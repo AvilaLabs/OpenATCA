@@ -1457,9 +1457,9 @@ fn a_full_table_of_max_tracks_refuses_the_next_aircraft_and_never_reallocates() 
     // The columns, one current and one anchor filter and the measurement ring: under 2.3 kB each
     // (it was 8.9 kB with a filter state in every ring slot; 2.2 kB before the filter carried
     // the newest rejected report of a run, 16 bytes in each of its two copies). The large-move
-    // rule's 23 bytes of columns per track and its pool of 64 rollback snapshots (RT-239,
+    // rule's 39 bytes of columns per track (the sum of its columns, checked in the tracker's own tests) and its pool of 64 rollback snapshots (RT-239,
     // 141 kB in all, 34 bytes per track at this 4096-track size, under 4 at 38,000) bring it to
-    // 2.26 kB: still under 2.3 kB.
+    // 2.27 kB: still under 2.3 kB.
     assert!(bytes / n < 2_300, "{} bytes per track", bytes / n);
 }
 
@@ -1485,7 +1485,7 @@ fn tracker_memory_is_linear_in_capacity_and_about_a_quarter_of_the_full_state_ri
     let per = |x: usize, n: usize| x as f64 / n as f64;
     assert!((per(a, 4096) - per(b, 38_000)).abs() < 12.0);
     // A ring of 12 full filter states and 12 measurements cost 8.9 kB per track. The large-move
-    // rule (RT-239) adds 23 bytes of columns per track (the bound was 2300 before it).
+    // rule (RT-239) adds 39 bytes of columns per track (the bound was 2300 before it).
     assert!(per(b, 38_000) < 2_300.0);
     // And its pool of rollback snapshots, 2200 bytes each and a 4-byte free-list entry, a fixed
     // cost independent of the number of tracks.

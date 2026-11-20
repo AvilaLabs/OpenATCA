@@ -313,11 +313,16 @@ pub fn tracker_bytes(t: &Tracker) -> usize {
         + core::mem::size_of::<CategoryState>())
         + t.anchor.len() * core::mem::size_of::<Filter>()
         + t.ring_m.len() * core::mem::size_of::<Measurement>()
-        + t.mv_on.len() * (1 + 8 + 4 + 8 + 2 + 8)
+        + t.mv_on.len() * MOVE_COLUMN_BYTES
         + t.snaps.len() * core::mem::size_of::<TrackSnap>()
         + t.snap_free.capacity() * 4
         + t.index.len() * 4
 }
+
+/// Bytes of the move's per-track columns: `mv_on` (1), `mv_start_ns` (8), `mv_snap` (4),
+/// `mv_first_ns` (8), `mv_first_sens` (2), `mv_old_vote_ns` (8) and `mv_resync_until_ns` (8). A
+/// test sums the element sizes of the columns themselves and compares.
+const MOVE_COLUMN_BYTES: usize = 1 + 8 + 4 + 8 + 2 + 8 + 8;
 
 /// The address and capacity of every buffer the tracker owns, in a fixed order. A test compares
 /// it before and after a run: equal means nothing was reallocated (RULESET C5; a counting
@@ -1091,8 +1096,11 @@ fn start_move(
     start_ns: i64,
 ) {
     put(&mut t.mv_start_ns, slot, start_ns);
-    // A move at a new place starts the count of old-path reports again.
+    // A move at a new place starts the count of old-path reports again, and the marking that
+    // followed an earlier move's resynchronisation is over: this move's own mark rules now
+    // (it is cleared with the move's decision, not held past it by the earlier one).
     put(&mut t.mv_old_vote_ns, slot, NO_VOTE_NS);
+    put(&mut t.mv_resync_until_ns, slot, i64::MIN);
     if move_active(t, slot) {
         return;
     }
@@ -1425,8 +1433,12 @@ fn update_in_order_held(t: &mut Tracker, slot: usize, m: &Measurement, out: &mut
         // track does not confirm it meanwhile).
         Resolve::OldUnpredictable => {
             t.hold_on = false;
-            t.stats.moves_old_path_unpredictable += 1;
-            update_in_order(t, slot, m, out);
+            // Counted when the report is applied; a refused one decides nothing and is counted
+            // as the refusal it is (`moves_decision_rejected`).
+            let step = update_in_order(t, slot, m, out);
+            if !decision_rejected(t, slot, step) {
+                t.stats.moves_old_path_unpredictable += 1;
+            }
         }
         Resolve::Confirm => {
             t.hold_on = false;
@@ -1745,14 +1757,9 @@ fn widen_replay_row(
     m: &Measurement,
 ) {
     let Some(mut row) = out_row_at(out, i) else {
-        // The row cannot be read back: marked all the same, fail closed, counted.
-        if let Some(f) = out.flags.get_mut(i) {
-            *f |= O_MOVE_UNCONFIRMED;
-        }
-        if let Some(c) = out.pos_cov_m2.get_mut(i) {
-            *c = FAIL_CLOSED_COV;
-        }
-        t.stats.move_widen_failed += 1;
+        // Unreachable: `i` indexes a row the replay just emitted, and every column of the table
+        // has that row. Not a fail-closed branch for that reason (there is nothing to widen).
+        debug_assert!(false, "a replay row that is not in the output table");
         return;
     };
     let old = snap_before_entry(t, slot, (m.toa_ns, m.sensor))
@@ -3035,8 +3042,7 @@ mod tests {
         // RT-276: with a snapshot present, an old path that cannot be predicted is no
         // agreement: a report on the moved track does not confirm the move (it would have, as
         // "the old path is unknown", with no snapshot at all); the move stays, marked, counted,
-        // until the window ends (or the filter resynchronises: the single far report moved the filter
-        // only part of the way, so these reports are refused by the gate and counted as such).
+        // until the window ends.
         let c = TrackerConfig {
             tick_ns: 100_000 * S,
             ..cfg(1, 0)
@@ -3052,8 +3058,12 @@ mod tests {
         let ix = move_snap_ix(&t, slot).unwrap();
         t.snaps[ix].cur.h.m[1].x[0] = f64::NAN;
 
+        // Reports that the moved track applies (a wide variance, so that the gate passes them):
+        // counted, no confirmation, the mark stays.
         for sec in 41..=43 {
-            tracker_update(&mut t, &north(sec * 1_000, 225_000), &mut out);
+            let mut m = north(sec * 1_000, 225_000);
+            m.pos_cov_m2 = [1.0e6, 0.0, 1.0e6];
+            tracker_update(&mut t, &m, &mut out);
             assert_eq!(t.stats.moves_old_path_unpredictable, (sec - 40) as u64);
             assert_eq!(t.stats.moves_confirmed, 0);
             assert!(move_active(&t, slot), "{sec} {:?}", t.stats);
@@ -3108,5 +3118,107 @@ mod tests {
             )
         );
         assert_eq!((a.ring_len, a.ring_head), (b.ring_len, b.ring_head));
+    }
+
+    // REQ: OA-TRK-349
+    #[test]
+    fn a_late_replay_that_releases_the_snapshot_clears_the_old_path_vote() {
+        // A forged move, a report on the old path (the vote), then a genuine report from before
+        // the forged one arrives late: in time order the forged report is refused, the rollback
+        // point cannot be derived, the snapshot goes, and the vote with it (no old path is left
+        // to vote for).
+        let c = TrackerConfig {
+            ooo_window_ns: 30 * S,
+            clock_step_limit_ns: 30 * S,
+            drop_after_ns: 60 * S,
+            tick_ns: 100_000 * S,
+            ..cfg(1, 0)
+        };
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for k in 0..=20 {
+            tracker_update(&mut t, &at(k, 0, 100.0), &mut out);
+        }
+        tracker_update(&mut t, &north(40_000, 225_000), &mut out);
+        let slot = lookup(&t, ADDR).unwrap();
+        tracker_update(&mut t, &north(41_000, 0), &mut out);
+        assert_eq!(t.stats.moves_old_path_votes, 1, "{:?}", t.stats);
+        assert_eq!(t.mv_old_vote_ns[slot], 1_000 * S + 41 * S);
+        tracker_update(&mut t, &north(39_600, 0), &mut out);
+        assert_eq!(t.stats.moves_rollback_lost_late, 1, "{:?}", t.stats);
+        assert!(move_active(&t, slot));
+        assert_eq!(t.mv_snap[slot], NO_SNAP);
+        assert_eq!(t.mv_old_vote_ns[slot], NO_VOTE_NS);
+    }
+
+    // REQ: OA-TRK-349
+    #[test]
+    fn a_late_replay_that_leaves_the_track_tentative_ends_the_move_as_demoted() {
+        // The track is confirmed by its third report; a report from between the first ones
+        // arrives late while a forged move is unconfirmed. The replay un-confirms the track and,
+        // with the initiation count raised past what the history can give (the only way to make
+        // the replay fall short here), does not confirm it again: the move is abandoned as
+        // demoted, counted once, and every move still ends once.
+        let c = TrackerConfig {
+            ooo_window_ns: 30 * S,
+            clock_step_limit_ns: 30 * S,
+            drop_after_ns: 60 * S,
+            tick_ns: 100_000 * S,
+            ..cfg(3, 0)
+        };
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for k in 0..=5 {
+            tracker_update(&mut t, &at(k, 0, 100.0), &mut out);
+        }
+        tracker_update(&mut t, &north(25_000, 225_000), &mut out);
+        let slot = lookup(&t, ADDR).unwrap();
+        assert!(move_active(&t, slot));
+        t.cfg.init_m = 99;
+        tracker_update(&mut t, &north(1_500, 0), &mut out);
+        assert_eq!(t.stats.moves_abandoned_demoted, 1, "{:?}", t.stats);
+        assert!(!move_active(&t, slot));
+        assert_eq!(t.state[slot], TENTATIVE);
+        assert_eq!(tracker_moves_active(&t), 0);
+        let s = &t.stats;
+        assert_eq!(
+            s.moves_unconfirmed,
+            s.moves_confirmed
+                + s.moves_rolled_back
+                + s.moves_undecided
+                + s.moves_abandoned_ended
+                + s.moves_abandoned_restarted
+                + s.moves_abandoned_resync
+                + s.moves_abandoned_demoted
+        );
+    }
+
+    // REQ: OA-TRK-347
+    #[test]
+    fn the_per_track_bytes_of_the_move_columns_are_the_sum_of_the_columns_themselves() {
+        // Derived from the element sizes of every `mv_*` per-track column, so that adding or
+        // widening one without the byte count (`tracker_bytes`) fails here.
+        let t = tracker_new(&cfg(1, 0)).unwrap();
+        let per_track = core::mem::size_of_val(&t.mv_on[0])
+            + core::mem::size_of_val(&t.mv_start_ns[0])
+            + core::mem::size_of_val(&t.mv_snap[0])
+            + core::mem::size_of_val(&t.mv_first_ns[0])
+            + core::mem::size_of_val(&t.mv_first_sens[0])
+            + core::mem::size_of_val(&t.mv_old_vote_ns[0])
+            + core::mem::size_of_val(&t.mv_resync_until_ns[0]);
+        assert_eq!(per_track, MOVE_COLUMN_BYTES);
+        assert_eq!(per_track, 39);
+        // All the columns are as long as the track table.
+        let n = t.mv_on.len();
+        for len in [
+            t.mv_start_ns.len(),
+            t.mv_snap.len(),
+            t.mv_first_ns.len(),
+            t.mv_first_sens.len(),
+            t.mv_old_vote_ns.len(),
+            t.mv_resync_until_ns.len(),
+        ] {
+            assert_eq!(len, n);
+        }
     }
 }

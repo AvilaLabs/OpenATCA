@@ -4445,7 +4445,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   counted in `moves_unconfirmed`. The track keeps its measurement state from before the report
   (the update's own transaction capture without the tracker's counters, 2200 bytes) in a bounded
   pool of `confirm_pool` entries (64 by default, allocated once; the per-track columns are
-  31 bytes: the move's flag, start, first report, old-path vote time and snapshot index); a move that finds the pool full is applied and marked all the same, without a
+  39 bytes: the move's flag, start, first report (time and sensor), old-path vote time, the end of a resynchronised move's marking and the snapshot index); a move that finds the pool full is applied and marked all the same, without a
   snapshot (`move_no_snapshot`): it can be confirmed or left standing but not rolled back. Until
   the next report decides (OA-TRK-348) every row the track emits, update row or tick row, and
   every forecast of it carries the flag `O_MOVE_UNCONFIRMED` (128), and the row's position
@@ -4462,7 +4462,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   (`tracker_predict`; a failure to widen is fail closed there too, not counted). The reacquisition marking of OA-TRK-343 follows the filter's own radius,
   not the widened one. A late re-filter that moves a confirmed track's estimate by more than
   `confirm_move_m` marks it likewise, with the state from before the replay (`moves_late`, also
-  in `moves_unconfirmed`; the row the replay emitted is flagged, not widened). A tentative track
+  in `moves_unconfirmed`; the row the replay emitted is flagged and widened as OA-TRK-347's later sentence says, RT-275). A tentative track
   is not covered (its second report has no velocity and moves far from its prediction as a
   matter of course; the plausibility rule judges it). The rule is on by default;
   `confirm_moves = false` turns it off only by an explicit choice. The move's report refreshes
@@ -4521,8 +4521,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   run of consistent reports the gate refuses re-synchronises the filter onto them, which ends
   the move (`moves_abandoned_resync`). Each is counted in its own outcome; only a second source
   (radar or multilateration) can refute a forger who keeps the false place up.
-- **OA-TRK-349** A rollback puts the track's measurement state back exactly as the snapshot held
-  it (bit for bit: filters, measurement history, times, counts, category, state) and the report
+- **OA-TRK-349** The snapshot is derived from the update's own transaction capture
+  (OA-TRK-354 states what is shown of that), and a rollback puts the track's measurement state
+  back to it (filters, measurement history, times, counts, category, state) and the report
   is then applied to that through the normal path; if the report is then not applied the
   rollback is undone and the move stays. The columns the fusion layer writes
   (`disagree_until_ns`, `expected_ns`), the tracker's counters and its bound on the newest
@@ -4559,11 +4560,15 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   the track onto them, which ends the move (`moves_abandoned_resync`) but not silently: the
   rows after it carry `O_MOVE_UNCONFIRMED` and `O_UNCERTAIN` (the radius lifted over the
   uncertainty threshold, no old path being left) until the move's window would have ended, and
-  `moves_resync_marked` counts it. A late replay that releases the move's snapshot clears the
+  `moves_resync_marked` counts it. The marking is judged at each row, so a silent track keeps
+  its marked rows past the window until its next report or its drop (nothing clears it by the
+  clock alone); a new move on the same track ends it at once (the new move's own mark rules, its
+  own window and decision). A late replay that releases the move's snapshot clears the
   vote. (Kani: `resolve_decide`, OA-TRK-348.)
 - **OA-TRK-353** An old path that has a snapshot but cannot be predicted at the report's time
   (its distance is not a number) is not agreement with anything (RT-276): the report is applied
-  as it is, `moves_old_path_unpredictable` counts it, and the move stays, marked, until the
+  as it is, `moves_old_path_unpredictable` counts it (only if the report is applied; a refused
+  one counts as a decision rejected), and the move stays, marked, until the
   window ends, when the next applied report leaves it standing (undecided) as usual. A report
   that agrees with the moved track does not confirm the move meanwhile; with no snapshot at all
   (the pool was full) the old path is unknown, not unpredictable, and the moved track decides
@@ -4578,10 +4583,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   current filter's run of refusals and the counters `jump_rejected` (one more),
   `moves_decision_rejected`, `moves_old_path_votes`, `moves_old_path_unpredictable` (at most one
   of them one more), which change as the real rejected path changes them; no row, no outcome.
-  The moved track differs from the snapshot in every group (scalar columns, category, current
-  filter, anchor filter, ring) in these proofs (nine, one group by any value in each, the
-  others by one fixed value, because a proof with every group symbolic at once does not fit the
-  memory budget), and afterwards the snapshot in the pool
+  Nine harnesses over eight groups of columns (the move's own columns and the counters, which two harnesses take; scalar columns; first and confirmation times with the move's first report; state and counts; category; current filter; anchor filter; ring): in each the moved track differs from the snapshot in every group by one fixed value and exactly one group is symbolic, because a proof with every group symbolic at once does not fit the memory budget. Symbolic in all nine: the move's start time, the old-path vote time (or none), the report's time (a 1000 ns window after the newest update) and flags, the stubbed distances. Symbolic in one only: the last-update time and update count; the track's first and confirmation times and the move's first report time and sensor (`mv_first_ns`, `mv_first_sens`; fixed in the others, and not made symbolic there again without a run to show it fits); the state (confirmed or tentative), hit count, ring length and ring head; the category; the current filter (run of refusals below `RESYNC_AFTER`); the anchor filter; in the ring harness only the first ring entry (`ring_m[0]`). Everything else is at one fixed value, including `disagree_until_ns`, `expected_ns` and `newest_update_ns` (checked unchanged at that default only) and the rest of the report. `decide`, `filter_apply` and `filter_miss_m` are stubs. Loops over the ring are bounded by the constant `RING_DEPTH` (12), no unwind bound of the harness's own. Afterwards the snapshot in the pool
   equals the one taken, field for field, bit for bit; the move's start, first report time and
   sensor are as before and the hold flag is off. They hold for the default configuration
   (`resync_consistent_k` 0 and the run of refusals below `RESYNC_AFTER`): the refusal that
@@ -4596,8 +4598,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-351** `check_config` requires `confirm_move_m` finite and positive, `confirm_agree_m`
   positive, finite and below `confirm_move_m`, `confirm_window_ns` over 0.5 s (and at most one
   day) and not over `drop_after_ns`, and `confirm_pool` at most 2^20. The counters are in the
-  statistics and the report. The tracker's tables hold 31 bytes of columns per track and the
-  pool: the tables go from 8.66 MiB to 8.91 MiB at 4096 tracks and from 80.5 MiB to 81.8 MiB at 38,000 (141 kB of pool and its free list, and 31 bytes a track). The pool's size is analysed beside `CONFIRM_POOL`: the most moves unconfirmed at once on the two development days was 7 on each (the 2026-11-14 day, and the 2026-11-15 day as the check), and a forger who fills it costs rollback, never the mark.
+  statistics and the report. The tracker's tables hold 39 bytes of columns per track and the
+  pool: the tables go from 8.66 MiB to 8.94 MiB at 4096 tracks and from 80.5 MiB to 82.1 MiB at 38,000 (141 kB of pool and its free list, and 39 bytes a track; the per-track figure is the sum of the columns' element sizes, checked by a test). The pool's size is analysed beside `CONFIRM_POOL`: the most moves unconfirmed at once on the two development days was 7 on each (the 2026-11-14 day, and the 2026-11-15 day as the check), and a forger who fills it costs rollback, never the mark.
   A report the filter holds back as a large move when the rule is off cannot happen; it is
   refused and counted (`moves_internal_refused`), never applied.
 

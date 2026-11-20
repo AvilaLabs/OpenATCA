@@ -1504,28 +1504,43 @@ fn not_applied_scenario(
     (before, after, vote, m, original)
 }
 
-// What these nine prove, and only this: the production `update_in_order_held`, with `decide`
-// stubbed to what the real rejected path does (one more jump rejection counted, one more in the
-// filter's run of refusals), `filter_apply` stubbed likewise, and any distances (so every
-// verdict of `resolve_decide`), given a report that is not applied, leaves the whole track as
-// the transaction capture sees it as it was, except the current filter's run of refusals (one
-// more, as the real rejected path adds it), and the move as it was (still active, the same
+// What these nine harnesses prove, and only this: the production `update_in_order_held`, with
+// `decide`, `filter_apply` and `filter_miss_m` stubbed (the first two to what the real rejected
+// path does: one more jump rejection counted, one more in the filter's run of refusals; the
+// third to any distance, so every verdict of `resolve_decide`), given a report that is not
+// applied, leaves the whole track as the transaction capture sees it as it was, except the
+// current filter's run of refusals (one more), and the move as it was (still active, the same
 // snapshot index, start, first report time and sensor, `hold_on` off) with the snapshot in the
-// pool equal to the one taken, field for field, bit for bit; the moved track differs from the
-// snapshot in every group (scalar columns, category, current filter, anchor filter, ring), one
-// group by any value in each harness and the others by one fixed value each. The only counters
-// that change are `jump_rejected` (one more) and at most one of `moves_decision_rejected`,
+// pool equal to the one taken, field for field, bit for bit. The only counters that change are
+// `jump_rejected` (one more) and at most one of `moves_decision_rejected`,
 // `moves_old_path_votes`, `moves_old_path_unpredictable` (one more, the vote also setting the
-// old-path vote time to the report's); no outcome is counted, no row is made. Nine harnesses,
-// one for each part of the track (the move's own columns and the counters that change, the other
-// counters, last time and update count, first and confirmation times and the
-// move's first report, state and counts, category,
-// current filter, anchor filter, ring), because a proof comparing every float at once does not fit the
-// memory budget. The stubs hold for the default configuration: `resync_consistent_k` is 0 (off)
-// and the run of refusals is below `RESYNC_AFTER`, so the refused report does not resynchronise
-// the filter (that case is the resynchronisation test, an integration test). Not covered by any
-// of them (integration tests only): a report that is applied, a report that is a large move,
-// ticks and forecasts of the marked track, and the late replay.
+// old-path vote time to the report's); no outcome is counted, no row is made.
+// Which fields are symbolic: the track is built in eight groups of columns (the move's own
+// columns and the counters that change; scalar columns; first and confirmation times and the
+// move's first report; state and counts; category; current filter; anchor filter; ring), nine
+// harnesses (the first two both take the first group). In every harness the moved track differs
+// from the snapshot in every group by one fixed value, and exactly one group is symbolic: in
+// all of them the move's start time, the old-path vote time (or none) and the report's time (in
+// a 1000 ns window after the newest update) and flags, and the stubbed distances; the
+// last-update time and update count in `last_time_and_updates`; the track's first and
+// confirmation times and the move's first report time and sensor (`mv_first_ns`,
+// `mv_first_sens`, fixed in the other harnesses) in `first_times`; the state (confirmed or
+// tentative), hit count, ring length and ring head in `state_and_counts`; the category, the
+// current filter (the run of refusals below `RESYNC_AFTER`), the anchor filter in their own
+// harnesses; in `ring` only the first ring entry (`ring_m[0]`) and not the others. Every other
+// field is at a fixed value, and the report is `blank_measurement` but for its address, time
+// and flags. `disagree_until_ns`, `expected_ns` and `newest_update_ns` are at their default
+// only: that they too are left alone is checked at that one value, not for any value. A proof
+// with every group symbolic at once does not fit the memory budget (so the split), and
+// `mv_first_ns` and `mv_first_sens` were not made symbolic in the other harnesses again
+// without a run to show that they fit. Loops over the ring are bounded by the constant
+// `RING_DEPTH` (12): the harnesses set no unwind bound of their own, and Kani's unwinding
+// assertions fail the proof if a loop needs more. The stubs hold for the default configuration:
+// `resync_consistent_k` is 0 (off) and the run of refusals is below `RESYNC_AFTER`, so the
+// refused report does not resynchronise the filter (that case is the resynchronisation test, an
+// integration test). Not covered by any of them (integration tests only): a report that is
+// applied, a report that is a large move, ticks and forecasts of the marked track, and the late
+// replay.
 // REQ: OA-TRK-354
 #[kani::proof]
 #[kani::solver(cadical)]

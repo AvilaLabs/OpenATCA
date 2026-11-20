@@ -14,9 +14,10 @@ mod common;
 
 use common::*;
 use oa_track::{
-    output_new, r95_m_of, tracker_moves_active, tracker_new, tracker_note_radar_disagreement,
-    tracker_predict, tracker_stats, tracker_update, Measurement, TrackOutput, Tracker,
-    TrackerConfig, TrackerStats, O_MOVE_UNCONFIRMED, O_RADAR_DISAGREES, O_TICK, O_UNCERTAIN,
+    output_new, r95_m_of, tracker_flush, tracker_log, tracker_moves_active, tracker_new,
+    tracker_note_radar_disagreement, tracker_predict, tracker_set_expected_interval, tracker_stats,
+    tracker_update, Measurement, TrackOutput, Tracker, TrackerConfig, TrackerStats,
+    O_MOVE_UNCONFIRMED, O_RADAR_DISAGREES, O_TICK, O_UNCERTAIN,
 };
 
 const ADDR: u32 = 0xA0_0001;
@@ -712,13 +713,27 @@ fn a_late_report_from_a_second_sensor_during_a_move_leaves_the_rollback_in_place
     assert_eq!((s.moves_rolled_back, s.moves_confirmed), (1, 0), "{s:?}");
     assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
     // Where the track is after the rollback: the control's, which never saw the forgery.
-    let (a, _, _) = tracker_predict(&l.t, ADDR, 42 * S).unwrap();
-    let (b, _, _) = tracker_predict(&control.t, ADDR, 42 * S).unwrap();
-    let d = ((f64::from(a.lat_e7 - b.lat_e7) * 0.011_119_5).powi(2)
-        + (f64::from(a.lon_e7 - b.lon_e7) * 0.011_119_5).powi(2))
-    .sqrt();
+    let miss = |x: &Live, y: &Live| {
+        let (a, _, _) = tracker_predict(&x.t, ADDR, 42 * S).unwrap();
+        let (b, _, _) = tracker_predict(&y.t, ADDR, 42 * S).unwrap();
+        ((f64::from(a.lat_e7 - b.lat_e7) * 0.011_119_5).powi(2)
+            + (f64::from(a.lon_e7 - b.lon_e7) * 0.011_119_5).powi(2))
+        .sqrt()
+    };
     // (The control also took the report at 41 s that the rolled-back track had only as a vote.)
+    let d = miss(&l, &control);
     assert!(d < 30.0, "{d} m from the track without the forgery");
+    // The position is washed out by the reports after the gap, so the history is read from the
+    // update count: the rebuilt rollback point holds the late report (early + late), so the
+    // track has one update fewer than the control (which also took 41 s). A rollback to the
+    // pre-replay snapshot would leave it two fewer.
+    let updates = |x: &mut Live| {
+        let mut out = output_new(64);
+        tracker_flush(&mut x.t, 100 * S, &mut out);
+        *tracker_log(&x.t).updates.last().unwrap()
+    };
+    let (u_l, u_control) = (updates(&mut l), updates(&mut control));
+    assert_eq!(u_l + 1, u_control, "{u_l} updates, the control {u_control}");
     balanced(&l.t);
 }
 
@@ -954,5 +969,48 @@ fn five_refused_old_place_reports_resync_the_track_and_the_rows_stay_marked() {
         l.feed(&[still(&mut rng, t, 0.0)]);
     }
     assert_eq!(l.last_flags() & (O_MOVE_UNCONFIRMED | O_UNCERTAIN), 0);
+    balanced(&l.t);
+}
+
+// REQ: OA-TRK-352
+#[test]
+fn a_new_move_decided_inside_an_earlier_resync_mark_is_not_held_marked() {
+    // Move A is ended by a resynchronisation (its rows stay marked until A's window would have
+    // ended). A new move B starts inside that window and is confirmed: the rows after B's
+    // decision are plain, A's marking no longer applies once B has started.
+    let mut rng = Rng(7);
+    let mut l = Live::new(&TrackerConfig {
+        ooo_window_ns: 30 * S,
+        clock_step_limit_ns: 30 * S,
+        drop_after_ns: 200 * S,
+        ..big_config()
+    });
+    for t in seconds(0.0, 20.0) {
+        l.feed(&[still(&mut rng, t, 0.0)]);
+    }
+    // A long expected interval: the window of a move is four of them, 120 s.
+    assert!(tracker_set_expected_interval(&mut l.t, ADDR, 30 * S));
+    l.feed(&[still(&mut rng, 60.0, 2_000.0)]);
+    for k in 1..=5 {
+        l.feed(&[still(&mut rng, 60.0 + 0.05 * f64::from(k), 0.0)]);
+    }
+    let s = l.s();
+    assert_eq!(
+        (s.moves_abandoned_resync, s.moves_resync_marked),
+        (1, 1),
+        "{s:?}"
+    );
+    assert_ne!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
+    // B: another relocation 60 s later, well inside A's marking (until 180 s), and its
+    // confirmation by the next report at the same place.
+    l.feed(&[still(&mut rng, 120.0, 2_000.0)]);
+    let s = l.s();
+    assert_eq!(s.moves_unconfirmed, 2, "{s:?}");
+    l.feed(&[still(&mut rng, 121.0, 2_000.0)]);
+    let s = l.s();
+    assert_eq!(s.moves_confirmed, 1, "{s:?}");
+    assert_eq!(l.last_flags() & (O_MOVE_UNCONFIRMED | O_UNCERTAIN), 0);
+    l.feed(&[still(&mut rng, 122.0, 2_000.0)]);
+    assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
     balanced(&l.t);
 }
