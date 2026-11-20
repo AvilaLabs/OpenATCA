@@ -1,9 +1,15 @@
 # M9 budget: one national hour on the reference laptop
 
-First measurement. Tables and commands only. Machine: Intel Core i3-N305 (8 cores), 30 GB, shared with
-other builds, load average 4.6 to 5.9 during every run below (so every timing is under load and is
-labelled with it). Runs pinned with `taskset -c 0-3`. The tracker and conflict alert are single-threaded:
-each run used one core (99 % of CPU), so the one-core figures are the budget actually used.
+| Machine | Value |
+|---|---|
+| CPU, memory | Intel Core i3-N305 (8 cores), 30 GB, shared with other jobs |
+| Pinning | `taskset -c 0-3`; tracker and conflict alert single-threaded (99 % of one core) |
+| Load average during the runs | 4.6 to 8.2, see each row; every timing is under load |
+
+| Input row | Meaning |
+|---|---|
+| Archived points | the adsb.lol trace points as archived, about 0.145 reports per aircraft per second |
+| 1 Hz, 2 Hz | synthetic rate from interpolated trace points: linear in position, altitude, vertical rate and velocity between consecutive points of one aircraft no more than 60 s apart; quality fields of the earlier point; no extrapolation past an aircraft's last point |
 
 ## Input
 
@@ -29,98 +35,67 @@ each run used one core (99 % of CPU), so the one-core figures are the budget act
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Addresses | 4,391 | 7,342 | 10,232 | 12,444 | 13,715 | 14,158 | 14,501 | 14,735 | 15,077 | 15,107 | 14,105 | 10,708 |
 
-| Census | Value |
-|---|---|
-| Clip 00:00Z to 12:00Z (same box) | 14,224,653 reports, 1.14 GB |
-| Peak minute of 00:00Z to 12:00Z | 00:00Z, 5,745 distinct airborne addresses |
-| Hour beating 21Z's 15,107 | none; the 21:00Z measurement stands |
+| Hour (Z) | Distinct airborne addresses | Trace rows in the hour | Rows per second | Peak minute (Z) | Distinct airborne addresses in the peak minute |
+|---|---|---|---|---|---|
+| 20 | 15,077 | 4,360,946 | 1,211.4 | 20:45 | 7,699 |
+| 21 | 15,107 | 4,425,128 | 1,229.2 | 21:15 | 7,684 |
+| 22 | 14,105 | 4,174,295 | 1,159.5 | 22:00 | 7,481 |
+| 00 to 12 (peak minute of the span) | 10,024 (00Z) | 14,224,653 (span) | not computed | 00:00 | 5,745 |
+| Hour beating 21Z's 15,107 | none | | | | |
 
 ## Tracking (`nas_hour track`)
 
-| Measure | Run A | Run B |
-|---|---|---|
-| Machine load average before / after | 4.86 / 4.71 | 4.56 / 5.63 |
-| Wall time, whole process (reading, decoding, 70 min replay, 60 min measured) | 99.8 s | 110.5 s |
-| User + sys CPU, whole process | 99.4 s | 110.1 s |
-| CPU of the measured hour | 80.9 s | 89.0 s |
-| Real-time factor (measured-hour CPU / 3600 s) | 0.0225 | 0.0247 |
-| Peak RSS (mostly the decoded clip) | 931,072 kB | 931,060 kB |
-| Reports per second of traffic, mean / max | 1,115.7 / 1,340 | 1,115.7 / 1,340 |
-| Reports processed per CPU second | 49,700 | 45,100 |
-| Confirmed tracks held, max / mean (sampled once per second) | 7,772 / 7,707.3 | 7,772 / 7,707.3 |
-| Tentative tracks held, max / mean | 95 / 69.2 | 95 / 69.2 |
-| Per-report latency (one `tracker_update` call), p50 | 7.50 us | 8.34 us |
-| p99 | 12.61 us | 14.82 us |
-| p99.9 | 27.95 us | 39.86 us |
-| max | 28,560 us | 27,094 us |
-| Per-cycle (one second of reports) work, p50 | 22.33 ms | 24.61 ms |
-| p99 | 24.77 ms | 27.40 ms |
-| p99.9 | 27.62 ms | 32.03 ms |
-| max | 42.55 ms | 47.37 ms |
-| Cycles longer than 1 s | 0 of 3,600 | 0 of 3,600 |
-
-Run A's track-count labels were printed swapped by the first build of the tool; the timings are valid and
-the counts are those of Run B (the same input, deterministic).
-
-### Tracker capacity and refusal counters (Run B)
-
-| Counter | Value |
-|---|---|
-| Track slots (`max_tracks`) | 65,536 |
-| Refused for capacity | 0 |
-| Output rows lost (table overflow) | 0 |
-| Refused for position, covariance, velocity, address, time | 0, 0, 0, 0, 0 |
-| Refused for altitude | 676 |
-| Late (window or ring), numerical refusals, time held | 0, 0, 0 |
-| Duplicates dropped | 2,873 |
-| Offered / applied | 4,671,037 / 4,584,871 |
-| Tracks started / confirmed (70 min) | 25,993 / 23,546 |
-| Rows not representable, NaN covariance | 0, 0 |
+| Measure | Run B (archived points, 10:57-11:18 runs) | Archived points, rerun | 1 Hz: synthetic rate from interpolated trace points | 2 Hz: synthetic rate from interpolated trace points |
+|---|---|---|---|---|
+| Machine load average before / after | 4.56 / 5.63 | 5.57 / 6.16 | 7.14 / 6.21 | 8.18 / 8.07 |
+| Wall time, whole process | 110.5 s | 107.8 s | 396.3 s | 809.3 s |
+| User+sys CPU, whole process | 110.1 s | 107.2 s | 393.5 s | 793.0 s |
+| CPU of the measured hour | 89.0 s | 87.3 s | 335.3 s | 679.5 s |
+| Real-time factor (measured-hour CPU / 3600 s) | 0.0247 | 0.0242 | 0.0931 | 0.1888 |
+| Peak RSS including load | 931,060 kB | 931,152 kB | 931,256 kB | 1,066,872 kB |
+| Working set RSS after clip decoded and dropped / start of hour / end of hour | not recorded | 447,620 / 610,732 / 667,000 kB | 447,648 / 634,188 / 866,032 kB | 447,716 / 634,240 / 1,066,872 kB |
+| Reports per second of traffic, mean / max | 1,115.7 / 1,340 | 1,115.7 / 1,340 | 7,650.6 / 7,876 | 14,789.4 / 15,044 |
+| Measured reports | 4,016,586 | 4,016,586 | 27,542,068 | 53,241,971 |
+| Reports per CPU second | 45,130 | 46,030 | 82,142 | 78,349 |
+| Confirmed tracks, max / mean | 7,772 / 7,707.3 | 7,772 / 7,707.3 | 7,805 / 7,739.3 | 7,806 / 7,741.3 |
+| Tentative tracks, max / mean | 95 / 69.2 | 95 / 69.2 | 66 / 37.3 | 65 / 35.4 |
+| Update calls without a tick (per report), mean / p50 / p99 / p99.9 / max | not recorded | 8.11 / 8.08 / 13.09 / 24.96 / 3,071.50 us | 9.07 / 9.04 / 14.82 / 27.15 / 10,077.26 us | 10.57 / 10.24 / 20.72 / 34.65 / 17,783.52 us |
+| Tick-crossing calls (the per-second sweep), mean / p50 / p99 / p99.9 / max | not recorded | 15,095.54 / 14,962.15 / 17,306.74 / 20,390.91 / 24,216.21 us | 16,907.25 / 16,935.22 / 22,076.77 / 28,488.68 / 37,260.08 us | 19,734.79 / 19,427.46 / 29,720.92 / 45,473.39 / 54,080.03 us |
+| All update calls together (Run B only), mean / p50 / p99 / p99.9 / max | 22.12 / 8.34 / 14.82 / 39.86 / 27,093.93 us | - | - | - |
+| Mean sweep time per second | not recorded | 15.10 ms | 16.91 ms | 19.73 ms |
+| Per-cycle (one second of reports) work, mean / p50 / p99 / p99.9 / max | 24.68 / 24.61 / 27.39 / 32.03 / 47.37 ms | 24.14 / 23.88 / 28.16 / 32.91 / 38.06 ms | 86.31 / 87.28 / 111.00 / 137.43 / 167.91 ms | 175.99 / 172.82 / 243.19 / 303.06 / 325.07 ms |
+| Cycles longer than 1 s | 0 of 3,600 | 0 of 3,600 | 0 of 3,600 | 0 of 3,600 |
+| Refused for capacity / output rows lost | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| Refused for altitude / duplicates dropped | 676 / 2,873 | 676 / 2,873 | 2,493 / 2,434 | 4,557 / 2,401 |
+| Offered / applied | 4,671,037 / 4,584,871 | 4,671,037 / 4,584,871 | 31,918,825 / 31,219,405 | 61,693,260 / 60,022,254 |
 
 ## Conflict alert (`nas_hour ca`, tracker and conflict alert in one process)
 
-| Measure | Run A | Run B |
-|---|---|---|
-| Machine load average before / after | 5.05 / 5.87 | 4.95 / 5.49 |
-| Wall time, whole process | 339.5 s | 364.3 s |
-| User + sys CPU, whole process | 338.9 s | 363.7 s |
-| CPU of the measured hour, tracker and conflict alert together | 289.4 s | 310.3 s |
-| Real-time factor of both (measured-hour CPU / 3600 s) | 0.0804 | 0.0862 |
-| Conflict-alert cycles, summed time (`ca_cycle` only) | 183.6 s | 197.9 s |
-| Real-time factor of `ca_cycle` alone | 0.0510 | 0.0550 |
-| Conflict-alert time with building the rows (70 min, includes warm-up) | 236.8 s | 254.0 s |
-| Peak RSS | 930,988 kB (Run B) | 930,988 kB |
-| Tracks per cycle, max / mean | 7,769 / 7,705.5 | 7,769 / 7,705.5 |
-| Pairs evaluated per cycle, max / mean | 15,732 / 14,674.7 | 15,732 / 14,674.7 |
-| Pairs found by the grid per cycle (candidates), max / mean | 15,732 / 14,674.7 | 15,732 / 14,674.7 |
-| Cycle time, p50 | 50.80 ms | 54.21 ms |
-| p99 | 57.19 ms | 65.32 ms |
-| p99.9 | 61.37 ms | 71.14 ms |
-| max | 68.04 ms | 76.67 ms |
-| Cycles longer than 1 s | 0 of 3,601 | 0 of 3,601 |
-| Cycles with work left undone by a budget (`work_short`) | 0 | 0 |
-| Cycles with tracks unscanned | 0 | 0 |
-| Cycles with candidates not evaluated | 0 | 0 |
-| Cycles the net reported not running | 3,601 of 3,601 | 3,601 of 3,601 |
-| Net state of those cycles | DEGRADED: INPUT MISSING | DEGRADED: INPUT MISSING |
-
-### Why the net reported degraded (conflict alert, Run B)
-
-| Count | Value |
-|---|---|
-| Rows above the latitude the grid's flat test is proved for, per cycle, max / mean | 853 / 398.3 |
-| Cycles with any such row | 3,601 of 3,601 |
-| Rows whose 95 % radius was held to the cap, per cycle, max / mean | 20 / 6.5 |
-| Rows refused for capacity, bad, duplicate | 0, 0, 0 |
-| Pairs skipped as unable to converge vertically (70 min) | 153,882,714 |
-| Pairs evaluated, in conflict (pair cycles, 70 min) | 61,223,242, 18,985,626 |
-| Alerts opened / closed / dropped | 274,487 / 269,814 / 0 |
-
-Conflict alert refuses no area: every row is used. The latitude limit is `atan(0.02 / dphi)`, with `dphi` the
-cycle's largest pair radius over 6,356,752 m (`crates/oa-ca/src/lib.rs`); rows above it are used and counted
-and the net reports degraded (`rows_high_lat`). Configuration: `national.cfg` (development minima of
-`tools/oa-ca/testdata/dev.cfg`; capacities `max_tracks` 65,536, `max_open` 65,536, `max_candidates`
-4,194,304; budgets `work_budget` 1,000,000,000, `eval_budget` 4,000,000; none is an ERAM or STARS value).
+| Measure | Run B (archived points, 10:57-11:18 runs) | Archived points, rerun | 1 Hz: synthetic rate from interpolated trace points | 2 Hz: synthetic rate from interpolated trace points | Mark |
+|---|---|---|---|---|---|
+| Machine load average before / after | 4.95 / 5.49 | 6.16 / 7.14 | 6.21 / 8.18 | 8.07 / 4.78 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Wall time, whole process | 364.3 s | 388.3 s | 757.8 s | 1018.9 s | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| User+sys CPU, whole process | 363.7 s | 387.2 s | 746.5 s | 1002.1 s | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| CPU of the measured hour, tracker and conflict alert | 310.3 s | 329.2 s | 643.3 s | 850.2 s | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Real-time factor of both | 0.0862 | 0.0914 | 0.1787 | 0.2362 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| `ca_cycle` summed | 197.8 s | 210.7 s | 245.1 s | 225.3 s | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Real-time factor of `ca_cycle` alone | 0.0550 | 0.0585 | 0.0681 | 0.0626 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Conflict-alert time with building the rows (70 min, includes warm-up) | 253.9 s | 272.4 s | 312.3 s | 291.5 s | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Peak RSS including load | 930,988 kB | 931,240 kB | 931,092 kB | 1,069,104 kB | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Working set RSS after clip decoded and dropped / start of hour / end of hour | not recorded | 447,676 / 613,424 / 669,764 kB | 447,604 / 636,304 / 868,268 kB | 447,688 / 636,380 / 1,069,104 kB | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Reports per second of traffic, mean / max | 1,115.7 / 1,340 | 1,115.7 / 1,340 | 7,650.6 / 7,876 | 14,789.4 / 15,044 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Tracks per cycle, max / mean | 7,769 / 7,705.5 | 7,769 / 7,705.5 | 7,801 / 7,737.5 | 7,803 / 7,739.5 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Pairs evaluated per cycle, max / mean | 15,732 / 14,674.7 | 15,732 / 14,674.7 | 15,776 / 14,650.7 | 15,942 / 14,804.7 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Pairs found by the grid per cycle, max / mean | 15,732 / 14,674.7 | 15,732 / 14,674.7 | 15,776 / 14,650.7 | 15,942 / 14,804.7 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Conflict-alert cycle, mean / p50 / p99 / p99.9 / max | 54.94 / 54.21 / 65.32 / 71.14 / 76.67 ms | 58.50 / 58.95 / 67.63 / 76.25 / 97.96 ms | 68.06 / 67.16 / 97.67 / 146.56 / 153.80 ms | 62.56 / 60.85 / 98.71 / 171.13 / 200.17 ms | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Cycles longer than 1 s | 0 of 3,601 | 0 of 3,601 | 0 of 3,601 | 0 of 3,601 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Cycles with work left undone by a budget | 0 | 0 | 0 | 0 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Cycles with tracks unscanned / candidates unevaluated while running | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Cycles the net reported not running | 3601 | 3601 | 3601 | 3601 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Rows above the flat-test latitude per cycle, max / mean | 853 / 398.3 | 853 / 398.3 | 853 / 400.4 | 1,439 / 400.9 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Rows with the radius held to the cap per cycle, max / mean | 20 / 6.5 | 20 / 6.5 | 14 / 5.5 | 16 / 5.5 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef |
+| Alerts opened / closed / dropped (development minima, 70 min including warm-up, not a conflict rate) | 274,487 / 269,814 / 0 | 274,487 / 269,814 / 0 | 270,933 / 266,256 / 0 | 273,010 / 268,269 / 0 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef; development minima, 70 min including warm-up, not a conflict rate |
+| Pair cycles evaluated / in conflict (development minima, 70 min including warm-up, not a conflict rate) | 61,223,242 / 18,985,626 | 61,223,242 / 18,985,626 | 61,264,599 / 19,252,449 | 61,905,580 / 19,453,508 | net DEGRADED on every cycle (latitude-limit and r95-cap rows); a fix is in lane-ca-ecef; development minima, 70 min including warm-up, not a conflict rate |
 
 ## Not measured
 
@@ -138,7 +113,8 @@ and the net reports degraded (`rows_high_lat`). Configuration: `national.cfg` (d
 
 Data directory `D=/home/connoravila/Documents/Avila-Labs/openatca-data/derived/nas-hour-20261119`,
 archive `R=/home/connoravila/Documents/Avila-Labs/openatca-data/raw/adsblol/2026.11.19`,
-`T=$HOME/.cache/avila-night/openatca-nashour/release`.
+`T=$HOME/.cache/avila-night/openatca-nashour/release`. The archive parts are
+`v2026.11.19-planes-readsb-prod-0.tar.aa` and `.ab`. `1795122000` is 2026-11-19T21:00:00Z.
 
 ```
 systemd-run --user --scope -q -p MemoryMax=5G -p MemorySwapMax=0 env CARGO_BUILD_JOBS=2 \
@@ -147,19 +123,22 @@ systemd-run --user --scope -q -p MemoryMax=5G -p MemorySwapMax=0 env CARGO_BUILD
 
 $T/oa-adsb-clip --out $D/conus-1200-2344.oaf --box 23,51,-127,-65 \
   --from 2026-11-19T12:00:00Z --to 2026-11-19T23:44:00Z $R/*.tar.aa $R/*.tar.ab 2> $D/conus-1200-2344.err
-
+$T/oa-adsb-clip --out $D/conus-0000-1200.oaf --box 23,51,-127,-65 \
+  --from 2026-11-19T00:00:00Z --to 2026-11-19T12:00:00Z $R/*.tar.aa $R/*.tar.ab 2> $D/conus-0000-1200.err
+$T/oa-adsb-clip --out $D/conus-2000-2300.oaf --box 23,51,-127,-65 \
+  --from 1795118400 --to 1795129200 $R/*.tar.aa $R/*.tar.ab 2> $D/conus-2000-2300.err
 $T/examples/nas_hour census $D/conus-1200-2344.oaf > $D/census.txt
+$T/examples/nas_hour census $D/conus-0000-1200.oaf > $D/census-0000-1200.txt
+$T/examples/nas_hour census $D/conus-2000-2300.oaf > $D/census-2000-2300.txt
 
 $T/oa-adsb-clip --out $D/conus-2050-2200.oaf --box 23,51,-127,-65 \
   --from 1795121400 --to 1795125600 $R/*.tar.aa $R/*.tar.ab 2> $D/conus-2050-2200.err
 
+# each of track and ca, with no flag (archived points), --rate-hz 1 and --rate-hz 2:
 systemd-run --user --scope -q -p MemoryMax=12G -p MemorySwapMax=0 taskset -c 0-3 /usr/bin/time -v \
-  $T/examples/nas_hour track $D/conus-2050-2200.oaf --start 1795122000 --max-tracks 65536 > $D/track.txt 2> $D/track.time
-
+  $T/examples/nas_hour track $D/conus-2050-2200.oaf --start 1795122000 --max-tracks 65536 [--rate-hz 1] \
+  > $D/track-<archive|1|2>.txt 2> $D/track-<...>.time
 systemd-run --user --scope -q -p MemoryMax=12G -p MemorySwapMax=0 taskset -c 0-3 /usr/bin/time -v \
-  $T/examples/nas_hour ca $D/conus-2050-2200.oaf --start 1795122000 --max-tracks 65536 \
-  --config $D/national.cfg > $D/ca.txt 2> $D/ca.time
+  $T/examples/nas_hour ca $D/conus-2050-2200.oaf --start 1795122000 --max-tracks 65536 [--rate-hz 1] \
+  --config $D/national.cfg > $D/ca-<archive|1|2>.txt 2> $D/ca-<...>.time
 ```
-
-`1795122000` is 2026-11-19T21:00:00Z. The archive parts are the two files
-`v2026.11.19-planes-readsb-prod-0.tar.aa` and `.ab`.

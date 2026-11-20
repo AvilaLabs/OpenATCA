@@ -5768,13 +5768,17 @@ configuration with no default; the crate's tests use synthetic values.
   read), through `oa_sealed::DropReport`; the count is also a line of `summary.txt`. A failure while the clip
   is being read still reports the rows dropped up to that point.
 - **OA-CA-032** The example `nas_hour` (`tools/oa-ca/examples`) is the M9 national-hour measurement. `census` counts
-  the distinct airborne addresses (a barometric altitude, not on the ground) of each UTC hour of a clip and of
-  each minute of the busiest hour, and prints no address. `track` and `ca` feed every measurement of the clip
-  to the tracker (and, for `ca`, the one-second rows to conflict alert), measure only from `--start` to
-  `--start` + 3600 s, and print CPU, peak memory, reports, tracks, the latency of each update and of each
-  second, the tracker's refusal and capacity counters and, for `ca`, the pairs evaluated, the cycle times
-  and the cycles left short by a budget. A sealed path is refused and `--start` is required. It scores
-  nothing and changes neither the tracker nor conflict alert (`tests/nas_hour.rs`).
+  the distinct airborne addresses (a barometric altitude, not on the ground) and the trace rows of each UTC
+  hour of a clip, and the peak minute of each hour, and prints no address. `track` and `ca` feed every
+  measurement of the clip to the tracker (and, for `ca`, the one-second rows to conflict alert), measure only
+  from `--start` to `--start` + 3600 s, and print CPU, peak and working-set memory, reports, tracks, the
+  latency of the update calls and of the tick-crossing calls apart, the latency of each second, the tracker's
+  refusal and capacity counters and, for `ca`, the pairs evaluated, the cycle times and the cycles left short by
+  a budget. With `--rate-hz`, the stream is interpolated linearly between consecutive points of an aircraft no
+  more than 60 s apart, at that rate, with the earlier point's quality fields, and nothing is added past an
+  aircraft's last point (`oa_ca_run::synth`); the output says "synthetic rate from interpolated trace points".
+  A sealed path is refused and `--start` is required. It scores nothing and changes neither the tracker nor
+  conflict alert (`tests/nas_hour.rs`).
 
 ## SWIM STDDS terminal data (oa-stdds)
 

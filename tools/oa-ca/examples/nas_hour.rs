@@ -60,26 +60,34 @@ fn run(args: &[String]) -> Result<(), String> {
         _ => return Err("usage: nas_hour <census|track|ca> <clip.oaf> [flags]".to_string()),
     };
     refuse_sealed(Sealed::production(), clip)?;
-    let (mut start, mut cfg_path, mut max_tracks) = (None, None, 65_536usize);
+    let (mut start, mut cfg_path, mut max_tracks, mut rate) = (None, None, 65_536usize, None);
     let mut it = args.iter().skip(2);
     while let Some(f) = it.next() {
         let v = it.next().ok_or_else(|| format!("{f} needs a value"))?;
         match f.as_str() {
             "--start" => start = Some(oa_adsb::cli::parse_time(v)?),
             "--config" => cfg_path = Some(v.clone()),
+            "--rate-hz" => rate = Some(v.parse::<f64>().map_err(|_| "bad --rate-hz".to_string())?),
             "--max-tracks" => max_tracks = v.parse().map_err(|_| "bad --max-tracks".to_string())?,
             _ => return Err(format!("unknown flag {f}")),
         }
     }
     match cmd {
         "census" => census(clip),
-        "track" => replay(clip, start.ok_or("--start is required")?, max_tracks, None),
+        "track" => replay(
+            clip,
+            start.ok_or("--start is required")?,
+            max_tracks,
+            rate,
+            None,
+        ),
         "ca" => {
             let p = cfg_path.ok_or("--config is required")?;
             replay(
                 clip,
                 start.ok_or("--start is required")?,
                 max_tracks,
+                rate,
                 Some(p),
             )
         }
@@ -93,6 +101,7 @@ fn census(clip: &Path) -> Result<(), String> {
     let mut hours: BTreeMap<i64, HashSet<u32>> = BTreeMap::new();
     let mut minutes: BTreeMap<i64, HashSet<u32>> = BTreeMap::new();
     let mut rows = 0u64;
+    let mut hour_rows: BTreeMap<i64, u64> = BTreeMap::new();
     let mut fr = Reports::default();
     let damaged = for_each_adsb_frame(clip, &mut |_, payload| {
         oa_adsb::reports_clear(&mut fr);
@@ -109,6 +118,9 @@ fn census(clip: &Path) -> Result<(), String> {
                 continue;
             };
             rows += 1;
+            *hour_rows
+                .entry(t.div_euclid(NS).div_euclid(HOUR_S))
+                .or_default() += 1;
             if fl & F_GROUND == 0 && alt != NONE_I32 {
                 let s = t.div_euclid(NS);
                 hours.entry(s.div_euclid(HOUR_S)).or_default().insert(a);
@@ -120,7 +132,20 @@ fn census(clip: &Path) -> Result<(), String> {
     println!("rows {rows}, damaged frames {damaged}");
     let mut best = None;
     for (h, s) in &hours {
-        println!("hour_unix_s {} distinct_airborne {}", h * HOUR_S, s.len());
+        let (mut pm, mut pc) = (0i64, 0usize);
+        for m in (h * 60)..(h * 60 + 60) {
+            let c = minutes.get(&m).map_or(0, HashSet::len);
+            if c > pc {
+                (pm, pc) = (m * 60, c);
+            }
+        }
+        let r = hour_rows.get(h).copied().unwrap_or(0);
+        println!(
+            "hour_unix_s {} distinct_airborne {} rows {r} rows_per_s {:.1} hour_peak_minute_unix_s {pm} distinct_airborne_in_minute {pc}",
+            h * HOUR_S,
+            s.len(),
+            r as f64 / HOUR_S as f64
+        );
         if best.is_none_or(|(_, n)| s.len() > n) {
             best = Some((*h, s.len()));
         }
@@ -150,6 +175,17 @@ fn cpu_s() -> (f64, f64) {
     let f: Vec<&str> = rest.split_whitespace().collect();
     let g = |i: usize| f.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0) / 100.0;
     (g(11), g(12))
+}
+
+/// `VmRSS` of this process now, kB.
+fn rss_kb() -> u64 {
+    // seal-allow: /proc, not an input
+    let s = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    s.lines()
+        .find_map(|l| l.strip_prefix("VmRSS:"))
+        .and_then(|v| v.split_whitespace().next())
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0)
 }
 
 /// `VmHWM` of this process, kB.
@@ -332,6 +368,7 @@ fn replay(
     clip: &Path,
     start_s: i64,
     max_tracks: usize,
+    rate_hz: Option<f64>,
     ca_cfg: Option<String>,
 ) -> Result<(), String> {
     let t_open = Instant::now();
@@ -346,12 +383,21 @@ fn replay(
         astats.rows_in, loaded.bad_frames, loaded.dropped_records, meas.len(), astats.removed
     );
     drop(loaded);
-    let iv = interval_stats(&meas).unwrap_or(IntervalStats {
+    let rss_loaded = rss_kb();
+    let mut iv = interval_stats(&meas).unwrap_or(IntervalStats {
         n: 0,
         p50_ns: NS,
         p90_ns: NS,
         p99_ns: NS,
     });
+    if let Some(r) = rate_hz {
+        // The expected interval is the synthetic one; the initiation interval keeps the trace's
+        // 90th percentile, so an aircraft with no interpolated points can still be confirmed.
+        iv.p50_ns = (1e9 / r).round() as i64;
+        println!("label {} rate_hz {r}", oa_ca_run::synth::LABEL);
+    } else {
+        println!("label trace points as archived (no interpolation)");
+    }
     let base = oa_track::TrackerConfig {
         max_tracks,
         ..DEFAULT_CONFIG
@@ -364,8 +410,8 @@ fn replay(
         None => None,
         Some(p) => {
             refuse_sealed(Sealed::production(), Path::new(&p))?;
-            // seal-allow: the configuration file, checked by the guard on the line above
-            let text = fs::read_to_string(&p).map_err(|e| format!("{p}: {e}"))?;
+            let bytes = oa_sealed::read(&p).map_err(|e| format!("{p}: {e}"))?;
+            let text = String::from_utf8(bytes).map_err(|_| format!("{p}: not UTF-8 text"))?;
             let set = parse_config(&text).map_err(|e| format!("{p}: {e}"))?;
             ca_check(&set.ca).map_err(|e| format!("conflict alert configuration: {e}"))?;
             Some(CaSide {
@@ -409,14 +455,20 @@ fn replay(
     );
     // The replay. `call_ns` is each measured update call; `sec_*` are per second of
     // measurement time.
-    let mut call_ns: Vec<u32> = Vec::new();
+    let (mut upd_ns, mut sweep_ns) = (Vec::<u64>::new(), Vec::<u64>::new());
+    let mut rss_start = 0u64;
     let (mut sec_ns, mut sec_reports) = (Vec::<u64>::new(), Vec::<u64>::new());
     let (mut conf, mut tent) = (Vec::<u64>::new(), Vec::<u64>::new());
     let (mut cur_sec, mut cur_work, mut cur_n) = (i64::MIN, 0u64, 0u64);
     let (c0, w0) = (cpu_s(), Instant::now());
     let mut ca_wall_ns = 0u64;
     let mut measured_from: Option<(f64, Instant)> = None;
-    for m in &meas {
+    let stream: Box<dyn Iterator<Item = oa_track::Measurement> + '_> = match rate_hz {
+        None => Box::new(meas.iter().copied()),
+        Some(r) => Box::new(oa_ca_run::synth::synth(&meas, r)?),
+    };
+    for m in stream {
+        let m = &m;
         if m.toa_ns >= to_ns {
             break;
         }
@@ -424,6 +476,7 @@ fn replay(
         if measured && measured_from.is_none() {
             let c = cpu_s();
             measured_from = Some((c.0 + c.1, Instant::now()));
+            rss_start = rss_kb();
         }
         let sec = m.toa_ns.div_euclid(NS);
         if measured && sec != cur_sec {
@@ -438,11 +491,21 @@ fn replay(
             cur_work = 0;
             cur_n = 0;
         }
+        let before = output_len(&out);
         let a = Instant::now();
         tracker_update(&mut t, m, &mut out);
         let mut ns = a.elapsed().as_nanos() as u64;
         if measured {
-            call_ns.push(u32::try_from(ns).unwrap_or(u32::MAX));
+            // A call that crossed a second boundary emitted the tick rows (the sweep).
+            let tick = out
+                .flags
+                .get(before..)
+                .is_some_and(|f| f.iter().any(|&x| x & O_TICK != 0));
+            if tick {
+                sweep_ns.push(ns);
+            } else {
+                upd_ns.push(ns);
+            }
         }
         if output_len(&out) > drain {
             let a = Instant::now();
@@ -472,6 +535,7 @@ fn replay(
         c.flush(from_ns);
     }
     let (c1, w1) = (cpu_s(), Instant::now());
+    let rss_end = rss_kb();
     if cur_sec != i64::MIN {
         sec_ns.push(cur_work);
         sec_reports.push(cur_n);
@@ -492,9 +556,12 @@ fn replay(
         c1.1 - c0.1,
     );
     println!(
-        "real_time_factor_measured_window {:.5} peak_rss_kb {}",
+        "real_time_factor_measured_window {:.5} peak_rss_including_load_kb {}",
         measured_cpu / HOUR_S as f64,
         hwm_kb()
+    );
+    println!(
+        "working_set_rss_kb after_load_and_drop {rss_loaded} start_of_hour {rss_start} end_of_hour {rss_end} (the measurement stream is held in memory)"
     );
     let total: u64 = sec_reports.iter().sum();
     println!(
@@ -510,8 +577,19 @@ fn replay(
         tent.iter().max().copied().unwrap_or(0),
         tent.iter().sum::<u64>() as f64 / tent.len().max(1) as f64,
     );
-    let mut calls: Vec<u64> = call_ns.iter().map(|&x| u64::from(x)).collect();
-    dist("tracker_update_call", &mut calls, "us", 1e3);
+    dist("tracker_update_call_no_tick", &mut upd_ns, "us", 1e3);
+    dist(
+        "tracker_update_call_tick_crossing",
+        &mut sweep_ns,
+        "us",
+        1e3,
+    );
+    println!(
+        "tracker_sweep_mean_per_second_ms {:.3} sweeps {} update_calls {}",
+        sweep_ns.iter().sum::<u64>() as f64 / sec_reports.len().max(1) as f64 / 1e6,
+        sweep_ns.len(),
+        upd_ns.len()
+    );
     let over = sec_ns.iter().filter(|&&x| x > NS as u64).count();
     dist("tracker_cycle_1s", &mut sec_ns.clone(), "ms", 1e6);
     println!("tracker_cycles_over_1s {over}");
