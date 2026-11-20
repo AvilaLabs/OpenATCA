@@ -28,6 +28,7 @@ pub fn is_refusal(msg: &str) -> bool {
 
 /// Checks `path`, opens it for reading and verifies the opened file; the error names the path.
 pub fn open_guarded(g: &Sealed, path: &Path) -> Result<File, OpenFail> {
+    // seal-allow: the opener of the guarded open, called only after the guard has passed the path
     open_guarded_with(g, path, |p| File::open(p))
 }
 

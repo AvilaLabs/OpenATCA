@@ -87,6 +87,7 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
             PathBuf::from("/home/connoravila/Documents/Avila-Labs/openatca-data/scds/stdds-smoke-20261119T1/o"),
         ),
     ] {
+        // seal-allow: runs the tool's own test binary; the run itself goes through the guard
         let r = Command::new(exe)
             .args([
                 "--adsb",
@@ -102,6 +103,7 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
         assert!(String::from_utf8_lossy(&r.stderr).contains("sealed"));
     }
     assert!(!out.join("o").exists());
+    // seal-allow: runs the tool's own test binary; the run itself goes through the guard
     let r = Command::new(exe).args(["--adsb", "a"]).output().unwrap();
     assert_eq!(r.status.code(), Some(2));
     let _ = std::fs::remove_dir_all(&out);

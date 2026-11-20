@@ -378,6 +378,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         write_atomic(&args.out, file, text)?;
     }
     // The renames reach the disk with the directory.
+    // seal-allow: opens the output directory, which this run wrote, to sync the renames
     fs::File::open(&args.out)
         .and_then(|d| d.sync_all())
         .map_err(|e| format!("{}: {e}", args.out.display()))?;
