@@ -53,7 +53,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    match run(g, &adsb, &out, &files) {
+    // Printed when `main` returns: on every exit after this point, an error included.
+    let mut drops = oa_sealed::DropReport::new();
+    match run(g, &adsb, &out, &files, &mut drops) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -66,7 +68,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(g: &Sealed, adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String, String> {
+fn run(
+    g: &Sealed,
+    adsb: &Path,
+    out: &Path,
+    files: &[PathBuf],
+    drops: &mut oa_sealed::DropReport,
+) -> Result<String, String> {
     // An existing output is refused before any work is done (and again, race-free, at the create).
     for name in [TXT, CSV] {
         let p = out.join(name);
@@ -80,11 +88,10 @@ fn run(g: &Sealed, adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String,
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut recs = Vec::new();
     let mut header = Vec::new();
-    let mut sealed = 0u64;
     for (i, f) in files.iter().enumerate() {
         let ix = u32::try_from(i).map_err(|_| "too many input files".to_string())?;
         let info = load_file(g, f, ix, &mut recs).map_err(|e| e.to_string())?;
-        sealed += info.sealed_window_dropped;
+        drops.add(info.sealed_window_dropped);
         header.push(format!(
             "STDDS file {ix}: {} (digest {}); message frames {}, other frames {}, damaged frames {}, messages not TAIS or refused {}, TAIS records {}, gzip damaged {}, gzip truncated {}",
             info.path,
@@ -99,12 +106,11 @@ fn run(g: &Sealed, adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String,
         ));
     }
     let addrs: BTreeSet<u32> = recs.iter().filter_map(|r| r.addr).collect();
-    let refs = build_refs(g, adsb, &addrs, out)?;
-    // After the last read: the recordings' frames and records and the clip's rows, each once.
-    eprintln!(
-        "{}",
-        oa_sealed::drop_line(sealed + refs.sealed_window_dropped)
-    );
+    // The clip's rows are added as soon as the clip is read, before anything that can fail.
+    let mut clip_sealed = 0u64;
+    let refs = build_refs(g, adsb, &addrs, out, &mut clip_sealed);
+    drops.add(clip_sealed);
+    let refs = refs?;
     header.extend(refs.header.iter().cloned());
     let truth = TruthSource {
         truth: &refs.truth.truth,

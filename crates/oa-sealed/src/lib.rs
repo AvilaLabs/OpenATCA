@@ -799,6 +799,71 @@ pub fn drop_line(n: u64) -> String {
     format!("sealed-window rows dropped: {n}")
 }
 
+/// The count of rows a tool dropped in a sealed window, which prints [`drop_line`] when it is
+/// dropped. A tool makes one at the top of its run and adds each reader's count as the reader
+/// returns, so the line is printed on every exit that comes back through `main`: a `?` error, an
+/// early return and a refusal included. (`std::process::exit` does not run it: a tool does not
+/// call it after reading has started.)
+#[derive(Debug)]
+pub struct DropReport {
+    n: u64,
+    stdout: bool,
+}
+
+impl DropReport {
+    /// A report that prints its line on standard error.
+    pub fn new() -> DropReport {
+        DropReport {
+            n: 0,
+            stdout: false,
+        }
+    }
+
+    /// A report that prints its line on standard output (a tool whose output is that stream).
+    pub fn to_stdout() -> DropReport {
+        DropReport { n: 0, stdout: true }
+    }
+
+    /// Adds the count of one reader (each input is added once).
+    pub fn add(&mut self, n: u64) {
+        self.n = self.n.saturating_add(n);
+    }
+
+    /// The count so far.
+    pub fn count(&self) -> u64 {
+        self.n
+    }
+}
+
+impl Default for DropReport {
+    fn default() -> DropReport {
+        DropReport::new()
+    }
+}
+
+impl Drop for DropReport {
+    fn drop(&mut self) {
+        if self.stdout {
+            println!("{}", drop_line(self.n));
+        } else {
+            eprintln!("{}", drop_line(self.n));
+        }
+    }
+}
+
+/// The sealed windows of the list as one span of Unix milliseconds, `from` inclusive and `to`
+/// exclusive (`from` rounded up and `to` rounded up, so a millisecond time is in it exactly when
+/// its nanosecond time is in a window); with several windows it is the span from the first start
+/// to the last end, which also holds the gaps (the check fails closed). `None` when the list has
+/// no window. The decoders take it as a plain value (`oa_stdds::Limits::drop_window`).
+pub fn sealed_window_ms() -> Option<(i64, i64)> {
+    let w = sealed_windows();
+    let up = |ns: i64| ns.div_euclid(1_000_000) + i64::from(ns.rem_euclid(1_000_000) != 0);
+    let from = w.iter().map(|x| x.from_ns).min()?;
+    let to = w.iter().map(|x| x.to_ns).max()?;
+    Some((up(from), up(to)))
+}
+
 /// The line for the process-wide count (see [`window_dropped_total`]): a cross-check for tests.
 pub fn window_drop_line() -> String {
     format!("sealed-window rows dropped: {}", window_dropped_total())
@@ -820,5 +885,15 @@ mod tests {
         assert_eq!(l.entries.len(), 6);
         assert_eq!(l.days.days.len(), 3);
         assert_eq!(l.windows.len(), 1);
+    }
+
+    #[test]
+    fn the_window_in_milliseconds_is_the_listed_span_and_the_report_adds() {
+        let (a, b) = sealed_window_ms().unwrap();
+        assert_eq!((a, b), (1_795_132_800_000, 1_795_393_020_000));
+        let mut r = DropReport::new();
+        r.add(2);
+        r.add(3);
+        assert_eq!(r.count(), 5);
     }
 }

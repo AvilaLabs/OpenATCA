@@ -43,7 +43,11 @@ fn every_real_sfdps_message_decodes() {
     let total: usize = data.iter().map(Vec::len).sum();
 
     let mut parser = Parser::new(oa_xml::Limits::default()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    // A message timed in the sealed window is dropped inside the decoder, before any count.
+    let mut dec = Decoder::new(Limits {
+        drop_window: oa_sealed::sealed_window_ms(),
+        ..Limits::default()
+    });
     let mut ev = new_events(1024, 1 << 20);
     let mut parse_failed = 0usize;
     let mut unsupported = 0usize;

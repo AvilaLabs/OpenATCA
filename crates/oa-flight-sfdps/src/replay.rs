@@ -14,8 +14,8 @@ use oa_flight::{
     Outcome, C_COUNT, OP_COUNT, REM_COUNT, R_COUNT, ST_COUNT,
 };
 use oa_replay::{
-    doc_fixm_limits, doc_xml_limits, list_recordings, new_doc_events, spec_from_paths,
-    try_merge_streams, FeedKind, MergeReport,
+    doc_fixm_limits, doc_xml_limits, list_recordings, merge_counted, new_doc_events,
+    spec_from_paths, FeedKind, MergeReport,
 };
 use oa_xml::Parser;
 
@@ -135,6 +135,18 @@ pub fn replay_sfdps(
     cfg: &ReplayConfig,
     before_op: &mut dyn FnMut(&FlightTable, i64),
 ) -> io::Result<ReplayReport> {
+    replay_sfdps_counted(paths, cfg, before_op, &mut 0)
+}
+
+/// [`replay_sfdps`], with the frames (by receive time, from the merge, also when the run stops
+/// at `to_ns` or on an error) and the messages (by their own time) dropped in a sealed window put
+/// in `sealed` on every exit, so a caller can print the count whatever the result.
+pub fn replay_sfdps_counted(
+    paths: Vec<PathBuf>,
+    cfg: &ReplayConfig,
+    before_op: &mut dyn FnMut(&FlightTable, i64),
+    sealed: &mut u64,
+) -> io::Result<ReplayReport> {
     let mut table = flights_new(&cfg.flight).map_err(|e| io::Error::other(format!("{e:?}")))?;
     let mut parser =
         Parser::new(doc_xml_limits()).map_err(|e| io::Error::other(format!("{e:?}")))?;
@@ -173,7 +185,7 @@ pub fn replay_sfdps(
     let mut next_sweep = i64::MIN;
     let spec = spec_from_paths(FeedKind::Sfdps, paths);
     let mut ended = false;
-    let res = try_merge_streams(vec![spec], 1 << 16, &mut |m| {
+    let (report, res) = merge_counted(vec![spec], 1 << 16, &mut |m| {
         if m.feed != FeedKind::Sfdps || m.kind != Kind::Message {
             return Ok(());
         }
@@ -198,7 +210,13 @@ pub fn replay_sfdps(
             }
         };
         oa_fixm::clear_events(&mut events);
-        if let Err(e) = decoder.decode_prefix(&doc, m.payload, &mut events) {
+        let decoded = decoder.decode_prefix(&doc, m.payload, &mut events);
+        if let Ok(s) = &decoded {
+            // Messages the decoder dropped for their own time (OA-SEAL-014).
+            *sealed += u64::from(s.sealed_window_dropped);
+            oa_sealed::note_window_drops(u64::from(s.sealed_window_dropped));
+        }
+        if let Err(e) = decoded {
             rep.docs_refused += 1;
             let k = match e {
                 oa_fixm::FixmError::UnsupportedRoot => 0,
@@ -219,7 +237,7 @@ pub fn replay_sfdps(
                 || (oa_fixm::has_field(&events, row, oa_fixm::Field::PositionTime)
                     && events.pos_time_ms.get(row).is_some_and(|&t| sealed_ms(t)))
             {
-                rep.sealed_window_dropped += 1;
+                *sealed += 1;
                 oa_sealed::note_window_drops(1);
                 continue;
             }
@@ -248,11 +266,12 @@ pub fn replay_sfdps(
         }
         Ok(())
     });
+    // The merge's own count of frames dropped by receive time is added on every way out, a stop at
+    // `to_ns` and an error included.
+    *sealed += report.sealed_window_dropped;
+    rep.sealed_window_dropped = *sealed;
     match res {
-        Ok(r) => {
-            rep.sealed_window_dropped += r.sealed_window_dropped;
-            rep.merge = Some(r);
-        }
+        Ok(()) => rep.merge = Some(report),
         Err(e) if ended && e.to_string() == WINDOW_END => {}
         Err(e) => return Err(e),
     }

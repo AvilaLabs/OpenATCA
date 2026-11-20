@@ -71,26 +71,27 @@ fn the_summary_example_drops_sealed_frames_and_records_and_prints_the_count() {
     assert!(exe.exists(), "{}", exe.display());
     let out = std::process::Command::new(exe).arg(&file).output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    // Two frames by receive time, and the first frame's three records (it holds two timed in the
-    // window, so the whole message is dropped).
+    // Two frames by receive time and the two records of the first frame timed in the window; the
+    // line is the last of the output.
     assert!(
-        text.contains("sealed-window rows dropped: 5 "),
+        text.trim_end().ends_with("sealed-window rows dropped: 4"),
         "{}",
-        text.lines().take(6).collect::<Vec<_>>().join("\n")
+        text.lines().rev().take(3).collect::<Vec<_>>().join("\n")
     );
-    assert!(text.contains("frames: message 1 "), "{text}");
-    // Nothing from a dropped message is in the counts: only the last frame's one record is.
-    assert!(text.contains("messages parsed: 1\n"), "{text}");
-    assert!(text.contains("\nrecords: 1 "), "{text}");
+    assert!(text.contains("frames: message 2 "), "{text}");
+    // Nothing the parser dropped is in any count: only the record at 23:59:59 of the first frame
+    // and the one of the last frame are.
+    assert!(text.contains("messages parsed: 2\n"), "{text}");
+    assert!(text.contains("\nrecords: 2 "), "{text}");
     let tn = text
         .lines()
         .find(|l| l.starts_with("tais field track/trackNum"))
         .unwrap();
-    assert!(tn.contains("present 1 "), "{tn}");
+    assert!(tn.contains("present 2 "), "{tn}");
     let pf = text
         .lines()
         .find(|l| l.starts_with("tais flag track/pseudo"))
         .unwrap();
-    assert!(pf.contains("false 0 true 1 of 1"), "{pf}");
+    assert!(pf.contains("false 0 true 2 of 2"), "{pf}");
     std::fs::remove_dir_all(&dir).ok();
 }

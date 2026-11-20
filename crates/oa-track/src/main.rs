@@ -35,7 +35,7 @@ use std::time::Instant;
 
 use oa_adsb::{decode_payload_lenient, reports_len, Reports};
 use oa_bench::adsb_truth;
-use oa_bench::input::{for_each_adsb_frame, load_adsb};
+use oa_bench::input::{file_opener, for_each_adsb_frame, load_adsb_counted};
 use oa_bench::report::{code_version, render_csv, render_text, Header};
 use oa_bench::run::find;
 use oa_bench::stats::Stats;
@@ -806,9 +806,13 @@ fn run_realtime_inner(
     let mut phases = Phases::default();
     phases.mark("start");
     let (load_wall, cpu_start) = (Instant::now(), cpu_ns());
-    let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
-    // The only read of the clip: its own count, once.
-    eprintln!("{}", oa_sealed::drop_line(clip.sealed_window_dropped));
+    // The only read of the clip: its own count, printed once when this function returns, an
+    // error included.
+    let mut drops = oa_sealed::DropReport::new();
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(clip_path, &file_opener(), &mut clip_sealed);
+    drops.add(clip_sealed);
+    let clip = clip.map_err(|e| e.to_string())?;
     let (clip_reports, clip_bad) = (reports_len(&clip.reports), clip.bad_frames);
     if clip_reports == 0 {
         return Err(format!(
@@ -1127,10 +1131,14 @@ fn run(
 ) -> Result<(), String> {
     let mut phases = Phases::default();
     phases.mark("start");
-    let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
-    // The count of the clip read, printed once after the last read (the latency replay below
-    // reads the same file again and drops the same frames; they are not counted twice).
-    let clip_sealed = clip.sealed_window_dropped;
+    // The count of the clip read, printed once when this function returns, an error included (the
+    // latency replay below reads the same file again and drops the same frames; they are not
+    // counted twice).
+    let mut drops = oa_sealed::DropReport::new();
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(clip_path, &file_opener(), &mut clip_sealed);
+    drops.add(clip_sealed);
+    let clip = clip.map_err(|e| e.to_string())?;
     phases.mark("clip decoded (all reports in memory)");
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
@@ -1189,7 +1197,6 @@ fn run(
         }
         Err(e) => return Err(format!("latency replay: {e}")),
     };
-    eprintln!("{}", oa_sealed::drop_line(clip_sealed));
     phases.mark("latency replay (frames to output)");
     if !score_it {
         let mut perf = Perf {

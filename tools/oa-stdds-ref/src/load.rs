@@ -82,15 +82,9 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
                 ctx.info.frames_message += 1;
                 match parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats) {
                     Ok(Message::Tais(m)) => {
+                        // A record timed in a sealed window was dropped by the parser
+                        // (`Limits::drop_window`), before any count.
                         for r in &m.records {
-                            // A record timed in a sealed window is dropped even when its frame
-                            // was received outside it.
-                            if oa_sealed::in_sealed_window(r.mrt_time_ms.saturating_mul(1_000_000))
-                            {
-                                ctx.info.sealed_window_dropped += 1;
-                                oa_sealed::note_window_drops(1);
-                                continue;
-                            }
                             let index = u32::try_from(ctx.info.records).unwrap_or(u32::MAX);
                             ctx.out.push(rec_of(ctx.file, index, &m, r));
                             ctx.info.records += 1;
@@ -130,7 +124,10 @@ pub fn load_reader<R: Read>(
     let mut ctx = Ctx {
         parser,
         stats: new_stats(),
-        limits: Limits::default(),
+        limits: Limits {
+            drop_window: oa_sealed::sealed_window_ms(),
+            ..Limits::default()
+        },
         file,
         out,
         info: FileInfo {
@@ -177,6 +174,8 @@ pub fn load_reader<R: Read>(
     }
     ctx.info.gzip_truncated = gz.as_ref().is_some_and(|g| g.finish().truncated.is_some());
     ctx.info.sha256 = to_hex(&hash.finalize());
+    // Frames by receive time and records by their own time, in one count.
+    ctx.info.sealed_window_dropped += ctx.stats.sealed_window_dropped;
     Ok(ctx.info)
 }
 

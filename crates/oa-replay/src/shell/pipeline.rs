@@ -116,6 +116,8 @@ pub fn doc_xml_limits() -> oa_xml::Limits {
 pub fn doc_fixm_limits() -> Limits {
     Limits {
         max_elements: DOC_MAX_ELEMENTS,
+        // A message timed in the sealed window is dropped inside the decoder, before any count.
+        drop_window: oa_sealed::sealed_window_ms(),
         ..Limits::default()
     }
 }
@@ -720,6 +722,9 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
             return;
         }
     };
+    // Messages the decoder dropped for their own time (OA-SEAL-014).
+    p.sealed_window_dropped += u64::from(summary.sealed_window_dropped);
+    oa_sealed::note_window_drops(u64::from(summary.sealed_window_dropped));
     let after = p.fixm.stats().rejected;
     for r in 0..REJECT_COUNT {
         let d = after

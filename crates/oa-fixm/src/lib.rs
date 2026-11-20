@@ -270,6 +270,11 @@ pub struct Limits {
     pub max_route_len: usize,
     /// Rows of the unknown-path table; paths beyond it are counted in `unknown_overflow`.
     pub max_unknown_paths: usize,
+    /// A span of Unix milliseconds, `from` inclusive and `to` exclusive. A message whose own
+    /// timestamp, or position time, is in it is dropped whole before any count is updated: it
+    /// is in no row, no `messages`, `rejected`, field-error or unknown count, and it is counted
+    /// in [`Stats::sealed_window_dropped`]. A pure value; the shell passes the sealed window in.
+    pub drop_window: Option<(i64, i64)>,
 }
 
 impl Default for Limits {
@@ -278,6 +283,7 @@ impl Default for Limits {
             max_elements: 50_000,
             max_route_len: 2048,
             max_unknown_paths: 256,
+            drop_window: None,
         }
     }
 }
@@ -302,6 +308,8 @@ pub struct UnknownPath {
 #[derive(Clone, Debug)]
 pub struct Stats {
     pub docs: u64,
+    /// Messages dropped because their own time is in [`Limits::drop_window`]: in no other count.
+    pub sealed_window_dropped: u64,
     /// Documents whose root is not a `MessageCollection` in the FAA NAS 3.0 namespace.
     pub unsupported_roots: u64,
     /// `message` elements seen.
@@ -326,6 +334,8 @@ pub struct Summary {
     pub messages: u32,
     /// Rows appended.
     pub rows: u32,
+    /// Messages dropped for their time in [`Limits::drop_window`]: not in any other count.
+    pub sealed_window_dropped: u32,
     /// Messages refused whole.
     pub rejected: u32,
     /// Field errors across the appended rows.

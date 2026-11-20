@@ -15,7 +15,7 @@ use oa_flight::{
     flight_by_address, flight_is_live, Alt, FlightConfig, FlightTable, ALT_AT_FIX, ALT_BLOCK,
     ALT_NIL, ALT_SIMPLE, ALT_VFR, ALT_VFR_ON_TOP_PLUS,
 };
-use oa_flight_sfdps::{recordings_in, replay_sfdps, ReplayConfig};
+use oa_flight_sfdps::{recordings_in, replay_sfdps_counted, ReplayConfig};
 
 use crate::report::{at_vertical_minimum, class_name, context_of, Airport, CLIMB_FPM, LEVEL_FT};
 
@@ -90,6 +90,16 @@ pub fn answer_queries(
     s: &Sfdps,
     queries: &[(u32, i64)],
 ) -> Result<(Vec<Answer>, JoinStats), String> {
+    answer_queries_counted(s, queries, &mut 0)
+}
+
+/// [`answer_queries`], with the frames and messages the replay dropped in a sealed window put in
+/// `sealed` on every exit.
+pub fn answer_queries_counted(
+    s: &Sfdps,
+    queries: &[(u32, i64)],
+    sealed: &mut u64,
+) -> Result<(Vec<Answer>, JoinStats), String> {
     let mut order: Vec<usize> = (0..queries.len()).collect();
     order.sort_by_key(|&k| queries.get(k).map_or(0, |q| q.1));
     let mut answers = vec![Answer::default(); queries.len()];
@@ -104,20 +114,25 @@ pub fn answer_queries(
         silence_ms: 6 * 3_600_000,
     };
     let mut next = 0usize;
-    let rep = replay_sfdps(paths, &cfg, &mut |t, avail_ms| {
-        while let Some(&k) = order.get(next) {
-            let Some(&(addr, t_ns)) = queries.get(k) else {
-                break;
-            };
-            if t_ns.div_euclid(1_000_000) >= avail_ms {
-                break;
+    let rep = replay_sfdps_counted(
+        paths,
+        &cfg,
+        &mut |t, avail_ms| {
+            while let Some(&k) = order.get(next) {
+                let Some(&(addr, t_ns)) = queries.get(k) else {
+                    break;
+                };
+                if t_ns.div_euclid(1_000_000) >= avail_ms {
+                    break;
+                }
+                if let Some(a) = answers.get_mut(k) {
+                    *a = lookup(t, addr);
+                }
+                next += 1;
             }
-            if let Some(a) = answers.get_mut(k) {
-                *a = lookup(t, addr);
-            }
-            next += 1;
-        }
-    })
+        },
+        sealed,
+    )
     .map_err(|e| e.to_string())?;
     let st = &rep.table.stats;
     let stats = JoinStats {

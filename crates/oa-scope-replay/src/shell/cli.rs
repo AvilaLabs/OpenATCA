@@ -900,9 +900,10 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     let keep_from = a.start_ns.checked_sub(history_ns).ok_or_else(overflow)?;
     let mut sealed = 0u64;
     let tracked = track_window_counted(&a.adsb, read_from, read_to, end_ns, keep_from, &mut sealed);
-    // After the last read of the clip, on every exit (an empty window and a failed read too);
-    // frames by receive time plus rows by their own time.
-    eprintln!("sealed-window rows dropped: {sealed}");
+    // Frames by receive time plus rows by their own time, printed when this function returns, on
+    // every exit (an empty window and a failed read too).
+    let mut drops = oa_sealed::DropReport::new();
+    drops.add(sealed);
     let (store, calls, tr) = tracked?;
     let track_time = t0.elapsed();
 

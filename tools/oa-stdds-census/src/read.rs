@@ -96,15 +96,10 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
                     Ok(Message::Tais(m)) => {
                         ctx.rs.tais_messages += 1;
                         let src = if m.src_present { m.src } else { [0; 8] };
+                        // A record timed (`mrtTime`) inside a sealed window was dropped by the
+                        // parser (`Limits::drop_window`), before any count, even when its frame
+                        // was received outside it.
                         for r in &m.records {
-                            // A record timed (`mrtTime`) inside a sealed window is dropped and
-                            // counted even when its frame was received outside it.
-                            if oa_sealed::in_sealed_window(r.mrt_time_ms.saturating_mul(1_000_000))
-                            {
-                                ctx.rs.sealed_window_dropped += 1;
-                                oa_sealed::note_window_drops(1);
-                                continue;
-                            }
                             ctx.rs.tais_records += 1;
                             ctx.census.observe(src, r);
                         }
@@ -291,12 +286,26 @@ pub fn read_dir(dir: &Path, census: &mut Census) -> Result<ReadStats, ReadError>
 
 /// [`read_dir`] against a given guard.
 pub fn read_dir_in(g: &Sealed, dir: &Path, census: &mut Census) -> Result<ReadStats, ReadError> {
+    read_dir_counted(g, dir, census, &mut 0)
+}
+
+/// [`read_dir_in`], with the frames and records dropped in a sealed window put in `dropped` as
+/// each file is read, so the caller has the count on an error exit too.
+pub fn read_dir_counted(
+    g: &Sealed,
+    dir: &Path,
+    census: &mut Census,
+    dropped: &mut u64,
+) -> Result<ReadStats, ReadError> {
     let files = recording_files_in(g, dir)?;
     let parser = Parser::new(XmlLimits::default())
         .map_err(|e| ReadError::Failed(format!("xml parser: {e:?}")))?;
     let mut ctx = Ctx {
         parser,
-        limits: Limits::default(),
+        limits: Limits {
+            drop_window: oa_sealed::sealed_window_ms(),
+            ..Limits::default()
+        },
         census,
         rs: ReadStats::new(),
     };
@@ -306,14 +315,17 @@ pub fn read_dir_in(g: &Sealed, dir: &Path, census: &mut Census) -> Result<ReadSt
             OpenFail::Refused(m) => ReadError::Refused(m),
             OpenFail::Io(m) => ReadError::Failed(format!("cannot open a recording: {m}")),
         })?;
-        read_stream(file, &mut ctx)
-            .map_err(|e| ReadError::Failed(format!("cannot read a recording: {e}")))?;
+        let read = read_stream(file, &mut ctx);
+        *dropped = ctx.rs.sealed_window_dropped + ctx.rs.stats.sealed_window_dropped;
+        read.map_err(|e| ReadError::Failed(format!("cannot read a recording: {e}")))?;
         if ctx.rs.over_budget {
             return Err(ReadError::Failed(
                 "stopped: the memory estimate is past the budget (use --from and --to)".to_string(),
             ));
         }
     }
+    // Frames by receive time and records by their own time, in one count.
+    ctx.rs.sealed_window_dropped += ctx.rs.stats.sealed_window_dropped;
     Ok(ctx.rs)
 }
 
@@ -322,11 +334,15 @@ pub fn read_bytes(bytes: &[u8], census: &mut Census) -> Result<ReadStats, String
     let parser = Parser::new(XmlLimits::default()).map_err(|e| format!("xml parser: {e:?}"))?;
     let mut ctx = Ctx {
         parser,
-        limits: Limits::default(),
+        limits: Limits {
+            drop_window: oa_sealed::sealed_window_ms(),
+            ..Limits::default()
+        },
         census,
         rs: ReadStats::new(),
     };
     read_stream(bytes, &mut ctx).map_err(|e| format!("cannot read: {e}"))?;
+    ctx.rs.sealed_window_dropped += ctx.rs.stats.sealed_window_dropped;
     Ok(ctx.rs)
 }
 
@@ -666,5 +682,7 @@ mod tests {
         let rs = read_bytes(&buf[..n], &mut census).unwrap();
         assert_eq!((rs.frames, rs.tais_messages, rs.tais_records), (1, 1, 2));
         assert_eq!(rs.sealed_window_dropped, 2);
+        // The parse-level counts do not hold the dropped records either.
+        assert_eq!(rs.stats.records, 2);
     }
 }

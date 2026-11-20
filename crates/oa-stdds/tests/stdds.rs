@@ -1539,28 +1539,80 @@ fn the_summary_prints_status_and_unknown_names_only_when_they_are_plain_text() {
     assert!(out.contains("frame reader stalled, bytes not read: 0"));
 }
 
+/// 2026-11-20T00:00:00Z and 2026-11-23T00:17:00Z in Unix milliseconds: the sealed window.
+const DROP: (i64, i64) = (1_795_132_800_000, 1_795_393_020_000);
+
 // REQ: OA-SEAL-014
 #[test]
-fn messages_parsed_into_scratch_accumulators_and_merged_equal_one_accumulator() {
+fn a_record_timed_in_the_drop_window_is_in_no_count_not_even_when_the_message_is_refused() {
     let mut p = parser();
-    let lim = Limits::default();
-    let mut whole = new_stats();
-    let mut merged = new_stats();
-    for name in [
-        "tais_full.xml",
-        "tais_malformed_fields.xml",
-        "tais_other_root.xml",
-        "smes_position.xml",
-        "stdds_rvr.xml",
-        "stdds_other.xml",
-        "tais_full.xml",
-    ] {
-        let bytes = fixture(name);
-        let _ = parse_message(&mut p, &bytes, &lim, &mut whole);
-        let mut scratch = new_stats();
-        let _ = parse_message(&mut p, &bytes, &lim, &mut scratch);
-        merged.merge(&scratch, &lim);
-    }
-    assert!(whole.messages == 7 && whole.records > 0);
-    assert_eq!(format!("{whole:?}"), format!("{merged:?}"));
+    // Two records in the window (one with a refused field, an unknown element and an invalidated
+    // field), then two outside it; the limit of one record refuses the message at the second.
+    let xml = tais_xml(
+        r#"<record><track><trackNum>1</trackNum><mrtTime>2026-11-20T00:00:00Z</mrtTime><lat>bad</lat><lon>1</lon><zzz>1</zzz><vx r="1">1</vx></track></record>
+<record><track><trackNum>2</trackNum><mrtTime>2026-11-23T00:16:59.999Z</mrtTime><pseudo>1</pseudo></track></record>
+<record><track><trackNum>3</trackNum><mrtTime>2026-11-19T23:59:59Z</mrtTime><pseudo>1</pseudo></track></record>
+<record><track><trackNum>4</trackNum><mrtTime>2026-11-23T00:17:00Z</mrtTime></track></record>"#,
+    );
+    let lim = Limits {
+        max_records: 1,
+        drop_window: Some(DROP),
+        ..Limits::default()
+    };
+    let mut st = new_stats();
+    let r = parse_message(&mut p, xml.as_bytes(), &lim, &mut st);
+    assert!(matches!(r, Err(StdError::TooManyRecords { .. })), "{r:?}");
+    assert_eq!(st.sealed_window_dropped, 2);
+    // Only the record at 23:59:59 on the 19th was kept before the refusal.
+    assert_eq!(st.records, 1);
+    assert_eq!(st.tais_present[TaisField::TrackNum as usize], 1);
+    assert_eq!(st.tais_flags[0], [0, 1]);
+    // Nothing the dropped records had is in the tables: no field error, shape, unknown path or
+    // invalidated field.
+    assert_eq!(st.field_error_kinds, [0; ERROR_KIND_COUNT]);
+    assert!(st.shapes.is_empty() && st.unknown.is_empty());
+    assert_eq!((st.invalidated, st.unknown_overflow), (0, 0));
+    assert_eq!(st.tais_errors, [0; TAIS_FIELD_COUNT]);
+    // The same message without a window counts every record parsed before the refusal.
+    let mut all = new_stats();
+    let lim0 = Limits {
+        max_records: 4,
+        ..Limits::default()
+    };
+    parse_message(&mut p, xml.as_bytes(), &lim0, &mut all).unwrap();
+    assert_eq!((all.records, all.sealed_window_dropped), (4, 0));
+    assert!(all.invalidated > 0 && !all.unknown.is_empty());
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn an_asdex_report_timed_in_the_drop_window_is_dropped_before_the_counts_and_one_without_a_time_is_kept(
+) {
+    let mut p = parser();
+    let rep = |t: &str| {
+        format!(
+            "<positionReport><seqNum>1</seqNum>{t}<track>3</track><qqq>1</qqq></positionReport>"
+        )
+    };
+    let xml = format!(
+        r#"<a:asdexMsg xmlns:a="{SMES_NS}"><airport>ZZB</airport>{}{}{}</a:asdexMsg>"#,
+        rep("<time>2026-11-21T12:00:00Z</time>"),
+        rep("<time>2026-11-19T12:00:00Z</time>"),
+        rep(""),
+    );
+    let lim = Limits {
+        drop_window: Some(DROP),
+        ..Limits::default()
+    };
+    let mut st = new_stats();
+    let m = match parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap() {
+        Message::Smes(m) => m,
+        _ => panic!("not smes"),
+    };
+    assert_eq!(
+        (m.records.len(), st.records, st.sealed_window_dropped),
+        (2, 2, 1)
+    );
+    // One unknown element per kept report, none for the dropped one.
+    assert_eq!(st.unknown.iter().map(|u| u.count).sum::<u64>(), 2);
 }

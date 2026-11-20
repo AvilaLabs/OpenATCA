@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use oa_replay::{
-    list_recordings, merge_streams, new_pipeline, pipeline_drain_checkpoints, process_frame,
-    replay_hash, FeedKind, PipelineConfig, StreamSpec,
+    list_recordings, new_pipeline, pipeline_drain_checkpoints, process_frame, replay_hash,
+    FeedKind, PipelineConfig, StreamSpec,
 };
 use oa_sha256::{sha256, sha256_reader, to_hex, Digest, Sha256};
 
@@ -320,6 +320,17 @@ pub fn load_with(feeds: &[FeedInput], open: &Opener) -> io::Result<Loaded> {
 
 /// [`load_with`] with `max_msg` as the longest `.msg` file accepted.
 pub fn load_with_max(feeds: &[FeedInput], open: &Opener, max_msg: u64) -> io::Result<Loaded> {
+    load_counted(feeds, open, max_msg, &mut 0)
+}
+
+/// [`load_with_max`], with the frames and records dropped in a sealed window put in `sealed` on
+/// every exit, an error included, so a caller can print the count whatever the result.
+pub fn load_counted(
+    feeds: &[FeedInput],
+    open: &Opener,
+    max_msg: u64,
+    sealed: &mut u64,
+) -> io::Result<Loaded> {
     let mut leg = new_legacy();
     let mut reader = new_reader().map_err(io::Error::other)?;
     let mut listed: Vec<Listed> = Vec::new();
@@ -331,128 +342,144 @@ pub fn load_with_max(feeds: &[FeedInput], open: &Opener, max_msg: u64) -> io::Re
     let all_oaf = !listed.is_empty() && listed.iter().all(|(_, k, _, _)| *k == DirKind::Oaf);
     let mut notes = Vec::new();
     let mut sealed_frames = 0u64;
-    let replay = if all_oaf {
-        let mut p = new_pipeline(PipelineConfig::default())
-            .map_err(|e| io::Error::other(format!("{e:?}")))?;
-        let specs: Vec<StreamSpec> = listed
-            .iter()
-            .map(|(f, _, files, dones)| hashed_spec(*f, files.clone(), dones.clone(), open.clone()))
-            .collect();
-        let mut sink = |m: &oa_replay::Merged<'_>| {
-            process_frame(&mut p, m.feed, m.kind, m.recv_ns, m.payload);
-            // Only the final hash is kept: the checkpoints are taken out as they are recorded, so
-            // none is ever dropped for want of room.
-            pipeline_drain_checkpoints(&mut p, |_| {});
-            if m.kind == oa_feed::Kind::Message {
-                ingest_one(
-                    &mut leg,
-                    &mut reader,
-                    m.feed,
-                    m.payload,
-                    m.recv_ns.div_euclid(1_000_000),
-                );
+    let body = (|| -> io::Result<(String, Vec<_>)> {
+        let replay = if all_oaf {
+            let mut p = new_pipeline(PipelineConfig::default())
+                .map_err(|e| io::Error::other(format!("{e:?}")))?;
+            let specs: Vec<StreamSpec> = listed
+                .iter()
+                .map(|(f, _, files, dones)| {
+                    hashed_spec(*f, files.clone(), dones.clone(), open.clone())
+                })
+                .collect();
+            let mut sink = |m: &oa_replay::Merged<'_>| {
+                process_frame(&mut p, m.feed, m.kind, m.recv_ns, m.payload);
+                // Only the final hash is kept: the checkpoints are taken out as they are recorded, so
+                // none is ever dropped for want of room.
+                pipeline_drain_checkpoints(&mut p, |_| {});
+                if m.kind == oa_feed::Kind::Message {
+                    ingest_one(
+                        &mut leg,
+                        &mut reader,
+                        m.feed,
+                        m.payload,
+                        m.recv_ns.div_euclid(1_000_000),
+                    );
+                }
+            };
+            let (rep, end) = oa_replay::merge_counted(specs, 1 << 16, &mut |m| {
+                sink(m);
+                Ok(())
+            });
+            sealed_frames += rep.sealed_window_dropped;
+            end?;
+            let bad: u64 = rep.errors.iter().sum();
+            if bad > 0 {
+                notes.push(format!(
+                    "the recordings had {bad} frame or gzip errors (counted by oa-replay)"
+                ));
             }
-        };
-        let rep = merge_streams(specs, 1 << 16, &mut sink)?;
-        sealed_frames += rep.sealed_window_dropped;
-        let bad: u64 = rep.errors.iter().sum();
-        if bad > 0 {
-            notes.push(format!(
-                "the recordings had {bad} frame or gzip errors (counted by oa-replay)"
-            ));
-        }
-        to_hex(&replay_hash(&p))
-    } else {
-        for (feed, kind, files, dones) in &listed {
-            match kind {
-                DirKind::Msg => {
-                    for (f, done) in files.iter().zip(dones) {
-                        // Read to the end through a fixed buffer, so the digest covers every
-                        // byte; only a document within the limit is kept.
-                        let mut hr = HashRead::new(open(f)?, done.clone());
-                        let mut b: Vec<u8> = Vec::new();
-                        let mut buf = [0u8; 8192];
-                        let mut too_long = false;
-                        loop {
-                            let n = hr.read(&mut buf).map_err(|e| {
-                                io::Error::new(e.kind(), format!("{}: {e}", f.display()))
-                            })?;
-                            let Some(chunk) = buf.get(..n).filter(|c| !c.is_empty()) else {
-                                break;
-                            };
-                            if !too_long {
-                                if (b.len() + n) as u64 > max_msg {
-                                    too_long = true;
-                                    b = Vec::new();
-                                } else {
-                                    b.extend_from_slice(chunk);
+            to_hex(&replay_hash(&p))
+        } else {
+            for (feed, kind, files, dones) in &listed {
+                match kind {
+                    DirKind::Msg => {
+                        for (f, done) in files.iter().zip(dones) {
+                            // Read to the end through a fixed buffer, so the digest covers every
+                            // byte; only a document within the limit is kept.
+                            let mut hr = HashRead::new(open(f)?, done.clone());
+                            let mut b: Vec<u8> = Vec::new();
+                            let mut buf = [0u8; 8192];
+                            let mut too_long = false;
+                            loop {
+                                let n = hr.read(&mut buf).map_err(|e| {
+                                    io::Error::new(e.kind(), format!("{}: {e}", f.display()))
+                                })?;
+                                let Some(chunk) = buf.get(..n).filter(|c| !c.is_empty()) else {
+                                    break;
+                                };
+                                if !too_long {
+                                    if (b.len() + n) as u64 > max_msg {
+                                        too_long = true;
+                                        b = Vec::new();
+                                    } else {
+                                        b.extend_from_slice(chunk);
+                                    }
                                 }
                             }
-                        }
-                        if too_long {
-                            let fi = match feed {
-                                FeedKind::Sfdps => Some(0),
-                                FeedKind::Tbfm => Some(1),
-                                FeedKind::Tfms => Some(2),
-                                FeedKind::Fns | FeedKind::Adsb => None,
-                            };
-                            if let Some(fi) = fi {
-                                if let (Some(d), Some(e)) = (
-                                    leg.counts.docs.get_mut(fi),
-                                    leg.counts.doc_errors.get_mut(fi),
-                                ) {
-                                    *d += 1;
-                                    *e += 1;
+                            if too_long {
+                                let fi = match feed {
+                                    FeedKind::Sfdps => Some(0),
+                                    FeedKind::Tbfm => Some(1),
+                                    FeedKind::Tfms => Some(2),
+                                    FeedKind::Fns | FeedKind::Adsb => None,
+                                };
+                                if let Some(fi) = fi {
+                                    if let (Some(d), Some(e)) = (
+                                        leg.counts.docs.get_mut(fi),
+                                        leg.counts.doc_errors.get_mut(fi),
+                                    ) {
+                                        *d += 1;
+                                        *e += 1;
+                                    }
                                 }
+                                leg.counts.note(MSG_TOO_LONG.to_string(), 1);
+                                continue;
                             }
-                            leg.counts.note(MSG_TOO_LONG.to_string(), 1);
-                            continue;
+                            ingest_one(&mut leg, &mut reader, *feed, &b, NO_TIME);
                         }
-                        ingest_one(&mut leg, &mut reader, *feed, &b, NO_TIME);
+                    }
+                    DirKind::Oaf => {
+                        let specs = vec![hashed_spec(
+                            *feed,
+                            files.clone(),
+                            dones.clone(),
+                            open.clone(),
+                        )];
+                        let mut sink = |m: &oa_replay::Merged<'_>| {
+                            if m.kind == oa_feed::Kind::Message {
+                                ingest_one(
+                                    &mut leg,
+                                    &mut reader,
+                                    m.feed,
+                                    m.payload,
+                                    m.recv_ns.div_euclid(1_000_000),
+                                );
+                            }
+                        };
+                        let (rep, end) = oa_replay::merge_counted(specs, 1 << 16, &mut |m| {
+                            sink(m);
+                            Ok(())
+                        });
+                        sealed_frames += rep.sealed_window_dropped;
+                        end?;
                     }
                 }
-                DirKind::Oaf => {
-                    let specs = vec![hashed_spec(
-                        *feed,
-                        files.clone(),
-                        dones.clone(),
-                        open.clone(),
-                    )];
-                    let mut sink = |m: &oa_replay::Merged<'_>| {
-                        if m.kind == oa_feed::Kind::Message {
-                            ingest_one(
-                                &mut leg,
-                                &mut reader,
-                                m.feed,
-                                m.payload,
-                                m.recv_ns.div_euclid(1_000_000),
-                            );
-                        }
-                    };
-                    sealed_frames +=
-                        merge_streams(specs, 1 << 16, &mut sink)?.sealed_window_dropped;
-                }
             }
-        }
-        notes.push("raw .msg input carries no frame headers: no receive time (T6 withheld) and no replay state hash".to_string());
-        "not available: the inputs are not all .oaf recordings".to_string()
-    };
-    notes.push(
+            notes.push("raw .msg input carries no frame headers: no receive time (T6 withheld) and no replay state hash".to_string());
+            "not available: the inputs are not all .oaf recordings".to_string()
+        };
+        notes.push(
         "input digests: each file is hashed from the bytes ingested, in the same read (.msg files as read, recordings through the replay merge)"
             .to_string(),
     );
-    let mut inputs = Vec::new();
-    for (fi, (_, _, files, dones)) in feeds.iter().zip(&listed) {
-        let label = format!(
-            "{} ({})",
-            oa_replay::FEED_NAMES
-                .get(fi.feed as usize)
-                .copied()
-                .unwrap_or("?"),
-            fi.dir.display()
-        );
-        inputs.push(input_hash(&label, files, dones)?);
-    }
+        let mut inputs = Vec::new();
+        for (fi, (_, _, files, dones)) in feeds.iter().zip(&listed) {
+            let label = format!(
+                "{} ({})",
+                oa_replay::FEED_NAMES
+                    .get(fi.feed as usize)
+                    .copied()
+                    .unwrap_or("?"),
+                fi.dir.display()
+            );
+            inputs.push(input_hash(&label, files, dones)?);
+        }
+        Ok((replay, inputs))
+    })();
+    // Whatever the result, the caller has what was dropped so far.
+    *sealed = sealed_frames + leg.counts.sealed_window_dropped;
+    let (replay, inputs) = body?;
     let sealed_window_dropped = sealed_frames + leg.counts.sealed_window_dropped;
     notes.push(format!(
         "sealed-window rows dropped: {sealed_window_dropped} (frames left out by receive time: {sealed_frames}; records left out by their own time: {})",
@@ -529,6 +556,12 @@ pub fn load_adsb(path: &Path) -> io::Result<AdsbClip> {
 
 /// [`load_adsb`] with the file opened by `open`.
 pub fn load_adsb_with(path: &Path, open: &Opener) -> io::Result<AdsbClip> {
+    load_adsb_counted(path, open, &mut 0)
+}
+
+/// [`load_adsb_with`], with the rows dropped in a sealed window put in `sealed` as soon as the
+/// frames are read, so the caller has the count on an error exit too.
+pub fn load_adsb_counted(path: &Path, open: &Opener, sealed: &mut u64) -> io::Result<AdsbClip> {
     let mut reports = oa_adsb::Reports::default();
     let mut undecodable = 0u64;
     let mut dropped_records = 0u64;
@@ -548,8 +581,10 @@ pub fn load_adsb_with(path: &Path, open: &Opener) -> io::Result<AdsbClip> {
                 Err(_) => undecodable += 1,
             }
         }
-    })
-    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    });
+    *sealed = sealed_window_dropped;
+    let damaged =
+        damaged.map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
     let hash = input_hash(
         &format!("adsb ({})", path.display()),
         &[path.to_path_buf()],

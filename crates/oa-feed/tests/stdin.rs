@@ -102,8 +102,7 @@ fn stdin_mode_records_verbatim_and_replay_agrees() {
     // The count line (frames), printed once.
     let rerr = String::from_utf8_lossy(&rep.stderr);
     assert_eq!(
-        rerr.matches("sealed-window rows dropped: 0 (frames")
-            .count(),
+        rerr.matches("sealed-window rows dropped: 0").count(),
         1,
         "{rerr}"
     );

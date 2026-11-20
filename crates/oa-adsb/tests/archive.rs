@@ -701,3 +701,28 @@ fn clip_creates_the_sidecar_and_the_clip_new_and_never_follows_or_replaces_a_nam
     let text = std::fs::read_to_string(format!("{}.source", out.display())).unwrap();
     assert!(text.contains("oa-adsb-clip source"), "{text}");
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn clip_prints_the_drop_line_when_the_tar_layer_fails_after_rows_were_dropped() {
+    // Three rows from the window start (all in the window), then a header block that is not a tar
+    // header: the scan stops with a tar error, and the line still has the rows dropped before it.
+    const FROM: i64 = 1_795_132_800;
+    let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
+    let good = trace_tar_at("tar-fail.tar", FROM, 3);
+    // seal-allow: reads a tar the test wrote in its own temp directory
+    let mut bytes = std::fs::read(&good).unwrap();
+    bytes.truncate(bytes.len() - 2 * BLOCK);
+    bytes.extend(std::iter::repeat_n(b'x', BLOCK));
+    let bad = tmp("tar-fail-bad.tar");
+    std::fs::write(&bad, bytes).unwrap();
+    let out = tmp("tar-fail.oaf");
+    let o = clip_cmd(
+        exe,
+        &["--out", out.to_str().unwrap(), bad.to_str().unwrap()],
+    );
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "{err}");
+    assert!(err.contains("sealed-window rows dropped: 3"), "{err}");
+    assert!(!out.exists());
+}

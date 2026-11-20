@@ -18,7 +18,7 @@ fn budget() -> u64 {
         .unwrap_or(DEFAULT_BUDGET)
 }
 use oa_stdds_census::guard::{is_refusal, refuse_sealed};
-use oa_stdds_census::read::{read_dir, ReadError};
+use oa_stdds_census::read::{read_dir_counted, ReadError};
 use oa_stdds_census::report::render;
 use oa_stdds_census::xcheck::{build, estimate_build_bytes, Params, Window};
 use std::path::Path;
@@ -37,6 +37,8 @@ fn usage() -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    // Printed when `main` returns: on every exit, an error or refusal included.
+    let mut drops = oa_sealed::DropReport::new();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let Some((dir, rest)) = argv.split_first() else {
         return usage();
@@ -132,6 +134,7 @@ fn main() -> ExitCode {
                 loaded.bad_frames, loaded.dropped_records
             );
             clip_sealed = loaded.sealed_window_dropped;
+            drops.add(clip_sealed);
             let est = estimate_build_bytes(&loaded.reports, &params, window);
             if est > budget() {
                 eprintln!(
@@ -162,11 +165,18 @@ fn main() -> ExitCode {
         .map_or_else(Census::new, Census::with_xcheck)
         .with_window(window)
         .with_budget(budget());
-    let rs = match read_dir(Path::new(dir), &mut census) {
+    let mut read_dropped = 0u64;
+    let read = read_dir_counted(
+        Sealed::production(),
+        Path::new(dir),
+        &mut census,
+        &mut read_dropped,
+    );
+    drops.add(read_dropped);
+    let rs = match read {
         Ok(mut rs) => {
-            // The clip's rows and the recording's frames, in one count.
+            // The clip's rows and the recording's frames and records, in one count.
             rs.sealed_window_dropped += clip_sealed;
-            eprintln!("sealed-window rows dropped: {}", rs.sealed_window_dropped);
             rs
         }
         Err(e @ (ReadError::Refused(_) | ReadError::Layout(_))) => {

@@ -70,8 +70,9 @@ pub use pipeline::{
     MIN_CHECKPOINT_NS,
 };
 pub use source::{
-    list_recordings, merge_key, merge_streams, run_streams, run_streams_with, spec_from_bytes,
-    spec_from_paths, try_merge_streams, MergeReport, Merged, StreamSpec,
+    list_recordings, merge_counted, merge_key, merge_streams, run_streams, run_streams_counted,
+    run_streams_with, spec_from_bytes, spec_from_paths, try_merge_streams, MergeReport, Merged,
+    StreamSpec,
 };
 pub use table::{
     advance_time, class_of_status, flights_live, is_stale, new_table, shift_times, slot_of_gufi,

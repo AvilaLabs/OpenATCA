@@ -257,7 +257,7 @@ fn the_check_binary_prints_the_summary_and_exits_by_result() {
     assert_eq!(bad.status.code(), Some(2));
     let Some(dir) = mva_dir() else { return };
     // `--dof` at a path that is not there: the clearance section reports it did not run.
-    // seal-allow: runs the built binary of this package on the test's own temp files
+    // seal-allow: runs the built binary of this package, on real data when it is set, which the binary reads only through the guard
     let out = std::process::Command::new(exe)
         .args([
             "--dir",

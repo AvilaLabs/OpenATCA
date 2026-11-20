@@ -110,7 +110,54 @@ pub(crate) struct Sink<'s> {
     pub invalidated: u64,
 }
 
+/// What the walk of one record put into a scratch sink; kept or discarded whole.
+#[derive(Default)]
+pub(crate) struct Scratch {
+    pub errors: Vec<FieldError>,
+    pub errors_dropped: u64,
+    pub unknown: Vec<(String, u64)>,
+    pub unknown_dropped: u64,
+    pub invalidated: u64,
+}
+
+impl Scratch {
+    /// A sink writing into this scratch, with the message's error limit.
+    pub(crate) fn sink(&mut self, max_errors: usize) -> Sink<'_> {
+        Sink {
+            errors: &mut self.errors,
+            max_errors,
+            errors_dropped: &mut self.errors_dropped,
+            unknown: &mut self.unknown,
+            unknown_dropped: 0,
+            invalidated: 0,
+        }
+    }
+}
+
 impl Sink<'_> {
+    /// Adds what a record's scratch sink collected to this sink, under the same limits.
+    pub(crate) fn absorb(&mut self, s: Scratch, sink_unknown_dropped: u64, sink_invalidated: u64) {
+        for e in s.errors {
+            if self.errors.len() < self.max_errors {
+                self.errors.push(e);
+            } else {
+                *self.errors_dropped += 1;
+            }
+        }
+        *self.errors_dropped += s.errors_dropped;
+        for (t, n) in s.unknown {
+            if let Some(e) = self.unknown.iter_mut().find(|(u, _)| *u == t) {
+                e.1 += n;
+            } else if self.unknown.len() < MAX_UNKNOWN_PER_MESSAGE {
+                self.unknown.push((t, n));
+            } else {
+                self.unknown_dropped += n;
+            }
+        }
+        self.unknown_dropped += s.unknown_dropped + sink_unknown_dropped;
+        self.invalidated += s.invalidated + sink_invalidated;
+    }
+
     pub(crate) fn error(&mut self, field: &'static str, kind: FieldErrorKind, offset: u32) {
         self.error_shaped(field, kind, offset, Shape::NONE);
     }

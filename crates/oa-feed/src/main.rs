@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use oa_feed::cli::{self, Command, Live, Source};
 use oa_feed::health::{observe_error, observe_frame, observe_skipped, FeedHealth};
 use oa_feed::record::{format_recording, utc_iso, Format, Outcome, Recorder};
-use oa_feed::replay::{replay_files, GzNoteKind};
+use oa_feed::replay::{replay_files_counted, GzNoteKind};
 use oa_feed::{
     encode_frame_mono, format_summary, frame_work_refusal_retryable, FrameReader, FrameWorkBudget,
     FrameWorkRefusal, MAX_FRAME_LEN,
@@ -67,18 +67,19 @@ fn now_ns() -> i64 {
 }
 
 fn replay(files: &[PathBuf]) -> ExitCode {
-    let rep = match replay_files(files) {
+    // Frames, not rows: a frame received in a sealed window is left out of the health record.
+    // Printed when this function returns, on every exit, an error included.
+    let mut drops = oa_sealed::DropReport::new();
+    let mut sealed = 0u64;
+    let replayed = replay_files_counted(files, &mut sealed);
+    drops.add(sealed);
+    let rep = match replayed {
         Ok(r) => r,
         Err(e) => {
             eprintln!("oa-feed: {e}");
             return ExitCode::FAILURE;
         }
     };
-    // Frames, not rows: a frame received in a sealed window is left out of the health record.
-    eprintln!(
-        "sealed-window rows dropped: {} (frames, by receive time)",
-        rep.sealed_window_dropped
-    );
     for fe in &rep.errors {
         println!("file={} {}", fe.file, fe.error);
     }

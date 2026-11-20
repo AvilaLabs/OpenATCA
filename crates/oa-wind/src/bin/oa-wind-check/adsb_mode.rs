@@ -3,7 +3,7 @@
 //! `raw/adsblol` whose day overlaps the RAP hours in `raw/rap`. Shell: owns files and output.
 
 use crate::list;
-use oa_adsb::{scan_archive, Filter, Reports, ScanEnd, ScanError};
+use oa_adsb::{scan_archive_counted, Filter, Reports, ScanEnd, ScanError};
 use oa_wind::adsb::{adsb_obs, all_groups, compare_adsb, AdsbObs, DEFAULT_MIN_GAP_S, MAX_OBS};
 use oa_wind::{archive_files, archive_sample, index_files};
 use std::fs::File;
@@ -139,7 +139,9 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
     let mut obs: Vec<AdsbObs> = Vec::new();
     let mut dropped = 0usize;
     let mut scanned = 0usize;
-    let mut sealed = 0u64;
+    // Trace rows in a sealed window, left out of the comparison; printed when this function
+    // returns, on every exit, an error included.
+    let mut drops = oa_sealed::DropReport::to_stdout();
     for (key, parts) in day_groups(&raw.join("adsblol")) {
         let Some(d0) = day_start(&key) else {
             println!("  {key}: day not readable from the name; skipped");
@@ -157,19 +159,23 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("oa-wind-check adsb: {key}: {e}");
-                // The count so far, as on every exit.
-                println!("sealed-window rows dropped: {sealed}");
                 return ExitCode::FAILURE;
             }
         };
         scanned += 1;
-        let res = scan_archive(files, &filter, &mut |r: &Reports| -> Result<(), String> {
-            dropped += adsb_obs(r, gap, &mut obs);
-            Ok(())
-        });
+        let mut archive_sealed = 0u64;
+        let res = scan_archive_counted(
+            files,
+            &filter,
+            &mut |r: &Reports| -> Result<(), String> {
+                dropped += adsb_obs(r, gap, &mut obs);
+                Ok(())
+            },
+            &mut archive_sealed,
+        );
+        drops.add(archive_sealed);
         match res {
             Ok(r) => {
-                sealed += r.stats.sealed_window_dropped;
                 println!(
                     "  {key}: {} traces read, {} refused, {} rows kept in box and window{}",
                     r.stats.traces_read,
@@ -183,20 +189,14 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             }
             Err(ScanError::Tar(e)) => {
                 eprintln!("oa-wind-check adsb: {key}: {e}");
-                // The count so far, as on every exit.
-                println!("sealed-window rows dropped: {sealed}");
                 return ExitCode::FAILURE;
             }
             Err(ScanError::Sink(e)) => {
                 eprintln!("oa-wind-check adsb: {key}: {e}");
-                // The count so far, as on every exit.
-                println!("sealed-window rows dropped: {sealed}");
                 return ExitCode::FAILURE;
             }
         }
     }
-    // After the last archive read: trace rows in a sealed window, left out of the comparison.
-    println!("sealed-window rows dropped: {sealed}");
     if scanned == 0 || obs.is_empty() {
         println!(
             "ADS-B vs RAP: no adsb.lol day overlaps the RAP hours (or none has a wind or temperature in them); nothing to compare. The comparison runs when an archive for a day the RAP files cover is in raw/adsblol."

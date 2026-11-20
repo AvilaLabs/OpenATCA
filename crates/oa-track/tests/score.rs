@@ -29,6 +29,18 @@ use oa_track::score::{
 use oa_track::{DEFAULT_CONFIG, END_FLUSHED, O_HAS_ALT, O_TICK};
 use oa_truth::DEFAULT_CONFIG as TRUTH;
 
+/// The text of a file the binary under test wrote in the test's own temp directory.
+fn read_text(p: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    // seal-allow: reads an output file the test's own run wrote in a temp directory
+    std::fs::read_to_string(p)
+}
+
+/// The entries of a temp directory of the test's own.
+fn list_dir(p: impl AsRef<std::path::Path>) -> std::io::Result<std::fs::ReadDir> {
+    // seal-allow: lists a temp directory of the test's own
+    std::fs::read_dir(p)
+}
+
 const T0: i64 = 1_700_000_000_000_000_000;
 
 fn base_row(addr: u32, t_s: f64) -> Row {
@@ -341,6 +353,7 @@ fn the_binary_writes_the_scored_report_deterministically_and_refuses_bad_usage()
     let mut digests = Vec::new();
     for k in 0..2 {
         let out = dir.join(format!("track_out_{k}"));
+        // seal-allow: runs the built binary of this package on the test's own temp files
         let o = Command::new(exe)
             .args([
                 "--adsb",
@@ -358,7 +371,7 @@ fn the_binary_writes_the_scored_report_deterministically_and_refuses_bad_usage()
             1,
             "{err}"
         );
-        let report = std::fs::read_to_string(out.join("report.txt")).unwrap();
+        let report = read_text(out.join("report.txt")).unwrap();
         for needle in [
             "Tracker (oa-track), ADS-B only, scored on split reports",
             "not an ESASSP exit result",
@@ -393,18 +406,20 @@ fn the_binary_writes_the_scored_report_deterministically_and_refuses_bad_usage()
     }
     assert_eq!(digests[0], digests[1]);
     // The tracks table lists every track and the esassp table has the basis label.
-    let tracks = std::fs::read_to_string(dir.join("track_out_0/tracks.csv")).unwrap();
+    let tracks = read_text(dir.join("track_out_0/tracks.csv")).unwrap();
     assert_eq!(tracks.lines().count(), 4);
-    let es = std::fs::read_to_string(dir.join("track_out_0/esassp.csv")).unwrap();
+    let es = read_text(dir.join("track_out_0/esassp.csv")).unwrap();
     assert!(es
         .lines()
         .skip(1)
         .all(|l| l.ends_with("not an ESASSP exit result")));
     // Usage errors exit 2, a missing clip exits 1.
     for args in [vec![], vec!["--bogus"], vec!["--adsb", "x"], vec!["--out"]] {
+        // seal-allow: runs the built binary of this package on the test's own temp files
         let o = Command::new(exe).args(&args).output().unwrap();
         assert_eq!(o.status.code(), Some(2), "{args:?}");
     }
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let o = Command::new(exe)
         .args([
             "--adsb",
@@ -844,6 +859,7 @@ fn no_score_runs_the_core_and_the_latency_replay_and_reports_memory_and_stages()
     write_clip(&clip, &sorted);
     let out = dir.join("track_noscore_out");
     let _ = std::fs::remove_dir_all(&out);
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let o = Command::new(env!("CARGO_BIN_EXE_oa-track-run"))
         .args([
             "--adsb",
@@ -855,7 +871,7 @@ fn no_score_runs_the_core_and_the_latency_replay_and_reports_memory_and_stages()
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    let text = std::fs::read_to_string(out.join("core.txt")).unwrap();
+    let text = read_text(out.join("core.txt")).unwrap();
     assert_eq!(text, String::from_utf8_lossy(&o.stdout));
     for needle in [
         "tracker core,",
@@ -874,7 +890,7 @@ fn no_score_runs_the_core_and_the_latency_replay_and_reports_memory_and_stages()
     // No scoring happened: no report, and the spill is gone.
     assert!(!out.join("report.txt").exists());
     assert_eq!(
-        std::fs::read_dir(&out)
+        list_dir(&out)
             .unwrap()
             .filter(|e| e
                 .as_ref()
@@ -1127,6 +1143,7 @@ fn run_realtime_binary(name: &str, args: &[&str]) -> (std::process::Output, Path
     write_clip(&clip, &synthetic_reports());
     let out = dir.join(name);
     let _ = std::fs::remove_dir_all(&out);
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let o = Command::new(env!("CARGO_BIN_EXE_oa-track-run"))
         .args([
             "--adsb",
@@ -1155,9 +1172,9 @@ fn realtime_writes_per_second_counts_and_a_digest_that_repeats() {
         let (o, out) =
             run_realtime_binary(&format!("track_rt_{k}"), &["--realtime", "--with-output"]);
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-        let text = std::fs::read_to_string(out.join("realtime.txt")).unwrap();
+        let text = read_text(out.join("realtime.txt")).unwrap();
         assert_eq!(text, String::from_utf8_lossy(&o.stdout));
-        let csv = std::fs::read_to_string(out.join("seconds.csv")).unwrap();
+        let csv = read_text(out.join("seconds.csv")).unwrap();
         let rows: Vec<Vec<&str>> = csv.lines().map(|l| l.split(',').collect()).collect();
         assert_eq!(
             rows[0],
@@ -1239,7 +1256,7 @@ fn realtime_writes_per_second_counts_and_a_digest_that_repeats() {
     assert!(!digests[0].contains("not computed"));
     let (o, out) = run_realtime_binary("track_rt_plain", &["--realtime"]);
     assert!(o.status.success());
-    let text = std::fs::read_to_string(out.join("realtime.txt")).unwrap();
+    let text = read_text(out.join("realtime.txt")).unwrap();
     assert!(text_after(&text, "output rows digest:").contains("not computed"));
     // Without rows the run summary digest is the same.
     assert_eq!(text_after(&text, "run summary digest"), summary[0]);
@@ -1251,13 +1268,14 @@ fn realtime_fails_on_a_full_table_an_empty_clip_and_flags_that_do_not_apply() {
     // One track slot for three aircraft: refusals, a report that says so, and a failing exit.
     let (o, out) = run_realtime_binary("track_rt_full", &["--realtime", "--max-tracks", "1"]);
     assert_eq!(o.status.code(), Some(1));
-    let text = std::fs::read_to_string(out.join("realtime.txt")).unwrap();
+    let text = read_text(out.join("realtime.txt")).unwrap();
     assert!(text.contains("NOT A FULL-LOAD MEASUREMENT"), "{text}");
     assert!(!text_after(&text, "counters:").contains("capacity-refused 0"));
     // An empty clip.
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let empty = dir.join("track_rt_empty.oaf");
     std::fs::write(&empty, b"").unwrap();
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let o = Command::new(env!("CARGO_BIN_EXE_oa-track-run"))
         .args([
             "--adsb",

@@ -89,12 +89,17 @@ enum Mode {
 /// [`FrameReader`] (a file never continues another's partial frame); the sequence tracking
 /// carries across, since recording rotates on frame boundaries.
 pub fn replay_sources<R: Read>(sources: Vec<R>) -> io::Result<Report> {
+    replay_sources_counted(sources, &mut 0)
+}
+
+/// [`replay_sources`], with the frames dropped in a sealed window (by receive time) so far put in
+/// `sealed` on every exit, an error included.
+pub fn replay_sources_counted<R: Read>(sources: Vec<R>, sealed: &mut u64) -> io::Result<Report> {
     let mut health = FeedHealth::new();
     let mut errors = Vec::new();
     let mut gzip = Vec::new();
     let mut bytes = 0u64;
     let mut files = 0usize;
-    let mut sealed = 0u64;
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
     let mut chunk = vec![0u8; 64 * 1024];
     for (i, mut src) in sources.into_iter().enumerate() {
@@ -122,13 +127,13 @@ pub fn replay_sources<R: Read>(sources: Vec<R>) -> io::Result<Report> {
             match &mut mode {
                 Mode::Raw => {
                     bytes += n as u64;
-                    feed_frames(&mut reader, &mut health, &mut errors, &mut sealed, i, data)
+                    feed_frames(&mut reader, &mut health, &mut errors, sealed, i, data)
                         .map_err(work_refusal_error)?;
                 }
                 Mode::Gzip(g) => {
                     let r = g.push(data, &mut |b: &[u8]| -> Result<(), FrameWorkRefusal> {
                         bytes += b.len() as u64;
-                        feed_frames(&mut reader, &mut health, &mut errors, &mut sealed, i, b)?;
+                        feed_frames(&mut reader, &mut health, &mut errors, sealed, i, b)?;
                         Ok(())
                     });
                     match r {
@@ -157,7 +162,7 @@ pub fn replay_sources<R: Read>(sources: Vec<R>) -> io::Result<Report> {
                 });
             }
         }
-        drain(&mut reader, &mut health, &mut errors, &mut sealed, i).map_err(work_refusal_error)?;
+        drain(&mut reader, &mut health, &mut errors, sealed, i).map_err(work_refusal_error)?;
         if let Some(e) = reader.finish() {
             observe_error(&mut health, &e);
             errors.push(FileError { file: i, error: e });
@@ -171,7 +176,7 @@ pub fn replay_sources<R: Read>(sources: Vec<R>) -> io::Result<Report> {
         bytes,
         errors,
         gzip,
-        sealed_window_dropped: sealed,
+        sealed_window_dropped: *sealed,
     })
 }
 
@@ -252,6 +257,12 @@ fn gzip_note_error(
 
 /// Replays files by path.
 pub fn replay_files(paths: &[impl AsRef<Path>]) -> io::Result<Report> {
+    replay_files_counted(paths, &mut 0)
+}
+
+/// [`replay_files`], with the count of frames dropped in a sealed window put in `sealed` on every
+/// exit (the files before one that cannot be opened are not read, so the count is then 0).
+pub fn replay_files_counted(paths: &[impl AsRef<Path>], sealed: &mut u64) -> io::Result<Report> {
     let mut srcs = Vec::with_capacity(paths.len());
     for p in paths {
         srcs.push(
@@ -259,5 +270,5 @@ pub fn replay_files(paths: &[impl AsRef<Path>]) -> io::Result<Report> {
                 .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.as_ref().display())))?,
         );
     }
-    replay_sources(srcs)
+    replay_sources_counted(srcs, sealed)
 }

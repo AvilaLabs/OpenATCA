@@ -207,6 +207,10 @@ pub struct Decoder {
     dflt_ns: Vec<bool>,
     elem_text: Vec<u32>,
     stats: Stats,
+    /// The unknown elements and attributes (path hash, is an attribute) noted since the open
+    /// message began, so a message dropped for its time can take them back out of the counts.
+    journal: Vec<(u64, bool)>,
+    journaling: bool,
 }
 
 /// A value read from an attribute or text: missing, present but undecodable, or its bytes.
@@ -668,8 +672,11 @@ impl Decoder {
             state: vec![0; n],
             dflt_ns: vec![false; n],
             elem_text: vec![NO_TEXT; n],
+            journal: Vec::new(),
+            journaling: false,
             stats: Stats {
                 docs: 0,
+                sealed_window_dropped: 0,
                 unsupported_roots: 0,
                 messages: 0,
                 rows: 0,
@@ -764,7 +771,10 @@ impl Decoder {
         match r {
             // Every row appended so far was committed whole, with its route text.
             Err(FixmError::RowCapacity { .. } | FixmError::StringCapacity { .. }) if prefix => {
-                let done = sum.rows.saturating_add(sum.rejected);
+                let done = sum
+                    .rows
+                    .saturating_add(sum.rejected)
+                    .saturating_add(sum.sealed_window_dropped);
                 sum.not_decoded = u32::try_from(messages)
                     .unwrap_or(u32::MAX)
                     .saturating_sub(done);
@@ -808,6 +818,8 @@ impl Decoder {
         if let Some(s) = self.state.first_mut() {
             *s = S_KNOWN;
         }
+        self.journaling = false;
+        self.journal.clear();
         let mut cur: Option<Msg> = None;
         for i in 1..n {
             let p = doc.elem_parent.get(i).copied().unwrap_or(ElemIx::NONE);
@@ -874,6 +886,10 @@ impl Decoder {
             if let Some(s) = self.state.get_mut(i) {
                 *s = S_KNOWN;
             }
+            if is_msg_level {
+                self.journal.clear();
+                self.journaling = true;
+            }
             self.check_attrs(doc, i, h, sum);
             if is_msg_level {
                 let mut m = new_msg();
@@ -933,6 +949,9 @@ impl Decoder {
         h: u64,
         sum: &mut Summary,
     ) {
+        if self.journaling {
+            self.journal.push((h, attr.is_some()));
+        }
         if attr.is_some() {
             self.stats.unknown_attributes = self.stats.unknown_attributes.saturating_add(1);
             sum.unknown_attributes = sum.unknown_attributes.saturating_add(1);
@@ -1359,6 +1378,9 @@ impl Decoder {
     /// Counts an unknown `nameValue` name as the path `.../nameValue[NAME]`.
     fn note_unknown_name(&mut self, doc: &Doc<'_>, i: usize, name: &[u8], sum: &mut Summary) {
         let h = extend(extend(self.hash.get(i).copied().unwrap_or(0), b"["), name);
+        if self.journaling {
+            self.journal.push((h, false));
+        }
         self.stats.unknown_elements = self.stats.unknown_elements.saturating_add(1);
         sum.unknown_elements = sum.unknown_elements.saturating_add(1);
         if let Some(u) = self.stats.unknown.iter_mut().find(|u| u.hash == h) {
@@ -1468,8 +1490,56 @@ impl Decoder {
         Ok(())
     }
 
+    /// Whether the message's own timestamp or position time is in the drop window.
+    fn drops(&self, m: &Msg) -> bool {
+        let Some((a, b)) = self.limits.drop_window else {
+            return false;
+        };
+        let inside = |t: i64| a <= t && t < b;
+        (m.has_ts && inside(m.row.ts_ms))
+            || (m.row.present & field_bit(Field::PositionTime) != 0 && inside(m.row.pos_time_ms))
+    }
+
+    /// Takes the message that is being dropped out of the counts it already changed: the
+    /// `messages` count and every unknown element or attribute it noted.
+    fn take_back(&mut self, sum: &mut Summary) {
+        self.stats.messages = self.stats.messages.saturating_sub(1);
+        sum.messages = sum.messages.saturating_sub(1);
+        for (h, is_attr) in std::mem::take(&mut self.journal) {
+            if is_attr {
+                self.stats.unknown_attributes = self.stats.unknown_attributes.saturating_sub(1);
+                sum.unknown_attributes = sum.unknown_attributes.saturating_sub(1);
+            } else {
+                self.stats.unknown_elements = self.stats.unknown_elements.saturating_sub(1);
+                sum.unknown_elements = sum.unknown_elements.saturating_sub(1);
+            }
+            match self.stats.unknown.iter().position(|u| u.hash == h) {
+                Some(p) => {
+                    let gone = self.stats.unknown.get_mut(p).is_some_and(|u| {
+                        u.count = u.count.saturating_sub(1);
+                        u.count == 0
+                    });
+                    if gone {
+                        self.stats.unknown.remove(p);
+                    }
+                }
+                None => {
+                    self.stats.unknown_overflow = self.stats.unknown_overflow.saturating_sub(1);
+                }
+            }
+        }
+    }
+
     /// Closes a message: refuses it, or appends its row.
     fn finish(&mut self, mut m: Msg, out: &mut Events, sum: &mut Summary) -> Result<(), FixmError> {
+        self.journaling = false;
+        // A message timed in the drop window is dropped before any count keeps it.
+        if self.drops(&m) {
+            self.take_back(sum);
+            self.stats.sealed_window_dropped = self.stats.sealed_window_dropped.saturating_add(1);
+            sum.sealed_window_dropped = sum.sealed_window_dropped.saturating_add(1);
+            return Ok(());
+        }
         if m.reject.is_none() {
             if !m.has_flight || !m.has_gufi {
                 reject(&mut m, Reject::MissingGufi);

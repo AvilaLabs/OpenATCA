@@ -101,6 +101,39 @@ fn the_program_prints_the_count_of_clip_rows_dropped_for_a_sealed_window_once() 
         summary.contains("sealed-window rows dropped: 2"),
         "{summary}"
     );
+    // The line is printed on the other exits too: `--hours` (which returns before the encounters
+    // are found) and a failed run (the SFDPS directory is not there).
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-encounter"))
+        .arg("--adsb")
+        .arg(&clip)
+        .arg("--out")
+        .arg(t.join("out-hours"))
+        .arg("--hours")
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "{err}");
+    assert_eq!(
+        err.matches("sealed-window rows dropped: 2").count(),
+        1,
+        "{err}"
+    );
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-encounter"))
+        .arg("--adsb")
+        .arg(&clip)
+        .arg("--out")
+        .arg(t.join("out-fail"))
+        .arg("--sfdps")
+        .arg(t.join("no-such-dir"))
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert_eq!(
+        err.matches("sealed-window rows dropped: 2").count(),
+        1,
+        "{err}"
+    );
     let _ = fs::remove_dir_all(&t);
 }
 

@@ -79,6 +79,20 @@ pub fn read_clip_counted(
     max_bytes: u64,
     max_rows: u64,
 ) -> Result<(Reports, u64, u64, u64), ClipError> {
+    let mut sealed = 0u64;
+    let (out, bad, dropped) = read_clip_tallied(path, max_bytes, max_rows, &mut sealed)?;
+    Ok((out, bad, dropped, sealed))
+}
+
+/// [`read_clip_counted`], with the rows dropped in a sealed window put in `sealed` on every exit
+/// once the frames are read (a too-many-rows refusal included), so a caller can print the count
+/// whatever the result. Returns the reports, the frames refused and the records dropped.
+pub fn read_clip_tallied(
+    path: &str,
+    max_bytes: u64,
+    max_rows: u64,
+    sealed_out: &mut u64,
+) -> Result<(Reports, u64, u64), ClipError> {
     let io = |e: std::io::Error| ClipError::Io(format!("{path}: {e}"));
     let mut f = oa_sealed::open(std::path::Path::new(path)).map_err(io)?;
     let bytes = f.metadata().map_err(io)?.len();
@@ -120,15 +134,16 @@ pub fn read_clip_counted(
                 Err(_) => undecodable += 1,
             }
         }
-    })
-    .map_err(io)?;
+    });
+    *sealed_out = sealed;
+    let damaged = damaged.map_err(io)?;
     if let Some(rows) = over {
         return Err(ClipError::TooManyRows {
             rows,
             cap: max_rows,
         });
     }
-    Ok((out, damaged + undecodable, dropped, sealed))
+    Ok((out, damaged + undecodable, dropped))
 }
 
 #[cfg(test)]

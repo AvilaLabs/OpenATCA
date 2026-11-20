@@ -5762,7 +5762,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   member crate (core crates included), a bare `File::open`, `File::open_buffered`, `File::options`, `OpenOptions`,
   `fs::read`, `fs::read_to_string`, `fs::read_dir`, `fs::copy`, `fs::hard_link` or `Command::new` fails the test unless
   `// seal-allow: <why>` with a reason is on the call's own line (trailing) or is the comment line before the next code
-  line it covers. A name counts when it is used at all, so a function passed as a value (`.map(fs::read_to_string)`,
+  line it covers. The generic spellings count: `<File>::open`, `<std::fs::File>::open` and a turbofish (`File::<T>::open`); an `include_bytes!` or `include_str!` whose argument is not a plain string literal (`env!`, `concat!`, a macro) is a bare read; and a `pub use` of anything in `std::fs` or `std::process` is one too (it re-exports the functions to the rest of the crate). A manifest that gains `libc`, `memmap`, `memmap2` or `walkdir` needs a `# seal-note: <why>` comment on its line or the line before, or a test fails. A name counts when it is used at all, so a function passed as a value (`.map(fs::read_to_string)`,
   `File::open` as a value) is a use, and so is the `.read_dir()` method. The scan reads each file with a lexer that tells
   plain, raw and byte strings, characters, lifetimes, line comments and nested block comments apart, with string state
   carried over lines; imports are read as use trees (`use std::fs::*`, grouped `use std::{fs::{self, File as F}, ..}`,
@@ -5771,9 +5771,11 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   is skipped (an inline one with its body, a file module `mod name;` with the file and every module it declares); no file
   is skipped by its name, and any other `#[cfg(test)]` item is scanned. An allow with no bare call on the line it covers is
   stale and fails, and an allow inside a skipped test module is not counted; the number of allows is pinned exactly in the
-  test (`ALLOW_COUNT`, now 88), not a budget. `tests/`, `benches/` and `build.rs` of every crate are scanned the same way
-  when the file names the real data root (`OPENATCA_RAW`, `OPENATCA_DATA`, `OPENATCA_SCDS`, `openatca-data`, in code or
-  in a string; a comment does not count; the guard has no root helper of its own to name): there a bare call needs the
+  test (`ALLOW_COUNT`, now 98), not a budget. `tests/`, `benches/` and `build.rs` of every crate are scanned the same way
+  when the file names the real data root (a string that holds `OPENATCA_`, which covers `OPENATCA_RAW`, `OPENATCA_DATA`,
+  `OPENATCA_SCDS`, `OPENATCA_ADSB_CLIP`, `OPENATCA_SNAPSHOT`, `OPENATCA_REC`, `OPENATCA_SENSORSIM_CLIP`, `OPENATCA_NASR`,
+  `OPENATCA_CIFP` and any other, or `openatca-data`; a comment or an identifier such as a constant does not count), and a
+  `#[cfg(test)]` module, inline or a file, that names it is scanned too instead of skipped: there a bare call needs the
   same allow (a temp dir, a fixture, a built binary), and a read of the data goes through `oa_sealed`; a file that does
   not name the root reads fixtures and temp dirs bare. Stated exceptions, with the reason: oa-arinc424 (a no-dependency
   crate, so it cannot use oa-sealed), oa-geo (a core crate, which does not depend on the shell crate oa-sealed) and
@@ -5806,7 +5808,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `derived/zau-20261121.oaf` and any renamed or partial copy. The consecutive components `2026`, `11`, `20` (and
   `2026-11`, `21`, in any spelling) name a day too. A scope is matched as consecutive components anywhere in a path, so a
   copy under another root is refused. The match is on digits only and fails closed: `120261120` and an epoch name that
-  holds the compact day are refused under these directories. Not matched: day-first dates (`20.11.2026`), month names and
+  holds the compact day are refused under these directories. A directory named `raw`, `scds` or `derived` anywhere in a path is a scope, so a path such as `/home/x/raw/notes.txt` is in scope and an ordinary file under such a directory can be refused (fail-closed refusals of ordinary files are expected); the digits are ASCII only, and full-width digits are not matched. Not matched: day-first dates (`20.11.2026`), month names and
   ordinals, and anything outside the scopes; a copy outside the data root that is named in none of these ways is
   caught only by the window rule on its rows (OA-SEAL-011, OA-SEAL-014). Also sealed: `scds/stdds-20261119-holdout*` (so
   `.tar`, `.bak` and `-copy` variants). Near misses are accepted: `scds/day-20261124`, `scds/rec-20261119/day1`,
@@ -5814,7 +5816,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `derived/adsb/zau-2026.11.14.oaf`, `stdds-20261119`, `raw/sfdps/2026/12/20`. A directory that only holds a day-named
   entry is not a holding directory. Tests: `every_sealed_adsb_day_in_both_name_forms_and_derived_clips_and_the_stdds_prefix_are_sealed`
   and `a_sealed_day_is_matched_on_normalised_components_split_components_and_every_raw_feed` (Rust and Python), and the
-  parity of the two parsers on the `day`, `dayscope` and `dayexempt` lines.
+  parity of the two parsers on the `day`, `dayscope` and `dayexempt` lines (a month 13, `raw/*`, `/raw`, `raw//rap`, a `day` with no `dayscope` and the reverse, a trailing space and a non-ASCII digit are refused by both; a `dayexempt` alone parses).
 - **OA-SEAL-011** The list holds `window <from-UTC> <to-UTC>` lines (`YYYY-MM-DDTHH:MM:SSZ`, half-open, from before to):
   every row or frame whose time falls in one is sealed whichever file holds it. `oa_sealed::in_sealed_window(unix_ns)` and
   `sealed_windows()` expose them, `sealed_guard.in_sealed_window` and `Guard.windows` do the same in Python, and both
@@ -5850,19 +5852,25 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   frames by receive time, rows by their own time, through `oa_adsb::reports_extend_unsealed` on a per-frame scratch), the
   `oa-replay` pipeline's ADS-B rows (own time) and FNS rows (issue or cancel time; the validity span is not a message time),
   the `oa-adsb` archive reader (trace rows; `Stats::sealed_window_dropped`, and `oa-adsb-clip` refuses, OA-SEAL-015),
-  `oa-wind-check adsb` (also on its early error exits, with the count so far) and the `stdds_summary` example, which
-  parses each message into a scratch accumulator: a TAIS message with a record timed (`mrtTime`) in a sealed window, or
-  an ASDE-X message with a report timed (`time`) in one, is dropped whole (all its records counted, nothing merged), so no
-  record, field, flag, latency or status count includes a hold-out row; other message kinds (service status, classified
-  only) carry no row time and go by the receive time of their frame. A test asserts the `records:`, a TAIS field and a
-  flag count. `oa-scope-replay` prints its line on every exit, an empty window included, and its decoder `records` and
+  `oa-wind-check adsb` and the `stdds_summary` example, which
+  drops inside the decoder: `oa_stdds::Limits::drop_window` (from, to in Unix ms, from `oa_sealed::sealed_window_ms()`) makes
+  `parse_tais`, `parse_smes` (ASDE-X) and the fixm decoder (`oa_fixm::Limits::drop_window`, by the row's own time) drop a
+  record timed in the window before any statistic is updated, and count it in `Stats::sealed_window_dropped`, also on the
+  refusal path (too many records, too deep); the shells set the window, so no record, field, flag, latency, status or
+  message count printed by `stdds_summary`, `oa-stdds-census`, `oa-stdds-ref`, `oa-flight`, `oa-replay`, `oa-bench` and the
+  fixm survey includes a hold-out row; other message kinds (service status, classified only) carry no row time and go by
+  the receive time of their frame. Tests assert the `records:`, a TAIS field and a flag count, a refused message whose early
+  records are in the window, and the fixm stats. `oa-scope-replay` prints its line on every exit, an empty window included, and its decoder `records` and
   `kept` counts are after the window filter. A row or record with no time of its own is kept, backstopped by the receive time of its frame where
   the reader has one: SFDPS rows without a timestamp, TBFM/TFMS rows without a message time, a TAIS record without
   `mrtTime`, a raw `.msg` file (no frame header, so nothing to count by receive time). `oa-compass slice` reads the `.ast`
   files of an export, which carry only a time of day, and relies on the export, which never writes sealed rows; the Python
   result tools (`run_comparison.py`, `track_set_score.py` and the like) read derived results, not data. The printed line is
-  printed once per run, after the tool's last read, and is the sum of the per-reader counts (`Loaded`, `MergeReport`,
-  clip counts), each input counted once (an input read twice is not counted twice); the process-wide counter
+  printed once per run, by an `oa_sealed::DropReport` that the tool makes at the top of its run and adds each reader's
+  count to as the reader returns; the line is printed when the report is dropped, so every exit that comes back through
+  `main` prints it: a `?` error, `--hours`, a stop at `--to` (which adds the merge's own count of frames dropped before the
+  stop), a refusal and a failed read. No tool calls `process::exit` after reading has started. The count is the sum of the
+  per-reader counts (`Loaded`, `MergeReport`, clip counts), each input counted once (an input read twice is not counted twice); the process-wide counter
   (`oa_sealed::window_dropped_total`) is kept only as a test cross-check. A test asserts the line for each tool that has
   an integration test.
 - **OA-SEAL-015** `oa-adsb-clip` creates the sidecar and then the clip, each with `create_new` (`O_EXCL`), so nothing is replaced, truncated or
@@ -5870,6 +5878,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   printed as `sealed-window rows dropped: N` (the reports are counted, not clipped). Otherwise it writes `<out>.source` next
   to the clip (not for `--out -`): each input path with its SHA-256, the window (`--from`, `--to` in Unix nanoseconds, `none`
   when open) and the counts (rows seen, outside the box, outside the window, kept, frames, sealed-window rows dropped).
+  A test makes the clip name appear between the pre-check and the create (a hook that exists only in test builds) and fails
+  if the create is `File::create` again; another checks the cleanup of a write failure.
 
 ## Scoring against STDDS terminal tracks (oa-stdds-ref)
 

@@ -609,6 +609,30 @@ fn odd_list_files_are_refused_by_both_parsers_and_good_ones_read_the_same() {
         ("root /d\nseal a//b\n", false),
         ("root /d\nseal ../b\n", false),
         ("root d\nseal a\n", false),
+        // The day words: a good set, a `dayexempt` alone, and the ways to break them. Both
+        // parsers must agree on every one.
+        ("root /d\nseal a\nday 2026-11-20\ndayscope raw\n", true),
+        ("root /d\nseal a\ndayexempt raw/rap\n", true),
+        ("root /d\nseal a\nday 2026-13-20\ndayscope raw\n", false),
+        ("root /d\nseal a\nday 2026-11-32\ndayscope raw\n", false),
+        ("root /d\nseal a\nday 2026-11-20\ndayscope raw/*\n", false),
+        ("root /d\nseal a\nday 2026-11-20\ndayscope /raw\n", false),
+        (
+            "root /d\nseal a\nday 2026-11-20\ndayscope raw//rap\n",
+            false,
+        ),
+        ("root /d\nseal a\nday 2026-11-20\n", false),
+        ("root /d\nseal a\ndayscope raw\n", false),
+        ("root /d\nseal a\nday 2026-11-20 \ndayscope raw\n", false),
+        ("root /d\nseal a\nday 2026-11-20\ndayscope raw \n", false),
+        (
+            "root /d\nseal a\nday 2026-11-2\u{660}\ndayscope raw\n",
+            false,
+        ),
+        (
+            "root /d\nseal a\nday 2026-1\u{ff11}-20\ndayscope raw\n",
+            false,
+        ),
     ];
     for (i, (text, good)) in cases.iter().enumerate() {
         let f = dir.join(format!("case{i}.txt"));
@@ -649,14 +673,22 @@ fn walk_unsealed_counts_links_back_errors_on_depth_and_a_missing_root_and_sorts_
     assert_eq!((r.files.len(), r.skipped, r.already_visited), (1, 0, 2));
     // A sibling link to a directory next to it: the first name in bytewise order is walked, the
     // other is counted as already visited, never as sealed.
+    // Eight such pairs, so that a walk in the order the directory lists them (not sorted) would
+    // reach `real` first in some pair and show it in the names visited.
     let sib = root.join("sib");
-    fs::create_dir_all(sib.join("real")).unwrap();
-    fs::write(sib.join("real/f.bin"), b"x").unwrap();
-    fs::create_dir_all(sib.join("a")).unwrap();
-    symlink("../real", sib.join("a/x")).unwrap();
+    for k in 0..8 {
+        let p = sib.join(format!("p{k}"));
+        fs::create_dir_all(p.join("real")).unwrap();
+        fs::write(p.join("real/f.bin"), b"x").unwrap();
+        fs::create_dir_all(p.join("a")).unwrap();
+        symlink("../real", p.join("a/x")).unwrap();
+    }
     let r = g.walk_unsealed(&sib).unwrap();
-    assert_eq!(r.files, [sib.join("a/x/f.bin")]);
-    assert_eq!((r.skipped, r.already_visited), (0, 1));
+    let want: Vec<PathBuf> = (0..8)
+        .map(|k| sib.join(format!("p{k}/a/x/f.bin")))
+        .collect();
+    assert_eq!(r.files, want);
+    assert_eq!((r.skipped, r.already_visited), (0, 8));
     // A tree deeper than the limit is an error, not a silent stop.
     let mut deep = root.join("deep");
     for _ in 0..70 {
@@ -694,6 +726,11 @@ fn a_file_with_a_second_hard_link_is_refused_when_opened() {
     fs::hard_link(&sealed, &neutral).unwrap();
     let e = g.open(&neutral).unwrap_err().to_string();
     assert!(e.contains("hard links"), "{e}");
+    // The branch that refuses a file whose metadata cannot be read has no test: `fstat` on a
+    // descriptor this process just opened does not fail on Linux (the descriptor is valid and the
+    // file is on a filesystem that answers), and a test would need a fake filesystem or an
+    // injected failure, which would be code only the test runs. The branch is a plain
+    // `map_err` that returns the refusal; it was read, not run.
     // A file with one name opens.
     let one = root.join("one.bin");
     fs::write(&one, b"x").unwrap();

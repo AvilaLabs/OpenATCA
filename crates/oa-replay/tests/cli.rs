@@ -164,10 +164,9 @@ fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {
     let (sp, tp) = (sf_path.to_str().unwrap(), tb_path.to_str().unwrap());
     let (code, out, err) = run_bin(&["--sfdps", sp, "--tbfm", tp]);
     assert_eq!(code, 0);
-    // The count line (frames, rows), printed once.
+    // The count line, printed once.
     assert_eq!(
-        err.matches("sealed-window rows dropped: 0 (frames 0, rows 0)")
-            .count(),
+        err.matches("sealed-window rows dropped: 0").count(),
         1,
         "{err}"
     );

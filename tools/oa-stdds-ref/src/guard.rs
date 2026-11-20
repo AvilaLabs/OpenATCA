@@ -214,7 +214,7 @@ mod tests {
             .join("2026.11.20")
             .join("c.oaf");
         let out = root.join("out");
-        let e = crate::run::build_refs(&g, &clip, &Default::default(), &out)
+        let e = crate::run::build_refs(&g, &clip, &Default::default(), &out, &mut 0)
             .err()
             .unwrap();
         assert!(

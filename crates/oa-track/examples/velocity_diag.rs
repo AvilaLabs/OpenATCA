@@ -32,7 +32,7 @@ use oa_adsb::{reports_row, NONE_U16};
 use oa_bench::adsb_truth;
 use oa_bench::chunked::{benchmark_chunk, chunk_add, chunk_finish, truth_index, ChunkAcc};
 use oa_bench::geo::{heading_deg, wrap180, KT_MPS};
-use oa_bench::input::load_adsb;
+use oa_bench::input::{file_opener, load_adsb_counted};
 use oa_bench::run::RunConfig;
 use oa_bench::stats::stats_of;
 use oa_bench::tracker_input::{legacy_from_track_samples_by_leg, TrackSamples};
@@ -486,8 +486,12 @@ fn nearest_tick(v: &[(i64, f64, f64)], t: i64) -> Option<(i64, f64, f64)> {
 
 fn run(clip_path: &Path, out_dir: &Path, opts: &Opts) -> Result<String, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
-    let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
-    eprintln!("{}", oa_sealed::drop_line(clip.sealed_window_dropped));
+    // Printed once when this function returns, an error included.
+    let mut drops = oa_sealed::DropReport::new();
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(clip_path, &file_opener(), &mut clip_sealed);
+    drops.add(clip_sealed);
+    let clip = clip.map_err(|e| e.to_string())?;
     let clip_hash = clip.hash.sha256.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)

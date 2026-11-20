@@ -38,6 +38,44 @@ fn a_sealed_recording_directory_is_refused_with_exit_2() {
 // REQ: OA-FLT-023
 #[test]
 fn an_unsealed_missing_directory_is_a_failed_run_not_a_refusal() {
-    let (code, _) = run("/nonexistent/openatca-data/scds/day-20261114/rec/sfdps");
+    let (code, err) = run("/nonexistent/openatca-data/scds/day-20261114/rec/sfdps");
     assert_eq!(code, Some(1));
+    // The line is printed on this exit too.
+    assert!(err.contains("sealed-window rows dropped: 0"), "{err}");
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_refusal_prints_the_drop_line_and_a_stop_at_to_counts_the_frames_the_merge_dropped() {
+    let (_, err) = run("/nonexistent/openatca-data/scds/stdds-20261119-holdout");
+    assert!(err.contains("sealed-window rows dropped: 0"), "{err}");
+    // The list's window is 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z. Frames received 2 s before
+    // it, in it, and 1 s after it; `--to` ends the run just before the window, so the run
+    // stops at the third frame, and the frame in the window is still counted.
+    const FROM: i64 = 1_795_132_800_000_000_000;
+    const TO: i64 = 1_795_393_020_000_000_000;
+    let xml =
+        r#"<?xml version="1.0"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0"/>"#;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("flight-to-cut");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut bytes = Vec::new();
+    for (i, t) in [FROM - 2_000_000_000, FROM, TO + 1_000_000_000]
+        .into_iter()
+        .enumerate()
+    {
+        let mut buf = vec![0u8; xml.len() + 64];
+        let n = oa_feed::encode_frame(&mut buf, 1, 0, i as u64, t, 0, xml.as_bytes()).unwrap();
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    std::fs::write(dir.join("a.oaf"), bytes).unwrap();
+    // seal-allow: runs the built binary of this package on the test's own temp files
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-flight"))
+        .arg(&dir)
+        .args(["--to", &(FROM - 1).to_string()])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "{err}");
+    assert!(err.contains("sealed-window rows dropped: 1"), "{err}");
 }

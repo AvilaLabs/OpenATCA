@@ -125,7 +125,7 @@ fn stat(csv: &str, metric: &str, label: &str) -> Vec<f64> {
 }
 
 fn run(args: &[&std::ffi::OsStr]) -> std::process::Output {
-    // seal-allow: runs the built binary of this package on the test's own temp files
+    // seal-allow: runs the built binary of this package, on the test's own temp files and, when the data is set, on real data, which the binary reads only through the guard
     Command::new(env!("CARGO_BIN_EXE_oa-bench"))
         .args(args)
         .output()

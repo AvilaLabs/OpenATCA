@@ -210,16 +210,13 @@ const ALLOW: &str = "seal-allow:";
 
 /// The allow comments in the sources the rule covers, pinned exactly: adding one is a decision
 /// made here, not slack in a budget.
-const ALLOW_COUNT: usize = 88;
+const ALLOW_COUNT: usize = 98;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.
-const ROOT_MARKERS: [&str; 4] = [
-    concat!("OPENATCA", "_RAW"),
-    concat!("OPENATCA", "_DATA"),
-    concat!("OPENATCA", "_SCDS"),
-    concat!("openatca", "-data"),
-];
+/// The prefix covers every variable of the project (the raw root, the data and scds roots, the
+/// clip, snapshot, recording, sensor clip, NASR and CIFP variables, and any other).
+const ROOT_MARKERS: [&str; 2] = [concat!("OPENATCA", "_"), concat!("openatca", "-data")];
 
 /// One source line after lexing: the code with strings emptied and comments cut, the text of the
 /// string literals (never the comments), and the allow comment on the line, if any.
@@ -555,8 +552,83 @@ fn uses_imported(code: &str, name: &str) -> bool {
     })
 }
 
+/// `code` with the generic spellings of a path undone: `<File>::open` and `<std::fs::File>::open`
+/// become `File::open`, and a turbofish (`File::<T>::open`) is dropped, so the names are found.
+fn normalise(code: &str) -> String {
+    let ch: Vec<char> = code.chars().collect();
+    let close = |from: usize| -> Option<usize> {
+        let mut depth = 0i32;
+        for (k, c) in ch.iter().enumerate().skip(from) {
+            match c {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(k);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+    let mut out = String::new();
+    let mut i = 0;
+    while i < ch.len() {
+        if ch[i] == ':' && ch.get(i + 1) == Some(&':') && ch.get(i + 2) == Some(&'<') {
+            if let Some(e) = close(i + 2) {
+                i = e + 1;
+                continue;
+            }
+        }
+        if ch[i] == '<' && (i == 0 || !is_ident(ch[i - 1])) {
+            if let Some(e) = close(i) {
+                if ch.get(e + 1) == Some(&':') && ch.get(e + 2) == Some(&':') {
+                    let inner: String = ch[i + 1..e].iter().collect();
+                    out.push_str(inner.split(" as ").next().unwrap_or("").trim());
+                    i = e + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(ch[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Whether the line has an `include_bytes!` or `include_str!` whose argument is not a plain
+/// string literal (an `env!` or `concat!` path is built from the environment).
+fn is_computed_include(code: &str) -> bool {
+    ["include_bytes!", "include_str!"].iter().any(|m| {
+        let mut from = 0;
+        while let Some(i) = code[from..].find(m) {
+            let after = code[from + i + m.len()..].trim_start();
+            let arg = after
+                .strip_prefix('(')
+                .or_else(|| after.strip_prefix('['))
+                .or_else(|| after.strip_prefix('{'))
+                .map_or("", str::trim_start);
+            if !(arg.starts_with('"') || arg.starts_with("r\"") || arg.starts_with("r#")) {
+                return true;
+            }
+            from += i + m.len();
+        }
+        false
+    })
+}
+
 /// Whether the code line uses a bare open, read, copy, link or command, given the file's imports.
 fn is_bare(code: &str, imp: &Imports) -> bool {
+    let norm = normalise(code);
+    if norm != code && is_bare_plain(&norm, imp) {
+        return true;
+    }
+    is_computed_include(code) || is_bare_plain(code, imp)
+}
+
+/// [`is_bare`] on a line whose generic spellings are already undone.
+fn is_bare_plain(code: &str, imp: &Imports) -> bool {
     if BARE.iter().any(|b| !token_at(code, b).is_empty()) {
         return true;
     }
@@ -618,6 +690,22 @@ fn file_mod(t: &str) -> Option<String> {
     name.chars().all(is_ident).then(|| name.to_string())
 }
 
+/// Whether a string of the line (not its comments or identifiers: `OPENATCA_SOURCE` is a constant
+/// of the code) names the real data root, as an environment variable or a path.
+fn line_names_root(l: &Line) -> bool {
+    ROOT_MARKERS.iter().any(|m| l.strs.contains(m))
+}
+
+/// Whether a `pub use` line brings in something of `std::fs` or `std::process`.
+fn reexports_fs(t: &str) -> bool {
+    use_paths(t).iter().any(|(p, _)| {
+        matches!(
+            p.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+            ["std", "fs" | "process", ..]
+        )
+    })
+}
+
 /// The bare calls of `text`. An allow comment covers only the call on the next code line (or on
 /// its own line when it trails code); one that covers no call, or has no reason, is stale.
 /// With `skip_tests`, a `#[cfg(test)]` followed by a `mod` item is skipped with its body (any
@@ -632,11 +720,10 @@ fn scan(text: &str, skip_tests: bool) -> Scan {
     let mut allows: Vec<(usize, String)> = Vec::new();
     let mut file_mods = Vec::new();
     let mut names_root = false;
+    let mut test_modules: Vec<(usize, usize)> = Vec::new();
+    let mut module_from = 0usize;
     for (i, l) in lines.iter().enumerate() {
-        if ROOT_MARKERS
-            .iter()
-            .any(|m| l.code.contains(m) || l.strs.contains(m))
-        {
+        if line_names_root(l) {
             names_root = true;
         }
         let code = &l.code;
@@ -645,6 +732,7 @@ fn scan(text: &str, skip_tests: bool) -> Scan {
             *depth += code.matches('{').count() as i64 - code.matches('}').count() as i64;
             if *depth <= 0 {
                 skip_depth = None;
+                test_modules.push((module_from, i));
             }
             continue;
         }
@@ -666,6 +754,10 @@ fn scan(text: &str, skip_tests: bool) -> Scan {
             if skip_tests && no_vis(t).starts_with("mod ") {
                 let depth = code.matches('{').count() as i64 - code.matches('}').count() as i64;
                 skip_depth = (depth > 0).then_some(depth);
+                module_from = i;
+                if skip_depth.is_none() {
+                    test_modules.push((i, i));
+                }
                 continue;
             }
         }
@@ -676,12 +768,36 @@ fn scan(text: &str, skip_tests: bool) -> Scan {
             allows.push((i, why.clone()));
         }
         if no_vis(t).starts_with("use ") {
+            // A `pub use` of `std::fs` or `std::process` names re-exports the functions to the
+            // rest of the crate, where no import of its own shows them.
+            if no_vis(t) != t && reexports_fs(t) {
+                call_lines.push(i);
+            }
             continue;
         }
         if is_bare(code, &imp) {
             call_lines.push(i);
         }
     }
+    // A skipped test module that names the real data root is not skipped: what it opens is
+    // scanned like any other code.
+    for (from, to) in test_modules {
+        if (from..=to).any(|k| line_names_root(&lines[k])) {
+            for (k, l) in lines.iter().enumerate().take(to + 1).skip(from) {
+                let t = l.code.trim();
+                if let Some(why) = &l.allow {
+                    allows.push((k, why.clone()));
+                }
+                if no_vis(t).starts_with("use ") {
+                    continue;
+                }
+                if is_bare(&l.code, &imp) {
+                    call_lines.push(k);
+                }
+            }
+        }
+    }
+    call_lines.sort_unstable();
     // The line an allow covers: its own when it trails code, else the next line of code that is
     // not an attribute.
     let target = |a: usize| -> Option<usize> {
@@ -799,7 +915,10 @@ fn covered_files() -> Vec<PathBuf> {
         }
         all.sort();
         let skipped = test_module_files(&all);
-        files.extend(all.into_iter().filter(|f| !skipped.contains(f)));
+        // A test file that names the real data root is covered like any other.
+        files.extend(all.into_iter().filter(|f| {
+            !skipped.contains(f) || scan(&fs::read_to_string(f).unwrap(), true).names_root
+        }));
     }
     files
 }
@@ -890,6 +1009,32 @@ fn the_bare_call_scan_finds_calls_imports_and_aliases_and_honours_allows_strings
 
 // REQ: OA-SEAL-006
 #[test]
+fn the_scan_finds_generic_paths_computed_includes_re_exports_and_a_test_module_naming_the_root() {
+    // `<File>::open`, `<std::fs::File>::open` and a turbofish are the same calls.
+    assert_eq!(
+        bare_lines("let a = <File>::open(p);\nlet b = <std::fs::File>::open(p);\nlet c = File::<X>::open(p);\nlet d = <Foo as Bar>::open(p);\nlet e = fs::read::<_>(p);\n"),
+        [1, 2, 3, 5]
+    );
+    // An include whose argument is computed is read from the environment; a literal is a fixture.
+    assert_eq!(
+        bare_lines("let a = include_bytes!(\"data/x.bin\");\nlet b = include_str!(concat!(env!(\"D\"), \"/x\"));\nlet c = include_bytes!(env!(\"P\"));\nlet d = include_str!(r#\"y\"#);\n"),
+        [2, 3]
+    );
+    // A re-export of the file system or process module to the rest of the crate.
+    assert_eq!(
+        bare_lines("pub use std::fs::read_to_string;\npub(crate) use std::fs;\nuse std::fs::read;\npub use std::collections::BTreeMap;\npub use std::process::{Command as C};\n"),
+        [1, 2, 5]
+    );
+    // A cfg(test) module is skipped, unless it names the real data root.
+    let root = format!("{}DATA", ROOT_MARKERS[0]);
+    let text = format!(
+        "#[cfg(test)]\nmod a {{\n fn t() {{ fs::read(p); }}\n}}\n#[cfg(test)]\nmod b {{\n fn t() {{ let r = std::env::var(\"{root}\"); fs::read(q); }}\n}}\n"
+    );
+    assert_eq!(bare_lines(&text), [7]);
+}
+
+// REQ: OA-SEAL-006
+#[test]
 fn the_scan_finds_function_values_globs_grouped_uses_aliases_methods_and_multi_line_strings() {
     // A function passed as a value, with no `(`.
     assert_eq!(
@@ -938,9 +1083,9 @@ fn the_scan_finds_function_values_globs_grouped_uses_aliases_methods_and_multi_l
     );
     assert_eq!((sc.allows, sc.calls.len()), (0, 0));
     // A file that names the data root is told from one that does not (strings count, comments not).
-    let var = ROOT_MARKERS[0];
+    let var = format!("{}CLIP", ROOT_MARKERS[0]);
     assert!(scan(&format!("let r = std::env::var(\"{var}\");"), true).names_root);
-    assert!(scan(&format!("let r = \"/x/{}/raw\";", ROOT_MARKERS[3]), true).names_root);
+    assert!(scan(&format!("let r = \"/x/{}/raw\";", ROOT_MARKERS[1]), true).names_root);
     assert!(!scan(&format!("// {var} is read elsewhere\nlet r = 1;"), true).names_root);
 }
 
@@ -1024,4 +1169,82 @@ fn the_arinc424_and_geo_exceptions_gain_no_bare_open_beyond_the_pinned_test_line
             "{krate}: a bare open or read was added (accepted exceptions are pinned, OA-SEAL-006)"
         );
     }
+}
+
+/// The dependencies that read or map files by a path of their own, so they could bypass the
+/// guard. One in a manifest needs a `# seal-note: <why>` comment on its line or the line above.
+const FILE_CRATES: [&str; 4] = ["libc", "memmap", "memmap2", "walkdir"];
+
+fn unnoted_file_crates(manifest: &str) -> Vec<String> {
+    let lines: Vec<&str> = manifest.lines().collect();
+    let mut bad = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let t = l.trim();
+        let key = t
+            .split(['=', '.', ' ', ']'])
+            .next()
+            .unwrap_or("")
+            .trim_start_matches('[');
+        let table = t
+            .strip_prefix('[')
+            .and_then(|r| r.rsplit_once("dependencies."))
+            .map(|(_, n)| n.trim_end_matches(']'));
+        let name = table.unwrap_or(key);
+        if !FILE_CRATES.contains(&name) {
+            continue;
+        }
+        let noted = l.contains("# seal-note:")
+            || i.checked_sub(1)
+                .and_then(|j| lines.get(j))
+                .is_some_and(|p| p.trim_start().starts_with("# seal-note:"));
+        if !noted {
+            bad.push(format!("{name} (line {})", i + 1));
+        }
+    }
+    bad
+}
+
+// REQ: OA-SEAL-006
+#[test]
+fn no_manifest_gains_a_file_or_mapping_dependency_without_a_seal_note() {
+    let mut manifests = vec![repo().join("Cargo.toml")];
+    manifests.extend(members().into_iter().map(|m| m.join("Cargo.toml")));
+    for m in manifests {
+        let text = fs::read_to_string(&m).unwrap();
+        let bad = unnoted_file_crates(&text);
+        assert!(
+            bad.is_empty(),
+            "{}: needs `# seal-note: <why it cannot bypass the guard>`: {bad:?}",
+            m.display()
+        );
+    }
+    // The checker itself.
+    assert_eq!(
+        unnoted_file_crates("[dependencies]\nlibc = \"0.2\"\n").len(),
+        1
+    );
+    assert_eq!(
+        unnoted_file_crates("[dependencies]\nwalkdir = { version = \"2\" }\n").len(),
+        1
+    );
+    assert_eq!(
+        unnoted_file_crates("[dependencies.memmap2]\nversion = \"0.9\"\n").len(),
+        1
+    );
+    assert_eq!(
+        unnoted_file_crates("[dependencies]\n# seal-note: reads only /proc\nlibc = \"0.2\"\n")
+            .len(),
+        0
+    );
+    assert_eq!(
+        unnoted_file_crates(
+            "[dependencies]\nlibc = \"0.2\" # seal-note: x\noa-x = { path = \"../x\" }\n"
+        )
+        .len(),
+        0
+    );
+    assert_eq!(
+        unnoted_file_crates("[dependencies]\nlibcx = \"1\"\n").len(),
+        0
+    );
 }

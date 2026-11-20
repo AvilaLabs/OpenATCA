@@ -133,7 +133,7 @@ mod speed;
 mod summary;
 mod trace;
 
-pub use archive::{scan_archive, ScanEnd, ScanError, ScanResult};
+pub use archive::{scan_archive, scan_archive_counted, ScanEnd, ScanError, ScanResult};
 pub use category::{category_is_reserved, category_observe, CategoryState, CATEGORY_PERSIST};
 pub use frames::{
     decode_payload, decode_payload_lenient, encode_payload, frame_ranges, PayloadCounts,

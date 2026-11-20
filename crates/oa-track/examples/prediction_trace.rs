@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use oa_adsb::{decode_payload_lenient, reports_len, reports_row, Reports};
 use oa_bench::adsb_truth;
 use oa_bench::geo::{enu, heading_deg, wrap180, KT_MPS};
-use oa_bench::input::{for_each_adsb_frame, load_adsb};
+use oa_bench::input::{file_opener, for_each_adsb_frame, load_adsb_counted};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     interval_stats, scoring_config, split_reports, IntervalStats, DRAIN_ROWS, PER_FLIGHT_MIN_N,
@@ -428,8 +428,13 @@ fn run(args: Args) -> Result<(), String> {
     } else {
         fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     }
-    let clip = load_adsb(&args.clip).map_err(|e| e.to_string())?;
-    let clip_sealed = clip.sealed_window_dropped;
+    // The clip's count, printed once when this function returns, an error included (receive_times
+    // reads the clip again and drops the same frames, which are not counted twice).
+    let mut drops = oa_sealed::DropReport::new();
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(&args.clip, &file_opener(), &mut clip_sealed);
+    drops.add(clip_sealed);
+    let clip = clip.map_err(|e| e.to_string())?;
     let full_reports = reports_len(&clip.reports);
     let clip_hash = clip.hash.sha256.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);
@@ -446,9 +451,6 @@ fn run(args: Args) -> Result<(), String> {
     let built = adsb_truth::build(&set_b, &TRUTH_DEFAULT).map_err(|e| e.to_string())?;
     let truth_n = oa_truth::leg_count(&built.truth);
     let received = receive_times(&args.clip, &args.addresses)?;
-    // After the last read of the clip (receive_times reads it again and drops the same frames,
-    // which are not counted twice).
-    eprintln!("{}", oa_sealed::drop_line(clip_sealed));
     let mut raw_counts: BTreeMap<GroupKey, u64> = BTreeMap::new();
     let mut measurement_counts: BTreeMap<GroupKey, u64> = BTreeMap::new();
     let mut raw_rows = Vec::new();

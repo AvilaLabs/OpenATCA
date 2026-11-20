@@ -95,6 +95,18 @@ pub fn scan_archive<R: Read, E>(
     filter: &Filter,
     sink: &mut dyn FnMut(&Reports) -> Result<(), E>,
 ) -> Result<ScanResult, ScanError<E>> {
+    scan_archive_counted(parts, filter, sink, &mut 0)
+}
+
+/// [`scan_archive`], with the trace rows dropped in a sealed window so far put in `sealed` on
+/// every exit (a tar error and a failing sink included), so a caller can print the count whatever
+/// the result.
+pub fn scan_archive_counted<R: Read, E>(
+    parts: Vec<R>,
+    filter: &Filter,
+    sink: &mut dyn FnMut(&Reports) -> Result<(), E>,
+    sealed: &mut u64,
+) -> Result<ScanResult, ScanError<E>> {
     let mut tar = TarReader::new(parts, oa_tar::DEFAULT_LIMITS);
     let mut stats = Stats::default();
     let mut res = ScanResult {
@@ -106,55 +118,60 @@ pub fn scan_archive<R: Read, E>(
     };
     let mut buf = Reports::default();
     let mut raw: Vec<u8> = Vec::new();
-    loop {
-        let h = match tar.next_entry().map_err(ScanError::Tar)? {
-            Next::Entry(h) => h,
-            Next::End => break,
-            Next::Truncated(t) => {
-                res.end = ScanEnd::Truncated(t);
-                break;
-            }
-        };
-        if h.typeflag != b'0' || !is_trace_name(&h.name) {
-            res.other_entries += 1;
-            continue;
-        }
-        res.trace_entries += 1;
-        if h.size > MAX_TRACE_BYTES as u64 {
-            stats.traces_refused += 1;
-            note(&mut res, &h.name, "entry larger than the trace size limit");
-            continue;
-        }
-        raw.clear();
-        if let Some(t) = tar.read_entry_to_vec(&mut raw).map_err(ScanError::Tar)? {
-            res.end = ScanEnd::Truncated(t);
-            res.trace_entries -= 1; // the cut entry was not read
-            break;
-        }
-        let json = match unpack(&raw) {
-            Ok(j) => j,
-            Err(why) => {
-                stats.traces_refused += 1;
-                note(&mut res, &h.name, &why);
+    let end = (|| -> Result<(), ScanError<E>> {
+        loop {
+            let h = match tar.next_entry().map_err(ScanError::Tar)? {
+                Next::Entry(h) => h,
+                Next::End => break,
+                Next::Truncated(t) => {
+                    res.end = ScanEnd::Truncated(t);
+                    break;
+                }
+            };
+            if h.typeflag != b'0' || !is_trace_name(&h.name) {
+                res.other_entries += 1;
                 continue;
             }
-        };
-        reports_clear(&mut buf);
-        let mut one = Stats::default();
-        match decode_trace(&json, filter, &mut buf, &mut one) {
-            Ok(()) => {
-                stats_add(&mut stats, &one);
-                stats.traces_read += 1;
-                if !buf.icao.is_empty() {
-                    sink(&buf).map_err(ScanError::Sink)?;
+            res.trace_entries += 1;
+            if h.size > MAX_TRACE_BYTES as u64 {
+                stats.traces_refused += 1;
+                note(&mut res, &h.name, "entry larger than the trace size limit");
+                continue;
+            }
+            raw.clear();
+            if let Some(t) = tar.read_entry_to_vec(&mut raw).map_err(ScanError::Tar)? {
+                res.end = ScanEnd::Truncated(t);
+                res.trace_entries -= 1; // the cut entry was not read
+                break;
+            }
+            let json = match unpack(&raw) {
+                Ok(j) => j,
+                Err(why) => {
+                    stats.traces_refused += 1;
+                    note(&mut res, &h.name, &why);
+                    continue;
+                }
+            };
+            reports_clear(&mut buf);
+            let mut one = Stats::default();
+            match decode_trace(&json, filter, &mut buf, &mut one) {
+                Ok(()) => {
+                    stats_add(&mut stats, &one);
+                    stats.traces_read += 1;
+                    if !buf.icao.is_empty() {
+                        sink(&buf).map_err(ScanError::Sink)?;
+                    }
+                }
+                Err(e) => {
+                    stats.traces_refused += 1;
+                    note(&mut res, &h.name, &e.to_string());
                 }
             }
-            Err(e) => {
-                stats.traces_refused += 1;
-                note(&mut res, &h.name, &e.to_string());
-            }
         }
-    }
+        Ok(())
+    })();
+    *sealed = stats.sealed_window_dropped;
+    end?;
     res.stats = stats;
     Ok(res)
 }

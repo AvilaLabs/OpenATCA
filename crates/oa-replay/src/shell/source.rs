@@ -442,8 +442,9 @@ pub fn try_merge_streams(
     end.map(|()| report)
 }
 
-/// The merge itself: what was counted up to the point it stopped, and how it ended.
-fn merge_counted(
+/// The merge itself: what was counted up to the point it stopped (also when the sink stopped it
+/// with an error), and how it ended.
+pub fn merge_counted(
     specs: Vec<StreamSpec>,
     chunk: usize,
     sink: &mut dyn FnMut(&Merged<'_>) -> io::Result<()>,
@@ -542,11 +543,24 @@ pub fn run_streams_with(
     chunk: usize,
     after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
 ) -> io::Result<MergeReport> {
+    run_streams_counted(p, specs, chunk, after_frame, &mut 0)
+}
+
+/// [`run_streams_with`], with the frames the merge dropped by receive time in a sealed window put
+/// in `sealed_frames` on every exit, a failing hook included.
+pub fn run_streams_counted(
+    p: &mut Pipeline,
+    specs: Vec<StreamSpec>,
+    chunk: usize,
+    after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
+    sealed_frames: &mut u64,
+) -> io::Result<MergeReport> {
     let (report, end) = merge_counted(specs, chunk, &mut |m| {
         process_frame_mono(p, m.feed, m.kind, m.recv_ns, m.stream, m.mono_ns, m.payload);
         after_frame(p)
     });
     // The counts go in first, so they are there whether the run ended or a hook failed.
+    *sealed_frames = report.sealed_window_dropped;
     for (a, b) in p.errors.iter_mut().zip(report.errors.iter()) {
         *a = a.saturating_add(*b);
     }

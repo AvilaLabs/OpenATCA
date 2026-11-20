@@ -1542,3 +1542,98 @@ fn aircraft_address_is_six_hex_digits() {
     assert!(!has_field(&r.ev, 0, Field::AircraftAddress));
     assert!(!field_error(&r.ev, 0, Field::AircraftAddress));
 }
+
+/// 2026-11-20T00:00:00Z and 2026-11-23T00:17:00Z in Unix milliseconds: the sealed window.
+const DROP: (i64, i64) = (1_795_132_800_000, 1_795_393_020_000);
+
+fn at(ts: &str, body: &str) -> String {
+    message_with(
+        &format!(r#"centre="ZXX" source="TH" system="SLC" timestamp="{ts}""#),
+        &format!("{}{body}", gufi_el(GUFI)),
+    )
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_message_timed_in_the_drop_window_is_in_no_count_of_the_decoder() {
+    let unknown = r#"<flightStatus fdpsFlightStatus="ACTIVE" newAttr="x"/><newThing><inner/></newThing><supplementalData><additionalFlightInformation><nameValue name="BRAND_NEW" value="1"/></additionalFlightInformation></supplementalData>"#;
+    let in_pos =
+        format!(r#"{unknown}<enRoute><position positionTime="2026-11-22T00:00:00Z"/></enRoute>"#);
+    let limits = Limits {
+        drop_window: Some(DROP),
+        ..Limits::default()
+    };
+    // Sealed by the message timestamp, by the position time, and a sealed message that is also
+    // refused (no GUFI): none of them counts as a message, row, rejection or unknown path.
+    let nogufi = message_with(
+        r#"centre="ZXX" source="TH" system="SLC" timestamp="2026-11-21T00:00:00Z""#,
+        unknown,
+    );
+    let all = doc(&[
+        at("2026-11-21T01:00:00Z", unknown),
+        at("2030-01-02T03:04:05Z", unknown),
+        at("2026-11-19T23:59:59Z", &in_pos),
+        nogufi,
+        at("2026-11-23T00:17:00Z", unknown),
+    ]);
+    let (a, res) = run_with(&all, 64, 1 << 16, limits);
+    res.unwrap();
+    // The same without the sealed messages.
+    let kept = doc(&[
+        at("2030-01-02T03:04:05Z", unknown),
+        at("2026-11-23T00:17:00Z", unknown),
+    ]);
+    let (b, res) = run_with(&kept, 64, 1 << 16, Limits::default());
+    res.unwrap();
+    let (sa, sb) = (a.dec.stats(), b.dec.stats());
+    assert_eq!(sa.sealed_window_dropped, 3);
+    assert_eq!(a.sum.sealed_window_dropped, 3);
+    assert_eq!(
+        (sa.messages, sa.rows, sa.rejected),
+        (sb.messages, sb.rows, sb.rejected)
+    );
+    assert_eq!(a.ev.len, 2);
+    assert_eq!(a.sum.messages, 2);
+    assert_eq!(
+        (
+            sa.unknown_elements,
+            sa.unknown_attributes,
+            sa.unknown_overflow
+        ),
+        (
+            sb.unknown_elements,
+            sb.unknown_attributes,
+            sb.unknown_overflow
+        )
+    );
+    assert_eq!(sa.field_errors, sb.field_errors);
+    let texts = |s: &oa_fixm::Stats| {
+        s.unknown
+            .iter()
+            .map(|u| (unknown_text(u).to_string(), u.count))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(texts(sa), texts(sb));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_dropped_message_that_overflowed_the_unknown_table_takes_the_overflow_back_out() {
+    let limits = Limits {
+        drop_window: Some(DROP),
+        max_unknown_paths: 1,
+        ..Limits::default()
+    };
+    let xml = doc(&[
+        at("2030-01-02T03:04:05Z", "<first/>"),
+        at("2026-11-21T00:00:00Z", "<second/><third/>"),
+    ]);
+    let (r, res) = run_with(&xml, 8, 1 << 12, limits);
+    res.unwrap();
+    let st = r.dec.stats();
+    assert_eq!(
+        (st.unknown_elements, st.unknown_overflow, st.unknown.len()),
+        (1, 0, 1)
+    );
+    assert_eq!(st.sealed_window_dropped, 1);
+}

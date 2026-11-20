@@ -67,6 +67,9 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
     let before = r.fixm.stats().rejected;
     match r.fixm.decode_prefix(&doc, bytes, &mut r.events) {
         Ok(sum) => {
+            // Messages the decoder dropped for their own time (OA-SEAL-014).
+            leg.counts.sealed_window_dropped += u64::from(sum.sealed_window_dropped);
+            oa_sealed::note_window_drops(u64::from(sum.sealed_window_dropped));
             leg.counts.sfdps_rejected += u64::from(sum.rejected);
             leg.counts.rows_not_decoded += u64::from(sum.not_decoded);
             leg.counts.sfdps_field_errors += u64::from(sum.field_errors);

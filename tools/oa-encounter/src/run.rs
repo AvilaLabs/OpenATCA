@@ -20,7 +20,7 @@ use oa_track::{
 };
 
 use crate::args::Args;
-use crate::join::{answer_queries, join_text, Sfdps};
+use crate::join::{answer_queries_counted, join_text, Sfdps};
 use crate::report::{band_of, encounters_csv, summary_text, Airport, SummaryInput};
 
 const NM: f64 = 1852.0;
@@ -335,6 +335,13 @@ pub fn hour_counts(r: &Reports) -> String {
 /// The whole run: reads the clip, writes `encounters.csv` and `summary.txt` under `args.out`, and
 /// returns the summary text.
 pub fn run(args: &Args) -> Result<String, String> {
+    run_counted(args, &mut 0)
+}
+
+/// [`run`], with the clip's rows and the SFDPS join's frames and rows dropped in a sealed window
+/// put in `sealed` as they are read, so the caller can print the count on every exit (an error and
+/// `--hours` included).
+pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     // The seconds the arguments give become ns and ms before anything is read.
     let window_ns = args
         .window
@@ -353,7 +360,8 @@ pub fn run(args: &Args) -> Result<String, String> {
     let clip =
         load_adsb_with(&args.adsb, &crate::guard::guarded_opener()).map_err(|e| e.to_string())?;
     let clip_sha = clip.hash.sha256.clone();
-    let sealed_window_dropped = clip.sealed_window_dropped;
+    let clip_sealed = clip.sealed_window_dropped;
+    *sealed = clip_sealed;
     let (reports, scope) = if args.scorer_half {
         let (a, b, _) = split_reports(&clip.reports);
         oa_bench::split_check::check_split(&a, &b)
@@ -406,7 +414,6 @@ pub fn run(args: &Args) -> Result<String, String> {
     };
     let report_sep = report_separations(&meas, &rec.encounters);
     let mut join = String::new();
-    let mut join_sealed = 0u64;
     if let Some(dir) = &args.sfdps {
         let queries: Vec<(u32, i64)> = rec
             .encounters
@@ -417,8 +424,10 @@ pub fn run(args: &Args) -> Result<String, String> {
             dir: dir.clone(),
             lag_floor_ms,
         };
-        let (answers, st) = answer_queries(&sf, &queries)?;
-        join_sealed = st.sealed_window_dropped;
+        let mut join_sealed = 0u64;
+        let joined = answer_queries_counted(&sf, &queries, &mut join_sealed);
+        *sealed = clip_sealed + join_sealed;
+        let (answers, st) = joined?;
         let window = args.window.map_or_else(
             || "the whole clip".to_string(),
             |(f, t)| format!("Unix seconds {f} up to {t}"),
@@ -438,9 +447,8 @@ pub fn run(args: &Args) -> Result<String, String> {
         .adsb
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    // Once, after the last read: the clip's rows and the SFDPS join's frames and rows.
-    let sealed_window_dropped = sealed_window_dropped + join_sealed;
-    eprintln!("sealed-window rows dropped: {sealed_window_dropped}");
+    // The clip's rows and the SFDPS join's frames and rows, each once.
+    let sealed_window_dropped = *sealed;
     let mut summary = summary_text(&SummaryInput {
         cfg: &ecfg,
         encounters: &rec.encounters,

@@ -16,7 +16,7 @@
 //! half is refused as an incomplete pair. An element with `r="1"` is invalidated by the sender.
 
 use crate::kind::{children, in_message_ns, name_of, Kind};
-use crate::walk::{elem_offset, text_index, walk, Got, Sink, Slot, Spec, Val};
+use crate::walk::{elem_offset, text_index, walk, Got, Scratch, Sink, Slot, Spec, Val};
 use crate::{FieldError, FieldErrorKind, Limits, Stats, StdError};
 use oa_xml::{Doc, ElemIx};
 
@@ -303,6 +303,7 @@ pub fn parse_smes(
         msg.airport_present = true;
     }
     let mut refusal = None;
+    let mut sealed_dropped = 0u64;
     for c in children(doc, root) {
         if name_of(doc, c) != b"positionReport" || !in_message_ns(doc, c) {
             continue;
@@ -314,9 +315,24 @@ pub fn parse_smes(
             });
             break;
         }
-        match report(doc, &tx, c, &mut sink) {
-            Ok(r) => msg.records.push(r),
+        // The record is walked into a scratch sink: one timed in the drop window is discarded
+        // with everything it counted, before any statistic is updated.
+        let mut scratch = Scratch::default();
+        let (res, ud, inv) = {
+            let mut tmp = scratch.sink(limits.max_errors);
+            let res = report(doc, &tx, c, &mut tmp);
+            (res, tmp.unknown_dropped, tmp.invalidated)
+        };
+        match res {
+            Ok(r) if r.present & smes_bit(SmesField::Time) != 0 && limits.drops(r.time_ms) => {
+                sealed_dropped += 1;
+            }
+            Ok(r) => {
+                sink.absorb(scratch, ud, inv);
+                msg.records.push(r);
+            }
             Err(off) => {
+                sink.absorb(scratch, ud, inv);
                 refusal = Some(StdError::TooDeep { offset: off });
                 break;
             }
@@ -327,6 +343,7 @@ pub fn parse_smes(
     msg.errors = errors;
     msg.errors_dropped = dropped;
     msg.unknown_elements = unknown.iter().map(|(_, n)| *n).sum::<u64>() + unknown_dropped;
+    stats.sealed_window_dropped += sealed_dropped;
     stats.observe_smes(&msg, &unknown, unknown_dropped, invalidated, limits);
     match refusal {
         Some(e) => {

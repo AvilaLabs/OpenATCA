@@ -99,6 +99,19 @@ pub fn run_job_counted(
     hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
     log: &mut dyn FnMut(String),
 ) -> Result<(Vec<String>, u64), ExportError> {
+    let mut sealed = 0u64;
+    let lines = run_job_tallied(job, hook, log, &mut sealed)?;
+    Ok((lines, sealed))
+}
+
+/// [`run_job_counted`], with the rows dropped in a sealed window put in `sealed` on every exit
+/// once the inputs have been read, a failed export included.
+pub fn run_job_tallied(
+    job: Job,
+    hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
+    log: &mut dyn FnMut(String),
+    sealed: &mut u64,
+) -> Result<Vec<String>, ExportError> {
     let t0 = Instant::now();
     let out = job.layout.out.clone();
     // The refusals that need no output directory come first: the sealed recording, a missing
@@ -117,20 +130,20 @@ pub fn run_job_counted(
     let mut created: Vec<PathBuf> = Vec::new();
     let mut done = Done::default();
     let has_adsb = job.adsb.is_some();
-    let mut sealed = 0u64;
     let result = match export_all(&job, &mut done, t0, log) {
         Ok(()) => {
-            sealed = done.sealed_window_dropped();
+            *sealed = done.sealed_window_dropped();
             let mode = has_adsb.then_some(job.mode);
             commit_staged(&job, done, mode, hook, &mut created, t0)
         }
         Err(e) => {
+            *sealed = done.sealed_window_dropped();
             done.abort();
             Err(e)
         }
     };
     match result {
-        Ok(lines) => Ok((lines, sealed)),
+        Ok(lines) => Ok(lines),
         Err(e) => {
             // `done` was moved into the commit; its partials are removed there on failure. What
             // can remain is a partial of a system that failed in `export_all`, which that

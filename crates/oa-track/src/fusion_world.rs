@@ -418,14 +418,22 @@ pub fn clip_world(path: &str) -> Result<BuiltTruth, String> {
 /// [`clip_world`], also returning the rows of the clip dropped because their time is in a sealed
 /// window (OA-SEAL-014).
 pub fn clip_world_counted(path: &str) -> Result<(BuiltTruth, u64), String> {
-    let (reports, bad, dropped, sealed) = oa_sensorsim::clip::read_clip_counted(path)?;
+    let mut sealed = 0u64;
+    let built = clip_world_tallied(path, &mut sealed)?;
+    Ok((built, sealed))
+}
+
+/// [`clip_world_counted`], with the sealed-window count put in `sealed` as soon as the clip is
+/// read, so a caller has it on an error exit too.
+pub fn clip_world_tallied(path: &str, sealed: &mut u64) -> Result<BuiltTruth, String> {
+    let (reports, bad, dropped) = oa_sensorsim::clip::read_clip_tallied(path, sealed)?;
     let cfg = TruthConfig {
         loo: false,
         ..DEFAULT_CONFIG
     };
     let (truth, st) = build_truth(&reports, &cfg).map_err(|e| e.to_string())?;
     let _ = (bad, dropped, st);
-    Ok((built_of(truth), sealed))
+    Ok(built_of(truth))
 }
 
 #[cfg(test)]

@@ -15,13 +15,14 @@ use oa_feed::frame::{Kind as FrameKind, MAX_FRAME_LEN};
 use oa_feed::reader::FrameReader;
 use oa_feed::replay::REPLAY_LIMITS;
 use oa_stdds::{
-    new_stats, parse_message, std_error_index, Limits, Message, Stats, ERROR_KIND_NAMES,
-    KIND_NAMES, LATENCY_BUCKET_NAMES, SMES_FIELD_NAMES, STD_ERROR_NAMES, TAIS_FIELD_NAMES,
+    new_stats, parse_message, std_error_index, Limits, Stats, ERROR_KIND_NAMES, KIND_NAMES,
+    LATENCY_BUCKET_NAMES, SMES_FIELD_NAMES, STD_ERROR_NAMES, TAIS_FIELD_NAMES,
 };
 use oa_xml::{Limits as XmlLimits, Parser};
 use oa_zip::GzipReader;
 use std::convert::Infallible;
 use std::io::Read;
+use std::process::ExitCode;
 
 struct Ctx {
     parser: Parser,
@@ -30,17 +31,13 @@ struct Ctx {
     frames: u64,
     other_frames: u64,
     bad_frames: u64,
-    /// Message frames received in a sealed window (OA-SEAL-014): dropped, counted.
-    sealed_window_dropped: u64,
+    /// Message frames received in a sealed window (OA-SEAL-014): dropped, counted. The records
+    /// the parser dropped by their own time are in `stats.sealed_window_dropped`.
+    sealed_frames: u64,
     refused: [u64; 4],
     /// Bytes the frame reader would not take after a drain (a stall): counted, never dropped
     /// silently; the run exits non-zero.
     stalled_bytes: u64,
-}
-
-/// Whether a record's own time (Unix milliseconds) is in a sealed window.
-fn sealed_ms(t: i64) -> bool {
-    oa_sealed::in_sealed_window(t.saturating_mul(1_000_000))
 }
 
 fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
@@ -49,41 +46,17 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
             Ok(f)
                 if f.kind == FrameKind::Message && oa_sealed::in_sealed_window(f.recv_unix_ns) =>
             {
-                ctx.sealed_window_dropped += 1;
-                oa_sealed::note_window_drops(1);
+                ctx.sealed_frames += 1;
             }
             Ok(f) if f.kind == FrameKind::Message => {
-                // Parsed into a scratch accumulator: a message with a record timed in a sealed
-                // window is dropped whole (its records counted as dropped, nothing merged), so
-                // no field, flag, latency or record count includes a hold-out row.
-                let mut scratch = new_stats();
-                match parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut scratch) {
-                    Ok(m) => {
-                        let (n, sealed) = match &m {
-                            Message::Tais(t) => (
-                                t.records.len(),
-                                t.records.iter().any(|r| sealed_ms(r.mrt_time_ms)),
-                            ),
-                            Message::Smes(t) => (
-                                t.records.len(),
-                                t.records.iter().any(|r| sealed_ms(r.time_ms)),
-                            ),
-                            _ => (0, false),
-                        };
-                        if sealed {
-                            ctx.sealed_window_dropped += n as u64;
-                            oa_sealed::note_window_drops(n as u64);
-                        } else {
-                            ctx.frames += 1;
-                            ctx.stats.merge(&scratch, &ctx.limits);
-                        }
-                    }
-                    Err(e) => {
-                        ctx.frames += 1;
-                        ctx.stats.merge(&scratch, &ctx.limits);
-                        if let Some(c) = ctx.refused.get_mut(std_error_index(&e)) {
-                            *c += 1;
-                        }
+                // A record or report timed in a sealed window is dropped inside the parser,
+                // before any count is updated (`Limits::drop_window`).
+                ctx.frames += 1;
+                if let Err(e) =
+                    parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats)
+                {
+                    if let Some(c) = ctx.refused.get_mut(std_error_index(&e)) {
+                        *c += 1;
                     }
                 }
             }
@@ -114,28 +87,33 @@ fn safe_text(t: &str, extra: &[u8], max: usize) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
 }
 
-fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| {
+fn main() -> ExitCode {
+    // Printed when `main` returns, on every exit (a refusal and a stall included).
+    let mut drops = oa_sealed::DropReport::to_stdout();
+    let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: stdds_summary FILE.oaf[.gz]");
-        std::process::exit(2);
-    });
+        return ExitCode::from(2);
+    };
     // The shared sealed hold-out guard (`oa-sealed`): the path is resolved and checked, the file
     // is opened and the opened file is checked again.
     let mut src = match oa_sealed::open(std::path::Path::new(&path)) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("refused or unreadable: {path}: {e}");
-            std::process::exit(2);
+            return ExitCode::from(2);
         }
     };
     let mut ctx = Ctx {
         parser: Parser::new(XmlLimits::default()).unwrap(),
         stats: new_stats(),
-        limits: Limits::default(),
+        limits: Limits {
+            drop_window: oa_sealed::sealed_window_ms(),
+            ..Limits::default()
+        },
         frames: 0,
         other_frames: 0,
         bad_frames: 0,
-        sealed_window_dropped: 0,
+        sealed_frames: 0,
         refused: [0; 4],
         stalled_bytes: 0,
     };
@@ -179,10 +157,8 @@ fn main() {
         "frames: message {} other {} damaged {}",
         ctx.frames, ctx.other_frames, ctx.bad_frames
     );
-    println!(
-        "sealed-window rows dropped: {} (frames by receive time; TAIS records by mrtTime and ASDE-X reports by time, dropping the whole message)",
-        ctx.sealed_window_dropped
-    );
+    // Frames by receive time, TAIS records by `mrtTime` and ASDE-X reports by `time`.
+    drops.add(ctx.sealed_frames + s.sealed_window_dropped);
     println!("gzip: damaged {gz_damaged} truncated {truncated}");
     println!("messages parsed: {}", s.messages);
     for (name, c) in KIND_NAMES.iter().zip(&s.kinds) {
@@ -293,6 +269,7 @@ fn main() {
     );
     if ctx.stalled_bytes > 0 {
         eprintln!("error: the frame reader stalled; the summary is incomplete");
-        std::process::exit(3);
+        return ExitCode::from(3);
     }
+    ExitCode::SUCCESS
 }

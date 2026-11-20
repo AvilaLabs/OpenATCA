@@ -63,6 +63,19 @@ pub struct Limits {
     pub max_errors: usize,
     /// Most distinct unknown element paths kept in [`Stats`]; further ones are counted as overflow.
     pub max_unknown_paths: usize,
+    /// A span of Unix milliseconds, `from` inclusive and `to` exclusive, in which a record (TAIS)
+    /// or report (SMES) timed by its own `mrtTime` or `time` is dropped before any statistic
+    /// is updated: it is not in the message, the counts or the unknown and error tables, and it
+    /// is counted in [`Stats::sealed_window_dropped`]. A pure value: the shell passes the sealed
+    /// window in. A record with no time is kept.
+    pub drop_window: Option<(i64, i64)>,
+}
+
+impl Limits {
+    /// Whether `t_ms` is in [`Limits::drop_window`].
+    pub fn drops(&self, t_ms: i64) -> bool {
+        self.drop_window.is_some_and(|(a, b)| a <= t_ms && t_ms < b)
+    }
 }
 
 impl Default for Limits {
@@ -71,6 +84,7 @@ impl Default for Limits {
             max_records: 4096,
             max_errors: 256,
             max_unknown_paths: 128,
+            drop_window: None,
         }
     }
 }

@@ -118,14 +118,18 @@ class SealedGuardTests(unittest.TestCase):
         self.assertEqual((len(files), skipped, again), (1, 0, 2))
         # A sibling link to a directory next to it: the first name in bytewise order is walked,
         # the other is counted as already visited, never as sealed.
+        # Eight such pairs, so a walk in the order the directory lists them (not sorted) would reach
+        # `real` first in some pair and show it in the names visited.
         sib = self.root / "sib"
-        (sib / "real").mkdir(parents=True)
-        (sib / "real/f.bin").write_bytes(b"x")
-        (sib / "a").mkdir()
-        os.symlink("../real", sib / "a/x")
+        for k in range(8):
+            p = sib / f"p{k}"
+            (p / "real").mkdir(parents=True)
+            (p / "real/f.bin").write_bytes(b"x")
+            (p / "a").mkdir()
+            os.symlink("../real", p / "a/x")
         files, skipped, again = self.g.walk_unsealed(sib)
         self.assertEqual(([os.path.relpath(f, sib) for f in files], skipped, again),
-                         (["a/x/f.bin"], 0, 1))
+                         ([f"p{k}/a/x/f.bin" for k in range(8)], 0, 8))
         deep = self.root / "deep"
         for _ in range(70):
             deep = deep / "d"

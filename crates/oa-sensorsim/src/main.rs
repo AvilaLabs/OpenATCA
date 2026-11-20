@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use oa_asterix::SourceId;
-use oa_sensorsim::clip::read_clip_counted;
+use oa_sensorsim::clip::read_clip_tallied;
 use oa_sensorsim::geom::{FT_M, NM_M};
 use oa_sensorsim::plots::{plots_len, plots_row, to_cat048, NONE_ADDR, NONE_ALT, NONE_CODE};
 use oa_sensorsim::profile::{
@@ -56,7 +56,7 @@ fn need(args: &[String], name: &str) -> Result<f64, String> {
     num(args, name)?.ok_or_else(|| format!("{name} is required (no sourced default)\n{}", usage()))
 }
 
-fn run() -> Result<(), String> {
+fn run(drops: &mut oa_sealed::DropReport) -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (Some(clip), Some(out_dir)) = (args.first(), args.get(1)) else {
         return Err(usage().to_string());
@@ -93,8 +93,10 @@ fn run() -> Result<(), String> {
         .unwrap_or(1);
     let name = flag(&args, "--name").unwrap_or_else(|| name.to_string());
     let t_total = Instant::now();
-    let (reports, bad, dropped, sealed) = read_clip_counted(clip)?;
-    println!("{}", oa_sealed::drop_line(sealed));
+    let mut sealed = 0u64;
+    let read = read_clip_tallied(clip, &mut sealed);
+    drops.add(sealed);
+    let (reports, bad, dropped) = read?;
     println!(
         "clip: {} reports ({bad} frames not decoded, {dropped} records dropped)",
         oa_adsb::reports_len(&reports)
@@ -198,7 +200,9 @@ fn run() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    // Printed (on standard output, as before) when `main` returns, an error included.
+    let mut drops = oa_sealed::DropReport::to_stdout();
+    match run(&mut drops) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("{e}");
