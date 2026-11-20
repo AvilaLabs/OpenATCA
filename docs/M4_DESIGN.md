@@ -53,7 +53,17 @@ So the design starts from four rules, before any prediction:
 | NOTAMs (`oa-notam`) | Temporary restrictions and airspace status | Yes | — |
 
 The flight data we hold is a national SFDPS, TFMS, TBFM and FNS recording from 16:13Z on
-14 November to about 16Z on 15 November 2026, alongside the ADS-B days.
+14 November to about 16Z on 15 November 2026, alongside the ADS-B days. Two more windows are
+scheduled, recording all five SCDS feeds (SFDPS, TFMS, TBFM, FNS and STDDS), and both end at a
+fixed time because the laptop's disk is the only storage:
+
+- **24 November 2026, 00:00Z to 24:00Z: the sealed hold-out day.** It is sealed from the start,
+  with that day's ADS-B, and is read only to score a frozen candidate. The development data is the
+  14 to 15 November recording.
+- **30 November 05:00Z to 1 December 06:00Z: a flight day.** It covers a domestic flight whose
+  phone GPS log gives one aircraft's position independently of every feed.
+
+Together they are about 30 GB. Each stops all feeds if free disk space falls below 50 GB.
 
 The first measurement is already in the survey. ERAM's assigned altitude is in 92% of SFDPS
 messages (13,719 of 14,851 in the sample), and handoff fields are in about a fifth. The interim
@@ -209,9 +219,8 @@ from `openatca-data` and never shipped. The model is empirical (ADS-B carries no
 and types with too few recorded flights fall back to their class; both limits are measured and
 stated with every result.
 
-## Open questions for Connor
+## Questions decided by Connor
 
-1. **More flight data.** SFDPS, TFMS and TBFM were recorded for about 24 hours (14 to 15 November)
-   and have not been recorded since. The STDDS capture shows another continuous capture is
-   practical. Should SFDPS, TFMS and TBFM run again for the 30 November flight and for a second
-   hold-out day?
+1. **More flight data.** Decided by Connor 2026-11-20: two bounded windows, a sealed hold-out
+   day on 24 November and the 30 November flight day (section 1), rather than a continuous
+   capture.
