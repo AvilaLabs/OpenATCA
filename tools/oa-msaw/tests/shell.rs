@@ -727,6 +727,7 @@ fn summary_of(r: &Record, set: &Settings) -> String {
         qnh_stats: r.qnh_stats,
         data: &used,
         skipped_listed: r.skips.len(),
+        below_mva_tracks: 0,
         clip_name: "clip.oaf",
         clip_sha256: "00",
         sealed_window_dropped: 0,
@@ -746,8 +747,15 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
     let b = go(&approach(0xA1B2C3, true), &set, ridge_floors());
     assert_eq!(alerts_csv(&a.alerts, &[]), alerts_csv(&b.alerts, &[]));
     assert_eq!(skipped_csv(&a.skips), skipped_csv(&b.skips));
+    // The wall-clock lines differ between runs; everything else is the same.
+    let steady = |t: String| {
+        t.lines()
+            .filter(|l| !l.contains("wall seconds in"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     let (s1, s2) = (summary_of(&a, &set), summary_of(&b, &set));
-    assert_eq!(s1, s2);
+    assert_eq!(steady(s1.clone()), steady(s2));
     assert!(alerts_csv(&a.alerts, &[]).contains("00A1B2C3"));
     assert!(
         !s1.to_uppercase().contains("A1B2C3"),
@@ -932,4 +940,28 @@ fn the_summary_gives_compute_rates_and_a_first_classification_counts_only() {
         Doing::Other
     );
     assert_eq!(classify(&base(-700.0, 2000.0, 70.0), None), Doing::VfrLow);
+}
+
+// REQ: OA-MSAW-058
+#[test]
+fn a_gtm_clearance_area_gives_its_clearance_to_the_cells_it_holds_and_a_bad_line_is_refused() {
+    use oa_msaw_run::floors::Area;
+    let b = Area::Box(40.0, 41.0, -89.0, -88.0);
+    assert!(b.holds(40.5, -88.5) && !b.holds(41.5, -88.5));
+    let tri = Area::Polygon(vec![(40.0, -89.0), (41.0, -89.0), (40.0, -88.0)]);
+    assert!(tri.holds(40.2, -88.8) && !tri.holds(40.9, -88.1));
+    let base =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/dev.cfg"))
+            .unwrap();
+    let ok = format!("{base}\ngtm_clearance = box 40 41 -89 -88 200\n");
+    let s = parse_config(&ok).unwrap();
+    assert_eq!(s.gtm_areas.len(), 1);
+    assert_eq!(s.gtm_areas[0].ft, 200);
+    for bad in [
+        "gtm_clearance = box 41 40 -89 -88 200",
+        "gtm_clearance = box 40 41 -89 -88 -5",
+        "gtm_clearance = hex 1",
+    ] {
+        assert!(parse_config(&format!("{base}\n{bad}\n")).is_err(), "{bad}");
+    }
 }

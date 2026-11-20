@@ -32,14 +32,16 @@ use oa_track::{
 
 use crate::args::Args;
 use crate::cifp::{approach_airports, corridors_from_cifp, CifpCorridor};
+use crate::config::GtmShape;
 use crate::config::{parse_config, InhibitSpec, Settings};
 use crate::eligibility::{callsign_timeline, first_seen, judge, Inputs};
+use crate::floors::Area;
 use crate::floors::{obstacle_index, FloorStats, Floors, ObstacleIndex};
 use crate::guard::{open_guarded, refuse_sealed, OpenFail};
 use crate::qnh::{Qnh, QnhStats};
 use crate::report::{
-    alerts_csv, alerts_csv_with_basis, inhibitions_csv, skipped_csv, state_text, summary_text,
-    DataUsed, SummaryInput,
+    alerts_csv, alerts_csv_with_basis, below_mva_csv, inhibitions_csv, skipped_csv, state_text,
+    summary_text, DataUsed, SummaryInput,
 };
 
 /// The chi-square quantile of 2 degrees of freedom at 95 %: the 95 % radius of a circular
@@ -189,6 +191,7 @@ fn flush(f: &mut Feed) {
                     obstacle_ft: FLOOR_NONE,
                     obstacle_covered: false,
                     mva_ft: FLOOR_NONE,
+                    gtm_clearance_ft: FLOOR_NONE,
                 });
             }
         }
@@ -499,9 +502,10 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
 }
 
 /// The names of the output files, the summary last: it is the mark of a complete run.
-const OUTPUTS: [&str; 5] = [
+const OUTPUTS: [&str; 6] = [
     "alerts.csv",
     "advisory.csv",
+    "below_mva.csv",
     "skipped.csv",
     "inhibitions.csv",
     "summary.txt",
@@ -550,6 +554,48 @@ fn opened(g: &Sealed, p: &Path) -> Result<fs::File, String> {
     open_guarded(g, p).map_err(|e| match e {
         OpenFail::Refused(m) | OpenFail::Io(m) => m,
     })
+}
+
+/// The areas of the `gtm_clearance` lines; a polygon file is read here (checked against the sealed
+/// paths first): `lat,lon` per line, `#` starts a comment.
+fn gtm_areas(g: &Sealed, set: &Settings) -> Result<Vec<(Area, i32)>, String> {
+    let mut out = Vec::new();
+    for a in &set.gtm_areas {
+        let shape = match &a.shape {
+            GtmShape::Box(s, n, w, e) => Area::Box(
+                f64::from(*s) / 1e7,
+                f64::from(*n) / 1e7,
+                f64::from(*w) / 1e7,
+                f64::from(*e) / 1e7,
+            ),
+            GtmShape::File(path) => {
+                let p = Path::new(path);
+                let mut text = String::new();
+                opened(g, p)?
+                    .take(1 << 20)
+                    .read_to_string(&mut text)
+                    .map_err(|e| format!("{path}: {e}"))?;
+                let mut v = Vec::new();
+                for line in text.lines() {
+                    let line = line.split('#').next().unwrap_or("").trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let (la, lo) = line
+                        .split_once(',')
+                        .and_then(|(a, b)| Some((a.trim().parse().ok()?, b.trim().parse().ok()?)))
+                        .ok_or_else(|| format!("{path}: `{line}` is not lat,lon"))?;
+                    v.push((la, lo));
+                }
+                if v.len() < 3 {
+                    return Err(format!("{path}: a polygon needs 3 or more points"));
+                }
+                Area::Polygon(v)
+            }
+        };
+        out.push((shape, a.ft));
+    }
+    Ok(out)
 }
 
 /// The obstacles of a DOF file: the zip that holds `DOF.DAT`, or the file itself.
@@ -751,7 +797,8 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         p99_ns: 1_000_000_000,
     });
     let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
-    let floors = Floors::new(args.terrain.clone(), obstacles, chart);
+    let mut floors = Floors::new(args.terrain.clone(), obstacles, chart);
+    floors.set_areas(gtm_areas(g, &set)?);
     used.terrain = floors.has_terrain();
     used.chart = floors.has_chart();
     used.cifp_corridors = cifp_corridors;
@@ -809,6 +856,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
             .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
     };
     let skipped = skipped_csv(&rec.skips);
+    let below_mva = below_mva_csv(&rec.skips);
     let inhibitions = inhibitions_csv(&rec.made, &rec.hidden, &rec.expired_ns);
     let summary = summary_text(&SummaryInput {
         cfg: &set.msaw,
@@ -829,7 +877,16 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         floor_stats: rec.floor_stats,
         qnh_stats: rec.qnh_stats,
         data: &used,
-        skipped_listed: rec.skips.len(),
+        skipped_listed: rec
+            .skips
+            .keys()
+            .filter(|k| k.1 != oa_msaw::SkipWhy::BelowMva as u8)
+            .count(),
+        below_mva_tracks: rec
+            .skips
+            .keys()
+            .filter(|k| k.1 == oa_msaw::SkipWhy::BelowMva as u8)
+            .count(),
         clip_name: &name_of(&args.adsb),
         clip_sha256: &clip_sha,
         sealed_window_dropped: *sealed,
@@ -839,10 +896,14 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         alerts_sha256: &csv_sha,
         t0_ns,
     });
-    for (file, text) in OUTPUTS
-        .into_iter()
-        .zip([&csv, &advisory, &skipped, &inhibitions, &summary])
-    {
+    for (file, text) in OUTPUTS.into_iter().zip([
+        &csv,
+        &advisory,
+        &below_mva,
+        &skipped,
+        &inhibitions,
+        &summary,
+    ]) {
         write_atomic(&args.out, file, text)?;
     }
     // The renames reach the disk with the directory.

@@ -21,9 +21,9 @@ use crate::state::{alert_push, skip_push, MsawState};
 use crate::types::{
     Alert, AlertLog, CycleStats, FloorKind, FloorSample, Grade, MsawTrack, SamplePoint, SkipLog,
     SkipWhy, Skipped, AF_COAST, AF_GROUND_UNKNOWN, AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE,
-    AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_UNCERTAIN, F_COAST, F_IDENTITY_UNCONFIRMED,
-    F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG,
-    MAX_ABS_VRATE_FPM, ON_GROUND,
+    AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_UNCERTAIN, FLOOR_NONE, F_COAST,
+    F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN,
+    MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG, MAX_ABS_VRATE_FPM, ON_GROUND,
 };
 
 /// Internal bit of a planned row's flags: the vertical rate was unknown and is taken as zero.
@@ -53,6 +53,7 @@ fn add(a: &mut CycleStats, b: &CycleStats) {
     a.over_budget = a.over_budget.saturating_add(b.over_budget);
     a.evaluated = a.evaluated.saturating_add(b.evaluated);
     a.qnh_missing = a.qnh_missing.saturating_add(b.qnh_missing);
+    a.below_mva = a.below_mva.saturating_add(b.below_mva);
     a.no_coverage = a.no_coverage.saturating_add(b.no_coverage);
     a.violations = a.violations.saturating_add(b.violations);
     a.suppressed = a.suppressed.saturating_add(b.suppressed);
@@ -285,6 +286,9 @@ struct Verdict {
     worst_floor_ft: i32,
     worst_kind: FloorKind,
     partial: bool,
+    /// Some point outside the corridors with a chart altitude is above the alert floor and the
+    /// predicted altitude is below the chart altitude there.
+    below_mva: bool,
 }
 
 fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawState) -> Verdict {
@@ -296,6 +300,7 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         worst_floor_ft: 0,
         worst_kind: FloorKind::Mva,
         partial: false,
+        below_mva: false,
     };
     for (k, (p, s)) in pts.iter().zip(floors.iter()).enumerate() {
         let hit = corridor_hit_at(cfg, &st.cidx, p);
@@ -305,6 +310,9 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         };
         let (lo, hi) = sample_span_s(k, cfg.samples, cfg.look_ahead_s);
         let low = alt_floor_ft(lowest_alt_ft(alt, vr, lo, hi));
+        if hit.is_none() && s.mva_ft != FLOOR_NONE && low < s.mva_ft {
+            v.below_mva = true;
+        }
         let margin = low.saturating_sub(floor);
         if margin < v.worst_margin_ft {
             v.worst_margin_ft = margin;
@@ -453,6 +461,10 @@ pub fn msaw_evaluate(
             skip(skips, &mut stats, t_ns, tr, SkipWhy::NoCoverage);
         }
         let Some(ttv) = v.ttv_s else {
+            if v.below_mva {
+                stats.below_mva = stats.below_mva.saturating_add(1);
+                skip(skips, &mut stats, t_ns, tr, SkipWhy::BelowMva);
+            }
             continue;
         };
         stats.violations = stats.violations.saturating_add(1);

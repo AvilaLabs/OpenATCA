@@ -3,14 +3,20 @@
 //! or repeated key, a value that does not parse or is not finite, and a missing key are errors
 //! that name it. Units are the ones in the key: seconds, nautical miles, feet, metres, degrees.
 //!
-//! Four keys may repeat:
+//! Five keys may repeat:
 //!
 //! ```text
 //! corridor = <thr_lat> <thr_lon> <out_bearing_deg> <length_m> <near_half_m> <far_half_m> <thr_elev_ft> <faf_alt_ft>
 //! cifp_airport = <ICAO identifier>
+//! gtm_clearance = box <lat_min> <lat_max> <lon_min> <lon_max> <ft>
+//! gtm_clearance = file <path of lat,lon lines> <ft>
 //! msaw_request = <addr:HEX24 | call:CALLSIGN> <start_s> <end_s>
 //! inhibit = <start_s> <end_s> <alt_lo_ft> <alt_hi_ft> <author> <reason> <lat>,<lon> <lat>,<lon> <lat>,<lon> ...
 //! ```
+//!
+//! `gtm_clearance_ft` is the clearance above terrain outside the corridors, the general terrain monitor's;
+//! a `gtm_clearance` line sets another clearance in an area (the highest of those that hold a point
+//! wins). The chart altitude is no alert floor.
 //!
 //! A corridor line is a final-approach corridor of the core. A `cifp_airport` line asks for the
 //! corridors the CIFP gives at that airport (needs `--cifp`). An inhibit
@@ -48,6 +54,23 @@ pub struct InhibitSpec {
     pub vertices: Vec<(i32, i32)>,
 }
 
+/// The area of a `gtm_clearance` line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GtmShape {
+    /// South, north, west, east, 1e-7 degree.
+    Box(i32, i32, i32, i32),
+    /// A file of `lat,lon` lines, read by the run.
+    File(String),
+}
+
+/// One `gtm_clearance` line.
+// A7.2: cold struct, size guard waived
+#[derive(Debug, Clone, PartialEq)]
+pub struct GtmArea {
+    pub shape: GtmShape,
+    pub ft: i32,
+}
+
 /// Who a request for MSAW service names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Requester {
@@ -82,6 +105,7 @@ pub struct Settings {
     pub inhibits: Vec<InhibitSpec>,
     pub cifp_airports: Vec<String>,
     pub requests: Vec<RequestSpec>,
+    pub gtm_areas: Vec<GtmArea>,
     /// A track below FL180 with no usable altimeter setting is given its pressure altitude lowered
     /// by this, feet (the conservative direction), and counted.
     pub no_qnh_allowance_ft: i32,
@@ -91,12 +115,12 @@ pub struct Settings {
     pub metar_max_age_s: i64,
 }
 
-const KEYS: [&str; 29] = [
+const KEYS: [&str; 30] = [
     "look_ahead_s",
     "warning_s",
     "samples",
     "hysteresis_s",
-    "terrain_clearance_ft",
+    "gtm_clearance_ft",
     "obstacle_clearance_ft",
     "approach_allowance_ft",
     "approach_min_clearance_ft",
@@ -119,6 +143,7 @@ const KEYS: [&str; 29] = [
     "inhibit_max_extent_deg",
     "corridor",
     "cifp_airport",
+    "gtm_clearance",
     "msaw_request",
     "inhibit",
 ];
@@ -246,6 +271,31 @@ fn inhibit(v: &str) -> Result<InhibitSpec, String> {
     })
 }
 
+fn gtm_area(v: &str) -> Result<GtmArea, String> {
+    let f: Vec<&str> = v.split_whitespace().collect();
+    let (shape, ft) = match f.as_slice() {
+        ["box", a, b, c, d, ft] => {
+            let (la0, la1) = (e7("gtm box lat", a, 90.0)?, e7("gtm box lat", b, 90.0)?);
+            let (lo0, lo1) = (e7("gtm box lon", c, 180.0)?, e7("gtm box lon", d, 180.0)?);
+            if la0 >= la1 || lo0 >= lo1 {
+                return Err("gtm_clearance: a box needs south < north and west < east".to_string());
+            }
+            (GtmShape::Box(la0, la1, lo0, lo1), *ft)
+        }
+        ["file", path, ft] => (GtmShape::File((*path).to_string()), *ft),
+        _ => {
+            return Err(format!(
+            "gtm_clearance: `{v}` needs `box lat_min lat_max lon_min lon_max ft` or `file path ft`"
+        ))
+        }
+    };
+    let ft = feet("gtm_clearance ft", ft)?;
+    if !(0..=oa_msaw::MAX_CLEARANCE_FT).contains(&ft) {
+        return Err("gtm_clearance: the clearance is out of range".to_string());
+    }
+    Ok(GtmArea { shape, ft })
+}
+
 fn request(v: &str) -> Result<RequestSpec, String> {
     let f: Vec<&str> = v.split_whitespace().collect();
     let [who, s, e] = f.as_slice() else {
@@ -291,12 +341,13 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         ));
     }
     let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
-    let (mut procs, mut airports, mut inhibits, mut requests): (
-        Vec<&str>,
-        Vec<&str>,
-        Vec<&str>,
-        Vec<&str>,
-    ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut procs, mut airports, mut inhibits, mut requests, mut areas) = (
+        Vec::<&str>::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
     for (n, raw) in text.lines().enumerate() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -314,6 +365,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             "cifp_airport" => airports.push(v),
             "inhibit" => inhibits.push(v),
             "msaw_request" => requests.push(v),
+            "gtm_clearance" => areas.push(v),
             _ => {
                 if kv.insert(k, v).is_some() {
                     return Err(format!("line {}: `{k}` given twice", n + 1));
@@ -329,7 +381,11 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
     if procs.len() > MAX_CORRIDORS {
         return Err(format!("more than {MAX_CORRIDORS} corridors"));
     }
-    if airports.len() > MAX_LINES || inhibits.len() > MAX_LINES || requests.len() > MAX_LINES {
+    if airports.len() > MAX_LINES
+        || inhibits.len() > MAX_LINES
+        || requests.len() > MAX_LINES
+        || areas.len() > MAX_LINES
+    {
         return Err(format!(
             "more than {MAX_LINES} cifp_airport, msaw_request or inhibit lines"
         ));
@@ -356,7 +412,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         warning_s: finite("warning_s", get("warning_s")?)?,
         samples: to_usize("samples", get("samples")?)?,
         hysteresis_ns: seconds_ns("hysteresis_s", get("hysteresis_s")?)?,
-        terrain_clearance_ft: feet("terrain_clearance_ft", get("terrain_clearance_ft")?)?,
+        terrain_clearance_ft: feet("gtm_clearance_ft", get("gtm_clearance_ft")?)?,
         obstacle_clearance_ft: feet("obstacle_clearance_ft", get("obstacle_clearance_ft")?)?,
         max_speed_mps: finite("max_speed_mps", get("max_speed_mps")?)?,
         r95_cap_m: finite("r95_cap_m", get("r95_cap_m")?)?,
@@ -406,6 +462,10 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
     for v in &inhibits {
         specs.push(inhibit(v)?);
     }
+    let mut gtm_areas = Vec::new();
+    for v in &areas {
+        gtm_areas.push(gtm_area(v)?);
+    }
     let mut reqs = Vec::new();
     for v in &requests {
         reqs.push(request(v)?);
@@ -420,6 +480,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         inhibits: specs,
         cifp_airports: airports.iter().map(|s| (*s).to_string()).collect(),
         requests: reqs,
+        gtm_areas,
         no_qnh_allowance_ft,
         metar_radius_nm,
         metar_max_age_s,

@@ -6230,10 +6230,10 @@ FAA value.
 - **OA-MSAW-007** An inhibition of the net in force at the track's position and altitude hides the
   alert, is recorded against its id, shows the net as inhibited with the inhibition and its end time,
   and stops hiding at its end time; an inhibition of another net or band hides nothing.
-- **OA-MSAW-008** The floor is the higher of terrain plus clearance, obstacle top plus clearance and the
-  chart altitude; no coverage gives no floor.
+- **OA-MSAW-008** Outside the corridors the floor is the higher of terrain plus the general clearance and
+  obstacle top plus its clearance; the chart altitude is no floor; no terrain or obstacle coverage gives no floor.
 - **OA-MSAW-009** A final-approach corridor gives its floor only where the whole query circle is inside it:
-  the higher of the surface and terrain or obstacle plus the approach clearance, with no chart floor;
+  the higher of the surface and terrain or obstacle plus the approach clearance;
   elsewhere the normal floor applies.
 - **OA-MSAW-010** An alert is a warning when the predicted violation is within the warning time, else a
   caution; a track already below its floor is a warning.
@@ -6311,5 +6311,10 @@ FAA value.
   far end; each approach corridor continues along the runway.
 - **OA-MSAW-056** A track is alerted only when it has an active IFR flight in SFDPS (address, then callsign) or an
   `msaw_request`; every other track is evaluated, written to `advisory.csv` and counted by reason.
+- **OA-MSAW-057** A track predicted below the chart altitude and not below its alert floor is written to
+  `below_mva.csv` and counted per hour; it is no alert, and a missing chart sector is counted in the summary only
+  and is no shortfall of the net.
+- **OA-MSAW-058** The clearance above terrain outside the corridors is `gtm_clearance_ft` (a development value),
+  or that of a `gtm_clearance` box or polygon file holding the point (the highest wins); corridors keep their own.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.

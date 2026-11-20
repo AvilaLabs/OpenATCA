@@ -45,12 +45,13 @@ fn a_failed_run_leaves_no_output_of_an_earlier_run_and_a_good_one_leaves_no_temp
     };
     let o = run(&cfg);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    // Exactly the five files: no temporary name is left.
+    // Exactly the six files: no temporary name is left.
     assert_eq!(
         names(&out),
         [
             "advisory.csv",
             "alerts.csv",
+            "below_mva.csv",
             "inhibitions.csv",
             "skipped.csv",
             "summary.txt"

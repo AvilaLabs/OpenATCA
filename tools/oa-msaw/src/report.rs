@@ -66,6 +66,7 @@ pub fn why_text(w: u8) -> &'static str {
         x if x == SkipWhy::BadRow as u8 => "BAD_ROW",
         x if x == SkipWhy::OverCapacity as u8 => "OVER_CAPACITY",
         x if x == SkipWhy::QnhMissing as u8 => "QNH_MISSING",
+        x if x == SkipWhy::BelowMva as u8 => "BELOW_MVA",
         _ => "?",
     }
 }
@@ -196,8 +197,21 @@ fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> St
 /// cycles it was left out, sorted by first time then address. It holds addresses and is not for
 /// publication.
 pub fn skipped_csv(skips: &BTreeMap<(u32, u8), SkipAgg>) -> String {
+    skip_rows(skips, false)
+}
+
+/// `below_mva.csv`: the tracks predicted below the chart altitude and not below their alert
+/// floor, in the same columns as `skipped.csv` (they are no alert and no shortfall).
+pub fn below_mva_csv(skips: &BTreeMap<(u32, u8), SkipAgg>) -> String {
+    skip_rows(skips, true)
+}
+
+fn skip_rows(skips: &BTreeMap<(u32, u8), SkipAgg>, below: bool) -> String {
     let mut o = String::from("address_hex,reason,first_s,last_s,cycles,lat_deg,lon_deg\n");
-    let mut v: Vec<(&(u32, u8), &SkipAgg)> = skips.iter().collect();
+    let mut v: Vec<(&(u32, u8), &SkipAgg)> = skips
+        .iter()
+        .filter(|(k, _)| (k.1 == SkipWhy::BelowMva as u8) == below)
+        .collect();
     v.sort_by_key(|(k, a)| (a.first_ns, k.0, k.1));
     for ((addr, why), a) in v {
         let _ = writeln!(
@@ -314,6 +328,8 @@ pub struct SummaryInput<'a> {
     pub data: &'a DataUsed,
     /// Listed (address, reason) rows of `skipped.csv`.
     pub skipped_listed: usize,
+    /// Tracks listed in `below_mva.csv`.
+    pub below_mva_tracks: usize,
     pub clip_name: &'a str,
     pub clip_sha256: &'a str,
     /// Clip rows left out because their time is in a sealed window (OA-SEAL-014).
@@ -359,7 +375,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
     );
     let _ = writeln!(
         o,
-        "clearance above terrain {} ft, above obstacles {} ft; track budget {}, track capacity {}",
+        "general clearance above terrain {} ft (the chart altitude is no alert floor), above obstacles {} ft; track budget {}, track capacity {}",
         c.terrain_clearance_ft, c.obstacle_clearance_ft, c.track_budget, c.max_tracks
     );
     let _ = writeln!(
@@ -598,6 +614,14 @@ pub fn summary_text(i: &SummaryInput) -> String {
         i.alert_overflow, i.skip_overflow
     );
     let _ = writeln!(o, "skipped.csv rows {}", i.skipped_listed);
+    let below_tracks = i.below_mva_tracks;
+    let _ = writeln!(
+        o,
+        "below the chart altitude and above the alert floor (below_mva.csv, no alert, no shortfall): {} tracks, {} track cycles; per hour {:.1} tracks",
+        below_tracks,
+        t.below_mva,
+        below_tracks as f64 / (t.cycles as f64 / 3600.0).max(1.0e-9)
+    );
     let warnings = i.alerts.iter().filter(|a| a.peak == Grade::Warning).count();
     let _ = writeln!(
         o,

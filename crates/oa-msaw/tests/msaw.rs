@@ -118,6 +118,7 @@ fn flat(terrain: i32, mva: i32) -> impl Fn(i32, i32) -> FloorSample {
         obstacle_ft: FLOOR_NONE,
         obstacle_covered: true,
         mva_ft: mva,
+        gtm_clearance_ft: FLOOR_NONE,
     }
 }
 
@@ -225,6 +226,7 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
         obstacle_ft: FLOOR_NONE,
         obstacle_covered: true,
         mva_ft: 2000,
+        gtm_clearance_ft: FLOOR_NONE,
     };
     let o = cycle(&mut r, S, &[a], &none_t);
     assert_eq!(o.stats.no_coverage, 1);
@@ -238,15 +240,17 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
             ..
         }
     ));
-    // No chart coverage is the same.
+    // No chart coverage is not a shortfall: the chart is not a floor.
     let none_m = |_: i32, _: i32| FloorSample {
         terrain_ft: 0,
         obstacle_ft: FLOOR_NONE,
         obstacle_covered: true,
         mva_ft: FLOOR_NONE,
+        gtm_clearance_ft: FLOOR_NONE,
     };
     let o = cycle(&mut r, 2 * S, &[a], &none_m);
-    assert_eq!(o.stats.no_coverage, 1);
+    assert_eq!(o.stats.no_coverage, 0);
+    assert_eq!(o.report, NetReport::Running);
     // Coverage that stops partway: the covered points are still judged, and the track is listed.
     let half = |lat: i32, _: i32| {
         if lat < 400_005_000 {
@@ -255,6 +259,7 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
                 obstacle_ft: FLOOR_NONE,
                 obstacle_covered: true,
                 mva_ft: 2000,
+                gtm_clearance_ft: FLOOR_NONE,
             }
         } else {
             FloorSample {
@@ -262,6 +267,7 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
                 obstacle_ft: FLOOR_NONE,
                 obstacle_covered: true,
                 mva_ft: FLOOR_NONE,
+                gtm_clearance_ft: FLOOR_NONE,
             }
         }
     };
@@ -269,7 +275,7 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
     assert_eq!(o.stats.no_coverage, 1);
     assert_eq!(
         o.stats.violations, 1,
-        "the covered part is below the chart floor"
+        "the covered part is below the terrain floor"
     );
     assert_ne!(r.alerts.items.len() + msaw_open_len(&r.st), 0);
     let open = msaw_open(&r.st);
@@ -376,6 +382,7 @@ fn ridge(lat_e7: i32, _lon: i32) -> FloorSample {
         obstacle_ft: FLOOR_NONE,
         obstacle_covered: true,
         mva_ft: 100,
+        gtm_clearance_ft: FLOOR_NONE,
     }
 }
 
@@ -520,13 +527,14 @@ fn an_inhibition_of_another_net_or_another_band_hides_nothing() {
 
 // REQ: OA-MSAW-008
 #[test]
-fn the_floor_is_the_higher_of_terrain_obstacle_and_chart_with_clearances() {
+fn the_floor_is_the_higher_of_terrain_and_obstacle_with_clearances_and_the_chart_is_none() {
     let c = cfg();
     let s = |t, o, m| FloorSample {
         terrain_ft: t,
         obstacle_ft: o,
         obstacle_covered: true,
         mva_ft: m,
+        gtm_clearance_ft: FLOOR_NONE,
     };
     assert_eq!(
         floor_of(&s(1000, FLOOR_NONE, 1200), None, &c),
@@ -536,9 +544,10 @@ fn the_floor_is_the_higher_of_terrain_obstacle_and_chart_with_clearances() {
         floor_of(&s(1000, 1200, 1200), None, &c),
         Some((1700, FloorKind::Obstacle))
     );
+    // The chart altitude is no floor, however high.
     assert_eq!(
         floor_of(&s(1000, 1200, 3000), None, &c),
-        Some((3000, FloorKind::Mva))
+        Some((1700, FloorKind::Obstacle))
     );
     // A tie goes to the terrain, then the obstacle.
     assert_eq!(
@@ -547,7 +556,7 @@ fn the_floor_is_the_higher_of_terrain_obstacle_and_chart_with_clearances() {
     );
     // No coverage: no floor.
     assert_eq!(floor_of(&s(FLOOR_NONE, 0, 0), None, &c), None);
-    assert_eq!(floor_of(&s(0, 0, FLOOR_NONE), None, &c), None);
+    assert!(floor_of(&s(0, 0, FLOOR_NONE), None, &c).is_some());
     // No obstacle is not no coverage.
     assert!(floor_of(&s(0, FLOOR_NONE, 0), None, &c).is_some());
 }
@@ -649,8 +658,9 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
         obstacle_ft: 1000,
         obstacle_covered: true,
         mva_ft: 3000,
+        gtm_clearance_ft: FLOOR_NONE,
     };
-    assert_eq!(floor_of(&s, None, &c), Some((3000, FloorKind::Mva)));
+    assert_eq!(floor_of(&s, None, &c), Some((1500, FloorKind::Obstacle)));
     assert_eq!(
         floor_of(&s, surf(900), &c),
         Some((1100, FloorKind::Obstacle))
@@ -671,10 +681,11 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
     // Terrain and the obstacle data are needed in a corridor; the chart is not.
     let nochart = FloorSample {
         mva_ft: FLOOR_NONE,
+        gtm_clearance_ft: FLOOR_NONE,
         ..s
     };
     assert!(floor_of(&nochart, surf(900), &c).is_some());
-    assert_eq!(floor_of(&nochart, None, &c), None);
+    assert!(floor_of(&nochart, None, &c).is_some());
     let noterrain = FloorSample {
         terrain_ft: FLOOR_NONE,
         ..s
@@ -702,6 +713,7 @@ fn ridge_world(terrain_ft: i32, ridge_ft: i32) -> impl Fn(i32, i32) -> FloorSamp
             obstacle_ft: FLOOR_NONE,
             obstacle_covered: true,
             mva_ft: 100,
+            gtm_clearance_ft: FLOOR_NONE,
         }
     }
 }
@@ -1206,6 +1218,7 @@ fn a_higher_floor_never_removes_an_alert_over_a_sweep() {
                         obstacle_ft: obstacle,
                         obstacle_covered: true,
                         mva_ft: mva,
+                        gtm_clearance_ft: FLOOR_NONE,
                     };
                     let b = FloorSample {
                         terrain_ft: terrain + bump,
@@ -1216,6 +1229,7 @@ fn a_higher_floor_never_removes_an_alert_over_a_sweep() {
                         },
                         obstacle_covered: true,
                         mva_ft: mva + bump,
+                        gtm_clearance_ft: FLOOR_NONE,
                     };
                     for surface in [None, Some(0), Some(1500), Some(9000)] {
                         let (fa, _) = floor_of(&a, surface.map(hit), &c).unwrap();
@@ -1243,6 +1257,7 @@ fn no_obstacle_data_is_no_coverage_and_the_net_reads_degraded() {
         obstacle_ft: FLOOR_NONE,
         obstacle_covered: false,
         mva_ft: 2000,
+        gtm_clearance_ft: FLOOR_NONE,
     };
     let o = cycle(&mut r, S, &[a], &no_dof);
     assert_eq!(o.stats.no_coverage, 1);
@@ -1353,7 +1368,8 @@ fn a_departure_climbing_normally_does_not_alert_and_one_levelling_off_below_its_
     assert_eq!(r.alerts.items.len(), 1);
     assert_eq!(r.alerts.items[0].worst_kind, FloorKind::Terrain);
     assert_eq!(r.alerts.items[0].worst_floor_ft, 1100);
-    // The same flight outside the corridor (3 km east of the line) is held to the chart.
+    // The same flight outside the corridor (3 km east of the line) is held to terrain plus the
+    // general clearance (500 ft), not the corridor's 100 ft.
     let mut r = rig(&c);
     for k in 0..=30 {
         let mut t = dep(k, 1200.0 + 25.0 * k as f32, 1500.0);
@@ -1362,7 +1378,8 @@ fn a_departure_climbing_normally_does_not_alert_and_one_levelling_off_below_its_
     }
     msaw_finish(&mut r.st, &mut r.alerts);
     assert_eq!(r.alerts.items.len(), 1);
-    assert_eq!(r.alerts.items[0].worst_kind, FloorKind::Mva);
+    assert_eq!(r.alerts.items[0].worst_kind, FloorKind::Terrain);
+    assert_eq!(r.alerts.items[0].worst_floor_ft, 1500);
 }
 
 // REQ: OA-MSAW-053
@@ -1439,4 +1456,70 @@ fn the_corridor_index_gives_the_answer_of_looking_at_every_corridor() {
         inside > 500 && outside > 500,
         "{inside} inside, {outside} outside"
     );
+}
+
+// REQ: OA-MSAW-057
+#[test]
+fn below_the_chart_but_above_the_alert_floor_is_listed_and_counted_and_never_an_alert() {
+    // An aircraft level at 2,600 ft over 1,100 ft terrain (1,500 ft above it) with the chart at
+    // 3,000 ft: 400 ft below the MVA, far above terrain plus 500 ft.
+    let mut r = rig(&cfg());
+    let a = tr(7, 40.0, -88.0, 0.0, 80.0, 2600.0, 0.0);
+    let o = cycle(&mut r, S, &[a], &flat(1100, 3000));
+    assert_eq!(o.stats.violations, 0);
+    assert_eq!(o.stats.below_mva, 1);
+    assert_eq!(r.skips.items.len(), 1);
+    assert_eq!(r.skips.items[0].why, SkipWhy::BelowMva);
+    assert_eq!(o.report, NetReport::Running, "not a shortfall of the net");
+    assert_eq!(msaw_open_len(&r.st), 0);
+    // Above the chart: nothing. Below terrain plus the clearance: an alert, and no below-MVA row.
+    let mut r = rig(&cfg());
+    let o = cycle(
+        &mut r,
+        S,
+        &[tr(7, 40.0, -88.0, 0.0, 80.0, 3100.0, 0.0)],
+        &flat(1100, 3000),
+    );
+    assert_eq!((o.stats.below_mva, o.stats.violations), (0, 0));
+    let o = cycle(
+        &mut r,
+        2 * S,
+        &[tr(7, 40.0, -88.0, 0.0, 80.0, 1500.0, 0.0)],
+        &flat(1100, 3000),
+    );
+    assert_eq!((o.stats.below_mva, o.stats.violations), (0, 1));
+    // No chart at all: no row and the net still runs.
+    let mut r = rig(&cfg());
+    let o = cycle(
+        &mut r,
+        S,
+        &[tr(7, 40.0, -88.0, 0.0, 80.0, 2600.0, 0.0)],
+        &flat(1100, FLOOR_NONE),
+    );
+    assert_eq!((o.stats.below_mva, o.stats.no_coverage), (0, 0));
+    assert_eq!(o.report, NetReport::Running);
+}
+
+// REQ: OA-MSAW-058
+#[test]
+fn an_area_clearance_replaces_the_general_one_outside_the_corridors() {
+    let c = cfg();
+    let s = FloorSample {
+        terrain_ft: 1000,
+        obstacle_ft: FLOOR_NONE,
+        obstacle_covered: true,
+        mva_ft: FLOOR_NONE,
+        gtm_clearance_ft: 200,
+    };
+    assert_eq!(floor_of(&s, None, &c), Some((1200, FloorKind::Terrain)));
+    let general = FloorSample {
+        gtm_clearance_ft: FLOOR_NONE,
+        ..s
+    };
+    assert_eq!(
+        floor_of(&general, None, &c),
+        Some((1500, FloorKind::Terrain))
+    );
+    // In a corridor the corridor's clearance holds, not the area's.
+    assert_eq!(floor_of(&s, surf(0), &c), Some((1100, FloorKind::Terrain)));
 }

@@ -129,6 +129,9 @@ pub struct FloorSample {
     pub obstacle_covered: bool,
     /// The minimum vectoring altitude of the sector containing the point, feet MSL.
     pub mva_ft: i32,
+    /// The clearance above terrain outside the corridors at the point, feet, where an area of the
+    /// adaptation sets one; [`FLOOR_NONE`] for the configuration's `terrain_clearance_ft`.
+    pub gtm_clearance_ft: i32,
 }
 
 /// [`Corridor::kind`]: a final-approach corridor, from the landing threshold outward to the final
@@ -290,6 +293,9 @@ pub enum SkipWhy {
     /// No altimeter setting was usable for the track's altitude (it was lowered by the allowance
     /// and evaluated).
     QnhMissing = 6,
+    /// Predicted below the minimum vectoring altitude but not below the alert floor: listed and
+    /// counted, never an alert and never a shortfall of the net.
+    BelowMva = 7,
 }
 
 /// A track a cycle did not (fully) evaluate, listed and never silently passed.
@@ -353,6 +359,8 @@ pub struct CycleStats {
     pub evaluated: u64,
     /// Rows whose altitude had no altimeter setting (lowered by the allowance, evaluated).
     pub qnh_missing: u64,
+    /// Tracks predicted below the chart altitude and not below their alert floor.
+    pub below_mva: u64,
     /// Tracks with at least one point without coverage (rule 1).
     pub no_coverage: u64,
     /// Track cycles below the floor within the look-ahead.

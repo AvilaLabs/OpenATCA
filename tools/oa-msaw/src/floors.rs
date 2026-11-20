@@ -155,6 +155,35 @@ impl ObstacleIndex {
     }
 }
 
+/// An area with its own clearance above terrain (degrees).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Area {
+    /// South, north, west, east.
+    Box(f64, f64, f64, f64),
+    /// Vertices as (latitude, longitude).
+    Polygon(Vec<(f64, f64)>),
+}
+
+impl Area {
+    pub fn holds(&self, lat: f64, lon: f64) -> bool {
+        match self {
+            Area::Box(s, n, w, e) => lat >= *s && lat <= *n && lon >= *w && lon <= *e,
+            Area::Polygon(v) => {
+                let mut inside = false;
+                let mut j = v.len().saturating_sub(1);
+                for (i, &(yi, xi)) in v.iter().enumerate() {
+                    let (yj, xj) = v.get(j).copied().unwrap_or((yi, xi));
+                    if (yi > lat) != (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi {
+                        inside = !inside;
+                    }
+                    j = i;
+                }
+                inside
+            }
+        }
+    }
+}
+
 /// The lookups with their data and cache. A7.2: cold struct, size guard waived.
 pub struct Floors {
     tile_dir: Option<PathBuf>,
@@ -166,7 +195,8 @@ pub struct Floors {
     absent: BTreeSet<(i32, i32)>,
     obstacles: Option<ObstacleIndex>,
     chart: Option<ChartRaster>,
-    cache: HashMap<(i32, i32, u32), (i32, i32)>,
+    cache: HashMap<(i32, i32, u32), (i32, i32, i32)>,
+    areas: Vec<(Area, i32)>,
     pub stats: FloorStats,
 }
 
@@ -205,6 +235,7 @@ impl Floors {
             obstacles,
             chart: chart.map(ChartRaster::new),
             cache: HashMap::new(),
+            areas: Vec::new(),
             stats: FloorStats::default(),
         }
     }
@@ -222,6 +253,27 @@ impl Floors {
         }
         f.stats.terrain_grid_bytes = f.coarse.bytes() as u64;
         f
+    }
+
+    /// Areas with their own clearance above terrain; where several hold a point the highest wins.
+    pub fn set_areas(&mut self, areas: Vec<(Area, i32)>) {
+        self.areas = areas;
+    }
+
+    /// The clearance of the areas over a lookup cell: the highest of those holding its centre or a
+    /// corner (so that an area's edge is on the high side); [`FLOOR_NONE`] if none does.
+    fn gtm_at(&self, clat: f64, clon: f64) -> i32 {
+        let h = CELL_DEG / 2.0;
+        let mut best = FLOOR_NONE;
+        for (a, ft) in &self.areas {
+            let any = [(0.0, 0.0), (h, h), (h, -h), (-h, h), (-h, -h)]
+                .iter()
+                .any(|(dy, dx)| a.holds(clat + dy, clon + dx));
+            if any && *ft > best {
+                best = *ft;
+            }
+        }
+        best
     }
 
     pub fn has_terrain(&self) -> bool {
@@ -363,7 +415,8 @@ impl Floors {
                 .as_ref()
                 .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
             self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
-            self.cache.insert(key, (t, o));
+            let g = self.gtm_at(clat, clon);
+            self.cache.insert(key, (t, o, g));
         }
         Ok(())
     }
@@ -381,7 +434,7 @@ impl Floors {
             cell_of(lon, CELL_DEG),
             bucket as u32,
         );
-        let (terrain_ft, obstacle_ft) = if let Some(&v) = self.cache.get(&key) {
+        let (terrain_ft, obstacle_ft, gtm_clearance_ft) = if let Some(&v) = self.cache.get(&key) {
             self.stats.cache_hits += 1;
             v
         } else {
@@ -401,14 +454,16 @@ impl Floors {
                 .as_ref()
                 .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
             self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
-            self.cache.insert(key, (t, o));
-            (t, o)
+            let g = self.gtm_at(clat, clon);
+            self.cache.insert(key, (t, o, g));
+            (t, o, g)
         };
         Ok(FloorSample {
             terrain_ft,
             obstacle_ft,
             obstacle_covered: self.obstacles.is_some(),
             mva_ft,
+            gtm_clearance_ft,
         })
     }
 }

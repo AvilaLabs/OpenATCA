@@ -48,15 +48,14 @@ pub fn deg_to_e7(x: f64) -> i32 {
     oa_math::clamp_f64(oa_ieee::round(x * 1.0e7), -1.8e9, 1.8e9) as i32
 }
 
-/// The floor at a point and what set it. `hit` is what the corridors say of the point (`None`
+/// The alert floor at a point and what set it. `hit` is what the corridors say of the point (`None`
 /// outside every corridor whose whole query circle holds it, see [`corridor_hit_at`]). `None`
-/// when the point has no coverage (rule 1): no floor is invented.
+/// when the point has no terrain or obstacle coverage (rule 1): no floor is invented.
 ///
-/// Outside the corridors the floor is the higher of terrain plus its clearance, the obstacle top
-/// plus its clearance and the chart altitude. Inside one the chart altitude does not apply and
-/// the floor is the higher of the surface, if the corridor has one, and terrain or the obstacle
-/// top plus the corridor's clearance: terrain and obstacles protect an approach or a departure
-/// always. Terrain, the obstacle data and (outside a corridor only) the chart must all be there.
+/// Outside the corridors the floor is the higher of terrain plus its clearance (the point's own
+/// where an area sets one, else the configuration's) and the obstacle top plus its clearance; the
+/// chart altitude is not a floor anywhere. Inside a corridor it is the higher of the surface, if the
+/// corridor has one, and terrain or the obstacle top plus the corridor's clearance.
 pub fn floor_of(
     s: &FloorSample,
     hit: Option<CorridorHit>,
@@ -67,7 +66,14 @@ pub fn floor_of(
     }
     let (tc, oc) = match hit {
         Some(h) => (h.clearance_ft, h.clearance_ft),
-        None => (cfg.terrain_clearance_ft, cfg.obstacle_clearance_ft),
+        None => (
+            if s.gtm_clearance_ft == FLOOR_NONE {
+                cfg.terrain_clearance_ft
+            } else {
+                s.gtm_clearance_ft
+            },
+            cfg.obstacle_clearance_ft,
+        ),
     };
     let mut best = (s.terrain_ft.saturating_add(tc), FloorKind::Terrain);
     if s.obstacle_ft != FLOOR_NONE {
@@ -76,21 +82,9 @@ pub fn floor_of(
             best = (o, FloorKind::Obstacle);
         }
     }
-    match hit {
-        Some(h) => {
-            if let Some(a) = h.surface_ft {
-                if a > best.0 {
-                    best = (a, FloorKind::Procedure);
-                }
-            }
-        }
-        None => {
-            if s.mva_ft == FLOOR_NONE {
-                return None;
-            }
-            if s.mva_ft > best.0 {
-                best = (s.mva_ft, FloorKind::Mva);
-            }
+    if let Some(a) = hit.and_then(|h| h.surface_ft) {
+        if a > best.0 {
+            best = (a, FloorKind::Procedure);
         }
     }
     Some(best)
@@ -392,18 +386,23 @@ mod proofs {
         kani::assume(t1 != FLOOR_NONE && m1 != FLOOR_NONE);
         kani::assume(t1 <= t2 && m1 <= m2);
         kani::assume(o1 == FLOOR_NONE || (o2 != FLOOR_NONE && o1 <= o2));
+        // The same area clearance (or none) at both points, the chart altitude not a floor.
+        let g: i32 = kani::any();
+        kani::assume(g == FLOOR_NONE || (g >= 0 && g <= MAX_CLEARANCE_FT));
         let cfg = cfg_with(tc, oc, amc);
         let s1 = FloorSample {
             terrain_ft: t1,
             obstacle_ft: o1,
             obstacle_covered: true,
             mva_ft: m1,
+            gtm_clearance_ft: g,
         };
         let s2 = FloorSample {
             terrain_ft: t2,
             obstacle_ft: o2,
             obstacle_covered: true,
             mva_ft: m2,
+            gtm_clearance_ft: g,
         };
         if let (Some((f1, _)), Some((f2, _))) = (floor_of(&s1, hit, &cfg), floor_of(&s2, hit, &cfg))
         {
@@ -452,6 +451,7 @@ mod proofs {
             obstacle_ft: o,
             obstacle_covered: covered,
             mva_ft: m,
+            gtm_clearance_ft: FLOOR_NONE,
         };
         let hit = CorridorHit {
             surface_ft: Some(a),
