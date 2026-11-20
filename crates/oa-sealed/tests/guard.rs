@@ -38,7 +38,7 @@ fn fake_root(name: &str) -> PathBuf {
 
 // REQ: OA-SEAL-001
 #[test]
-fn the_list_has_the_three_sealed_folders_and_the_python_guard_parses_it_to_the_same_set() {
+fn the_list_has_the_sealed_folders_and_the_python_guard_parses_it_to_the_same_set() {
     let l = parse_list(LIST).unwrap();
     let texts: Vec<&str> = l.entries.iter().map(|e| e.text.as_str()).collect();
     assert_eq!(
@@ -46,7 +46,10 @@ fn the_list_has_the_three_sealed_folders_and_the_python_guard_parses_it_to_the_s
         [
             "scds/rec-20261119",
             "scds/stdds-20261119-holdout",
-            "scds/stdds-smoke-20261119*"
+            "scds/stdds-smoke-20261119*",
+            "raw/adsblol/2026.11.20",
+            "raw/adsblol/2026.11.21",
+            "raw/adsblol/2026.11.22"
         ]
     );
     let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sealed_guard.py");

@@ -9,3 +9,7 @@ root /home/connoravila/Documents/Avila-Labs/openatca-data
 seal scds/rec-20261119
 seal scds/stdds-20261119-holdout
 seal scds/stdds-smoke-20261119*
+# The ADS-B days of hold-out days A, B and C (20 to 22 November 2026).
+seal raw/adsblol/2026.11.20
+seal raw/adsblol/2026.11.21
+seal raw/adsblol/2026.11.22

@@ -366,6 +366,6 @@ mod tests {
     #[test]
     fn the_compiled_in_list_parses() {
         let l = parse_list(LIST).unwrap();
-        assert_eq!(l.entries.len(), 3);
+        assert_eq!(l.entries.len(), 6);
     }
 }

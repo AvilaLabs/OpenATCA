@@ -36,10 +36,11 @@ class SealedGuardTests(unittest.TestCase):
         self.assertIn("OA-SEAL-001", str(c.exception))
 
     # REQ: OA-SEAL-001
-    def test_the_list_parses_to_the_three_entries(self):
+    def test_the_list_parses_to_the_sealed_entries(self):
         root, entries = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
         self.assertEqual([e[0] for e in entries], [
-            "scds/rec-20261119", "scds/stdds-20261119-holdout", "scds/stdds-smoke-20261119*"])
+            "scds/rec-20261119", "scds/stdds-20261119-holdout", "scds/stdds-smoke-20261119*",
+            "raw/adsblol/2026.11.20", "raw/adsblol/2026.11.21", "raw/adsblol/2026.11.22"])
         for bad in ("", "root /d\n", "seal a/b\n", "root /d\nseal a/../b\n", "root d\nseal a\n",
                     "root /d\nseal *\n", "root /d\nfoo bar\n"):
             with self.assertRaises(ValueError):
