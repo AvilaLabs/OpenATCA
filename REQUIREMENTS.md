@@ -5281,7 +5281,7 @@ scope.
   and the working tree at run time is at that commit and clean. This gates which runs count as
   hold-out scores; it does not change what is computed.
 - **OA-TRK-389** The P-002 scorer scores every system, passthrough included, on the truth legs that contain
-  an aircraft's grid samples (the grid is ERAM's paired samples) and on no others; no system chooses its own
+  an aircraft's grid samples (the grid is the paired samples of ERAM's most-paired flight of the aircraft) and on no others; no system chooses its own
   flight. The output prints each system's coverage under that rule and under the replaced per-system rule.
 - **OA-TRK-390** The reacquired group is OpenATCA's rows within 10 s after an update row of the same address
   flagged `O_REACQUIRED`; ERAM and passthrough are shown on the same samples.

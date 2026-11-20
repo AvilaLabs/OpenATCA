@@ -456,6 +456,7 @@ fn on_scored_leg(scored: &ScoredLegs, legs: &LegIndex, addr: u32, t_ms: i64) -> 
 /// out by the leg rule the caller passes (P-004 section 1).
 fn pair_points(
     p: &PairTable,
+    flights: Option<&BTreeMap<u32, u32>>,
     keep: &dyn Fn(u32, i64) -> bool,
     per: &mut PerAc,
     dropped: &mut Dropped,
@@ -471,6 +472,12 @@ fn pair_points(
         let (Some(&a), Some(&t)) = (p.addr.get(i), p.t_ms.get(i)) else {
             continue;
         };
+        // Only ERAM's grid is limited to a flight (the most-paired one); not counted as dropped.
+        if flights
+            .is_some_and(|f| f.get(&a).copied() != Some(p.flight.get(i).copied().unwrap_or(0)))
+        {
+            continue;
+        }
         if !fin(i) {
             dropped.no_cross_along += 1;
             continue;
@@ -512,6 +519,31 @@ fn old_rule_times(p: &PairTable, out: &mut TimesBy) {
         p.cross_m.get(i).is_some_and(|v| v.is_finite())
             && p.along_m.get(i).is_some_and(|v| v.is_finite())
     };
+    let best = most_paired_flights(p);
+    let mut local: TimesBy = BTreeMap::new();
+    for i in 0..n {
+        let (Some(&a), Some(&t)) = (p.addr.get(i), p.t_ms.get(i)) else {
+            continue;
+        };
+        if fin(i) && best.get(&a).copied() == Some(p.flight.get(i).copied().unwrap_or(0)) {
+            local.entry(a).or_default().push(t);
+        }
+    }
+    for (a, mut v) in local {
+        v.sort_unstable();
+        v.dedup();
+        out.entry(a).or_default().extend(v);
+    }
+}
+
+/// Each aircraft's flight with the most finite pairs (the lowest flight on a tie). P-004 keeps
+/// this for ERAM only, where it defines the grid ("as before, from ERAM's paired times").
+fn most_paired_flights(p: &PairTable) -> BTreeMap<u32, u32> {
+    let n = p.t_ms.len();
+    let fin = |i: usize| {
+        p.cross_m.get(i).is_some_and(|v| v.is_finite())
+            && p.along_m.get(i).is_some_and(|v| v.is_finite())
+    };
     let mut count: BTreeMap<(u32, u32), u64> = BTreeMap::new();
     for i in 0..n {
         if let (Some(&a), true) = (p.addr.get(i), fin(i)) {
@@ -527,20 +559,7 @@ fn old_rule_times(p: &PairTable, out: &mut TimesBy) {
             *e = (f, c);
         }
     }
-    let mut local: TimesBy = BTreeMap::new();
-    for i in 0..n {
-        let (Some(&a), Some(&t)) = (p.addr.get(i), p.t_ms.get(i)) else {
-            continue;
-        };
-        if fin(i) && best.get(&a).map(|e| e.0) == Some(p.flight.get(i).copied().unwrap_or(0)) {
-            local.entry(a).or_default().push(t);
-        }
-    }
-    for (a, mut v) in local {
-        v.sort_unstable();
-        v.dedup();
-        out.entry(a).or_default().extend(v);
-    }
+    best.into_iter().map(|(a, (f, _))| (a, f)).collect()
 }
 
 /// The sample times of every aircraft of a per-aircraft table.
@@ -2470,7 +2489,13 @@ fn run(
     drop(loaded);
     let mut er_pts: PerAc = BTreeMap::new();
     let mut er_drop = Dropped::default();
-    pair_points(&ep.pairs, &|_, _| true, &mut er_pts, &mut er_drop);
+    pair_points(
+        &ep.pairs,
+        Some(&most_paired_flights(&ep.pairs)),
+        &|_, _| true,
+        &mut er_pts,
+        &mut er_drop,
+    );
     let mut er_old: TimesBy = BTreeMap::new();
     old_rule_times(&ep.pairs, &mut er_old);
     // P-007: the samples inside an excluded window leave the grid for every system alike. The
@@ -2559,7 +2584,7 @@ fn run(
         let p = pair_legacy(&legacy, &truth, &tix, &rcfg);
         old_rule_times(&p.pairs, &mut oa_old);
         let mut local: PerAc = BTreeMap::new();
-        pair_points(&p.pairs, &on_leg, &mut local, &mut oa_drop);
+        pair_points(&p.pairs, None, &on_leg, &mut local, &mut oa_drop);
         for (a, v) in &mut local {
             for pt in v {
                 let (u, re) = flag_lookup(&flags, *a, pt.t);
@@ -2619,7 +2644,7 @@ fn run(
     let (pp, pt_chosen) = passthrough_pairs(&set_a, &by_addr_time, &er_times, &truth, &tix, &rcfg)?;
     let mut pt_pts: PerAc = BTreeMap::new();
     let mut pt_drop = Dropped::default();
-    pair_points(&pp.pairs, &on_leg, &mut pt_pts, &mut pt_drop);
+    pair_points(&pp.pairs, None, &on_leg, &mut pt_pts, &mut pt_drop);
     eprintln!("passthrough paired aircraft: {}", pt_pts.len());
     // The replaced rule's passthrough, on the replaced rule's grid (coverage record only).
     let (pp_old, _) = passthrough_pairs(&set_a, &by_addr_time, &er_old, &truth, &tix, &rcfg)?;
@@ -2782,7 +2807,7 @@ fn run(
     );
     let _ = writeln!(
         o,
-        "  grid: {grid} samples on {n_ac} aircraft (ERAM sample times on the scored legs, finite cross/along)"
+        "  grid: {grid} samples on {n_ac} aircraft (ERAM's paired samples on each aircraft's most-paired ERAM flight, as before, finite cross/along)"
     );
     let _ = writeln!(
         o,
@@ -3939,6 +3964,7 @@ mod tests {
         let mut dropped = Dropped::default();
         pair_points(
             &p,
+            None,
             &|a, t| on_scored_leg(&scored, &legs, a, t),
             &mut oa,
             &mut dropped,
@@ -3962,6 +3988,7 @@ mod tests {
         let mut d2 = Dropped::default();
         pair_points(
             &other,
+            None,
             &|a, t| on_scored_leg(&scored, &legs, a, t),
             &mut none,
             &mut d2,
@@ -4418,5 +4445,33 @@ mod tests {
             })
             .collect();
         claim_lines(true, c, &pieces, w, n)
+    }
+
+    // REQ: OA-TRK-389
+    #[test]
+    fn only_eram_most_paired_flight_forms_the_grid() {
+        // Address 1: flight 0 has 2 pairs, flight 1 has 4, flight 2 has 4 (lower flight wins a tie).
+        let mut samples: Vec<(u32, u32, i64)> = vec![(1, 0, 0), (1, 0, 1000)];
+        samples.extend((0..4).map(|i| (1, 1, 100_000 + i * 1000)));
+        samples.extend((0..4).map(|i| (1, 2, 200_000 + i * 1000)));
+        samples.push((2, 5, 0));
+        let p = table(&samples);
+        let best = most_paired_flights(&p);
+        assert_eq!(best.get(&1), Some(&1));
+        assert_eq!(best.get(&2), Some(&5));
+        let mut er: PerAc = BTreeMap::new();
+        let mut d = Dropped::default();
+        pair_points(&p, Some(&best), &|_, _| true, &mut er, &mut d);
+        let ts: Vec<i64> = er.get(&1).unwrap().iter().map(|s| s.t).collect();
+        assert_eq!(ts, [100_000, 101_000, 102_000, 103_000]);
+        assert_eq!(er.get(&2).unwrap().len(), 1);
+        // The scored legs are the legs of those samples only.
+        let legs = LegIndex::new(&[
+            leg(1, 0, 50_000),
+            leg(1, 100_000, 150_000),
+            leg(1, 200_000, 250_000),
+        ]);
+        let sc = scored_legs(&er, &legs);
+        assert_eq!(sc.get(&1).unwrap().iter().copied().collect::<Vec<_>>(), [1]);
     }
 }
