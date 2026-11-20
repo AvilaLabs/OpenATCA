@@ -44,11 +44,18 @@ fn write_clip(path: &Path, t0_s: i64) {
 
 /// A STDDS day folder (`rec/stdds`) with one update at `iso` (UTC).
 fn write_stdds(day: &Path, iso: &str) {
+    write_stdds_many(day, &[iso]);
+}
+
+/// A STDDS day folder with one update of track 1 at each of `isos` (UTC).
+fn write_stdds_many(day: &Path, isos: &[&str]) {
     let d = day.join("rec").join("stdds");
     std::fs::create_dir_all(&d).unwrap();
-    let xml = format!(
-        "<?xml version=\"1.0\"?><ns2:TATrackAndFlightPlan xmlns:ns2=\"urn:us:gov:dot:faa:atm:terminal:entities:v4-0:tais:terminalautomationinformation\"><src>AAA</src><record><track><trackNum>1</trackNum><mrtTime>{iso}</mrtTime><adsb>false</adsb><lat>40.0</lat><lon>-75.0</lon></track></record></ns2:TATrackAndFlightPlan>"
-    );
+    let mut xml = "<?xml version=\"1.0\"?><ns2:TATrackAndFlightPlan xmlns:ns2=\"urn:us:gov:dot:faa:atm:terminal:entities:v4-0:tais:terminalautomationinformation\"><src>AAA</src>".to_string();
+    for iso in isos {
+        xml += &format!("<record><track><trackNum>1</trackNum><mrtTime>{iso}</mrtTime><adsb>false</adsb><lat>40.0</lat><lon>-75.0</lon></track></record>");
+    }
+    xml += "</ns2:TATrackAndFlightPlan>";
     std::fs::write(
         d.join("scds-stdds-20261124T000000Z-0001.oaf"),
         frame(xml.as_bytes()),
@@ -82,7 +89,7 @@ const D25: i64 = D24 + 86_400;
 
 // REQ: OA-CEN-009
 #[test]
-fn a_clip_and_a_folder_of_different_days_exit_2_with_the_rounded_spans() {
+fn a_clip_and_a_folder_of_different_days_exit_2_with_the_spans_to_the_second() {
     let t = temp("days");
     let day = t.join("day-20261124");
     write_stdds(&day, "2026-11-24T10:00:30Z");
@@ -96,11 +103,11 @@ fn a_clip_and_a_folder_of_different_days_exit_2_with_the_rounded_spans() {
         "{e}"
     );
     assert!(
-        e.contains("2026-11-24 10:00 to 2026-11-24 10:01 UTC"),
+        e.contains("2026-11-24 10:00:30 to 2026-11-24 10:00:30 UTC"),
         "{e}"
     );
     assert!(
-        e.contains("2026-11-25 10:00 to 2026-11-25 10:01 UTC"),
+        e.contains("2026-11-25 10:00:00 to 2026-11-25 10:00:09 UTC"),
         "{e}"
     );
     std::fs::remove_dir_all(&t).unwrap();
@@ -151,6 +158,52 @@ fn a_budget_below_the_estimate_refuses_before_the_index_is_built() {
         err(&o).contains("building the ADS-B index is estimated"),
         "{}",
         err(&o)
+    );
+    std::fs::remove_dir_all(&t).unwrap();
+}
+
+// REQ: OA-CEN-023
+#[test]
+fn updates_after_the_clip_are_counted_apart_and_the_run_goes_on() {
+    let t = temp("partial");
+    let day = t.join("day-20261124");
+    // The clip covers 10:00:25 to 10:00:34; the update at 10:00:50 is after it.
+    write_stdds_many(&day, &["2026-11-24T10:00:30Z", "2026-11-24T10:00:50Z"]);
+    let clip = t.join("clip.oaf");
+    write_clip(&clip, D24 + 25);
+    let o = run(&[&day, Path::new("--adsb"), &clip], &[], &[]);
+    assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("outside the ADS-B clip (time span) 1 (reconciles)"),
+        "{out}"
+    );
+    assert!(
+        out.contains("2026-11-24 10:00:30 to 2026-11-24 10:00:50 UTC"),
+        "{out}"
+    );
+    std::fs::remove_dir_all(&t).unwrap();
+}
+
+// REQ: OA-CEN-005
+#[test]
+fn a_damaged_gzip_file_exits_3_after_the_report() {
+    let t = temp("gzip");
+    let d = t.join("day").join("rec").join("stdds");
+    std::fs::create_dir_all(&d).unwrap();
+    // The gzip magic, then a method byte no decoder takes, then junk.
+    std::fs::write(
+        d.join("scds-stdds-20261124T000000Z-0001.oaf.gz"),
+        [0x1f, 0x8b, 0xff, 0xff, 0xde, 0xad, 0xbe, 0xef, 0, 1, 2, 3],
+    )
+    .unwrap();
+    let o = run(&[&t.join("day")], &[], &[]);
+    assert_eq!(o.status.code(), Some(3), "{}", err(&o));
+    assert!(err(&o).contains("damaged"), "{}", err(&o));
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("gzip damaged 1"),
+        "the report is printed: {out}"
     );
     std::fs::remove_dir_all(&t).unwrap();
 }
