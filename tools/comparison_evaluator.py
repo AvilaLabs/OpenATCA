@@ -78,7 +78,7 @@ def _csv(path, kind):
                     raise EvaluationError(f"{path}: exceeds row limit {MAX_ROWS}")
                 if None in row or any(v is None or len(v) > MAX_FIELD for v in row.values()):
                     raise EvaluationError(f"{path}:{n}: malformed or oversized record")
-                if sealed_guard.row_in_window(row, *TIME_COLUMNS[kind]):
+                if sealed_guard.row_in_window(row, *TIME_COLUMNS[kind], keep_malformed=True):
                     DROPS.add(); continue
                 rows.append(row)
             order_fields={"truth":("scenario_id","time_ns","flight_id"),"measurements":("receive_ns","event_id")}.get(kind)
@@ -283,7 +283,7 @@ def _validate_identity_binding(path, truth_keys, output_rows):
             seen=set(); track_truth={}; bound={"candidate":set(),"baseline":set()}
             outputs={name:{(*_key(r),_parse_int(r["score_ns"])):r for r in rows} for name,rows in output_rows.items()}
             for row in reader:
-                if sealed_guard.row_in_window(row,("score_ns",)):
+                if sealed_guard.row_in_window(row,("score_ns",),keep_malformed=True):
                     DROPS.add(); continue
                 system=row["system"]
                 if system not in bound: return False,"identity_binding_unknown_system"

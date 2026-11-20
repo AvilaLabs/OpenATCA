@@ -320,7 +320,7 @@ def _csv_keys(path: Path, header: list[str]) -> list[dict[str, str]]:
         times = tuple(c for c in header if c in ("time_ns", "score_ns"))
         rows = []
         for row in reader:
-            if sealed_guard.row_in_window(row, times, ("source_ns", "publish_ns") if "source_ns" in header else ()):
+            if sealed_guard.row_in_window(row, times, ("source_ns", "publish_ns") if "source_ns" in header else (), keep_malformed=True):
                 DROPS.add()
                 continue
             rows.append(row)

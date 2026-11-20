@@ -175,7 +175,7 @@ def _bounded_rows(path: Path, expected_fields: tuple[str, ...], max_rows: int) -
                     raise ValidationError(f"{path.name} exceeds the {max_rows}-row protocol limit")
                 if None in row or any(value is None for value in row.values()):
                     raise ValidationError(f"{path.name} row {count + 1} has the wrong field count")
-                if sealed_guard.row_in_window(row, tuple(c for c in expected_fields if c in _TIME_FIELDS)):
+                if sealed_guard.row_in_window(row, tuple(c for c in expected_fields if c in _TIME_FIELDS), keep_malformed=True):
                     DROPS.add(); continue
                 yield row
         except csv.Error as e:

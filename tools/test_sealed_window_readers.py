@@ -97,6 +97,11 @@ class RowTests(unittest.TestCase):
         self.assertTrue(sg.time_in_window(""))
         self.assertFalse(sg.time_in_window("", optional=True))
         self.assertTrue(sg.time_in_window(None))
+        # a scoring reader keeps a cell that does not parse (its own validation rejects it)
+        self.assertFalse(sg.time_in_window("12x", keep_malformed=True))
+        self.assertTrue(sg.time_in_window(f" +{IN_NS}_0"[:-2], keep_malformed=True))
+        self.assertTrue(sg.row_in_window({"a": str(IN_NS)}, ("a",), keep_malformed=True))
+        self.assertFalse(sg.row_in_window({"a": "x"}, ("a", "b"), keep_malformed=True))
 
     def test_drop_counter_line_is_printed_once_at_exit_even_after_an_error(self):
         code = ("import sys; sys.path.insert(0, %r); import sealed_guard as g; c = g.DropCounter(); c.add(); c.add(2); "
@@ -135,15 +140,44 @@ class FilterExistingTests(unittest.TestCase):
             (corpus / "sub" / "b-ok").write_bytes(b"<x>2026-11-10T12:00:00Z</x>")
             (corpus / "c-frame").write_bytes(frame(OUT_NS) + frame(IN_NS))
             (corpus / "d-trace").write_bytes(json.dumps({"timestamp": 0, "trace": [[(IN_NS) / NS, 1]]}).encode())
-            (corpus / "syn-seed").write_bytes(b"2026-13-45T25:61:61Z")
+            seed = next(p for p in (REPO / "fuzz" / "seeds").rglob("*") if p.is_file())
+            (corpus / "syn-seed").write_bytes(seed.read_bytes())
+            (corpus / "syn-x").write_bytes(b"<x>2026-11-21T12:00:00Z</x>")
             r = subprocess.run([sys.executable, "-I", str(REPO / "fuzz" / "make_corpora.py"), "--filter-existing", str(corpus)],
                                capture_output=True, text=True, env={"PATH": os.environ.get("PATH", "")})
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(r.stdout, "files scanned: 5\nfiles removed: 3\nfiles kept: 2\n")
-            self.assertTrue(r.stderr.strip().endswith("sealed-window rows dropped: 3"))
+            self.assertEqual(r.stdout, "files scanned: 6\nfiles removed: 4\nfiles kept: 2\n")
+            self.assertTrue(r.stderr.strip().endswith("sealed-window rows dropped: 4"))
             self.assertEqual(sorted(p.name for p in corpus.rglob("*") if p.is_file()), ["b-ok", "syn-seed"])
             for name in ("a-bad", "c-frame", "d-trace", "b-ok"):
                 self.assertNotIn(name, r.stdout + r.stderr)
+
+
+class MakeCorporaStaticTests(unittest.TestCase):
+    def test_no_bare_read_listing_or_stat_outside_the_guard(self):
+        import re
+        src = (REPO / "fuzz" / "make_corpora.py").read_text()
+        for i, line in enumerate(src.split("\n"), 1):
+            code = line.split("#")[0]
+            if re.search(r"(?<![\w.])open\(", code) and "'wb'" not in code:
+                self.fail(f"make_corpora.py:{i}: bare open( for reading")
+            for bad in ("os.listdir(", "glob.glob(", "os.path.getsize(", "os.path.exists(", "os.path.isdir(",
+                        "os.scandir(", "os.walk(", "os.stat(", "Path(", ".read_bytes(", ".read_text(", "import glob"):
+                self.assertNotIn(bad, code, f"make_corpora.py:{i}")
+
+    def test_guard_glob_and_listdir_never_return_a_sealed_name(self):
+        with tempfile.TemporaryDirectory() as t:
+            d = Path(t) / "scds"
+            for n in ("tbfm-a", "stdds-20261119-holdout", "rec-20261119"):
+                (d / n).mkdir(parents=True)
+                (d / n / "a.msg").write_bytes(b"x")
+            (d / "rec-20261119" / "day2").mkdir()
+            self.assertEqual(sg.glob(str(d / "*" / "*.msg")), [str(d / "rec-20261119" / "a.msg"), str(d / "tbfm-a" / "a.msg")])
+            self.assertEqual(sg.listdir(d), ["rec-20261119", "tbfm-a"])
+            with self.assertRaises(sg.SealedError):
+                sg.getsize(d / "stdds-20261119-holdout" / "a.msg")
+            with self.assertRaises(sg.SealedError):
+                sg.listdir(d / "rec-20261119" / "day2")
 
 
 class CorpusBuilderTests(unittest.TestCase):
@@ -213,13 +247,17 @@ class ConsumerTests(unittest.TestCase):
     def tearDown(self):
         self._t.cleanup()
 
-    def test_evaluator_drops_in_window_and_unparsable_rows(self):
+    def test_evaluator_drops_in_window_rows_but_unparsable_ones_still_raise(self):
         rows = [dict(scenario_id="s", flight_id="f", time_ns=v, lat_deg=0, lon_deg=0, ve_mps=0, vn_mps=0, phase="p")
                 for v in (OUT_NS, OUT_NS + NS, IN_NS)]
         write_rows(self.d / "t.csv", ce.EXPECTED["truth"], rows)
         before = ce.DROPS.count
         self.assertEqual(len(ce._csv(str(self.d / "t.csv"), "truth")), 2)
         self.assertEqual(ce.DROPS.count, before + 1)
+        rows[1]["time_ns"] = "1_000_000_000"
+        write_rows(self.d / "t2.csv", ce.EXPECTED["truth"], rows)
+        with self.assertRaises(ce.EvaluationError):
+            ce._csv(str(self.d / "t2.csv"), "truth")
         out = [dict(scenario_id="s", flight_id="f", score_ns=OUT_NS, source_ns=IN_NS, publish_ns=OUT_NS, lat_deg=0,
                     lon_deg=0, ve_mps=0, vn_mps=0, status="valid"),
                dict(scenario_id="s", flight_id="f", score_ns=OUT_NS + NS, source_ns="", publish_ns="", lat_deg="",
@@ -238,8 +276,9 @@ class ConsumerTests(unittest.TestCase):
         write_rows(self.d / "t.csv", tss.TRUTH_FIELDS, rows)
         before = tss.DROPS.count
         pts, _ = tss._bounded_csv(self.d / "t.csv", tss.TRUTH_FIELDS, "truth")
-        self.assertEqual(len(pts), 1)
-        self.assertEqual(tss.DROPS.count, before + 2)
+        # the in-window row is dropped; the unparsable one stays for the scorer's own validation
+        self.assertEqual([r["time_ns"] for r in pts], [str(OUT_NS), "zz"])
+        self.assertEqual(tss.DROPS.count, before + 1)
 
     def test_reference_drops_in_window_rows(self):
         rows = [dict(scenario_id="s", flight_id=1, time_ns=v, lat_deg=0, lon_deg=0, ve_mps=0, vn_mps=0, phase="p")
@@ -248,12 +287,16 @@ class ConsumerTests(unittest.TestCase):
         before = ref.DROPS.count
         self.assertEqual(len(list(ref._bounded_rows(self.d / "t.csv", ref.TRUTH_FIELDS, 10))), 1)
         self.assertEqual(ref.DROPS.count, before + 1)
+        rows[0]["time_ns"] = "1_0"
+        write_rows(self.d / "t2.csv", ref.TRUTH_FIELDS, rows)
+        with self.assertRaises(ref.ValidationError):
+            ref._parse_truth(self.d / "t2.csv", 10)
 
     def test_run_comparison_key_reader_drops_in_window_rows(self):
         write_rows(self.d / "g.csv", ["scenario_id", "flight_id", "time_ns"],
-                   [dict(scenario_id="s", flight_id="f", time_ns=v) for v in (OUT_NS, IN_NS)])
+                   [dict(scenario_id="s", flight_id="f", time_ns=v) for v in (OUT_NS, IN_NS, "bad")])
         before = rc.DROPS.count
-        self.assertEqual(len(rc._csv_keys(self.d / "g.csv", ["scenario_id", "flight_id", "time_ns"])), 1)
+        self.assertEqual(len(rc._csv_keys(self.d / "g.csv", ["scenario_id", "flight_id", "time_ns"])), 2)
         self.assertEqual(rc.DROPS.count, before + 1)
 
     def test_motion_study_drops_rows_and_refuses_sealed_paths(self):
@@ -263,6 +306,9 @@ class ConsumerTests(unittest.TestCase):
         before = ms.DROPS.count
         self.assertEqual(len(ms._csv(self.d / "t.csv", ms.TRUTH_FIELDS)), 1)
         self.assertEqual(ms.DROPS.count, before + 1)
+        rows[0]["time_ns"] = "abc"
+        write_rows(self.d / "t2.csv", ms.TRUTH_FIELDS, rows[:1])
+        self.assertEqual(len(ms._csv(self.d / "t2.csv", ms.TRUTH_FIELDS)), 1)  # kept; the row checks reject it
         sealed_dir = self.d / "scds" / "stdds-20261119-holdout"
         sealed_dir.mkdir(parents=True)
         write_rows(sealed_dir / "truth.csv", ms.TRUTH_FIELDS, [])

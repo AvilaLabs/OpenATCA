@@ -10,7 +10,10 @@ import math
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import comparison_evaluator as ce
 import comparison_baseline as cb
@@ -374,10 +377,7 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(ce._num({"v":"1.5e3"},"v","t"),1500.0); self.assertEqual(ce._num({"v":"-.25"},"v","t"),-0.25)
         rows=truth_rows(); rows[1]["time_ns"]="1_000_000_000"
         write(self.t,TRUTH,rows)
-        # a row whose time is not strict integer text is dropped and counted (fail closed), not read
-        before=ce.DROPS.count
-        self.assertEqual(len(ce._csv(self.t,"truth")),len(rows)-1)
-        self.assertEqual(ce.DROPS.count,before+1)
+        with self.assertRaises(ce.EvaluationError): ce.evaluate(self.t,self.m,self.c,self.b,{})
     # REQ: OA-CPR-222
     def test_bootstrap_reports_replicates_and_dropped_count(self):
         good=ce._bootstrap_ratio({("s1","f1"):([1.0],[2.0]),("s2","f2"):([1.0],[2.0])},"rms")

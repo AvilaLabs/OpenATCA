@@ -9,7 +9,7 @@ count is printed as `sealed-window rows dropped: N` once at exit. `--filter-exis
 same tests to the files already in a corpus directory, deletes the ones that match and prints only
 the counts (files scanned, removed, kept).
 """
-import os, sys, struct, glob, gzip, io, zlib, tarfile, zipfile, random
+import os, sys, hashlib, struct, gzip, io, zlib, tarfile, zipfile, random
 # The sealed hold-out guard (tools/sealed_guard.py); -I does not put the script's directory on the path.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
 import sealed_guard
@@ -18,7 +18,14 @@ if sys.argv[1:2] == ['--filter-existing']:
     if len(sys.argv) != 3:
         print('usage: make_corpora.py --filter-existing DIR', file=sys.stderr); sys.exit(2)
     try:
-        _s, _r, _k = sealed_guard.filter_corpus_dir(sys.argv[2], DROPS)
+        # Only a file whose bytes equal a committed seed is left alone, whatever it is named.
+        _fz = os.path.dirname(os.path.abspath(__file__))
+        _seeds, _, _ = sealed_guard.walk_unsealed(_fz + '/seeds')
+        _seeds += [_fz + '/' + n for n in sealed_guard.listdir(_fz) if not sealed_guard.isdir(_fz + '/' + n)]
+        _ok = set()
+        for _p in _seeds:
+            with sealed_guard.open_read(_p, 'rb') as _f: _ok.add(hashlib.sha256(_f.read()).hexdigest())
+        _s, _r, _k = sealed_guard.filter_corpus_dir(sys.argv[2], DROPS, exempt_sha256=_ok)
     except (sealed_guard.SealedError, OSError) as e:
         print('make_corpora: cannot filter:', type(e).__name__, file=sys.stderr); sys.exit(2)
     print(f'files scanned: {_s}\nfiles removed: {_r}\nfiles kept: {_k}')
@@ -32,17 +39,8 @@ REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'seeds')
 random.seed(1)
 SEALED_SKIPPED = 0
 def gl(pattern):
-    """glob() without the sealed paths: each is skipped and counted, never opened (OA-SEAL-012)."""
-    global SEALED_SKIPPED
-    keep = []
-    for p in glob.glob(pattern):
-        try:
-            sealed_guard.production().check(p)
-        except sealed_guard.SealedError:
-            SEALED_SKIPPED += 1
-            continue
-        keep.append(p)
-    return keep
+    """The guard's glob: a sealed path is never listed, opened or returned (OA-SEAL-012)."""
+    return sealed_guard.glob(pattern)
 def rb(path, mode='rb'):
     """Whole file through the guard's opener."""
     with sealed_guard.open_read(path, mode) as f:
@@ -90,7 +88,7 @@ def msgs(pattern, n, maxsz=200_000):
     random.shuffle(fs)
     c = 0
     for f in fs:
-        if os.path.getsize(f) <= maxsz:
+        if sealed_guard.getsize(f) <= maxsz:
             yield os.path.basename(f), rb(f); c += 1
             if c >= n: break
 def xml_msgs(pattern, n):
@@ -126,7 +124,7 @@ for f in gl(S + '/rec/*.oaf'):
 # --- adsb traces, json
 # The newest part among the unsealed days (the real layout is raw/adsblol/YYYY.MM.DD/v*.tar.aa);
 # a sealed day directory is skipped and counted, never listed.
-adsb_parts, adsb_skipped, _ = sealed_guard.walk_unsealed(R + '/adsblol') if os.path.isdir(R + '/adsblol') else ([], 0, 0)
+adsb_parts, adsb_skipped, _ = sealed_guard.walk_unsealed(R + '/adsblol') if sealed_guard.isdir(R + '/adsblol') else ([], 0, 0)
 SEALED_SKIPPED += adsb_skipped
 adsb_parts = sorted(p for p in adsb_parts if p.endswith('.tar.aa'))
 n = 0; tot = 0
@@ -276,7 +274,7 @@ def head_rows(name, n, off=0):
     lines = rd(f'{NA}/{name}.csv').split(b'\n')
     return b'\n'.join([lines[0]] + lines[1 + off:1 + off + n]) + b'\n'
 for name, sel in SEL.items():
-    if not os.path.exists(f'{NA}/{name}.csv'): continue
+    if not sealed_guard.exists(f'{NA}/{name}.csv'): continue
     n_all = rd(f'{NA}/{name}.csv').count(b'\n')
     for k in range(14):
         off = 0 if k == 0 else random.randrange(max(1, n_all - 40))
@@ -331,7 +329,7 @@ repo('arinc424', 'enroute.cifp', cifp(fx('airways') + fx('enroute_waypoints') + 
 repo('arinc424', 'records.txt', (fx('airports') + fx('approach')).encode())
 repo('arinc424', 'header-only.cifp', cifp(''))
 # local corpus: the real file in record-sized chunks, each with the real header and a matching count
-if os.path.exists(CI):
+if sealed_guard.exists(CI):
     cl = rd(CI).split(b'\n')
     hdr = [l for l in cl[:5]]
     data = [l for l in cl[5:] if l]
@@ -375,8 +373,8 @@ for f in sorted(gl(R + '/mva*/*.xml')):
     out('mva', os.path.basename(f), rd(f), 400_000)
 
 # every committed seed also goes into its corpus
-for t in os.listdir(REPO):
-    for f in os.listdir(f'{REPO}/{t}'):
+for t in sealed_guard.listdir(REPO):
+    for f in sealed_guard.listdir(f'{REPO}/{t}'):
         out(t, 'seed-' + f, rb(f'{REPO}/{t}/{f}'))
 print('sealed entries skipped:', SEALED_SKIPPED)
 print('done')

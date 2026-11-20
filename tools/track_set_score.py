@@ -94,7 +94,7 @@ def _bounded_csv(path: Path, expected_fields: tuple[str, ...], kind: str) -> tup
                 if (None in row or any(value is None or len(value) > MAX_FIELD_CHARS for value in row.values())):
                     malformed += 1
                     continue
-                if sealed_guard.row_in_window(row, ("time_ns",), ("source_ns",)):
+                if sealed_guard.row_in_window(row, ("time_ns",), ("source_ns",), keep_malformed=True):
                     DROPS.add(); continue
                 rows.append(row)
             return rows, malformed

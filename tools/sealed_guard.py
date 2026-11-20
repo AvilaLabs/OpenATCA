@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import atexit
 import calendar
+import fnmatch
 import functools
+import hashlib
 import json
 import os
 import re
@@ -437,29 +439,39 @@ class DropCounter:
 _STRICT_INT = re.compile(r"-?[0-9]+", re.ASCII)
 
 
-def time_in_window(value, optional: bool = False, guard: "Guard | None" = None) -> bool:
-    """Whether a time cell (nanoseconds since the Unix epoch, an int or strict integer text) is in a
-    sealed window; a cell that is not a strict integer counts as in the window (fail closed). With
-    `optional`, an empty cell is no time and is not in the window."""
+def time_in_window(value, optional: bool = False, guard: "Guard | None" = None, keep_malformed: bool = False) -> bool:
+    """Whether a time cell (nanoseconds since the Unix epoch, an int or integer text) is in a sealed
+    window. A cell that does not parse counts as in the window (fail closed), unless `keep_malformed`:
+    then it is not in the window and the caller's own validation rejects it, as before. Text is read
+    as Python's `int()` reads it (the widest reading any caller uses), so no spelling of a number
+    escapes. With `optional`, an empty cell is no time and is not in the window."""
     if isinstance(value, bool):
-        return True
+        return not keep_malformed
     if isinstance(value, int):
         return _in_window_ns(value, guard)
     if isinstance(value, str):
         if optional and value == "":
             return False
-        if _STRICT_INT.fullmatch(value):
+        try:
             return _in_window_ns(int(value), guard)
-    return True
+        except ValueError:
+            pass
+    return not keep_malformed
 
 
-def row_in_window(row, columns, optional=(), guard: "Guard | None" = None) -> bool:
-    """Whether a row (a mapping) must be dropped: any of `columns` is missing, unparsable or in a
-    sealed window, or any non-empty `optional` column is."""
+def row_in_window(row, columns, optional=(), guard: "Guard | None" = None, keep_malformed: bool = False) -> bool:
+    """Whether a row (a mapping) must be dropped: any of `columns` is in a sealed window, or any
+    non-empty `optional` column is. A missing or unparsable time also drops the row, unless
+    `keep_malformed` (scoring readers: the row goes on to their own validation, which rejects it)."""
     for c in columns:
-        if c not in row or time_in_window(row[c], guard=guard):
+        if c not in row:
+            if keep_malformed:
+                continue
             return True
-    return any(c in row and time_in_window(row[c], optional=True, guard=guard) for c in optional)
+        if time_in_window(row[c], guard=guard, keep_malformed=keep_malformed):
+            return True
+    return any(c in row and time_in_window(row[c], optional=True, guard=guard, keep_malformed=keep_malformed)
+               for c in optional)
 
 
 # ---- time tokens in text (recorded messages, frames, corpus files) ----------------------------
@@ -727,10 +739,11 @@ def file_has_sealed_time(data: bytes, guard: "Guard | None" = None) -> bool:
     return adsb_trace_in_window(data, guard)
 
 
-def filter_corpus_dir(directory, counter: DropCounter, guard: "Guard | None" = None):
-    """Deletes every file below `directory` that `file_has_sealed_time` flags (files named `syn-*` or
-    `seed-*` are the committed synthetic seeds and stay); a file that cannot be read by the guarded
-    opener is deleted too. Returns (scanned, removed, kept); nothing about a file is printed."""
+def filter_corpus_dir(directory, counter: DropCounter, guard: "Guard | None" = None, exempt_sha256=frozenset()):
+    """Deletes every file below `directory` that `file_has_sealed_time` flags, whatever its name; a
+    file whose bytes (sha256) are one of `exempt_sha256` (the committed seeds) stays; a file that
+    cannot be read by the guarded opener is deleted too. Returns (scanned, removed, kept); nothing
+    about a file is printed."""
     g = guard or production()
     g.check(directory, True)
     scanned = removed = 0
@@ -739,11 +752,10 @@ def filter_corpus_dir(directory, counter: DropCounter, guard: "Guard | None" = N
         for name in sorted(files):
             path = os.path.join(base, name)
             scanned += 1
-            if name.startswith(("syn-", "seed-")):
-                continue
             try:
                 with g.open(path, "rb") as f:
-                    bad = file_has_sealed_time(f.read(), g)
+                    data = f.read()
+                bad = hashlib.sha256(data).hexdigest() not in exempt_sha256 and file_has_sealed_time(data, g)
             except (SealedError, OSError, MemoryError):
                 bad = True
             if bad:
@@ -756,6 +768,80 @@ def filter_corpus_dir(directory, counter: DropCounter, guard: "Guard | None" = N
 def walk_unsealed(root):
     """Production walk: (unsealed files, sealed entries skipped, directories already visited)."""
     return production().walk_unsealed(root)
+
+
+def getsize(path) -> int:
+    """`os.path.getsize` after the guard's check."""
+    production().check(path)
+    return os.path.getsize(path)
+
+
+def exists(path) -> bool:
+    """`os.path.exists` after the guard's check (a sealed path raises SealedError)."""
+    production().check(path)
+    return os.path.exists(path)
+
+
+def isdir(path) -> bool:
+    """`os.path.isdir` after the guard's check."""
+    production().check(path)
+    return os.path.isdir(path)
+
+
+def listdir(path) -> list[str]:
+    """The names in a directory, bytewise sorted; the directory must pass the guard's check (a
+    directory that only holds a sealed entry is listed, its sealed entries are left out)."""
+    g = production()
+    g.check(path, True)
+    out = []
+    for name in sorted(os.listdir(path), key=os.fsencode):
+        try:
+            g.check(os.path.join(os.fspath(path), name), True)
+        except SealedError:
+            continue
+        out.append(name)
+    return out
+
+
+def glob(pattern: str) -> list[str]:
+    """`glob.glob` for `*`, `?` and `[...]` in any component, listing only directories the guard
+    allows and returning only paths it allows (a sealed one is never listed or returned). Hidden
+    names match only a pattern that starts with a dot, as in glob."""
+    magic = re.compile(r"[*?\[]")
+    parts = pattern.split("/")
+    results = ["/" if pattern.startswith("/") else ""]
+    for i, comp in enumerate(parts):
+        if comp == "" and i == 0:
+            continue
+        nxt = []
+        for base in results:
+            if not magic.search(comp):
+                cand = os.path.join(base, comp) if base else comp
+                try:
+                    production().check(cand, True)
+                except SealedError:
+                    continue
+                if os.path.lexists(cand):
+                    nxt.append(cand)
+                continue
+            try:
+                names = listdir(base or ".")
+            except (SealedError, OSError):
+                continue
+            for name in names:
+                if name.startswith(".") and not comp.startswith("."):
+                    continue
+                if fnmatch.fnmatchcase(name, comp):
+                    nxt.append(os.path.join(base, name) if base else name)
+        results = nxt
+    final = []
+    for p in sorted(results):
+        try:
+            production().check(p)
+        except SealedError:
+            continue
+        final.append(p)
+    return final
 
 
 def refuse(*paths) -> None:
