@@ -63,7 +63,7 @@ fn main() -> ExitCode {
         retain_ms: 3_600_000,
         silence_ms: 6 * 3_600_000,
     };
-    let rep = match replay_sfdps(paths, &cfg, &mut |_, _| {}) {
+    let rep = match replay_sfdps(paths, &cfg, &mut |_, _, _| {}) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{e}");

@@ -112,6 +112,7 @@ pub struct ReplayReport {
     pub view_states: [u64; ST_COUNT],
     pub removed_by_reason: [u64; REM_COUNT],
     pub merge: Option<MergeReport>,
+    pub positions: Positions,
     pub table: FlightTable,
 }
 
@@ -122,14 +123,76 @@ pub fn recordings_in(dir: &std::path::Path) -> io::Result<Vec<PathBuf>> {
 
 const WINDOW_END: &str = "end of the replay window";
 
+/// The latest position a flight reported, as the record had it. A7.2: cold struct, size guard
+/// waived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Position {
+    /// The position's own time (`positionTime`), Unix ms.
+    pub ts_ms: i64,
+    /// When it became available: the clock after the operations of its message.
+    pub avail_ms: i64,
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+}
+
+/// The latest position of each flight, keyed by GUFI, bounded: a flight that would take the table
+/// past its capacity is refused and counted, none is evicted. A position older than the one held
+/// is counted and not kept. A7.2: cold struct, size guard waived.
+#[derive(Clone, Debug, Default)]
+pub struct Positions {
+    map: BTreeMap<u128, Position>,
+    capacity: usize,
+    pub updated: u64,
+    pub refused_full: u64,
+    pub out_of_order: u64,
+}
+
+impl Positions {
+    pub fn new(capacity: usize) -> Positions {
+        Positions {
+            capacity,
+            ..Positions::default()
+        }
+    }
+
+    /// The latest position the flight with this GUFI had made available.
+    pub fn get(&self, gufi: u128) -> Option<&Position> {
+        self.map.get(&gufi)
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    fn put(&mut self, gufi: u128, p: Position) {
+        let full = self.map.len() >= self.capacity;
+        match self.map.get_mut(&gufi) {
+            Some(h) if p.ts_ms < h.ts_ms => self.out_of_order += 1,
+            Some(h) => {
+                *h = p;
+                self.updated += 1;
+            }
+            None if full => self.refused_full += 1,
+            None => {
+                self.map.insert(gufi, p);
+                self.updated += 1;
+            }
+        }
+    }
+}
+
 /// Replays the SFDPS recordings `paths` into a new table. Before each operation is applied,
-/// `before_op(table, avail_ms)` is called with the time the operation will become available, so
+/// `before_op(table, positions, avail_ms)` is called with the time the operation will become available, so
 /// the caller can answer questions as of any earlier time; a last call with `i64::MAX` follows the
 /// final operation.
 pub fn replay_sfdps(
     paths: Vec<PathBuf>,
     cfg: &ReplayConfig,
-    before_op: &mut dyn FnMut(&FlightTable, i64),
+    before_op: &mut dyn FnMut(&FlightTable, &Positions, i64),
 ) -> io::Result<ReplayReport> {
     let mut table = flights_new(&cfg.flight).map_err(|e| io::Error::other(format!("{e:?}")))?;
     let mut parser =
@@ -158,12 +221,14 @@ pub fn replay_sfdps(
         view_states: [0; ST_COUNT],
         removed_by_reason: [0; REM_COUNT],
         merge: None,
+        positions: Positions::default(),
         table: flights_new(&FlightConfig {
             capacity: 1,
             ..cfg.flight
         })
         .map_err(|e| io::Error::other(format!("{e:?}")))?,
     };
+    let mut positions = Positions::new(cfg.flight.capacity.saturating_mul(2));
     let mut ops: Vec<Op> = Vec::with_capacity(crate::adapter::MAX_OPS_PER_MESSAGE);
     let mut next_sweep = i64::MIN;
     let spec = spec_from_paths(FeedKind::Sfdps, paths);
@@ -214,12 +279,21 @@ pub fn replay_sfdps(
             row_ops(&events, row, seen_ms, msg, &mut rep.adapter, &mut ops);
             for o in &ops {
                 let avail = flights_op_avail(&table, o);
-                before_op(&table, avail);
+                before_op(&table, &positions, avail);
                 let out = flights_apply(&mut table, o);
                 debug_assert!(matches!(
                     out,
                     Outcome::Applied | Outcome::Unchanged | Outcome::Refused(_)
                 ));
+            }
+            // A position is as available as the operations of its message (the clock after
+            // them); a message with no operation is placed as an operation of its time would be,
+            // and the question is announced first.
+            if let Some(avail) = position_avail(&events, row, seen_ms, &table) {
+                if avail > table.clock_ms {
+                    before_op(&table, &positions, avail);
+                }
+                note_position(&events, row, avail, &mut positions);
             }
         }
         drain_refusals(&mut table, &mut rep);
@@ -238,7 +312,7 @@ pub fn replay_sfdps(
         Err(e) if ended && e.to_string() == WINDOW_END => {}
         Err(e) => return Err(e),
     }
-    before_op(&table, i64::MAX);
+    before_op(&table, &positions, i64::MAX);
     drain_refusals(&mut table, &mut rep);
     drain_removals(&mut table, &mut rep);
     for f in table
@@ -253,8 +327,52 @@ pub fn replay_sfdps(
         }
     }
     rep.fixm = decoder.stats().clone();
+    rep.positions = positions;
     rep.table = table;
     Ok(rep)
+}
+
+/// When the position of a row becomes available, `None` if the row has none or its message is
+/// stamped too far ahead of its receipt (counted by the caller's positions as bad time).
+fn position_avail(
+    ev: &oa_fixm::Events,
+    row: usize,
+    seen_ms: i64,
+    table: &FlightTable,
+) -> Option<i64> {
+    use oa_fixm::{has_field, Field};
+    if !has_field(ev, row, Field::Position) || !has_field(ev, row, Field::PositionTime) {
+        return None;
+    }
+    let ts = *ev.ts_ms.get(row)?;
+    if ts.saturating_sub(seen_ms) > table.cfg.max_future_ms {
+        return None;
+    }
+    Some(
+        seen_ms
+            .max(ts.saturating_add(table.cfg.lag_floor_ms))
+            .max(table.clock_ms),
+    )
+}
+
+fn note_position(ev: &oa_fixm::Events, row: usize, avail_ms: i64, positions: &mut Positions) {
+    let (Some(&g), Some(&pt), Some(&la), Some(&lo)) = (
+        ev.gufi.get(row),
+        ev.pos_time_ms.get(row),
+        ev.lat_e7.get(row),
+        ev.lon_e7.get(row),
+    ) else {
+        return;
+    };
+    positions.put(
+        g,
+        Position {
+            ts_ms: pt,
+            avail_ms,
+            lat_e7: la,
+            lon_e7: lo,
+        },
+    );
 }
 
 fn count_row(rep: &mut ReplayReport, ev: &oa_fixm::Events, row: usize, seen_ms: i64) {

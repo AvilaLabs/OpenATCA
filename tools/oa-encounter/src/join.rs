@@ -12,10 +12,11 @@ use std::path::PathBuf;
 
 use oa_encounter::Encounter;
 use oa_flight::{
-    flight_by_address, flight_is_live, Alt, FlightConfig, FlightTable, ALT_AT_FIX, ALT_BLOCK,
-    ALT_NIL, ALT_SIMPLE, ALT_VFR, ALT_VFR_ON_TOP_PLUS,
+    flight_by_address, flight_is_live, flights_flying_by_callsign, Alt, Flight, FlightConfig,
+    FlightKey, FlightTable, ALT_AT_FIX, ALT_BLOCK, ALT_NIL, ALT_SIMPLE, ALT_VFR,
+    ALT_VFR_ON_TOP_PLUS, KEY_GUFI,
 };
-use oa_flight_sfdps::{recordings_in, replay_sfdps, ReplayConfig};
+use oa_flight_sfdps::{norm_callsign, recordings_in, replay_sfdps, Positions, ReplayConfig};
 
 use crate::report::{at_vertical_minimum, class_name, context_of, Airport, CLIMB_FPM, LEVEL_FT};
 
@@ -26,15 +27,191 @@ pub const NEAR_FROM_FT: f32 = 900.0;
 /// Two clearances at least this far apart are levels 1,000 ft apart: a level-off.
 pub const LEVEL_OFF_FT: i32 = 1000;
 
-/// What the flight record held for one aircraft at one time. A7.2: cold struct, size guard waived.
+/// How the join found the flight of an aircraft.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Key {
+    /// No flight.
+    #[default]
+    None,
+    /// A live flight claims the aircraft address.
+    Address,
+    /// The callsign names one flying flight and its own position agrees with the ADS-B one.
+    CallsignChecked,
+    /// The callsign names one flying flight and it has no position within the window.
+    CallsignUnchecked,
+}
+
+/// Why the callsign join found nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CsReject {
+    /// The ADS-B reports of the aircraft in the previous 60 s carry no callsign.
+    NoCallsign,
+    /// They carry more than one.
+    Unstable,
+    /// No flight that is flying states the callsign.
+    NoLiveFlight,
+    /// Several do.
+    SeveralLive,
+    /// The one flight's own position within 120 s is more than 10 NM from the ADS-B one.
+    PositionDisagrees,
+}
+
+pub const CS_REJECT_NAMES: [&str; 5] = [
+    "no callsign",
+    "unstable callsign",
+    "no live flight with the callsign",
+    "several live flights",
+    "position disagrees",
+];
+
+fn reject_index(r: CsReject) -> usize {
+    match r {
+        CsReject::NoCallsign => 0,
+        CsReject::Unstable => 1,
+        CsReject::NoLiveFlight => 2,
+        CsReject::SeveralLive => 3,
+        CsReject::PositionDisagrees => 4,
+    }
+}
+
+/// The result of the callsign join for one aircraft.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CsResult {
+    /// Not tried (the aircraft is not in a context the callsign join is asked for).
+    #[default]
+    NotTried,
+    Accepted {
+        checked: bool,
+    },
+    Rejected(CsReject),
+}
+
+/// What the flight record held for one aircraft at one time. A7.2: cold struct, size guard
+/// waived.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Answer {
-    /// A live flight claims the aircraft address.
+    /// The flight the join chose (the address one, else the accepted callsign one) is live.
     pub flight: bool,
-    /// A flight claims it but every plan of it had ended.
+    /// A flight claims the address but every plan of it had ended.
     pub ended: bool,
     pub assigned: Alt,
     pub interim: Alt,
+    /// How the chosen flight was found.
+    pub key: Key,
+    /// The flight the address names, and the flight the accepted callsign names: both kept, so
+    /// the two joins can be compared where both are possible.
+    pub addr_flight: Option<FlightKey>,
+    pub cs_flight: Option<FlightKey>,
+    pub cs: CsResult,
+}
+
+/// The callsign an aircraft's ADS-B reports carry over the 60 s before a time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CallsignObs {
+    /// All the callsigns of the window are this one (upper case, trimmed).
+    Stable([u8; 8]),
+    Unstable,
+    #[default]
+    Absent,
+}
+
+/// One question: the flight of an aircraft at a time.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Query {
+    pub addr: u32,
+    /// Unix ns.
+    pub t_ns: i64,
+    pub callsign: CallsignObs,
+    /// The ADS-B position at the time, 1e-7 degree.
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+    /// Whether the callsign join is asked for as well as the address one.
+    pub try_callsign: bool,
+}
+
+/// The longest a flight's own position may be from the query time and still check it, ms.
+pub const POSITION_AGE_MS: i64 = 120_000;
+/// The farthest a flight's own position may be from the ADS-B one, metres (10 NM).
+pub const POSITION_DIST_M: f64 = 10.0 * 1852.0;
+/// The window over which the ADS-B callsign must be stable, ns.
+pub const STABLE_NS: i64 = 60 * 1_000_000_000;
+
+/// The ADS-B reports of the aircraft of interest: time, position and callsign, by address, in
+/// time order.
+pub type Timeline = BTreeMap<u32, Vec<(i64, i32, i32, [u8; 8])>>;
+
+/// The timeline of the reports from `from_ns` up to `to_ns` of the addresses in `want`.
+pub fn timeline(
+    r: &oa_adsb::Reports,
+    want: &std::collections::BTreeSet<u32>,
+    from_ns: i64,
+    to_ns: i64,
+) -> Timeline {
+    let mut t: Timeline = BTreeMap::new();
+    for i in 0..oa_adsb::reports_len(r) {
+        let (Some(&a), Some(&ns), Some(&la), Some(&lo), Some(&c)) = (
+            r.icao.get(i),
+            r.time_ns.get(i),
+            r.lat_e7.get(i),
+            r.lon_e7.get(i),
+            r.callsign.get(i),
+        ) else {
+            continue;
+        };
+        if ns >= from_ns && ns <= to_ns && want.contains(&a) {
+            t.entry(a).or_default().push((ns, la, lo, norm_callsign(c)));
+        }
+    }
+    for v in t.values_mut() {
+        v.sort_by_key(|e| e.0);
+    }
+    t
+}
+
+/// How long before a time the latest ADS-B report may be and still give the aircraft's position, ns.
+pub const ADSB_POSITION_AGE_NS: i64 = 60 * 1_000_000_000;
+
+/// The callsign state of `addr` over the 60 s up to `t_ns`, and its latest position not after it
+/// and within [`ADSB_POSITION_AGE_NS`].
+pub fn observe(tl: &Timeline, addr: u32, t_ns: i64) -> (CallsignObs, Option<(i32, i32)>) {
+    let Some(v) = tl.get(&addr) else {
+        return (CallsignObs::Absent, None);
+    };
+    let hi = v.partition_point(|e| e.0 <= t_ns);
+    let lo = v.partition_point(|e| e.0 <= t_ns - STABLE_NS);
+    let window = v.get(lo..hi).unwrap_or(&[]);
+    let mut seen: Option<[u8; 8]> = None;
+    let mut obs = CallsignObs::Absent;
+    for e in window.iter().filter(|e| e.3 != [0; 8]) {
+        match seen {
+            None => {
+                seen = Some(e.3);
+                obs = CallsignObs::Stable(e.3);
+            }
+            Some(c) if c == e.3 => {}
+            Some(_) => {
+                obs = CallsignObs::Unstable;
+                break;
+            }
+        }
+    }
+    let pos = hi
+        .checked_sub(1)
+        .and_then(|k| v.get(k))
+        .filter(|e| t_ns - e.0 <= ADSB_POSITION_AGE_NS)
+        .map(|e| (e.1, e.2));
+    (obs, pos)
+}
+
+/// Great-circle distance between two positions of 1e-7 degree, metres.
+pub fn distance_m(a: (i32, i32), b: (i32, i32)) -> f64 {
+    let (la1, lo1) = (f64::from(a.0) / 1e7, f64::from(a.1) / 1e7);
+    let (la2, lo2) = (f64::from(b.0) / 1e7, f64::from(b.1) / 1e7);
+    let (p1, p2) = (la1.to_radians(), la2.to_radians());
+    let dl = (lo2 - lo1).to_radians();
+    let h = ((p2 - p1) / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * 6_371_008.8 * h.sqrt().min(1.0).asin()
 }
 
 /// The sfdps input of a run.
@@ -52,6 +229,9 @@ pub struct JoinStats {
     pub refused: u64,
     pub conflicts: u64,
     pub flights_held: usize,
+    /// Flights that reported a position, and positions the bounded table could not take.
+    pub positions: usize,
+    pub positions_refused: u64,
 }
 
 /// The flight-record configuration of the tool: the national day holds about 45,000 flights, so
@@ -67,31 +247,76 @@ fn flight_config(lag_floor_ms: i64) -> FlightConfig {
     }
 }
 
-fn lookup(t: &FlightTable, addr: u32) -> Answer {
-    match flight_by_address(t, addr) {
-        None => Answer::default(),
-        Some(f) if flight_is_live(&f) => Answer {
-            flight: true,
-            ended: false,
-            assigned: f.assigned,
-            interim: f.interim,
-        },
-        Some(_) => Answer {
-            ended: true,
-            ..Answer::default()
-        },
+fn cs_join(t: &FlightTable, pos: &Positions, q: &Query) -> (CsResult, Option<Flight>) {
+    let c = match q.callsign {
+        CallsignObs::Absent => return (CsResult::Rejected(CsReject::NoCallsign), None),
+        CallsignObs::Unstable => return (CsResult::Rejected(CsReject::Unstable), None),
+        CallsignObs::Stable(c) => c,
+    };
+    let (n, first) = flights_flying_by_callsign(t, &c);
+    let Some(f) = first else {
+        return (CsResult::Rejected(CsReject::NoLiveFlight), None);
+    };
+    if n > 1 {
+        return (CsResult::Rejected(CsReject::SeveralLive), None);
+    }
+    let t_ms = q.t_ns.div_euclid(1_000_000);
+    let own = (f.key.kind == KEY_GUFI)
+        .then(|| pos.get(f.key.gufi))
+        .flatten()
+        .filter(|p| (t_ms - p.ts_ms).abs() <= POSITION_AGE_MS);
+    match own {
+        Some(p) if distance_m((p.lat_e7, p.lon_e7), (q.lat_e7, q.lon_e7)) > POSITION_DIST_M => {
+            (CsResult::Rejected(CsReject::PositionDisagrees), None)
+        }
+        Some(_) => (CsResult::Accepted { checked: true }, Some(f)),
+        None => (CsResult::Accepted { checked: false }, Some(f)),
     }
 }
 
-/// The answers to `queries` (aircraft address, Unix ns), in the order given.
-pub fn answer_queries(
-    s: &Sfdps,
-    queries: &[(u32, i64)],
-) -> Result<(Vec<Answer>, JoinStats), String> {
+fn lookup(t: &FlightTable, pos: &Positions, q: &Query) -> Answer {
+    let mut a = Answer::default();
+    let mut chosen = None;
+    match flight_by_address(t, q.addr) {
+        Some(f) if flight_is_live(&f) => {
+            a.addr_flight = Some(f.key);
+            a.key = Key::Address;
+            chosen = Some(f);
+        }
+        Some(_) => a.ended = true,
+        None => {}
+    }
+    if q.try_callsign {
+        let (r, f) = cs_join(t, pos, q);
+        a.cs = r;
+        a.cs_flight = f.map(|f| f.key);
+        if chosen.is_none() {
+            if let (CsResult::Accepted { checked }, Some(f)) = (r, f) {
+                a.key = if checked {
+                    Key::CallsignChecked
+                } else {
+                    Key::CallsignUnchecked
+                };
+                chosen = Some(f);
+            }
+        }
+    }
+    if let Some(f) = chosen {
+        a.flight = true;
+        a.assigned = f.assigned;
+        a.interim = f.interim;
+    }
+    a
+}
+
+/// The answers to `queries`, in the order given. A query at time T is answered before the first
+/// operation that is available after T is applied, and sees the positions of the same moment: for
+/// the address join and the callsign join alike.
+pub fn answer_queries(s: &Sfdps, queries: &[Query]) -> Result<(Vec<Answer>, JoinStats), String> {
     let mut order: Vec<usize> = (0..queries.len()).collect();
-    order.sort_by_key(|&k| queries.get(k).map_or(0, |q| q.1));
+    order.sort_by_key(|&k| queries.get(k).map_or(0, |q| q.t_ns));
     let mut answers = vec![Answer::default(); queries.len()];
-    let end_ns = queries.iter().map(|q| q.1).max().unwrap_or(i64::MIN);
+    let end_ns = queries.iter().map(|q| q.t_ns).max().unwrap_or(i64::MIN);
     let paths = recordings_in(&s.dir).map_err(|e| e.to_string())?;
     let cfg = ReplayConfig {
         flight: flight_config(s.lag_floor_ms),
@@ -102,16 +327,16 @@ pub fn answer_queries(
         silence_ms: 6 * 3_600_000,
     };
     let mut next = 0usize;
-    let rep = replay_sfdps(paths, &cfg, &mut |t, avail_ms| {
+    let rep = replay_sfdps(paths, &cfg, &mut |t, pos, avail_ms| {
         while let Some(&k) = order.get(next) {
-            let Some(&(addr, t_ns)) = queries.get(k) else {
+            let Some(q) = queries.get(k) else {
                 break;
             };
-            if t_ns.div_euclid(1_000_000) >= avail_ms {
+            if q.t_ns.div_euclid(1_000_000) >= avail_ms {
                 break;
             }
             if let Some(a) = answers.get_mut(k) {
-                *a = lookup(t, addr);
+                *a = lookup(t, pos, q);
             }
             next += 1;
         }
@@ -124,6 +349,8 @@ pub fn answer_queries(
         refused: st.refused.iter().sum(),
         conflicts: st.conflicts.iter().sum(),
         flights_held: oa_flight::flights_len(&rep.table),
+        positions: rep.positions.len(),
+        positions_refused: rep.positions.refused_full,
     };
     Ok((answers, stats))
 }
@@ -321,6 +548,191 @@ pub fn join_text(
                 .sum();
             let _ = writeln!(o, "      {label}: {n}");
         }
+    }
+    o.push_str(&key_text(encounters, answers, airports, volume_v_ft));
+    o
+}
+
+/// The two joins compared where both name a flight.
+#[derive(Clone, Copy, Default)]
+struct Cross {
+    both: u64,
+    same: u64,
+    diff: u64,
+    checked: u64,
+    diff_checked: u64,
+    diff_unchecked: u64,
+}
+
+impl Cross {
+    fn add(&mut self, same: bool, checked: bool) {
+        self.both += 1;
+        self.checked += u64::from(checked);
+        if same {
+            self.same += 1;
+        } else {
+            self.diff += 1;
+            if checked {
+                self.diff_checked += 1;
+            } else {
+                self.diff_unchecked += 1;
+            }
+        }
+    }
+}
+
+fn key_rank(k: Key) -> u8 {
+    match k {
+        Key::Address => 0,
+        Key::CallsignChecked => 1,
+        Key::CallsignUnchecked => 2,
+        Key::None => 3,
+    }
+}
+
+const KEY_NAMES: [&str; 4] = [
+    "address",
+    "callsign, position checked",
+    "callsign, no position check",
+    "none",
+];
+
+/// The join split by the key that found the flight, the callsign rejections, and the two keys
+/// compared where both are possible. Counts only.
+fn key_text(
+    encounters: &[Encounter],
+    answers: &[Answer],
+    airports: &[Airport],
+    volume_v_ft: f32,
+) -> String {
+    let mut o = String::new();
+    let ans = |i: usize| answers.get(i).copied().unwrap_or_default();
+    let _ = writeln!(
+        o,
+        "\n  join by key (the callsign is used only where the address names no live flight)"
+    );
+    let _ = writeln!(
+        o,
+        "  callsign rule: one flying flight with the callsign (not ended, not dropped); its own SFDPS position within {} s, if it has one, within 10 NM of the ADS-B one; the ADS-B callsign stable over the previous 60 s",
+        POSITION_AGE_MS / 1000
+    );
+    let mut per_key = [0u64; 4];
+    let mut rejects = [0u64; 5];
+    let (mut aircraft, mut not_tried) = (0u64, 0u64);
+    let (mut addr_both, mut addr_one, mut addr_none) = (0u64, 0u64, 0u64);
+    let (mut both, mut one, mut none) = (0u64, 0u64, 0u64);
+    let mut weakest = [0u64; 3];
+    let mut by_weakest = [[0u64; 5]; 3];
+    let mut n = 0u64;
+    // [group, all tried]: both possible, same flight, different flight, checked-different, unchecked-different.
+    let mut cross = [Cross::default(); 2];
+    for (k, e) in encounters.iter().enumerate() {
+        let (a, b) = (ans(2 * k), ans(2 * k + 1));
+        let group = is_near_climb(e, airports, volume_v_ft);
+        for x in [&a, &b] {
+            if x.cs == CsResult::NotTried {
+                continue;
+            }
+            if let (Some(af), Some(cf), CsResult::Accepted { checked }) =
+                (x.addr_flight, x.cs_flight, x.cs)
+            {
+                for (c, on) in cross.iter_mut().zip([group, true]) {
+                    if on {
+                        c.add(af == cf, checked);
+                    }
+                }
+            }
+        }
+        if !group {
+            continue;
+        }
+        n += 1;
+        let v = verdict(&a, &b, assigned_of);
+        for x in [&a, &b] {
+            aircraft += 1;
+            if let Some(c) = per_key.get_mut(usize::from(key_rank(x.key))) {
+                *c += 1;
+            }
+            if x.cs == CsResult::NotTried {
+                not_tried += 1;
+            }
+            if x.addr_flight.is_none() {
+                if let CsResult::Rejected(r) = x.cs {
+                    if let Some(c) = rejects.get_mut(reject_index(r)) {
+                        *c += 1;
+                    }
+                }
+            }
+        }
+        match u8::from(a.addr_flight.is_some()) + u8::from(b.addr_flight.is_some()) {
+            2 => addr_both += 1,
+            1 => addr_one += 1,
+            _ => addr_none += 1,
+        }
+        match u8::from(a.flight) + u8::from(b.flight) {
+            2 => {
+                both += 1;
+                let w = key_rank(a.key).max(key_rank(b.key)).min(2);
+                if let Some(c) = weakest.get_mut(usize::from(w)) {
+                    *c += 1;
+                }
+                if let Some(c) = by_weakest
+                    .get_mut(usize::from(w))
+                    .and_then(|r| r.get_mut(vindex(v)))
+                {
+                    *c += 1;
+                }
+            }
+            1 => one += 1,
+            _ => none += 1,
+        }
+    }
+    let _ = writeln!(
+        o,
+        "  the group: {n} encounters, {aircraft} aircraft ({not_tried} without the callsign join)"
+    );
+    let _ = writeln!(o, "  aircraft by the key that found their flight:");
+    for (name, c) in KEY_NAMES.iter().zip(per_key) {
+        let _ = writeln!(o, "    {name}: {c}");
+    }
+    let _ = writeln!(
+        o,
+        "  callsign rejections, aircraft whose address named no live flight:"
+    );
+    for (name, c) in CS_REJECT_NAMES.iter().zip(rejects) {
+        let _ = writeln!(o, "    {name}: {c}");
+    }
+    let _ = writeln!(o, "  flight record for both aircraft, address only: {addr_both} of {n}; one {addr_one}, neither {addr_none}");
+    let _ = writeln!(o, "  flight record for both aircraft, address then callsign: {both} of {n}; one {one}, neither {none}");
+    let _ = writeln!(
+        o,
+        "  encounters with a record for both, by the weakest key of the two:"
+    );
+    for (k, name) in KEY_NAMES.iter().take(3).enumerate() {
+        let r = by_weakest.get(k).copied().unwrap_or([0; 5]);
+        let _ = writeln!(
+            o,
+            "    {name}: {} (level-off {}, does not stop {}, no altitude {}, not one level {})",
+            weakest.get(k).copied().unwrap_or(0),
+            r[0],
+            r[1],
+            r[3],
+            r[4]
+        );
+    }
+    let _ = writeln!(
+        o,
+        "  address and callsign compared where both name a flight (the callsign error):"
+    );
+    for (label, c) in [
+        ("group aircraft", cross[0]),
+        ("every aircraft the callsign join was tried for", cross[1]),
+    ] {
+        let _ = writeln!(
+            o,
+            "    {label}: both possible {}, the same flight {}, different flights {} (callsign checked {} of the both-possible, different with check {}, different without {})",
+            c.both, c.same, c.diff, c.checked, c.diff_checked, c.diff_unchecked
+        );
     }
     o
 }

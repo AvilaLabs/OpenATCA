@@ -1456,3 +1456,35 @@ fn a_question_is_not_advanced_past_an_operation_that_will_be_refused_for_its_key
     let good = assign(k, 5_000_000, 30_000);
     assert_eq!(flights_op_avail(&t, &good), 5_000_000 + 61_000);
 }
+
+// REQ: OA-FLT-025
+#[test]
+fn flights_flying_with_a_callsign_are_counted_without_the_ended_and_the_dropped() {
+    let mut t = table();
+    let id = |k: FlightKey, cs: &str, ts: i64| {
+        let mut o = op(OP_IDENTITY, k, ZAU, ts);
+        o.callsign = code(cs);
+        o
+    };
+    for n in 1..=4u128 {
+        live(&mut t, gk(n));
+        assert_eq!(apply(&mut t, &id(gk(n), "ABC1", 2_000)), Outcome::Applied);
+    }
+    assert_eq!(flights_flying_by_callsign(&t, &code("ABC1")).0, 4);
+    assert_eq!(flights_flying_by_callsign(&t, &code("ZZZ9")).0, 0);
+    assert_eq!(
+        flights_flying_by_callsign(&t, &[0; 8]).0,
+        0,
+        "no callsign names no flight"
+    );
+    apply(&mut t, &op(OP_COMPLETE, gk(1), ZAU, 3_000));
+    apply(&mut t, &op(OP_DROP, gk(2), ZAU, 3_000));
+    let (n, first) = flights_flying_by_callsign(&t, &code("ABC1"));
+    assert_eq!(n, 2);
+    assert!(flight_is_flying(&first.unwrap()));
+    assert!(
+        flight_is_live(&flight_get(&t, &gk(2)).unwrap()),
+        "dropped is live but not flying"
+    );
+    assert!(!flight_is_flying(&flight_get(&t, &gk(2)).unwrap()));
+}

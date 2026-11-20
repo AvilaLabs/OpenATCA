@@ -141,6 +141,33 @@ pub fn flight_is_live(f: &Flight) -> bool {
         .any(|v| v.state != ST_NONE && !is_terminal(v.state))
 }
 
+/// Whether any plan view of the flight is proposed, active or departed: not ended and not dropped.
+pub fn flight_is_flying(f: &Flight) -> bool {
+    f.views
+        .iter()
+        .take(usize::from(f.n_views))
+        .any(|v| v.state == ST_PROPOSED || v.state == ST_ACTIVE || v.state == ST_DEPARTED)
+}
+
+/// The flights that are flying ([`flight_is_flying`]) and state this callsign, counted, and the
+/// first of them in slot order. One pass over the table, at most its length.
+pub fn flights_flying_by_callsign(t: &FlightTable, callsign: &[u8; 8]) -> (usize, Option<Flight>) {
+    let mut n = 0usize;
+    let mut first = None;
+    if *callsign == [0; 8] {
+        return (0, None);
+    }
+    for f in &t.flights {
+        if f.key.kind != KEY_FREE && f.callsign == *callsign && flight_is_flying(f) {
+            n += 1;
+            if first.is_none() {
+                first = Some(*f);
+            }
+        }
+    }
+    (n, first)
+}
+
 /// The most advanced state among the views: departed, active, proposed, dropped, completed,
 /// cancelled, in that order; [`ST_NONE`] for a flight with no view.
 pub(crate) fn best_state(f: &Flight) -> u8 {

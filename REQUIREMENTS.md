@@ -5577,6 +5577,20 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   opens anything, and exits 2; every recording it reads is opened through the same guard.
 - **OA-FLT-024** A question about a flight is answered as of its time: an operation received before it but not yet aged in by the
   lag floor is not seen by it, and one that has aged in is.
+- **OA-FLT-025** The callsign join names a flight only where the address names none, and only when the ADS-B callsign is stable,
+  exactly one flight that is flying (a plan proposed, active or departed; not ended, not dropped) states it, and the flight's own
+  SFDPS position within 120 s of the question, where it has one, is within 10 NM of the ADS-B position; with no such position the
+  join stands and is counted apart as unchecked. Each rejection (no callsign, unstable callsign, no live flight, several live
+  flights, position disagrees) is counted.
+- **OA-FLT-026** The callsign join is read as of the closest approach exactly as the address join is: a flight, an identity or a
+  position that ages in after the question is not used by it.
+- **OA-FLT-027** Where the address and the callsign both name a flight the two are kept and compared, and the counts of the same
+  flight and of different flights are reported, as the measure of the callsign join's error.
+- **OA-FLT-028** The ADS-B callsign of an aircraft is stable when the reports of the previous 60 s carry one callsign (upper
+  case, trimmed); none is no callsign and more than one is unstable; the position is the latest report not after the question
+  and not older than 60 s.
+- **OA-FLT-029** The adapter makes a callsign upper case and trimmed, and the replay keeps the latest position of each flight,
+  bounded, as of the time it ages in.
 - **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
   refuses a window that is open at one end or runs backwards.
 
