@@ -91,6 +91,9 @@ pub struct ReplayReport {
     /// Documents the XML parser refused, and documents the decoder refused whole.
     pub docs_unparsed: u64,
     pub docs_refused: u64,
+    /// Refused documents by reason: unsupported root, too many elements, input mismatch, row
+    /// capacity, string capacity.
+    pub refused_by: [u64; 5],
     pub first_recv_ns: i64,
     pub last_recv_ns: i64,
     pub fixm: oa_fixm::Stats,
@@ -139,6 +142,7 @@ pub fn replay_sfdps(
         frames_after_end: 0,
         docs_unparsed: 0,
         docs_refused: 0,
+        refused_by: [0; 5],
         first_recv_ns: i64::MAX,
         last_recv_ns: i64::MIN,
         fixm: decoder.stats().clone(),
@@ -189,8 +193,18 @@ pub fn replay_sfdps(
             }
         };
         oa_fixm::clear_events(&mut events);
-        if decoder.decode_prefix(&doc, m.payload, &mut events).is_err() {
+        if let Err(e) = decoder.decode_prefix(&doc, m.payload, &mut events) {
             rep.docs_refused += 1;
+            let k = match e {
+                oa_fixm::FixmError::UnsupportedRoot => 0,
+                oa_fixm::FixmError::TooManyElements { .. } => 1,
+                oa_fixm::FixmError::InputMismatch => 2,
+                oa_fixm::FixmError::RowCapacity { .. } => 3,
+                oa_fixm::FixmError::StringCapacity { .. } => 4,
+            };
+            if let Some(c) = rep.refused_by.get_mut(k) {
+                *c += 1;
+            }
             return Ok(());
         }
         for row in 0..events.len {

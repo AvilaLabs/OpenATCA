@@ -87,7 +87,36 @@ fn main() -> ExitCode {
         "interim value {} nil {}",
         rep.interim_value, rep.interim_nil
     );
-    println!("present {:?}", rep.present);
+    println!(
+        "refused_by (root, elements, mismatch, rows, strings) {:?}",
+        rep.refused_by
+    );
+    for (k, n) in rep.present.iter().enumerate() {
+        println!(
+            "present {} {n}",
+            oa_fixm::FIELD_NAMES.get(k).copied().unwrap_or("?")
+        );
+    }
+    for (k, n) in rep
+        .fixm
+        .field_errors
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n > 0)
+    {
+        println!(
+            "field_error {} {n}",
+            oa_fixm::FIELD_NAMES.get(k).copied().unwrap_or("?")
+        );
+    }
+    println!(
+        "fixm messages {} rows {} rejected {:?} unknown_elements {} unknown_attributes {}",
+        rep.fixm.messages,
+        rep.fixm.rows,
+        rep.fixm.rejected,
+        rep.fixm.unknown_elements,
+        rep.fixm.unknown_attributes
+    );
     println!("adapter {:?}", rep.adapter);
     let s = &rep.table.stats;
     println!(
