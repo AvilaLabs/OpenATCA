@@ -2032,6 +2032,56 @@
           }
         }
       ]
+    },
+    "rt239_ci_memory_split_runs": {
+      "note": "The current-filter and anchor-filter large-move proofs were split on 2026-11-20 after a 16 GB CI runner ran out of memory on the first (CI run 44723758730, shard 0/2, at c8a03f5). Before the split they peaked at 13.7 GB (current filter, measured locally at c8a03f5) and 13.8 GB (anchor filter). Each run below is one local run by tools/rust_proof_suite.py with a one-proof registry, one at a time, Kani 0.68.0, CBMC 6.11.0, Cargo 1.89.0, on branch lane-kani-mem before commit; status PASS for all. wall_clock is /usr/bin/time's elapsed time including compilation and max_rss_kib its maximum resident set size. The horizontal half was run under its first name (update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_current_filter_horizontal), renamed afterwards because Kani's substring match selected it together with the current-filter harness; its body is unchanged. The other current-filter runs came before the anchor split was written, and the anchor pair after it; the commit then re-wrapped one function signature (rustfmt), with no change to any harness body.",
+      "proofs": [
+        {
+          "id": "large-move-decision-rejected-current-filter",
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_current_filter",
+          "package": "oa-track",
+          "date": "2026-11-20",
+          "status": "PASS",
+          "wall_clock": "2:50.85",
+          "max_rss_kib": 4538324
+        },
+        {
+          "id": "large-move-decision-rejected-current-filter-horizontal",
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_keeps_the_horizontal_current_filter",
+          "package": "oa-track",
+          "date": "2026-11-20",
+          "status": "PASS",
+          "wall_clock": "2:37.89",
+          "max_rss_kib": 3422136
+        },
+        {
+          "id": "large-move-decision-rejected-current-filter-snapshot",
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_keeps_the_snapshot_with_any_current_filter",
+          "package": "oa-track",
+          "date": "2026-11-20",
+          "status": "PASS",
+          "wall_clock": "5:02.95",
+          "max_rss_kib": 12124752
+        },
+        {
+          "id": "large-move-decision-rejected-anchor-filter",
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_anchor_filter",
+          "package": "oa-track",
+          "date": "2026-11-20",
+          "status": "PASS",
+          "wall_clock": "3:24.98",
+          "max_rss_kib": 6345400
+        },
+        {
+          "id": "large-move-decision-rejected-anchor-filter-snapshot",
+          "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_keeps_the_snapshot_with_any_anchor_filter",
+          "package": "oa-track",
+          "date": "2026-11-20",
+          "status": "PASS",
+          "wall_clock": "5:06.58",
+          "max_rss_kib": 12121720
+        }
+      ]
     }
   },
   "miri": {

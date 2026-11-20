@@ -135,6 +135,13 @@ def validate_registry(data: Any) -> list[str]:
                     errors.append(f"{label}.loop_unwind_overrides contains an unknown preset")
                 elif package != preset["package"] or harness not in preset["harnesses"]:
                     errors.append(f"{label}: loop-unwind preset is not applicable to package/harness")
+    # Kani's --harness matches a substring of the full name, so a harness whose name is
+    # contained in another's selects both and the run fails its one-harness check.
+    names = sorted({(package, harness) for package, harness in harnesses})
+    for package, harness in names:
+        for other_package, other in names:
+            if package == other_package and harness != other and harness in other:
+                errors.append(f"harness name {harness} is contained in {other}; Kani would select both")
     return sorted(set(errors))
 
 
