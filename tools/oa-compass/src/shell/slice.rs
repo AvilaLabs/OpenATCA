@@ -19,12 +19,13 @@ use super::adsb_export::{self, EDITION as EDITION_021, RECORDS_PER_BLOCK};
 use super::dirs::{check_out, create_tracked, remove_created};
 use super::error::{io_err, ExportError};
 use super::export;
+use super::guard::SEALED_DAY;
 use super::guard::{
     copy_guarded, open_guarded, read_to_string_guarded, refuse_holdout, refuse_holdout_out,
     refuse_sealed_date,
 };
 use super::notes::clock_text;
-use crate::core::time::UNITS_PER_DAY;
+use crate::core::time::{touches_day, UNITS_PER_DAY};
 
 /// What one file of the slice holds. A7.2: cold.
 // A7.2: cold struct, size guard waived
@@ -139,6 +140,50 @@ fn len_of(b: &Block) -> usize {
     }
 }
 
+/// Whether a record whose time of day is `units` (1/128 s) on UTC day `day` is on the sealed
+/// hold-out day or inside a sealed window (the listed span widened by its margin), by its raw
+/// time or once rounded.
+fn is_sealed_time(day: i64, units: u32) -> bool {
+    let ns = day
+        .saturating_mul(86_400_000_000_000)
+        .saturating_add(i64::from(units).saturating_mul(7_812_500));
+    touches_day(ns, SEALED_DAY) || oa_sealed::in_sealed_window(ns)
+}
+
+/// Records of one file that could be in the sealed hold-out day or window, found by their time of
+/// day and the day the source README gives. A time of day carries no date, so a file in which the
+/// time goes back (midnight wrapped) may hold records of the day after: its records are tested on
+/// both days. `either` counts the records sealed on the README's day or the next, `on_day` those
+/// sealed on the README's day alone.
+#[derive(Clone, Copy, Debug, Default)]
+struct SealedScan {
+    on_day: u64,
+    either: u64,
+    prev: u32,
+    wrapped: bool,
+}
+
+impl SealedScan {
+    fn note(&mut self, day: i64, units: u32, first: bool) {
+        if !first && units < self.prev {
+            self.wrapped = true;
+        }
+        self.prev = units;
+        let here = is_sealed_time(day, units);
+        self.on_day += u64::from(here);
+        self.either += u64::from(here || is_sealed_time(day.saturating_add(1), units));
+    }
+
+    /// The records that could be sealed: on either day if the time wrapped, else on the README's.
+    fn hits(&self) -> u64 {
+        if self.wrapped {
+            self.either
+        } else {
+            self.on_day
+        }
+    }
+}
+
 /// Slices one file into `out_path`; returns what it holds, or `None` for the records kept if the
 /// window holds none (no file is written then).
 fn slice_file(
@@ -146,6 +191,8 @@ fn slice_file(
     out_path: &Path,
     from: u32,
     to: u32,
+    day: i64,
+    sealed: &mut u64,
 ) -> Result<(SliceFile, Option<PathBuf>), ExportError> {
     let name = input
         .file_name()
@@ -172,6 +219,7 @@ fn slice_file(
     let mut source = None;
     let mut cat = 0u8;
     let mut late = 0u64;
+    let mut scan = SealedScan::default();
     let result: Result<(), ExportError> = (|| {
         while next_block(&mut r, &mut buf, input)? {
             let this = buf.first().copied().unwrap_or(0);
@@ -198,6 +246,7 @@ fn slice_file(
                         "{name}: a record without its time item"
                     )));
                 };
+                scan.note(day, *t, info.records_in == 0);
                 info.records_in = info.records_in.saturating_add(1);
                 if i64::from(*t) >= UNITS_PER_DAY {
                     late = late.saturating_add(1);
@@ -220,6 +269,16 @@ fn slice_file(
             }
         }
         flush(&mut pending, &mut pending_n, cat, &mut w, &mut info)?;
+        // Any record that could be in the sealed window refuses the whole slice, whichever
+        // records the window keeps.
+        if scan.hits() > 0 {
+            return Err(ExportError::Input(format!(
+                "{name}: {} records could be on the sealed hold-out day or in a sealed window (time of day on {}{}); nothing was written",
+                scan.hits(),
+                export::date_text(day),
+                if scan.wrapped { " or the day after, the time of day wraps past midnight" } else { "" }
+            )));
+        }
         if late > 0 {
             return Err(ExportError::Verify(format!(
                 "{name}: {late} records with a time of day of 24:00:00 or later (a time of day is below 86400 s)"
@@ -228,6 +287,7 @@ fn slice_file(
         w.flush().map_err(|e| io_err(&partial, &e))
     })();
     drop(w);
+    *sealed = sealed.saturating_add(scan.hits());
     if let Err(e) = result {
         let _ = fs::remove_file(&partial);
         return Err(e);
@@ -333,6 +393,18 @@ pub fn slice_dir(
     slice_dir_with(input, out, from, to, &mut |_| Ok(()))
 }
 
+/// [`slice_dir`], with the records that could be in a sealed window put in `sealed` on every exit
+/// once the files have been read, a refusal included (the caller prints the drop line from it).
+pub fn slice_dir_tallied(
+    input: &Path,
+    out: &Path,
+    from: u32,
+    to: u32,
+    sealed: &mut u64,
+) -> Result<Vec<SliceFile>, ExportError> {
+    slice_dir_hooked(input, out, from, to, &mut |_| Ok(()), sealed)
+}
+
 /// [`slice_dir`] with a hook called at each [`Stage`]; an error from the hook fails the run as
 /// any other error does. On any error every file this run created in `out` (partial or already
 /// renamed) is removed.
@@ -342,6 +414,18 @@ pub fn slice_dir_with(
     from: u32,
     to: u32,
     hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
+) -> Result<Vec<SliceFile>, ExportError> {
+    slice_dir_hooked(input, out, from, to, hook, &mut 0)
+}
+
+/// [`slice_dir_with`], also putting the records that could be in a sealed window in `sealed`.
+pub fn slice_dir_hooked(
+    input: &Path,
+    out: &Path,
+    from: u32,
+    to: u32,
+    hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
+    sealed: &mut u64,
 ) -> Result<Vec<SliceFile>, ExportError> {
     check_window(from, to)?;
     // Before the directory is listed: a sealed source is never read, not even its names.
@@ -410,7 +494,7 @@ pub fn slice_dir_with(
             let partial = dest.with_extension("ast.partial");
             // The partial exists once slice_file runs; list it first so a failure removes it.
             pending.push((partial, dest.clone()));
-            let (info, kept) = slice_file(p, &dest, from, to)?;
+            let (info, kept) = slice_file(p, &dest, from, to, day, sealed)?;
             if kept.is_none() {
                 pending.pop();
             }

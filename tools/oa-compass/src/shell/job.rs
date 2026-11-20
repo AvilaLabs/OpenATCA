@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use oa_bench::input::{load_with, FeedInput};
+use oa_bench::input::{load_counted, FeedInput};
 use oa_bench::legacy::Legacy;
 use oa_replay::FeedKind;
 
@@ -26,8 +26,8 @@ use super::notes::{
     data_sources_for, readme_with, Extras, ADSB_SOURCE, ERAM_SOURCE, OPENATCA_SOURCE,
 };
 use super::run::{
-    export_adsb_clip, export_adsb_loaded, export_eram, ClipInfo, EramAddress, EramInfo, InputsMode,
-    OpenatcaRows, TrackRunInfo,
+    export_adsb_clip, export_adsb_loaded, export_eram, AdsbInfo, ClipInfo, EramAddress, EramInfo,
+    InputsMode, OpenatcaRows, TrackRunInfo,
 };
 use super::slice::Stage;
 use crate::core::time::touches_day;
@@ -131,7 +131,9 @@ pub fn run_job_tallied(
     // Before any directory or file is created, and before the tracker runs: no input time may be
     // on the sealed day.
     refuse_holdout_out(&out)?;
-    let mut pre = prescan_sealed(&job)?;
+    let mut pre = prescan_sealed(&job, sealed)?;
+    // What the pre-scan read is the count of every exit from here on (the inputs are read once).
+    let pre_total = *sealed;
     check_out(&out)?;
     let mut run_dirs: Vec<PathBuf> = Vec::new();
     create_tracked(&out, &mut run_dirs)?;
@@ -140,12 +142,12 @@ pub fn run_job_tallied(
     let has_adsb = job.adsb.is_some();
     let result = match export_all(&job, &mut pre, &mut done, t0, log) {
         Ok(()) => {
-            *sealed = done.sealed_window_dropped();
+            *sealed = pre_total.max(done.sealed_window_dropped());
             let mode = has_adsb.then_some(job.mode);
             commit_staged(&job, done, mode, hook, &mut created, t0)
         }
         Err(e) => {
-            *sealed = done.sealed_window_dropped();
+            *sealed = pre_total.max(done.sealed_window_dropped());
             done.abort();
             Err(e)
         }
@@ -311,11 +313,14 @@ fn eram_details(info: &EramInfo) -> Vec<String> {
 /// A time within 1/256 s before the sealed day's midnight (for example 2026-11-18 23:59:59.998)
 /// is refused too: its raw day is the day before, but it rounds to 00:00:00 of the sealed day,
 /// where the export would file it.
-fn prescan_sealed(job: &Job) -> Result<Preloaded, ExportError> {
+fn prescan_sealed(job: &Job, sealed: &mut u64) -> Result<Preloaded, ExportError> {
     let mut pre = Preloaded::default();
     if let Some(clip) = &job.adsb {
-        let c = oa_bench::input::load_adsb_with(clip, &guarded_opener())
-            .map_err(|e| ExportError::Input(format!("{}: {e}", clip.display())))?;
+        // The count is in `sealed` as soon as the frames are read, an error included.
+        let mut n = 0u64;
+        let loaded = oa_bench::input::load_adsb_counted(clip, &guarded_opener(), &mut n);
+        *sealed = sealed.saturating_add(n);
+        let c = loaded.map_err(|e| ExportError::Input(format!("{}: {e}", clip.display())))?;
         let n = oa_adsb::reports_len(&c.reports);
         let mut hits = 0u64;
         for i in 0..n {
@@ -330,14 +335,19 @@ fn prescan_sealed(job: &Job) -> Result<Preloaded, ExportError> {
     }
     match &job.sfdps {
         Some(EramSource::Dir(dir)) => {
-            let loaded = load_with(
+            let mut n = 0u64;
+            let loaded = load_counted(
                 &[FeedInput {
                     feed: FeedKind::Sfdps,
                     dir: dir.clone(),
                 }],
                 &guarded_opener(),
-            )
-            .map_err(|e| ExportError::Input(format!("{}: {e}", dir.display())))?;
+                oa_bench::input::msg_limit(),
+                &mut n,
+            );
+            *sealed = sealed.saturating_add(n);
+            let loaded =
+                loaded.map_err(|e| ExportError::Input(format!("{}: {e}", dir.display())))?;
             refuse_sealed_count("ERAM", count_sealed_ms(&loaded.legacy))?;
             let inputs = loaded
                 .inputs
@@ -442,7 +452,6 @@ fn export_all(
                     *v,
                 ));
             }
-            ax.lines.push(a.reconciliation());
         }
         let mut f = match ex.finish() {
             Ok(f) => f,
@@ -456,6 +465,12 @@ fn export_all(
             .push(format!("ADS-B clip {}", clip.display()));
         done.systems.push(f);
         done.adsb = Some(ax.finish()?);
+        // A real check: the records in the written file, counted by the format walker, and the
+        // refusals the file listed, against the counts above. A mismatch fails the run.
+        if let (Some(a), Some(fin)) = (cinfo.adsb.as_ref(), done.adsb.as_mut()) {
+            let line = reconcile_adsb(a, fin)?;
+            fin.report.lines.push(line);
+        }
         done.clip = Some(cinfo);
     }
     if let Some(src) = &job.sfdps {
@@ -511,6 +526,19 @@ fn export_all(
         done.systems.push(f);
     }
     Ok(())
+}
+
+/// The reconciliation line of the ADS-B file, or an error that carries it when the counts of
+/// the run, the records found in the finished file and the refusals the file listed disagree.
+pub fn reconcile_adsb(info: &AdsbInfo, fin: &AdsbFinished) -> Result<String, ExportError> {
+    let in_file = fin.records_on_disk()?;
+    let listed = fin.report.refused.iter().sum::<u64>();
+    let (line, ok) = info.reconciliation(in_file, listed);
+    if ok {
+        Ok(line)
+    } else {
+        Err(ExportError::Verify(line))
+    }
 }
 
 /// The run counts of the OpenATCA file, as README lines.

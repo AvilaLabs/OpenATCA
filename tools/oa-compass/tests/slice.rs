@@ -17,7 +17,9 @@ use oa_compass::shell::adsb_export::AdsbExport;
 use oa_compass::shell::error::ExportError;
 use oa_compass::shell::export::{Layout, SystemExport};
 use oa_compass::shell::notes::{data_sources_json, ADSB_SOURCE, OPENATCA_SOURCE};
-use oa_compass::shell::slice::{check_window, parse_clock, slice_dir, slice_dir_with, Stage};
+use oa_compass::shell::slice::{
+    check_window, parse_clock, slice_dir, slice_dir_tallied, slice_dir_with, Stage,
+};
 
 const DAY: i64 = 20_772;
 const DAY_NS: i64 = DAY * 86_400 * 1_000_000_000;
@@ -565,4 +567,134 @@ fn a_sidecar_or_source_file_that_links_into_sealed_data_is_refused_and_nothing_i
     )
     .unwrap_err();
     assert!(e.to_string().contains("OA-SEAL-001"), "{e}");
+}
+
+/// A source directory of one CAT021 file with records at the given times of day, and a README
+/// with `readme_line` as its import-date line.
+fn source_times(name: &str, readme_line: &str, times: &[u32]) -> PathBuf {
+    let inp = tmp(name);
+    fs::write(inp.join("README.txt"), format!("{readme_line}\n")).unwrap();
+    fs::write(inp.join("a.ast"), block_21(times)).unwrap();
+    inp
+}
+
+// REQ: OA-CMP-051
+#[test]
+fn a_record_that_could_be_in_a_sealed_window_refuses_the_whole_slice_and_the_count_is_given() {
+    let line = |d: &str| format!("UTC date to give at import (UTC Day): {d}");
+    // A README day that does not parse, with a date that does not exist: refused.
+    for (k, bad) in ["2026.13.40", "soon", ""].into_iter().enumerate() {
+        let inp = source_times(&format!("sw-bad{k}"), &line(bad), &[units(1, 0, 0)]);
+        let out = tmp(&format!("sw-bad-out{k}")).join("o");
+        let e = slice_dir(&inp, &out, units(0, 0, 0), units(2, 0, 0)).unwrap_err();
+        assert!(
+            e.to_string().contains("day of the source is unknown"),
+            "{e}"
+        );
+        assert!(!out.exists());
+    }
+    // 2026-11-20 is inside the sealed window: every record could be sealed, whichever the slice
+    // keeps; the count is given on the refusal.
+    let inp = source_times(
+        "sw-in",
+        &line("2026.11.20"),
+        &[units(1, 0, 0), units(5, 0, 0), units(23, 0, 0)],
+    );
+    let out = tmp("sw-out").join("o");
+    let mut n = 0u64;
+    let e = slice_dir_tallied(&inp, &out, units(1, 0, 0), units(2, 0, 0), &mut n).unwrap_err();
+    assert!(
+        e.to_string()
+            .contains("sealed hold-out day or in a sealed window"),
+        "{e}"
+    );
+    assert_eq!(
+        n, 3,
+        "all three records could be sealed, not only the one in the window"
+    );
+    assert!(!out.exists());
+    // A day clear of the window passes, and counts 0.
+    let inp = source_times(
+        "sw-ok",
+        &line("2026.11.26"),
+        &[units(1, 0, 0), units(5, 0, 0)],
+    );
+    let mut n = 0u64;
+    let f = slice_dir_tallied(
+        &inp,
+        &tmp("sw-ok-out").join("o"),
+        units(0, 0, 0),
+        units(2, 0, 0),
+        &mut n,
+    )
+    .unwrap();
+    assert_eq!((n, f[0].records_kept), (0, 1));
+}
+
+// REQ: OA-CMP-051
+#[test]
+fn a_time_of_day_that_wraps_past_midnight_is_tested_on_both_days() {
+    let line = "UTC date to give at import (UTC Day): 2026.11.18";
+    // 2026-11-18 alone, ending at 23:59:50: nothing on the sealed day, it passes.
+    let inp = source_times("wrap-ok", line, &[units(23, 0, 0), units(23, 59, 50)]);
+    let mut n = 0u64;
+    slice_dir_tallied(
+        &inp,
+        &tmp("wrap-ok-out").join("o"),
+        units(23, 0, 0),
+        units(23, 59, 59),
+        &mut n,
+    )
+    .unwrap();
+    assert_eq!(n, 0);
+    // The time goes back (23:59:50 then 00:00:10): the second record may be on 2026-11-19, the
+    // sealed day, so the whole slice is refused, though the window asks for the first alone.
+    let inp = source_times("wrap-bad", line, &[units(23, 59, 50), units(0, 0, 10)]);
+    let out = tmp("wrap-bad-out").join("o");
+    let mut n = 0u64;
+    let e = slice_dir_tallied(&inp, &out, units(23, 59, 0), units(23, 59, 59), &mut n).unwrap_err();
+    assert!(e.to_string().contains("wraps past midnight"), "{e}");
+    assert_eq!(
+        n, 2,
+        "both records could be on either day, and the next day is sealed"
+    );
+    assert!(!out.exists());
+    // The window's own start: 2026-11-19 plus a wrap onto 2026-11-20 00:00, which is in the window.
+    let inp = source_times(
+        "wrap-win",
+        "UTC date to give at import (UTC Day): 2026.11.19",
+        &[units(23, 59, 50), units(0, 0, 10)],
+    );
+    assert!(slice_dir(
+        &inp,
+        &tmp("wrap-win-out").join("o"),
+        units(0, 0, 0),
+        units(1, 0, 0)
+    )
+    .is_err());
+}
+
+// REQ: OA-CMP-051
+#[test]
+fn the_slice_program_exits_non_zero_and_prints_the_drop_line_on_a_sealed_refusal() {
+    let inp = source_times(
+        "sw-bin",
+        "UTC date to give at import (UTC Day): 2026.11.21",
+        &[units(1, 0, 0), units(2, 0, 0)],
+    );
+    let out = tmp("sw-bin-out").join("o");
+    let r = std::process::Command::new(env!("CARGO_BIN_EXE_oa-compass"))
+        .args(["slice", "--in"])
+        .arg(&inp)
+        .args(["--from", "00:00:00", "--to", "03:00:00", "--out"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(r.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&r.stdout);
+    assert!(stdout.contains("sealed-window rows dropped: 2"), "{stdout}");
+    assert!(
+        String::from_utf8_lossy(&r.stderr).contains("sealed hold-out day or in a sealed window")
+    );
+    assert!(!out.exists());
 }

@@ -20,6 +20,7 @@ use oa_compass::core::adsb::*;
 use oa_compass::shell::adsb_export::{read_back, AdsbExport, EDITION};
 use oa_compass::shell::error::ExportError;
 use oa_compass::shell::export::Layout;
+use oa_compass::shell::job::reconcile_adsb;
 use oa_compass::shell::notes::{
     data_sources_json, readme_with, Extras, ADSB_SOURCE, OPENATCA_SOURCE,
 };
@@ -640,6 +641,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
             ..Default::default()
         },
         adsb: None,
+        file_offered: 11,
         gate: oa_track::adsb::AdsbStats {
             rows_in: 10,
             passed: 6,
@@ -669,6 +671,8 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         "SAC 255 SIC 13",
         "split_reports_with",
         "KEEP ALL",
+        "adsb.ast removes copies by its own, finer key, which adds NIC_baro, SDA and GVA",
+        "11 reports remained for the file after that copy removal",
         "3 duplicate reports removed",
         "1 conflicting (address, time) groups holding 2 reports",
         "INDEPENDENCE",
@@ -681,6 +685,9 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         "I090 quality indicators (primary subfield in every record; each extension only while all its fields are known",
         "UNVERIFIED",
         "never mapped through the NUCp column",
+        "\"This item shall be present in every ASTERIX record. Extensions are sent only if at least 1 bit is set to \u{201c}1\u{201d}.\"",
+        "version 0, NUCr not available",
+        "PIC is taken from NIC and the MOPS version (1 or 2)",
         "a clip written before that column existed carries none",
         "ASSUMED from the source type and not proven",
         "a decoder cannot tell a known 0 from an extension not sent",
@@ -995,8 +1002,29 @@ fn the_primary_subfield_is_the_source_nic_and_version_0_never_gets_a_nucp_or_a_p
     assert!(n.contains(&ANOTE_NIC_V2));
     // Version 0: readsb's nic is a NIC, not a NUCp: NUCp 0, counted, no PIC, no NIC count.
     let (nacv, nic, pic, n) = primary(0, 7);
-    assert_eq!((nacv, nic, pic), (2, 0, None));
+    assert_eq!((nacv, nic, pic), (0, 0, None));
     assert!(n.contains(&ANOTE_V0_NUCP) && !n.contains(&ANOTE_NIC_UNKNOWN));
+    // The same field is a NUCr under version 0: written 0 whatever the NACv holds (2 here, and
+    // also a value the MOPS defines as high), counted as "NUCr not available" and not as an
+    // unknown NACv.
+    let mut r = full();
+    r.version = Some(0);
+    for held in [Some(2u8), Some(4), None] {
+        r.nac_v = held;
+        let c = adsb_record(&r).unwrap();
+        assert_eq!(c.values.quality.nacv, 0, "{held:?}");
+        let n = noted(&c);
+        assert!(
+            n.contains(&ANOTE_V0_NUCR) && !n.contains(&ANOTE_NACV_UNKNOWN),
+            "{held:?}"
+        );
+    }
+    // Versions 1 and 2 keep it: written as given, and an unknown one is the NACv count.
+    r.version = Some(2);
+    r.nac_v = Some(3);
+    let c = adsb_record(&r).unwrap();
+    assert_eq!(c.values.quality.nacv, 3);
+    assert!(!noted(&c).contains(&ANOTE_V0_NUCR));
     assert!(!n.contains(&ANOTE_PIC_UNMAPPED) && n.contains(&ANOTE_EXT3_CUT));
 }
 
@@ -1142,15 +1170,69 @@ fn a_refused_row_is_counted_and_the_reconciliation_says_whether_it_reconciles() 
         (info.rows_in, info.stale, info.converted, info.refused),
         (4, 1, 1, 1)
     );
-    assert_eq!(
-        info.reconciliation(),
-        "offered 4 = stale 1 + not ADS-B 1 + written 1 + refused 1 = 4: reconciles"
+    // The count of records the file gives and the refusals it lists are part of the check.
+    let (line, ok) = info.reconciliation(1, 1);
+    assert!(ok, "{line}");
+    assert!(
+        line.starts_with("offered 4 = stale 1 + not ADS-B 1 + written 1 + refused 1 = 4;"),
+        "{line}"
     );
+    assert!(line.ends_with(": reconciles"), "{line}");
+    // Any one of the four sums or counts off, and it does not reconcile, with the counts shown.
     let mut off = info.clone();
     off.refused = 0;
-    assert!(off.reconciliation().ends_with("DOES NOT RECONCILE"));
-    let rep = ex.finish().unwrap().commit().unwrap();
+    assert!(off.reconciliation(1, 1).0.ends_with("DOES NOT RECONCILE"));
+    let (line, ok) = info.reconciliation(2, 1);
+    assert!(
+        !ok && line.contains("written file 2 (written 1)") && line.ends_with("DOES NOT RECONCILE")
+    );
+    let (line, ok) = info.reconciliation(1, 0);
+    assert!(!ok && line.contains("listed by the file 0 (refused 1)"));
+    // Through the finished file: the records on disk are counted by the walker.
+    let fin = ex.finish().unwrap();
+    assert_eq!(fin.records_on_disk().unwrap(), 1);
+    assert!(reconcile_adsb(&info, &fin)
+        .unwrap()
+        .ends_with(": reconciles"));
+    let mut wrong = info.clone();
+    wrong.converted = 2;
+    wrong.stale = 0;
+    let e = reconcile_adsb(&wrong, &fin).unwrap_err().to_string();
+    assert!(
+        e.contains("DOES NOT RECONCILE") && e.contains("written file 1 (written 2)"),
+        "{e}"
+    );
+    let rep = fin.commit().unwrap();
     assert_eq!(rep.refused, [1, 0]);
+}
+
+// REQ: OA-CMP-023
+#[test]
+fn the_walker_counts_records_by_fspec_and_item_lengths_independently_of_the_decoder() {
+    use oa_compass::core::walk::count_cat021_records;
+    // One record: FSPEC 81 01 30 (FRN 1, then 17 and 18), I010, I090 primary + extensions, I210.
+    let one = [
+        0x15, 0x00, 0x0D, 0x81, 0x01, 0x30, 0xFF, 0x0D, 0x51, 0xF1, 0x35, 0xB0, 0x12,
+    ];
+    assert_eq!(count_cat021_records(&one), Ok(1));
+    // Two such records in one block (LEN 23).
+    let mut two = vec![0x15, 0x00, 0x17];
+    two.extend_from_slice(&one[3..]);
+    two.extend_from_slice(&one[3..]);
+    assert_eq!(count_cat021_records(&two), Ok(2));
+    // A record with a short I090 (primary only, FX 0): FRN 1 and 17 only, FSPEC 81 01 20.
+    let short = [0x15, 0x00, 0x09, 0x81, 0x01, 0x20, 0xFF, 0x0D, 0x50];
+    assert_eq!(count_cat021_records(&short), Ok(1));
+    // Wrong category, wrong LEN, a record cut short, an item the export never writes.
+    assert!(count_cat021_records(&[0x3E, 0x00, 0x03]).is_err());
+    assert!(count_cat021_records(&[0x15, 0x00, 0x05, 0x80]).is_err());
+    assert!(count_cat021_records(&one[..12]).is_err());
+    let only_source = [0x15, 0x00, 0x06, 0x80, 0xFF, 0x0D];
+    assert_eq!(count_cat021_records(&only_source), Ok(1));
+    let cut = [0x15, 0x00, 0x05, 0x80, 0xFF];
+    assert!(count_cat021_records(&cut).is_err());
+    let compound = [0x15, 0x00, 0x06, 0x01, 0x01, 0x02];
+    assert!(count_cat021_records(&compound).is_err());
 }
 
 // REQ: OA-CMP-028
@@ -1244,4 +1326,36 @@ fn the_clip_loader_drops_rows_in_a_sealed_window_and_the_readme_counts_them() {
     .unwrap();
     assert_eq!(info.sealed_window_dropped, 2);
     assert_eq!(info.offered, 2);
+}
+
+// REQ: OA-CMP-023
+#[test]
+fn the_file_keeps_reports_that_differ_only_in_nic_baro_sda_or_gva_the_scorers_key_merges() {
+    use oa_compass::shell::run::export_key;
+    let mut r = Reports::default();
+    // One (address, time): the same but for NIC_baro; the same but for SDA; the same but for GVA;
+    // and an exact copy of the first.
+    push_row(&mut r, 10.0, 0x100001, |x| x.nic_baro = 0);
+    push_row(&mut r, 10.0, 0x100001, |x| x.nic_baro = 1);
+    push_row(&mut r, 10.0, 0x100001, |x| {
+        x.nic_baro = 0;
+        x.sda = 2;
+    });
+    push_row(&mut r, 10.0, 0x100001, |x| {
+        x.nic_baro = 0;
+        x.gva = 2;
+    });
+    push_row(&mut r, 10.0, 0x100001, |x| x.nic_baro = 0);
+    // The scorer's split is unchanged: one observation, four copies removed.
+    let (a, _, st) = oa_track::score::split_reports_with(&r, false);
+    assert_eq!((reports_len(&a), st.duplicates_removed), (1, 4));
+    // The file's key keeps the four that differ and removes the exact copy.
+    let (kept, _, st) = oa_track::score::split_reports_keyed(&r, false, export_key);
+    assert_eq!((reports_len(&kept), st.duplicates_removed), (4, 1));
+    // They reach adsb.ast: four records.
+    let (lay, _out) = layout("keyed", false);
+    let mut ex = AdsbExport::new(ADSB_SOURCE, lay);
+    let info = export_adsb_reports(&kept, &mut ex).unwrap();
+    assert_eq!(info.converted, 4);
+    ex.finish().unwrap().commit().unwrap();
 }

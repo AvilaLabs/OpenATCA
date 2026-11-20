@@ -2003,7 +2003,7 @@ fn the_readme_reconciles_the_adsb_reports_offered_with_what_became_of_them() {
     );
     assert!(
         readme.contains(
-            "offered 10 = stale 0 + not ADS-B 0 + written 10 + refused 0 = 10: reconciles"
+            "offered 10 = stale 0 + not ADS-B 0 + written 10 + refused 0 = 10; records counted in the written file 10 (written 10); refusals listed by the file 0 (refused 0): reconciles"
         ),
         "{readme}"
     );
@@ -2028,4 +2028,61 @@ fn a_run_returns_the_sealed_window_count_summed_over_its_inputs_and_the_readme_s
     assert_eq!(sealed, 0);
     let readme = std::fs::read_to_string(out.join("README.txt")).unwrap();
     assert!(readme.contains("sealed-window rows dropped"), "{readme}");
+}
+
+/// An OAF1 clip of one frame per time given (Unix ns), one report in each, all of `ADDR`.
+fn clip_frames(dir: &Path, name: &str, times_ns: &[i64]) -> PathBuf {
+    let mut file = Vec::new();
+    for &time_ns in times_ns {
+        let mut all = Reports::default();
+        let row = oa_adsb::Row {
+            icao: ADDR,
+            time_ns,
+            lat_e7: 410_000_000,
+            lon_e7: -880_000_000,
+            baro_alt_ft: 20_000,
+            gs_dkt: 3500,
+            track_ddeg: 0,
+            nic: 8,
+            nac_p: 9,
+            nac_v: 2,
+            sil: 3,
+            version: 2,
+            source: 0,
+            ..ROW_EMPTY
+        };
+        reports_push(&mut all, &row);
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &all, 0, oa_adsb::reports_len(&all)).unwrap();
+        let mut buf = vec![0u8; payload.len() + 256];
+        let n = oa_feed::encode_frame(&mut buf, 1, 0, 0, T0_NS, 0, &payload).unwrap();
+        file.extend_from_slice(&buf[..n]);
+    }
+    let p = dir.join(name);
+    fs::write(&p, file).unwrap();
+    p
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_sealed_window_count_is_given_on_a_refusal_before_anything_is_written() {
+    use oa_compass::shell::job::run_job_tallied;
+    let work = tmp("seal-count-refused");
+    // One frame inside the sealed window (2026-11-21 12:00, dropped whole and counted) and one
+    // row on the sealed day itself (refused by the pre-scan).
+    let clip = clip_frames(
+        &work,
+        "c.oaf",
+        &[
+            SEALED_START_NS + 2 * 86_400 * S + 12 * 3_600 * S,
+            SEALED_START_NS + 3_600 * S,
+        ],
+    );
+    let out = work.join("out");
+    let mut sealed = 0u64;
+    let mut j = job(&out, Some(clip), false, false, OpenatcaRows::Ticks);
+    j.layout.day = 20_775;
+    let e = run_job_tallied(j, &mut |_| Ok(()), &mut |_| {}, &mut sealed).unwrap_err();
+    assert!(e.to_string().contains("sealed hold-out day"), "{e}");
+    assert_eq!(sealed, 1, "the refusal still reports the rows it dropped");
 }

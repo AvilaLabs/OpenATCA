@@ -559,3 +559,58 @@ fn nic_baro_is_the_last_byte_plus_one_and_a_clip_without_it_reads_as_absent() {
     assert_eq!((c.kept, c.reserved_set), (1, 1));
     assert_eq!(reports_row(&out, 0).unwrap().nic_baro, NONE_U8);
 }
+
+// REQ: OA-ADSB-160
+#[test]
+fn a_new_clip_is_ads3_an_old_clip_ads2_reads_without_nic_baro_and_an_old_magic_with_byte_79_set_is_reserved(
+) {
+    use oa_adsb::PREVIOUS_PAYLOAD_MAGIC;
+    // New clip: the magic is ADS3, which a reader of ADS1 and ADS2 only refuses by its magic, and
+    // NIC_baro 0 and 1 are carried at byte 79 as 1 and 2.
+    let mut want = full_row();
+    want.nic_baro = 1;
+    let p = payload_of(&want);
+    assert_eq!(&p[..4], b"ADS3");
+    assert_eq!(PAYLOAD_MAGIC, *b"ADS3");
+    assert_ne!(&p[..4], &PREVIOUS_PAYLOAD_MAGIC[..]);
+    assert_ne!(&p[..4], &LEGACY_PAYLOAD_MAGIC[..]);
+    assert_eq!(p[16 + 79], 2);
+    assert_eq!(decoded(&p).nic_baro, 1);
+    want.nic_baro = 0;
+    let p = payload_of(&want);
+    assert_eq!((p[16 + 79], decoded(&p).nic_baro), (1, 0));
+    want.nic_baro = NONE_U8;
+    let p = payload_of(&want);
+    assert_eq!((p[16 + 79], decoded(&p).nic_baro), (0, NONE_U8));
+    // Old clip: ADS2 with byte 79 zero reads, NIC_baro absent, nothing counted.
+    let mut old = p.clone();
+    old[..4].copy_from_slice(b"ADS2");
+    let mut out = Reports::default();
+    let c = decode_payload_lenient(&old, &mut out).unwrap();
+    assert_eq!((c.kept, c.reserved_set), (1, 0));
+    assert_eq!(reports_row(&out, 0).unwrap().nic_baro, NONE_U8);
+    // Old magic with byte 79 set: counted as a reserved byte, and NOT read as NIC_baro.
+    for v in [1u8, 2, 9] {
+        let mut dirty = old.clone();
+        dirty[16 + 79] = v;
+        let mut out = Reports::default();
+        let c = decode_payload_lenient(&dirty, &mut out).unwrap();
+        assert_eq!((c.kept, c.reserved_set), (1, 1), "byte 79 = {v}");
+        assert_eq!(
+            reports_row(&out, 0).unwrap().nic_baro,
+            NONE_U8,
+            "byte 79 = {v}"
+        );
+        assert_eq!(
+            decode_payload(&dirty, &mut Reports::default()),
+            Err(PayloadError::BadRecord(0))
+        );
+    }
+    // New clip, a byte above the codes: reserved, NIC_baro absent.
+    let mut bad = payload_of(&want);
+    bad[16 + 79] = 9;
+    let mut out = Reports::default();
+    let c = decode_payload_lenient(&bad, &mut out).unwrap();
+    assert_eq!((c.kept, c.reserved_set), (1, 1));
+    assert_eq!(reports_row(&out, 0).unwrap().nic_baro, NONE_U8);
+}

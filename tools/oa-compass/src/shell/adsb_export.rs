@@ -19,6 +19,7 @@ use super::error::{io_err, ExportError};
 use super::export::{date_text, Layout};
 use super::guard::refuse_sealed_row;
 use crate::core::adsb::{count_adsb_notes, AdsbConverted, AdsbRefusal, AdsbValues, ADSB_NOTES};
+use crate::core::walk::count_cat021_records;
 
 /// Edition written and read back.
 pub const EDITION: Cat021Edition = Cat021Edition::Ed24;
@@ -178,6 +179,16 @@ pub struct AdsbFinished {
 }
 
 impl AdsbFinished {
+    /// The records in the files as written (the partials, before the rename), counted by the
+    /// independent walker of the format ([`count_cat021_records`]) and not by the decoder.
+    pub fn records_on_disk(&self) -> Result<u64, ExportError> {
+        let mut total = 0u64;
+        for (partial, _) in &self.renames {
+            total = total.saturating_add(count_file_records(partial)?);
+        }
+        Ok(total)
+    }
+
     /// The (partial, final) names of the files, for a caller that renames them with other files.
     pub fn renames(&self) -> &[(PathBuf, PathBuf)] {
         &self.renames
@@ -466,4 +477,34 @@ pub fn read_back(
         )));
     }
     Ok((n_rec, n_blk))
+}
+
+/// The records of the file at `path`, block by block, by the walker (no value is decoded).
+pub fn count_file_records(path: &Path) -> Result<u64, ExportError> {
+    let bad = |s: String| ExportError::Verify(format!("{}: {s}", path.display()));
+    let f = super::guard::open(path).map_err(|e| io_err(path, &e))?;
+    let mut r = BufReader::with_capacity(1 << 20, f);
+    let mut total = 0u64;
+    let mut block = Vec::new();
+    loop {
+        let mut head = [0u8; 3];
+        match r.read(&mut head[..1]) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => return Err(io_err(path, &e)),
+        }
+        r.read_exact(head.get_mut(1..).unwrap_or(&mut []))
+            .map_err(|e| io_err(path, &e))?;
+        let len = usize::from(u16::from_be_bytes([head[1], head[2]]));
+        if len < 3 {
+            return Err(bad(format!("LEN {len}")));
+        }
+        block.clear();
+        block.extend_from_slice(&head);
+        block.resize(len, 0);
+        r.read_exact(block.get_mut(3..).unwrap_or(&mut []))
+            .map_err(|e| io_err(path, &e))?;
+        total = total.saturating_add(count_cat021_records(&block).map_err(bad)?);
+    }
+    Ok(total)
 }

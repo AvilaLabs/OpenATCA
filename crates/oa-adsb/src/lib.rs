@@ -138,8 +138,8 @@ pub use category::{category_is_reserved, category_observe, CategoryState, CATEGO
 pub use frames::{
     decode_payload, decode_payload_lenient, encode_payload, frame_ranges, PayloadCounts,
     PayloadError, DEFAULT_FRAME_MS, LEGACY_MAX_ROWS, LEGACY_PAYLOAD_MAGIC, LEGACY_RECORD_LEN,
-    MAX_FRAME_MS, MAX_ROWS_PER_FRAME, MIN_FRAME_MS, PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC, RECORD_LEN,
-    TIME_MAX_NS, TIME_MIN_NS,
+    MAX_FRAME_MS, MAX_ROWS_PER_FRAME, MIN_FRAME_MS, PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC,
+    PREVIOUS_PAYLOAD_MAGIC, RECORD_LEN, TIME_MAX_NS, TIME_MIN_NS,
 };
 pub use speed::{
     category_ceiling_kt, category_hard_cap_kt, is_jump, is_reserved_address, jump_verdict,
@@ -333,7 +333,7 @@ pub struct Row {
     pub roll_cdeg: i16,
     pub track_rate_cdps: i16,
 }
-// Budget: one per decoded row, transient: 8 + 6 * 4 + 10 * 2 + 4 * 2 + 19 = 79, padded to 80.
+// Budget: one per decoded row, transient: 8 + 6 * 4 + 10 * 2 + 4 * 2 + 20 = 80 (the 20 bytes: flags, source, callsign 8, ten quality bytes).
 const _: () = assert!(core::mem::size_of::<Row>() == 80);
 
 /// A [`Row`] with every optional field absent; the decoder fills in what the row has.

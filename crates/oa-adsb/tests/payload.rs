@@ -36,7 +36,7 @@ fn payload_round_trips_and_has_the_documented_layout() {
     let mut p = Vec::new();
     encode_payload(&mut p, &r, 10, 60).unwrap();
     assert_eq!(p.len(), PAYLOAD_HEADER_LEN + 50 * RECORD_LEN);
-    assert_eq!(&p[..4], b"ADS2");
+    assert_eq!(&p[..4], b"ADS3");
     assert_eq!(RECORD_LEN, 80);
     assert_eq!(u16::from_le_bytes([p[4], p[5]]), 80);
     assert_eq!(u32::from_le_bytes([p[8], p[9], p[10], p[11]]), 50);

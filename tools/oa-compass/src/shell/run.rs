@@ -6,7 +6,8 @@
 
 use oa_bench::legacy::{Counts, Legacy, NONE, NO_ALT, NO_VEL};
 use oa_track::score::{
-    interval_stats, scoring_config, split_reports_with, IntervalStats, SplitStats, DRAIN_ROWS,
+    interval_stats, scoring_config, split_reports_keyed, split_reports_with, IntervalStats,
+    SplitStats, DRAIN_ROWS,
 };
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
@@ -292,6 +293,9 @@ pub struct ClipInfo {
     pub split: SplitStats,
     /// The ADS-B file, when one was asked for.
     pub adsb: Option<AdsbInfo>,
+    /// Reports left for the file by its own copy removal ([`export_key`]); never fewer than
+    /// `offered`, because its key is finer than the scorer's.
+    pub file_offered: u64,
     /// What the tracker's own adapter (oa-truth's quality gates and the rest) removed from the
     /// reports it was offered.
     pub gate: oa_track::adsb::AdsbStats,
@@ -316,23 +320,38 @@ pub struct AdsbInfo {
 }
 
 impl AdsbInfo {
-    /// The reconciliation of what was offered: offered = stale + not ADS-B + written + refused.
-    pub fn reconciliation(&self) -> String {
+    /// The reconciliation of what was offered: offered = stale + not ADS-B + written + refused,
+    /// and the two counts the file itself gives: `in_file`, the records found in the written
+    /// file by the format walker, equal to `written`, and `refused_listed`, the refusals the
+    /// file listed, equal to `refused`. Returns the README line and whether everything agrees.
+    pub fn reconciliation(&self, in_file: u64, refused_listed: u64) -> (String, bool) {
         let other: u64 = self.other_sources.iter().map(|(_, c)| *c).sum();
         let sum = self
             .stale
             .saturating_add(other)
             .saturating_add(self.converted)
             .saturating_add(self.refused);
-        let verdict = if sum == self.rows_in {
+        let ok = sum == self.rows_in && in_file == self.converted && refused_listed == self.refused;
+        let verdict = if ok {
             "reconciles"
         } else {
             "DOES NOT RECONCILE"
         };
-        format!(
-            "offered {} = stale {} + not ADS-B {} + written {} + refused {} = {}: {}",
-            self.rows_in, self.stale, other, self.converted, self.refused, sum, verdict
-        )
+        let line = format!(
+            "offered {} = stale {} + not ADS-B {} + written {} + refused {} = {}; records counted in the written file {} (written {}); refusals listed by the file {} (refused {}): {}",
+            self.rows_in,
+            self.stale,
+            other,
+            self.converted,
+            self.refused,
+            sum,
+            in_file,
+            self.converted,
+            refused_listed,
+            self.refused,
+            verdict
+        );
+        (line, ok)
     }
 }
 
@@ -458,6 +477,16 @@ fn adsb_row(r: &oa_adsb::Row) -> AdsbRow {
     }
 }
 
+/// The identity of an observation for the ADS-B file: the scorer's key and, in addition, the
+/// fields the file writes that the scorer does not read, NIC_baro, SDA and GVA. Two reports that
+/// agree on the scorer's key and differ in one of these are not copies here.
+pub fn export_key(r: &oa_adsb::Row) -> (oa_bench::split_check::Key, [u8; 3]) {
+    (
+        oa_bench::split_check::observation_key(r),
+        [r.nic_baro, r.sda, r.gva],
+    )
+}
+
 /// Loads the ADS-B clip at `path`, removes the copies of reports through the scorer's own split
 /// code (`split_reports_with`: the same function the scorer calls, with the halving on for
 /// `Split` and off for `All`), runs the tracker on the reports `mode` selects and exports its
@@ -465,8 +494,10 @@ fn adsb_row(r: &oa_adsb::Row) -> AdsbRow {
 /// fed ADS-B only, so the tracks are monosensor.
 ///
 /// Conflict rule: reports of one address and time with different content are all kept, in one
-/// fixed order (the tracker sees them as the scorer's split gives them); only exact copies are
-/// removed. This holds in both modes.
+/// fixed order (the tracker sees them as the scorer's split gives them). What counts as a copy
+/// differs by path: the tracker's feed removes copies by the scorer's key (`observation_key`,
+/// which does not hold NIC_baro, SDA, GVA or the callsign), and the file by [`export_key`], which
+/// adds NIC_baro, SDA and GVA (the callsign is still not part of either). This holds in both modes.
 pub fn export_adsb_clip(
     path: &std::path::Path,
     ex: &mut SystemExport,
@@ -490,7 +521,16 @@ pub fn export_adsb_loaded(
 ) -> Result<(TrackRunInfo, ClipInfo), ExportError> {
     let sealed_window_dropped = clip.sealed_window_dropped;
     let positions = ref_points(&clip.reports);
-    let (fed_set, other, split) = split_reports_with(&clip.reports, mode == InputsMode::Split);
+    let halve = mode == InputsMode::Split;
+    let (fed_set, other, split) = split_reports_with(&clip.reports, halve);
+    // The file's own copy removal, with a key that also holds NIC_baro, SDA and GVA (the scorer's
+    // does not read them, but the file writes them): the groups are the same, so the sets are the
+    // same observations, and two reports that differ only in those are both written.
+    let file_set = if adsb.is_some() {
+        Some(split_reports_keyed(&clip.reports, halve, export_key).0)
+    } else {
+        None
+    };
     drop(clip);
     let mut info = ClipInfo {
         offered: oa_adsb::reports_len(&fed_set) as u64,
@@ -498,12 +538,14 @@ pub fn export_adsb_loaded(
         sealed_window_dropped,
         split,
         adsb: None,
+        file_offered: 0,
         gate: oa_track::adsb::AdsbStats::default(),
         positions,
     };
     drop(other);
-    if let Some(ax) = adsb {
-        info.adsb = Some(export_adsb_reports(&fed_set, ax)?);
+    if let (Some(ax), Some(file_set)) = (adsb, file_set) {
+        info.file_offered = oa_adsb::reports_len(&file_set) as u64;
+        info.adsb = Some(export_adsb_reports(&file_set, ax)?);
     }
     let (meas, gate) =
         oa_track::adsb::adsb_measurements(&fed_set, &oa_track::adsb::AdsbConfig::default());
