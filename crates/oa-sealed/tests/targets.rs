@@ -183,194 +183,463 @@ fn every_bin_and_example_target_uses_the_guard_or_is_exempt_with_a_reason() {
     assert!(bad.is_empty(), "{bad:#?}");
 }
 
-/// The calls that open, read, copy or run something from a path without the guard.
+/// The calls that open, read, copy or run something from a path without the guard, as names: a
+/// name counts when it is used at all (a call, or the function passed as a value), not only
+/// when it is followed by `(`.
 const BARE: [&str; 10] = [
-    "File::open(",
-    "File::open_buffered(",
-    "File::options(",
+    "File::open",
+    "File::open_buffered",
+    "File::options",
     "OpenOptions",
-    "fs::read(",
-    "fs::read_to_string(",
-    "fs::read_dir(",
-    "fs::copy(",
-    "fs::hard_link(",
-    "Command::new(",
+    "fs::read",
+    "fs::read_to_string",
+    "fs::read_dir",
+    "fs::copy",
+    "fs::hard_link",
+    "Command::new",
 ];
 
-/// The comment that allows a bare call on its line or within the two lines before:
-/// `// seal-allow: <why>`.
-const ALLOW: &str = "// seal-allow:";
+/// The `std::fs` functions whose bare use is a read, copy or link, and the types whose `open`,
+/// `options` and `new` start one.
+const FS_FUNCS: [&str; 5] = ["read", "read_to_string", "read_dir", "copy", "hard_link"];
+const FS_TYPES: [&str; 3] = ["File", "OpenOptions", "Command"];
+
+/// The comment that allows a bare call on the next code line (or its own line, when it trails
+/// code): `// seal-allow: <why>`.
+const ALLOW: &str = "seal-allow:";
 
 /// The allow comments in the sources the rule covers, pinned exactly: adding one is a decision
 /// made here, not slack in a budget.
-const ALLOW_COUNT: usize = 44;
+const ALLOW_COUNT: usize = 88;
 
-/// `line` with the string literals emptied and any `//` comment cut off.
-fn code_of(line: &str) -> String {
-    let mut out = String::new();
-    let mut chars = line.chars().peekable();
-    let mut in_str = false;
-    while let Some(c) = chars.next() {
-        if in_str {
-            match c {
-                '\\' => {
-                    chars.next();
-                }
-                '"' => {
-                    in_str = false;
-                    out.push('"');
-                }
-                _ => {}
+/// Text that names the real data root: a file that holds one must read through `oa_sealed`.
+/// Written in two pieces so this file does not name the root itself.
+const ROOT_MARKERS: [&str; 4] = [
+    concat!("OPENATCA", "_RAW"),
+    concat!("OPENATCA", "_DATA"),
+    concat!("OPENATCA", "_SCDS"),
+    concat!("openatca", "-data"),
+];
+
+/// One source line after lexing: the code with strings emptied and comments cut, the text of the
+/// string literals (never the comments), and the allow comment on the line, if any.
+#[derive(Default, Debug)]
+struct Line {
+    code: String,
+    strs: String,
+    allow: Option<String>,
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Reads a string literal whose body starts at `i` (`hashes` is `Some(n)` for a raw string with
+/// `n` `#`) and returns the index after it. The state is carried over lines: a newline inside
+/// the string ends the current line and the string goes on.
+fn read_string(
+    ch: &[char],
+    mut i: usize,
+    hashes: Option<usize>,
+    out: &mut Vec<Line>,
+    cur: &mut Line,
+) -> usize {
+    while i < ch.len() {
+        let c = ch[i];
+        if c == '\n' {
+            out.push(std::mem::take(cur));
+            i += 1;
+        } else if hashes.is_none() && c == '\\' {
+            if ch.get(i + 1) == Some(&'\n') {
+                out.push(std::mem::take(cur));
+            } else if let Some(n) = ch.get(i + 1) {
+                cur.strs.push(*n);
             }
-            continue;
-        }
-        match c {
-            '"' => {
-                in_str = true;
-                out.push('"');
-            }
-            // A char literal such as '"' is not a string start.
-            '\'' => {
-                let rest: String = chars.clone().take(3).collect();
-                if rest.chars().nth(1) == Some('\'') || rest.starts_with("\\") {
-                    // Skip the literal: `'x'` or `'\x'`.
-                    let mut n = 0;
-                    for d in chars.by_ref() {
-                        n += 1;
-                        if d == '\'' && n > 0 {
-                            break;
-                        }
-                    }
-                } else {
-                    out.push(c);
-                }
-            }
-            '/' if chars.peek() == Some(&'/') => break,
-            _ => out.push(c),
+            i += 2;
+        } else if c == '"' && hashes.is_none_or(|h| (1..=h).all(|k| ch.get(i + k) == Some(&'#'))) {
+            cur.code.push_str("\"\"");
+            // Two strings never read as one text.
+            cur.strs.push('\u{1}');
+            return i + 1 + hashes.unwrap_or(0);
+        } else {
+            cur.strs.push(c);
+            i += 1;
         }
     }
+    i
+}
+
+/// Splits Rust source into [`Line`]s, with strings (plain, raw, byte), characters, lifetimes,
+/// line comments and nested block comments told apart across lines.
+fn lex(text: &str) -> Vec<Line> {
+    let ch: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut cur = Line::default();
+    let (mut i, mut block) = (0usize, 0usize);
+    while i < ch.len() {
+        let c = ch[i];
+        let next = ch.get(i + 1).copied();
+        if c == '\n' {
+            out.push(std::mem::take(&mut cur));
+            i += 1;
+        } else if block > 0 {
+            if c == '/' && next == Some('*') {
+                block += 1;
+                i += 2;
+            } else if c == '*' && next == Some('/') {
+                block -= 1;
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if c == '/' && next == Some('/') {
+            let mut j = i + 2;
+            let mut s = String::new();
+            while j < ch.len() && ch[j] != '\n' {
+                s.push(ch[j]);
+                j += 1;
+            }
+            if let Some(r) = s.trim_start().strip_prefix(ALLOW) {
+                cur.allow = Some(r.trim().to_string());
+            }
+            i = j;
+        } else if c == '/' && next == Some('*') {
+            block = 1;
+            i += 2;
+        } else if c == '"' {
+            i = read_string(&ch, i + 1, None, &mut out, &mut cur);
+        } else if matches!(c, 'r' | 'b' | 'c') && (i == 0 || !is_ident(ch[i - 1])) {
+            // `r"`, `r#"`, `b"`, `br#"`, `c"`: a string with a prefix.
+            let mut j = i + usize::from(c != 'r');
+            let raw = ch.get(j) == Some(&'r');
+            if raw {
+                j += 1;
+            }
+            let mut h = 0;
+            while raw && ch.get(j) == Some(&'#') {
+                h += 1;
+                j += 1;
+            }
+            if ch.get(j) == Some(&'"') && (raw || j > i) {
+                i = read_string(&ch, j + 1, raw.then_some(h), &mut out, &mut cur);
+            } else {
+                cur.code.push(c);
+                i += 1;
+            }
+        } else if c == '\'' {
+            if next == Some('\\') {
+                let mut j = i + 3;
+                while j < ch.len() && ch[j] != '\'' {
+                    j += 1;
+                }
+                i = j + 1;
+            } else if ch.get(i + 2) == Some(&'\'') {
+                i += 3;
+            } else {
+                cur.code.push(c);
+                i += 1;
+            }
+        } else {
+            cur.code.push(c);
+            i += 1;
+        }
+    }
+    out.push(cur);
     out
 }
 
-/// What `use std::fs...` brings in: the names to call bare (`read`, `read_to_string`, ...,
-/// under any alias), the names of `File` and `OpenOptions`, and aliases of the module itself.
+/// What the file's imports and aliases make callable bare: functions of `std::fs` (under their
+/// local names), the types `File`, `OpenOptions` and `Command` (under their local names), and
+/// local names of the modules `std::fs` and `std::process`.
 #[derive(Default, Debug)]
-struct FsImports {
+struct Imports {
     funcs: Vec<String>,
     types: Vec<String>,
     modules: Vec<String>,
 }
 
-fn fs_imports(text: &str) -> FsImports {
-    let mut imp = FsImports::default();
-    let mut rest = text;
-    while let Some(i) = rest.find("use std::fs") {
-        rest = &rest[i + "use std::fs".len()..];
-        let stmt = rest.split(';').next().unwrap_or("");
-        let stmt = stmt.trim();
-        if let Some(alias) = stmt.strip_prefix("as ") {
-            imp.modules.push(alias.trim().to_string());
-            continue;
+/// A cursor over the text of a `use` tree.
+struct Tree<'a> {
+    s: &'a [char],
+    pos: usize,
+}
+
+impl Tree<'_> {
+    fn ws(&mut self) {
+        while self.s.get(self.pos).is_some_and(|c| c.is_whitespace()) {
+            self.pos += 1;
         }
-        let Some(items) = stmt.strip_prefix("::") else {
-            continue;
-        };
-        let items = items.trim().trim_start_matches('{').trim_end_matches('}');
-        for item in items.split(',') {
-            let item = item.trim();
-            let (name, alias) = match item.split_once(" as ") {
-                Some((n, a)) => (n.trim(), a.trim()),
-                None => (item, item),
-            };
-            match name {
-                "read" | "read_to_string" | "read_dir" | "copy" | "hard_link" => {
-                    imp.funcs.push(alias.to_string());
+    }
+
+    fn ident(&mut self) -> Option<String> {
+        self.ws();
+        let start = self.pos;
+        while self.s.get(self.pos).copied().is_some_and(is_ident) {
+            self.pos += 1;
+        }
+        (self.pos > start).then(|| self.s[start..self.pos].iter().collect())
+    }
+
+    /// Flattens one use tree below `prefix` into (path, local name) pairs.
+    fn parse(&mut self, prefix: &[String], out: &mut Vec<(Vec<String>, String)>) {
+        let mut segs = prefix.to_vec();
+        loop {
+            self.ws();
+            match self.s.get(self.pos) {
+                Some(':') => {
+                    self.pos += 1;
+                    continue;
                 }
-                "File" | "OpenOptions" => imp.types.push(alias.to_string()),
-                "self" if alias != "self" => imp.modules.push(alias.to_string()),
+                Some('{') => {
+                    self.pos += 1;
+                    loop {
+                        self.parse(&segs, out);
+                        self.ws();
+                        match self.s.get(self.pos) {
+                            Some(',') => self.pos += 1,
+                            Some('}') => {
+                                self.pos += 1;
+                                return;
+                            }
+                            _ => return,
+                        }
+                        self.ws();
+                        if self.s.get(self.pos) == Some(&'}') {
+                            self.pos += 1;
+                            return;
+                        }
+                    }
+                }
+                Some('*') => {
+                    self.pos += 1;
+                    segs.push("*".into());
+                    out.push((segs, "*".into()));
+                    return;
+                }
                 _ => {}
             }
+            let Some(id) = self.ident() else { return };
+            segs.push(id);
+            self.ws();
+            if self.s.get(self.pos) == Some(&':') && self.s.get(self.pos + 1) == Some(&':') {
+                self.pos += 2;
+                continue;
+            }
+            break;
         }
+        let last = segs.last().cloned().unwrap_or_default();
+        let save = self.pos;
+        let alias = match self.ident() {
+            Some(a) if a == "as" => self.ident(),
+            _ => {
+                self.pos = save;
+                None
+            }
+        };
+        out.push((segs, alias.unwrap_or(last)));
+    }
+}
+
+/// Every `use` statement of `code` as (path, local name) pairs.
+fn use_paths(code: &str) -> Vec<(Vec<String>, String)> {
+    let ch: Vec<char> = code.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 < ch.len() {
+        let hit = ch[i..i + 3] == ['u', 's', 'e']
+            && (i == 0 || !is_ident(ch[i - 1]))
+            && ch[i + 3].is_whitespace();
+        if hit {
+            let end = ch[i..]
+                .iter()
+                .position(|c| *c == ';')
+                .map_or(ch.len(), |e| i + e);
+            let body = &ch[i + 3..end];
+            Tree { s: body, pos: 0 }.parse(&[], &mut out);
+            i = end;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn imports(lines: &[Line]) -> Imports {
+    let code: String = lines.iter().map(|l| format!("{}\n", l.code)).collect();
+    let mut imp = Imports::default();
+    for (segs, alias) in use_paths(&code) {
+        let mut p: Vec<&str> = segs.iter().map(String::as_str).collect();
+        let mut name = alias.clone();
+        if p.last() == Some(&"self") {
+            p.pop();
+            if alias == "self" {
+                name = p.last().copied().unwrap_or("").to_string();
+            }
+        }
+        match p.as_slice() {
+            ["std", "fs"] | ["std", "process"] => imp.modules.push(name),
+            ["std", "fs", f] if FS_FUNCS.contains(f) => imp.funcs.push(name),
+            ["std", "fs", t] | ["std", "process", t] if FS_TYPES.contains(t) => {
+                imp.types.push(name)
+            }
+            ["std", "fs", "*"] => {
+                imp.funcs.extend(FS_FUNCS.map(String::from));
+                imp.types.extend(["File", "OpenOptions"].map(String::from));
+            }
+            ["std", "process", "*"] => imp.types.push("Command".into()),
+            _ => {}
+        }
+    }
+    // `type X = File;` (also through a path or with generics) makes `X` a bare type.
+    let mut rest = code.as_str();
+    while let Some(i) = rest.find("type ") {
+        let before = rest[..i].chars().next_back();
+        rest = &rest[i + 5..];
+        if before.is_some_and(is_ident) {
+            continue;
+        }
+        let Some((head, tail)) = rest.split_once(';') else {
+            break;
+        };
+        let Some((lhs, value)) = head.split_once('=') else {
+            continue;
+        };
+        let lhs: String = lhs.trim().chars().take_while(|c| is_ident(*c)).collect();
+        let value = value.trim().split('<').next().unwrap_or("").trim();
+        let last = value.rsplit("::").next().unwrap_or("");
+        if !lhs.is_empty() && (FS_TYPES.contains(&last) || imp.types.iter().any(|t| t == last)) {
+            imp.types.push(lhs);
+        }
+        rest = tail;
     }
     imp
 }
 
-/// Whether `code` calls `name(` as a bare identifier (not a method, not a path tail).
-fn calls_bare(code: &str, name: &str) -> bool {
-    let pat = format!("{name}(");
+/// Offsets in `code` where `tok` is used as a whole name (not inside a longer identifier).
+fn token_at(code: &str, tok: &str) -> Vec<usize> {
+    let mut out = Vec::new();
     let mut from = 0;
-    while let Some(i) = code[from..].find(&pat) {
+    while let Some(i) = code[from..].find(tok) {
         let at = from + i;
         let before = code[..at].chars().next_back();
-        let ok = before.is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '.' || c == ':'));
-        if ok {
-            return true;
+        let after = code[at + tok.len()..].chars().next();
+        if before.is_none_or(|c| !is_ident(c)) && after.is_none_or(|c| !is_ident(c)) {
+            out.push(at);
         }
-        from = at + pat.len();
+        from = at + tok.len();
     }
-    false
+    out
 }
 
-/// Whether the code line holds a bare call, given the file's `use std::fs` imports.
-fn is_bare(code: &str, imp: &FsImports) -> bool {
-    if BARE.iter().any(|b| code.contains(b)) {
+/// Whether `name`, an imported function, is used as a value or called: not a method, a path
+/// tail, a binding, a field or a parameter of that name.
+fn uses_imported(code: &str, name: &str) -> bool {
+    token_at(code, name).into_iter().any(|at| {
+        let before = code[..at].trim_end();
+        let after = code[at + name.len()..].trim_start();
+        let word = before.rsplit(|c: char| !is_ident(c)).next().unwrap_or("");
+        !(before.ends_with('.')
+            || before.ends_with("::")
+            || matches!(
+                word,
+                "fn" | "let"
+                    | "mut"
+                    | "ref"
+                    | "struct"
+                    | "enum"
+                    | "mod"
+                    | "const"
+                    | "static"
+                    | "type"
+            )
+            || (after.starts_with(':') && !after.starts_with("::")))
+    })
+}
+
+/// Whether the code line uses a bare open, read, copy, link or command, given the file's imports.
+fn is_bare(code: &str, imp: &Imports) -> bool {
+    if BARE.iter().any(|b| !token_at(code, b).is_empty()) {
         return true;
     }
-    if imp.funcs.iter().any(|f| calls_bare(code, f)) {
-        return true;
-    }
-    imp.types.iter().any(|t| {
-        code.contains(&format!("{t}::open("))
-            || code.contains(&format!("{t}::options("))
-            || code.contains(&format!("{t}::new("))
-    }) || imp.modules.iter().any(|m| {
-        [
-            "read(",
-            "read_to_string(",
-            "read_dir(",
-            "copy(",
-            "hard_link(",
-        ]
+    // The `read_dir` method, whatever it is called on.
+    if token_at(code, "read_dir")
         .iter()
-        .any(|f| code.contains(&format!("{m}::{f}")))
+        .any(|&at| code[..at].ends_with('.'))
+    {
+        return true;
+    }
+    if imp.funcs.iter().any(|f| uses_imported(code, f)) {
+        return true;
+    }
+    let methods = ["open", "open_buffered", "options", "new"];
+    imp.types.iter().any(|t| {
+        methods
+            .iter()
+            .any(|m| !token_at(code, &format!("{t}::{m}")).is_empty())
+    }) || imp.modules.iter().any(|m| {
+        FS_FUNCS
+            .iter()
+            .any(|f| !token_at(code, &format!("{m}::{f}")).is_empty())
     })
 }
 
 /// One bare call: line number, the trimmed line, and whether an allow comment covers it.
 type Call = (usize, String, bool);
 
-/// What the scan of one file found: the bare calls, and the allow comments that name no call
-/// within two lines or give no reason.
+/// What the scan of one file found: the bare calls, the allow comments, the allows that cover
+/// no bare call or give no reason, the `mod name;` declarations (with whether a `#[cfg(test)]`
+/// is on them) and whether the file names the real data root.
 struct Scan {
     calls: Vec<Call>,
     allows: usize,
     stale: Vec<(usize, String)>,
+    file_mods: Vec<(String, bool)>,
+    names_root: bool,
 }
 
-/// Lines of `text` that hold a bare call, with whether an allow comment on the line or within the
-/// two lines before covers it. A `#[cfg(test)]` followed by a `mod` item is skipped with its
-/// body; any other `#[cfg(test)]` item is scanned.
-fn scan(text: &str) -> Scan {
-    let lines: Vec<&str> = text.lines().collect();
-    let imp = fs_imports(text);
+/// `t` without a leading visibility (`pub`, `pub(crate)`, `pub(in path)`).
+fn no_vis(t: &str) -> &str {
+    let Some(r) = t.strip_prefix("pub") else {
+        return t;
+    };
+    if let Some(r) = r.strip_prefix('(') {
+        return r.split_once(')').map_or(t, |(_, r)| r.trim_start());
+    }
+    if r.starts_with(' ') {
+        r.trim_start()
+    } else {
+        t
+    }
+}
+
+/// The `mod NAME;` of a code line, if it is one.
+fn file_mod(t: &str) -> Option<String> {
+    let t = no_vis(t);
+    let name = t.strip_prefix("mod ")?.strip_suffix(';')?.trim();
+    name.chars().all(is_ident).then(|| name.to_string())
+}
+
+/// The bare calls of `text`. An allow comment covers only the call on the next code line (or on
+/// its own line when it trails code); one that covers no call, or has no reason, is stale.
+/// With `skip_tests`, a `#[cfg(test)]` followed by a `mod` item is skipped with its body (any
+/// other `#[cfg(test)]` item is scanned), and an allow inside it does not count.
+fn scan(text: &str, skip_tests: bool) -> Scan {
+    let lines = lex(text);
+    let imp = imports(&lines);
     let mut skip_depth: Option<i64> = None;
     let mut pending_cfg_test = false;
     let mut attr_depth = 0i64;
-    let mut calls: Vec<Call> = Vec::new();
-    let mut allow_at: Vec<usize> = Vec::new();
     let mut call_lines: Vec<usize> = Vec::new();
-    let mut bad_reason: Vec<(usize, String)> = Vec::new();
+    let mut allows: Vec<(usize, String)> = Vec::new();
+    let mut file_mods = Vec::new();
+    let mut names_root = false;
     for (i, l) in lines.iter().enumerate() {
-        if let Some(pos) = l.find(ALLOW) {
-            // An allow is a comment, not text inside a string.
-            if l[..pos].matches('"').count() % 2 == 0 {
-                allow_at.push(i);
-                if l[pos + ALLOW.len()..].trim().is_empty() {
-                    bad_reason.push((i + 1, "the allow has no reason".to_string()));
-                }
-            }
+        if ROOT_MARKERS
+            .iter()
+            .any(|m| l.code.contains(m) || l.strs.contains(m))
+        {
+            names_root = true;
         }
-        let code = code_of(l);
+        let code = &l.code;
         let t = code.trim();
         if let Some(depth) = skip_depth.as_mut() {
             *depth += code.matches('{').count() as i64 - code.matches('}').count() as i64;
@@ -390,39 +659,71 @@ fn scan(text: &str) -> Scan {
         }
         if pending_cfg_test && !t.is_empty() {
             pending_cfg_test = false;
-            if t.starts_with("mod ") || t.contains(" mod ") {
+            if let Some(m) = file_mod(t) {
+                file_mods.push((m, true));
+                continue;
+            }
+            if skip_tests && no_vis(t).starts_with("mod ") {
                 let depth = code.matches('{').count() as i64 - code.matches('}').count() as i64;
-                if depth > 0 || !t.ends_with(';') {
-                    skip_depth = Some(depth);
-                    if depth <= 0 && t.ends_with('}') {
-                        skip_depth = None;
-                    }
-                }
+                skip_depth = (depth > 0).then_some(depth);
                 continue;
             }
         }
-        if t.starts_with("///") || t.starts_with("//!") || t.starts_with("use ") {
+        if let Some(m) = file_mod(t) {
+            file_mods.push((m, false));
+        }
+        if let Some(why) = &l.allow {
+            allows.push((i, why.clone()));
+        }
+        if no_vis(t).starts_with("use ") {
             continue;
         }
-        if is_bare(&code, &imp) {
+        if is_bare(code, &imp) {
             call_lines.push(i);
-            let allowed = (i.saturating_sub(2)..=i).any(|j| allow_at.contains(&j));
-            calls.push((i + 1, l.trim().to_string(), allowed));
         }
     }
-    let mut stale: Vec<(usize, String)> = bad_reason;
-    for &a in &allow_at {
-        if !call_lines.iter().any(|&c| (a..=a + 2).contains(&c)) {
+    // The line an allow covers: its own when it trails code, else the next line of code that is
+    // not an attribute.
+    let target = |a: usize| -> Option<usize> {
+        if !lines[a].code.trim().is_empty() {
+            return Some(a);
+        }
+        (a + 1..lines.len()).find(|&j| {
+            let t = lines[j].code.trim();
+            !t.is_empty() && !t.starts_with("#[")
+        })
+    };
+    let covered: BTreeSet<usize> = allows.iter().filter_map(|(a, _)| target(*a)).collect();
+    let src: Vec<&str> = text.lines().collect();
+    let calls = call_lines
+        .iter()
+        .map(|&i| {
+            (
+                i + 1,
+                src.get(i).copied().unwrap_or("").trim().to_string(),
+                covered.contains(&i),
+            )
+        })
+        .collect();
+    let mut stale = Vec::new();
+    for (a, why) in &allows {
+        if why.is_empty() {
+            stale.push((a + 1, "the allow has no reason".to_string()));
+        }
+        if !target(*a).is_some_and(|t| call_lines.contains(&t)) {
             stale.push((
                 a + 1,
-                "an allow with no bare call on its line or the two after it (stale)".to_string(),
+                "an allow that covers no bare call on its line or the next code line (stale)"
+                    .to_string(),
             ));
         }
     }
     Scan {
         calls,
-        allows: allow_at.len(),
+        allows: allows.len(),
         stale,
+        file_mods,
+        names_root,
     }
 }
 
@@ -433,25 +734,89 @@ const SOURCE_TOOLS: [(&str, &str); 1] = [(
     "walks the repository's own sources and requirement registers, and reads no input data",
 )];
 
-/// The files the bare-call rule covers: `src/` and `examples/` of every member crate (core
-/// crates included), without test modules, and the accepted exceptions are checked apart.
-fn covered_files() -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for k in members() {
-        let name = k.file_name().unwrap().to_string_lossy().into_owned();
-        if EXCEPTION_CRATES.iter().any(|(n, _)| *n == name)
-            || SOURCE_TOOLS.iter().any(|(n, _)| *n == name)
-        {
-            continue;
+/// The member crates the rule covers: all but the accepted exceptions (checked apart) and the
+/// source tools.
+fn covered_crates() -> Vec<PathBuf> {
+    members()
+        .into_iter()
+        .filter(|k| {
+            let name = k.file_name().unwrap().to_string_lossy().into_owned();
+            !EXCEPTION_CRATES.iter().any(|(n, _)| *n == name)
+                && !SOURCE_TOOLS.iter().any(|(n, _)| *n == name)
+        })
+        .collect()
+}
+
+/// The files `mod name;` can mean from `file`: the module file beside it, or in a directory of
+/// the file's own name (the form of a file that is not a crate or module root).
+fn module_files(file: &Path, name: &str) -> Vec<PathBuf> {
+    let dir = file.parent().unwrap();
+    let stem = file.file_stem().unwrap().to_string_lossy().into_owned();
+    let mut out = Vec::new();
+    for base in [dir.to_path_buf(), dir.join(&stem)] {
+        out.push(base.join(format!("{name}.rs")));
+        out.push(base.join(name).join("mod.rs"));
+    }
+    out
+}
+
+/// The files that are declared as `#[cfg(test)] mod name;` (and so test code), with every module
+/// they declare in turn. No file is skipped by what it is called.
+fn test_module_files(all: &[PathBuf]) -> BTreeSet<PathBuf> {
+    let mods: Vec<(&PathBuf, Vec<(String, bool)>)> = all
+        .iter()
+        .map(|f| (f, scan(&fs::read_to_string(f).unwrap(), true).file_mods))
+        .collect();
+    let mut skipped: BTreeSet<PathBuf> = BTreeSet::new();
+    loop {
+        let before = skipped.len();
+        for (f, ms) in &mods {
+            let all_test = skipped.contains(*f);
+            for (name, is_test) in ms {
+                if *is_test || all_test {
+                    for c in module_files(f, name) {
+                        if all.contains(&c) {
+                            skipped.insert(c);
+                        }
+                    }
+                }
+            }
         }
-        for sub in ["src", "examples"] {
-            rs_files(&k.join(sub), &mut files);
+        if skipped.len() == before {
+            return skipped;
         }
     }
-    files.retain(|f| {
-        let name = f.file_name().unwrap().to_string_lossy();
-        !name.starts_with("tests") && !f.components().any(|c| c.as_os_str() == "tests")
-    });
+}
+
+/// The files the bare-call rule covers in full: `src/` and `examples/` of every covered crate
+/// (core crates included), without the files that are `#[cfg(test)]` modules.
+fn covered_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for k in covered_crates() {
+        let mut all = Vec::new();
+        for sub in ["src", "examples"] {
+            rs_files(&k.join(sub), &mut all);
+        }
+        all.sort();
+        let skipped = test_module_files(&all);
+        files.extend(all.into_iter().filter(|f| !skipped.contains(f)));
+    }
+    files
+}
+
+/// `tests/`, `benches/` and `build.rs` of every covered crate. A file of these that names the
+/// real data root must read through `oa_sealed`; bare reads of fixtures and temp dirs stay
+/// allowed in the others.
+fn harness_files() -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for k in covered_crates() {
+        for sub in ["tests", "benches"] {
+            rs_files(&k.join(sub), &mut files);
+        }
+        if k.join("build.rs").exists() {
+            files.push(k.join("build.rs"));
+        }
+    }
     files.sort();
     files
 }
@@ -461,9 +826,12 @@ fn covered_files() -> Vec<PathBuf> {
 fn a_bare_open_or_read_in_any_crate_needs_an_allow_comment_with_a_reason_and_no_allow_is_stale() {
     let mut bad = Vec::new();
     let mut allows = 0;
-    for f in covered_files() {
-        let text = fs::read_to_string(&f).unwrap();
-        let sc = scan(&text);
+    let mut check = |f: &Path, strict_only_if_root: bool| {
+        let text = fs::read_to_string(f).unwrap();
+        let sc = scan(&text, !strict_only_if_root);
+        if strict_only_if_root && !sc.names_root {
+            return;
+        }
         allows += sc.allows;
         let rel = f.strip_prefix(repo()).unwrap().display().to_string();
         for (n, line, ok) in sc.calls {
@@ -474,10 +842,16 @@ fn a_bare_open_or_read_in_any_crate_needs_an_allow_comment_with_a_reason_and_no_
         for (n, why) in sc.stale {
             bad.push(format!("{rel}:{n}: {why}"));
         }
+    };
+    for f in covered_files() {
+        check(&f, false);
+    }
+    for f in harness_files() {
+        check(&f, true);
     }
     assert!(
         bad.is_empty(),
-        "a bare open, read, copy, link or command needs `{ALLOW} <why>` (a write, a temp dir, a /proc file) or the guard:\n{bad:#?}"
+        "a bare open, read, copy, link or command needs `// {ALLOW} <why>` (a write, a temp dir, a /proc file) or the guard:\n{bad:#?}"
     );
     assert_eq!(
         allows, ALLOW_COUNT,
@@ -485,12 +859,16 @@ fn a_bare_open_or_read_in_any_crate_needs_an_allow_comment_with_a_reason_and_no_
     );
 }
 
+fn bare_lines(text: &str) -> Vec<usize> {
+    scan(text, true).calls.iter().map(|c| c.0).collect()
+}
+
 // REQ: OA-SEAL-006
 #[test]
 fn the_bare_call_scan_finds_calls_imports_and_aliases_and_honours_allows_strings_and_test_modules()
 {
     let text = "fn a() { let f = File::open(p); }\n// seal-allow: temp dir\nlet g = fs::read(q);\nlet h = fs::read_dir(d); // seal-allow: output\n/// doc: fs::read(x)\nlet i = oa_sealed::open(p);\nlet s = \"fs::read( // not code\";\n#[cfg(test)]\nmod t { fn x() { File::open(z); } }\nlet j = OpenOptions::new();\nlet k = std::process::Command::new(\"x\");\n";
-    let sc = scan(text);
+    let sc = scan(text, true);
     let flags: Vec<(usize, bool)> = sc.calls.iter().map(|(n, _, ok)| (*n, *ok)).collect();
     assert_eq!(
         flags,
@@ -500,16 +878,100 @@ fn the_bare_call_scan_finds_calls_imports_and_aliases_and_honours_allows_strings
     assert!(sc.stale.is_empty(), "{:?}", sc.stale);
     // `use std::fs::{...}` imports and an alias are caught.
     let text = "use std::fs::{read_to_string as slurp, File as F};\nuse std::fs as filesystem;\nfn a() {\n let a = slurp(p);\n let b = F::open(q);\n let c = filesystem::read(r);\n let d = x.read_to_string();\n}\n";
-    let lines: Vec<usize> = scan(text).calls.iter().map(|c| c.0).collect();
-    assert_eq!(lines, [4, 5, 6]);
+    assert_eq!(bare_lines(text), [4, 5, 6]);
     // A cfg(test) item that is not a module is scanned; the test module after it is not.
     let text = "#[cfg(test)]\nfn helper() { fs::read(p); }\n#[cfg(test)]\nmod tests {\n fn t() { fs::read(q); }\n}\nfn live() { fs::read(r); }\n";
-    let lines: Vec<usize> = scan(text).calls.iter().map(|c| c.0).collect();
-    assert_eq!(lines, [2, 7]);
+    assert_eq!(bare_lines(text), [2, 7]);
     // A stale allow and an allow without a reason are reported.
     let text = "// seal-allow: gone\nlet a = 1;\nlet b = 2;\nlet c = 3;\n// seal-allow:\nlet d = fs::read(p);\n";
-    let sc = scan(text);
+    let sc = scan(text, true);
     assert_eq!(sc.stale.len(), 2, "{:?}", sc.stale);
+}
+
+// REQ: OA-SEAL-006
+#[test]
+fn the_scan_finds_function_values_globs_grouped_uses_aliases_methods_and_multi_line_strings() {
+    // A function passed as a value, with no `(`.
+    assert_eq!(
+        bare_lines("let a = v.iter().map(fs::read_to_string);\nlet b = Some(File::open);\nlet c = fs::read_to_string_x(p);\nlet d = MyFile::open(p);\n"),
+        [1, 2]
+    );
+    // A glob, a grouped use, and an alias of the module or the type.
+    assert_eq!(
+        bare_lines("use std::fs::*;\nfn a() { let x = read(p); let y = File::open(q); let z = std::fs::read(w); }\n"),
+        [2]
+    );
+    assert_eq!(
+        bare_lines("use std::{fs::{self, File as F, read_to_string as slurp}, io};\nfn a() {\n let a = fs::read(p);\n let b = F::open(q);\n let c = slurp(r);\n let d = io::read(s);\n}\n"),
+        [3, 4, 5]
+    );
+    assert_eq!(
+        bare_lines("use std::process::Command as C;\nuse std::process as pr;\nfn a() {\n let a = C::new(\"x\");\n let b = pr::Command::new(\"y\");\n}\n"),
+        [4, 5]
+    );
+    assert_eq!(
+        bare_lines("type Reader = std::fs::File;\ntype Cmd = Command;\nfn a() {\n let a = Reader::open(p);\n let b = Cmd::new(\"x\");\n}\n"),
+        [4, 5]
+    );
+    // The `read_dir` method.
+    assert_eq!(
+        bare_lines("let a = path.read_dir();\nlet b = d.read_dir().unwrap();\n"),
+        [1, 2]
+    );
+    // A binding of an imported name is not a call; a method of that name is not either.
+    assert_eq!(
+        bare_lines("use std::fs::read;\nfn a(read: bool) {\n let read = 1;\n x.read();\n}\n"),
+        Vec::<usize>::new()
+    );
+    // A string that runs over lines, and a raw string, hide what is inside them.
+    let text = "let a = \"first line\nfs::read(p) inside the string\nlast\"; let b = fs::read(q);\nlet c = r#\"\nFile::open(\"x\")\n\"#;\nlet d = br\"fs::copy\";\nlet e = '\"'; let f = fs::copy(a, b);\n/* fs::read(p)\nFile::open */ let g = File::open(r);\n";
+    assert_eq!(bare_lines(text), [3, 8, 10]);
+    // An allow covers only the call on the next code line.
+    let text = "// seal-allow: one\nlet a = fs::read(p);\nlet b = fs::read(q);\n";
+    let sc = scan(text, true);
+    let flags: Vec<(usize, bool)> = sc.calls.iter().map(|(n, _, ok)| (*n, *ok)).collect();
+    assert_eq!(flags, [(2, true), (3, false)]);
+    // An allow inside a skipped test module is not counted.
+    let sc = scan(
+        "#[cfg(test)]\nmod t {\n // seal-allow: x\n fn a() { fs::read(p); }\n}\n",
+        true,
+    );
+    assert_eq!((sc.allows, sc.calls.len()), (0, 0));
+    // A file that names the data root is told from one that does not (strings count, comments not).
+    let var = ROOT_MARKERS[0];
+    assert!(scan(&format!("let r = std::env::var(\"{var}\");"), true).names_root);
+    assert!(scan(&format!("let r = \"/x/{}/raw\";", ROOT_MARKERS[3]), true).names_root);
+    assert!(!scan(&format!("// {var} is read elsewhere\nlet r = 1;"), true).names_root);
+}
+
+// REQ: OA-SEAL-006
+#[test]
+fn a_file_is_skipped_only_when_a_cfg_test_module_declares_it_never_by_its_name() {
+    let dir = std::env::temp_dir().join(format!("oa-sealed-testmods-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("shell/inner")).unwrap();
+    let w = |p: &str, t: &str| fs::write(dir.join(p), t).unwrap();
+    w("lib.rs", "mod shell;\n#[cfg(test)]\nmod tests;\n");
+    w(
+        "shell/mod.rs",
+        "mod live;\n#[cfg(test)]\n#[allow(unused)]\nmod tests;\n",
+    );
+    w("tests.rs", "mod nested;\nfn a() {}\n");
+    w("nested.rs", "fn b() {}\n");
+    w("shell/live.rs", "fn c() {}\n");
+    // Named like tests, but declared without a cfg(test): scanned.
+    w("shell/tests_index.rs", "fn d() {}\n");
+    w("shell/tests.rs", "fn e() {}\n");
+    let mut all = Vec::new();
+    rs_files(&dir, &mut all);
+    all.sort();
+    let skipped = test_module_files(&all);
+    let names: Vec<String> = skipped
+        .iter()
+        .map(|p| p.strip_prefix(&dir).unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["nested.rs", "shell/tests.rs", "tests.rs"]);
+    fs::remove_dir_all(&dir).ok();
 }
 
 /// The accepted exceptions: oa-arinc424 must stay free of dependencies (so it cannot use
@@ -547,15 +1009,9 @@ fn the_arinc424_and_geo_exceptions_gain_no_bare_open_beyond_the_pinned_test_line
         }
         let mut found: BTreeMap<String, usize> = BTreeMap::new();
         for f in files {
-            // A test module inside a source file is not cut off here: every bare call counts.
-            let text = std::fs::read_to_string(&f).unwrap();
-            let n = text
-                .lines()
-                .filter(|l| {
-                    let code = l.split("//").next().unwrap_or("");
-                    !code.trim_start().starts_with("///") && BARE.iter().any(|b| code.contains(b))
-                })
-                .count();
+            // The same scan as the covered crates, with nothing skipped: a test module inside a
+            // source file counts too.
+            let n = scan(&fs::read_to_string(&f).unwrap(), false).calls.len();
             if n > 0 {
                 let rel = f.strip_prefix(&root).unwrap().to_string_lossy().to_string();
                 found.insert(rel, n);

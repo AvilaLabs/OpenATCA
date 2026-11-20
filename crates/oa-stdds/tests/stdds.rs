@@ -1538,3 +1538,29 @@ fn the_summary_prints_status_and_unknown_names_only_when_they_are_plain_text() {
     assert!(out.contains("unknown names printed as other: 1"));
     assert!(out.contains("frame reader stalled, bytes not read: 0"));
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn messages_parsed_into_scratch_accumulators_and_merged_equal_one_accumulator() {
+    let mut p = parser();
+    let lim = Limits::default();
+    let mut whole = new_stats();
+    let mut merged = new_stats();
+    for name in [
+        "tais_full.xml",
+        "tais_malformed_fields.xml",
+        "tais_other_root.xml",
+        "smes_position.xml",
+        "stdds_rvr.xml",
+        "stdds_other.xml",
+        "tais_full.xml",
+    ] {
+        let bytes = fixture(name);
+        let _ = parse_message(&mut p, &bytes, &lim, &mut whole);
+        let mut scratch = new_stats();
+        let _ = parse_message(&mut p, &bytes, &lim, &mut scratch);
+        merged.merge(&scratch, &lim);
+    }
+    assert!(whole.messages == 7 && whole.records > 0);
+    assert_eq!(format!("{whole:?}"), format!("{merged:?}"));
+}

@@ -395,6 +395,7 @@ fn the_file_decodes_as_ed24_with_every_value_and_position_error_within_bounds() 
     assert_eq!((d.stats.records, d.stats.blocks), (700, 3));
     assert!(d.stats.max_lat_error_e7 <= 1 && d.stats.max_lon_error_e7 <= 1);
     assert_eq!((d.read_back_records, d.read_back_blocks), (700, 3));
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let bytes = fs::read(out.join("adsb.ast")).unwrap();
     assert_eq!(bytes.len() as u64, d.stats.bytes);
     let mut recs = Vec::new();
@@ -516,6 +517,7 @@ fn reports_are_written_in_time_order_with_stale_and_non_adsb_ones_left_out_and_c
     );
     let rep = ex.finish().unwrap().commit().unwrap();
     assert_eq!(rep.days[0].stats.records, 4);
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let blocks = decode_stream_ed24(&fs::read(out.join("adsb.ast")).unwrap());
     let times: Vec<u32> = blocks.iter().map(|c| c.tomr_position.unwrap()).collect();
     assert_eq!(times, vec![5 * 128, 10 * 128, 30 * 128, 40 * 128]);
@@ -581,6 +583,7 @@ fn all_mode_uses_the_scorers_split_code_with_halving_off_and_counts_what_it_remo
     let info = export_adsb_reports(&all, &mut ex).unwrap();
     assert_eq!(info.converted, 5);
     ex.finish().unwrap().commit().unwrap();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let recs = decode_stream_ed24(&fs::read(out.join("adsb.ast")).unwrap());
     let lats: Vec<i32> = recs
         .iter()
@@ -913,6 +916,7 @@ fn every_record_of_the_file_has_i090_and_ground_records_have_gbs_and_no_i160() {
         ex.push(&c, (r.lat_e7, r.lon_e7)).unwrap();
     }
     ex.finish().unwrap().commit().unwrap();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let recs = decode_stream_ed24(&fs::read(out.join("adsb.ast")).unwrap());
     assert_eq!(recs.len(), 300);
     let mut ground = 0;

@@ -26,6 +26,7 @@ fn expected(name: &str) -> Vec<u8> {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/expected")
         .join(name);
+    // seal-allow: reads a checked-in fixture
     std::fs::read(p).unwrap()
 }
 

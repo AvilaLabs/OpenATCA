@@ -19,7 +19,7 @@ fn message(times: &[&str]) -> Vec<u8> {
     );
     for (n, t) in times.iter().enumerate() {
         s += &format!(
-            "<record><track><trackNum>{n}</trackNum><mrtTime>{t}</mrtTime></track></record>"
+            "<record><track><trackNum>{n}</trackNum><mrtTime>{t}</mrtTime><pseudo>1</pseudo></track></record>"
         );
     }
     s += "</ns2:TATrackAndFlightPlan>";
@@ -71,12 +71,26 @@ fn the_summary_example_drops_sealed_frames_and_records_and_prints_the_count() {
     assert!(exe.exists(), "{}", exe.display());
     let out = std::process::Command::new(exe).arg(&file).output().unwrap();
     let text = String::from_utf8_lossy(&out.stdout);
-    // Two frames by receive time and two records by their own time.
+    // Two frames by receive time, and the first frame's three records (it holds two timed in the
+    // window, so the whole message is dropped).
     assert!(
-        text.contains("sealed-window rows dropped: 4 "),
+        text.contains("sealed-window rows dropped: 5 "),
         "{}",
         text.lines().take(6).collect::<Vec<_>>().join("\n")
     );
-    assert!(text.contains("frames: message 2 "), "{text}");
+    assert!(text.contains("frames: message 1 "), "{text}");
+    // Nothing from a dropped message is in the counts: only the last frame's one record is.
+    assert!(text.contains("messages parsed: 1\n"), "{text}");
+    assert!(text.contains("\nrecords: 1 "), "{text}");
+    let tn = text
+        .lines()
+        .find(|l| l.starts_with("tais field track/trackNum"))
+        .unwrap();
+    assert!(tn.contains("present 1 "), "{tn}");
+    let pf = text
+        .lines()
+        .find(|l| l.starts_with("tais flag track/pseudo"))
+        .unwrap();
+    assert!(pf.contains("false 0 true 1 of 1"), "{pf}");
     std::fs::remove_dir_all(&dir).ok();
 }

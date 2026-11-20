@@ -28,6 +28,7 @@ MAX_LINKS = 40
 MAX_WALK_DEPTH = 64
 
 
+_DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", re.ASCII)
 _UTC = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
 
 
@@ -49,8 +50,10 @@ def _parse_utc_ns(t: str):
 
 
 def parse_list(text: str):
-    """Returns (root, [(entry_text, parts, kind)], [(window_text, from_ns, to_ns)]); kind is
-    "exact", "prefix" (`X*`) or "contains" (`*X*`). Anything not understood is an error."""
+    """Returns (root, [(entry_text, parts, kind)], days, [(window_text, from_ns, to_ns)]); kind is
+    "exact", "prefix" (`X*`) or "contains" (`*X*`); days is (days, scopes, exempt), the days as
+    written and the scope and exempt directories as (text, parts). Anything not understood is an
+    error."""
     # Only printable ASCII and newline; a line is `word`, one space, `value` (the Rust parser
     # reads the same rules, so the two cannot read the file differently).
     for ch in text:
@@ -59,6 +62,9 @@ def parse_list(text: str):
     root = None
     entries = []
     windows = []
+    days: list[str] = []
+    scopes: list = []
+    exempt: list = []
     for i, line in enumerate(text.split("\n"), 1):
         if not line or line.startswith("#"):
             continue
@@ -89,6 +95,15 @@ def parse_list(text: str):
             if any("*" in p for p in parts[:-1]):
                 raise ValueError(f"line {i}: `*` only in the last component")
             entries.append((value, parts, kind))
+        elif word == "day":
+            if not _DAY.fullmatch(value) or not 1 <= int(value[5:7]) <= 12 or not 1 <= int(value[8:10]) <= 31:
+                raise ValueError(f"line {i}: expected `day YYYY-MM-DD`")
+            days.append(value)
+        elif word in ("dayscope", "dayexempt"):
+            parts = value.split("/")
+            if any(p in ("", ".", "..") or "*" in p for p in parts):
+                raise ValueError(f"line {i}: bad day scope path")
+            (scopes if word == "dayscope" else exempt).append((value, parts))
         elif word == "window":
             bits = value.split(" ", 1)
             ns = [_parse_utc_ns(b) for b in bits]
@@ -103,7 +118,9 @@ def parse_list(text: str):
         raise ValueError("no root line")
     if not entries:
         raise ValueError("no seal lines")
-    return root, entries, windows
+    if bool(days) != bool(scopes):
+        raise ValueError("`day` and `dayscope` lines come together")
+    return root, entries, (days, scopes, exempt), windows
 
 
 def _list_text() -> str:
@@ -113,8 +130,11 @@ def _list_text() -> str:
 
 def dump(text: str | None = None) -> str:
     """The list as the Rust guard's `List::dump` prints it."""
-    root, entries, windows = parse_list(_list_text() if text is None else text)
+    root, entries, (days, scopes, exempt), windows = parse_list(_list_text() if text is None else text)
     return (f"root {root}\n" + "".join(f"seal {e[0]}\n" for e in entries)
+            + "".join(f"day {d}\n" for d in days)
+            + "".join(f"dayscope {t[0]}\n" for t in scopes)
+            + "".join(f"dayexempt {t[0]}\n" for t in exempt)
             + "".join(f"window {w[0]}\n" for w in windows))
 
 
@@ -145,6 +165,40 @@ def _is_ancestor(entry, names: list[str]) -> bool:
     parts = entry[1]
     # A substring entry seals names, not a folder: its directory part is an ordinary folder.
     return entry[2] != "contains" and len(names) < len(parts) and parts[: len(names)] == names
+
+
+def _compact(name: str) -> str:
+    return name.replace(".", "").replace("-", "").replace("_", "")
+
+
+def _day_in(days: list[str], rest: list[str]):
+    """The sealed day a component of `rest` (below a scope) names, else None."""
+    norm = [_compact(c) for c in rest]
+    for d in days:
+        c = _compact(d)
+        y, m, dd, ym = c[:4], c[4:6], c[6:], c[:6]
+        if (any(c in n for n in norm)
+                or any(norm[k:k + 3] == [y, m, dd] for k in range(len(norm)))
+                or any(norm[k:k + 2] == [ym, dd] for k in range(len(norm)))):
+            return d
+    return None
+
+
+def _day_hit(rules, names: list[str], anchored: bool):
+    """(scope, day) when `names` has a scope as consecutive components (at the start only when
+    `anchored`) and a component below it names a sealed day, unless it is under an exempt path."""
+    days, scopes, exempt = rules
+    for i in ([0] if anchored else range(len(names))):
+        t = names[i:]
+        for text, parts in scopes:
+            if t[: len(parts)] != parts or len(t) <= len(parts):
+                continue
+            if any(t[: len(e[1])] == e[1] for e in exempt):
+                continue
+            d = _day_in(days, t[len(parts):])
+            if d is not None:
+                return text, d
+    return None
 
 
 def _resolve(path: str, depth: int = 0) -> str:
@@ -182,11 +236,11 @@ class Guard:
 
     def __init__(self, text: str | None = None, root: str | os.PathLike | None = None):
         try:
-            r, self.entries, self.windows = parse_list(_list_text() if text is None else text)
+            r, self.entries, self.days, self.windows = parse_list(_list_text() if text is None else text)
             self.broken = False
         except (ValueError, OSError, UnicodeError):
             # The list is unreadable: the guard fails closed and refuses every path.
-            r, self.entries, self.windows, self.broken = "", [], [], True
+            r, self.entries, self.days, self.windows, self.broken = "", [], ([], [], []), [], True
         if root is not None:
             r = os.fspath(root)
         try:
@@ -200,20 +254,22 @@ class Guard:
         return self.broken or any(w[1] <= unix_ns < w[2] for w in self.windows)
 
     def walk_unsealed(self, root: str | os.PathLike):
-        """(files, skipped): the unsealed files below `root`, sorted; a directory or file the
-        guard refuses is skipped and counted, never descended into (a directory that only holds a
-        sealed entry, such as the data root or raw/adsblol, is walked); a directory already visited
-        (a link back) is skipped and counted. `root` itself refused raises SealedError; a missing
+        """(files, skipped, already_visited): the unsealed files below `root`, sorted; a directory
+        or file the guard refuses is skipped and counted, never descended into (a directory that
+        only holds a sealed entry, such as the data root or raw/adsblol, is walked); a directory
+        already visited (a link back, or a second name of one directory; entries are walked in
+        bytewise order, so the first name is the one walked) is counted apart. `root` itself refused raises SealedError; a missing
         root raises OSError, and nesting deeper than MAX_WALK_DEPTH raises SealedError. The files
         are sorted bytewise by the string form of the path."""
         self.check(root, True)
         os.stat(root)
         files: list[str] = []
         skipped = 0
+        again = 0
         visited: set[str] = set()
 
         def walk(d: str, depth: int) -> None:
-            nonlocal skipped
+            nonlocal skipped, again
             if not os.path.isdir(d):
                 files.append(d)
                 return
@@ -223,10 +279,10 @@ class Guard:
                 )
             real = os.path.realpath(d)
             if real in visited:
-                skipped += 1
+                again += 1
                 return
             visited.add(real)
-            for name in sorted(os.listdir(d)):
+            for name in sorted(os.listdir(d), key=os.fsencode):
                 p = os.path.join(d, name)
                 try:
                     self.check(p, True)
@@ -236,7 +292,7 @@ class Guard:
                 walk(p, depth + 1)
 
         walk(os.fspath(root), 0)
-        return sorted(files, key=os.fsencode), skipped
+        return sorted(files, key=os.fsencode), skipped, again
 
     def check(self, path: str | os.PathLike, walking: bool = False) -> None:
         """Raises SealedError if `path` is, is inside, resolves into, or holds a sealed entry.
@@ -275,6 +331,15 @@ class Guard:
                 f"{given}: refused by OA-SEAL-001: {how} the sealed hold-out entry `{e[0]}` "
                 "(crates/oa-sealed/sealed_paths.txt); sealed data is never read"
             )
+        for how, names, anchored in (("the path names", given_names, False),
+                                     ("the path resolves to", real_names, False),
+                                     ("the path is inside", below, True)):
+            hit = None if names is None else _day_hit(self.days, names, anchored)
+            if hit:
+                raise SealedError(
+                    f"{given}: refused by OA-SEAL-001: {how} the sealed hold-out entry `day {hit[1]} below {hit[0]}` "
+                    "(crates/oa-sealed/sealed_paths.txt); sealed data is never read"
+                )
 
     def open(self, path, mode="r", **kw):
         """Checks `path`, opens it for reading, then asks the kernel which file the descriptor is
@@ -321,7 +386,7 @@ def in_sealed_window(unix_ns: int) -> bool:
 
 
 def walk_unsealed(root):
-    """Production walk: (unsealed files, count of sealed entries skipped)."""
+    """Production walk: (unsealed files, sealed entries skipped, directories already visited)."""
     return production().walk_unsealed(root)
 
 

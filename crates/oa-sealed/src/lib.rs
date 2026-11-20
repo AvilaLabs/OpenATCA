@@ -35,6 +35,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File};
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
@@ -118,11 +119,85 @@ impl Window {
     }
 }
 
-/// The parsed list: the data root, the sealed entries and the sealed windows.
+/// The sealed days: a path below (or anywhere as consecutive components) a scope directory is
+/// sealed when a component below the scope names a sealed day, in any spelling. A component is
+/// normalised first (every `.`, `-` and `_` deleted), so `2026.11.20`, `2026-11-20`, `2026_11_20`
+/// and `20261120` are one name, and the day is matched as a substring of it; the consecutive
+/// components `2026`, `11`, `20` (and `202611`, `20`) name it too. A directory under an exempt
+/// path (the weather inputs) is left out. A match is on the digits only: `120261120` is sealed
+/// (it fails closed), a day-first or worded date is not matched at all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Days {
+    /// The days as written (`YYYY-MM-DD`).
+    pub days: Vec<String>,
+    /// Scope directories, as written, and as components.
+    pub scopes: Vec<(String, Vec<String>)>,
+    /// Directories left out of every scope, as written and as components.
+    pub exempt: Vec<(String, Vec<String>)>,
+}
+
+/// `name` with every `.`, `-` and `_` deleted.
+fn compact(name: &str) -> String {
+    name.chars()
+        .filter(|c| !matches!(c, '.' | '-' | '_'))
+        .collect()
+}
+
+impl Days {
+    /// Whether the components below a scope (`rest`, already below the scope directory) name a
+    /// sealed day; the day found.
+    fn day_in(&self, rest: &[String]) -> Option<&str> {
+        let norm: Vec<String> = rest.iter().map(|c| compact(c)).collect();
+        for d in &self.days {
+            let c = compact(d);
+            let (y, m, dd) = (c.get(..4)?, c.get(4..6)?, c.get(6..)?);
+            let ym = c.get(..6)?;
+            let hit = norm.iter().any(|n| n.contains(c.as_str()))
+                || norm
+                    .windows(3)
+                    .any(|w| matches!(w, [a, b, c] if a == y && b == m && c == dd))
+                || norm
+                    .windows(2)
+                    .any(|w| matches!(w, [a, b] if a == ym && b == dd));
+            if hit {
+                return Some(d);
+            }
+        }
+        None
+    }
+
+    /// The scope and day when `names` has a scope as consecutive components (at the start only
+    /// when `anchored`, else anywhere) and a component below it names a sealed day.
+    fn hit(&self, names: &[String], anchored: bool) -> Option<(&str, &str)> {
+        let starts: Vec<usize> = if anchored {
+            vec![0]
+        } else {
+            (0..names.len()).collect()
+        };
+        for i in starts {
+            let t = names.get(i..)?;
+            for (text, parts) in &self.scopes {
+                if !t.starts_with(parts) || t.len() <= parts.len() {
+                    continue;
+                }
+                if self.exempt.iter().any(|(_, e)| t.starts_with(e)) {
+                    continue;
+                }
+                if let Some(d) = t.get(parts.len()..).and_then(|r| self.day_in(r)) {
+                    return Some((text, d));
+                }
+            }
+        }
+        None
+    }
+}
+
+/// The parsed list: the data root, the sealed entries, the sealed days and the sealed windows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct List {
     pub root: PathBuf,
     pub entries: Vec<Entry>,
+    pub days: Days,
     pub windows: Vec<Window>,
 }
 
@@ -186,6 +261,15 @@ impl List {
         for e in &self.entries {
             out.push_str(&format!("seal {}\n", e.text));
         }
+        for d in &self.days.days {
+            out.push_str(&format!("day {d}\n"));
+        }
+        for (t, _) in &self.days.scopes {
+            out.push_str(&format!("dayscope {t}\n"));
+        }
+        for (t, _) in &self.days.exempt {
+            out.push_str(&format!("dayexempt {t}\n"));
+        }
         for w in &self.windows {
             out.push_str(&format!("window {}\n", w.text));
         }
@@ -209,6 +293,7 @@ pub fn parse_list(text: &str) -> Result<List, String> {
     let mut root: Option<PathBuf> = None;
     let mut entries = Vec::new();
     let mut windows = Vec::new();
+    let mut days = Days::default();
     for (i, line) in text.split('\n').enumerate() {
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -262,6 +347,43 @@ pub fn parse_list(text: &str) -> Result<List, String> {
                     kind,
                 });
             }
+            "day" => {
+                let b = value.as_bytes();
+                let digits = |r: std::ops::Range<usize>| {
+                    b.get(r).is_some_and(|x| x.iter().all(u8::is_ascii_digit))
+                };
+                let num = |r: std::ops::Range<usize>| {
+                    value
+                        .get(r)
+                        .and_then(|x| x.parse::<u32>().ok())
+                        .unwrap_or(0)
+                };
+                if value.len() != 10
+                    || !(digits(0..4) && digits(5..7) && digits(8..10))
+                    || b.get(4) != Some(&b'-')
+                    || b.get(7) != Some(&b'-')
+                    || !(1..=12).contains(&num(5..7))
+                    || !(1..=31).contains(&num(8..10))
+                {
+                    return Err(format!("line {}: expected `day YYYY-MM-DD`", i + 1));
+                }
+                days.days.push(value.to_owned());
+            }
+            "dayscope" | "dayexempt" => {
+                let parts: Vec<String> = value.split('/').map(str::to_owned).collect();
+                if parts
+                    .iter()
+                    .any(|p| p.is_empty() || p == "." || p == ".." || p.contains('*'))
+                {
+                    return Err(format!("line {}: bad day scope path", i + 1));
+                }
+                let t = (value.to_owned(), parts);
+                if word == "dayscope" {
+                    days.scopes.push(t);
+                } else {
+                    days.exempt.push(t);
+                }
+            }
             "window" => {
                 let bad = || format!("line {}: expected `window <from-UTC> <to-UTC>`", i + 1);
                 let (a, b) = value.split_once(' ').ok_or_else(bad)?;
@@ -285,9 +407,13 @@ pub fn parse_list(text: &str) -> Result<List, String> {
     if entries.is_empty() {
         return Err("no seal lines".into());
     }
+    if days.days.is_empty() != days.scopes.is_empty() {
+        return Err("`day` and `dayscope` lines come together".into());
+    }
     Ok(List {
         root,
         entries,
+        days,
         windows,
     })
 }
@@ -311,12 +437,14 @@ impl std::error::Error for Refusal {}
 const MAX_WALK_DEPTH: usize = 64;
 
 /// What [`Sealed::walk_unsealed`] found: the unsealed files, sorted bytewise by the string form of
-/// the path, and the count of entries (files or directories) skipped: sealed ones, and
-/// directories already visited (a link back to a directory the walk is in or has been in).
+/// the path, the count of entries (files or directories) skipped because the guard refuses them,
+/// and the count of directories already visited (a link to a directory the walk is in or has been
+/// in, or two names of one directory: the first in bytewise order of the walk is the one walked).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Walk {
     pub files: Vec<PathBuf>,
     pub skipped: usize,
+    pub already_visited: usize,
 }
 
 /// The guard for one data root.
@@ -401,6 +529,7 @@ impl Sealed {
                 list: List {
                     root: PathBuf::new(),
                     entries: Vec::new(),
+                    days: Days::default(),
                     windows: Vec::new(),
                 },
                 root: PathBuf::new(),
@@ -458,6 +587,28 @@ impl Sealed {
                 ),
             });
         }
+        let days = &self.list.days;
+        let hit = days
+            .hit(&given, false)
+            .map(|h| ("the path names", h))
+            .or_else(|| {
+                days.hit(&resolved, false)
+                    .map(|h| ("the path resolves to", h))
+            })
+            .or_else(|| {
+                below
+                    .as_ref()
+                    .and_then(|b| days.hit(b, true))
+                    .map(|h| ("the path is inside", h))
+            });
+        if let Some((how, (scope, day))) = hit {
+            return Err(Refusal {
+                path: path.to_path_buf(),
+                why: format!(
+                    "refused by OA-SEAL-001: {how} the sealed hold-out entry `day {day} below {scope}` (crates/oa-sealed/sealed_paths.txt); sealed data is never read"
+                ),
+            });
+        }
         Ok(())
     }
 
@@ -478,7 +629,6 @@ impl Sealed {
     /// being refused is an error (the caller names the path). A name that is a file is returned
     /// as the only file.
     pub fn walk_unsealed(&self, root: &Path) -> io::Result<Walk> {
-        use std::os::unix::ffi::OsStrExt;
         self.check_with(root, true)
             .map_err(|r| io::Error::other(r.why))?;
         // A root that does not exist is an error, not an empty walk.
@@ -513,12 +663,18 @@ impl Sealed {
         // skipped and counted rather than followed round again.
         let real = fs::canonicalize(dir)?;
         if !visited.insert(real) {
-            walk.skipped += 1;
+            walk.already_visited += 1;
             return Ok(());
         }
+        // The entries are sorted bytewise before any is walked, so which of two names of one
+        // directory is walked does not depend on the order the file system lists them in.
+        let mut entries = Vec::new();
         // seal-allow: the guard's own walk; every entry is checked below before it is used
         for e in fs::read_dir(dir)? {
-            let p = e?.path();
+            entries.push(e?.path());
+        }
+        entries.sort_by(|a, b| a.as_os_str().as_bytes().cmp(b.as_os_str().as_bytes()));
+        for p in entries {
             if self.check_with(&p, true).is_err() {
                 walk.skipped += 1;
             } else if p.is_dir() {
@@ -549,13 +705,17 @@ impl Sealed {
         // A regular file with more than one name is refused: a hard link under a neutral name
         // to a sealed file would pass the name check, and the real path of the descriptor is
         // only one of its names.
-        if let Ok(m) = file.metadata() {
-            if m.is_file() && m.nlink() > 1 {
-                return Err(io::Error::other(format!(
-                    "refused by OA-SEAL-002: the file has {} hard links, so its other names could be sealed data under a neutral name; copy it instead",
-                    m.nlink()
-                )));
-            }
+        // A file whose metadata cannot be read is refused: the check fails closed.
+        let m = file.metadata().map_err(|e| {
+            io::Error::other(format!(
+                "refused by OA-SEAL-002: the open file's metadata cannot be read ({e}), so it is not shown to have one name"
+            ))
+        })?;
+        if m.is_file() && m.nlink() > 1 {
+            return Err(io::Error::other(format!(
+                "refused by OA-SEAL-002: the file has {} hard links, so its other names could be sealed data under a neutral name; copy it instead",
+                m.nlink()
+            )));
         }
         let link = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
         if let Ok(real) = fs::read_link(&link) {
@@ -657,7 +817,8 @@ mod tests {
     #[test]
     fn the_compiled_in_list_parses() {
         let l = parse_list(LIST).unwrap();
-        assert_eq!(l.entries.len(), 42);
+        assert_eq!(l.entries.len(), 6);
+        assert_eq!(l.days.days.len(), 3);
         assert_eq!(l.windows.len(), 1);
     }
 }

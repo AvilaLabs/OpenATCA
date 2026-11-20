@@ -167,6 +167,7 @@ fn real_coverage_has_no_large_gap() {
 #[test]
 fn real_altitudes_agree_with_the_pdf_plots() {
     let Some((dir, l)) = loaded() else { return };
+    // seal-allow: checks that a fixed tool is installed; reads no data
     if std::process::Command::new("pdftotext")
         .arg("-v")
         .output()
@@ -248,6 +249,7 @@ fn real_clearance_of_one_chart_against_terrain_and_obstacles() {
 #[test]
 fn the_check_binary_prints_the_summary_and_exits_by_result() {
     let exe = env!("CARGO_BIN_EXE_oa-mva-check");
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let bad = std::process::Command::new(exe)
         .arg("--bogus")
         .output()
@@ -255,6 +257,7 @@ fn the_check_binary_prints_the_summary_and_exits_by_result() {
     assert_eq!(bad.status.code(), Some(2));
     let Some(dir) = mva_dir() else { return };
     // `--dof` at a path that is not there: the clearance section reports it did not run.
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let out = std::process::Command::new(exe)
         .args([
             "--dir",
@@ -286,6 +289,7 @@ fn the_check_binary_prints_the_summary_and_exits_by_result() {
     let tmp = std::env::temp_dir().join(format!("oa-mva-bad-{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
     std::fs::write(tmp.join("BAD.xml"), b"<a xmlns:x=\"y\"/>").unwrap();
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let out = std::process::Command::new(exe)
         .args([
             "--dir",

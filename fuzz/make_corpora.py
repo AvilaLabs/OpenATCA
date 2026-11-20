@@ -98,7 +98,7 @@ for f in gl(S + '/rec/*.oaf'):
 # --- adsb traces, json
 # The newest part among the unsealed days (the real layout is raw/adsblol/YYYY.MM.DD/v*.tar.aa);
 # a sealed day directory is skipped and counted, never listed.
-adsb_parts, adsb_skipped = sealed_guard.walk_unsealed(R + '/adsblol') if os.path.isdir(R + '/adsblol') else ([], 0)
+adsb_parts, adsb_skipped, _ = sealed_guard.walk_unsealed(R + '/adsblol') if os.path.isdir(R + '/adsblol') else ([], 0, 0)
 SEALED_SKIPPED += adsb_skipped
 adsb_parts = sorted(p for p in adsb_parts if p.endswith('.tar.aa'))
 n = 0; tot = 0

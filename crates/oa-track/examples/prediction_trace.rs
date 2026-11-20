@@ -147,6 +147,9 @@ fn receive_key(row: &oa_adsb::Row) -> ReceiveKey {
     )
 }
 
+/// The receive times of the frames that carry the selected addresses' rows. The map is only ever
+/// looked up by the keys of rows already read (and filtered of the sealed window) by the clip
+/// reader, so a row it holds that the reader dropped is never used.
 fn receive_times(
     path: &Path,
     selected: &BTreeSet<u32>,

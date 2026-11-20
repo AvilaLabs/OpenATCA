@@ -38,14 +38,13 @@ class SealedGuardTests(unittest.TestCase):
 
     # REQ: OA-SEAL-001
     def test_the_list_parses_to_the_sealed_entries(self):
-        root, entries, windows = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
+        root, entries, days, windows = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
         want = ["scds/rec-20261119/day2*", "scds/rec-20261119/day3*", "scds/rec-20261119/day4*",
                 "scds/rec-20261119/runs*", "scds/stdds-20261119-holdout*", "scds/stdds-smoke-20261119*"]
-        for d in ("raw/adsblol", "scds", "derived"):
-            for form in ("2026.11.2", "2026-11-2", "2026_11_2", "2026112"):
-                for n in "012":
-                    want.append(f"{d}/*{form}{n}*")
         self.assertEqual([e[0] for e in entries], want)
+        self.assertEqual(days[0], ["2026-11-20", "2026-11-21", "2026-11-22"])
+        self.assertEqual([t[0] for t in days[1]], ["raw", "scds", "derived"])
+        self.assertEqual([t[0] for t in days[2]], ["raw/rap", "raw/awc"])
         self.assertEqual([w[0] for w in windows], ["2026-11-20T00:00:00Z 2026-11-23T00:17:00Z"])
         for bad in ("", "root /d\n", "seal a/b\n", "root /d\nseal a/../b\n", "root d\nseal a\n",
                     "root /d\nseal *\n", "root /d\nfoo bar\n", "root /d\nseal **\n", "root /d\nseal a/*x\n",
@@ -91,17 +90,42 @@ class SealedGuardTests(unittest.TestCase):
                   "/data/raw/rap/rap.20261120.t00z.grib2", "/data/raw/awc/2026-11-21.json"):
             self.g.check(p)
 
+    # REQ: OA-SEAL-010
+    def test_a_sealed_day_is_matched_on_normalised_components_split_components_and_every_raw_feed(self):
+        for p in ("/data/raw/sfdps/2026.11.20/a.xml", "/data/raw/stdds/2026-11-21.oaf",
+                  "/data/raw/tfms/x_2026_11_22_y", "/data/raw/tbfm/20261120.bin",
+                  "/data/derived/zau-2026.11_20.oaf", "/data/raw/sfdps/2026/11/20/a.xml",
+                  "/data/scds/2026/11/22", "/data/derived/2026-11/21/x", "/data/derived/202611/21/x",
+                  "/data/derived/120261120", "/data/scds/1720261120.bin", "/data/raw/adsblol/120261121.tar",
+                  "/elsewhere/copy/raw/sfdps/2026.11.21/a"):
+            self.refused(p)
+        for p in ("/data/raw/rap/2026/11/20/x.grib2", "/data/raw/awc/20261122.json",
+                  "/data/raw/sfdps/2026.11.19/a.xml", "/data/raw/sfdps/2026/11/19", "/data/raw/sfdps/2026/12/20",
+                  "/data/raw/sfdps/2026/20/11", "/data/derived/2026-11/19/x", "/data/other/2026.11.20/a",
+                  "/data/2026.11.20", "/data/raw/sfdps/20.11.2026/a", "/data/raw/sfdps/20-nov-2026/a"):
+            self.g.check(p)
+
     # REQ: OA-SEAL-012
     def test_walk_unsealed_links_back_depth_missing_root_and_order(self):
         w = self.root / "work"
         (w / "a").mkdir(parents=True)
         (w / "a/f.bin").write_bytes(b"x")
         os.symlink(w, w / "a/self")
-        files, skipped = self.g.walk_unsealed(w)
-        self.assertEqual((len(files), skipped), (1, 1))
+        files, skipped, again = self.g.walk_unsealed(w)
+        self.assertEqual((len(files), skipped, again), (1, 0, 1))
         os.symlink(w, w / "a/self2")
-        files, skipped = self.g.walk_unsealed(w)
-        self.assertEqual((len(files), skipped), (1, 2))
+        files, skipped, again = self.g.walk_unsealed(w)
+        self.assertEqual((len(files), skipped, again), (1, 0, 2))
+        # A sibling link to a directory next to it: the first name in bytewise order is walked,
+        # the other is counted as already visited, never as sealed.
+        sib = self.root / "sib"
+        (sib / "real").mkdir(parents=True)
+        (sib / "real/f.bin").write_bytes(b"x")
+        (sib / "a").mkdir()
+        os.symlink("../real", sib / "a/x")
+        files, skipped, again = self.g.walk_unsealed(sib)
+        self.assertEqual(([os.path.relpath(f, sib) for f in files], skipped, again),
+                         (["a/x/f.bin"], 0, 1))
         deep = self.root / "deep"
         for _ in range(70):
             deep = deep / "d"
@@ -115,7 +139,7 @@ class SealedGuardTests(unittest.TestCase):
         (s / "a").mkdir(parents=True)
         (s / "a/b").write_bytes(b"x")
         (s / "a.b").write_bytes(b"x")
-        files, _ = self.g.walk_unsealed(s)
+        files, _, _ = self.g.walk_unsealed(s)
         self.assertEqual([os.path.relpath(f, s) for f in files], ["a.b", "a/b"])
 
     # REQ: OA-SEAL-002, OA-SEAL-007
@@ -131,7 +155,7 @@ class SealedGuardTests(unittest.TestCase):
 
     # REQ: OA-SEAL-011, OA-SEAL-001
     def test_the_window_is_half_open_and_parses_like_the_rust_one(self):
-        _, _, windows = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
+        _, _, _, windows = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
         self.assertEqual(windows[0][1:], (1_795_132_800_000_000_000, 1_795_393_020_000_000_000))
         lo, hi = windows[0][1:]
         for t, sealed in ((lo - 1, False), (lo, True), (hi - 1, True), (hi, False), (0, False)):
@@ -140,7 +164,7 @@ class SealedGuardTests(unittest.TestCase):
         self.assertTrue(sealed_guard.Guard(text="garbage").in_window(0))
         two = ("root /d\nseal a\nwindow 2024-02-29T00:00:00Z 2024-03-01T00:00:00Z\n"
                "window 1970-01-01T00:00:01Z 1970-01-01T00:00:02Z\n")
-        _, _, w2 = sealed_guard.parse_list(two)
+        _, _, _, w2 = sealed_guard.parse_list(two)
         self.assertEqual((w2[0][1], w2[1][1]), (1_709_164_800_000_000_000, 1_000_000_000))
         self.assertTrue(sealed_guard.dump(two).endswith("window 1970-01-01T00:00:01Z 1970-01-01T00:00:02Z\n"))
 
@@ -152,17 +176,17 @@ class SealedGuardTests(unittest.TestCase):
             (adsb / d / "a.oaf").write_bytes(b"x")
         (adsb / "v2026.11.21-x.tar.aa").write_bytes(b"x")
         (adsb / "v2026.11.23-x.tar.aa").write_bytes(b"x")
-        files, skipped = self.g.walk_unsealed(adsb)
+        files, skipped, _ = self.g.walk_unsealed(adsb)
         self.assertEqual([os.path.relpath(f, adsb) for f in files],
                          ["2026.11.19/a.oaf", "2026.11.24/a.oaf", "v2026.11.23-x.tar.aa"])
         self.assertEqual(skipped, 2)
         os.symlink(self.root / "scds/rec-20261119/day2", adsb / "2026.11.30")
-        files, skipped = self.g.walk_unsealed(adsb)
+        files, skipped, _ = self.g.walk_unsealed(adsb)
         self.assertEqual((len(files), skipped), (3, 3))
         with self.assertRaises(sealed_guard.SealedError):
             self.g.walk_unsealed(adsb / "2026.11.20")
         # The data root holds sealed entries: it is walked, and they are skipped and counted.
-        files, skipped = self.g.walk_unsealed(self.root)
+        files, skipped, _ = self.g.walk_unsealed(self.root)
         self.assertGreaterEqual(skipped, 6)
         self.assertIn(str(self.root / "scds/day-20261118/rec/b.bin"), files)
         for f in files:

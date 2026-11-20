@@ -1501,4 +1501,15 @@ fn the_clip_reader_drops_sealed_window_frames_and_rows_and_counts_them() {
     assert_eq!(tr.sealed_window_dropped, 4);
     // Kept: the row at from - 1 and the rows at to and to + 1 s.
     assert_eq!(tr.reports, 3);
+    // The decoder's records and kept counts are after the window filter: the 2 rows timed in the
+    // window are not in them (the 4 + 1 + 1 + 1 rows of the frames not received in the window
+    // are decoded: 4 + 1, minus 2 dropped).
+    assert_eq!((tr.decode.records, tr.decode.kept), (3, 3));
+    // On every exit the count is given: a window that holds only sealed frames is an error, and
+    // the count of what was dropped is still returned.
+    let mut sealed = 0;
+    let e = cli::track_window_counted(&clip, FROM, TO - 1, TO + 5, 0, &mut sealed).unwrap_err();
+    assert!(e.to_string().contains("no reports in the window"), "{e}");
+    // The two frames received in the window; the frame just before it is outside the read span.
+    assert_eq!(sealed, 2);
 }

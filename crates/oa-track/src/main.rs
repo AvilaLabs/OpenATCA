@@ -274,6 +274,9 @@ fn replay_timed(
     cfg: &TrackerConfig,
     dir: &Path,
 ) -> Result<(LatencyLog, SpilledRun, f64, usize), String> {
+    // `meas` was built from rows the clip reader had already filtered (a frame or row in a sealed
+    // window is dropped there); the frames read here pass the same filter, and a row is only ever
+    // looked up by the key of a measurement that is in `meas`, so nothing sealed is replayed.
     let mut by_key: BTreeMap<(u32, i64), VecDeque<usize>> = BTreeMap::new();
     for (i, m) in meas.iter().enumerate() {
         by_key.entry((m.addr, m.toa_ns)).or_default().push_back(i);

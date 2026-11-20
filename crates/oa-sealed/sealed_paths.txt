@@ -16,46 +16,25 @@ seal scds/rec-20261119/day4*
 seal scds/rec-20261119/runs*
 seal scds/stdds-20261119-holdout*
 seal scds/stdds-smoke-20261119*
-# The three hold-out days 20 to 22 November 2026 (ADS-B days and hold-out days A to C), in any spelling:
-# `2026.11.2d`, `2026-11-2d`, `2026_11_2d` and `2026112d` (case-sensitive), as a substring of any component
-# at any depth below raw/adsblol, scds and derived, so a renamed, partial or archived copy is sealed too.
-# The weather inputs (raw/rap, raw/awc, ...) are inputs, not scored data, and stay unsealed.
-seal raw/adsblol/*2026.11.20*
-seal raw/adsblol/*2026.11.21*
-seal raw/adsblol/*2026.11.22*
-seal raw/adsblol/*2026-11-20*
-seal raw/adsblol/*2026-11-21*
-seal raw/adsblol/*2026-11-22*
-seal raw/adsblol/*2026_11_20*
-seal raw/adsblol/*2026_11_21*
-seal raw/adsblol/*2026_11_22*
-seal raw/adsblol/*20261120*
-seal raw/adsblol/*20261121*
-seal raw/adsblol/*20261122*
-seal scds/*2026.11.20*
-seal scds/*2026.11.21*
-seal scds/*2026.11.22*
-seal scds/*2026-11-20*
-seal scds/*2026-11-21*
-seal scds/*2026-11-22*
-seal scds/*2026_11_20*
-seal scds/*2026_11_21*
-seal scds/*2026_11_22*
-seal scds/*20261120*
-seal scds/*20261121*
-seal scds/*20261122*
-seal derived/*2026.11.20*
-seal derived/*2026.11.21*
-seal derived/*2026.11.22*
-seal derived/*2026-11-20*
-seal derived/*2026-11-21*
-seal derived/*2026-11-22*
-seal derived/*2026_11_20*
-seal derived/*2026_11_21*
-seal derived/*2026_11_22*
-seal derived/*20261120*
-seal derived/*20261121*
-seal derived/*20261122*
+# day, dayscope, dayexempt: the three hold-out days 20 to 22 November 2026 (ADS-B days and hold-out
+#       days A to C). A path is sealed when a component below a dayscope directory names a sealed day:
+#       each component is normalised (every `.`, `-` and `_` deleted) and the compact day (`20261120`)
+#       is matched as a substring of it, so `2026.11.20`, `2026-11-20`, `2026_11_20` and `20261120`
+#       are one name; the consecutive components `2026`, `11`, `20` name it too. The match is on
+#       digits only, so a longer number holding the compact day (`120261120`, an epoch) is sealed
+#       too (it fails closed). Day-first dates, month names and ordinals are not matched, and a
+#       copy outside the data root that is not named like this relies on the window rule. A
+#       dayscope is matched as consecutive components anywhere in a path, so a copy of the data
+#       under another root is refused too. A dayexempt directory is left out: the weather inputs
+#       (raw/rap, raw/awc) are inputs, not scored data.
+day 2026-11-20
+day 2026-11-21
+day 2026-11-22
+dayscope raw
+dayscope scds
+dayscope derived
+dayexempt raw/rap
+dayexempt raw/awc
 # window  a half-open UTC span (from inclusive, to exclusive) in which every row or frame is
 #         sealed, whichever file holds it: the three ADS-B days and hold-out days A to C of the
 #         four-day recording (19 Nov 00:17Z, then 24 h each). Readers drop and count such rows.

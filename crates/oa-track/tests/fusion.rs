@@ -544,6 +544,7 @@ fn registration_removes_a_radar_bias_from_radar_only_aircraft_that_adsb_aircraft
 fn the_binary_writes_the_report_and_refuses_bad_usage() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fusion_out");
     let exe = env!("CARGO_BIN_EXE_oa-track-fusion");
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let o = Command::new(exe)
         .args([
             "--out",
@@ -564,6 +565,7 @@ fn the_binary_writes_the_report_and_refuses_bad_usage() {
         1,
         "{err}"
     );
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let report = std::fs::read_to_string(dir.join("report.txt")).unwrap();
     for needle in [
         "scored against EXACT truth",
@@ -585,6 +587,7 @@ fn the_binary_writes_the_report_and_refuses_bad_usage() {
         vec!["--out"],
         vec!["--out", "x", "--worlds", "abc"],
     ] {
+        // seal-allow: runs the built binary of this package on the test's own temp files
         let o = Command::new(exe).args(&args).output().unwrap();
         assert_eq!(o.status.code(), Some(2), "{args:?}");
     }

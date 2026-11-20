@@ -38,6 +38,11 @@ struct Ctx {
     stalled_bytes: u64,
 }
 
+/// Whether a record's own time (Unix milliseconds) is in a sealed window.
+fn sealed_ms(t: i64) -> bool {
+    oa_sealed::in_sealed_window(t.saturating_mul(1_000_000))
+}
+
 fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
     while let Some(ev) = reader.next() {
         match ev {
@@ -48,22 +53,34 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
                 oa_sealed::note_window_drops(1);
             }
             Ok(f) if f.kind == FrameKind::Message => {
-                ctx.frames += 1;
-                match parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats) {
-                    Ok(Message::Tais(m)) => {
-                        // A record timed (`mrtTime`) in a sealed window is counted as dropped
-                        // even when its frame was received outside it; the per-field counts
-                        // below are parse counts and still include it.
-                        for r in &m.records {
-                            if oa_sealed::in_sealed_window(r.mrt_time_ms.saturating_mul(1_000_000))
-                            {
-                                ctx.sealed_window_dropped += 1;
-                                oa_sealed::note_window_drops(1);
-                            }
+                // Parsed into a scratch accumulator: a message with a record timed in a sealed
+                // window is dropped whole (its records counted as dropped, nothing merged), so
+                // no field, flag, latency or record count includes a hold-out row.
+                let mut scratch = new_stats();
+                match parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut scratch) {
+                    Ok(m) => {
+                        let (n, sealed) = match &m {
+                            Message::Tais(t) => (
+                                t.records.len(),
+                                t.records.iter().any(|r| sealed_ms(r.mrt_time_ms)),
+                            ),
+                            Message::Smes(t) => (
+                                t.records.len(),
+                                t.records.iter().any(|r| sealed_ms(r.time_ms)),
+                            ),
+                            _ => (0, false),
+                        };
+                        if sealed {
+                            ctx.sealed_window_dropped += n as u64;
+                            oa_sealed::note_window_drops(n as u64);
+                        } else {
+                            ctx.frames += 1;
+                            ctx.stats.merge(&scratch, &ctx.limits);
                         }
                     }
-                    Ok(_) => {}
                     Err(e) => {
+                        ctx.frames += 1;
+                        ctx.stats.merge(&scratch, &ctx.limits);
                         if let Some(c) = ctx.refused.get_mut(std_error_index(&e)) {
                             *c += 1;
                         }
@@ -163,7 +180,7 @@ fn main() {
         ctx.frames, ctx.other_frames, ctx.bad_frames
     );
     println!(
-        "sealed-window rows dropped: {} (frames by receive time, TAIS records by mrtTime)",
+        "sealed-window rows dropped: {} (frames by receive time; TAIS records by mrtTime and ASDE-X reports by time, dropping the whole message)",
         ctx.sealed_window_dropped
     );
     println!("gzip: damaged {gz_damaged} truncated {truncated}");

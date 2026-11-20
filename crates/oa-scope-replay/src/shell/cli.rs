@@ -555,6 +555,20 @@ pub fn track_window(
     end_ns: i64,
     keep_from_ns: i64,
 ) -> Result<(RowStore, Callsigns, TrackSummary), CliError> {
+    track_window_counted(adsb, from_ns, to_ns, end_ns, keep_from_ns, &mut 0)
+}
+
+/// [`track_window`], with the frames and rows dropped in a sealed window put in `sealed_out` on
+/// every exit (a read error and an empty window included), so the caller can print the count
+/// whatever the result.
+pub fn track_window_counted(
+    adsb: &Path,
+    from_ns: i64,
+    to_ns: i64,
+    end_ns: i64,
+    keep_from_ns: i64,
+    sealed_out: &mut u64,
+) -> Result<(RowStore, Callsigns, TrackSummary), CliError> {
     let mut sum = TrackSummary::default();
     let mut reports = Reports::default();
     let mut file =
@@ -565,7 +579,7 @@ pub fn track_window(
     let (mut rejects, mut statuses) = (0u64, 0u64);
     let mut sealed = 0u64;
     let mut scratch_rows = Reports::default();
-    let damaged = oa_feed::read_frames(&mut file, &mut |fr| {
+    let read = oa_feed::read_frames(&mut file, &mut |fr| {
         // A frame received in a sealed window is dropped and counted, never decoded.
         if oa_sealed::in_sealed_window(fr.recv_unix_ns) {
             sealed += 1;
@@ -595,10 +609,12 @@ pub fn track_window(
         reports_clear(&mut scratch_rows);
         match decode_payload_lenient(fr.payload, &mut scratch_rows) {
             Ok(c) => {
-                // A row timed in a sealed window is dropped even when its frame was not.
-                sealed += oa_adsb::reports_extend_unsealed(&mut reports, &scratch_rows);
-                dec.records += c.records as u64;
-                dec.kept += c.kept as u64;
+                // A row timed in a sealed window is dropped even when its frame was not, and is
+                // not in the records and kept counts: they are after the window filter.
+                let gone = oa_adsb::reports_extend_unsealed(&mut reports, &scratch_rows);
+                sealed += gone;
+                dec.records += (c.records as u64).saturating_sub(gone);
+                dec.kept += (c.kept as u64).saturating_sub(gone);
                 dec.dropped += c.dropped as u64;
                 dec.bad_time += c.bad_time as u64;
                 dec.unknown_source += c.unknown_source as u64;
@@ -607,8 +623,9 @@ pub fn track_window(
             }
             Err(_) => undecodable += 1,
         }
-    })
-    .map_err(|e| failed(&format!("read {}", adsb.display()), e))?;
+    });
+    *sealed_out = sealed;
+    let damaged = read.map_err(|e| failed(&format!("read {}", adsb.display()), e))?;
     if window_full {
         return Err(CliError::Failed(format!(
             "{} has more than {MAX_WINDOW_REPORTS} reports in the window; narrow the window",
@@ -876,16 +893,18 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         .and_then(|h| h.checked_add(NS_PER_S))
         .ok_or_else(overflow)?;
     let t0 = Instant::now();
-    let (store, calls, tr) = track_window(
-        &a.adsb,
+    let (read_from, read_to) = (
         from_ns.checked_sub(READ_MARGIN_NS).ok_or_else(overflow)?,
         end_ns.checked_add(READ_MARGIN_NS).ok_or_else(overflow)?,
-        end_ns,
-        a.start_ns.checked_sub(history_ns).ok_or_else(overflow)?,
-    )?;
+    );
+    let keep_from = a.start_ns.checked_sub(history_ns).ok_or_else(overflow)?;
+    let mut sealed = 0u64;
+    let tracked = track_window_counted(&a.adsb, read_from, read_to, end_ns, keep_from, &mut sealed);
+    // After the last read of the clip, on every exit (an empty window and a failed read too);
+    // frames by receive time plus rows by their own time.
+    eprintln!("sealed-window rows dropped: {sealed}");
+    let (store, calls, tr) = tracked?;
     let track_time = t0.elapsed();
-    // After the last read of the clip; frames by receive time plus rows by their own time.
-    eprintln!("sealed-window rows dropped: {}", tr.sealed_window_dropped);
 
     let cfg = ReplayConfig {
         centre_lat_e7: a.centre_lat_e7,

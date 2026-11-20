@@ -286,6 +286,7 @@ fn a_row_on_another_day_refuses_the_export_and_leaves_no_file() {
         "{text}"
     );
     ex.abort();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let left: Vec<_> = fs::read_dir(&out).unwrap().collect();
     assert!(left.is_empty(), "{left:?}");
 }
@@ -309,6 +310,7 @@ fn split_days_writes_one_directory_per_day_and_no_file_holds_two_days() {
     assert_eq!(report.days.len(), 2);
     for d in &report.days {
         let dir = out.join(oa_compass::shell::export::date_text(d.day));
+        // seal-allow: reads back a file the test wrote in its own temp dir
         let bytes = fs::read(dir.join("openatca.ast")).unwrap();
         let recs = decode_all(&bytes);
         assert_eq!(recs.len() as u64, d.sink.records);
@@ -336,6 +338,7 @@ fn track_numbers_are_stable_per_key_from_one_and_never_wrap() {
     }
     let rep = ex.finish().unwrap().commit().unwrap();
     assert_eq!(rep.days[0].tracks, 3);
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let recs = decode_all(&fs::read(out.join("openatca.ast")).unwrap());
     let nums: Vec<u16> = recs.iter().map(|r| r.track_number.unwrap()).collect();
     assert_eq!(nums, vec![1, 2, 1, 3]);
@@ -473,6 +476,7 @@ fn eram_samples_are_sorted_deduplicated_and_counted() {
     assert_eq!(info.unknown_flight, 1);
     let rep = ex.finish().unwrap().commit().unwrap();
     assert_eq!(rep.days[0].sink.records, 4);
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let recs = decode_all(&fs::read(out.join("eram.ast")).unwrap());
     let times: Vec<u32> = recs.iter().map(|r| r.time.unwrap()).collect();
     assert_eq!(times, vec![0, 0, 0, 12 * 128]);
@@ -659,6 +663,7 @@ fn tracker_output_exports_ticks_only_and_counts_the_update_rows() {
     assert_eq!(info.update_rows_not_exported, 1);
     assert_eq!((info.coasting, info.uncertain), (1, 1));
     ex.finish().unwrap().commit().unwrap();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let recs = decode_all(&fs::read(out.join("openatca.ast")).unwrap());
     assert_eq!(recs.len(), 2);
     // A radar-handle key is no aircraft address; a coasting row has no altitude here.
@@ -711,6 +716,7 @@ fn a_slice_of_a_real_recording_round_trips_through_the_tracker_and_the_encoder()
     assert_eq!(written + rep.refused.iter().sum::<u64>(), info.tick_rows);
     for d in &rep.days {
         let dir = out.join(oa_compass::shell::export::date_text(d.day));
+        // seal-allow: reads back a file the test wrote in its own temp dir
         let recs = decode_all(&fs::read(dir.join("openatca.ast")).unwrap());
         assert_eq!(recs.len() as u64, d.sink.records);
         assert!(d.sink.max_lat_error_e7 <= 27 && d.sink.max_lon_error_e7 <= 27);
@@ -759,6 +765,7 @@ fn the_sfdps_ingest_counts_are_reported_and_a_full_table_refuses_the_export() {
     );
     assert!(export_eram(&leg, &mut ex, None, EramAddress::Keep).is_err());
     ex.abort();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     assert!(fs::read_dir(&out).unwrap().next().is_none());
 }
 

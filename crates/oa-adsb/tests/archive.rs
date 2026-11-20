@@ -258,10 +258,12 @@ fn clip_cmd(exe: &str, args: &[&str]) -> std::process::Output {
             let _ = std::fs::remove_file(format!("{o}.source"));
         }
     }
+    // seal-allow: runs the built binary of this package on the test's own temp files
     Command::new(exe).args(args).output().unwrap()
 }
 
 fn read_frames(path: &PathBuf) -> (Vec<u8>, Reports, usize) {
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let bytes = std::fs::read(path).unwrap();
     let mut buf = vec![0u8; MAX_FRAME_LEN];
     let mut rd = FrameReader::new(&mut buf).unwrap();
@@ -581,7 +583,9 @@ fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwis
     let (_, r, _) = read_frames(&out);
     assert_eq!(r.time_ns, [(FROM - 1) * 1_000_000_000]);
     // The sidecar names the input with its SHA-256, the window and the counts.
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let text = std::fs::read_to_string(&side).unwrap();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let want = oa_sha256::to_hex(&oa_sha256::sha256(&std::fs::read(&tar).unwrap()));
     assert!(
         text.contains(&format!("input: {tar} sha256 {want}\n")),
@@ -602,6 +606,7 @@ fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwis
         assert!(text.contains(k), "{k} {text}");
     }
     // An existing output or sidecar is refused and left as it was.
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let o = Command::new(exe)
         .args([
             "--out",
@@ -614,6 +619,7 @@ fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwis
         .unwrap();
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("exists"));
+    // seal-allow: reads back a file the test wrote in its own temp dir
     assert_eq!(std::fs::read_to_string(&side).unwrap(), text);
     let _ = std::fs::remove_file(&out);
     let _ = std::fs::remove_file(&side);
@@ -637,8 +643,61 @@ fn the_archive_reader_drops_and_counts_trace_rows_in_a_sealed_window() {
         to_ns: i64::MAX,
         ..ZAU_BOX
     };
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let (res, calls) = scan(vec![Cursor::new(std::fs::read(&tar).unwrap())], &f);
     assert_eq!(res.stats.sealed_window_dropped, 2);
     assert_eq!(res.stats.kept, 1);
     assert_eq!(calls, [(0xaaaaaa, 1)]);
+}
+
+// REQ: OA-SEAL-015
+#[test]
+fn clip_creates_the_sidecar_and_the_clip_new_and_never_follows_or_replaces_a_name() {
+    const AFTER: i64 = 1_795_393_020;
+    let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
+    let tar = trace_tar_at("new-only.tar", AFTER, 1);
+    let go = |out: &PathBuf| {
+        // seal-allow: runs the built binary of this package on the test's own temp files
+        Command::new(exe)
+            .args(["--out", out.to_str().unwrap(), &tar])
+            .output()
+            .unwrap()
+    };
+    // Only the sidecar exists: refused, the clip is not created, the sidecar is as it was.
+    let out = tmp("new-only.oaf");
+    let side = PathBuf::from(format!("{}.source", out.display()));
+    std::fs::write(&side, "mine").unwrap();
+    let o = go(&out);
+    assert!(!o.status.success());
+    assert!(!out.exists());
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), "mine");
+    // Only the clip exists: refused, no sidecar is created, the clip is as it was.
+    let out = tmp("new-only2.oaf");
+    let side = PathBuf::from(format!("{}.source", out.display()));
+    std::fs::write(&out, "mine").unwrap();
+    let o = go(&out);
+    assert!(!o.status.success());
+    assert!(!side.exists());
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "mine");
+    // A dangling link in either place is refused and its target is not created.
+    for (n, link_side) in [("dangle-a.oaf", false), ("dangle-b.oaf", true)] {
+        let out = tmp(n);
+        let side = PathBuf::from(format!("{}.source", out.display()));
+        let target = tmp(&format!("{n}.target"));
+        std::os::unix::fs::symlink(&target, if link_side { &side } else { &out }).unwrap();
+        let o = go(&out);
+        assert!(!o.status.success(), "{n}");
+        assert!(!target.exists(), "{n}");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&side);
+    }
+    // A clean run creates both and the sidecar names the clip.
+    let out = tmp("new-ok.oaf");
+    let o = go(&out);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    let text = std::fs::read_to_string(format!("{}.source", out.display())).unwrap();
+    assert!(text.contains("oa-adsb-clip source"), "{text}");
 }

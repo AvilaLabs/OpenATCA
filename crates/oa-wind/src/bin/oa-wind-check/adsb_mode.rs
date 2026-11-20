@@ -157,6 +157,8 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("oa-wind-check adsb: {key}: {e}");
+                // The count so far, as on every exit.
+                println!("sealed-window rows dropped: {sealed}");
                 return ExitCode::FAILURE;
             }
         };
@@ -181,10 +183,14 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             }
             Err(ScanError::Tar(e)) => {
                 eprintln!("oa-wind-check adsb: {key}: {e}");
+                // The count so far, as on every exit.
+                println!("sealed-window rows dropped: {sealed}");
                 return ExitCode::FAILURE;
             }
             Err(ScanError::Sink(e)) => {
                 eprintln!("oa-wind-check adsb: {key}: {e}");
+                // The count so far, as on every exit.
+                println!("sealed-window rows dropped: {sealed}");
                 return ExitCode::FAILURE;
             }
         }

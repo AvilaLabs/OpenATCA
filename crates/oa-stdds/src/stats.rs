@@ -267,6 +267,86 @@ impl Stats {
         }
     }
 
+    /// Adds the counts of `o` (a scratch accumulator that parsed one message) to `self`, with the
+    /// same table limits as counting directly.
+    pub fn merge(&mut self, o: &Stats, limits: &Limits) {
+        fn add<const N: usize>(a: &mut [u64; N], b: &[u64; N]) {
+            for (x, y) in a.iter_mut().zip(b) {
+                *x += y;
+            }
+        }
+        self.messages += o.messages;
+        add(&mut self.kinds, &o.kinds);
+        add(&mut self.errors, &o.errors);
+        self.records += o.records;
+        self.records_with_errors += o.records_with_errors;
+        self.empty_records += o.empty_records;
+        self.invalidated += o.invalidated;
+        add(&mut self.field_error_kinds, &o.field_error_kinds);
+        add(&mut self.tais_present, &o.tais_present);
+        add(&mut self.tais_errors, &o.tais_errors);
+        add(&mut self.smes_present, &o.smes_present);
+        add(&mut self.smes_errors, &o.smes_errors);
+        add(&mut self.tais_present_empty, &o.tais_present_empty);
+        add(&mut self.smes_present_empty, &o.smes_present_empty);
+        for s in &o.shapes {
+            let hit = self.shapes.iter_mut().find(|t| {
+                t.field == s.field && t.kind == s.kind && t.len == s.len && t.pattern == s.pattern
+            });
+            if let Some(h) = hit {
+                h.count += s.count;
+            } else if self.shapes.len() < MAX_SHAPES {
+                self.shapes.push(s.clone());
+            } else {
+                self.shapes_overflow += s.count;
+            }
+        }
+        self.shapes_overflow += o.shapes_overflow;
+        for (a, b) in self.tais_flags.iter_mut().zip(&o.tais_flags) {
+            add(a, b);
+        }
+        add(&mut self.latency, &o.latency);
+        self.latency_missing += o.latency_missing;
+        for id in &o.src_ids {
+            if self.src_ids.contains(id) {
+            } else if self.src_ids.len() < MAX_SRC_IDS {
+                self.src_ids.push(*id);
+            } else {
+                self.src_ids_overflow += 1;
+            }
+        }
+        self.src_ids_overflow += o.src_ids_overflow;
+        for (t, n) in &o.status_values {
+            if let Some(e) = self.status_values.iter_mut().find(|(u, _)| u == t) {
+                e.1 += n;
+            } else if self.status_values.len() < MAX_STATUS_VALUES {
+                self.status_values.push((t.clone(), *n));
+            } else {
+                self.status_table_overflow += n;
+            }
+        }
+        self.status_dropped += o.status_dropped;
+        self.status_value_too_long += o.status_value_too_long;
+        self.status_key_too_long += o.status_key_too_long;
+        self.status_table_overflow += o.status_table_overflow;
+        let unknown: Vec<(String, u64)> = o
+            .unknown
+            .iter()
+            .map(|u| (u.text.clone(), u.count))
+            .collect();
+        self.merge_unknown(&unknown, o.unknown_overflow, limits);
+        for (t, n) in &o.unknown_roots {
+            if let Some(e) = self.unknown_roots.iter_mut().find(|(u, _)| u == t) {
+                e.1 += n;
+            } else if self.unknown_roots.len() < MAX_ROOTS {
+                self.unknown_roots.push((t.clone(), *n));
+            } else {
+                self.unknown_roots_overflow += n;
+            }
+        }
+        self.unknown_roots_overflow += o.unknown_roots_overflow;
+    }
+
     pub(crate) fn observe_tais(
         &mut self,
         m: &TaisMessage,

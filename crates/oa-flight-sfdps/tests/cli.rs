@@ -9,6 +9,7 @@
 use std::process::Command;
 
 fn run(dir: &str) -> (Option<i32>, String) {
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let o = Command::new(env!("CARGO_BIN_EXE_oa-flight"))
         .arg(dir)
         .output()

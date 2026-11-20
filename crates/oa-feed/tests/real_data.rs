@@ -36,6 +36,7 @@ fn convert(src: &Path, dir: &Path, feed: &str) -> Vec<PathBuf> {
         assert!(took > 0);
     }
     rec.finish().unwrap();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())

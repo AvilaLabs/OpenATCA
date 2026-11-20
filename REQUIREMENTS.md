@@ -5738,7 +5738,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
 - **OA-SEAL-001** The sealed hold-out data is listed once, in `crates/oa-sealed/sealed_paths.txt` (the data root, the entries
-  `scds/rec-20261119/day2`, `day3`, `day4`, `runs*`, `scds/stdds-20261119-holdout*`, `scds/stdds-smoke-20261119*`, the ADS-B days and derived clips of OA-SEAL-010, and the windows of OA-SEAL-011); the Rust guard compiles the file in and
+  `scds/rec-20261119/day2`, `day3`, `day4`, `runs*`, `scds/stdds-20261119-holdout*`, `scds/stdds-smoke-20261119*`, the days of OA-SEAL-010, and the windows of OA-SEAL-011); the Rust guard compiles the file in and
   the Python guard reads it, and both parse it to the same set. A list that does not parse refuses every path.
 - **OA-SEAL-002** A path is resolved before it is checked (relative paths, `..`, every link, a symlinked parent directory, a
   path not yet created through its nearest existing ancestor) and is refused, with a message that names the rule, if it is,
@@ -5747,7 +5747,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   sealed day's rows out of a file that also holds unsealed rows is a content rule that needs the tool's own parser
   (OA-SEAL-014). A file with more than one hard link is refused when it is opened, with a message that says why: a second
   name for sealed data under a neutral name passes the name check, and the real path of a descriptor is only one of its
-  names (OA-SEAL-007).
+  names (OA-SEAL-007). Consequences: `cp -al`, `rsync --link-dest` and hard-link dedup trees give files with a second name and are refused when opened, so such data is copied (`cp`, `rsync` without links) before it is read; a file whose metadata cannot be read is refused too (the check fails closed).
 - **OA-SEAL-003** A tool that walks a directory checks every file it opens, through the guard's opener, not only its
   arguments.
 - **OA-SEAL-004** Nothing switches the guard off: it reads no environment variable, flag or file, and an unknown option of
@@ -5760,20 +5760,33 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   sealed guard or is listed with a reason in `crates/oa-sealed/exempt_targets.txt`; a target with neither, a listed target
   that does not exist, and a listed target that uses the guard all fail the test. In the `src/` and `examples/` of every
   member crate (core crates included), a bare `File::open`, `File::open_buffered`, `File::options`, `OpenOptions`,
-  `fs::read`, `fs::read_to_string`, `fs::read_dir`, `fs::copy`, `fs::hard_link` or `Command::new`, also through
-  `use std::fs::{...}` or an alias (`as`), fails the test unless its line, or one of the two lines before, carries
-  `// seal-allow: <why>` with a reason. String literals are stripped before a trailing `//` comment is cut off; only a
-  `#[cfg(test)]` followed by a `mod` item is skipped (with its body), any other `#[cfg(test)]` item is scanned; an allow
-  with no bare call on its line or the two after it is stale and fails, and the number of allows is pinned exactly in the
-  test (`ALLOW_COUNT`, now 44), not a budget. Stated exceptions, with the reason: oa-arinc424 (a no-dependency crate, so it
-  cannot use oa-sealed), oa-geo (a core crate, which does not depend on the shell crate oa-sealed) and oa-trace (walks the
-  repository's own sources and registers, no data). The bare opens of the first two are in tests only (fixtures and the
-  env-named `OPENATCA_CIFP` and `OPENATCA_GEODTEST` inputs); a test pins the count of bare calls per file and fails if
-  either crate gains one. `oa-mva`'s `pdftotext` runs on a path the guard has checked as given and as resolved.
+  `fs::read`, `fs::read_to_string`, `fs::read_dir`, `fs::copy`, `fs::hard_link` or `Command::new` fails the test unless
+  `// seal-allow: <why>` with a reason is on the call's own line (trailing) or is the comment line before the next code
+  line it covers. A name counts when it is used at all, so a function passed as a value (`.map(fs::read_to_string)`,
+  `File::open` as a value) is a use, and so is the `.read_dir()` method. The scan reads each file with a lexer that tells
+  plain, raw and byte strings, characters, lifetimes, line comments and nested block comments apart, with string state
+  carried over lines; imports are read as use trees (`use std::fs::*`, grouped `use std::{fs::{self, File as F}, ..}`,
+  `as` aliases of functions, types and the modules `std::fs` and `std::process`), and `type X = File;` (also `OpenOptions`
+  and `Command`, through a path or generics) makes `X` a bare type. Under `src/`, only a module declared `#[cfg(test)] mod`
+  is skipped (an inline one with its body, a file module `mod name;` with the file and every module it declares); no file
+  is skipped by its name, and any other `#[cfg(test)]` item is scanned. An allow with no bare call on the line it covers is
+  stale and fails, and an allow inside a skipped test module is not counted; the number of allows is pinned exactly in the
+  test (`ALLOW_COUNT`, now 88), not a budget. `tests/`, `benches/` and `build.rs` of every crate are scanned the same way
+  when the file names the real data root (`OPENATCA_RAW`, `OPENATCA_DATA`, `OPENATCA_SCDS`, `openatca-data`, in code or
+  in a string; a comment does not count; the guard has no root helper of its own to name): there a bare call needs the
+  same allow (a temp dir, a fixture, a built binary), and a read of the data goes through `oa_sealed`; a file that does
+  not name the root reads fixtures and temp dirs bare. Stated exceptions, with the reason: oa-arinc424 (a no-dependency
+  crate, so it cannot use oa-sealed), oa-geo (a core crate, which does not depend on the shell crate oa-sealed) and
+  oa-trace (walks the repository's own sources and registers, no data). The bare opens of the first two are in tests only
+  (fixtures and the env-named `OPENATCA_CIFP` and `OPENATCA_GEODTEST` inputs); a test pins the count of bare calls per
+  file, found by the same scan with nothing skipped, and fails if either crate gains one. `oa-mva`'s `pdftotext` runs on
+  a path the guard has checked as given and as resolved. Not covered: a test module that is declared `#[cfg(test)] mod`
+  in a source file is not scanned even when it names the data root, and a file module is matched to its declaration by
+  the usual module paths without reading `#[path]`.
 - **OA-SEAL-007** The guard opens a file and then checks the real path of the opened descriptor (`/proc/self/fd`), so a
   link swapped in after the path check is caught and the file closed; the loaders of `oa-bench` and `oa-replay` run the
   guard before they stat a listed entry, and every guarded opener is this one function. An opened regular file whose link
-  count is above 1 is refused (OA-SEAL-002); a test makes a hard link to a sealed file under a neutral name.
+  count is above 1, or whose metadata cannot be read, is refused (OA-SEAL-002); a test makes a hard link to a sealed file under a neutral name.
 - **OA-SEAL-008** The list file is printable ASCII and newline only, each line `word`, one space, `value`; both parsers
   refuse anything else, and the same inputs are refused by both.
 - **OA-SEAL-009** Of the four-day recording `scds/rec-20261119`, the sealed list seals the name prefixes `day2*`, `day3*` and
@@ -5784,17 +5797,24 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `scds`. A path through `..` or a link into day2 to day4 is refused, and so is a copy that keeps the components
   `scds/rec-20261119/day2` (or day3, day4, runs); a copy renamed outside those components is not caught by any path rule. Tests: `only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed` (Rust,
   `crates/oa-sealed/tests/guard.rs`; Python, `tools/test_sealed_guard.py`).
-- **OA-SEAL-010** The list seals each of the days 2026-11-20 to 2026-11-22 in any spelling (`2026.11.2d`, `2026-11-2d`,
-  `2026_11_2d`, `2026112d`) as a substring of any component at any depth below `raw/adsblol`, `scds` and `derived`
-  (`raw/adsblol/*2026.11.20*`, written `*X*`: matched against every component at or below the directory part), so the day
-  directory, its parts `v2026.11.20-planes-readsb-prod-0.tar.aa`, an archive `zau-2026.11.20.tar`, `scds/day-20261120`,
-  `scds/rec-20261120`, `derived/zau-20261121.oaf` and any renamed or partial copy are sealed; and `scds/stdds-20261119-holdout*`
-  (so `.tar`, `.bak` and `-copy` variants are sealed). The match is case-sensitive. The weather inputs (`raw/rap`, `raw/awc`,
-  ...) are inputs, not scored data, and stay unsealed. Near misses are accepted: `scds/day-20261124`,
-  `scds/rec-20261119/day1`, `raw/adsblol/2026.11.14`, `raw/rap/rap.20261120.t00z.grib2`, `v2026.11.24-...`,
-  `derived/adsb/zau-2026.11.14.oaf`, `stdds-20261119`. A directory that only holds a substring entry is not a holding
-  directory. Tests:
-  `every_sealed_adsb_day_in_both_name_forms_and_derived_clips_and_the_stdds_prefix_are_sealed` (Rust and Python).
+- **OA-SEAL-010** The list seals each of the days 2026-11-20 to 2026-11-22 (`day` lines) below the directories `raw`,
+  `scds` and `derived` (`dayscope`), except below `raw/rap` and `raw/awc` (`dayexempt`, the weather inputs: inputs, not
+  scored data). A component below a scope is normalised (every `.`, `-` and `_` deleted) and the compact day
+  (`20261120`) is matched as a substring of it, so `2026.11.20`, `2026-11-20`, `2026_11_20` and `20261120` are one
+  name, at any depth, with any prefix or suffix: the day directory, its parts `v2026.11.20-planes-readsb-prod-0.tar.aa`,
+  an archive `zau-2026.11.20.tar`, `raw/sfdps/2026.11.21/a.xml`, `scds/day-20261120`, `scds/rec-20261120`,
+  `derived/zau-20261121.oaf` and any renamed or partial copy. The consecutive components `2026`, `11`, `20` (and
+  `2026-11`, `21`, in any spelling) name a day too. A scope is matched as consecutive components anywhere in a path, so a
+  copy under another root is refused. The match is on digits only and fails closed: `120261120` and an epoch name that
+  holds the compact day are refused under these directories. Not matched: day-first dates (`20.11.2026`), month names and
+  ordinals, and anything outside the scopes; a copy outside the data root that is named in none of these ways is
+  caught only by the window rule on its rows (OA-SEAL-011, OA-SEAL-014). Also sealed: `scds/stdds-20261119-holdout*` (so
+  `.tar`, `.bak` and `-copy` variants). Near misses are accepted: `scds/day-20261124`, `scds/rec-20261119/day1`,
+  `raw/adsblol/2026.11.14`, `raw/rap/rap.20261120.t00z.grib2`, `raw/awc/2026-11-21.json`, `v2026.11.24-...`,
+  `derived/adsb/zau-2026.11.14.oaf`, `stdds-20261119`, `raw/sfdps/2026/12/20`. A directory that only holds a day-named
+  entry is not a holding directory. Tests: `every_sealed_adsb_day_in_both_name_forms_and_derived_clips_and_the_stdds_prefix_are_sealed`
+  and `a_sealed_day_is_matched_on_normalised_components_split_components_and_every_raw_feed` (Rust and Python), and the
+  parity of the two parsers on the `day`, `dayscope` and `dayexempt` lines.
 - **OA-SEAL-011** The list holds `window <from-UTC> <to-UTC>` lines (`YYYY-MM-DDTHH:MM:SSZ`, half-open, from before to):
   every row or frame whose time falls in one is sealed whichever file holds it. `oa_sealed::in_sealed_window(unix_ns)` and
   `sealed_windows()` expose them, `sealed_guard.in_sealed_window` and `Guard.windows` do the same in Python, and both
@@ -5804,10 +5824,13 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   directory or file the guard refuses is skipped and counted, never descended into or opened, a directory that only holds a
   sealed entry (the data root, `raw/adsblol`) is walked, and a sealed walk root is an error. `oa_sealed::read` and
   `read_to_string` read through the guard's opener. `fuzz/make_corpora.py` reads and globs through the guard. The walk
-  visits each canonical directory once: a link back to one already visited is skipped and counted (`skipped`); nesting
-  deeper than 64 and a root that does not exist are errors, not a silent stop or an empty walk; the files are sorted
-  bytewise by the string form of the path, the same in both guards. Tests: a self-link, two self-links, a deep tree, a
-  missing root and the sort order (Rust and Python).
+  visits each canonical directory once: the entries of a directory are sorted bytewise before any is walked, so of two
+  names of one directory (a sibling link such as `a/x -> ../real` beside `real`) the first in that order is the one
+  walked; a repeat visit, and a link back, is counted as `already_visited` (`Walk::already_visited`; the Python guard
+  returns it as the third item), apart from the sealed entries counted in `skipped`. Nesting deeper than 64 and a root
+  that does not exist are errors, not a silent stop or an empty walk; the files are sorted bytewise by the string form of
+  the path, the same in both guards. Tests: a self-link, two self-links, a sibling link, a deep tree, a missing root and
+  the sort order (Rust and Python).
 - **OA-SEAL-013** Every library function that takes a path and opens it for reading opens it through the guard: `oa_zip::read_archive_file`,
   `oa_nasr::open`, `oa_dof::read_file`, `oa_tiff::read_file` and the `oa-replay-diff` file readers; a sealed path is an I/O error that names OA-SEAL-001.
 - **OA-SEAL-014** The readers drop every row or frame whose time falls in a sealed window (OA-SEAL-011) and count it:
@@ -5827,8 +5850,13 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   frames by receive time, rows by their own time, through `oa_adsb::reports_extend_unsealed` on a per-frame scratch), the
   `oa-replay` pipeline's ADS-B rows (own time) and FNS rows (issue or cancel time; the validity span is not a message time),
   the `oa-adsb` archive reader (trace rows; `Stats::sealed_window_dropped`, and `oa-adsb-clip` refuses, OA-SEAL-015),
-  `oa-wind-check adsb` and the `stdds_summary` example (TAIS records by `mrtTime`, counted; its per-field parse counts
-  still include them). A row or record with no time of its own is kept, backstopped by the receive time of its frame where
+  `oa-wind-check adsb` (also on its early error exits, with the count so far) and the `stdds_summary` example, which
+  parses each message into a scratch accumulator: a TAIS message with a record timed (`mrtTime`) in a sealed window, or
+  an ASDE-X message with a report timed (`time`) in one, is dropped whole (all its records counted, nothing merged), so no
+  record, field, flag, latency or status count includes a hold-out row; other message kinds (service status, classified
+  only) carry no row time and go by the receive time of their frame. A test asserts the `records:`, a TAIS field and a
+  flag count. `oa-scope-replay` prints its line on every exit, an empty window included, and its decoder `records` and
+  `kept` counts are after the window filter. A row or record with no time of its own is kept, backstopped by the receive time of its frame where
   the reader has one: SFDPS rows without a timestamp, TBFM/TFMS rows without a message time, a TAIS record without
   `mrtTime`, a raw `.msg` file (no frame header, so nothing to count by receive time). `oa-compass slice` reads the `.ast`
   files of an export, which carry only a time of day, and relies on the export, which never writes sealed rows; the Python
@@ -5837,8 +5865,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   clip counts), each input counted once (an input read twice is not counted twice); the process-wide counter
   (`oa_sealed::window_dropped_total`) is kept only as a test cross-check. A test asserts the line for each tool that has
   an integration test.
-- **OA-SEAL-015** `oa-adsb-clip` writes the clip and the sidecar to temporary names and renames both into place, never
-  replaces or truncates an existing output or `.source` (an existing one is refused), and refuses to clip a report whose time is in a sealed window: exit 2, nothing written, the count
+- **OA-SEAL-015** `oa-adsb-clip` creates the sidecar and then the clip, each with `create_new` (`O_EXCL`), so nothing is replaced, truncated or
+  followed (a dangling link included) and no second name for an existing file appears; an existing output or `.source` is refused, and a failure removes the files this run created and only those, and refuses to clip a report whose time is in a sealed window: exit 2, nothing written, the count
   printed as `sealed-window rows dropped: N` (the reports are counted, not clipped). Otherwise it writes `<out>.source` next
   to the clip (not for `--out -`): each input path with its SHA-256, the window (`--from`, `--to` in Unix nanoseconds, `none`
   when open) and the counts (rows seen, outside the box, outside the window, kept, frames, sealed-window rows dropped).

@@ -70,7 +70,13 @@ fn reorder(src: &Reports, ix: &[u32]) -> Reports {
 
 /// Writes `<out>.source` next to the clip: each input path and its SHA-256, the window
 /// (`--from`, `--to`; `none` when open) and the counts.
-fn write_source(a: &Args, st: &oa_adsb::Stats, frames: u64, path: &str) -> Result<(), String> {
+fn write_source(
+    a: &Args,
+    st: &oa_adsb::Stats,
+    frames: u64,
+    out: &mut impl Write,
+    path: &str,
+) -> Result<(), String> {
     let mut text = String::from("oa-adsb-clip source\n");
     text.push_str(&format!("out: {}\n", a.out));
     for p in &a.parts {
@@ -94,7 +100,40 @@ fn write_source(a: &Args, st: &oa_adsb::Stats, frames: u64, path: &str) -> Resul
         "rows_seen: {}\noutside_box: {}\noutside_time: {}\nkept: {}\nframes: {frames}\nsealed-window rows dropped: {}\n",
         st.rows_seen, st.outside_box, st.outside_time, st.kept, st.sealed_window_dropped
     ));
-    std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))
+    out.write_all(text.as_bytes())
+        .and_then(|()| out.flush())
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+/// Creates `path` for writing with `create_new` (`O_EXCL`): an existing file or link, even a
+/// dangling one, is refused and never replaced, truncated or followed, and no second name for
+/// an existing file can appear.
+fn create_new(path: &str) -> Result<std::fs::File, String> {
+    // seal-allow: creates the tool's own output with create_new; reads nothing
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+/// Writes the sidecar and then the clip, each created new; `made` lists the files this run
+/// created, so a failure can remove those and only those.
+fn write_outputs(
+    a: &Args,
+    st: &oa_adsb::Stats,
+    sorted: &Reports,
+    side: &str,
+    made: &mut Vec<String>,
+) -> Result<u64, String> {
+    let mut sf = create_new(side)?;
+    made.push(side.to_string());
+    let mut w = BufWriter::new(create_new(&a.out)?);
+    made.push(a.out.clone());
+    let n = write_frames(sorted, a.frame_ms, &mut w)?;
+    w.flush().map_err(|e| format!("{}: {e}", a.out))?;
+    write_source(a, st, n, &mut sf, side)?;
+    Ok(n)
 }
 
 fn run(a: &Args) -> Result<ExitCode, String> {
@@ -139,11 +178,9 @@ fn run(a: &Args) -> Result<ExitCode, String> {
         );
         return Ok(ExitCode::from(2));
     }
-    // An existing output or sidecar is never replaced or truncated; the clip and the sidecar are
-    // written to temporary names and renamed into place once both are complete.
+    // An existing output or sidecar is never replaced or truncated: both are created new, the
+    // sidecar first, and a failure removes the files this run created and no others.
     let side = format!("{}.source", a.out);
-    let tmp_out = format!("{}.tmp{}", a.out, std::process::id());
-    let tmp_side = format!("{side}.tmp{}", std::process::id());
     if a.out != "-" {
         for p in [&a.out, &side] {
             if std::fs::symlink_metadata(p).is_ok() {
@@ -153,30 +190,24 @@ fn run(a: &Args) -> Result<ExitCode, String> {
             }
         }
     }
+    let st = &res.stats;
     let frames = if a.out == "-" {
         let mut w = BufWriter::new(io::stdout().lock());
         let n = write_frames(&sorted, a.frame_ms, &mut w)?;
         w.flush().map_err(|e| e.to_string())?;
         n
     } else {
-        // seal-allow: creates the clip's own temporary output (create_new); reads nothing
-        let mut w = BufWriter::new(
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp_out)
-                .map_err(|e| format!("{tmp_out}: {e}"))?,
-        );
-        let n = write_frames(&sorted, a.frame_ms, &mut w)?;
-        w.flush().map_err(|e| e.to_string())?;
-        n
+        let mut made = Vec::new();
+        match write_outputs(a, st, &sorted, &side, &mut made) {
+            Ok(n) => n,
+            Err(e) => {
+                for p in &made {
+                    let _ = std::fs::remove_file(p);
+                }
+                return Err(e);
+            }
+        }
     };
-    let st = &res.stats;
-    if a.out != "-" {
-        write_source(a, st, frames, &tmp_side)?;
-        std::fs::rename(&tmp_out, &a.out).map_err(|e| format!("{}: {e}", a.out))?;
-        std::fs::rename(&tmp_side, &side).map_err(|e| format!("{side}: {e}"))?;
-    }
     let sum = summarize(&sorted);
     eprintln!(
         "traces_read={} traces_refused={} trace_entries={} other_entries={} rows_seen={} outside_box={} outside_time={} kept={} frames={frames}",

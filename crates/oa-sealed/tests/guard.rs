@@ -43,7 +43,7 @@ fn fake_root(name: &str) -> PathBuf {
 fn the_list_has_the_sealed_folders_and_the_python_guard_parses_it_to_the_same_set() {
     let l = parse_list(LIST).unwrap();
     let texts: Vec<&str> = l.entries.iter().map(|e| e.text.as_str()).collect();
-    let mut want: Vec<String> = [
+    let want: Vec<String> = [
         "scds/rec-20261119/day2*",
         "scds/rec-20261119/day3*",
         "scds/rec-20261119/day4*",
@@ -54,15 +54,12 @@ fn the_list_has_the_sealed_folders_and_the_python_guard_parses_it_to_the_same_se
     .iter()
     .map(|t| t.to_string())
     .collect();
-    // Each sealed day in four spellings, as a substring at any depth below three directories.
-    for dir in ["raw/adsblol", "scds", "derived"] {
-        for form in ["2026.11.2", "2026-11-2", "2026_11_2", "2026112"] {
-            for d in ["0", "1", "2"] {
-                want.push(format!("{dir}/*{form}{d}*"));
-            }
-        }
-    }
     assert_eq!(texts, want);
+    // The sealed days, the directories they are sealed below and the ones left out.
+    assert_eq!(l.days.days, ["2026-11-20", "2026-11-21", "2026-11-22"]);
+    let t = |v: &[(String, Vec<String>)]| v.iter().map(|x| x.0.clone()).collect::<Vec<_>>();
+    assert_eq!(t(&l.days.scopes), ["raw", "scds", "derived"]);
+    assert_eq!(t(&l.days.exempt), ["raw/rap", "raw/awc"]);
     let w: Vec<&str> = l.windows.iter().map(|w| w.text.as_str()).collect();
     assert_eq!(w, ["2026-11-20T00:00:00Z 2026-11-23T00:17:00Z"]);
     let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sealed_guard.py");
@@ -189,6 +186,54 @@ fn every_sealed_adsb_day_in_both_name_forms_and_derived_clips_and_the_stdds_pref
         // Case-sensitive, and the weather inputs are not scored data.
         "/data/raw/rap/rap.20261120.t00z.grib2",
         "/data/raw/awc/2026-11-21.json",
+    ] {
+        assert!(g.check(Path::new(p)).is_ok(), "{p}");
+    }
+}
+
+// REQ: OA-SEAL-010
+#[test]
+fn a_sealed_day_is_matched_on_normalised_components_split_components_and_every_raw_feed() {
+    let g = Sealed::with_root(&fake_root("daynames"));
+    for p in [
+        // The four spellings, normalised.
+        "/data/raw/sfdps/2026.11.20/a.xml",
+        "/data/raw/stdds/2026-11-21.oaf",
+        "/data/raw/tfms/x_2026_11_22_y",
+        "/data/raw/tbfm/20261120.bin",
+        // Mixed separators in one name.
+        "/data/derived/zau-2026.11_20.oaf",
+        // The consecutive components year / month / day, and year-month / day.
+        "/data/raw/sfdps/2026/11/20/a.xml",
+        "/data/scds/2026/11/22",
+        "/data/derived/2026-11/21/x",
+        "/data/derived/202611/21/x",
+        // Fails closed on a longer number that holds the compact day, and on an epoch with it.
+        "/data/derived/120261120",
+        "/data/scds/1720261120.bin",
+        "/data/raw/adsblol/120261121.tar",
+        // A copy of the data under another root.
+        "/elsewhere/copy/raw/sfdps/2026.11.21/a",
+    ] {
+        let e = g.check(Path::new(p)).unwrap_err().to_string();
+        assert!(e.contains("OA-SEAL-001") && e.contains(p), "{e}");
+    }
+    for p in [
+        // The weather inputs, under raw, stay open.
+        "/data/raw/rap/2026/11/20/x.grib2",
+        "/data/raw/awc/20261122.json",
+        // Other days, and a month and day that are not consecutive components of the year.
+        "/data/raw/sfdps/2026.11.19/a.xml",
+        "/data/raw/sfdps/2026/11/19",
+        "/data/raw/sfdps/2026/12/20",
+        "/data/raw/sfdps/2026/20/11",
+        "/data/derived/2026-11/19/x",
+        // Not below a scope directory.
+        "/data/other/2026.11.20/a",
+        "/data/2026.11.20",
+        // Day-first, worded and ordinal forms are not matched (the window rule covers rows).
+        "/data/raw/sfdps/20.11.2026/a",
+        "/data/raw/sfdps/20-nov-2026/a",
     ] {
         assert!(g.check(Path::new(p)).is_ok(), "{p}");
     }
@@ -588,7 +633,7 @@ fn odd_list_files_are_refused_by_both_parsers_and_good_ones_read_the_same() {
 
 // REQ: OA-SEAL-012
 #[test]
-fn walk_unsealed_skips_links_back_errors_on_depth_and_a_missing_root_and_sorts_bytewise() {
+fn walk_unsealed_counts_links_back_errors_on_depth_and_a_missing_root_and_sorts_bytewise() {
     let root = fake_root("walkloops");
     let g = Sealed::with_root(&root);
     let w = root.join("work");
@@ -597,11 +642,21 @@ fn walk_unsealed_skips_links_back_errors_on_depth_and_a_missing_root_and_sorts_b
     // A self-link: the directory is visited once, the link is skipped and counted.
     symlink(&w, w.join("a/self")).unwrap();
     let r = g.walk_unsealed(&w).unwrap();
-    assert_eq!((r.files.len(), r.skipped), (1, 1));
+    assert_eq!((r.files.len(), r.skipped, r.already_visited), (1, 0, 1));
     // Two self-links.
     symlink(&w, w.join("a/self2")).unwrap();
     let r = g.walk_unsealed(&w).unwrap();
-    assert_eq!((r.files.len(), r.skipped), (1, 2));
+    assert_eq!((r.files.len(), r.skipped, r.already_visited), (1, 0, 2));
+    // A sibling link to a directory next to it: the first name in bytewise order is walked, the
+    // other is counted as already visited, never as sealed.
+    let sib = root.join("sib");
+    fs::create_dir_all(sib.join("real")).unwrap();
+    fs::write(sib.join("real/f.bin"), b"x").unwrap();
+    fs::create_dir_all(sib.join("a")).unwrap();
+    symlink("../real", sib.join("a/x")).unwrap();
+    let r = g.walk_unsealed(&sib).unwrap();
+    assert_eq!(r.files, [sib.join("a/x/f.bin")]);
+    assert_eq!((r.skipped, r.already_visited), (0, 1));
     // A tree deeper than the limit is an error, not a silent stop.
     let mut deep = root.join("deep");
     for _ in 0..70 {

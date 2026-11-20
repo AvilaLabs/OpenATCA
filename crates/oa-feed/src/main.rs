@@ -123,6 +123,7 @@ fn spawn_bridge(env: &PathBuf, jar: &Option<PathBuf>, java: &Option<PathBuf>) ->
         std::env::var_os("OPENATCA_BRIDGE_JAR")
             .map_or_else(|| PathBuf::from(DEFAULT_JAR), PathBuf::from)
     });
+    // seal-allow: starts the bridge JVM; reads no data
     Proc::new(java)
         // Bounded heap: the bridge holds at most a few messages, not a backlog.
         .arg("-Xmx512m")
@@ -710,6 +711,7 @@ fn print_summary(feed: &str, h: &FeedHealth) {
 
 /// Asks the bridge JVM to exit (SIGTERM via `kill`), so it closes the broker session cleanly.
 fn terminate(c: &mut Child) {
+    // seal-allow: runs `kill` on the bridge JVM; reads no data
     let ok = Proc::new("kill")
         .arg("-TERM")
         .arg(c.id().to_string())
