@@ -933,3 +933,143 @@ fn where_the_address_and_the_callsign_name_different_flights_the_position_decide
     assert_eq!(d.len(), 4, "every disagreement stays in the cross-check");
     let _ = std::fs::remove_dir_all(&sf.dir);
 }
+
+// REQ: OA-FLT-037
+#[test]
+fn with_several_claimants_flying_the_adsb_callsign_decides_before_state_and_position() {
+    let frames = [
+        // 1 holds the ADS-B callsign but is only proposed and far; 2 is active and near.
+        claim((1, 1, 0), "A1B2C3", "NOW1", "PROPOSED", 20_000, FAR),
+        claim((2, 2, 1), "A1B2C3", "OTHER2", "ACTIVE", 21_000, NEAR),
+        // 3 and 4 are active; only 4 has the callsign; 5 has no match at all.
+        claim((3, 3, 2), "B1B2C3", "ONE3", "ACTIVE", 22_000, NEAR),
+        claim((4, 4, 3), "B1B2C3", "TWO4", "ACTIVE", 23_000, FAR),
+        claim((5, 5, 4), "C1B2C3", "ONE5", "ACTIVE", 24_000, NEAR),
+        claim((6, 6, 5), "C1B2C3", "TWO6", "ACTIVE", 25_000, FAR),
+    ];
+    let sf = recording("cs-decides", &frames);
+    let (r, _d, _) = answer_queries(
+        &sf,
+        &[
+            // The callsign picks the proposed, far flight: a wins over b and c.
+            q(0x00A1_B2C3, 150, cs("NOW1"), CHI),
+            q(0x00B1_B2C3, 150, cs("TWO4"), CHI),
+            // No claimant has the callsign: nothing narrows by it, and the position decides.
+            Query {
+                try_callsign: false,
+                ..q(0x00C1_B2C3, 150, cs("NONE"), CHI)
+            },
+            // No callsign seen: the position decides.
+            Query {
+                try_callsign: false,
+                ..q(0x00C1_B2C3, 150, CallsignObs::Absent, CHI)
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralCallsignDecides);
+    assert_eq!(r[0].assigned, simple(20_000));
+    assert_eq!(r[1].addr, AddrResult::SeveralCallsignDecides);
+    assert_eq!(
+        r[1].assigned,
+        simple(23_000),
+        "though its own position is far"
+    );
+    for k in [2, 3] {
+        assert_eq!(r[k].addr, AddrResult::SeveralByPosition);
+        assert_eq!(r[k].assigned, simple(24_000));
+    }
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-038
+#[test]
+fn with_several_claimants_flying_active_or_departed_wins_over_proposed() {
+    let frames = [
+        claim((1, 1, 0), "A1B2C3", "PLAN1", "PROPOSED", 20_000, NEAR),
+        claim((2, 2, 1), "A1B2C3", "FLOWN2", "ACTIVE", 21_000, FAR),
+        // Two active and one proposed: the two active go on to the position check.
+        claim((3, 3, 2), "B1B2C3", "PLAN3", "PROPOSED", 22_000, NEAR),
+        claim((4, 4, 3), "B1B2C3", "FLOWN4", "ACTIVE", 23_000, FAR),
+        claim((5, 5, 4), "B1B2C3", "FLOWN5", "ACTIVE", 24_000, NEAR),
+        // All proposed: the state narrows nothing.
+        claim((6, 6, 5), "C1B2C3", "PLAN6", "PROPOSED", 25_000, FAR),
+        claim((7, 7, 6), "C1B2C3", "PLAN7", "PROPOSED", 26_000, FAR),
+    ];
+    let sf = recording("state-decides", &frames);
+    let none = |a| Query {
+        try_callsign: false,
+        ..q(a, 150, CallsignObs::Absent, CHI)
+    };
+    let (r, _d, _) = answer_queries(
+        &sf,
+        &[none(0x00A1_B2C3), none(0x00B1_B2C3), none(0x00C1_B2C3)],
+    )
+    .unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralStateDecides);
+    assert_eq!(
+        r[0].assigned,
+        simple(21_000),
+        "active, though proposed is nearer"
+    );
+    assert_eq!(r[1].addr, AddrResult::SeveralByPosition);
+    assert_eq!(r[1].assigned, simple(24_000));
+    assert_eq!(r[2].addr, AddrResult::SeveralUnresolved);
+    assert!(!r[2].flight);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-039
+#[test]
+fn a_claimant_dropped_at_the_query_is_excluded_and_counted_on_its_own() {
+    let frames = [
+        claim((1, 1, 0), "A1B2C3", "GONE1", "ACTIVE", 20_000, NEAR),
+        claim((2, 1, 1), "A1B2C3", "GONE1", "DROPPED", 20_000, None),
+        claim((3, 2, 2), "B1B2C3", "GONE2", "ACTIVE", 21_000, NEAR),
+        claim((4, 2, 3), "B1B2C3", "GONE2", "COMPLETED", 21_000, None),
+        claim((5, 3, 4), "B1B2C3", "GONE3", "ACTIVE", 22_000, NEAR),
+        claim((6, 3, 5), "B1B2C3", "GONE3", "DROPPED", 22_000, None),
+    ];
+    let sf = recording("dropped", &frames);
+    let none = |a| Query {
+        try_callsign: false,
+        ..q(a, 150, CallsignObs::Absent, CHI)
+    };
+    let (r, _d, _) = answer_queries(&sf, &[none(0x00A1_B2C3), none(0x00B1_B2C3)]).unwrap();
+    assert_eq!(r[0].addr, AddrResult::OnlyClaimantDropped);
+    assert!(r[0].ended && !r[0].flight);
+    assert!(
+        r[0].old_found,
+        "the join before the walk took a dropped flight"
+    );
+    assert_eq!(r[1].addr, AddrResult::NoneFlying);
+    assert!(!r[1].many_claimants);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-039
+#[test]
+fn an_address_with_more_than_32_claimants_is_walked_whole_and_flagged() {
+    let mut frames = Vec::new();
+    for n in 1..=40u32 {
+        let c = if n == 1 { "FIRST" } else { "MANY" };
+        frames.push(claim(
+            (u64::from(n), n, i64::from(n)),
+            "A1B2C3",
+            c,
+            "ACTIVE",
+            20_000 + 1000 * n as i32,
+            None,
+        ));
+    }
+    let sf = recording("many", &frames);
+    let (r, _d, _) = answer_queries(&sf, &[q(0x00A1_B2C3, 150, cs("FIRST"), CHI)]).unwrap();
+    assert!(r[0].many_claimants);
+    assert_eq!(r[0].addr, AddrResult::SeveralCallsignDecides);
+    assert_eq!(
+        r[0].assigned,
+        simple(21_000),
+        "the oldest claimant is found"
+    );
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}

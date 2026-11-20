@@ -5608,6 +5608,12 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   ADS-B position; if none or more than one passes, it gives several flying claimants and the callsign join is tried next.
 - **OA-FLT-036** Where the address join and the callsign join name different flights, the one whose position check passes is taken;
   if both or neither pass the address flight stands; each case is counted and kept in the cross-check.
+- **OA-FLT-037** With several claimants flying, the claimants whose callsign equals the ADS-B callsign are kept first; if one remains
+  it is taken and counted as several flying, callsign decides; a step that would leave none narrows nothing.
+- **OA-FLT-038** Then claimants with a view active or departed are kept over those only proposed; if one remains it is taken and
+  counted as several flying, state decides; then the position check; otherwise the claimants stay unresolved.
+- **OA-FLT-039** A dropped flight is not flying; an address whose only claimant is dropped at the query time is counted on its own
+  line, every claimant is walked whatever their number, and addresses with more than 32 claimants are counted in the report.
 - **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
   refuses a window that is open at one end or runs backwards.
 

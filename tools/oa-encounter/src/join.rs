@@ -13,9 +13,9 @@ use std::path::PathBuf;
 
 use oa_encounter::Encounter;
 use oa_flight::{
-    flight_get, flight_is_flying, flights_claiming_address, flights_flying_by_callsign, Alt,
-    Flight, FlightConfig, FlightKey, FlightTable, ALT_AT_FIX, ALT_BLOCK, ALT_NIL, ALT_SIMPLE,
-    ALT_VFR, ALT_VFR_ON_TOP_PLUS, KEY_GUFI,
+    flight_by_address, flight_get, flight_is_flying, flight_is_live, flights_claiming_address,
+    flights_flying_by_callsign, Alt, Flight, FlightConfig, FlightKey, FlightTable, ALT_AT_FIX,
+    ALT_BLOCK, ALT_NIL, ALT_SIMPLE, ALT_VFR, ALT_VFR_ON_TOP_PLUS, KEY_GUFI, ST_ACTIVE, ST_DEPARTED,
 };
 use oa_flight_sfdps::{
     norm_callsign, recordings_in, replay_sfdps, Position, Positions, ReplayConfig,
@@ -54,21 +54,30 @@ pub enum AddrResult {
     /// No flight claims the address.
     #[default]
     NoClaimant,
-    /// Flights claim it and none is flying (all ended or dropped).
+    /// One flight claims it and it is dropped at the query time.
+    OnlyClaimantDropped,
+    /// Flights claim it and none is flying (all ended or dropped), other than the case above.
     NoneFlying,
     /// One claimant is flying.
     One,
+    /// Several are flying and one has the ADS-B callsign.
+    SeveralCallsignDecides,
+    /// Several are flying and one is active or departed where the others are proposed.
+    SeveralStateDecides,
     /// Several are flying and exactly one has its own position within 120 s within 10 NM of the
     /// ADS-B one.
     SeveralByPosition,
-    /// Several are flying and none, or more than one, passes the position check.
+    /// Several are flying and none of the steps leaves one.
     SeveralUnresolved,
 }
 
-pub const ADDR_NAMES: [&str; 5] = [
+pub const ADDR_NAMES: [&str; 8] = [
     "no flight claims the address",
-    "address claimants, none flying",
+    "the only claimant is dropped",
+    "address claimants, none flying (other)",
     "one claimant flying",
+    "several flying, callsign decides",
+    "several flying, state decides",
     "several flying, one passes the position check",
     "several flying claimants, not resolved",
 ];
@@ -159,6 +168,11 @@ pub struct Answer {
     pub addr_flight: Option<FlightKey>,
     pub cs_flight: Option<FlightKey>,
     pub cs: CsResult,
+    /// The join before the walk (the newest claimant, if not ended, else the callsign) found a
+    /// flight: for counting what the walk lost and gained.
+    pub old_found: bool,
+    /// More than [`MANY_CLAIMANTS`] flights claim the address.
+    pub many_claimants: bool,
 }
 
 /// The callsign an aircraft's ADS-B reports carry over the 60 s before a time.
@@ -480,28 +494,64 @@ fn position_passes(pos: &Positions, f: &Flight, q: &Query) -> bool {
         .is_some_and(|p| distance_m((p.lat_e7, p.lon_e7), (q.lat_e7, q.lon_e7)) <= POSITION_DIST_M)
 }
 
-/// Most claimants of one address that are looked at: an airframe states its address on a few legs
-/// a day.
-const MAX_CLAIMANTS: usize = 32;
+/// An address claimed by more flights than this is counted in the report. All claimants are
+/// looked at whatever their number.
+pub const MANY_CLAIMANTS: usize = 32;
 
-/// The address join over every claimant of the address that is flying at the query time.
-fn addr_join(t: &FlightTable, pos: &Positions, q: &Query) -> (AddrResult, Option<Flight>) {
+/// Whether some view of the flight is active or departed.
+fn is_underway(f: &Flight) -> bool {
+    f.views
+        .iter()
+        .take(usize::from(f.n_views))
+        .any(|v| v.state == ST_ACTIVE || v.state == ST_DEPARTED)
+}
+
+/// The address join over every claimant of the address that is flying at the query time. Several
+/// flying are narrowed in turn, each step only narrowing (a step that would leave none changes
+/// nothing): by the ADS-B callsign, by state (active or departed over proposed), by the position
+/// check.
+fn addr_join(t: &FlightTable, pos: &Positions, q: &Query) -> (AddrResult, Option<Flight>, bool) {
     let mut claimants = Vec::new();
-    if flights_claiming_address(t, q.addr, &mut claimants, MAX_CLAIMANTS) == 0 {
-        return (AddrResult::NoClaimant, None);
-    }
-    let flying: Vec<Flight> = claimants.into_iter().filter(flight_is_flying).collect();
-    match flying.as_slice() {
-        [] => (AddrResult::NoneFlying, None),
+    let n = flights_claiming_address(t, q.addr, &mut claimants, usize::MAX);
+    let many = n > MANY_CLAIMANTS;
+    let flying: Vec<Flight> = claimants.iter().copied().filter(flight_is_flying).collect();
+    let r = match flying.as_slice() {
+        [] => match claimants.as_slice() {
+            [] => (AddrResult::NoClaimant, None),
+            [f] if flight_is_live(f) => (AddrResult::OnlyClaimantDropped, None),
+            _ => (AddrResult::NoneFlying, None),
+        },
         [f] => (AddrResult::One, Some(*f)),
         many => {
-            let mut passing = many.iter().filter(|f| position_passes(pos, f, q));
+            let mut set: Vec<Flight> = many.to_vec();
+            if let CallsignObs::Stable(c) = q.callsign {
+                let kept: Vec<Flight> = set.iter().copied().filter(|f| f.callsign == c).collect();
+                if let [f] = kept.as_slice() {
+                    return (AddrResult::SeveralCallsignDecides, Some(*f), many_flag(n));
+                }
+                if !kept.is_empty() {
+                    set = kept;
+                }
+            }
+            let kept: Vec<Flight> = set.iter().copied().filter(is_underway).collect();
+            if let [f] = kept.as_slice() {
+                return (AddrResult::SeveralStateDecides, Some(*f), many_flag(n));
+            }
+            if !kept.is_empty() {
+                set = kept;
+            }
+            let mut passing = set.iter().filter(|f| position_passes(pos, f, q));
             match (passing.next(), passing.next()) {
                 (Some(f), None) => (AddrResult::SeveralByPosition, Some(*f)),
                 _ => (AddrResult::SeveralUnresolved, None),
             }
         }
-    }
+    };
+    (r.0, r.1, many)
+}
+
+fn many_flag(n: usize) -> bool {
+    n > MANY_CLAIMANTS
 }
 
 fn lookup(
@@ -513,9 +563,14 @@ fn lookup(
 ) -> (Answer, Option<Diag>) {
     let mut a = Answer::default();
     let mut chosen = None;
-    let (addr, addr_f) = addr_join(t, pos, q);
+    let (addr, addr_f, many) = addr_join(t, pos, q);
     a.addr = addr;
-    a.ended = addr == AddrResult::NoneFlying;
+    a.many_claimants = many;
+    a.ended = matches!(
+        addr,
+        AddrResult::NoneFlying | AddrResult::OnlyClaimantDropped
+    );
+    let old_addr = flight_by_address(t, q.addr).is_some_and(|f| flight_is_live(&f));
     if let Some(f) = addr_f {
         a.addr_flight = Some(f.key);
         a.key = Key::Address;
@@ -563,6 +618,7 @@ fn lookup(
             }
         }
     }
+    a.old_found = old_addr || matches!(a.cs, CsResult::Accepted { .. });
     if let Some(f) = chosen {
         a.flight = true;
         a.assigned = f.assigned;
@@ -1029,10 +1085,13 @@ const KEY_NAMES: [&str; 5] = [
 fn addr_index(r: AddrResult) -> usize {
     match r {
         AddrResult::NoClaimant => 0,
-        AddrResult::NoneFlying => 1,
-        AddrResult::One => 2,
-        AddrResult::SeveralByPosition => 3,
-        AddrResult::SeveralUnresolved => 4,
+        AddrResult::OnlyClaimantDropped => 1,
+        AddrResult::NoneFlying => 2,
+        AddrResult::One => 3,
+        AddrResult::SeveralCallsignDecides => 4,
+        AddrResult::SeveralStateDecides => 5,
+        AddrResult::SeveralByPosition => 6,
+        AddrResult::SeveralUnresolved => 7,
     }
 }
 
@@ -1054,7 +1113,10 @@ fn key_text(
         POSITION_AGE_MS / 1000
     );
     let mut per_key = [0u64; 5];
-    let mut addr_results = [0u64; 5];
+    let mut addr_results = [0u64; 8];
+    let mut many_claimants = 0u64;
+    // Encounters with a record for both before the walk and not after, by cause; and the reverse.
+    let (mut lost, mut gained) = ([0u64; 3], 0u64);
     let mut rejects = [0u64; 5];
     let (mut aircraft, mut not_tried, mut several) = (0u64, 0u64, 0u64);
     let (mut addr_both, mut addr_one, mut addr_none) = (0u64, 0u64, 0u64);
@@ -1097,6 +1159,7 @@ fn key_text(
             if let Some(c) = addr_results.get_mut(addr_index(x.addr)) {
                 *c += 1;
             }
+            many_claimants += u64::from(x.many_claimants);
             if x.addr_flight.is_none() && matches!(x.cs, CsResult::Accepted { several: true, .. }) {
                 several += 1;
             }
@@ -1108,6 +1171,21 @@ fn key_text(
                 }
             }
         }
+        let (old_both, new_both) = (a.old_found && b.old_found, a.flight && b.flight);
+        if old_both && !new_both {
+            // The cause of the aircraft that lost its record; where both did, the first in
+            // this order: only claimant dropped, several flying unresolved, anything else.
+            let cause = |x: &Answer| match x.addr {
+                _ if x.flight => 3,
+                AddrResult::OnlyClaimantDropped => 0,
+                AddrResult::SeveralUnresolved => 1,
+                _ => 2,
+            };
+            if let Some(c) = lost.get_mut(cause(&a).min(cause(&b))) {
+                *c += 1;
+            }
+        }
+        gained += u64::from(!old_both && new_both);
         match u8::from(a.addr_flight.is_some()) + u8::from(b.addr_flight.is_some()) {
             2 => addr_both += 1,
             1 => addr_one += 1,
@@ -1146,6 +1224,15 @@ fn key_text(
     for (name, c) in ADDR_NAMES.iter().zip(addr_results) {
         let _ = writeln!(o, "    {name}: {c}");
     }
+    let _ = writeln!(
+        o,
+        "  addresses claimed by more than {MANY_CLAIMANTS} flights (aircraft counted): {many_claimants}"
+    );
+    let _ = writeln!(
+        o,
+        "  record for both before the walk (newest claimant only) and not after, by cause: only claimant dropped {}, several flying not resolved and the callsign found nothing {}, anything else {}; the reverse (a record for both only after): {gained}",
+        lost[0], lost[1], lost[2]
+    );
     let _ = writeln!(
         o,
         "  of the callsign joins, one aircraft with several plans (the newest taken): {several}"
