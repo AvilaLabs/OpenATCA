@@ -1,0 +1,24 @@
+[package]
+name = "oa-feed-gaps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates; not outside dependencies (RULESET F1).
+oa-bench = { path = "../../crates/oa-bench" }
+oa-feed = { path = "../../crates/oa-feed" }
+oa-replay = { path = "../../crates/oa-replay" }
+oa-sealed = { path = "../../crates/oa-sealed" }
+
+[package.metadata.openatca]
+class = "split"
+
+[dev-dependencies]
+# Workspace crate; writes the synthetic ADS-B clip the tests read (RULESET F1: not an outside dependency).
+oa-adsb = { path = "../../crates/oa-adsb" }

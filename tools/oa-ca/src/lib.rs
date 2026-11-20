@@ -13,3 +13,4 @@ pub mod config;
 pub mod guard;
 pub mod report;
 pub mod run;
+pub mod synth;
