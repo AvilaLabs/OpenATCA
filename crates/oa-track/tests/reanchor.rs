@@ -135,8 +135,9 @@ fn consistent_forged_reports_after_a_short_gap_are_still_refused_by_the_hard_lim
 fn the_allowance_lets_a_forged_report_through_only_after_a_long_gap() {
     // One forged report 2 km north of the track `gap` seconds after the last report: the number
     // of rejections (1 refused, 0 accepted) per variant. The default gate already accepts it
-    // from a 12 s gap (the turn model's covariance has grown to cover 2 km); the allowance moves
-    // that to 10 s; at 8 s and less every variant refuses it.
+    // from a 10 s gap (the turn model's covariance has grown to cover 2 km; it was 12 s before the
+    // velocity update carried the turn rate over the transponder's lag, OA-TRK-395, which changed
+    // the covariance the turn model keeps); at 8 s and less every variant refuses it.
     for gap in [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0] {
         let mut rng = Rng(7);
         let mut ms: Vec<Measurement> = seconds(0.0, 20.0)
@@ -152,7 +153,7 @@ fn the_allowance_lets_a_forged_report_through_only_after_a_long_gap() {
                 assert_eq!(rejected, 1, "gap {gap} {name}");
             }
             if name == "default" {
-                assert_eq!(rejected, u64::from(gap < 12.0), "gap {gap}");
+                assert_eq!(rejected, u64::from(gap < 10.0), "gap {gap}");
             }
             if name.starts_with("A ") && gap == 10.0 {
                 assert_eq!(rejected, 0, "gap {gap} {name}");

@@ -5315,6 +5315,17 @@ scope.
   build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,
   and the working tree at run time is at that commit and clean. This gates which runs count as
   hold-out scores; it does not change what is computed.
+- **OA-TRK-395** The horizontal filter takes a reported velocity as the aircraft's `VEL_LAG_S` (1.0 s)
+  before the report: against the state the measurement is `z = R(-w L) v`, the velocity turned back by
+  the state's turn rate `w` over the lag `L`, linearised at the state so that it also updates the turn
+  rate. The straight model's rate is zero, so its velocity update is the plain one; in a turn the turn
+  model's velocity is the report's turned forward by `w L`; a report that agrees with that leaves the
+  state unchanged; a singular innovation covariance changes nothing.
+- **OA-TRK-396** `turn_diag` reports OpenATCA's and ERAM's cross-track and track-angle error (n, median,
+  p95, RMS of the absolute values, nearest rank) of the common samples of a P-002 `samples.csv`, binned by
+  the reference's turn rate, the turn phase, the tracker's turn-model probability, the time since the
+  track's last report and the gap holding the sample; a value goes to the bin whose lower edge it reaches.
+  It also reports the lag of the reported velocity's track behind the reference's.
 - **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
   refused in every date syntax. Any input path the shared sealed list refuses (`oa-sealed`, OA-SEAL-001), and every file the run opens
   (each file of the feed directory, the ADS-B clip, each file and the README of a `slice` source), is checked

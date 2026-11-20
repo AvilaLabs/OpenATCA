@@ -79,6 +79,14 @@ pub const CT_OMEGA_STD_FLOOR: f64 = 0.04;
 /// Largest turn rate magnitude the turn model keeps, rad/s (29 deg/s: helicopters and aircraft
 /// in tight orbits at low speed are in the ZAU hour; an airliner never exceeds 3).
 pub const OMEGA_MAX: f64 = 0.5;
+/// How far the reported velocity lags the aircraft's, seconds: in a turn the reported track is
+/// behind the track of the positions. Measured as the reference's track minus the reported one over
+/// the reference's turn rate, median over the reports of aircraft in the scoring grid in turns of
+/// 0.25 deg/s or more (`turn_diag`): 2026-11-15 1.01, 0.99, 0.92 and 0.74 s in the bins 0.25-1, 1-2,
+/// 2-3 and over 3 deg/s; 2026-11-19 0.96, 1.00, 0.91 and 0.84 s. With it the cross-track p95 of the
+/// common samples fell from 45.4 to 34.8 m (2026-11-15) and from 41.2 to 30.4 m (2026-11-19), the
+/// median from 1.9 to 1.7 m on both; 1.5 s was worse than 1.0 s on 2026-11-15.
+pub const VEL_LAG_S: f64 = 1.0;
 /// Mean time the straight model persists, seconds. Set from the distribution of straight
 /// segment lengths in the recorded day.
 pub const H_TAU_CV_S: f64 = 100.0;

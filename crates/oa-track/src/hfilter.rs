@@ -34,7 +34,7 @@ use oa_geo::small::sin_cos_near_zero;
 
 use crate::params::{
     cv_only_q, CT_OMEGA_STD_FLOOR, H_MU0_CV, H_PRIOR_VEL_STD, H_Q_CT, H_Q_CV, H_Q_OMEGA,
-    H_TAU_CT_S, H_TAU_CV_S, MU_FLOOR, OMEGA_MAX, V_TAU_CLIMB_S, V_TAU_LEVEL_S,
+    H_TAU_CT_S, H_TAU_CV_S, MU_FLOOR, OMEGA_MAX, V_TAU_CLIMB_S, V_TAU_LEVEL_S, VEL_LAG_S,
 };
 
 /// One model's state and covariance. Hot (A7): 5 + 25 doubles.
@@ -498,6 +498,59 @@ fn update_sel(
     Some((d2, det))
 }
 
+/// The velocity measurement with the transponder's lag: the reported velocity is the aircraft's as
+/// of [`VEL_LAG_S`] before the report, so against the state it is `z = R(-w L) v + noise`, the
+/// velocity turned back by the turn rate `w` over the lag `L` (the state's rate; zero for the
+/// straight model, whose measurement is then the plain velocity one). Linearised at the state, the
+/// measurement also carries the turn rate. Updates `x` and `p` and returns the quadratic form and
+/// determinant of the innovation covariance as [`update_sel`] does; `None`, with `x` and `p`
+/// unchanged, if that covariance is singular.
+fn update_vel_lagged(x: &mut V5, p: &mut M5, z: &[f64; 2], r: &[f64; 3]) -> Option<(f64, f64)> {
+    let w = x[4].clamp(-OMEGA_MAX, OMEGA_MAX);
+    let (s, c) = sin_cos_near_zero(w * VEL_LAG_S);
+    let zh = [c * x[2] + s * x[3], -s * x[2] + c * x[3]];
+    // The measurement matrix: velocity columns 2 and 3, turn rate column 4.
+    let hm = [
+        [0.0, 0.0, c, s, VEL_LAG_S * zh[1]],
+        [0.0, 0.0, -s, c, -VEL_LAG_S * zh[0]],
+    ];
+    let old = *p;
+    // P H^T, five rows by two.
+    let mut pht = [[0.0f64; 2]; 5];
+    for (row, out) in pht.iter_mut().enumerate() {
+        for (k, o) in out.iter_mut().enumerate() {
+            *o = (0..5).map(|j| old[row][j] * hm[k][j]).sum();
+        }
+    }
+    let hpht = |k: usize, l: usize| -> f64 { (0..5).map(|j| hm[k][j] * pht[j][l]).sum() };
+    let s00 = hpht(0, 0) + r[0];
+    let s01 = hpht(0, 1) + r[1];
+    let s11 = hpht(1, 1) + r[2];
+    let det = s00 * s11 - s01 * s01;
+    if det.is_nan() || det <= 0.0 {
+        return None;
+    }
+    let (y0, y1) = (z[0] - zh[0], z[1] - zh[1]);
+    let (n00, n01, n11) = (s11 / det, -s01 / det, s00 / det);
+    let d2 = y0 * (n00 * y0 + n01 * y1) + y1 * (n01 * y0 + n11 * y1);
+    let mut k = [[0.0f64; 2]; 5];
+    for (kr, pr) in k.iter_mut().zip(pht.iter()) {
+        *kr = [pr[0] * n00 + pr[1] * n01, pr[0] * n01 + pr[1] * n11];
+    }
+    for (xr, kr) in x.iter_mut().zip(k.iter()) {
+        *xr += kr[0] * y0 + kr[1] * y1;
+    }
+    let mut pn = old;
+    for (row, kr) in k.iter().enumerate() {
+        for col in 0..5 {
+            // (H P)[k][col] is P H^T transposed, P being symmetric.
+            pn[row][col] -= kr[0] * pht[col][0] + kr[1] * pht[col][1];
+        }
+    }
+    *p = symmetrise(&pn);
+    Some((d2, det))
+}
+
 /// The model probabilities after a measurement, before the floor and the normalisation: the
 /// prior `prior[j]` times the likelihood, scaled so the larger is 1. Each model's `fit[j]` is
 /// the sum `q` of the quadratic forms and the product `det` of the innovation determinants of
@@ -539,7 +592,8 @@ pub(crate) fn imm_weights(prior: [f64; 2], fit: [Option<(f64, f64)>; 2]) -> [f64
 }
 
 /// Updates the predicted filter with a position (and a velocity if given), then the model
-/// probabilities from the likelihoods and the predicted probabilities.
+/// probabilities from the likelihoods and the predicted probabilities. The velocity update is the
+/// lagged one ([`update_vel_lagged`]).
 pub(crate) fn h_update(
     pred: &HFilter,
     z: &[f64; 2],
@@ -561,7 +615,7 @@ pub(crate) fn h_update(
     for (j, m) in out.m.iter_mut().enumerate() {
         let mut f = update_sel(&mut m.x, &mut m.p, [0, 1], z, r);
         if let Some((v, vr)) = vel {
-            let g = update_sel(&mut m.x, &mut m.p, [2, 3], &v, &vr);
+            let g = update_vel_lagged(&mut m.x, &mut m.p, &v, &vr);
             f = f.zip(g).map(|((q, d), (q2, d2))| (q + q2, d * d2));
         }
         fit[j] = f;
@@ -1006,5 +1060,72 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A state flying east at 230 m/s, turn rate `w`, with the given velocity and rate variances.
+    fn lag_state(w: f64, pvv: f64, pww: f64) -> (V5, M5) {
+        let mut p = ZERO;
+        p[2][2] = pvv;
+        p[3][3] = pvv;
+        p[4][4] = pww;
+        ([0.0, 0.0, 230.0, 0.0, w], p)
+    }
+
+    // REQ: OA-TRK-395
+    #[test]
+    fn a_state_without_turn_takes_the_plain_velocity_update() {
+        let (mut x1, mut p1) = lag_state(0.0, 4.0, 0.0);
+        let (mut x2, mut p2) = (x1, p1);
+        let z = [228.0, 3.0];
+        let r = [0.36, 0.0, 0.36];
+        let a = update_vel_lagged(&mut x1, &mut p1, &z, &r).expect("regular");
+        let b = update_sel(&mut x2, &mut p2, [2, 3], &z, &r).expect("regular");
+        assert!((a.0 - b.0).abs() < 1.0e-12 && (a.1 - b.1).abs() < 1.0e-12);
+        for i in 0..N {
+            assert!((x1[i] - x2[i]).abs() < 1.0e-12);
+            for j in 0..N {
+                assert!((p1[i][j] - p2[i][j]).abs() < 1.0e-12);
+            }
+        }
+    }
+
+    // REQ: OA-TRK-395
+    #[test]
+    fn in_a_turn_the_reported_velocity_is_taken_as_that_of_a_lag_ago() {
+        // Turning left at 2 degrees per second; the report, a lag old, still points east.
+        let w = 2.0_f64.to_radians();
+        let (mut x, mut p) = lag_state(w, 100.0, 1.0e-12);
+        update_vel_lagged(&mut x, &mut p, &[230.0, 0.0], &[0.01, 0.0, 0.01]).expect("regular");
+        // The aircraft's velocity is the report's turned forward by the rate over the lag (the
+        // update is linear, so the east component is right to second order in the angle).
+        let a = w * VEL_LAG_S;
+        assert!((x[2] - 230.0 * a.cos()).abs() < 0.5, "{}", x[2]);
+        assert!((x[3] - 230.0 * a.sin()).abs() < 0.05, "{}", x[3]);
+        // A report that agrees with that leaves the state where it was.
+        let (mut x, mut p) = lag_state(w, 100.0, 1.0e-6);
+        let before = x;
+        let z = [230.0 * a.cos(), -230.0 * a.sin()];
+        update_vel_lagged(&mut x, &mut p, &z, &[0.01, 0.0, 0.01]).expect("regular");
+        for i in 0..N {
+            assert!((x[i] - before[i]).abs() < 1.0e-9, "{i}");
+        }
+    }
+
+    // REQ: OA-TRK-395
+    #[test]
+    fn a_report_behind_the_velocity_by_more_than_the_lag_says_the_turn_is_faster() {
+        // The state turns at 1 degree per second; the report points 3 degrees clockwise of the
+        // velocity, so over the lag the aircraft is turning counter-clockwise faster.
+        let (mut x, mut p) = lag_state(1.0_f64.to_radians(), 0.36, 1.0e-3);
+        let a = 3.0_f64.to_radians();
+        let z = [230.0 * a.cos(), -230.0 * a.sin()];
+        let before = x[4];
+        update_vel_lagged(&mut x, &mut p, &z, &[0.36, 0.0, 0.36]).expect("regular");
+        assert!(x[4] > before, "{}", x[4]);
+        // A singular innovation covariance changes nothing.
+        let (mut x, mut p) = lag_state(0.0, 0.0, 0.0);
+        let keep = (x, p);
+        assert!(update_vel_lagged(&mut x, &mut p, &[1.0, 1.0], &[0.0, 0.0, 0.0]).is_none());
+        assert_eq!((x, p), keep);
     }
 }

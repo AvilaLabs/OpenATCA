@@ -492,11 +492,12 @@ fn a_forger_who_repeats_the_same_false_place_is_confirmed_by_the_second_report()
         (1, 1, 0, 0),
         "{s:?}"
     );
-    // (Some repeats are refused by the gate, the track having seen one report there and the
-    // noise of the feed being what it is: the one at 41 s decides nothing,
-    // `moves_decision_rejected`, and the one at 42 s confirms. The counts are those of this
-    // seeded feed.)
-    assert_eq!((s.resyncs, s.moves_decision_rejected), (0, 1), "{s:?}");
+    // (Some repeats can be refused by the gate, the track having seen one report there and the
+    // noise of the feed being what it is: such a one decides nothing,
+    // `moves_decision_rejected`. The counts are those of this seeded feed: before the velocity
+    // update carried the turn rate over the transponder's lag (OA-TRK-395) the one at 41 s was
+    // refused and the one at 42 s confirmed; now none is refused.)
+    assert_eq!((s.resyncs, s.moves_decision_rejected), (0, 0), "{s:?}");
     assert_eq!(tracker_moves_active(&l.t), 0, "{s:?}");
     assert_eq!(l.last_flags() & O_MOVE_UNCONFIRMED, 0);
     balanced(&l.t);

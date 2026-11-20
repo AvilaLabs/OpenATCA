@@ -144,6 +144,15 @@ impl Manoeuvre {
             accel: 0.0,
         }
     }
+    /// Truth at `t` with the velocity of `VEL_LAG_S` earlier: what a transponder reports (the
+    /// reported velocity lags the aircraft's, `oa_track::params::VEL_LAG_S`).
+    pub fn at_lagged_velocity(&self, t: f64, e0: f64, n0: f64) -> Truth {
+        let mut tr = self.at(t, e0, n0);
+        let v = self.at(t - oa_track::params::VEL_LAG_S, e0, n0);
+        tr.ve = v.ve;
+        tr.vn = v.vn;
+        tr
+    }
     /// Truth at `t` by integrating in 10 ms steps (the exact path is not needed to better than
     /// a millimetre).
     pub fn at(&self, t: f64, e0: f64, n0: f64) -> Truth {
