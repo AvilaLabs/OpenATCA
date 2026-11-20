@@ -10,6 +10,9 @@
 # failure; the reports stay in <outdir>. Exit status is oa-replay-diff's (0 identical, 1 different,
 # 2 error). Only commit hashes or refs are accepted: never a working tree.
 #
+# The clip is first checked, by oa-clip-sealcheck built from the current tree, for any row time or
+# frame receive time in the sealed window; a failure refuses the run before any commit is built.
+#
 # Environment:
 #   REPLAY_COMPARE_GUARD      command that wraps every build and run (default: a systemd
 #                             scope limited to $GUARD_MEM, 6G); set it to the empty string to
@@ -216,6 +219,26 @@ build_and_run() {
     git -C "$repo" worktree remove --force "$wt" >/dev/null
     rm -rf "$tgt" "$scratch/run-$label"
 }
+
+# A commit from before the seal has no row window of its own, so the clip's name is the only guard
+# it has. The clip itself is checked first, by a binary built from this checkout: every row time
+# and every frame receive time against the sealed window. A non-zero exit (anything in the window,
+# a clip that does not parse, a fail-closed window) refuses the run before any commit is built.
+echo "building oa-clip-sealcheck" >&2
+seal_tgt="${CARGO_TARGET_DIR:-$repo/target}"
+(
+    cd "$repo"
+    "${guard[@]}" "${clean_env_prefix[@]}" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
+        CARGO_TARGET_DIR="$seal_tgt" cargo "+$toolchain" build --release --locked \
+        --config 'build.rustflags=[]' -p oa-truth --bin oa-clip-sealcheck >"$outdir/build-sealcheck.log" 2>&1
+) || die "build of oa-clip-sealcheck failed (see $outdir/build-sealcheck.log)"
+seal_bin="$seal_tgt/release/oa-clip-sealcheck"
+[ -x "$seal_bin" ] || die "the built oa-clip-sealcheck is not at $seal_bin"
+seal_status=0
+"$seal_bin" "$clip" >"$outdir/sealcheck.txt" 2>&1 || seal_status=$?
+if [ "$seal_status" != 0 ]; then
+    die "the clip failed the seal check (oa-clip-sealcheck exit $seal_status; see $outdir/sealcheck.txt): $(tr '\n' ' ' <"$outdir/sealcheck.txt")"
+fi
 
 build_and_run A "$commit_a"
 build_and_run B "$commit_b"

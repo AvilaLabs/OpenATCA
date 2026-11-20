@@ -1,7 +1,9 @@
 //! Reads an OAF1 clip (docs/ADSB_PAYLOAD.md) into ADS-B reports, with caps. Shell (B7): owns the file.
 //! Shared by `oa-truth-check` and `oa-sensorsim`.
 
-use oa_adsb::{decode_payload_lenient, reports_clear, reports_extend_unsealed, Reports};
+use oa_adsb::{
+    decode_payload_lenient, reports_clear, reports_extend_unsealed, reports_len, Reports,
+};
 use oa_feed::{read_frames, Kind};
 
 /// The largest clip read, in bytes: ten times the 330 MB raw ZAU day (2026-11-14). A larger
@@ -148,6 +150,77 @@ pub fn read_clip_tallied(
         });
     }
     Ok((out, damaged + undecodable, dropped))
+}
+
+/// What [`seal_check_clip`] found in a clip: counts only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SealCheck {
+    /// Frames read (well formed).
+    pub frames: u64,
+    /// Rows in the ADS-B payload frames that decoded.
+    pub rows: u64,
+    /// Frames whose receive time is in the window.
+    pub frames_in_window: u64,
+    /// Rows whose time is in the window.
+    pub rows_in_window: u64,
+    /// Frames that did not parse: damaged, or a payload that does not decode.
+    pub unreadable: u64,
+}
+
+impl SealCheck {
+    /// Whether the clip holds nothing in the window, parsed whole, and has at least one frame.
+    pub fn clean(&self) -> bool {
+        self.frames > 0
+            && self.frames_in_window == 0
+            && self.rows_in_window == 0
+            && self.unreadable == 0
+    }
+}
+
+/// Opens a clip through the seal guard and checks every frame's receive time and every row's time
+/// against `window` (Unix milliseconds). Nothing is kept: the counts are all it returns. The
+/// check is for a clip about to be run by code that has no row window of its own (a commit from
+/// before the seal): the clip's name is then the only other guard.
+pub fn seal_check_clip(
+    path: &str,
+    max_bytes: u64,
+    window: oa_sealed::DropWindow,
+) -> Result<SealCheck, ClipError> {
+    let io = |e: std::io::Error| ClipError::Io(format!("{path}: {e}"));
+    let mut f = oa_sealed::open(std::path::Path::new(path)).map_err(io)?;
+    let bytes = f.metadata().map_err(io)?.len();
+    if bytes > max_bytes {
+        return Err(ClipError::TooManyBytes {
+            bytes,
+            cap: max_bytes,
+        });
+    }
+    let mut c = SealCheck::default();
+    let mut frame = Reports::default();
+    let damaged = read_frames(&mut f, &mut |fr| {
+        c.frames += 1;
+        if window.contains(fr.recv_unix_ns.div_euclid(1_000_000)) {
+            c.frames_in_window += 1;
+        }
+        if fr.kind == Kind::Message {
+            reports_clear(&mut frame);
+            match decode_payload_lenient(fr.payload, &mut frame) {
+                Ok(_) => {
+                    let n = reports_len(&frame);
+                    c.rows += n as u64;
+                    c.rows_in_window += frame
+                        .time_ns
+                        .iter()
+                        .take(n)
+                        .filter(|t| window.contains(t.div_euclid(1_000_000)))
+                        .count() as u64;
+                }
+                Err(_) => c.unreadable += 1,
+            }
+        }
+    });
+    c.unreadable += damaged.map_err(io)?;
+    Ok(c)
 }
 
 #[cfg(test)]
@@ -402,5 +475,76 @@ mod proofs {
             Ok(t) => assert!(t <= max_rows && t >= rows),
             Err(t) => assert!(t > max_rows && t >= rows),
         }
+    }
+
+    /// A clip of one frame per `(recv_ns, row times)`.
+    fn timed_clip(frames: &[(i64, &[i64])]) -> Vec<u8> {
+        use oa_adsb::{encode_payload, reports_push, ROW_EMPTY};
+        let mut bytes = Vec::new();
+        for (seq, (recv, times)) in frames.iter().enumerate() {
+            let mut r = Reports::default();
+            for (i, t) in times.iter().enumerate() {
+                let mut row = ROW_EMPTY;
+                row.icao = 0xA00000 + i as u32;
+                row.time_ns = *t;
+                row.lat_e7 = 410_000_000;
+                row.lon_e7 = -880_000_000;
+                reports_push(&mut r, &row);
+            }
+            let mut payload = Vec::new();
+            encode_payload(&mut payload, &r, 0, times.len()).unwrap();
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(&mut buf, 1, FLAG_BYTES, seq as u64, *recv, 0, &payload).unwrap();
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        bytes
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn the_seal_check_counts_rows_and_receive_times_in_the_window() {
+        let w = oa_sealed::DropWindow::from_ns_span(1_000_000_000_000, 2_000_000_000_000);
+        let out = 3_000_000_000_000;
+        let inn = 1_500_000_000_000;
+        let one = |frames: &[(i64, &[i64])]| {
+            let p = write("sealcheck.oaf", &timed_clip(frames));
+            seal_check_clip(&p, 1 << 20, w).unwrap()
+        };
+        let c = one(&[(out, &[out, out + 1])]);
+        assert!(c.clean(), "{c:?}");
+        assert_eq!((c.frames, c.rows), (1, 2));
+        // A row in the window, with the frame receive time outside it.
+        let c = one(&[(out, &[out, inn])]);
+        assert_eq!((c.rows_in_window, c.frames_in_window), (1, 0));
+        assert!(!c.clean());
+        // A frame received in the window, with every row outside it.
+        let c = one(&[(inn, &[out])]);
+        assert_eq!((c.rows_in_window, c.frames_in_window), (0, 1));
+        assert!(!c.clean());
+        // Rows are checked at the millisecond: the edges.
+        let c = one(&[(out, &[1_000_000_000_000 - 1_000_000, 2_000_000_000_000])]);
+        assert!(c.clean(), "{c:?}");
+        let c = one(&[(out, &[1_000_000_000_000])]);
+        assert_eq!(c.rows_in_window, 1);
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn the_seal_check_refuses_a_clip_that_does_not_parse_and_one_with_no_frames() {
+        let w = oa_sealed::DropWindow::from_ns_span(1_000_000_000_000, 2_000_000_000_000);
+        let mut bytes = timed_clip(&[(0, &[0])]);
+        bytes.extend_from_slice(b"garbage that is no frame");
+        let c = seal_check_clip(&write("damaged.oaf", &bytes), 1 << 20, w).unwrap();
+        assert!(c.unreadable > 0 && !c.clean(), "{c:?}");
+        let c = seal_check_clip(&write("empty.oaf", b""), 1 << 20, w).unwrap();
+        assert!(!c.clean(), "{c:?}");
+        // The fail-closed window holds every row.
+        let c = seal_check_clip(
+            &write("all.oaf", &timed_clip(&[(0, &[0])])),
+            1 << 20,
+            oa_sealed::DropWindow::all_time(),
+        )
+        .unwrap();
+        assert!(!c.clean());
     }
 }

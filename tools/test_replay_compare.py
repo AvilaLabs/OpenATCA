@@ -28,6 +28,10 @@ def run(*args, cwd=None, script=SCRIPT):
 SCRIPT_FILES = ["replay_compare.sh", "replay_clean_env.sh", "replay_overlay_apply.sh", "sealed_guard.py"]
 
 
+# A stand-in for oa-clip-sealcheck that finds nothing in the window.
+SEAL_OK_STUB = "#!/usr/bin/env bash\necho 'clip: 1 frames, 1 rows; in the sealed window: 0'\nexit 0\n"
+
+
 def scratch_repo(base, commits):
     """A private repository holding copies of the script and one commit per (name, canon, main).
 
@@ -323,7 +327,8 @@ class OverlayApply(unittest.TestCase):
             'pkg=""; while [ $# -gt 0 ]; do [ "$1" = -p ] && pkg="$2"; shift; done\n'
             'mkdir -p "$CARGO_TARGET_DIR/release"\n'
             f'case "$pkg" in oa-track) printf %s {json_q(run_stub)} >"$CARGO_TARGET_DIR/release/oa-track-run"; chmod +x "$CARGO_TARGET_DIR/release/oa-track-run";;\n'
-            f'oa-replay-diff) printf %s {json_q(diff_stub)} >"$CARGO_TARGET_DIR/release/oa-replay-diff"; chmod +x "$CARGO_TARGET_DIR/release/oa-replay-diff";; esac\n'
+            f'oa-replay-diff) printf %s {json_q(diff_stub)} >"$CARGO_TARGET_DIR/release/oa-replay-diff"; chmod +x "$CARGO_TARGET_DIR/release/oa-replay-diff";;\n'
+            f'oa-truth) printf %s {json_q(SEAL_OK_STUB)} >"$CARGO_TARGET_DIR/release/oa-clip-sealcheck"; chmod +x "$CARGO_TARGET_DIR/release/oa-clip-sealcheck";; esac\n'
         )
         (bindir / "cargo").write_text(cargo)
         (bindir / "rustc").write_text('#!/usr/bin/env bash\necho "rustc 1.89.0 stub"\n')
@@ -350,7 +355,7 @@ class OverlayApply(unittest.TestCase):
         self.assertEqual(res.returncode, 0, res.stderr)
         calls = log.read_text()
         builds = [l for l in calls.splitlines() if l.startswith("CALL cargo")]
-        self.assertEqual(len(builds), 3)  # A, B, and the diff tool
+        self.assertEqual(len(builds), 4)  # the clip check, A, B, and the diff tool
         for b in builds:
             self.assertIn("--locked", b)
             self.assertIn("--config build.rustflags=[]", b)
@@ -393,6 +398,7 @@ class OverlayApply(unittest.TestCase):
             'pkg=""; while [ $# -gt 0 ]; do [ "$1" = -p ] && pkg="$2"; shift; done\n'
             'mkdir -p "$CARGO_TARGET_DIR/release"\n'
             f'[ "$pkg" = oa-track ] && {{ cp {bindir}/run_src "$CARGO_TARGET_DIR/release/oa-track-run"; chmod +x "$CARGO_TARGET_DIR/release/oa-track-run"; }}\n'
+            f'[ "$pkg" = oa-truth ] && {{ printf %s {json_q(SEAL_OK_STUB)} >"$CARGO_TARGET_DIR/release/oa-clip-sealcheck"; chmod +x "$CARGO_TARGET_DIR/release/oa-clip-sealcheck"; }}\n'
             "exit 0\n"
         )
         (bindir / "rustc").write_text('#!/usr/bin/env bash\necho stub\n')
@@ -410,6 +416,43 @@ class OverlayApply(unittest.TestCase):
         self.assertIn("is not at", res.stderr)
         # A failed run leaves no rows file behind (OA-RDF-023).
         self.assertEqual(sorted(p.name for p in (self.dir / "out").glob("rows-*")), [])
+
+
+    # REQ: OA-SEAL-014
+    def test_a_clip_that_fails_the_seal_check_refuses_the_run_before_any_commit_is_built(self):
+        for code in (1, 2):
+            with self.subTest(exit=code):
+                d = self.dir / f"c{code}"
+                bindir = d / "bin"
+                bindir.mkdir(parents=True)
+                log = d / "calls.log"
+                seal = f"#!/usr/bin/env bash\necho 'in the sealed window: 1 rows'\nexit {code}\n"
+                (bindir / "cargo").write_text(
+                    "#!/usr/bin/env bash\n"
+                    f'echo "$*" >>{log}\n'
+                    'pkg=""; while [ $# -gt 0 ]; do [ "$1" = -p ] && pkg="$2"; shift; done\n'
+                    'mkdir -p "$CARGO_TARGET_DIR/release"\n'
+                    f'[ "$pkg" = oa-truth ] && {{ printf %s {json_q(seal)} >"$CARGO_TARGET_DIR/release/oa-clip-sealcheck"; chmod +x "$CARGO_TARGET_DIR/release/oa-clip-sealcheck"; }}\n'
+                    "exit 0\n"
+                )
+                (bindir / "rustc").write_text("#!/usr/bin/env bash\necho stub\n")
+                for n in ["cargo", "rustc"]:
+                    (bindir / n).chmod(0o755)
+                clip = d / "clip.oaf"
+                clip.write_bytes(b"x")
+                env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}", REPLAY_COMPARE_GUARD="",
+                           CARGO_TARGET_DIR=str(d / "tgt"))
+                res = subprocess.run(
+                    ["bash", str(SCRIPT), "HEAD", "HEAD", str(clip), str(d / "out"), str(d / "scratch")],
+                    capture_output=True, text=True, env=env, timeout=180,
+                )
+                self.assertEqual(res.returncode, 2, res.stderr)
+                self.assertIn("failed the seal check", res.stderr)
+                # Only the clip check was built: no commit was built or run.
+                calls = log.read_text().splitlines()
+                self.assertEqual(len(calls), 1, calls)
+                self.assertIn("oa-clip-sealcheck", calls[0])
+                self.assertEqual(sorted(p.name for p in (d / "out").glob("digest-*")), [])
 
 
 class DigestFormatRefusal(unittest.TestCase):

@@ -44,6 +44,49 @@ use std::sync::OnceLock;
 /// The list file, compiled in.
 pub const LIST: &str = include_str!("../sealed_paths.txt");
 
+/// Where [`LIST`] was read from at build time. At run time the guard compares the file there, if
+/// there is one, with the compiled-in text ([`production_guard`]).
+const LIST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/sealed_paths.txt");
+
+/// FNV-1a 64 of `bytes`, in hex: a short name for a list in a warning (not a security hash).
+fn list_hash(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// The guard for the compiled-in `embedded` list, checked against the list file at `path`: if the
+/// file exists and its bytes differ from the embedded text (or it exists and cannot be read), the
+/// list the binary was built with is not the list on disk, and the guard fails closed (every path
+/// refused, every instant sealed) with a warning on `warn` naming both hashes. A file that is
+/// absent (an installed binary, a copied one) leaves the embedded list in force.
+fn production_guard(embedded: &str, path: &Path, warn: &mut dyn io::Write) -> Sealed {
+    match fs::read(path) {
+        Ok(disk) if disk != embedded.as_bytes() => {
+            let _ = writeln!(
+                warn,
+                "seal list on disk ({}) differs from the list compiled in ({}) [{}]: every path refused and every timed row dropped; rebuild",
+                list_hash(&disk),
+                list_hash(embedded.as_bytes()),
+                path.display()
+            );
+            Sealed::with_list("", None)
+        }
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            let _ = writeln!(
+                warn,
+                "seal list on disk cannot be read ({e}) [{}]: every path refused and every timed row dropped",
+                path.display()
+            );
+            Sealed::with_list("", None)
+        }
+        _ => Sealed::with_list(embedded, None),
+    }
+}
+
 /// A deepest chain of links followed by hand before a path is refused as unresolvable.
 const MAX_LINKS: usize = 40;
 
@@ -512,7 +555,7 @@ impl Sealed {
     /// The guard for the compiled-in list and the real data root, built once (production).
     pub fn production() -> &'static Sealed {
         static PRODUCTION: OnceLock<Sealed> = OnceLock::new();
-        PRODUCTION.get_or_init(|| Sealed::with_list(LIST, None))
+        PRODUCTION.get_or_init(|| production_guard(LIST, Path::new(LIST_PATH), &mut io::stderr()))
     }
 
     /// The guard for the compiled-in entries under `root` (tests build a fake root).
@@ -1151,5 +1194,34 @@ mod tests {
             assert!(!in_sealed_window(ms * 1_000_000), "{ms}");
         }
         assert_eq!(WINDOW_MARGIN_NS, 15 * 60 * 1_000_000_000);
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn a_list_on_disk_that_differs_from_the_compiled_in_one_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("oa_sealed_list_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sealed_paths.txt");
+        let mut warn = Vec::new();
+        // The same bytes: the embedded list is in force and nothing is said.
+        fs::write(&file, LIST).unwrap();
+        let g = production_guard(LIST, &file, &mut warn);
+        assert!(!g.broken && g.drop_window() != DropWindow::all_time() && warn.is_empty());
+        // One byte more: closed, with both hashes named.
+        fs::write(&file, format!("{LIST}\n")).unwrap();
+        let g = production_guard(LIST, &file, &mut warn);
+        assert!(g.broken && g.drop_window() == DropWindow::all_time());
+        assert!(g.in_window(0));
+        let said = String::from_utf8(warn.clone()).unwrap();
+        assert!(said.contains(&list_hash(LIST.as_bytes())), "{said}");
+        assert!(said.contains(&list_hash(format!("{LIST}\n").as_bytes())), "{said}");
+        // A file that is absent (an installed binary): the embedded list stays.
+        fs::remove_file(&file).unwrap();
+        let mut warn = Vec::new();
+        let g = production_guard(LIST, &file, &mut warn);
+        assert!(!g.broken && warn.is_empty());
+        // The real list file of this checkout is the compiled-in one, so production is open.
+        assert_eq!(fs::read(LIST_PATH).unwrap(), LIST.as_bytes());
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
