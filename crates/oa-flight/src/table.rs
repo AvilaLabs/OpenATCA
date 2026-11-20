@@ -149,23 +149,66 @@ pub fn flight_is_flying(f: &Flight) -> bool {
         .any(|v| v.state == ST_PROPOSED || v.state == ST_ACTIVE || v.state == ST_DEPARTED)
 }
 
-/// The flights that are flying ([`flight_is_flying`]) and state this callsign, counted, and the
-/// first of them in slot order. One pass over the table, at most its length.
-pub fn flights_flying_by_callsign(t: &FlightTable, callsign: &[u8; 8]) -> (usize, Option<Flight>) {
-    let mut n = 0usize;
-    let mut first = None;
+/// The flying flights ([`flight_is_flying`]) that state one callsign.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug)]
+pub struct Flying {
+    /// How many there are.
+    pub count: usize,
+    /// The first in slot order.
+    pub first: Option<Flight>,
+    /// The one with the newest plan stamp (the later stamped time of any view, then the later
+    /// message, then the larger GUFI): the same choice whatever the slot order.
+    pub newest: Option<Flight>,
+    /// Every one of them states the same departure and the same arrival, both given.
+    pub same_route: bool,
+}
+
+fn plan_stamp(f: &Flight) -> (i64, u64, u128) {
+    let (ts, msg) = f
+        .views
+        .iter()
+        .take(usize::from(f.n_views))
+        .map(|v| (v.stamp.ts_ms, v.stamp.msg))
+        .max()
+        .unwrap_or((i64::MIN, 0));
+    (ts, msg, f.key.gufi)
+}
+
+/// The flights that are flying and state this callsign. One pass over the table, at most its
+/// length.
+pub fn flights_flying_by_callsign(t: &FlightTable, callsign: &[u8; 8]) -> Flying {
+    let mut r = Flying {
+        count: 0,
+        first: None,
+        newest: None,
+        same_route: true,
+    };
     if *callsign == [0; 8] {
-        return (0, None);
+        return r;
     }
     for f in &t.flights {
-        if f.key.kind != KEY_FREE && f.callsign == *callsign && flight_is_flying(f) {
-            n += 1;
-            if first.is_none() {
-                first = Some(*f);
+        if f.key.kind == KEY_FREE || f.callsign != *callsign || !flight_is_flying(f) {
+            continue;
+        }
+        r.count += 1;
+        match (&r.first, &r.newest) {
+            (Some(first), Some(newest)) => {
+                if f.dep != first.dep || f.arr != first.arr {
+                    r.same_route = false;
+                }
+                if plan_stamp(f) > plan_stamp(newest) {
+                    r.newest = Some(*f);
+                }
+            }
+            _ => {
+                r.first = Some(*f);
+                r.newest = Some(*f);
+                r.same_route = f.dep != [0; 12] && f.arr != [0; 12];
             }
         }
     }
-    (n, first)
+    r
 }
 
 /// The most advanced state among the views: departed, active, proposed, dropped, completed,

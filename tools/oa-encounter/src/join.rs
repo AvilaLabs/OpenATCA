@@ -6,17 +6,20 @@
 //! floor)`, so a question at time T is answered before the first operation available after T is
 //! applied and sees nothing that arrived or aged in later.
 
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use oa_encounter::Encounter;
 use oa_flight::{
-    flight_by_address, flight_is_live, flights_flying_by_callsign, Alt, Flight, FlightConfig,
-    FlightKey, FlightTable, ALT_AT_FIX, ALT_BLOCK, ALT_NIL, ALT_SIMPLE, ALT_VFR,
-    ALT_VFR_ON_TOP_PLUS, KEY_GUFI,
+    flight_by_address, flight_get, flight_is_flying, flight_is_live, flights_flying_by_callsign,
+    Alt, Flight, FlightConfig, FlightKey, FlightTable, ALT_AT_FIX, ALT_BLOCK, ALT_NIL, ALT_SIMPLE,
+    ALT_VFR, ALT_VFR_ON_TOP_PLUS, KEY_GUFI,
 };
-use oa_flight_sfdps::{norm_callsign, recordings_in, replay_sfdps, Positions, ReplayConfig};
+use oa_flight_sfdps::{
+    norm_callsign, recordings_in, replay_sfdps, Position, Positions, ReplayConfig,
+};
 
 use crate::report::{at_vertical_minimum, class_name, context_of, Airport, CLIMB_FPM, LEVEL_FT};
 
@@ -82,6 +85,9 @@ pub enum CsResult {
     NotTried,
     Accepted {
         checked: bool,
+        /// Several flying flights state the callsign, all with one departure and arrival (one
+        /// aircraft with several plans), and the one with the newest plan stamp was taken.
+        several: bool,
     },
     Rejected(CsReject),
 }
@@ -219,6 +225,9 @@ pub fn distance_m(a: (i32, i32), b: (i32, i32)) -> f64 {
 pub struct Sfdps {
     pub dir: PathBuf,
     pub lag_floor_ms: i64,
+    /// Take the newest plan where every flying flight with the callsign shares its departure and
+    /// arrival.
+    pub pick_newest: bool,
 }
 
 /// What the replay behind the answers saw (counts only).
@@ -247,57 +256,208 @@ fn flight_config(lag_floor_ms: i64) -> FlightConfig {
     }
 }
 
-fn cs_join(t: &FlightTable, pos: &Positions, q: &Query) -> (CsResult, Option<Flight>) {
+fn cs_join(
+    t: &FlightTable,
+    pos: &Positions,
+    q: &Query,
+    pick_newest: bool,
+) -> (CsResult, Option<Flight>) {
     let c = match q.callsign {
         CallsignObs::Absent => return (CsResult::Rejected(CsReject::NoCallsign), None),
         CallsignObs::Unstable => return (CsResult::Rejected(CsReject::Unstable), None),
         CallsignObs::Stable(c) => c,
     };
-    let (n, first) = flights_flying_by_callsign(t, &c);
-    let Some(f) = first else {
-        return (CsResult::Rejected(CsReject::NoLiveFlight), None);
+    let r = flights_flying_by_callsign(t, &c);
+    let (several, chosen) = match (r.count, r.first, r.newest) {
+        (0, _, _) | (_, None, _) => return (CsResult::Rejected(CsReject::NoLiveFlight), None),
+        (1, Some(f), _) => (false, f),
+        (_, Some(_), Some(n)) if pick_newest && r.same_route => (true, n),
+        _ => return (CsResult::Rejected(CsReject::SeveralLive), None),
     };
-    if n > 1 {
-        return (CsResult::Rejected(CsReject::SeveralLive), None);
-    }
     let t_ms = q.t_ns.div_euclid(1_000_000);
-    let own = (f.key.kind == KEY_GUFI)
-        .then(|| pos.get(f.key.gufi))
-        .flatten()
-        .filter(|p| (t_ms - p.ts_ms).abs() <= POSITION_AGE_MS);
+    let own = own_position(pos, &chosen, t_ms);
     match own {
         Some(p) if distance_m((p.lat_e7, p.lon_e7), (q.lat_e7, q.lon_e7)) > POSITION_DIST_M => {
             (CsResult::Rejected(CsReject::PositionDisagrees), None)
         }
-        Some(_) => (CsResult::Accepted { checked: true }, Some(f)),
-        None => (CsResult::Accepted { checked: false }, Some(f)),
+        Some(_) => (
+            CsResult::Accepted {
+                checked: true,
+                several,
+            },
+            Some(chosen),
+        ),
+        None => (
+            CsResult::Accepted {
+                checked: false,
+                several,
+            },
+            Some(chosen),
+        ),
     }
 }
 
-fn lookup(t: &FlightTable, pos: &Positions, q: &Query) -> Answer {
+/// The flight's own latest position if it is within [`POSITION_AGE_MS`] of the time.
+fn own_position(pos: &Positions, f: &Flight, t_ms: i64) -> Option<Position> {
+    (f.key.kind == KEY_GUFI)
+        .then(|| pos.get(f.key.gufi))
+        .flatten()
+        .filter(|p| (t_ms - p.ts_ms).abs() <= POSITION_AGE_MS)
+        .copied()
+}
+
+/// How two flights that the address and the callsign name differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagClass {
+    /// The same callsign and the same departure and arrival: a refile or a second plan.
+    SameRoute,
+    /// The same callsign with another departure or arrival: another leg or day.
+    OtherRoute,
+    /// Different callsigns.
+    OtherCallsign,
+    /// Anything else (a callsign or a route not stated by one of them).
+    Other,
+}
+
+pub const DIAG_NAMES: [&str; 4] = [
+    "same callsign, same departure and arrival",
+    "same callsign, other departure or arrival",
+    "different callsigns",
+    "anything else",
+];
+
+/// A disagreement between the address and the callsign, kept for the report. A7.2: cold struct,
+/// size guard waived.
+#[derive(Clone, Debug)]
+pub struct Diag {
+    /// The query (the aircraft) it is about.
+    pub query: usize,
+    pub class: DiagClass,
+    pub t_ms: i64,
+    pub addr_key: FlightKey,
+    pub cs_key: FlightKey,
+    /// The callsign join was position checked, and took one of several plans.
+    pub cs_checked: bool,
+    pub cs_several: bool,
+    /// Between the two flights' latest SFDPS positions, metres, where both have one.
+    pub flights_m: Option<f64>,
+    /// From the ADS-B position to each flight's own position within 120 s, metres.
+    pub adsb_to_addr_m: Option<f64>,
+    pub adsb_to_cs_m: Option<f64>,
+    /// Each flight's latest position whatever its age: age at the query (ms) and distance from the
+    /// ADS-B position (m).
+    pub addr_any: Option<(i64, f64)>,
+    pub cs_any: Option<(i64, f64)>,
+    /// The address flight was flying (not dropped) at the query.
+    pub addr_flying: bool,
+    /// The two callsigns start with the same three letters (one operator).
+    pub same_operator: bool,
+    /// Looked at again 30 min later: whether each flight had stopped flying (ended or dropped).
+    pub probed: bool,
+    pub addr_ended_later: bool,
+    pub cs_ended_later: bool,
+    /// A refile conflict listed for either flight within 30 min of the query, either side.
+    pub refile_near: bool,
+}
+
+/// How long after a question the two flights of a disagreement are looked at again, and the
+/// window of a refile around it, ms.
+pub const PROBE_MS: i64 = 30 * 60 * 1000;
+
+fn diag_of(
+    pos: &Positions,
+    q: &Query,
+    query: usize,
+    (fa, fc): (&Flight, &Flight),
+    (cs_checked, cs_several): (bool, bool),
+) -> Diag {
+    let t_ms = q.t_ns.div_euclid(1_000_000);
+    let class = if fa.callsign == [0; 8] || fc.callsign == [0; 8] {
+        DiagClass::Other
+    } else if fa.callsign != fc.callsign {
+        DiagClass::OtherCallsign
+    } else if fa.dep == [0; 12] || fa.arr == [0; 12] || fc.dep == [0; 12] || fc.arr == [0; 12] {
+        DiagClass::Other
+    } else if fa.dep == fc.dep && fa.arr == fc.arr {
+        DiagClass::SameRoute
+    } else {
+        DiagClass::OtherRoute
+    };
+    let last = |f: &Flight| {
+        (f.key.kind == KEY_GUFI)
+            .then(|| pos.get(f.key.gufi))
+            .flatten()
+            .copied()
+    };
+    let flights_m = last(fa)
+        .zip(last(fc))
+        .map(|(x, y)| distance_m((x.lat_e7, x.lon_e7), (y.lat_e7, y.lon_e7)));
+    let adsb = (q.lat_e7, q.lon_e7);
+    let to =
+        |f: &Flight| own_position(pos, f, t_ms).map(|p| distance_m((p.lat_e7, p.lon_e7), adsb));
+    let any =
+        |f: &Flight| last(f).map(|p| (t_ms - p.ts_ms, distance_m((p.lat_e7, p.lon_e7), adsb)));
+    Diag {
+        query,
+        class,
+        t_ms,
+        addr_key: fa.key,
+        cs_key: fc.key,
+        cs_checked,
+        cs_several,
+        flights_m,
+        adsb_to_addr_m: to(fa),
+        adsb_to_cs_m: to(fc),
+        addr_any: any(fa),
+        cs_any: any(fc),
+        addr_flying: flight_is_flying(fa),
+        same_operator: fa.callsign.get(..3) == fc.callsign.get(..3),
+        probed: false,
+        addr_ended_later: false,
+        cs_ended_later: false,
+        refile_near: false,
+    }
+}
+
+fn lookup(
+    t: &FlightTable,
+    pos: &Positions,
+    q: &Query,
+    query: usize,
+    pick_newest: bool,
+) -> (Answer, Option<Diag>) {
     let mut a = Answer::default();
     let mut chosen = None;
+    let mut addr_f = None;
     match flight_by_address(t, q.addr) {
         Some(f) if flight_is_live(&f) => {
             a.addr_flight = Some(f.key);
             a.key = Key::Address;
             chosen = Some(f);
+            addr_f = Some(f);
         }
         Some(_) => a.ended = true,
         None => {}
     }
+    let mut diag = None;
     if q.try_callsign {
-        let (r, f) = cs_join(t, pos, q);
+        let (r, f) = cs_join(t, pos, q, pick_newest);
         a.cs = r;
         a.cs_flight = f.map(|f| f.key);
-        if chosen.is_none() {
-            if let (CsResult::Accepted { checked }, Some(f)) = (r, f) {
-                a.key = if checked {
-                    Key::CallsignChecked
-                } else {
-                    Key::CallsignUnchecked
-                };
-                chosen = Some(f);
+        if let (CsResult::Accepted { checked, several }, Some(fc)) = (r, f) {
+            match addr_f {
+                None => {
+                    a.key = if checked {
+                        Key::CallsignChecked
+                    } else {
+                        Key::CallsignUnchecked
+                    };
+                    chosen = Some(fc);
+                }
+                Some(fa) if fa.key != fc.key => {
+                    diag = Some(diag_of(pos, q, query, (&fa, &fc), (checked, several)));
+                }
+                Some(_) => {}
             }
         }
     }
@@ -306,39 +466,61 @@ fn lookup(t: &FlightTable, pos: &Positions, q: &Query) -> Answer {
         a.assigned = f.assigned;
         a.interim = f.interim;
     }
-    a
+    (a, diag)
 }
 
-/// The answers to `queries`, in the order given. A query at time T is answered before the first
-/// operation that is available after T is applied, and sees the positions of the same moment: for
-/// the address join and the callsign join alike.
-pub fn answer_queries(s: &Sfdps, queries: &[Query]) -> Result<(Vec<Answer>, JoinStats), String> {
+/// The answers to `queries`, in the order given, and the disagreements between the two keys. A
+/// query at time T is answered before the first operation that is available after T is applied,
+/// and sees the positions of the same moment: for the address join and the callsign join alike.
+/// A disagreement is looked at again [`PROBE_MS`] later, which is for the report only and joins
+/// nothing.
+pub fn answer_queries(
+    s: &Sfdps,
+    queries: &[Query],
+) -> Result<(Vec<Answer>, Vec<Diag>, JoinStats), String> {
     let mut order: Vec<usize> = (0..queries.len()).collect();
     order.sort_by_key(|&k| queries.get(k).map_or(0, |q| q.t_ns));
     let mut answers = vec![Answer::default(); queries.len()];
+    let mut diags: Vec<Diag> = Vec::new();
+    let mut probes: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::new();
     let end_ns = queries.iter().map(|q| q.t_ns).max().unwrap_or(i64::MIN);
     let paths = recordings_in(&s.dir).map_err(|e| e.to_string())?;
     let cfg = ReplayConfig {
         flight: flight_config(s.lag_floor_ms),
         from_ns: i64::MIN,
-        to_ns: end_ns,
+        to_ns: end_ns.saturating_add((PROBE_MS + 60_000).saturating_mul(1_000_000)),
         sweep_every_ms: 60_000,
         retain_ms: 3_600_000,
         silence_ms: 6 * 3_600_000,
     };
     let mut next = 0usize;
-    let rep = replay_sfdps(paths, &cfg, &mut |t, pos, avail_ms| {
-        while let Some(&k) = order.get(next) {
-            let Some(q) = queries.get(k) else {
-                break;
-            };
-            if q.t_ns.div_euclid(1_000_000) >= avail_ms {
-                break;
+    let rep = replay_sfdps(paths, &cfg, &mut |t, pos, avail_ms| loop {
+        let q_ms = order
+            .get(next)
+            .and_then(|&k| queries.get(k))
+            .map(|q| q.t_ns.div_euclid(1_000_000));
+        let p_ms = probes.peek().map(|r| r.0 .0);
+        match (q_ms, p_ms) {
+            (Some(q), p) if q < avail_ms && p.is_none_or(|p| q <= p) => {
+                let k = order.get(next).copied().unwrap_or(0);
+                if let (Some(q), Some(slot)) = (queries.get(k), answers.get_mut(k)) {
+                    let (a, d) = lookup(t, pos, q, k, s.pick_newest);
+                    *slot = a;
+                    if let Some(d) = d {
+                        probes.push(Reverse((d.t_ms.saturating_add(PROBE_MS), diags.len())));
+                        diags.push(d);
+                    }
+                }
+                next += 1;
             }
-            if let Some(a) = answers.get_mut(k) {
-                *a = lookup(t, pos, q);
+            (_, Some(p)) if p < avail_ms => {
+                if let Some(Reverse((_, i))) = probes.pop() {
+                    if let Some(d) = diags.get_mut(i) {
+                        probe(t, pos, d);
+                    }
+                }
             }
-            next += 1;
+            _ => break,
         }
     })
     .map_err(|e| e.to_string())?;
@@ -352,7 +534,22 @@ pub fn answer_queries(s: &Sfdps, queries: &[Query]) -> Result<(Vec<Answer>, Join
         positions: rep.positions.len(),
         positions_refused: rep.positions.refused_full,
     };
-    Ok((answers, stats))
+    Ok((answers, diags, stats))
+}
+
+/// Looks at the two flights of a disagreement again, 30 min on.
+fn probe(t: &FlightTable, pos: &Positions, d: &mut Diag) {
+    let ended = |k: &FlightKey| flight_get(t, k).is_some_and(|f| !flight_is_flying(&f));
+    d.addr_ended_later = ended(&d.addr_key);
+    d.cs_ended_later = ended(&d.cs_key);
+    let near = |k: &FlightKey| {
+        (k.kind == KEY_GUFI)
+            .then(|| pos.refiled_at(k.gufi))
+            .flatten()
+            .is_some_and(|r| (r - d.t_ms).abs() <= PROBE_MS)
+    };
+    d.refile_near = near(&d.addr_key) || near(&d.cs_key);
+    d.probed = true;
 }
 
 /// The clearance a pair is judged on: `Some(feet)` for a simple altitude, else why not.
@@ -457,6 +654,7 @@ pub fn join_text(
     airports: &[Airport],
     volume_v_ft: f32,
     stats: &JoinStats,
+    diags: &[Diag],
     window: &str,
 ) -> String {
     let mut o = String::new();
@@ -550,6 +748,104 @@ pub fn join_text(
         }
     }
     o.push_str(&key_text(encounters, answers, airports, volume_v_ft));
+    o.push_str(&diag_text(encounters, diags, airports, volume_v_ft));
+    o
+}
+
+fn median(v: &mut [f64]) -> Option<f64> {
+    v.sort_by(|a, b| a.total_cmp(b));
+    v.get(v.len() / 2).copied()
+}
+
+/// The disagreements between the two keys, by kind. Counts and distances only.
+fn diag_text(
+    encounters: &[Encounter],
+    diags: &[Diag],
+    airports: &[Airport],
+    volume_v_ft: f32,
+) -> String {
+    let mut o = String::new();
+    let in_group = |d: &Diag| {
+        encounters
+            .get(d.query / 2)
+            .is_some_and(|e| is_near_climb(e, airports, volume_v_ft))
+    };
+    let km = |m: f64| m / 1852.0;
+    for (label, only_group) in [("group aircraft", true), ("every aircraft tried", false)] {
+        let sel: Vec<&Diag> = diags
+            .iter()
+            .filter(|d| !only_group || in_group(d))
+            .collect();
+        let _ = writeln!(o, "  disagreements, {label}: {}", sel.len());
+        for (k, name) in DIAG_NAMES.iter().enumerate() {
+            let of_class: Vec<&&Diag> = sel
+                .iter()
+                .filter(|d| {
+                    matches!(
+                        (k, d.class),
+                        (0, DiagClass::SameRoute)
+                            | (1, DiagClass::OtherRoute)
+                            | (2, DiagClass::OtherCallsign)
+                            | (3, DiagClass::Other)
+                    )
+                })
+                .collect();
+            let _ = write!(o, "    {name}: {}", of_class.len());
+            {
+                let ended = of_class
+                    .iter()
+                    .filter(|d| d.probed && (d.addr_ended_later || d.cs_ended_later))
+                    .count();
+                let refiled = of_class.iter().filter(|d| d.refile_near).count();
+                let either = of_class
+                    .iter()
+                    .filter(|d| {
+                        d.probed && (d.addr_ended_later || d.cs_ended_later || d.refile_near)
+                    })
+                    .count();
+                let mut dist: Vec<f64> = of_class.iter().filter_map(|d| d.flights_m).collect();
+                let n_dist = dist.len();
+                let within = dist.iter().filter(|m| **m <= POSITION_DIST_M).count();
+                let med = median(&mut dist)
+                    .map_or_else(|| "none".to_string(), |m| format!("{:.1} NM", km(m)));
+                let _ = write!(
+                    o,
+                    "; a plan ended or dropped within 30 min after: {ended}; refile conflict within 30 min: {refiled}; either: {either}; last positions of both flights known: {n_dist} (within 10 NM {within}, median {med})"
+                );
+            }
+            let _ = writeln!(o);
+        }
+        // The position check, over the disagreements the callsign join had checked.
+        let chk: Vec<&&Diag> = sel.iter().filter(|d| d.cs_checked).collect();
+        let mut to_cs: Vec<f64> = chk.iter().filter_map(|d| d.adsb_to_cs_m).collect();
+        let mut to_addr: Vec<f64> = chk.iter().filter_map(|d| d.adsb_to_addr_m).collect();
+        let addr_within = to_addr.iter().filter(|m| **m <= POSITION_DIST_M).count();
+        let (n_cs, n_addr) = (to_cs.len(), to_addr.len());
+        let m_cs =
+            median(&mut to_cs).map_or_else(|| "none".to_string(), |m| format!("{:.2} NM", km(m)));
+        let m_addr =
+            median(&mut to_addr).map_or_else(|| "none".to_string(), |m| format!("{:.2} NM", km(m)));
+        let any_addr: Vec<(i64, f64)> = sel.iter().filter_map(|d| d.addr_any).collect();
+        let mut age: Vec<f64> = any_addr.iter().map(|a| a.0 as f64 / 1000.0).collect();
+        let mut dist: Vec<f64> = any_addr.iter().map(|a| a.1).collect();
+        let within = dist.iter().filter(|m| **m <= POSITION_DIST_M).count();
+        let (n_any, m_age) = (age.len(), median(&mut age));
+        let m_dist =
+            median(&mut dist).map_or_else(|| "none".to_string(), |m| format!("{:.1} NM", km(m)));
+        let _ = writeln!(
+            o,
+            "    address flights with any SFDPS position: {n_any} of {} (age at the query: median {} s; distance from ADS-B: median {m_dist}, within 10 NM {within}); address flight flying (not dropped): {}; callsigns of one operator (same first three letters): {}",
+            sel.len(),
+            m_age.map_or_else(|| "none".to_string(), |a| format!("{a:.0}")),
+            sel.iter().filter(|d| d.addr_flying).count(),
+            sel.iter().filter(|d| d.same_operator).count()
+        );
+        let _ = writeln!(
+            o,
+            "    position-checked disagreements: {}; ADS-B to the callsign flight's position: median {m_cs} (of {n_cs}); to the address flight's: median {m_addr} (of {n_addr} with a position within 120 s, {addr_within} within 10 NM)",
+            chk.len()
+        );
+    }
     o
 }
 
@@ -618,7 +914,7 @@ fn key_text(
     );
     let mut per_key = [0u64; 4];
     let mut rejects = [0u64; 5];
-    let (mut aircraft, mut not_tried) = (0u64, 0u64);
+    let (mut aircraft, mut not_tried, mut several) = (0u64, 0u64, 0u64);
     let (mut addr_both, mut addr_one, mut addr_none) = (0u64, 0u64, 0u64);
     let (mut both, mut one, mut none) = (0u64, 0u64, 0u64);
     let mut weakest = [0u64; 3];
@@ -633,7 +929,7 @@ fn key_text(
             if x.cs == CsResult::NotTried {
                 continue;
             }
-            if let (Some(af), Some(cf), CsResult::Accepted { checked }) =
+            if let (Some(af), Some(cf), CsResult::Accepted { checked, .. }) =
                 (x.addr_flight, x.cs_flight, x.cs)
             {
                 for (c, on) in cross.iter_mut().zip([group, true]) {
@@ -655,6 +951,9 @@ fn key_text(
             }
             if x.cs == CsResult::NotTried {
                 not_tried += 1;
+            }
+            if x.addr_flight.is_none() && matches!(x.cs, CsResult::Accepted { several: true, .. }) {
+                several += 1;
             }
             if x.addr_flight.is_none() {
                 if let CsResult::Rejected(r) = x.cs {
@@ -695,6 +994,10 @@ fn key_text(
     for (name, c) in KEY_NAMES.iter().zip(per_key) {
         let _ = writeln!(o, "    {name}: {c}");
     }
+    let _ = writeln!(
+        o,
+        "  of the callsign joins, one aircraft with several plans (the newest taken): {several}"
+    );
     let _ = writeln!(
         o,
         "  callsign rejections, aircraft whose address named no live flight:"

@@ -453,8 +453,9 @@ pub fn run(args: &Args) -> Result<String, String> {
         let sf = Sfdps {
             dir: dir.clone(),
             lag_floor_ms,
+            pick_newest: args.pick_newest,
         };
-        let (answers, st) = answer_queries(&sf, &queries)?;
+        let (answers, diags, st) = answer_queries(&sf, &queries)?;
         let window = args.window.map_or_else(
             || "the whole clip".to_string(),
             |(f, t)| format!("Unix seconds {f} up to {t}"),
@@ -465,6 +466,7 @@ pub fn run(args: &Args) -> Result<String, String> {
             &airports,
             ecfg.volume_v_ft as f32,
             &st,
+            &diags,
             &window,
         );
     }

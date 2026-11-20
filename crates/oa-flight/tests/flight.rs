@@ -1470,21 +1470,69 @@ fn flights_flying_with_a_callsign_are_counted_without_the_ended_and_the_dropped(
         live(&mut t, gk(n));
         assert_eq!(apply(&mut t, &id(gk(n), "ABC1", 2_000)), Outcome::Applied);
     }
-    assert_eq!(flights_flying_by_callsign(&t, &code("ABC1")).0, 4);
-    assert_eq!(flights_flying_by_callsign(&t, &code("ZZZ9")).0, 0);
+    assert_eq!(flights_flying_by_callsign(&t, &code("ABC1")).count, 4);
+    assert_eq!(flights_flying_by_callsign(&t, &code("ZZZ9")).count, 0);
     assert_eq!(
-        flights_flying_by_callsign(&t, &[0; 8]).0,
+        flights_flying_by_callsign(&t, &[0; 8]).count,
         0,
         "no callsign names no flight"
     );
     apply(&mut t, &op(OP_COMPLETE, gk(1), ZAU, 3_000));
     apply(&mut t, &op(OP_DROP, gk(2), ZAU, 3_000));
-    let (n, first) = flights_flying_by_callsign(&t, &code("ABC1"));
-    assert_eq!(n, 2);
-    assert!(flight_is_flying(&first.unwrap()));
+    let r = flights_flying_by_callsign(&t, &code("ABC1"));
+    assert_eq!(r.count, 2);
+    assert!(flight_is_flying(&r.first.unwrap()));
     assert!(
         flight_is_live(&flight_get(&t, &gk(2)).unwrap()),
         "dropped is live but not flying"
     );
     assert!(!flight_is_flying(&flight_get(&t, &gk(2)).unwrap()));
+}
+
+// REQ: OA-FLT-030
+#[test]
+fn of_several_flying_flights_with_one_callsign_the_newest_plan_is_found_the_same_whatever_the_order(
+) {
+    let build = |order: &[u128]| {
+        let mut t = table();
+        for &n in order {
+            // Flight n is stamped n seconds after the start; all state one route.
+            let ts = (n as i64) * 1_000;
+            assert_eq!(
+                apply(&mut t, &set_plan(gk(n), ZAU, ts, ST_ACTIVE)),
+                Outcome::Applied
+            );
+            let mut id = op(OP_IDENTITY, gk(n), ZAU, ts);
+            id.callsign = code("ABC1");
+            id.dep = code("KAAA");
+            id.arr = code("KBBB");
+            assert_eq!(apply(&mut t, &id), Outcome::Applied);
+        }
+        t
+    };
+    for order in [[1u128, 2, 3], [3, 1, 2], [2, 3, 1]] {
+        let t = build(&order);
+        let r = flights_flying_by_callsign(&t, &code("ABC1"));
+        assert_eq!(r.count, 3);
+        assert!(r.same_route);
+        assert_eq!(r.newest.unwrap().key, gk(3), "the newest plan stamp");
+    }
+    // One flight with another arrival: the flights no longer share a route.
+    let mut t = build(&[1, 2]);
+    live(&mut t, gk(9));
+    let mut id = op(OP_IDENTITY, gk(9), ZAU, 9_000);
+    id.callsign = code("ABC1");
+    id.dep = code("KAAA");
+    id.arr = code("KCCC");
+    apply(&mut t, &id);
+    assert!(!flights_flying_by_callsign(&t, &code("ABC1")).same_route);
+    // A route that is not stated is not shared.
+    let mut t = table();
+    for n in 1..=2u128 {
+        live(&mut t, gk(n));
+        let mut id = op(OP_IDENTITY, gk(n), ZAU, 2_000);
+        id.callsign = code("XYZ9");
+        apply(&mut t, &id);
+    }
+    assert!(!flights_flying_by_callsign(&t, &code("XYZ9")).same_route);
 }

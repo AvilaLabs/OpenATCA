@@ -333,5 +333,46 @@ fn a_callsign_is_made_upper_case_and_trimmed_and_a_position_is_kept_as_it_ages_i
 }
 
 fn flight_by_callsign_via_table(rep: &oa_flight_sfdps::ReplayReport) -> usize {
-    oa_flight::flights_flying_by_callsign(&rep.table, b"ABC12\0\0\0").0
+    oa_flight::flights_flying_by_callsign(&rep.table, b"ABC12\0\0\0").count
+}
+
+// REQ: OA-FLT-031
+#[test]
+fn a_plan_filed_again_over_an_ended_one_is_remembered_with_its_time() {
+    let dir = temp_dir("refile");
+    let ts = parse_iso_ms(b"2030-01-02T03:04:05.000Z").unwrap();
+    let plan = |id: &str, status: &str| {
+        format!(r#"<flightStatus fdpsFlightStatus="{status}"/><flightPlan identifier="{id}"/>"#)
+    };
+    let mut bytes = Vec::new();
+    for (k, (t, status, id)) in [
+        ("03:04:05", "ACTIVE", "P1"),
+        ("03:04:06", "COMPLETED", "P1"),
+        ("03:04:07", "ACTIVE", "P2"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let x = doc(&msg(
+            "TH",
+            &format!("2030-01-02T{t}.000Z"),
+            &plan(id, status),
+        ));
+        bytes.extend(frame(k as u64 + 1, ts + 10_000 + k as i64 * 1_000, &x));
+    }
+    std::fs::write(dir.join("a.oaf"), bytes).unwrap();
+    let rep = replay_sfdps(
+        recordings_in(&dir).unwrap(),
+        &cfg(i64::MIN, i64::MAX),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(
+        rep.table.stats.conflicts[oa_flight::C_PLAN_REFILED as usize],
+        1
+    );
+    let g = 0x1111_1111_2222_3333_4444_5555_5555_5555u128;
+    assert_eq!(rep.positions.refiled_at(g), Some(ts + 2_000));
+    assert_eq!(rep.positions.refiled_at(g + 1), None);
+    let _ = std::fs::remove_dir_all(&dir);
 }

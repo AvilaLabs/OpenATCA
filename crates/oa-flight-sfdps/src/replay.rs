@@ -141,6 +141,10 @@ pub struct Position {
 #[derive(Clone, Debug, Default)]
 pub struct Positions {
     map: BTreeMap<u128, Position>,
+    /// The time of the latest listed refile conflict (a plan filed again over an ended one) of
+    /// each flight, by GUFI, bounded like the positions.
+    refiled: BTreeMap<u128, i64>,
+    pub refiled_refused: u64,
     capacity: usize,
     pub updated: u64,
     pub refused_full: u64,
@@ -158,6 +162,22 @@ impl Positions {
     /// The latest position the flight with this GUFI had made available.
     pub fn get(&self, gufi: u128) -> Option<&Position> {
         self.map.get(&gufi)
+    }
+
+    /// The stamped time of the latest refile conflict listed for the flight with this GUFI.
+    pub fn refiled_at(&self, gufi: u128) -> Option<i64> {
+        self.refiled.get(&gufi).copied()
+    }
+
+    fn note_refile(&mut self, gufi: u128, ts_ms: i64) {
+        let full = self.refiled.len() >= self.capacity;
+        match self.refiled.get_mut(&gufi) {
+            Some(h) => *h = (*h).max(ts_ms),
+            None if full => self.refiled_refused += 1,
+            None => {
+                self.refiled.insert(gufi, ts_ms);
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -296,7 +316,7 @@ pub fn replay_sfdps(
                 note_position(&events, row, avail, &mut positions);
             }
         }
-        drain_refusals(&mut table, &mut rep);
+        drain_refusals(&mut table, &mut rep, &mut positions);
         if table.clock_ms >= next_sweep {
             if next_sweep != i64::MIN {
                 let now = table.clock_ms;
@@ -313,7 +333,7 @@ pub fn replay_sfdps(
         Err(e) => return Err(e),
     }
     before_op(&table, &positions, i64::MAX);
-    drain_refusals(&mut table, &mut rep);
+    drain_refusals(&mut table, &mut rep, &mut positions);
     drain_removals(&mut table, &mut rep);
     for f in table
         .flights
@@ -435,11 +455,16 @@ fn count_row(rep: &mut ReplayReport, ev: &oa_fixm::Events, row: usize, seen_ms: 
     }
 }
 
-fn drain_refusals(t: &mut FlightTable, rep: &mut ReplayReport) {
+fn drain_refusals(t: &mut FlightTable, rep: &mut ReplayReport, positions: &mut Positions) {
     for r in &t.refusals {
         *rep.refusals.entry((r.op, r.reason, r.state)).or_default() += 1;
     }
     t.refusals.clear();
+    for c in &t.conflicts {
+        if c.kind == oa_flight::C_PLAN_REFILED && c.a.kind == oa_flight::KEY_GUFI {
+            positions.note_refile(c.a.gufi, c.ts_ms);
+        }
+    }
     t.conflicts.clear();
 }
 

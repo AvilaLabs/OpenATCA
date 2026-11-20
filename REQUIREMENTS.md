@@ -5591,6 +5591,14 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   and not older than 60 s.
 - **OA-FLT-029** The adapter makes a callsign upper case and trimmed, and the replay keeps the latest position of each flight,
   bounded, as of the time it ages in.
+- **OA-FLT-030** Where several flying flights state one callsign, all with the same departure and arrival, the callsign join may take
+  the one with the newest plan stamp (the later stamped time of any plan view, then the later message, then the larger GUFI), the
+  same one whatever the order the flights arrived in, and counts it as one aircraft with several plans; with another route among
+  them, or a route not stated, they stay rejected as several live flights.
+- **OA-FLT-031** The replay remembers the time of the latest refile conflict of each flight, bounded.
+- **OA-FLT-032** A disagreement between the address and the callsign is classed (same callsign and route, same callsign and another
+  route, different callsigns, other), the distances between the flights' positions and from the ADS-B position are kept, and
+  the two flights are looked at again 30 min later for whether either stopped flying; the second look joins nothing.
 - **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
   refuses a window that is open at one end or runs backwards.
 
