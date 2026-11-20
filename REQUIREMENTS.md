@@ -3839,11 +3839,20 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   with no measurements and the last, the measurements, the processing time and the confirmed and tentative
   track counts after the last update in the second (a second with no updates carries the previous counts;
   the tracker is not advanced to the second boundary, and the peaks are sampled once per second). It reports the time's p50, p99 and maximum over all those seconds
-  (an empty second counts as zero), the seconds that did not finish within the second and the longest queue
-  behind the traffic (an upper bound: a second's work starts when the second ends), the final advance and
-  flush apart, CPU and wall time of the update window and, read right after the final flush and before any
+  (an empty second counts as zero) and, labelled as such with their count, p50 and p99 over the seconds with
+  at least one measurement; the seconds that did not finish within the second and the longest backlog under
+  this queue model: each second's reports form one batch, available when the second ends, processed during
+  the next second, leftover work carried on (backlog = max(0, backlog + work - 1 s)), a second finishing late
+  when backlog is left, so a report waits at most 1 s plus the backlog ahead of its batch before processing
+  starts and a batch completes at most its own work later (latency at most 1 s + backlog + that second's work), an upper bound because real reports arrive spread through the second; the final advance and
+  flush apart (including the output spill with `--with-output`), CPU and wall time of the update window,
+  which also hold the per-second track-count scan and bookkeeping, next to the sum of the per-second timers
+  and the difference named as outside them (the sum is at most the window) and, read right after the final flush and before any
   digest, of the run from its start (ingest, set-up, updates, flush) against the traffic's span with the CPU
-  source named, every refusal and overflow counter, resident memory with the process peak
+  source named (and, when the `/proc/self/stat` fallback served any reading, how many and its assumed 100 Hz
+  tick rate), the conditions (input decoded and held in memory before timing, sorted by time, one thread:
+  the figures exclude network input, decoding and interrupts of a live feed; a second with no measurements
+  does no tick work, its tick rows are emitted with the next update and charged to that second), every refusal and overflow counter, resident memory with the process peak
   labelled, and the tracker table bytes. A run summary digest (the track log and the counters, taken after the
   timed window; `oa-track` has no tracker state hash) is always printed; `--with-output` also writes the output
   rows to column files and prints their digest. These digests are comparable only between realtime runs of the
@@ -5629,35 +5638,45 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 ## STDDS adsb-flag census (tools/oa-stdds-census)
 
 - **OA-CEN-001** The update interval of a TAIS track is the difference of consecutive `mrtTime` values of
-  one track (facility, `recSTARSSrcID`, `trackNum`), attributed to the `adsb` flag of the update that ends
+  one track segment (a run of one key, facility, `recSTARSSrcID` and `trackNum`, that no restart has cut; see OA-CEN-019;
+  a coasting, pseudo or frozen update takes part in the time state, so a coast keeps a segment alive across a gap, since
+  STARS kept the track), attributed to the `adsb` flag of the update that ends
   it, kept in 10 ms bins to 120 s; the census prints per flag the count, median, 10th and 90th percentile
   and a histogram in 0.5 s bins to 15 s with the count at 15 s and over.
-- **OA-CEN-002** Flag changes within a track are counted (total, tracks with one, tracks by number of
+- **OA-CEN-002** Flag changes within a track segment are counted (total, segments with one, segments by number of
   changes), and for each direction the interval across the change, the one before it and the one after it
   are distributions of their own; intervals across a change stay out of the per-flag distributions.
 - **OA-CEN-003** For the updates of each flag the census counts the share carrying a Mode S address, a
   Mode 3/A code, code 1200, a callsign, any flight plan field, address with code, and none of address,
-  code and callsign, plus the share with the pseudo, frozen and new flags; and the tracks whose adsb=false
+  code and callsign, plus the share with the new flag (the identity shares leave out pseudo, frozen and coasting updates,
+  OA-CEN-021); and the track segments whose adsb=false
   updates ever carried an address.
 - **OA-CEN-004** Every count and distribution is also kept per source facility (the message `src`); a
-  track number at two facilities, or under two `recSTARSSrcID`, is two tracks.
+  track number at two facilities, or under two `recSTARSSrcID`, is two tracks. A record with neither `src` nor
+  `recSTARSSrcID` is in a facility printed "facility unknown", not a merged all-zero source id; with no `src`, the
+  record's `recSTARSSrcID` names the facility.
 - **OA-CEN-005** An update with no `adsb` element is counted apart (never as false); updates with no
   `mrtTime`, with a time before the track's previous one, or with a gap over 120 s (a reset) are counted
   and make no interval; a record with no `trackNum` is counted and not tracked; a frame cut short or a
-  gzip file that ends inside a member (a recording still being written) is counted, never fatal.
+  gzip file that ends inside a member (a recording still being written) is counted, never fatal. A damaged gzip file
+  is counted and the run exits 3 after printing the report, as stalled bytes do.
 - **OA-CEN-006** WITHDRAWN: the address-based cross-check (replaced by OA-CEN-009 to OA-CEN-012; the gateless check by address of
   adsb=true updates in OA-CEN-010 is a different, later check, not this one: the
   address field reads zero on almost all adsb=false updates).
 - **OA-CEN-007** The output holds counts, shares and distributions only: no position, address, callsign,
   code, flight-plan content or individual time; the only text from the data is a source id of letters and
-  digits, and the only times are the start (rounded down) and end (rounded up) to the minute of the STDDS
+  digits, and the only times are the start (rounded down) and end (rounded up) to the second of the STDDS
   recording and of the ADS-B clip, which are the span of each recording and not the time of any aircraft. Every path (the directory, the ADS-B clip, each subdirectory before it is listed, each
   file before and after it is opened) goes through the shared guard (OA-SEAL-001), as given and with
   links resolved, and a sealed one is refused, naming the path (exit 2). A capture day directory is
   read from its `rec/stdds` folder and only files named `scds-stdds-*`; a day or `rec` directory with no
   `rec/stdds` is refused (exit 2).
-- **OA-CEN-008** Tracks are classed by the flags seen on them (fewer than two flagged updates, all
-  adsb=false, all adsb=true, mixed), with their update counts and per-flag interval distributions.
+- **OA-CEN-008** Track segments (not track numbers: STARS reuses them, so one key holds many aircraft) are classed by
+  the flags seen on them (fewer than two flagged updates, all adsb=false, all adsb=true, mixed), with their update
+  counts and per-flag interval distributions. Class, flag counts, changes, change bins, segments with adsb=false,
+  false address counts and the cross-check by class are all taken per segment; the report says "track segments".
+  A segment with no flagged update (only status updates, or only updates with no flag) is counted as "segments with no
+  flagged update" and is in no class; the class "one flagged update" holds segments with exactly one.
 - **OA-CEN-009** Position cross-check (with an ADS-B clip, read by the loader oa-encounter and oa-bench use):
   each tracked update with a flag, position and `mrtTime` is compared with every ADS-B aircraft interpolated
   linearly to `mrtTime` between the two reports around it (at most 5 s apart by default, 30 s at most; `--max-gap-s`; a
@@ -5665,7 +5684,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   vertical gate (both inclusive; defaults 0.5, 1 and 2 NM with 500 ft, 1 NM primary). Per flag and gate the
   update is counted no candidate, exactly one, or ambiguous; only exactly-one is used. A horizontal-only
   count is kept at the primary gate. Updates with no position or time, with no flag, or on a pseudo, frozen or
-  coasting track update are counted apart (a coasting position is dead-reckoned, not measured). A
+  coasting track update are counted apart (a coasting position is dead-reckoned, not measured), as are updates whose
+  `mrtTime` is outside the ADS-B clip's time span (OA-CEN-023). A
   gate above 10 NM, a gap above 30 s, or an unusable parameter is refused.
 - **OA-CEN-010** For exactly-one matches at the primary gate, per flag, the
   horizontal difference, the vertical difference, and the along-track and cross-track differences (STDDS
@@ -5674,8 +5694,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   matches are summarised over a wide range to expose an altitude unit error. adsb=true is labelled
   ADS-B-fused and not independent of the truth (STARS fuses ADS-B into those updates, so its difference
   measures STARS latency and filtering, not accuracy). The adsb=false results are headlined by track class,
-  and an adsb=false update on a mixed track is not ADS-B-free. Each matched cell prints the placebo-over-real
-  match ratio as the share of matches that may be chance. The ADS-B bracket width of the matches is counted
+  and an adsb=false update on a mixed track is not ADS-B-free. Each matched cell prints the placebo-to-real
+  match ratio, worded as a rough indication of unknown direction and not as an estimate of the chance share (OA-CEN-017). The ADS-B bracket width of the matches is counted
   (up to 2 s, 2 to 5, 5 to 10, over 10). A bias injected into synthetic STDDS updates shows in the
   matched distribution of adsb=false and not of adsb=true. adsb=true updates with a Mode S address are
   also checked by address, with no gate, and reported apart.
@@ -5702,13 +5722,21 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-CEN-015** Coverage is counted apart from no candidate: per flag, the share of checked updates with
   any indexed ADS-B aircraft within 30 NM at their time.
 - **OA-CEN-016** The cross-check counts reconcile exactly with the update counts per flag: updates equal
-  checked plus no position or time, above 85 degrees, no trackNum, pseudo, frozen or coasting update, and exact
-  duplicates of the track's previous update (time and position); updates with no flag equal the not-checked no-flag count.
+  checked plus no position or time, above 85 degrees, no trackNum, pseudo, frozen or coasting update, outside the
+  ADS-B clip's time span, and updates with the same time and position as the track's previous update (updates with
+  the same key, time, position and flags are dropped earlier, OA-CEN-022); updates with no flag equal the not-checked no-flag count.
+  The report also reconciles, with or without a clip, the input TAIS records read against the updates, the duplicates
+  dropped, the updates outside the window and the updates with no time outside the window; with a clip, per flag and
+  shift of the placebo, matched plus not matched plus outside the clip against checked. Each line says "reconciles" or
+  "DOES NOT RECONCILE".
 - **OA-CEN-017** A null control is run beside the real match: the same positions with the STDDS time
   shifted by plus and minus 60 s, printing per flag the outcome counts and the horizontal difference
   distribution of its exactly-one matches; the placebo exactly-one count (mean of the two shifts) over the
-  real one is printed as an estimate of the chance share. A placebo lookup at a window's edge finds its
-  shifted ADS-B.
+  real one is printed as a rough indication of unknown direction, not as an estimate of the chance share: the
+  placebo shares route structure with the real match (aircraft in trail about 60 s apart, slow or circling aircraft
+  matching themselves) and is not suppressed by the single-candidate rule the way a real chance match is. A placebo
+  lookup at a window's edge finds its shifted ADS-B; a lookup whose shifted time lies outside the clip's time span (no
+  window, or near the clip's edges) is counted as "placebo outside the clip", never as a non-match.
 - **OA-CEN-018** Per flag the census prints the matches without a vertical difference, the distinct matched
   ADS-B aircraft and the distinct STDDS track segments with a match, and the distribution over track
   segments of each segment's median difference (segments with 3 or more matches). A segment is a run of
@@ -5730,9 +5758,26 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   a clip of faster or sparser aircraft or a larger gate. (2) After it: the index's own estimate. (3) While
   reading: what the census holds (interval lists, cross-check records, segments, with 2x Vec slack) and the
   copies that `finish` makes of each match, address match, placebo value and segment (three accumulators:
-  all, class, facility). Not counted: the loaded clip columns, the read buffers, the quality-gate state
-  and the output. Updates left out by the time window are counted. A test sets the budget through
+  all, class, facility), the tracks map, the segments and the set of seen update fingerprints. The quality-state map
+  of the index build is counted, per distinct aircraft, in checks (1) and (2). Not counted: the loaded clip columns, the
+  read buffers and the output. The report and the refusal message call the figure an estimate, not a bound. Updates left out by the time window are counted. A test sets the budget through
   `OA_STDDS_CENSUS_BUDGET_BYTES`, which exists for tests only.
+- **OA-CEN-021** Updates flagged pseudo, frozen or coasting (each read only when present and true) are never counted
+  in the flag tallies, the track-segment class, the change counts or the interval census (the interval that starts at
+  one is not counted either); they remain in the update totals and have their own counts per kind and flag, so the
+  report shows how many coasts carried adsb=false and how many adsb=true. An all adsb=true segment with coasting
+  adsb=false updates stays "all adsb=true". The identity shares (address, callsign, code 1200), the adsb=false share of
+  flagged updates and the per-facility false share also leave out these updates, so they agree with the class lines;
+  the update totals still count them.
+- **OA-CEN-022** An update with the same facility, `recSTARSSrcID`, `trackNum`, `mrtTime`, position and flags as one
+  already seen, across files or within a file, is dropped before any count and counted as "duplicate updates dropped";
+  updates without a time or a track number are not checked for duplicates; the
+  consecutive-repeat rule of the position check (OA-CEN-016) stays. With `--from` and `--to`, an update with no
+  `mrtTime` is outside every window: it is excluded and counted as "no time, outside the window". `--from` and `--to`
+  take whole seconds; a fractional value, or one whose milliseconds do not fit an i64, is a usage error (exit 2).
+- **OA-CEN-023** An update whose `mrtTime` lies outside the ADS-B clip's time span is counted, per flag, as "outside the
+  ADS-B clip", never as no candidate or no ADS-B, and not checked; the run goes on. Exit 2 stays for no overlap at all.
+  The spans are printed to the second.
 
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
@@ -5768,3 +5813,54 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `scds`. A path through `..` or a link into day2 to day4 is refused, and so is a copy that keeps the components
   `scds/rec-20261119/day2` (or day3, day4, runs); a copy renamed outside those components is not caught by any path rule. Tests: `only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed` (Rust,
   `crates/oa-sealed/tests/guard.rs`; Python, `tools/test_sealed_guard.py`).
+
+## Scoring against STDDS terminal tracks (oa-stdds-ref)
+
+- **OA-SRF-001** A STDDS record is paired with the tracker and the ADS-B truth by its Mode S address
+  (`acAddress`, 24 bits) only; a record without an address is counted and never paired.
+- **OA-SRF-002** Every STDDS record has a class from its own flags, by one function, read as the census
+  reads them and only when a flag's bit is in `present` (an absent flag is never false): `track/pseudo`,
+  `track/frozen` or `track/coast` present and true is "pseudo, frozen or coasting"; otherwise `track/adsb`
+  present gives "adsb=false" or "adsb=true", and absent gives "adsb absent". The names state the flag value,
+  not a meaning: what `track/adsb` means is not confirmed (the census measures it).
+- **OA-SRF-003** Every metric, count and time-offset distribution is reported per class; no line or section
+  blends the classes, "pseudo, frozen or coasting" is never pooled with another, and a class's records are
+  fitted as tracks of their own.
+- **OA-SRF-004** Per class, three error sets are computed on the same paired samples: tracker minus STDDS,
+  ADS-B truth minus STDDS, tracker minus ADS-B truth (the second is the diagnostic for STDDS following ADS-B).
+- **OA-SRF-005** Per STDDS track the stamp offset is fitted against the ADS-B truth only, never the tracker,
+  over -15 s to +15 s in 0.1 s steps minimising along-track error, ties toward zero; every metric is reported
+  at offset 0 and at the fitted offset, and a track with no fit has no fitted samples.
+- **OA-SRF-006** The offset search is exact at its edges, flags an offset at either end of the range, and
+  refuses a fit with fewer than 8 samples that have a moving truth at every offset (OA-SRF-015 gives the
+  reason).
+- **OA-SRF-007** Tracker fixes are interpolated between rows at most 5 s apart; at a track end a fix is
+  extrapolated by the end row's velocity up to 1 s and counted, and refused beyond that.
+- **OA-SRF-008** Per set: horizontal error, along and cross track, altitude difference (feet) and velocity
+  difference (m/s), each with n, rms, mean, p50, p95 and p99; an absent value is no data, never 0.
+- **OA-SRF-009** The summary carries the SHA-256 of each input file and one digest over the summary and the
+  per-sample CSV; the CSV (record place, class, status, offset and errors) carries neither. Both outputs
+  are byte-identical for the same inputs given by the same paths.
+- **OA-SRF-010** The tool uses the shared guard (`oa-sealed`, OA-SEAL-001, OA-SEAL-002) and no guard of
+  its own: every path it is given (the STDDS files, the ADS-B clip, the output folder) is checked before
+  anything is read or created, and a sealed one (a sealed folder, a sealed ADS-B day, a link into sealed
+  data) exits 2 with a message that names the path.
+- **OA-SRF-013** Every file the tool reads is opened by check, open and verify-the-open through the shared
+  guard, so a link swapped between the check and the open is refused (exit 2, the path named). The tool
+  walks no directory.
+- **OA-SRF-014** The text and the per-sample CSV hold counts and aggregate statistics only: never a track
+  number, callsign, Mode S address, time or position of a record.
+- **OA-SRF-011** A `.oaf` or `.oaf.gz` recording is read into records with counts of frames, other products
+  and damage, and the SHA-256 of the file's stored bytes.
+- **OA-SRF-012** A record with no time or no position is counted as its own unpaired reason, never paired.
+- **OA-SRF-015** Tracks that are not fitted are reported per class by reason: no ADS-B truth over the
+  +-15 s window at enough samples (the track has at least 8 sample records), and fewer than 8 usable samples
+  (too few records, or a covered truth too slow to give a direction).
+- **OA-SRF-016** The tool creates `stdds_ref.txt` and `stdds_ref.csv` with create-new and never overwrites:
+  an existing output (or link) exits 1 with its path named, before any work; each output path is checked
+  through the shared guard before it is created, and one that leads into sealed data exits 2.
+- **OA-SRF-017** The report states the assumed units (STDDS altitude feet, velocity m/s east and north) and
+  which tracker altitude is compared, and prints per class the median STDDS altitude against the median
+  truth altitude and the median ratio of STDDS speed to truth speed on the paired samples, with "units
+  suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
+  ratio is outside 0.8 to 1.25.

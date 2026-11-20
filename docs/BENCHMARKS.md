@@ -93,7 +93,32 @@ since terminal airspace needs it and en route benefits from it.
 | Falsely confirmed tracks near true tracks (R20) | — / ≤2 per hour within 7 NM | — / **≤1 per hour within 9 NM**; our target zero on the recorded day | ERAM swaps (T9) | — |
 | Continuity (R21) | — / ≤2.5×10⁻⁵ critical failures per hour | **same** | — | — |
 | Spoof detection | — | — | unknown | ≥95% detection (NDSS 2021); false positives 0 to 1.06×10⁻³ (LoVe 2023) (S, abstracts) |
-| Capacity | — | — | ERAM: 1,900 tracks, 64 radars per centre (S) | ours: all 20 centres in real time on one machine |
+| Capacity | — | — | ERAM: 1,900 tracks, 64 radars per centre (S) | ours: all 20 centres in real time on one machine; measured 7,424 confirmed tracks at about 2 % of one core (below) |
+
+**National load, measured 20 November 2026** (`oa-track-run --realtime`, one thread, on the
+development laptop). Input: one hour of the whole contiguous US from adsb.lol, 17 November 2026
+21:00 to 22:00Z, the busiest hour of that day: 4,505,161 reports from 13,542 aircraft, of which
+4,007,539 passed the quality filter, 1,113 a second on average and 1,591 at most. At the busiest
+second the tracker held 7,424 confirmed and 1,436 tentative tracks, about four times ERAM's limit
+for one centre, with the whole country's ADS-B traffic in one process.
+
+| Measure | Rows discarded (2 runs) | Rows kept (2 runs) |
+|---|---|---|
+| Compute per second of traffic, p50 | 21.2 to 21.4 ms | 19.1 to 21.0 ms |
+| p99 | 24.3 to 24.9 ms | 32.5 to 38.4 ms |
+| Slowest second | 29 to 34 ms | 308 to 636 ms |
+| Share of one core, updates only | 2.09 % | 2.03 to 2.23 % |
+| Share of one core, with reading and decoding | 2.20 to 2.22 % | 2.43 to 2.66 % |
+| Seconds that took longer than a second | 0 | 0 |
+
+Tracker tables: 138.5 MiB for 65,536 track slots; process peak 0.69 GB, most of it the decoded
+clip. Run-to-run spread is small; the slowest seconds with rows kept come from writing about 30
+million output rows, not from tracking. The machine was not quiet (builds and an emulator were
+running), which raises the figures; a quiet re-run on the landed build is owed. The input was
+decoded, sorted and held in memory before timing, and processed on one thread: a live feed adds
+network input, decoding and interrupts, which these figures do not include. Each second's reports
+are timed as one batch processed after the second ends. The clip is
+ADS-B only: radar, which ERAM also tracks, is not in it.
 
 ESASSP notes: any flight failing R2, R4, R12 or R13 must be investigated (R22). Track initiation
 has no numeric requirement ("verified by design"). A valid sample is at least 36,000 measurement
