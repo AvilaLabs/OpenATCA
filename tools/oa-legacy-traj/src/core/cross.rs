@@ -168,9 +168,9 @@ pub fn approach(path: &[PathPoint], place: Place, cut_m: f64) -> Approach {
 }
 
 /// The passage the aircraft reached the point at for an estimate issued at `issue_ms`, scored at
-/// the cut `cfg.cut_m` from a search `a` made at the largest cut: the closest
-/// approach of the first passage that is not before the issue; when every passage is before it,
-/// the last one (the event happened before the message: the error is kept). The estimate never
+/// the cut `cfg.cut_m` from a search `a` made at the largest cut: of the passages not before the
+/// issue the one with the smallest closest approach (the earliest on a tie); when every passage is
+/// before it, the last one (the event happened before the message: the error is kept). The estimate never
 /// chooses. A passage that is in progress at the issue is chosen by its closest approach like any
 /// other.
 pub fn choose_passage(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<Passage, Exclusion> {
@@ -180,13 +180,17 @@ pub fn choose_passage(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<Passa
     if a.min_dist_m > cfg.cut_m {
         return Err(Exclusion::BeyondCut);
     }
-    // The passage is chosen among all of `a`'s, whatever `cfg.cut_m` is: searching `a` at the
-    // largest cut and scoring the one passage at each smaller cut makes the cuts nest.
-    let chosen = a
-        .passages
-        .iter()
-        .find(|p| p.t_ms >= issue_ms)
-        .or_else(|| a.passages.last());
+    // The passage is chosen among all of `a`'s, whatever `cfg.cut_m` is: among those not before the
+    // issue, the one with the smallest closest approach (the earliest on a tie), else the last
+    // one before it. Searching `a` at the largest cut and scoring the one passage at each smaller
+    // cut makes the cuts nest.
+    let mut best: Option<&Passage> = None;
+    for p in a.passages.iter().filter(|p| p.t_ms >= issue_ms) {
+        if best.is_none_or(|b| p.dist_m < b.dist_m) {
+            best = Some(p);
+        }
+    }
+    let chosen = best.or_else(|| a.passages.last());
     match chosen {
         None => Err(Exclusion::BeyondCut),
         Some(p) if p.dist_m > cfg.cut_m => Err(Exclusion::BeyondCut),

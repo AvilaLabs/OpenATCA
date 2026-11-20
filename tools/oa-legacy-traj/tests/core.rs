@@ -1022,7 +1022,7 @@ fn path_through(pts: &[(i64, f64, f64)]) -> Vec<PathPoint> {
 
 // REQ: OA-LTJ-048
 #[test]
-fn the_passage_is_chosen_once_and_every_cut_scores_that_passage_or_none() {
+fn the_closest_passage_is_chosen_once_and_every_cut_scores_that_passage_or_none() {
     // An early passage 4 NM away that starts the path (at an edge), then a later one 0.8 NM away.
     let p = path_through(&[
         (0, 4.0 * NM, 0.0),
@@ -1046,19 +1046,19 @@ fn the_passage_is_chosen_once_and_every_cut_scores_that_passage_or_none() {
             })
             .collect()
     };
-    // Issued at the start: the early passage is the one chosen at every cut, and it is scored at
-    // none: beyond the cut below 4 NM, at an edge above.
-    let early = at(0);
-    assert_eq!(early[0], Err(Exclusion::BeyondCut));
-    assert_eq!(early[2], Err(Exclusion::BeyondCut));
-    assert_eq!(early[3], Err(Exclusion::PassageAtEdge));
-    // Issued after it: the later passage, scored from the cut that holds its 0.8 NM, at the same time.
-    let late = at(100);
-    assert_eq!(late[0], Err(Exclusion::BeyondCut));
-    assert!(
-        late[1..].iter().all(|r| *r == late[1]) && late[1].is_ok(),
-        "{late:?}"
-    );
+    // The closest passage not before the issue is chosen: the 0.8 NM one, whether the issue is at
+    // the start or after the early one. From 1 NM up every cut scores it, at the same time; no cut
+    // scores the early one.
+    for issue in [0, 100] {
+        let r = at(issue);
+        assert_eq!(r[0], Err(Exclusion::BeyondCut), "issue {issue}");
+        assert!(
+            r[1..].iter().all(|x| *x == Ok(300_000)),
+            "issue {issue}: {r:?}"
+        );
+    }
+    // Issued after both passages in time (the later one at 300 s): the last passage before it.
+    assert_eq!(at(350)[3], Ok(300_000));
     // Nesting: a cut that scores scores at every larger cut, for every issue time.
     for issue in (0..=400).step_by(20) {
         let r = at(issue);
@@ -1066,4 +1066,40 @@ fn the_passage_is_chosen_once_and_every_cut_scores_that_passage_or_none() {
             assert!(w[0].is_err() || w[0] == w[1], "issue {issue}: {r:?}");
         }
     }
+}
+
+// REQ: OA-LTJ-048
+#[test]
+fn a_holding_pattern_gives_the_closest_of_its_passes() {
+    // Three passes of the fix, north, south, north, at 0.3, 0.1 and 0.4 NM, joined by legs far away.
+    let p = path_through(&[
+        (0, 556.0, -20_000.0),
+        (400, 556.0, 20_000.0),
+        (500, 40_000.0, 20_000.0),
+        (600, 40_000.0, -20_000.0),
+        (700, 185.0, -20_000.0),
+        (1100, 185.0, 20_000.0),
+        (1200, 40_000.0, 20_000.0),
+        (1300, 40_000.0, -20_000.0),
+        (1400, 741.0, -20_000.0),
+        (1800, 741.0, 20_000.0),
+        (1900, 741.0, 40_000.0),
+        (2000, 741.0, 60_000.0),
+    ]);
+    let widest = approach(&p, ORIGIN, 5.0 * NM);
+    assert_eq!(widest.passages.len(), 3);
+    for cut in [0.5, 1.0, 2.0, 5.0] {
+        let cfg = Config {
+            cut_m: cut * NM,
+            ..cfg()
+        };
+        let c = choose_passage(&widest, 0, &cfg).unwrap();
+        assert_eq!(c.t_ms, 900_000, "cut {cut}");
+        assert!((c.dist_m - 185.0).abs() < 2.0);
+    }
+    // Issued after the first two passes: the third is the only one left.
+    assert_eq!(
+        choose_passage(&widest, 1_000_000, &cfg()).unwrap().t_ms,
+        1_600_000
+    );
 }
