@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use oa_adsb::{decode_payload_lenient, reports_len, reports_row, Reports};
 use oa_bench::adsb_truth;
 use oa_bench::geo::{enu, heading_deg, wrap180, KT_MPS};
-use oa_bench::input::{for_each_adsb_frame, load_adsb};
+use oa_bench::input::{file_opener, for_each_adsb_frame, load_adsb_counted};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     interval_stats, scoring_config, split_reports, IntervalStats, DRAIN_ROWS, PER_FLIGHT_MIN_N,
@@ -147,6 +147,9 @@ fn receive_key(row: &oa_adsb::Row) -> ReceiveKey {
     )
 }
 
+/// The receive times of the frames that carry the selected addresses' rows. The map is only ever
+/// looked up by the keys of rows already read (and filtered of the sealed window) by the clip
+/// reader, so a row it holds that the reader dropped is never used.
 fn receive_times(
     path: &Path,
     selected: &BTreeSet<u32>,
@@ -414,6 +417,7 @@ pub(crate) const OUTPUT_HEADER: &str = "kind,t_ns,address_hex,lat_e7,lon_e7,vel_
 
 fn run(args: Args) -> Result<(), String> {
     if args.out.exists() {
+        // seal-allow: the output directory; only its emptiness is read
         let mut entries = fs::read_dir(&args.out).map_err(|e| e.to_string())?;
         if entries.next().is_some() {
             return Err(format!(
@@ -424,7 +428,13 @@ fn run(args: Args) -> Result<(), String> {
     } else {
         fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     }
-    let clip = load_adsb(&args.clip).map_err(|e| e.to_string())?;
+    // The clip's count, printed once when this function returns, an error included (receive_times
+    // reads the clip again and drops the same frames, which are not counted twice).
+    let mut drops = oa_sealed::DropReport::new();
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(&args.clip, &file_opener(), &mut clip_sealed);
+    drops.add(clip_sealed);
+    let clip = clip.map_err(|e| e.to_string())?;
     let full_reports = reports_len(&clip.reports);
     let clip_hash = clip.hash.sha256.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);

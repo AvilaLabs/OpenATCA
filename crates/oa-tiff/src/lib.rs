@@ -201,11 +201,17 @@ impl fmt::Display for TiffError {
 
 impl std::error::Error for TiffError {}
 
-/// Shell: reads a whole file into memory, refusing one over [`MAX_FILE_BYTES`].
+/// Shell: reads a whole file into memory, refusing one over [`MAX_FILE_BYTES`]. The file is opened
+/// through the sealed-data guard (OA-SEAL-013): a sealed path is refused as an I/O error.
 pub fn read_file(path: &Path) -> Result<Vec<u8>, TiffError> {
-    let meta = std::fs::metadata(path).map_err(|e| TiffError::Io(e.to_string()))?;
-    if meta.len() > MAX_FILE_BYTES {
-        return Err(TiffError::FileTooLarge(meta.len()));
+    use std::io::Read;
+    let io = |e: std::io::Error| TiffError::Io(e.to_string());
+    let mut f = oa_sealed::open(path).map_err(io)?;
+    let len = f.metadata().map_err(io)?.len();
+    if len > MAX_FILE_BYTES {
+        return Err(TiffError::FileTooLarge(len));
     }
-    std::fs::read(path).map_err(|e| TiffError::Io(e.to_string()))
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).map_err(io)?;
+    Ok(buf)
 }

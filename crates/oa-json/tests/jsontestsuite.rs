@@ -96,9 +96,11 @@ fn jsontestsuite_y_accepted_n_refused() {
     };
     let (mut y, mut n) = (0, 0);
     let mut bad = Vec::new();
-    for e in std::fs::read_dir(&dir).unwrap() {
-        let name = e.unwrap().file_name().into_string().unwrap();
-        let data = std::fs::read(dir.join(&name)).unwrap();
+    let walk = oa_sealed::walk_unsealed(&dir).unwrap();
+    eprintln!("sealed entries skipped: {}", walk.skipped);
+    for p in &walk.files {
+        let name = p.file_name().unwrap().to_str().unwrap().to_string();
+        let data = oa_sealed::read(p).unwrap();
         let ok = parse(&data, &DEFAULT_LIMITS).is_ok();
         if name.starts_with("y_") {
             y += 1;
@@ -124,16 +126,11 @@ fn jsontestsuite_i_cases_follow_the_documented_choices() {
         eprintln!("skip: OPENATCA_DATA/raw/jsontestsuite/test_parsing not present");
         return;
     };
-    let on_disk = std::fs::read_dir(&dir)
+    let on_disk = oa_sealed::walk_unsealed(&dir)
         .unwrap()
-        .filter(|e| {
-            e.as_ref()
-                .unwrap()
-                .file_name()
-                .to_str()
-                .unwrap()
-                .starts_with("i_")
-        })
+        .files
+        .iter()
+        .filter(|p| p.file_name().unwrap().to_str().unwrap().starts_with("i_"))
         .count();
     assert_eq!(
         on_disk,
@@ -141,7 +138,7 @@ fn jsontestsuite_i_cases_follow_the_documented_choices() {
         "every i_ case needs a documented choice"
     );
     for (name, want) in I_CASES {
-        let data = std::fs::read(dir.join(format!("{name}.json"))).unwrap();
+        let data = oa_sealed::read(dir.join(format!("{name}.json"))).unwrap();
         let got = match parse(&data, &DEFAULT_LIMITS) {
             Ok(doc) => {
                 let first = doc.elements(NodeIx::ROOT).next().unwrap();

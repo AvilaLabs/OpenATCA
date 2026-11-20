@@ -286,6 +286,8 @@ pub struct ClipInfo {
     pub offered: u64,
     /// Reports not offered (set B of the split, empty in `all` mode).
     pub not_offered: u64,
+    /// Clip rows left out because their time is in a sealed window (OA-SEAL-014).
+    pub sealed_window_dropped: u64,
     /// What the shared split code removed and kept.
     pub split: SplitStats,
     /// The ADS-B file, when one was asked for.
@@ -486,12 +488,14 @@ pub fn export_adsb_loaded(
     mode: InputsMode,
     rows: OpenatcaRows,
 ) -> Result<(TrackRunInfo, ClipInfo), ExportError> {
+    let sealed_window_dropped = clip.sealed_window_dropped;
     let positions = ref_points(&clip.reports);
     let (fed_set, other, split) = split_reports_with(&clip.reports, mode == InputsMode::Split);
     drop(clip);
     let mut info = ClipInfo {
         offered: oa_adsb::reports_len(&fed_set) as u64,
         not_offered: oa_adsb::reports_len(&other) as u64,
+        sealed_window_dropped,
         split,
         adsb: None,
         gate: oa_track::adsb::AdsbStats::default(),

@@ -285,6 +285,10 @@ pub struct Counts {
     pub th_adsb_hint: u64,
     /// Route points that are relative to a fix (radial and distance) rather than a fix itself.
     pub route_relative_points: u64,
+    /// Records left out because their own time (the message timestamp or position time of an
+    /// SFDPS row, the message time of a TBFM row or a TFMS flight) is in a sealed window
+    /// (OA-SEAL-014).
+    pub sealed_window_dropped: u64,
 }
 
 impl Counts {

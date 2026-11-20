@@ -27,6 +27,7 @@ use crate::scalar::{
     parse_lat_lon, parse_limit, parse_uint, parse_uuid, trim, EffEnd,
 };
 use crate::stats::{Stats, UnknownPath, MAX_PATH_TEXT};
+use oa_sealed::DropWindow;
 use oa_xml::{
     attr_needs_decode, decode_into, ns_uri_bytes, resolve_attr_ns, resolve_elem_ns, span_bytes,
     text_needs_decode, AttrIx, Doc, ElemIx, Ns, Parser, Span, SpanKind, TextIx,
@@ -43,14 +44,23 @@ pub struct Limits {
     pub max_text_len: usize,
     /// Most vertices (closing vertex included) in one polygon; more is a field error.
     pub max_poly_vertices: usize,
+    /// A NOTAM issued (`issued`) or cancelled (`canceled`) in this window is dropped whole before
+    /// any count is updated: no row, and no `docs`, `accepted`, `rows`, field, feature or unknown
+    /// count; it is counted in [`Stats::sealed_window_dropped`]. A document refused whole is
+    /// counted as refused (it has no known time). Its validity span is not a message time and is
+    /// not checked. Required: there is no `Default`, so a caller cannot forget it.
+    pub drop_window: DropWindow,
 }
 
-impl Default for Limits {
-    fn default() -> Limits {
+impl Limits {
+    /// The default bounds, dropping NOTAMs timed in `window`. A tool passes
+    /// [`DropWindow::sealed`]; tests and fuzz targets pass [`DropWindow::empty_for_tests_and_fuzz`].
+    pub const fn new(window: DropWindow) -> Limits {
         Limits {
             max_elements: 50_000,
             max_text_len: 8192,
             max_poly_vertices: 4096,
+            drop_window: window,
         }
     }
 }
@@ -65,6 +75,10 @@ pub struct Outcome {
     pub field_errors: u32,
     pub unknown_elements: u32,
     pub unknown_attributes: u32,
+    /// The document was dropped whole for the time of its NOTAM in [`Limits::drop_window`]: it
+    /// was not decoded, no row was appended (`row` is then 0 and names nothing) and no count but
+    /// `Stats::sealed_window_dropped` has it.
+    pub sealed_dropped: bool,
 }
 
 /// The namespaces of the surveyed feed, and the short alias a known path uses for each. The
@@ -736,6 +750,47 @@ fn count_reject(stats: &mut Stats, e: &DocError) {
     }
 }
 
+/// Fills the first-text-node index of the decoder for `doc` (see [`text`]).
+fn index_texts(dec: &mut Decoder, doc: &Doc<'_>) {
+    let n = doc.elem_name.len();
+    dec.elem_text.iter_mut().take(n).for_each(|t| *t = NO_TEXT);
+    for (t, owner) in doc.text_owner.iter().enumerate() {
+        if let Some(slot) = dec.elem_text.get_mut(owner.0 as usize) {
+            *slot = if *slot == NO_TEXT {
+                t as u32
+            } else {
+                MANY_TEXT
+            };
+        }
+    }
+}
+
+/// Reads the text of every `issued` and `canceled` element of the document with the decoder's
+/// own reader (`short`, the trimmed text, with the buffer and the `parse_iso_ms` of the field
+/// parsers), directly from the parsed tree and whatever else is valid in it. True if any is in the drop window.
+/// A time that cannot be read is not in the window (the frame's receive time gates it).
+fn prescan(dec: &mut Decoder, doc: &Doc<'_>) -> bool {
+    let window = dec.limits.drop_window;
+    if window.span().is_none() {
+        return false;
+    }
+    index_texts(dec, doc);
+    let mut b1 = [0u8; 64];
+    for i in 0..doc.elem_name.len() {
+        let name = doc.elem_name.get(i).copied().unwrap_or_default();
+        let name = name_bytes(doc.input, name);
+        if name != b"issued" && name != b"canceled" {
+            continue;
+        }
+        if let Raw::Val(v) = short(doc, &dec.elem_text, i, &mut b1) {
+            if parse_iso_ms(v).is_some_and(|t| window.contains(t)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Decodes one parsed document into `out`: appends one row, or on `Err` leaves `out` exactly
 /// as it was. Refusals, field errors and unknown paths are counted in `stats`.
 pub fn decode_doc(
@@ -744,6 +799,18 @@ pub fn decode_doc(
     out: &mut Notams,
     stats: &mut Stats,
 ) -> Result<Outcome, DocError> {
+    // The first step, before any count, row or table is touched: a NOTAM issued or cancelled in
+    // the sealed window is dropped whole.
+    if prescan(dec, doc) {
+        stats.sealed_window_dropped = stats.sealed_window_dropped.saturating_add(1);
+        return Ok(Outcome {
+            row: 0,
+            field_errors: 0,
+            unknown_elements: 0,
+            unknown_attributes: 0,
+            sealed_dropped: true,
+        });
+    }
     stats.docs = stats.docs.saturating_add(1);
     let start = mark(out);
     let r = decode_inner(dec, doc, out, stats, start);
@@ -810,16 +877,7 @@ fn decode_inner(
         return Err(DocError::Capacity(CapacityKind::Rows));
     }
     // First text node of each element, for value elements.
-    dec.elem_text.iter_mut().take(n).for_each(|t| *t = NO_TEXT);
-    for (t, owner) in doc.text_owner.iter().enumerate() {
-        if let Some(slot) = dec.elem_text.get_mut(owner.0 as usize) {
-            *slot = if *slot == NO_TEXT {
-                t as u32
-            } else {
-                MANY_TEXT
-            };
-        }
-    }
+    index_texts(dec, doc);
     let mut m = new_msg(start);
     let mut unknown_el = 0u32;
     let mut unknown_at = 0u32;
@@ -880,6 +938,7 @@ fn decode_inner(
         field_errors: out.errors.get(row as usize).map_or(0, |w| w.count_ones()),
         unknown_elements: unknown_el,
         unknown_attributes: unknown_at,
+        sealed_dropped: false,
     })
 }
 

@@ -10,6 +10,7 @@
 use std::process::Command;
 
 fn run(args: &[&str]) -> (Option<i32>, String, String) {
+    // seal-allow: runs the built binary of this package on the test's own temp files
     let out = Command::new(env!("CARGO_BIN_EXE_oa-wind-check"))
         .args(args)
         .output()

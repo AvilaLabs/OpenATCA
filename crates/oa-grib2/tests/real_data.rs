@@ -21,11 +21,12 @@ fn data_dir() -> Option<PathBuf> {
 }
 
 fn files_in(dir: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "grib2"))
+    // The files directly in `dir`; a sealed one is skipped, never opened (OA-SEAL-012).
+    let mut v: Vec<PathBuf> = match oa_sealed::walk_unsealed(dir) {
+        Ok(w) => w
+            .files
+            .into_iter()
+            .filter(|p| p.parent() == Some(dir) && p.extension().is_some_and(|e| e == "grib2"))
             .collect(),
         Err(_) => Vec::new(),
     };
@@ -65,7 +66,7 @@ fn real_rap_and_hrrr_inventory_matches_idx_and_grid() {
     let mut packings = std::collections::BTreeMap::<String, u32>::new();
     for sub in ["rap", "hrrr"] {
         for path in files_in(&dir.join("raw").join(sub)) {
-            let data = std::fs::read(&path).unwrap();
+            let data = oa_sealed::read(&path).unwrap();
             let ins = inspect_stream(&data);
             assert!(ins.stopped.is_none(), "{path:?}: {:?}", ins.stopped);
             assert!(ins.skipped.is_empty(), "{path:?}: {:?}", ins.skipped);
@@ -105,7 +106,7 @@ fn real_rap_and_hrrr_inventory_matches_idx_and_grid() {
             }
             // Message order matches the index: names and levels agree line by line.
             let idx_path = PathBuf::from(format!("{}.idx", path.display()));
-            let text = std::fs::read_to_string(&idx_path).unwrap();
+            let text = oa_sealed::read_to_string(&idx_path).unwrap();
             let want = idx_pairs(&text);
             let got: Vec<(String, String)> = ins
                 .fields
@@ -149,7 +150,7 @@ fn load_fields(dir: &Path) -> Vec<(String, Field)> {
     let mut out = Vec::new();
     for d in [dir.join("raw/rap"), dir.join("raw/hrrr")] {
         for path in files_in(&d) {
-            let data = std::fs::read(&path).unwrap();
+            let data = oa_sealed::read(&path).unwrap();
             let t0 = std::time::Instant::now();
             let dec = decode_stream(&data);
             if path.to_string_lossy().contains("/hrrr/") {
@@ -336,7 +337,7 @@ fn real_rap_and_hrrr_250mb_winds_agree() {
 
 fn read_test_file(dir: &Path, name: &str) -> Option<Vec<u8>> {
     let p = dir.join("raw/grib2-testdata").join(name);
-    match std::fs::read(&p) {
+    match oa_sealed::read(&p) {
         Ok(d) => Some(d),
         Err(_) => {
             println!("{p:?} absent: skipping");
@@ -484,11 +485,11 @@ fn rap_jpeg2000_integers_equal_the_openjpeg_repack_exactly() {
     for path in &raw {
         let name = path.file_name().unwrap();
         let rp_path = dir.join("derived/grib2-repack/rap").join(name);
-        let Ok(repacked) = std::fs::read(&rp_path) else {
+        let Ok(repacked) = oa_sealed::read(&rp_path) else {
             println!("{rp_path:?} absent: skipping this file");
             continue;
         };
-        let data = std::fs::read(path).unwrap();
+        let data = oa_sealed::read(path).unwrap();
         let (a, b) = (
             scan_messages(&data).unwrap(),
             scan_messages(&repacked).unwrap(),

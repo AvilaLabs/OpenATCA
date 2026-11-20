@@ -55,7 +55,7 @@ fn without_mono(recorded: &[u8]) -> Vec<u8> {
     out
 }
 
-// REQ: OA-FEED-023, OA-FEED-026
+// REQ: OA-FEED-023, OA-FEED-026, OA-SEAL-014
 #[test]
 fn stdin_mode_records_verbatim_and_replay_agrees() {
     let dir = std::env::temp_dir().join(format!("oa-feed-it-{}", std::process::id()));
@@ -99,6 +99,13 @@ fn stdin_mode_records_verbatim_and_replay_agrees() {
         .output()
         .unwrap();
     assert!(rep.status.success());
+    // The count line (frames), printed once.
+    let rerr = String::from_utf8_lossy(&rep.stderr);
+    assert_eq!(
+        rerr.matches("sealed-window rows dropped: 0").count(),
+        1,
+        "{rerr}"
+    );
     let text = String::from_utf8(rep.stdout).unwrap();
     assert!(text.starts_with("replay files=1 bytes="), "{text}");
     assert!(
@@ -224,4 +231,22 @@ fn stdin_mode_records_compressed_and_replay_matches_the_raw_recording() {
     assert!(text.contains("gzip truncated"), "{text}");
     assert!(text.contains("replay files=1 "), "{text}");
     std::fs::remove_dir_all(&base).unwrap();
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn replay_counts_bytes_after_the_window_gate() {
+    // 2026-11-19T23:45:00Z in Unix nanoseconds, the start of the sealed window (widened).
+    const FROM: i64 = 1_795_131_900_000_000_000;
+    let frame = |i: u64, t: i64| {
+        let mut buf = vec![0u8; HEADER_LEN + 1 + TRAILER_LEN];
+        let n = encode_frame(&mut buf, 1, 0, i, t, 0, b"x").unwrap();
+        buf[..n].to_vec()
+    };
+    let (a, b) = (frame(0, FROM - 1), frame(1, FROM));
+    let mut all = a.clone();
+    all.extend(&b);
+    let mut sealed = 0u64;
+    let rep = oa_feed::replay::replay_sources_counted(vec![&all[..]], &mut sealed).unwrap();
+    assert_eq!((sealed, rep.bytes), (1, a.len() as u64));
 }

@@ -7,9 +7,11 @@ use std::time::Instant;
 
 use oa_encounter_run::args::{parse, USAGE};
 use oa_encounter_run::guard::refuse_sealed;
-use oa_encounter_run::run::run;
+use oa_encounter_run::run::run_counted;
 
 fn main() -> ExitCode {
+    // Printed when `main` returns: on every exit, an error, `--hours` and a refusal included.
+    let mut drops = oa_sealed::DropReport::new();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse(&argv) {
         Ok(a) => a,
@@ -19,9 +21,14 @@ fn main() -> ExitCode {
         }
     };
     // Every path is checked, as given and resolved, before anything is opened or created.
-    for p in [Some(&args.adsb), Some(&args.out), args.nasr.as_ref()]
-        .into_iter()
-        .flatten()
+    for p in [
+        Some(&args.adsb),
+        Some(&args.out),
+        args.nasr.as_ref(),
+        args.sfdps.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
     {
         if let Err(e) = refuse_sealed(p) {
             eprintln!("oa-encounter: {e}");
@@ -29,7 +36,10 @@ fn main() -> ExitCode {
         }
     }
     let t0 = Instant::now();
-    match run(&args) {
+    let mut sealed = 0u64;
+    let result = run_counted(&args, &mut sealed);
+    drops.add(sealed);
+    match result {
         Ok(summary) => {
             print!("{summary}");
             eprintln!("run time {:.1} s", t0.elapsed().as_secs_f64());

@@ -517,6 +517,12 @@ pub fn decode_trace(
             local.outside_time += 1;
             continue;
         }
+        // A row in a sealed window is dropped and counted, never output (OA-SEAL-014).
+        if oa_sealed::in_sealed_window(time_ns) {
+            local.sealed_window_dropped += 1;
+            oa_sealed::note_window_drops(1);
+            continue;
+        }
         let mut row = ROW_EMPTY;
         row.time_ns = time_ns;
         row.icao = icao;

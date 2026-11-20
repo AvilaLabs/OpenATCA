@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use oa_feed::cli::{self, Command, Live, Source};
 use oa_feed::health::{observe_error, observe_frame, observe_skipped, FeedHealth};
 use oa_feed::record::{format_recording, utc_iso, Format, Outcome, Recorder};
-use oa_feed::replay::{replay_files, GzNoteKind};
+use oa_feed::replay::{replay_files_counted, GzNoteKind};
 use oa_feed::{
     encode_frame_mono, format_summary, frame_work_refusal_retryable, FrameReader, FrameWorkBudget,
     FrameWorkRefusal, MAX_FRAME_LEN,
@@ -67,7 +67,13 @@ fn now_ns() -> i64 {
 }
 
 fn replay(files: &[PathBuf]) -> ExitCode {
-    let rep = match replay_files(files) {
+    // Frames, not rows: a frame received in a sealed window is left out of the health record.
+    // Printed when this function returns, on every exit, an error included.
+    let mut drops = oa_sealed::DropReport::new();
+    let mut sealed = 0u64;
+    let replayed = replay_files_counted(files, &mut sealed);
+    drops.add(sealed);
+    let rep = match replayed {
         Ok(r) => r,
         Err(e) => {
             eprintln!("oa-feed: {e}");
@@ -118,6 +124,7 @@ fn spawn_bridge(env: &PathBuf, jar: &Option<PathBuf>, java: &Option<PathBuf>) ->
         std::env::var_os("OPENATCA_BRIDGE_JAR")
             .map_or_else(|| PathBuf::from(DEFAULT_JAR), PathBuf::from)
     });
+    // seal-allow: starts the bridge JVM; reads no data
     Proc::new(java)
         // Bounded heap: the bridge holds at most a few messages, not a backlog.
         .arg("-Xmx512m")
@@ -705,6 +712,7 @@ fn print_summary(feed: &str, h: &FeedHealth) {
 
 /// Asks the bridge JVM to exit (SIGTERM via `kill`), so it closes the broker session cleanly.
 fn terminate(c: &mut Child) {
+    // seal-allow: runs `kill` on the bridge JVM; reads no data
     let ok = Proc::new("kill")
         .arg("-TERM")
         .arg(c.id().to_string())

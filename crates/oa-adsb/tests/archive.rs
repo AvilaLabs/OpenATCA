@@ -240,11 +240,30 @@ fn split_archive_gives_the_same_result_and_first_part_alone_is_truncated() {
     assert!(matches!(r, Err(ScanError::Sink(ref s)) if s == "disk full"));
 }
 
+/// A path under the target temp directory, with nothing at it or at its `.source` (the clip tool
+/// never replaces an existing output).
 fn tmp(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
+    let p = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_file(&p);
+    let _ = std::fs::remove_file(format!("{}.source", p.display()));
+    p
+}
+
+/// Runs the clip tool; an existing output named by `--out` and its sidecar are removed first (the
+/// tool never replaces them).
+fn clip_cmd(exe: &str, args: &[&str]) -> std::process::Output {
+    if let Some(i) = args.iter().position(|a| *a == "--out") {
+        if let Some(o) = args.get(i + 1).filter(|o| **o != "-") {
+            let _ = std::fs::remove_file(o);
+            let _ = std::fs::remove_file(format!("{o}.source"));
+        }
+    }
+    // seal-allow: runs the built binary of this package on the test's own temp files
+    Command::new(exe).args(args).output().unwrap()
 }
 
 fn read_frames(path: &PathBuf) -> (Vec<u8>, Reports, usize) {
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let bytes = std::fs::read(path).unwrap();
     let mut buf = vec![0u8; MAX_FRAME_LEN];
     let mut rd = FrameReader::new(&mut buf).unwrap();
@@ -277,7 +296,7 @@ fn clip_binary_writes_time_sorted_oaf_frames_and_reports_truncation() {
     std::fs::write(&b, &d.tar[cut..]).unwrap();
     let out = tmp("clip.oaf");
     let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
-    let run = |args: &[&str]| Command::new(exe).args(args).output().unwrap();
+    let run = |args: &[&str]| clip_cmd(exe, args);
     let (sa, sb, so) = (
         a.to_str().unwrap(),
         b.to_str().unwrap(),
@@ -373,7 +392,7 @@ fn clip_frames_split_by_report_time_and_keep_every_report_once_in_order() {
         let mut a = vec!["--out", so];
         a.extend_from_slice(extra);
         a.push(&tar);
-        let o = Command::new(exe).args(&a).output().unwrap();
+        let o = clip_cmd(exe, &a);
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         read_frames(&out)
     };
@@ -427,7 +446,7 @@ fn clip_refuses_a_frame_span_outside_1_to_60000_ms() {
         a.extend_from_slice(bad);
         a.push(&tar);
         // `--frame-ms` last in the list takes the part as its value and then has no parts.
-        let o = Command::new(exe).args(&a).output().unwrap();
+        let o = clip_cmd(exe, &a);
         assert_eq!(o.status.code(), Some(2), "{bad:?}");
         assert!(
             String::from_utf8_lossy(&o.stderr).contains("usage"),
@@ -435,10 +454,7 @@ fn clip_refuses_a_frame_span_outside_1_to_60000_ms() {
         );
     }
     for ok in ["1", "60000"] {
-        let o = Command::new(exe)
-            .args(["--out", so, "--frame-ms", ok, &tar])
-            .output()
-            .unwrap();
+        let o = clip_cmd(exe, &["--out", so, "--frame-ms", ok, &tar]);
         assert!(o.status.success(), "{ok}");
     }
 }
@@ -451,17 +467,20 @@ fn real_day_archive_first_part() {
         return;
     };
     let dir = PathBuf::from(root).join("raw/adsblol");
-    let part = std::fs::read_dir(&dir).ok().and_then(|rd| {
-        let mut v: Vec<PathBuf> = rd
-            .filter_map(Result::ok)
-            .map(|e| e.path())
+    // Only unsealed days are considered: a sealed day directory or part is skipped and counted,
+    // never opened (OA-SEAL-012), and none left means the test skips.
+    let part = oa_sealed::walk_unsealed(&dir).ok().and_then(|w| {
+        eprintln!("sealed entries skipped: {}", w.skipped);
+        let mut v: Vec<PathBuf> = w
+            .files
+            .into_iter()
             .filter(|p| p.to_string_lossy().ends_with(".tar.aa"))
             .collect();
         v.sort();
         v.pop()
     });
     let Some(part) = part else {
-        eprintln!("skip: no *.tar.aa under {}", dir.display());
+        eprintln!("skip: no unsealed *.tar.aa under {}", dir.display());
         return;
     };
     // The whole 2 GB part takes minutes without optimisation; by default read a prefix.
@@ -471,7 +490,7 @@ fn real_day_archive_first_part() {
     } else {
         8 * 1024 * 1024
     };
-    let f = std::fs::File::open(&part).unwrap().take(limit);
+    let f = oa_sealed::open(&part).unwrap().take(limit);
     let mut all = Reports::default();
     let res = scan_archive(
         vec![std::io::BufReader::new(f)],
@@ -507,4 +526,203 @@ fn real_day_archive_first_part() {
     );
     // The scan ended because the cap or the part ended, never on a refusal.
     assert!(matches!(res.end, ScanEnd::Truncated(_) | ScanEnd::Complete));
+}
+
+/// A tar with one trace of `n` rows at one-second steps whose first row (offset 1000 s from the
+/// trace base) is at `first_unix_s`.
+fn trace_tar_at(name: &str, first_unix_s: i64, n: usize) -> String {
+    let mut t = Vec::new();
+    let rows = in_box(n, 41.0);
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let json = format!(
+        "{{\"icao\":\"aaaaaa\",\"timestamp\":{}.000,\"trace\":[{}]}}",
+        first_unix_s - 1000,
+        rows.join(",")
+    );
+    tar_entry(
+        &mut t,
+        "./traces/aa/trace_full_aaaaaa.json",
+        json.as_bytes(),
+    );
+    t.resize(t.len() + 2 * BLOCK, 0);
+    let p = tmp(name);
+    std::fs::write(&p, &t).unwrap();
+    p.to_str().unwrap().to_string()
+}
+
+// REQ: OA-SEAL-015
+#[test]
+fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwise() {
+    // The window starts at 2026-11-19T23:45:00Z = 1795131900 s.
+    const FROM: i64 = 1_795_131_900;
+    let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
+    let run = |args: &[&str]| clip_cmd(exe, args);
+    // Rows at from-1 s, from and from+1 s: refused, exit 2, nothing written, the count printed.
+    let tar = trace_tar_at("seal-edge.tar", FROM - 1, 3);
+    let out = tmp("seal-edge.oaf");
+    let side = tmp("seal-edge.oaf.source");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&side);
+    let o = run(&["--out", out.to_str().unwrap(), &tar]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(2), "{err}");
+    assert!(err.contains("sealed-window rows dropped: 2"), "{err}");
+    assert!(!out.exists() && !side.exists());
+    // With --to at the window start only the row at from-1 is clipped: it is kept, the rows at
+    // from and after are outside the time window, and the count is 0.
+    let o = run(&[
+        "--out",
+        out.to_str().unwrap(),
+        "--to",
+        &FROM.to_string(),
+        &tar,
+    ]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "{err}");
+    assert!(err.contains("sealed-window rows dropped: 0"), "{err}");
+    let (_, r, _) = read_frames(&out);
+    assert_eq!(r.time_ns, [(FROM - 1) * 1_000_000_000]);
+    // The sidecar names the input with its SHA-256, the window and the counts.
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    let text = std::fs::read_to_string(&side).unwrap();
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    let want = oa_sha256::to_hex(&oa_sha256::sha256(&std::fs::read(&tar).unwrap()));
+    assert!(
+        text.contains(&format!("input: {tar} sha256 {want}\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("window_to_unix_ns: {}\n", FROM * 1_000_000_000)),
+        "{text}"
+    );
+    assert!(text.contains("window_from_unix_ns: none\n"), "{text}");
+    for k in [
+        "rows_seen: 3",
+        "outside_time: 2",
+        "kept: 1",
+        "frames: 1",
+        "sealed-window rows dropped: 0",
+    ] {
+        assert!(text.contains(k), "{k} {text}");
+    }
+    // An existing output or sidecar is refused and left as it was.
+    // seal-allow: runs the built binary of this package on the test's own temp files
+    let o = Command::new(exe)
+        .args([
+            "--out",
+            out.to_str().unwrap(),
+            "--to",
+            &FROM.to_string(),
+            &tar,
+        ])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("exists"));
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), text);
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&side);
+    // A report at the window end (to = 2026-11-23T00:32:00Z = 1795393920 s) is not sealed.
+    let tar = trace_tar_at("seal-after.tar", 1_795_393_920, 1);
+    let o = run(&["--out", out.to_str().unwrap(), &tar]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // Standard output has no sidecar.
+    let o = run(&["--out", "-", &tar]);
+    assert!(o.status.success());
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_archive_reader_drops_and_counts_trace_rows_in_a_sealed_window() {
+    // The window starts at 2026-11-19T23:45:00Z = 1795131900 s; rows at from-1 s, from, from+1 s.
+    const FROM: i64 = 1_795_131_900;
+    let tar = trace_tar_at("seal-scan.tar", FROM - 1, 3);
+    let f = Filter {
+        from_ns: i64::MIN,
+        to_ns: i64::MAX,
+        ..ZAU_BOX
+    };
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    let (res, calls) = scan(vec![Cursor::new(std::fs::read(&tar).unwrap())], &f);
+    assert_eq!(res.stats.sealed_window_dropped, 2);
+    assert_eq!(res.stats.kept, 1);
+    assert_eq!(calls, [(0xaaaaaa, 1)]);
+}
+
+// REQ: OA-SEAL-015
+#[test]
+fn clip_creates_the_sidecar_and_the_clip_new_and_never_follows_or_replaces_a_name() {
+    const AFTER: i64 = 1_795_393_920;
+    let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
+    let tar = trace_tar_at("new-only.tar", AFTER, 1);
+    let go = |out: &PathBuf| {
+        // seal-allow: runs the built binary of this package on the test's own temp files
+        Command::new(exe)
+            .args(["--out", out.to_str().unwrap(), &tar])
+            .output()
+            .unwrap()
+    };
+    // Only the sidecar exists: refused, the clip is not created, the sidecar is as it was.
+    let out = tmp("new-only.oaf");
+    let side = PathBuf::from(format!("{}.source", out.display()));
+    std::fs::write(&side, "mine").unwrap();
+    let o = go(&out);
+    assert!(!o.status.success());
+    assert!(!out.exists());
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), "mine");
+    // Only the clip exists: refused, no sidecar is created, the clip is as it was.
+    let out = tmp("new-only2.oaf");
+    let side = PathBuf::from(format!("{}.source", out.display()));
+    std::fs::write(&out, "mine").unwrap();
+    let o = go(&out);
+    assert!(!o.status.success());
+    assert!(!side.exists());
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "mine");
+    // A dangling link in either place is refused and its target is not created.
+    for (n, link_side) in [("dangle-a.oaf", false), ("dangle-b.oaf", true)] {
+        let out = tmp(n);
+        let side = PathBuf::from(format!("{}.source", out.display()));
+        let target = tmp(&format!("{n}.target"));
+        std::os::unix::fs::symlink(&target, if link_side { &side } else { &out }).unwrap();
+        let o = go(&out);
+        assert!(!o.status.success(), "{n}");
+        assert!(!target.exists(), "{n}");
+        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_file(&side);
+    }
+    // A clean run creates both and the sidecar names the clip.
+    let out = tmp("new-ok.oaf");
+    let o = go(&out);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    let text = std::fs::read_to_string(format!("{}.source", out.display())).unwrap();
+    assert!(text.contains("oa-adsb-clip source"), "{text}");
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn clip_prints_the_drop_line_when_the_tar_layer_fails_after_rows_were_dropped() {
+    // Three rows from the window start (all in the window), then a header block that is not a tar
+    // header: the scan stops with a tar error, and the line still has the rows dropped before it.
+    const FROM: i64 = 1_795_131_900;
+    let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
+    let good = trace_tar_at("tar-fail.tar", FROM, 3);
+    // seal-allow: reads a tar the test wrote in its own temp directory
+    let mut bytes = std::fs::read(&good).unwrap();
+    bytes.truncate(bytes.len() - 2 * BLOCK);
+    bytes.extend(std::iter::repeat_n(b'x', BLOCK));
+    let bad = tmp("tar-fail-bad.tar");
+    std::fs::write(&bad, bytes).unwrap();
+    let out = tmp("tar-fail.oaf");
+    let o = clip_cmd(
+        exe,
+        &["--out", out.to_str().unwrap(), bad.to_str().unwrap()],
+    );
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(!o.status.success(), "{err}");
+    assert!(err.contains("sealed-window rows dropped: 3"), "{err}");
+    assert!(!out.exists());
 }

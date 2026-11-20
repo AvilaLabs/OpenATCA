@@ -8,7 +8,13 @@ permissions:
 jobs:
   kani:
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    # The enabled proofs add up to about 2 h 16 min on the development laptop, so the registry
+    # runs as two jobs of half of it each (every second enabled proof), well inside the limit.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ["0/2", "1/2"]
     steps:
       - uses: actions/checkout@v4
       - name: Install pinned product Rust compiler
@@ -33,6 +39,7 @@ jobs:
         run: >-
           python3 tools/rust_proof_suite.py
           --fail-fast
+          --shard "${{ matrix.shard }}"
           --repo "$GITHUB_WORKSPACE"
           --registry "$GITHUB_WORKSPACE/tools/rust_proofs.json"
           --out "$RUNNER_TEMP/kani-proof-evidence"
@@ -41,7 +48,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kani-proof-evidence
+          name: kani-proof-evidence-${{ strategy.job-index }}
           path: ${{ runner.temp }}/kani-proof-evidence/
           if-no-files-found: warn
           retention-days: 14

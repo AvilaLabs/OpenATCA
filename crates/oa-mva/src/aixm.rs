@@ -1196,6 +1196,7 @@ pub struct DirLoad {
 /// refused is reported in [`DirLoad::files`] and the rest still load.
 pub fn load_directory(dir: &Path) -> Result<DirLoad, MvaError> {
     oa_sealed::refuse_io(dir).map_err(|e| MvaError::Io(e.to_string()))?;
+    // seal-allow: the directory was refused by the guard above; each file is read through the guarded read_file
     let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| MvaError::Io(e.to_string()))?
         .filter_map(Result::ok)

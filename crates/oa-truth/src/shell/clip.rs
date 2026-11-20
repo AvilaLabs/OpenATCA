@@ -1,7 +1,7 @@
 //! Reads an OAF1 clip (docs/ADSB_PAYLOAD.md) into ADS-B reports, with caps. Shell (B7): owns the file.
 //! Shared by `oa-truth-check` and `oa-sensorsim`.
 
-use oa_adsb::{decode_payload_lenient, Reports};
+use oa_adsb::{decode_payload_lenient, reports_clear, reports_extend_unsealed, Reports};
 use oa_feed::{read_frames, Kind};
 
 /// The largest clip read, in bytes: ten times the 330 MB raw ZAU day (2026-11-14). A larger
@@ -61,10 +61,37 @@ fn claim_rows(rows: u64, claimed: u32, max_rows: u64) -> Result<u64, u64> {
 /// the number of frames that did not decode and the number of records dropped from frames that
 /// did (a bad record does not refuse its frame). A file over `max_bytes` is refused unread; a
 /// frame whose header takes the running row count over `max_rows` is refused before it is decoded.
+///
+/// Rows whose time is in a sealed window are dropped and counted (OA-SEAL-014); see
+/// [`read_clip_counted`] for the count.
 pub fn read_clip(
     path: &str,
     max_bytes: u64,
     max_rows: u64,
+) -> Result<(Reports, u64, u64), ClipError> {
+    read_clip_counted(path, max_bytes, max_rows).map(|(r, bad, dropped, _)| (r, bad, dropped))
+}
+
+/// [`read_clip`], also returning the number of rows dropped because their time is in a sealed
+/// window (the count is added to the process-wide one a tool prints as well).
+pub fn read_clip_counted(
+    path: &str,
+    max_bytes: u64,
+    max_rows: u64,
+) -> Result<(Reports, u64, u64, u64), ClipError> {
+    let mut sealed = 0u64;
+    let (out, bad, dropped) = read_clip_tallied(path, max_bytes, max_rows, &mut sealed)?;
+    Ok((out, bad, dropped, sealed))
+}
+
+/// [`read_clip_counted`], with the rows dropped in a sealed window put in `sealed` on every exit
+/// once the frames are read (a too-many-rows refusal included), so a caller can print the count
+/// whatever the result. Returns the reports, the frames refused and the records dropped.
+pub fn read_clip_tallied(
+    path: &str,
+    max_bytes: u64,
+    max_rows: u64,
+    sealed_out: &mut u64,
 ) -> Result<(Reports, u64, u64), ClipError> {
     let io = |e: std::io::Error| ClipError::Io(format!("{path}: {e}"));
     let mut f = oa_sealed::open(std::path::Path::new(path)).map_err(io)?;
@@ -76,8 +103,10 @@ pub fn read_clip(
         });
     }
     let mut out = Reports::default();
+    let mut frame = Reports::default();
     let mut undecodable = 0u64;
     let mut dropped = 0u64;
+    let mut sealed = 0u64;
     let mut rows = 0u64;
     let mut over: Option<u64> = None;
     let damaged = read_frames(&mut f, &mut |fr| {
@@ -96,13 +125,22 @@ pub fn read_clip(
                     return;
                 }
             }
-            match decode_payload_lenient(fr.payload, &mut out) {
-                Ok(c) => dropped += c.dropped as u64,
+            reports_clear(&mut frame);
+            match decode_payload_lenient(fr.payload, &mut frame) {
+                Ok(c) => {
+                    // A frame dropped whole for a row in a sealed window is in no other count.
+                    let gone = reports_extend_unsealed(&mut out, &frame);
+                    sealed += gone;
+                    if gone == 0 {
+                        dropped += c.dropped as u64;
+                    }
+                }
                 Err(_) => undecodable += 1,
             }
         }
-    })
-    .map_err(io)?;
+    });
+    *sealed_out = sealed;
+    let damaged = damaged.map_err(io)?;
     if let Some(rows) = over {
         return Err(ClipError::TooManyRows {
             rows,
@@ -135,6 +173,42 @@ mod tests {
         let p = std::env::temp_dir().join(format!("oa_clip_{}_{name}", std::process::id()));
         std::fs::write(&p, bytes).unwrap();
         p.to_str().unwrap().to_string()
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn rows_at_the_window_edges_are_kept_or_dropped_and_counted() {
+        use oa_adsb::{encode_payload, reports_push, ROW_EMPTY};
+        // The list's window: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes).
+        const FROM: i64 = 1_795_131_900_000_000_000;
+        const TO: i64 = 1_795_393_920_000_000_000;
+        let frame = |seq: u64, times: &[i64]| {
+            let mut r = Reports::default();
+            for (i, t) in times.iter().enumerate() {
+                let mut row = ROW_EMPTY;
+                row.icao = 0xA00000 + i as u32;
+                row.time_ns = *t;
+                row.lat_e7 = 410_000_000;
+                row.lon_e7 = -880_000_000;
+                reports_push(&mut r, &row);
+            }
+            let mut payload = Vec::new();
+            encode_payload(&mut payload, &r, 0, times.len()).unwrap();
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(&mut buf, 1, FLAG_BYTES, seq, FROM - 1, 0, &payload).unwrap();
+            buf[..n].to_vec()
+        };
+        // A frame with two rows in the window is dropped whole, with its four rows counted; a
+        // frame with every row outside it is kept.
+        let mut bytes = frame(0, &[FROM - 1, FROM, TO - 1, TO]);
+        bytes.extend(frame(1, &[FROM - 1, TO]));
+        let path = write("window.oaf", &bytes);
+        let (got, bad, dropped, sealed) = read_clip_counted(&path, 1 << 20, 1000).unwrap();
+        assert_eq!(got.time_ns, [FROM - 1, TO]);
+        assert_eq!((bad, dropped, sealed), (0, 0, 4));
+        // The plain reader drops the same frame.
+        let (got, _, _) = read_clip(&path, 1 << 20, 1000).unwrap();
+        assert_eq!(got.time_ns, [FROM - 1, TO]);
     }
 
     // REQ: OA-TRUTH-045

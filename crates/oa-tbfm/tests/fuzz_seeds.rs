@@ -14,7 +14,10 @@ use oa_xml::Parser;
 fn every_committed_seed_decodes_or_is_refused_as_named() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/seeds/tbfm");
     let mut parser = Parser::new(oa_tbfm::default_limits()).unwrap();
-    let mut rows = oa_tbfm::new_rows(oa_tbfm::DEFAULT_ROW_CAPACITY);
+    let mut rows = oa_tbfm::new_rows(
+        oa_tbfm::DEFAULT_ROW_CAPACITY,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let (mut accepted, mut refused) = (0, 0);
     let mut names: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -48,5 +51,5 @@ fn every_committed_seed_decodes_or_is_refused_as_named() {
         }
     }
     eprintln!("tbfm seeds: {accepted} accepted, {refused} refused");
-    assert_eq!((accepted, refused), (21, 14));
+    assert_eq!((accepted, refused), (32, 17));
 }

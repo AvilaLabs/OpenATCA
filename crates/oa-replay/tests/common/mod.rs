@@ -203,7 +203,9 @@ pub fn sf_doc(msgs: &[Sf]) -> String {
 pub fn events(xml: &str) -> Events {
     let mut parser = Parser::new(oa_xml::Limits::default()).unwrap();
     let doc = parser.parse(xml.as_bytes()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(512, 1 << 16);
     dec.decode(&doc, xml.as_bytes(), &mut ev).unwrap();
     ev
@@ -302,7 +304,7 @@ pub fn tb_doc(msg_ms: i64, centre: &str, airs: &[Tb]) -> String {
 /// Decodes a TBFM document into rows.
 pub fn rows(xml: &str) -> Rows {
     let mut parser = Parser::new(default_limits()).unwrap();
-    let mut r = new_rows(512);
+    let mut r = new_rows(512, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     decode_bytes(&mut parser, xml.as_bytes(), &mut r).unwrap();
     r
 }

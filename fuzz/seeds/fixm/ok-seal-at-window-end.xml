@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:ns2="http://www.fixm.aero/base/3.0" xmlns:ns3="http://www.fixm.aero/flight/3.0" xmlns:ns4="http://www.fixm.aero/foundation/3.0"><message xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2026-11-23T00:32:00Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi>
+<arrival xsi:type="ns5:NasArrivalType" arrivalPoint="KTST"><runwayPositionAndTime><runwayTime><estimated time="2030-01-02T05:00:00Z"/></runwayTime></runwayPositionAndTime></arrival>
+<controllingUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZXX" sectorIdentifier="08"/>
+<departure xsi:type="ns5:NasDepartureType" departurePoint="KDEP"><runwayPositionAndTime><runwayTime><actual time="2030-01-02T02:00:00Z"/></runwayTime></runwayPositionAndTime></departure>
+<enRoute xsi:type="ns5:NasEnRouteType">
+<boundaryCrossings xsi:type="ns5:NasUnitBoundaryType"><handoff xsi:type="ns5:NasHandoffType"><receivingUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZYY" sectorIdentifier="03"/></handoff></boundaryCrossings>
+<position xsi:type="ns5:NasAircraftPositionType" targetPositionTime="2030-01-02T03:04:00Z" positionTime="2030-01-02T03:04:00Z" reportSource="SURVEILLANCE">
+<actualSpeed><surveillance uom="KNOTS">412.5</surveillance></actualSpeed>
+<altitude uom="FEET">38000.0</altitude>
+<position xsi:type="ns2:LocationPointType"><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>32.6 -84.776389</pos></location></position>
+<targetAltitude uom="FEET">38000.0</targetAltitude>
+<trackVelocity><x uom="KNOTS">-190.0</x><y uom="KNOTS">366.0</y></trackVelocity>
+</position></enRoute>
+<flightIdentification xsi:type="ns5:NasFlightIdentificationType" computerId="104" siteSpecificPlanId="400" aircraftIdentification="TST123"/>
+<flightStatus xsi:type="ns5:NasFlightStatusType" fdpsFlightStatus="ACTIVE"/>
+<operator><operatingOrganization><organization name="TST"/></operatingOrganization></operator>
+<supplementalData xsi:type="ns5:NasSupplementalDataType"><additionalFlightInformation>
+<nameValue name="MSG_SEQ_NO" value="42141910"/><nameValue name="FLIGHT_PLAN_SEQ_NO" value="8"/>
+<nameValue name="FDPS_GUFI" value="made.up/1"/></additionalFlightInformation></supplementalData>
+<assignedAltitude><simple uom="FEET">36000.0</simple></assignedAltitude>
+<flightPlan identifier="KR000000AB"/></flight></message></ns5:MessageCollection>

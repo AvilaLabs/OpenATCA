@@ -10,8 +10,9 @@
 use oa_fixm::{
     clear_events, code_str, field_error, has_field, new_events, parse_iso_ms, parse_scaled,
     parse_uuid, route_text, sector_code, track_ddeg, unit_code, unknown_text, Decoder, Events,
-    Field, FixmError, Limits, Reject, Summary, ALL_FIELDS, FIELD_COUNT, FIELD_NAMES,
-    FLAG_ASSIGNED_VFR, FLAG_ASSIGNED_VFR_PLUS, FTYPE_SCHEDULED, REJECT_COUNT, REJECT_NAMES,
+    Field, FixmError, Limits, Reject, Summary, ALL_FIELDS, ALT_FORM_AT_FIX, ALT_FORM_BLOCK,
+    ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS, FIELD_COUNT, FIELD_NAMES, FLAG_ASSIGNED_VFR,
+    FLAG_ASSIGNED_VFR_PLUS, FLAG_INTERIM_NIL, FTYPE_SCHEDULED, REJECT_COUNT, REJECT_NAMES,
     STATUS_ACTIVE, STATUS_CANCELLED, STATUS_PROPOSED,
 };
 use oa_xml::{Limits as XmlLimits, Parser};
@@ -64,7 +65,12 @@ fn run_with(xml: &str, cap: usize, strings: usize, limits: Limits) -> (Run, Resu
 }
 
 fn run(xml: &str) -> Run {
-    let (r, res) = run_with(xml, 64, 1 << 16, Limits::default());
+    let (r, res) = run_with(
+        xml,
+        64,
+        1 << 16,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     res.expect("decodes");
     r
 }
@@ -250,7 +256,7 @@ fn amendment_ah_carries_route_and_vfr_plus_altitude() {
 // REQ: OA-FIXM-001
 #[test]
 fn handoff_oh_with_transferring_and_receiving_units() {
-    let body = r#"<enRoute xsi:type="ns5:NasEnRouteType"><boundaryCrossings xsi:type="ns5:NasUnitBoundaryType"><handoff xsi:type="ns5:NasHandoffType" event="PROPOSE">
+    let body = r#"<enRoute xsi:type="ns5:NasEnRouteType"><boundaryCrossings xsi:type="ns5:NasUnitBoundaryType"><handoff xsi:type="ns5:NasHandoffType" event="INITIATION">
 <receivingUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZYY" sectorIdentifier="1E"/>
 <transferringUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="???" sectorIdentifier="12"/>
 </handoff></boundaryCrossings></enRoute>"#;
@@ -260,6 +266,7 @@ fn handoff_oh_with_transferring_and_receiving_units() {
     assert_eq!(sector_code(&e.recv[0]), "1E");
     // The FAA writes an unknown unit as question marks; it is kept as stated.
     assert_eq!(unit_code(&e.xfer[0]), "???");
+    assert_eq!(e.handoff_event[0], oa_fixm::HANDOFF_INITIATION);
     assert_eq!(r.sum.unknown_attributes, 0);
 }
 
@@ -775,18 +782,30 @@ fn whole_message_rejection_is_counted_by_reason() {
 #[test]
 fn row_capacity_is_all_or_nothing_per_document() {
     let three = doc(&[message("TH", ""), message("TH", ""), message("TH", "")]);
-    let (r, res) = run_with(&three, 2, 1024, Limits::default());
+    let (r, res) = run_with(
+        &three,
+        2,
+        1024,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Err(FixmError::RowCapacity { capacity: 2 }));
     assert_eq!(r.ev.len, 0);
     assert!(r.ev.gufi.is_empty() && r.ev.present.is_empty());
-    let (r, res) = run_with(&three, 3, 1024, Limits::default());
+    let (r, res) = run_with(
+        &three,
+        3,
+        1024,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Ok(()));
     assert_eq!(r.ev.len, 3);
     assert_eq!(r.ev.capacity, 3);
 
     // Existing rows survive a refused document.
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(3, 1024);
     let one_doc = doc(&[message("TH", "")]);
     let d = parser.parse(one_doc.as_bytes()).unwrap();
@@ -811,11 +830,21 @@ fn string_table_capacity_rolls_the_whole_document_back() {
         message("FH", &route("ABCDEFGHIJ")),
         message("FH", &route("KLMNOPQRST")),
     ]);
-    let (r, res) = run_with(&two, 8, 15, Limits::default());
+    let (r, res) = run_with(
+        &two,
+        8,
+        15,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Err(FixmError::StringCapacity { capacity: 15 }));
     assert_eq!(r.ev.len, 0);
     assert_eq!(r.ev.strings_used, 0);
-    let (r, res) = run_with(&two, 8, 20, Limits::default());
+    let (r, res) = run_with(
+        &two,
+        8,
+        20,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Ok(()));
     assert_eq!(r.ev.strings_used, 20);
     assert_eq!(route_text(&r.ev, 0), "ABCDEFGHIJ");
@@ -830,7 +859,7 @@ fn route_text_is_bounded_and_entities_are_decoded() {
     let route = |t: &str| format!(r#"<agreed><route nasRouteText="{t}"/></agreed>"#);
     let limits = Limits {
         max_route_len: 8,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let (r, res) = run_with(&doc(&[message("FH", &route("12345678"))]), 4, 64, limits);
     res.unwrap();
@@ -907,7 +936,7 @@ fn unknown_path_table_is_bounded() {
     let body = r#"<a1/><a2/><a3/><a4/><a1/>"#;
     let limits = Limits {
         max_unknown_paths: 2,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let (r, res) = run_with(&doc(&[message("TH", body)]), 4, 64, limits);
     res.unwrap();
@@ -954,7 +983,9 @@ fn namespaced_and_foreign_elements_are_unknown_not_decoded() {
 #[test]
 fn documents_that_are_not_sfdps_message_collections_are_refused() {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(8, 64);
     for xml in [
         r#"<FDPSMsg xmlns="us:gov:dot:faa:atm:enroute:entities:flightdata"><center>ZXX</center></FDPSMsg>"#,
@@ -991,7 +1022,7 @@ fn element_limit_and_input_mismatch_are_errors() {
     let mut ev = new_events(4, 64);
     let mut dec = Decoder::new(Limits {
         max_elements: n - 1,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     assert_eq!(
         dec.decode(&d, xml.as_bytes(), &mut ev),
@@ -1002,7 +1033,7 @@ fn element_limit_and_input_mismatch_are_errors() {
     );
     let mut dec = Decoder::new(Limits {
         max_elements: n,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     assert!(dec.decode(&d, xml.as_bytes(), &mut ev).is_ok());
     let copy = xml.clone();
@@ -1066,7 +1097,7 @@ fn mutated_fixtures_never_panic() {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits {
         max_unknown_paths: 8,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut ev = new_events(4, 64);
     let mut docs = 0usize;
@@ -1140,7 +1171,9 @@ fn decoder_is_reusable_and_does_not_grow() {
     let big = doc(&[message("TH", TH_BODY), message("FH", TH_BODY)]);
     let small = doc(&[message("BA", "")]);
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(8, 4096);
     let caps = |e: &Events| {
         (
@@ -1203,7 +1236,7 @@ fn route_attribute_whitespace_is_normalised() {
         &doc(&[message("FH", &route("AA\tBB\r\nCC"))]),
         4,
         64,
-        Limits::default(),
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
     );
     res.unwrap();
     assert_eq!(route_text(&r.ev, 0), "AA BB CC");
@@ -1212,7 +1245,9 @@ fn route_attribute_whitespace_is_normalised() {
 fn decode_prefix_run(xml: &str, cap: usize) -> (Summary, usize) {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let d = parser.parse(xml.as_bytes()).expect("fixture parses");
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(cap, 1 << 16);
     let s = dec.decode_prefix(&d, xml.as_bytes(), &mut ev).unwrap();
     (s, ev.len)
@@ -1275,7 +1310,12 @@ fn foreign_siblings_do_not_count_as_messages() {
     let foreign = r#"<other xmlns="urn:other"><x/></other>"#.to_string();
     let xml = doc(&[message("TH", ""), foreign.clone()]);
     // Capacity for exactly one row: the foreign sibling needs none.
-    let (r, res) = run_with(&xml, 1, 1 << 16, Limits::default());
+    let (r, res) = run_with(
+        &xml,
+        1,
+        1 << 16,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     res.expect("one message fits one row");
     assert_eq!((r.sum.messages, r.sum.rows), (1, 1));
     // Prefix mode with no capacity: the one real message is undecoded, the sibling is not counted.
@@ -1284,4 +1324,477 @@ fn foreign_siblings_do_not_count_as_messages() {
     // Only foreign children: nothing to hold, nothing undecoded.
     let (s, _) = decode_prefix_run(&doc(&[foreign]), 0);
     assert_eq!(s.not_decoded, 0);
+}
+
+// REQ: OA-FIXM-022
+#[test]
+fn assigned_altitude_forms_are_states_not_numbers() {
+    let simple = one(
+        "TH",
+        r#"<assignedAltitude><simple uom="FEET">36000.0</simple></assignedAltitude>"#,
+    );
+    assert_eq!(simple.ev.assigned_form[0], ALT_FORM_SIMPLE);
+    assert_eq!(simple.ev.assigned_ft[0], 36_000);
+
+    let plus = one(
+        "TH",
+        r#"<assignedAltitude><vfrPlus uom="FEET">5500.0</vfrPlus></assignedAltitude>"#,
+    );
+    assert_eq!(plus.ev.assigned_form[0], ALT_FORM_VFR_PLUS);
+    assert_eq!(plus.ev.assigned_ft[0], 5500);
+
+    let vfr = one("TH", r#"<assignedAltitude><vfr/></assignedAltitude>"#);
+    assert_eq!(vfr.ev.assigned_form[0], ALT_FORM_VFR);
+    assert!(has_field(&vfr.ev, 0, Field::AssignedForm));
+    assert!(
+        !has_field(&vfr.ev, 0, Field::AssignedAlt),
+        "VFR is not a number"
+    );
+
+    let block = one(
+        "TH",
+        r#"<assignedAltitude><block><above uom="FEET">45000.0</above><below uom="FEET">47000.0</below></block></assignedAltitude>"#,
+    );
+    assert_eq!(block.ev.assigned_form[0], ALT_FORM_BLOCK);
+    assert_eq!(
+        (block.ev.block_above_ft[0], block.ev.block_below_ft[0]),
+        (45_000, 47_000)
+    );
+    assert!(!has_field(&block.ev, 0, Field::AssignedAlt));
+    assert_eq!(block.sum.unknown_elements, 0);
+    assert_eq!(block.sum.unknown_attributes, 0);
+
+    let fix = one(
+        "TH",
+        r#"<assignedAltitude><altFixAlt><point xsi:type="ns2:FixPointType" fix="ABCDE"/><post uom="FEET">7000.0</post><pre uom="FEET">22000.0</pre></altFixAlt></assignedAltitude>"#,
+    );
+    assert_eq!(fix.ev.assigned_form[0], ALT_FORM_AT_FIX);
+    assert_eq!(
+        (fix.ev.fixalt_pre_ft[0], fix.ev.fixalt_post_ft[0]),
+        (22_000, 7000)
+    );
+    assert_eq!(code_str(&fix.ev.fixalt_point[0]), "ABCDE");
+    assert_eq!(fix.sum.unknown_elements, 0);
+}
+
+// REQ: OA-FIXM-023
+#[test]
+fn a_bad_or_doubled_altitude_form_is_a_field_error() {
+    // Two forms of one altitude: the single one meant cannot be known.
+    let two = one(
+        "TH",
+        r#"<assignedAltitude><simple uom="FEET">100</simple><vfr/></assignedAltitude>"#,
+    );
+    err_field_n(&two, Field::AssignedForm);
+    // A block whose limits are the wrong way round, and one with a limit missing.
+    let swapped = one(
+        "TH",
+        r#"<assignedAltitude><block><above uom="FEET">47000.0</above><below uom="FEET">45000.0</below></block></assignedAltitude>"#,
+    );
+    err_field_n(&swapped, Field::AssignedForm);
+    let half = one(
+        "TH",
+        r#"<assignedAltitude><block><above uom="FEET">45000.0</above></block></assignedAltitude>"#,
+    );
+    err_field_n(&half, Field::AssignedForm);
+    // An altitude at a fix with no fix, and one with an unreadable value.
+    let nofix = one(
+        "TH",
+        r#"<assignedAltitude><altFixAlt><post uom="FEET">7000.0</post><pre uom="FEET">22000.0</pre></altFixAlt></assignedAltitude>"#,
+    );
+    err_field_n(&nofix, Field::AssignedForm);
+    let junk = one(
+        "TH",
+        r#"<assignedAltitude><altFixAlt><point fix="ABCDE"/><post uom="FEET">x</post><pre uom="FEET">22000.0</pre></altFixAlt></assignedAltitude>"#,
+    );
+    err_field_n(&junk, Field::AssignedForm);
+    // A simple altitude that does not parse has no form either.
+    let bad = one(
+        "TH",
+        r#"<assignedAltitude><simple uom="FEET">999999</simple></assignedAltitude>"#,
+    );
+    err_field_n(&bad, Field::AssignedForm);
+    err_field_n(&bad, Field::AssignedAlt);
+}
+
+fn err_field_n(r: &Run, f: Field) {
+    assert!(
+        field_error(&r.ev, 0, f),
+        "{} should be an error",
+        FIELD_NAMES[f as usize]
+    );
+    assert!(
+        !has_field(&r.ev, 0, f),
+        "{} should be absent",
+        FIELD_NAMES[f as usize]
+    );
+}
+
+// REQ: OA-FIXM-024
+#[test]
+fn interim_altitude_is_a_value_or_an_explicit_nil() {
+    let v = one(
+        "LH",
+        r#"<interimAltitude uom="FEET">23000.0</interimAltitude>"#,
+    );
+    assert!(has_field(&v.ev, 0, Field::InterimAlt));
+    assert_eq!(v.ev.interim_ft[0], 23_000);
+    assert_eq!(v.ev.flags[0] & FLAG_INTERIM_NIL, 0);
+    assert_eq!(v.sum.unknown_attributes, 0);
+
+    let nil = one("LH", r#"<interimAltitude uom="FEET" xsi:nil="true"/>"#);
+    assert!(has_field(&nil.ev, 0, Field::InterimAlt));
+    assert_ne!(nil.ev.flags[0] & FLAG_INTERIM_NIL, 0);
+    assert_eq!(nil.sum.unknown_attributes, 0);
+    assert_eq!(nil.sum.field_errors, 0);
+
+    // Not stated is not nil: nothing is present.
+    let none = one("TH", r#"<flightStatus fdpsFlightStatus="ACTIVE"/>"#);
+    assert!(!has_field(&none.ev, 0, Field::InterimAlt));
+    assert!(!field_error(&none.ev, 0, Field::InterimAlt));
+
+    // An empty element with no nil, a nil that is not a boolean, and a doubled element.
+    err_field_n(
+        &one("LH", r#"<interimAltitude uom="FEET"/>"#),
+        Field::InterimAlt,
+    );
+    err_field_n(
+        &one("LH", r#"<interimAltitude uom="FEET" xsi:nil="maybe"/>"#),
+        Field::InterimAlt,
+    );
+    err_field_n(
+        &one(
+            "LH",
+            r#"<interimAltitude uom="FEET">1000</interimAltitude><interimAltitude uom="FEET" xsi:nil="true"/>"#,
+        ),
+        Field::InterimAlt,
+    );
+}
+
+// REQ: OA-FIXM-025
+#[test]
+fn requested_altitude_forms() {
+    let s = one(
+        "FH",
+        r#"<requestedAltitude><simple uom="FEET">35000.0</simple></requestedAltitude>"#,
+    );
+    assert_eq!(s.ev.requested_form[0], ALT_FORM_SIMPLE);
+    assert_eq!(s.ev.requested_ft[0], 35_000);
+    let p = one(
+        "FH",
+        r#"<requestedAltitude><vfrPlus uom="FEET">5500.0</vfrPlus></requestedAltitude>"#,
+    );
+    assert_eq!(p.ev.requested_form[0], ALT_FORM_VFR_PLUS);
+    assert_eq!(p.ev.requested_ft[0], 5500);
+    let v = one("FH", r#"<requestedAltitude><vfr/></requestedAltitude>"#);
+    assert_eq!(v.ev.requested_form[0], ALT_FORM_VFR);
+    assert_eq!(v.sum.unknown_elements, 0, "the vfr form is a known path");
+    err_field_n(
+        &one(
+            "FH",
+            r#"<requestedAltitude><simple uom="FEET">100</simple><vfr/></requestedAltitude>"#,
+        ),
+        Field::RequestedForm,
+    );
+    err_field_n(
+        &one(
+            "FH",
+            r#"<requestedAltitude><simple uom="FEET">x</simple></requestedAltitude>"#,
+        ),
+        Field::RequestedForm,
+    );
+    // The requested altitude does not disturb the assigned one.
+    let both = one(
+        "FH",
+        r#"<assignedAltitude><simple uom="FEET">10000</simple></assignedAltitude><requestedAltitude><simple uom="FEET">35000.0</simple></requestedAltitude>"#,
+    );
+    assert_eq!(both.ev.assigned_ft[0], 10_000);
+    assert_eq!(both.ev.requested_ft[0], 35_000);
+}
+
+// REQ: OA-FIXM-026
+#[test]
+fn handoff_event_and_accepting_unit() {
+    let units = r#"<receivingUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZYY" sectorIdentifier="1E"/><transferringUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZXX" sectorIdentifier="12"/><acceptingUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZYY" sectorIdentifier="1E"/>"#;
+    for (name, code) in [
+        ("INITIATION", oa_fixm::HANDOFF_INITIATION),
+        ("ACCEPTANCE", oa_fixm::HANDOFF_ACCEPTANCE),
+        ("UPDATE", oa_fixm::HANDOFF_UPDATE),
+        ("RETRACTION", oa_fixm::HANDOFF_RETRACTION),
+        ("FAILURE", oa_fixm::HANDOFF_FAILURE),
+        ("TAKE_CONTROL", oa_fixm::HANDOFF_TAKE_CONTROL),
+    ] {
+        let body = format!(
+            r#"<enRoute><boundaryCrossings><handoff xsi:type="ns5:NasHandoffType" event="{name}">{units}</handoff></boundaryCrossings></enRoute>"#
+        );
+        let r = one("OH", &body);
+        assert_eq!(r.ev.handoff_event[0], code, "{name}");
+        assert_eq!(unit_code(&r.ev.acpt[0]), "ZYY");
+        assert_eq!(sector_code(&r.ev.acpt[0]), "1E");
+        assert_eq!(
+            r.sum.unknown_elements + r.sum.unknown_attributes,
+            0,
+            "{name}"
+        );
+    }
+    // A handoff with no event (the track-message form) has no event and no accepting unit.
+    let r = one(
+        "TH",
+        r#"<enRoute><boundaryCrossings><handoff><receivingUnit unitIdentifier="ZYY" sectorIdentifier="03"/></handoff></boundaryCrossings></enRoute>"#,
+    );
+    assert!(!has_field(&r.ev, 0, Field::HandoffEvent));
+    assert!(!field_error(&r.ev, 0, Field::HandoffEvent));
+    assert!(!has_field(&r.ev, 0, Field::HandoffAccepting));
+    assert!(has_field(&r.ev, 0, Field::HandoffReceiving));
+    // An event this decoder does not know is a field error, not a default.
+    let r = one(
+        "OH",
+        r#"<enRoute><boundaryCrossings><handoff event="OFFER"><receivingUnit unitIdentifier="ZYY"/></handoff></boundaryCrossings></enRoute>"#,
+    );
+    err_field_n(&r, Field::HandoffEvent);
+    assert!(
+        has_field(&r.ev, 0, Field::HandoffReceiving),
+        "the rest of the row is kept"
+    );
+}
+
+// REQ: OA-FIXM-027
+#[test]
+fn aircraft_address_is_six_hex_digits() {
+    let desc = |a: &str| {
+        format!(
+            r#"<aircraftDescription aircraftAddress="{a}" wakeTurbulence="MEDIUM"><aircraftType><icaoModelIdentifier>B738</icaoModelIdentifier></aircraftType></aircraftDescription>"#
+        )
+    };
+    let r = one("FH", &desc("A1B2C3"));
+    assert_eq!(r.ev.address[0], 0xA1_B2_C3);
+    let r = one("FH", &desc("a1b2c3"));
+    assert_eq!(r.ev.address[0], 0xA1_B2_C3);
+    let r = one("FH", &desc("000042"));
+    assert_eq!(r.ev.address[0], 0x42);
+    for bad in ["", "A1B2C", "A1B2C3D", "G1B2C3", "000000", "A1 2C3"] {
+        err_field_n(&one("FH", &desc(bad)), Field::AircraftAddress);
+    }
+    // No address attribute, no field and no error.
+    let r = one("FH", r#"<aircraftDescription wakeTurbulence="MEDIUM"/>"#);
+    assert!(!has_field(&r.ev, 0, Field::AircraftAddress));
+    assert!(!field_error(&r.ev, 0, Field::AircraftAddress));
+}
+
+/// 2026-11-20T00:00:00Z and 2026-11-23T00:17:00Z in Unix milliseconds: the sealed window.
+const DROP: (i64, i64) = (1_795_132_800_000, 1_795_393_020_000);
+
+fn at(ts: &str, body: &str) -> String {
+    message_with(
+        &format!(r#"centre="ZXX" source="TH" system="SLC" timestamp="{ts}""#),
+        &format!("{}{body}", gufi_el(GUFI)),
+    )
+}
+
+/// A decoder's stats as they are before it has seen anything, with the drop count set.
+fn untouched(limits: Limits, dropped: u64) -> oa_fixm::Stats {
+    let mut s = Decoder::new(limits).stats().clone();
+    s.sealed_window_dropped = dropped;
+    s
+}
+
+fn windowed() -> Limits {
+    Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1))
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_document_with_a_message_in_the_window_is_dropped_whole_and_every_counter_is_as_for_an_empty_run(
+) {
+    let unknown = r#"<flightStatus fdpsFlightStatus="ACTIVE" newAttr="x"/><newThing><inner/></newThing><supplementalData><additionalFlightInformation><nameValue name="BRAND_NEW" value="1"/></additionalFlightInformation></supplementalData>"#;
+    let in_pos =
+        format!(r#"{unknown}<enRoute><position positionTime="2026-11-22T00:00:00Z"/></enRoute>"#);
+    let nogufi = message_with(
+        r#"centre="ZXX" source="TH" system="SLC" timestamp="2026-11-21T00:00:00Z""#,
+        unknown,
+    );
+    // Kept messages around: one timed in the window by its timestamp, one by its position time,
+    // one refused (no GUFI) and in the window; the rest, with unknown paths, are outside it.
+    let all = doc(&[
+        at("2030-01-02T03:04:05Z", unknown),
+        at("2026-11-21T01:00:00Z", unknown),
+        at("2026-11-19T23:59:59Z", &in_pos),
+        nogufi,
+        at("2026-11-23T00:17:00Z", unknown),
+    ]);
+    let (r, res) = run_with(&all, 64, 1 << 16, windowed());
+    res.unwrap();
+    // Dropped whole: the count is the five messages of the document, and nothing else moved.
+    assert_eq!(
+        r.sum,
+        Summary {
+            sealed_window_dropped: 5,
+            ..Summary::default()
+        }
+    );
+    assert_eq!(r.dec.stats(), &untouched(windowed(), 5));
+    assert_eq!((r.ev.len, r.ev.strings_used), (0, 0));
+    // Without a message in the window the same kept messages are all decoded as usual.
+    let kept = doc(&[
+        at("2030-01-02T03:04:05Z", unknown),
+        at("2026-11-23T00:17:00Z", unknown),
+    ]);
+    let (r, res) = run_with(&kept, 64, 1 << 16, windowed());
+    res.unwrap();
+    assert_eq!(
+        (r.sum.sealed_window_dropped, r.sum.messages, r.ev.len),
+        (0, 2, 2)
+    );
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn an_in_window_message_after_a_full_table_or_a_prefix_cut_is_still_found() {
+    let m = |ts: &str| at(ts, "");
+    // Three messages, room for one row: a plain decode would be refused for capacity, and a
+    // prefix decode would stop at the second. The in-window third message is read first.
+    let xml = doc(&[
+        m("2030-01-02T03:04:05Z"),
+        m("2030-01-02T03:04:06Z"),
+        m("2026-11-21T00:00:00Z"),
+    ]);
+    for prefix in [false, true] {
+        let mut parser = Parser::new(XmlLimits::default()).unwrap();
+        let d = parser.parse(xml.as_bytes()).unwrap();
+        let mut dec = Decoder::new(windowed());
+        let mut ev = new_events(1, 1 << 12);
+        let r = if prefix {
+            dec.decode_prefix(&d, xml.as_bytes(), &mut ev)
+        } else {
+            dec.decode(&d, xml.as_bytes(), &mut ev)
+        };
+        assert_eq!(
+            r.unwrap(),
+            Summary {
+                sealed_window_dropped: 3,
+                ..Summary::default()
+            },
+            "prefix {prefix}"
+        );
+        assert_eq!(dec.stats(), &untouched(windowed(), 3));
+        assert_eq!(ev.len, 0);
+    }
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_message_with_an_invalid_field_before_its_time_is_still_dropped_with_its_document() {
+    // An invalid GUFI and a bad attribute come before the timestamp in document order.
+    let bad = message_with(
+        r#"centre="ZXX" source="TH" system="SLC" bogus="1" timestamp="2026-11-21T00:00:00Z""#,
+        "<gufi>not-a-uuid</gufi>",
+    );
+    let xml = doc(&[at("2030-01-02T03:04:05Z", "<x/>"), bad]);
+    let (r, res) = run_with(&xml, 64, 1 << 16, windowed());
+    res.unwrap();
+    assert_eq!(r.dec.stats(), &untouched(windowed(), 2));
+    assert_eq!(r.sum.sealed_window_dropped, 2);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_drops_the_window() {
+    let xml = doc(&[at("2030-01-02T03:04:05Z", "")]);
+    // All time (the closed failure of the list).
+    let all = Limits::new(oa_sealed::DropWindow::all_time());
+    let (r, res) = run_with(&xml, 64, 1 << 16, all);
+    res.unwrap();
+    assert_eq!(
+        r.sum,
+        Summary {
+            sealed_window_dropped: 1,
+            ..Summary::default()
+        }
+    );
+    assert_eq!(r.dec.stats(), &untouched(all, 1));
+    // The production list.
+    let prod = Limits::new(oa_sealed::DropWindow::sealed());
+    let (r, res) = run_with(&doc(&[at("2026-11-21T00:00:00Z", "")]), 64, 1 << 16, prod);
+    res.unwrap();
+    assert_eq!(r.sum.sealed_window_dropped, 1);
+    let (r, res) = run_with(&xml, 64, 1 << 16, prod);
+    res.unwrap();
+    assert_eq!((r.sum.sealed_window_dropped, r.ev.len), (0, 1));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn message_and_position_times_are_window_keys_in_any_encoding_and_event_times_are_not() {
+    let dropped = |xml: &str| {
+        let (r, res) = run_with(xml, 64, 1 << 16, windowed());
+        res.unwrap();
+        r.sum.sealed_window_dropped
+    };
+    // Entity-encoded (the final Z as a character reference), and padded with whitespace.
+    for ts in ["2026-11-21T00:00:00&#90;", " 2026-11-21T00:00:00Z "] {
+        let x = doc(&[at(ts, "")]);
+        // The decoder's own parser reads a padded value as no time and refuses the message; then
+        // there is no row to protect, and the document is kept as refused.
+        let n = dropped(&x);
+        let (r, res) = run_with(&x, 64, 1 << 16, windowed());
+        res.unwrap();
+        assert!(n == 1 || r.ev.len == 0, "{ts:?}");
+    }
+    assert_eq!(dropped(&doc(&[at("2026-11-21T00:00:00&#90;", "")])), 1);
+    // A repeated attribute is not well-formed XML: the document is refused, not read.
+    let dup = message_with(
+        r#"centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:05Z" timestamp="2026-11-21T00:00:00Z""#,
+        &gufi_el(GUFI),
+    );
+    let mut p = oa_xml::Parser::new(oa_xml::Limits::default()).unwrap();
+    assert!(p.parse(doc(&[dup]).as_bytes()).is_err());
+    // A position time in the window, the message time outside it.
+    let pos = at(
+        "2030-01-02T03:04:05Z",
+        r#"<enRoute><position positionTime="2026-11-21T00:00:00Z"/></enRoute>"#,
+    );
+    assert_eq!(dropped(&doc(&[pos])), 1);
+    // The actual departure is a key: a message stamped after the window can report it inside.
+    let dep = |ts: &str, actual: &str| {
+        at(
+            ts,
+            &format!(
+                r#"<departure xsi:type="ns5:NasDepartureType" departurePoint="KDEP"><runwayPositionAndTime><runwayTime><actual time="{actual}"/></runwayTime></runwayPositionAndTime></departure>"#
+            ),
+        )
+    };
+    assert_eq!(
+        dropped(&doc(&[dep("2026-11-23T01:00:00Z", "2026-11-22T23:00:00Z")])),
+        1
+    );
+    // Outside the window both, and an estimated arrival in the window (a reference time), are kept.
+    assert_eq!(
+        dropped(&doc(&[dep("2026-11-23T01:00:00Z", "2026-11-23T00:17:00Z")])),
+        0
+    );
+    let est = at(
+        "2026-11-23T01:00:00Z",
+        r#"<arrival xsi:type="ns5:NasArrivalType" arrivalPoint="KTST"><runwayPositionAndTime><runwayTime><estimated time="2026-11-22T23:00:00Z"/></runwayTime></runwayPositionAndTime></arrival>"#,
+    );
+    assert_eq!(dropped(&doc(&[est])), 0);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_count_of_a_dropped_document_is_its_messages_and_at_least_one() {
+    // A time key on an element that is not a message: the document has no message, and the
+    // count is still one.
+    let bare = r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0"><other timestamp="2026-11-21T00:00:00Z"/></ns5:MessageCollection>"#;
+    let (r, res) = run_with(bare, 64, 1 << 16, windowed());
+    res.unwrap();
+    assert_eq!(r.sum.sealed_window_dropped, 1);
+    // Three messages, one in the window: all three are counted.
+    let three = doc(&[
+        at("2030-01-02T03:04:05Z", ""),
+        at("2026-11-21T00:00:00Z", ""),
+        at("2030-01-02T03:04:07Z", ""),
+    ]);
+    let (r, res) = run_with(&three, 64, 1 << 16, windowed());
+    res.unwrap();
+    assert_eq!(r.sum.sealed_window_dropped, 3);
 }

@@ -90,6 +90,7 @@ pub struct Availability {
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     oa_sealed::refuse_io(dir)?;
+    // seal-allow: the directory was refused by the guard above; each entry is recursed through the same check
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .collect();

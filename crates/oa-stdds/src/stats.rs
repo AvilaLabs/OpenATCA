@@ -76,12 +76,15 @@ pub struct ShapeCount {
 
 /// Counts. Fields are public plain data; [`new_stats`] makes an empty one.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stats {
     /// Messages seen (parsed XML or not).
     pub messages: u64,
     /// Messages per [`Kind`].
     pub kinds: [u64; KIND_COUNT],
+    /// Records and reports dropped because their own time is in [`Limits::drop_window`]: not in
+    /// any other count.
+    pub sealed_window_dropped: u64,
     /// Messages refused whole, per [`StdError`] variant.
     pub errors: [u64; STD_ERROR_KINDS],
     /// TAIS records and SMES reports seen.
@@ -142,6 +145,7 @@ pub fn new_stats() -> Stats {
     Stats {
         messages: 0,
         kinds: [0; KIND_COUNT],
+        sealed_window_dropped: 0,
         errors: [0; STD_ERROR_KINDS],
         records: 0,
         records_with_errors: 0,

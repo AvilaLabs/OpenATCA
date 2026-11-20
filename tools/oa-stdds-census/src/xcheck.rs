@@ -350,6 +350,12 @@ impl Index {
         f64::from(lat_e7).abs() / E7 <= MAX_LAT_DEG
     }
 
+    /// Whether `t_ms` lies outside the time span of the clip (before its first or after its last
+    /// report); false when the clip has no span.
+    pub fn outside_clip(&self, t_ms: i64) -> bool {
+        self.clip.span_ms.is_some_and(|(a, b)| t_ms < a || t_ms > b)
+    }
+
     /// An estimate of the bytes the index holds.
     pub fn bytes(&self) -> u64 {
         self.bytes
@@ -532,6 +538,9 @@ pub fn build(r: &Reports, params: Params, window: Option<Window>) -> Result<Inde
         });
     }
     let mut idx = build_from_points(pts, params)?;
+    // The quality-state map is dropped after the loop; counted in the index's estimate as the
+    // peak it was, so the later checks see it.
+    idx.bytes += quality.len() as u64 * QUALITY_ENTRY_BYTES;
     idx.clip = stats;
     Ok(idx)
 }
@@ -642,6 +651,9 @@ pub const ORDER_BYTES_PER_REPORT: u64 = 16;
 /// seconds is a handful. A clip of faster or sparser aircraft, or a larger gate, can exceed it.
 pub const ASSUMED_ENTRIES_PER_REPORT: u64 = 8;
 pub const ASSUMED_CELLS_PER_REPORT: u64 = 2;
+/// ASSUMED bytes of one aircraft's entry in the quality-state map ([`build`]): the state and the
+/// map node's own overhead.
+pub const QUALITY_ENTRY_BYTES: u64 = std::mem::size_of::<QualityState>() as u64 + 48;
 /// Growth slack on a `Vec` or `HashMap` that is filled by pushes.
 pub const GROWTH_SLACK: u64 = 2;
 
@@ -649,7 +661,8 @@ pub const GROWTH_SLACK: u64 = 2;
 /// counts before anything is allocated: the sort order for every report, and for each report
 /// the window keeps (the padded window, if any) its point and its assumed share of the cell
 /// entries and cell map, each with [`GROWTH_SLACK`]. It is an estimate under the stated
-/// assumptions, not a bound. The clip's own columns, already loaded, are not counted.
+/// assumptions, not a bound. The clip's own columns, already loaded, are not counted. The
+/// quality-state map ([`build`]) is counted: one entry per distinct aircraft.
 pub fn estimate_build_bytes(r: &Reports, params: &Params, window: Option<Window>) -> u64 {
     let all = r.time_ns.len() as u64;
     let kept = r
@@ -663,8 +676,15 @@ pub fn estimate_build_bytes(r: &Reports, params: &Params, window: Option<Window>
         * (std::mem::size_of::<Pt>() as u64
             + ASSUMED_ENTRIES_PER_REPORT * std::mem::size_of::<u32>() as u64
             + ASSUMED_CELLS_PER_REPORT * 72);
+    let aircraft = r
+        .icao
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<u32>>()
+        .len() as u64;
     all.saturating_mul(ORDER_BYTES_PER_REPORT)
         .saturating_add(kept.saturating_mul(per_kept))
+        .saturating_add(aircraft.saturating_mul(QUALITY_ENTRY_BYTES))
 }
 
 /// The outcome of one gate: no candidate, exactly one, more than one.
@@ -1218,5 +1238,20 @@ pub(crate) mod tests {
         assert!(d
             .for_icao(4_000, 410_000_000, -750_000_000, None, 8)
             .is_none());
+    }
+
+    // REQ: OA-CEN-020
+    #[test]
+    fn the_estimate_counts_the_quality_state_map_per_aircraft() {
+        // The same number of reports from one aircraft and from many: the estimate differs by
+        // the map's entries.
+        let rows = |n_ac: u32| -> Vec<Row> {
+            (0..200)
+                .map(|s| row(s % n_ac + 1, s as i64, 40.0, -75.0 + s as f64 * 1e-3, 0))
+                .collect()
+        };
+        let one = estimate_build_bytes(&clip(&rows(1)), &Params::default(), None);
+        let many = estimate_build_bytes(&clip(&rows(100)), &Params::default(), None);
+        assert!(many >= one + 99 * QUALITY_ENTRY_BYTES, "{one} {many}");
     }
 }

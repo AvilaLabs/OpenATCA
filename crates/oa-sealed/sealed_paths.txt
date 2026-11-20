@@ -2,7 +2,8 @@
 # (tools/sealed_guard.py). A test checks that both parse this file to the same set.
 #
 # root  the data root; the production guard resolves every path against it.
-# seal  a path below the root, as components; a last component ending in `*` is a name prefix.
+# seal  a path below the root, as components; a last component `X*` is a name prefix and `*X*` matches
+#       any component at or below the directory part that contains `X`.
 #       The names are also matched anywhere in a path as consecutive components, so a copy of the
 #       data under another root is refused too.
 root /home/connoravila/Documents/Avila-Labs/openatca-data
@@ -13,9 +14,30 @@ seal scds/rec-20261119/day2*
 seal scds/rec-20261119/day3*
 seal scds/rec-20261119/day4*
 seal scds/rec-20261119/runs*
-seal scds/stdds-20261119-holdout
+seal scds/stdds-20261119-holdout*
 seal scds/stdds-smoke-20261119*
-# The ADS-B days of hold-out days A, B and C (20 to 22 November 2026).
-seal raw/adsblol/2026.11.20
-seal raw/adsblol/2026.11.21
-seal raw/adsblol/2026.11.22
+# day, dayscope, dayexempt: the three hold-out days 20 to 22 November 2026 (ADS-B days and hold-out
+#       days A to C). A path is sealed when a component below a dayscope directory names a sealed day:
+#       each component is normalised (every `.`, `-` and `_` deleted) and the compact day (`20261120`)
+#       is matched as a substring of it, so `2026.11.20`, `2026-11-20`, `2026_11_20` and `20261120`
+#       are one name; the consecutive components `2026`, `11`, `20` name it too. The match is on
+#       digits only, so a longer number holding the compact day (`120261120`, an epoch) is sealed
+#       too (it fails closed). Day-first dates, month names and ordinals are not matched, and a
+#       copy outside the data root that is not named like this relies on the window rule. A
+#       dayscope is matched as consecutive components anywhere in a path, so a copy of the data
+#       under another root is refused too. A dayexempt directory is left out: the weather inputs
+#       (raw/rap, raw/awc) are inputs, not scored data.
+day 2026-11-20
+day 2026-11-21
+day 2026-11-22
+dayscope raw
+dayscope scds
+dayscope derived
+dayexempt raw/rap
+dayexempt raw/awc
+# window  a half-open UTC span (from inclusive, to exclusive) in which every row or frame is
+#         sealed, whichever file holds it: the three ADS-B days and hold-out days A to C of the
+#         four-day recording (19 Nov 00:17Z, then 24 h each). Readers drop and count such rows.
+#         Both ends are widened by 15 minutes when the list is read (`WINDOW_MARGIN_NS`), so
+#         rows within 15 minutes of either edge are dropped too; the line below is the listed span.
+window 2026-11-20T00:00:00Z 2026-11-23T00:17:00Z

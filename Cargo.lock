@@ -9,6 +9,7 @@ dependencies = [
  "oa-feed",
  "oa-json",
  "oa-sealed",
+ "oa-sha256",
  "oa-tar",
  "oa-zip",
 ]
@@ -38,6 +39,7 @@ version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-json",
+ "oa-sealed",
 ]
 
 [[package]]
@@ -100,6 +102,7 @@ version = "0.0.1"
 name = "oa-deflate"
 version = "0.0.1"
 dependencies = [
+ "oa-sealed",
  "oa-zip",
 ]
 
@@ -120,6 +123,7 @@ dependencies = [
 name = "oa-dof"
 version = "0.0.1"
 dependencies = [
+ "oa-sealed",
  "oa-zip",
 ]
 
@@ -139,6 +143,10 @@ dependencies = [
  "oa-adsb",
  "oa-bench",
  "oa-encounter",
+ "oa-feed",
+ "oa-flight",
+ "oa-flight-sfdps",
+ "oa-math",
  "oa-nasr",
  "oa-sealed",
  "oa-sha256",
@@ -164,6 +172,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-flight"
+version = "0.0.1"
+
+[[package]]
+name = "oa-flight-sfdps"
+version = "0.0.1"
+dependencies = [
+ "oa-feed",
+ "oa-fixm",
+ "oa-flight",
+ "oa-replay",
+ "oa-sealed",
+ "oa-xml",
+]
+
+[[package]]
 name = "oa-geo"
 version = "0.0.1"
 dependencies = [
@@ -177,6 +201,7 @@ version = "0.0.1"
 dependencies = [
  "oa-j2k",
  "oa-math",
+ "oa-sealed",
 ]
 
 [[package]]
@@ -190,6 +215,9 @@ version = "0.0.1"
 [[package]]
 name = "oa-json"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+]
 
 [[package]]
 name = "oa-math"
@@ -219,6 +247,7 @@ name = "oa-nasr"
 version = "0.0.1"
 dependencies = [
  "oa-csv",
+ "oa-sealed",
 ]
 
 [[package]]
@@ -227,6 +256,7 @@ version = "0.0.1"
 dependencies = [
  "oa-airspace",
  "oa-geo",
+ "oa-sealed",
  "oa-xml",
 ]
 
@@ -308,6 +338,9 @@ dependencies = [
 [[package]]
 name = "oa-sha256"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+]
 
 [[package]]
 name = "oa-shadow"
@@ -315,6 +348,7 @@ version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-bench",
+ "oa-feed",
  "oa-math",
  "oa-replay",
  "oa-sealed",
@@ -349,6 +383,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-stdds-ref"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-feed",
+ "oa-geo",
+ "oa-sealed",
+ "oa-sha256",
+ "oa-stdds",
+ "oa-track",
+ "oa-truth",
+ "oa-xml",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-tar"
 version = "0.0.1"
 
@@ -357,6 +408,7 @@ name = "oa-tbfm"
 version = "0.0.1"
 dependencies = [
  "oa-airspace",
+ "oa-sealed",
  "oa-xml",
 ]
 
@@ -365,6 +417,7 @@ name = "oa-tfms"
 version = "0.0.1"
 dependencies = [
  "oa-fixm",
+ "oa-sealed",
  "oa-xml",
 ]
 
@@ -375,6 +428,7 @@ dependencies = [
  "oa-deflate",
  "oa-dof",
  "oa-nasr",
+ "oa-sealed",
  "oa-zip",
 ]
 
@@ -425,6 +479,9 @@ dependencies = [
 [[package]]
 name = "oa-xml"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+]
 
 [[package]]
 name = "oa-zip"

@@ -451,3 +451,57 @@ pub(crate) fn note_unknown(sink: &mut Sink<'_>, path: &[&[u8]]) {
 pub(crate) fn elem_offset(doc: &Doc<'_>, e: ElemIx) -> u32 {
     offset_of(doc, e)
 }
+
+/// The elements reached from `base` by the child names `path`, in document order.
+fn reach(doc: &Doc<'_>, base: ElemIx, path: &[&[u8]], out: &mut Vec<ElemIx>) {
+    let Some((first, rest)) = path.split_first() else {
+        out.push(base);
+        return;
+    };
+    for c in crate::kind::children(doc, base) {
+        if name_of(doc, c) == *first {
+            reach(doc, c, rest, out);
+        }
+    }
+}
+
+/// The first step of a message decode, before any count, table or record is touched: reads the
+/// observation times of every record (`record` below the root, each time at one of `time_paths`) directly from the
+/// parsed tree, whatever else in the message is valid. If any is in `window`, returns how many
+/// records the message has (all are dropped, at least 1); otherwise 0. A time that cannot be
+/// read is not in the window (the frame's receive time gates it). No record limit applies to
+/// this scan, so a record in the window past `max_records` is still found.
+pub(crate) fn prescan(
+    doc: &Doc<'_>,
+    tx: &TextIndex,
+    window: oa_sealed::DropWindow,
+    record: &[u8],
+    time_paths: &[&[&[u8]]],
+) -> u64 {
+    if window.span().is_none() {
+        return 0;
+    }
+    let (mut records, mut hit) = (0u64, false);
+    let mut found = Vec::new();
+    for c in crate::kind::children(doc, ElemIx(0)) {
+        if name_of(doc, c) != record || !in_message_ns(doc, c) {
+            continue;
+        }
+        records += 1;
+        found.clear();
+        for path in time_paths {
+            reach(doc, c, path, &mut found);
+        }
+        for e in &found {
+            let mut buf = [0u8; VALUE_BUF];
+            if let Ok(t) = leaf_text(doc, tx, *e, &mut buf) {
+                hit |= parse_iso_ms(t).is_some_and(|t| window.contains(t));
+            }
+        }
+    }
+    if hit {
+        records.max(1)
+    } else {
+        0
+    }
+}

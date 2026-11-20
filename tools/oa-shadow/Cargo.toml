@@ -20,6 +20,10 @@ oa-sha256 = { path = "../../crates/oa-sha256" }
 oa-track = { path = "../../crates/oa-track" }
 oa-truth = { path = "../../crates/oa-truth" }
 
+[dev-dependencies]
+# Workspace crate, not an outside dependency (RULESET F1): frames the recordings the sealed-window test writes.
+oa-feed = { path = "../../crates/oa-feed" }
+
 [[bin]]
 name = "oa-shadow"
 path = "src/main.rs"

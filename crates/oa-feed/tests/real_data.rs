@@ -19,7 +19,7 @@ use oa_feed::{format_summary, FrameReader, MAX_FRAME_LEN};
 
 /// Writes every frame of `src` to `dir` through a [`Recorder`]; returns the files made.
 fn convert(src: &Path, dir: &Path, feed: &str) -> Vec<PathBuf> {
-    let data = std::fs::read(src).unwrap();
+    let data = oa_sealed::read(src).unwrap();
     let mut rec = Recorder::open(dir, feed, 256 << 20, u64::MAX, Format::Gzip).unwrap();
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
     let mut reader = FrameReader::new(&mut storage).unwrap();
@@ -36,6 +36,7 @@ fn convert(src: &Path, dir: &Path, feed: &str) -> Vec<PathBuf> {
         assert!(took > 0);
     }
     rec.finish().unwrap();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -51,12 +52,16 @@ fn real_recordings_compress_and_replay_identically() {
         eprintln!("OPENATCA_SCDS_REC is not set: skipping the real recordings test");
         return;
     };
-    let mut recs: Vec<PathBuf> = std::fs::read_dir(&root)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|x| x == "oaf"))
+    // Sealed entries are skipped and counted, never opened (OA-SEAL-012).
+    let walk = oa_sealed::walk_unsealed(Path::new(&root)).unwrap();
+    eprintln!("sealed entries skipped: {}", walk.skipped);
+    let recs: Vec<PathBuf> = walk
+        .files
+        .into_iter()
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "oaf") && p.parent() == Some(Path::new(&root))
+        })
         .collect();
-    recs.sort();
     assert!(!recs.is_empty(), "no .oaf files under {root:?}");
     let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("real-rec-gz");
     let _ = std::fs::remove_dir_all(&scratch);

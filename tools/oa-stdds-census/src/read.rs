@@ -39,6 +39,8 @@ pub struct ReadStats {
     pub over_budget: bool,
     /// Parse-level stats of every message (field presence, errors).
     pub stats: Stats,
+    /// Message frames dropped because their time is in a sealed window (OA-SEAL-014).
+    pub sealed_window_dropped: u64,
 }
 
 struct Ctx<'a> {
@@ -64,6 +66,7 @@ impl ReadStats {
             stalled_bytes: 0,
             over_budget: false,
             stats: new_stats(),
+            sealed_window_dropped: 0,
         }
     }
 }
@@ -80,9 +83,25 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
             break;
         }
         match ev {
+            Ok(f)
+                if f.kind == FrameKind::Message && oa_sealed::in_sealed_window(f.recv_unix_ns) =>
+            {
+                // A frame whose time is in a sealed window is dropped and counted, never parsed.
+                ctx.rs.sealed_window_dropped += 1;
+                oa_sealed::note_window_drops(1);
+            }
             Ok(f) if f.kind == FrameKind::Message => {
+                let before = ctx.rs.stats.sealed_window_dropped;
+                let parsed =
+                    parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.rs.stats);
+                // A message with a record timed in a sealed window was dropped whole by the
+                // parser (`Limits::drop_window`), before any count, even when its frame was
+                // received outside the window: it is in no count here but the drop.
+                if ctx.rs.stats.sealed_window_dropped > before {
+                    continue;
+                }
                 ctx.rs.frames += 1;
-                match parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.rs.stats) {
+                match parsed {
                     Ok(Message::Tais(m)) => {
                         ctx.rs.tais_messages += 1;
                         let src = if m.src_present { m.src } else { [0; 8] };
@@ -203,6 +222,7 @@ fn collect(
     // Every directory is checked before it is listed, the given one and each below it.
     refuse_sealed(g, dir).map_err(ReadError::Refused)?;
     let fail = |e: std::io::Error| ReadError::Failed(format!("cannot list the directory: {e}"));
+    // seal-allow: every directory is checked by refuse_sealed above, before it is listed
     for e in std::fs::read_dir(dir).map_err(fail)? {
         let e = e.map_err(fail)?;
         let p = e.path();
@@ -272,12 +292,23 @@ pub fn read_dir(dir: &Path, census: &mut Census) -> Result<ReadStats, ReadError>
 
 /// [`read_dir`] against a given guard.
 pub fn read_dir_in(g: &Sealed, dir: &Path, census: &mut Census) -> Result<ReadStats, ReadError> {
+    read_dir_counted(g, dir, census, &mut 0)
+}
+
+/// [`read_dir_in`], with the frames and records dropped in a sealed window put in `dropped` as
+/// each file is read, so the caller has the count on an error exit too.
+pub fn read_dir_counted(
+    g: &Sealed,
+    dir: &Path,
+    census: &mut Census,
+    dropped: &mut u64,
+) -> Result<ReadStats, ReadError> {
     let files = recording_files_in(g, dir)?;
     let parser = Parser::new(XmlLimits::default())
         .map_err(|e| ReadError::Failed(format!("xml parser: {e:?}")))?;
     let mut ctx = Ctx {
         parser,
-        limits: Limits::default(),
+        limits: read_limits(),
         census,
         rs: ReadStats::new(),
     };
@@ -287,15 +318,24 @@ pub fn read_dir_in(g: &Sealed, dir: &Path, census: &mut Census) -> Result<ReadSt
             OpenFail::Refused(m) => ReadError::Refused(m),
             OpenFail::Io(m) => ReadError::Failed(format!("cannot open a recording: {m}")),
         })?;
-        read_stream(file, &mut ctx)
-            .map_err(|e| ReadError::Failed(format!("cannot read a recording: {e}")))?;
+        let read = read_stream(file, &mut ctx);
+        *dropped = ctx.rs.sealed_window_dropped + ctx.rs.stats.sealed_window_dropped;
+        read.map_err(|e| ReadError::Failed(format!("cannot read a recording: {e}")))?;
         if ctx.rs.over_budget {
             return Err(ReadError::Failed(
                 "stopped: the memory estimate is past the budget (use --from and --to)".to_string(),
             ));
         }
     }
+    // Frames by receive time and records by their own time, in one count.
+    ctx.rs.sealed_window_dropped += ctx.rs.stats.sealed_window_dropped;
     Ok(ctx.rs)
+}
+
+/// The decoder limits of every read in this tool: the sealed window as the drop window, so a
+/// record timed in it is dropped before any count (OA-SEAL-014).
+pub fn read_limits() -> Limits {
+    Limits::new(oa_sealed::DropWindow::sealed())
 }
 
 /// Reads one in-memory stream (tests).
@@ -303,11 +343,12 @@ pub fn read_bytes(bytes: &[u8], census: &mut Census) -> Result<ReadStats, String
     let parser = Parser::new(XmlLimits::default()).map_err(|e| format!("xml parser: {e:?}"))?;
     let mut ctx = Ctx {
         parser,
-        limits: Limits::default(),
+        limits: read_limits(),
         census,
         rs: ReadStats::new(),
     };
     read_stream(bytes, &mut ctx).map_err(|e| format!("cannot read: {e}"))?;
+    ctx.rs.sealed_window_dropped += ctx.rs.stats.sealed_window_dropped;
     Ok(ctx.rs)
 }
 
@@ -602,5 +643,66 @@ mod tests {
             Err(ReadError::Refused(_))
         ));
         std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn frames_at_the_window_edges_are_kept_or_dropped_and_counted() {
+        // The list's window: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes).
+        const FROM: i64 = 1_795_131_900_000_000_000;
+        const TO: i64 = 1_795_393_920_000_000_000;
+        let m = msg("ZZA", &[(1, "2026-11-19T12:00:00Z", None)]).into_bytes();
+        let mut bytes = Vec::new();
+        for (i, t) in [FROM - 1, FROM, TO - 1, TO].into_iter().enumerate() {
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n =
+                encode_frame(&mut buf, FrameKind::Message as u8, 0, i as u64, t, 0, &m).unwrap();
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        let mut census = Census::new();
+        let rs = read_bytes(&bytes, &mut census).unwrap();
+        assert_eq!((rs.frames, rs.sealed_window_dropped), (2, 2));
+        assert_eq!(rs.tais_messages, 2);
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn a_record_timed_in_the_window_is_dropped_though_its_frame_was_received_before_it() {
+        const FROM: i64 = 1_795_131_900_000_000_000;
+        // One message, four records: mrtTime at from - 1 s, at from, at to - 1 s and at to. The
+        // two inside the window drop the whole message, not just themselves.
+        let m = msg(
+            "ZZA",
+            &[
+                (1, "2026-11-19T23:44:59Z", None),
+                (2, "2026-11-19T23:45:00Z", None),
+                (3, "2026-11-23T00:31:59Z", None),
+                (4, "2026-11-23T00:32:00Z", None),
+            ],
+        )
+        .into_bytes();
+        let kept = msg("ZZA", &[(5, "2026-11-19T23:44:59Z", None)]).into_bytes();
+        let mut bytes = Vec::new();
+        // The frames were received at from - 1 ns, outside the window.
+        for (i, x) in [&m, &kept].into_iter().enumerate() {
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(
+                &mut buf,
+                FrameKind::Message as u8,
+                0,
+                i as u64,
+                FROM - 1,
+                0,
+                x,
+            )
+            .unwrap();
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        let mut census = Census::new();
+        let rs = read_bytes(&bytes, &mut census).unwrap();
+        // Only the second message is counted; the first is in no count but the drop (4 records).
+        assert_eq!((rs.frames, rs.tais_messages, rs.tais_records), (1, 1, 1));
+        assert_eq!(rs.sealed_window_dropped, 4);
+        assert_eq!(rs.stats.records, 1);
     }
 }

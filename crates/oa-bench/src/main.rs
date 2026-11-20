@@ -23,7 +23,9 @@ use std::time::Instant;
 use oa_bench::adsb_truth::{self, config_with, truth_section};
 use oa_bench::airspace_env::lookup_from_model;
 use oa_bench::altimeters::load_metar_dir;
-use oa_bench::input::{load, load_adsb, read_capped_file, FeedInput};
+use oa_bench::input::{
+    file_opener, load_adsb_counted, load_counted, msg_limit, read_capped_file, FeedInput,
+};
 use oa_bench::report::{code_version, render_csv, render_text, Header};
 use oa_bench::run::{run_benchmark, RunConfig, RunOutput};
 use oa_bench::synth::{
@@ -44,6 +46,8 @@ fn positive(name: &str, v: Option<String>) -> Result<f64, String> {
 }
 
 fn main() -> ExitCode {
+    // Printed when `main` returns: on every exit after a read, an error included.
+    let mut drops = oa_sealed::DropReport::new();
     let mut out: Option<PathBuf> = None;
     let mut feeds: Vec<FeedInput> = Vec::new();
     let mut adsb: Option<PathBuf> = None;
@@ -144,7 +148,7 @@ fn main() -> ExitCode {
             reason,
             no_loo,
         };
-        return match recorded(&feeds, &opts, &out) {
+        return match recorded(&feeds, &opts, &out, &mut drops) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("oa-bench: {e}");
@@ -153,7 +157,10 @@ fn main() -> ExitCode {
         };
     }
     if extract_only {
-        return match load(&feeds) {
+        let mut sealed = 0u64;
+        let loaded = load_counted(&feeds, &file_opener(), msg_limit(), &mut sealed);
+        drops.add(sealed);
+        return match loaded {
             Ok(l) => {
                 print!("{}", counts_text(&l));
                 ExitCode::SUCCESS
@@ -261,9 +268,20 @@ struct RecordedOpts {
 
 /// Reads the recorded inputs, builds truth from the ADS-B clip, runs the benchmark and writes the
 /// report.
-fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), String> {
-    let loaded = load(feeds).map_err(|e| e.to_string())?;
-    let clip = load_adsb(&o.clip).map_err(|e| e.to_string())?;
+fn recorded(
+    feeds: &[FeedInput],
+    o: &RecordedOpts,
+    out: &Path,
+    drops: &mut oa_sealed::DropReport,
+) -> Result<(), String> {
+    let mut feeds_sealed = 0u64;
+    let loaded = load_counted(feeds, &file_opener(), msg_limit(), &mut feeds_sealed);
+    drops.add(feeds_sealed);
+    let loaded = loaded.map_err(|e| e.to_string())?;
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(&o.clip, &file_opener(), &mut clip_sealed);
+    drops.add(clip_sealed);
+    let clip = clip.map_err(|e| e.to_string())?;
     let mut tcfg = config_with(o.bracket_s, o.max_sigma_m);
     tcfg.loo = !o.no_loo;
     let started = Instant::now();
@@ -328,6 +346,13 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
     let mut notes = loaded.notes.clone();
     // Wall-clock time goes to stderr only: the report must be the same bytes on every run.
     eprintln!("truth built in {truth_secs:.2} s");
+    // Once, after the last read: the message feeds' frames (by receive time) and records (by their
+    // own time), and the clip's rows, each input counted once.
+    let sealed_total = loaded.sealed_window_dropped + clip.sealed_window_dropped;
+    notes.push(format!(
+        "sealed-window rows dropped: {sealed_total} (message feeds {}, ADS-B clip {})",
+        loaded.sealed_window_dropped, clip.sealed_window_dropped
+    ));
     notes.push(format!(
         "truth: ADS-B clip, {} reports decoded, {} frames refused, {} records dropped",
         clip.reports.icao.len(),

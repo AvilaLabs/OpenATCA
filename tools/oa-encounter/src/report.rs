@@ -252,6 +252,8 @@ pub struct SummaryInput<'a> {
     pub tick_rows: u64,
     pub clip_name: &'a str,
     pub clip_sha256: &'a str,
+    /// Clip rows left out because their time is in a sealed window (OA-SEAL-014).
+    pub sealed_window_dropped: u64,
     pub scope: &'a str,
     pub csv_sha256: &'a str,
 }
@@ -324,6 +326,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
         > 0;
     let _ = writeln!(o, "oa-encounter summary");
     let _ = writeln!(o, "clip: {} sha256 {}", i.clip_name, i.clip_sha256);
+    let _ = writeln!(o, "sealed-window rows dropped: {}", i.sealed_window_dropped);
     let _ = writeln!(o, "tracks from: {}", i.scope);
     let _ = writeln!(
         o,

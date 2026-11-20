@@ -346,6 +346,7 @@ pub fn slice_dir_with(
     check_window(from, to)?;
     // Before the directory is listed: a sealed source is never read, not even its names.
     refuse_holdout(input)?;
+    // seal-allow: the source was refused by refuse_holdout above; every file is checked again before it is opened
     let mut names: Vec<PathBuf> = fs::read_dir(input)
         .map_err(|e| io_err(input, &e))?
         .filter_map(Result::ok)

@@ -10,6 +10,8 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+# Workspace crate, not an outside dependency (RULESET F1): the drop window type the decoder takes, and the guard the tests read through.
+oa-sealed = { path = "../oa-sealed" }
 oa-xml = { path = "../oa-xml" }
 # Linkage against SFDPS rows only (src/link.rs); the decoder itself does not use it.
 oa-fixm = { path = "../oa-fixm" }

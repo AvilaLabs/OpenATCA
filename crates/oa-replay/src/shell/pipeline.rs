@@ -116,8 +116,13 @@ pub fn doc_xml_limits() -> oa_xml::Limits {
 pub fn doc_fixm_limits() -> Limits {
     Limits {
         max_elements: DOC_MAX_ELEMENTS,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::sealed())
     }
+}
+
+/// The NOTAM decoder limits of one document: the sealed window as the drop window.
+pub fn doc_notam_limits() -> NotamLimits {
+    NotamLimits::new(oa_sealed::DropWindow::sealed())
 }
 
 /// The SFDPS event table of one document (see [`doc_xml_limits`]). Documents are decoded with
@@ -128,7 +133,8 @@ pub fn new_doc_events() -> Events {
 
 /// The TBFM row table of one document.
 pub fn new_doc_tbfm_rows() -> Rows {
-    new_rows(DOC_ROW_CAPACITY)
+    // A flight timed in the sealed window is dropped inside the decoder, before any count.
+    new_rows(DOC_ROW_CAPACITY, oa_sealed::DropWindow::sealed())
 }
 
 /// The TFMS row tables of one document.
@@ -137,6 +143,7 @@ pub fn new_doc_tfms_rows() -> TfmsRows {
         DEFAULT_FLIGHT_CAPACITY,
         DEFAULT_FLOW_CAPACITY,
         DEFAULT_STRING_BYTES,
+        oa_sealed::DropWindow::sealed(),
     )
 }
 
@@ -351,6 +358,12 @@ pub struct Pipeline {
     /// TBFM rows with no usable key, TFMS flight rows with no flight reference, and FNS
     /// cancellations that name no NOTAM held.
     pub rows_unlinked: u64,
+    /// SFDPS, TBFM and TFMS rows left out because their own time is in a sealed window
+    /// (OA-SEAL-014); not applied, not in `rows_seen`.
+    pub sealed_window_dropped: u64,
+    /// Whether the last frame fed was a document the decoder dropped whole (OA-SEAL-014): it is
+    /// in no count but the drop.
+    pub last_doc_dropped: bool,
     /// TBFM messages by `oa_tbfm::MsgKind`.
     pub tbfm_kinds: [u64; MSG_KIND_COUNT],
     /// Failures by kind.
@@ -380,7 +393,7 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         rows: new_doc_tbfm_rows(),
         reports: Reports::default(),
         tfms_rows: new_doc_tfms_rows(),
-        notam_dec: new_decoder(NotamLimits::default()),
+        notam_dec: new_decoder(doc_notam_limits()),
         notam_stats: new_stats(0),
         notams: default_notams_small(),
         replay_ns: i64::MIN,
@@ -397,6 +410,8 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         rows_out_of_order: [0; FEED_COUNT],
         rows_refused_full: [0; FEED_COUNT],
         rows_unlinked: 0,
+        sealed_window_dropped: 0,
+        last_doc_dropped: false,
         tbfm_kinds: [0; MSG_KIND_COUNT],
         errors: [0; ERR_COUNT],
     })
@@ -591,6 +606,7 @@ pub fn process_frame_mono(
     payload: &[u8],
 ) {
     let f = feed as usize;
+    p.last_doc_dropped = false;
     // 1. Clock, eviction cadence, checkpoint.
     let clock_before = p.clock;
     match clock_observe_mono(&mut p.clock, f, p.replay_ns, recv_unix_ns, stream, mono_ns) {
@@ -630,25 +646,35 @@ pub fn process_frame_mono(
         p.checkpoints.push(cp);
         p.next_checkpoint_ns = next_boundary(now, p.cfg.checkpoint_ns);
     }
-    if let Some(c) = p.frames.get_mut(f) {
-        *c += 1;
-    }
     // 2. Only MESSAGE frames carry feed data.
     if kind != Kind::Message {
+        if let Some(c) = p.frames.get_mut(f) {
+            *c += 1;
+        }
         if let Some(c) = p.other_frames.get_mut(f) {
             *c += 1;
         }
         return;
     }
-    if let Some(c) = p.messages.get_mut(f) {
-        *c += 1;
-    }
-    match feed {
+    let dropped = match feed {
         FeedKind::Sfdps => process_sfdps(p, payload, now),
         FeedKind::Tbfm => process_tbfm(p, payload, now),
         FeedKind::Adsb => process_adsb(p, payload, now),
         FeedKind::Tfms => process_tfms(p, payload, now),
         FeedKind::Fns => process_fns(p, payload, now),
+    };
+    // A document the decoder dropped whole for a message in the sealed window is in no count
+    // but the drop (OA-SEAL-014). The clock and the sweeps above ran on the receive time of the
+    // frame, which the gate has checked is outside the widened window; what they print (the replay
+    // time, the clock's own counters) comes from receive times, not from the document.
+    p.last_doc_dropped = dropped;
+    if !dropped {
+        if let Some(c) = p.frames.get_mut(f) {
+            *c += 1;
+        }
+        if let Some(c) = p.messages.get_mut(f) {
+            *c += 1;
+        }
     }
 }
 
@@ -691,13 +717,13 @@ fn note(p: &mut Pipeline, feed: FeedKind, a: Applied) {
     }
 }
 
-fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
+fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) -> bool {
     clear_events(&mut p.events);
     let doc = match p.parser.parse(payload) {
         Ok(d) => d,
         Err(_) => {
             count_error(&mut p.errors, ErrKind::SfdpsXml, 1);
-            return;
+            return false;
         }
     };
     let before_rejected = p.fixm.stats().rejected;
@@ -713,9 +739,15 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
                 FixmError::InputMismatch => ErrKind::SfdpsInternal,
             };
             count_error(&mut p.errors, k, 1);
-            return;
+            return false;
         }
     };
+    // The decoder dropped the whole document for a message timed in the sealed window
+    // (OA-SEAL-014): nothing else of it is counted or applied.
+    if summary.sealed_window_dropped > 0 {
+        note_sealed(p, u64::from(summary.sealed_window_dropped));
+        return true;
+    }
     let after = p.fixm.stats().rejected;
     for r in 0..REJECT_COUNT {
         let d = after
@@ -742,13 +774,21 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
         bump(&mut p.rows_seen, FeedKind::Sfdps, 1);
         note(p, FeedKind::Sfdps, a);
     }
+    false
 }
 
-fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) {
+/// Adds rows the decoders or the loops above dropped for their own time in the window.
+fn note_sealed(p: &mut Pipeline, n: u64) {
+    p.sealed_window_dropped += n;
+    oa_sealed::note_window_drops(n);
+}
+
+fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) -> bool {
     reports_clear(&mut p.reports);
-    match decode_payload_lenient(payload, &mut p.reports) {
-        // A record that cannot be read loses only itself, and is counted.
-        Ok(c) => count_error(&mut p.errors, ErrKind::AdsbBadRecord, c.dropped as u64),
+    let unreadable = match decode_payload_lenient(payload, &mut p.reports) {
+        // A record that cannot be read loses only itself, and is counted (below, once the
+        // frame has passed the window gate).
+        Ok(c) => c.dropped as u64,
         Err(e) => {
             let k = match e {
                 PayloadError::Length => ErrKind::AdsbLength,
@@ -759,10 +799,24 @@ fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) {
                 PayloadError::Range => ErrKind::AdsbInternal,
             };
             count_error(&mut p.errors, k, 1);
-            return;
+            return false;
         }
+    };
+    // A frame with any row timed in a sealed window is dropped whole, as a document is
+    // (OA-SEAL-014): its rows are counted as dropped, and it is in no other count, not even
+    // an error count.
+    let rows = reports_len(&p.reports);
+    if p.reports
+        .time_ns
+        .iter()
+        .take(rows)
+        .any(|&t| oa_sealed::in_sealed_window(t))
+    {
+        note_sealed(p, rows as u64);
+        return true;
     }
-    for i in 0..reports_len(&p.reports) {
+    count_error(&mut p.errors, ErrKind::AdsbBadRecord, unreadable);
+    for i in 0..rows {
         let a = apply_adsb(&mut p.adsb, &p.reports, i, now);
         bump(&mut p.rows_seen, FeedKind::Adsb, 1);
         match a {
@@ -774,19 +828,26 @@ fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) {
             AdsbApplied::BadRow => count_error(&mut p.errors, ErrKind::BadRow, 1),
         }
     }
+    false
 }
 
-fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) {
+fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) -> bool {
     clear_rows(&mut p.rows);
     let doc = match p.parser.parse(payload) {
         Ok(d) => d,
         Err(_) => {
             count_error(&mut p.errors, ErrKind::TbfmXml, 1);
-            return;
+            return false;
         }
     };
     match decode_doc_prefix(&doc, &mut p.rows) {
         Ok(out) => {
+            // The decoder dropped the whole document for a message timed in the sealed window
+            // (OA-SEAL-014): nothing else of it is counted or applied.
+            if out.sealed_dropped > 0 {
+                note_sealed(p, u64::from(out.sealed_dropped));
+                return true;
+            }
             count_error(&mut p.errors, ErrKind::TbfmCapacity, u64::from(out.dropped));
             // Flights refused for a field are dropped alone; the rest of the message applies.
             count_error(&mut p.errors, ErrKind::TbfmField, u64::from(out.rejected));
@@ -803,7 +864,7 @@ fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) {
                 DocError::Capacity => ErrKind::TbfmCapacity,
             };
             count_error(&mut p.errors, k, 1);
-            return;
+            return false;
         }
     }
     for i in 0..rows_len(&p.rows) {
@@ -811,19 +872,26 @@ fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) {
         bump(&mut p.rows_seen, FeedKind::Tbfm, 1);
         note(p, FeedKind::Tbfm, a);
     }
+    false
 }
 
-fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) {
+fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) -> bool {
     clear_tfms_rows(&mut p.tfms_rows);
     let doc = match p.parser.parse(payload) {
         Ok(d) => d,
         Err(_) => {
             count_error(&mut p.errors, ErrKind::TfmsXml, 1);
-            return;
+            return false;
         }
     };
     match decode_tfms_doc(&doc, &mut p.tfms_rows) {
         Ok(out) => {
+            // The decoder dropped the whole document for a message timed in the sealed window
+            // (OA-SEAL-014): nothing else of it is counted or applied.
+            if out.sealed_dropped > 0 {
+                note_sealed(p, u64::from(out.sealed_dropped));
+                return true;
+            }
             count_error(&mut p.errors, ErrKind::TfmsCapacity, u64::from(out.dropped));
             // Messages refused for a field are dropped alone; their siblings apply.
             count_error(&mut p.errors, ErrKind::TfmsField, u64::from(out.rejected));
@@ -836,7 +904,7 @@ fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) {
                 TfmsDocError::Capacity(_) => ErrKind::TfmsCapacity,
             };
             count_error(&mut p.errors, k, 1);
-            return;
+            return false;
         }
     }
     for i in 0..flights_len(&p.tfms_rows.flights) {
@@ -860,19 +928,27 @@ fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) {
             FlowApplied::BadRow => count_error(&mut p.errors, ErrKind::BadRow, 1),
         }
     }
+    false
 }
 
-fn process_fns(p: &mut Pipeline, payload: &[u8], now: i64) {
+fn process_fns(p: &mut Pipeline, payload: &[u8], now: i64) -> bool {
     clear_notams(&mut p.notams);
     let doc = match p.parser.parse(payload) {
         Ok(d) => d,
         Err(_) => {
             count_error(&mut p.errors, ErrKind::FnsXml, 1);
-            return;
+            return false;
         }
     };
     match oa_notam::decode_doc(&mut p.notam_dec, &doc, &mut p.notams, &mut p.notam_stats) {
-        Ok(o) => count_error(&mut p.errors, ErrKind::FnsField, u64::from(o.field_errors)),
+        Ok(o) => {
+            // A NOTAM the decoder dropped for its issue or cancel time (OA-SEAL-014).
+            if o.sealed_dropped {
+                note_sealed(p, 1);
+                return true;
+            }
+            count_error(&mut p.errors, ErrKind::FnsField, u64::from(o.field_errors));
+        }
         Err(e) => {
             let k = match e {
                 FnsDocError::Xml(_) => ErrKind::FnsXml,
@@ -881,7 +957,7 @@ fn process_fns(p: &mut Pipeline, payload: &[u8], now: i64) {
                 FnsDocError::Capacity(_) => ErrKind::FnsCapacity,
             };
             count_error(&mut p.errors, k, 1);
-            return;
+            return false;
         }
     }
     for i in 0..notams_len(&p.notams) {
@@ -899,4 +975,5 @@ fn process_fns(p: &mut Pipeline, payload: &[u8], now: i64) {
             FnsApplied::BadRow => count_error(&mut p.errors, ErrKind::BadRow, 1),
         }
     }
+    false
 }

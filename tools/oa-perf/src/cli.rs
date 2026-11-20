@@ -226,6 +226,7 @@ fn child(o: &Opts, n: usize) -> Result<Kv, String> {
     o.no_early_stop = o.no_early_stop || o.cmd == "overload";
     let o = &o;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // seal-allow: starts this binary again on a synthetic load; it reads no input data
     let st = Command::new(exe)
         .arg("one")
         .args(["--n", &n.to_string()])
@@ -250,6 +251,7 @@ fn child(o: &Opts, n: usize) -> Result<Kv, String> {
     }
     let p = o.out.join(format!("cap_{}.kv", tag(o, n)));
     Ok(Kv::parse(
+        // seal-allow: the tool's own output file from the run it just made
         &std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?,
     ))
 }

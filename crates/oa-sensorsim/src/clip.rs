@@ -9,3 +9,17 @@ use oa_truth::clip::{MAX_CLIP_BYTES, MAX_CLIP_ROWS};
 pub fn read_clip(path: &str) -> Result<(Reports, u64, u64), String> {
     oa_truth::clip::read_clip(path, MAX_CLIP_BYTES, MAX_CLIP_ROWS).map_err(|e| e.to_string())
 }
+
+/// [`read_clip`], also returning the rows dropped because their time is in a sealed window
+/// (OA-SEAL-014): `(reports, frames not decoded, records dropped, sealed-window rows dropped)`.
+pub fn read_clip_counted(path: &str) -> Result<(Reports, u64, u64, u64), String> {
+    oa_truth::clip::read_clip_counted(path, MAX_CLIP_BYTES, MAX_CLIP_ROWS)
+        .map_err(|e| e.to_string())
+}
+
+/// [`read_clip_counted`] with the sealed-window count put in `sealed` on every exit, a refusal
+/// for too many rows included: `(reports, frames not decoded, records dropped)`.
+pub fn read_clip_tallied(path: &str, sealed: &mut u64) -> Result<(Reports, u64, u64), String> {
+    oa_truth::clip::read_clip_tallied(path, MAX_CLIP_BYTES, MAX_CLIP_ROWS, sealed)
+        .map_err(|e| e.to_string())
+}

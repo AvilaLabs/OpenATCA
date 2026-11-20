@@ -278,6 +278,7 @@ pub(crate) const KNOWN: &[(&str, &[&str])] = &[
     ("flight/requestedAirspeed/nasAirspeed", &["uom"]),
     ("flight/requestedAltitude", &[]),
     ("flight/requestedAltitude/simple", &["uom"]),
+    ("flight/requestedAltitude/vfr", &[]),
     ("flight/requestedAltitude/vfrPlus", &["uom"]),
     ("flight/routeToRevisedDestination", &[]),
     ("flight/routeToRevisedDestination/route", &["routeText"]),

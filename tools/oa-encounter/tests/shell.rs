@@ -208,6 +208,7 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
             tick_rows: 20,
             clip_name: "clip.oaf",
             clip_sha256: &"0".repeat(64),
+            sealed_window_dropped: 0,
             scope: "test",
             csv_sha256: &"1".repeat(64),
         })
@@ -262,6 +263,7 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
         tick_rows: 0,
         clip_name: "c",
         clip_sha256: "",
+        sealed_window_dropped: 0,
         scope: "",
         csv_sha256: "",
     });
@@ -295,6 +297,7 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
             tick_rows: 0,
             clip_name: "c",
             clip_sha256: "",
+            sealed_window_dropped: 0,
             scope: "",
             csv_sha256: "",
         });
@@ -480,6 +483,7 @@ fn the_high_altitude_table_and_breakdown_and_the_vertical_histogram() {
         tick_rows: 0,
         clip_name: "c",
         clip_sha256: "",
+        sealed_window_dropped: 0,
         scope: "",
         csv_sha256: "",
     });
@@ -562,6 +566,7 @@ fn aircraft_a_level_apart_are_kept_and_counted_apart_from_the_class_tables() {
         tick_rows: 0,
         clip_name: "c",
         clip_sha256: "",
+        sealed_window_dropped: 0,
         scope: "",
         csv_sha256: "",
     });

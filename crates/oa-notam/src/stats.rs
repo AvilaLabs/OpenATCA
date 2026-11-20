@@ -1,5 +1,6 @@
 //! Counters over many documents, and the bounded table of unknown paths. Plain data; updated
-//! by the decoder. Core (pure).
+//! by the decoder. Pure functions and plain data (crate class shell: the crate depends on the
+//! guard crate for the drop window), no clock and no I/O.
 
 use crate::fields::{FEAT_COUNT, FIELD_COUNT, REJECT_SLOTS};
 
@@ -8,7 +9,7 @@ pub const MAX_PATH_TEXT: usize = 160;
 
 /// One unknown element or attribute path and how often it was seen.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnknownPath {
     pub hash: u64,
     pub count: u64,
@@ -20,11 +21,14 @@ pub struct UnknownPath {
 
 /// Totals over a run of documents, and the unknown paths seen.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stats {
     /// Rows of the unknown-path table; paths beyond it are counted in `unknown_overflow`.
     pub max_unknown_paths: usize,
     pub docs: u64,
+    /// NOTAMs dropped because they were issued or cancelled in the window (OA-SEAL-014): in no
+    /// other count, `docs` included.
+    pub sealed_window_dropped: u64,
     pub accepted: u64,
     pub rows: u64,
     /// Refused documents by reason ([`crate::reject_index`]).
@@ -52,6 +56,7 @@ pub fn new_stats(max_unknown_paths: usize) -> Stats {
     Stats {
         max_unknown_paths,
         docs: 0,
+        sealed_window_dropped: 0,
         accepted: 0,
         rows: 0,
         rejects: [0; REJECT_SLOTS],

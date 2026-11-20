@@ -10,7 +10,7 @@ use std::fs;
 use oa_adsb::{Reports, F_GROUND, F_STALE, NONE_U16, ZAU_BOX};
 use oa_bench::adsb_truth;
 
-use oa_bench::input::{file_opener, load_adsb_with, load_with, FeedInput, Opener};
+use oa_bench::input::{file_opener, load_adsb_counted, load_counted, msg_limit, FeedInput, Opener};
 use oa_bench::legacy::{NONE, NO_ALT};
 use oa_replay::FeedKind;
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
@@ -146,15 +146,22 @@ pub fn load_eram(
     args: &Args,
     open: &Opener,
     header: &mut Vec<String>,
+    sealed: &mut u64,
 ) -> Result<Vec<EramFlight>, String> {
-    let loaded = load_with(
+    // SFDPS frames (by receive time) and records (by their own time) left out for a sealed
+    // window, in `sealed` on every exit; the caller prints the one line.
+    let mut got = 0u64;
+    let loaded = load_counted(
         &[FeedInput {
             feed: FeedKind::Sfdps,
             dir: args.sfdps_dir.clone(),
         }],
         open,
-    )
-    .map_err(|e| format!("{}: {e}", args.sfdps_dir.display()))?;
+        msg_limit(),
+        &mut got,
+    );
+    *sealed += got;
+    let loaded = loaded.map_err(|e| format!("{}: {e}", args.sfdps_dir.display()))?;
     for i in &loaded.inputs {
         header.push(format!(
             "SFDPS input: {} files, {} bytes, sha256 {}",
@@ -230,6 +237,16 @@ pub fn load_eram(
 /// Runs the whole comparison and writes `events.csv`, `flights.csv` and `summary.txt` to the
 /// output directory; returns the summary text.
 pub fn run(args: &Args) -> Result<String, String> {
+    // The count of every input read, printed on standard error when this function returns, an
+    // error included.
+    let mut sealed = 0u64;
+    let result = run_counted(args, &mut sealed);
+    let mut drops = oa_sealed::DropReport::new();
+    drops.add(sealed);
+    result
+}
+
+fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     for p in [&args.adsb, &args.sfdps_dir, &args.out] {
         refuse_sealed(p)?;
     }
@@ -241,8 +258,10 @@ pub fn run(args: &Args) -> Result<String, String> {
     let mut header: Vec<String> = Vec::new();
 
     // OpenATCA: the tracker on set A.
-    let clip =
-        load_adsb_with(&args.adsb, &open).map_err(|e| format!("{}: {e}", args.adsb.display()))?;
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(&args.adsb, &open, &mut clip_sealed);
+    *sealed += clip_sealed;
+    let clip = clip.map_err(|e| format!("{}: {e}", args.adsb.display()))?;
     header.push(format!("ADS-B clip sha256 {}", clip.hash.sha256));
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
@@ -305,7 +324,14 @@ pub fn run(args: &Args) -> Result<String, String> {
         .collect();
 
     // ERAM: the SFDPS track positions in the box.
-    let mut eram = load_eram(args, &open, &mut header)?;
+    let mut eram = load_eram(args, &open, &mut header, sealed)?;
+    // After the last read: the clip's count and the SFDPS loader's, each input once; the line is
+    // in the summary header, and on standard error when the run returns.
+    header.push(oa_sealed::drop_line(*sealed));
+    header.push(
+        "  (the line above counts ADS-B rows and SFDPS frames by receive time and records by their own time)"
+            .to_string(),
+    );
     // The recorded extents inside the box (the clip is boxed, so only those are comparable).
     let eram_extent = extent(eram.iter().flat_map(|f| f.samples.iter().map(|s| s.t_ms)));
     let oa_extent = extent(
@@ -441,6 +467,15 @@ pub fn truth_point(truth: &oa_truth::Truth, addr: u32, t_ms: i64) -> Option<Trut
 /// Runs the ADS-B persistent-error screen and writes `aircraft.csv` and `summary.txt` to the
 /// output directory; returns the summary text.
 pub fn run_screen(args: &Args) -> Result<String, String> {
+    // As in [`run`]: the count is printed when this function returns, an error included.
+    let mut sealed = 0u64;
+    let result = run_screen_counted(args, &mut sealed);
+    let mut drops = oa_sealed::DropReport::new();
+    drops.add(sealed);
+    result
+}
+
+fn run_screen_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     for p in [&args.adsb, &args.sfdps_dir, &args.out] {
         refuse_sealed(p)?;
     }
@@ -450,11 +485,20 @@ pub fn run_screen(args: &Args) -> Result<String, String> {
         .map_err(|e| format!("{}: {e}", args.sfdps_dir.display()))?;
     fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     let mut header: Vec<String> = Vec::new();
-    let mut eram = load_eram(args, &open, &mut header)?;
+    let mut eram = load_eram(args, &open, &mut header, sealed)?;
     let wanted: BTreeSet<u32> = eram.iter().filter_map(|f| f.addr).collect();
-    let clip =
-        load_adsb_with(&args.adsb, &open).map_err(|e| format!("{}: {e}", args.adsb.display()))?;
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(&args.adsb, &open, &mut clip_sealed);
+    *sealed += clip_sealed;
+    let clip = clip.map_err(|e| format!("{}: {e}", args.adsb.display()))?;
     header.push(format!("ADS-B clip sha256 {}", clip.hash.sha256));
+    // After the last read: the SFDPS loader's count and the clip's, each input once; the line is
+    // in the summary header, and on standard error when the run returns.
+    header.push(oa_sealed::drop_line(*sealed));
+    header.push(
+        "  (the line above counts ADS-B rows and SFDPS frames by receive time and records by their own time)"
+            .to_string(),
+    );
     let raw = raw_reports(&clip.reports, &wanted);
     // The smoother, as the scorer builds it (default settings), over every report of the clip.
     let built =

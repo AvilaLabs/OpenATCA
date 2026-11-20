@@ -10,14 +10,19 @@ use std::cell::RefCell;
 struct State {
     parser: oa_xml::Parser,
     dec: Decoder,
+    // The same decoder with the sealed window, so the whole-document pre-scan runs too.
+    sealed: Decoder,
     rows: Notams,
+    sealed_rows: Notams,
 }
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State {
         parser: oa_xml::Parser::new(oa_xml::Limits::default()).expect("default limits are valid"),
-        dec: new_decoder(Limits::default()),
+        dec: new_decoder(Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())),
+        sealed: new_decoder(Limits::new(oa_sealed::DropWindow::sealed())),
         rows: new_notams(16, 1 << 16, 32, 4096),
+        sealed_rows: new_notams(16, 1 << 16, 32, 4096),
     });
 }
 
@@ -41,10 +46,40 @@ fuzz_target!(|data: &[u8]| {
 
     STATE.with(|s| {
         let mut s = s.borrow_mut();
-        let State { parser, dec, rows } = &mut *s;
+        let State {
+            parser,
+            dec,
+            sealed,
+            rows,
+            sealed_rows,
+        } = &mut *s;
         clear_notams(rows);
+        clear_notams(sealed_rows);
         let mut stats: Stats = new_stats(64);
-        let _ = oa_notam::decode_bytes(parser, dec, data, rows, &mut stats);
+        let mut sealed_stats: Stats = new_stats(64);
+        let a = oa_notam::decode_bytes(parser, dec, data, rows, &mut stats);
+        let b = oa_notam::decode_bytes(parser, sealed, data, sealed_rows, &mut sealed_stats);
+        // Oracle 1: no row the sealed decoder keeps has an observation time in the window.
+        let w = oa_sealed::DropWindow::sealed();
+        for i in 0..notams_len(sealed_rows) {
+            let r = row_at(sealed_rows, i).expect("a row below the length");
+            assert!(
+                !w.contains(r.issued_ms) && !w.contains(r.canceled_ms),
+                "kept row in the window"
+            );
+        }
+        // Oracle 2: a document the sealed decoder did not drop decodes as with no window.
+        match &b {
+            Ok(o) if o.sealed_dropped => assert_eq!(notams_len(sealed_rows), 0),
+            _ => {
+                assert_eq!(format!("{a:?}"), format!("{b:?}"), "results differ");
+                assert_eq!(stats, sealed_stats);
+                assert_eq!(notams_len(rows), notams_len(sealed_rows));
+                for i in 0..notams_len(rows) {
+                    assert_eq!(row_at(rows, i), row_at(sealed_rows, i));
+                }
+            }
+        }
         for u in &stats.unknown {
             let _ = unknown_text(u);
         }

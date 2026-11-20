@@ -134,7 +134,7 @@ fn stable(out: &str) -> String {
         .join("\n")
 }
 
-// REQ: OA-RPL-024
+// REQ: OA-RPL-024, OA-SEAL-014
 #[test]
 fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {
     let dir = scratch("bin");
@@ -162,8 +162,14 @@ fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {
     std::fs::write(&sf_path, &s).unwrap();
     std::fs::write(&tb_path, &t).unwrap();
     let (sp, tp) = (sf_path.to_str().unwrap(), tb_path.to_str().unwrap());
-    let (code, out, _) = run_bin(&["--sfdps", sp, "--tbfm", tp]);
+    let (code, out, err) = run_bin(&["--sfdps", sp, "--tbfm", tp]);
     assert_eq!(code, 0);
+    // The count line, printed once.
+    assert_eq!(
+        err.matches("sealed-window rows dropped: 0").count(),
+        1,
+        "{err}"
+    );
     assert!(out.lines().filter(|l| l.starts_with("checkpoint ")).count() >= 10);
     assert!(out.contains("summary files=2 "));
     assert!(out.contains("errors none"));

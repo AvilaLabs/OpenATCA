@@ -396,6 +396,7 @@ fn the_file_decodes_as_ed24_with_every_value_and_position_error_within_bounds() 
     assert_eq!((d.stats.records, d.stats.blocks), (700, 3));
     assert!(d.stats.max_lat_error_e7 <= 1 && d.stats.max_lon_error_e7 <= 1);
     assert_eq!((d.read_back_records, d.read_back_blocks), (700, 3));
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let bytes = fs::read(out.join("adsb.ast")).unwrap();
     assert_eq!(bytes.len() as u64, d.stats.bytes);
     let mut recs = Vec::new();
@@ -517,6 +518,7 @@ fn reports_are_written_in_time_order_with_stale_and_non_adsb_ones_left_out_and_c
     );
     let rep = ex.finish().unwrap().commit().unwrap();
     assert_eq!(rep.days[0].stats.records, 4);
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let blocks = decode_stream_ed24(&fs::read(out.join("adsb.ast")).unwrap());
     let times: Vec<u32> = blocks.iter().map(|c| c.tomr_position.unwrap()).collect();
     assert_eq!(times, vec![5 * 128, 10 * 128, 30 * 128, 40 * 128]);
@@ -585,6 +587,7 @@ fn all_mode_uses_the_scorers_split_code_with_halving_off_and_counts_what_it_remo
     let info = export_adsb_reports(&all, &mut ex).unwrap();
     assert_eq!(info.converted, 5);
     ex.finish().unwrap().commit().unwrap();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let recs = decode_stream_ed24(&fs::read(out.join("adsb.ast")).unwrap());
     let lats: Vec<i32> = recs
         .iter()
@@ -624,6 +627,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
     let clip = ClipInfo {
         offered: 10,
         not_offered: 0,
+        sealed_window_dropped: 0,
         positions: Vec::new(),
         split: oa_track::score::SplitStats {
             rows_in: 14,
@@ -1077,6 +1081,7 @@ fn i090_is_in_every_record_and_ground_records_have_gbs_and_no_i160() {
         ex.push(&c, (r.lat_e7, r.lon_e7)).unwrap();
     }
     ex.finish().unwrap().commit().unwrap();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let recs = decode_stream_ed24(&fs::read(out.join("adsb.ast")).unwrap());
     assert_eq!(recs.len(), 300);
     let mut ground = 0;
@@ -1182,4 +1187,61 @@ fn the_i090_and_i210_octets_are_the_ones_the_specification_gives_written_by_hand
     assert!(full_bytes
         .windows(5)
         .any(|w| w == [0x51, 0xF1, 0x35, 0xB0, 0x12]));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_clip_loader_drops_rows_in_a_sealed_window_and_the_readme_counts_them() {
+    use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
+    // The list's window: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes).
+    const FROM: i64 = 1_795_131_900_000_000_000;
+    const TO: i64 = 1_795_393_920_000_000_000;
+    let mut r = Reports::default();
+    for (i, t) in [FROM - 1, FROM, TO - 1, TO].into_iter().enumerate() {
+        let mut row = ROW_EMPTY;
+        row.icao = 0xA00000 + i as u32;
+        row.time_ns = t;
+        row.lat_e7 = 410_000_000;
+        row.lon_e7 = -880_000_000;
+        row.nic = 8;
+        row.nac_p = 10;
+        row.sil = 3;
+        row.version = 2;
+        row.source = 0;
+        reports_push(&mut r, &row);
+    }
+    // One row per frame (a frame with a row in the window is dropped whole): the frames at
+    // from and to - 1 ns are dropped, the others kept.
+    let mut bytes = Vec::new();
+    for k in 0..4 {
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &r, k, k + 1).unwrap();
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, 1, FLAG_BYTES, k as u64, FROM - 1, 0, &payload).unwrap();
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let dir = tmp("sealwindow");
+    let clip = dir.join("c.oaf");
+    fs::write(&clip, &bytes).unwrap();
+    let lay = Layout {
+        out: dir.join("out"),
+        day: 0,
+        split: true,
+    };
+    let mut ex = oa_compass::shell::export::SystemExport::new(
+        "OpenATCA",
+        "openatca.ast",
+        OPENATCA_SOURCE,
+        lay,
+    );
+    let (_, info) = oa_compass::shell::run::export_adsb_clip(
+        &clip,
+        &mut ex,
+        None,
+        InputsMode::All,
+        oa_compass::shell::run::OpenatcaRows::Ticks,
+    )
+    .unwrap();
+    assert_eq!(info.sealed_window_dropped, 2);
+    assert_eq!(info.offered, 2);
 }

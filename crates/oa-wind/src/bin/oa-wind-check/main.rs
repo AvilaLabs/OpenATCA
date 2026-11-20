@@ -29,6 +29,7 @@ fn list(dir: &Path, prefix: &str, suffix: &str) -> Vec<PathBuf> {
         eprintln!("oa-wind-check: {e}");
         std::process::exit(2);
     }
+    // seal-allow: the directory was refused by the guard above; each file is read through the guarded read_hour_file
     let mut v: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())

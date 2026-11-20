@@ -412,7 +412,21 @@ pub fn pair_world(kind: Kind, g: &PairGeom) -> Result<BuiltTruth, String> {
 /// The truth built from a clip: its `oa-truth` trajectories, used only as shapes. The
 /// simulator and the scorer both read this truth, so it is exact for them.
 pub fn clip_world(path: &str) -> Result<BuiltTruth, String> {
-    let (reports, bad, dropped) = oa_sensorsim::clip::read_clip(path)?;
+    clip_world_counted(path).map(|(b, _)| b)
+}
+
+/// [`clip_world`], also returning the rows of the clip dropped because their time is in a sealed
+/// window (OA-SEAL-014).
+pub fn clip_world_counted(path: &str) -> Result<(BuiltTruth, u64), String> {
+    let mut sealed = 0u64;
+    let built = clip_world_tallied(path, &mut sealed)?;
+    Ok((built, sealed))
+}
+
+/// [`clip_world_counted`], with the sealed-window count put in `sealed` as soon as the clip is
+/// read, so a caller has it on an error exit too.
+pub fn clip_world_tallied(path: &str, sealed: &mut u64) -> Result<BuiltTruth, String> {
+    let (reports, bad, dropped) = oa_sensorsim::clip::read_clip_tallied(path, sealed)?;
     let cfg = TruthConfig {
         loo: false,
         ..DEFAULT_CONFIG

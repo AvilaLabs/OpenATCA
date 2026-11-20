@@ -33,3 +33,6 @@ version = "0.0.1"
 [[package]]
 name = "oa-zip"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+]

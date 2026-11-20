@@ -204,7 +204,12 @@ fn run_with(
     flows: usize,
     strings: usize,
 ) -> (Result<Outcome, DocError>, Rows) {
-    let mut rows = new_rows(flights, flows, strings);
+    let mut rows = new_rows(
+        flights,
+        flows,
+        strings,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let mut p = Parser::new(default_limits()).unwrap();
     let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
     (r, rows)
@@ -493,7 +498,7 @@ fn rows_are_plain_struct_of_arrays_with_absent_values() {
         assert_eq!(v, NO_NUM);
     }
     // Push, rebuild, truncate, capacity: one row at a time, columns sharing an index.
-    let mut rows = new_rows(2, 1, 64);
+    let mut rows = new_rows(2, 1, 64, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     assert_eq!(rows.flights.cap, 2);
     let mut a = BLANK_FLIGHT;
     a.kind = kind::TRACK;
@@ -1236,7 +1241,12 @@ fn every_field_error_names_the_field_and_the_kind() {
         match decode_bytes(
             &mut Parser::new(default_limits()).unwrap(),
             doc.replacen(from, to, 1).as_bytes(),
-            &mut new_rows(4, 4, 1 << 12),
+            &mut new_rows(
+                4,
+                4,
+                1 << 12,
+                oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+            ),
         ) {
             Ok(Outcome {
                 rejected: 1,
@@ -1369,7 +1379,12 @@ fn one_bad_message_is_rolled_back_and_its_siblings_are_kept() {
     assert_eq!(rows.strings_used, 0);
     // rows already in the caller's table from earlier documents survive a document whose only
     // message is refused
-    let mut rows = new_rows(16, 8, 1 << 16);
+    let mut rows = new_rows(
+        16,
+        8,
+        1 << 16,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let mut p = Parser::new(default_limits()).unwrap();
     decode_bytes(&mut p, wrap_flight(&track_route()).as_bytes(), &mut rows).unwrap();
     let (f, w, s) = (
@@ -1484,13 +1499,18 @@ fn capacity_is_stated_and_never_exceeded() {
     r.unwrap();
     assert_eq!(rows.strings_used, need);
     // pushes past capacity are refused, not grown
-    let mut rows = new_rows(1, 1, 8);
+    let mut rows = new_rows(1, 1, 8, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     assert!(push_flight(&mut rows.flights, &BLANK_FLIGHT));
     assert!(!push_flight(&mut rows.flights, &BLANK_FLIGHT));
     assert!(push_flow(&mut rows.flows, &BLANK_FLOW));
     assert!(!push_flow(&mut rows.flows, &BLANK_FLOW));
     // the table does not move or grow while decoding: no allocation after init
-    let mut rows = new_rows(8, 4, 1 << 12);
+    let mut rows = new_rows(
+        8,
+        4,
+        1 << 12,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let before = (
         rows.flights.acid.as_ptr(),
         rows.flights.acid.capacity(),
@@ -1606,7 +1626,12 @@ fn mutating_documents_never_panics() {
         ),
         wrap_fi(&[rstr(), gadv(), fxa(), aptc(), tmi_list()].concat()),
     ];
-    let mut rows = new_rows(64, 32, 1 << 16);
+    let mut rows = new_rows(
+        64,
+        32,
+        1 << 16,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let mut p = Parser::new(default_limits()).unwrap();
     let mut accepted = 0u32;
     let mut refused = 0u32;
@@ -1680,7 +1705,12 @@ fn mutating_documents_never_panics() {
 #[test]
 fn stats_fold_outcomes_rejects_and_field_errors() {
     let mut s = new_stats();
-    let mut rows = new_rows(16, 8, 1 << 16);
+    let mut rows = new_rows(
+        16,
+        8,
+        1 << 16,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let mut p = Parser::new(default_limits()).unwrap();
     let docs = [
         wrap_flight(&[track(), modify()].concat()),
@@ -1774,7 +1804,7 @@ fn linkage_matches_by_gufi_then_by_acid_departure_arrival() {
     sfdps(&mut ev, 2, "AB00000002", "TST2", "KTAA", "KTCC");
     sfdps(&mut ev, 3, "", "TST3", "KTDD", "KTEE"); // no plan identifier, has a key
     sfdps(&mut ev, 4, "AB00000004", "", "", ""); // plan identifier only
-    let mut rows = new_rows(16, 1, 16);
+    let mut rows = new_rows(16, 1, 16, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     tfms(&mut rows, 10, "AB00000001", "TST1", "KTAA", "KTBB"); // by gufi, agrees by key
     tfms(&mut rows, 10, "AB00000001", "TST1", "KTAA", "KTBB"); // same flight, second message
     tfms(&mut rows, 11, "ZZ99999999", "TST2", "KTAA", "KTCC"); // gufi unknown, key matches
@@ -1810,7 +1840,7 @@ fn linkage_reports_uuid_shaped_gufis_and_ambiguous_keys_as_found() {
     let mut ev = oa_fixm::new_events(8, 64);
     sfdps(&mut ev, 1, "AB00000001", "TST1", "KTAA", "KTBB");
     sfdps(&mut ev, 2, "AB00000002", "TST1", "KTAA", "KTBB"); // the same key, another flight
-    let mut rows = new_rows(4, 1, 16);
+    let mut rows = new_rows(4, 1, 16, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     tfms(&mut rows, 1, "", "TST1", "KTAA", "KTBB");
     // a TFMS gufi longer than the 16-byte name is refused by the decoder, so it never reaches the
     // linkage: a UUID-shaped gufi would be a field error, not a silent non-match
@@ -1831,7 +1861,7 @@ fn linkage_reports_uuid_shaped_gufis_and_ambiguous_keys_as_found() {
     assert_eq!(rep.by_acid_no_gufi, 1);
     assert_eq!(rep.by_gufi, 0);
     let ev2 = oa_fixm::new_events(1, 8);
-    let rows2 = new_rows(1, 1, 8);
+    let rows2 = new_rows(1, 1, 8, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     let rep = link_flights(&ev2, &rows2);
     assert_eq!(rep, oa_tfms::LinkReport::default());
     // decoded rows link too: the flight of a handwritten message finds its plan identifier
@@ -1850,6 +1880,7 @@ fn the_default_capacities_and_the_vocabularies_are_consistent() {
         DEFAULT_FLIGHT_CAPACITY,
         DEFAULT_FLOW_CAPACITY,
         DEFAULT_STRING_BYTES,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
     );
     assert_eq!(rows.flights.acid.capacity(), DEFAULT_FLIGHT_CAPACITY);
     assert_eq!(rows.flows.text.capacity(), DEFAULT_FLOW_CAPACITY);
@@ -1963,7 +1994,12 @@ fn a_word_outside_a_vocabulary_is_kept_as_unknown_and_counted() {
     let r = decode_bytes(
         &mut Parser::new(default_limits()).unwrap(),
         doc.as_bytes(),
-        &mut new_rows(4, 4, 1 << 12),
+        &mut new_rows(
+            4,
+            4,
+            1 << 12,
+            oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+        ),
     );
     observe(&mut s, &r, &[], &[]);
     assert_eq!(s.unknown_words, 6);
@@ -2105,7 +2141,7 @@ fn a_flight_reference_of_zero_is_told_from_no_reference() {
     // of its own that does not absorb them.
     use oa_tfms::link_flights;
     let ev = oa_fixm::new_events(1, 8);
-    let mut rows = new_rows(8, 1, 16);
+    let mut rows = new_rows(8, 1, 16, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     tfms(&mut rows, 0, "AB00000001", "TST1", "KTAA", "KTBB"); // reference 0, carried
     tfms(&mut rows, 0, "AB00000001", "TST1", "KTAA", "KTBB"); // the same flight again
     for (acid, dep) in [("TST2", "KTAA"), ("TST3", "KTDD")] {
@@ -2133,4 +2169,397 @@ fn a_namespace_written_with_a_character_reference_is_the_same_namespace() {
     assert_eq!(o, o2);
     assert_eq!(flights_len(&rows2.flights), flights_len(&rows.flights));
     assert_eq!(rows2.flights.flight_ref[0], rows.flights.flight_ref[0]);
+}
+
+/// 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z in Unix ms: the sealed window.
+const SEAL: (i64, i64) = (1_795_132_800_000, 1_795_393_020_000);
+
+/// `xml` with every message time set to `ts`.
+fn stamped(xml: &str, ts: &str) -> String {
+    xml.replace(
+        r#"sourceTimeStamp="2030-01-02T03:04:05Z""#,
+        &format!(r#"sourceTimeStamp="{ts}""#),
+    )
+}
+
+/// The outcome of a document dropped whole: only the count.
+fn sealed(n: u32) -> Outcome {
+    Outcome {
+        kind: DocKind::Empty,
+        messages: 0,
+        flight_rows: 0,
+        flow_rows: 0,
+        unknown_paths: 0,
+        ignored_paths: 0,
+        dropped: 0,
+        rejected: 0,
+        first_reject: None,
+        reject_fields: [0; FIELD_COUNT],
+        reject_kinds: [0; oa_tfms::ERROR_KIND_COUNT],
+        unknown_words: 0,
+        unknown_units: 0,
+        sealed_dropped: n,
+    }
+}
+
+/// Decodes `xml` (prefix and plain) with the sealed window into tables of the given sizes, and
+/// checks that the outcome is the sealed one, the tables are untouched and the stats are those
+/// of an empty run with the drop count set.
+fn assert_dropped_whole(xml: &str, flights: usize, flows: usize, n: u32) {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let mut p = Parser::new(default_limits()).unwrap();
+    for prefix in [false, true] {
+        let mut rows = new_rows(flights, flows, 1 << 12, w);
+        let doc = p.parse(xml.as_bytes()).unwrap();
+        let r = if prefix {
+            oa_tfms::decode_doc_prefix(&doc, &mut rows)
+        } else {
+            oa_tfms::decode_doc(&doc, &mut rows)
+        };
+        assert_eq!(r, Ok(sealed(n)), "prefix {prefix}");
+        assert_eq!(flights_len(&rows.flights), 0);
+        assert_eq!(flows_len(&rows.flows), 0);
+        assert_eq!(rows.strings_used, 0);
+        let mut s = new_stats();
+        observe(&mut s, &r, &[], &[]);
+        assert_eq!(
+            s,
+            oa_tfms::Stats {
+                sealed_window_dropped: u64::from(n),
+                ..new_stats()
+            }
+        );
+    }
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_document_with_a_message_in_the_window_is_dropped_whole_and_every_counter_is_as_for_an_empty_run(
+) {
+    let inside = |x: String| stamped(&x, "2026-11-21T00:00:00Z");
+    let outside = |x: String| x;
+    // One in-window message among others: the document is dropped and n is its messages.
+    let mixed = format!(
+        "{}{}{}",
+        outside(track()),
+        inside(track()),
+        outside(track())
+    );
+    assert_dropped_whole(&wrap_flight(&mixed), 16, 8, 3);
+    // A full table: three flights, room for one, the in-window one last.
+    assert_dropped_whole(&wrap_flight(&mixed), 1, 1, 3);
+    // A flow message, and a TMI flight list (its entries have no time of their own).
+    assert_dropped_whole(&wrap_fi(&inside(gadv())), 16, 8, 1);
+    assert_dropped_whole(&wrap_fi(&inside(tmi_list())), 16, 8, 1);
+    assert_dropped_whole(
+        &wrap_fi(&format!("{}{}", gadv(), inside(tmi_list()))),
+        1,
+        1,
+        2,
+    );
+    // An invalid attribute before the time, and an invalid field after it, in the window.
+    let early = track().replace(r#"cdmPart="false""#, r#"cdmPart="maybe""#);
+    assert_dropped_whole(&wrap_flight(&inside(early)), 16, 8, 1);
+    let late = track().replace(
+        "<nxcm:speed>276</nxcm:speed>",
+        "<nxcm:speed>zzz</nxcm:speed>",
+    );
+    assert_dropped_whole(&wrap_flight(&inside(late)), 16, 8, 1);
+    // Without a message in the window (the end is excluded) the document decodes as usual.
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let mut rows = new_rows(16, 8, 1 << 16, w);
+    let mut p = Parser::new(default_limits()).unwrap();
+    let xml = stamped(&wrap_flight(&track()), "2026-11-23T00:17:00Z");
+    let o = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
+    assert_eq!((o.sealed_dropped, flights_len(&rows.flights)), (0, 1));
+}
+
+/// Decodes `xml` with `w` into roomy tables, returning the result and the stats.
+fn decode_with_window(
+    xml: &str,
+    w: oa_sealed::DropWindow,
+) -> (Result<Outcome, DocError>, usize, oa_tfms::Stats) {
+    let mut rows = new_rows(16, 8, 1 << 14, w);
+    let mut p = Parser::new(default_limits()).unwrap();
+    let doc = p.parse(xml.as_bytes()).unwrap();
+    let r = oa_tfms::decode_doc(&doc, &mut rows);
+    let mut s = new_stats();
+    observe(&mut s, &r, &[], &[]);
+    (r, flights_len(&rows.flights) + flows_len(&rows.flows), s)
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_drops_the_window() {
+    let doc = wrap_flight(&track());
+    // All time (the closed failure of the list): the document is dropped whole.
+    let (r, rows, s) = decode_with_window(&doc, oa_sealed::DropWindow::all_time());
+    assert_eq!((r, rows), (Ok(sealed(1)), 0));
+    assert_eq!(
+        s,
+        oa_tfms::Stats {
+            sealed_window_dropped: 1,
+            ..new_stats()
+        }
+    );
+    // The production list: a message in the window is dropped, one outside it is kept.
+    let w = oa_sealed::DropWindow::sealed();
+    let (r, rows, _) = decode_with_window(&stamped(&doc, "2026-11-21T00:00:00Z"), w);
+    assert_eq!((r, rows), (Ok(sealed(1)), 0));
+    let (r, rows, s) = decode_with_window(&doc, w);
+    assert_eq!(
+        (r.unwrap().sealed_dropped, rows, s.sealed_window_dropped),
+        (0, 1, 0)
+    );
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn every_observation_time_is_a_window_key_in_any_encoding_and_a_reference_time_is_not() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let inw = "2026-11-21T00:00:00Z";
+    // The position time (`timeAtPosition`) in the window, the message time outside it.
+    let pos = wrap_flight(&track().replace(
+        "2030-01-02T03:04:00Z</nxcm:timeAtPosition>",
+        &format!("{inw}</nxcm:timeAtPosition>"),
+    ));
+    let (r, rows, _) = decode_with_window(&pos, w);
+    assert_eq!((r, rows), (Ok(sealed(1)), 0));
+    // The oceanic position's `time`.
+    let oc = wrap_flight(&oceanic().replace("2030-01-02T03:00:00Z", inw));
+    assert_eq!(decode_with_window(&oc, w).0, Ok(sealed(1)));
+    // The same message with the position time outside the window is kept, with its row.
+    let (r, rows, _) = decode_with_window(&wrap_flight(&oceanic()), w);
+    assert_eq!((r.unwrap().sealed_dropped, rows), (0, 1));
+    // Entity-encoded (the final Z as a character reference), in the message time and the
+    // position time, and split by a comment.
+    let enc = wrap_flight(&track()).replace(
+        r#"sourceTimeStamp="2030-01-02T03:04:05Z""#,
+        r#"sourceTimeStamp="2026-11-21T00:00:00&#90;""#,
+    );
+    assert_eq!(decode_with_window(&enc, w).0, Ok(sealed(1)));
+    let split = pos.replace(inw, "2026-11-21T00:00:<!--x-->00Z");
+    assert_eq!(decode_with_window(&split, w).0, Ok(sealed(1)));
+    // Padded with whitespace: the decoder's time reader refuses the padded value, so the scan,
+    // which reads with the same function, does not read it as a time: the document is not
+    // dropped, and the message is refused (rejected) with no row.
+    let pad = wrap_flight(&track()).replace(
+        r#"sourceTimeStamp="2030-01-02T03:04:05Z""#,
+        r#"sourceTimeStamp=" 2026-11-21T00:00:00Z ""#,
+    );
+    let (r, rows, _) = decode_with_window(&pad, w);
+    let o = r.unwrap();
+    assert_eq!((o.sealed_dropped, o.rejected, rows), (0, 1, 0));
+    // A repeated position time element: both are read, so the one in the window is found.
+    let dup = wrap_flight(&track().replace(
+        "<nxcm:timeAtPosition>2030-01-02T03:04:00Z</nxcm:timeAtPosition>",
+        &format!("<nxcm:timeAtPosition>2030-01-02T03:04:00Z</nxcm:timeAtPosition><nxcm:timeAtPosition>{inw}</nxcm:timeAtPosition>"),
+    ));
+    assert_eq!(decode_with_window(&dup, w).0, Ok(sealed(1)));
+    // Reference times (here an ETA and the arrival fix time) in the window are not keys.
+    let refs = wrap_flight(
+        &track()
+            .replace("2030-01-02T04:30:00Z", inw)
+            .replace("2030-01-02T04:00:00Z", inw),
+    );
+    let (r, rows, _) = decode_with_window(&refs, w);
+    assert_eq!((r.unwrap().sealed_dropped, rows), (0, 1));
+    // A status output counts as a message of a dropped document.
+    let status = wrap_flight(&format!("{}<tfmsStatusOutput/>", stamped(&track(), inw)));
+    assert_eq!(decode_with_window(&status, w).0, Ok(sealed(2)));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn an_actual_event_time_in_the_window_drops_a_message_stamped_after_it() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let after = "2026-11-24T01:00:00Z";
+    let inw = "2026-11-22T23:00:00Z";
+    // Every message is stamped after the window; only the event time named is moved into it.
+    let late = |xml: String| xml.replace("2030-01-02T03:04:05Z", after);
+    let modify = late(modify());
+    // The out, off, on and in times, the runway and gate actuals.
+    for name in [
+        "airlineOutTime",
+        "airlineOffTime",
+        "airlineOnTime",
+        "airlineInTime",
+        "runwayDeparture",
+        "runwayArrival",
+        "gateDeparture",
+        "gateArrival",
+    ] {
+        let val = modify.split(&format!("{name}=\"")).nth(1).unwrap();
+        let val = &val[..val.find('"').unwrap()];
+        let x = wrap_flight(
+            &modify.replace(&format!("{name}=\"{val}\""), &format!("{name}=\"{inw}\"")),
+        );
+        assert_eq!(decode_with_window(&x, w).0, Ok(sealed(1)), "{name}");
+    }
+    // The control: the same message with nothing in the window is kept.
+    let (r, rows, _) = decode_with_window(&wrap_flight(&modify), w);
+    assert_eq!((r.unwrap().sealed_dropped, rows), (0, 1));
+    // An actual departure given as an `etd`, and an estimated one (a reference time).
+    let dep = late(departure());
+    let actual = dep.replace("2030-01-02T02:05:00Z", inw);
+    assert_eq!(
+        decode_with_window(&wrap_flight(&actual), w).0,
+        Ok(sealed(1))
+    );
+    let est = actual.replace(r#"etdType="ACTUAL""#, r#"etdType="ESTIMATED""#);
+    assert_eq!(
+        decode_with_window(&wrap_flight(&est), w)
+            .0
+            .unwrap()
+            .sealed_dropped,
+        0
+    );
+    // The time of departure and of arrival: actual when `estimated` is not "true".
+    let tod = dep.replace("2030-01-02T02:06:00Z", inw);
+    assert_eq!(decode_with_window(&wrap_flight(&tod), w).0, Ok(sealed(1)));
+    let tod_est = tod.replace(r#"estimated="false""#, r#"estimated="true""#);
+    assert_eq!(
+        decode_with_window(&wrap_flight(&tod_est), w)
+            .0
+            .unwrap()
+            .sealed_dropped,
+        0
+    );
+    let toa = dep
+        .replace("2030-01-02T04:31:00Z", inw)
+        .replace(r#"estimated="true""#, r#"estimated="false""#);
+    assert_eq!(decode_with_window(&wrap_flight(&toa), w).0, Ok(sealed(1)));
+    // The boundary crossing.
+    let bnd = late(boundary()).replace("2030-01-02T03:20:00Z", inw);
+    assert_eq!(decode_with_window(&wrap_flight(&bnd), w).0, Ok(sealed(1)));
+    // An actual coordination time; a proposed one is a reference time.
+    let plan = late(plan()).replace("2030-01-02T03:30:00Z", inw);
+    assert_eq!(
+        decode_with_window(&wrap_flight(&plan), w)
+            .0
+            .unwrap()
+            .sealed_dropped,
+        0
+    );
+    let act = plan.replace(r#"type="PROPOSED""#, r#"type="ACTUAL""#);
+    assert_eq!(decode_with_window(&wrap_flight(&act), w).0, Ok(sealed(1)));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_times_a_flow_message_or_a_tmi_list_reports_are_window_keys_too() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let after = "2026-11-24T01:00:00Z";
+    let inw = "2026-11-22T23:00:00Z";
+    // A flow message stamped after the window that reports a sent time inside it.
+    let adv = stamped(&gadv(), after).replace(
+        "<ns11:dateSent>2030-01-02T03:00:00Z",
+        &format!("<ns11:dateSent>{inw}"),
+    );
+    assert_eq!(decode_with_window(&wrap_fi(&adv), w).0, Ok(sealed(1)));
+    let kept = stamped(&gadv(), after);
+    assert_eq!(
+        decode_with_window(&wrap_fi(&kept), w)
+            .0
+            .unwrap()
+            .sealed_dropped,
+        0
+    );
+    // A TMI list entry whose last update time is inside the window.
+    let list = stamped(&tmi_list(), after);
+    let t = list
+        .split("lastUpdateTime=\"")
+        .nth(1)
+        .map(|r| r[..r.find('"').unwrap()].to_string())
+        .expect("the TMI list fixture has a lastUpdateTime");
+    let x = list.replace(
+        &format!("lastUpdateTime=\"{t}\""),
+        &format!("lastUpdateTime=\"{inw}\""),
+    );
+    assert_eq!(decode_with_window(&wrap_fi(&x), w).0, Ok(sealed(1)));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn every_remaining_key_moved_into_the_window_drops_a_message_stamped_after_it() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let after = "2026-11-24T01:00:00Z";
+    let inw = "2026-11-22T23:00:00Z";
+    let dropped = |xml: &str, flow: bool, what: &str| {
+        let x = if flow { wrap_fi(xml) } else { wrap_flight(xml) };
+        assert_eq!(decode_with_window(&x, w).0, Ok(sealed(1)), "{what}");
+    };
+    let kept = |xml: &str, flow: bool, what: &str| {
+        let x = if flow { wrap_fi(xml) } else { wrap_flight(xml) };
+        let (r, _, _) = decode_with_window(&x, w);
+        assert_eq!(r.unwrap().sealed_dropped, 0, "{what}");
+    };
+    let dep = stamped(&departure(), after);
+    // An `eta` typed ACTUAL; the same time as an estimate is a reference time.
+    let eta = dep.replace(
+        r#"<nxcm:eta etaType="ESTIMATED" timeValue="2030-01-02T04:30:00Z"/>"#,
+        &format!(r#"<nxcm:eta etaType="ACTUAL" timeValue="{inw}"/>"#),
+    );
+    assert_ne!(eta, dep);
+    dropped(&eta, false, "eta ACTUAL");
+    kept(
+        &eta.replace(r#"etaType="ACTUAL""#, r#"etaType="ESTIMATED""#),
+        false,
+        "eta ESTIMATED",
+    );
+    // A `newCoordinationTime` typed ACTUAL (the scan reads the key whatever the message holds).
+    let plan = stamped(&plan(), after).replace("2030-01-02T03:30:00Z", inw);
+    let new_coord = plan
+        .replace("nxcm:coordinationTime", "nxcm:newCoordinationTime")
+        .replace(r#"type="PROPOSED""#, r#"type="ACTUAL""#);
+    assert_ne!(new_coord, plan);
+    dropped(&new_coord, false, "newCoordinationTime ACTUAL");
+    kept(
+        &new_coord.replace(r#"type="ACTUAL""#, r#"type="PROPOSED""#),
+        false,
+        "newCoordinationTime PROPOSED",
+    );
+    // The creation time of the flight, an attribute of `flightTimeData`.
+    let modify = stamped(&modify(), after);
+    let created = modify.replace(
+        r#"flightCreation="2030-01-01T20:00:00Z""#,
+        &format!(r#"flightCreation="{inw}""#),
+    );
+    assert_ne!(created, modify);
+    dropped(&created, false, "flightCreation");
+    // The flow times: `eventTime` of an airport configuration, and `lastUpdate`.
+    let aptc = stamped(&aptc(), after);
+    let event = aptc.replace(
+        "<ns11:eventTime>2030-01-02T03:00:00Z",
+        &format!("<ns11:eventTime>{inw}"),
+    );
+    assert_ne!(event, aptc);
+    dropped(&event, true, "eventTime");
+    kept(&aptc, true, "airport configuration outside the window");
+    let adv = stamped(&gadv(), after);
+    let sent = adv.replace(
+        "<ns11:dateSent>2030-01-02T03:00:00Z",
+        &format!("<ns11:lastUpdate>{inw}"),
+    );
+    let sent = sent.replace("</ns11:dateSent>", "</ns11:lastUpdate>");
+    assert_ne!(sent, adv);
+    dropped(&sent, true, "lastUpdate");
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_count_of_a_dropped_document_is_its_messages_and_at_least_one() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let inw = "2026-11-22T23:00:00Z";
+    // A time key on an element that is not a message: the document has no message, and the
+    // count is still one (the drop is never silent).
+    let bare = wrap_flight(&format!(r#"<x sourceTimeStamp="{inw}"/>"#));
+    assert_eq!(decode_with_window(&bare, w).0, Ok(sealed(1)));
+    // Messages and status outputs are each counted.
+    let two = wrap_flight(&format!(
+        "{}{}<tfmsStatusOutput/><tfmsStatusOutput/>",
+        stamped(&track(), inw),
+        track()
+    ));
+    assert_eq!(decode_with_window(&two, w).0, Ok(sealed(4)));
 }

@@ -61,9 +61,15 @@ pub fn pdf_labels_from_text(text: &str) -> Vec<(String, i32)> {
 
 /// Shell: the text of a PDF by `pdftotext -raw`.
 pub fn pdftotext(path: &Path) -> Result<String, String> {
+    // The sealed guard sees the path as given and as resolved before the program is run on it; the
+    // resolved path is the one passed on.
+    oa_sealed::refuse_io(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let real = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    oa_sealed::refuse_io(&real).map_err(|e| format!("{}: {e}", path.display()))?;
+    // seal-allow: runs pdftotext on a path the guard has just checked, as given and resolved
     let out = Command::new("pdftotext")
         .arg("-raw")
-        .arg(path)
+        .arg(&real)
         .arg("-")
         .output()
         .map_err(|e| format!("pdftotext not runnable: {e}"))?;

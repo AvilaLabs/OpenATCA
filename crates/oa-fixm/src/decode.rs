@@ -2,13 +2,16 @@
 
 use crate::known::KNOWN;
 use crate::scalar::{
-    parse_beacon, parse_code, parse_iso_ms, parse_scaled, parse_uint, parse_uuid, rescale, trim,
+    parse_beacon, parse_code, parse_hex24, parse_iso_ms, parse_scaled, parse_uint, parse_uuid,
+    rescale, trim,
 };
 use crate::{
     field_bit, truncate_events, Events, Field, FixmError, Limits, Reject, Stats, Summary,
-    UnknownPath, FIELD_COUNT, FLAG_ASSIGNED_VFR, FLAG_ASSIGNED_VFR_PLUS, FTYPE_GENERAL,
-    FTYPE_NON_SCHEDULED, FTYPE_SCHEDULED, MAX_PATH_TEXT, REJECT_COUNT, STATUS_ACTIVE,
-    STATUS_CANCELLED, STATUS_COMPLETED, STATUS_DROPPED, STATUS_PROPOSED,
+    UnknownPath, ALT_FORM_AT_FIX, ALT_FORM_BLOCK, ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS,
+    FIELD_COUNT, FLAG_ASSIGNED_VFR, FLAG_ASSIGNED_VFR_PLUS, FLAG_INTERIM_NIL, FTYPE_GENERAL,
+    FTYPE_NON_SCHEDULED, FTYPE_SCHEDULED, HANDOFF_ACCEPTANCE, HANDOFF_FAILURE, HANDOFF_INITIATION,
+    HANDOFF_RETRACTION, HANDOFF_TAKE_CONTROL, HANDOFF_UPDATE, MAX_PATH_TEXT, REJECT_COUNT,
+    STATUS_ACTIVE, STATUS_CANCELLED, STATUS_COMPLETED, STATUS_DROPPED, STATUS_PROPOSED,
 };
 use oa_xml::{
     attr_needs_decode, decode_into, ns_uri_bytes, resolve_attr_ns, resolve_elem_ns, resolve_prefix,
@@ -91,6 +94,26 @@ const P_ARR_EST: u64 = path(&[
 const P_ASSIGNED_SIMPLE: u64 = path(&["flight", "assignedAltitude", "simple"]);
 const P_ASSIGNED_VFRPLUS: u64 = path(&["flight", "assignedAltitude", "vfrPlus"]);
 const P_ASSIGNED_VFR: u64 = path(&["flight", "assignedAltitude", "vfr"]);
+const P_ASSIGNED_BLOCK: u64 = path(&["flight", "assignedAltitude", "block"]);
+const P_BLOCK_ABOVE: u64 = path(&["flight", "assignedAltitude", "block", "above"]);
+const P_BLOCK_BELOW: u64 = path(&["flight", "assignedAltitude", "block", "below"]);
+const P_ALTFIX: u64 = path(&["flight", "assignedAltitude", "altFixAlt"]);
+const P_ALTFIX_POINT: u64 = path(&["flight", "assignedAltitude", "altFixAlt", "point"]);
+const P_ALTFIX_PRE: u64 = path(&["flight", "assignedAltitude", "altFixAlt", "pre"]);
+const P_ALTFIX_POST: u64 = path(&["flight", "assignedAltitude", "altFixAlt", "post"]);
+const P_INTERIM: u64 = path(&["flight", "interimAltitude"]);
+const P_REQ_SIMPLE: u64 = path(&["flight", "requestedAltitude", "simple"]);
+const P_REQ_VFRPLUS: u64 = path(&["flight", "requestedAltitude", "vfrPlus"]);
+const P_REQ_VFR: u64 = path(&["flight", "requestedAltitude", "vfr"]);
+const P_AIRCRAFT_DESC: u64 = path(&["flight", "aircraftDescription"]);
+const P_HANDOFF: u64 = path(&["flight", "enRoute", "boundaryCrossings", "handoff"]);
+const P_ACPT: u64 = path(&[
+    "flight",
+    "enRoute",
+    "boundaryCrossings",
+    "handoff",
+    "acceptingUnit",
+]);
 const P_POSITION: u64 = path(&["flight", "enRoute", "position"]);
 const P_REPORTED_ALT: u64 = path(&["flight", "enRoute", "position", "altitude"]);
 const P_GS: u64 = path(&[
@@ -231,6 +254,18 @@ struct Row {
     arr_est_ms: i64,
     msg_seq: u64,
     plan_seq: u32,
+    assigned_form: u8,
+    requested_form: u8,
+    requested_ft: i32,
+    interim_ft: i32,
+    block_above_ft: i32,
+    block_below_ft: i32,
+    fixalt_pre_ft: i32,
+    fixalt_post_ft: i32,
+    fixalt_point: [u8; 12],
+    handoff_event: u8,
+    acpt: [u8; 8],
+    address: u32,
     /// `coastIndicator` carries nothing beyond its presence; this only receives the parse.
     coast: u8,
 }
@@ -248,6 +283,22 @@ struct Msg {
     vel_bad: bool,
     /// Bytes of route text written past `strings_used` (committed with the row).
     route_bytes: usize,
+    /// The altitude-form elements seen under `assignedAltitude` and `requestedAltitude`, one
+    /// bit per form (`FORM_BIT_*`); a form that is not alone is a field error.
+    aforms: u8,
+    rforms: u8,
+    /// How many form elements were seen (a repeated one is a bad form).
+    acount: u8,
+    rcount: u8,
+    /// The values of a block and of an altitude at a fix, each `Some` once read well, and
+    /// whether any of those elements was bad or repeated.
+    block_above: Option<i32>,
+    block_below: Option<i32>,
+    fix_pre: Option<i32>,
+    fix_post: Option<i32>,
+    fix_point: Option<[u8; 12]>,
+    aform_bad: bool,
+    rform_bad: bool,
 }
 
 fn new_msg() -> Msg {
@@ -262,8 +313,26 @@ fn new_msg() -> Msg {
         vel_seen: 0,
         vel_bad: false,
         route_bytes: 0,
+        aforms: 0,
+        rforms: 0,
+        acount: 0,
+        rcount: 0,
+        block_above: None,
+        block_below: None,
+        fix_pre: None,
+        fix_post: None,
+        fix_point: None,
+        aform_bad: false,
+        rform_bad: false,
     }
 }
+
+/// Bits of `Msg::aforms` and `Msg::rforms`: which form element was seen.
+const FORM_BIT_SIMPLE: u8 = 1;
+const FORM_BIT_VFR_PLUS: u8 = 2;
+const FORM_BIT_VFR: u8 = 4;
+const FORM_BIT_BLOCK: u8 = 8;
+const FORM_BIT_AT_FIX: u8 = 16;
 
 fn reject(m: &mut Msg, why: Reject) {
     if m.reject.is_none() {
@@ -458,6 +527,18 @@ fn parse_ftype(s: &[u8]) -> Option<u8> {
     }
 }
 
+fn parse_handoff_event(s: &[u8]) -> Option<u8> {
+    match s {
+        b"INITIATION" => Some(HANDOFF_INITIATION),
+        b"ACCEPTANCE" => Some(HANDOFF_ACCEPTANCE),
+        b"UPDATE" => Some(HANDOFF_UPDATE),
+        b"RETRACTION" => Some(HANDOFF_RETRACTION),
+        b"FAILURE" => Some(HANDOFF_FAILURE),
+        b"TAKE_CONTROL" => Some(HANDOFF_TAKE_CONTROL),
+        _ => None,
+    }
+}
+
 fn parse_coast(s: &[u8]) -> Option<u8> {
     (s == b"COASTING").then_some(1)
 }
@@ -503,10 +584,98 @@ fn is_xmlns(doc: &Doc<'_>, a: usize) -> bool {
         || name_bytes(doc.input, prefix) == b"xmlns"
 }
 
+/// Reads the `timestamp` and `positionTime` of every element of the document that has one, and
+/// the `time` of every `actual` element, directly from the parsed tree and whatever else is valid in it. If any is in `window`,
+/// returns how many messages the document has (all are dropped, at least 1); otherwise 0. A time
+/// that cannot be read is not in the window (the frame's receive time gates it).
+pub fn prescan(doc: &Doc<'_>, window: oa_sealed::DropWindow) -> u32 {
+    if window.span().is_none() {
+        return 0;
+    }
+    let mut hit = false;
+    for i in 1..doc.elem_name.len() {
+        // The message time, the position time and the time of an actual event (the `time` of an
+        // `actual` element, the departure actual): an event a message reports after the window
+        // can have happened inside it.
+        let actual =
+            name_bytes(doc.input, doc.elem_name.get(i).copied().unwrap_or_default()) == b"actual";
+        let times: &[&[u8]] = if actual {
+            &[b"timestamp", b"positionTime", b"time"]
+        } else {
+            &[b"timestamp", b"positionTime"]
+        };
+        for name in times {
+            let mut buf = [0u8; 64];
+            if let Raw::Val(v) = attr(doc, i, name, &mut buf) {
+                hit |= parse_iso_ms(v).is_some_and(|t| window.contains(t));
+            }
+        }
+    }
+    if !hit {
+        return 0;
+    }
+    let messages = (1..doc.elem_name.len())
+        .filter(|&i| doc.elem_parent.get(i).is_some_and(|p| p.0 == 0) && is_message_elem(doc, i))
+        .count();
+    u32::try_from(messages).unwrap_or(u32::MAX).max(1)
+}
+
 fn attr_range(doc: &Doc<'_>, i: usize) -> core::ops::Range<usize> {
     let first = doc.elem_first_attr.get(i).map_or(0, |a| a.0 as usize);
     let count = doc.elem_attr_count.get(i).map_or(0, |&c| c as usize);
     first..first.saturating_add(count)
+}
+
+/// Whether element `i` carries `xsi:nil`: `Some(true)` for `"true"` or `"1"`, `Some(false)` for
+/// `"false"` or `"0"`, `None` when there is no such attribute or its value is neither (the
+/// caller counts that as a bad value).
+fn xsi_nil(doc: &Doc<'_>, i: usize) -> Option<bool> {
+    let mut buf = [0u8; 16];
+    for a in attr_range(doc, i) {
+        let prefix = doc.attr_prefix.get(a).copied().unwrap_or_default();
+        let name = doc.attr_name.get(a).copied().unwrap_or_default();
+        if prefix.len == 0 || name_bytes(doc.input, name) != b"nil" {
+            continue;
+        }
+        let xsi = matches!(
+            resolve_attr_ns(doc, ElemIx(i as u32), AttrIx(a as u32)),
+            Ns::Uri(u) if uri_bytes(doc, u) == NS_XSI
+        );
+        if !xsi {
+            continue;
+        }
+        let &sp = doc.attr_value.get(a)?;
+        let ent = attr_needs_decode(doc, AttrIx(a as u32));
+        return match raw_bytes(doc.input, sp, ent, SpanKind::AttrValue, &mut buf) {
+            Raw::Val(b"true" | b"1") => Some(true),
+            Raw::Val(b"false" | b"0") => Some(false),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// Whether element `i` has an `xsi:nil` attribute at all, whatever its value.
+fn find_xsi_nil_attr(doc: &Doc<'_>, i: usize) -> bool {
+    attr_range(doc, i).any(|a| {
+        let prefix = doc.attr_prefix.get(a).copied().unwrap_or_default();
+        let name = doc.attr_name.get(a).copied().unwrap_or_default();
+        prefix.len > 0
+            && name_bytes(doc.input, name) == b"nil"
+            && matches!(
+                resolve_attr_ns(doc, ElemIx(i as u32), AttrIx(a as u32)),
+                Ns::Uri(u) if uri_bytes(doc, u) == NS_XSI
+            )
+    })
+}
+
+/// A feet value from an altitude element: its text and `uom`.
+fn alt_value(doc: &Doc<'_>, texts: &[u32], i: usize, b1: &mut [u8], b2: &mut [u8]) -> Option<i32> {
+    let uom = attr(doc, i, b"uom", b2);
+    match (text(doc, texts, i, b1), uom) {
+        (Raw::Val(t), Raw::Val(u)) => parse_alt(t, u),
+        _ => None,
+    }
 }
 
 impl Decoder {
@@ -537,6 +706,7 @@ impl Decoder {
             elem_text: vec![NO_TEXT; n],
             stats: Stats {
                 docs: 0,
+                sealed_window_dropped: 0,
                 unsupported_roots: 0,
                 messages: 0,
                 rows: 0,
@@ -593,10 +763,24 @@ impl Decoder {
         out: &mut Events,
         prefix: bool,
     ) -> Result<Summary, FixmError> {
-        self.stats.docs = self.stats.docs.saturating_add(1);
         if doc.input.len() != input.len() || doc.input.as_ptr() != input.as_ptr() {
             return Err(FixmError::InputMismatch);
         }
+        // The first step, before any count, row or table is touched (and before any refusal an
+        // in-window message could cause): a document with a message timed in the sealed window
+        // is dropped whole.
+        let gone = prescan(doc, self.limits.drop_window);
+        if gone > 0 {
+            self.stats.sealed_window_dropped = self
+                .stats
+                .sealed_window_dropped
+                .saturating_add(u64::from(gone));
+            return Ok(Summary {
+                sealed_window_dropped: gone,
+                ..Summary::default()
+            });
+        }
+        self.stats.docs = self.stats.docs.saturating_add(1);
         let n = doc.elem_name.len();
         if n > self.limits.max_elements {
             return Err(FixmError::TooManyElements {
@@ -973,7 +1157,11 @@ impl Decoder {
             P_ASSIGNED_SIMPLE | P_ASSIGNED_VFRPLUS => {
                 if h == P_ASSIGNED_VFRPLUS {
                     m.row.flags |= FLAG_ASSIGNED_VFR_PLUS;
+                    m.aforms |= FORM_BIT_VFR_PLUS;
+                } else {
+                    m.aforms |= FORM_BIT_SIMPLE;
                 }
+                m.acount = m.acount.saturating_add(1);
                 let uom = attr(doc, i, b"uom", &mut b2);
                 let parsed = match (text(doc, texts, i, &mut b1), uom) {
                     (Raw::Val(t), Raw::Val(u)) => parse_alt(t, u),
@@ -981,7 +1169,105 @@ impl Decoder {
                 };
                 store(m, Field::AssignedAlt, parsed, |r| &mut r.assigned_ft);
             }
-            P_ASSIGNED_VFR => m.row.flags |= FLAG_ASSIGNED_VFR,
+            P_ASSIGNED_VFR => {
+                m.row.flags |= FLAG_ASSIGNED_VFR;
+                m.aforms |= FORM_BIT_VFR;
+                m.acount = m.acount.saturating_add(1);
+            }
+            P_ASSIGNED_BLOCK => {
+                m.aforms |= FORM_BIT_BLOCK;
+                m.acount = m.acount.saturating_add(1);
+            }
+            P_BLOCK_ABOVE | P_BLOCK_BELOW => {
+                let v = alt_value(doc, texts, i, &mut b1, &mut b2);
+                let slot = if h == P_BLOCK_ABOVE {
+                    &mut m.block_above
+                } else {
+                    &mut m.block_below
+                };
+                if v.is_none() || slot.is_some() {
+                    m.aform_bad = true;
+                }
+                *slot = v.or(*slot);
+            }
+            P_ALTFIX => {
+                m.aforms |= FORM_BIT_AT_FIX;
+                m.acount = m.acount.saturating_add(1);
+            }
+            P_ALTFIX_PRE | P_ALTFIX_POST => {
+                let v = alt_value(doc, texts, i, &mut b1, &mut b2);
+                let slot = if h == P_ALTFIX_PRE {
+                    &mut m.fix_pre
+                } else {
+                    &mut m.fix_post
+                };
+                if v.is_none() || slot.is_some() {
+                    m.aform_bad = true;
+                }
+                *slot = v.or(*slot);
+            }
+            P_ALTFIX_POINT => {
+                let point = match attr(doc, i, b"fix", &mut b1) {
+                    Raw::Val(b) => parse_point(b),
+                    _ => None,
+                };
+                if point.is_none() || m.fix_point.is_some() {
+                    m.aform_bad = true;
+                }
+                m.fix_point = point.or(m.fix_point);
+            }
+            P_INTERIM => {
+                let nil = xsi_nil(doc, i);
+                let has_nil_attr = find_xsi_nil_attr(doc, i);
+                if has_nil_attr && nil.is_none() {
+                    store(m, Field::InterimAlt, None, |r| &mut r.interim_ft);
+                } else if nil == Some(true) {
+                    // ERAM says there is no interim altitude. The element has no text.
+                    if seen(m, Field::InterimAlt) {
+                        mark_err(m, Field::InterimAlt);
+                    } else {
+                        m.row.flags |= FLAG_INTERIM_NIL;
+                        mark_ok(m, Field::InterimAlt);
+                    }
+                } else {
+                    let v = alt_value(doc, texts, i, &mut b1, &mut b2);
+                    store(m, Field::InterimAlt, v, |r| &mut r.interim_ft);
+                }
+            }
+            P_REQ_SIMPLE | P_REQ_VFRPLUS => {
+                m.rforms |= if h == P_REQ_SIMPLE {
+                    FORM_BIT_SIMPLE
+                } else {
+                    FORM_BIT_VFR_PLUS
+                };
+                m.rcount = m.rcount.saturating_add(1);
+                let v = alt_value(doc, texts, i, &mut b1, &mut b2);
+                if v.is_none() {
+                    m.rform_bad = true;
+                }
+                if let Some(v) = v {
+                    m.row.requested_ft = v;
+                }
+            }
+            P_REQ_VFR => {
+                m.rforms |= FORM_BIT_VFR;
+                m.rcount = m.rcount.saturating_add(1);
+            }
+            P_AIRCRAFT_DESC => {
+                let raw = attr(doc, i, b"aircraftAddress", &mut b1);
+                field(m, Field::AircraftAddress, raw, parse_hex24, |r| {
+                    &mut r.address
+                });
+            }
+            P_HANDOFF => {
+                field(
+                    m,
+                    Field::HandoffEvent,
+                    attr(doc, i, b"event", &mut b1),
+                    parse_handoff_event,
+                    |r| &mut r.handoff_event,
+                );
+            }
             P_POSITION => {
                 field(
                     m,
@@ -1073,12 +1359,13 @@ impl Decoder {
                 let raw = text(doc, texts, i, &mut b1);
                 field(m, Field::Beacon, raw, parse_beacon, |r| &mut r.beacon);
             }
-            P_CTRL | P_RECV | P_XFER => {
+            P_CTRL | P_RECV | P_XFER | P_ACPT => {
                 let unit = attr(doc, i, b"unitIdentifier", &mut b1);
                 let sector = attr(doc, i, b"sectorIdentifier", &mut b2);
                 let (f, dst): (Field, fn(&mut Row) -> &mut [u8; 8]) = match h {
                     P_CTRL => (Field::ControllingUnit, |r| &mut r.ctrl),
                     P_RECV => (Field::HandoffReceiving, |r| &mut r.recv),
+                    P_ACPT => (Field::HandoffAccepting, |r| &mut r.acpt),
                     _ => (Field::HandoffTransferring, |r| &mut r.xfer),
                 };
                 match unit_pair(unit, sector) {
@@ -1259,6 +1546,7 @@ impl Decoder {
                 _ => mark_err(&mut m, Field::Velocity),
             }
         }
+        compose_forms(&mut m);
         if out.len >= out.capacity {
             return Err(FixmError::RowCapacity {
                 capacity: out.capacity,
@@ -1299,6 +1587,18 @@ impl Decoder {
         out.arr_est_ms.push(r.arr_est_ms);
         out.msg_seq.push(r.msg_seq);
         out.plan_seq.push(r.plan_seq);
+        out.assigned_form.push(r.assigned_form);
+        out.requested_form.push(r.requested_form);
+        out.requested_ft.push(r.requested_ft);
+        out.interim_ft.push(r.interim_ft);
+        out.block_above_ft.push(r.block_above_ft);
+        out.block_below_ft.push(r.block_below_ft);
+        out.fixalt_pre_ft.push(r.fixalt_pre_ft);
+        out.fixalt_post_ft.push(r.fixalt_post_ft);
+        out.fixalt_point.push(r.fixalt_point);
+        out.handoff_event.push(r.handoff_event);
+        out.acpt.push(r.acpt);
+        out.address.push(r.address);
         out.len += 1;
         out.strings_used += m.route_bytes;
         self.stats.rows = self.stats.rows.saturating_add(1);
@@ -1311,6 +1611,68 @@ impl Decoder {
         }
         Ok(())
     }
+}
+
+/// The form of a one-of altitude element: its code, or `None` when there is no form, more than
+/// one (the single one that is meant cannot be known), or the form's content was bad.
+fn single_form(forms: u8, count: u8, bad: bool) -> Option<u8> {
+    if forms == 0 || forms.count_ones() != 1 || count != 1 || bad {
+        return None;
+    }
+    Some(forms)
+}
+
+/// Turns the form elements of the assigned and the requested altitude into the form columns.
+/// A message with two forms of one altitude, or a form whose content is bad, has that altitude's
+/// form marked as a field error; the plain `AssignedAlt` field keeps its own rule.
+fn compose_forms(m: &mut Msg) {
+    if m.aforms != 0 {
+        let bits = m.aforms;
+        let simple_ok = bits & (FORM_BIT_SIMPLE | FORM_BIT_VFR_PLUS) == 0
+            || m.row.present & field_bit(Field::AssignedAlt) != 0;
+        let block_ok = bits & FORM_BIT_BLOCK == 0
+            || matches!((m.block_above, m.block_below), (Some(a), Some(b)) if a <= b);
+        let fix_ok = bits & FORM_BIT_AT_FIX == 0
+            || (m.fix_pre.is_some() && m.fix_post.is_some() && m.fix_point.is_some());
+        match single_form(
+            bits,
+            m.acount,
+            m.aform_bad || !simple_ok || !block_ok || !fix_ok,
+        ) {
+            Some(FORM_BIT_SIMPLE) => set_form(m, Field::AssignedForm, ALT_FORM_SIMPLE, true),
+            Some(FORM_BIT_VFR_PLUS) => set_form(m, Field::AssignedForm, ALT_FORM_VFR_PLUS, true),
+            Some(FORM_BIT_VFR) => set_form(m, Field::AssignedForm, ALT_FORM_VFR, true),
+            Some(FORM_BIT_BLOCK) => {
+                m.row.block_above_ft = m.block_above.unwrap_or(0);
+                m.row.block_below_ft = m.block_below.unwrap_or(0);
+                set_form(m, Field::AssignedForm, ALT_FORM_BLOCK, true);
+            }
+            Some(FORM_BIT_AT_FIX) => {
+                m.row.fixalt_pre_ft = m.fix_pre.unwrap_or(0);
+                m.row.fixalt_post_ft = m.fix_post.unwrap_or(0);
+                m.row.fixalt_point = m.fix_point.unwrap_or([0; 12]);
+                set_form(m, Field::AssignedForm, ALT_FORM_AT_FIX, true);
+            }
+            _ => mark_err(m, Field::AssignedForm),
+        }
+    }
+    if m.rforms != 0 {
+        match single_form(m.rforms, m.rcount, m.rform_bad) {
+            Some(FORM_BIT_SIMPLE) => set_form(m, Field::RequestedForm, ALT_FORM_SIMPLE, false),
+            Some(FORM_BIT_VFR_PLUS) => set_form(m, Field::RequestedForm, ALT_FORM_VFR_PLUS, false),
+            Some(FORM_BIT_VFR) => set_form(m, Field::RequestedForm, ALT_FORM_VFR, false),
+            _ => mark_err(m, Field::RequestedForm),
+        }
+    }
+}
+
+fn set_form(m: &mut Msg, f: Field, code: u8, assigned: bool) {
+    if assigned {
+        m.row.assigned_form = code;
+    } else {
+        m.row.requested_form = code;
+    }
+    mark_ok(m, f);
 }
 
 /// Whether element `i` (a child of the root) is a `message`: that local name in no namespace.

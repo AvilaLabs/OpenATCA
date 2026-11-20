@@ -133,7 +133,7 @@ mod speed;
 mod summary;
 mod trace;
 
-pub use archive::{scan_archive, ScanEnd, ScanError, ScanResult};
+pub use archive::{scan_archive, scan_archive_counted, ScanEnd, ScanError, ScanResult};
 pub use category::{category_is_reserved, category_observe, CategoryState, CATEGORY_PERSIST};
 pub use frames::{
     decode_payload, decode_payload_lenient, encode_payload, frame_ranges, PayloadCounts,
@@ -504,6 +504,29 @@ pub fn reports_extend(dst: &mut Reports, src: &Reports) {
     }
 }
 
+/// Appends the reports of `src`, the reports of one frame, to `dst`, unless any of them is timed in
+/// a sealed window (`oa_sealed::in_sealed_window`, OA-SEAL-014): then the whole frame is left out,
+/// as the pipeline leaves it out, and the number of its reports is returned (0 when the frame is
+/// kept); the number is also added to the process-wide count a tool prints.
+pub fn reports_extend_unsealed(dst: &mut Reports, src: &Reports) -> u64 {
+    let n = reports_len(src);
+    if src
+        .time_ns
+        .iter()
+        .take(n)
+        .any(|t| oa_sealed::in_sealed_window(*t))
+    {
+        oa_sealed::note_window_drops(n as u64);
+        return n as u64;
+    }
+    for i in 0..n {
+        if let Some(row) = reports_row(src, i) {
+            reports_push(dst, &row);
+        }
+    }
+    0
+}
+
 /// What to keep: a latitude/longitude box and a time window, applied while decoding. A report
 /// is kept when its position is inside the box (edges included) and its time is in
 /// `[from_ns, to_ns)`. Plain record (A1).
@@ -616,6 +639,9 @@ pub struct Stats {
     pub outside_box: u64,
     /// Rows inside the box but outside the time window.
     pub outside_time: u64,
+    /// Rows that would be kept but whose time is in a sealed window (OA-SEAL-014): not output,
+    /// counted here.
+    pub sealed_window_dropped: u64,
     /// Rows of traces whose address is reserved (0x000000 or 0xFFFFFF, not flagged non-ICAO):
     /// a misconfigured transponder's reports are not one aircraft's, so none are output.
     pub reserved_address: u64,
@@ -679,6 +705,7 @@ pub fn stats_add(a: &mut Stats, b: &Stats) {
     }
     a.outside_box += b.outside_box;
     a.outside_time += b.outside_time;
+    a.sealed_window_dropped += b.sealed_window_dropped;
     a.reserved_address += b.reserved_address;
     a.kept += b.kept;
     a.bad_measurements += b.bad_measurements;

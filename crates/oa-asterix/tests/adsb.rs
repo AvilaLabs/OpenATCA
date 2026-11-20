@@ -259,16 +259,19 @@ fn real_adsb_lol_rows_round_trip() {
         return;
     };
     let dir = std::path::Path::new(&dir).join("raw/adsblol");
-    let part = std::fs::read_dir(&dir).ok().and_then(|rd| {
-        rd.flatten()
-            .map(|e| e.path())
+    // Only unsealed days are considered: a sealed day directory or part is skipped and counted,
+    // never opened (OA-SEAL-012), and none left means the test skips.
+    let part = oa_sealed::walk_unsealed(&dir).ok().and_then(|w| {
+        eprintln!("sealed entries skipped: {}", w.skipped);
+        w.files
+            .into_iter()
             .find(|p| p.extension().is_some_and(|e| e == "aa"))
     });
     let Some(part) = part else {
-        eprintln!("no .aa part under {}: skipping", dir.display());
+        eprintln!("no unsealed .aa part under {}: skipping", dir.display());
         return;
     };
-    let f = std::fs::File::open(&part).unwrap();
+    let f = oa_sealed::open(&part).unwrap();
     // Take the first 40 000 rows and stop the scan there.
     const WANT: usize = 40_000;
     let mut rows = Reports::default();

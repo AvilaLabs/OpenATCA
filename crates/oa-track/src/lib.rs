@@ -30,6 +30,7 @@ pub mod assoc;
 pub mod canon;
 pub mod canon_spill;
 pub mod coarse;
+mod confirm;
 mod filter;
 pub mod fixed_map;
 pub mod fusion;
@@ -55,9 +56,10 @@ pub use filter::Filter;
 pub use hfilter::{HFilter, HModel};
 pub use tracker::{
     measurement_check, r95_m_of, tracker_advance, tracker_buffers, tracker_bytes, tracker_config,
-    tracker_counts, tracker_flush, tracker_live, tracker_live_iter, tracker_log, tracker_new,
-    tracker_newest_update_ns, tracker_note_radar_disagreement, tracker_predict,
-    tracker_predict_checked, tracker_stats, tracker_update, Tracker,
+    tracker_counts, tracker_flush, tracker_forecast, tracker_live, tracker_live_iter, tracker_log,
+    tracker_moves_active, tracker_new, tracker_newest_update_ns, tracker_note_radar_disagreement,
+    tracker_predict, tracker_predict_checked, tracker_set_expected_interval, tracker_stats,
+    tracker_update, Tracker,
 };
 pub use types::*;
 pub use vfilter::{VFilter, VModel};

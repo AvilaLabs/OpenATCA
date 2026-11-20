@@ -54,6 +54,7 @@ use crate::schema::{
     ns_uri, At, El, Nsx, BODIES, EMPTY, FI_MESSAGE, FLIGHT_DATA, FLOW_BODIES, FLTD_MESSAGE,
     MAX_DEPTH, TMI_LIST_BODY, TMI_LIST_TYPE,
 };
+use oa_sealed::DropWindow;
 use oa_xml::{
     attr_needs_decode, decode_into, decode_text_run, ns_uri_bytes, resolve_elem_ns, span_bytes,
     text_needs_decode, Doc, ElemIx, Limits, Ns, Parser, Span, SpanKind, XmlError,
@@ -96,6 +97,10 @@ pub struct Outcome {
     /// Speeds of a form that is neither knots nor Mach, kept with unit
     /// [`spd_unit::UNKNOWN`] instead of refusing the message.
     pub unknown_units: u32,
+    /// Messages of a document dropped whole because one of them has its `sourceTimeStamp` in
+    /// [`Rows::window`] (OA-SEAL-014). The document was not decoded: every other field of the
+    /// outcome is zero and nothing was touched.
+    pub sealed_dropped: u32,
 }
 
 /// Parses `input` with `parser` and decodes it. A parse error is [`DocError::Xml`].
@@ -129,7 +134,134 @@ pub fn decode_doc_prefix(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocE
     decode_with(doc, rows, true)
 }
 
+/// Reads every observation time and every actual-event time of the document: the
+/// `sourceTimeStamp` of every element that has one (the `fltdMessage` and `fiMessage` messages,
+/// which also time their TMI flight list entries), the position times, and the actual times of
+/// departure, arrival, gate, runway, boundary crossing and coordination (a message stamped after
+/// the window can report an event inside it), directly from the parsed tree and whatever else is valid in it. If any is in `window`, returns how many
+/// messages the document has (all are dropped, at least 1); otherwise 0. A time that cannot be
+/// read is not in the window (the frame's receive time gates it).
+fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
+    if window.span().is_none() {
+        return 0;
+    }
+    // Attributes that are an observation or the time of an actual event, on any element.
+    const ATTRS: [&[u8]; 12] = [
+        b"sourceTimeStamp",
+        b"airlineOutTime",
+        b"airlineOffTime",
+        b"airlineOnTime",
+        b"airlineInTime",
+        b"runwayDeparture",
+        b"runwayArrival",
+        b"gateDeparture",
+        b"gateArrival",
+        b"boundaryCrossingTime",
+        b"lastUpdateTime",
+        // The time the flight was created in the system: not an event time but a record time of
+        // the message, keyed when in doubt.
+        b"flightCreation",
+    ];
+    // Whether attribute `name` of `e` has the value `want`.
+    let attr_is = |e: ElemIx, name: &[u8], want: &[u8]| {
+        (0..attr_count(doc, e)).any(|k| {
+            let a = attr_ref(doc, e, k);
+            let mut buf = [0u8; MAX_VALUE];
+            a.name == name && value_bytes(doc, attr_val(&a), &mut buf).is_ok_and(|v| v == want)
+        })
+    };
+    let in_window = |v: &[u8]| parse_time(v).is_ok_and(|t| window.contains(t));
+    let (mut messages, mut hit) = (0u32, false);
+    for i in 0..doc.elem_name.len() {
+        let e = ElemIx(i as u32);
+        let name = elem_name(doc, e);
+        if name == b"fltdMessage" || name == b"fiMessage" || name == b"tfmsStatusOutput" {
+            messages = messages.saturating_add(1);
+        }
+        // `eta` and `etd` carry an actual event time when their type says so.
+        let typed_actual = (name == b"etd" && attr_is(e, b"etdType", b"ACTUAL"))
+            || (name == b"eta" && attr_is(e, b"etaType", b"ACTUAL"));
+        for k in 0..attr_count(doc, e) {
+            let a = attr_ref(doc, e, k);
+            let key = ATTRS.contains(&a.name);
+            let typed = typed_actual && a.name == b"timeValue";
+            if !key && !typed {
+                continue;
+            }
+            let mut buf = [0u8; MAX_VALUE];
+            if let Ok(v) = value_bytes(doc, attr_val(&a), &mut buf) {
+                hit |= in_window(v);
+            }
+        }
+    }
+    // The observation and actual-event times that are element text: the position time
+    // (`timeAtPosition`, an oceanic position's `time`), the actual time of departure or arrival
+    // (`estimated` is not "true"), an actual coordination time, and the times a flow message
+    // reports (`eventTime`, `dateSent`, `lastUpdate`). A text that a comment or CDATA section
+    // splits is one value.
+    let total = doc.text_owner.len();
+    let mut t = 0usize;
+    while t < total {
+        let Some(&owner) = doc.text_owner.get(t) else {
+            break;
+        };
+        let first = t;
+        while doc.text_owner.get(t) == Some(&owner) {
+            t += 1;
+        }
+        let name = elem_name(doc, owner);
+        let key = match name {
+            b"timeAtPosition" | b"time" | b"eventTime" | b"dateSent" | b"lastUpdate" => true,
+            b"timeOfDeparture" | b"timeOfArrival" => !attr_is(owner, b"estimated", b"true"),
+            b"coordinationTime" | b"newCoordinationTime" => attr_is(owner, b"type", b"ACTUAL"),
+            _ => false,
+        };
+        if key {
+            // The decoder's own value, built by the function `leaf_text` builds it with, and read
+            // by the decoder's own value reader. (An element that is not a leaf is refused by
+            // the decoder; its text is read here all the same, so the scan reads at least what
+            // the decoder reads.)
+            let v = text_value(doc, first, t - first);
+            let mut buf = [0u8; MAX_VALUE];
+            if let Ok(v) = value_bytes(doc, v, &mut buf) {
+                hit |= in_window(v);
+            }
+        }
+    }
+    if hit {
+        messages.max(1)
+    } else {
+        0
+    }
+}
+
+/// The outcome of a document dropped whole by [`prescan`]: only the count, nothing else.
+fn sealed_outcome(messages: u32) -> Outcome {
+    Outcome {
+        kind: DocKind::Empty,
+        messages: 0,
+        flight_rows: 0,
+        flow_rows: 0,
+        unknown_paths: 0,
+        ignored_paths: 0,
+        dropped: 0,
+        rejected: 0,
+        first_reject: None,
+        reject_fields: [0; FIELD_COUNT],
+        reject_kinds: [0; ERROR_KIND_COUNT],
+        unknown_words: 0,
+        unknown_units: 0,
+        sealed_dropped: messages,
+    }
+}
+
 fn decode_with(doc: &Doc<'_>, rows: &mut Rows, prefix: bool) -> Result<Outcome, DocError> {
+    // The first step, before any count, row, string or table is touched: a document with a
+    // message in the sealed window is dropped whole.
+    let gone = prescan(doc, rows.window);
+    if gone > 0 {
+        return Ok(sealed_outcome(gone));
+    }
     let f0 = flights_len(&rows.flights);
     let w0 = flows_len(&rows.flows);
     let s0 = rows.strings_used;
@@ -335,15 +467,20 @@ fn leaf_text(
     if count == 0 {
         return Ok(None);
     }
-    let span = doc.text_span.get(first).copied().unwrap_or_default();
-    let flagged = text_needs_decode(doc, oa_xml::TextIx(first as u32));
-    Ok(Some(Val {
-        span,
-        flagged,
+    Ok(Some(text_value(doc, first, count)))
+}
+
+/// The value of the `count` text nodes from node `first`, which one element owns: the one value
+/// the decoder reads for a leaf element, over however many nodes a comment or CDATA section
+/// split it into. [`leaf_text`] and the pre-scan ([`prescan`]) both build the value here.
+fn text_value(doc: &Doc<'_>, first: usize, count: usize) -> Val {
+    Val {
+        span: doc.text_span.get(first).copied().unwrap_or_default(),
+        flagged: text_needs_decode(doc, oa_xml::TextIx(first as u32)),
         kind: SpanKind::Text,
         first,
         count,
-    }))
+    }
 }
 
 // ---- storing a value -----------------------------------------------------------------------
@@ -913,6 +1050,7 @@ fn guarded(
 ) -> Result<(), DocError> {
     let m = mark(acc, c);
     match f(acc, c) {
+        Ok(()) => Ok(()),
         Err(DocError::Field(fe)) => {
             truncate_rows(c.rows, m.flights, m.flows, m.strings);
             acc.unknown = m.unknown;
@@ -1243,5 +1381,6 @@ fn decode_root(
         reject_kinds: acc.reject_kinds,
         unknown_words: c.unknown_words,
         unknown_units: c.unknown_units,
+        sealed_dropped: 0,
     })
 }

@@ -25,7 +25,7 @@ use oa_compass::shell::adsb_export::AdsbExport;
 use oa_compass::shell::encode::MAX_POSITION_ERROR_E7;
 use oa_compass::shell::error::ExportError;
 use oa_compass::shell::export::{Layout, SystemExport};
-use oa_compass::shell::job::{run_job, EramSource, Job};
+use oa_compass::shell::job::{run_job, run_job_counted, EramSource, Job};
 use oa_compass::shell::notes::{ADSB_SOURCE, OPENATCA_SOURCE};
 use oa_compass::shell::run::{export_output, EramAddress, InputsMode, OpenatcaRows, TrackRunInfo};
 use oa_compass::shell::slice::Stage;
@@ -1738,15 +1738,21 @@ fn the_prescan_refuses_sealed_adsb_times_including_stale_and_refused_rows() {
     assert_refused_and_nothing_made(j, &out, "ADS-B: 1 input rows");
     // A row the clip loader itself drops (position out of range) never becomes a report, so
     // the pre-scan cannot see it; it cannot reach any output either.
-    // 2026-11-20 00:00:00.000 alone is accepted.
+    // 2026-11-24 02:00:00 alone is accepted. Main's sealed window runs 2026-11-20 to 2026-11-23
+    // 00:17, widened by 15 minutes, and drops a frame with any row in it whole, so a row of
+    // 2026-11-20 is no longer an accepted edge.
     let clip = clip_rows(
         &work,
         "e.oaf",
-        &[(SEALED_START_NS + 86_400_000_000_000, 0, 410_000_000)],
+        &[(
+            SEALED_START_NS + 5 * 86_400_000_000_000 + 7_200_000_000_000,
+            0,
+            410_000_000,
+        )],
     );
     let out = work.join("e");
     let mut j = job(&out, Some(clip), false, false, OpenatcaRows::Ticks);
-    j.layout.day = 20_777;
+    j.layout.day = 20_781;
     run(j).unwrap();
 }
 
@@ -2004,4 +2010,22 @@ fn the_readme_reconciles_the_adsb_reports_offered_with_what_became_of_them() {
     assert!(readme.contains(
         "reports refused (position beyond 90 / 180 degrees, or time does not fit a day): 0"
     ));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_run_returns_the_sealed_window_count_summed_over_its_inputs_and_the_readme_says_it() {
+    let work = tmp("sealed-count");
+    let clip = write_clip(&work, 120);
+    let out = work.join("out");
+    let (_, sealed) = run_job_counted(
+        job(&out, Some(clip), true, false, OpenatcaRows::Ticks),
+        &mut |_| Ok(()),
+        &mut |_| {},
+    )
+    .unwrap();
+    // Nothing of this clip or of the ERAM table is in the window.
+    assert_eq!(sealed, 0);
+    let readme = std::fs::read_to_string(out.join("README.txt")).unwrap();
+    assert!(readme.contains("sealed-window rows dropped"), "{readme}");
 }

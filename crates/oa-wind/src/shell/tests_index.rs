@@ -320,13 +320,16 @@ fn real_rap_files() -> Vec<PathBuf> {
         return Vec::new();
     };
     let dir = PathBuf::from(root).join("raw/rap");
-    let Ok(rd) = std::fs::read_dir(&dir) else {
+    // A sealed entry is skipped and counted, never opened (OA-SEAL-012).
+    let Ok(walk) = oa_sealed::walk_unsealed(&dir) else {
         println!("{} missing: skipped", dir.display());
         return Vec::new();
     };
-    let mut v: Vec<PathBuf> = rd
-        .filter_map(Result::ok)
-        .map(|e| e.path())
+    println!("sealed entries skipped: {}", walk.skipped);
+    let mut v: Vec<PathBuf> = walk
+        .files
+        .into_iter()
+        .filter(|p| p.parent() == Some(dir.as_path()))
         .filter(|p| p.extension().is_some_and(|e| e == "grib2"))
         .collect();
     v.sort();
@@ -343,14 +346,14 @@ fn real_rap_subsets_refuse_the_idx_of_the_original_and_accept_their_own() {
     else {
         return;
     };
-    let data = std::fs::read(path).unwrap();
+    let data = oa_sealed::read(path).unwrap();
     let whole = load_hour(&data).unwrap();
     assert_eq!(whole.levels_pa.len(), 37);
     // The shipped sidecar is the original file's, whose offsets are not this subset's.
     let dir = Dir::new("real");
     let (h, used) = read_hour_file_report(&dir.write(
         &data,
-        Some(&std::fs::read_to_string(format!("{}.idx", path.display())).unwrap()),
+        Some(&oa_sealed::read_to_string(PathBuf::from(format!("{}.idx", path.display()))).unwrap()),
     ))
     .unwrap();
     assert_eq!(h, whole);
