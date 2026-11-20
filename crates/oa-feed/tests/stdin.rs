@@ -232,3 +232,21 @@ fn stdin_mode_records_compressed_and_replay_matches_the_raw_recording() {
     assert!(text.contains("replay files=1 "), "{text}");
     std::fs::remove_dir_all(&base).unwrap();
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn replay_counts_bytes_after_the_window_gate() {
+    // 2026-11-20T00:00:00Z in Unix nanoseconds, the start of the sealed window.
+    const FROM: i64 = 1_795_132_800_000_000_000;
+    let frame = |i: u64, t: i64| {
+        let mut buf = vec![0u8; HEADER_LEN + 1 + TRAILER_LEN];
+        let n = encode_frame(&mut buf, 1, 0, i, t, 0, b"x").unwrap();
+        buf[..n].to_vec()
+    };
+    let (a, b) = (frame(0, FROM - 1), frame(1, FROM));
+    let mut all = a.clone();
+    all.extend(&b);
+    let mut sealed = 0u64;
+    let rep = oa_feed::replay::replay_sources_counted(vec![&all[..]], &mut sealed).unwrap();
+    assert_eq!((sealed, rep.bytes), (1, a.len() as u64));
+}

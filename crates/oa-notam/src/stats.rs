@@ -25,6 +25,9 @@ pub struct Stats {
     /// Rows of the unknown-path table; paths beyond it are counted in `unknown_overflow`.
     pub max_unknown_paths: usize,
     pub docs: u64,
+    /// NOTAMs dropped because they were issued or cancelled in the window (OA-SEAL-014): in no
+    /// other count, `docs` included.
+    pub sealed_window_dropped: u64,
     pub accepted: u64,
     pub rows: u64,
     /// Refused documents by reason ([`crate::reject_index`]).
@@ -52,6 +55,7 @@ pub fn new_stats(max_unknown_paths: usize) -> Stats {
     Stats {
         max_unknown_paths,
         docs: 0,
+        sealed_window_dropped: 0,
         accepted: 0,
         rows: 0,
         rejects: [0; REJECT_SLOTS],

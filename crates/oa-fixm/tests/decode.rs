@@ -65,7 +65,12 @@ fn run_with(xml: &str, cap: usize, strings: usize, limits: Limits) -> (Run, Resu
 }
 
 fn run(xml: &str) -> Run {
-    let (r, res) = run_with(xml, 64, 1 << 16, Limits::default());
+    let (r, res) = run_with(
+        xml,
+        64,
+        1 << 16,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     res.expect("decodes");
     r
 }
@@ -777,18 +782,30 @@ fn whole_message_rejection_is_counted_by_reason() {
 #[test]
 fn row_capacity_is_all_or_nothing_per_document() {
     let three = doc(&[message("TH", ""), message("TH", ""), message("TH", "")]);
-    let (r, res) = run_with(&three, 2, 1024, Limits::default());
+    let (r, res) = run_with(
+        &three,
+        2,
+        1024,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Err(FixmError::RowCapacity { capacity: 2 }));
     assert_eq!(r.ev.len, 0);
     assert!(r.ev.gufi.is_empty() && r.ev.present.is_empty());
-    let (r, res) = run_with(&three, 3, 1024, Limits::default());
+    let (r, res) = run_with(
+        &three,
+        3,
+        1024,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Ok(()));
     assert_eq!(r.ev.len, 3);
     assert_eq!(r.ev.capacity, 3);
 
     // Existing rows survive a refused document.
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(3, 1024);
     let one_doc = doc(&[message("TH", "")]);
     let d = parser.parse(one_doc.as_bytes()).unwrap();
@@ -813,11 +830,21 @@ fn string_table_capacity_rolls_the_whole_document_back() {
         message("FH", &route("ABCDEFGHIJ")),
         message("FH", &route("KLMNOPQRST")),
     ]);
-    let (r, res) = run_with(&two, 8, 15, Limits::default());
+    let (r, res) = run_with(
+        &two,
+        8,
+        15,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Err(FixmError::StringCapacity { capacity: 15 }));
     assert_eq!(r.ev.len, 0);
     assert_eq!(r.ev.strings_used, 0);
-    let (r, res) = run_with(&two, 8, 20, Limits::default());
+    let (r, res) = run_with(
+        &two,
+        8,
+        20,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Ok(()));
     assert_eq!(r.ev.strings_used, 20);
     assert_eq!(route_text(&r.ev, 0), "ABCDEFGHIJ");
@@ -832,7 +859,7 @@ fn route_text_is_bounded_and_entities_are_decoded() {
     let route = |t: &str| format!(r#"<agreed><route nasRouteText="{t}"/></agreed>"#);
     let limits = Limits {
         max_route_len: 8,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let (r, res) = run_with(&doc(&[message("FH", &route("12345678"))]), 4, 64, limits);
     res.unwrap();
@@ -909,7 +936,7 @@ fn unknown_path_table_is_bounded() {
     let body = r#"<a1/><a2/><a3/><a4/><a1/>"#;
     let limits = Limits {
         max_unknown_paths: 2,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let (r, res) = run_with(&doc(&[message("TH", body)]), 4, 64, limits);
     res.unwrap();
@@ -956,7 +983,9 @@ fn namespaced_and_foreign_elements_are_unknown_not_decoded() {
 #[test]
 fn documents_that_are_not_sfdps_message_collections_are_refused() {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(8, 64);
     for xml in [
         r#"<FDPSMsg xmlns="us:gov:dot:faa:atm:enroute:entities:flightdata"><center>ZXX</center></FDPSMsg>"#,
@@ -993,7 +1022,7 @@ fn element_limit_and_input_mismatch_are_errors() {
     let mut ev = new_events(4, 64);
     let mut dec = Decoder::new(Limits {
         max_elements: n - 1,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     assert_eq!(
         dec.decode(&d, xml.as_bytes(), &mut ev),
@@ -1004,7 +1033,7 @@ fn element_limit_and_input_mismatch_are_errors() {
     );
     let mut dec = Decoder::new(Limits {
         max_elements: n,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     assert!(dec.decode(&d, xml.as_bytes(), &mut ev).is_ok());
     let copy = xml.clone();
@@ -1068,7 +1097,7 @@ fn mutated_fixtures_never_panic() {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits {
         max_unknown_paths: 8,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut ev = new_events(4, 64);
     let mut docs = 0usize;
@@ -1142,7 +1171,9 @@ fn decoder_is_reusable_and_does_not_grow() {
     let big = doc(&[message("TH", TH_BODY), message("FH", TH_BODY)]);
     let small = doc(&[message("BA", "")]);
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(8, 4096);
     let caps = |e: &Events| {
         (
@@ -1205,7 +1236,7 @@ fn route_attribute_whitespace_is_normalised() {
         &doc(&[message("FH", &route("AA\tBB\r\nCC"))]),
         4,
         64,
-        Limits::default(),
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
     );
     res.unwrap();
     assert_eq!(route_text(&r.ev, 0), "AA BB CC");
@@ -1214,7 +1245,9 @@ fn route_attribute_whitespace_is_normalised() {
 fn decode_prefix_run(xml: &str, cap: usize) -> (Summary, usize) {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let d = parser.parse(xml.as_bytes()).expect("fixture parses");
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(cap, 1 << 16);
     let s = dec.decode_prefix(&d, xml.as_bytes(), &mut ev).unwrap();
     (s, ev.len)
@@ -1277,7 +1310,12 @@ fn foreign_siblings_do_not_count_as_messages() {
     let foreign = r#"<other xmlns="urn:other"><x/></other>"#.to_string();
     let xml = doc(&[message("TH", ""), foreign.clone()]);
     // Capacity for exactly one row: the foreign sibling needs none.
-    let (r, res) = run_with(&xml, 1, 1 << 16, Limits::default());
+    let (r, res) = run_with(
+        &xml,
+        1,
+        1 << 16,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     res.expect("one message fits one row");
     assert_eq!((r.sum.messages, r.sum.rows), (1, 1));
     // Prefix mode with no capacity: the one real message is undecoded, the sibling is not counted.
@@ -1560,8 +1598,8 @@ fn a_message_timed_in_the_drop_window_is_in_no_count_of_the_decoder() {
     let in_pos =
         format!(r#"{unknown}<enRoute><position positionTime="2026-11-22T00:00:00Z"/></enRoute>"#);
     let limits = Limits {
-        drop_window: Some(DROP),
-        ..Limits::default()
+        drop_window: oa_sealed::DropWindow::new(DROP.0, DROP.1),
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     // Sealed by the message timestamp, by the position time, and a sealed message that is also
     // refused (no GUFI): none of them counts as a message, row, rejection or unknown path.
@@ -1583,7 +1621,12 @@ fn a_message_timed_in_the_drop_window_is_in_no_count_of_the_decoder() {
         at("2030-01-02T03:04:05Z", unknown),
         at("2026-11-23T00:17:00Z", unknown),
     ]);
-    let (b, res) = run_with(&kept, 64, 1 << 16, Limits::default());
+    let (b, res) = run_with(
+        &kept,
+        64,
+        1 << 16,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     res.unwrap();
     let (sa, sb) = (a.dec.stats(), b.dec.stats());
     assert_eq!(sa.sealed_window_dropped, 3);
@@ -1620,9 +1663,9 @@ fn a_message_timed_in_the_drop_window_is_in_no_count_of_the_decoder() {
 #[test]
 fn a_dropped_message_that_overflowed_the_unknown_table_takes_the_overflow_back_out() {
     let limits = Limits {
-        drop_window: Some(DROP),
+        drop_window: oa_sealed::DropWindow::new(DROP.0, DROP.1),
         max_unknown_paths: 1,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let xml = doc(&[
         at("2030-01-02T03:04:05Z", "<first/>"),
@@ -1636,4 +1679,46 @@ fn a_dropped_message_that_overflowed_the_unknown_table_takes_the_overflow_back_o
         (1, 0, 1)
     );
     assert_eq!(st.sealed_window_dropped, 1);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_dropped_message_leaves_the_unknown_path_a_kept_message_put_in_the_table_and_takes_back_its_own_count(
+) {
+    let limits = Limits {
+        drop_window: oa_sealed::DropWindow::new(DROP.0, DROP.1),
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+    };
+    // The same unknown element in a kept message, a dropped one, and another kept one.
+    let xml = doc(&[
+        at("2030-01-02T03:04:05Z", "<same/>"),
+        at("2026-11-21T00:00:00Z", "<same/><same/>"),
+        at("2030-01-02T03:04:06Z", "<same/>"),
+    ]);
+    let (r, res) = run_with(&xml, 8, 1 << 12, limits);
+    res.unwrap();
+    let st = r.dec.stats();
+    assert_eq!(st.sealed_window_dropped, 1);
+    assert_eq!(st.unknown_elements, 2);
+    assert_eq!(st.unknown.len(), 1);
+    assert_eq!(st.unknown.first().map(|u| u.count), Some(2));
+    // The dropped message is named by its element index, for a caller that reads the document
+    // again.
+    assert_eq!(r.dec.dropped_messages().len(), 1);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_document_whose_messages_were_all_dropped_by_time_is_not_counted_as_a_document() {
+    let limits = Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1));
+    let xml = doc(&[
+        at("2026-11-21T00:00:00Z", "<x/>"),
+        at("2026-11-22T00:00:00Z", "<y/>"),
+    ]);
+    let (r, res) = run_with(&xml, 8, 1 << 12, limits);
+    res.unwrap();
+    let st = r.dec.stats();
+    assert_eq!(st.sealed_window_dropped, 2);
+    assert_eq!((st.docs, st.messages, st.rows), (0, 0, 0));
+    assert!(st.unknown.is_empty());
 }

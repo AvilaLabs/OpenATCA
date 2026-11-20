@@ -27,6 +27,7 @@ use crate::scalar::{
     parse_lat_lon, parse_limit, parse_uint, parse_uuid, trim, EffEnd,
 };
 use crate::stats::{Stats, UnknownPath, MAX_PATH_TEXT};
+use oa_sealed::DropWindow;
 use oa_xml::{
     attr_needs_decode, decode_into, ns_uri_bytes, resolve_attr_ns, resolve_elem_ns, span_bytes,
     text_needs_decode, AttrIx, Doc, ElemIx, Ns, Parser, Span, SpanKind, TextIx,
@@ -43,14 +44,23 @@ pub struct Limits {
     pub max_text_len: usize,
     /// Most vertices (closing vertex included) in one polygon; more is a field error.
     pub max_poly_vertices: usize,
+    /// A NOTAM issued (`issued`) or cancelled (`canceled`) in this window is dropped whole before
+    /// any count is updated: no row, and no `docs`, `accepted`, `rows`, field, feature or unknown
+    /// count; it is counted in [`Stats::sealed_window_dropped`]. A document refused whole is
+    /// counted as refused (it has no known time). Its validity span is not a message time and is
+    /// not checked. Required: there is no `Default`, so a caller cannot forget it.
+    pub drop_window: DropWindow,
 }
 
-impl Default for Limits {
-    fn default() -> Limits {
+impl Limits {
+    /// The default bounds, dropping NOTAMs timed in `window`. A tool passes
+    /// [`DropWindow::sealed`]; tests and fuzz targets pass [`DropWindow::empty_for_tests_and_fuzz`].
+    pub const fn new(window: DropWindow) -> Limits {
         Limits {
             max_elements: 50_000,
             max_text_len: 8192,
             max_poly_vertices: 4096,
+            drop_window: window,
         }
     }
 }
@@ -65,6 +75,9 @@ pub struct Outcome {
     pub field_errors: u32,
     pub unknown_elements: u32,
     pub unknown_attributes: u32,
+    /// The NOTAM was dropped for its time in [`Limits::drop_window`]: no row was appended (`row`
+    /// is then 0 and names nothing) and no count but `Stats::sealed_window_dropped` has it.
+    pub sealed_dropped: bool,
 }
 
 /// The namespaces of the surveyed feed, and the short alias a known path uses for each. The
@@ -746,7 +759,38 @@ pub fn decode_doc(
 ) -> Result<Outcome, DocError> {
     stats.docs = stats.docs.saturating_add(1);
     let start = mark(out);
+    // What the walk may change before the time of the NOTAM is known, to put back if it is
+    // dropped for its time.
+    let snap = (
+        stats.unknown.clone(),
+        stats.unknown_elements,
+        stats.unknown_attributes,
+        stats.unknown_overflow,
+    );
     let r = decode_inner(dec, doc, out, stats, start);
+    if let Ok(o) = &r {
+        let i = o.row as usize;
+        let w = dec.limits.drop_window;
+        let timed = |v: &[i64]| v.get(i).is_some_and(|&t| w.contains(t));
+        if timed(&out.issued_ms) || timed(&out.canceled_ms) {
+            truncate_notams(out, start);
+            stats.docs = stats.docs.saturating_sub(1);
+            (
+                stats.unknown,
+                stats.unknown_elements,
+                stats.unknown_attributes,
+                stats.unknown_overflow,
+            ) = snap;
+            stats.sealed_window_dropped = stats.sealed_window_dropped.saturating_add(1);
+            return Ok(Outcome {
+                row: 0,
+                field_errors: 0,
+                unknown_elements: 0,
+                unknown_attributes: 0,
+                sealed_dropped: true,
+            });
+        }
+    }
     match &r {
         Ok(o) => {
             stats.accepted = stats.accepted.saturating_add(1);
@@ -880,6 +924,7 @@ fn decode_inner(
         field_errors: out.errors.get(row as usize).map_or(0, |w| w.count_ones()),
         unknown_elements: unknown_el,
         unknown_attributes: unknown_at,
+        sealed_dropped: false,
     })
 }
 

@@ -693,7 +693,23 @@ fn file_mod(t: &str) -> Option<String> {
 /// Whether a string of the line (not its comments or identifiers: `OPENATCA_SOURCE` is a constant
 /// of the code) names the real data root, as an environment variable or a path.
 fn line_names_root(l: &Line) -> bool {
-    ROOT_MARKERS.iter().any(|m| l.strs.contains(m))
+    if ROOT_MARKERS.iter().any(|m| l.strs.contains(m)) {
+        return true;
+    }
+    // A name assembled from pieces by `concat!` or `format!`: the string pieces of the line, run
+    // together, name the root.
+    // (The line that defines the markers themselves is the one exception.)
+    if (l.code.contains("concat!") || l.code.contains("format!"))
+        && !l.code.contains("ROOT_MARKERS")
+    {
+        let joined: String = l
+            .strs
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        return ROOT_MARKERS.iter().any(|m| joined.contains(m));
+    }
+    false
 }
 
 /// Whether a `pub use` line brings in something of `std::fs` or `std::process`.
@@ -1087,6 +1103,17 @@ fn the_scan_finds_function_values_globs_grouped_uses_aliases_methods_and_multi_l
     assert!(scan(&format!("let r = std::env::var(\"{var}\");"), true).names_root);
     assert!(scan(&format!("let r = \"/x/{}/raw\";", ROOT_MARKERS[1]), true).names_root);
     assert!(!scan(&format!("// {var} is read elsewhere\nlet r = 1;"), true).names_root);
+    // A root name assembled by `concat!` or `format!` from pieces counts too.
+    let (a, b) = (&ROOT_MARKERS[0][..4], &ROOT_MARKERS[0][4..]);
+    assert!(
+        scan(
+            &format!("let n = concat!(\"{a}\", \"{b}\", \"CLIP\");"),
+            true
+        )
+        .names_root
+    );
+    assert!(scan(&format!("let n = format!(\"{a}{b}{{}}\", 1);"), true).names_root);
+    assert!(!scan("let n = format!(\"x{}\", 1);", true).names_root);
 }
 
 // REQ: OA-SEAL-006

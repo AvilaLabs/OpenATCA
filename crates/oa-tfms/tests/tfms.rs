@@ -204,7 +204,12 @@ fn run_with(
     flows: usize,
     strings: usize,
 ) -> (Result<Outcome, DocError>, Rows) {
-    let mut rows = new_rows(flights, flows, strings);
+    let mut rows = new_rows(
+        flights,
+        flows,
+        strings,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let mut p = Parser::new(default_limits()).unwrap();
     let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
     (r, rows)
@@ -493,7 +498,7 @@ fn rows_are_plain_struct_of_arrays_with_absent_values() {
         assert_eq!(v, NO_NUM);
     }
     // Push, rebuild, truncate, capacity: one row at a time, columns sharing an index.
-    let mut rows = new_rows(2, 1, 64);
+    let mut rows = new_rows(2, 1, 64, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     assert_eq!(rows.flights.cap, 2);
     let mut a = BLANK_FLIGHT;
     a.kind = kind::TRACK;
@@ -1236,7 +1241,12 @@ fn every_field_error_names_the_field_and_the_kind() {
         match decode_bytes(
             &mut Parser::new(default_limits()).unwrap(),
             doc.replacen(from, to, 1).as_bytes(),
-            &mut new_rows(4, 4, 1 << 12),
+            &mut new_rows(
+                4,
+                4,
+                1 << 12,
+                oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+            ),
         ) {
             Ok(Outcome {
                 rejected: 1,
@@ -1369,7 +1379,12 @@ fn one_bad_message_is_rolled_back_and_its_siblings_are_kept() {
     assert_eq!(rows.strings_used, 0);
     // rows already in the caller's table from earlier documents survive a document whose only
     // message is refused
-    let mut rows = new_rows(16, 8, 1 << 16);
+    let mut rows = new_rows(
+        16,
+        8,
+        1 << 16,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let mut p = Parser::new(default_limits()).unwrap();
     decode_bytes(&mut p, wrap_flight(&track_route()).as_bytes(), &mut rows).unwrap();
     let (f, w, s) = (
@@ -1484,13 +1499,18 @@ fn capacity_is_stated_and_never_exceeded() {
     r.unwrap();
     assert_eq!(rows.strings_used, need);
     // pushes past capacity are refused, not grown
-    let mut rows = new_rows(1, 1, 8);
+    let mut rows = new_rows(1, 1, 8, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     assert!(push_flight(&mut rows.flights, &BLANK_FLIGHT));
     assert!(!push_flight(&mut rows.flights, &BLANK_FLIGHT));
     assert!(push_flow(&mut rows.flows, &BLANK_FLOW));
     assert!(!push_flow(&mut rows.flows, &BLANK_FLOW));
     // the table does not move or grow while decoding: no allocation after init
-    let mut rows = new_rows(8, 4, 1 << 12);
+    let mut rows = new_rows(
+        8,
+        4,
+        1 << 12,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let before = (
         rows.flights.acid.as_ptr(),
         rows.flights.acid.capacity(),
@@ -1606,7 +1626,12 @@ fn mutating_documents_never_panics() {
         ),
         wrap_fi(&[rstr(), gadv(), fxa(), aptc(), tmi_list()].concat()),
     ];
-    let mut rows = new_rows(64, 32, 1 << 16);
+    let mut rows = new_rows(
+        64,
+        32,
+        1 << 16,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let mut p = Parser::new(default_limits()).unwrap();
     let mut accepted = 0u32;
     let mut refused = 0u32;
@@ -1680,7 +1705,12 @@ fn mutating_documents_never_panics() {
 #[test]
 fn stats_fold_outcomes_rejects_and_field_errors() {
     let mut s = new_stats();
-    let mut rows = new_rows(16, 8, 1 << 16);
+    let mut rows = new_rows(
+        16,
+        8,
+        1 << 16,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let mut p = Parser::new(default_limits()).unwrap();
     let docs = [
         wrap_flight(&[track(), modify()].concat()),
@@ -1774,7 +1804,7 @@ fn linkage_matches_by_gufi_then_by_acid_departure_arrival() {
     sfdps(&mut ev, 2, "AB00000002", "TST2", "KTAA", "KTCC");
     sfdps(&mut ev, 3, "", "TST3", "KTDD", "KTEE"); // no plan identifier, has a key
     sfdps(&mut ev, 4, "AB00000004", "", "", ""); // plan identifier only
-    let mut rows = new_rows(16, 1, 16);
+    let mut rows = new_rows(16, 1, 16, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     tfms(&mut rows, 10, "AB00000001", "TST1", "KTAA", "KTBB"); // by gufi, agrees by key
     tfms(&mut rows, 10, "AB00000001", "TST1", "KTAA", "KTBB"); // same flight, second message
     tfms(&mut rows, 11, "ZZ99999999", "TST2", "KTAA", "KTCC"); // gufi unknown, key matches
@@ -1810,7 +1840,7 @@ fn linkage_reports_uuid_shaped_gufis_and_ambiguous_keys_as_found() {
     let mut ev = oa_fixm::new_events(8, 64);
     sfdps(&mut ev, 1, "AB00000001", "TST1", "KTAA", "KTBB");
     sfdps(&mut ev, 2, "AB00000002", "TST1", "KTAA", "KTBB"); // the same key, another flight
-    let mut rows = new_rows(4, 1, 16);
+    let mut rows = new_rows(4, 1, 16, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     tfms(&mut rows, 1, "", "TST1", "KTAA", "KTBB");
     // a TFMS gufi longer than the 16-byte name is refused by the decoder, so it never reaches the
     // linkage: a UUID-shaped gufi would be a field error, not a silent non-match
@@ -1831,7 +1861,7 @@ fn linkage_reports_uuid_shaped_gufis_and_ambiguous_keys_as_found() {
     assert_eq!(rep.by_acid_no_gufi, 1);
     assert_eq!(rep.by_gufi, 0);
     let ev2 = oa_fixm::new_events(1, 8);
-    let rows2 = new_rows(1, 1, 8);
+    let rows2 = new_rows(1, 1, 8, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     let rep = link_flights(&ev2, &rows2);
     assert_eq!(rep, oa_tfms::LinkReport::default());
     // decoded rows link too: the flight of a handwritten message finds its plan identifier
@@ -1850,6 +1880,7 @@ fn the_default_capacities_and_the_vocabularies_are_consistent() {
         DEFAULT_FLIGHT_CAPACITY,
         DEFAULT_FLOW_CAPACITY,
         DEFAULT_STRING_BYTES,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
     );
     assert_eq!(rows.flights.acid.capacity(), DEFAULT_FLIGHT_CAPACITY);
     assert_eq!(rows.flows.text.capacity(), DEFAULT_FLOW_CAPACITY);
@@ -1963,7 +1994,12 @@ fn a_word_outside_a_vocabulary_is_kept_as_unknown_and_counted() {
     let r = decode_bytes(
         &mut Parser::new(default_limits()).unwrap(),
         doc.as_bytes(),
-        &mut new_rows(4, 4, 1 << 12),
+        &mut new_rows(
+            4,
+            4,
+            1 << 12,
+            oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+        ),
     );
     observe(&mut s, &r, &[], &[]);
     assert_eq!(s.unknown_words, 6);
@@ -2105,7 +2141,7 @@ fn a_flight_reference_of_zero_is_told_from_no_reference() {
     // of its own that does not absorb them.
     use oa_tfms::link_flights;
     let ev = oa_fixm::new_events(1, 8);
-    let mut rows = new_rows(8, 1, 16);
+    let mut rows = new_rows(8, 1, 16, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     tfms(&mut rows, 0, "AB00000001", "TST1", "KTAA", "KTBB"); // reference 0, carried
     tfms(&mut rows, 0, "AB00000001", "TST1", "KTAA", "KTBB"); // the same flight again
     for (acid, dep) in [("TST2", "KTAA"), ("TST3", "KTDD")] {
@@ -2133,4 +2169,62 @@ fn a_namespace_written_with_a_character_reference_is_the_same_namespace() {
     assert_eq!(o, o2);
     assert_eq!(flights_len(&rows2.flights), flights_len(&rows.flights));
     assert_eq!(rows2.flights.flight_ref[0], rows.flights.flight_ref[0]);
+}
+
+/// 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z in Unix ms: the sealed window.
+const SEAL: (i64, i64) = (1_795_132_800_000, 1_795_393_020_000);
+
+/// `xml` with every message time set to `ts`.
+fn stamped(xml: &str, ts: &str) -> String {
+    xml.replace(
+        r#"sourceTimeStamp="2030-01-02T03:04:05Z""#,
+        &format!(r#"sourceTimeStamp="{ts}""#),
+    )
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_message_timed_in_the_drop_window_is_dropped_before_any_count_flights_flows_and_refused_ones() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let mut p = Parser::new(default_limits()).unwrap();
+    let mut rows = new_rows(16, 8, 1 << 16, w);
+    let mut s = new_stats();
+    let refused = track().replace(
+        "<nxcm:speed>276</nxcm:speed>",
+        "<nxcm:speed>zzz</nxcm:speed>",
+    );
+    for xml in [
+        wrap_flight(&track()),
+        wrap_flight(&refused),
+        wrap_fi(&gadv()),
+    ] {
+        let xml = stamped(&xml, "2026-11-21T00:00:00Z");
+        let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
+        let o = r.as_ref().unwrap();
+        assert_eq!(o.sealed_dropped, 1, "{o:?}");
+        assert_eq!((o.messages, o.rejected, o.dropped), (0, 0, 0));
+        assert_eq!(o.reject_fields.iter().sum::<u32>(), 0);
+        assert_eq!(o.reject_kinds.iter().sum::<u32>(), 0);
+        observe(&mut s, &r, &[], &[]);
+    }
+    assert_eq!(flights_len(&rows.flights), 0);
+    assert_eq!(flows_len(&rows.flows), 0);
+    assert_eq!(rows.strings_used, 0);
+    assert_eq!(s.sealed_window_dropped, 3);
+    assert_eq!(
+        (s.documents, s.accepted, s.messages, s.rejected_messages),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(s.field_errors.iter().sum::<u64>(), 0);
+    assert_eq!(s.reject_kinds.iter().sum::<u64>(), 0);
+    // Just outside it, a message is kept; and one refused with no known time is refused as before.
+    let xml = stamped(&wrap_flight(&track()), "2026-11-19T23:59:59Z");
+    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
+    assert_eq!(r.as_ref().unwrap().sealed_dropped, 0);
+    assert_eq!(flights_len(&rows.flights), 1);
+    let xml = refused.replace(r#"acid="TST123""#, r#"acid="""#);
+    let xml = stamped(&wrap_flight(&xml), "2026-11-21T00:00:00Z");
+    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
+    // Refused for a field read before its time (the acid) or dropped for its time: never both.
+    assert_eq!(r.sealed_dropped + r.rejected, 1);
 }

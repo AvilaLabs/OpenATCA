@@ -584,7 +584,12 @@ fn a_long_programme_identity_works_up_to_the_pool_limit_and_is_refused_beyond_it
     // With no free cell a new long programme is refused and the held ones stay apart.
     let mut t = oa_replay::tfms::new_flow_table_with(8, 1);
     let mut parser = oa_xml::Parser::new(oa_tfms::default_limits()).unwrap();
-    let mut rows = new_tfms_rows(4, 4, 1 << 16);
+    let mut rows = new_tfms_rows(
+        4,
+        4,
+        1 << 16,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     for (n, id) in ["L".repeat(30) + "1", "L".repeat(30) + "2"]
         .iter()
         .enumerate()
@@ -630,7 +635,12 @@ fn the_tfms_tables_are_bounded_refuse_when_full_and_expire_by_replay_time() {
     let mut t = new_tfms_table(3);
     let flights = new_table(TableConfig::default()).unwrap();
     let mut parser = Parser::new(default_limits()).unwrap();
-    let mut rows = new_tfms_rows(16, 4, 1 << 16);
+    let mut rows = new_tfms_rows(
+        16,
+        4,
+        1 << 16,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let mut r = Vec::new();
     for n in 1..=5u32 {
         let x = wrap_flight(&departure(
@@ -759,7 +769,12 @@ fn a_tfms_flight_row_without_a_flight_reference_is_not_applied() {
     // payload; the apply step still refuses it and counts it, as the pipeline does.
     let mut t = new_tfms_table(4);
     let flights = new_table(TableConfig::default()).unwrap();
-    let mut rows = new_tfms_rows(4, 4, 1 << 10);
+    let mut rows = new_tfms_rows(
+        4,
+        4,
+        1 << 10,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     oa_tfms::push_flight(&mut rows.flights, &oa_tfms::BLANK_FLIGHT);
     assert_eq!(
         apply_tfms_flight(&mut t, &flights, &rows, 0, at(3, 0, 0)),
@@ -1039,7 +1054,9 @@ fn a_local_format_notam_with_no_series_is_keyed_by_its_location() {
 fn the_notam_table_is_bounded_and_refuses_when_full() {
     let mut t = new_fns_table(2);
     let mut parser = Parser::new(oa_xml::Limits::default()).unwrap();
-    let mut dec = new_decoder(Limits::default());
+    let mut dec = new_decoder(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut stats = new_stats(0);
     let mut out = Vec::new();
     for n in 1..=3 {
@@ -1062,7 +1079,9 @@ fn the_notam_table_is_bounded_and_refuses_when_full() {
 /// Applies one NOTAM document straight to a table.
 fn fns_apply(t: &mut oa_replay::fns::FnsTable, n: &Nt, now: i64) -> FnsApplied {
     let mut parser = Parser::new(oa_xml::Limits::default()).unwrap();
-    let mut dec = new_decoder(Limits::default());
+    let mut dec = new_decoder(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut stats = new_stats(0);
     let mut notams = new_notams(4, 1 << 16, 16, 1 << 12);
     let x = notam(n);
@@ -1846,4 +1865,24 @@ fn a_notam_issued_in_a_sealed_window_is_dropped_and_counted() {
     feed(&mut p, FeedKind::Fns, from_ns - 1, &notam(&before));
     assert_eq!(p.sealed_window_dropped, 1);
     assert_eq!(p.rows_seen[FeedKind::Fns as usize], 1);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_tfms_flow_timed_in_a_window_is_not_applied_though_its_frame_was_received_before_it() {
+    let mut p = pl();
+    let doc = wrap_fi(&rstr((3, 0, 0), 7, 20, 6));
+    // Received outside the window, but its source time is inside it: dropped and counted, nothing
+    // applied, no row seen.
+    let inside = doc.replace(&ts(3, 0, 0), "2026-11-21T00:00:00Z");
+    assert_ne!(inside, doc);
+    feed(&mut p, FeedKind::Tfms, at(3, 0, 0), &inside);
+    assert_eq!(p.sealed_window_dropped, 1);
+    assert_eq!(p.rows_applied[FeedKind::Tfms as usize], 0);
+    assert_eq!(p.rows_seen[FeedKind::Tfms as usize], 0);
+    assert_eq!(flow_live(&p.flows), 0);
+    // The same flow timed outside it is applied.
+    feed(&mut p, FeedKind::Tfms, at(3, 0, 1), &doc);
+    assert_eq!(p.sealed_window_dropped, 1);
+    assert_eq!(p.rows_applied[FeedKind::Tfms as usize], 1);
 }

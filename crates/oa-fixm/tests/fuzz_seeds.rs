@@ -13,7 +13,9 @@
 fn every_committed_seed_decodes_or_is_refused_as_named() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/seeds/fixm");
     let mut parser = oa_xml::Parser::new(oa_xml::Limits::default()).unwrap();
-    let mut decoder = oa_fixm::Decoder::new(oa_fixm::Limits::default());
+    let mut decoder = oa_fixm::Decoder::new(oa_fixm::Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut events = oa_fixm::new_events(256, 256 * 1024);
     let (mut accepted, mut refused) = (0, 0);
     let mut names: Vec<_> = std::fs::read_dir(&dir)

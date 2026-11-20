@@ -155,8 +155,11 @@ fn route_points(doc: &Doc<'_>, first: &[u32], er: usize, leg: &mut Legacy) -> Ve
     pts
 }
 
-/// Scans every message of `doc` (an SFDPS `MessageCollection`) into `leg`.
-pub fn scan_doc(doc: &Doc<'_>, scratch: &mut Vec<u32>, leg: &mut Legacy) {
+/// Scans every message of `doc` (an SFDPS `MessageCollection`) into `leg`, except the messages
+/// the decoder dropped for their own time (`dropped`: their element indices, from
+/// `oa_fixm::Decoder::dropped_messages`): such a message never reaches a hint, address,
+/// handoff or route count or table (OA-SEAL-014).
+pub fn scan_doc(doc: &Doc<'_>, scratch: &mut Vec<u32>, leg: &mut Legacy, dropped: &[u32]) {
     first_texts(doc, scratch);
     let n = doc.elem_name.len();
     let starts: Vec<usize> = (1..n)
@@ -164,6 +167,9 @@ pub fn scan_doc(doc: &Doc<'_>, scratch: &mut Vec<u32>, leg: &mut Legacy) {
         .collect();
     for (k, &s) in starts.iter().enumerate() {
         let e = starts.get(k + 1).copied().unwrap_or(n);
+        if dropped.iter().any(|&d| d as usize == s) {
+            continue;
+        }
         scan_message(doc, scratch, leg, s, e);
     }
 }

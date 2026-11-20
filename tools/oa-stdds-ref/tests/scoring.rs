@@ -236,7 +236,14 @@ fn tais_xml(records: &[(Option<&str>, &str, &str, &str)]) -> Vec<u8> {
 
 fn parse(xml: &[u8]) -> oa_stdds::TaisMessage {
     let mut p = Parser::new(XmlLimits::default()).unwrap();
-    match parse_message(&mut p, xml, &Limits::default(), &mut new_stats()).unwrap() {
+    match parse_message(
+        &mut p,
+        xml,
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut new_stats(),
+    )
+    .unwrap()
+    {
         Message::Tais(m) => m,
         other => panic!("not TAIS: {other:?}"),
     }
@@ -1055,4 +1062,12 @@ fn a_frame_or_a_record_in_a_sealed_window_is_dropped_and_counted() {
     // The frame at from is dropped; in the frame at from - 1 ns the record timed at from is.
     assert_eq!((info.frames_message, info.records), (1, 1));
     assert_eq!(info.sealed_window_dropped, 2);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_loader_drops_the_sealed_window() {
+    let w = oa_stdds_ref::load::load_limits().drop_window;
+    assert_eq!(w, oa_sealed::DropWindow::sealed());
+    assert_eq!(w.span(), oa_sealed::sealed_window_ms());
 }

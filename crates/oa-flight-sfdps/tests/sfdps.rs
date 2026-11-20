@@ -37,7 +37,9 @@ fn doc(m: &str) -> String {
 fn ops_of(xml: &str, seen_ms: i64, st: &mut AdapterStats) -> Vec<Op> {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let d = parser.parse(xml.as_bytes()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev: Events = new_events(8, 4096);
     clear_events(&mut ev);
     dec.decode(&d, xml.as_bytes(), &mut ev).unwrap();
@@ -445,4 +447,13 @@ fn the_position_of_a_flight_the_table_removes_is_forgotten_with_it() {
     assert_eq!(rep.positions.refiled_at(g), None);
     assert_eq!(rep.positions.refiled_len(), 0);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_replay_decoder_drops_the_sealed_window() {
+    let w = oa_flight_sfdps::decoder_limits().drop_window;
+    assert_eq!(w, oa_sealed::DropWindow::sealed());
+    assert_eq!(w.span(), oa_sealed::sealed_window_ms());
+    assert!(w.span().is_some());
 }

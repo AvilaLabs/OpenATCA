@@ -111,23 +111,38 @@ fn feed(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>, data: &[u8]) {
     }
 }
 
+/// The decoder limits of every load in this tool: the sealed window as the drop window, so a
+/// record timed in it is dropped before any count (OA-SEAL-014).
+pub fn load_limits() -> Limits {
+    Limits::new(oa_sealed::DropWindow::sealed())
+}
+
 /// Reads a recording from `src` (raw or gzip, decided by the gzip magic), appending its TAIS
 /// records to `out`. `path` is only the label of the result.
 pub fn load_reader<R: Read>(
+    src: R,
+    path: &str,
+    file: u32,
+    out: &mut Vec<Rec>,
+) -> io::Result<FileInfo> {
+    load_reader_counted(src, path, file, out, &mut 0)
+}
+
+/// [`load_reader`], with the frames and records dropped in a sealed window put in `sealed` on
+/// every exit, a read error included, so a caller can print the count whatever the result.
+pub fn load_reader_counted<R: Read>(
     mut src: R,
     path: &str,
     file: u32,
     out: &mut Vec<Rec>,
+    sealed: &mut u64,
 ) -> io::Result<FileInfo> {
     let parser =
         Parser::new(XmlLimits::default()).map_err(|e| io::Error::other(format!("{e:?}")))?;
     let mut ctx = Ctx {
         parser,
         stats: new_stats(),
-        limits: Limits {
-            drop_window: oa_sealed::sealed_window_ms(),
-            ..Limits::default()
-        },
+        limits: load_limits(),
         file,
         out,
         info: FileInfo {
@@ -148,26 +163,32 @@ pub fn load_reader<R: Read>(
         FrameReader::new(&mut storage).map_err(|e| io::Error::other(format!("{e:?}")))?;
     let mut hash = Sha256::new();
     let mut chunk = vec![0u8; 64 * 1024];
-    let mut n = src.read(&mut chunk)?;
-    let mut gz = (n >= 2 && chunk.first() == Some(&0x1f) && chunk.get(1) == Some(&0x8b))
-        .then(|| Box::new(GzipReader::new(REPLAY_LIMITS)));
-    while n > 0 {
-        let Some(data) = chunk.get(..n) else { break };
-        hash.update(data)
-            .map_err(|e| io::Error::other(format!("{e:?}")))?;
-        match gz.as_mut() {
-            None => feed(&mut reader, &mut ctx, data),
-            Some(g) if !ctx.info.gzip_damaged => {
-                let r = g.push(data, &mut |b: &[u8]| -> Result<(), Infallible> {
-                    feed(&mut reader, &mut ctx, b);
-                    Ok(())
-                });
-                ctx.info.gzip_damaged = r.is_err();
+    let mut gz: Option<Box<GzipReader>> = None;
+    let read = (|| -> io::Result<()> {
+        let mut n = src.read(&mut chunk)?;
+        gz = (n >= 2 && chunk.first() == Some(&0x1f) && chunk.get(1) == Some(&0x8b))
+            .then(|| Box::new(GzipReader::new(REPLAY_LIMITS)));
+        while n > 0 {
+            let Some(data) = chunk.get(..n) else { break };
+            hash.update(data)
+                .map_err(|e| io::Error::other(format!("{e:?}")))?;
+            match gz.as_mut() {
+                None => feed(&mut reader, &mut ctx, data),
+                Some(g) if !ctx.info.gzip_damaged => {
+                    let r = g.push(data, &mut |b: &[u8]| -> Result<(), Infallible> {
+                        feed(&mut reader, &mut ctx, b);
+                        Ok(())
+                    });
+                    ctx.info.gzip_damaged = r.is_err();
+                }
+                Some(_) => {}
             }
-            Some(_) => {}
+            n = src.read(&mut chunk)?;
         }
-        n = src.read(&mut chunk)?;
-    }
+        Ok(())
+    })();
+    *sealed = ctx.info.sealed_window_dropped + ctx.stats.sealed_window_dropped;
+    read?;
     drain(&mut reader, &mut ctx);
     if reader.finish().is_some() {
         ctx.info.frames_damaged += 1;
@@ -182,6 +203,17 @@ pub fn load_reader<R: Read>(
 /// [`load_reader`] on the file at `path`, opened through the shared guard `g` (check, open, verify
 /// the opened file). A refusal is an `Err` whose text names the path and carries `OA-SEAL-001`.
 pub fn load_file(g: &Sealed, path: &Path, file: u32, out: &mut Vec<Rec>) -> io::Result<FileInfo> {
+    load_file_counted(g, path, file, out, &mut 0)
+}
+
+/// [`load_file`], with the sealed-window count put in `sealed` on every exit.
+pub fn load_file_counted(
+    g: &Sealed,
+    path: &Path,
+    file: u32,
+    out: &mut Vec<Rec>,
+    sealed: &mut u64,
+) -> io::Result<FileInfo> {
     let f = open_guarded(g, path)?;
-    load_reader(f, &path.display().to_string(), file, out)
+    load_reader_counted(f, &path.display().to_string(), file, out, sealed)
 }

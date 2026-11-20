@@ -86,3 +86,13 @@ fn the_frame_walker_passes_no_frame_with_a_row_in_a_sealed_window() {
         for_each_adsb_frame_counted(&clip("walk4.oaf", &r, 4), &mut |t, _| seen.push(t)).unwrap();
     assert_eq!((seen.len(), sealed), (0, 4));
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_reader_builds_every_decoder_with_the_sealed_window_as_its_drop_window() {
+    let r = oa_bench::ingest::new_reader().unwrap();
+    for w in r.drop_windows() {
+        assert_eq!(w, oa_sealed::DropWindow::sealed());
+        assert_eq!(w.span(), oa_sealed::sealed_window_ms());
+    }
+}

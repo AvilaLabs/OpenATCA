@@ -38,6 +38,7 @@ pub mod status;
 pub mod tais;
 mod walk;
 
+use oa_sealed::DropWindow;
 use oa_xml::{error_offset, Parser, XmlError};
 use std::fmt;
 
@@ -63,29 +64,28 @@ pub struct Limits {
     pub max_errors: usize,
     /// Most distinct unknown element paths kept in [`Stats`]; further ones are counted as overflow.
     pub max_unknown_paths: usize,
-    /// A span of Unix milliseconds, `from` inclusive and `to` exclusive, in which a record (TAIS)
-    /// or report (SMES) timed by its own `mrtTime` or `time` is dropped before any statistic
-    /// is updated: it is not in the message, the counts or the unknown and error tables, and it
-    /// is counted in [`Stats::sealed_window_dropped`]. A pure value: the shell passes the sealed
-    /// window in. A record with no time is kept.
-    pub drop_window: Option<(i64, i64)>,
+    /// The span in which a record (TAIS) or report (SMES) timed by its own `mrtTime` or `time`
+    /// is dropped before any statistic is updated: it is not in the message, the counts or the
+    /// unknown and error tables, and it is counted in [`Stats::sealed_window_dropped`]. A record
+    /// with no time is kept. Required: there is no `Default`, so a caller cannot forget it.
+    pub drop_window: DropWindow,
 }
 
 impl Limits {
-    /// Whether `t_ms` is in [`Limits::drop_window`].
-    pub fn drops(&self, t_ms: i64) -> bool {
-        self.drop_window.is_some_and(|(a, b)| a <= t_ms && t_ms < b)
-    }
-}
-
-impl Default for Limits {
-    fn default() -> Limits {
+    /// The default bounds, dropping rows timed in `window`. A tool passes [`DropWindow::sealed`];
+    /// tests and fuzz targets pass [`DropWindow::empty_for_tests_and_fuzz`].
+    pub const fn new(window: DropWindow) -> Limits {
         Limits {
             max_records: 4096,
             max_errors: 256,
             max_unknown_paths: 128,
-            drop_window: None,
+            drop_window: window,
         }
+    }
+
+    /// Whether `t_ms` is in [`Limits::drop_window`].
+    pub fn drops(&self, t_ms: i64) -> bool {
+        self.drop_window.contains(t_ms)
     }
 }
 
@@ -299,11 +299,23 @@ pub fn parse_message(
         }
     };
     let k = classify(&doc);
-    stats.observe_kind(&doc, k);
-    match k {
+    let before = stats.sealed_window_dropped;
+    let out = match k {
         Kind::TaisTrackAndFlightPlan => parse_tais(&doc, limits, stats).map(Message::Tais),
         Kind::AsdexPositionReport => parse_smes(&doc, limits, stats).map(Message::Smes),
         Kind::StddsStatus => parse_status(&doc, limits, stats).map(Message::Status),
         other => Ok(Message::Other(other)),
+    };
+    // A message whose records or reports were all dropped for their time is in no message, kind
+    // or unknown-root count: only `sealed_window_dropped` has it.
+    let all_dropped = stats.sealed_window_dropped > before
+        && match &out {
+            Ok(Message::Tais(m)) => m.records.is_empty(),
+            Ok(Message::Smes(m)) => m.records.is_empty(),
+            _ => false,
+        };
+    if !all_dropped {
+        stats.observe_kind(&doc, k);
     }
+    out
 }

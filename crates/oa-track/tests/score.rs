@@ -31,14 +31,28 @@ use oa_truth::DEFAULT_CONFIG as TRUTH;
 
 /// The text of a file the binary under test wrote in the test's own temp directory.
 fn read_text(p: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    assert_own_temp(p.as_ref());
     // seal-allow: reads an output file the test's own run wrote in a temp directory
     std::fs::read_to_string(p)
 }
 
 /// The entries of a temp directory of the test's own.
 fn list_dir(p: impl AsRef<std::path::Path>) -> std::io::Result<std::fs::ReadDir> {
+    assert_own_temp(p.as_ref());
     // seal-allow: lists a temp directory of the test's own
     std::fs::read_dir(p)
+}
+
+/// The helpers below read only under the system temp directory or the test target's own temp
+/// directory; any other path is a test bug and stops the test.
+fn assert_own_temp(p: &std::path::Path) {
+    let under = |root: &std::path::Path| p.starts_with(root);
+    let target = option_env!("CARGO_TARGET_TMPDIR").map(std::path::PathBuf::from);
+    assert!(
+        under(&std::env::temp_dir()) || target.as_deref().is_some_and(under),
+        "{} is not under a temp directory",
+        p.display()
+    );
 }
 
 const T0: i64 = 1_700_000_000_000_000_000;

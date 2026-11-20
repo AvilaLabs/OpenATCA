@@ -7,6 +7,6 @@ pub mod replay;
 
 pub use adapter::{norm_callsign, row_ops, AdapterStats, MAX_OPS_PER_MESSAGE};
 pub use replay::{
-    lag_quantile_s, recordings_in, replay_sfdps, replay_sfdps_counted, LagHist, Position,
-    Positions, ReplayConfig, ReplayReport, LAG_MAX_S, LAG_MIN_S,
+    decoder_limits, lag_quantile_s, recordings_in, replay_sfdps, replay_sfdps_counted, LagHist,
+    Position, Positions, ReplayConfig, ReplayReport, LAG_MAX_S, LAG_MIN_S,
 };

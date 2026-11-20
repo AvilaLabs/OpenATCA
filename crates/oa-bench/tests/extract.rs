@@ -713,3 +713,46 @@ fn load_drops_sealed_frames_by_receive_time_and_a_record_inside_a_frame_received
         .any(|n| n.starts_with("sealed-window rows dropped: 3")));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_message_timed_in_the_window_never_reaches_the_hint_handoff_route_or_flight_tables() {
+    // Frame received outside the window (2030): the messages carry their own times.
+    let recv = 1_893_553_300_000;
+    let doc = |ts: &str, pos: &str| {
+        sfdps(&format!(
+            "{}{}{}",
+            th(GUFI_A, ts, pos, false, ADDR_AND_HINT),
+            handoff(GUFI_B, ts, "INITIATION"),
+            route_msg("cccccccc-dddd-4eee-8fff-000000000001", ts),
+        ))
+    };
+    let mut leg = new_legacy();
+    let mut r = new_reader().unwrap();
+    ingest_sfdps(
+        &mut leg,
+        &mut r,
+        doc("2026-11-21T03:00:05.250Z", "2026-11-21T03:00:04Z").as_bytes(),
+        recv,
+    );
+    assert_eq!(leg.counts.sealed_window_dropped, 3);
+    assert_eq!(leg.counts.th_adsb_hint, 0);
+    assert_eq!(leg.handoffs.flight.len(), 0);
+    assert_eq!(leg.routes.flight.len(), 0);
+    assert_eq!(leg.th.flight.len(), 0);
+    assert_eq!(leg.flights.gufi.len(), 0);
+    assert_eq!(leg.counts.th_coast, 0);
+    // The same three messages timed outside it reach every table.
+    let mut leg = new_legacy();
+    ingest_sfdps(
+        &mut leg,
+        &mut r,
+        doc("2030-01-02T03:00:05.250Z", "2030-01-02T03:00:04Z").as_bytes(),
+        recv,
+    );
+    assert_eq!(leg.counts.sealed_window_dropped, 0);
+    assert_eq!(leg.counts.th_adsb_hint, 1);
+    assert_eq!(leg.handoffs.flight.len(), 1);
+    assert_eq!(leg.routes.flight.len(), 1);
+    assert_eq!(leg.flights.gufi.len(), 3);
+}

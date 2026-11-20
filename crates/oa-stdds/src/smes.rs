@@ -253,7 +253,9 @@ fn code(slots: &[Slot], f: SmesField) -> Option<[u8; 8]> {
 /// with a refused field is kept with the field absent. Counts reports, fields and unknown
 /// elements into `stats`, including the reports read before a [`StdError::TooManyRecords`] or
 /// [`StdError::TooDeep`] refusal; the refusal itself is counted in `stats.errors`. It does not
-/// count the message: [`crate::parse_message`] does, once, when it classifies.
+/// count the message: [`crate::parse_message`] does, once, when it classifies. The half-walked
+/// record of a `TooDeep` refusal has no known time and is not counted at all; the reports after a
+/// refusal are never parsed, so [`Stats::sealed_window_dropped`] is a lower bound for them.
 pub fn parse_smes(
     doc: &Doc<'_>,
     limits: &Limits,
@@ -332,7 +334,8 @@ pub fn parse_smes(
                 msg.records.push(r);
             }
             Err(off) => {
-                sink.absorb(scratch, ud, inv);
+                // As for TAIS: no known time, so the scratch is discarded, not absorbed.
+                let _ = (ud, inv);
                 refusal = Some(StdError::TooDeep { offset: off });
                 break;
             }

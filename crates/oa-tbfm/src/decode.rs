@@ -79,6 +79,9 @@ pub struct Outcome {
     pub unknown_words: u32,
     /// Speeds whose form is neither knots nor Mach, stored with the unknown unit.
     pub unknown_units: u32,
+    /// Rows dropped because their own time (`msgTime`) is in [`Rows::window`]: the row is not
+    /// appended and nothing it counted is kept; no other field of the outcome includes it.
+    pub sealed_dropped: u32,
 }
 
 /// Parses `input` with `parser` and decodes it. A parse error is [`DocError::Xml`].
@@ -124,6 +127,8 @@ fn decode_with(doc: &Doc<'_>, rows: &mut Rows, prefix: bool) -> Result<Outcome, 
         reject_kinds: [0; ERROR_KIND_COUNT],
         unknown_words: 0,
         unknown_units: 0,
+        sealed: 0,
+        msg_ms: None,
     };
     let r = decode_root(doc, &mut acc, rows);
     if r.is_err() {
@@ -146,6 +151,11 @@ struct Acc {
     reject_kinds: [u32; ERROR_KIND_COUNT],
     unknown_words: u32,
     unknown_units: u32,
+    /// Rows dropped for their time in the window.
+    sealed: u32,
+    /// The message time of the `tma` being decoded, once read: a flight refused after it is
+    /// known is dropped for its time instead (the time is known, so it is not a refusal).
+    msg_ms: Option<i64>,
 }
 
 /// Runs `f` (the decode of one flight or one `tma`); a refused field rolls the rows and the
@@ -166,7 +176,36 @@ fn guarded<T>(
         acc.unknown_units,
     );
     match f(acc, rows) {
-        Ok(v) => Ok(Some(v)),
+        Ok(v) => {
+            // A flight timed (`msgTime`) in the window is dropped like a refused one: its rows
+            // and everything it counted are rolled back, and only the drop is counted.
+            let gone = rows.msg_ms.get(start..).map_or(0, |t| {
+                t.iter().filter(|&&t| rows.window.contains(t)).count()
+            });
+            if gone == 0 {
+                return Ok(Some(v));
+            }
+            truncate_rows(rows, start);
+            acc.unknown = unknown;
+            acc.ignored = ignored;
+            acc.dropped = dropped;
+            acc.unknown_words = words;
+            acc.unknown_units = units;
+            acc.sealed = acc
+                .sealed
+                .saturating_add(u32::try_from(gone).unwrap_or(u32::MAX));
+            Ok(None)
+        }
+        Err(DocError::Field(_)) if acc.msg_ms.is_some_and(|t| rows.window.contains(t)) => {
+            truncate_rows(rows, start);
+            acc.unknown = unknown;
+            acc.ignored = ignored;
+            acc.dropped = dropped;
+            acc.unknown_words = words;
+            acc.unknown_units = units;
+            acc.sealed = acc.sealed.saturating_add(1);
+            Ok(None)
+        }
         Err(DocError::Field(fe)) => {
             truncate_rows(rows, start);
             acc.unknown = unknown;
@@ -807,6 +846,7 @@ fn decode_mis(doc: &Doc<'_>, acc: &mut Acc, root: ElemIx) -> Result<Outcome, Doc
         reject_kinds: [0; ERROR_KIND_COUNT],
         unknown_words: 0,
         unknown_units: 0,
+        sealed_dropped: 0,
     })
 }
 
@@ -846,6 +886,7 @@ fn decode_env(
         reject_kinds: acc.reject_kinds,
         unknown_words: acc.unknown_words,
         unknown_units: acc.unknown_units,
+        sealed_dropped: acc.sealed,
     })
 }
 
@@ -857,6 +898,7 @@ fn decode_tma(
     rows: &mut Rows,
 ) -> Result<MsgKind, DocError> {
     let at = elem_at(doc, tma);
+    acc.msg_ms = None;
     let mut msg_ms = None;
     let mut msg_id = None;
     let n = doc
@@ -897,6 +939,7 @@ fn decode_tma(
     base.env_ms = env.time_ms;
     base.msg_ms = msg_ms;
     base.msg_id = msg_id;
+    acc.msg_ms = Some(msg_ms);
 
     let mut kind = MsgKind::Empty;
     let mut c = first_child(doc, tma);

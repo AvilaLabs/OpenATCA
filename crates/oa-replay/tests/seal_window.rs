@@ -106,3 +106,35 @@ fn an_adsb_row_timed_in_a_window_is_not_applied_though_its_frame_was_received_be
     assert_eq!(p.sealed_window_dropped, 2);
     assert_eq!(p.rows_seen[Feed::Adsb as usize], 2);
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn every_decoder_of_the_pipeline_is_built_with_the_sealed_window_as_its_drop_window() {
+    let sealed = oa_sealed::DropWindow::sealed();
+    assert_eq!(sealed.span(), oa_sealed::sealed_window_ms());
+    assert!(sealed.span().is_some());
+    assert_eq!(oa_replay::doc_fixm_limits().drop_window, sealed);
+    assert_eq!(oa_replay::doc_notam_limits().drop_window, sealed);
+    assert_eq!(oa_replay::new_doc_tbfm_rows().window, sealed);
+    assert_eq!(oa_replay::new_doc_tfms_rows().window, sealed);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_byte_count_is_the_bytes_after_the_window_gate() {
+    let kept = file(&[FROM - 1, TO]);
+    let all = file(&[FROM - 1, FROM, TO - 1, TO]);
+    let run = |b: Vec<u8>| {
+        merge_streams(
+            vec![spec_from_bytes(FeedKind::Sfdps, vec![b])],
+            4096,
+            &mut |_| {},
+        )
+        .unwrap()
+    };
+    let (a, b) = (run(all.clone()), run(kept.clone()));
+    // Two frames of the same size were dropped: their bytes are not in the count.
+    assert_eq!(a.sealed_window_dropped, 2);
+    assert_eq!(a.bytes, kept.len() as u64);
+    assert_eq!(b.bytes, kept.len() as u64);
+}

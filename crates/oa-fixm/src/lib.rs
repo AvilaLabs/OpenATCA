@@ -28,6 +28,7 @@ mod scalar;
 pub use decode::Decoder;
 pub use scalar::{parse_beacon, parse_hex24, parse_iso_ms, parse_scaled, parse_uuid};
 
+use oa_sealed::DropWindow;
 use std::fmt;
 
 /// The fields a row can carry, in bit order of [`Events::present`] and [`Events::errors`].
@@ -270,20 +271,23 @@ pub struct Limits {
     pub max_route_len: usize,
     /// Rows of the unknown-path table; paths beyond it are counted in `unknown_overflow`.
     pub max_unknown_paths: usize,
-    /// A span of Unix milliseconds, `from` inclusive and `to` exclusive. A message whose own
-    /// timestamp, or position time, is in it is dropped whole before any count is updated: it
-    /// is in no row, no `messages`, `rejected`, field-error or unknown count, and it is counted
-    /// in [`Stats::sealed_window_dropped`]. A pure value; the shell passes the sealed window in.
-    pub drop_window: Option<(i64, i64)>,
+    /// A message whose own timestamp, or position time, is in this window is dropped whole
+    /// before any count is updated: it is in no row, no `messages`, `rejected`, field-error or
+    /// unknown count (a document with nothing else is not in `docs` either), and it is counted
+    /// in [`Stats::sealed_window_dropped`]. A message refused whole with no known time is counted
+    /// as refused. Required: there is no `Default`, so a caller cannot forget it.
+    pub drop_window: DropWindow,
 }
 
-impl Default for Limits {
-    fn default() -> Limits {
+impl Limits {
+    /// The default bounds, dropping messages timed in `window`. A tool passes
+    /// [`DropWindow::sealed`]; tests and fuzz targets pass [`DropWindow::empty_for_tests_and_fuzz`].
+    pub const fn new(window: DropWindow) -> Limits {
         Limits {
             max_elements: 50_000,
             max_route_len: 2048,
             max_unknown_paths: 256,
-            drop_window: None,
+            drop_window: window,
         }
     }
 }

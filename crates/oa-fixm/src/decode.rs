@@ -211,6 +211,9 @@ pub struct Decoder {
     /// message began, so a message dropped for its time can take them back out of the counts.
     journal: Vec<(u64, bool)>,
     journaling: bool,
+    /// The element index (in the document of the last decode call) of each message dropped for
+    /// its time, so a caller that reads the document again skips exactly those messages.
+    dropped_elems: Vec<u32>,
 }
 
 /// A value read from an attribute or text: missing, present but undecodable, or its bytes.
@@ -276,6 +279,8 @@ struct Row {
 
 /// The message being decoded.
 struct Msg {
+    /// The message element's index in the document.
+    elem: u32,
     row: Row,
     reject: Option<Reject>,
     has_flight: bool,
@@ -305,8 +310,9 @@ struct Msg {
     rform_bad: bool,
 }
 
-fn new_msg() -> Msg {
+fn new_msg(elem: usize) -> Msg {
     Msg {
+        elem: u32::try_from(elem).unwrap_or(u32::MAX),
         row: Row::default(),
         reject: None,
         has_flight: false,
@@ -674,6 +680,7 @@ impl Decoder {
             elem_text: vec![NO_TEXT; n],
             journal: Vec::new(),
             journaling: false,
+            dropped_elems: Vec::new(),
             stats: Stats {
                 docs: 0,
                 sealed_window_dropped: 0,
@@ -698,6 +705,13 @@ impl Decoder {
     /// Cumulative counts since construction.
     pub fn stats(&self) -> &Stats {
         &self.stats
+    }
+
+    /// The element index of each message the last [`Decoder::decode`] or
+    /// [`Decoder::decode_prefix`] call dropped for its time in [`Limits::drop_window`], in
+    /// document order. A caller that scans the same document for more fields skips these.
+    pub fn dropped_messages(&self) -> &[u32] {
+        &self.dropped_elems
     }
 
     /// Decodes every `message` of `doc` (parsed from `input`) and appends one row per accepted
@@ -734,6 +748,7 @@ impl Decoder {
         prefix: bool,
     ) -> Result<Summary, FixmError> {
         self.stats.docs = self.stats.docs.saturating_add(1);
+        self.dropped_elems.clear();
         if doc.input.len() != input.len() || doc.input.as_ptr() != input.as_ptr() {
             return Err(FixmError::InputMismatch);
         }
@@ -785,6 +800,10 @@ impl Decoder {
             }
             Ok(()) => {}
         }
+        // A document whose every message was dropped for its time is in no count but the drop.
+        if sum.sealed_window_dropped > 0 && sum.messages == 0 {
+            self.stats.docs = self.stats.docs.saturating_sub(1);
+        }
         Ok(sum)
     }
 
@@ -820,6 +839,7 @@ impl Decoder {
         }
         self.journaling = false;
         self.journal.clear();
+        self.dropped_elems.clear();
         let mut cur: Option<Msg> = None;
         for i in 1..n {
             let p = doc.elem_parent.get(i).copied().unwrap_or(ElemIx::NONE);
@@ -892,7 +912,7 @@ impl Decoder {
             }
             self.check_attrs(doc, i, h, sum);
             if is_msg_level {
-                let mut m = new_msg();
+                let mut m = new_msg(i);
                 sum.messages = sum.messages.saturating_add(1);
                 self.stats.messages = self.stats.messages.saturating_add(1);
                 let mut buf = [0u8; 64];
@@ -1492,10 +1512,7 @@ impl Decoder {
 
     /// Whether the message's own timestamp or position time is in the drop window.
     fn drops(&self, m: &Msg) -> bool {
-        let Some((a, b)) = self.limits.drop_window else {
-            return false;
-        };
-        let inside = |t: i64| a <= t && t < b;
+        let inside = |t: i64| self.limits.drop_window.contains(t);
         (m.has_ts && inside(m.row.ts_ms))
             || (m.row.present & field_bit(Field::PositionTime) != 0 && inside(m.row.pos_time_ms))
     }
@@ -1536,6 +1553,7 @@ impl Decoder {
         // A message timed in the drop window is dropped before any count keeps it.
         if self.drops(&m) {
             self.take_back(sum);
+            self.dropped_elems.push(m.elem);
             self.stats.sealed_window_dropped = self.stats.sealed_window_dropped.saturating_add(1);
             sum.sealed_window_dropped = sum.sealed_window_dropped.saturating_add(1);
             return Ok(());

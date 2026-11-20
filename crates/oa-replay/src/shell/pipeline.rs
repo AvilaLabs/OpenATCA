@@ -116,10 +116,13 @@ pub fn doc_xml_limits() -> oa_xml::Limits {
 pub fn doc_fixm_limits() -> Limits {
     Limits {
         max_elements: DOC_MAX_ELEMENTS,
-        // A message timed in the sealed window is dropped inside the decoder, before any count.
-        drop_window: oa_sealed::sealed_window_ms(),
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::sealed())
     }
+}
+
+/// The NOTAM decoder limits of one document: the sealed window as the drop window.
+pub fn doc_notam_limits() -> NotamLimits {
+    NotamLimits::new(oa_sealed::DropWindow::sealed())
 }
 
 /// The SFDPS event table of one document (see [`doc_xml_limits`]). Documents are decoded with
@@ -130,7 +133,8 @@ pub fn new_doc_events() -> Events {
 
 /// The TBFM row table of one document.
 pub fn new_doc_tbfm_rows() -> Rows {
-    new_rows(DOC_ROW_CAPACITY)
+    // A flight timed in the sealed window is dropped inside the decoder, before any count.
+    new_rows(DOC_ROW_CAPACITY, oa_sealed::DropWindow::sealed())
 }
 
 /// The TFMS row tables of one document.
@@ -139,6 +143,7 @@ pub fn new_doc_tfms_rows() -> TfmsRows {
         DEFAULT_FLIGHT_CAPACITY,
         DEFAULT_FLOW_CAPACITY,
         DEFAULT_STRING_BYTES,
+        oa_sealed::DropWindow::sealed(),
     )
 }
 
@@ -385,7 +390,7 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         rows: new_doc_tbfm_rows(),
         reports: Reports::default(),
         tfms_rows: new_doc_tfms_rows(),
-        notam_dec: new_decoder(NotamLimits::default()),
+        notam_dec: new_decoder(doc_notam_limits()),
         notam_stats: new_stats(0),
         notams: default_notams_small(),
         replay_ns: i64::MIN,
@@ -723,8 +728,7 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     };
     // Messages the decoder dropped for their own time (OA-SEAL-014).
-    p.sealed_window_dropped += u64::from(summary.sealed_window_dropped);
-    oa_sealed::note_window_drops(u64::from(summary.sealed_window_dropped));
+    note_sealed(p, u64::from(summary.sealed_window_dropped));
     let after = p.fixm.stats().rejected;
     for r in 0..REJECT_COUNT {
         let d = after
@@ -747,29 +751,20 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
     };
     count_error(&mut p.errors, full, u64::from(summary.not_decoded));
     for i in 0..p.events.len {
-        // A row whose own time is in a sealed window is dropped and counted, whatever the receive
-        // time of its frame.
-        if p.events.ts_ms.get(i).is_some_and(|&t| sealed_ms(t))
-            || (oa_fixm::has_field(&p.events, i, oa_fixm::Field::PositionTime)
-                && p.events.pos_time_ms.get(i).is_some_and(|&t| sealed_ms(t)))
-        {
-            drop_sealed(p);
-            continue;
-        }
         let a = apply_sfdps(&mut p.table, &p.events, i, now);
         bump(&mut p.rows_seen, FeedKind::Sfdps, 1);
         note(p, FeedKind::Sfdps, a);
     }
 }
 
-/// Whether a row's own time (Unix milliseconds) is in a sealed window.
-fn sealed_ms(t: i64) -> bool {
-    oa_sealed::in_sealed_window(t.saturating_mul(1_000_000))
+fn drop_sealed(p: &mut Pipeline) {
+    note_sealed(p, 1);
 }
 
-fn drop_sealed(p: &mut Pipeline) {
-    p.sealed_window_dropped += 1;
-    oa_sealed::note_window_drops(1);
+/// Adds rows the decoders or the loops above dropped for their own time in the window.
+fn note_sealed(p: &mut Pipeline, n: u64) {
+    p.sealed_window_dropped += n;
+    oa_sealed::note_window_drops(n);
 }
 
 fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) {
@@ -824,6 +819,12 @@ fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) {
     };
     match decode_doc_prefix(&doc, &mut p.rows) {
         Ok(out) => {
+            // Flights the decoder dropped for their own time (OA-SEAL-014); a message with
+            // nothing else in it is in no other count.
+            note_sealed(p, u64::from(out.sealed_dropped));
+            if out.sealed_dropped > 0 && out.rows == 0 && out.rejected == 0 && out.dropped == 0 {
+                return;
+            }
             count_error(&mut p.errors, ErrKind::TbfmCapacity, u64::from(out.dropped));
             // Flights refused for a field are dropped alone; the rest of the message applies.
             count_error(&mut p.errors, ErrKind::TbfmField, u64::from(out.rejected));
@@ -844,10 +845,6 @@ fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     }
     for i in 0..rows_len(&p.rows) {
-        if oa_tbfm::row_at(&p.rows, i).is_some_and(|r| sealed_ms(r.msg_ms)) {
-            drop_sealed(p);
-            continue;
-        }
         let a = apply_tbfm(&mut p.table, &p.rows, i, now);
         bump(&mut p.rows_seen, FeedKind::Tbfm, 1);
         note(p, FeedKind::Tbfm, a);
@@ -865,6 +862,13 @@ fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) {
     };
     match decode_tfms_doc(&doc, &mut p.tfms_rows) {
         Ok(out) => {
+            // Messages the decoder dropped for their own time, flights and flows alike
+            // (OA-SEAL-014); a document with nothing else in it is in no other count.
+            note_sealed(p, u64::from(out.sealed_dropped));
+            if out.sealed_dropped > 0 && out.messages == 0 && out.rejected == 0 && out.dropped == 0
+            {
+                return;
+            }
             count_error(&mut p.errors, ErrKind::TfmsCapacity, u64::from(out.dropped));
             // Messages refused for a field are dropped alone; their siblings apply.
             count_error(&mut p.errors, ErrKind::TfmsField, u64::from(out.rejected));
@@ -881,10 +885,6 @@ fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     }
     for i in 0..flights_len(&p.tfms_rows.flights) {
-        if oa_tfms::flight_at(&p.tfms_rows.flights, i).is_some_and(|f| sealed_ms(f.src_ms)) {
-            drop_sealed(p);
-            continue;
-        }
         let a = apply_tfms_flight(&mut p.tfms, &p.table, &p.tfms_rows, i, now);
         bump(&mut p.rows_seen, FeedKind::Tfms, 1);
         match a {
@@ -917,7 +917,14 @@ fn process_fns(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     };
     match oa_notam::decode_doc(&mut p.notam_dec, &doc, &mut p.notams, &mut p.notam_stats) {
-        Ok(o) => count_error(&mut p.errors, ErrKind::FnsField, u64::from(o.field_errors)),
+        Ok(o) => {
+            // A NOTAM the decoder dropped for its issue or cancel time (OA-SEAL-014).
+            if o.sealed_dropped {
+                note_sealed(p, 1);
+                return;
+            }
+            count_error(&mut p.errors, ErrKind::FnsField, u64::from(o.field_errors));
+        }
         Err(e) => {
             let k = match e {
                 FnsDocError::Xml(_) => ErrKind::FnsXml,
@@ -930,14 +937,6 @@ fn process_fns(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     }
     for i in 0..notams_len(&p.notams) {
-        // A NOTAM issued or cancelled in a sealed window is dropped and counted; its validity
-        // span is not a message time and is not checked.
-        if oa_notam::row_at(&p.notams, i)
-            .is_some_and(|r| sealed_ms(r.issued_ms) || sealed_ms(r.canceled_ms))
-        {
-            drop_sealed(p);
-            continue;
-        }
         let a = apply_fns(&mut p.fns, &p.notams, i, now);
         bump(&mut p.rows_seen, FeedKind::Fns, 1);
         match a {

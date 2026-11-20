@@ -843,10 +843,59 @@ impl Default for DropReport {
 
 impl Drop for DropReport {
     fn drop(&mut self) {
+        use std::io::Write;
+        // A failed write (a closed pipe) is ignored: this runs on the way out and must not panic.
+        let line = drop_line(self.n);
         if self.stdout {
-            println!("{}", drop_line(self.n));
+            let _ = writeln!(io::stdout(), "{line}");
         } else {
-            eprintln!("{}", drop_line(self.n));
+            let _ = writeln!(io::stderr(), "{line}");
+        }
+    }
+}
+
+/// The span of Unix milliseconds a decoder drops rows in, `from` inclusive and `to` exclusive.
+/// A decoder takes it as a required argument, so a caller cannot forget it: the shells pass
+/// [`DropWindow::sealed`], and [`DropWindow::empty_for_tests_and_fuzz`] is the only way to drop nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DropWindow {
+    from_ms: i64,
+    to_ms: i64,
+}
+
+impl DropWindow {
+    /// The span `from_ms` (inclusive) to `to_ms` (exclusive); empty when `from_ms >= to_ms`.
+    pub const fn new(from_ms: i64, to_ms: i64) -> DropWindow {
+        DropWindow { from_ms, to_ms }
+    }
+
+    /// A window that holds no time: nothing is dropped. For tests and fuzz targets only; a tool
+    /// passes [`DropWindow::sealed`].
+    pub const fn empty_for_tests_and_fuzz() -> DropWindow {
+        DropWindow {
+            from_ms: 0,
+            to_ms: 0,
+        }
+    }
+
+    /// The sealed window of the list ([`sealed_window_ms`]); empty when the list has none.
+    pub fn sealed() -> DropWindow {
+        sealed_window_ms().map_or(DropWindow::empty_for_tests_and_fuzz(), |(a, b)| {
+            DropWindow::new(a, b)
+        })
+    }
+
+    /// Whether `t_ms` is in the window.
+    pub const fn contains(&self, t_ms: i64) -> bool {
+        self.from_ms <= t_ms && t_ms < self.to_ms
+    }
+
+    /// The span as `(from, to)`, or `None` when it is empty.
+    pub const fn span(&self) -> Option<(i64, i64)> {
+        if self.from_ms < self.to_ms {
+            Some((self.from_ms, self.to_ms))
+        } else {
+            None
         }
     }
 }
@@ -895,5 +944,19 @@ mod tests {
         r.add(2);
         r.add(3);
         assert_eq!(r.count(), 5);
+    }
+
+    #[test]
+    fn a_window_is_half_open_and_the_sealed_one_is_the_listed_span() {
+        let w = DropWindow::new(10, 20);
+        assert!(!w.contains(9) && w.contains(10) && w.contains(19) && !w.contains(20));
+        assert_eq!(w.span(), Some((10, 20)));
+        let e = DropWindow::empty_for_tests_and_fuzz();
+        assert!(!e.contains(0) && !e.contains(i64::MIN) && e.span().is_none());
+        assert_eq!(DropWindow::sealed().span(), sealed_window_ms());
+        assert_eq!(
+            DropWindow::sealed().span(),
+            Some((1_795_132_800_000, 1_795_393_020_000))
+        );
     }
 }

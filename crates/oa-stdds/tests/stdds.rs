@@ -42,7 +42,14 @@ fn kind_of(name: &str) -> Kind {
 fn tais(xml: &[u8]) -> oa_stdds::TaisMessage {
     let mut p = parser();
     let mut st = new_stats();
-    match parse_message(&mut p, xml, &Limits::default(), &mut st).unwrap() {
+    match parse_message(
+        &mut p,
+        xml,
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap()
+    {
         Message::Tais(m) => m,
         other => panic!("not TAIS: {other:?}"),
     }
@@ -94,7 +101,7 @@ fn unknown_kinds_are_counted_with_their_root_and_are_not_errors() {
     let m = parse_message(
         &mut p,
         &fixture("unknown_namespace.xml"),
-        &Limits::default(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
         &mut st,
     )
     .unwrap();
@@ -102,7 +109,7 @@ fn unknown_kinds_are_counted_with_their_root_and_are_not_errors() {
     parse_message(
         &mut p,
         &fixture("unknown_namespace.xml"),
-        &Limits::default(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
         &mut st,
     )
     .unwrap();
@@ -285,7 +292,7 @@ fn half_a_position_pair_is_refused_in_both_products() {
     let Message::Smes(s) = parse_message(
         &mut p,
         &fixture("smes_delta_lat_only.xml"),
-        &Limits::default(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
         &mut st,
     )
     .unwrap() else {
@@ -380,7 +387,7 @@ fn a_field_the_sender_marks_invalid_is_absent_and_counted_not_an_error() {
     let Message::Tais(m) = parse_message(
         &mut p,
         &fixture("tais_invalidated.xml"),
-        &Limits::default(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
         &mut st,
     )
     .unwrap() else {
@@ -405,7 +412,7 @@ fn record_and_error_limits_are_stated_and_reached_visibly() {
     let mut st = new_stats();
     let lim = Limits {
         max_records: 4,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let e = parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap_err();
     let fifth = head.len() + 4 * one.len() + 1;
@@ -429,7 +436,7 @@ fn record_and_error_limits_are_stated_and_reached_visibly() {
     let xml = format!("{head}{}</a:TATrackAndFlightPlan>", bad.repeat(2));
     let lim = Limits {
         max_errors: 4,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let Message::Tais(m) = parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap() else {
         panic!("not TAIS");
@@ -446,7 +453,13 @@ fn malformed_xml_is_refused_with_an_offset_and_no_input_panics() {
     let mut p = parser();
     let mut st = new_stats();
     for f in ["tais_truncated.xml", "tais_doctype.xml"] {
-        let e = parse_message(&mut p, &fixture(f), &Limits::default(), &mut st).unwrap_err();
+        let e = parse_message(
+            &mut p,
+            &fixture(f),
+            &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+            &mut st,
+        )
+        .unwrap_err();
         assert!(matches!(e, StdError::Xml(_)), "{f}: {e:?}");
         assert!(std_error_offset(&e).is_some());
         assert!(format!("{e}").contains("byte"));
@@ -464,10 +477,20 @@ fn malformed_xml_is_refused_with_an_offset_and_no_input_panics() {
     for n in &names {
         let b = fixture(n);
         for cut in 0..b.len() {
-            let _ = parse_message(&mut p, &b[..cut], &Limits::default(), &mut st);
+            let _ = parse_message(
+                &mut p,
+                &b[..cut],
+                &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+                &mut st,
+            );
             let mut d = b.clone();
             d.remove(cut);
-            let _ = parse_message(&mut p, &d, &Limits::default(), &mut st);
+            let _ = parse_message(
+                &mut p,
+                &d,
+                &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+                &mut st,
+            );
             results += 2;
         }
     }
@@ -482,7 +505,7 @@ fn unknown_elements_are_counted_per_path_topmost_only_and_the_table_is_bounded()
     let Message::Tais(m) = parse_message(
         &mut p,
         &fixture("tais_unknown_elements.xml"),
-        &Limits::default(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
         &mut st,
     )
     .unwrap() else {
@@ -511,7 +534,7 @@ fn unknown_elements_are_counted_per_path_topmost_only_and_the_table_is_bounded()
     let mut st = new_stats();
     let lim = Limits {
         max_unknown_paths: 2,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     parse_message(&mut p, &fixture("tais_unknown_elements.xml"), &lim, &mut st).unwrap();
     assert_eq!(st.unknown.len(), 2);
@@ -526,7 +549,7 @@ fn an_asdex_position_report_parses_every_field_in_its_unit() {
     let Message::Smes(m) = parse_message(
         &mut p,
         &fixture("smes_position.xml"),
-        &Limits::default(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
         &mut st,
     )
     .unwrap() else {
@@ -571,7 +594,14 @@ fn products_that_are_classified_only_return_their_kind_and_count() {
         ("smes_event.xml", Kind::SmesOther),
     ];
     for (f, k) in only {
-        match parse_message(&mut p, &fixture(f), &Limits::default(), &mut st).unwrap() {
+        match parse_message(
+            &mut p,
+            &fixture(f),
+            &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+            &mut st,
+        )
+        .unwrap()
+        {
             Message::Other(got) => assert_eq!(got, k, "{f}"),
             m => panic!("{f}: parsed as {m:?}"),
         }
@@ -586,7 +616,7 @@ fn products_that_are_classified_only_return_their_kind_and_count() {
 fn stats_count_kinds_errors_and_per_field_presence_and_nothing_else() {
     let mut p = parser();
     let mut st = new_stats();
-    let lim = Limits::default();
+    let lim = Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     for f in [
         "tais_full.xml",
         "tais_malformed_fields.xml",
@@ -623,7 +653,12 @@ fn a_typed_parser_refuses_a_message_of_another_kind() {
     let mut st = new_stats();
     let bytes = fixture("smes_position.xml");
     let d = p.parse(&bytes).unwrap();
-    let e = parse_tais(&d, &Limits::default(), &mut st).unwrap_err();
+    let e = parse_tais(
+        &d,
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap_err();
     assert_eq!(
         e,
         StdError::WrongKind {
@@ -633,7 +668,12 @@ fn a_typed_parser_refuses_a_message_of_another_kind() {
     assert_eq!(std_error_offset(&e), None);
     let bytes = fixture("tais_full.xml");
     let d = p.parse(&bytes).unwrap();
-    let e = parse_smes(&d, &Limits::default(), &mut st).unwrap_err();
+    let e = parse_smes(
+        &d,
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap_err();
     assert!(matches!(
         e,
         StdError::WrongKind {
@@ -648,7 +688,7 @@ fn a_typed_parser_refuses_a_message_of_another_kind() {
 #[test]
 fn parsing_is_deterministic_and_a_parser_and_stats_are_reusable() {
     let mut p = parser();
-    let lim = Limits::default();
+    let lim = Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     let mut a = new_stats();
     let mut b = new_stats();
     let first = parse_message(&mut p, &fixture("tais_full.xml"), &lim, &mut a).unwrap();
@@ -755,12 +795,22 @@ fn messages_framed_in_a_feed_parse_to_the_same_counts_as_direct_parsing() {
     while let Some(f) = reader.next() {
         let f = f.unwrap();
         assert_eq!(f.kind, FrameKind::Message);
-        let _ = parse_message(&mut p, f.payload, &Limits::default(), &mut framed);
+        let _ = parse_message(
+            &mut p,
+            f.payload,
+            &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+            &mut framed,
+        );
         n += 1;
     }
     assert_eq!(n, names.len());
     for f in names {
-        let _ = parse_message(&mut p, &fixture(f), &Limits::default(), &mut direct);
+        let _ = parse_message(
+            &mut p,
+            &fixture(f),
+            &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+            &mut direct,
+        );
     }
     assert_eq!(framed.kinds, direct.kinds);
     assert_eq!(framed.errors, direct.errors);
@@ -854,7 +904,14 @@ fn smes_rec(body: &str) -> oa_stdds::SmesMessage {
     );
     let mut p = parser();
     let mut st = new_stats();
-    match parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap() {
+    match parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap()
+    {
         Message::Smes(m) => m,
         other => panic!("not SMES: {other:?}"),
     }
@@ -918,7 +975,13 @@ fn an_empty_raw_flight_rules_element_is_present_empty_and_other_empty_fields_sta
     let xml = format!(
         r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><flightPlan><rawFlightRules> </rawFlightRules></flightPlan></record></a:TATrackAndFlightPlan>"#
     );
-    parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+    parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap();
     assert_eq!(st.tais_present_empty[TaisField::RawFlightRules as usize], 1);
     assert_eq!(st.tais_errors[TaisField::RawFlightRules as usize], 0);
     assert_eq!(st.field_error_kinds[FieldErrorKind::Empty as usize], 0);
@@ -969,7 +1032,13 @@ fn track_coast_decodes_true_false_absent_and_unreadable() {
             let xml = format!(
                 r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><track><coast>{v}</coast></track></record></a:TATrackAndFlightPlan>"#
             );
-            parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+            parse_message(
+                &mut p,
+                xml.as_bytes(),
+                &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+                &mut st,
+            )
+            .unwrap();
         }
     }
     assert_eq!(st.tais_present[TaisField::TrackCoast as usize], 3);
@@ -1001,7 +1070,13 @@ fn track_flags_decode_and_the_stats_keep_a_histogram_of_them() {
             r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><track><adsb>{a}</adsb></track></record></a:TATrackAndFlightPlan>"#
         );
         for _ in 0..n {
-            parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+            parse_message(
+                &mut p,
+                xml.as_bytes(),
+                &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+                &mut st,
+            )
+            .unwrap();
         }
     }
     // [false, true] per flag; only adsb was given.
@@ -1039,7 +1114,13 @@ fn the_record_header_decodes_and_latency_and_distinct_sources_are_counted() {
             r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record>{}</record></a:TATrackAndFlightPlan>"#,
             hdr(src, stars, safa)
         );
-        parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+        parse_message(
+            &mut p,
+            xml.as_bytes(),
+            &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+            &mut st,
+        )
+        .unwrap();
     }
     assert_eq!(st.src_ids.len(), 2);
     assert_eq!(st.latency[1], 1, "0-9 ms");
@@ -1054,7 +1135,13 @@ fn the_record_header_decodes_and_latency_and_distinct_sources_are_counted() {
     let xml = format!(
         r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><recSAFAReceiptTime>2030-01-02T03:04:05Z</recSAFAReceiptTime></record></a:TATrackAndFlightPlan>"#
     );
-    parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+    parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap();
     assert_eq!((st.latency_missing, st.latency.iter().sum::<u64>()), (1, 0));
     // A time of day past 24 h, and a receipt time that is not a time, are refused.
     let m = tais_rec("<recSTARSTimestamp>86400000</recSTARSTimestamp><recSAFAReceiptTime>soon</recSAFAReceiptTime>");
@@ -1068,7 +1155,7 @@ fn the_record_header_decodes_and_latency_and_distinct_sources_are_counted() {
 fn the_status_roots_become_stdds_status_with_service_and_state() {
     let mut p = parser();
     let mut st = new_stats();
-    let lim = Limits::default();
+    let lim = Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     let svc = r#"<s:AirportDataServiceStatus xmlns:s="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:status"><rvrLinks><rvrLink><linkStatus>Normal</linkStatus></rvrLink></rvrLinks><serviceStatus>Degraded</serviceStatus></s:AirportDataServiceStatus>"#;
     match parse_message(&mut p, svc.as_bytes(), &lim, &mut st).unwrap() {
         Message::Status(m) => {
@@ -1134,7 +1221,14 @@ fn an_mmixm_asset_message_is_counted_by_kind_and_not_decoded() {
         r#"<m:AssetMessage xmlns:m="https://mmixm.aero/base/1.1.1"><x>1</x></m:AssetMessage>"#;
     let mut p = parser();
     let mut st = new_stats();
-    match parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap() {
+    match parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap()
+    {
         Message::Other(k) => assert_eq!(k, Kind::MmixmAsset),
         other => panic!("{other:?}"),
     }
@@ -1162,7 +1256,13 @@ fn asdex_status_sub_elements_stay_unknown_and_counted() {
     let xml = format!(
         r#"<a:asdexMsg xmlns:a="{SMES_NS}"><positionReport><status><mon>1</mon><mon>1</mon></status></positionReport></a:asdexMsg>"#
     );
-    parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+    parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap();
     assert_eq!(
         st.unknown,
         [oa_stdds::UnknownPath {
@@ -1193,7 +1293,13 @@ fn a_refused_field_is_diagnosed_by_shape_and_never_by_value() {
     let xml = format!(
         r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><flightPlan><runway>#12</runway></flightPlan></record><record><flightPlan><runway>#34</runway></flightPlan></record></a:TATrackAndFlightPlan>"#
     );
-    parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+    parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap();
     assert_eq!(st.shapes.len(), 1);
     assert_eq!(st.shapes[0].field, "flightPlan/runway");
     assert_eq!((st.shapes[0].len, st.shapes[0].count), (3, 2));
@@ -1211,7 +1317,7 @@ fn a_message_is_counted_once_on_every_path_and_a_direct_parse_counts_none() {
     let mut st = new_stats();
     let tiny = Limits {
         max_records: 1,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let rec = "<record><track><trackNum>1</trackNum></track></record>";
     let msgs: Vec<(String, &Limits)> = vec![
@@ -1238,7 +1344,12 @@ fn a_message_is_counted_once_on_every_path_and_a_direct_parse_counts_none() {
     // Direct calls count the refusal but never a message.
     let before = st.messages;
     let doc = p.parse(b"<a/>").unwrap();
-    let e = parse_tais(&doc, &Limits::default(), &mut st).unwrap_err();
+    let e = parse_tais(
+        &doc,
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap_err();
     assert!(matches!(e, StdError::WrongKind { .. }));
     assert_eq!((st.messages, st.errors[1]), (before, 1));
 }
@@ -1261,7 +1372,14 @@ fn the_message_level_src_and_airport_follow_the_field_rules() {
     let mut p = parser();
     let mut st = new_stats();
     let xml = tais_xml(r#"<src r="1">ZZA</src>"#);
-    match parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap() {
+    match parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap()
+    {
         Message::Tais(m) => assert!(!m.src_present && m.errors.is_empty()),
         other => panic!("{other:?}"),
     }
@@ -1277,7 +1395,14 @@ fn the_message_level_src_and_airport_follow_the_field_rules() {
         );
         let mut p = parser();
         let mut st = new_stats();
-        match parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap() {
+        match parse_message(
+            &mut p,
+            xml.as_bytes(),
+            &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+            &mut st,
+        )
+        .unwrap()
+        {
             Message::Smes(m) => m,
             other => panic!("{other:?}"),
         }
@@ -1298,7 +1423,13 @@ fn latency_is_signed_around_a_day_wrap_and_a_small_skew_counts_below_zero() {
         let xml = tais_xml(&format!(
             "<record><recSTARSTimestamp>{stars}</recSTARSTimestamp><recSAFAReceiptTime>{safa}</recSAFAReceiptTime></record>"
         ));
-        parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+        parse_message(
+            &mut p,
+            xml.as_bytes(),
+            &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+            &mut st,
+        )
+        .unwrap();
     };
     // A true midnight crossing: stamped 86_399_990, received 00:00:00.020 the next day: 30 ms.
     day("86399990", "2030-01-03T00:00:00.020Z");
@@ -1407,7 +1538,14 @@ fn a_status_key_or_value_over_the_limit_is_counted_and_never_silent() {
     );
     let mut p = parser();
     let mut st = new_stats();
-    match parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap() {
+    match parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap()
+    {
         Message::Status(m) => {
             assert_eq!(m.states.len(), 1);
             assert_eq!((m.value_too_long, m.key_too_long, m.dropped), (1, 1, 1));
@@ -1426,7 +1564,13 @@ fn a_status_key_or_value_over_the_limit_is_counted_and_never_silent() {
     let xml = format!(
         r#"<s:AirportDataServiceStatus xmlns:s="{STATUS_NS}"><serviceStatus>{long}</serviceStatus></s:AirportDataServiceStatus>"#
     );
-    parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+    parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap();
     assert_eq!(st.status_value_too_long, 2);
     // More distinct states than the table holds: counted apart from the per-message drops.
     let mut st = new_stats();
@@ -1434,7 +1578,13 @@ fn a_status_key_or_value_over_the_limit_is_counted_and_never_silent() {
         let xml = format!(
             r#"<s:STDDSStatus xmlns:s="{STATUS_NS}"><p k="aStatus" v="V{i}"/></s:STDDSStatus>"#
         );
-        parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+        parse_message(
+            &mut p,
+            xml.as_bytes(),
+            &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+            &mut st,
+        )
+        .unwrap();
     }
     assert_eq!((st.status_table_overflow, st.status_dropped), (6, 0));
 }
@@ -1451,7 +1601,14 @@ fn only_fields_in_the_root_namespace_or_none_are_read_and_others_are_unknown() {
     );
     let mut p = parser();
     let mut st = new_stats();
-    match parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap() {
+    match parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap()
+    {
         Message::Tais(m) => {
             assert_eq!(m.records.len(), 1, "a foreign record is not a record");
             assert_eq!(m.records[0].present, 0);
@@ -1466,7 +1623,14 @@ fn only_fields_in_the_root_namespace_or_none_are_read_and_others_are_unknown() {
     let xml = format!(
         r#"<TATrackAndFlightPlan xmlns="{TAIS_NS}"><record><track><trackNum>9</trackNum></track></record></TATrackAndFlightPlan>"#
     );
-    match parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap() {
+    match parse_message(
+        &mut p,
+        xml.as_bytes(),
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut st,
+    )
+    .unwrap()
+    {
         Message::Tais(m) => assert_eq!(m.records[0].track_num, 9),
         other => panic!("{other:?}"),
     }
@@ -1487,7 +1651,13 @@ fn an_r_attribute_other_than_one_or_zero_is_a_field_error_and_unknown_paths_are_
     let mut st = new_stats();
     for _ in 0..2 {
         let xml = tais_xml(&format!("<{long}/>"));
-        parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+        parse_message(
+            &mut p,
+            xml.as_bytes(),
+            &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+            &mut st,
+        )
+        .unwrap();
     }
     assert_eq!(st.unknown.len(), 1);
     assert_eq!((st.unknown[0].text.len(), st.unknown[0].count), (120, 2));
@@ -1556,8 +1726,8 @@ fn a_record_timed_in_the_drop_window_is_in_no_count_not_even_when_the_message_is
     );
     let lim = Limits {
         max_records: 1,
-        drop_window: Some(DROP),
-        ..Limits::default()
+        drop_window: oa_sealed::DropWindow::new(DROP.0, DROP.1),
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let mut st = new_stats();
     let r = parse_message(&mut p, xml.as_bytes(), &lim, &mut st);
@@ -1577,7 +1747,7 @@ fn a_record_timed_in_the_drop_window_is_in_no_count_not_even_when_the_message_is
     let mut all = new_stats();
     let lim0 = Limits {
         max_records: 4,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     parse_message(&mut p, xml.as_bytes(), &lim0, &mut all).unwrap();
     assert_eq!((all.records, all.sealed_window_dropped), (4, 0));
@@ -1601,8 +1771,8 @@ fn an_asdex_report_timed_in_the_drop_window_is_dropped_before_the_counts_and_one
         rep(""),
     );
     let lim = Limits {
-        drop_window: Some(DROP),
-        ..Limits::default()
+        drop_window: oa_sealed::DropWindow::new(DROP.0, DROP.1),
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let mut st = new_stats();
     let m = match parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap() {
@@ -1615,4 +1785,88 @@ fn an_asdex_report_timed_in_the_drop_window_is_dropped_before_the_counts_and_one
     );
     // One unknown element per kept report, none for the dropped one.
     assert_eq!(st.unknown.iter().map(|u| u.count).sum::<u64>(), 2);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_summary_example_passes_the_sealed_window_to_the_decoder() {
+    // An example is not a library: its source is read, so the window it passes cannot drift.
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/stdds_summary.rs"),
+    )
+    .unwrap();
+    assert!(src.contains("Limits::new(oa_sealed::DropWindow::sealed())"));
+    assert!(!src.contains("empty_for_tests_and_fuzz"));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn nesting_below_an_unknown_element_is_one_unknown_element_and_never_a_too_deep_refusal() {
+    let mut p = parser();
+    // The walk descends only into containers of known paths (two levels at most), so no document
+    // reaches the deeper-than-eight refusal; the branch that takes it discards the half-walked
+    // record's scratch (no known time) and counts the refusal in `errors` only.
+    let deep = format!("{}1{}", "<d>".repeat(12), "</d>".repeat(12));
+    let xml = tais_xml(&format!(
+        "<record><track><trackNum>2</trackNum>{deep}</track></record>"
+    ));
+    let mut st = new_stats();
+    let lim = Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1));
+    let m = parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap();
+    assert!(matches!(m, Message::Tais(_)));
+    assert_eq!((st.errors[3], st.records), (0, 1));
+    assert_eq!(st.unknown.iter().map(|u| u.count).sum::<u64>(), 1);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn records_after_a_too_many_records_refusal_are_never_parsed_so_the_dropped_count_is_a_lower_bound()
+{
+    let mut p = parser();
+    let rec = |n: u32, t: &str| {
+        format!("<record><track><trackNum>{n}</trackNum><mrtTime>{t}</mrtTime></track></record>")
+    };
+    // One kept record, the refusal at the second, then two timed in the window that nothing reads.
+    let xml = tais_xml(&format!(
+        "{}{}{}{}",
+        rec(1, "2026-11-19T00:00:00Z"),
+        rec(2, "2026-11-19T00:00:01Z"),
+        rec(3, "2026-11-21T00:00:00Z"),
+        rec(4, "2026-11-21T00:00:01Z"),
+    ));
+    let lim = Limits {
+        max_records: 1,
+        ..Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1))
+    };
+    let mut st = new_stats();
+    let r = parse_message(&mut p, xml.as_bytes(), &lim, &mut st);
+    assert!(matches!(r, Err(StdError::TooManyRecords { .. })), "{r:?}");
+    // The refusal is counted; the two window records after it are in no count, not even the
+    // sealed-window one, which is a lower bound for the records after a refusal.
+    assert_eq!(
+        (st.errors[2], st.records, st.sealed_window_dropped),
+        (1, 1, 0)
+    );
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_message_whose_records_were_all_dropped_by_time_is_not_a_message_a_kind_or_an_unknown_root() {
+    let mut p = parser();
+    let lim = Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1));
+    let mut st = new_stats();
+    let xml = tais_xml(
+        "<record><track><trackNum>1</trackNum><mrtTime>2026-11-21T00:00:00Z</mrtTime></track></record>",
+    );
+    parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap();
+    assert_eq!(st.sealed_window_dropped, 1);
+    assert_eq!(st.messages, 0);
+    assert_eq!(st.kinds.iter().sum::<u64>(), 0);
+    assert!(st.unknown_roots.is_empty());
+    // A message with one kept record is counted as usual.
+    let xml = tais_xml(
+        "<record><track><trackNum>1</trackNum><mrtTime>2026-11-21T00:00:00Z</mrtTime></track></record><record><track><trackNum>2</trackNum></track></record>",
+    );
+    parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap();
+    assert_eq!((st.messages, st.sealed_window_dropped), (1, 2));
 }

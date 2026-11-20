@@ -96,6 +96,10 @@ pub struct Outcome {
     /// Speeds of a form that is neither knots nor Mach, kept with unit
     /// [`spd_unit::UNKNOWN`] instead of refusing the message.
     pub unknown_units: u32,
+    /// Flight and flow rows dropped because the message's own time (`sourceTimeStamp`) is in
+    /// [`Rows::window`]: not appended, and in no other field of the outcome (the message is not
+    /// in `messages` either).
+    pub sealed_dropped: u32,
 }
 
 /// Parses `input` with `parser` and decodes it. A parse error is [`DocError::Xml`].
@@ -141,6 +145,8 @@ fn decode_with(doc: &Doc<'_>, rows: &mut Rows, prefix: bool) -> Result<Outcome, 
         first_reject: None,
         reject_fields: [0; FIELD_COUNT],
         reject_kinds: [0; ERROR_KIND_COUNT],
+        sealed: 0,
+        sealed_messages: 0,
     };
     let r = decode_root(doc, &mut acc, rows, prefix);
     if r.is_err() {
@@ -158,6 +164,9 @@ struct Acc {
     first_reject: Option<FieldError>,
     reject_fields: [u32; FIELD_COUNT],
     reject_kinds: [u32; ERROR_KIND_COUNT],
+    /// Rows, and messages, dropped for their time in the window.
+    sealed: u32,
+    sealed_messages: u32,
 }
 
 /// Degrees, minutes, seconds and hemisphere of one coordinate, collected from four attributes.
@@ -912,7 +921,60 @@ fn guarded(
     f: impl FnOnce(&mut Acc, &mut Ctx<'_>) -> Result<(), DocError>,
 ) -> Result<(), DocError> {
     let m = mark(acc, c);
+    // No message time is known until this message's `sourceTimeStamp` is read.
+    c.f.src_ms = NO_TIME;
+    c.w.src_ms = NO_TIME;
     match f(acc, c) {
+        Ok(()) => {
+            // A message timed (`sourceTimeStamp`) in the window is dropped like a refused one:
+            // its rows, text and everything it counted are rolled back, and only the drop is
+            // counted.
+            let w = c.rows.window;
+            let flights = c
+                .rows
+                .flights
+                .src_ms
+                .get(m.flights..)
+                .map_or(0, |t| t.iter().filter(|&&t| w.contains(t)).count());
+            let flows = c
+                .rows
+                .flows
+                .src_ms
+                .get(m.flows..)
+                .map_or(0, |t| t.iter().filter(|&&t| w.contains(t)).count());
+            if flights + flows == 0 {
+                return Ok(());
+            }
+            truncate_rows(c.rows, m.flights, m.flows, m.strings);
+            acc.unknown = m.unknown;
+            acc.ignored = m.ignored;
+            c.unknown_words = m.words;
+            c.unknown_units = m.units;
+            c.dropped = m.dropped;
+            acc.sealed = acc
+                .sealed
+                .saturating_add(u32::try_from(flights + flows).unwrap_or(u32::MAX));
+            acc.sealed_messages = acc.sealed_messages.saturating_add(1);
+            Ok(())
+        }
+        // A message refused after its time was read, and timed in the window, is dropped for its
+        // time, not counted as refused. One refused before it (no known time) is counted as
+        // refused.
+        Err(DocError::Field(_))
+            if [c.f.src_ms, c.w.src_ms]
+                .iter()
+                .any(|&t| t != NO_TIME && c.rows.window.contains(t)) =>
+        {
+            truncate_rows(c.rows, m.flights, m.flows, m.strings);
+            acc.unknown = m.unknown;
+            acc.ignored = m.ignored;
+            c.unknown_words = m.words;
+            c.unknown_units = m.units;
+            c.dropped = m.dropped;
+            acc.sealed = acc.sealed.saturating_add(1);
+            acc.sealed_messages = acc.sealed_messages.saturating_add(1);
+            Ok(())
+        }
         Err(DocError::Field(fe)) => {
             truncate_rows(c.rows, m.flights, m.flows, m.strings);
             acc.unknown = m.unknown;
@@ -1231,7 +1293,7 @@ fn decode_root(
     let w1 = flows_len(&c.rows.flows);
     Ok(Outcome {
         kind: kind.unwrap_or(DocKind::Empty),
-        messages,
+        messages: messages.saturating_sub(acc.sealed_messages),
         flight_rows: u32::try_from(f1 - f0).unwrap_or(u32::MAX),
         flow_rows: u32::try_from(w1 - w0).unwrap_or(u32::MAX),
         unknown_paths: acc.unknown,
@@ -1243,5 +1305,6 @@ fn decode_root(
         reject_kinds: acc.reject_kinds,
         unknown_words: c.unknown_words,
         unknown_units: c.unknown_units,
+        sealed_dropped: acc.sealed,
     })
 }

@@ -428,7 +428,7 @@ fn text_longer_than_the_limit_or_empty_is_a_field_error_and_takes_no_space() {
     let mut p = parser();
     let mut d = new_decoder(Limits {
         max_text_len: 10,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut out = small();
     let mut s = default_stats();
@@ -724,7 +724,7 @@ fn a_bad_polygon_is_a_field_error_on_the_row_and_none_is_kept() {
     let mut p = parser();
     let mut d = new_decoder(Limits {
         max_poly_vertices: 4,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut out = small();
     let mut s = default_stats();
@@ -1144,7 +1144,7 @@ fn reaching_a_capacity_is_a_reported_refusal_with_nothing_kept() {
     // A document that has too many elements for the decoder.
     let mut small_dec = new_decoder(Limits {
         max_elements: 10,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut out = small();
     let e = decode_bytes(&mut p, &mut small_dec, xml.as_bytes(), &mut out, &mut st).unwrap_err();
@@ -1429,4 +1429,63 @@ fn a_referred_number_and_year_without_a_series_is_a_local_format_reference() {
         "<event:number>42</event:number><event:referredYear>2029</event:referredYear>",
     );
     assert_eq!(ok(&xml).0.errors[0], bit(Field::Ref));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_notam_issued_in_the_drop_window_is_dropped_before_any_count_and_the_drop_is_counted() {
+    // 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, the sealed window, in Unix ms.
+    let w = oa_sealed::DropWindow::new(1_795_132_800_000, 1_795_393_020_000);
+    let mut p = parser();
+    let mut d = new_decoder(Limits::new(w));
+    let mut out = small();
+    let mut stats = default_stats();
+    let base = rep(
+        &msg(&[&airport()]),
+        "</event:NOTAM>",
+        "<event:zzz>1</event:zzz></event:NOTAM>",
+    );
+    // Issued in the window, with an unknown element and a refused field: in no count.
+    let bad = rep(
+        &base,
+        "<event:radius>5</event:radius>",
+        "<event:radius>x</event:radius>",
+    );
+    for xml in [
+        rep(
+            &base,
+            "<event:issued>2030-03-05T09:00:00.000Z</event:issued>",
+            "<event:issued>2026-11-21T00:00:00.000Z</event:issued>",
+        ),
+        rep(
+            &bad,
+            "<event:issued>2030-03-05T09:00:00.000Z</event:issued>",
+            "<event:issued>2026-11-22T00:00:00.000Z</event:issued>",
+        ),
+    ] {
+        let o = decode_bytes(&mut p, &mut d, xml.as_bytes(), &mut out, &mut stats).unwrap();
+        assert!(o.sealed_dropped);
+        assert_eq!((o.field_errors, o.unknown_elements), (0, 0));
+    }
+    assert_eq!(out.len, 0);
+    assert_eq!(mark(&out), mark(&small()));
+    assert_eq!(stats.sealed_window_dropped, 2);
+    assert_eq!((stats.docs, stats.accepted, stats.rows), (0, 0, 0));
+    assert_eq!(stats.unknown_elements + stats.unknown_attributes, 0);
+    assert!(stats.unknown.is_empty());
+    assert_eq!(stats.field_errors.iter().sum::<u64>(), 0);
+    // Outside it (the end is excluded) the NOTAM is kept and its unknown element counted.
+    let xml = rep(
+        &base,
+        "<event:issued>2030-03-05T09:00:00.000Z</event:issued>",
+        "<event:issued>2026-11-23T00:17:00.000Z</event:issued>",
+    );
+    let o = decode_bytes(&mut p, &mut d, xml.as_bytes(), &mut out, &mut stats).unwrap();
+    assert!(!o.sealed_dropped);
+    assert_eq!((out.len, stats.docs, stats.rows), (1, 1, 1));
+    assert_eq!(stats.unknown_elements, 1);
+    // A document refused whole has no known time and is counted as refused.
+    let r = decode_bytes(&mut p, &mut d, b"<notaixm/>", &mut out, &mut stats);
+    assert!(r.is_err());
+    assert_eq!(stats.sealed_window_dropped, 2);
 }

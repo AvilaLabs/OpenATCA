@@ -62,12 +62,12 @@ pub use fns::{
 };
 pub use hash::{state_hash, HASH_TAG};
 pub use pipeline::{
-    add_errors, doc_fixm_limits, doc_xml_limits, frames_total, new_doc_events, new_doc_tbfm_rows,
-    new_doc_tfms_rows, new_pipeline, pipeline_drain_checkpoints, pipeline_stale_count,
-    pipeline_try_drain_checkpoints, process_frame, process_frame_mono, replay_hash,
-    replay_state_digest, rows_applied_total, snapshot, Checkpoint, CheckpointRing, FeedKind,
-    Pipeline, PipelineConfig, PipelineError, DEFAULT_CHECKPOINT_RING, FEED_COUNT, FEED_NAMES,
-    MIN_CHECKPOINT_NS,
+    add_errors, doc_fixm_limits, doc_notam_limits, doc_xml_limits, frames_total, new_doc_events,
+    new_doc_tbfm_rows, new_doc_tfms_rows, new_pipeline, pipeline_drain_checkpoints,
+    pipeline_stale_count, pipeline_try_drain_checkpoints, process_frame, process_frame_mono,
+    replay_hash, replay_state_digest, rows_applied_total, snapshot, Checkpoint, CheckpointRing,
+    FeedKind, Pipeline, PipelineConfig, PipelineError, DEFAULT_CHECKPOINT_RING, FEED_COUNT,
+    FEED_NAMES, MIN_CHECKPOINT_NS,
 };
 pub use source::{
     list_recordings, merge_counted, merge_key, merge_streams, run_streams, run_streams_counted,

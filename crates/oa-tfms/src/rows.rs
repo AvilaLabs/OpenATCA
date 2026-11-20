@@ -13,6 +13,8 @@
 //! expands only to a struct definition and straight-line code (RULESET F3: no hidden control
 //! flow).
 
+use oa_sealed::DropWindow;
+
 /// Short ASCII names, zero-padded on the right; all zero means absent. Widths come from the
 /// longest value in the 4,237-message survey (docs/TFMS_SURVEY.md) plus headroom; a longer value
 /// is a field error, never truncated.
@@ -537,6 +539,9 @@ const _: () = assert!(core::mem::size_of::<FlowRow>() == 144);
 // A7.2: cold struct, size guard waived (one per decoder)
 #[derive(Clone, Debug)]
 pub struct Rows {
+    /// The span in which a message timed by its own `sourceTimeStamp` is dropped by the decoder,
+    /// before any count and without a row (OA-SEAL-014). Fixed at construction.
+    pub window: DropWindow,
     pub flights: Flights,
     pub flows: Flows,
     /// The text table: `strings.len()` is its capacity, `strings_used` bytes are in use.
@@ -558,8 +563,11 @@ pub const DEFAULT_STRING_BYTES: usize = 256 * 1024;
 
 /// Allocates empty tables with room for `flights` flight rows, `flows` flow rows and
 /// `string_bytes` bytes of text.
-pub fn new_rows(flights: usize, flows: usize, string_bytes: usize) -> Rows {
+/// A tool passes [`DropWindow::sealed`]; tests and fuzz targets pass
+/// [`DropWindow::empty_for_tests_and_fuzz`].
+pub fn new_rows(flights: usize, flows: usize, string_bytes: usize, window: DropWindow) -> Rows {
     Rows {
+        window,
         flights: new_flights(flights),
         flows: new_flows(flows),
         strings: vec![0; string_bytes],

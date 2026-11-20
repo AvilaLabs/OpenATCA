@@ -302,10 +302,7 @@ pub fn read_dir_counted(
         .map_err(|e| ReadError::Failed(format!("xml parser: {e:?}")))?;
     let mut ctx = Ctx {
         parser,
-        limits: Limits {
-            drop_window: oa_sealed::sealed_window_ms(),
-            ..Limits::default()
-        },
+        limits: read_limits(),
         census,
         rs: ReadStats::new(),
     };
@@ -329,15 +326,18 @@ pub fn read_dir_counted(
     Ok(ctx.rs)
 }
 
+/// The decoder limits of every read in this tool: the sealed window as the drop window, so a
+/// record timed in it is dropped before any count (OA-SEAL-014).
+pub fn read_limits() -> Limits {
+    Limits::new(oa_sealed::DropWindow::sealed())
+}
+
 /// Reads one in-memory stream (tests).
 pub fn read_bytes(bytes: &[u8], census: &mut Census) -> Result<ReadStats, String> {
     let parser = Parser::new(XmlLimits::default()).map_err(|e| format!("xml parser: {e:?}"))?;
     let mut ctx = Ctx {
         parser,
-        limits: Limits {
-            drop_window: oa_sealed::sealed_window_ms(),
-            ..Limits::default()
-        },
+        limits: read_limits(),
         census,
         rs: ReadStats::new(),
     };

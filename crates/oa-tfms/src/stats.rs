@@ -12,6 +12,9 @@ use crate::rows::{fkind, kind};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stats {
     pub documents: u64,
+    /// Rows dropped because their message's own time is in the window (OA-SEAL-014); a document
+    /// that held only such messages is in no other count.
+    pub sealed_window_dropped: u64,
     pub accepted: u64,
     /// Messages in accepted documents.
     pub messages: u64,
@@ -46,6 +49,7 @@ pub struct Stats {
 pub const fn new_stats() -> Stats {
     Stats {
         documents: 0,
+        sealed_window_dropped: 0,
         accepted: 0,
         messages: 0,
         flight_rows: 0,
@@ -73,6 +77,12 @@ pub fn observe(
     flight_kinds: &[u8],
     flow_kinds: &[u8],
 ) {
+    if let Ok(o) = result {
+        s.sealed_window_dropped += u64::from(o.sealed_dropped);
+        if o.sealed_dropped > 0 && o.messages == 0 && o.rejected == 0 && o.dropped == 0 {
+            return;
+        }
+    }
     s.documents += 1;
     match result {
         Ok(o) => {

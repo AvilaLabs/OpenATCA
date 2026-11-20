@@ -73,7 +73,7 @@ fn every_real_tbfm_message_decodes_and_is_reported() {
     let total: usize = data.iter().map(Vec::len).sum();
 
     // Pass 1, keeping every row, for the distinct counts and the field-error detail.
-    let mut rows = new_rows(200_000);
+    let mut rows = new_rows(200_000, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     let mut parser = Parser::new(default_limits()).unwrap();
     let mut stats = new_stats();
     let mut errors: BTreeMap<String, u64> = BTreeMap::new();
@@ -195,7 +195,10 @@ fn every_real_tbfm_message_decodes_and_is_reported() {
     assert!(stats.kinds[MsgKind::Air as usize] > 0);
 
     // Pass 2, timing only (the files are already in memory; rows are discarded per message).
-    let mut scratch = new_rows(oa_tbfm::DEFAULT_ROW_CAPACITY);
+    let mut scratch = new_rows(
+        oa_tbfm::DEFAULT_ROW_CAPACITY,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     let t = Instant::now();
     let reps = 5;
     for _ in 0..reps {
@@ -228,7 +231,7 @@ fn real_meter_fixes_and_airports_resolve_against_the_model() {
         return;
     };
     let model = oa_airspace::snapshot::decode(&oa_sealed::read(snap).unwrap()).unwrap();
-    let mut rows = new_rows(200_000);
+    let mut rows = new_rows(200_000, oa_sealed::DropWindow::empty_for_tests_and_fuzz());
     let stats = decode_all(&data, &mut rows, true);
     assert_eq!(stats.rejects.iter().sum::<u64>(), 0);
     let x = cross_check(&model, &rows);

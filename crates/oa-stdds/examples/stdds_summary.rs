@@ -103,13 +103,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let Ok(parser) = Parser::new(XmlLimits::default()) else {
+        eprintln!("error: the XML parser limits were refused");
+        return ExitCode::from(1);
+    };
     let mut ctx = Ctx {
-        parser: Parser::new(XmlLimits::default()).unwrap(),
+        parser,
         stats: new_stats(),
-        limits: Limits {
-            drop_window: oa_sealed::sealed_window_ms(),
-            ..Limits::default()
-        },
+        limits: Limits::new(oa_sealed::DropWindow::sealed()),
         frames: 0,
         other_frames: 0,
         bad_frames: 0,
@@ -118,33 +119,47 @@ fn main() -> ExitCode {
         stalled_bytes: 0,
     };
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
-    let mut reader = FrameReader::new(&mut storage).unwrap();
+    let Ok(mut reader) = FrameReader::new(&mut storage) else {
+        eprintln!("error: the frame reader buffer is too small");
+        return ExitCode::from(1);
+    };
     let mut chunk = vec![0u8; 64 * 1024];
-    // Read until two bytes (the gzip magic) or the end of the file.
-    let mut n = 0;
-    while n < 2 {
-        let got = src.read(&mut chunk[n..]).unwrap();
-        if got == 0 {
-            break;
-        }
-        n += got;
-    }
-    let mut gz =
-        (n >= 2 && chunk[..2] == [0x1f, 0x8b]).then(|| Box::new(GzipReader::new(REPLAY_LIMITS)));
+    let mut gz: Option<Box<GzipReader>> = None;
     let mut gz_damaged = false;
-    while n > 0 {
-        match gz.as_mut() {
-            None => feed(&mut reader, &mut ctx, &chunk[..n]),
-            Some(g) if !gz_damaged => {
-                let r = g.push(&chunk[..n], &mut |b: &[u8]| -> Result<(), Infallible> {
-                    feed(&mut reader, &mut ctx, b);
-                    Ok(())
-                });
-                gz_damaged = r.is_err();
+    let read = (|| -> std::io::Result<()> {
+        // Read until two bytes (the gzip magic) or the end of the file.
+        let mut n = 0;
+        while n < 2 {
+            let got = src.read(&mut chunk[n..])?;
+            if got == 0 {
+                break;
             }
-            Some(_) => {}
+            n += got;
         }
-        n = src.read(&mut chunk).unwrap();
+        gz = (n >= 2 && chunk[..2] == [0x1f, 0x8b])
+            .then(|| Box::new(GzipReader::new(REPLAY_LIMITS)));
+        while n > 0 {
+            match gz.as_mut() {
+                None => feed(&mut reader, &mut ctx, &chunk[..n]),
+                Some(g) if !gz_damaged => {
+                    let r = g.push(&chunk[..n], &mut |b: &[u8]| -> Result<(), Infallible> {
+                        feed(&mut reader, &mut ctx, b);
+                        Ok(())
+                    });
+                    gz_damaged = r.is_err();
+                }
+                Some(_) => {}
+            }
+            n = src.read(&mut chunk)?;
+        }
+        Ok(())
+    })();
+    // The count so far goes in whatever the read did: frames by receive time, TAIS records by
+    // `mrtTime` and ASDE-X reports by `time`.
+    drops.add(ctx.sealed_frames + ctx.stats.sealed_window_dropped);
+    if let Err(e) = read {
+        eprintln!("error: cannot read {path}: {e}");
+        return ExitCode::from(1);
     }
     drain(&mut reader, &mut ctx);
     if reader.finish().is_some() {
@@ -157,8 +172,6 @@ fn main() -> ExitCode {
         "frames: message {} other {} damaged {}",
         ctx.frames, ctx.other_frames, ctx.bad_frames
     );
-    // Frames by receive time, TAIS records by `mrtTime` and ASDE-X reports by `time`.
-    drops.add(ctx.sealed_frames + s.sealed_window_dropped);
     println!("gzip: damaged {gz_damaged} truncated {truncated}");
     println!("messages parsed: {}", s.messages);
     for (name, c) in KIND_NAMES.iter().zip(&s.kinds) {

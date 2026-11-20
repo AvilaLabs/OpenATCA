@@ -235,6 +235,12 @@ pub fn replay_sfdps(
     replay_sfdps_counted(paths, cfg, before_op, &mut 0)
 }
 
+/// The decoder limits of every replay here: the replay pipeline's own, with the sealed window as
+/// the drop window (OA-SEAL-014).
+pub fn decoder_limits() -> oa_fixm::Limits {
+    doc_fixm_limits()
+}
+
 /// [`replay_sfdps`], with the frames (by receive time, from the merge, also when the run stops
 /// at `to_ns` or on an error) and the messages (by their own time) dropped in a sealed window put
 /// in `sealed` on every exit, so a caller can print the count whatever the result.
@@ -247,7 +253,7 @@ pub fn replay_sfdps_counted(
     let mut table = flights_new(&cfg.flight).map_err(|e| io::Error::other(format!("{e:?}")))?;
     let mut parser =
         Parser::new(doc_xml_limits()).map_err(|e| io::Error::other(format!("{e:?}")))?;
-    let mut decoder = Decoder::new(doc_fixm_limits());
+    let mut decoder = Decoder::new(decoder_limits());
     let mut events = new_doc_events();
     let mut rep = ReplayReport {
         frames: 0,
@@ -330,16 +336,6 @@ pub fn replay_sfdps_counted(
             return Ok(());
         }
         for row in 0..events.len {
-            // A row whose own time is in a sealed window is dropped and counted, whatever the
-            // receive time of its frame.
-            if events.ts_ms.get(row).is_some_and(|&t| sealed_ms(t))
-                || (oa_fixm::has_field(&events, row, oa_fixm::Field::PositionTime)
-                    && events.pos_time_ms.get(row).is_some_and(|&t| sealed_ms(t)))
-            {
-                *sealed += 1;
-                oa_sealed::note_window_drops(1);
-                continue;
-            }
             count_row(&mut rep, &events, row, seen_ms);
             ops.clear();
             let msg = m.seq << 16 | (row as u64 & 0xFFFF);
@@ -405,11 +401,6 @@ pub fn replay_sfdps_counted(
     rep.positions = positions;
     rep.table = table;
     Ok(rep)
-}
-
-/// Whether a row's own time (Unix milliseconds) is in a sealed window.
-fn sealed_ms(t: i64) -> bool {
-    oa_sealed::in_sealed_window(t.saturating_mul(1_000_000))
 }
 
 /// When the position of a row becomes available.

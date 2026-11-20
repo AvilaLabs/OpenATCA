@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use oa_sealed::Sealed;
 use oa_stdds_ref::engine::analyse;
 use oa_stdds_ref::guard::{create_output, is_refusal, refuse_sealed};
-use oa_stdds_ref::load::load_file;
+use oa_stdds_ref::load::load_file_counted;
 use oa_stdds_ref::report::build_report;
 use oa_stdds_ref::run::build_refs;
 use oa_stdds_ref::sources::TruthSource;
@@ -90,8 +90,10 @@ fn run(
     let mut header = Vec::new();
     for (i, f) in files.iter().enumerate() {
         let ix = u32::try_from(i).map_err(|_| "too many input files".to_string())?;
-        let info = load_file(g, f, ix, &mut recs).map_err(|e| e.to_string())?;
-        drops.add(info.sealed_window_dropped);
+        let mut file_sealed = 0u64;
+        let loaded = load_file_counted(g, f, ix, &mut recs, &mut file_sealed);
+        drops.add(file_sealed);
+        let info = loaded.map_err(|e| e.to_string())?;
         header.push(format!(
             "STDDS file {ix}: {} (digest {}); message frames {}, other frames {}, damaged frames {}, messages not TAIS or refused {}, TAIS records {}, gzip damaged {}, gzip truncated {}",
             info.path,

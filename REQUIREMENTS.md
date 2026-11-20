@@ -5897,14 +5897,34 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `oa-replay` pipeline's ADS-B rows (own time) and FNS rows (issue or cancel time; the validity span is not a message time),
   the `oa-adsb` archive reader (trace rows; `Stats::sealed_window_dropped`, and `oa-adsb-clip` refuses, OA-SEAL-015),
   `oa-wind-check adsb` and the `stdds_summary` example, which
-  drops inside the decoder: `oa_stdds::Limits::drop_window` (from, to in Unix ms, from `oa_sealed::sealed_window_ms()`) makes
-  `parse_tais`, `parse_smes` (ASDE-X) and the fixm decoder (`oa_fixm::Limits::drop_window`, by the row's own time) drop a
-  record timed in the window before any statistic is updated, and count it in `Stats::sealed_window_dropped`, also on the
-  refusal path (too many records, too deep); the shells set the window, so no record, field, flag, latency, status or
-  message count printed by `stdds_summary`, `oa-stdds-census`, `oa-stdds-ref`, `oa-flight`, `oa-replay`, `oa-bench` and the
-  fixm survey includes a hold-out row; other message kinds (service status, classified only) carry no row time and go by
+  drops inside the decoder. The window is a required argument of every decoder, so a caller cannot forget it:
+  `oa_stdds::Limits`, `oa_fixm::Limits` and `oa_notam::Limits` have no `Default` and a constructor `Limits::new(DropWindow)`;
+  `oa_tbfm::new_rows` and `oa_tfms::new_rows` take it as their last argument. `oa_sealed::DropWindow` is the half-open span in
+  Unix ms; `DropWindow::sealed()` is the sealed window (`oa_sealed::sealed_window_ms()`) and is what every tool passes;
+  `DropWindow::empty_for_tests_and_fuzz()` drops nothing and is for tests and fuzz targets only (its name says so). A test per
+  shell asserts the window it passes equals the sealed one (oa-replay `doc_fixm_limits`, `doc_notam_limits` and the TBFM and
+  TFMS row tables, which `oa-bench` and `oa-flight` use through `Reader::drop_windows` and `decoder_limits`, the census, the
+  `oa-stdds-ref` loader and the `stdds_summary` example). A row timed in the window is dropped before any count, by its own
+  time: a TAIS record by `mrtTime` and an ASDE-X report by `time` (`parse_tais`, `parse_smes`), an SFDPS message by its
+  `timestamp` or `positionTime`, a TBFM flight by `msgTime`, a TFMS message by `sourceTimeStamp`, a NOTAM by `issued` or
+  `canceled` (its validity span is not a message time). It is in no message, row, kind, rejection (`rejected`,
+  `reject_fields`, `reject_kinds`), refused-field, field-error, shape, flag, unknown-path or unknown-root count, and the
+  scratch it filled is rolled back; it is counted in `Stats::sealed_window_dropped` (or `Outcome::sealed_dropped`). A
+  message or document whose rows were all dropped by time is not counted as a message, a document, a kind or an unknown root
+  either. A row refused whole before its time was read has no known time and is counted as refused, and so is a document
+  refused whole (not XML, wrong root). In stdds the unknown elements and errors at the message root (outside any record)
+  have no row time and stay counted. Two refusals: for `TooManyRecords` the refusal is counted in `errors`, and
+  `sealed_window_dropped` is a lower bound for the records after the refusal point, which are never parsed or counted
+  anywhere; for `TooDeep` (not reachable by any document today, because the walk descends only into known containers) the
+  half-walked record has no known time, so its scratch is discarded and only the refusal is counted in `errors`. The
+  `oa-bench` SFDPS scan (hints, addresses, handoffs, routes) skips every message the decoder dropped by time
+  (`Decoder::dropped_messages`), so none reaches those tables. A recording's byte count (`oa-replay`, `oa-feed replay`) is
+  the bytes after the window gate: the bytes of a frame dropped by receive time are not in it. A failed read still adds what
+  was counted so far (`oa-stdds-ref` `load_file_counted`, `stdds_summary`, the fixm survey, which returns an error through
+  `main` instead of unwrapping). `oa-bench` and `oa-stdds-census` record the line in their report and also print one
+  stderr line at exit, which is the same count printed once. Other message kinds (service status, classified only) carry no row time and go by
   the receive time of their frame. Tests assert the `records:`, a TAIS field and a flag count, a refused message whose early
-  records are in the window, and the fixm stats. `oa-scope-replay` prints its line on every exit, an empty window included, and its decoder `records` and
+  records are in the window, the fixm, TBFM, TFMS and NOTAM stats, the oa-replay TFMS flow rows, and the oa-bench tables. `oa-scope-replay` prints its line on every exit, an empty window included, and its decoder `records` and
   `kept` counts are after the window filter. A row or record with no time of its own is kept, backstopped by the receive time of its frame where
   the reader has one: SFDPS rows without a timestamp, TBFM/TFMS rows without a message time, a TAIS record without
   `mrtTime`, a raw `.msg` file (no frame header, so nothing to count by receive time). `oa-compass slice` reads the `.ast`

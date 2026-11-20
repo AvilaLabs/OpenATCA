@@ -59,6 +59,7 @@ fn new_default_rows() -> Rows {
         DEFAULT_FLIGHT_CAPACITY,
         DEFAULT_FLOW_CAPACITY,
         DEFAULT_STRING_BYTES,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
     )
 }
 
@@ -243,14 +244,16 @@ fn real_tfms_flights_link_to_real_sfdps_flights() {
         return;
     };
     let mut parser = Parser::new(default_limits()).unwrap();
-    let mut rows = new_rows(tfms.len() * 24, tfms.len() * 2, 64 << 20);
+    let mut rows = new_rows(
+        tfms.len() * 24,
+        tfms.len() * 2,
+        64 << 20,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     for bytes in &tfms {
         decode_bytes(&mut parser, bytes, &mut rows).unwrap();
     }
-    let mut dec = Decoder::new(FixmLimits {
-        drop_window: oa_sealed::sealed_window_ms(),
-        ..FixmLimits::default()
-    });
+    let mut dec = Decoder::new(FixmLimits::new(oa_sealed::DropWindow::sealed()));
     let mut ev = new_events(200_000, 16 << 20);
     let mut sparser = Parser::new(oa_xml::Limits::default()).unwrap();
     for bytes in &sfdps {

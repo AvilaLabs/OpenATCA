@@ -75,7 +75,9 @@ fn every_real_fns_message_decodes_and_is_reported() {
 
     // Pass 1, keeping every row, for the distinct counts.
     let mut rows = default_notams();
-    let mut dec = new_decoder(Limits::default());
+    let mut dec = new_decoder(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut stats = new_stats(256);
     decode_all(&data, &mut dec, &mut rows, &mut stats, true);
 
@@ -202,7 +204,9 @@ fn real_locations_and_polygons_resolve_against_the_model() {
     };
     let model = oa_airspace::snapshot::decode(&oa_sealed::read(snap).unwrap()).unwrap();
     let mut rows = default_notams();
-    let mut dec = new_decoder(Limits::default());
+    let mut dec = new_decoder(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut stats = new_stats(256);
     decode_all(&data, &mut dec, &mut rows, &mut stats, true);
     assert_eq!(stats.rejects.iter().sum::<u64>(), 0);

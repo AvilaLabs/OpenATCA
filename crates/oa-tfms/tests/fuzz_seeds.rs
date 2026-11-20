@@ -18,6 +18,7 @@ fn every_committed_seed_decodes_or_is_refused_as_named() {
         oa_tfms::DEFAULT_FLIGHT_CAPACITY,
         oa_tfms::DEFAULT_FLOW_CAPACITY,
         oa_tfms::DEFAULT_STRING_BYTES,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
     );
     let (mut accepted, mut refused) = (0, 0);
     let mut names: Vec<_> = std::fs::read_dir(&dir)

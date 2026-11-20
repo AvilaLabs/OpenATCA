@@ -250,6 +250,8 @@ impl Stream<'_> {
             Some(Ok(f)) if oa_sealed::in_sealed_window(f.recv_unix_ns) => {
                 // A frame whose time is in a sealed window is dropped and counted.
                 self.sealed_window_dropped += 1;
+                // Its bytes are not counted: `bytes` is the bytes after the window gate.
+                self.bytes = self.bytes.saturating_sub(f.raw.len() as u64);
                 oa_sealed::note_window_drops(1);
                 return Ok(AdvanceStep::Continue);
             }

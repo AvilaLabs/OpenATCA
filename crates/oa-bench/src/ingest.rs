@@ -43,6 +43,17 @@ impl std::fmt::Display for ReaderError {
 
 impl std::error::Error for ReaderError {}
 
+impl Reader {
+    /// The drop window of each decoder of this reader: SFDPS, TBFM, TFMS (OA-SEAL-014).
+    pub fn drop_windows(&self) -> [oa_sealed::DropWindow; 3] {
+        [
+            self.fixm.limits().drop_window,
+            self.tbfm_rows.window,
+            self.tfms_rows.window,
+        ]
+    }
+}
+
 /// A reader with the replay pipeline's parser limits and table sizes.
 pub fn new_reader() -> Result<Reader, ReaderError> {
     let parser = Parser::new(oa_replay::doc_xml_limits()).map_err(|_| ReaderError)?;
@@ -68,8 +79,7 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
     match r.fixm.decode_prefix(&doc, bytes, &mut r.events) {
         Ok(sum) => {
             // Messages the decoder dropped for their own time (OA-SEAL-014).
-            leg.counts.sealed_window_dropped += u64::from(sum.sealed_window_dropped);
-            oa_sealed::note_window_drops(u64::from(sum.sealed_window_dropped));
+            note_sealed(leg, u64::from(sum.sealed_window_dropped));
             leg.counts.sfdps_rejected += u64::from(sum.rejected);
             leg.counts.rows_not_decoded += u64::from(sum.not_decoded);
             leg.counts.sfdps_field_errors += u64::from(sum.field_errors);
@@ -97,15 +107,6 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
             leg.counts.note(DROP_SFDPS_NO_GUFI.into(), 1);
             continue;
         };
-        // A record whose own time is in a sealed window is dropped and counted, whatever the
-        // receive time of its frame.
-        if ev.ts_ms.get(row).is_some_and(|&t| sealed_ms(t))
-            || (row_has(ev, row, Field::PositionTime)
-                && ev.pos_time_ms.get(row).is_some_and(|&t| sealed_ms(t)))
-        {
-            drop_sealed(leg);
-            continue;
-        }
         let Some(f) = flight_ix(leg, gufi) else {
             leg.counts.note(DROP_SFDPS_FLIGHT_FULL.into(), 1);
             continue;
@@ -175,7 +176,7 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
             push_th(leg, f, pt, recv_ms, lat, lon, alt, vel, coast);
         }
     }
-    scan_doc(&doc, &mut r.text, leg);
+    scan_doc(&doc, &mut r.text, leg, r.fixm.dropped_messages());
 }
 
 /// Field error kind names of `oa-tbfm`, by `error_kind_index`.
@@ -232,15 +233,10 @@ const DROP_TBFM_NO_TIME: &str = "TBFM values dropped, reason time absent";
 const DROP_TFMS_NO_ROW: &str = "TFMS rows dropped, reason row not readable";
 const DROP_TFMS_NOT_ESTIMATE: &str = "TFMS times dropped, reason type is not ESTIMATED";
 
-/// Whether a record's own time (Unix milliseconds) is in a sealed window.
-fn sealed_ms(t: i64) -> bool {
-    oa_sealed::in_sealed_window(t.saturating_mul(1_000_000))
-}
-
-/// Counts a record left out for its own time in a sealed window (OA-SEAL-014).
-fn drop_sealed(leg: &mut Legacy) {
-    leg.counts.sealed_window_dropped += 1;
-    oa_sealed::note_window_drops(1);
+/// Counts rows the decoders dropped for their own time in a sealed window (OA-SEAL-014).
+fn note_sealed(leg: &mut Legacy, n: u64) {
+    leg.counts.sealed_window_dropped += n;
+    oa_sealed::note_window_drops(n);
 }
 
 fn tb_time(t: i64) -> Option<i64> {
@@ -257,6 +253,12 @@ pub fn ingest_tbfm(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
     };
     match oa_tbfm::decode_doc_prefix(&doc, &mut r.tbfm_rows) {
         Ok(out) => {
+            // Flights the decoder dropped for their own time; a message with nothing else in it
+            // is in no other count.
+            note_sealed(leg, u64::from(out.sealed_dropped));
+            if out.sealed_dropped > 0 && out.rows == 0 && out.rejected == 0 && out.dropped == 0 {
+                return;
+            }
             leg.counts.rows_not_decoded += u64::from(out.dropped);
             leg.counts.tbfm_rejected += u64::from(out.rejected);
             note_rejects(
@@ -278,10 +280,6 @@ pub fn ingest_tbfm(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
             leg.counts.note(DROP_TBFM_NO_ROW.into(), 1);
             continue;
         };
-        if sealed_ms(row.msg_ms) {
-            drop_sealed(leg);
-            continue;
-        }
         let entries: [(u8, usize, bool); 4] = [
             (tbfm_kind::ETA_MFX, pt::MFX, true),
             (tbfm_kind::ETA_RWY, pt::RWY, true),
@@ -335,6 +333,13 @@ pub fn ingest_tfms(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
     };
     match oa_tfms::decode_doc_prefix(&doc, &mut r.tfms_rows) {
         Ok(out) => {
+            // Messages the decoder dropped for their own time; a document with nothing else in
+            // it is in no other count.
+            note_sealed(leg, u64::from(out.sealed_dropped));
+            if out.sealed_dropped > 0 && out.messages == 0 && out.rejected == 0 && out.dropped == 0
+            {
+                return;
+            }
             leg.counts.rows_not_decoded += u64::from(out.dropped);
             leg.counts.tfms_rejected += u64::from(out.rejected);
             note_rejects(
@@ -355,10 +360,6 @@ pub fn ingest_tfms(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
             leg.counts.note(DROP_TFMS_NO_ROW.into(), 1);
             continue;
         };
-        if sealed_ms(f.src_ms) {
-            drop_sealed(leg);
-            continue;
-        }
         let issue = if f.src_ms == TFMS_NO_TIME {
             NO_TIME
         } else {

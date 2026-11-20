@@ -437,7 +437,9 @@ fn code(slots: &[Slot], f: TaisField) -> Option<[u8; 8]> {
 /// with a refused field is kept with the field absent. Counts records, fields and unknown
 /// elements into `stats`, including the records read before a [`StdError::TooManyRecords`] or
 /// [`StdError::TooDeep`] refusal; the refusal itself is counted in `stats.errors`. It does not
-/// count the message: [`crate::parse_message`] does, once, when it classifies.
+/// count the message: [`crate::parse_message`] does, once, when it classifies. The half-walked
+/// record of a `TooDeep` refusal has no known time and is not counted at all; the records after a
+/// refusal are never parsed, so [`Stats::sealed_window_dropped`] is a lower bound for them.
 pub fn parse_tais(
     doc: &Doc<'_>,
     limits: &Limits,
@@ -518,7 +520,9 @@ pub fn parse_tais(
                 msg.records.push(r);
             }
             Err(off) => {
-                sink.absorb(scratch, ud, inv);
+                // The half-walked record has no known time: its scratch is discarded, not
+                // absorbed, and the refusal is counted in `errors` only.
+                let _ = (ud, inv);
                 refusal = Some(StdError::TooDeep { offset: off });
                 break;
             }

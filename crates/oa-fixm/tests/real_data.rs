@@ -45,8 +45,7 @@ fn every_real_sfdps_message_decodes() {
     let mut parser = Parser::new(oa_xml::Limits::default()).unwrap();
     // A message timed in the sealed window is dropped inside the decoder, before any count.
     let mut dec = Decoder::new(Limits {
-        drop_window: oa_sealed::sealed_window_ms(),
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::sealed())
     });
     let mut ev = new_events(1024, 1 << 20);
     let mut parse_failed = 0usize;
