@@ -21,7 +21,11 @@ fn a_sealed_directory_and_a_sealed_clip_exit_2_naming_the_path() {
         err.contains(&*sealed.to_string_lossy()) && err.contains("refused"),
         "{err}"
     );
-    let clip = t.join("scds").join("rec-20261119").join("clip.oaf");
+    let clip = t
+        .join("scds")
+        .join("rec-20261119")
+        .join("day2")
+        .join("clip.oaf");
     let o = run(&[&ok, std::path::Path::new("--adsb"), &clip]);
     assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("rec-20261119"));
@@ -37,6 +41,26 @@ fn a_non_finite_window_is_a_usage_error() {
     for a in [
         ["--from", "NaN", "--to", "5"],
         ["--from", "1", "--to", "inf"],
+    ] {
+        let o = Command::new(bin).arg("x").args(a).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{a:?}");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("usage:"),
+            "{a:?}"
+        );
+    }
+}
+
+// REQ: OA-CEN-013
+#[test]
+fn a_fractional_or_out_of_range_window_bound_is_a_usage_error() {
+    let bin = env!("CARGO_BIN_EXE_oa-stdds-census");
+    for a in [
+        ["--from", "1.5", "--to", "100"],
+        ["--from", "1", "--to", "99.25"],
+        // Beyond the range of milliseconds in an i64.
+        ["--from", "1", "--to", "1e16"],
+        ["--from", "-1e18", "--to", "5"],
     ] {
         let o = Command::new(bin).arg("x").args(a).output().unwrap();
         assert_eq!(o.status.code(), Some(2), "{a:?}");

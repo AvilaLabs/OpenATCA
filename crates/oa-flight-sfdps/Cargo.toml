@@ -1,0 +1,30 @@
+[package]
+name = "oa-flight-sfdps"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates only; none is an outside dependency (RULESET F1).
+oa-feed = { path = "../oa-feed" }
+oa-fixm = { path = "../oa-fixm" }
+oa-flight = { path = "../oa-flight" }
+oa-replay = { path = "../oa-replay" }
+oa-sealed = { path = "../oa-sealed" }
+oa-xml = { path = "../oa-xml" }
+
+[lib]
+name = "oa_flight_sfdps"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oa-flight"
+path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"

@@ -57,7 +57,7 @@ same interface and are indistinguishable to it. One core, five uses.
   surface positions ADS-B already carries, so it can serve airports that have no surface radar,
   as Austin did not in the 2023 near-collision there. Where an airport has ASDE-X, its output on
   STDDS is the reference the tracking is measured against. Sequenced after the M5 airborne
-  safety nets.
+  safety nets. Design: `docs/RUNWAY_SAFETY_DESIGN.md`.
 
 ### Out of scope
 
