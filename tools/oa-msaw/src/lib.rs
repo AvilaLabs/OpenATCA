@@ -10,8 +10,11 @@
 //! Requirements: OA-MSAW-030 and the following, in REQUIREMENTS.md.
 
 pub mod args;
+pub mod chart_raster;
 pub mod cifp;
+pub mod coarse;
 pub mod config;
+pub mod eligibility;
 pub mod floors;
 pub mod guard;
 pub mod qnh;

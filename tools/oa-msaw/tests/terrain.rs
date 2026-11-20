@@ -98,14 +98,23 @@ fn geotiff(w: u32, h: u32, lon: f64, lat: f64, step: f64, data: &[f32]) -> Vec<u
     file
 }
 
-/// Writes the tile of the one-degree cell whose south-west corner is (`lat`, `lon`): 4 by 4
-/// samples at `step` degrees, all `metres` but the `holes` (row, column), which are nodata.
+/// Writes the tile of the one-degree cell whose south-west corner is (`lat`, `lon`): samples at
+/// `step` degrees from two steps beyond each edge of the cell (as 3DEP tiles are), all `metres`
+/// but the `holes` (row, column), which are nodata.
 fn write_tile(dir: &Path, lat: i32, lon: i32, step: f64, metres: f32, holes: &[(usize, usize)]) {
-    let mut data = vec![metres; 16];
+    let n = (1.0 / step).round() as usize + 4;
+    let mut data = vec![metres; n * n];
     for &(r, c) in holes {
-        data[r * 4 + c] = -9999.0;
+        data[r * n + c] = -9999.0;
     }
-    let bytes = geotiff(4, 4, f64::from(lon), f64::from(lat + 1), step, &data);
+    let bytes = geotiff(
+        n as u32,
+        n as u32,
+        f64::from(lon) - 2.0 * step,
+        f64::from(lat + 1) + 2.0 * step,
+        step,
+        &data,
+    );
     std::fs::write(dir.join(tile_name(lat, lon).unwrap()), bytes).unwrap();
 }
 
@@ -119,13 +128,14 @@ fn point(lat: f64, lon: f64) -> SamplePoint {
 
 // REQ: OA-MSAW-047
 #[test]
-fn a_missing_neighbour_a_nodata_sample_and_a_misaligned_tile_spoil_only_their_own_queries() {
+fn a_missing_neighbour_and_a_nodata_sample_spoil_only_their_own_queries_and_no_lattice_does() {
     let dir = scratch("lazy");
-    // Cells (40,-89) and (40,-88) are on one lattice; (40,-87) has a slightly different spacing;
-    // (41,-89) has a nodata sample at its row 1, column 1.
-    write_tile(&dir, 40, -89, 0.25, 100.0, &[]);
-    write_tile(&dir, 40, -87, 0.250_01, 100.0, &[]);
-    write_tile(&dir, 41, -89, 0.25, 100.0, &[(1, 1)]);
+    // Cells (40,-89) and (40,-88) are on one lattice; (40,-87) has a slightly different spacing,
+    // which is no matter: each tile is reduced alone. (41,-89) has a nodata sample at its row 52,
+    // column 52 (the middle).
+    write_tile(&dir, 40, -89, 0.01, 100.0, &[]);
+    write_tile(&dir, 40, -87, 0.0101, 100.0, &[]);
+    write_tile(&dir, 41, -89, 0.01, 100.0, &[(52, 52)]);
     let mut f = Floors::new(Some(dir.clone()), None, None);
     // Inside the first tile: answered (100 m is 329 ft rounded up).
     assert_eq!(f.floor_at(&point(40.5, -88.5)).unwrap().terrain_ft, 329);
@@ -138,27 +148,23 @@ fn a_missing_neighbour_a_nodata_sample_and_a_misaligned_tile_spoil_only_their_ow
     assert_eq!(f.stats.terrain_missing, 1);
     // With the neighbour in place the same place is answered (a new Floors: the absent tile was
     // noted once).
-    write_tile(&dir, 40, -88, 0.25, 250.0, &[]);
+    write_tile(&dir, 40, -88, 0.01, 250.0, &[]);
     let mut g = Floors::new(Some(dir.clone()), None, None);
     let s = g.floor_at(&point(40.5, -88.001)).unwrap();
     assert_eq!(
         s.terrain_ft, 821,
         "the higher of the two tiles under the circle"
     );
-    // A nodata sample under the circle: no answer, counted as nodata (not as a missing tile).
-    let hole = g.floor_at(&point(41.625, -88.625)).unwrap();
+    // A nodata sample under the circle: no answer, counted as nodata (not as a missing tile). The
+    // sample is at about (41.48, -88.48).
+    let hole = g.floor_at(&point(41.48, -88.48)).unwrap();
     assert_eq!(hole.terrain_ft, FLOOR_NONE);
     assert_eq!(g.stats.terrain_nodata, 1);
-    // The tile on another lattice spoils the queries that touch it and no others.
-    let bad = g.floor_at(&point(40.5, -86.9995)).unwrap();
-    assert_eq!(bad.terrain_ft, FLOOR_NONE);
-    assert_eq!(g.stats.terrain_misaligned, 1);
-    assert_eq!(g.stats.blocks_misaligned, 1);
-    // The same block again is counted as a query, not as a new block.
-    g.floor_at(&point(40.6, -86.9995)).unwrap();
-    assert_eq!(g.stats.blocks_misaligned, 1);
-    assert!(g.stats.terrain_misaligned == 2);
-    // Away from it, the good tiles still answer.
+    // The tile on another lattice answers like any other, and nothing is counted misaligned.
+    let other = g.floor_at(&point(40.5, -86.5)).unwrap();
+    assert_eq!(other.terrain_ft, 329);
+    assert_eq!(g.stats.terrain_misaligned, 0);
+    // Away from the hole, the good tiles still answer.
     assert_eq!(g.floor_at(&point(40.5, -88.5)).unwrap().terrain_ft, 329);
     assert_eq!(
         g.stats.terrain_absent,
@@ -167,5 +173,8 @@ fn a_missing_neighbour_a_nodata_sample_and_a_misaligned_tile_spoil_only_their_ow
             + g.stats.terrain_misaligned
             + g.stats.terrain_refused
     );
+    // Three tiles were read once each.
+    assert_eq!(g.stats.tiles_loaded, 4);
+    assert_eq!(g.stats.tiles_reloaded, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
