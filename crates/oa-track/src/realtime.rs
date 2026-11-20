@@ -4,7 +4,10 @@
 //!
 //! A second of traffic is a whole second of the measurements' time of applicability. Work is
 //! queued the way a live feed would queue it: a second's work starts when the previous second's
-//! work is finished, and a second finishes in real time when the backlog it leaves is zero.
+//! work is finished, and a second finishes in real time when the backlog it leaves is zero. Real
+//! reports arrive spread through the second, so this queue is an upper bound on the lateness.
+
+use crate::types::{TrackLog, TrackerStats};
 
 /// The most seconds one log holds (two days); later seconds are counted in `dropped`.
 pub const MAX_SECONDS: usize = 2 * 86_400;
@@ -12,7 +15,8 @@ pub const MAX_SECONDS: usize = 2 * 86_400;
 /// Nanoseconds in a second.
 const NS_PER_S: u64 = 1_000_000_000;
 
-/// Reports and processing time of each second, from the first second with traffic.
+/// Reports, processing time and track counts of each second, from the first second with traffic.
+/// Seconds are appended in order, so every second between the first and the last has an entry.
 #[derive(Debug, Clone, Default)]
 // A7.2: cold struct, size guard waived
 pub struct SecondLog {
@@ -22,48 +26,51 @@ pub struct SecondLog {
     pub work_ns: Vec<u64>,
     /// Measurements of each second.
     pub reports: Vec<u32>,
-    /// Confirmed tracks alive at the end of each second (0 until set).
-    pub tracks: Vec<u32>,
-    /// Entries refused because the log was full or the second was before the first.
+    /// Confirmed tracks at the close of each second.
+    pub confirmed: Vec<u32>,
+    /// Tentative tracks at the close of each second.
+    pub tentative: Vec<u32>,
+    /// Measurements refused because the second was before the first, not after the previous one,
+    /// or more than [`MAX_SECONDS`] from the first. A run with any of these has no valid figures.
     pub dropped: u64,
 }
 
 impl SecondLog {
-    /// Adds one measurement of second `sec` that took `ns` nanoseconds to process.
-    pub fn add(&mut self, sec: i64, ns: u64) {
+    /// Closes second `sec`: `reports` measurements took `work_ns` nanoseconds in all, and the
+    /// tracker then held `confirmed` and `tentative` tracks. Seconds between the previous entry
+    /// and `sec` have no traffic, no work and the previous second's counts (nothing changed them).
+    pub fn push_second(
+        &mut self,
+        sec: i64,
+        reports: u32,
+        work_ns: u64,
+        confirmed: u32,
+        tentative: u32,
+    ) {
         if self.work_ns.is_empty() {
             self.first_s = sec;
         }
-        let Some(idx) = sec
-            .checked_sub(self.first_s)
-            .and_then(|d| usize::try_from(d).ok())
-        else {
-            self.dropped += 1;
-            return;
-        };
-        if idx >= MAX_SECONDS {
-            self.dropped += 1;
-            return;
-        }
-        if self.work_ns.len() <= idx {
-            self.work_ns.resize(idx + 1, 0);
-            self.reports.resize(idx + 1, 0);
-            self.tracks.resize(idx + 1, 0);
-        }
-        if let (Some(w), Some(r)) = (self.work_ns.get_mut(idx), self.reports.get_mut(idx)) {
-            *w = w.saturating_add(ns);
-            *r = r.saturating_add(1);
-        }
-    }
-
-    /// Records the confirmed-track count at the end of second `sec`.
-    pub fn set_tracks(&mut self, sec: i64, n: u32) {
         let idx = sec
             .checked_sub(self.first_s)
             .and_then(|d| usize::try_from(d).ok());
-        if let Some(t) = idx.and_then(|i| self.tracks.get_mut(i)) {
-            *t = n;
+        let Some(idx) = idx.filter(|&i| i >= self.work_ns.len() && i < MAX_SECONDS) else {
+            self.dropped += u64::from(reports);
+            return;
+        };
+        let (c, t) = (
+            self.confirmed.last().copied().unwrap_or(0),
+            self.tentative.last().copied().unwrap_or(0),
+        );
+        while self.work_ns.len() < idx {
+            self.work_ns.push(0);
+            self.reports.push(0);
+            self.confirmed.push(c);
+            self.tentative.push(t);
         }
+        self.work_ns.push(work_ns);
+        self.reports.push(reports);
+        self.confirmed.push(confirmed);
+        self.tentative.push(tentative);
     }
 }
 
@@ -92,8 +99,9 @@ pub struct RealtimeSummary {
     pub finished_late: usize,
     /// The longest the queue got behind the traffic, nanoseconds.
     pub backlog_max_ns: u64,
-    /// Peak confirmed tracks at the end of a second.
-    pub tracks_peak: u32,
+    /// Peak confirmed and tentative tracks at the close of a second.
+    pub confirmed_peak: u32,
+    pub tentative_peak: u32,
 }
 
 /// Nearest-rank percentile of a sorted slice, `p` in percent.
@@ -127,7 +135,7 @@ pub fn realtime_summary(log: &SecondLog) -> RealtimeSummary {
         s.work_total_ns = s.work_total_ns.saturating_add(w);
         s.over_one_second += usize::from(w > NS_PER_S);
         // The second's work starts when the earlier work is done and has the second to finish.
-        backlog = (backlog + w).saturating_sub(NS_PER_S);
+        backlog = backlog.saturating_add(w).saturating_sub(NS_PER_S);
         s.finished_late += usize::from(backlog > 0);
         s.backlog_max_ns = s.backlog_max_ns.max(backlog);
     }
@@ -136,25 +144,102 @@ pub fn realtime_summary(log: &SecondLog) -> RealtimeSummary {
     sorted.sort_unstable();
     s.work_p50_ns = rank(&sorted, 50);
     s.work_p99_ns = rank(&sorted, 99);
-    s.tracks_peak = log.tracks.iter().copied().max().unwrap_or(0);
+    s.confirmed_peak = log.confirmed.iter().copied().max().unwrap_or(0);
+    s.tentative_peak = log.tentative.iter().copied().max().unwrap_or(0);
     s
 }
 
 /// The csv of a log: one line per second.
 pub fn seconds_csv(log: &SecondLog) -> String {
-    let mut o = String::from("unix_second,reports,work_us,confirmed_tracks\n");
-    for (i, ((w, r), t)) in log
-        .work_ns
-        .iter()
-        .zip(log.reports.iter())
-        .zip(log.tracks.iter())
-        .enumerate()
-    {
+    let mut o = String::from("unix_second,reports,work_us,confirmed_tracks,tentative_tracks\n");
+    for i in 0..log.work_ns.len() {
+        let g = |v: &[u32]| v.get(i).copied().unwrap_or(0);
         o.push_str(&format!(
-            "{},{r},{:.1},{t}\n",
+            "{},{},{:.1},{},{}\n",
             log.first_s + i as i64,
-            *w as f64 / 1e3
+            g(&log.reports),
+            log.work_ns.get(i).copied().unwrap_or(0) as f64 / 1e3,
+            g(&log.confirmed),
+            g(&log.tentative)
         ));
     }
     o
+}
+
+/// Why a realtime run's figures cannot be trusted, or `None`: measurements dropped from the
+/// log, no measurements at all, or table capacity refusals (the run was not at full load).
+pub fn realtime_failure(
+    log: &SecondLog,
+    measurements: usize,
+    capacity_refused: u64,
+) -> Option<String> {
+    if measurements == 0 {
+        return Some(
+            "no measurements after the adapter (empty clip, or every report gated out)".to_string(),
+        );
+    }
+    if log.dropped > 0 {
+        return Some(format!(
+            "{} measurements fall outside the log (before the first second, out of time order, or more than {MAX_SECONDS} s from it): the figures would cover a truncated span",
+            log.dropped
+        ));
+    }
+    if capacity_refused > 0 {
+        return Some(format!(
+            "{capacity_refused} measurements refused for lack of a track slot: not a full-load measurement, raise --max-tracks"
+        ));
+    }
+    None
+}
+
+/// Why the flags given to `oa-track-run` do not go together, or `None`. `--realtime` takes the
+/// whole clip through the tracker and nothing else; the flags of the scored run and the flags of
+/// the realtime run do not mix.
+pub fn check_flags(
+    realtime: bool,
+    with_output: bool,
+    max_tracks: bool,
+    scored_run_flags: &[&str],
+) -> Option<String> {
+    if !realtime {
+        for (given, name) in [(with_output, "--with-output"), (max_tracks, "--max-tracks")] {
+            if given {
+                return Some(format!("{name} needs --realtime"));
+            }
+        }
+    } else if let Some(f) = scored_run_flags.first() {
+        return Some(format!("{f} does not apply with --realtime"));
+    }
+    None
+}
+
+/// The SHA-256 of what a run ended with: the track log (every track's address, times, updates and
+/// end reason) and the tracker's counters, as lowercase hex. It is not the tracker's state hash
+/// (none exists in `oa-track`) and not the digest of the output rows; it is computed after the
+/// timed window, so it costs nothing in it.
+pub fn run_summary_digest(log: &TrackLog, stats: &TrackerStats) -> String {
+    let mut h = oa_sha256::Sha256::new();
+    let mut put = |b: &[u8]| {
+        let _ = h.update(b);
+    };
+    put(b"OATKRT1");
+    put(&(log.addr.len() as u64).to_le_bytes());
+    put(&log.overflow.to_le_bytes());
+    for v in &log.addr {
+        put(&v.to_le_bytes());
+    }
+    for v in log
+        .first_ns
+        .iter()
+        .chain(&log.confirmed_ns)
+        .chain(&log.last_ns)
+    {
+        put(&v.to_le_bytes());
+    }
+    for v in &log.updates {
+        put(&v.to_le_bytes());
+    }
+    put(&log.reason);
+    put(format!("{stats:?}").as_bytes());
+    crate::canon::hex32(&h.finalize())
 }
