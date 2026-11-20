@@ -5473,3 +5473,52 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   "other". It exits 3 with a count of the bytes dropped if the frame reader stalls, reads until two bytes to
   sniff gzip, and refuses (exit 2) a path with a sealed name inside any component, as given or resolved, and
   any path it cannot resolve.
+
+## M4 flight data: the per-flight record (oa-flight, oa-flight-sfdps)
+
+- **OA-FLT-001** A flight is keyed by its GUFI, or by the TFMS key (callsign, departure, arrival) where a source has no GUFI; a
+  key with a missing part (a zero GUFI, an empty callsign, departure or arrival, or a GUFI key carrying TFMS parts) is refused
+  as a bad key; one key is one flight and a GUFI flight is never a TFMS flight.
+- **OA-FLT-002** The assigned, interim and requested altitudes are separate fields. Each holds a form: one altitude, VFR on top
+  plus an altitude, VFR with no number, a block (assigned only), an altitude at a named fix (assigned only), or explicitly none
+  (interim only). A form the field cannot hold, an out-of-range value, an unused number that is not zero, an altitude operation
+  with no altitude, or an at-fix altitude without its fix is refused as a bad value and changes nothing.
+- **OA-FLT-003** Every field records when it last changed (the source's time), when it became available and the message it came
+  from; stating the value the record already holds changes nothing, not even the stamp.
+- **OA-FLT-004** An operation is available no earlier than its stamped time plus the measured lag floor and no earlier than any
+  operation before it (the clock never goes back); one stamped later than its receipt by more than the allowed clock
+  difference is refused as a bad time.
+- **OA-FLT-005** The plan lifecycle (proposed, active, departed, completed, cancelled, dropped) allows exactly the stated steps:
+  proposed goes to active, cancelled or dropped; active departs, completes, is cancelled or dropped; departed completes or is
+  dropped; dropped is reinstated by an active plan or completed or cancelled; completed and cancelled are final and a repeat of
+  the same end is a restatement. A step back, a step that skips one, or an operation on a flight or plan that is not there
+  (an operation other than setting a plan, which makes the flight) is refused and leaves the state; so is an amendment to a
+  flight whose plans have all ended.
+- **OA-FLT-006** Every refused operation is counted by operation and reason and listed with its key, times, message and the
+  state it found; a full list counts the entries it could not hold, so the counts stay exact whatever the list holds, and
+  operations equal applied plus unchanged plus refused.
+- **OA-FLT-007** A flight holds one plan view per reporting centre, because each centre reports its own status for the national
+  plan; a second centre's proposal after the first one's activation is not a step back; a dropped view reinstated is counted;
+  more centres than views are refused, never evicted.
+- **OA-FLT-008** Two plans for one flight are listed as conflicts: a different plan identifier on a live plan, and a new plan
+  identifier on a view whose earlier plan had ended (the key filed again, which replaces the plan on the view).
+- **OA-FLT-009** An aircraft address held by two live flights, and a callsign, departure and arrival held by two live flights,
+  are each listed as a conflict naming both; both flights stay in the table; the address lookup returns the latest claimant and
+  a flight whose plans ended is no conflict.
+- **OA-FLT-010** A handoff is offered, optionally updated, accepted and completed when the owner becomes the accepting unit, or
+  is retracted, fails or ends in the accepting unit taking control; an offer does not move the owner; a step with no handoff
+  pending, a second offer while one is pending, and an update or a different acceptance after acceptance are refused.
+- **OA-FLT-011** A change older than the value a field holds is refused as stale and one at the same time with another value is
+  refused (the earlier stays); an older restatement of the held value is no error; the rule holds for altitudes, the plan state
+  and ownership.
+- **OA-FLT-012** A flight leaves the table only by a removal that is written to the removal log first; a full table refuses a new
+  flight and evicts none; the sweep retires flights whose plans ended or that went silent, logged each, and removes none when
+  the log has no room.
+- **OA-FLT-013** After every step of every sequence of up to four operations over a fixed alphabet covering every operation kind,
+  and of random sequences of sixty operations, the audit of the table holds: keys, indexes and chains, views, altitude forms,
+  handoff units, stamps against the clock and the logs.
+- **OA-FLT-014** Over random sequences, a flight has at most one plan view per centre, flights created equals flights held plus
+  flights removed, and every removal is in the removal log.
+- **OA-FLT-015** The same operations in the same order give the same table, logs included, and the same digest after every step.
+- **OA-FLT-016** The table allocates nothing after it is made: the capacity of every collection is unchanged by twenty thousand
+  operations with sweeps.
