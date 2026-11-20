@@ -950,9 +950,7 @@ fn a_gtm_clearance_area_gives_its_clearance_to_the_cells_it_holds_and_a_bad_line
     assert!(b.holds(40.5, -88.5) && !b.holds(41.5, -88.5));
     let tri = Area::Polygon(vec![(40.0, -89.0), (41.0, -89.0), (40.0, -88.0)]);
     assert!(tri.holds(40.2, -88.8) && !tri.holds(40.9, -88.1));
-    let base =
-        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/dev.cfg"))
-            .unwrap();
+    let base = DEV_CFG;
     let ok = format!("{base}\ngtm_clearance = box 40 41 -89 -88 200\n");
     let s = parse_config(&ok).unwrap();
     assert_eq!(s.gtm_areas.len(), 1);
