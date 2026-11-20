@@ -5292,16 +5292,29 @@ scope.
 - **OA-TRK-393** M1 median, M5 ground-speed median and M4t at 300 m are the primary metrics. Each run prints,
   per primary metric, whether the day's interval of OpenATCA minus ERAM excludes zero in OpenATCA's favour,
   in ERAM's favour, or neither, as `CLAIM` lines; `p002 --combine <dirA> <dirB> <dirC>` applies the cross-day
-  rule (OpenATCA's favour on A and B, C not in ERAM's favour) and refuses a day that is not a hold-out run, or
-  days scored at different commits.
+  rule (OpenATCA's favour on A and B, C not in ERAM's favour) and refuses a day that is not a hold-out run, days
+  scored at different commits or by different binaries, days with the same clip hash, a `samples.csv` that is
+  not the one its run recorded, and primary metrics that differ from those recomputed from the three `samples.csv`.
 - **OA-TRK-394** `--candidate-commit <40 hex>` is required with `--frozen-commit`; the run is refused unless
   `git diff --name-only <candidate> <frozen>` is exactly `crates/oa-sealed/sealed_paths.txt`; both commits are
   printed.
-- **OA-TRK-395** The scorer writes `p002.txt` and `samples.csv` only if neither exists; otherwise it refuses
-  and writes nothing. It prints the SFDPS loader notes, the replay hash and the ingest drop counts.
+- **OA-TRK-395** The scorer writes `p002.txt` and `samples.csv` to `.partial` names, flushes them and renames
+  both, only if neither final name exists; otherwise it refuses and writes nothing; a leftover `.partial` is
+  reported. It prints the SFDPS loader notes, the replay hash and the ingest drop counts.
 - **OA-TRK-396** `--exclude-window <from ISO> <to ISO>` (repeatable, whole-nanosecond or whole-second ISO times)
   removes every grid sample inside any window for all three systems alike, before any metric; each window and
   the number of samples it removed are printed and written to the `CLAIM` lines.
+- **OA-TRK-397** Each `CLAIM metric=` line carries `floor=0|1` and the three-way OpenATCA and passthrough
+  values it was judged on (M4t on the share over all grid samples); `--combine` prints "AT REFERENCE FLOOR:
+  no claim" for a metric whose floor applies on any day and never "RULE MET" for it.
+- **OA-TRK-398** A hold-out run takes its excluded windows only from `--damage-report` (an `oa-feed-gaps`
+  report: the `window:` line, the `exclude <iso> <iso>` lines and the verdict line `CLEAN`), and refuses
+  `--exclude-window`, a report that is not CLEAN, a window under 600 s, windows over 3,600 s in all, and a
+  report whose window is not the whole UTC day of the clip.
+- **OA-TRK-399** Every run needs `--ledger <file>` and is refused when the clip's SHA-256 is in it; a hold-out
+  run appends one line (clip SHA-256, scored commit, candidate commit, UTC time) before it writes any result.
+- **OA-TRK-400** OpenATCA's and ERAM's time offsets are fitted on the two-way common set, the passthrough's on
+  the three-way set.
 ## Shadow comparator (oa-shadow)
 
 A tool crate (`tools/oa-shadow`, class `shell`) that runs OpenATCA's tracker beside ERAM's published track

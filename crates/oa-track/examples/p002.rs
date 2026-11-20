@@ -68,6 +68,7 @@ use oa_bench::thindex::build_th_index;
 use oa_bench::tracker_input::{legacy_from_track_samples_by_leg, TrackSamples};
 use oa_bench::truth::{Truth, TruthLeg};
 use oa_replay::FeedKind;
+use oa_sha256::{sha256, to_hex};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     interval_stats, run_tracker_spilled, score_ranges, scoring_config, split_reports,
@@ -114,6 +115,7 @@ fn main() -> ExitCode {
     let (mut allow_dirty, mut development) = (false, false);
     let mut frozen: Option<String> = None;
     let mut candidate: Option<String> = None;
+    let (mut damage_path, mut ledger): (Option<PathBuf>, Option<PathBuf>) = (None, None);
     let mut windows: Vec<Window> = Vec::new();
     while let Some(a) = args.next() {
         if a == "--exclude-window" {
@@ -146,6 +148,8 @@ fn main() -> ExitCode {
             "--label" => label = v.unwrap_or_default(),
             "--frozen-commit" => frozen = v,
             "--candidate-commit" => candidate = v,
+            "--damage-report" => damage_path = v.map(PathBuf::from),
+            "--ledger" => ledger = v.map(PathBuf::from),
             _ => {
                 eprintln!("p002: unknown option {a}");
                 return ExitCode::from(2);
@@ -154,7 +158,7 @@ fn main() -> ExitCode {
     }
     let (Some(adsb), Some(sfdps), Some(out)) = (adsb, sfdps, out) else {
         eprintln!(
-            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]...\n       p002 --combine <dirA> <dirB> <dirC>"
+            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]... [--damage-report <oa-feed-gaps report>] --ledger <file>\n       p002 --combine <dirA> <dirB> <dirC>"
         );
         return ExitCode::from(2);
     };
@@ -195,6 +199,42 @@ fn main() -> ExitCode {
         eprintln!("p002: refused: {e}");
         return ExitCode::from(2);
     }
+    // P-008 sections 2 and 5: a hold-out run takes its excluded windows only from the damage
+    // report of its day, and every run is checked against the ledger of scored days.
+    let Some(ledger) = ledger else {
+        eprintln!("p002: refused: --ledger <file> is required (the ledger of scored days; a development run may pass a fresh empty file)");
+        return ExitCode::from(2);
+    };
+    if mode.holdout && !windows.is_empty() {
+        eprintln!("p002: refused: --exclude-window is for development runs; a hold-out run takes its windows from --damage-report");
+        return ExitCode::from(2);
+    }
+    if mode.holdout && damage_path.is_none() {
+        eprintln!(
+            "p002: refused: a hold-out run needs --damage-report <oa-feed-gaps report of the day>"
+        );
+        return ExitCode::from(2);
+    }
+    let mut damage: Option<DamageReport> = None;
+    if let Some(dp) = &damage_path {
+        let read = oa_sealed::refuse(dp)
+            .and_then(|()| oa_sealed::read(dp).map_err(|e| format!("{}: {e}", dp.display())))
+            .and_then(|b| {
+                let text = String::from_utf8(b.clone()).map_err(|e| e.to_string())?;
+                parse_damage_report(&text, &to_hex(&sha256(&b)))
+            });
+        match read {
+            Ok(d) => damage = Some(d),
+            Err(e) => {
+                eprintln!("p002: refused: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if let Err(e) = oa_sealed::refuse(&ledger) {
+        eprintln!("p002: {e}");
+        return ExitCode::from(2);
+    }
     // Nothing is written if either output exists (P-006 section 7).
     if let Err(e) = outputs_free(&out) {
         eprintln!("p002: refused: {e}");
@@ -210,6 +250,8 @@ fn main() -> ExitCode {
             mode,
             commits: &commits,
             windows: &windows,
+            damage: damage.as_ref(),
+            ledger: &ledger,
         },
     ) {
         Ok(text) => {
@@ -230,25 +272,39 @@ fn combine_main(dirs: &[String]) -> ExitCode {
         eprintln!("usage: p002 --combine <dirA> <dirB> <dirC>");
         return ExitCode::from(2);
     };
-    let mut texts: Vec<String> = Vec::new();
+    let mut texts: Vec<(String, String)> = Vec::new();
     for d in [a, b, c] {
         let dir = Path::new(d);
         if let Err(e) = oa_sealed::refuse(dir) {
             eprintln!("p002: {e}");
             return ExitCode::from(2);
         }
-        match oa_sealed::read_to_string(dir.join("p002.txt")) {
-            Ok(t) => texts.push(t),
-            Err(e) => {
-                eprintln!("p002: {d}/p002.txt: {e}");
-                return ExitCode::from(2);
+        let mut two = Vec::new();
+        for f in ["p002.txt", "samples.csv"] {
+            match oa_sealed::read_to_string(dir.join(f)) {
+                Ok(t) => two.push(t),
+                Err(e) => {
+                    eprintln!("p002: {d}/{f}: {e}");
+                    return ExitCode::from(2);
+                }
             }
         }
+        let mut it = two.into_iter();
+        let (Some(t), Some(v)) = (it.next(), it.next()) else {
+            return ExitCode::from(2);
+        };
+        texts.push((t, v));
     }
     let [ta, tb, tc] = texts.as_slice() else {
         return ExitCode::from(2);
     };
-    match combine([ta, tb, tc]) {
+    fn day(t: &(String, String)) -> DayFiles<'_> {
+        DayFiles {
+            txt: t.0.as_str(),
+            csv: t.1.as_str(),
+        }
+    }
+    match combine([day(ta), day(tb), day(tc)]) {
         Ok(report) => {
             print!("{report}");
             ExitCode::SUCCESS
@@ -926,6 +982,16 @@ fn build_grid(er: &PerAc, oa: &PerAc, pt: &PerAc, row_times: [&TimesBy; 3]) -> G
     g
 }
 
+/// Whether a grid row is one a system's time offset is fitted on (P-008 section 1): the two-way
+/// common set for OpenATCA and ERAM, the three-way set for the passthrough.
+fn in_fit_set(r: &Row, system: usize) -> bool {
+    if system == PT {
+        r.common()
+    } else {
+        r.two_way()
+    }
+}
+
 /// The least-squares offset `tau` of `along = tau * v` over `(along, v)` pairs (library fit).
 fn fit_tau(it: impl Iterator<Item = (f64, f64)>) -> Option<f64> {
     let (mut sev, mut svv) = (0.0, 0.0);
@@ -1075,12 +1141,12 @@ fn m6_counts(rows: &[Row], n_ac: usize) -> M6 {
     m
 }
 
-/// Samples of all flagged OpenATCA points still without a tracker row for their flags, counted
-/// over every point (not only the addresses the join saw).
-fn unmatched_points(pts: &PerAc) -> u64 {
-    pts.values()
-        .flatten()
-        .filter(|p| p.uncertain == Tri::Unmatched || p.reacquired == Tri::Unmatched)
+/// Grid samples whose OpenATCA row has no tracker row for its flags (or only a conflicting one).
+/// Only the rows matched to a grid sample count, not every point on a scored leg.
+fn unmatched_rows(rows: &[Row]) -> u64 {
+    rows.iter()
+        .filter_map(|r| r.val.first().and_then(|v| v.as_ref()))
+        .filter(|v| v.pt.uncertain == Tri::Unmatched || v.pt.reacquired == Tri::Unmatched)
         .count() as u64
 }
 
@@ -1823,9 +1889,26 @@ fn exclude_windows(grid: &PerAc, windows: &[Window]) -> (PerAc, Vec<u64>, u64) {
                 keep.push(*s);
             }
         }
-        out.insert(a, keep);
+        // An aircraft left with no sample is no aircraft of the grid (it takes no bootstrap slot).
+        if !keep.is_empty() {
+            out.insert(a, keep);
+        }
     }
     (out, counts, removed)
+}
+
+/// The scored legs and the grid of a run. The legs are those of the grid as it was before any
+/// window (P-004 section 1: the legs that contain the aircraft's grid samples), so an excluded
+/// window changes which samples are scored and never which legs they lie on. Also the number of
+/// samples each window holds, and the number removed.
+fn plan_grid(
+    er_pts: &PerAc,
+    legs: &LegIndex,
+    windows: &[Window],
+) -> (ScoredLegs, PerAc, Vec<u64>, u64) {
+    let scored = scored_legs(er_pts, legs);
+    let (grid, counts, removed) = exclude_windows(er_pts, windows);
+    (scored, grid, counts, removed)
 }
 
 /// `git -C dir args`: its standard output, `None` when git failed or could not run.
@@ -1900,8 +1983,13 @@ fn candidate_binding(mode: Mode, c: &Commits, repo: &Path) -> Result<(), String>
 /// The names of the two files a run writes.
 const OUTPUT_FILES: [&str; 2] = ["samples.csv", "p002.txt"];
 
+/// The suffix of a file being written; it becomes the final name only when both are complete.
+const PARTIAL: &str = ".partial";
+
 /// P-006 section 7: refuses when either output file already exists (nothing is written then).
-fn outputs_free(out_dir: &Path) -> Result<(), String> {
+/// A leftover `.partial` does not refuse; it is returned so the run can report it.
+fn outputs_free(out_dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut left = Vec::new();
     for f in OUTPUT_FILES {
         let p = out_dir.join(f);
         if p.exists() || p.is_symlink() {
@@ -1910,20 +1998,220 @@ fn outputs_free(out_dir: &Path) -> Result<(), String> {
                 p.display()
             ));
         }
+        let part = out_dir.join(format!("{f}{PARTIAL}"));
+        if part.exists() || part.is_symlink() {
+            left.push(part);
+        }
+    }
+    Ok(left)
+}
+
+/// Writes `text` to `path` (a `.partial` name: a leftover of an earlier run is replaced), and
+/// flushes it to disk.
+fn write_partial(path: &Path, text: &str) -> Result<(), String> {
+    // seal-allow: the scorer's own output file, write-only, a partial name
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    f.write_all(text.as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    f.sync_all().map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// P-008 and P-006 section 7: both files are written to `.partial` names and flushed, then
+/// renamed, so a run that stops leaves no result under the final name. Neither final name may
+/// exist (checked again just before the renames).
+fn publish_outputs(out_dir: &Path, csv: &str, txt: &str) -> Result<(), String> {
+    outputs_free(out_dir)?;
+    let part = |f: &str| out_dir.join(format!("{f}{PARTIAL}"));
+    write_partial(&part("samples.csv"), csv)?;
+    write_partial(&part("p002.txt"), txt)?;
+    outputs_free(out_dir)?;
+    for f in OUTPUT_FILES {
+        fs::rename(part(f), out_dir.join(f)).map_err(|e| format!("{f}: {e}"))?;
     }
     Ok(())
 }
 
-/// Writes `text` to `path`, which must not exist.
-fn write_new(path: &Path, text: &str) -> Result<(), String> {
-    // seal-allow: the scorer's own output file, create-new and write-only
+// ---------------------------------------------------------------------------------------------
+// The ledger (P-008 section 5).
+// ---------------------------------------------------------------------------------------------
+
+/// Whether the ledger already holds `clip_sha` (the first field of a line). A ledger that does
+/// not exist yet is empty.
+fn ledger_has(ledger: &Path, clip_sha: &str) -> Result<bool, String> {
+    match oa_sealed::read_to_string(ledger) {
+        Ok(t) => Ok(t
+            .lines()
+            .any(|l| l.split_whitespace().next() == Some(clip_sha))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("ledger {}: {e}", ledger.display())),
+    }
+}
+
+/// Appends one line to the ledger (O_APPEND, created if missing) and flushes it.
+fn ledger_append(ledger: &Path, line: &str) -> Result<(), String> {
+    // seal-allow: the append-only ledger of scored days, write-only
     let mut f = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    f.write_all(text.as_bytes())
-        .map_err(|e| format!("{}: {e}", path.display()))
+        .append(true)
+        .create(true)
+        .open(ledger)
+        .map_err(|e| format!("ledger {}: {e}", ledger.display()))?;
+    f.write_all(format!("{line}\n").as_bytes())
+        .map_err(|e| format!("ledger {}: {e}", ledger.display()))?;
+    f.sync_all()
+        .map_err(|e| format!("ledger {}: {e}", ledger.display()))
+}
+
+/// The date of a day count since 1970-01-01.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// Unix seconds as `YYYY-MM-DDTHH:MM:SSZ`.
+fn iso_utc(secs: i64) -> String {
+    let (y, m, d) = civil_from_days(secs.div_euclid(86_400));
+    let r = secs.rem_euclid(86_400);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        r / 3600,
+        r % 3600 / 60,
+        r % 60
+    )
+}
+
+/// The ledger line of a hold-out run: clip SHA-256, scored commit, candidate commit, UTC time.
+fn ledger_line(clip_sha: &str, c: &Commits, now_secs: i64) -> String {
+    format!(
+        "{clip_sha} {} {} {}",
+        c.frozen.as_deref().unwrap_or("none"),
+        c.candidate.as_deref().unwrap_or("none"),
+        iso_utc(now_secs)
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+// The damage report (P-008 section 2).
+// ---------------------------------------------------------------------------------------------
+
+/// No excluded window may be shorter than this (P-007), ns.
+const MIN_WINDOW_NS: i64 = 600_000_000_000;
+/// The excluded windows of a hold-out day may total at most this (P-007: 60 minutes), ns.
+const MAX_WINDOWS_NS: i64 = 3_600_000_000_000;
+
+/// What a run takes from the report of `tools/oa-feed-gaps`.
+// A7.2: cold struct, size guard waived
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DamageReport {
+    sha256: String,
+    /// The report's window, Unix ns.
+    from_ns: i64,
+    to_ns: i64,
+    windows: Vec<Window>,
+    total_ns: i64,
+}
+
+/// Reads an `oa-feed-gaps` report. The lines read, and no others, are:
+/// `window: <iso> to <iso> (<seconds> s)` (exactly one), `exclude <iso> <iso>` (any number) and
+/// the verdict, the single line `CLEAN`; a line starting `DAMAGED:` refuses. Refused: a verdict
+/// that is not `CLEAN`, a window under 600 s, windows totalling over 3,600 s, and a report
+/// window that is not one whole UTC day (00:00:00 to 23:59:59 or the end of that second).
+fn parse_damage_report(text: &str, sha256: &str) -> Result<DamageReport, String> {
+    let mut window: Option<(i64, i64)> = None;
+    let mut windows: Vec<Window> = Vec::new();
+    let (mut clean, mut damaged) = (0u32, 0u32);
+    for l in text.lines() {
+        if let Some(rest) = l.strip_prefix("window: ") {
+            let mut it = rest.split_whitespace();
+            let (Some(f), Some("to"), Some(t)) = (it.next(), it.next(), it.next()) else {
+                return Err(format!("damage report: cannot read the window line `{l}`"));
+            };
+            if window.is_some() {
+                return Err("damage report: two window lines".into());
+            }
+            window = Some((parse_iso_ns(f)?, parse_iso_ns(t)?));
+        } else if let Some(rest) = l.strip_prefix("exclude ") {
+            let mut it = rest.split_whitespace();
+            let (Some(f), Some(t), None) = (it.next(), it.next(), it.next()) else {
+                return Err(format!("damage report: cannot read the exclude line `{l}`"));
+            };
+            windows.push(Window::parse(f, t)?);
+        } else if l == "CLEAN" {
+            clean += 1;
+        } else if l.starts_with("DAMAGED:") {
+            damaged += 1;
+        }
+    }
+    if damaged > 0 || clean != 1 {
+        return Err(format!(
+            "damage report: the verdict is not CLEAN ({clean} CLEAN lines, {damaged} DAMAGED lines); a damaged day is not scored"
+        ));
+    }
+    let Some((from_ns, to_ns)) = window else {
+        return Err("damage report: no window line".into());
+    };
+    let day = 86_400_000_000_000;
+    if from_ns.rem_euclid(day) != 0
+        || to_ns - from_ns < day - 1_000_000_000
+        || to_ns - from_ns >= day
+    {
+        return Err(format!(
+            "damage report: its window is not one whole UTC day (from {from_ns} ns to {to_ns} ns)"
+        ));
+    }
+    let mut total = 0i64;
+    for w in &windows {
+        let len = w.to_ns - w.from_ns;
+        if len < MIN_WINDOW_NS {
+            return Err(format!(
+                "damage report: the window {} to {} is under 600 s",
+                w.from, w.to
+            ));
+        }
+        if w.from_ns < from_ns || w.to_ns > to_ns {
+            return Err(format!(
+                "damage report: the window {} to {} lies outside the report's window",
+                w.from, w.to
+            ));
+        }
+        total += len;
+    }
+    if total > MAX_WINDOWS_NS {
+        return Err(format!(
+            "damage report: the windows total {} s, over 3,600 s",
+            total / 1_000_000_000
+        ));
+    }
+    Ok(DamageReport {
+        sha256: sha256.to_string(),
+        from_ns,
+        to_ns,
+        windows,
+        total_ns: total,
+    })
+}
+
+/// The clip's report times (Unix ns) must lie inside the report's window: the day the report
+/// checked is the day being scored.
+fn damage_matches_clip(d: &DamageReport, first_ns: i64, last_ns: i64) -> Result<(), String> {
+    if first_ns < d.from_ns || last_ns > d.to_ns {
+        return Err(format!(
+            "the damage report's window ({} ns to {} ns) is not the scored day: the clip's reports run from {first_ns} ns to {last_ns} ns",
+            d.from_ns, d.to_ns
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2008,12 +2296,62 @@ struct ClaimPiece {
     lo: f64,
     hi: f64,
     verdict: Verdict,
+    /// P-008 section 3: the passthrough is within 10 % of OpenATCA on the three-way set (for M4t,
+    /// on the share over all grid samples), and the two values it was judged on.
+    floor: bool,
+    oa3: f64,
+    pt3: f64,
+}
+
+/// Whether the passthrough is within 10 % of OpenATCA's value (P-002), as [`floor_note`] says.
+fn floor_applies(oa: f64, pt: f64) -> bool {
+    floor_note(oa, pt).starts_with("APPLIES")
+}
+
+/// What a run records of itself in its `CLAIM run` line (P-008 sections 3 to 5).
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, PartialEq)]
+struct RunInfo {
+    holdout: bool,
+    frozen: String,
+    candidate: String,
+    /// SHA-256 of the ADS-B clip.
+    clip_sha: String,
+    /// The SFDPS inputs' manifest hash (SHA-256 over the sorted `name:sha256` lines).
+    sfdps_sha: String,
+    replay_hash: String,
+    /// SHA-256 of the `samples.csv` the run wrote.
+    samples_sha: String,
+    /// SHA-256 of the scorer binary.
+    binary_sha: String,
+    /// SHA-256 of the damage report, `none` when there was none.
+    damage_sha: String,
+    /// Total of the excluded windows, seconds.
+    window_total_s: String,
+}
+
+/// The `CLAIM metric=` line of a piece.
+fn claim_metric_line(p: &ClaimPiece) -> String {
+    let better = PRIMARY
+        .iter()
+        .find(|(id, _, _)| *id == p.id)
+        .map_or("?", |(_, lower, _)| if *lower { "lower" } else { "higher" });
+    format!(
+        "CLAIM metric={} better={better} diff={} lo={} hi={} verdict={} floor={} oa3={} pt3={}",
+        p.id,
+        p.diff,
+        p.lo,
+        p.hi,
+        p.verdict.word(),
+        u8::from(p.floor),
+        p.oa3,
+        p.pt3
+    )
 }
 
 /// The machine-readable lines of a run, for `--combine`.
 fn claim_lines(
-    holdout: bool,
-    c: &Commits,
+    info: &RunInfo,
     pieces: &[ClaimPiece],
     windows: &[Window],
     removed: &[u64],
@@ -2021,28 +2359,23 @@ fn claim_lines(
     let mut o = String::new();
     let _ = writeln!(
         o,
-        "CLAIM run holdout={} frozen={} candidate={}",
-        u8::from(holdout),
-        c.frozen.as_deref().unwrap_or("none"),
-        c.candidate.as_deref().unwrap_or("none")
+        "CLAIM run holdout={} frozen={} candidate={} clip={} sfdps={} replay={} samples={} binary={} damage={} window_total_s={}",
+        u8::from(info.holdout),
+        info.frozen,
+        info.candidate,
+        info.clip_sha,
+        info.sfdps_sha,
+        info.replay_hash,
+        info.samples_sha,
+        info.binary_sha,
+        info.damage_sha,
+        info.window_total_s
     );
     for (w, n) in windows.iter().zip(removed) {
         let _ = writeln!(o, "CLAIM window from={} to={} removed={n}", w.from, w.to);
     }
     for p in pieces {
-        let better = PRIMARY
-            .iter()
-            .find(|(id, _, _)| *id == p.id)
-            .map_or("?", |(_, lower, _)| if *lower { "lower" } else { "higher" });
-        let _ = writeln!(
-            o,
-            "CLAIM metric={} better={better} diff={} lo={} hi={} verdict={}",
-            p.id,
-            p.diff,
-            p.lo,
-            p.hi,
-            p.verdict.word()
-        );
+        let _ = writeln!(o, "{}", claim_metric_line(p));
     }
     o
 }
@@ -2050,9 +2383,7 @@ fn claim_lines(
 /// A day's parsed `CLAIM` lines.
 // A7.2: cold struct, size guard waived
 struct DayClaim {
-    holdout: bool,
-    frozen: String,
-    candidate: String,
+    info: RunInfo,
     pieces: Vec<ClaimPiece>,
     /// The excluded windows as `(from, to, grid samples removed)`.
     windows: Vec<(String, String, u64)>,
@@ -2061,7 +2392,7 @@ struct DayClaim {
 /// Reads the `CLAIM` lines of a `p002.txt`. Every primary metric must appear once, its direction
 /// must be the one fixed here, and its verdict must be the one its interval gives.
 fn parse_claim_lines(text: &str) -> Result<DayClaim, String> {
-    let mut run: Option<(bool, String, String)> = None;
+    let mut run: Option<RunInfo> = None;
     let mut pieces: Vec<ClaimPiece> = Vec::new();
     let mut windows: Vec<(String, String, u64)> = Vec::new();
     for line in text.lines().filter_map(|l| l.strip_prefix("CLAIM ")) {
@@ -2078,11 +2409,19 @@ fn parse_claim_lines(text: &str) -> Result<DayClaim, String> {
             if run.is_some() {
                 return Err("two CLAIM run lines".into());
             }
-            run = Some((
-                get("holdout")? == "1",
-                get("frozen")?.to_string(),
-                get("candidate")?.to_string(),
-            ));
+            let g = |k: &str| get(k).map(str::to_string);
+            run = Some(RunInfo {
+                holdout: get("holdout")? == "1",
+                frozen: g("frozen")?,
+                candidate: g("candidate")?,
+                clip_sha: g("clip")?,
+                sfdps_sha: g("sfdps")?,
+                replay_hash: g("replay")?,
+                samples_sha: g("samples")?,
+                binary_sha: g("binary")?,
+                damage_sha: g("damage")?,
+                window_total_s: g("window_total_s")?,
+            });
         } else if line.starts_with("window ") {
             let n = get("removed")?
                 .parse::<u64>()
@@ -2109,6 +2448,11 @@ fn parse_claim_lines(text: &str) -> Result<DayClaim, String> {
                     "CLAIM verdict of {id} is not the one its interval [{lo}, {hi}] gives"
                 ));
             }
+            let floor = match get("floor")? {
+                "1" => true,
+                "0" => false,
+                f => return Err(format!("CLAIM floor must be 0 or 1, got {f}")),
+            };
             if pieces.iter().any(|p| p.id == id) {
                 return Err(format!("CLAIM metric {id} appears twice"));
             }
@@ -2118,10 +2462,13 @@ fn parse_claim_lines(text: &str) -> Result<DayClaim, String> {
                 lo,
                 hi,
                 verdict,
+                floor,
+                oa3: num("oa3")?,
+                pt3: num("pt3")?,
             });
         }
     }
-    let Some((holdout, frozen, candidate)) = run else {
+    let Some(info) = run else {
         return Err("no CLAIM run line (not a p002.txt of this scorer)".into());
     };
     for (id, _, _) in PRIMARY {
@@ -2130,50 +2477,293 @@ fn parse_claim_lines(text: &str) -> Result<DayClaim, String> {
         }
     }
     Ok(DayClaim {
-        holdout,
-        frozen,
-        candidate,
+        info,
         pieces,
         windows,
     })
 }
 
-/// The cross-day claim rule (P-006 section 3): for each primary metric, OpenATCA's favour on day A
-/// and on day B, and day C not in ERAM's favour. Refuses a day that is not a hold-out run, and
-/// days scored at different commits.
-fn combine(days: [&str; 3]) -> Result<String, String> {
+// ---------------------------------------------------------------------------------------------
+// samples.csv: written, and read back to recompute the primary metrics (P-008 section 4).
+// ---------------------------------------------------------------------------------------------
+
+/// A number at full precision (it reads back exactly), empty when it is not finite.
+fn fmt_full(v: f64) -> String {
+    if v.is_finite() {
+        format!("{v}")
+    } else {
+        String::new()
+    }
+}
+
+/// Columns before the per-system ones, and per system.
+const CSV_LEAD: usize = 6;
+const CSV_PER_SYS: usize = 10;
+
+/// The text of `samples.csv`: one row per grid sample.
+fn samples_csv(rows: &[Row], stamps: &[&str]) -> String {
+    let mut csv = String::new();
+    for st in stamps {
+        let _ = writeln!(csv, "# {st}");
+    }
+    csv.push_str("addr,t_ms,phase,band,common,common_two_way");
+    for p in ["oa", "eram", "pt"] {
+        let _ = write!(
+            csv,
+            ",{p}_miss,{p}_cross_m,{p}_along_raw_m,{p}_along_fit_m,{p}_h_fit_m,{p}_along_tol_m,{p}_h_tol_m,{p}_speed_err_mps,{p}_track_err_deg,{p}_row_dt_ms"
+        );
+    }
+    csv.push_str(",oa_coast,oa_uncertain,oa_reacquired\n");
+    for r in rows {
+        let _ = write!(
+            csv,
+            "{:06x},{},{},{},{},{}",
+            r.addr,
+            r.t,
+            phase::NAMES
+                .get(usize::from(r.phase))
+                .copied()
+                .unwrap_or(""),
+            band::NAMES.get(usize::from(r.band)).copied().unwrap_or(""),
+            u8::from(r.common()),
+            u8::from(r.two_way())
+        );
+        for v in &r.val {
+            match v {
+                None => csv.push_str(",1,,,,,,,,,"),
+                Some(v) => {
+                    let _ = write!(
+                        csv,
+                        ",0,{},{},{},{},{},{},{},{},{}",
+                        fmt_full(v.pt.cross),
+                        fmt_full(v.pt.along),
+                        fmt_full(v.along_fit),
+                        fmt_full(v.h_fit),
+                        fmt_full(v.along_tol),
+                        fmt_full(v.h_tol),
+                        fmt_full(v.pt.spd),
+                        fmt_full(v.pt.hdg),
+                        v.pt.t - r.t
+                    );
+                }
+            }
+        }
+        let oa = r.val.first().and_then(|v| v.as_ref()).map(|v| v.pt);
+        let _ = writeln!(
+            csv,
+            ",{},{},{}",
+            oa.map_or(String::new(), |p| p.coast.to_string()),
+            oa.map_or(String::new(), |p| tri_text(p.uncertain)),
+            oa.map_or(String::new(), |p| tri_text(p.reacquired))
+        );
+    }
+    csv
+}
+
+/// The grid rows of a `samples.csv` with the columns the primary metrics read (the cross-track,
+/// ground-speed and rounding-tolerant horizontal errors of each system, and which have a value),
+/// and the number of aircraft: one per run of rows with one address.
+fn rows_from_csv(text: &str) -> Result<(Vec<Row>, usize), String> {
+    let mut lines = text.lines().filter(|l| !l.starts_with('#'));
+    let header = lines.next().ok_or("samples.csv is empty")?;
+    if !header.starts_with("addr,t_ms,phase,band,common,common_two_way,oa_miss,") {
+        return Err("samples.csv: unexpected header".into());
+    }
+    let num = |f: &str| -> Result<f64, String> {
+        if f.is_empty() {
+            Ok(f64::NAN)
+        } else {
+            f.parse::<f64>()
+                .map_err(|_| format!("samples.csv: `{f}` is not a number"))
+        }
+    };
+    let mut rows = Vec::new();
+    let mut n_ac = 0usize;
+    let mut last: Option<&str> = None;
+    for l in lines {
+        let f: Vec<&str> = l.split(',').collect();
+        if f.len() != CSV_LEAD + 3 * CSV_PER_SYS + 3 {
+            return Err(format!("samples.csv: a row has {} fields", f.len()));
+        }
+        let at = |i: usize| f.get(i).copied().unwrap_or("");
+        let addr_text = at(0);
+        if last != Some(addr_text) {
+            n_ac += 1;
+            last = Some(addr_text);
+        }
+        let mut val: [Option<Val>; 3] = [None; 3];
+        for (s, slot) in val.iter_mut().enumerate() {
+            let c = CSV_LEAD + s * CSV_PER_SYS;
+            if at(c) == "1" {
+                continue;
+            }
+            let pt = Pt {
+                t: 0,
+                cross: num(at(c + 1))?,
+                along: num(at(c + 2))?,
+                v: f64::NAN,
+                spd: num(at(c + 7))?,
+                hdg: num(at(c + 8))?,
+                coast: 0,
+                uncertain: Tri::Unmatched,
+                reacquired: Tri::Unmatched,
+                phase: 0,
+                band: 0,
+            };
+            *slot = Some(Val {
+                pt,
+                along_fit: num(at(c + 3))?,
+                h_raw: f64::NAN,
+                h_fit: num(at(c + 4))?,
+                along_tol: num(at(c + 5))?,
+                h_tol: num(at(c + 6))?,
+            });
+        }
+        rows.push(Row {
+            ac: n_ac.saturating_sub(1),
+            t: at(1)
+                .parse::<i64>()
+                .map_err(|_| "samples.csv: bad time".to_string())?,
+            addr: u32::from_str_radix(addr_text, 16)
+                .map_err(|_| "samples.csv: bad address".to_string())?,
+            phase: 0,
+            band: 0,
+            val,
+        });
+    }
+    Ok((rows, n_ac))
+}
+
+/// The three primary metrics of a day (P-006 section 3) from its grid rows, with the floor test of
+/// P-008 section 3. Used by the run and, on the rows read back from `samples.csv`, by `--combine`.
+fn claim_pieces(rows: &[Row], n_ac: usize, draws: &[Vec<u32>]) -> Vec<ClaimPiece> {
+    let all = |_: &Row| true;
+    let share_point = |c: &Cnt| {
+        let (n, d) = c.point();
+        if d == 0 {
+            f64::NAN
+        } else {
+            n as f64 / d as f64
+        }
+    };
+    let m1 = metric(rows, n_ac, draws, Kind::Cross, &all, Set::Two);
+    let f1 = metric(rows, n_ac, &[], Kind::Cross, &all, Set::Three);
+    let m5 = metric(rows, n_ac, draws, Kind::Speed, &all, Set::Two);
+    let f5 = metric(rows, n_ac, &[], Kind::Speed, &all, Set::Three);
+    let (c4t, _) = m4_counts(rows, n_ac, |v| v.h_tol, 300.0);
+    let (oa4, er4) = (&c4t[OA], &c4t[ER]);
+    let (ba, bb) = (oa4.boot(draws), er4.boot(draws));
+    let (lo4, hi4) = interval(ba.iter().zip(&bb).map(|(x, y)| x - y));
+    let d4 = share_point(oa4) - share_point(er4);
+    let (o4, p4) = (share_point(oa4), share_point(&c4t[PT]));
+    let (d1, lo1, hi1) = diff_of(&m1, 0);
+    let (d5, lo5, hi5) = diff_of(&m5, 0);
+    let vals = [
+        (d1, lo1, hi1, pv(&f1, OA, 0), pv(&f1, PT, 0)),
+        (d5, lo5, hi5, pv(&f5, OA, 0), pv(&f5, PT, 0)),
+        (d4, lo4, hi4, o4, p4),
+    ];
+    PRIMARY
+        .iter()
+        .zip(vals)
+        .map(|((id, lower, _), (diff, lo, hi, oa3, pt3))| ClaimPiece {
+            id: (*id).to_string(),
+            diff,
+            lo,
+            hi,
+            verdict: verdict_of(lo, hi, *lower),
+            floor: floor_applies(oa3, pt3),
+            oa3,
+            pt3,
+        })
+        .collect()
+}
+
+/// One day's files for `--combine`: its `p002.txt` and `samples.csv`, as bytes read.
+// A7.2: cold struct, size guard waived
+struct DayFiles<'a> {
+    txt: &'a str,
+    csv: &'a str,
+}
+
+/// The cross-day claim rule (P-006 section 3, with P-008 sections 3 and 4): for each primary
+/// metric, OpenATCA's favour on day A and on day B, day C not in ERAM's favour, and the reference
+/// floor not applying on any day. The three days must be three different clips, each run's
+/// `samples.csv` must be the one it recorded, every run a hold-out run at one binary and one pair
+/// of full commit ids, and the primary metrics recomputed from the three `samples.csv` files must
+/// equal the recorded `CLAIM` lines.
+fn combine(days: [DayFiles<'_>; 3]) -> Result<String, String> {
     let mut parsed = Vec::new();
-    for (name, t) in ["A", "B", "C"].iter().zip(days) {
-        let d = parse_claim_lines(t).map_err(|e| format!("hold-out {name}: {e}"))?;
-        if !d.holdout {
+    for (name, d) in ["A", "B", "C"].iter().zip(&days) {
+        let c = parse_claim_lines(d.txt).map_err(|e| format!("hold-out {name}: {e}"))?;
+        if !c.info.holdout {
             return Err(format!(
                 "hold-out {name} is not a hold-out run (development or dirty-tree runs are not scores)"
             ));
         }
-        parsed.push(d);
+        for (what, v) in [("frozen", &c.info.frozen), ("candidate", &c.info.candidate)] {
+            if !is_full_sha(v) {
+                return Err(format!(
+                    "hold-out {name}: the {what} commit is `{v}`, not a full 40-hex commit id"
+                ));
+            }
+        }
+        let sha = to_hex(&sha256(d.csv.as_bytes()));
+        if sha != c.info.samples_sha {
+            return Err(format!(
+                "hold-out {name}: samples.csv has SHA-256 {sha}, not the {} its run recorded",
+                c.info.samples_sha
+            ));
+        }
+        // The recomputation: same rows, same bootstrap and seed, same code.
+        let (rows, n_ac) = rows_from_csv(d.csv).map_err(|e| format!("hold-out {name}: {e}"))?;
+        let re = claim_pieces(&rows, n_ac, &draws_of(n_ac));
+        for (a, b) in re.iter().zip(&c.pieces) {
+            if claim_metric_line(a) != claim_metric_line(b) {
+                return Err(format!(
+                    "hold-out {name}: the primary metrics recomputed from samples.csv differ from its CLAIM line:\n  recomputed {}\n  recorded   {}",
+                    claim_metric_line(a),
+                    claim_metric_line(b)
+                ));
+            }
+        }
+        parsed.push(c);
     }
     let [a, b, c] = parsed.as_slice() else {
         return Err("three days are needed".into());
     };
-    if [&b.frozen, &c.frozen].iter().any(|f| **f != a.frozen)
-        || [&b.candidate, &c.candidate]
-            .iter()
-            .any(|f| **f != a.candidate)
-    {
+    let same =
+        |f: &dyn Fn(&RunInfo) -> &String| f(&b.info) == f(&a.info) && f(&c.info) == f(&a.info);
+    if !same(&|i| &i.frozen) || !same(&|i| &i.candidate) {
         return Err(format!(
             "the days were not scored at one commit pair: A {}/{}, B {}/{}, C {}/{}",
-            a.frozen, a.candidate, b.frozen, b.candidate, c.frozen, c.candidate
+            a.info.frozen,
+            a.info.candidate,
+            b.info.frozen,
+            b.info.candidate,
+            c.info.frozen,
+            c.info.candidate
+        ));
+    }
+    if !same(&|i| &i.binary_sha) {
+        return Err("the days were not scored by one scorer binary".into());
+    }
+    let clips = [&a.info.clip_sha, &b.info.clip_sha, &c.info.clip_sha];
+    if clips[0] == clips[1] || clips[0] == clips[2] || clips[1] == clips[2] {
+        return Err(format!(
+            "the three days are not three different clips (clip hashes {}, {}, {})",
+            clips[0], clips[1], clips[2]
         ));
     }
     let mut o = String::new();
     let _ = writeln!(
         o,
-        "P-006 claim rule over hold-outs A, B, C (scored commit {}, candidate {})",
-        a.frozen, a.candidate
+        "P-006 claim rule over hold-outs A, B, C (scored commit {}, candidate {}; scorer binary {})",
+        a.info.frozen, a.info.candidate, a.info.binary_sha
     );
     let _ = writeln!(
         o,
-        "rule: the 95% interval of OpenATCA minus ERAM excludes zero in OpenATCA's favour on A and on B, and C's interval does not exclude zero in ERAM's favour"
+        "rule: the 95% interval of OpenATCA minus ERAM excludes zero in OpenATCA's favour on A and on B, and C's interval does not exclude zero in ERAM's favour; a metric at the reference floor on any day gives no claim (P-008 section 3)"
     );
     for (day, d) in [("A", a), ("B", b), ("C", c)] {
         for (f, t, n) in &d.windows {
@@ -2184,28 +2774,35 @@ fn combine(days: [&str; 3]) -> Result<String, String> {
         }
     }
     for (id, _, name) in PRIMARY {
-        let v = |d: &DayClaim| {
-            d.pieces
-                .iter()
-                .find(|p| p.id == id)
-                .map_or(Verdict::Neither, |p| p.verdict)
-        };
-        let (va, vb, vc) = (v(a), v(b), v(c));
+        let piece = |d: &DayClaim| d.pieces.iter().find(|p| p.id == id).cloned();
+        let ps = [piece(a), piece(b), piece(c)];
+        let v = |p: &Option<ClaimPiece>| p.as_ref().map_or(Verdict::Neither, |p| p.verdict);
+        let (va, vb, vc) = (v(&ps[0]), v(&ps[1]), v(&ps[2]));
+        let floor = ps.iter().any(|p| p.as_ref().is_some_and(|p| p.floor));
         let met = va == Verdict::OpenAtca && vb == Verdict::OpenAtca && vc != Verdict::Eram;
-        let _ = writeln!(
-            o,
-            "{name}: {}",
-            if met { "RULE MET" } else { "RULE NOT MET" }
-        );
-        for (day, d, vd) in [("A", a, va), ("B", b, vb), ("C", c, vc)] {
-            let p = d.pieces.iter().find(|p| p.id == id);
+        let line = if floor {
+            "AT REFERENCE FLOOR: no claim"
+        } else if met {
+            "RULE MET"
+        } else {
+            "RULE NOT MET"
+        };
+        let _ = writeln!(o, "{name}: {line}");
+        for (day, p, vd) in [("A", &ps[0], va), ("B", &ps[1], vb), ("C", &ps[2], vc)] {
             let _ = writeln!(
                 o,
-                "  {day}: difference {} [{}, {}]: {}",
-                p.map_or(f64::NAN, |p| p.diff),
-                p.map_or(f64::NAN, |p| p.lo),
-                p.map_or(f64::NAN, |p| p.hi),
-                vd.text()
+                "  {day}: difference {} [{}, {}]: {}; reference floor {} (OpenATCA {}, passthrough {} on the three-way set)",
+                p.as_ref().map_or(f64::NAN, |p| p.diff),
+                p.as_ref().map_or(f64::NAN, |p| p.lo),
+                p.as_ref().map_or(f64::NAN, |p| p.hi),
+                vd.text(),
+                if p.as_ref().is_some_and(|p| p.floor) {
+                    "APPLIES"
+                } else {
+                    "does not apply"
+                },
+                p.as_ref().map_or(f64::NAN, |p| p.oa3),
+                p.as_ref().map_or(f64::NAN, |p| p.pt3)
             );
         }
     }
@@ -2227,11 +2824,6 @@ fn peak_rss_mb() -> f64 {
                 .and_then(|v| v.parse::<f64>().ok())
         })
         .map_or(f64::NAN, |kb| kb / 1024.0)
-}
-
-fn fmt_opt(v: Option<f64>, prec: usize) -> String {
-    v.filter(|x| x.is_finite())
-        .map_or(String::new(), |x| format!("{x:.prec$}"))
 }
 
 /// What the SFDPS loader and the clip reader reported of damage and drops, for the output
@@ -2379,7 +2971,11 @@ struct Opts<'a> {
     label: &'a str,
     mode: Mode,
     commits: &'a Commits,
+    /// Hand-typed windows (development runs only).
     windows: &'a [Window],
+    /// The `oa-feed-gaps` report (its windows are the only ones of a hold-out run).
+    damage: Option<&'a DamageReport>,
+    ledger: &'a Path,
 }
 
 fn run(
@@ -2393,9 +2989,17 @@ fn run(
         label,
         mode,
         commits,
-        windows,
+        windows: hand_windows,
+        damage,
+        ledger,
     } = *opts;
-    outputs_free(out_dir)?;
+    let partials_left = outputs_free(out_dir)?;
+    let windows_all: Vec<Window> = hand_windows
+        .iter()
+        .chain(damage.iter().flat_map(|d| d.windows.iter()))
+        .cloned()
+        .collect();
+    let windows = windows_all.as_slice();
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let t_start = Instant::now();
 
@@ -2408,6 +3012,23 @@ fn run(
     drops.add(clip_sealed);
     let clip = clip.map_err(|e| e.to_string())?;
     let clip_hash = clip.hash.clone();
+    // P-008 section 5: a clip already scored is refused, whatever the mode.
+    if ledger_has(ledger, &clip_hash.sha256)? {
+        return Err(format!(
+            "the clip {} is already in the ledger {}: one result per day",
+            clip_hash.sha256,
+            ledger.display()
+        ));
+    }
+    // P-008 section 2: the damage report is that of the day being scored.
+    if let Some(d) = damage {
+        let t = &clip.reports.time_ns;
+        let (first, last) = (
+            t.iter().copied().min().unwrap_or(i64::MAX),
+            t.iter().copied().max().unwrap_or(i64::MIN),
+        );
+        damage_matches_clip(d, first, last)?;
+    }
     let (clip_bad_frames, clip_dropped_records) = (clip.bad_frames, clip.dropped_records);
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
@@ -2466,6 +3087,12 @@ fn run(
     );
     drops.add(sfdps_sealed);
     let loaded = loaded.map_err(|e| e.to_string())?;
+    let sfdps_manifest = loaded
+        .inputs
+        .iter()
+        .map(|h| h.sha256.clone())
+        .collect::<Vec<_>>()
+        .join(",");
     let sfdps_inputs: Vec<String> = loaded
         .inputs
         .iter()
@@ -2476,7 +3103,7 @@ fn run(
             )
         })
         .collect();
-    let damage = Damage {
+    let loader = Damage {
         clip_bad_frames,
         clip_dropped_records,
         clip_sealed,
@@ -2501,7 +3128,7 @@ fn run(
     // P-007: the samples inside an excluded window leave the grid for every system alike. The
     // scored legs, the passthrough pairs and the other systems' samples are made from the grid
     // as it was, so no remaining value changes.
-    let (er_grid, win_removed, n_win_removed) = exclude_windows(&er_pts, windows);
+    let (scored, er_grid, win_removed, n_win_removed) = plan_grid(&er_pts, &legs, windows);
     let er_old_win = {
         let t = |m: &TimesBy| -> TimesBy {
             m.iter()
@@ -2518,7 +3145,6 @@ fn run(
         };
         t(&er_old)
     };
-    let scored = scored_legs(&er_pts, &legs);
     let on_leg = |a: u32, t: i64| on_scored_leg(&scored, &legs, a, t);
     eprintln!("ERAM paired aircraft: {}", er_pts.len());
 
@@ -2613,10 +3239,6 @@ fn run(
     drop(run);
     let _ = fs::remove_dir_all(&spill);
     eprintln!("OpenATCA paired aircraft: {}", oa_pts.len());
-    // A hold-out score needs every sample's flags: an unmatched sample is not scored as if its
-    // flags were "no" (E6, G6). Every point is counted, whichever way the join reached it.
-    let flag_unmatched = unmatched_points(&oa_pts);
-    flag_gate(mode, flag_unmatched, flag_dup_rows, flag_conflicts)?;
 
     // Passthrough: for each grid sample, the nearest set-A report of that aircraft within 0.5 s.
     let by_addr_time: Vec<(u32, i64, u32)> = {
@@ -2678,16 +3300,21 @@ fn run(
     let grid = rows.len();
     let n_common = rows.iter().filter(|r| r.common()).count();
     let n_two = rows.iter().filter(|r| r.two_way()).count();
+    // A hold-out score needs every scored sample's flags: an unmatched sample is not scored as if
+    // its flags were "no" (E6, G6). Counted over the OpenATCA rows matched to a grid sample.
+    let flag_unmatched = unmatched_rows(&rows);
+    flag_gate(mode, flag_unmatched, flag_dup_rows, flag_conflicts)?;
 
-    // Per-aircraft, per-system time offsets, fitted on the aircraft's common samples and applied
-    // to all of its samples.
+    // Per-aircraft, per-system time offsets, applied to all of the aircraft's samples. P-008
+    // section 1: OpenATCA's and ERAM's are fitted on the two-way common set (the set the claim is
+    // made on); the passthrough's on the three-way set, the only one where it has values.
     let mut taus: Vec<[Option<f64>; 3]> = vec![[None; 3]; n_ac];
     for (ac, tau) in taus.iter_mut().enumerate() {
         for (s, slot) in tau.iter_mut().enumerate() {
             *slot = fit_tau(
                 of_ac(&rows, ac)
                     .iter()
-                    .filter(|r| r.common())
+                    .filter(|r| in_fit_set(r, s))
                     .filter_map(|r| r.val.get(s).and_then(|v| v.as_ref()))
                     .map(|v| (v.pt.along, v.pt.v)),
             );
@@ -2727,6 +3354,33 @@ fn run(
     let m5t = two(Kind::Track);
     eprintln!("main metrics bootstrapped");
 
+    // samples.csv, and what the run records of itself for `--combine` (P-008 sections 3 to 5).
+    let mut stamps: Vec<&str> = Vec::new();
+    if git_is_dirty(git) {
+        stamps.push(DIRTY_STAMP);
+    }
+    if mode.development {
+        stamps.push(DEV_STAMP);
+    }
+    let csv = samples_csv(&rows, &stamps);
+    let binary_sha = std::env::current_exe()
+        .map_err(|e| e.to_string())
+        .and_then(|p| oa_sealed::read(&p).map_err(|e| format!("{}: {e}", p.display())))
+        .map_or_else(|e| format!("unavailable ({e})"), |b| to_hex(&sha256(&b)));
+    let window_total_ns: i64 = windows.iter().map(|w| w.to_ns - w.from_ns).sum();
+    let info = RunInfo {
+        holdout: mode.holdout,
+        frozen: commits.frozen.clone().unwrap_or_else(|| "none".into()),
+        candidate: commits.candidate.clone().unwrap_or_else(|| "none".into()),
+        clip_sha: clip_hash.sha256.clone(),
+        sfdps_sha: sfdps_manifest.clone(),
+        replay_hash: loader.replay_hash.clone(),
+        samples_sha: to_hex(&sha256(csv.as_bytes())),
+        binary_sha,
+        damage_sha: damage.map_or_else(|| "none".to_string(), |d| d.sha256.clone()),
+        window_total_s: format!("{}", window_total_ns / 1_000_000_000),
+    };
+    let pieces = claim_pieces(&rows, n_ac, &draws);
     let mut o = String::new();
     if git_is_dirty(git) {
         let _ = writeln!(o, "{DIRTY_STAMP}");
@@ -2759,6 +3413,25 @@ fn run(
         option_env!("OA_BUILD_COMMIT").unwrap_or("unknown"),
         option_env!("OA_BUILD_DIRTY").map_or("unknown", |d| if d == "0" { "yes" } else { "no" })
     );
+    let _ = writeln!(
+        o,
+        "  scorer binary sha256: {}; damage report sha256: {} (excluded windows total {} s); ledger: {}",
+        info.binary_sha,
+        info.damage_sha,
+        info.window_total_s,
+        ledger.display()
+    );
+    for p in &partials_left {
+        eprintln!(
+            "p002: a leftover {} from an earlier run was replaced",
+            p.display()
+        );
+        let _ = writeln!(
+            o,
+            "  a leftover {} from an earlier run was found and replaced",
+            p.display()
+        );
+    }
     let _ = writeln!(
         o,
         "  P-003: M2t = sign(a) * max(0, |a| - {ROUND_TOL_S} s * v) of the time-fitted along-track error a and the reference ground speed v; M3t = hypot(cross, M2t); all three systems alike; headline position metrics are M1 and M3t (no 'better than ERAM' claim may rest on M2 or M3); M4 and M7 are also given on M3t"
@@ -2964,17 +3637,17 @@ fn run(
     let _ = writeln!(
         o,
         "  ADS-B clip: frames that did not decode {}; records dropped from decoded frames {}; rows left out in a sealed window {}",
-        damage.clip_bad_frames, damage.clip_dropped_records, damage.clip_sealed
+        loader.clip_bad_frames, loader.clip_dropped_records, loader.clip_sealed
     );
     let _ = writeln!(
         o,
         "  SFDPS: replay state hash {}; frames and records left out in a sealed window {}",
-        damage.replay_hash, damage.sfdps_sealed
+        loader.replay_hash, loader.sfdps_sealed
     );
-    for n in &damage.notes {
+    for n in &loader.notes {
         let _ = writeln!(o, "  SFDPS loader note: {n}");
     }
-    for c in &damage.counts {
+    for c in &loader.counts {
         let _ = writeln!(o, "  SFDPS ingest: {c}");
     }
     let _ = writeln!(o);
@@ -3042,34 +3715,6 @@ fn run(
     let _ = writeln!(o);
 
     // The primary metrics and the claim rule (P-006 section 3).
-    let (c4t, _) = m4_counts(&rows, n_ac, |v| v.h_tol, 300.0);
-    let share_point = |c: &Cnt| {
-        let (n, d) = c.point();
-        if d == 0 {
-            f64::NAN
-        } else {
-            n as f64 / d as f64
-        }
-    };
-    let (d4, lo4, hi4) = {
-        let (oa4, er4) = (&c4t[OA], &c4t[ER]);
-        let (ba, bb) = (oa4.boot(&draws), er4.boot(&draws));
-        let (lo, hi) = interval(ba.iter().zip(&bb).map(|(x, y)| x - y));
-        (share_point(oa4) - share_point(er4), lo, hi)
-    };
-    let (d1, lo1, hi1) = diff_of(&m1, 0);
-    let (d5, lo5, hi5) = diff_of(&m5s, 0);
-    let pieces: Vec<ClaimPiece> = PRIMARY
-        .iter()
-        .zip([(d1, lo1, hi1), (d5, lo5, hi5), (d4, lo4, hi4)])
-        .map(|((id, lower, _), (diff, lo, hi))| ClaimPiece {
-            id: (*id).to_string(),
-            diff,
-            lo,
-            hi,
-            verdict: verdict_of(lo, hi, *lower),
-        })
-        .collect();
     let _ = writeln!(
         o,
         "PRIMARY METRICS AND THE CLAIM RULE (P-006 section 3): three metrics are primary: M1 median, M5 ground-speed error median (absolute), M4t at 300 m. A claim of 'better than ERAM' may rest on a primary metric only; every other metric is secondary."
@@ -3095,13 +3740,7 @@ fn run(
         "  the rule across the three days is met for a metric only if the A and B parts and the C part are all met: not decidable from one day"
     );
     let _ = writeln!(o, "  machine-readable (read by --combine):");
-    o.push_str(&claim_lines(
-        mode.holdout,
-        commits,
-        &pieces,
-        windows,
-        &win_removed,
-    ));
+    o.push_str(&claim_lines(&info, &pieces, windows, &win_removed));
     let _ = writeln!(o);
 
     // M1 to M3, M5.
@@ -3349,68 +3988,16 @@ fn run(
         if mode.holdout { "hold-out" } else { "non-hold-out" }
     );
 
-    // samples.csv.
-    let mut csv = String::new();
-    if git_is_dirty(git) {
-        let _ = writeln!(csv, "# {DIRTY_STAMP}");
+    // P-008 section 5: the ledger line is written before any result, and a clip already in the
+    // ledger was refused above.
+    if mode.holdout {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        ledger_append(ledger, &ledger_line(&clip_hash.sha256, commits, now))?;
     }
-    if mode.development {
-        let _ = writeln!(csv, "# {DEV_STAMP}");
-    }
-    csv.push_str("addr,t_ms,phase,band,common,common_two_way");
-    for p in ["oa", "eram", "pt"] {
-        let _ = write!(
-            csv,
-            ",{p}_miss,{p}_cross_m,{p}_along_raw_m,{p}_along_fit_m,{p}_h_fit_m,{p}_along_tol_m,{p}_h_tol_m,{p}_speed_err_mps,{p}_track_err_deg,{p}_row_dt_ms"
-        );
-    }
-    csv.push_str(",oa_coast,oa_uncertain,oa_reacquired\n");
-    for r in &rows {
-        let _ = write!(
-            csv,
-            "{:06x},{},{},{},{},{}",
-            r.addr,
-            r.t,
-            phase::NAMES
-                .get(usize::from(r.phase))
-                .copied()
-                .unwrap_or(""),
-            band::NAMES.get(usize::from(r.band)).copied().unwrap_or(""),
-            u8::from(r.common()),
-            u8::from(r.two_way())
-        );
-        for v in &r.val {
-            match v {
-                None => csv.push_str(",1,,,,,,,,,"),
-                Some(v) => {
-                    let _ = write!(
-                        csv,
-                        ",0,{},{},{},{},{},{},{},{},{}",
-                        fmt_opt(Some(v.pt.cross), 2),
-                        fmt_opt(Some(v.pt.along), 2),
-                        fmt_opt(Some(v.along_fit), 2),
-                        fmt_opt(Some(v.h_fit), 2),
-                        fmt_opt(Some(v.along_tol), 2),
-                        fmt_opt(Some(v.h_tol), 2),
-                        fmt_opt(Some(v.pt.spd), 3),
-                        fmt_opt(Some(v.pt.hdg), 2),
-                        v.pt.t - r.t
-                    );
-                }
-            }
-        }
-        let oa = r.val.first().and_then(|v| v.as_ref()).map(|v| v.pt);
-        let _ = writeln!(
-            csv,
-            ",{},{},{}",
-            oa.map_or(String::new(), |p| p.coast.to_string()),
-            oa.map_or(String::new(), |p| tri_text(p.uncertain)),
-            oa.map_or(String::new(), |p| tri_text(p.reacquired))
-        );
-    }
-    // Create-new (P-006 section 7): neither file existed when the run began, and neither may now.
-    write_new(&out_dir.join("samples.csv"), &csv)?;
-    write_new(&out_dir.join("p002.txt"), &o)?;
+    // Create-new via `.partial` names, flushed, then renamed (P-006 section 7, P-008).
+    publish_outputs(out_dir, &csv, &o)?;
     Ok(o)
 }
 
@@ -3818,34 +4405,6 @@ mod tests {
         rows.clear();
     }
 
-    // REQ: OA-TRK-373
-    #[test]
-    fn the_hold_out_gate_refuses_any_unmatched_sample_and_counts_every_point() {
-        let pts = |u| {
-            let mut p = fx_pt();
-            p.uncertain = u;
-            p
-        };
-        let mut per: PerAc = BTreeMap::new();
-        per.insert(1, vec![pts(Tri::No), pts(Tri::Yes)]);
-        assert_eq!(unmatched_points(&per), 0);
-        // An unmatched point on an address the join never saw is still counted.
-        per.insert(9, vec![pts(Tri::Unmatched)]);
-        assert_eq!(unmatched_points(&per), 1);
-        let hold = Mode {
-            holdout: true,
-            development: false,
-        };
-        let dev = Mode {
-            holdout: false,
-            development: true,
-        };
-        assert!(flag_gate(hold, 0, 3, 1).is_ok());
-        let e = flag_gate(hold, 1, 3, 1).unwrap_err();
-        assert!(e.contains("hold-out run refused") && e.contains("1 OpenATCA samples"));
-        assert!(flag_gate(dev, 5, 0, 0).is_ok());
-    }
-
     // REQ: OA-TRK-377
     #[test]
     fn a_hold_out_run_needs_the_frozen_commit_a_clean_build_and_a_clean_tree_at_it() {
@@ -4118,92 +4677,6 @@ mod tests {
         assert_eq!(verdict_of(f64::NAN, 1.0, false), Verdict::Neither);
     }
 
-    fn day_text(holdout: bool, frozen: &str, v: [(f64, f64, f64); 3]) -> String {
-        let c = Commits {
-            frozen: Some(frozen.into()),
-            candidate: Some("c".repeat(40)),
-        };
-        let pieces: Vec<ClaimPiece> = PRIMARY
-            .iter()
-            .zip(v)
-            .map(|((id, lower, _), (diff, lo, hi))| ClaimPiece {
-                id: (*id).into(),
-                diff,
-                lo,
-                hi,
-                verdict: verdict_of(lo, hi, *lower),
-            })
-            .collect();
-        format!(
-            "other text\n{}",
-            claim_lines(holdout, &c, &pieces, &[], &[])
-        )
-    }
-
-    const OA_WINS: [(f64, f64, f64); 3] =
-        [(-2.0, -3.0, -1.0), (-0.5, -0.9, -0.1), (0.1, 0.05, 0.2)];
-    const NO_DIFF: [(f64, f64, f64); 3] = [(0.0, -1.0, 1.0), (0.0, -1.0, 1.0), (0.0, -0.1, 0.1)];
-    const ERAM_WINS: [(f64, f64, f64); 3] = [(2.0, 1.0, 3.0), (0.5, 0.1, 0.9), (-0.1, -0.2, -0.05)];
-
-    // REQ: OA-TRK-393
-    #[test]
-    fn the_cross_day_rule_is_met_only_on_a_and_b_in_openatcas_favour_and_c_not_against() {
-        let u = "a".repeat(40);
-        let a = day_text(true, &u, OA_WINS);
-        let r = combine([&a, &a, &day_text(true, &u, NO_DIFF)]).unwrap();
-        assert_eq!(r.matches("RULE MET").count(), 3, "{r}");
-        assert!(!r.contains("NOT MET"));
-        // C against OpenATCA breaks it; C silent does not.
-        let r = combine([&a, &a, &day_text(true, &u, ERAM_WINS)]).unwrap();
-        assert_eq!(r.matches("RULE NOT MET").count(), 3, "{r}");
-        // B silent breaks it.
-        let r = combine([&a, &day_text(true, &u, NO_DIFF), &a]).unwrap();
-        assert_eq!(r.matches("RULE NOT MET").count(), 3);
-        // One metric only: M1 wins on every day, the others do not.
-        let mixed = [OA_WINS[0], NO_DIFF[1], NO_DIFF[2]];
-        let m = day_text(true, &u, mixed);
-        let r = combine([&m, &m, &m]).unwrap();
-        assert!(
-            r.contains("M1 median cross-track error (m): RULE MET"),
-            "{r}"
-        );
-        assert_eq!(r.matches("RULE NOT MET").count(), 2);
-    }
-
-    // REQ: OA-TRK-393
-    #[test]
-    fn combine_refuses_a_day_that_is_not_a_holdout_run_or_is_inconsistent() {
-        let u = "a".repeat(40);
-        let good = day_text(true, &u, OA_WINS);
-        let dev = day_text(false, &u, OA_WINS);
-        assert!(combine([&good, &good, &dev])
-            .unwrap_err()
-            .contains("not a hold-out run"));
-        // Another scored commit.
-        let other = day_text(true, &"b".repeat(40), OA_WINS);
-        assert!(combine([&good, &good, &other])
-            .unwrap_err()
-            .contains("one commit pair"));
-        // No CLAIM lines, a missing metric, a verdict that its interval does not give.
-        assert!(combine([&good, &good, "nothing"]).is_err());
-        let missing: String = good
-            .lines()
-            .filter(|l| !l.contains("M4t_300"))
-            .map(|l| format!("{l}\n"))
-            .collect();
-        assert!(combine([&good, &good, &missing])
-            .unwrap_err()
-            .contains("M4t_300"));
-        let forged = good.replace("verdict=oa", "verdict=none");
-        assert!(combine([&good, &good, &forged])
-            .unwrap_err()
-            .contains("interval"));
-        // An undefined interval reads back as no verdict.
-        let nan = day_text(true, &u, [(f64::NAN, f64::NAN, f64::NAN); 3]);
-        let d = parse_claim_lines(&nan).unwrap();
-        assert!(d.pieces.iter().all(|p| p.verdict == Verdict::Neither));
-    }
-
     // ----- P-006 section 5: the candidate commit -----
 
     fn scratch(tag: &str) -> PathBuf {
@@ -4309,29 +4782,6 @@ mod tests {
 
     // REQ: OA-TRK-395
     #[test]
-    fn a_run_refuses_when_an_output_exists_and_never_overwrites_one() {
-        let d = scratch("out");
-        assert!(outputs_free(&d).is_ok());
-        // Either file alone refuses the run.
-        for f in OUTPUT_FILES {
-            fs::write(d.join(f), "kept").unwrap();
-            let e = outputs_free(&d).unwrap_err();
-            assert!(e.contains(f), "{e}");
-            assert!(write_new(&d.join(f), "new").is_err());
-            assert_eq!(fs::read_to_string(d.join(f)).unwrap(), "kept");
-            fs::remove_file(d.join(f)).unwrap();
-        }
-        write_new(&d.join("p002.txt"), "first").unwrap();
-        assert!(write_new(&d.join("p002.txt"), "second").is_err());
-        assert_eq!(fs::read_to_string(d.join("p002.txt")).unwrap(), "first");
-        // A name that is a dangling symlink is taken too.
-        std::os::unix::fs::symlink(d.join("nowhere"), d.join("samples.csv")).unwrap();
-        assert!(outputs_free(&d).is_err());
-        let _ = fs::remove_dir_all(&d);
-    }
-
-    // REQ: OA-TRK-395
-    #[test]
     fn the_ingest_drop_counts_are_listed_with_their_reasons() {
         let mut c = oa_bench::legacy::Counts::default();
         c.sfdps_rejected = 7;
@@ -4417,12 +4867,9 @@ mod tests {
         assert!(g.rows.iter().all(|r| !w.holds_ms(r.t)));
         let _ = none;
         // The window is recorded in the machine-readable lines and read back.
-        let c = Commits {
-            frozen: Some("a".repeat(40)),
-            candidate: Some("c".repeat(40)),
-        };
-        let text = day_text_with(&c, &[w], &[6]);
-        let d = parse_claim_lines(&text).unwrap();
+        let rows = synth_rows(true, false);
+        let (txt, _) = make_day(&rows, "clip", &"a".repeat(40), true, &[w], &[6]);
+        let d = parse_claim_lines(&txt).unwrap();
         assert_eq!(
             d.windows,
             vec![(
@@ -4433,18 +4880,26 @@ mod tests {
         );
     }
 
-    fn day_text_with(c: &Commits, w: &[Window], n: &[u64]) -> String {
-        let pieces: Vec<ClaimPiece> = PRIMARY
-            .iter()
-            .map(|(id, lower, _)| ClaimPiece {
-                id: (*id).into(),
-                diff: -1.0,
-                lo: -2.0,
-                hi: -0.5,
-                verdict: verdict_of(-2.0, -0.5, *lower),
-            })
-            .collect();
-        claim_lines(true, c, &pieces, w, n)
+    // REQ: OA-TRK-396
+    #[test]
+    fn a_window_changes_the_samples_scored_and_never_the_scored_legs() {
+        let legs = LegIndex::new(&[leg(1, 0, 50_000), leg(1, 100_000, 150_000)]);
+        let mut er: PerAc = BTreeMap::new();
+        er.insert(1, vec![pt_at(10_000), pt_at(20_000), pt_at(110_000)]);
+        er.insert(2, vec![pt_at(30_000)]);
+        // The window holds every sample of leg 0 of aircraft 1, and all of aircraft 2.
+        let w = Window::parse("1970-01-01T00:00:05Z", "1970-01-01T00:00:35Z").unwrap();
+        let (scored, grid, counts, removed) = plan_grid(&er, &legs, &[w]);
+        assert_eq!((counts, removed), (vec![3], 3));
+        // The legs are those of the grid before the window: leg 0 stays scored.
+        assert_eq!(scored, scored_legs(&er, &legs));
+        assert!(scored.get(&1).unwrap().contains(&0));
+        assert!(scored.get(&2).is_some());
+        // Computed from the grid after the window they would differ.
+        assert_ne!(scored, scored_legs(&grid, &legs));
+        // The grid has lost the emptied aircraft.
+        assert_eq!(grid.keys().copied().collect::<Vec<_>>(), [1]);
+        assert_eq!(grid.get(&1).unwrap().len(), 1);
     }
 
     // REQ: OA-TRK-389
@@ -4473,5 +4928,420 @@ mod tests {
         ]);
         let sc = scored_legs(&er, &legs);
         assert_eq!(sc.get(&1).unwrap().iter().copied().collect::<Vec<_>>(), [1]);
+    }
+
+    // ----- P-008 -----
+
+    fn syn_val(cross: f64, spd: f64, h: f64) -> Val {
+        Val {
+            pt: Pt {
+                cross,
+                spd,
+                ..fx_pt()
+            },
+            along_fit: 0.0,
+            h_raw: 1.0,
+            h_fit: h,
+            along_tol: 0.0,
+            h_tol: h,
+        }
+    }
+
+    /// 12 aircraft of 20 grid samples. OpenATCA beats ERAM when `oa_better`, the two are equal
+    /// when not and `eram_better` is false; the passthrough has every second sample and equals
+    /// OpenATCA when `pt_equal`, else is far better.
+    fn synth_rows_with(oa_better: bool, eram_better: bool, pt_equal: bool) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for ac in 0..12usize {
+            for i in 0..20usize {
+                let base = 1.0 + ((i + ac) % 4) as f64 * 0.3;
+                let slow = 8.0 + ((i * 3 + ac) % 5) as f64 * 0.5;
+                let (oa_c, er_c) = if oa_better {
+                    (base, slow)
+                } else if eram_better {
+                    (slow, base)
+                } else {
+                    (base, base)
+                };
+                let spd = |c: f64| c * 0.1;
+                let pt = (i % 2 == 0).then(|| {
+                    let c = if pt_equal { oa_c } else { oa_c * 0.2 };
+                    syn_val(c, spd(c), c * 40.0)
+                });
+                rows.push(Row {
+                    ac,
+                    t: i as i64 * 1000,
+                    addr: ac as u32 + 1,
+                    phase: 0,
+                    band: 0,
+                    val: [
+                        Some(syn_val(oa_c, spd(oa_c), oa_c * 40.0)),
+                        Some(syn_val(er_c, spd(er_c), er_c * 40.0)),
+                        pt,
+                    ],
+                });
+            }
+        }
+        rows
+    }
+
+    fn synth_rows(oa_better: bool, pt_equal: bool) -> Vec<Row> {
+        synth_rows_with(oa_better, false, pt_equal)
+    }
+
+    /// One day's `p002.txt` and `samples.csv` as the run writes them.
+    fn make_day(
+        rows: &[Row],
+        clip: &str,
+        frozen: &str,
+        holdout: bool,
+        windows: &[Window],
+        removed: &[u64],
+    ) -> (String, String) {
+        let csv = samples_csv(rows, &[]);
+        let n_ac = rows.iter().map(|r| r.ac).max().map_or(0, |m| m + 1);
+        let pieces = claim_pieces(rows, n_ac, &draws_of(n_ac));
+        let info = RunInfo {
+            holdout,
+            frozen: frozen.into(),
+            candidate: "c".repeat(40),
+            clip_sha: clip.into(),
+            sfdps_sha: "s".into(),
+            replay_hash: "r".into(),
+            samples_sha: to_hex(&sha256(csv.as_bytes())),
+            binary_sha: "b".into(),
+            damage_sha: "d".into(),
+            window_total_s: "0".into(),
+        };
+        (
+            format!(
+                "other text\n{}",
+                claim_lines(&info, &pieces, windows, removed)
+            ),
+            csv,
+        )
+    }
+
+    fn files<'a>(d: &'a [(String, String); 3]) -> [DayFiles<'a>; 3] {
+        [
+            DayFiles {
+                txt: &d[0].0,
+                csv: &d[0].1,
+            },
+            DayFiles {
+                txt: &d[1].0,
+                csv: &d[1].1,
+            },
+            DayFiles {
+                txt: &d[2].0,
+                csv: &d[2].1,
+            },
+        ]
+    }
+
+    const U: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    // REQ: OA-TRK-393
+    #[test]
+    fn the_cross_day_rule_is_met_only_on_a_and_b_in_openatcas_favour_and_c_not_against() {
+        let win = synth_rows(true, false);
+        let flat = synth_rows_with(false, false, false);
+        let lose = synth_rows_with(false, true, false);
+        let day = |r: &[Row], clip: &str| make_day(r, clip, U, true, &[], &[]);
+        let d = [day(&win, "c1"), day(&win, "c2"), day(&flat, "c3")];
+        let r = combine(files(&d)).unwrap();
+        assert_eq!(r.matches("RULE MET").count(), 3, "{r}");
+        // C against OpenATCA, or B silent, breaks it.
+        let d = [day(&win, "c1"), day(&win, "c2"), day(&lose, "c3")];
+        assert_eq!(
+            combine(files(&d)).unwrap().matches("RULE NOT MET").count(),
+            3
+        );
+        let d = [day(&win, "c1"), day(&flat, "c2"), day(&win, "c3")];
+        assert_eq!(
+            combine(files(&d)).unwrap().matches("RULE NOT MET").count(),
+            3
+        );
+    }
+
+    // REQ: OA-TRK-393
+    #[test]
+    fn combine_refuses_one_day_three_times_and_runs_that_are_not_holdout_or_not_one_commit_pair() {
+        let win = synth_rows(true, false);
+        let day = |clip: &str, f: &str, h: bool| make_day(&win, clip, f, h, &[], &[]);
+        // The same clip three times.
+        let d = [day("c1", U, true), day("c1", U, true), day("c1", U, true)];
+        let e = combine(files(&d)).unwrap_err();
+        assert!(e.contains("three different clips"), "{e}");
+        // A development run.
+        let d = [day("c1", U, true), day("c2", U, true), day("c3", U, false)];
+        assert!(combine(files(&d))
+            .unwrap_err()
+            .contains("not a hold-out run"));
+        // frozen=none, a short commit, another commit.
+        let d = [
+            day("c1", U, true),
+            day("c2", U, true),
+            day("c3", "none", true),
+        ];
+        assert!(combine(files(&d)).unwrap_err().contains("40-hex"));
+        let d = [
+            day("c1", U, true),
+            day("c2", U, true),
+            day("c3", "abc", true),
+        ];
+        assert!(combine(files(&d)).is_err());
+        let other = "b".repeat(40);
+        let d = [
+            day("c1", U, true),
+            day("c2", U, true),
+            day("c3", &other, true),
+        ];
+        assert!(combine(files(&d)).unwrap_err().contains("one commit pair"));
+        // No CLAIM lines.
+        let mut d = [day("c1", U, true), day("c2", U, true), day("c3", U, true)];
+        d[2].0 = "nothing".into();
+        assert!(combine(files(&d)).is_err());
+    }
+
+    // REQ: OA-TRK-393
+    #[test]
+    fn combine_recomputes_and_refuses_an_edited_interval_or_an_edited_samples_file() {
+        let win = synth_rows(true, false);
+        let day = |clip: &str| make_day(&win, clip, U, true, &[], &[]);
+        let good = [day("c1"), day("c2"), day("c3")];
+        assert!(combine(files(&good)).is_ok());
+        // An edited difference or interval in a CLAIM line.
+        let mut d = [day("c1"), day("c2"), day("c3")];
+        let line = d[1]
+            .0
+            .lines()
+            .find(|l| l.contains("metric=M1_median"))
+            .unwrap()
+            .to_string();
+        let lo = line
+            .split_whitespace()
+            .find(|w| w.starts_with("lo="))
+            .unwrap()
+            .to_string();
+        d[1].0 = d[1].0.replace(&lo, "lo=-99");
+        let e = combine(files(&d)).unwrap_err();
+        assert!(e.contains("recomputed"), "{e}");
+        // An edited samples.csv no longer has its recorded hash.
+        let mut d = [day("c1"), day("c2"), day("c3")];
+        d[0].1 = d[0].1.replacen(",1,", ",2,", 1).replacen("0,", "1,", 0);
+        d[0].1.push('\n');
+        let e = combine(files(&d)).unwrap_err();
+        assert!(e.contains("samples.csv has SHA-256"), "{e}");
+        // A samples.csv edited AND rehashed in the CLAIM line still fails the recomputation.
+        let mut d = [day("c1"), day("c2"), day("c3")];
+        let mut rows = win.clone();
+        for r in &mut rows {
+            if let Some(v) = r.val[OA].as_mut() {
+                v.pt.cross += 50.0;
+            }
+        }
+        let forged_csv = samples_csv(&rows, &[]);
+        let old_sha = to_hex(&sha256(d[2].1.as_bytes()));
+        d[2].0 = d[2]
+            .0
+            .replace(&old_sha, &to_hex(&sha256(forged_csv.as_bytes())));
+        d[2].1 = forged_csv;
+        assert!(combine(files(&d)).unwrap_err().contains("recomputed"));
+    }
+
+    // REQ: OA-TRK-397
+    #[test]
+    fn a_metric_at_the_reference_floor_on_any_day_gives_no_claim_and_never_rule_met() {
+        let win = synth_rows(true, false);
+        // The passthrough equals OpenATCA: at the floor on M1 and M5.
+        let floor_rows = synth_rows(true, true);
+        let day = |r: &[Row], clip: &str| make_day(r, clip, U, true, &[], &[]);
+        let d = [
+            day(&floor_rows, "c1"),
+            day(&floor_rows, "c2"),
+            day(&floor_rows, "c3"),
+        ];
+        let r = combine(files(&d)).unwrap();
+        assert!(
+            r.contains("M1 median cross-track error (m): AT REFERENCE FLOOR: no claim"),
+            "{r}"
+        );
+        assert!(r.contains(
+            "M5 ground-speed error median, absolute (m/s): AT REFERENCE FLOOR: no claim"
+        ));
+        // M4t is judged on the share, where the passthrough is far below: not at the floor.
+        assert!(!r.contains("M4t share of ALL grid samples within 300 m (rounding-tolerant, time-fitted): AT REFERENCE"), "{r}");
+        // On one day only, the metric still gets no claim.
+        let d = [day(&win, "c1"), day(&win, "c2"), day(&floor_rows, "c3")];
+        let r = combine(files(&d)).unwrap();
+        assert_eq!(r.matches("AT REFERENCE FLOOR: no claim").count(), 2, "{r}");
+        assert!(r.contains(
+            "M4t share of ALL grid samples within 300 m (rounding-tolerant, time-fitted): RULE MET"
+        ));
+        // Without any floor, the rule is met and the flag is 0 in the CLAIM lines.
+        let d = [day(&win, "c1"), day(&win, "c2"), day(&win, "c3")];
+        assert!(!combine(files(&d))
+            .unwrap()
+            .contains("AT REFERENCE FLOOR: no claim"));
+        assert!(d[0].0.contains("floor=0"));
+        // Floor test on the share.
+        assert!(floor_applies(0.95, 0.99));
+        assert!(!floor_applies(0.997, 0.19));
+    }
+
+    // REQ: OA-TRK-398
+    #[test]
+    fn an_oa_feed_gaps_report_gives_the_windows_of_a_clean_day_and_is_refused_otherwise() {
+        let head = "oa-feed-gaps report (P-006 section 6)\nwindow: 2026-11-19T00:00:00.000000000Z to 2026-11-19T23:59:59.000000000Z (86399.000000000 s)\nlimit: 600.000000000 s\n";
+        let ex = |a: &str, b: &str| {
+            format!("exclude 2026-11-19T{a}.000000000Z 2026-11-19T{b}.000000000Z\n")
+        };
+        let ok = format!(
+            "{head}{}{}CLEAN\n",
+            ex("10:00:00", "10:15:00"),
+            ex("12:00:00", "12:10:00")
+        );
+        let d = parse_damage_report(&ok, "abc").unwrap();
+        assert_eq!(
+            (d.windows.len(), d.total_ns, d.sha256.as_str()),
+            (2, 1_500_000_000_000, "abc")
+        );
+        assert!(parse_damage_report(&format!("{head}CLEAN\n"), "x")
+            .unwrap()
+            .windows
+            .is_empty());
+        // Not CLEAN, no verdict, two verdicts.
+        assert!(parse_damage_report(&format!("{head}DAMAGED: an interval\n"), "x").is_err());
+        assert!(parse_damage_report(head, "x").is_err());
+        assert!(parse_damage_report(&format!("{head}CLEAN\nCLEAN\n"), "x").is_err());
+        // A window under 600 s, windows over 3,600 s in all, outside the report's window.
+        let e = parse_damage_report(&format!("{head}{}CLEAN\n", ex("10:00:00", "10:09:59")), "x")
+            .unwrap_err();
+        assert!(e.contains("under 600 s"), "{e}");
+        let many: String = (0..5)
+            .map(|i| ex(&format!("0{}:00:00", i + 1), &format!("0{}:15:00", i + 1)))
+            .collect();
+        let e = parse_damage_report(&format!("{head}{many}CLEAN\n"), "x").unwrap_err();
+        assert!(e.contains("over 3,600 s"), "{e}");
+        let outside = "exclude 2026-11-20T00:00:00.000000000Z 2026-11-20T00:20:00.000000000Z\n";
+        assert!(parse_damage_report(&format!("{head}{outside}CLEAN\n"), "x").is_err());
+        // A report window that is not one whole UTC day.
+        let part = ok.replace("T00:00:00.000000000Z to", "T00:00:01.000000000Z to");
+        assert!(parse_damage_report(&part, "x")
+            .unwrap_err()
+            .contains("whole UTC day"));
+        let short = ok.replace("T23:59:59.000000000Z (86399", "T12:00:00.000000000Z (43200");
+        assert!(parse_damage_report(&short, "x").is_err());
+        // The clip must lie in the report's window.
+        let day0 = parse_iso_ns("2026-11-19T00:00:00Z").unwrap();
+        assert!(damage_matches_clip(&d, day0 + 1, day0 + 86_000_000_000_000).is_ok());
+        assert!(damage_matches_clip(&d, day0 - 1, day0 + 5).is_err());
+        assert!(damage_matches_clip(&d, day0, day0 + 86_400_000_000_000).is_err());
+    }
+
+    // REQ: OA-TRK-399
+    #[test]
+    fn the_ledger_refuses_a_clip_it_holds_and_is_only_ever_appended_to() {
+        let dir = scratch("ledger");
+        let l = dir.join("ledger.txt");
+        assert_eq!(ledger_has(&l, "clip1"), Ok(false));
+        let c = Commits {
+            frozen: Some(U.into()),
+            candidate: Some("c".repeat(40)),
+        };
+        assert_eq!(
+            ledger_line("clip1", &c, 1_795_130_682),
+            format!("clip1 {U} {} 2026-11-19T23:24:42Z", "c".repeat(40))
+        );
+        ledger_append(&l, &ledger_line("clip1", &c, 0)).unwrap();
+        ledger_append(&l, &ledger_line("clip2", &c, 0)).unwrap();
+        let text = fs::read_to_string(&l).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert_eq!(ledger_has(&l, "clip1"), Ok(true));
+        assert_eq!(ledger_has(&l, "clip2"), Ok(true));
+        assert_eq!(ledger_has(&l, "clip"), Ok(false));
+        assert_eq!(iso_utc(0), "1970-01-01T00:00:00Z");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // REQ: OA-TRK-395
+    #[test]
+    fn outputs_are_written_to_partial_names_then_renamed_and_never_over_a_result() {
+        let d = scratch("out");
+        assert_eq!(outputs_free(&d), Ok(vec![]));
+        // A leftover partial does not block a run, and is reported.
+        fs::write(d.join("p002.txt.partial"), "old").unwrap();
+        assert_eq!(outputs_free(&d).unwrap(), vec![d.join("p002.txt.partial")]);
+        publish_outputs(&d, "csv", "txt").unwrap();
+        assert_eq!(fs::read_to_string(d.join("p002.txt")).unwrap(), "txt");
+        assert_eq!(fs::read_to_string(d.join("samples.csv")).unwrap(), "csv");
+        assert!(!d.join("p002.txt.partial").exists() && !d.join("samples.csv.partial").exists());
+        // A result under a final name refuses the run and nothing is written.
+        let e = publish_outputs(&d, "new", "new").unwrap_err();
+        assert!(e.contains("exists"), "{e}");
+        assert_eq!(fs::read_to_string(d.join("samples.csv")).unwrap(), "csv");
+        assert!(!d.join("samples.csv.partial").exists());
+        // Either final file alone refuses; so does a dangling symlink.
+        for f in OUTPUT_FILES {
+            fs::remove_file(d.join(f)).unwrap();
+        }
+        fs::write(d.join("samples.csv"), "kept").unwrap();
+        assert!(outputs_free(&d).unwrap_err().contains("samples.csv"));
+        fs::remove_file(d.join("samples.csv")).unwrap();
+        std::os::unix::fs::symlink(d.join("nowhere"), d.join("p002.txt")).unwrap();
+        assert!(outputs_free(&d).is_err());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // REQ: OA-TRK-400
+    #[test]
+    fn the_time_fit_of_openatca_and_eram_uses_the_two_way_set_and_the_passthroughs_the_three_way_set(
+    ) {
+        let both = fx_row(0, [Some(1.0), Some(1.0), None]);
+        let all3 = fx_row(0, [Some(1.0), Some(1.0), Some(1.0)]);
+        let pt_only = fx_row(0, [Some(1.0), None, Some(1.0)]);
+        for (r, oa, er, pt) in [
+            (&both, true, true, false),
+            (&all3, true, true, true),
+            (&pt_only, false, false, false),
+        ] {
+            assert_eq!(in_fit_set(r, OA), oa);
+            assert_eq!(in_fit_set(r, ER), er);
+            assert_eq!(in_fit_set(r, PT), pt);
+        }
+    }
+
+    // REQ: OA-TRK-373
+    #[test]
+    fn the_hold_out_gate_counts_only_openatca_rows_matched_to_a_grid_sample() {
+        let mut matched = syn_val(1.0, 0.0, 1.0);
+        matched.pt.uncertain = Tri::No;
+        matched.pt.reacquired = Tri::No;
+        let mut bad = matched;
+        bad.pt.uncertain = Tri::Unmatched;
+        let row = |v: Option<Val>| Row {
+            ac: 0,
+            t: 0,
+            addr: 1,
+            phase: 0,
+            band: 0,
+            val: [v, None, None],
+        };
+        // An unmatched OpenATCA point that no grid sample uses is not in the rows at all.
+        assert_eq!(unmatched_rows(&[row(Some(matched)), row(None)]), 0);
+        assert_eq!(unmatched_rows(&[row(Some(matched)), row(Some(bad))]), 1);
+        let hold = Mode {
+            holdout: true,
+            development: false,
+        };
+        let dev = Mode {
+            holdout: false,
+            development: true,
+        };
+        assert!(flag_gate(hold, 0, 3, 1).is_ok());
+        let e = flag_gate(hold, 1, 3, 1).unwrap_err();
+        assert!(e.contains("hold-out run refused") && e.contains("1 OpenATCA samples"));
+        assert!(flag_gate(dev, 5, 0, 0).is_ok());
     }
 }
