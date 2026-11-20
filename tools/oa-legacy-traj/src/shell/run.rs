@@ -14,7 +14,7 @@ use oa_replay::FeedKind;
 use crate::core::bins::{lead_bin, lead_in_range, score};
 use crate::core::cross::{
     airborne_span, approach, choose_landing, choose_passage, great_circle_m, landings,
-    near_box_edge,
+    near_box_edge, pick_passage, unsplit_choice_ms,
 };
 use crate::core::join::{
     all_legs_of, bind_leg, index_legs, join, leg_in_window, legs_of, outcome_index, Binding, Known,
@@ -114,18 +114,30 @@ fn core_legs(built: &BuiltTruth) -> Vec<Leg> {
         .collect()
 }
 
-/// The truth path of leg `leg` of `addr`, sampled every `step_ms`. A time truth has no answer for
-/// leaves a hole: the next sample is marked as after one, and so is the first sample.
-fn sample_path(ctx: &Ctx<'_>, addr: u32, leg: u32) -> Vec<PathPoint> {
+/// The longest stretch of the truth path that is taken as continuous, ms: samples more than this
+/// apart are a hole. (The truth answers only within 10 s of a real report on both sides, so with
+/// the default 5 s step no two consecutive answered samples are this far apart; the rule only
+/// matters for a larger `--step-s`.)
+const MAX_SEGMENT_MS: i64 = 30_000;
+
+/// The truth path of leg `leg` of `addr`, sampled every `step_ms`, and the number of segments
+/// longer than [`MAX_SEGMENT_MS`] made holes. A time truth has no answer for leaves a hole: the
+/// next sample is marked as after one, and so is the first sample.
+fn sample_path(ctx: &Ctx<'_>, addr: u32, leg: u32) -> (Vec<PathPoint>, u64) {
     let Some(l) = ctx.ix.legs.get(leg as usize) else {
-        return Vec::new();
+        return (Vec::new(), 0);
     };
-    let mut out = Vec::new();
+    let mut out: Vec<PathPoint> = Vec::new();
+    let mut forced = 0u64;
     let mut hole = true;
     let mut t = l.start_ms;
     while t <= l.end_ms {
         match adsb_truth::query(&ctx.built.truth, addr, t) {
             Ok(s) => {
+                if !hole && out.last().is_some_and(|p| t - p.t_ms > MAX_SEGMENT_MS) {
+                    hole = true;
+                    forced += 1;
+                }
                 out.push(PathPoint {
                     t_ms: t,
                     lat_deg: s.lat,
@@ -138,7 +150,7 @@ fn sample_path(ctx: &Ctx<'_>, addr: u32, leg: u32) -> Vec<PathPoint> {
         }
         t += ctx.step_ms;
     }
-    out
+    (out, forced)
 }
 
 /// A key for a place, to keep one search per place of a flight.
@@ -538,7 +550,10 @@ struct Flight<'a, 'b> {
     known: Known,
     /// Whether each of `cands` passes the take-off test of the earlier rounds.
     old_ok: Vec<bool>,
-    binds: BTreeMap<i64, Binding>,
+    /// By message time: the binding, and the leg the rule without the shuttle test bound.
+    binds: BTreeMap<i64, (Binding, Result<u32, Miss>)>,
+    /// Segments made holes for being over 30 s long, over this flight's paths.
+    long_gaps: u64,
     paths: BTreeMap<u32, Vec<PathPoint>>,
     searches: BTreeMap<(u32, (i64, i64)), Approach>,
     lands: BTreeMap<(u32, String), AirportLandings>,
@@ -570,9 +585,14 @@ impl<'a, 'b> Flight<'a, 'b> {
                     }
                 };
                 let span = airborne_span(leg_reports(ctx, addr, i), &ctx.cfg);
+                let at_edge = |p: Option<Place>| {
+                    p.is_some_and(|p| near_box_edge(p, ctx.cfg.box_deg, ctx.cfg.edge_margin_m))
+                };
                 LegFacts {
                     dep_ok: near(&dep, known.dep, ends.map(|e| e.0)),
                     arr_ok: near(&arr, known.arr, ends.map(|e| e.1)),
+                    dep_edge: at_edge(ends.map(|e| e.0)),
+                    arr_edge: at_edge(ends.map(|e| e.1)),
                     cs_ok: has_cs
                         && ctx
                             .ix
@@ -597,6 +617,7 @@ impl<'a, 'b> Flight<'a, 'b> {
             known,
             old_ok,
             binds: BTreeMap::new(),
+            long_gaps: 0,
             paths: BTreeMap::new(),
             searches: BTreeMap::new(),
             lands: BTreeMap::new(),
@@ -605,29 +626,36 @@ impl<'a, 'b> Flight<'a, 'b> {
     }
 
     /// The one leg a message issued at `issue` binds to, or why none; refusals of a leg in
-    /// progress are counted once per message time.
+    /// progress are counted once per message time, and every row whose leg the shuttle test
+    /// (both known airports must match) changed is counted.
     fn leg_for(&mut self, sys: &mut SystemReport, issue: i64) -> Result<u32, Exclusion> {
-        let b = match self.binds.get(&issue) {
+        let (b, loose) = match self.binds.get(&issue) {
             Some(b) => *b,
             None => {
                 let ctx = self.ctx;
-                let b = bind_leg(
-                    ctx.ix,
-                    &self.cands,
-                    &self.facts,
-                    self.known,
-                    issue,
-                    ctx.cfg.leg_window_ms,
-                );
+                let bind = |strict| {
+                    bind_leg(
+                        ctx.ix,
+                        &self.cands,
+                        &self.facts,
+                        self.known,
+                        (issue, ctx.cfg.leg_window_ms),
+                        strict,
+                    )
+                };
+                let (b, loose) = (bind(true), bind(false));
                 match b.refused {
                     Some(Refused::NotOwn) => count(sys, REFUSED_KEYS[0], 1),
                     Some(Refused::Landed) => count(sys, REFUSED_KEYS[1], 1),
                     None => {}
                 }
-                self.binds.insert(issue, b);
-                b
+                self.binds.insert(issue, (b, loose.leg));
+                (b, loose.leg)
             }
         };
+        if b.leg != loose {
+            count(sys, SHUTTLE_KEY, 1);
+        }
         b.leg.map_err(|m| match m {
             Miss::NoLeg => Exclusion::NoLeg,
             Miss::NotOwn => Exclusion::LegNotOwn,
@@ -671,9 +699,12 @@ impl<'a, 'b> Flight<'a, 'b> {
 
     fn path(&mut self, leg: u32) -> &Vec<PathPoint> {
         let (ctx, addr) = (self.ctx, self.addr);
-        self.paths
-            .entry(leg)
-            .or_insert_with(|| sample_path(ctx, addr, leg))
+        if !self.paths.contains_key(&leg) {
+            let (p, forced) = sample_path(ctx, addr, leg);
+            self.long_gaps += forced;
+            self.paths.insert(leg, p);
+        }
+        self.paths.entry(leg).or_default()
     }
 
     /// The reports of the aircraft within the leg, in time order.
@@ -702,7 +733,7 @@ impl<'a, 'b> Flight<'a, 'b> {
     /// approaches are counted when `sys` is given.
     fn cross(
         &mut self,
-        sys: Option<&mut SystemReport>,
+        mut sys: Option<&mut SystemReport>,
         leg: u32,
         place: Place,
         est: i64,
@@ -714,7 +745,7 @@ impl<'a, 'b> Flight<'a, 'b> {
             // One search at the largest cut: the passage is chosen once, and each cut scores it.
             let widest = ctx.cuts_m.last().copied().unwrap_or(ctx.cfg.cut_m);
             let a = approach(self.path(leg), place, widest);
-            if let Some(sys) = sys {
+            if let Some(sys) = sys.as_deref_mut() {
                 closest_add(sys, a.min_dist_m);
             }
             self.searches.insert(key, a);
@@ -722,6 +753,14 @@ impl<'a, 'b> Flight<'a, 'b> {
         let Some(a) = self.searches.get(&key) else {
             return Vec::new();
         };
+        if let Some(sys) = sys {
+            if a.passages.len() > 1 {
+                count(sys, MULTI_KEY, 1);
+                if pick_passage(a, issue).map(|p| p.t_ms) != unsplit_choice_ms(a, issue) {
+                    count(sys, CHANGED_KEY, 1);
+                }
+            }
+        }
         ctx.cuts_m
             .iter()
             .map(|&c| {
@@ -825,6 +864,23 @@ impl<'a, 'b> Flight<'a, 'b> {
 /// The arrival airport shown for flights whose records name none.
 const NO_AIRPORT: &str = "(none named)";
 
+/// Truth path segments longer than 30 s made holes (zero with a step of 30 s or less: the truth
+/// answers only within 10 s of a report on both sides).
+const LONG_GAP_KEY: &str = "truth path segments over 30 s made holes";
+
+/// Rows dropped as exact duplicates (same flight, point, issue time and estimate) before scoring.
+const DUPLICATE_KEY: &str =
+    "exact duplicate rows dropped before scoring (same flight, point, issue time and estimate)";
+
+/// Rows (message, point) whose truth path has more than one passage within the widest cut, and of
+/// them those whose chosen passage differs from the one the runs-not-split rule chose.
+const MULTI_KEY: &str = "rows (message, point) with more than one passage within the widest cut";
+const CHANGED_KEY: &str =
+    "  of them, rows whose chosen passage differs from the earlier rule (runs not split, closest)";
+
+/// Rows whose bound leg differs from the one the rule without the shuttle test bound.
+const SHUTTLE_KEY: &str = "shuttle rule (departure and arrival airports both must match an in-progress leg): rows whose bound leg changed";
+
 /// The counts of the in-progress legs a message was not bound to.
 const REFUSED_KEYS: [&str; 2] = [
     "leg binding: in-progress leg refused, airborne but not the flight's own (neither airport matches, or the callsign differs when no airport is known), messages",
@@ -840,6 +896,7 @@ fn record_cross(
     (unit_id, cs): (u32, bool),
     (leg, issue, est): (u32, i64, i64),
     results: Vec<Result<Sample, Exclusion>>,
+    flown: bool,
 ) {
     let g = group_of(cs, fl.airborne_at(leg, issue));
     let head = results
@@ -865,6 +922,7 @@ fn record_cross(
         Extra {
             issue_ms: issue,
             lead_bin: lead_bin(est, issue),
+            flown,
             ..Extra::default()
         },
     );
@@ -924,7 +982,7 @@ fn record_landing(
             if picked {
                 k.resolved_ambiguous += 1;
             }
-            kind_record(k, unit_id, g, Ok(sm), x);
+            kind_record(k, unit_id, g, Ok(sm), Extra { flown: picked, ..x });
         }
         Err(e) => kind_record(
             k,
@@ -1102,6 +1160,7 @@ fn eram(leg: &Legacy, ctx: &Ctx<'_>, sys: &mut SystemReport, flights_total: &mut
         count_multi(ctx, sys, addr, &unit);
         let cs = by_callsign(outcome) == Some(true);
         let mut fl = Flight::new(ctx, addr, (dep, arr), unit.callsign);
+        let mut seen: BTreeSet<(i64, i64, i32, i32, [u8; 8])> = BTreeSet::new();
         for &r in routes {
             let issue = ts(r);
             let (first, len) = span(r);
@@ -1113,6 +1172,10 @@ fn eram(leg: &Legacy, ctx: &Ctx<'_>, sys: &mut SystemReport, flights_total: &mut
                     leg.route_points.lon_e7.get(p).copied().unwrap_or(NO_COORD),
                 );
                 let fix = leg.route_points.fix.get(p).copied().unwrap_or([0; 8]);
+                if !seen.insert((issue, est, lat, lon, fix)) {
+                    count(sys, DUPLICATE_KEY, 1);
+                    continue;
+                }
                 // What the earlier rounds' binding scored in the headline at 60 to 120 minutes,
                 // and what became of the row now.
                 let old = if lb == Some(OLD_FATE_BIN) && !cs {
@@ -1187,13 +1250,21 @@ fn eram(leg: &Legacy, ctx: &Ctx<'_>, sys: &mut SystemReport, flights_total: &mut
                                 );
                             }
                             let res = fl.cross(Some(&mut *sys), lg, place, est, issue);
-                            record_cross(sys, 0, &fl, (f, cs), (lg, issue, est), res);
+                            record_cross(
+                                sys,
+                                0,
+                                &fl,
+                                (f, cs),
+                                (lg, issue, est),
+                                res,
+                                picked && source == RefSource::FlownPath,
+                            );
                         }
                     }
                 }
                 if let (Some(b), Some(ol)) = (before, old) {
                     if let Some(k) = sys.kinds.first() {
-                        let new_leg = fl.binds.get(&issue).and_then(|b| b.leg.ok());
+                        let new_leg = fl.binds.get(&issue).and_then(|b| b.0.leg.ok());
                         let label = fate(&b, &tally(k), new_leg == Some(ol));
                         count(sys, OLD_FATE_ALL, 1);
                         count(sys, &format!("{OLD_FATE_PREFIX}{label}"), 1);
@@ -1201,6 +1272,7 @@ fn eram(leg: &Legacy, ctx: &Ctx<'_>, sys: &mut SystemReport, flights_total: &mut
                 }
             }
         }
+        count(sys, LONG_GAP_KEY, fl.long_gaps);
     }
 }
 
@@ -1286,6 +1358,7 @@ fn tbfm(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
         let mut fl =
             addr.map(|a| Flight::new(ctx, a, (u.dep.clone(), u.arrival.clone()), u.unit.callsign));
         let actual_arr = ctx.tfms_actual.get(&u.plan).copied();
+        let mut seen: BTreeSet<(u8, i64, i64, [u8; 8])> = BTreeSet::new();
         for &r in &u.rows {
             let ri = r as usize;
             let kind = leg.tbfm.kind.get(ri).copied().unwrap_or(0);
@@ -1294,6 +1367,11 @@ fn tbfm(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
             };
             let issue = leg.tbfm.issue_ms.get(ri).copied().unwrap_or(NO_TIME);
             let est = leg.tbfm.time_ms.get(ri).copied().unwrap_or(NO_TIME);
+            let fix = leg.tbfm.fix.get(ri).copied().unwrap_or([0; 8]);
+            if !seen.insert((kind, issue, est, fix)) {
+                count(sys, DUPLICATE_KEY, 1);
+                continue;
+            }
             let lb = lead_bin(est, issue);
             if slot >= 2 {
                 if let Some(k) = sys.kinds.get_mut(slot) {
@@ -1312,7 +1390,6 @@ fn tbfm(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
                 record_excluded(sys, slot, Exclusion::NoEstimate, None);
                 continue;
             }
-            let fix = leg.tbfm.fix.get(ri).copied().unwrap_or([0; 8]);
             let nm = name(&fix);
             if slot < 2 && point_places(ctx.table, nm).is_empty() {
                 record_excluded(sys, slot, Exclusion::PlaceUnknown, lb);
@@ -1352,13 +1429,24 @@ fn tbfm(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
                             }
                         }
                         let res = fl.cross(Some(&mut *sys), lg, place, est, issue);
-                        record_cross(sys, slot, fl, (uix as u32, cs), (lg, issue, est), res);
+                        record_cross(
+                            sys,
+                            slot,
+                            fl,
+                            (uix as u32, cs),
+                            (lg, issue, est),
+                            res,
+                            picked,
+                        );
                     }
                 }
             } else {
                 let res = fl.landing(sys, lg, u.arrival.as_deref(), est, issue, actual_arr);
                 record_landing(sys, slot, fl, (uix as u32, cs), (lg, issue, est), res);
             }
+        }
+        if let Some(f) = &fl {
+            count(sys, LONG_GAP_KEY, f.long_gaps);
         }
     }
 }
@@ -1389,10 +1477,15 @@ fn tfms(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
         let mut fl =
             addr.map(|a| Flight::new(ctx, a, (u.dep.clone(), u.arrival.clone()), u.unit.callsign));
         let actual_arr = ctx.tfms_actual.get(&u.plan).copied();
+        let mut seen: BTreeSet<(i64, i64)> = BTreeSet::new();
         for &r in &u.rows {
             let ri = r as usize;
             let issue = leg.tfms.issue_ms.get(ri).copied().unwrap_or(NO_TIME);
             let est = leg.tfms.time_ms.get(ri).copied().unwrap_or(NO_TIME);
+            if !seen.insert((issue, est)) {
+                count(sys, DUPLICATE_KEY, 1);
+                continue;
+            }
             let lb = lead_bin(est, issue);
             if let Some(k) = sys.kinds.first_mut() {
                 airport_offer(k, u.arrival.as_deref().unwrap_or(NO_AIRPORT));
@@ -1418,6 +1511,9 @@ fn tfms(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
             };
             let res = fl.landing(sys, lg, u.arrival.as_deref(), est, issue, actual_arr);
             record_landing(sys, 0, fl, (uix as u32, cs), (lg, issue, est), res);
+        }
+        if let Some(f) = &fl {
+            count(sys, LONG_GAP_KEY, f.long_gaps);
         }
     }
 }

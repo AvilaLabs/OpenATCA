@@ -2,7 +2,11 @@
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: oa-legacy-traj --sfdps <dir> --tbfm <dir> --tfms <dir> --adsb <clip.oaf> [--adsb <clip.oaf> ...] --out <dir>\n       [--nasr <zip>] [--places <csv>] [--cut-nm <nm>] [--runway-nm <nm>] [--landing-gap-s <s>] [--step-s <s>]";
+pub const USAGE: &str = "usage: oa-legacy-traj --sfdps <dir> --tbfm <dir> --tfms <dir> --adsb <clip.oaf> [--adsb <clip.oaf> ...] --out <dir>
+       [--nasr <zip>] [--places <csv>] [--cut-nm <nm>] [--runway-nm <nm>] [--landing-gap-s <s>] [--step-s <s>]
+defaults: --cut-nm 2 (the headline crossing cut; sensitivity cuts 0.5, 1, 2 and 5 NM are always run), --runway-nm 5, --landing-gap-s 30, --step-s 5;
+          no --nasr and no --places (no point or airport then has a place)
+fixed settings: leg-airport distance 10 NM, leg window 3 h, landing persistence 30 s, landing altitude 1000 ft above the airport or 80 m/s, longest look-ahead 120 min, clip box edge margin 10 NM";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived

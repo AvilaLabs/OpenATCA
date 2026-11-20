@@ -104,6 +104,8 @@ pub struct Approach {
     pub min_dist_m: f64,
     /// Every stretch within the cut distance, in time order.
     pub passages: Vec<Passage>,
+    /// The same stretches with no split at a return to the point (the rule of the earlier round).
+    pub unsplit: Vec<Passage>,
 }
 
 /// One report of an aircraft that states a ground state.

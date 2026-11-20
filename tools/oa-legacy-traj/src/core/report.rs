@@ -86,6 +86,11 @@ pub struct KindTable {
     pub too_far_bin: Vec<u64>,
     /// Exclusions whose bound leg ended at the clip box edge, by reason ([`EXCLUSION_NAMES`]).
     pub at_edge: [u64; EXCLUSION_COUNT],
+    /// Exclusions by reason ([`EXCLUSION_NAMES`]) and bin of the stated lead (the last slot: no
+    /// lead in range).
+    pub excl_bin: Vec<Vec<u64>>,
+    /// Headline errors per bin, without the rows whose place was resolved by the flown path.
+    pub no_flown: Vec<Vec<f64>>,
     /// Per arrival airport: estimates offered and scored.
     pub by_airport: BTreeMap<String, (u64, u64)>,
 }
@@ -106,6 +111,8 @@ pub struct Extra {
     pub lead_bin: Option<usize>,
     /// The bound leg ended at the clip box edge, not inside it (for the landing exclusions).
     pub end_at_edge: bool,
+    /// The place was one of several, resolved against the flown path.
+    pub flown: bool,
 }
 
 /// The exclusions that say the bound leg did not land at the airport, split by where the leg ended.
@@ -146,6 +153,8 @@ pub fn kind_new(name: &str) -> KindTable {
         not_own_bin: vec![0; BIN_COUNT + 1],
         too_far_bin: vec![0; BIN_COUNT + 1],
         at_edge: [0; EXCLUSION_COUNT],
+        excl_bin: vec![vec![0; BIN_COUNT + 1]; EXCLUSION_COUNT],
+        no_flown: per_bin(),
         by_airport: BTreeMap::new(),
     }
 }
@@ -170,6 +179,13 @@ pub fn kind_record(
         Ok(s) => s,
         Err(e) => {
             if let Some(c) = t.exclusions.get_mut(exclusion_index(e)) {
+                *c += 1;
+            }
+            if let Some(c) = t
+                .excl_bin
+                .get_mut(exclusion_index(e))
+                .and_then(|v| v.get_mut(slot))
+            {
                 *c += 1;
             }
             let miss = match e {
@@ -205,6 +221,11 @@ pub fn kind_record(
     }
     if group != 0 {
         return;
+    }
+    if !x.flown {
+        if let Some(e) = t.no_flown.get_mut(s.bin) {
+            e.push(s.error_s);
+        }
     }
     if let Some(g) = x.gap_s {
         t.gaps_s.push(g);
@@ -619,6 +640,31 @@ pub fn render_text(
                 "estimates whose name had several places, nearest the route taken: n={}\n",
                 t.resolved_ambiguous
             ));
+            o.push_str("disclosure: share of the offered rows of each bin excluded as truth path never within the cut, passage at an edge, and no ground report\n");
+            for k in 0..=BIN_COUNT {
+                let offered = t.offered_bin.get(k).copied().unwrap_or(0);
+                let share = |x: Exclusion| {
+                    let n = t
+                        .excl_bin
+                        .get(exclusion_index(x))
+                        .and_then(|v| v.get(k))
+                        .copied()
+                        .unwrap_or(0);
+                    let pct = if offered == 0 {
+                        0.0
+                    } else {
+                        100.0 * n as f64 / offered as f64
+                    };
+                    format!("{n} ({pct:.1}%)")
+                };
+                o.push_str(&format!(
+                    "  {}: offered={offered} never within the cut={} at an edge={} no ground report={}\n",
+                    BIN_NAMES.get(k).copied().unwrap_or("no stated lead in range"),
+                    share(Exclusion::BeyondCut),
+                    share(Exclusion::PassageAtEdge),
+                    share(Exclusion::NoGroundCoverage)
+                ));
+            }
             for (gi, title) in GROUP_NAMES.iter().enumerate() {
                 let Some(g) = t.groups.get(gi) else { continue };
                 o.push_str(&format!(
@@ -676,6 +722,13 @@ pub fn render_text(
                         Some(f),
                     ));
                 }
+            }
+            if t.groups
+                .first()
+                .is_some_and(|g| g.errors.iter().any(|e| !e.is_empty()))
+            {
+                o.push_str("sensitivity of the headline: without the rows whose place was one of several resolved against the flown path\n");
+                o.push_str(&bins_text(&t.no_flown));
             }
             if t.abeam.iter().any(|e| !e.is_empty()) {
                 o.push_str("headline crossings abeam: closest approach from the headline cut up to the largest cut, by stated lead (not in the headline)\n");

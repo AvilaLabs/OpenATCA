@@ -164,6 +164,11 @@ pub struct LegFacts {
     pub dep_ok: bool,
     /// The leg landed within the leg-airport distance of the flight's arrival airport.
     pub arr_ok: bool,
+    /// The leg's first place is at the clip box edge: it began where the aircraft entered the box,
+    /// so where it took off is not seen.
+    pub dep_edge: bool,
+    /// The leg's last place is at the clip box edge: it ended where the aircraft left the box.
+    pub arr_edge: bool,
     /// The leg's ADS-B callsign is the flight's.
     pub cs_ok: bool,
     /// The leg's first airborne report, Unix ms; [`i64::MAX`] when it has none.
@@ -228,13 +233,18 @@ pub struct Binding {
 /// flight not yet airborne at the issue (one starting after it, or one in progress on the ground
 /// before its first airborne report) binds when it starts within `window_ms` and took off at the
 /// departure airport; with the departure airport unknown it must carry the flight's callsign.
+///
+/// With `strict`, a flight whose departure and arrival airports are both known owns an in-progress
+/// leg only when each airport either matches it or is out of the leg's sight (the leg begins, or
+/// ends, at the clip box edge), and at least one matches: a shuttle's return leg, which took off
+/// at the flight's arrival airport, is not the outbound flight's. Without it either match owns it.
 pub fn bind_leg(
     ix: &LegIndex,
     cands: &[u32],
     facts: &[LegFacts],
     known: Known,
-    issue_ms: i64,
-    window_ms: i64,
+    (issue_ms, window_ms): (i64, i64),
+    strict: bool,
 ) -> Binding {
     let mut refused = None;
     let mut seen = false;
@@ -251,7 +261,9 @@ pub fn bind_leg(
                 continue;
             }
             if f.airborne_at(issue_ms) {
-                let own = if known.dep || known.arr {
+                let own = if strict && known.dep && known.arr {
+                    (f.dep_ok && (f.arr_ok || f.arr_edge)) || (f.arr_ok && f.dep_edge)
+                } else if known.dep || known.arr {
                     (known.dep && f.dep_ok) || (known.arr && f.arr_ok)
                 } else {
                     f.cs_ok

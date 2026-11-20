@@ -611,6 +611,8 @@ fn facts(dep_ok: bool, arr_ok: bool, cs_ok: bool, from_s: i64, to_s: i64) -> Leg
     LegFacts {
         dep_ok,
         arr_ok,
+        dep_edge: false,
+        arr_edge: false,
         cs_ok,
         air_from_ms: from_s * 1000,
         air_to_ms: to_s * 1000,
@@ -648,17 +650,17 @@ fn a_message_binds_one_leg_and_a_turnaround_is_never_scored() {
         facts(true, false, false, 20_010, 20_990),
     ];
     // Between the legs: the first of its own starting after, within the window.
-    let b = bind_leg(&ix, &cands, &f, KNOWN, 2_000_000, W);
+    let b = bind_leg(&ix, &cands, &f, KNOWN, (2_000_000, W), false);
     assert_eq!((b.leg, b.refused), (Ok(1), None));
     // Past the window (leg 2 starts 5 h later, leg 1 has gone): too far, and counted as such.
-    let b = bind_leg(&ix, &cands, &f, KNOWN, 6_500_000, W);
+    let b = bind_leg(&ix, &cands, &f, KNOWN, (6_500_000, W), false);
     assert_eq!(b.leg, Err(Miss::TooFar));
     // After every leg: no leg.
-    let b = bind_leg(&ix, &cands, &f, KNOWN, 30_000_000, W);
+    let b = bind_leg(&ix, &cands, &f, KNOWN, (30_000_000, W), false);
     assert_eq!(b.leg, Err(Miss::NoLeg));
     // Leg 0 in progress and airborne: ADS-B says it lands at the flight's arrival airport, so it
     // is the flight's.
-    let b = bind_leg(&ix, &cands, &f, KNOWN, 500_000, W);
+    let b = bind_leg(&ix, &cands, &f, KNOWN, (500_000, W), false);
     assert_eq!(b.leg, Ok(0));
     // The callsign window: a leg starting over 3 h after the first issue is refused.
     assert!(leg_in_window(&legs[1], 0, 6_000_000_000));
@@ -667,7 +669,7 @@ fn a_message_binds_one_leg_and_a_turnaround_is_never_scored() {
     assert!(!leg_in_window(&legs[0], 2_000_000, W));
 }
 
-// REQ: OA-LTJ-035
+// REQ: OA-LTJ-035, OA-LTJ-051
 #[test]
 fn an_in_progress_leg_that_is_another_flights_is_refused_and_counted() {
     // The turnaround: the aircraft flew flight A into the airport (leg 0, 0 to 1,000 s) and flies
@@ -691,11 +693,11 @@ fn an_in_progress_leg_that_is_another_flights_is_refused_and_counted() {
     };
     // Issued during leg 0: refused as not its own (it neither took off at B's departure airport
     // nor lands at an arrival airport of B), and the next leg binds.
-    let b = bind_leg(&ix, &cands, &f, known, 500_000, W);
+    let b = bind_leg(&ix, &cands, &f, known, (500_000, W), false);
     assert_eq!((b.leg, b.refused), (Ok(1), Some(Refused::NotOwn)));
     // The same message when leg 1 is not B's either: no leg of its own.
     let g = [f[0], facts(false, false, true, 5_010, 5_990)];
-    let b = bind_leg(&ix, &cands, &g, known, 500_000, W);
+    let b = bind_leg(&ix, &cands, &g, known, (500_000, W), false);
     assert_eq!(b.leg, Err(Miss::NotOwn));
     assert_eq!(b.refused, Some(Refused::NotOwn));
     // Arriving at an airport the flight lands at is also its own, even when it did not take off
@@ -705,21 +707,49 @@ fn an_in_progress_leg_that_is_another_flights_is_refused_and_counted() {
         arr: true,
     };
     let h = [facts(false, true, false, 10, 990), f[1]];
-    let b = bind_leg(&ix, &cands, &h, known_both, 500_000, W);
+    let b = bind_leg(&ix, &cands, &h, known_both, (500_000, W), false);
     assert_eq!((b.leg, b.refused), (Ok(0), None));
+    // Strictly, with both airports known, the departure must match too, or be out of the leg's
+    // sight: the return leg of a shuttle (took off at the flight's arrival airport) is refused;
+    // a leg that began at the clip box edge is not.
+    let b = bind_leg(&ix, &cands, &h, known_both, (500_000, W), true);
+    assert_eq!(b.refused, Some(Refused::NotOwn));
+    let edge = [
+        LegFacts {
+            dep_edge: true,
+            ..h[0]
+        },
+        h[1],
+    ];
+    let b = bind_leg(&ix, &cands, &edge, known_both, (500_000, W), true);
+    assert_eq!((b.leg, b.refused), (Ok(0), None));
+    // Both match: owned. Neither matches though both are out of sight: refused (nothing matches).
+    let both = [facts(true, true, false, 10, 990), f[1]];
+    let b = bind_leg(&ix, &cands, &both, known_both, (500_000, W), true);
+    assert_eq!(b.leg, Ok(0));
+    let blind = [
+        LegFacts {
+            dep_edge: true,
+            arr_edge: true,
+            ..facts(false, false, false, 10, 990)
+        },
+        f[1],
+    ];
+    let b = bind_leg(&ix, &cands, &blind, known_both, (500_000, W), true);
+    assert_eq!(b.refused, Some(Refused::NotOwn));
     // With neither airport known, the callsign decides; without a match no leg binds, and the
     // next-leg branch needs the callsign too.
     let c = [
         facts(false, false, true, 10, 990),
         facts(false, false, false, 5_010, 5_990),
     ];
-    let b = bind_leg(&ix, &cands, &c, NONE_KNOWN, 500_000, W);
+    let b = bind_leg(&ix, &cands, &c, NONE_KNOWN, (500_000, W), false);
     assert_eq!(b.leg, Ok(0));
     let d = [
         facts(false, false, false, 10, 990),
         facts(false, false, false, 5_010, 5_990),
     ];
-    let b = bind_leg(&ix, &cands, &d, NONE_KNOWN, 500_000, W);
+    let b = bind_leg(&ix, &cands, &d, NONE_KNOWN, (500_000, W), false);
     assert_eq!(
         (b.leg, b.refused),
         (Err(Miss::NotOwn), Some(Refused::NotOwn))
@@ -733,10 +763,10 @@ fn an_in_progress_leg_that_is_another_flights_is_refused_and_counted() {
         dep: false,
         arr: false,
     };
-    let b = bind_leg(&ix, &cands, &e, unknown_dep, 2_000_000, W);
+    let b = bind_leg(&ix, &cands, &e, unknown_dep, (2_000_000, W), false);
     assert_eq!(b.leg, Ok(1));
     let e2 = [e[0], facts(true, false, false, 5_010, 5_990)];
-    let b = bind_leg(&ix, &cands, &e2, unknown_dep, 2_000_000, W);
+    let b = bind_leg(&ix, &cands, &e2, unknown_dep, (2_000_000, W), false);
     assert_eq!(b.leg, Err(Miss::NotOwn));
 }
 
@@ -756,16 +786,16 @@ fn a_leg_that_landed_before_the_issue_never_binds_as_in_progress() {
         facts(true, true, true, 10, 900),
         facts(true, false, true, 5_010, 5_990),
     ];
-    let b = bind_leg(&ix, &cands, &f, KNOWN, 950_000, W);
+    let b = bind_leg(&ix, &cands, &f, KNOWN, (950_000, W), false);
     assert_eq!((b.leg, b.refused), (Ok(1), Some(Refused::Landed)));
     // With no next leg: no leg, not a binding of the taxi-in.
-    let b = bind_leg(&ix, &cands[..1], &f[..1], KNOWN, 950_000, W);
+    let b = bind_leg(&ix, &cands[..1], &f[..1], KNOWN, (950_000, W), false);
     assert_eq!(
         (b.leg, b.refused),
         (Err(Miss::NoLeg), Some(Refused::Landed))
     );
     // Before the first airborne report the leg is not yet airborne: the flight's own next leg.
-    let b = bind_leg(&ix, &cands[..1], &f[..1], KNOWN, 5_000, W);
+    let b = bind_leg(&ix, &cands[..1], &f[..1], KNOWN, (5_000, W), false);
     assert_eq!(b.leg, Ok(0));
     assert!(!f[0].airborne_at(5_000));
     assert!(f[0].airborne_at(10_000) && f[0].airborne_at(900_000));
@@ -1068,38 +1098,63 @@ fn the_closest_passage_is_chosen_once_and_every_cut_scores_that_passage_or_none(
     }
 }
 
-// REQ: OA-LTJ-048
+/// A racetrack: one-minute legs about 4 by 2 NM, the fix overflown on each northbound leg at the
+/// given offsets east of it (metres), entered and left by two far segments each.
+fn racetrack(offsets_m: &[f64]) -> Vec<PathPoint> {
+    let (half, wide) = (3_704.0, 3_704.0);
+    let mut pts: Vec<(i64, f64, f64)> = vec![(-120, 0.0, -40_000.0), (-60, 0.0, -20_000.0)];
+    let mut t = 0;
+    for (i, &e) in offsets_m.iter().enumerate() {
+        pts.push((t, e, -half));
+        pts.push((t + 60, e, half));
+        pts.push((t + 90, wide, half));
+        pts.push((t + 150, wide, -half));
+        t += 180;
+        if i + 1 == offsets_m.len() {
+            pts.push((t, 0.0, -20_000.0));
+            pts.push((t + 60, 0.0, -40_000.0));
+            pts.push((t + 120, 0.0, -60_000.0));
+        }
+    }
+    path_through(&pts)
+}
+
+// REQ: OA-LTJ-048, OA-LTJ-049
 #[test]
-fn a_holding_pattern_gives_the_closest_of_its_passes() {
-    // Three passes of the fix, north, south, north, at 0.3, 0.1 and 0.4 NM, joined by legs far away.
-    let p = path_through(&[
-        (0, 556.0, -20_000.0),
-        (400, 556.0, 20_000.0),
-        (500, 40_000.0, 20_000.0),
-        (600, 40_000.0, -20_000.0),
-        (700, 185.0, -20_000.0),
-        (1100, 185.0, 20_000.0),
-        (1200, 40_000.0, 20_000.0),
-        (1300, 40_000.0, -20_000.0),
-        (1400, 741.0, -20_000.0),
-        (1800, 741.0, 20_000.0),
-        (1900, 741.0, 40_000.0),
-        (2000, 741.0, 60_000.0),
-    ]);
+fn a_racetrack_hold_is_one_passage_per_loop_and_the_first_crossing_is_chosen() {
+    // Three loops inside the 5 NM cut, overflying the fix at 0.2, 0.1 and 0.3 NM.
+    let p = racetrack(&[370.0, 185.0, 556.0]);
     let widest = approach(&p, ORIGIN, 5.0 * NM);
-    assert_eq!(widest.passages.len(), 3);
+    assert_eq!(widest.passages.len(), 3, "{:?}", widest.passages);
+    let times: Vec<i64> = widest.passages.iter().map(|x| x.t_ms).collect();
+    assert_eq!(times, vec![30_000, 210_000, 390_000]);
+    assert!(widest.passages.iter().all(|x| !x.at_edge));
     for cut in [0.5, 1.0, 2.0, 5.0] {
         let cfg = Config {
             cut_m: cut * NM,
             ..cfg()
         };
+        // The first loop is chosen, though the second is closer.
         let c = choose_passage(&widest, 0, &cfg).unwrap();
-        assert_eq!(c.t_ms, 900_000, "cut {cut}");
-        assert!((c.dist_m - 185.0).abs() < 2.0);
+        assert_eq!(c.t_ms, 30_000, "cut {cut}");
+        assert!((c.dist_m - 370.0).abs() < 2.0);
     }
-    // Issued after the first two passes: the third is the only one left.
+    // Issued after the first loop's pass: the second, the first within 0.5 NM that remains.
+    assert_eq!(
+        choose_passage(&widest, 100_000, &cfg()).unwrap().t_ms,
+        210_000
+    );
+    // Issued after every pass: the last.
     assert_eq!(
         choose_passage(&widest, 1_000_000, &cfg()).unwrap().t_ms,
-        1_600_000
+        390_000
     );
+    // None within 0.5 NM: the closest is chosen, the earliest on a tie.
+    let far = racetrack(&[1_500.0, 1_200.0, 1_500.0]);
+    let a = approach(&far, ORIGIN, 5.0 * NM);
+    assert_eq!(a.passages.len(), 3);
+    assert_eq!(choose_passage(&a, 0, &cfg()).unwrap().t_ms, 210_000);
+    let tie = racetrack(&[1_500.0, 1_500.0, 1_500.0]);
+    let a = approach(&tie, ORIGIN, 5.0 * NM);
+    assert_eq!(choose_passage(&a, 0, &cfg()).unwrap().t_ms, 30_000);
 }

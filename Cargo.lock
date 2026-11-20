@@ -504,3 +504,7 @@ version = "0.0.1"
 dependencies = [
  "oa-sealed",
 ]
+
+[[patch.unused]]
+name = "creusot-std"
+version = "0.16.0-dev"

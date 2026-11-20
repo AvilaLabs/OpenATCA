@@ -18,6 +18,13 @@ use crate::core::types::{
     NO_SPEED,
 };
 
+/// A passage ends, and the next begins, when the distance to the point has risen this much above
+/// the passage's closest approach and then falls this much below its largest, metres (0.5 NM).
+const SPLIT_RISE_M: f64 = 0.5 * 1852.0;
+/// A passage this close to the point (0.5 NM) is a crossing: the first such passage not before the
+/// issue is the one chosen, whether or not a later one is closer.
+const NEAR_M: f64 = 0.5 * 1852.0;
+
 /// Metres per degree of latitude (a sphere of 6,371,008.8 m).
 const M_PER_DEG: f64 = 111_194.926_644_558_74;
 
@@ -113,6 +120,16 @@ pub fn approach(path: &[PathPoint], place: Place, cut_m: f64) -> Approach {
             min_dist_m = it.dist_m;
         }
     }
+    Approach {
+        min_dist_m,
+        passages: passages_of(&items, cut_m, true),
+        unsplit: passages_of(&items, cut_m, false),
+    }
+}
+
+/// The passages within `cut_m` of the items of a path: each run of consecutive items within it,
+/// split where the distance rises and falls again (when `split`).
+fn passages_of(items: &[Item], cut_m: f64, split: bool) -> Vec<Passage> {
     let mut passages: Vec<Passage> = Vec::new();
     // A passage is at an edge when the segment of its closest approach, or one directly next to
     // it, begins or ends at a path end or a hole: only then may the aircraft have been nearer
@@ -124,35 +141,7 @@ pub fn approach(path: &[PathPoint], place: Place, cut_m: f64) -> Approach {
         };
         at(Some(b)) || at(b.checked_sub(1)) || at(Some(b + 1))
     };
-    // The run of consecutive items within the cut being built: the item of the closest approach,
-    // and the last sample the run reached.
-    let mut run: Option<(usize, usize)> = None;
-    for (k, it) in items.iter().enumerate() {
-        let inside = it.dist_m <= cut_m;
-        let continues = inside && run.is_some_and(|r| it.first <= r.1);
-        if continues {
-            if let Some(r) = run.as_mut() {
-                if items.get(r.0).is_none_or(|b| it.dist_m < b.dist_m) {
-                    r.0 = k;
-                }
-                r.1 = it.last;
-            }
-            continue;
-        }
-        if let Some((b, _)) = run.take() {
-            if let Some(best) = items.get(b) {
-                passages.push(Passage {
-                    t_ms: best.t_ms,
-                    dist_m: best.dist_m,
-                    at_edge: touches(b),
-                });
-            }
-        }
-        if inside {
-            run = Some((k, it.last));
-        }
-    }
-    if let Some((b, _)) = run {
+    let push = |b: usize, passages: &mut Vec<Passage>| {
         if let Some(best) = items.get(b) {
             passages.push(Passage {
                 t_ms: best.t_ms,
@@ -160,16 +149,88 @@ pub fn approach(path: &[PathPoint], place: Place, cut_m: f64) -> Approach {
                 at_edge: touches(b),
             });
         }
+    };
+    // The run of consecutive items within the cut being built: the item of the closest approach,
+    // the last sample the run reached, whether the distance has risen the split distance above
+    // the run's minimum, and the largest distance since that minimum. A run is split when the distance,
+    // after that rise, falls the split distance below its largest: the aircraft is coming back to
+    // the point (a hold, a loop).
+    let mut run: Option<(usize, usize, bool, f64)> = None;
+    for (k, it) in items.iter().enumerate() {
+        let inside = it.dist_m <= cut_m;
+        let continues = inside && run.is_some_and(|r| it.first <= r.1);
+        if continues {
+            if let Some(r) = run.as_mut() {
+                let min_d = items.get(r.0).map_or(f64::INFINITY, |b| b.dist_m);
+                if split && r.2 && it.dist_m <= r.3 - SPLIT_RISE_M {
+                    // Falling again by the same distance after the rise: this item starts the
+                    // next passage.
+                    let b = r.0;
+                    *r = (k, it.last, false, it.dist_m);
+                    push(b, &mut passages);
+                    continue;
+                }
+                r.1 = it.last;
+                if it.dist_m < min_d {
+                    // A new closest approach: the rise is measured from here.
+                    *r = (k, it.last, false, it.dist_m);
+                } else {
+                    if it.dist_m >= min_d + SPLIT_RISE_M {
+                        r.2 = true;
+                    }
+                    if it.dist_m > r.3 {
+                        r.3 = it.dist_m;
+                    }
+                }
+            }
+            continue;
+        }
+        if let Some((b, _, _, _)) = run.take() {
+            push(b, &mut passages);
+        }
+        if inside {
+            run = Some((k, it.last, false, it.dist_m));
+        }
     }
-    Approach {
-        min_dist_m,
-        passages,
+    if let Some((b, _, _, _)) = run {
+        push(b, &mut passages);
     }
+    passages
+}
+
+/// The passage chosen for an estimate issued at `issue_ms` among all of `a`'s, whatever the cut is:
+/// among those not before the issue, the first one within 0.5 NM; else the one with the smallest
+/// closest approach (the earliest on a tie); else the last one before the issue. Searching `a` at
+/// the largest cut and scoring the one passage at each smaller cut makes the cuts nest.
+pub fn pick_passage(a: &Approach, issue_ms: i64) -> Option<&Passage> {
+    let later = || a.passages.iter().filter(|p| p.t_ms >= issue_ms);
+    let mut best: Option<&Passage> = later().find(|p| p.dist_m <= NEAR_M);
+    if best.is_none() {
+        for p in later() {
+            if best.is_none_or(|b| p.dist_m < b.dist_m) {
+                best = Some(p);
+            }
+        }
+    }
+    best.or_else(|| a.passages.last())
+}
+
+/// The time of the passage the earlier round's rule chose: runs not split, of those not before the
+/// issue the one with the smallest closest approach, else the last. Kept to count the rows the
+/// splitting changed.
+pub fn unsplit_choice_ms(a: &Approach, issue_ms: i64) -> Option<i64> {
+    let mut best: Option<&Passage> = None;
+    for p in a.unsplit.iter().filter(|p| p.t_ms >= issue_ms) {
+        if best.is_none_or(|b| p.dist_m < b.dist_m) {
+            best = Some(p);
+        }
+    }
+    best.or_else(|| a.unsplit.last()).map(|p| p.t_ms)
 }
 
 /// The passage the aircraft reached the point at for an estimate issued at `issue_ms`, scored at
 /// the cut `cfg.cut_m` from a search `a` made at the largest cut: of the passages not before the
-/// issue the one with the smallest closest approach (the earliest on a tie); when every passage is
+/// issue the first within 0.5 NM, else the closest (the earliest on a tie); when every passage is
 /// before it, the last one (the event happened before the message: the error is kept). The estimate never
 /// chooses. A passage that is in progress at the issue is chosen by its closest approach like any
 /// other.
@@ -180,17 +241,7 @@ pub fn choose_passage(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<Passa
     if a.min_dist_m > cfg.cut_m {
         return Err(Exclusion::BeyondCut);
     }
-    // The passage is chosen among all of `a`'s, whatever `cfg.cut_m` is: among those not before the
-    // issue, the one with the smallest closest approach (the earliest on a tie), else the last
-    // one before it. Searching `a` at the largest cut and scoring the one passage at each smaller
-    // cut makes the cuts nest.
-    let mut best: Option<&Passage> = None;
-    for p in a.passages.iter().filter(|p| p.t_ms >= issue_ms) {
-        if best.is_none_or(|b| p.dist_m < b.dist_m) {
-            best = Some(p);
-        }
-    }
-    let chosen = best.or_else(|| a.passages.last());
+    let chosen = pick_passage(a, issue_ms);
     match chosen {
         None => Err(Exclusion::BeyondCut),
         Some(p) if p.dist_m > cfg.cut_m => Err(Exclusion::BeyondCut),

@@ -906,3 +906,70 @@ fn the_population_line_gives_the_flights_the_join_share_and_the_scored_and_uncov
     let t = population_line(&s.systems[1], s.recording_flights[0]);
     assert!(t.contains("flights in the recording"), "{t}");
 }
+
+// REQ: OA-LTJ-050, OA-LTJ-051
+#[test]
+fn the_headline_is_disclosed_with_exclusion_shares_and_without_flown_path_places() {
+    let mut leg = new_legacy();
+    let f = flight(&mut leg, 12, Some(ADDR1), b"TST1", b"PLAN12", b"");
+    // Two messages with exactly the same point, issue time and estimate: one is dropped, counted.
+    for _ in 0..2 {
+        push_route(
+            &mut leg,
+            f,
+            (TC_S - 420) * 1000,
+            &[pt(b"AMBIG", None, Some(TC_S + 60))],
+        );
+    }
+    let s = scored_with(clip(), leg, |_| {});
+    let e = &s.systems[0];
+    let c = |k: &str| e.counters.get(k).copied().unwrap_or(0);
+    assert_eq!(
+        c("exact duplicate rows dropped before scoring (same flight, point, issue time and estimate)"),
+        1
+    );
+    let k = &e.kinds[0];
+    // One row scored, and it took its place from the flown path: the sensitivity has none.
+    assert_eq!(k.groups[0].errors.iter().map(Vec::len).sum::<usize>(), 1);
+    assert_eq!(k.no_flown.iter().map(Vec::len).sum::<usize>(), 0);
+    let text = render_text(&[], &cfg(), &s.sections, &s.systems);
+    assert!(
+        text.contains("disclosure: share of the offered rows"),
+        "{text}"
+    );
+    assert!(text.contains("never within the cut=0 (0.0%)"));
+    assert!(text.contains("sensitivity of the headline: without the rows"));
+}
+
+// REQ: OA-LTJ-052
+#[test]
+fn a_truth_segment_over_thirty_seconds_is_a_hole_and_counted() {
+    // With a 60 s step every answered sample is more than 30 s from the last: each segment is a
+    // hole, so a passage is always at an edge and nothing is scored; the holes are counted.
+    let leg = legacy();
+    let reports = clip();
+    let mut tcfg = adsb_truth::config_with(None, None);
+    tcfg.loo = false;
+    let built = adsb_truth::build(&reports, &tcfg).unwrap();
+    let mut places = PlacesFile::default();
+    places.airports.insert("ORD".to_string(), AIRPORT);
+    places.fixes.push((pad(b"MFXC"), P));
+    let mut table = PlaceTable::default();
+    apply_places(&mut table, &places);
+    let s = score_all(
+        &Inputs {
+            legacy: &leg,
+            built: &built,
+            cfg: cfg(),
+            step_ms: 60_000,
+            table,
+        },
+        reports,
+    );
+    let n = s.systems[0]
+        .counters
+        .get("truth path segments over 30 s made holes")
+        .copied()
+        .unwrap_or(0);
+    assert!(n > 0, "{:?}", s.systems[0].counters);
+}
