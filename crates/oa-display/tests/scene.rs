@@ -1995,3 +1995,25 @@ fn a_shortened_label_buffer_is_refused_on_a_model_with_named_candidates() {
         );
     }
 }
+
+// REQ: OA-SEAL-006
+#[test]
+fn a_sealed_snapshot_path_is_refused_by_the_guard_before_its_size_is_read() {
+    // The file does not exist: a size read first would say "No such file"; the guard says why.
+    let a = args(&[
+        "--snapshot",
+        "/nonexistent/scds/stdds-20261119-holdout.bak",
+        "--centre",
+        "41.9,-87.9",
+        "--range-nm",
+        "50",
+        "--size",
+        "640x480",
+        "--out",
+        "o",
+    ]);
+    let e = cli::run_render(&a, &mut Vec::new())
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("OA-SEAL-001"), "{e}");
+}

@@ -93,10 +93,10 @@ pub(crate) fn manifest_hash(label: &str, files: &[PathBuf], sums: &[(Digest, u64
 pub fn hash_files(label: &str, files: &[PathBuf]) -> io::Result<InputHash> {
     let mut sums = Vec::with_capacity(files.len());
     for p in files {
-        oa_sealed::refuse_io(p)?;
-        let len = fs::metadata(p)?.len();
+        // The guard first: the size is taken from the opened file.
         let f = oa_sealed::open(p)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))?;
+        let len = f.metadata()?.len();
         let d = sha256_reader(io::BufReader::new(f)).map_err(io::Error::other)?;
         sums.push((d, len));
     }
@@ -153,15 +153,15 @@ impl<R: Read> Read for Capped<R> {
 /// is allocated.
 pub fn read_capped_file(path: &Path, max: u64) -> io::Result<Vec<u8>> {
     let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
-    oa_sealed::refuse_io(path).map_err(named)?;
-    let len = fs::metadata(path).map_err(named)?.len();
+    // The guard first: the size is taken from the opened file.
+    let f = oa_sealed::open(path).map_err(named)?;
+    let len = f.metadata().map_err(named)?.len();
     if len > max {
         return Err(named(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{len} bytes, past the limit of {max} bytes"),
         )));
     }
-    let f = oa_sealed::open(path).map_err(named)?;
     let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
     Capped {
         inner: f,
@@ -520,7 +520,8 @@ pub fn for_each_adsb_frame(path: &Path, f: &mut dyn FnMut(i64, &[u8])) -> io::Re
 }
 
 /// [`for_each_adsb_frame`], also returning the number of rows in the frames left out because a
-/// row's time is in a sealed window (the count is added to the process-wide one as well).
+/// row's time is in a sealed window, plus the rows of each frame left out because it was received in
+/// one (1 if its payload does not decode) (the count is added to the process-wide one as well).
 pub fn for_each_adsb_frame_counted(
     path: &Path,
     f: &mut dyn FnMut(i64, &[u8]),
@@ -531,6 +532,12 @@ pub fn for_each_adsb_frame_counted(
     let mut tmp = oa_adsb::Reports::default();
     let damaged = oa_feed::read_frames(&mut file, &mut |fr| {
         if fr.kind == oa_feed::Kind::Message {
+            // A frame received in a sealed window is dropped whole and counted (once), as the
+            // replay source does, whatever its rows say.
+            if oa_sealed::in_sealed_window(fr.recv_unix_ns) {
+                sealed += oa_adsb::dropped_frame_units(fr.payload);
+                return;
+            }
             oa_adsb::reports_clear(&mut tmp);
             // A payload that does not decode is passed on: the caller counts it as bad.
             if oa_adsb::decode_payload_lenient(fr.payload, &mut tmp).is_ok()
@@ -571,6 +578,13 @@ pub fn load_adsb_counted(path: &Path, open: &Opener, sealed: &mut u64) -> io::Re
     let mut src = HashRead::new(open(path)?, done.clone());
     let damaged = oa_feed::read_frames(&mut src, &mut |fr| {
         if fr.kind == oa_feed::Kind::Message {
+            // A frame received in a sealed window is dropped whole and counted once.
+            if oa_sealed::in_sealed_window(fr.recv_unix_ns) {
+                let n = oa_adsb::dropped_frame_units(fr.payload);
+                sealed_window_dropped += n;
+                oa_sealed::note_window_drops(n);
+                return;
+            }
             // Rows in a sealed window are dropped and counted (OA-SEAL-014).
             oa_adsb::reports_clear(&mut frame);
             match oa_adsb::decode_payload_lenient(fr.payload, &mut frame) {

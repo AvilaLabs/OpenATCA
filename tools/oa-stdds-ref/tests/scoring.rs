@@ -359,7 +359,35 @@ fn a_recording_is_read_into_records_with_counts_and_a_digest() {
     let mut o2 = Vec::new();
     let i2 = load_reader(&damaged[..], "mem", 3, &mut o2).unwrap();
     assert_ne!(i2.sha256, info.sha256);
-    assert!(i2.frames_damaged > 0);
+    // Damage with no good frame after it is dropped, not counted as damage (OA-SEAL-014).
+    assert!(i2.frames_damaged + i2.sealed_window_dropped > 0);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_damaged_frame_is_gated_by_the_receive_times_of_the_good_frames_either_side() {
+    const FROM: i64 = 1_795_131_900_000_000_000;
+    let out = FROM - 3_600_000_000_000;
+    let read = |t: [i64; 3]| {
+        let mut bytes = Vec::new();
+        let mut at = Vec::new();
+        for (i, t) in t.into_iter().enumerate() {
+            let mut buf = vec![0u8; 256];
+            let n = oa_feed::encode_frame(&mut buf, 3, 0, i as u64, t, 0, b"xxxx").unwrap();
+            at.push(bytes.len());
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        bytes[at[1] + 37] ^= 0xff;
+        let info = load_reader(&bytes[..], "mem", 0, &mut Vec::new()).unwrap();
+        (
+            info.frames_other,
+            info.frames_damaged,
+            info.sealed_window_dropped,
+        )
+    };
+    assert_eq!(read([out, out, out + 1]), (2, 1, 0));
+    assert_eq!(read([out, out, FROM]), (1, 0, 2));
+    assert_eq!(read([FROM, out, out]), (1, 0, 2));
 }
 
 // REQ: OA-SRF-005
@@ -1075,4 +1103,22 @@ fn the_loader_drops_the_sealed_window() {
     let w = oa_stdds_ref::load::load_limits().drop_window;
     assert_eq!(w, oa_sealed::DropWindow::sealed());
     assert_eq!(w.span(), oa_sealed::sealed_window_ms());
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_status_or_reject_frame_received_in_the_window_is_dropped_and_not_counted_by_kind() {
+    const FROM: i64 = 1_795_131_900_000_000_000;
+    let mut bytes = Vec::new();
+    for (i, (kind, t)) in [(3u8, FROM - 1), (3, FROM), (2, FROM + 9)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut buf = vec![0u8; 256];
+        let n = oa_feed::encode_frame(&mut buf, kind, 0, i as u64, t, 0, b"x").unwrap();
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let mut out = Vec::new();
+    let info = load_reader(&bytes[..], "mem", 0, &mut out).unwrap();
+    assert_eq!((info.frames_other, info.sealed_window_dropped), (1, 2));
 }

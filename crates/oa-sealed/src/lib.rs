@@ -30,6 +30,14 @@
 //! message for stdds) for a message time in one, before it touches any counter or row, and drops
 //! the document whole, counting only its messages.
 //!
+//! The list on disk is compared with the compiled-in one when a *reader* starts (see
+//! [`Sealed::production`]): a build whose list differs from `sealed_paths.txt` fails closed, and the
+//! fix is to rebuild. Capture and write-only paths (the `oa-feed` recorder, which records and
+//! never computes on what it reads) use [`Sealed::production_embedded`] and [`refuse_io_embedded`]
+//! instead: they check against the compiled-in list and skip the comparison, so recording never
+//! stops because the list file changed. A running recorder keeps the list it was built with until it
+//! is restarted on a rebuilt binary; the readers of what it recorded refuse until they are rebuilt.
+//!
 //! Requirements: OA-SEAL-001 and the following, in REQUIREMENTS.md.
 
 use std::collections::BTreeSet;
@@ -43,6 +51,50 @@ use std::sync::OnceLock;
 
 /// The list file, compiled in.
 pub const LIST: &str = include_str!("../sealed_paths.txt");
+
+/// Where [`LIST`] was read from at build time. At run time the guard compares the file there, if
+/// there is one, with the compiled-in text ([`production_guard`]).
+const LIST_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/sealed_paths.txt");
+
+/// FNV-1a 64 of `bytes`, in hex: a short name for a list in a warning (not a security hash).
+fn list_hash(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// The guard for the compiled-in `embedded` list, checked against the list file at `path`: if the
+/// file exists and its bytes differ from the embedded text (or it exists and cannot be read), the
+/// list the binary was built with is not the list on disk, and the guard fails closed (every path
+/// refused, every instant sealed) with a warning on `warn` naming both hashes. A file that is
+/// absent (an installed binary, a copied one) leaves the embedded list in force.
+fn production_guard(embedded: &str, path: &Path, warn: &mut dyn io::Write) -> Sealed {
+    // seal-allow: the guard's own list file, compared with the compiled-in copy
+    match fs::read(path) {
+        Ok(disk) if disk != embedded.as_bytes() => {
+            let _ = writeln!(
+                warn,
+                "seal list on disk ({}) differs from the list compiled in ({}) [{}]: every path refused and every timed row dropped; rebuild",
+                list_hash(&disk),
+                list_hash(embedded.as_bytes()),
+                path.display()
+            );
+            Sealed::with_list("", None)
+        }
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            let _ = writeln!(
+                warn,
+                "seal list on disk cannot be read ({e}) [{}]: every path refused and every timed row dropped",
+                path.display()
+            );
+            Sealed::with_list("", None)
+        }
+        _ => Sealed::with_list(embedded, None),
+    }
+}
 
 /// A deepest chain of links followed by hand before a path is refused as unresolvable.
 const MAX_LINKS: usize = 40;
@@ -496,6 +548,7 @@ fn resolve(path: &Path, depth: usize) -> Result<PathBuf, ()> {
                 out.push(n);
                 if let Ok(real) = fs::canonicalize(&out) {
                     out = real;
+                // seal-allow: the guard's own link resolution; it reads no file, only whether a name is a link
                 } else if fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink()) {
                     // A link canonicalize could not follow: follow it by hand.
                     let target = fs::read_link(&out).map_err(|_| ())?;
@@ -512,7 +565,15 @@ impl Sealed {
     /// The guard for the compiled-in list and the real data root, built once (production).
     pub fn production() -> &'static Sealed {
         static PRODUCTION: OnceLock<Sealed> = OnceLock::new();
-        PRODUCTION.get_or_init(|| Sealed::with_list(LIST, None))
+        PRODUCTION.get_or_init(|| production_guard(LIST, Path::new(LIST_PATH), &mut io::stderr()))
+    }
+
+    /// The guard for the compiled-in list alone, with no comparison against the list file on disk.
+    /// For capture and write-only paths, which must keep recording when the list file changes
+    /// (the readers fail closed instead, see [`Sealed::production`]). Built once.
+    pub fn production_embedded() -> &'static Sealed {
+        static EMBEDDED: OnceLock<Sealed> = OnceLock::new();
+        EMBEDDED.get_or_init(|| Sealed::with_list(LIST, None))
     }
 
     /// The guard for the compiled-in entries under `root` (tests build a fake root).
@@ -658,6 +719,7 @@ impl Sealed {
         self.check_with(root, true)
             .map_err(|r| io::Error::other(r.why))?;
         // A root that does not exist is an error, not an empty walk.
+        // seal-allow: the guard's own walk; root was checked above
         fs::metadata(root)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", root.display())))?;
         let mut walk = Walk::default();
@@ -757,6 +819,13 @@ pub fn refuse(path: &Path) -> Result<(), String> {
     Sealed::production().check(path).map_err(|e| e.to_string())
 }
 
+/// [`refuse_io`] against [`Sealed::production_embedded`]: for a capture or write-only path.
+pub fn refuse_io_embedded(path: &Path) -> io::Result<()> {
+    Sealed::production_embedded()
+        .check(path)
+        .map_err(|r| io::Error::other(r.why))
+}
+
 /// Production check as an I/O error (the rule, no path) for a loader that adds the path itself.
 pub fn refuse_io(path: &Path) -> io::Result<()> {
     Sealed::production()
@@ -825,6 +894,11 @@ pub fn drop_line(n: u64) -> String {
     format!("sealed-window rows dropped: {n}")
 }
 
+/// What one dropped unit is: a row, a record or a message counts as itself; a frame dropped because
+/// it was received in a window counts as the rows it holds where its payload decodes (at least 1),
+/// and as 1 where it does not (a frame of another kind, or a payload that is no rows). A damaged
+/// frame, which has no receive time, counts as 1 when [`DamagedGate`] drops it.
+///
 /// The count of rows a tool dropped in a sealed window, which prints [`drop_line`] when it is
 /// dropped. A tool makes one at the top of its run and adds each reader's count as the reader
 /// returns, so the line is printed on every exit that comes back through `main`: a `?` error, an
@@ -834,6 +908,61 @@ pub fn drop_line(n: u64) -> String {
 pub struct DropReport {
     n: u64,
     stdout: bool,
+}
+
+/// Decides what a damaged frame is, in a stream of frames. A damaged frame carries no receive
+/// time, so it is gated by the receive times of the nearest good frame before it and the nearest
+/// good frame after it in the same file: if either is in a sealed window, or either is missing
+/// (the damage is at the start or the end of the file), the frame is dropped and counted in the
+/// drop line, not counted as damaged. Every good frame (in the window or not) is shown to the
+/// gate with [`DamagedGate::good`]; each damaged one with [`DamagedGate::damaged`]; at the end of
+/// the file [`DamagedGate::finish`] settles what is left. One gate per file.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DamagedGate {
+    prev: Option<i64>,
+    pending: u64,
+}
+
+impl DamagedGate {
+    /// A gate at the start of a file.
+    pub const fn new() -> DamagedGate {
+        DamagedGate {
+            prev: None,
+            pending: 0,
+        }
+    }
+
+    /// A damaged frame: settled by the next good frame, or by [`DamagedGate::finish`].
+    pub fn damaged(&mut self) {
+        self.pending = self.pending.saturating_add(1);
+    }
+
+    /// A good frame received at `recv_unix_ns`. Returns `(kept, dropped)`: the damaged frames
+    /// since the last good frame that are counted as damaged, and the ones dropped (counted in
+    /// the drop line; the count is also added to the process-wide one).
+    pub fn good(&mut self, recv_unix_ns: i64) -> (u64, u64) {
+        let n = std::mem::take(&mut self.pending);
+        let before = self.prev.replace(recv_unix_ns);
+        if n == 0 {
+            return (0, 0);
+        }
+        let open = before.is_some_and(|b| !in_sealed_window(b)) && !in_sealed_window(recv_unix_ns);
+        if open {
+            (n, 0)
+        } else {
+            note_window_drops(n);
+            (0, n)
+        }
+    }
+
+    /// The end of the file: the damaged frames with no good frame after them are dropped. Returns
+    /// their count (added to the process-wide one), and the gate is reset for the next file.
+    pub fn finish(&mut self) -> u64 {
+        let n = std::mem::take(&mut self.pending);
+        self.prev = None;
+        note_window_drops(n);
+        n
+    }
 }
 
 /// The warning a tool prints at start when the list seals every instant: a list with no `window`
@@ -1151,5 +1280,69 @@ mod tests {
             assert!(!in_sealed_window(ms * 1_000_000), "{ms}");
         }
         assert_eq!(WINDOW_MARGIN_NS, 15 * 60 * 1_000_000_000);
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn a_list_on_disk_that_differs_from_the_compiled_in_one_fails_closed() {
+        let dir = std::env::temp_dir().join(format!("oa_sealed_list_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("sealed_paths.txt");
+        let mut warn = Vec::new();
+        // The same bytes: the embedded list is in force and nothing is said.
+        fs::write(&file, LIST).unwrap();
+        let g = production_guard(LIST, &file, &mut warn);
+        assert!(!g.broken && g.drop_window() != DropWindow::all_time() && warn.is_empty());
+        // One byte more: closed, with both hashes named.
+        fs::write(&file, format!("{LIST}\n")).unwrap();
+        let g = production_guard(LIST, &file, &mut warn);
+        assert!(g.broken && g.drop_window() == DropWindow::all_time());
+        assert!(g.in_window(0));
+        let said = String::from_utf8(warn.clone()).unwrap();
+        assert!(said.contains(&list_hash(LIST.as_bytes())), "{said}");
+        assert!(
+            said.contains(&list_hash(format!("{LIST}\n").as_bytes())),
+            "{said}"
+        );
+        // A file that is absent (an installed binary): the embedded list stays.
+        fs::remove_file(&file).unwrap();
+        let mut warn = Vec::new();
+        let g = production_guard(LIST, &file, &mut warn);
+        assert!(!g.broken && warn.is_empty());
+        // A differing list file: a reader's guard refuses every path, the capture guard (the
+        // compiled-in list alone) still accepts an ordinary one.
+        fs::write(&file, format!("{LIST}\n")).unwrap();
+        let reader = production_guard(LIST, &file, &mut Vec::new());
+        let capture = Sealed::production_embedded();
+        let ordinary = dir.join("rec/stdds/a.oaf");
+        assert!(reader.check(&ordinary).is_err());
+        assert!(capture.check(&ordinary).is_ok());
+        assert!(refuse_io_embedded(&ordinary).is_ok());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn a_damaged_frame_is_gated_by_the_good_frames_on_both_sides() {
+        let (from, _) = sealed_window_ms().unwrap();
+        let inside = from * 1_000_000 + 5;
+        let outside = from * 1_000_000 - 3_600_000_000_000;
+        // Good, damaged, good: both outside the window, so the damage is damage.
+        let mut g = DamagedGate::new();
+        assert_eq!(g.good(outside), (0, 0));
+        g.damaged();
+        assert_eq!(g.good(outside + 1), (1, 0));
+        // A good frame on either side in the window drops it.
+        g.damaged();
+        g.damaged();
+        assert_eq!(g.good(inside), (0, 2));
+        g.damaged();
+        assert_eq!(g.good(outside), (0, 1));
+        // At the end there is no frame after: dropped. The next file starts with none before.
+        g.damaged();
+        assert_eq!(g.finish(), 1);
+        g.damaged();
+        assert_eq!(g.good(outside), (0, 1));
+        assert_eq!(g.finish(), 0);
     }
 }
