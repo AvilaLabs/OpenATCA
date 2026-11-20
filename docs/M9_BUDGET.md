@@ -12,7 +12,7 @@ each run used one core (99 % of CPU), so the one-core figures are the budget act
 | Source | adsb.lol, 2026-11-19 (tune day), worldwide archive, two tar parts |
 | Area | box 23 to 51 N, 127 W to 65 W (CONUS and margin) |
 | Clip searched for the busiest hour | 12:00:00Z to 23:44:00Z, 40,864,430 reports, 3.27 GB (the full-day clip is refused by the clip tool: more than 41,943,040 reports) |
-| Hours not examined | 00:00Z to 12:00Z and 23:44Z to 24:00Z |
+| Hours not examined | 23:44Z to 24:00Z |
 | Busiest hour (whole UTC hours) | 21:00:00Z to 22:00:00Z, 15,107 distinct airborne addresses |
 | Peak minute | 21:15Z, 7,684 distinct airborne addresses |
 | Clip measured | 20:50:00Z to 22:00:00Z, 5,159,535 reports, 413 MB; first 10 minutes warm-up, not measured |
@@ -21,9 +21,19 @@ each run used one core (99 % of CPU), so the one-core figures are the budget act
 
 ## Distinct airborne addresses per UTC hour
 
+| Hour (Z) | 00 | 01 | 02 | 03 | 04 | 05 | 06 | 07 | 08 | 09 | 10 | 11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Addresses | 10,024 | 8,231 | 6,945 | 5,577 | 4,128 | 2,674 | 1,691 | 1,216 | 1,037 | 1,127 | 1,414 | 2,420 |
+
 | Hour (Z) | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 (to 23:44) |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Addresses | 4,391 | 7,342 | 10,232 | 12,444 | 13,715 | 14,158 | 14,501 | 14,735 | 15,077 | 15,107 | 14,105 | 10,708 |
+
+| Census | Value |
+|---|---|
+| Clip 00:00Z to 12:00Z (same box) | 14,224,653 reports, 1.14 GB |
+| Peak minute of 00:00Z to 12:00Z | 00:00Z, 5,745 distinct airborne addresses |
+| Hour beating 21Z's 15,107 | none; the 21:00Z measurement stands |
 
 ## Tracking (`nas_hour track`)
 
@@ -122,7 +132,6 @@ and the net reports degraded (`rows_high_lat`). Configuration: `national.cfg` (d
 | Feed health | not measured |
 | Comparator against ERAM | not measured |
 | Display scene generation | not measured |
-| Hours 00:00Z to 12:00Z of the day | not measured |
 | Quiet machine (no other jobs) | not measured |
 
 ## Commands
