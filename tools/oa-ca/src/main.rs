@@ -6,8 +6,9 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use oa_ca_run::args::{parse, USAGE};
+use oa_ca_run::guard::refuse_sealed;
 use oa_ca_run::run::run;
-use oa_encounter_run::guard::refuse_sealed;
+use oa_sealed::Sealed;
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -20,7 +21,7 @@ fn main() -> ExitCode {
     };
     // Every path is checked, as given and resolved, before anything is opened or created.
     for p in [&args.adsb, &args.config, &args.out] {
-        if let Err(e) = refuse_sealed(p) {
+        if let Err(e) = refuse_sealed(Sealed::production(), p) {
             eprintln!("oa-ca: {e}");
             return ExitCode::from(2);
         }

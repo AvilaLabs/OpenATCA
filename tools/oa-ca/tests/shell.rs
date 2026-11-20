@@ -75,16 +75,16 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
     let exe = env!("CARGO_BIN_EXE_oa-ca");
     let out = scratch("exit");
     for (adsb, cfg, o) in [
-        ("/x/scds/rec-20261119/a.oaf", "k.cfg", out.join("o")),
+        ("/home/connoravila/Documents/Avila-Labs/openatca-data/raw/adsblol/2026.11.20/a.oaf", "k.cfg", out.join("o")),
         (
             "fine.oaf",
-            "/x/scds/stdds-20261119-holdout/k.cfg",
+            "/home/connoravila/Documents/Avila-Labs/openatca-data/scds/stdds-20261119-holdout/k.cfg",
             out.join("o"),
         ),
         (
             "fine.oaf",
             "k.cfg",
-            PathBuf::from("/x/scds/stdds-smoke-20261119T1/o"),
+            PathBuf::from("/home/connoravila/Documents/Avila-Labs/openatca-data/scds/stdds-smoke-20261119T1/o"),
         ),
     ] {
         let r = Command::new(exe)

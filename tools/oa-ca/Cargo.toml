@@ -10,12 +10,13 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-# Workspace crates; not outside dependencies (RULESET F1). The sealed-path guard and the ground
-# table of the clip are the close-encounter tool's own, shared so the two tools agree.
+# Workspace crates; not outside dependencies (RULESET F1). The ground
+# table of the clip is the close-encounter tool's own, shared so the two tools agree.
 oa-adsb = { path = "../../crates/oa-adsb" }
 oa-bench = { path = "../../crates/oa-bench" }
 oa-ca = { path = "../../crates/oa-ca" }
 oa-encounter-run = { path = "../oa-encounter" }
+oa-sealed = { path = "../../crates/oa-sealed" }
 oa-safety = { path = "../../crates/oa-safety" }
 oa-sha256 = { path = "../../crates/oa-sha256" }
 oa-track = { path = "../../crates/oa-track" }

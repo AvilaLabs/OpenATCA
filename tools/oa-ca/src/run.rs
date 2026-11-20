@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::Read;
 
 use oa_bench::input::load_adsb;
 use oa_ca::{
@@ -12,6 +13,7 @@ use oa_ca::{
 use oa_encounter_run::run::{ground_at, ground_table, GroundTable};
 use oa_safety::inhibit::{inhibits_new, InhibitTable};
 use oa_safety::net::{net_status, state_table_new, NetId, StateTable};
+use oa_sealed::Sealed;
 use oa_sha256::{sha256, to_hex};
 use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
 use oa_track::score::{interval_stats, scoring_config, split_reports, IntervalStats};
@@ -23,6 +25,7 @@ use oa_track::{
 
 use crate::args::Args;
 use crate::config::{parse_config, Settings};
+use crate::guard::{open_guarded, refuse_sealed, OpenFail};
 use crate::report::{alerts_csv, events_csv, state_text, summary_text, SummaryInput};
 
 /// The chi-square quantile of 2 degrees of freedom at 95 %: the 95 % radius of a circular
@@ -244,8 +247,17 @@ pub fn track_and_alert(
 /// The whole run: reads the clip and the configuration, writes `alerts.csv`,
 /// `altitude_lost.csv` and `summary.txt` under `args.out`, and returns the summary text.
 pub fn run(args: &Args) -> Result<String, String> {
-    let cfg_bytes =
-        fs::read(&args.config).map_err(|e| format!("{}: {e}", args.config.display()))?;
+    // Every path is checked before anything is opened or created, for a caller of the library too.
+    for p in [&args.adsb, &args.config, &args.out] {
+        refuse_sealed(Sealed::production(), p)?;
+    }
+    let mut cfg_bytes = Vec::new();
+    open_guarded(Sealed::production(), &args.config)
+        .map_err(|e| match e {
+            OpenFail::Refused(m) | OpenFail::Io(m) => m,
+        })?
+        .read_to_end(&mut cfg_bytes)
+        .map_err(|e| format!("{}: {e}", args.config.display()))?;
     let cfg_text = String::from_utf8(cfg_bytes.clone())
         .map_err(|_| format!("{}: not UTF-8 text", args.config.display()))?;
     let set = parse_config(&cfg_text).map_err(|e| format!("{}: {e}", args.config.display()))?;

@@ -93,6 +93,7 @@ dependencies = [
  "oa-ca",
  "oa-encounter-run",
  "oa-safety",
+ "oa-sealed",
  "oa-sha256",
  "oa-track",
 ]

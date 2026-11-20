@@ -5485,6 +5485,12 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-CA-029** Proved (Kani, bounded): the horizontal miss is finite and not negative; the meet of two
   ordered intervals is finite and ordered inside the look-ahead; a prediction has a finite time to loss
   inside the look-ahead and finite, not negative misses.
+- **OA-CA-030** The tool uses the shared sealed-path guard (`oa-sealed`) for every path: the clip, the
+  configuration and the output directory are checked as given and after links before anything is opened or
+  created, and the configuration is opened, then verified as the file opened (a link swapped between check
+  and open is refused). A sealed directory, a sealed ADS-B day, a link into sealed data and a link swapped
+  after the check are each refused, with the path named; a refusal exits 2. The clip is read by the guarded
+  `oa_bench::input::load_adsb`.
 
 ## SWIM STDDS terminal data (oa-stdds)
 
