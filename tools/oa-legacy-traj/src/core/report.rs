@@ -67,12 +67,27 @@ pub struct KindTable {
     /// Error with touchdown at the last airborne report, and at the first ground report, per bin.
     pub td_air: Vec<Vec<f64>>,
     pub td_gnd: Vec<Vec<f64>>,
-    /// Keep one row per (flight, bin): the last message in the bin.
+    /// Keep the last message of each (flight, bin): headline rows only.
     pub track_last: bool,
-    /// (flight, bin) to the issue time and the error of the last message.
-    pub last_in_bin: BTreeMap<(u32, usize), (i64, f64)>,
+    /// (flight, bin) to the issue time of the last message and the errors of its rows.
+    pub last_in_bin: BTreeMap<(u32, usize), (i64, Vec<f64>)>,
     /// Crossing-cut sensitivity: label to the headline errors per bin.
     pub sens: BTreeMap<String, Vec<Vec<f64>>>,
+    /// Headline-class crossings whose closest approach was from 2 NM up to the largest cut: the
+    /// errors per bin.
+    pub abeam: Vec<Vec<f64>>,
+    /// Estimates offered per bin of the stated lead; the last slot is those with no lead in range
+    /// (no time, before the issue, or past the last bin).
+    pub offered_bin: Vec<u64>,
+    /// Of them, per bin and by why there was no leg: none of the aircraft's, none the flight's
+    /// own, and the departure past the window.
+    pub no_leg_bin: Vec<u64>,
+    pub not_own_bin: Vec<u64>,
+    pub too_far_bin: Vec<u64>,
+    /// Exclusions whose bound leg ended at the clip box edge, by reason ([`EXCLUSION_NAMES`]).
+    pub at_edge: [u64; EXCLUSION_COUNT],
+    /// Per arrival airport: estimates offered and scored.
+    pub by_airport: BTreeMap<String, (u64, u64)>,
 }
 
 /// What a scored sample carries besides its error (all diagnostics, for headline rows).
@@ -87,7 +102,19 @@ pub struct Extra {
     pub td: Option<(f64, f64)>,
     /// The issue time of the message, Unix ms.
     pub issue_ms: i64,
+    /// The bin of the stated lead, when the estimate is excluded (a scored one carries it).
+    pub lead_bin: Option<usize>,
+    /// The bound leg ended at the clip box edge, not inside it (for the landing exclusions).
+    pub end_at_edge: bool,
 }
+
+/// The exclusions that say the bound leg did not land at the airport, split by where the leg ended.
+const LANDING_REASONS: [Exclusion; 4] = [
+    Exclusion::NoGroundCoverage,
+    Exclusion::NoLanding,
+    Exclusion::TouchAndGo,
+    Exclusion::Diversion,
+];
 
 /// An empty table.
 pub fn kind_new(name: &str) -> KindTable {
@@ -110,9 +137,16 @@ pub fn kind_new(name: &str) -> KindTable {
         landing_minus_actual_s: Vec::new(),
         td_air: per_bin(),
         td_gnd: per_bin(),
-        track_last: false,
+        track_last: true,
         last_in_bin: BTreeMap::new(),
         sens: BTreeMap::new(),
+        abeam: per_bin(),
+        offered_bin: vec![0; BIN_COUNT + 1],
+        no_leg_bin: vec![0; BIN_COUNT + 1],
+        not_own_bin: vec![0; BIN_COUNT + 1],
+        too_far_bin: vec![0; BIN_COUNT + 1],
+        at_edge: [0; EXCLUSION_COUNT],
+        by_airport: BTreeMap::new(),
     }
 }
 
@@ -125,11 +159,32 @@ pub fn kind_record(
     x: Extra,
 ) {
     t.estimates += 1;
+    let slot = match &r {
+        Ok(s) => s.bin,
+        Err(_) => x.lead_bin.unwrap_or(BIN_COUNT),
+    };
+    if let Some(c) = t.offered_bin.get_mut(slot) {
+        *c += 1;
+    }
     let s = match r {
         Ok(s) => s,
         Err(e) => {
             if let Some(c) = t.exclusions.get_mut(exclusion_index(e)) {
                 *c += 1;
+            }
+            let miss = match e {
+                Exclusion::NoLeg => Some(&mut t.no_leg_bin),
+                Exclusion::LegNotOwn => Some(&mut t.not_own_bin),
+                Exclusion::DepartureTooFar => Some(&mut t.too_far_bin),
+                _ => None,
+            };
+            if let Some(c) = miss.and_then(|v| v.get_mut(slot)) {
+                *c += 1;
+            }
+            if x.end_at_edge && LANDING_REASONS.contains(&e) {
+                if let Some(c) = t.at_edge.get_mut(exclusion_index(e)) {
+                    *c += 1;
+                }
             }
             return;
         }
@@ -172,10 +227,30 @@ pub fn kind_record(
         let slot = t
             .last_in_bin
             .entry((unit, s.bin))
-            .or_insert((x.issue_ms, s.error_s));
-        if x.issue_ms >= slot.0 {
-            *slot = (x.issue_ms, s.error_s);
+            .or_insert((x.issue_ms, Vec::new()));
+        if x.issue_ms > slot.0 {
+            *slot = (x.issue_ms, Vec::new());
         }
+        if x.issue_ms == slot.0 {
+            slot.1.push(s.error_s);
+        }
+    }
+}
+
+/// Counts one estimate offered against the airport it lands at.
+pub fn airport_offer(t: &mut KindTable, airport: &str) {
+    t.by_airport.entry(airport.to_string()).or_default().0 += 1;
+}
+
+/// Counts one estimate scored against the airport it lands at.
+pub fn airport_scored(t: &mut KindTable, airport: &str) {
+    t.by_airport.entry(airport.to_string()).or_default().1 += 1;
+}
+
+/// Adds a headline crossing whose closest approach was beyond the headline cut to the abeam table.
+pub fn abeam_add(t: &mut KindTable, s: &Sample) {
+    if let Some(v) = t.abeam.get_mut(s.bin) {
+        v.push(s.error_s);
     }
 }
 
@@ -300,6 +375,17 @@ fn large(e: &[f64]) -> u64 {
     e.iter().filter(|x| x.abs() > LARGE_ERROR_S).count() as u64
 }
 
+/// The smallest sample whose tail percentiles (p95, p99) are printed.
+pub const TAIL_MIN_N: u64 = 100;
+
+fn tail(st: &crate::core::bins::Stats, v: f64) -> String {
+    if st.n >= TAIL_MIN_N {
+        cell(v)
+    } else {
+        "n<100".to_string()
+    }
+}
+
 fn stat_line(label: &str, e: &[f64], flights: Option<u64>) -> String {
     match stats(e) {
         Some(st) => {
@@ -309,12 +395,12 @@ fn stat_line(label: &str, e: &[f64], flights: Option<u64>) -> String {
                 "  {label}: n={}{f} |e| median={} p95={} p99={}; bias median={} mean={}; spread p5={} p95={}; rms={}; over {}s: n={big} ({:.1}%)\n",
                 st.n,
                 cell(st.abs_median),
-                cell(st.abs_p95),
-                cell(st.abs_p99),
+                tail(&st, st.abs_p95),
+                tail(&st, st.abs_p99),
                 cell(st.median),
                 cell(st.mean),
-                cell(st.p5),
-                cell(st.p95),
+                tail(&st, st.p5),
+                tail(&st, st.p95),
                 cell(st.rms),
                 LARGE_ERROR_S as i64,
                 100.0 * big as f64 / st.n as f64
@@ -352,6 +438,15 @@ fn histogram(e: &[f64]) -> String {
     format!("[<-1800, -1800..-600, -600..-300, -300..-60, -60..60, 60..300, 300..600, 600..1800, >=1800] = {}", parts.join("/"))
 }
 
+/// A tail percentile for the CSV: empty below [`TAIL_MIN_N`] values.
+fn csv_tail(st: &crate::core::bins::Stats, v: f64) -> String {
+    if st.n >= TAIL_MIN_N {
+        cell(v)
+    } else {
+        String::new()
+    }
+}
+
 /// The statistics rows of a system as CSV: one row per kind, class and bin, and a last row per
 /// kind and class for all bins. `n` is the number of scored estimates, `flights` the number of
 /// flights they came from.
@@ -372,12 +467,12 @@ pub fn render_csv(s: &SystemReport) -> String {
                         st.n,
                         flights,
                         cell(st.abs_median),
-                        cell(st.abs_p95),
-                        cell(st.abs_p99),
+                        csv_tail(&st, st.abs_p95),
+                        csv_tail(&st, st.abs_p99),
                         cell(st.median),
                         cell(st.mean),
-                        cell(st.p5),
-                        cell(st.p95),
+                        csv_tail(&st, st.p5),
+                        csv_tail(&st, st.p95),
                         cell(st.rms),
                         large(&e)
                     )),
@@ -456,15 +551,16 @@ pub fn render_text(
         o.push_str(&format!("{k}: {v}\n"));
     }
     o.push_str(&format!(
-        "\nsettings\n  crossing: time of closest approach of the truth path to the point, counted only within {:.2} NM (sensitivity at the cuts listed per kind)\n  landing: touchdown is the middle of the gap between the last airborne and the first ground report (gap at most {} s); the last airborne report is within {:.1} NM of the airport reference point, below the airport elevation plus {:.0} ft or below {:.0} m/s, and no airborne report follows within {} s\n  leg: each message binds one truth leg: the one in progress at the issue, else the first starting within {} h after it whose take-off airport is the flight's departure airport (when known)\n  airborne at issue: an airborne report of the aircraft within {} s before the issue time\n  error: estimate minus actual, seconds (positive: the estimate is later than what happened)\n  bins: by the stated lead, the estimate minus the time of the message that carried it: {}\n  statistics: |e| median, p95, p99 are nearest rank over absolute errors, as oa-bench defines them; bias is the signed median and mean; spread is the signed 5th and 95th percentile (nearest rank); rms and the share over {} s follow; n is scored estimates, flights the distinct flights they came from\n",
+        "\nsettings\n  crossing: time of closest approach of the truth path to the point, counted only within {:.2} NM (sensitivity at the cuts listed per kind)\n  landing: touchdown is the middle of the gap between the last airborne and the first ground report (gap at most {} s); the last airborne report is within {:.1} NM of the airport reference point, below the airport elevation plus {:.0} ft or below {:.0} m/s, and no airborne report follows within {} s of the last airborne report\n  leg: each message binds one truth leg of the flight's own. In progress at the issue: it binds only if the aircraft is airborne on it (the issue is between its first airborne report and its landing, or its last report), it lands after the issue, and it took off within {:.0} NM of the departure airport or lands within {:.0} NM of the arrival airport, or, with neither airport known, carries the flight's callsign; a leg that had landed before the issue never binds. Else the first leg not yet airborne at the issue starting within {} h after it whose take-off airport is the departure airport, or, with the departure airport unknown or not in NASR, whose callsign is the flight's\n  airborne at issue: the issue time is between the bound leg's first airborne report and its landing (or last report)\n  error: estimate minus actual, seconds (positive: the estimate is later than what happened)\n  bins: by the stated lead, the estimate minus the time of the message that carried it: {}\n  statistics: |e| median, p95, p99 are nearest rank over absolute errors, as oa-bench defines them; bias is the signed median and mean; spread is the signed 5th and 95th percentile (nearest rank); rms and the share over {} s follow; n is scored estimates, flights the distinct flights they came from\n",
         cfg.cut_m / NM_M,
         cfg.landing_gap_max_ms / 1000,
         cfg.runway_radius_m / NM_M,
         cfg.landing_alt_ft,
         cfg.landing_speed_ms,
         cfg.landing_persist_ms / 1000,
+        cfg.leg_airport_m / NM_M,
+        cfg.leg_airport_m / NM_M,
         cfg.leg_window_ms / 3_600_000,
-        cfg.airborne_window_ms / 1000,
         BIN_NAMES.join(", "),
         LARGE_ERROR_S as i64
     ));
@@ -497,7 +593,28 @@ pub fn render_text(
         o.push_str(&format!("  all searched: n={searched}\n"));
         for t in &s.kinds {
             o.push_str(&format!("\n-- {} --\n", t.name));
+            if t.name.starts_with("sta_") {
+                o.push_str("schedule target (metering), not a forecast: scored against what happened for reference only\n");
+            }
             o.push_str(&format!("estimates offered: n={}\n", t.estimates));
+            o.push_str("estimates by bin of the stated lead: offered, with no leg (of which no leg of the flight's own; departure past the window), scored\n");
+            for k in 0..=BIN_COUNT {
+                let at = |v: &[u64]| v.get(k).copied().unwrap_or(0);
+                let scored: u64 = t
+                    .groups
+                    .iter()
+                    .map(|g| g.errors.get(k).map_or(0, |e| e.len() as u64))
+                    .sum();
+                o.push_str(&format!(
+                    "  {}: offered={} no leg={} (no leg of the flight's own={}; departure past the window={}) scored={}\n",
+                    BIN_NAMES.get(k).copied().unwrap_or("no stated lead in range"),
+                    at(&t.offered_bin),
+                    at(&t.no_leg_bin) + at(&t.not_own_bin) + at(&t.too_far_bin),
+                    at(&t.not_own_bin),
+                    at(&t.too_far_bin),
+                    scored
+                ));
+            }
             o.push_str(&format!(
                 "estimates whose name had several places, nearest the route taken: n={}\n",
                 t.resolved_ambiguous
@@ -539,14 +656,30 @@ pub fn render_text(
                 }
             }
             if t.track_last {
-                o.push_str("sensitivity of the headline: one row per flight and stated-lead bin, the last message in the bin\n");
+                o.push_str("headline, one message per flight and stated-lead bin: the last message of the flight in the bin (all its rows)\n");
                 let mut by_bin: Vec<Vec<f64>> = vec![Vec::new(); BIN_COUNT];
-                for ((_, bin), (_, err)) in &t.last_in_bin {
+                let mut flights: Vec<Vec<u32>> = vec![Vec::new(); BIN_COUNT];
+                for ((unit, bin), (_, errs)) in &t.last_in_bin {
                     if let Some(v) = by_bin.get_mut(*bin) {
-                        v.push(*err);
+                        v.extend_from_slice(errs);
+                    }
+                    if let Some(v) = flights.get_mut(*bin) {
+                        v.push(*unit);
                     }
                 }
-                o.push_str(&bins_text(&by_bin));
+                for k in 0..BIN_COUNT {
+                    let e = by_bin.get(k).map_or(&[][..], Vec::as_slice);
+                    let f = flights.get(k).map_or(0, |u| units_in(u));
+                    o.push_str(&stat_line(
+                        BIN_NAMES.get(k).copied().unwrap_or("?"),
+                        e,
+                        Some(f),
+                    ));
+                }
+            }
+            if t.abeam.iter().any(|e| !e.is_empty()) {
+                o.push_str("headline crossings abeam: closest approach from the headline cut up to the largest cut, by stated lead (not in the headline)\n");
+                o.push_str(&bins_text(&t.abeam));
             }
             for (label, by_bin) in &t.sens {
                 o.push_str(&format!("sensitivity of the headline: {label}\n"));
@@ -578,9 +711,17 @@ pub fn render_text(
             }
             o.push_str("excluded, by reason\n");
             let excluded: u64 = t.exclusions.iter().sum();
-            for (name, n) in EXCLUSION_NAMES.iter().zip(t.exclusions) {
+            for (k, (name, n)) in EXCLUSION_NAMES.iter().zip(t.exclusions).enumerate() {
                 if n > 0 {
-                    o.push_str(&format!("  {name}: n={n}\n"));
+                    let edge = t.at_edge.get(k).copied().unwrap_or(0);
+                    if LANDING_REASONS.iter().any(|&x| exclusion_index(x) == k) {
+                        o.push_str(&format!(
+                            "  {name}: n={n} (bound leg ends inside the box: {}; at its edge: {edge})\n",
+                            n - edge
+                        ));
+                    } else {
+                        o.push_str(&format!("  {name}: n={n}\n"));
+                    }
                 }
             }
             let scored: u64 = t
@@ -592,6 +733,17 @@ pub fn render_text(
                 "  excluded in all: n={excluded}; scored: n={scored}; offered: n={}\n",
                 t.estimates
             ));
+            if !t.by_airport.is_empty() {
+                o.push_str("scored share per arrival airport, the 30 with the most estimates offered (offered, scored, share)\n");
+                let mut v: Vec<(&String, &(u64, u64))> = t.by_airport.iter().collect();
+                v.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then_with(|| a.0.cmp(b.0)));
+                for (apt, (offered, ok)) in v.into_iter().take(30) {
+                    o.push_str(&format!(
+                        "  {apt}: offered={offered} scored={ok} share={:.1}%\n",
+                        100.0 * *ok as f64 / *offered as f64
+                    ));
+                }
+            }
         }
     }
     o

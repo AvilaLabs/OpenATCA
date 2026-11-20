@@ -10,7 +10,8 @@
 //!
 //! **Landing.** The landing time is the middle of the gap between the last airborne report and
 //! the first ground report, where the last airborne report is within the runway radius of the
-//! airport reference point, the aircraft then stays on the ground, and was low or slow.
+//! airport reference point, the aircraft then stays on the ground (no airborne report within the
+//! persistence time of the last airborne report), and was low or slow.
 
 use crate::core::types::{
     AirState, Approach, Config, Exclusion, Landing, LandingSet, Passage, PathPoint, Place, NO_ALT,
@@ -113,40 +114,52 @@ pub fn approach(path: &[PathPoint], place: Place, cut_m: f64) -> Approach {
         }
     }
     let mut passages: Vec<Passage> = Vec::new();
-    // The run of consecutive items within the cut being built: best distance and time, and
-    // whether it touches an edge, and the last sample it reached.
-    let mut run: Option<(f64, i64, bool, usize)> = None;
-    for it in &items {
+    // A passage is at an edge when the segment of its closest approach, or one directly next to
+    // it, begins or ends at a path end or a hole: only then may the aircraft have been nearer
+    // where truth has no answer.
+    let touches = |b: usize| {
+        let at = |k: Option<usize>| {
+            k.and_then(|k| items.get(k))
+                .is_some_and(|it| it.start_edge || it.end_edge)
+        };
+        at(Some(b)) || at(b.checked_sub(1)) || at(Some(b + 1))
+    };
+    // The run of consecutive items within the cut being built: the item of the closest approach,
+    // and the last sample the run reached.
+    let mut run: Option<(usize, usize)> = None;
+    for (k, it) in items.iter().enumerate() {
         let inside = it.dist_m <= cut_m;
-        let continues = inside && run.is_some_and(|r| it.first <= r.3);
+        let continues = inside && run.is_some_and(|r| it.first <= r.1);
         if continues {
             if let Some(r) = run.as_mut() {
-                if it.dist_m < r.0 {
-                    r.0 = it.dist_m;
-                    r.1 = it.t_ms;
+                if items.get(r.0).is_none_or(|b| it.dist_m < b.dist_m) {
+                    r.0 = k;
                 }
-                r.2 = r.2 || it.end_edge;
-                r.3 = it.last;
+                r.1 = it.last;
             }
             continue;
         }
-        if let Some((d, t, edge, _)) = run.take() {
-            passages.push(Passage {
-                t_ms: t,
-                dist_m: d,
-                at_edge: edge,
-            });
+        if let Some((b, _)) = run.take() {
+            if let Some(best) = items.get(b) {
+                passages.push(Passage {
+                    t_ms: best.t_ms,
+                    dist_m: best.dist_m,
+                    at_edge: touches(b),
+                });
+            }
         }
         if inside {
-            run = Some((it.dist_m, it.t_ms, it.start_edge || it.end_edge, it.last));
+            run = Some((k, it.last));
         }
     }
-    if let Some((d, t, edge, _)) = run {
-        passages.push(Passage {
-            t_ms: t,
-            dist_m: d,
-            at_edge: edge,
-        });
+    if let Some((b, _)) = run {
+        if let Some(best) = items.get(b) {
+            passages.push(Passage {
+                t_ms: best.t_ms,
+                dist_m: best.dist_m,
+                at_edge: touches(b),
+            });
+        }
     }
     Approach {
         min_dist_m,
@@ -159,7 +172,7 @@ pub fn approach(path: &[PathPoint], place: Place, cut_m: f64) -> Approach {
 /// the last one (the event happened before the message: the error is kept). The estimate never
 /// chooses. A passage that is in progress at the issue is chosen by its closest approach like any
 /// other.
-pub fn choose_passage(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<i64, Exclusion> {
+pub fn choose_passage(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<Passage, Exclusion> {
     if a.min_dist_m.is_infinite() {
         return Err(Exclusion::NoTruthPath);
     }
@@ -174,13 +187,13 @@ pub fn choose_passage(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<i64, 
     match chosen {
         None => Err(Exclusion::BeyondCut),
         Some(p) if p.at_edge => Err(Exclusion::PassageAtEdge),
-        Some(p) => Ok(p.t_ms),
+        Some(p) => Ok(*p),
     }
 }
 
 /// Every change from airborne to ground in `states` (sorted by time) that holds up as a landing,
 /// with whether the last airborne report is near `arp`. A change holds up when no airborne report
-/// follows within the persistence time and the last airborne report is below the airport
+/// follows within the persistence time of the last airborne report and the last airborne report is below the airport
 /// elevation `elev_ft` plus the altitude limit, or below the speed limit. Changes near the
 /// airport that do not are counted.
 pub fn landings(states: &[AirState], arp: Place, elev_ft: Option<f64>, cfg: &Config) -> LandingSet {
@@ -196,7 +209,7 @@ pub fn landings(states: &[AirState], arp: Place, elev_ft: Option<f64>, cfg: &Con
         let flies_on = states
             .iter()
             .skip(i + 2)
-            .take_while(|s| s.t_ms <= b.t_ms + cfg.landing_persist_ms)
+            .take_while(|s| s.t_ms <= a.t_ms + cfg.landing_persist_ms)
             .any(|s| !s.ground);
         if flies_on {
             if at_airport {
@@ -224,6 +237,31 @@ pub fn landings(states: &[AirState], arp: Place, elev_ft: Option<f64>, cfg: &Con
     out
 }
 
+/// When the aircraft of `states` (sorted by time) is airborne: from its first airborne report to
+/// the first ground report of the first change to ground that holds up (no airborne report within
+/// the persistence time of the last airborne one), else to its last report. `None` when it has no
+/// airborne report.
+pub fn airborne_span(states: &[AirState], cfg: &Config) -> Option<(i64, i64)> {
+    let from = states.iter().find(|s| !s.ground)?.t_ms;
+    for (i, w) in states.windows(2).enumerate() {
+        let (Some(a), Some(b)) = (w.first(), w.get(1)) else {
+            continue;
+        };
+        if a.ground || !b.ground {
+            continue;
+        }
+        let flies_on = states
+            .iter()
+            .skip(i + 2)
+            .take_while(|s| s.t_ms <= a.t_ms + cfg.landing_persist_ms)
+            .any(|s| !s.ground);
+        if !flies_on {
+            return Some((from, b.t_ms));
+        }
+    }
+    Some((from, states.last()?.t_ms))
+}
+
 /// Metres per second in a knot.
 const KT_MS: f64 = 1852.0 / 3600.0;
 
@@ -243,6 +281,18 @@ pub fn choose_landing(set: &LandingSet, issue_ms: i64, cfg: &Config) -> Result<L
         None if set.refused_persist + set.refused_altitude > 0 => Err(Exclusion::TouchAndGo),
         None => Err(Exclusion::NoLanding),
     }
+}
+
+/// Whether `p` is within `margin_m` of an edge of the box `[south, north, west, east]`, degrees
+/// (or outside it).
+pub fn near_box_edge(p: Place, box_deg: [f64; 4], margin_m: f64) -> bool {
+    let [south, north, west, east] = box_deg;
+    let cos_lat = oa_math::cos(p.lat_deg * (core::f64::consts::PI / 180.0));
+    let to_south = (p.lat_deg - south) * M_PER_DEG;
+    let to_north = (north - p.lat_deg) * M_PER_DEG;
+    let to_west = (p.lon_deg - west) * cos_lat * M_PER_DEG;
+    let to_east = (east - p.lon_deg) * cos_lat * M_PER_DEG;
+    to_south < margin_m || to_north < margin_m || to_west < margin_m || to_east < margin_m
 }
 
 /// The great-circle distance in metres between two places (haversine, sphere of 6,371,008.8 m).

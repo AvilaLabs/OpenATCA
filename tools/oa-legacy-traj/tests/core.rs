@@ -7,21 +7,29 @@
     clippy::panic
 )]
 
-use oa_legacy_traj::core::bins::{bin_of, score, stats, BIN_COUNT, BIN_NAMES};
-use oa_legacy_traj::core::cross::{approach, choose_landing, choose_passage, landings};
+use oa_legacy_traj::core::bins::{bin_of, nearest_rank, score, stats, BIN_COUNT, BIN_NAMES};
+use oa_legacy_traj::core::cross::{
+    airborne_span, approach, choose_landing, choose_passage, landings, near_box_edge,
+};
 use oa_legacy_traj::core::join::{
-    all_legs_of, bind_leg, index_legs, join, leg_in_window, Leg, Outcome, Unit,
+    all_legs_of, bind_leg, index_legs, join, leg_in_window, Known, Leg, LegFacts, Miss, Outcome,
+    Refused, Unit,
 };
 use oa_legacy_traj::core::report::{
-    closest_add, group_of, kind_record, render_counts_csv, render_csv, render_text, system_new,
-    Extra,
+    abeam_add, airport_offer, airport_scored, closest_add, group_of, kind_record,
+    render_counts_csv, render_csv, render_text, system_new, Extra,
 };
 use oa_legacy_traj::core::types::{
-    AirState, Config, Exclusion, LandingSet, PathPoint, Place, NO_ADDR, NO_ALT, NO_SPEED,
+    AirState, Approach, Config, Exclusion, LandingSet, PathPoint, Place, NO_ADDR, NO_ALT, NO_SPEED,
 };
 
 const M_PER_DEG: f64 = 111_194.926_644_558_74;
 const NM: f64 = 1852.0;
+
+/// The time of the passage chosen.
+fn chosen(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<i64, Exclusion> {
+    choose_passage(a, issue_ms, cfg).map(|p| p.t_ms)
+}
 
 fn cfg() -> Config {
     Config::new(2.0 * NM, 5.0 * NM, 30_000, 120 * 60_000)
@@ -67,7 +75,7 @@ fn the_crossing_is_the_closest_approach_interpolated_between_samples() {
     assert!(p.dist_m < 1.0, "{}", p.dist_m);
     assert!(!p.at_edge);
     assert!(a.min_dist_m < 1.0);
-    assert_eq!(choose_passage(&a, 1_000_000, &cfg()), Ok(p.t_ms));
+    assert_eq!(chosen(&a, 1_000_000, &cfg()), Ok(p.t_ms));
 }
 
 // REQ: OA-LTJ-002
@@ -88,7 +96,7 @@ fn a_closest_approach_beyond_the_cut_is_not_a_crossing_and_is_counted_by_distanc
     assert!((near.min_dist_m - 0.9 * cut).abs() < 5.0);
     assert!(far.passages.is_empty());
     assert!((far.min_dist_m - 1.1 * cut).abs() < 5.0);
-    assert_eq!(choose_passage(&far, 0, &cfg()), Err(Exclusion::BeyondCut));
+    assert_eq!(chosen(&far, 0, &cfg()), Err(Exclusion::BeyondCut));
     let mut s = system_new("X", &["k"]);
     closest_add(&mut s, near.min_dist_m);
     closest_add(&mut s, far.min_dist_m);
@@ -109,7 +117,7 @@ fn a_passage_at_a_path_end_or_a_hole_is_not_scored() {
     let start = northbound(0, 0.0, 10_000.0, 10, 0.0);
     let a = approach(&start, ORIGIN, 2.0 * NM);
     assert!(a.passages[0].at_edge);
-    assert_eq!(choose_passage(&a, 0, &cfg()), Err(Exclusion::PassageAtEdge));
+    assert_eq!(chosen(&a, 0, &cfg()), Err(Exclusion::PassageAtEdge));
     // A hole over the origin: truth has no answer for 60 s around it.
     let mut hole = northbound(0, 10_000.0, 10_000.0, 10, 0.0);
     hole.retain(|p| p.t_ms < 80_000 || p.t_ms > 130_000);
@@ -118,10 +126,10 @@ fn a_passage_at_a_path_end_or_a_hole_is_not_scored() {
     }
     let a = approach(&hole, ORIGIN, 2.0 * NM);
     assert!(a.passages.iter().all(|p| p.at_edge));
-    assert_eq!(choose_passage(&a, 0, &cfg()), Err(Exclusion::PassageAtEdge));
+    assert_eq!(chosen(&a, 0, &cfg()), Err(Exclusion::PassageAtEdge));
     // A path that never gets near, and an empty path.
     let a = approach(&[], ORIGIN, 2.0 * NM);
-    assert_eq!(choose_passage(&a, 0, &cfg()), Err(Exclusion::NoTruthPath));
+    assert_eq!(chosen(&a, 0, &cfg()), Err(Exclusion::NoTruthPath));
 }
 
 // REQ: OA-LTJ-004
@@ -144,10 +152,10 @@ fn the_estimate_is_scored_against_the_first_passage_not_before_its_issue() {
     assert_eq!(a.passages.len(), 2);
     let (first, second) = (a.passages[0].t_ms, a.passages[1].t_ms);
     assert!(second > first + 100_000);
-    assert_eq!(choose_passage(&a, 0, &cfg()), Ok(first));
-    assert_eq!(choose_passage(&a, first + 1_000, &cfg()), Ok(second));
+    assert_eq!(chosen(&a, 0, &cfg()), Ok(first));
+    assert_eq!(chosen(&a, first + 1_000, &cfg()), Ok(second));
     // Every passage before the issue: the last is kept (the event happened before the message).
-    assert_eq!(choose_passage(&a, second + 1_000, &cfg()), Ok(second));
+    assert_eq!(chosen(&a, second + 1_000, &cfg()), Ok(second));
 }
 
 // REQ: OA-LTJ-026
@@ -159,9 +167,9 @@ fn a_passage_in_progress_at_the_issue_is_chosen_by_its_closest_approach() {
     assert_eq!(a.passages.len(), 1);
     let t = a.passages[0].t_ms;
     // Issued while the aircraft is inside the cut and before the closest approach: that passage.
-    assert_eq!(choose_passage(&a, t - 20_000, &cfg()), Ok(t));
+    assert_eq!(chosen(&a, t - 20_000, &cfg()), Ok(t));
     // Issued inside the cut after the closest approach: the event is before the issue, kept.
-    assert_eq!(choose_passage(&a, t + 20_000, &cfg()), Ok(t));
+    assert_eq!(chosen(&a, t + 20_000, &cfg()), Ok(t));
     let kept = score(t + 60_000, t, t + 20_000, &cfg()).unwrap();
     assert!(kept.before_issue);
     assert_eq!(kept.error_s, 60.0);
@@ -348,13 +356,12 @@ fn the_error_is_the_estimate_minus_the_actual_time() {
     // The same sign through a crossing found on a path.
     let path = northbound(0, 10_000.0, 10_000.0, 10, 0.0);
     let a = approach(&path, ORIGIN, 2.0 * NM);
-    let actual = choose_passage(&a, 0, &c).unwrap();
+    let actual = chosen(&a, 0, &c).unwrap();
     assert!(score(actual + 30_000, actual, 0, &c).unwrap().error_s > 0.0);
     assert!(score(actual - 30_000, actual, 0, &c).unwrap().error_s < 0.0);
 }
 
-// REQ: OA-LTJ-008
-// REQ: OA-LTJ-025
+// REQ: OA-LTJ-008, OA-LTJ-025
 #[test]
 fn statistics_have_n_median_mean_percentiles_and_rms_in_any_input_order() {
     assert!(stats(&[]).is_none());
@@ -378,6 +385,18 @@ fn statistics_have_n_median_mean_percentiles_and_rms_in_any_input_order() {
     assert!((s.rms - 12.5f64.sqrt()).abs() < 1e-12);
     let one = stats(&[7.0]).unwrap();
     assert_eq!((one.median, one.p5, one.p95, one.rms), (7.0, 7.0, 7.0, 7.0));
+    // The rank rule is oa-bench's own, called directly: the same value for every length and
+    // percentile.
+    for n in 1..=250usize {
+        let v: Vec<f64> = (0..n).map(|i| i as f64 * 1.5).collect();
+        for p in [1u64, 5, 25, 50, 75, 95, 99, 100] {
+            assert_eq!(
+                nearest_rank(&v, p),
+                oa_bench::stats::nearest_rank(&v, p),
+                "n={n} p={p}"
+            );
+        }
+    }
 }
 
 fn leg(addr: u32, start: i64, end: i64, cs: &[u8]) -> Leg {
@@ -486,7 +505,7 @@ fn the_report_is_deterministic_and_every_number_carries_its_n() {
     let text = render_text(&header, &c, &[], &[s.clone()]);
     assert_eq!(text, render_text(&header, &c, &[], &[s.clone()]));
     assert!(
-        text.contains("5 to 10 min: n=3 flights=2 |e| median=20.0 p95=30.0 p99=30.0; bias median=10.0 mean=0.0"),
+        text.contains("5 to 10 min: n=3 flights=2 |e| median=20.0 p95=n<100 p99=n<100; bias median=10.0 mean=0.0"),
         "{text}"
     );
     assert!(text.contains("HEADLINE: address-joined, airborne at issue"));
@@ -503,7 +522,7 @@ fn the_report_is_deterministic_and_every_number_carries_its_n() {
         "system,kind,block,bin,n,flights,abs_median_s,abs_p95_s,abs_p99_s,bias_median_s,bias_mean_s,p5_s,p95_s,rms_s,over_1800s\n"
     ));
     assert!(
-        csv.contains("SYS,kind a,0,5 to 10 min,3,2,20.0,30.0,30.0,10.0,0.0,"),
+        csv.contains("SYS,kind a,0,5 to 10 min,3,2,20.0,,,10.0,0.0,"),
         "{csv}"
     );
     assert!(csv.contains("SYS,kind a,0,0 to 5 min,0,0,,,,,,,,,\n"));
@@ -555,6 +574,7 @@ fn rows_are_split_by_join_and_airborne_state_and_the_headline_is_the_first_block
         alt: Some((300.0, 60.0)),
         td: Some((365.0, 355.0)),
         issue_ms: issue,
+        ..Extra::default()
     };
     kind_record(&mut s.kinds[0], 1, 0, r, x);
     // The same estimate in the other three blocks.
@@ -586,11 +606,32 @@ fn rows_are_split_by_join_and_airborne_state_and_the_headline_is_the_first_block
     assert!(text.contains("over 1800s: n=1 (100.0%)"), "{text}");
 }
 
+/// Facts of a leg that flies from `from` to `to` (seconds).
+fn facts(dep_ok: bool, arr_ok: bool, cs_ok: bool, from_s: i64, to_s: i64) -> LegFacts {
+    LegFacts {
+        dep_ok,
+        arr_ok,
+        cs_ok,
+        air_from_ms: from_s * 1000,
+        air_to_ms: to_s * 1000,
+    }
+}
+
+const KNOWN: Known = Known {
+    dep: true,
+    arr: true,
+};
+const NONE_KNOWN: Known = Known {
+    dep: false,
+    arr: false,
+};
+const W: i64 = 3 * 3_600_000;
+
 // REQ: OA-LTJ-029
 #[test]
 fn a_message_binds_one_leg_and_a_turnaround_is_never_scored() {
-    // One aircraft: leg 0 flies 0 to 1,000 s; leg 1 (the turnaround) flies 5,000 to 6,000 s; leg 2
-    // flies 20,000 s on, past the window.
+    // One aircraft: leg 0 flies 0 to 1,000 s (to its own flight's airports); leg 1 (the turnaround)
+    // flies 5,000 to 6,000 s; leg 2 flies 20,000 s on, past the window.
     let a = 0xa1;
     let legs = [
         leg(a, 0, 1_000_000, b"AAA1"),
@@ -600,25 +641,368 @@ fn a_message_binds_one_leg_and_a_turnaround_is_never_scored() {
     let ix = index_legs(&legs);
     let cands = all_legs_of(&ix, a);
     assert_eq!(cands, vec![0, 1, 2]);
-    let w = 3 * 3_600_000;
-    // In progress at the issue: that leg, whatever the airports.
-    assert_eq!(bind_leg(&ix, &cands, &[false; 3], 500_000, w), Some(0));
-    // Between legs: the first starting after, if its take-off airport is the departure airport.
-    assert_eq!(bind_leg(&ix, &cands, &[true; 3], 2_000_000, w), Some(1));
-    assert_eq!(
-        bind_leg(&ix, &cands, &[true, false, true], 2_000_000, w),
-        None
-    );
-    // Past the window (leg 2 starts 5 h later): no leg.
-    assert_eq!(bind_leg(&ix, &cands, &[true; 3], 6_500_000, w), None);
+    // The flight departs where leg 1 took off and lands where leg 0 landed: it is leg 1's.
+    let f = [
+        facts(false, true, false, 10, 990),
+        facts(true, false, false, 5_010, 5_990),
+        facts(true, false, false, 20_010, 20_990),
+    ];
+    // Between the legs: the first of its own starting after, within the window.
+    let b = bind_leg(&ix, &cands, &f, KNOWN, 2_000_000, W);
+    assert_eq!((b.leg, b.refused), (Ok(1), None));
+    // Past the window (leg 2 starts 5 h later, leg 1 has gone): too far, and counted as such.
+    let b = bind_leg(&ix, &cands, &f, KNOWN, 6_500_000, W);
+    assert_eq!(b.leg, Err(Miss::TooFar));
     // After every leg: no leg.
-    assert_eq!(bind_leg(&ix, &cands, &[true; 3], 30_000_000, w), None);
-    // A flight whose messages are all before leg 0 and whose window reaches leg 1 only through
-    // the rule never binds the turnaround leg 1 for messages inside leg 0: one leg per message.
-    assert_eq!(bind_leg(&ix, &cands, &[true; 3], 900_000, w), Some(0));
+    let b = bind_leg(&ix, &cands, &f, KNOWN, 30_000_000, W);
+    assert_eq!(b.leg, Err(Miss::NoLeg));
+    // Leg 0 in progress and airborne: ADS-B says it lands at the flight's arrival airport, so it
+    // is the flight's.
+    let b = bind_leg(&ix, &cands, &f, KNOWN, 500_000, W);
+    assert_eq!(b.leg, Ok(0));
     // The callsign window: a leg starting over 3 h after the first issue is refused.
     assert!(leg_in_window(&legs[1], 0, 6_000_000_000));
-    assert!(!leg_in_window(&legs[2], 0, w));
-    assert!(leg_in_window(&legs[0], 500_000, w));
-    assert!(!leg_in_window(&legs[0], 2_000_000, w));
+    assert!(!leg_in_window(&legs[2], 0, W));
+    assert!(leg_in_window(&legs[0], 500_000, W));
+    assert!(!leg_in_window(&legs[0], 2_000_000, W));
+}
+
+// REQ: OA-LTJ-035
+#[test]
+fn an_in_progress_leg_that_is_another_flights_is_refused_and_counted() {
+    // The turnaround: the aircraft flew flight A into the airport (leg 0, 0 to 1,000 s) and flies
+    // flight B out of it (leg 1, 5,000 to 6,000 s); one fix lies on both legs. A message of flight
+    // B issued while the aircraft still flies A's leg must not bind it.
+    let a = 0xa1;
+    let legs = [
+        leg(a, 0, 1_000_000, b"AAA1"),
+        leg(a, 5_000_000, 6_000_000, b"AAA1"),
+    ];
+    let ix = index_legs(&legs);
+    let cands = all_legs_of(&ix, a);
+    // Flight B departs the airport leg 1 took off from; leg 0 took off elsewhere and landed there.
+    let f = [
+        facts(false, false, true, 10, 990),
+        facts(true, false, true, 5_010, 5_990),
+    ];
+    let known = Known {
+        dep: true,
+        arr: false,
+    };
+    // Issued during leg 0: refused as not its own (it neither took off at B's departure airport
+    // nor lands at an arrival airport of B), and the next leg binds.
+    let b = bind_leg(&ix, &cands, &f, known, 500_000, W);
+    assert_eq!((b.leg, b.refused), (Ok(1), Some(Refused::NotOwn)));
+    // The same message when leg 1 is not B's either: no leg of its own.
+    let g = [f[0], facts(false, false, true, 5_010, 5_990)];
+    let b = bind_leg(&ix, &cands, &g, known, 500_000, W);
+    assert_eq!(b.leg, Err(Miss::NotOwn));
+    assert_eq!(b.refused, Some(Refused::NotOwn));
+    // Arriving at an airport the flight lands at is also its own, even when it did not take off
+    // at the departure airport (a flight that departed outside the clip).
+    let known_both = Known {
+        dep: true,
+        arr: true,
+    };
+    let h = [facts(false, true, false, 10, 990), f[1]];
+    let b = bind_leg(&ix, &cands, &h, known_both, 500_000, W);
+    assert_eq!((b.leg, b.refused), (Ok(0), None));
+    // With neither airport known, the callsign decides; without a match no leg binds, and the
+    // next-leg branch needs the callsign too.
+    let c = [
+        facts(false, false, true, 10, 990),
+        facts(false, false, false, 5_010, 5_990),
+    ];
+    let b = bind_leg(&ix, &cands, &c, NONE_KNOWN, 500_000, W);
+    assert_eq!(b.leg, Ok(0));
+    let d = [
+        facts(false, false, false, 10, 990),
+        facts(false, false, false, 5_010, 5_990),
+    ];
+    let b = bind_leg(&ix, &cands, &d, NONE_KNOWN, 500_000, W);
+    assert_eq!(
+        (b.leg, b.refused),
+        (Err(Miss::NotOwn), Some(Refused::NotOwn))
+    );
+    // A departure airport that is not in NASR needs the callsign for the next leg.
+    let e = [
+        facts(true, false, false, 10, 990),
+        facts(true, false, true, 5_010, 5_990),
+    ];
+    let unknown_dep = Known {
+        dep: false,
+        arr: false,
+    };
+    let b = bind_leg(&ix, &cands, &e, unknown_dep, 2_000_000, W);
+    assert_eq!(b.leg, Ok(1));
+    let e2 = [e[0], facts(true, false, false, 5_010, 5_990)];
+    let b = bind_leg(&ix, &cands, &e2, unknown_dep, 2_000_000, W);
+    assert_eq!(b.leg, Err(Miss::NotOwn));
+}
+
+// REQ: OA-LTJ-036
+#[test]
+fn a_leg_that_landed_before_the_issue_never_binds_as_in_progress() {
+    // Taxi-in: the aircraft landed at 900 s and its leg runs to 1,000 s (reports on the ground).
+    // A message at 950 s of the flight leaving next must not bind the leg just flown.
+    let a = 0xa1;
+    let legs = [
+        leg(a, 0, 1_000_000, b"AAA1"),
+        leg(a, 5_000_000, 6_000_000, b"AAA1"),
+    ];
+    let ix = index_legs(&legs);
+    let cands = all_legs_of(&ix, a);
+    let f = [
+        facts(true, true, true, 10, 900),
+        facts(true, false, true, 5_010, 5_990),
+    ];
+    let b = bind_leg(&ix, &cands, &f, KNOWN, 950_000, W);
+    assert_eq!((b.leg, b.refused), (Ok(1), Some(Refused::Landed)));
+    // With no next leg: no leg, not a binding of the taxi-in.
+    let b = bind_leg(&ix, &cands[..1], &f[..1], KNOWN, 950_000, W);
+    assert_eq!(
+        (b.leg, b.refused),
+        (Err(Miss::NoLeg), Some(Refused::Landed))
+    );
+    // Before the first airborne report the leg is not yet airborne: the flight's own next leg.
+    let b = bind_leg(&ix, &cands[..1], &f[..1], KNOWN, 5_000, W);
+    assert_eq!(b.leg, Ok(0));
+    assert!(!f[0].airborne_at(5_000));
+    assert!(f[0].airborne_at(10_000) && f[0].airborne_at(900_000));
+    assert!(!f[0].airborne_at(901_000));
+}
+
+// REQ: OA-LTJ-037
+#[test]
+fn the_airborne_span_runs_from_the_first_airborne_report_to_the_landing_or_the_last_report() {
+    let c = cfg();
+    // Ground, ground, airborne to 100 s, ground from 104 s on: the span ends at the first ground
+    // report of the landing.
+    let mut v = vec![st(0, 0.0, true), st(10, 0.0, true)];
+    v.extend((20..=100).step_by(10).map(|t| st(t, 1000.0, false)));
+    v.push(st(104, 1500.0, true));
+    v.push(st(120, 1500.0, true));
+    assert_eq!(airborne_span(&v, &c), Some((20_000, 104_000)));
+    // Persistence is measured from the last airborne report: an airborne report within 30 s of
+    // it makes the change a blip, so the span runs on to the real landing.
+    let mut w: Vec<AirState> = v[..11].to_vec();
+    w.extend([
+        st(104, 1500.0, true),
+        st(110, 1500.0, false),
+        st(200, 0.0, true),
+    ]);
+    assert_eq!(airborne_span(&w, &c), Some((20_000, 200_000)));
+    // No landing: to the last report. No airborne report: none.
+    let up: Vec<AirState> = (0..=5).map(|t| st(t * 10, 1000.0, false)).collect();
+    assert_eq!(airborne_span(&up, &c), Some((0, 50_000)));
+    assert_eq!(airborne_span(&[st(0, 0.0, true)], &c), None);
+    assert_eq!(airborne_span(&[], &c), None);
+}
+
+// REQ: OA-LTJ-038
+#[test]
+fn the_landing_persistence_is_measured_from_the_last_airborne_report() {
+    let c = cfg();
+    let arp = ORIGIN;
+    // Last airborne at 100 s, first ground at 110 s: an airborne report at 125 s is within 30 s
+    // of the last airborne report (130 s), so it is not a landing; at 135 s it is not within it.
+    let base = |t_back: i64| {
+        vec![
+            st_with(90, 0.0, false, 300, 500),
+            st_with(100, 0.0, false, 300, 500),
+            st_with(110, 0.0, true, 0, 500),
+            st_with(t_back, 0.0, false, 300, 500),
+            st_with(t_back + 5, 0.0, true, 0, 500),
+        ]
+    };
+    let blip = landings(&base(125), arp, Some(0.0), &c);
+    assert_eq!(blip.refused_persist, 1);
+    assert!(blip.landings.iter().all(|l| l.t_air_ms != 100_000));
+    let held = landings(&base(135), arp, Some(0.0), &c);
+    assert!(
+        held.landings.iter().any(|l| l.t_air_ms == 100_000),
+        "{held:?}"
+    );
+}
+
+// REQ: OA-LTJ-039
+#[test]
+fn a_passage_is_at_an_edge_only_when_its_closest_segment_or_a_neighbour_touches_one() {
+    // A path from 4,000 m south to 4,000 m north in 5 s steps at 100 m/s: the point is at 0 m,
+    // the cut 2,000 m: the closest approach is in the middle, far from the ends.
+    let c = cfg();
+    let place = ORIGIN;
+    let mid = northbound(0, 4_000.0, 4_000.0, 5, 0.0);
+    let a = approach(&mid, place, 2_000.0);
+    assert!(!a.passages[0].at_edge);
+    // A path that starts within the cut and ends in it too, but whose closest approach is in
+    // the middle: not at an edge (the ends are not next to the closest segment).
+    let short = northbound(0, 1_500.0, 1_500.0, 5, 0.0);
+    let a = approach(&short, place, 2_000.0);
+    assert!(!a.passages[0].at_edge, "{a:?}");
+    // The closest approach is at the last segment: at an edge.
+    let ends = northbound(0, 1_500.0, 100.0, 5, 0.0);
+    let a = approach(&ends, place, 2_000.0);
+    assert!(a.passages[0].at_edge);
+    assert_eq!(chosen(&a, 0, &c), Err(Exclusion::PassageAtEdge));
+}
+
+// REQ: OA-LTJ-040
+#[test]
+fn the_report_counts_offered_no_leg_and_scored_per_bin_and_the_landing_exclusions_by_leg_end() {
+    let c = cfg();
+    let mut s = system_new("SYS", &["eta"]);
+    let k = &mut s.kinds[0];
+    let issue = 10_000_000;
+    // Offered in bin 2 (10 to 20 min): one scored, two with no leg (one the flight's own absent,
+    // one the departure past the window), one landing exclusion at the box edge, one inside.
+    let ok = score(issue + 900_000, issue + 960_000, issue, &c);
+    kind_record(k, 1, 0, ok, Extra::default());
+    let at = |lead_bin, end_at_edge| Extra {
+        lead_bin,
+        end_at_edge,
+        ..Extra::default()
+    };
+    kind_record(k, 1, 0, Err(Exclusion::LegNotOwn), at(Some(2), false));
+    kind_record(k, 1, 0, Err(Exclusion::DepartureTooFar), at(Some(2), false));
+    kind_record(k, 1, 0, Err(Exclusion::NoLanding), at(Some(2), true));
+    kind_record(k, 1, 0, Err(Exclusion::Diversion), at(Some(2), false));
+    kind_record(k, 1, 0, Err(Exclusion::NoLeg), at(None, false));
+    assert_eq!(k.offered_bin[2], 5);
+    assert_eq!(k.offered_bin[BIN_COUNT], 1);
+    assert_eq!(
+        (k.not_own_bin[2], k.too_far_bin[2], k.no_leg_bin[BIN_COUNT]),
+        (1, 1, 1)
+    );
+    airport_offer(k, "KORD");
+    airport_offer(k, "KORD");
+    airport_scored(k, "KORD");
+    let text = render_text(&[], &c, &[], &[s]);
+    assert!(
+        text.contains("10 to 20 min: offered=5 no leg=2 (no leg of the flight's own=1; departure past the window=1) scored=1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("no stated lead in range: offered=1 no leg=1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("(bound leg ends inside the box: 0; at its edge: 1)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("(bound leg ends inside the box: 1; at its edge: 0)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("KORD: offered=2 scored=1 share=50.0%"),
+        "{text}"
+    );
+    assert!(
+        text.contains("bound leg has no ground report") || !text.contains("no ground coverage"),
+        "{text}"
+    );
+}
+
+// REQ: OA-LTJ-041, OA-LTJ-046
+#[test]
+fn tail_percentiles_are_printed_only_from_one_hundred_values_and_every_kind_has_a_last_message_row()
+{
+    let c = cfg();
+    let mut s = system_new("SYS", &["eta", "sta_sfx"]);
+    let issue = 10_000_000;
+    // 99 rows: no p95 or p99. Two flights; flight 1 has two messages in the bin: only the last
+    // counts in the one-row-per-flight table.
+    for i in 0..99 {
+        let r = score(issue + 480_000, issue + 480_000 - i * 1000, issue, &c);
+        kind_record(
+            &mut s.kinds[0],
+            i as u32 % 2,
+            0,
+            r,
+            Extra {
+                issue_ms: issue,
+                ..Extra::default()
+            },
+        );
+    }
+    let r = score(issue + 480_000, issue + 400_000, issue, &c);
+    kind_record(
+        &mut s.kinds[0],
+        1,
+        0,
+        r,
+        Extra {
+            issue_ms: issue + 5_000,
+            ..Extra::default()
+        },
+    );
+    let k = &s.kinds[0];
+    // Flight 0's last message is the issue one (49 or 50 rows), flight 1's is the later one.
+    let last = &k.last_in_bin[&(1, 1)];
+    assert_eq!(last.0, issue + 5_000);
+    assert_eq!(last.1, vec![80.0]);
+    let text = render_text(&[], &c, &[], &[s.clone()]);
+    assert!(
+        text.contains("5 to 10 min: n=100 flights=2 |e| median="),
+        "{text}"
+    );
+    assert!(
+        text.contains("one message per flight and stated-lead bin"),
+        "{text}"
+    );
+    assert!(
+        text.contains("schedule target (metering), not a forecast"),
+        "{text}"
+    );
+    // 100 rows: tails printed; 99: not.
+    let mut few = system_new("SYS", &["eta"]);
+    for i in 0..99 {
+        let r = score(issue + 480_000, issue + 480_000 - i * 1000, issue, &c);
+        kind_record(&mut few.kinds[0], 0, 0, r, Extra::default());
+    }
+    let t99 = render_text(&[], &c, &[], &[few.clone()]);
+    assert!(
+        t99.contains("5 to 10 min: n=99 flights=1 |e| median=49.0 p95=n<100 p99=n<100"),
+        "{t99}"
+    );
+    assert!(
+        render_csv(&few).contains(",5 to 10 min,99,1,49.0,,,"),
+        "{}",
+        render_csv(&few)
+    );
+    let r = score(issue + 480_000, issue + 380_000, issue, &c);
+    kind_record(&mut few.kinds[0], 0, 0, r, Extra::default());
+    let t100 = render_text(&[], &c, &[], &[few]);
+    assert!(!t100.contains("n<100"), "{t100}");
+    // The abeam table.
+    let mut ab = system_new("SYS", &["eta"]);
+    let r = score(issue + 480_000, issue + 400_000, issue, &c).unwrap();
+    abeam_add(&mut ab.kinds[0], &r);
+    let ta = render_text(&[], &c, &[], &[ab]);
+    assert!(ta.contains("crossings abeam"), "{ta}");
+}
+
+// REQ: OA-LTJ-042
+#[test]
+fn the_box_edge_is_within_the_margin_of_any_side() {
+    let b = [38.5, 46.5, -93.5, -83.5];
+    let m = 10.0 * NM;
+    let at = |lat, lon| {
+        near_box_edge(
+            Place {
+                lat_deg: lat,
+                lon_deg: lon,
+            },
+            b,
+            m,
+        )
+    };
+    assert!(!at(42.0, -88.0));
+    // 5 NM from the east edge: at the edge; 20 NM: not.
+    assert!(at(42.0, -83.5 - 5.0 / 60.0 / 0.74));
+    assert!(!at(42.0, -83.5 - 20.0 / 60.0 / 0.74));
+    assert!(at(38.5 + 5.0 / 60.0, -88.0));
+    assert!(at(46.5, -88.0));
+    assert!(at(42.0, -93.6));
 }

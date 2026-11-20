@@ -17,7 +17,7 @@ use oa_legacy_traj::core::join::OUTCOME_NAMES;
 use oa_legacy_traj::core::report::{render_counts_csv, render_text};
 use oa_legacy_traj::core::types::{exclusion_index, Config, Exclusion, Place};
 use oa_legacy_traj::shell::places::{apply_places, PlaceTable, PlacesFile};
-use oa_legacy_traj::shell::run::{score_all, Inputs, Scored};
+use oa_legacy_traj::shell::run::{population_line, score_all, Inputs, Scored};
 
 const M_PER_DEG: f64 = 111_194.926_644_558_74;
 /// A time in 2023, far from every sealed window.
@@ -345,6 +345,11 @@ fn eram_is_scored_along_its_route_by_look_ahead_with_the_sign_estimate_minus_act
     near(e[2], 60.0);
     near(e[3], 60.0);
     assert_eq!(k.resolved_ambiguous, 1);
+    assert_eq!(
+        s.systems[0].counters
+            ["names with several places resolved against the filed route's neighbouring points"],
+        1
+    );
     assert!(k.groups[0].errors[2..].iter().all(Vec::is_empty));
     // The crossing at the three cuts: the 2 NM headline equals its sensitivity row.
     assert_eq!(k.sens["crossing cut 2.0 NM"][1].len(), 4);
@@ -358,8 +363,7 @@ fn eram_is_scored_along_its_route_by_look_ahead_with_the_sign_estimate_minus_act
     assert_eq!(x(Exclusion::NotJoined), 2);
 }
 
-// REQ: OA-LTJ-015
-// REQ: OA-LTJ-031
+// REQ: OA-LTJ-015, OA-LTJ-031
 #[test]
 fn tbfm_is_scored_against_the_meter_fix_crossing_and_the_landing() {
     let s = scored();
@@ -658,4 +662,247 @@ fn no_two_distinct_airports_share_a_key_and_a_shared_key_is_found() {
             t2.collisions
         );
     }
+}
+
+const ADDR4: u32 = 0xa00004;
+/// The airport the turnaround aircraft lands at and takes off from, on the meridian 0.54 degrees
+/// south of the fix both legs pass.
+const D4: Place = Place {
+    lat_deg: 39.46,
+    lon_deg: -88.0,
+};
+/// The fix both legs of aircraft 4 pass.
+const F4: Place = Place {
+    lat_deg: 40.0,
+    lon_deg: -88.0,
+};
+const CA_S: i64 = T0_S + 10_600;
+const CB_S: i64 = CA_S + 3_000;
+
+/// Aircraft 4 flies south through `F4` at `CA_S` and lands at `D4` (leg A, the inbound flight);
+/// then flies north from `D4` through `F4` at `CB_S` (leg B, the outbound flight).
+fn clip4() -> Reports {
+    let mut r = Reports::default();
+    for t in CA_S - 600..=CA_S + 600 {
+        let lat = 40.0 - 100.0 * (t - CA_S) as f64 / M_PER_DEG;
+        reports_push(
+            &mut r,
+            &row_at(ADDR4, t, (lat, -88.0), b"TST4", false, 5000),
+        );
+    }
+    for t in CB_S - 600..=CB_S + 600 {
+        let lat = 40.0 + 100.0 * (t - CB_S) as f64 / M_PER_DEG;
+        reports_push(
+            &mut r,
+            &row_at(ADDR4, t, (lat, -88.0), b"TST4", false, 5000),
+        );
+    }
+    r
+}
+
+fn legacy4() -> Legacy {
+    let mut leg = new_legacy();
+    // Flight A lands at D4: its message in progress is its own. Flight B departs D4: its message,
+    // issued while the aircraft still flies leg A, passes F4 on leg A too, but is leg B's.
+    let fa = flight(&mut leg, 10, Some(ADDR4), b"TST4", b"PLAN10", b"KDDD");
+    let fb = flight(&mut leg, 11, Some(ADDR4), b"TST4", b"PLAN11", b"");
+    leg.flights.dep[fb as usize] = pad(b"KDDD");
+    let abeam = Place {
+        lat_deg: 40.0,
+        lon_deg: -88.0
+            + 3.0 * 1852.0 / (M_PER_DEG * (40.0f64 * std::f64::consts::PI / 180.0).cos()),
+    };
+    push_route(
+        &mut leg,
+        fa,
+        (CA_S - 300) * 1000,
+        &[
+            pt(b"WPF", Some(F4), Some(CA_S + 20)),
+            pt(b"WPQ", Some(abeam), Some(CA_S + 20)),
+        ],
+    );
+    push_route(
+        &mut leg,
+        fb,
+        (CA_S - 300) * 1000,
+        &[pt(b"WPF", Some(F4), Some(CB_S + 20))],
+    );
+    // The same, issued 590 s before leg A's passage: 60 minutes of lead. The earlier binding
+    // scored it against leg A's passage in the headline.
+    push_route(
+        &mut leg,
+        fb,
+        (CA_S - 590) * 1000,
+        &[pt(b"WPF", Some(F4), Some(CB_S + 20))],
+    );
+    leg
+}
+
+// REQ: OA-LTJ-035, OA-LTJ-036, OA-LTJ-045, OA-LTJ-047
+#[test]
+fn the_outbound_flights_message_is_never_scored_against_the_inbound_passage_of_the_same_fix() {
+    let reports = clip4();
+    let mut tcfg = adsb_truth::config_with(None, None);
+    tcfg.loo = false;
+    assert_eq!(adsb_truth::build(&reports, &tcfg).unwrap().legs.len(), 2);
+    let s = scored_with(reports, legacy4(), |t| {
+        t.airports.insert("DDD".to_string(), vec![D4]);
+    });
+    let e = &s.systems[0];
+    let k = &e.kinds[0];
+    // Flight A, in progress on leg A, which lands at its airport: the headline, 20 s late.
+    assert_eq!(k.groups[0].errors.iter().map(Vec::len).sum::<usize>(), 1);
+    near(k.groups[0].errors[1][0], 20.0);
+    // Flight B: the message was issued while the aircraft flew leg A, which is not its own
+    // (it took off elsewhere). It binds leg B, not yet airborne: pre-departure, 20 s late; not
+    // the inbound passage, 3,000 s earlier.
+    assert_eq!(k.groups[1].errors.iter().map(Vec::len).sum::<usize>(), 2);
+    near(k.groups[1].errors[4][0], 20.0);
+    near(k.groups[1].errors[5][0], 20.0);
+    assert_eq!(
+        e.counters["leg binding: in-progress leg refused, airborne but not the flight's own (neither airport matches, or the callsign differs when no airport is known), messages"],
+        2
+    );
+    // The row the earlier binding scored in the headline at 60 to 120 minutes: now pre-departure.
+    let all = e
+        .counters
+        .iter()
+        .find(|(k, _)| k.starts_with("ERAM headline rows at 60 to 120 min under the earlier"))
+        .map(|(_, n)| *n);
+    assert_eq!(all, Some(1));
+    let fate = e
+        .counters
+        .iter()
+        .find(|(k, _)| k.starts_with("  of them, now: "))
+        .unwrap();
+    assert!(
+        fate.0.contains("scored, but in the class: PRE-DEPARTURE"),
+        "{fate:?}"
+    );
+    assert_eq!(*fate.1, 1);
+    // The point 3 NM abeam of leg A is beyond the 2 NM headline cut, scored at 5 NM, and in the
+    // abeam table, not in the headline.
+    assert_eq!(k.exclusions[exclusion_index(Exclusion::BeyondCut)], 1);
+    assert_eq!(k.abeam.iter().map(Vec::len).sum::<usize>(), 1);
+    near(k.abeam[1][0], 20.0);
+    assert_eq!(k.sens["crossing cut 5.0 NM"][1].len(), 2);
+    // Every row scored at one cut is scored at the next larger one.
+    for bin in 0..6 {
+        let n: Vec<usize> = ["0.5", "1.0", "2.0", "5.0"]
+            .iter()
+            .map(|c| {
+                k.sens
+                    .get(&format!("crossing cut {c} NM"))
+                    .map_or(0, |v| v[bin].len())
+            })
+            .collect();
+        assert!(n.windows(2).all(|w| w[0] <= w[1]), "bin {bin}: {n:?}");
+    }
+    assert!(!e
+        .counters
+        .keys()
+        .any(|c| c.starts_with("headline rows scored at a smaller crossing cut")));
+    // The offered rows are accounted per bin.
+    assert_eq!(k.offered_bin.iter().sum::<u64>(), 4);
+    assert_eq!(k.offered_bin[1], 2);
+    assert_eq!(k.offered_bin[4], 1);
+    assert_eq!(k.offered_bin[5], 1);
+}
+
+// REQ: OA-LTJ-043
+#[test]
+fn a_name_with_several_places_uses_the_route_geometry_else_the_flown_path_and_counts_which() {
+    // A route of one point with no coordinates: no route geometry, so the flown path decides.
+    let mut leg = new_legacy();
+    let f = flight(&mut leg, 12, Some(ADDR1), b"TST1", b"PLAN12", b"");
+    push_route(
+        &mut leg,
+        f,
+        (TC_S - 420) * 1000,
+        &[pt(b"AMBIG", None, Some(TC_S + 60))],
+    );
+    // A route whose only coordinates are in another message: the route's other points.
+    let g = flight(&mut leg, 13, Some(ADDR1), b"TST1", b"PLAN13", b"");
+    push_route(
+        &mut leg,
+        g,
+        (TC_S - 420) * 1000,
+        &[pt(b"AMBIG", None, Some(TC_S + 60))],
+    );
+    push_route(
+        &mut leg,
+        g,
+        (TC_S - 300) * 1000,
+        &[pt(b"WPTP", Some(P), Some(TC_S + 30))],
+    );
+    let s = scored_with(clip(), leg, |_| {});
+    let e = &s.systems[0];
+    let c = |k: &str| e.counters.get(k).copied().unwrap_or(0);
+    assert_eq!(
+        c("names with several places resolved against the flown path (the flight's routes carry no coordinates)"),
+        1
+    );
+    assert_eq!(
+        c("names with several places resolved against the filed route's other points (no neighbour has coordinates)"),
+        1
+    );
+    assert_eq!(
+        c("names with several places resolved against the filed route's neighbouring points"),
+        0
+    );
+    // Both took the place on the flown path.
+    let k = &e.kinds[0];
+    assert_eq!(k.groups[0].errors.iter().map(Vec::len).sum::<usize>(), 3);
+}
+
+// REQ: OA-LTJ-044
+#[test]
+fn a_runway_estimate_out_of_range_is_counted_as_such_before_the_missing_ground_report() {
+    // Aircraft 1 has no ground report on its leg: a landing estimate for it is excluded for that
+    // reason when its lead is in range, but an estimate before its issue is out of range first.
+    let mut leg = new_legacy();
+    let f = flight(&mut leg, 14, Some(ADDR1), b"TST1", b"PLAN14", b"KORD");
+    let _ = f;
+    for (est, issue) in [(TC_S + 600, TC_S - 600), (TC_S - 700, TC_S - 600)] {
+        push_tbfm(
+            &mut leg,
+            pad(b"PLAN14"),
+            pad(b"TST1"),
+            pad(b"MFXB"),
+            tbfm_kind::ETA_RWY,
+            est * 1000,
+            issue * 1000,
+        );
+    }
+    let s = scored_with(clip(), leg, |_| {});
+    let rwy = &s.systems[1].kinds[2];
+    let x = |r: Exclusion| rwy.exclusions[exclusion_index(r)];
+    assert_eq!(x(Exclusion::NoGroundCoverage), 1);
+    assert_eq!(x(Exclusion::EstimateBeforeIssue), 1);
+    assert_eq!(rwy.estimates, 2);
+    let text = render_text(&[], &cfg(), &s.sections, &s.systems);
+    assert!(
+        text.contains("bound leg has no ground report: n=1"),
+        "{text}"
+    );
+    // The aircraft's leg ends inside the clip box, 600 s after its last report is inside it.
+    assert!(
+        text.contains("(bound leg ends inside the box: 1; at its edge: 0)"),
+        "{text}"
+    );
+}
+
+// REQ: OA-LTJ-032
+#[test]
+fn the_population_line_gives_the_flights_the_join_share_and_the_scored_and_uncovered_estimates() {
+    let s = scored();
+    let line = population_line(&s.systems[0], s.sfdps_flights.1);
+    assert!(
+        line.starts_with("3 flights in the recording (3 counted by join), 2 joined to an ADS-B aircraft in the ZAU clip (66.7%; 1 of them by callsign), 2 with a scored estimate, 0 estimates excluded because the bound leg has no ground report"),
+        "{line}"
+    );
+    // TBFM: the two flights of the recording joined by address, the runway estimates excluded
+    // for no ground coverage are counted.
+    let t = population_line(&s.systems[1], s.recording_flights[0]);
+    assert!(t.contains("flights in the recording"), "{t}");
 }

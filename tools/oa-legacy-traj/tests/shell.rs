@@ -95,8 +95,7 @@ fn files_are_written_under_a_temporary_name_and_renamed_with_none_left_behind() 
     let _ = fs::remove_dir_all(&t);
 }
 
-// REQ: OA-LTJ-019
-// REQ: OA-LTJ-033
+// REQ: OA-LTJ-019, OA-LTJ-033
 #[test]
 fn a_link_into_sealed_data_is_refused_for_every_input_and_the_output() {
     let t = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ltj-sealed");

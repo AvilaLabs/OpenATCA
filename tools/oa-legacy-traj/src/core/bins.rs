@@ -1,6 +1,6 @@
 //! Look-ahead bins and the statistics of an error sample. Core (pure).
 
-use crate::core::types::{Config, Exclusion, Sample};
+use crate::core::types::{Config, Exclusion, Sample, NO_TIME};
 
 /// Bin edges, minutes of look-ahead: bin `k` is from `EDGES_MIN[k]` up to (excluding)
 /// `EDGES_MIN[k + 1]`.
@@ -31,6 +31,26 @@ pub fn bin_of(look_ahead_ms: i64) -> Option<usize> {
     })
 }
 
+/// The bin of a stated lead, when both times are known and the lead is in range.
+pub fn lead_bin(est_ms: i64, issue_ms: i64) -> Option<usize> {
+    if est_ms == NO_TIME || issue_ms == NO_TIME {
+        return None;
+    }
+    bin_of(est_ms.saturating_sub(issue_ms))
+}
+
+/// Whether an estimate's stated lead is in range: not before the issue and short of the last bin.
+pub fn lead_in_range(est_ms: i64, issue_ms: i64, cfg: &Config) -> Result<(), Exclusion> {
+    let lead_ms = est_ms - issue_ms;
+    if lead_ms < 0 {
+        return Err(Exclusion::EstimateBeforeIssue);
+    }
+    if lead_ms >= cfg.max_look_ahead_ms || bin_of(lead_ms).is_none() {
+        return Err(Exclusion::LookAheadBeyondRange);
+    }
+    Ok(())
+}
+
 /// Scores one estimate against the actual time: the error is the estimate minus the actual time,
 /// in seconds (positive when the estimate is later than what happened). The bin is that of the
 /// stated lead, the estimate minus the issue time. An event before the issue time is kept (it is
@@ -57,6 +77,7 @@ pub fn score(
         bin,
         act_bin: bin_of(actual_ms - issue_ms),
         before_issue: actual_ms < issue_ms,
+        dist_m: 0.0,
     })
 }
 

@@ -31,9 +31,11 @@ pub struct Config {
     pub leg_airport_m: f64,
     /// A message binds a leg starting after it only within this, ms.
     pub leg_window_ms: i64,
-    /// A row is airborne at issue when the aircraft has an airborne report within this before
-    /// the issue time, ms.
-    pub airborne_window_ms: i64,
+    /// The clip box, degrees: south, north, west and east edges. A truth leg whose last place is
+    /// within `edge_margin_m` of an edge ended where the aircraft left the box.
+    pub box_deg: [f64; 4],
+    /// How near the box edge a leg's end counts as at the edge, metres.
+    pub edge_margin_m: f64,
 }
 
 impl Config {
@@ -54,7 +56,8 @@ impl Config {
             landing_speed_ms: 80.0,
             leg_airport_m: 10.0 * 1852.0,
             leg_window_ms: 3 * 3_600_000,
-            airborne_window_ms: 60_000,
+            box_deg: [38.5, 46.5, -93.5, -83.5],
+            edge_margin_m: 10.0 * 1852.0,
         }
     }
 }
@@ -167,15 +170,19 @@ pub enum Exclusion {
     PlaceAmbiguous,
     /// The airport is not in NASR or the places file.
     AirportUnknown,
-    /// No truth leg is in progress at the issue time or starts within the window after it.
+    /// No truth leg of the aircraft is in progress at the issue time or starts after it.
     NoLeg,
+    /// Legs of the aircraft are in progress or start after the issue, but none is the flight's own.
+    LegNotOwn,
+    /// The flight's own next leg starts more than the window after the issue time.
+    DepartureTooFar,
     /// The bound leg has no truth sample.
     NoTruthPath,
     /// The truth path never came within the cut distance of the point.
     BeyondCut,
     /// The chosen passage begins or ends at a path end or a hole in the truth.
     PassageAtEdge,
-    /// The bound leg has no ground report after the issue time (no ground coverage).
+    /// The bound leg has no ground report.
     NoGroundCoverage,
     /// The bound leg has no airborne-to-ground change near the airport.
     NoLanding,
@@ -192,7 +199,7 @@ pub enum Exclusion {
 }
 
 /// Number of [`Exclusion`] values.
-pub const EXCLUSION_COUNT: usize = 17;
+pub const EXCLUSION_COUNT: usize = 19;
 /// Display names, indexed by [`exclusion_index`].
 pub const EXCLUSION_NAMES: [&str; EXCLUSION_COUNT] = [
     "message gave no time for the point",
@@ -201,11 +208,13 @@ pub const EXCLUSION_NAMES: [&str; EXCLUSION_COUNT] = [
     "point name not in NASR or the places file",
     "point name has several places, none chosen",
     "airport not in NASR or the places file",
-    "no leg (none in progress at issue or starting within the window after it)",
+    "no leg (none of the aircraft in progress at issue or starting after it)",
+    "no leg of the flight's own (the aircraft's legs there are another flight's)",
+    "departure more than the window after the issue (pre-departure, dropped as no leg)",
     "no truth sample of the bound leg",
     "truth path never within the cut distance",
     "passage at a path end or hole in the truth",
-    "no ground coverage (no ground report on the bound leg after issue)",
+    "bound leg has no ground report",
     "no airborne-to-ground change near the airport on the bound leg",
     "only touch-and-go, blip or too-high changes near the airport",
     "bound leg landed elsewhere (diversion or another flight's leg)",
@@ -224,16 +233,18 @@ pub fn exclusion_index(e: Exclusion) -> usize {
         Exclusion::PlaceAmbiguous => 4,
         Exclusion::AirportUnknown => 5,
         Exclusion::NoLeg => 6,
-        Exclusion::NoTruthPath => 7,
-        Exclusion::BeyondCut => 8,
-        Exclusion::PassageAtEdge => 9,
-        Exclusion::NoGroundCoverage => 10,
-        Exclusion::NoLanding => 11,
-        Exclusion::TouchAndGo => 12,
-        Exclusion::Diversion => 13,
-        Exclusion::LandingGap => 14,
-        Exclusion::EstimateBeforeIssue => 15,
-        Exclusion::LookAheadBeyondRange => 16,
+        Exclusion::LegNotOwn => 7,
+        Exclusion::DepartureTooFar => 8,
+        Exclusion::NoTruthPath => 9,
+        Exclusion::BeyondCut => 10,
+        Exclusion::PassageAtEdge => 11,
+        Exclusion::NoGroundCoverage => 12,
+        Exclusion::NoLanding => 13,
+        Exclusion::TouchAndGo => 14,
+        Exclusion::Diversion => 15,
+        Exclusion::LandingGap => 16,
+        Exclusion::EstimateBeforeIssue => 17,
+        Exclusion::LookAheadBeyondRange => 18,
     }
 }
 
@@ -251,4 +262,6 @@ pub struct Sample {
     pub act_bin: Option<usize>,
     /// The event happened before the message was issued.
     pub before_issue: bool,
+    /// The closest approach of the passage chosen, metres (crossings; zero for landings).
+    pub dist_m: f64,
 }

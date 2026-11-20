@@ -156,32 +156,145 @@ pub fn all_legs_of(ix: &LegIndex, addr: u32) -> Vec<u32> {
     v
 }
 
-/// The one truth leg a message binds to, among `cands` (leg indexes by start time): the leg in
-/// progress at the issue time; else the first leg starting after it, within `window_ms`, whose
-/// entry in `takes_off_ok` (parallel to `cands`) is true: the take-off airport is the flight's
-/// departure airport, when known.
+/// What is known of one candidate leg, for the flight it may belong to. Cold record (A7.2).
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LegFacts {
+    /// The leg took off within the leg-airport distance of the flight's departure airport.
+    pub dep_ok: bool,
+    /// The leg landed within the leg-airport distance of the flight's arrival airport.
+    pub arr_ok: bool,
+    /// The leg's ADS-B callsign is the flight's.
+    pub cs_ok: bool,
+    /// The leg's first airborne report, Unix ms; [`i64::MAX`] when it has none.
+    pub air_from_ms: i64,
+    /// The leg's landing (the first ground report of the first landing that held), else its last
+    /// report, Unix ms; [`i64::MIN`] when it has no airborne report.
+    pub air_to_ms: i64,
+}
+
+impl LegFacts {
+    /// The aircraft is airborne on the leg at `issue_ms`: between its first airborne report and
+    /// its landing (or last report).
+    pub fn airborne_at(&self, issue_ms: i64) -> bool {
+        self.air_from_ms <= issue_ms && issue_ms <= self.air_to_ms
+    }
+}
+
+/// What the flight's airports are, for the ownership of a leg.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Known {
+    /// The departure airport is known (named, and has a place).
+    pub dep: bool,
+    /// The arrival airport is known.
+    pub arr: bool,
+}
+
+/// Why an in-progress leg was not bound to a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// Airborne at the issue, but neither the take-off nor the landing airport is the flight's
+    /// (or, with neither airport known, the callsign differs): another flight's leg.
+    NotOwn,
+    /// The leg had landed before the issue (taxi-in; the next flight has not left).
+    Landed,
+}
+
+/// Why no leg is bound to a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Miss {
+    /// The aircraft has no leg in progress or starting after the issue.
+    NoLeg,
+    /// Legs there are, but none is the flight's own.
+    NotOwn,
+    /// The flight's own next leg starts more than the window after the issue.
+    TooFar,
+}
+
+/// The binding of one message: the leg or why none, and the in-progress leg refused on the way.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Binding {
+    pub leg: Result<u32, Miss>,
+    pub refused: Option<Refused>,
+}
+
+/// The one truth leg a message binds to, among `cands` (leg indexes by start time, `facts`
+/// parallel to them): a leg in progress at the issue time binds only when it is the flight's own
+/// and the aircraft is airborne on it: the issue is between its first airborne report and its
+/// landing, and it took off at the departure airport or landed at the arrival airport (within
+/// the leg-airport distance), or, with neither airport known, carries the flight's callsign. A leg
+/// that had landed before the issue never binds as in progress. Otherwise the first leg of the
+/// flight not yet airborne at the issue (one starting after it, or one in progress on the ground
+/// before its first airborne report) binds when it starts within `window_ms` and took off at the
+/// departure airport; with the departure airport unknown it must carry the flight's callsign.
 pub fn bind_leg(
     ix: &LegIndex,
     cands: &[u32],
-    takes_off_ok: &[bool],
+    facts: &[LegFacts],
+    known: Known,
     issue_ms: i64,
     window_ms: i64,
-) -> Option<u32> {
-    let get = |i: u32| ix.legs.get(i as usize);
-    if let Some(&i) = cands
-        .iter()
-        .find(|&&i| get(i).is_some_and(|l| l.start_ms <= issue_ms && l.end_ms >= issue_ms))
-    {
-        return Some(i);
+) -> Binding {
+    let mut refused = None;
+    let mut seen = false;
+    let mut far = false;
+    let mut foreign = false;
+    for (&i, f) in cands.iter().zip(facts) {
+        let Some(l) = ix.legs.get(i as usize) else {
+            continue;
+        };
+        let in_progress = l.start_ms <= issue_ms && l.end_ms >= issue_ms;
+        if in_progress {
+            if f.air_to_ms != i64::MIN && issue_ms > f.air_to_ms {
+                refused = Some(Refused::Landed);
+                continue;
+            }
+            if f.airborne_at(issue_ms) {
+                let own = if known.dep || known.arr {
+                    (known.dep && f.dep_ok) || (known.arr && f.arr_ok)
+                } else {
+                    f.cs_ok
+                };
+                if own {
+                    return Binding {
+                        leg: Ok(i),
+                        refused,
+                    };
+                }
+                refused = Some(Refused::NotOwn);
+                foreign = true;
+                continue;
+            }
+        } else if l.start_ms <= issue_ms {
+            continue;
+        }
+        // Not yet airborne at the issue: the flight's own next leg.
+        seen = true;
+        let own = if known.dep { f.dep_ok } else { f.cs_ok };
+        if !own {
+            continue;
+        }
+        if l.start_ms - issue_ms > window_ms {
+            far = true;
+            break;
+        }
+        return Binding {
+            leg: Ok(i),
+            refused,
+        };
     }
-    cands
-        .iter()
-        .zip(takes_off_ok)
-        .find(|(&i, &ok)| {
-            ok && get(i)
-                .is_some_and(|l| l.start_ms > issue_ms && l.start_ms - issue_ms <= window_ms)
-        })
-        .map(|(&i, _)| i)
+    let miss = if far {
+        Miss::TooFar
+    } else if seen || foreign {
+        Miss::NotOwn
+    } else {
+        Miss::NoLeg
+    };
+    Binding {
+        leg: Err(miss),
+        refused,
+    }
 }
 
 /// Whether a leg may be the callsign-joined flight's: it starts no later than `window_ms` after the
