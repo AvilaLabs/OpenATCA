@@ -7,10 +7,11 @@
 #       data under another root is refused too.
 root /home/connoravila/Documents/Avila-Labs/openatca-data
 # The four-day recording: day1 is protocol P-001's tune day and is not sealed; days 2 to 4 are
-# hold-out days A to C; the recorder's run log covers every day and stays sealed.
-seal scds/rec-20261119/day2
-seal scds/rec-20261119/day3
-seal scds/rec-20261119/day4
+# hold-out days A to C, sealed as name prefixes so a renamed or partial copy beside them is sealed
+# too; the recorder's run log covers every day and stays sealed.
+seal scds/rec-20261119/day2*
+seal scds/rec-20261119/day3*
+seal scds/rec-20261119/day4*
 seal scds/rec-20261119/runs*
 seal scds/stdds-20261119-holdout
 seal scds/stdds-smoke-20261119*

@@ -40,7 +40,7 @@ class SealedGuardTests(unittest.TestCase):
     def test_the_list_parses_to_the_sealed_entries(self):
         root, entries = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
         self.assertEqual([e[0] for e in entries], [
-            "scds/rec-20261119/day2", "scds/rec-20261119/day3", "scds/rec-20261119/day4",
+            "scds/rec-20261119/day2*", "scds/rec-20261119/day3*", "scds/rec-20261119/day4*",
             "scds/rec-20261119/runs*", "scds/stdds-20261119-holdout", "scds/stdds-smoke-20261119*",
             "raw/adsblol/2026.11.20", "raw/adsblol/2026.11.21", "raw/adsblol/2026.11.22"])
         for bad in ("", "root /d\n", "seal a/b\n", "root /d\nseal a/../b\n", "root d\nseal a\n",
@@ -53,10 +53,10 @@ class SealedGuardTests(unittest.TestCase):
 
     # REQ: OA-SEAL-002
     def test_names_as_given_and_near_misses(self):
-        for p in ("x/scds/rec-20261119/day2", "/data/scds/rec-20261119/day2/sub/f", "/data/scds/rec-20261119/runs.log", "/data/scds/stdds-20261119-holdout/a",
+        for p in ("x/scds/rec-20261119/day2", "/data/scds/rec-20261119/day2/sub/f", "/data/scds/rec-20261119/runs.log", "/data/scds/rec-20261119/day2x", "/data/scds/rec-20261119/day3.partial", "/data/scds/stdds-20261119-holdout/a",
                   "/data/scds/stdds-smoke-20261119T192936Z/b", "/data/scds/stdds-smoke-20261119"):
             self.refused(p)
-        for p in ("/data/scds/day-20261114/rec", "/data/scds/rec-20261119x", "/data/scds/rec-20261119/day1/x", "/data/scds/rec-20261119/day2x",
+        for p in ("/data/scds/day-20261114/rec", "/data/scds/rec-20261119x", "/data/scds/rec-20261119/day1/x",
                   "/data/rec-20261119",
                   "/data/scds/x/rec-20261119", "/data/scds/stdds-smoke-20261118T1"):
             self.g.check(p)
@@ -69,14 +69,14 @@ class SealedGuardTests(unittest.TestCase):
         (rec / "day3").mkdir()
         (rec / "day4").mkdir()
         (rec / "bin/run-days.sh").write_bytes(b"x")
-        for p in ("day1/x", "bin/run-days.sh", "bin", "day1"):
+        for p in ("day1/x", "bin/run-days.sh", "bin", "day1", "day1x", "day5"):
             self.g.check(rec / p)
         # The folder itself holds sealed entries, so it is refused as a holding directory (as
         # `scds` is): a tool names day1 or bin directly.
         with self.assertRaises(sealed_guard.SealedError) as c:
             self.g.check(rec)
         self.assertIn("holds", str(c.exception))
-        for p in ("day2/x", "day3", "day3/x", "day4/x", "runs.log", "runs.log.1", "day1/../day2/x"):
+        for p in ("day2/x", "day3", "day3/x", "day4/x", "runs.log", "runs.log.1", "day2.tmp", "day30", "day1/../day2/x"):
             self.refused(rec / p)
         work = self.base / "work"
         work.mkdir()

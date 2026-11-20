@@ -46,9 +46,9 @@ fn the_list_has_the_sealed_folders_and_the_python_guard_parses_it_to_the_same_se
     assert_eq!(
         texts,
         [
-            "scds/rec-20261119/day2",
-            "scds/rec-20261119/day3",
-            "scds/rec-20261119/day4",
+            "scds/rec-20261119/day2*",
+            "scds/rec-20261119/day3*",
+            "scds/rec-20261119/day4*",
             "scds/rec-20261119/runs*",
             "scds/stdds-20261119-holdout",
             "scds/stdds-smoke-20261119*",
@@ -100,6 +100,8 @@ fn sealed_names_are_refused_as_given_with_the_rule_named_and_near_misses_are_not
     for p in [
         "x/scds/rec-20261119/day2",
         "/data/scds/rec-20261119/day2/sub/file.oaf",
+        "/data/scds/rec-20261119/day2x",
+        "/data/scds/rec-20261119/day3.partial",
         "/data/scds/rec-20261119/runs.log",
         "/data/scds/stdds-20261119-holdout/a",
         "/data/scds/stdds-smoke-20261119T192936Z/b.bin",
@@ -112,7 +114,6 @@ fn sealed_names_are_refused_as_given_with_the_rule_named_and_near_misses_are_not
         "/data/scds/day-20261114/rec/sfdps",
         "/data/scds/rec-20261119x",
         "/data/scds/rec-20261119/day1/x",
-        "/data/scds/rec-20261119/day2x",
         "/data/rec-20261119",
         "/data/scds/x/rec-20261119",
         "/data/scds/stdds-smoke-20261118T1",
@@ -133,7 +134,7 @@ fn only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed() {
     fs::create_dir_all(rec.join("day3")).unwrap();
     fs::create_dir_all(rec.join("day4")).unwrap();
     fs::write(rec.join("bin/run-days.sh"), b"x").unwrap();
-    for p in ["day1/x", "bin/run-days.sh", "bin", "day1"] {
+    for p in ["day1/x", "bin/run-days.sh", "bin", "day1", "day1x", "day5"] {
         assert!(g.check(&rec.join(p)).is_ok(), "{p}");
     }
     // The folder itself holds sealed entries, so it is refused as a holding directory (as
@@ -147,6 +148,8 @@ fn only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed() {
         "day4/x",
         "runs.log",
         "runs.log.1",
+        "day2.tmp",
+        "day30",
         "day1/../day2/x",
     ] {
         let e = g.check(&rec.join(p)).unwrap_err().to_string();
