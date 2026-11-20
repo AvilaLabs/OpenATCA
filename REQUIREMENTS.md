@@ -4578,8 +4578,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   current filter's run of refusals and the counters `jump_rejected` (one more),
   `moves_decision_rejected`, `moves_old_path_votes`, `moves_old_path_unpredictable` (at most one
   of them one more), which change as the real rejected path changes them; no row, no outcome.
-  The moved track differs from the snapshot in every group (scalar columns and category,
-  current filter, anchor filter, ring) in these proofs, and afterwards the snapshot in the pool
+  The moved track differs from the snapshot in every group (scalar columns, category, current
+  filter, anchor filter, ring) in these proofs (nine, one group by any value in each, the
+  others by one fixed value, because a proof with every group symbolic at once does not fit the
+  memory budget), and afterwards the snapshot in the pool
   equals the one taken, field for field, bit for bit; the move's start, first report time and
   sensor are as before and the hold flag is off. They hold for the default configuration
   (`resync_consistent_k` 0 and the run of refusals below `RESYNC_AFTER`): the refusal that
