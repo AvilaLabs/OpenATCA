@@ -309,6 +309,29 @@ pub struct AdsbInfo {
     /// Source types that are not ADS-B (`oa_truth::ADSB_SOURCES`), by name.
     pub other_sources: Vec<(String, u64)>,
     pub converted: u64,
+    /// Reports whose position or time cannot be written (refused, counted by the file).
+    pub refused: u64,
+}
+
+impl AdsbInfo {
+    /// The reconciliation of what was offered: offered = stale + not ADS-B + written + refused.
+    pub fn reconciliation(&self) -> String {
+        let other: u64 = self.other_sources.iter().map(|(_, c)| *c).sum();
+        let sum = self
+            .stale
+            .saturating_add(other)
+            .saturating_add(self.converted)
+            .saturating_add(self.refused);
+        let verdict = if sum == self.rows_in {
+            "reconciles"
+        } else {
+            "DOES NOT RECONCILE"
+        };
+        format!(
+            "offered {} = stale {} + not ADS-B {} + written {} + refused {} = {}: {}",
+            self.rows_in, self.stale, other, self.converted, self.refused, sum, verdict
+        )
+    }
 }
 
 /// The reference points of the address check: every report of `reports` that is not stale, of an
@@ -376,7 +399,10 @@ pub fn export_adsb_reports(
                 ax.push(&c, (row.lat_e7, row.lon_e7))?;
                 info.converted = info.converted.saturating_add(1);
             }
-            Err(r) => ax.refuse(r),
+            Err(r) => {
+                ax.refuse(r);
+                info.refused = info.refused.saturating_add(1);
+            }
         }
     }
     for (s, &c) in other.iter().enumerate() {
@@ -421,7 +447,7 @@ fn adsb_row(r: &oa_adsb::Row) -> AdsbRow {
         version: u8_of(r.version),
         gva: u8_of(r.gva),
         sda: u8_of(r.sda),
-        nic_baro: None,
+        nic_baro: u8_of(r.nic_baro),
         link: match r.source {
             NONE_U8 => LinkSource::NoColumn,
             0 | 1 => LinkSource::Es1090,

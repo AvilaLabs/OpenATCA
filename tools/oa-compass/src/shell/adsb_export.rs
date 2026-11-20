@@ -51,7 +51,8 @@ pub fn cat021_record(v: &AdsbValues, source: SourceId) -> Cat021 {
         address: Some(v.address),
         tomr_position: Some(v.time),
         geometric_height: v.geometric_height,
-        quality: v.quality.map(|q| {
+        quality: Some({
+            let q = v.quality;
             // First extension: NICBARO (bit 8), SIL (bits 7/6), NACp (bits 5/2); second: SILS
             // (bit 6), SDA (bits 5/4), GVA (bits 3/2); third: PIC (bits 8/5). The core gives an
             // extension only when it and those before it are fully known. One whose bits are all 0
@@ -152,6 +153,8 @@ pub struct AdsbReport {
     pub refused: [u64; 2],
     /// Other counts, label and value.
     pub counts: Vec<(String, u64)>,
+    /// Other lines of the README, as written.
+    pub lines: Vec<String>,
 }
 
 /// The writer of the ADS-B file(s).
@@ -162,6 +165,7 @@ pub struct AdsbExport {
     files: BTreeMap<i64, DayFile>,
     refused: [u64; 2],
     pub counts: Vec<(String, u64)>,
+    pub lines: Vec<String>,
     /// Added to the latitude of every source position (a verification self-test, 0 normally).
     source_offset_e7: i32,
 }
@@ -203,6 +207,7 @@ impl AdsbExport {
             files: BTreeMap::new(),
             refused: [0; 2],
             counts: Vec::new(),
+            lines: Vec::new(),
             source_offset_e7: 0,
         }
     }
@@ -332,6 +337,7 @@ impl AdsbExport {
                 days,
                 refused: self.refused,
                 counts: self.counts,
+                lines: self.lines,
             },
             renames,
         })

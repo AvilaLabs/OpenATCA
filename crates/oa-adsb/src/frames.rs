@@ -140,7 +140,19 @@ fn encode_row(r: &Row) -> [u8; RECORD_LEN] {
     {
         put(&mut b, 71 + 2 * i, &v.to_le_bytes());
     }
+    // The last byte: NIC_baro plus one (0 absent, 1 for NIC_baro 0, 2 for NIC_baro 1). Clips
+    // written before it held a reserved zero there: they read as absent.
+    put(&mut b, 79, &[nic_baro_code(r.nic_baro)]);
     b
+}
+
+/// The record byte of a NIC_baro value.
+fn nic_baro_code(v: u8) -> u8 {
+    if v <= 1 {
+        v + 1
+    } else {
+        0
+    }
 }
 
 fn rd<const N: usize>(b: &[u8], at: usize) -> Option<[u8; N]> {
@@ -163,8 +175,10 @@ fn decode_measurements(b: &[u8], row: &mut Row, legacy: bool) -> Option<u8> {
         }
         return Some(anom);
     }
-    if *b.get(79)? != 0 {
-        anom |= ANOM_RESERVED;
+    match *b.get(79)? {
+        0 => {}
+        c @ 1..=2 => row.nic_baro = c - 1,
+        _ => anom |= ANOM_RESERVED,
     }
     let u = |i: usize| -> Option<u16> { Some(u16::from_le_bytes(rd(b, 57 + 2 * i)?)) };
     let s = |i: usize| -> Option<i16> { Some(i16::from_le_bytes(rd(b, 71 + 2 * i)?)) };

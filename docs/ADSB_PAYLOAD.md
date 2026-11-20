@@ -34,7 +34,7 @@ of ADS-B reports is a feed of its own kind: one file per feed, as with SFDPS, TB
   `oa-adsb-clip`; bytes 57 to 63 of a record are reserved and zero.
 * `ADS2`: 80-byte records, at most 50 000 per frame (16 + 80 * 50 000 stays under the 4 MiB
   payload limit). Bytes 0 to 56 are the `ADS1` record unchanged; bytes 57 to 78 add the
-  measurements below; byte 79 is reserved and zero. Only `ADS2` is written now.
+  measurements below; byte 79 is NIC_baro plus one (below); a clip written before it held a reserved zero there, which reads as absent. Only `ADS2` is written now.
 
 `decode_payload` reads both, by magic; an `ADS1` record decodes with every measurement absent.
 The OAF1 frame, its sequence and its time use are identical, so `oa-replay` and `oa-truth`
@@ -93,7 +93,7 @@ Record (offsets from the start of the record):
 | 73 | 2 | total air temperature `tat`, i16 | whole degrees C, readsb-derived; `-32768` absent |
 | 75 | 2 | roll, i16 | 0.01 degree, negative is left, within 18000 in magnitude; `-32768` absent |
 | 77 | 2 | track rate, i16 | 0.01 degree per second; `-32768` absent |
-| 79 | 1 | reserved, 0 | |
+| 79 | 1 | nic_baro + 1 | 0 absent, 1 for NIC_baro 0, 2 for NIC_baro 1; any other value is ignored and counted |
 
 (`ADS1` records have bytes 57 to 63 reserved, 0, and no measurements.)
 
@@ -118,7 +118,7 @@ can read and counts the rest (`PayloadCounts`):
 * a record whose source is not 0 to 13 or 255 is kept with source 13 (`unknown`);
 * a record whose wind direction is 360 or more, whose heading is 36000 or more or whose roll is
   beyond 180 degrees is kept with that value absent;
-* a non-zero reserved byte (79, or 57 to 63 of `ADS1`) is ignored and counted.
+* a non-zero reserved byte (57 to 63 of `ADS1`), or a byte 79 above 2, is ignored and counted.
 
 `decode_payload` is the strict form: any of those makes it refuse the whole payload with
 `BadRecord(n)`, as before. A payload with none of them decodes the same by both.

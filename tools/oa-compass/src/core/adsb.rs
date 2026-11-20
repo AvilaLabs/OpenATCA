@@ -30,24 +30,31 @@
 //! * I160 airborne ground vector (5.2.30): ground speed (2^-14 NM/s) and track angle (360/2^16
 //!   degrees); both or neither, and none for a report on the ground.
 //! * I170 identification, I020 emitter category (table below).
-//! * I090 quality: no zero ever stands in for a value the source lacks. The primary subfield (NACv
-//!   and NIC; NUCr and NUCp under MOPS version 0) is written only when both are known, else the
-//!   item is omitted and counted. NIC is the source's own (readsb's `nic` already folds in the
-//!   NIC supplements) and is written as NUCp/NIC. Each extension is written only while every field
-//!   in it is known: first NICBARO, SIL and NACp; second SILS, SDA and GVA; third PIC. The chain
-//!   stops at the first extension with an unknown field, and each row cut short is counted at
-//!   that extension. The source has no NIC_baro, so a clip row never gets the first extension
-//!   and so nothing after it. PIC is written (when the chain reaches it) only where the NIC and
-//!   the MOPS version map to exactly one PIC row of the Ed 2.4 table ([`pic_of`]; NIC 6 needs the
-//!   supplements, which the source does not have as separate fields, so it maps to none and is
-//!   counted); PIC 0 is never generated (the specification: no third extension). An extension
-//!   whose bits are all 0 is not sent unless a later one is (5.2.16 encoding rule). NIC and NACp
-//!   above 11 and NACv above 4 are outside what the MOPS defines: they are not encoded, they
-//!   count as unknown.
+//! * I090 quality, in every record (Ed 2.4 5.2.16: it shall be present in every record). The
+//!   primary subfield is always written: an unknown NACv or NIC is written as the code 0, which the
+//!   ADS-B MOPS defines as "unknown" for both (NACv 0: unknown or 10 m/s or more; NIC 0: Rc
+//!   unknown), and each case is counted. NIC is the source's own (readsb's `nic` already folds in
+//!   the NIC supplements) and is written as NUCp/NIC; under MOPS version 2 Ed 2.4 says the NIC
+//!   values "shall be mapped accordingly", and readsb's value is written unchanged (counted,
+//!   UNVERIFIED). readsb's `nic` is a NIC, not a NUCp, so for MOPS version 0 the NUCp is written 0
+//!   (unknown) and counted, and a version 0 row is never mapped through the NUCp column of the PIC
+//!   table. Beyond the primary subfield, no zero stands in for a value the source lacks: each
+//!   extension is written only while every field in it is known: first NICBARO, SIL and NACp;
+//!   second SILS, SDA and GVA; third PIC. The chain stops at the first extension with an unknown
+//!   field, and each row cut short is counted at that extension. PIC is written (when the chain
+//!   reaches it) only where the NIC and the MOPS version map to exactly one PIC row of the Ed 2.4
+//!   table ([`pic_of`]; NIC 6 maps to none, because the PIC then depends on NIC supplements that
+//!   the NIC alone does not give), and is counted otherwise; PIC 0 is never generated (the
+//!   specification: no third extension). An extension whose fields are all known and all 0 is not
+//!   sent unless a later one is (5.2.16 allows that), so a decoder cannot tell a known 0 from an
+//!   extension not sent. NIC and NACp above 11 and NACv above 4 are outside what the MOPS defines:
+//!   they are not encoded and count as unknown.
 //! * I210: VN from the report's version, 0 to 2 (Ed 2.4 does not define 3); LTT from the source
-//!   type: `adsb_icao` and `adsb_icao_nt` are 1090 ES (2); a UAT source would be 1 (the clip's
-//!   source types have none); a clip without the source type column, or a type that does not say
-//!   (`adsb_other`), is written 0 (other) and counted, because the item has no unknown code.
+//!   type: `adsb_icao` and `adsb_icao_nt` are written 2 (1090 ES), which is ASSUMED from the source
+//!   type and not proven (such a report can come through a UAT-to-ES converter); a UAT source would
+//!   be 1 (the clip's source types have none). A clip without the source type column, or a type
+//!   that does not say (`adsb_other`), is written LTT 0 (other) and counted, because the item has
+//!   no unknown code.
 //!
 //! Emitter category (ADS-B set and code, to I021/020 in Ed 2.4 5.2.5): A1 1, A2 2, A3 3, A4 4, A5
 //! 5, A6 6, A7 10, B1 11, B2 12, B3 16, B4 15, B6 13, B7 14, C1 20, C2 21, C3 22, C4 23, C5 24.
@@ -58,7 +65,7 @@ use oa_ieee::round;
 use super::time::{day_time_of_ns, DayTime};
 
 /// Number of notes.
-pub const ADSB_NOTES: usize = 30;
+pub const ADSB_NOTES: usize = 33;
 
 pub const ANOTE_TRACK_NUMBER: usize = 0;
 pub const ANOTE_TOA_POSITION: usize = 1;
@@ -77,8 +84,8 @@ pub const ANOTE_IDENT_ABSENT: usize = 13;
 pub const ANOTE_IDENT_CHARS: usize = 14;
 pub const ANOTE_CATEGORY_ABSENT: usize = 15;
 pub const ANOTE_CATEGORY_NO_CODE: usize = 16;
-/// I090 omitted: NACv or NIC unknown.
-pub const ANOTE_QUALITY_ABSENT: usize = 17;
+/// I090 NACv unknown, written as the code 0.
+pub const ANOTE_NACV_UNKNOWN: usize = 17;
 /// I090 cut short at the first extension.
 pub const ANOTE_EXT1_CUT: usize = 18;
 /// The NIC and version map to no single PIC row.
@@ -98,6 +105,12 @@ pub const ANOTE_VECTOR_GROUND: usize = 27;
 pub const ANOTE_GROUND_UNKNOWN: usize = 28;
 /// LTT written 0: the source type does not say which link.
 pub const ANOTE_LTT_NOT_SAID: usize = 29;
+/// I090 NIC unknown, written as the code 0.
+pub const ANOTE_NIC_UNKNOWN: usize = 30;
+/// MOPS version 0: readsb gives a NIC, not a NUCp; NUCp written 0.
+pub const ANOTE_V0_NUCP: usize = 31;
+/// MOPS version 2 NIC written as readsb gives it, UNVERIFIED mapping.
+pub const ANOTE_NIC_V2: usize = 32;
 
 /// What each note means, in index order. The first words name the item.
 pub const ADSB_NOTE_NAMES: [&str; ADSB_NOTES] = [
@@ -118,9 +131,9 @@ pub const ADSB_NOTE_NAMES: [&str; ADSB_NOTES] = [
     "I170 target identification: a character outside A-Z, 0-9 and space (item omitted)",
     "I020 emitter category: report has none (item omitted)",
     "I020 emitter category: the category has no I020 code (item omitted)",
-    "I090 quality indicators: NACv or NIC unknown, so the primary subfield cannot be written and the item is omitted (the specification says every record shall have it; no zero is written for an unknown)",
+    "I090 NACv unknown: written as the code 0, which the MOPS defines as unknown (or 10 m/s or more)",
     "I090 cut short at the first extension: NICBARO, SIL or NACp unknown (the extension and every one after it are omitted)",
-    "I090 PIC: the NIC with the MOPS version maps to no single PIC row of the Ed 2.4 table (NIC 6 needs the NIC supplements; no NIC, or no version, maps to none), so no PIC is written",
+    "I090 PIC: the NIC with the MOPS version maps to no single PIC row of the Ed 2.4 table (NIC 6, or no version), so no PIC is written",
     "I090 cut short at the second extension: SILS, SDA or GVA unknown (the extension and the PIC extension after it are omitted)",
     "I210 MOPS version: report has none (item omitted)",
     "I210 MOPS version: 3 or more, not defined in Ed 2.4 (item omitted)",
@@ -131,6 +144,9 @@ pub const ADSB_NOTE_NAMES: [&str; ADSB_NOTES] = [
     "I160 airborne ground vector: report is on the ground and 5.2.30 defines the airborne vector only (item omitted)",
     "I040 GBS: ground state unknown (no ground flag and no altitude in the report); written 0 because the item has no unknown value",
     "I210 LTT link technology: the source type (adsb_other) does not say which link carried the report (written 0 = other; the item has no unknown code)",
+    "I090 NIC unknown: written as the code 0, which the MOPS defines as unknown (Rc unknown)",
+    "I090 version 0, NUCp not available: readsb's nic is a NIC, not a NUCp, so the NUCp is written 0 (unknown) and the row is not mapped through the NUCp column of the PIC table",
+    "I090 NIC with MOPS version 2: Ed 2.4 says version 2 NIC values \"shall be mapped accordingly\"; readsb's NIC is written unchanged, the mapping is UNVERIFIED",
 ];
 
 /// Which link carried a report, from its source type.
@@ -210,8 +226,8 @@ pub struct QualityExt2 {
     pub gva: u8,
 }
 
-/// The I090 values: the primary subfield, and each extension only while every field of it and of
-/// those before it is known (`ext2` only with `ext1`, `pic` only with `ext2`). A7.2: transient.
+/// The I090 values: the primary subfield (an unknown NACv or NIC as the code 0), and each
+/// extension only while every field of it and of those before it is known (`ext2` only with `ext1`, `pic` only with `ext2`). A7.2: transient.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 // A7.2: cold struct, size guard waived
 pub struct QualityValues {
@@ -249,8 +265,8 @@ pub struct AdsbValues {
     pub ground_vector: Option<(u16, u16)>,
     pub ident: Option<[u8; 8]>,
     pub category: Option<u8>,
-    /// I090, when NACv and NIC are known.
-    pub quality: Option<QualityValues>,
+    /// I090, in every record.
+    pub quality: QualityValues,
     /// I210 VN.
     pub mops_version: Option<u8>,
     /// I210 LTT: 0 other, 1 UAT, 2 1090 ES.
@@ -264,7 +280,7 @@ pub struct AdsbConverted {
     pub day: i64,
     pub values: AdsbValues,
     /// Bit `i` set: note `i` of [`ADSB_NOTE_NAMES`] applies.
-    pub notes: u32,
+    pub notes: u64,
 }
 
 /// Why a report was not converted at all.
@@ -277,12 +293,12 @@ pub enum AdsbRefusal {
     Time = 1,
 }
 
-const fn bit(i: usize) -> u32 {
-    1u32 << i
+const fn bit(i: usize) -> u64 {
+    1u64 << i
 }
 
 /// Adds one to the counter of every note set in `mask`.
-pub fn count_adsb_notes(counts: &mut [u64; ADSB_NOTES], mask: u32) {
+pub fn count_adsb_notes(counts: &mut [u64; ADSB_NOTES], mask: u64) {
     for (i, c) in counts.iter_mut().enumerate() {
         if mask & bit(i) != 0 {
             *c = c.saturating_add(1);
@@ -343,14 +359,10 @@ fn ident_ok(c: &[u8; 8]) -> bool {
 
 /// The PIC (I021/090 third extension, Ed 2.4 5.2.16) of a NIC under a MOPS version, from the
 /// specification's conversion table; `None` when the NIC maps to no single PIC row: no version,
-/// a NIC the version does not define, and NIC 6 under versions 1 and 2, which is PIC 7, 8 or 9
-/// according to the NIC supplements. Version 0 is the NUCp column.
+/// MOPS version 0 (readsb's `nic` is a NIC, so the NUCp column is never used), a NIC the version
+/// does not define, and NIC 6, which is PIC 7, 8 or 9 according to the NIC supplements.
 pub fn pic_of(version: Option<u8>, nic: u8) -> Option<u8> {
     match version? {
-        // NUCp 0 to 9: PIC 0, 1, 2, 5, 6, 8, 10, 11, 13, 14.
-        0 => [0, 1, 2, 5, 6, 8, 10, 11, 13, 14]
-            .get(usize::from(nic))
-            .copied(),
         // NIC 0 to 11, NIC 6 ambiguous: PIC 0, 1, 3, 4, 5, 6, -, 10, 11, 12, 13, 14.
         1 | 2 => match nic {
             0 | 1 => Some(nic),
@@ -483,44 +495,54 @@ pub fn adsb_record(r: &AdsbRow) -> Result<AdsbConverted, AdsbRefusal> {
     let (sil, gva, sda) = (fit(r.sil, 3), fit(r.gva, 3), fit(r.sda, 3));
     let nic_baro = fit(r.nic_baro, 1);
     let version = r.version.filter(|&v| v <= 2);
+    let v0 = r.version == Some(0);
+    // The primary subfield is always written; an unknown value is the MOPS code 0, counted.
+    let nacv_code = nac_v.unwrap_or_else(|| {
+        notes |= bit(ANOTE_NACV_UNKNOWN);
+        0
+    });
+    let nic_code = if v0 {
+        // readsb's nic is a NIC, not a NUCp.
+        notes |= bit(ANOTE_V0_NUCP);
+        0
+    } else {
+        nic.unwrap_or_else(|| {
+            notes |= bit(ANOTE_NIC_UNKNOWN);
+            0
+        })
+    };
+    if version == Some(2) && nic.is_some() {
+        notes |= bit(ANOTE_NIC_V2);
+    }
     let pic = nic.and_then(|n| pic_of(version, n));
-    if nic.is_some_and(|_| pic.is_none()) {
+    if !v0 && nic.is_some() && pic.is_none() {
         notes |= bit(ANOTE_PIC_UNMAPPED);
     }
-    let quality = match (nic, nac_v) {
-        (Some(nic), Some(nacv)) => {
-            let mut q = QualityValues {
-                nacv,
-                nic,
-                ext1: None,
-                ext2: None,
-                pic: None,
-            };
-            match (nic_baro, sil, nac_p) {
-                (Some(nicbaro), Some(sil), Some(nacp)) => {
-                    q.ext1 = Some(QualityExt1 { nicbaro, sil, nacp });
-                    match (r.sil_per_sample, sda, gva) {
-                        (Some(sils), Some(sda), Some(gva)) => {
-                            q.ext2 = Some(QualityExt2 { sils, sda, gva });
-                            // PIC 0 means no integrity: no third extension is generated.
-                            match pic {
-                                Some(p) if p > 0 => q.pic = Some(p),
-                                Some(_) => {}
-                                None => notes |= bit(ANOTE_EXT3_CUT),
-                            }
-                        }
-                        _ => notes |= bit(ANOTE_EXT2_CUT),
+    let mut quality = QualityValues {
+        nacv: nacv_code,
+        nic: nic_code,
+        ext1: None,
+        ext2: None,
+        pic: None,
+    };
+    match (nic_baro, sil, nac_p) {
+        (Some(nicbaro), Some(sil), Some(nacp)) => {
+            quality.ext1 = Some(QualityExt1 { nicbaro, sil, nacp });
+            match (r.sil_per_sample, sda, gva) {
+                (Some(sils), Some(sda), Some(gva)) => {
+                    quality.ext2 = Some(QualityExt2 { sils, sda, gva });
+                    // PIC 0 means no integrity: no third extension is generated.
+                    match pic {
+                        Some(p) if p > 0 => quality.pic = Some(p),
+                        Some(_) => {}
+                        None => notes |= bit(ANOTE_EXT3_CUT),
                     }
                 }
-                _ => notes |= bit(ANOTE_EXT1_CUT),
+                _ => notes |= bit(ANOTE_EXT2_CUT),
             }
-            Some(q)
         }
-        _ => {
-            notes |= bit(ANOTE_QUALITY_ABSENT);
-            None
-        }
-    };
+        _ => notes |= bit(ANOTE_EXT1_CUT),
+    }
     let mut link = 0;
     let mops_version = match r.version {
         None => {

@@ -1986,3 +1986,22 @@ fn the_velocity_frame_sentence_names_the_systems_present_and_claims_east_north_f
     let r = readme("both", true, true);
     assert!(r.contains(oa) && r.contains(er), "{r}");
 }
+
+// REQ: OA-CMP-023
+#[test]
+fn the_readme_reconciles_the_adsb_reports_offered_with_what_became_of_them() {
+    let (_, readme) = run_numbers(
+        "reconcile",
+        &(0..10).map(|k| k * S).collect::<Vec<_>>(),
+        OpenatcaRows::Ticks,
+    );
+    assert!(
+        readme.contains(
+            "offered 10 = stale 0 + not ADS-B 0 + written 10 + refused 0 = 10: reconciles"
+        ),
+        "{readme}"
+    );
+    assert!(readme.contains(
+        "reports refused (position beyond 90 / 180 degrees, or time does not fit a day): 0"
+    ));
+}

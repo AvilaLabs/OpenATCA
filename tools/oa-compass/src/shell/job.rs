@@ -396,6 +396,10 @@ fn export_all(
                     a.stale,
                 ),
                 ("reports written", a.converted),
+                (
+                    "reports refused (position beyond 90 / 180 degrees, or time does not fit a day)",
+                    a.refused,
+                ),
             ] {
                 ax.counts.push((l.to_string(), v));
             }
@@ -405,6 +409,7 @@ fn export_all(
                     *v,
                 ));
             }
+            ax.lines.push(a.reconciliation());
         }
         let mut f = match ex.finish() {
             Ok(f) => f,

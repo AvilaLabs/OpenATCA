@@ -265,6 +265,8 @@ pub struct Reports {
     pub gva: Vec<u8>,
     /// System design assurance, 0 to 3.
     pub sda: Vec<u8>,
+    /// Navigation integrity category for barometric altitude, 0 or 1; [`NONE_U8`] if absent.
+    pub nic_baro: Vec<u8>,
     // Per-observation values: printed on rows with an aircraft object (and `ias`, `roll` also in
     // the row's own columns), never carried forward.
     /// Wind speed derived by readsb, knots; [`NONE_U16`] if absent.
@@ -317,6 +319,8 @@ pub struct Row {
     pub version: u8,
     pub gva: u8,
     pub sda: u8,
+    /// NIC_baro, 0 or 1.
+    pub nic_baro: u8,
     pub ws_kt: u16,
     pub wd_deg: u16,
     pub tas_kt: u16,
@@ -356,6 +360,7 @@ pub const ROW_EMPTY: Row = Row {
     version: NONE_U8,
     gva: NONE_U8,
     sda: NONE_U8,
+    nic_baro: NONE_U8,
     ws_kt: NONE_U16,
     wd_deg: NONE_U16,
     tas_kt: NONE_U16,
@@ -398,6 +403,7 @@ pub fn reports_clear(r: &mut Reports) {
     r.version.clear();
     r.gva.clear();
     r.sda.clear();
+    r.nic_baro.clear();
     r.ws_kt.clear();
     r.wd_deg.clear();
     r.tas_kt.clear();
@@ -435,6 +441,7 @@ pub fn reports_push(r: &mut Reports, row: &Row) {
     r.version.push(row.version);
     r.gva.push(row.gva);
     r.sda.push(row.sda);
+    r.nic_baro.push(row.nic_baro);
     r.ws_kt.push(row.ws_kt);
     r.wd_deg.push(row.wd_deg);
     r.tas_kt.push(row.tas_kt);
@@ -473,6 +480,7 @@ pub fn reports_row(r: &Reports, i: usize) -> Option<Row> {
         version: *r.version.get(i)?,
         gva: *r.gva.get(i)?,
         sda: *r.sda.get(i)?,
+        nic_baro: *r.nic_baro.get(i)?,
         ws_kt: *r.ws_kt.get(i)?,
         wd_deg: *r.wd_deg.get(i)?,
         tas_kt: *r.tas_kt.get(i)?,
@@ -539,9 +547,10 @@ pub const REJ_FLAGS: usize = 3;
 pub const FIELD_NAMES: [&str; FIELD_KINDS] = [
     "altitude", "geom_alt", "speed", "track", "rate", "source", "object", "flight", "squawk",
     "category", "nic", "nac_p", "nac_v", "sil", "gva", "sda", "version", "sil_type", "flags",
+    "nic_baro",
 ];
 /// Number of counted fields.
-pub const FIELD_KINDS: usize = 19;
+pub const FIELD_KINDS: usize = 20;
 pub const FLD_ALTITUDE: usize = 0;
 pub const FLD_GEOM_ALT: usize = 1;
 pub const FLD_SPEED: usize = 2;
@@ -562,6 +571,7 @@ pub const FLD_VERSION: usize = 16;
 pub const FLD_SIL_TYPE: usize = 17;
 /// Flag bits above the four readsb defines (the row is kept with them cleared).
 pub const FLD_FLAGS: usize = 18;
+pub const FLD_NIC_BARO: usize = 19;
 
 /// Distinct (field, value) pairs [`Stats`] keeps counts for; later ones add to
 /// [`Stats::unknown_overflow`].

@@ -63,6 +63,7 @@ fn full_row_with_object_decodes_every_field() {
         (r.sil_type, r.version, r.gva, r.sda),
         (SIL_PER_HOUR, 2, 2, 2)
     );
+    assert_eq!(r.nic_baro, 1);
     // The second row has no object: those fields are absent; the rest decodes.
     let r2 = reports_row(&out, 1).unwrap();
     assert_eq!(r2.time_ns, 1_663_259_853_016_000_000 + 7_024_850_000_000);
@@ -412,9 +413,11 @@ fn row_count_bound_is_enforced() {
 #[test]
 fn an_unknown_or_null_minor_field_keeps_the_row_and_is_counted_by_field_and_value() {
     let obj = |o: &str| format!("[1,40.0,-90.0,1000,300.0,90.0,0,0,{o},\"adsb_icao\"]");
-    let cases: [(&str, usize, &str); 7] = [
+    let cases: [(&str, usize, &str); 9] = [
         (r#"{"nac_p":16}"#, FLD_NAC_P, "16"),
         (r#"{"nic":null}"#, FLD_NIC, "null"),
+        (r#"{"nic_baro":null}"#, FLD_NIC_BARO, "null"),
+        (r#"{"nic_baro":2}"#, FLD_NIC_BARO, "2"),
         (r#"{"sil_type":"bogus"}"#, FLD_SIL_TYPE, "bogus"),
         (r#"{"flight":7}"#, FLD_FLIGHT, "7"),
         (r#"{"squawk":"1800"}"#, FLD_SQUAWK, "1800"),

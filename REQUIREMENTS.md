@@ -2268,7 +2268,7 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-ADSB-009** No trace input panics: every prefix of a sample and 5 000 seeded random byte
   mutations give reports or an error, and every kept report is in range.
 - **OA-ADSB-010** The OAF1 payload (`docs/ADSB_PAYLOAD.md`) round-trips and has the documented
-  layout: header, 80-byte little-endian records, reserved byte zero.
+  layout: header, 80-byte little-endian records, the last byte NIC_baro plus one (0 absent).
 - **OA-ADSB-011** A payload with a wrong length, magic, record length, reserved field, count or a
   record value out of range is refused and appends nothing; the encoder refuses an empty or
   out-of-range row range and more than the per-frame maximum.
@@ -2356,7 +2356,9 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-ADSB-154** Every field of an `ADS2` record (geometric altitude, vertical rate, category, NIC, NACp, NACv,
   SIL, SIL type, version, GVA, SDA and the rest) is encoded at its documented offset and decoded back unchanged.
 - **OA-ADSB-155** Every field of an `ADS1` record that the layout has decodes unchanged, the measurements of
-  the later layout are absent, and a non-zero reserved byte is counted and ignored.
+  the later layout are absent, and a non-zero reserved byte is counted and ignored. NIC_baro is the last byte
+  of an `ADS2` record plus one (0 absent, so a clip written before it reads as absent); a byte above 2 is counted
+  and ignored; the trace's `nic_baro` is read as 0 or 1, and a value outside that, or a null, is counted by field.
 - **OA-ADSB-156** A payload of exactly the most records of its layout is accepted and one more is refused; the
   length must be exactly header plus count records; `encode_payload` writes `to - from` records and refuses
   an empty, reversed or past-the-end range and one over the most; `frame_ranges` starts a frame at the first
@@ -4690,7 +4692,8 @@ scope.
   to the next day.
 - **OA-CMP-023** `adsb.ast` decodes with the Ed 2.4 decoder to the values converted; every block is decoded
   again before it is written and the file is read back from disk; reports are written in time order, and stale
-  positions and source types that are not ADS-B are left out and counted.
+  positions and source types that are not ADS-B are left out and counted. The README reconciles the reports
+  offered with stale, not ADS-B, written and refused ("reconciles" or "DOES NOT RECONCILE").
 - **OA-CMP-024** A report earlier than the one before it, or on another UTC day than the requested one, refuses
   the export unless days are split, which writes one directory per day.
 - **OA-CMP-025** `--inputs all` runs the clip through `oa_track::score::split_reports_with` (the scorer's split
@@ -4705,23 +4708,28 @@ scope.
   again unchanged in verified blocks, reads each file back, copies `data_sources.json` and writes a README with
   the window, the source directory and the records in and kept per file; a window across midnight or empty, a
   category other than 21 and 62, and a damaged file are refused, leaving no partial file.
-- **OA-CMP-028** No zero stands in for a value the source lacks in an ADS-B record. I090: the primary subfield
-  (NACv and NIC, written as NUCp/NIC; readsb's `nic` already folds in the NIC supplements) is written only when
-  both are known, else the item is omitted and counted; each extension (first NICBARO, SIL, NACp; second SILS,
-  SDA, GVA; third PIC) is written only while every field in it and in those before it is known, the chain stops
-  at the first extension with an unknown field and the rows cut short are counted per extension; an extension
-  with all bits 0 is sent only before a later one that has bits. The source has no NIC_baro, so no clip row has
-  the first extension or any after it. PIC follows the Ed 2.4 table for the row's MOPS version (`pic_of`) and is
-  written only where the NIC maps to exactly one PIC row (NIC 6 needs the supplements and maps to none; PIC 0 is
-  never generated); rows whose NIC maps to none are counted. NIC or NACp above 11 and NACv above 4 are not
-  encoded and count as unknown. I040 GBS is 1 when the report says ground and 0 when it carries an altitude; a
-  row with neither is written GBS 0 and counted as "ground state unknown"; ARC, CL, RC, RAB, DCR, SIM, TST and SAA
-  are defaults, listed in the README as defaults and not facts. I210 LTT is 2 for the source types adsb_icao and
-  adsb_icao_nt, 1 for a UAT source (the clip's types have none), and 0, counted, for a clip without the source
-  type column or for adsb_other; the source types mlat, tisb_*, adsr_*, mode_s and the rest are not ADS-B
-  reports, are not written and are counted by source type. I160 is omitted on a ground report and counted; the
-  README states that adsb.ast is a superset of what the tracker was fed, with the tracker adapter's removals per
-  reason, and keeps the independence statement (UK-008).
+- **OA-CMP-028** I021/090 is in every ADS-B record (Ed 2.4 5.2.16). Its primary subfield is always written: an
+  unknown NACv or NIC is the MOPS code 0 (unknown), each counted; NIC is readsb's value written as NUCp/NIC, and
+  under MOPS version 2 it is written unchanged with the mapping UNVERIFIED and each row counted; for version 0
+  the NUCp is written 0 and counted (readsb's `nic` is a NIC) and a version 0 row is never mapped through the
+  NUCp column of the PIC table. Beyond the primary subfield no zero stands in for a missing value: each extension
+  (first NICBARO, SIL, NACp; second SILS, SDA, GVA; third PIC) is written only while every field in it and in
+  those before it is known, the chain stops at the first extension with an unknown field and the rows cut short
+  are counted per extension; an all-zero extension is sent only before a later one that has bits, so a decoder
+  cannot tell a known 0 from an extension not sent. NICBARO is the clip's NIC_baro (a clip written before the
+  column carries none). PIC follows the Ed 2.4 table for versions 1 and 2 (`pic_of`), is written only where the
+  NIC alone maps to exactly one PIC row (NIC 6 maps to none; PIC 0 is never generated), and rows whose NIC maps
+  to none are counted. NIC or NACp above 11 and NACv above 4 are not encoded and count as unknown. I040 GBS is 1
+  when the report says ground and 0 when it carries an altitude (an inference from readsb); a row with neither
+  is written GBS 0 and counted as "ground state unknown"; ARC, CL, RC, RAB, DCR, SIM, TST and SAA are defaults,
+  listed in the README as defaults and not facts. I210 LTT is 2 for the source types adsb_icao and adsb_icao_nt
+  (ASSUMED from the source type, not proven: such a report can come through a UAT-to-ES converter), 1 for a UAT
+  source (the clip's types have none), and 0, counted, for a clip without the source type column or for
+  adsb_other; the source types mlat, tisb_*, adsr_*, mode_s and the rest are not ADS-B reports, are not written
+  and are counted by source type. The I090 and I210 octets are checked against bytes worked out by hand from the
+  specification. I160 is omitted on a ground report and counted; the README states that adsb.ast is a superset
+  of what the tracker was fed, with the tracker adapter's removals per reason, and keeps the independence
+  statement (UK-008).
 - **OA-CMP-029** The three data sources are SAC 255 with SIC 11 (OpenATCA), 12 (ERAM) and 13 (ADS-B), one constant
   each; 255/1 is left free because COMPASS writes its reference there, and the README says so.
 - **OA-CMP-030** The export refuses an `--out` that exists and is not empty (the same rule as `slice`), before
