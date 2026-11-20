@@ -47,6 +47,7 @@ members = [
     "tools/oa-compass",
     "tools/oa-perf",
     "tools/oa-replay-diff",
+    "tools/oa-stdds-ref",
     "tools/oa-shadow",
     "tools/oa-stdds-census",
     "tools/oa-trace",
