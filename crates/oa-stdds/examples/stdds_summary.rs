@@ -43,9 +43,9 @@ struct Ctx {
 fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
     while let Some(ev) = reader.next() {
         match ev {
-            Ok(f)
-                if f.kind == FrameKind::Message && oa_sealed::in_sealed_window(f.recv_unix_ns) =>
-            {
+            // A frame of any kind (Status and Reject included) received in a sealed window is
+            // dropped and counted, never parsed and never counted by kind.
+            Ok(f) if oa_sealed::in_sealed_window(f.recv_unix_ns) => {
                 ctx.sealed_frames += 1;
             }
             Ok(f) if f.kind == FrameKind::Message => {

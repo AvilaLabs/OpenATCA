@@ -83,9 +83,9 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
             break;
         }
         match ev {
-            Ok(f)
-                if f.kind == FrameKind::Message && oa_sealed::in_sealed_window(f.recv_unix_ns) =>
-            {
+            // A frame of any kind (Status and Reject included) received in a sealed window is
+            // dropped and counted, never parsed and never counted by kind.
+            Ok(f) if oa_sealed::in_sealed_window(f.recv_unix_ns) => {
                 // A frame whose time is in a sealed window is dropped and counted, never parsed.
                 ctx.rs.sealed_window_dropped += 1;
                 oa_sealed::note_window_drops(1);
@@ -704,5 +704,32 @@ mod tests {
         assert_eq!((rs.frames, rs.tais_messages, rs.tais_records), (1, 1, 1));
         assert_eq!(rs.sealed_window_dropped, 4);
         assert_eq!(rs.stats.records, 1);
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn a_status_or_reject_frame_received_in_the_window_is_dropped_and_not_counted_by_kind() {
+        const FROM: i64 = 1_795_131_900_000_000_000;
+        const TO: i64 = 1_795_393_920_000_000_000;
+        let mut bytes = Vec::new();
+        // Status (3) and Reject (2) frames at the edges: from - 1 and to are kept, from and
+        // to - 1 are in the window.
+        for (i, (kind, t)) in [
+            (3u8, FROM - 1),
+            (3, FROM),
+            (2, TO - 1),
+            (2, TO),
+            (3, FROM + 7),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(&mut buf, kind, 0, i as u64, t, 0, b"x").unwrap();
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        let mut census = Census::new();
+        let rs = read_bytes(&bytes, &mut census).unwrap();
+        assert_eq!((rs.other_frames, rs.sealed_window_dropped), (2, 3));
     }
 }
