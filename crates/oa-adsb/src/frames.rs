@@ -1,6 +1,9 @@
 //! The ADSB payload carried in OAF1 MESSAGE frames (docs/ADSB_PAYLOAD.md). Core (pure).
-//! Two layouts are read: `ADS1` (64-byte records, the first clips) and `ADS2` (80-byte records,
-//! adds the measured wind, temperature, speeds, headings and roll); only `ADS2` is written.
+//! Three layouts are read: `ADS1` (64-byte records, the first clips), `ADS2` (80-byte records,
+//! adds the measured wind, temperature, speeds, headings and roll; byte 79 reserved) and `ADS3`
+//! (the `ADS2` record with byte 79 holding NIC_baro plus one); only `ADS3` is written. A reader
+//! that knows only `ADS1` and `ADS2` refuses an `ADS3` payload by its magic, so a clip that carries
+//! NIC_baro cannot be read as one that does not.
 
 use std::fmt;
 
@@ -10,7 +13,9 @@ use crate::{
 };
 
 /// First four payload bytes of the layout written now.
-pub const PAYLOAD_MAGIC: [u8; 4] = *b"ADS2";
+pub const PAYLOAD_MAGIC: [u8; 4] = *b"ADS3";
+/// First four payload bytes of the second layout (byte 79 reserved), still read.
+pub const PREVIOUS_PAYLOAD_MAGIC: [u8; 4] = *b"ADS2";
 /// First four payload bytes of the first layout, still read.
 pub const LEGACY_PAYLOAD_MAGIC: [u8; 4] = *b"ADS1";
 /// Bytes before the first record.
@@ -140,7 +145,19 @@ fn encode_row(r: &Row) -> [u8; RECORD_LEN] {
     {
         put(&mut b, 71 + 2 * i, &v.to_le_bytes());
     }
+    // The last byte: NIC_baro plus one (0 absent, 1 for NIC_baro 0, 2 for NIC_baro 1). Clips
+    // written before it held a reserved zero there: they read as absent.
+    put(&mut b, 79, &[nic_baro_code(r.nic_baro)]);
     b
+}
+
+/// The record byte of a NIC_baro value.
+fn nic_baro_code(v: u8) -> u8 {
+    if v <= 1 {
+        v + 1
+    } else {
+        0
+    }
 }
 
 fn rd<const N: usize>(b: &[u8], at: usize) -> Option<[u8; N]> {
@@ -163,6 +180,8 @@ fn decode_measurements(b: &[u8], row: &mut Row, legacy: bool) -> Option<u8> {
         }
         return Some(anom);
     }
+    // Byte 79 is reserved in this layout (`ADS2`); an `ADS3` record is read with it taken out
+    // first, by `take_nic_baro`.
     if *b.get(79)? != 0 {
         anom |= ANOM_RESERVED;
     }
@@ -195,6 +214,25 @@ fn decode_measurements(b: &[u8], row: &mut Row, legacy: bool) -> Option<u8> {
         anom |= ANOM_MEASUREMENT;
     }
     Some(anom)
+}
+
+/// Decodes one record of the layout `ads3` selects. `ADS3` is `ADS2` with byte 79 holding NIC_baro
+/// plus one (0 absent, 1 for 0, 2 for 1): that byte is read here and the rest decoded as `ADS2`;
+/// a value above 2 is a reserved byte set. Under `ADS2` and `ADS1` byte 79 stays reserved: a
+/// nonzero one is counted and ignored, never read as NIC_baro.
+fn decode_row_layout(b: &[u8], legacy: bool, ads3: bool) -> Option<(Row, u8)> {
+    if !ads3 || legacy {
+        return decode_row(b, legacy);
+    }
+    let mut rec: [u8; RECORD_LEN] = b.try_into().ok()?;
+    let code = std::mem::take(rec.get_mut(79)?);
+    let (mut row, mut anom) = decode_row(&rec, false)?;
+    match code {
+        0 => {}
+        1 | 2 => row.nic_baro = code - 1,
+        _ => anom |= ANOM_RESERVED,
+    }
+    Some((row, anom))
 }
 
 /// Decodes one record. `None` if its time, position or flags cannot be read (the record has no
@@ -298,7 +336,7 @@ fn parse_header(bytes: &[u8]) -> Result<(bool, usize, usize), PayloadError> {
         return Err(PayloadError::Length);
     }
     let legacy = match bytes.get(..4) {
-        Some(m) if m == PAYLOAD_MAGIC => false,
+        Some(m) if m == PAYLOAD_MAGIC || m == PREVIOUS_PAYLOAD_MAGIC => false,
         Some(m) if m == LEGACY_PAYLOAD_MAGIC => true,
         _ => return Err(PayloadError::Magic),
     };
@@ -333,6 +371,7 @@ pub fn decode_payload_lenient(
     out: &mut Reports,
 ) -> Result<PayloadCounts, PayloadError> {
     let (legacy, count, rec_len) = parse_header(bytes)?;
+    let ads3 = bytes.get(..4) == Some(&PAYLOAD_MAGIC[..]);
     let mut c = PayloadCounts {
         records: count,
         ..PayloadCounts::default()
@@ -341,7 +380,7 @@ pub fn decode_payload_lenient(
     for i in 0..count {
         let at = PAYLOAD_HEADER_LEN + i * rec_len;
         let rec = bytes.get(at..at + rec_len).ok_or(PayloadError::Length)?;
-        match decode_row(rec, legacy) {
+        match decode_row_layout(rec, legacy, ads3) {
             Some((row, anom)) => {
                 c.unknown_source += usize::from(anom & ANOM_SOURCE != 0);
                 c.bad_measurement += usize::from(anom & ANOM_MEASUREMENT != 0);
@@ -369,11 +408,12 @@ pub fn decode_payload_lenient(
 /// [`PayloadError::BadRecord`] and appends nothing.
 pub fn decode_payload(bytes: &[u8], out: &mut Reports) -> Result<usize, PayloadError> {
     let (legacy, count, rec_len) = parse_header(bytes)?;
+    let ads3 = bytes.get(..4) == Some(&PAYLOAD_MAGIC[..]);
     let mut rows = Vec::with_capacity(count);
     for i in 0..count {
         let at = PAYLOAD_HEADER_LEN + i * rec_len;
         let rec = bytes.get(at..at + rec_len).ok_or(PayloadError::Length)?;
-        match decode_row(rec, legacy) {
+        match decode_row_layout(rec, legacy, ads3) {
             Some((row, 0)) => rows.push(row),
             _ => return Err(PayloadError::BadRecord(i)),
         }

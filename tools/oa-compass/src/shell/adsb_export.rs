@@ -17,7 +17,9 @@ use oa_asterix::{
 
 use super::error::{io_err, ExportError};
 use super::export::{date_text, Layout};
+use super::guard::refuse_sealed_row;
 use crate::core::adsb::{count_adsb_notes, AdsbConverted, AdsbRefusal, AdsbValues, ADSB_NOTES};
+use crate::core::walk::count_cat021_records;
 
 /// Edition written and read back.
 pub const EDITION: Cat021Edition = Cat021Edition::Ed24;
@@ -50,19 +52,31 @@ pub fn cat021_record(v: &AdsbValues, source: SourceId) -> Cat021 {
         address: Some(v.address),
         tomr_position: Some(v.time),
         geometric_height: v.geometric_height,
-        quality: v.quality.map(|q| {
-            // First extension: NICBARO 0 (bit 8), SIL (bits 7/6), NACp (bits 5/2); second: SILS
-            // (bit 6), SDA (bits 5/4), GVA (bits 3/2). Extensions are sent only if a bit in them
-            // is 1 (5.2.16 encoding rule); the second needs the first to chain to.
-            let ext1 = (q.sil << 5) | (q.nacp << 1);
-            let ext2 = (u8::from(q.sils) << 5) | (q.sda << 3) | (q.gva << 1);
-            let ext = if ext2 != 0 {
-                vec![ext1 | 1, ext2]
-            } else if ext1 != 0 {
-                vec![ext1]
-            } else {
-                Vec::new()
-            };
+        quality: Some({
+            let q = v.quality;
+            // First extension: NICBARO (bit 8), SIL (bits 7/6), NACp (bits 5/2); second: SILS
+            // (bit 6), SDA (bits 5/4), GVA (bits 3/2); third: PIC (bits 8/5). The core gives an
+            // extension only when it and those before it are fully known. One whose bits are all 0
+            // is sent only if a later one is (5.2.16 encoding rule).
+            let mut ext: Vec<u8> = Vec::new();
+            if let Some(e) = q.ext1 {
+                ext.push((e.nicbaro << 7) | (e.sil << 5) | (e.nacp << 1));
+                if let Some(e) = q.ext2 {
+                    ext.push((u8::from(e.sils) << 5) | (e.sda << 3) | (e.gva << 1));
+                    if let Some(pic) = q.pic {
+                        ext.push(pic << 4);
+                    }
+                }
+            }
+            while ext.last() == Some(&0) {
+                ext.pop();
+            }
+            let n = ext.len();
+            for (i, o) in ext.iter_mut().enumerate() {
+                if i + 1 < n {
+                    *o |= 1;
+                }
+            }
             Quality021 {
                 nacv: q.nacv,
                 nic: q.nic,
@@ -72,7 +86,7 @@ pub fn cat021_record(v: &AdsbValues, source: SourceId) -> Cat021 {
         mops: v.mops_version.map(|version| Mops {
             not_supported: false,
             version,
-            link: 0,
+            link: v.link,
         }),
         flight_level: v.flight_level,
         baro_rate: v.baro_rate.map(|raw| FlagS15 {
@@ -140,6 +154,8 @@ pub struct AdsbReport {
     pub refused: [u64; 2],
     /// Other counts, label and value.
     pub counts: Vec<(String, u64)>,
+    /// Other lines of the README, as written.
+    pub lines: Vec<String>,
 }
 
 /// The writer of the ADS-B file(s).
@@ -150,6 +166,7 @@ pub struct AdsbExport {
     files: BTreeMap<i64, DayFile>,
     refused: [u64; 2],
     pub counts: Vec<(String, u64)>,
+    pub lines: Vec<String>,
     /// Added to the latitude of every source position (a verification self-test, 0 normally).
     source_offset_e7: i32,
 }
@@ -162,6 +179,16 @@ pub struct AdsbFinished {
 }
 
 impl AdsbFinished {
+    /// The records in the files as written (the partials, before the rename), counted by the
+    /// independent walker of the format ([`count_cat021_records`]) and not by the decoder.
+    pub fn records_on_disk(&self) -> Result<u64, ExportError> {
+        let mut total = 0u64;
+        for (partial, _) in &self.renames {
+            total = total.saturating_add(count_file_records(partial)?);
+        }
+        Ok(total)
+    }
+
     /// The (partial, final) names of the files, for a caller that renames them with other files.
     pub fn renames(&self) -> &[(PathBuf, PathBuf)] {
         &self.renames
@@ -191,6 +218,7 @@ impl AdsbExport {
             files: BTreeMap::new(),
             refused: [0; 2],
             counts: Vec::new(),
+            lines: Vec::new(),
             source_offset_e7: 0,
         }
     }
@@ -211,6 +239,7 @@ impl AdsbExport {
     /// previous report of its day, and one on another day than the requested one unless the
     /// layout splits days.
     pub fn push(&mut self, c: &AdsbConverted, src_e7: (i32, i32)) -> Result<(), ExportError> {
+        refuse_sealed_row(SYSTEM, c.day)?;
         if !self.layout.split && c.day != self.layout.day {
             return Err(ExportError::CrossesMidnight {
                 system: SYSTEM,
@@ -319,6 +348,7 @@ impl AdsbExport {
                 days,
                 refused: self.refused,
                 counts: self.counts,
+                lines: self.lines,
             },
             renames,
         })
@@ -447,4 +477,34 @@ pub fn read_back(
         )));
     }
     Ok((n_rec, n_blk))
+}
+
+/// The records of the file at `path`, block by block, by the walker (no value is decoded).
+pub fn count_file_records(path: &Path) -> Result<u64, ExportError> {
+    let bad = |s: String| ExportError::Verify(format!("{}: {s}", path.display()));
+    let f = super::guard::open(path).map_err(|e| io_err(path, &e))?;
+    let mut r = BufReader::with_capacity(1 << 20, f);
+    let mut total = 0u64;
+    let mut block = Vec::new();
+    loop {
+        let mut head = [0u8; 3];
+        match r.read(&mut head[..1]) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) => return Err(io_err(path, &e)),
+        }
+        r.read_exact(head.get_mut(1..).unwrap_or(&mut []))
+            .map_err(|e| io_err(path, &e))?;
+        let len = usize::from(u16::from_be_bytes([head[1], head[2]]));
+        if len < 3 {
+            return Err(bad(format!("LEN {len}")));
+        }
+        block.clear();
+        block.extend_from_slice(&head);
+        block.resize(len, 0);
+        r.read_exact(block.get_mut(3..).unwrap_or(&mut []))
+            .map_err(|e| io_err(path, &e))?;
+        total = total.saturating_add(count_cat021_records(&block).map_err(bad)?);
+    }
+    Ok(total)
 }

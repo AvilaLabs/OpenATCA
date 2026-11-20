@@ -382,12 +382,12 @@ fn malformed_adsb_payload_headers_are_counted_by_type_and_never_applied() {
 #[test]
 fn a_bad_adsb_record_loses_only_itself_and_is_counted() {
     let good = payload(&[row(1, T0), row(2, T0), row(3, T0)]);
-    // Record 1: latitude out of range, or flag bits 5 to 7; a reserved byte and an unknown source
-    // keep their record.
+    // Record 1: latitude out of range, or flag bits 5 to 7; a reserved byte (byte 79 above the
+    // NIC_baro codes 1 and 2) and an unknown source keep their record.
     for (at, v, dropped) in [
         (4usize, 0x7fu8, 1u64),
         (38, 0x20, 1),
-        (79, 1, 0),
+        (79, 9, 0),
         (39, 14, 0),
     ] {
         let mut m = good.clone();

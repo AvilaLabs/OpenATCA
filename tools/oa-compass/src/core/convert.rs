@@ -128,10 +128,10 @@ pub const NOTE_NAMES: [&str; NOTES] = [
     "I015 service identification: not in the source (item omitted)",
     "I135/I136 altitude off the 25 ft grid: rounded to the nearest 25 ft (item kept)",
     "longitude of exactly +180 degrees (or rounding to it): written as -180, the same meridian (CAT062 range is -180 up to, not including, +180)",
-    "ERAM altitude under 18 000 ft: written as I135 with QNH = 1 (altimeter-corrected, inferred; see README), not as a flight level",
+    "ERAM altitude under 18 000 ft: written as I135 with QNH = 1 (altimeter-corrected; ASSUMED, UNCONFIRMED, inferred from this project's own comparison; see README), not as a flight level",
     "I220 rate of climb/descent: exported on a row without an altitude (item kept)",
-    "O_IDENTITY_UNCONFIRMED row flag (the key is a local radar handle, not an address): written with CNF = 0 all the same, because CNF means a tentative track and this flag does not (see README)",
-    "I080 MON = 0 and CNF = 0: not in the feed; written as defaults, an assumption and not a fact about ERAM",
+    "O_IDENTITY_UNCONFIRMED row flag (the key is a local radar handle, not an address): written with CNF = 0 all the same (ASSUMED, UNCONFIRMED: the specification defines CNF for the track, not for its identity; see README)",
+    "I080 MON = 0 and CNF = 0: not in the feed; written as defaults (ASSUMED, UNCONFIRMED), not facts about ERAM",
     "I380 target address withheld: the flight's track contradicts the address it carries (see the address check below)",
 ];
 
