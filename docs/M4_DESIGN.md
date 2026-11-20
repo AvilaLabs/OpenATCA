@@ -1,6 +1,6 @@
 # M4 — Flight data processing and trajectory: design
 
-Status: draft for Connor's approval, 2026-11-19. The decoders it builds on exist; none of the M4
+Status: approved by Connor 2026-11-20. The decoders it builds on exist; none of the M4
 functions is built yet.
 
 ## Goal
@@ -53,13 +53,15 @@ So the design starts from four rules, before any prediction:
 | NOTAMs (`oa-notam`) | Temporary restrictions and airspace status | Yes | — |
 
 The flight data we hold is a national SFDPS, TFMS, TBFM and FNS recording from 16:13Z on
-14 November to about 16Z on 15 November 2026, alongside the ADS-B days. Two more windows are
-scheduled, recording all five SCDS feeds (SFDPS, TFMS, TBFM, FNS and STDDS), and both end at a
-fixed time because the laptop's disk is the only storage:
+14 November to about 16Z on 15 November 2026, alongside the ADS-B days, and it is the development
+data. A second recording of the same four feeds started at 00:17Z on 19 November and runs for four
+days. Their roles were fixed in a hashed protocol before any of it was recorded: 19 November is
+for tuning, and 20 to 22 November are sealed hold-out days, read only to score a frozen candidate.
+Two more windows are scheduled, recording all five SCDS feeds (SFDPS, TFMS, TBFM, FNS and STDDS),
+and both end at a fixed time because the laptop's disk is the only storage:
 
-- **24 November 2026, 00:00Z to 24:00Z: the sealed hold-out day.** It is sealed from the start,
-  with that day's ADS-B, and is read only to score a frozen candidate. The development data is the
-  14 to 15 November recording.
+- **24 November 2026, 00:00Z to 24:00Z: a further sealed hold-out day.** It is sealed from the
+  start, with that day's ADS-B.
 - **30 November 05:00Z to 1 December 06:00Z: a flight day.** It covers a domestic flight whose
   phone GPS log gives one aircraft's position independently of every feed.
 
