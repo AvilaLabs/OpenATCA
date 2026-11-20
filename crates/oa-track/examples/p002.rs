@@ -3365,7 +3365,10 @@ fn run(
     let csv = samples_csv(&rows, &stamps);
     let binary_sha = std::env::current_exe()
         .map_err(|e| e.to_string())
-        .and_then(|p| oa_sealed::read(&p).map_err(|e| format!("{}: {e}", p.display())))
+        .and_then(|p| {
+            // seal-allow: the scorer's own executable, not input data (the guard refuses a hard-linked build output)
+            fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))
+        })
         .map_or_else(|e| format!("unavailable ({e})"), |b| to_hex(&sha256(&b)));
     let window_total_ns: i64 = windows.iter().map(|w| w.to_ns - w.from_ns).sum();
     let info = RunInfo {
