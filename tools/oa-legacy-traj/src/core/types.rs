@@ -20,6 +20,43 @@ pub struct Config {
     pub landing_gap_max_ms: i64,
     /// The longest look-ahead scored, ms (the end of the last bin).
     pub max_look_ahead_ms: i64,
+    /// A landing needs ground reports and no airborne report for this long after the change, ms.
+    pub landing_persist_ms: i64,
+    /// A landing's last airborne report is below the airport elevation plus this, feet, or ...
+    pub landing_alt_ft: f64,
+    /// ... below this ground speed, metres per second.
+    pub landing_speed_ms: f64,
+    /// A truth leg takes off from (lands at) an airport when its first (last) place is within
+    /// this of the airport reference point, metres.
+    pub leg_airport_m: f64,
+    /// A message binds a leg starting after it only within this, ms.
+    pub leg_window_ms: i64,
+    /// A row is airborne at issue when the aircraft has an airborne report within this before
+    /// the issue time, ms.
+    pub airborne_window_ms: i64,
+}
+
+impl Config {
+    /// The settings that the tool states besides the four it takes from the command line.
+    pub fn new(
+        cut_m: f64,
+        runway_radius_m: f64,
+        landing_gap_max_ms: i64,
+        max_look_ahead_ms: i64,
+    ) -> Config {
+        Config {
+            cut_m,
+            runway_radius_m,
+            landing_gap_max_ms,
+            max_look_ahead_ms,
+            landing_persist_ms: 30_000,
+            landing_alt_ft: 1000.0,
+            landing_speed_ms: 80.0,
+            leg_airport_m: 10.0 * 1852.0,
+            leg_window_ms: 3 * 3_600_000,
+            airborne_window_ms: 60_000,
+        }
+    }
 }
 
 /// A point on the earth, degrees.
@@ -74,18 +111,44 @@ pub struct AirState {
     pub lat_deg: f64,
     pub lon_deg: f64,
     pub ground: bool,
+    /// Geometric altitude, else barometric, feet; [`NO_ALT`] when neither.
+    pub alt_ft: i32,
+    /// Ground speed, 0.1 kt; [`NO_SPEED`] when absent.
+    pub gs_dkt: u16,
 }
 
-/// A change from airborne to ground in the reports of an aircraft.
+/// No altitude in a report.
+pub const NO_ALT: i32 = i32::MIN;
+/// No ground speed in a report.
+pub const NO_SPEED: u16 = u16::MAX;
+
+/// A change from airborne to ground in the reports of an aircraft that held up as a landing.
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Landing {
-    /// The last airborne report before the first ground one, Unix ms: the landing time.
+    /// The touchdown time: the middle of the gap between the last airborne and the first ground
+    /// report, Unix ms.
     pub t_ms: i64,
-    /// From that report to the first ground report, ms.
+    /// The last airborne report, Unix ms.
+    pub t_air_ms: i64,
+    /// The first ground report, Unix ms.
+    pub t_gnd_ms: i64,
+    /// From the last airborne to the first ground report, ms.
     pub gap_ms: i64,
     /// The last airborne report is within the runway radius of the airport reference point.
     pub at_airport: bool,
+}
+
+/// The landings of an aircraft, and the changes near the airport that were refused.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LandingSet {
+    pub landings: Vec<Landing>,
+    /// Changes near the airport followed by an airborne report within the persistence time
+    /// (touch and go, or a ground flag blip).
+    pub refused_persist: u64,
+    /// Changes near the airport whose last airborne report was too high and too fast.
+    pub refused_altitude: u64,
 }
 
 /// Why an estimate is not scored. Every estimate lands in one reason or in a bin.
@@ -104,24 +167,32 @@ pub enum Exclusion {
     PlaceAmbiguous,
     /// The airport is not in NASR or the places file.
     AirportUnknown,
-    /// The joined aircraft has no truth sample in the flight's interval.
+    /// No truth leg is in progress at the issue time or starts within the window after it.
+    NoLeg,
+    /// The bound leg has no truth sample.
     NoTruthPath,
     /// The truth path never came within the cut distance of the point.
     BeyondCut,
-    /// Every passage was before the estimate was issued.
-    PassedBeforeIssue,
-    /// The first passage after issue begins or ends at a path end or a hole in the truth.
+    /// The chosen passage begins or ends at a path end or a hole in the truth.
     PassageAtEdge,
-    /// The aircraft has no airborne-to-ground change near the airport after issue.
+    /// The bound leg has no ground report after the issue time (no ground coverage).
+    NoGroundCoverage,
+    /// The bound leg has no airborne-to-ground change near the airport.
     NoLanding,
-    /// The first landing near the airport after issue has too long a gap in the reports.
+    /// The changes near the airport were touch-and-go or blips, or too high and fast.
+    TouchAndGo,
+    /// The bound leg landed, but not at the airport (a diversion, or another flight's leg).
+    Diversion,
+    /// The landing near the airport has too long a gap in the reports.
     LandingGap,
-    /// The look-ahead is past the last bin.
+    /// The estimate is not after the time of the message that carried it.
+    EstimateBeforeIssue,
+    /// The estimated look-ahead is past the last bin.
     LookAheadBeyondRange,
 }
 
 /// Number of [`Exclusion`] values.
-pub const EXCLUSION_COUNT: usize = 13;
+pub const EXCLUSION_COUNT: usize = 17;
 /// Display names, indexed by [`exclusion_index`].
 pub const EXCLUSION_NAMES: [&str; EXCLUSION_COUNT] = [
     "message gave no time for the point",
@@ -130,13 +201,17 @@ pub const EXCLUSION_NAMES: [&str; EXCLUSION_COUNT] = [
     "point name not in NASR or the places file",
     "point name has several places, none chosen",
     "airport not in NASR or the places file",
-    "no truth sample of the aircraft in the flight's interval",
+    "no leg (none in progress at issue or starting within the window after it)",
+    "no truth sample of the bound leg",
     "truth path never within the cut distance",
-    "every passage before the estimate was issued",
-    "first passage after issue at a path end or hole in the truth",
-    "no airborne-to-ground change near the airport after issue",
+    "passage at a path end or hole in the truth",
+    "no ground coverage (no ground report on the bound leg after issue)",
+    "no airborne-to-ground change near the airport on the bound leg",
+    "only touch-and-go, blip or too-high changes near the airport",
+    "bound leg landed elsewhere (diversion or another flight's leg)",
     "landing gap in the reports too long",
-    "look-ahead beyond the last bin",
+    "estimate not after the issue time",
+    "estimated look-ahead beyond the last bin",
 ];
 
 /// The index of an exclusion in [`EXCLUSION_NAMES`].
@@ -148,13 +223,17 @@ pub fn exclusion_index(e: Exclusion) -> usize {
         Exclusion::PlaceUnknown => 3,
         Exclusion::PlaceAmbiguous => 4,
         Exclusion::AirportUnknown => 5,
-        Exclusion::NoTruthPath => 6,
-        Exclusion::BeyondCut => 7,
-        Exclusion::PassedBeforeIssue => 8,
+        Exclusion::NoLeg => 6,
+        Exclusion::NoTruthPath => 7,
+        Exclusion::BeyondCut => 8,
         Exclusion::PassageAtEdge => 9,
-        Exclusion::NoLanding => 10,
-        Exclusion::LandingGap => 11,
-        Exclusion::LookAheadBeyondRange => 12,
+        Exclusion::NoGroundCoverage => 10,
+        Exclusion::NoLanding => 11,
+        Exclusion::TouchAndGo => 12,
+        Exclusion::Diversion => 13,
+        Exclusion::LandingGap => 14,
+        Exclusion::EstimateBeforeIssue => 15,
+        Exclusion::LookAheadBeyondRange => 16,
     }
 }
 
@@ -164,10 +243,12 @@ pub fn exclusion_index(e: Exclusion) -> usize {
 pub struct Sample {
     /// Estimate minus actual, seconds: positive when the estimate is later than what happened.
     pub error_s: f64,
-    /// Actual time minus the time the message was issued, seconds.
-    pub look_ahead_s: f64,
-    /// The look-ahead bin, an index into [`crate::core::bins::BIN_NAMES`].
+    /// The estimate minus the time the message was issued, seconds: the stated lead.
+    pub lead_s: f64,
+    /// The bin of the stated lead, an index into [`crate::core::bins::BIN_NAMES`].
     pub bin: usize,
-    /// The bin of the estimated look-ahead (the estimate minus the issue time), if in range.
-    pub est_bin: Option<usize>,
+    /// The bin of the actual time minus the issue time, if in range.
+    pub act_bin: Option<usize>,
+    /// The event happened before the message was issued.
+    pub before_issue: bool,
 }

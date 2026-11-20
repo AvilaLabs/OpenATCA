@@ -12,21 +12,25 @@ use oa_bench::legacy::{
 use oa_replay::FeedKind;
 
 use crate::core::bins::score;
-use crate::core::cross::{approach, choose_landing, choose_passage, landings};
-use crate::core::join::{index_legs, join, legs_of, outcome_index, Leg, LegIndex, Outcome, Unit};
+use crate::core::cross::{approach, choose_landing, choose_passage, great_circle_m, landings};
+use crate::core::join::{
+    all_legs_of, bind_leg, index_legs, join, leg_in_window, legs_of, outcome_index, Leg, LegIndex,
+    Outcome, Unit,
+};
 use crate::core::places::{classify, resolve, Resolution, CLASS_NAMES};
 use crate::core::report::{
-    closest_add, kind_add, kind_add_with, kind_exclude, render_counts_csv, render_csv, render_text,
-    system_new, Extra, Section, SystemReport,
+    closest_add, count, group_of, kind_exclude, kind_record, render_counts_csv, render_csv,
+    render_text, scored_flights, sens_add, system_new, Extra, Section, SystemReport,
 };
 use crate::core::types::{
-    AirState, Approach, Config, Exclusion, Landing, PathPoint, Place, Sample, NO_ADDR,
+    exclusion_index, AirState, Approach, Config, Exclusion, LandingSet, PathPoint, Place, Sample,
+    NO_ADDR, NO_ALT, NO_SPEED,
 };
 use crate::shell::args::Args;
 use crate::shell::guard::guarded_opener;
 use crate::shell::places::{
-    airport_key, airport_places, apply_places, load_nasr, parse_places, place_of_e7, point_places,
-    PlaceTable, PlacesFile,
+    airport_elev_ft, airport_key, airport_places, apply_places, load_nasr, parse_places,
+    place_of_e7, point_places, PlaceTable, PlacesFile,
 };
 use crate::shell::write::write_all;
 
@@ -40,6 +44,10 @@ const MAX_LOOK_AHEAD_MIN: i64 = 120;
 // A7.2: cold struct, size guard waived
 struct Ctx<'a> {
     cfg: Config,
+    /// The crossing cuts searched, metres: the sensitivity cuts and the headline cut.
+    cuts_m: Vec<f64>,
+    /// The index of the headline cut in `cuts_m`.
+    primary: usize,
     step_ms: i64,
     built: &'a BuiltTruth,
     ix: &'a LegIndex,
@@ -47,6 +55,8 @@ struct Ctx<'a> {
     states: &'a BTreeMap<u32, Vec<AirState>>,
     /// The TFMS actual arrival time by plan identifier, Unix ms (the latest issued).
     tfms_actual: &'a BTreeMap<[u8; 12], i64>,
+    /// Where each truth leg took off and landed.
+    leg_ends: &'a [Option<(Place, Place)>],
 }
 
 /// The airport key of a code held as bytes.
@@ -100,41 +110,29 @@ fn core_legs(built: &BuiltTruth) -> Vec<Leg> {
         .collect()
 }
 
-/// The truth path of the legs `leg_ixs` of `addr` within `[from_ms, to_ms]`, sampled every
-/// `step_ms`. A time truth has no answer for leaves a hole: the next sample is marked as after
-/// one, and so is the first sample of every leg.
-fn sample_path(
-    ctx: &Ctx<'_>,
-    addr: u32,
-    leg_ixs: &[u32],
-    from_ms: i64,
-    to_ms: i64,
-) -> Vec<PathPoint> {
-    let mut legs: Vec<&Leg> = leg_ixs
-        .iter()
-        .filter_map(|&i| ctx.ix.legs.get(i as usize))
-        .collect();
-    legs.sort_by_key(|l| (l.start_ms, l.end_ms));
+/// The truth path of leg `leg` of `addr`, sampled every `step_ms`. A time truth has no answer for
+/// leaves a hole: the next sample is marked as after one, and so is the first sample.
+fn sample_path(ctx: &Ctx<'_>, addr: u32, leg: u32) -> Vec<PathPoint> {
+    let Some(l) = ctx.ix.legs.get(leg as usize) else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for l in legs {
-        let (lo, hi) = (l.start_ms.max(from_ms), l.end_ms.min(to_ms));
-        let mut hole = true;
-        let mut t = lo;
-        while t <= hi {
-            match adsb_truth::query(&ctx.built.truth, addr, t) {
-                Ok(s) => {
-                    out.push(PathPoint {
-                        t_ms: t,
-                        lat_deg: s.lat,
-                        lon_deg: s.lon,
-                        gap_before: hole,
-                    });
-                    hole = false;
-                }
-                Err(_) => hole = true,
+    let mut hole = true;
+    let mut t = l.start_ms;
+    while t <= l.end_ms {
+        match adsb_truth::query(&ctx.built.truth, addr, t) {
+            Ok(s) => {
+                out.push(PathPoint {
+                    t_ms: t,
+                    lat_deg: s.lat,
+                    lon_deg: s.lon,
+                    gap_before: hole,
+                });
+                hole = false;
             }
-            t += ctx.step_ms;
+            Err(_) => hole = true,
         }
+        t += ctx.step_ms;
     }
     out
 }
@@ -147,40 +145,6 @@ fn place_key(p: Place) -> (i64, i64) {
     )
 }
 
-/// The searches of one flight's path against its points, by place, so a point sent in every
-/// message is searched once.
-// A7.2: cold struct, size guard waived
-#[derive(Default)]
-struct Searches {
-    by_place: BTreeMap<(i64, i64), Approach>,
-}
-
-/// The closest approach of `path` to `place`, searched once per place; a new search is counted in
-/// the closest-approach buckets of `sys`.
-fn approach_of<'a>(
-    s: &'a mut Searches,
-    sys: &mut SystemReport,
-    path: &[PathPoint],
-    place: Place,
-    cfg: &Config,
-) -> &'a Approach {
-    s.by_place.entry(place_key(place)).or_insert_with(|| {
-        let a = approach(path, place, cfg.cut_m);
-        closest_add(sys, a.min_dist_m);
-        a
-    })
-}
-
-fn score_cross(
-    a: &Approach,
-    est_ms: i64,
-    issue_ms: i64,
-    cfg: &Config,
-) -> Result<Sample, Exclusion> {
-    let actual = choose_passage(a, issue_ms, cfg)?;
-    score(est_ms, actual, issue_ms, cfg)
-}
-
 /// A flight of the TBFM or TFMS tables: its rows, and what it joined to.
 // A7.2: cold struct, size guard waived
 struct TableUnit {
@@ -189,6 +153,8 @@ struct TableUnit {
     rows: Vec<u32>,
     /// The airport the flight lands at, as [`airport_key`], when the records name one.
     arrival: Option<String>,
+    /// The airport the flight departs from, as [`airport_key`], when the records name one.
+    dep: Option<String>,
     /// The plan identifier, to find the TFMS actual arrival of the flight.
     plan: [u8; 12],
 }
@@ -208,11 +174,18 @@ fn addr_of(leg: &Legacy, cands: &[u32]) -> (u32, bool) {
     }
 }
 
-/// The one arrival airport of the flights of `cands`, when they name exactly one.
-fn arrival_of(leg: &Legacy, cands: &[u32]) -> Option<String> {
+/// The one arrival (`arrival`) or departure airport of the flights of `cands`, when they name
+/// exactly one.
+fn airport_of(leg: &Legacy, cands: &[u32], arrival: bool) -> Option<String> {
     let set: BTreeSet<String> = cands
         .iter()
-        .filter_map(|&f| leg.flights.arr.get(f as usize))
+        .filter_map(|&f| {
+            if arrival {
+                leg.flights.arr.get(f as usize)
+            } else {
+                leg.flights.dep.get(f as usize)
+            }
+        })
         .map(|a| key_of(a))
         .filter(|a| !a.is_empty())
         .collect();
@@ -241,6 +214,7 @@ fn tbfm_units(
     plans: &PlanIndex,
     ix: &LegIndex,
     tfms_arr: &BTreeMap<[u8; 12], String>,
+    tfms_dep: &BTreeMap<[u8; 12], String>,
 ) -> Vec<TableUnit> {
     let mut groups: BTreeMap<[u8; 12], Vec<u32>> = BTreeMap::new();
     for (i, p) in leg.tbfm.plan_id.iter().enumerate() {
@@ -271,12 +245,14 @@ fn tbfm_units(
             to_ms,
         };
         let outcome = join(ix, &unit);
-        let arrival = arrival_of(leg, cands).or_else(|| tfms_arr.get(&key).cloned());
+        let arrival = airport_of(leg, cands, true).or_else(|| tfms_arr.get(&key).cloned());
+        let dep = airport_of(leg, cands, false).or_else(|| tfms_dep.get(&key).cloned());
         out.push(TableUnit {
             unit,
             outcome,
             rows,
             arrival,
+            dep,
             plan: key,
         });
     }
@@ -327,11 +303,23 @@ fn tfms_units(leg: &Legacy, plans: &PlanIndex, ix: &LegIndex) -> Vec<TableUnit> 
             (Some(a), None) => Some(a.clone()),
             _ => None,
         };
+        let dep: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|&r| leg.tfms.dep.get(r as usize))
+            .map(|a| key_of(a))
+            .filter(|a| !a.is_empty())
+            .collect();
+        let mut it = dep.iter();
+        let dep = match (it.next(), it.next()) {
+            (Some(a), None) => Some(a.clone()),
+            _ => None,
+        };
         out.push(TableUnit {
             unit,
             outcome,
             rows,
             arrival,
+            dep,
             plan: norm_id::<12>(&plan),
         });
     }
@@ -375,18 +363,428 @@ fn air_states(reports: &Reports, want: &BTreeSet<u32>) -> BTreeMap<u32, Vec<AirS
         if !ground && !airborne {
             continue;
         }
+        let alt = [reports.geom_alt_ft.get(i), reports.baro_alt_ft.get(i)]
+            .into_iter()
+            .flatten()
+            .copied()
+            .find(|&v| v != NONE_I32)
+            .unwrap_or(NO_ALT);
+        let gs = reports.gs_dkt.get(i).copied().unwrap_or(NO_SPEED);
         let p = place_of_e7(lat, lon);
         out.entry(a).or_default().push(AirState {
             t_ms: ns.div_euclid(1_000_000),
             lat_deg: p.lat_deg,
             lon_deg: p.lon_deg,
             ground,
+            alt_ft: alt,
+            gs_dkt: gs,
         });
     }
     for v in out.values_mut() {
         v.sort_by(|a, b| a.t_ms.cmp(&b.t_ms));
     }
     out
+}
+
+/// The truth legs' first and last places, by leg index: where each took off and landed.
+fn leg_ends(built: &BuiltTruth) -> Vec<Option<(Place, Place)>> {
+    built
+        .legs
+        .iter()
+        .map(|l| {
+            let at = |t| {
+                adsb_truth::query(&built.truth, l.addr, t)
+                    .ok()
+                    .map(|s| Place {
+                        lat_deg: s.lat,
+                        lon_deg: s.lon,
+                    })
+            };
+            Some((at(l.start_ms)?, at(l.end_ms)?))
+        })
+        .collect()
+}
+
+/// Whether `p` is within the leg-airport distance of a place of the airport `code`; `None` when
+/// the table has no place for the airport.
+fn near_airport(ctx: &Ctx<'_>, code: &str, p: Place) -> Option<bool> {
+    let c = airport_places(ctx.table, code);
+    (!c.is_empty()).then(|| {
+        c.iter()
+            .any(|a| great_circle_m(*a, p) <= ctx.cfg.leg_airport_m)
+    })
+}
+
+/// The leg took off at the flight's departure airport (true when the airport is not known).
+fn takes_off_ok(ctx: &Ctx<'_>, leg: u32, dep: Option<&str>) -> bool {
+    let Some(d) = dep else { return true };
+    let Some(Some((start, _))) = ctx.leg_ends.get(leg as usize) else {
+        return false;
+    };
+    near_airport(ctx, d, *start).unwrap_or(true)
+}
+
+/// What the callsign join of a flight is refused for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// No leg of the aircraft took off from the departure airport or landed at the arrival one.
+    Airport,
+    /// No leg of the aircraft starts within the window after the flight's first issue.
+    Window,
+}
+
+const REFUSAL_KEYS: [&str; 2] = [
+    "callsign joins refused: no leg took off at the departure airport or landed at the arrival airport",
+    "callsign joins refused: no leg starts within the window after the first issue",
+];
+
+/// A callsign join also needs a leg that starts within the window after the first issue (or is in
+/// progress at it) and whose take-off airport is the departure airport or landing airport the
+/// arrival airport, when those are known.
+fn callsign_check(
+    ctx: &Ctx<'_>,
+    addr: u32,
+    unit: &Unit,
+    dep: Option<&str>,
+    arr: Option<&str>,
+) -> Result<(), Refusal> {
+    let legs: Vec<u32> = legs_of(ctx.ix, addr, unit)
+        .into_iter()
+        .filter(|&i| {
+            ctx.ix
+                .legs
+                .get(i as usize)
+                .is_some_and(|l| leg_in_window(l, unit.from_ms, ctx.cfg.leg_window_ms))
+        })
+        .collect();
+    if legs.is_empty() {
+        return Err(Refusal::Window);
+    }
+    fn known<'x>(ctx: &Ctx<'_>, a: Option<&'x str>) -> Option<&'x str> {
+        a.filter(|c| !airport_places(ctx.table, c).is_empty())
+    }
+    let (d, r) = (known(ctx, dep), known(ctx, arr));
+    if d.is_none() && r.is_none() {
+        return Ok(());
+    }
+    let ok = legs.iter().any(|&i| {
+        let Some(Some((start, end))) = ctx.leg_ends.get(i as usize) else {
+            return false;
+        };
+        d.is_some_and(|c| near_airport(ctx, c, *start) == Some(true))
+            || r.is_some_and(|c| near_airport(ctx, c, *end) == Some(true))
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(Refusal::Airport)
+    }
+}
+
+/// Applies the extra callsign conditions to a join outcome, counting a refusal; a refused join
+/// has no truth.
+fn refine(
+    ctx: &Ctx<'_>,
+    sys: &mut SystemReport,
+    o: Outcome,
+    unit: &Unit,
+    dep: Option<&str>,
+    arr: Option<&str>,
+) -> Outcome {
+    if let Outcome::ByCallsign(a) = o {
+        if let Err(r) = callsign_check(ctx, a, unit, dep, arr) {
+            count(sys, REFUSAL_KEYS.get(r as usize).copied().unwrap_or("?"), 1);
+            return Outcome::NoTruth;
+        }
+    }
+    o
+}
+
+/// One joined flight's scoring state: the leg each message binds to, and the truth paths,
+/// crossing searches and landings of those legs, each computed once.
+// A7.2: cold struct, size guard waived
+struct Flight<'a, 'b> {
+    ctx: &'a Ctx<'b>,
+    addr: u32,
+    cands: Vec<u32>,
+    /// Whether each of `cands` took off at the departure airport (true when it is not known).
+    off_ok: Vec<bool>,
+    binds: BTreeMap<i64, Option<u32>>,
+    paths: BTreeMap<u32, Vec<PathPoint>>,
+    searches: BTreeMap<(u32, (i64, i64)), Vec<Approach>>,
+    lands: BTreeMap<(u32, String), AirportLandings>,
+    /// Whether the leg has any ground report.
+    ground_cov: BTreeMap<u32, bool>,
+}
+
+impl<'a, 'b> Flight<'a, 'b> {
+    fn new(ctx: &'a Ctx<'b>, addr: u32, dep: Option<String>) -> Self {
+        let cands = all_legs_of(ctx.ix, addr);
+        let off_ok = cands
+            .iter()
+            .map(|&i| takes_off_ok(ctx, i, dep.as_deref()))
+            .collect();
+        Flight {
+            ctx,
+            addr,
+            cands,
+            off_ok,
+            binds: BTreeMap::new(),
+            paths: BTreeMap::new(),
+            searches: BTreeMap::new(),
+            lands: BTreeMap::new(),
+            ground_cov: BTreeMap::new(),
+        }
+    }
+
+    /// The one leg a message issued at `issue` binds to.
+    fn leg_for(&mut self, issue: i64) -> Option<u32> {
+        if let Some(v) = self.binds.get(&issue) {
+            return *v;
+        }
+        let ctx = self.ctx;
+        let r = bind_leg(
+            ctx.ix,
+            &self.cands,
+            &self.off_ok,
+            issue,
+            ctx.cfg.leg_window_ms,
+        );
+        self.binds.insert(issue, r);
+        r
+    }
+
+    fn path(&mut self, leg: u32) -> &Vec<PathPoint> {
+        let (ctx, addr) = (self.ctx, self.addr);
+        self.paths
+            .entry(leg)
+            .or_insert_with(|| sample_path(ctx, addr, leg))
+    }
+
+    /// The reports of the aircraft within the leg, in time order.
+    fn leg_states(&self, leg: u32) -> &'b [AirState] {
+        let (Some(l), Some(all)) = (
+            self.ctx.ix.legs.get(leg as usize),
+            self.ctx.states.get(&self.addr),
+        ) else {
+            return &[];
+        };
+        let lo = all.partition_point(|s| s.t_ms < l.start_ms);
+        let hi = all.partition_point(|s| s.t_ms <= l.end_ms);
+        all.get(lo..hi).unwrap_or(&[])
+    }
+
+    /// The aircraft has an airborne report on the leg within the window before the issue time.
+    fn airborne_at(&self, leg: u32, issue: i64) -> bool {
+        let st = self.leg_states(leg);
+        let hi = st.partition_point(|s| s.t_ms <= issue);
+        let from = issue - self.ctx.cfg.airborne_window_ms;
+        st.get(..hi)
+            .unwrap_or(&[])
+            .iter()
+            .rev()
+            .take_while(|s| s.t_ms >= from)
+            .any(|s| !s.ground)
+    }
+
+    /// The crossing of `place` on `leg` for an estimate, once for every cut.
+    fn cross(
+        &mut self,
+        sys: &mut SystemReport,
+        leg: u32,
+        place: Place,
+        est: i64,
+        issue: i64,
+    ) -> Vec<Result<Sample, Exclusion>> {
+        let ctx = self.ctx;
+        let key = (leg, place_key(place));
+        if !self.searches.contains_key(&key) {
+            let a: Vec<Approach> = {
+                let path = self.path(leg);
+                ctx.cuts_m
+                    .iter()
+                    .map(|&c| approach(path, place, c))
+                    .collect()
+            };
+            if let Some(p) = a.get(ctx.primary) {
+                closest_add(sys, p.min_dist_m);
+            }
+            self.searches.insert(key, a);
+        }
+        let Some(all) = self.searches.get(&key) else {
+            return Vec::new();
+        };
+        all.iter()
+            .zip(&ctx.cuts_m)
+            .map(|(a, &c)| {
+                let cfg = Config {
+                    cut_m: c,
+                    ..ctx.cfg
+                };
+                let actual = choose_passage(a, issue, &cfg)?;
+                score(est, actual, issue, &cfg)
+            })
+            .collect()
+    }
+
+    /// An estimate of a landing time against the touchdown on `leg` at the airport `apt`.
+    fn landing(
+        &mut self,
+        sys: &mut SystemReport,
+        leg: u32,
+        apt: Option<&str>,
+        est: i64,
+        issue: i64,
+        actual_arr: Option<i64>,
+    ) -> Result<(Sample, Extra, bool), Exclusion> {
+        let Some(apt) = apt else {
+            return Err(Exclusion::AirportUnknown);
+        };
+        let states = self.leg_states(leg);
+        let ctx = self.ctx;
+        let covered = *self
+            .ground_cov
+            .entry(leg)
+            .or_insert_with(|| states.iter().any(|s| s.ground));
+        if !covered {
+            return Err(Exclusion::NoGroundCoverage);
+        }
+        let key = (leg, apt.to_string());
+        if !self.lands.contains_key(&key) {
+            let refs = thin(
+                states
+                    .iter()
+                    .map(|s| Place {
+                        lat_deg: s.lat_deg,
+                        lon_deg: s.lon_deg,
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            );
+            let r = match resolve(airport_places(ctx.table, apt), &refs) {
+                Resolution::NotFound => Err(Exclusion::AirportUnknown),
+                Resolution::Refused => Err(Exclusion::PlaceAmbiguous),
+                Resolution::Unique(arp) | Resolution::Picked(arp) => {
+                    let picked = matches!(
+                        resolve(airport_places(ctx.table, apt), &refs),
+                        Resolution::Picked(_)
+                    );
+                    let set = landings(states, arp, airport_elev_ft(ctx.table, apt), &ctx.cfg);
+                    count(
+                        sys,
+                        "changes near the airport refused: ground not held (touch and go, blip)",
+                        set.refused_persist,
+                    );
+                    count(
+                        sys,
+                        "changes near the airport refused: too high and too fast",
+                        set.refused_altitude,
+                    );
+                    Ok((picked, set))
+                }
+            };
+            self.lands.insert(key.clone(), r);
+        }
+        let (picked, set) = match self.lands.get(&key) {
+            Some(Ok((p, s))) => (*p, s),
+            Some(Err(e)) => return Err(*e),
+            None => return Err(Exclusion::AirportUnknown),
+        };
+        let landing = choose_landing(set, issue, &ctx.cfg)?;
+        let sm = score(est, landing.t_ms, issue, &ctx.cfg)?;
+        let x = Extra {
+            gap_s: Some(landing.gap_ms as f64 / 1000.0),
+            alt: actual_arr.map(|t| {
+                (
+                    (est - t) as f64 / 1000.0,
+                    (landing.t_ms - t) as f64 / 1000.0,
+                )
+            }),
+            td: Some((
+                (est - landing.t_air_ms) as f64 / 1000.0,
+                (est - landing.t_gnd_ms) as f64 / 1000.0,
+            )),
+            issue_ms: issue,
+        };
+        Ok((sm, x, picked))
+    }
+}
+
+/// Records the crossing results of one estimate: the headline cut into its class, and, for a
+/// headline row, every cut into the sensitivity tables.
+fn record_cross(
+    sys: &mut SystemReport,
+    kind: usize,
+    fl: &Flight<'_, '_>,
+    (unit_id, cs): (u32, bool),
+    (leg, issue): (u32, i64),
+    results: Vec<Result<Sample, Exclusion>>,
+) {
+    let g = group_of(cs, fl.airborne_at(leg, issue));
+    let Some(k) = sys.kinds.get_mut(kind) else {
+        return;
+    };
+    let head = results
+        .get(fl.ctx.primary)
+        .copied()
+        .unwrap_or(Err(Exclusion::NoTruthPath));
+    kind_record(
+        k,
+        unit_id,
+        g,
+        head,
+        Extra {
+            issue_ms: issue,
+            ..Extra::default()
+        },
+    );
+    if g == 0 {
+        for (r, c) in results.iter().zip(&fl.ctx.cuts_m) {
+            sens_add(k, &format!("crossing cut {:.1} NM", c / 1852.0), r);
+        }
+    }
+}
+
+/// Records one excluded estimate (the class does not matter).
+fn record_excluded(sys: &mut SystemReport, kind: usize, x: Exclusion) {
+    if let Some(k) = sys.kinds.get_mut(kind) {
+        kind_record(k, 0, 0, Err(x), Extra::default());
+    }
+}
+
+/// Records a landing estimate.
+fn record_landing(
+    sys: &mut SystemReport,
+    kind: usize,
+    fl: &Flight<'_, '_>,
+    (unit_id, cs): (u32, bool),
+    (leg, issue): (u32, i64),
+    r: Result<(Sample, Extra, bool), Exclusion>,
+) {
+    let g = group_of(cs, fl.airborne_at(leg, issue));
+    let Some(k) = sys.kinds.get_mut(kind) else {
+        return;
+    };
+    match r {
+        Ok((sm, x, picked)) => {
+            if picked {
+                k.resolved_ambiguous += 1;
+            }
+            kind_record(k, unit_id, g, Ok(sm), x);
+        }
+        Err(e) => kind_record(k, unit_id, g, Err(e), Extra::default()),
+    }
+}
+
+/// The joined flights whose interval touched more than one truth leg, counted.
+fn count_multi(ctx: &Ctx<'_>, sys: &mut SystemReport, addr: u32, unit: &Unit) {
+    if legs_of(ctx.ix, addr, unit).len() > 1 {
+        count(
+            sys,
+            "joined flights whose interval touched more than one leg",
+            1,
+        );
+    }
 }
 
 /// ERAM: the predicted time of each route point of each converted route, against when the
@@ -416,7 +814,16 @@ fn eram(leg: &Legacy, ctx: &Ctx<'_>, sys: &mut SystemReport, flights_total: &mut
             from_ms,
             to_ms,
         };
-        let outcome = join(ctx.ix, &unit);
+        let dep = airport_of(leg, &[f], false);
+        let arr = airport_of(leg, &[f], true);
+        let outcome = refine(
+            ctx,
+            sys,
+            join(ctx.ix, &unit),
+            &unit,
+            dep.as_deref(),
+            arr.as_deref(),
+        );
         if let Some(c) = sys.outcomes.get_mut(outcome_index(outcome)) {
             *c += 1;
         }
@@ -426,42 +833,9 @@ fn eram(leg: &Legacy, ctx: &Ctx<'_>, sys: &mut SystemReport, flights_total: &mut
             }
             continue;
         };
-        let path = sample_path(ctx, addr, &legs_of_unit(ctx, addr, &unit), from_ms, to_ms);
-        let mut searches = Searches::default();
-        // Several places of one name: the one nearest the route's own coordinates, else nearest
-        // the flown path.
-        let route_refs = || {
-            let mut v: Vec<Place> = Vec::new();
-            for &r in routes {
-                let (first, len) = (
-                    leg.routes.first.get(r as usize).copied().unwrap_or(0) as usize,
-                    leg.routes.len.get(r as usize).copied().unwrap_or(0) as usize,
-                );
-                for p in first..first + len {
-                    if let (Some(&la), Some(&lo)) = (
-                        leg.route_points.lat_e7.get(p),
-                        leg.route_points.lon_e7.get(p),
-                    ) {
-                        if la != NO_COORD && lo != NO_COORD {
-                            v.push(place_of_e7(la, lo));
-                        }
-                    }
-                }
-            }
-            if v.is_empty() {
-                v = thin(path.iter().map(|q| Place {
-                    lat_deg: q.lat_deg,
-                    lon_deg: q.lon_deg,
-                }));
-            } else {
-                v = thin(v.into_iter());
-            }
-            v
-        };
-        let extra = Extra {
-            by_callsign: by_callsign(outcome),
-            ..Extra::default()
-        };
+        count_multi(ctx, sys, addr, &unit);
+        let cs = by_callsign(outcome) == Some(true);
+        let mut fl = Flight::new(ctx, addr, dep);
         for &r in routes {
             let issue = ts(r);
             let (first, len) = (
@@ -474,49 +848,87 @@ fn eram(leg: &Legacy, ctx: &Ctx<'_>, sys: &mut SystemReport, flights_total: &mut
                     leg.route_points.lat_e7.get(p).copied().unwrap_or(NO_COORD),
                     leg.route_points.lon_e7.get(p).copied().unwrap_or(NO_COORD),
                 );
-                let result = if issue == NO_TIME {
-                    Err(Exclusion::NoIssueTime)
-                } else if est == NO_TIME {
-                    Err(Exclusion::NoEstimate)
-                } else {
-                    let mut picked = false;
-                    let placed = if lat != NO_COORD && lon != NO_COORD {
-                        Ok(place_of_e7(lat, lon))
-                    } else {
-                        let fix = leg.route_points.fix.get(p).copied().unwrap_or([0; 8]);
-                        point_result(ctx.table, name(&fix), route_refs).map(|(pl, pk)| {
-                            picked = pk;
-                            pl
-                        })
-                    };
-                    match placed {
-                        Err(x) => Err(x),
-                        Ok(_) if path.is_empty() => Err(Exclusion::NoTruthPath),
-                        Ok(place) => {
-                            if picked {
-                                if let Some(k) = sys.kinds.first_mut() {
-                                    k.resolved_ambiguous += 1;
+                if issue == NO_TIME {
+                    record_excluded(sys, 0, Exclusion::NoIssueTime);
+                    continue;
+                }
+                if est == NO_TIME {
+                    record_excluded(sys, 0, Exclusion::NoEstimate);
+                    continue;
+                }
+                let Some(lg) = fl.leg_for(issue) else {
+                    record_excluded(sys, 0, Exclusion::NoLeg);
+                    continue;
+                };
+                if fl.path(lg).is_empty() {
+                    record_excluded(sys, 0, Exclusion::NoTruthPath);
+                    continue;
+                }
+                // Several places of one name: the one nearest the route's own coordinates, else
+                // nearest the flown path.
+                let route_refs = || {
+                    let mut v: Vec<Place> = Vec::new();
+                    for &r2 in routes {
+                        let (f2, l2) = (
+                            leg.routes.first.get(r2 as usize).copied().unwrap_or(0) as usize,
+                            leg.routes.len.get(r2 as usize).copied().unwrap_or(0) as usize,
+                        );
+                        for q in f2..f2 + l2 {
+                            if let (Some(&la), Some(&lo)) = (
+                                leg.route_points.lat_e7.get(q),
+                                leg.route_points.lon_e7.get(q),
+                            ) {
+                                if la != NO_COORD && lo != NO_COORD {
+                                    v.push(place_of_e7(la, lo));
                                 }
                             }
-                            let a = approach_of(&mut searches, sys, &path, place, &ctx.cfg);
-                            score_cross(a, est, issue, &ctx.cfg)
                         }
                     }
+                    thin(v.into_iter())
                 };
-                if let Some(k) = sys.kinds.first_mut() {
-                    kind_add_with(k, f, result, extra);
+                let mut picked = false;
+                let placed = if lat != NO_COORD && lon != NO_COORD {
+                    Ok(place_of_e7(lat, lon))
+                } else {
+                    let fix = leg.route_points.fix.get(p).copied().unwrap_or([0; 8]);
+                    let path_refs =
+                        || {
+                            let r = route_refs();
+                            if r.is_empty() {
+                                thin(fl.paths.get(&lg).map_or(&[][..], Vec::as_slice).iter().map(
+                                    |q| Place {
+                                        lat_deg: q.lat_deg,
+                                        lon_deg: q.lon_deg,
+                                    },
+                                ))
+                            } else {
+                                r
+                            }
+                        };
+                    point_result(ctx.table, name(&fix), path_refs).map(|(pl, pk)| {
+                        picked = pk;
+                        pl
+                    })
+                };
+                match placed {
+                    Err(x) => record_excluded(sys, 0, x),
+                    Ok(place) => {
+                        if picked {
+                            if let Some(k) = sys.kinds.first_mut() {
+                                k.resolved_ambiguous += 1;
+                            }
+                        }
+                        let res = fl.cross(sys, lg, place, est, issue);
+                        record_cross(sys, 0, &fl, (f, cs), (lg, issue), res);
+                    }
                 }
             }
         }
     }
 }
 
-fn legs_of_unit(ctx: &Ctx<'_>, addr: u32, u: &Unit) -> Vec<u32> {
-    legs_of(ctx.ix, addr, u)
-}
-
 /// TBFM: the meter-fix and runway estimates and the scheduled times, against the crossing of the
-/// meter fix and the landing.
+/// meter fix and the touchdown.
 fn tbfm(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport) {
     let kinds = [
         tbfm_kind::ETA_MFX,
@@ -525,13 +937,24 @@ fn tbfm(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
         tbfm_kind::STA_RWY,
     ];
     for (uix, u) in units.iter().enumerate() {
-        if let Some(c) = sys.outcomes.get_mut(outcome_index(u.outcome)) {
+        let outcome = refine(
+            ctx,
+            sys,
+            u.outcome,
+            &u.unit,
+            u.dep.as_deref(),
+            u.arrival.as_deref(),
+        );
+        if let Some(c) = sys.outcomes.get_mut(outcome_index(outcome)) {
             *c += 1;
         }
-        let addr = joined_addr(u.outcome);
-        let mut path: Option<Vec<PathPoint>> = None;
-        let mut searches = Searches::default();
-        let mut lands: BTreeMap<String, AirportLandings> = BTreeMap::new();
+        let addr = joined_addr(outcome);
+        if let Some(a) = addr {
+            count_multi(ctx, sys, a, &u.unit);
+        }
+        let cs = by_callsign(outcome) == Some(true);
+        let mut fl = addr.map(|a| Flight::new(ctx, a, u.dep.clone()));
+        let actual_arr = ctx.tfms_actual.get(&u.plan).copied();
         for &r in &u.rows {
             let ri = r as usize;
             let kind = leg.tbfm.kind.get(ri).copied().unwrap_or(0);
@@ -540,193 +963,113 @@ fn tbfm(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
             };
             let issue = leg.tbfm.issue_ms.get(ri).copied().unwrap_or(NO_TIME);
             let est = leg.tbfm.time_ms.get(ri).copied().unwrap_or(NO_TIME);
-            let result = if addr.is_none() {
-                Err(Exclusion::NotJoined)
-            } else if issue == NO_TIME {
-                Err(Exclusion::NoIssueTime)
-            } else if est == NO_TIME {
-                Err(Exclusion::NoEstimate)
-            } else if let (Some(a), true) = (addr, slot < 2) {
-                let fix = leg.tbfm.fix.get(ri).copied().unwrap_or([0; 8]);
-                let nm = name(&fix);
-                if point_places(ctx.table, nm).is_empty() {
-                    Err(Exclusion::PlaceUnknown)
-                } else {
-                    let p = path.get_or_insert_with(|| {
-                        sample_path(
-                            ctx,
-                            a,
-                            &legs_of_unit(ctx, a, &u.unit),
-                            u.unit.from_ms,
-                            u.unit.to_ms,
-                        )
-                    });
-                    if p.is_empty() {
-                        Err(Exclusion::NoTruthPath)
-                    } else {
-                        let refs = || {
-                            thin(p.iter().map(|q| Place {
+            let Some(fl) = fl.as_mut() else {
+                record_excluded(sys, slot, Exclusion::NotJoined);
+                continue;
+            };
+            if issue == NO_TIME {
+                record_excluded(sys, slot, Exclusion::NoIssueTime);
+                continue;
+            }
+            if est == NO_TIME {
+                record_excluded(sys, slot, Exclusion::NoEstimate);
+                continue;
+            }
+            let fix = leg.tbfm.fix.get(ri).copied().unwrap_or([0; 8]);
+            let nm = name(&fix);
+            if slot < 2 && point_places(ctx.table, nm).is_empty() {
+                record_excluded(sys, slot, Exclusion::PlaceUnknown);
+                continue;
+            }
+            let Some(lg) = fl.leg_for(issue) else {
+                record_excluded(sys, slot, Exclusion::NoLeg);
+                continue;
+            };
+            if slot < 2 {
+                if fl.path(lg).is_empty() {
+                    record_excluded(sys, slot, Exclusion::NoTruthPath);
+                    continue;
+                }
+                let paths = &fl.paths;
+                let refs = || {
+                    thin(
+                        paths
+                            .get(&lg)
+                            .map_or(&[][..], Vec::as_slice)
+                            .iter()
+                            .map(|q| Place {
                                 lat_deg: q.lat_deg,
                                 lon_deg: q.lon_deg,
-                            }))
-                        };
-                        match point_result(ctx.table, nm, refs) {
-                            Err(x) => Err(x),
-                            Ok((place, picked)) => {
-                                if picked {
-                                    if let Some(k) = sys.kinds.get_mut(slot) {
-                                        k.resolved_ambiguous += 1;
-                                    }
-                                }
-                                let ap = approach_of(&mut searches, sys, p, place, &ctx.cfg);
-                                score_cross(ap, est, issue, &ctx.cfg)
-                                    .map(|sm| (sm, Extra::default()))
+                            }),
+                    )
+                };
+                match point_result(ctx.table, nm, refs) {
+                    Err(x) => record_excluded(sys, slot, x),
+                    Ok((place, picked)) => {
+                        if picked {
+                            if let Some(k) = sys.kinds.get_mut(slot) {
+                                k.resolved_ambiguous += 1;
                             }
                         }
+                        let res = fl.cross(sys, lg, place, est, issue);
+                        record_cross(sys, slot, fl, (uix as u32, cs), (lg, issue), res);
                     }
                 }
-            } else if let Some(a) = addr {
-                let actual_arr = ctx.tfms_actual.get(&u.plan).copied();
-                landing_result(
-                    ctx,
-                    a,
-                    u.arrival.as_deref(),
-                    &mut lands,
-                    est,
-                    issue,
-                    actual_arr,
-                )
-                .map(|(sm, x, pk)| {
-                    if pk {
-                        if let Some(k) = sys.kinds.get_mut(slot) {
-                            k.resolved_ambiguous += 1;
-                        }
-                    }
-                    (sm, x)
-                })
             } else {
-                Err(Exclusion::NotJoined)
-            };
-            if let Some(k) = sys.kinds.get_mut(slot) {
-                add_result(k, uix as u32, result, by_callsign(u.outcome));
+                let res = fl.landing(sys, lg, u.arrival.as_deref(), est, issue, actual_arr);
+                record_landing(sys, slot, fl, (uix as u32, cs), (lg, issue), res);
             }
         }
     }
 }
 
-/// Adds a scored estimate, with the diagnostics it carries, or its exclusion.
-fn add_result(
-    k: &mut crate::core::report::KindTable,
-    unit: u32,
-    r: Result<(Sample, Extra), Exclusion>,
-    cs: Option<bool>,
-) {
-    match r {
-        Ok((sm, mut x)) => {
-            x.by_callsign = cs;
-            kind_add_with(k, unit, Ok(sm), x);
-        }
-        Err(e) => kind_add(k, unit, Err(e)),
-    }
-}
+/// An airport's landings on a leg: whether one of several places was taken, and the set; or why
+/// not.
+type AirportLandings = Result<(bool, LandingSet), Exclusion>;
 
-/// An airport of a flight: its place (and whether one of several was taken), and the landings of
-/// the aircraft near it.
-type AirportLandings = Result<(bool, Vec<Landing>), Exclusion>;
-
-/// An estimate of a landing time against the landing of the aircraft at the airport. `actual_arr`
-/// is the TFMS actual arrival time of the flight, if it has one (a diagnostic: the same estimate
-/// is also scored against it). Returns the sample, its diagnostics, and whether the airport had
-/// several places and one was taken.
-fn landing_result(
-    ctx: &Ctx<'_>,
-    addr: u32,
-    arrival: Option<&str>,
-    cache: &mut BTreeMap<String, AirportLandings>,
-    est: i64,
-    issue: i64,
-    actual_arr: Option<i64>,
-) -> Result<(Sample, Extra, bool), Exclusion> {
-    let Some(apt) = arrival else {
-        return Err(Exclusion::AirportUnknown);
-    };
-    let entry = cache.entry(apt.to_string()).or_insert_with(|| {
-        let states = ctx.states.get(&addr).map_or(&[][..], Vec::as_slice);
-        let refs = thin(
-            states
-                .iter()
-                .map(|s| Place {
-                    lat_deg: s.lat_deg,
-                    lon_deg: s.lon_deg,
-                })
-                .collect::<Vec<_>>()
-                .into_iter(),
-        );
-        match resolve(airport_places(ctx.table, apt), &refs) {
-            Resolution::NotFound => Err(Exclusion::AirportUnknown),
-            Resolution::Refused => Err(Exclusion::PlaceAmbiguous),
-            Resolution::Unique(arp) => Ok((false, landings(states, arp, &ctx.cfg))),
-            Resolution::Picked(arp) => Ok((true, landings(states, arp, &ctx.cfg))),
-        }
-    });
-    let (picked, l) = match entry {
-        Ok((p, l)) => (*p, l),
-        Err(e) => return Err(*e),
-    };
-    let landing = choose_landing(l, issue, &ctx.cfg)?;
-    let sm = score(est, landing.t_ms, issue, &ctx.cfg)?;
-    let alt = actual_arr.map(|t| {
-        (
-            (est - t) as f64 / 1000.0,
-            (landing.t_ms - t) as f64 / 1000.0,
-        )
-    });
-    let x = Extra {
-        gap_s: Some(landing.gap_ms as f64 / 1000.0),
-        alt,
-        by_callsign: None,
-    };
-    Ok((sm, x, picked))
-}
-
-/// TFMS: the arrival estimates, against the landing at the arrival airport.
+/// TFMS: the arrival estimates, against the touchdown at the arrival airport.
 fn tfms(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport) {
     for (uix, u) in units.iter().enumerate() {
-        if let Some(c) = sys.outcomes.get_mut(outcome_index(u.outcome)) {
+        let outcome = refine(
+            ctx,
+            sys,
+            u.outcome,
+            &u.unit,
+            u.dep.as_deref(),
+            u.arrival.as_deref(),
+        );
+        if let Some(c) = sys.outcomes.get_mut(outcome_index(outcome)) {
             *c += 1;
         }
-        let addr = joined_addr(u.outcome);
-        let mut lands: BTreeMap<String, AirportLandings> = BTreeMap::new();
+        let addr = joined_addr(outcome);
+        if let Some(a) = addr {
+            count_multi(ctx, sys, a, &u.unit);
+        }
+        let cs = by_callsign(outcome) == Some(true);
+        let mut fl = addr.map(|a| Flight::new(ctx, a, u.dep.clone()));
         let actual_arr = ctx.tfms_actual.get(&u.plan).copied();
         for &r in &u.rows {
             let ri = r as usize;
             let issue = leg.tfms.issue_ms.get(ri).copied().unwrap_or(NO_TIME);
             let est = leg.tfms.time_ms.get(ri).copied().unwrap_or(NO_TIME);
-            let result = match addr {
-                None => Err(Exclusion::NotJoined),
-                Some(_) if issue == NO_TIME => Err(Exclusion::NoIssueTime),
-                Some(_) if est == NO_TIME => Err(Exclusion::NoEstimate),
-                Some(a) => landing_result(
-                    ctx,
-                    a,
-                    u.arrival.as_deref(),
-                    &mut lands,
-                    est,
-                    issue,
-                    actual_arr,
-                )
-                .map(|(sm, x, pk)| {
-                    if pk {
-                        if let Some(k) = sys.kinds.first_mut() {
-                            k.resolved_ambiguous += 1;
-                        }
-                    }
-                    (sm, x)
-                }),
+            let Some(fl) = fl.as_mut() else {
+                record_excluded(sys, 0, Exclusion::NotJoined);
+                continue;
             };
-            if let Some(k) = sys.kinds.first_mut() {
-                add_result(k, uix as u32, result, by_callsign(u.outcome));
+            if issue == NO_TIME {
+                record_excluded(sys, 0, Exclusion::NoIssueTime);
+                continue;
             }
+            if est == NO_TIME {
+                record_excluded(sys, 0, Exclusion::NoEstimate);
+                continue;
+            }
+            let Some(lg) = fl.leg_for(issue) else {
+                record_excluded(sys, 0, Exclusion::NoLeg);
+                continue;
+            };
+            let res = fl.landing(sys, lg, u.arrival.as_deref(), est, issue, actual_arr);
+            record_landing(sys, 0, fl, (uix as u32, cs), (lg, issue), res);
         }
     }
 }
@@ -754,6 +1097,8 @@ pub struct Scored {
     pub etd_rows: u64,
     /// The match rates of the names against the table.
     pub sections: Vec<Section>,
+    /// Flights in the TBFM and TFMS recordings (SFDPS is `sfdps_flights.0`).
+    pub recording_flights: [u64; 2],
 }
 
 /// How many of the most frequent unresolved names are listed.
@@ -917,28 +1262,46 @@ pub fn score_all(inp: &Inputs<'_>, reports: Reports) -> Scored {
     }
     let tfms_actual: BTreeMap<[u8; 12], i64> =
         tfms_actual.into_iter().map(|(k, (t, _))| (k, t)).collect();
-    let tb_units = tbfm_units(leg, &plans, &ix, &tfms_arr);
+    let mut tfms_dep: BTreeMap<[u8; 12], String> = BTreeMap::new();
+    for (p, a) in leg.tfms.plan_id.iter().zip(&leg.tfms.dep) {
+        let k = key_of(a);
+        if !k.is_empty() {
+            tfms_dep.entry(norm_id::<12>(p)).or_insert(k);
+        }
+    }
+    let tb_units = tbfm_units(leg, &plans, &ix, &tfms_arr, &tfms_dep);
     let tf_units = tfms_units(leg, &plans, &ix);
-    let want: BTreeSet<u32> = tb_units
-        .iter()
-        .chain(tf_units.iter())
-        .filter_map(|u| joined_addr(u.outcome))
-        .collect();
+    let want: BTreeSet<u32> = ix.by_addr.keys().copied().collect();
     let states = air_states(&reports, &want);
     drop(reports);
+    let ends = leg_ends(inp.built);
+    let mut cuts_m: Vec<f64> = [0.5, 1.0, 2.0].iter().map(|c| c * 1852.0).collect();
+    let primary = match cuts_m.iter().position(|c| (c - inp.cfg.cut_m).abs() < 1e-6) {
+        Some(k) => k,
+        None => {
+            cuts_m.push(inp.cfg.cut_m);
+            cuts_m.len() - 1
+        }
+    };
     let ctx = Ctx {
         cfg: inp.cfg,
+        cuts_m,
+        primary,
         step_ms: inp.step_ms,
         built: inp.built,
         ix: &ix,
         table: &inp.table,
         states: &states,
         tfms_actual: &tfms_actual,
+        leg_ends: &ends,
     };
     let mut e = system_new("ERAM", &["route point time"]);
     let mut counts = (0u64, 0u64);
     eram(leg, &ctx, &mut e, &mut counts);
     let mut b = system_new("TBFM", &["eta_mfx", "sta_sfx", "eta_rwy", "sta_rwy"]);
+    for k in b.kinds.iter_mut().skip(2) {
+        k.track_last = true;
+    }
     tbfm(leg, &ctx, &tb_units, &mut b);
     let mut t = system_new("TFMS", &["eta"]);
     tfms(leg, &ctx, &tf_units, &mut t);
@@ -952,28 +1315,30 @@ pub fn score_all(inp: &Inputs<'_>, reports: Reports) -> Scored {
             .filter(|&&k| k == tfms_kind::ETD)
             .count() as u64,
         sections: match_sections(leg, &inp.table),
+        recording_flights: [tb_units.len() as u64, tf_units.len() as u64],
     }
 }
 
 /// The run: reads the recordings and the clips, writes the report and the CSV files under
 /// `args.out`, and returns the report text.
 pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
-    let cfg = Config {
-        cut_m: args.cut_nm * 1852.0,
-        runway_radius_m: args.runway_nm * 1852.0,
-        landing_gap_max_ms: args.landing_gap_s * 1000,
-        max_look_ahead_ms: MAX_LOOK_AHEAD_MIN * MS_PER_MIN,
-    };
+    let cfg = Config::new(
+        args.cut_nm * 1852.0,
+        args.runway_nm * 1852.0,
+        args.landing_gap_s * 1000,
+        MAX_LOOK_AHEAD_MIN * MS_PER_MIN,
+    );
     let mut table = PlaceTable::default();
     let mut nasr_line = "none given: no point or airport has a place".to_string();
     if let Some(z) = &args.nasr {
         let (t, sha) = load_nasr(z)?;
         nasr_line = format!(
-            "{}: {} point names, {} airport codes, {} rows rejected by the parser, sha256 {sha}",
+            "{}: {} point names, {} airport codes, {} airport keys shared by two airports, {} rows rejected by the parser, sha256 {sha}",
             z.file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
             t.points.len(),
             t.airports.len(),
+            t.collisions.len(),
             t.rejected
         );
         table = t;
@@ -1103,6 +1468,36 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         "TFMS departure estimates".to_string(),
         format!("{} rows, not scored (the task is arrival)", scored.etd_rows),
     ));
+    let names = ["ERAM", "TBFM", "TFMS"];
+    let totals = [
+        scored.sfdps_flights.1,
+        scored.recording_flights[0],
+        scored.recording_flights[1],
+    ];
+    for ((sys, name), total) in scored.systems.iter().zip(names).zip(totals) {
+        let joined =
+            sys.outcomes.first().copied().unwrap_or(0) + sys.outcomes.get(1).copied().unwrap_or(0);
+        let all: u64 = sys.outcomes.iter().sum();
+        let by_cs = sys.outcomes.get(1).copied().unwrap_or(0);
+        let no_cov: u64 = sys
+            .kinds
+            .iter()
+            .map(|k| {
+                k.exclusions
+                    .get(exclusion_index(Exclusion::NoGroundCoverage))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .sum();
+        header.push((
+            format!("population {name}"),
+            format!(
+                "{total} flights in the recording ({all} counted by join), {joined} joined to an ADS-B aircraft in the ZAU clip ({:.1}%; {by_cs} of them by callsign), {} with a scored estimate, {no_cov} estimates excluded for no ground coverage",
+                if all == 0 { 0.0 } else { 100.0 * joined as f64 / all as f64 },
+                scored_flights(sys)
+            ),
+        ));
+    }
     header.push((
         "sealed-window rows dropped".to_string(),
         (*sealed).to_string(),

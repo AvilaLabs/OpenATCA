@@ -8,11 +8,13 @@
 //! A stretch of the path within the cut distance is one passage, with its own closest approach,
 //! so an aircraft that holds over a point passes it more than once.
 //!
-//! **Landing.** The landing time is the last airborne report before the first ground report, where
-//! that report is within the runway radius of the airport reference point.
+//! **Landing.** The landing time is the middle of the gap between the last airborne report and
+//! the first ground report, where the last airborne report is within the runway radius of the
+//! airport reference point, the aircraft then stays on the ground, and was low or slow.
 
 use crate::core::types::{
-    AirState, Approach, Config, Exclusion, Landing, Passage, PathPoint, Place,
+    AirState, Approach, Config, Exclusion, Landing, LandingSet, Passage, PathPoint, Place, NO_ALT,
+    NO_SPEED,
 };
 
 /// Metres per degree of latitude (a sphere of 6,371,008.8 m).
@@ -153,7 +155,10 @@ pub fn approach(path: &[PathPoint], place: Place, cut_m: f64) -> Approach {
 }
 
 /// The time the aircraft reached the point for an estimate issued at `issue_ms`: the closest
-/// approach of the first passage that is not before the issue. The estimate never chooses.
+/// approach of the first passage that is not before the issue; when every passage is before it,
+/// the last one (the event happened before the message: the error is kept). The estimate never
+/// chooses. A passage that is in progress at the issue is chosen by its closest approach like any
+/// other.
 pub fn choose_passage(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<i64, Exclusion> {
     if a.min_dist_m.is_infinite() {
         return Err(Exclusion::NoTruthPath);
@@ -161,53 +166,82 @@ pub fn choose_passage(a: &Approach, issue_ms: i64, cfg: &Config) -> Result<i64, 
     if a.min_dist_m > cfg.cut_m {
         return Err(Exclusion::BeyondCut);
     }
-    match a.passages.iter().find(|p| p.t_ms >= issue_ms) {
-        None => Err(Exclusion::PassedBeforeIssue),
+    let chosen = a
+        .passages
+        .iter()
+        .find(|p| p.t_ms >= issue_ms)
+        .or_else(|| a.passages.last());
+    match chosen {
+        None => Err(Exclusion::BeyondCut),
         Some(p) if p.at_edge => Err(Exclusion::PassageAtEdge),
         Some(p) => Ok(p.t_ms),
     }
 }
 
-/// Every change from airborne to ground in `states` (sorted by time), with whether the last
-/// airborne report is near `arp`.
-pub fn landings(states: &[AirState], arp: Place, cfg: &Config) -> Vec<Landing> {
-    let mut out = Vec::new();
-    for w in states.windows(2) {
+/// Every change from airborne to ground in `states` (sorted by time) that holds up as a landing,
+/// with whether the last airborne report is near `arp`. A change holds up when no airborne report
+/// follows within the persistence time and the last airborne report is below the airport
+/// elevation `elev_ft` plus the altitude limit, or below the speed limit. Changes near the
+/// airport that do not are counted.
+pub fn landings(states: &[AirState], arp: Place, elev_ft: Option<f64>, cfg: &Config) -> LandingSet {
+    let mut out = LandingSet::default();
+    for (i, w) in states.windows(2).enumerate() {
         let (Some(a), Some(b)) = (w.first(), w.get(1)) else {
             continue;
         };
         if a.ground || !b.ground {
             continue;
         }
-        out.push(Landing {
-            t_ms: a.t_ms,
+        let at_airport = flat_dist_m(arp, a.lat_deg, a.lon_deg) <= cfg.runway_radius_m;
+        let flies_on = states
+            .iter()
+            .skip(i + 2)
+            .take_while(|s| s.t_ms <= b.t_ms + cfg.landing_persist_ms)
+            .any(|s| !s.ground);
+        if flies_on {
+            if at_airport {
+                out.refused_persist += 1;
+            }
+            continue;
+        }
+        let low = a.alt_ft != NO_ALT
+            && elev_ft.is_some_and(|e| f64::from(a.alt_ft) < e + cfg.landing_alt_ft);
+        let slow = a.gs_dkt != NO_SPEED && f64::from(a.gs_dkt) * 0.1 * KT_MS < cfg.landing_speed_ms;
+        if !(low || slow) {
+            if at_airport {
+                out.refused_altitude += 1;
+            }
+            continue;
+        }
+        out.landings.push(Landing {
+            t_ms: a.t_ms + (b.t_ms - a.t_ms) / 2,
+            t_air_ms: a.t_ms,
+            t_gnd_ms: b.t_ms,
             gap_ms: b.t_ms - a.t_ms,
-            at_airport: flat_dist_m(arp, a.lat_deg, a.lon_deg) <= cfg.runway_radius_m,
+            at_airport,
         });
     }
     out
 }
 
-/// The landing time for an estimate issued at `issue_ms`: the first landing at the airport that
-/// is not before the issue.
-pub fn choose_landing(l: &[Landing], issue_ms: i64, cfg: &Config) -> Result<Landing, Exclusion> {
-    let mut too_long = false;
-    let mut before = false;
-    for x in l.iter().filter(|x| x.at_airport) {
-        if x.t_ms < issue_ms {
-            before = true;
-        } else if x.gap_ms > cfg.landing_gap_max_ms {
-            too_long = true;
-        } else {
-            return Ok(*x);
-        }
-    }
-    if too_long {
-        Err(Exclusion::LandingGap)
-    } else if before {
-        Err(Exclusion::PassedBeforeIssue)
-    } else {
-        Err(Exclusion::NoLanding)
+/// Metres per second in a knot.
+const KT_MS: f64 = 1852.0 / 3600.0;
+
+/// The landing for an estimate issued at `issue_ms`: the first landing at the airport that is not
+/// before the issue, else the last one before it (kept). When there is none at the airport: a
+/// landing elsewhere is a diversion; refused changes near the airport are touch-and-go.
+pub fn choose_landing(set: &LandingSet, issue_ms: i64, cfg: &Config) -> Result<Landing, Exclusion> {
+    let here: Vec<&Landing> = set.landings.iter().filter(|x| x.at_airport).collect();
+    let chosen = here
+        .iter()
+        .find(|x| x.t_ms >= issue_ms)
+        .or_else(|| here.last());
+    match chosen {
+        Some(x) if x.gap_ms > cfg.landing_gap_max_ms => Err(Exclusion::LandingGap),
+        Some(x) => Ok(**x),
+        None if !set.landings.is_empty() => Err(Exclusion::Diversion),
+        None if set.refused_persist + set.refused_altitude > 0 => Err(Exclusion::TouchAndGo),
+        None => Err(Exclusion::NoLanding),
     }
 }
 

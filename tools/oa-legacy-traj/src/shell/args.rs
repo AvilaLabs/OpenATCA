@@ -94,7 +94,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
     if adsb.is_empty() {
         return Err("at least one --adsb clip is required".to_string());
     }
-    let landing_gap_s = gap.unwrap_or(120.0);
+    let landing_gap_s = gap.unwrap_or(30.0);
     let step_s = step.unwrap_or(5.0);
     if landing_gap_s.fract() != 0.0 || step_s.fract() != 0.0 {
         return Err("--landing-gap-s and --step-s are whole seconds".to_string());

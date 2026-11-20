@@ -21,6 +21,10 @@ pub struct PlaceTable {
     pub airports: BTreeMap<String, Vec<Place>>,
     /// Rows NASR parsing rejected, by file.
     pub rejected: u64,
+    /// The elevation of an airport, feet, by airport key (NASR `APT_BASE`).
+    pub elev_ft: BTreeMap<String, f64>,
+    /// Airport keys that two distinct airports (site numbers) share; none in a sound NASR file.
+    pub collisions: Vec<String>,
 }
 
 fn add(m: &mut BTreeMap<String, Vec<Place>>, name: &str, here: Place) {
@@ -72,16 +76,30 @@ pub fn table_from_csv(fix: &[u8], nav: &[u8], apt: &[u8]) -> Result<PlaceTable, 
     let apts = oa_nasr::apt::parse_airports("APT_BASE.csv", apt)
         .map_err(|e| format!("APT_BASE.csv: {e}"))?;
     t.rejected += apts.rejected.len() as u64 + apts.rejected_dropped;
+    let mut sites: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for a in apts.records.iter().filter(|a| a.site_type_code == "A") {
         let here = Place {
             lat_deg: a.position.lat,
             lon_deg: a.position.lon,
         };
-        add(&mut t.airports, &airport_key(&a.arpt_id), here);
+        let mut keys = vec![airport_key(&a.arpt_id)];
         if let Some(icao) = &a.icao_id {
-            add(&mut t.airports, &airport_key(icao), here);
+            keys.push(airport_key(icao));
+        }
+        for k in keys {
+            add(&mut t.airports, &k, here);
+            t.elev_ft.entry(k.clone()).or_insert(a.elev);
+            let v = sites.entry(k).or_default();
+            if !v.contains(&a.site_no) {
+                v.push(a.site_no.clone());
+            }
         }
     }
+    t.collisions = sites
+        .into_iter()
+        .filter(|(_, v)| v.len() > 1)
+        .map(|(k, _)| k)
+        .collect();
     Ok(t)
 }
 
@@ -112,6 +130,7 @@ pub fn apply_places(t: &mut PlaceTable, f: &PlacesFile) {
         add(&mut t.points, &n, *here);
     }
     for (apt, here) in &f.airports {
+        t.elev_ft.remove(apt);
         t.airports.insert(apt.clone(), vec![*here]);
     }
 }
@@ -196,4 +215,9 @@ pub fn parse_places(text: &str) -> Result<PlacesFile, String> {
         }
     }
     Ok(out)
+}
+
+/// The elevation of an airport, feet, when the table has one.
+pub fn airport_elev_ft(t: &PlaceTable, code: &str) -> Option<f64> {
+    t.elev_ft.get(&airport_key(code)).copied()
 }

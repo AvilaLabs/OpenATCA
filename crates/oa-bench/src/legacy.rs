@@ -276,6 +276,8 @@ pub struct Counts {
     pub overflow_routes: u64,
     pub overflow_tbfm: u64,
     pub overflow_tfms: u64,
+    /// TFMS actual-arrival rows that did not fit; not shown in the report (a diagnostic table).
+    pub overflow_tfms_actual: u64,
     /// `TH` samples with a coast indicator.
     pub th_coast: u64,
     /// `TH` samples without a reported altitude.
@@ -504,7 +506,7 @@ pub fn push_tfms(leg: &mut Legacy, e: &TfmsIn) {
 /// Appends a TFMS actual arrival time to [`Legacy::tfms_actual`], or counts the overflow.
 pub fn push_tfms_actual(leg: &mut Legacy, e: &TfmsIn) {
     if leg.tfms_actual.kind.len() >= leg.limits.tfms {
-        leg.counts.overflow_tfms = leg.counts.overflow_tfms.saturating_add(1);
+        leg.counts.overflow_tfms_actual = leg.counts.overflow_tfms_actual.saturating_add(1);
         return;
     }
     let t = &mut leg.tfms_actual;

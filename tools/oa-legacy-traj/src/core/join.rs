@@ -144,3 +144,48 @@ pub fn join(ix: &LegIndex, u: &Unit) -> Outcome {
         _ => Outcome::Ambiguous,
     }
 }
+
+/// Every leg of `addr`, by start time.
+pub fn all_legs_of(ix: &LegIndex, addr: u32) -> Vec<u32> {
+    let mut v: Vec<u32> = ix.by_addr.get(&addr).cloned().unwrap_or_default();
+    v.sort_by_key(|&i| {
+        ix.legs
+            .get(i as usize)
+            .map_or((i64::MAX, i64::MAX), |l| (l.start_ms, l.end_ms))
+    });
+    v
+}
+
+/// The one truth leg a message binds to, among `cands` (leg indexes by start time): the leg in
+/// progress at the issue time; else the first leg starting after it, within `window_ms`, whose
+/// entry in `takes_off_ok` (parallel to `cands`) is true: the take-off airport is the flight's
+/// departure airport, when known.
+pub fn bind_leg(
+    ix: &LegIndex,
+    cands: &[u32],
+    takes_off_ok: &[bool],
+    issue_ms: i64,
+    window_ms: i64,
+) -> Option<u32> {
+    let get = |i: u32| ix.legs.get(i as usize);
+    if let Some(&i) = cands
+        .iter()
+        .find(|&&i| get(i).is_some_and(|l| l.start_ms <= issue_ms && l.end_ms >= issue_ms))
+    {
+        return Some(i);
+    }
+    cands
+        .iter()
+        .zip(takes_off_ok)
+        .find(|(&i, &ok)| {
+            ok && get(i)
+                .is_some_and(|l| l.start_ms > issue_ms && l.start_ms - issue_ms <= window_ms)
+        })
+        .map(|(&i, _)| i)
+}
+
+/// Whether a leg may be the callsign-joined flight's: it starts no later than `window_ms` after the
+/// flight's first issue time (it may be in progress at it).
+pub fn leg_in_window(l: &Leg, first_issue_ms: i64, window_ms: i64) -> bool {
+    l.end_ms >= first_issue_ms && l.start_ms <= first_issue_ms + window_ms
+}

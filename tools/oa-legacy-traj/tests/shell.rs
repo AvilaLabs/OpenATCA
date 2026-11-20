@@ -37,7 +37,7 @@ fn the_arguments_take_the_inputs_in_any_order_and_state_the_defaults() {
     .is_err());
     assert_eq!(a.cut_nm, 2.0);
     assert_eq!(a.runway_nm, 5.0);
-    assert_eq!(a.landing_gap_s, 120);
+    assert_eq!(a.landing_gap_s, 30);
     assert_eq!(a.step_s, 5);
     let a = parse(&argv(&format!(
         "--adsb a.oaf {BASE} --cut-nm 1.5 --runway-nm 3 --landing-gap-s 60 --step-s 2"
@@ -96,6 +96,7 @@ fn files_are_written_under_a_temporary_name_and_renamed_with_none_left_behind() 
 }
 
 // REQ: OA-LTJ-019
+// REQ: OA-LTJ-033
 #[test]
 fn a_link_into_sealed_data_is_refused_for_every_input_and_the_output() {
     let t = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ltj-sealed");
@@ -135,23 +136,42 @@ fn a_link_into_sealed_data_is_refused_for_every_input_and_the_output() {
         assert!(String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"));
     }
     assert!(!out.exists() && !sealed.join("new").exists());
-    // The NASR archive path is checked like every other input.
-    let o = Command::new(env!("CARGO_BIN_EXE_oa-legacy-traj"))
-        .args(["--sfdps"])
-        .arg(t.join("fine.oaf"))
-        .arg("--tbfm")
-        .arg(t.join("fine.oaf"))
-        .arg("--tfms")
-        .arg(t.join("fine.oaf"))
-        .arg("--adsb")
-        .arg(t.join("fine.oaf"))
-        .arg("--nasr")
-        .arg(t.join("clip-link.oaf"))
-        .arg("--out")
-        .arg(&out)
-        .output()
-        .unwrap();
-    assert_eq!(o.status.code(), Some(2));
-    assert!(!out.exists());
+    // The NASR archive and the places file are checked like every other input.
+    for flag in ["--nasr", "--places"] {
+        let o = Command::new(env!("CARGO_BIN_EXE_oa-legacy-traj"))
+            .args(["--sfdps"])
+            .arg(t.join("fine.oaf"))
+            .arg("--tbfm")
+            .arg(t.join("fine.oaf"))
+            .arg("--tfms")
+            .arg(t.join("fine.oaf"))
+            .arg("--adsb")
+            .arg(t.join("fine.oaf"))
+            .arg(flag)
+            .arg(t.join("clip-link.oaf"))
+            .arg("--out")
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(2), "{flag}");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"),
+            "{flag}"
+        );
+        assert!(!out.exists());
+    }
+    // The readers themselves go through the guard, so a caller that skips the check is refused.
+    let e = oa_legacy_traj::shell::places::load_nasr(&t.join("clip-link.oaf")).unwrap_err();
+    assert!(e.contains("OA-SEAL"), "{e}");
+    let args = parse(&argv(&format!(
+        "--sfdps a --tbfm b --tfms c --adsb d.oaf --out {} --places {}",
+        t.join("o2").display(),
+        t.join("clip-link.oaf").display()
+    )))
+    .unwrap();
+    let mut sealed = 0u64;
+    let e = oa_legacy_traj::shell::run::run_counted(&args, &mut sealed).unwrap_err();
+    assert!(e.contains("OA-SEAL"), "{e}");
+    assert!(!t.join("o2").exists());
     let _ = fs::remove_dir_all(&t);
 }
