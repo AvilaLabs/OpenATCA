@@ -1420,7 +1420,7 @@ fn tangent_point(lat: f64, lon: f64, th: f64, east: bool) -> (f64, f64) {
     (lat2, lon + if east { dl } else { -dl })
 }
 
-// REQ: OA-CA-032
+// REQ: OA-CA-033
 #[test]
 fn the_grid_finds_a_pair_at_its_radius_in_every_direction_up_to_85_degrees_of_latitude() {
     // The hardest pair for the cell search: at the reach of the pair, at the tangent point, where
@@ -1460,7 +1460,7 @@ fn the_grid_finds_a_pair_at_its_radius_in_every_direction_up_to_85_degrees_of_la
     }
 }
 
-// REQ: OA-CA-032
+// REQ: OA-CA-033
 #[test]
 fn a_busy_scatter_at_high_latitude_with_a_capped_radius_is_evaluated_and_running() {
     // 60 N, 70 N and 80 N: a track with the largest radius the cap allows used to set the
@@ -1522,7 +1522,7 @@ fn a_busy_scatter_at_high_latitude_with_a_capped_radius_is_evaluated_and_running
     }
 }
 
-// REQ: OA-CA-032
+// REQ: OA-CA-033
 #[test]
 fn rows_above_85_degrees_are_counted_and_the_net_is_degraded_for_input() {
     let rows = [

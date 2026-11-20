@@ -221,7 +221,7 @@ disabled). They depend on the exactness of the Veltkamp-split products, a multip
 problem for the SAT solver, so the horizontal miss's finiteness rests on the documented, tested
 behaviour of `hypot` (OA-MATH-005), not on a proof.
 
-### Conflict alert: the grid's pair test (OA-CA-032, OA-CA-033)
+### Conflict alert: the grid's pair test (OA-CA-033, OA-CA-034)
 
 `ca-chord-d2` (`grid::proofs`, 5.6 s, 0.2 GB): the squared chord of two vectors with components in
 `[-1, 1]` is finite and not negative. Not proved, because CBMC did not finish within 10 minutes (the

@@ -1566,7 +1566,7 @@
     },
     {
       "id": "ca-chord-d2",
-      "requirement": "OA-CA-033: the squared chord of two vectors with components in [-1, 1] is finite and not negative.",
+      "requirement": "OA-CA-034: the squared chord of two vectors with components in [-1, 1] is finite and not negative.",
       "package": "oa-ca",
       "harness": "grid::proofs::chord_d2_of_unit_vectors_is_finite_and_not_negative",
       "enabled": true,

@@ -463,7 +463,7 @@ mod tests {
         (p2.to_degrees(), l)
     }
 
-    // REQ: OA-CA-032
+    // REQ: OA-CA-033
     #[test]
     fn the_chord_is_never_longer_than_the_arc_at_any_latitude() {
         let mut g = Lcg(11);
@@ -497,7 +497,7 @@ mod tests {
         }
     }
 
-    // REQ: OA-CA-032
+    // REQ: OA-CA-033
     #[test]
     fn where_the_flat_test_is_valid_it_accepts_every_pair_the_exact_test_accepts() {
         let mut g = Lcg(5);
@@ -544,7 +544,7 @@ mod tests {
         );
     }
 
-    // REQ: OA-CA-033
+    // REQ: OA-CA-034
     #[test]
     fn the_chord_is_finite_symmetric_and_not_negative_and_flat_validity_only_narrows() {
         let mut g = Lcg(23);
@@ -570,7 +570,7 @@ mod tests {
         }
     }
 
-    // REQ: OA-CA-032
+    // REQ: OA-CA-033
     #[test]
     fn the_flat_test_is_invalid_exactly_where_it_could_miss_a_pair() {
         // At a radius of 120 km the old cycle-wide limit was 66 degrees; the pair's own radius
@@ -600,7 +600,7 @@ mod proofs {
         v
     }
 
-    // REQ: OA-CA-033
+    // REQ: OA-CA-034
     #[kani::proof]
     fn chord_d2_of_unit_vectors_is_finite_and_not_negative() {
         let (a, b) = (unit_like(), unit_like());
