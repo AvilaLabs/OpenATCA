@@ -292,6 +292,7 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
             final_net: "RUNNING",
             clip_name: "clip.oaf",
             clip_sha256: &"0".repeat(64),
+            sealed_window_dropped: 0,
             config_name: "dev.cfg",
             config_sha256: &"2".repeat(64),
             scope: "test",

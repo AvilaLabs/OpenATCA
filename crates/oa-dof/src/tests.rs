@@ -399,3 +399,11 @@ fn seconds_field_edges_are_exact() {
     assert_eq!(seconds_hundredths(b"5x.00"), None);
     assert_eq!(seconds_hundredths(b"+5.00"), None);
 }
+
+// REQ: OA-SEAL-013
+#[test]
+fn read_file_refuses_a_sealed_path() {
+    let p = std::path::Path::new("/x/raw/adsblol/2026.11.21/a.dat");
+    let e = read_file(p).unwrap_err().to_string();
+    assert!(e.contains("OA-SEAL-001"), "{e}");
+}

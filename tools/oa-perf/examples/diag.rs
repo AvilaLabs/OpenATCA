@@ -437,6 +437,7 @@ fn main() {
     println!("POST-WARM-UP coarse width: mean {:.0} m, max-ever {} m; coarse visits per plot {:.0}; live cands at end {}", ds(st.coarse_width_sum_m, s0.coarse_width_sum_m) as f64 / runs, st.coarse_width_max_m, ds(st.coarse_visits, s0.coarse_visits) as f64 / ds(st.plots_in, s0.plots_in).max(1) as f64, st.cand_started - st.cand_confirmed - st.cand_expired);
     println!("POST-WARM-UP work units per traffic second: coarse_visits {:.0} exact_tests {:.0} init_tests {:.0} applied {:.0} confirmed {:.1} buckets {:.1}",
         ds(st.coarse_visits, s0.coarse_visits) as f64 / post, ds(st.pairs_tested, s0.pairs_tested) as f64 / post, ds(st.init_tests, s0.init_tests) as f64 / post, (ds(st.applied_assoc, s0.applied_assoc) + ds(st.applied_hard, s0.applied_hard)) as f64 / post, ds(st.cand_confirmed, s0.cand_confirmed) as f64 / post, ds(st.buckets, s0.buckets) as f64 / post);
+    // seal-allow: /proc, not an input
     let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
     println!("shell-timed fusion_advance, mean ms per traffic second, post-warm-up (loaded machine, load average {}): {:.1}", load.split_whitespace().take(3).collect::<Vec<_>>().join(" "), mean);
     // ages (radar-only tick rows, non-coast) by dup

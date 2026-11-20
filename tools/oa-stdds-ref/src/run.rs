@@ -31,12 +31,14 @@ pub struct Refs {
 
 /// Runs the tracker over set A of `clip` and keeps its one-second rows of the addresses in
 /// `addrs`; builds the truth from set B. `work` is a directory for the tracker's spill files,
-/// removed afterwards. The clip is opened through the shared guard `g`.
+/// removed afterwards. The clip is opened through the shared guard `g`; `sealed` gets the rows
+/// of the clip dropped in a sealed window as soon as the clip is read.
 pub fn build_refs(
     g: &Sealed,
     clip: &Path,
     addrs: &BTreeSet<u32>,
     work: &Path,
+    sealed: &mut u64,
 ) -> Result<Refs, String> {
     let guard = g.clone();
     let opener: Opener = Rc::new(move |p: &Path| {
@@ -44,6 +46,9 @@ pub fn build_refs(
     });
     let loaded = load_adsb_with(clip, &opener).map_err(|e| e.to_string())?;
     let clip_digest = loaded.hash.sha256.clone();
+    // The clip's rows left out for their time in a sealed window (OA-SEAL-014), given to the
+    // caller before anything that can fail.
+    *sealed = loaded.sealed_window_dropped;
     let (set_a, set_b, split) = split_reports(&loaded.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
         .map_err(|v| format!("split refused: {v:?}"))?;

@@ -77,6 +77,17 @@ fn alt_from(form: u8, value: i32, a: Option<i32>, b: Option<i32>) -> Option<Alt>
     })
 }
 
+/// A callsign as the join compares it: upper case, spaces at either end removed, zero padded.
+pub fn norm_callsign(c: [u8; 8]) -> [u8; 8] {
+    let end = c.iter().position(|&b| b == 0).unwrap_or(c.len());
+    let text = c.get(..end).unwrap_or(&[]).trim_ascii();
+    let mut out = [0u8; 8];
+    for (d, s) in out.iter_mut().zip(text) {
+        *d = s.to_ascii_uppercase();
+    }
+    out
+}
+
 /// Appends the operations of row `row` of `ev` to `out`. `seen_ms` is when the message arrived and
 /// `msg` the driver's number of the message; every operation carries the message's own time. The
 /// flight is keyed by the GUFI (an SFDPS message always has one).
@@ -273,7 +284,7 @@ pub fn row_ops(
         .flatten();
     if callsign.is_some() || dep.is_some() || arr.is_some() {
         let mut o = mk(OP_IDENTITY);
-        o.callsign = callsign.unwrap_or([0; 8]);
+        o.callsign = callsign.map_or([0; 8], norm_callsign);
         o.dep = dep.unwrap_or([0; 12]);
         o.arr = arr.unwrap_or([0; 12]);
         push(o, st);

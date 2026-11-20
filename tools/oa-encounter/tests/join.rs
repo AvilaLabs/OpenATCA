@@ -10,11 +10,13 @@
 use oa_encounter::Encounter;
 use oa_encounter_run::args::parse;
 use oa_encounter_run::join::{
-    answer_queries, assigned_of, effective_of, is_near_climb, join_text, Answer, Clearance,
-    JoinStats, Sfdps,
+    answer_queries, assigned_of, effective_of, fresh_position, is_near_climb, join_text, observe,
+    timeline, AddrResult, Answer, CallsignObs, Clearance, CsReject, CsResult, DiagClass, JoinStats,
+    Key, Query, Resolution, Sfdps, FLYING_CAP,
 };
 use oa_encounter_run::run::run;
 use oa_flight::{Alt, ALT_AT_FIX, ALT_NIL, ALT_SIMPLE, ALT_VFR};
+use oa_flight_sfdps::Position;
 
 fn enc(v: f32, vr: f32, class: u8) -> Encounter {
     Encounter {
@@ -56,9 +58,10 @@ fn simple(ft: i32) -> Alt {
 fn ans(assigned: Alt, interim: Alt) -> Answer {
     Answer {
         flight: true,
-        ended: false,
         assigned,
         interim,
+        key: Key::Address,
+        ..Answer::default()
     }
 }
 
@@ -70,11 +73,17 @@ const NONE: Alt = Alt {
 
 fn stats() -> JoinStats {
     JoinStats {
+        sealed_window_dropped: 0,
         frames: 10,
         ops: 20,
         refused: 1,
         conflicts: 0,
         flights_held: 3,
+        positions: 0,
+        positions_refused: 0,
+        refiles: 0,
+        refiles_refused: 0,
+        positions_bad_time: 0,
     }
 }
 
@@ -182,7 +191,7 @@ fn each_encounter_of_the_group_is_split_once_and_the_unresolved_are_counted_apar
         ans(simple(30_000), NONE),
     ]);
     answers.extend([none, none]);
-    let t = join_text(&es, &answers, &[], 1000.0, &stats(), "test");
+    let t = join_text(&es, &answers, &[], 1000.0, &stats(), &[], "test");
     assert!(t.contains("before (one group): 6 climbing"));
     let a = t.split("judged on the assigned altitude").nth(1).unwrap();
     let a = a.split("judged on the interim").next().unwrap();
@@ -281,38 +290,864 @@ fn a_window_or_lag_floor_that_overflows_is_an_error_not_a_panic() {
 
 const DOC_HEAD: &str = r#"<?xml version="1.0" encoding="UTF-8"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:ns2="http://www.fixm.aero/base/3.0" xmlns:ns3="http://www.fixm.aero/flight/3.0" xmlns:ns4="http://www.fixm.aero/foundation/3.0">"#;
 
+/// 2030-01-02T03:04:05.000Z, Unix ms.
+const T0: i64 = 1_893_553_445_000;
+const MS: i64 = 1_000_000;
+const CHI: (i32, i32) = (419_000_000, -879_000_000);
+
+fn guid(n: u32) -> String {
+    format!("{n:08x}-2222-3333-4444-555555555555")
+}
+
+/// One flight message: gufi `n`, time `T0 + dt_s`, the body, received 10 s after it.
+fn frame(seq: u64, n: u32, dt_s: i64, body: &str) -> Vec<u8> {
+    let ts = T0 + dt_s * 1000;
+    let iso = |ms: i64| {
+        // The fixtures stay inside 2030-01-02 03:04 to 03:09.
+        let s = (ms - T0) / 1000;
+        format!(
+            "2030-01-02T03:{:02}:{:02}.000Z",
+            4 + (5 + s) / 60,
+            (5 + s) % 60
+        )
+    };
+    let xml = format!(
+        r#"{DOC_HEAD}<message xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="{}"><gufi codeSpace="urn:uuid">{}</gufi>{body}</flight></message></ns5:MessageCollection>"#,
+        iso(ts),
+        guid(n)
+    );
+    let mut buf = vec![0u8; xml.len() + 64];
+    let n = oa_feed::encode_frame(
+        &mut buf,
+        1,
+        0,
+        seq,
+        (ts + 10_000) * 1_000_000,
+        0,
+        xml.as_bytes(),
+    )
+    .unwrap();
+    buf.truncate(n);
+    buf
+}
+
+fn id(cs: &str, status: &str) -> String {
+    format!(
+        r#"<flightStatus fdpsFlightStatus="{status}"/><flightIdentification aircraftIdentification="{cs}" computerId="123"/>"#
+    )
+}
+
+fn pos(lat: &str, lon: &str, hhmmss: &str) -> String {
+    format!(
+        r#"<enRoute><position positionTime="2030-01-02T{hhmmss}Z"><position><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>{lat} {lon}</pos></location></position></position></enRoute>"#
+    )
+}
+
+fn cs(s: &str) -> CallsignObs {
+    let mut c = [0u8; 8];
+    c[..s.len()].copy_from_slice(s.as_bytes());
+    CallsignObs::Stable(c)
+}
+
+fn q(addr: u32, dt_s: i64, callsign: CallsignObs, at: (i32, i32)) -> Query {
+    Query {
+        addr,
+        t_ns: (T0 + dt_s * 1000) * MS,
+        callsign,
+        lat_e7: at.0,
+        lon_e7: at.1,
+        try_callsign: true,
+    }
+}
+
+fn recording(tag: &str, frames: &[Vec<u8>]) -> Sfdps {
+    let dir = std::env::temp_dir().join(format!("oa-encounter-join-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.oaf"), frames.concat()).unwrap();
+    Sfdps {
+        dir,
+        lag_floor_ms: 58_000,
+        pick_newest: false,
+    }
+}
+
 // REQ: OA-FLT-024
 #[test]
 fn an_operation_that_ages_in_after_the_question_is_not_seen_by_it() {
-    let dir = std::env::temp_dir().join(format!("oa-encounter-join-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    // Stamped 2030-01-02T03:04:05Z, received 10 s later: it ages in at stamp + 58 s.
-    let ts_ms = 1_893_553_445_000i64;
-    let xml = format!(
-        r#"{DOC_HEAD}<message xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightStatus fdpsFlightStatus="ACTIVE"/><aircraftDescription aircraftAddress="A1B2C3"/><assignedAltitude><simple uom="FEET">24000.0</simple></assignedAltitude></flight></message></ns5:MessageCollection>"#
+    let body = format!(
+        "{}<aircraftDescription aircraftAddress=\"A1B2C3\"/><assignedAltitude><simple uom=\"FEET\">24000.0</simple></assignedAltitude>",
+        id("ABC123", "ACTIVE")
     );
-    let mut buf = vec![0u8; xml.len() + 64];
-    let recv_ns = (ts_ms + 10_000) * 1_000_000;
-    let n = oa_feed::encode_frame(&mut buf, 1, 0, 1, recv_ns, 0, xml.as_bytes()).unwrap();
-    std::fs::write(dir.join("a.oaf"), &buf[..n]).unwrap();
+    let sf = recording("addr", &[frame(1, 1, 0, &body)]);
     let addr = 0x00A1_B2C3;
-    let ms = 1_000_000;
+    let none = CallsignObs::Absent;
     let queries = [
-        (addr, (ts_ms + 11_000) * ms),     // received, not yet aged in
-        (addr, (ts_ms + 57_900) * ms),     // a moment before it ages in
-        (addr, (ts_ms + 58_000) * ms),     // as it ages in
-        (addr, (ts_ms + 90_000) * ms),     // after
-        (addr + 1, (ts_ms + 90_000) * ms), // another aircraft
+        q(addr, 11, none, CHI),     // received, not yet aged in
+        q(addr, 57, none, CHI),     // a moment before it ages in
+        q(addr, 58, none, CHI),     // as it ages in
+        q(addr, 90, none, CHI),     // after
+        q(addr + 1, 90, none, CHI), // another aircraft
     ];
-    let sf = Sfdps {
-        dir: dir.clone(),
-        lag_floor_ms: 58_000,
-    };
-    let (a, st) = answer_queries(&sf, &queries).unwrap();
+    let (a, _d, st) = answer_queries(&sf, &queries).unwrap();
     assert_eq!(st.frames, 1);
     let held: Vec<bool> = a.iter().map(|x| x.flight).collect();
     assert_eq!(held, [false, false, true, true, false]);
     assert_eq!(a[3].assigned.a_ft, 24_000);
-    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(a[3].key, Key::Address);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-025
+#[test]
+fn the_callsign_names_a_flight_only_when_it_is_the_one_flying_flight_with_it() {
+    let alt = |ft: &str| {
+        format!("<assignedAltitude><simple uom=\"FEET\">{ft}</simple></assignedAltitude>")
+    };
+    let frames = [
+        // 1: near the ADS-B position; 2: no position; 3: far away.
+        frame(
+            1,
+            1,
+            0,
+            &format!(
+                "{}{}{}",
+                id("NEAR1", "ACTIVE"),
+                alt("30000.0"),
+                pos("41.95", "-87.9", "03:05:30")
+            ),
+        ),
+        frame(
+            2,
+            2,
+            0,
+            &format!("{}{}", id("NOPOS2", "ACTIVE"), alt("31000.0")),
+        ),
+        frame(
+            3,
+            3,
+            0,
+            &format!(
+                "{}{}",
+                id("FAR3", "ACTIVE"),
+                pos("43.5", "-87.9", "03:05:30")
+            ),
+        ),
+        // 4 and 5 share a callsign; 6 ended, 7 flying with the same callsign.
+        frame(4, 4, 0, &id("TWIN4", "ACTIVE")),
+        frame(5, 5, 0, &id("TWIN4", "ACTIVE")),
+        frame(6, 6, 0, &id("ONE6", "ACTIVE")),
+        frame(7, 6, 1, &id("ONE6", "COMPLETED")),
+        frame(
+            8,
+            7,
+            2,
+            &format!("{}{}", id("ONE6", "ACTIVE"), alt("27000.0")),
+        ),
+        // 8: positions older than 120 s before the question do not check it (here: far, but old).
+        frame(
+            9,
+            8,
+            0,
+            &format!(
+                "{}{}",
+                id("OLD8", "ACTIVE"),
+                pos("43.5", "-87.9", "03:04:00")
+            ),
+        ),
+    ];
+    let sf = recording("cs", &frames);
+    let t = 100; // everything has aged in; the positions are 15 s old
+    let a = |addr| q(addr, t, CallsignObs::Absent, CHI);
+    let queries = [
+        q(1, t, cs("NEAR1"), CHI),
+        q(2, t, cs("NOPOS2"), CHI),
+        q(3, t, cs("FAR3"), CHI),
+        q(4, t, cs("TWIN4"), CHI),
+        q(5, t, cs("ONE6"), CHI),
+        q(6, t, cs("NOBODY"), CHI),
+        q(7, t, CallsignObs::Unstable, CHI),
+        a(8),
+        q(9, 300, cs("OLD8"), CHI),
+    ];
+    let (r, _d, _) = answer_queries(&sf, &queries).unwrap();
+    assert_eq!(r[0].key, Key::CallsignChecked);
+    assert_eq!(r[0].assigned.a_ft, 30_000);
+    assert_eq!(
+        r[0].cs,
+        CsResult::Accepted {
+            checked: true,
+            several: false
+        }
+    );
+    assert_eq!(r[1].key, Key::CallsignUnchecked);
+    assert_eq!(r[1].assigned.a_ft, 31_000);
+    assert_eq!(r[2].cs, CsResult::Rejected(CsReject::PositionDisagrees));
+    assert!(!r[2].flight);
+    assert_eq!(r[3].cs, CsResult::Rejected(CsReject::SeveralLive));
+    assert_eq!(
+        r[4].key,
+        Key::CallsignUnchecked,
+        "the ended flight does not count"
+    );
+    assert_eq!(r[4].assigned.a_ft, 27_000);
+    assert_eq!(r[5].cs, CsResult::Rejected(CsReject::NoLiveFlight));
+    assert_eq!(r[6].cs, CsResult::Rejected(CsReject::Unstable));
+    assert_eq!(r[7].cs, CsResult::Rejected(CsReject::NoCallsign));
+    // The position of flight 8 is 04:00 and the question is at 09:05: older than 120 s.
+    assert_eq!(r[8].key, Key::CallsignUnchecked);
+    assert!(r.iter().take(8).all(|x| x.addr_flight.is_none()));
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-026
+#[test]
+fn the_callsign_join_sees_only_what_had_aged_in_at_the_question() {
+    let frames = [
+        frame(
+            1,
+            1,
+            0,
+            &format!(
+                "{}{}",
+                id("LATE1", "ACTIVE"),
+                pos("43.5", "-87.9", "03:04:05")
+            ),
+        ),
+        frame(2, 2, 0, &id("LATE1", "ACTIVE")),
+    ];
+    // Flight 1 ages in at T0 + 58 s with a position 1.6 degrees away; flight 2 shares the callsign.
+    let sf = recording("late", &frames);
+    let queries = [
+        q(1, 30, cs("LATE1"), CHI), // nothing has aged in
+        q(1, 57, cs("LATE1"), CHI),
+        q(1, 59, cs("LATE1"), CHI), // both aged in
+        q(1, 59, CallsignObs::Absent, CHI),
+    ];
+    let (r, _d, _) = answer_queries(&sf, &queries).unwrap();
+    assert_eq!(r[0].cs, CsResult::Rejected(CsReject::NoLiveFlight));
+    assert_eq!(r[1].cs, CsResult::Rejected(CsReject::NoLiveFlight));
+    assert_eq!(r[2].cs, CsResult::Rejected(CsReject::SeveralLive));
+    let _ = std::fs::remove_dir_all(&sf.dir);
+
+    // A position that has not aged in does not check the join: it stands, unchecked.
+    let frames = [
+        frame(1, 1, 0, &id("POS1", "ACTIVE")),
+        frame(2, 1, 100, &pos("43.5", "-87.9", "03:05:45")),
+    ];
+    let sf = recording("late-pos", &frames);
+    let queries = [
+        q(1, 120, cs("POS1"), CHI), // the position (ts 100 s) is received at 110 s but ages in at 158 s
+        q(1, 200, cs("POS1"), CHI),
+    ];
+    let (r, _d, _) = answer_queries(&sf, &queries).unwrap();
+    assert_eq!(r[0].key, Key::CallsignUnchecked);
+    assert_eq!(r[1].cs, CsResult::Rejected(CsReject::PositionDisagrees));
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-027
+#[test]
+fn the_address_join_wins_and_the_two_joins_are_kept_to_be_compared() {
+    let frames = [
+        frame(
+            1,
+            1,
+            0,
+            &format!(
+                "{}<aircraftDescription aircraftAddress=\"A1B2C3\"/>",
+                id("AAA1", "ACTIVE")
+            ),
+        ),
+        frame(2, 2, 0, &id("BBB2", "ACTIVE")),
+    ];
+    let sf = recording("both", &frames);
+    let t = 120;
+    let queries = [
+        q(0x00A1_B2C3, t, cs("AAA1"), CHI),
+        q(0x00A1_B2C3, t, cs("BBB2"), CHI),
+        // The address finds nothing; the callsign is not asked for.
+        Query {
+            try_callsign: false,
+            ..q(0x0000_0042, t, cs("BBB2"), CHI)
+        },
+    ];
+    let (r, _d, _) = answer_queries(&sf, &queries).unwrap();
+    assert_eq!(r[0].key, Key::Address);
+    assert_eq!(r[0].addr_flight, r[0].cs_flight, "the same flight");
+    assert_eq!(r[1].key, Key::Address);
+    assert_ne!(
+        r[1].addr_flight, r[1].cs_flight,
+        "different flights are visible"
+    );
+    assert!(r[1].cs_flight.is_some());
+    assert_eq!(r[2].key, Key::None);
+    assert_eq!(r[2].cs, CsResult::NotTried);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-028
+#[test]
+fn the_adsb_callsign_must_be_stable_over_the_previous_60_s_and_the_position_is_the_latest() {
+    use oa_adsb::Reports;
+    let mut r = Reports::default();
+    let mut add = |addr: u32, t_s: i64, cs: &str, lat: i32| {
+        let mut c = [0u8; 8];
+        c[..cs.len()].copy_from_slice(cs.as_bytes());
+        r.icao.push(addr);
+        r.time_ns.push(t_s * 1_000_000_000);
+        r.lat_e7.push(lat);
+        r.lon_e7.push(-879_000_000);
+        r.callsign.push(c);
+    };
+    // 1: stable (a lower-case, padded form counts as the same); 2: changes; 3: none; 4: changed
+    // longer than 60 s ago.
+    for t in [100, 110, 120] {
+        add(1, t, "abc123 ", 419_000_000 + t as i32);
+        add(3, t, "", 419_000_000);
+    }
+    add(2, 100, "AAA1", 419_000_000);
+    add(2, 120, "BBB2", 419_000_000);
+    add(4, 10, "OLD1", 419_000_000);
+    add(4, 100, "NEW1", 419_000_000);
+    add(4, 120, "NEW1", 419_000_000);
+    let want = [1u32, 2, 3, 4].into_iter().collect();
+    let tl = timeline(&r, &want, 0, i64::MAX);
+    let at = 125 * 1_000_000_000;
+    let (o, p) = observe(&tl, 1, at);
+    assert_eq!(o, cs("ABC123"));
+    assert_eq!(p, Some((419_000_120, -879_000_000)), "the latest report");
+    assert_eq!(observe(&tl, 2, at).0, CallsignObs::Unstable);
+    assert_eq!(observe(&tl, 3, at).0, CallsignObs::Absent);
+    assert_eq!(observe(&tl, 4, at).0, cs("NEW1"));
+    assert_eq!(observe(&tl, 9, at).0, CallsignObs::Absent);
+    // A report after the question is not used; one older than 60 s gives no position.
+    assert_eq!(
+        observe(&tl, 1, 105 * 1_000_000_000).1.map(|p| p.0),
+        Some(419_000_100)
+    );
+    assert_eq!(observe(&tl, 1, 200 * 1_000_000_000).0, CallsignObs::Absent);
+    assert_eq!(observe(&tl, 1, 200 * 1_000_000_000).1, None);
+}
+
+fn plan(cs: &str, status: &str, dep: &str, arr: &str) -> String {
+    format!(
+        "{}<departure departurePoint=\"{dep}\"/><arrival arrivalPoint=\"{arr}\"/>",
+        id(cs, status)
+    )
+}
+
+fn with_pick(mut sf: Sfdps, pick: bool) -> Sfdps {
+    sf.pick_newest = pick;
+    sf
+}
+
+// REQ: OA-FLT-030
+#[test]
+fn plans_of_one_aircraft_are_picked_by_the_newest_stamp_only_where_they_share_a_route() {
+    // Flights 1 and 2 are two plans of one aircraft (the same route); 3 and 4 share a callsign
+    // but not a route.
+    let mk = |order: [u32; 2]| {
+        let mut f = vec![
+            frame(1, 3, 0, &plan("SAME1", "ACTIVE", "KAAA", "KBBB")),
+            frame(2, 4, 0, &plan("SAME1", "ACTIVE", "KAAA", "KCCC")),
+        ];
+        let mut k = 3;
+        for n in order {
+            let alt = if n == 2 { "28000.0" } else { "26000.0" };
+            // Flight 2 is stamped later whatever the order of arrival.
+            let dt = i64::from(n) * 5;
+            let b = format!(
+                "{}<assignedAltitude><simple uom=\"FEET\">{alt}</simple></assignedAltitude>",
+                plan("ONE", "ACTIVE", "KAAA", "KBBB")
+            );
+            f.push(frame(k, n, dt, &b));
+            k += 1;
+        }
+        f
+    };
+    let queries = |cs_a: &str, cs_b: &str| [q(100, 200, cs(cs_a), CHI), q(101, 200, cs(cs_b), CHI)];
+    for order in [[1, 2], [2, 1]] {
+        let sf = recording("pick", &mk(order));
+        let (r, _, _) = answer_queries(
+            &with_pick(recording("pick2", &mk(order)), false),
+            &queries("ONE", "SAME1"),
+        )
+        .unwrap();
+        assert_eq!(
+            r[0].cs,
+            CsResult::Rejected(CsReject::SeveralLive),
+            "as before"
+        );
+        let (r, _, _) = answer_queries(&with_pick(sf, true), &queries("ONE", "SAME1")).unwrap();
+        assert_eq!(
+            r[0].cs,
+            CsResult::Accepted {
+                checked: false,
+                several: true
+            }
+        );
+        assert_eq!(
+            r[0].assigned.a_ft, 28_000,
+            "the newest plan, whatever the order"
+        );
+        assert_eq!(
+            r[1].cs,
+            CsResult::Rejected(CsReject::SeveralLive),
+            "another route"
+        );
+    }
+}
+
+// REQ: OA-FLT-032
+#[test]
+fn a_disagreement_between_the_keys_is_classed_and_looked_at_again_half_an_hour_on() {
+    let addr = |a: &str| format!("<aircraftDescription aircraftAddress=\"{a}\"/>");
+    let end = |n: u32, dt: i64, cs: &str| frame(100 + u64::from(n), n, dt, &id(cs, "COMPLETED"));
+    let at = |lat: &str| pos(lat, "-87.9", "03:05:30");
+    let frames = [
+        // Aircraft 100: its plan 1 holds the address with callsign SAM1 and is far off; plan 2
+        // states SAM1 on the same route near the ADS-B position, and the callsign join (with the
+        // newest-plan pick on) takes plan 2.
+        frame(
+            1,
+            1,
+            0,
+            &format!(
+                "{}{}{}",
+                plan("SAM1", "ACTIVE", "KAAA", "KBBB"),
+                addr("000064"),
+                at("43.5")
+            ),
+        ),
+        frame(
+            3,
+            2,
+            0,
+            &format!("{}{}", plan("SAM1", "ACTIVE", "KAAA", "KBBB"), at("41.95")),
+        ),
+        // Aircraft 102: the address flight has another callsign; neither has a position.
+        frame(
+            7,
+            5,
+            0,
+            &format!(
+                "{}{}",
+                plan("DIF3", "ACTIVE", "KAAA", "KBBB"),
+                addr("000066")
+            ),
+        ),
+        frame(8, 6, 0, &plan("NEW3", "ACTIVE", "KAAA", "KBBB")),
+        // Frames are in the order received. Plans 1 and 2 of aircraft 100 end 20 min on, and a
+        // frame after the 30 min lets the replay reach the second look.
+        end(1, 20 * 60, "SAM1"),
+        end(2, 20 * 60, "SAM1"),
+        frame(9, 7, 33 * 60, &id("LATE9", "ACTIVE")),
+    ];
+    let sf = with_pick(recording("diag", &frames), true);
+    let queries = [q(0x64, 150, cs("SAM1"), CHI), q(0x66, 150, cs("NEW3"), CHI)];
+    let (r, d, _) = answer_queries(&sf, &queries).unwrap();
+    assert_eq!(r[0].key, Key::CallsignOverAddress, "{r:?}");
+    assert_eq!(r[1].key, Key::Address);
+    assert_eq!(d.len(), 2);
+    let by = |k: usize| d.iter().find(|x| x.query == k).unwrap();
+    assert_eq!(by(0).class, DiagClass::SameRoute);
+    assert_eq!(by(1).class, DiagClass::OtherCallsign);
+    assert!(d.iter().all(|x| x.probed));
+    assert!(by(0).addr_ended_later && by(0).cs_ended_later, "both ended");
+    assert!(!by(1).addr_ended_later && !by(1).cs_ended_later);
+    assert!(!by(0).refile_near);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+/// A flight message of gufi `n` that states aircraft address `addr`, callsign `c`, assigned
+/// altitude `ft` and, where given, a position at 03:05:30 (85 s into the fixtures).
+fn claim(
+    (seq, n, dt_s): (u64, u32, i64),
+    addr: &str,
+    c: &str,
+    status: &str,
+    ft: i32,
+    at: Option<(&str, &str)>,
+) -> Vec<u8> {
+    let p = at
+        .map(|(la, lo)| pos(la, lo, "03:05:30"))
+        .unwrap_or_default();
+    frame(
+        seq,
+        n,
+        dt_s,
+        &format!(
+            "{}<aircraftDescription aircraftAddress=\"{addr}\"/><assignedAltitude><simple uom=\"FEET\">{ft}.0</simple></assignedAltitude>{p}",
+            id(c, status)
+        ),
+    )
+}
+
+const NEAR: Option<(&str, &str)> = Some(("41.95", "-87.9"));
+const FAR: Option<(&str, &str)> = Some(("43.5", "-87.9"));
+
+// REQ: OA-FLT-033
+#[test]
+fn the_address_join_walks_every_claimant_and_takes_the_one_that_is_flying() {
+    // 2 claimed the address first and flies; 1 claimed it later (so it is the newest) and ended.
+    let frames = [
+        claim((1, 2, 0), "A1B2C3", "OLD2", "ACTIVE", 31_000, None),
+        claim((2, 1, 1), "A1B2C3", "NEW1", "ACTIVE", 25_000, None),
+        claim((3, 1, 2), "A1B2C3", "NEW1", "COMPLETED", 25_000, None),
+    ];
+    let sf = recording("walk", &frames);
+    let (r, d, _) = answer_queries(&sf, &[q(0x00A1_B2C3, 150, CallsignObs::Absent, CHI)]).unwrap();
+    assert_eq!(r[0].addr, AddrResult::One);
+    assert_eq!(r[0].key, Key::Address);
+    assert!(!r[0].ended);
+    assert_eq!(
+        r[0].assigned,
+        simple(31_000),
+        "the flying one, not the newest"
+    );
+    assert!(d.is_empty());
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-034
+#[test]
+fn with_no_claimant_flying_the_address_finds_nothing_and_the_callsign_is_tried() {
+    let frames = [
+        claim((1, 1, 0), "A1B2C3", "DONE1", "ACTIVE", 25_000, None),
+        claim((2, 2, 1), "A1B2C3", "DONE2", "ACTIVE", 26_000, None),
+        claim((3, 1, 2), "A1B2C3", "DONE1", "COMPLETED", 25_000, None),
+        claim((4, 2, 3), "A1B2C3", "DONE2", "CANCELLED", 26_000, None),
+        claim((5, 3, 4), "000001", "SOLO3", "ACTIVE", 33_000, NEAR),
+    ];
+    let sf = recording("none", &frames);
+    let (r, _d, _) = answer_queries(
+        &sf,
+        &[
+            q(0x00A1_B2C3, 150, cs("SOLO3"), CHI),
+            q(0x00A1_B2C3, 150, CallsignObs::Absent, CHI),
+            q(0x00FF_FFFF, 150, CallsignObs::Absent, CHI),
+        ],
+    )
+    .unwrap();
+    assert_eq!(r[0].addr, AddrResult::NoneFlying);
+    assert!(r[0].ended);
+    assert_eq!(r[0].addr_flight, None);
+    assert_eq!(
+        r[0].key,
+        Key::CallsignChecked,
+        "the callsign join is tried next"
+    );
+    assert_eq!(r[0].assigned, simple(33_000));
+    assert_eq!(r[1].addr, AddrResult::NoneFlying);
+    assert_eq!(r[1].key, Key::None);
+    assert_eq!(r[2].addr, AddrResult::NoClaimant);
+    assert!(!r[2].ended);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-035
+#[test]
+fn with_several_claimants_flying_the_one_whose_position_agrees_is_taken() {
+    let frames = [
+        claim((1, 1, 0), "A1B2C3", "FARA1", "ACTIVE", 31_000, FAR),
+        claim((2, 2, 1), "A1B2C3", "NEARA2", "ACTIVE", 25_000, NEAR),
+        // 3 and 4 both near; 5 and 6 have no position.
+        claim((3, 3, 2), "B1B2C3", "TWIN3", "ACTIVE", 20_000, NEAR),
+        claim((4, 4, 3), "B1B2C3", "TWIN4", "ACTIVE", 21_000, NEAR),
+        claim((5, 5, 4), "C1B2C3", "NOPOS5", "ACTIVE", 22_000, None),
+        claim((6, 6, 5), "C1B2C3", "NOPOS6", "ACTIVE", 23_000, None),
+        // A third callsign flight to fall back to.
+        claim((7, 7, 6), "000007", "FALL7", "ACTIVE", 35_000, NEAR),
+    ];
+    let sf = recording("several", &frames);
+    let (r, d, _) = answer_queries(
+        &sf,
+        &[
+            q(0x00A1_B2C3, 150, CallsignObs::Absent, CHI),
+            q(0x00B1_B2C3, 150, CallsignObs::Absent, CHI),
+            q(0x00C1_B2C3, 150, CallsignObs::Absent, CHI),
+            q(0x00B1_B2C3, 150, cs("FALL7"), CHI),
+            q(0x00C1_B2C3, 150, cs("FALL7"), CHI),
+        ],
+    )
+    .unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralByPosition);
+    assert_eq!(r[0].key, Key::Address);
+    assert_eq!(
+        r[0].assigned,
+        simple(25_000),
+        "the near one, though not asked by callsign"
+    );
+    for k in [1, 2] {
+        assert_eq!(r[k].addr, AddrResult::SeveralUnresolved);
+        assert_eq!(r[k].key, Key::None);
+        assert!(!r[k].flight);
+        assert!(!r[k].ended);
+    }
+    // Not resolved: the callsign join is tried next.
+    for k in [3, 4] {
+        assert_eq!(r[k].addr, AddrResult::SeveralUnresolved);
+        assert_eq!(r[k].key, Key::CallsignChecked);
+        assert_eq!(r[k].assigned, simple(35_000));
+    }
+    assert!(d.is_empty());
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-036
+#[test]
+fn where_the_address_and_the_callsign_name_different_flights_the_position_decides() {
+    let frames = [
+        // Address 1: flight 1 (address) far, flight 2 (callsign) near.
+        claim((1, 1, 0), "A1B2C3", "ADR1", "ACTIVE", 30_000, FAR),
+        claim((2, 2, 1), "000002", "CSN2", "ACTIVE", 31_000, NEAR),
+        // Address 2: address flight near, callsign flight has no position to check.
+        claim((3, 3, 2), "B1B2C3", "ADR3", "ACTIVE", 32_000, NEAR),
+        claim((4, 4, 3), "000004", "CSF4", "ACTIVE", 33_000, None),
+        // Address 3: both near.
+        claim((5, 5, 4), "C1B2C3", "ADR5", "ACTIVE", 34_000, NEAR),
+        claim((6, 6, 5), "000006", "CSN6", "ACTIVE", 35_000, NEAR),
+        // Address 4: neither has a position.
+        claim((7, 7, 6), "D1B2C3", "ADR7", "ACTIVE", 36_000, None),
+        claim((8, 8, 7), "000008", "CSX8", "ACTIVE", 37_000, None),
+    ];
+    let sf = recording("differ", &frames);
+    let (r, d, _) = answer_queries(
+        &sf,
+        &[
+            q(0x00A1_B2C3, 150, cs("CSN2"), CHI),
+            q(0x00B1_B2C3, 150, cs("CSF4"), CHI),
+            q(0x00C1_B2C3, 150, cs("CSN6"), CHI),
+            q(0x00D1_B2C3, 150, cs("CSX8"), CHI),
+        ],
+    )
+    .unwrap();
+    let want = [
+        (Key::CallsignOverAddress, 31_000, Resolution::CallsignTaken),
+        (Key::Address, 32_000, Resolution::AddressTaken),
+        (Key::Address, 34_000, Resolution::BothPass),
+        (Key::Address, 36_000, Resolution::NeitherPass),
+    ];
+    for (k, (key, ft, res)) in want.into_iter().enumerate() {
+        assert_eq!(r[k].key, key, "query {k}");
+        assert_eq!(r[k].assigned, simple(ft), "query {k}");
+        let got = d.iter().find(|x| x.query == k).map(|x| x.resolution);
+        assert_eq!(got, Some(res), "query {k}");
+    }
+    assert_eq!(d.len(), 4, "every disagreement stays in the cross-check");
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-037
+#[test]
+fn with_several_claimants_flying_the_adsb_callsign_decides_before_state_and_position() {
+    let frames = [
+        // 1 holds the ADS-B callsign but is only proposed and far; 2 is active and near.
+        claim((1, 1, 0), "A1B2C3", "NOW1", "PROPOSED", 20_000, FAR),
+        claim((2, 2, 1), "A1B2C3", "OTHER2", "ACTIVE", 21_000, NEAR),
+        // 3 and 4 are active; only 4 has the callsign; 5 has no match at all.
+        claim((3, 3, 2), "B1B2C3", "ONE3", "ACTIVE", 22_000, NEAR),
+        claim((4, 4, 3), "B1B2C3", "TWO4", "ACTIVE", 23_000, FAR),
+        claim((5, 5, 4), "C1B2C3", "ONE5", "ACTIVE", 24_000, NEAR),
+        claim((6, 6, 5), "C1B2C3", "TWO6", "ACTIVE", 25_000, FAR),
+    ];
+    let sf = recording("cs-decides", &frames);
+    let (r, _d, _) = answer_queries(
+        &sf,
+        &[
+            // The callsign picks the proposed, far flight: a wins over b and c.
+            q(0x00A1_B2C3, 150, cs("NOW1"), CHI),
+            q(0x00B1_B2C3, 150, cs("TWO4"), CHI),
+            // No claimant has the callsign: nothing narrows by it, and the position decides.
+            Query {
+                try_callsign: false,
+                ..q(0x00C1_B2C3, 150, cs("NONE"), CHI)
+            },
+            // No callsign seen: the position decides.
+            Query {
+                try_callsign: false,
+                ..q(0x00C1_B2C3, 150, CallsignObs::Absent, CHI)
+            },
+        ],
+    )
+    .unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralCallsignDecides);
+    assert_eq!(r[0].assigned, simple(20_000));
+    assert_eq!(r[1].addr, AddrResult::SeveralCallsignDecides);
+    assert_eq!(
+        r[1].assigned,
+        simple(23_000),
+        "though its own position is far"
+    );
+    for k in [2, 3] {
+        assert_eq!(r[k].addr, AddrResult::SeveralByPosition);
+        assert_eq!(r[k].assigned, simple(24_000));
+    }
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-038
+#[test]
+fn with_several_claimants_flying_active_or_departed_wins_over_proposed() {
+    let frames = [
+        claim((1, 1, 0), "A1B2C3", "PLAN1", "PROPOSED", 20_000, NEAR),
+        claim((2, 2, 1), "A1B2C3", "FLOWN2", "ACTIVE", 21_000, FAR),
+        // Two active and one proposed: the two active go on to the position check.
+        claim((3, 3, 2), "B1B2C3", "PLAN3", "PROPOSED", 22_000, NEAR),
+        claim((4, 4, 3), "B1B2C3", "FLOWN4", "ACTIVE", 23_000, FAR),
+        claim((5, 5, 4), "B1B2C3", "FLOWN5", "ACTIVE", 24_000, NEAR),
+        // All proposed: the state narrows nothing.
+        claim((6, 6, 5), "C1B2C3", "PLAN6", "PROPOSED", 25_000, FAR),
+        claim((7, 7, 6), "C1B2C3", "PLAN7", "PROPOSED", 26_000, FAR),
+    ];
+    let sf = recording("state-decides", &frames);
+    let none = |a| Query {
+        try_callsign: false,
+        ..q(a, 150, CallsignObs::Absent, CHI)
+    };
+    let (r, _d, _) = answer_queries(
+        &sf,
+        &[none(0x00A1_B2C3), none(0x00B1_B2C3), none(0x00C1_B2C3)],
+    )
+    .unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralStateDecides);
+    assert_eq!(
+        r[0].assigned,
+        simple(21_000),
+        "active, though proposed is nearer"
+    );
+    assert_eq!(r[1].addr, AddrResult::SeveralByPosition);
+    assert_eq!(r[1].assigned, simple(24_000));
+    assert_eq!(r[2].addr, AddrResult::SeveralUnresolved);
+    assert!(!r[2].flight);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-039
+#[test]
+fn a_claimant_dropped_at_the_query_is_excluded_and_counted_on_its_own() {
+    let frames = [
+        claim((1, 1, 0), "A1B2C3", "GONE1", "ACTIVE", 20_000, NEAR),
+        claim((2, 1, 1), "A1B2C3", "GONE1", "DROPPED", 20_000, None),
+        claim((3, 2, 2), "B1B2C3", "GONE2", "ACTIVE", 21_000, NEAR),
+        claim((4, 2, 3), "B1B2C3", "GONE2", "COMPLETED", 21_000, None),
+        claim((5, 3, 4), "B1B2C3", "GONE3", "ACTIVE", 22_000, NEAR),
+        claim((6, 3, 5), "B1B2C3", "GONE3", "DROPPED", 22_000, None),
+    ];
+    let sf = recording("dropped", &frames);
+    let none = |a| Query {
+        try_callsign: false,
+        ..q(a, 150, CallsignObs::Absent, CHI)
+    };
+    let (r, _d, _) = answer_queries(&sf, &[none(0x00A1_B2C3), none(0x00B1_B2C3)]).unwrap();
+    assert_eq!(r[0].addr, AddrResult::OnlyClaimantDropped);
+    assert!(r[0].ended && !r[0].flight);
+    assert!(
+        r[0].old_found,
+        "the join before the walk took a dropped flight"
+    );
+    assert_eq!(r[1].addr, AddrResult::NoneFlying);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-039
+#[test]
+fn an_address_with_more_than_the_cap_flying_is_counted_and_left_unresolved() {
+    let mut frames = Vec::new();
+    for n in 1..=(FLYING_CAP as u32 + 1) {
+        let c = if n == 1 { "FIRST" } else { "MANY" };
+        frames.push(claim(
+            (u64::from(n), n, i64::from(n)),
+            "A1B2C3",
+            c,
+            "ACTIVE",
+            20_000 + 10 * n as i32,
+            None,
+        ));
+    }
+    // An address with exactly the cap flying is looked at: the callsign decides.
+    let at_cap: Vec<Vec<u8>> = (1..=FLYING_CAP as u32)
+        .map(|n| {
+            let c = if n == 1 { "FIRST" } else { "MANY" };
+            claim(
+                (u64::from(n), n, i64::from(n)),
+                "A1B2C3",
+                c,
+                "ACTIVE",
+                20_000,
+                None,
+            )
+        })
+        .collect();
+    let sf = recording("over-cap", &frames);
+    let (r, _d, _) = answer_queries(&sf, &[q(0x00A1_B2C3, 150, cs("FIRST"), CHI)]).unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralOverCap);
+    assert!(!r[0].ended);
+    assert_eq!(r[0].addr_flight, None);
+    assert_eq!(
+        r[0].key,
+        Key::CallsignUnchecked,
+        "unresolved: the callsign join is tried next"
+    );
+    let _ = std::fs::remove_dir_all(&sf.dir);
+    let sf = recording("at-cap", &at_cap);
+    let (r, _d, _) = answer_queries(&sf, &[q(0x00A1_B2C3, 150, cs("FIRST"), CHI)]).unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralCallsignDecides);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-038
+#[test]
+fn an_all_proposed_set_does_not_narrow_to_none_and_a_callsign_step_that_leaves_two_goes_on() {
+    let frames = [
+        // All proposed, one near: the state step must leave the set, and the position picks.
+        claim((1, 1, 0), "A1B2C3", "P1", "PROPOSED", 20_000, FAR),
+        claim((2, 2, 1), "A1B2C3", "P2", "PROPOSED", 21_000, NEAR),
+        // The callsign leaves two (X, near and far); a third with another callsign is near too:
+        // without the callsign step the position would not resolve.
+        claim((3, 3, 2), "B1B2C3", "X3", "ACTIVE", 22_000, FAR),
+        claim((4, 4, 3), "B1B2C3", "X3", "ACTIVE", 23_000, NEAR),
+        claim((5, 5, 4), "B1B2C3", "Y5", "ACTIVE", 24_000, NEAR),
+    ];
+    let sf = recording("narrow", &frames);
+    let none = |a, c| Query {
+        try_callsign: false,
+        ..q(a, 150, c, CHI)
+    };
+    let (r, _d, _) = answer_queries(
+        &sf,
+        &[
+            none(0x00A1_B2C3, CallsignObs::Absent),
+            none(0x00B1_B2C3, cs("X3")),
+            none(0x00B1_B2C3, CallsignObs::Absent),
+        ],
+    )
+    .unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralByPosition);
+    assert_eq!(r[0].assigned, simple(21_000));
+    assert_eq!(r[1].addr, AddrResult::SeveralByPosition);
+    assert_eq!(r[1].assigned, simple(23_000));
+    assert_eq!(r[2].addr, AddrResult::SeveralUnresolved);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-041
+#[test]
+fn a_position_counts_only_when_stamped_at_or_before_the_question_and_within_120_s() {
+    let p = |ts_ms| Position {
+        ts_ms,
+        avail_ms: ts_ms,
+        lat_e7: 1,
+        lon_e7: 2,
+    };
+    let t = 1_000_000;
+    assert!(fresh_position(Some(&p(t)), t).is_some());
+    assert!(fresh_position(Some(&p(t - 120_000)), t).is_some());
+    assert!(fresh_position(Some(&p(t - 120_001)), t).is_none());
+    assert!(
+        fresh_position(Some(&p(t + 1)), t).is_none(),
+        "stamped after the question"
+    );
+    assert!(fresh_position(None, t).is_none());
 }

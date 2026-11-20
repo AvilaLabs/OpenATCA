@@ -22,6 +22,7 @@ pub fn is_refusal(msg: &str) -> bool {
 
 /// Checks `path`, opens it for reading and verifies the opened file; the error names the path.
 pub fn open_guarded(g: &Sealed, path: &Path) -> io::Result<File> {
+    // seal-allow: the guard's opener: checked first, verified on the open file
     open_guarded_with(g, path, |p| File::open(p))
 }
 
@@ -45,6 +46,7 @@ pub fn open_guarded_with(
 /// or followed. The error names the path; a sealed path is a refusal (`OA-SEAL-001`).
 pub fn create_output(g: &Sealed, path: &Path) -> io::Result<File> {
     refuse_sealed(g, path).map_err(io::Error::other)?;
+    // seal-allow: creates the tool's own output (create_new) after the guard check; reads nothing
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -212,7 +214,7 @@ mod tests {
             .join("2026.11.20")
             .join("c.oaf");
         let out = root.join("out");
-        let e = crate::run::build_refs(&g, &clip, &Default::default(), &out)
+        let e = crate::run::build_refs(&g, &clip, &Default::default(), &out, &mut 0)
             .err()
             .unwrap();
         assert!(

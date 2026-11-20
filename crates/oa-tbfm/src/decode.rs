@@ -36,9 +36,10 @@ use crate::fields::{
 };
 use crate::rows::{
     change, pt, push_row, rows_len, sch_flag, section, spd_unit, truncate_rows, Name12, Name14,
-    Name16, Name20, Name24, Name4, Name8, Row, Rows, BLANK_ROW,
+    Name16, Name20, Name24, Name4, Name8, Row, Rows, BLANK_ROW, NO_TIME,
 };
 use crate::time::parse_iso_ms;
+use oa_sealed::DropWindow;
 use oa_xml::{
     attr_needs_decode, decode_into, decode_text_run, ns_uri_bytes, resolve_elem_ns, span_bytes,
     text_needs_decode, Doc, ElemIx, Limits, Ns, Parser, Span, SpanKind,
@@ -79,6 +80,10 @@ pub struct Outcome {
     pub unknown_words: u32,
     /// Speeds whose form is neither knots nor Mach, stored with the unknown unit.
     pub unknown_units: u32,
+    /// Messages (`tma`) of a document dropped whole because one of them has its `msgTime` in
+    /// [`Rows::window`] (OA-SEAL-014). The document was not decoded: every other field of the
+    /// outcome is zero and nothing was touched.
+    pub sealed_dropped: u32,
 }
 
 /// Parses `input` with `parser` and decodes it. A parse error is [`DocError::Xml`].
@@ -110,7 +115,82 @@ pub fn decode_doc_prefix(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocE
     decode_with(doc, rows, true)
 }
 
+/// Reads every message time of the document (the `msgTime` of each `tma`, the `misTime` or
+/// `envTime` of the others), directly from the parsed tree and whatever else is valid in it. If any is in `window`, returns how many messages the document
+/// has (all are dropped); otherwise 0. A time that cannot be read is not in the window (the
+/// frame's receive time gates it).
+fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
+    if window.span().is_none() {
+        return 0;
+    }
+    let (mut messages, mut hit) = (0u32, false);
+    // The text cursor of the elements asked for in document order, as the decoder keeps it.
+    let mut cursor = 0usize;
+    for i in 0..doc.elem_name.len() {
+        let e = ElemIx(i as u32);
+        match elem_name(doc, e) {
+            b"tma" => messages = messages.saturating_add(1),
+            // The time a flight crossed the meter fix, read with the decoder's own leaf reader:
+            // keyed when in doubt, as it can be an actual crossing. The estimate and schedule
+            // times (`eta`, `sta`, `etd`, `std`) and the validity times are not keys.
+            b"ctm" => {
+                let mut buf = [0u8; MAX_VALUE];
+                if let Ok(v) = leaf_text_at(doc, &mut cursor, e, Field::Ctm, &mut buf) {
+                    hit |= parse_time(v).is_ok_and(|t| window.contains(t));
+                }
+            }
+            _ => {}
+        }
+        let n = doc.elem_attr_count.get(i).copied().unwrap_or(0);
+        for k in 0..n {
+            let a = attr_ref(doc, e, k);
+            // The message time of a `tma` and the envelope time of the other documents
+            // (`misTime`, `envTime`); the validity times are not keys.
+            let field = match a.name {
+                b"msgTime" => Field::MsgTime,
+                b"misTime" | b"envTime" => Field::EnvTime,
+                _ => continue,
+            };
+            let mut buf = [0u8; MAX_VALUE];
+            if let Ok(v) = attr_val(doc, &a, field, &mut buf) {
+                hit |= parse_time(v).is_ok_and(|t| window.contains(t));
+            }
+        }
+    }
+    if hit {
+        messages.max(1)
+    } else {
+        0
+    }
+}
+
+/// The outcome of a document dropped whole by [`prescan`]: only the count, nothing else.
+fn sealed_outcome(messages: u32) -> Outcome {
+    Outcome {
+        kind: MsgKind::Empty,
+        rows: 0,
+        unknown_paths: 0,
+        ignored_paths: 0,
+        center: [0; 4],
+        env_ms: NO_TIME,
+        dropped: 0,
+        rejected: 0,
+        first_reject: None,
+        reject_fields: [0; FIELD_COUNT],
+        reject_kinds: [0; ERROR_KIND_COUNT],
+        unknown_words: 0,
+        unknown_units: 0,
+        sealed_dropped: messages,
+    }
+}
+
 fn decode_with(doc: &Doc<'_>, rows: &mut Rows, prefix: bool) -> Result<Outcome, DocError> {
+    // The first step, before any count, row or table is touched: a document with a message in
+    // the sealed window is dropped whole.
+    let gone = prescan(doc, rows.window);
+    if gone > 0 {
+        return Ok(sealed_outcome(gone));
+    }
     let start = rows_len(rows);
     let mut acc = Acc {
         t: 0,
@@ -316,19 +396,31 @@ fn leaf_text<'x>(
     field: Field,
     buf: &'x mut [u8; MAX_VALUE],
 ) -> Result<&'x [u8], DocError> {
+    leaf_text_at(doc, &mut acc.t, e, field, buf)
+}
+
+/// [`leaf_text`] with the text cursor given alone: the decoder and the pre-scan ([`prescan`])
+/// read an element's text with this one function.
+fn leaf_text_at<'x>(
+    doc: &Doc<'x>,
+    cursor: &mut usize,
+    e: ElemIx,
+    field: Field,
+    buf: &'x mut [u8; MAX_VALUE],
+) -> Result<&'x [u8], DocError> {
     let at = elem_at(doc, e);
     if first_child(doc, e) != ElemIx::NONE {
         return Err(ferr(field, FieldErrorKind::NotLeaf, at));
     }
     let n = doc.text_owner.len();
-    while acc.t < n && doc.text_owner.get(acc.t).is_some_and(|o| o.0 < e.0) {
-        acc.t += 1;
+    while *cursor < n && doc.text_owner.get(*cursor).is_some_and(|o| o.0 < e.0) {
+        *cursor += 1;
     }
-    let first = acc.t;
-    while acc.t < n && doc.text_owner.get(acc.t) == Some(&e) {
-        acc.t += 1;
+    let first = *cursor;
+    while *cursor < n && doc.text_owner.get(*cursor) == Some(&e) {
+        *cursor += 1;
     }
-    let count = acc.t - first;
+    let count = *cursor - first;
     let span = doc.text_span.get(first).copied().unwrap_or_default();
     let v = match count {
         0 => return Ok(&[]),
@@ -807,6 +899,7 @@ fn decode_mis(doc: &Doc<'_>, acc: &mut Acc, root: ElemIx) -> Result<Outcome, Doc
         reject_kinds: [0; ERROR_KIND_COUNT],
         unknown_words: 0,
         unknown_units: 0,
+        sealed_dropped: 0,
     })
 }
 
@@ -846,6 +939,7 @@ fn decode_env(
         reject_kinds: acc.reject_kinds,
         unknown_words: acc.unknown_words,
         unknown_units: acc.unknown_units,
+        sealed_dropped: 0,
     })
 }
 

@@ -169,9 +169,10 @@ pub(crate) fn reject(list: &mut Vec<RowError>, dropped: &mut u64, e: RowError) {
 /// not stored, so one badly broken file cannot exhaust memory.
 pub const MAX_VIOLATIONS_PER_FILE: usize = 100_000;
 
-/// Opens a file for reading, mapping failures to [`NasrError::Io`].
+/// Opens a file for reading through the sealed-data guard (OA-SEAL-013), mapping failures
+/// (a sealed path included) to [`NasrError::Io`].
 pub fn open(path: &std::path::Path) -> Result<std::io::BufReader<std::fs::File>, NasrError> {
-    std::fs::File::open(path)
+    oa_sealed::open(path)
         .map(std::io::BufReader::new)
         .map_err(|e| NasrError::Io {
             file: path.display().to_string(),

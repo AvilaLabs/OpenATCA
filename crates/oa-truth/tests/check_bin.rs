@@ -40,7 +40,7 @@ fn track() -> Reports {
     r
 }
 
-// REQ: OA-TRUTH-016
+// REQ: OA-TRUTH-016, OA-SEAL-014
 #[test]
 fn check_binary_prints_the_summary_and_the_library_digest() {
     let r = track();
@@ -70,6 +70,11 @@ fn check_binary_prints_the_summary_and_the_library_digest() {
     );
     assert!(
         out.contains("300 reports decoded, 0 frames refused"),
+        "{out}"
+    );
+    assert_eq!(
+        out.matches("sealed-window rows dropped: 0").count(),
+        1,
         "{out}"
     );
     assert!(out.contains("legs               2"), "{out}");

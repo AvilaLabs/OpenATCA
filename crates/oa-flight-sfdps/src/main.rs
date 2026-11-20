@@ -6,9 +6,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use oa_flight::{FlightConfig, R_COUNT};
-use oa_flight_sfdps::{lag_quantile_s, recordings_in, replay_sfdps, ReplayConfig};
+use oa_flight_sfdps::{lag_quantile_s, recordings_in, replay_sfdps_counted, ReplayConfig};
 
 fn main() -> ExitCode {
+    // Printed when `main` returns: on every exit, an error or a refusal included. Frames by
+    // receive time and messages by their own time.
+    let mut drops = oa_sealed::DropReport::new();
     let mut dir: Option<PathBuf> = None;
     let (mut from, mut to) = (i64::MIN, i64::MAX);
     let mut args = std::env::args().skip(1);
@@ -63,7 +66,10 @@ fn main() -> ExitCode {
         retain_ms: 3_600_000,
         silence_ms: 6 * 3_600_000,
     };
-    let rep = match replay_sfdps(paths, &cfg, &mut |_, _| {}) {
+    let mut sealed = 0u64;
+    let replayed = replay_sfdps_counted(paths, &cfg, &mut |_, _, _| {}, &mut sealed);
+    drops.add(sealed);
+    let rep = match replayed {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{e}");

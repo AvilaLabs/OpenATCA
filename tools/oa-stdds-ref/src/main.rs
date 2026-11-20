@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use oa_sealed::Sealed;
 use oa_stdds_ref::engine::analyse;
 use oa_stdds_ref::guard::{create_output, is_refusal, refuse_sealed};
-use oa_stdds_ref::load::load_file;
+use oa_stdds_ref::load::load_file_counted;
 use oa_stdds_ref::report::build_report;
 use oa_stdds_ref::run::build_refs;
 use oa_stdds_ref::sources::TruthSource;
@@ -53,7 +53,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    match run(g, &adsb, &out, &files) {
+    // Printed when `main` returns: on every exit after this point, an error included.
+    let mut drops = oa_sealed::DropReport::new();
+    match run(g, &adsb, &out, &files, &mut drops) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -66,7 +68,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(g: &Sealed, adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String, String> {
+fn run(
+    g: &Sealed,
+    adsb: &Path,
+    out: &Path,
+    files: &[PathBuf],
+    drops: &mut oa_sealed::DropReport,
+) -> Result<String, String> {
     // An existing output is refused before any work is done (and again, race-free, at the create).
     for name in [TXT, CSV] {
         let p = out.join(name);
@@ -82,7 +90,10 @@ fn run(g: &Sealed, adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String,
     let mut header = Vec::new();
     for (i, f) in files.iter().enumerate() {
         let ix = u32::try_from(i).map_err(|_| "too many input files".to_string())?;
-        let info = load_file(g, f, ix, &mut recs).map_err(|e| e.to_string())?;
+        let mut file_sealed = 0u64;
+        let loaded = load_file_counted(g, f, ix, &mut recs, &mut file_sealed);
+        drops.add(file_sealed);
+        let info = loaded.map_err(|e| e.to_string())?;
         header.push(format!(
             "STDDS file {ix}: {} (digest {}); message frames {}, other frames {}, damaged frames {}, messages not TAIS or refused {}, TAIS records {}, gzip damaged {}, gzip truncated {}",
             info.path,
@@ -97,7 +108,11 @@ fn run(g: &Sealed, adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String,
         ));
     }
     let addrs: BTreeSet<u32> = recs.iter().filter_map(|r| r.addr).collect();
-    let refs = build_refs(g, adsb, &addrs, out)?;
+    // The clip's rows are added as soon as the clip is read, before anything that can fail.
+    let mut clip_sealed = 0u64;
+    let refs = build_refs(g, adsb, &addrs, out, &mut clip_sealed);
+    drops.add(clip_sealed);
+    let refs = refs?;
     header.extend(refs.header.iter().cloned());
     let truth = TruthSource {
         truth: &refs.truth.truth,

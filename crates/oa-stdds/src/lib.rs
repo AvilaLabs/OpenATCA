@@ -38,6 +38,7 @@ pub mod status;
 pub mod tais;
 mod walk;
 
+use oa_sealed::DropWindow;
 use oa_xml::{error_offset, Parser, XmlError};
 use std::fmt;
 
@@ -63,14 +64,23 @@ pub struct Limits {
     pub max_errors: usize,
     /// Most distinct unknown element paths kept in [`Stats`]; further ones are counted as overflow.
     pub max_unknown_paths: usize,
+    /// The span in which a record (TAIS `track/mrtTime`) or report (SMES `time`) is timed. The
+    /// first step of a decode reads every record's time, with no record limit; if any is in the
+    /// span the whole message is dropped, with nothing counted but the number of its records in
+    /// [`Stats::sealed_window_dropped`]. A record with no readable time does not count. Required:
+    /// there is no `Default`, so a caller cannot forget it.
+    pub drop_window: DropWindow,
 }
 
-impl Default for Limits {
-    fn default() -> Limits {
+impl Limits {
+    /// The default bounds, dropping rows timed in `window`. A tool passes [`DropWindow::sealed`];
+    /// tests and fuzz targets pass [`DropWindow::empty_for_tests_and_fuzz`].
+    pub const fn new(window: DropWindow) -> Limits {
         Limits {
             max_records: 4096,
             max_errors: 256,
             max_unknown_paths: 128,
+            drop_window: window,
         }
     }
 }
@@ -285,11 +295,23 @@ pub fn parse_message(
         }
     };
     let k = classify(&doc);
-    stats.observe_kind(&doc, k);
-    match k {
+    let before = stats.sealed_window_dropped;
+    let out = match k {
         Kind::TaisTrackAndFlightPlan => parse_tais(&doc, limits, stats).map(Message::Tais),
         Kind::AsdexPositionReport => parse_smes(&doc, limits, stats).map(Message::Smes),
         Kind::StddsStatus => parse_status(&doc, limits, stats).map(Message::Status),
         other => Ok(Message::Other(other)),
+    };
+    // A message whose records or reports were all dropped for their time is in no message, kind
+    // or unknown-root count: only `sealed_window_dropped` has it.
+    let all_dropped = stats.sealed_window_dropped > before
+        && match &out {
+            Ok(Message::Tais(m)) => m.records.is_empty(),
+            Ok(Message::Smes(m)) => m.records.is_empty(),
+            _ => false,
+        };
+    if !all_dropped {
+        stats.observe_kind(&doc, k);
     }
+    out
 }

@@ -20,8 +20,8 @@ use oa_track::{
 };
 
 use crate::args::Args;
-use crate::join::{answer_queries, join_text, Sfdps};
-use crate::report::{band_of, encounters_csv, summary_text, Airport, SummaryInput};
+use crate::join::{answer_queries_counted, join_text, observe, timeline, Query, Sfdps, STABLE_NS};
+use crate::report::{band_of, context_of, encounters_csv, summary_text, Airport, SummaryInput};
 
 const NM: f64 = 1852.0;
 const FT: f64 = 0.3048;
@@ -335,6 +335,13 @@ pub fn hour_counts(r: &Reports) -> String {
 /// The whole run: reads the clip, writes `encounters.csv` and `summary.txt` under `args.out`, and
 /// returns the summary text.
 pub fn run(args: &Args) -> Result<String, String> {
+    run_counted(args, &mut 0)
+}
+
+/// [`run`], with the clip's rows and the SFDPS join's frames and rows dropped in a sealed window
+/// put in `sealed` as they are read, so the caller can print the count on every exit (an error and
+/// `--hours` included).
+pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     // The seconds the arguments give become ns and ms before anything is read.
     let window_ns = args
         .window
@@ -353,6 +360,8 @@ pub fn run(args: &Args) -> Result<String, String> {
     let clip =
         load_adsb_with(&args.adsb, &crate::guard::guarded_opener()).map_err(|e| e.to_string())?;
     let clip_sha = clip.hash.sha256.clone();
+    let clip_sealed = clip.sealed_window_dropped;
+    *sealed = clip_sealed;
     let (reports, scope) = if args.scorer_half {
         let (a, b, _) = split_reports(&clip.reports);
         oa_bench::split_check::check_split(&a, &b)
@@ -371,7 +380,13 @@ pub fn run(args: &Args) -> Result<String, String> {
     check_adsb_config(&adsb_cfg).map_err(|e| format!("adapter configuration: {e}"))?;
     let ground = ground_table(&reports);
     let (mut meas, _) = adsb_measurements(&reports, &adsb_cfg);
-    drop(reports);
+    // The join reads the callsigns and positions of the reports; without it they are let go.
+    let join_reports = if args.sfdps.is_some() {
+        Some(reports)
+    } else {
+        drop(reports);
+        None
+    };
     if let Some((from_ns, to_ns)) = window_ns {
         meas.retain(|m| m.toa_ns >= from_ns && m.toa_ns < to_ns);
     }
@@ -406,16 +421,53 @@ pub fn run(args: &Args) -> Result<String, String> {
     let report_sep = report_separations(&meas, &rec.encounters);
     let mut join = String::new();
     if let Some(dir) = &args.sfdps {
-        let queries: Vec<(u32, i64)> = rec
+        // The callsign join is asked for the aircraft of AIRBORNE encounters.
+        let airborne: Vec<bool> = rec
             .encounters
             .iter()
-            .flat_map(|e| [(e.addr_a, e.closest_ns), (e.addr_b, e.closest_ns)])
+            .map(|e| context_of(e, &airports) == 0)
             .collect();
+        let want: std::collections::BTreeSet<u32> = rec
+            .encounters
+            .iter()
+            .zip(&airborne)
+            .filter(|(_, a)| **a)
+            .flat_map(|(e, _)| [e.addr_a, e.addr_b])
+            .collect();
+        let (from_ns, to_ns) = window_ns.map_or((i64::MIN, i64::MAX), |(f, t)| {
+            (f.saturating_sub(STABLE_NS), t)
+        });
+        let tl = join_reports
+            .as_ref()
+            .map(|r| timeline(r, &want, from_ns, to_ns))
+            .unwrap_or_default();
+        let mut queries: Vec<Query> = Vec::with_capacity(rec.encounters.len() * 2);
+        for (e, &air) in rec.encounters.iter().zip(&airborne) {
+            for addr in [e.addr_a, e.addr_b] {
+                let (callsign, pos) = observe(&tl, addr, e.closest_ns);
+                // Without a recent report of its own the aircraft is taken at the pair's midpoint
+                // (the pair is within 5 NM).
+                let (lat_e7, lon_e7) = pos.unwrap_or((e.lat_e7, e.lon_e7));
+                queries.push(Query {
+                    addr,
+                    t_ns: e.closest_ns,
+                    callsign,
+                    lat_e7,
+                    lon_e7,
+                    try_callsign: air,
+                });
+            }
+        }
+        drop(join_reports);
         let sf = Sfdps {
             dir: dir.clone(),
             lag_floor_ms,
+            pick_newest: args.pick_newest,
         };
-        let (answers, st) = answer_queries(&sf, &queries)?;
+        let mut join_sealed = 0u64;
+        let joined = answer_queries_counted(&sf, &queries, &mut join_sealed);
+        *sealed = clip_sealed + join_sealed;
+        let (answers, diags, st) = joined?;
         let window = args.window.map_or_else(
             || "the whole clip".to_string(),
             |(f, t)| format!("Unix seconds {f} up to {t}"),
@@ -426,6 +478,7 @@ pub fn run(args: &Args) -> Result<String, String> {
             &airports,
             ecfg.volume_v_ft as f32,
             &st,
+            &diags,
             &window,
         );
     }
@@ -435,6 +488,8 @@ pub fn run(args: &Args) -> Result<String, String> {
         .adsb
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    // The clip's rows and the SFDPS join's frames and rows, each once.
+    let sealed_window_dropped = *sealed;
     let mut summary = summary_text(&SummaryInput {
         cfg: &ecfg,
         encounters: &rec.encounters,
@@ -449,6 +504,7 @@ pub fn run(args: &Args) -> Result<String, String> {
         tick_rows: rec.tick_rows,
         clip_name: &name,
         clip_sha256: &clip_sha,
+        sealed_window_dropped,
         scope: &scope,
         csv_sha256: &csv_sha,
     });

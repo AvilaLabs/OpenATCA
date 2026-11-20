@@ -11,6 +11,8 @@
 //! is its `NONE` constant and a code column is 0. A speed always carries its unit
 //! ([`spd_unit`]).
 
+use oa_sealed::DropWindow;
+
 /// A short ASCII name, zero-padded on the right; all zero means absent. Widths come from the
 /// longest value in the 12,760-message survey (docs/TBFM_SURVEY.md) plus headroom; a longer
 /// value is a field error, never truncated.
@@ -214,6 +216,9 @@ pub const BLANK_ROW: Row = Row {
 #[derive(Clone, Debug)]
 pub struct Rows {
     pub cap: usize,
+    /// The span in which a flight timed by its own `msgTime` is dropped by the decoder, before
+    /// any count and without a row (OA-SEAL-014). Fixed at construction.
+    pub window: DropWindow,
     pub eta_ms: [Vec<i64>; pt::COUNT],
     pub sta_ms: [Vec<i64>; pt::COUNT],
     pub env_ms: Vec<i64>,
@@ -269,12 +274,15 @@ pub struct Rows {
 pub const DEFAULT_ROW_CAPACITY: usize = 256;
 
 /// Allocates empty columns able to hold `cap` rows.
-pub fn new_rows(cap: usize) -> Rows {
+/// A tool passes [`DropWindow::sealed`]; tests and fuzz targets pass
+/// [`DropWindow::empty_for_tests_and_fuzz`].
+pub fn new_rows(cap: usize, window: DropWindow) -> Rows {
     fn v<T>(cap: usize) -> Vec<T> {
         Vec::with_capacity(cap)
     }
     Rows {
         cap,
+        window,
         eta_ms: std::array::from_fn(|_| v(cap)),
         sta_ms: std::array::from_fn(|_| v(cap)),
         env_ms: v(cap),

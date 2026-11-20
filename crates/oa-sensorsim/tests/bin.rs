@@ -76,7 +76,7 @@ fn a_bad_record_costs_the_clip_that_record_and_is_counted() {
     assert_eq!((reports_len(&reports), bad, dropped), (9, 0, 1));
 }
 
-// REQ: OA-SIM-019
+// REQ: OA-SIM-019, OA-SEAL-014
 #[test]
 fn binary_writes_plots_for_a_clip_and_demands_the_biases() {
     let path = tmp("sensorsim.oaf");
@@ -124,6 +124,12 @@ fn binary_writes_plots_for_a_clip_and_demands_the_biases() {
         String::from_utf8_lossy(&o.stderr)
     );
     assert!(stdout.contains("plots:"), "{stdout}");
+    // The count line, printed once.
+    assert_eq!(
+        stdout.matches("sealed-window rows dropped: 0").count(),
+        1,
+        "{stdout}"
+    );
     let bytes = std::fs::read(out1.join("custom.cat048")).unwrap();
     let n: usize = decode_stream(&bytes)
         .unwrap()

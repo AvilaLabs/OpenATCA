@@ -236,7 +236,14 @@ fn tais_xml(records: &[(Option<&str>, &str, &str, &str)]) -> Vec<u8> {
 
 fn parse(xml: &[u8]) -> oa_stdds::TaisMessage {
     let mut p = Parser::new(XmlLimits::default()).unwrap();
-    match parse_message(&mut p, xml, &Limits::default(), &mut new_stats()).unwrap() {
+    match parse_message(
+        &mut p,
+        xml,
+        &Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+        &mut new_stats(),
+    )
+    .unwrap()
+    {
         Message::Tais(m) => m,
         other => panic!("not TAIS: {other:?}"),
     }
@@ -1033,4 +1040,39 @@ fn an_existing_output_exits_1_and_an_output_link_into_sealed_data_exits_2() {
     assert!(err.contains(&*link.to_string_lossy()), "{err}");
     assert!(!sealed.join("new.txt").exists());
     let _ = std::fs::remove_dir_all(&base);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_frame_or_a_record_in_a_sealed_window_is_dropped_and_counted() {
+    // The window of the list: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes), Unix nanoseconds.
+    const FROM: i64 = 1_795_131_900_000_000_000;
+    let m = tais_xml(&[
+        (Some("A1B2C3"), "2026-11-19T23:44:59.000Z", "40.5", "-75.5"),
+        (Some("A1B2C3"), "2026-11-19T23:45:00.000Z", "40.6", "-75.6"),
+    ]);
+    let kept = tais_xml(&[(Some("A1B2C3"), "2026-11-19T23:44:58.000Z", "40.4", "-75.4")]);
+    let mut bytes = Vec::new();
+    for (i, (t, x)) in [(FROM - 1, &m), (FROM - 1, &kept), (FROM, &kept)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut buf = vec![0u8; x.len() + 256];
+        let n = oa_feed::encode_frame(&mut buf, 1, 0, i as u64, t, 0, x).unwrap();
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let mut out = Vec::new();
+    let info = load_reader(&bytes[..], "mem", 0, &mut out).unwrap();
+    // The frame at from is dropped; the message of the frame at from - 1 ns has a record timed at
+    // from, so it is dropped whole (both its records are counted), and only `kept` is read.
+    assert_eq!((info.frames_message, info.records), (1, 1));
+    assert_eq!(info.sealed_window_dropped, 3);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_loader_drops_the_sealed_window() {
+    let w = oa_stdds_ref::load::load_limits().drop_window;
+    assert_eq!(w, oa_sealed::DropWindow::sealed());
+    assert_eq!(w.span(), oa_sealed::sealed_window_ms());
 }

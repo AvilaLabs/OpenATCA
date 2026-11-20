@@ -147,6 +147,25 @@ pub struct TrackerConfig {
     /// position), besides the `RESYNC_AFTER` rule. 0 (the default) is off; otherwise 2 to
     /// `RESYNC_AFTER`.
     pub resync_consistent_k: u8,
+    /// Large-move rule (RT-239): a report that passes the position gate but lies farther than
+    /// this, metres, from the track's predicted position is applied but marked unconfirmed until
+    /// the next report decides ([`crate::params::CONFIRM_MOVE_M`]). Positive and finite; a value of 0 is
+    /// refused, never read as "off" (`confirm_moves` turns the rule off).
+    pub confirm_move_m: f64,
+    /// A deciding report agrees with a path if within this, metres, of its prediction ([`crate::params::CONFIRM_AGREE_M`]). Positive and below `confirm_move_m`.
+    pub confirm_agree_m: f64,
+    /// The floor of the time within which the next report decides a move, ns
+    /// ([`crate::params::CONFIRM_WINDOW_NS`]); the window is four expected report intervals, not
+    /// under this and not over `drop_after_ns`.
+    /// Over 0.5 s (the least separation of the confirming report).
+    pub confirm_window_ns: i64,
+    /// The large-move rule is on. True by default; false only by an explicit choice.
+    pub confirm_moves: bool,
+    /// How many unconfirmed moves can keep a rollback snapshot at once ([`crate::params::CONFIRM_POOL`],
+    /// with the analysis of its size). The pool is allocated once, at most `max_tracks` entries
+    /// of about 2.2 kB. A move that finds it full is applied and marked all the same, without a
+    /// snapshot: it can be confirmed or left standing but not rolled back (`move_no_snapshot`).
+    pub confirm_pool: usize,
     /// Out-of-order window, ns.
     pub ooo_window_ns: i64,
     /// Farthest a measurement may be ahead of the clock without a confirmed step, ns: at least
@@ -176,6 +195,11 @@ pub const DEFAULT_CONFIG: TrackerConfig = TrackerConfig {
     vel_gate_chi2: crate::params::VEL_GATE_CHI2,
     gate_manoeuvre_mps2: crate::params::GATE_MANOEUVRE_MPS2,
     resync_consistent_k: 0,
+    confirm_move_m: crate::params::CONFIRM_MOVE_M,
+    confirm_agree_m: crate::params::CONFIRM_AGREE_M,
+    confirm_window_ns: crate::params::CONFIRM_WINDOW_NS,
+    confirm_moves: true,
+    confirm_pool: crate::params::CONFIRM_POOL,
     ooo_window_ns: OOO_WINDOW_NS,
     clock_step_limit_ns: CLOCK_STEP_LIMIT_NS,
     init_m: INIT_M,
@@ -245,6 +269,26 @@ pub fn check_config(c: &TrackerConfig) -> Result<(), TrackError> {
     {
         return bad("resync_consistent_k");
     }
+    if !c.confirm_move_m.is_finite() || c.confirm_move_m <= 0.0 {
+        return bad("confirm_move_m");
+    }
+    if !c.confirm_agree_m.is_finite()
+        || c.confirm_agree_m <= 0.0
+        || c.confirm_agree_m >= c.confirm_move_m
+    {
+        return bad("confirm_agree_m");
+    }
+    if c.confirm_window_ns <= crate::params::CONFIRM_MIN_SEP_NS
+        || c.confirm_window_ns > 86_400 * 1_000_000_000
+    {
+        return bad("confirm_window_ns");
+    }
+    if c.drop_after_ns < c.confirm_window_ns {
+        return bad("drop_after_ns below confirm_window_ns");
+    }
+    if c.confirm_pool > (1 << 20) {
+        return bad("confirm_pool");
+    }
     if c.coast_after_intervals <= 0 || c.drop_after_ns <= 0 || c.ooo_window_ns < 0 {
         return bad("coast_after_intervals, drop_after_ns or ooo_window_ns");
     }
@@ -302,6 +346,12 @@ pub const O_UNCERTAIN: u8 = 32;
 /// [`crate::params::REACQUIRE_GAP_NS`] since its previous applied update, or after a re-anchor on
 /// a report: the position may have jumped.
 pub const O_REACQUIRED: u8 = 64;
+/// The track's last position was a move of more than [`crate::params::CONFIRM_MOVE_M`] from its
+/// predicted position that no second report has confirmed yet (RT-239): the position is applied
+/// but may be a forged or faulty report, and `pos_cov_m2` is widened to cover the old path. The
+/// flag is on every row of the track, update or tick, until its next report decides. A display
+/// must show it.
+pub const O_MOVE_UNCONFIRMED: u8 = 128;
 
 /// Output rows, struct-of-arrays (A3), bounded: a push past the capacity is counted in
 /// `overflow` and the row is lost (C2). The consumer calls [`crate::output_clear`] after reading.
@@ -557,6 +607,56 @@ pub struct TrackerStats {
     pub time_future_dropped: u64,
     /// Sensor table entries reused while the table was full.
     pub time_sensor_evicted: u64,
+    /// Reports of a confirmed track that passed the position gate but moved it by more than
+    /// `confirm_move_m` from its predicted position: applied, and the track marked
+    /// [`O_MOVE_UNCONFIRMED`] until its next report decides.
+    pub moves_unconfirmed: u64,
+    /// Moves confirmed by the next report agreeing with the moved track.
+    pub moves_confirmed: u64,
+    /// Moves rolled back: the next report agreed with the old path and not with the moved track,
+    /// so the track was restored to its state from before the move and the report applied to it.
+    pub moves_rolled_back: u64,
+    /// Moves the next report neither confirmed nor refuted (it agreed with neither path, or came
+    /// after the window) and that report was applied: the move stands, the mark is cleared.
+    pub moves_undecided: u64,
+    /// Deciding reports that were not applied (the gate rejected them, or the update was
+    /// refused): they decide nothing, the mark and the snapshot stay.
+    pub moves_decision_rejected: u64,
+    /// Late re-filters that moved a confirmed track's estimate by more than `confirm_move_m`:
+    /// counted in `moves_unconfirmed` too, marked with the state from before the replay.
+    pub moves_late: u64,
+    /// Late re-filters while a move was unconfirmed that could not derive the rollback point again
+    /// (the report that made the move is no longer in the ring, or nothing before it is held):
+    /// the snapshot is dropped, the mark stays and a refuting report cannot roll back.
+    pub moves_rollback_lost_late: u64,
+    /// Moves that ended with the track: it ended (dropped, expired, flushed).
+    pub moves_abandoned_ended: u64,
+    /// Moves that ended with the track restarted (initiation window, implausible report).
+    pub moves_abandoned_restarted: u64,
+    /// Moves that ended with the filter re-synchronised.
+    pub moves_abandoned_resync: u64,
+    /// Moves that ended with the track demoted to tentative by a late re-filter.
+    pub moves_abandoned_demoted: u64,
+    /// Reports that agreed with the old path of an unconfirmed move for the first time: a vote,
+    /// not a rollback (a rollback needs a second, RT-273).
+    pub moves_old_path_votes: u64,
+    /// Deciding reports of an unconfirmed move whose old path has a snapshot that cannot be
+    /// predicted at the report's time: no agreement with anything, the move stands (RT-276).
+    pub moves_old_path_unpredictable: u64,
+    /// Moves ended by a filter resynchronisation (five refused reports in a row): the rows after
+    /// it stay marked and uncertain until the move's window would have ended, the old path being
+    /// gone with the resynchronised filter. Counted with `moves_abandoned_resync`.
+    pub moves_resync_marked: u64,
+    /// Moves applied and marked without a rollback snapshot: the pool was full.
+    pub move_no_snapshot: u64,
+    /// Rows of a marked track whose widened radius could not be computed: they carry a radius of
+    /// [`crate::params::FAIL_CLOSED_R95_M`] (500 km) instead (fail closed).
+    pub move_widen_failed: u64,
+    /// A report the filter returned as a large move although the rule was off for it (cannot
+    /// happen): refused and counted.
+    pub moves_internal_refused: u64,
+    /// The most tracks with an unconfirmed move at once.
+    pub moves_peak_active: u64,
     /// Sum and count of the position normalised innovation squared (expected 2 per update).
     pub nis_sum: f64,
     pub nis_n: u64,

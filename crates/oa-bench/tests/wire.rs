@@ -125,6 +125,7 @@ fn stat(csv: &str, metric: &str, label: &str) -> Vec<f64> {
 }
 
 fn run(args: &[&std::ffi::OsStr]) -> std::process::Output {
+    // seal-allow: runs the built binary of this package, on the test's own temp files and, when the data is set, on real data, which the binary reads only through the guard
     Command::new(env!("CARGO_BIN_EXE_oa-bench"))
         .args(args)
         .output()
@@ -253,6 +254,7 @@ fn the_clip_is_read_and_hashed() {
     assert_eq!(l.hash.files, 1);
     assert_eq!(
         l.hash.sha256,
+        // seal-allow: reads back a file the test wrote in its own temp dir
         to_hex(&sha256(&std::fs::read(&clip).unwrap()))
     );
     assert!(load_adsb(&d.join("missing.oaf")).is_err());
@@ -384,7 +386,7 @@ fn an_identifier_naming_two_places_is_ambiguous_not_the_first_row() {
     assert!(l.fix_all("NOPE").is_empty());
 }
 
-// REQ: OA-BENCH-033
+// REQ: OA-BENCH-033, OA-SEAL-014
 #[test]
 fn the_binary_scores_a_known_cross_track_error_end_to_end() {
     let (d, clip, sf) = fixture("e2e");
@@ -399,7 +401,16 @@ fn the_binary_scores_a_known_cross_track_error_end_to_end() {
     ];
     let o = run(&args);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // The count line is printed once, after the last read (message feeds and clip together).
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(
+        err.matches("sealed-window rows dropped: 0").count(),
+        1,
+        "{err}"
+    );
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let csv = std::fs::read_to_string(out.join("report.csv")).unwrap();
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let txt = std::fs::read_to_string(out.join("report.txt")).unwrap();
     // 21 track messages, all associated by address and paired.
     let t1 = stat(&csv, "T1", "all");
@@ -426,6 +437,7 @@ fn the_binary_scores_a_known_cross_track_error_end_to_end() {
     assert!(txt.contains("truth_digest: "), "{txt}");
     assert!(txt.contains("truth gates: the design's values"), "{txt}");
     assert!(txt.contains("airspace: no model given"), "{txt}");
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let h = to_hex(&sha256(&std::fs::read(&clip).unwrap()));
     assert!(txt.contains(&format!("sha256 {h}")), "{txt}");
     assert!(csv.contains("\ntruth,,truth_digest,"), "{csv}");
@@ -436,7 +448,9 @@ fn the_binary_scores_a_known_cross_track_error_end_to_end() {
     assert!(run(&args2).status.success());
     for f in ["report.txt", "report.csv"] {
         assert_eq!(
+            // seal-allow: reads back a file the test wrote in its own temp dir
             std::fs::read(out.join(f)).unwrap(),
+            // seal-allow: reads back a file the test wrote in its own temp dir
             std::fs::read(out2.join(f)).unwrap(),
             "{f}"
         );
@@ -462,6 +476,7 @@ fn the_binary_scores_a_known_cross_track_error_end_to_end() {
         "{}",
         String::from_utf8_lossy(&o3.stderr)
     );
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let t3 = std::fs::read_to_string(out3.join("report.txt")).unwrap();
     assert!(t3.contains("truth gates OVERRIDDEN: bracket 6 s"), "{t3}");
     assert!(t3.contains("0.5 m (design 50 m)"), "{t3}");
@@ -484,14 +499,16 @@ fn real_clip_with_no_overlap_gives_no_pairs_and_a_full_exclusions_table() {
         eprintln!("OPENATCA_DATA / OPENATCA_ADSB_CLIP not set: skipping the real-data smoke run");
         return;
     };
-    let sf = std::fs::read_dir(PathBuf::from(&data).join("scds"))
-        .ok()
-        .and_then(|rd| {
-            rd.flatten().map(|e| e.path()).find(|p| {
-                p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with("sfdps-"))
-            })
-        });
+    // A sealed entry is skipped and counted, never descended into (OA-SEAL-012).
+    let scds = PathBuf::from(&data).join("scds");
+    let sf = oa_sealed::walk_unsealed(&scds).ok().and_then(|w| {
+        eprintln!("sealed entries skipped: {}", w.skipped);
+        w.files.iter().find_map(|f| {
+            let first = f.strip_prefix(&scds).ok()?.components().next()?;
+            let name = first.as_os_str().to_string_lossy();
+            name.starts_with("sfdps-").then(|| scds.join(first))
+        })
+    });
     let Some(sf) = sf else {
         eprintln!("no SFDPS sample under OPENATCA_DATA/scds: skipping");
         return;
@@ -507,6 +524,7 @@ fn real_clip_with_no_overlap_gives_no_pairs_and_a_full_exclusions_table() {
         "--no-loo".as_ref(),
     ]);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let txt = std::fs::read_to_string(out.join("report.txt")).unwrap();
     assert!(txt.contains("Paired samples: 0"), "{txt}");
     assert!(txt.contains("Exclusions"), "{txt}");

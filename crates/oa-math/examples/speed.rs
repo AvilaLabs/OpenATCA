@@ -26,6 +26,7 @@ impl Rng {
 
 /// CPU seconds this process has run so far, if the kernel reports it.
 fn cpu_seconds() -> Option<f64> {
+    // seal-allow: /proc/self/schedstat, this process's own CPU time
     let text = std::fs::read_to_string("/proc/self/schedstat").ok()?;
     let ns: f64 = text.split_whitespace().next()?.parse().ok()?;
     Some(ns * 1e-9)

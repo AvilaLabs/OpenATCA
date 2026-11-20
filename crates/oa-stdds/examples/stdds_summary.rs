@@ -22,6 +22,7 @@ use oa_xml::{Limits as XmlLimits, Parser};
 use oa_zip::GzipReader;
 use std::convert::Infallible;
 use std::io::Read;
+use std::process::ExitCode;
 
 struct Ctx {
     parser: Parser,
@@ -30,6 +31,9 @@ struct Ctx {
     frames: u64,
     other_frames: u64,
     bad_frames: u64,
+    /// Message frames received in a sealed window (OA-SEAL-014): dropped, counted. The records
+    /// the parser dropped by their own time are in `stats.sealed_window_dropped`.
+    sealed_frames: u64,
     refused: [u64; 4],
     /// Bytes the frame reader would not take after a drain (a stall): counted, never dropped
     /// silently; the run exits non-zero.
@@ -39,11 +43,22 @@ struct Ctx {
 fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
     while let Some(ev) = reader.next() {
         match ev {
+            Ok(f)
+                if f.kind == FrameKind::Message && oa_sealed::in_sealed_window(f.recv_unix_ns) =>
+            {
+                ctx.sealed_frames += 1;
+            }
             Ok(f) if f.kind == FrameKind::Message => {
+                // A message with a record or report timed in a sealed window is dropped whole
+                // inside the parser, before any count is updated (`Limits::drop_window`): it is
+                // in no count here but the drop.
+                let before = ctx.stats.sealed_window_dropped;
+                let parsed = parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats);
+                if ctx.stats.sealed_window_dropped > before {
+                    continue;
+                }
                 ctx.frames += 1;
-                if let Err(e) =
-                    parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats)
-                {
+                if let Err(e) = parsed {
                     if let Some(c) = ctx.refused.get_mut(std_error_index(&e)) {
                         *c += 1;
                     }
@@ -76,58 +91,79 @@ fn safe_text(t: &str, extra: &[u8], max: usize) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
 }
 
-fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| {
+fn main() -> ExitCode {
+    // Printed when `main` returns, on every exit (a refusal and a stall included).
+    let mut drops = oa_sealed::DropReport::to_stdout();
+    let Some(path) = std::env::args().nth(1) else {
         eprintln!("usage: stdds_summary FILE.oaf[.gz]");
-        std::process::exit(2);
-    });
+        return ExitCode::from(2);
+    };
     // The shared sealed hold-out guard (`oa-sealed`): the path is resolved and checked, the file
     // is opened and the opened file is checked again.
     let mut src = match oa_sealed::open(std::path::Path::new(&path)) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("refused or unreadable: {path}: {e}");
-            std::process::exit(2);
+            return ExitCode::from(2);
         }
     };
+    let Ok(parser) = Parser::new(XmlLimits::default()) else {
+        eprintln!("error: the XML parser limits were refused");
+        return ExitCode::from(1);
+    };
     let mut ctx = Ctx {
-        parser: Parser::new(XmlLimits::default()).unwrap(),
+        parser,
         stats: new_stats(),
-        limits: Limits::default(),
+        limits: Limits::new(oa_sealed::DropWindow::sealed()),
         frames: 0,
         other_frames: 0,
         bad_frames: 0,
+        sealed_frames: 0,
         refused: [0; 4],
         stalled_bytes: 0,
     };
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
-    let mut reader = FrameReader::new(&mut storage).unwrap();
+    let Ok(mut reader) = FrameReader::new(&mut storage) else {
+        eprintln!("error: the frame reader buffer is too small");
+        return ExitCode::from(1);
+    };
     let mut chunk = vec![0u8; 64 * 1024];
-    // Read until two bytes (the gzip magic) or the end of the file.
-    let mut n = 0;
-    while n < 2 {
-        let got = src.read(&mut chunk[n..]).unwrap();
-        if got == 0 {
-            break;
-        }
-        n += got;
-    }
-    let mut gz =
-        (n >= 2 && chunk[..2] == [0x1f, 0x8b]).then(|| Box::new(GzipReader::new(REPLAY_LIMITS)));
+    let mut gz: Option<Box<GzipReader>> = None;
     let mut gz_damaged = false;
-    while n > 0 {
-        match gz.as_mut() {
-            None => feed(&mut reader, &mut ctx, &chunk[..n]),
-            Some(g) if !gz_damaged => {
-                let r = g.push(&chunk[..n], &mut |b: &[u8]| -> Result<(), Infallible> {
-                    feed(&mut reader, &mut ctx, b);
-                    Ok(())
-                });
-                gz_damaged = r.is_err();
+    let read = (|| -> std::io::Result<()> {
+        // Read until two bytes (the gzip magic) or the end of the file.
+        let mut n = 0;
+        while n < 2 {
+            let got = src.read(&mut chunk[n..])?;
+            if got == 0 {
+                break;
             }
-            Some(_) => {}
+            n += got;
         }
-        n = src.read(&mut chunk).unwrap();
+        gz = (n >= 2 && chunk[..2] == [0x1f, 0x8b])
+            .then(|| Box::new(GzipReader::new(REPLAY_LIMITS)));
+        while n > 0 {
+            match gz.as_mut() {
+                None => feed(&mut reader, &mut ctx, &chunk[..n]),
+                Some(g) if !gz_damaged => {
+                    let r = g.push(&chunk[..n], &mut |b: &[u8]| -> Result<(), Infallible> {
+                        feed(&mut reader, &mut ctx, b);
+                        Ok(())
+                    });
+                    gz_damaged = r.is_err();
+                }
+                Some(_) => {}
+            }
+            n = src.read(&mut chunk)?;
+        }
+        Ok(())
+    })();
+    // The count so far goes in whatever the read did: frames by receive time, TAIS records by
+    // `mrtTime` and ASDE-X reports by `time`.
+    drops.add(ctx.sealed_frames + ctx.stats.sealed_window_dropped);
+    if let Err(e) = read {
+        eprintln!("error: cannot read {path}: {e}");
+        return ExitCode::from(1);
     }
     drain(&mut reader, &mut ctx);
     if reader.finish().is_some() {
@@ -250,6 +286,7 @@ fn main() {
     );
     if ctx.stalled_bytes > 0 {
         eprintln!("error: the frame reader stalled; the summary is incomplete");
-        std::process::exit(3);
+        return ExitCode::from(3);
     }
+    ExitCode::SUCCESS
 }

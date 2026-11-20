@@ -21,20 +21,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-fn collect(dir: &Path, prefix: &str, in_dir: bool, out: &mut Vec<PathBuf>) {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    entries.sort();
-    for p in entries {
-        if p.is_dir() {
-            let name = p.file_name().unwrap().to_string_lossy().into_owned();
-            collect(&p, prefix, in_dir || name.starts_with(prefix), out);
-        } else if in_dir && p.extension().is_some_and(|e| e == "msg") {
-            out.push(p);
-        }
-    }
+fn collect(dir: &Path, prefix: &str, out: &mut Vec<PathBuf>) {
+    // Sealed directories are skipped and counted, never descended into (OA-SEAL-012).
+    let walk = oa_sealed::walk_unsealed(dir).unwrap();
+    eprintln!("sealed entries skipped: {}", walk.skipped);
+    out.extend(walk.files.into_iter().filter(|p| {
+        p.extension().is_some_and(|e| e == "msg")
+            && p.strip_prefix(dir)
+                .ok()
+                .and_then(Path::parent)
+                .is_some_and(|q| {
+                    q.components()
+                        .any(|c| c.as_os_str().to_string_lossy().starts_with(prefix))
+                })
+    }));
 }
 
 fn corpus(prefix: &str) -> Option<Vec<Vec<u8>>> {
@@ -43,7 +43,7 @@ fn corpus(prefix: &str) -> Option<Vec<Vec<u8>>> {
         return None;
     };
     let mut files = Vec::new();
-    collect(Path::new(&dir), prefix, false, &mut files);
+    collect(Path::new(&dir), prefix, &mut files);
     if files.is_empty() {
         eprintln!(
             "no {prefix}*/ *.msg files under {}: skipping",
@@ -51,7 +51,7 @@ fn corpus(prefix: &str) -> Option<Vec<Vec<u8>>> {
         );
         return None;
     }
-    Some(files.iter().map(|f| std::fs::read(f).unwrap()).collect())
+    Some(files.iter().map(|f| oa_sealed::read(f).unwrap()).collect())
 }
 
 fn new_default_rows() -> Rows {
@@ -59,6 +59,7 @@ fn new_default_rows() -> Rows {
         DEFAULT_FLIGHT_CAPACITY,
         DEFAULT_FLOW_CAPACITY,
         DEFAULT_STRING_BYTES,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
     )
 }
 
@@ -243,11 +244,16 @@ fn real_tfms_flights_link_to_real_sfdps_flights() {
         return;
     };
     let mut parser = Parser::new(default_limits()).unwrap();
-    let mut rows = new_rows(tfms.len() * 24, tfms.len() * 2, 64 << 20);
+    let mut rows = new_rows(
+        tfms.len() * 24,
+        tfms.len() * 2,
+        64 << 20,
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    );
     for bytes in &tfms {
         decode_bytes(&mut parser, bytes, &mut rows).unwrap();
     }
-    let mut dec = Decoder::new(FixmLimits::default());
+    let mut dec = Decoder::new(FixmLimits::new(oa_sealed::DropWindow::sealed()));
     let mut ev = new_events(200_000, 16 << 20);
     let mut sparser = Parser::new(oa_xml::Limits::default()).unwrap();
     for bytes in &sfdps {

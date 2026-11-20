@@ -26,6 +26,7 @@ fn expected(name: &str) -> Vec<u8> {
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/expected")
         .join(name);
+    // seal-allow: reads a checked-in fixture
     std::fs::read(p).unwrap()
 }
 
@@ -555,7 +556,7 @@ fn compare_zip_to_extracted(raw: &Path, zip_rel: &str, dir_rel: &str) -> (usize,
         if e.method() == 8 {
             inflate_secs += t.elapsed().as_secs_f64();
         }
-        let want = std::fs::read(raw.join(dir_rel).join(e.name())).unwrap();
+        let want = oa_sealed::read(raw.join(dir_rel).join(e.name())).unwrap();
         assert!(got == want, "{} differs", e.name());
         total += got.len() as u64;
     }
@@ -578,7 +579,7 @@ fn real_nasr_zip_matches_extracted_copy() {
     );
     // The nested archive is itself readable.
     let inner =
-        std::fs::read(raw.join("nasr-2026-10-29/x/01_Oct_2026_CSV-29_Oct_2026_CSV.zip")).unwrap();
+        oa_sealed::read(raw.join("nasr-2026-10-29/x/01_Oct_2026_CSV-29_Oct_2026_CSV.zip")).unwrap();
     let ia = Archive::parse(&inner).unwrap();
     for e in ia.entries() {
         ia.extract_entry(e).unwrap();
@@ -709,4 +710,13 @@ fn offsets_near_the_top_of_the_address_space_are_refused_not_added_to() {
             }
         }
     }
+}
+
+// REQ: OA-SEAL-013
+#[test]
+fn read_archive_file_refuses_a_sealed_path() {
+    let e = read_archive_file(Path::new("/x/derived/adsb/zau-2026.11.21-1s.zip"))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("OA-SEAL-001"), "{e}");
 }

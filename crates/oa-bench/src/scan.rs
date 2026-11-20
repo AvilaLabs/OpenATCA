@@ -155,7 +155,9 @@ fn route_points(doc: &Doc<'_>, first: &[u32], er: usize, leg: &mut Legacy) -> Ve
     pts
 }
 
-/// Scans every message of `doc` (an SFDPS `MessageCollection`) into `leg`.
+/// Scans every message of `doc` (an SFDPS `MessageCollection`) into `leg`. The caller runs it
+/// only on a document the decoder did not drop for a message timed in the sealed window, so no
+/// such message reaches a hint, address, handoff or route count or table (OA-SEAL-014).
 pub fn scan_doc(doc: &Doc<'_>, scratch: &mut Vec<u32>, leg: &mut Legacy) {
     first_texts(doc, scratch);
     let n = doc.elem_name.len();

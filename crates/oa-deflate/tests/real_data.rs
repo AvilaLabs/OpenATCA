@@ -15,21 +15,6 @@ use oa_zip::inflate;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    entries.sort();
-    for p in entries {
-        if p.is_dir() {
-            collect(&p, out);
-        } else if p.extension().is_some_and(|e| e == "msg") {
-            out.push(p);
-        }
-    }
-}
-
 /// Seconds to compress `data` as one write at `level`, and the stream.
 fn timed_deflate(level: u8, data: &[u8]) -> (f64, Vec<u8>) {
     let t = Instant::now();
@@ -44,12 +29,23 @@ fn real_swim_feeds_compress_and_round_trip() {
         eprintln!("OPENATCA_SCDS is not set: skipping the real SWIM data test");
         return;
     };
-    let mut feeds: Vec<PathBuf> = std::fs::read_dir(&root)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.is_dir())
-        .collect();
+    // The feed directories one level down: a sealed one is skipped and counted.
+    let walk_root = oa_sealed::walk_unsealed(Path::new(&root)).unwrap();
+    let mut feeds: Vec<PathBuf> = Vec::new();
+    for f in &walk_root.files {
+        if let Some(feed) = f
+            .strip_prefix(&root)
+            .ok()
+            .and_then(|r| r.components().next())
+        {
+            let feed = Path::new(&root).join(feed);
+            if feed.is_dir() && !feeds.contains(&feed) {
+                feeds.push(feed);
+            }
+        }
+    }
     feeds.sort();
+    eprintln!("sealed entries skipped: {}", walk_root.skipped);
     assert!(
         !feeds.is_empty(),
         "no feed directories under {}",
@@ -65,14 +61,19 @@ fn real_swim_feeds_compress_and_round_trip() {
     );
     let mut checked = 0;
     for feed in &feeds {
-        let mut files = Vec::new();
-        collect(feed, &mut files);
+        let mut files: Vec<PathBuf> = walk_root
+            .files
+            .iter()
+            .filter(|p| p.starts_with(feed) && p.extension().is_some_and(|e| e == "msg"))
+            .cloned()
+            .collect();
+        files.sort();
         if files.is_empty() {
             continue;
         }
         let mut data = Vec::new();
         for f in &files {
-            data.extend(std::fs::read(f).unwrap());
+            data.extend(oa_sealed::read(f).unwrap());
             if data.len() >= cap {
                 data.truncate(cap);
                 break;

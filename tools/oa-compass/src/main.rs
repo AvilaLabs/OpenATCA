@@ -27,7 +27,7 @@ use std::process::ExitCode;
 use oa_compass::shell::args::{parse_export, parse_slice, SLICE_USAGE, USAGE};
 use oa_compass::shell::error::ExportError;
 use oa_compass::shell::export::Layout;
-use oa_compass::shell::job::{run_job, EramSource, Job};
+use oa_compass::shell::job::{run_job_tallied, EramSource, Job};
 use oa_compass::shell::slice;
 
 fn main() -> ExitCode {
@@ -66,8 +66,13 @@ fn main() -> ExitCode {
 }
 
 fn run(job: Job) -> Result<(), ExportError> {
-    let lines = run_job(job, &mut |_| Ok(()), &mut |l| eprintln!("{l}"))?;
-    for l in lines {
+    // The clip's count and the ERAM loader's, printed (on standard output, as before) when this
+    // function returns, an error included.
+    let mut drops = oa_sealed::DropReport::to_stdout();
+    let mut sealed = 0u64;
+    let done = run_job_tallied(job, &mut |_| Ok(()), &mut |l| eprintln!("{l}"), &mut sealed);
+    drops.add(sealed);
+    for l in done? {
         println!("{l}");
     }
     Ok(())

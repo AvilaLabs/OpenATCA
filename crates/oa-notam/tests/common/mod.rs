@@ -174,7 +174,9 @@ pub fn small() -> Notams {
 }
 
 pub fn decoder() -> Decoder {
-    new_decoder(Limits::default())
+    new_decoder(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ))
 }
 
 pub fn parser() -> Parser {

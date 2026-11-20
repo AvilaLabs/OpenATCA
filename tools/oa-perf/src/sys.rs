@@ -2,6 +2,7 @@
 
 /// `/proc/loadavg` as one line ("1.20 1.50 1.10 ..."), or "unknown".
 pub fn loadavg() -> String {
+    // seal-allow: /proc, not an input
     std::fs::read_to_string("/proc/loadavg")
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "unknown".to_string())
@@ -18,6 +19,7 @@ pub fn loadavg3() -> String {
 
 /// The first CPU model name in `/proc/cpuinfo`.
 pub fn cpu_model() -> String {
+    // seal-allow: /proc, not an input
     let text = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     text.lines()
         .find(|l| l.starts_with("model name"))
@@ -32,6 +34,7 @@ pub fn nproc() -> usize {
 
 /// A `kB` field of `/proc/self/status` (`VmHWM`, `VmRSS`), in kilobytes.
 pub fn status_kb(field: &str) -> Option<u64> {
+    // seal-allow: /proc, not an input
     status_kb_of(&std::fs::read_to_string("/proc/self/status").ok()?, field)
 }
 

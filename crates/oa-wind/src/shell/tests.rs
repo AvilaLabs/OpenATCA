@@ -852,7 +852,7 @@ fn rap_file(root: &std::path::Path, hour: u8) -> PathBuf {
 fn real_rap_hour_matches_oa_grib2_exactly() {
     let Some(root) = data_dir() else { return };
     let path = rap_file(&root, 12);
-    let Ok(data) = std::fs::read(&path) else {
+    let Ok(data) = oa_sealed::read(&path) else {
         println!("{} missing: skipped", path.display());
         return;
     };
@@ -877,7 +877,7 @@ fn real_rap_agrees_with_hrrr_and_the_cache_is_bounded() {
     let Some(root) = data_dir() else { return };
     let path = rap_file(&root, 12);
     let hrrr = root.join("raw/hrrr/hrrr.20261114.t12z.wrfprsf00.UV250.grib2");
-    let (Ok(_), Ok(hd)) = (std::fs::metadata(&path), std::fs::read(&hrrr)) else {
+    let (Ok(_), Ok(hd)) = (std::fs::metadata(&path), oa_sealed::read(&hrrr)) else {
         println!("RAP t12z or HRRR sample missing: skipped");
         return;
     };

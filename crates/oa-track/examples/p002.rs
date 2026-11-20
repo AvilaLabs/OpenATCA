@@ -43,7 +43,7 @@ use oa_bench::adsb_truth;
 use oa_bench::assoc::{associate, astatus, TruthIndex};
 use oa_bench::chunked::truth_index;
 use oa_bench::geo::KT_MPS;
-use oa_bench::input::{load_adsb, load_with, FeedInput};
+use oa_bench::input::{file_opener, load_adsb_counted, load_counted, msg_limit, FeedInput};
 use oa_bench::legacy::{Legacy, NO_ALT};
 use oa_bench::pair::{build_pairs_with, PairTable};
 use oa_bench::run::RunConfig;
@@ -1290,6 +1290,7 @@ fn write_groups(
 fn git_state() -> GitState {
     let dir = env!("CARGO_MANIFEST_DIR");
     let git = |args: &[&str]| {
+        // seal-allow: git describes this source tree for the report; it reads no input data
         Command::new("git")
             .arg("-C")
             .arg(dir)
@@ -1306,6 +1307,7 @@ fn git_state() -> GitState {
 }
 
 fn peak_rss_mb() -> f64 {
+    // seal-allow: /proc, not an input
     fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {
@@ -1334,7 +1336,13 @@ fn run(
     let t_start = Instant::now();
 
     // Tracker on set A (as vs_eram).
-    let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
+    // The clip's count and the SFDPS loader's, each input once, printed when this function
+    // returns, an error included.
+    let mut drops = oa_sealed::DropReport::new();
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(clip_path, &file_opener(), &mut clip_sealed);
+    drops.add(clip_sealed);
+    let clip = clip.map_err(|e| e.to_string())?;
     let clip_hash = clip.hash.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
@@ -1436,14 +1444,18 @@ fn run(
         oa_sealed::refuse_io(p)?;
         oa_bench::input::file_opener()(p)
     });
-    let loaded = load_with(
+    let mut sfdps_sealed = 0u64;
+    let loaded = load_counted(
         &[FeedInput {
             feed: FeedKind::Sfdps,
             dir: sfdps.to_path_buf(),
         }],
         &open,
-    )
-    .map_err(|e| e.to_string())?;
+        msg_limit(),
+        &mut sfdps_sealed,
+    );
+    drops.add(sfdps_sealed);
+    let loaded = loaded.map_err(|e| e.to_string())?;
     let sfdps_inputs: Vec<String> = loaded
         .inputs
         .iter()

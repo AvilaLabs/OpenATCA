@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 72)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 72)
+        self.assertEqual(registry["expected_proof_count"], 91)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 91)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 63)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 82)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -362,6 +362,21 @@ print("fake runner stdout")
             self.assertEqual(suite["status"], "FAIL")
             self.assertEqual([x["status"] for x in suite["checks"]], ["FAIL"] * 2)
             self.assertEqual(len(invoked.read_text().splitlines()), 2)
+
+    def test_shards_split_the_enabled_proofs_between_jobs_without_overlap(self):
+        seen = []
+        for index in range(2):
+            with tempfile.TemporaryDirectory() as temp:
+                repo, registry, out, target, _ = self.fake_workspace(Path(temp), proof_count=5)
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    result = run_suite(repo, out, target, registry, shard=(index, 2))
+                self.assertEqual(result, 0, stderr.getvalue())
+                suite = json.loads((out / "suite.json").read_text())
+                self.assertEqual(suite["shard"], f"{index}/2")
+                seen.append([x["proof"] if "proof" in x else x["id"] for x in suite["checks"]])
+        self.assertEqual([len(x) for x in seen], [3, 2])
+        self.assertFalse(set(seen[0]) & set(seen[1]))
 
     def test_loop_unwind_preset_is_forwarded_and_recorded(self):
         with tempfile.TemporaryDirectory() as temp:

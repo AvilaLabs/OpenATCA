@@ -144,6 +144,7 @@ impl Recorder {
         format: Format,
     ) -> io::Result<Recorder> {
         let opener: Opener = Box::new(|path: &Path| {
+            // seal-allow: creates a recording file (create_new); reads nothing
             let f: File = OpenOptions::new().write(true).create_new(true).open(path)?;
             Ok(Box::new(f) as Box<dyn Write + Send>)
         });
@@ -454,6 +455,7 @@ fn existing_recording_bytes(dir: &Path, entry_limit: usize) -> io::Result<u64> {
     let mut total = 0u64;
     let mut entries = 0usize;
     oa_sealed::refuse_io(dir)?;
+    // seal-allow: the recorder's own output directory: sizes only, nothing is read
     for entry in fs::read_dir(dir)? {
         if entries >= entry_limit {
             return Err(io::Error::new(

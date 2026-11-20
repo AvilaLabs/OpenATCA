@@ -91,6 +91,7 @@ pub fn load_metar_dir_with(
     read: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
 ) -> io::Result<(Altimeters, InputHash)> {
     oa_sealed::refuse_io(dir)?;
+    // seal-allow: the directory is refused by the guard above and each entry is checked before it is opened
     let mut paths: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .map(|e| e.path())

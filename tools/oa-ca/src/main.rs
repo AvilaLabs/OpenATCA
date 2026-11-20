@@ -7,10 +7,12 @@ use std::time::Instant;
 
 use oa_ca_run::args::{parse, USAGE};
 use oa_ca_run::guard::refuse_sealed;
-use oa_ca_run::run::run;
+use oa_ca_run::run::run_counted;
 use oa_sealed::Sealed;
 
 fn main() -> ExitCode {
+    // Printed when `main` returns: on every exit, an error and a refusal included.
+    let mut drops = oa_sealed::DropReport::new();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse(&argv) {
         Ok(a) => a,
@@ -27,7 +29,10 @@ fn main() -> ExitCode {
         }
     }
     let t0 = Instant::now();
-    match run(&args) {
+    let mut sealed = 0u64;
+    let result = run_counted(&args, &mut sealed);
+    drops.add(sealed);
+    match result {
         Ok(summary) => {
             print!("{summary}");
             eprintln!("run time {:.1} s", t0.elapsed().as_secs_f64());

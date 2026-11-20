@@ -293,6 +293,22 @@ pub const TRACKER_NOT_LOSS: &[&str] = &[
     "time_steps_back",
     "nis_sum",
     "nis_n",
+    // Large moves (RT-239): outcome accounting. Every report is applied or counted as a
+    // refusal elsewhere; these say what became of a move, not what was lost.
+    "moves_unconfirmed",
+    "moves_confirmed",
+    "moves_rolled_back",
+    "moves_undecided",
+    "moves_decision_rejected",
+    "moves_late",
+    "moves_abandoned_ended",
+    "moves_abandoned_restarted",
+    "moves_abandoned_resync",
+    "moves_abandoned_demoted",
+    "moves_old_path_votes",
+    "moves_old_path_unpredictable",
+    "moves_resync_marked",
+    "moves_peak_active",
 ];
 
 /// Every counter of work lost or refused: input or output that the run dropped, refused, cut
@@ -309,7 +325,8 @@ pub const TRACKER_NOT_LOSS: &[&str] = &[
 /// keys not remembered, scratch buffers full, registration history full.
 /// Tracker: no free slot, each validation refusal, numerical prediction/update refusals, late
 /// measurements (window and ring), clock-step holds discarded, tracks dropped by a step back,
-/// sensor table entries evicted.
+/// sensor table entries evicted; large moves that lost their rollback (late, or no snapshot for a
+/// full pool), rows whose widened radius failed (fail-closed radius), reports refused internally.
 /// Output: rows lost to a full table.
 pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Vec<(String, u64)> {
     let mut v: Vec<(String, u64)> = vec![
@@ -355,6 +372,20 @@ pub fn loss_counters(f: &FusionStats, t: &TrackerStats, out_overflow: u64) -> Ve
         ("tracker.nan_covariance".into(), t.nan_covariance),
         // A filter prediction that cannot produce a finite/usable state withholds this update.
         ("tracker.numerical_refused".into(), t.numerical_refused),
+        // A move that can no longer be rolled back, or was made without a snapshot because the
+        // pool was full, has lost its rollback: work lost for want of room or history.
+        (
+            "tracker.moves_rollback_lost_late".into(),
+            t.moves_rollback_lost_late,
+        ),
+        ("tracker.move_no_snapshot".into(), t.move_no_snapshot),
+        // Rows given the fail-closed radius instead of a computed one: output degraded.
+        ("tracker.move_widen_failed".into(), t.move_widen_failed),
+        // A report refused because the rule was off for it (cannot happen): input refused.
+        (
+            "tracker.moves_internal_refused".into(),
+            t.moves_internal_refused,
+        ),
     ];
     for (name, c) in REFUSE_NAMES.iter().zip(t.refused.iter()) {
         v.push((format!("tracker.refused_{name}"), *c));
@@ -938,6 +969,10 @@ mod tests {
             "tracker.rows_unrepresentable" => t.rows_unrepresentable = 1,
             "tracker.nan_covariance" => t.nan_covariance = 1,
             "tracker.numerical_refused" => t.numerical_refused = 1,
+            "tracker.moves_rollback_lost_late" => t.moves_rollback_lost_late = 1,
+            "tracker.move_no_snapshot" => t.move_no_snapshot = 1,
+            "tracker.move_widen_failed" => t.move_widen_failed = 1,
+            "tracker.moves_internal_refused" => t.moves_internal_refused = 1,
             "out.overflow" => r.out_overflow = 1,
             n if n.starts_with("tracker.refused_") => t.refused[0] = 1,
             n => panic!("no setter for {n}"),

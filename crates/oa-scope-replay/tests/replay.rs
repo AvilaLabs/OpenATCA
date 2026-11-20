@@ -563,7 +563,7 @@ fn cli_args(
     v
 }
 
-// REQ: OA-DSP-044
+// REQ: OA-DSP-044, OA-SEAL-014
 #[test]
 fn the_command_writes_one_ppm_a_step_and_a_hashes_file_that_repeats() {
     let dir = tmp("replay-cli");
@@ -577,6 +577,11 @@ fn the_command_writes_one_ppm_a_step_and_a_hashes_file_that_repeats() {
         "{said}"
     );
     assert!(said.contains("rows lost"), "{said}");
+    // The clip line says how many frames and rows were left out for a sealed window.
+    assert!(
+        said.contains("0 frames and rows in a sealed window dropped"),
+        "{said}"
+    );
     assert!(
         said.contains("loss     none"),
         "a clean run says so: {said}"
@@ -1440,4 +1445,74 @@ fn only_exact_output_names_are_ours_and_a_link_is_never_followed() {
     assert!(matches!(e, cli::CliError::Failed(_)), "{e}");
     assert!(e.to_string().contains("not a plain file"), "{e}");
     assert_eq!(std::fs::read(&secret).unwrap(), b"secret");
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_clip_reader_drops_sealed_window_frames_and_rows_and_counts_them() {
+    // The list's window: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes), Unix nanoseconds.
+    const FROM: i64 = 1_795_131_900_000_000_000;
+    const TO: i64 = 1_795_393_920_000_000_000;
+    let dir = tmp("seal_window");
+    // One frame per entry: (frame receive time, [row times]).
+    let frames: [(i64, &[i64]); 4] = [
+        // Received just before the window but carrying rows timed at from - 1 (kept), from and
+        // to - 1 (dropped), and to (kept).
+        (FROM - 1, &[FROM - 1, FROM, TO - 1, TO]),
+        // Received in the window: the whole frame is dropped.
+        (FROM, &[TO]),
+        (TO - 1, &[TO]),
+        (TO, &[TO + 1_000_000_000]),
+    ];
+    let mut bytes = Vec::new();
+    for (i, (recv, times)) in frames.iter().enumerate() {
+        let mut r = Reports::default();
+        for (k, t) in times.iter().enumerate() {
+            let mut row: Row = ROW_EMPTY;
+            row.time_ns = *t;
+            row.icao = 0xA00001 + k as u32;
+            row.lat_e7 = ORD.0;
+            row.lon_e7 = ORD.1;
+            row.nic = 8;
+            row.nac_p = 10;
+            row.sil = 3;
+            row.version = 2;
+            reports_push(&mut r, &row);
+        }
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &r, 0, times.len()).unwrap();
+        let mut buf = vec![0u8; oa_feed::MAX_FRAME_LEN];
+        let n = oa_feed::encode_frame(
+            &mut buf,
+            1,
+            oa_feed::FLAG_BYTES,
+            i as u64,
+            *recv,
+            recv / 1_000_000,
+            &payload,
+        )
+        .unwrap();
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let clip = dir.join("neutral-name.oaf");
+    std::fs::write(&clip, bytes).unwrap();
+    let (_, _, tr) = cli::track_window(&clip, FROM - 10, TO + 10_000_000_000, TO + 5, 0).unwrap();
+    // Two frames by receive time (at from and at to - 1 ns), counted one each; and the frame
+    // received at from - 1 ns, dropped whole for its rows timed in the window, its four rows
+    // counted.
+    assert_eq!(tr.sealed_window_dropped, 6);
+    // Kept: the row at to + 1 s, in the frame received at to.
+    assert_eq!(tr.reports, 1);
+    // The decoder's counters hold only the frame that was kept: the dropped ones are in none.
+    assert_eq!(
+        (tr.decode.records, tr.decode.kept, tr.decode.dropped),
+        (1, 1, 0)
+    );
+    // On every exit the count is given: a window that holds only sealed frames is an error, and
+    // the count of what was dropped is still returned.
+    let mut sealed = 0;
+    let e = cli::track_window_counted(&clip, FROM, TO - 1, TO + 5, 0, &mut sealed).unwrap_err();
+    assert!(e.to_string().contains("no reports in the window"), "{e}");
+    // The two frames received in the window; the frame just before it is outside the read span.
+    assert_eq!(sealed, 2);
 }

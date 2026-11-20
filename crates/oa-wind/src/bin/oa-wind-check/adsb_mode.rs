@@ -3,7 +3,7 @@
 //! `raw/adsblol` whose day overlaps the RAP hours in `raw/rap`. Shell: owns files and output.
 
 use crate::list;
-use oa_adsb::{scan_archive, Filter, Reports, ScanEnd, ScanError};
+use oa_adsb::{scan_archive_counted, Filter, Reports, ScanEnd, ScanError};
 use oa_wind::adsb::{adsb_obs, all_groups, compare_adsb, AdsbObs, DEFAULT_MIN_GAP_S, MAX_OBS};
 use oa_wind::{archive_files, archive_sample, index_files};
 use std::fs::File;
@@ -139,6 +139,9 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
     let mut obs: Vec<AdsbObs> = Vec::new();
     let mut dropped = 0usize;
     let mut scanned = 0usize;
+    // Trace rows in a sealed window, left out of the comparison; printed when this function
+    // returns, on every exit, an error included.
+    let mut drops = oa_sealed::DropReport::to_stdout();
     for (key, parts) in day_groups(&raw.join("adsblol")) {
         let Some(d0) = day_start(&key) else {
             println!("  {key}: day not readable from the name; skipped");
@@ -160,21 +163,30 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             }
         };
         scanned += 1;
-        let res = scan_archive(files, &filter, &mut |r: &Reports| -> Result<(), String> {
-            dropped += adsb_obs(r, gap, &mut obs);
-            Ok(())
-        });
+        let mut archive_sealed = 0u64;
+        let res = scan_archive_counted(
+            files,
+            &filter,
+            &mut |r: &Reports| -> Result<(), String> {
+                dropped += adsb_obs(r, gap, &mut obs);
+                Ok(())
+            },
+            &mut archive_sealed,
+        );
+        drops.add(archive_sealed);
         match res {
-            Ok(r) => println!(
-                "  {key}: {} traces read, {} refused, {} rows kept in box and window{}",
-                r.stats.traces_read,
-                r.stats.traces_refused,
-                r.stats.kept,
-                match r.end {
-                    ScanEnd::Complete => "",
-                    ScanEnd::Truncated(_) => " (archive ended early)",
-                }
-            ),
+            Ok(r) => {
+                println!(
+                    "  {key}: {} traces read, {} refused, {} rows kept in box and window{}",
+                    r.stats.traces_read,
+                    r.stats.traces_refused,
+                    r.stats.kept,
+                    match r.end {
+                        ScanEnd::Complete => "",
+                        ScanEnd::Truncated(_) => " (archive ended early)",
+                    }
+                )
+            }
             Err(ScanError::Tar(e)) => {
                 eprintln!("oa-wind-check adsb: {key}: {e}");
                 return ExitCode::FAILURE;

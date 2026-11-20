@@ -9,7 +9,9 @@
 
 use oa_bench::ingest::{ingest_sfdps, ingest_tbfm, ingest_tfms, new_reader};
 use oa_bench::input::{hash_files, list_inputs, load, DirKind, FeedInput};
-use oa_bench::legacy::{hev, new_legacy, tbfm_kind, tfms_kind, Limits, NONE, NO_ALT, NO_TIME};
+use oa_bench::legacy::{
+    hev, new_legacy, tbfm_kind, tfms_kind, Counts, Limits, NONE, NO_ALT, NO_TIME,
+};
 use oa_replay::FeedKind;
 use oa_sha256::{sha256, to_hex};
 
@@ -558,4 +560,248 @@ fn tfms_times_that_are_not_estimates_are_counted() {
         "{:?}",
         leg.counts
     );
+}
+
+/// The sealed window of the list: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z, Unix nanoseconds.
+const SEAL_FROM: i64 = 1_795_131_900_000_000_000;
+const SEAL_TO: i64 = 1_795_393_920_000_000_000;
+
+fn oaf_frames(frames: &[(i64, &str)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (i, (t, doc)) in frames.iter().enumerate() {
+        let mut buf = vec![0u8; oa_feed::MAX_FRAME_LEN];
+        let n = oa_feed::encode_frame(
+            &mut buf,
+            1,
+            oa_feed::FLAG_BYTES,
+            i as u64,
+            *t,
+            t / 1_000_000,
+            doc.as_bytes(),
+        )
+        .unwrap();
+        out.extend_from_slice(&buf[..n]);
+    }
+    out
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn sfdps_records_timed_in_a_sealed_window_are_dropped_and_counted() {
+    let before = th(
+        GUFI_A,
+        "2026-11-19T23:44:59.999Z",
+        "2026-11-19T23:44:59Z",
+        false,
+        "",
+    );
+    let at_from = th(
+        GUFI_A,
+        "2026-11-19T23:45:00.000Z",
+        "2026-11-19T23:44:59Z",
+        false,
+        "",
+    );
+    let pos_in = th(
+        GUFI_B,
+        "2026-11-19T23:44:59.999Z",
+        "2026-11-19T23:45:00Z",
+        false,
+        "",
+    );
+    let last_in = th(
+        GUFI_B,
+        "2026-11-23T00:31:59.999Z",
+        "2026-11-19T23:44:59Z",
+        false,
+        "",
+    );
+    let at_to = th(
+        GUFI_B,
+        "2026-11-23T00:32:00.000Z",
+        "2026-11-23T00:32:00Z",
+        false,
+        "",
+    );
+    let mut leg = new_legacy();
+    let mut r = new_reader().unwrap();
+    // One document each: a document with a message in the window is dropped whole.
+    for m in [before, at_from, pos_in, last_in, at_to] {
+        ingest_sfdps(&mut leg, &mut r, sfdps(&m).as_bytes(), 1_793_000_000_000);
+    }
+    // Kept: the message at from - 1 ms and the one at to; dropped: message time at from, position
+    // time at from, message time at to - 1 ms.
+    assert_eq!(leg.th.flight.len(), 2);
+    assert_eq!(leg.counts.sealed_window_dropped, 3);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn tbfm_and_tfms_records_timed_in_a_sealed_window_are_dropped_and_counted() {
+    for (msg, kept) in [
+        ("2026-11-19T23:44:59.999Z", true),
+        ("2026-11-19T23:45:00.000Z", false),
+        ("2026-11-23T00:31:59.999Z", false),
+        ("2026-11-23T00:32:00.000Z", true),
+    ] {
+        let mut leg = new_legacy();
+        let mut r = new_reader().unwrap();
+        let doc = TBFM_DOC.replace(
+            r#"msgTime="2030-01-02T03:00:00.100Z""#,
+            &format!(r#"msgTime="{msg}""#),
+        );
+        ingest_tbfm(&mut leg, &mut r, doc.as_bytes());
+        assert_eq!(leg.tbfm.kind.len(), if kept { 4 } else { 0 }, "{msg}");
+        // One message, dropped whole.
+        assert_eq!(leg.counts.sealed_window_dropped, u64::from(!kept), "{msg}");
+    }
+    for (src, kept) in [
+        ("2026-11-19T23:44:59Z", true),
+        ("2026-11-19T23:45:00Z", false),
+        ("2026-11-23T00:31:59Z", false),
+        ("2026-11-23T00:32:00Z", true),
+    ] {
+        let mut leg = new_legacy();
+        let mut r = new_reader().unwrap();
+        let doc = tfms_doc().replace("2030-01-02T03:04:05Z", src);
+        ingest_tfms(&mut leg, &mut r, doc.as_bytes());
+        assert_eq!(leg.tfms.kind.len(), if kept { 2 } else { 0 }, "{src}");
+        assert_eq!(leg.counts.sealed_window_dropped, u64::from(!kept), "{src}");
+    }
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn load_drops_sealed_frames_by_receive_time_and_a_record_inside_a_frame_received_before_it() {
+    let dir = std::env::temp_dir().join(format!("oa-bench-seal-load-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ok = sfdps(&th(
+        GUFI_A,
+        "2026-11-19T20:00:00.000Z",
+        "2026-11-19T20:00:00Z",
+        false,
+        "",
+    ));
+    // Received at from - 1 ns but timed inside the window: the record goes, the frame does not.
+    let late = sfdps(&th(
+        GUFI_B,
+        "2026-11-19T23:45:00.000Z",
+        "2026-11-19T23:44:59Z",
+        false,
+        "",
+    ));
+    let frames = [
+        (SEAL_FROM - 1, ok.as_str()),
+        (SEAL_FROM - 1, late.as_str()),
+        (SEAL_FROM, ok.as_str()),
+        (SEAL_TO - 1, ok.as_str()),
+        (SEAL_TO, ok.as_str()),
+    ];
+    std::fs::write(dir.join("a.oaf"), oaf_frames(&frames)).unwrap();
+    let l = load(&[FeedInput {
+        feed: FeedKind::Sfdps,
+        dir: dir.clone(),
+    }])
+    .unwrap();
+    // Two frames by receive time (at from and at to - 1 ns), one record by its own time.
+    assert_eq!(l.legacy.counts.sealed_window_dropped, 1);
+    assert_eq!(l.sealed_window_dropped, 3);
+    // The record's document is dropped whole, so it is not a document here.
+    assert_eq!(l.legacy.counts.docs[0], 2);
+    assert!(l
+        .notes
+        .iter()
+        .any(|n| n.starts_with("sealed-window rows dropped: 3")));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_message_timed_in_the_window_never_reaches_the_hint_handoff_route_or_flight_tables() {
+    // Frame received outside the window (2030): the messages carry their own times.
+    let recv = 1_893_553_300_000;
+    let doc = |ts: &str, pos: &str| {
+        sfdps(&format!(
+            "{}{}{}",
+            th(GUFI_A, ts, pos, false, ADDR_AND_HINT),
+            handoff(GUFI_B, ts, "INITIATION"),
+            route_msg("cccccccc-dddd-4eee-8fff-000000000001", ts),
+        ))
+    };
+    let mut leg = new_legacy();
+    let mut r = new_reader().unwrap();
+    ingest_sfdps(
+        &mut leg,
+        &mut r,
+        doc("2026-11-21T03:00:05.250Z", "2026-11-21T03:00:04Z").as_bytes(),
+        recv,
+    );
+    // Dropped whole: every count is as for an empty run, with the three messages counted.
+    assert_eq!(
+        leg.counts,
+        Counts {
+            sealed_window_dropped: 3,
+            ..Counts::default()
+        }
+    );
+    assert_eq!(leg.counts.th_adsb_hint, 0);
+    assert_eq!(leg.handoffs.flight.len(), 0);
+    assert_eq!(leg.routes.flight.len(), 0);
+    assert_eq!(leg.th.flight.len(), 0);
+    assert_eq!(leg.flights.gufi.len(), 0);
+    assert_eq!(leg.counts.th_coast, 0);
+    // The same three messages timed outside it reach every table.
+    let mut leg = new_legacy();
+    ingest_sfdps(
+        &mut leg,
+        &mut r,
+        doc("2030-01-02T03:00:05.250Z", "2030-01-02T03:00:04Z").as_bytes(),
+        recv,
+    );
+    assert_eq!(leg.counts.sealed_window_dropped, 0);
+    assert_eq!(leg.counts.th_adsb_hint, 1);
+    assert_eq!(leg.handoffs.flight.len(), 1);
+    assert_eq!(leg.routes.flight.len(), 1);
+    assert_eq!(leg.flights.gufi.len(), 3);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_document_cut_off_by_the_row_capacity_is_dropped_whole_for_a_window_message_after_the_cut() {
+    // More messages than the event table holds, the last one timed in the window: the prefix
+    // decoder would never reach it, and the scan would read it.
+    let recv = 1_893_553_300_000;
+    let mini = |gufi: &str, ts: &str| {
+        format!(
+            r#"<message xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="ns5:FlightMessageType"><flight centre="ZXX" source="TH" system="SLC" timestamp="{ts}"><gufi codeSpace="urn:uuid">{gufi}</gufi></flight></message>"#
+        )
+    };
+    let msgs: String = (0..oa_replay::pipeline::DOC_ROW_CAPACITY + 8)
+        .map(|_| mini(GUFI_A, "2030-01-02T03:00:05.250Z"))
+        .collect();
+    let last = mini(GUFI_B, "2026-11-21T03:00:05.250Z");
+    let n = (oa_replay::pipeline::DOC_ROW_CAPACITY + 8 + 1) as u64;
+    let mut leg = new_legacy();
+    let mut r = new_reader().unwrap();
+    ingest_sfdps(
+        &mut leg,
+        &mut r,
+        sfdps(&format!("{msgs}{last}")).as_bytes(),
+        recv,
+    );
+    assert_eq!(
+        leg.counts,
+        Counts {
+            sealed_window_dropped: n,
+            ..Counts::default()
+        }
+    );
+    assert_eq!((leg.th.flight.len(), leg.handoffs.flight.len()), (0, 0));
+    assert_eq!(leg.flights.gufi.len(), 0);
+    // Without the window message the same document is cut off, counted, and read as before.
+    let mut leg = new_legacy();
+    ingest_sfdps(&mut leg, &mut r, sfdps(&msgs).as_bytes(), recv);
+    assert_eq!(leg.counts.sealed_window_dropped, 0);
+    assert_eq!(leg.counts.docs[0], 1);
+    assert_eq!(leg.counts.rows_not_decoded, 8);
 }

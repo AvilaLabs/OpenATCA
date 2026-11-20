@@ -129,6 +129,47 @@ pub const VEL_GATE_CHI2: f64 = 400.0;
 /// 85 %), chosen before the 2026-11-15 validation was seen; a forged 2 km report is accepted at
 /// 10 s of gap instead of 12 s.
 pub const GATE_MANOEUVRE_MPS2: f64 = 5.0;
+/// A report that passes the position gate but lies farther than this, metres, from the track's
+/// predicted position is applied but marked unconfirmed, with the state from before it kept for a
+/// rollback, until the track's next report decides it (RT-239). A fixed distance: it does not
+/// scale with the gap or the covariance, which is what lets the widening gate pass a single
+/// forged report after a gap. 926 m is 0.5 NM, the radius of [`COAST_MAX_R95_M`].
+pub const CONFIRM_MOVE_M: f64 = 926.0;
+/// A later report agrees with a path (the moved track's or the old one's) if it lies within this,
+/// metres, of that path's prediction at its time, growing with the time since the move by the
+/// manoeuvre allowance and never over [`CONFIRM_MOVE_M`]: the two reports must agree more
+/// closely than the move they decide.
+pub const CONFIRM_AGREE_M: f64 = 300.0;
+/// The floor of the time, ns, within which the next report decides a move (see
+/// [`CONFIRM_WINDOW_INTERVALS`]); a report past the window leaves the move standing (undecided,
+/// counted).
+pub const CONFIRM_WINDOW_NS: i64 = 5 * NS_PER_S;
+/// The window follows the track's report rate: this many expected report intervals, with
+/// [`CONFIRM_WINDOW_NS`] as the floor and the drop age as the ceiling. Live 1 Hz data keeps the
+/// floor; the thinned clips (7 s median interval) have about 28 s for the second report.
+pub const CONFIRM_WINDOW_INTERVALS: i64 = 4;
+/// The deciding report is at least this long, ns, after the move: a copy of the same message,
+/// or a burst within one squitter, is not a second report.
+pub const CONFIRM_MIN_SEP_NS: i64 = NS_PER_S / 2;
+/// How many reports at one place decide a move, either way (RT-273): the move's own report counts
+/// for the moved place, so one more report there confirms it, and the old path needs two reports
+/// of its own, at least [`CONFIRM_MIN_SEP_NS`] apart, to roll it back (one report, the case of a
+/// forger who replays the old place, or of a genuine relocation seen by one stray plot, decides
+/// nothing). The rule is written for two: the moved side needs one more, the old side keeps one
+/// earlier vote (`const` assertion in `confirm`).
+pub const CONFIRM_REPORTS: u8 = 2;
+/// How many unconfirmed moves can hold a rollback snapshot at once (2200 bytes each): 64, 141 kB.
+/// Measured on the two development days (the 2026-11-14 day to choose, 2026-11-15 as the
+/// check): the most tracks with an unconfirmed move at once was 7 on 2026-11-14 and
+/// 7 on 2026-11-15, so 64 is about nine times the largest peak seen; a move is open
+/// for the window of its track (5 s at 1 Hz, 28 s on a 7 s feed) unless its track goes silent,
+/// when it stays until the track is dropped (120 s). What a forger can force: one gate-passing
+/// far report on each of many confirmed aircraft addresses at once, each holding a snapshot until
+/// the track's next report decides it or the track ends. With the pool full the move is still
+/// applied and marked, only without a snapshot, so such a flood costs rollback and never the
+/// mark (`move_no_snapshot` counts it); it needs a live confirmed track and a gap of 10 s or more
+/// on it for every slot taken, and it cannot grow memory, which is allocated once.
+pub const CONFIRM_POOL: usize = 64;
 /// An altitude innovation above this many standard deviations is not applied.
 pub const ALT_GATE_SIGMAS: f64 = 10.0;
 /// This many rejections in a row re-initialise the filter at the new report (the track the
@@ -185,6 +226,11 @@ pub const COAST_MAX_R95_M: f64 = 926.0;
 /// An update after more than this long, ns, since the track's previous applied update carries
 /// `O_REACQUIRED` (15 s: more than five expected intervals, past a coast).
 pub const REACQUIRE_GAP_NS: i64 = 15 * NS_PER_S;
+/// The 95% radius, metres, a row of a track with an unconfirmed move gets when its widening
+/// cannot be computed (RT-239). 500 km: larger than any sector this tracker serves, and finite
+/// through every consumer (a covariance of the largest `f32` made the fusion window width
+/// saturate a counter and overflow its sum).
+pub const FAIL_CLOSED_R95_M: f64 = 500_000.0;
 /// The 95% quantile of the chi-squared distribution with two degrees of freedom.
 pub const CHI2_2_95: f64 = 5.991_464_547_107_979;
 /// Capacity: simultaneous tracks. ERAM states 1,900 per centre; 4,096 is two times that.

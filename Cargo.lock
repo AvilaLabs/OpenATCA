@@ -9,6 +9,7 @@ dependencies = [
  "oa-feed",
  "oa-json",
  "oa-sealed",
+ "oa-sha256",
  "oa-tar",
  "oa-zip",
 ]
@@ -38,6 +39,7 @@ version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-json",
+ "oa-sealed",
 ]
 
 [[package]]
@@ -92,6 +94,7 @@ dependencies = [
  "oa-bench",
  "oa-ca",
  "oa-encounter-run",
+ "oa-feed",
  "oa-safety",
  "oa-sealed",
  "oa-sha256",
@@ -124,6 +127,7 @@ version = "0.0.1"
 name = "oa-deflate"
 version = "0.0.1"
 dependencies = [
+ "oa-sealed",
  "oa-zip",
 ]
 
@@ -144,6 +148,7 @@ dependencies = [
 name = "oa-dof"
 version = "0.0.1"
 dependencies = [
+ "oa-sealed",
  "oa-zip",
 ]
 
@@ -166,6 +171,7 @@ dependencies = [
  "oa-feed",
  "oa-flight",
  "oa-flight-sfdps",
+ "oa-math",
  "oa-nasr",
  "oa-sealed",
  "oa-sha256",
@@ -220,6 +226,7 @@ version = "0.0.1"
 dependencies = [
  "oa-j2k",
  "oa-math",
+ "oa-sealed",
 ]
 
 [[package]]
@@ -233,6 +240,9 @@ version = "0.0.1"
 [[package]]
 name = "oa-json"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+]
 
 [[package]]
 name = "oa-math"
@@ -262,6 +272,7 @@ name = "oa-nasr"
 version = "0.0.1"
 dependencies = [
  "oa-csv",
+ "oa-sealed",
 ]
 
 [[package]]
@@ -270,6 +281,7 @@ version = "0.0.1"
 dependencies = [
  "oa-airspace",
  "oa-geo",
+ "oa-sealed",
  "oa-xml",
 ]
 
@@ -351,6 +363,9 @@ dependencies = [
 [[package]]
 name = "oa-sha256"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+]
 
 [[package]]
 name = "oa-shadow"
@@ -358,6 +373,7 @@ version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-bench",
+ "oa-feed",
  "oa-math",
  "oa-replay",
  "oa-sealed",
@@ -417,6 +433,7 @@ name = "oa-tbfm"
 version = "0.0.1"
 dependencies = [
  "oa-airspace",
+ "oa-sealed",
  "oa-xml",
 ]
 
@@ -425,6 +442,7 @@ name = "oa-tfms"
 version = "0.0.1"
 dependencies = [
  "oa-fixm",
+ "oa-sealed",
  "oa-xml",
 ]
 
@@ -435,6 +453,7 @@ dependencies = [
  "oa-deflate",
  "oa-dof",
  "oa-nasr",
+ "oa-sealed",
  "oa-zip",
 ]
 
@@ -485,6 +504,9 @@ dependencies = [
 [[package]]
 name = "oa-xml"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+]
 
 [[package]]
 name = "oa-zip"

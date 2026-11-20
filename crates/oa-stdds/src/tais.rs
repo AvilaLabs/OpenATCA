@@ -35,7 +35,7 @@
 //! counted, not an error.
 
 use crate::kind::{children, in_message_ns, name_of, Kind};
-use crate::walk::{elem_offset, text_index, walk, Got, Sink, Slot, Spec, Val};
+use crate::walk::{elem_offset, prescan, text_index, walk, Got, Sink, Slot, Spec, Val};
 use crate::{FieldError, FieldErrorKind, Limits, Stats, StdError};
 use oa_xml::{Doc, ElemIx};
 
@@ -450,6 +450,28 @@ pub fn parse_tais(
         return Err(e);
     }
     let tx = text_index(doc);
+    // The first step, before any count: a message with a record timed in the sealed window is
+    // dropped whole (OA-SEAL-014).
+    let gone = prescan(
+        doc,
+        &tx,
+        limits.drop_window,
+        b"record",
+        // Both observation times of a record: the track's and the SAFA receipt time (the
+        // STARS timestamp is a time of day, not a time).
+        &[&[b"track", b"mrtTime"], &[b"recSAFAReceiptTime"]],
+    );
+    if gone > 0 {
+        stats.sealed_window_dropped += gone;
+        return Ok(TaisMessage {
+            src: [0; 8],
+            src_present: false,
+            records: Vec::new(),
+            errors: Vec::new(),
+            errors_dropped: 0,
+            unknown_elements: 0,
+        });
+    }
     let root = ElemIx(0);
     let mut msg = TaisMessage {
         src: [0; 8],

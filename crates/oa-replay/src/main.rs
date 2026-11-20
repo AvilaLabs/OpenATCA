@@ -15,7 +15,7 @@ use std::time::Instant;
 use oa_replay::cli::{parse_args, USAGE};
 use oa_replay::report::{drain_checkpoint_lines, write_failure_message, write_summary};
 use oa_replay::{
-    frames_total, list_recordings, new_pipeline, run_streams_with, spec_from_paths, Pipeline,
+    frames_total, list_recordings, new_pipeline, run_streams_counted, spec_from_paths, Pipeline,
     NS_PER_S,
 };
 
@@ -35,6 +35,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
+    // Printed when `main` returns: on every exit once reading has started, an error included.
+    let mut drops = oa_sealed::DropReport::new();
     let mut specs = Vec::with_capacity(cmd.inputs.len());
     for i in &cmd.inputs {
         let paths = if i.dir {
@@ -88,7 +90,13 @@ fn main() -> ExitCode {
         }
         Ok(())
     };
-    let report = match run_streams_with(&mut p, specs, cmd.chunk, &mut hook) {
+    let mut sealed_frames = 0u64;
+    let ran = run_streams_counted(&mut p, specs, cmd.chunk, &mut hook, &mut sealed_frames);
+    // Frames by receive time, plus SFDPS, TBFM and TFMS rows by their own time, added before the
+    // result is looked at, so the line is printed on every exit after this point.
+    drops.add(sealed_frames);
+    drops.add(p.sealed_window_dropped);
+    let report = match ran {
         Ok(r) => r,
         Err(e) => {
             return match write_err {
@@ -118,6 +126,7 @@ fn main() -> ExitCode {
 
 /// A `kB` figure from `/proc/self/status` (0 where there is none): resident or peak memory.
 fn status_kb(key: &str) -> u64 {
+    // seal-allow: /proc, not an input
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {

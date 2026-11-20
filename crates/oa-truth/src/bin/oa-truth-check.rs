@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use oa_adsb::reports_len;
 use oa_sha256::{to_hex, Sha256};
-use oa_truth::clip::{read_clip, MAX_CLIP_BYTES, MAX_CLIP_ROWS};
+use oa_truth::clip::{read_clip_tallied, MAX_CLIP_BYTES, MAX_CLIP_ROWS};
 use oa_truth::{
     build_truth, truth_hash_into, Dist, Fraction, LooStats, TruthConfig, TruthStats,
     DEFAULT_CONFIG, REMOVE_NAMES, SPLIT_NAMES,
@@ -112,7 +112,7 @@ fn print_stats(s: &TruthStats, secs: f64) {
     println!("build time {secs:.2} s");
 }
 
-fn run() -> Result<(), String> {
+fn run(drops: &mut oa_sealed::DropReport) -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut cfg: TruthConfig = DEFAULT_CONFIG;
     let mut path: Option<String> = None;
@@ -135,8 +135,10 @@ fn run() -> Result<(), String> {
         }
     }
     let path = path.ok_or(usage())?;
-    let (reports, bad, dropped) =
-        read_clip(&path, MAX_CLIP_BYTES, MAX_CLIP_ROWS).map_err(|e| e.to_string())?;
+    let mut sealed = 0u64;
+    let read = read_clip_tallied(&path, MAX_CLIP_BYTES, MAX_CLIP_ROWS, &mut sealed);
+    drops.add(sealed);
+    let (reports, bad, dropped) = read.map_err(|e| e.to_string())?;
     println!(
         "clip {path}: {} reports decoded, {bad} frames refused",
         reports_len(&reports)
@@ -157,7 +159,9 @@ fn run() -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    // Printed (on standard output, as before) when `main` returns, an error included.
+    let mut drops = oa_sealed::DropReport::to_stdout();
+    match run(&mut drops) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("oa-truth-check: {e}");

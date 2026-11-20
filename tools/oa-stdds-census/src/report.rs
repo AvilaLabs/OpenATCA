@@ -550,6 +550,11 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
     );
     let _ = writeln!(
         o,
+        "sealed-window rows dropped: {}",
+        rs.sealed_window_dropped
+    );
+    let _ = writeln!(
+        o,
         "TAIS messages {} records {}; other-kind messages {}",
         rs.tais_messages, rs.tais_records, rs.other_messages
     );

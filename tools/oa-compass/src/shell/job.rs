@@ -60,9 +60,16 @@ struct Done {
     systems: Vec<Finished>,
     adsb: Option<AdsbFinished>,
     clip: Option<ClipInfo>,
+    /// Frames and records of the ERAM (SFDPS) input left out for a sealed window (OA-SEAL-014).
+    eram_sealed: u64,
 }
 
 impl Done {
+    /// The rows and frames dropped for a sealed window over every input, each counted once.
+    fn sealed_window_dropped(&self) -> u64 {
+        self.eram_sealed + self.clip.as_ref().map_or(0, |c| c.sealed_window_dropped)
+    }
+
     fn abort(self) {
         for f in self.systems {
             f.abort();
@@ -81,6 +88,29 @@ pub fn run_job(
     job: Job,
     hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
     log: &mut dyn FnMut(String),
+) -> Result<Vec<String>, ExportError> {
+    run_job_counted(job, hook, log).map(|(lines, _)| lines)
+}
+
+/// [`run_job`], also returning the count of rows and frames dropped because their time is in a
+/// sealed window, summed over the inputs, each counted once (OA-SEAL-014).
+pub fn run_job_counted(
+    job: Job,
+    hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
+    log: &mut dyn FnMut(String),
+) -> Result<(Vec<String>, u64), ExportError> {
+    let mut sealed = 0u64;
+    let lines = run_job_tallied(job, hook, log, &mut sealed)?;
+    Ok((lines, sealed))
+}
+
+/// [`run_job_counted`], with the rows dropped in a sealed window put in `sealed` on every exit
+/// once the inputs have been read, a failed export included.
+pub fn run_job_tallied(
+    job: Job,
+    hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
+    log: &mut dyn FnMut(String),
+    sealed: &mut u64,
 ) -> Result<Vec<String>, ExportError> {
     let t0 = Instant::now();
     let out = job.layout.out.clone();
@@ -102,10 +132,12 @@ pub fn run_job(
     let has_adsb = job.adsb.is_some();
     let result = match export_all(&job, &mut done, t0, log) {
         Ok(()) => {
+            *sealed = done.sealed_window_dropped();
             let mode = has_adsb.then_some(job.mode);
             commit_staged(&job, done, mode, hook, &mut created, t0)
         }
         Err(e) => {
+            *sealed = done.sealed_window_dropped();
             done.abort();
             Err(e)
         }
@@ -127,6 +159,7 @@ pub fn run_job(
 fn remove_run_dirs(out: &Path, layout: &Layout, created: &[PathBuf], run_dirs: &[PathBuf]) {
     remove_created(created);
     if layout.split {
+        // seal-allow: the output directory; only subdirectories of the tool's own run are removed
         if let Ok(rd) = fs::read_dir(out) {
             for e in rd.filter_map(Result::ok) {
                 if e.path().is_dir() {
@@ -326,6 +359,7 @@ fn export_all(
         let mut ex = SystemExport::new("ERAM", "eram.ast", ERAM_SOURCE, layout.clone());
         ex.set_source_offset(job.self_test_eram_offset_e7);
         let refs = job.adsb.is_some().then_some(positions.as_slice());
+        let mut eram_sealed = 0u64;
         let (info, inputs) = match src {
             EramSource::Dir(dir) => {
                 let loaded = load_with(
@@ -347,6 +381,7 @@ fn export_all(
                         return Err(e);
                     }
                 };
+                eram_sealed = loaded.sealed_window_dropped;
                 let inputs: Vec<String> = loaded
                     .inputs
                     .iter()
@@ -373,9 +408,15 @@ fn export_all(
         for (l, v) in eram_counts(&info) {
             ex.counts.push((l, v));
         }
+        ex.counts
+            .push(("sealed-window rows dropped".to_string(), eram_sealed));
+        done.eram_sealed = eram_sealed;
         let mut f = ex.finish()?;
         f.report.inputs = inputs;
         f.report.details = eram_details(&info);
+        f.report.details.push(
+            "sealed-window rows dropped (ERAM): SFDPS frames left out by their receive time and records left out by their own time (message timestamp or position time) because they are in a sealed window".to_string(),
+        );
         done.systems.push(f);
     }
     Ok(())
@@ -388,6 +429,10 @@ fn openatca_counts(
     cinfo: &ClipInfo,
 ) -> Vec<(String, u64)> {
     let mut v: Vec<(String, u64)> = vec![
+        (
+            "sealed-window rows dropped".into(),
+            cinfo.sealed_window_dropped,
+        ),
         (
             "ADS-B reports offered to the tracker's adapter".into(),
             cinfo.offered,

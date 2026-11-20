@@ -35,19 +35,10 @@ fn awc_dir() -> Option<PathBuf> {
 /// the parser, so the test fails once, loudly, until the parser handles it. A point hazard whose
 /// `rawSigmet` states another position is also a failure.
 fn hazard_records_are_accounted_for(dir: &Path, s: &summary::Summary) {
-    let mut files = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_dir() {
-                stack.push(p);
-            } else {
-                files.push(p);
-            }
-        }
-    }
-    files.sort();
+    // Sealed directories are skipped and counted, never descended into (OA-SEAL-012).
+    let walk = oa_sealed::walk_unsealed(dir).unwrap();
+    eprintln!("sealed entries skipped: {}", walk.skipped);
+    let files = walk.files;
     for p in &files {
         let name = p.file_name().unwrap().to_string_lossy().into_owned();
         let src = if name.contains("airsigmet") {
@@ -59,7 +50,7 @@ fn hazard_records_are_accounted_for(dir: &Path, s: &summary::Summary) {
         } else {
             continue;
         };
-        for line in describe_hazard_refusals(&std::fs::read(p).unwrap(), src).unwrap() {
+        for line in describe_hazard_refusals(&oa_sealed::read(p).unwrap(), src).unwrap() {
             eprintln!("REFUSED {name}: {line}");
         }
     }

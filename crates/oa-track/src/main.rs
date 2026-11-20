@@ -35,7 +35,7 @@ use std::time::Instant;
 
 use oa_adsb::{decode_payload_lenient, reports_len, Reports};
 use oa_bench::adsb_truth;
-use oa_bench::input::{for_each_adsb_frame, load_adsb};
+use oa_bench::input::{file_opener, for_each_adsb_frame, load_adsb_counted};
 use oa_bench::report::{code_version, render_csv, render_text, Header};
 use oa_bench::run::find;
 use oa_bench::stats::Stats;
@@ -212,6 +212,7 @@ impl Clock for SystemClock {
 
 /// `(VmRSS, VmHWM)` of this process in kB, from `/proc/self/status` (None where it is absent).
 fn rss_kb() -> Option<(u64, u64)> {
+    // seal-allow: /proc, not an input
     let s = fs::read_to_string("/proc/self/status").ok()?;
     let get = |k: &str| {
         s.lines()
@@ -273,6 +274,9 @@ fn replay_timed(
     cfg: &TrackerConfig,
     dir: &Path,
 ) -> Result<(LatencyLog, SpilledRun, f64, usize), String> {
+    // `meas` was built from rows the clip reader had already filtered (a frame or row in a sealed
+    // window is dropped there); the frames read here pass the same filter, and a row is only ever
+    // looked up by the key of a measurement that is in `meas`, so nothing sealed is replayed.
     let mut by_key: BTreeMap<(u32, i64), VecDeque<usize>> = BTreeMap::new();
     for (i, m) in meas.iter().enumerate() {
         by_key.entry((m.addr, m.toa_ns)).or_default().push_back(i);
@@ -517,6 +521,40 @@ fn tracker_section(
     for (n, c) in REFUSE_NAMES.iter().zip(s.refused.iter()) {
         let _ = writeln!(o, "    refused {n}: {c}");
     }
+    let outcomes = s.moves_confirmed
+        + s.moves_rolled_back
+        + s.moves_undecided
+        + s.moves_abandoned_ended
+        + s.moves_abandoned_restarted
+        + s.moves_abandoned_resync
+        + s.moves_abandoned_demoted;
+    let _ = writeln!(
+        o,
+        "  large moves: unconfirmed {} (of which late re-filters {}), confirmed {}, rolled back {}, undecided {}, abandoned: ended {}, restarted {}, resync {}, demoted {}; every move ends once (all tracks are flushed at the end): {}",
+        s.moves_unconfirmed,
+        s.moves_late,
+        s.moves_confirmed,
+        s.moves_rolled_back,
+        s.moves_undecided,
+        s.moves_abandoned_ended,
+        s.moves_abandoned_restarted,
+        s.moves_abandoned_resync,
+        s.moves_abandoned_demoted,
+        if outcomes == s.moves_unconfirmed { "yes" } else { "NO" }
+    );
+    let _ = writeln!(
+        o,
+        "  large moves: peak at once {}, deciding reports not applied {}, rollback lost to a late re-filter {}, no snapshot (pool full) {}, widening failed {}, internal refusals {}, first old-path reports (votes) {}, old path unpredictable {}, resyncs marked {}",
+        s.moves_peak_active,
+        s.moves_decision_rejected,
+        s.moves_rollback_lost_late,
+        s.move_no_snapshot,
+        s.move_widen_failed,
+        s.moves_internal_refused,
+        s.moves_old_path_votes,
+        s.moves_old_path_unpredictable,
+        s.moves_resync_marked
+    );
     let _ = writeln!(
         o,
         "  tracks: started {}, confirmed {}, ended: {}; tentative restarted for implausible second report {}, for window passed {}",
@@ -757,6 +795,7 @@ struct CanonOut {
 /// 10 ms each, as the tick rate cannot be read without `unsafe`; the whole process) where the first
 /// is absent.
 fn cpu_ns() -> Option<(u64, &'static str)> {
+    // seal-allow: /proc, not an input
     if let Some(v) = fs::read_to_string("/proc/self/schedstat")
         .ok()
         .and_then(|s| s.split_whitespace().next()?.parse::<u64>().ok())
@@ -764,6 +803,7 @@ fn cpu_ns() -> Option<(u64, &'static str)> {
     {
         return Some((v, "/proc/self/schedstat (main thread)"));
     }
+    // seal-allow: /proc, not an input
     let s = fs::read_to_string("/proc/self/stat").ok()?;
     let rest = s.get(s.rfind(')')? + 2..)?;
     let f: Vec<&str> = rest.split_whitespace().collect();
@@ -800,7 +840,13 @@ fn run_realtime_inner(
     let mut phases = Phases::default();
     phases.mark("start");
     let (load_wall, cpu_start) = (Instant::now(), cpu_ns());
-    let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
+    // The only read of the clip: its own count, printed once when this function returns, an
+    // error included.
+    let mut drops = oa_sealed::DropReport::new();
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(clip_path, &file_opener(), &mut clip_sealed);
+    drops.add(clip_sealed);
+    let clip = clip.map_err(|e| e.to_string())?;
     let (clip_reports, clip_bad) = (reports_len(&clip.reports), clip.bad_frames);
     if clip_reports == 0 {
         return Err(format!(
@@ -1119,7 +1165,14 @@ fn run(
 ) -> Result<(), String> {
     let mut phases = Phases::default();
     phases.mark("start");
-    let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
+    // The count of the clip read, printed once when this function returns, an error included (the
+    // latency replay below reads the same file again and drops the same frames; they are not
+    // counted twice).
+    let mut drops = oa_sealed::DropReport::new();
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(clip_path, &file_opener(), &mut clip_sealed);
+    drops.add(clip_sealed);
+    let clip = clip.map_err(|e| e.to_string())?;
     phases.mark("clip decoded (all reports in memory)");
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)

@@ -428,7 +428,7 @@ fn text_longer_than_the_limit_or_empty_is_a_field_error_and_takes_no_space() {
     let mut p = parser();
     let mut d = new_decoder(Limits {
         max_text_len: 10,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut out = small();
     let mut s = default_stats();
@@ -724,7 +724,7 @@ fn a_bad_polygon_is_a_field_error_on_the_row_and_none_is_kept() {
     let mut p = parser();
     let mut d = new_decoder(Limits {
         max_poly_vertices: 4,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut out = small();
     let mut s = default_stats();
@@ -1144,7 +1144,7 @@ fn reaching_a_capacity_is_a_reported_refusal_with_nothing_kept() {
     // A document that has too many elements for the decoder.
     let mut small_dec = new_decoder(Limits {
         max_elements: 10,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut out = small();
     let e = decode_bytes(&mut p, &mut small_dec, xml.as_bytes(), &mut out, &mut st).unwrap_err();
@@ -1429,4 +1429,159 @@ fn a_referred_number_and_year_without_a_series_is_a_local_format_reference() {
         "<event:number>42</event:number><event:referredYear>2029</event:referredYear>",
     );
     assert_eq!(ok(&xml).0.errors[0], bit(Field::Ref));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_notam_issued_or_cancelled_in_the_drop_window_is_dropped_whole_and_every_counter_is_as_for_an_empty_run(
+) {
+    // 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, the sealed window, in Unix ms.
+    let w = oa_sealed::DropWindow::new(1_795_132_800_000, 1_795_393_020_000);
+    let issued = "<event:issued>2030-03-05T09:00:00.000Z</event:issued>";
+    let in_issued = |t: &str| format!("<event:issued>{t}</event:issued>");
+    let base = rep(
+        &msg(&[&airport()]),
+        "</event:NOTAM>",
+        "<event:zzz>1</event:zzz></event:NOTAM>",
+    );
+    let bad = rep(
+        &base,
+        "<event:radius>5</event:radius>",
+        "<event:radius>x</event:radius>",
+    );
+    // A cancel time in the window: the element is added to the NOTAM.
+    let cancelled = rep(
+        &base,
+        "</event:NOTAM>",
+        "</event:NOTAM><fnse:canceled>2026-11-22T00:00:00.000Z</fnse:canceled>",
+    );
+    // An invalid field comes before the issue time in the document, and a field after it.
+    let early = rep(&bad, issued, &in_issued("2026-11-21T00:00:00.000Z"));
+    let docs = [
+        rep(&base, issued, &in_issued("2026-11-21T00:00:00.000Z")),
+        early,
+        rep(&cancelled, issued, issued),
+    ];
+    let mut p = parser();
+    for xml in docs {
+        let mut d = new_decoder(Limits::new(w));
+        let mut out = small();
+        let mut stats = default_stats();
+        let o = decode_bytes(&mut p, &mut d, xml.as_bytes(), &mut out, &mut stats).unwrap();
+        assert!(o.sealed_dropped);
+        assert_eq!(
+            o,
+            Outcome {
+                row: 0,
+                field_errors: 0,
+                unknown_elements: 0,
+                unknown_attributes: 0,
+                sealed_dropped: true,
+            }
+        );
+        assert_eq!(out.len, 0);
+        assert_eq!(mark(&out), mark(&small()));
+        assert_eq!(
+            stats,
+            Stats {
+                sealed_window_dropped: 1,
+                ..default_stats()
+            }
+        );
+    }
+    // Outside it (the end is excluded) the NOTAM is kept and its unknown element counted.
+    let mut d = new_decoder(Limits::new(w));
+    let mut out = small();
+    let mut stats = default_stats();
+    let xml = rep(&base, issued, &in_issued("2026-11-23T00:17:00.000Z"));
+    let o = decode_bytes(&mut p, &mut d, xml.as_bytes(), &mut out, &mut stats).unwrap();
+    assert!(!o.sealed_dropped);
+    assert_eq!((out.len, stats.docs, stats.rows), (1, 1, 1));
+    assert_eq!(stats.unknown_elements, 1);
+    // A document refused whole has no known time and is counted as refused.
+    let r = decode_bytes(&mut p, &mut d, b"<notaixm/>", &mut out, &mut stats);
+    assert!(r.is_err());
+    assert_eq!(stats.sealed_window_dropped, 0);
+}
+
+/// Decodes `xml` with `w` and returns the outcome, the rows kept and the stats.
+fn decode_with_window(xml: &str, w: oa_sealed::DropWindow) -> (Outcome, usize, Stats) {
+    let mut p = parser();
+    let mut d = new_decoder(Limits::new(w));
+    let mut out = small();
+    let mut stats = default_stats();
+    let o = decode_bytes(&mut p, &mut d, xml.as_bytes(), &mut out, &mut stats).unwrap();
+    (o, out.len, stats)
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_drops_the_window() {
+    let issued = "<event:issued>2030-03-05T09:00:00.000Z</event:issued>";
+    let base = msg(&[&airport()]);
+    // All time (the closed failure of the list).
+    let (o, rows, s) = decode_with_window(&base, oa_sealed::DropWindow::all_time());
+    assert!(o.sealed_dropped);
+    assert_eq!(rows, 0);
+    assert_eq!(
+        s,
+        Stats {
+            sealed_window_dropped: 1,
+            ..default_stats()
+        }
+    );
+    // The production list.
+    let w = oa_sealed::DropWindow::sealed();
+    let inside = rep(
+        &base,
+        issued,
+        "<event:issued>2026-11-21T00:00:00.000Z</event:issued>",
+    );
+    assert!(decode_with_window(&inside, w).0.sealed_dropped);
+    let (o, rows, _) = decode_with_window(&base, w);
+    assert_eq!((o.sealed_dropped, rows), (false, 1));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn issue_and_cancel_times_are_window_keys_in_any_encoding_and_validity_times_are_not() {
+    let w = oa_sealed::DropWindow::new(1_795_132_800_000, 1_795_393_020_000);
+    let issued = "<event:issued>2030-03-05T09:00:00.000Z</event:issued>";
+    let base = msg(&[&airport()]);
+    let with = |t: &str| rep(&base, issued, &format!("<event:issued>{t}</event:issued>"));
+    // Entity-encoded and padded with whitespace.
+    for t in [
+        "2026-11-21T00:00:00.000&#90;",
+        " 2026-11-21T00:00:00.000Z\n",
+    ] {
+        assert!(decode_with_window(&with(t), w).0.sealed_dropped, "{t:?}");
+    }
+    // A text split by a comment is not a value the decoder reads (it is a bad field), so the
+    // scan, which reads with the decoder's own text reader, does not read it either.
+    assert!(
+        !decode_with_window(&with("2026-11-21T00:00:<!--x-->00.000Z"), w)
+            .0
+            .sealed_dropped
+    );
+    // A repeated issue element: both are read, so the one in the window is found.
+    let dup = rep(
+        &base,
+        issued,
+        &format!("{issued}<event:issued>2026-11-21T00:00:00.000Z</event:issued>"),
+    );
+    assert!(decode_with_window(&dup, w).0.sealed_dropped);
+    // A NOTAM with only a cancel time in the window, its issue time outside it.
+    let canc = rep(
+        &base,
+        "</event:NOTAM>",
+        "</event:NOTAM><fnse:canceled>2026-11-22T00:00:00.000Z</fnse:canceled>",
+    );
+    assert!(decode_with_window(&canc, w).0.sealed_dropped);
+    // The same cancel time outside the window: kept.
+    let canc_out = rep(
+        &base,
+        "</event:NOTAM>",
+        "</event:NOTAM><fnse:canceled>2030-03-06T00:00:00.000Z</fnse:canceled>",
+    );
+    assert!(!decode_with_window(&canc_out, w).0.sealed_dropped);
 }

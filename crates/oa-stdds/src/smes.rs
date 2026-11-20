@@ -16,7 +16,7 @@
 //! half is refused as an incomplete pair. An element with `r="1"` is invalidated by the sender.
 
 use crate::kind::{children, in_message_ns, name_of, Kind};
-use crate::walk::{elem_offset, text_index, walk, Got, Sink, Slot, Spec, Val};
+use crate::walk::{elem_offset, prescan, text_index, walk, Got, Sink, Slot, Spec, Val};
 use crate::{FieldError, FieldErrorKind, Limits, Stats, StdError};
 use oa_xml::{Doc, ElemIx};
 
@@ -266,6 +266,26 @@ pub fn parse_smes(
         return Err(e);
     }
     let tx = text_index(doc);
+    // The first step, before any count: a message with a report timed in the sealed window is
+    // dropped whole (OA-SEAL-014).
+    let gone = prescan(
+        doc,
+        &tx,
+        limits.drop_window,
+        b"positionReport",
+        &[&[b"time"]],
+    );
+    if gone > 0 {
+        stats.sealed_window_dropped += gone;
+        return Ok(SmesMessage {
+            airport: [0; 8],
+            airport_present: false,
+            records: Vec::new(),
+            errors: Vec::new(),
+            errors_dropped: 0,
+            unknown_elements: 0,
+        });
+    }
     let root = ElemIx(0);
     let mut msg = SmesMessage {
         airport: [0; 8],

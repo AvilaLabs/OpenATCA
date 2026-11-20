@@ -161,6 +161,35 @@ Injected attacks for the exit test: ghost aircraft, gradual position drift, repl
 aircraft's past track, and address duplication. Detection and false positives are reported as a
 confusion matrix against the published bars (≥95% detection; false positives ≤1e-3).
 
+Limit of the position gate (red-team finding RT-239). The gate widens with the time since the
+track's last update, so after a gap a single forged report of any plausible size passes it. The
+tracker therefore applies a report that passes the gate but lies more than 926 m from the predicted
+position at once, as before, but keeps the track's state from before it (a pool of 64 snapshots,
+2.2 kB each), marks every row and every forecast of the track `O_MOVE_UNCONFIRMED` with a 95%
+radius wide enough to cover the old path, and lets the track's next report decide, if that report
+is itself applied: it agrees with the moved track (confirmed), with the old path (the first such
+report is only a vote and the second, 0.5 s or more after it, rolls back to the snapshot with
+the report applied to that, so that one stray plot or a forger's replay of the old place cannot
+undo a genuine relocation), or with neither or comes after four expected report
+intervals (5 s at least), in which case the move stands. A report the gate refuses decides
+nothing and the mark stays. Every move ends in exactly one counted outcome (confirmed, rolled
+back, undecided, or abandoned because the track ended, restarted, resynchronised or was demoted),
+and the report prints that the count balances (OA-TRK-347 to OA-TRK-351). It protects against one
+forged or faulty report. It does not protect against a forger who keeps the false place up, and
+the ways to an unmarked false track are exactly these, each counted: a second forged report at
+least 0.5 s later that agrees with the moved track and not the old path confirms the move
+(`moves_confirmed`); a report in the gate that agrees with neither path, or comes after the
+window, leaves the move standing (`moves_undecided`); and a run of consistent reports the gate
+refuses re-synchronises the filter onto them (`moves_abandoned_resync`; the rows after it stay marked
+and uncertain until the move's window would have ended, `moves_resync_marked`). Only a second source
+(radar or multilateration, above) can refute any of them.
+A tentative track is not covered (its second report has no velocity and moves far from its
+prediction as a matter of course). With the pool full (a forger would need a confirmed track, a
+gap and a gate-passing report for every slot) the move is still marked, only without a
+rollback (`move_no_snapshot`). The flag only helps if the consumer shows it: a display that
+draws a marked row like any other gives no protection, and a display follow-up to show it (and
+the wider radius) is open. The pool size (64, 141 kB; the most moves unconfirmed at once on the two development days was 7) and what a forger can force by filling it are analysed beside `CONFIRM_POOL` in `crates/oa-track/src/params.rs`.
+
 ## 5. Flight plan correlation
 
 Track to plan by address (the plan's `aircraftAddress`, or the `ADSB_02M_52B` value SFDPS

@@ -247,6 +247,12 @@ pub fn track_and_alert(
 /// The whole run: reads the clip and the configuration, writes `alerts.csv`,
 /// `altitude_lost.csv` and `summary.txt` under `args.out`, and returns the summary text.
 pub fn run(args: &Args) -> Result<String, String> {
+    run_counted(args, &mut 0)
+}
+
+/// [`run`], also giving `sealed` the count of clip rows left out for a sealed window (set as soon
+/// as the clip is read, so an error after that still carries it).
+pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     // Every path is checked before anything is opened or created, for a caller of the library too.
     for p in [&args.adsb, &args.config, &args.out] {
         refuse_sealed(Sealed::production(), p)?;
@@ -262,6 +268,7 @@ pub fn run(args: &Args) -> Result<String, String> {
         .map_err(|_| format!("{}: not UTF-8 text", args.config.display()))?;
     let set = parse_config(&cfg_text).map_err(|e| format!("{}: {e}", args.config.display()))?;
     let clip = load_adsb(&args.adsb).map_err(|e| e.to_string())?;
+    *sealed = clip.sealed_window_dropped;
     let clip_sha = clip.hash.sha256.clone();
     let (reports, scope) = if args.scorer_half {
         let (a, b, _) = split_reports(&clip.reports);
@@ -310,6 +317,7 @@ pub fn run(args: &Args) -> Result<String, String> {
         final_net: &rec.final_net,
         clip_name: &name_of(&args.adsb),
         clip_sha256: &clip_sha,
+        sealed_window_dropped: *sealed,
         config_name: &name_of(&args.config),
         config_sha256: &to_hex(&sha256(&cfg_bytes)),
         scope: &scope,

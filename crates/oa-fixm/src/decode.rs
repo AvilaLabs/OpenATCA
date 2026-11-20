@@ -584,6 +584,42 @@ fn is_xmlns(doc: &Doc<'_>, a: usize) -> bool {
         || name_bytes(doc.input, prefix) == b"xmlns"
 }
 
+/// Reads the `timestamp` and `positionTime` of every element of the document that has one, and
+/// the `time` of every `actual` element, directly from the parsed tree and whatever else is valid in it. If any is in `window`,
+/// returns how many messages the document has (all are dropped, at least 1); otherwise 0. A time
+/// that cannot be read is not in the window (the frame's receive time gates it).
+pub fn prescan(doc: &Doc<'_>, window: oa_sealed::DropWindow) -> u32 {
+    if window.span().is_none() {
+        return 0;
+    }
+    let mut hit = false;
+    for i in 1..doc.elem_name.len() {
+        // The message time, the position time and the time of an actual event (the `time` of an
+        // `actual` element, the departure actual): an event a message reports after the window
+        // can have happened inside it.
+        let actual =
+            name_bytes(doc.input, doc.elem_name.get(i).copied().unwrap_or_default()) == b"actual";
+        let times: &[&[u8]] = if actual {
+            &[b"timestamp", b"positionTime", b"time"]
+        } else {
+            &[b"timestamp", b"positionTime"]
+        };
+        for name in times {
+            let mut buf = [0u8; 64];
+            if let Raw::Val(v) = attr(doc, i, name, &mut buf) {
+                hit |= parse_iso_ms(v).is_some_and(|t| window.contains(t));
+            }
+        }
+    }
+    if !hit {
+        return 0;
+    }
+    let messages = (1..doc.elem_name.len())
+        .filter(|&i| doc.elem_parent.get(i).is_some_and(|p| p.0 == 0) && is_message_elem(doc, i))
+        .count();
+    u32::try_from(messages).unwrap_or(u32::MAX).max(1)
+}
+
 fn attr_range(doc: &Doc<'_>, i: usize) -> core::ops::Range<usize> {
     let first = doc.elem_first_attr.get(i).map_or(0, |a| a.0 as usize);
     let count = doc.elem_attr_count.get(i).map_or(0, |&c| c as usize);
@@ -670,6 +706,7 @@ impl Decoder {
             elem_text: vec![NO_TEXT; n],
             stats: Stats {
                 docs: 0,
+                sealed_window_dropped: 0,
                 unsupported_roots: 0,
                 messages: 0,
                 rows: 0,
@@ -726,10 +763,24 @@ impl Decoder {
         out: &mut Events,
         prefix: bool,
     ) -> Result<Summary, FixmError> {
-        self.stats.docs = self.stats.docs.saturating_add(1);
         if doc.input.len() != input.len() || doc.input.as_ptr() != input.as_ptr() {
             return Err(FixmError::InputMismatch);
         }
+        // The first step, before any count, row or table is touched (and before any refusal an
+        // in-window message could cause): a document with a message timed in the sealed window
+        // is dropped whole.
+        let gone = prescan(doc, self.limits.drop_window);
+        if gone > 0 {
+            self.stats.sealed_window_dropped = self
+                .stats
+                .sealed_window_dropped
+                .saturating_add(u64::from(gone));
+            return Ok(Summary {
+                sealed_window_dropped: gone,
+                ..Summary::default()
+            });
+        }
+        self.stats.docs = self.stats.docs.saturating_add(1);
         let n = doc.elem_name.len();
         if n > self.limits.max_elements {
             return Err(FixmError::TooManyElements {

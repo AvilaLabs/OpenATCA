@@ -25,9 +25,10 @@ mod decode;
 mod known;
 mod scalar;
 
-pub use decode::Decoder;
+pub use decode::{prescan, Decoder};
 pub use scalar::{parse_beacon, parse_hex24, parse_iso_ms, parse_scaled, parse_uuid};
 
+use oa_sealed::DropWindow;
 use std::fmt;
 
 /// The fields a row can carry, in bit order of [`Events::present`] and [`Events::errors`].
@@ -270,14 +271,23 @@ pub struct Limits {
     pub max_route_len: usize,
     /// Rows of the unknown-path table; paths beyond it are counted in `unknown_overflow`.
     pub max_unknown_paths: usize,
+    /// A message whose own timestamp, or position time, is in this window is dropped whole
+    /// before any count is updated: it is in no row, no `messages`, `rejected`, field-error or
+    /// unknown count (a document with nothing else is not in `docs` either), and it is counted
+    /// in [`Stats::sealed_window_dropped`]. A message refused whole with no known time is counted
+    /// as refused. Required: there is no `Default`, so a caller cannot forget it.
+    pub drop_window: DropWindow,
 }
 
-impl Default for Limits {
-    fn default() -> Limits {
+impl Limits {
+    /// The default bounds, dropping messages timed in `window`. A tool passes
+    /// [`DropWindow::sealed`]; tests and fuzz targets pass [`DropWindow::empty_for_tests_and_fuzz`].
+    pub const fn new(window: DropWindow) -> Limits {
         Limits {
             max_elements: 50_000,
             max_route_len: 2048,
             max_unknown_paths: 256,
+            drop_window: window,
         }
     }
 }
@@ -287,7 +297,7 @@ pub const MAX_PATH_TEXT: usize = 160;
 
 /// One unknown element or attribute path and how often it was seen.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnknownPath {
     pub hash: u64,
     pub count: u64,
@@ -299,9 +309,11 @@ pub struct UnknownPath {
 
 /// Cumulative counts over every document a [`Decoder`] has seen.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stats {
     pub docs: u64,
+    /// Messages dropped because their own time is in [`Limits::drop_window`]: in no other count.
+    pub sealed_window_dropped: u64,
     /// Documents whose root is not a `MessageCollection` in the FAA NAS 3.0 namespace.
     pub unsupported_roots: u64,
     /// `message` elements seen.
@@ -326,6 +338,8 @@ pub struct Summary {
     pub messages: u32,
     /// Rows appended.
     pub rows: u32,
+    /// Messages dropped for their time in [`Limits::drop_window`]: not in any other count.
+    pub sealed_window_dropped: u32,
     /// Messages refused whole.
     pub rejected: u32,
     /// Field errors across the appended rows.

@@ -32,6 +32,8 @@ oa-csv = { path = "../crates/oa-csv" }
 oa-arinc424 = { path = "../crates/oa-arinc424" }
 oa-nasr = { path = "../crates/oa-nasr" }
 oa-notam = { path = "../crates/oa-notam" }
+oa-stdds = { path = "../crates/oa-stdds" }
+oa-sealed = { path = "../crates/oa-sealed" }
 oa-mva = { path = "../crates/oa-mva" }
 oa-nam = { path = "../crates/oa-nam" }
 
@@ -105,6 +107,13 @@ bench = false
 [[bin]]
 name = "tfms"
 path = "fuzz_targets/tfms.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stdds"
+path = "fuzz_targets/stdds.rs"
 test = false
 doc = false
 bench = false

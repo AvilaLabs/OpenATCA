@@ -113,7 +113,7 @@ fn a_clip_and_a_folder_of_different_days_exit_2_with_the_spans_to_the_second() {
     std::fs::remove_dir_all(&t).unwrap();
 }
 
-// REQ: OA-CEN-009
+// REQ: OA-CEN-009, OA-SEAL-014
 #[test]
 fn a_window_with_no_stdds_update_says_so_and_overlapping_days_run() {
     let t = temp("window");
@@ -136,6 +136,13 @@ fn a_window_with_no_stdds_update_says_so_and_overlapping_days_run() {
     // The same inputs without the window overlap and run.
     let o = run(&[&day, Path::new("--adsb"), &clip], &[], &[]);
     assert_eq!(o.status.code(), Some(0), "{}", err(&o));
+    // The count line (recording frames, STDDS records and the clip's rows in one count), once.
+    assert_eq!(
+        err(&o).matches("sealed-window rows dropped: 0").count(),
+        1,
+        "{}",
+        err(&o)
+    );
     std::fs::remove_dir_all(&t).unwrap();
 }
 
@@ -206,4 +213,12 @@ fn a_damaged_gzip_file_exits_3_after_the_report() {
         "the report is printed: {out}"
     );
     std::fs::remove_dir_all(&t).unwrap();
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_census_reader_drops_the_sealed_window() {
+    let w = oa_stdds_census::read::read_limits().drop_window;
+    assert_eq!(w, oa_sealed::DropWindow::sealed());
+    assert_eq!(w.span(), oa_sealed::sealed_window_ms());
 }

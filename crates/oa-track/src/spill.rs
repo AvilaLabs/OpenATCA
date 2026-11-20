@@ -103,6 +103,7 @@ fn remove_columns(dir: &Path) {
 /// Starts a spill in `dir`: created (with its parents) if absent; refused if it exists and has
 /// anything in it. The column files are created new.
 pub fn spill_new(dir: &Path) -> io::Result<SpillWriter> {
+    // seal-allow: the tracker's own spill directory (a temp dir it created)
     if dir.exists() && fs::read_dir(dir)?.next().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -123,6 +124,7 @@ pub fn spill_create(dir: &Path) -> io::Result<SpillWriter> {
     let mut made: Vec<PathBuf> = Vec::with_capacity(COLS.len());
     for c in COLS {
         let path = dir.join(c);
+        // seal-allow: creates the run's own spill file (create_new); reads nothing
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -255,9 +257,11 @@ pub fn spill_finish(
     put(&overflow.to_le_bytes())?;
     let mut buf = vec![0u8; 1 << 16];
     for (ci, c) in COLS.iter().enumerate() {
+        // seal-allow: the tracker's own spill file in its temp dir
         let mut f = File::open(w.dir.join(c))?;
         if (ALT..ALT + 3).contains(&ci) {
             // The altitude columns hash as zero for a row with no altitude, as in memory.
+            // seal-allow: the tracker's own spill file in its temp dir
             let mut flags = File::open(w.dir.join(COLS.get(FLAGS).copied().unwrap_or("flags")))?;
             let mut fbuf = vec![0u8; buf.len() / 4];
             loop {
@@ -316,6 +320,7 @@ impl ColReader {
     pub(crate) fn open(dir: &Path, col: usize, width: usize) -> io::Result<ColReader> {
         let name = COLS.get(col).copied().unwrap_or("");
         Ok(ColReader {
+            // seal-allow: the tracker's own spill file in its temp dir
             f: BufReader::with_capacity(1 << 16, File::open(dir.join(name))?),
             width,
             buf: vec![0u8; width * BLOCK_ROWS],

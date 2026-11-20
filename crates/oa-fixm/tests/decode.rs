@@ -65,7 +65,12 @@ fn run_with(xml: &str, cap: usize, strings: usize, limits: Limits) -> (Run, Resu
 }
 
 fn run(xml: &str) -> Run {
-    let (r, res) = run_with(xml, 64, 1 << 16, Limits::default());
+    let (r, res) = run_with(
+        xml,
+        64,
+        1 << 16,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     res.expect("decodes");
     r
 }
@@ -777,18 +782,30 @@ fn whole_message_rejection_is_counted_by_reason() {
 #[test]
 fn row_capacity_is_all_or_nothing_per_document() {
     let three = doc(&[message("TH", ""), message("TH", ""), message("TH", "")]);
-    let (r, res) = run_with(&three, 2, 1024, Limits::default());
+    let (r, res) = run_with(
+        &three,
+        2,
+        1024,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Err(FixmError::RowCapacity { capacity: 2 }));
     assert_eq!(r.ev.len, 0);
     assert!(r.ev.gufi.is_empty() && r.ev.present.is_empty());
-    let (r, res) = run_with(&three, 3, 1024, Limits::default());
+    let (r, res) = run_with(
+        &three,
+        3,
+        1024,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Ok(()));
     assert_eq!(r.ev.len, 3);
     assert_eq!(r.ev.capacity, 3);
 
     // Existing rows survive a refused document.
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(3, 1024);
     let one_doc = doc(&[message("TH", "")]);
     let d = parser.parse(one_doc.as_bytes()).unwrap();
@@ -813,11 +830,21 @@ fn string_table_capacity_rolls_the_whole_document_back() {
         message("FH", &route("ABCDEFGHIJ")),
         message("FH", &route("KLMNOPQRST")),
     ]);
-    let (r, res) = run_with(&two, 8, 15, Limits::default());
+    let (r, res) = run_with(
+        &two,
+        8,
+        15,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Err(FixmError::StringCapacity { capacity: 15 }));
     assert_eq!(r.ev.len, 0);
     assert_eq!(r.ev.strings_used, 0);
-    let (r, res) = run_with(&two, 8, 20, Limits::default());
+    let (r, res) = run_with(
+        &two,
+        8,
+        20,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     assert_eq!(res, Ok(()));
     assert_eq!(r.ev.strings_used, 20);
     assert_eq!(route_text(&r.ev, 0), "ABCDEFGHIJ");
@@ -832,7 +859,7 @@ fn route_text_is_bounded_and_entities_are_decoded() {
     let route = |t: &str| format!(r#"<agreed><route nasRouteText="{t}"/></agreed>"#);
     let limits = Limits {
         max_route_len: 8,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let (r, res) = run_with(&doc(&[message("FH", &route("12345678"))]), 4, 64, limits);
     res.unwrap();
@@ -909,7 +936,7 @@ fn unknown_path_table_is_bounded() {
     let body = r#"<a1/><a2/><a3/><a4/><a1/>"#;
     let limits = Limits {
         max_unknown_paths: 2,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     };
     let (r, res) = run_with(&doc(&[message("TH", body)]), 4, 64, limits);
     res.unwrap();
@@ -956,7 +983,9 @@ fn namespaced_and_foreign_elements_are_unknown_not_decoded() {
 #[test]
 fn documents_that_are_not_sfdps_message_collections_are_refused() {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(8, 64);
     for xml in [
         r#"<FDPSMsg xmlns="us:gov:dot:faa:atm:enroute:entities:flightdata"><center>ZXX</center></FDPSMsg>"#,
@@ -993,7 +1022,7 @@ fn element_limit_and_input_mismatch_are_errors() {
     let mut ev = new_events(4, 64);
     let mut dec = Decoder::new(Limits {
         max_elements: n - 1,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     assert_eq!(
         dec.decode(&d, xml.as_bytes(), &mut ev),
@@ -1004,7 +1033,7 @@ fn element_limit_and_input_mismatch_are_errors() {
     );
     let mut dec = Decoder::new(Limits {
         max_elements: n,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     assert!(dec.decode(&d, xml.as_bytes(), &mut ev).is_ok());
     let copy = xml.clone();
@@ -1068,7 +1097,7 @@ fn mutated_fixtures_never_panic() {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let mut dec = Decoder::new(Limits {
         max_unknown_paths: 8,
-        ..Limits::default()
+        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
     });
     let mut ev = new_events(4, 64);
     let mut docs = 0usize;
@@ -1142,7 +1171,9 @@ fn decoder_is_reusable_and_does_not_grow() {
     let big = doc(&[message("TH", TH_BODY), message("FH", TH_BODY)]);
     let small = doc(&[message("BA", "")]);
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(8, 4096);
     let caps = |e: &Events| {
         (
@@ -1205,7 +1236,7 @@ fn route_attribute_whitespace_is_normalised() {
         &doc(&[message("FH", &route("AA\tBB\r\nCC"))]),
         4,
         64,
-        Limits::default(),
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
     );
     res.unwrap();
     assert_eq!(route_text(&r.ev, 0), "AA BB CC");
@@ -1214,7 +1245,9 @@ fn route_attribute_whitespace_is_normalised() {
 fn decode_prefix_run(xml: &str, cap: usize) -> (Summary, usize) {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let d = parser.parse(xml.as_bytes()).expect("fixture parses");
-    let mut dec = Decoder::new(Limits::default());
+    let mut dec = Decoder::new(Limits::new(
+        oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
+    ));
     let mut ev = new_events(cap, 1 << 16);
     let s = dec.decode_prefix(&d, xml.as_bytes(), &mut ev).unwrap();
     (s, ev.len)
@@ -1277,7 +1310,12 @@ fn foreign_siblings_do_not_count_as_messages() {
     let foreign = r#"<other xmlns="urn:other"><x/></other>"#.to_string();
     let xml = doc(&[message("TH", ""), foreign.clone()]);
     // Capacity for exactly one row: the foreign sibling needs none.
-    let (r, res) = run_with(&xml, 1, 1 << 16, Limits::default());
+    let (r, res) = run_with(
+        &xml,
+        1,
+        1 << 16,
+        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
+    );
     res.expect("one message fits one row");
     assert_eq!((r.sum.messages, r.sum.rows), (1, 1));
     // Prefix mode with no capacity: the one real message is undecoded, the sibling is not counted.
@@ -1541,4 +1579,222 @@ fn aircraft_address_is_six_hex_digits() {
     let r = one("FH", r#"<aircraftDescription wakeTurbulence="MEDIUM"/>"#);
     assert!(!has_field(&r.ev, 0, Field::AircraftAddress));
     assert!(!field_error(&r.ev, 0, Field::AircraftAddress));
+}
+
+/// 2026-11-20T00:00:00Z and 2026-11-23T00:17:00Z in Unix milliseconds: the sealed window.
+const DROP: (i64, i64) = (1_795_132_800_000, 1_795_393_020_000);
+
+fn at(ts: &str, body: &str) -> String {
+    message_with(
+        &format!(r#"centre="ZXX" source="TH" system="SLC" timestamp="{ts}""#),
+        &format!("{}{body}", gufi_el(GUFI)),
+    )
+}
+
+/// A decoder's stats as they are before it has seen anything, with the drop count set.
+fn untouched(limits: Limits, dropped: u64) -> oa_fixm::Stats {
+    let mut s = Decoder::new(limits).stats().clone();
+    s.sealed_window_dropped = dropped;
+    s
+}
+
+fn windowed() -> Limits {
+    Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1))
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_document_with_a_message_in_the_window_is_dropped_whole_and_every_counter_is_as_for_an_empty_run(
+) {
+    let unknown = r#"<flightStatus fdpsFlightStatus="ACTIVE" newAttr="x"/><newThing><inner/></newThing><supplementalData><additionalFlightInformation><nameValue name="BRAND_NEW" value="1"/></additionalFlightInformation></supplementalData>"#;
+    let in_pos =
+        format!(r#"{unknown}<enRoute><position positionTime="2026-11-22T00:00:00Z"/></enRoute>"#);
+    let nogufi = message_with(
+        r#"centre="ZXX" source="TH" system="SLC" timestamp="2026-11-21T00:00:00Z""#,
+        unknown,
+    );
+    // Kept messages around: one timed in the window by its timestamp, one by its position time,
+    // one refused (no GUFI) and in the window; the rest, with unknown paths, are outside it.
+    let all = doc(&[
+        at("2030-01-02T03:04:05Z", unknown),
+        at("2026-11-21T01:00:00Z", unknown),
+        at("2026-11-19T23:59:59Z", &in_pos),
+        nogufi,
+        at("2026-11-23T00:17:00Z", unknown),
+    ]);
+    let (r, res) = run_with(&all, 64, 1 << 16, windowed());
+    res.unwrap();
+    // Dropped whole: the count is the five messages of the document, and nothing else moved.
+    assert_eq!(
+        r.sum,
+        Summary {
+            sealed_window_dropped: 5,
+            ..Summary::default()
+        }
+    );
+    assert_eq!(r.dec.stats(), &untouched(windowed(), 5));
+    assert_eq!((r.ev.len, r.ev.strings_used), (0, 0));
+    // Without a message in the window the same kept messages are all decoded as usual.
+    let kept = doc(&[
+        at("2030-01-02T03:04:05Z", unknown),
+        at("2026-11-23T00:17:00Z", unknown),
+    ]);
+    let (r, res) = run_with(&kept, 64, 1 << 16, windowed());
+    res.unwrap();
+    assert_eq!(
+        (r.sum.sealed_window_dropped, r.sum.messages, r.ev.len),
+        (0, 2, 2)
+    );
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn an_in_window_message_after_a_full_table_or_a_prefix_cut_is_still_found() {
+    let m = |ts: &str| at(ts, "");
+    // Three messages, room for one row: a plain decode would be refused for capacity, and a
+    // prefix decode would stop at the second. The in-window third message is read first.
+    let xml = doc(&[
+        m("2030-01-02T03:04:05Z"),
+        m("2030-01-02T03:04:06Z"),
+        m("2026-11-21T00:00:00Z"),
+    ]);
+    for prefix in [false, true] {
+        let mut parser = Parser::new(XmlLimits::default()).unwrap();
+        let d = parser.parse(xml.as_bytes()).unwrap();
+        let mut dec = Decoder::new(windowed());
+        let mut ev = new_events(1, 1 << 12);
+        let r = if prefix {
+            dec.decode_prefix(&d, xml.as_bytes(), &mut ev)
+        } else {
+            dec.decode(&d, xml.as_bytes(), &mut ev)
+        };
+        assert_eq!(
+            r.unwrap(),
+            Summary {
+                sealed_window_dropped: 3,
+                ..Summary::default()
+            },
+            "prefix {prefix}"
+        );
+        assert_eq!(dec.stats(), &untouched(windowed(), 3));
+        assert_eq!(ev.len, 0);
+    }
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_message_with_an_invalid_field_before_its_time_is_still_dropped_with_its_document() {
+    // An invalid GUFI and a bad attribute come before the timestamp in document order.
+    let bad = message_with(
+        r#"centre="ZXX" source="TH" system="SLC" bogus="1" timestamp="2026-11-21T00:00:00Z""#,
+        "<gufi>not-a-uuid</gufi>",
+    );
+    let xml = doc(&[at("2030-01-02T03:04:05Z", "<x/>"), bad]);
+    let (r, res) = run_with(&xml, 64, 1 << 16, windowed());
+    res.unwrap();
+    assert_eq!(r.dec.stats(), &untouched(windowed(), 2));
+    assert_eq!(r.sum.sealed_window_dropped, 2);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_drops_the_window() {
+    let xml = doc(&[at("2030-01-02T03:04:05Z", "")]);
+    // All time (the closed failure of the list).
+    let all = Limits::new(oa_sealed::DropWindow::all_time());
+    let (r, res) = run_with(&xml, 64, 1 << 16, all);
+    res.unwrap();
+    assert_eq!(
+        r.sum,
+        Summary {
+            sealed_window_dropped: 1,
+            ..Summary::default()
+        }
+    );
+    assert_eq!(r.dec.stats(), &untouched(all, 1));
+    // The production list.
+    let prod = Limits::new(oa_sealed::DropWindow::sealed());
+    let (r, res) = run_with(&doc(&[at("2026-11-21T00:00:00Z", "")]), 64, 1 << 16, prod);
+    res.unwrap();
+    assert_eq!(r.sum.sealed_window_dropped, 1);
+    let (r, res) = run_with(&xml, 64, 1 << 16, prod);
+    res.unwrap();
+    assert_eq!((r.sum.sealed_window_dropped, r.ev.len), (0, 1));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn message_and_position_times_are_window_keys_in_any_encoding_and_event_times_are_not() {
+    let dropped = |xml: &str| {
+        let (r, res) = run_with(xml, 64, 1 << 16, windowed());
+        res.unwrap();
+        r.sum.sealed_window_dropped
+    };
+    // Entity-encoded (the final Z as a character reference), and padded with whitespace.
+    for ts in ["2026-11-21T00:00:00&#90;", " 2026-11-21T00:00:00Z "] {
+        let x = doc(&[at(ts, "")]);
+        // The decoder's own parser reads a padded value as no time and refuses the message; then
+        // there is no row to protect, and the document is kept as refused.
+        let n = dropped(&x);
+        let (r, res) = run_with(&x, 64, 1 << 16, windowed());
+        res.unwrap();
+        assert!(n == 1 || r.ev.len == 0, "{ts:?}");
+    }
+    assert_eq!(dropped(&doc(&[at("2026-11-21T00:00:00&#90;", "")])), 1);
+    // A repeated attribute is not well-formed XML: the document is refused, not read.
+    let dup = message_with(
+        r#"centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:05Z" timestamp="2026-11-21T00:00:00Z""#,
+        &gufi_el(GUFI),
+    );
+    let mut p = oa_xml::Parser::new(oa_xml::Limits::default()).unwrap();
+    assert!(p.parse(doc(&[dup]).as_bytes()).is_err());
+    // A position time in the window, the message time outside it.
+    let pos = at(
+        "2030-01-02T03:04:05Z",
+        r#"<enRoute><position positionTime="2026-11-21T00:00:00Z"/></enRoute>"#,
+    );
+    assert_eq!(dropped(&doc(&[pos])), 1);
+    // The actual departure is a key: a message stamped after the window can report it inside.
+    let dep = |ts: &str, actual: &str| {
+        at(
+            ts,
+            &format!(
+                r#"<departure xsi:type="ns5:NasDepartureType" departurePoint="KDEP"><runwayPositionAndTime><runwayTime><actual time="{actual}"/></runwayTime></runwayPositionAndTime></departure>"#
+            ),
+        )
+    };
+    assert_eq!(
+        dropped(&doc(&[dep("2026-11-23T01:00:00Z", "2026-11-22T23:00:00Z")])),
+        1
+    );
+    // Outside the window both, and an estimated arrival in the window (a reference time), are kept.
+    assert_eq!(
+        dropped(&doc(&[dep("2026-11-23T01:00:00Z", "2026-11-23T00:17:00Z")])),
+        0
+    );
+    let est = at(
+        "2026-11-23T01:00:00Z",
+        r#"<arrival xsi:type="ns5:NasArrivalType" arrivalPoint="KTST"><runwayPositionAndTime><runwayTime><estimated time="2026-11-22T23:00:00Z"/></runwayTime></runwayPositionAndTime></arrival>"#,
+    );
+    assert_eq!(dropped(&doc(&[est])), 0);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_count_of_a_dropped_document_is_its_messages_and_at_least_one() {
+    // A time key on an element that is not a message: the document has no message, and the
+    // count is still one.
+    let bare = r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0"><other timestamp="2026-11-21T00:00:00Z"/></ns5:MessageCollection>"#;
+    let (r, res) = run_with(bare, 64, 1 << 16, windowed());
+    res.unwrap();
+    assert_eq!(r.sum.sealed_window_dropped, 1);
+    // Three messages, one in the window: all three are counted.
+    let three = doc(&[
+        at("2030-01-02T03:04:05Z", ""),
+        at("2026-11-21T00:00:00Z", ""),
+        at("2030-01-02T03:04:07Z", ""),
+    ]);
+    let (r, res) = run_with(&three, 64, 1 << 16, windowed());
+    res.unwrap();
+    assert_eq!(r.sum.sealed_window_dropped, 3);
 }

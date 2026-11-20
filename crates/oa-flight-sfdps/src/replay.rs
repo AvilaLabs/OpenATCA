@@ -14,8 +14,8 @@ use oa_flight::{
     Outcome, C_COUNT, OP_COUNT, REM_COUNT, R_COUNT, ST_COUNT,
 };
 use oa_replay::{
-    doc_fixm_limits, doc_xml_limits, list_recordings, new_doc_events, spec_from_paths,
-    try_merge_streams, FeedKind, MergeReport,
+    doc_fixm_limits, doc_xml_limits, list_recordings, merge_counted, new_doc_events,
+    spec_from_paths, FeedKind, MergeReport,
 };
 use oa_xml::Parser;
 
@@ -112,6 +112,11 @@ pub struct ReplayReport {
     pub view_states: [u64; ST_COUNT],
     pub removed_by_reason: [u64; REM_COUNT],
     pub merge: Option<MergeReport>,
+    /// SFDPS frames (by receive time) and rows (by their own time) left out because they are in a
+    /// sealed window (OA-SEAL-014). The frame count comes from the merge, so a run stopped early
+    /// by `--to` does not include the frames dropped before the stop.
+    pub sealed_window_dropped: u64,
+    pub positions: Positions,
     pub table: FlightTable,
 }
 
@@ -122,19 +127,140 @@ pub fn recordings_in(dir: &std::path::Path) -> io::Result<Vec<PathBuf>> {
 
 const WINDOW_END: &str = "end of the replay window";
 
+/// The latest position a flight reported, as the record had it. A7.2: cold struct, size guard
+/// waived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Position {
+    /// The position's own time (`positionTime`), Unix ms.
+    pub ts_ms: i64,
+    /// When it became available: the clock after the operations of its message.
+    pub avail_ms: i64,
+    pub lat_e7: i32,
+    pub lon_e7: i32,
+}
+
+/// The latest position of each flight, keyed by GUFI, bounded: a flight that would take the table
+/// past its capacity is refused and counted, none is evicted by a newcomer; the entries of a flight
+/// go when the table removes the flight ([`Positions::forget`]). A position older than the one
+/// held is counted and not kept. A7.2: cold struct, size guard waived.
+#[derive(Clone, Debug, Default)]
+pub struct Positions {
+    map: BTreeMap<u128, Position>,
+    /// The time of the latest listed refile conflict (a plan filed again over an ended one) of
+    /// each flight, by GUFI, bounded like the positions.
+    refiled: BTreeMap<u128, i64>,
+    pub refiled_refused: u64,
+    /// Positions left out because their message is stamped too far ahead of its receipt.
+    pub bad_time: u64,
+    capacity: usize,
+    pub updated: u64,
+    pub refused_full: u64,
+    pub out_of_order: u64,
+}
+
+impl Positions {
+    pub fn new(capacity: usize) -> Positions {
+        Positions {
+            capacity,
+            ..Positions::default()
+        }
+    }
+
+    /// The latest position the flight with this GUFI had made available.
+    pub fn get(&self, gufi: u128) -> Option<&Position> {
+        self.map.get(&gufi)
+    }
+
+    /// The stamped time of the latest refile conflict listed for the flight with this GUFI.
+    pub fn refiled_at(&self, gufi: u128) -> Option<i64> {
+        self.refiled.get(&gufi).copied()
+    }
+
+    fn note_refile(&mut self, gufi: u128, ts_ms: i64) {
+        let full = self.refiled.len() >= self.capacity;
+        match self.refiled.get_mut(&gufi) {
+            Some(h) => *h = (*h).max(ts_ms),
+            None if full => self.refiled_refused += 1,
+            None => {
+                self.refiled.insert(gufi, ts_ms);
+            }
+        }
+    }
+
+    /// Drops what is held for the flight with this GUFI: the position and the refile time.
+    pub fn forget(&mut self, gufi: u128) {
+        self.map.remove(&gufi);
+        self.refiled.remove(&gufi);
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// How many flights have a refile time held.
+    pub fn refiled_len(&self) -> usize {
+        self.refiled.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    fn put(&mut self, gufi: u128, p: Position) {
+        let full = self.map.len() >= self.capacity;
+        match self.map.get_mut(&gufi) {
+            Some(h) if p.ts_ms < h.ts_ms => self.out_of_order += 1,
+            Some(h) => {
+                *h = p;
+                self.updated += 1;
+            }
+            None if full => self.refused_full += 1,
+            None => {
+                self.map.insert(gufi, p);
+                self.updated += 1;
+            }
+        }
+    }
+}
+
 /// Replays the SFDPS recordings `paths` into a new table. Before each operation is applied,
-/// `before_op(table, avail_ms)` is called with the time the operation will become available, so
+/// `before_op(table, positions, avail_ms)` is called with the time the operation will become available, so
 /// the caller can answer questions as of any earlier time; a last call with `i64::MAX` follows the
 /// final operation.
 pub fn replay_sfdps(
     paths: Vec<PathBuf>,
     cfg: &ReplayConfig,
-    before_op: &mut dyn FnMut(&FlightTable, i64),
+    before_op: &mut dyn FnMut(&FlightTable, &Positions, i64),
+) -> io::Result<ReplayReport> {
+    replay_sfdps_counted(paths, cfg, before_op, &mut 0)
+}
+
+/// Counts one frame that reached the decoder's report.
+fn note_frame(rep: &mut ReplayReport, recv_ns: i64) {
+    rep.frames += 1;
+    rep.first_recv_ns = rep.first_recv_ns.min(recv_ns);
+    rep.last_recv_ns = rep.last_recv_ns.max(recv_ns);
+}
+
+/// The decoder limits of every replay here: the replay pipeline's own, with the sealed window as
+/// the drop window (OA-SEAL-014).
+pub fn decoder_limits() -> oa_fixm::Limits {
+    doc_fixm_limits()
+}
+
+/// [`replay_sfdps`], with the frames (by receive time, from the merge, also when the run stops
+/// at `to_ns` or on an error) and the messages (by their own time) dropped in a sealed window put
+/// in `sealed` on every exit, so a caller can print the count whatever the result.
+pub fn replay_sfdps_counted(
+    paths: Vec<PathBuf>,
+    cfg: &ReplayConfig,
+    before_op: &mut dyn FnMut(&FlightTable, &Positions, i64),
+    sealed: &mut u64,
 ) -> io::Result<ReplayReport> {
     let mut table = flights_new(&cfg.flight).map_err(|e| io::Error::other(format!("{e:?}")))?;
     let mut parser =
         Parser::new(doc_xml_limits()).map_err(|e| io::Error::other(format!("{e:?}")))?;
-    let mut decoder = Decoder::new(doc_fixm_limits());
+    let mut decoder = Decoder::new(decoder_limits());
     let mut events = new_doc_events();
     let mut rep = ReplayReport {
         frames: 0,
@@ -158,17 +284,20 @@ pub fn replay_sfdps(
         view_states: [0; ST_COUNT],
         removed_by_reason: [0; REM_COUNT],
         merge: None,
+        sealed_window_dropped: 0,
+        positions: Positions::default(),
         table: flights_new(&FlightConfig {
             capacity: 1,
             ..cfg.flight
         })
         .map_err(|e| io::Error::other(format!("{e:?}")))?,
     };
+    let mut positions = Positions::new(cfg.flight.capacity.saturating_mul(2));
     let mut ops: Vec<Op> = Vec::with_capacity(crate::adapter::MAX_OPS_PER_MESSAGE);
     let mut next_sweep = i64::MIN;
     let spec = spec_from_paths(FeedKind::Sfdps, paths);
     let mut ended = false;
-    let res = try_merge_streams(vec![spec], 1 << 16, &mut |m| {
+    let (report, res) = merge_counted(vec![spec], 1 << 16, &mut |m| {
         if m.feed != FeedKind::Sfdps || m.kind != Kind::Message {
             return Ok(());
         }
@@ -181,19 +310,28 @@ pub fn replay_sfdps(
             ended = true;
             return Err(io::Error::other(WINDOW_END));
         }
-        rep.frames += 1;
-        rep.first_recv_ns = rep.first_recv_ns.min(m.recv_ns);
-        rep.last_recv_ns = rep.last_recv_ns.max(m.recv_ns);
         let seen_ms = m.recv_ns.div_euclid(1_000_000);
         let doc = match parser.parse(m.payload) {
             Ok(d) => d,
             Err(_) => {
+                note_frame(&mut rep, m.recv_ns);
                 rep.docs_unparsed += 1;
                 return Ok(());
             }
         };
         oa_fixm::clear_events(&mut events);
-        if let Err(e) = decoder.decode_prefix(&doc, m.payload, &mut events) {
+        let decoded = decoder.decode_prefix(&doc, m.payload, &mut events);
+        if let Ok(s) = &decoded {
+            if s.sealed_window_dropped > 0 {
+                // The decoder dropped the whole document for a message timed in the sealed
+                // window: the frame is in no count here but the drop (OA-SEAL-014).
+                *sealed += u64::from(s.sealed_window_dropped);
+                oa_sealed::note_window_drops(u64::from(s.sealed_window_dropped));
+                return Ok(());
+            }
+        }
+        note_frame(&mut rep, m.recv_ns);
+        if let Err(e) = decoded {
             rep.docs_refused += 1;
             let k = match e {
                 oa_fixm::FixmError::UnsupportedRoot => 0,
@@ -214,33 +352,50 @@ pub fn replay_sfdps(
             row_ops(&events, row, seen_ms, msg, &mut rep.adapter, &mut ops);
             for o in &ops {
                 let avail = flights_op_avail(&table, o);
-                before_op(&table, avail);
+                before_op(&table, &positions, avail);
                 let out = flights_apply(&mut table, o);
                 debug_assert!(matches!(
                     out,
                     Outcome::Applied | Outcome::Unchanged | Outcome::Refused(_)
                 ));
             }
+            // A position is as available as the operations of its message (the clock after
+            // them); a message with no operation is placed as an operation of its time would be,
+            // and the question is announced first.
+            match position_avail(&events, row, seen_ms, &table) {
+                PositionAvail::NoPosition => {}
+                PositionAvail::BadTime => positions.bad_time += 1,
+                PositionAvail::At(avail) => {
+                    if avail > table.clock_ms {
+                        before_op(&table, &positions, avail);
+                    }
+                    note_position(&events, row, avail, &mut positions);
+                }
+            }
         }
-        drain_refusals(&mut table, &mut rep);
+        drain_refusals(&mut table, &mut rep, &mut positions);
         if table.clock_ms >= next_sweep {
             if next_sweep != i64::MIN {
                 let now = table.clock_ms;
                 flights_sweep(&mut table, now, cfg.retain_ms, cfg.silence_ms);
-                drain_removals(&mut table, &mut rep);
+                drain_removals(&mut table, &mut rep, &mut positions);
             }
             next_sweep = table.clock_ms.saturating_add(cfg.sweep_every_ms);
         }
         Ok(())
     });
+    // The merge's own count of frames dropped by receive time is added on every way out, a stop at
+    // `to_ns` and an error included.
+    *sealed += report.sealed_window_dropped;
+    rep.sealed_window_dropped = *sealed;
     match res {
-        Ok(r) => rep.merge = Some(r),
+        Ok(()) => rep.merge = Some(report),
         Err(e) if ended && e.to_string() == WINDOW_END => {}
         Err(e) => return Err(e),
     }
-    before_op(&table, i64::MAX);
-    drain_refusals(&mut table, &mut rep);
-    drain_removals(&mut table, &mut rep);
+    before_op(&table, &positions, i64::MAX);
+    drain_refusals(&mut table, &mut rep, &mut positions);
+    drain_removals(&mut table, &mut rep, &mut positions);
     for f in table
         .flights
         .iter()
@@ -253,8 +408,61 @@ pub fn replay_sfdps(
         }
     }
     rep.fixm = decoder.stats().clone();
+    rep.positions = positions;
     rep.table = table;
     Ok(rep)
+}
+
+/// When the position of a row becomes available.
+enum PositionAvail {
+    /// The row has no position.
+    NoPosition,
+    /// Its message is stamped too far ahead of its receipt: counted as bad time, not kept.
+    BadTime,
+    At(i64),
+}
+
+fn position_avail(
+    ev: &oa_fixm::Events,
+    row: usize,
+    seen_ms: i64,
+    table: &FlightTable,
+) -> PositionAvail {
+    use oa_fixm::{has_field, Field};
+    if !has_field(ev, row, Field::Position) || !has_field(ev, row, Field::PositionTime) {
+        return PositionAvail::NoPosition;
+    }
+    let Some(&ts) = ev.ts_ms.get(row) else {
+        return PositionAvail::NoPosition;
+    };
+    if ts.saturating_sub(seen_ms) > table.cfg.max_future_ms {
+        return PositionAvail::BadTime;
+    }
+    PositionAvail::At(
+        seen_ms
+            .max(ts.saturating_add(table.cfg.lag_floor_ms))
+            .max(table.clock_ms),
+    )
+}
+
+fn note_position(ev: &oa_fixm::Events, row: usize, avail_ms: i64, positions: &mut Positions) {
+    let (Some(&g), Some(&pt), Some(&la), Some(&lo)) = (
+        ev.gufi.get(row),
+        ev.pos_time_ms.get(row),
+        ev.lat_e7.get(row),
+        ev.lon_e7.get(row),
+    ) else {
+        return;
+    };
+    positions.put(
+        g,
+        Position {
+            ts_ms: pt,
+            avail_ms,
+            lat_e7: la,
+            lon_e7: lo,
+        },
+    );
 }
 
 fn count_row(rep: &mut ReplayReport, ev: &oa_fixm::Events, row: usize, seen_ms: i64) {
@@ -317,16 +525,25 @@ fn count_row(rep: &mut ReplayReport, ev: &oa_fixm::Events, row: usize, seen_ms: 
     }
 }
 
-fn drain_refusals(t: &mut FlightTable, rep: &mut ReplayReport) {
+fn drain_refusals(t: &mut FlightTable, rep: &mut ReplayReport, positions: &mut Positions) {
     for r in &t.refusals {
         *rep.refusals.entry((r.op, r.reason, r.state)).or_default() += 1;
     }
     t.refusals.clear();
+    for c in &t.conflicts {
+        if c.kind == oa_flight::C_PLAN_REFILED && c.a.kind == oa_flight::KEY_GUFI {
+            positions.note_refile(c.a.gufi, c.ts_ms);
+        }
+    }
     t.conflicts.clear();
 }
 
-fn drain_removals(t: &mut FlightTable, rep: &mut ReplayReport) {
+/// Counts the removals the table listed and drops what the replay held for those flights.
+fn drain_removals(t: &mut FlightTable, rep: &mut ReplayReport, positions: &mut Positions) {
     for r in &t.removals {
+        if r.key.kind == oa_flight::KEY_GUFI {
+            positions.forget(r.key.gufi);
+        }
         if let Some(c) = rep.removed_by_reason.get_mut(usize::from(r.reason)) {
             *c += 1;
         }
@@ -340,3 +557,45 @@ pub const REASONS: usize = R_COUNT;
 pub const OPS: usize = OP_COUNT;
 /// The number of conflict kinds.
 pub const CONFLICTS: usize = C_COUNT;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(ts_ms: i64) -> Position {
+        Position {
+            ts_ms,
+            avail_ms: ts_ms,
+            lat_e7: 1,
+            lon_e7: 2,
+        }
+    }
+
+    // REQ: OA-FLT-040
+    #[test]
+    fn a_forgotten_flight_frees_its_place_so_the_table_fills_to_capacity_again() {
+        let mut p = Positions::new(3);
+        for g in 1..=3u128 {
+            p.put(g, at(100));
+            p.note_refile(g, 100);
+        }
+        // Full: a newcomer is refused and counted.
+        p.put(4, at(100));
+        p.note_refile(4, 100);
+        assert_eq!((p.len(), p.refused_full, p.refiled_refused), (3, 1, 1));
+        // The flight is removed: its entries go, and the table fills to capacity again.
+        p.forget(2);
+        assert!(p.get(2).is_none() && p.refiled_at(2).is_none());
+        assert_eq!((p.len(), p.refiled_len()), (2, 2));
+        p.put(4, at(200));
+        p.note_refile(4, 200);
+        assert_eq!((p.len(), p.refiled_len()), (3, 3));
+        assert!(p.get(4).is_some());
+        p.put(5, at(300));
+        p.note_refile(5, 300);
+        assert_eq!((p.refused_full, p.refiled_refused), (2, 2));
+        // Forgetting a flight never held is harmless.
+        p.forget(99);
+        assert_eq!(p.len(), 3);
+    }
+}
