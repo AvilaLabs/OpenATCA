@@ -2,11 +2,57 @@
 refreshes the small synthetic seeds in fuzz/seeds/. Real data never goes into the repository.
 
     python3 -I fuzz/make_corpora.py
+    python3 -I fuzz/make_corpora.py --filter-existing DIR
+
+Recorded messages, frames and traces whose own times fall in a sealed window are not copied; the
+count is printed as `sealed-window rows dropped: N` once at exit. `--filter-existing DIR` applies the
+same tests to the files already in a corpus directory, deletes the ones that match and prints only
+the counts (files scanned, removed, kept).
 """
-import os, sys, struct, glob, gzip, io, zlib, tarfile, zipfile, random
+import os, sys, hashlib, struct, gzip, io, zlib, tarfile, zipfile, random
 # The sealed hold-out guard (tools/sealed_guard.py); -I does not put the script's directory on the path.
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
 import sealed_guard
+DROPS = sealed_guard.DropCounter()
+def filter_existing(directory):
+    """--filter-existing: only a corpus directory, only with a clean tracked fuzz tree; prints counts."""
+    import subprocess
+    fz = os.path.dirname(os.path.abspath(__file__))
+    try:
+        sealed_guard.corpus_dir_check(directory)
+    except (sealed_guard.SealedError, OSError) as e:
+        print('make_corpora: not filtered:', type(e).__name__, str(e).split(': ', 1)[-1][:120], file=sys.stderr); return 2
+    # Only a file whose bytes equal a committed (git-tracked) fuzz file is left alone, whatever it is
+    # named; a fuzz tree with untracked or modified files is not trusted for that.
+    repo = os.path.dirname(fz)
+    # git is told the repository (-C) and given an environment without any GIT_* variable
+    genv = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    def git(*a):
+        return subprocess.run(['git', '-C', repo, *a], capture_output=True, check=True, env=genv).stdout
+    try:
+        if git('status', '--porcelain', '--', 'fuzz').strip():
+            print('make_corpora: not filtered: the fuzz tree has untracked or modified files', file=sys.stderr); return 2
+        names = [n for n in git('ls-files', '-z', '--', 'fuzz').split(b'\0') if n]
+    except (OSError, subprocess.CalledProcessError):
+        print('make_corpora: not filtered: git cannot list the fuzz tree', file=sys.stderr); return 2
+    ok = set()
+    for n in names:
+        try:
+            with sealed_guard.open_read(os.path.join(repo, os.fsdecode(n)), 'rb') as f: ok.add(hashlib.sha256(f.read()).hexdigest())
+        except (sealed_guard.SealedError, OSError):
+            pass
+    try:
+        s, r, k, bad, skipped = sealed_guard.filter_corpus_dir(directory, DROPS, exempt_sha256=ok)
+    except (sealed_guard.SealedError, OSError) as e:
+        print('make_corpora: cannot filter:', type(e).__name__, file=sys.stderr); return 2
+    print(f'files scanned: {s}\nfiles removed: {r}\nfiles kept: {k}\nfiles refused (kept): {bad}\nfiles skipped (not regular): {skipped}')
+    return 1 if bad else 0
+if sys.argv[1:2] == ['--filter-existing']:
+    if len(sys.argv) != 3:
+        print('usage: make_corpora.py --filter-existing DIR', file=sys.stderr); sys.exit(2)
+    sys.exit(filter_existing(sys.argv[2]))
+if len(sys.argv) != 1:
+    print('usage: make_corpora.py [--filter-existing DIR]', file=sys.stderr); sys.exit(2)
 D = os.environ['OPENATCA_DATA']
 R = D + '/raw'
 S = D + '/scds'
@@ -14,17 +60,8 @@ REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'seeds')
 random.seed(1)
 SEALED_SKIPPED = 0
 def gl(pattern):
-    """glob() without the sealed paths: each is skipped and counted, never opened (OA-SEAL-012)."""
-    global SEALED_SKIPPED
-    keep = []
-    for p in glob.glob(pattern):
-        try:
-            sealed_guard.production().check(p)
-        except sealed_guard.SealedError:
-            SEALED_SKIPPED += 1
-            continue
-        keep.append(p)
-    return keep
+    """The guard's glob: a sealed path is never listed, opened or returned (OA-SEAL-012)."""
+    return sealed_guard.glob(pattern)
 def rb(path, mode='rb'):
     """Whole file through the guard's opener."""
     with sealed_guard.open_read(path, mode) as f:
@@ -67,38 +104,57 @@ for f in gl(A + '/*.pcap'):
         k += 1
 
 # --- xml family from scds message dumps
+LAST_RECORDING_DAY = (2026, 11, 18)   # a second bound, besides the text scan: nothing recorded later is copied
+def dated_ok(path):
+    """Whether a recording file is from a directory (or file name) dated LAST_RECORDING_DAY or
+    earlier; an undated or unparsable path, or a later one, is dropped and counted (not opened)."""
+    d = sealed_guard.path_date(os.path.relpath(path, S))
+    if d is None or d > LAST_RECORDING_DAY:
+        DROPS.add(); return False
+    return True
 def msgs(pattern, n, maxsz=200_000):
-    fs = sorted(gl(pattern))
+    fs = sorted(p for p in gl(pattern) if dated_ok(p))
     random.shuffle(fs)
     c = 0
     for f in fs:
-        if os.path.getsize(f) <= maxsz:
+        if sealed_guard.getsize(f) <= maxsz:
             yield os.path.basename(f), rb(f); c += 1
             if c >= n: break
+def xml_msgs(pattern, n):
+    """msgs() without the messages that hold a time in a sealed window: each is dropped and counted."""
+    for nm, d in msgs(pattern, n):
+        if sealed_guard.text_has_sealed_time(d):
+            DROPS.add(); continue
+        yield nm, d
 for tgt, pat, n in [('tbfm', S+'/tbfm-*/*.msg', 600), ('tfms', S+'/tfms-*/*.msg', 600), ('fixm', S+'/sfdps-*/*.msg', 600)]:
-    for nm, d in msgs(pat, n):
+    for nm, d in xml_msgs(pat, n):
         out(tgt, nm, d); out('xml', tgt + '-' + nm, d) if random.random() < 0.3 else None
-for nm, d in msgs(S+'/fns-*/*.msg', 113): out('xml', 'fns-' + nm, d)
+for nm, d in xml_msgs(S+'/fns-*/*.msg', 113): out('xml', 'fns-' + nm, d)
 # a few hostile XML starters (synthetic)
 for i, x in enumerate([b'<a/>', b'<a xmlns="u"><b:c xmlns:b="v" d="&amp;&#65;"/></a>', b'<?xml version="1.0"?><!-- c --><a><![CDATA[x]]></a>', b'<a b="1" b="2"/>', b'<!DOCTYPE a [<!ENTITY e "x">]><a>&e;</a>']):
     repo('xml', f'x{i}.xml', x)
 
 # --- feed frames from the recordings
 for f in gl(S + '/rec/*.oaf'):
-    b = rb(f); i = 0; fr = []
-    while i + 40 <= len(b):
-        if b[i:i+4] != b'OAF1': break
-        n = struct.unpack('<I', b[i+32:i+36])[0]
-        fr.append(b[i:i+40+n]); i += 40 + n
+    if not dated_ok(f): continue
+    b = rb(f); fr = []
+    frames, _rest = sealed_guard.oaf_frames(b)
+    for x in frames:
+        bad = sealed_guard.oaf_frame_dropped(x)
+        if bad: DROPS.add()   # the drop count is of frames (a run holding a dropped frame is not counted again)
+        fr.append((x.raw, bad))
     random.shuffle(fr)
-    for k, x in enumerate(fr[:200]): out('feed-frame', f'{os.path.basename(f)}-{k}', x, 100_000)
+    for k, (x, bad) in enumerate(fr[:200]):
+        if not bad: out('feed-frame', f'{os.path.basename(f)}-{k}', x, 100_000)
     for k in range(20):
-        out('feed-frame', f'{os.path.basename(f)}-run{k}', b''.join(fr[k*5:k*5+5]), 200_000)
+        run = fr[k*5:k*5+5]
+        if any(bad for _, bad in run): continue
+        out('feed-frame', f'{os.path.basename(f)}-run{k}', b''.join(x for x, _ in run), 200_000)
 
 # --- adsb traces, json
 # The newest part among the unsealed days (the real layout is raw/adsblol/YYYY.MM.DD/v*.tar.aa);
 # a sealed day directory is skipped and counted, never listed.
-adsb_parts, adsb_skipped, _ = sealed_guard.walk_unsealed(R + '/adsblol') if os.path.isdir(R + '/adsblol') else ([], 0, 0)
+adsb_parts, adsb_skipped, _ = sealed_guard.walk_unsealed(R + '/adsblol') if sealed_guard.isdir(R + '/adsblol') else ([], 0, 0)
 SEALED_SKIPPED += adsb_skipped
 adsb_parts = sorted(p for p in adsb_parts if p.endswith('.tar.aa'))
 n = 0; tot = 0
@@ -113,6 +169,8 @@ try:
             except Exception:
                 continue
             if len(raw) > 400_000: continue
+            if sealed_guard.adsb_trace_in_window(raw):
+                DROPS.add(); continue
             out('adsb-trace', f'tr{n}', raw, 400_000); out('json', f'tr{n}', raw, 400_000) if n % 4 == 0 else None
             n += 1; tot += len(raw)
             if n >= 500 or tot > 30_000_000: break
@@ -246,7 +304,7 @@ def head_rows(name, n, off=0):
     lines = rd(f'{NA}/{name}.csv').split(b'\n')
     return b'\n'.join([lines[0]] + lines[1 + off:1 + off + n]) + b'\n'
 for name, sel in SEL.items():
-    if not os.path.exists(f'{NA}/{name}.csv'): continue
+    if not sealed_guard.exists(f'{NA}/{name}.csv'): continue
     n_all = rd(f'{NA}/{name}.csv').count(b'\n')
     for k in range(14):
         off = 0 if k == 0 else random.randrange(max(1, n_all - 40))
@@ -301,7 +359,7 @@ repo('arinc424', 'enroute.cifp', cifp(fx('airways') + fx('enroute_waypoints') + 
 repo('arinc424', 'records.txt', (fx('airports') + fx('approach')).encode())
 repo('arinc424', 'header-only.cifp', cifp(''))
 # local corpus: the real file in record-sized chunks, each with the real header and a matching count
-if os.path.exists(CI):
+if sealed_guard.exists(CI):
     cl = rd(CI).split(b'\n')
     hdr = [l for l in cl[:5]]
     data = [l for l in cl[5:] if l]
@@ -345,8 +403,8 @@ for f in sorted(gl(R + '/mva*/*.xml')):
     out('mva', os.path.basename(f), rd(f), 400_000)
 
 # every committed seed also goes into its corpus
-for t in os.listdir(REPO):
-    for f in os.listdir(f'{REPO}/{t}'):
+for t in sealed_guard.listdir(REPO):
+    for f in sealed_guard.listdir(f'{REPO}/{t}'):
         out(t, 'seed-' + f, rb(f'{REPO}/{t}/{f}'))
 print('sealed entries skipped:', SEALED_SKIPPED)
 print('done')

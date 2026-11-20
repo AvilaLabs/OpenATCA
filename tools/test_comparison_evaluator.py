@@ -10,7 +10,10 @@ import math
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import comparison_evaluator as ce
 import comparison_baseline as cb
