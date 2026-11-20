@@ -6208,3 +6208,48 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   truth altitude and the median ratio of STDDS speed to truth speed on the paired samples, with "units
   suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
   ratio is outside 0.8 to 1.25.
+
+## Runway geometry and occupancy (oa-runway)
+
+- **OA-RWY-001** An airport's local east-north plane is a tangent plane about its reference point with the WGS-84
+  local scales and a curvature term. It is defined within 20 km of the origin in each axis and for an origin up to
+  80 degrees of latitude; a point beyond the extent, a non-finite point or an origin outside those limits gives no
+  position. Within the extent its distances from the origin differ from the geodesic distance by at most 1.5 m
+  (test `plane_error_against_geodesic_is_within_the_stated_bound`).
+- **OA-RWY-002** A runway is built from the published length, width, alignment, end coordinates, displaced-threshold
+  coordinates and declared distances. It keeps each physical end and each landing threshold apart, and the rectangle is
+  the one between the physical ends at the published width (tests on KMDW 04L/22R, which has both ends displaced).
+- **OA-RWY-003** Per OA-ASP-067, an end with a displacement and no NASR displaced coordinate takes its landing
+  threshold from the CIFP record and is marked as such; with no CIFP threshold the runway is refused. Where NASR has no
+  end coordinate and no displacement, the CIFP threshold is the end.
+- **OA-RWY-004** A runway with a missing or zero width, a missing length, a bad end name, a missing end or threshold,
+  an invalid coordinate, a coordinate outside the plane, or ends under 1 m apart is refused, and each refusal is
+  counted under its own reason; nothing is guessed.
+- **OA-RWY-005** A runway is refused when the published length and the distance between the physical ends differ by
+  more than 60 m, the published alignment and the azimuth between the ends by more than 2 degrees, a published
+  displacement and the measured one by more than 30 m, or a threshold lies more than 15 m off the line between the
+  ends or outside the runway (the same test as OA-RWY-004).
+- **OA-RWY-006** The occupancy regions are the rectangle, an approach area for each end measured outward from the
+  landing threshold (1,500 m long, 100 m wider than the runway on each side) and a departure area beyond each physical
+  end (1,000 m long, 50 m wider on each side). These dimensions are development values, not FAA values. The test
+  covers each edge of each region at radii 0 and just over the gap.
+- **OA-RWY-007** `occupies` reports whether a target, its position widened by its 95 % radius, touches the
+  rectangle, either approach area or either departure area. A non-finite or negative position or radius, or a
+  coordinate beyond 1e9 m, counts as occupying every region and is marked unknown (test `unknown_position_or_radius_occupies_everything`).
+- **OA-RWY-008** Raising the radius never removes a region from the result (test `a_larger_radius_only_adds_occupancy`,
+  a sweep of radii at six positions; proved for all inputs by OA-RWY-009).
+- **OA-RWY-009** For every runway with finite geometry, every position and finite radii r1 <= r2, a region occupied
+  at r1 is occupied at r2. Proved with Kani (`occupancy_is_monotone_in_r95`, `kani::cover!` that adding occupancy is
+  reachable).
+- **OA-RWY-010** For every runway and every non-finite, negative or beyond-the-limit (1e9 m) position or radius,
+  every region is occupied.
+  Proved with Kani (`non_finite_input_occupies`).
+- **OA-RWY-011** A point inside the rectangle occupies the runway for every finite radius of at least zero. Proved with
+  Kani (`point_in_rectangle_occupies`), for a point whose coordinates in the runway axes lie inside it; the
+  rotation into those axes is covered by the unit tests, not the proof.
+- **OA-RWY-012** The occupancy test returns without panic, overflow or NaN for every runway of the kind
+  `build_runway` makes (finite geometry within 1e9 m) and every position and radius, any `f64` bit pattern included.
+  Proved with Kani (`occupies_never_panics`).
+- **OA-RWY-013** For every plane scale `plane_new` can produce, the conversion from degrees gives no position for a
+  non-finite input, and any position it gives is finite and within the extent. Proved with Kani
+  (`local_plane_is_bounded`).
