@@ -42,14 +42,19 @@ fn main() -> ExitCode {
         }
     }
     let (Some(adsb), Some(addr), Some(t_ms)) = (adsb, addr, t_ms) else {
-        eprintln!("usage: turn_trace --adsb <clip.oaf> --addr <hex> --t-ms <unix ms> [--span-s 40]");
+        eprintln!(
+            "usage: turn_trace --adsb <clip.oaf> --addr <hex> --t-ms <unix ms> [--span-s 40]"
+        );
         return ExitCode::from(2);
     };
     if let Err(e) = oa_sealed::refuse(&adsb) {
         eprintln!("turn_trace: {e}");
         return ExitCode::from(2);
     }
-    let (lo, hi) = ((t_ms - span * 1000) * 1_000_000, (t_ms + span * 1000) * 1_000_000);
+    let (lo, hi) = (
+        (t_ms - span * 1000) * 1_000_000,
+        (t_ms + span * 1000) * 1_000_000,
+    );
     let mut sealed = 0u64;
     let Ok(clip) = load_adsb_counted(&adsb, &file_opener(), &mut sealed) else {
         return ExitCode::from(1);
@@ -72,7 +77,8 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let truth_at = |t_ns: i64| adsb_truth::query(&built.truth, addr, t_ns.div_euclid(1_000_000)).ok();
+    let truth_at =
+        |t_ns: i64| adsb_truth::query(&built.truth, addr, t_ns.div_euclid(1_000_000)).ok();
     let rel = |t_ns: i64| (t_ns - t_ms * 1_000_000) as f64 / 1e9;
     println!("measurements (set A): t_rel  heading  speed  | truth heading");
     for m in &meas {
@@ -123,7 +129,11 @@ fn main() -> ExitCode {
             println!(
                 "  {:7.2} {} {:7.2} {:6.2} {:5.3} | {th} {err}",
                 rel(tn),
-                if f & oa_track::O_TICK != 0 { "tick" } else { "upd " },
+                if f & oa_track::O_TICK != 0 {
+                    "tick"
+                } else {
+                    "upd "
+                },
                 compass(ve, vn),
                 g(&o.turn_rate_rps).to_degrees(),
                 mu

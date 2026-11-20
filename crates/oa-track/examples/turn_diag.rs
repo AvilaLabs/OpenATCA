@@ -50,10 +50,10 @@ use oa_track::score::{
     DRAIN_ROWS, SCORE_CHUNK_ROWS,
 };
 use oa_track::spill::{spill_append, spill_finish, spill_new};
-use oa_track::{tracker_log, tracker_stats};
-use oa_track::{tracker_advance, tracker_flush, tracker_new, tracker_update};
 use oa_track::types::{output_clear, output_len, output_new, TrackOutput, M_HAS_VEL, O_TICK};
 use oa_track::DEFAULT_CONFIG;
+use oa_track::{tracker_advance, tracker_flush, tracker_new, tracker_update};
+use oa_track::{tracker_log, tracker_stats};
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
 
 /// Half-width of the heading-rate difference, seconds.
@@ -160,7 +160,8 @@ fn parse_samples(text: &str) -> Result<Vec<Sample>, String> {
         .map(|(i, h)| (h, i))
         .collect();
     let col = |n: &str| head.get(n).copied().ok_or(format!("no column {n}"));
-    let (c_addr, c_t, c_band, c_common) = (col("addr")?, col("t_ms")?, col("band")?, col("common")?);
+    let (c_addr, c_t, c_band, c_common) =
+        (col("addr")?, col("t_ms")?, col("band")?, col("common")?);
     let (c_cross, c_hdg, c_dt) = (
         col("oa_cross_m")?,
         col("oa_track_err_deg")?,
@@ -333,7 +334,11 @@ fn run(adsb: &Path, samples_path: &Path, out_dir: &Path, rescore: bool) -> Resul
         if addrs.contains(&m.addr) {
             if i % LAG_EVERY == 0 && m.flags & M_HAS_VEL != 0 {
                 let (e, n) = (f64::from(m.vel_east_mps), f64::from(m.vel_north_mps));
-                reported.push((m.addr, m.toa_ns.div_euclid(1_000_000), e.atan2(n).to_degrees()));
+                reported.push((
+                    m.addr,
+                    m.toa_ns.div_euclid(1_000_000),
+                    e.atan2(n).to_degrees(),
+                ));
             }
             times
                 .entry(m.addr)
@@ -432,7 +437,8 @@ fn run(adsb: &Path, samples_path: &Path, out_dir: &Path, rescore: bool) -> Resul
             drop(r);
             let ix = build_th_index(&legacy.th, legacy.flights.gufi.len());
             let assoc = associate(&legacy, &ix, &truth, &tix, &rcfg.assoc);
-            let (p, _) = build_pairs_with(&legacy, &ix, &assoc, &truth, &rcfg.pair, &|_, _, _| None);
+            let (p, _) =
+                build_pairs_with(&legacy, &ix, &assoc, &truth, &rcfg.pair, &|_, _, _| None);
             for (i, (&a, &t)) in p.addr.iter().zip(&p.t_ms).enumerate() {
                 let g = |v: &[f32]| f64::from(v.get(i).copied().unwrap_or(f32::NAN));
                 let (c, h) = (g(&p.cross_m), g(&p.hdg_err_deg));
@@ -520,11 +526,12 @@ fn run(adsb: &Path, samples_path: &Path, out_dir: &Path, rescore: bool) -> Resul
         .iter()
         .map(|s| s.to_string())
         .collect();
-    let mut by_rate = Table::new("By the reference's turn rate (deg/s, magnitude)", rate_labels);
+    let mut by_rate = Table::new(
+        "By the reference's turn rate (deg/s, magnitude)",
+        rate_labels,
+    );
     let mut by_phase = Table::new(
-        &format!(
-            "By turn phase (turning = |rate| >= {TURN_DPS} deg/s; window {WINDOW_S} s)"
-        ),
+        &format!("By turn phase (turning = |rate| >= {TURN_DPS} deg/s; window {WINDOW_S} s)"),
         PHASES.iter().map(|s| s.to_string()).collect(),
     );
     let mut by_mu = Table::new("By the IMM turn-model probability", mu_labels);
@@ -673,7 +680,15 @@ mod tests {
     // REQ: OA-TRK-396
     #[test]
     fn statistics_are_nearest_rank_of_the_absolute_values() {
-        let v: Vec<f64> = (1..=100).map(|i| if i % 2 == 0 { -f64::from(i) } else { f64::from(i) }).collect();
+        let v: Vec<f64> = (1..=100)
+            .map(|i| {
+                if i % 2 == 0 {
+                    -f64::from(i)
+                } else {
+                    f64::from(i)
+                }
+            })
+            .collect();
         let [n, med, p95, rms] = stat(&v);
         assert_eq!((n, med, p95), (100.0, 50.0, 95.0));
         assert!((rms - (338_350.0_f64 / 100.0).sqrt()).abs() < 1.0e-9);

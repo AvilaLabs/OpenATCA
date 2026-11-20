@@ -34,7 +34,7 @@ use oa_geo::small::sin_cos_near_zero;
 
 use crate::params::{
     cv_only_q, CT_OMEGA_STD_FLOOR, H_MU0_CV, H_PRIOR_VEL_STD, H_Q_CT, H_Q_CV, H_Q_OMEGA,
-    H_TAU_CT_S, H_TAU_CV_S, MU_FLOOR, OMEGA_MAX, V_TAU_CLIMB_S, V_TAU_LEVEL_S, VEL_LAG_S,
+    H_TAU_CT_S, H_TAU_CV_S, MU_FLOOR, OMEGA_MAX, VEL_LAG_S, V_TAU_CLIMB_S, V_TAU_LEVEL_S,
 };
 
 /// One model's state and covariance. Hot (A7): 5 + 25 doubles.
