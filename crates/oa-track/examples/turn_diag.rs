@@ -966,13 +966,13 @@ fn gap_report(o: &mut String, g: &GapIn) {
     };
     let _ = writeln!(
         o,
-        "\nGap diagnostic: dead reckoning (last raw report's position plus its reported velocity times the age) against OpenATCA and ERAM, cross-track m, median p95 rms; samples with a raw report, a tracker row and a reference of 50 m/s or more ({} samples)",
+        "\nGap diagnostic: dead reckoning (last raw report's position plus its reported velocity times the age) against OpenATCA and ERAM, cross-track m, median p95 rms (groups: a phase, or level / turning by the reference turn rate under / over 0.5 deg/s at the sample); samples with a raw report, a tracker row and a reference of 50 m/s or more ({} samples)",
         far.len()
     );
     let _ = writeln!(
         o,
-        "  {:<22} {:>6} | dead reckoning        | OpenATCA (same definition) | OpenATCA (p002)      | ERAM",
-        "phase, age", "n"
+        "  {:<26} {:>6} | dead reckoning        | OpenATCA (same definition) | OpenATCA (p002)      | ERAM",
+        "group, age", "n"
     );
     let ages: [(&str, f64, f64); 4] = [
         ("under 5 s", 0.0, FAR_S),
@@ -980,15 +980,23 @@ fn gap_report(o: &mut String, g: &GapIn) {
         ("over 8 s", 8.0, f64::INFINITY),
         ("over 5 s", FAR_S, f64::INFINITY),
     ];
-    for fl in ["all", "climb", "cruise", "descent"] {
+    for fl in ["all", "climb", "cruise", "descent", "level", "turning"] {
         for (name, lo, hi) in ages {
             let v: Vec<&Far> = far
                 .iter()
-                .filter(|a| (fl == "all" || a.flight == fl) && a.age >= lo && a.age < hi)
+                .filter(|a| {
+                    let in_group = match fl {
+                        "all" => true,
+                        "level" => a.level,
+                        "turning" => !a.level,
+                        _ => a.flight == fl,
+                    };
+                    in_group && a.age >= lo && a.age < hi
+                })
                 .collect();
             let _ = writeln!(
                 o,
-                "  {:<22} {:>6} | {} | {}     | {} | {}",
+                "  {:<26} {:>6} | {} | {}     | {} | {}",
                 format!("{fl}, {name}"),
                 v.len(),
                 cell(&v, &|a| a.dr),
@@ -1158,5 +1166,29 @@ mod tests {
         assert_eq!((s.oa_cross, s.er_cross), (-3.5, 7.0));
         assert_eq!(s.flight, "climb");
         assert!(parse_samples("addr,t_ms\n").is_err());
+    }
+
+    // REQ: OA-TRK-402
+    #[test]
+    fn the_cross_track_distance_is_from_the_reference_line_and_the_last_report_is_found() {
+        // Reference at 45 N heading east at 200 m/s: a point 100 m north is 100 m off the line,
+        // one 5 km east of it is on it; below the speed floor there is no line.
+        let r = [45.0, 10.0, 200.0, 0.0];
+        let north = cross_of(45.0 + 100.0 / M_PER_DEG, 10.0, &r).unwrap();
+        assert!((north + 100.0).abs() < 1e-6, "{north}");
+        let east = cross_of(
+            45.0,
+            10.0 + 5000.0 / (M_PER_DEG * 45f64.to_radians().cos()),
+            &r,
+        )
+        .unwrap();
+        assert!(east.abs() < 1e-6, "{east}");
+        assert!(cross_of(45.0, 10.0, &[45.0, 10.0, 10.0, 0.0]).is_none());
+        assert_eq!(wrap_deg(190.0), -170.0);
+        assert_eq!(wrap_deg(-190.0), 170.0);
+        let t = [1000, 2000, 5000];
+        assert_eq!(last_report(&t, 1999), Some(1000));
+        assert_eq!(last_report(&t, 5000), Some(5000));
+        assert_eq!(last_report(&t, 999), None);
     }
 }
