@@ -787,7 +787,7 @@ fn the_summary_example_refuses_sealed_folders_as_given_and_through_links() {
     let root = std::env::temp_dir().join(format!("oa-stdds-seal-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     for name in [
-        "rec-20261119",
+        "rec-20261119/day2",
         "stdds-20261119-holdout",
         "stdds-smoke-20261119",
     ] {
@@ -795,6 +795,7 @@ fn the_summary_example_refuses_sealed_folders_as_given_and_through_links() {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a.oaf");
         std::fs::write(&file, b"").unwrap();
+        let name = name.replace('/', "-");
         // As given.
         let o = run(&file);
         assert_eq!(o.status.code(), Some(2), "{name}");

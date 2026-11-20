@@ -23,8 +23,8 @@ fn scratch(name: &str) -> PathBuf {
 #[test]
 fn the_three_sealed_recordings_are_refused_as_given() {
     for p in [
-        "x/scds/rec-20261119",
-        "x/scds/rec-20261119/sub/file.oaf",
+        "x/scds/rec-20261119/day2",
+        "x/scds/rec-20261119/day2/sub/file.oaf",
         "/data/scds/stdds-20261119-holdout",
         "/data/scds/stdds-20261119-holdout/a",
         "/data/scds/stdds-smoke-20261119T192936Z",
@@ -53,13 +53,13 @@ fn the_three_sealed_recordings_are_refused_as_given() {
 fn a_link_into_a_sealed_recording_is_refused_after_resolving() {
     let root = scratch("link");
     for sealed in [
-        "rec-20261119",
+        "rec-20261119/day2",
         "stdds-20261119-holdout",
         "stdds-smoke-20261119T000000Z",
     ] {
         let dir = root.join("scds").join(sealed);
         std::fs::create_dir_all(&dir).unwrap();
-        let link = root.join(format!("innocent-{sealed}"));
+        let link = root.join(format!("innocent-{}", sealed.replace('/', "-")));
         std::os::unix::fs::symlink(&dir, &link).unwrap();
         assert!(refuse_sealed(&link).is_err(), "{sealed}");
     }
@@ -74,7 +74,7 @@ fn the_program_exits_2_for_a_sealed_path_in_any_argument_and_opens_nothing() {
     let fine = out.join("fine");
     for (adsb, sfdps, o) in [
         (
-            "/x/scds/rec-20261119/a.oaf",
+            "/x/scds/rec-20261119/day2/a.oaf",
             fine.to_str().unwrap(),
             out.join("o"),
         ),
@@ -144,7 +144,7 @@ fn arguments_are_strict() {
 fn every_file_opened_is_canonicalised_so_a_link_in_an_unsealed_directory_is_refused() {
     use oa_shadow::run::guarded_opener;
     let root = scratch("opener");
-    let sealed = root.join("scds").join("rec-20261119");
+    let sealed = root.join("scds").join("rec-20261119").join("day2");
     std::fs::create_dir_all(&sealed).unwrap();
     let target = sealed.join("a.msg");
     std::fs::write(&target, b"x").unwrap();
@@ -166,7 +166,7 @@ fn run_itself_refuses_a_sealed_argument_before_creating_anything() {
     let out = scratch("runrefuse");
     let made = out.join("o");
     let r = oa_shadow::run::run(&Args {
-        adsb: PathBuf::from("/x/scds/rec-20261119/a.oaf"),
+        adsb: PathBuf::from("/x/scds/rec-20261119/day2/a.oaf"),
         sfdps_dir: out.join("fine"),
         out: made.clone(),
     });
@@ -180,7 +180,7 @@ fn run_itself_refuses_a_sealed_argument_before_creating_anything() {
 #[cfg(unix)]
 fn an_output_directory_that_does_not_exist_yet_is_resolved_through_its_existing_parent() {
     let root = scratch("newdir");
-    let sealed = root.join("scds").join("rec-20261119");
+    let sealed = root.join("scds").join("rec-20261119").join("day2");
     std::fs::create_dir_all(&sealed).unwrap();
     let link = root.join("innocent");
     std::os::unix::fs::symlink(&sealed, &link).unwrap();
@@ -197,7 +197,7 @@ fn links_into_sealed_data_are_refused_for_each_argument_and_inside_the_sfdps_fol
     use std::os::unix::fs::symlink;
     let exe = env!("CARGO_BIN_EXE_oa-shadow");
     let t = scratch("links");
-    let sealed = t.join("scds/rec-20261119");
+    let sealed = t.join("scds/rec-20261119/day2");
     std::fs::create_dir_all(&sealed).unwrap();
     std::fs::write(sealed.join("a.oaf"), b"x").unwrap();
     std::fs::write(t.join("fine.oaf"), b"x").unwrap();

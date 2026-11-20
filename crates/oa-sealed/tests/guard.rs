@@ -24,14 +24,16 @@ fn scratch(name: &str) -> PathBuf {
 fn fake_root(name: &str) -> PathBuf {
     let root = scratch(name).join("data");
     for d in [
-        "scds/rec-20261119/sfdps",
+        "scds/rec-20261119/day2/sfdps",
+        "scds/rec-20261119/day1",
+        "scds/rec-20261119/bin",
         "scds/stdds-20261119-holdout",
         "scds/stdds-smoke-20261119T192936Z",
         "scds/day-20261118/rec",
     ] {
         fs::create_dir_all(root.join(d)).unwrap();
     }
-    fs::write(root.join("scds/rec-20261119/sfdps/a.bin"), b"x").unwrap();
+    fs::write(root.join("scds/rec-20261119/day2/sfdps/a.bin"), b"x").unwrap();
     fs::write(root.join("scds/day-20261118/rec/b.bin"), b"y").unwrap();
     root
 }
@@ -44,7 +46,10 @@ fn the_list_has_the_sealed_folders_and_the_python_guard_parses_it_to_the_same_se
     assert_eq!(
         texts,
         [
-            "scds/rec-20261119",
+            "scds/rec-20261119/day2*",
+            "scds/rec-20261119/day3*",
+            "scds/rec-20261119/day4*",
+            "scds/rec-20261119/runs*",
             "scds/stdds-20261119-holdout",
             "scds/stdds-smoke-20261119*",
             "raw/adsblol/2026.11.20",
@@ -93,8 +98,11 @@ fn a_list_that_does_not_parse_is_an_error_and_the_guard_then_refuses_everything(
 fn sealed_names_are_refused_as_given_with_the_rule_named_and_near_misses_are_not() {
     let g = Sealed::with_root(&fake_root("names"));
     for p in [
-        "x/scds/rec-20261119",
-        "/data/scds/rec-20261119/sub/file.oaf",
+        "x/scds/rec-20261119/day2",
+        "/data/scds/rec-20261119/day2/sub/file.oaf",
+        "/data/scds/rec-20261119/day2x",
+        "/data/scds/rec-20261119/day3.partial",
+        "/data/scds/rec-20261119/runs.log",
         "/data/scds/stdds-20261119-holdout/a",
         "/data/scds/stdds-smoke-20261119T192936Z/b.bin",
         "/data/scds/stdds-smoke-20261119",
@@ -105,6 +113,7 @@ fn sealed_names_are_refused_as_given_with_the_rule_named_and_near_misses_are_not
     for p in [
         "/data/scds/day-20261114/rec/sfdps",
         "/data/scds/rec-20261119x",
+        "/data/scds/rec-20261119/day1/x",
         "/data/rec-20261119",
         "/data/scds/x/rec-20261119",
         "/data/scds/stdds-smoke-20261118T1",
@@ -114,6 +123,58 @@ fn sealed_names_are_refused_as_given_with_the_rule_named_and_near_misses_are_not
     }
 }
 
+// REQ: OA-SEAL-001
+// REQ: OA-SEAL-002
+#[test]
+fn only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed() {
+    let root = fake_root("tune");
+    let g = Sealed::with_root(&root);
+    let rec = root.join("scds/rec-20261119");
+    fs::write(rec.join("day1/x"), b"x").unwrap();
+    fs::create_dir_all(rec.join("day3")).unwrap();
+    fs::create_dir_all(rec.join("day4")).unwrap();
+    fs::write(rec.join("bin/run-days.sh"), b"x").unwrap();
+    for p in ["day1/x", "bin/run-days.sh", "bin", "day1", "day1x", "day5"] {
+        assert!(g.check(&rec.join(p)).is_ok(), "{p}");
+    }
+    // The folder itself holds sealed entries, so it is refused as a holding directory (as
+    // `scds` is): a tool names day1 or bin directly.
+    let e = g.check(&rec).unwrap_err().to_string();
+    assert!(e.contains("OA-SEAL-001") && e.contains("holds"), "{e}");
+    for p in [
+        "day2/x",
+        "day3",
+        "day3/x",
+        "day4/x",
+        "runs.log",
+        "runs.log.1",
+        "day2.tmp",
+        "day30",
+        "day1/../day2/x",
+    ] {
+        let e = g.check(&rec.join(p)).unwrap_err().to_string();
+        assert!(e.contains("OA-SEAL-001"), "{p} {e}");
+    }
+    let work = root.parent().unwrap().join("work");
+    fs::create_dir_all(&work).unwrap();
+    // A link inside day1 into day2, and a link named day1 elsewhere to day2.
+    symlink(rec.join("day2/sfdps/a.bin"), rec.join("day1/link")).unwrap();
+    assert!(g.check(&rec.join("day1/link")).is_err());
+    symlink(rec.join("day2"), work.join("day1")).unwrap();
+    assert!(g.check(&work.join("day1")).is_err());
+    assert!(g.check(&work.join("day1/sfdps/a.bin")).is_err());
+    // A copy under another root: the names decide.
+    assert!(g
+        .check(Path::new("/elsewhere/scds/rec-20261119/day2/x"))
+        .is_err());
+    assert!(g
+        .check(Path::new("/elsewhere/scds/rec-20261119/runs.log"))
+        .is_err());
+    assert!(g
+        .check(Path::new("/elsewhere/scds/rec-20261119/day1/x"))
+        .is_ok());
+}
+
 // REQ: OA-SEAL-002
 #[test]
 fn a_path_is_resolved_before_it_is_checked() {
@@ -121,7 +182,7 @@ fn a_path_is_resolved_before_it_is_checked() {
     let g = Sealed::with_root(&root);
     let work = root.parent().unwrap().join("work");
     fs::create_dir_all(&work).unwrap();
-    let sealed = root.join("scds/rec-20261119");
+    let sealed = root.join("scds/rec-20261119/day2");
     // A link to the folder, to a file in it, a link to a link, and a symlinked parent directory.
     symlink(&sealed, work.join("dir")).unwrap();
     symlink(sealed.join("sfdps/a.bin"), work.join("file")).unwrap();
@@ -132,10 +193,10 @@ fn a_path_is_resolved_before_it_is_checked() {
         work.join("file"),
         work.join("chain/sfdps"),
         // `..` that leads into the folder, and a path through a dir that is not there yet.
-        root.join("scds/day-20261118/../rec-20261119/sfdps"),
+        root.join("scds/day-20261118/../rec-20261119/day2/sfdps"),
         work.join("dir/new-output"),
         work.join("dir/not/yet/here"),
-        root.join("scds/day-20261118/nothing/../../rec-20261119"),
+        root.join("scds/day-20261118/nothing/../../rec-20261119/day2"),
     ] {
         let e = g.check(&p).unwrap_err().to_string();
         assert!(e.contains("OA-SEAL-001"), "{} {e}", p.display());
@@ -186,7 +247,7 @@ fn a_directory_that_holds_a_sealed_folder_is_refused_and_one_below_it_is_not() {
     // The same on a root reached through a link.
     let via = root.parent().unwrap().join("via");
     symlink(&root, &via).unwrap();
-    assert!(g.check(&via.join("scds/rec-20261119")).is_err());
+    assert!(g.check(&via.join("scds/rec-20261119/day2")).is_err());
     assert!(g.check(&via.join("scds/day-20261118/rec")).is_ok());
 }
 
@@ -199,7 +260,7 @@ fn every_file_a_walk_opens_goes_through_the_opener() {
     // opens each entry through the guard reads the first and is refused on the second.
     let dev = root.join("scds/day-20261118/rec");
     symlink(
-        root.join("scds/rec-20261119/sfdps/a.bin"),
+        root.join("scds/rec-20261119/day2/sfdps/a.bin"),
         dev.join("sneaky"),
     )
     .unwrap();
@@ -227,7 +288,7 @@ fn every_file_a_walk_opens_goes_through_the_opener() {
 fn nothing_switches_the_guard_off() {
     let root = fake_root("nooff");
     let g = Sealed::with_root(&root);
-    let sealed = root.join("scds/rec-20261119/sfdps/a.bin");
+    let sealed = root.join("scds/rec-20261119/day2/sfdps/a.bin");
     // Whatever the environment says, the answer is the same: the guard reads no environment.
     let src = include_str!("../src/lib.rs");
     for word in ["env::var", "env::args", "getenv", "OA_SEAL"] {
@@ -247,7 +308,7 @@ fn a_file_opened_after_a_swapped_in_link_is_caught_on_the_descriptor() {
     let g = Sealed::with_root(&root);
     let work = root.parent().unwrap().join("work");
     fs::create_dir_all(&work).unwrap();
-    let sealed_file = root.join("scds/rec-20261119/sfdps/a.bin");
+    let sealed_file = root.join("scds/rec-20261119/day2/sfdps/a.bin");
     symlink(&sealed_file, work.join("late")).unwrap();
     // As if the path check had passed before the link was put there: the file is opened without
     // the check and then verified.

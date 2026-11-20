@@ -139,7 +139,7 @@ fn a_sealed_path_is_refused_with_exit_2_naming_the_rule_and_nothing_is_written()
     let digest = d.join("a.txt");
     fs::write(&digest, digest_with(&[1])).unwrap();
     // A fake path that only names a sealed folder; nothing real is touched.
-    let fake = "/nonexistent-fake/scds/rec-20261119/digest.txt";
+    let fake = "/nonexistent-fake/scds/rec-20261119/day2/digest.txt";
     let summary = d.join("summary.txt");
     for args in [
         vec![fake.to_string(), digest.display().to_string()],

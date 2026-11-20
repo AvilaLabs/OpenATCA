@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const CLIP: &str = "/nonexistent-fake/scds/rec-20261119/clip.oaf";
+const CLIP: &str = "/nonexistent-fake/scds/rec-20261119/day2/clip.oaf";
 const SFDPS: &str = "/nonexistent-fake/scds/stdds-smoke-20261119T192936Z/sfdps";
 
 /// An example binary built beside the test binary (`target/<profile>/examples/<name>`).
@@ -112,7 +112,7 @@ fn the_examples_that_read_recordings_refuse_a_sealed_path() {
 fn the_tools_refuse_links_into_sealed_data_and_loaders_refuse_links_inside_a_folder() {
     use std::os::unix::fs::symlink;
     let t = out_dir("links");
-    let sealed = t.join("scds/rec-20261119");
+    let sealed = t.join("scds/rec-20261119/day2");
     std::fs::create_dir_all(&sealed).unwrap();
     std::fs::write(sealed.join("a.oaf"), b"x").unwrap();
     symlink(sealed.join("a.oaf"), t.join("clip.oaf")).unwrap();

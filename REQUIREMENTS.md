@@ -4741,8 +4741,9 @@ scope.
 - **OA-CMP-045** `slice` refuses a source directory whose `README.txt` is missing or unreadable.
 - **OA-CMP-046** The build commit's modified flag follows the tracked files of the trees the crate is built from
   (the build script reruns on the git index and on those trees).
-- **OA-CMP-047** Any input path with the components `scds/rec-20261119` (the sealed hold-out recording) is
-  refused, as given and after resolving links; a flag value that starts with `--` is a missing value and a
+- **OA-CMP-047** Any input path the shared sealed list refuses (OA-SEAL-001; of the recording
+  `scds/rec-20261119`, that is days 2 to 4, the run log and the folder itself) is refused, as given and after
+  resolving links; a flag value that starts with `--` is a missing value and a
   repeated flag is an error.
 
 - **OA-TRK-370** The canonical row layout is tied to the spill column table at compile time: the
@@ -5127,9 +5128,8 @@ value is a difference only when strictly greater than it.
 - **OA-SHD-015** Both systems are restricted to the clip box (38.5 to 46.5 N, 83.5 to 93.5 W, inclusive); the
   identity the adapter was offered is the squawk and callsign carried forward from the aircraft's reports, one point
   per change.
-- **OA-SHD-016** An input or output path with the components `scds` then `rec-20261119`, `stdds-20261119-holdout` or
-  a name starting `stdds-smoke-20261119`, as given or after resolving links, is refused before anything is
-  opened, exit 2.
+- **OA-SHD-016** An input or output path the shared sealed list refuses (OA-SEAL-001), as given or after
+  resolving links, is refused before anything is opened, exit 2.
 - **OA-SHD-017** A missing, repeated, unknown or valueless flag (a value starting with `--` is missing) is a usage
   error, exit 2.
 - **OA-SHD-018** The two recordings are cut to the overlap of their in-box recorded extents (ERAM's in-box track
@@ -5459,13 +5459,13 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
 - **OA-SEAL-001** The sealed hold-out data is listed once, in `crates/oa-sealed/sealed_paths.txt` (the data root and the entries
-  `scds/rec-20261119`, `scds/stdds-20261119-holdout`, `scds/stdds-smoke-20261119*`); the Rust guard compiles the file in and
+  `scds/rec-20261119/day2`, `day3`, `day4`, `runs*`, `scds/stdds-20261119-holdout`, `scds/stdds-smoke-20261119*`); the Rust guard compiles the file in and
   the Python guard reads it, and both parse it to the same set. A list that does not parse refuses every path.
 - **OA-SEAL-002** A path is resolved before it is checked (relative paths, `..`, every link, a symlinked parent directory, a
   path not yet created through its nearest existing ancestor) and is refused, with a message that names the rule, if it is,
-  is inside, resolves into or names (`scds` then a sealed name, as given or resolved) a sealed entry, if it is a directory
-  that holds one, or if a link on it cannot be resolved. The shared guard owns the path rule only; a recording or row
-  stamped on UTC day 2026-11-19 is a content rule that needs the tool's own parser.
+  is inside, resolves into or names (an entry's components in a row, as given or resolved) a sealed entry, if it is a
+  directory that holds one, or if a link on it cannot be resolved. The shared guard owns the path rule only; keeping a
+  sealed day's rows out of a file that also holds unsealed rows is a content rule that needs the tool's own parser.
 - **OA-SEAL-003** A tool that walks a directory checks every file it opens, through the guard's opener, not only its
   arguments.
 - **OA-SEAL-004** Nothing switches the guard off: it reads no environment variable, flag or file, and an unknown option of
@@ -5482,3 +5482,11 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   guard before they stat a listed entry, and every guarded opener is this one function.
 - **OA-SEAL-008** The list file is printable ASCII and newline only, each line `word`, one space, `value`; both parsers
   refuse anything else, and the same inputs are refused by both.
+- **OA-SEAL-009** Of the four-day recording `scds/rec-20261119`, the sealed list seals the name prefixes `day2*`, `day3*` and
+  `day4*` (hold-out days A, B and C of protocol P-001, and any renamed or partial copy beside them such as `day2.tmp`) and
+  `runs*` (the recorder's run log, which covers every day); `day1` (the tune day, usable freely) and `bin` are not sealed,
+  so a path below them is accepted. The recorder (`bin/run-days.sh`) writes only `day1` to `day4` and `runs.log` at the
+  top of the folder. The folder itself holds sealed entries and is refused as a holding directory (OA-SEAL-002), like
+  `scds`. A path through `..` or a link into day2 to day4 is refused, and so is a copy that keeps the components
+  `scds/rec-20261119/day2` (or day3, day4, runs); a copy renamed outside those components is not caught by any path rule. Tests: `only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed` (Rust,
+  `crates/oa-sealed/tests/guard.rs`; Python, `tools/test_sealed_guard.py`).
