@@ -48,6 +48,8 @@ struct Ctx<'a> {
     limits: Limits,
     census: &'a mut Census,
     rs: ReadStats,
+    /// Decides the damaged frames of the file being read (see [`oa_sealed::DamagedGate`]).
+    gate: oa_sealed::DamagedGate,
 }
 
 impl ReadStats {
@@ -81,6 +83,16 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
     while let Some(ev) = reader.next() {
         if ctx.rs.over_budget {
             break;
+        }
+        // Every frame is settled against its neighbours: a damaged frame has no receive time of
+        // its own, so the good frames either side of it decide whether it is damage or a drop.
+        match &ev {
+            Ok(f) => {
+                let (kept, gone) = ctx.gate.good(f.recv_unix_ns);
+                ctx.rs.bad_frames += kept;
+                ctx.rs.sealed_window_dropped += gone;
+            }
+            Err(_) => ctx.gate.damaged(),
         }
         match ev {
             // A frame of any kind (Status and Reject included) received in a sealed window is
@@ -120,7 +132,7 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
                 }
             }
             Ok(_) => ctx.rs.other_frames += 1,
-            Err(_) => ctx.rs.bad_frames += 1,
+            Err(_) => {}
         }
     }
 }
@@ -182,8 +194,9 @@ fn read_stream<R: Read>(mut src: R, ctx: &mut Ctx<'_>) -> std::io::Result<()> {
     }
     drain(&mut reader, ctx);
     if reader.finish().is_some() {
-        ctx.rs.bad_frames += 1;
+        ctx.gate.damaged();
     }
+    ctx.rs.sealed_window_dropped += ctx.gate.finish();
     ctx.rs.files += 1;
     ctx.rs.files_gzip_damaged += u64::from(damaged);
     ctx.rs.files_gzip_truncated +=
@@ -318,6 +331,7 @@ pub fn read_dir_counted(
         limits: read_limits(),
         census,
         rs: ReadStats::new(),
+        gate: oa_sealed::DamagedGate::new(),
     };
     for f in &files {
         refuse_sealed(g, f).map_err(ReadError::Refused)?;
@@ -353,6 +367,7 @@ pub fn read_bytes(bytes: &[u8], census: &mut Census) -> Result<ReadStats, String
         limits: read_limits(),
         census,
         rs: ReadStats::new(),
+        gate: oa_sealed::DamagedGate::new(),
     };
     read_stream(bytes, &mut ctx).map_err(|e| format!("cannot read: {e}"))?;
     ctx.rs.sealed_window_dropped += ctx.rs.stats.sealed_window_dropped;
@@ -568,7 +583,40 @@ mod tests {
         let mut c = Census::new();
         let rs = read_bytes(&bytes, &mut c).unwrap();
         assert_eq!(rs.tais_records, 1);
-        assert_eq!(rs.bad_frames, 1);
+        // Nothing follows the cut frame, so it has no receive time to be told by: it is dropped
+        // and counted in the drop line, not as damage (OA-SEAL-014).
+        assert_eq!((rs.bad_frames, rs.sealed_window_dropped), (0, 1));
+    }
+
+    /// Three status frames received at `t`, the middle one damaged (a payload byte flipped).
+    fn damaged_middle(t: [i64; 3]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut at = Vec::new();
+        for (i, t) in t.into_iter().enumerate() {
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(&mut buf, 3, 0, i as u64, t, 0, b"xxxx").unwrap();
+            at.push(out.len());
+            out.extend_from_slice(&buf[..n]);
+        }
+        out[at[1] + 37] ^= 0xff;
+        out
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn a_damaged_frame_is_gated_by_the_receive_times_of_the_good_frames_either_side() {
+        const FROM: i64 = 1_795_131_900_000_000_000;
+        let out = FROM - 3_600_000_000_000;
+        let read = |t: [i64; 3]| {
+            let mut c = Census::new();
+            let rs = read_bytes(&damaged_middle(t), &mut c).unwrap();
+            (rs.other_frames, rs.bad_frames, rs.sealed_window_dropped)
+        };
+        // Both neighbours outside the window: it is damage.
+        assert_eq!(read([out, out, out + 1]), (2, 1, 0));
+        // Either neighbour inside it: the damaged frame is dropped, with that neighbour.
+        assert_eq!(read([out, out, FROM]), (1, 0, 2));
+        assert_eq!(read([FROM, out, out]), (1, 0, 2));
     }
 
     // REQ: OA-CEN-005

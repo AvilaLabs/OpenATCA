@@ -125,3 +125,42 @@ fn the_summary_example_drops_status_and_reject_frames_received_in_the_window() {
     assert!(text.contains("other 1"), "{text}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_summary_example_gates_a_damaged_frame_by_its_neighbours_receive_times() {
+    let run = |name: &str, t: [i64; 3]| {
+        let mut bytes = Vec::new();
+        let mut at = Vec::new();
+        for (i, t) in t.into_iter().enumerate() {
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(&mut buf, 3, 0, i as u64, t, 0, b"xxxx").unwrap();
+            at.push(bytes.len());
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        bytes[at[1] + 37] ^= 0xff;
+        let dir = std::env::temp_dir().join(format!("oa-stdds-gate-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("clip.oaf");
+        std::fs::write(&file, bytes).unwrap();
+        let out = std::process::Command::new(example())
+            .arg(&file)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let before = FROM - 3_600_000_000_000;
+    let text = run("out", [before, before, before + 1]);
+    assert!(text.contains("other 2 damaged 1"), "{text}");
+    assert!(
+        text.trim_end().ends_with("sealed-window rows dropped: 0"),
+        "{text}"
+    );
+    let text = run("in", [before, before, FROM]);
+    assert!(text.contains("other 1 damaged 0"), "{text}");
+    assert!(
+        text.trim_end().ends_with("sealed-window rows dropped: 2"),
+        "{text}"
+    );
+}

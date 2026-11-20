@@ -140,7 +140,7 @@ fn spawn_bridge(env: &PathBuf, jar: &Option<PathBuf>, java: &Option<PathBuf>) ->
 fn live(cfg: &Live) -> Result<ExitCode, String> {
     let mut child: Option<Child> = None;
     let mut src: Box<dyn Read + Send> = match &cfg.source {
-        // seal-allow: live capture: this binary records what it is fed and never computes on what it reads
+        // seal-allow: `oa-feed < file` copies frames as given; the path guard cannot see standard input, and that route is the operator's deliberate choice
         Source::Stdin => Box::new(io::stdin()),
         Source::Bridge { env, jar, java } => {
             let mut c =

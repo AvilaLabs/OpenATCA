@@ -38,10 +38,22 @@ struct Ctx {
     /// Bytes the frame reader would not take after a drain (a stall): counted, never dropped
     /// silently; the run exits non-zero.
     stalled_bytes: u64,
+    /// Decides the damaged frames (see [`oa_sealed::DamagedGate`]).
+    gate: oa_sealed::DamagedGate,
 }
 
 fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
     while let Some(ev) = reader.next() {
+        // A damaged frame has no receive time: the good frames either side of it decide whether
+        // it is damage or a drop (frames dropped this way are in `sealed_frames`).
+        match &ev {
+            Ok(f) => {
+                let (kept, gone) = ctx.gate.good(f.recv_unix_ns);
+                ctx.bad_frames += kept;
+                ctx.sealed_frames += gone;
+            }
+            Err(_) => ctx.gate.damaged(),
+        }
         match ev {
             // A frame of any kind (Status and Reject included) received in a sealed window is
             // dropped and counted, never parsed and never counted by kind.
@@ -65,7 +77,7 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
                 }
             }
             Ok(_) => ctx.other_frames += 1,
-            Err(_) => ctx.bad_frames += 1,
+            Err(_) => {}
         }
     }
 }
@@ -121,6 +133,7 @@ fn main() -> ExitCode {
         sealed_frames: 0,
         refused: [0; 4],
         stalled_bytes: 0,
+        gate: oa_sealed::DamagedGate::new(),
     };
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
     let Ok(mut reader) = FrameReader::new(&mut storage) else {
@@ -167,8 +180,11 @@ fn main() -> ExitCode {
     }
     drain(&mut reader, &mut ctx);
     if reader.finish().is_some() {
-        ctx.bad_frames += 1;
+        ctx.gate.damaged();
     }
+    let tail = ctx.gate.finish();
+    ctx.sealed_frames += tail;
+    drops.add(tail);
     let truncated = gz.as_ref().is_some_and(|g| g.finish().truncated.is_some());
 
     let s = &ctx.stats;

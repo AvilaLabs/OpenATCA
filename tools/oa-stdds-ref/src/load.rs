@@ -67,10 +67,22 @@ struct Ctx<'a> {
     file: u32,
     out: &'a mut Vec<Rec>,
     info: FileInfo,
+    /// Decides the damaged frames of the file (see [`oa_sealed::DamagedGate`]).
+    gate: oa_sealed::DamagedGate,
 }
 
 fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
     while let Some(ev) = reader.next() {
+        // A damaged frame has no receive time: the good frames either side of it decide whether
+        // it is damage or a drop.
+        match &ev {
+            Ok(f) => {
+                let (kept, gone) = ctx.gate.good(f.recv_unix_ns);
+                ctx.info.frames_damaged += kept;
+                ctx.info.sealed_window_dropped += gone;
+            }
+            Err(_) => ctx.gate.damaged(),
+        }
         match ev {
             // A frame of any kind (Status and Reject included) received in a sealed window is
             // dropped and counted, never parsed and never counted by kind.
@@ -100,7 +112,7 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
                 }
             }
             Ok(_) => ctx.info.frames_other += 1,
-            Err(_) => ctx.info.frames_damaged += 1,
+            Err(_) => {}
         }
     }
 }
@@ -163,6 +175,7 @@ pub fn load_reader_counted<R: Read>(
             gzip_truncated: false,
             records: 0,
         },
+        gate: oa_sealed::DamagedGate::new(),
     };
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
     let mut reader =
@@ -193,12 +206,17 @@ pub fn load_reader_counted<R: Read>(
         }
         Ok(())
     })();
+    if read.is_err() {
+        ctx.info.sealed_window_dropped += ctx.gate.finish();
+    }
     *sealed = ctx.info.sealed_window_dropped + ctx.stats.sealed_window_dropped;
     read?;
     drain(&mut reader, &mut ctx);
     if reader.finish().is_some() {
-        ctx.info.frames_damaged += 1;
+        ctx.gate.damaged();
     }
+    ctx.info.sealed_window_dropped += ctx.gate.finish();
+    *sealed = ctx.info.sealed_window_dropped + ctx.stats.sealed_window_dropped;
     ctx.info.gzip_truncated = gz.as_ref().is_some_and(|g| g.finish().truncated.is_some());
     ctx.info.sha256 = to_hex(&hash.finalize());
     // Frames by receive time and records by their own time, in one count.

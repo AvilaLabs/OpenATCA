@@ -93,11 +93,10 @@ pub(crate) fn manifest_hash(label: &str, files: &[PathBuf], sums: &[(Digest, u64
 pub fn hash_files(label: &str, files: &[PathBuf]) -> io::Result<InputHash> {
     let mut sums = Vec::with_capacity(files.len());
     for p in files {
-        oa_sealed::refuse_io(p)?;
-        // seal-allow: the guard refused this path on the line above, before anything reads it
-        let len = fs::metadata(p)?.len();
+        // The guard first: the size is taken from the opened file.
         let f = oa_sealed::open(p)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))?;
+        let len = f.metadata()?.len();
         let d = sha256_reader(io::BufReader::new(f)).map_err(io::Error::other)?;
         sums.push((d, len));
     }
@@ -154,16 +153,15 @@ impl<R: Read> Read for Capped<R> {
 /// is allocated.
 pub fn read_capped_file(path: &Path, max: u64) -> io::Result<Vec<u8>> {
     let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
-    oa_sealed::refuse_io(path).map_err(named)?;
-    // seal-allow: the guard refused this path on the line above, before anything reads it
-    let len = fs::metadata(path).map_err(named)?.len();
+    // The guard first: the size is taken from the opened file.
+    let f = oa_sealed::open(path).map_err(named)?;
+    let len = f.metadata().map_err(named)?.len();
     if len > max {
         return Err(named(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{len} bytes, past the limit of {max} bytes"),
         )));
     }
-    let f = oa_sealed::open(path).map_err(named)?;
     let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
     Capped {
         inner: f,
