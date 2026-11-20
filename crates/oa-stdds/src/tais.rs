@@ -1,5 +1,5 @@
 //! The TAIS `TATrackAndFlightPlan` message: STARS terminal radar tracks, each with the flight
-//! plan it is associated with. Core (pure).
+//! plan it is associated with. Pure functions (crate class shell).
 //!
 //! Structure (FAA FIXM-mediated STDDS data overview v2, section 2.3.4, which maps the native
 //! message to FIXM): a root `TATrackAndFlightPlan` holding `src` (the producing TRACON, mapped
@@ -32,10 +32,8 @@
 //! holds the value valid (documented for SMES, accepted here too): the field is absent and
 //! counted, not an error.
 
-use crate::kind::{children, name_of, Kind};
-use crate::walk::{
-    elem_offset, note_unknown, read_one, text_index, walk, Got, Sink, Slot, Spec, Val,
-};
+use crate::kind::{children, in_message_ns, name_of, Kind};
+use crate::walk::{elem_offset, text_index, walk, Got, Sink, Slot, Spec, Val};
 use crate::{FieldError, FieldErrorKind, Limits, Stats, StdError};
 use oa_xml::{Doc, ElemIx};
 
@@ -124,8 +122,7 @@ pub const TAIS_FIELD_NAMES: [&str; TAIS_FIELD_COUNT] = [
     "recSAFAReceiptTime",
 ];
 
-const ALT: Val = Val::Scaled {
-    scale: 0,
+const ALT: Val = Val::Int {
     lo: -2_000,
     hi: 100_000,
 };
@@ -169,8 +166,7 @@ const SPECS: [Spec; TAIS_FIELD_COUNT] = [
     },
     Spec {
         path: &["track", "vVert"],
-        val: Val::Scaled {
-            scale: 0,
+        val: Val::Int {
             lo: -30_000,
             hi: 30_000,
         },
@@ -281,8 +277,7 @@ const SPECS: [Spec; TAIS_FIELD_COUNT] = [
     },
     Spec {
         path: &["recSTARSTimestamp"],
-        val: Val::Scaled {
-            scale: 0,
+        val: Val::Int {
             lo: 0,
             hi: MS_PER_DAY - 1,
         },
@@ -292,6 +287,15 @@ const SPECS: [Spec; TAIS_FIELD_COUNT] = [
         val: Val::TimeMs,
     },
 ];
+
+/// The message-level fields, read with the same walker as a record's: `src`, the producing TRACON.
+const ROOT_SPECS: [Spec; 1] = [Spec {
+    path: &["src"],
+    val: Val::Code,
+}];
+const ROOT_NAMES: [&str; 1] = ["src"];
+/// Under the root, the records are read apart.
+const ROOT_SKIP: [&[&str]; 1] = [&["record"]];
 
 /// Known elements that are deliberately not read (not counted as unknown).
 const SKIP: [&[&str]; 8] = [
@@ -420,7 +424,10 @@ fn code(slots: &[Slot], f: TaisField) -> Option<[u8; 8]> {
 }
 
 /// Parses a message that [`crate::classify`] called [`Kind::TaisTrackAndFlightPlan`]. A record
-/// with a refused field is kept with the field absent. Counts into `stats`.
+/// with a refused field is kept with the field absent. Counts records, fields and unknown
+/// elements into `stats`, including the records read before a [`StdError::TooManyRecords`] or
+/// [`StdError::TooDeep`] refusal; the refusal itself is counted in `stats.errors`. It does not
+/// count the message: [`crate::parse_message`] does, once, when it classifies.
 pub fn parse_tais(
     doc: &Doc<'_>,
     limits: &Limits,
@@ -453,35 +460,40 @@ pub fn parse_tais(
         unknown_dropped: 0,
         invalidated: 0,
     };
+    let mut root_slots = [Slot::Empty; 1];
+    // The root's own depth is one level, so the walk cannot be too deep.
+    let _ = walk(
+        doc,
+        &tx,
+        root,
+        &ROOT_SPECS,
+        &ROOT_NAMES,
+        &ROOT_SKIP,
+        &mut root_slots,
+        &mut sink,
+    );
+    if let Some(Slot::Ok(Got::Code(v))) = root_slots.first() {
+        msg.src = *v;
+        msg.src_present = true;
+    }
+    let mut refusal = None;
     for c in children(doc, root) {
-        match name_of(doc, c) {
-            b"record" => {
-                if msg.records.len() >= limits.max_records {
-                    let e = StdError::TooManyRecords {
-                        limit: limits.max_records,
-                        offset: elem_offset(doc, c),
-                    };
-                    stats.observe_error(&e);
-                    return Err(e);
-                }
-                match record(doc, &tx, c, &mut sink) {
-                    Ok(r) => msg.records.push(r),
-                    Err(off) => {
-                        let e = StdError::TooDeep { offset: off };
-                        stats.observe_error(&e);
-                        return Err(e);
-                    }
-                }
+        if name_of(doc, c) != b"record" || !in_message_ns(doc, c) {
+            continue;
+        }
+        if msg.records.len() >= limits.max_records {
+            refusal = Some(StdError::TooManyRecords {
+                limit: limits.max_records,
+                offset: elem_offset(doc, c),
+            });
+            break;
+        }
+        match record(doc, &tx, c, &mut sink) {
+            Ok(r) => msg.records.push(r),
+            Err(off) => {
+                refusal = Some(StdError::TooDeep { offset: off });
+                break;
             }
-            b"src" => match read_one(doc, &tx, c, Val::Code) {
-                Ok(Got::Code(v)) => {
-                    msg.src = v;
-                    msg.src_present = true;
-                }
-                Ok(_) => {}
-                Err(kind) => sink.error("src", kind, elem_offset(doc, c)),
-            },
-            other => note_unknown(&mut sink, &[other]),
         }
     }
     let invalidated = sink.invalidated;
@@ -490,7 +502,13 @@ pub fn parse_tais(
     msg.errors_dropped = dropped;
     msg.unknown_elements = unknown.iter().map(|(_, n)| *n).sum::<u64>() + unknown_dropped;
     stats.observe_tais(&msg, &unknown, unknown_dropped, invalidated, limits);
-    Ok(msg)
+    match refusal {
+        Some(e) => {
+            stats.observe_error(&e);
+            Err(e)
+        }
+        None => Ok(msg),
+    }
 }
 
 fn record(

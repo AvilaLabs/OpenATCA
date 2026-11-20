@@ -1,4 +1,4 @@
-//! Cumulative counts over many messages. Core (pure): a plain accumulator with no clock and no
+//! Cumulative counts over many messages. Pure functions (crate class shell): a plain accumulator with no clock and no
 //! I/O. Counts only: no position, identity or value is kept (the unknown-element table keeps
 //! element names and root names, which are schema text, never message values).
 
@@ -119,8 +119,14 @@ pub struct Stats {
     pub src_ids_overflow: u64,
     /// Service-status messages: `service name / status value` text and count.
     pub status_values: Vec<(String, u64)>,
-    /// Status values past the table.
-    pub status_values_overflow: u64,
+    /// Status states found in a message but not kept (more than the per-message limit, or an
+    /// empty or unreadable name or value).
+    pub status_dropped: u64,
+    /// Status values whose text is longer than the limit, and keys likewise.
+    pub status_value_too_long: u64,
+    pub status_key_too_long: u64,
+    /// Status states past the table of distinct values.
+    pub status_table_overflow: u64,
     /// Unknown element paths, at most [`Limits::max_unknown_paths`] distinct.
     pub unknown: Vec<UnknownPath>,
     /// Unknown elements whose path did not fit the table or the per-message cap.
@@ -156,12 +162,24 @@ pub fn new_stats() -> Stats {
         src_ids: Vec::new(),
         src_ids_overflow: 0,
         status_values: Vec::new(),
-        status_values_overflow: 0,
+        status_dropped: 0,
+        status_value_too_long: 0,
+        status_key_too_long: 0,
+        status_table_overflow: 0,
         unknown: Vec::new(),
         unknown_overflow: 0,
         unknown_roots: Vec::new(),
         unknown_roots_overflow: 0,
     }
+}
+
+/// `t` cut to [`MAX_TEXT`] bytes at a character boundary.
+fn cap_text(t: &str) -> String {
+    let mut n = t.len().min(MAX_TEXT);
+    while !t.is_char_boundary(n) {
+        n -= 1;
+    }
+    t.get(..n).unwrap_or("").to_string()
 }
 
 fn bump_bits(counts: &mut [u64], word: u64) {
@@ -173,9 +191,9 @@ fn bump_bits(counts: &mut [u64], word: u64) {
 }
 
 impl Stats {
-    /// Counts a message refused whole.
+    /// Counts a refusal by reason. It does not count a message: [`crate::parse_message`]
+    /// counts each message once (a refusal after classification is already in `kinds`).
     pub fn observe_error(&mut self, e: &StdError) {
-        self.messages += 1;
         if let Some(c) = self.errors.get_mut(std_error_index(e)) {
             *c += 1;
         }
@@ -235,6 +253,7 @@ impl Stats {
     fn merge_unknown(&mut self, unknown: &[(String, u64)], dropped: u64, limits: &Limits) {
         self.unknown_overflow += dropped;
         for (t, n) in unknown {
+            let t = &cap_text(t);
             if let Some(e) = self.unknown.iter_mut().find(|u| u.text == *t) {
                 e.count += n;
             } else if self.unknown.len() < limits.max_unknown_paths {
@@ -291,10 +310,15 @@ impl Stats {
                 }
             }
             if has(TaisField::RecStarsTimestamp) && has(TaisField::RecSafaReceiptTime) {
-                // Receipt time of day minus the STARS time of day, wrapped into a day.
-                let d = (r.rec_safa_receipt_ms.rem_euclid(86_400_000)
+                // Receipt time of day minus the STARS time of day, wrapped into a day and then
+                // folded into -12 h..=12 h, so a skew of a few seconds is negative and a true
+                // midnight crossing is a small positive latency.
+                let mut d = (r.rec_safa_receipt_ms.rem_euclid(86_400_000)
                     - i64::from(r.rec_stars_tod_ms))
                 .rem_euclid(86_400_000);
+                if d > 43_200_000 {
+                    d -= 86_400_000;
+                }
                 if let Some(c) = self.latency.get_mut(latency_bucket(d)) {
                     *c += 1;
                 }
@@ -313,7 +337,9 @@ impl Stats {
     }
 
     pub(crate) fn observe_status(&mut self, m: &crate::status::StatusMessage) {
-        self.status_values_overflow += m.dropped;
+        self.status_dropped += m.dropped;
+        self.status_value_too_long += m.value_too_long;
+        self.status_key_too_long += m.key_too_long;
         for st in &m.states {
             let text = format!("{} {}={}", m.root, st.name, st.value);
             if let Some(e) = self.status_values.iter_mut().find(|(t, _)| *t == text) {
@@ -321,7 +347,7 @@ impl Stats {
             } else if self.status_values.len() < MAX_STATUS_VALUES {
                 self.status_values.push((text, 1));
             } else {
-                self.status_values_overflow += 1;
+                self.status_table_overflow += 1;
             }
         }
     }

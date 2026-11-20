@@ -1,10 +1,11 @@
 //! The shared record walker: a table of expected element paths below a base element in, one
-//! checked value per path out. Core (pure). Iterative (no recursion); the work is one visit per
+//! checked value per path out. Pure functions (crate class shell). Iterative (no recursion); the work is one visit per
 //! element of the subtree, each visit a bounded path comparison against the table.
 
-use crate::kind::{attr_value, name_of};
+use crate::kind::{attr_present, attr_value, in_message_ns, name_of};
 use crate::scalar::{
-    parse_beacon, parse_code, parse_hex24, parse_iso_ms, parse_scaled, parse_uint, trim,
+    parse_beacon, parse_code, parse_hex24, parse_int, parse_iso_ms, parse_uint, scaled_parts, trim,
+    ScaledError,
 };
 use crate::{FieldError, FieldErrorKind, Shape};
 use oa_xml::{decode_text_run, Doc, ElemIx, XmlError};
@@ -25,6 +26,11 @@ pub(crate) enum Val {
     DegE7 { max_deg: i64 },
     /// Decimal with `scale` fraction digits, range `lo..=hi` after scaling.
     Scaled { scale: u32, lo: i64, hi: i64 },
+    /// A heading in degrees to 0.01 degree: 0 up to but not including 360 (the exact value is
+    /// compared, so 359.999 is in range and rounds to 0).
+    Heading,
+    /// A whole number in `lo..=hi` (see [`parse_int`]: no fraction, no `-0`, no leading zero).
+    Int { lo: i64, hi: i64 },
     /// Four octal digits.
     Beacon,
     /// 1 to 6 hex digits.
@@ -190,6 +196,13 @@ fn next(doc: &Doc<'_>, base: ElemIx, d: ElemIx, skip: bool) -> Option<ElemIx> {
     }
 }
 
+fn scaled_kind(e: ScaledError) -> FieldErrorKind {
+    match e {
+        ScaledError::Syntax => FieldErrorKind::Syntax,
+        ScaledError::Range => FieldErrorKind::Range,
+    }
+}
+
 fn code8(s: &[u8], extra: &[u8]) -> Result<Got, FieldErrorKind> {
     if s.len() > 8 {
         return Err(FieldErrorKind::TooLong);
@@ -217,14 +230,30 @@ fn parse_val(v: Val, s: &[u8]) -> Result<Got, FieldErrorKind> {
     match v {
         Val::TimeMs => parse_iso_ms(s).map(Got::Int).ok_or(Syntax),
         Val::DegE7 { max_deg } => {
-            let x = parse_scaled(s, 7).ok_or(Syntax)?;
-            if x.abs() > max_deg * 10_000_000 {
+            let p = scaled_parts(s, 7).map_err(scaled_kind)?;
+            let b = max_deg * 10_000_000;
+            if p.cmp_exact(b).is_gt() || p.cmp_exact(-b).is_lt() {
                 return Err(Range);
             }
-            Ok(Got::Int(x))
+            p.rounded().map(Got::Int).ok_or(Range)
         }
         Val::Scaled { scale, lo, hi } => {
-            let x = parse_scaled(s, scale).ok_or(Syntax)?;
+            let p = scaled_parts(s, scale).map_err(scaled_kind)?;
+            if p.cmp_exact(hi).is_gt() || p.cmp_exact(lo).is_lt() {
+                return Err(Range);
+            }
+            p.rounded().map(Got::Int).ok_or(Range)
+        }
+        Val::Heading => {
+            let p = scaled_parts(s, 2).map_err(scaled_kind)?;
+            if p.cmp_exact(36_000).is_ge() || p.cmp_exact(0).is_lt() {
+                return Err(Range);
+            }
+            // A value that rounds up to 360.00 is the heading 0.
+            Ok(Got::Int(p.rounded().ok_or(Range)? % 36_000))
+        }
+        Val::Int { lo, hi } => {
+            let x = parse_int(s).map_err(scaled_kind)?;
             if x < lo || x > hi {
                 return Err(Range);
             }
@@ -314,7 +343,11 @@ pub(crate) fn walk(
         };
         let path = pbuf.get(..depth).unwrap_or(&[]);
         let mut descend = true;
-        if let Some(si) = specs.iter().position(|s| path_eq(s.path, path)) {
+        if !in_message_ns(doc, cur) {
+            // Not a field of this message: counted, nothing below it is looked at.
+            descend = false;
+            note_unknown(sink, path);
+        } else if let Some(si) = specs.iter().position(|s| path_eq(s.path, path)) {
             descend = false;
             read_field(
                 doc, tx, cur, specs, names, si, slots, sink, &mut tbuf, &mut abuf,
@@ -361,10 +394,20 @@ fn read_field(
         sink.error(name, FieldErrorKind::Duplicate, off);
         return;
     }
-    if attr_value(doc, e, b"r", abuf) == Some(b"1") {
-        *slot = Slot::Invalid;
-        sink.invalidated += 1;
-        return;
+    match attr_value(doc, e, b"r", abuf) {
+        Some(b"1") => {
+            *slot = Slot::Invalid;
+            sink.invalidated += 1;
+            return;
+        }
+        Some(b"0") => {}
+        None if !attr_present(doc, e, b"r") => {}
+        _ => {
+            // `r` is neither "1" nor "0" (or is too long to be either): the field is refused.
+            *slot = Slot::Bad;
+            sink.error(name, FieldErrorKind::Syntax, off);
+            return;
+        }
     }
     let (kind, shape) = match leaf_text(doc, tx, e, tbuf) {
         Ok(t) if NO_VALUE.iter().any(|&(n, w)| n == name && w == t) => {
@@ -403,19 +446,6 @@ pub(crate) fn note_unknown(sink: &mut Sink<'_>, path: &[&[u8]]) {
     } else {
         sink.unknown_dropped += 1;
     }
-}
-
-/// Reads one element's text as `val` for a message-level field (no slots): the value or the
-/// error kind.
-pub(crate) fn read_one(
-    doc: &Doc<'_>,
-    tx: &TextIndex,
-    e: ElemIx,
-    val: Val,
-) -> Result<Got, FieldErrorKind> {
-    let mut tbuf = [0u8; VALUE_BUF];
-    let t = leaf_text(doc, tx, e, &mut tbuf)?;
-    parse_val(val, t)
 }
 
 pub(crate) fn elem_offset(doc: &Doc<'_>, e: ElemIx) -> u32 {

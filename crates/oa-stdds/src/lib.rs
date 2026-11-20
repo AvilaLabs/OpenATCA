@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 //! oa-stdds: parser for FAA SWIM STDDS (SWIM Terminal Data Distribution System) messages
-//! delivered through SCDS. Core (pure): every function here is a function of the parsed
-//! document and the bytes it came from, no I/O, no clock (RULESET B1, B2). Class `shell` like
-//! its sibling SWIM parsers (`oa-fixm`, `oa-tbfm`): the crate's only I/O is the example.
+//! delivered through SCDS. Class `shell`, like its sibling SWIM parsers (`oa-fixm`, `oa-tbfm`):
+//! every function here is a function of the parsed document and the bytes it came from, no I/O,
+//! no clock (RULESET B1, B2), and the crate's only I/O is the example.
 //!
 //! * [`kind`]: classifies a message by root element and namespace into a [`Kind`]. A message of
 //!   no known kind is counted, with its root name and namespace, never an error (IF-R6).
@@ -261,7 +261,9 @@ pub enum Message {
 }
 
 /// Parses one complete message: XML, then classification, then the typed parse for the kinds
-/// that have one. Every outcome is counted in `stats`. Nothing here panics on any input.
+/// that have one. Every outcome is counted in `stats`, and a message is counted once: in
+/// `kinds` if it parsed as XML, else in `errors[xml]`, so `messages == sum(kinds) + errors[xml]`;
+/// a refusal after classification adds to `errors` only. Nothing here panics on any input.
 pub fn parse_message(
     parser: &mut Parser,
     bytes: &[u8],
@@ -272,6 +274,8 @@ pub fn parse_message(
         Ok(d) => d,
         Err(x) => {
             let e = StdError::Xml(x);
+            // An unreadable message has no kind: it is counted here, once, as a message.
+            stats.messages += 1;
             stats.observe_error(&e);
             return Err(e);
         }

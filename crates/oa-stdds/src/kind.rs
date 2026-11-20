@@ -1,4 +1,4 @@
-//! Classification of a message by root element and namespace. Core (pure).
+//! Classification of a message by root element and namespace. Pure functions (crate class shell).
 //!
 //! STDDS native ("SimpleXML") messages put their root in a namespace of the form
 //! `urn:us:gov:dot:faa:atm:terminal:entities:vN-M:<service>:<name>`, for example
@@ -201,6 +201,31 @@ pub(crate) fn attr_value<'o>(
         return Some(dst);
     }
     None
+}
+
+/// Whether element `e` has an attribute called `name`, whatever its value.
+pub(crate) fn attr_present(doc: &Doc<'_>, e: ElemIx, name: &[u8]) -> bool {
+    let (Some(first), Some(count)) = (
+        doc.elem_first_attr.get(e.0 as usize),
+        doc.elem_attr_count.get(e.0 as usize),
+    ) else {
+        return false;
+    };
+    let first = first.0 as usize;
+    (first..first.saturating_add(*count as usize)).any(|a| {
+        doc.attr_name
+            .get(a)
+            .and_then(|sp| span_bytes(doc.input, *sp).ok())
+            == Some(name)
+    })
+}
+
+/// Whether element `e` is in the root's namespace or in none: the real feed's children are
+/// unqualified (only the root carries a prefix), so a child in any other namespace is not a
+/// field of the message.
+pub(crate) fn in_message_ns(doc: &Doc<'_>, e: ElemIx) -> bool {
+    let ns = ns_of(doc, e);
+    ns.is_empty() || ns == ns_of(doc, ElemIx(0))
 }
 
 /// Classifies a parsed message. Pure: the root element's local name and namespace, and for the

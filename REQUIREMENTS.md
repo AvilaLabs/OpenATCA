@@ -5413,7 +5413,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-STD-028** The TAIS record header decodes: `recType`, `recSrc`, `recSTARSSrcID` as codes,
   `recSTARSTimestamp` as milliseconds since midnight (ASSUMED from the observed digits; range 0 to 24 h) and
   `recSAFAReceiptTime` as ISO-8601. The stats count the latency (receipt time of day minus STARS time of
-  day, wrapped into a day) in ms buckets, the records lacking a time, and the distinct `recSTARSSrcID` values,
+  day, wrapped into a day and folded into -12 h to 12 h, so a skew is negative and a midnight crossing small) in ms buckets, the records lacking a time, and the distinct `recSTARSSrcID` values,
   never printing a time or an identifier.
 - **OA-STD-029** The five service-status roots in the `...:vN-M:status` namespace (`AirportDataServiceStatus`,
   `TerminalAutomationInformationServiceStatus`, `TowerDepartureEventServiceStatus`,
@@ -5426,3 +5426,34 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-STD-032** A refused field is diagnosed by its text's shape (length and the first 12 character classes
   with runs collapsed), kept per field and error kind in the stats and printed by the summary; no value is
   kept or printed.
+- **OA-STD-033** A message is counted once: `messages == sum(kinds) + errors[xml]` after every refusal path;
+  a refusal after classification adds to `errors` only; a direct `parse_tais`, `parse_smes` or
+  `parse_status` call counts its records and refusals but never a message. The records read before a
+  too-many-records or too-deep refusal are counted.
+- **OA-STD-034** The message-level `src` (TAIS) and `airport` (SMES) follow the field rules: `r="1"` marks
+  them absent and counted, a duplicate keeps neither and is a counted field error, a bad value is a counted
+  field error.
+- **OA-STD-035** The latency (receipt time of day minus STARS time of day) is folded into -12 h to 12 h:
+  a true midnight crossing is a small positive latency and a skew of seconds counts in `<0`.
+- **OA-STD-036** Integer fields (TAIS altitudes, `vVert`, `recSTARSTimestamp`, SMES `vertRate`) take whole
+  numbers only: no fraction, no `+`, no `-0`, no leading zero beyond a single `0`; the counters (`trackNum`,
+  `sfpn`, `seqNum`, `track`) take no leading zero. More than 12 digits is out of range. The SMES altitude is
+  a decimal in the real feed and keeps rounding to feet.
+- **OA-STD-037** A bound is compared with the exact decimal before rounding (so 90.00000004 degrees is out
+  of range though it rounds to 90); a heading is at least 0 and below 360 (a value that rounds up to
+  360.00 is stored as 0).
+- **OA-STD-038** A fraction finer than a millisecond is rounded half up on its fourth digit with a carry
+  into the second, minute and day (not truncated).
+- **OA-STD-039** A status key or value longer than 64 bytes is counted (`status_key_too_long`,
+  `status_value_too_long`), an empty one or one past the per-message limit in `status_dropped`, and a state
+  past the table of distinct values in `status_table_overflow`; none is silent.
+- **OA-STD-040** Only elements with no namespace or in the root's namespace are fields (the real feed's
+  children are unqualified); an element in another namespace is unknown, counted, and nothing below it is
+  read.
+- **OA-STD-041** An `r` attribute other than `"1"` or `"0"` is a counted field error; an unknown element
+  path is stored cut to 120 bytes.
+- **OA-STD-042** The summary example prints a status text only if it is `[A-Za-z0-9 _-]` (up to 64 bytes) and
+  an unknown element or root name only if it is those characters or `:./{}`; anything else is counted as
+  "other". It exits 3 with a count of the bytes dropped if the frame reader stalls, reads until two bytes to
+  sniff gzip, and refuses (exit 2) a path with a sealed name inside any component, as given or resolved, and
+  any path it cannot resolve.

@@ -1,5 +1,5 @@
 //! The STDDS service-status messages (kind [`Kind::StddsStatus`]): the service name and its
-//! status value. Core (pure).
+//! status value. Pure functions (crate class shell).
 //!
 //! Four of the roots (`AirportDataServiceStatus`, `TerminalAutomationInformationServiceStatus`,
 //! `TowerDepartureEventServiceStatus`, `SurfaceMovementEventServiceStatus`) carry the service's
@@ -10,15 +10,16 @@
 //! are service states (`Normal`, `Degraded` and the like), not identifying; the names are
 //! schema text.
 
-use crate::kind::{attr_value, children, name_of, Kind, STATUS_ROOTS};
+use crate::kind::{attr_present, attr_value, children, in_message_ns, name_of, Kind, STATUS_ROOTS};
 use crate::walk::{leaf_text, text_index, VALUE_BUF};
-use crate::{Stats, StdError};
+use crate::{FieldErrorKind, Stats, StdError};
 use oa_xml::{Doc, ElemIx};
 
 /// Most states kept per message; further ones are counted in [`StatusMessage::dropped`].
 pub const MAX_STATES: usize = 32;
 /// Longest name or value kept (bytes); a longer one is dropped and counted.
 pub const MAX_TEXT: usize = 64;
+// VALUE_BUF is also 64: a serviceStatus text longer than that is `TooLong` from the reader.
 
 /// One service state: `name` (schema text) and its `value`.
 // A7.2: cold struct, size guard waived
@@ -35,23 +36,35 @@ pub struct StatusMessage {
     /// The root element's name, one of [`STATUS_ROOTS`].
     pub root: &'static str,
     pub states: Vec<StatusState>,
-    /// States found but not kept (too many, or a name or value too long or unreadable).
+    /// States found but not kept (more than [`MAX_STATES`], or an empty or unreadable name or
+    /// value).
     pub dropped: u64,
+    /// States whose value text is longer than [`MAX_TEXT`], and whose key is.
+    pub value_too_long: u64,
+    pub key_too_long: u64,
 }
 
-fn keep(states: &mut Vec<StatusState>, dropped: &mut u64, name: &[u8], value: &[u8]) {
-    let ok = !name.is_empty()
-        && !value.is_empty()
-        && name.len() <= MAX_TEXT
-        && value.len() <= MAX_TEXT
-        && states.len() < MAX_STATES;
-    if ok {
-        states.push(StatusState {
-            name: String::from_utf8_lossy(name).into_owned(),
-            value: String::from_utf8_lossy(value).into_owned(),
-        });
-    } else {
-        *dropped += 1;
+struct Acc {
+    states: Vec<StatusState>,
+    dropped: u64,
+    value_too_long: u64,
+    key_too_long: u64,
+}
+
+impl Acc {
+    fn keep(&mut self, name: &[u8], value: &[u8]) {
+        if name.len() > MAX_TEXT {
+            self.key_too_long += 1;
+        } else if value.len() > MAX_TEXT {
+            self.value_too_long += 1;
+        } else if name.is_empty() || value.is_empty() || self.states.len() >= MAX_STATES {
+            self.dropped += 1;
+        } else {
+            self.states.push(StatusState {
+                name: String::from_utf8_lossy(name).into_owned(),
+                value: String::from_utf8_lossy(value).into_owned(),
+            });
+        }
     }
 }
 
@@ -74,40 +87,55 @@ pub fn parse_status(
         .copied()
         .find(|r| r.as_bytes() == root_name)
         .unwrap_or("?");
-    let mut states = Vec::new();
-    let mut dropped = 0u64;
+    let mut acc = Acc {
+        states: Vec::new(),
+        dropped: 0,
+        value_too_long: 0,
+        key_too_long: 0,
+    };
     if root_static == "STDDSStatus" {
-        let mut kb = [0u8; MAX_TEXT + 1];
-        let mut vb = [0u8; MAX_TEXT + 1];
-        for p in children(doc, root).filter(|&c| name_of(doc, c) == b"p") {
-            let Some(key) = attr_value(doc, p, b"k", &mut kb) else {
-                continue;
+        // Buffers a little over the limit, so a text past it is seen as too long, not absent.
+        let mut kb = [0u8; MAX_TEXT + 8];
+        let mut vb = [0u8; MAX_TEXT + 8];
+        for p in children(doc, root).filter(|&c| name_of(doc, c) == b"p" && in_message_ns(doc, c)) {
+            let key = match attr_value(doc, p, b"k", &mut kb) {
+                Some(k) => k,
+                None => {
+                    if attr_present(doc, p, b"k") {
+                        acc.key_too_long += 1;
+                    }
+                    continue;
+                }
             };
             if !(key.ends_with(b"Status") || key.ends_with(b"State")) {
                 continue;
             }
             match attr_value(doc, p, b"v", &mut vb) {
-                Some(v) => keep(&mut states, &mut dropped, key, v),
-                None => {
-                    // A key with no value (a container such as a status block) is not a state; a
-                    // value too long for the buffer is dropped and counted.
-                }
+                Some(v) => acc.keep(key, v),
+                // A key with no value (a container such as a status block) is not a state.
+                None if !attr_present(doc, p, b"v") => {}
+                None => acc.value_too_long += 1,
             }
         }
     } else {
         let tx = text_index(doc);
         let mut buf = [0u8; VALUE_BUF];
-        for c in children(doc, root).filter(|&c| name_of(doc, c) == b"serviceStatus") {
+        for c in children(doc, root)
+            .filter(|&c| name_of(doc, c) == b"serviceStatus" && in_message_ns(doc, c))
+        {
             match leaf_text(doc, &tx, c, &mut buf) {
-                Ok(v) => keep(&mut states, &mut dropped, root_name, v),
-                Err(_) => dropped += 1,
+                Ok(v) => acc.keep(root_name, v),
+                Err(FieldErrorKind::TooLong) => acc.value_too_long += 1,
+                Err(_) => acc.dropped += 1,
             }
         }
     }
     let m = StatusMessage {
         root: root_static,
-        states,
-        dropped,
+        states: acc.states,
+        dropped: acc.dropped,
+        value_too_long: acc.value_too_long,
+        key_too_long: acc.key_too_long,
     };
     stats.observe_status(&m);
     Ok(m)

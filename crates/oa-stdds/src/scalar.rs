@@ -1,6 +1,6 @@
-//! Strict scalar parsers for STDDS text values. Core (pure); allocate nothing.
-//! Every parser returns `None` for anything it does not fully understand: no trimming, no
-//! defaults, no partial reads.
+//! Strict scalar parsers for STDDS text values. Pure functions (crate class shell); allocate nothing.
+//! Every parser returns `None` for anything it does not fully understand: no defaults, no
+//! partial reads, and no trimming here (the record walker trims element text before calling).
 
 /// Days since 1970-01-01 of a proleptic Gregorian date (Hinnant's `days_from_civil`), for years 1970
 /// to 9999 and dates that exist; `None` for any other year, month or day.
@@ -45,7 +45,8 @@ fn digits(s: &[u8], at: usize, n: usize) -> Option<i64> {
 
 /// Strict ISO-8601 UTC timestamp `YYYY-MM-DDThh:mm:ss[.f{1,9}]Z` (or `+00:00`) as Unix milliseconds. The
 /// designator must be `Z` or `+00:00` (no other offsets), the date must exist, the year is 1970 to 9999, the
-/// second is 0 to 59 (no leap second), and a fraction finer than a millisecond is truncated.
+/// second is 0 to 59 (no leap second), and a fraction finer than a millisecond is rounded half up
+/// on its fourth digit (as [`parse_scaled`] rounds), carrying into the second, minute and day.
 pub fn parse_iso_ms(s: &[u8]) -> Option<i64> {
     let year = digits(s, 0, 4)?;
     if *s.get(4)? != b'-' || *s.get(7)? != b'-' || *s.get(10)? != b'T' {
@@ -86,6 +87,11 @@ pub fn parse_iso_ms(s: &[u8]) -> Option<i64> {
             ms += i64::from(b - b'0') * scale;
             scale /= 10;
         }
+        // The fourth digit decides the rounding; the milliseconds may reach 1000, which the
+        // sum below carries into the second.
+        if s.get(start + 3).is_some_and(|b| (b'5'..=b'9').contains(b)) {
+            ms += 1;
+        }
     }
     // The designator is `Z`, or the zero offset `+00:00`; any other offset is refused.
     let tail = s.get(at..)?;
@@ -96,55 +102,148 @@ pub fn parse_iso_ms(s: &[u8]) -> Option<i64> {
     Some(((days * 24 + hour) * 60 + min) * 60_000 + sec * 1000 + ms)
 }
 
-/// Strict decimal `[-]digits[.digits]` scaled by `10^scale` and rounded half away from zero.
-/// At most 12 integer digits and 24 fraction digits (a binary double printed in full has 17 or
-/// more); digits past `scale + 1` only decide nothing, rounding reads the first dropped digit. No
-/// sign `+`, no exponent, no spaces.
-pub fn parse_scaled(s: &[u8], scale: u32) -> Option<i64> {
-    let (neg, body) = match s.split_first()? {
+/// Why a decimal was refused: not a decimal at all, or a decimal too large for the parser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScaledError {
+    Syntax,
+    Range,
+}
+
+/// A decimal split at `scale` fraction digits: the sign, the magnitude truncated to `scale`
+/// digits, and what was cut off, so a bound can be compared with the unrounded value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScaledParts {
+    pub neg: bool,
+    /// The magnitude in units of `10^-scale`, truncated.
+    pub mag: i64,
+    /// Some digit past `scale` is not zero.
+    pub rem_nonzero: bool,
+    /// The first digit past `scale` is 5 or more (round half away from zero).
+    pub round_up: bool,
+}
+
+impl ScaledParts {
+    /// The value rounded half away from zero.
+    pub fn rounded(&self) -> Option<i64> {
+        let m = self.mag.checked_add(i64::from(self.round_up))?;
+        Some(if self.neg { -m } else { m })
+    }
+
+    /// The exact (unrounded) value compared with the integer `bound` (same units).
+    pub fn cmp_exact(&self, bound: i64) -> std::cmp::Ordering {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        if !self.neg {
+            return match self.mag.cmp(&bound) {
+                Equal if self.rem_nonzero => Greater,
+                o => o,
+            };
+        }
+        // value = -(mag + f), f in [0, 1).
+        match (-self.mag).cmp(&bound) {
+            Equal if self.rem_nonzero => Less,
+            Greater => Greater,
+            o => o,
+        }
+    }
+}
+
+/// Strict decimal `[-]digits[.digits]` split at `scale` fraction digits. At most 12 integer
+/// digits and 24 fraction digits (a binary double printed in full has 17 or more); a longer one
+/// is [`ScaledError::Range`] once every character has been checked as a digit. No sign `+`, no
+/// exponent, no spaces.
+pub fn scaled_parts(s: &[u8], scale: u32) -> Result<ScaledParts, ScaledError> {
+    use ScaledError::{Range, Syntax};
+    let (neg, body) = match s.split_first().ok_or(Syntax)? {
         (b'-', rest) => (true, rest),
         _ => (false, s),
     };
     let (int, frac) = match body.iter().position(|&b| b == b'.') {
-        Some(p) => (body.get(..p)?, body.get(p + 1..)?),
+        Some(p) => (
+            body.get(..p).ok_or(Syntax)?,
+            body.get(p + 1..).ok_or(Syntax)?,
+        ),
         None => (body, &[][..]),
     };
-    if int.is_empty() || int.len() > 12 || frac.len() > 24 {
-        return None;
+    if int.is_empty() || (body.contains(&b'.') && frac.is_empty()) {
+        return Err(Syntax);
     }
-    if body.contains(&b'.') && frac.is_empty() {
-        return None;
+    if int.iter().chain(frac).any(|b| !b.is_ascii_digit()) {
+        return Err(Syntax);
+    }
+    if int.len() > 12 || frac.len() > 24 {
+        return Err(Range);
     }
     let mut v: i64 = 0;
     for &b in int {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        v = v.checked_mul(10)?.checked_add(i64::from(b - b'0'))?;
+        v = v
+            .checked_mul(10)
+            .and_then(|x| x.checked_add(i64::from(b - b'0')))
+            .ok_or(Range)?;
     }
-    let mut round_up = false;
+    let (mut round_up, mut rem_nonzero) = (false, false);
     for (i, &b) in frac.iter().enumerate() {
-        if !b.is_ascii_digit() {
-            return None;
-        }
         if (i as u32) < scale {
-            v = v.checked_mul(10)?.checked_add(i64::from(b - b'0'))?;
-        } else if i as u32 == scale {
-            round_up = b >= b'5';
+            v = v
+                .checked_mul(10)
+                .and_then(|x| x.checked_add(i64::from(b - b'0')))
+                .ok_or(Range)?;
+        } else {
+            if i as u32 == scale {
+                round_up = b >= b'5';
+            }
+            rem_nonzero |= b != b'0';
         }
     }
     for _ in frac.len()..scale as usize {
-        v = v.checked_mul(10)?;
+        v = v.checked_mul(10).ok_or(Range)?;
     }
-    if round_up {
-        v = v.checked_add(1)?;
-    }
-    Some(if neg { -v } else { v })
+    Ok(ScaledParts {
+        neg,
+        mag: v,
+        rem_nonzero,
+        round_up,
+    })
 }
 
-/// An unsigned decimal integer, digits only, at most `max_digits` of them.
+/// Strict decimal `[-]digits[.digits]` scaled by `10^scale` and rounded half away from zero.
+/// Limits as [`scaled_parts`]; `None` for any refusal.
+pub fn parse_scaled(s: &[u8], scale: u32) -> Option<i64> {
+    scaled_parts(s, scale).ok()?.rounded()
+}
+
+/// A signed decimal integer: digits with an optional leading `-`, no fraction, no `+`, no
+/// leading zero beyond a single `0`, no `-0`, at most 12 digits (more is
+/// [`ScaledError::Range`]).
+pub fn parse_int(s: &[u8]) -> Result<i64, ScaledError> {
+    let (neg, digits) = match s.split_first().ok_or(ScaledError::Syntax)? {
+        (b'-', rest) => (true, rest),
+        _ => (false, s),
+    };
+    if digits.is_empty()
+        || digits.iter().any(|b| !b.is_ascii_digit())
+        || (digits.len() > 1 && digits.first() == Some(&b'0'))
+        || (neg && digits == b"0")
+    {
+        return Err(ScaledError::Syntax);
+    }
+    if digits.len() > 12 {
+        return Err(ScaledError::Range);
+    }
+    let mut v = 0i64;
+    for &b in digits {
+        v = v * 10 + i64::from(b - b'0');
+    }
+    Ok(if neg { -v } else { v })
+}
+
+/// An unsigned decimal integer, digits only, at most `max_digits` of them, no leading zero
+/// beyond a single `0`.
 pub fn parse_uint(s: &[u8], max_digits: usize) -> Option<u64> {
-    if s.is_empty() || s.len() > max_digits || max_digits > 19 {
+    if s.is_empty()
+        || s.len() > max_digits
+        || max_digits > 19
+        || (s.len() > 1 && s.first() == Some(&b'0'))
+    {
         return None;
     }
     let mut v: u64 = 0;

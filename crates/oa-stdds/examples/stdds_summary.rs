@@ -31,6 +31,9 @@ struct Ctx {
     other_frames: u64,
     bad_frames: u64,
     refused: [u64; 4],
+    /// Bytes the frame reader would not take after a drain (a stall): counted, never dropped
+    /// silently; the run exits non-zero.
+    stalled_bytes: u64,
 }
 
 fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
@@ -59,44 +62,55 @@ fn feed(reader: &mut FrameReader<'_>, ctx: &mut Ctx, data: &[u8]) {
         off += took;
         drain(reader, ctx);
         if took == 0 {
+            ctx.stalled_bytes += (data.len() - off) as u64;
             break;
         }
     }
 }
 
-/// Recordings under `scds/` that are sealed hold-outs or smoke sets and are never read.
+/// Names of sealed hold-out and smoke recordings; a path with any of them in a component is never read.
 const SEALED: [&str; 3] = [
     "rec-20261119",
     "stdds-20261119-holdout",
     "stdds-smoke-20261119",
 ];
 
-/// Whether the components of `p` contain `scds` immediately followed by a sealed name.
+/// Whether any component of `p` contains a sealed name anywhere in it.
 fn names_sealed(p: &std::path::Path) -> bool {
-    let c: Vec<_> = p
-        .components()
-        .map(|c| c.as_os_str().to_os_string())
-        .collect();
-    c.windows(2)
-        .any(|w| w[0] == "scds" && SEALED.iter().any(|s| w[1] == *s))
+    p.components().any(|c| {
+        let c = c.as_os_str().to_string_lossy();
+        SEALED.iter().any(|s| c.contains(s))
+    })
 }
 
 /// Refuses (exit 2, before the file is opened) a path that names a sealed folder as given, or
-/// whose every prefix, with links resolved, does.
+/// whose every prefix, with links resolved, does. A prefix that cannot be resolved fails closed.
 fn refuse_sealed(path: &str) {
     let given = std::path::Path::new(path);
     let mut bad = names_sealed(given);
     let mut prefix = std::path::PathBuf::new();
     for comp in given.components() {
         prefix.push(comp);
-        if let Ok(real) = std::fs::canonicalize(&prefix) {
-            bad |= names_sealed(&real);
+        match std::fs::canonicalize(&prefix) {
+            Ok(real) => bad |= names_sealed(&real),
+            Err(e) => {
+                eprintln!("refused: cannot resolve the path ({e}), so it cannot be checked");
+                std::process::exit(2);
+            }
         }
     }
     if bad {
         eprintln!("refused: the sealed hold-out recording is not read");
         std::process::exit(2);
     }
+}
+
+/// Whether `t` is 1 to `max` ASCII letters and digits and the `extra` characters.
+fn safe_text(t: &str, extra: &[u8], max: usize) -> bool {
+    !t.is_empty()
+        && t.len() <= max
+        && t.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
 }
 
 fn main() {
@@ -114,11 +128,20 @@ fn main() {
         other_frames: 0,
         bad_frames: 0,
         refused: [0; 4],
+        stalled_bytes: 0,
     };
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
     let mut reader = FrameReader::new(&mut storage).unwrap();
     let mut chunk = vec![0u8; 64 * 1024];
-    let mut n = src.read(&mut chunk).unwrap();
+    // Read until two bytes (the gzip magic) or the end of the file.
+    let mut n = 0;
+    while n < 2 {
+        let got = src.read(&mut chunk[n..]).unwrap();
+        if got == 0 {
+            break;
+        }
+        n += got;
+    }
     let mut gz =
         (n >= 2 && chunk[..2] == [0x1f, 0x8b]).then(|| Box::new(GzipReader::new(REPLAY_LIMITS)));
     let mut gz_damaged = false;
@@ -219,16 +242,44 @@ fn main() {
         s.src_ids_overflow
     );
     // Service states are not identifying; the value histogram is printed.
+    let mut other = 0u64;
     for (t, c) in &s.status_values {
-        println!("stdds-status {t}: {c}");
+        if safe_text(t, b" _-=", 130) {
+            println!("stdds-status {t}: {c}");
+        } else {
+            other += c;
+        }
     }
-    println!("stdds-status overflow: {}", s.status_values_overflow);
+    println!("stdds-status other (text outside [A-Za-z0-9 _-]): {other}");
+    println!(
+        "stdds-status dropped {} value too long {} key too long {} table overflow {}",
+        s.status_dropped, s.status_value_too_long, s.status_key_too_long, s.status_table_overflow
+    );
+    // Element and root names are printed only if they are plain schema text.
+    let mut other_names = 0u64;
     for u in &s.unknown {
-        println!("unknown element {}: {}", u.text, u.count);
+        if safe_text(&u.text, b" _-:./{}", 120) {
+            println!("unknown element {}: {}", u.text, u.count);
+        } else {
+            other_names += u.count;
+        }
     }
     println!("unknown element overflow: {}", s.unknown_overflow);
     for (t, c) in &s.unknown_roots {
-        println!("unknown root {t}: {c}");
+        if safe_text(t, b" _-:./{}", 260) {
+            println!("unknown root {t}: {c}");
+        } else {
+            other_names += c;
+        }
     }
+    println!("unknown names printed as other: {other_names}");
     println!("unknown root overflow: {}", s.unknown_roots_overflow);
+    println!(
+        "frame reader stalled, bytes not read: {}",
+        ctx.stalled_bytes
+    );
+    if ctx.stalled_bytes > 0 {
+        eprintln!("error: the frame reader stalled; the summary is incomplete");
+        std::process::exit(3);
+    }
 }
