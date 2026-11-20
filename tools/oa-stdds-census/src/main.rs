@@ -12,11 +12,11 @@ use oa_stdds_census::census::DEFAULT_BUDGET;
 use oa_stdds_census::guard::{is_refusal, refuse_sealed};
 use oa_stdds_census::read::{read_dir, ReadError};
 use oa_stdds_census::report::render;
-use oa_stdds_census::xcheck::{build, Params, Window};
+use oa_stdds_census::xcheck::{build, estimate_build_bytes, Params, Window};
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: oa-stdds-census DIR [--from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft N]]\n  with --adsb the census also compares the updates' positions with ADS-B; the horizontal gate N\n  (default 1 NM) is tried with 0.5 and 2 as well, the vertical gate defaults to 500 ft;\n  --from/--to restrict both sides to a time of the UTC day, in seconds; the run is refused\n  if its memory estimate is above 4 GB";
+const USAGE: &str = "usage: oa-stdds-census DIR [--from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft N] [--max-gap-s S]]\n  with --adsb the census also compares the updates' positions with ADS-B; the horizontal gate N\n  (default 1 NM) is tried with 0.5 and 2 as well, the vertical gate defaults to 500 ft; --max-gap-s (default 5) is the widest gap between two ADS-B reports that is interpolated;\n  --from/--to restrict both sides to a time of the UTC day, in seconds; the run is refused\n  if its memory estimate is above 4 GB";
 
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
@@ -34,7 +34,11 @@ fn main() -> ExitCode {
     let mut gate_given = false;
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
-        let num = |v: Option<&String>| v.and_then(|v| v.parse::<f64>().ok());
+        // Only finite numbers are taken (NaN and infinity are a usage error).
+        let num = |v: Option<&String>| {
+            v.and_then(|v| v.parse::<f64>().ok())
+                .filter(|x| x.is_finite())
+        };
         match flag.as_str() {
             "--adsb" => match it.next() {
                 Some(v) => clip = Some(v),
@@ -42,7 +46,7 @@ fn main() -> ExitCode {
             },
             "--gate-nm" => match num(it.next()) {
                 Some(g) => {
-                    params.gates_nm = [0.5, g, 2.0];
+                    params = params.with_primary_gate_nm(g);
                     gate_given = true;
                 }
                 None => return usage(),
@@ -53,6 +57,12 @@ fn main() -> ExitCode {
                     gate_given = true;
                 }
                 None => return usage(),
+            },
+            "--max-gap-s" => match num(it.next()) {
+                Some(g) if g > 0.0 && g <= 30.0 => {
+                    params.max_gap_ms = (g * 1000.0).round() as i64;
+                }
+                _ => return usage(),
             },
             "--from" => match num(it.next()) {
                 Some(g) => from = Some(g as i64),
@@ -105,6 +115,15 @@ fn main() -> ExitCode {
                 "ADS-B clip: bad frames {} dropped records {}",
                 loaded.bad_frames, loaded.dropped_records
             );
+            let est = estimate_build_bytes(&loaded.reports, &params, window);
+            if est > DEFAULT_BUDGET {
+                eprintln!(
+                    "oa-stdds-census: refused: building the ADS-B index is estimated at {} MB from {} reports, past the 4 GB budget (use --from and --to)",
+                    est / 1_000_000,
+                    loaded.reports.icao.len()
+                );
+                return ExitCode::from(2);
+            }
             match build(&loaded.reports, params, window) {
                 Ok(i) if i.bytes() > DEFAULT_BUDGET => {
                     eprintln!(
@@ -137,6 +156,12 @@ fn main() -> ExitCode {
         }
     };
     let results = census.finish();
+    if let Some(x) = &results.xc {
+        if let Err(e) = x.check_overlap() {
+            eprintln!("oa-stdds-census: {e}");
+            return ExitCode::from(2);
+        }
+    }
     print!("{}", render(&rs, &results));
     eprintln!("run time {:.1} s", t0.elapsed().as_secs_f64());
     if rs.stalled_bytes > 0 {

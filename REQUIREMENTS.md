@@ -5489,20 +5489,28 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   adsb=false, all adsb=true, mixed), with their update counts and per-flag interval distributions.
 - **OA-CEN-009** Position cross-check (with an ADS-B clip, read by the loader oa-encounter and oa-bench use):
   each tracked update with a flag, position and `mrtTime` is compared with every ADS-B aircraft interpolated
-  linearly to `mrtTime` between the two reports around it (at most 10 s apart by default, 30 s at most; a
+  linearly to `mrtTime` between the two reports around it (at most 5 s apart by default, 30 s at most; `--max-gap-s`; a
   segment faster than 600 m/s is left out and counted; ground reports are left out). A candidate is one aircraft inside the horizontal gate and, when both altitudes exist, the
   vertical gate (both inclusive; defaults 0.5, 1 and 2 NM with 500 ft, 1 NM primary). Per flag and gate the
   update is counted no candidate, exactly one, or ambiguous; only exactly-one is used. A horizontal-only
-  count is kept at the primary gate. Updates with no position or time, or no flag, are counted apart. A
+  count is kept at the primary gate. Updates with no position or time, with no flag, or on a pseudo or frozen
+  track are counted apart (coasting is not read by the STDDS parser, so it is not excluded). A
   gate above 10 NM, a gap above 30 s, or an unusable parameter is refused.
-- **OA-CEN-010** For exactly-one matches at the primary gate, per flag (adsb=true is the control), the
+- **OA-CEN-010** For exactly-one matches at the primary gate, per flag, the
   horizontal difference, the vertical difference, and the along-track and cross-track differences (STDDS
-  minus ADS-B, along the ADS-B track, positive ahead and to the right) are summarised by count, median,
+  minus ADS-B, along the ADS-B track, positive ahead and to the right; aircraft at 100 kt or more) are summarised by count, median,
   10th, 90th and 99th percentile and a 20-bin histogram; the vertical differences of horizontal-only
-  matches are summarised over a wide range to expose an altitude unit error. A bias injected into synthetic
-  STDDS updates shows in the matched distribution and not in the control.
+  matches are summarised over a wide range to expose an altitude unit error. adsb=true is labelled
+  ADS-B-fused and not independent of the truth (STARS fuses ADS-B into those updates, so its difference
+  measures STARS latency and filtering, not accuracy). The adsb=false results are headlined by track class,
+  and an adsb=false update on a mixed track is not ADS-B-free. Each matched cell prints the placebo-over-real
+  match ratio as the share of matches that may be chance. The ADS-B bracket width of the matches is counted
+  (up to 2 s, 2 to 5, 5 to 10, over 10). A bias injected into synthetic STDDS updates shows in the
+  matched distribution of adsb=false and not of adsb=true. adsb=true updates with a Mode S address are
+  also checked by address, with no gate, and reported apart.
 - **OA-CEN-011** The along-track difference is also given as time (along-track metres over the ADS-B ground
-  speed, aircraft at 100 kt or more); a known clock offset in synthetic data is recovered, positive when the
+  speed, aircraft at 100 kt or more); the ADS-B time is receipt time, so this is the STARS latency minus the
+  ADS-B latency; a known clock offset in synthetic data is recovered, positive when the
   STDDS position is where the aircraft is later than the stated time.
 - **OA-CEN-012** The cross-check counts and difference medians are split by track class and by facility, and
   absent without a clip.
@@ -5512,23 +5520,30 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   filter; reports on the ground are then dropped. The census prints the clip's reports by source type before
   any gating, what each gate removed, and what the time window left out. A TIS-B report on top of a
   radar-only update is not a candidate. `--from` and `--to` restrict both sides to a time of the UTC day
-  (the ADS-B side padded by the interpolation gap); a window outside 0 to 86400 s is refused.
+  (the ADS-B side padded by the interpolation gap and the placebo shift of 60 s, across midnight too); a window
+  outside 0 to 86400 s, or a non-finite bound, is refused. The STDDS and ADS-B time spans are printed, and
+  a run whose spans do not overlap (a wrong day or clip) exits 2.
 - **OA-CEN-014** The candidate search is exact at any latitude to 85 degrees and across the antimeridian:
   each segment is stored in every grid cell its bounding box touches after widening by the largest gate
   (in longitude at the box's highest latitude), longitude cells wrap, interpolation and the east difference
-  take the short way round. Segments and updates above 85 degrees, and segments faster than 600 m/s, are
+  take the short way round. Distances are in the tangent plane at the interpolated ADS-B point. Segments and updates above 85 degrees, and segments faster than 600 m/s, are
   counted and not used.
 - **OA-CEN-015** Coverage is counted apart from no candidate: per flag, the share of checked updates with
   any indexed ADS-B aircraft within 30 NM at their time.
 - **OA-CEN-016** The cross-check counts reconcile exactly with the update counts per flag: updates equal
-  checked plus no position or time, above 85 degrees, no trackNum, and exact duplicates of the track's
-  previous update (time and position); updates with no flag equal the not-checked no-flag count.
+  checked plus no position or time, above 85 degrees, no trackNum, pseudo or frozen track, and exact
+  duplicates of the track's previous update (time and position); updates with no flag equal the not-checked no-flag count.
 - **OA-CEN-017** A null control is run beside the real match: the same positions with the STDDS time
   shifted by plus and minus 60 s, printing per flag the outcome counts and the horizontal difference
-  distribution of its exactly-one matches.
+  distribution of its exactly-one matches; the placebo exactly-one count (mean of the two shifts) over the
+  real one is printed as an estimate of the chance share. A placebo lookup at a window's edge finds its
+  shifted ADS-B.
 - **OA-CEN-018** Per flag the census prints the matches without a vertical difference, the distinct matched
-  ADS-B aircraft and the distinct STDDS tracks with a match, and the distribution over tracks of each track's
-  median difference (tracks with 3 or more matches); the along-track-as-time figure leaves out aircraft
+  ADS-B aircraft and the distinct STDDS track segments with a match, and the distribution over track
+  segments of each segment's median difference (segments with 3 or more matches). A segment is a run of
+  one track number that a restart of the interval state (a gap over 120 s, an update flagged new, a resync)
+  has not cut, so a recycled track number is not one aircraft; along and cross metres, like the time,
+  leave out aircraft below 100 kt; a value is kept inside its histogram range after rounding to f32; the along-track-as-time figure leaves out aircraft
   below 100 kt; a class or facility cell with fewer than 30 matches prints "n<30" for a flag instead of
   medians; `--gate-nm` and `--gate-ft` without `--adsb` are refused; the histogram's upper edge is
   inclusive.
@@ -5537,8 +5552,13 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   flag of the track, an absent-flag update obeys the same backwards and reset rules, 3 backwards updates in
   a row restart the track (counted), and an update flagged new on a track number with state starts a new
   segment (counted).
-- **OA-CEN-020** The census estimates the bytes it holds, prints the estimate, stops and refuses a run whose
-  estimate passes 4 GB, and counts updates left out by the time window.
+- **OA-CEN-020** Three checks against 4 GB, each an estimate: before the ADS-B index is built, from the
+  count of clip reports (inside the padded window) times a per-report allowance, so a run that would
+  not fit is refused (exit 2) before the index is allocated; after it, the index's own estimate; and while
+  reading, what the census holds (the interval lists, the cross-check records and segments) with the copies
+  that `finish` makes of each match, placebo value and segment (three accumulators: all, class, facility).
+  Not counted: the loaded clip columns, the read buffers and the output. Updates left out by the time window
+  are counted.
 
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)

@@ -9,7 +9,7 @@ use crate::dist::{Summary, HIST_BINS};
 use crate::hist::{Hist, COARSE_BINS};
 use crate::read::ReadStats;
 use crate::xcheck::{source_names, Params, OUTCOME_NAMES};
-use crate::xcres::{cidx, XcGroup, MIN_CELL_N, Q_NAMES};
+use crate::xcres::{addr_range, cidx, utc, XcGroup, GAP_NAMES, MIN_CELL_N, Q_NAMES};
 use oa_stdds::STD_ERROR_NAMES;
 use oa_truth::REMOVE_NAMES;
 use std::fmt::Write;
@@ -193,6 +193,9 @@ fn med(s: Option<&Summary>) -> String {
         .map_or_else(|| "n/a".to_string(), |x| format!("{x:.1}"))
 }
 
+/// Label of adsb=true in the cross-check.
+const FUSED: &str = " (ADS-B-fused, not independent of the truth)";
+
 /// One line for a class or facility: the outcomes at the primary gate and, for a flag with at
 /// least [`MIN_CELL_N`] matches, the median differences of the matches.
 fn xc_group_line(g: &XcGroup, p: &Params) -> String {
@@ -212,11 +215,40 @@ fn xc_group_line(g: &XcGroup, p: &Params) -> String {
             )
         };
         parts.push(format!(
-            "{name}: {}; {meds}",
-            outcomes_line(&counts_of(g, f, p.primary))
+            "{name}{}: {}; {meds}; share of matches that may be chance (placebo estimate) {}",
+            if f == 1 { FUSED } else { "" },
+            outcomes_line(&counts_of(g, f, p.primary)),
+            chance_share(g, f, p.primary)
         ));
     }
     parts.join(" | ")
+}
+
+/// "Share of matches that may be chance": the placebo exactly-one matches (the mean of the two
+/// shifts) over the real exactly-one matches, at the primary gate.
+fn chance_share(g: &XcGroup, f: usize, primary: usize) -> String {
+    let real = g.counts.get(cidx(f, primary, 1)).copied().unwrap_or(0);
+    let pl = |k: usize| g.pcounts.get((k * 2 + f) * 3 + 1).copied().unwrap_or(0);
+    if real == 0 {
+        return "n/a".to_string();
+    }
+    format!("{:.1}%", (pl(0) + pl(1)) as f64 * 50.0 / real as f64)
+}
+
+fn span(s: Option<(i64, i64)>) -> String {
+    s.map_or_else(
+        || "none".to_string(),
+        |(a, b)| format!("{} to {} UTC", utc(a), utc(b)),
+    )
+}
+
+/// The adsb=false part of [`xc_group_line`].
+fn xc_false_line(g: &XcGroup, p: &Params) -> String {
+    xc_group_line(g, p)
+        .split(" | ")
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn at(a: &[u64], i: usize) -> u64 {
@@ -253,6 +285,29 @@ fn xc_section(o: &mut String, r: &Results) {
         o,
         "caveats: STARS reuses track numbers, so a track here is a track number; a gap over 120 s, an update flagged new, or 3 backwards updates in a row starts a new segment, but a reuse within 120 s without the new flag is not detected. Matches lie inside the gate by construction, so the tails are cut at the gate; the no-candidate and ambiguous counts say how many updates fall outside."
     );
+    let _ = writeln!(
+        o,
+        "adsb=true{FUSED}: STARS fuses ADS-B into those updates, so their difference from ADS-B measures STARS latency and filtering, not accuracy; it shows what an ADS-B-built position looks like here and is no control for an error of ADS-B itself"
+    );
+    let _ = writeln!(
+        o,
+        "time: the ADS-B time is the receipt time of the report, so the along-track time is the STARS latency minus the ADS-B latency (the fleet's ADS-B latency was 0.49 s, UK-008)"
+    );
+    let _ = writeln!(
+        o,
+        "time spans (UTC, aggregate): STDDS updates counted {}; ADS-B clip reports {}",
+        span(x.stdds_span_ms),
+        span(x.clip.span_ms)
+    );
+    let _ = writeln!(
+        o,
+        "headline, adsb=false updates by track class (an adsb=false update on a mixed track is not ADS-B-free: the same track carries ADS-B on other updates; only the all adsb=false class is without ADS-B on every update):"
+    );
+    for &ci in &[1usize, 3, 2] {
+        if let (Some(name), Some(gr)) = (CLASS_NAMES.get(ci), x.classes.get(ci)) {
+            let _ = writeln!(o, "  {name}: {}", xc_false_line(gr, p));
+        }
+    }
     let c = &x.clip;
     let _ = writeln!(
         o,
@@ -275,8 +330,8 @@ fn xc_section(o: &mut String, r: &Results) {
     );
     let _ = writeln!(
         o,
-        "ADS-B index: reports {} aircraft {} interpolable segments {} (left out: faster than 600 m/s {}, above 85 degrees {})",
-        x.points, x.aircraft, x.segments, x.segments_fast, x.segments_polar
+        "ADS-B index: reports {} aircraft {} interpolable segments {} (left out: faster than 600 m/s {}, above 85 degrees {}, neighbouring reports more than {} ms apart {})",
+        x.points, x.aircraft, x.segments, x.segments_fast, x.segments_polar, p.max_gap_ms, x.segments_long
     );
     let _ = writeln!(
         o,
@@ -295,15 +350,17 @@ fn xc_section(o: &mut String, r: &Results) {
             + at(&nc.no_position, f)
             + at(&nc.polar, f)
             + at(&nc.no_track, f)
-            + at(&nc.duplicate, f);
+            + at(&nc.duplicate, f)
+            + at(&nc.status, f);
         let _ = writeln!(
             o,
-            "  {name}: updates {} = checked {checked} + no position or time {} + above 85 degrees {} + no trackNum {} + exact duplicate of the track's previous update {} ({})",
+            "  {name}: updates {} = checked {checked} + no position or time {} + above 85 degrees {} + no trackNum {} + exact duplicate of the track's previous update {} + pseudo or frozen track {} ({})",
             at(&r.global.updates, f),
             at(&nc.no_position, f),
             at(&nc.polar, f),
             at(&nc.no_track, f),
             at(&nc.duplicate, f),
+            at(&nc.status, f),
             if total == at(&r.global.updates, f) { "reconciles" } else { "DOES NOT RECONCILE" }
         );
     }
@@ -340,7 +397,7 @@ fn xc_section(o: &mut String, r: &Results) {
         let n1 = g.sums.get(f * 5 + 1).map_or(0, |s| s.n);
         let _ = writeln!(
             o,
-            "  {name}: matches {n0}, of which without a vertical difference (altitude gate not applied) {}; distinct ADS-B aircraft matched {}; distinct STDDS tracks with a match {}",
+            "  {name}: matches {n0}, of which without a vertical difference (altitude gate not applied) {}; distinct ADS-B aircraft matched {}; distinct STDDS track segments with a match {}",
             n0.saturating_sub(n1),
             at(&x.matched_aircraft, f),
             at(&g.tracks_matched, f)
@@ -348,11 +405,16 @@ fn xc_section(o: &mut String, r: &Results) {
     }
     let _ = writeln!(
         o,
-        "null control (placebo): the same positions with the STDDS time shifted by plus and minus 60 s; a real match rate far above these means the matches are not chance:"
+        "null control (placebo): the same positions with the STDDS time shifted by plus and minus 60 s; the placebo matches over the real ones estimate the share of the real matches that may be chance:"
     );
     for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
         let real = counts_of(g, f, p.primary);
-        let _ = writeln!(o, "  {name}, real time: {}", outcomes_line(&real));
+        let _ = writeln!(
+            o,
+            "  {name}, real time: {}; share of matches that may be chance (placebo estimate) {}",
+            outcomes_line(&real),
+            chance_share(g, f, p.primary)
+        );
         for (k, sh) in ["+60 s", "-60 s"].iter().enumerate() {
             let code = k * 2 + f;
             let c: Vec<u64> = (0..3).map(|j| at(&g.pcounts, code * 3 + j)).collect();
@@ -371,7 +433,19 @@ fn xc_section(o: &mut String, r: &Results) {
         "differences STDDS minus ADS-B of the exactly-one matches at the primary gate:"
     );
     for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
-        let _ = writeln!(o, "  {name}{}:", if f == 1 { " (control)" } else { "" });
+        let _ = writeln!(o, "  {name}{}:", if f == 1 { FUSED } else { "" });
+        let gc = g.gap_counts.get(f).copied().unwrap_or_default();
+        let gt: u64 = gc.iter().sum();
+        let _ = writeln!(
+            o,
+            "    ADS-B bracket width of the matches: {}",
+            GAP_NAMES
+                .iter()
+                .zip(gc)
+                .map(|(n, c)| format!("{n} {c} ({})", pct(c, gt)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         for (q, qn) in Q_NAMES.iter().enumerate() {
             if let Some(s) = g.sums.get(f * 5 + q) {
                 let _ = writeln!(o, "    {qn}: {}", sum_line(s));
@@ -380,7 +454,7 @@ fn xc_section(o: &mut String, r: &Results) {
             if let Some(s) = g.tsums.get(f * 5 + q) {
                 let _ = writeln!(
                     o,
-                    "      over tracks (each track's median, tracks with 3 or more matches): {}",
+                    "      over track segments (each segment's median, segments with 3 or more matches): {}",
                     sum_line(s)
                 );
             }
@@ -391,6 +465,23 @@ fn xc_section(o: &mut String, r: &Results) {
                 "    vertical difference of horizontal-only matches, feet (wide range, to check the altitude unit): {}",
                 sum_line(s)
             );
+        }
+    }
+    let _ = writeln!(
+        o,
+        "adsb=true updates carrying a Mode S address, checked by address (the aircraft of that address at that time, no gate, so the differences are not cut at the gate); reported apart from the proximity matches above:"
+    );
+    let _ = writeln!(
+        o,
+        "  addressed adsb=true updates {}, with that aircraft bracketed in the clip {} ({})",
+        g.addr_n,
+        g.addr_found,
+        pct(g.addr_found, g.addr_n)
+    );
+    for (q, qn) in Q_NAMES.iter().enumerate() {
+        if let Some(s) = g.asums.get(q) {
+            let (lo, hi) = addr_range(q, p);
+            let _ = writeln!(o, "    {qn} (range {lo:.0} to {hi:.0}): {}", sum_line(s));
         }
     }
     let _ = writeln!(o, "by track class:");

@@ -1,13 +1,14 @@
 # oa-stdds-census
 
 Counts what the ADS-B flag on STDDS terminal radar tracks means. STARS publishes every track
-update with a flag that says whether ADS-B contributed. If the flag is reliable, the updates
-flagged without ADS-B are a reference independent of ADS-B, and comparing them with the same
-aircraft's ADS-B measures how far ADS-B itself is off (UK-008, UK-009). This tool collects the
-evidence for and against that reading; it does not decide it.
+update with a flag that says whether ADS-B contributed. If the flag is reliable, updates
+flagged without ADS-B on a track that never carries ADS-B could be a reference independent of
+ADS-B (UK-008, UK-009). An adsb=false update on a mixed track is not ADS-B-free, and adsb=true
+updates are ADS-B-fused: their difference from ADS-B measures STARS latency and filtering, not
+accuracy. This tool collects the evidence for and against the reading; it does not decide it.
 
 ```
-oa-stdds-census DIR [--from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft N]]
+oa-stdds-census DIR [--from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft N] [--max-gap-s S]]
 ```
 
 - `DIR`: a STDDS recording directory (files `*.oaf` or `*.oaf.gz`, searched up to three levels
@@ -17,7 +18,14 @@ oa-stdds-census DIR [--from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft 
 - `--adsb`: an `.oaf` clip of the same day from `oa-adsb-clip`. Without it, only the census runs.
 - `--gate-nm`, `--gate-ft`: the match gates of the position comparison, 1 NM and 500 ft by
   default. The horizontal gate is also tried at 0.5 and 2 NM.
-- `--from`, `--to`: a window of the UTC day in seconds, applied to both sides.
+- `--max-gap-s`: the widest gap between two ADS-B reports that is interpolated, 5 s by default
+  (a wider bracket interpolates a manoeuvre away; the output counts matches by bracket width and the
+  neighbouring reports left out as too far apart).
+- `--from`, `--to`: a window of the UTC day in seconds, applied to both sides; the ADS-B side is
+  widened by the bracket and the 60 s placebo shift. Both must be finite.
+
+The run exits 2 if the STDDS and ADS-B time spans (printed, UTC) do not overlap, and before the
+index is built if the clip's record count puts it past the 4 GB estimate.
 
 Sealed hold-out data is never read. `DIR`, `--adsb`, every directory of the walk and every file
 opened go through the shared guard `oa-sealed` (`crates/oa-sealed/sealed_paths.txt`), which
@@ -61,20 +69,28 @@ With `--adsb`, each update is compared with the ADS-B aircraft at the same place
   rebroadcasts the radar picture, multilateration and ADS-R are removed, and so are reports below
   the accuracy gates. Ground reports are removed after the gates. The output counts the clip's
   reports by source and what each gate removed.
-- Each ADS-B aircraft is interpolated to the update's time between two reports at most 10 s
-  apart. An update with exactly one aircraft inside the gates is a match; none and more than one
+- Each ADS-B aircraft is interpolated to the update's time between two reports at most 5 s
+  apart. The ADS-B time is the receipt time (about 0.49 s fleet latency, UK-008), so the along-track
+  time is the STARS latency minus the ADS-B latency. An update with exactly one aircraft inside the gates is a match; none and more than one
   are counted and not used.
 - For matches, the difference STDDS minus ADS-B: horizontal, vertical, along and across the
-  ADS-B track, and along-track as a time for aircraft at 100 kt or more. Each is given per update
-  and as the distribution of per-track medians, for adsb=false and for adsb=true as the control.
+  ADS-B track, and along-track as a time; along and across need 100 kt or more, like the time.
+  Each is given per update and as the distribution of per-segment medians. A segment is a run of
+  one track number that no gap over 120 s, new flag or resync has cut, so a reused track number
+  is not one aircraft. adsb=false is headlined by track class (all false, mixed, all true);
+  adsb=true is printed as ADS-B-fused, not independent of the truth.
+- Updates on pseudo or frozen tracks are counted and not checked. Coasting is not read by the
+  STDDS parser, so coasting updates are not excluded.
+- adsb=true updates that carry a Mode S address are also checked by address (that aircraft at that
+  time, no gate), reported apart from the proximity matches.
 
 Three counts must be read with every matched distribution:
 
 - **The gate.** A match is inside the gate by construction, so the matched distribution is cut
   at the gate. The outcome counts at 0.5, 1 and 2 NM show how much lies beyond.
 - **Chance matches.** The comparison is run again with the STDDS time moved by 60 s each way.
-  Matches in those passes are unrelated aircraft that happen to be inside the gate; their rate is
-  the floor under the real one.
+  Matches in those passes are unrelated aircraft that happen to be inside the gate; their
+  count over the real matches is printed next to the medians as an estimate of the chance share.
 - **Coverage.** The share of updates with any ADS-B aircraft within 30 NM separates an aircraft
   with no ADS-B from an area the clip does not cover.
 
