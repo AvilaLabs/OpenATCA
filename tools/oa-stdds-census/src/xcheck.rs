@@ -90,8 +90,12 @@ impl Default for Params {
 
 impl Params {
     /// The gates 0.5, `nm` and 2 NM in ascending order, with `nm` as the primary one.
+    /// If `nm` is already one of them the list is the default one (no gate twice).
     pub fn with_primary_gate_nm(mut self, nm: f64) -> Params {
         let mut g = [0.5, nm, 2.0];
+        if nm == 0.5 || nm == 2.0 || nm == 1.0 {
+            g = [0.5, 1.0, 2.0];
+        }
         g.sort_by(|a, b| a.total_cmp(b));
         self.primary = g.iter().position(|&x| x == nm).unwrap_or(1);
         self.gates_nm = g;
@@ -630,24 +634,37 @@ pub fn build_from_points(mut pts: Vec<Pt>, params: Params) -> Result<Index, Stri
     })
 }
 
-/// Bytes allowed per report for building the index from `n` reports: the sort order, the kept
-/// point, the cell entries of its segment and its share of the cell map (an estimate).
-pub fn build_bytes_per_report() -> u64 {
-    (16 + std::mem::size_of::<Pt>() + 8 * std::mem::size_of::<u32>() + 2 * 72) as u64
-}
+/// Bytes [`build`] allocates for the sort order of each report of the clip (time and index),
+/// whether or not the window keeps it.
+pub const ORDER_BYTES_PER_REPORT: u64 = 16;
+/// ASSUMED cell entries (`u32` each) and new grid cells (72 bytes each) per kept report: a
+/// segment is stored in every cell its box touches, which for a gate of a few NM and a few
+/// seconds is a handful. A clip of faster or sparser aircraft, or a larger gate, can exceed it.
+pub const ASSUMED_ENTRIES_PER_REPORT: u64 = 8;
+pub const ASSUMED_CELLS_PER_REPORT: u64 = 2;
+/// Growth slack on a `Vec` or `HashMap` that is filled by pushes.
+pub const GROWTH_SLACK: u64 = 2;
 
-/// An estimate of the bytes [`build`] allocates for the reports of `r` (those inside the
-/// padded window, if any), made from the record count before anything is allocated. The
-/// clip's own columns, already loaded, are not counted.
+/// An estimate of the bytes [`build`] allocates for the reports of `r`, made from the record
+/// counts before anything is allocated: the sort order for every report, and for each report
+/// the window keeps (the padded window, if any) its point and its assumed share of the cell
+/// entries and cell map, each with [`GROWTH_SLACK`]. It is an estimate under the stated
+/// assumptions, not a bound. The clip's own columns, already loaded, are not counted.
 pub fn estimate_build_bytes(r: &Reports, params: &Params, window: Option<Window>) -> u64 {
-    let n = r
+    let all = r.time_ns.len() as u64;
+    let kept = r
         .time_ns
         .iter()
         .filter(|&&t| {
             window.is_none_or(|w| w.contains_padded(t.div_euclid(1_000_000), adsb_pad_ms(params)))
         })
         .count() as u64;
-    n.saturating_mul(build_bytes_per_report())
+    let per_kept = GROWTH_SLACK
+        * (std::mem::size_of::<Pt>() as u64
+            + ASSUMED_ENTRIES_PER_REPORT * std::mem::size_of::<u32>() as u64
+            + ASSUMED_CELLS_PER_REPORT * 72);
+    all.saturating_mul(ORDER_BYTES_PER_REPORT)
+        .saturating_add(kept.saturating_mul(per_kept))
 }
 
 /// The outcome of one gate: no candidate, exactly one, more than one.
@@ -1170,6 +1187,9 @@ pub(crate) mod tests {
         assert_eq!(g(3.0), ([0.5, 2.0, 3.0], 2));
         assert_eq!(g(1.0), ([0.5, 1.0, 2.0], 1));
         assert_eq!(g(0.25), ([0.25, 0.5, 2.0], 0));
+        // A gate equal to a default one is not listed twice.
+        assert_eq!(g(0.5), ([0.5, 1.0, 2.0], 0));
+        assert_eq!(g(2.0), ([0.5, 1.0, 2.0], 2));
     }
 
     // REQ: OA-CEN-009

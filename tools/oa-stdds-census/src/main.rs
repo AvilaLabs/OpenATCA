@@ -9,6 +9,14 @@
 use oa_sealed::Sealed;
 use oa_stdds_census::census::Census;
 use oa_stdds_census::census::DEFAULT_BUDGET;
+
+/// The memory budget: 4 GB, or the value of `OA_STDDS_CENSUS_BUDGET_BYTES` (for tests only).
+fn budget() -> u64 {
+    std::env::var("OA_STDDS_CENSUS_BUDGET_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_BUDGET)
+}
 use oa_stdds_census::guard::{is_refusal, refuse_sealed};
 use oa_stdds_census::read::{read_dir, ReadError};
 use oa_stdds_census::report::render;
@@ -116,7 +124,7 @@ fn main() -> ExitCode {
                 loaded.bad_frames, loaded.dropped_records
             );
             let est = estimate_build_bytes(&loaded.reports, &params, window);
-            if est > DEFAULT_BUDGET {
+            if est > budget() {
                 eprintln!(
                     "oa-stdds-census: refused: building the ADS-B index is estimated at {} MB from {} reports, past the 4 GB budget (use --from and --to)",
                     est / 1_000_000,
@@ -125,7 +133,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
             match build(&loaded.reports, params, window) {
-                Ok(i) if i.bytes() > DEFAULT_BUDGET => {
+                Ok(i) if i.bytes() > budget() => {
                     eprintln!(
                         "oa-stdds-census: refused: the ADS-B index alone is estimated at {} MB, past the 4 GB budget (use --from and --to)",
                         i.bytes() / 1_000_000
@@ -143,7 +151,8 @@ fn main() -> ExitCode {
     };
     let mut census = index
         .map_or_else(Census::new, Census::with_xcheck)
-        .with_window(window);
+        .with_window(window)
+        .with_budget(budget());
     let rs = match read_dir(Path::new(dir), &mut census) {
         Ok(rs) => rs,
         Err(e @ (ReadError::Refused(_) | ReadError::Layout(_))) => {

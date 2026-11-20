@@ -27,6 +27,24 @@ pub fn utc(ms: i64) -> String {
         sec % 60
     )
 }
+/// The span of a recording as minutes: the start rounded down and the end rounded up to the
+/// minute, the span of the recording and not the time of any aircraft.
+pub fn minute_span(s: Option<(i64, i64)>) -> String {
+    const MIN: i64 = 60_000;
+    s.map_or_else(
+        || "none".to_string(),
+        |(a, b)| {
+            let lo = a.div_euclid(MIN) * MIN;
+            let hi = (b + MIN - 1).div_euclid(MIN) * MIN;
+            format!(
+                "{} to {} UTC",
+                utc(lo).get(..16).unwrap_or_default(),
+                utc(hi).get(..16).unwrap_or_default()
+            )
+        },
+    )
+}
+
 /// A track's median difference is taken only from this many matches.
 pub const MIN_TRACK_MATCHES: usize = 3;
 /// A cell with fewer matches than this prints "n<30" instead of medians.
@@ -402,18 +420,17 @@ impl XcResults {
     /// `Err` if the STDDS updates and the ADS-B clip do not overlap in time (a wrong day or
     /// clip), or either has none; the text gives the two spans (aggregate times only).
     pub fn check_overlap(&self) -> Result<(), String> {
-        let span = |s: Option<(i64, i64)>| {
-            s.map_or_else(
-                || "none".to_string(),
-                |(a, b)| format!("{} to {} UTC", utc(a), utc(b)),
-            )
-        };
         match (self.stdds_span_ms, self.clip.span_ms) {
             (Some((a, b)), Some((c, d))) if a <= d && c <= b => Ok(()),
+            (None, _) if self.window.is_some() => {
+                Err("no STDDS updates inside the window".to_string())
+            }
+            (None, _) => Err("no STDDS updates with a time".to_string()),
+            (_, None) => Err("no ADS-B reports in the clip".to_string()),
             (s, c) => Err(format!(
                 "the STDDS updates ({}) and the ADS-B clip ({}) do not overlap in time: wrong day or clip",
-                span(s),
-                span(c)
+                minute_span(s),
+                minute_span(c)
             )),
         }
     }

@@ -151,17 +151,20 @@ type TrackKey = (u32, [u8; 8], u32);
 pub const RESYNC_AFTER: u8 = 3;
 
 /// Bytes counted per kept interval entry, match record and similar small item (estimates).
-const IV_BYTES: u64 = 2;
-const REC_BYTES: u64 = std::mem::size_of::<MatchRec>() as u64;
-const SMALL_BYTES: u64 = 8;
+/// Every figure carries the 2x capacity slack of a `Vec` filled by pushes.
+const SLACK: u64 = 2;
+const IV_BYTES: u64 = SLACK * 2;
+const REC_BYTES: u64 = SLACK * std::mem::size_of::<MatchRec>() as u64;
+const SMALL_BYTES: u64 = SLACK * 8;
 /// What [`Census::finish`] allocates on top of what is held while reading, per item: a match
 /// record's five values are copied into three accumulators (all, its class, its facility); a
 /// placebo or vertical-only value once into each of the three; a track segment's per-track
 /// medians (ten at most) once into each of the three.
-const FINISH_REC_BYTES: u64 = 3 * 5 * 4;
-const FINISH_SMALL_BYTES: u64 = 3 * 4;
-const FINISH_SEG_BYTES: u64 = 3 * 10 * 4;
-const SEG_BYTES: u64 = std::mem::size_of::<TrackXc>() as u64 + FINISH_SEG_BYTES;
+/// (An address match is counted the same, as three copies.)
+const FINISH_REC_BYTES: u64 = SLACK * 3 * 5 * 4;
+const FINISH_SMALL_BYTES: u64 = SLACK * 3 * 4;
+const FINISH_SEG_BYTES: u64 = SLACK * 3 * 10 * 4;
+const SEG_BYTES: u64 = SLACK * std::mem::size_of::<TrackXc>() as u64 + FINISH_SEG_BYTES;
 
 struct Track {
     fac: u32,
@@ -283,7 +286,7 @@ fn xc_observe(x: &Index, t: &mut TrackXc, flag: bool, r: &TaisRecord) -> (u64, O
         t.addr_n += 1;
         if let Some(c) = x.for_icao(r.mrt_time_ms, r.lat_e7, r.lon_e7, alt, r.mode_s_addr) {
             t.addr.push(match_rec(&c, flag, |q| addr_range(q, &p)));
-            bytes += REC_BYTES + 5 * 4;
+            bytes += REC_BYTES + FINISH_REC_BYTES;
         }
     }
     (bytes, matched)
@@ -1852,7 +1855,8 @@ pub(crate) mod tests {
             "not ADS-B-free",
             "ADS-B bracket width of the matches",
             "track segments",
-            "time spans (UTC, aggregate)",
+            "time spans (UTC, start rounded down",
+            "not of any aircraft",
         ] {
             assert!(out.contains(want), "{want}");
         }
@@ -1879,9 +1883,19 @@ pub(crate) mod tests {
                 ),
             );
         }
-        // Ten matches: each record, and the copies of its values the three accumulators take.
-        let per = REC_BYTES + FINISH_REC_BYTES;
+        // Counted from the numbers, not from the constants: per match, the record twice over
+        // (Vec slack), and its five f32 values in each of three accumulators, twice over.
+        let rec = std::mem::size_of::<MatchRec>() as u64;
+        let per = 2 * rec + 2 * 3 * 5 * 4;
         assert!(c.held_bytes() - before >= 10 * per, "{}", c.held_bytes());
+        // An address match costs the same.
+        let mid = c.held_bytes();
+        let mut a = upd(2, 10_300, Some(true), -75.0, 40.0, 10_000, 100.0, 0.0, 0.0);
+        a.present |= tais_bit(TaisField::AcAddress);
+        a.mode_s_addr = 1;
+        c.observe(src("AAA"), &a);
+        // That update is a proximity match too (one record) and an address record (another).
+        assert!(c.held_bytes() - mid >= 2 * per, "{}", c.held_bytes() - mid);
     }
 
     // REQ: OA-CEN-009

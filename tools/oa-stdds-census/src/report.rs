@@ -9,7 +9,7 @@ use crate::dist::{Summary, HIST_BINS};
 use crate::hist::{Hist, COARSE_BINS};
 use crate::read::ReadStats;
 use crate::xcheck::{source_names, Params, OUTCOME_NAMES};
-use crate::xcres::{addr_range, cidx, utc, XcGroup, GAP_NAMES, MIN_CELL_N, Q_NAMES};
+use crate::xcres::{addr_range, cidx, minute_span, XcGroup, GAP_NAMES, MIN_CELL_N, Q_NAMES};
 use oa_stdds::STD_ERROR_NAMES;
 use oa_truth::REMOVE_NAMES;
 use std::fmt::Write;
@@ -199,8 +199,16 @@ const FUSED: &str = " (ADS-B-fused, not independent of the truth)";
 /// One line for a class or facility: the outcomes at the primary gate and, for a flag with at
 /// least [`MIN_CELL_N`] matches, the median differences of the matches.
 fn xc_group_line(g: &XcGroup, p: &Params) -> String {
-    let mut parts = Vec::new();
-    for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
+    (0..2)
+        .map(|f| xc_flag_part(g, p, f))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// The part of [`xc_group_line`] for one flag.
+fn xc_flag_part(g: &XcGroup, p: &Params, f: usize) -> String {
+    let name = FLAG_NAMES.get(f).copied().unwrap_or_default();
+    {
         let n = g.sums.get(f * 5).map_or(0, |s| s.n);
         let meds = if n < MIN_CELL_N {
             format!("n<30 (matches {n})")
@@ -214,18 +222,18 @@ fn xc_group_line(g: &XcGroup, p: &Params) -> String {
                 med(g.sums.get(f * 5 + 4)),
             )
         };
-        parts.push(format!(
+        format!(
             "{name}{}: {}; {meds}; share of matches that may be chance (placebo estimate) {}",
             if f == 1 { FUSED } else { "" },
             outcomes_line(&counts_of(g, f, p.primary)),
             chance_share(g, f, p.primary)
-        ));
+        )
     }
-    parts.join(" | ")
 }
 
 /// "Share of matches that may be chance": the placebo exactly-one matches (the mean of the two
-/// shifts) over the real exactly-one matches, at the primary gate.
+/// shifts) over the real exactly-one matches, at the primary gate. It is a ratio of counts, not
+/// a probability, and can exceed 100% (a target that sits still, or a crowded sky).
 fn chance_share(g: &XcGroup, f: usize, primary: usize) -> String {
     let real = g.counts.get(cidx(f, primary, 1)).copied().unwrap_or(0);
     let pl = |k: usize| g.pcounts.get((k * 2 + f) * 3 + 1).copied().unwrap_or(0);
@@ -235,20 +243,9 @@ fn chance_share(g: &XcGroup, f: usize, primary: usize) -> String {
     format!("{:.1}%", (pl(0) + pl(1)) as f64 * 50.0 / real as f64)
 }
 
-fn span(s: Option<(i64, i64)>) -> String {
-    s.map_or_else(
-        || "none".to_string(),
-        |(a, b)| format!("{} to {} UTC", utc(a), utc(b)),
-    )
-}
-
 /// The adsb=false part of [`xc_group_line`].
 fn xc_false_line(g: &XcGroup, p: &Params) -> String {
-    xc_group_line(g, p)
-        .split(" | ")
-        .next()
-        .unwrap_or_default()
-        .to_string()
+    xc_flag_part(g, p, 0)
 }
 
 fn at(a: &[u64], i: usize) -> u64 {
@@ -283,7 +280,7 @@ fn xc_section(o: &mut String, r: &Results) {
     }
     let _ = writeln!(
         o,
-        "caveats: STARS reuses track numbers, so a track here is a track number; a gap over 120 s, an update flagged new, or 3 backwards updates in a row starts a new segment, but a reuse within 120 s without the new flag is not detected. Matches lie inside the gate by construction, so the tails are cut at the gate; the no-candidate and ambiguous counts say how many updates fall outside."
+        "caveats: STARS reuses track numbers, so a track here is a track number; a gap over 120 s, an update flagged new, or 3 backwards updates in a row starts a new segment, but a reuse within 120 s without the new flag is not detected. Track classes are per track number, the medians per segment. Matches lie inside the gate by construction, so the tails are cut at the gate; the no-candidate and ambiguous counts say how many updates fall outside."
     );
     let _ = writeln!(
         o,
@@ -295,9 +292,9 @@ fn xc_section(o: &mut String, r: &Results) {
     );
     let _ = writeln!(
         o,
-        "time spans (UTC, aggregate): STDDS updates counted {}; ADS-B clip reports {}",
-        span(x.stdds_span_ms),
-        span(x.clip.span_ms)
+        "time spans (UTC, start rounded down and end up to the minute; the span of each recording, not of any aircraft): STDDS updates counted {}; ADS-B clip reports {}",
+        minute_span(x.stdds_span_ms),
+        minute_span(x.clip.span_ms)
     );
     let _ = writeln!(
         o,

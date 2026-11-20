@@ -24,8 +24,12 @@ oa-stdds-census DIR [--from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft 
 - `--from`, `--to`: a window of the UTC day in seconds, applied to both sides; the ADS-B side is
   widened by the bracket and the 60 s placebo shift. Both must be finite.
 
-The run exits 2 if the STDDS and ADS-B time spans (printed, UTC) do not overlap, and before the
-index is built if the clip's record count puts it past the 4 GB estimate.
+The run exits 2 if the STDDS and ADS-B time spans do not overlap, or if the window holds no STDDS
+update. The spans are printed in UTC, start rounded down and end rounded up to the minute: the span
+of each recording, not of any aircraft. It also exits 2, before the index is built, if the clip's
+record count puts it past the 4 GB estimate (an estimate under stated assumptions, not a bound; see
+OA-CEN-020). The environment variable `OA_STDDS_CENSUS_BUDGET_BYTES` replaces the 4 GB and is for
+tests only.
 
 Sealed hold-out data is never read. `DIR`, `--adsb`, every directory of the walk and every file
 opened go through the shared guard `oa-sealed` (`crates/oa-sealed/sealed_paths.txt`), which
@@ -90,7 +94,8 @@ Three counts must be read with every matched distribution:
   at the gate. The outcome counts at 0.5, 1 and 2 NM show how much lies beyond.
 - **Chance matches.** The comparison is run again with the STDDS time moved by 60 s each way.
   Matches in those passes are unrelated aircraft that happen to be inside the gate; their
-  count over the real matches is printed next to the medians as an estimate of the chance share.
+  count over the real matches is printed next to the medians as an estimate of the chance share
+  (a ratio of counts, which can exceed 100%).
 - **Coverage.** The share of updates with any ADS-B aircraft within 30 NM separates an aircraft
   with no ADS-B from an area the clip does not cover.
 

@@ -5480,11 +5480,13 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `mrtTime`, with a time before the track's previous one, or with a gap over 120 s (a reset) are counted
   and make no interval; a record with no `trackNum` is counted and not tracked; a frame cut short or a
   gzip file that ends inside a member (a recording still being written) is counted, never fatal.
-- **OA-CEN-006** WITHDRAWN: the address-based cross-check (replaced by OA-CEN-009 to OA-CEN-012: the
+- **OA-CEN-006** WITHDRAWN: the address-based cross-check (replaced by OA-CEN-009 to OA-CEN-012; the gateless check by address of
+  adsb=true updates in OA-CEN-010 is a different, later check, not this one: the
   address field reads zero on almost all adsb=false updates).
 - **OA-CEN-007** The output holds counts, shares and distributions only: no position, address, callsign,
   code, flight-plan content or individual time; the only text from the data is a source id of letters and
-  digits. Every path (the directory, the ADS-B clip, each subdirectory before it is listed, each
+  digits, and the only times are the start (rounded down) and end (rounded up) to the minute of the STDDS
+  recording and of the ADS-B clip, which are the span of each recording and not the time of any aircraft. Every path (the directory, the ADS-B clip, each subdirectory before it is listed, each
   file before and after it is opened) goes through the shared guard (OA-SEAL-001), as given and with
   links resolved, and a sealed one is refused, naming the path (exit 2). A capture day directory is
   read from its `rec/stdds` folder and only files named `scds-stdds-*`; a day or `rec` directory with no
@@ -5556,13 +5558,16 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   flag of the track, an absent-flag update obeys the same backwards and reset rules, 3 backwards updates in
   a row restart the track (counted), and an update flagged new on a track number with state starts a new
   segment (counted).
-- **OA-CEN-020** Three checks against 4 GB, each an estimate: before the ADS-B index is built, from the
-  count of clip reports (inside the padded window) times a per-report allowance, so a run that would
-  not fit is refused (exit 2) before the index is allocated; after it, the index's own estimate; and while
-  reading, what the census holds (the interval lists, the cross-check records and segments) with the copies
-  that `finish` makes of each match, placebo value and segment (three accumulators: all, class, facility).
-  Not counted: the loaded clip columns, the read buffers and the output. Updates left out by the time window
-  are counted.
+- **OA-CEN-020** Three checks against 4 GB. Each is an estimate under stated assumptions, not a guaranteed
+  bound. (1) Before the ADS-B index is built: 16 bytes for every clip report, and for each report the padded
+  window keeps, its point and an assumed 8 cell entries and 2 new grid cells (72 bytes each), all with 2x
+  growth slack; a run past it is refused (exit 2) before the index is allocated. The cell assumption fails for
+  a clip of faster or sparser aircraft or a larger gate. (2) After it: the index's own estimate. (3) While
+  reading: what the census holds (interval lists, cross-check records, segments, with 2x Vec slack) and the
+  copies that `finish` makes of each match, address match, placebo value and segment (three accumulators:
+  all, class, facility). Not counted: the loaded clip columns, the read buffers, the quality-gate state
+  and the output. Updates left out by the time window are counted. A test sets the budget through
+  `OA_STDDS_CENSUS_BUDGET_BYTES`, which exists for tests only.
 
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)

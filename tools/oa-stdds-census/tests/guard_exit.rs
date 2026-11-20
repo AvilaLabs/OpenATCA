@@ -31,6 +31,8 @@ fn a_sealed_directory_and_a_sealed_clip_exit_2_naming_the_path() {
 // REQ: OA-CEN-013
 #[test]
 fn a_non_finite_window_is_a_usage_error() {
+    // Without the finite filter "NaN" would parse and the run would go on to the directory;
+    // with it the arguments are a usage error and the usage text is printed.
     let bin = env!("CARGO_BIN_EXE_oa-stdds-census");
     for a in [
         ["--from", "NaN", "--to", "5"],
@@ -38,5 +40,9 @@ fn a_non_finite_window_is_a_usage_error() {
     ] {
         let o = Command::new(bin).arg("x").args(a).output().unwrap();
         assert_eq!(o.status.code(), Some(2), "{a:?}");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("usage:"),
+            "{a:?}"
+        );
     }
 }
