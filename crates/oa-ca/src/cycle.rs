@@ -637,9 +637,7 @@ fn time_to_reach(st: &CaState, c: &Cand) -> f64 {
 fn sort_for_evaluation(st: &mut CaState) {
     let mut cands = core::mem::take(&mut st.cands);
     cands.sort_unstable_by(|a, b| {
-        time_to_reach(st, a)
-            .total_cmp(&time_to_reach(st, b))
-            .then_with(|| a.cmp(b))
+        oa_math::cmp_canon_f64(time_to_reach(st, a), time_to_reach(st, b)).then_with(|| a.cmp(b))
     });
     st.cands = cands;
 }
