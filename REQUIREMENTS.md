@@ -6209,7 +6209,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
   ratio is outside 0.8 to 1.25.
 
-## Feed damage check (oa-feed-gaps, P-006 section 6)
+## Feed damage check (oa-feed-gaps, P-006 section 6 and P-007)
 
 - **OA-GAP-001** An interval between consecutive times of a feed over 600 s is an excluded interval (P-007), not damage by itself; exactly 600 s is not over.
 - **OA-GAP-002** The interval from the window start to the first time, and from the last time to the window end, counts.
@@ -6228,6 +6228,6 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-GAP-015** `--clip-log` is required. A refused trace, not exactly one summary line and one `archive:` line, or an archive not reported complete makes the window damaged.
 - **OA-GAP-016** The clip log's `kept` must equal the reports decoded from the clip; a mismatch is damage, with both numbers printed.
 - **OA-GAP-017** A regular file in the SFDPS directory that is not `.oaf` or `.oaf.gz` is a read error (exit 2) that names it; the report names the files used.
-- **OA-GAP-018** An `exclude` line parses back to the same nanosecond window.
+- **OA-GAP-018** An `exclude` line parses back to the same nanosecond window under the whole-second ISO grammar of `oa_adsb::cli::parse_iso` plus a nine-digit fraction. The scorer's own parser of these lines is tested on its side, not here.
 - **OA-GAP-019** An existing `--out` is refused (exit 2); the report is written to a new temporary file, synced, then renamed.
 
