@@ -15,6 +15,7 @@ import tarfile
 import tempfile
 import unittest
 import zlib
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -68,9 +69,10 @@ def make_tree(base, git=False):
     return tree, data
 
 
-def run_filter(tree, directory):
+def run_filter(tree, directory, extra_env=None):
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(tree.parent), **(extra_env or {})}
     return subprocess.run([sys.executable, "-I", str(tree / "fuzz" / "make_corpora.py"), "--filter-existing", str(directory)],
-                          capture_output=True, text=True, env={"PATH": os.environ.get("PATH", ""), "HOME": str(tree.parent)})
+                          capture_output=True, text=True, env=env)
 
 
 class TextScanTests(unittest.TestCase):
@@ -225,7 +227,9 @@ class FilterExistingTests(unittest.TestCase):
             seed = next(p for p in (tree / "fuzz" / "seeds").rglob("*") if p.is_file())
             (corpus / "syn-seed").write_bytes(seed.read_bytes())   # the bytes of a committed seed: kept
             (corpus / "syn-x").write_bytes(b"<x>2026-11-21T12:00:00Z</x>")   # named like a seed, is not one: removed
-            r = run_filter(tree, corpus)
+            # a GIT_* variable in the environment does not move git off the repository
+            r = run_filter(tree, corpus, {"GIT_DIR": str(Path(t) / "nowhere"), "GIT_INDEX_FILE": str(Path(t) / "nope"),
+                                          "GIT_WORK_TREE": str(Path(t) / "nowhere")})
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(r.stdout, "files scanned: 7\nfiles removed: 5\nfiles kept: 2\nfiles refused (kept): 0\n"
                                        "files skipped (not regular): 0\n")
@@ -276,6 +280,8 @@ class FilterExistingTests(unittest.TestCase):
                 (d / "f").write_bytes(b"2026-11-21T12:00:00Z")
             (corpus / "ok").write_bytes(b"2026-11-10T12:00:00Z")
             (corpus / "bad").write_bytes(b"2026-11-21T12:00:00Z")
+            # a file with a sealed name: not read, not deleted, not counted
+            (corpus / "scds" / "stdds-20261119-holdout.bin").write_bytes(b"2026-11-21T12:00:00Z")
             os.mkfifo(corpus / "pipe")
             os.symlink(corpus / "ok", corpus / "link")
             (corpus / "linked").write_bytes(b"2026-11-21T12:00:00Z")
@@ -285,7 +291,8 @@ class FilterExistingTests(unittest.TestCase):
             self.assertEqual(sg.filter_corpus_dir(corpus, counter, g), (5, 1, 4, 1, 2))
             self.assertEqual(counter.count, 1)
             self.assertFalse((corpus / "bad").exists())
-            for kept in ((sealed_sub / "f"), (day_sub / "f"), corpus / "ok", corpus / "linked"):
+            for kept in ((sealed_sub / "f"), (day_sub / "f"), corpus / "ok", corpus / "linked",
+                         corpus / "scds" / "stdds-20261119-holdout.bin"):
                 self.assertTrue(kept.exists(), kept)
             # not a directory, and not a corpus directory
             with self.assertRaises(NotADirectoryError):
@@ -293,6 +300,108 @@ class FilterExistingTests(unittest.TestCase):
             for d in (data, data / "fuzz", data / "fuzz" / "x", corpus / "scds" / "stdds-20261119-holdout"):
                 with self.assertRaises(sg.SealedError):
                     sg.filter_corpus_dir(d, counter, g)
+
+
+class FilterRaceTests(unittest.TestCase):
+    """A name swapped for another file or a link while the walk runs must not redirect a delete."""
+
+    def setUp(self):
+        self._t = tempfile.TemporaryDirectory()
+        self.data = Path(self._t.name).resolve() / "data"
+        self.corpus = self.data / "fuzz" / "x" / "corpus"
+        self.corpus.mkdir(parents=True)
+        (self.data / "other").mkdir()
+        self.g = sg.Guard(root=self.data)
+        self.bad = b"<x>2026-11-21T12:00:00Z</x>"
+
+    def tearDown(self):
+        self._t.cleanup()
+
+    def run_with(self, swap):
+        real = sg.file_has_sealed_time
+        calls = []
+
+        def hooked(data, guard=None):
+            verdict = real(data, guard)
+            if not calls:
+                calls.append(1)
+                swap()
+            return verdict
+        counter = sg.DropCounter(announce=False)
+        with mock.patch.object(sg, "file_has_sealed_time", hooked):
+            return sg.filter_corpus_dir(self.corpus, counter, self.g), counter
+
+    def test_a_subdirectory_swapped_for_a_link_mid_walk_deletes_nothing_outside(self):
+        (self.corpus / "sw").mkdir()
+        (self.corpus / "sw" / "bad").write_bytes(self.bad)
+        (self.data / "other" / "bad").write_bytes(self.bad)
+
+        def swap():
+            os.rename(self.corpus / "sw", self.corpus / "sw.orig")
+            os.symlink(self.data / "other", self.corpus / "sw")
+        (counts, counter) = self.run_with(swap)
+        self.assertTrue((self.data / "other" / "bad").exists())
+        self.assertEqual(counts[1], 1)   # what was read was removed: the file in the directory that was opened
+        self.assertFalse((self.corpus / "sw.orig" / "bad").exists())
+
+    def test_a_file_swapped_for_another_between_read_and_unlink_is_kept(self):
+        (self.corpus / "f").write_bytes(self.bad)
+
+        def swap():
+            (self.corpus / "new").write_bytes(self.bad)
+            os.rename(self.corpus / "new", self.corpus / "f")   # the opened inode is no longer at the name
+        (counts, counter) = self.run_with(swap)
+        self.assertEqual((counts[1], counts[3]), (0, 1))
+        self.assertEqual((self.corpus / "f").read_bytes(), self.bad)
+
+    def test_a_file_that_gains_a_hard_link_before_the_unlink_is_kept(self):
+        (self.corpus / "f").write_bytes(self.bad)
+        (counts, counter) = self.run_with(lambda: os.link(self.corpus / "f", self.data / "other" / "alias"))
+        self.assertEqual((counts[1], counts[3]), (0, 1))
+        self.assertTrue((self.corpus / "f").exists())
+
+    def test_a_directory_replaced_by_a_link_before_it_is_opened_is_not_entered(self):
+        (self.corpus / "sw").mkdir()
+        (self.data / "other" / "bad").write_bytes(self.bad)
+        real_open = os.open
+
+        def hooked(path, flags, *a, **kw):
+            if path == "sw" and flags & os.O_DIRECTORY:
+                os.rmdir(self.corpus / "sw")
+                os.symlink(self.data / "other", self.corpus / "sw")
+            return real_open(path, flags, *a, **kw)
+        with mock.patch.object(os, "open", hooked):
+            counts = sg.filter_corpus_dir(self.corpus, sg.DropCounter(announce=False), self.g)
+        self.assertTrue((self.data / "other" / "bad").exists())
+        self.assertEqual(counts[1], 0)
+
+
+class LongCellAndRunTests(unittest.TestCase):
+    def test_a_cell_over_the_integer_text_limit_is_not_a_time(self):
+        big = "9" * 5000
+        self.assertFalse(sg.time_in_window(big, keep_malformed=True))
+        self.assertFalse(sg.time_in_window(big, keep_malformed=True, loose=True))
+        self.assertTrue(sg.time_in_window(big))   # the corpus builder fails closed
+        self.assertFalse(sg.row_in_window({"a": big}, ("a",), keep_malformed=True))
+        write = [dict(scenario_id="s", flight_id="f", time_ns=big, lat_deg=0, lon_deg=0, ve_mps=0, vn_mps=0, phase="p")]
+        with tempfile.TemporaryDirectory() as t:
+            write_rows(Path(t) / "t.csv", ce.EXPECTED["truth"], write)
+            with self.assertRaises(ce.EvaluationError):
+                ce._csv(str(Path(t) / "t.csv"), "truth")
+
+    def test_a_long_digit_run_is_read_at_every_position(self):
+        s = IN_NS // NS
+        self.assertTrue(sealed("77777" + str(s) + "77777"))
+        self.assertTrue(sealed("1" * 30 + "20261121" + "1" * 30))
+        self.assertTrue(sealed("9" * 5000))   # over the cost bound: fail closed
+        self.assertFalse(sealed("0" * 60))
+        self.assertFalse(sealed("9" * 100))
+
+    def test_a_date_glued_to_digits_in_a_recording_path_is_found(self):
+        self.assertEqual(sg.path_date("rec/2026-11-18/x120261121.oaf"), (2026, 11, 21))
+        self.assertEqual(sg.path_date("x120261110"), (2026, 11, 10))
+        self.assertEqual(sg.path_date("a/2026_11_09b/20261110x"), (2026, 11, 10))
+        self.assertIsNone(sg.path_date("x120261399"))
 
 
 class MakeCorporaStaticTests(unittest.TestCase):

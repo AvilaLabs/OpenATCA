@@ -353,6 +353,21 @@ class Guard:
                     "(crates/oa-sealed/sealed_paths.txt); sealed data is never read"
                 )
 
+    def verify_fd(self, fd: int, path) -> None:
+        """Asks the kernel which file the descriptor is (/proc/self/fd/N) and refuses a sealed one, and a
+        regular file with more than one hard link; SealedError. Without /proc only the link count is checked."""
+        try:
+            real = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            real = None
+        st = os.fstat(fd)
+        if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+            raise SealedError(
+                f"{path}: refused by OA-SEAL-002: the file has {st.st_nlink} hard links, so its other names could be sealed data under a neutral name; copy it instead"
+            )
+        if real is not None:
+            self._check_resolved(os.fspath(path) if not isinstance(path, bytes) else os.fsdecode(path), real)
+
     def open(self, path, mode="r", **kw):
         """Checks `path`, opens it for reading, then asks the kernel which file the descriptor is
         (/proc/self/fd/N) and refuses a sealed one, closing it: the opener every file a tool reads
@@ -362,17 +377,7 @@ class Guard:
         self.check(path)
         fd = os.open(path, os.O_RDONLY)
         try:
-            try:
-                real = os.readlink(f"/proc/self/fd/{fd}")
-            except OSError:
-                real = None
-            st = os.fstat(fd)
-            if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
-                raise SealedError(
-                    f"{path}: refused by OA-SEAL-002: the file has {st.st_nlink} hard links, so its other names could be sealed data under a neutral name; copy it instead"
-                )
-            if real is not None:
-                self._check_resolved(os.fspath(path) if not isinstance(path, bytes) else os.fsdecode(path), real)
+            self.verify_fd(fd, path)
             return open(fd, mode, closefd=True, **kw)
         except BaseException:
             try:
@@ -457,12 +462,12 @@ def time_in_window(value, optional: bool = False, guard: "Guard | None" = None, 
     if isinstance(value, str):
         if optional and value == "":
             return False
-        if keep_malformed and not loose:
-            return _in_window_ns(int(value), guard) if _STRICT_INT.fullmatch(value) else False
         try:
+            if keep_malformed and not loose:
+                return _in_window_ns(int(value), guard) if _STRICT_INT.fullmatch(value) else False
             return _in_window_ns(int(value), guard)
         except ValueError:
-            pass
+            pass   # also a cell over Python's integer-text limit (4300 digits): not a time
     return not keep_malformed
 
 
@@ -629,10 +634,20 @@ def _epoch_hit(lo_v, hi_v, guard) -> bool:
     return any(_overlaps_window(int(lo_v * sc), int(hi_v * sc) + 1, guard) for sc in _EPOCH_SCALES)
 
 
-def _scan_run(run: str, guard) -> bool:
-    """A run of digits as a compact date or date-time, a day of the year, or an epoch time."""
+MAX_RUN_DIGITS = 4096
+
+
+def _scan_run(run: str, guard, strict8: bool = True) -> bool:
+    """A run of digits as a compact date or date-time, a day of the year, or an epoch time. A run
+    over 19 digits is read at every position (every substring of 7 to 19 digits); one over
+    MAX_RUN_DIGITS is judged sealed (fail closed). `strict8`: an 8-digit date that does not parse
+    counts as sealed."""
     import datetime
     n = len(run)
+    if n > 19:
+        if n > MAX_RUN_DIGITS:
+            return True
+        return any(_scan_run(run[i:i + k], guard, False) for k in range(7, 20) for i in range(n - k + 1))
     if n >= 4 and 1970 <= int(run[:4]) <= 2200:
         if n == 7:
             ddd = int(run[4:])
@@ -650,7 +665,7 @@ def _scan_run(run: str, guard) -> bool:
                               run[12:14] or None, run[14:] or None, None, guard):
                     return True
             except _Unparsable:
-                if n == 8:
+                if n == 8 and strict8:
                     return True
     if 9 <= n <= 19:
         v = int(run)
@@ -808,12 +823,14 @@ def text_has_sealed_time(data: bytes, guard: "Guard | None" = None) -> bool:
 
 # ---- recording directories ----------------------------------------------------------------------
 
-_PATH_DATE = re.compile(r"(?<![0-9])([0-9]{4})([-._]?)([0-9]{2})\2([0-9]{2})(?![0-9])")
+# at every position, overlapping, no look-around: digits glued to a date do not hide it
+_PATH_DATE = re.compile(r"(?=([0-9]{4})([-._]?)([0-9]{2})\2([0-9]{2}))")
 
 
 def path_date(relpath: str):
-    """The latest date written in a path as YYYYMMDD, YYYY-MM-DD, YYYY.MM.DD or YYYY_MM_DD, as a
-    (year, month, day) tuple; None when the path has no date or one that is not a real date."""
+    """The latest date written anywhere in a path as YYYYMMDD, YYYY-MM-DD, YYYY.MM.DD or YYYY_MM_DD
+    (found at every position, whatever digits touch it), as a (year, month, day) tuple; None when the
+    path has no date or has one in years 1970 to 2200 that is not a real date."""
     import datetime
     found = []
     for m in _PATH_DATE.finditer(relpath):
@@ -949,40 +966,99 @@ def corpus_dir_check(directory, guard: "Guard | None" = None) -> str:
 def filter_corpus_dir(directory, counter: DropCounter, guard: "Guard | None" = None, exempt_sha256=frozenset()):
     """Deletes every regular file below a corpus directory that `file_has_sealed_time` flags,
     whatever its name; a file whose bytes (sha256) are one of `exempt_sha256` (the committed seeds)
-    stays. A subdirectory the guard refuses is not entered. A file the guard refuses or that cannot
-    be read or removed is never deleted: it is counted as refused. Anything that is not a regular
-    file (FIFO, device, socket, link) is skipped and counted. Returns (scanned, removed, kept,
-    refused, skipped); nothing about a file is printed."""
+    stays. Entries the guard refuses by name are skipped (not listed, not counted). The walk is by
+    file descriptor: the top directory is opened once (O_NOFOLLOW) and checked to still be the
+    resolved corpus path, every directory and file is opened relative to its parent's descriptor
+    with O_NOFOLLOW, a directory on another device is not entered, and no path string is resolved
+    again, so a swap of a name for a link cannot redirect a read or a delete. A file is removed
+    only if the descriptor it was read through still is the file at that name (device and inode)
+    and has one hard link. A file the guard refuses on opening, or that cannot be read or removed,
+    is never deleted: it is counted as refused. Anything that is not a regular file (FIFO, device,
+    socket, link) is skipped and counted. Returns (scanned, removed, kept, refused, skipped);
+    nothing about a file is printed."""
     g = guard or production()
     top = corpus_dir_check(directory, g)
-    scanned = removed = refused = skipped = 0
-    for base, dirs, files in os.walk(top, followlinks=False):
-        keep = []
-        for name in sorted(dirs):
+    dflags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    ffl = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    n = {"scanned": 0, "removed": 0, "refused": 0, "skipped": 0}
+
+    def walk(dfd: int, dpath: str, dev: int, depth: int) -> None:
+        for name in sorted(os.listdir(dfd), key=os.fsencode):
+            path = os.path.join(dpath, name)
             try:
-                g.check(os.path.join(base, name), True)
+                st = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+            except OSError:
+                n["scanned"] += 1
+                n["refused"] += 1
+                continue
+            try:
+                g.check(path, stat.S_ISDIR(st.st_mode))
             except SealedError:
                 continue
-            keep.append(name)
-        dirs[:] = keep
-        for name in sorted(files):
-            path = os.path.join(base, name)
-            scanned += 1
-            try:
-                if not stat.S_ISREG(os.lstat(path).st_mode):
-                    skipped += 1
+            if stat.S_ISDIR(st.st_mode):
+                if st.st_dev != dev or depth >= MAX_WALK_DEPTH:
+                    n["scanned"] += 1
+                    n["skipped"] += 1
                     continue
-                g.check(path)
-                with g.open(path, "rb") as f:
+                try:
+                    cfd = os.open(name, dflags, dir_fd=dfd)
+                except OSError:
+                    n["scanned"] += 1
+                    n["refused"] += 1
+                    continue
+                try:
+                    now = os.fstat(cfd)
+                    if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+                        n["scanned"] += 1
+                        n["refused"] += 1
+                        continue
+                    walk(cfd, path, dev, depth + 1)
+                finally:
+                    os.close(cfd)
+                continue
+            n["scanned"] += 1
+            if not stat.S_ISREG(st.st_mode):
+                n["skipped"] += 1
+                continue
+            try:
+                fd = os.open(name, ffl, dir_fd=dfd)
+            except OSError:
+                n["refused"] += 1
+                continue
+            try:
+                fst = os.fstat(fd)
+                if not stat.S_ISREG(fst.st_mode):
+                    n["skipped"] += 1
+                    continue
+                g.verify_fd(fd, path)
+                with open(fd, "rb", closefd=False) as f:
                     data = f.read()
-                bad = hashlib.sha256(data).hexdigest() not in exempt_sha256 and file_has_sealed_time(data, g)
-                if bad:
-                    os.unlink(path)
-                    removed += 1
-                    counter.add()
+                if hashlib.sha256(data).hexdigest() in exempt_sha256 or not file_has_sealed_time(data, g):
+                    continue
+                again = os.stat(name, dir_fd=dfd, follow_symlinks=False)
+                if (again.st_dev, again.st_ino) != (fst.st_dev, fst.st_ino) or os.fstat(fd).st_nlink != 1:
+                    n["refused"] += 1
+                    continue
+                os.unlink(name, dir_fd=dfd)
+                n["removed"] += 1
+                counter.add()
             except (SealedError, OSError, MemoryError):
-                refused += 1
-    return scanned, removed, scanned - removed, refused, skipped
+                n["refused"] += 1
+            finally:
+                os.close(fd)
+
+    tfd = os.open(top, dflags)
+    try:
+        try:
+            same = os.readlink(f"/proc/self/fd/{tfd}") == top
+        except OSError:
+            same = False
+        if not same:
+            raise SealedError(f"{os.fspath(directory)}: refused: the corpus directory changed while it was opened")
+        walk(tfd, top, os.fstat(tfd).st_dev, 0)
+    finally:
+        os.close(tfd)
+    return n["scanned"], n["removed"], n["scanned"] - n["removed"], n["refused"], n["skipped"]
 
 
 def walk_unsealed(root):

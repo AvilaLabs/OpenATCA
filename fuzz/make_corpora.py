@@ -24,18 +24,21 @@ def filter_existing(directory):
         print('make_corpora: not filtered:', type(e).__name__, str(e).split(': ', 1)[-1][:120], file=sys.stderr); return 2
     # Only a file whose bytes equal a committed (git-tracked) fuzz file is left alone, whatever it is
     # named; a fuzz tree with untracked or modified files is not trusted for that.
+    repo = os.path.dirname(fz)
+    # git is told the repository (-C) and given an environment without any GIT_* variable
+    genv = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     def git(*a):
-        return subprocess.run(['git', '-C', fz, *a], capture_output=True, check=True).stdout
+        return subprocess.run(['git', '-C', repo, *a], capture_output=True, check=True, env=genv).stdout
     try:
-        if git('status', '--porcelain', '--', '.').strip():
+        if git('status', '--porcelain', '--', 'fuzz').strip():
             print('make_corpora: not filtered: the fuzz tree has untracked or modified files', file=sys.stderr); return 2
-        names = [n for n in git('ls-files', '-z', '--', '.').split(b'\0') if n]
+        names = [n for n in git('ls-files', '-z', '--', 'fuzz').split(b'\0') if n]
     except (OSError, subprocess.CalledProcessError):
         print('make_corpora: not filtered: git cannot list the fuzz tree', file=sys.stderr); return 2
     ok = set()
     for n in names:
         try:
-            with sealed_guard.open_read(os.path.join(fz, os.fsdecode(n)), 'rb') as f: ok.add(hashlib.sha256(f.read()).hexdigest())
+            with sealed_guard.open_read(os.path.join(repo, os.fsdecode(n)), 'rb') as f: ok.add(hashlib.sha256(f.read()).hexdigest())
         except (sealed_guard.SealedError, OSError):
             pass
     try:
