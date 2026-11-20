@@ -50,3 +50,20 @@ fn a_non_finite_window_is_a_usage_error() {
         );
     }
 }
+
+// REQ: OA-CEN-013
+#[test]
+fn a_fractional_window_bound_is_a_usage_error() {
+    let bin = env!("CARGO_BIN_EXE_oa-stdds-census");
+    for a in [
+        ["--from", "1.5", "--to", "100"],
+        ["--from", "1", "--to", "99.25"],
+    ] {
+        let o = Command::new(bin).arg("x").args(a).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{a:?}");
+        assert!(
+            String::from_utf8_lossy(&o.stderr).contains("usage:"),
+            "{a:?}"
+        );
+    }
+}

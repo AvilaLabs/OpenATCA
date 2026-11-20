@@ -27,20 +27,16 @@ pub fn utc(ms: i64) -> String {
         sec % 60
     )
 }
-/// The span of a recording as minutes: the start rounded down and the end rounded up to the
-/// minute, the span of the recording and not the time of any aircraft.
-pub fn minute_span(s: Option<(i64, i64)>) -> String {
-    const MIN: i64 = 60_000;
+/// The span of a recording to the second: the start rounded down and the end rounded up, the
+/// span of the recording and not the time of any aircraft.
+pub fn second_span(s: Option<(i64, i64)>) -> String {
+    const SEC: i64 = 1000;
     s.map_or_else(
         || "none".to_string(),
         |(a, b)| {
-            let lo = a.div_euclid(MIN) * MIN;
-            let hi = (b + MIN - 1).div_euclid(MIN) * MIN;
-            format!(
-                "{} to {} UTC",
-                utc(lo).get(..16).unwrap_or_default(),
-                utc(hi).get(..16).unwrap_or_default()
-            )
+            let lo = a.div_euclid(SEC) * SEC;
+            let hi = (b + SEC - 1).div_euclid(SEC) * SEC;
+            format!("{} to {} UTC", utc(lo), utc(hi))
         },
     )
 }
@@ -132,6 +128,9 @@ pub struct NotChecked {
     pub duplicate: [u64; 2],
     /// A pseudo, frozen or coasting track update (not a measured position).
     pub status: [u64; 2],
+    /// An update whose `mrtTime` lies outside the ADS-B clip's time span: there is no ADS-B to
+    /// find, which is not the same as no candidate.
+    pub outside_clip: [u64; 2],
     /// No `adsb` element at all.
     pub no_flag: u64,
 }
@@ -146,6 +145,8 @@ pub struct TrackXc {
     pub cov: [u32; 2],
     /// Placebo outcomes at the primary gate: (shift index * 2 + flag) * 3 + outcome.
     pub pcnt: [u32; 12],
+    /// Placebo lookups whose shifted time lies outside the clip's span, by shift * 2 + flag.
+    pub pout: [u32; 4],
     pub pdh: Vec<(u8, f32)>,
     pub recs: Vec<MatchRec>,
     pub hdv: Vec<(bool, f32)>,
@@ -181,6 +182,7 @@ pub struct XcAcc {
     hcounts: [u64; 6],
     covered: [u64; 2],
     pcounts: [u64; 12],
+    pout: [u64; 4],
     pvals: Vec<Vec<f32>>,
     vals: Vec<Vec<f32>>,
     tvals: Vec<Vec<f32>>,
@@ -199,6 +201,7 @@ impl Default for XcAcc {
             hcounts: [0; 6],
             covered: [0; 2],
             pcounts: [0; 12],
+            pout: [0; 4],
             pvals: vec![Vec::new(); 4],
             vals: vec![Vec::new(); 10],
             tvals: vec![Vec::new(); 10],
@@ -224,6 +227,9 @@ impl XcAcc {
             *a += u64::from(b);
         }
         for (a, &b) in self.pcounts.iter_mut().zip(&t.pcnt) {
+            *a += u64::from(b);
+        }
+        for (a, &b) in self.pout.iter_mut().zip(&t.pout) {
             *a += u64::from(b);
         }
         for &(k, v) in &t.pdh {
@@ -338,6 +344,7 @@ impl XcAcc {
             hcounts: self.hcounts,
             covered: self.covered,
             pcounts: self.pcounts,
+            pout: self.pout,
             psums,
             sums,
             tsums,
@@ -368,6 +375,8 @@ pub struct XcGroup {
     /// Placebo outcomes at the primary gate with the time shifted +60 s then -60 s:
     /// (shift * 2 + flag) * 3 + outcome.
     pub pcounts: [u64; 12],
+    /// Placebo lookups outside the clip's time span (not non-matches), `shift * 2 + flag`.
+    pub pout: [u64; 4],
     /// Horizontal differences of the placebo exactly-one matches, `shift * 2 + flag`.
     pub psums: Vec<Summary>,
     /// Difference distributions of the exactly-one matches at the primary gate, `flag * 5 + q`.
@@ -429,8 +438,8 @@ impl XcResults {
             (_, None) => Err("no ADS-B reports in the clip".to_string()),
             (s, c) => Err(format!(
                 "the STDDS updates ({}) and the ADS-B clip ({}) do not overlap in time: wrong day or clip",
-                minute_span(s),
-                minute_span(c)
+                second_span(s),
+                second_span(c)
             )),
         }
     }

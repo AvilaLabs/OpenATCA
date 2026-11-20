@@ -3,8 +3,8 @@
 //! recordings in DIR, and with an ADS-B clip the position cross-check. Exit 0 on success, 1 on a
 //! failed run, 2 on a usage error, a bad gate or window, a memory estimate past the budget, a sealed
 //! path (given, met in the walk, or found when a file is opened or the clip is loaded) or a directory
-//! that is a `rec` folder or a capture day without `rec/stdds`, 3 if the frame reader stalled (the
-//! census is incomplete).
+//! that is a `rec` folder or a capture day without `rec/stdds`, 3 if the frame reader stalled or a
+//! gzip file was damaged (the census is incomplete, printed all the same).
 
 use oa_sealed::Sealed;
 use oa_stdds_census::census::Census;
@@ -72,11 +72,12 @@ fn main() -> ExitCode {
                 }
                 _ => return usage(),
             },
-            "--from" => match num(it.next()) {
+            // A window bound is whole seconds; a fractional one is a usage error, not truncated.
+            "--from" => match num(it.next()).filter(|g| g.fract() == 0.0) {
                 Some(g) => from = Some(g as i64),
                 None => return usage(),
             },
-            "--to" => match num(it.next()) {
+            "--to" => match num(it.next()).filter(|g| g.fract() == 0.0) {
                 Some(g) => to = Some(g as i64),
                 None => return usage(),
             },
@@ -126,7 +127,7 @@ fn main() -> ExitCode {
             let est = estimate_build_bytes(&loaded.reports, &params, window);
             if est > budget() {
                 eprintln!(
-                    "oa-stdds-census: refused: building the ADS-B index is estimated at {} MB from {} reports, past the 4 GB budget (use --from and --to)",
+                    "oa-stdds-census: refused: building the ADS-B index is estimated at {} MB from {} reports (an estimate, not a bound), past the 4 GB budget (use --from and --to)",
                     est / 1_000_000,
                     loaded.reports.icao.len()
                 );
@@ -135,7 +136,7 @@ fn main() -> ExitCode {
             match build(&loaded.reports, params, window) {
                 Ok(i) if i.bytes() > budget() => {
                     eprintln!(
-                        "oa-stdds-census: refused: the ADS-B index alone is estimated at {} MB, past the 4 GB budget (use --from and --to)",
+                        "oa-stdds-census: refused: the ADS-B index alone is estimated at {} MB (an estimate, not a bound), past the 4 GB budget (use --from and --to)",
                         i.bytes() / 1_000_000
                     );
                     return ExitCode::from(2);
@@ -175,6 +176,13 @@ fn main() -> ExitCode {
     eprintln!("run time {:.1} s", t0.elapsed().as_secs_f64());
     if rs.stalled_bytes > 0 {
         eprintln!("oa-stdds-census: the frame reader stalled; the census is incomplete");
+        return ExitCode::from(3);
+    }
+    if rs.files_gzip_damaged > 0 {
+        eprintln!(
+            "oa-stdds-census: {} gzip file(s) damaged; the census is incomplete",
+            rs.files_gzip_damaged
+        );
         return ExitCode::from(3);
     }
     ExitCode::SUCCESS
