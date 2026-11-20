@@ -6495,3 +6495,26 @@ configuration with no default; the crate's tests use synthetic values.
   non-finite input, and any position it gives is finite and within 20 km on each axis. Proved with Kani
   (`local_plane_is_bounded`). The disc limit itself (east squared plus north squared within the extent squared) is
   tested, not proved.
+
+## Feed damage check (oa-feed-gaps, P-006 section 6 and P-007)
+
+- **OA-GAP-001** An interval between consecutive times of a feed over 600 s is an excluded interval (P-007), not damage by itself; exactly 600 s is not over.
+- **OA-GAP-002** The interval from the window start to the first time, and from the last time to the window end, counts.
+- **OA-GAP-003** A window with no message in a feed is damaged.
+- **OA-GAP-004** At most 1,000 intervals over 600 s are listed; the rest are counted and make the window damaged.
+- **OA-GAP-005** Any reader gzip or frame error count, and any ADS-B damaged-frame count, makes the window damaged.
+- **OA-GAP-006** A time earlier than the one before it is counted, left out of the intervals, and makes the window damaged.
+- **OA-GAP-007** SFDPS times are the recorder's receive times, sorted, so files that overlap or are named out of order give the true intervals.
+- **OA-GAP-008** A frame the reader finds damaged is counted by kind, never skipped silently.
+- **OA-GAP-009** ADS-B report times are sorted before the intervals are taken.
+- **OA-GAP-010** Exit 0 clean, 1 damaged, 2 usage or read error; the report is deterministic and written by temporary file and rename.
+- **OA-GAP-011** Both inputs go through the shared sealed guard (OA-SEAL-001); a refusal is exit 2.
+- **OA-GAP-012** `--from` and `--to` are `YYYY-MM-DDTHH:MM:SSZ`, both required, from before to.
+- **OA-GAP-013** An excluded interval is the interval over 600 s and the 300 s after it, in either feed, cut at the window end; each merged block is written as `exclude <from ISO ns> <to ISO ns>`.
+- **OA-GAP-014** Excluded intervals are merged where they overlap; more than 3600 s in total makes the window damaged.
+- **OA-GAP-015** `--clip-log` is required. A refused trace, not exactly one summary line and one `archive:` line, or an archive not reported complete makes the window damaged.
+- **OA-GAP-016** The clip log's `kept` must equal the reports decoded from the clip; a mismatch is damage, with both numbers printed.
+- **OA-GAP-017** A regular file in the SFDPS directory that is not `.oaf` or `.oaf.gz` is a read error (exit 2) that names it; the report names the files used.
+- **OA-GAP-018** An `exclude` line parses back to the same nanosecond window under the whole-second ISO grammar of `oa_adsb::cli::parse_iso` plus a nine-digit fraction. The scorer's own parser of these lines is tested on its side, not here.
+- **OA-GAP-019** An existing `--out` is refused (exit 2); the report is written to a new temporary file, synced, then renamed.
+
