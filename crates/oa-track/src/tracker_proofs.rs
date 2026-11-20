@@ -1504,7 +1504,7 @@ fn not_applied_scenario(
     (before, after, vote, m, original)
 }
 
-// What these eight prove, and only this: the production `update_in_order_held`, with `decide`
+// What these nine prove, and only this: the production `update_in_order_held`, with `decide`
 // stubbed to what the real rejected path does (one more jump rejection counted, one more in the
 // filter's run of refusals), `filter_apply` stubbed likewise, and any distances (so every
 // verdict of `resolve_decide`), given a report that is not applied, leaves the whole track as
@@ -1516,8 +1516,9 @@ fn not_applied_scenario(
 // group by any value in each harness and the others by one fixed value each. The only counters
 // that change are `jump_rejected` (one more) and at most one of `moves_decision_rejected`,
 // `moves_old_path_votes`, `moves_old_path_unpredictable` (one more, the vote also setting the
-// old-path vote time to the report's); no outcome is counted, no row is made. Eight harnesses,
-// one for each part of the track (the move's own columns and the counters, last time and update count, first and confirmation times and the
+// old-path vote time to the report's); no outcome is counted, no row is made. Nine harnesses,
+// one for each part of the track (the move's own columns and the counters that change, the other
+// counters, last time and update count, first and confirmation times and the
 // move's first report, state and counts, category,
 // current filter, anchor filter, ring), because a proof comparing every float at once does not fit the
 // memory budget. The stubs hold for the default configuration: `resync_consistent_k` is 0 (off)
@@ -1551,12 +1552,6 @@ fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refus
         t.mv_old_vote_ns[PROOF_SLOT],
         if votes == 1 { m.toa_ns } else { vote }
     );
-    let mut same = *a;
-    same.jump_rejected = b.jump_rejected;
-    same.moves_old_path_votes = b.moves_old_path_votes;
-    same.moves_old_path_unpredictable = b.moves_old_path_unpredictable;
-    same.moves_decision_rejected = b.moves_decision_rejected;
-    assert_stats_eq(&same, b);
     kani::cover!(decision_rejected == 1, "a deciding report was refused");
     kani::cover!(votes == 1, "a first report on the old path");
     kani::cover!(unpredictable == 1, "an old path that cannot be predicted");
@@ -1564,6 +1559,25 @@ fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refus
         votes + unpredictable + decision_rejected == 0,
         "too soon to decide"
     );
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(decide, decide_rejected_as_the_real_path)]
+#[kani::stub(filter_miss_m, any_miss)]
+#[kani::stub(filter_apply, filter_apply_rejects_as_the_real_path)]
+fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_other_counters()
+{
+    let mut t = proof_tracker_with_pool(CONFIRMED, 1);
+    let (before, after, _, _, _) = not_applied_scenario(&mut t, Part::Moves);
+    let (b, a) = (&before.stats, &after.stats);
+    let mut same = *a;
+    same.jump_rejected = b.jump_rejected;
+    same.moves_old_path_votes = b.moves_old_path_votes;
+    same.moves_old_path_unpredictable = b.moves_old_path_unpredictable;
+    same.moves_decision_rejected = b.moves_decision_rejected;
+    assert_stats_eq(&same, b);
 }
 
 // REQ: OA-TRK-354
