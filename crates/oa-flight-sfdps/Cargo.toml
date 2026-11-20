@@ -15,6 +15,7 @@ oa-feed = { path = "../oa-feed" }
 oa-fixm = { path = "../oa-fixm" }
 oa-flight = { path = "../oa-flight" }
 oa-replay = { path = "../oa-replay" }
+oa-sealed = { path = "../oa-sealed" }
 oa-xml = { path = "../oa-xml" }
 
 [lib]

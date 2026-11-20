@@ -179,8 +179,10 @@ enum Gate {
 
 /// The staleness rule of a stamped field: a restatement of the held value changes nothing; a
 /// different value stamped before the held one is stale, and one stamped at the same time is
-/// refused (the earlier stays).
-fn gate(stamp: &Stamp, ts_ms: i64, same: bool) -> Gate {
+/// refused (the earlier stays), unless the earlier change came from the same message: the
+/// operations of one message share its time and a shared stamp (a plan made active and then
+/// departed, an owner and the handoff it ends), so they are not a tie.
+fn gate(stamp: &Stamp, ts_ms: i64, msg: u64, same: bool) -> Gate {
     if same {
         return Gate::Same;
     }
@@ -189,7 +191,7 @@ fn gate(stamp: &Stamp, ts_ms: i64, same: bool) -> Gate {
     }
     if ts_ms < stamp.ts_ms {
         Gate::Refuse(R_STALE)
-    } else if ts_ms == stamp.ts_ms {
+    } else if ts_ms == stamp.ts_ms && msg != stamp.msg {
         Gate::Refuse(R_SAME_STAMP_DIFFERENT)
     } else {
         Gate::Go
@@ -204,9 +206,21 @@ fn is_zero8(u: &[u8; 8]) -> bool {
 /// held at the clock. A driver that answers a question "as of" a time calls this to know
 /// which operations are still in its future.
 pub fn flights_op_avail(t: &FlightTable, op: &Op) -> i64 {
+    if refused_early(t, op) {
+        // Refused before it has a time: it moves nothing, so a question is not advanced past it.
+        return t.clock_ms;
+    }
     op.seen_ms
         .max(op.ts_ms.saturating_add(t.cfg.lag_floor_ms))
         .max(t.clock_ms)
+}
+
+/// An operation refused for its key or its time before it is placed in time.
+fn refused_early(t: &FlightTable, op: &Op) -> bool {
+    op.kind == 0
+        || usize::from(op.kind) >= OP_COUNT
+        || !key_valid(&op.key)
+        || op.ts_ms.saturating_sub(op.seen_ms) > t.cfg.max_future_ms
 }
 
 /// Applies one operation. The availability time of the operation is
@@ -242,7 +256,11 @@ pub fn flights_apply(t: &mut FlightTable, op: &Op) -> Outcome {
 }
 
 fn apply_at(t: &mut FlightTable, op: &Op, avail: i64) -> Outcome {
-    if op.kind == OP_SET_PLAN && op.state != ST_PROPOSED && op.state != ST_ACTIVE {
+    // Everything a plan operation can be refused for before it needs a flight is checked here,
+    // so a refused operation never makes one.
+    if op.kind == OP_SET_PLAN
+        && ((op.state != ST_PROPOSED && op.state != ST_ACTIVE) || op.centre == [0; 4])
+    {
         return refuse(t, op, avail, R_BAD_VALUE, ST_NONE);
     }
     let slot = match slot_of_key(t, &op.key) {
@@ -334,6 +352,19 @@ fn plan_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64) -> Result<bool, 
         if op.centre == [0; 4] {
             return Err(R_BAD_VALUE);
         }
+        // A new centre's plan for a flight whose plans have all ended is the key filed again if
+        // its plan identifier is a new one (listed as that conflict), and is refused otherwise.
+        let refiled = f.n_views > 0 && !flight_is_live(&f);
+        if refiled {
+            let known = f
+                .views
+                .iter()
+                .take(usize::from(f.n_views))
+                .any(|v| v.plan_id == op.plan_id);
+            if op.plan_id == [0; 12] || known {
+                return Err(R_TERMINAL);
+            }
+        }
         let g = t.flights.get_mut(slot as usize).ok_or(R_UNKNOWN_FLIGHT)?;
         let n = usize::from(g.n_views);
         if let Some(v) = g.views.get_mut(n) {
@@ -346,6 +377,9 @@ fn plan_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64) -> Result<bool, 
         }
         g.n_views += 1;
         t.stats.views_added += 1;
+        if refiled {
+            list_conflict(t, C_PLAN_REFILED, f.key, f.key, op.ts_ms, op.msg);
+        }
         return Ok(true);
     };
     let v = f.views.get(k).copied().ok_or(R_NO_VIEW)?;
@@ -379,7 +413,7 @@ fn plan_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64) -> Result<bool, 
     if !changed {
         return Ok(false);
     }
-    match gate(&v.stamp, op.ts_ms, false) {
+    match gate(&v.stamp, op.ts_ms, op.msg, false) {
         Gate::Refuse(r) => return Err(r),
         Gate::Same | Gate::Go => {}
     }
@@ -423,7 +457,12 @@ fn alt_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64, field: usize) -> 
         _ => (f.requested, [0; 12]),
     };
     let same = held == op.alt && held_fix == op.fix;
-    match gate(f.stamps.get(field).ok_or(R_BAD_VALUE)?, op.ts_ms, same) {
+    match gate(
+        f.stamps.get(field).ok_or(R_BAD_VALUE)?,
+        op.ts_ms,
+        op.msg,
+        same,
+    ) {
         Gate::Same => return Ok(false),
         Gate::Refuse(r) => return Err(r),
         Gate::Go => {}
@@ -453,6 +492,7 @@ fn owner_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64) -> Result<bool,
     match gate(
         f.stamps.get(F_OWNER).ok_or(R_BAD_VALUE)?,
         op.ts_ms,
+        op.msg,
         f.owner == op.unit_a,
     ) {
         Gate::Same => return Ok(false),
@@ -462,19 +502,27 @@ fn owner_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64) -> Result<bool,
     let stamp = stamp_of(op, avail);
     let mut completed = false;
     let mut implicit = false;
+    let mut skipped = false;
     if let Some(g) = t.flights.get_mut(slot as usize) {
         g.owner = op.unit_a;
         if let Some(s) = g.stamps.get_mut(F_OWNER) {
             *s = stamp;
         }
-        if g.ho_state == HO_ACCEPTED && g.ho_accepted_by == op.unit_a {
-            completed = true;
-        } else if g.ho_state == HO_OFFERED && g.ho_to == op.unit_a {
-            implicit = true;
-        }
-        if completed || implicit {
+        let pending_ends = (g.ho_state == HO_ACCEPTED && g.ho_accepted_by == op.unit_a)
+            || (g.ho_state == HO_OFFERED && g.ho_to == op.unit_a);
+        // The handoff's own stamp never goes back: an owner older than the handoff it would
+        // end leaves the handoff as it is.
+        let older = g.stamps.get(F_HANDOFF).is_some_and(|h| op.ts_ms < h.ts_ms);
+        if pending_ends && older {
+            skipped = true;
+        } else if pending_ends {
+            completed = g.ho_state == HO_ACCEPTED;
+            implicit = !completed;
             clear_handoff(g, stamp);
         }
+    }
+    if skipped {
+        t.stats.handoff_clears_skipped += 1;
     }
     if completed {
         t.stats.handoffs_completed += 1;
@@ -555,13 +603,18 @@ fn handoff_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64) -> Result<boo
             if f.ho_state == HO_NONE {
                 return Err(R_NO_HANDOFF);
             }
+            // Once a unit has accepted, only that unit takes control; before that the taker
+            // may differ from the receiving unit (the feed does this).
+            if f.ho_state == HO_ACCEPTED && f.ho_accepted_by != op.unit_b {
+                return Err(R_BAD_TRANSITION);
+            }
             ho = (HO_NONE, [0; 8], [0; 8], [0; 8]);
             owner = op.unit_b;
             take = true;
         }
     }
     let same = ho == (f.ho_state, f.ho_from, f.ho_to, f.ho_accepted_by) && owner == f.owner;
-    match gate(&hstamp, op.ts_ms, same) {
+    match gate(&hstamp, op.ts_ms, op.msg, same) {
         Gate::Same => return Ok(false),
         Gate::Refuse(r) => return Err(r),
         Gate::Go => {}
@@ -570,7 +623,7 @@ fn handoff_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64) -> Result<boo
         // The owner changes with it: the owner's own stamp must not be newer.
         let ostamp = f.stamps.get(F_OWNER).ok_or(R_BAD_VALUE)?;
         if owner != f.owner {
-            if let Gate::Refuse(r) = gate(ostamp, op.ts_ms, false) {
+            if let Gate::Refuse(r) = gate(ostamp, op.ts_ms, op.msg, false) {
                 return Err(r);
             }
         }
@@ -607,6 +660,7 @@ fn address_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64) -> Result<boo
     match gate(
         f.stamps.get(F_ADDRESS).ok_or(R_BAD_VALUE)?,
         op.ts_ms,
+        op.msg,
         f.address == op.address,
     ) {
         Gate::Same => return Ok(false),
@@ -648,6 +702,7 @@ fn identity_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64) -> Result<bo
     match gate(
         f.stamps.get(F_IDENTITY).ok_or(R_BAD_VALUE)?,
         op.ts_ms,
+        op.msg,
         callsign == f.callsign && dep == f.dep && arr == f.arr,
     ) {
         Gate::Same => return Ok(false),

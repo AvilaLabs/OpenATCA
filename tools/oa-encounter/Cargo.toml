@@ -22,6 +22,10 @@ oa-sha256 = { path = "../../crates/oa-sha256" }
 oa-track = { path = "../../crates/oa-track" }
 oa-zip = { path = "../../crates/oa-zip" }
 
+[dev-dependencies]
+# Workspace crate: frames the recordings the join tests make.
+oa-feed = { path = "../../crates/oa-feed" }
+
 [lib]
 name = "oa_encounter_run"
 path = "src/lib.rs"

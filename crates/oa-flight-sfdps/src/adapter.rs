@@ -38,6 +38,8 @@ pub struct AdapterStats {
     pub owner_unknown: u64,
     /// A handoff event with a unit it needs missing, so no operation.
     pub handoff_incomplete: u64,
+    /// A handoff event whose operation needs a unit the FAA gives as `???`: no operation.
+    pub handoff_unknown_unit: u64,
     /// Handoff `receivingUnit` elements with no event (the form on track messages): not an
     /// operation, counted.
     pub handoff_receiving_only: u64,
@@ -200,12 +202,15 @@ pub fn row_ops(
             push(o, st);
         }
     }
-    let unit = |f: Field, col: &[[u8; 8]]| -> Option<[u8; 8]> {
-        if ok(f) {
-            col.get(row).copied()
-        } else {
-            None
+    // A unit the FAA gives as `???` says nothing, here as for the owner: no unit, counted.
+    let mut unknown_unit = false;
+    let mut unit = |f: Field, col: &[[u8; 8]]| -> Option<[u8; 8]> {
+        let u = if ok(f) { col.get(row).copied() } else { None };
+        if u.is_some_and(|u| unit_code(&u) == "???") {
+            unknown_unit = true;
+            return None;
         }
+        u
     };
     let (xfer, recv, acpt) = (
         unit(Field::HandoffTransferring, &ev.xfer),
@@ -242,6 +247,7 @@ pub fn row_ops(
         };
         match made {
             Some(o) => push(o, st),
+            None if unknown_unit => st.handoff_unknown_unit += 1,
             None => st.handoff_incomplete += 1,
         }
     } else if recv.is_some() {

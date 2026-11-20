@@ -68,6 +68,7 @@ pub fn flights_new(cfg: &FlightConfig) -> Result<FlightTable, FlightError> {
             handoffs_implicit: 0,
             handoffs_retracted: 0,
             handoffs_failed: 0,
+            handoff_clears_skipped: 0,
             conflicts: [0; C_COUNT],
             refusals_unlisted: 0,
             conflicts_unlisted: 0,
@@ -440,6 +441,7 @@ pub fn flights_digest(t: &FlightTable) -> u64 {
         t.stats.handoffs_implicit,
         t.stats.handoffs_retracted,
         t.stats.handoffs_failed,
+        t.stats.handoff_clears_skipped,
         t.stats.lag_raised,
         t.stats.clock_held,
     ] {
@@ -588,6 +590,119 @@ fn in_tfms_chain(t: &FlightTable, slot: u32, f: &Flight) -> bool {
         }
     }
     false
+}
+
+/// The chains of the address and TFMS indexes: each cell names the head of the chain of its key,
+/// a chain is acyclic with distinct flights that all have the key and end in 0, every flight with
+/// the key is on exactly one chain, and a link is 0 where the flight has no address or full key.
+fn chain_audit(t: &FlightTable) -> Result<(), FlightError> {
+    let inv = FlightError::Invariant;
+    let n = t.flights.len();
+    let (mut with_addr, mut with_tfms) = (0usize, 0usize);
+    for (i, f) in t.flights.iter().enumerate() {
+        let used = f.key.kind != KEY_FREE;
+        if f.address != 0 && used {
+            with_addr += 1;
+        }
+        if tfms_complete(f) && used {
+            with_tfms += 1;
+        }
+        if (f.addr_next != 0 && (f.address == 0 || !used))
+            || (f.tfms_next != 0 && (!tfms_complete(f) || !used))
+        {
+            return Err(inv(
+                "a link is 0 for a flight without an address or full key",
+            ));
+        }
+        if f.addr_next as usize == i + 1 || f.tfms_next as usize == i + 1 {
+            return Err(inv("a flight does not link to itself"));
+        }
+    }
+    let mut on_addr = 0usize;
+    for &c in &t.by_addr.cells {
+        if c == 0 {
+            continue;
+        }
+        let head = c - 1;
+        let Some(h) = t.flights.get(head as usize) else {
+            return Err(inv("an address index cell names a slot"));
+        };
+        let address = h.address;
+        if address == 0
+            || index_find(&t.by_addr, hash_addr(address), |s| {
+                t.flights
+                    .get(s as usize)
+                    .is_some_and(|g| g.address == address)
+            }) != Some(head)
+        {
+            return Err(inv("an address index cell is the head of its address"));
+        }
+        let mut cur = head;
+        let mut seen: Vec<u32> = Vec::new();
+        loop {
+            let Some(g) = t.flights.get(cur as usize) else {
+                return Err(inv("an address chain stays inside the table"));
+            };
+            if g.key.kind == KEY_FREE || g.address != address || seen.contains(&cur) {
+                return Err(inv(
+                    "an address chain holds distinct used flights of the address",
+                ));
+            }
+            seen.push(cur);
+            on_addr += 1;
+            if seen.len() > n {
+                return Err(inv("an address chain is acyclic"));
+            }
+            if g.addr_next == 0 {
+                break;
+            }
+            cur = g.addr_next - 1;
+        }
+    }
+    if on_addr != with_addr {
+        return Err(inv("every flight with an address is on exactly one chain"));
+    }
+    let mut on_tfms = 0usize;
+    for &c in &t.by_tfms.cells {
+        if c == 0 {
+            continue;
+        }
+        let head = c - 1;
+        let Some(h) = t.flights.get(head as usize).copied() else {
+            return Err(inv("a TFMS index cell names a slot"));
+        };
+        let same = |g: &Flight| g.callsign == h.callsign && g.dep == h.dep && g.arr == h.arr;
+        if !tfms_complete(&h)
+            || index_find(&t.by_tfms, hash_tfms(&h.callsign, &h.dep, &h.arr), |s| {
+                t.flights.get(s as usize).is_some_and(same)
+            }) != Some(head)
+        {
+            return Err(inv("a TFMS index cell is the head of its key"));
+        }
+        let mut cur = head;
+        let mut seen: Vec<u32> = Vec::new();
+        loop {
+            let Some(g) = t.flights.get(cur as usize) else {
+                return Err(inv("a TFMS chain stays inside the table"));
+            };
+            if g.key.kind == KEY_FREE || !same(g) || seen.contains(&cur) {
+                return Err(inv("a TFMS chain holds distinct used flights of the key"));
+            }
+            seen.push(cur);
+            on_tfms += 1;
+            if seen.len() > n {
+                return Err(inv("a TFMS chain is acyclic"));
+            }
+            if g.tfms_next == 0 {
+                break;
+            }
+            cur = g.tfms_next - 1;
+        }
+    }
+    if on_tfms != with_tfms {
+        return Err(inv("every flight with a full key is on exactly one chain"));
+    }
+    Ok(())
 }
 
 /// Audits every invariant of the table and returns the first that does not hold:
@@ -740,6 +855,7 @@ pub fn flights_check(t: &FlightTable) -> Result<(), FlightError> {
     {
         return Err(inv("logs within their capacity"));
     }
+    chain_audit(t)?;
     // Every index entry names a flight that has the key it is filed under.
     for &c in &t.by_addr.cells {
         if c == 0 {

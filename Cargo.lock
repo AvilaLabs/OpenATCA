@@ -139,6 +139,7 @@ dependencies = [
  "oa-adsb",
  "oa-bench",
  "oa-encounter",
+ "oa-feed",
  "oa-flight",
  "oa-flight-sfdps",
  "oa-nasr",
@@ -177,6 +178,7 @@ dependencies = [
  "oa-fixm",
  "oa-flight",
  "oa-replay",
+ "oa-sealed",
  "oa-xml",
 ]
 

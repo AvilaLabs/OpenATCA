@@ -534,6 +534,8 @@ pub struct FlightStats {
     pub handoffs_implicit: u64,
     pub handoffs_retracted: u64,
     pub handoffs_failed: u64,
+    /// Owner operations that left a pending handoff alone because they were older than it.
+    pub handoff_clears_skipped: u64,
     pub conflicts: [u64; C_COUNT],
     /// Entries a full log could not list.
     pub refusals_unlisted: u64,

@@ -10,8 +10,10 @@
 use oa_encounter::Encounter;
 use oa_encounter_run::args::parse;
 use oa_encounter_run::join::{
-    assigned_of, effective_of, is_near_climb, join_text, Answer, Clearance, JoinStats,
+    answer_queries, assigned_of, effective_of, is_near_climb, join_text, Answer, Clearance,
+    JoinStats, Sfdps,
 };
+use oa_encounter_run::run::run;
 use oa_flight::{Alt, ALT_AT_FIX, ALT_NIL, ALT_SIMPLE, ALT_VFR};
 
 fn enc(v: f32, vr: f32, class: u8) -> Encounter {
@@ -244,4 +246,73 @@ fn the_arguments_take_a_window_and_the_sfdps_input() {
     assert!(a(&[base[0], base[1], base[2], base[3], "--from", "100"]).is_err());
     assert!(a(&[base[0], base[1], base[2], base[3], "--from", "200", "--to", "100"]).is_err());
     assert!(a(&[base[0], base[1], base[2], base[3], "--from", "x", "--to", "1"]).is_err());
+}
+
+// REQ: OA-FLT-021
+#[test]
+fn a_window_or_lag_floor_that_overflows_is_an_error_not_a_panic() {
+    let a = |v: &[&str]| parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap();
+    let big = i64::MAX.to_string();
+    let e = run(&a(&[
+        "--adsb",
+        "/nonexistent/c.oaf",
+        "--out",
+        "/nonexistent/o",
+        "--from",
+        "1",
+        "--to",
+        &big,
+    ]))
+    .unwrap_err();
+    assert!(e.contains("--to") && e.contains("out of range"), "{e}");
+    let e = run(&a(&[
+        "--adsb",
+        "/nonexistent/c.oaf",
+        "--out",
+        "/nonexistent/o",
+        "--sfdps",
+        "/nonexistent/d",
+        "--lag-floor-s",
+        &big,
+    ]))
+    .unwrap_err();
+    assert!(e.contains("--lag-floor-s"), "{e}");
+}
+
+const DOC_HEAD: &str = r#"<?xml version="1.0" encoding="UTF-8"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:ns2="http://www.fixm.aero/base/3.0" xmlns:ns3="http://www.fixm.aero/flight/3.0" xmlns:ns4="http://www.fixm.aero/foundation/3.0">"#;
+
+// REQ: OA-FLT-024
+#[test]
+fn an_operation_that_ages_in_after_the_question_is_not_seen_by_it() {
+    let dir = std::env::temp_dir().join(format!("oa-encounter-join-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Stamped 2030-01-02T03:04:05Z, received 10 s later: it ages in at stamp + 58 s.
+    let ts_ms = 1_893_553_445_000i64;
+    let xml = format!(
+        r#"{DOC_HEAD}<message xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightStatus fdpsFlightStatus="ACTIVE"/><aircraftDescription aircraftAddress="A1B2C3"/><assignedAltitude><simple uom="FEET">24000.0</simple></assignedAltitude></flight></message></ns5:MessageCollection>"#
+    );
+    let mut buf = vec![0u8; xml.len() + 64];
+    let recv_ns = (ts_ms + 10_000) * 1_000_000;
+    let n = oa_feed::encode_frame(&mut buf, 1, 0, 1, recv_ns, 0, xml.as_bytes()).unwrap();
+    std::fs::write(dir.join("a.oaf"), &buf[..n]).unwrap();
+    let addr = 0x00A1_B2C3;
+    let ms = 1_000_000;
+    let queries = [
+        (addr, (ts_ms + 11_000) * ms),     // received, not yet aged in
+        (addr, (ts_ms + 57_900) * ms),     // a moment before it ages in
+        (addr, (ts_ms + 58_000) * ms),     // as it ages in
+        (addr, (ts_ms + 90_000) * ms),     // after
+        (addr + 1, (ts_ms + 90_000) * ms), // another aircraft
+    ];
+    let sf = Sfdps {
+        dir: dir.clone(),
+        lag_floor_ms: 58_000,
+    };
+    let (a, st) = answer_queries(&sf, &queries).unwrap();
+    assert_eq!(st.frames, 1);
+    let held: Vec<bool> = a.iter().map(|x| x.flight).collect();
+    assert_eq!(held, [false, false, true, true, false]);
+    assert_eq!(a[3].assigned.a_ft, 24_000);
+    let _ = std::fs::remove_dir_all(&dir);
 }

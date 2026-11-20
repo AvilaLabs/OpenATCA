@@ -36,6 +36,11 @@ fn main() -> ExitCode {
         eprintln!("usage: oa-flight <recording-dir> [--from <ns>] [--to <ns>]");
         return ExitCode::from(2);
     };
+    // The sealed hold-out guard sees the directory first; every file is opened through it too.
+    if let Err(e) = oa_sealed::refuse(&dir) {
+        eprintln!("oa-flight: {e}");
+        return ExitCode::from(2);
+    }
     let paths = match recordings_in(&dir) {
         Ok(p) => p,
         Err(e) => {
@@ -136,6 +141,8 @@ fn main() -> ExitCode {
         "conflicts {:?} unlisted {}",
         s.conflicts, s.conflicts_unlisted
     );
+    println!("refused total {}", s.refused.iter().sum::<u64>());
+    println!("handoff_clears_skipped {}", s.handoff_clears_skipped);
     for (k, n) in s.refused.iter().enumerate().filter(|(_, n)| **n > 0) {
         println!("refused op {} reason {} {n}", k / R_COUNT, k % R_COUNT);
     }

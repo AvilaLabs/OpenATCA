@@ -335,6 +335,21 @@ pub fn hour_counts(r: &Reports) -> String {
 /// The whole run: reads the clip, writes `encounters.csv` and `summary.txt` under `args.out`, and
 /// returns the summary text.
 pub fn run(args: &Args) -> Result<String, String> {
+    // The seconds the arguments give become ns and ms before anything is read.
+    let window_ns = args
+        .window
+        .map(|(from, to)| -> Result<(i64, i64), String> {
+            let ns = |s: i64, what: &str| {
+                s.checked_mul(S_NS)
+                    .ok_or_else(|| format!("{what} {s} s is out of range"))
+            };
+            Ok((ns(from, "--from")?, ns(to, "--to")?))
+        })
+        .transpose()?;
+    let lag_floor_ms = args
+        .lag_floor_s
+        .checked_mul(1000)
+        .ok_or_else(|| format!("--lag-floor-s {} s is out of range", args.lag_floor_s))?;
     let clip =
         load_adsb_with(&args.adsb, &crate::guard::guarded_opener()).map_err(|e| e.to_string())?;
     let clip_sha = clip.hash.sha256.clone();
@@ -357,8 +372,8 @@ pub fn run(args: &Args) -> Result<String, String> {
     let ground = ground_table(&reports);
     let (mut meas, _) = adsb_measurements(&reports, &adsb_cfg);
     drop(reports);
-    if let Some((from, to)) = args.window {
-        meas.retain(|m| m.toa_ns >= from * S_NS && m.toa_ns < to * S_NS);
+    if let Some((from_ns, to_ns)) = window_ns {
+        meas.retain(|m| m.toa_ns >= from_ns && m.toa_ns < to_ns);
     }
     let iv = interval_stats(&meas).unwrap_or(IntervalStats {
         n: 0,
@@ -398,7 +413,7 @@ pub fn run(args: &Args) -> Result<String, String> {
             .collect();
         let sf = Sfdps {
             dir: dir.clone(),
-            lag_floor_ms: args.lag_floor_s * 1000,
+            lag_floor_ms,
         };
         let (answers, st) = answer_queries(&sf, &queries)?;
         let window = args.window.map_or_else(

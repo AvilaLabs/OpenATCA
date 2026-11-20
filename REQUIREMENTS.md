@@ -1063,8 +1063,9 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FIXM-021** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the
   month; hour 24 is refused.
 - **OA-FIXM-022** The assigned altitude is decoded with its form as a state: `simple` and `vfrPlus` (the
-  value in `assigned_ft`), `vfr` (no number and no `AssignedAlt` field), `block` (limits `above` to `below`) and
-  `altFixAlt` (altitude before and after a named fix); the form is its own field and no number stands for VFR.
+  value in `assigned_ft`), `vfr` (no number and no `AssignedAlt` field), `block` (limits `above` to `below`; that `above` is the lower limit is read from the recording and is
+  unconfirmed) and `altFixAlt` (altitude before and after a named fix; the meaning of the two is unconfirmed); the
+  form is its own field and no number stands for VFR.
 - **OA-FIXM-023** A doubled assigned-altitude form, a block with a limit missing or with `above` over `below`, and
   an altitude at a fix with the fix or a value missing or unreadable, are a counted field error on the form; the
   row is kept.
@@ -5497,15 +5498,19 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   dropped; dropped is reinstated by an active plan or completed or cancelled; completed and cancelled are final and a repeat of
   the same end is a restatement. A step back, a step that skips one, or an operation on a flight or plan that is not there
   (an operation other than setting a plan, which makes the flight) is refused and leaves the state; so is an amendment to a
-  flight whose plans have all ended.
+  flight whose plans have all ended. A refused operation never makes a flight. The one way past an ended plan is the refile
+  of OA-FLT-008.
 - **OA-FLT-006** Every refused operation is counted by operation and reason and listed with its key, times, message and the
   state it found; a full list counts the entries it could not hold, so the counts stay exact whatever the list holds, and
   operations equal applied plus unchanged plus refused.
 - **OA-FLT-007** A flight holds one plan view per reporting centre, because each centre reports its own status for the national
   plan; a second centre's proposal after the first one's activation is not a step back; a dropped view reinstated is counted;
   more centres than views are refused, never evicted.
-- **OA-FLT-008** Two plans for one flight are listed as conflicts: a different plan identifier on a live plan, and a new plan
-  identifier on a view whose earlier plan had ended (the key filed again, which replaces the plan on the view).
+- **OA-FLT-008** Two plans for one flight are listed as conflicts: a different plan identifier on a live plan, and the key filed
+  again, which is a plan setting a plan identifier new to the flight on a view whose plan had ended (the view takes the plan) or
+  for a centre the flight has no view for while all its plans have ended (a new view). This is the only way past an ended plan.
+  A plan for a new centre on a flight whose plans have all ended with a plan identifier the flight already has, or none, is
+  refused as terminal.
 - **OA-FLT-009** An aircraft address held by two live flights, and a callsign, departure and arrival held by two live flights,
   are each listed as a conflict naming both; both flights stay in the table; the address lookup returns the latest claimant and
   a flight whose plans ended is no conflict.
@@ -5542,6 +5547,15 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   level-off, less apart is a climb or descent that does not stop; no record, no altitude and an altitude that is not one
   level (VFR, block, at a fix) are counted apart; the split is given on the assigned altitude and on the interim altitude
   over the assigned one.
+- **OA-FLT-022** The operations of one message share its time and its message number and are not a tie on a shared stamp: a plan
+  made active and then departed in one message, and an owner and the handoff it ends, all apply; another message at the same
+  time with another value is still a tie. An owner older than the handoff it would end leaves the handoff and its stamp as they
+  are and is counted. A question is not advanced past an operation refused for its key or its time. Taking control, once a unit
+  has accepted, is by that unit.
+- **OA-FLT-023** The SFDPS replay tool refuses a recording directory the shared sealed-data guard names, before it lists or
+  opens anything, and exits 2; every recording it reads is opened through the same guard.
+- **OA-FLT-024** A question about a flight is answered as of its time: an operation received before it but not yet aged in by the
+  lag floor is not seen by it, and one that has aged in is.
 - **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
   refuses a window that is open at one end or runs backwards.
 

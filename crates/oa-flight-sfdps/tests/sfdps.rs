@@ -245,3 +245,47 @@ fn frames_outside_the_window_are_skipped_and_the_run_ends_at_its_end() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// REQ: OA-FLT-022
+#[test]
+fn a_flight_first_seen_active_with_an_actual_departure_departs() {
+    let dir = temp_dir("depart");
+    let ts = parse_iso_ms(b"2030-01-02T03:04:05.000Z").unwrap();
+    let body = r#"<flightStatus fdpsFlightStatus="ACTIVE"/><departure departurePoint="KAAA"><runwayPositionAndTime><runwayTime><actual time="2030-01-02T03:00:00Z"/></runwayTime></runwayPositionAndTime></departure><aircraftDescription aircraftAddress="A1B2C3"/><controllingUnit unitIdentifier="ZXX" sectorIdentifier="12"/>"#;
+    let x = doc(&msg("TH", "2030-01-02T03:04:05.000Z", body));
+    std::fs::write(dir.join("a.oaf"), frame(1, ts + 60_000, &x)).unwrap();
+    let rep = replay_sfdps(
+        recordings_in(&dir).unwrap(),
+        &cfg(i64::MIN, i64::MAX),
+        &mut |_, _| {},
+    )
+    .unwrap();
+    assert_eq!(
+        rep.table.stats.refused.iter().sum::<u64>(),
+        0,
+        "{:?}",
+        rep.refusals
+    );
+    let f = flight_by_address(&rep.table, 0x00A1_B2C3).unwrap();
+    assert_eq!(
+        oa_flight::view_of(&f, b"ZXX\0").unwrap().state,
+        oa_flight::ST_DEPARTED
+    );
+    assert_eq!(rep.view_states[oa_flight::ST_DEPARTED as usize], 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// REQ: OA-FLT-018
+#[test]
+fn a_handoff_unit_the_faa_gives_as_unknown_makes_no_operation_and_is_counted() {
+    let mut st = AdapterStats::default();
+    let init = r#"<enRoute><boundaryCrossings><handoff event="INITIATION"><receivingUnit unitIdentifier="ZYY" sectorIdentifier="1E"/><transferringUnit unitIdentifier="???" sectorIdentifier="12"/></handoff></boundaryCrossings></enRoute>"#;
+    let a = ops_of(
+        &doc(&msg("OH", "2030-01-02T03:04:05.678Z", init)),
+        1,
+        &mut st,
+    );
+    assert!(a.is_empty());
+    assert_eq!(st.handoff_unknown_unit, 1);
+    assert_eq!(st.handoff_incomplete, 0);
+}

@@ -887,8 +887,11 @@ fn an_older_change_is_stale_and_a_tie_with_another_value_is_refused() {
         apply(&mut t, &assign(k, 9_000, 20_000)),
         Outcome::Refused(R_STALE)
     );
+    // Another message at the same time with another value is a tie.
+    let mut tie = assign(k, 10_000, 40_000);
+    tie.msg = 77;
     assert_eq!(
-        apply(&mut t, &assign(k, 10_000, 40_000)),
+        apply(&mut t, &tie),
         Outcome::Refused(R_SAME_STAMP_DIFFERENT)
     );
     assert_eq!(flight_get(&t, &k).unwrap().assigned.a_ft, 30_000);
@@ -1017,7 +1020,7 @@ impl Rng {
 }
 
 const UNITS: [&str; 3] = ["ZAU12", "ZAU34", "ZMP05"];
-const CENTRES: [[u8; 4]; 3] = [*b"ZAU\0", *b"ZMP\0", *b"ZKC\0"];
+const CENTRES: [[u8; 4]; 4] = [*b"ZAU\0", *b"ZMP\0", *b"ZKC\0", [0; 4]];
 
 /// A random operation over a small domain, so flights, centres and values collide often. Times
 /// move about, so staleness and ties occur.
@@ -1027,7 +1030,11 @@ fn random_op(r: &mut Rng) -> Op {
         1 => key_tfms(code("TST1"), code("KAAA"), code("KCCC")),
         n => gk(u128::from(n)),
     };
-    let centre = CENTRES[r.below(3) as usize];
+    let centre = CENTRES[if r.below(12) == 0 {
+        3
+    } else {
+        r.below(3) as usize
+    }];
     let ts = 100_000 + (r.below(400) as i64) * 1_000;
     let seen = ts + (r.below(130) as i64) * 1_000 - 10_000;
     // A third of the operations are plan operations, so plans end and are filed again.
@@ -1162,6 +1169,33 @@ fn every_short_sequence_of_operations_leaves_a_valid_record() {
     let mut ad = op(OP_ADDRESS, k, ZAU, 0);
     ad.address = 0xABCDEF;
     alphabet.push(ad);
+    let mut req = op(OP_REQUEST, k, ZAU, 0);
+    req.alt = Alt {
+        form: ALT_VFR,
+        a_ft: 0,
+        b_ft: 0,
+    };
+    alphabet.push(req);
+    alphabet.push(ho(OP_HO_UPDATE, k, 0, "ZAU12", "ZAU56"));
+    alphabet.push(ho(OP_HO_FAIL, k, 0, "ZAU12", "ZAU34"));
+    let mut id = op(OP_IDENTITY, k, ZAU, 0);
+    id.callsign = code("TST1");
+    id.dep = code("KAAA");
+    id.arr = code("KBBB");
+    alphabet.push(id);
+    // Out of order: stamped before the step that came before it (marked by a time of -1).
+    let older = |mut o: Op| {
+        o.ts_ms = -1;
+        o
+    };
+    for o in [
+        assign(k, 0, 20_000),
+        owner(k, 0, "ZAU34"),
+        op(OP_DROP, k, ZAU, 0),
+        ho(OP_HO_ACCEPT, k, 0, "ZAU12", "ZAU34"),
+    ] {
+        alphabet.push(older(o));
+    }
     let n = alphabet.len();
     let mut count = 0u64;
     for len in 1..=4usize {
@@ -1171,8 +1205,9 @@ fn every_short_sequence_of_operations_leaves_a_valid_record() {
             for (step, &i) in idx.iter().enumerate() {
                 let mut o = alphabet[i];
                 // Strictly increasing stamps, seen after the floor.
-                o.ts_ms = 1_000 * (step as i64 + 1);
-                o.seen_ms = o.ts_ms + 61_000;
+                let at = 1_000 * (step as i64 + 1);
+                o.ts_ms = if o.ts_ms == -1 { at - 1_500 } else { at };
+                o.seen_ms = at + 61_000;
                 o.msg = step as u64;
                 flights_apply(&mut t, &o);
                 audit(&t, 0);
@@ -1283,4 +1318,141 @@ fn the_same_operations_give_the_same_record_bit_for_bit() {
         assert_ne!(da, dc);
         assert_ne!(a, c);
     }
+}
+
+/// The operations of one message: one time, one message number.
+fn in_msg(mut o: Op, msg: u64) -> Op {
+    o.msg = msg;
+    o.ts_ms = 5_000;
+    o.seen_ms = 5_000 + 61_000;
+    o
+}
+
+// REQ: OA-FLT-022
+#[test]
+fn the_operations_of_one_message_share_a_stamp_without_tying() {
+    let mut t = table();
+    let k = gk(1);
+    // A flight first seen airborne: active with an actual departure in its first message.
+    let a = in_msg(set_plan(k, ZAU, 0, ST_ACTIVE), 1);
+    let d = in_msg(op(OP_DEPART, k, ZAU, 0), 1);
+    assert_eq!(apply(&mut t, &a), Outcome::Applied);
+    assert_eq!(
+        apply(&mut t, &d),
+        Outcome::Applied,
+        "a forward step of the same message"
+    );
+    let f = flight_get(&t, &k).unwrap();
+    assert_eq!(view_of(&f, &ZAU).unwrap().state, ST_DEPARTED);
+    // The owner clearing a handoff and the handoff op in one message.
+    let init = in_msg(ho(OP_HO_INITIATE, k, 0, "ZAU12", "ZMP34"), 2);
+    let own = in_msg(owner(k, 0, "ZMP34"), 2);
+    assert_eq!(apply(&mut t, &init), Outcome::Applied);
+    assert_eq!(
+        apply(&mut t, &own),
+        Outcome::Applied,
+        "the owner of the same message"
+    );
+    assert_eq!(flight_get(&t, &k).unwrap().ho_state, HO_NONE);
+    // Another message at the same time with a different value is still a tie.
+    let other = in_msg(op(OP_DROP, k, ZAU, 0), 3);
+    assert_eq!(
+        apply(&mut t, &other),
+        Outcome::Refused(R_SAME_STAMP_DIFFERENT)
+    );
+}
+
+// REQ: OA-FLT-022
+#[test]
+fn a_refused_plan_operation_never_makes_a_flight() {
+    let mut t = table();
+    let k = gk(1);
+    assert_eq!(
+        apply(&mut t, &set_plan(k, [0; 4], 1_000, ST_ACTIVE)),
+        Outcome::Refused(R_BAD_VALUE)
+    );
+    assert_eq!(flights_len(&t), 0);
+    assert_eq!(t.stats.created, 0);
+}
+
+// REQ: OA-FLT-008
+#[test]
+fn a_new_centre_for_a_flight_whose_plans_ended_is_refused_unless_it_is_a_new_plan() {
+    let mut t = table();
+    let k = gk(1);
+    let mut first = set_plan(k, ZAU, 1_000, ST_ACTIVE);
+    first.plan_id = code("P1");
+    assert_eq!(apply(&mut t, &first), Outcome::Applied);
+    assert_eq!(
+        apply(&mut t, &op(OP_COMPLETE, k, ZAU, 2_000)),
+        Outcome::Applied
+    );
+    // The same plan reported by another centre after it ended.
+    let mut same = set_plan(k, ZMP, 3_000, ST_ACTIVE);
+    same.plan_id = code("P1");
+    assert_eq!(apply(&mut t, &same), Outcome::Refused(R_TERMINAL));
+    let blank = set_plan(k, ZMP, 3_000, ST_ACTIVE);
+    assert_eq!(apply(&mut t, &blank), Outcome::Refused(R_TERMINAL));
+    assert_eq!(flight_get(&t, &k).unwrap().n_views, 1);
+    // A different plan identifier is the key filed again.
+    let mut new = set_plan(k, ZMP, 4_000, ST_ACTIVE);
+    new.plan_id = code("P2");
+    assert_eq!(apply(&mut t, &new), Outcome::Applied);
+    assert_eq!(t.stats.conflicts[C_PLAN_REFILED as usize], 1);
+    assert_eq!(flight_get(&t, &k).unwrap().n_views, 2);
+}
+
+// REQ: OA-FLT-010
+#[test]
+fn an_owner_older_than_the_handoff_it_would_end_leaves_the_handoff_and_is_counted() {
+    let mut t = table();
+    let k = gk(1);
+    live(&mut t, k);
+    assert_eq!(apply(&mut t, &owner(k, 2_000, "ZAU12")), Outcome::Applied);
+    assert_eq!(
+        apply(&mut t, &ho(OP_HO_INITIATE, k, 9_000, "ZAU12", "ZMP34")),
+        Outcome::Applied
+    );
+    let before = flight_get(&t, &k).unwrap().stamps[F_HANDOFF];
+    // The owner is older than the offer: it is applied, the handoff stays and its stamp is kept.
+    assert_eq!(apply(&mut t, &owner(k, 5_000, "ZMP34")), Outcome::Applied);
+    let f = flight_get(&t, &k).unwrap();
+    assert_eq!(f.ho_state, HO_OFFERED);
+    assert_eq!(f.stamps[F_HANDOFF], before);
+    assert_eq!(t.stats.handoff_clears_skipped, 1);
+}
+
+// REQ: OA-FLT-010
+#[test]
+fn taking_control_is_by_the_unit_that_accepted() {
+    let mut t = table();
+    let k = gk(1);
+    live(&mut t, k);
+    apply(&mut t, &ho(OP_HO_INITIATE, k, 2_000, "ZAU12", "ZMP34"));
+    apply(&mut t, &ho(OP_HO_ACCEPT, k, 3_000, "", "ZMP34"));
+    assert_eq!(
+        apply(&mut t, &ho(OP_HO_TAKE, k, 4_000, "", "ZMP99")),
+        Outcome::Refused(R_BAD_TRANSITION)
+    );
+    assert_eq!(
+        apply(&mut t, &ho(OP_HO_TAKE, k, 4_000, "", "ZMP34")),
+        Outcome::Applied
+    );
+}
+
+// REQ: OA-FLT-004
+#[test]
+fn a_question_is_not_advanced_past_an_operation_that_will_be_refused_for_its_key_or_time() {
+    let mut t = table();
+    let k = gk(1);
+    live(&mut t, k);
+    let clock = t.clock_ms;
+    let mut bad = set_plan(key_gufi(0), ZAU, 5_000_000, ST_ACTIVE);
+    bad.seen_ms = 5_000_000 + 61_000;
+    assert_eq!(flights_op_avail(&t, &bad), clock, "a bad key");
+    let mut future = op(OP_ASSIGN, k, ZAU, 9_000_000);
+    future.seen_ms = 1_000;
+    assert_eq!(flights_op_avail(&t, &future), clock, "a bad time");
+    let good = assign(k, 5_000_000, 30_000);
+    assert_eq!(flights_op_avail(&t, &good), 5_000_000 + 61_000);
 }
