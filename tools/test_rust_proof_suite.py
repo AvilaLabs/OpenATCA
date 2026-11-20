@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 91)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 91)
+        self.assertEqual(registry["expected_proof_count"], 94)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 94)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 82)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 85)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -180,6 +180,15 @@ class SuiteConfigurationTests(unittest.TestCase):
         self.assertTrue(any("expected_proof_count" in error for error in errors))
         self.assertTrue(any("duplicate package/harness" in error for error in errors))
 
+    def test_a_harness_name_contained_in_another_is_rejected(self):
+        first = proof_entry()
+        second = copy.deepcopy(first)
+        second["id"] = "another-id"
+        second["harness"] = first["harness"] + "_more"
+        data = registry_with(first, second)
+        errors = validate_registry(data)
+        self.assertTrue(any("is contained in" in error for error in errors), errors)
+
     def test_unregistered_cfg_and_stub_mismatch_are_rejected(self):
         proof = proof_entry()
         proof["cfgs"] = ["kani_experimental"]
@@ -255,7 +264,7 @@ print("fake runner stdout")
             proof = proof_entry()
             if index:
                 proof["id"] = f"second-proof-{index}"
-                proof["harness"] = f"types::proofs::bounded_example_{index}"
+                proof["harness"] = f"types::proofs::example_{index}_bounded"
                 proof["required_covers"] = []
             proofs.append(proof)
         registry_path = tools_dir / "rust_proofs.json"

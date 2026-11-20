@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 91,
+  "expected_proof_count": 94,
   "proofs": [
     {
       "id": "output-append",
@@ -1203,9 +1203,47 @@
     },
     {
       "id": "large-move-decision-rejected-current-filter",
-      "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected (the moved track differs from the snapshot in every group), current filter symbolic: it is as before but for its run of refusals (one more), and the snapshot in the pool is unchanged bit for bit.",
+      "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected (the moved track differs from the snapshot in every group), current filter symbolic: the vertical filter, trigonometry and every scalar of the current filter are as before but for its run of refusals (one more). The horizontal half is proved by large-move-decision-rejected-current-filter-horizontal and the snapshot by large-move-decision-rejected-current-filter-snapshot.",
       "package": "oa-track",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_current_filter",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+        "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+        "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 1200,
+      "external_timeout_seconds": 1500,
+      "memory_mib": 16384
+    },
+    {
+      "id": "large-move-decision-rejected-current-filter-horizontal",
+      "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected, current filter symbolic: the horizontal half of the current filter (both models' state, covariance and weight) is as before bit for bit.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_keeps_the_horizontal_current_filter",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+        "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+        "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 1200,
+      "external_timeout_seconds": 1500,
+      "memory_mib": 16384
+    },
+    {
+      "id": "large-move-decision-rejected-current-filter-snapshot",
+      "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected, current filter symbolic: the snapshot in the pool is unchanged bit for bit.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_keeps_the_snapshot_with_any_current_filter",
       "enabled": true,
       "experimental": false,
       "required_covers": [],
@@ -1241,9 +1279,28 @@
     },
     {
       "id": "large-move-decision-rejected-anchor-filter",
-      "requirement": "OA-TRK-354: the same scenario, anchor filter symbolic: the anchor filter is as before and the snapshot in the pool is unchanged bit for bit.",
+      "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected, anchor filter symbolic: the anchor filter is as before bit for bit. The snapshot is proved by large-move-decision-rejected-anchor-filter-snapshot.",
       "package": "oa-track",
       "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_anchor_filter",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decide does what the real rejected path does to the track (one more jump rejection and one more in the filter's run of refusals). Holds for the default configuration (resync_consistent_k 0, rej_h below RESYNC_AFTER).",
+        "filter_miss_m returns any distance, so every verdict of resolve_decide.",
+        "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 1200,
+      "external_timeout_seconds": 1500,
+      "memory_mib": 16384
+    },
+    {
+      "id": "large-move-decision-rejected-anchor-filter-snapshot",
+      "requirement": "OA-TRK-354: the same scenario as large-move-decision-rejected, anchor filter symbolic: the snapshot in the pool is unchanged bit for bit.",
+      "package": "oa-track",
+      "harness": "tracker::proofs::update_in_order_held_with_a_report_that_is_not_applied_keeps_the_snapshot_with_any_anchor_filter",
       "enabled": true,
       "experimental": false,
       "required_covers": [],
