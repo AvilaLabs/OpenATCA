@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use oa_adsb::{reports_extend, reports_len, Reports, F_GROUND, NONE_I32};
 use oa_bench::adsb_truth::{self, BuiltTruth};
-use oa_bench::input::{load_adsb_counted, load_counted, msg_limit, FeedInput};
+use oa_bench::input::{load_adsb_counted, load_counted, msg_limit, read_capped_file, FeedInput};
 use oa_bench::legacy::{
     name, norm_id, plan_candidates, plan_index, tbfm_kind, tfms_kind, Legacy, PlanIndex, NONE,
     NO_COORD, NO_TIME,
@@ -24,11 +24,14 @@ use crate::core::types::{
 use crate::shell::args::Args;
 use crate::shell::guard::guarded_opener;
 use crate::shell::places::{
-    book_airport, book_counts, derive_airports, find, place_book, place_of_e7, Found, PlaceBook,
+    book_counts, derive_airports, find, parse_places, place_book, place_of_e7, Found, PlaceBook,
+    PlacesFile,
 };
 use crate::shell::write::write_all;
 
 const MS_PER_MIN: i64 = 60_000;
+/// The longest places file read, bytes.
+const MAX_PLACES_BYTES: u64 = 64 << 20;
 /// The longest look-ahead scored, minutes: the end of the last bin.
 const MAX_LOOK_AHEAD_MIN: i64 = 120;
 
@@ -572,9 +575,9 @@ pub struct Inputs<'a> {
     pub cfg: Config,
     /// The step of the truth path sampling, ms.
     pub step_ms: i64,
-    /// The airport reference points by [`airport_key`], or `None` to derive them from the
-    /// recordings.
-    pub arps: Option<BTreeMap<String, Place>>,
+    /// The named points and airport reference points the caller supplied; an airport with none
+    /// is derived from the recordings.
+    pub places: PlacesFile,
 }
 
 /// What the scoring produced. Cold container (A7.2).
@@ -597,7 +600,7 @@ pub struct Scored {
 pub fn score_all(inp: &Inputs<'_>, reports: Reports) -> Scored {
     let leg = inp.legacy;
     let ix = index_legs(&core_legs(inp.built));
-    let book = place_book(leg);
+    let book = place_book(leg, &inp.places);
     let plans = plan_index(leg);
     let mut tfms_arr: BTreeMap<[u8; 12], String> = BTreeMap::new();
     for (p, a) in leg.tfms.plan_id.iter().zip(&leg.tfms.arr) {
@@ -615,19 +618,10 @@ pub fn score_all(inp: &Inputs<'_>, reports: Reports) -> Scored {
         .collect();
     let states = air_states(&reports, &want);
     drop(reports);
-    let arps = match &inp.arps {
-        Some(a) => a.clone(),
-        None => {
-            let flights = arrival_flights(&tb_units, &tf_units);
-            let mut a = derive_airports(&flights, &states);
-            for (apt, ..) in &flights {
-                if let Some(p) = book_airport(&book, apt) {
-                    a.insert(apt.clone(), p);
-                }
-            }
-            a
-        }
-    };
+    let mut arps = derive_airports(&arrival_flights(&tb_units, &tf_units), &states);
+    for (apt, p) in &inp.places.airports {
+        arps.insert(apt.clone(), *p);
+    }
     let ctx = Ctx {
         cfg: inp.cfg,
         step_ms: inp.step_ms,
@@ -667,6 +661,55 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         landing_gap_max_ms: args.landing_gap_s * 1000,
         max_look_ahead_ms: MAX_LOOK_AHEAD_MIN * MS_PER_MIN,
     };
+    let places = match &args.places {
+        Some(p) => {
+            let bytes = read_capped_file(p, MAX_PLACES_BYTES).map_err(|e| e.to_string())?;
+            let text =
+                String::from_utf8(bytes).map_err(|_| "places file is not UTF-8".to_string())?;
+            parse_places(&text)?
+        }
+        None => PlacesFile::default(),
+    };
+    let mut header: Vec<(String, String)> = Vec::new();
+    let mut reports = Reports::default();
+    let mut clip_sealed = 0u64;
+    for p in &args.adsb {
+        let mut s = 0u64;
+        let clip = load_adsb_counted(p, &guarded_opener(), &mut s);
+        clip_sealed += s;
+        *sealed = clip_sealed;
+        let clip = clip.map_err(|e| e.to_string())?;
+        header.push((
+            "adsb clip".to_string(),
+            format!(
+                "{}: {} reports, {} bad frames, {} dropped records, sha256 {}",
+                p.file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                reports_len(&clip.reports),
+                clip.bad_frames,
+                clip.dropped_records,
+                clip.hash.sha256
+            ),
+        ));
+        if reports_len(&reports) == 0 {
+            reports = clip.reports;
+        } else {
+            reports_extend(&mut reports, &clip.reports);
+        }
+        eprintln!(
+            "oa-legacy-traj: clip read, {} reports so far",
+            reports_len(&reports)
+        );
+    }
+    let mut tcfg = adsb_truth::config_with(None, None);
+    // The leave-one-out accuracy measurement is the truth's own check and is not needed here.
+    tcfg.loo = false;
+    let built = adsb_truth::build(&reports, &tcfg).map_err(|e| format!("truth: {e}"))?;
+    eprintln!("oa-legacy-traj: truth built, {} legs", built.legs.len());
+    header.push((
+        "truth".to_string(),
+        format!("{} legs, digest {}", built.legs.len(), built.digest),
+    ));
     let feeds = [
         FeedInput {
             feed: FeedKind::Sfdps,
@@ -683,9 +726,9 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     ];
     let mut feeds_sealed = 0u64;
     let loaded = load_counted(&feeds, &guarded_opener(), msg_limit(), &mut feeds_sealed);
-    *sealed = feeds_sealed;
+    *sealed += feeds_sealed;
     let mut loaded = loaded.map_err(|e| e.to_string())?;
-    let mut header: Vec<(String, String)> = Vec::new();
+    eprintln!("oa-legacy-traj: recordings read");
     for h in &loaded.inputs {
         header.push((
             "input".to_string(),
@@ -712,35 +755,14 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     l.th = Default::default();
     l.handoffs = Default::default();
     l.beacons = Default::default();
-    let mut reports = Reports::default();
-    let mut clip_sealed = 0u64;
-    for p in &args.adsb {
-        let mut s = 0u64;
-        let clip = load_adsb_counted(p, &guarded_opener(), &mut s);
-        clip_sealed += s;
-        *sealed = feeds_sealed + clip_sealed;
-        let clip = clip.map_err(|e| e.to_string())?;
-        header.push((
-            "adsb clip".to_string(),
-            format!(
-                "{}: {} reports, {} bad frames, {} dropped records, sha256 {}",
-                p.file_name()
-                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
-                reports_len(&clip.reports),
-                clip.bad_frames,
-                clip.dropped_records,
-                clip.hash.sha256
-            ),
-        ));
-        reports_extend(&mut reports, &clip.reports);
-    }
-    let mut tcfg = adsb_truth::config_with(None, None);
-    // The leave-one-out accuracy measurement is the truth's own check and is not needed here.
-    tcfg.loo = false;
-    let built = adsb_truth::build(&reports, &tcfg).map_err(|e| format!("truth: {e}"))?;
+    let n_given_airports = places.airports.len();
     header.push((
-        "truth".to_string(),
-        format!("{} legs, digest {}", built.legs.len(), built.digest),
+        "places file".to_string(),
+        format!(
+            "{} named points, {} airports",
+            places.fixes.len(),
+            places.airports.len()
+        ),
     ));
     let scored = score_all(
         &Inputs {
@@ -748,7 +770,7 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
             built: &built,
             cfg,
             step_ms: args.step_s * 1000,
-            arps: None,
+            places,
         },
         reports,
     );
@@ -772,7 +794,10 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     ));
     header.push((
         "airport reference points".to_string(),
-        format!("{} derived from the recordings", scored.arps),
+        format!(
+            "{} in use ({} from the places file, the rest derived from the recordings)",
+            scored.arps, n_given_airports
+        ),
     ));
     header.push((
         "sealed-window rows dropped".to_string(),

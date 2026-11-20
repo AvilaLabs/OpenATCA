@@ -18,6 +18,7 @@ use oa_bench::legacy::{
 use oa_legacy_traj::core::join::OUTCOME_NAMES;
 use oa_legacy_traj::core::report::{render_counts_csv, render_text};
 use oa_legacy_traj::core::types::{exclusion_index, Config, Exclusion, Place};
+use oa_legacy_traj::shell::places::PlacesFile;
 use oa_legacy_traj::shell::run::{score_all, Inputs, Scored};
 
 const M_PER_DEG: f64 = 111_194.926_644_558_74;
@@ -162,6 +163,17 @@ fn legacy() -> Legacy {
         (TC_S + 90) * 1000,
         (TC_S - 900) * 1000,
     );
+    // TBFM: flight 1's meter fix MFXC, a name only the places file knows: 8 minutes ahead, 20 s
+    // late.
+    push_tbfm(
+        &mut leg,
+        pad(b"PLAN1"),
+        pad(b"TST1"),
+        pad(b"MFXC"),
+        tbfm_kind::ETA_MFX,
+        (TC_S + 20) * 1000,
+        (TC_S - 480) * 1000,
+    );
     // Aircraft 2: its flight lands at KORD; TBFM runway estimate 25 minutes ahead, 50 s early.
     let f4 = flight(&mut leg, 4, Some(ADDR2), b"TST2", b"PLAN2", b"KORD");
     let _ = f4;
@@ -218,8 +230,9 @@ fn scored() -> Scored {
     let mut tcfg = adsb_truth::config_with(None, None);
     tcfg.loo = false;
     let built = adsb_truth::build(&reports, &tcfg).unwrap();
-    let mut arps = BTreeMap::new();
-    arps.insert("ORD".to_string(), AIRPORT);
+    let mut places = PlacesFile::default();
+    places.airports.insert("ORD".to_string(), AIRPORT);
+    places.fixes.push((pad(b"MFXC"), P));
     let leg = legacy();
     score_all(
         &Inputs {
@@ -227,7 +240,7 @@ fn scored() -> Scored {
             built: &built,
             cfg: cfg(),
             step_ms: 5000,
-            arps: Some(arps),
+            places,
         },
         reports,
     )
@@ -305,12 +318,18 @@ fn tbfm_is_scored_against_the_meter_fix_crossing_and_the_landing() {
     let mfx = &t.kinds[0];
     assert_eq!(mfx.errors[2].len(), 1);
     near(mfx.errors[2][0], 90.0);
+    // The meter fix MFXC is in the places file only: 8 minutes ahead, 20 s late.
+    assert_eq!(mfx.errors[1].len(), 1);
+    near(mfx.errors[1][0], 20.0);
+    assert_eq!(mfx.estimates, 2);
     // The runway estimate: 25 minutes ahead, 50 s early, against the last airborne report.
     let rwy = &t.kinds[2];
     assert_eq!(rwy.errors[3].len(), 1);
     assert_eq!(rwy.errors[3][0], -50.0);
     assert_eq!(t.outcomes[0], 2);
     assert_eq!(rwy.estimates, 1);
+    // One airport reference point in use: the one the places file gave.
+    assert_eq!(s.arps, 1);
 }
 
 // REQ: OA-LTJ-016
@@ -361,8 +380,9 @@ fn a_reference_point_is_derived_only_where_enough_landings_agree() {
     }
     states.insert(10, landing(40.0, 1000));
     states.insert(11, landing(40.0, 1000));
-    let mut flights: Vec<(String, u32, i64, i64)> =
-        (0..5).map(|k| ("ORD".to_string(), k, 0, 5_000_000)).collect();
+    let mut flights: Vec<(String, u32, i64, i64)> = (0..5)
+        .map(|k| ("ORD".to_string(), k, 0, 5_000_000))
+        .collect();
     flights.push(("XYZ".to_string(), 10, 0, 5_000_000));
     flights.push(("XYZ".to_string(), 11, 0, 5_000_000));
     // A landing outside the flight's interval is not a candidate.
@@ -372,4 +392,33 @@ fn a_reference_point_is_derived_only_where_enough_landings_agree() {
     let p = arps["ORD"];
     assert!((p.lat_deg - 41.5).abs() < 0.01, "{}", p.lat_deg);
     assert!((p.lon_deg + 88.0).abs() < 1e-9);
+}
+
+// REQ: OA-LTJ-021
+#[test]
+fn a_places_file_gives_named_points_and_airports_and_a_bad_line_is_named() {
+    use oa_legacy_traj::shell::places::{find, parse_places, place_book, Found};
+    let f = parse_places(
+        "# points\nfix, abc, 41.5, -88.25\nfix,ABC,43.5,-88.25\nfix,SOLO,41.0,-88.0\n\nairport,KORD,41.98,-87.9\n",
+    )
+    .unwrap();
+    assert_eq!(f.fixes.len(), 3);
+    assert_eq!(f.airports.len(), 1);
+    assert!(f.airports.contains_key("ORD"));
+    let book = place_book(&new_legacy(), &f);
+    // A name with two places far apart is ambiguous; one with a single place has it.
+    assert_eq!(find(&book, &pad(b"ABC")), Found::Ambiguous);
+    assert!(matches!(find(&book, &pad(b"SOLO")), Found::At(p) if p.lat_deg == 41.0));
+    assert_eq!(find(&book, &pad(b"NONE")), Found::Unknown);
+    for (bad, line) in [
+        ("fix,AB,1,2\nfix,CD,x,2", 2),
+        ("fix,AB,95,2", 1),
+        ("pier,AB,1,2", 1),
+        ("fix,TOOLONGNAME,1,2", 1),
+        ("airport,KORD,1,2\nairport,ORD,1,2", 2),
+        ("fix,AB,1", 1),
+    ] {
+        let e = parse_places(bad).unwrap_err();
+        assert!(e.contains(&format!("line {line}")), "{bad}: {e}");
+    }
 }

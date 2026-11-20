@@ -24,6 +24,7 @@ fn main() -> ExitCode {
     for p in [&args.sfdps, &args.tbfm, &args.tfms, &args.out]
         .into_iter()
         .chain(args.adsb.iter())
+        .chain(args.places.iter())
     {
         if let Err(e) = refuse_sealed(p) {
             eprintln!("oa-legacy-traj: {e}");

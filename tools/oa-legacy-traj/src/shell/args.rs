@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: oa-legacy-traj --sfdps <dir> --tbfm <dir> --tfms <dir> --adsb <clip.oaf> [--adsb <clip.oaf> ...] --out <dir>\n       [--cut-nm <nm>] [--runway-nm <nm>] [--landing-gap-s <s>] [--step-s <s>]";
+pub const USAGE: &str = "usage: oa-legacy-traj --sfdps <dir> --tbfm <dir> --tfms <dir> --adsb <clip.oaf> [--adsb <clip.oaf> ...] --out <dir>\n       [--places <csv>] [--cut-nm <nm>] [--runway-nm <nm>] [--landing-gap-s <s>] [--step-s <s>]";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived
@@ -14,6 +14,9 @@ pub struct Args {
     /// The ADS-B clips, in the order given (their reports are put together before truth is built).
     pub adsb: Vec<PathBuf>,
     pub out: PathBuf,
+    /// The named points and airport reference points to use (lines `fix,NAME,lat,lon` and
+    /// `airport,CODE,lat,lon`); the recordings carry none for named points.
+    pub places: Option<PathBuf>,
     /// A truth path counts as at a point within this, nautical miles.
     pub cut_nm: f64,
     /// A landing counts within this of the airport reference point, nautical miles.
@@ -33,12 +36,9 @@ fn number(flag: &str, v: Option<&String>) -> Result<f64, String> {
 /// Parses the arguments after the program name. A flag value that starts with `--` is a missing
 /// value; a repeated flag (other than `--adsb`), an unknown flag and a missing flag are errors.
 pub fn parse(argv: &[String]) -> Result<Args, String> {
-    let (mut sfdps, mut tbfm, mut tfms, mut out): (
-        Option<PathBuf>,
-        Option<PathBuf>,
-        Option<PathBuf>,
-        Option<PathBuf>,
-    ) = (None, None, None, None);
+    let (mut sfdps, mut tbfm, mut tfms): (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) =
+        (None, None, None);
+    let (mut out, mut places): (Option<PathBuf>, Option<PathBuf>) = (None, None);
     let mut adsb: Vec<PathBuf> = Vec::new();
     let (mut cut, mut runway, mut gap, mut step): (
         Option<f64>,
@@ -61,7 +61,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
                     return Err(format!("{flag} given twice"));
                 }
             }
-            "--sfdps" | "--tbfm" | "--tfms" | "--adsb" | "--out" => {
+            "--sfdps" | "--tbfm" | "--tfms" | "--adsb" | "--out" | "--places" => {
                 let value = it
                     .next()
                     .filter(|v| !v.starts_with("--"))
@@ -72,6 +72,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
                     "--tbfm" => &mut tbfm,
                     "--tfms" => &mut tfms,
                     "--out" => &mut out,
+                    "--places" => &mut places,
                     _ => {
                         adsb.push(p);
                         continue;
@@ -101,6 +102,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         tfms,
         adsb,
         out,
+        places,
         cut_nm: cut.unwrap_or(2.0),
         runway_nm: runway.unwrap_or(5.0),
         landing_gap_s: landing_gap_s as i64,

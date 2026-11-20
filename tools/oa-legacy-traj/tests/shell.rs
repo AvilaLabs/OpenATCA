@@ -25,6 +25,9 @@ const BASE: &str = "--sfdps s --tbfm b --tfms f --out o";
 fn the_arguments_take_the_inputs_in_any_order_and_state_the_defaults() {
     let a = parse(&argv(&format!("{BASE} --adsb a.oaf --adsb b.oaf"))).unwrap();
     assert_eq!(a.adsb.len(), 2);
+    assert!(a.places.is_none());
+    let a = parse(&argv(&format!("{BASE} --adsb a.oaf --places p.csv"))).unwrap();
+    assert_eq!(a.places.as_deref(), Some(std::path::Path::new("p.csv")));
     assert_eq!(a.cut_nm, 2.0);
     assert_eq!(a.runway_nm, 5.0);
     assert_eq!(a.landing_gap_s, 120);
@@ -40,6 +43,7 @@ fn the_arguments_take_the_inputs_in_any_order_and_state_the_defaults() {
     for bad in [
         BASE.to_string(),
         format!("{BASE} --adsb a --sfdps again"),
+        format!("{BASE} --adsb a --places p --places q"),
         format!("{BASE} --adsb a --cut-nm"),
         format!("{BASE} --adsb a --cut-nm 0"),
         format!("{BASE} --adsb a --step-s 2.5"),
