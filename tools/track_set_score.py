@@ -21,6 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# The sealed hold-out guard (tools/sealed_guard.py); the script's own directory may not be on the path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sealed_guard  # noqa: E402
+
 
 TRUTH_FIELDS = ("scenario_id", "time_ns", "truth_id", "lat_deg", "lon_deg")
 OUTPUT_FIELDS = ("scenario_id", "time_ns", "track_id", "source_ns", "lat_deg", "lon_deg", "status")
@@ -62,6 +66,7 @@ class Point:
 
 
 def _sha256(path: Path) -> str:
+    sealed_guard.refuse(path)
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -70,6 +75,7 @@ def _sha256(path: Path) -> str:
 
 
 def _bounded_csv(path: Path, expected_fields: tuple[str, ...], kind: str) -> tuple[list[dict[str, str]], int]:
+    sealed_guard.refuse(path)
     try:
         if path.stat().st_size > MAX_FILE_BYTES:
             raise ScoreError(f"{kind} exceeds byte limit {MAX_FILE_BYTES}")
@@ -364,6 +370,7 @@ def _parse_points(path: Path, fields: tuple[str, ...], kind: str) -> tuple[list[
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
+    sealed_guard.refuse(path)
     try:
         if path.stat().st_size > 1024 * 1024:
             raise ScoreError("manifest exceeds 1 MiB limit")
@@ -489,6 +496,7 @@ def _manifest_contract(manifest: dict[str, Any]) -> tuple[str, list[int], int, d
 
 
 def score(truth_path: Path, outputs_path: Path, manifest_path: Path) -> dict[str, Any]:
+    sealed_guard.refuse(truth_path, outputs_path, manifest_path)
     hashes: dict[str, str | None] = {}
     for name, path in (("truth_sha256", truth_path), ("outputs_sha256", outputs_path), ("manifest_sha256", manifest_path)):
         try:
@@ -788,7 +796,12 @@ def _cli() -> int:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     args = parser.parse_args()
-    result = score(args.truth, args.outputs, args.manifest)
+    try:
+        sealed_guard.refuse(args.truth, args.outputs, args.manifest, args.out)
+        result = score(args.truth, args.outputs, args.manifest)
+    except sealed_guard.SealedError as exc:
+        print(f"track_set_score: {exc}", file=sys.stderr)
+        return 2
     try:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with args.out.open("w", encoding="utf-8", newline="\n") as handle:

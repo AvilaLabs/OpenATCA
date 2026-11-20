@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
 use oa_adsb::{reports_len, Reports, F_GROUND, NONE_I32};
-use oa_bench::input::load_adsb;
+use oa_bench::input::load_adsb_with;
 use oa_encounter::{
     encounter_check, encounter_cycle, encounter_finish, encounter_lat_limit_deg,
     encounter_log_clear, encounter_log_new, encounter_new, encounter_totals, ClassLimit,
@@ -319,7 +319,8 @@ pub fn report_separations(
 /// The whole run: reads the clip, writes `encounters.csv` and `summary.txt` under `args.out`, and
 /// returns the summary text.
 pub fn run(args: &Args) -> Result<String, String> {
-    let clip = load_adsb(&args.adsb).map_err(|e| e.to_string())?;
+    let clip =
+        load_adsb_with(&args.adsb, &crate::guard::guarded_opener()).map_err(|e| e.to_string())?;
     let clip_sha = clip.hash.sha256.clone();
     let (reports, scope) = if args.scorer_half {
         let (a, b, _) = split_reports(&clip.reports);

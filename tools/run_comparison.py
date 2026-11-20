@@ -22,6 +22,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+# The sealed hold-out guard (tools/sealed_guard.py); the script's own directory may not be on the path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sealed_guard  # noqa: E402
+
 
 SCENARIOS = ("straight", "turn", "acceleration", "crossing", "dropout", "delayed")
 COMPARISON_CLASS = "development_control"
@@ -868,7 +872,11 @@ def run(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        sealed_guard.refuse(args.repo, args.out, args.target_dir, args.runner)
         return run(args)
+    except sealed_guard.SealedError as exc:
+        print(f"comparison run: {exc}", file=sys.stderr)
+        return 2
     except ComparisonRunError as exc:
         print(f"comparison run: {exc}", file=sys.stderr)
         return 2

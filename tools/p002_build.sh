@@ -5,6 +5,12 @@
 #
 #   tools/p002_build.sh [extra cargo args]
 set -euo pipefail
+# The sealed hold-out data is never read: a path argument (not an option) is checked before anything
+# runs. Nothing switches this check off.
+sealed_args=()
+for a in "$@"; do case "$a" in -*) ;; *) sealed_args+=("$a") ;; esac; done
+[ "${#sealed_args[@]}" -eq 0 ] ||
+    python3 -I "$(dirname "${BASH_SOURCE[0]}")/sealed_guard.py" "${sealed_args[@]}" || exit 2
 repo="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 cd "$repo"
 commit="$(git rev-parse HEAD)"

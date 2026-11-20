@@ -65,6 +65,12 @@ clip="${pos[2]}"
 outdir="${pos[3]}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The sealed hold-out data is never read: every path argument is checked (resolved, links followed)
+# before anything is read, built or created. Nothing switches this check off.
+sealed_args=("$clip" "$outdir")
+[ -z "$expect" ] || sealed_args+=("$expect")
+[ -z "${pos[4]:-}" ] || sealed_args+=("${pos[4]}")
+python3 -I "$here/sealed_guard.py" "${sealed_args[@]}" || exit 2
 # shellcheck source=replay_clean_env.sh
 . "$here/replay_clean_env.sh"
 repo="$(git -C "$here" rev-parse --show-toplevel)"

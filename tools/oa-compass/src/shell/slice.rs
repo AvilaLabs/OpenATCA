@@ -148,6 +148,7 @@ fn slice_file(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    refuse_holdout(input)?;
     let f = File::open(input).map_err(|e| io_err(input, &e))?;
     let mut r = BufReader::with_capacity(1 << 20, f);
     let partial = out_path.with_extension("ast.partial");
@@ -341,6 +342,8 @@ pub fn slice_dir_with(
     hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
 ) -> Result<Vec<SliceFile>, ExportError> {
     check_window(from, to)?;
+    // Before the directory is listed: a sealed source is never read, not even its names.
+    refuse_holdout(input)?;
     let mut names: Vec<PathBuf> = fs::read_dir(input)
         .map_err(|e| io_err(input, &e))?
         .filter_map(Result::ok)
@@ -354,7 +357,11 @@ pub fn slice_dir_with(
             input.display()
         )));
     }
-    refuse_holdout(input)?;
+    // Every file of the source is checked on its own as well: a link inside an unsealed
+    // directory can lead into a sealed one.
+    for n in &names {
+        refuse_holdout(n)?;
+    }
     // Not the input directory (by canonical path), and new or empty: nothing of an earlier run is
     // mixed in; a directory of only partial files says so.
     if out.exists() {
@@ -369,6 +376,7 @@ pub fn slice_dir_with(
     // The source README is needed for the import date line: read before anything is created.
     let src_readme = fs::read_to_string(input.join("README.txt"))
         .map_err(|e| io_err(&input.join("README.txt"), &e))?;
+    refuse_holdout(out)?;
     check_out(out)?;
     let mut run_dirs: Vec<PathBuf> = Vec::new();
     create_tracked(out, &mut run_dirs)?;

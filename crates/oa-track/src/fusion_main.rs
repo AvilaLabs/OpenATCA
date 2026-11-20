@@ -1069,6 +1069,11 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let out = out.ok_or_else(|| USAGE.to_string())?;
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    oa_sealed::refuse(&out)?;
+    if let Some(c) = &clip {
+        oa_sealed::refuse(std::path::Path::new(c))?;
+    }
     if opts.quick {
         opts.worlds = 1;
         opts.pair_seeds = 3;

@@ -5457,3 +5457,21 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   "other". It exits 3 with a count of the bytes dropped if the frame reader stalls, reads until two bytes to
   sniff gzip, and refuses (exit 2) a path with a sealed name inside any component, as given or resolved, and
   any path it cannot resolve.
+
+## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
+- **OA-SEAL-001** The sealed hold-out data is listed once, in `tools/sealed_paths.txt` (the data root and the entries
+  `scds/rec-20261119`, `scds/stdds-20261119-holdout`, `scds/stdds-smoke-20261119*`); the Rust guard compiles the file in and
+  the Python guard reads it, and both parse it to the same set. A list that does not parse refuses every path.
+- **OA-SEAL-002** A path is resolved before it is checked (relative paths, `..`, every link, a symlinked parent directory, a
+  path not yet created through its nearest existing ancestor) and is refused, with a message that names the rule, if it is,
+  is inside, resolves into or names (`scds` then a sealed name, as given or resolved) a sealed entry, if it is a directory
+  that holds one, or if a link on it cannot be resolved. The shared guard owns the path rule only; a recording or row
+  stamped on UTC day 2026-11-19 is a content rule that needs the tool's own parser.
+- **OA-SEAL-003** A tool that walks a directory checks every file it opens, through the guard's opener, not only its
+  arguments.
+- **OA-SEAL-004** Nothing switches the guard off: it reads no environment variable, flag or file, and an unknown option of
+  the checker is a usage error.
+- **OA-SEAL-005** Every tool that reads recordings refuses a sealed input or output path with a nonzero exit, a message that
+  names the rule, and nothing written: oa-compass, oa-encounter, oa-shadow, oa-track-run, oa-track-fusion, p002,
+  oa-replay-diff, validate_candidate.py, comparison_reference.py, comparison_evaluator.py, run_comparison.py,
+  track_set_score.py, replay_compare.sh and p002_build.sh.

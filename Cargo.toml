@@ -45,6 +45,7 @@ members = [
     "tools/oa-encounter",
     "tools/oa-compass",
     "tools/oa-perf",
+    "tools/oa-sealed",
     "tools/oa-replay-diff",
     "tools/oa-shadow",
     "tools/oa-trace",

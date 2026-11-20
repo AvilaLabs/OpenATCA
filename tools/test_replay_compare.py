@@ -385,7 +385,7 @@ class DigestFormatRefusal(unittest.TestCase):
         self.repo = self.d / "r"
         (self.repo / "tools").mkdir(parents=True)
         (self.repo / "crates/oa-track/src").mkdir(parents=True)
-        for n in ["replay_compare.sh", "replay_clean_env.sh", "replay_overlay_apply.sh"]:
+        for n in ["replay_compare.sh", "replay_clean_env.sh", "replay_overlay_apply.sh", "sealed_guard.py", "sealed_paths.txt"]:
             (self.repo / "tools" / n).write_text((SCRIPT.parent / n).read_text())
         git(self.repo, "init", "-q", "-b", "main")
         self.commits = {}

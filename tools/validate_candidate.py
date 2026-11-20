@@ -14,6 +14,9 @@ import sys
 import time
 
 from allocator_validation import evaluate_allocator_result
+# The sealed hold-out guard (tools/sealed_guard.py), beside the older forbidden-component rule below.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sealed_guard  # noqa: E402
 
 ALLOWED_ENV = {"OPENATCA_DATA", "OPENATCA_RAW", "OPENATCA_SNAPSHOT",
                "OPENATCA_GEODTEST", "OPENATCA_CIFP", "OPENATCA_NASR",
@@ -41,6 +44,7 @@ SAFE_DATA_CHILDREN = {"raw", "derived", "tools", "fuzz"}
 
 
 def sha(path):
+    sealed_guard.refuse(path)
     h = hashlib.sha256()
     with path.open("rb") as f:
         for block in iter(lambda: f.read(1024 * 1024), b""):
@@ -547,6 +551,7 @@ def checkout_target_dir(repo, cache_root):
 
 
 def run_gate(args):
+    sealed_guard.refuse(args.repo, args.target_dir, args.out, args.reference_env, args.clip)
     repo = args.repo.resolve()
     out = args.out.resolve()
     target_root = args.target_dir.resolve()
@@ -894,6 +899,9 @@ def main():
     args = p.parse_args()
     try:
         code = run_gate(args)
+    except sealed_guard.SealedError as e:
+        print(f"candidate gate: {e}", file=sys.stderr)
+        return 2
     except (OSError, ValueError, subprocess.CalledProcessError, json.JSONDecodeError) as e:
         print(f"candidate gate: {e}", file=sys.stderr)
         return 1

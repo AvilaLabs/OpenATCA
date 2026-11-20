@@ -83,6 +83,7 @@ dependencies = [
  "oa-json",
  "oa-math",
  "oa-replay",
+ "oa-sealed",
  "oa-track",
  "oa-truth",
 ]
@@ -134,6 +135,7 @@ dependencies = [
  "oa-bench",
  "oa-encounter",
  "oa-nasr",
+ "oa-sealed",
  "oa-sha256",
  "oa-track",
  "oa-zip",
@@ -251,6 +253,7 @@ dependencies = [
 name = "oa-replay-diff"
 version = "0.0.1"
 dependencies = [
+ "oa-sealed",
  "oa-track",
 ]
 
@@ -273,6 +276,10 @@ dependencies = [
  "oa-track",
  "oa-truth",
 ]
+
+[[package]]
+name = "oa-sealed"
+version = "0.0.1"
 
 [[package]]
 name = "oa-sensorsim"
@@ -298,6 +305,7 @@ dependencies = [
  "oa-bench",
  "oa-math",
  "oa-replay",
+ "oa-sealed",
  "oa-sha256",
  "oa-track",
  "oa-truth",
@@ -356,6 +364,7 @@ dependencies = [
  "oa-geo",
  "oa-math",
  "oa-replay",
+ "oa-sealed",
  "oa-sensorsim",
  "oa-sha256",
  "oa-truth",
