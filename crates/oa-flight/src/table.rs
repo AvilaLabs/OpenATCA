@@ -98,6 +98,65 @@ pub(crate) fn slot_of_key(t: &FlightTable, k: &FlightKey) -> Option<u32> {
     })
 }
 
+/// What the chain of flights that claim one aircraft address holds.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Claimants {
+    /// Every flight that claims the address.
+    pub total: usize,
+    /// Those flying ([`flight_is_flying`]).
+    pub flying: usize,
+    /// The only claimant is live but not flying (dropped).
+    pub sole_dropped: bool,
+}
+
+/// Walks the chain of the address index, newest claimant first, and counts every flight that
+/// claims the address. Appends a copy of each flying one to `out`, at most `max`; the flights not
+/// flying are not copied. The walk is at most the length of the table.
+pub fn flights_claiming_address(
+    t: &FlightTable,
+    address: u32,
+    out: &mut Vec<Flight>,
+    max: usize,
+) -> Claimants {
+    let mut r = Claimants::default();
+    if address == 0 {
+        return r;
+    }
+    let flights = &t.flights;
+    let Some(mut cur) = index_find(&t.by_addr, hash_addr(address), |s| {
+        flights
+            .get(s as usize)
+            .is_some_and(|f| f.address == address)
+    }) else {
+        return r;
+    };
+    let mut only: Option<Flight> = None;
+    for _ in 0..t.flights.len() {
+        let Some(f) = t.flights.get(cur as usize) else {
+            break;
+        };
+        if f.address != address {
+            break;
+        }
+        r.total += 1;
+        if flight_is_flying(f) {
+            r.flying += 1;
+            if out.len() < max {
+                out.push(*f);
+            }
+        } else if r.total == 1 {
+            only = Some(*f);
+        }
+        if f.addr_next == 0 {
+            break;
+        }
+        cur = f.addr_next - 1;
+    }
+    r.sole_dropped = r.total == 1 && only.is_some_and(|f| flight_is_live(&f));
+    r
+}
+
 /// A copy of the flight with this key.
 pub fn flight_get(t: &FlightTable, k: &FlightKey) -> Option<Flight> {
     slot_of_key(t, k).and_then(|s| t.flights.get(s as usize).copied())
@@ -139,6 +198,76 @@ pub fn flight_is_live(f: &Flight) -> bool {
         .iter()
         .take(usize::from(f.n_views))
         .any(|v| v.state != ST_NONE && !is_terminal(v.state))
+}
+
+/// Whether any plan view of the flight is proposed, active or departed: not ended and not dropped.
+pub fn flight_is_flying(f: &Flight) -> bool {
+    f.views
+        .iter()
+        .take(usize::from(f.n_views))
+        .any(|v| v.state == ST_PROPOSED || v.state == ST_ACTIVE || v.state == ST_DEPARTED)
+}
+
+/// The flying flights ([`flight_is_flying`]) that state one callsign.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug)]
+pub struct Flying {
+    /// How many there are.
+    pub count: usize,
+    /// The first in slot order.
+    pub first: Option<Flight>,
+    /// The one with the newest plan stamp (the later stamped time of any view, then the later
+    /// message, then the larger GUFI): the same choice whatever the slot order.
+    pub newest: Option<Flight>,
+    /// Every one of them states the same departure and the same arrival, both given.
+    pub same_route: bool,
+}
+
+fn plan_stamp(f: &Flight) -> (i64, u64, u128) {
+    let (ts, msg) = f
+        .views
+        .iter()
+        .take(usize::from(f.n_views))
+        .map(|v| (v.stamp.ts_ms, v.stamp.msg))
+        .max()
+        .unwrap_or((i64::MIN, 0));
+    (ts, msg, f.key.gufi)
+}
+
+/// The flights that are flying and state this callsign. One pass over the table, at most its
+/// length.
+pub fn flights_flying_by_callsign(t: &FlightTable, callsign: &[u8; 8]) -> Flying {
+    let mut r = Flying {
+        count: 0,
+        first: None,
+        newest: None,
+        same_route: true,
+    };
+    if *callsign == [0; 8] {
+        return r;
+    }
+    for f in &t.flights {
+        if f.key.kind == KEY_FREE || f.callsign != *callsign || !flight_is_flying(f) {
+            continue;
+        }
+        r.count += 1;
+        match (&r.first, &r.newest) {
+            (Some(first), Some(newest)) => {
+                if f.dep != first.dep || f.arr != first.arr {
+                    r.same_route = false;
+                }
+                if plan_stamp(f) > plan_stamp(newest) {
+                    r.newest = Some(*f);
+                }
+            }
+            _ => {
+                r.first = Some(*f);
+                r.newest = Some(*f);
+                r.same_route = f.dep != [0; 12] && f.arr != [0; 12];
+            }
+        }
+    }
+    r
 }
 
 /// The most advanced state among the views: departed, active, proposed, dropped, completed,

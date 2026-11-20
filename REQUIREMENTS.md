@@ -5586,6 +5586,50 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   opens anything, and exits 2; every recording it reads is opened through the same guard.
 - **OA-FLT-024** A question about a flight is answered as of its time: an operation received before it but not yet aged in by the
   lag floor is not seen by it, and one that has aged in is.
+- **OA-FLT-025** The callsign join is tried where the address names no flight, and may override the address flight under OA-FLT-036; it names a flight only when the ADS-B callsign is stable,
+  exactly one flight that is flying (a plan proposed, active or departed; not ended, not dropped) states it, and the flight's own
+  SFDPS position within 120 s of the question, where it has one, is within 10 NM of the ADS-B position; with no such position the
+  join stands and is counted apart as unchecked. Each rejection (no callsign, unstable callsign, no live flight, several live
+  flights, position disagrees) is counted.
+- **OA-FLT-026** The callsign join is read as of the closest approach exactly as the address join is: a flight, an identity or a
+  position that ages in after the question is not used by it.
+- **OA-FLT-027** Where the address and the callsign both name a flight the two are kept and compared, and the counts of the same
+  flight and of different flights are reported, as the measure of the callsign join's error.
+- **OA-FLT-028** The ADS-B callsign of an aircraft is stable when the reports of the previous 60 s carry one callsign (upper
+  case, trimmed); none is no callsign and more than one is unstable; the position is the latest report not after the question
+  and not older than 60 s, and with none in that span it is the midpoint of the two aircraft of the pair's closest approach.
+- **OA-FLT-029** The adapter makes a callsign upper case and trimmed, and the replay keeps the latest position of each flight,
+  bounded, as of the time it ages in.
+- **OA-FLT-030** Where several flying flights state one callsign, all with the same departure and arrival, the callsign join may take
+  the one with the newest plan stamp (the later stamped time of any plan view, then the later message, then the larger GUFI), the
+  same one whatever the order the flights arrived in, and counts it as one aircraft with several plans; with another route among
+  them, or a route not stated, they stay rejected as several live flights.
+- **OA-FLT-031** The replay remembers the time of the latest refile conflict of each flight, bounded.
+- **OA-FLT-032** A disagreement between the address and the callsign is classed (same callsign and route, same callsign and another
+  route, different callsigns, other), the distances between the flights' positions and from the ADS-B position are kept, and
+  the two flights are looked at again 30 min later for whether either stopped flying; the second look joins nothing.
+- **OA-FLT-033** The core lists every flight that claims an aircraft address, newest first, by walking the chain of the address
+  index, bounded by the table, and counts them all.
+- **OA-FLT-034** The address join walks every claimant of the address, keeps those flying at the query time under the same as-of,
+  no-peek rule, takes the one that is flying if only one is, and with none flying finds nothing (counted as address claimants,
+  none flying) and the callsign join is tried next.
+- **OA-FLT-035** Among the claimants left after OA-FLT-037 and OA-FLT-038, the address join takes the one whose own position within
+  120 s is within 10 NM of the ADS-B position; if none or more than one passes, it gives several flying claimants and the callsign
+  join is tried next.
+- **OA-FLT-036** Where the address join and the callsign join name different flights, the one whose position check passes is taken;
+  if both or neither pass the address flight stands; each case is counted and kept in the cross-check.
+- **OA-FLT-037** With several claimants flying, the claimants whose callsign equals the ADS-B callsign are kept first; if one remains
+  it is taken and counted as several flying, callsign decides; a step that would leave none narrows nothing.
+- **OA-FLT-038** Then claimants with a view active or departed are kept over those only proposed; if one remains it is taken and
+  counted as several flying, state decides; then the position check; otherwise the claimants stay unresolved.
+- **OA-FLT-039** A dropped flight is not flying; an address whose only claimant is dropped at the query time is counted on its own
+  line. The walk counts every claimant of the chain (time linear in the chain, at most the table) and copies only the flying ones,
+  at most 64 (FLYING_CAP, 64 flights of 768 B, 48 KiB per question); an address with more than 64 flying is counted on its own
+  line and left unresolved, so the callsign join is tried.
+- **OA-FLT-040** The replay drops the position and the refile time of a flight when the table removes the flight; positions held,
+  positions refused (table full), refile times held and refiles refused are printed, also at zero, and so are positions left out for
+  a stamp too far ahead of their receipt.
+- **OA-FLT-041** A flight's own position counts only when stamped at or before the question and no more than 120 s before it.
 - **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
   refuses a window that is open at one end or runs backwards.
 
@@ -5771,7 +5815,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   is skipped (an inline one with its body, a file module `mod name;` with the file and every module it declares); no file
   is skipped by its name, and any other `#[cfg(test)]` item is scanned. An allow with no bare call on the line it covers is
   stale and fails, and an allow inside a skipped test module is not counted; the number of allows is pinned exactly in the
-  test (`ALLOW_COUNT`, now 98), not a budget. `tests/`, `benches/` and `build.rs` of every crate are scanned the same way
+  test (`ALLOW_COUNT`, now 99), not a budget. `tests/`, `benches/` and `build.rs` of every crate are scanned the same way
   when the file names the real data root (a string that holds `OPENATCA_`, which covers `OPENATCA_RAW`, `OPENATCA_DATA`,
   `OPENATCA_SCDS`, `OPENATCA_ADSB_CLIP`, `OPENATCA_SNAPSHOT`, `OPENATCA_REC`, `OPENATCA_SENSORSIM_CLIP`, `OPENATCA_NASR`,
   `OPENATCA_CIFP` and any other, or `openatca-data`; a comment or an identifier such as a constant does not count), and a

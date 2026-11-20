@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 pub const USAGE: &str =
-    "usage: oa-encounter --adsb <clip.oaf> --out <dir> [--scorer-half] [--nasr <NASR_CSV.zip>]\n       [--from <unix s> --to <unix s>] [--sfdps <recording dir> [--lag-floor-s <s>]] [--hours]";
+    "usage: oa-encounter --adsb <clip.oaf> --out <dir> [--scorer-half] [--nasr <NASR_CSV.zip>]\n       [--from <unix s> --to <unix s>] [--sfdps <recording dir> [--lag-floor-s <s>]] [--pick-newest-plan] [--hours]";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived
@@ -21,6 +21,9 @@ pub struct Args {
     /// The SFDPS recordings to join the flight record from, and the lag floor to apply, seconds.
     pub sfdps: Option<PathBuf>,
     pub lag_floor_s: i64,
+    /// Where every flying flight with the callsign shares its departure and arrival, take the one
+    /// with the newest plan stamp.
+    pub pick_newest: bool,
     /// Print the reports of the clip by UTC hour and stop.
     pub hours: bool,
 }
@@ -32,6 +35,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         (None, None, None);
     let mut scorer_half = false;
     let mut hours = false;
+    let mut pick_newest = false;
     let (mut sfdps, mut from, mut to, mut lag): (
         Option<PathBuf>,
         Option<i64>,
@@ -44,6 +48,12 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             "--scorer-half" => {
                 if std::mem::replace(&mut scorer_half, true) {
                     return Err("--scorer-half given twice".to_string());
+                }
+                continue;
+            }
+            "--pick-newest-plan" => {
+                if std::mem::replace(&mut pick_newest, true) {
+                    return Err("--pick-newest-plan given twice".to_string());
                 }
                 continue;
             }
@@ -96,6 +106,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             window,
             sfdps,
             lag_floor_s: lag.unwrap_or(58),
+            pick_newest,
             hours,
         }),
         _ => Err("--adsb and --out are both required".to_string()),

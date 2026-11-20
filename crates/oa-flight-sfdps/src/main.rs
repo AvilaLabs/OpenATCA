@@ -67,7 +67,7 @@ fn main() -> ExitCode {
         silence_ms: 6 * 3_600_000,
     };
     let mut sealed = 0u64;
-    let replayed = replay_sfdps_counted(paths, &cfg, &mut |_, _| {}, &mut sealed);
+    let replayed = replay_sfdps_counted(paths, &cfg, &mut |_, _, _| {}, &mut sealed);
     drops.add(sealed);
     let rep = match replayed {
         Ok(r) => r,

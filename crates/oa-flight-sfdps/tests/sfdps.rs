@@ -180,7 +180,7 @@ fn a_replay_applies_the_lag_and_a_question_sees_only_what_had_aged_in() {
     let paths = recordings_in(&dir).unwrap();
     assert_eq!(paths.len(), 1);
     let mut asked: Vec<(i64, bool)> = Vec::new();
-    let rep = replay_sfdps(paths, &cfg(i64::MIN, i64::MAX), &mut |t, avail| {
+    let rep = replay_sfdps(paths, &cfg(i64::MIN, i64::MAX), &mut |t, _, avail| {
         if avail == i64::MAX {
             asked.push((avail, flight_by_address(t, 0x00A1_B2C3).is_some()));
         }
@@ -209,7 +209,7 @@ fn a_replay_applies_the_lag_and_a_question_sees_only_what_had_aged_in() {
     replay_sfdps(
         recordings_in(&dir).unwrap(),
         &cfg(i64::MIN, i64::MAX),
-        &mut |t, avail| {
+        &mut |t, _, avail| {
             before.push((avail, flight_by_address(t, 0x00A1_B2C3).is_some()));
         },
     )
@@ -236,7 +236,12 @@ fn frames_outside_the_window_are_skipped_and_the_run_ends_at_its_end() {
     std::fs::write(dir.join("a.oaf"), bytes).unwrap();
     let from = (base + 1000) * 1_000_000;
     let to = (base + 3000) * 1_000_000;
-    let rep = replay_sfdps(recordings_in(&dir).unwrap(), &cfg(from, to), &mut |_, _| {}).unwrap();
+    let rep = replay_sfdps(
+        recordings_in(&dir).unwrap(),
+        &cfg(from, to),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
     assert_eq!(rep.frames_skipped_before, 1);
     assert_eq!(rep.frames, 3, "frames at 1, 2 and 3 s");
     assert_eq!(
@@ -257,7 +262,7 @@ fn a_flight_first_seen_active_with_an_actual_departure_departs() {
     let rep = replay_sfdps(
         recordings_in(&dir).unwrap(),
         &cfg(i64::MIN, i64::MAX),
-        &mut |_, _| {},
+        &mut |_, _, _| {},
     )
     .unwrap();
     assert_eq!(
@@ -313,10 +318,131 @@ fn the_replay_drops_sealed_window_frames_and_rows_and_counts_them() {
     let rep = replay_sfdps(
         recordings_in(&dir).unwrap(),
         &cfg(i64::MIN, i64::MAX),
-        &mut |_, _| {},
+        &mut |_, _, _| {},
     )
     .unwrap();
     assert_eq!(rep.frames, 2);
     assert_eq!(rep.sealed_window_dropped, 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// REQ: OA-FLT-029
+#[test]
+fn a_callsign_is_made_upper_case_and_trimmed_and_a_position_is_kept_as_it_ages_in() {
+    assert_eq!(
+        oa_flight_sfdps::norm_callsign(*b"abc12 \0\0"),
+        *b"ABC12\0\0\0"
+    );
+    assert_eq!(oa_flight_sfdps::norm_callsign(*b" n123ab "), *b"N123AB\0\0");
+    let dir = temp_dir("pos");
+    let ts = parse_iso_ms(b"2030-01-02T03:04:05.000Z").unwrap();
+    let body = r#"<flightStatus fdpsFlightStatus="ACTIVE"/><flightIdentification aircraftIdentification="abc12" computerId="1"/><enRoute><position positionTime="2030-01-02T03:04:00Z"><position><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>41.9 -87.9</pos></location></position></position></enRoute>"#;
+    let x = doc(&msg("TH", "2030-01-02T03:04:05.000Z", body));
+    std::fs::write(dir.join("a.oaf"), frame(1, ts + 10_000, &x)).unwrap();
+    let mut seen: Vec<(i64, bool)> = Vec::new();
+    let g = 0x1111_1111_2222_3333_4444_5555_5555_5555u128;
+    let rep = replay_sfdps(
+        recordings_in(&dir).unwrap(),
+        &cfg(i64::MIN, i64::MAX),
+        &mut |_, p, avail| {
+            seen.push((avail, p.get(g).is_some()));
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        seen.first(),
+        Some(&(ts + 58_000, false)),
+        "not there before it ages in"
+    );
+    assert_eq!(seen.last(), Some(&(i64::MAX, true)));
+    let p = rep.positions.get(g).unwrap();
+    assert_eq!((p.lat_e7, p.lon_e7), (419_000_000, -879_000_000));
+    assert_eq!(p.avail_ms, ts + 58_000);
+    let f = flight_by_callsign_via_table(&rep);
+    assert_eq!(f, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn flight_by_callsign_via_table(rep: &oa_flight_sfdps::ReplayReport) -> usize {
+    oa_flight::flights_flying_by_callsign(&rep.table, b"ABC12\0\0\0").count
+}
+
+// REQ: OA-FLT-031
+#[test]
+fn a_plan_filed_again_over_an_ended_one_is_remembered_with_its_time() {
+    let dir = temp_dir("refile");
+    let ts = parse_iso_ms(b"2030-01-02T03:04:05.000Z").unwrap();
+    let plan = |id: &str, status: &str| {
+        format!(r#"<flightStatus fdpsFlightStatus="{status}"/><flightPlan identifier="{id}"/>"#)
+    };
+    let mut bytes = Vec::new();
+    for (k, (t, status, id)) in [
+        ("03:04:05", "ACTIVE", "P1"),
+        ("03:04:06", "COMPLETED", "P1"),
+        ("03:04:07", "ACTIVE", "P2"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let x = doc(&msg(
+            "TH",
+            &format!("2030-01-02T{t}.000Z"),
+            &plan(id, status),
+        ));
+        bytes.extend(frame(k as u64 + 1, ts + 10_000 + k as i64 * 1_000, &x));
+    }
+    std::fs::write(dir.join("a.oaf"), bytes).unwrap();
+    let rep = replay_sfdps(
+        recordings_in(&dir).unwrap(),
+        &cfg(i64::MIN, i64::MAX),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(
+        rep.table.stats.conflicts[oa_flight::C_PLAN_REFILED as usize],
+        1
+    );
+    let g = 0x1111_1111_2222_3333_4444_5555_5555_5555u128;
+    assert_eq!(rep.positions.refiled_at(g), Some(ts + 2_000));
+    assert_eq!(rep.positions.refiled_at(g + 1), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// REQ: OA-FLT-040
+#[test]
+fn the_position_of_a_flight_the_table_removes_is_forgotten_with_it() {
+    let dir = temp_dir("forget");
+    let ts = parse_iso_ms(b"2030-01-02T03:04:05.000Z").unwrap();
+    let other = "99999999-2222-3333-4444-555555555555";
+    let pos = r#"<enRoute><position positionTime="2030-01-02T03:04:00Z"><position><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>41.9 -87.9</pos></location></position></position></enRoute>"#;
+    let active = format!(r#"<flightStatus fdpsFlightStatus="ACTIVE"/>{pos}"#);
+    let done = r#"<flightStatus fdpsFlightStatus="COMPLETED"/>"#;
+    let at = |s: &str| format!("2030-01-02T03:{s}.000Z");
+    let m = |g: &str, t: &str, b: &str| msg("TH", t, b).replace(GUFI, g);
+    let frames = [
+        frame(1, ts + 10_000, &doc(&m(GUFI, &at("04:05"), &active))),
+        frame(2, ts + 11_000, &doc(&m(GUFI, &at("04:06"), done))),
+        frame(3, ts + 600_000, &doc(&m(other, &at("14:05"), &active))),
+        frame(4, ts + 700_000, &doc(&m(other, &at("15:45"), &active))),
+    ];
+    std::fs::write(dir.join("a.oaf"), frames.concat()).unwrap();
+    let mut c = cfg(i64::MIN, i64::MAX);
+    c.retain_ms = 60_000;
+    let g = 0x1111_1111_2222_3333_4444_5555_5555_5555u128;
+    let mut held_before_sweep = false;
+    let rep = replay_sfdps(recordings_in(&dir).unwrap(), &c, &mut |_, p, avail| {
+        if avail < ts + 300_000 && p.get(g).is_some() {
+            held_before_sweep = true;
+        }
+    })
+    .unwrap();
+    assert!(
+        held_before_sweep,
+        "the position was held while the flight was"
+    );
+    assert_eq!(rep.removed_by_reason.iter().sum::<u64>(), 1);
+    assert!(rep.positions.get(g).is_none());
+    assert_eq!(rep.positions.refiled_at(g), None);
+    assert_eq!(rep.positions.refiled_len(), 0);
     let _ = std::fs::remove_dir_all(&dir);
 }

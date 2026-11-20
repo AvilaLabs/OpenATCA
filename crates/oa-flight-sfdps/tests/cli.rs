@@ -79,3 +79,33 @@ fn a_refusal_prints_the_drop_line_and_a_stop_at_to_counts_the_frames_the_merge_d
     assert!(o.status.success(), "{err}");
     assert!(err.contains("sealed-window rows dropped: 1"), "{err}");
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_file_that_cannot_be_opened_partway_through_the_list_keeps_the_count_of_the_files_read() {
+    const FROM: i64 = 1_795_132_800_000_000_000;
+    let xml =
+        r#"<?xml version="1.0"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0"/>"#;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("flight-open-fails");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // The first file holds one frame in the window; the second is listed and cannot be opened
+    // (no permission) once the first has been read.
+    let mut buf = vec![0u8; xml.len() + 64];
+    let n = oa_feed::encode_frame(&mut buf, 1, 0, 0, FROM, 0, xml.as_bytes()).unwrap();
+    std::fs::write(dir.join("a.oaf"), &buf[..n]).unwrap();
+    std::fs::write(dir.join("b.oaf"), b"x").unwrap();
+    std::fs::set_permissions(
+        dir.join("b.oaf"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+    // seal-allow: runs the built binary of this package on the test's own temp files
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-flight"))
+        .arg(&dir)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(err.contains("sealed-window rows dropped: 1"), "{err}");
+}
