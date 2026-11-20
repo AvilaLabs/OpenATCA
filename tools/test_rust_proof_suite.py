@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 95)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 95)
+        self.assertEqual(registry["expected_proof_count"], 96)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 96)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 86)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 87)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -98,10 +98,13 @@ class SuiteConfigurationTests(unittest.TestCase):
             "ca-predict-span",
             "ca-predict-ttl",
             "ca-unknown-altitude",
+            "ca-chord-d2",
         })
         for proof in ca.values():
             self.assertTrue(proof["enabled"] and not proof["experimental"])
-            self.assertTrue(proof["harness"].startswith("solve::proofs::"))
+            self.assertTrue(
+                proof["harness"].startswith(("solve::proofs::", "grid::proofs::"))
+            )
 
     def test_the_hypot_proofs_are_registered_in_oa_math(self):
         registry, errors = load_registry(REGISTRY_PATH)

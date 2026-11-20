@@ -53,6 +53,10 @@ pub struct CaState {
     pub(crate) scratch: Vec<CaTrack>,
     pub(crate) obs: Vec<CaTrack>,
     pub(crate) cos_lat: Vec<f64>,
+    /// Absolute tangent of each track's latitude (infinite at a pole).
+    pub(crate) tan_lat: Vec<f64>,
+    /// Unit vector of each track's position.
+    pub(crate) unit: Vec<[f64; 3]>,
     pub(crate) speed: Vec<f64>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) keys: Vec<u64>,
@@ -216,6 +220,8 @@ pub fn ca_new(cfg: &CaConfig) -> Result<CaState, &'static str> {
         scratch: table(cfg.max_tracks)?,
         obs: table(cfg.max_tracks)?,
         cos_lat: table(cfg.max_tracks)?,
+        tan_lat: table(cfg.max_tracks)?,
+        unit: table(cfg.max_tracks)?,
         speed: table(cfg.max_tracks)?,
         frames: table(cfg.max_tracks)?,
         keys: table(cfg.max_tracks)?,

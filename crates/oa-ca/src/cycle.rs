@@ -4,7 +4,7 @@
 use oa_geo::aeqd::{frame_new, project, try_frame_from_true_velocity_at};
 use oa_safety::net::{state_report, Area, NetId, NetReport, Reason, StateTable};
 
-use crate::grid::{exact_radius, grid_build, grid_scan, max_radius, R_MIN_M};
+use crate::grid::{exact_radius, grid_build, grid_scan, MAX_LAT_DEG};
 use crate::solve::{predict, Prediction, Vertical};
 use crate::state::{alert_push, AltRec, CaState, Cand};
 use crate::types::{
@@ -26,7 +26,7 @@ pub struct CycleOut {
     /// evaluated, rows over capacity, alerts and events lost to a full table), whether or not
     /// an input cause was present too.
     pub work_short: u64,
-    /// Rows or values left out or altered: bad, duplicate, above the latitude limit, with a
+    /// Rows or values left out or altered: bad, duplicate, above 85 degrees of latitude, with a
     /// radius held to the cap, or lost before reaching the cycle.
     pub input_short: u64,
 }
@@ -42,6 +42,7 @@ fn add(t: &mut CycleStats, s: &CycleStats) {
     t.r95_clamped += s.r95_clamped;
     t.grid_work += s.grid_work;
     t.tracks_unscanned += s.tracks_unscanned;
+    t.pairs_chord += s.pairs_chord;
     t.candidates += s.candidates;
     t.pairs_skipped_vertical += s.pairs_skipped_vertical;
     t.candidates_dropped += s.candidates_dropped;
@@ -511,17 +512,11 @@ pub fn ca_cycle(
     stats.rows_lost_upstream = core::mem::take(&mut st.lost_input);
     load(st, rows, &mut stats);
     grid_build(st);
-    // The flat test is a superset test up to this latitude for the largest radius of the cycle.
-    let dphi = max_radius(st) / R_MIN_M;
-    let lat_limit = if dphi > 0.0 {
-        oa_math::atan(0.02 / dphi).to_degrees()
-    } else {
-        90.0
-    };
+    // Rows above the latitude the cell search is shown for are used and counted.
     stats.rows_high_lat = st
         .obs
         .iter()
-        .filter(|o| o.lat_deg.abs() > lat_limit)
+        .filter(|o| o.lat_deg.abs() > MAX_LAT_DEG)
         .count() as u64;
     st.frames.clear();
     for k in 0..st.obs.len() {

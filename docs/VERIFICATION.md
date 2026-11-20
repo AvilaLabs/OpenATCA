@@ -221,6 +221,16 @@ disabled). They depend on the exactness of the Veltkamp-split products, a multip
 problem for the SAT solver, so the horizontal miss's finiteness rests on the documented, tested
 behaviour of `hypot` (OA-MATH-005), not on a proof.
 
+### Conflict alert: the grid's pair test (OA-CA-032, OA-CA-033)
+
+`ca-chord-d2` (`grid::proofs`, 5.6 s, 0.2 GB): the squared chord of two vectors with components in
+`[-1, 1]` is finite and not negative. Not proved, because CBMC did not finish within 10 minutes (the
+products of symbolic doubles again): that the chord is symmetric and zero for one point (in the same
+harness), and that the flat test's validity only narrows as a tangent or the radius grows. Not
+provable here: that the chord is never longer than the arc and that a valid flat test accepts every
+pair the exact projection does; both rest on the trigonometry of `oa_math`. All four are dense
+deterministic tests (`grid::tests`, `tests/ca.rs`).
+
 ## What the proofs do not cover
 
 * **Inputs beyond the bound.** A 25-octet item, a 4-octet CAT021 FSPEC, a 5-record ADS-B payload

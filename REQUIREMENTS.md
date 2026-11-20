@@ -5767,6 +5767,21 @@ configuration with no default; the crate's tests use synthetic values.
   through `main`, a usage error, a refusal and a failed run included (with N the count, 0 when nothing was
   read), through `oa_sealed::DropReport`; the count is also a line of `summary.txt`. A failure while the clip
   is being read still reports the rows dropped up to that point.
+- **OA-CA-032** A candidate pair is tested by the flat-earth separation only while that is a superset test
+  for the pair's own radius and latitudes (the larger tangent of the two latitudes times the radius at
+  most 0.02 of 6,356,752 m); otherwise by the chord between the two positions on the sphere, which has no
+  latitude limit and is never longer than the arc, and the pair is counted (`pairs_chord`, not a shortfall).
+  The cell search finds every pair within its radius up to 85 degrees of latitude, either hemisphere;
+  rows above 85 degrees are used, counted (`rows_high_lat`) and degrade the net (`InputMissing`). A 95 %
+  radius that is unusable or above the cap is held to the cap and counted (`r95_clamped`) as before; a
+  radius at the cap does not degrade the net. The largest radius of a cycle no longer limits the latitude
+  of any other pair.
+- **OA-CA-033** Proved (Kani, bounded): the squared chord of two vectors with components in [-1, 1] is finite
+  and not negative (`ca-chord-d2`, 5.6 s). Tested, not proved: the chord is symmetric and zero for one
+  point; the flat test's validity only narrows as a tangent or the radius grows (a proof of it did not finish
+  in ten minutes); the chord is never longer than the arc; where the flat test is valid it accepts every pair
+  the exact projection accepts (deterministic pairs at every latitude, `grid::tests`). The trigonometry is
+  outside what the harnesses reach.
 
 ## SWIM STDDS terminal data (oa-stdds)
 

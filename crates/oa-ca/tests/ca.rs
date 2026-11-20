@@ -1394,3 +1394,154 @@ fn a_log_too_large_to_allocate_is_an_error_not_an_abort() {
     assert!(event_log_new(usize::MAX).is_err());
     assert!(alert_log_new(4).is_ok() && event_log_new(4).is_ok());
 }
+
+/// A track at `(lat, lon)` degrees with a 95 % radius and a velocity, at 10,000 ft, level.
+fn at(addr: u32, lat: f64, lon: f64, ve: f32, vn: f32, r95: f32) -> CaTrack {
+    CaTrack {
+        lat_deg: lat,
+        lon_deg: lon,
+        addr,
+        vel_east_mps: ve,
+        vel_north_mps: vn,
+        r95_m: r95,
+        alt_ft: 10_000.0,
+        vrate_fpm: 0.0,
+        flags: 0,
+        ground: AIRBORNE,
+    }
+}
+
+/// The second track of a pair whose first is at `(lat, lon)`: the point of the circle of angular
+/// radius `th` about it farthest in longitude (the tangent point), east or west.
+fn tangent_point(lat: f64, lon: f64, th: f64, east: bool) -> (f64, f64) {
+    let p = lat.to_radians();
+    let lat2 = (p.sin() / th.cos()).asin().to_degrees();
+    let dl = (th.sin() / p.cos()).asin().to_degrees();
+    (lat2, lon + if east { dl } else { -dl })
+}
+
+// REQ: OA-CA-032
+#[test]
+fn the_grid_finds_a_pair_at_its_radius_in_every_direction_up_to_85_degrees_of_latitude() {
+    // The hardest pair for the cell search: at the reach of the pair, at the tangent point, where
+    // the longitude difference is greatest. Two aircraft at 300 m/s: a radius of 77 km.
+    for band_m in [10_000.0, 100_000.0, 1.0e6] {
+        let mut c = cfg();
+        c.grid_band_m = band_m;
+        let mut deg10 = -850i32;
+        while deg10 <= 850 {
+            let lat = f64::from(deg10) / 10.0;
+            let radius = 120.0 * 600.0 + 5000.0;
+            for east in [true, false] {
+                // An angular distance that puts the exact separation at the pair's radius.
+                let mut th = radius / 6_356_752.0;
+                let (mut lat2, mut lon2) = (0.0, 0.0);
+                for _ in 0..4 {
+                    (lat2, lon2) = tangent_point(lat.abs(), 10.0, th, east);
+                    if lat < 0.0 {
+                        lat2 = -lat2;
+                    }
+                    let (x, y) = oa_geo::aeqd::project(&frame_new(lat, 10.0), lat2, lon2);
+                    th *= radius / x.hypot(y);
+                }
+                let rows = [
+                    at(1, lat, 10.0, 300.0, 0.0, 0.0),
+                    at(2, lat2, lon2, -300.0, 0.0, 0.0),
+                ];
+                let mut r = rig_with(&c);
+                let out = step(&mut r, 0, &rows);
+                assert_eq!(out.stats.candidates, 1, "{lat} {east} {band_m}");
+                // The tangent point is poleward of the first track: past 85 it is a counted row, and
+                // is still found.
+                assert_eq!(out.stats.rows_high_lat, u64::from(lat2.abs() > 85.0));
+            }
+            deg10 += 5;
+        }
+    }
+}
+
+// REQ: OA-CA-032
+#[test]
+fn a_busy_scatter_at_high_latitude_with_a_capped_radius_is_evaluated_and_running() {
+    // 60 N, 70 N and 80 N: a track with the largest radius the cap allows used to set the
+    // latitude limit of the whole cycle (about 46 degrees for it) and degrade the net.
+    for (lat0, seed) in [(60.0, 3u64), (70.0, 4), (80.0, 5)] {
+        let mut s = seed;
+        let mut next = move || {
+            s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (s >> 33) as f64 / (1u64 << 31) as f64
+        };
+        let f = frame_new(lat0, 20.0);
+        let mut rows: Vec<CaTrack> = (0..200)
+            .map(|k| {
+                let (x, y) = ((next() - 0.5) * 300_000.0, (next() - 0.5) * 300_000.0);
+                let (lat, lon) = unproject(&f, x, y).unwrap();
+                let (ve, vn) = ((next() - 0.5) * 500.0, (next() - 0.5) * 500.0);
+                at(
+                    100 + k,
+                    lat,
+                    lon,
+                    ve as f32,
+                    vn as f32,
+                    (next() * 300.0) as f32,
+                )
+            })
+            .collect();
+        rows[7].r95_m = 20_000.0;
+        let mut fine = cfg();
+        fine.max_tracks = 256;
+        fine.max_candidates = 40_000;
+        let mut coarse = fine;
+        coarse.grid_band_m = 1.0e6;
+        let (mut a, mut b) = (rig_with(&fine), rig_with(&coarse));
+        let (oa, ob) = (step(&mut a, 0, &rows), step(&mut b, 0, &rows));
+        assert_eq!(oa.stats.candidates, ob.stats.candidates);
+        assert_eq!(ca_open(&a.st), ca_open(&b.st));
+        // The oracle: every pair whose exact separation is inside its radius is a candidate.
+        let mut inside = 0u64;
+        let sp = |t: &CaTrack| f64::from(t.vel_east_mps).hypot(f64::from(t.vel_north_mps));
+        for (i, p) in rows.iter().enumerate() {
+            for q in &rows[i + 1..] {
+                let (x, y) =
+                    oa_geo::aeqd::project(&frame_new(p.lat_deg, p.lon_deg), q.lat_deg, q.lon_deg);
+                let radius =
+                    120.0 * (sp(p) + sp(q)) + 5000.0 + f64::from(p.r95_m) + f64::from(q.r95_m);
+                inside += u64::from(x.hypot(y) <= radius);
+            }
+        }
+        assert!(
+            inside > 100 && oa.stats.candidates >= inside,
+            "{lat0} {inside}"
+        );
+        assert!(oa.stats.pairs_chord > 0, "{lat0}");
+        assert_eq!(oa.stats.rows_high_lat, 0);
+        assert_eq!(oa.stats.r95_clamped, 0);
+        assert_eq!(oa.report, NetReport::Running, "{lat0}");
+    }
+}
+
+// REQ: OA-CA-032
+#[test]
+fn rows_above_85_degrees_are_counted_and_the_net_is_degraded_for_input() {
+    let rows = [
+        at(1, 85.0, 10.0, 100.0, 0.0, 0.0),
+        at(2, 85.5, 10.0, 100.0, 0.0, 0.0),
+        at(3, -86.0, 10.0, 100.0, 0.0, 0.0),
+        at(4, 60.0, 10.0, 100.0, 0.0, 0.0),
+    ];
+    let mut r = rig();
+    let out = step(&mut r, 0, &rows);
+    assert_eq!(out.stats.rows_high_lat, 2);
+    assert_eq!(out.work_short, 0);
+    assert_eq!(out.input_short, 2);
+    assert_eq!(
+        out.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            area: oa_safety::net::Area::Whole,
+            count: 2
+        }
+    );
+}

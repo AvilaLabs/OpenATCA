@@ -358,10 +358,11 @@ pub fn summary_text(i: &SummaryInput) -> String {
         ),
         ("rows sharing an address (all left out)", t.rows_duplicate),
         ("rows over the track capacity", t.rows_over_capacity),
-        ("rows above the grid's latitude limit", t.rows_high_lat),
+        ("rows above 85 degrees of latitude", t.rows_high_lat),
         ("rows whose 95% radius was held to the cap", t.r95_clamped),
         ("grid work", t.grid_work),
         ("tracks the grid scan did not reach", t.tracks_unscanned),
+        ("pairs tested by the chord (no flat test)", t.pairs_chord),
         ("candidate pairs", t.candidates),
         (
             "pairs skipped: cannot converge vertically",

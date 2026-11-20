@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 95,
+  "expected_proof_count": 96,
   "proofs": [
     {
       "id": "output-append",
@@ -1562,6 +1562,21 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "ca-chord-d2",
+      "requirement": "OA-CA-033: the squared chord of two vectors with components in [-1, 1] is finite and not negative.",
+      "package": "oa-ca",
+      "harness": "grid::proofs::chord_d2_of_unit_vectors_is_finite_and_not_negative",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
       "memory_mib": 8192
     },
     {
