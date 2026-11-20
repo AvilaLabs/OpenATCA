@@ -560,7 +560,7 @@ fn nic_baro_is_the_last_byte_plus_one_and_a_clip_without_it_reads_as_absent() {
     assert_eq!(reports_row(&out, 0).unwrap().nic_baro, NONE_U8);
 }
 
-// REQ: OA-ADSB-160
+// REQ: OA-ADSB-173
 #[test]
 fn a_new_clip_is_ads3_an_old_clip_ads2_reads_without_nic_baro_and_an_old_magic_with_byte_79_set_is_reserved(
 ) {

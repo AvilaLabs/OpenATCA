@@ -2389,7 +2389,7 @@ frame of their feed has been fed (as the ADS-B table is).
   and applies the gzip ratio limit only above 1 MiB of output.
 - **OA-ADSB-160** `parse_iso` reads `YYYY-MM-DDTHH:MM:SSZ` to the exact Unix second and refuses an out-of-range
   month, day, hour, minute or second (a leap second 60 is the next minute) and any other shape.
-- **OA-ADSB-160** An `ADS3` payload (the magic the writer uses) carries NIC_baro in byte 79 as NIC_baro plus one (0
+- **OA-ADSB-173** An `ADS3` payload (the magic the writer uses) carries NIC_baro in byte 79 as NIC_baro plus one (0
   absent, 1 for 0, 2 for 1) and reads it back; a byte above 2 is counted as a reserved byte and NIC_baro is absent. An
   `ADS2` payload (an older clip) reads with NIC_baro absent, and a non-zero byte 79 under `ADS2` or `ADS1` is counted as a
   reserved byte and is never read as NIC_baro. A reader of `ADS1` and `ADS2` only refuses an `ADS3` payload by its magic.
