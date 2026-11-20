@@ -80,6 +80,9 @@ pub struct FloorStats {
     pub chart_absent: u64,
 }
 
+/// A lookup to make: its cache key, and the centre and radius of the query.
+type Lookup = ((i32, i32, u32), f64, f64, f64);
+
 /// One obstacle: latitude and longitude in 1e-7 degree, top in feet MSL.
 type Obstacle = (i32, i32, i32);
 
@@ -439,7 +442,7 @@ impl Floors {
 
     /// The cache key of a point and the query it stands for: the cell, the radius bucket, and the
     /// centre and radius the terrain and obstacle lookups are made at.
-    fn key_of(p: &SamplePoint) -> ((i32, i32, u32), f64, f64, f64) {
+    fn key_of(p: &SamplePoint) -> Lookup {
         let (lat, lon) = (f64::from(p.lat_e7) / 1e7, f64::from(p.lon_e7) / 1e7);
         let bucket = (f64::from(p.radius_m) / RADIUS_STEP_M).ceil().max(1.0);
         let key = (
@@ -459,7 +462,7 @@ impl Floors {
     /// the whole batch and not once for every time the points move on and back. The answers are
     /// the same as lookup by lookup (the cache is keyed by cell and radius bucket alone).
     pub fn prepare(&mut self, points: &[SamplePoint]) -> Result<(), String> {
-        let mut todo: Vec<((i32, i32, u32), f64, f64, f64)> = points
+        let mut todo: Vec<Lookup> = points
             .iter()
             .map(Self::key_of)
             .filter(|k| !self.cache.contains_key(&k.0))
