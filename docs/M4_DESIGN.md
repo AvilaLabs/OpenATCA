@@ -60,8 +60,9 @@ for tuning, and 20 to 22 November are sealed hold-out days, read only to score a
 Two more windows are scheduled, recording all five SCDS feeds (SFDPS, TFMS, TBFM, FNS and STDDS),
 and both end at a fixed time because the laptop's disk is the only storage:
 
-- **24 November 2026, 00:00Z to 24:00Z: a further sealed hold-out day.** It is sealed from the
-  start, with that day's ADS-B.
+- **24 November 2026, 00:00Z to 24:00Z: a development day.** It is the first day on which
+  terminal radar (STDDS), the flight data and ADS-B can all be read together, because the 20 to
+  22 November ADS-B days are sealed with the flight-data hold-out.
 - **30 November 05:00Z to 1 December 06:00Z: a flight day.** It covers a domestic flight whose
   phone GPS log gives one aircraft's position independently of every feed.
 
@@ -223,6 +224,8 @@ stated with every result.
 
 ## Questions decided by Connor
 
-1. **More flight data.** Decided by Connor 2026-11-20: two bounded windows, a sealed hold-out
-   day on 24 November and the 30 November flight day (section 1), rather than a continuous
-   capture.
+1. **More flight data.** Decided by Connor 2026-11-20: two bounded windows, a development day
+   on 24 November and the 30 November flight day (section 1), rather than a continuous capture.
+   The 24 November day was first planned as a further sealed day; Connor left the choice to me
+   and I made it a development day, since three sealed flight-data days already exist and no
+   unsealed day yet pairs terminal radar with ADS-B.
