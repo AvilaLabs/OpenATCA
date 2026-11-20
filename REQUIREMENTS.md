@@ -5281,8 +5281,8 @@ scope.
   and the working tree at run time is at that commit and clean. This gates which runs count as
   hold-out scores; it does not change what is computed.
 - **OA-TRK-389** The P-002 scorer scores every system, passthrough included, on the truth legs that contain
-  an aircraft's grid samples (the grid is the paired samples of ERAM's most-paired flight of the aircraft) and on no others; no system chooses its own
-  flight. The output prints each system's coverage under that rule and under the replaced per-system rule.
+  an aircraft's grid samples, and on no others; no system chooses its own flight (P-004). The grid is the
+  paired samples of the aircraft's most-paired ERAM flight. The output prints each system's coverage under that rule and under the replaced per-system rule.
 - **OA-TRK-390** The reacquired group is OpenATCA's rows within 10 s after an update row of the same address
   flagged `O_REACQUIRED`; ERAM and passthrough are shown on the same samples.
 - **OA-TRK-391** Every grid sample at which a system has no value is counted in exactly one class per system:
@@ -5301,8 +5301,8 @@ scope.
 - **OA-TRK-395** The scorer writes `p002.txt` and `samples.csv` to `.partial` names, flushes them and renames
   both (after the ledger line of a hold-out run, OA-TRK-399), only if neither final name exists; otherwise it refuses and writes nothing; a leftover `.partial` is
   reported. It prints the SFDPS loader notes, the replay hash and the ingest drop counts.
-- **OA-TRK-396** `--exclude-window <from ISO> <to ISO>` (repeatable, whole-nanosecond or whole-second ISO times)
-  removes every grid sample inside any window for all three systems alike, before any metric; each window and
+- **OA-TRK-396** On a development run, `--exclude-window <from ISO> <to ISO>` (repeatable, whole-nanosecond
+  or whole-second ISO times) removes every grid sample inside any window for all three systems alike, before any metric; each window and
   the number of samples it removed are printed and written to the `CLAIM` lines.
 - **OA-TRK-397** Each `CLAIM metric=` line carries `floor=0|1` and the three-way OpenATCA and passthrough
   values it was judged on (M4t on the share over all grid samples); `--combine` prints "AT REFERENCE FLOOR:
@@ -5318,7 +5318,8 @@ scope.
   written and flushed and before either is renamed; if the append fails the partials are deleted and the run
   fails, so a ledger line exists only when both result files were written.
 - **OA-TRK-400** OpenATCA's and ERAM's time offsets are fitted on the two-way common set, the passthrough's on
-  the three-way set.
+  the three-way set (P-008 §1).
+
 ## Shadow comparator (oa-shadow)
 
 A tool crate (`tools/oa-shadow`, class `shell`) that runs OpenATCA's tracker beside ERAM's published track
