@@ -107,8 +107,8 @@ pub struct Stats {
     pub shapes: Vec<ShapeCount>,
     /// Refused fields whose shape did not fit the table.
     pub shapes_overflow: u64,
-    /// TAIS tracks per flag (`pseudo`, `frozen`, `new`, `adsb`) as `[false, true]`.
-    pub tais_flags: [[u64; 2]; 4],
+    /// TAIS tracks per flag (`pseudo`, `frozen`, `new`, `adsb`, `coast`) as `[false, true]`.
+    pub tais_flags: [[u64; 2]; 5],
     /// TAIS records per latency bucket of `recSAFAReceiptTime - recSTARSTimestamp`.
     pub latency: [u64; LATENCY_BUCKETS],
     /// TAIS records lacking either time.
@@ -156,7 +156,7 @@ pub fn new_stats() -> Stats {
         smes_present_empty: [0; SMES_FIELD_COUNT],
         shapes: Vec::new(),
         shapes_overflow: 0,
-        tais_flags: [[0; 2]; 4],
+        tais_flags: [[0; 2]; 5],
         latency: [0; LATENCY_BUCKETS],
         latency_missing: 0,
         src_ids: Vec::new(),
@@ -295,6 +295,7 @@ impl Stats {
                 (TaisField::TrackFrozen, r.frozen),
                 (TaisField::TrackNew, r.is_new),
                 (TaisField::TrackAdsb, r.adsb),
+                (TaisField::TrackCoast, r.coast),
             ]
             .into_iter()
             .enumerate()

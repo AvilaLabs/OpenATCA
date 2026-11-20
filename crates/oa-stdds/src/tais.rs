@@ -79,10 +79,11 @@ pub enum TaisField {
     RecStarsSrcId,
     RecStarsTimestamp,
     RecSafaReceiptTime,
+    TrackCoast,
 }
 
 /// Number of [`TaisField`] values.
-pub const TAIS_FIELD_COUNT: usize = 36;
+pub const TAIS_FIELD_COUNT: usize = 37;
 
 /// Field names, in order; the element path below `record` with the unit where it has one.
 pub const TAIS_FIELD_NAMES: [&str; TAIS_FIELD_COUNT] = [
@@ -122,6 +123,7 @@ pub const TAIS_FIELD_NAMES: [&str; TAIS_FIELD_COUNT] = [
     "recSTARSSrcID",
     "recSTARSTimestamp",
     "recSAFAReceiptTime",
+    "track/coast",
 ];
 
 const ALT: Val = Val::Int {
@@ -288,6 +290,10 @@ const SPECS: [Spec; TAIS_FIELD_COUNT] = [
         path: &["recSAFAReceiptTime"],
         val: Val::TimeMs,
     },
+    Spec {
+        path: &["track", "coast"],
+        val: Val::Flag,
+    },
 ];
 
 /// The message-level fields, read with the same walker as a record's: `src`, the producing TRACON.
@@ -300,7 +306,7 @@ const ROOT_NAMES: [&str; 1] = ["src"];
 const ROOT_SKIP: [&[&str]; 1] = [&["record"]];
 
 /// Known elements that are deliberately not read (not counted as unknown).
-const SKIP: [&[&str]; 8] = [
+const SKIP: [&[&str]; 7] = [
     &["flightPlan", "scratchPad1"],
     &["flightPlan", "scratchPad2"],
     &["flightPlan", "delete"],
@@ -308,7 +314,6 @@ const SKIP: [&[&str]; 8] = [
     &["flightPlan", "rnav"],
     &["flightPlan", "equipmentSuffix"],
     &["enhancedData"],
-    &["track", "coast"],
 ];
 
 /// One `record`: a track and the flight plan it is associated with, in fixed units. A field is
@@ -366,10 +371,12 @@ pub struct TaisRecord {
     pub exit_fix: [u8; 8],
     pub plan_type: [u8; 8],
     pub plan_status: [u8; 16],
-    /// `track/pseudo`, `track/frozen`, `track/new`, `track/adsb` (`xs:boolean`); each meaningful
+    /// `track/pseudo`, `track/frozen`, `track/new`, `track/adsb`, `track/coast` (`xs:boolean`); each meaningful
     /// only if its bit is set in `present`. `adsb` is the candidate radar-only marker.
     pub pseudo: bool,
     pub frozen: bool,
+    /// `track/coast`: the position is dead-reckoned, not measured.
+    pub coast: bool,
     pub is_new: bool,
     pub adsb: bool,
     /// Record header `recType`, `recSrc` and `recSTARSSrcID`.
@@ -612,6 +619,7 @@ fn record(
         plan_status: word(&slots, TaisField::PlanStatus).unwrap_or([0; 16]),
         pseudo: int(&slots, TaisField::TrackPseudo) == Some(1),
         frozen: int(&slots, TaisField::TrackFrozen) == Some(1),
+        coast: int(&slots, TaisField::TrackCoast) == Some(1),
         is_new: int(&slots, TaisField::TrackNew) == Some(1),
         adsb: int(&slots, TaisField::TrackAdsb) == Some(1),
         rec_type: c(TaisField::RecType),

@@ -185,7 +185,7 @@ fn main() {
     }
     println!("refused shape overflow: {}", s.shapes_overflow);
     // Track flags are not identifying; their value histogram is printed.
-    for (name, c) in ["pseudo", "frozen", "new", "adsb"]
+    for (name, c) in ["pseudo", "frozen", "new", "adsb", "coast"]
         .iter()
         .zip(&s.tais_flags)
     {
