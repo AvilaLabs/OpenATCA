@@ -425,6 +425,15 @@ fn corridors_come_from_the_runway_end_and_the_final_approach_fix_of_its_approach
     assert!((k.corridor.far_half_width_m - 1852.0).abs() < 1e-6);
     assert_eq!(k.corridor.thr_elev_ft, 661);
     assert_eq!(k.corridor.faf_alt_ft, 2200);
+    // The procedure's own path: the angle of its runway-fix leg (-3.00) and the runway record's
+    // crossing height, from the CIFP; the strip keeps the defaults.
+    assert!(k.angle_from_cifp);
+    assert!((k.corridor.path_angle_deg - 3.0).abs() < 1e-9);
+    assert_eq!(k.tch_from_cifp, rwy.threshold_crossing_height_ft.is_some());
+    assert_eq!(
+        k.corridor.tch_ft,
+        rwy.threshold_crossing_height_ft.map_or(50, |t| t as i32)
+    );
     // The runway course is 045 magnetic with a 3 degree west variation: 042 true, so the
     // corridor runs out toward 222.
     assert!(
@@ -861,6 +870,15 @@ fn below_fl180_the_altitude_takes_the_nearest_fresh_station_and_the_rest_is_lowe
     assert!(!missing && a > 2200.0, "{a}");
     // No station within 200 NM (the one at 45 N is 300 NM away): lowered by the allowance and
     // counted as missing.
+    // The age of the observation behind a setting is the time from it to the end of the 300 s
+    // bucket, and none where there is no setting.
+    let age = q.setting_age_s(40.01, -88.0, T0).unwrap();
+    assert!((3600..=3900).contains(&age), "{age}");
+    assert_eq!(
+        Qnh::from_stations(vec![(45.0, -88.0, fresh.clone())], 100.0, 7200)
+            .setting_age_s(40.0, -88.0, T0),
+        None
+    );
     let mut far = Qnh::from_stations(vec![(45.0, -88.0, fresh)], 100.0, 7200);
     assert_eq!(far.datum_ft(40.0, -88.0, T0, 2000.0, 300), (1700.0, true));
     // At and above FL180 the standard setting is flown: no correction, no flag, whatever the data.
@@ -1120,6 +1138,12 @@ fn the_diagnosis_gives_the_altitude_radius_obstacle_and_terrain_sections_and_nam
     };
     assert!(parse(&argv(&["--diagnose"])).unwrap().diagnose);
     assert!(!parse(&argv(&[])).unwrap().diagnose);
+    assert_eq!(
+        parse(&argv(&["--landing-of", "old/alerts.csv"]))
+            .unwrap()
+            .landing_of,
+        Some("old/alerts.csv".to_string())
+    );
     assert!(parse(&argv(&["--diagnose", "--diagnose"])).is_err());
     let set = settings();
     let a = go(&approach(0xA1B2C3, true), &set, ridge_floors());
@@ -1134,6 +1158,8 @@ fn the_diagnosis_gives_the_altitude_radius_obstacle_and_terrain_sections_and_nam
         terrain_dir: None,
         airports: &[],
         sealed: oa_sealed::Sealed::production(),
+        corridors: &[],
+        qnh: None,
     });
     for k in [
         "1. the altitude judged",
@@ -1141,6 +1167,7 @@ fn the_diagnosis_gives_the_altitude_radius_obstacle_and_terrain_sections_and_nam
         "3. the obstacles",
         "4. the terrain-floor alerts",
         "5. what the predicted depth is made of",
+        "6. the landing zone",
         "dominant term over all 1 alerts",
     ] {
         assert!(t.contains(k), "{k}\n{t}");
@@ -1224,4 +1251,44 @@ fn alerts_of_one_track_20_s_apart_or_less_are_one_episode() {
     assert_eq!(episodes(&v, EPISODE_GAP_S), (3, 2));
     assert_eq!(episodes(&[], EPISODE_GAP_S), (0, 0));
     assert_eq!(episodes(&v, 0), (4, 2));
+}
+
+// REQ: OA-MSAW-076
+#[test]
+fn the_alerts_of_another_run_are_counted_in_the_landing_zone_by_this_runs_corridors() {
+    let c = fixture_cifp();
+    let a = corridors_from_cifp(&c, "KORD").unwrap();
+    let cfg = settings().msaw;
+    let strip = &a.corridors[1].corridor;
+    // A point on the strip, 500 m past its start, and one 100 km north.
+    let (lat, lon) = (
+        f64::from(strip.thr_lat_e7) / 1e7 + 0.0001,
+        f64::from(strip.thr_lon_e7) / 1e7 + 0.0001,
+    );
+    let dir = std::env::temp_dir().join(format!("oa-msaw-landing-of-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("alerts.csv");
+    std::fs::write(
+        &p,
+        format!(
+            "address_hex,worst_lat_deg,worst_lon_deg,worst_flags_raw\n0000A1,{lat:.5},{lon:.5},128\n0000A2,{:.5},{lon:.5},0\n",
+            lat + 1.0
+        ),
+    )
+    .unwrap();
+    let t = oa_msaw_run::run::landing_of(
+        oa_sealed::Sealed::production(),
+        p.to_str().unwrap(),
+        &a.corridors,
+        &cfg,
+    )
+    .unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(t.contains("alerts in alerts.csv: 2;"), "{t}");
+    assert!(
+        t.ends_with(
+            "last 1 NM of a capture box: 1; no altimeter setting in reach at the worst cycle: 1\n"
+        ),
+        "{t}"
+    );
 }

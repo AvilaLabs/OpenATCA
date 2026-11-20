@@ -169,11 +169,26 @@ impl Qnh {
             self.stats.cache_hits += 1;
             return v;
         }
+        let found = self.nearest_observation(key).map(|(hpa, _)| hpa);
+        self.cache.insert(key, found);
+        found
+    }
+
+    /// How old, seconds at the end of the time's bucket, the observation behind
+    /// [`Qnh::setting_hpa`] is; `None` where that has no setting. For the diagnosis.
+    pub fn setting_age_s(&self, lat: f64, lon: f64, t_s: i64) -> Option<i64> {
+        let key = (cell_of(lat), cell_of(lon), t_s.div_euclid(BUCKET_S));
+        self.nearest_observation(key).map(|(_, age)| age)
+    }
+
+    /// The setting of the nearest station within the radius with an observation within the age,
+    /// and that observation's age at the end of the bucket.
+    fn nearest_observation(&self, key: (i32, i32, i64)) -> Option<(f64, i64)> {
         let (clat, clon) = (
             (f64::from(key.0) + 0.5) * CELL_DEG,
             (f64::from(key.1) + 0.5) * CELL_DEG,
         );
-        let (start, end) = (bucket * BUCKET_S, (bucket + 1) * BUCKET_S);
+        let (start, end) = (key.2 * BUCKET_S, (key.2 + 1) * BUCKET_S);
         let cos = clat.to_radians().cos().max(0.01);
         let mut near: Vec<(f64, usize)> = Vec::new();
         for (i, s) in self.stations.iter().enumerate() {
@@ -185,7 +200,6 @@ impl Qnh {
             }
         }
         near.sort_by(|a, b| oa_math::cmp_canon_f64(a.0, b.0).then(a.1.cmp(&b.1)));
-        let mut found = None;
         for (_, i) in near {
             let Some(s) = self.stations.get(i) else {
                 continue;
@@ -193,13 +207,11 @@ impl Qnh {
             let upto = s.obs.partition_point(|&(o, _)| o <= start);
             if let Some(&(o, hpa)) = upto.checked_sub(1).and_then(|k| s.obs.get(k)) {
                 if end - o <= self.max_age_s {
-                    found = Some(hpa);
-                    break;
+                    return Some((hpa, end - o));
                 }
             }
         }
-        self.cache.insert(key, found);
-        found
+        None
     }
 
     /// The lowest altimeter setting reported within 200 NM in the 12 h before the time's bucket, hPa;

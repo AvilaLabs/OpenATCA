@@ -192,6 +192,21 @@ fn near_of(a: &Alert, airports: &[(String, f64, f64)]) -> Option<f64> {
 
 /// `alerts.csv`: one row per alert, sorted by start time then address, with the distance to the
 /// nearest airport that has an approach. It holds addresses and is not for publication.
+/// The corridor of the CIFP whose landing zone holds a point: the runway strip, or the last 1 NM of
+/// a capture box (where the clearance is nil). The one function that says which alerts are
+/// landing alerts, for every count of them.
+pub fn landing_corridor<'a>(
+    corridors: &'a [CifpCorridor],
+    lat_e7: i32,
+    lon_e7: i32,
+    cfg: &MsawConfig,
+) -> Option<&'a CifpCorridor> {
+    corridors.iter().find(|k| {
+        oa_msaw::corridor_hit_ft(&k.corridor, lat_e7, lon_e7, 0.0, cfg)
+            .is_some_and(|h| h.clearance_ft == 0)
+    })
+}
+
 pub fn alerts_csv(alerts: &[Alert], airports: &[(String, f64, f64)]) -> String {
     let rows: Vec<(Alert, Option<&str>)> = alerts.iter().map(|a| (*a, None)).collect();
     csv_of(&rows, airports)
@@ -207,7 +222,7 @@ pub fn alerts_csv_with_basis(rows: &[(Alert, Basis)], airports: &[(String, f64, 
 fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> String {
     let labelled = rows.iter().any(|r| r.1.is_some());
     let mut o = String::from(
-        "address_hex,start_s,end_s,caution_s,warning_s,peak,lat_deg,lon_deg,altitude_ft,vrate_fpm,speed_mps,nearest_approach_airport_nm,worst_margin_ft,worst_floor_ft,worst_floor_kind,ttv_min_s,cycles,flags,flags_raw,end_reason",
+        "address_hex,start_s,end_s,caution_s,warning_s,peak,lat_deg,lon_deg,altitude_ft,vrate_fpm,speed_mps,nearest_approach_airport_nm,worst_margin_ft,worst_floor_ft,worst_floor_kind,ttv_min_s,cycles,flags,flags_raw,end_reason,worst_lat_deg,worst_lon_deg,worst_flags_raw",
     );
     if labelled {
         o.push_str(",basis");
@@ -218,7 +233,7 @@ fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> St
     for (a, basis) in v {
         let _ = write!(
             o,
-            "{:08X},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{:08X},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{}",
             a.addr,
             secs(a.start_ns),
             secs(a.end_ns),
@@ -238,7 +253,10 @@ fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> St
             a.cycles,
             flags_text(a.flags),
             a.flags,
-            end_text(a.end_reason)
+            end_text(a.end_reason),
+            f64::from(a.worst_lat_e7) / 1e7,
+            f64::from(a.worst_lon_e7) / 1e7,
+            a.worst_flags
         );
         if let Some(b) = basis {
             let _ = write!(o, ",{b}");
@@ -566,12 +584,21 @@ pub fn summary_text(i: &SummaryInput) -> String {
         i.data.without_corridor.len(),
         i.data.airports.len()
     );
-    for c in i
+    let apps: Vec<&CifpCorridor> = i
         .data
         .cifp_corridors
         .iter()
         .filter(|c| c.kind == CK_APPROACH)
-    {
+        .collect();
+    let _ = writeln!(
+        o,
+        "approach surface from the procedure's own path (threshold crossing height over the threshold elevation, rising at the lowest published angle, less the allowance): angle from the CIFP {} of {} runway ends, crossing height from the CIFP {}, neither (3 degrees, 50 ft) {}",
+        apps.iter().filter(|c| c.angle_from_cifp).count(),
+        apps.len(),
+        apps.iter().filter(|c| c.tch_from_cifp).count(),
+        apps.iter().filter(|c| !c.angle_from_cifp && !c.tch_from_cifp).count()
+    );
+    for c in apps {
         let _ = writeln!(
             o,
             "  {}: {:.1} NM{}, threshold {} ft, fix {} ft, from {} approaches",
@@ -836,13 +863,20 @@ pub fn summary_text(i: &SummaryInput) -> String {
         ));
     }
     let _ = writeln!(o, "by phase: {}", phases.join("; "));
-    let in_final = |a: &Alert| {
-        i.data.cifp_corridors.iter().any(|k| {
-            oa_msaw::corridor_hit_ft(&k.corridor, a.worst_lat_e7, a.worst_lon_e7, 0.0, i.cfg)
-                .is_some_and(|h| h.clearance_ft == 0)
+    let landing: Vec<Alert> = i
+        .alerts
+        .iter()
+        .filter(|a| {
+            landing_corridor(
+                &i.data.cifp_corridors,
+                a.worst_lat_e7,
+                a.worst_lon_e7,
+                i.cfg,
+            )
+            .is_some()
         })
-    };
-    let landing: Vec<Alert> = i.alerts.iter().filter(|a| in_final(a)).copied().collect();
+        .copied()
+        .collect();
     let (leps, ltracks) = episodes(&landing, EPISODE_GAP_S);
     let _ = writeln!(
         o,

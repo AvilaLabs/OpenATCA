@@ -4,8 +4,10 @@
 //! For each runway end of an airport that has an instrument approach with a published altitude at
 //! its final approach fix, one corridor: the strip under the extended centreline from the landing
 //! threshold outward to the fix (5 NM when the fix cannot be placed or is farther), a constant
-//! half-width either side (legacy's capture box of 1 NM, FAA ARTS IIA A2.08), with the surface from the threshold elevation to
-//! the published fix altitude (the core takes the allowance off it). The fix is the leg whose
+//! half-width either side (legacy's capture box of 1 NM, FAA ARTS IIA A2.08), with the surface the
+//! procedure's own path: the runway's threshold crossing height over the threshold elevation at the
+//! lowest vertical angle its approaches publish (3 degrees and 50 ft where the CIFP gives none; the
+//! core takes the allowance off it). The fix is the leg whose
 //! fourth waypoint description code is `F`; its altitude is read as a floor (at, at or above,
 //! the lower bound of a between; an at-or-below altitude is a ceiling and is not one). Where a
 //! runway end has several approaches the one with the lowest fix altitude gives the corridor, so
@@ -52,6 +54,9 @@ pub const DEPARTURE_NM: f64 = 5.0;
 pub const RUNWAY_MARGIN_NM: f64 = 0.3;
 /// How far outside the threshold the strip along the runway begins, metres.
 const RUNWAY_OVERLAP_M: f64 = NM_M;
+/// The vertical path angle and threshold crossing height taken where the CIFP gives none.
+pub const DEFAULT_PATH_ANGLE_DEG: f64 = 3.0;
+pub const DEFAULT_TCH_FT: i32 = 50;
 /// The runway width taken where the CIFP gives none, feet.
 const DEFAULT_RUNWAY_WIDTH_FT: f64 = 200.0;
 const FT_M: f64 = 0.3048;
@@ -70,6 +75,10 @@ pub struct CifpCorridor {
     pub faf_from_cifp: bool,
     /// The approaches of the runway end that have a fix altitude.
     pub approaches: usize,
+    /// Whether the vertical path angle and the threshold crossing height of an approach corridor
+    /// came from the CIFP (else 3 degrees and 50 ft). False for the other kinds.
+    pub angle_from_cifp: bool,
+    pub tch_from_cifp: bool,
 }
 
 /// What [`corridors_from_cifp`] made and what it had to leave out. A7.2: cold struct.
@@ -206,11 +215,22 @@ pub fn corridors_from_cifp_with(
         // (altitude, distance from the threshold in metres if the fix can be placed).
         let mut found: Vec<(i32, Option<f64>)> = Vec::new();
         let mut any_approach = false;
+        // The lowest published vertical path angle among the approaches to this runway end.
+        let mut angle: Option<f64> = None;
         for p in procedures_at(c, airport, ProcedureKind::Approach) {
             if approach_runway(&p.ident).as_deref() != Some(designator) {
                 continue;
             }
             any_approach = true;
+            for a in p
+                .routes
+                .iter()
+                .flat_map(|rt| rt.legs.iter())
+                .filter_map(|l| l.vertical_angle_deg)
+                .filter(|a| a.is_finite() && *a < 0.0)
+            {
+                angle = Some(angle.map_or(-a, |b| b.min(-a)));
+            }
             let faf = p
                 .routes
                 .iter()
@@ -271,10 +291,16 @@ pub fn corridors_from_cifp_with(
                 thr_elev_ft,
                 faf_alt_ft,
                 land_from_m: 0.0,
+                path_angle_deg: angle.unwrap_or(DEFAULT_PATH_ANGLE_DEG),
+                tch_ft: r
+                    .threshold_crossing_height_ft
+                    .map_or(DEFAULT_TCH_FT, |t| t as i32),
             },
             faf_nm,
             faf_from_cifp,
             approaches: found.len(),
+            angle_from_cifp: angle.is_some(),
+            tch_from_cifp: r.threshold_crossing_height_ft.is_some(),
         });
     }
     add_runway_corridors(c, airport, &mut out);
@@ -369,10 +395,14 @@ fn add_runway_corridors(c: &Cifp, airport: &str, out: &mut CifpCorridors) {
                 thr_elev_ft: elev,
                 faf_alt_ft: elev,
                 land_from_m: RUNWAY_OVERLAP_M,
+                path_angle_deg: 3.0,
+                tch_ft: 50,
             },
             faf_nm: (run_m + RUNWAY_OVERLAP_M) / NM_M,
             faf_from_cifp: true,
             approaches: 0,
+            angle_from_cifp: false,
+            tch_from_cifp: false,
         });
         if !departs {
             continue;
@@ -392,10 +422,14 @@ fn add_runway_corridors(c: &Cifp, airport: &str, out: &mut CifpCorridors) {
                 thr_elev_ft: elev,
                 faf_alt_ft: elev,
                 land_from_m: 0.0,
+                path_angle_deg: 3.0,
+                tch_ft: 50,
             },
             faf_nm: DEPARTURE_NM,
             faf_from_cifp: true,
             approaches: 0,
+            angle_from_cifp: false,
+            tch_from_cifp: false,
         });
     }
 }

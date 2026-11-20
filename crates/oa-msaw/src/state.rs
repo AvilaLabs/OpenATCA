@@ -137,6 +137,13 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
         {
             return Err("corridor geometry");
         }
+        if !(p.path_angle_deg.is_finite()
+            && p.path_angle_deg > 0.0
+            && p.path_angle_deg <= 10.0
+            && (0..=MAX_CLEARANCE_FT).contains(&p.tch_ft))
+        {
+            return Err("corridor path");
+        }
         if !(-MAX_CLEARANCE_FT..=MAX_CLEARANCE_FT).contains(&p.thr_elev_ft)
             || !(-MAX_CLEARANCE_FT..=MAX_CLEARANCE_FT).contains(&p.faf_alt_ft)
         {

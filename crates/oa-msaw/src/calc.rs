@@ -187,10 +187,10 @@ fn alt_ceil_ft(x: f64) -> i32 {
 
 /// What corridor `c` says of a query circle at (`lat_e7`, `lon_e7`) of `radius_m`: `Some` only if
 /// the whole circle lies inside the corridor, then the corridor's clearance and its surface at
-/// the circle's far side along the centreline (the highest it reaches), rounded up. An approach
-/// surface is a straight line from the threshold elevation at the threshold to the published
-/// altitude at the fix lowered by the allowance at the far end; a runway surface is the threshold
-/// elevation; a departure corridor has none. The circle is inside when its centre is at least
+/// the circle's centre along the centreline, rounded up. An approach surface is the procedure's
+/// own path, the threshold crossing height over the threshold elevation rising at the published
+/// angle, lowered by the allowance; a runway surface is the threshold elevation; a departure
+/// corridor has none. The circle is inside when its centre is at least
 /// `radius_m` from every one of the four edges.
 pub fn corridor_hit_ft(
     c: &Corridor,
@@ -219,7 +219,6 @@ pub fn corridor_hit_ft(
     if side.is_nan() || side < radius_m {
         return None;
     }
-    let far = oa_math::min_f64(along + radius_m, c.length_m);
     Some(match c.kind {
         CK_DEPARTURE => CorridorHit {
             surface_ft: None,
@@ -239,13 +238,17 @@ pub fn corridor_hit_ft(
             },
         },
         _ => {
-            let top = f64::from(c.faf_alt_ft) - f64::from(cfg.approach_allowance_ft);
-            let base = f64::from(c.thr_elev_ft);
-            let surface = alt_ceil_ft(base + (top - base) * far / c.length_m);
+            // The procedure's own path: the threshold crossing height over the threshold elevation,
+            // rising at the published angle, less the allowance, at the centre of the circle (the allowance
+            // is the margin for the along-track uncertainty).
+            let slope = oa_math::tan(c.path_angle_deg * RAD_PER_DEG);
+            let path = f64::from(c.thr_elev_ft) + f64::from(c.tch_ft) + slope * along / FT_M
+                - f64::from(cfg.approach_allowance_ft);
+            let surface = alt_ceil_ft(path);
             if along + radius_m <= FINAL_ZONE_M {
-                // The last 1 NM of the box: as the strip, with the surface lowered by the allowance.
+                // The last 1 NM of the box: no clearance over terrain or obstacles.
                 CorridorHit {
-                    surface_ft: Some(surface.saturating_sub(cfg.approach_allowance_ft)),
+                    surface_ft: Some(surface),
                     clearance_ft: 0,
                     landing_elev_ft: None,
                 }
@@ -263,6 +266,8 @@ pub fn corridor_hit_ft(
 /// The last stretch of a capture box before the threshold, metres (1 NM), where the floor takes no
 /// clearance over terrain or obstacles.
 pub const FINAL_ZONE_M: f64 = 1852.0;
+/// Metres per foot.
+const FT_M: f64 = 0.3048;
 
 /// The union of two hits: the higher surface and the higher clearance.
 pub(crate) fn hit_union(a: Option<CorridorHit>, b: CorridorHit) -> CorridorHit {
@@ -451,6 +456,8 @@ mod proofs {
                 thr_elev_ft: 0,
                 faf_alt_ft: 0,
                 land_from_m: 0.0,
+                path_angle_deg: 3.0,
+                tch_ft: 50,
             }; MAX_CORRIDORS],
             n_corridors: 0,
         }

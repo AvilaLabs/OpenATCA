@@ -460,6 +460,8 @@ fn raise(
         worst_lon_e7: v.worst_at.1,
         worst_radius_m: v.worst_at.2,
         worst_k: v.worst_at.3,
+        worst_ns: t_ns,
+        worst_flags: flags,
         r95_m: tr.r95_m,
         vel_east_mps: tr.vel_east_mps,
         vel_north_mps: tr.vel_north_mps,
@@ -486,6 +488,8 @@ fn raise(
                     a.worst_lon_e7 = v.worst_at.1;
                     a.worst_radius_m = v.worst_at.2;
                     a.worst_k = v.worst_at.3;
+                    a.worst_ns = t_ns;
+                    a.worst_flags = flags;
                 }
                 if (ttv_s as f32) < a.ttv_min_s {
                     a.ttv_min_s = ttv_s as f32;

@@ -59,6 +59,8 @@ fn blank_corridor() -> Corridor {
         thr_elev_ft: 0,
         faf_alt_ft: 0,
         land_from_m: 0.0,
+        path_angle_deg: 3.0,
+        tch_ft: 50,
     }
 }
 
@@ -596,6 +598,8 @@ fn north_corridor() -> Corridor {
         thr_elev_ft: 600,
         faf_alt_ft: 2250,
         land_from_m: 0.0,
+        path_angle_deg: 3.0,
+        tch_ft: 50,
     }
 }
 
@@ -635,9 +639,9 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
             .round() as i32;
         corridor_hit_ft(&k, lat, lon, r, &c).map(|h| h.surface_ft.unwrap())
     };
-    // The surface runs from 600 ft at the threshold to 1,950 ft (2,250 less the allowance) at
-    // the far end, taken at the far side of the circle, rounded up.
-    assert_eq!(at(4630.0, 0.0, 100.0), Some(600 + 1350 * 4730 / 9260 + 1));
+    // The surface is the 3 degree path from 50 ft over the 600 ft threshold, less the 300 ft
+    // allowance, at the centre of the circle, rounded up.
+    assert_eq!(at(4630.0, 0.0, 100.0), Some(1147));
     // The whole circle inside: on the centreline at 2 NM with a 500 m circle.
     assert!(at(3704.0, 0.0, 500.0).is_some());
     // Straddling the threshold end, the far end or a side: none.
@@ -657,6 +661,8 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
     two.corridors[1] = Corridor {
         faf_alt_ft: 3250,
         land_from_m: 0.0,
+        path_angle_deg: 4.0,
+        tch_ft: 50,
         ..north_corridor()
     };
     two.n_corridors = 2;
@@ -792,6 +798,8 @@ fn guam_synthetic_an_early_descent_in_the_corridor_over_a_ridge_alerts() {
     let mut c = corridor_cfg();
     c.corridors[0].faf_alt_ft = 0;
     c.corridors[0].thr_elev_ft = 0;
+    c.corridors[0].tch_ft = 0;
+    c.corridors[0].path_angle_deg = 0.1;
     let mut r = rig(&c);
     for k in 0..=40 {
         cycle(&mut r, k * S, &[a(k)], &ridge_world(600, 700));
@@ -1360,6 +1368,8 @@ fn departure_corridor() -> Corridor {
         thr_elev_ft: 600,
         faf_alt_ft: 0,
         land_from_m: 0.0,
+        path_angle_deg: 3.0,
+        tch_ft: 50,
     }
 }
 
@@ -1470,6 +1480,8 @@ fn the_corridor_index_gives_the_answer_of_looking_at_every_corridor() {
             thr_elev_ft: (rnd() * 3000.0) as i32,
             faf_alt_ft: (rnd() * 6000.0) as i32,
             land_from_m: 0.0,
+            path_angle_deg: 3.0,
+            tch_ft: 50,
         };
     }
     c.n_corridors = 400;
@@ -1843,6 +1855,8 @@ fn runway_strip() -> Corridor {
         thr_elev_ft: 600,
         faf_alt_ft: 600,
         land_from_m: 1852.0,
+        path_angle_deg: 3.0,
+        tch_ft: 50,
     }
 }
 
@@ -1990,4 +2004,32 @@ fn an_explicit_area_clearance_is_a_lower_bound_inside_a_corridor_too() {
         floor_of(&resolved, surf(0), &c),
         Some((1100, FloorKind::Terrain))
     );
+}
+
+// REQ: OA-MSAW-075
+#[test]
+fn a_3_5_degree_approach_flown_on_its_path_does_not_alert() {
+    let mut c = landing_cfg();
+    c.corridors[0].path_angle_deg = 3.5;
+    let world = landing_world(FLOOR_NONE, 0.0);
+    // 6.1 ft per 100 m of the 3.5 degree path from 50 ft over the 600 ft threshold.
+    let on_path = |k: i64| {
+        let d = 9000.0 - 70.0 * k as f64;
+        let alt = 650.0 + d / 0.3048 * 0.061_164;
+        tr(77, south_m(d), -88.0, 0.0, 70.0, alt as f32, -840.0)
+    };
+    let mut r = rig(&c);
+    for k in 0..=100 {
+        let t = on_path(k);
+        if t.alt_ft < 600.0 {
+            break;
+        }
+        let o = cycle(&mut r, k * S, &[t], &world);
+        assert_eq!(o.stats.violations, 0, "cycle {k}");
+    }
+    // Flown on the steeper path against a surface taken at 3 degrees it would be above it too;
+    // flown on the 3 degree path against the 3.5 degree surface it alerts.
+    let mut r = rig(&c);
+    let o = cycle(&mut r, S, &[final_track(0, 6000.0, -250.0, -722.0)], &world);
+    assert_eq!(o.stats.violations, 1);
 }

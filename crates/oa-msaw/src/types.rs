@@ -169,9 +169,9 @@ pub const CK_DEPARTURE: u8 = 2;
 /// the runway ([`CK_RUNWAY`]) or out from its departure end ([`CK_DEPARTURE`]). Inside it (whole
 /// query circle) the floor is the higher of the corridor's surface, if it has one, and terrain and
 /// obstacles plus a clearance, and the chart altitude does not apply. A trapezoid: its half-width
-/// runs linearly from the threshold end to the far end. An approach surface rises from the
-/// threshold elevation to the published altitude of the fix; a runway surface is the threshold
-/// elevation.
+/// runs linearly from the threshold end to the far end. An approach surface is the procedure's own
+/// path (`tch_ft` over the threshold elevation at `path_angle_deg`); a runway surface is the
+/// threshold elevation.
 // A7.2: cold struct (adaptation), size guard waived. Held inline so that the configuration stays
 // `Copy` and allocates nothing (C1); there are at most `MAX_CORRIDORS`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -197,6 +197,11 @@ pub struct Corridor {
     /// strip may start before the threshold). A path that reaches the runway elevation beyond it is
     /// landing. Zero for the other kinds.
     pub land_from_m: f64,
+    /// For an approach corridor: the angle of the procedure's own vertical path, degrees, and the
+    /// height at which it crosses the threshold, feet above the threshold elevation. The surface
+    /// is that path less the allowance.
+    pub path_angle_deg: f64,
+    pub tch_ft: i32,
 }
 
 /// What the corridors say of a point: the surface of the highest corridor that holds it, if any
@@ -312,6 +317,9 @@ pub struct Alert {
     pub worst_radius_m: f32,
     /// The sample index of that point and the track's 95 % radius as given, metres.
     pub worst_k: u8,
+    /// The cycle time (Unix ns) and the `AF_` bits of the cycle that gave that worst margin.
+    pub worst_ns: i64,
+    pub worst_flags: u16,
     pub r95_m: f32,
     pub vel_east_mps: f32,
     pub vel_north_mps: f32,

@@ -126,6 +126,8 @@ pub struct Record {
     pub diag_cpu_s: f64,
     /// The floor lookups, kept for the diagnosis.
     pub floors: Floors,
+    /// The altimeter settings, kept for the diagnosis.
+    pub qnh: Option<Qnh>,
 }
 
 /// Wall time of the steady state, nanoseconds, by part. A7.2: cold struct, size guard waived.
@@ -551,7 +553,72 @@ pub fn track_and_alert(
         qnh_stats: f.qnh.as_ref().map(|q| q.stats),
         times: f.times,
         floors: f.floors,
+        qnh: f.qnh,
     })
+}
+
+/// For each of the `alerts.csv` files (comma-separated paths of other runs, with the columns
+/// `worst_lat_deg` and `worst_lon_deg`, and `worst_flags_raw` where it has it): how many alerts
+/// have their worst point in the landing zone, by the corridors of this run, and how many had no
+/// altimeter setting in reach at their worst cycle (the lowest-in-12-h setting or the allowance).
+pub fn landing_of(
+    g: &Sealed,
+    paths: &str,
+    corridors: &[CifpCorridor],
+    cfg: &oa_msaw::MsawConfig,
+) -> Result<String, String> {
+    let mut out = String::new();
+    for path in paths.split(',').map(Path::new) {
+        let mut text = String::new();
+        {
+            use std::io::Read as _;
+            opened(g, path)?
+                .read_to_string(&mut text)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        let mut lines = text.lines();
+        let head: Vec<&str> = lines.next().unwrap_or("").split(',').collect();
+        let col = |n: &str| head.iter().position(|h| *h == n);
+        let (Some(la), Some(lo)) = (col("worst_lat_deg"), col("worst_lon_deg")) else {
+            return Err(format!(
+                "{}: no worst_lat_deg and worst_lon_deg columns",
+                path.display()
+            ));
+        };
+        let fl = col("worst_flags_raw");
+        let (mut n, mut inside, mut no_setting) = (0usize, 0usize, 0usize);
+        for l in lines {
+            let f: Vec<&str> = l.split(',').collect();
+            let (Some(a), Some(b)) = (
+                f.get(la).and_then(|x| x.parse::<f64>().ok()),
+                f.get(lo).and_then(|x| x.parse::<f64>().ok()),
+            ) else {
+                continue;
+            };
+            n += 1;
+            let (lat, lon) = ((a * 1e7).round() as i32, (b * 1e7).round() as i32);
+            if crate::report::landing_corridor(corridors, lat, lon, cfg).is_some() {
+                inside += 1;
+            }
+            if let Some(flags) = fl
+                .and_then(|c| f.get(c))
+                .and_then(|x| x.parse::<u16>().ok())
+            {
+                no_setting += usize::from(flags & oa_msaw::AF_QNH_MISSING != 0);
+            }
+        }
+        out.push_str(&format!(
+            "alerts in {}: {n}; worst point in a runway strip or the last 1 NM of a capture box: {inside}{}\n",
+            path.file_name()
+                .map_or(String::new(), |s| s.to_string_lossy().into_owned()),
+            if fl.is_some() {
+                format!("; no altimeter setting in reach at the worst cycle: {no_setting}")
+            } else {
+                String::new()
+            }
+        ));
+    }
+    Ok(out)
 }
 
 /// The whole run: reads the clip, the configuration and the data, writes `alerts.csv`,
@@ -1017,8 +1084,14 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
             terrain_dir: args.terrain.as_deref(),
             airports: &apt_elev,
             sealed: g,
+            corridors: &used.cifp_corridors,
+            qnh: rec.qnh.as_mut(),
         });
         write_atomic(&args.out, "diagnosis.txt", &text)?;
+    }
+    if let Some(p) = &args.landing_of {
+        let text = landing_of(g, p, &used.cifp_corridors, &set.msaw)?;
+        write_atomic(&args.out, "landing_of.txt", &text)?;
     }
     for (file, text) in OUTPUTS.into_iter().zip([
         &csv,

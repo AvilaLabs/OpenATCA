@@ -11,8 +11,11 @@ use oa_msaw::{Alert, FloorKind, MsawConfig, AF_COAST, AF_QNH_MISSING, AF_UNCERTA
 use oa_sealed::Sealed;
 use oa_tiff::{grid_elevation_at, grid_max_in_radius, Elevation, Grid};
 
+use crate::cifp::CifpCorridor;
 use crate::floors::{read_tile, tile_name, Floors};
 use crate::guard::refuse_sealed;
+use crate::qnh::Qnh;
+use crate::report::landing_corridor;
 
 const FT_PER_M: f64 = 3.280_839_895;
 const M_PER_NM: f64 = 1852.0;
@@ -42,6 +45,9 @@ pub struct DiagIn<'a> {
     /// Airports of the CIFP with an approach: identifier, latitude, longitude, elevation in feet.
     pub airports: &'a [(String, f64, f64, i32)],
     pub sealed: &'a Sealed,
+    /// The corridors of the CIFP, and the altimeter settings, for the landing zone.
+    pub corridors: &'a [CifpCorridor],
+    pub qnh: Option<&'a mut Qnh>,
 }
 
 struct Tiles<'a> {
@@ -164,6 +170,7 @@ pub fn diagnosis_text(i: &mut DiagIn) -> String {
     obstacles(&mut o, i, &mut tiles);
     terrain(&mut o, i, &mut tiles);
     depth(&mut o, i);
+    landing(&mut o, i);
     o
 }
 
@@ -641,4 +648,304 @@ fn terrain(o: &mut String, i: &mut DiagIn, tiles: &mut Tiles) {
         i.cfg.terrain_clearance_ft,
         i.cfg.obstacle_clearance_ft
     );
+}
+
+/// The age of an altimeter setting under which it counts as recent, seconds.
+const QNH_RECENT_S: i64 = 1800;
+/// The look-back for the descent angle the aircraft is flying, seconds.
+const ANGLE_BACK_S: i64 = 30;
+
+/// The altimeter behind an alert's worst cycle.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Datum {
+    /// A station's setting no older than [`QNH_RECENT_S`] (the age bucket's end).
+    Recent,
+    Older,
+    /// The lowest setting of the last 12 h.
+    Fallback,
+    /// None at all: the allowance.
+    Allowance,
+    /// Not below FL180, or the setting was not asked.
+    Standard,
+}
+
+fn datum_of(a: &Alert, q: &mut Option<&mut Qnh>) -> Datum {
+    let Some(q) = q.as_deref_mut() else {
+        return Datum::Standard;
+    };
+    if a.worst_flags & AF_QNH_MISSING == 0 {
+        let (lat, lon) = (
+            f64::from(a.worst_lat_e7) / 1e7,
+            f64::from(a.worst_lon_e7) / 1e7,
+        );
+        let t_s = a.worst_ns.div_euclid(1_000_000_000);
+        return match q.setting_age_s(lat, lon, t_s) {
+            Some(age) if age <= QNH_RECENT_S => Datum::Recent,
+            Some(_) => Datum::Older,
+            None => Datum::Standard,
+        };
+    }
+    let (lat, lon) = (f64::from(a.lat_e7) / 1e7, f64::from(a.lon_e7) / 1e7);
+    if q.lowest_recent_hpa(lat, lon, a.worst_ns.div_euclid(1_000_000_000))
+        .is_some()
+    {
+        Datum::Fallback
+    } else {
+        Datum::Allowance
+    }
+}
+
+fn datum_name(d: Datum) -> &'static str {
+    match d {
+        Datum::Recent => "station within 30 min",
+        Datum::Older => "station older than 30 min",
+        Datum::Fallback => "lowest in 12 h",
+        Datum::Allowance => "allowance, no setting",
+        Datum::Standard => "standard or none needed",
+    }
+}
+
+/// Metres along the corridor's outward bearing from its start point, and across it.
+fn along_cross_m(k: &oa_msaw::Corridor, lat: f64, lon: f64) -> (f64, f64) {
+    let (tlat, tlon) = (f64::from(k.thr_lat_e7) / 1e7, f64::from(k.thr_lon_e7) / 1e7);
+    let (dy, dx) = (
+        (lat - tlat) * M_PER_DEG,
+        (lon - tlon) * M_PER_DEG * tlat.to_radians().cos(),
+    );
+    let b = k.out_bearing_deg.to_radians();
+    (dx * b.sin() + dy * b.cos(), dx * b.cos() - dy * b.sin())
+}
+
+/// The angle the aircraft flew down over the 30 s before the cycle, degrees (positive is
+/// descending), from the barometric altitudes of the rows and the speed of the alert.
+fn flown_angle_deg(a: &Alert, rows: &BTreeMap<u32, Vec<Row>>) -> Option<f64> {
+    let v = rows.get(&a.addr)?;
+    let t = a.worst_ns;
+    let from = t - ANGLE_BACK_S * 1_000_000_000;
+    let inside: Vec<&Row> = v
+        .iter()
+        .filter(|r| r.0 > from && r.0 <= t && r.1 > -2000 && r.1 < 60_000)
+        .collect();
+    let (first, last) = (inside.first()?, inside.last()?);
+    let dt = (last.0 - first.0) as f64 / 1e9;
+    if dt < 10.0 {
+        return None;
+    }
+    let speed = f64::from(a.vel_east_mps).hypot(f64::from(a.vel_north_mps));
+    let drop_m = f64::from(first.1 - last.1) / FT_PER_M;
+    Some((drop_m / (speed * dt).max(1.0)).atan().to_degrees())
+}
+
+/// The alerts whose worst point is in a runway strip or the last 1 NM of a capture box: how deep,
+/// what floor, how high and how far from the threshold the aircraft was at that point, the angle it
+/// was flying against the procedure's, the altimeter behind its altitude, and the time to
+/// violation. Item 4: how many of all the alerts used the lowest-in-12-h setting.
+fn landing(o: &mut String, i: &mut DiagIn) {
+    let _ = writeln!(
+        o,
+        "\n6. the landing zone (worst point in a runway strip or the last 1 NM of a capture box)"
+    );
+    let mut all = [0usize; 5];
+    let at = |all: &[usize; 5], d: Datum| all.get(d as usize).copied().unwrap_or(0);
+    for a in i.alerts {
+        let d = datum_of(a, &mut i.qnh);
+        if let Some(n) = all.get_mut(d as usize) {
+            *n += 1;
+        }
+    }
+    let _ = writeln!(
+        o,
+        "  all {} alerts, the altimeter behind the altitude at the worst cycle: station within 30 min {}, station older {}, lowest in 12 h (fallback) {}, allowance {}, standard or none needed {}",
+        i.alerts.len(),
+        at(&all, Datum::Recent),
+        at(&all, Datum::Older),
+        at(&all, Datum::Fallback),
+        at(&all, Datum::Allowance),
+        at(&all, Datum::Standard)
+    );
+    // (alert, corridor)
+    let mut rows: Vec<(Alert, &CifpCorridor)> = Vec::new();
+    for a in i.alerts {
+        if let Some(k) = landing_corridor(i.corridors, a.worst_lat_e7, a.worst_lon_e7, i.cfg) {
+            rows.push((*a, k));
+        }
+    }
+    let _ = writeln!(o, "  landing alerts: {}", rows.len());
+    if rows.is_empty() {
+        return;
+    }
+    struct R {
+        depth: f64,
+        kind: FloorKind,
+        floor: i32,
+        height: f64,
+        dist_nm: f64,
+        flown: Option<f64>,
+        published: Option<f64>,
+        datum: Datum,
+        stale: bool,
+        ttv: f64,
+        on_strip: bool,
+    }
+    let mut out: Vec<R> = Vec::new();
+    for (a, k) in &rows {
+        let (lat, lon) = (
+            f64::from(a.worst_lat_e7) / 1e7,
+            f64::from(a.worst_lon_e7) / 1e7,
+        );
+        let (along, _) = along_cross_m(&k.corridor, lat, lon);
+        let on_strip = k.kind == oa_msaw::CK_RUNWAY;
+        // Before the threshold is positive, past it negative.
+        let to_thr = if on_strip {
+            k.corridor.land_from_m - along
+        } else {
+            along
+        };
+        let judged = f64::from(a.worst_margin_ft) + f64::from(a.worst_floor_ft);
+        let published = if on_strip {
+            let label = k.label.trim_end_matches(" strip");
+            i.corridors
+                .iter()
+                .find(|x| x.kind == oa_msaw::CK_APPROACH && x.label == label)
+                .map(|x| x.corridor.path_angle_deg)
+        } else {
+            Some(k.corridor.path_angle_deg)
+        };
+        out.push(R {
+            depth: -f64::from(a.worst_margin_ft),
+            kind: a.worst_kind,
+            floor: a.worst_floor_ft,
+            height: judged - f64::from(k.corridor.thr_elev_ft),
+            dist_nm: to_thr / M_PER_NM,
+            flown: flown_angle_deg(a, i.rows),
+            published,
+            datum: datum_of(a, &mut i.qnh),
+            stale: a.worst_flags & oa_msaw::AF_STALE_EXTRAPOLATED != 0,
+            ttv: f64::from(a.ttv_min_s),
+            on_strip,
+        });
+    }
+    let col = |f: &dyn Fn(&R) -> f64| out.iter().map(f).collect::<Vec<_>>();
+    let _ = writeln!(
+        o,
+        "  in the runway strip {}, in a capture box's last mile {}",
+        out.iter().filter(|r| r.on_strip).count(),
+        out.iter().filter(|r| !r.on_strip).count()
+    );
+    let _ = writeln!(
+        o,
+        "  depth below the floor, ft: {}",
+        buckets(
+            &col(&|r| r.depth),
+            &[25.0, 50.0, 100.0, 200.0, 500.0],
+            " ft"
+        )
+    );
+    let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
+    for r in &out {
+        *kinds.entry(crate::report::kind_text(r.kind)).or_default() += 1;
+    }
+    let _ = writeln!(o, "  floor kind: {kinds:?}");
+    let _ = writeln!(
+        o,
+        "  height above the threshold at the worst point, ft: {}",
+        buckets(
+            &col(&|r| r.height),
+            &[0.0, 50.0, 100.0, 200.0, 500.0, 1000.0],
+            " ft"
+        )
+    );
+    let _ = writeln!(
+        o,
+        "  distance before the threshold at the worst point (negative: past it), NM: {}",
+        buckets(
+            &col(&|r| r.dist_nm),
+            &[-1.0, 0.0, 0.25, 0.5, 1.0, 2.0],
+            " NM"
+        )
+    );
+    let flown: Vec<f64> = out.iter().filter_map(|r| r.flown).collect();
+    let _ = writeln!(
+        o,
+        "  angle flown over the last 30 s, degrees ({} of {} have two rows 10 s or more apart): {}",
+        flown.len(),
+        out.len(),
+        buckets(&flown, &[0.0, 1.0, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0], " deg")
+    );
+    let gap: Vec<f64> = out
+        .iter()
+        .filter_map(|r| Some(r.flown? - r.published?))
+        .collect();
+    let _ = writeln!(
+        o,
+        "  angle flown less the procedure's angle, degrees: {}",
+        buckets(&gap, &[-3.0, -1.0, -0.5, 0.0, 0.5, 1.0], " deg")
+    );
+    let mut dat: BTreeMap<&str, usize> = BTreeMap::new();
+    for r in &out {
+        *dat.entry(datum_name(r.datum)).or_default() += 1;
+    }
+    let _ = writeln!(
+        o,
+        "  altimeter at the worst cycle: {dat:?}; stale-extrapolated at the worst cycle {}",
+        out.iter().filter(|r| r.stale).count()
+    );
+    let _ = writeln!(
+        o,
+        "  time to violation, s: {}",
+        buckets(&col(&|r| r.ttv), &[0.5, 5.0, 10.0, 15.0], " s")
+    );
+    // The obstacle behind an obstacle floor: how tall, how far from the worst point, and whether a
+    // lookup of the point alone (not the circle) would still put the aircraft below it.
+    if let Some(d) = i.dof {
+        let (mut agl, mut dist, mut still, mut n) = (Vec::new(), Vec::new(), 0usize, 0usize);
+        for (a, _) in &rows {
+            if a.worst_kind != FloorKind::Obstacle {
+                continue;
+            }
+            let (lat, lon) = (
+                f64::from(a.worst_lat_e7) / 1e7,
+                f64::from(a.worst_lon_e7) / 1e7,
+            );
+            let eff = Floors::effective_radius_m(f64::from(a.worst_radius_m));
+            if let Some((_, rec, dpt)) = i.floors.obstacle_record_within(lat, lon, eff) {
+                n += 1;
+                agl.push(f64::from(d.agl_ft.get(rec as usize).copied().unwrap_or(0)));
+                dist.push(dpt);
+            }
+            let judged = f64::from(a.worst_margin_ft) + f64::from(a.worst_floor_ft);
+            if i.floors
+                .obstacle_record_within(lat, lon, POINT_M)
+                .is_some_and(|x| judged < f64::from(x.0))
+            {
+                still += 1;
+            }
+        }
+        let _ = writeln!(
+            o,
+            "  the {n} obstacle floors: height above ground of the obstacle {}; distance from the worst point to it {}; with a lookup of the point alone ({POINT_M} m) {still} would still be below an obstacle top",
+            buckets(&agl, &[20.0, 50.0, 100.0, 200.0], " ft"),
+            buckets(&dist, &[100.0, 250.0, 500.0, 1000.0], " m")
+        );
+    }
+    let _ = writeln!(o, "  10 alerts spread through the depth order (depth ft; floor kind; floor ft; height above the threshold ft; distance before the threshold NM; angle flown deg; procedure's angle deg; altimeter; time to violation s):");
+    out.sort_by(|a, b| oa_math::cmp_canon_f64(a.depth, b.depth));
+    for n in 0..10usize {
+        let Some(r) = out.get(n * out.len() / 10) else {
+            break;
+        };
+        let _ = writeln!(
+            o,
+            "    {:.0}; {}; {}; {:.0}; {:.2}; {}; {}; {}; {:.1}",
+            r.depth,
+            crate::report::kind_text(r.kind),
+            r.floor,
+            r.height,
+            r.dist_nm,
+            r.flown.map_or("n/a".to_string(), |x| format!("{x:.1}")),
+            r.published.map_or("n/a".to_string(), |x| format!("{x:.1}")),
+            datum_name(r.datum),
+            r.ttv
+        );
+    }
 }

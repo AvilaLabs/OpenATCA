@@ -1,10 +1,10 @@
 //! The command line:
 //! `oa-msaw --adsb <clip.oaf> --config <file> --out <dir> [--terrain <dir>] [--dof <zip|dat>]
-//! [--mva <dir>] [--cifp <file>] [--metar <dir>] [--sfdps <dir>] [--from-s <n> --to-s <n>] [--scorer-half] [--diagnose]`.
+//! [--mva <dir>] [--cifp <file>] [--metar <dir>] [--sfdps <dir>] [--from-s <n> --to-s <n>] [--scorer-half] [--diagnose] [--landing-of <alerts.csv>]`.
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: oa-msaw --adsb <clip.oaf> --config <file.cfg> --out <dir> [--terrain <3dep dir>] [--dof <DOF zip or DOF.DAT>] [--mva <dir>] [--cifp <FAACIFP18 or the CIFP zip>] [--metar <dir of metar_NNz_hours1.json>] [--sfdps <recording dir>] [--from-s <n> --to-s <n>] [--scorer-half] [--diagnose]";
+pub const USAGE: &str = "usage: oa-msaw --adsb <clip.oaf> --config <file.cfg> --out <dir> [--terrain <3dep dir>] [--dof <DOF zip or DOF.DAT>] [--mva <dir>] [--cifp <FAACIFP18 or the CIFP zip>] [--metar <dir of metar_NNz_hours1.json>] [--sfdps <recording dir>] [--from-s <n> --to-s <n>] [--scorer-half] [--diagnose] [--landing-of <alerts.csv of another run>]";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived
@@ -38,6 +38,9 @@ pub struct Args {
     /// Also write `diagnosis.txt`: the altitude, radius, obstacle and terrain behind the alerts
     /// (numbers only, no aircraft named).
     pub diagnose: bool,
+    /// The `alerts.csv` of other runs, comma-separated: how many of their alerts have their worst point in the
+    /// landing zone, by the same corridors and geometry, written to `landing_of.txt`.
+    pub landing_of: Option<String>,
 }
 
 fn seconds(flag: &str, v: &str) -> Result<f64, String> {
@@ -54,11 +57,11 @@ fn seconds(flag: &str, v: &str) -> Result<f64, String> {
 /// Parses the arguments after the program name. A flag value that starts with `--` is a missing
 /// value; a repeated flag, an unknown flag and a missing flag are errors.
 pub fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut paths: [Option<PathBuf>; 9] = Default::default();
+    let mut paths: [Option<PathBuf>; 10] = Default::default();
     let (mut from, mut to): (Option<f64>, Option<f64>) = (None, None);
     let mut scorer_half = false;
     let mut diagnose = false;
-    const NAMES: [&str; 9] = [
+    const NAMES: [&str; 10] = [
         "--adsb",
         "--config",
         "--out",
@@ -68,6 +71,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         "--cifp",
         "--metar",
         "--sfdps",
+        "--landing-of",
     ];
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -121,7 +125,8 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         (Some(_), Some(_)) => return Err("--from-s must be less than --to-s".to_string()),
         _ => return Err("--from-s and --to-s go together".to_string()),
     };
-    let [adsb, config, out, terrain, dof, mva, cifp, metar, sfdps] = paths;
+    let [adsb, config, out, terrain, dof, mva, cifp, metar, sfdps, landing_of] = paths;
+    let landing_of = landing_of.map(|p| p.to_string_lossy().into_owned());
     match (adsb, config, out) {
         (Some(adsb), Some(config), Some(out)) => Ok(Args {
             adsb,
@@ -136,6 +141,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             window_s,
             scorer_half,
             diagnose,
+            landing_of,
         }),
         _ => Err("--adsb, --config and --out are all required".to_string()),
     }

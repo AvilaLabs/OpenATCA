@@ -172,6 +172,7 @@ fn a_clip_that_fails_after_rows_were_dropped_still_reports_the_true_count() {
         window_s: None,
         scorer_half: false,
         diagnose: false,
+        landing_of: None,
     };
     let open: oa_bench::input::Opener =
         Rc::new(move |_| Ok(Box::new(Damaged(Cursor::new(bytes.clone()))) as Box<dyn Read>));

@@ -261,6 +261,8 @@ fn corridor(v: &str) -> Result<Corridor, String> {
         thr_elev_ft: feet("corridor thr_elev_ft", thr_elev)?,
         faf_alt_ft: feet("corridor faf_alt_ft", faf_alt)?,
         land_from_m: 0.0,
+        path_angle_deg: 3.0,
+        tch_ft: 50,
     })
 }
 
@@ -426,6 +428,8 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         thr_elev_ft: 0,
         faf_alt_ft: 0,
         land_from_m: 0.0,
+        path_angle_deg: 3.0,
+        tch_ft: 50,
     }; MAX_CORRIDORS];
     for (slot, v) in list.iter_mut().zip(procs.iter()) {
         *slot = corridor(v)?;

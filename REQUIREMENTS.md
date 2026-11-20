@@ -6585,8 +6585,8 @@ FAA value.
   absent where any sample is missing or nodata; obstacles are the highest top within the circle; the chart is
   the highest FUS3, FUS5 or TAV altitude of the sectors containing the point and absent outside them all.
 - **OA-MSAW-034** A runway end with an approach gets a corridor from its threshold to the final approach fix
-  (5 NM if the CIFP does not place it), a capture box of constant half-width `approach_half_width_nm` (1 NM), from
-  the threshold elevation to the lowest fix altitude its approaches publish; an airport the file lacks is an error.
+  (5 NM if the CIFP does not place it), a capture box of constant half-width `approach_half_width_nm` (1 NM), with
+  the lowest fix altitude its approaches publish; an airport the file lacks is an error.
 - **OA-MSAW-035** The output files are written whole or not at all and a failed run leaves none of an earlier run's.
 - **OA-MSAW-036** Clip rows in a sealed window are dropped and counted, and the count is printed once on every exit.
 - **OA-MSAW-037** Synthetic Guam case through the tracker: the early descent alerts at caution and then warning.
@@ -6660,6 +6660,12 @@ FAA value.
 - **OA-MSAW-073** A point outside the obstacle file's extent has no obstacle data: counted as without coverage.
 - **OA-MSAW-074** Tracks on the ground are listed per track; an altitude with no barometric measurement behind it is
   no altitude, and is counted apart.
+- **OA-MSAW-075** An approach corridor's surface is its procedure's own path: the threshold crossing height over the
+  threshold elevation rising at the lowest published vertical angle of the runway end, less `approach_allowance_ft`,
+  at the circle's centre; where the CIFP gives neither, 3 degrees and 50 ft, and the runways so are counted.
+- **OA-MSAW-076** `--landing-of <alerts.csv>` counts the alerts of another run whose worst point is in the landing
+  zone, by the corridors and geometry of this run; the diagnosis gives the landing alerts' depth, floor, height and
+  distance, flown angle and altimeter, and how many alerts used the lowest-in-12-h setting.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.
 ## Runway geometry and occupancy (oa-runway)
