@@ -6432,6 +6432,70 @@ configuration with no default; the crate's tests use synthetic values.
   suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
   ratio is outside 0.8 to 1.25.
 
+## Runway geometry and occupancy (oa-runway)
+
+- **OA-RWY-001** An airport's local east-north plane is a tangent plane about its reference point with the WGS-84
+  local scales and a curvature term. It is defined on the disc within 20 km of the origin, for an origin up to 80
+  degrees of latitude; a point outside the disc, a non-finite point or an origin outside those limits gives no
+  position. On the disc a point's distance from the origin differs from the geodesic distance by at most 1.5 m, the
+  plane error bound: test `plane_error_against_geodesic_is_within_the_stated_bound`, 11 latitudes to 80 degrees, 72
+  bearings, out to the edge (worst 1.05 m, at 80 degrees and 20 km). The distance between two points on the disc
+  differs from the geodesic by at most twice the bound: test
+  `plane_distance_between_two_points_against_geodesic_is_within_twice_the_bound`, 2,800 random pairs (worst 1.90 m).
+  These are measured bounds on the cases tested, not proved ones.
+- **OA-RWY-002** A runway is built from the published length, width, alignment, end coordinates, displaced-threshold
+  coordinates and declared distances. It keeps each physical end and each landing threshold apart, and the rectangle is
+  the one between the physical ends at the published width (tests on KMDW 04L/22R, displaced at both ends, and on KAUS
+  18L/36R and KSFO 10L/28R, from the NASR 2026-10-29 values).
+- **OA-RWY-003** Per OA-ASP-067, an end with a displacement and no NASR displaced coordinate takes its landing
+  threshold from the CIFP record and is marked as such; with no CIFP threshold the runway is refused. Where NASR has
+  no end coordinate, the CIFP threshold is taken as the physical end only when the published displacement is exactly
+  zero; with an unknown displacement the runway is refused. An end with both a NASR displaced coordinate and a CIFP
+  threshold is refused when they lie more than 30 m apart, because one of them is wrong and nothing here can tell which.
+- **OA-RWY-004** A runway is refused, and counted under its own one of 16 reasons, when its width is missing, zero or
+  over 500 ft, its length is missing, an end name is bad, a displacement is negative or not finite, a physical end or
+  landing threshold is missing, a displaced coordinate has no displacement length to check it against, a coordinate is
+  invalid or outside the plane, or the ends are under 1 m apart. Nothing is guessed.
+- **OA-RWY-005** A runway is refused when the published length and the distance between the physical ends differ by
+  more than 60 m, the published alignment and the azimuth between the ends by more than 2 degrees, a published
+  displacement and the measured one by more than 30 m, or a threshold lies more than 15 m off the line between the
+  ends or outside the runway (tests include a threshold past the far end, and one 25 m behind the near end).
+- **OA-RWY-006** The occupancy regions are the rectangle, an approach area for each end measured outward from the
+  landing threshold (1,500 m long, 100 m wider than the runway on each side) and a departure area beyond each physical
+  end (1,000 m long, 50 m wider on each side). These dimensions are development values, not FAA values. The test
+  `every_edge_of_every_region_at_the_interval_ends` probes each of the four edges of all five regions on the edge,
+  inside, and outside by the margin and just past it, and the KMDW test checks the hand-worked interval ends.
+- **OA-RWY-007** `occupies` reports whether a target touches the rectangle, either approach area or either departure
+  area, with its position widened by its 95 % radius plus the 1.5 m plane error bound and a 1e-6 m rounding pad. A
+  non-finite or negative position or radius, a coordinate beyond 1e9 m, or a runway with any non-finite number,
+  counts as occupying every region and is marked unknown. Every comparison is written so that a NaN reads as
+  touching. Tests `unknown_position_or_radius_occupies_everything`, `a_runway_with_a_non_finite_number_never_clears_a_target`
+  (nine fields) and `real_coordinates_run_end_to_end_through_the_plane_and_the_test` (KMDW, from latitude and
+  longitude).
+- **OA-RWY-008** Raising the radius never removes a region from the result (test `a_larger_radius_only_adds_occupancy`,
+  a sweep of radii at six positions). For the whole of `occupies` this is tested, not proved; OA-RWY-009 proves it
+  for the one-region test underneath.
+- **OA-RWY-009** For every region box and every coordinate pair within 1e9 m, and finite radii 0 <= r1 <= r2, the
+  one-region test `in_box`, which every occupancy flag uses, is true at r2 whenever it is true at r1; the runway-axis
+  coordinates do not depend on the radius. Proved with Kani (`occupancy_is_monotone_in_r95`, with `kani::cover!` that
+  gaining a region is reachable). A proof through `occupies` with a symbolic runway did not finish in the time budget.
+- **OA-RWY-010** For every runway, every non-finite, negative or beyond-1e9 m position or radius occupies every region
+  and is marked unknown (Kani `non_finite_input_occupies`), and for every runway with any non-finite number, every
+  position and radius does too (Kani `non_finite_runway_occupies`).
+- **OA-RWY-011** For every runway of the kind `build_runway` makes and every finite radius of at least zero, a target
+  whose coordinates in the runway axes lie inside the rectangle touches it. Proved with Kani
+  (`point_in_rectangle_occupies`); the rotation from the plane into the runway axes is covered by the unit tests, not
+  the proof.
+- **OA-RWY-012** For every runway of the kind `build_runway` makes (finite geometry within 1e9 m, axis components
+  within [-1, 1]) and every position and radius, any `f64` bit pattern included, `occupies` returns without panic,
+  and for a known position the coordinates in the runway axes are finite and under 1e10 m. Proved with Kani
+  (`occupies_never_panics`). The proof checks panics and those assertions; it does not run a separate float-overflow
+  check.
+- **OA-RWY-013** For every plane scale `plane_new` can produce, the conversion from degrees gives no position for a
+  non-finite input, and any position it gives is finite and within 20 km on each axis. Proved with Kani
+  (`local_plane_is_bounded`). The disc limit itself (east squared plus north squared within the extent squared) is
+  tested, not proved.
+
 ## Feed damage check (oa-feed-gaps, P-006 section 6 and P-007)
 
 - **OA-GAP-001** An interval between consecutive times of a feed over 600 s is an excluded interval (P-007), not damage by itself; exactly 600 s is not over.

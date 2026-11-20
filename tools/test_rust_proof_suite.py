@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 95)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 95)
+        self.assertEqual(registry["expected_proof_count"], 101)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 101)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 86)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 92)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -78,6 +78,21 @@ class SuiteConfigurationTests(unittest.TestCase):
         for proof in safety.values():
             self.assertTrue(proof["enabled"] and not proof["experimental"])
             self.assertTrue(proof["harness"].startswith("inhibit::proofs::"))
+
+    def test_the_runway_occupancy_proofs_are_registered_with_their_covers(self):
+        registry, errors = load_registry(REGISTRY_PATH)
+        self.assertEqual(errors, [])
+        runway = {p["id"]: p for p in registry["proofs"] if p["package"] == "oa-runway"}
+        self.assertEqual(set(runway), {
+            "runway-occupancy-monotone", "runway-non-finite-occupies", "runway-inside-occupies",
+            "runway-occupies-total", "runway-plane-bounded",
+            "runway-non-finite-runway-occupies",
+        })
+        for proof in runway.values():
+            self.assertTrue(proof["enabled"] and not proof["experimental"])
+            self.assertTrue(proof["harness"].startswith("occupy::proofs::"))
+            self.assertTrue(proof["required_covers"])
+            self.assertTrue(proof["requirement"].startswith("OA-RWY-"))
 
     def test_the_conflict_alert_solver_proofs_are_registered(self):
         registry, errors = load_registry(REGISTRY_PATH)
