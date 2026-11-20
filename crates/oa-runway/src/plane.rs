@@ -12,8 +12,8 @@
 //! conversion itself is a few multiplications and no library call, so a Kani proof can cover it
 //! ([`crate::occupy`]); the scales are found once, in [`plane_new`], with `oa_math`.
 //!
-//! Extent and error: the plane is defined for points within [`EXTENT_M`] of the origin, in both
-//! axes, and [`to_local`] refuses (returns `None` for) any point past it. Within the extent and
+//! Extent and error: the plane is defined for points within [`EXTENT_M`] of the origin (a disc),
+//! and [`to_local`] refuses (returns `None` for) any point past it. Within the extent and
 //! for an origin up to [`MAX_ORIGIN_LAT_DEG`], the distance from the origin the plane gives
 //! differs from the WGS-84 geodesic distance by at most [`PLANE_ERROR_BOUND_M`]; the test
 //! `plane_error_against_geodesic_is_within_the_stated_bound` checks that over a grid of origins
@@ -21,7 +21,7 @@
 
 use oa_geo::wgs84;
 
-/// Half the side of the square the plane covers, metres. Our own choice: it holds a runway, its
+/// The radius of the disc the plane covers, metres. Our own choice: it holds a runway, its
 /// approach and departure areas ([`crate::runway`]) and the airfield around them, and keeps
 /// `dlat` under 0.2 degrees so the second-order error stays small.
 pub const EXTENT_M: f64 = 20_000.0;
@@ -32,8 +32,8 @@ pub const MAX_ORIGIN_LAT_DEG: f64 = 80.0;
 
 /// The largest difference, metres, between the plane's distance from the origin and the WGS-84
 /// geodesic distance, anywhere in the extent, for an origin within [`MAX_ORIGIN_LAT_DEG`].
-/// Measured by the test named in the module doc (worst case 0.9 m, at 80 degrees and 19 km, and
-/// under 0.3 m below 75), then rounded up; it is a stated bound, not a
+/// Measured by the test named in the module doc (worst case 1.05 m, at 80 degrees south and 20 km), then
+/// rounded up; it is a stated bound, not a
 /// derivation. A runway is at least 30 m wide, so this is small beside what the test decides.
 pub const PLANE_ERROR_BOUND_M: f64 = 1.5;
 
@@ -111,8 +111,9 @@ pub fn plane_origin(p: &Plane) -> Geo {
     }
 }
 
-/// Degrees to the plane. `None` for a non-finite input or a point more than [`EXTENT_M`] from
-/// the origin in either axis. A longitude difference past 180 degrees is taken the short way
+/// Degrees to the plane. `None` for a non-finite input or a point whose plane distance from the
+/// origin, `sqrt(east^2 + north^2)`, exceeds [`EXTENT_M`] (a disc, so the stated error bound,
+/// which is a distance from the origin, covers every point accepted). A longitude difference past 180 degrees is taken the short way
 /// round.
 pub fn to_local(p: &Plane, g: Geo) -> Option<Local> {
     if !(g.lat_deg.is_finite() && g.lon_deg.is_finite()) {
@@ -135,7 +136,11 @@ pub fn to_local(p: &Plane, g: Geo) -> Option<Local> {
         return None;
     }
     let north = north0 + p.half_curv * east * east;
-    if !(-EXTENT_M..=EXTENT_M).contains(&north) {
+    // The disc, compared so that a NaN fails it (the sum is finite here: each term is within
+    // the per-axis guards above, and the guards are only there to bound the arithmetic).
+    if !(-EXTENT_M..=EXTENT_M).contains(&north)
+        || !(0.0..=EXTENT_M * EXTENT_M).contains(&(east * east + north * north))
+    {
         return None;
     }
     Some(Local {

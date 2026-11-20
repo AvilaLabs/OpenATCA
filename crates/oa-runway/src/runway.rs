@@ -209,10 +209,16 @@ pub enum Refusal {
     /// A threshold off the line between the ends by more than [`THRESHOLD_OFF_AXIS_M`], or
     /// outside the runway.
     ThresholdOffRunway,
+    /// A NASR displaced-threshold coordinate with no displacement length: the displacement is
+    /// not known, so the coordinate cannot be checked.
+    DisplacementMissing,
+    /// A NASR displaced coordinate and a CIFP threshold for the same end that differ by more
+    /// than [`DISPLACEMENT_TOLERANCE_M`]: one of them is wrong and we do not choose.
+    ThresholdDisagreement,
 }
 
 /// Every reason, in the order of [`RefusalCounts`].
-pub const REFUSALS: [Refusal; 14] = [
+pub const REFUSALS: [Refusal; 16] = [
     Refusal::BadWidth,
     Refusal::WidthImplausible,
     Refusal::BadLength,
@@ -227,6 +233,8 @@ pub const REFUSALS: [Refusal; 14] = [
     Refusal::AlignmentMismatch,
     Refusal::DisplacementMismatch,
     Refusal::ThresholdOffRunway,
+    Refusal::DisplacementMissing,
+    Refusal::ThresholdDisagreement,
 ];
 
 /// How many runways were refused for each reason, and how many were built. Counts saturate.
@@ -254,6 +262,8 @@ pub fn refusal_index(r: Refusal) -> usize {
         Refusal::AlignmentMismatch => 11,
         Refusal::DisplacementMismatch => 12,
         Refusal::ThresholdOffRunway => 13,
+        Refusal::DisplacementMissing => 14,
+        Refusal::ThresholdDisagreement => 15,
     }
 }
 
@@ -321,7 +331,20 @@ fn resolve_end(e: &EndInput<'_>) -> Result<Resolved, Refusal> {
         Some(_) => return Err(Refusal::BadDisplacement),
     };
     if let Some(t) = e.displaced_position {
+        if e.displaced_len_ft.is_none() {
+            return Err(Refusal::DisplacementMissing);
+        }
         let physical = e.position.ok_or(Refusal::PhysicalEndMissing)?;
+        if let Some(c) = e.cifp_threshold {
+            // Two sources for the same threshold must agree.
+            let d = wgs84()
+                .inverse(latlon(t)?, latlon(c)?)
+                .map_err(|_| Refusal::BadCoordinate)?
+                .distance_m;
+            if d.is_nan() || d > DISPLACEMENT_TOLERANCE_M {
+                return Err(Refusal::ThresholdDisagreement);
+            }
+        }
         return Ok(Resolved {
             physical,
             threshold: t,
@@ -345,14 +368,15 @@ fn resolve_end(e: &EndInput<'_>) -> Result<Resolved, Refusal> {
             threshold: p,
             from_cifp: false,
         }),
-        // NASR has no coordinate at all and says the end is not displaced, so the CIFP
-        // threshold is the physical end too.
-        (None, Some(c)) => Ok(Resolved {
+        // NASR has no coordinate at all and says (explicitly, as a zero) that the end is not
+        // displaced, so the CIFP threshold is the physical end too. An absent displacement
+        // does not say that.
+        (None, Some(c)) if e.displaced_len_ft == Some(0.0) => Ok(Resolved {
             physical: c,
             threshold: c,
             from_cifp: true,
         }),
-        (None, None) => Err(Refusal::PhysicalEndMissing),
+        (None, _) => Err(Refusal::PhysicalEndMissing),
     }
 }
 

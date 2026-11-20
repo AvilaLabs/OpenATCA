@@ -8,7 +8,7 @@
 
 use oa_geo::{wgs84, LatLon};
 use oa_runway::occupy::{frame_coords, is_occupied, occupies, Occupancy};
-use oa_runway::plane::{plane_new, to_local, Geo, Local, Plane, PLANE_ERROR_BOUND_M};
+use oa_runway::plane::{plane_new, to_local, Geo, Local, Plane, EXTENT_M, PLANE_ERROR_BOUND_M};
 use oa_runway::runway::*;
 
 fn g(lat: f64, lon: f64) -> Geo {
@@ -207,8 +207,8 @@ fn austin_and_san_francisco_geometry() {
         let o = occupies(&rw, rw.center, 0.0);
         assert!(o.on_runway);
         let past = Local {
-            east_m: rw.center.east_m + rw.ux * (rw.half_len_m + 1.0),
-            north_m: rw.center.north_m + rw.uy * (rw.half_len_m + 1.0),
+            east_m: rw.center.east_m + rw.ux * (rw.half_len_m + 5.0),
+            north_m: rw.center.north_m + rw.uy * (rw.half_len_m + 5.0),
         };
         let o = occupies(&rw, past, 0.0);
         assert!(!o.on_runway && o.departure[1]);
@@ -244,13 +244,27 @@ fn cifp_threshold_takes_the_place_of_a_missing_displaced_coordinate() {
 fn cifp_threshold_fills_an_end_with_no_nasr_coordinate() {
     let (plane, mut input) = mdw();
     input.a.displaced_position = None;
-    input.a.displaced_len_ft = None;
+    input.a.displaced_len_ft = Some(0.0);
     input.a.cifp_threshold = input.a.position;
     input.a.position = None;
-    // The CIFP point is the physical end here (not displaced): accepted, marked as CIFP.
+    // The CIFP point is the physical end here (explicitly not displaced): accepted, marked as
+    // CIFP.
     let rw = build_runway(&plane, &input).unwrap();
     assert!(rw.ends[0].threshold_from_cifp);
     assert_eq!(rw.ends[0].physical, rw.ends[0].threshold);
+    // Without the explicit zero the displacement is not known, and the CIFP point does not
+    // stand as the end.
+    input.a.displaced_len_ft = None;
+    assert_eq!(
+        build_runway(&plane, &input),
+        Err(Refusal::PhysicalEndMissing)
+    );
+    // Nor does a displacement above zero.
+    input.a.displaced_len_ft = Some(758.0);
+    assert_eq!(
+        build_runway(&plane, &input),
+        Err(Refusal::PhysicalEndMissing)
+    );
 }
 
 // REQ: OA-RWY-004
@@ -331,6 +345,84 @@ fn a_runway_with_a_missing_or_inconsistent_value_is_refused_and_counted() {
     );
 }
 
+// REQ: OA-RWY-004
+#[test]
+fn displacement_inputs_that_cannot_be_checked_are_refused() {
+    let (plane, good) = mdw();
+    let mut counts = RefusalCounts::default();
+    // (a) A displaced coordinate with no displacement length.
+    let mut c = good;
+    c.a.displaced_len_ft = None;
+    assert_eq!(
+        build_counted_err(&plane, &c, &mut counts),
+        Refusal::DisplacementMissing
+    );
+    // (b) Physical end missing, displacement unknown.
+    let mut c = good;
+    c.a.displaced_position = None;
+    c.a.displaced_len_ft = None;
+    c.a.cifp_threshold = c.a.position;
+    c.a.position = None;
+    assert_eq!(
+        build_counted_err(&plane, &c, &mut counts),
+        Refusal::PhysicalEndMissing
+    );
+    // (c) A NASR displaced coordinate and a CIFP threshold 60 m apart: refused. 10 m apart:
+    // accepted, the NASR coordinate stands.
+    let nasr = good.a.displaced_position.unwrap();
+    let mut c = good;
+    c.a.cifp_threshold = Some(g(nasr.lat_deg + 0.00054, nasr.lon_deg));
+    assert_eq!(
+        build_counted_err(&plane, &c, &mut counts),
+        Refusal::ThresholdDisagreement
+    );
+    let mut c = good;
+    c.a.cifp_threshold = Some(g(nasr.lat_deg + 0.00009, nasr.lon_deg));
+    let rw = build_runway(&plane, &c).unwrap();
+    assert_eq!(rw.ends[0].threshold, nasr);
+    assert!(!rw.ends[0].threshold_from_cifp);
+    assert_eq!(refusal_count(&counts, Refusal::DisplacementMissing), 1);
+    assert_eq!(refusal_count(&counts, Refusal::PhysicalEndMissing), 1);
+    assert_eq!(refusal_count(&counts, Refusal::ThresholdDisagreement), 1);
+}
+
+fn build_counted_err(
+    plane: &Plane,
+    input: &RunwayInput<'_>,
+    counts: &mut RefusalCounts,
+) -> Refusal {
+    assert!(build_counted(plane, input, counts).is_none());
+    build_runway(plane, input).unwrap_err()
+}
+
+// REQ: OA-RWY-004
+#[test]
+fn a_threshold_beyond_the_far_end_or_outside_the_near_end_is_refused() {
+    let (plane, good) = mdw();
+    // The runway axis runs about (0.6875 east, 0.7262 north): 83,000 m per degree of longitude
+    // and 111,000 m per degree of latitude here.
+    let a = good.a.position.unwrap();
+    let along = |m: f64| {
+        g(
+            a.lat_deg + 0.7262 * m / 111_000.0,
+            a.lon_deg + 0.6875 * m / 83_000.0,
+        )
+    };
+    // 1,800 m along from end a: past end b, 1,678 m away.
+    let mut c = good;
+    c.a.displaced_position = Some(along(1_800.0));
+    assert_eq!(build_runway(&plane, &c), Err(Refusal::ThresholdOffRunway));
+    // 25 m behind end a: more than 15 m outside the near end.
+    let mut c = good;
+    c.a.displaced_position = Some(along(-25.0));
+    assert_eq!(build_runway(&plane, &c), Err(Refusal::ThresholdOffRunway));
+    // 10 m behind is within the allowance (the displacement check then decides).
+    let mut c = good;
+    c.a.displaced_position = Some(along(-10.0));
+    c.a.displaced_len_ft = Some(-10.0 / FT_TO_M * 0.0);
+    assert_ne!(build_runway(&plane, &c), Err(Refusal::ThresholdOffRunway));
+}
+
 // REQ: OA-RWY-005
 #[test]
 fn the_tolerances_are_the_stated_constants() {
@@ -404,24 +496,87 @@ fn plane_new_refuses_what_it_cannot_represent() {
 #[test]
 fn plane_error_against_geodesic_is_within_the_stated_bound() {
     let ell = wgs84();
-    let mut worst = 0.0f64;
-    for lat0 in [0.0, 25.0, 40.0, 52.0, 64.0, 72.0, -34.0, -55.0, 80.0, -80.0] {
+    let mut worst = (0.0f64, 0.0, 0.0, 0.0);
+    for lat0 in [
+        0.0, 25.0, 40.0, 52.0, 64.0, 72.0, 78.0, 80.0, -34.0, -55.0, -80.0,
+    ] {
         let plane = plane_new(lat0, 10.0).unwrap();
         let o = LatLon::new(lat0, 10.0).unwrap();
+        // Every 5 degrees, so the 45 degree diagonals are in, out to the edge of the disc.
         for k in 0..72 {
             let az = k as f64 * 5.0;
-            for dist in [1_000.0, 5_000.0, 10_000.0, 14_000.0, 19_000.0] {
+            for dist in [
+                1_000.0,
+                5_000.0,
+                10_000.0,
+                15_000.0,
+                19_000.0,
+                EXTENT_M - 5.0,
+            ] {
                 let q = ell.direct(o, az, dist).unwrap().position;
                 let l = to_local(&plane, g(q.lat(), q.lon())).unwrap();
                 let d = (l.east_m * l.east_m + l.north_m * l.north_m).sqrt();
-                worst = worst.max((d - dist).abs());
+                if (d - dist).abs() > worst.0 {
+                    worst = ((d - dist).abs(), lat0, az, dist);
+                }
             }
         }
     }
+    eprintln!("plane worst distance-from-origin error {worst:?}");
     assert!(
-        worst <= PLANE_ERROR_BOUND_M,
-        "worst distance error {worst} m"
+        worst.0 <= PLANE_ERROR_BOUND_M,
+        "worst distance error {worst:?}"
     );
+    // Past the disc: the corner of the old square is refused.
+    let plane = plane_new(40.0, 10.0).unwrap();
+    let o = LatLon::new(40.0, 10.0).unwrap();
+    let q = ell.direct(o, 45.0, EXTENT_M + 100.0).unwrap().position;
+    assert!(to_local(&plane, g(q.lat(), q.lon())).is_none());
+    let q = ell.direct(o, 45.0, EXTENT_M - 100.0).unwrap().position;
+    assert!(to_local(&plane, g(q.lat(), q.lon())).is_some());
+}
+
+// REQ: OA-RWY-001
+#[test]
+fn plane_distance_between_two_points_against_geodesic_is_within_twice_the_bound() {
+    // End to end: two points anywhere in the disc (so up to twice the extent apart), the plane's
+    // distance between them against the geodesic distance. A fixed pseudo-random sequence.
+    let ell = wgs84();
+    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let mut worst = (0.0f64, 0.0, 0.0);
+    for lat0 in [0.0, 30.0, 45.0, 60.0, 70.0, 80.0, -45.0] {
+        let plane = plane_new(lat0, -100.0).unwrap();
+        let o = LatLon::new(lat0, -100.0).unwrap();
+        for _ in 0..400 {
+            let mut pts = [Local {
+                east_m: 0.0,
+                north_m: 0.0,
+            }; 2];
+            let mut lls = [o; 2];
+            for i in 0..2 {
+                let az = next() * 360.0;
+                let dist = EXTENT_M * next().sqrt();
+                let q = ell.direct(o, az, dist).unwrap().position;
+                lls[i] = q;
+                pts[i] = to_local(&plane, g(q.lat(), q.lon())).unwrap();
+            }
+            let truth = ell.inverse(lls[0], lls[1]).unwrap().distance_m;
+            let d = ((pts[0].east_m - pts[1].east_m).powi(2)
+                + (pts[0].north_m - pts[1].north_m).powi(2))
+            .sqrt();
+            if (d - truth).abs() > worst.0 {
+                worst = ((d - truth).abs(), lat0, truth);
+            }
+        }
+    }
+    eprintln!("plane worst pair-distance error {worst:?}");
+    assert!(worst.0 <= 2.0 * PLANE_ERROR_BOUND_M, "{worst:?}");
 }
 
 // Occupancy, on Midway: the runway runs along (ux, uy) from 04L to 22R.
@@ -445,70 +600,138 @@ fn at_to_frame_round_trips() {
     assert!(near(a, 123.0, 1e-9) && near(c, -45.0, 1e-9));
 }
 
-// REQ: OA-RWY-006
-#[test]
-fn occupancy_at_the_rectangle_edges() {
-    let rw = mdw_runway();
-    let hl = rw.half_len_m;
-    let hw = rw.half_width_m;
-    let o = |a: f64, c: f64, r: f64| occupies(&rw, at(&rw, a, c), r);
-    // Centre, and just inside each edge.
-    assert!(o(0.0, 0.0, 0.0).on_runway);
-    assert!(o(hl - 0.01, 0.0, 0.0).on_runway);
-    assert!(o(-hl + 0.01, 0.0, 0.0).on_runway);
-    assert!(o(0.0, hw - 0.01, 0.0).on_runway);
-    assert!(o(0.0, -hw + 0.01, 0.0).on_runway);
-    // Just outside the side edge: clear at radius zero, touching at a radius that reaches it.
-    assert!(!is_occupied(&o(0.0, hw + 0.5, 0.0)));
-    assert!(o(0.0, hw + 0.5, 0.6).on_runway);
-    assert!(!is_occupied(&o(0.0, hw + 0.5, 0.4)));
-    assert!(!is_occupied(&o(0.0, -hw - 0.5, 0.4)));
-    assert!(o(0.0, -hw - 0.5, 0.6).on_runway);
-    // Just past the end: not on the runway but in the departure area of that end.
-    let past = o(hl + 0.5, 0.0, 0.0);
-    assert!(!past.on_runway && past.departure[1] && past.approach[1] && !past.departure[0]);
-    assert!(o(hl + 0.5, 0.0, 0.6).on_runway);
-    // The corner: the square widening reaches it at r = 0.5 on both axes.
-    assert!(o(hl + 0.4, hw + 0.4, 0.5).on_runway);
-    assert!(!o(hl + 0.6, hw + 0.6, 0.5).on_runway);
+type EdgeFn<'a> = Box<dyn Fn(f64) -> Local + 'a>;
+type Breaker = fn(&mut Runway);
+
+/// The flag of region `i` (0 runway, 1 and 2 the approach areas, 3 and 4 the departure areas).
+fn flag(o: &Occupancy, i: usize) -> bool {
+    match i {
+        0 => o.on_runway,
+        1 => o.approach[0],
+        2 => o.approach[1],
+        3 => o.departure[0],
+        _ => o.departure[1],
+    }
+}
+
+/// `(lo, hi, half_width)` of region `i` from the runway's own numbers.
+fn region_box(rw: &Runway, i: usize) -> (f64, f64, f64) {
+    match i {
+        0 => (-rw.half_len_m, rw.half_len_m, rw.half_width_m),
+        1 => (
+            rw.approach_along[0][0],
+            rw.approach_along[0][1],
+            rw.approach_half_width_m,
+        ),
+        2 => (
+            rw.approach_along[1][0],
+            rw.approach_along[1][1],
+            rw.approach_half_width_m,
+        ),
+        3 => (
+            rw.departure_along[0][0],
+            rw.departure_along[0][1],
+            rw.departure_half_width_m,
+        ),
+        _ => (
+            rw.departure_along[1][0],
+            rw.departure_along[1][1],
+            rw.departure_half_width_m,
+        ),
+    }
 }
 
 // REQ: OA-RWY-006
 #[test]
-fn occupancy_of_the_approach_and_departure_areas() {
+fn the_region_intervals_are_the_hand_worked_ones_on_a_runway_displaced_at_both_ends() {
+    // Midway: half length 839.3 m; 04L (end a) displaced 758 ft = 231.04 m, 22R (end b)
+    // displaced 878 ft = 267.61 m. Along coordinates run from a (negative) to b (positive).
     let rw = mdw_runway();
     let hl = rw.half_len_m;
-    let hw = rw.half_width_m;
-    // End b's approach area starts at its landing threshold, 878 ft inside the physical end, and
-    // reaches APPROACH_LENGTH_M beyond it.
-    let thr_b = rw.approach_along[1][0];
-    assert!(near(thr_b, hl - rw.ends[1].displacement_m, 1e-6));
-    let o = occupies(&rw, at(&rw, thr_b + 100.0, 0.0), 0.0);
-    assert!(o.on_runway && o.approach[1] && !o.approach[0]);
-    let o = occupies(&rw, at(&rw, thr_b + APPROACH_LENGTH_M - 1.0, 0.0), 0.0);
-    assert!(o.approach[1] && !o.on_runway);
-    assert!(!is_occupied(&occupies(
-        &rw,
-        at(&rw, thr_b + APPROACH_LENGTH_M + 1.0, 0.0),
-        0.0
-    )));
-    // The area is wider than the runway by its side margin.
-    let side = hw + APPROACH_SIDE_MARGIN_M;
-    assert!(occupies(&rw, at(&rw, hl + 10.0, side - 1.0), 0.0).approach[1]);
-    assert!(!occupies(&rw, at(&rw, hl + 10.0, side + 1.0), 0.0).approach[1]);
-    // Departure area beyond end a, and its own, narrower, width.
-    let d = occupies(&rw, at(&rw, -hl - DEPARTURE_LENGTH_M + 1.0, 0.0), 0.0);
-    assert!(d.departure[0] && !d.on_runway);
-    assert!(!is_occupied(&occupies(
-        &rw,
-        at(&rw, -hl - 1_600.0, 0.0),
-        0.0
-    )));
-    let dside = hw + DEPARTURE_SIDE_MARGIN_M;
-    assert!(occupies(&rw, at(&rw, -hl - 10.0, dside - 1.0), 0.0).departure[0]);
-    assert!(!occupies(&rw, at(&rw, -hl - 10.0, dside + 1.0), 0.0).departure[0]);
-    // Far from everything.
-    assert!(!is_occupied(&occupies(&rw, at(&rw, 0.0, 5_000.0), 100.0)));
+    assert!(near(hl, 839.3, 1.0));
+    let thr_a = -hl + 758.0 * FT_TO_M;
+    let thr_b = hl - 878.0 * FT_TO_M;
+    assert!(near(thr_a, -608.3, 1.5) && near(thr_b, 571.7, 1.5));
+    let eps = 5.0;
+    // Approach areas: from each landing threshold outward by the approach length.
+    assert!(near(rw.approach_along[0][1], thr_a, eps));
+    assert!(near(
+        rw.approach_along[0][0],
+        thr_a - APPROACH_LENGTH_M,
+        eps
+    ));
+    assert!(near(rw.approach_along[1][0], thr_b, eps));
+    assert!(near(
+        rw.approach_along[1][1],
+        thr_b + APPROACH_LENGTH_M,
+        eps
+    ));
+    // Departure areas: from each physical end outward by the departure length.
+    assert!(near(rw.departure_along[0][1], -hl, 1e-9));
+    assert!(near(
+        rw.departure_along[0][0],
+        -hl - DEPARTURE_LENGTH_M,
+        1e-9
+    ));
+    assert!(near(rw.departure_along[1][0], hl, 1e-9));
+    assert!(near(
+        rw.departure_along[1][1],
+        hl + DEPARTURE_LENGTH_M,
+        1e-9
+    ));
+    assert!(near(
+        rw.approach_half_width_m,
+        rw.half_width_m + APPROACH_SIDE_MARGIN_M,
+        1e-9
+    ));
+    assert!(near(
+        rw.departure_half_width_m,
+        rw.half_width_m + DEPARTURE_SIDE_MARGIN_M,
+        1e-9
+    ));
+}
+
+// REQ: OA-RWY-006
+#[test]
+fn every_edge_of_every_region_at_the_interval_ends() {
+    let rw = mdw_runway();
+    // The radius the test adds to r95 itself: the plane error bound and the rounding pad.
+    let pad = PLANE_ERROR_BOUND_M + 1e-6;
+    let gap = 0.5;
+    for i in 0..5 {
+        let (lo, hi, w) = region_box(&rw, i);
+        let mid = (lo + hi) / 2.0;
+        // Each edge as (point on the edge's outward side at distance `d`, where d = 0 is on it).
+        let edges: [(&str, EdgeFn); 4] = [
+            ("lo", Box::new(|d| at(&rw, lo - d, 0.0))),
+            ("hi", Box::new(|d| at(&rw, hi + d, 0.0))),
+            ("left", Box::new(|d| at(&rw, mid, w + d))),
+            ("right", Box::new(|d| at(&rw, mid, -w - d))),
+        ];
+        for (name, p) in &edges {
+            let what = format!("region {i} edge {name}");
+            // On the edge and just inside it: touched at r95 = 0.
+            assert!(flag(&occupies(&rw, p(0.0), 0.0), i), "{what} on");
+            assert!(flag(&occupies(&rw, p(-0.01), 0.0), i), "{what} inside");
+            // Outside by the pad and a gap: clear at r95 = 0 and at a radius that does not
+            // reach (gap - 0.1), touched at gap + 0.1.
+            let out = p(pad + gap);
+            assert!(!flag(&occupies(&rw, out, 0.0), i), "{what} outside r=0");
+            assert!(
+                !flag(&occupies(&rw, out, gap - 0.1), i),
+                "{what} outside short"
+            );
+            assert!(
+                flag(&occupies(&rw, out, gap + 0.1), i),
+                "{what} outside reached"
+            );
+            // Inside the pad only: touched even at r95 = 0 (the plane's error is added).
+            assert!(
+                flag(&occupies(&rw, p(pad - 0.1), 0.0), i),
+                "{what} within the pad"
+            );
+        }
+    }
 }
 
 // REQ: OA-RWY-007
@@ -597,4 +820,68 @@ fn a_larger_radius_only_adds_occupancy() {
             prev[0] = o;
         }
     }
+}
+
+// REQ: OA-RWY-007
+#[test]
+fn a_runway_with_a_non_finite_number_never_clears_a_target() {
+    let far = Local {
+        east_m: 0.0,
+        north_m: 9_000.0,
+    };
+    let base = mdw_runway();
+    assert!(!is_occupied(&occupies(&base, far, 0.0)));
+    let breaks: [(&str, Breaker); 9] = [
+        ("half_len", |r| r.half_len_m = f64::NAN),
+        ("half_width", |r| r.half_width_m = f64::NAN),
+        ("ux", |r| r.ux = f64::NAN),
+        ("center", |r| r.center.east_m = f64::INFINITY),
+        ("approach", |r| r.approach_along[1][1] = f64::NAN),
+        ("approach width", |r| r.approach_half_width_m = f64::NAN),
+        ("departure", |r| r.departure_along[0][0] = f64::NEG_INFINITY),
+        ("departure width", |r| r.departure_half_width_m = f64::NAN),
+        ("uy", |r| r.uy = f64::INFINITY),
+    ];
+    for (name, f) in breaks {
+        let mut rw = base;
+        f(&mut rw);
+        let o = occupies(&rw, far, 0.0);
+        assert!(
+            o.unknown && o.on_runway && o.approach == [true; 2] && o.departure == [true; 2],
+            "{name}"
+        );
+    }
+}
+
+// REQ: OA-RWY-007
+#[test]
+fn real_coordinates_run_end_to_end_through_the_plane_and_the_test() {
+    let (plane, input) = mdw();
+    let rw = build_runway(&plane, &input).unwrap();
+    let a = input.a.position.unwrap();
+    let b = input.b.position.unwrap();
+    let local = |lat: f64, lon: f64| to_local(&plane, g(lat, lon)).unwrap();
+    // The midpoint of the two NASR end coordinates is on the runway, and nowhere else.
+    let mid = local((a.lat_deg + b.lat_deg) / 2.0, (a.lon_deg + b.lon_deg) / 2.0);
+    let o = occupies(&rw, mid, 0.0);
+    assert!(o.on_runway && !o.unknown);
+    assert!(!o.approach[0] && !o.approach[1] && !o.departure[0] && !o.departure[1]);
+    // The 22R displaced threshold is on the runway and at the start of end b's approach area.
+    let t = input.b.displaced_position.unwrap();
+    let o = occupies(&rw, local(t.lat_deg, t.lon_deg), 0.0);
+    assert!(o.on_runway && o.approach[1] && !o.approach[0]);
+    // The physical ends are on the runway, with the departure area beyond them.
+    let o = occupies(&rw, local(a.lat_deg, a.lon_deg), 0.0);
+    assert!(o.on_runway && o.departure[0] && o.approach[0]);
+    // 300 m abeam the midpoint (to the left of the direction a to b, 0.7262 north per metre
+    // of the perpendicular's 0.6875 and 0.7262 components): clear.
+    let (ux, uy) = (rw.ux, rw.uy);
+    let abeam = local(
+        (a.lat_deg + b.lat_deg) / 2.0 + ux * 300.0 / 111_000.0,
+        (a.lon_deg + b.lon_deg) / 2.0 - uy * 300.0 / 83_000.0,
+    );
+    let o = occupies(&rw, abeam, 0.0);
+    assert!(!is_occupied(&o) && !o.unknown, "{o:?}");
+    // The same point is occupied by a target whose radius covers the 300 m.
+    assert!(occupies(&rw, abeam, 300.0).on_runway);
 }

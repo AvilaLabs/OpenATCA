@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 77)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 77)
+        self.assertEqual(registry["expected_proof_count"], 78)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 78)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 72)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 73)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -82,6 +82,7 @@ class SuiteConfigurationTests(unittest.TestCase):
         self.assertEqual(set(runway), {
             "runway-occupancy-monotone", "runway-non-finite-occupies", "runway-inside-occupies",
             "runway-occupies-total", "runway-plane-bounded",
+            "runway-non-finite-runway-occupies",
         })
         for proof in runway.values():
             self.assertTrue(proof["enabled"] and not proof["experimental"])
