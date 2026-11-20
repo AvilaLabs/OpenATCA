@@ -33,7 +33,7 @@ fn cfg() -> MsawConfig {
         terrain_clearance_ft: 500,
         obstacle_clearance_ft: 500,
         max_speed_mps: 400.0,
-        r95_cap_m: 2000.0,
+        wide_degrade_share: 0.5,
         approach_allowance_ft: 300,
         approach_min_clearance_ft: 100,
         departure_min_clearance_ft: 100,
@@ -97,7 +97,7 @@ fn tr(addr: u32, lat: f64, lon: f64, ve: f32, vn: f32, alt: f32, vr: f32) -> Msa
         flags: 0,
         ground: AIRBORNE,
         alt_age_s: 0.0,
-        alt_change_10s_ft: f32::NAN,
+        alt_change_10s_ft: 0.0,
         ground_ft: f32::NAN,
     }
 }
@@ -1170,7 +1170,7 @@ fn an_unknown_vertical_rate_predicts_level_and_is_flagged() {
 
 // REQ: OA-MSAW-019
 #[test]
-fn a_bad_row_is_counted_and_listed_and_a_poor_radius_is_held_to_the_cap() {
+fn a_bad_row_is_counted_and_listed_and_an_unusable_radius_takes_the_largest_and_none_is_shrunk() {
     let mut r = rig(&cfg());
     let mut rows = vec![
         tr(1, f64::NAN, -88.0, 0.0, 0.0, 5000.0, 0.0),
@@ -1198,15 +1198,39 @@ fn a_bad_row_is_counted_and_listed_and_a_poor_radius_is_held_to_the_cap() {
     assert_eq!(o.stats.r95_held, 2);
     assert!(msaw_points(&r.st)
         .iter()
-        .all(|p| f64::from(p.radius_m) <= 2000.0 + 400.0 * 2.5));
+        .all(|p| f64::from(p.radius_m) <= 10_000.0 + 400.0 * 2.5));
+    // The two wide ones (unusable and 1,000 km held to 10 km) are flagged and counted; they are all
+    // of the airborne tracks, more than the share: the net reads degraded with them in the count.
+    assert_eq!(o.stats.wide, 2);
+    assert_eq!(o.stats.wide_degrade, 2);
     assert!(matches!(
         o.report,
         NetReport::Degraded {
             reason: Reason::InputMissing,
-            count: 5,
+            count: 7,
             ..
         }
     ));
+}
+
+// REQ: OA-MSAW-019
+#[test]
+fn a_radius_of_a_few_kilometres_is_looked_up_whole_flagged_and_alerts_say_so() {
+    let mut c = cfg();
+    c.wide_degrade_share = 0.9;
+    let mut r = rig(&c);
+    let mut wide = tr(1, 40.0, -88.0, 0.0, 0.0, 700.0, 0.0);
+    wide.r95_m = 3000.0;
+    let narrow = tr(2, 41.0, -88.0, 0.0, 0.0, 20_000.0, 0.0);
+    let o = cycle(&mut r, S, &[wide, narrow], &flat(600, 100));
+    assert_eq!(
+        (o.stats.wide, o.stats.wide_degrade, o.stats.r95_held),
+        (1, 0, 0)
+    );
+    assert!(msaw_points(&r.st).iter().any(|p| p.radius_m >= 3000.0));
+    assert_eq!(o.stats.violations, 1);
+    assert_ne!(msaw_open(&r.st)[0].flags & AF_WIDE_UNCERTAINTY, 0);
+    assert_eq!(o.report, NetReport::Running);
 }
 
 // REQ: OA-MSAW-023
@@ -2017,6 +2041,7 @@ fn a_point_over_the_pavement_gets_the_interpolated_runway_elevation_and_the_marg
             ((south_m(1852.0 - along_m) * 1e7).round()) as i32,
             ((-88.0 + cross_m / (111_194.926_644_558_74 * 40.0f64.to_radians().cos())) * 1e7)
                 .round() as i32,
+            0.0,
         )
     };
     // The runway runs from 1,852 m (600 ft) to 4,352 m (660 ft) along the strip.
@@ -2164,7 +2189,7 @@ fn a_runway_rising_to_its_far_end_is_landed_on_at_the_elevation_where_the_aircra
     let o = cycle(
         &mut r,
         S,
-        &[over_runway(-2300.0, 0.0, 662.0, -300.0)],
+        &[over_runway(-2300.0, 0.0, 654.0, -300.0)],
         &world,
     );
     assert_eq!((o.stats.violations, o.stats.landings), (0, 1));
@@ -2301,4 +2326,55 @@ fn over_budget_the_tracks_are_ranked_by_height_above_their_own_ground() {
     let mut r = rig(&c);
     cycle(&mut r, S, &[high_ground, unknown], &flat(0, 1000));
     assert_eq!(msaw_planned(&r.st)[0].addr, 22);
+}
+
+// REQ: OA-MSAW-070
+#[test]
+fn only_a_fresh_descending_altitude_with_a_real_setting_and_a_whole_circle_on_the_pavement_lands() {
+    let c = landing_cfg();
+    let world = terrain_world(|m, _| if m < -2700.0 { 1500 } else { 300 });
+    let at = |vr: f32, change: f32, flags: u16| {
+        let mut t = over_runway(-300.0, 0.0, 640.0, vr);
+        t.alt_change_10s_ft = change;
+        t.flags |= flags;
+        let mut r = rig(&c);
+        let o = cycle(&mut r, S, &[t], &world);
+        (o.stats.violations, o.stats.landings)
+    };
+    // A go-around that starts at -500 ft/min qualifies while it is descending (the roll-out is not
+    // judged) and is judged the moment its rate is above zero.
+    assert_eq!(at(-500.0, -30.0, 0), (0, 1));
+    assert_eq!(at(500.0, 30.0, 0), (1, 0));
+    // A slow climb never qualifies, nor a track that has risen over the last 10 s whatever its
+    // rate says, nor one whose history is not known.
+    assert_eq!(at(250.0, 10.0, 0), (1, 0));
+    assert_eq!(at(-500.0, 10.0, 0), (1, 0));
+    assert_eq!(at(-500.0, f32::NAN, 0), (1, 0));
+    // A cold-corrected, a stale-extrapolated and a no-setting altitude are not exempt.
+    assert_eq!(at(-500.0, -30.0, F_COLD_CORRECTED), (1, 0));
+    assert_eq!(at(-500.0, -30.0, F_QNH_MISSING), (1, 0));
+    // A circle wider than the pavement and its margin does not land: r95 of 100 m on a runway whose
+    // pavement is 30 m either side and 60 m allowed.
+    let mut wide = over_runway(-300.0, 0.0, 640.0, -500.0);
+    wide.r95_m = 100.0;
+    let mut r = rig(&c);
+    let o = cycle(&mut r, S, &[wide], &world);
+    assert_eq!((o.stats.violations, o.stats.landings), (1, 0));
+}
+
+// REQ: OA-MSAW-070
+#[test]
+fn the_roll_out_points_are_counted_and_those_off_the_runway_apart() {
+    let c = landing_cfg();
+    let world = terrain_world(|m, _| if m < -2700.0 { 1500 } else { 300 });
+    let mut r = rig(&c);
+    let o = cycle(
+        &mut r,
+        S,
+        &[over_runway(-2000.0, 0.0, 620.0, -300.0)],
+        &world,
+    );
+    assert_eq!(o.stats.landings, 1);
+    assert!(o.stats.rollout_points > 0);
+    assert!(o.stats.rollout_off_runway > 0 && o.stats.rollout_off_runway <= o.stats.rollout_points);
 }

@@ -6558,7 +6558,7 @@ FAA value.
 - **OA-MSAW-017** The net report gives the reason of highest priority (budget, input) and the count
   of every shortfall of the cycle; rows told lost upstream degrade the next cycle.
 - **OA-MSAW-018** An unknown vertical rate predicts level and is flagged.
-- **OA-MSAW-019** A bad row is counted and listed; a missing or oversized 95 % radius is held to the cap and counted.
+- **OA-MSAW-019** A bad row is counted and listed; a 95 % radius is never shrunk: it is looked up as it is, an unusable one (NaN, negative) or one above 10 km takes 10 km (counted); one above 2 km is flagged `wide_uncertainty` on the track and its alerts and counted, and the net reads degraded when more than `wide_degrade_share` of the airborne tracks of a cycle are.
 - **OA-MSAW-020** The altitude predicted at any time inside the look-ahead is finite for bounded inputs (Kani).
 - **OA-MSAW-021** The floor is monotone in the terrain and the obstacle, so a higher floor never removes an alert (Kani).
 - **OA-MSAW-022** The time of a predicted violation is clamped inside its span for bounded inputs (Kani).
@@ -6659,34 +6659,37 @@ FAA value.
   tracks are not monitored for altitude.
 - **OA-MSAW-070** In the runway strip and the last 1 NM of a capture box the floor is the higher of the surface
   less the allowance, terrain and the obstacle top, with no clearance. A point is a landing, and not judged, only if
-  its centre is over the pavement (half-width plus 60 m), the track is not climbing (rate at most 200 ft/min, or
-  level within 50 ft over 10 s), its altitude has a setting, and it is at or below the runway elevation interpolated
-  between the two thresholds there; the points after the first such point are the roll-out and are not judged, and
-  every point of a track that does not qualify is. The strip margin gives no landing.
+  the whole 95 % circle of the track is over the pavement plus 60 m, the track is not climbing (a known rate not
+  above zero and no rise over the last 10 s), its altitude is fresh with a real setting and neither stale-extrapolated
+  nor cold-corrected, and the altitude at the point (not the lowest of its span) is at or below the runway elevation
+  interpolated between the two thresholds there. The points after the first such point are the roll-out and are not
+  judged; they are counted, with those outside every runway strip. Every point of a track that does not qualify is
+  judged. The strip margin gives no landing.
 - **OA-MSAW-071** The airport area's clearance applies only where the whole query circle is inside the area; a
   `gtm_clearance` area applies where the circle overlaps it at all.
 - **OA-MSAW-072** With no setting within the radius and age, the lowest setting of the last 12 h within 200 NM is
   used; only with none the allowance; the track stays flagged and the net InputMissing.
 - **OA-MSAW-073** A point outside the obstacle data has no obstacle data: counted as without coverage. The data is
-  the union of each loaded file's own extent (the cells of 0.5 degree holding an obstacle of it and their
-  neighbours), not the box around them; `--dof` takes a comma-separated list.
+  the union of each loaded file's own covered 0.5 degree cells: a cell with an obstacle, or an empty cell with obstacle
+  cells on both sides within 4 cells along its row and along its column (an interior gap); edges and borders are not
+  filled. An empty file is an error. `--dof` takes a comma-separated list; the track rows outside the coverage are
+  counted.
 - **OA-MSAW-074** Tracks on the ground are listed per track; an altitude with no barometric measurement behind it is
   no altitude, and is counted apart.
 - **OA-MSAW-075** An approach corridor's surface is its procedure's own path: the threshold crossing height over the
   threshold elevation rising at the lowest published vertical angle of the runway end, less `approach_allowance_ft`,
   at the circle's centre; where the CIFP gives neither, 3 degrees and 50 ft, and the runways so are counted. The
-  angle is that of the final approach legs only (from the final approach fix, 2 to 6 degrees); a configuration
-  whose allowance is below the tangent of any approach corridor's path angle times the largest lookup radius is
-  refused.
+  angle is that of the final approach legs only (from the final approach fix, 2 to 6 degrees).
 - **OA-MSAW-076** `--landing-of <alerts.csv>` counts the alerts of another run whose worst point is in the landing
   zone, by the corridors and geometry of this run; the diagnosis gives the landing alerts' depth, floor, height and
   distance, flown angle and altimeter, and how many alerts used the lowest-in-12-h setting.
 - **OA-MSAW-077** Where a lookup circle is wholly inside surface-bearing corridors (approach corridors and runway
   strips) and no departure corridor reaches it, an obstacle whose top is not above the highest of their surfaces,
-  less the allowance, at the obstacle's own position does not raise the floor; elsewhere every obstacle does.
+  less the allowance, at the obstacle's own position does not raise the floor, but only where the tangent of the
+  corridors' path angle times that lookup's own radius is not above the allowance; elsewhere every obstacle does.
 - **OA-MSAW-078** An altitude below FL180 with a setting is lowered by the ICAO Doc 8168 cold-temperature correction
-  from the METAR temperature at the altimeter station (never raised, flagged); with no station temperature there is
-  no correction, flagged.
+  from the METAR temperature at the altimeter station, up to 5,000 ft above the station (never raised, flagged);
+  with no station temperature, or higher than that, there is no correction, flagged.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.
 ## Runway geometry and occupancy (oa-runway)

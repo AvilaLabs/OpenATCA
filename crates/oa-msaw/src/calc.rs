@@ -172,24 +172,19 @@ pub const UNKNOWN_RATE_DESCENT_FPM: f64 = 1000.0;
 
 /// How far from the pavement edge a point may be and still be over the runway, metres.
 pub const PAVEMENT_MARGIN_M: f64 = 60.0;
-/// The vertical rate above which a track is climbing and no landing, feet per minute.
-pub const CLIMB_FPM: f64 = 200.0;
-/// An altitude change over 10 s within which a track is level, feet.
-pub const LEVEL_FT: f64 = 50.0;
-
-/// True if a track can be landing: not climbing. Its rate is at most [`CLIMB_FPM`], or it has
-/// stayed within [`LEVEL_FT`] over the last 10 s; a rate that is not known and no level evidence
-/// is not a landing.
+/// True if a track can be landing: not climbing. Its vertical rate is known and not above zero,
+/// and its altitude has not risen over the last 10 s (`change_10s_ft`, the altitude now less the
+/// altitude 10 s before; NaN: not known, so not a landing).
 pub fn not_climbing(vrate_known: bool, vrate_fpm: f64, change_10s_ft: f64) -> bool {
-    (vrate_known && vrate_fpm <= CLIMB_FPM) || (-LEVEL_FT..=LEVEL_FT).contains(&change_10s_ft)
+    vrate_known && vrate_fpm <= 0.0 && change_10s_ft.is_finite() && change_10s_ft <= 0.0
 }
 
-/// The runway elevation at a point, feet (rounded down), if the point itself is over the pavement
-/// of the runway strip `c`: along the runway between its threshold and its far end, and within the
-/// pavement half-width plus [`PAVEMENT_MARGIN_M`] of the centreline. The strip's wider margin gives
+/// The runway elevation at a point, feet (rounded down), if the whole circle of `radius_m` around
+/// it is over the pavement of the runway strip `c`: along the runway between its threshold and its
+/// far end, and within the pavement half-width plus [`PAVEMENT_MARGIN_M`] of the centreline. The strip's wider margin gives
 /// no landing. The elevation is interpolated along the runway between the elevations of its two
 /// ends.
-pub fn runway_elev_at(c: &Corridor, lat_e7: i32, lon_e7: i32) -> Option<i32> {
+pub fn runway_elev_at(c: &Corridor, lat_e7: i32, lon_e7: i32, radius_m: f64) -> Option<i32> {
     if c.kind != CK_RUNWAY {
         return None;
     }
@@ -202,10 +197,11 @@ pub fn runway_elev_at(c: &Corridor, lat_e7: i32, lon_e7: i32) -> Option<i32> {
     let signed = dx * cos_b - dy * sin_b;
     let across = if signed < 0.0 { -signed } else { signed };
     let run = c.length_m - c.land_from_m;
-    if !(along.is_finite() && across.is_finite() && run > 0.0)
-        || along < c.land_from_m
-        || along > c.length_m
-        || across > c.pave_half_m + PAVEMENT_MARGIN_M
+    if !(along.is_finite() && across.is_finite() && run > 0.0 && radius_m.is_finite())
+        || radius_m < 0.0
+        || along - radius_m < c.land_from_m
+        || along + radius_m > c.length_m
+        || across + radius_m > c.pave_half_m + PAVEMENT_MARGIN_M
     {
         return None;
     }
@@ -473,7 +469,7 @@ mod proofs {
             terrain_clearance_ft: tc,
             obstacle_clearance_ft: oc,
             max_speed_mps: 300.0,
-            r95_cap_m: 1000.0,
+            wide_degrade_share: 0.5,
             approach_allowance_ft: 0,
             approach_min_clearance_ft: amc,
             departure_min_clearance_ft: amc,

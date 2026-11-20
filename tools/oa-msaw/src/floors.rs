@@ -23,7 +23,8 @@ use std::time::Instant;
 
 use oa_dof::Dof;
 use oa_msaw::{
-    corridor_hit_ft, Corridor, FloorSample, MsawConfig, SamplePoint, CK_DEPARTURE, FLOOR_NONE,
+    corridor_hit_ft, Corridor, FloorSample, MsawConfig, SamplePoint, CK_APPROACH, CK_DEPARTURE,
+    FLOOR_NONE,
 };
 use oa_mva::Model;
 use oa_sealed::Sealed;
@@ -99,9 +100,9 @@ pub struct ObstacleIndex {
     pub extent: Option<(i32, i32, i32, i32)>,
     /// How many states and countries the file names.
     pub regions: usize,
-    /// The coverage of the files loaded: the cells of [`COVER_CELL_DEG`] that hold an obstacle of
-    /// any file, with the cells next to them (the union of the files' own extents: a bounding box
-    /// of a whole state would cover its neighbours). `None`: no extent was given.
+    /// The coverage of the files loaded: the union of each file's own covered cells of
+    /// [`COVER_CELL_DEG`] (see [`cover_cells`]; a bounding box of a state would cover its
+    /// neighbours). `None`: no extent was given.
     coverage: Option<std::collections::HashSet<(i32, i32)>>,
     /// The files the set is made of.
     pub files: usize,
@@ -114,21 +115,48 @@ fn cell_of(deg: f64, size: f64) -> i32 {
     (deg / size).floor() as i32
 }
 
-/// The coverage cells of positions (1e-7 degree): each cell that holds one, and the cells next to it.
+/// How far, in cells, an obstacle cell must lie on each side of an empty cell for it to count as an
+/// interior gap.
+const GAP_CELLS: i32 = 4;
+
+/// The covered cells of one file's positions (1e-7 degree): the cells that hold an obstacle, and an
+/// empty cell with obstacle cells on both sides of it within [`GAP_CELLS`] along its row AND along
+/// its column (an interior gap). Edges and borders are not filled: a cell outside the obstacles'
+/// own spread is not covered.
 fn cover_cells(points: impl Iterator<Item = (i32, i32)>) -> std::collections::HashSet<(i32, i32)> {
-    let mut cells = std::collections::HashSet::new();
+    let mut have = std::collections::HashSet::new();
     for (la, lo) in points {
-        let (a, b) = (
+        have.insert((
             cell_of(f64::from(la) / 1e7, COVER_CELL_DEG),
             cell_of(f64::from(lo) / 1e7, COVER_CELL_DEG),
-        );
-        for da in -1..=1 {
-            for db in -1..=1 {
-                cells.insert((a + da, b + db));
+        ));
+    }
+    let (Some(a0), Some(a1), Some(b0), Some(b1)) = (
+        have.iter().map(|c| c.0).min(),
+        have.iter().map(|c| c.0).max(),
+        have.iter().map(|c| c.1).min(),
+        have.iter().map(|c| c.1).max(),
+    ) else {
+        return have;
+    };
+    let side = |a: i32, b: i32, da: i32, db: i32| {
+        (1..=GAP_CELLS).any(|k| have.contains(&(a + da * k, b + db * k)))
+    };
+    let mut gaps = Vec::new();
+    for a in a0..=a1 {
+        for b in b0..=b1 {
+            if !have.contains(&(a, b))
+                && side(a, b, 0, -1)
+                && side(a, b, 0, 1)
+                && side(a, b, -1, 0)
+                && side(a, b, 1, 0)
+            {
+                gaps.push((a, b));
             }
         }
     }
-    cells
+    have.extend(gaps);
+    have
 }
 
 /// Indexes the obstacles of `d` (position 1e-7 degree, top feet above mean sea level).
@@ -171,7 +199,12 @@ impl ObstacleIndex {
         ix
     }
 
-    /// True if the circle of `radius_m` around the point lies inside the extent of the file the
+    /// The number of covered cells; `None` where no coverage was given.
+    pub fn covered_cells(&self) -> Option<usize> {
+        self.coverage.as_ref().map(|c| c.len())
+    }
+
+    /// True if the circle of `radius_m` around the point lies inside the coverage of the files the
     /// obstacles came from (or no extent was given): obstacle data covers it. A point outside has
     /// no obstacle data, which is no coverage, never "no obstacle".
     pub fn covers(&self, lat: f64, lon: f64, radius_m: f64) -> bool {
@@ -566,6 +599,18 @@ impl Floors {
         if holding.is_empty() {
             return ix.highest_within(lat, lon, radius_m);
         }
+        // The surface falls toward the threshold: an obstacle at the edge of the circle can be above
+        // the surface at the centre by the tangent of the angle times the radius. Only where the
+        // allowance covers that over this lookup's whole radius may the surface stand for the
+        // obstacles under it; otherwise every obstacle counts.
+        let rise_ft = holding
+            .iter()
+            .filter(|c| c.kind == CK_APPROACH)
+            .map(|c| oa_math::tan(c.path_angle_deg.to_radians()) * radius_m / 0.3048)
+            .fold(0.0, f64::max);
+        if rise_ft > f64::from(cfg.approach_allowance_ft) {
+            return ix.highest_within(lat, lon, radius_m);
+        }
         ix.highest_where(lat, lon, radius_m, &|ola, olo, top| {
             let surface = holding
                 .iter()
@@ -733,6 +778,16 @@ impl Floors {
 
     /// The extent of the obstacle file (south, north, west, east, 1e-7 degree) and how many states
     /// and countries it names; `None` if there is none or no extent was given.
+    /// Whether the obstacle data covers the point itself; `None` where there is no obstacle file.
+    pub fn obstacle_covers_point(&self, lat: f64, lon: f64) -> Option<bool> {
+        self.obstacles.as_ref().map(|o| o.covers(lat, lon, 0.0))
+    }
+
+    /// The covered cells of the obstacle data.
+    pub fn obstacle_cells(&self) -> Option<usize> {
+        self.obstacles.as_ref().and_then(|o| o.covered_cells())
+    }
+
     pub fn obstacle_extent(&self) -> Option<((i32, i32, i32, i32), usize)> {
         self.obstacles
             .as_ref()

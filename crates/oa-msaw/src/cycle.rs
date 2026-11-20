@@ -14,25 +14,27 @@ use oa_safety::net::{state_report, Area, NetId, NetReport, Reason, StateTable};
 
 use crate::calc::{
     alt_floor_ft, altitude_use, deg_to_e7, extrapolated_alt_ft, floor_of, grade_of, lowest_alt_ft,
-    not_climbing, predicted_alt_ft, sample_points, sample_span_s, violates, violation_time_s,
-    with_airport_area, AltUse, PathStart,
+    not_climbing, predicted_alt_ft, sample_points, sample_span_s, sample_time_s, violates,
+    violation_time_s, with_airport_area, AltUse, PathStart,
 };
 use crate::corridor::{corridor_hit_at, corridor_runway_elev_at};
 use crate::state::{alert_push, skip_push, MsawState};
 use crate::types::{
     Alert, AlertLog, CycleStats, FloorKind, FloorSample, Grade, MsawTrack, SamplePoint, SkipLog,
-    SkipWhy, Skipped, AF_COAST, AF_COLD_CORRECTED, AF_COLD_UNKNOWN, AF_GROUND_UNKNOWN,
-    AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE, AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN,
-    AF_STALE_EXTRAPOLATED, AF_UNCERTAIN, END_CLEAR, END_LOST_ALTITUDE_MISSING,
-    END_LOST_ALTITUDE_STALE, FLOOR_NONE, F_COAST, F_COLD_CORRECTED, F_COLD_UNKNOWN,
-    F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN, KB_APPROACH,
-    KB_DEPARTURE, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG, MAX_ABS_VRATE_FPM, ON_GROUND,
+    SkipWhy, Skipped, AF_COAST, AF_COLD_CORRECTED, AF_COLD_HIGH, AF_COLD_UNKNOWN,
+    AF_GROUND_UNKNOWN, AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE, AF_QNH_MISSING, AF_RADAR_ONLY,
+    AF_RATE_UNKNOWN, AF_STALE_EXTRAPOLATED, AF_UNCERTAIN, AF_WIDE_UNCERTAINTY, END_CLEAR,
+    END_LOST_ALTITUDE_MISSING, END_LOST_ALTITUDE_STALE, FLOOR_NONE, F_COAST, F_COLD_CORRECTED,
+    F_COLD_HIGH, F_COLD_UNKNOWN, F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN,
+    GROUND_UNKNOWN, KB_APPROACH, KB_DEPARTURE, KB_RUNWAY, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG,
+    MAX_ABS_VRATE_FPM, MAX_R95_M, ON_GROUND, WIDE_R95_M,
 };
 
 /// Internal bit of a planned row's flags: the vertical rate was unknown and is taken as zero.
 const IF_RATE_UNKNOWN: u16 = 0x100;
 /// Internal bit of a planned row's flags: the altitude was stale within the hold and was extrapolated.
 const IF_STALE_EXTRAPOLATED: u16 = 0x200;
+const IF_WIDE: u16 = 0x400;
 
 /// What one cycle did.
 // A7.2: cold struct, size guard waived.
@@ -63,6 +65,10 @@ fn add(a: &mut CycleStats, b: &CycleStats) {
     a.rows_bad = a.rows_bad.saturating_add(b.rows_bad);
     a.rows_over_capacity = a.rows_over_capacity.saturating_add(b.rows_over_capacity);
     a.r95_held = a.r95_held.saturating_add(b.r95_held);
+    a.wide = a.wide.saturating_add(b.wide);
+    a.rollout_points = a.rollout_points.saturating_add(b.rollout_points);
+    a.rollout_off_runway = a.rollout_off_runway.saturating_add(b.rollout_off_runway);
+    a.wide_degrade = a.wide_degrade.saturating_add(b.wide_degrade);
     a.rows_lost_upstream = a.rows_lost_upstream.saturating_add(b.rows_lost_upstream);
     a.over_budget = a.over_budget.saturating_add(b.over_budget);
     a.evaluated = a.evaluated.saturating_add(b.evaluated);
@@ -99,7 +105,8 @@ pub fn net_report_of(s: &CycleStats) -> NetReport {
         .saturating_add(s.rows_bad)
         .saturating_add(s.qnh_missing)
         .saturating_add(s.rows_lost_upstream)
-        .saturating_add(s.alt_loss);
+        .saturating_add(s.alt_loss)
+        .saturating_add(s.wide_degrade);
     let all = work.saturating_add(input);
     let (reason, count) = if work > 0 {
         (Reason::BudgetExceeded, all)
@@ -253,9 +260,14 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
             row.flags |= IF_RATE_UNKNOWN;
         }
         let r95 = f64::from(row.r95_m);
-        if !(r95.is_finite() && r95 >= 0.0 && r95 <= cfg.r95_cap_m) {
+        // The radius is never shrunk: an unusable one takes the largest, one above it is held to it.
+        if !(r95.is_finite() && (0.0..=MAX_R95_M).contains(&r95)) {
             stats.r95_held = stats.r95_held.saturating_add(1);
-            row.r95_m = cfg.r95_cap_m as f32;
+            row.r95_m = MAX_R95_M as f32;
+        }
+        if f64::from(row.r95_m) > WIDE_R95_M {
+            stats.wide = stats.wide.saturating_add(1);
+            row.flags |= IF_WIDE;
         }
         st.scratch.push(row);
     }
@@ -268,6 +280,9 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
     let lost = stats.alt_missing.saturating_add(stats.alt_stale);
     if airborne > 0 && (lost as f64) > cfg.altitude_loss_degrade_share * (airborne as f64) {
         stats.alt_loss = lost;
+    }
+    if airborne > 0 && (stats.wide as f64) > cfg.wide_degrade_share * (airborne as f64) {
+        stats.wide_degrade = stats.wide;
     }
     // Over the budget the lowest predicted altitudes are kept (ties by address), the rest counted
     // and listed.
@@ -358,6 +373,8 @@ fn flags_of(tr: &MsawTrack) -> u16 {
         (IF_STALE_EXTRAPOLATED, AF_STALE_EXTRAPOLATED),
         (F_COLD_CORRECTED, AF_COLD_CORRECTED),
         (F_COLD_UNKNOWN, AF_COLD_UNKNOWN),
+        (F_COLD_HIGH, AF_COLD_HIGH),
+        (IF_WIDE, AF_WIDE_UNCERTAINTY),
     ] {
         if tr.flags & bit != 0 {
             f |= af;
@@ -384,6 +401,10 @@ struct Verdict {
     /// The path reached the runway elevation over the runway: a landing (the later points are
     /// the aircraft on the ground and are not judged).
     landed: bool,
+    /// The points after a landing that were not judged (the roll-out), and those of them outside
+    /// every runway strip (past the far end or off the runway).
+    rollout: u32,
+    rollout_off: u32,
 }
 
 fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawState) -> Verdict {
@@ -398,6 +419,8 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         partial: false,
         below_mva: false,
         landed: false,
+        rollout: 0,
+        rollout_off: 0,
     };
     // The look-ahead is the terminal one where the track is now inside an approach capture box (A2.08)
     // and no departure corridor; runway strips, departure corridors, airport terminal areas and
@@ -409,13 +432,14 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         }
         _ => cfg.look_ahead_s,
     };
-    // A point over the pavement is a landing only for a track that is not climbing and whose
-    // altitude is not biased low by a missing altimeter setting.
+    // A point over the pavement is a landing only for a track that is not climbing (a known rate not
+    // above zero and no rise over 10 s) and whose altitude is fresh, has a real setting and is not
+    // corrected for cold air: only then is the altitude as exact as the runway elevation.
     let may_land = not_climbing(
         tr.flags & IF_RATE_UNKNOWN == 0,
         vr,
         f64::from(tr.alt_change_10s_ft),
-    ) && tr.flags & F_QNH_MISSING == 0;
+    ) && tr.flags & (F_QNH_MISSING | F_COLD_CORRECTED | IF_STALE_EXTRAPOLATED) == 0;
     for (k, (p, s)) in pts.iter().zip(floors.iter()).enumerate() {
         let hit = corridor_hit_at(cfg, &st.cidx, p);
         let (lo, hi) = sample_span_s(k, cfg.samples, cfg.look_ahead_s);
@@ -429,9 +453,22 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         // ground, and is no path the aircraft flies. A track that does not qualify (a climb, a
         // go-around, a low pass, no setting) never rolls out: every point of its path is judged.
         if v.landed {
+            v.rollout += 1;
+            if hit.is_none_or(|h| h.kinds & KB_RUNWAY == 0) {
+                v.rollout_off += 1;
+            }
             continue;
         }
-        if may_land && corridor_runway_elev_at(cfg, &st.cidx, p).is_some_and(|e| low <= e) {
+        // The altitude at the point itself, not the lowest of its span.
+        let at_point = alt_floor_ft(predicted_alt_ft(
+            alt,
+            vr,
+            sample_time_s(k, cfg.samples, cfg.look_ahead_s),
+        ));
+        if may_land
+            && corridor_runway_elev_at(cfg, &st.cidx, p, f64::from(tr.r95_m))
+                .is_some_and(|e| at_point <= e)
+        {
             // The path reaches the runway elevation over the pavement: a landing at this point
             // (and only this point: the points outside the runway are still judged).
             v.landed = true;
@@ -627,6 +664,10 @@ pub fn msaw_evaluate(
         if v.landed {
             stats.landings = stats.landings.saturating_add(1);
         }
+        stats.rollout_points = stats.rollout_points.saturating_add(u64::from(v.rollout));
+        stats.rollout_off_runway = stats
+            .rollout_off_runway
+            .saturating_add(u64::from(v.rollout_off));
         let Some(ttv) = v.ttv_s else {
             // An alert open for a track whose altitude is stale within the hold stays open: the
             // hysteresis does not close it on an altitude that is no longer measured.

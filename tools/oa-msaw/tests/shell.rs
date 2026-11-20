@@ -150,7 +150,7 @@ fn the_configuration_has_no_defaults_and_names_what_is_wrong() {
             c.approach_min_clearance_ft,
             c.velocity_uncertainty_mps
         ),
-        (250, 100, 5.0)
+        (100, 100, 5.0)
     );
     assert_eq!(
         (s.no_qnh_allowance_ft, s.metar_radius_nm, s.metar_max_age_s),
@@ -508,30 +508,24 @@ fn the_path_angle_is_the_final_approachs_only_and_the_strip_holds_its_pavement_a
     assert!((a.corridors[0].corridor.path_angle_deg - 3.0).abs() < 1e-9);
 }
 
-// REQ: OA-MSAW-075
+// REQ: OA-MSAW-077
 #[test]
-fn a_configuration_whose_allowance_is_under_the_rise_of_the_path_over_the_lookup_radius_is_refused()
-{
-    let mut s = settings().msaw;
-    s.n_corridors = 1;
-    s.corridors[0].kind = CK_APPROACH;
-    s.corridors[0].path_angle_deg = 3.0;
-    assert!(oa_msaw_run::config::check_allowance(&s).is_ok());
-    // r95 of 2,000 m needs 400 ft and more; 100 ft is refused naming the cause.
-    s.r95_cap_m = 2000.0;
-    s.approach_allowance_ft = 100;
-    let e = oa_msaw_run::config::check_allowance(&s).unwrap_err();
-    assert!(
-        e.contains("approach_allowance_ft") && e.contains("r95_cap_m"),
-        "{e}"
-    );
-    s.approach_allowance_ft = 500;
-    assert!(oa_msaw_run::config::check_allowance(&s).is_ok());
-    // A steeper path needs more.
-    s.corridors[0].path_angle_deg = 6.0;
-    assert!(oa_msaw_run::config::check_allowance(&s).is_err());
-    // The development configuration passes.
-    assert!(oa_msaw_run::config::check_allowance(&settings().msaw).is_ok());
+fn the_surface_stands_for_an_obstacle_only_where_the_allowance_covers_the_rise_over_that_lookups_radius(
+) {
+    // A 150 ft tower (top 590) beside the final mile, below the surface at its own position: left to
+    // the surface with the lookup circle of 100 m (rise over about 408 m is 70 ft against the
+    // allowance of 100 ft), and counted whole with a circle of 1.2 km (the rise is about 240 ft).
+    let (cfg, mut f, mut p) = tower_rig(590, 300.0, false);
+    assert_eq!(f.floor_at(&p).unwrap().obstacle_ft, FLOOR_NONE);
+    p.radius_m = 1200.0;
+    assert_eq!(f.floor_at(&p).unwrap().obstacle_ft, 590);
+    // The same wide circle with an allowance that covers the rise is left to the surface again.
+    let mut big = cfg;
+    big.approach_allowance_ft = 300;
+    let (_, mut g, mut q) = tower_rig(590, 300.0, false);
+    g.set_corridors(&big);
+    q.radius_m = 1200.0;
+    assert_eq!(g.floor_at(&q).unwrap().obstacle_ft, FLOOR_NONE);
 }
 
 // REQ: OA-MSAW-055
@@ -1468,26 +1462,42 @@ fn the_coverage_of_several_files_is_the_union_of_each_files_own_extent() {
     use oa_msaw_run::floors::ObstacleIndex;
     // California and Colorado loaded: a point in Nevada between them is obstacle data absent, and a
     // point inside either is covered.
-    let ca = ObstacleIndex::from_file_points(vec![
-        (340_000_000, -1_180_000_000, 900),
-        (360_000_000, -1_200_000_000, 800),
-        (390_000_000, -1_220_000_000, 700),
-        (320_000_000, -1_150_000_000, 600),
-    ]);
-    let co = ObstacleIndex::from_file_points(vec![
-        (390_000_000, -1_050_000_000, 9000),
-        (380_000_000, -1_040_000_000, 9000),
-    ]);
+    // One obstacle in each 0.5 degree cell of a block, but for an interior hole.
+    let block = |lat0: i32, lat1: i32, lon0: i32, lon1: i32, hole: (i32, i32)| {
+        let mut v = Vec::new();
+        for a in lat0..lat1 {
+            for b in lon0..lon1 {
+                if (a, b) != hole {
+                    v.push((a * 5_000_000 + 2_500_000, b * 5_000_000 + 2_500_000, 900));
+                }
+            }
+        }
+        v
+    };
+    // California about 33 to 40 N, 123 to 117 W; Colorado 37 to 41 N, 108 to 103 W.
+    let ca = ObstacleIndex::from_file_points(block(66, 80, -246, -234, (72, -240)));
+    let co = ObstacleIndex::from_file_points(block(74, 82, -216, -206, (78, -211)));
     let mut both = ca;
     both.merge(co);
     assert_eq!(both.files, 2);
-    assert_eq!(both.count, 6);
-    assert!(both.covers(36.0, -120.0, 1000.0), "California");
-    assert!(both.covers(39.0, -105.0, 1000.0), "Colorado");
+    assert!(both.covers(36.0, -121.0, 1000.0), "California");
+    assert!(both.covers(39.0, -105.5, 1000.0), "Colorado");
+    // An interior gap of a file (a cell with no obstacle between obstacle cells) is covered;
+    // its edge and the cells beyond are not.
+    assert!(
+        both.covers(36.25, -119.75, 100.0),
+        "the hole of the California block"
+    );
+    assert!(!both.covers(40.25, -121.0, 100.0), "past the northern edge");
+    assert!(
+        !both.covers(36.0, -116.0, 100.0),
+        "30 NM across the border into Nevada"
+    );
     assert!(!both.covers(38.5, -116.5, 1000.0), "Nevada: no file of it");
     // The box around both would have covered it.
     let (s, n, w, e) = both.extent.unwrap();
     assert!(s < 385_000_000 && n > 385_000_000 && w < -1_165_000_000 && e > -1_165_000_000);
+    let _ = (s, n, w, e);
     let mut f = Floors::new(None, Some(both), None);
     assert!(
         !f.floor_at(&point(38.5, -116.5, 100.0))
@@ -1495,7 +1505,7 @@ fn the_coverage_of_several_files_is_the_union_of_each_files_own_extent() {
             .obstacle_covered
     );
     assert!(
-        f.floor_at(&point(36.0, -120.0, 100.0))
+        f.floor_at(&point(36.0, -121.0, 100.0))
             .unwrap()
             .obstacle_covered
     );
@@ -1520,6 +1530,8 @@ fn the_cold_temperature_correction_only_lowers_an_altitude_and_says_when_it_coul
     let (a, code) = q.cold_ft(40.0, -88.0, t, 2600.0);
     assert_eq!(code, 1);
     assert!(a < 2600.0 && a > 2400.0, "{a}");
+    // Above 5,000 ft over the station the correction is not made, and said so.
+    assert_eq!(q.cold_ft(40.0, -88.0, t, 6000.0), (6000.0, 3));
     // At or below the station there is nothing to correct; a warm station gives no correction.
     assert_eq!(q.cold_ft(40.0, -88.0, t, 600.0), (600.0, 0));
     let mut warm = Qnh::from_stations(vec![(40.0, -88.0, obs.clone())], 100.0, 7200);
@@ -1529,4 +1541,18 @@ fn the_cold_temperature_correction_only_lowers_an_altitude_and_says_when_it_coul
     let mut none = Qnh::from_stations(vec![(40.0, -88.0, obs)], 100.0, 7200);
     none.set_station_weather(0, 600.0, vec![f64::NAN]);
     assert_eq!(none.cold_ft(40.0, -88.0, t, 2600.0), (2600.0, 2));
+}
+
+// REQ: OA-MSAW-073
+#[test]
+fn an_empty_obstacle_file_is_an_error_not_full_coverage() {
+    let dir = std::env::temp_dir().join(format!("oa-msaw-empty-dof-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("DOF.DAT");
+    std::fs::write(&p, b"").unwrap();
+    let e = oa_msaw_run::run::read_dof(&p)
+        .map(|_| ())
+        .expect_err("an empty file is refused");
+    assert!(!e.is_empty());
+    std::fs::remove_dir_all(&dir).ok();
 }

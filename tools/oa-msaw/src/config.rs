@@ -151,7 +151,7 @@ const KEYS: [&str; 39] = [
     "max_open",
     "track_budget",
     "max_speed_mps",
-    "r95_cap_m",
+    "wide_degrade_share",
     "net_stale_limit_s",
     "net_future_horizon_s",
     "alert_log_capacity",
@@ -465,7 +465,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         terrain_clearance_ft: feet("gtm_clearance_ft", get("gtm_clearance_ft")?)?,
         obstacle_clearance_ft: feet("obstacle_clearance_ft", get("obstacle_clearance_ft")?)?,
         max_speed_mps: finite("max_speed_mps", get("max_speed_mps")?)?,
-        r95_cap_m: finite("r95_cap_m", get("r95_cap_m")?)?,
+        wide_degrade_share: finite("wide_degrade_share", get("wide_degrade_share")?)?,
         approach_allowance_ft: feet("approach_allowance_ft", get("approach_allowance_ft")?)?,
         approach_min_clearance_ft: feet(
             "approach_min_clearance_ft",
@@ -564,38 +564,4 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         metar_radius_nm,
         metar_max_age_s,
     })
-}
-
-/// Feet in a metre.
-const FT_PER_M: f64 = 1.0 / 0.3048;
-
-/// The largest radius a floor lookup of a point on an approach is made with, metres: the position
-/// radius the configuration allows plus the growth of the velocity uncertainty over the terminal
-/// look-ahead, rounded up as the lookup does.
-pub fn largest_lookup_radius_m(c: &MsawConfig) -> f64 {
-    let r = c.r95_cap_m + c.velocity_uncertainty_mps * c.terminal_lookahead_s;
-    crate::floors::Floors::effective_radius_m(r)
-}
-
-/// Refuses a configuration whose approach corridors would let terrain at the edge of the lookup
-/// circle stand above the surface at its centre: the surface falls by the tangent of the path angle
-/// for each metre toward the threshold, so the allowance must cover that tangent over the largest
-/// lookup radius.
-pub fn check_allowance(c: &MsawConfig) -> Result<(), String> {
-    let r = largest_lookup_radius_m(c);
-    for k in c
-        .corridors
-        .iter()
-        .take(c.n_corridors)
-        .filter(|k| k.kind == CK_APPROACH)
-    {
-        let need = oa_math::tan(k.path_angle_deg.to_radians()) * r * FT_PER_M;
-        if f64::from(c.approach_allowance_ft) < need {
-            return Err(format!(
-                "approach_allowance_ft {} is below {:.0} ft, the rise of a {:.1} degree path over the largest lookup radius of {:.0} m (r95_cap_m {} and the velocity uncertainty over the terminal look-ahead): raise the allowance or lower r95_cap_m",
-                c.approach_allowance_ft, need, k.path_angle_deg, r, c.r95_cap_m
-            ));
-        }
-    }
-    Ok(())
 }

@@ -57,6 +57,9 @@ pub const F_COLD_CORRECTED: u16 = 32;
 /// [`MsawTrack::flags`]: the temperature at the altimeter station was not known: no cold-temperature
 /// correction was made.
 pub const F_COLD_UNKNOWN: u16 = 64;
+/// [`MsawTrack::flags`]: the altitude is more than 5,000 ft above the altimeter station, beyond the
+/// terminal and approach use of the cold-temperature correction: not corrected.
+pub const F_COLD_HIGH: u16 = 128;
 
 /// [`MsawTrack::ground`]: the tracker does not say (the track is evaluated).
 pub const GROUND_UNKNOWN: u8 = 0;
@@ -91,6 +94,16 @@ pub const AF_COLD_CORRECTED: u16 = 512;
 /// [`Alert::flags`]: no cold-temperature correction was made for want of a station temperature, at
 /// some cycle.
 pub const AF_COLD_UNKNOWN: u16 = 1024;
+/// [`Alert::flags`]: the track's 95 % radius was above [`WIDE_R95_M`] (or unusable) at some cycle.
+pub const AF_WIDE_UNCERTAINTY: u16 = 2048;
+/// [`Alert::flags`]: not cold-corrected for being over 5,000 ft above the station, at some cycle.
+pub const AF_COLD_HIGH: u16 = 4096;
+
+/// The largest 95 % radius a lookup is made with, metres. A radius is never shrunk below the
+/// track's own: one that is unusable (NaN, negative) takes this, one above it is held to it.
+pub const MAX_R95_M: f64 = 10_000.0;
+/// A 95 % radius above this, metres, is flagged and counted as wide uncertainty.
+pub const WIDE_R95_M: f64 = 2_000.0;
 
 /// [`Alert::end_reason`]: the alert ended by the hysteresis (the track was clear).
 pub const END_CLEAR: u8 = 0;
@@ -267,8 +280,9 @@ pub struct MsawConfig {
     pub obstacle_clearance_ft: i32,
     /// A row faster than this, metres per second, is refused as bad.
     pub max_speed_mps: f64,
-    /// A track's 95 % radius is held to this, metres (a row without a usable radius takes it).
-    pub r95_cap_m: f64,
+    /// The net reads degraded when more than this share of a cycle's airborne tracks have a 95 %
+    /// radius above [`WIDE_R95_M`].
+    pub wide_degrade_share: f64,
     /// Inside a corridor the surface is held this far below the published altitude at the fix, feet.
     pub approach_allowance_ft: i32,
     /// Inside an approach or runway corridor the clearance above terrain and obstacle tops, feet.
@@ -454,6 +468,10 @@ pub struct CycleStats {
     pub alt_loss: u64,
     /// Track cycles with a point that qualified as a landing over the runway (not judged).
     pub landings: u64,
+    /// Path points not judged for a landed track (the roll-out), and those of them outside every
+    /// runway strip (past the far end or off the runway).
+    pub rollout_points: u64,
+    pub rollout_off_runway: u64,
     /// Tracks whose altitude was lost (missing or past the hold): protection lost, whatever the
     /// share, and of them those that had an open alert (held open).
     pub protection_lost: u64,
@@ -466,6 +484,10 @@ pub struct CycleStats {
     pub rows_over_capacity: u64,
     /// Rows whose 95 % radius was not usable or above the cap and was held to the cap.
     pub r95_held: u64,
+    /// Track cycles with a 95 % radius above [`WIDE_R95_M`] or unusable, and the cycles' count of
+    /// them when more than `wide_degrade_share` of the airborne tracks (the net degrades).
+    pub wide: u64,
+    pub wide_degrade: u64,
     /// Rows lost before they reached the net (told by the caller).
     pub rows_lost_upstream: u64,
     /// Tracks not evaluated for want of budget.

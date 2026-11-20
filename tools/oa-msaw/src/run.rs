@@ -12,8 +12,8 @@ use oa_msaw::{
     alert_log_clear, alert_log_new, msaw_check, msaw_evaluate, msaw_finish, msaw_new,
     msaw_note_lost_input, msaw_plan, msaw_points, msaw_totals, skip_log_clear, skip_log_new, Alert,
     AlertLog, CycleStats, FloorSample, MsawState, MsawTrack, SkipLog, SkipWhy, FLOOR_NONE, F_COAST,
-    F_COLD_CORRECTED, F_COLD_UNKNOWN, F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY,
-    F_UNCERTAIN, MAX_CORRIDORS,
+    F_COLD_CORRECTED, F_COLD_HIGH, F_COLD_UNKNOWN, F_IDENTITY_UNCONFIRMED, F_QNH_MISSING,
+    F_RADAR_ONLY, F_UNCERTAIN, MAX_CORRIDORS,
 };
 use oa_safety::geom::Vertex;
 use oa_safety::inhibit::{
@@ -109,6 +109,11 @@ pub struct Record {
     pub rows_skipped: u64,
     /// Rows whose altitude had no barometric measurement behind it (taken as no altitude).
     pub alt_age_unknown: u64,
+    /// Track rows with a position, those outside the obstacle data's coverage, and the distinct
+    /// 0.5 degree cells they lay in.
+    pub cov_rows: u64,
+    pub cov_uncovered_rows: u64,
+    pub cov_uncovered_cells: usize,
     /// The net state after the last report, the end of the run included.
     pub final_net: String,
     pub made: Vec<MadeInhibit>,
@@ -181,6 +186,9 @@ struct Feed<'a> {
     alt_hist: std::collections::HashMap<u32, Vec<(i64, f32)>>,
     /// Rows with an altitude but no barometric measurement of it: taken as no altitude.
     alt_age_unknown: u64,
+    cov_rows: u64,
+    cov_uncovered_rows: u64,
+    cov_cells: std::collections::BTreeSet<(i32, i32)>,
     last_t: i64,
     /// The first terrain file that could not be read: the run is then refused.
     error: Option<String>,
@@ -383,6 +391,14 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
         }
         f.tick_rows += 1;
         let (lat, lon) = (f64::from(la) / 1e7, f64::from(lo) / 1e7);
+        if let Some(c) = f.floors.obstacle_covers_point(lat, lon) {
+            f.cov_rows += 1;
+            if !c {
+                f.cov_uncovered_rows += 1;
+                f.cov_cells
+                    .insert(((lat / 0.5).floor() as i32, (lon / 0.5).floor() as i32));
+            }
+        }
         let mut flags = flags_of(fl);
         let mut alt_ft = if fl & O_HAS_ALT != 0 { alt } else { f32::NAN };
         let alt_age_s = f.alt_times.get(&addr).map_or(f32::NAN, |v| {
@@ -416,6 +432,7 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
                 match code {
                     1 => flags |= F_COLD_CORRECTED,
                     2 => flags |= F_COLD_UNKNOWN,
+                    3 => flags |= F_COLD_HIGH,
                     _ => {}
                 }
             }
@@ -543,6 +560,9 @@ pub fn track_and_alert(
         alt_times: std::collections::HashMap::new(),
         alt_hist: std::collections::HashMap::new(),
         alt_age_unknown: 0,
+        cov_rows: 0,
+        cov_uncovered_rows: 0,
+        cov_cells: std::collections::BTreeSet::new(),
         last_t: 0,
         error: None,
     };
@@ -598,6 +618,9 @@ pub fn track_and_alert(
         tick_rows: f.tick_rows,
         rows_skipped: f.rows_skipped,
         alt_age_unknown: f.alt_age_unknown,
+        cov_rows: f.cov_rows,
+        cov_uncovered_rows: f.cov_uncovered_rows,
+        cov_uncovered_cells: f.cov_cells.len(),
         final_net,
         made,
         hidden: f.hidden,
@@ -811,7 +834,7 @@ fn gtm_areas(g: &Sealed, set: &Settings) -> Result<Vec<(Area, i32)>, String> {
 }
 
 /// The obstacles of a DOF file: the zip that holds `DOF.DAT`, or the file itself.
-fn read_dof(p: &Path) -> Result<(ObstacleIndex, oa_dof::Dof), String> {
+pub fn read_dof(p: &Path) -> Result<(ObstacleIndex, oa_dof::Dof), String> {
     let is_zip = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
     let bytes = if is_zip {
         let z = oa_zip::read_archive_file(p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -822,6 +845,12 @@ fn read_dof(p: &Path) -> Result<(ObstacleIndex, oa_dof::Dof), String> {
         oa_dof::read_file(p).map_err(|e| format!("{}: {e}", p.display()))?
     };
     let d = oa_dof::parse_dof(&bytes).map_err(|e| format!("{}: {e}", p.display()))?;
+    if d.lat_e7.is_empty() {
+        return Err(format!(
+            "{}: no obstacle in the file (an empty file is not coverage)",
+            p.display()
+        ));
+    }
     Ok((obstacle_index(&d), d))
 }
 
@@ -987,7 +1016,6 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
             set.msaw.n_corridors += 1;
         }
     }
-    crate::config::check_allowance(&set.msaw)?;
     // The altimeter settings: the METAR files, or none (every altitude below FL180 then reads as
     // having no setting, which the net counts).
     let qnh = match &args.metar {
@@ -1094,6 +1122,10 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     used.diag_cpu_s = rec.diag_cpu_s;
     used.tiles_absent = rec.floors.absent_tiles();
     used.alt_age_unknown = rec.alt_age_unknown;
+    used.obstacle_cells = rec.floors.obstacle_cells();
+    used.cov_rows = rec.cov_rows;
+    used.cov_uncovered_rows = rec.cov_uncovered_rows;
+    used.cov_uncovered_cells = rec.cov_uncovered_cells;
     used.obstacle_extent = rec.floors.obstacle_extent();
     used.rss_end_kb = proc_kb("VmHWM:");
     used.times = rec.times;

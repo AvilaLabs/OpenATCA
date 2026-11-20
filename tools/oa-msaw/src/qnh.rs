@@ -38,6 +38,8 @@ const BUCKET_S: i64 = 300;
 /// conservative direction.
 const FALLBACK_RADIUS_NM: f64 = 200.0;
 const FALLBACK_AGE_S: i64 = 12 * 3600;
+/// The largest height above the altimeter station the cold-temperature correction is made up to, feet.
+pub const COLD_MAX_HEIGHT_FT: f64 = 5_000.0;
 /// The altitude from which the standard setting is flown, feet.
 pub const FL180_FT: f64 = 18_000.0;
 
@@ -91,6 +93,8 @@ pub struct QnhStats {
     pub fallback: u64,
     /// Altitudes lowered by the cold-temperature correction.
     pub cold: u64,
+    /// Altitudes over [`COLD_MAX_HEIGHT_FT`] above the station in cold air: not corrected.
+    pub cold_high: u64,
     pub lookups: u64,
     pub cache_hits: u64,
 }
@@ -312,7 +316,7 @@ impl Qnh {
     /// The cold-temperature correction (ICAO Doc 8168) of an altitude that was corrected with the
     /// setting at (`lat`, `lon`), `t_s`: the altitude lowered by the correction for the temperature
     /// at the station of that setting, and a code (0: not needed, 1: corrected, 2: the temperature
-    /// or elevation of the station not known: no correction). Never raises an altitude.
+    /// or elevation of the station not known, 3: over 5,000 ft above it: no correction). Never raises an altitude.
     pub fn cold_ft(&mut self, lat: f64, lon: f64, t_s: i64, indicated_ft: f64) -> (f64, u8) {
         self.stats.lookups += 1;
         let key = (cell_of(lat), cell_of(lon), t_s.div_euclid(BUCKET_S));
@@ -333,6 +337,12 @@ impl Qnh {
         let h = indicated_ft - elev;
         if t >= 15.0 || h <= 0.0 {
             return (indicated_ft, 0);
+        }
+        // The correction is for the terminal and approach: above this the air column is too tall for
+        // one station's temperature to stand for it.
+        if h > COLD_MAX_HEIGHT_FT {
+            self.stats.cold_high += 1;
+            return (indicated_ft, 3);
         }
         let dh = cold_correction_ft(h, elev, t);
         self.stats.cold += 1;

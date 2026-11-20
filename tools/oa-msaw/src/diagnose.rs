@@ -330,7 +330,7 @@ fn radius(o: &mut String, i: &DiagIn) {
         let ts =
             oa_msaw::calc::sample_time_s(usize::from(a.worst_k), i.cfg.samples, i.cfg.look_ahead_s);
         let speed = f64::from(a.vel_east_mps).hypot(f64::from(a.vel_north_mps));
-        let r95 = f64::from(a.r95_m).min(i.cfg.r95_cap_m);
+        let r95 = f64::from(a.r95_m);
         let growth = i.cfg.velocity_uncertainty_mps * ts;
         let half = speed * step / 2.0;
         v.push((

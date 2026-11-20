@@ -6,7 +6,7 @@ use crate::corridor::{corridor_index_new, CorridorIndex};
 use crate::types::{
     Alert, AlertLog, CycleStats, MsawConfig, MsawTrack, SamplePoint, SkipLog, Skipped, CK_APPROACH,
     CK_DEPARTURE, MAX_CLEARANCE_FT, MAX_CORRIDORS, MAX_CORRIDOR_LENGTH_M, MAX_LOOK_AHEAD_S,
-    MAX_OPEN_LIMIT, MAX_RADIUS_M, MAX_SAMPLES, MAX_SPEED_LIMIT_MPS, MAX_TRACKS_LIMIT,
+    MAX_OPEN_LIMIT, MAX_R95_M, MAX_RADIUS_M, MAX_SAMPLES, MAX_SPEED_LIMIT_MPS, MAX_TRACKS_LIMIT,
 };
 
 /// Most points of one cycle (`max_tracks` times `samples`): the table of points is allocated
@@ -83,8 +83,11 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
     if !(pos(c.max_speed_mps) && c.max_speed_mps <= MAX_SPEED_LIMIT_MPS) {
         return Err("max_speed_mps");
     }
-    if !(pos(c.r95_cap_m) && c.r95_cap_m <= MAX_RADIUS_M) {
-        return Err("r95_cap_m");
+    if !(c.wide_degrade_share.is_finite()
+        && c.wide_degrade_share >= 0.0
+        && c.wide_degrade_share <= 1.0)
+    {
+        return Err("wide_degrade_share");
     }
     if !(c.max_altitude_age_s.is_finite() && c.max_altitude_age_s > 0.0) {
         return Err("max_altitude_age_s");
@@ -116,7 +119,7 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
     // The query radius of a point is not held down (a held radius would not be conservative):
     // the configuration must keep it inside the bound.
     let half_step = c.look_ahead_s / ((c.samples - 1) as f64) / 2.0;
-    if c.r95_cap_m + c.velocity_uncertainty_mps * c.look_ahead_s + c.max_speed_mps * half_step
+    if MAX_R95_M + c.velocity_uncertainty_mps * c.look_ahead_s + c.max_speed_mps * half_step
         > MAX_RADIUS_M
     {
         return Err("look_ahead_s and samples: query radius beyond the bound");

@@ -126,6 +126,7 @@ pub fn corridor_runway_elev_at(
     cfg: &MsawConfig,
     ix: &CorridorIndex,
     p: &SamplePoint,
+    radius_m: f64,
 ) -> Option<i32> {
     let cell = (
         i32::div_euclid(p.lat_e7, CELL_E7),
@@ -140,7 +141,7 @@ pub fn corridor_runway_elev_at(
         let Some(c) = cfg.corridors.get(usize::from(k)) else {
             continue;
         };
-        if let Some(e) = runway_elev_at(c, p.lat_e7, p.lon_e7) {
+        if let Some(e) = runway_elev_at(c, p.lat_e7, p.lon_e7, radius_m) {
             best = Some(best.map_or(e, |b| b.min(e)));
         }
     }

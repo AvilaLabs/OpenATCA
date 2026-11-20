@@ -6,9 +6,10 @@ use std::fmt::Write as _;
 
 use oa_msaw::{
     Alert, CycleStats, FloorKind, Grade, MsawConfig, SkipWhy, AF_COAST, AF_COLD_CORRECTED,
-    AF_COLD_UNKNOWN, AF_GROUND_UNKNOWN, AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE,
+    AF_COLD_HIGH, AF_COLD_UNKNOWN, AF_GROUND_UNKNOWN, AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE,
     AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_STALE_EXTRAPOLATED, AF_UNCERTAIN,
-    CK_APPROACH, CK_DEPARTURE, CK_RUNWAY, END_LOST_ALTITUDE_MISSING, END_LOST_ALTITUDE_STALE,
+    AF_WIDE_UNCERTAINTY, CK_APPROACH, CK_DEPARTURE, CK_RUNWAY, END_LOST_ALTITUDE_MISSING,
+    END_LOST_ALTITUDE_STALE,
 };
 use oa_safety::net::{reason_text, NetState};
 
@@ -19,7 +20,7 @@ use crate::qnh::QnhStats;
 use crate::run::{HiddenAgg, MadeInhibit, SkipAgg};
 
 /// The flag bits of an alert with their names, in the order the summary lists them.
-pub const FLAG_NAMES: [(u16, &str); 11] = [
+pub const FLAG_NAMES: [(u16, &str); 13] = [
     (AF_RATE_UNKNOWN, "rate_unknown"),
     (AF_COAST, "coast"),
     (AF_UNCERTAIN, "uncertain"),
@@ -31,6 +32,8 @@ pub const FLAG_NAMES: [(u16, &str); 11] = [
     (AF_STALE_EXTRAPOLATED, "stale_extrapolated"),
     (AF_COLD_CORRECTED, "cold_corrected"),
     (AF_COLD_UNKNOWN, "cold_unknown"),
+    (AF_COLD_HIGH, "cold_high"),
+    (AF_WIDE_UNCERTAINTY, "wide_uncertainty"),
 ];
 
 /// The text of how an alert ended.
@@ -372,6 +375,10 @@ pub struct DataUsed {
     pub tiles_absent: Vec<String>,
     /// Rows whose altitude had no barometric measurement behind it: counted, taken as no altitude.
     pub alt_age_unknown: u64,
+    pub cov_rows: u64,
+    pub cov_uncovered_rows: u64,
+    pub cov_uncovered_cells: usize,
+    pub obstacle_cells: Option<usize>,
     /// The extent of the obstacle file and how many states it names.
     pub obstacle_extent: Option<((i32, i32, i32, i32), usize)>,
     /// The airports of the CIFP that have an approach: identifier, latitude, longitude.
@@ -549,12 +556,22 @@ pub fn summary_text(i: &SummaryInput) -> String {
     match i.data.obstacles {
         Some(n) => {
             let _ = writeln!(o, "  obstacles indexed {n}");
-            if let Some(((s, nn, w, e), regions)) = i.data.obstacle_extent {
-                let d = |x: i32| f64::from(x) / 1e7;
+            if let Some((_, regions)) = i.data.obstacle_extent {
                 let _ = writeln!(
                     o,
-                    "  obstacle data covers latitude {:.2} to {:.2}, longitude {:.2} to {:.2} ({} states or countries); a point outside is obstacle data absent (counted as without coverage)",
-                    d(s), d(nn), d(w), d(e), regions
+                    "  obstacle data covers {} cells of 0.5 degree ({} states or countries): a cell with an obstacle of a loaded file, or an empty cell with obstacle cells on both sides within 4 cells along its row and along its column (an interior gap); edges and borders are not filled; a point outside is obstacle data absent (counted as without coverage)",
+                    i.data.obstacle_cells.unwrap_or(0),
+                    regions
+                );
+                let share = if i.data.cov_rows > 0 {
+                    100.0 * i.data.cov_uncovered_rows as f64 / i.data.cov_rows as f64
+                } else {
+                    0.0
+                };
+                let _ = writeln!(
+                    o,
+                    "  track rows outside the obstacle coverage: {} of {} ({share:.3} %), in {} cells of 0.5 degree",
+                    i.data.cov_uncovered_rows, i.data.cov_rows, i.data.cov_uncovered_cells
                 );
             }
         }
@@ -708,7 +725,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
     );
     let _ = writeln!(
         o,
-        "track cycles with a point that qualified as a landing (over the pavement, not climbing, a setting, at the runway elevation there; the points after it are the roll-out and are not judged) {}",
+        "track cycles with a point that qualified as a landing (the whole 95 % circle over the pavement plus 60 m, a known rate not above zero and no rise over 10 s, a fresh altitude with a real setting and no cold correction, at or below the runway elevation at the point; the points after it are the roll-out and are not judged) {}",
         t.landings
     );
     let _ = writeln!(
@@ -734,7 +751,16 @@ pub fn summary_text(i: &SummaryInput) -> String {
         "vertical rate unknown (predicted level) {}",
         t.rate_unknown
     );
-    let _ = writeln!(o, "95 % radius held to the cap {}", t.r95_held);
+    let _ = writeln!(
+        o,
+        "95 % radius unusable or above 10 km, held to 10 km {}; above 2 km (flagged wide_uncertainty, track cycles; the net reads degraded when more than {} of the airborne tracks of a cycle are, {} track cycles) {}",
+        t.r95_held, i.cfg.wide_degrade_share, t.wide_degrade, t.wide
+    );
+    let _ = writeln!(
+        o,
+        "roll-out path points not judged (after a landing point) {}, of them outside every runway strip (past the far end or off it) {}",
+        t.rollout_points, t.rollout_off_runway
+    );
     let _ = writeln!(
         o,
         "track cycles below the floor within the look-ahead {}",
