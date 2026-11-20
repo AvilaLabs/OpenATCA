@@ -1,5 +1,39 @@
 # M9 budget: one national hour on the reference laptop
 
+Milestone M9 is the whole NAS at the busiest recorded hour, in real time, on one ordinary laptop,
+using at most four of its eight cores (SCOPE.md). This file is where that claim is measured, one
+function at a time, as each function is built. A real-time factor is the CPU time a function
+spends divided by the hour of traffic it processed: 1.0 is one core exactly keeping up, and the M9
+budget for everything together is 4.0.
+
+What is measured so far, on the busiest UTC hour of 19 November 2026 in a box around the
+contiguous United States (15,107 airborne aircraft in the hour, up to 7,806 tracked at once):
+
+| Function | Real-time factor, one core | Share of the 4.0 budget |
+|---|---|---|
+| Tracking, archived trace points (about 0.15 reports per aircraft per second) | 0.024 | 0.6 % |
+| Tracking, synthetic 2 reports per aircraft per second | 0.189 | 4.7 % |
+| Tracking and conflict alert, synthetic 2 per second | 0.236 | 5.9 % |
+
+What these numbers do and do not show:
+
+- They are the core computation only. Reading and decoding the input, and the quality filter, are
+  outside the timed span.
+- The input is ADS-B only. Radar fusion, which must associate plots that carry no identity from
+  every radar, is not measured, and is expected to be the largest cost.
+- The live rates are synthetic: trace points interpolated to 1 or 2 per second. A live ADS-B feed
+  is up to about 2 position messages per aircraft per second.
+- It is the busiest hour of one Thursday, not the busiest recorded hour; the Sunday after
+  Thanksgiving is a better candidate, and will be measured when its archive is out.
+- Conflict alert ran with development separation minima everywhere, and reported itself degraded
+  on every cycle because about 400 aircraft a cycle were above the latitude its grid test is proved
+  for. Its compute is measured, but not yet a complete national conflict alert.
+- Every run is a single run on a laptop loaded by other work (load average 4.6 to 8.2), so the
+  timings are upper figures, not best cases.
+- Flight data processing, the conflict probe, MSAW at national scale, feed health and display
+  scene generation are not measured yet.
+
+
 | Machine | Value |
 |---|---|
 | CPU, memory | Intel Core i3-N305 (8 cores), 30 GB, shared with other jobs |
