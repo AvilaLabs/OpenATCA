@@ -140,6 +140,9 @@ fn write_outputs(
 /// check; this one only saves the work).
 fn precheck(a: &Args, side: &str) -> Result<(), String> {
     for p in [a.out.as_str(), side] {
+        // The guard first: an output name inside sealed data is refused before it is probed.
+        oa_sealed::refuse(std::path::Path::new(p))?;
+        // seal-allow: the guard refused this output name on the line above; the probe reads no file
         if std::fs::symlink_metadata(p).is_ok() {
             return Err(format!(
                 "{p}: exists; it is never replaced, remove it first"

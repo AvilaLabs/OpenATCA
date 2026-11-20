@@ -877,7 +877,7 @@ fn real_rap_agrees_with_hrrr_and_the_cache_is_bounded() {
     let Some(root) = data_dir() else { return };
     let path = rap_file(&root, 12);
     let hrrr = root.join("raw/hrrr/hrrr.20261114.t12z.wrfprsf00.UV250.grib2");
-    let (Ok(_), Ok(hd)) = (std::fs::metadata(&path), oa_sealed::read(&hrrr)) else {
+    let (Ok(_), Ok(hd)) = (oa_sealed::open(&path), oa_sealed::read(&hrrr)) else {
         println!("RAP t12z or HRRR sample missing: skipped");
         return;
     };
@@ -1145,4 +1145,19 @@ fn a_percentile_rank_that_is_not_a_number_is_no_value_not_the_first_element() {
     assert_eq!(percentile(&v, f64::NAN), None);
     assert_eq!(percentile(&v, 0.5), Some(2.0));
     assert_eq!(percentile(&v, 2.0), Some(3.0));
+}
+
+// REQ: OA-SEAL-006
+#[test]
+fn a_sealed_hour_file_is_refused_by_the_guard_before_its_size_is_read() {
+    // The file does not exist: a size read first would say "no such file" (NotFound); the guard
+    // refuses the name (PermissionDenied).
+    let e = read_hour_file(std::path::Path::new(
+        "/nonexistent/scds/stdds-20261119-holdout.bak",
+    ))
+    .unwrap_err();
+    assert!(
+        matches!(e, LoadError::Io { kind, .. } if kind != std::io::ErrorKind::NotFound),
+        "{e:?}"
+    );
 }

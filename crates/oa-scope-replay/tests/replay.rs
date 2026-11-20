@@ -1516,3 +1516,18 @@ fn the_clip_reader_drops_sealed_window_frames_and_rows_and_counts_them() {
     // The two frames received in the window; the frame just before it is outside the read span.
     assert_eq!(sealed, 2);
 }
+
+// REQ: OA-SEAL-006
+#[test]
+fn a_sealed_snapshot_path_is_refused_by_the_guard_before_its_size_is_read() {
+    let out = std::env::temp_dir().join(format!("oa-scope-seal-{}", std::process::id()));
+    let a = cli_args(
+        std::path::Path::new("/nonexistent/scds/stdds-20261119-holdout.bak"),
+        std::path::Path::new("/nonexistent/clip.oaf"),
+        &out,
+        &[],
+    );
+    let e = cli::run(&a, &mut Vec::new()).unwrap_err().to_string();
+    assert!(e.contains("OA-SEAL-001"), "{e}");
+    let _ = std::fs::remove_dir_all(&out);
+}

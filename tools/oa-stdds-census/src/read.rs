@@ -48,6 +48,8 @@ struct Ctx<'a> {
     limits: Limits,
     census: &'a mut Census,
     rs: ReadStats,
+    /// Decides the damaged frames of the file being read (see [`oa_sealed::DamagedGate`]).
+    gate: oa_sealed::DamagedGate,
 }
 
 impl ReadStats {
@@ -82,10 +84,20 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
         if ctx.rs.over_budget {
             break;
         }
+        // Every frame is settled against its neighbours: a damaged frame has no receive time of
+        // its own, so the good frames either side of it decide whether it is damage or a drop.
+        match &ev {
+            Ok(f) => {
+                let (kept, gone) = ctx.gate.good(f.recv_unix_ns);
+                ctx.rs.bad_frames += kept;
+                ctx.rs.sealed_window_dropped += gone;
+            }
+            Err(_) => ctx.gate.damaged(),
+        }
         match ev {
-            Ok(f)
-                if f.kind == FrameKind::Message && oa_sealed::in_sealed_window(f.recv_unix_ns) =>
-            {
+            // A frame of any kind (Status and Reject included) received in a sealed window is
+            // dropped and counted, never parsed and never counted by kind.
+            Ok(f) if oa_sealed::in_sealed_window(f.recv_unix_ns) => {
                 // A frame whose time is in a sealed window is dropped and counted, never parsed.
                 ctx.rs.sealed_window_dropped += 1;
                 oa_sealed::note_window_drops(1);
@@ -120,7 +132,7 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
                 }
             }
             Ok(_) => ctx.rs.other_frames += 1,
-            Err(_) => ctx.rs.bad_frames += 1,
+            Err(_) => {}
         }
     }
 }
@@ -182,8 +194,9 @@ fn read_stream<R: Read>(mut src: R, ctx: &mut Ctx<'_>) -> std::io::Result<()> {
     }
     drain(&mut reader, ctx);
     if reader.finish().is_some() {
-        ctx.rs.bad_frames += 1;
+        ctx.gate.damaged();
     }
+    ctx.rs.sealed_window_dropped += ctx.gate.finish();
     ctx.rs.files += 1;
     ctx.rs.files_gzip_damaged += u64::from(damaged);
     ctx.rs.files_gzip_truncated +=
@@ -267,10 +280,17 @@ pub fn recording_files_in(g: &Sealed, dir: &Path) -> Result<Vec<PathBuf>, ReadEr
                 .to_string(),
         ));
     }
+    // The guard first: neither folder is probed unless it is unsealed.
+    refuse_sealed(g, &feed).map_err(ReadError::Refused)?;
+    refuse_sealed(g, &rec).map_err(ReadError::Refused)?;
     // A capture day: only the STDDS feed's files (the day holds the other feeds too).
-    let (start, feed_only) = if std::fs::symlink_metadata(&feed).is_ok() {
+    // seal-allow: the guard checked the folder above; the probe reads no file
+    let has_feed = std::fs::symlink_metadata(&feed).is_ok();
+    // seal-allow: the guard checked the folder above; the probe reads no file
+    let has_rec = std::fs::symlink_metadata(&rec).is_ok();
+    let (start, feed_only) = if has_feed {
         (feed, true)
-    } else if std::fs::symlink_metadata(&rec).is_ok() {
+    } else if has_rec {
         return Err(ReadError::Layout(
             "the directory has a `rec` folder but no `rec/stdds`; give the STDDS recording folder"
                 .to_string(),
@@ -311,6 +331,7 @@ pub fn read_dir_counted(
         limits: read_limits(),
         census,
         rs: ReadStats::new(),
+        gate: oa_sealed::DamagedGate::new(),
     };
     for f in &files {
         refuse_sealed(g, f).map_err(ReadError::Refused)?;
@@ -346,6 +367,7 @@ pub fn read_bytes(bytes: &[u8], census: &mut Census) -> Result<ReadStats, String
         limits: read_limits(),
         census,
         rs: ReadStats::new(),
+        gate: oa_sealed::DamagedGate::new(),
     };
     read_stream(bytes, &mut ctx).map_err(|e| format!("cannot read: {e}"))?;
     ctx.rs.sealed_window_dropped += ctx.rs.stats.sealed_window_dropped;
@@ -561,7 +583,40 @@ mod tests {
         let mut c = Census::new();
         let rs = read_bytes(&bytes, &mut c).unwrap();
         assert_eq!(rs.tais_records, 1);
-        assert_eq!(rs.bad_frames, 1);
+        // Nothing follows the cut frame, so it has no receive time to be told by: it is dropped
+        // and counted in the drop line, not as damage (OA-SEAL-014).
+        assert_eq!((rs.bad_frames, rs.sealed_window_dropped), (0, 1));
+    }
+
+    /// Three status frames received at `t`, the middle one damaged (a payload byte flipped).
+    fn damaged_middle(t: [i64; 3]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut at = Vec::new();
+        for (i, t) in t.into_iter().enumerate() {
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(&mut buf, 3, 0, i as u64, t, 0, b"xxxx").unwrap();
+            at.push(out.len());
+            out.extend_from_slice(&buf[..n]);
+        }
+        out[at[1] + 37] ^= 0xff;
+        out
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn a_damaged_frame_is_gated_by_the_receive_times_of_the_good_frames_either_side() {
+        const FROM: i64 = 1_795_131_900_000_000_000;
+        let out = FROM - 3_600_000_000_000;
+        let read = |t: [i64; 3]| {
+            let mut c = Census::new();
+            let rs = read_bytes(&damaged_middle(t), &mut c).unwrap();
+            (rs.other_frames, rs.bad_frames, rs.sealed_window_dropped)
+        };
+        // Both neighbours outside the window: it is damage.
+        assert_eq!(read([out, out, out + 1]), (2, 1, 0));
+        // Either neighbour inside it: the damaged frame is dropped, with that neighbour.
+        assert_eq!(read([out, out, FROM]), (1, 0, 2));
+        assert_eq!(read([FROM, out, out]), (1, 0, 2));
     }
 
     // REQ: OA-CEN-005
@@ -704,5 +759,32 @@ mod tests {
         assert_eq!((rs.frames, rs.tais_messages, rs.tais_records), (1, 1, 1));
         assert_eq!(rs.sealed_window_dropped, 4);
         assert_eq!(rs.stats.records, 1);
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn a_status_or_reject_frame_received_in_the_window_is_dropped_and_not_counted_by_kind() {
+        const FROM: i64 = 1_795_131_900_000_000_000;
+        const TO: i64 = 1_795_393_920_000_000_000;
+        let mut bytes = Vec::new();
+        // Status (3) and Reject (2) frames at the edges: from - 1 and to are kept, from and
+        // to - 1 are in the window.
+        for (i, (kind, t)) in [
+            (3u8, FROM - 1),
+            (3, FROM),
+            (2, TO - 1),
+            (2, TO),
+            (3, FROM + 7),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(&mut buf, kind, 0, i as u64, t, 0, b"x").unwrap();
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        let mut census = Census::new();
+        let rs = read_bytes(&bytes, &mut census).unwrap();
+        assert_eq!((rs.other_frames, rs.sealed_window_dropped), (2, 3));
     }
 }

@@ -284,7 +284,10 @@ pub fn read_hour_file(path: &Path) -> Result<Hour, LoadError> {
 
 /// [`read_hour_file`] that also says how the `.idx` was used, so a caller can count refusals.
 pub fn read_hour_file_report(path: &Path) -> Result<(Hour, IndexUse), LoadError> {
-    let meta = std::fs::metadata(path).map_err(|e| io_err(path, &e))?;
+    // The guard first: the file is opened through it, and its size is read from the opened file.
+    let file = oa_sealed::open(path).map_err(|e| io_err(path, &e))?;
+    let meta = file.metadata().map_err(|e| io_err(path, &e))?;
+    drop(file);
     if meta.len() > MAX_FILE_BYTES {
         return Err(LoadError::Io {
             path: path.display().to_string(),

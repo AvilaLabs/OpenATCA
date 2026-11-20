@@ -10,6 +10,9 @@
 # failure; the reports stay in <outdir>. Exit status is oa-replay-diff's (0 identical, 1 different,
 # 2 error). Only commit hashes or refs are accepted: never a working tree.
 #
+# The clip is first checked, by oa-clip-sealcheck built from the current tree, for any row time or
+# frame receive time in the sealed window; a failure refuses the run before any commit is built.
+#
 # Environment:
 #   REPLAY_COMPARE_GUARD      command that wraps every build and run (default: a systemd
 #                             scope limited to $GUARD_MEM, 6G); set it to the empty string to
@@ -74,6 +77,12 @@ python3 -I "$here/sealed_guard.py" "${sealed_args[@]}" || exit 2
 # shellcheck source=replay_clean_env.sh
 . "$here/replay_clean_env.sh"
 repo="$(git -C "$here" rev-parse --show-toplevel)"
+# The target directory of the tool builds, absolute before any `cd`.
+cargo_tgt_root="${CARGO_TARGET_DIR:-$repo/target}"
+case "$cargo_tgt_root" in
+/*) ;;
+*) cargo_tgt_root="$PWD/$cargo_tgt_root" ;;
+esac
 
 # A commit spec is a hash or a ref name: no options, no revision syntax, nothing that names the
 # working tree or a dirty state.
@@ -148,6 +157,16 @@ fi
 toolchain="${REPLAY_COMPARE_TOOLCHAIN:-1.89.0}"
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
 
+# The clip is copied once, after the name guard, into a private directory (mode 700) under the
+# scratch directory, and the copy is made read-only. The seal check and both runs read that copy
+# and nothing else, so the original cannot be swapped (a link, a rewrite) between the check and
+# the runs; the copy is hashed now and again after the runs, and a change fails the run.
+clip_orig="$clip"
+clip_dir="$(mktemp -d "$scratch/clip.XXXXXX")"
+chmod 700 "$clip_dir"
+cp --reflink=never -- "$clip_orig" "$clip_dir/clip.oaf" || die "cannot copy the clip $clip_orig"
+chmod 400 "$clip_dir/clip.oaf"
+clip="$clip_dir/clip.oaf"
 clip_sha="$(sha256sum "$clip" | cut -d' ' -f1)"
 # What the caller's environment held, recorded before it is cleared for the builds.
 flags_before="RUSTFLAGS=[${RUSTFLAGS-}] CARGO_ENCODED_RUSTFLAGS=[${CARGO_ENCODED_RUSTFLAGS-}] CARGO_BUILD_RUSTFLAGS=[${CARGO_BUILD_RUSTFLAGS-}] RUSTDOCFLAGS=[${RUSTDOCFLAGS-}]"
@@ -166,7 +185,7 @@ cleanup() {
         git -C "$repo" worktree remove --force "$w" >/dev/null 2>&1 || true
     done
     git -C "$repo" worktree prune >/dev/null 2>&1 || true
-    rm -rf "$scratch/target-A" "$scratch/target-B" "$scratch/run-A" "$scratch/run-B"
+    rm -rf "$clip_dir" "$scratch/target-A" "$scratch/target-B" "$scratch/run-A" "$scratch/run-B"
     rmdir "$scratch" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -217,12 +236,36 @@ build_and_run() {
     rm -rf "$tgt" "$scratch/run-$label"
 }
 
+# A commit from before the seal has no row window of its own, so the clip's name is the only guard
+# it has. The clip itself is checked first, by a binary built from this checkout: every row time
+# and every frame receive time against the sealed window. A non-zero exit (anything in the window,
+# a clip that does not parse, a fail-closed window) refuses the run before any commit is built.
+echo "building oa-clip-sealcheck" >&2
+seal_tgt="$cargo_tgt_root"
+(
+    cd "$repo"
+    "${guard[@]}" "${clean_env_prefix[@]}" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
+        CARGO_TARGET_DIR="$seal_tgt" cargo "+$toolchain" build --release --locked \
+        --config 'build.rustflags=[]' -p oa-truth --bin oa-clip-sealcheck >"$outdir/build-sealcheck.log" 2>&1
+) || die "build of oa-clip-sealcheck failed (see $outdir/build-sealcheck.log)"
+seal_bin="$seal_tgt/release/oa-clip-sealcheck"
+[ -x "$seal_bin" ] || die "the built oa-clip-sealcheck is not at $seal_bin"
+seal_status=0
+"$seal_bin" "$clip" >"$outdir/sealcheck.txt" 2>&1 || seal_status=$?
+if [ "$seal_status" != 0 ]; then
+    die "the clip failed the seal check (oa-clip-sealcheck exit $seal_status; see $outdir/sealcheck.txt): $(tr '\n' ' ' <"$outdir/sealcheck.txt")"
+fi
+
 build_and_run A "$commit_a"
 build_and_run B "$commit_b"
 
+# The copy the runs read is the one that was checked.
+clip_sha_after="$(sha256sum "$clip" | cut -d' ' -f1)"
+[ "$clip_sha_after" = "$clip_sha" ] || die "the clip copy changed during the runs (sha256 $clip_sha before, $clip_sha_after after)"
+
 # oa-replay-diff comes from the current checkout, not from either commit under test.
 echo "building oa-replay-diff" >&2
-diff_tgt="${CARGO_TARGET_DIR:-$repo/target}"
+diff_tgt="$cargo_tgt_root"
 (
     cd "$repo"
     "${guard[@]}" "${clean_env_prefix[@]}" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
@@ -250,8 +293,8 @@ status=0
     echo "replay comparison"
     echo "commit A: $commit_a ($spec_a)"
     echo "commit B: $commit_b ($spec_b)"
-    echo "clip: $clip"
-    echo "clip sha256: $clip_sha"
+    echo "clip: $clip_orig"
+    echo "clip sha256 (of the private copy that was checked and run): $clip_sha"
     echo "builds ran under env -i with only PATH, HOME, RUSTUP_HOME, CARGO_HOME, TMPDIR, an empty CARGO_ENCODED_RUSTFLAGS, CARGO_BUILD_JOBS, CARGO_TARGET_DIR, and --config build.rustflags=[]"
     echo "environment flags cleared for the builds: $flags_before"
     echo "environment variables dropped: $dropped_vars"

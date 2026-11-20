@@ -124,15 +124,14 @@ pub fn new_parser() -> Result<Parser, MvaError> {
 
 /// Shell: reads a whole file, refusing one over [`MAX_FILE_BYTES`].
 pub fn read_file(path: &Path) -> Result<Vec<u8>, MvaError> {
-    oa_sealed::refuse_io(path).map_err(|e| MvaError::Io(e.to_string()))?;
-    let meta = std::fs::metadata(path).map_err(|e| MvaError::Io(e.to_string()))?;
+    // The guard first: the size is taken from the opened file.
+    let mut f = oa_sealed::open(path).map_err(|e| MvaError::Io(e.to_string()))?;
+    let meta = f.metadata().map_err(|e| MvaError::Io(e.to_string()))?;
     if meta.len() > MAX_FILE_BYTES {
         return Err(MvaError::FileTooLarge(meta.len()));
     }
     let mut out = Vec::new();
-    oa_sealed::open(path)
-        .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut out))
-        .map_err(|e| MvaError::Io(e.to_string()))?;
+    std::io::Read::read_to_end(&mut f, &mut out).map_err(|e| MvaError::Io(e.to_string()))?;
     Ok(out)
 }
 

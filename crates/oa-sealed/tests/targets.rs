@@ -117,10 +117,69 @@ fn targets() -> Vec<Target> {
     out
 }
 
+/// The entry points of the guard that open, check or walk paths: a free function of `oa_sealed`
+/// (or one imported from it), or the `Sealed` guard type's constructors and its checking methods.
+/// A `DropReport`, a window test or a drop line does not count: those never look at a path.
+const GUARD_FNS: [&str; 8] = [
+    "open",
+    "read",
+    "read_to_string",
+    "refuse",
+    "refuse_io",
+    "refuse_io_embedded",
+    "walk_unsealed",
+    "verify_open",
+];
+
+/// The guard methods, called on a guard value.
+const GUARD_METHODS: [&str; 4] = [".check(", ".refuse(", ".walk_unsealed(", ".verify_open("];
+
+/// Whether `name` is called in `code`: the whole name followed by `(`. With `bare`, not as a
+/// method or a path tail (an imported function used by its own name).
+fn is_called(code: &str, name: &str, bare: bool) -> bool {
+    token_at(code, name).into_iter().any(|at| {
+        let before = code[..at].trim_end();
+        code[at + name.len()..].trim_start().starts_with('(')
+            && !(bare && (before.ends_with('.') || before.ends_with("::")))
+    })
+}
+
+/// Whether the file calls a guard entry point (comments, strings and unused imports do not
+/// count): `oa_sealed::open(..)` and the other functions, `Sealed::production(..)`,
+/// `Sealed::production_embedded(..)`, `Sealed::with_..(..)`, a guard method (`.check(`,
+/// `.refuse(`), or a function imported from `oa_sealed` called by its own name.
+fn calls_guard(text: &str) -> bool {
+    let lines = lex(text);
+    let code: String = lines.iter().map(|l| format!("{}\n", l.code)).collect();
+    if GUARD_FNS
+        .iter()
+        .any(|f| is_called(&code, &format!("oa_sealed::{f}"), false))
+        || [
+            "production",
+            "production_embedded",
+            "with_root",
+            "with_list",
+        ]
+        .iter()
+        .any(|f| is_called(&code, &format!("Sealed::{f}"), false))
+        || GUARD_METHODS.iter().any(|m| code.contains(m))
+    {
+        return true;
+    }
+    // `use oa_sealed::{open, refuse as r}`: the imported name called bare.
+    // A renamed import (`pub use oa_sealed::refuse as refuse_sealed;`) may be called through its
+    // module path from another file of the program; an un-renamed one only by its own name.
+    use_paths(&code).iter().any(|(p, alias)| {
+        matches!(
+            p.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+            ["oa_sealed", f] if GUARD_FNS.contains(f) && is_called(&code, alias, alias == f)
+        )
+    })
+}
+
 fn uses_guard(t: &Target, all: &[Target]) -> bool {
-    let mentions = |p: &Path| fs::read_to_string(p).unwrap().contains("oa_sealed");
     if !t.is_bin {
-        return mentions(&t.entry);
+        return calls_guard(&fs::read_to_string(&t.entry).unwrap());
     }
     // A bin: its entry file, and the crate's other source files that are not the entry of a
     // target (those are other programs of the crate).
@@ -131,10 +190,13 @@ fn uses_guard(t: &Target, all: &[Target]) -> bool {
         .collect();
     let mut files = Vec::new();
     rs_files(&t.krate.join("src"), &mut files);
-    files
+    // The files are read as one program: an import in one file is called in another.
+    let text: String = files
         .iter()
         .filter(|f| **f == t.entry || !entries.contains(f))
-        .any(|f| mentions(f))
+        .map(|f| fs::read_to_string(f).unwrap() + "\n")
+        .collect();
+    calls_guard(&text)
 }
 
 fn exempt() -> BTreeMap<String, String> {
@@ -186,7 +248,7 @@ fn every_bin_and_example_target_uses_the_guard_or_is_exempt_with_a_reason() {
 /// The calls that open, read, copy or run something from a path without the guard, as names: a
 /// name counts when it is used at all (a call, or the function passed as a value), not only
 /// when it is followed by `(`.
-const BARE: [&str; 10] = [
+const BARE: [&str; 14] = [
     "File::open",
     "File::open_buffered",
     "File::options",
@@ -194,6 +256,10 @@ const BARE: [&str; 10] = [
     "fs::read",
     "fs::read_to_string",
     "fs::read_dir",
+    "fs::metadata",
+    "fs::symlink_metadata",
+    "std::io::stdin",
+    "io::stdin",
     "fs::copy",
     "fs::hard_link",
     "Command::new",
@@ -201,7 +267,15 @@ const BARE: [&str; 10] = [
 
 /// The `std::fs` functions whose bare use is a read, copy or link, and the types whose `open`,
 /// `options` and `new` start one.
-const FS_FUNCS: [&str; 5] = ["read", "read_to_string", "read_dir", "copy", "hard_link"];
+const FS_FUNCS: [&str; 7] = [
+    "read",
+    "read_to_string",
+    "read_dir",
+    "metadata",
+    "symlink_metadata",
+    "copy",
+    "hard_link",
+];
 const FS_TYPES: [&str; 3] = ["File", "OpenOptions", "Command"];
 
 /// The comment that allows a bare call on the next code line (or its own line, when it trails
@@ -210,7 +284,7 @@ const ALLOW: &str = "seal-allow:";
 
 /// The allow comments in the sources the rule covers, pinned exactly: adding one is a decision
 /// made here, not slack in a budget.
-const ALLOW_COUNT: usize = 99;
+const ALLOW_COUNT: usize = 108;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.
@@ -996,6 +1070,60 @@ fn a_bare_open_or_read_in_any_crate_needs_an_allow_comment_with_a_reason_and_no_
 
 fn bare_lines(text: &str) -> Vec<usize> {
     scan(text, true).calls.iter().map(|c| c.0).collect()
+}
+
+// REQ: OA-SEAL-006
+#[test]
+fn a_target_counts_as_guarded_only_with_a_call_to_a_guard_entry_point() {
+    // A drop report, a window test, a mention in a comment or a string, an import that is never
+    // called, and the bare name of the guard type do not count.
+    for text in [
+        "fn main() { let mut d = oa_sealed::DropReport::new(); d.add(1); }",
+        "fn f(t: i64) -> bool { oa_sealed::in_sealed_window(t) }",
+        "// oa_sealed::open(p)\nfn main() {}",
+        "fn main() { let s = \"oa_sealed::open(p)\"; }",
+        "use oa_sealed::DropReport;\nfn main() {}",
+        "fn main() { oa_sealed::note_window_drops(1); let _ = oa_sealed::drop_line(0); }",
+        "use oa_sealed::open;\nfn main() {}",
+        "use oa_sealed::Sealed;\nfn f(g: &Sealed) {}",
+        "use oa_sealed::{open, DropReport};\nfn main() { x.open(p); File::open(q); }",
+        "fn main() { let f = oa_sealed::open; }",
+    ] {
+        assert!(!calls_guard(text), "{text}");
+    }
+    // A call to an entry point does.
+    for text in [
+        "fn main() { oa_sealed::open(p); }",
+        "fn main() { oa_sealed::refuse(p); }",
+        "fn main() { oa_sealed::refuse_io(p); }",
+        "fn main() { oa_sealed::refuse_io_embedded(p); }",
+        "fn main() { oa_sealed::read_to_string(p); }",
+        "fn main() { oa_sealed::walk_unsealed(p); }",
+        "use oa_sealed::{open, DropReport};\nfn main() { open(p); }",
+        "use oa_sealed::refuse as r;\nfn main() { r(p); }",
+        "pub use oa_sealed::refuse as refuse_sealed;\nfn main() { guard::refuse_sealed(p); }",
+        "fn main() { oa_sealed::Sealed::production().check(p); }",
+        "fn main() { Sealed::production_embedded(); }",
+        "fn main() { Sealed::with_root(r); }",
+        "fn f(g: &Sealed) { g.check(p); }",
+    ] {
+        assert!(calls_guard(text), "{text}");
+    }
+}
+
+// REQ: OA-SEAL-006
+#[test]
+fn the_scan_finds_a_metadata_probe_and_standard_input_as_bare() {
+    assert_eq!(
+        bare_lines("let a = std::fs::metadata(p);\nlet b = fs::symlink_metadata(q);\nlet c = std::io::stdin();\nlet d = io::stdin();\nlet e = file.metadata();\n"),
+        [1, 2, 3, 4]
+    );
+    assert_eq!(
+        bare_lines(
+            "use std::fs::{metadata, symlink_metadata as sm};\nfn a() { metadata(p); sm(q); }\n"
+        ),
+        [2]
+    );
 }
 
 // REQ: OA-SEAL-006
