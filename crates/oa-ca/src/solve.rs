@@ -247,9 +247,14 @@ pub fn closest_point(rx: f64, ry: f64, vx: f64, vy: f64, t_max: f64) -> (f64, f6
 }
 
 /// The smallest horizontal separation over `[0, t_max]` for straight-line motion, metres.
+///
+/// The square root of `x * x + y * y` at the closest point. For the stated input bounds the point
+/// is finite with each coordinate at most 5e7 m (proved), so the sum is at most 5e15 and cannot
+/// overflow; the correctly rounded square root of a finite value that is not negative is finite
+/// and not negative.
 pub fn horizontal_miss(rx: f64, ry: f64, vx: f64, vy: f64, t_max: f64) -> f64 {
     let (x, y) = closest_point(rx, ry, vx, vy, t_max);
-    oa_math::hypot(x, y)
+    oa_ieee::sqrt(x * x + y * y)
 }
 
 /// The smallest vertical separation over `[0, t_max]` for straight-line motion, feet.
@@ -408,15 +413,13 @@ mod proofs {
         assert!(m.is_finite() && m >= 0.0);
     }
 
-    // The proofs that follow split the horizontal solver and the miss at the square root and the
-    // hypot, which the proofs of the arithmetic around them take as a parameter. Each states the
-    // contract it takes (a comment on its bounds) and a lemma proof shows the library function
-    // meets it on the bounded inputs. A composition proof is the whole property (the step, the
-    // contract, the last step) only because the production code is exactly that composition:
-    // `horizontal_span` is `horizontal_step`, then `span_from_root` of `oa_ieee::sqrt(disc)`;
-    // `horizontal_miss` is `closest_point`, then `oa_math::hypot`; `predict` is `conflict_span`,
-    // `horizontal_miss` and `vertical_miss`, then `prediction_of` (tested bit for bit against the
-    // unsplit code in `tests`).
+    // The proofs that follow split the horizontal solver and the miss at the square root, which
+    // the proofs of the arithmetic around them take as a parameter. A composition proof is the
+    // whole property (the step, the contract, the last step) only because the production code is
+    // exactly that composition: `horizontal_span` is `horizontal_step`, then `span_from_root` of
+    // `oa_ieee::sqrt(disc)`; `horizontal_miss` is `closest_point`, then `oa_ieee::sqrt` of the sum
+    // of squares; `predict` is `conflict_span`, `horizontal_miss` and `vertical_miss`, then
+    // `prediction_of` (tested bit for bit against the unsplit code in `tests`).
 
     /// Bounds of what the first step hands the root step, for the stated input bounds: the
     /// squared relative speed at most 2 (4e3)^2 and the discriminant at most H^2 a, both with
@@ -534,15 +537,10 @@ mod proofs {
         }
     }
 
-    // The horizontal miss is `oa_math::hypot` of the closest point, and takes this contract of it:
-    // for finite `x` and `y`, each at most POINT_MAX in magnitude, the result is finite and not
-    // negative. It is NOT proved here: CBMC did not finish a proof of `hypot` over these inputs
-    // in 10 minutes, the limit of each proof here (the result of its double-double path and its
-    // scaling are bit-level arithmetic of about forty products and divisions). The contract is the documented one
-    // (`oa_math::hypot`: faithfully rounded, no intermediate overflow, the result overflows only
-    // when it does not fit; the closest point is under 7.1e7 from the origin), checked against
-    // the reference data of `crates/oa-math/tests/reference.rs` (OA-MATH-005) and, for this
-    // crate, by `crates/oa-ca/tests/split.rs`.
+    // The horizontal miss is the square root of the sum of squares of the closest point. The chain
+    // is proved in two parts: the closest point is finite with each coordinate at most POINT_MAX
+    // (this proof), and the miss of any such point is finite and not negative (the proof of
+    // `the_horizontal_miss_is_finite_and_not_negative`, over the real function).
     //
     // REQ: OA-CA-029
     #[kani::proof]
@@ -552,6 +550,16 @@ mod proofs {
         assert!(within(x, POINT_MAX) && within(y, POINT_MAX));
         let ct = closest_time(rx, ry, vx, vy, t);
         assert!(ct >= 0.0 && ct <= t);
+    }
+
+    // REQ: OA-CA-029
+    #[kani::proof]
+    fn the_horizontal_miss_is_finite_and_not_negative() {
+        // The real `horizontal_miss`, under the inputs of the closest-point proof (the whole
+        // chain in one harness, not a lemma over a free point).
+        let (rx, ry, vx, vy, _h, t) = horizontal_inputs();
+        let m = horizontal_miss(rx, ry, vx, vy, t);
+        assert!(m.is_finite() && m >= 0.0);
     }
 
     // REQ: OA-CA-029
@@ -602,7 +610,7 @@ mod proofs {
     #[kani::proof]
     fn the_time_to_loss_of_a_prediction_is_finite_and_inside_the_look_ahead() {
         // With the two misses any finite not negative values (the horizontal miss is proved in
-        // `the_closest_point_is_finite_and_bounded` and the hypot lemma, the vertical miss in
+        // `the_closest_point_is_finite_and_bounded` and `the_horizontal_miss_is_finite_and_not_negative`, the vertical miss in
         // `vertical_span_is_finite_and_ordered_for_bounded_inputs`).
         let t: f64 = kani::any();
         kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);

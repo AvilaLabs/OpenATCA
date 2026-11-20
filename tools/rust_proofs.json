@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 94,
+  "expected_proof_count": 95,
   "proofs": [
     {
       "id": "output-append",
@@ -1470,9 +1470,24 @@
     },
     {
       "id": "ca-horizontal-miss-point",
-      "requirement": "OA-CA-029: the closest point of a pair within the stated bounds is finite and within the bound the hypot contract takes, and the time of closest approach is inside the look-ahead (the hypot contract itself is not proved).",
+      "requirement": "OA-CA-029: the closest point of a pair within the stated bounds is finite with each coordinate at most 5e7 m, and the time of closest approach is inside the look-ahead.",
       "package": "oa-ca",
       "harness": "solve::proofs::the_closest_point_is_finite_and_bounded",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192
+    },
+    {
+      "id": "ca-horizontal-miss",
+      "requirement": "OA-CA-029: the real horizontal miss (the square root of the sum of squares of the closest point) of a pair within the stated bounds is finite and not negative.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::the_horizontal_miss_is_finite_and_not_negative",
       "enabled": true,
       "experimental": false,
       "required_covers": [],

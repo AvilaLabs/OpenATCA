@@ -226,7 +226,7 @@ fn evaluate(st: &mut CaState, i: usize, j: usize, t_ns: i64, stats: &mut CycleSt
         return true;
     }
     let (x, y) = project(&fi, oj.lat_deg, oj.lon_deg);
-    let h_now = oa_math::hypot(x, y);
+    let h_now = oa_ieee::sqrt(x * x + y * y);
     let Some(reach) = exact_radius(st, i, j) else {
         return false;
     };
