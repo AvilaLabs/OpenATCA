@@ -134,16 +134,40 @@ pub fn decode_doc_prefix(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocE
     decode_with(doc, rows, true)
 }
 
-/// Reads every observation time of the document: the `sourceTimeStamp` of every element that has
-/// one (the `fltdMessage` and `fiMessage` messages, which also time their TMI flight list
-/// entries), and the position times `timeAtPosition` and an oceanic position's `time`, directly
-/// from the parsed tree and whatever else is valid in it. If any is in `window`, returns how many
+/// Reads every observation time and every actual-event time of the document: the
+/// `sourceTimeStamp` of every element that has one (the `fltdMessage` and `fiMessage` messages,
+/// which also time their TMI flight list entries), the position times, and the actual times of
+/// departure, arrival, gate, runway, boundary crossing and coordination (a message stamped after
+/// the window can report an event inside it), directly from the parsed tree and whatever else is valid in it. If any is in `window`, returns how many
 /// messages the document has (all are dropped, at least 1); otherwise 0. A time that cannot be
 /// read is not in the window (the frame's receive time gates it).
 fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
     if window.span().is_none() {
         return 0;
     }
+    // Attributes that are an observation or the time of an actual event, on any element.
+    const ATTRS: [&[u8]; 11] = [
+        b"sourceTimeStamp",
+        b"airlineOutTime",
+        b"airlineOffTime",
+        b"airlineOnTime",
+        b"airlineInTime",
+        b"runwayDeparture",
+        b"runwayArrival",
+        b"gateDeparture",
+        b"gateArrival",
+        b"boundaryCrossingTime",
+        b"lastUpdateTime",
+    ];
+    // Whether attribute `name` of `e` has the value `want`.
+    let attr_is = |e: ElemIx, name: &[u8], want: &[u8]| {
+        (0..attr_count(doc, e)).any(|k| {
+            let a = attr_ref(doc, e, k);
+            let mut buf = [0u8; MAX_VALUE];
+            a.name == name && value_bytes(doc, attr_val(&a), &mut buf).is_ok_and(|v| v == want)
+        })
+    };
+    let in_window = |v: &[u8]| parse_time(v).is_ok_and(|t| window.contains(t));
     let (mut messages, mut hit) = (0u32, false);
     for i in 0..doc.elem_name.len() {
         let e = ElemIx(i as u32);
@@ -151,19 +175,27 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
         if name == b"fltdMessage" || name == b"fiMessage" || name == b"tfmsStatusOutput" {
             messages = messages.saturating_add(1);
         }
+        // `eta` and `etd` carry an actual event time when their type says so.
+        let typed_actual = (name == b"etd" && attr_is(e, b"etdType", b"ACTUAL"))
+            || (name == b"eta" && attr_is(e, b"etaType", b"ACTUAL"));
         for k in 0..attr_count(doc, e) {
             let a = attr_ref(doc, e, k);
-            if a.name != b"sourceTimeStamp" {
+            let key = ATTRS.contains(&a.name);
+            let typed = typed_actual && a.name == b"timeValue";
+            if !key && !typed {
                 continue;
             }
             let mut buf = [0u8; MAX_VALUE];
             if let Ok(v) = value_bytes(doc, attr_val(&a), &mut buf) {
-                hit |= parse_time(v).is_ok_and(|t| window.contains(t));
+                hit |= in_window(v);
             }
         }
     }
-    // The observation times that are element text: the track message's `timeAtPosition` and the
-    // oceanic reported position's `time` (a text a comment or CDATA section splits is one value).
+    // The observation and actual-event times that are element text: the position time
+    // (`timeAtPosition`, an oceanic position's `time`), the actual time of departure or arrival
+    // (`estimated` is not "true"), an actual coordination time, and the times a flow message
+    // reports (`eventTime`, `dateSent`, `lastUpdate`). A text that a comment or CDATA section
+    // splits is one value.
     let total = doc.text_owner.len();
     let mut t = 0usize;
     while t < total {
@@ -175,12 +207,16 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
             t += 1;
         }
         let name = elem_name(doc, owner);
-        if name == b"timeAtPosition" || name == b"time" {
+        let key = match name {
+            b"timeAtPosition" | b"time" | b"eventTime" | b"dateSent" | b"lastUpdate" => true,
+            b"timeOfDeparture" | b"timeOfArrival" => !attr_is(owner, b"estimated", b"true"),
+            b"coordinationTime" | b"newCoordinationTime" => attr_is(owner, b"type", b"ACTUAL"),
+            _ => false,
+        };
+        if key {
             let mut buf = [0u8; MAX_VALUE];
             if let Ok(n) = decode_text_run(doc, first, t - first, &mut buf) {
-                hit |= buf
-                    .get(..n)
-                    .is_some_and(|v| parse_time(v).is_ok_and(|t| window.contains(t)));
+                hit |= buf.get(..n).is_some_and(in_window);
             }
         }
     }

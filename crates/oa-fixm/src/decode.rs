@@ -584,8 +584,8 @@ fn is_xmlns(doc: &Doc<'_>, a: usize) -> bool {
         || name_bytes(doc.input, prefix) == b"xmlns"
 }
 
-/// Reads the `timestamp` and `positionTime` of every element of the document that has one,
-/// directly from the parsed tree and whatever else is valid in it. If any is in `window`,
+/// Reads the `timestamp` and `positionTime` of every element of the document that has one, and
+/// the `time` of every `actual` element, directly from the parsed tree and whatever else is valid in it. If any is in `window`,
 /// returns how many messages the document has (all are dropped, at least 1); otherwise 0. A time
 /// that cannot be read is not in the window (the frame's receive time gates it).
 fn prescan(doc: &Doc<'_>, window: oa_sealed::DropWindow) -> u32 {
@@ -594,7 +594,17 @@ fn prescan(doc: &Doc<'_>, window: oa_sealed::DropWindow) -> u32 {
     }
     let mut hit = false;
     for i in 1..doc.elem_name.len() {
-        for name in [&b"timestamp"[..], b"positionTime"] {
+        // The message time, the position time and the time of an actual event (the `time` of an
+        // `actual` element, the departure actual): an event a message reports after the window
+        // can have happened inside it.
+        let actual =
+            name_bytes(doc.input, doc.elem_name.get(i).copied().unwrap_or_default()) == b"actual";
+        let times: &[&[u8]] = if actual {
+            &[b"timestamp", b"positionTime", b"time"]
+        } else {
+            &[b"timestamp", b"positionTime"]
+        };
+        for name in times {
             let mut buf = [0u8; 64];
             if let Raw::Val(v) = attr(doc, i, name, &mut buf) {
                 hit |= parse_iso_ms(v).is_some_and(|t| window.contains(t));

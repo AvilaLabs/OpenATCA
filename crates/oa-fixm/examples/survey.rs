@@ -85,7 +85,10 @@ fn run() -> Result<(), String> {
             let first = d.elem_first_attr[i].0 as usize;
             for a in first..first + d.elem_attr_count[i] as usize {
                 let an = s(&d, d.attr_name[a]);
-                if an == "timestamp" || an == "positionTime" {
+                if an == "timestamp"
+                    || an == "positionTime"
+                    || (an == "time" && s(&d, d.elem_name[i]) == "actual")
+                {
                     let t = oa_fixm::parse_iso_ms(s(&d, d.attr_value[a]).as_bytes());
                     hit |= t.is_some_and(|t| window.contains(t));
                 }

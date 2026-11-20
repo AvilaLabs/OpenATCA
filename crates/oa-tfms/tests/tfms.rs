@@ -2368,3 +2368,79 @@ fn every_observation_time_is_a_window_key_in_any_encoding_and_a_reference_time_i
     let status = wrap_flight(&format!("{}<tfmsStatusOutput/>", stamped(&track(), inw)));
     assert_eq!(decode_with_window(&status, w).0, Ok(sealed(2)));
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn an_actual_event_time_in_the_window_drops_a_message_stamped_after_it() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let after = "2026-11-24T01:00:00Z";
+    let inw = "2026-11-22T23:00:00Z";
+    // Every message is stamped after the window; only the event time named is moved into it.
+    let late = |xml: String| xml.replace("2030-01-02T03:04:05Z", after);
+    let modify = late(modify());
+    // The out, off, on and in times, the runway and gate actuals.
+    for name in [
+        "airlineOutTime",
+        "airlineOffTime",
+        "airlineOnTime",
+        "airlineInTime",
+        "runwayDeparture",
+        "runwayArrival",
+        "gateDeparture",
+        "gateArrival",
+    ] {
+        let val = modify.split(&format!("{name}=\"")).nth(1).unwrap();
+        let val = &val[..val.find('"').unwrap()];
+        let x = wrap_flight(
+            &modify.replace(&format!("{name}=\"{val}\""), &format!("{name}=\"{inw}\"")),
+        );
+        assert_eq!(decode_with_window(&x, w).0, Ok(sealed(1)), "{name}");
+    }
+    // The control: the same message with nothing in the window is kept.
+    let (r, rows, _) = decode_with_window(&wrap_flight(&modify), w);
+    assert_eq!((r.unwrap().sealed_dropped, rows), (0, 1));
+    // An actual departure given as an `etd`, and an estimated one (a reference time).
+    let dep = late(departure());
+    let actual = dep.replace("2030-01-02T02:05:00Z", inw);
+    assert_eq!(
+        decode_with_window(&wrap_flight(&actual), w).0,
+        Ok(sealed(1))
+    );
+    let est = actual.replace(r#"etdType="ACTUAL""#, r#"etdType="ESTIMATED""#);
+    assert_eq!(
+        decode_with_window(&wrap_flight(&est), w)
+            .0
+            .unwrap()
+            .sealed_dropped,
+        0
+    );
+    // The time of departure and of arrival: actual when `estimated` is not "true".
+    let tod = dep.replace("2030-01-02T02:06:00Z", inw);
+    assert_eq!(decode_with_window(&wrap_flight(&tod), w).0, Ok(sealed(1)));
+    let tod_est = tod.replace(r#"estimated="false""#, r#"estimated="true""#);
+    assert_eq!(
+        decode_with_window(&wrap_flight(&tod_est), w)
+            .0
+            .unwrap()
+            .sealed_dropped,
+        0
+    );
+    let toa = dep
+        .replace("2030-01-02T04:31:00Z", inw)
+        .replace(r#"estimated="true""#, r#"estimated="false""#);
+    assert_eq!(decode_with_window(&wrap_flight(&toa), w).0, Ok(sealed(1)));
+    // The boundary crossing.
+    let bnd = late(boundary()).replace("2030-01-02T03:20:00Z", inw);
+    assert_eq!(decode_with_window(&wrap_flight(&bnd), w).0, Ok(sealed(1)));
+    // An actual coordination time; a proposed one is a reference time.
+    let plan = late(plan()).replace("2030-01-02T03:30:00Z", inw);
+    assert_eq!(
+        decode_with_window(&wrap_flight(&plan), w)
+            .0
+            .unwrap()
+            .sealed_dropped,
+        0
+    );
+    let act = plan.replace(r#"type="PROPOSED""#, r#"type="ACTUAL""#);
+    assert_eq!(decode_with_window(&wrap_flight(&act), w).0, Ok(sealed(1)));
+}

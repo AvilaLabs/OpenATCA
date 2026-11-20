@@ -1754,10 +1754,27 @@ fn message_and_position_times_are_window_keys_in_any_encoding_and_event_times_ar
         r#"<enRoute><position positionTime="2026-11-21T00:00:00Z"/></enRoute>"#,
     );
     assert_eq!(dropped(&doc(&[pos])), 1);
-    // An event time (the actual departure) in the window is not a key.
-    let dep = at(
-        "2030-01-02T03:04:05Z",
-        r#"<flight><departure><actualTime time="2026-11-21T00:00:00Z"/></departure></flight>"#,
+    // The actual departure is a key: a message stamped after the window can report it inside.
+    let dep = |ts: &str, actual: &str| {
+        at(
+            ts,
+            &format!(
+                r#"<departure xsi:type="ns5:NasDepartureType" departurePoint="KDEP"><runwayPositionAndTime><runwayTime><actual time="{actual}"/></runwayTime></runwayPositionAndTime></departure>"#
+            ),
+        )
+    };
+    assert_eq!(
+        dropped(&doc(&[dep("2026-11-23T01:00:00Z", "2026-11-22T23:00:00Z")])),
+        1
     );
-    assert_eq!(dropped(&doc(&[dep])), 0);
+    // Outside the window both, and an estimated arrival in the window (a reference time), are kept.
+    assert_eq!(
+        dropped(&doc(&[dep("2026-11-23T01:00:00Z", "2026-11-23T00:17:00Z")])),
+        0
+    );
+    let est = at(
+        "2026-11-23T01:00:00Z",
+        r#"<arrival xsi:type="ns5:NasArrivalType" arrivalPoint="KTST"><runwayPositionAndTime><runwayTime><estimated time="2026-11-22T23:00:00Z"/></runwayTime></runwayPositionAndTime></arrival>"#,
+    );
+    assert_eq!(dropped(&doc(&[est])), 0);
 }
