@@ -40,9 +40,9 @@ fn the_survey_drops_a_file_with_a_message_in_the_window_whole_and_prints_the_cou
         "{text} {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    // Both files are listed, only the file outside the window is in the counts, and the dropped
-    // message is counted in the printed line.
-    assert!(text.contains("files 2"), "{text}");
+    // Only the file outside the window is in the counts, files included; the dropped file is
+    // in the drop line.
+    assert!(text.contains("files 1\n"), "{text}");
     assert!(text.contains("messages per file {1: 1}"), "{text}");
     // The line is printed on stderr, when the run ends.
     let err = String::from_utf8_lossy(&out.stderr);

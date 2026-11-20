@@ -5872,7 +5872,10 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   parser, and the lag between a feed's own time and the receive time of its frame (the SFDPS lag floor is 58 s):
   development data within 15 minutes of either edge is dropped and counted. A list with no window line seals every instant
   (`Sealed::in_window`, `Guard.in_window`), and a tool prints `seal list has no window: every timed row is dropped` on
-  standard error at start (`DropReport`, `sealed_guard.production`), still failing closed.
+  standard error at start (`DropReport`, `sealed_guard.production`), still failing closed; a list that does not parse
+  prints `seal list does not parse: every timed row is dropped and every sealed path refused` the same way (`oa_sealed::start_warning`,
+  `sealed_guard.start_warning`). Several windows are read to one span, the hull from the earliest start to the latest end, with
+  any gap between them inside it (`Sealed::drop_window`, `sealed_window_ms`; the gates `in_window` test each window).
 - **OA-SEAL-012** A test or tool that walks a directory uses `oa_sealed::walk_unsealed` (Python `Guard.walk_unsealed`): a
   directory or file the guard refuses is skipped and counted, never descended into or opened, a directory that only holds a
   sealed entry (the data root, `raw/adsblol`) is walked, and a sealed walk root is an error. `oa_sealed::read` and
@@ -5887,8 +5890,10 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-SEAL-013** Every library function that takes a path and opens it for reading opens it through the guard: `oa_zip::read_archive_file`,
   `oa_nasr::open`, `oa_dof::read_file`, `oa_tiff::read_file` and the `oa-replay-diff` file readers; a sealed path is an I/O error that names OA-SEAL-001.
 - **OA-SEAL-014** The readers drop every row or frame whose time falls in a sealed window (OA-SEAL-011) and count it:
-  `oa_bench::input::load_adsb` (rows; `AdsbClip::sealed_window_dropped`) and `for_each_adsb_frame` (a frame with a row in the
-  window is not passed on), `oa_truth::clip::read_clip` (`read_clip_counted`), the `oa-replay` recording reader (frames by
+  `oa_bench::input::load_adsb` (a frame with a row in the window is dropped whole and its rows counted;
+  `AdsbClip::sealed_window_dropped`) and `for_each_adsb_frame` (a frame with a row in the
+  window is not passed on), `oa_truth::clip::read_clip` (`read_clip_counted`; a frame with a row in the window is dropped whole,
+  and is in no other count, `oa_adsb::reports_extend_unsealed`), the `oa-replay` recording reader (frames by
   receive time; `MergeReport::sealed_window_dropped`) and the `oa-stdds-census` recording reader (`ReadStats`). A row at the
   `from` instant of the widened window (the listed start less 15 minutes) and one at the last nanosecond before its `to`
   (the listed end plus 15 minutes) are dropped; one at `from - 1 ns` and one at `to` are kept. Every
@@ -5896,13 +5901,16 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   records the line there: oa-bench (report note), oa-compass (README), oa-encounter (summary), oa-shadow (report header),
   oa-stdds-census (the read section); oa-truth-check, oa-sensorsim, oa-track and its examples, oa-replay print it.
   The message loaders do the same by frame and by record: `oa_bench::input::load_with` (SFDPS, TBFM, TFMS; frames by receive
-  time, and a record whose own time (SFDPS message timestamp or position time, TBFM `msgTime`, TFMS `sourceTimeStamp`) is in
-  the window even when its frame was received outside it; `Loaded::sealed_window_dropped`, `Counts::sealed_window_dropped`),
-  the `oa-replay` pipeline (rows by their own time; `Pipeline::sealed_window_dropped`), `oa-feed replay` (frames;
+  time, and a document with a message whose own time is in the window even when its frame was received outside it (the keys of
+  the list below, which the decoders read; the loader has no key list of its own); `Loaded::sealed_window_dropped`, `Counts::sealed_window_dropped`),
+  the `oa-replay` pipeline (documents by the times of their messages, and an ADS-B frame by its rows, each dropped whole;
+  `Pipeline::sealed_window_dropped`), `oa-feed replay` (frames;
   `Report::sealed_window_dropped`), the `oa-stdds-census` reader (TAIS records by `mrtTime`) and the `stdds_summary` example.
   For these the printed count is frames plus records and the tool says so. The same holds for `oa-flight` (`oa-flight-sfdps`: frames by receive time from the merge, rows by their own time; a run stopped early by `--to` does not count the frames dropped before the stop), the SFDPS join of `oa-encounter` (added to the clip's count), the recordings and clip of `oa-stdds-ref` (frames by receive time, TAIS records by `mrtTime`), and for `oa-scope-replay` (clip
-  frames by receive time, rows by their own time, through `oa_adsb::reports_extend_unsealed` on a per-frame scratch), the
-  `oa-replay` pipeline's ADS-B rows (own time) and FNS rows (issue or cancel time; the validity span is not a message time),
+  frames by receive time, and a frame with a row in the window dropped whole and in no decode counter, through
+  `oa_adsb::reports_extend_unsealed` on a per-frame scratch), the
+  `oa-replay` pipeline's ADS-B frames (whole frame, by any row's time; the frame is in no error, frame, message, byte or `fed`
+  count) and FNS rows (issue or cancel time; the validity span is not a message time),
   the `oa-adsb` archive reader (trace rows; `Stats::sealed_window_dropped`, and `oa-adsb-clip` refuses, OA-SEAL-015),
   `oa-wind-check adsb` and the `stdds_summary` example, which
   drops inside the decoder. The window is a required argument of every decoder, so a caller cannot forget it:
@@ -5915,9 +5923,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `oa-stdds-ref` loader and the `stdds_summary` example). A document is dropped whole by the times of its messages. Every decoder's first step is
   a pre-scan of the whole document (the whole message for stdds), before any counter, row, table or string store is touched. It
   reads each message's or record's own time by the feed's known path, directly from the parsed tree, in any attribute order:
-  a TAIS record by `mrtTime` and an ASDE-X report by `time` (`parse_tais`, `parse_smes`), an SFDPS message by its
-  `timestamp` or `positionTime`, a TBFM `tma` by `msgTime`, a TFMS message, flow or TMI-list entry by `sourceTimeStamp`, a
-  NOTAM by `issued` or `canceled` (its validity span is not a message time). If any is in the window the whole document
+  its own times by the feed's known path (the key list below). If any is in the window the whole document
   is dropped and a sealed outcome carries only the count of its messages (or records): `Stats::sealed_window_dropped` or
   `Outcome::sealed_dropped`. It is in no other count (no message, document, row, kind, rejection, refused-field,
   field-error, shape, flag, unknown-path or unknown-root count) and touches no table or string store. No refusal can be
@@ -5925,14 +5931,25 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   window rollback in any decoder. Every pre-scan reads each value with the decoder's own value reader and parser (the same
   function, not a copy; the fixm survey calls `oa_fixm::prescan`), so the scan and the decoder cannot differ in what they read. TFMS TMI-list counts are therefore for the whole document, not per entry. The rule for what is a window key: every observation time and every actual-event time the decoder parses into a row or a
   statistic is a key (a message stamped after the window can report an event inside it); a reference time (an estimate, a
-  schedule or a validity time such as ETA, ETD, STA, effective, begin, end, original and filed times) is not. The keys per feed: TAIS `track/mrtTime` and `recSAFAReceiptTime` (`recSTARSTimestamp` is a
-  time of day, not a time); ASDE-X `time`; SFDPS `timestamp`, `positionTime` and the actual departure (`actual@time`); TBFM `msgTime`, and the envelope time of
-  an `env` (`envTime`) or `mis` (`misTime`) document; TFMS `sourceTimeStamp`, `timeAtPosition`, an oceanic position's `time`, the out, off, on and in times, the runway and
-  gate actuals, the boundary crossing time, an `etd` or `eta` typed ACTUAL, a time of departure or arrival that is not
-  marked estimated, an ACTUAL coordination time, and the event, sent and last-update times of flow messages and TMI
-  lists; NOTAM `issued` and `canceled`. A scan reads a time as the decoder would (character references decoded, text
-  split by a comment joined, whitespace trimmed where the decoder trims), and it also reads a repeated or foreign-namespace
-  element of a key name, so such a document is dropped too (the closed failure). A time that cannot be
+  schedule or a validity time such as ETA, ETD, STA, effective, begin, end, original and filed times) is not. The keys per feed, exactly as the code reads them: TAIS `track/mrtTime` and `recSAFAReceiptTime` of each `record`
+  (`recSTARSTimestamp` is a time of day, not a time); ASDE-X `time` of each report; SFDPS (fixm) the `timestamp` and
+  `positionTime` attributes of any element, and the `time` attribute of an `actual` element (the actual departure); TBFM
+  the `msgTime` attribute, the envelope time of an `env` (`envTime`) or `mis` (`misTime`) document, and `ctm`; TFMS the
+  attributes `sourceTimeStamp`, `airlineOutTime`, `airlineOffTime`, `airlineOnTime`, `airlineInTime`, `runwayDeparture`,
+  `runwayArrival`, `gateDeparture`, `gateArrival`, `boundaryCrossingTime`, `lastUpdateTime` and `flightCreation`, the
+  `timeValue` of an `etd` with `etdType` ACTUAL or an `eta` with `etaType` ACTUAL, and the element text of `timeAtPosition`, of
+  any element named `time` (an oceanic position's), of `eventTime`, `dateSent` and `lastUpdate` (flow and TMI messages), of
+  `timeOfDeparture` and `timeOfArrival` unless `estimated="true"`, and of `coordinationTime` and `newCoordinationTime` with
+  `type` ACTUAL; NOTAM the text of `issued` and `canceled`. Borderline times, keyed because when unsure a time is keyed (a
+  false drop costs a document of development data; a missed key leaks hold-out data): the TFMS `flightCreation` (when the flight
+  was created in the system, which is the time of the message that created it) and the TBFM `ctm` (a crossing time, which can
+  be an actual one). Not keys, as reference times: ETA, ETD and STA of any other type, `igtd`, the original departure and
+  arrival, the arrival and departure fix times, the `startTime`, `stopTime` and `endTime` of a restriction or advisory, the
+  TBFM schedule and estimate times, and the validity times of a NOTAM. A scan reads a value with the decoder's own reader, so it
+  reads what the decoder reads: character references are decoded and whitespace is trimmed where the decoder trims; text
+  that a comment or CDATA section splits is one value for STDDS and TFMS and is a bad field, not a time, for NOTAM. A repeated
+  element of a key name is read too. The STDDS scan skips a record outside the message's namespace, as the decoder does; the
+  other scans read an element of a key name in any namespace (so such a document is dropped too: the closed failure). A time that cannot be
   read falls to the receive-time gate of its frame; a document refused whole (not XML, wrong root) has no known time and is
   counted as refused. Development-day documents near the window edges that carry an in-window message are lost whole, and
   counted. `DropWindow::sealed()` fails closed: if the sealed list has no window or does not parse it is a window covering
@@ -5950,7 +5967,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `oa-flight-sfdps` merge report's bytes are not printed. The input digests and byte totals of `oa-bench` are
   file identities, like the SHA-256 that `oa-stdds-ref` prints, and not statistics. A recording's byte count (`oa-replay`, `oa-feed replay`) is
   the bytes after the window gate: the bytes of a frame dropped by receive time are not in it. A failed read still adds what
-  was counted so far (`oa-stdds-ref` `load_file_counted`, `stdds_summary`, the fixm survey, which uses `DropWindow::sealed()`, drops a file with a message in the window whole before any count, and returns an error through
+  was counted so far (`oa-stdds-ref` `load_file_counted`, `stdds_summary`, the fixm survey, which uses `DropWindow::sealed()`, drops a file with a message in the window whole before any count (`files` counts the kept files only; the dropped ones are in the drop line), and returns an error through
   `main` instead of unwrapping). The SHA-256 `oa-stdds-ref` prints is a file identity (of the file as a whole, as a name for it), not a statistic of its contents. `oa-bench` and `oa-stdds-census` record the line in their report and also print one
   stderr line at exit, which is the same count printed once. Other message kinds (service status, classified only) carry no row time and go by
   the receive time of their frame. Tests assert the `records:`, a TAIS field and a flag count, a refused message whose early

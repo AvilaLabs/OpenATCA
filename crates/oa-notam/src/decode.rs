@@ -766,8 +766,8 @@ fn index_texts(dec: &mut Decoder, doc: &Doc<'_>) {
 }
 
 /// Reads the text of every `issued` and `canceled` element of the document with the decoder's
-/// own text reader (`text`, with the buffer and the `parse_iso_ms` of the field parsers), directly
-/// from the parsed tree and whatever else is valid in it. True if any is in the drop window.
+/// own reader (`short`, the trimmed text, with the buffer and the `parse_iso_ms` of the field
+/// parsers), directly from the parsed tree and whatever else is valid in it. True if any is in the drop window.
 /// A time that cannot be read is not in the window (the frame's receive time gates it).
 fn prescan(dec: &mut Decoder, doc: &Doc<'_>) -> bool {
     let window = dec.limits.drop_window;
@@ -782,8 +782,8 @@ fn prescan(dec: &mut Decoder, doc: &Doc<'_>) -> bool {
         if name != b"issued" && name != b"canceled" {
             continue;
         }
-        if let Raw::Val(v) = text(doc, &dec.elem_text, i, &mut b1) {
-            if parse_iso_ms(trim(v)).is_some_and(|t| window.contains(t)) {
+        if let Raw::Val(v) = short(doc, &dec.elem_text, i, &mut b1) {
+            if parse_iso_ms(v).is_some_and(|t| window.contains(t)) {
                 return true;
             }
         }

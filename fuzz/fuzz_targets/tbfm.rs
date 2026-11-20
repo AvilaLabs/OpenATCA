@@ -51,6 +51,11 @@ fuzz_target!(|data: &[u8]| {
             for i in 0..oa_tbfm::rows_len(sealed) {
                 let r = oa_tbfm::row_at(sealed, i).expect("a row below the length");
                 assert!(!w.contains(r.msg_ms) && !w.contains(r.env_ms), "kept row in the window");
+                assert!(!w.contains(r.ctm_ms), "kept crossing time in the window");
+            }
+            // The outcome's envelope time is a key too, whatever the rows are.
+            if let Ok(o) = &b {
+                assert!(o.sealed_dropped > 0 || !w.contains(o.env_ms), "kept envelope time");
             }
             // Oracle 2: a document the sealed decoder did not drop decodes as with no window.
             match &b {

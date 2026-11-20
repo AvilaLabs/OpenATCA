@@ -146,7 +146,7 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
         return 0;
     }
     // Attributes that are an observation or the time of an actual event, on any element.
-    const ATTRS: [&[u8]; 11] = [
+    const ATTRS: [&[u8]; 12] = [
         b"sourceTimeStamp",
         b"airlineOutTime",
         b"airlineOffTime",
@@ -158,6 +158,9 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
         b"gateArrival",
         b"boundaryCrossingTime",
         b"lastUpdateTime",
+        // The time the flight was created in the system: not an event time but a record time of
+        // the message, keyed when in doubt.
+        b"flightCreation",
     ];
     // Whether attribute `name` of `e` has the value `want`.
     let attr_is = |e: ElemIx, name: &[u8], want: &[u8]| {
@@ -214,14 +217,11 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
             _ => false,
         };
         if key {
-            // The decoder's own value reader on the same text value as `leaf_text` builds it.
-            let v = Val {
-                span: doc.text_span.get(first).copied().unwrap_or_default(),
-                flagged: text_needs_decode(doc, oa_xml::TextIx(first as u32)),
-                kind: SpanKind::Text,
-                first,
-                count: t - first,
-            };
+            // The decoder's own value, built by the function `leaf_text` builds it with, and read
+            // by the decoder's own value reader. (An element that is not a leaf is refused by
+            // the decoder; its text is read here all the same, so the scan reads at least what
+            // the decoder reads.)
+            let v = text_value(doc, first, t - first);
             let mut buf = [0u8; MAX_VALUE];
             if let Ok(v) = value_bytes(doc, v, &mut buf) {
                 hit |= in_window(v);
@@ -467,15 +467,20 @@ fn leaf_text(
     if count == 0 {
         return Ok(None);
     }
-    let span = doc.text_span.get(first).copied().unwrap_or_default();
-    let flagged = text_needs_decode(doc, oa_xml::TextIx(first as u32));
-    Ok(Some(Val {
-        span,
-        flagged,
+    Ok(Some(text_value(doc, first, count)))
+}
+
+/// The value of the `count` text nodes from node `first`, which one element owns: the one value
+/// the decoder reads for a leaf element, over however many nodes a comment or CDATA section
+/// split it into. [`leaf_text`] and the pre-scan ([`prescan`]) both build the value here.
+fn text_value(doc: &Doc<'_>, first: usize, count: usize) -> Val {
+    Val {
+        span: doc.text_span.get(first).copied().unwrap_or_default(),
+        flagged: text_needs_decode(doc, oa_xml::TextIx(first as u32)),
         kind: SpanKind::Text,
         first,
         count,
-    }))
+    }
 }
 
 // ---- storing a value -----------------------------------------------------------------------

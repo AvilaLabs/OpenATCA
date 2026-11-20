@@ -128,8 +128,12 @@ pub fn read_clip_tallied(
             reports_clear(&mut frame);
             match decode_payload_lenient(fr.payload, &mut frame) {
                 Ok(c) => {
-                    dropped += c.dropped as u64;
-                    sealed += reports_extend_unsealed(&mut out, &frame);
+                    // A frame dropped whole for a row in a sealed window is in no other count.
+                    let gone = reports_extend_unsealed(&mut out, &frame);
+                    sealed += gone;
+                    if gone == 0 {
+                        dropped += c.dropped as u64;
+                    }
                 }
                 Err(_) => undecodable += 1,
             }
@@ -178,24 +182,31 @@ mod tests {
         // The list's window: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes).
         const FROM: i64 = 1_795_131_900_000_000_000;
         const TO: i64 = 1_795_393_920_000_000_000;
-        let mut r = Reports::default();
-        for (i, t) in [FROM - 1, FROM, TO - 1, TO].into_iter().enumerate() {
-            let mut row = ROW_EMPTY;
-            row.icao = 0xA00000 + i as u32;
-            row.time_ns = t;
-            row.lat_e7 = 410_000_000;
-            row.lon_e7 = -880_000_000;
-            reports_push(&mut r, &row);
-        }
-        let mut payload = Vec::new();
-        encode_payload(&mut payload, &r, 0, 4).unwrap();
-        let mut buf = vec![0u8; MAX_FRAME_LEN];
-        let n = encode_frame(&mut buf, 1, FLAG_BYTES, 0, FROM - 1, 0, &payload).unwrap();
-        let path = write("window.oaf", &buf[..n]);
+        let frame = |seq: u64, times: &[i64]| {
+            let mut r = Reports::default();
+            for (i, t) in times.iter().enumerate() {
+                let mut row = ROW_EMPTY;
+                row.icao = 0xA00000 + i as u32;
+                row.time_ns = *t;
+                row.lat_e7 = 410_000_000;
+                row.lon_e7 = -880_000_000;
+                reports_push(&mut r, &row);
+            }
+            let mut payload = Vec::new();
+            encode_payload(&mut payload, &r, 0, times.len()).unwrap();
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(&mut buf, 1, FLAG_BYTES, seq, FROM - 1, 0, &payload).unwrap();
+            buf[..n].to_vec()
+        };
+        // A frame with two rows in the window is dropped whole, with its four rows counted; a
+        // frame with every row outside it is kept.
+        let mut bytes = frame(0, &[FROM - 1, FROM, TO - 1, TO]);
+        bytes.extend(frame(1, &[FROM - 1, TO]));
+        let path = write("window.oaf", &bytes);
         let (got, bad, dropped, sealed) = read_clip_counted(&path, 1 << 20, 1000).unwrap();
         assert_eq!(got.time_ns, [FROM - 1, TO]);
-        assert_eq!((bad, dropped, sealed), (0, 0, 2));
-        // The plain reader drops the same rows.
+        assert_eq!((bad, dropped, sealed), (0, 0, 4));
+        // The plain reader drops the same frame.
         let (got, _, _) = read_clip(&path, 1 << 20, 1000).unwrap();
         assert_eq!(got.time_ns, [FROM - 1, TO]);
     }

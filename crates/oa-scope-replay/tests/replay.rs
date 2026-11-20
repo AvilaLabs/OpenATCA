@@ -1497,14 +1497,17 @@ fn the_clip_reader_drops_sealed_window_frames_and_rows_and_counts_them() {
     let clip = dir.join("neutral-name.oaf");
     std::fs::write(&clip, bytes).unwrap();
     let (_, _, tr) = cli::track_window(&clip, FROM - 10, TO + 10_000_000_000, TO + 5, 0).unwrap();
-    // Two frames by receive time (at from and at to - 1 ns); two rows by their own time.
-    assert_eq!(tr.sealed_window_dropped, 4);
-    // Kept: the row at from - 1 and the rows at to and to + 1 s.
-    assert_eq!(tr.reports, 3);
-    // The decoder's records and kept counts are after the window filter: the 2 rows timed in the
-    // window are not in them (the 4 + 1 + 1 + 1 rows of the frames not received in the window
-    // are decoded: 4 + 1, minus 2 dropped).
-    assert_eq!((tr.decode.records, tr.decode.kept), (3, 3));
+    // Two frames by receive time (at from and at to - 1 ns), counted one each; and the frame
+    // received at from - 1 ns, dropped whole for its rows timed in the window, its four rows
+    // counted.
+    assert_eq!(tr.sealed_window_dropped, 6);
+    // Kept: the row at to + 1 s, in the frame received at to.
+    assert_eq!(tr.reports, 1);
+    // The decoder's counters hold only the frame that was kept: the dropped ones are in none.
+    assert_eq!(
+        (tr.decode.records, tr.decode.kept, tr.decode.dropped),
+        (1, 1, 0)
+    );
     // On every exit the count is given: a window that holds only sealed frames is an error, and
     // the count of what was dropped is still returned.
     let mut sealed = 0;

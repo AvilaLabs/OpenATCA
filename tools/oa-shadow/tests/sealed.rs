@@ -267,10 +267,15 @@ fn the_program_counts_sfdps_frames_and_clip_rows_in_a_sealed_window_once() {
         row.version = 2;
         oa_adsb::reports_push(&mut r, &row);
     }
-    let mut payload = Vec::new();
-    oa_adsb::encode_payload(&mut payload, &r, 0, 2).unwrap();
+    // One row per frame: a frame with a row in the window is dropped whole.
+    let mut bytes = Vec::new();
+    for k in 0..2 {
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &r, k, k + 1).unwrap();
+        bytes.extend(frame(FROM - 1_000_000_000, &payload));
+    }
     let clip = root.join("neutral.oaf");
-    std::fs::write(&clip, frame(FROM - 1_000_000_000, &payload)).unwrap();
+    std::fs::write(&clip, bytes).unwrap();
     let out = root.join("out");
     // The two recordings do not overlap in time, so the run ends with an error after its reads;
     // the count line is on standard error once, before it.

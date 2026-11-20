@@ -9,6 +9,8 @@
 "timeAtPosition"
 "<time>"
 "actual"
+"<ctm>"
+"flightCreation=\""
 "airlineOutTime=\""
 "airlineOffTime=\""
 "airlineOnTime=\""

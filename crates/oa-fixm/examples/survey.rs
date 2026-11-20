@@ -65,6 +65,8 @@ fn run() -> Result<(), String> {
     let mut src_paths: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
     let mut uoms: BTreeMap<String, u64> = BTreeMap::new();
     let mut root_types: BTreeMap<String, u64> = BTreeMap::new();
+    // The files read and kept; a file dropped whole is in the drop line, not in this count.
+    let mut kept_files = 0usize;
     for f in &files {
         let bytes = oa_sealed::read(f).map_err(|e| format!("survey: {}: {e}", f.display()))?;
         let d = parser
@@ -80,6 +82,7 @@ fn run() -> Result<(), String> {
             drops.add(u64::from(gone));
             continue;
         }
+        kept_files += 1;
         // Message of each element: the child of the root.
         let mut msg_of = vec![u32::MAX; n];
         let mut nmsg = 0;
@@ -137,7 +140,7 @@ fn run() -> Result<(), String> {
             }
         }
     }
-    println!("files {}", files.len());
+    println!("files {kept_files}");
     println!("roots {root_types:?}");
     println!("messages per file {msgs_per_file:?}");
     println!("source {src:?}");

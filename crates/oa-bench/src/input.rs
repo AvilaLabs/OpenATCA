@@ -575,8 +575,12 @@ pub fn load_adsb_counted(path: &Path, open: &Opener, sealed: &mut u64) -> io::Re
             oa_adsb::reports_clear(&mut frame);
             match oa_adsb::decode_payload_lenient(fr.payload, &mut frame) {
                 Ok(c) => {
-                    dropped_records += c.dropped as u64;
-                    sealed_window_dropped += oa_adsb::reports_extend_unsealed(&mut reports, &frame);
+                    // A frame dropped whole for a row in a sealed window is in no other count.
+                    let gone = oa_adsb::reports_extend_unsealed(&mut reports, &frame);
+                    sealed_window_dropped += gone;
+                    if gone == 0 {
+                        dropped_records += c.dropped as u64;
+                    }
                 }
                 Err(_) => undecodable += 1,
             }

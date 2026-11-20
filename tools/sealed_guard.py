@@ -375,13 +375,23 @@ class Guard:
             raise
 
 
+def start_warning(g: Guard) -> str | None:
+    """The warning a tool prints at start when the list seals every instant: a list that does not
+    parse (which also refuses every sealed path) or has no window line; None otherwise."""
+    if g.broken:
+        return "seal list does not parse: every timed row is dropped and every sealed path refused"
+    if not g.windows:
+        return "seal list has no window: every timed row is dropped"
+    return None
+
+
 @functools.lru_cache(maxsize=1)
 def production() -> Guard:
     g = Guard()
-    # A list with no window line seals every instant; say so, once (the guard is cached), on
-    # stderr, at start.
-    if not g.broken and not g.windows:
-        print("seal list has no window: every timed row is dropped", file=sys.stderr)
+    # Say so once (the guard is cached), on stderr, at start.
+    w = start_warning(g)
+    if w is not None:
+        print(w, file=sys.stderr)
     return g
 
 

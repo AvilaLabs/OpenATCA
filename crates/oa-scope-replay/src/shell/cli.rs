@@ -609,17 +609,19 @@ pub fn track_window_counted(
         reports_clear(&mut scratch_rows);
         match decode_payload_lenient(fr.payload, &mut scratch_rows) {
             Ok(c) => {
-                // A row timed in a sealed window is dropped even when its frame was not, and is
-                // not in the records and kept counts: they are after the window filter.
+                // A frame with a row timed in a sealed window is dropped whole, even when its
+                // frame was received outside it, and is in no decode counter (OA-SEAL-014).
                 let gone = oa_adsb::reports_extend_unsealed(&mut reports, &scratch_rows);
                 sealed += gone;
-                dec.records += (c.records as u64).saturating_sub(gone);
-                dec.kept += (c.kept as u64).saturating_sub(gone);
-                dec.dropped += c.dropped as u64;
-                dec.bad_time += c.bad_time as u64;
-                dec.unknown_source += c.unknown_source as u64;
-                dec.bad_measurement += c.bad_measurement as u64;
-                dec.reserved_set += c.reserved_set as u64;
+                if gone == 0 {
+                    dec.records += c.records as u64;
+                    dec.kept += c.kept as u64;
+                    dec.dropped += c.dropped as u64;
+                    dec.bad_time += c.bad_time as u64;
+                    dec.unknown_source += c.unknown_source as u64;
+                    dec.bad_measurement += c.bad_measurement as u64;
+                    dec.reserved_set += c.reserved_set as u64;
+                }
             }
             Err(_) => undecodable += 1,
         }

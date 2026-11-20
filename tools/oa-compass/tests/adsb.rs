@@ -958,13 +958,19 @@ fn the_clip_loader_drops_rows_in_a_sealed_window_and_the_readme_counts_them() {
         row.source = 0;
         reports_push(&mut r, &row);
     }
-    let mut payload = Vec::new();
-    oa_adsb::encode_payload(&mut payload, &r, 0, 4).unwrap();
-    let mut buf = vec![0u8; MAX_FRAME_LEN];
-    let n = encode_frame(&mut buf, 1, FLAG_BYTES, 0, FROM - 1, 0, &payload).unwrap();
+    // One row per frame (a frame with a row in the window is dropped whole): the frames at
+    // from and to - 1 ns are dropped, the others kept.
+    let mut bytes = Vec::new();
+    for k in 0..4 {
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &r, k, k + 1).unwrap();
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, 1, FLAG_BYTES, k as u64, FROM - 1, 0, &payload).unwrap();
+        bytes.extend_from_slice(&buf[..n]);
+    }
     let dir = tmp("sealwindow");
     let clip = dir.join("c.oaf");
-    fs::write(&clip, &buf[..n]).unwrap();
+    fs::write(&clip, &bytes).unwrap();
     let lay = Layout {
         out: dir.join("out"),
         day: 0,

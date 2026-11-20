@@ -785,9 +785,10 @@ fn note_sealed(p: &mut Pipeline, n: u64) {
 
 fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) -> bool {
     reports_clear(&mut p.reports);
-    match decode_payload_lenient(payload, &mut p.reports) {
-        // A record that cannot be read loses only itself, and is counted.
-        Ok(c) => count_error(&mut p.errors, ErrKind::AdsbBadRecord, c.dropped as u64),
+    let unreadable = match decode_payload_lenient(payload, &mut p.reports) {
+        // A record that cannot be read loses only itself, and is counted (below, once the
+        // frame has passed the window gate).
+        Ok(c) => c.dropped as u64,
         Err(e) => {
             let k = match e {
                 PayloadError::Length => ErrKind::AdsbLength,
@@ -800,9 +801,10 @@ fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) -> bool {
             count_error(&mut p.errors, k, 1);
             return false;
         }
-    }
+    };
     // A frame with any row timed in a sealed window is dropped whole, as a document is
-    // (OA-SEAL-014): its rows are counted as dropped, and it is in no other count.
+    // (OA-SEAL-014): its rows are counted as dropped, and it is in no other count, not even
+    // an error count.
     let rows = reports_len(&p.reports);
     if p.reports
         .time_ns
@@ -813,6 +815,7 @@ fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) -> bool {
         note_sealed(p, rows as u64);
         return true;
     }
+    count_error(&mut p.errors, ErrKind::AdsbBadRecord, unreadable);
     for i in 0..rows {
         let a = apply_adsb(&mut p.adsb, &p.reports, i, now);
         bump(&mut p.rows_seen, FeedKind::Adsb, 1);

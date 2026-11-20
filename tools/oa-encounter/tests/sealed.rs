@@ -74,12 +74,17 @@ fn the_program_prints_the_count_of_clip_rows_dropped_for_a_sealed_window_once() 
         row.version = 2;
         oa_adsb::reports_push(&mut r, &row);
     }
-    let mut payload = Vec::new();
-    oa_adsb::encode_payload(&mut payload, &r, 0, 4).unwrap();
-    let mut buf = vec![0u8; payload.len() + 256];
-    let n = oa_feed_frame(&mut buf, &payload);
+    // One row per frame: a frame with a row in the window is dropped whole.
+    let mut bytes = Vec::new();
+    for k in 0..4 {
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &r, k, k + 1).unwrap();
+        let mut buf = vec![0u8; payload.len() + 256];
+        let n = oa_feed_frame(&mut buf, &payload);
+        bytes.extend_from_slice(&buf[..n]);
+    }
     let clip = t.join("neutral.oaf");
-    fs::write(&clip, &buf[..n]).unwrap();
+    fs::write(&clip, &bytes).unwrap();
     let o = Command::new(env!("CARGO_BIN_EXE_oa-encounter"))
         .arg("--adsb")
         .arg(&clip)

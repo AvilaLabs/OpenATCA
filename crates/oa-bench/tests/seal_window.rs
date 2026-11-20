@@ -57,16 +57,19 @@ fn clip(name: &str, r: &Reports, per_frame: usize) -> PathBuf {
 
 // REQ: OA-SEAL-014
 #[test]
-fn load_adsb_keeps_rows_at_from_minus_one_and_at_to_and_drops_the_rest() {
+fn load_adsb_drops_a_frame_with_a_row_in_the_window_whole_and_keeps_the_rest() {
     let r = rows_at(&[FROM - 1, FROM, TO - 1, TO]);
-    let p = clip("load.oaf", &r, 4);
-    let c = load_adsb(&p).unwrap();
+    // One frame of four: it has rows in the window, so all four are dropped and counted.
+    let c = load_adsb(&clip("load.oaf", &r, 4)).unwrap();
+    assert_eq!((reports_len(&c.reports), c.sealed_window_dropped), (0, 4));
+    assert_eq!((c.bad_frames, c.dropped_records), (0, 0));
+    // One row per frame: only the frames with a row in the window are dropped.
+    let c = load_adsb(&clip("load1.oaf", &r, 1)).unwrap();
     assert_eq!(c.reports.time_ns, [FROM - 1, TO]);
     assert_eq!(c.sealed_window_dropped, 2);
-    assert_eq!(c.bad_frames, 0);
     // A clip with nothing in the window still reports the count, 0.
     let r = rows_at(&[FROM - 1, TO]);
-    let c = load_adsb(&clip("load0.oaf", &r, 1)).unwrap();
+    let c = load_adsb(&clip("load0.oaf", &r, 2)).unwrap();
     assert_eq!((reports_len(&c.reports), c.sealed_window_dropped), (2, 0));
 }
 

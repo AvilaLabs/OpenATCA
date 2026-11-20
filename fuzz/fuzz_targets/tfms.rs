@@ -73,10 +73,31 @@ fuzz_target!(|data: &[u8]| {
                 ] {
                     assert!(!w.contains(t), "kept flight in the window");
                 }
+                // The estimate and coordination times are keys only when they are actual: an eta
+                // or etd of type ACTUAL, a time of departure or arrival that is not an estimate,
+                // and an ACTUAL coordination time. The creation time and the TMI update time are
+                // keys always.
+                use oa_tfms::rows::{flag, ttype};
+                let actual = |ty: u8, t: i64| ty == ttype::ACTUAL && w.contains(t);
+                assert!(!actual(r.eta_type, r.eta_ms), "kept actual eta in the window");
+                assert!(!actual(r.etd_type, r.etd_ms), "kept actual etd in the window");
+                assert!(
+                    !actual(r.coord_type, r.coord_ms),
+                    "kept actual coordination time in the window"
+                );
+                for (est, t) in [(flag::TOD_EST, r.tod_ms), (flag::TOA_EST, r.toa_ms)] {
+                    let estimated = oa_tfms::flag_get(r.flags, est) == flag::TRUE;
+                    assert!(estimated || !w.contains(t), "kept actual time of day in window");
+                }
+                assert!(!w.contains(r.created_ms), "kept creation time in the window");
+                assert!(!w.contains(r.tmi_ms), "kept TMI update time in the window");
             }
             for i in 0..oa_tfms::flows_len(&sealed.flows) {
                 let r = oa_tfms::flow_at(&sealed.flows, i).expect("a row below the length");
-                assert!(!w.contains(r.src_ms), "kept flow in the window");
+                assert!(
+                    !w.contains(r.src_ms) && !w.contains(r.event_ms),
+                    "kept flow in the window"
+                );
             }
             // Oracle 2: a document the sealed decoder did not drop decodes as with no window.
             match &b {

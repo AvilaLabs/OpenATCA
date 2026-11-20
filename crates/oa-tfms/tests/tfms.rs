@@ -2470,14 +2470,80 @@ fn the_times_a_flow_message_or_a_tmi_list_reports_are_window_keys_too() {
     let t = list
         .split("lastUpdateTime=\"")
         .nth(1)
-        .map(|r| r[..r.find('"').unwrap()].to_string());
-    if let Some(t) = t {
-        let x = list.replace(
-            &format!("lastUpdateTime=\"{t}\""),
-            &format!("lastUpdateTime=\"{inw}\""),
-        );
-        assert_eq!(decode_with_window(&wrap_fi(&x), w).0, Ok(sealed(1)));
-    }
+        .map(|r| r[..r.find('"').unwrap()].to_string())
+        .expect("the TMI list fixture has a lastUpdateTime");
+    let x = list.replace(
+        &format!("lastUpdateTime=\"{t}\""),
+        &format!("lastUpdateTime=\"{inw}\""),
+    );
+    assert_eq!(decode_with_window(&wrap_fi(&x), w).0, Ok(sealed(1)));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn every_remaining_key_moved_into_the_window_drops_a_message_stamped_after_it() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let after = "2026-11-24T01:00:00Z";
+    let inw = "2026-11-22T23:00:00Z";
+    let dropped = |xml: &str, flow: bool, what: &str| {
+        let x = if flow { wrap_fi(xml) } else { wrap_flight(xml) };
+        assert_eq!(decode_with_window(&x, w).0, Ok(sealed(1)), "{what}");
+    };
+    let kept = |xml: &str, flow: bool, what: &str| {
+        let x = if flow { wrap_fi(xml) } else { wrap_flight(xml) };
+        let (r, _, _) = decode_with_window(&x, w);
+        assert_eq!(r.unwrap().sealed_dropped, 0, "{what}");
+    };
+    let dep = stamped(&departure(), after);
+    // An `eta` typed ACTUAL; the same time as an estimate is a reference time.
+    let eta = dep.replace(
+        r#"<nxcm:eta etaType="ESTIMATED" timeValue="2030-01-02T04:30:00Z"/>"#,
+        &format!(r#"<nxcm:eta etaType="ACTUAL" timeValue="{inw}"/>"#),
+    );
+    assert_ne!(eta, dep);
+    dropped(&eta, false, "eta ACTUAL");
+    kept(
+        &eta.replace(r#"etaType="ACTUAL""#, r#"etaType="ESTIMATED""#),
+        false,
+        "eta ESTIMATED",
+    );
+    // A `newCoordinationTime` typed ACTUAL (the scan reads the key whatever the message holds).
+    let plan = stamped(&plan(), after).replace("2030-01-02T03:30:00Z", inw);
+    let new_coord = plan
+        .replace("nxcm:coordinationTime", "nxcm:newCoordinationTime")
+        .replace(r#"type="PROPOSED""#, r#"type="ACTUAL""#);
+    assert_ne!(new_coord, plan);
+    dropped(&new_coord, false, "newCoordinationTime ACTUAL");
+    kept(
+        &new_coord.replace(r#"type="ACTUAL""#, r#"type="PROPOSED""#),
+        false,
+        "newCoordinationTime PROPOSED",
+    );
+    // The creation time of the flight, an attribute of `flightTimeData`.
+    let modify = stamped(&modify(), after);
+    let created = modify.replace(
+        r#"flightCreation="2030-01-01T20:00:00Z""#,
+        &format!(r#"flightCreation="{inw}""#),
+    );
+    assert_ne!(created, modify);
+    dropped(&created, false, "flightCreation");
+    // The flow times: `eventTime` of an airport configuration, and `lastUpdate`.
+    let aptc = stamped(&aptc(), after);
+    let event = aptc.replace(
+        "<ns11:eventTime>2030-01-02T03:00:00Z",
+        &format!("<ns11:eventTime>{inw}"),
+    );
+    assert_ne!(event, aptc);
+    dropped(&event, true, "eventTime");
+    kept(&aptc, true, "airport configuration outside the window");
+    let adv = stamped(&gadv(), after);
+    let sent = adv.replace(
+        "<ns11:dateSent>2030-01-02T03:00:00Z",
+        &format!("<ns11:lastUpdate>{inw}"),
+    );
+    let sent = sent.replace("</ns11:dateSent>", "</ns11:lastUpdate>");
+    assert_ne!(sent, adv);
+    dropped(&sent, true, "lastUpdate");
 }
 
 // REQ: OA-SEAL-014

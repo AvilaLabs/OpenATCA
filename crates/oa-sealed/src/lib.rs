@@ -627,8 +627,10 @@ impl Sealed {
         &self.list.windows
     }
 
-    /// The windows of the list as one span of Unix milliseconds for the decoders. A list with no
-    /// window, or one that does not parse, gives the window that holds all time (fails closed).
+    /// The windows of the list as one span of Unix milliseconds for the decoders: the hull, from
+    /// the earliest start to the latest end, with any gap between windows inside it (fails
+    /// closed). A list with no window, or one that does not parse, gives the window that holds
+    /// all time.
     pub fn drop_window(&self) -> DropWindow {
         let from = self.list.windows.iter().map(|x| x.from_ns).min();
         let to = self.list.windows.iter().map(|x| x.to_ns).max();
@@ -834,38 +836,52 @@ pub struct DropReport {
     stdout: bool,
 }
 
-/// The warning a tool prints at start when the list has no `window` line (and so seals every
-/// instant): `None` when it has one.
-pub fn no_window_warning(guard: &Sealed) -> Option<&'static str> {
-    (guard.windows().is_empty() && !guard.broken)
-        .then_some("seal list has no window: every timed row is dropped")
+/// The warning a tool prints at start when the list seals every instant: a list with no `window`
+/// line, or one that does not parse (which also refuses every sealed path); `None` otherwise.
+pub fn start_warning(guard: &Sealed) -> Option<&'static str> {
+    if guard.broken {
+        Some("seal list does not parse: every timed row is dropped and every sealed path refused")
+    } else if guard.windows().is_empty() {
+        Some("seal list has no window: every timed row is dropped")
+    } else {
+        None
+    }
 }
 
-/// Prints [`no_window_warning`] for the compiled-in list, once per process, on standard error.
-/// A tool makes its [`DropReport`] first thing, so this is printed at start.
-fn warn_if_no_window() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        if let Some(w) = no_window_warning(Sealed::production()) {
-            eprintln!("{w}");
+/// Writes [`start_warning`] of `guard` to `out`, once per `once`. A failed write is ignored.
+fn announce(guard: &Sealed, once: &std::sync::Once, out: &mut dyn io::Write) {
+    once.call_once(|| {
+        if let Some(w) = start_warning(guard) {
+            let _ = writeln!(out, "{w}");
         }
     });
 }
 
+/// The once-per-process guard of the start warning.
+static START: std::sync::Once = std::sync::Once::new();
+
 impl DropReport {
-    /// A report that prints its line on standard error.
+    /// A report that prints its line on standard error. A tool makes its report first thing, so
+    /// the start warning ([`start_warning`]) is printed, once per process, at start.
     pub fn new() -> DropReport {
-        warn_if_no_window();
-        DropReport {
-            n: 0,
-            stdout: false,
-        }
+        DropReport::begin(Sealed::production(), &START, &mut io::stderr(), false)
     }
 
-    /// A report that prints its line on standard output (a tool whose output is that stream).
+    /// A report that prints its line on standard output (a tool whose output is that stream); the
+    /// start warning goes to standard error.
     pub fn to_stdout() -> DropReport {
-        warn_if_no_window();
-        DropReport { n: 0, stdout: true }
+        DropReport::begin(Sealed::production(), &START, &mut io::stderr(), true)
+    }
+
+    /// Makes a report after announcing the start warning of `guard` once per `once` on `out`.
+    fn begin(
+        guard: &Sealed,
+        once: &std::sync::Once,
+        out: &mut dyn io::Write,
+        stdout: bool,
+    ) -> DropReport {
+        announce(guard, once, out);
+        DropReport { n: 0, stdout }
     }
 
     /// Adds the count of one reader (each input is added once).
@@ -1040,18 +1056,58 @@ mod tests {
     }
 
     #[test]
-    fn a_list_with_no_window_line_gives_a_start_warning_and_one_with_a_window_does_not() {
+    fn a_list_that_seals_every_instant_gives_a_start_warning_and_a_good_one_does_not() {
         let none: String = LIST
             .lines()
             .filter(|l| !l.starts_with("window"))
             .map(|l| format!("{l}\n"))
             .collect();
         assert_eq!(
-            no_window_warning(&Sealed::with_list(&none, None)),
+            start_warning(&Sealed::with_list(&none, None)),
             Some("seal list has no window: every timed row is dropped")
         );
-        assert_eq!(no_window_warning(&Sealed::with_list(LIST, None)), None);
-        assert_eq!(no_window_warning(Sealed::production()), None);
+        assert_eq!(
+            start_warning(&Sealed::with_list("not a list\n", None)),
+            Some(
+                "seal list does not parse: every timed row is dropped and every sealed path refused"
+            )
+        );
+        assert_eq!(start_warning(&Sealed::with_list(LIST, None)), None);
+        assert_eq!(start_warning(Sealed::production()), None);
+    }
+
+    #[test]
+    fn a_drop_report_made_on_a_list_that_seals_every_instant_prints_the_warning_once() {
+        let none: String = LIST
+            .lines()
+            .filter(|l| !l.starts_with("window"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        for (list, line) in [
+            (
+                none.as_str(),
+                "seal list has no window: every timed row is dropped\n",
+            ),
+            (
+                "not a list\n",
+                "seal list does not parse: every timed row is dropped and every sealed path refused\n",
+            ),
+        ] {
+            let g = Sealed::with_list(list, None);
+            let once = std::sync::Once::new();
+            let mut out = Vec::new();
+            let r = DropReport::begin(&g, &once, &mut out, false);
+            assert_eq!(String::from_utf8(out.clone()).unwrap(), line);
+            // A second report of the process does not repeat it.
+            let r2 = DropReport::begin(&g, &once, &mut out, true);
+            assert_eq!(String::from_utf8(out).unwrap(), line);
+            assert_eq!((r.count(), r2.count()), (0, 0));
+        }
+        // A good list prints nothing.
+        let mut out = Vec::new();
+        let g = Sealed::with_list(LIST, None);
+        DropReport::begin(&g, &std::sync::Once::new(), &mut out, false);
+        assert!(out.is_empty());
     }
 
     #[test]

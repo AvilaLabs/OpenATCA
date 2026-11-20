@@ -176,6 +176,31 @@ class SealedGuardTests(unittest.TestCase):
         self.assertTrue(sealed_guard.Guard(text="root /d\nseal a\n").in_window(0))
         self.assertTrue(sealed_guard.dump(two).endswith("window 1970-01-01T00:00:01Z 1970-01-01T00:00:02Z\n"))
 
+    # REQ: OA-SEAL-014
+    def test_a_list_that_seals_every_instant_warns_at_start_and_a_good_list_does_not(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        nowin = "root /d\nseal a\n"
+        self.assertEqual(sealed_guard.start_warning(sealed_guard.Guard(text=nowin)),
+                         "seal list has no window: every timed row is dropped")
+        self.assertEqual(sealed_guard.start_warning(sealed_guard.Guard(text="garbage")),
+                         "seal list does not parse: every timed row is dropped and every sealed path refused")
+        self.assertIsNone(sealed_guard.start_warning(self.g))
+        # production() prints it, once, on stderr; the cache is bypassed for the test.
+        for text, line in ((nowin, "seal list has no window: every timed row is dropped\n"),
+                           ("garbage", "seal list does not parse: every timed row is dropped"
+                                       " and every sealed path refused\n"),
+                           (None, "")):
+            err = io.StringIO()
+            real = sealed_guard.Guard
+            with mock.patch.object(sealed_guard, "Guard", lambda: real(text=text)) if text is not None \
+                    else contextlib.nullcontext():
+                with contextlib.redirect_stderr(err):
+                    sealed_guard.production.__wrapped__()
+            self.assertEqual(err.getvalue(), line)
+
     # REQ: OA-SEAL-012, OA-SEAL-003
     def test_walk_unsealed_skips_and_counts_sealed_entries(self):
         adsb = self.root / "raw/adsblol"

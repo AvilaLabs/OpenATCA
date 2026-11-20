@@ -1551,3 +1551,30 @@ fn every_message_time_is_a_window_key_in_any_encoding_and_a_reference_time_is_no
     let o = decode_bytes(&mut p, refs.as_bytes(), &mut rows).unwrap();
     assert_eq!(o.sealed_dropped, 0);
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_ctm_time_is_a_window_key_though_the_message_is_stamped_after_the_window() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let with_ctm = |t: &str| {
+        let flt = FLT.replace("2026-11-14T14:30:00Z", t);
+        assert_ne!(flt, FLT);
+        env_many(&[(OUT, &format!("<air {AIR_ATTRS}>{flt}</air>"))])
+    };
+    // An in-window `ctm` in a message stamped outside it: dropped whole, counted once; in any
+    // encoding the decoder reads (a character reference, padding).
+    for t in [
+        "2026-11-21T00:00:00Z",
+        "2026-11-21T00:00:00&#90;",
+        " 2026-11-21T00:00:00Z ",
+    ] {
+        assert_dropped_whole(&with_ctm(t), 16, 1);
+    }
+    // The same message with the time outside the window is kept, with its row and its `ctm`.
+    let mut p = Parser::new(default_limits()).unwrap();
+    let mut rows = new_rows(16, w);
+    let kept = with_ctm("2030-01-02T03:30:00Z");
+    let o = decode_bytes(&mut p, kept.as_bytes(), &mut rows).unwrap();
+    assert_eq!((o.sealed_dropped, o.rows), (0, 1));
+    assert_ne!(oa_tbfm::row_at(&rows, 0).unwrap().ctm_ms, NO_TIME);
+}

@@ -124,16 +124,28 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
         return 0;
     }
     let (mut messages, mut hit) = (0u32, false);
+    // The text cursor of the elements asked for in document order, as the decoder keeps it.
+    let mut cursor = 0usize;
     for i in 0..doc.elem_name.len() {
         let e = ElemIx(i as u32);
-        if elem_name(doc, e) == b"tma" {
-            messages = messages.saturating_add(1);
+        match elem_name(doc, e) {
+            b"tma" => messages = messages.saturating_add(1),
+            // The time a flight crossed the meter fix, read with the decoder's own leaf reader:
+            // keyed when in doubt, as it can be an actual crossing. The estimate and schedule
+            // times (`eta`, `sta`, `etd`, `std`) and the validity times are not keys.
+            b"ctm" => {
+                let mut buf = [0u8; MAX_VALUE];
+                if let Ok(v) = leaf_text_at(doc, &mut cursor, e, Field::Ctm, &mut buf) {
+                    hit |= parse_time(v).is_ok_and(|t| window.contains(t));
+                }
+            }
+            _ => {}
         }
         let n = doc.elem_attr_count.get(i).copied().unwrap_or(0);
         for k in 0..n {
             let a = attr_ref(doc, e, k);
             // The message time of a `tma` and the envelope time of the other documents
-            // (`misTime`, `envTime`); the validity and estimate times are not keys.
+            // (`misTime`, `envTime`); the validity times are not keys.
             let field = match a.name {
                 b"msgTime" => Field::MsgTime,
                 b"misTime" | b"envTime" => Field::EnvTime,
@@ -384,19 +396,31 @@ fn leaf_text<'x>(
     field: Field,
     buf: &'x mut [u8; MAX_VALUE],
 ) -> Result<&'x [u8], DocError> {
+    leaf_text_at(doc, &mut acc.t, e, field, buf)
+}
+
+/// [`leaf_text`] with the text cursor given alone: the decoder and the pre-scan ([`prescan`])
+/// read an element's text with this one function.
+fn leaf_text_at<'x>(
+    doc: &Doc<'x>,
+    cursor: &mut usize,
+    e: ElemIx,
+    field: Field,
+    buf: &'x mut [u8; MAX_VALUE],
+) -> Result<&'x [u8], DocError> {
     let at = elem_at(doc, e);
     if first_child(doc, e) != ElemIx::NONE {
         return Err(ferr(field, FieldErrorKind::NotLeaf, at));
     }
     let n = doc.text_owner.len();
-    while acc.t < n && doc.text_owner.get(acc.t).is_some_and(|o| o.0 < e.0) {
-        acc.t += 1;
+    while *cursor < n && doc.text_owner.get(*cursor).is_some_and(|o| o.0 < e.0) {
+        *cursor += 1;
     }
-    let first = acc.t;
-    while acc.t < n && doc.text_owner.get(acc.t) == Some(&e) {
-        acc.t += 1;
+    let first = *cursor;
+    while *cursor < n && doc.text_owner.get(*cursor) == Some(&e) {
+        *cursor += 1;
     }
-    let count = acc.t - first;
+    let count = *cursor - first;
     let span = doc.text_span.get(first).copied().unwrap_or_default();
     let v = match count {
         0 => return Ok(&[]),

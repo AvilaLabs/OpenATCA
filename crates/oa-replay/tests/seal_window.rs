@@ -246,3 +246,70 @@ fn the_bytes_of_a_document_dropped_whole_are_not_in_the_byte_count() {
     assert_eq!(p.frames[Feed::Sfdps as usize], 1);
     assert_eq!(rep.bytes, kept.len() as u64);
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_dropped_adsb_frame_adds_to_no_error_count_even_with_a_bad_record() {
+    let mut r = oa_adsb::Reports::default();
+    for (k, t) in [FROM, FROM - 1, TO].into_iter().enumerate() {
+        let mut row = oa_adsb::ROW_EMPTY;
+        row.time_ns = t;
+        row.icao = 0xA00001 + k as u32;
+        row.lat_e7 = 410_000_000;
+        row.lon_e7 = -880_000_000;
+        row.nic = 8;
+        row.nac_p = 10;
+        row.sil = 3;
+        row.version = 2;
+        oa_adsb::reports_push(&mut r, &row);
+    }
+    let mut payload = Vec::new();
+    oa_adsb::encode_payload(&mut payload, &r, 0, 3).unwrap();
+    // Record 1 has a latitude out of range: read on its own it is a bad record, counted.
+    let o = 16 + oa_adsb::RECORD_LEN + 4;
+    payload[o] = 0x7f;
+    payload[o + 3] = 0x7f;
+    let errors = |p: &oa_replay::Pipeline| p.errors.iter().sum::<u64>();
+    let mut p = new_pipeline(PipelineConfig::default()).unwrap();
+    process_frame(
+        &mut p,
+        Feed::Adsb,
+        oa_feed::Kind::Message,
+        FROM - 1,
+        &payload,
+    );
+    // Row 0 is in the window: the frame is dropped whole, and nothing is counted but the drop
+    // (the rows that could be read: the bad record is not one of them).
+    assert!(p.last_doc_dropped);
+    assert_eq!(p.sealed_window_dropped, 2);
+    assert_eq!((errors(&p), p.rows_seen[Feed::Adsb as usize]), (0, 0));
+    // The same frame with row 0 outside the window: the bad record is counted.
+    let mut r2 = oa_adsb::Reports::default();
+    for (k, t) in [FROM - 2, FROM - 1, TO].into_iter().enumerate() {
+        let mut row = oa_adsb::ROW_EMPTY;
+        row.time_ns = t;
+        row.icao = 0xA00001 + k as u32;
+        row.lat_e7 = 410_000_000;
+        row.lon_e7 = -880_000_000;
+        row.nic = 8;
+        row.nac_p = 10;
+        row.sil = 3;
+        row.version = 2;
+        oa_adsb::reports_push(&mut r2, &row);
+    }
+    let mut payload = Vec::new();
+    oa_adsb::encode_payload(&mut payload, &r2, 0, 3).unwrap();
+    payload[o] = 0x7f;
+    payload[o + 3] = 0x7f;
+    let mut q = new_pipeline(PipelineConfig::default()).unwrap();
+    process_frame(
+        &mut q,
+        Feed::Adsb,
+        oa_feed::Kind::Message,
+        FROM - 1,
+        &payload,
+    );
+    assert!(!q.last_doc_dropped);
+    assert_eq!(errors(&q), 1);
+    assert_eq!(q.rows_seen[Feed::Adsb as usize], 2);
+}
