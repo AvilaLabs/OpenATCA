@@ -3815,6 +3815,15 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   scoring, writes `core.txt` with throughput with and without the one-second output, per-stage latency,
   and resident memory per phase, and the replay's output digest equals the scoring run's.
 
+- **OA-TRK-388** `oa-track-run --adsb <clip.oaf> --out <dir> --realtime [--with-output]` offers every report of
+  the clip to the tracker (no split, no scoring), times each update with the shell's monotonic clock, and
+  writes `realtime.txt` and `seconds.csv`: per second of traffic the reports, the processing time and the
+  confirmed tracks, the time's p50, p99 and maximum, the seconds that did not finish within the second
+  and the longest queue behind the traffic (a second's work starts when the earlier work is done), the
+  process's CPU and wall time against the traffic's span, every refusal and overflow counter, resident
+  memory and the tracker table bytes. `--with-output` also writes the output rows to column files and
+  reports their digest. The per-second log is a pure function of the nanoseconds it is given.
+
 ### Radar fusion with registration (oa-track: radar, assoc, registration, fusion; study binary oa-track-fusion)
 
 - **OA-TRK-030** A radar plot (slant range, azimuth, Mode C altitude) becomes a position in the track's local

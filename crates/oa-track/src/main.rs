@@ -5,6 +5,7 @@
 //! ```text
 //! oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score]
 //!                [--digest <file>] [--rows <file>]
+//! oa-track-run --adsb <clip.oaf> --out <dir> --realtime [--with-output]
 //! ```
 //!
 //! The clip's reports are split into two disjoint halves (`oa_track::score::SPLIT_TEXT`); the
@@ -15,7 +16,9 @@
 //! tracker core and the latency replay only (no truth, no scoring, no files but `core.txt`), to
 //! measure the tracker's own memory and speed apart from the scoring harness. `--digest` writes
 //! the per-second digest of the output rows and `--rows` the canonical rows themselves
-//! (`oa_track::canon`), for `oa-replay-diff`; without them nothing else changes.
+//! (`oa_track::canon`), for `oa-replay-diff`; without them nothing else changes. `--realtime` is the M9 interim marker's measurement: every
+//! report goes to the tracker (no split, no scoring) and each update is timed, per second of traffic;
+//! `--with-output` also writes the rows to column files, as a display or feed would need.
 //!
 //! The tracker's output goes to column files under `<dir>/spill-<pid>` as it is produced and
 //! scoring reads it back one address range at a time, so memory does not grow with the run. The
@@ -41,6 +44,7 @@ use oa_track::latency::{
     latency_count, latency_new, latency_stats, update_timed, Clock, FrameStamps, LatencyLog,
     LATENCY_CAPACITY, STAGES, STAGE_NAMES,
 };
+use oa_track::realtime::{realtime_summary, seconds_csv, SecondLog};
 use oa_track::score::{
     initiation_delays, interval_stats, run_tracker_spilled, score_source, scoring_config,
     split_reports, Esassp, IntervalStats, RowSet, Scored, SplitStats, BASIS_TEXT, CLASS_NAMES,
@@ -48,13 +52,13 @@ use oa_track::score::{
 };
 use oa_track::spill::{spill_append, spill_finish, spill_new, SpilledRun};
 use oa_track::{
-    output_clear, output_len, output_new, tracker_advance, tracker_bytes, tracker_flush,
-    tracker_log, tracker_new, tracker_stats, tracker_update, Measurement, TrackOutput,
-    TrackerConfig, DEFAULT_CONFIG, END_NAMES, REFUSE_NAMES,
+    output_clear, output_len, output_new, tracker_advance, tracker_bytes, tracker_counts,
+    tracker_flush, tracker_log, tracker_new, tracker_stats, tracker_update, Measurement,
+    TrackOutput, TrackerConfig, DEFAULT_CONFIG, END_NAMES, REFUSE_NAMES,
 };
 use oa_truth::{DEFAULT_CONFIG as TRUTH_DEFAULT, REMOVE_NAMES};
 
-const USAGE: &str = "usage: oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score] [--digest <file>] [--rows <file>]";
+const USAGE: &str = "usage: oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score] [--digest <file>] [--rows <file>] | --adsb <clip.oaf> --out <dir> --realtime [--with-output]";
 
 fn main() -> ExitCode {
     let mut adsb: Option<PathBuf> = None;
@@ -62,11 +66,14 @@ fn main() -> ExitCode {
     let mut compare = true;
     let mut score_it = true;
     let mut canon = CanonOut::default();
+    let (mut realtime, mut with_output) = (false, false);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--no-compare" => compare = false,
             "--no-score" => score_it = false,
+            "--realtime" => realtime = true,
+            "--with-output" => with_output = true,
             "--adsb" | "--out" | "--digest" | "--rows" => match args.next() {
                 Some(v) if a == "--adsb" => adsb = Some(PathBuf::from(v)),
                 Some(v) if a == "--digest" => canon.digest = Some(PathBuf::from(v)),
@@ -87,7 +94,12 @@ fn main() -> ExitCode {
         eprintln!("oa-track-run: --adsb and --out are required\n{USAGE}");
         return ExitCode::from(2);
     };
-    match run(&adsb, &out, compare, score_it, &canon) {
+    let result = if realtime {
+        run_realtime(&adsb, &out, with_output)
+    } else {
+        run(&adsb, &out, compare, score_it, &canon)
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("oa-track-run: {e}");
@@ -689,6 +701,232 @@ fn outliers_csv(rows: &[(&str, &Scored)]) -> (String, String) {
 struct CanonOut {
     digest: Option<PathBuf>,
     rows: Option<PathBuf>,
+}
+
+/// On-CPU nanoseconds of this process (`/proc/self/schedstat`), or from `/proc/self/stat`'s ticks
+/// (10 ms each) where the first is absent. The run is one thread, so this is its CPU time.
+fn cpu_ns() -> Option<u64> {
+    if let Some(v) = fs::read_to_string("/proc/self/schedstat")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+    {
+        return Some(v);
+    }
+    let s = fs::read_to_string("/proc/self/stat").ok()?;
+    let rest = s.get(s.rfind(')')? + 2..)?;
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let ticks = f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?;
+    Some(ticks * 10_000_000)
+}
+
+/// Seconds of CPU between two [`cpu_ns`] readings, as text.
+fn cpu_text(a: Option<u64>, b: Option<u64>) -> Option<f64> {
+    a.zip(b).map(|(a, b)| b.saturating_sub(a) as f64 / 1e9)
+}
+
+/// `--realtime`: the whole clip through the tracker, each update timed, per second of traffic
+/// (OA-TRK-388). Reading, decoding and the adapter are timed apart, not in the per-second figures.
+fn run_realtime(clip_path: &Path, out_dir: &Path, with_output: bool) -> Result<(), String> {
+    let mut phases = Phases::default();
+    phases.mark("start");
+    let (load_wall, load_cpu0) = (Instant::now(), cpu_ns());
+    let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
+    let (clip_reports, clip_bad) = (reports_len(&clip.reports), clip.bad_frames);
+    phases.mark("clip decoded (all reports in memory)");
+    let adsb_cfg = AdsbConfig::default();
+    check_adsb_config(&adsb_cfg).map_err(|e| format!("adapter configuration: {e}"))?;
+    let (meas, ad) = adsb_measurements(&clip.reports, &adsb_cfg);
+    drop(clip);
+    let load_wall_s = secs(load_wall);
+    let load_cpu_s = cpu_text(load_cpu0, cpu_ns());
+    let iv = interval_stats(&meas).unwrap_or(IntervalStats {
+        n: 0,
+        p50_ns: 1_000_000_000,
+        p90_ns: 1_000_000_000,
+        p99_ns: 1_000_000_000,
+    });
+    let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
+    phases.mark("measurements built");
+    let mut addrs: Vec<u32> = meas.iter().map(|m| m.addr).collect();
+    addrs.sort_unstable();
+    addrs.dedup();
+    fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
+    let spill_root = out_dir.join(format!("spill-{}", std::process::id()));
+    let mut t = tracker_new(&cfg).map_err(|e| e.to_string())?;
+    let tracker_mem = tracker_bytes(&t);
+    let mut out = output_new(cfg.out_capacity);
+    let mut w = if with_output {
+        Some(spill_new(&spill_root.join("run")).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let drain_rows = cfg.out_capacity.min(1 << 17) / 2;
+    let mut log = SecondLog::default();
+    let mut rows = 0u64;
+    let mut failed: Option<String> = None;
+    let mut cur_sec = i64::MIN;
+    let (wall0, cpu0) = (Instant::now(), cpu_ns());
+    for m in &meas {
+        let sec = i64::div_euclid(m.toa_ns, 1_000_000_000);
+        if sec != cur_sec {
+            if cur_sec != i64::MIN {
+                let (a, b) = tracker_counts(&t);
+                log.set_tracks(cur_sec, (a + b) as u32);
+            }
+            cur_sec = sec;
+        }
+        let at = Instant::now();
+        tracker_update(&mut t, m, &mut out);
+        if output_len(&out) > drain_rows {
+            rows += output_len(&out) as u64;
+            if let Some(w) = w.as_mut() {
+                if let Err(e) = spill_append(w, &out) {
+                    failed = Some(e.to_string());
+                }
+            }
+            output_clear(&mut out);
+        }
+        log.add(sec, at.elapsed().as_nanos() as u64);
+    }
+    let end = meas.last().map_or(0, |m| m.toa_ns);
+    tracker_advance(&mut t, end, &mut out);
+    tracker_flush(&mut t, end, &mut out);
+    rows += output_len(&out) as u64;
+    if let Some(w) = w.as_mut() {
+        spill_append(w, &out).map_err(|e| e.to_string())?;
+    }
+    let feed_wall_s = secs(wall0);
+    let feed_cpu_s = cpu_text(cpu0, cpu_ns());
+    phases.mark("tracker run");
+    if let Some(e) = failed {
+        return Err(format!("spilled output: {e}"));
+    }
+    let overflow = out.overflow;
+    let stats = *tracker_stats(&t);
+    let digest = match w {
+        Some(w) => {
+            let run = spill_finish(
+                w,
+                overflow,
+                stats,
+                tracker_log(&t).clone(),
+                meas.len() as u64,
+            )
+            .map_err(|e| e.to_string())?;
+            Some(run.digest.clone())
+        }
+        None => None,
+    };
+    phases.mark("output digest");
+    let s = realtime_summary(&log);
+    let traffic_s = s.seconds as f64;
+    let ms = |ns: u64| ns as f64 / 1e6;
+    let cpu_or = |c: Option<f64>, f: &dyn Fn(f64) -> String| c.map_or("n/a".to_string(), f);
+    let mut o = String::new();
+    let _ = writeln!(
+        o,
+        "oa-track-run --realtime{}: clip {}",
+        if with_output { " --with-output" } else { "" },
+        clip_path.display()
+    );
+    let _ = writeln!(
+        o,
+        "input: {clip_reports} reports decoded ({clip_bad} frames refused), {} of {} rows passed the adapter (NACp >= 8, NIC >= 7, SIL 3, version >= 2), {} distinct addresses in the measurements; full input, no split, no thinning",
+        ad.passed,
+        ad.rows_in,
+        addrs.len()
+    );
+    let _ = writeln!(
+        o,
+        "traffic: {} s from unix second {} ({} with measurements); measurements per second mean {:.1}, peak {} (second {})",
+        s.seconds, log.first_s, s.busy_seconds, s.reports_mean, s.reports_peak, s.reports_peak_s
+    );
+    let _ = writeln!(
+        o,
+        "peak confirmed tracks at the end of a second: {}",
+        s.tracks_peak
+    );
+    let _ = writeln!(
+        o,
+        "processing time of a second of traffic (the updates of that second, rows {}): p50 {:.3} ms, p99 {:.3} ms, max {:.3} ms (second {}), total {:.3} s",
+        if with_output { "written to column files" } else { "discarded" },
+        ms(s.work_p50_ns),
+        ms(s.work_p99_ns),
+        ms(s.work_max_ns),
+        s.work_max_s,
+        s.work_total_ns as f64 / 1e9
+    );
+    let _ = writeln!(
+        o,
+        "real time: {} seconds whose work took longer than the second, {} seconds that finished late behind queued work, longest queue {:.3} ms",
+        s.over_one_second,
+        s.finished_late,
+        ms(s.backlog_max_ns)
+    );
+    let _ = writeln!(
+        o,
+        "tracker run (updates and output, one thread): wall {feed_wall_s:.3} s for {traffic_s:.0} s of traffic, CPU {} s; share of one core: wall {:.4}%, CPU {}",
+        cpu_or(feed_cpu_s, &|c| format!("{c:.3}")),
+        100.0 * feed_wall_s / traffic_s.max(1.0),
+        cpu_or(feed_cpu_s, &|c| format!("{:.4}%", 100.0 * c / traffic_s.max(1.0)))
+    );
+    let _ = writeln!(
+        o,
+        "ingest (read, decode, adapter; not in the per-second figures): wall {load_wall_s:.3} s, CPU {} s",
+        cpu_or(load_cpu_s, &|c| format!("{c:.3}"))
+    );
+    let _ = writeln!(
+        o,
+        "tracker tables: {} bytes ({:.1} MiB) for {} tracks",
+        tracker_mem,
+        tracker_mem as f64 / (1024.0 * 1024.0),
+        cfg.max_tracks
+    );
+    let _ = writeln!(
+        o,
+        "counters: offered {}, applied {}, duplicates {}, late (window) {}, late (ring) {}, re-filtered {}, jump-rejected {}, numerical-refused {}, resyncs {}, altitude-rejected {}, geometric altitude skipped {}, capacity-refused {}",
+        stats.offered, stats.applied, stats.duplicates, stats.late_window, stats.late_ring, stats.refiltered, stats.jump_rejected, stats.numerical_refused, stats.resyncs, stats.alt_rejected, stats.alt_geometric_skipped, stats.capacity_refused
+    );
+    for (n, c) in REFUSE_NAMES.iter().zip(stats.refused.iter()) {
+        let _ = writeln!(o, "  refused {n}: {c}");
+    }
+    let _ = writeln!(
+        o,
+        "tracks: started {}, confirmed {}, ended: {}",
+        stats.started,
+        stats.confirmed,
+        END_NAMES
+            .iter()
+            .zip(stats.ended.iter())
+            .map(|(n, c)| format!("{n} {c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let _ = writeln!(
+        o,
+        "output: {rows} rows, rows lost to table capacity {overflow}, unrepresentable rows {}, nan covariance {}, skipped ticks {}, time held {} (applied {}), time steps {} back {}, log seconds dropped {}",
+        stats.rows_unrepresentable, stats.nan_covariance, stats.ticks_skipped, stats.time_held, stats.time_held_applied, stats.time_steps, stats.time_steps_back, log.dropped
+    );
+    let _ = writeln!(
+        o,
+        "output digest: {}",
+        digest.as_deref().unwrap_or("not computed (rows discarded)")
+    );
+    let _ = writeln!(o, "resident memory (kB, VmRSS now, VmHWM peak so far)");
+    phases.mark("end");
+    for (n, r, h) in &phases.0 {
+        let _ = writeln!(o, "  {n:<44} rss {r:>9}  peak {h:>9}");
+    }
+    print!("{o}");
+    let wr = |name: &str, body: String| {
+        fs::write(out_dir.join(name), body)
+            .map_err(|e| format!("{}: {e}", out_dir.join(name).display()))
+    };
+    wr("realtime.txt", o)?;
+    wr("seconds.csv", seconds_csv(&log))?;
+    let _ = fs::remove_dir_all(&spill_root);
+    Ok(())
 }
 
 fn run(
