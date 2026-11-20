@@ -86,7 +86,10 @@ fn the_program_exits_2_for_a_sealed_path_and_opens_and_creates_nothing() {
     let out = scratch("exit");
     let fine = out.join("fine.oaf");
     for (adsb, o) in [
-        (PathBuf::from("/x/scds/rec-20261119/day2/a.oaf"), out.join("o")),
+        (
+            PathBuf::from("/x/scds/rec-20261119/day2/a.oaf"),
+            out.join("o"),
+        ),
         (
             fine.clone(),
             PathBuf::from("/x/scds/stdds-smoke-20261119T1/o"),
