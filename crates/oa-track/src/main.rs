@@ -46,8 +46,8 @@ use oa_track::latency::{
     LATENCY_CAPACITY, STAGES, STAGE_NAMES,
 };
 use oa_track::realtime::{
-    check_flags, cpu_use, realtime_failure, realtime_summary, run_summary_digest, seconds_csv,
-    CpuMarks, SecondLog,
+    busy_line, check_flags, cpu_fallback_note, cpu_use, queue_line, realtime_failure,
+    realtime_summary, run_summary_digest, seconds_csv, timers_line, CpuMarks, SecondLog,
 };
 use oa_track::score::{
     initiation_delays, interval_stats, run_tracker_spilled, score_source, scoring_config,
@@ -753,8 +753,9 @@ struct CanonOut {
 }
 
 /// On-CPU nanoseconds of this process and where they come from: `/proc/self/schedstat` (the main
-/// thread, which is the whole run: it is one thread), or `/proc/self/stat`'s ticks (10 ms each; the
-/// whole process) where the first is absent.
+/// thread, which is the whole run: it is one thread), or `/proc/self/stat`'s ticks (assumed 100 Hz,
+/// 10 ms each, as the tick rate cannot be read without `unsafe`; the whole process) where the first
+/// is absent.
 fn cpu_ns() -> Option<(u64, &'static str)> {
     if let Some(v) = fs::read_to_string("/proc/self/schedstat")
         .ok()
@@ -767,7 +768,10 @@ fn cpu_ns() -> Option<(u64, &'static str)> {
     let rest = s.get(s.rfind(')')? + 2..)?;
     let f: Vec<&str> = rest.split_whitespace().collect();
     let ticks = f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?;
-    Some((ticks * 10_000_000, "/proc/self/stat (process, 10 ms ticks)"))
+    Some((
+        ticks * 10_000_000,
+        "/proc/self/stat (process, assumed 100 Hz ticks)",
+    ))
 }
 
 /// `--realtime`: removes the spill directory on every way out, then runs [`run_realtime_inner`].
@@ -984,18 +988,23 @@ fn run_realtime_inner(
         s.work_max_s,
         s.work_total_ns as f64 / 1e9
     );
+    let _ = writeln!(o, "{}", busy_line(&s));
+    let _ = writeln!(o, "{}", queue_line(&s));
     let _ = writeln!(
         o,
-        "real time: {} seconds whose work took longer than the second, {} seconds that finished late behind queued work, longest queue {:.3} ms (an upper bound: real reports arrive spread through the second, this model has each second's work start when the second ends)",
-        s.over_one_second,
-        s.finished_late,
-        ms(s.backlog_max_ns)
+        "final advance and flush after the last second: {:.3} ms{}",
+        finish_s * 1e3,
+        if with_output {
+            " (includes the output spill)"
+        } else {
+            ""
+        }
     );
     let _ = writeln!(
         o,
-        "final advance and flush after the last second: {:.3} ms",
-        finish_s * 1e3
+        "conditions: the input was decoded and held in memory before timing, sorted by time, and processed on one thread, so the figures exclude network input, decoding and the interrupts of a live feed; a second with no measurements does no tick work: the tick rows for a gap are emitted with the next update and charged to that second"
     );
+    let _ = writeln!(o, "{}", timers_line(s.work_total_ns, loop_wall_s));
     let _ = writeln!(
         o,
         "update window (one thread): wall {loop_wall_s:.3} s for {traffic_s:.0} s of traffic, CPU {} s; share of one core (over the {traffic_s:.0} s span of the traffic), update only: wall {:.4}%, CPU {}",
@@ -1010,10 +1019,24 @@ fn run_realtime_inner(
         pct(cpu.map(|c| c.total_pct)),
         cpu_or(cpu.map(|c| c.total_s), &|c| format!("{c:.3}"))
     );
+    let readings = [
+        cpu_start,
+        cpu_loaded,
+        cpu_loop_start,
+        cpu_looped,
+        cpu_finished,
+    ];
+    let got = readings.iter().flatten().count();
+    let fallback = readings
+        .iter()
+        .flatten()
+        .filter(|c| c.1.starts_with("/proc/self/stat"))
+        .count();
     let _ = writeln!(
         o,
-        "cpu source: {} (the run is single-threaded today)",
-        cpu_loaded.map_or("none", |c| c.1)
+        "cpu source: {} (the run is single-threaded today){}",
+        cpu_loaded.map_or("none", |c| c.1),
+        cpu_fallback_note(fallback, got).map_or(String::new(), |n| format!("; {n}"))
     );
     let _ = writeln!(
         o,
