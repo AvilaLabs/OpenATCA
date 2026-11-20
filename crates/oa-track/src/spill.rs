@@ -76,6 +76,7 @@ impl std::error::Error for SpillMismatch {}
 /// Checks every column file of `dir` against `rows` rows.
 pub(crate) fn check_columns(dir: &Path, rows: u64) -> io::Result<()> {
     for (c, w) in COLS.iter().zip(WIDTHS.iter()) {
+        // seal-allow: the tool's own spill directory (its output), not input data
         let found = fs::metadata(dir.join(c))?.len();
         let expected = rows * w;
         if found != expected {

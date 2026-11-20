@@ -267,10 +267,17 @@ pub fn recording_files_in(g: &Sealed, dir: &Path) -> Result<Vec<PathBuf>, ReadEr
                 .to_string(),
         ));
     }
+    // The guard first: neither folder is probed unless it is unsealed.
+    refuse_sealed(g, &feed).map_err(ReadError::Refused)?;
+    refuse_sealed(g, &rec).map_err(ReadError::Refused)?;
     // A capture day: only the STDDS feed's files (the day holds the other feeds too).
-    let (start, feed_only) = if std::fs::symlink_metadata(&feed).is_ok() {
+    // seal-allow: the guard checked the folder above; the probe reads no file
+    let has_feed = std::fs::symlink_metadata(&feed).is_ok();
+    // seal-allow: the guard checked the folder above; the probe reads no file
+    let has_rec = std::fs::symlink_metadata(&rec).is_ok();
+    let (start, feed_only) = if has_feed {
         (feed, true)
-    } else if std::fs::symlink_metadata(&rec).is_ok() {
+    } else if has_rec {
         return Err(ReadError::Layout(
             "the directory has a `rec` folder but no `rec/stdds`; give the STDDS recording folder"
                 .to_string(),

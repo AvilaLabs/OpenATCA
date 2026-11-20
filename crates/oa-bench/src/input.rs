@@ -94,6 +94,7 @@ pub fn hash_files(label: &str, files: &[PathBuf]) -> io::Result<InputHash> {
     let mut sums = Vec::with_capacity(files.len());
     for p in files {
         oa_sealed::refuse_io(p)?;
+        // seal-allow: the guard refused this path on the line above, before anything reads it
         let len = fs::metadata(p)?.len();
         let f = oa_sealed::open(p)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))?;
@@ -154,6 +155,7 @@ impl<R: Read> Read for Capped<R> {
 pub fn read_capped_file(path: &Path, max: u64) -> io::Result<Vec<u8>> {
     let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
     oa_sealed::refuse_io(path).map_err(named)?;
+    // seal-allow: the guard refused this path on the line above, before anything reads it
     let len = fs::metadata(path).map_err(named)?.len();
     if len > max {
         return Err(named(io::Error::new(

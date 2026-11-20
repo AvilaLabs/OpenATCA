@@ -125,6 +125,7 @@ pub fn new_parser() -> Result<Parser, MvaError> {
 /// Shell: reads a whole file, refusing one over [`MAX_FILE_BYTES`].
 pub fn read_file(path: &Path) -> Result<Vec<u8>, MvaError> {
     oa_sealed::refuse_io(path).map_err(|e| MvaError::Io(e.to_string()))?;
+    // seal-allow: the guard refused this path on the line above, before anything reads it
     let meta = std::fs::metadata(path).map_err(|e| MvaError::Io(e.to_string()))?;
     if meta.len() > MAX_FILE_BYTES {
         return Err(MvaError::FileTooLarge(meta.len()));

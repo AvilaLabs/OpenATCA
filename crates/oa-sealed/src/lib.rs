@@ -64,6 +64,7 @@ fn list_hash(bytes: &[u8]) -> String {
 /// refused, every instant sealed) with a warning on `warn` naming both hashes. A file that is
 /// absent (an installed binary, a copied one) leaves the embedded list in force.
 fn production_guard(embedded: &str, path: &Path, warn: &mut dyn io::Write) -> Sealed {
+    // seal-allow: the guard's own list file, compared with the compiled-in copy
     match fs::read(path) {
         Ok(disk) if disk != embedded.as_bytes() => {
             let _ = writeln!(
@@ -539,6 +540,7 @@ fn resolve(path: &Path, depth: usize) -> Result<PathBuf, ()> {
                 out.push(n);
                 if let Ok(real) = fs::canonicalize(&out) {
                     out = real;
+                // seal-allow: the guard's own link resolution; it reads no file, only whether a name is a link
                 } else if fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink()) {
                     // A link canonicalize could not follow: follow it by hand.
                     let target = fs::read_link(&out).map_err(|_| ())?;
@@ -701,6 +703,7 @@ impl Sealed {
         self.check_with(root, true)
             .map_err(|r| io::Error::other(r.why))?;
         // A root that does not exist is an error, not an empty walk.
+        // seal-allow: the guard's own walk; root was checked above
         fs::metadata(root)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", root.display())))?;
         let mut walk = Walk::default();
@@ -1214,7 +1217,10 @@ mod tests {
         assert!(g.in_window(0));
         let said = String::from_utf8(warn.clone()).unwrap();
         assert!(said.contains(&list_hash(LIST.as_bytes())), "{said}");
-        assert!(said.contains(&list_hash(format!("{LIST}\n").as_bytes())), "{said}");
+        assert!(
+            said.contains(&list_hash(format!("{LIST}\n").as_bytes())),
+            "{said}"
+        );
         // A file that is absent (an installed binary): the embedded list stays.
         fs::remove_file(&file).unwrap();
         let mut warn = Vec::new();
