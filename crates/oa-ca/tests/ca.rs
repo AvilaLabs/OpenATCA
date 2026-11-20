@@ -604,6 +604,40 @@ fn still(a: u32, x: f64, y: f64, d: f64) -> [CaTrack; 2] {
 
 // REQ: OA-CA-010
 #[test]
+fn under_a_tight_budget_a_distant_pair_closing_fast_is_evaluated_before_a_near_pair_moving_apart() {
+    let mut c = cfg();
+    c.eval_budget = 1;
+    c.look_ahead_ns = 300 * S;
+    let mut r = rig_with(&c);
+    // 45 NM apart, closing at 1,000 kt combined (514.4 m/s): inside 5 km at about 152 s.
+    let nm = 1852.0;
+    let kt = 0.514_444_4f32;
+    let closing = [
+        trk(1, 0.0, 0.0, 500.0 * kt, 0.0, 10_000.0),
+        trk(2, 45.0 * nm, 0.0, -500.0 * kt, 0.0, 10_000.0),
+    ];
+    // 4 NM apart and moving apart at 12 m/s combined: the nearer pair, and never in conflict.
+    let apart = [
+        trk(3, 0.0, 250_000.0, -6.0, 0.0, 10_000.0),
+        trk(4, 4.0 * nm, 250_000.0, 6.0, 0.0, 10_000.0),
+    ];
+    let out = step(&mut r, 0, &[apart[0], apart[1], closing[0], closing[1]]);
+    assert_eq!(
+        (
+            out.stats.candidates,
+            out.stats.evaluated,
+            out.stats.not_evaluated
+        ),
+        (2, 1, 1)
+    );
+    // The pair that was evaluated is the closing one: its alert is the only one, evaluated.
+    let open = ca_open(&r.st);
+    assert_eq!(open.len(), 1);
+    assert_eq!((open[0].addr_a, open[0].addr_b), (1, 2));
+}
+
+// REQ: OA-CA-010
+#[test]
 fn over_budget_the_closest_pairs_are_evaluated_the_rest_counted_and_open_alerts_kept() {
     let mut c = cfg();
     c.eval_budget = 1;

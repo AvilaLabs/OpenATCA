@@ -4,14 +4,18 @@ use alloc::vec::Vec;
 use oa_geo::aeqd::Frame;
 
 use crate::grid::{grid_tables, M_PER_DEG_LOW};
-use crate::solve::{MAX_ABS_VRATE_FPS, MAX_COORD_M, MAX_LOOK_AHEAD_S, MAX_RADIUS_M};
+use crate::solve::{
+    MAX_ABS_VRATE_FPS, MAX_ALT_FT, MAX_COORD_M, MAX_LOOK_AHEAD_S, MAX_RADIUS_M, MAX_REL_SPEED_MPS,
+};
 use crate::types::{
-    Alert, AlertLog, Area, CaConfig, CaTrack, CycleStats, EventLog, Volume, MAX_VOLUMES,
+    Alert, AlertLog, Area, CaConfig, CaTrack, CycleStats, EventLog, Volume, COAST_V_ALLOWANCE_FT,
+    MAX_ABS_ALT_FT, MAX_VOLUMES,
 };
 use crate::volume::volume_maxima;
 
 /// One pair inside the grid's reach, ordered by flat separation then by track numbers (tracks
-/// are in address order, so ties break by address).
+/// are in address order, so ties break by address): the order of the candidate table that keeps
+/// the nearest. The order of evaluation is the cycle's own (`time_to_reach` first).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Cand {
     /// Squared flat-earth separation, whole square metres.
@@ -71,6 +75,19 @@ const MAX_SPEED_LIMIT_MPS: f64 = 1.0e3;
 const MAX_VOLUME_H_M: f64 = 1.0e5;
 const MAX_VOLUME_V_FT: f64 = 1.0e5;
 const NS_PER_S: f64 = 1.0e9;
+
+// The proofs of the solvers (`solve`, proofs module) hold for inputs within the bounds stated
+// there. What the configuration check and the row check allow must be inside them, so each proof's
+// input assumption is met by the production values: a relative velocity component is at most
+// twice the speed limit; a horizontal limit is a volume's plus two radii at the cap; a relative
+// altitude is at most twice the altitude limit and a vertical limit a volume's plus both
+// allowances for a coasting track.
+const _: () = {
+    assert!(2.0 * MAX_SPEED_LIMIT_MPS <= MAX_REL_SPEED_MPS);
+    assert!(MAX_VOLUME_H_M + 2.0 * (MAX_RADIUS_M / 10.0) <= MAX_RADIUS_M);
+    assert!(2.0 * MAX_ABS_ALT_FT <= MAX_ALT_FT);
+    assert!(MAX_VOLUME_V_FT + 2.0 * COAST_V_ALLOWANCE_FT <= MAX_ALT_FT);
+};
 
 fn pos(x: f64) -> bool {
     x.is_finite() && x > 0.0

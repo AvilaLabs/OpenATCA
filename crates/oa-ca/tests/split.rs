@@ -214,3 +214,119 @@ fn the_split_solver_miss_and_prediction_agree_bit_for_bit_with_the_unsplit_code(
     // Both kinds of result were compared, many times.
     assert!(some > 10_000 && nones > 10_000, "{some} {nones}");
 }
+
+// ---- golden vectors from the original code ---------------------------------------------------
+
+const GOLDEN: &str = include_str!("golden/solver_vectors.txt");
+
+fn bits(tok: &str) -> f64 {
+    f64::from_bits(u64::from_str_radix(tok, 16).unwrap())
+}
+
+/// Equal bit for bit, except that any NaN equals any NaN (the payload of a NaN is not arithmetic).
+fn same_f64(a: f64, b: f64) -> bool {
+    a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+}
+
+fn span_from<'a>(it: &mut impl Iterator<Item = &'a str>) -> Option<Span> {
+    match it.next().unwrap() {
+        "N" => None,
+        "S" => Some(Span {
+            lo: bits(it.next().unwrap()),
+            hi: bits(it.next().unwrap()),
+            now: it.next().unwrap() == "1",
+        }),
+        other => panic!("{other}"),
+    }
+}
+
+fn prediction_from<'a>(it: &mut impl Iterator<Item = &'a str>) -> Option<Prediction> {
+    match it.next().unwrap() {
+        "N" => None,
+        "P" => Some(Prediction {
+            ttl_s: bits(it.next().unwrap()),
+            now: it.next().unwrap() == "1",
+            h_miss_m: bits(it.next().unwrap()),
+            v_miss_ft: bits(it.next().unwrap()),
+        }),
+        other => panic!("{other}"),
+    }
+}
+
+fn same_span_golden(a: &Option<Span>, b: &Option<Span>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => same_f64(a.lo, b.lo) && same_f64(a.hi, b.hi) && a.now == b.now,
+        _ => false,
+    }
+}
+
+fn same_prediction_golden(a: &Option<Prediction>, b: &Option<Prediction>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            same_f64(a.ttl_s, b.ttl_s)
+                && a.now == b.now
+                && same_f64(a.h_miss_m, b.h_miss_m)
+                && same_f64(a.v_miss_ft, b.v_miss_ft)
+        }
+        _ => false,
+    }
+}
+
+// REQ: OA-CA-018, OA-CA-028, OA-CA-029
+#[test]
+fn the_split_code_agrees_bit_for_bit_with_the_golden_vectors_of_the_original_code() {
+    // The vectors were made by the code before the split (the commit is named at the top of the
+    // file), so the comparison does not rest on a copy of that code kept in this file.
+    let (mut cases, mut spans, mut preds_known, mut preds_unknown) = (0u32, 0u32, 0u32, 0u32);
+    for (n, line) in GOLDEN.lines().enumerate() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let mut inp = [0.0f64; 9];
+        for x in &mut inp {
+            *x = bits(it.next().unwrap());
+        }
+        let [rx, ry, vx, vy, h, t, dz, dvz, v] = inp;
+        let want_span = span_from(&mut it);
+        let want_miss = bits(it.next().unwrap());
+        let want_known = prediction_from(&mut it);
+        assert_eq!(it.next(), Some("|"));
+        let want_unknown = prediction_from(&mut it);
+        assert_eq!(it.next(), None);
+        let at = format!("line {}: {line}", n + 1);
+        assert!(
+            same_span_golden(&want_span, &horizontal_span(rx, ry, vx, vy, h, t)),
+            "{at}"
+        );
+        assert!(
+            same_f64(want_miss, horizontal_miss(rx, ry, vx, vy, t)),
+            "{at}"
+        );
+        let z = Vertical {
+            dz_ft: dz,
+            dvz_fps: dvz,
+            v_eff_ft: v,
+        };
+        assert!(
+            same_prediction_golden(&want_known, &predict(rx, ry, vx, vy, h, Some(&z), t)),
+            "{at}"
+        );
+        assert!(
+            same_prediction_golden(&want_unknown, &predict(rx, ry, vx, vy, h, None, t)),
+            "{at}"
+        );
+        cases += 1;
+        spans += u32::from(want_span.is_some());
+        preds_known += u32::from(want_known.is_some());
+        preds_unknown += u32::from(want_unknown.is_some());
+    }
+    // Every kind of result is in the file, in numbers that matter.
+    assert_eq!(cases, 2400);
+    assert!(
+        spans > 300 && preds_known > 100 && preds_unknown > 100,
+        "{spans} {preds_known} {preds_unknown}"
+    );
+}

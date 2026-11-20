@@ -83,7 +83,11 @@ fn the_program_drops_and_counts_clip_rows_in_a_sealed_window_and_prints_the_line
         1,
         "{err}"
     );
-    assert_eq!(err.matches("sealed-window rows dropped: ").count(), 1, "{err}");
+    assert_eq!(
+        err.matches("sealed-window rows dropped: ").count(),
+        1,
+        "{err}"
+    );
     // A run that fails after the clip is read (the output directory cannot be made: its parent
     // is a file) carries the true count, 2, once.
     let file = t.join("a-file");
@@ -92,7 +96,11 @@ fn the_program_drops_and_counts_clip_rows_in_a_sealed_window_and_prints_the_line
     let err = String::from_utf8_lossy(&o.stderr);
     assert_eq!(o.status.code(), Some(1), "{err}");
     assert_eq!(err.matches(line).count(), 1, "{err}");
-    assert_eq!(err.matches("sealed-window rows dropped: ").count(), 1, "{err}");
+    assert_eq!(
+        err.matches("sealed-window rows dropped: ").count(),
+        1,
+        "{err}"
+    );
     // A usage error and a refusal print the line too, with a count of 0.
     let o = Command::new(env!("CARGO_BIN_EXE_oa-ca")).output().unwrap();
     let err = String::from_utf8_lossy(&o.stderr);

@@ -531,7 +531,7 @@ pub fn ca_cycle(
     }
     st.cands.clear();
     grid_scan(st, &mut stats);
-    st.cands.sort_unstable();
+    sort_for_evaluation(st);
     let n_eval = st.cands.len().min(st.cfg.eval_budget);
     for k in 0..n_eval {
         let Some(c) = st.cands.get(k).copied() else {
@@ -602,6 +602,46 @@ pub fn ca_cycle(
         work_short,
         input_short,
     }
+}
+
+/// A lower bound on the time, seconds, before a candidate pair can be inside its horizontal
+/// limit: the flat separation less the widest limit it can have (the largest of the volumes plus
+/// both 95 % radii), over the sum of the two ground speeds, the speeds an unknown speed taken as
+/// the configured maximum. Zero for a pair inside the limit now; infinite for a pair with no
+/// speed that is outside it. The flat separation is itself approximate (the exact test is the
+/// evaluation's), so this only orders the pairs: it never decides one.
+fn time_to_reach(st: &CaState, c: &Cand) -> f64 {
+    let (i, j) = (c.i as usize, c.j as usize);
+    let speed = |k: usize| st.speed.get(k).copied().unwrap_or(st.cfg.max_speed_mps);
+    let radius = |k: usize| {
+        st.obs
+            .get(k)
+            .map_or(st.cfg.r95_cap_m, |o| f64::from(o.r95_m))
+    };
+    let wide = st.h_max_m + radius(i) + radius(j);
+    let gap = oa_ieee::sqrt(c.d2 as f64) - wide;
+    let closing = speed(i) + speed(j);
+    if gap <= 0.0 {
+        0.0
+    } else if closing > 0.0 {
+        gap / closing
+    } else {
+        f64::INFINITY
+    }
+}
+
+/// Orders `st.cands` for the evaluation budget: by the least time before the pair can be inside
+/// its limit ([`time_to_reach`]), then nearest first, then by track numbers (addresses). The
+/// order is total, so it is the same on every run. A distant pair closing fast comes before a
+/// near pair moving apart slowly, which is what a budget that stops early must not get wrong.
+fn sort_for_evaluation(st: &mut CaState) {
+    let mut cands = core::mem::take(&mut st.cands);
+    cands.sort_unstable_by(|a, b| {
+        time_to_reach(st, a)
+            .total_cmp(&time_to_reach(st, b))
+            .then_with(|| a.cmp(b))
+    });
+    st.cands = cands;
 }
 
 fn keep_pair(st: &mut CaState, c: &Cand, t_ns: i64) {

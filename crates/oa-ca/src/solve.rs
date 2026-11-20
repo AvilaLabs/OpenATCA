@@ -2,8 +2,14 @@
 //!
 //! Two aircraft at relative position `r` (metres, east and north of the first) with relative
 //! velocity `v` (metres per second) are in horizontal loss at time `t` while `|r + v t| < H`.
-//! That is a quadratic in `t`; it is solved without cancellation near the middle of the pass by
-//! the perpendicular miss `|cross(r, v)| / |v|` and the time of closest approach `-(r.v) / (v.v)`.
+//! That is a quadratic in `t`, solved by its discriminant `H^2 a - cross(r, v)^2` (`a = v.v`) and
+//! the time of closest approach `-(r.v) / a`. The discriminant does cancel near tangency, where the
+//! perpendicular miss `|cross| / sqrt(a)` is close to `H`: its rounding error is a few units of
+//! `2^-52 H^2 a`, so the half-width of the pass, `sqrt(disc) / a`, is off by at most about
+//! `3e-8 H / sqrt(a)` seconds, a distance of about `3e-8 H` (0.03 m at the largest `H`, well inside
+//! the 1 m tolerance of the tests), and which side of zero a tiny discriminant falls on decides only
+//! a pass of that size: a pair inside now is kept current either way (`step_of`), and the edges are
+//! strict in any case.
 //! Vertically, relative altitude `dz` (feet) and rate `dvz` (feet per second) are in loss while
 //! `|dz + dvz t| < V`, which is linear. A pair is in conflict when the two loss intervals meet
 //! inside `[0, T]`, `T` the look-ahead.
@@ -427,31 +433,32 @@ mod proofs {
     // REQ: OA-CA-028
     #[kani::proof]
     fn the_decision_of_the_first_step_gives_a_current_pair_a_span_or_a_root_step() {
-        // The contract on the three values it takes: `a` finite, from 0 to A_MAX; `disc` finite;
-        // `tc` finite and at most TC_MAX when `a` is not taken as zero (proved for the functions
-        // that compute them, the three proofs below).
-        let (a, disc, tc, t): (f64, f64, f64, f64) =
-            (kani::any(), kani::any(), kani::any(), kani::any());
-        kani::assume(a >= 0.0 && a <= A_MAX);
-        kani::assume(disc.is_finite());
-        kani::assume(a < STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS || within(tc, TC_MAX));
-        kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);
-        match step_of(true, a, disc, tc, t) {
+        // The real first step, `horizontal_step`, on every input inside the stated bounds. Its
+        // outputs are what the proofs below take as their contracts: for the root step, `a` from
+        // the stationary threshold squared to A_MAX, `disc` finite in (0, DISC_MAX] (the
+        // square-root lemma's domain), `tc` within TC_MAX; and a pair inside the limit now never
+        // gets no span.
+        let (rx, ry, vx, vy, h, t) = horizontal_inputs();
+        let now = rx * rx + ry * ry < h * h;
+        match horizontal_step(rx, ry, vx, vy, h, t) {
             HorizontalStep::Done(s) => {
-                assert!(s.is_some());
+                assert!(s.is_some() == now);
                 if let Some(s) = s {
+                    kani::cover!(true, "a span without a root");
                     assert!(s.now && s.lo == 0.0 && 0.0 <= s.hi && s.hi <= t);
                 }
             }
             HorizontalStep::Root {
-                now,
-                tc: rtc,
-                a: ra,
-                disc: rd,
+                now: rnow,
+                tc,
+                a,
+                disc,
             } => {
-                assert!(now && within(rtc, TC_MAX) && rtc == tc);
-                assert!(ra >= STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS && ra <= A_MAX);
-                assert!(rd.is_finite() && rd > 0.0 && rd == disc);
+                kani::cover!(true, "a root step");
+                assert!(rnow == now);
+                assert!(within(tc, TC_MAX));
+                assert!(a >= STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS && a <= A_MAX);
+                assert!(disc.is_finite() && disc > 0.0 && disc <= DISC_MAX);
             }
         }
     }
@@ -524,8 +531,8 @@ mod proofs {
     // The horizontal miss is `oa_math::hypot` of the closest point, and takes this contract of it:
     // for finite `x` and `y`, each at most POINT_MAX in magnitude, the result is finite and not
     // negative. It is NOT proved here: CBMC did not finish a proof of `hypot` over these inputs
-    // in 30 minutes (the result of its double-double path and its scaling are bit-level
-    // arithmetic of about forty products and divisions). The contract is the documented one
+    // in 10 minutes, the limit of each proof here (the result of its double-double path and its
+    // scaling are bit-level arithmetic of about forty products and divisions). The contract is the documented one
     // (`oa_math::hypot`: faithfully rounded, no intermediate overflow, the result overflows only
     // when it does not fit; the closest point is under 7.1e7 from the origin), checked against
     // the reference data of `crates/oa-math/tests/reference.rs` (OA-MATH-005) and, for this
@@ -546,7 +553,8 @@ mod proofs {
     fn a_conflict_span_of_any_ordered_horizontal_span_is_ordered_and_finite() {
         // Any ordered horizontal span inside the look-ahead (the solver's own are such: proved
         // in `horizontal_span_is_finite_and_ordered_for_bounded_inputs`), with the vertical part
-        // known: the conflict span `combine_spans` gives is finite, ordered, inside the look-ahead.
+        // known or unknown: the conflict span `combine_spans` gives is finite, ordered, inside the
+        // look-ahead.
         let t: f64 = kani::any();
         kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);
         let (lo, hi): (f64, f64) = (kani::any(), kani::any());
@@ -568,7 +576,17 @@ mod proofs {
             dvz_fps: dvz,
             v_eff_ft: v,
         };
-        if let Some(m) = combine_spans(hs, Some(&z), t) {
+        // The vertical part known, and unknown (the horizontal span is then the test).
+        let known: bool = kani::any();
+        let vert = if known { Some(&z) } else { None };
+        kani::cover!(hs.is_none(), "no horizontal span");
+        kani::cover!(!known, "an unknown vertical part");
+        let m = combine_spans(hs, vert, t);
+        if let Some(m) = m {
+            kani::cover!(
+                known && hs.is_some(),
+                "a conflict of a horizontal and a vertical span"
+            );
             assert!(m.lo.is_finite() && m.hi.is_finite());
             assert!(0.0 <= m.lo && m.lo <= m.hi && m.hi <= t);
         }
@@ -625,6 +643,7 @@ mod proofs {
         let known = combine_spans(hs, Some(&z), t_max);
         let unknown = combine_spans(hs, None, t_max);
         if let Some(k) = known {
+            kani::cover!(true, "a conflict with the altitude known");
             // A conflict with the altitude known is a conflict, no later and no less current,
             // with the altitude unknown; and it is the horizontal conflict itself.
             let u = unknown.unwrap();

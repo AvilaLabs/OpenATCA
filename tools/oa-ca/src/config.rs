@@ -159,7 +159,9 @@ fn volume(v: &str) -> Result<Volume, String> {
 /// Parses the configuration text, and checks it with the core's own check.
 pub fn parse_config(text: &str) -> Result<Settings, String> {
     if text.len() > MAX_TEXT_BYTES {
-        return Err(format!("the configuration is longer than {MAX_TEXT_BYTES} bytes"));
+        return Err(format!(
+            "the configuration is longer than {MAX_TEXT_BYTES} bytes"
+        ));
     }
     let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
     let mut volumes: Vec<&str> = Vec::new();
