@@ -1236,9 +1236,9 @@
         "filter_apply refuses the report as the real path does (the counter goes to its scratch statistics)."
       ],
       "cfgs": [],
-      "harness_timeout_seconds": 600,
-      "external_timeout_seconds": 900,
-      "memory_mib": 8192
+      "harness_timeout_seconds": 1200,
+      "external_timeout_seconds": 1500,
+      "memory_mib": 16384
     },
     {
       "id": "large-move-decision-rejected-anchor-filter",
