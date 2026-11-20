@@ -225,6 +225,7 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path) -> Result<String, String>
 
     // Tracker on set A.
     let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
+    eprintln!("{}", oa_sealed::window_drop_line());
     let clip_hash = clip.hash.sha256.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)

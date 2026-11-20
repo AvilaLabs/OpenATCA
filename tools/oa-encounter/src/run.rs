@@ -321,7 +321,9 @@ pub fn report_separations(
 pub fn run(args: &Args) -> Result<String, String> {
     let clip =
         load_adsb_with(&args.adsb, &crate::guard::guarded_opener()).map_err(|e| e.to_string())?;
+    eprintln!("sealed-window rows dropped: {}", clip.sealed_window_dropped);
     let clip_sha = clip.hash.sha256.clone();
+    let sealed_window_dropped = clip.sealed_window_dropped;
     let (reports, scope) = if args.scorer_half {
         let (a, b, _) = split_reports(&clip.reports);
         oa_bench::split_check::check_split(&a, &b)
@@ -387,6 +389,7 @@ pub fn run(args: &Args) -> Result<String, String> {
         tick_rows: rec.tick_rows,
         clip_name: &name,
         clip_sha256: &clip_sha,
+        sealed_window_dropped,
         scope: &scope,
         csv_sha256: &csv_sha,
     });

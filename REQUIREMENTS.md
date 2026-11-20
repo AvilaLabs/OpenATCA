@@ -5644,3 +5644,15 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `read_to_string` read through the guard's opener. `fuzz/make_corpora.py` reads and globs through the guard.
 - **OA-SEAL-013** Every library function that takes a path and opens it for reading opens it through the guard: `oa_zip::read_archive_file`,
   `oa_nasr::open`, `oa_dof::read_file`, `oa_tiff::read_file` and the `oa-replay-diff` file readers; a sealed path is an I/O error that names OA-SEAL-001.
+- **OA-SEAL-014** The readers drop every row or frame whose time falls in a sealed window (OA-SEAL-011) and count it:
+  `oa_bench::input::load_adsb` (rows; `AdsbClip::sealed_window_dropped`) and `for_each_adsb_frame` (a frame with a row in the
+  window is not passed on), `oa_truth::clip::read_clip` (`read_clip_counted`), the `oa-replay` recording reader (frames by
+  receive time; `MergeReport::sealed_window_dropped`) and the `oa-stdds-census` recording reader (`ReadStats`). A row at the
+  `from` instant and one at the last nanosecond before `to` are dropped; one at `from - 1 ns` and one at `to` are kept. Every
+  tool built on them prints `sealed-window rows dropped: N` (also when N is 0) and, where it writes a report or README,
+  records the line there: oa-bench (report note), oa-compass (README), oa-encounter (summary), oa-shadow (report header),
+  oa-stdds-census (the read section); oa-truth-check, oa-sensorsim, oa-track and its examples, oa-replay print it.
+- **OA-SEAL-015** `oa-adsb-clip` refuses to clip a report whose time is in a sealed window: exit 2, nothing written, the count
+  printed as `sealed-window rows dropped: N` (the reports are counted, not clipped). Otherwise it writes `<out>.source` next
+  to the clip (not for `--out -`): each input path with its SHA-256, the window (`--from`, `--to` in Unix nanoseconds, `none`
+  when open) and the counts (rows seen, outside the box, outside the window, kept, frames, sealed-window rows dropped).

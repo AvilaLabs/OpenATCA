@@ -272,6 +272,16 @@ fn walk_unsealed_skips_and_counts_sealed_entries_and_never_descends_into_them() 
     assert_eq!((one.files.len(), one.skipped), (1, 0));
 }
 
+// REQ: OA-SEAL-014
+#[test]
+fn the_drop_counter_adds_up_and_the_line_has_the_fixed_text() {
+    let before = oa_sealed::window_dropped_total();
+    oa_sealed::note_window_drops(3);
+    oa_sealed::note_window_drops(0);
+    assert!(oa_sealed::window_dropped_total() >= before + 3);
+    assert!(oa_sealed::window_drop_line().starts_with("sealed-window rows dropped: "));
+}
+
 // REQ: OA-SEAL-012, OA-SEAL-003
 #[test]
 fn read_and_read_to_string_go_through_the_opener() {

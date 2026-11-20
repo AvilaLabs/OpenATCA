@@ -105,6 +105,7 @@ fn main() -> ExitCode {
         }
     }
     let t0 = std::time::Instant::now();
+    let mut clip_sealed = 0u64;
     let index = match clip {
         Some(c) => {
             // The loader is the one oa-encounter and the bench use.
@@ -123,6 +124,7 @@ fn main() -> ExitCode {
                 "ADS-B clip: bad frames {} dropped records {}",
                 loaded.bad_frames, loaded.dropped_records
             );
+            clip_sealed = loaded.sealed_window_dropped;
             let est = estimate_build_bytes(&loaded.reports, &params, window);
             if est > budget() {
                 eprintln!(
@@ -154,7 +156,12 @@ fn main() -> ExitCode {
         .with_window(window)
         .with_budget(budget());
     let rs = match read_dir(Path::new(dir), &mut census) {
-        Ok(rs) => rs,
+        Ok(mut rs) => {
+            // The clip's rows and the recording's frames, in one count.
+            rs.sealed_window_dropped += clip_sealed;
+            eprintln!("sealed-window rows dropped: {}", rs.sealed_window_dropped);
+            rs
+        }
         Err(e @ (ReadError::Refused(_) | ReadError::Layout(_))) => {
             eprintln!("oa-stdds-census: refused: {e}");
             return ExitCode::from(2);

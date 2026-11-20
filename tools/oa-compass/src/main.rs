@@ -70,6 +70,7 @@ fn run(job: Job) -> Result<(), ExportError> {
     for l in lines {
         println!("{l}");
     }
+    println!("{}", oa_sealed::window_drop_line());
     Ok(())
 }
 

@@ -244,6 +244,11 @@ pub fn run(args: &Args) -> Result<String, String> {
     let clip =
         load_adsb_with(&args.adsb, &open).map_err(|e| format!("{}: {e}", args.adsb.display()))?;
     header.push(format!("ADS-B clip sha256 {}", clip.hash.sha256));
+    header.push(format!(
+        "sealed-window rows dropped: {}",
+        clip.sealed_window_dropped
+    ));
+    eprintln!("sealed-window rows dropped: {}", clip.sealed_window_dropped);
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
         .map_err(|v| format!("split refused: {v:?}"))?;
@@ -455,6 +460,11 @@ pub fn run_screen(args: &Args) -> Result<String, String> {
     let clip =
         load_adsb_with(&args.adsb, &open).map_err(|e| format!("{}: {e}", args.adsb.display()))?;
     header.push(format!("ADS-B clip sha256 {}", clip.hash.sha256));
+    header.push(format!(
+        "sealed-window rows dropped: {}",
+        clip.sealed_window_dropped
+    ));
+    eprintln!("sealed-window rows dropped: {}", clip.sealed_window_dropped);
     let raw = raw_reports(&clip.reports, &wanted);
     // The smoother, as the scorer builds it (default settings), over every report of the clip.
     let built =

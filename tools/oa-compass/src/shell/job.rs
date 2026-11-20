@@ -390,6 +390,10 @@ fn openatca_counts(
 ) -> Vec<(String, u64)> {
     let mut v: Vec<(String, u64)> = vec![
         (
+            "sealed-window rows dropped".into(),
+            cinfo.sealed_window_dropped,
+        ),
+        (
             "ADS-B reports offered to the tracker's adapter".into(),
             cinfo.offered,
         ),

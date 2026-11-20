@@ -16,6 +16,7 @@ oa-json = { path = "../oa-json" }
 oa-tar = { path = "../oa-tar" }
 oa-zip = { path = "../oa-zip" }
 oa-feed = { path = "../oa-feed" }
+oa-sha256 = { path = "../oa-sha256" }
 
 [[bin]]
 name = "oa-adsb-clip"

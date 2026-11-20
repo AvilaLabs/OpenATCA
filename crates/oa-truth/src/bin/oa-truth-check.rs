@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use oa_adsb::reports_len;
 use oa_sha256::{to_hex, Sha256};
-use oa_truth::clip::{read_clip, MAX_CLIP_BYTES, MAX_CLIP_ROWS};
+use oa_truth::clip::{read_clip_counted, MAX_CLIP_BYTES, MAX_CLIP_ROWS};
 use oa_truth::{
     build_truth, truth_hash_into, Dist, Fraction, LooStats, TruthConfig, TruthStats,
     DEFAULT_CONFIG, REMOVE_NAMES, SPLIT_NAMES,
@@ -135,8 +135,9 @@ fn run() -> Result<(), String> {
         }
     }
     let path = path.ok_or(usage())?;
-    let (reports, bad, dropped) =
-        read_clip(&path, MAX_CLIP_BYTES, MAX_CLIP_ROWS).map_err(|e| e.to_string())?;
+    let (reports, bad, dropped, sealed) =
+        read_clip_counted(&path, MAX_CLIP_BYTES, MAX_CLIP_ROWS).map_err(|e| e.to_string())?;
+    println!("sealed-window rows dropped: {sealed}");
     println!(
         "clip {path}: {} reports decoded, {bad} frames refused",
         reports_len(&reports)

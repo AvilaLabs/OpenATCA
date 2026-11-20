@@ -94,6 +94,7 @@ fn run() -> Result<(), String> {
     let name = flag(&args, "--name").unwrap_or_else(|| name.to_string());
     let t_total = Instant::now();
     let (reports, bad, dropped) = read_clip(clip)?;
+    println!("{}", oa_sealed::window_drop_line());
     println!(
         "clip: {} reports ({bad} frames not decoded, {dropped} records dropped)",
         oa_adsb::reports_len(&reports)

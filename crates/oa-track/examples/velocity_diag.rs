@@ -487,6 +487,7 @@ fn nearest_tick(v: &[(i64, f64, f64)], t: i64) -> Option<(i64, f64, f64)> {
 fn run(clip_path: &Path, out_dir: &Path, opts: &Opts) -> Result<String, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
+    eprintln!("{}", oa_sealed::window_drop_line());
     let clip_hash = clip.hash.sha256.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)

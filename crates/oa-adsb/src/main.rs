@@ -69,6 +69,36 @@ fn reorder(src: &Reports, ix: &[u32]) -> Reports {
     dst
 }
 
+/// Writes `<out>.source` next to the clip: each input path and its SHA-256, the window
+/// (`--from`, `--to`; `none` when open) and the counts.
+fn write_source(a: &Args, st: &oa_adsb::Stats, frames: u64) -> Result<(), String> {
+    let mut text = String::from("oa-adsb-clip source\n");
+    text.push_str(&format!("out: {}\n", a.out));
+    for p in &a.parts {
+        let f = oa_sealed::open(std::path::Path::new(p)).map_err(|e| format!("{p}: {e}"))?;
+        let d = oa_sha256::sha256_reader(f).map_err(|e| format!("{p}: {e:?}"))?;
+        text.push_str(&format!("input: {p} sha256 {}\n", oa_sha256::to_hex(&d)));
+    }
+    let bound = |ns: i64| {
+        if ns == i64::MIN || ns == i64::MAX {
+            "none".to_string()
+        } else {
+            ns.to_string()
+        }
+    };
+    text.push_str(&format!(
+        "window_from_unix_ns: {}\nwindow_to_unix_ns: {}\n",
+        bound(a.filter.from_ns),
+        bound(a.filter.to_ns)
+    ));
+    text.push_str(&format!(
+        "rows_seen: {}\noutside_box: {}\noutside_time: {}\nkept: {}\nframes: {frames}\nsealed-window rows dropped: 0\n",
+        st.rows_seen, st.outside_box, st.outside_time, st.kept
+    ));
+    let path = format!("{}.source", a.out);
+    std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))
+}
+
 fn run(a: &Args) -> Result<ExitCode, String> {
     let mut files = Vec::new();
     for p in &a.parts {
@@ -101,6 +131,20 @@ fn run(a: &Args) -> Result<ExitCode, String> {
     });
     let sorted = reorder(&held, &ix);
     drop(held);
+    // A report whose time is in a sealed window is never clipped (OA-SEAL-015): the run is
+    // refused before anything is written, and the count is printed.
+    let sealed = sorted
+        .time_ns
+        .iter()
+        .filter(|t| oa_sealed::in_sealed_window(**t))
+        .count();
+    eprintln!("sealed-window rows dropped: {sealed}");
+    if sealed > 0 {
+        eprintln!(
+            "oa-adsb-clip: refused: {sealed} report(s) fall in a sealed window (OA-SEAL-001, crates/oa-sealed/sealed_paths.txt); narrow --from and --to; nothing was written"
+        );
+        return Ok(ExitCode::from(2));
+    }
     let frames = if a.out == "-" {
         let mut w = BufWriter::new(io::stdout().lock());
         let n = write_frames(&sorted, a.frame_ms, &mut w)?;
@@ -113,6 +157,9 @@ fn run(a: &Args) -> Result<ExitCode, String> {
         n
     };
     let st = &res.stats;
+    if a.out != "-" {
+        write_source(a, st, frames)?;
+    }
     let sum = summarize(&sorted);
     eprintln!(
         "traces_read={} traces_refused={} trace_entries={} other_entries={} rows_seen={} outside_box={} outside_time={} kept={} frames={frames}",

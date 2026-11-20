@@ -465,21 +465,47 @@ pub struct AdsbClip {
     /// Records dropped from frames that did decode (position or flags out of range); the rest of
     /// such a frame is kept.
     pub dropped_records: u64,
+    /// Rows left out because their time is in a sealed window (OA-SEAL-014); counted, not hidden.
+    pub sealed_window_dropped: u64,
     pub hash: InputHash,
 }
 
 /// Calls `f(recv_unix_ns, payload)` for every message frame of an OAF1 file, in file order, and
 /// returns the number of frames that were damaged (bad CRC or length, or a partial frame at the
 /// end of the file; counted, not hidden).
+///
+/// A frame with a row whose time is in a sealed window is not passed on (OA-SEAL-014); see
+/// [`for_each_adsb_frame_counted`] for the count.
 pub fn for_each_adsb_frame(path: &Path, f: &mut dyn FnMut(i64, &[u8])) -> io::Result<u64> {
+    for_each_adsb_frame_counted(path, f).map(|(damaged, _)| damaged)
+}
+
+/// [`for_each_adsb_frame`], also returning the number of rows in the frames left out because a
+/// row's time is in a sealed window (the count is added to the process-wide one as well).
+pub fn for_each_adsb_frame_counted(
+    path: &Path,
+    f: &mut dyn FnMut(i64, &[u8]),
+) -> io::Result<(u64, u64)> {
     let mut file = oa_sealed::open(path)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
-    oa_feed::read_frames(&mut file, &mut |fr| {
+    let mut sealed = 0u64;
+    let mut tmp = oa_adsb::Reports::default();
+    let damaged = oa_feed::read_frames(&mut file, &mut |fr| {
         if fr.kind == oa_feed::Kind::Message {
+            oa_adsb::reports_clear(&mut tmp);
+            // A payload that does not decode is passed on: the caller counts it as bad.
+            if oa_adsb::decode_payload_lenient(fr.payload, &mut tmp).is_ok()
+                && tmp.time_ns.iter().any(|t| oa_sealed::in_sealed_window(*t))
+            {
+                sealed += oa_adsb::reports_len(&tmp) as u64;
+                return;
+            }
             f(fr.recv_unix_ns, fr.payload);
         }
     })
-    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
+    .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    oa_sealed::note_window_drops(sealed);
+    Ok((damaged, sealed))
 }
 
 /// Reads every ADS-B payload frame of an OAF1 file (docs/ADSB_PAYLOAD.md) into one set of reports
@@ -494,12 +520,19 @@ pub fn load_adsb_with(path: &Path, open: &Opener) -> io::Result<AdsbClip> {
     let mut reports = oa_adsb::Reports::default();
     let mut undecodable = 0u64;
     let mut dropped_records = 0u64;
+    let mut sealed_window_dropped = 0u64;
+    let mut frame = oa_adsb::Reports::default();
     let done = new_done();
     let mut src = HashRead::new(open(path)?, done.clone());
     let damaged = oa_feed::read_frames(&mut src, &mut |fr| {
         if fr.kind == oa_feed::Kind::Message {
-            match oa_adsb::decode_payload_lenient(fr.payload, &mut reports) {
-                Ok(c) => dropped_records += c.dropped as u64,
+            // Rows in a sealed window are dropped and counted (OA-SEAL-014).
+            oa_adsb::reports_clear(&mut frame);
+            match oa_adsb::decode_payload_lenient(fr.payload, &mut frame) {
+                Ok(c) => {
+                    dropped_records += c.dropped as u64;
+                    sealed_window_dropped += oa_adsb::reports_extend_unsealed(&mut reports, &frame);
+                }
                 Err(_) => undecodable += 1,
             }
         }
@@ -514,6 +547,7 @@ pub fn load_adsb_with(path: &Path, open: &Opener) -> io::Result<AdsbClip> {
         reports,
         bad_frames: damaged + undecodable,
         dropped_records,
+        sealed_window_dropped,
         hash,
     })
 }

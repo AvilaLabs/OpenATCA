@@ -35,6 +35,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 /// The list file, compiled in.
@@ -575,6 +576,26 @@ pub fn sealed_windows() -> &'static [Window] {
 /// frame and counts it.
 pub fn in_sealed_window(unix_ns: i64) -> bool {
     Sealed::production().in_window(unix_ns)
+}
+
+static WINDOW_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Adds `n` to the process-wide count of rows or frames a reader dropped because their time is
+/// in a sealed window (OA-SEAL-014). The readers call this; a tool prints [`window_drop_line`]
+/// when it ends.
+pub fn note_window_drops(n: u64) {
+    WINDOW_DROPPED.fetch_add(n, Ordering::Relaxed);
+}
+
+/// The process-wide count of rows or frames dropped in a sealed window so far.
+pub fn window_dropped_total() -> u64 {
+    WINDOW_DROPPED.load(Ordering::Relaxed)
+}
+
+/// The line every tool that reads rows prints, also with a count of 0:
+/// `sealed-window rows dropped: N`.
+pub fn window_drop_line() -> String {
+    format!("sealed-window rows dropped: {}", window_dropped_total())
 }
 
 #[cfg(test)]

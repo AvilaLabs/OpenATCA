@@ -620,6 +620,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
     let clip = ClipInfo {
         offered: 10,
         not_offered: 0,
+        sealed_window_dropped: 0,
         positions: Vec::new(),
         split: oa_track::score::SplitStats {
             rows_in: 14,
@@ -930,4 +931,55 @@ fn every_record_of_the_file_has_i090_and_ground_records_have_gbs_and_no_i160() {
         }
     }
     assert_eq!(ground, 100);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_clip_loader_drops_rows_in_a_sealed_window_and_the_readme_counts_them() {
+    use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
+    // The list's window: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z.
+    const FROM: i64 = 1_795_132_800_000_000_000;
+    const TO: i64 = 1_795_393_020_000_000_000;
+    let mut r = Reports::default();
+    for (i, t) in [FROM - 1, FROM, TO - 1, TO].into_iter().enumerate() {
+        let mut row = ROW_EMPTY;
+        row.icao = 0xA00000 + i as u32;
+        row.time_ns = t;
+        row.lat_e7 = 410_000_000;
+        row.lon_e7 = -880_000_000;
+        row.nic = 8;
+        row.nac_p = 10;
+        row.sil = 3;
+        row.version = 2;
+        row.source = 0;
+        reports_push(&mut r, &row);
+    }
+    let mut payload = Vec::new();
+    oa_adsb::encode_payload(&mut payload, &r, 0, 4).unwrap();
+    let mut buf = vec![0u8; MAX_FRAME_LEN];
+    let n = encode_frame(&mut buf, 1, FLAG_BYTES, 0, FROM - 1, 0, &payload).unwrap();
+    let dir = tmp("sealwindow");
+    let clip = dir.join("c.oaf");
+    fs::write(&clip, &buf[..n]).unwrap();
+    let lay = Layout {
+        out: dir.join("out"),
+        day: 0,
+        split: true,
+    };
+    let mut ex = oa_compass::shell::export::SystemExport::new(
+        "OpenATCA",
+        "openatca.ast",
+        OPENATCA_SOURCE,
+        lay,
+    );
+    let (_, info) = oa_compass::shell::run::export_adsb_clip(
+        &clip,
+        &mut ex,
+        None,
+        InputsMode::All,
+        oa_compass::shell::run::OpenatcaRows::Ticks,
+    )
+    .unwrap();
+    assert_eq!(info.sealed_window_dropped, 2);
+    assert_eq!(info.offered, 2);
 }

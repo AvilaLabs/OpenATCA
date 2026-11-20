@@ -98,6 +98,10 @@ fn main() -> ExitCode {
         }
     };
     let elapsed = t0.elapsed();
+    eprintln!(
+        "sealed-window rows dropped: {}",
+        report.sealed_window_dropped
+    );
     // The frames' last checkpoints are drained before the summary, so none is left unprinted.
     if let Err(e) = drain_checkpoint_lines(&mut p, &mut out, quiet) {
         return fail_write(&e);

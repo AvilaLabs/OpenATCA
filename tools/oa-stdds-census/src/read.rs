@@ -39,6 +39,8 @@ pub struct ReadStats {
     pub over_budget: bool,
     /// Parse-level stats of every message (field presence, errors).
     pub stats: Stats,
+    /// Message frames dropped because their time is in a sealed window (OA-SEAL-014).
+    pub sealed_window_dropped: u64,
 }
 
 struct Ctx<'a> {
@@ -64,6 +66,7 @@ impl ReadStats {
             stalled_bytes: 0,
             over_budget: false,
             stats: new_stats(),
+            sealed_window_dropped: 0,
         }
     }
 }
@@ -80,6 +83,13 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
             break;
         }
         match ev {
+            Ok(f)
+                if f.kind == FrameKind::Message && oa_sealed::in_sealed_window(f.recv_unix_ns) =>
+            {
+                // A frame whose time is in a sealed window is dropped and counted, never parsed.
+                ctx.rs.sealed_window_dropped += 1;
+                oa_sealed::note_window_drops(1);
+            }
             Ok(f) if f.kind == FrameKind::Message => {
                 ctx.rs.frames += 1;
                 match parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.rs.stats) {
@@ -603,5 +613,25 @@ mod tests {
             Err(ReadError::Refused(_))
         ));
         std::fs::remove_dir_all(&t).unwrap();
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn frames_at_the_window_edges_are_kept_or_dropped_and_counted() {
+        // The list's window: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z.
+        const FROM: i64 = 1_795_132_800_000_000_000;
+        const TO: i64 = 1_795_393_020_000_000_000;
+        let m = msg("ZZA", &[(1, "2026-11-20T00:00:00Z", None)]).into_bytes();
+        let mut bytes = Vec::new();
+        for (i, t) in [FROM - 1, FROM, TO - 1, TO].into_iter().enumerate() {
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n =
+                encode_frame(&mut buf, FrameKind::Message as u8, 0, i as u64, t, 0, &m).unwrap();
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        let mut census = Census::new();
+        let rs = read_bytes(&bytes, &mut census).unwrap();
+        assert_eq!((rs.frames, rs.sealed_window_dropped), (2, 2));
+        assert_eq!(rs.tais_messages, 2);
     }
 }

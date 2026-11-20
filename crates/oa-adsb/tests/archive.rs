@@ -511,3 +511,87 @@ fn real_day_archive_first_part() {
     // The scan ended because the cap or the part ended, never on a refusal.
     assert!(matches!(res.end, ScanEnd::Truncated(_) | ScanEnd::Complete));
 }
+
+/// A tar with one trace of `n` rows at one-second steps whose first row (offset 1000 s from the
+/// trace base) is at `first_unix_s`.
+fn trace_tar_at(name: &str, first_unix_s: i64, n: usize) -> String {
+    let mut t = Vec::new();
+    let rows = in_box(n, 41.0);
+    let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+    let json = format!(
+        "{{\"icao\":\"aaaaaa\",\"timestamp\":{}.000,\"trace\":[{}]}}",
+        first_unix_s - 1000,
+        rows.join(",")
+    );
+    tar_entry(
+        &mut t,
+        "./traces/aa/trace_full_aaaaaa.json",
+        json.as_bytes(),
+    );
+    t.resize(t.len() + 2 * BLOCK, 0);
+    let p = tmp(name);
+    std::fs::write(&p, &t).unwrap();
+    p.to_str().unwrap().to_string()
+}
+
+// REQ: OA-SEAL-015
+#[test]
+fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwise() {
+    // The window starts at 2026-11-20T00:00:00Z = 1795132800 s.
+    const FROM: i64 = 1_795_132_800;
+    let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
+    let run = |args: &[&str]| Command::new(exe).args(args).output().unwrap();
+    // Rows at from-1 s, from and from+1 s: refused, exit 2, nothing written, the count printed.
+    let tar = trace_tar_at("seal-edge.tar", FROM - 1, 3);
+    let out = tmp("seal-edge.oaf");
+    let side = tmp("seal-edge.oaf.source");
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&side);
+    let o = run(&["--out", out.to_str().unwrap(), &tar]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(2), "{err}");
+    assert!(err.contains("sealed-window rows dropped: 2"), "{err}");
+    assert!(!out.exists() && !side.exists());
+    // With --to at the window start only the row at from-1 is clipped: it is kept, the rows at
+    // from and after are outside the time window, and the count is 0.
+    let o = run(&[
+        "--out",
+        out.to_str().unwrap(),
+        "--to",
+        &FROM.to_string(),
+        &tar,
+    ]);
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(o.status.success(), "{err}");
+    assert!(err.contains("sealed-window rows dropped: 0"), "{err}");
+    let (_, r, _) = read_frames(&out);
+    assert_eq!(r.time_ns, [(FROM - 1) * 1_000_000_000]);
+    // The sidecar names the input with its SHA-256, the window and the counts.
+    let text = std::fs::read_to_string(&side).unwrap();
+    let want = oa_sha256::to_hex(&oa_sha256::sha256(&std::fs::read(&tar).unwrap()));
+    assert!(
+        text.contains(&format!("input: {tar} sha256 {want}\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("window_to_unix_ns: {}\n", FROM * 1_000_000_000)),
+        "{text}"
+    );
+    assert!(text.contains("window_from_unix_ns: none\n"), "{text}");
+    for k in [
+        "rows_seen: 3",
+        "outside_time: 2",
+        "kept: 1",
+        "frames: 1",
+        "sealed-window rows dropped: 0",
+    ] {
+        assert!(text.contains(k), "{k} {text}");
+    }
+    // A report at the window end (to = 2026-11-23T00:17:00Z = 1795393020 s) is not sealed.
+    let tar = trace_tar_at("seal-after.tar", 1_795_393_020, 1);
+    let o = run(&["--out", out.to_str().unwrap(), &tar]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // Standard output has no sidecar.
+    let o = run(&["--out", "-", &tar]);
+    assert!(o.status.success());
+}

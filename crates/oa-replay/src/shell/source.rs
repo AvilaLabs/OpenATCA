@@ -153,6 +153,8 @@ struct Stream<'b> {
     files: usize,
     errors: Errors,
     frame_errors: Vec<FrameError>,
+    /// Frames dropped because their time is in a sealed window (OA-SEAL-014).
+    sealed_window_dropped: u64,
 }
 
 enum AdvanceStep {
@@ -201,6 +203,7 @@ impl<'b> Stream<'b> {
             files: 0,
             errors: [0; ERR_COUNT],
             frame_errors: Vec::new(),
+            sealed_window_dropped: 0,
         }
     }
 }
@@ -244,6 +247,12 @@ impl Stream<'_> {
             .next_with_remaining_budget(work)
             .map_err(|e| io::Error::other(format!("frame reader work refused: {e:?}")))?
         {
+            Some(Ok(f)) if oa_sealed::in_sealed_window(f.recv_unix_ns) => {
+                // A frame whose time is in a sealed window is dropped and counted.
+                self.sealed_window_dropped += 1;
+                oa_sealed::note_window_drops(1);
+                return Ok(AdvanceStep::Continue);
+            }
             Some(Ok(f)) => {
                 self.head.recv_ns = f.recv_unix_ns;
                 self.head.mono_ns = f.mono_ns();
@@ -396,6 +405,8 @@ pub struct MergeReport {
     pub errors: Errors,
     /// The first [`MAX_KEPT_FRAME_ERRORS`] frame errors with their stream.
     pub frame_errors: Vec<(u32, FrameError)>,
+    /// Frames dropped because their time is in a sealed window (OA-SEAL-014).
+    pub sealed_window_dropped: u64,
 }
 
 /// The sort key of a frame: a total order over any set of frames.
@@ -485,6 +496,7 @@ fn merge_counted(
     for (i, s) in streams.iter().enumerate() {
         report.files += s.files;
         report.bytes += s.bytes;
+        report.sealed_window_dropped += s.sealed_window_dropped;
         for (a, b) in report.errors.iter_mut().zip(s.errors.iter()) {
             *a += b;
         }
@@ -503,6 +515,7 @@ fn empty_report() -> MergeReport {
         bytes: 0,
         errors: [0; ERR_COUNT],
         frame_errors: Vec::new(),
+        sealed_window_dropped: 0,
     }
 }
 

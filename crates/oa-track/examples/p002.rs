@@ -1336,6 +1336,7 @@ fn run(
 
     // Tracker on set A (as vs_eram).
     let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
+    eprintln!("{}", oa_sealed::window_drop_line());
     let clip_hash = clip.hash.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)

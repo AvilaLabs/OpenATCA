@@ -426,6 +426,7 @@ fn run(args: Args) -> Result<(), String> {
         fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     }
     let clip = load_adsb(&args.clip).map_err(|e| e.to_string())?;
+    eprintln!("{}", oa_sealed::window_drop_line());
     let full_reports = reports_len(&clip.reports);
     let clip_hash = clip.hash.sha256.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);

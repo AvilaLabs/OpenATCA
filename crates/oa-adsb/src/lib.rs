@@ -496,6 +496,26 @@ pub fn reports_extend(dst: &mut Reports, src: &Reports) {
     }
 }
 
+/// Appends the reports of `src` to `dst` except those whose time is in a sealed window
+/// (`oa_sealed::in_sealed_window`, OA-SEAL-014); returns the number dropped, which is also added
+/// to the process-wide count a tool prints.
+pub fn reports_extend_unsealed(dst: &mut Reports, src: &Reports) -> u64 {
+    let mut dropped = 0u64;
+    for i in 0..reports_len(src) {
+        if src
+            .time_ns
+            .get(i)
+            .is_some_and(|t| oa_sealed::in_sealed_window(*t))
+        {
+            dropped += 1;
+        } else if let Some(row) = reports_row(src, i) {
+            reports_push(dst, &row);
+        }
+    }
+    oa_sealed::note_window_drops(dropped);
+    dropped
+}
+
 /// What to keep: a latitude/longitude box and a time window, applied while decoding. A report
 /// is kept when its position is inside the box (edges included) and its time is in
 /// `[from_ns, to_ns)`. Plain record (A1).

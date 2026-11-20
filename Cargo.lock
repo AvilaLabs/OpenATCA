@@ -9,6 +9,7 @@ dependencies = [
  "oa-feed",
  "oa-json",
  "oa-sealed",
+ "oa-sha256",
  "oa-tar",
  "oa-zip",
 ]
