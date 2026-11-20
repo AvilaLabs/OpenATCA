@@ -56,6 +56,13 @@ pub struct Truth {
 pub const SIGMA_POS: f64 = 30.0 / 2.447_746_830_680_816;
 pub const SIGMA_VEL: f64 = 3.0 / 2.447_746_830_680_816;
 
+/// The measurement of a transponder whose velocity lags by the second of
+/// [`Manoeuvre::at_lagged_velocity`].
+pub fn with_lag(mut m: Measurement) -> Measurement {
+    m.vel_lag_s = 1.0;
+    m
+}
+
 /// A measurement of `tr` at `t_s` seconds with noise from `rng`.
 #[allow(clippy::too_many_arguments)]
 pub fn measure(
@@ -88,6 +95,7 @@ pub fn measure(
         ident: NO_IDENT,
         flags: 0,
         category: 0,
+        vel_lag_s: 0.0,
     };
     if let Some(sv) = sigma_vel {
         let (te, tn) = try_frame_velocity(f, tr.e, tr.n, tr.ve, tr.vn).unwrap();
@@ -144,11 +152,12 @@ impl Manoeuvre {
             accel: 0.0,
         }
     }
-    /// Truth at `t` with the velocity of `VEL_LAG_S` earlier: what a transponder reports (the
-    /// reported velocity lags the aircraft's, `oa_track::params::VEL_LAG_S`).
+    /// Truth at `t` with the velocity of 1 s earlier: what a transponder reports (the reported
+    /// velocity lags the aircraft's). A literal, not `VEL_LAG_S`, so that a change of the constant
+    /// does not move the world; the measurement is marked with [`with_lag`].
     pub fn at_lagged_velocity(&self, t: f64, e0: f64, n0: f64) -> Truth {
         let mut tr = self.at(t, e0, n0);
-        let v = self.at(t - oa_track::params::VEL_LAG_S, e0, n0);
+        let v = self.at(t - 1.0, e0, n0);
         tr.ve = v.ve;
         tr.vn = v.vn;
         tr

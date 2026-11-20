@@ -135,9 +135,8 @@ fn consistent_forged_reports_after_a_short_gap_are_still_refused_by_the_hard_lim
 fn the_allowance_lets_a_forged_report_through_only_after_a_long_gap() {
     // One forged report 2 km north of the track `gap` seconds after the last report: the number
     // of rejections (1 refused, 0 accepted) per variant. The default gate already accepts it
-    // from a 10 s gap (the turn model's covariance has grown to cover 2 km; it was 12 s before the
-    // velocity update carried the turn rate over the transponder's lag, OA-TRK-395, which changed
-    // the covariance the turn model keeps); at 8 s and less every variant refuses it.
+    // from a 12 s gap (the turn model's covariance has grown to cover 2 km); the allowance moves
+    // that to 10 s; at 8 s and less every variant refuses it.
     for gap in [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 16.0] {
         let mut rng = Rng(7);
         let mut ms: Vec<Measurement> = seconds(0.0, 20.0)
@@ -153,7 +152,7 @@ fn the_allowance_lets_a_forged_report_through_only_after_a_long_gap() {
                 assert_eq!(rejected, 1, "gap {gap} {name}");
             }
             if name == "default" {
-                assert_eq!(rejected, u64::from(gap < 10.0), "gap {gap}");
+                assert_eq!(rejected, u64::from(gap < 12.0), "gap {gap}");
             }
             if name.starts_with("A ") && gap == 10.0 {
                 assert_eq!(rejected, 0, "gap {gap} {name}");
@@ -161,6 +160,38 @@ fn the_allowance_lets_a_forged_report_through_only_after_a_long_gap() {
         }
         println!("single forged after a gap of {gap} s: {}", row.join(" "));
     }
+}
+
+// REQ: OA-TRK-401
+#[test]
+fn the_first_gap_that_lets_a_forged_report_through_the_shipped_gate_moves_with_the_lag() {
+    // The shipped default gate (the manoeuvre allowance of 5 m/s^2 on) and the one forged report
+    // 2 km north, after 8 to 12 s of silence, with reports whose velocity is current (lag 0: the
+    // behaviour before OA-TRK-401, bit for bit) and with those of a transponder (lag 1 s, ADS-B's).
+    // The first gap that lets the report through goes from 10 s to 9 s. The mechanism: the turn
+    // model's extra freedom, its turn rate, widens its covariance after a velocity update that
+    // also updates the turn rate (the velocity measurement now carries the rate), and the gate is
+    // that covariance's.
+    let mut first = Vec::new();
+    for lag in [0.0, 1.0] {
+        let mut row = Vec::new();
+        for gap in [8.0, 9.0, 10.0, 11.0, 12.0] {
+            let mut rng = Rng(7);
+            let mut ms: Vec<Measurement> = seconds(0.0, 20.0)
+                .iter()
+                .map(|&t| report(&mut rng, t, 0.0))
+                .collect();
+            ms.push(report(&mut rng, 20.0 + gap, FORGED_OFFSET_M));
+            for m in ms.iter_mut() {
+                m.vel_lag_s = lag;
+            }
+            let rejected = stats_of_run(&TrackerConfig::default(), &ms).jump_rejected;
+            row.push((gap, rejected));
+        }
+        println!("lag {lag} s: (gap s, refused): {row:?}");
+        first.push(row.iter().find(|r| r.1 == 0).map(|r| r.0));
+    }
+    assert_eq!(first, [Some(10.0), Some(9.0)]);
 }
 
 // REQ: OA-TRK-341, OA-TRK-342, OA-TRK-346

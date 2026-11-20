@@ -271,7 +271,7 @@ fn synthetic_reports() -> Reports {
     for (addr, man, e0, n0) in &mans {
         for k in 0..300 {
             let t = f64::from(k) * 2.0;
-            // The reported velocity lags the aircraft's (OA-TRK-395).
+            // The reported velocity lags the aircraft's (OA-TRK-401).
             let tr = man.at_lagged_velocity(t, *e0, *n0);
             let (lat, lon) = unproject(
                 &f,

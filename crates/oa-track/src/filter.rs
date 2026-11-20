@@ -30,7 +30,7 @@ use crate::confirm::move_is_large;
 use crate::gate_trace::{gate_trace_push, GateTraceRow};
 use crate::hfilter::{
     dwell_decay, h_change_frame, h_combine, h_gate_d2, h_init, h_pos_nis, h_predict, h_update,
-    h_vel_gate_d2, HFilter,
+    h_vel_gate_d2, HFilter, VelMeas,
 };
 use crate::params::{
     ALT_BASE_SIGMA_FT, ALT_GATE_SIGMAS, GATE_CHI2, NS_PER_S, PLAUSIBLE_SLACK_M, RESYNC_AFTER,
@@ -116,7 +116,7 @@ fn pos_cov(m: &Measurement, from_true: &Mat2) -> [f64; 3] {
 
 /// The measurement's velocity and its covariance in the plane, through the plane-from-true
 /// differential `from_true` at the plot's plane position.
-fn vel_of(m: &Measurement, from_true: &Mat2) -> Option<([f64; 2], [f64; 3])> {
+fn vel_of(m: &Measurement, from_true: &Mat2) -> Option<VelMeas> {
     if m.flags & M_HAS_VEL == 0 {
         return None;
     }
@@ -126,7 +126,7 @@ fn vel_of(m: &Measurement, from_true: &Mat2) -> Option<([f64; 2], [f64; 3])> {
     );
     let [a, b, c] = m.vel_cov_m2s2;
     let cov = mat2_congruence(from_true, &[f64::from(a), f64::from(b), f64::from(c)]);
-    Some(([vx, vy], cov))
+    Some(([vx, vy], cov, f64::from(m.vel_lag_s)))
 }
 
 /// Altitude variance: quantisation `step^2 / 12` plus the base term.
@@ -163,7 +163,11 @@ pub(crate) fn filter_init(m: &Measurement, mode: u8) -> Filter {
         mu: [1.0, 0.0],
     };
     Filter {
-        h: h_init(&pos_cov(m, &from_true), vel_of(m, &from_true), mode),
+        h: h_init(
+            &pos_cov(m, &from_true),
+            vel_of(m, &from_true).map(|(v, vr, _)| (v, vr)),
+            mode,
+        ),
         v: if has_alt { vertical_init(m) } else { zero },
         t_ns: m.toa_ns,
         lat_e7: m.lat_e7,
@@ -362,13 +366,13 @@ fn apply(
     let mut vel = vel_of(m, &from_true);
     let mut trace_d2 = f64::NAN;
     let mut trace_gated = false;
-    if let Some((v, vr)) = vel {
+    if let Some((v, vr, lag)) = vel {
         // The baseline modes keep one model; the second slot is not a prediction.
         let one = HFilter {
             m: [pred.m[0], pred.m[0]],
             mu: pred.mu,
         };
-        let d2 = h_vel_gate_d2(if f.h_mode == 0 { &pred } else { &one }, &v, &vr);
+        let d2 = h_vel_gate_d2(if f.h_mode == 0 { &pred } else { &one }, &v, &vr, lag);
         trace_d2 = d2;
         if d2.is_nan() || d2 > cfg.vel_gate_chi2 {
             vel = None;
@@ -635,6 +639,7 @@ mod tests {
             ident: crate::types::NO_IDENT,
             flags: 0,
             category: 0,
+            vel_lag_s: 0.0,
         }
     }
 
@@ -986,8 +991,8 @@ mod tests {
         let pred = h_predict(&f0.h, 1.0, dwell_decay(1.0), 0).expect("valid prediction");
         let (zx, zy) = project(&frame, deg(m1.lat_e7), deg(m1.lon_e7));
         let from_true = try_frame_from_true(&frame, zx, zy).expect("differential");
-        let (v, vr) = vel_of(&m1, &from_true).expect("velocity");
-        let d2 = h_vel_gate_d2(&pred, &v, &vr);
+        let (v, vr, lag) = vel_of(&m1, &from_true).expect("velocity");
+        let d2 = h_vel_gate_d2(&pred, &v, &vr, lag);
         println!("velocity gate d2 of the +60 m/s case: {d2}");
         assert!(d2 > 400.0, "{d2}");
         let mut f = f0;

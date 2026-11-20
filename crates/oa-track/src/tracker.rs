@@ -217,6 +217,7 @@ fn blank_measurement() -> Measurement {
         ident: crate::types::NO_IDENT,
         flags: 0,
         category: 0,
+        vel_lag_s: 0.0,
     }
 }
 

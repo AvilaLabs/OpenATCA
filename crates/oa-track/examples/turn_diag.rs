@@ -12,7 +12,8 @@
 //! scoring, the pairing and the ERAM load are p002's and are not repeated here. This tool runs
 //! p002's split and tracker (`split_reports`, `adsb_measurements`, `scoring_config`, the same
 //! drain loop as `run_tracker`) over the same clip and builds the same reference
-//! (`adsb_truth::build` on set B). With `--rescore` the OpenATCA errors are not read from the CSV
+//! (`adsb_truth::build` on set B). `--vel-lag S` sets every velocity's lag to S seconds (0: before
+//! OA-TRK-401); `--thin N` keeps every Nth report of each aircraft (with `--rescore`). With `--rescore` the OpenATCA errors are not read from the CSV
 //! but recomputed from this build's tracker on the CSV's samples (the same keys) by the library
 //! calls p002 pairs with (`associate`, `build_pairs_with`), so a change to the tracker can be
 //! screened in a few minutes without the ERAM load and the bootstrap; the ERAM columns stay those
@@ -104,6 +105,7 @@ fn main() -> ExitCode {
     let (mut adsb, mut samples, mut out) = (None, None, None);
     let mut rescore = false;
     let mut thin = 1usize;
+    let mut vel_lag = None;
     while let Some(a) = args.next() {
         if a == "--rescore" {
             rescore = true;
@@ -111,6 +113,7 @@ fn main() -> ExitCode {
         }
         let v = args.next();
         match a.as_str() {
+            "--vel-lag" => vel_lag = v.and_then(|x| x.parse::<f32>().ok()),
             "--thin" => {
                 thin = v
                     .and_then(|x| x.parse().ok())
@@ -128,7 +131,7 @@ fn main() -> ExitCode {
     }
     let (Some(adsb), Some(samples), Some(out)) = (adsb, samples, out) else {
         eprintln!(
-            "usage: turn_diag --adsb <clip.oaf> --samples <p002 samples.csv> --out <dir> [--rescore [--thin N]]"
+            "usage: turn_diag --adsb <clip.oaf> --samples <p002 samples.csv> --out <dir> [--rescore [--thin N]] [--vel-lag S]"
         );
         return ExitCode::from(2);
     };
@@ -142,7 +145,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    match run(&adsb, &samples, &out, rescore, thin) {
+    match run(&adsb, &samples, &out, rescore, thin, vel_lag) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -328,6 +331,7 @@ fn run(
     out_dir: &Path,
     rescore: bool,
     thin: usize,
+    vel_lag: Option<f32>,
 ) -> Result<String, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let mut samples = read_samples(samples_path)?;
@@ -344,6 +348,13 @@ fn run(
     drop(clip);
     let (mut meas, _) = adsb_measurements(&set_a, &AdsbConfig::default());
     drop(set_a);
+    if let Some(l) = vel_lag {
+        // Every velocity says it lags by `l` s whatever the source set: 0 is the behaviour before
+        // OA-TRK-401.
+        for m in meas.iter_mut().filter(|m| m.flags & M_HAS_VEL != 0) {
+            m.vel_lag_s = l;
+        }
+    }
     if thin > 1 {
         // Every `thin`th report of each aircraft goes to the tracker; the grid and the reference
         // are unchanged.
@@ -413,6 +424,11 @@ fn run(
     let end = meas.last().map_or(0, |m| m.toa_ns);
     tracker_advance(&mut t, end, &mut scratch);
     tracker_flush(&mut t, end, &mut scratch);
+    let st = tracker_stats(&t);
+    eprintln!(
+        "tracker stats: offered {} applied {} velocity_gated {} jump_rejected {}",
+        st.offered, st.applied, st.velocity_gated, st.jump_rejected
+    );
     let overflow = scratch.overflow;
     drain(&mut scratch, &mut w, &mut rows)?;
     let run = match w {
@@ -762,7 +778,7 @@ fn run(
 mod tests {
     use super::*;
 
-    // REQ: OA-TRK-396
+    // REQ: OA-TRK-402
     #[test]
     fn statistics_are_nearest_rank_of_the_absolute_values() {
         let v: Vec<f64> = (1..=100)
@@ -780,7 +796,7 @@ mod tests {
         assert_eq!(stat(&[])[0], 0.0);
     }
 
-    // REQ: OA-TRK-396
+    // REQ: OA-TRK-402
     #[test]
     fn a_value_goes_to_the_bin_whose_lower_edge_it_reaches() {
         assert_eq!(bin_of(&RATE_EDGES, 0.0), 0);
@@ -789,7 +805,7 @@ mod tests {
         assert_eq!(bin_of(&RATE_EDGES, 3.0), 4);
     }
 
-    // REQ: OA-TRK-396
+    // REQ: OA-TRK-402
     #[test]
     fn the_age_and_gap_are_those_of_the_last_report_at_or_before_the_time() {
         let t = [1000, 4000, 9000];
@@ -799,7 +815,7 @@ mod tests {
         assert_eq!(age_gap(&t, 9500), (Some(0.5), None));
     }
 
-    // REQ: OA-TRK-396
+    // REQ: OA-TRK-402
     #[test]
     fn only_common_samples_with_finite_errors_are_read_from_the_p002_csv() {
         let mut csv = String::from("# DEVELOPMENT RUN\naddr,t_ms,phase,band,common,oa_miss,oa_cross_m,oa_track_err_deg,oa_row_dt_ms,eram_miss,eram_cross_m,eram_track_err_deg\n");

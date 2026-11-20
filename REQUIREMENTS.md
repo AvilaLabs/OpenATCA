@@ -5315,13 +5315,17 @@ scope.
   build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,
   and the working tree at run time is at that commit and clean. This gates which runs count as
   hold-out scores; it does not change what is computed.
-- **OA-TRK-395** The horizontal filter takes a reported velocity as the aircraft's `VEL_LAG_S` (1.0 s)
-  before the report: against the state the measurement is `z = R(-w L) v`, the velocity turned back by
-  the state's turn rate `w` over the lag `L`, linearised at the state so that it also updates the turn
-  rate. The straight model's rate is zero, so its velocity update is the plain one; in a turn the turn
+- **OA-TRK-401** A measurement carries the lag `vel_lag_s` of its velocity behind the aircraft's (zero unless
+  the source says otherwise; ADS-B sets `VEL_LAG_S`, 1.0 s). The horizontal filter takes the velocity as the
+  aircraft's `vel_lag_s` before the report: against the state the measurement is `z = R(-w L) v`, the
+  velocity turned back by the state's turn rate `w` over the lag `L`, linearised at the state so that it
+  also updates the turn rate; the velocity gate compares against the same expectation, with the same
+  innovation covariance. At a lag of zero the update and the gate are the plain velocity ones, bit for
+  bit. The straight model's rate is zero, so its velocity update is the plain one; in a turn the turn
   model's velocity is the report's turned forward by `w L`; a report that agrees with that leaves the
-  state unchanged; a singular innovation covariance changes nothing.
-- **OA-TRK-396** `turn_diag` reports OpenATCA's and ERAM's cross-track and track-angle error (n, median,
+  state unchanged; the covariance stays symmetric and not negative; the turn-rate column is the
+  derivative of the lagged velocity; a singular innovation covariance changes nothing.
+- **OA-TRK-402** `turn_diag` reports OpenATCA's and ERAM's cross-track and track-angle error (n, median,
   p95, RMS of the absolute values, nearest rank) of the common samples of a P-002 `samples.csv`, binned by
   the reference's turn rate, the turn phase, the tracker's turn-model probability, the time since the
   track's last report and the gap holding the sample; a value goes to the bin whose lower edge it reaches.

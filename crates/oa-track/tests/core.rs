@@ -30,13 +30,32 @@ struct Errs {
 /// Runs one aircraft with measurement interval `dt` for `dur` seconds and measures the update
 /// rows with times in `[w0, w1]` against truth.
 fn scenario(man: &Manoeuvre, dt: f64, dur: f64, mode: u8, seed: u64, w: (f64, f64)) -> Errs {
+    scenario_with(false, man, dt, dur, mode, seed, w)
+}
+
+/// [`scenario`] with the reports of a transponder when `lagged`: the velocity is the aircraft's
+/// of a second before the report and the measurement says so (`vel_lag_s` 1); otherwise the
+/// velocity is current and the lag is 0.
+fn scenario_with(
+    lagged: bool,
+    man: &Manoeuvre,
+    dt: f64,
+    dur: f64,
+    mode: u8,
+    seed: u64,
+    w: (f64, f64),
+) -> Errs {
     let f = frame0();
     let mut rng = Rng(seed);
     let mut ms = Vec::new();
     let mut t = 0.0;
     while t <= dur {
-        let tr = man.at_lagged_velocity(t, 0.0, 0.0);
-        ms.push(measure(
+        let tr = if lagged {
+            man.at_lagged_velocity(t, 0.0, 0.0)
+        } else {
+            man.at(t, 0.0, 0.0)
+        };
+        let m = measure(
             &f,
             0xABC123,
             t,
@@ -45,7 +64,8 @@ fn scenario(man: &Manoeuvre, dt: f64, dur: f64, mode: u8, seed: u64, w: (f64, f6
             Some(SIGMA_VEL),
             false,
             &mut rng,
-        ));
+        );
+        ms.push(if lagged { with_lag(m) } else { m });
         t += dt;
     }
     let cfg = TrackerConfig {
@@ -156,6 +176,35 @@ fn position_noise_comes_from_nacp_and_innovations_are_consistent() {
 // REQ: OA-TRK-004
 #[test]
 fn constant_rate_turns_are_followed_and_the_imm_beats_one_straight_filter() {
+    // A world with current velocities and no lag on the measurements: as before OA-TRK-401.
+    let (worst_vs_cv1, worst_vs_best_pos) = turn_sweep(false);
+    assert!(
+        worst_vs_cv1.0 > 0.0 && worst_vs_cv1.1 > 0.0,
+        "{worst_vs_cv1:?}"
+    );
+    assert!(worst_vs_best_pos > 0.0, "{worst_vs_best_pos}");
+}
+
+// REQ: OA-TRK-401
+#[test]
+fn constant_rate_turns_with_lagged_reports_are_followed_and_the_imm_beats_one_straight_filter() {
+    // The same turns with the reports of a transponder (the velocity a second old, the
+    // measurement saying so). The IMM's position is far better than any single filter's, as
+    // before; its speed is up to 17 % worse than a single constant-velocity filter's in the
+    // slowest turn (1.5 deg/s at 1 s), where the velocity update spends some of the reported
+    // velocity on the turn rate. The bound is 20 %.
+    let (worst_vs_cv1, worst_vs_best_pos) = turn_sweep(true);
+    assert!(
+        worst_vs_cv1.0 > 0.0 && worst_vs_cv1.1 > -20.0,
+        "{worst_vs_cv1:?}"
+    );
+    assert!(worst_vs_best_pos > 0.0, "{worst_vs_best_pos}");
+}
+
+/// The four turns of the sweep with the IMM and three single filters: the worst improvement of
+/// the IMM over the IMM's own straight model alone, in position and in speed (percent), and over
+/// the best single filter in position. The per-turn bounds are asserted here.
+fn turn_sweep(lagged: bool) -> ((f64, f64), f64) {
     // Scored on the one-second output over the last 54 s of a 60 s turn, input at 1 s and 5 s.
     // CV1 is the IMM's own straight model alone (the same process noise); CV2 and CV3 are single
     // filters with larger process noise (0.5 and 5 m^2/s^3), the best a single filter can do.
@@ -163,10 +212,18 @@ fn constant_rate_turns_are_followed_and_the_imm_beats_one_straight_filter() {
     let mut worst_vs_best_pos = f64::MAX;
     for (rate, dt) in [(1.5, 1.0), (3.0, 1.0), (6.0, 1.0), (3.0, 5.0)] {
         let man = Manoeuvre::turning(230.0, 20.0, 120.0, 180.0, rate);
-        let imm = scenario(&man, dt, 300.0, 0, 5, (126.0, 180.0));
+        let imm = scenario_with(lagged, &man, dt, 300.0, 0, 5, (126.0, 180.0));
         let mut cvs = Vec::new();
         for mode in 1..=3 {
-            cvs.push(scenario(&man, dt, 300.0, mode, 5, (126.0, 180.0)));
+            cvs.push(scenario_with(
+                lagged,
+                &man,
+                dt,
+                300.0,
+                mode,
+                5,
+                (126.0, 180.0),
+            ));
         }
         let best_pos = cvs.iter().map(|c| c.pos).fold(f64::MAX, f64::min);
         let g = |a: f64, b: f64| 100.0 * (1.0 - a / b);
@@ -187,22 +244,25 @@ fn constant_rate_turns_are_followed_and_the_imm_beats_one_straight_filter() {
             "{imm:?}"
         );
     }
-    // The speed is within a quarter of the single filter's (its reports carry no lag error in
-    // speed, and the IMM's velocity update spends some of them on the turn rate, OA-TRK-395; the
-    // two were 1 % apart before and are noise-level apart, 17 % at the slowest turn, now).
-    assert!(
-        worst_vs_cv1.0 > 0.0 && worst_vs_cv1.1 > -25.0,
-        "{worst_vs_cv1:?}"
-    );
-    assert!(worst_vs_best_pos > 0.0, "{worst_vs_best_pos}");
+    (worst_vs_cv1, worst_vs_best_pos)
 }
 
 // REQ: OA-TRK-005
 #[test]
 fn the_imm_costs_nothing_on_straight_flight_and_turn_probability_follows_the_turn() {
+    imm_straight_and_turn_probability(false);
+}
+
+// REQ: OA-TRK-401
+#[test]
+fn the_same_holds_for_the_reports_of_a_transponder_with_a_lagged_velocity() {
+    imm_straight_and_turn_probability(true);
+}
+
+fn imm_straight_and_turn_probability(lagged: bool) {
     let man = Manoeuvre::turning(230.0, 20.0, 150.0, 210.0, 3.0);
-    let imm = scenario(&man, 1.0, 400.0, 0, 3, (40.0, 140.0));
-    let cv = scenario(&man, 1.0, 400.0, 1, 3, (40.0, 140.0));
+    let imm = scenario_with(lagged, &man, 1.0, 400.0, 0, 3, (40.0, 140.0));
+    let cv = scenario_with(lagged, &man, 1.0, 400.0, 1, 3, (40.0, 140.0));
     println!("straight part: IMM {imm:?} CV1 {cv:?}");
     assert!(imm.pos <= cv.pos * 1.15 + 0.2);
     // Model probabilities in the middle of the turn and of the straight leg.
@@ -211,16 +271,26 @@ fn the_imm_costs_nothing_on_straight_flight_and_turn_probability_follows_the_tur
     let ms: Vec<Measurement> = (0..400)
         .map(|k| {
             let t = f64::from(k);
-            measure(
+            let tr = if lagged {
+                man.at_lagged_velocity(t, 0.0, 0.0)
+            } else {
+                man.at(t, 0.0, 0.0)
+            };
+            let m = measure(
                 &f,
                 0x222222,
                 t,
-                &man.at_lagged_velocity(t, 0.0, 0.0),
+                &tr,
                 SIGMA_POS,
                 Some(SIGMA_VEL),
                 false,
                 &mut rng,
-            )
+            );
+            if lagged {
+                with_lag(m)
+            } else {
+                m
+            }
         })
         .collect();
     let (_, out) = run(&big_config(), &ms, 400.0);
@@ -1280,13 +1350,8 @@ const GOLDEN_COUNTERS: &str = "579 472 35 53 4 284 847 14 0 1316";
 // innovations and output values; all ten replay counters above remain unchanged. Prior values:
 // 0x40a4_3b1a_f97a_16bc and
 // "8924b0a9d9aef420b74326d06d45fe3b055b3ea20a74845e0b03bfa4f6d1a6bd".
-// The velocity update carries the turn rate over the transponder's lag (OA-TRK-395): the counters
-// are unchanged; the innovation sum went from 2585.2 to 2557.2 and the rows differ in velocity,
-// turn rate and covariance. The earlier values were
-// 0x40a4_3264_bf63_657b and
-// "5864f9c330900223ad8e431a98d2f5e1ba70f82867c4a64a3005d89d9921488f".
-const GOLDEN_NIS_BITS: u64 = 0x40a3_fa65_dc6f_6157;
-const GOLDEN_DIGEST: &str = "cf1bc8249e2c9d4ae3322654205a29880d5bfbc5dd2438915e41a4448cfdaa75";
+const GOLDEN_NIS_BITS: u64 = 0x40a4_3264_bf63_657b;
+const GOLDEN_DIGEST: &str = "5864f9c330900223ad8e431a98d2f5e1ba70f82867c4a64a3005d89d9921488f";
 
 /// Aircraft that start, stop and start again with long gaps between: one that stops early (and
 /// is dropped), one that flies on, and two that begin after gaps far longer than the drop time.
@@ -1388,10 +1453,7 @@ fn the_newest_update_is_kept_and_is_an_upper_bound_on_the_live_ones() {
 // OA-TRK-329 changes predicted values with the same 1,446 rows, end counts, held reports and
 // applied-after-step counts. Prior digest:
 // "6bf2d72d551760c04e78ed96d9054f6519e8db2ee59fa9b4a1300bbf212578fd".
-// Re-recorded for the velocity update with the transponder's lag (OA-TRK-395): the same 1,446 rows
-// and the same end and hold counts; velocity, turn rate and covariance values moved. The earlier
-// value was "4a705106b8b2beecf911272b615cf909e7b4c87082b8a2de8b62cf66b3f04b44".
-const GAPPY_DIGEST: &str = "facdf5997ed53697123759ad52c8c6d3aaade1f546220181ded9d328aff4f4f9";
+const GAPPY_DIGEST: &str = "4a705106b8b2beecf911272b615cf909e7b4c87082b8a2de8b62cf66b3f04b44";
 
 // REQ: OA-TRK-041
 #[test]
@@ -1663,6 +1725,7 @@ fn a_position_on_the_far_side_of_the_earth_is_a_jump_not_a_coherent_update() {
         ident: oa_track::NO_IDENT,
         flags: M_HAS_VEL,
         category: 0,
+        vel_lag_s: 0.0,
     };
     for k in 0..10 {
         tracker_update(&mut t, &m_at(k, 0), &mut out);
