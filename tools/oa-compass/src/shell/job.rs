@@ -19,14 +19,15 @@ use super::dirs::{check_out, create_tracked, remove_created};
 use super::error::{io_err, ExportError};
 use super::export::{date_text, Finished, Layout, SystemExport, SystemReport};
 use super::guard::{
-    guarded_opener, refuse_holdout, refuse_sealed_date, SEALED_DAY, SEALED_DAY_TEXT,
+    guarded_opener, refuse_holdout, refuse_holdout_out, refuse_sealed_date, SEALED_DAY,
+    SEALED_DAY_TEXT,
 };
 use super::notes::{
     data_sources_for, readme_with, Extras, ADSB_SOURCE, ERAM_SOURCE, OPENATCA_SOURCE,
 };
 use super::run::{
-    export_adsb_clip, export_eram, ClipInfo, EramAddress, EramInfo, InputsMode, OpenatcaRows,
-    TrackRunInfo,
+    export_adsb_clip, export_adsb_loaded, export_eram, ClipInfo, EramAddress, EramInfo, InputsMode,
+    OpenatcaRows, TrackRunInfo,
 };
 use super::slice::Stage;
 use crate::core::time::touches_day;
@@ -99,14 +100,15 @@ pub fn run_job(
     }
     // Before any directory or file is created, and before the tracker runs: no input time may be
     // on the sealed day.
-    prescan_sealed(&job)?;
+    refuse_holdout_out(&out)?;
+    let mut pre = prescan_sealed(&job)?;
     check_out(&out)?;
     let mut run_dirs: Vec<PathBuf> = Vec::new();
     create_tracked(&out, &mut run_dirs)?;
     let mut created: Vec<PathBuf> = Vec::new();
     let mut done = Done::default();
     let has_adsb = job.adsb.is_some();
-    let result = match export_all(&job, &mut done, t0, log) {
+    let result = match export_all(&job, &mut pre, &mut done, t0, log) {
         Ok(()) => {
             let mode = has_adsb.then_some(job.mode);
             commit_staged(&job, done, mode, hook, &mut created, t0)
@@ -276,7 +278,8 @@ fn eram_details(info: &EramInfo) -> Vec<String> {
 /// A time within 1/256 s before the sealed day's midnight (for example 2026-11-18 23:59:59.998)
 /// is refused too: its raw day is the day before, but it rounds to 00:00:00 of the sealed day,
 /// where the export would file it.
-fn prescan_sealed(job: &Job) -> Result<(), ExportError> {
+fn prescan_sealed(job: &Job) -> Result<Preloaded, ExportError> {
+    let mut pre = Preloaded::default();
     if let Some(clip) = &job.adsb {
         let c = oa_bench::input::load_adsb_with(clip, &guarded_opener())
             .map_err(|e| ExportError::Input(format!("{}: {e}", clip.display())))?;
@@ -290,6 +293,7 @@ fn prescan_sealed(job: &Job) -> Result<(), ExportError> {
             }
         }
         refuse_sealed_count("ADS-B", hits)?;
+        pre.clip = Some(c);
     }
     match &job.sfdps {
         Some(EramSource::Dir(dir)) => {
@@ -302,13 +306,31 @@ fn prescan_sealed(job: &Job) -> Result<(), ExportError> {
             )
             .map_err(|e| ExportError::Input(format!("{}: {e}", dir.display())))?;
             refuse_sealed_count("ERAM", count_sealed_ms(&loaded.legacy))?;
+            let inputs = loaded
+                .inputs
+                .iter()
+                .map(|h| {
+                    format!(
+                        "{} files={} bytes={} sha256={}",
+                        h.label, h.files, h.bytes, h.sha256
+                    )
+                })
+                .collect();
+            pre.eram = Some((loaded.legacy, inputs));
         }
         Some(EramSource::Loaded(leg, _)) => {
             refuse_sealed_count("ERAM", count_sealed_ms(leg))?;
         }
         None => {}
     }
-    Ok(())
+    Ok(pre)
+}
+
+/// What the pre-scan loaded, kept so that what was scanned is what is exported.
+#[derive(Default)]
+struct Preloaded {
+    clip: Option<oa_bench::input::AdsbClip>,
+    eram: Option<(Legacy, Vec<String>)>,
 }
 
 /// ERAM track samples whose position time is on the sealed day (raw or rounded).
@@ -334,6 +356,7 @@ fn refuse_sealed_count(system: &str, hits: u64) -> Result<(), ExportError> {
 
 fn export_all(
     job: &Job,
+    pre: &mut Preloaded,
     done: &mut Done,
     t0: Instant,
     log: &mut dyn FnMut(String),
@@ -342,10 +365,12 @@ fn export_all(
     let mut positions = Vec::new();
     if let Some(clip) = &job.adsb {
         let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, layout.clone());
-        ex.set_segment_gap_ns(oa_track::score::SCORE_DROP_AFTER_NS);
         let mut ax = AdsbExport::new(ADSB_SOURCE, layout.clone());
         ax.set_source_offset(job.self_test_adsb_offset_e7);
-        let r = export_adsb_clip(clip, &mut ex, Some(&mut ax), job.mode, job.rows);
+        let r = match pre.clip.take() {
+            Some(c) => export_adsb_loaded(c, &mut ex, Some(&mut ax), job.mode, job.rows),
+            None => export_adsb_clip(clip, &mut ex, Some(&mut ax), job.mode, job.rows),
+        };
         let (info, mut cinfo) = match r {
             Ok(x) => x,
             Err(e) => {
@@ -401,35 +426,23 @@ fn export_all(
         let refs = job.adsb.is_some().then_some(positions.as_slice());
         let (info, inputs) = match src {
             EramSource::Dir(dir) => {
-                let loaded = load_with(
-                    &[FeedInput {
-                        feed: FeedKind::Sfdps,
-                        dir: dir.clone(),
-                    }],
-                    &guarded_opener(),
-                )
-                .map_err(|e| ExportError::Input(format!("{}: {e}", dir.display())))?;
+                let Some((leg, inputs)) = pre.eram.take() else {
+                    return Err(ExportError::Input(format!(
+                        "{}: the pre-scan did not load the directory",
+                        dir.display()
+                    )));
+                };
                 log(format!(
                     "ERAM loaded at {:.1} s",
                     t0.elapsed().as_secs_f64()
                 ));
-                let info = match export_eram(&loaded.legacy, &mut ex, refs, job.eram_address) {
+                let info = match export_eram(&leg, &mut ex, refs, job.eram_address) {
                     Ok(i) => i,
                     Err(e) => {
                         ex.abort();
                         return Err(e);
                     }
                 };
-                let inputs: Vec<String> = loaded
-                    .inputs
-                    .iter()
-                    .map(|h| {
-                        format!(
-                            "{} files={} bytes={} sha256={}",
-                            h.label, h.files, h.bytes, h.sha256
-                        )
-                    })
-                    .collect();
                 (info, inputs)
             }
             EramSource::Loaded(leg, inputs) => {

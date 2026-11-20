@@ -5025,17 +5025,24 @@ scope.
   refused in every date syntax. Any input path with the components `scds/rec-20261119`, `stdds-20261119-holdout`
   or `stdds-smoke-20261119*`, and every file the run opens (each file of the feed directory, the ADS-B clip, each
   file and the README of a `slice` source), is resolved once, checked and opened by the resolved path; a path
-  that cannot be resolved is refused. Limits: a hard link, copy, rename or bind mount of a sealed file has no
+  that cannot be resolved is refused. `--out` of a run or of `slice` is refused inside such a folder, as given or
+  resolved (the nearest existing ancestor). `slice` refuses a source whose README import date is the sealed
+  day, or has no readable date line. Limits: a hard link, copy, rename or bind mount of a sealed file has no
   sealed component in its path and is not detectable by path, which is why OA-CMP-051 exists. A flag value that
   starts with `--` is a missing value and a repeated flag is an error.
-- **OA-CMP-048** A track restart gets a new I062/040 number: a row of one key (aircraft address) more than the
-  tracker's drop time (`oa_track::score::SCORE_DROP_AFTER_NS`, 120 s, compared in ns on the raw row times) after
-  the previous row of the key starts a new segment; exactly the drop time does not. The row pair that spans a
-  restart is left out of the interval statistics, and the README counts restarts and the excluded pairs.
+- **OA-CMP-048** A track restart gets a new I062/040 number, from the tracker's own end events and not from gaps
+  between exported rows: a confirmed track instance the tracker dropped is logged with its last applied update;
+  a row of that address later than that time plus the drop age (`oa_track::score::SCORE_DROP_AFTER_NS`) is of a
+  later instance, exact to the nanosecond, in ticks and updates mode, also when both instances' rows are in one
+  batch. The tracker holds one live track per address (one slot per key). A full track log fails the run. The row
+  pair that spans a restart is left out of the interval statistics, and the README counts restarts. ERAM rows use
+  one track number per flight.
 - **OA-CMP-049** Track numbers are one per (key, segment), allocated in order of first appearance, refused when
-  the 16-bit space is exhausted; the README gives track segments, keys and keys with more than one segment.
+  the 16-bit space (65 535 numbers, restarts included) is exhausted; the README gives track segments, keys, keys
+  with more than one segment and the numbers used of the 65 535 available.
 - **OA-CMP-050** I062/185 Vx and Vy are the true east and north velocity at the target (the frame of the CAT062
-  specification and of COMPASS); the README names the frame.
+  specification and of COMPASS); the README names the frame for OpenATCA only. For ERAM the README says the frame
+  is as the feed gives it and not verified. Each sentence is printed only when its system is present.
 - **OA-CMP-051** Before any directory or file is created and before the tracker runs, every raw input time (every
   ADS-B report of the clip including stale and other-source ones, every ERAM sample including unknown-flight,
   duplicate and refused ones) is checked: one on the sealed day by its raw time or once rounded to 1/128 s (the

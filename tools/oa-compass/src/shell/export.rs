@@ -72,8 +72,6 @@ pub struct DayReport {
     /// Track restarts: segments after a key's first. Each left its one pair of rows (the last row
     /// of the old segment and the first of the new) out of the interval statistics.
     pub restarts: u64,
-    /// Row pairs left out of the interval statistics because they span a restart.
-    pub restart_pairs_excluded: u64,
     pub notes: [u64; NOTES],
     /// Time between consecutive rows of one track, over all tracks of the file.
     pub intervals: IntervalSummary,
@@ -105,9 +103,8 @@ struct DayFile {
     partial: PathBuf,
     path: PathBuf,
     /// Key to (track number, time of its last row).
-    /// Key to (track number, time of its last row in 1/128 s, segments, raw time of its last row
-    /// in ns).
-    tracks: BTreeMap<u32, (u16, u32, u32, i64)>,
+    /// Key to (track number, time of its last row in 1/128 s, segments, segment of its last row).
+    tracks: BTreeMap<u32, (u16, u32, u32, u32)>,
     /// Restarts (a key's second and later segments) and the row pairs they left out of `intervals`.
     restarts: u64,
     /// Last track number allocated.
@@ -129,9 +126,6 @@ pub struct SystemExport {
     pub counts: Vec<(String, u64)>,
     /// Added to the latitude of every source position (a verification self-test, 0 normally).
     source_offset_e7: i32,
-    /// Silence of one key (ns, raw times) after which its next row starts a new segment, and so
-    /// a new track number; none for a system whose key is a track already.
-    segment_gap_ns: Option<i64>,
 }
 
 /// The renames that make a finished export visible.
@@ -179,14 +173,7 @@ impl SystemExport {
             refused: [0; 2],
             counts: Vec::new(),
             source_offset_e7: 0,
-            segment_gap_ns: None,
         }
-    }
-
-    /// A row of a key more than `ns` nanoseconds (raw times) after its previous row starts a new
-    /// segment of the key, with a new track number; exactly `ns` does not.
-    pub fn set_segment_gap_ns(&mut self, ns: i64) {
-        self.segment_gap_ns = Some(ns);
     }
 
     /// Sets the verification self-test offset (see `Job::self_test_position_offset_e7`).
@@ -203,21 +190,20 @@ impl SystemExport {
 
     /// Adds a converted row of track `key` (the position it came from is `src_e7`).
     pub fn push(&mut self, c: &Converted, key: u32, src_e7: (i32, i32)) -> Result<(), ExportError> {
-        // The raw time of the row as far as the record knows it: its rounded time.
-        let ns = c
-            .day
-            .saturating_mul(86_400_000_000_000)
-            .saturating_add(i64::from(c.values.time) * 1_000_000_000 / 128);
-        self.push_at(c, key, src_e7, ns)
+        self.push_segment(c, key, 0, src_e7)
     }
 
-    /// [`push`](Self::push) with the raw time of the row (Unix ns), which the restart rule uses.
-    pub fn push_at(
+    /// [`push`](Self::push) for a row of segment `segment` of `key`: a track instance of the
+    /// key. A row whose segment differs from the key's previous row's starts a new track number
+    /// (a track restart); the pair of rows that spans it is not an interval of one track. The
+    /// caller (the tracker run) knows the instance from the tracker's own end events; a system
+    /// whose key is a track already (ERAM) passes 0.
+    pub fn push_segment(
         &mut self,
         c: &Converted,
         key: u32,
+        segment: u32,
         src_e7: (i32, i32),
-        raw_ns: i64,
     ) -> Result<(), ExportError> {
         refuse_sealed_row(self.name, c.day)?;
         if !self.layout.split && c.day != self.layout.day {
@@ -256,15 +242,13 @@ impl SystemExport {
         };
         let time = c.values.time;
         let number = match file.tracks.get_mut(&key) {
-            Some((n, last, segs, last_ns)) => {
+            Some((n, last, segs, last_seg)) => {
                 // Rows are in time order (the sink refuses otherwise), so this does not wrap.
                 let gap = time.saturating_sub(*last);
-                let gap_ns = raw_ns.saturating_sub(*last_ns);
                 *last = time;
-                *last_ns = raw_ns;
-                if self.segment_gap_ns.is_some_and(|g| gap_ns > g) {
-                    // A track restart: a new segment gets a new number, and the pair of rows
-                    // that spans it is not an interval of one track.
+                if segment != *last_seg {
+                    // A track restart: a new number, and the pair of rows that spans it is not
+                    // an interval of one track.
                     let next =
                         file.last_number
                             .checked_add(1)
@@ -275,6 +259,7 @@ impl SystemExport {
                     file.last_number = next;
                     *n = next;
                     *segs = segs.saturating_add(1);
+                    *last_seg = segment;
                     file.restarts = file.restarts.saturating_add(1);
                 } else {
                     let slot = file.intervals.entry(gap).or_insert(0);
@@ -291,7 +276,7 @@ impl SystemExport {
                         day: date_text(c.day),
                     })?;
                 file.last_number = next;
-                file.tracks.insert(key, (next, time, 1, raw_ns));
+                file.tracks.insert(key, (next, time, 1, segment));
                 next
             }
         };
@@ -348,7 +333,6 @@ impl SystemExport {
                             keys: tracks.len() as u64,
                             keys_multi_segment: multi,
                             restarts,
-                            restart_pairs_excluded: restarts,
                             notes,
                             intervals: summarize(&hist),
                             read_back_records: records,

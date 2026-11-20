@@ -19,7 +19,10 @@ use super::adsb_export::{self, EDITION as EDITION_021, RECORDS_PER_BLOCK};
 use super::dirs::{check_out, create_tracked, remove_created};
 use super::error::{io_err, ExportError};
 use super::export;
-use super::guard::{copy_guarded, open_guarded, read_to_string_guarded, refuse_holdout};
+use super::guard::{
+    copy_guarded, open_guarded, read_to_string_guarded, refuse_holdout, refuse_holdout_out,
+    refuse_sealed_date,
+};
 use super::notes::clock_text;
 use crate::core::time::UNITS_PER_DAY;
 
@@ -379,6 +382,17 @@ pub fn slice_dir_with(
     }
     // The source README is needed for the import date line: read before anything is created.
     let src_readme = read_to_string_guarded(&input.join("README.txt"))?;
+    // The day of the source is the README's import date: the records have a time of day only.
+    // Without that line the day is unknown, and the window cannot be shown to be off the sealed
+    // day.
+    let Some(day) = import_day(&src_readme) else {
+        return Err(ExportError::Input(format!(
+            "{}: the README has no readable \"UTC date to give at import\" line, so the day of the source is unknown",
+            input.display()
+        )));
+    };
+    refuse_sealed_date(day)?;
+    refuse_holdout_out(out)?;
     check_out(out)?;
     let mut run_dirs: Vec<PathBuf> = Vec::new();
     create_tracked(out, &mut run_dirs)?;
@@ -497,4 +511,18 @@ pub fn slice_readme(
         }
     }
     o
+}
+
+/// The day (days since 1970-01-01) of the source README's "UTC date to give at import" line.
+fn import_day(readme: &str) -> Option<i64> {
+    let line = readme
+        .lines()
+        .find(|l| l.starts_with("UTC date to give at import"))?;
+    let date = line.rsplit(':').next()?.split_whitespace().next()?;
+    let mut it = date.split(['.', '-']);
+    let (y, m, d) = (it.next()?, it.next()?, it.next()?);
+    if it.next().is_some() {
+        return None;
+    }
+    crate::core::time::days_from_civil(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?)
 }

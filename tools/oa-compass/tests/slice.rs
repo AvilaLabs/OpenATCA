@@ -467,3 +467,51 @@ fn a_symlink_to_a_directory_in_a_sealed_folder_is_refused_for_slice() {
     );
     assert!(oa_compass::shell::guard::refuse_holdout(&base.join("stdds-smoke-20261118")).is_ok());
 }
+
+// REQ: OA-CMP-047
+#[test]
+fn a_source_on_the_sealed_date_or_without_a_date_line_and_a_sealed_out_are_refused() {
+    let day = |readme: &str, name: &str| {
+        let inp = source(name);
+        fs::write(inp.join("README.txt"), readme).unwrap();
+        inp
+    };
+    let base = tmp("sealed-date");
+    let out = base.join("o").join("x");
+    let inp = day(
+        "UTC date to give at import (UTC Day): 2026.11.19\n",
+        "sd-in1",
+    );
+    let e = slice_dir(&inp, &out, units(12, 0, 0), units(13, 0, 0)).unwrap_err();
+    assert!(e.to_string().contains("sealed hold-out day"), "{e}");
+    assert!(!base.join("o").exists());
+    let inp = day("no date here\n", "sd-in2");
+    let e = slice_dir(&inp, &out, units(12, 0, 0), units(13, 0, 0)).unwrap_err();
+    assert!(
+        e.to_string().contains("day of the source is unknown"),
+        "{e}"
+    );
+    assert!(!base.join("o").exists());
+    // The day before is fine.
+    let inp = day(
+        "UTC date to give at import (UTC Day): 2026.11.18\n",
+        "sd-in3",
+    );
+    slice_dir(&inp, &base.join("ok"), units(12, 0, 0), units(13, 0, 0)).unwrap();
+    // --out inside a sealed folder: as given, and through a link to one.
+    let inp = source("sd-in4");
+    let sealed_out = base.join("scds").join("rec-20261119").join("slice");
+    let e = slice_dir(&inp, &sealed_out, units(12, 0, 0), units(13, 0, 0)).unwrap_err();
+    assert!(e.to_string().contains("sealed hold-out recording"), "{e}");
+    assert!(!base.join("scds").exists());
+    #[cfg(unix)]
+    {
+        let real = base.join("real").join("scds").join("rec-20261119");
+        fs::create_dir_all(&real).unwrap();
+        let link = base.join("lnk");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let e = slice_dir(&inp, &link.join("new"), units(12, 0, 0), units(13, 0, 0)).unwrap_err();
+        assert!(e.to_string().contains("sealed hold-out recording"), "{e}");
+        assert!(!real.join("new").exists());
+    }
+}

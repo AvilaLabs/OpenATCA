@@ -26,7 +26,7 @@ use crate::core::convert::{eram_record, eram_refusal, track_record, EramRow, Tra
 
 /// What a tracker run did besides the rows exported. A7.2: cold.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrackRunInfo {
     pub measurements: u64,
     /// Tick rows written (`--openatca-rows ticks`); a row refused by the conversion is not one.
@@ -50,6 +50,24 @@ pub struct TrackRunInfo {
     pub uncertain: u64,
     pub reacquired: u64,
     pub coasting: u64,
+    /// Per address, the last time (Unix ns) at which each track instance the tracker dropped
+    /// could still have a row: its last applied update plus the drop age, in time order. A row of
+    /// the address later than the k-th of these is of an instance after the k-th: that is how a
+    /// restart is told apart, from the tracker's own end events and not from gaps between rows.
+    /// An instance's rows are all at or before its own entry (a tick row is on the table through
+    /// the tick at which the age equals the drop age) and the next instance of the address starts
+    /// only after the sweep that dropped the old one, which is after it (age over the drop age).
+    pub ends: BTreeMap<u32, Vec<i64>>,
+}
+
+impl TrackRunInfo {
+    /// The instance (0, 1, ...) of the address `key` that a row at `t_ns` belongs to: how many
+    /// dropped instances of the address ended before it.
+    pub fn instance_of(&self, key: u32, t_ns: i64) -> u32 {
+        self.ends.get(&key).map_or(0, |v| {
+            u32::try_from(v.partition_point(|&end| end < t_ns)).unwrap_or(u32::MAX)
+        })
+    }
 }
 
 /// The row at index `i` of `out` and the key of its track.
@@ -128,7 +146,8 @@ pub fn export_output(
         }
         match track_record(&row) {
             Ok(c) => {
-                ex.push_at(&c, key, (row.lat_e7, row.lon_e7), row.t_ns)?;
+                let segment = info.instance_of(key, row.t_ns);
+                ex.push_segment(&c, key, segment, (row.lat_e7, row.lon_e7))?;
                 if rows == OpenatcaRows::Updates {
                     info.last_update_ns = Some(row.t_ns);
                     info.update_rows = info.update_rows.saturating_add(1);
@@ -163,8 +182,10 @@ pub fn run_tracker(
         measurements: meas.len() as u64,
         ..TrackRunInfo::default()
     };
+    let mut logged = 0usize;
     for m in meas {
         tracker_update(&mut t, m, &mut scratch);
+        note_ends(&t, cfg.drop_after_ns, &mut logged, &mut info)?;
         if output_len(&scratch) > DRAIN_ROWS.min(cfg.out_capacity / 2) {
             export_output(&scratch, ex, &mut info, mono, rows)?;
             output_clear(&mut scratch);
@@ -173,6 +194,7 @@ pub fn run_tracker(
     let end = meas.last().map_or(0, |m| m.toa_ns);
     tracker_advance(&mut t, end, &mut scratch);
     tracker_flush(&mut t, end, &mut scratch);
+    note_ends(&t, cfg.drop_after_ns, &mut logged, &mut info)?;
     export_output(&scratch, ex, &mut info, mono, rows)?;
     info.overflow = scratch.overflow;
     if info.overflow > 0 {
@@ -182,6 +204,42 @@ pub fn run_tracker(
         )));
     }
     Ok(info)
+}
+
+/// Reads the tracks the tracker has dropped since the last call from its log into `info.ends`.
+/// A dropped track that was never confirmed has no rows and is not an instance. A full log would
+/// lose events, so it fails the run.
+fn note_ends(
+    t: &oa_track::Tracker,
+    drop_after_ns: i64,
+    logged: &mut usize,
+    info: &mut TrackRunInfo,
+) -> Result<(), ExportError> {
+    let log = oa_track::tracker_log(t);
+    if log.overflow > 0 {
+        return Err(ExportError::Input(format!(
+            "the tracker's track log lost {} ended tracks to a full table; the track numbers would be wrong",
+            log.overflow
+        )));
+    }
+    for i in *logged..log.addr.len() {
+        let (Some(&addr), Some(&last), Some(&conf), Some(&why)) = (
+            log.addr.get(i),
+            log.last_ns.get(i),
+            log.confirmed_ns.get(i),
+            log.reason.get(i),
+        ) else {
+            continue;
+        };
+        if conf != i64::MIN && why == oa_track::END_DROPPED {
+            info.ends
+                .entry(addr)
+                .or_default()
+                .push(last.saturating_add(drop_after_ns));
+        }
+    }
+    *logged = log.addr.len();
+    Ok(())
 }
 
 /// The scoring configuration for `meas`, as the scorer builds it.
@@ -369,6 +427,18 @@ pub fn export_adsb_clip(
 ) -> Result<(TrackRunInfo, ClipInfo), ExportError> {
     let clip = oa_bench::input::load_adsb_with(path, &guarded_opener())
         .map_err(|e| ExportError::Input(format!("{}: {e}", path.display())))?;
+    export_adsb_loaded(clip, ex, adsb, mode, rows)
+}
+
+/// [`export_adsb_clip`] over a clip that is already loaded, so that what a caller inspected
+/// first is what is exported.
+pub fn export_adsb_loaded(
+    clip: oa_bench::input::AdsbClip,
+    ex: &mut SystemExport,
+    adsb: Option<&mut AdsbExport>,
+    mode: InputsMode,
+    rows: OpenatcaRows,
+) -> Result<(TrackRunInfo, ClipInfo), ExportError> {
     let positions = ref_points(&clip.reports);
     let (fed_set, other, split) = split_reports_with(&clip.reports, mode == InputsMode::Split);
     drop(clip);

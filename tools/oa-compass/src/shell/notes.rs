@@ -139,10 +139,15 @@ fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
     if d.restarts > 0 || report.name == "OpenATCA" {
         let _ = writeln!(
             out,
-            "  track restarts: {} (a key whose next row came more than the tracker's drop time after its previous row; the key gets a new track number); row pairs left out of the interval statistics because they span a restart: {}",
-            d.restarts, d.restart_pairs_excluded
+            "  track restarts: {} (the tracker dropped a track of the key and later started another; each gets its own track number); each restart leaves its one pair of rows out of the interval statistics",
+            d.restarts
         );
     }
+    let _ = writeln!(
+        out,
+        "  track numbers used: {} of the 65535 the 16-bit I040 holds (a day with more track segments than that is refused)",
+        d.tracks
+    );
     let _ = writeln!(
         out,
         "  time span: {} to {} UTC (I070, rounded to 1/128 s)",
@@ -373,7 +378,17 @@ pub fn readme_with(
         } else {
             ""
         };
-        let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. The velocity is the track's, true east (Vx) and true north (Vy) at the target's own position, the frame the CAT062 specification gives for I062/185 (y-axis to geographical north at the location of the target), not a system plane. I080: {mon}; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.{cnf}\n");
+        let mut vel = String::new();
+        if has_oa {
+            vel.push_str("OpenATCA velocity (I185): the track's, true east (Vx) and true north (Vy) at the target's own position, the frame the CAT062 specification gives for I062/185 (y-axis to geographical north at the location of the target), not a system plane.");
+        }
+        if has_eram {
+            if !vel.is_empty() {
+                vel.push(' ');
+            }
+            vel.push_str("ERAM velocity (I185): the east and north components as the SFDPS feed gives them; their frame is not verified here.");
+        }
+        let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. {vel} I080: {mon}; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.{cnf}\n");
     }
     if has_oa {
         let _ = writeln!(o, "Altitude (OpenATCA): the tracker's altitude is ADS-B barometric (pressure) altitude, filtered: it is a CALCULATED altitude, I135 with QNH = 0. OpenATCA publishes no measured flight level (I136), so COMPASS's \"Mode C Present\" does not apply to it.\n");

@@ -134,3 +134,32 @@ pub fn refuse_holdout(path: &Path) -> Result<(), ExportError> {
     }
     Ok(())
 }
+
+/// Refuses an output path that is, or is inside, a sealed recording folder: the path as given, and
+/// its resolved form where it exists (the nearest existing ancestor resolved, with the rest of
+/// the components appended, for a path that is yet to be created).
+pub fn refuse_holdout_out(path: &Path) -> Result<(), ExportError> {
+    if holds_sealed(path) {
+        return Err(sealed_path_error(path));
+    }
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut at = Some(path);
+    while let Some(p) = at {
+        if let Ok(c) = std::fs::canonicalize(p) {
+            let mut full = c;
+            for r in rest.iter().rev() {
+                full.push(r);
+            }
+            if holds_sealed(&full) {
+                return Err(sealed_path_error(path));
+            }
+            return Ok(());
+        }
+        match p.file_name() {
+            Some(n) => rest.push(n.to_os_string()),
+            None => break,
+        }
+        at = p.parent();
+    }
+    Ok(())
+}

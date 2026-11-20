@@ -1397,9 +1397,13 @@ fn i062_185_is_true_east_and_north_at_the_target_and_the_readme_says_so() {
     );
 }
 
-/// The track numbers (in file order), track count and keys with several segments of one
-/// aircraft whose rows are at the given seconds, exported with the restart rule.
-fn numbers_for(name: &str, times_s: &[i64]) -> (Vec<u16>, u64, u64) {
+/// The track numbers (file order) of tick rows of the given (second, address) pairs, exported with
+/// the tracker's dropped-instance boundaries `ends` (address, Unix ns), and the day's report.
+fn numbers_with_ends(
+    name: &str,
+    rows: &[(i64, u32)],
+    ends: &[(u32, i64)],
+) -> (Vec<u16>, u64, u64, u64) {
     let out = tmp(name);
     let lay = Layout {
         out: out.clone(),
@@ -1407,11 +1411,17 @@ fn numbers_for(name: &str, times_s: &[i64]) -> (Vec<u16>, u64, u64) {
         split: false,
     };
     let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay);
-    ex.set_segment_gap_ns(oa_track::score::SCORE_DROP_AFTER_NS);
     let mut info = TrackRunInfo::default();
-    let rows: Vec<(u8, i64, u32)> = times_s.iter().map(|&t| (oa_track::O_TICK, t, 7)).collect();
+    for &(a, e) in ends {
+        info.ends.entry(a).or_default().push(e);
+    }
+    // One export call holding every row: a restart inside one batch.
+    let list: Vec<(u8, i64, u32)> = rows
+        .iter()
+        .map(|&(t, a)| (oa_track::O_TICK, t, a))
+        .collect();
     export_output(
-        &track_output(&rows),
+        &track_output(&list),
         &mut ex,
         &mut info,
         true,
@@ -1419,62 +1429,72 @@ fn numbers_for(name: &str, times_s: &[i64]) -> (Vec<u16>, u64, u64) {
     )
     .unwrap();
     let f = ex.finish().unwrap();
-    let (tracks, multi) = (f.report.days[0].tracks, f.report.days[0].keys_multi_segment);
+    let d = &f.report.days[0];
+    let counts = (d.tracks, d.keys, d.keys_multi_segment);
     f.commit().unwrap();
     let nums = records_062(&out.join("openatca.ast"))
         .iter()
         .map(|r| r.track_number.unwrap())
         .collect();
-    (nums, tracks, multi)
+    (nums, counts.0, counts.1, counts.2)
 }
 
 // REQ: OA-CMP-048
 #[test]
-fn a_track_restart_after_more_than_the_drop_time_gets_a_new_track_number() {
-    // The tracker's own drop time, the constant the export reads.
-    assert_eq!(oa_track::score::SCORE_DROP_AFTER_NS, 120 * 1_000_000_000);
-    // Two legs 121 s apart: two numbers; 119 s and exactly 120 s: one.
-    let (n, tracks, multi) = numbers_for("seg-a", &[1, 2, 3, 124, 125]);
-    assert_eq!(n, [1, 1, 1, 2, 2]);
-    assert_eq!((tracks, multi), (2, 1));
-    let (n, tracks, multi) = numbers_for("seg-b", &[1, 2, 3, 122, 123]);
-    assert_eq!(n, [1, 1, 1, 1, 1]);
-    assert_eq!((tracks, multi), (1, 0));
-    let (n, ..) = numbers_for("seg-c", &[1, 2, 3, 123, 124]);
+fn a_row_after_the_end_of_a_dropped_track_instance_is_a_new_track_number() {
+    let drop = oa_track::score::SCORE_DROP_AFTER_NS;
+    assert_eq!(drop, 120 * 1_000_000_000);
+    // The instance's last update was at 3 s: its rows are on the table through 123 s (age equal to
+    // the drop age) and the next instance's rows are later.
+    let boundary = DAY_NS + 3_000_000_000 + drop;
+    let ends = [(7, boundary)];
+    let (n, tracks, keys, multi) = numbers_with_ends(
+        "seg-ends",
+        &[(1, 7), (2, 7), (3, 7), (123, 7), (124, 7)],
+        &ends,
+    );
     assert_eq!(
         n,
-        [1, 1, 1, 1, 1],
-        "exactly 120 s is not over the drop time"
+        [1, 1, 1, 1, 2],
+        "a row at the boundary is the old instance's"
     );
+    assert_eq!((tracks, keys, multi), (2, 1, 1));
+    // To the nanosecond.
+    let mut info = TrackRunInfo::default();
+    info.ends.insert(7, vec![boundary]);
+    assert_eq!(info.instance_of(7, boundary - 1), 0);
+    assert_eq!(info.instance_of(7, boundary), 0);
+    assert_eq!(info.instance_of(7, boundary + 1), 1);
+    assert_eq!(
+        info.instance_of(8, boundary + 1),
+        0,
+        "another address has no end"
+    );
+}
+
+// REQ: OA-CMP-048
+#[test]
+fn a_long_gap_between_exported_rows_is_not_a_restart_without_a_tracker_end() {
+    // 500 s between rows of one address, no instance dropped (for example the rows between were
+    // refused or not exported): one track.
+    let (n, tracks, _, multi) = numbers_with_ends("seg-gap", &[(1, 9), (500, 9)], &[]);
+    assert_eq!(n, [1, 1]);
+    assert_eq!((tracks, multi), (1, 0));
 }
 
 // REQ: OA-CMP-049
 #[test]
 fn track_segments_are_numbered_in_order_reported_and_the_space_is_checked() {
-    // Aircraft 7 restarts twice and aircraft 8 not at all: the numbers follow the first appearance of
-    // each segment. The rows are exported in time order.
-    let out = tmp("segs");
-    let lay = Layout {
-        out: out.clone(),
-        day: DAY,
-        split: false,
-    };
-    let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay);
-    ex.set_segment_gap_ns(oa_track::score::SCORE_DROP_AFTER_NS);
-    let mut info = TrackRunInfo::default();
-    for (t, a) in [(1, 7), (2, 8), (100, 8), (200, 7), (400, 7)] {
-        let o = track_output(&[(oa_track::O_TICK, t, a)]);
-        export_output(&o, &mut ex, &mut info, true, OpenatcaRows::Ticks).unwrap();
-    }
-    let f = ex.finish().unwrap();
-    let d = &f.report.days[0];
-    assert_eq!((d.tracks, d.keys, d.keys_multi_segment), (4, 2, 1));
-    f.commit().unwrap();
-    let nums: Vec<u16> = records_062(&out.join("openatca.ast"))
-        .iter()
-        .map(|r| r.track_number.unwrap())
-        .collect();
-    assert_eq!(nums, [1, 2, 2, 3, 4]);
+    // Aircraft 7 has two dropped instances and aircraft 8 none: the numbers follow the first
+    // appearance of each segment, and the rows are exported in time order.
+    let end = |s: i64| DAY_NS + s * 1_000_000_000;
+    let (n, tracks, keys, multi) = numbers_with_ends(
+        "segs",
+        &[(1, 7), (2, 8), (100, 8), (200, 7), (400, 7)],
+        &[(7, end(150)), (7, end(300))],
+    );
+    assert_eq!(n, [1, 2, 2, 3, 4]);
+    assert_eq!((tracks, keys, multi), (4, 2, 1));
     // The 16-bit space: 65 535 numbers are given, one more is refused.
     let lay = Layout {
         out: tmp("segfull"),
@@ -1486,10 +1506,15 @@ fn track_segments_are_numbered_in_order_reported_and_the_space_is_checked() {
     for k in 0..65_535u32 {
         ex.push(&c, k, (410_000_000, -880_000_000)).unwrap();
     }
-    assert!(matches!(
-        ex.push(&c, 65_535, (410_000_000, -880_000_000)),
-        Err(ExportError::TrackNumbers { .. })
-    ));
+    let e = ex
+        .push(&c, 65_535, (410_000_000, -880_000_000))
+        .unwrap_err();
+    assert!(
+        matches!(e, ExportError::TrackNumbers { .. })
+            && e.to_string()
+                .contains("more than 65535 track segments (including restarts)"),
+        "{e}"
+    );
     ex.abort();
 }
 
@@ -1792,44 +1817,13 @@ fn the_second_check_refuses_a_sealed_day_row_at_the_eram_and_cat021_paths() {
     ax.abort();
 }
 
-// REQ: OA-CMP-048
-#[test]
-fn the_restart_gap_is_compared_in_ns_on_raw_times() {
-    let two_rows = |name: &str, second_extra_ns: i64| -> Vec<u16> {
-        let out = tmp(name);
-        let lay = Layout {
-            out: out.clone(),
-            day: DAY,
-            split: false,
-        };
-        let mut ex = SystemExport::new("OpenATCA", "openatca.ast", OPENATCA_SOURCE, lay);
-        ex.set_segment_gap_ns(oa_track::score::SCORE_DROP_AFTER_NS);
-        for t in [T0_NS, T0_NS + 120_000_000_000 + second_extra_ns] {
-            let mut row = row_with_velocity(1.0, 1.0);
-            row.t_ns = t;
-            let c = track_record(&row).unwrap();
-            ex.push_at(&c, 7, (row.lat_e7, row.lon_e7), t).unwrap();
-        }
-        ex.finish().unwrap().commit().unwrap();
-        records_062(&out.join("openatca.ast"))
-            .iter()
-            .map(|r| r.track_number.unwrap())
-            .collect()
-    };
-    assert_eq!(
-        two_rows("ns0", 0),
-        [1, 1],
-        "120.000000000 s is not a restart"
-    );
-    assert_eq!(two_rows("ns1", 1), [1, 2], "120.000000001 s is");
-}
-
-/// The track numbers of the file of a run over one aircraft that reports at the given seconds.
-fn run_numbers(name: &str, seconds: &[i64], rows: OpenatcaRows) -> (Vec<u16>, String) {
+/// The track numbers (file order) and README of a run over one aircraft whose reports are at the
+/// given times (seconds as ns offsets from the clip start).
+fn run_numbers(name: &str, times_ns: &[i64], rows: OpenatcaRows) -> (Vec<u16>, String) {
     let work = tmp(name);
-    let reports: Vec<(i64, u8, i32)> = seconds
+    let reports: Vec<(i64, u8, i32)> = times_ns
         .iter()
-        .map(|&k| (T0_NS + k * 1_000_000_000, 0u8, clip_position(k).0))
+        .map(|&t| (T0_NS + t, 0u8, clip_position(t / 1_000_000_000).0))
         .collect();
     let clip = clip_rows(&work, "c.oaf", &reports);
     let out = work.join("out");
@@ -1841,29 +1835,141 @@ fn run_numbers(name: &str, seconds: &[i64], rows: OpenatcaRows) -> (Vec<u16>, St
     (nums, fs::read_to_string(out.join("README.txt")).unwrap())
 }
 
+const S: i64 = 1_000_000_000;
+
+/// `nums` is a run of 1s then a run of 2s, both non-empty.
+fn assert_two_runs(nums: &[u16]) {
+    let ones = nums.iter().take_while(|&&x| x == 1).count();
+    assert!(ones > 0 && ones < nums.len(), "{nums:?}");
+    assert!(nums[ones..].iter().all(|&x| x == 2), "{nums:?}");
+}
+
 // REQ: OA-CMP-048
 #[test]
-fn a_restart_through_run_job_gets_a_new_number_and_the_readme_reports_its_effect() {
-    let burst = |from: i64| (from..from + 10).collect::<Vec<i64>>();
-    // Update rows are at the reports: 131 s of silence between the bursts is a restart, 119 s not.
+fn a_restart_after_140_seconds_gets_a_new_number_in_ticks_and_updates_mode() {
+    let burst = |from: i64| (from..from + 10).map(|k| k * S).collect::<Vec<i64>>();
     let both: Vec<i64> = burst(0).into_iter().chain(burst(140)).collect();
-    let (n, readme) = run_numbers("e2e-restart", &both, OpenatcaRows::Updates);
-    assert_eq!((n.first(), n.last()), (Some(&1), Some(&2)), "{n:?}");
-    assert!(readme.contains("track restarts: 1"), "{readme}");
-    assert!(
-        readme.contains("left out of the interval statistics because they span a restart: 1"),
-        "{readme}"
-    );
-    assert!(
-        readme.contains("1 track segments") || readme.contains("2 track segments"),
-        "{readme}"
-    );
+    for (name, rows) in [
+        ("e2e-ticks", OpenatcaRows::Ticks),
+        ("e2e-updates", OpenatcaRows::Updates),
+    ] {
+        let (n, readme) = run_numbers(name, &both, rows);
+        assert_two_runs(&n);
+        assert!(
+            readme.contains("2 track segments (I040 numbers 1 to 2) of 1 keys, 1 keys with more than one segment"),
+            "{readme}"
+        );
+        assert!(readme.contains("track restarts: 1 "), "{readme}");
+        assert!(
+            readme.contains("of the 65535 the 16-bit I040 holds"),
+            "{readme}"
+        );
+    }
+    // The whole clip is small: the rows of both instances are exported in one batch, so the 140 s
+    // case is also a re-init inside one batch of tick rows. 119 s after the last update (the
+    // second burst at 128 s) the track is still alive: one track.
     let near: Vec<i64> = burst(0).into_iter().chain(burst(128)).collect();
-    let (n, _) = run_numbers("e2e-same", &near, OpenatcaRows::Updates);
+    let (n, readme) = run_numbers("e2e-119", &near, OpenatcaRows::Ticks);
     assert!(n.iter().all(|&x| x == 1), "{n:?}");
-    // Tick rows continue until the tracker drops the track, so only a longer silence shows as a
-    // gap between rows.
-    let ticks: Vec<i64> = burst(0).into_iter().chain(burst(400)).collect();
-    let (n, _) = run_numbers("e2e-ticks", &ticks, OpenatcaRows::Ticks);
-    assert_eq!((n.first(), n.last()), (Some(&1), Some(&2)), "{n:?}");
+    assert!(readme.contains("1 track segments"), "{readme}");
+    let alive: Vec<i64> = burst(0).into_iter().chain(burst(100)).collect();
+    let (n, readme) = run_numbers("e2e-alive", &alive, OpenatcaRows::Ticks);
+    assert!(n.iter().all(|&x| x == 1), "{n:?}");
+    assert!(
+        readme.contains(
+            "1 track segments (I040 numbers 1 to 1) of 1 keys, 0 keys with more than one segment"
+        ),
+        "{readme}"
+    );
+}
+
+// REQ: OA-CMP-048
+#[test]
+fn the_export_follows_the_tracker_where_it_drops_a_track_not_a_clock_rule() {
+    let first: Vec<i64> = (0..10).map(|k| k * S).collect();
+    // The tracker drops a track only at a sweep and measures the age from its own time basis, so
+    // the report time at which a second burst restarts the track is the tracker's, measured here:
+    // 130 s after the first burst's start the track still lives, 131 s it does not. (The boundary
+    // to the nanosecond is in the unit test of the instance rule above.)
+    let after = |at_s: i64| -> Vec<i64> {
+        first
+            .iter()
+            .copied()
+            .chain((0..10).map(|k| (at_s + k) * S))
+            .collect()
+    };
+    for rows in [OpenatcaRows::Updates, OpenatcaRows::Ticks] {
+        let (n, _) = run_numbers("age-130", &after(130), rows);
+        assert!(n.iter().all(|&x| x == 1), "{rows:?}: {n:?}");
+        let (n, _) = run_numbers("age-131", &after(131), rows);
+        assert_two_runs(&n);
+    }
+}
+
+// REQ: OA-CMP-048
+#[test]
+fn the_tracker_holds_one_track_per_address_so_simultaneous_reports_make_one_track() {
+    // One address reporting from two places a second apart: the tracker's key index has one slot
+    // per address, so at any time at most one row of that address exists, and the numbering has
+    // nothing to separate.
+    let work = tmp("simul");
+    let mut reports: Vec<(i64, u8, i32)> = Vec::new();
+    for k in 0..30i64 {
+        let lat = clip_position(k).0;
+        reports.push((T0_NS + k * S, 0, lat));
+        reports.push((T0_NS + k * S + S / 2, 0, lat + 20_000));
+    }
+    let clip = clip_rows(&work, "c.oaf", &reports);
+    let out = work.join("out");
+    run(job(&out, Some(clip), false, false, OpenatcaRows::Ticks)).unwrap();
+    let recs = records_062(&out.join("openatca.ast"));
+    let mut by_time = std::collections::BTreeMap::new();
+    for r in &recs {
+        *by_time.entry(r.time.unwrap()).or_insert(0u32) += 1;
+    }
+    assert!(!by_time.is_empty());
+    assert!(
+        by_time.values().all(|&c| c == 1),
+        "two rows of one address at one time"
+    );
+}
+
+// REQ: OA-CMP-047
+#[test]
+fn an_out_inside_a_sealed_folder_is_refused_and_nothing_is_created() {
+    let work = tmp("sealed-out");
+    let out = work.join("scds").join("rec-20261119").join("export");
+    let e = run(job(&out, None, true, false, OpenatcaRows::Ticks)).unwrap_err();
+    assert!(e.to_string().contains("sealed hold-out recording"), "{e}");
+    assert!(!work.join("scds").exists());
+    #[cfg(unix)]
+    {
+        let real = work.join("real").join("stdds-20261119-holdout");
+        fs::create_dir_all(&real).unwrap();
+        let link = work.join("lnk");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let e = run(job(&link.join("o"), None, true, false, OpenatcaRows::Ticks)).unwrap_err();
+        assert!(e.to_string().contains("sealed hold-out recording"), "{e}");
+        assert!(names(&real).is_empty());
+    }
+}
+
+// REQ: OA-CMP-050
+#[test]
+fn the_velocity_frame_sentence_names_the_systems_present_and_claims_east_north_for_openatca_only() {
+    let work = tmp("velsent");
+    let readme = |name: &str, clip: bool, eram: bool| {
+        let out = work.join(name);
+        let adsb = clip.then(|| write_clip(&work, 30));
+        run(job(&out, adsb, eram, false, OpenatcaRows::Ticks)).unwrap();
+        fs::read_to_string(out.join("README.txt")).unwrap()
+    };
+    let oa = "OpenATCA velocity (I185): the track's, true east (Vx) and true north (Vy)";
+    let er = "ERAM velocity (I185): the east and north components as the SFDPS feed gives them; their frame is not verified here.";
+    let r = readme("oa", true, false);
+    assert!(r.contains(oa) && !r.contains("ERAM velocity"), "{r}");
+    let r = readme("er", false, true);
+    assert!(r.contains(er) && !r.contains("OpenATCA velocity"), "{r}");
+    let r = readme("both", true, true);
+    assert!(r.contains(oa) && r.contains(er), "{r}");
 }
