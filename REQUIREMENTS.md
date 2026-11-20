@@ -5034,7 +5034,9 @@ scope.
   between exported rows: a confirmed track instance the tracker dropped is logged with its last applied update;
   a row of that address later than that time plus the drop age (`oa_track::score::SCORE_DROP_AFTER_NS`) is of a
   later instance, exact to the nanosecond, in ticks and updates mode, also when both instances' rows are in one
-  batch. The tracker holds one live track per address (one slot per key). A full track log fails the run. The row
+  batch. The tracker holds one live track per address (one slot per key). A full track log fails the run. A clock
+  step back of the tracker (`time_steps_back` or `time_future_dropped` above zero) fails the run, because the tracks
+  it drops at once ended at the step and not at their last update plus the drop age. The row
   pair that spans a restart is left out of the interval statistics, and the README counts restarts. ERAM rows use
   one track number per flight.
 - **OA-CMP-049** Track numbers are one per (key, segment), allocated in order of first appearance, refused when

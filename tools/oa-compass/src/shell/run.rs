@@ -222,6 +222,17 @@ fn note_ends(
             log.overflow
         )));
     }
+    // A step back drops every track updated after the new clock at once: the end of each is the
+    // moment of the step, not `last + drop_after`, and the tracker's log does not say when that
+    // was. The numbers would be wrong, so the run fails.
+    let st = oa_track::tracker_stats(t);
+    if st.time_steps_back > 0 || st.time_future_dropped > 0 {
+        return Err(ExportError::Input(format!(
+            "the tracker moved its clock back {} time(s) and dropped {} track(s) built on the wrong clock; \
+             track restarts cannot be placed in time, so the run is not complete",
+            st.time_steps_back, st.time_future_dropped
+        )));
+    }
     for i in *logged..log.addr.len() {
         let (Some(&addr), Some(&last), Some(&conf), Some(&why)) = (
             log.addr.get(i),
