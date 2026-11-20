@@ -112,6 +112,12 @@ pub fn read_clip_tallied(
     let mut rows = 0u64;
     let mut over: Option<u64> = None;
     let damaged = read_frames(&mut f, &mut |fr| {
+        // A frame received in a sealed window is dropped whole and counted once.
+        if fr.kind == Kind::Message && oa_sealed::in_sealed_window(fr.recv_unix_ns) {
+            sealed += 1;
+            oa_sealed::note_window_drops(1);
+            return;
+        }
         if fr.kind == Kind::Message && over.is_none() {
             // The row count is the u32 at byte 8 of the payload header; a payload too short to
             // have one fails the decode below.
@@ -546,5 +552,17 @@ mod proofs {
         )
         .unwrap();
         assert!(!c.clean());
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn a_frame_received_in_the_window_is_dropped_whole_whatever_its_rows_say() {
+        const FROM: i64 = 1_795_131_900_000_000_000;
+        let out = FROM - 3_600_000_000_000;
+        let bytes = timed_clip(&[(FROM + 5, &[out]), (out, &[out + 1])]);
+        let (got, bad, dropped, sealed) =
+            read_clip_counted(&write("recv.oaf", &bytes), 1 << 20, 1000).unwrap();
+        assert_eq!(got.time_ns, [out + 1]);
+        assert_eq!((bad, dropped, sealed), (0, 0, 1));
     }
 }

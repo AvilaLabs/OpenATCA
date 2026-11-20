@@ -99,3 +99,43 @@ fn the_reader_builds_every_decoder_with_the_sealed_window_as_its_drop_window() {
         assert_eq!(w.span(), oa_sealed::sealed_window_ms());
     }
 }
+
+/// One frame holding `r`, received at `recv`.
+fn clip_received(name: &str, r: &Reports, recv: i64) -> PathBuf {
+    let mut payload = Vec::new();
+    encode_payload(&mut payload, r, 0, reports_len(r)).unwrap();
+    let mut buf = vec![0u8; MAX_FRAME_LEN];
+    let len = encode_frame(&mut buf, 1, FLAG_BYTES, 0, recv, recv / 1_000_000, &payload).unwrap();
+    let p = std::env::temp_dir().join(format!("oa-bench-seal-{}-{name}", std::process::id()));
+    std::fs::write(&p, &buf[..len]).unwrap();
+    p
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_frame_received_in_the_window_is_dropped_whole_and_counted_whatever_its_rows_say() {
+    // Every row is outside the window; only the receive time is inside it.
+    let r = rows_at(&[FROM - 3_600_000_000_000, TO + 3_600_000_000_000]);
+    let inside = [FROM, TO - 1];
+    let outside = FROM - 1;
+    for recv in inside {
+        let mut seen = Vec::new();
+        let (damaged, sealed) =
+            for_each_adsb_frame_counted(&clip_received("recv_walk.oaf", &r, recv), &mut |t, _| {
+                seen.push(t)
+            })
+            .unwrap();
+        assert_eq!((damaged, sealed, seen.len()), (0, 1, 0));
+        let c = load_adsb(&clip_received("recv_load.oaf", &r, recv)).unwrap();
+        assert_eq!((reports_len(&c.reports), c.sealed_window_dropped), (0, 1));
+    }
+    let mut seen = Vec::new();
+    let (_, sealed) =
+        for_each_adsb_frame_counted(&clip_received("recv_out.oaf", &r, outside), &mut |t, _| {
+            seen.push(t)
+        })
+        .unwrap();
+    assert_eq!((sealed, seen), (0, vec![outside]));
+    let c = load_adsb(&clip_received("recv_out2.oaf", &r, outside)).unwrap();
+    assert_eq!((reports_len(&c.reports), c.sealed_window_dropped), (2, 0));
+}

@@ -38,7 +38,10 @@ fn check(p: &PathBuf) -> (Option<i32>, String) {
         .arg(p)
         .output()
         .unwrap();
-    (o.status.code(), String::from_utf8_lossy(&o.stdout).into_owned())
+    (
+        o.status.code(),
+        String::from_utf8_lossy(&o.stdout).into_owned(),
+    )
 }
 
 // REQ: OA-SEAL-014
