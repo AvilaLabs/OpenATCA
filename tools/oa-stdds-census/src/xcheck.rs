@@ -96,7 +96,7 @@ impl Params {
         if nm == 0.5 || nm == 2.0 || nm == 1.0 {
             g = [0.5, 1.0, 2.0];
         }
-        g.sort_by(|a, b| a.total_cmp(b));
+        g.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
         self.primary = g.iter().position(|&x| x == nm).unwrap_or(1);
         self.gates_nm = g;
         self
