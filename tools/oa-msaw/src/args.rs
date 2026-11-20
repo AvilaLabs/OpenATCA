@@ -1,10 +1,10 @@
 //! The command line:
 //! `oa-msaw --adsb <clip.oaf> --config <file> --out <dir> [--terrain <dir>] [--dof <zip|dat>]
-//! [--mva <dir>] [--cifp <file>] [--metar <dir>] [--from-s <n> --to-s <n>] [--scorer-half]`.
+//! [--mva <dir>] [--cifp <file>] [--metar <dir>] [--sfdps <dir>] [--from-s <n> --to-s <n>] [--scorer-half]`.
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: oa-msaw --adsb <clip.oaf> --config <file.cfg> --out <dir> [--terrain <3dep dir>] [--dof <DOF zip or DOF.DAT>] [--mva <dir>] [--cifp <FAACIFP18 or the CIFP zip>] [--metar <dir of metar_NNz_hours1.json>] [--from-s <n> --to-s <n>] [--scorer-half]";
+pub const USAGE: &str = "usage: oa-msaw --adsb <clip.oaf> --config <file.cfg> --out <dir> [--terrain <3dep dir>] [--dof <DOF zip or DOF.DAT>] [--mva <dir>] [--cifp <FAACIFP18 or the CIFP zip>] [--metar <dir of metar_NNz_hours1.json>] [--sfdps <recording dir>] [--from-s <n> --to-s <n>] [--scorer-half]";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived
@@ -27,6 +27,9 @@ pub struct Args {
     /// A directory of METAR files (`metar_00z_hours1.json` to `metar_23z_hours1.json`), for the
     /// altimeter settings. Without it no altitude below FL180 has a setting and the net says so.
     pub metar: Option<PathBuf>,
+    /// The SFDPS recordings, for the flight plans that decide who is alerted. Without them every
+    /// track is alerted and the summary says that eligibility was not judged.
+    pub sfdps: Option<PathBuf>,
     /// Track only the measurements from `from_s` to `to_s` seconds after the first one.
     pub window_s: Option<(f64, f64)>,
     /// Track only the scorer's half A of the clip (the reports the scoring harness gives the
@@ -48,10 +51,10 @@ fn seconds(flag: &str, v: &str) -> Result<f64, String> {
 /// Parses the arguments after the program name. A flag value that starts with `--` is a missing
 /// value; a repeated flag, an unknown flag and a missing flag are errors.
 pub fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut paths: [Option<PathBuf>; 8] = Default::default();
+    let mut paths: [Option<PathBuf>; 9] = Default::default();
     let (mut from, mut to): (Option<f64>, Option<f64>) = (None, None);
     let mut scorer_half = false;
-    const NAMES: [&str; 8] = [
+    const NAMES: [&str; 9] = [
         "--adsb",
         "--config",
         "--out",
@@ -60,6 +63,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         "--mva",
         "--cifp",
         "--metar",
+        "--sfdps",
     ];
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -107,7 +111,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         (Some(_), Some(_)) => return Err("--from-s must be less than --to-s".to_string()),
         _ => return Err("--from-s and --to-s go together".to_string()),
     };
-    let [adsb, config, out, terrain, dof, mva, cifp, metar] = paths;
+    let [adsb, config, out, terrain, dof, mva, cifp, metar, sfdps] = paths;
     match (adsb, config, out) {
         (Some(adsb), Some(config), Some(out)) => Ok(Args {
             adsb,
@@ -118,6 +122,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             mva,
             cifp,
             metar,
+            sfdps,
             window_s,
             scorer_half,
         }),

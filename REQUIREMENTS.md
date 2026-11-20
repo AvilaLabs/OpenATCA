@@ -6289,9 +6289,9 @@ FAA value.
 - **OA-MSAW-039** With no terrain or chart the run alerts on nothing and says so (degraded, listed); a track with
   no altitude and a track over the budget are counted, listed and degrade the net.
 - **OA-MSAW-040** The files are deterministic and the summary names no aircraft.
-- **OA-MSAW-047** Terrain is queried over only the tiles of the cells the query touches; a missing neighbour, a
-  nodata sample and a tile on another lattice are counted apart, the last is also reported on stderr, and it
-  spoils only the queries that touch it.
+- **OA-MSAW-047** Terrain is reduced once per tile to a grid of 0.002-degree cells and looked up from it; a
+  missing neighbour and a nodata sample are counted apart, each tile is reduced alone (no common lattice is
+  needed), and a tile is read once.
 - **OA-MSAW-048** Below FL180 the altitude takes the altimeter setting of the nearest METAR station within the
   radius with an observation within the age; at and above FL180 it is used as it is.
 - **OA-MSAW-049** With no usable setting the altitude is lowered by the allowance, the track is counted and
@@ -6299,5 +6299,17 @@ FAA value.
 - **OA-MSAW-050** The summary gives the one-off load times and peak memory, the CPU seconds per simulated second
   of the steady state and its split, the alerts per hour by grade, the worst floor kind, the alerts near an
   airport with an approach and a first classification of what the tracks were doing.
+- **OA-MSAW-051** A coarse terrain lookup is never below the fine lookup over the same circle, and gives no
+  answer where the fine lookup has none (dense bounded grids; the fine path is the oracle).
+- **OA-MSAW-052** The chart raster holds, for each 0.002-degree cell, the highest minimum altitude of any sector
+  touching the cell, and nothing where no sector touches it; never below the sector lookup.
+- **OA-MSAW-053** A departure corridor and a runway corridor hold the whole-circle rule; a departure that climbs
+  normally does not alert and one that levels off below terrain plus the departure clearance does; the chart
+  does not apply in either.
+- **OA-MSAW-054** The corridor grid index gives the answer of looking at every corridor.
+- **OA-MSAW-055** A runway end with a SID, or the reverse of an approach end, has a departure corridor from its
+  far end; each approach corridor continues along the runway.
+- **OA-MSAW-056** A track is alerted only when it has an active IFR flight in SFDPS (address, then callsign) or an
+  `msaw_request`; every other track is evaluated, written to `advisory.csv` and counted by reason.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.

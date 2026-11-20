@@ -33,11 +33,13 @@ use oa_track::{
 use crate::args::Args;
 use crate::cifp::{approach_airports, corridors_from_cifp, CifpCorridor};
 use crate::config::{parse_config, InhibitSpec, Settings};
+use crate::eligibility::{callsign_timeline, first_seen, judge, Inputs};
 use crate::floors::{obstacle_index, FloorStats, Floors, ObstacleIndex};
 use crate::guard::{open_guarded, refuse_sealed, OpenFail};
 use crate::qnh::{Qnh, QnhStats};
 use crate::report::{
-    alerts_csv, inhibitions_csv, skipped_csv, state_text, summary_text, DataUsed, SummaryInput,
+    alerts_csv, alerts_csv_with_basis, inhibitions_csv, skipped_csv, state_text, summary_text,
+    DataUsed, SummaryInput,
 };
 
 /// The chi-square quantile of 2 degrees of freedom at 95 %: the 95 % radius of a circular
@@ -497,8 +499,9 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
 }
 
 /// The names of the output files, the summary last: it is the mark of a complete run.
-const OUTPUTS: [&str; 4] = [
+const OUTPUTS: [&str; 5] = [
     "alerts.csv",
+    "advisory.csv",
     "skipped.csv",
     "inhibitions.csv",
     "summary.txt",
@@ -602,7 +605,14 @@ fn read_cifp(g: &Sealed, p: &Path) -> Result<oa_arinc424::Cifp, String> {
 pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<String, String> {
     let g = Sealed::production();
     // Every path is checked before anything is opened or created, for a caller of the library too.
-    let optional = [&args.terrain, &args.dof, &args.mva, &args.cifp, &args.metar];
+    let optional = [
+        &args.terrain,
+        &args.dof,
+        &args.mva,
+        &args.cifp,
+        &args.metar,
+        &args.sfdps,
+    ];
     for p in [&args.adsb, &args.config, &args.out]
         .into_iter()
         .chain(optional.into_iter().flatten())
@@ -710,7 +720,6 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     check_adsb_config(&adsb_cfg).map_err(|e| format!("adapter configuration: {e}"))?;
     let ground = ground_table(&reports);
     let (mut meas, _) = adsb_measurements(&reports, &adsb_cfg);
-    drop(reports);
     let t0_ns = meas.first().map_or(0, |m| m.toa_ns);
     let mut scope = scope;
     if let Some((a, b)) = args.window_s {
@@ -721,6 +730,20 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         meas.retain(|m| m.toa_ns >= lo && m.toa_ns <= hi);
         scope = format!("{scope}, measurements from {a} s to {b} s after the first");
     }
+    // The callsigns the reports carry, for the flight join and the requests (before the reports go).
+    let callsigns = if args.sfdps.is_some() || !set.requests.is_empty() {
+        let addrs: std::collections::BTreeSet<u32> = meas.iter().map(|m| m.addr).collect();
+        let (lo, hi) = (
+            meas.first()
+                .map_or(0, |m| m.toa_ns)
+                .saturating_sub(60_000_000_000),
+            meas.last().map_or(0, |m| m.toa_ns),
+        );
+        callsign_timeline(&reports, &addrs, lo, hi)
+    } else {
+        Default::default()
+    };
+    drop(reports);
     let iv = interval_stats(&meas).unwrap_or(IntervalStats {
         n: 0,
         p50_ns: 1_000_000_000,
@@ -750,7 +773,36 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     used.rss_end_kb = proc_kb("VmHWM:");
     used.times = rec.times;
     fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
-    let csv = alerts_csv(&rec.alerts, &used.airports);
+    // Who is alerted: the rest of the violations are advisories, listed and counted.
+    let tracks = first_seen(&meas);
+    let elig = judge(
+        &Inputs {
+            alerts: &rec.alerts,
+            tracks: &tracks,
+            callsigns: &callsigns,
+            requests: &set.requests,
+            t0_ns,
+            sfdps: args.sfdps.as_deref(),
+        },
+        sealed,
+    )?;
+    let alerted: Vec<oa_msaw::Alert> = rec
+        .alerts
+        .iter()
+        .filter(|a| elig.basis.contains_key(&(a.addr, a.start_ns)))
+        .copied()
+        .collect();
+    let csv = if elig.judged {
+        let rows: Vec<_> = alerted
+            .iter()
+            .filter_map(|a| elig.basis.get(&(a.addr, a.start_ns)).map(|b| (*a, *b)))
+            .collect();
+        alerts_csv_with_basis(&rows, &used.airports)
+    } else {
+        alerts_csv(&alerted, &used.airports)
+    };
+    let advisory = alerts_csv_with_basis(&elig.advisories, &used.airports);
+    used.eligibility = Some(elig);
     let csv_sha = to_hex(&sha256(csv.as_bytes()));
     let name_of = |p: &Path| {
         p.file_name()
@@ -760,7 +812,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let inhibitions = inhibitions_csv(&rec.made, &rec.hidden, &rec.expired_ns);
     let summary = summary_text(&SummaryInput {
         cfg: &set.msaw,
-        alerts: &rec.alerts,
+        alerts: &alerted,
         totals: rec.totals,
         net_cycles: &rec.net_cycles,
         alert_overflow: rec.alert_overflow,
@@ -789,7 +841,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     });
     for (file, text) in OUTPUTS
         .into_iter()
-        .zip([&csv, &skipped, &inhibitions, &summary])
+        .zip([&csv, &advisory, &skipped, &inhibitions, &summary])
     {
         write_atomic(&args.out, file, text)?;
     }

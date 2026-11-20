@@ -7,11 +7,12 @@ use std::fmt::Write as _;
 use oa_msaw::{
     Alert, CycleStats, FloorKind, Grade, MsawConfig, SkipWhy, AF_COAST, AF_GROUND_UNKNOWN,
     AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE, AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN,
-    AF_UNCERTAIN,
+    AF_UNCERTAIN, CK_APPROACH, CK_DEPARTURE, CK_RUNWAY,
 };
 use oa_safety::net::{reason_text, NetState};
 
 use crate::cifp::{nearest_airport_nm, CifpCorridor};
+use crate::eligibility::{Basis, EligibilityReport, BASIS_COUNT};
 use crate::floors::FloorStats;
 use crate::qnh::QnhStats;
 use crate::run::{HiddenAgg, MadeInhibit, SkipAgg};
@@ -137,13 +138,30 @@ fn near_of(a: &Alert, airports: &[(String, f64, f64)]) -> Option<f64> {
 /// `alerts.csv`: one row per alert, sorted by start time then address, with the distance to the
 /// nearest airport that has an approach. It holds addresses and is not for publication.
 pub fn alerts_csv(alerts: &[Alert], airports: &[(String, f64, f64)]) -> String {
+    let rows: Vec<(Alert, Option<&str>)> = alerts.iter().map(|a| (*a, None)).collect();
+    csv_of(&rows, airports)
+}
+
+/// [`alerts_csv`] with a last column, `basis`: why the track is alerted (or, in `advisory.csv`,
+/// why it is not).
+pub fn alerts_csv_with_basis(rows: &[(Alert, Basis)], airports: &[(String, f64, f64)]) -> String {
+    let rows: Vec<(Alert, Option<&str>)> = rows.iter().map(|(a, b)| (*a, Some(b.text()))).collect();
+    csv_of(&rows, airports)
+}
+
+fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> String {
+    let labelled = rows.iter().any(|r| r.1.is_some());
     let mut o = String::from(
-        "address_hex,start_s,end_s,caution_s,warning_s,peak,lat_deg,lon_deg,altitude_ft,vrate_fpm,speed_mps,nearest_approach_airport_nm,worst_margin_ft,worst_floor_ft,worst_floor_kind,ttv_min_s,cycles,flags,flags_raw\n",
+        "address_hex,start_s,end_s,caution_s,warning_s,peak,lat_deg,lon_deg,altitude_ft,vrate_fpm,speed_mps,nearest_approach_airport_nm,worst_margin_ft,worst_floor_ft,worst_floor_kind,ttv_min_s,cycles,flags,flags_raw",
     );
-    let mut v = alerts.to_vec();
-    v.sort_by_key(|a| (a.start_ns, a.addr));
-    for a in v {
-        let _ = writeln!(
+    if labelled {
+        o.push_str(",basis");
+    }
+    o.push('\n');
+    let mut v = rows.to_vec();
+    v.sort_by_key(|(a, _)| (a.start_ns, a.addr));
+    for (a, basis) in v {
+        let _ = write!(
             o,
             "{:08X},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{}",
             a.addr,
@@ -166,6 +184,10 @@ pub fn alerts_csv(alerts: &[Alert], airports: &[(String, f64, f64)]) -> String {
             flags_text(a.flags),
             a.flags
         );
+        if let Some(b) = basis {
+            let _ = write!(o, ",{b}");
+        }
+        o.push('\n');
     }
     o
 }
@@ -262,6 +284,8 @@ pub struct DataUsed {
     pub rss_end_kb: Option<u64>,
     pub steady_cpu_s: Option<f64>,
     pub times: crate::run::RunTimes,
+    /// Who was alerted and why; `None` when the run did not judge (a test of the report alone).
+    pub eligibility: Option<EligibilityReport>,
 }
 
 /// What the summary is made from. A7.2: cold struct, size guard waived.
@@ -351,6 +375,12 @@ pub fn summary_text(i: &SummaryInput) -> String {
         "  terrain tiles loaded {}, absent {}, read again {}; terrain queries {} of which without a complete answer {}",
         fs.tiles_loaded, fs.tiles_absent, fs.tiles_reloaded, fs.terrain_queries, fs.terrain_absent
     );
+    let _ = writeln!(
+        o,
+        "  terrain grids resident {:.1} MB, chart raster blocks {}",
+        fs.terrain_grid_bytes as f64 / 1_048_576.0,
+        fs.chart_blocks
+    );
     let answered = fs.terrain_queries - fs.terrain_absent;
     let _ = writeln!(
         o,
@@ -423,18 +453,27 @@ pub fn summary_text(i: &SummaryInput) -> String {
         .data
         .cifp_corridors
         .iter()
-        .filter(|c| c.faf_from_cifp)
+        .filter(|c| c.kind == CK_APPROACH && c.faf_from_cifp)
         .count();
+    let of_kind = |k: u8| i.data.cifp_corridors.iter().filter(|c| c.kind == k).count();
     let _ = writeln!(
         o,
-        "corridors {} ({} from the CIFP, {} of them with the fix placed by the CIFP); runway ends with an approach and no corridor {}; airports with an approach {}",
+        "corridors {} ({} from the CIFP: {} approach, {} along runways, {} departure; {} approach corridors with the fix placed by the CIFP); runway ends with an approach and no corridor {}; airports with an approach {}",
         i.cfg.n_corridors,
         i.data.cifp_corridors.len(),
+        of_kind(CK_APPROACH),
+        of_kind(CK_RUNWAY),
+        of_kind(CK_DEPARTURE),
         from_cifp,
         i.data.without_corridor.len(),
         i.data.airports.len()
     );
-    for c in &i.data.cifp_corridors {
+    for c in i
+        .data
+        .cifp_corridors
+        .iter()
+        .filter(|c| c.kind == CK_APPROACH)
+    {
         let _ = writeln!(
             o,
             "  {}: {:.1} NM{}, threshold {} ft, fix {} ft, from {} approaches",
@@ -578,6 +617,9 @@ pub fn summary_text(i: &SummaryInput) -> String {
             i.alerts.len() as f64 / hours
         );
     }
+    if let Some(e) = &i.data.eligibility {
+        eligibility_lines(&mut o, e, hours, i.data);
+    }
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
     for a in i.alerts {
         *kinds.entry(kind_text(a.worst_kind)).or_default() += 1;
@@ -635,6 +677,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
                 .join(", ")
         );
     }
+    nuisance_lines(&mut o, i, &order, &nears);
     let _ = writeln!(o, "net state by cycle:");
     for (s, n) in i.net_cycles {
         let _ = writeln!(o, "  {s}: {n}");
@@ -660,4 +703,140 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let _ = writeln!(o, "suppressions lost (log full) {}", i.suppressed_overflow);
     let _ = writeln!(o, "alerts.csv sha256 {}", i.alerts_sha256);
     o
+}
+
+/// The summary's account of who was alerted: counts by basis of the tracks and of the violations,
+/// the advisories, and what the advisories were doing.
+fn eligibility_lines(o: &mut String, e: &EligibilityReport, hours: f64, data: &DataUsed) {
+    if !e.judged {
+        let _ = writeln!(
+            o,
+            "eligibility: not judged (no --sfdps recordings), every track is alerted; msaw_request lines count only as a basis"
+        );
+        return;
+    }
+    let by = |a: &[u64; BASIS_COUNT]| {
+        [
+            Basis::Address,
+            Basis::Callsign,
+            Basis::Request,
+            Basis::VfrPlan,
+            Basis::NotActive,
+            Basis::Ambiguous,
+            Basis::NoFlight,
+        ]
+        .iter()
+        .map(|b| format!("{} {}", b.text(), a.get(*b as usize).copied().unwrap_or(0)))
+        .collect::<Vec<_>>()
+        .join(", ")
+    };
+    let _ = writeln!(
+        o,
+        "eligibility: alerts only for a track with an active IFR flight in SFDPS (by address, then callsign) or an msaw_request; the rest are advisories ({} SFDPS operations applied, {} flights held)",
+        e.sfdps_ops, e.sfdps_flights
+    );
+    let _ = writeln!(
+        o,
+        "tracks ({}) by basis at first sight: {}",
+        e.tracks,
+        by(&e.tracks_by)
+    );
+    let _ = writeln!(
+        o,
+        "violating tracks by basis (alerts and advisories): {}",
+        by(&e.alerts_by)
+    );
+    let w = e
+        .advisories
+        .iter()
+        .filter(|(a, _)| a.peak == Grade::Warning)
+        .count();
+    let n = e.advisories.len();
+    let _ = writeln!(
+        o,
+        "advisories (advisory.csv, not alerted): {n}: reached warning {w}, caution only {}",
+        n - w
+    );
+    if hours > 0.0 {
+        let _ = writeln!(
+            o,
+            "advisories per hour over {hours:.4} h: reached warning {:.1}, caution only {:.1}, all {:.1}",
+            w as f64 / hours,
+            (n - w) as f64 / hours,
+            n as f64 / hours
+        );
+    }
+    let mut c = [0usize; 4];
+    for (a, _) in &e.advisories {
+        let d = classify(a, near_of(a, &data.airports));
+        if let Some(slot) = DOING_NAMES.iter().position(|(x, _)| *x == d) {
+            if let Some(x) = c.get_mut(slot) {
+                *x += 1;
+            }
+        }
+    }
+    let _ = writeln!(
+        o,
+        "what the advised tracks were doing ({n}): {}",
+        DOING_NAMES
+            .iter()
+            .zip(c.iter())
+            .map(|((_, name), x)| format!("{name} {x}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+}
+
+/// How many alerts the nuisance list holds.
+const NUISANCE_LIST: usize = 20;
+
+/// The alerts most likely to be nuisance (a heuristic, not a rule): an alert within 10 NM of an
+/// airport with an approach on a track climbing or descending at 300 ft/min or more, whose floor
+/// is not an approach surface, ranked by the shallowest predicted violation first. Each with what
+/// the track was doing, its altitude over the floor now, the floor kind and the basis.
+fn nuisance_lines(o: &mut String, i: &SummaryInput, order: &[usize], nears: &[Option<f64>]) {
+    let mut cand: Vec<(f32, usize)> = Vec::new();
+    for &k in order {
+        let (Some(a), Some(d)) = (i.alerts.get(k), nears.get(k)) else {
+            continue;
+        };
+        let phase = classify(a, *d);
+        if matches!(phase, Doing::OnApproach | Doing::Departing)
+            && a.worst_kind != FloorKind::Procedure
+        {
+            cand.push((-a.worst_margin_ft, k));
+        }
+    }
+    cand.sort_by(|x, y| oa_math::cmp_canon_f64(f64::from(x.0), f64::from(y.0)).then(x.1.cmp(&y.1)));
+    let _ = writeln!(
+        o,
+        "nuisance candidates (heuristic: within {NEAR_AIRPORT_NM} NM of an airport with an approach, climbing or descending, floor not an approach surface; shallowest predicted violation first): {} of {} alerts, first {}",
+        cand.len(),
+        i.alerts.len(),
+        NUISANCE_LIST.min(cand.len())
+    );
+    for (n, &(_, k)) in cand.iter().take(NUISANCE_LIST).enumerate() {
+        let (Some(a), Some(d)) = (i.alerts.get(k), nears.get(k)) else {
+            continue;
+        };
+        let basis = i
+            .data
+            .eligibility
+            .as_ref()
+            .and_then(|e| e.basis.get(&(a.addr, a.start_ns)))
+            .map_or("not_judged", |b| b.text());
+        let name = DOING_NAMES
+            .iter()
+            .find(|(x, _)| *x == classify(a, *d))
+            .map_or("", |(_, n)| *n);
+        let _ = writeln!(
+            o,
+            "  {:2}: {name}, {:.0} ft over the floor now, predicted {:.0} ft at worst, floor {} ({} ft), associated {basis}",
+            n + 1,
+            a.alt_ft - a.worst_floor_ft as f32,
+            a.worst_margin_ft,
+            kind_text(a.worst_kind),
+            a.worst_floor_ft
+        );
+    }
 }

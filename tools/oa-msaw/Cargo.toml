@@ -18,6 +18,8 @@ oa-awc = { path = "../../crates/oa-awc" }
 oa-bench = { path = "../../crates/oa-bench" }
 oa-dof = { path = "../../crates/oa-dof" }
 oa-encounter-run = { path = "../oa-encounter" }
+oa-flight = { path = "../../crates/oa-flight" }
+oa-flight-sfdps = { path = "../../crates/oa-flight-sfdps" }
 oa-math = { path = "../../crates/oa-math" }
 oa-msaw = { path = "../../crates/oa-msaw" }
 oa-mva = { path = "../../crates/oa-mva" }

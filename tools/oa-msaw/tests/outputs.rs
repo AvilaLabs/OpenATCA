@@ -45,17 +45,18 @@ fn a_failed_run_leaves_no_output_of_an_earlier_run_and_a_good_one_leaves_no_temp
     };
     let o = run(&cfg);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    // Exactly the four files: no temporary name is left.
+    // Exactly the five files: no temporary name is left.
     assert_eq!(
         names(&out),
         [
+            "advisory.csv",
             "alerts.csv",
             "inhibitions.csv",
             "skipped.csv",
             "summary.txt"
         ]
     );
-    // A run that fails (a bad configuration) removes the four, so none looks like its result.
+    // A run that fails (a bad configuration) removes the five, so none looks like its result.
     let bad = t.join("bad.cfg");
     fs::write(&bad, "not a configuration\n").unwrap();
     let o = run(&bad);

@@ -163,6 +163,8 @@ pub struct Answer {
     pub ended: bool,
     pub assigned: Alt,
     pub interim: Alt,
+    /// The chosen flight has a plan view that is active or departed (not only proposed).
+    pub active: bool,
     /// How the chosen flight was found.
     pub key: Key,
     pub addr: AddrResult,
@@ -639,6 +641,7 @@ fn lookup(
         a.flight = true;
         a.assigned = f.assigned;
         a.interim = f.interim;
+        a.active = is_underway(&f);
     }
     (a, diag)
 }

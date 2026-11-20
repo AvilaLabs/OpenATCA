@@ -12,13 +12,23 @@
 //! that the surface never forbids what any published approach allows. A runway end with no such
 //! approach has no corridor and the normal floor applies there: the net alerts, it does not
 //! assume. The path of the approach is the business of approach path monitoring (build order step
-//! 8), not of this net. Departure procedures (SIDs) are not used yet.
+//! 8), not of this net.
+//!
+//! Along the runway, from the landing threshold to the far end, a strip of the runway's half-width
+//! plus 0.3 NM under a flat surface at the threshold elevation continues the approach corridor (it
+//! begins 1 NM outside the threshold, so that a circle over the threshold is inside one of them).
+//! At each runway end that has a SID (a runway transition of one) or is the reverse of an
+//! approach end, a departure corridor runs 5 NM from the departure end along the runway heading,
+//! 0.3 NM either side widening to 1.0 NM, with no surface (the core gives it terrain and obstacle
+//! clearance alone, and no chart altitude). A runway with a departure corridor and no approach
+//! corridor gets the strip along it as well.
 
 use oa_arinc424::{
     altitude_feet, procedures_at, runway_designator, runways_at, AltitudeDescription, Cifp, FixRef,
     Leg, Position, ProcedureKind,
 };
-use oa_msaw::Corridor;
+use oa_msaw::{Corridor, CK_APPROACH, CK_DEPARTURE, CK_RUNWAY};
+use std::collections::BTreeSet;
 
 /// Metres per degree of latitude (mean radius), the core's.
 const M_PER_DEG: f64 = 111_194.926_644_558_74;
@@ -32,11 +42,22 @@ pub const DEFAULT_FAF_NM: f64 = 5.0;
 /// approach fix of a straight-in approach, nautical miles.
 const FAF_MIN_NM: f64 = 1.0;
 const FAF_MAX_NM: f64 = 15.0;
+/// Length of a departure corridor, nautical miles.
+pub const DEPARTURE_NM: f64 = 5.0;
+/// Half-width of the strip along a runway beyond the runway's own, nautical miles.
+pub const RUNWAY_MARGIN_NM: f64 = 0.3;
+/// How far outside the threshold the strip along the runway begins, metres.
+const RUNWAY_OVERLAP_M: f64 = NM_M;
+/// The runway width taken where the CIFP gives none, feet.
+const DEFAULT_RUNWAY_WIDTH_FT: f64 = 200.0;
+const FT_M: f64 = 0.3048;
 
 /// One corridor of the CIFP and what it came from.
 // A7.2: cold struct, size guard waived
 #[derive(Debug, Clone, PartialEq)]
 pub struct CifpCorridor {
+    /// `CK_*` of the corridor.
+    pub kind: u8,
     /// The airport and runway, for the summary.
     pub label: String,
     pub corridor: Corridor,
@@ -224,8 +245,10 @@ pub fn corridors_from_cifp(c: &Cifp, airport: &str) -> Result<CifpCorridors, Str
             _ => (DEFAULT_FAF_NM, false),
         };
         out.corridors.push(CifpCorridor {
+            kind: CK_APPROACH,
             label,
             corridor: Corridor {
+                kind: CK_APPROACH,
                 thr_lat_e7: (r.threshold.lat * 1e7).round() as i32,
                 thr_lon_e7: (r.threshold.lon * 1e7).round() as i32,
                 out_bearing_deg: (landing_course + 180.0).rem_euclid(360.0),
@@ -240,7 +263,125 @@ pub fn corridors_from_cifp(c: &Cifp, airport: &str) -> Result<CifpCorridors, Str
             approaches: found.len(),
         });
     }
+    add_runway_corridors(c, airport, &mut out);
     Ok(out)
+}
+
+/// The runway numbers a SID names by a runway transition (`RW27L` gives `27L`; `RW27B`, both
+/// parallel runways, gives `27L`, `27R` and `27C`).
+fn sid_runways(c: &Cifp, airport: &str) -> BTreeSet<String> {
+    let mut v = BTreeSet::new();
+    for p in procedures_at(c, airport, ProcedureKind::Sid) {
+        for rt in &p.routes {
+            let Some(rw) = rt.transition.strip_prefix("RW") else {
+                continue;
+            };
+            let rw = rw.trim();
+            if let Some(n) = rw.strip_suffix('B') {
+                for side in ["L", "R", "C"] {
+                    v.insert(format!("{n}{side}"));
+                }
+                v.insert(n.to_string());
+            } else {
+                v.insert(rw.to_string());
+            }
+        }
+    }
+    v
+}
+
+/// The point `dist_m` from (`lat`, `lon`) along `course` degrees, on the core's flat scale.
+fn moved(lat: f64, lon: f64, course: f64, dist_m: f64) -> (f64, f64) {
+    let (s, co) = course.to_radians().sin_cos();
+    let la = lat + dist_m * co / M_PER_DEG;
+    (la, lon + dist_m * s / (M_PER_DEG * lat.to_radians().cos()))
+}
+
+/// The strips along runways and the departure corridors of the airport (see the module text).
+fn add_runway_corridors(c: &Cifp, airport: &str, out: &mut CifpCorridors) {
+    let Some(apt) = c.airports.iter().find(|a| a.ident == airport) else {
+        return;
+    };
+    let sids = sid_runways(c, airport);
+    let with_approach: BTreeSet<String> = out
+        .corridors
+        .iter()
+        .filter(|k| k.kind == CK_APPROACH)
+        .filter_map(|k| k.label.rsplit_once(" RW").map(|(_, d)| d.to_string()))
+        .collect();
+    let any_approach: BTreeSet<String> = procedures_at(c, airport, ProcedureKind::Approach)
+        .filter_map(|p| approach_runway(&p.ident))
+        .collect();
+    for r in runways_at(c, airport) {
+        let designator = runway_designator(r);
+        let reverse_of_approach =
+            opposite_designator(designator).is_some_and(|o| any_approach.contains(&o));
+        let departs = reverse_of_approach || sids.contains(designator);
+        if !(departs || with_approach.contains(designator)) {
+            continue;
+        }
+        let course = opposite_designator(designator)
+            .and_then(|o| runways_at(c, airport).find(|x| runway_designator(x) == o))
+            .map(|o| bearing_deg(&r.threshold, &o.threshold))
+            .or_else(|| {
+                r.magnetic_bearing
+                    .map(|m| (m + apt.magnetic_variation.unwrap_or(0.0)).rem_euclid(360.0))
+            });
+        let label = format!("{airport} RW{designator}");
+        let (Some(course), Some(elev)) = (course, r.threshold_elevation_ft.or(apt.elevation_ft))
+        else {
+            out.without_corridor.push(format!(
+                "{label}: no runway strip, for want of a direction or an elevation"
+            ));
+            continue;
+        };
+        // From the landing threshold to the physical far end.
+        let run_m = (f64::from(r.length_ft) - f64::from(r.displaced_threshold_ft)).max(1.0) * FT_M;
+        let half_m = r.width_ft.map_or(DEFAULT_RUNWAY_WIDTH_FT, f64::from) * FT_M / 2.0
+            + RUNWAY_MARGIN_NM * NM_M;
+        let (lat, lon) = (r.threshold.lat, r.threshold.lon);
+        let (slat, slon) = moved(lat, lon, course + 180.0, RUNWAY_OVERLAP_M);
+        out.corridors.push(CifpCorridor {
+            kind: CK_RUNWAY,
+            label: format!("{label} strip"),
+            corridor: Corridor {
+                kind: CK_RUNWAY,
+                thr_lat_e7: (slat * 1e7).round() as i32,
+                thr_lon_e7: (slon * 1e7).round() as i32,
+                out_bearing_deg: course.rem_euclid(360.0),
+                length_m: run_m + RUNWAY_OVERLAP_M,
+                near_half_width_m: half_m,
+                far_half_width_m: half_m,
+                thr_elev_ft: elev,
+                faf_alt_ft: elev,
+            },
+            faf_nm: (run_m + RUNWAY_OVERLAP_M) / NM_M,
+            faf_from_cifp: true,
+            approaches: 0,
+        });
+        if !departs {
+            continue;
+        }
+        let (dlat, dlon) = moved(lat, lon, course, run_m);
+        out.corridors.push(CifpCorridor {
+            kind: CK_DEPARTURE,
+            label: format!("{label} departure"),
+            corridor: Corridor {
+                kind: CK_DEPARTURE,
+                thr_lat_e7: (dlat * 1e7).round() as i32,
+                thr_lon_e7: (dlon * 1e7).round() as i32,
+                out_bearing_deg: course.rem_euclid(360.0),
+                length_m: DEPARTURE_NM * NM_M,
+                near_half_width_m: NEAR_HALF_WIDTH_NM * NM_M,
+                far_half_width_m: FAR_HALF_WIDTH_NM * NM_M,
+                thr_elev_ft: elev,
+                faf_alt_ft: elev,
+            },
+            faf_nm: DEPARTURE_NM,
+            faf_from_cifp: true,
+            approaches: 0,
+        });
+    }
 }
 
 /// The airports of the CIFP that have an instrument approach (the file marks them): identifier and

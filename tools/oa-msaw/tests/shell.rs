@@ -15,7 +15,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use oa_encounter_run::run::GroundTable;
-use oa_msaw::{AIRBORNE, FLOOR_NONE, GROUND_UNKNOWN, ON_GROUND};
+use oa_msaw::{
+    AIRBORNE, CK_APPROACH, CK_DEPARTURE, CK_RUNWAY, FLOOR_NONE, GROUND_UNKNOWN, ON_GROUND,
+};
 use oa_msaw_run::args::parse;
 use oa_msaw_run::cifp::{approach_runway, corridors_from_cifp};
 use oa_msaw_run::config::{parse_config, Settings};
@@ -322,11 +324,12 @@ fn the_floor_lookups_are_conservative_and_absent_where_there_is_no_data() {
     assert_eq!(ix.highest_within(41.0, -88.0, 200.0), FLOOR_NONE);
     // Terrain from the grid: the highest sample under the circle, rounded up, and the chart.
     let mut f = ridge_floors();
-    // 13.50 N: the grid's elevation there is 3,000 ft at 13.50; with a 250 m radius (about 0.0023
-    // degrees) the highest is a little north of it.
+    // 13.50 N: the grid's elevation there is 3,000 ft at 13.50; with a 250 m radius bucket (about
+    // 0.0023 degrees), the cell's half diagonal and the widening by a cell, the highest is some
+    // 0.006 degrees north of it, 30 ft per 0.001 degree.
     let s = f.floor_at(&point(13.50, 144.80, 100.0)).unwrap();
     assert!(
-        s.terrain_ft >= 3000 && s.terrain_ft < 3200,
+        s.terrain_ft >= 3000 && s.terrain_ft < 3400,
         "{}",
         s.terrain_ft
     );
@@ -392,9 +395,26 @@ fn corridors_come_from_the_runway_end_and_the_final_approach_fix_of_its_approach
     let mut c = fixture_cifp();
     // The fixture's terminal waypoints do not hold the fix REKKS: the corridor takes 5 NM.
     let a = corridors_from_cifp(&c, "KORD").unwrap();
-    assert_eq!(a.corridors.len(), 1, "{a:?}");
+    // The approach corridor and the strip along its runway (the fixture has no SID and no
+    // reciprocal runway, so no departure corridor).
+    assert_eq!(a.corridors.len(), 2, "{a:?}");
     let k = &a.corridors[0];
     assert_eq!(k.label, "KORD RW04R");
+    assert_eq!(k.kind, CK_APPROACH);
+    let strip = &a.corridors[1];
+    assert_eq!(strip.kind, CK_RUNWAY);
+    assert_eq!(strip.label, "KORD RW04R strip");
+    let rwy = c.runways.iter().find(|r| r.ident == "RW04R").unwrap();
+    let run_m = (f64::from(rwy.length_ft) - f64::from(rwy.displaced_threshold_ft)) * 0.3048;
+    assert!((strip.corridor.length_m - run_m - 1852.0).abs() < 1e-6);
+    assert!((strip.corridor.out_bearing_deg - 42.0).abs() < 0.01);
+    let half = f64::from(rwy.width_ft.unwrap_or(200)) * 0.3048 / 2.0 + 0.3 * 1852.0;
+    assert!((strip.corridor.near_half_width_m - half).abs() < 1e-6);
+    assert_eq!(
+        strip.corridor.near_half_width_m,
+        strip.corridor.far_half_width_m
+    );
+    assert_eq!(strip.corridor.thr_elev_ft, 661);
     assert_eq!(k.approaches, 1);
     assert!(!k.faf_from_cifp);
     assert_eq!(k.faf_nm, 5.0);
@@ -437,6 +457,48 @@ fn corridors_come_from_the_runway_end_and_the_final_approach_fix_of_its_approach
     // An airport the file does not hold is an error, never an empty list.
     let e = corridors_from_cifp(&c, "KXYZ").unwrap_err();
     assert!(e.contains("KXYZ"), "{e}");
+}
+
+// REQ: OA-MSAW-055
+#[test]
+fn a_runway_end_with_a_sid_gets_a_departure_corridor_from_its_far_end() {
+    let mut c = fixture_cifp();
+    let before = corridors_from_cifp(&c, "KORD").unwrap();
+    assert!(before.corridors.iter().all(|k| k.kind != CK_DEPARTURE));
+    // A SID with a runway transition for 04R.
+    let mut sid = c
+        .procedures
+        .iter()
+        .find(|p| p.kind == oa_arinc424::ProcedureKind::Approach)
+        .unwrap()
+        .clone();
+    sid.kind = oa_arinc424::ProcedureKind::Sid;
+    sid.ident = "TEST1".to_string();
+    sid.routes.truncate(1);
+    sid.routes[0].transition = "RW04R".to_string();
+    c.procedures.push(sid);
+    let a = corridors_from_cifp(&c, "KORD").unwrap();
+    let d = a
+        .corridors
+        .iter()
+        .find(|k| k.kind == CK_DEPARTURE)
+        .expect("a departure corridor");
+    assert_eq!(d.label, "KORD RW04R departure");
+    let rwy = c.runways.iter().find(|r| r.ident == "RW04R").unwrap();
+    assert!((d.corridor.length_m - 5.0 * 1852.0).abs() < 1e-6);
+    assert!((d.corridor.near_half_width_m - 0.3 * 1852.0).abs() < 1e-6);
+    assert!((d.corridor.far_half_width_m - 1852.0).abs() < 1e-6);
+    assert!((d.corridor.out_bearing_deg - 42.0).abs() < 0.01);
+    // It starts at the far end: the threshold moved along the heading by the runway less the
+    // displacement.
+    let run_m = (f64::from(rwy.length_ft) - f64::from(rwy.displaced_threshold_ft)) * 0.3048;
+    let dy = f64::from(d.corridor.thr_lat_e7 - (rwy.threshold.lat * 1e7).round() as i32)
+        * 1e-7
+        * 111_194.926_644_558_74;
+    assert!(
+        (dy - run_m * 42.0f64.to_radians().cos()).abs() < 1.0,
+        "{dy} {run_m}"
+    );
 }
 
 fn meas(t_s: i64, addr: u32, lat: f64, lon: f64, vn: f32, alt: i32, vr: i32) -> Measurement {

@@ -247,6 +247,8 @@ dependencies = [
  "oa-encounter",
  "oa-encounter-run",
  "oa-feed",
+ "oa-flight",
+ "oa-flight-sfdps",
  "oa-math",
  "oa-msaw",
  "oa-mva",

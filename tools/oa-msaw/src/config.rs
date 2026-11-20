@@ -3,22 +3,26 @@
 //! or repeated key, a value that does not parse or is not finite, and a missing key are errors
 //! that name it. Units are the ones in the key: seconds, nautical miles, feet, metres, degrees.
 //!
-//! Three keys may repeat:
+//! Four keys may repeat:
 //!
 //! ```text
 //! corridor = <thr_lat> <thr_lon> <out_bearing_deg> <length_m> <near_half_m> <far_half_m> <thr_elev_ft> <faf_alt_ft>
 //! cifp_airport = <ICAO identifier>
+//! msaw_request = <addr:HEX24 | call:CALLSIGN> <start_s> <end_s>
 //! inhibit = <start_s> <end_s> <alt_lo_ft> <alt_hi_ft> <author> <reason> <lat>,<lon> <lat>,<lon> <lat>,<lon> ...
 //! ```
 //!
 //! A corridor line is a final-approach corridor of the core. A `cifp_airport` line asks for the
 //! corridors the CIFP gives at that airport (needs `--cifp`). An inhibit
 //! line is an inhibition of the net made when the run starts: its times are seconds after the
-//! first measurement of the clip, the author and the reason are one word each (`_` is a space).
+//! first measurement of the clip, the author and the reason are one word each (`_` is a space). A
+//! `msaw_request` line is a pilot's request for MSAW service: a track with that address or callsign
+//! in the span (seconds after the first measurement of the clip) is alerted whatever its flight
+//! plan says.
 
 use std::collections::BTreeMap;
 
-use oa_msaw::{Corridor, MsawConfig, MAX_CORRIDORS};
+use oa_msaw::{Corridor, MsawConfig, CK_APPROACH, MAX_CORRIDORS};
 use oa_safety::geom::polygon_new;
 use oa_safety::inhibit::InhibitConfig;
 use oa_safety::net::NET_COUNT;
@@ -44,6 +48,25 @@ pub struct InhibitSpec {
     pub vertices: Vec<(i32, i32)>,
 }
 
+/// Who a request for MSAW service names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Requester {
+    /// The 24-bit ICAO address.
+    Address(u32),
+    /// The callsign, upper case, at most eight characters.
+    Callsign(String),
+}
+
+/// One `msaw_request` line: the track is alerted in the span, seconds after the first
+/// measurement of the clip.
+// A7.2: cold struct, size guard waived
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestSpec {
+    pub who: Requester,
+    pub start_s: f64,
+    pub end_s: f64,
+}
+
 /// What the tool needs beyond the core's configuration.
 // A7.2: cold struct, size guard waived
 #[derive(Debug, Clone, PartialEq)]
@@ -58,6 +81,7 @@ pub struct Settings {
     pub inhibit_cfg: InhibitConfig,
     pub inhibits: Vec<InhibitSpec>,
     pub cifp_airports: Vec<String>,
+    pub requests: Vec<RequestSpec>,
     /// A track below FL180 with no usable altimeter setting is given its pressure altitude lowered
     /// by this, feet (the conservative direction), and counted.
     pub no_qnh_allowance_ft: i32,
@@ -67,7 +91,7 @@ pub struct Settings {
     pub metar_max_age_s: i64,
 }
 
-const KEYS: [&str; 27] = [
+const KEYS: [&str; 29] = [
     "look_ahead_s",
     "warning_s",
     "samples",
@@ -76,6 +100,7 @@ const KEYS: [&str; 27] = [
     "obstacle_clearance_ft",
     "approach_allowance_ft",
     "approach_min_clearance_ft",
+    "departure_min_clearance_ft",
     "velocity_uncertainty_mps",
     "no_qnh_allowance_ft",
     "metar_radius_nm",
@@ -94,6 +119,7 @@ const KEYS: [&str; 27] = [
     "inhibit_max_extent_deg",
     "corridor",
     "cifp_airport",
+    "msaw_request",
     "inhibit",
 ];
 
@@ -176,6 +202,7 @@ fn corridor(v: &str) -> Result<Corridor, String> {
         ));
     };
     Ok(Corridor {
+        kind: CK_APPROACH,
         thr_lat_e7: e7("corridor lat", la, 90.0)?,
         thr_lon_e7: e7("corridor lon", lo, 180.0)?,
         out_bearing_deg: finite("corridor out_bearing_deg", bearing)?,
@@ -219,6 +246,43 @@ fn inhibit(v: &str) -> Result<InhibitSpec, String> {
     })
 }
 
+fn request(v: &str) -> Result<RequestSpec, String> {
+    let f: Vec<&str> = v.split_whitespace().collect();
+    let [who, s, e] = f.as_slice() else {
+        return Err(format!(
+            "msaw_request: `{v}` needs addr:HEX or call:CALLSIGN, start_s and end_s"
+        ));
+    };
+    let who = if let Some(h) = who.strip_prefix("addr:") {
+        match u32::from_str_radix(h, 16) {
+            Ok(a) if h.len() == 6 => Requester::Address(a),
+            _ => return Err(format!("msaw_request: `{h}` is not a 24-bit hex address")),
+        }
+    } else if let Some(c) = who.strip_prefix("call:") {
+        let c = c.to_ascii_uppercase();
+        if c.is_empty() || c.len() > 8 || !c.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(format!("msaw_request: `{c}` is not a callsign"));
+        }
+        Requester::Callsign(c)
+    } else {
+        return Err(format!("msaw_request: `{who}` must start addr: or call:"));
+    };
+    let (start_s, end_s) = (
+        finite("msaw_request start_s", s)?,
+        finite("msaw_request end_s", e)?,
+    );
+    if start_s < 0.0 || end_s <= start_s {
+        return Err(
+            "msaw_request: the end must be after the start, which is not negative".to_string(),
+        );
+    }
+    Ok(RequestSpec {
+        who,
+        start_s,
+        end_s,
+    })
+}
+
 /// Parses the configuration text, and checks it with the core's own check.
 pub fn parse_config(text: &str) -> Result<Settings, String> {
     if text.len() > MAX_TEXT_BYTES {
@@ -227,8 +291,12 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         ));
     }
     let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
-    let (mut procs, mut airports, mut inhibits): (Vec<&str>, Vec<&str>, Vec<&str>) =
-        (Vec::new(), Vec::new(), Vec::new());
+    let (mut procs, mut airports, mut inhibits, mut requests): (
+        Vec<&str>,
+        Vec<&str>,
+        Vec<&str>,
+        Vec<&str>,
+    ) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (n, raw) in text.lines().enumerate() {
         let line = raw.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -245,6 +313,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             "corridor" => procs.push(v),
             "cifp_airport" => airports.push(v),
             "inhibit" => inhibits.push(v),
+            "msaw_request" => requests.push(v),
             _ => {
                 if kv.insert(k, v).is_some() {
                     return Err(format!("line {}: `{k}` given twice", n + 1));
@@ -260,12 +329,13 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
     if procs.len() > MAX_CORRIDORS {
         return Err(format!("more than {MAX_CORRIDORS} corridors"));
     }
-    if airports.len() > MAX_LINES || inhibits.len() > MAX_LINES {
+    if airports.len() > MAX_LINES || inhibits.len() > MAX_LINES || requests.len() > MAX_LINES {
         return Err(format!(
-            "more than {MAX_LINES} cifp_airport or inhibit lines"
+            "more than {MAX_LINES} cifp_airport, msaw_request or inhibit lines"
         ));
     }
     let mut list = [Corridor {
+        kind: CK_APPROACH,
         thr_lat_e7: 0,
         thr_lon_e7: 0,
         out_bearing_deg: 0.0,
@@ -294,6 +364,10 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         approach_min_clearance_ft: feet(
             "approach_min_clearance_ft",
             get("approach_min_clearance_ft")?,
+        )?,
+        departure_min_clearance_ft: feet(
+            "departure_min_clearance_ft",
+            get("departure_min_clearance_ft")?,
         )?,
         velocity_uncertainty_mps: finite(
             "velocity_uncertainty_mps",
@@ -332,6 +406,10 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
     for v in &inhibits {
         specs.push(inhibit(v)?);
     }
+    let mut reqs = Vec::new();
+    for v in &requests {
+        reqs.push(request(v)?);
+    }
     Ok(Settings {
         msaw,
         net_stale_limit_ns: seconds_ns("net_stale_limit_s", get("net_stale_limit_s")?)?,
@@ -341,6 +419,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         inhibit_cfg,
         inhibits: specs,
         cifp_airports: airports.iter().map(|s| (*s).to_string()).collect(),
+        requests: reqs,
         no_qnh_allowance_ft,
         metar_radius_nm,
         metar_max_age_s,
