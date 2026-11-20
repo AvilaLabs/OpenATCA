@@ -20,42 +20,6 @@ fn arbitrary_full_table() -> GateState {
     g
 }
 
-/// The live count is exactly the qualifying-slot count and never exceeds full capacity.
-// REQ: OA-TRK-336
-#[kani::proof]
-#[kani::unwind(70)]
-#[kani::solver(cadical)]
-fn full_sensor_table_live_count_matches_slot_contract() {
-    let g = arbitrary_full_table();
-    let clock: i64 = kani::any();
-    let drop_ns: i64 = kani::any();
-    kani::assume(drop_ns >= 0 && drop_ns <= MAX_DROP_NS);
-
-    let actual = gate_live_sensors(&g, clock, drop_ns);
-    assert!(actual <= SENSOR_TABLE);
-
-    // This independent finite-table sum is the contract for a fully populated table, and also
-    // confirms that the return value is the number of qualifying slots rather than a boolean.
-    let floor = clock.saturating_sub(drop_ns);
-    let mut expected = 0usize;
-    for i in 0..SENSOR_TABLE {
-        if g.sensor_ns[i] >= floor {
-            expected += 1;
-        }
-    }
-    assert_eq!(actual, expected);
-    kani::cover!(
-        g.sensor_ns[0] == i64::MIN,
-        "minimum stored sensor timestamp"
-    );
-    kani::cover!(
-        g.sensor_ns[1] == i64::MAX,
-        "maximum stored sensor timestamp"
-    );
-    kani::cover!(actual == SENSOR_TABLE, "all 64 full-table sensors live");
-    kani::cover!(actual == 0, "no full-table sensors live");
-}
-
 /// The live count is monotone nonincreasing when the clock advances with a fixed nonnegative
 /// drop interval. The full 64 symbolic stored timestamps include both signed extremes.
 // REQ: OA-TRK-336

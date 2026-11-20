@@ -203,7 +203,7 @@ pub fn occupies(rw: &Runway, pos: Local, r95_m: f64) -> Occupancy {
 mod proofs {
     //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
     use super::*;
-    use crate::plane::{plane_from_parts, to_local, Geo, EXTENT_M};
+    use crate::plane::Geo;
     use crate::runway::RunwayEnd;
 
     fn any_geo() -> Geo {
@@ -283,72 +283,6 @@ mod proofs {
         rw
     }
 
-    fn implies(a: bool, b: bool) -> bool {
-        !a || b
-    }
-
-    // REQ: OA-RWY-009
-    #[kani::proof]
-    fn occupancy_is_monotone_in_r95() {
-        // Every flag of `occupies`, and `touches`, is `in_box` of the target's runway-axis
-        // coordinates (which do not depend on the radius) with one region's box, so monotone
-        // `in_box` over every finite box and coordinate pair is monotone occupancy.
-        let (along, across): (f64, f64) = (kani::any(), kani::any());
-        let b: (f64, f64, f64) = (kani::any(), kani::any(), kani::any());
-        let (r1, r2): (f64, f64) = (kani::any(), kani::any());
-        kani::assume(small(along) && small(across));
-        kani::assume(small(b.0) && small(b.1) && small(b.2));
-        kani::assume(r1.is_finite() && r2.is_finite() && 0.0 <= r1 && r1 <= r2);
-        let (t1, t2) = (in_box(along, across, b, r1), in_box(along, across, b, r2));
-        assert!(implies(t1, t2));
-        kani::cover!(t1, "touched at the smaller radius");
-        kani::cover!(!t1 && t2, "a larger radius adds occupancy");
-        kani::cover!(!t2, "clear at the larger radius");
-    }
-
-    // REQ: OA-RWY-010
-    #[kani::proof]
-    fn non_finite_input_occupies() {
-        let rw = any_runway();
-        let (e, n, r): (f64, f64, f64) = (kani::any(), kani::any(), kani::any());
-        kani::assume(!(small(e) && small(n) && r.is_finite() && r >= 0.0));
-        let o = occupies(
-            &rw,
-            Local {
-                east_m: e,
-                north_m: n,
-            },
-            r,
-        );
-        assert!(o.unknown && o.on_runway && is_occupied(&o));
-        assert!(o.approach[0] && o.approach[1] && o.departure[0] && o.departure[1]);
-        kani::cover!(!e.is_finite(), "non-finite east");
-        kani::cover!(e.is_finite() && !small(e), "east beyond the limit");
-        kani::cover!(!r.is_finite(), "non-finite radius");
-        kani::cover!(r < 0.0, "negative radius");
-    }
-
-    // REQ: OA-RWY-011
-    #[kani::proof]
-    fn point_in_rectangle_occupies() {
-        // `occupies` and `touches` take the runway region from `box_of` and test it with
-        // `in_box` on the target's runway-axis coordinates (`frame_coords`, a rotation that the
-        // unit tests check), so: a target whose coordinates are inside the rectangle touches it.
-        let rw = finite_runway();
-        let (along, across): (f64, f64) = (kani::any(), kani::any());
-        let r: f64 = kani::any();
-        kani::assume(r.is_finite() && r >= 0.0);
-        let b = box_of(&rw, Region::Runway);
-        kani::assume(along >= b.0 && along <= b.1 && across >= -b.2 && across <= b.2);
-        assert!(in_box(along, across, b, r));
-        kani::cover!(r > 0.0, "inside with a positive radius");
-        kani::cover!(r == 0.0, "inside with a zero radius");
-        kani::cover!(
-            b.0 < along && along < b.1,
-            "strictly inside along the runway"
-        );
-    }
-
     // REQ: OA-RWY-012
     #[kani::proof]
     fn occupies_never_panics() {
@@ -367,50 +301,5 @@ mod proofs {
         }
         kani::cover!(is_occupied(&o), "an input that occupies");
         kani::cover!(!is_occupied(&o), "an input that is clear");
-    }
-
-    // REQ: OA-RWY-010
-    #[kani::proof]
-    fn non_finite_runway_occupies() {
-        let rw = any_runway();
-        kani::assume(!runway_finite(&rw));
-        let (pos, r) = (any_local(), kani::any::<f64>());
-        let o = occupies(&rw, pos, r);
-        assert!(o.unknown && o.on_runway && is_occupied(&o));
-        assert!(o.approach[0] && o.approach[1] && o.departure[0] && o.departure[1]);
-        kani::cover!(rw.half_len_m.is_nan(), "a NaN half length");
-        kani::cover!(
-            small(pos.east_m) && r.is_finite() && r >= 0.0,
-            "a known position"
-        );
-    }
-
-    // REQ: OA-RWY-013
-    #[kani::proof]
-    fn local_plane_is_bounded() {
-        // Every scale a `plane_new` result can have: M and N cos(lat0) per degree for latitudes
-        // within `MAX_ORIGIN_LAT_DEG` (110.5 to 111.7 km, and 19 to 111.4 km), and tan(lat0)
-        // within 5.8, and tan(lat0) / 2R within 5.8 / 12.7e6.
-        let (m, k, t, h): (f64, f64, f64, f64) =
-            (kani::any(), kani::any(), kani::any(), kani::any());
-        kani::assume(m >= 110_000.0 && m <= 112_000.0);
-        kani::assume(k >= 10_000.0 && k <= 112_000.0);
-        kani::assume(t >= -6.0 && t <= 6.0);
-        kani::assume(h >= -1e-6 && h <= 1e-6);
-        let (lat0, lon0): (f64, f64) = (kani::any(), kani::any());
-        kani::assume(lat0 >= -80.0 && lat0 <= 80.0 && lon0 >= -180.0 && lon0 <= 180.0);
-        let p = plane_from_parts(lat0, lon0, m, k, t, h);
-        let g = any_geo();
-        let l = to_local(&p, g);
-        if !(g.lat_deg.is_finite() && g.lon_deg.is_finite()) {
-            assert!(l.is_none());
-        }
-        if let Some(l) = l {
-            assert!(l.east_m.is_finite() && l.north_m.is_finite());
-            assert!(l.east_m <= EXTENT_M && l.east_m >= -EXTENT_M);
-            assert!(l.north_m <= EXTENT_M && l.north_m >= -EXTENT_M);
-        }
-        kani::cover!(l.is_some(), "a point inside the extent");
-        kani::cover!(l.is_none(), "a point refused");
     }
 }

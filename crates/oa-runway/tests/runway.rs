@@ -536,6 +536,134 @@ fn plane_error_against_geodesic_is_within_the_stated_bound() {
     assert!(to_local(&plane, g(q.lat(), q.lon())).is_some());
 }
 
+// REQ: OA-RWY-009
+#[test]
+fn every_region_flag_at_a_smaller_radius_stays_set_at_a_larger_one() {
+    let rw = mdw_runway();
+    let radii = [0.0, 0.5, 3.0, 40.0, 400.0, 2_000.0];
+    for i in 0..5 {
+        let (lo, hi, w) = region_box(&rw, i);
+        // Points inside, on and outside every edge of the region, and far away.
+        for along in [
+            lo - 900.0,
+            lo - 1.0,
+            lo,
+            (lo + hi) / 2.0,
+            hi,
+            hi + 1.0,
+            hi + 900.0,
+        ] {
+            for across in [-w - 900.0, -w - 1.0, -w, 0.0, w, w + 1.0, w + 900.0] {
+                let p = at(&rw, along, across);
+                for pair in radii.windows(2) {
+                    let (small, large) = (occupies(&rw, p, pair[0]), occupies(&rw, p, pair[1]));
+                    assert!(!flag(&small, i) || flag(&large, i), "{i} {along} {across}");
+                }
+            }
+        }
+    }
+}
+
+// REQ: OA-RWY-010
+#[test]
+fn a_position_radius_or_runway_that_is_not_known_occupies_every_region_whatever_the_rest() {
+    let rw = mdw_runway();
+    let beyond = 1.0e9 * 1.000_001;
+    let bad_positions = [
+        (f64::NAN, 0.0),
+        (0.0, f64::NEG_INFINITY),
+        (beyond, 0.0),
+        (0.0, -beyond),
+        (f64::MAX, f64::MIN),
+    ];
+    for r in [0.0, 5.0, 1.0e6] {
+        for (e, n) in bad_positions {
+            let o = occupies(
+                &rw,
+                Local {
+                    east_m: e,
+                    north_m: n,
+                },
+                r,
+            );
+            assert!(
+                o.unknown && o.on_runway && o.approach == [true; 2] && o.departure == [true; 2]
+            );
+        }
+    }
+    let inside = at(&rw, 0.0, 0.0);
+    for r in [f64::NAN, f64::INFINITY, -f64::MIN_POSITIVE, -3.0] {
+        let o = occupies(&rw, inside, r);
+        assert!(o.unknown && o.on_runway && o.approach == [true; 2] && o.departure == [true; 2]);
+    }
+    // A runway with a non-finite number, at every kind of position and radius.
+    let mut broken = rw;
+    broken.half_len_m = f64::NAN;
+    for p in [
+        inside,
+        at(&rw, 9_000.0, 0.0),
+        Local {
+            east_m: f64::NAN,
+            north_m: 0.0,
+        },
+    ] {
+        for r in [0.0, 10.0, f64::NAN] {
+            let o = occupies(&broken, p, r);
+            assert!(
+                o.unknown && o.on_runway && o.approach == [true; 2] && o.departure == [true; 2]
+            );
+        }
+    }
+}
+
+// REQ: OA-RWY-011
+#[test]
+fn a_target_inside_the_runway_rectangle_touches_it_at_every_radius() {
+    let rw = mdw_runway();
+    let (lo, hi, w) = region_box(&rw, 0);
+    for along in [lo, lo + 0.001, 0.0, hi - 0.001, hi] {
+        for across in [-w, -w + 0.001, 0.0, w - 0.001, w] {
+            for r in [0.0, 1.0, 50.0, 5_000.0] {
+                let o = occupies(&rw, at(&rw, along, across), r);
+                assert!(o.on_runway && !o.unknown, "{along} {across} {r}");
+            }
+        }
+    }
+}
+
+// REQ: OA-RWY-013
+#[test]
+fn a_point_in_the_local_plane_is_finite_and_inside_the_extent_or_refused() {
+    for (lat0, lon0) in [
+        (0.0, 0.0),
+        (40.0, -100.0),
+        (52.0, 179.95),
+        (-34.0, 151.0),
+        (80.0, 10.0),
+    ] {
+        let plane = plane_new(lat0, lon0).unwrap();
+        let (mut some, mut none) = (0u32, 0u32);
+        for i in -40..=40 {
+            for j in -40..=40 {
+                let p = g(lat0 + f64::from(i) * 0.01, lon0 + f64::from(j) * 0.01);
+                match to_local(&plane, p) {
+                    Some(l) => {
+                        some += 1;
+                        assert!(l.east_m.is_finite() && l.north_m.is_finite());
+                        assert!(l.east_m.abs() <= EXTENT_M && l.north_m.abs() <= EXTENT_M);
+                    }
+                    None => none += 1,
+                }
+            }
+        }
+        assert!(some > 100 && none > 100, "{lat0} {some} {none}");
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(to_local(&plane, g(bad, lon0)).is_none());
+            assert!(to_local(&plane, g(lat0, bad)).is_none());
+        }
+    }
+}
+
 // REQ: OA-RWY-001
 #[test]
 fn plane_distance_between_two_points_against_geodesic_is_within_twice_the_bound() {

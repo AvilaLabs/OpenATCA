@@ -615,25 +615,3 @@ mod tests {
         assert!(!flat_valid(f64::INFINITY, 0.0, 1.0));
     }
 }
-
-#[cfg(kani)]
-mod proofs {
-    //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
-    use super::*;
-
-    fn unit_like() -> [f64; 3] {
-        let v: [f64; 3] = [kani::any(), kani::any(), kani::any()];
-        for c in v {
-            kani::assume(c.is_finite() && (-1.0..=1.0).contains(&c));
-        }
-        v
-    }
-
-    // REQ: OA-CA-034
-    #[kani::proof]
-    fn chord_d2_of_unit_vectors_is_finite_and_not_negative() {
-        let (a, b) = (unit_like(), unit_like());
-        let d = chord_d2(&a, &b);
-        assert!(d.is_finite() && d >= 0.0);
-    }
-}

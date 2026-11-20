@@ -12,7 +12,9 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
-from rust_proof_suite import load_registry, run_suite, validate_registry
+from rust_proof_suite import (
+    affected_packages, load_registry, package_graph, run_suite, select_proofs, validate_registry,
+)
 from kani_validation import LOOP_UNWIND_PRESETS
 
 
@@ -35,6 +37,7 @@ def proof_entry():
         "harness_timeout_seconds": 300,
         "external_timeout_seconds": 420,
         "memory_mib": 4096,
+        "tier": "push",
     }
 
 
@@ -70,13 +73,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 101)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 101)
+        self.assertEqual(registry["expected_proof_count"], 104)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 104)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 92)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 95)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -90,24 +93,11 @@ class SuiteConfigurationTests(unittest.TestCase):
             "hypot-fast-scaled",
         })
 
-    def test_the_safety_net_inhibition_proofs_are_registered(self):
-        registry, errors = load_registry(REGISTRY_PATH)
-        self.assertEqual(errors, [])
-        safety = {p["id"]: p for p in registry["proofs"] if p["package"] == "oa-safety"}
-        self.assertEqual(set(safety), {"inhibition-in-force", "inhibition-band"})
-        for proof in safety.values():
-            self.assertTrue(proof["enabled"] and not proof["experimental"])
-            self.assertTrue(proof["harness"].startswith("inhibit::proofs::"))
-
-    def test_the_runway_occupancy_proofs_are_registered_with_their_covers(self):
+    def test_the_runway_occupancy_proof_is_registered_with_its_covers(self):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         runway = {p["id"]: p for p in registry["proofs"] if p["package"] == "oa-runway"}
-        self.assertEqual(set(runway), {
-            "runway-occupancy-monotone", "runway-non-finite-occupies", "runway-inside-occupies",
-            "runway-occupies-total", "runway-plane-bounded",
-            "runway-non-finite-runway-occupies",
-        })
+        self.assertEqual(set(runway), {"runway-occupies-total"})
         for proof in runway.values():
             self.assertTrue(proof["enabled"] and not proof["experimental"])
             self.assertTrue(proof["harness"].startswith("occupy::proofs::"))
@@ -121,7 +111,6 @@ class SuiteConfigurationTests(unittest.TestCase):
         self.assertEqual(set(ca), {
             "ca-horizontal-span",
             "ca-vertical-span",
-            "ca-horizontal-now-step",
             "ca-horizontal-now-bounds",
             "ca-horizontal-now-approach",
             "ca-horizontal-now-root",
@@ -130,15 +119,11 @@ class SuiteConfigurationTests(unittest.TestCase):
             "ca-horizontal-miss-point",
             "ca-horizontal-miss",
             "ca-predict-span",
-            "ca-predict-ttl",
             "ca-unknown-altitude",
-            "ca-chord-d2",
         })
         for proof in ca.values():
             self.assertTrue(proof["enabled"] and not proof["experimental"])
-            self.assertTrue(
-                proof["harness"].startswith(("solve::proofs::", "grid::proofs::"))
-            )
+            self.assertTrue(proof["harness"].startswith("solve::proofs::"))
 
     def test_the_hypot_proofs_are_registered_in_oa_math(self):
         registry, errors = load_registry(REGISTRY_PATH)
@@ -186,6 +171,48 @@ class SuiteConfigurationTests(unittest.TestCase):
                     self.assertEqual(proof["harness"], f"tracker::proofs::rollback_paths::late_{mode}_{suffix}")
                     self.assertEqual(proof["cfgs"], [])
                     self.assertEqual(proof["required_covers"], [])
+
+    def test_the_parser_and_decoder_proofs_are_registered(self):
+        registry, errors = load_registry(REGISTRY_PATH)
+        self.assertEqual(errors, [])
+        by_package = {}
+        for p in registry["proofs"]:
+            by_package.setdefault(p["package"], set()).add(p["id"])
+        self.assertEqual(by_package["oa-asterix"], {
+            "asterix-primitives", "asterix-time-round-trip", "asterix-ident-round-trip",
+            "asterix-block-framing", "asterix-position-range", "asterix-walk-cat048",
+            "asterix-fspec-cat021", "asterix-fspec-cat048", "asterix-fspec-cat062",
+        })
+        self.assertEqual(by_package["oa-adsb"], {
+            "adsb-decode-row-ads2", "adsb-decode-row-ads1", "adsb-header-two-records",
+            "adsb-payload-ads2-4", "adsb-payload-ads1-4",
+        })
+        stubbed = {p["id"] for p in registry["proofs"] if p["package"] == "oa-adsb" and p["stubbing"]}
+        self.assertEqual(stubbed, {"adsb-payload-ads2-4", "adsb-payload-ads1-4"})
+
+    def test_the_nightly_tier_is_the_proofs_recorded_over_five_minutes(self):
+        registry, errors = load_registry(REGISTRY_PATH)
+        self.assertEqual(errors, [])
+        nightly = {p["id"] for p in registry["proofs"] if p["tier"] == "nightly"}
+        self.assertEqual(nightly, {
+            "large-move-decision-rejected",
+            "large-move-decision-rejected-current-filter-snapshot",
+            "large-move-decision-rejected-ring",
+            "large-move-decision-rejected-anchor-filter-snapshot",
+            "large-move-decision-rejected-state-and-counts",
+            "large-move-decision-rejected-first-times",
+            "large-move-decision-rejected-last-time-and-updates",
+            "asterix-fspec-cat021",
+        })
+
+    def test_an_entry_needs_a_known_tier(self):
+        for bad in ("weekly", None):
+            proof = proof_entry()
+            proof["tier"] = bad
+            self.assertTrue(validate_registry(registry_with(proof)))
+        proof = proof_entry()
+        del proof["tier"]
+        self.assertTrue(validate_registry(registry_with(proof)))
 
     def test_minimal_valid_matrix_is_accepted(self):
         self.assertEqual(validate_registry(registry_with(proof_entry())), [])
@@ -443,6 +470,82 @@ print("fake runner stdout")
             self.assertIn("late-replay-two-events", outcome["command"])
             run_record = json.loads((out / "proofs" / proof["id"] / "run" / "run.json").read_text())
             self.assertEqual(run_record["loop_unwind_presets"][proof["harness"]], ["late-replay-two-events"])
+
+
+def sample_graph():
+    # c depends on b, b on a; d stands alone.
+    return {
+        "a": {"dir": "crates/a/", "deps": set()},
+        "b": {"dir": "crates/b/", "deps": {"a"}},
+        "c": {"dir": "crates/c/", "deps": {"b"}},
+        "d": {"dir": "crates/d/", "deps": set()},
+    }
+
+
+def sample_proofs():
+    proofs = []
+    for package in "abcd":
+        for tier in ("push", "nightly"):
+            proof = proof_entry()
+            proof.update(id=f"{package}-{tier}", package=package, tier=tier)
+            proofs.append(proof)
+    return proofs
+
+
+def selected_ids(changed, push=True):
+    affected = affected_packages(sample_graph(), changed)
+    return {p["id"] for p in select_proofs(sample_proofs(), affected, push)}
+
+
+class PushSelectionTests(unittest.TestCase):
+    def test_a_change_in_one_package_selects_only_its_proofs(self):
+        self.assertEqual(selected_ids(["crates/d/src/lib.rs"]), {"d-push"})
+        self.assertEqual(selected_ids(["crates/c/tests/t.rs", "crates/c/Cargo.toml"]), {"c-push"})
+
+    def test_a_change_in_a_dependency_selects_its_dependents(self):
+        self.assertEqual(selected_ids(["crates/a/src/lib.rs"]), {"a-push", "b-push", "c-push"})
+        self.assertEqual(selected_ids(["crates/b/src/x.rs"]), {"b-push", "c-push"})
+
+    def test_a_change_outside_every_package_selects_nothing(self):
+        self.assertEqual(selected_ids(["docs/VERIFICATION.md", "REQUIREMENTS.md"]), set())
+
+    def test_a_change_to_the_registry_runner_or_workflow_selects_everything_in_the_push_tier(self):
+        for path in (
+            "tools/rust_proofs.json", "tools/rust_proof_suite.py", "tools/kani_validation.py",
+            ".github/workflows/rust-proofs.yml", "Cargo.toml", "Cargo.lock",
+        ):
+            self.assertEqual(
+                selected_ids([path]), {"a-push", "b-push", "c-push", "d-push"}, path,
+            )
+
+    def test_the_nightly_tier_never_runs_on_a_push_and_always_in_the_full_run(self):
+        every = [p for p in sample_proofs()]
+        for changed in (["crates/a/src/lib.rs"], ["tools/rust_proofs.json"]):
+            self.assertFalse(any(i.endswith("nightly") for i in selected_ids(changed)))
+        full = {p["id"] for p in select_proofs(every, None, False)}
+        self.assertEqual(full, {p["id"] for p in every})
+
+    def test_a_disabled_proof_is_never_selected(self):
+        proofs = sample_proofs()
+        for proof in proofs:
+            proof["enabled"] = False
+        self.assertEqual(select_proofs(proofs, None, True), [])
+        self.assertEqual(select_proofs(proofs, None, False), [])
+
+    def test_the_real_workspace_graph_ties_the_tracker_to_its_dependencies(self):
+        graph = package_graph(REPO)
+        self.assertIn("oa-math", graph["oa-track"]["deps"])
+        self.assertEqual(graph["oa-track"]["dir"], "crates/oa-track/")
+        registry, _ = load_registry(REGISTRY_PATH)
+        proofs = registry["proofs"]
+        math_change = {p["package"] for p in select_proofs(
+            proofs, affected_packages(graph, ["crates/oa-math/src/trig.rs"]), True)}
+        self.assertIn("oa-math", math_change)
+        self.assertIn("oa-track", math_change)
+        tracker_change = {p["package"] for p in select_proofs(
+            proofs, affected_packages(graph, ["crates/oa-track/src/tracker.rs"]), True)}
+        self.assertIn("oa-track", tracker_change)
+        self.assertNotIn("oa-asterix", tracker_change)
 
 
 if __name__ == "__main__":

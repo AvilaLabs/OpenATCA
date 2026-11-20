@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import time
+import tomllib
 from typing import Any
 
 from kani_validation import LOOP_UNWIND_PRESETS
@@ -20,10 +21,91 @@ from kani_validation import LOOP_UNWIND_PRESETS
 
 REGISTRY_VERSION = 1
 MAX_PROOFS = 128
-ALLOWED_PACKAGES = {"oa-track", "oa-replay", "oa-safety", "oa-ca", "oa-math", "oa-runway"}
+ALLOWED_PACKAGES = {
+    "oa-track", "oa-replay", "oa-safety", "oa-ca", "oa-math", "oa-runway", "oa-asterix", "oa-adsb",
+    "oa-feed", "oa-truth",
+}
 ALLOWED_CFGS = {"kani_full_capacity", "kani_late_replay_covers"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HARNESS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$")
+
+
+# Paths whose change reruns every push-tier proof: the registry, the runner, the workflow and
+# the workspace build inputs.
+RUN_ALL_PATHS = frozenset({
+    "tools/rust_proofs.json", "tools/rust_proof_suite.py", "tools/kani_validation.py",
+    ".github/workflows/rust-proofs.yml", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml",
+})
+TIERS = ("push", "nightly")
+_PACKAGE_ROOTS = ("crates", "tools")
+
+
+def package_graph(repo: Path) -> dict[str, dict[str, Any]]:
+    """Every workspace package under crates/ and tools/: its directory and path dependencies."""
+    graph: dict[str, dict[str, Any]] = {}
+    for root in _PACKAGE_ROOTS:
+        for manifest in sorted((repo / root).glob("*/Cargo.toml")):
+            try:
+                data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                continue
+            name = data.get("package", {}).get("name")
+            if not isinstance(name, str):
+                continue
+            deps: set[str] = set()
+            for table in ("dependencies", "build-dependencies"):
+                for dep, spec in data.get(table, {}).items():
+                    if isinstance(spec, dict) and "path" in spec:
+                        deps.add(spec.get("package", dep))
+            graph[name] = {"dir": f"{root}/{manifest.parent.name}/", "deps": deps}
+    return graph
+
+
+def affected_packages(graph: dict[str, dict[str, Any]], changed: list[str]) -> set[str] | None:
+    """Packages whose proofs a change can affect: those with a changed file and every package
+    that depends on one of them, directly or not. `None` means everything."""
+    if any(path in RUN_ALL_PATHS for path in changed):
+        return None
+    touched = {
+        name for name, info in graph.items()
+        if any(path.startswith(info["dir"]) for path in changed)
+    }
+    affected = set(touched)
+    grew = True
+    while grew:
+        grew = False
+        for name, info in graph.items():
+            if name not in affected and info["deps"] & affected:
+                affected.add(name)
+                grew = True
+    return affected
+
+
+def select_proofs(
+    proofs: list[dict[str, Any]], affected: set[str] | None, push: bool,
+) -> list[dict[str, Any]]:
+    """The enabled proofs to run. A push run takes only the push tier and, unless a change to
+    the registry, runner or workflow selects everything, only the affected packages."""
+    chosen = [p for p in proofs if p["enabled"]]
+    if push:
+        chosen = [p for p in chosen if p["tier"] == "push"]
+        if affected is not None:
+            chosen = [p for p in chosen if p["package"] in affected]
+    return chosen
+
+
+def changed_files(repo: Path, base: str) -> list[str] | None:
+    """Files changed since `base`, or None when the comparison cannot be made."""
+    if not re.fullmatch(r"[0-9a-fA-F]{7,64}|[A-Za-z0-9_./-]+", base) or set(base) == {"0"}:
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "diff", "--name-only", base, "HEAD"], cwd=repo, check=True,
+            capture_output=True, text=True, timeout=60,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return [line for line in out.splitlines() if line]
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -61,7 +143,7 @@ def validate_registry(data: Any) -> list[str]:
         required_keys = {
             "id", "requirement", "package", "harness", "enabled", "experimental",
             "required_covers", "stubbing", "stub_summaries", "cfgs",
-            "harness_timeout_seconds", "external_timeout_seconds", "memory_mib",
+            "harness_timeout_seconds", "external_timeout_seconds", "memory_mib", "tier",
         }
         allowed_keys = required_keys | {"loop_unwind_overrides"}
         if not required_keys.issubset(entry) or not set(entry).issubset(allowed_keys):
@@ -85,6 +167,8 @@ def validate_registry(data: Any) -> list[str]:
             errors.append(f"duplicate package/harness pair: {package} {harness}")
         elif isinstance(package, str) and isinstance(harness, str):
             harnesses.add((package, harness))
+        if entry.get("tier") not in TIERS:
+            errors.append(f"{label}.tier must be one of {', '.join(TIERS)}")
         if not isinstance(entry.get("enabled"), bool) or not isinstance(entry.get("experimental"), bool):
             errors.append(f"{label}.enabled and experimental must be booleans")
         covers = entry.get("required_covers")
@@ -231,7 +315,7 @@ def _not_run_outcome(proof: dict[str, Any], failed_id: str) -> dict[str, Any]:
 
 def run_suite(
     repo: Path, out: Path, target_dir: Path, registry_path: Path, fail_fast: bool = False,
-    shard: tuple[int, int] = (0, 1),
+    shard: tuple[int, int] = (0, 1), changed_from: str | None = None,
 ) -> int:
     try:
         registry_path = registry_path.resolve(strict=True)
@@ -268,7 +352,17 @@ def run_suite(
     # Shard `i` of `n` runs every n-th enabled proof from the i-th: the same registry split
     # across jobs, so that each job finishes within the CI time limit.
     shard_index, shard_count = shard
-    selected = [p for p in registry["proofs"] if p["enabled"]][shard_index::shard_count]
+    # A push run (--changed-from given) takes only the push tier of the packages the change reaches;
+    # without it the whole enabled registry runs, nightly tier included.
+    affected: set[str] | None = None
+    if changed_from is not None:
+        changed = changed_files(repo, changed_from)
+        affected = None if changed is None else affected_packages(package_graph(repo), changed)
+    chosen = select_proofs(registry["proofs"], affected, changed_from is not None)
+    selected = chosen[shard_index::shard_count]
+    if changed_from is not None and not selected:
+        print(json.dumps({"suite_status": "SKIPPED", "reason": "no proof of this shard is affected"}))
+        return 0
     if not selected:
         print("registry has no enabled proof entries", file=sys.stderr)
         return 2
@@ -421,6 +515,11 @@ def main(argv: list[str] | None = None) -> int:
         "--shard", default="0/1",
         help="run shard I of N (every N-th enabled proof from the I-th), for example 1/2",
     )
+    parser.add_argument(
+        "--changed-from", metavar="REV",
+        help="push run: only the push-tier proofs of packages changed since REV or depending on "
+        "a changed package; without it the full suite runs",
+    )
     args = parser.parse_args(argv)
     try:
         shard_index, shard_count = (int(x) for x in args.shard.split("/"))
@@ -432,7 +531,7 @@ def main(argv: list[str] | None = None) -> int:
     registry_path = args.registry or repo / "tools" / "rust_proofs.json"
     return run_suite(
         repo, args.out, args.target_dir, registry_path, fail_fast=args.fail_fast,
-        shard=(shard_index, shard_count),
+        shard=(shard_index, shard_count), changed_from=args.changed_from,
     )
 
 

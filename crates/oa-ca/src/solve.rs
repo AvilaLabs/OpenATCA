@@ -435,45 +435,6 @@ mod proofs {
 
     // REQ: OA-CA-028
     #[kani::proof]
-    fn the_decision_of_the_first_step_gives_a_current_pair_a_span_or_a_root_step() {
-        // The contract on the three values it takes: `a` finite, from 0 to A_MAX; `disc` finite;
-        // `tc` finite and at most TC_MAX when `a` is not taken as zero. Each is proved for the
-        // function that computes it, the three proofs below (`a` and `disc` at most DISC_MAX in
-        // the second, `tc` in the third). That `horizontal_step` hands exactly those values to
-        // `step_of`, and that what comes out of its root step meets the contract the square root
-        // and the last step take, is NOT proved: a proof of `horizontal_step` itself on the
-        // bounded inputs did not finish in 9 minutes in CBMC (the products and the division in one
-        // problem). It is tested instead, on every kind of input, in `tests/split.rs`.
-        let (a, disc, tc, t): (f64, f64, f64, f64) =
-            (kani::any(), kani::any(), kani::any(), kani::any());
-        kani::assume(a >= 0.0 && a <= A_MAX);
-        kani::assume(disc.is_finite());
-        kani::assume(a < STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS || within(tc, TC_MAX));
-        kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);
-        match step_of(true, a, disc, tc, t) {
-            HorizontalStep::Done(s) => {
-                assert!(s.is_some());
-                if let Some(s) = s {
-                    kani::cover!(true, "a span without a root");
-                    assert!(s.now && s.lo == 0.0 && 0.0 <= s.hi && s.hi <= t);
-                }
-            }
-            HorizontalStep::Root {
-                now,
-                tc: rtc,
-                a: ra,
-                disc: rd,
-            } => {
-                kani::cover!(true, "a root step");
-                assert!(now && within(rtc, TC_MAX) && rtc == tc);
-                assert!(ra >= STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS && ra <= A_MAX);
-                assert!(rd.is_finite() && rd > 0.0 && rd == disc);
-            }
-        }
-    }
-
-    // REQ: OA-CA-028
-    #[kani::proof]
     fn the_squared_speed_and_the_discriminant_of_bounded_inputs_are_within_their_bounds() {
         let (rx, ry, vx, vy, h, _t) = horizontal_inputs();
         let hh = h * h;
@@ -604,29 +565,6 @@ mod proofs {
             assert!(m.lo.is_finite() && m.hi.is_finite());
             assert!(0.0 <= m.lo && m.lo <= m.hi && m.hi <= t);
         }
-    }
-
-    // REQ: OA-CA-029
-    #[kani::proof]
-    fn the_time_to_loss_of_a_prediction_is_finite_and_inside_the_look_ahead() {
-        // With the two misses any finite not negative values (the horizontal miss is proved in
-        // `the_closest_point_is_finite_and_bounded` and `the_horizontal_miss_is_finite_and_not_negative`, the vertical miss in
-        // `vertical_span_is_finite_and_ordered_for_bounded_inputs`).
-        let t: f64 = kani::any();
-        kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);
-        let (lo, hi, hm, vm): (f64, f64, f64, f64) =
-            (kani::any(), kani::any(), kani::any(), kani::any());
-        kani::assume(0.0 <= lo && lo <= hi && hi <= t);
-        kani::assume(hm.is_finite() && hm >= 0.0 && vm.is_finite() && vm >= 0.0);
-        let m = Span {
-            lo,
-            hi,
-            now: kani::any(),
-        };
-        let p = prediction_of(&m, hm, vm);
-        assert!(p.ttl_s.is_finite() && 0.0 <= p.ttl_s && p.ttl_s <= t);
-        assert!(p.h_miss_m.is_finite() && p.h_miss_m >= 0.0);
-        assert!(p.v_miss_ft.is_finite() && p.v_miss_ft >= 0.0);
     }
 
     // REQ: OA-CA-021

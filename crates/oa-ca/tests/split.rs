@@ -405,3 +405,71 @@ fn the_first_step_hands_the_root_step_the_three_values_the_proofs_take_within_th
     }
     assert!(roots > 10_000 && dones > 10_000, "{roots} {dones}");
 }
+
+// REQ: OA-CA-028
+#[test]
+fn the_decision_of_the_first_step_gives_a_current_pair_a_span_or_a_root_step() {
+    let t = 120.0;
+    let slow = STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS * 0.5;
+    // A pair at rest relative to each other: the whole look-ahead when current, none otherwise.
+    assert_eq!(
+        step_of(true, slow, 1.0, 5.0, t),
+        HorizontalStep::Done(Some(Span {
+            lo: 0.0,
+            hi: t,
+            now: true
+        }))
+    );
+    assert_eq!(
+        step_of(false, slow, 1.0, 5.0, t),
+        HorizontalStep::Done(None)
+    );
+    // No positive discriminant and a current pair: kept current to the closest approach, clamped
+    // to the look-ahead.
+    for (tc, hi) in [(-3.0, 0.0), (0.0, 0.0), (40.0, 40.0), (t, t), (500.0, t)] {
+        match step_of(true, 10.0, 0.0, tc, t) {
+            HorizontalStep::Done(Some(s)) => assert!(s.now && s.lo == 0.0 && s.hi == hi),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(
+        step_of(false, 10.0, -1.0, 40.0, t),
+        HorizontalStep::Done(None)
+    );
+    // A positive discriminant hands the root step the same three numbers.
+    assert_eq!(
+        step_of(true, 10.0, 7.0, -2.5, t),
+        HorizontalStep::Root {
+            now: true,
+            tc: -2.5,
+            a: 10.0,
+            disc: 7.0
+        }
+    );
+}
+
+// REQ: OA-CA-029
+#[test]
+fn the_time_to_loss_of_a_prediction_is_the_span_start_or_zero_and_the_misses_are_carried() {
+    let t = 120.0;
+    for (lo, hi) in [(0.0, 0.0), (0.0, t), (30.0, 30.0), (30.0, 90.0), (t, t)] {
+        let span = Span { lo, hi, now: false };
+        let p = prediction_of(&span, 12.5, 300.0);
+        assert!(!p.now && p.ttl_s == lo && p.h_miss_m == 12.5 && p.v_miss_ft == 300.0);
+        assert!((0.0..=t).contains(&p.ttl_s));
+        let current = Span { lo, hi, now: true };
+        let p = prediction_of(&current, 0.0, 0.0);
+        assert!(p.now && p.ttl_s == 0.0);
+    }
+    // An unknown altitude has no vertical miss: the NaN is carried, not hidden.
+    let p = prediction_of(
+        &Span {
+            lo: 5.0,
+            hi: 9.0,
+            now: false,
+        },
+        1.0,
+        f64::NAN,
+    );
+    assert!(p.v_miss_ft.is_nan() && p.ttl_s == 5.0 && p.h_miss_m == 1.0);
+}

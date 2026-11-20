@@ -656,3 +656,68 @@ mod proofs {
 #[cfg(all(kani, kani_full_capacity))]
 #[path = "time_gate_proofs_full.rs"]
 mod proofs_full;
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    /// A full table: sensor `i` last accepted at `times[i]`.
+    fn full(times: &[i64; SENSOR_TABLE]) -> GateState {
+        let mut g = gate_new();
+        for (i, &t) in times.iter().enumerate() {
+            gate_note_applied(&mut g, i as u16, t);
+        }
+        assert_eq!(g.evicted, 0);
+        g
+    }
+
+    // REQ: OA-TRK-336
+    #[test]
+    fn the_live_count_of_a_full_table_is_the_number_of_sensors_inside_the_drop_interval() {
+        let mut times = [0i64; SENSOR_TABLE];
+        for (i, t) in times.iter_mut().enumerate() {
+            *t = 1_000 + 10 * i as i64;
+        }
+        let g = full(&times);
+        let drop_ns = 100;
+        for clock in [
+            0, 900, 1_000, 1_100, 1_345, 1_639, 1_640, 1_739, 1_740, 5_000,
+        ] {
+            // Counted by hand from the list of times: those at or after `clock - drop`.
+            let want = times.iter().filter(|&&t| t >= clock - drop_ns).count();
+            assert_eq!(gate_live_sensors(&g, clock, drop_ns), want, "clock {clock}");
+        }
+        assert_eq!(gate_live_sensors(&g, 1_000, 0), SENSOR_TABLE);
+        assert_eq!(gate_live_sensors(&g, 5_000, 0), 0);
+    }
+
+    // REQ: OA-TRK-336
+    #[test]
+    fn the_live_count_of_a_full_table_holds_at_the_signed_extremes_and_never_grows_with_the_clock()
+    {
+        let mut times = [0i64; SENSOR_TABLE];
+        for (i, t) in times.iter_mut().enumerate() {
+            *t = match i % 4 {
+                0 => i64::MIN + 1,
+                1 => i64::MAX,
+                2 => 0,
+                _ => -1_000 * i as i64,
+            };
+        }
+        let g = full(&times);
+        for drop_ns in [0, 1, 86_400 * 1_000_000_000] {
+            let mut last = SENSOR_TABLE;
+            for clock in [i64::MIN, -5_000, -1, 0, 1, 5_000, i64::MAX - 1, i64::MAX] {
+                let n = gate_live_sensors(&g, clock, drop_ns);
+                let floor = clock.saturating_sub(drop_ns);
+                assert_eq!(n, times.iter().filter(|&&t| t >= floor).count());
+                assert!(
+                    n <= SENSOR_TABLE && n <= last,
+                    "clock {clock} drop {drop_ns}"
+                );
+                last = n;
+            }
+        }
+    }
+}
