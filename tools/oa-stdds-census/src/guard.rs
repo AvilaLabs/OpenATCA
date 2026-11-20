@@ -161,6 +161,7 @@ pub(crate) mod tests {
             .join(format!("oa-census-clip-{}", std::process::id()))
             .join("scds")
             .join("rec-20261119")
+            .join("day2")
             .join("c.oaf");
         let e = oa_bench::input::load_adsb(&p).err().unwrap();
         assert!(is_refusal(&e.to_string()), "{e}");
