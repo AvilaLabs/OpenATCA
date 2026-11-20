@@ -164,6 +164,9 @@ struct Feed<'a> {
     tick_rows: u64,
     rows_skipped: u64,
     last_overflow: u64,
+    /// The times of the latest barometric altitudes of each aircraft (a few, oldest first), for the
+    /// age of a track's altitude.
+    alt_times: std::collections::HashMap<u32, Vec<i64>>,
     last_t: i64,
     /// The first terrain file that could not be read: the run is then refused.
     error: Option<String>,
@@ -375,6 +378,12 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
             vrate_fpm: if fl & O_HAS_ALT != 0 { vr } else { f32::NAN },
             flags,
             ground: ground_at(f.ground, addr, t),
+            alt_age_s: f.alt_times.get(&addr).map_or(f32::NAN, |v| {
+                let i = v.partition_point(|&x| x <= t);
+                i.checked_sub(1)
+                    .and_then(|i| v.get(i))
+                    .map_or(f32::NAN, |&x| ((t - x) as f64 / 1e9) as f32)
+            }),
         });
     }
 }
@@ -454,12 +463,20 @@ pub fn track_and_alert(
         tick_rows: 0,
         rows_skipped: 0,
         last_overflow: 0,
+        alt_times: std::collections::HashMap::new(),
         last_t: 0,
         error: None,
     };
     let steady = Instant::now();
     let drain = cfg.out_capacity.min(1 << 16) / 2;
     for m in meas {
+        if m.alt_ft != oa_track::NONE_I32 && m.flags & oa_track::M_ALT_GEOMETRIC == 0 {
+            let v = f.alt_times.entry(m.addr).or_default();
+            if v.len() >= 8 {
+                v.remove(0);
+            }
+            v.push(m.toa_ns);
+        }
         tracker_update(&mut t, m, &mut out);
         if output_len(&out) > drain {
             consume(&mut f, &out);

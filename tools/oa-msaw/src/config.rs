@@ -123,7 +123,7 @@ pub struct Settings {
     pub metar_max_age_s: i64,
 }
 
-const KEYS: [&str; 34] = [
+const KEYS: [&str; 36] = [
     "look_ahead_s",
     "warning_s",
     "samples",
@@ -138,6 +138,8 @@ const KEYS: [&str; 34] = [
     "approach_min_clearance_ft",
     "departure_min_clearance_ft",
     "velocity_uncertainty_mps",
+    "max_altitude_age_s",
+    "terminal_lookahead_s",
     "no_qnh_allowance_ft",
     "metar_radius_nm",
     "metar_max_age_s",
@@ -449,6 +451,8 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             "velocity_uncertainty_mps",
             get("velocity_uncertainty_mps")?,
         )?,
+        max_altitude_age_s: finite("max_altitude_age_s", get("max_altitude_age_s")?)?,
+        terminal_lookahead_s: finite("terminal_lookahead_s", get("terminal_lookahead_s")?)?,
         corridors: list,
         n_corridors: procs.len(),
     };

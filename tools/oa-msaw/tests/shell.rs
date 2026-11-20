@@ -1070,3 +1070,31 @@ fn the_diagnosis_gives_the_altitude_radius_obstacle_and_terrain_sections_and_nam
     }
     assert!(!t.to_uppercase().contains("A1B2C3"));
 }
+
+// REQ: OA-MSAW-065
+#[test]
+fn a_track_whose_altitude_stops_arriving_is_not_monitored_once_it_is_stale_and_is_counted() {
+    let set = settings();
+    assert_eq!(
+        (set.msaw.max_altitude_age_s, set.msaw.terminal_lookahead_s),
+        (12.0, 15.0)
+    );
+    let mut m = approach(0xA1B2C3, true);
+    for x in m.iter_mut().skip(20) {
+        x.alt_ft = NONE_I32;
+        x.vrate_fpm = NONE_I32;
+    }
+    let r = go(&m, &set, ridge_floors());
+    // Rows from about 12 s after the last altitude are stale; before that they are judged.
+    assert!(r.totals.alt_stale > 40, "{}", r.totals.alt_stale);
+    assert!(r.totals.evaluated >= 20, "{}", r.totals.evaluated);
+    assert!(r
+        .skips
+        .keys()
+        .any(|k| k.1 == oa_msaw::SkipWhy::AltitudeStale as u8));
+    assert!(
+        r.net_cycles.keys().any(|k| k.contains("ALTITUDE MISSING")),
+        "{:?}",
+        r.net_cycles
+    );
+}

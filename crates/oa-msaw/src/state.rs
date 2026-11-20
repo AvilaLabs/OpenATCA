@@ -86,6 +86,15 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
     if !(pos(c.r95_cap_m) && c.r95_cap_m <= MAX_RADIUS_M) {
         return Err("r95_cap_m");
     }
+    if !(c.max_altitude_age_s.is_finite() && c.max_altitude_age_s > 0.0) {
+        return Err("max_altitude_age_s");
+    }
+    if !(c.terminal_lookahead_s.is_finite()
+        && c.terminal_lookahead_s > 0.0
+        && c.terminal_lookahead_s <= c.look_ahead_s)
+    {
+        return Err("terminal_lookahead_s");
+    }
     if !(c.velocity_uncertainty_mps.is_finite()
         && c.velocity_uncertainty_mps >= 0.0
         && c.velocity_uncertainty_mps <= MAX_SPEED_LIMIT_MPS)

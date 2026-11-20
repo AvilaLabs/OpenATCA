@@ -13,8 +13,8 @@ use oa_safety::inhibit::{inhibit_suppress, InhibitTable};
 use oa_safety::net::{state_report, Area, NetId, NetReport, Reason, StateTable};
 
 use crate::calc::{
-    alt_floor_ft, deg_to_e7, floor_of, grade_of, lowest_alt_ft, predicted_alt_ft, sample_points,
-    sample_span_s, violates, violation_time_s, with_airport_area, PathStart,
+    alt_floor_ft, altitude_stale, deg_to_e7, floor_of, grade_of, lowest_alt_ft, predicted_alt_ft,
+    sample_points, sample_span_s, violates, violation_time_s, with_airport_area, PathStart,
 };
 use crate::corridor::corridor_hit_at;
 use crate::state::{alert_push, skip_push, MsawState};
@@ -45,6 +45,7 @@ fn add(a: &mut CycleStats, b: &CycleStats) {
     a.ground_excluded = a.ground_excluded.saturating_add(b.ground_excluded);
     a.ground_unknown = a.ground_unknown.saturating_add(b.ground_unknown);
     a.alt_missing = a.alt_missing.saturating_add(b.alt_missing);
+    a.alt_stale = a.alt_stale.saturating_add(b.alt_stale);
     a.rate_unknown = a.rate_unknown.saturating_add(b.rate_unknown);
     a.rows_bad = a.rows_bad.saturating_add(b.rows_bad);
     a.rows_over_capacity = a.rows_over_capacity.saturating_add(b.rows_over_capacity);
@@ -81,13 +82,14 @@ pub fn net_report_of(s: &CycleStats) -> NetReport {
         .saturating_add(s.rows_bad)
         .saturating_add(s.qnh_missing)
         .saturating_add(s.rows_lost_upstream);
-    let all = work.saturating_add(input).saturating_add(s.alt_missing);
+    let alt = s.alt_missing.saturating_add(s.alt_stale);
+    let all = work.saturating_add(input).saturating_add(alt);
     let (reason, count) = if work > 0 {
         (Reason::BudgetExceeded, all)
     } else if input > 0 {
         (Reason::InputMissing, all)
-    } else if s.alt_missing > 0 {
-        (Reason::AltitudeMissing, s.alt_missing)
+    } else if alt > 0 {
+        (Reason::AltitudeMissing, alt)
     } else {
         return NetReport::Running;
     };
@@ -187,6 +189,11 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
         if r.alt_ft.is_nan() {
             stats.alt_missing = stats.alt_missing.saturating_add(1);
             skip(skips, &mut stats, t_ns, r, SkipWhy::AltitudeMissing);
+            continue;
+        }
+        if altitude_stale(r.alt_age_s, cfg.max_altitude_age_s) {
+            stats.alt_stale = stats.alt_stale.saturating_add(1);
+            skip(skips, &mut stats, t_ns, r, SkipWhy::AltitudeStale);
             continue;
         }
         let mut row = *r;
@@ -304,9 +311,24 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         partial: false,
         below_mva: false,
     };
+    // The look-ahead is the terminal one where the track is now: inside a corridor, or inside an
+    // airport terminal area below its ceiling. A path that leaves it keeps that look-ahead.
+    let limit = match (pts.first(), floors.first()) {
+        (Some(p), Some(s))
+            if corridor_hit_at(cfg, &st.cidx, p).is_some()
+                || (s.apt_ceiling_ft != FLOOR_NONE && alt < f64::from(s.apt_ceiling_ft)) =>
+        {
+            cfg.terminal_lookahead_s
+        }
+        _ => cfg.look_ahead_s,
+    };
     for (k, (p, s)) in pts.iter().zip(floors.iter()).enumerate() {
         let hit = corridor_hit_at(cfg, &st.cidx, p);
         let (lo, hi) = sample_span_s(k, cfg.samples, cfg.look_ahead_s);
+        if k > 0 && lo >= limit {
+            continue;
+        }
+        let hi = oa_math::min_f64(hi, limit);
         let low = alt_floor_ft(lowest_alt_ft(alt, vr, lo, hi));
         let s = &with_airport_area(s, low);
         let Some((floor, kind)) = floor_of(s, hit, cfg) else {

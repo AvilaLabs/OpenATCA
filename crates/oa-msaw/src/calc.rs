@@ -109,6 +109,13 @@ pub fn with_airport_area(s: &FloorSample, low_ft: i32) -> FloorSample {
     }
 }
 
+/// True if a track's altitude is too old to be monitored: older than `max_age_s`. An age that is
+/// not known (NaN) is taken as fresh; infinity is stale. A stale altitude is counted and listed
+/// by the cycle, never judged and never read as clear.
+pub fn altitude_stale(age_s: f32, max_age_s: f64) -> bool {
+    f64::from(age_s) > max_age_s
+}
+
 /// True if a predicted altitude is below the floor: a violation. Monotone: a higher floor never
 /// removes one (proved).
 pub fn violates(alt_ft: i32, floor_ft: i32) -> bool {
@@ -347,6 +354,8 @@ mod proofs {
             approach_min_clearance_ft: amc,
             departure_min_clearance_ft: amc,
             velocity_uncertainty_mps: 0.0,
+            max_altitude_age_s: 12.0,
+            terminal_lookahead_s: 15.0,
             corridors: [Corridor {
                 kind: CK_APPROACH,
                 thr_lat_e7: 0,
@@ -530,6 +539,20 @@ mod proofs {
             }
         } else {
             assert!(t == FLOOR_NONE);
+        }
+    }
+
+    // REQ: OA-MSAW-065
+    #[kani::proof]
+    fn a_stale_altitude_is_never_monitored_and_a_fresh_or_unknown_one_always_is() {
+        let (age, max): (f32, f64) = (kani::any(), kani::any());
+        kani::assume(max.is_finite() && max > 0.0);
+        let stale = altitude_stale(age, max);
+        if !age.is_nan() && f64::from(age) > max {
+            assert!(stale);
+        }
+        if age.is_nan() || f64::from(age) <= max {
+            assert!(!stale);
         }
     }
 }

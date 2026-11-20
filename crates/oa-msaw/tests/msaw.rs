@@ -38,6 +38,8 @@ fn cfg() -> MsawConfig {
         approach_min_clearance_ft: 100,
         departure_min_clearance_ft: 100,
         velocity_uncertainty_mps: 5.0,
+        max_altitude_age_s: 12.0,
+        terminal_lookahead_s: 15.0,
         corridors: [blank_corridor(); MAX_CORRIDORS],
         n_corridors: 0,
     }
@@ -87,6 +89,7 @@ fn tr(addr: u32, lat: f64, lon: f64, ve: f32, vn: f32, alt: f32, vr: f32) -> Msa
         vrate_fpm: vr,
         flags: 0,
         ground: AIRBORNE,
+        alt_age_s: 0.0,
     }
 }
 
@@ -785,7 +788,7 @@ fn guam_synthetic_an_early_descent_in_the_corridor_over_a_ridge_alerts() {
     c.corridors[0].faf_alt_ft = 0;
     c.corridors[0].thr_elev_ft = 0;
     let mut r = rig(&c);
-    for k in 0..=20 {
+    for k in 0..=40 {
         cycle(&mut r, k * S, &[a(k)], &ridge_world(600, 700));
     }
     msaw_finish(&mut r.st, &mut r.alerts);
@@ -827,7 +830,12 @@ fn outside_the_corridor_or_straddling_its_edge_the_normal_floor_applies() {
     assert_eq!(o.stats.violations, 1);
     assert_eq!(msaw_open(&r.st)[0].worst_kind, FloorKind::Terrain);
     // 500 m east: the centre is inside, but the circle (50 m growing 5 m per second) leaves the
-    // side after 34 s, and from there the normal floor applies.
+    // side after 34 s, and from there the normal floor applies: beyond the 15 s terminal
+    // look-ahead, so only a corridor look-ahead of 60 s sees it.
+    let mut r = rig(&k);
+    let o = cycle(&mut r, S, &[still(500.0)], &world);
+    assert_eq!(o.stats.violations, 0);
+    k.terminal_lookahead_s = 60.0;
     let mut r = rig(&k);
     let o = cycle(&mut r, S, &[still(500.0)], &world);
     assert_eq!(o.stats.violations, 1);
@@ -1624,4 +1632,86 @@ fn a_visual_base_leg_in_an_airport_area_alerts_only_for_a_tower_and_the_floor_is
     let o = cycle(&mut r, S, &[high], &airport_world(600, FLOOR_NONE));
     assert_eq!(o.stats.violations, 1);
     assert_eq!(msaw_open(&r.st)[0].worst_floor_ft, 800);
+}
+
+// REQ: OA-MSAW-064
+#[test]
+fn inside_an_airport_area_the_prediction_is_15_s_and_outside_it_is_the_general_look_ahead() {
+    // 2,000 ft, 1,200 ft above the area floor (terrain 600 + 200), descending 1,500 ft/min: 1,625 ft
+    // in 15 s, 500 ft in 60 s.
+    let arrival = tr(9, 40.0, -88.0, 70.0, 0.0, 2000.0, -1500.0);
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[arrival], &airport_world(600, FLOOR_NONE));
+    assert_eq!(o.stats.violations, 0);
+    // The same geometry outside any terminal area: the general floor (1,100 ft) and look-ahead.
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[arrival], &flat(600, FLOOR_NONE));
+    assert_eq!(o.stats.violations, 1);
+    // Below the area's floor now: an alert at once, with a time to violation of zero.
+    let low = tr(9, 40.0, -88.0, 70.0, 0.0, 700.0, 0.0);
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[low], &airport_world(600, FLOOR_NONE));
+    assert_eq!(o.stats.violations, 1);
+    assert_eq!(msaw_open(&r.st)[0].ttv_min_s, 0.0);
+    // Above the area's ceiling the general look-ahead holds again.
+    let high = tr(9, 40.0, -88.0, 70.0, 0.0, 4600.0, -4000.0);
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[high], &airport_world(600, FLOOR_NONE));
+    assert_eq!(o.stats.violations, 1);
+}
+
+// REQ: OA-MSAW-064
+#[test]
+fn the_guam_descent_in_a_terminal_area_alerts_later_by_the_look_ahead_difference() {
+    let first = |terminal: bool| {
+        let mut r = rig(&cfg());
+        for c in 0..60 {
+            let world = |la: i32, lo: i32| {
+                let mut s = ridge(la, lo);
+                if terminal {
+                    s.apt_clearance_ft = 500;
+                    s.apt_ceiling_ft = 100_000;
+                }
+                s
+            };
+            cycle(&mut r, c * S, &[approach(c)], &world);
+        }
+        msaw_finish(&mut r.st, &mut r.alerts);
+        assert_eq!(r.alerts.items.len(), 1, "the alert is not lost");
+        r.alerts.items[0].start_ns
+    };
+    let (general, terminal) = (first(false), first(true));
+    assert_eq!(general, 0);
+    // The violation is 38 s ahead at the first cycle: seen from 15 s ahead it is 23 s later, 24 s
+    // on the 5 s sample grid.
+    assert_eq!(terminal, 24 * S, "{terminal}");
+}
+
+// REQ: OA-MSAW-065
+#[test]
+fn an_altitude_older_than_the_limit_is_not_monitored_is_counted_listed_and_degrades_the_net() {
+    let mut old = tr(9, 40.0, -88.0, 70.0, 0.0, 700.0, 0.0);
+    old.alt_age_s = 20.0;
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[old], &airport_world(600, FLOOR_NONE));
+    assert_eq!(
+        (o.stats.alt_stale, o.stats.evaluated, o.stats.violations),
+        (1, 0, 0)
+    );
+    assert_eq!(r.skips.items[0].why, SkipWhy::AltitudeStale);
+    assert!(matches!(
+        o.report,
+        NetReport::Degraded {
+            reason: Reason::AltitudeMissing,
+            count: 1,
+            ..
+        }
+    ));
+    // 11 s old is judged; an unknown age is taken as fresh.
+    old.alt_age_s = 11.0;
+    let o = cycle(&mut r, 2 * S, &[old], &airport_world(600, FLOOR_NONE));
+    assert_eq!((o.stats.alt_stale, o.stats.violations), (0, 1));
+    old.alt_age_s = f32::NAN;
+    let o = cycle(&mut r, 3 * S, &[old], &airport_world(600, FLOOR_NONE));
+    assert_eq!(o.stats.alt_stale, 0);
 }

@@ -6327,5 +6327,10 @@ FAA value.
 - **OA-MSAW-063** With `--diagnose` the tool writes `diagnosis.txt`: the altitude judged against the geometric one,
   the terms of the query radius, the obstacle and terrain records behind the floors and what the depth is made of;
   numbers only.
+- **OA-MSAW-064** Inside an approach or departure corridor or an airport terminal area below its ceiling the
+  prediction time is `terminal_lookahead_s`, else `look_ahead_s`, by where the track is now; the check of the present
+  position is unchanged.
+- **OA-MSAW-065** A track whose latest barometric altitude is older than `max_altitude_age_s` is not judged, is
+  counted and listed as altitude stale, and degrades the net as a missing altitude does; an unknown age is taken as fresh.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.

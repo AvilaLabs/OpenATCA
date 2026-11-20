@@ -67,6 +67,7 @@ pub fn why_text(w: u8) -> &'static str {
         x if x == SkipWhy::OverCapacity as u8 => "OVER_CAPACITY",
         x if x == SkipWhy::QnhMissing as u8 => "QNH_MISSING",
         x if x == SkipWhy::BelowMva as u8 => "BELOW_MVA",
+        x if x == SkipWhy::AltitudeStale as u8 => "ALTITUDE_STALE",
         _ => "?",
     }
 }
@@ -571,6 +572,11 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let _ = writeln!(o, "excluded on the ground {}", t.ground_excluded);
     let _ = writeln!(o, "ground state unknown (evaluated) {}", t.ground_unknown);
     let _ = writeln!(o, "no altitude (listed, rule 4) {}", t.alt_missing);
+    let _ = writeln!(
+        o,
+        "not monitored: altitude stale (older than {} s; listed, degrades the net as a missing altitude does) {}",
+        i.cfg.max_altitude_age_s, t.alt_stale
+    );
     let _ = writeln!(
         o,
         "tracks with no altimeter setting (listed, rule 1) {}",

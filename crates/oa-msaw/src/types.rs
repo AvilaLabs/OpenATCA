@@ -100,6 +100,9 @@ pub struct MsawTrack {
     pub flags: u8,
     /// [`GROUND_UNKNOWN`], [`AIRBORNE`] or [`ON_GROUND`].
     pub ground: u8,
+    /// Seconds since the track's latest barometric altitude was measured; NaN if not known (the
+    /// altitude is then taken as fresh).
+    pub alt_age_s: f32,
 }
 
 /// A point of a track's predicted path where the shell looks up the floor.
@@ -224,6 +227,11 @@ pub struct MsawConfig {
     pub departure_min_clearance_ft: i32,
     /// The growth of a sample point's radius with the prediction time, metres per second.
     pub velocity_uncertainty_mps: f64,
+    /// A track whose latest barometric altitude is older than this, seconds, is not monitored.
+    pub max_altitude_age_s: f64,
+    /// The prediction time inside an approach or departure corridor and an airport terminal area
+    /// below its ceiling, seconds; not above `look_ahead_s`.
+    pub terminal_lookahead_s: f64,
     /// The corridors; `n_corridors` of them are used.
     pub corridors: [Corridor; MAX_CORRIDORS],
     pub n_corridors: usize,
@@ -312,6 +320,9 @@ pub enum SkipWhy {
     /// Predicted below the minimum vectoring altitude but not below the alert floor: listed and
     /// counted, never an alert and never a shortfall of the net.
     BelowMva = 7,
+    /// The latest barometric altitude was older than `max_altitude_age_s`: not monitored, and said
+    /// so; it degrades the net as a missing altitude does.
+    AltitudeStale = 8,
 }
 
 /// A track a cycle did not (fully) evaluate, listed and never silently passed.
@@ -359,6 +370,8 @@ pub struct CycleStats {
     pub ground_unknown: u64,
     /// Rows with no altitude (rule 4).
     pub alt_missing: u64,
+    /// Rows whose altitude was older than the limit (not monitored).
+    pub alt_stale: u64,
     /// Rows with no vertical rate (predicted level).
     pub rate_unknown: u64,
     /// Rows with a bad value.
