@@ -22,6 +22,10 @@
 //! it afterwards as lost ([`Recorder::failure`], [`Recorder::lost_frames`], [`format_recording`]),
 //! so the shell can report it and exit non-zero. A stop at the size cap exits non-zero too
 //! ([`Recorder::exit_reason`]): the run did not record what it was asked to.
+//!
+//! Startup counts existing recordings across at most [`DEFAULT_MAX_DIRECTORY_ENTRIES`] directory
+//! entries. This is an operational enumeration cap, not an elapsed-time guarantee; unrelated and
+//! zero-byte entries count toward it too.
 
 use std::convert::Infallible;
 use std::fs::{self, File, OpenOptions};
@@ -29,6 +33,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use oa_deflate::{GzipWriter, DEFAULT_LEVEL};
+
+/// Maximum directory entries inspected when a recorder counts existing recordings at startup.
+pub const DEFAULT_MAX_DIRECTORY_ENTRIES: usize = 16_384;
 
 /// How frames are stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,7 +134,8 @@ fn is_recording(p: &Path) -> bool {
 
 impl Recorder {
     /// Prepares `dir` (created if missing) and counts the bytes of existing `.oaf` and
-    /// `.oaf.gz` files toward the cap.
+    /// `.oaf.gz` files toward the cap. Startup refuses directories with more than
+    /// [`DEFAULT_MAX_DIRECTORY_ENTRIES`] total entries, including unrelated entries.
     pub fn open(
         dir: &Path,
         feed: &str,
@@ -143,7 +151,7 @@ impl Recorder {
     }
 
     /// As [`Recorder::open`], creating each file through `opener` (for a writer that fails on
-    /// demand in tests).
+    /// demand in tests). The same startup directory-entry limit applies.
     pub fn open_with(
         dir: &Path,
         feed: &str,
@@ -154,13 +162,7 @@ impl Recorder {
     ) -> io::Result<Recorder> {
         check_feed_label(feed).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         fs::create_dir_all(dir)?;
-        let mut total = 0u64;
-        for e in fs::read_dir(dir)? {
-            let e = e?;
-            if is_recording(&e.path()) {
-                total = total.saturating_add(e.metadata()?.len());
-            }
-        }
+        let total = existing_recording_bytes(dir, DEFAULT_MAX_DIRECTORY_ENTRIES)?;
         Ok(Recorder {
             dir: dir.to_path_buf(),
             feed: feed.to_string(),
@@ -445,6 +447,32 @@ impl Recorder {
     }
 }
 
+// Keep the limit check before the counter increment as well as all entry processing.
+// This also prevents counter overflow when the private helper receives usize::MAX.
+#[allow(clippy::explicit_counter_loop)]
+fn existing_recording_bytes(dir: &Path, entry_limit: usize) -> io::Result<u64> {
+    let mut total = 0u64;
+    let mut entries = 0usize;
+    oa_sealed::refuse_io(dir)?;
+    for entry in fs::read_dir(dir)? {
+        if entries >= entry_limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "recording directory entry limit exceeded: {found} entries found (counting stopped there) against a limit of {entry_limit}; unrelated files count too; no existing file was touched and nothing was created",
+                    found = entries.saturating_add(1)
+                ),
+            ));
+        }
+        entries += 1;
+        let entry = entry?;
+        if is_recording(&entry.path()) {
+            total = total.saturating_add(entry.metadata()?.len());
+        }
+    }
+    Ok(total)
+}
+
 /// Earliest Unix time [`utc_stamp`] and [`utc_iso`] accept: 0001-01-01T00:00:00Z.
 pub const UTC_MIN_SECS: i64 = -62_135_596_800;
 /// Latest Unix time they accept: 9999-12-31T23:59:59Z.
@@ -499,4 +527,48 @@ pub fn format_recording(feed: &str, r: &Recorder) -> String {
         ));
     }
     out
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod directory_limit_tests {
+    use super::existing_recording_bytes;
+    use std::fs;
+    use std::io::ErrorKind;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn temp_dir() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "oa-feed-directory-limit-{}-{serial}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("create temporary directory");
+        path
+    }
+
+    // REQ: OA-FEED-189
+    #[test]
+    fn directory_entry_limit_counts_unrelated_and_zero_byte_entries() {
+        let dir = temp_dir();
+        fs::write(dir.join("existing.oaf"), b"abc").expect("write recording");
+        fs::write(dir.join("empty.oaf.gz"), b"").expect("write zero-byte recording");
+        fs::write(dir.join("notes.txt"), b"unrelated").expect("write unrelated entry");
+
+        let refused = existing_recording_bytes(&dir, 2).expect_err("third entry exceeds limit");
+        assert_eq!(refused.kind(), ErrorKind::InvalidData);
+        let text = refused.to_string();
+        assert!(text.contains("entry limit exceeded"));
+        assert!(text.contains("3 entries found"), "{text}");
+        assert!(text.contains("limit of 2"), "{text}");
+        assert!(text.contains("no existing file was touched"), "{text}");
+        assert_eq!(
+            existing_recording_bytes(&dir, 3).expect("exact entry allowance"),
+            3
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
 }

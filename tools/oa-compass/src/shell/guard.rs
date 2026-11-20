@@ -1,35 +1,22 @@
-//! Shell (B1): the sealed hold-out recording. The recording of 2026-11-19 lives under
-//! `scds/rec-20261119` and is never read by this tool: any input path that has `scds` followed by
-//! `rec-20261119` as two consecutive components (exact match, on the path as given and on its
-//! canonical form, so a link into it is caught) is refused.
+//! Shell (B1): the sealed hold-out data. The rule and the list live in the shared guard
+//! (`oa-sealed`, `crates/oa-sealed/sealed_paths.txt`); this is only its error mapping for the export.
+//! Every path is resolved and checked there, as given and after links.
 
-use std::path::{Component, Path};
+use std::path::Path;
 
 use super::error::ExportError;
 
-fn names(p: &Path) -> Vec<String> {
-    p.components()
-        .filter_map(|c| match c {
-            Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn holds_sealed(p: &Path) -> bool {
-    let n = names(p);
-    n.windows(2)
-        .any(|w| matches!(w, [a, b] if a == "scds" && b == "rec-20261119"))
-}
-
-/// Refuses `path` if it is, or is inside, the sealed recording.
+/// Refuses `path` if it is, is inside, resolves into or holds a sealed recording.
 pub fn refuse_holdout(path: &Path) -> Result<(), ExportError> {
-    let canonical = std::fs::canonicalize(path).ok();
-    if holds_sealed(path) || canonical.as_deref().is_some_and(holds_sealed) {
-        return Err(ExportError::Input(format!(
-            "{}: this is the sealed hold-out recording (scds/rec-20261119); it is never read",
-            path.display()
-        )));
-    }
-    Ok(())
+    oa_sealed::refuse(path).map_err(ExportError::Input)
+}
+
+/// The opener every input file goes through: `oa_bench`'s file opener is itself guarded.
+pub fn guarded_opener() -> oa_bench::input::Opener {
+    oa_bench::input::file_opener()
+}
+
+/// Opens `path` for reading through the shared guard (checked before and after the open).
+pub fn open(path: &Path) -> std::io::Result<std::fs::File> {
+    oa_sealed::open(path)
 }

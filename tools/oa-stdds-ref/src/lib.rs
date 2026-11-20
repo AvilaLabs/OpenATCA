@@ -12,10 +12,12 @@
 //! * [`sources`]: the tracker rows (interpolated here) and the ADS-B truth.
 //! * [`engine`]: pairing by Mode S address, the per-track time-offset fit, the error sets.
 //! * [`report`]: the summary text and the per-sample CSV, byte-identical for the same inputs.
-//! * [`load`]: reading `.oaf` / `.oaf.gz` recordings, and the sealed-path refusal.
+//! * [`load`]: reading `.oaf` / `.oaf.gz` recordings.
+//! * [`guard`]: the sealed-path refusal, through the shared guard `oa-sealed`.
 //! * [`run`]: runs the tracker and builds the truth from the ADS-B clip, as `vs_eram` does.
 
 pub mod engine;
+pub mod guard;
 pub mod load;
 pub mod model;
 pub mod report;

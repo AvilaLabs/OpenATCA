@@ -342,7 +342,7 @@ fn pct(v: &[f64], p: f64) -> f64 {
         return f64::NAN;
     }
     let mut s = v.to_vec();
-    s.sort_by(f64::total_cmp);
+    s.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     let k = ((p * s.len() as f64).ceil() as usize).clamp(1, s.len());
     s.get(k - 1).copied().unwrap_or(f64::NAN)
 }
@@ -1069,6 +1069,11 @@ fn run(args: &[String]) -> Result<(), String> {
         }
     }
     let out = out.ok_or_else(|| USAGE.to_string())?;
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    oa_sealed::refuse(&out)?;
+    if let Some(c) = &clip {
+        oa_sealed::refuse(std::path::Path::new(c))?;
+    }
     if opts.quick {
         opts.worlds = 1;
         opts.pair_seeds = 3;
@@ -1168,6 +1173,11 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e == USAGE => {
             eprintln!("{e}");
+            ExitCode::from(2)
+        }
+        // A sealed hold-out path is a usage refusal, like the other tools: exit 2.
+        Err(e) if e.contains("OA-SEAL-001") => {
+            eprintln!("oa-track-fusion: {e}");
             ExitCode::from(2)
         }
         Err(e) => {

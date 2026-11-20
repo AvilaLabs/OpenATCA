@@ -3,7 +3,7 @@
 //! reader, parses every message frame and prints per-kind counts, parse-error counts and
 //! per-field presence counts. It prints no position, identity, time or other message value;
 //! the unknown-path and unknown-root lines are element and namespace names (schema text).
-//! Paths under `scds/rec-20261119`, `scds/stdds-20261119-holdout` and `scds/stdds-smoke-20261119` are refused.
+//! Paths into the sealed hold-out data (`oa-sealed`, `crates/oa-sealed/sealed_paths.txt`) are refused.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -16,7 +16,7 @@ use oa_feed::reader::FrameReader;
 use oa_feed::replay::REPLAY_LIMITS;
 use oa_stdds::{
     new_stats, parse_message, std_error_index, Limits, Stats, ERROR_KIND_NAMES, KIND_NAMES,
-    SMES_FIELD_NAMES, STD_ERROR_NAMES, TAIS_FIELD_NAMES,
+    LATENCY_BUCKET_NAMES, SMES_FIELD_NAMES, STD_ERROR_NAMES, TAIS_FIELD_NAMES,
 };
 use oa_xml::{Limits as XmlLimits, Parser};
 use oa_zip::GzipReader;
@@ -31,6 +31,9 @@ struct Ctx {
     other_frames: u64,
     bad_frames: u64,
     refused: [u64; 4],
+    /// Bytes the frame reader would not take after a drain (a stall): counted, never dropped
+    /// silently; the run exits non-zero.
+    stalled_bytes: u64,
 }
 
 fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
@@ -59,44 +62,18 @@ fn feed(reader: &mut FrameReader<'_>, ctx: &mut Ctx, data: &[u8]) {
         off += took;
         drain(reader, ctx);
         if took == 0 {
+            ctx.stalled_bytes += (data.len() - off) as u64;
             break;
         }
     }
 }
 
-/// Recordings under `scds/` that are sealed hold-outs or smoke sets and are never read.
-const SEALED: [&str; 3] = [
-    "rec-20261119",
-    "stdds-20261119-holdout",
-    "stdds-smoke-20261119",
-];
-
-/// Whether the components of `p` contain `scds` immediately followed by a sealed name.
-fn names_sealed(p: &std::path::Path) -> bool {
-    let c: Vec<_> = p
-        .components()
-        .map(|c| c.as_os_str().to_os_string())
-        .collect();
-    c.windows(2)
-        .any(|w| w[0] == "scds" && SEALED.iter().any(|s| w[1] == *s))
-}
-
-/// Refuses (exit 2, before the file is opened) a path that names a sealed folder as given, or
-/// whose every prefix, with links resolved, does.
-fn refuse_sealed(path: &str) {
-    let given = std::path::Path::new(path);
-    let mut bad = names_sealed(given);
-    let mut prefix = std::path::PathBuf::new();
-    for comp in given.components() {
-        prefix.push(comp);
-        if let Ok(real) = std::fs::canonicalize(&prefix) {
-            bad |= names_sealed(&real);
-        }
-    }
-    if bad {
-        eprintln!("refused: the sealed hold-out recording is not read");
-        std::process::exit(2);
-    }
+/// Whether `t` is 1 to `max` ASCII letters and digits and the `extra` characters.
+fn safe_text(t: &str, extra: &[u8], max: usize) -> bool {
+    !t.is_empty()
+        && t.len() <= max
+        && t.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || extra.contains(&b))
 }
 
 fn main() {
@@ -104,8 +81,15 @@ fn main() {
         eprintln!("usage: stdds_summary FILE.oaf[.gz]");
         std::process::exit(2);
     });
-    refuse_sealed(&path);
-    let mut src = std::fs::File::open(&path).unwrap();
+    // The shared sealed hold-out guard (`oa-sealed`): the path is resolved and checked, the file
+    // is opened and the opened file is checked again.
+    let mut src = match oa_sealed::open(std::path::Path::new(&path)) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("refused or unreadable: {path}: {e}");
+            std::process::exit(2);
+        }
+    };
     let mut ctx = Ctx {
         parser: Parser::new(XmlLimits::default()).unwrap(),
         stats: new_stats(),
@@ -114,11 +98,20 @@ fn main() {
         other_frames: 0,
         bad_frames: 0,
         refused: [0; 4],
+        stalled_bytes: 0,
     };
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
     let mut reader = FrameReader::new(&mut storage).unwrap();
     let mut chunk = vec![0u8; 64 * 1024];
-    let mut n = src.read(&mut chunk).unwrap();
+    // Read until two bytes (the gzip magic) or the end of the file.
+    let mut n = 0;
+    while n < 2 {
+        let got = src.read(&mut chunk[n..]).unwrap();
+        if got == 0 {
+            break;
+        }
+        n += got;
+    }
     let mut gz =
         (n >= 2 && chunk[..2] == [0x1f, 0x8b]).then(|| Box::new(GzipReader::new(REPLAY_LIMITS)));
     let mut gz_damaged = false;
@@ -166,22 +159,97 @@ fn main() {
     }
     for (i, name) in TAIS_FIELD_NAMES.iter().enumerate() {
         println!(
-            "tais field {name}: present {} refused {}",
-            s.tais_present[i], s.tais_errors[i]
+            "tais field {name}: present {} present_empty {} refused {}",
+            s.tais_present[i], s.tais_present_empty[i], s.tais_errors[i]
         );
     }
     for (i, name) in SMES_FIELD_NAMES.iter().enumerate() {
         println!(
-            "smes field {name}: present {} refused {}",
-            s.smes_present[i], s.smes_errors[i]
+            "smes field {name}: present {} present_empty {} refused {}",
+            s.smes_present[i], s.smes_present_empty[i], s.smes_errors[i]
         );
     }
+    // Refused-field diagnostics: the text's length and character classes, never a value.
+    for h in &s.shapes {
+        println!(
+            "refused shape {} {} len {} classes {}: {}",
+            h.field,
+            ERROR_KIND_NAMES
+                .get(h.kind as usize)
+                .copied()
+                .unwrap_or("?"),
+            h.len,
+            h.pattern,
+            h.count
+        );
+    }
+    println!("refused shape overflow: {}", s.shapes_overflow);
+    // Track flags are not identifying; their value histogram is printed.
+    for (name, c) in ["pseudo", "frozen", "new", "adsb", "coast"]
+        .iter()
+        .zip(&s.tais_flags)
+    {
+        let total = c[0] + c[1];
+        println!(
+            "tais flag track/{name}: false {} true {} of {total}",
+            c[0], c[1]
+        );
+    }
+    let adsb = s.tais_flags[3];
+    if adsb[0] + adsb[1] > 0 {
+        println!(
+            "tais adsb false share: {:.4}",
+            adsb[0] as f64 / (adsb[0] + adsb[1]) as f64
+        );
+    }
+    for (name, c) in LATENCY_BUCKET_NAMES.iter().zip(&s.latency) {
+        println!("latency recSAFAReceiptTime-recSTARSTimestamp ms {name}: {c}");
+    }
+    println!("latency missing a time: {}", s.latency_missing);
+    println!(
+        "distinct recSTARSSrcID: {} overflow {}",
+        s.src_ids.len(),
+        s.src_ids_overflow
+    );
+    // Service states are not identifying; the value histogram is printed.
+    let mut other = 0u64;
+    for (t, c) in &s.status_values {
+        if safe_text(t, b" _-=", 130) {
+            println!("stdds-status {t}: {c}");
+        } else {
+            other += c;
+        }
+    }
+    println!("stdds-status other (text outside [A-Za-z0-9 _-]): {other}");
+    println!(
+        "stdds-status dropped {} value too long {} key too long {} table overflow {}",
+        s.status_dropped, s.status_value_too_long, s.status_key_too_long, s.status_table_overflow
+    );
+    // Element and root names are printed only if they are plain schema text.
+    let mut other_names = 0u64;
     for u in &s.unknown {
-        println!("unknown element {}: {}", u.text, u.count);
+        if safe_text(&u.text, b" _-:./{}", 120) {
+            println!("unknown element {}: {}", u.text, u.count);
+        } else {
+            other_names += u.count;
+        }
     }
     println!("unknown element overflow: {}", s.unknown_overflow);
     for (t, c) in &s.unknown_roots {
-        println!("unknown root {t}: {c}");
+        if safe_text(t, b" _-:./{}", 260) {
+            println!("unknown root {t}: {c}");
+        } else {
+            other_names += c;
+        }
     }
+    println!("unknown names printed as other: {other_names}");
     println!("unknown root overflow: {}", s.unknown_roots_overflow);
+    println!(
+        "frame reader stalled, bytes not read: {}",
+        ctx.stalled_bytes
+    );
+    if ctx.stalled_bytes > 0 {
+        eprintln!("error: the frame reader stalled; the summary is incomplete");
+        std::process::exit(3);
+    }
 }

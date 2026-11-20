@@ -127,7 +127,7 @@ fn count(table: &'static str, n: usize) -> Result<u32, SnapshotError> {
 }
 
 fn put_u32(out: &mut Vec<u8>, v: u32) {
-    out.extend_from_slice(&v.to_le_bytes());
+    out.extend_from_slice(&u32::to_le_bytes(v));
 }
 
 fn put_header(out: &mut Vec<u8>, tag: &[u8; 4], rows: u32) {
@@ -137,7 +137,7 @@ fn put_header(out: &mut Vec<u8>, tag: &[u8; 4], rows: u32) {
 
 fn put_i32s(out: &mut Vec<u8>, col: &[i32]) {
     for v in col {
-        out.extend_from_slice(&v.to_le_bytes());
+        out.extend_from_slice(&i32::to_le_bytes(*v));
     }
 }
 
@@ -149,13 +149,13 @@ fn put_u32s(out: &mut Vec<u8>, col: &[u32]) {
 
 fn put_u16s(out: &mut Vec<u8>, col: &[u16]) {
     for v in col {
-        out.extend_from_slice(&v.to_le_bytes());
+        out.extend_from_slice(&u16::to_le_bytes(*v));
     }
 }
 
 fn put_i16s(out: &mut Vec<u8>, col: &[i16]) {
     for v in col {
-        out.extend_from_slice(&v.to_le_bytes());
+        out.extend_from_slice(&i16::to_le_bytes(*v));
     }
 }
 
@@ -180,7 +180,7 @@ fn put_spans<I: Copy>(out: &mut Vec<u8>, col: &[Span<I>], raw: impl Fn(I) -> u32
 
 fn put_bits(out: &mut Vec<u8>, b: &BitSet) {
     for w in &b.words {
-        out.extend_from_slice(&w.to_le_bytes());
+        out.extend_from_slice(&u64::to_le_bytes(*w));
     }
 }
 

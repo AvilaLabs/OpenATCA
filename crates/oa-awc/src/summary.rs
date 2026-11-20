@@ -35,7 +35,7 @@ pub const MAX_FILE_BYTES: u64 = oa_json::MAX_INPUT_BYTES as u64;
 /// Reads a whole file of at most `limit` bytes: its length is checked first, and the read
 /// itself stops one byte past the limit, so a file that grows meanwhile is refused too.
 pub fn read_file_capped(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
-    let f = std::fs::File::open(path)?;
+    let f = oa_sealed::open(path)?;
     if f.metadata()?.len() > limit {
         return Err(std::io::ErrorKind::InvalidInput.into());
     }
@@ -89,6 +89,7 @@ pub struct Availability {
 }
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    oa_sealed::refuse_io(dir)?;
     let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .collect();
@@ -264,7 +265,7 @@ pub fn availability(t: &MetarTable) -> Availability {
         }
         i = j;
     }
-    rows.sort_by(|x, y| x.1.total_cmp(&y.1).then_with(|| x.0.cmp(&y.0)));
+    rows.sort_by(|x, y| oa_math::cmp_canon_f64(x.1, y.1).then_with(|| x.0.cmp(&y.0)));
     rows.truncate(10);
     a.worst = rows;
     a

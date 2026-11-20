@@ -177,9 +177,11 @@ fn status(r: &Result<Sample, Unpaired>) -> String {
     }
 }
 
+/// One row per STDDS record: its place in the input (file and record number), class, status, fitted
+/// offset and errors. No address, track number, callsign, time or position: the real recordings are
+/// reported as counts and aggregate statistics only.
 fn csv_of(a: &Analysis) -> String {
-    let mut o =
-        String::from("file,record,class,addr,track,t_ms,status_plain,offset_ms,status_fitted");
+    let mut o = String::from("file,record,class,status_plain,offset_ms,status_fitted");
     for mode in ["p", "f"] {
         for set in SET_CODES {
             for (name, _) in METRICS {
@@ -193,13 +195,10 @@ fn csv_of(a: &Analysis) -> String {
         let rec = &r.rec;
         let _ = write!(
             o,
-            "{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{}",
             rec.file,
             rec.index,
             rec.class.name(),
-            rec.addr.map_or(String::new(), |x| format!("{x:06x}")),
-            rec.track_num.map_or(String::new(), |x| x.to_string()),
-            rec.t_ms.map_or(String::new(), |x| x.to_string()),
             status(&r.plain),
             r.offset_ms.map_or(String::new(), |x| x.to_string()),
             status(&r.fitted),

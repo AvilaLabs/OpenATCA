@@ -319,3 +319,29 @@ fn a_file_is_read_in_bounded_pieces_whatever_its_size() {
         biggest.get()
     );
 }
+
+// REQ: OA-RPL-276
+#[test]
+fn offline_search_renews_bounded_steps_across_long_garbage_and_keeps_valid_tail() {
+    let garbage = 24 << 20; // six scan quotas
+    let payload = b"state=up\n";
+    let mut tail = vec![0u8; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
+    let tail_len = oa_feed::encode_frame(&mut tail, 3, 0, 1, 1, 0, payload).unwrap();
+    tail.truncate(tail_len);
+    let mut bytes = vec![0u8; garbage];
+    bytes.extend_from_slice(&tail);
+    let expected_bytes = bytes.len() as u64;
+
+    let mut p = new_pipeline(PipelineConfig::default()).unwrap();
+    let report = run_streams_with(
+        &mut p,
+        vec![spec_from_bytes(FeedKind::Sfdps, vec![bytes])],
+        64,
+        &mut |_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(report.bytes, expected_bytes);
+    assert_eq!(p.frames[FeedKind::Sfdps as usize], 1);
+    assert_eq!(p.errors[ErrKind::FrameTruncated as usize], 0);
+    assert!(p.errors[ErrKind::FrameBadMagic as usize] > 0);
+}

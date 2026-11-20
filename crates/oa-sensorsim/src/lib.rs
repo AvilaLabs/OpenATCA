@@ -15,9 +15,12 @@
 //!   `oa-asterix`.
 //! * [`spoof`]: ghost, drift, replay and duplicate-address transforms with per-row labels and a
 //!   confusion matrix.
+//! * [`adsb_error`]: per-aircraft position bias and latency applied to reports regenerated from an
+//!   exact truth, with per-row labels.
 //! * [`prng`]: xoshiro256** seeded by SplitMix64, with the published test vectors.
 //! * [`geom`]: WGS-84 radar frame and line of sight.
 
+pub mod adsb_error;
 pub mod clip;
 pub mod error;
 pub mod geom;

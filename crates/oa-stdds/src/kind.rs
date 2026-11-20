@@ -1,4 +1,4 @@
-//! Classification of a message by root element and namespace. Core (pure).
+//! Classification of a message by root element and namespace. Pure functions (crate class shell).
 //!
 //! STDDS native ("SimpleXML") messages put their root in a namespace of the form
 //! `urn:us:gov:dot:faa:atm:terminal:entities:vN-M:<service>:<name>`, for example
@@ -49,10 +49,14 @@ pub enum Kind {
     FixmAsdex,
     /// A FIXM messaging `MessageCollection` of another or unreadable message type.
     FixmOther,
+    /// One of the six STDDS service-status roots ([`STATUS_ROOTS`]) in the `status` namespace.
+    StddsStatus,
+    /// An `AssetMessage` in the mmixm base namespace (classified only).
+    MmixmAsset,
 }
 
 /// Number of [`Kind`] values.
-pub const KIND_COUNT: usize = 16;
+pub const KIND_COUNT: usize = 18;
 
 /// Display names of the kinds, in order.
 pub const KIND_NAMES: [&str; KIND_COUNT] = [
@@ -72,6 +76,8 @@ pub const KIND_NAMES: [&str; KIND_COUNT] = [
     "fixm-tais",
     "fixm-asdex",
     "fixm-other",
+    "stdds-status",
+    "mmixm-asset",
 ];
 
 /// The display name of a kind.
@@ -80,6 +86,16 @@ pub fn kind_name(k: Kind) -> &'static str {
 }
 
 const STDDS_PREFIX: &[u8] = b"urn:us:gov:dot:faa:atm:terminal:entities:";
+/// The root names of the STDDS service-status messages (namespace `...:vN-M:status`).
+pub const STATUS_ROOTS: [&str; 5] = [
+    "AirportDataServiceStatus",
+    "TerminalAutomationInformationServiceStatus",
+    "TowerDepartureEventServiceStatus",
+    "SurfaceMovementEventServiceStatus",
+    "STDDSStatus",
+];
+
+const MMIXM_PREFIX: &[u8] = b"https://mmixm.aero/base/";
 const FIXM_MESSAGING_PREFIX: &[u8] = b"http://www.fixm.aero/messaging/";
 
 /// `vN-M` with one or more digits on each side.
@@ -107,6 +123,18 @@ pub fn stdds_namespace(uri: &[u8]) -> Option<(&[u8], &[u8])> {
         return None;
     };
     (is_version(ver) && !service.is_empty() && !name.is_empty()).then_some((service, name))
+}
+
+/// Whether `uri` is the STDDS status namespace `urn:...:entities:vN-M:status`, whatever its version.
+fn is_status_namespace(uri: &[u8]) -> bool {
+    let Some(rest) = uri.strip_prefix(STDDS_PREFIX) else {
+        return false;
+    };
+    let mut parts = rest.split(|&b| b == b':');
+    let (Some(ver), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    is_version(ver) && name == b"status"
 }
 
 /// The raw bytes of element `e`'s name; empty if the span is outside the document.
@@ -175,6 +203,31 @@ pub(crate) fn attr_value<'o>(
     None
 }
 
+/// Whether element `e` has an attribute called `name`, whatever its value.
+pub(crate) fn attr_present(doc: &Doc<'_>, e: ElemIx, name: &[u8]) -> bool {
+    let (Some(first), Some(count)) = (
+        doc.elem_first_attr.get(e.0 as usize),
+        doc.elem_attr_count.get(e.0 as usize),
+    ) else {
+        return false;
+    };
+    let first = first.0 as usize;
+    (first..first.saturating_add(*count as usize)).any(|a| {
+        doc.attr_name
+            .get(a)
+            .and_then(|sp| span_bytes(doc.input, *sp).ok())
+            == Some(name)
+    })
+}
+
+/// Whether element `e` is in the root's namespace or in none: the real feed's children are
+/// unqualified (only the root carries a prefix), so a child in any other namespace is not a
+/// field of the message.
+pub(crate) fn in_message_ns(doc: &Doc<'_>, e: ElemIx) -> bool {
+    let ns = ns_of(doc, e);
+    ns.is_empty() || ns == ns_of(doc, ElemIx(0))
+}
+
 /// Classifies a parsed message. Pure: the root element's local name and namespace, and for the
 /// FIXM-mediated form the first `metadata@messageType`. Never fails: no match is
 /// [`Kind::Unknown`].
@@ -187,6 +240,17 @@ pub fn classify(doc: &Doc<'_>) -> Kind {
     let ns = ns_of(doc, root);
     if let Some((service, ns_name)) = stdds_namespace(ns) {
         return classify_stdds(doc, root, name, service, ns_name);
+    }
+    if is_status_namespace(ns) {
+        let known = STATUS_ROOTS.iter().any(|r| r.as_bytes() == name);
+        return if known {
+            Kind::StddsStatus
+        } else {
+            Kind::Unknown
+        };
+    }
+    if ns.starts_with(MMIXM_PREFIX) && name == b"AssetMessage" {
+        return Kind::MmixmAsset;
     }
     if ns.starts_with(FIXM_MESSAGING_PREFIX) && name == b"MessageCollection" {
         return classify_fixm(doc);

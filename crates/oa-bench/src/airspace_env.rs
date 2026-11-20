@@ -213,7 +213,9 @@ pub fn lookup_from_model(m: &Model) -> AirspaceLookup {
         }
     }
     for places in fixes.values_mut() {
-        places.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        places.sort_by(|a, b| {
+            oa_math::cmp_canon_f64(a.0, b.0).then(oa_math::cmp_canon_f64(a.1, b.1))
+        });
     }
     let ambiguous_fixes = fixes.values().filter(|v| v.len() > 1).count();
     let zone = units.iter().position(|u| u.id == m.meta.artcc);

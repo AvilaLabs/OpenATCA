@@ -262,14 +262,14 @@ fn encode_any(
     let dst = out.get_mut(..total)?;
     let mut head = [0u8; HEADER_LEN_V2];
     let kf = [kind, flags];
-    let reserved = 0u16.to_le_bytes();
+    let reserved = u16::to_le_bytes(0);
     let (seq_b, recv_b, jms_b) = (
-        seq.to_le_bytes(),
-        recv_unix_ns.to_le_bytes(),
-        jms_timestamp_ms.to_le_bytes(),
+        u64::to_le_bytes(seq),
+        i64::to_le_bytes(recv_unix_ns),
+        i64::to_le_bytes(jms_timestamp_ms),
     );
-    let mono_b = mono_ns.unwrap_or(0).to_le_bytes();
-    let len_b = (payload.len() as u32).to_le_bytes();
+    let mono_b = u64::to_le_bytes(mono_ns.unwrap_or(0));
+    let len_b = u32::to_le_bytes(payload.len() as u32);
     let magic: &[u8] = if mono_ns.is_some() { &MAGIC_V2 } else { &MAGIC };
     let mono_part: &[u8] = if mono_ns.is_some() { &mono_b } else { &[] };
     let parts: [&[u8]; 8] = [
@@ -284,6 +284,6 @@ fn encode_any(
         .copy_from_slice(head.get(..header_len)?);
     dst.get_mut(header_len..body)?.copy_from_slice(payload);
     let crc = crc32(dst.get(..body)?);
-    dst.get_mut(body..)?.copy_from_slice(&crc.to_le_bytes());
+    dst.get_mut(body..)?.copy_from_slice(&u32::to_le_bytes(crc));
     Some(total)
 }

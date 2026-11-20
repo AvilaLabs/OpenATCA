@@ -151,7 +151,7 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             );
             continue;
         }
-        let files: Result<Vec<File>, _> = parts.iter().map(File::open).collect();
+        let files: Result<Vec<File>, _> = parts.iter().map(|p| oa_sealed::open(p)).collect();
         let files = match files {
             Ok(f) => f,
             Err(e) => {
@@ -194,7 +194,7 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
     if dropped > 0 {
         println!("  {dropped} observations over the limit of {MAX_OBS} were not kept");
     }
-    obs.sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+    obs.sort_by(|a, b| oa_math::cmp_canon_f64(a.time_s, b.time_s));
     let with_wind = obs.iter().filter(|o| o.wind.is_some()).count();
     let with_oat = obs.iter().filter(|o| o.oat_c.is_some()).count();
     println!(

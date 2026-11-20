@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 //! oa-stdds: parser for FAA SWIM STDDS (SWIM Terminal Data Distribution System) messages
-//! delivered through SCDS. Core (pure): every function here is a function of the parsed
-//! document and the bytes it came from, no I/O, no clock (RULESET B1, B2). Class `shell` like
-//! its sibling SWIM parsers (`oa-fixm`, `oa-tbfm`): the crate's only I/O is the example.
+//! delivered through SCDS. Class `shell`, like its sibling SWIM parsers (`oa-fixm`, `oa-tbfm`):
+//! every function here is a function of the parsed document and the bytes it came from, no I/O,
+//! no clock (RULESET B1, B2), and the crate's only I/O is the example.
 //!
 //! * [`kind`]: classifies a message by root element and namespace into a [`Kind`]. A message of
 //!   no known kind is counted, with its root name and namespace, never an error (IF-R6).
@@ -15,9 +15,13 @@
 //! * [`stats`]: cumulative counts (kinds, errors, per-field presence, unknown elements).
 //!
 //! The element names come from the FAA's public FIXM-mediated STDDS data overview (its mapping
-//! tables, REQUIREMENTS.md OA-STD-001). No real STDDS message was available when this was
-//! written: every unit marked ASSUMED in a field's doc comment must be confirmed against real
-//! data before the value is trusted.
+//! tables, REQUIREMENTS.md OA-STD-001). The parser was first written without a real message and
+//! then checked against the first recorded day (20 November 2026): every element of the TAIS
+//! track and flight plan and the SMES position report now parses, apart from runway text with
+//! damaged encoding, which is refused. That check confirms the element names, the text forms and
+//! the value ranges. It does not confirm units: a unit still marked ASSUMED in a field's doc
+//! comment is confirmed only by comparing the values with an independent source, such as the
+//! same aircraft's ADS-B, and is not trusted before then.
 //!
 //! Interface rules (INTERFACES.md): a field that is present but unreadable is a counted field
 //! error that names the field and the byte offset (IF-R5), the record is kept with the field
@@ -30,6 +34,7 @@ pub mod kind;
 pub mod scalar;
 pub mod smes;
 pub mod stats;
+pub mod status;
 pub mod tais;
 mod walk;
 
@@ -40,7 +45,8 @@ pub use kind::{classify, kind_name, Kind, KIND_COUNT, KIND_NAMES};
 pub use smes::{
     parse_smes, SmesField, SmesMessage, SmesRecord, SMES_FIELD_COUNT, SMES_FIELD_NAMES,
 };
-pub use stats::{new_stats, Stats, UnknownPath};
+pub use stats::{new_stats, ShapeCount, Stats, UnknownPath, LATENCY_BUCKETS, LATENCY_BUCKET_NAMES};
+pub use status::{parse_status, StatusMessage, StatusState};
 pub use tais::{
     parse_tais, TaisField, TaisMessage, TaisRecord, TAIS_FIELD_COUNT, TAIS_FIELD_NAMES,
 };
@@ -106,6 +112,70 @@ pub const ERROR_KIND_NAMES: [&str; ERROR_KIND_COUNT] = [
     "undecodable text",
 ];
 
+/// The shape of a refused text, never its value: its length and its character classes with
+/// runs collapsed (`9` digit, `A` upper-case letter, `a` lower-case letter, `~` space, `?`
+/// non-ASCII, `#` other control or symbol, and `-+.:/_,;=` as themselves), first
+/// [`SHAPE_LEN`] classes. Used to diagnose a refused field without keeping any value.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shape {
+    /// Length in bytes (saturating); 0 when the text was not available (longer than the buffer).
+    pub len: u16,
+    /// The collapsed classes, zero padded.
+    pub classes: [u8; SHAPE_LEN],
+}
+
+/// Most character classes a [`Shape`] keeps.
+pub const SHAPE_LEN: usize = 12;
+
+impl Shape {
+    /// No text was available.
+    pub const NONE: Shape = Shape {
+        len: 0,
+        classes: [0; SHAPE_LEN],
+    };
+
+    /// The shape of `s`.
+    pub fn of(s: &[u8]) -> Shape {
+        let mut out = Shape {
+            len: u16::try_from(s.len()).unwrap_or(u16::MAX),
+            classes: [0; SHAPE_LEN],
+        };
+        let mut n = 0usize;
+        let mut last = 0u8;
+        for &b in s {
+            let c = match b {
+                b'0'..=b'9' => b'9',
+                b'A'..=b'Z' => b'A',
+                b'a'..=b'z' => b'a',
+                b' ' => b'~',
+                b'-' | b'+' | b'.' | b':' | b'/' | b'_' | b',' | b';' | b'=' => b,
+                0x80..=0xff => b'?',
+                _ => b'#',
+            };
+            if c == last {
+                continue;
+            }
+            last = c;
+            match out.classes.get_mut(n) {
+                Some(slot) => *slot = c,
+                None => break,
+            }
+            n += 1;
+        }
+        out
+    }
+
+    /// The classes as text.
+    pub fn pattern(&self) -> String {
+        self.classes
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| char::from(c))
+            .collect()
+    }
+}
+
 /// One refused field: which, why and where (the byte offset of its element name).
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +185,8 @@ pub struct FieldError {
     pub kind: FieldErrorKind,
     /// Byte offset in the message of the field's element name.
     pub offset: u32,
+    /// The refused text's shape (no value).
+    pub shape: Shape,
 }
 
 impl fmt::Display for FieldError {
@@ -187,12 +259,15 @@ impl std::error::Error for StdError {}
 pub enum Message {
     Tais(TaisMessage),
     Smes(SmesMessage),
+    Status(StatusMessage),
     /// A message of a kind that is classified only (or unknown), counted in the stats.
     Other(Kind),
 }
 
 /// Parses one complete message: XML, then classification, then the typed parse for the kinds
-/// that have one. Every outcome is counted in `stats`. Nothing here panics on any input.
+/// that have one. Every outcome is counted in `stats`, and a message is counted once: in
+/// `kinds` if it parsed as XML, else in `errors[xml]`, so `messages == sum(kinds) + errors[xml]`;
+/// a refusal after classification adds to `errors` only. Nothing here panics on any input.
 pub fn parse_message(
     parser: &mut Parser,
     bytes: &[u8],
@@ -203,6 +278,8 @@ pub fn parse_message(
         Ok(d) => d,
         Err(x) => {
             let e = StdError::Xml(x);
+            // An unreadable message has no kind: it is counted here, once, as a message.
+            stats.messages += 1;
             stats.observe_error(&e);
             return Err(e);
         }
@@ -212,6 +289,7 @@ pub fn parse_message(
     match k {
         Kind::TaisTrackAndFlightPlan => parse_tais(&doc, limits, stats).map(Message::Tais),
         Kind::AsdexPositionReport => parse_smes(&doc, limits, stats).map(Message::Smes),
+        Kind::StddsStatus => parse_status(&doc, limits, stats).map(Message::Status),
         other => Ok(Message::Other(other)),
     }
 }

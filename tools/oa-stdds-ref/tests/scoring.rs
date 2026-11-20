@@ -9,7 +9,7 @@
 
 use oa_stdds::{new_stats, parse_message, Limits, Message};
 use oa_stdds_ref::engine::{analyse, evaluate, fit_offset, pair_err, FitMiss, FIT_MIN_SAMPLES};
-use oa_stdds_ref::load::{is_sealed, load_reader, rec_of};
+use oa_stdds_ref::load::{load_reader, rec_of};
 use oa_stdds_ref::model::{classify_record, Class, Fix, Miss, Rec, Reference, Unpaired};
 use oa_stdds_ref::report::build_report;
 use oa_stdds_ref::sources::{interpolate, Row, TrackerSource};
@@ -730,23 +730,52 @@ fn the_report_is_deterministic_and_carries_digests() {
     assert!(!r1.summary.contains("seconds elapsed"));
 }
 
-// REQ: OA-SRF-010
+// REQ: OA-SRF-014
 #[test]
-fn sealed_folders_are_refused_as_named_and_through_links() {
-    use std::os::unix::fs::symlink;
-    use std::path::Path;
-    assert!(is_sealed(Path::new("/x/scds/rec-20261119/a.oaf")));
-    assert!(is_sealed(Path::new(
-        "x/scds/stdds-20261119-holdout/a.oaf.gz"
-    )));
-    assert!(is_sealed(Path::new("/x/scds/stdds-smoke-20261119")));
-    assert!(!is_sealed(Path::new("/x/scds/dev-20261118/a.oaf")));
-    assert!(!is_sealed(Path::new("/x/rec-20261119/a.oaf")));
+fn the_text_output_holds_none_of_the_fixture_identifiers() {
+    let l = line();
+    let mut recs = track(2_300, Class::Unknown);
+    for (k, r) in recs.iter_mut().enumerate() {
+        r.src = *b"QQZ\0\0\0\0\0";
+        r.track_num = Some(31_337);
+        r.index = k as u32;
+    }
+    let a = analyse(&recs, &tracker_of(&l), &l);
+    let r = build_report(&["STDDS file 0: input.oaf (digest abc)".to_string()], &a);
+    let addr_hex = format!("{ADDR:06x}");
+    let samples = [
+        addr_hex.clone(),
+        addr_hex.to_uppercase(),
+        ADDR.to_string(),
+        "31337".to_string(),
+        "QQZ".to_string(),
+        format!("{LAT}"),
+        format!("{LON}"),
+        T0.to_string(),
+        (T0 + 20_000).to_string(),
+    ];
+    for out in [&r.summary, &r.csv] {
+        for id in &samples {
+            assert!(!out.contains(id.as_str()), "{id} in the output");
+        }
+    }
+    // The record is still counted and scored.
+    assert!(r.summary.contains("records 81,"));
+    assert_eq!(r.csv.lines().count(), 82);
+}
 
+// REQ: OA-SRF-010, OA-SRF-013
+#[test]
+fn a_sealed_path_exits_2_naming_it_before_anything_is_opened() {
+    use std::os::unix::fs::symlink;
     let base = std::env::temp_dir().join(format!("oa-stdds-ref-seal-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
-    let sealed = base.join("scds").join("rec-20261119");
-    std::fs::create_dir_all(&sealed).unwrap();
+    let sealed = base.join("scds").join("rec-20261119").join("day2");
+    let holdout = base.join("scds").join("stdds-20261119-holdout");
+    let day = base.join("raw").join("adsblol").join("2026.11.21");
+    for d in [&sealed, &holdout, &day] {
+        std::fs::create_dir_all(d).unwrap();
+    }
     let file = sealed.join("day.oaf");
     std::fs::write(&file, b"synthetic").unwrap();
     let to_file = base.join("link-to-file");
@@ -755,37 +784,50 @@ fn sealed_folders_are_refused_as_named_and_through_links() {
     symlink(&file, &to_file).unwrap();
     symlink(&sealed, &to_dir).unwrap();
     symlink(&to_dir, &to_link).unwrap();
-    assert!(is_sealed(&to_file));
-    assert!(is_sealed(&to_dir.join("day.oaf")));
-    assert!(is_sealed(&to_link.join("day.oaf")));
     let fine = base.join("fine.oaf");
     std::fs::write(&fine, b"synthetic").unwrap();
-    assert!(!is_sealed(&fine));
+    let out_dir = base.join("out");
 
-    // The program exits 2 before opening anything, the clip path being absent proves it.
     let exe = env!("CARGO_BIN_EXE_oa-stdds-ref");
-    for p in [&to_file, &to_dir.join("day.oaf"), &to_link.join("day.oaf")] {
-        let out = std::process::Command::new(exe)
+    let run = |clip: &std::path::Path, out: &std::path::Path, file: &std::path::Path| {
+        std::process::Command::new(exe)
             .arg("--adsb")
-            .arg(base.join("no-such-clip.oaf"))
+            .arg(clip)
             .arg("--out")
-            .arg(base.join("out"))
-            .arg(p)
+            .arg(out)
+            .arg(file)
             .output()
-            .unwrap();
-        assert_eq!(out.status.code(), Some(2), "{}", p.display());
-        assert!(String::from_utf8_lossy(&out.stderr).contains("refused"));
-        assert!(!base.join("out").exists());
+            .unwrap()
+    };
+    let missing = base.join("no-such-clip.oaf");
+    // A STDDS file: a sealed directory, a file inside it, and links to the file, the folder and a link.
+    for p in [
+        holdout.clone(),
+        file.clone(),
+        to_file.clone(),
+        to_dir.join("day.oaf"),
+        to_link.join("day.oaf"),
+    ] {
+        let o = run(&missing, &out_dir, &p);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.code(), Some(2), "{}: {err}", p.display());
+        assert!(
+            err.contains("refused") && err.contains(&*p.to_string_lossy()),
+            "{err}"
+        );
+        assert!(!out_dir.exists());
     }
-    // A sealed clip is refused the same way.
-    let out = std::process::Command::new(exe)
-        .arg("--adsb")
-        .arg(&to_file)
-        .arg("--out")
-        .arg(base.join("out"))
-        .arg(&fine)
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    // A sealed ADS-B day, or a link to sealed data, as the clip.
+    for p in [day.join("clip.oaf"), to_file.clone(), to_link.join("c.oaf")] {
+        let o = run(&p, &out_dir, &fine);
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.code(), Some(2), "{}: {err}", p.display());
+        assert!(err.contains(&*p.to_string_lossy()), "{err}");
+        assert!(!out_dir.exists());
+    }
+    // A sealed output folder is refused too, and not created.
+    let o = run(&missing, &holdout.join("out"), &fine);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(!holdout.join("out").exists());
     let _ = std::fs::remove_dir_all(&base);
 }

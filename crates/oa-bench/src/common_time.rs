@@ -84,7 +84,7 @@ fn by_aircraft(p: &PairTable) -> (ErrorsByAircraft, u64, u64) {
             x.0.cmp(&y.0)
                 .then(n(y.1).cmp(&n(x.1)))
                 .then(x.1.cmp(&y.1))
-                .then(x.2.total_cmp(&y.2))
+                .then(oa_math::cmp_canon_f64(x.2, y.2))
         });
         let kept = m.entry(a).or_default();
         let mut last: Option<i64> = None;

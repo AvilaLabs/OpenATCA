@@ -59,12 +59,16 @@ pub mod method {
     /// Associated by callsign but the ERAM positions fail the 3 NM / 1,000 ft check: kept (the
     /// selection must not depend on the error being measured) and scored under its own method.
     pub const CALLSIGN_GATE_FAILED: u8 = 4;
-    pub const NAMES: [&str; 5] = [
+    /// The plan `aircraftAddress` failed the plausibility check or is unknown to truth, and the
+    /// `ADSB_02M` address hint passed it: the hint is used.
+    pub const HINT_OVER_PLAN: u8 = 5;
+    pub const NAMES: [&str; 6] = [
         "none",
         "address",
         "callsign",
         "address hint",
         "callsign (failed 3 NM / 1000 ft check)",
+        "address hint (plan address implausible or unknown to truth)",
     ];
 }
 
@@ -240,7 +244,11 @@ pub fn stats_checked(values: &[f64]) -> Result<Stats, &'static str> {
             abs.push(v.abs());
         }
     }
-    let Some(max) = abs.iter().copied().max_by(f64::total_cmp) else {
+    let Some(max) = abs
+        .iter()
+        .copied()
+        .max_by(|a, b| oa_math::cmp_canon_f64(*a, *b))
+    else {
         return Ok(Stats::EMPTY);
     };
     let n = abs.len() as f64;
@@ -273,7 +281,7 @@ pub fn stats_checked(values: &[f64]) -> Result<Stats, &'static str> {
     if !mean.is_finite() || !rms.is_finite() {
         return Err("statistic not finite");
     }
-    abs.sort_by(f64::total_cmp);
+    abs.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     Ok(Stats {
         n: abs.len() as u64,
         mean,

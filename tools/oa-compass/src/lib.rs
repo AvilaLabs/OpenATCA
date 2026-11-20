@@ -24,7 +24,8 @@
 //! tracker's one-second tick rows (the default) or its update rows. With both `--adsb` and
 //! `--sfdps-dir`, every ERAM flight with an aircraft address is compared with the ADS-B reports of
 //! the same address (`core::addrcheck`): a flight whose track contradicts the address it carries
-//! is exported without I380 address and listed in the README.
+//! is listed in the README; by default its address is written as ERAM published it, and
+//! `--eram-contradicted-address drop` writes it without I380 address instead.
 //!
 //! # CAT021 Ed 2.4 against Ed 2.7, for every item `adsb.ast` encodes
 //!
@@ -67,6 +68,10 @@
 //! The time is I073, the time the receiver network stamped the report; I071 (an avionics time)
 //! and I075 (a separate time for the velocity) are not in the source. The data source is
 //! SAC 255, SIC 13 (a test pair, like the two trackers': 11 and 12; SIC 1 is left free because COMPASS uses 255/1 for its reference).
+
+// The width of `usize` is fixed by construction: no 32-bit build of the core (B10).
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("this crate supports 64-bit targets only");
 
 pub mod core;
 pub mod shell;

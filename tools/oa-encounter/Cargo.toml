@@ -1,0 +1,32 @@
+[package]
+name = "oa-encounter-run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates; not outside dependencies (RULESET F1).
+oa-adsb = { path = "../../crates/oa-adsb" }
+oa-bench = { path = "../../crates/oa-bench" }
+oa-encounter = { path = "../../crates/oa-encounter" }
+oa-nasr = { path = "../../crates/oa-nasr" }
+oa-sealed = { path = "../../crates/oa-sealed" }
+oa-sha256 = { path = "../../crates/oa-sha256" }
+oa-track = { path = "../../crates/oa-track" }
+oa-zip = { path = "../../crates/oa-zip" }
+
+[lib]
+name = "oa_encounter_run"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oa-encounter"
+path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"

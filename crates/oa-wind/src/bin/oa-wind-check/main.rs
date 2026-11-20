@@ -25,6 +25,10 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 fn list(dir: &Path, prefix: &str, suffix: &str) -> Vec<PathBuf> {
+    if let Err(e) = oa_sealed::refuse(dir) {
+        eprintln!("oa-wind-check: {e}");
+        std::process::exit(2);
+    }
     let mut v: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
@@ -103,7 +107,7 @@ fn wind_obs(t: &PirepTable) -> Vec<ObsWind> {
             wspd_kt: f64::from(spd),
         });
     }
-    v.sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
+    v.sort_by(|a, b| oa_math::cmp_canon_f64(a.time_s, b.time_s));
     v
 }
 

@@ -204,10 +204,10 @@ fn main() {
                 ));
             }
         }
-        sg.sort_by(|a, b| b.0.total_cmp(&a.0));
+        sg.sort_by(|a, b| oa_math::cmp_canon_f64(b.0, a.0));
         let all: Vec<f64> = sg.iter().map(|x| x.0).collect();
         let mut sorted = all.clone();
-        sorted.sort_by(|a, b| a.total_cmp(b));
+        sorted.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
         println!(
             "track sigma m at end: median {:.0} p99 {:.0} max {:.0}; top: {:?}",
             sorted[sorted.len() / 2],
@@ -297,7 +297,7 @@ fn main() {
                     .copied()
                     .filter(|r| *r <= conf_s)
                     .map(|r| first_s - r)
-                    .min_by(|a, b| a.abs().total_cmp(&b.abs()));
+                    .min_by(|a, b| oa_math::cmp_canon_f64(a.abs(), b.abs()));
                 refl_rows.push((l, first_s, conf_s, refl.len(), near, refl.first().copied()));
             }
             let all_r: HashSet<u8> = xi.radars.iter().copied().collect();
@@ -459,7 +459,7 @@ fn main() {
         .iter()
         .zip(ages.iter_mut())
     {
-        v.sort_by(|a, b| a.total_cmp(b));
+        v.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
         let p = |q: f64| {
             v.get(((v.len() as f64 - 1.0) * q) as usize)
                 .copied()
@@ -495,7 +495,7 @@ fn main() {
         }
     }
     for (name, v) in ["no-dup", "dup"].iter().zip(gaps.iter_mut()) {
-        v.sort_by(|a, b| a.total_cmp(b));
+        v.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
         let p = |q: f64| {
             v.get(((v.len() as f64 - 1.0) * q) as usize)
                 .copied()

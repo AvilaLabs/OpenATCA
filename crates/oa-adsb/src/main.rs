@@ -74,7 +74,7 @@ fn run(a: &Args) -> Result<ExitCode, String> {
     for p in &a.parts {
         files.push(io::BufReader::with_capacity(
             1 << 20,
-            File::open(p).map_err(|e| format!("{p}: {e}"))?,
+            oa_sealed::open(std::path::Path::new(p)).map_err(|e| format!("{p}: {e}"))?,
         ));
     }
     let mut held = Reports::default();

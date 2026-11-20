@@ -2,6 +2,11 @@
 <ns2:TATrackAndFlightPlan xmlns:ns2="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:tais:terminalautomationinformation">
   <src>ZZA</src>
   <record>
+    <recType>TAIS</recType>
+    <recSrc>ZZ1</recSrc>
+    <recSTARSSrcID>ZZA1</recSTARSSrcID>
+    <recSTARSTimestamp>11045600</recSTARSTimestamp>
+    <recSAFAReceiptTime>2030-01-02T03:04:05.678Z</recSAFAReceiptTime>
     <track>
       <trackNum>1234</trackNum>
       <mrtTime>2030-01-02T03:04:05.678Z</mrtTime>
@@ -14,6 +19,11 @@
       <reportedBeaconCode>1200</reportedBeaconCode>
       <acAddress>A1B2C3</acAddress>
       <status>active</status>
+      <pseudo>false</pseudo>
+      <frozen>0</frozen>
+      <new>true</new>
+      <adsb>1</adsb>
+      <coast>false</coast>
     </track>
     <flightPlan>
       <acid>TST123</acid>

@@ -1,5 +1,5 @@
 //! The SMES (Surface Movement Event Service) ASDE-X Cat11 `positionReport`, inside an `asdexMsg`.
-//! Core (pure).
+//! Pure functions (crate class shell).
 //!
 //! Structure (FAA FIXM-mediated STDDS data overview v2, section 2.3.1): a root `asdexMsg` with
 //! `airport` and a `positionReport` holding `time`, `flightId` (`acAddress`, `aircraftId`,
@@ -15,10 +15,8 @@
 //! ISO-8601 UTC. A delta-encoded message may carry only one of `latitude` and `longitude`; the
 //! half is refused as an incomplete pair. An element with `r="1"` is invalidated by the sender.
 
-use crate::kind::{children, name_of, Kind};
-use crate::walk::{
-    elem_offset, note_unknown, read_one, text_index, walk, Got, Sink, Slot, Spec, Val,
-};
+use crate::kind::{children, in_message_ns, name_of, Kind};
+use crate::walk::{elem_offset, text_index, walk, Got, Sink, Slot, Spec, Val};
 use crate::{FieldError, FieldErrorKind, Limits, Stats, StdError};
 use oa_xml::{Doc, ElemIx};
 
@@ -86,7 +84,7 @@ const SPECS: [Spec; SMES_FIELD_COUNT] = [
     },
     Spec {
         path: &["flightId", "aircraftId"],
-        val: Val::Code,
+        val: Val::Callsign,
     },
     Spec {
         path: &["flightId", "mode3ACode"],
@@ -98,11 +96,7 @@ const SPECS: [Spec; SMES_FIELD_COUNT] = [
     },
     Spec {
         path: &["movement", "heading"],
-        val: Val::Scaled {
-            scale: 2,
-            lo: 0,
-            hi: 36_000,
-        },
+        val: Val::Heading,
     },
     Spec {
         path: &["movement", "speed"],
@@ -138,7 +132,7 @@ const SPECS: [Spec; SMES_FIELD_COUNT] = [
     },
     Spec {
         path: &["runway"],
-        val: Val::Code,
+        val: Val::Runway,
     },
     Spec {
         path: &["seqNum"],
@@ -150,8 +144,7 @@ const SPECS: [Spec; SMES_FIELD_COUNT] = [
     },
     Spec {
         path: &["status", "vertRate"],
-        val: Val::Scaled {
-            scale: 0,
+        val: Val::Int {
             lo: -30_000,
             hi: 30_000,
         },
@@ -161,6 +154,15 @@ const SPECS: [Spec; SMES_FIELD_COUNT] = [
         val: Val::Code,
     },
 ];
+
+/// The message-level fields, read with the same walker as a report's: `airport`.
+const ROOT_SPECS: [Spec; 1] = [Spec {
+    path: &["airport"],
+    val: Val::Code,
+}];
+const ROOT_NAMES: [&str; 1] = ["airport"];
+/// Under the root, the reports are read apart.
+const ROOT_SKIP: [&[&str]; 1] = [&["positionReport"]];
 
 /// Known elements deliberately not read.
 const SKIP: [&[&str]; 12] = [
@@ -183,9 +185,10 @@ const SKIP: [&[&str]; 12] = [
 // A7.2: cold struct, size guard waived (a parse result held per message, not a hot collection)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SmesRecord {
-    pub present: u32,
-    pub errors: u32,
-    pub invalidated: u32,
+    pub present: u64,
+    pub errors: u64,
+    pub invalidated: u64,
+    pub present_empty: u64,
     /// Byte offset of the `positionReport` element's name.
     pub offset: u32,
     /// `time` as Unix milliseconds (UTC).
@@ -228,8 +231,8 @@ pub struct SmesMessage {
 }
 
 /// A bit for field `f`.
-pub const fn smes_bit(f: SmesField) -> u32 {
-    1u32 << (f as u32)
+pub const fn smes_bit(f: SmesField) -> u64 {
+    1u64 << (f as u32)
 }
 
 fn int(slots: &[Slot], f: SmesField) -> Option<i64> {
@@ -246,8 +249,11 @@ fn code(slots: &[Slot], f: SmesField) -> Option<[u8; 8]> {
     }
 }
 
-/// Parses a message that [`crate::classify`] called [`Kind::AsdexPositionReport`]. Counts into
-/// `stats`.
+/// Parses a message that [`crate::classify`] called [`Kind::AsdexPositionReport`]. A report
+/// with a refused field is kept with the field absent. Counts reports, fields and unknown
+/// elements into `stats`, including the reports read before a [`StdError::TooManyRecords`] or
+/// [`StdError::TooDeep`] refusal; the refusal itself is counted in `stats.errors`. It does not
+/// count the message: [`crate::parse_message`] does, once, when it classifies.
 pub fn parse_smes(
     doc: &Doc<'_>,
     limits: &Limits,
@@ -280,35 +286,40 @@ pub fn parse_smes(
         unknown_dropped: 0,
         invalidated: 0,
     };
+    let mut root_slots = [Slot::Empty; 1];
+    // The root's own depth is one level, so the walk cannot be too deep.
+    let _ = walk(
+        doc,
+        &tx,
+        root,
+        &ROOT_SPECS,
+        &ROOT_NAMES,
+        &ROOT_SKIP,
+        &mut root_slots,
+        &mut sink,
+    );
+    if let Some(Slot::Ok(Got::Code(v))) = root_slots.first() {
+        msg.airport = *v;
+        msg.airport_present = true;
+    }
+    let mut refusal = None;
     for c in children(doc, root) {
-        match name_of(doc, c) {
-            b"positionReport" => {
-                if msg.records.len() >= limits.max_records {
-                    let e = StdError::TooManyRecords {
-                        limit: limits.max_records,
-                        offset: elem_offset(doc, c),
-                    };
-                    stats.observe_error(&e);
-                    return Err(e);
-                }
-                match report(doc, &tx, c, &mut sink) {
-                    Ok(r) => msg.records.push(r),
-                    Err(off) => {
-                        let e = StdError::TooDeep { offset: off };
-                        stats.observe_error(&e);
-                        return Err(e);
-                    }
-                }
+        if name_of(doc, c) != b"positionReport" || !in_message_ns(doc, c) {
+            continue;
+        }
+        if msg.records.len() >= limits.max_records {
+            refusal = Some(StdError::TooManyRecords {
+                limit: limits.max_records,
+                offset: elem_offset(doc, c),
+            });
+            break;
+        }
+        match report(doc, &tx, c, &mut sink) {
+            Ok(r) => msg.records.push(r),
+            Err(off) => {
+                refusal = Some(StdError::TooDeep { offset: off });
+                break;
             }
-            b"airport" => match read_one(doc, &tx, c, Val::Code) {
-                Ok(Got::Code(v)) => {
-                    msg.airport = v;
-                    msg.airport_present = true;
-                }
-                Ok(Got::Int(_)) => {}
-                Err(kind) => sink.error("airport", kind, elem_offset(doc, c)),
-            },
-            other => note_unknown(&mut sink, &[other]),
         }
     }
     let invalidated = sink.invalidated;
@@ -317,7 +328,13 @@ pub fn parse_smes(
     msg.errors_dropped = dropped;
     msg.unknown_elements = unknown.iter().map(|(_, n)| *n).sum::<u64>() + unknown_dropped;
     stats.observe_smes(&msg, &unknown, unknown_dropped, invalidated, limits);
-    Ok(msg)
+    match refusal {
+        Some(e) => {
+            stats.observe_error(&e);
+            Err(e)
+        }
+        None => Ok(msg),
+    }
 }
 
 fn report(
@@ -355,13 +372,14 @@ fn report(
             );
         }
     }
-    let (mut present, mut errors, mut invalidated) = (0u32, 0u32, 0u32);
+    let (mut present, mut errors, mut invalidated, mut present_empty) = (0u64, 0u64, 0u64, 0u64);
     for (i, s) in slots.iter().enumerate() {
-        let bit = 1u32 << i;
+        let bit = 1u64 << i;
         match s {
             Slot::Ok(_) => present |= bit,
             Slot::Bad => errors |= bit,
             Slot::Invalid => invalidated |= bit,
+            Slot::Blank => present_empty |= bit,
             Slot::Empty => {}
         }
     }
@@ -380,6 +398,7 @@ fn report(
         present,
         errors,
         invalidated,
+        present_empty,
         offset,
         time_ms: int(&slots, SmesField::Time).unwrap_or(0),
         lat_e7: i32_of(SmesField::Latitude),

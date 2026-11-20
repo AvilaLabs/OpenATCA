@@ -1,12 +1,13 @@
-//! Reading STDDS recordings (`.oaf`, raw or gzip) into [`Rec`]s, and the sealed-path refusal.
+//! Reading STDDS recordings (`.oaf`, raw or gzip) into [`Rec`]s.
 
 use std::convert::Infallible;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use oa_feed::frame::{Kind as FrameKind, MAX_FRAME_LEN};
 use oa_feed::reader::FrameReader;
 use oa_feed::replay::REPLAY_LIMITS;
+use oa_sealed::Sealed;
 use oa_sha256::{to_hex, Sha256};
 use oa_stdds::tais::tais_bit;
 use oa_stdds::{
@@ -15,38 +16,8 @@ use oa_stdds::{
 use oa_xml::{Limits as XmlLimits, Parser};
 use oa_zip::GzipReader;
 
+use crate::guard::open_guarded;
 use crate::model::{classify_record, Rec};
-
-/// Recordings under `scds/` that are sealed hold-outs or smoke sets and are never read.
-const SEALED: [&str; 3] = [
-    "rec-20261119",
-    "stdds-20261119-holdout",
-    "stdds-smoke-20261119",
-];
-
-/// Whether the components of `p` contain `scds` immediately followed by a sealed name.
-fn names_sealed(p: &Path) -> bool {
-    let c: Vec<_> = p
-        .components()
-        .map(|c| c.as_os_str().to_os_string())
-        .collect();
-    c.windows(2)
-        .any(|w| matches!(w, [a, b] if a == "scds" && SEALED.iter().any(|s| b == *s)))
-}
-
-/// Whether `path` names a sealed folder as given, or has a prefix that does with links resolved
-/// (a link to the file, to a folder above it, or to another link). Nothing is opened.
-pub fn is_sealed(path: &Path) -> bool {
-    let mut bad = names_sealed(path);
-    let mut prefix = PathBuf::new();
-    for comp in path.components() {
-        prefix.push(comp);
-        if let Ok(real) = std::fs::canonicalize(&prefix) {
-            bad |= names_sealed(&real);
-        }
-    }
-    bad
-}
 
 /// What was read from one recording.
 // A7.2: cold struct, size guard waived
@@ -191,9 +162,9 @@ pub fn load_reader<R: Read>(
     Ok(ctx.info)
 }
 
-/// [`load_reader`] on the file at `path`. The caller has already refused sealed paths.
-pub fn load_file(path: &Path, file: u32, out: &mut Vec<Rec>) -> io::Result<FileInfo> {
-    let f = std::fs::File::open(path)
-        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+/// [`load_reader`] on the file at `path`, opened through the shared guard `g` (check, open, verify
+/// the opened file). A refusal is an `Err` whose text names the path and carries `OA-SEAL-001`.
+pub fn load_file(g: &Sealed, path: &Path, file: u32, out: &mut Vec<Rec>) -> io::Result<FileInfo> {
+    let f = open_guarded(g, path)?;
     load_reader(f, &path.display().to_string(), file, out)
 }

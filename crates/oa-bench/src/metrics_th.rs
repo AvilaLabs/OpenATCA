@@ -179,7 +179,7 @@ pub fn fit_offset(p: &PairTable, cfg: &OffsetConfig) -> OffsetFit {
         .filter(|(_, g)| g.n >= cfg.min_group_n)
         .filter_map(|(&a, g)| tau_of(g).map(|t| (a, g.n, t)))
         .collect();
-    gl.sort_by(|a, b| a.2.total_cmp(&b.2).then(a.0.cmp(&b.0)));
+    gl.sort_by(|a, b| oa_math::cmp_canon_f64(a.2, b.2).then(a.0.cmp(&b.0)));
     fit.groups_tested = gl.len() as u64;
     let trim = gl.len() / 20;
     let mut max_trim = 0.0f64;
@@ -199,7 +199,7 @@ pub fn fit_offset(p: &PairTable, cfg: &OffsetConfig) -> OffsetFit {
         .iter()
         .map(|&(a, n, t)| (a, n, t, (t - tau).abs()))
         .collect();
-    worst.sort_by(|a, b| b.3.total_cmp(&a.3).then(a.0.cmp(&b.0)));
+    worst.sort_by(|a, b| oa_math::cmp_canon_f64(b.3, a.3).then(a.0.cmp(&b.0)));
     worst.truncate(WORST_GROUPS);
     fit.worst_groups = worst;
     if fit.max_bin_dev_s > cfg.drift_limit_s {

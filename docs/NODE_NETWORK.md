@@ -12,8 +12,11 @@ divide the workload. It can exist for three other things:
 
 - **Resilience.** Every facility can compute the national picture, so a facility can take over a
   neighbour's airspace without first building a picture of it.
-- **Independent checking.** Facilities fed the same inputs reach the same state bit for bit, so a
-  facility whose state differs is found within seconds.
+- **Independent checking.** Facilities fed the same inputs are to reach the same state bit for bit,
+  so a facility whose state differs is found within seconds. Today that holds only for the same
+  build on the same kind of machine: the tracker crates are still `unsplit` (RULESET B9) and call
+  the platform maths library, whose last bit can differ between CPUs and C library versions. It
+  holds across machines once those crates are core (B7), which keeps them off platform maths.
 - **Local survival.** A facility cut off from the shared network keeps working on its own sensors.
 
 Control authority is not part of the network. Exactly one position is responsible for each
@@ -160,6 +163,39 @@ snapshot's hash matches a peer-countersigned checkpoint at that input position, 
 input log from there, and runs in shadow until it has matched a set number of consecutive
 checkpoints before it is trusted again.
 
+### When the faulty machine is the one in use
+
+A machine that keeps disagreeing on the same inputs is a hardware or installation fault, not a
+dispute about the airspace: any other machine can replay those inputs and show the correct state.
+What follows depends on whose machine it is.
+
+- **Another facility's machine, or an observer's.** Nothing changes for this facility. The owner
+  receives the evidence: which machine, since which checkpoint, and which tracks and fields
+  differ, from the replay comparison (`oa-replay-diff`).
+- **The machine feeding this facility's controllers.** Its picture is in doubt from the first
+  failed comparison. Four things happen:
+  1. **The controllers see the state, not a diagnosis.** A persistent indication that cannot be
+     dismissed while it lasts ("PICTURE UNVERIFIED: PROCESSOR MISMATCH"), under the same rule the
+     safety nets follow: a system always says what state it is in (docs/M5_DESIGN.md, rule 1).
+  2. **Technicians receive the evidence.** It says how far the states differ, because one wrong
+     field in one track and a whole picture diverging call for different urgency.
+  3. **The picture moves to a machine that agrees with its peers.** That is the facility's other
+     machine, or a neighbouring facility that already computes this airspace. Every facility
+     therefore runs at least two machines, on different hardware where it can, so a mismatch
+     never leaves it choosing between two pictures alone. The switch is logged, and the
+     controllers see it happen.
+  4. **With no machine that agrees, the facility steps down the fallback ladder (section 8)**, and
+     each step is shown.
+
+  The faulty machine is then rebuilt as above, and it serves no position until it has matched
+  its peers for the set number of checkpoints.
+
+Detection comes at the first comparison after the late-arrival window closes, so within seconds.
+A machine that computes wrong without crashing is otherwise found only by fleet-wide testing,
+which is how Google and Meta found theirs. The test is the fault-injection run in section 11: a
+machine made to compute wrong on every cycle, with the time to detect, the time to a verified
+picture on screen and the number of wrong frames shown measured.
+
 ## 7. What replication does not catch
 
 Identical deterministic nodes agree on a shared bug, and they fail together on a shared poison
@@ -232,7 +268,8 @@ for their own receiver; there is no token or payment.
 
 - **Deterministic simulation of the shell.** The unmodified engine runs under a simulated network,
   disk and clock driven by a seed, with injected message loss, delay, partitions, clock skew,
-  torn writes, bit flips and a node that sends different checkpoints to different peers. The
+  torn writes, bit flips, a node that sends different checkpoints to different peers, and a
+  node whose processor computes wrong on every cycle (section 6). The
   comparison itself is the state checker, and every failure replays from its seed. This is the
   method of FoundationDB's simulator and TigerBeetle's VOPR.
 - **Protocol model.** A TLA+ model of the checkpoint, isolation and rebuild protocol.

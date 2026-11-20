@@ -134,6 +134,13 @@ fn main() -> ExitCode {
         eprintln!("usage: velocity_diag --adsb <clip.oaf> --out <dir> [--bound-table] [--vel-sigma a,b,c,d] [--vel-scale x] [--no-vel-gate] [--vel-gate-chi2 x]");
         return ExitCode::from(2);
     };
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    for p in [&adsb, &out] {
+        if let Err(e) = oa_sealed::refuse(p) {
+            eprintln!("velocity_diag: {e}");
+            return ExitCode::from(2);
+        }
+    }
     match run(&adsb, &out, &opts) {
         Ok(text) => {
             print!("{text}");
@@ -845,7 +852,7 @@ fn run(clip_path: &Path, out_dir: &Path, opts: &Opts) -> Result<String, String> 
         }
         let total_sq: f64 = per_addr.values().map(|x| x.1).sum();
         let mut top: Vec<(&u32, &(u64, f64))> = per_addr.iter().collect();
-        top.sort_by(|a, b| b.1 .1.total_cmp(&a.1 .1));
+        top.sort_by(|a, b| oa_math::cmp_canon_f64(b.1 .1, a.1 .1));
         let _ = writeln!(brk, "  Top 10 aircraft by squared ground-speed error");
         for (a, (n, sq)) in top.into_iter().take(10) {
             let _ = writeln!(
@@ -884,7 +891,7 @@ fn run(clip_path: &Path, out_dir: &Path, opts: &Opts) -> Result<String, String> 
             }
         }
         let med = |v: &mut Vec<f64>| -> f64 {
-            v.sort_by(f64::total_cmp);
+            v.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
             v.get(v.len() / 2).copied().unwrap_or(f64::NAN)
         };
         for (c, name) in CONDS.iter().enumerate() {

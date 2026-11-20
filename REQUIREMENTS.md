@@ -213,6 +213,23 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   an invalid operation makes at run time (`0.0 / 0.0`, `inf - inf`, `inf * 0.0`, `oa_ieee::sqrt(-1.0)`, tried
   under `black_box` so the compiler cannot fold them), negative and payload NaNs, and every other value
   (signed zeros, subnormals, infinities) unchanged bit for bit.
+- **OA-MATH-035** `cmp_canon_f64`/`_f32` order two floats by the IEEE-754 total order after both went through
+  `canon_nan` (`-inf < negatives < -0.0 < +0.0 < positives < +inf < NaN`, every NaN equal to every other, a
+  negative or payload NaN included); `is_sign_negative_canon_f64`/`_f32` read the sign bit after `canon_nan`
+  (true for `-0.0`, false for every NaN); `copysign_canon_f64`/`_f32` give the magnitude of the first
+  argument with the sign of the second after `canon_nan` (a NaN magnitude gives the canonical NaN);
+  `signum_canon_f64`/`_f32` give `1.0` or `-1.0` by the sign bit (`-1.0` for `-0.0`) and the canonical NaN for
+  any NaN, tested over every kind of value. Code calls these in place of `total_cmp`, `is_sign_negative`,
+  `is_sign_positive`, `copysign` and `signum`, whose results depend on the sign and payload of a NaN (see
+  OA-TRC-247 and OA-TRC-260).
+- **OA-MATH-036** `min_f64`/`max_f64`/`clamp_f64` and the `f32` forms ignore a NaN argument (the other is
+  returned; two NaNs, or a NaN `x` in `clamp`, give the canonical NaN), return `-0.0` from `min` and `0.0`
+  from `max` for the two zeros in either argument order, and never panic (`clamp` with `lo > hi` gives `hi`).
+  Tested for every combination of sign, zero, infinity and NaN. Core code calls these in place of the
+  float `min`, `max` and `clamp` (see OA-TRC-251).
+- **OA-MATH-037** Outside `order.rs`, no source of `oa-math` calls `total_cmp`, `is_sign_negative` or
+  `is_sign_positive` (method, path call or path as a value): the sign and order of a NaN come from the `*_canon_*`
+  functions only. The purity scan fails on one, and a planted-detection test shows the matcher finds each form.
 
 ### NASR (oa-nasr)
 
@@ -483,13 +500,103 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-TRC-241** A core `pub fn` inside an `impl` whose generics or `where` clause carry a bound, with a bare
   `fn(..)` pointer type in its signature, and a `pub struct`, `enum`, `union` or `type` holding an `Fn*`, `dyn`
   or `fn(..)` type need an allowlist line like any other callback.
-- **OA-TRC-242** `canon_nan` and `canon_nan_f32` in core are `oa_math`'s: qualified through it or imported from
-  it; a fn, binding, method or import of that name from anywhere else fails. `f64::to_bits(x)`, `f32::to_bits(x)`
-  and `to_le_bytes`/`to_be_bytes`/`to_ne_bytes` on a float (a literal, an `as f64` cast, a name the same fn
-  declares `f32`/`f64`, a struct field declared so, or the UFCS form) fail unless the value passed `canon_nan`.
+- **OA-TRC-242** `canon_nan` and `canon_nan_f32` in core are `oa_math`'s: reached as `oa_math::canon_nan(..)`
+  (an import is not allowed, see OA-TRC-259); a fn, binding, method or import of that name from anywhere else
+  fails. The bits and bytes of a float are OA-TRC-258.
 - **OA-TRC-243** `&raw const`/`&raw mut`, the identifier `Pointer`, `type X = usize;` and `isize`, `<usize>::MAX`
   and a `cfg`, `cfg!` or `cfg_attr` naming `debug_assertions` fail in core code; `debug_assert!`, `alloc::format`
   and `format!` pass; `core::hash`, `core::cell` and `alloc::rc` still fail.
+- **OA-TRC-244** Every `pub trait` (unrestricted `pub`, `unsafe` included) in core code is sealed, meaning one of
+  its supertraits is reached through a module the crate declares non-public (`mod sealed { pub trait Sealed {} }`
+  and `pub trait T: sealed::Sealed`, or `Sealed` imported through that module), or is listed in
+  `tools/oa-trace/core-callbacks-allowlist.txt` as `crate file.rs::TraitName reason`. A `pub use` of the sealing
+  trait and a blanket `impl<X> sealed::Sealed for X` un-seal it and fail. The sealing trait itself, `pub(crate)`
+  and private traits and test-only ones are not listed.
+- **OA-TRC-245** In an item the shell can reach (plain `pub`; a method of a `pub trait`; a `pub` field), every
+  generic bound (angle brackets, `where`, the `impl` block around a method) and every `impl Trait` argument is
+  `Sized`, `?Sized`, a lifetime or a sealed trait of a core crate (`Copy` is not, it implies `Clone`); `Clone`, `PartialEq`, `Eq`,
+  `PartialOrd`, `Ord`, `Default`, `Debug`, `Hash`, `Iterator`, `Into` and every other trait fail unless the
+  allowlist names the item. Private and `pub(crate)` items may carry any bound, a type parameter with no bound
+  is not checked; the header of an `impl` is OA-TRC-252. A bound is read through parentheses, `?` and
+  `for<..>`; one that still has no name (anything but `?Sized` or a lifetime) fails.
+- **OA-TRC-246** `Fn`, `FnMut`, `FnOnce`, `dyn` and a `fn(..)` pointer in the signature of a reachable item (OA-TRC-245),
+  in a `pub` field of a `pub` struct or union, in the body of a `pub enum` or `pub type`, or by naming a type
+  alias of the same crate (private or not) whose body holds one, fail unless the allowlist names the item.
+  Private and `pub(crate)` items, and bodies, may use closures, `dyn` and fn pointers.
+- **OA-TRC-247** `total_cmp`, `is_sign_negative`, `is_sign_positive` and `copysign` are banned in core code (`oa-math`
+  excepted), method or path, and so is `signum` on a float (an integer's `signum` is not seen); the failure names
+  `oa_math::cmp_canon_f64`/`_f32`, `is_sign_negative_canon_f64`/`_f32` and `copysign_canon_f64`/`_f32`, which
+  take the sign and order after `canon_nan`. Every use in the real core crates is migrated.
+- **OA-TRC-248** `to_bits` and `to_le_bytes`/`to_be_bytes`/`to_ne_bytes` on a float are found also as a path used
+  as a value (`.map(f64::to_bits)`), as `<f64>::to_bits(..)` and `<f32>::..`, on a tuple-struct float field
+  (`struct P(f64)`, `self.0`), on a name bound by a tuple pattern with float types (`let (a, b): (f64, f64)`) or
+  a tuple type, on a name bound by an untyped `let` whose initializer mentions a float literal, a float-typed
+  name, a float field, a float method or function or an `as f64` cast (an integer cast at the end of the
+  initializer, or a later `let` of the same name, makes it not a float), and on a field, tuple field, function
+  return type or constant that any other core crate declares as a float. Whatever is left is stated in the
+  RULESET's known lexical limits.
+- **OA-TRC-249** `into_raw`, `into_raw_parts`, `from_raw`, `leak`, `as_ptr`, `as_mut_ptr`, `as_ptr_range`,
+  `as_mut_ptr_range`, `addr_of`, `addr_of_mut`, `.addr(`, `expose_provenance` and `with_exposed_provenance` fail
+  in core code.
+- **OA-TRC-250** The `src/lib.rs` of every crate of class core (`oa-ieee` included) and split has, at the top level and
+  outside test code, `#[cfg(not(target_pointer_width = "64"))]` followed by `compile_error!(..);`, so the crate does
+  not build for a target whose `usize` is not 64 bits. The attribute stands alone: at the start of the file, or
+  after the `]` of an inner attribute, a `;` or a `}`, never directly after another outer attribute
+  (`#[cfg(any())]` stacked on it). In a split crate's `lib.rs` this is the one attribute and the one macro call
+  allowed besides `mod core;`, `mod shell;` and re-exports (B7). That is the one target cfg core code may have;
+  any other, any other `target_pointer_width` cfg included, still fails. The check reads the string, so `"32"`, a
+  missing `compile_error!` or a guard inside a module fails.
+- **OA-TRC-251** A float `min`, `max` or `clamp` (a float receiver or float argument by the evidence of
+  OA-TRC-248, or the path `f64::max`, `<f32>::min` and so on, also as a value in `fold(.., f64::max)`) fails in
+  core code (`oa-math` excepted), with `oa_math::min_f64`/`max_f64`/`clamp_f64` (and the `f32` forms) named, whose
+  results for the zeros and the NaN are defined (OA-MATH-036). Integer and iterator `min`/`max`/`clamp` pass.
+- **OA-TRC-252** The header of every `impl` in core code (inherent or trait, any self type: `&F`, `Box<F>`,
+  `Wrap<T>`, `Box<dyn Fn()>`) is a boundary: its generic bounds, `where` clause and callback types are judged
+  like those of a reachable item (OA-TRC-245, 246), and a trait `impl`'s are judged whether or not it has `pub`
+  methods; the body of an impl is core's own code. An inherent `impl` header counts for its plain `pub` methods.
+  The allowlist names a header by trait and self type with their generic arguments and no spaces
+  (`impl@Default/for/Wrap<T>`, `impl@Wrap<T>`), not by a head word.
+- **OA-TRC-253** A `pub trait` is sealed only by the leading path of a supertrait (`sealed::Sealed`), never by a
+  path inside its generic arguments (`Iterator<Item = sealed::Private>`), and a `use` tree is read per item
+  (`use crate::{sealed::Sealed, open::Other}` seals through `Sealed` only). `pub use` of any glob, and of a sealing
+  trait, fails, and so does a `pub use` of a module that holds one (`crate::sealed`, `sealed::{self}`).
+  A module is reachable only if it and every module around it is `pub`, so a `pub mod` inside a private module
+  seals. A blanket impl of a sealing trait fails when a type parameter appears anywhere in the self type.
+- **OA-TRC-254** A type alias that holds an `Fn*`, `dyn` or `fn(..)` is resolved through other aliases of the crate
+  (`type B = Vec<A>;`, in any order, generic or not), so a reachable signature or field that names any of them
+  fails. An `as` rename in any `use` of core code fails.
+- **OA-TRC-255** The float evidence of OA-TRC-248 follows type aliases whose body mentions a float (`type V3 =
+  [f64; 3]`, `(f64, f64)`, `f64`, and an alias of an alias), also in struct fields, and follows functions that
+  return a float aggregate (`pair().0`, `make()[0]`, `let p = make();`). Aliases are matched by name over all core
+  crates; the rest is in the RULESET's known lexical limits.
+- **OA-TRC-256** A name bound to an expression whose outermost shape is an integer (`.count()`, `.len()`,
+  `usize::try_from(..)` with `?`/`.unwrap()`, or a final `as <integer>`) is not float evidence, whatever the
+  expression mentions inside.
+- **OA-TRC-257** `fmt::Arguments` (it carries the caller's `Display` impls) is not taken by a reachable item.
+- **OA-TRC-258** (an integer primitive name cannot be declared, renamed or made a generic parameter, in core or, for `signum`, anywhere) In core code a `to_bits` token fails (method or path, any qualifier) unless it is the method on
+  the result of `oa_math::canon_nan(..)` / `canon_nan_f32(..)`, alone or in extra parentheses. `to_le_bytes`,
+  `to_be_bytes` and `to_ne_bytes` are allowed only as a path with an integer primitive qualifier
+  (`u64::to_le_bytes(x)`); the method form fails whatever the receiver. No receiver is inferred, so a shadowing
+  closure parameter, a `match` binding, a type alias, `<f64 as T>::to_bits`, a user `len()` or a struct-literal
+  field cannot pass. Planted failing and passing cases, the review's bypasses and RT-281 among them.
+- **OA-TRC-259** In core code the helpers of `oa_math` (`canon_nan`, `canon_nan_f32` and every public function
+  of `order.rs`, listed in the checker and compared with the source by a test) are called only as
+  `oa_math::<name>(..)`. A `use` of one, `use oa_math::*`, and any other occurrence of the name (a bare call, a
+  local, a parameter, a definition, a path through another crate) fails. The planted case imports `canon_nan` and
+  passes a parameter of that name; it fails on both. `oa-math` itself defines them. `oa_math` itself is only the
+  external crate: a core `mod oa_math`, `use .. as oa_math`, `extern crate .. as oa_math`, a local of that name or a
+  `crate::oa_math` path fails. A test compares the list with the public functions of `order.rs` and `nan.rs`
+  (indented, `const` and re-exported forms included) and with the crate root's re-exports.
+- **OA-TRC-260** In non-test code of every crate of the workspace (`src`, `examples`, `benches`, any class), the
+  five names `total_cmp`, `is_sign_negative`, `is_sign_positive`, `copysign` and `signum` (method, path call or
+  path as a value) fail, except `signum` as an integer path (`i64::signum(x)`) and the file
+  `crates/oa-math/src/order.rs`. Code uses `cmp_canon_*`, `is_sign_negative_canon_*`, `copysign_canon_*` and
+  `signum_canon_*` of `oa_math`. A site the core scan reports is reported once. Test directories, `#[cfg(test)]`
+  items, comments and strings are not read; a crate-root `build.rs` is not scanned and the workspace has none.
+- **OA-TRC-261** `capacity` as a method call, as any path (`Vec::capacity`, `Vec::<u8>::capacity`, a path value
+  passed to `map` or bound by `let`) and `spare_capacity_mut` fail in core code, since the allocator chooses the
+  value; a field named `capacity` and `with_capacity` do not, and `try_reserve`-style probes are left alone. The
+  allocation probe of the display tests is in a shell module.
 
 ### Hashing (oa-sha256)
 
@@ -828,6 +935,41 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   `Recorder::open` refuses one again before touching the directory.
 - **OA-FEED-180** `utc_stamp` and `utc_iso` accept Unix times from 0001-01-01T00:00:00Z to
   9999-12-31T23:59:59Z and return `None` outside them; a recording is not named from a clock outside that range.
+- **OA-FEED-181** A CRC-work refusal leaves a complete frame buffered at the same offset with no CRC
+  bytes charged; retry with sufficient allowance returns that frame and charges exactly the CRC input bytes.
+- **OA-FEED-182** A copy-work refusal leaves the reader unchanged and charges no copied bytes; retry copies
+  the complete offered input exactly once. A copy allowance equal to the bytes taken passes and one byte less
+  is refused; likewise a compaction allowance equal to the buffered bytes that must move passes and one byte
+  less is refused with nothing moved.
+- **OA-FEED-183** A maximum-size frame with a damaged CRC is refused when its exact CRC byte allowance is one
+  short, then reported as a CRC error after retry with the full allowance and charges exactly those bytes.
+- **OA-FEED-184** After the first bad-magic byte is reported, a resynchronisation scan refused with zero
+  candidate-position allowance retains the unexamined suffix at its current offset; retry finds the next frame,
+  counts each examined start position and records every skipped prefix byte. The scan is charged the buffered
+  bytes minus three: that allowance passes and one position less is refused.
+- **OA-FEED-185** A shared remaining allowance across overlapping corrupt maximum-size frames stops CRC work
+  at its exact cap, retains the next candidate on refusal, and after budget renewal yields the valid tail frame.
+- **OA-FEED-186** A work refusal is renewable only when its kind-specific required amount fits a fresh profile;
+  cumulative counter overflow and amounts above the fresh allowance require explicit stream cancellation. The live
+  loop decides each turn by pure functions: it stops only when stopping, the stop condition holds and no input
+  or drain is owed; it services when input or a drain is owed, else it receives. A retryable push refusal
+  defers with no drain pending, a retryable drain refusal defers with a drain pending, and a refusal a fresh
+  allowance cannot satisfy, a counter overflow, or a push that takes no bytes cancels the stream with an error
+  naming the refusal, the reader-buffer bytes, the unpushed input bytes and the deferral count.
+- **OA-FEED-187** Work cancellation leaves complete buffered frames unclassified as malformed and retains them
+  for explicit disposition; only normal end-of-stream finalization reports a truncated tail.
+- **OA-FEED-188** The release binary `oa-feed-work-check` reports the maximum service-turn wall time and exits
+  nonzero above 1 s; the `ci` workflow runs it in release. It separately labels valid-capacity and malformed-input safety
+  cases, accounts CRC refusals/skips as rejection rather than valid-frame loss, and checks defer/resume and
+  compaction ownership exactly; its `#[test]` asserts only these deterministic checks, not wall time.
+- **OA-FEED-189** Recorder startup inspects at most 16,384 directory entries when summing existing recording
+  bytes; unrelated and zero-byte entries count toward the cap, and an excess entry returns an explicit error.
+  `Recorder::open` accepts a directory of exactly 16,384 entries and refuses one of 16,385.
+- **OA-FEED-190** The compatibility `FrameReader::push` and `next` use a work allowance sized to the reader's own
+  buffer, so a large buffer never stalls silently: an 8 MiB buffer takes 6 MiB offered in one `push`, decodes it
+  with `next`, and reports no work refusal.
+- **OA-FEED-191** The live loop prints a stderr warning (not recorded output) once each time the work-deferral
+  count reaches a power of two of 1,024 or more, and not at any other count.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).
@@ -1317,6 +1459,18 @@ the SFDPS `gufi` (they are different kinds of value, survey).
   traffic drawing over a full set (every target state, refusals at capacity, a malformed target) and the whole frame
   chain (a non-empty airspace map, traffic, stamp, pixels and the frame hash) run under the counting allocator of `validation/oa-alloc-check`
   (window `display_window`) with zero allocations (the set is refilled, with its refusals and a malformed target, inside the measured window), a positive control for each allocation call and a negative control that injects one.
+- **OA-DSP-053** The display API accepts exactly 2^26 pixels (8192 by 8192, 16384 by 4096 and 65536 by 1024 alike)
+  through `check_frame`, `scratch_for`, `build_scene` and `rasterize`, and refuses the smallest larger product
+  (65536 by 1025) at each before writing pixels; it refuses frame/list combinations whose conservative preflight
+  work charge, including repeated polyline/text span visits and the tested maximum glyph stroke count, exceeds
+  `MAX_RENDER_WORK` (a charge equal to it is accepted, one more is refused); a smaller retry succeeds.
+- **OA-DSP-054** `build_scene` precharges, against `MAX_SCENE_WORK` and before clearing the destination list, table scans,
+  per-boundary-span subdivision (including overlapping and zero-length spans), airway-leg subdivision, the point-label
+  sort (the in-crate bottom-up merge sort's bound of n * ceil(log2 n) comparisons, 0 for n <= 1, each costing the longest identifier plus 4, not the string pool) and label-grid slot inspections; each term moves the
+  bound by its own cost, a charge equal to the limit is accepted and one more is refused, over-limit work leaves the previous
+  complete list intact, and a valid retry succeeds.
+- **OA-DSP-055** `scratch_for` refuses a display profile above `MAX_SCENE_PIXELS` before allocating grid storage, while preserving the earlier `MAX_GRID_BOXES` refusal precedence; a profile within the limit succeeds.
+- **OA-DSP-056** The raster text stroke-work ceiling equals the largest built-in glyph and covers all glyphs, the fallback glyph and every byte-valued input character.
 
 ### Replay and flight state (oa-replay)
 
@@ -1711,6 +1865,9 @@ frame of their feed has been fed (as the ADS-B table is).
 - **OA-RPL-254** The progress line's replayed span is computed with saturating arithmetic: a stream whose
   clock steps are each representable but whose total span is not does not stop the run.
 - **OA-RPL-255** A file is read in pieces of at most `MAX_CHUNK` bytes; its size never sets an allocation.
+- **OA-RPL-276** Offline stream advance renews its finite reader allowance only between bounded steps; over input of
+  six scan quotas of garbage followed by a valid frame it emits that frame, conserves source bytes, takes at least
+  five steps, and no step's measured scan, CRC, copy or compaction work exceeds one quota.
 - **OA-RPL-171** A stale mark is cleared only by an accepted update that carries what the row shows: an ADS-B
   report that is accepted, an SFDPS row whose position was not refused as older and that carries a position or
   a flight status. A refused older position, or an SFDPS amendment with neither, leaves the row stale.
@@ -2538,6 +2695,10 @@ decoder is OA-GRIB-021.
   obstacle columns of different lengths, a terrain grid without a valid lattice or shorter than its
   dimensions, and work over `MAX_CLEARANCE_WORK` (rows, edge rows, cells, pair tests, counted before
   they are built); a NaN percentile is NaN.
+- **OA-MVA-085** The overlaps of a chart come out in one fixed order: largest first, then by sector name, then
+  (two pairs that tie on both) by the sector pair as the model orders the sectors, and the pairs are collected in
+  an ordered map, never a hash map, so the report is the same on every run and whatever order the pairs were
+  found in. Tested with two pairs that tie on cells and names, collected in every order.
 
 ## M2 — Weather inputs
 
@@ -3130,6 +3291,24 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   counted under `T4` / `no altimeter setting`, never compared uncorrected. T4 reports `compared_as_flight_level`,
   `corrected_with_altimeter`, `excluded_no_altimeter_setting` and `mean_altimeter_correction_ft`; the flagged view
   applies the same correction.
+- **OA-BENCH-132** Where a flight's `aircraftAddress` fails the plausibility check or is unknown to truth, and its
+  `ADSB_02M_*` address hint is a different address, known to truth, that passes the check (not merely unchecked),
+  the flight is associated with the hint under its own status and method (`hint over plan`); its pairs are scored
+  in the primary rows as that method split, and each such flight is listed with both addresses and the reason the
+  plan address failed. A plausible plan address always wins; an unchecked hint never replaces it, and a plan
+  address that is only unchecked (too few shared times) is kept. `AssocConfig::hint_over_plan` (default on) turns the
+  rule off for protocols frozen before it. The case list holds the first 200 cases by severity; the ASSOC table
+  counts the cases left out ("more cases not listed") and the truth addresses associated with more than one ERAM
+  flight at the same time (time spans, first to last sample, that overlap; consecutive legs do not), and lists them.
+- **OA-BENCH-133** The flight table keeps the last transponder code an SFDPS message gave
+  (`currentBeaconCode`, four octal digits read as a decimal number like the ADS-B squawk) in `Flights::beacon`, and
+  `NO_BEACON` when no message carried one; a message without a valid code leaves the stored one.
+- **OA-BENCH-134** `Legacy::beacons` holds one row (flight, message time, code) each time a message gives a flight a
+  code other than the one it had, the first code included, so the code in force at a time is the last row of the
+  flight at or before it. The table is capped (`Limits::beacons`); a row that does not fit, or whose message has
+  no time, is counted under the notes and not stored.
+- **OA-BENCH-135** A beacon change beyond the cap is counted under the label `DROP_SFDPS_BEACON_FULL` and the flight
+  still holds the last code.
 
 ## Winds aloft (oa-wind)
 
@@ -3377,6 +3556,39 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   `simulate_radar` with `SimError::BadSite("epoch")`, and the scan index, the scan start and the beam
   azimuth use checked or widened arithmetic, so no epoch or window overflows.
 - **OA-SIM-032** A drift window across the whole time range does not overflow in the elapsed time.
+- **OA-SIM-033** `adsb_error` gives a position bias to round(`bias_fraction` * N) of the N distinct addresses and a
+  latency to round(`lag_fraction` * N), chosen by a seeded shuffle, exactly for every seed; the two sets are chosen
+  independently.
+- **OA-SIM-034** A biased aircraft's reports are offset from the truth by `bias_mult` times one bound per aircraft, in a
+  direction fixed per aircraft.
+- **OA-SIM-035** A row with no usable NACp takes `bias_fallback_bound_m` as its bound where the aircraft has no usable NACp at all.
+- **OA-SIM-036** A lagged aircraft's report at time t carries the truth position and velocity of time t - L (whole
+  milliseconds), stamped at t.
+- **OA-SIM-037** Each lagged aircraft's L is constant and within `[lag_min_s, lag_max_s]`.
+- **OA-SIM-038** Each output row carries the label bits (`ERR_BIAS`, `ERR_LAG`) of the errors its aircraft has; a row
+  with no bits is the truth at its time.
+- **OA-SIM-039** The output depends only on the truth, the base reports and the parameters, and changes with the seed.
+- **OA-SIM-040** With no error the output is the truth at the base reports' times and addresses, every other field
+  copied, and rows the truth cannot answer are counted as dropped.
+- **OA-SIM-041** A fraction outside 0 to 1, a negative or non-finite multiple, bound or latency, an inverted latency
+  range or a latency above `MAX_LAG_S` is refused with `BadSpoof`.
+- **OA-SIM-042** With no error injected, a tracker run scored against the exact truth and against the truth rebuilt
+  from the generated reports gives the same Ticks and Updates position RMS within the stated tolerance (the optimism
+  harness, with the clip set; without it the test prints "skipped" and passes).
+- **OA-SIM-043** A biased aircraft's magnitude uses one bound for all its rows: the median (upper middle) of its usable
+  NACp bounds, so a NACp that changes in flight does not change the offset.
+- **OA-SIM-044** With both fractions at one half, the biased and the lagged sets differ, for each of five seeds.
+- **OA-SIM-045** A generated row's time is its base row's time rounded to the nearest whole millisecond, exactly.
+- **OA-SIM-046** A lagged row's altitude and vertical rate are the truth's at t - L where it has them, else blank; its
+  geometric altitude is blank.
+- **OA-SIM-047** Rows left out are counted in total and by the label their aircraft would have carried; the counts add
+  up with the rows kept.
+- **OA-SIM-049** A lagged row whose time t - L the truth cannot answer is the truth at t stepped back along its
+  velocity by L (counted as extrapolated, by label and by reason, with its altitude and vertical rate blank), and is
+  left out only when the truth cannot answer at t or its velocity is not finite. Base columns of different lengths
+  (including `nac_p`) are refused.
+- **OA-SIM-048** Per-report noise is seeded, independent per row, and per axis of standard deviation
+  `hypot(noise_sigma_m, noise_bound_frac * row bound)`.
 - **OA-AST-022** The test-side pcap reader (`tests/common/pcap.rs`) returns the UDP payload of every packet of a
   libpcap file (little or big endian, microsecond or nanosecond magic) over Ethernet II and IPv4 without
   fragmentation, trims Ethernet padding by the IP length, and refuses with a typed error a bad magic or
@@ -3602,6 +3814,27 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-047** `oa-track-run --no-score` runs the tracker core and the latency replay without truth or
   scoring, writes `core.txt` with throughput with and without the one-second output, per-stage latency,
   and resident memory per phase, and the replay's output digest equals the scoring run's.
+
+- **OA-TRK-388** `oa-track-run --adsb <clip.oaf> --out <dir> --realtime [--with-output] [--max-tracks <n>]` offers
+  every report of the clip to the tracker (no split, no scoring; the configuration is `scoring_config` of the
+  full clip, printed with the run) and times each second's updates together with the shell's monotonic clock.
+  It writes `realtime.txt` and `seconds.csv`: for every second from the first to the last, including seconds
+  with no measurements and the last, the measurements, the processing time and the confirmed and tentative
+  track counts after the last update in the second (a second with no updates carries the previous counts;
+  the tracker is not advanced to the second boundary, and the peaks are sampled once per second). It reports the time's p50, p99 and maximum over all those seconds
+  (an empty second counts as zero), the seconds that did not finish within the second and the longest queue
+  behind the traffic (an upper bound: a second's work starts when the second ends), the final advance and
+  flush apart, CPU and wall time of the update window and, read right after the final flush and before any
+  digest, of the run from its start (ingest, set-up, updates, flush) against the traffic's span with the CPU
+  source named, every refusal and overflow counter, resident memory with the process peak
+  labelled, and the tracker table bytes. A run summary digest (the track log and the counters, taken after the
+  timed window; `oa-track` has no tracker state hash) is always printed; `--with-output` also writes the output
+  rows to column files and prints their digest. These digests are comparable only between realtime runs of the
+  same clip, the same `--max-tracks` and the same build, not with the golden digests of the split, scored run. The run fails (non-zero exit) on an empty
+  clip, on no measurements after the adapter, on any measurement outside the per-second log (no figures are
+  computed over a truncated span), and, after printing its report, on any capacity refusal (not a full-load
+  measurement) and on any lost output row or track log entry (the digests would cover truncated data). `--with-output` and `--max-tracks` need `--realtime`; `--realtime` refuses `--digest`,
+  `--rows`, `--no-score` and `--no-compare`. The per-second log is a pure function of what it is given.
 
 ### Radar fusion with registration (oa-track: radar, assoc, registration, fusion; study binary oa-track-fusion)
 
@@ -4102,6 +4335,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-263** A track's output position and velocity covariances are in east and north at the output
   point: a track started from a plot returns its covariance and velocity at the start, at 45 and 89.9999
   degrees and in the south, to 1e-4.
+- **OA-TRK-264** No order or selection in the tracker reads the sign or payload of a NaN: the greedy order of
+  a component larger than `MAX_COMPONENT` and the order in which a plot keeps coarse candidates (by
+  `coarse_distance`, then track number) use `oa_math::cmp_canon_f64`, so the same inputs with a positive, a
+  negative and a payload NaN choose the same tracks. Real-data digests are unchanged where no NaN reaches a
+  migrated sort; a sort that does see NaN now places every NaN last (the canonical order) instead of by sign (the gate of OA-TRC-260 keeps the raw `total_cmp`,
+  `is_sign_negative`, `copysign` and `signum` out of every non-test source of the workspace).
 
 ## Speed and capacity harness (oa-perf)
 
@@ -4523,9 +4762,596 @@ scope.
 - **OA-CMP-045** `slice` refuses a source directory whose `README.txt` is missing or unreadable.
 - **OA-CMP-046** The build commit's modified flag follows the tracked files of the trees the crate is built from
   (the build script reruns on the git index and on those trees).
-- **OA-CMP-047** Any input path with the components `scds/rec-20261119` (the sealed hold-out recording) is
-  refused, as given and after resolving links; a flag value that starts with `--` is a missing value and a
+- **OA-CMP-047** Any input path the shared sealed list refuses (OA-SEAL-001; of the recording
+  `scds/rec-20261119`, that is days 2 to 4, the run log and the folder itself) is refused, as given and after
+  resolving links; a flag value that starts with `--` is a missing value and a
   repeated flag is an error.
+
+- **OA-TRK-370** The canonical row layout is tied to the spill column table at compile time: the
+  fields tile bytes 0 to 84 of the row once each, entry `i` of the field table is column `i`, and
+  every field range is checked before use, so there is no write that lands nowhere. Hex hashes
+  parse only as 64 lowercase digits.
+- **OA-TRK-371** A digest accepts at most 2^20 seconds and 2^20 rows in one second; a row that
+  would pass either is an error and is not counted, and the rows-file writer therefore never holds
+  a whole oversized second.
+- **OA-TRK-372** The header of a rows file is checked in full (magic, version, row size, exact
+  length), and the hash of a second's rows is computable from the rows alone (`hash_rows`).
+- **OA-TRK-373** The scorer's flag join counts duplicate (address, millisecond) keys and never
+  overwrites one; rows that disagree make the key a conflict. A sample with no tracker row, or only
+  a conflicting one, is a third state, scored in its own `UNMATCHED` group and written as
+  `unmatched`, never as "no". A run that is neither `--development` nor `--allow-dirty` fails if
+  any sample is unmatched, counted over every point after the join.
+- **OA-TRK-374** In every coverage-penalised metric (M4, M4t, M7, M7t) a present value that is not a
+  number is a failure, and the count of such values is printed; an aircraft whose M6 RMS is not a
+  number is a failure for the share and is left out of the sign test; samples left out of a metric's
+  common set for a non-finite value are counted per system apart from samples not in all three; aircraft with no usable time fit are
+  counted per system with their samples and are scored unfitted (offset 0), and the output says so.
+- **OA-RDF-007** A digest is accepted only with the `v2` header as its first line and with every
+  chain hash equal to the chain recomputed from the line and the lines before it; a line that fails
+  is named. A `v1` digest is refused (there is no legacy path), and so is a blank line before the
+  header.
+- **OA-RDF-008** A digest or expect file over its size limit, a second with no rows or over 2^20
+  rows, and row counts that overflow are errors (exit 2), never a panic; a failing standard output
+  (a closed pipe) is exit 2 with a message.
+- **OA-RDF-009** Rows with the same address, time and tick flag in one second are ambiguous
+  pairings: they are counted per second and in total (`ambiguous_pairs`) and are a class that a
+  declared difference must name (`ambiguous`). Rows left over with the same address and time but
+  another tick flag are one changed row (class `flags`), not a removal and an addition.
+- **OA-RDF-010** `order` is read from the matched rows alone, whatever else differs, so a declared
+  class next to an undeclared reorder fails the expectation.
+- **OA-RDF-011** Digests that differ only in a chain hash are different (exit 1, `chain_only`),
+  and no declaration makes them pass.
+- **OA-RDF-012** A rows file is used only after the hash and count of every one of its seconds are
+  recomputed and found equal to its digest line, no digest second is missing from it and none is in
+  it that the digest lacks; the first bad second is named and the exit is 2.
+- **OA-RDF-013** A rows file whose header count differs from its digest's total, that has bytes after
+  its last row, or that ends early is an error (exit 2).
+- **OA-RDF-014** `tools/replay_overlay_apply.sh` applies the overlay patch only to files whose blob
+  is the patch's preimage, at zero fuzz, checks the postimage blobs, and records the sha256 of the
+  patch and of every patched file; any mismatch is a refusal (exit 2).
+- **OA-RDF-015** The overlay patch creates `canon.rs` and `canon_spill.rs` byte for byte as they are in
+  `crates/oa-track/src/`, so an old commit writes the digest line, second hash, chain and end line
+  of the tree. Reading the spill columns back turns every NaN among the `f32` fields into the one
+  canonical NaN, so rows are canonical whatever bits the old commit spilled.
+- **OA-RDF-016** `tools/replay_compare.sh` builds with `--locked` and with compiler flags
+  neutralised: the environment variables `RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and `RUSTDOCFLAGS`
+  are not passed, `CARGO_ENCODED_RUSTFLAGS` is passed empty (which cargo reads before every
+  config file, so a `target.<triple>.rustflags` or `target.<cfg>.rustflags` in the user's config
+  is not read), and `--config build.rustflags=[]` is given; its report states what the caller's
+  four flag variables held, that they were cleared, and the toolchain. Flags in a
+  `.cargo/config.toml` of the tree under test are not neutralised.
+- **OA-RDF-017** A digest ends with `end <seconds> <rows> <chain>` (format v2), which the reader
+  recomputes from the lines before it and requires, compared field by field on single spaces (tabs,
+  repeated or trailing spaces are refused); a digest cut at a line boundary, an end line that
+  disagrees, or text after it is an error.
+- **OA-RDF-018** Two digests that both have no seconds are exit 2 ("no seconds to compare"), not
+  identical.
+- **OA-RDF-019** When both rows files are given they are verified against their digests whether or
+  not the digests are identical, and the summary says `rows_known=true`.
+- **OA-RDF-020** A second the digests call different but whose rows do not differ, or a differing
+  second that was not diffed, is an inconsistency: exit 2, never a pass.
+- **OA-RDF-021** An option given twice is a usage error (exit 2).
+- **OA-RDF-022** `tools/replay_compare.sh` runs cargo and rustc under `env -i` with only PATH, HOME,
+  RUSTUP_HOME, CARGO_HOME, TMPDIR, an empty `CARGO_ENCODED_RUSTFLAGS` and the two variables it
+  sets, with `--config build.rustflags=[]`;
+  it records the dropped variable names, the sha256 of both digests, both rows files, both
+  tracker binaries and the diff binary, and a missing diff binary is exit 2.
+- **OA-RDF-023** `tools/replay_compare.sh` refuses an output directory that exists and is not
+  empty (exit 2, before any build, touching nothing), and a run that does not reach its end removes
+  the rows files it made.
+
+## Comparison protocol
+
+- **OA-CPR-200** The frozen development seed set, including its default seed, is disjoint from every
+  qualification seed; protocol validation rejects any overlap.
+- **OA-CPR-201** Qualification seed IDs are unique and their declared count equals the list length;
+  duplicate IDs or a count mismatch fail protocol validation.
+- **OA-CPR-202** Competitive thresholds remain fixed at position RMS ratio ≤0.70, p99 position
+  error ratio ≤0.80, p99 receive-to-usable latency ratio ≤0.50, and throughput ratio ≥2.0, with
+  equal quality and resource envelope required; mutation fails protocol validation.
+- **OA-CPR-203** The truth, measurement, and output CSV headers and allowed comparison stages are
+  versioned contract values; unsupported headers or claim stages fail protocol validation.
+- **OA-CPR-204** Qualification declares at least 10,000 simulated aircraft-hours and a seed ×
+  aircraft × duration allocation whose arithmetic exactly matches the declared total, with the
+  100 qualification seeds assigned 20 each to the five nominal scenarios and zero to dropout.
+- **OA-CPR-205** The qualification uses the frozen IDs 1,000,001 through 1,000,100, distinct from
+  development IDs 0 through 31; generator, distribution, and allocation are frozen before candidate
+  freeze.
+- **OA-CPR-206** A frozen input/output ledger gives each event exactly one terminal disposition
+  and each required score-grid point exactly one status; missing outputs are scored and any
+  unaccounted work fails the strict gate.
+- **OA-CPR-207** The actual holdout is consumed once after freeze, is unavailable for tuning, and
+  is reclassified as development if its outcome informs a change; consumption state is published.
+- **OA-CPR-208** No unqualified professional tracker or unauthenticated legacy export is claimed;
+  a controlled or Python baseline cannot be labelled as a professional reference.
+- **OA-CPR-209** Qualification seed replicates are not represented as independent references or
+  aircraft; shared world/reference-model dependence is stated in the protocol.
+
+## Independent comparison evaluator (OA-CMP)
+
+- **OA-CPR-001** The evaluator parses the shared truth, measurement and output CSV schemas by header name and refuses absent required columns.
+- **OA-CPR-002** CSV byte, row and field sizes are bounded and malformed, non-UTF-8, duplicate-header and non-finite numeric values are refused with source context.
+- **OA-CPR-003** Truth keys are unique and strictly ordered by scenario, time and flight; numeric flight IDs compare numerically.
+- **OA-CPR-004** Output score keys outside the truth grid are counted as false-identity rows and prevent qualification.
+- **OA-CPR-005** Duplicate output grid keys are counted and prevent qualification.
+- **OA-CPR-006** Missing output rows and explicit missing statuses are counted for each system.
+- **OA-CPR-007** Candidate and baseline outputs are evaluated on the common truth grid.
+- **OA-CPR-008** Output timestamps require score time equal publish time for logical accuracy scoring.
+- **OA-CPR-009** Outputs whose source time follows publish time are refused.
+- **OA-CPR-010** The evaluator checks coordinate ranges and computes horizontal position error in a local tangent plane from Earth-centered coordinates.
+- **OA-CPR-011** The evaluator reports velocity error separately from position error.
+- **OA-CPR-012** Aggregate position and velocity results report sample count, RMS, mean and nearest-rank 95th and 99th percentiles.
+- **OA-CPR-013** Position and velocity metrics are split by scenario, flight and truth phase.
+- **OA-CPR-014** Coast, missing and refused outputs are accounted separately from valid outputs, with each status count and fraction of the full truth grid.
+- **OA-CPR-015** A source-timestamp join to input receive time is reported only as a labeled diagnostic proxy; receive-to-usable delay requires an event-level first-valid-use ledger.
+- **OA-CPR-016** Receive-to-usable delay and its competitive ratio are unavailable without a complete event-level first-use ledger that records no-usable-completion dispositions.
+- **OA-CPR-017** A negative receive-to-usable delay is refused.
+- **OA-CPR-018** The evaluator uses fixed thresholds of 0.70 RMS ratio and 0.80 p99 position-error ratio, with hierarchical 95% upper bounds under those thresholds; nominal scoring starts at scenario epoch plus the predeclared two-second initialization window.
+- **OA-CPR-019** A speed claim requires a complete event-level first-use ledger, p99 receive-to-usable delay no greater than 0.50 of reference, and at least 2.0 throughput ratio.
+- **OA-CPR-020** Accuracy and speed qualifications are reported separately from measured logical metrics.
+- **OA-CPR-021** A zero or near-zero reference error produces an explicit unqualified ratio, never a fabricated finite ratio.
+- **OA-CPR-022** Development-control comparisons cannot qualify performance claims.
+- **OA-CPR-023** Missing comparison provenance disables qualification.
+- **OA-CPR-024** Qualification requires an explicit reference qualification state and input fingerprint.
+- **OA-CPR-025** Qualification requires content-validated, matching-input timing ledgers for candidate and reference.
+- **OA-CPR-026** Hashed timing ledger contents identify the monotonic wall clock, elapsed wall time, work units, drain state and input fingerprint.
+- **OA-CPR-027** Speed qualification requires a drained workload and zero reported loss counters.
+- **OA-CPR-028** The evaluator never derives a speed claim from Python runtime measurements.
+- **OA-CPR-029** Paired uncertainty resamples scenario clusters and flight clusters within each scenario rather than individual pings.
+- **OA-CPR-030** The hierarchical cluster bootstrap is deterministic and reports scenario and flight cluster counts.
+- **OA-CPR-031** Fewer than two paired scenario clusters produce unavailable confidence bounds.
+- **OA-CPR-032** The independent CV Kalman baseline consumes measurements and emits outputs on the supplied truth grid.
+- **OA-CPR-033** The baseline estimator does not consume truth coordinates, truth velocity, or truth phase.
+- **OA-CPR-034** The baseline estimator does not apply measurements whose sensor time follows the output grid time.
+- **OA-CPR-035** The baseline uses fixed, declared process noise and measurement uncertainty fields, confirms after two of the last three distinct reports, and marks output coast when source age exceeds two seconds.
+- **OA-CPR-036** The baseline identifies itself as a development control and is never a speed reference.
+- **OA-CPR-037** The command line reports malformed input or metadata with a nonzero exit status.
+- **OA-CPR-038** The command line writes machine-readable JSON with distinct metrics, qualification and accounting sections.
+- **OA-CPR-039** Qualification metadata uses only registered comparison classes and records reference status and input fingerprint.
+- **OA-CPR-040** Throughput is derived from hashed ledger work units and elapsed wall time for equal workload counts.
+- **OA-CPR-041** Timing evidence binds both system timing ledgers to their recorded hashes, and each ledger's contents are parsed and validated.
+- **OA-CPR-042** The evaluator reports the number of measurement events independently of output rows.
+- **OA-CPR-043** The evaluator validates a hashed independent system/scenario/flight/time/track/truth-flight binding and does not silently discard false flight identities.
+- **OA-CPR-044** Empty metric populations report count zero and null statistics.
+- **OA-CPR-045** Percentiles use nearest-rank selection with no interpolation.
+- **OA-CPR-046** The evaluator never divides by a zero reference metric.
+- **OA-CPR-047** Loss, refusal, missing and stale-output coverage remain visible even if accuracy is measurable; nominal post-initialization usable coverage must be at least 99.9% for both systems and candidate coverage cannot be below reference coverage, while dropout runs remain diagnostic-only and cold-start rows stay reported separately.
+- **OA-CPR-048** The baseline emits one valid, coast or missing row per truth grid key; it reports matching M-of-N startup and source-age coast behavior.
+- **OA-CPR-049** The evaluator and baseline use only Python standard-library modules.
+
+- **OA-CPR-050** The comparison command requires a fresh output directory outside the checkout and
+  never writes build artifacts under the checkout; output and target directories cannot overlap.
+- **OA-CPR-051** Every run records Git head, dirty status, tracked source digest, patch digest,
+  untracked source digests, and before/after snapshots; a changed source snapshot fails the run.
+- **OA-CPR-052** Without a prebuilt binary, the command checks Cargo 1.89.0 and builds the standalone
+  runner with the locked release manifest in offline mode, one Cargo job, and an external target
+  directory; every subprocess has a fixed timeout and retained bounded logs.
+- **OA-CPR-053** The command records hashes for the runner binary, run configuration, every CSV/JSON
+  input and output, stdout, stderr, command list, and comparison result.
+- **OA-CPR-054** The CLI supports a named scenario or `all`; `all` executes six scenarios in fresh
+  isolated directories, then reports each result without turning process success into a score pass.
+- **OA-CPR-055** Baseline generation receives only a derived grid containing `scenario_id`,
+  `flight_id`, and `time_ns`, plus the shared measurements; truth coordinates and phase are not
+  passed to the baseline.
+- **OA-CPR-056** The wrapper validates candidate and baseline output coverage against the truth grid
+  and emits one identity binding per output row, normalizing runner identity to `candidate` and
+  deriving baseline mapping only from known input flight identifiers.
+- **OA-CPR-057** Wrapper metadata labels the Python constant-velocity control `development_control`
+  and never represents it as a professional tracker or qualified comparison baseline.
+- **OA-CPR-058** Replay-call-cost timing is preserved as such and is never converted to first-use
+  wall latency; absent valid timing ledgers leave speed comparison unknown.
+- **OA-CPR-059** The reference validator's evidence status is recorded exactly; a failed or unknown
+  reference cannot be upgraded by the wrapper to qualified evidence.
+- **OA-CPR-060** The qualification seed set is not launched by the development wrapper; runs use the
+  explicit development seed and record source cleanliness and seed/configuration identity.
+- **OA-CPR-061** `--require-competitive-pass` returns nonzero unless every scenario passes accuracy,
+  all-quality, and speed bars; missing, unqualified, or unknown evidence fails that option.
+- **OA-CPR-062** Any build, runner, validator, or evaluator failure exits nonzero and retains the
+  command record, logs, source snapshots, and all outputs created before failure.
+- **OA-CPR-063** JSON artifacts are size bounded, parse as a JSON object with finite values, and
+  malformed content fails with a retained error record when execution has begun.
+- **OA-CPR-064** The command wrapper's aircraft and duration bounds match the standalone runner's
+  300-aircraft / 1,200-second profile and report the normative profile ID separately from the
+  runner implementation model ID.
+- **OA-CPR-065** Standard output and error are drained into fixed-size bounded buffers while the
+  process runs; exceeding a limit or timeout terminates the entire child process group and records
+  the failure.
+- **OA-CPR-066** Each run binds its cohort ID and scoring role to the frozen protocol plus the raw
+  runner manifest seed/scenario; metadata must agree, and the development command cannot launch
+  nominal qualification or sealed fault-cohort seeds.
+- **OA-CPR-067** The wrapper pins the comparison protocol hash (equal to the evaluator's pinned value) and refuses a protocol file or recorded `protocol_sha256` that differs.
+- **OA-CPR-068** A run's status is `completed` only for a clean, reference-validated run; a dirty source tree gives `exploratory (source tree not clean)`, and every status other than `completed`, including `reference_failure`, exits 3 whether or not `--require-competitive-pass` is given.
+- **OA-CPR-210** A `missing` output is an explicit row with scheduled `score_ns == publish_ns`,
+  empty `source_ns` and empty position/velocity values; no required grid row may be omitted.
+
+## Independent synthetic comparison reference
+
+- **OA-CPR-150** The stdlib-only reference validator accepts explicit truth, measurements, manifest, protocol and output paths, applies bounded strict CSV/JSON parsing, and rejects malformed, non-finite, duplicate, reordered or incomplete rows.
+- **OA-CPR-151** The validator independently recomputes supported v2 scenario truth (including all-positive turns and alternating crossing signs), WGS84 ground velocity and regional extent, and sanity-checks velocity with ECEF central differences.
+- **OA-CPR-152** Measurement IDs, causal receive schedule, dropout denominator and reported covariance reconcile with the manifest, including truth-grid event ordinals absent from dropout measurements.
+- **OA-CPR-153** The declared Box-Muller seed/event/axis noise model is checked against deterministic latents, distinct axis keys and finite-sample residual bounds.
+- **OA-CPR-154** Evidence records bind input artifacts and protocol by SHA-256; a passing result requires the supplied runner source bytes to match the manifest's declared implementation SHA-256.
+- **OA-CPR-155** Passing evidence is labeled `independent_simulation` with `declared_model_only` scope and explicitly makes no physical-accuracy claim; it preserves the exact recognized protocol version/status and reports the v1.0.3 dropout fault gate as blocked.
+- **OA-CPR-156** Unknown model/protocol versions or missing required artifacts produce `UNQUALIFIED`; readable contradictions produce `FAIL` with a reason.
+- **OA-CPR-157** The validator checks v1.0.3 paired post-init key-set rules and the separate 20-seed dropout fault cohort, exact allocation and pending gates; it never presents that blocked cohort as a passed quality gate. Unit tests cover evidence hashes, negative controls, and missing/mismatched runner source.
+
+- **OA-CPR-211** The scenario epoch is the score origin; candidate initialization is 2-of-3 distinct
+  events, and the development control requires two distinct input events before usable output.
+- **OA-CPR-212** Every run retains raw cold-start and all-grid results and separately scores only
+  `time_ns >= epoch + 2 s` as post-initialization metrics.
+- **OA-CPR-213** Coast status is determined from actual supporting source age and is required when
+  that age exceeds two seconds; only `valid` rows count as usable in post-initialization coverage.
+- **OA-CPR-214** Nominal scenarios straight, turn, acceleration, crossing, and delayed require
+  post-initialization usable coverage ≥0.999 and candidate coverage no lower than baseline.
+- **OA-CPR-215** Dropout is diagnostic-only under v1 and is excluded from qualification gates for
+  its predeclared 4-of-12 absent-source schedule and resulting 2-of-12 coast interval.
+- **OA-CPR-216** The runner, reference validator, evaluator, and wrapper preserve and report the
+  frozen v1.0.3 initialization, scenario-role, paired-key, and fault-cohort values without tuning
+  them from candidate results.
+- **OA-CPR-217** The v1 dropout fault cohort is separate from the 100 nominal performance seeds,
+  uses seeds 1,000,101 through 1,000,120 and 2,000 additional simulated aircraft-hours, remains
+  unopened, and blocks any all-quality pass until every independently reviewed fault gate is
+  measured and passes; nominal seed count cannot erase the fault-mode gate.
+- **OA-CPR-218** Qualified v1 accuracy requires identical candidate and baseline usable post-init
+  truth-grid key sets; a mismatch blocks qualified accuracy while raw per-system metrics and
+  keyset intersection/difference counts remain reported.
+- **OA-CPR-219** The evaluator pins the SHA-256 of `validation/comparison-protocol-v1.json`; any other protocol bytes make accuracy qualification `unqualified_protocol_hash_mismatch` with the reason "protocol file does not match the frozen v1 hash", and every threshold it applies (ratios, coverage minimum, coast age, initialization window) is read from the verified protocol.
+- **OA-CPR-220** Every unpaired position, velocity, age and per-group statistic carries its coverage (rows used, rows expected, fraction) in the same object as its figures.
+- **OA-CPR-221** Parsed integers and numbers must match a strict decimal pattern; underscores, spaces, a leading plus sign, and inf/nan text are refused.
+- **OA-CPR-222** The cluster bootstrap reports its replicate count and how many replicates were dropped for a zero denominator.
+
+## Motion-model development study
+
+- **OA-ACC-150** The versioned study preregistration is committed before experiment outputs and fixes its developmental-only claim scope.
+- **OA-ACC-151** The study evaluates exactly `H_Q_CV` values 1, 0.1, and 0.01 while all other motion and measurement settings remain frozen at default.
+- **OA-ACC-152** Training runs exactly three candidate settings across seeds 1–3, six v1 scenarios and onset-exit (63 candidate run cases), with 20 aircraft for 300 seconds; each is paired to frozen default and winner selection follows the preregistered pooled nominal RMS rule subject to all gates.
+- **OA-ACC-153** Seeds 4–6 are used only once for the selected candidate paired with the frozen-default control across all six v1 scenarios and onset-exit; no other experimental setting is run, and results cannot retune or replace the selected candidate.
+- **OA-ACC-154** The study excludes qualification seeds 1,000,001 and above and the sealed fault cohort.
+- **OA-ACC-155** Candidate selection requires zero lost, pending or refused inputs, full nominal post-initialization coverage, identical usable key sets and the preregistered 1.02 regression bounds.
+- **OA-ACC-156** Dropout remains diagnostic-only and is compared to frozen default using the preregistered paired p99 and coverage checks.
+- **OA-ACC-157** Mirrored onset-exit transitions are scored separately by direction and entry/exit in fixed 30-second windows; both motion probability and turn rate must cross their thresholds for three samples, candidate lag is at most one second worse than default, and censoring fails the response gate.
+- **OA-ACC-158** Posterior 2D containment is computed from candidate ENU covariance using a seed-then-flight paired cluster bootstrap; preregistered one-sided lower-bound floors apply per nominal scenario and each onset-exit direction/window group, invalid covariance fails the setting, and overcoverage is reported.
+- **OA-ACC-159** The study does not claim NIS, physical accuracy, professional performance, or independent qualification; thresholds are not changed after observing results.
+## Motion filter diagnostics study
+
+- **OA-ACC-160** Every candidate setting has a recorded pass for the preselection `oa-track core accelerating_flight_is_tracked` regression guard; missing or nonzero evidence blocks selection, and the selected candidate receives the full core suite afterward.
+## Independent track-set accuracy scoring
+
+- **OA-ACC-050** The set scorer is a standalone Python standard-library tool with explicit truth, outputs, manifest and evidence paths.
+- **OA-ACC-051** Truth and output CSV headers exactly match the registered snapshot schemas.
+- **OA-ACC-052** Input bytes, records, fields, grid ticks, per-tick points and matching work are bounded; exceeded exact-work limits return `UNQUALIFIED`.
+- **OA-ACC-053** Invalid IDs, timestamps, statuses, coordinates, non-finite values and out-of-range geodetic positions are excluded and counted.
+- **OA-ACC-054** Manifest schema version, scenario, run configuration, sources, grid and expected truth counts are validated before scoring.
+- **OA-ACC-055** Truth, output and manifest artifacts are hash-bound; declared source file hashes and row counts reconcile with supplied bytes; whole and measured fusion input fingerprints/counts match their offered input counts.
+- **OA-ACC-056** Manifest accounting requires explicit export validity, strict processing state, reconciliation flags and complete nonnegative counters; unassigned plots remain reported, not treated as loss by default.
+- **OA-ACC-057** The truth manifest inventory explicitly names every score tick and expected cardinality, including zero-truth ticks.
+- **OA-ACC-058** The output manifest inventory explicitly names every score tick and emitted row count, including intentional empty output sets.
+- **OA-ACC-059** An output snapshot count mismatch or incomplete truth inventory is `UNQUALIFIED`; absent outputs are never silently interpreted as valid empty sets.
+- **OA-ACC-060** A declared intentional empty output set at a required tick is scored as an empty track set and counts all truth objects as misses.
+- **OA-ACC-061** Missing whole output ticks are separately reported; expected nonempty output ticks with no emitted rows are `UNQUALIFIED`.
+- **OA-ACC-062** A zero-truth snapshot is valid and charges the false-track penalty for each emitted output.
+- **OA-ACC-063** Duplicate truth and output IDs are detected per time, counted, excluded after the first occurrence and invalidate trace quality.
+- **OA-ACC-064** Malformed rows are counted and excluded; scoring cannot pass with malformed rows.
+- **OA-ACC-065** Scenario/time exclusions and invalid identity rows are included in named excluded-truth and excluded-output counts.
+- **OA-ACC-066** Both `valid` and `coast` outputs with positions participate in the set metric.
+- **OA-ACC-067** Output source timestamps are nonnegative, within the signed timestamp domain and no later than their score time.
+- **OA-ACC-068** Truth IDs and output track IDs are unique within each snapshot; IDs may persist across snapshots.
+- **OA-ACC-069** Every row is joined only to the manifest scenario and a declared grid timestamp.
+- **OA-ACC-070** The preregistered score is GOSPA with p=2, alpha=2 and c=1000 m.
+- **OA-ACC-071** Pair distances use the declared zero-height WGS84 ECEF chord, including correct behavior at the dateline and antipodes.
+- **OA-ACC-072** A bounded 3-D spatial hash generates every possible pair strictly inside the cutoff without all-pairs distance evaluation.
+- **OA-ACC-073** Pair distances at or above 1000 m are never matched; a spatial-bin margin cannot change the final metric cutoff.
+- **OA-ACC-074** The score uses a minimum-cost one-to-one partial assignment; each truth and output occurs in at most one match.
+- **OA-ACC-075** Each unmatched truth contributes c²/2 to squared GOSPA cost.
+- **OA-ACC-076** Each unmatched output contributes c²/2 to squared GOSPA cost.
+- **OA-ACC-077** Each selected in-cutoff pair contributes its squared ECEF chord distance to localization cost.
+- **OA-ACC-078** Snapshot GOSPA distance is the square root of localization, missed-object and false-object squared costs.
+- **OA-ACC-079** The exact assignment solver is implemented in-tree without SciPy or other external dependencies.
+- **OA-ACC-080** Candidate graphs are decomposed into independent connected components before exact assignment.
+- **OA-ACC-081** Equal-cost assignments use stable sorted-ID row/column order and a deterministic first-minimum solver rule.
+- **OA-ACC-082** Local equal-nearest candidate ties are counted and labeled with their numerical tie tolerance.
+- **OA-ACC-083** Global assignment uniqueness is explicitly reported as not assessed; a deterministic representative is not claimed unique.
+- **OA-ACC-084** Track-ID to truth-ID assignment changes between adjacent ticks are reported by both IDs and time.
+- **OA-ACC-085** Truth-ID to track-ID changes between adjacent ticks are reported by both IDs and time.
+- **OA-ACC-086** Proximity-based assignment and association changes are never represented as proof of physical identity continuity.
+- **OA-ACC-087** Every manifest score tick has a result row with truth/output cardinality, matches, misses, extras, costs and GOSPA.
+- **OA-ACC-088** Aggregate output reports summed localization, missed, extra and total costs and counts across all ticks.
+- **OA-ACC-089** Intentional empty outputs and missing output snapshots are distinguishable through the per-tick manifest inventory.
+- **OA-ACC-090** Inventory rows are ordered, unique, nonnegative and cover the complete inclusive grid.
+- **OA-ACC-091** Truth point counts and truth file declarations reconcile with per-tick truth inventories before any score is emitted.
+- **OA-ACC-092** Offered, input, processed, applied and pending counts reconcile using the declared fusion accounting identities.
+- **OA-ACC-093** Late/refused events, input-address refusals, queue overflow, work failure, counter overflow, prediction failure and output overflow block the strict processing-quality pass; complete structurally valid exports retain descriptive metrics with status `UNQUALIFIED_PROCESSING`.
+- **OA-ACC-094** No approximate assignment fallback is permitted when a component or work bound is exceeded.
+- **OA-ACC-095** Retained candidate edges have explicit per-tick and whole-run caps checked before storing each edge.
+- **OA-ACC-096** Assignment component size has an explicit hard cap; exceeding it produces `UNQUALIFIED`.
+- **OA-ACC-097** Candidate-search and Hungarian cubic work have explicit hard caps; exceeding them produces `UNQUALIFIED`.
+- **OA-ACC-098** Small-set exact assignments are exhaustively cross-checked against a separate brute-force partial-matching implementation for all sizes through four.
+- **OA-ACC-099** The report is a set-level synthetic metric only; it makes no full-quality or physical identity claim.
+- **OA-ACC-161** Study CSVs enforce exact bounded schemas, finite numeric values, unique truth/diagnostic/output keys, unique event IDs and nonregressing input order.
+- **OA-ACC-162** Candidate and frozen-default artifacts bind identical truth and measurement bytes, the six compiled motion parameters, source/configuration hashes, and the preregistered `H_Q_CV` difference only.
+- **OA-ACC-163** The scorer reports all-grid, cold-start and post-initialization position/velocity metrics plus valid/coast/missing counts and fractions, with paired post-initialization position/velocity metrics also split by truth phase.
+- **OA-ACC-164** The native regression guard passes only with hash-verified result and log artifacts, matching source identity, the exact pinned test command and a one-test successful log summary.
+- **OA-ACC-165** Candidate and frozen-default builds share the same source head and runner, have parameter-source bytes differing only at the registered `H_Q_CV` declaration, bind a source diff limited to that declaration, and both carry passing native regression evidence.
+- **OA-ACC-166** Run manifests use the frozen `adsb_kinematic_v2` model for the six established scenarios and `adsb_motion_study_v1` only for onset-exit.
+- **OA-ACC-167** Onset-exit truth validation compares geographic velocity using the WGS84 Jacobian at each generated latitude while retaining the frozen position and velocity tolerances.
+- **OA-ACC-168** Containment uses position error in candidate-local ENU axes matching emitted covariance, and turn-rate residuals use the tracker's clockwise-positive sign convention.
+- **OA-ACC-169** The motion-study scorer, selector and checker load `validation/motion-study-v1.json` only if its bytes match the pinned v1 SHA-256, and otherwise fail closed with "protocol file does not match the frozen v1 hash".
+
+- **OA-RDF-024** `tools/replay_compare.sh` reads from each commit's tree, before any build, the
+  digest format it will emit (the header constant of its `canon.rs`, or v2 for a commit that gets
+  the overlay); a commit that would emit v1, a half-way commit (only one of `canon.rs` and
+  `--digest`) or an unknown header is exit 2. It runs both `oa-track-run` calls in the same
+  `env -i` environment as the builds, and records the diff tool's build commit and whether that
+  tree was clean in the report and in `summary.txt`.
+- **OA-TRK-377** A P-002 hold-out run (neither `--development` nor `--allow-dirty`) needs
+  `--frozen-commit <40 hex>` and is refused (exit 2) unless the commit embedded in the binary at
+  build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,
+  and the working tree at run time is at that commit and clean. This gates which runs count as
+  hold-out scores; it does not change what is computed.
+## Shadow comparator (oa-shadow)
+
+A tool crate (`tools/oa-shadow`, class `shell`) that runs OpenATCA's tracker beside ERAM's published track
+(SFDPS) on a recording and reports where the two disagree. It uses neither system's accuracy to decide what is a
+difference: a live shadow has no truth. Every threshold is a value of one table (`thresholds::THRESHOLDS`) and a
+value is a difference only when strictly greater than it.
+
+- **OA-SHD-001** Flights are paired by exactly one rule. An ERAM flight with a Mode S address that OpenATCA has an
+  aircraft for pairs with that aircraft. Any other ERAM flight with a beacon code pairs with the OpenATCA aircraft
+  that is not already paired (by address or by beacon) to an ERAM flight whose span overlaps this one's (beacon
+  claims are exclusive within overlapping spans), was offered the code within the flight's span plus 30 s, and is
+  nearest to ERAM's first in-box, in-window report of the flight within 5 NM (ties to the lowest address). The code
+  is the one in force at that first report, or the earliest if the first message came later. Several ERAM flights
+  of one aircraft form one group.
+- **OA-SHD-002** A flight or aircraft with no partner is a difference (`UNPAIRED_ERAM`, `UNPAIRED_OA`) with its
+  first and last time and duration and its own row in the flight table; it is not dropped.
+- **OA-SHD-003** At each ERAM report time the raw cross-track and along-track separations from OpenATCA are judged
+  separately: above 0.5 NM (926 m) and up to 1 NM (1852 m) is `POS_*_0P5_TO_1NM`, above 1 NM is `POS_*_GT_1NM`; a
+  separation exactly at a threshold is not in the class above it.
+- **OA-SHD-004** ERAM stamps whole seconds. The classification uses the raw along-track separation; the event
+  carries OpenATCA's ground speed times 1 s (`along_credit_m`) and a flag `within_1s_stamp_allowance`, true when the
+  raw separation less that credit is not over the event's threshold; the summary counts the events with and
+  without the flag. Cross-track events carry no flag. Below 2 kt the direction is undefined and the whole
+  separation counts as cross-track.
+- **OA-SHD-005** OpenATCA is linearly interpolated to the ERAM report time between two of its one-second rows at
+  most 2 s apart, or taken from the row at that time; with no such rows it has no sample there.
+- **OA-SHD-006** An altitude difference above 300 ft either way is `ALT_GT_300FT`, only where both systems have an
+  altitude; the others are counted as not comparable. Each event names the band of ERAM's altitude (below or at or
+  above 18,000 ft), and the summary gives the event counts and the median signed difference of both bands (no
+  altimeter setting is applied).
+- **OA-SHD-007** Identity: a report disagrees on the beacon when ERAM's code in force (each message's code carried
+  forward) differs from every squawk the OpenATCA adapter was offered within +-60 s of the report time (inclusive,
+  the one in force at the window start included); a disagreement counts only when it lasts at least 3 consecutive
+  reports of the ERAM flight, and each such run is one `ID_BEACON` event with its span (the first report's codes in
+  the detail). Nothing is compared where either side has no code, and a report that agrees or is not compared ends
+  a run. `ID_CALLSIGN` is the same for ERAM's callsign against the callsigns offered (case and padding ignored).
+- **OA-SHD-008** A paired aircraft's first compared ERAM report and OpenATCA's first in-box row (and the last of each)
+  differ by more than 12 s plus the ERAM report interval at that end: `START_TIMING`, `DROP_TIMING`, with the
+  direction. Gaps inside the track are `ERAM_REPORT_GAP` only. The summary prints the median ERAM report interval.
+- **OA-SHD-009** ERAM reports with no OpenATCA sample are `ERAM_ONLY_SPAN` (consecutive reports one span);
+  OpenATCA rows outside the span of every ERAM flight of the aircraft, each widened by 12 s plus the report interval
+  at that end, are `OA_ONLY_SPAN` (consecutive rows one span). A span's duration is first to last plus half the
+  local sample interval at each end (a lone sample gets one interval; an interval counts at most 30 s).
+- **OA-SHD-010** Where ERAM has a report and OpenATCA has a row at exactly that time, ERAM flagging coast and
+  OpenATCA not is `COAST_ERAM_ONLY` and the reverse is `COAST_OA_ONLY`; the flag is not interpolated and the summary
+  says the two flags are different concepts.
+- **OA-SHD-011** With truth, each position event also names which system was closer to the truth at the ERAM
+  report time (`ERAM`, `OpenATCA`, `tie` within 1 m, or empty without truth), computed after classification. The
+  events, their order and values are the same with and without truth. The summary states that the truth shares
+  its source with OpenATCA's input and favours OpenATCA, and counts the truth queries that gave no answer.
+- **OA-SHD-012** The report is deterministic: `events.csv`, `flights.csv` and `summary.txt` are byte-identical for
+  the same inputs; the summary holds no path, clock or run time and ends with a digest line over the three texts;
+  it counts every class (events, flights, span, largest) and gives no aircraft address or callsign. A value that
+  rounds to zero is written without a sign.
+- **OA-SHD-013** The thresholds are one table and the summary prints every one.
+- **OA-SHD-014** The flight table has one row per group and per unpaired flight or aircraft, with a flight index
+  (the only name in the summary), the compared count and the worst cross-track, along-track and altitude
+  difference.
+- **OA-SHD-015** Both systems are restricted to the clip box (38.5 to 46.5 N, 83.5 to 93.5 W, inclusive); the
+  identity the adapter was offered is the squawk and callsign carried forward from the aircraft's reports, one point
+  per change.
+- **OA-SHD-016** An input or output path the shared sealed list refuses (OA-SEAL-001), as given or after
+  resolving links, is refused before anything is opened, exit 2.
+- **OA-SHD-017** A missing, repeated, unknown or valueless flag (a value starting with `--` is missing) is a usage
+  error, exit 2.
+- **OA-SHD-018** The two recordings are cut to the overlap of their in-box recorded extents (ERAM's in-box track
+  positions, OpenATCA's rows) before anything is compared, edges inclusive; a flight or aircraft left with no
+  samples is gone, and the summary states the window in UTC. Recordings that do not overlap are an error.
+- **OA-SHD-019** A gap of more than 30 s between two reports of one ERAM flight is `ERAM_REPORT_GAP` with its
+  length; OpenATCA rows inside the flight's span are not `OA_ONLY_SPAN`.
+- **OA-SHD-020** Two ERAM flights of one aircraft with overlapping spans: the overlap is `DUP_ERAM_TRACK` (its
+  duration, the union of the overlap with the flights before it in priority), and a flight's reports inside the
+  segments of those flights (gaps over 30 s not covered) are not compared; the flight with the earliest first report
+  (ties: the lower flight index) is the primary. Each (aircraft, ERAM time) is compared once.
+- **OA-SHD-021** An address-paired ERAM flight more than 20 NM from the paired aircraft for 3 or more consecutive
+  reports is `ADDR_CONTRADICTS_TRACK` (with the span) and its reports in the span are left out of the position
+  classes and of the worst-case columns.
+- **OA-SHD-022** Every file the run opens is canonicalised and refused when it resolves into a sealed recording, so a
+  link inside an unsealed directory is caught; the run itself checks its arguments before creating anything.
+- **OA-SHD-023** A start or drop difference is not reported as `START_TIMING`/`DROP_TIMING` where an `OA_ONLY_SPAN` or
+  `ERAM_ONLY_SPAN` already covers the interval between the two times; the span classes are disjoint by construction
+  and the summary says span totals add.
+- **OA-SHD-024** `DUP_ERAM_TRACK` is one event per secondary flight, its value the union of overlap time with the
+  primary flights; a secondary's reports inside a gap of over 30 s of the primary are compared.
+- **OA-SHD-025** `ERAM_REPORT_GAP` is measured on the compared (not duplicate-excluded) reports only.
+- **OA-SHD-026** A beacon-paired flight is measured against the OpenATCA row nearest its first report within 12 s plus
+  the ERAM report interval, else the first row inside its span; no interpolated sample is needed.
+- **OA-SHD-027** Reports in an `ADDR_CONTRADICTS_TRACK` span are also left out of altitude, coast and identity; a
+  report with no OpenATCA sample neither extends nor breaks a contradiction run.
+- **OA-SHD-028** An output path that does not exist yet is resolved through its nearest existing ancestor before the
+  sealed check.
+- **OA-SHD-029** Every nonzero load count is printed in the summary header; a beacon table that overflowed
+  (`DROP_SFDPS_BEACON_FULL`) fails the run.
+
+
+## M5 close-encounter record (oa-encounter, tools/oa-encounter)
+
+- **OA-ENC-001** A pair is in a class when its horizontal separation is strictly under the class's horizontal limit and its vertical separation strictly under the vertical limit; the record volume has the same strict edges, and the class of a finished encounter is the tightest class any tick with a known altitude met.
+- **OA-ENC-002** An encounter starts at the first tick a pair is inside the record volume and ends when the pair has been outside it for the hysteresis (end time the last tick inside); a re-entry within the hysteresis continues the same encounter and a later one is a new encounter.
+- **OA-ENC-003** Each encounter records the time of the closest horizontal approach, the minimum horizontal separation, the vertical separation and the mean altitude at that time, the minimum scaled three-dimensional separation, both tracks' flags and whether either was on the ground at that time.
+- **OA-ENC-004** A pair with both aircraft on the ground inside the record volume is not recorded and is counted; one aircraft on the ground, or an unknown ground state, is recorded.
+- **OA-ENC-005** A pair inside the horizontal radius with an altitude unknown on either track is recorded by horizontal distance, and an encounter with no tick of known altitude is class ALT_UNKNOWN; none is dropped.
+- **OA-ENC-006** The grid scan and the pair evaluation count their work against configured budgets; over budget the pairs are evaluated in order of smallest separation, the remainder is counted as not evaluated, an open encounter whose pair was not evaluated is kept alive and marked, and every shortfall (tracks not scanned, candidates dropped, encounters not opened) is a count.
+- **OA-ENC-007** The record is a deterministic function of the rows: the same rows in any order give the same encounters and counts; rows sharing an address, or with no valid position, are left out and counted.
+- **OA-ENC-008** The grid finds every pair that the exact separation test finds inside the record radius, including across the antimeridian and at high and southern latitudes up to the limit `atan(0.02 / dphi)` (`dphi` the radius over 6,356,752 m, 85.8 degrees for 5 NM), which the core reports; rows above it are used and counted.
+- **OA-ENC-009** The tool refuses, with exit 2 and before opening or creating anything, an input or output path that is, is inside, or resolves (through a link or the nearest existing ancestor of a new directory) into a sealed 2026-11-19 recording; its arguments are strict.
+- **OA-ENC-010** A cycle whose time is not after the previous cycle's is refused and counted, an out-of-range configuration is refused, and a full encounter log counts what it loses.
+- **OA-ENC-011** The tool writes `encounters.csv` and `summary.txt` deterministically, sorted by start time; the summary has counts per class, altitude band, hour and 0.25 degree cell, the work and overflow counts, a degraded state when any shortfall is non-zero and the digest of `encounters.csv`, and contains no aircraft address.
+- **OA-ENC-012** A synthetic close pass run through the tracker and the record gives one encounter of the expected class and distance, repeats exactly, is not recorded at a large vertical separation, and the on-ground state at a tick is the latest report not older than 30 s.
+- **OA-ENC-013** The true minimum horizontal separation of an encounter is found by moving the pair's relative position in a straight line between two consecutive ticks that were both evaluated, and its time is recorded beside the sampled minimum, which is kept; the interpolated minimum is never above the sampled one, and no line is drawn across a tick that was not evaluated. The smallest vertical separation and the vertical rates at the closest approach and their largest magnitude are recorded.
+- **OA-ENC-014** Each encounter has one context at its closest approach: SURFACE (either aircraft on the ground, or within 5 NM of a public airport and under the field elevation plus 200 ft), else DEGRADED_TRACK (either track coasting or uncertain), else AIRBORNE (both altitudes known) or AIRBORNE_ALT_UNKNOWN; the distance classes apply within each context.
+- **OA-ENC-015** The summary leads with AIRBORNE and then AIRBORNE_ALT_UNKNOWN, counts SURFACE and DEGRADED_TRACK with the rule that defines each, lists every encounter at or above 18,000 ft pressure altitude without an address with its breakdown (vertical at the level of 975 ft or more, a climb or descent, anything else), and gives the AIRBORNE vertical separation at the closest approach from 900 to 1,000 ft in 25 ft bins.
+- **OA-ENC-016** For an encounter at or above 18,000 ft the tool finds the smallest separation between the two aircraft's own reports (one aircraft's position at the other's report times, straight between its reports when under 30 s apart (the clip's reports are about 20 s apart at altitude)) during the encounter, and reports none for a pair with no such time.
+- **OA-ENC-017** An AIRBORNE encounter whose vertical separation at the closest approach is at least the record volume's vertical limit less one 25 ft altitude quantum, with both vertical rates known and under 300 fpm, is AT_VERTICAL_MINIMUM: it stays in the record and the CSV (a column), is counted on its own line with its rule and is left out of the AIRBORNE class, band and hour tables.
+- **OA-ENC-018** The airports of the surface rule are the NASR `APT_BASE.csv` rows of site type airport and public use, with position and field elevation, read from the CSV archive; a missing file or a bad archive is an error.
+- **OA-ENC-019** A shortfall never ends or splits an encounter: when the candidate table overflowed, or rows were removed (a duplicate address, no valid position, over capacity), every open encounter not evaluated at the tick whose pair could have been lost to it is kept alive and its unevaluated ticks counted; the counts add up (`evaluated + not_evaluated = candidates`, the dropped ones a part of `not_evaluated`), and a hysteresis of zero or less is refused.
+- **OA-ENC-020** The grid skips, and counts, a pair whose two altitudes are known and not under the record volume's vertical limit apart (strict, as the volume test); an unknown altitude is never skipped, and the record is the same as without the skip.
+- **OA-ENC-021** The core states the latitude limit of the grid test, rows above it are counted, and the summary prints both and calls the record degraded when any is non-zero, as for duplicate and invalid rows.
+
+## M5 — Safety nets: state and inhibitions (oa-safety, oa-display)
+
+Build order step 1 of docs/M5_DESIGN.md (rules 1 and 2). `oa-safety` is a core crate with no
+allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes feet.
+
+### Net state (oa-safety)
+
+- **OA-SAF-001** A net that has never reported reads as `Unavailable(NeverReported)`, one whose last
+  report is older than the staleness limit (age strictly over it) as `Unavailable(StateStale)` with
+  its age, and one whose report is dated after the query as `Unavailable(TimeInconsistent)`: a net
+  that stops reporting is never shown as running. Extreme times do not panic.
+- **OA-SAF-002** The staleness limit and the future horizon come from configuration with no default
+  (a non-positive limit or a negative horizon is refused); an age equal to the limit is still current.
+- **OA-SAF-003** Each net's state (running, degraded with reason, area and count, unavailable with
+  reason) is reported with the age of the state, for every net, in a fixed order.
+- **OA-SAF-004** A running net with at least one inhibition in force reads as inhibited, derived
+  from the inhibition table (a net cannot report it), and a degraded or unavailable net keeps its
+  state and shows the inhibitions in force as well.
+
+### Inhibitions (oa-safety)
+
+- **OA-SAF-005** An inhibition request is refused, counted and changes nothing when: the
+  configuration has no positive maximum duration for the net (there is no default), the end is not
+  after the start, the end is already past, the start is further ahead than the configured horizon
+  (no horizon configured is refused too), the area is larger than the configured extent (likewise),
+  the duration is over the maximum by one nanosecond (or
+  overflows), the polygon is not valid, the altitude band is reversed, or the reason or author is
+  empty, longer than its field or not printable ASCII. A duration exactly the maximum is accepted.
+- **OA-SAF-006** A full table refuses the request and counts it; no inhibition is evicted, and an
+  id is never reused.
+- **OA-SAF-007** An inhibition is in force at `t` iff `start <= t < end` (the start instant in, the
+  end instant out; never for an empty or reversed span). Proved with Kani over every `i64` triple.
+- **OA-SAF-008** The altitude band is inclusive at both ends and empty when reversed. Proved with
+  Kani over every `i32` triple.
+- **OA-SAF-009** The query names the inhibitions that hide an alert at a position, altitude and
+  time: on the net, in force, the point strictly inside the area (a point on an edge or vertex is
+  not hidden), the altitude in the band. An unknown altitude is hidden by none. The pure query
+  logs nothing.
+- **OA-SAF-010** Every suppression is recorded (net, inhibition id, time, position) in a bounded
+  log; an entry that does not fit is counted as overflow, the suppression still applies, and no
+  entry is evicted.
+- **OA-SAF-011** Removing an inhibition before its end is an explicit action that names who did it,
+  is refused for an unknown id or an invalid name, and is logged with the time and the name.
+- **OA-SAF-012** An inhibition whose end has passed is reported once as an expiry event (review) and
+  leaves the table; it no longer suppresses; creation is logged with the author.
+- **OA-SAF-013** If the event log is full an expired inhibition stays in the table (counted, not in
+  force) until the log is drained, then is reported once: no expiry is lost.
+- **OA-SAF-014** A polygon of 3 to 32 vertices is accepted only if no vertex is at a pole or off the
+  globe, no consecutive vertices repeat, no edge spans 180 degrees of longitude, no edge folds back
+  over its neighbour, no two edges cross or touch and its area is not zero; point-in-polygon is
+  integer arithmetic in 128 bits, correct for a concave polygon and at the extremes of the range.
+
+### Display indications (oa-display)
+
+- **OA-DSP-060** When every net is running with a fresh state, no inhibition is in force, every
+  feed is live and the newest track update is within the limit, the safety build draws nothing at
+  all, so a traffic frame (and each ZAU map frame, sha256 e34d3091...a062, 306bc3de...a0c3 and
+  06dca517...ac84) is byte for byte what it was.
+- **OA-DSP-061** Every net that is not plainly running is one banner line in the alert colour above
+  the other layers, under the legend strip, giving the name, state, reason, area, count and age of
+  the state (and the inhibitions in force); numbers are capped so no line is cut; the banner is a
+  function of the state alone, so it cannot be dismissed and ends with the condition.
+- **OA-DSP-062** An inhibition in force is drawn as a closed outline in the alert colour with a label
+  giving the net, the end time in UTC, the author and the reason cut to 16 characters; one not yet
+  started or already ended is not drawn; the net's banner line reads inhibited with the count.
+- **OA-DSP-063** The banner says `PICTURE FROZEN` with the age when the newest track update is at
+  least the configured limit old, nothing one nanosecond before it, and says so when there has been
+  no update; a limit that is not positive is refused.
+- **OA-DSP-064** A feed that is slow or lost is one banner line with its name and age, a live feed
+  none, and more feeds than the display lists is refused, not cut (design ND-04).
+- **OA-DSP-065** The worst state (64 inhibitions of 32 vertices, every net degraded with extreme
+  numbers, eight lost feeds, a frozen picture) fits `safety_caps` and `MAX_SAFETY_WORK`, loses no
+  text and rasterizes.
+- **OA-DSP-066** The UTC date and time of an instant are integer civil time from the epoch,
+  correct across leap days, the year 2000 and negative times, and total over every `i64`.
+- **OA-SAF-015** A report dated before the net's stored one that is worse than it (unavailable over
+  degraded over running) replaces its state at once and keeps the later time, and is counted; any
+  other backdated report is refused and counted.
+- **OA-SAF-016** A report dated more than the configured horizon after the report-time clock
+  (including `i64::MAX`) is refused and counted, and the net reads `Unavailable(TimeInconsistent)`
+  until a valid report arrives; the stored report is untouched, so no one timestamp locks a net out.
+- **OA-SAF-017** A request is refused while the event log has no room for its record (creation: one
+  slot, counted; removal: one slot, two for an expired inhibition still waiting, which then emits
+  its expiry and then the removal), the inhibition staying visible.
+- **OA-SAF-018** A start horizon and a maximum extent are required configuration (no default) and
+  enforced to the unit: a start exactly at the horizon is accepted, one nanosecond more is not; an
+  area exactly at the extent is accepted, one unit more is not.
+- **OA-SAF-019** Suppressions lost to a full log mark the net degraded (`SuppressionLogFull`, with
+  the count) until the log is cleared; the total lost stays counted.
+- **OA-DSP-067** A newest track update dated after now is never fresh: the banner says `PICTURE TIME
+  INCONSISTENT`.
+- **OA-DSP-068** Any loss in the safety record (event log overflow, suppressions lost, expired
+  inhibitions waiting, refused state reports, clipped texts) is a banner line `SAFETY RECORD
+  INCOMPLETE` with the counts, second in the banner, and a net with suppressions lost reads degraded.
+- **OA-DSP-069** A build that fails before drawing still draws the net lines and `SAFETY DISPLAY
+  ERROR <code>` and returns the error (an alarm to the shell); a faulted list returns the error.
+- **OA-DSP-070** A banner that does not fit the frame ends with `+N MORE STATES NOT SHOWN`, the
+  count of hidden lines.
+- **OA-DSP-071** The banner box is opaque; targets whose symbol is under it are counted on it
+  (`TARGETS UNDER BANNER: n`) and in the stats.
+- **OA-SHD-030** `oa-shadow screen` compares ADS-B with ERAM's reports of address-paired aircraft: ADS-B is
+  evaluated at each ERAM report time by oa-truth's smoother (default settings) and the offset ADS-B minus ERAM is
+  resolved along and across the ADS-B velocity direction. The along offset is `c - L x speed`: L is the apparent
+  latency, positive when ADS-B is late (a late report is behind); b is the mean cross offset, positive to the right.
+  A known injected latency and offset are recovered within the bootstrap interval.
+- **OA-SHD-031** Two stages, because one aircraft's speed barely varies and its c and L are collinear: (a) the fleet
+  fit of c and L over all samples of the screened aircraft, by Theil-Sen (the reference: all pairs of 12 evenly
+  spaced samples of each aircraft, the same for the point fit and every bootstrap resample; a bootstrap over
+  aircraft for its interval) and by least squares (pulled by lagged aircraft); (b) per aircraft L_i alone, the
+  median of (c_fleet - along) / speed, and its latency excess L_i - fleet L; the cross offset b is the median cross
+  offset. A constant along-track offset and a latency are indistinguishable at constant speed, so a constant-speed
+  aircraft is identified only through stage (b). The two-parameter per-aircraft fit is a cross-check for aircraft
+  whose speed (5th to 95th percentile) spans 50 kt or more. Aircraft are listed by ascending address.
+- **OA-SHD-032** LAG is the lower 95 % bound of the latency excess strictly over 0.1 s, meaning an along-track
+  excess equivalent to a latency of 0.1 s or more; EARLY is the upper bound strictly under -0.1 s (counted, not a
+  LAG). BIAS is |b - fleet cross reference| (the reference: the median of the aircraft's median cross offsets)
+  strictly over max(3 x the 95 % bound of the aircraft's median NACp, the fleet's p95 of |b - reference|) with the
+  lower 95 % bound of it strictly over it too; an unknown NACp never flags BIAS. A LAG or BIAS stays only if the
+  aircraft recomputed without the one sample that most supports it still has it; the counts before and after are
+  printed. LAG is also given with c at both ends of the Theil-Sen c interval and under the least-squares fleet fit.
+- **OA-SHD-033** The aircraft interval is a block bootstrap (blocks of 10 consecutive samples, circular starts,
+  1000 resamples) seeded from the aircraft address, the fleet interval a seeded bootstrap over aircraft (200
+  resamples), so two runs give identical values; the valid replicates behind each interval are printed.
+- **OA-SHD-034** A sample needs a smoother state, |ADS-B - ERAM| at most 2000 m, a direction of travel (over
+  2 kt), a 95 % horizontal radius of at most 15 m, a turn rate (heading change over 2 s either side) of at most
+  0.5 deg/s, a vertical rate of at most 500 ft/min in magnitude (edges kept) and finite offsets; an ERAM report is
+  left out for the first reason that applies, in that order, and every reason is counted. No gap rule applies: a
+  thinned ADS-B trace still gives samples; the distance of a used sample to the nearest raw report is printed. An
+  unknown ERAM altitude has its own band code.
+- **OA-SHD-035** Left out of the screen and counted: ERAM reports in a duplicate-track overlap (a flight lends its
+  span only over the reports that survive the contradiction rule), in a contradicted address span (3 or more
+  consecutive reports over 20 NM from the smoother), and coasted ones; the reasons of OA-SHD-034; the counts add up
+  to the ERAM reports.
+- **OA-SHD-036** Two minimums, both printed: the fleet fit and cross reference use every aircraft with 30 or more
+  samples over 10 minutes or more; only aircraft with 100 or more samples (ten blocks) over 10 minutes or more are
+  screened for flags, and every prevalence line is over those. Aircraft out of the fit are counted under their
+  reason; an aircraft eligible for flags that cannot be screened is an error, so screened equals eligible; with
+  fewer than 30 screened the summary says the day has too few long, gated tracks for a prevalence estimate.
+- **OA-SHD-037** The screen summary carries the fixed caveat text and the statement that an offset and a latency are
+  indistinguishable at constant speed, the fleet c and L with intervals, the BIAS threshold rule and both its terms,
+  the counts and fractions of LAG, BIAS and EARLY, the distributions (p05, p50, p95) and a digest over
+  `aircraft.csv` and the summary; the summary names no address.
+- **OA-SHD-038** The screen reads only usable raw ADS-B positions (not stale, not on the ground, an ADS-B source, a
+  non-zero latitude), one per millisecond per address, with the NACp carried forward from the last known value
+  (1 to 15) within the truth configuration's carry age; an absent or zero NACp is unknown.
 
 ## SWIM STDDS terminal data (oa-stdds)
 
@@ -4592,8 +5418,212 @@ scope.
   directly; the summary example reads such a feed (raw or gzip) and prints counts and schema names only,
   never a position, identity or time.
 - **OA-STD-024** The summary example exits 2 before opening the file when the path, as given or with links
-  resolved on any prefix, names `scds/rec-20261119`, `scds/stdds-20261119-holdout` or
-  `scds/stdds-smoke-20261119`, including through a link to the file, to the folder or to a link.
+  resolved, is sealed by the shared guard (OA-SEAL-001, OA-SEAL-002), including through a link to the
+  file, to the folder or to a link.
+- **OA-STD-025** Forms the real feed uses are accepted: a decimal with up to 24 fraction digits (a heading
+  printed as a binary double, still range checked), a callsign with an inner space, a runway with `*` or `+`,
+  a flight plan status word up to 16 characters (`terminated`), and the sender's no-value words
+  (`unavailable` for the vertical rate, `unassigned` for an entry or exit fix) as an absent field counted
+  as present-empty, not an error. Encoding-damaged text (U+FFFD) and any other word stay refused.
+- **OA-STD-026** An element with no text is a counted `present_empty` field, not a field error, for
+  `flightPlan/rawFlightRules` (the real feed prints it empty as its normal absent form); every other field
+  keeps an empty element as a refused field. A record with only present-empty fields is not an empty record.
+- **OA-STD-027** The TAIS `track/pseudo`, `track/frozen`, `track/new` and `track/adsb` decode as booleans
+  (`true`, `false`, `1`, `0`); the stats keep a `[false, true]` count per flag, which the summary prints (the
+  flags are not identifying). `track/adsb` is the candidate radar-only marker.
+- **OA-STD-043** The TAIS `track/coast` decodes as a boolean like the other track flags (`true`, `false`,
+  `1`, `0`; an element is no longer skipped): absent stays absent, a present but unreadable value is a counted
+  field error and the field is absent, and the stats keep its presence count and a `[false, true]` count
+  (fifth flag), which the summary prints.
+- **OA-STD-028** The TAIS record header decodes: `recType`, `recSrc`, `recSTARSSrcID` as codes,
+  `recSTARSTimestamp` as milliseconds since midnight (ASSUMED from the observed digits; range 0 to 24 h) and
+  `recSAFAReceiptTime` as ISO-8601. The stats count the latency (receipt time of day minus STARS time of
+  day, wrapped into a day and folded into -12 h to 12 h, so a skew is negative and a midnight crossing small) in ms buckets, the records lacking a time, and the distinct `recSTARSSrcID` values,
+  never printing a time or an identifier.
+- **OA-STD-029** The five service-status roots in the `...:vN-M:status` namespace (`AirportDataServiceStatus`,
+  `TerminalAutomationInformationServiceStatus`, `TowerDepartureEventServiceStatus`,
+  `SurfaceMovementEventServiceStatus`, `STDDSStatus`) classify as kind `stdds-status`; the service name and
+  state are decoded (the root's `serviceStatus` text, or the top-level `p@k` ending in `Status` or `State` with
+  its `v` for `STDDSStatus`) and counted as a value histogram. Any other root of that namespace is unknown.
+- **OA-STD-030** An `AssetMessage` in the `https://mmixm.aero/base/` namespace classifies as kind `mmixm-asset`
+  and is counted, not decoded.
+- **OA-STD-031** ASDE-X `status/*` sub-elements other than `vertRate` stay unknown and are counted.
+- **OA-STD-032** A refused field is diagnosed by its text's shape (length and the first 12 character classes
+  with runs collapsed), kept per field and error kind in the stats and printed by the summary; no value is
+  kept or printed.
+- **OA-STD-033** A message is counted once: `messages == sum(kinds) + errors[xml]` after every refusal path;
+  a refusal after classification adds to `errors` only; a direct `parse_tais`, `parse_smes` or
+  `parse_status` call counts its records and refusals but never a message. The records read before a
+  too-many-records or too-deep refusal are counted.
+- **OA-STD-034** The message-level `src` (TAIS) and `airport` (SMES) follow the field rules: `r="1"` marks
+  them absent and counted, a duplicate keeps neither and is a counted field error, a bad value is a counted
+  field error.
+- **OA-STD-035** The latency (receipt time of day minus STARS time of day) is folded into -12 h to 12 h:
+  a true midnight crossing is a small positive latency and a skew of seconds counts in `<0`.
+- **OA-STD-036** Integer fields (TAIS altitudes, `vVert`, `recSTARSTimestamp`, SMES `vertRate`) take whole
+  numbers only: no fraction, no `+`, no `-0`, no leading zero beyond a single `0`; the counters (`trackNum`,
+  `sfpn`, `seqNum`, `track`) take no leading zero. More than 12 digits is out of range. The SMES altitude is
+  a decimal in the real feed and keeps rounding to feet.
+- **OA-STD-037** A bound is compared with the exact decimal before rounding (so 90.00000004 degrees is out
+  of range though it rounds to 90); a heading is at least 0 and below 360 (a value that rounds up to
+  360.00 is stored as 0).
+- **OA-STD-038** A fraction finer than a millisecond is rounded half up on its fourth digit with a carry
+  into the second, minute and day (not truncated).
+- **OA-STD-039** A status key or value longer than 64 bytes is counted (`status_key_too_long`,
+  `status_value_too_long`), an empty one or one past the per-message limit in `status_dropped`, and a state
+  past the table of distinct values in `status_table_overflow`; none is silent.
+- **OA-STD-040** Only elements with no namespace or in the root's namespace are fields (the real feed's
+  children are unqualified); an element in another namespace is unknown, counted, and nothing below it is
+  read.
+- **OA-STD-041** An `r` attribute other than `"1"` or `"0"` is a counted field error; an unknown element
+  path is stored cut to 120 bytes.
+- **OA-STD-042** The summary example prints a status text only if it is `[A-Za-z0-9 _-]` (up to 64 bytes) and
+  an unknown element or root name only if it is those characters or `:./{}`; anything else is counted as
+  "other". It exits 3 with a count of the bytes dropped if the frame reader stalls, reads until two bytes to
+  sniff gzip, and exits 2 for a sealed path (the shared guard) and for a path it cannot open.
+
+## STDDS adsb-flag census (tools/oa-stdds-census)
+
+- **OA-CEN-001** The update interval of a TAIS track is the difference of consecutive `mrtTime` values of
+  one track (facility, `recSTARSSrcID`, `trackNum`), attributed to the `adsb` flag of the update that ends
+  it, kept in 10 ms bins to 120 s; the census prints per flag the count, median, 10th and 90th percentile
+  and a histogram in 0.5 s bins to 15 s with the count at 15 s and over.
+- **OA-CEN-002** Flag changes within a track are counted (total, tracks with one, tracks by number of
+  changes), and for each direction the interval across the change, the one before it and the one after it
+  are distributions of their own; intervals across a change stay out of the per-flag distributions.
+- **OA-CEN-003** For the updates of each flag the census counts the share carrying a Mode S address, a
+  Mode 3/A code, code 1200, a callsign, any flight plan field, address with code, and none of address,
+  code and callsign, plus the share with the pseudo, frozen and new flags; and the tracks whose adsb=false
+  updates ever carried an address.
+- **OA-CEN-004** Every count and distribution is also kept per source facility (the message `src`); a
+  track number at two facilities, or under two `recSTARSSrcID`, is two tracks.
+- **OA-CEN-005** An update with no `adsb` element is counted apart (never as false); updates with no
+  `mrtTime`, with a time before the track's previous one, or with a gap over 120 s (a reset) are counted
+  and make no interval; a record with no `trackNum` is counted and not tracked; a frame cut short or a
+  gzip file that ends inside a member (a recording still being written) is counted, never fatal.
+- **OA-CEN-006** WITHDRAWN: the address-based cross-check (replaced by OA-CEN-009 to OA-CEN-012; the gateless check by address of
+  adsb=true updates in OA-CEN-010 is a different, later check, not this one: the
+  address field reads zero on almost all adsb=false updates).
+- **OA-CEN-007** The output holds counts, shares and distributions only: no position, address, callsign,
+  code, flight-plan content or individual time; the only text from the data is a source id of letters and
+  digits, and the only times are the start (rounded down) and end (rounded up) to the minute of the STDDS
+  recording and of the ADS-B clip, which are the span of each recording and not the time of any aircraft. Every path (the directory, the ADS-B clip, each subdirectory before it is listed, each
+  file before and after it is opened) goes through the shared guard (OA-SEAL-001), as given and with
+  links resolved, and a sealed one is refused, naming the path (exit 2). A capture day directory is
+  read from its `rec/stdds` folder and only files named `scds-stdds-*`; a day or `rec` directory with no
+  `rec/stdds` is refused (exit 2).
+- **OA-CEN-008** Tracks are classed by the flags seen on them (fewer than two flagged updates, all
+  adsb=false, all adsb=true, mixed), with their update counts and per-flag interval distributions.
+- **OA-CEN-009** Position cross-check (with an ADS-B clip, read by the loader oa-encounter and oa-bench use):
+  each tracked update with a flag, position and `mrtTime` is compared with every ADS-B aircraft interpolated
+  linearly to `mrtTime` between the two reports around it (at most 5 s apart by default, 30 s at most; `--max-gap-s`; a
+  segment faster than 600 m/s is left out and counted; ground reports are left out). A candidate is one aircraft inside the horizontal gate and, when both altitudes exist, the
+  vertical gate (both inclusive; defaults 0.5, 1 and 2 NM with 500 ft, 1 NM primary). Per flag and gate the
+  update is counted no candidate, exactly one, or ambiguous; only exactly-one is used. A horizontal-only
+  count is kept at the primary gate. Updates with no position or time, with no flag, or on a pseudo, frozen or
+  coasting track update are counted apart (a coasting position is dead-reckoned, not measured). A
+  gate above 10 NM, a gap above 30 s, or an unusable parameter is refused.
+- **OA-CEN-010** For exactly-one matches at the primary gate, per flag, the
+  horizontal difference, the vertical difference, and the along-track and cross-track differences (STDDS
+  minus ADS-B, along the ADS-B track, positive ahead and to the right; aircraft at 100 kt or more) are summarised by count, median,
+  10th, 90th and 99th percentile and a 20-bin histogram; the vertical differences of horizontal-only
+  matches are summarised over a wide range to expose an altitude unit error. adsb=true is labelled
+  ADS-B-fused and not independent of the truth (STARS fuses ADS-B into those updates, so its difference
+  measures STARS latency and filtering, not accuracy). The adsb=false results are headlined by track class,
+  and an adsb=false update on a mixed track is not ADS-B-free. Each matched cell prints the placebo-over-real
+  match ratio as the share of matches that may be chance. The ADS-B bracket width of the matches is counted
+  (up to 2 s, 2 to 5, 5 to 10, over 10). A bias injected into synthetic STDDS updates shows in the
+  matched distribution of adsb=false and not of adsb=true. adsb=true updates with a Mode S address are
+  also checked by address, with no gate, and reported apart.
+- **OA-CEN-011** The along-track difference is also given as time (along-track metres over the ADS-B ground
+  speed, aircraft at 100 kt or more); the ADS-B time is receipt time, so this is the STARS latency minus the
+  ADS-B latency; a known clock offset in synthetic data is recovered, positive when the
+  STDDS position is where the aircraft is later than the stated time.
+- **OA-CEN-012** The cross-check counts and difference medians are split by track class and by facility, and
+  absent without a clip.
+- **OA-CEN-013** The ADS-B reference is built with the gating of the tracker and the truth
+  (`oa_truth::quality_check`, default config: source type adsb_icao, adsb_icao_nt or adsb_other, NACp, NIC,
+  SIL, version, stale and range gates), in time order with per-aircraft carried state, not a parallel
+  filter; reports on the ground are then dropped. The census prints the clip's reports by source type before
+  any gating, what each gate removed, and what the time window left out. A TIS-B report on top of a
+  radar-only update is not a candidate. `--from` and `--to` restrict both sides to a time of the UTC day
+  (the ADS-B side padded by the interpolation gap and the placebo shift of 60 s, across midnight too); a window
+  outside 0 to 86400 s, or a non-finite bound, is refused. The STDDS and ADS-B time spans are printed, and
+  a run whose spans do not overlap (a wrong day or clip) exits 2.
+- **OA-CEN-014** The candidate search is exact at any latitude to 85 degrees and across the antimeridian:
+  each segment is stored in every grid cell its bounding box touches after widening by the largest gate
+  (in longitude at the box's highest latitude), longitude cells wrap, interpolation and the east difference
+  take the short way round. Distances are in the tangent plane at the interpolated ADS-B point. Segments and updates above 85 degrees, and segments faster than 600 m/s, are
+  counted and not used.
+- **OA-CEN-015** Coverage is counted apart from no candidate: per flag, the share of checked updates with
+  any indexed ADS-B aircraft within 30 NM at their time.
+- **OA-CEN-016** The cross-check counts reconcile exactly with the update counts per flag: updates equal
+  checked plus no position or time, above 85 degrees, no trackNum, pseudo, frozen or coasting update, and exact
+  duplicates of the track's previous update (time and position); updates with no flag equal the not-checked no-flag count.
+- **OA-CEN-017** A null control is run beside the real match: the same positions with the STDDS time
+  shifted by plus and minus 60 s, printing per flag the outcome counts and the horizontal difference
+  distribution of its exactly-one matches; the placebo exactly-one count (mean of the two shifts) over the
+  real one is printed as an estimate of the chance share. A placebo lookup at a window's edge finds its
+  shifted ADS-B.
+- **OA-CEN-018** Per flag the census prints the matches without a vertical difference, the distinct matched
+  ADS-B aircraft and the distinct STDDS track segments with a match, and the distribution over track
+  segments of each segment's median difference (segments with 3 or more matches). A segment is a run of
+  one track number that a restart of the interval state (a gap over 120 s, an update flagged new, a resync)
+  has not cut, so a recycled track number is not one aircraft; along and cross metres, like the time,
+  leave out aircraft below 100 kt; a value is kept inside its histogram range after rounding to f32; the along-track-as-time figure leaves out aircraft
+  below 100 kt; a class or facility cell with fewer than 30 matches prints "n<30" for a flag instead of
+  medians; `--gate-nm` and `--gate-ft` without `--adsb` are refused; the histogram's upper edge is
+  inclusive.
+- **OA-CEN-019** Track state is kept in step: a change of flag is counted only where an interval across it
+  exists (so changes equal the changes by direction); a backwards update changes neither the time nor the
+  flag of the track, an absent-flag update obeys the same backwards and reset rules, 3 backwards updates in
+  a row restart the track (counted), and an update flagged new on a track number with state starts a new
+  segment (counted).
+- **OA-CEN-020** Three checks against 4 GB. Each is an estimate under stated assumptions, not a guaranteed
+  bound. (1) Before the ADS-B index is built: 16 bytes for every clip report, and for each report the padded
+  window keeps, its point and an assumed 8 cell entries and 2 new grid cells (72 bytes each), all with 2x
+  growth slack; a run past it is refused (exit 2) before the index is allocated. The cell assumption fails for
+  a clip of faster or sparser aircraft or a larger gate. (2) After it: the index's own estimate. (3) While
+  reading: what the census holds (interval lists, cross-check records, segments, with 2x Vec slack) and the
+  copies that `finish` makes of each match, address match, placebo value and segment (three accumulators:
+  all, class, facility). Not counted: the loaded clip columns, the read buffers, the quality-gate state
+  and the output. Updates left out by the time window are counted. A test sets the budget through
+  `OA_STDDS_CENSUS_BUDGET_BYTES`, which exists for tests only.
+
+
+## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
+- **OA-SEAL-001** The sealed hold-out data is listed once, in `crates/oa-sealed/sealed_paths.txt` (the data root and the entries
+  `scds/rec-20261119/day2`, `day3`, `day4`, `runs*`, `scds/stdds-20261119-holdout`, `scds/stdds-smoke-20261119*`); the Rust guard compiles the file in and
+  the Python guard reads it, and both parse it to the same set. A list that does not parse refuses every path.
+- **OA-SEAL-002** A path is resolved before it is checked (relative paths, `..`, every link, a symlinked parent directory, a
+  path not yet created through its nearest existing ancestor) and is refused, with a message that names the rule, if it is,
+  is inside, resolves into or names (an entry's components in a row, as given or resolved) a sealed entry, if it is a
+  directory that holds one, or if a link on it cannot be resolved. The shared guard owns the path rule only; keeping a
+  sealed day's rows out of a file that also holds unsealed rows is a content rule that needs the tool's own parser.
+- **OA-SEAL-003** A tool that walks a directory checks every file it opens, through the guard's opener, not only its
+  arguments.
+- **OA-SEAL-004** Nothing switches the guard off: it reads no environment variable, flag or file, and an unknown option of
+  the checker is a usage error.
+- **OA-SEAL-005** Every tool that reads recordings refuses a sealed input or output path with a nonzero exit, a message that
+  names the rule, and nothing written: oa-compass, oa-encounter, oa-shadow, oa-track-run, oa-track-fusion, p002,
+  oa-replay-diff, validate_candidate.py, comparison_reference.py, comparison_evaluator.py, run_comparison.py,
+  track_set_score.py, replay_compare.sh and p002_build.sh.
+- **OA-SEAL-006** Every bin and example target of the workspace, found from the manifests and the source layout, uses the
+  sealed guard or is listed with a reason in `crates/oa-sealed/exempt_targets.txt`; a target with neither, a listed target
+  that does not exist, and a listed target that uses the guard all fail the test.
+- **OA-SEAL-007** The guard opens a file and then checks the real path of the opened descriptor (`/proc/self/fd`), so a
+  link swapped in after the path check is caught and the file closed; the loaders of `oa-bench` and `oa-replay` run the
+  guard before they stat a listed entry, and every guarded opener is this one function.
+- **OA-SEAL-008** The list file is printable ASCII and newline only, each line `word`, one space, `value`; both parsers
+  refuse anything else, and the same inputs are refused by both.
+- **OA-SEAL-009** Of the four-day recording `scds/rec-20261119`, the sealed list seals the name prefixes `day2*`, `day3*` and
+  `day4*` (hold-out days A, B and C of protocol P-001, and any renamed or partial copy beside them such as `day2.tmp`) and
+  `runs*` (the recorder's run log, which covers every day); `day1` (the tune day, usable freely) and `bin` are not sealed,
+  so a path below them is accepted. The recorder (`bin/run-days.sh`) writes only `day1` to `day4` and `runs.log` at the
+  top of the folder. The folder itself holds sealed entries and is refused as a holding directory (OA-SEAL-002), like
+  `scds`. A path through `..` or a link into day2 to day4 is refused, and so is a copy that keeps the components
+  `scds/rec-20261119/day2` (or day3, day4, runs); a copy renamed outside those components is not caught by any path rule. Tests: `only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed` (Rust,
+  `crates/oa-sealed/tests/guard.rs`; Python, `tools/test_sealed_guard.py`).
 
 ## Scoring against STDDS terminal tracks (oa-stdds-ref)
 
@@ -4614,11 +5644,17 @@ scope.
   extrapolated by the end row's velocity up to 1 s and counted, and refused beyond that.
 - **OA-SRF-008** Per set: horizontal error, along and cross track, altitude difference (feet) and velocity
   difference (m/s), each with n, rms, mean, p50, p95 and p99; an absent value is no data, never 0.
-- **OA-SRF-009** The summary and the per-sample CSV are byte-identical for the same inputs and carry the
+- **OA-SRF-009** The summary and the per-sample CSV (record place, class, status, offset and errors) are byte-identical for the same inputs and carry the
   input file digests and a digest of the output.
-- **OA-SRF-010** The tool exits 2 before opening anything when an input path, as given or with links
-  resolved on any prefix, names `scds/rec-20261119`, `scds/stdds-20261119-holdout` or
-  `scds/stdds-smoke-20261119`.
+- **OA-SRF-010** The tool uses the shared guard (`oa-sealed`, OA-SEAL-001, OA-SEAL-002) and no guard of
+  its own: every path it is given (the STDDS files, the ADS-B clip, the output folder) is checked before
+  anything is read or created, and a sealed one (a sealed folder, a sealed ADS-B day, a link into sealed
+  data) exits 2 with a message that names the path.
+- **OA-SRF-013** Every file the tool reads is opened by check, open and verify-the-open through the shared
+  guard, so a link swapped between the check and the open is refused (exit 2, the path named). The tool
+  walks no directory.
+- **OA-SRF-014** The text and the per-sample CSV hold counts and aggregate statistics only: never a track
+  number, callsign, Mode S address, time or position of a record.
 - **OA-SRF-011** A `.oaf` or `.oaf.gz` recording is read into records with counts of frames, other products
   and damage, and the SHA-256 of the file's stored bytes.
 - **OA-SRF-012** A record with no time or no position is counted as its own unpaired reason, never paired.

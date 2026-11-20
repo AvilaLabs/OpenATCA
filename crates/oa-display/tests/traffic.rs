@@ -9,6 +9,7 @@
 
 use oa_display::list::*;
 use oa_display::palette as pal;
+use oa_display::probe::list_capacities;
 use oa_display::project::{project, projection_new, Projection};
 use oa_display::raster::{frame_digest, frame_len, rasterize, FrameSpec};
 use oa_display::text::{text_new, text_str};

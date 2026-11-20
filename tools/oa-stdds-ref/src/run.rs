@@ -4,10 +4,12 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::rc::Rc;
 
 use oa_bench::adsb_truth::{self, BuiltTruth};
-use oa_bench::input::load_adsb;
+use oa_bench::input::{load_adsb_with, Opener};
 use oa_bench::legacy::NO_ALT;
+use oa_sealed::Sealed;
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     interval_stats, run_tracker_spilled, score_ranges, scoring_config, split_reports,
@@ -16,6 +18,7 @@ use oa_track::score::{
 use oa_track::DEFAULT_CONFIG;
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
 
+use crate::guard::open_guarded;
 use crate::sources::{Row, TrackerSource};
 
 /// The two references of one clip, and the header lines that describe how they were made.
@@ -28,9 +31,18 @@ pub struct Refs {
 
 /// Runs the tracker over set A of `clip` and keeps its one-second rows of the addresses in
 /// `addrs`; builds the truth from set B. `work` is a directory for the tracker's spill files,
-/// removed afterwards.
-pub fn build_refs(clip: &Path, addrs: &BTreeSet<u32>, work: &Path) -> Result<Refs, String> {
-    let loaded = load_adsb(clip).map_err(|e| e.to_string())?;
+/// removed afterwards. The clip is opened through the shared guard `g`.
+pub fn build_refs(
+    g: &Sealed,
+    clip: &Path,
+    addrs: &BTreeSet<u32>,
+    work: &Path,
+) -> Result<Refs, String> {
+    let guard = g.clone();
+    let opener: Opener = Rc::new(move |p: &Path| {
+        open_guarded(&guard, p).map(|f| Box::new(f) as Box<dyn std::io::Read>)
+    });
+    let loaded = load_adsb_with(clip, &opener).map_err(|e| e.to_string())?;
     let clip_digest = loaded.hash.sha256.clone();
     let (set_a, set_b, split) = split_reports(&loaded.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)

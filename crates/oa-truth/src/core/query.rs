@@ -1,6 +1,5 @@
 //! Queries on a built [`Truth`], its accessors and its digest. Core (pure, B7).
 
-use oa_math::canon_nan;
 use oa_sha256::core::sha256::Sha256;
 
 use super::frame::{frame_new, try_frame_velocity, unproject};
@@ -226,7 +225,7 @@ fn put(h: &mut Sha256, b: &[u8]) {
 
 /// Writes the truth's canonical serialisation to the hasher: the tag, the settings, the counts,
 /// then every column, integers little-endian and floats as their IEEE bits (a NaN as the one
-/// fixed NaN, [`canon_nan`], since its sign and payload differ between machines). Equal digests mean
+/// fixed NaN, [`oa_math::canon_nan`], since its sign and payload differ between machines). Equal digests mean
 /// the models are bit-identical.
 pub fn truth_hash_into(h: &mut Sha256, t: &Truth) {
     put(h, TRUTH_HASH_TAG);
@@ -235,7 +234,7 @@ pub fn truth_hash_into(h: &mut Sha256, t: &Truth) {
         put(h, &[v]);
     }
     for v in [c.quality_carry_ms, c.leg_gap_ms, c.bracket_ms] {
-        put(h, &v.to_le_bytes());
+        put(h, &i64::to_le_bytes(v));
     }
     for v in [
         c.max_sigma95_h_m,
@@ -244,14 +243,14 @@ pub fn truth_hash_into(h: &mut Sha256, t: &Truth) {
         c.accel_q,
         c.sigma_scale,
     ] {
-        put(h, &canon_nan(v).to_bits().to_le_bytes());
+        put(h, &u64::to_le_bytes(oa_math::canon_nan(v).to_bits()));
     }
     for v in [c.jump_resync, c.min_leg_points, c.loo_stride] {
-        put(h, &v.to_le_bytes());
+        put(h, &u32::to_le_bytes(v));
     }
     put(h, &[u8::from(c.loo)]);
     for n in [t.ac_addr.len(), t.leg_addr.len(), t.pt_t_ns.len()] {
-        put(h, &(n as u64).to_le_bytes());
+        put(h, &u64::to_le_bytes(n as u64));
     }
     for v in t
         .ac_addr
@@ -260,21 +259,21 @@ pub fn truth_hash_into(h: &mut Sha256, t: &Truth) {
         .chain(&t.leg_addr)
         .chain(&t.leg_first_pt)
     {
-        put(h, &v.to_le_bytes());
+        put(h, &u32::to_le_bytes(*v));
     }
     for v in t.leg_lat0.iter().chain(&t.leg_lon0) {
-        put(h, &canon_nan(*v).to_bits().to_le_bytes());
+        put(h, &u64::to_le_bytes(oa_math::canon_nan(*v).to_bits()));
     }
     for v in &t.pt_t_ns {
-        put(h, &v.to_le_bytes());
+        put(h, &i64::to_le_bytes(*v));
     }
     for v in t.pt_alt_ft.iter().chain(&t.pt_vrate_fpm) {
-        put(h, &v.to_le_bytes());
+        put(h, &i32::to_le_bytes(*v));
     }
     for col in [&t.pt_xf, &t.pt_pf, &t.pt_xs, &t.pt_ps] {
         for row in col {
             for v in row {
-                put(h, &canon_nan(*v).to_bits().to_le_bytes());
+                put(h, &u64::to_le_bytes(oa_math::canon_nan(*v).to_bits()));
             }
         }
     }

@@ -469,7 +469,7 @@ pub fn polar_cov_local(
     // `MIN_COS_ELEV`.
     let nd = dot(&up_t, &d_el);
     let nd = if nd.abs() < MIN_COS_ELEV {
-        MIN_COS_ELEV.copysign(nd)
+        oa_math::copysign_canon_f64(MIN_COS_ELEV, nd)
     } else {
         nd
     };

@@ -1,18 +1,19 @@
 //! The shared record walker: a table of expected element paths below a base element in, one
-//! checked value per path out. Core (pure). Iterative (no recursion); the work is one visit per
+//! checked value per path out. Pure functions (crate class shell). Iterative (no recursion); the work is one visit per
 //! element of the subtree, each visit a bounded path comparison against the table.
 
-use crate::kind::{attr_value, name_of};
+use crate::kind::{attr_present, attr_value, in_message_ns, name_of};
 use crate::scalar::{
-    parse_beacon, parse_code, parse_hex24, parse_iso_ms, parse_scaled, parse_uint, trim,
+    parse_beacon, parse_code, parse_hex24, parse_int, parse_iso_ms, parse_uint, scaled_parts, trim,
+    ScaledError,
 };
-use crate::{FieldError, FieldErrorKind};
+use crate::{FieldError, FieldErrorKind, Shape};
 use oa_xml::{decode_text_run, Doc, ElemIx, XmlError};
 
 /// Deepest path (names below the base element) the walker follows.
 pub(crate) const MAX_PATH: usize = 8;
 /// Longest value text read (bytes); longer is [`FieldErrorKind::TooLong`].
-const VALUE_BUF: usize = 64;
+pub(crate) const VALUE_BUF: usize = 64;
 /// Most distinct unknown paths one message adds (the XML element limit bounds the rest).
 const MAX_UNKNOWN_PER_MESSAGE: usize = 64;
 
@@ -25,6 +26,11 @@ pub(crate) enum Val {
     DegE7 { max_deg: i64 },
     /// Decimal with `scale` fraction digits, range `lo..=hi` after scaling.
     Scaled { scale: u32, lo: i64, hi: i64 },
+    /// A heading in degrees to 0.01 degree: 0 up to but not including 360 (the exact value is
+    /// compared, so 359.999 is in range and rounds to 0).
+    Heading,
+    /// A whole number in `lo..=hi` (see [`parse_int`]: no fraction, no `-0`, no leading zero).
+    Int { lo: i64, hi: i64 },
     /// Four octal digits.
     Beacon,
     /// 1 to 6 hex digits.
@@ -33,6 +39,14 @@ pub(crate) enum Val {
     Uint(usize),
     /// Up to 8 ASCII letters, digits and `-_/.`.
     Code,
+    /// Up to 16 ASCII letters, digits and `-_/.` (a status word such as `terminated`).
+    Word,
+    /// Up to 8 ASCII letters, digits and `-_/.*+` (a runway designator as STARS prints it).
+    Runway,
+    /// Up to 8 ASCII letters, digits, `-_/.` and inner spaces (a callsign).
+    Callsign,
+    /// An `xs:boolean`: `true`, `false`, `1` or `0`, as 1 or 0.
+    Flag,
 }
 
 /// One expected path and the field it fills.
@@ -47,6 +61,7 @@ pub(crate) struct Spec {
 pub(crate) enum Got {
     Int(i64),
     Code([u8; 8]),
+    Word([u8; 16]),
 }
 
 /// The state of one field slot while a record is walked.
@@ -58,6 +73,9 @@ pub(crate) enum Slot {
     Bad,
     /// Marked no longer valid by the sender (`r="1"`): absent, not an error.
     Invalid,
+    /// An element present with no text, in a field of [`BLANK_OK`] or carrying a [`NO_VALUE`]
+    /// word: absent, counted apart from errors.
+    Blank,
 }
 
 /// For each element, its first text node and how many text nodes it owns.
@@ -94,11 +112,22 @@ pub(crate) struct Sink<'s> {
 
 impl Sink<'_> {
     pub(crate) fn error(&mut self, field: &'static str, kind: FieldErrorKind, offset: u32) {
+        self.error_shaped(field, kind, offset, Shape::NONE);
+    }
+
+    pub(crate) fn error_shaped(
+        &mut self,
+        field: &'static str,
+        kind: FieldErrorKind,
+        offset: u32,
+        shape: Shape,
+    ) {
         if self.errors.len() < self.max_errors {
             self.errors.push(FieldError {
                 field,
                 kind,
                 offset,
+                shape,
             });
         } else {
             *self.errors_dropped += 1;
@@ -167,19 +196,64 @@ fn next(doc: &Doc<'_>, base: ElemIx, d: ElemIx, skip: bool) -> Option<ElemIx> {
     }
 }
 
+fn scaled_kind(e: ScaledError) -> FieldErrorKind {
+    match e {
+        ScaledError::Syntax => FieldErrorKind::Syntax,
+        ScaledError::Range => FieldErrorKind::Range,
+    }
+}
+
+fn code8(s: &[u8], extra: &[u8]) -> Result<Got, FieldErrorKind> {
+    if s.len() > 8 {
+        return Err(FieldErrorKind::TooLong);
+    }
+    parse_code::<8>(s, extra)
+        .map(Got::Code)
+        .ok_or(FieldErrorKind::Syntax)
+}
+
+/// Words a sender prints in place of a value: `(field name, text)`. The element is present and
+/// carries no value: absent, counted apart from errors ([`Slot::Blank`]).
+const NO_VALUE: [(&str, &[u8]); 3] = [
+    ("status/vertRate", b"unavailable"),
+    ("flightPlan/entryFix", b"unassigned"),
+    ("flightPlan/exitFix", b"unassigned"),
+];
+
+/// Text fields whose element may be present with no text (observed on real data as the normal
+/// form of an absent value): absent and counted apart from errors ([`Slot::Blank`]). Every other
+/// field keeps an empty element as a refused field.
+const BLANK_OK: [&str; 1] = ["flightPlan/rawFlightRules"];
+
 fn parse_val(v: Val, s: &[u8]) -> Result<Got, FieldErrorKind> {
     use FieldErrorKind::{Range, Syntax, TooLong};
     match v {
         Val::TimeMs => parse_iso_ms(s).map(Got::Int).ok_or(Syntax),
         Val::DegE7 { max_deg } => {
-            let x = parse_scaled(s, 7).ok_or(Syntax)?;
-            if x.abs() > max_deg * 10_000_000 {
+            let p = scaled_parts(s, 7).map_err(scaled_kind)?;
+            let b = max_deg * 10_000_000;
+            if p.cmp_exact(b).is_gt() || p.cmp_exact(-b).is_lt() {
                 return Err(Range);
             }
-            Ok(Got::Int(x))
+            p.rounded().map(Got::Int).ok_or(Range)
         }
         Val::Scaled { scale, lo, hi } => {
-            let x = parse_scaled(s, scale).ok_or(Syntax)?;
+            let p = scaled_parts(s, scale).map_err(scaled_kind)?;
+            if p.cmp_exact(hi).is_gt() || p.cmp_exact(lo).is_lt() {
+                return Err(Range);
+            }
+            p.rounded().map(Got::Int).ok_or(Range)
+        }
+        Val::Heading => {
+            let p = scaled_parts(s, 2).map_err(scaled_kind)?;
+            if p.cmp_exact(36_000).is_ge() || p.cmp_exact(0).is_lt() {
+                return Err(Range);
+            }
+            // A value that rounds up to 360.00 is the heading 0.
+            Ok(Got::Int(p.rounded().ok_or(Range)? % 36_000))
+        }
+        Val::Int { lo, hi } => {
+            let x = parse_int(s).map_err(scaled_kind)?;
             if x < lo || x > hi {
                 return Err(Range);
             }
@@ -193,17 +267,25 @@ fn parse_val(v: Val, s: &[u8]) -> Result<Got, FieldErrorKind> {
             let x = parse_uint(s, digits).ok_or(Syntax)?;
             i64::try_from(x).map(Got::Int).map_err(|_| Range)
         }
-        Val::Code => {
-            if s.len() > 8 {
+        Val::Flag => match s {
+            b"true" | b"1" => Ok(Got::Int(1)),
+            b"false" | b"0" => Ok(Got::Int(0)),
+            _ => Err(Syntax),
+        },
+        Val::Code => code8(s, b"-_/."),
+        Val::Runway => code8(s, b"-_/.*+"),
+        Val::Callsign => code8(s, b"-_/. "),
+        Val::Word => {
+            if s.len() > 16 {
                 return Err(TooLong);
             }
-            parse_code::<8>(s, b"-_/.").map(Got::Code).ok_or(Syntax)
+            parse_code::<16>(s, b"-_/.").map(Got::Word).ok_or(Syntax)
         }
     }
 }
 
 /// Reads the text of leaf element `e`, trimmed, into `buf`.
-fn leaf_text<'b>(
+pub(crate) fn leaf_text<'b>(
     doc: &Doc<'_>,
     tx: &TextIndex,
     e: ElemIx,
@@ -261,7 +343,11 @@ pub(crate) fn walk(
         };
         let path = pbuf.get(..depth).unwrap_or(&[]);
         let mut descend = true;
-        if let Some(si) = specs.iter().position(|s| path_eq(s.path, path)) {
+        if !in_message_ns(doc, cur) {
+            // Not a field of this message: counted, nothing below it is looked at.
+            descend = false;
+            note_unknown(sink, path);
+        } else if let Some(si) = specs.iter().position(|s| path_eq(s.path, path)) {
             descend = false;
             read_field(
                 doc, tx, cur, specs, names, si, slots, sink, &mut tbuf, &mut abuf,
@@ -308,18 +394,41 @@ fn read_field(
         sink.error(name, FieldErrorKind::Duplicate, off);
         return;
     }
-    if attr_value(doc, e, b"r", abuf) == Some(b"1") {
-        *slot = Slot::Invalid;
-        sink.invalidated += 1;
-        return;
-    }
-    match leaf_text(doc, tx, e, tbuf).and_then(|t| parse_val(spec.val, t)) {
-        Ok(g) => *slot = Slot::Ok(g),
-        Err(k) => {
+    match attr_value(doc, e, b"r", abuf) {
+        Some(b"1") => {
+            *slot = Slot::Invalid;
+            sink.invalidated += 1;
+            return;
+        }
+        Some(b"0") => {}
+        None if !attr_present(doc, e, b"r") => {}
+        _ => {
+            // `r` is neither "1" nor "0" (or is too long to be either): the field is refused.
             *slot = Slot::Bad;
-            sink.error(name, k, off);
+            sink.error(name, FieldErrorKind::Syntax, off);
+            return;
         }
     }
+    let (kind, shape) = match leaf_text(doc, tx, e, tbuf) {
+        Ok(t) if NO_VALUE.iter().any(|&(n, w)| n == name && w == t) => {
+            *slot = Slot::Blank;
+            return;
+        }
+        Ok(t) => match parse_val(spec.val, t) {
+            Ok(g) => {
+                *slot = Slot::Ok(g);
+                return;
+            }
+            Err(k) => (k, Shape::of(t)),
+        },
+        Err(k) => (k, Shape::NONE),
+    };
+    if kind == FieldErrorKind::Empty && BLANK_OK.contains(&name) {
+        *slot = Slot::Blank;
+        return;
+    }
+    *slot = Slot::Bad;
+    sink.error_shaped(name, kind, off, shape);
 }
 
 pub(crate) fn note_unknown(sink: &mut Sink<'_>, path: &[&[u8]]) {
@@ -337,19 +446,6 @@ pub(crate) fn note_unknown(sink: &mut Sink<'_>, path: &[&[u8]]) {
     } else {
         sink.unknown_dropped += 1;
     }
-}
-
-/// Reads one element's text as `val` for a message-level field (no slots): the value or the
-/// error kind.
-pub(crate) fn read_one(
-    doc: &Doc<'_>,
-    tx: &TextIndex,
-    e: ElemIx,
-    val: Val,
-) -> Result<Got, FieldErrorKind> {
-    let mut tbuf = [0u8; VALUE_BUF];
-    let t = leaf_text(doc, tx, e, &mut tbuf)?;
-    parse_val(val, t)
 }
 
 pub(crate) fn elem_offset(doc: &Doc<'_>, e: ElemIx) -> u32 {

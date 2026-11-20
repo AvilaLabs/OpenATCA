@@ -4,6 +4,9 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("64-bit targets only");
+
 pub const TEXT: &str = "std::fs::read and HashMap and println!(x) and crate::shell::go";
 pub const RAW: &str = r#"thread_local! static mut std::time"#;
 pub const CH: char = '"';

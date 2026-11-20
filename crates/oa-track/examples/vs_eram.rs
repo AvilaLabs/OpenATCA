@@ -34,7 +34,7 @@ use oa_bench::adsb_truth;
 use oa_bench::assoc::associate;
 use oa_bench::chunked::{benchmark_chunk, chunk_add, chunk_finish, truth_index, ChunkAcc};
 use oa_bench::common_time::{common_time_compare, CommonTimeConfig};
-use oa_bench::input::{load, load_adsb, FeedInput};
+use oa_bench::input::{load_adsb, load_with, FeedInput};
 use oa_bench::pair::{build_pairs_with, PairTable};
 use oa_bench::run::RunConfig;
 use oa_bench::stats::{stats_of, Stats};
@@ -72,6 +72,13 @@ fn main() -> ExitCode {
         eprintln!("usage: vs_eram --adsb <clip.oaf> --sfdps-dir <dir> --out <dir>");
         return ExitCode::from(2);
     };
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    for p in [&adsb, &sfdps, &out] {
+        if let Err(e) = oa_sealed::refuse(p) {
+            eprintln!("vs_eram: {e}");
+            return ExitCode::from(2);
+        }
+    }
     match run(&adsb, &sfdps, &out) {
         Ok(text) => {
             print!("{text}");
@@ -298,10 +305,18 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path) -> Result<String, String>
     eprintln!("OpenATCA paired: {}", ours_pairs.t_ms.len());
 
     // ERAM pairs: SFDPS published track against the same reference.
-    let loaded = load(&[FeedInput {
-        feed: FeedKind::Sfdps,
-        dir: sfdps.to_path_buf(),
-    }])
+    // Every file of the directory is checked against the sealed list as it is opened.
+    let open: oa_bench::input::Opener = std::rc::Rc::new(|p: &Path| {
+        oa_sealed::refuse_io(p)?;
+        oa_bench::input::file_opener()(p)
+    });
+    let loaded = load_with(
+        &[FeedInput {
+            feed: FeedKind::Sfdps,
+            dir: sfdps.to_path_buf(),
+        }],
+        &open,
+    )
     .map_err(|e| e.to_string())?;
     let leg = &loaded.legacy;
     let ix = build_th_index(&leg.th, leg.flights.gufi.len());

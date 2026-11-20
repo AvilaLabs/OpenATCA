@@ -168,18 +168,18 @@ fn bow_bound_m(len_m: f64) -> f64 {
 /// Half-width of the band around the buffer inside which the spherical estimate for `e` does
 /// not decide: the larger of [`GREY`] of the buffer and the scale error plus the bow bound.
 fn grey_m(e: &Edge, buffer_m: f64) -> f64 {
-    (GREY * buffer_m).max(SCALE_ERR * buffer_m + e.bow_m)
+    oa_math::max_f64(GREY * buffer_m, SCALE_ERR * buffer_m + e.bow_m)
 }
 
 /// Spherical estimate of the distance from `p` to the edge, metres.
 fn approx_edge_m(e: &Edge, p: V3) -> f64 {
-    let mut best = angle(p, e.a3).min(angle(p, e.b3));
+    let mut best = oa_math::min_f64(angle(p, e.a3), angle(p, e.b3));
     if norm(e.n3) > 0.5 {
         let s = dot(e.n3, p);
         // Foot of the perpendicular on the great circle, then check it lies between a and b.
         let q = [p[0] - s * e.n3[0], p[1] - s * e.n3[1], p[2] - s * e.n3[2]];
         if norm(q) > 1e-12 && dot(cross(e.a3, q), e.n3) >= 0.0 && dot(cross(q, e.b3), e.n3) >= 0.0 {
-            best = best.min(oa_math::asin(s.abs().min(1.0)));
+            best = oa_math::min_f64(best, oa_math::asin(oa_math::min_f64(s.abs(), 1.0)));
         }
     }
     best * R_MEAN_M
@@ -196,7 +196,9 @@ pub fn exact_edge_m(ell: &Ellipsoid, a: LatLon, b: LatLon, p: LatLon) -> Result<
         return Ok(ell.inverse(a, p)?.distance_m);
     }
     let f = |s: f64| -> Result<f64, GeoError> {
-        let q = ell.direct(a, ab.azimuth1_deg, s.clamp(0.0, len))?.position;
+        let q = ell
+            .direct(a, ab.azimuth1_deg, oa_math::clamp_f64(s, 0.0, len))?
+            .position;
         Ok(ell.inverse(q, p)?.distance_m)
     };
     let mut best = (0usize, f64::INFINITY);
@@ -207,12 +209,12 @@ pub fn exact_edge_m(ell: &Ellipsoid, a: LatLon, b: LatLon, p: LatLon) -> Result<
         }
     }
     let step = len / SCAN as f64;
-    let mut lo = (best.0 as f64 - 1.0).max(0.0) * step;
-    let mut hi = (best.0 as f64 + 1.0).min(SCAN as f64) * step;
+    let mut lo = oa_math::max_f64(best.0 as f64 - 1.0, 0.0) * step;
+    let mut hi = oa_math::min_f64(best.0 as f64 + 1.0, SCAN as f64) * step;
     let mut x1 = hi - GOLDEN * (hi - lo);
     let mut x2 = lo + GOLDEN * (hi - lo);
     let (mut f1, mut f2) = (f(x1)?, f(x2)?);
-    let mut top = best.1.min(f1).min(f2);
+    let mut top = oa_math::min_f64(oa_math::min_f64(best.1, f1), f2);
     for _ in 0..40 {
         if f1 < f2 {
             hi = x2;
@@ -220,14 +222,14 @@ pub fn exact_edge_m(ell: &Ellipsoid, a: LatLon, b: LatLon, p: LatLon) -> Result<
             f2 = f1;
             x1 = hi - GOLDEN * (hi - lo);
             f1 = f(x1)?;
-            top = top.min(f1);
+            top = oa_math::min_f64(top, f1);
         } else {
             lo = x1;
             x1 = x2;
             f1 = f2;
             x2 = lo + GOLDEN * (hi - lo);
             f2 = f(x2)?;
-            top = top.min(f2);
+            top = oa_math::min_f64(top, f2);
         }
     }
     Ok(top)
@@ -269,7 +271,7 @@ fn lon_range(reference: f64, lons: impl Iterator<Item = f64>) -> Option<(f64, f6
     for l in lons {
         let u = reference + wrap180(l - reference);
         range = Some(match range {
-            Some((lo, hi)) => (lo.min(u), hi.max(u)),
+            Some((lo, hi)) => (oa_math::min_f64(lo, u), oa_math::max_f64(hi, u)),
             None => (u, u),
         });
     }
@@ -293,9 +295,10 @@ fn edge_vertex_lat(ell: &Ellipsoid, a: LatLon, b: LatLon) -> Result<Option<f64>,
     }
     let f1 = 1.0 - ell.flattening();
     let beta_a = oa_math::atan(f1 * oa_math::tan(a.lat().to_radians()));
-    let k = (oa_math::cos(beta_a) * oa_math::sin(inv.azimuth1_deg.to_radians()))
-        .abs()
-        .min(1.0);
+    let k = oa_math::min_f64(
+        (oa_math::cos(beta_a) * oa_math::sin(inv.azimuth1_deg.to_radians())).abs(),
+        1.0,
+    );
     let beta_max = oa_math::acos(k);
     let lat = oa_math::atan(oa_math::tan(beta_max) / f1).to_degrees();
     Ok(Some(if c1 > 0.0 { lat } else { -lat }))
@@ -313,14 +316,14 @@ pub fn ring_bbox(ell: &Ellipsoid, ring: &[LatLon]) -> Option<Bbox> {
     let (mut min_lat, mut max_lat) = (f64::INFINITY, f64::NEG_INFINITY);
     for (i, a) in ring.iter().enumerate() {
         let b = ring.get((i + 1) % ring.len()).copied().unwrap_or(*a);
-        min_lat = min_lat.min(a.lat());
-        max_lat = max_lat.max(a.lat());
+        min_lat = oa_math::min_f64(min_lat, a.lat());
+        max_lat = oa_math::max_f64(max_lat, a.lat());
         if let Some(v) = edge_vertex_lat(ell, *a, b).ok()? {
-            min_lat = min_lat.min(v);
-            max_lat = max_lat.max(v);
+            min_lat = oa_math::min_f64(min_lat, v);
+            max_lat = oa_math::max_f64(max_lat, v);
         }
     }
-    if hi - lo > 120.0 || min_lat.abs().max(max_lat.abs()) > 80.0 {
+    if hi - lo > 120.0 || oa_math::max_f64(min_lat.abs(), max_lat.abs()) > 80.0 {
         return None;
     }
     Some(Bbox {
@@ -362,18 +365,18 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
     for ring in &rings {
         polys.push(Polygon::new(&ell, ring)?);
         if let Some((lo, hi)) = lon_range(reference, ring.iter().map(|v| v.lon())) {
-            min_lon = min_lon.min(lo);
-            max_lon = max_lon.max(hi);
+            min_lon = oa_math::min_f64(min_lon, lo);
+            max_lon = oa_math::max_f64(max_lon, hi);
         }
         for (i, a) in ring.iter().enumerate() {
             let b = ring.get((i + 1) % ring.len()).copied().unwrap_or(*a);
             edges.push(edge_of(*a, b));
-            min_lat = min_lat.min(a.lat());
-            max_lat = max_lat.max(a.lat());
+            min_lat = oa_math::min_f64(min_lat, a.lat());
+            max_lat = oa_math::max_f64(max_lat, a.lat());
             // A geodesic bulges poleward between its ends (OA-ASP-008).
             if let Some(v) = edge_vertex_lat(&ell, *a, b)? {
-                min_lat = min_lat.min(v);
-                max_lat = max_lat.max(v);
+                min_lat = oa_math::min_f64(min_lat, v);
+                max_lat = oa_math::max_f64(max_lat, v);
             }
         }
     }
@@ -382,10 +385,14 @@ pub fn build_area(rings: Vec<Vec<LatLon>>, buffer_m: f64) -> Result<Area, GeoErr
         let pts = dense_ring_samples(&ell, ring)?;
         dense.extend(closed_edges(&pts));
     }
-    let dense_half = dense.iter().fold(0.0_f64, |m, e| m.max(e.half));
+    let dense_half = dense
+        .iter()
+        .fold(0.0_f64, |m, e| oa_math::max_f64(m, e.half));
     let dlat = buffer_m / 110_000.0 + 0.01;
-    let worst_lat = (min_lat.abs().max(max_lat.abs()) + dlat).min(89.0);
-    let dlon = buffer_m / (111_000.0 * oa_math::cos(worst_lat.to_radians()).max(0.05)) + 0.01;
+    let worst_lat = oa_math::min_f64(oa_math::max_f64(min_lat.abs(), max_lat.abs()) + dlat, 89.0);
+    let dlon = buffer_m
+        / (111_000.0 * oa_math::max_f64(oa_math::cos(worst_lat.to_radians()), 0.05))
+        + 0.01;
     let bbox = if edges.is_empty() || max_lon - min_lon > 120.0 || worst_lat > 80.0 {
         None
     } else {
@@ -428,7 +435,7 @@ pub fn area_inside(area: &Area, p: LatLon) -> bool {
 pub fn area_edge_distance_m(area: &Area, p: LatLon) -> Result<f64, GeoError> {
     let mut best = f64::INFINITY;
     for e in &area.edges {
-        best = best.min(exact_edge_m(&area.ell, e.a, e.b, p)?);
+        best = oa_math::min_f64(best, exact_edge_m(&area.ell, e.a, e.b, p)?);
     }
     Ok(best)
 }
@@ -574,7 +581,7 @@ fn arc_samples(
     sweep_deg: f64,
     remaining: &mut usize,
 ) -> Result<Vec<LatLon>, GeoError> {
-    let r = radius_m.max(2.0 * ARC_CHORD_M);
+    let r = oa_math::max_f64(radius_m, 2.0 * ARC_CHORD_M);
     let max_step_deg = (2.0 * oa_math::acos(1.0 - ARC_CHORD_M / r)).to_degrees();
     let n = (oa_ieee::ceil(sweep_deg.abs() / max_step_deg) as usize).clamp(1, MAX_ARC_POINTS);
     take_samples(remaining, n)?;
@@ -670,7 +677,8 @@ pub fn arc_radius_gap_m(ell: &Ellipsoid, segs: &[SegIn]) -> Result<f64, GeoError
         let next = segs.get((i + 1) % segs.len()).and_then(|n| n.pos);
         if let (Some(a), Some(b), Some(c)) = (s.pos, next, s.centre) {
             for end in [a, b] {
-                worst = worst.max((ell.inverse(c, end)?.distance_m - s.radius_m).abs());
+                worst =
+                    oa_math::max_f64(worst, (ell.inverse(c, end)?.distance_m - s.radius_m).abs());
             }
         }
     }
@@ -789,8 +797,8 @@ pub fn samples_touch_area_within(
     if let Some(b) = area.bbox {
         let (mut lo_la, mut hi_la) = (f64::INFINITY, f64::NEG_INFINITY);
         for s in samples {
-            lo_la = lo_la.min(s.lat());
-            hi_la = hi_la.max(s.lat());
+            lo_la = oa_math::min_f64(lo_la, s.lat());
+            hi_la = oa_math::max_f64(hi_la, s.lat());
         }
         // The samples are dense, so their extent stands for the outline's.
         let reference = samples.first().map_or(0.0, |s| s.lon());
@@ -834,14 +842,14 @@ fn cell_outline(lat: i32, lon: i32) -> Result<Vec<LatLon>, GeoError> {
     let (la, lo) = (f64::from(lat), f64::from(lon));
     let mut out = Vec::new();
     for (row, from, to) in [(la, lo, lo + 1.0), (la + 1.0, lo + 1.0, lo)] {
-        let row = row.min(90.0);
+        let row = oa_math::min_f64(row, 90.0);
         let len_m = 111_000.0 * oa_math::cos(row.to_radians()).abs();
         let n = (oa_ieee::ceil(len_m / PARALLEL_STEP_M) as usize).clamp(1, 400);
         for i in 0..n {
             let t = i as f64 / n as f64;
             out.push(LatLon::new(
                 row,
-                (from + (to - from) * t).clamp(-180.0, 180.0),
+                oa_math::clamp_f64(from + (to - from) * t, -180.0, 180.0),
             )?);
         }
     }

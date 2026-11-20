@@ -114,6 +114,22 @@ fn main() -> ExitCode {
             }
         }
     }
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    for p in [
+        adsb.as_ref(),
+        airspace.as_ref(),
+        metar.as_ref(),
+        out.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(feeds.iter().map(|f| &f.dir))
+    {
+        if let Err(e) = oa_sealed::refuse(p) {
+            eprintln!("oa-bench: {e}");
+            return ExitCode::from(2);
+        }
+    }
     if let Some(clip) = adsb {
         let Some(out) = out else {
             eprintln!("oa-bench: --out is required\n{USAGE}");

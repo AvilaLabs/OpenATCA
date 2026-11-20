@@ -1,14 +1,18 @@
 //! `oa-stdds-ref --adsb <clip.oaf> --out <dir> <stdds.oaf[.gz]>...`
 //!
 //! Writes `stdds_ref.txt` (printed too) and `stdds_ref.csv` to `--out`. Paths that name a sealed
-//! recording folder, as given or through links, exit 2 before anything is opened.
+//! recording folder or ADS-B day, as given or through links, exit 2 before anything is opened; the
+//! refusal is made by the shared guard `oa-sealed` and names the path. The text printed holds counts
+//! and aggregate statistics only, never a track number, callsign, address or position.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use oa_sealed::Sealed;
 use oa_stdds_ref::engine::analyse;
-use oa_stdds_ref::load::{is_sealed, load_file};
+use oa_stdds_ref::guard::{is_refusal, refuse_sealed};
+use oa_stdds_ref::load::load_file;
 use oa_stdds_ref::report::build_report;
 use oa_stdds_ref::run::build_refs;
 use oa_stdds_ref::sources::TruthSource;
@@ -38,29 +42,33 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     }
-    if is_sealed(&adsb) || files.iter().any(|f| is_sealed(f)) {
-        eprintln!("refused: the sealed hold-out recording is not read");
-        return ExitCode::from(2);
+    let g = Sealed::production();
+    for p in [&adsb, &out].into_iter().chain(&files) {
+        if let Err(e) = refuse_sealed(g, p) {
+            eprintln!("oa-stdds-ref: refused: {e}");
+            return ExitCode::from(2);
+        }
     }
-    match run(&adsb, &out, &files) {
+    match run(g, &adsb, &out, &files) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
         }
         Err(e) => {
             eprintln!("oa-stdds-ref: {e}");
-            ExitCode::from(1)
+            // A refusal that came at the open (a link swapped after the check) is the same exit.
+            ExitCode::from(if is_refusal(&e) { 2 } else { 1 })
         }
     }
 }
 
-fn run(adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String, String> {
+fn run(g: &Sealed, adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String, String> {
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut recs = Vec::new();
     let mut header = Vec::new();
     for (i, f) in files.iter().enumerate() {
         let ix = u32::try_from(i).map_err(|_| "too many input files".to_string())?;
-        let info = load_file(f, ix, &mut recs).map_err(|e| e.to_string())?;
+        let info = load_file(g, f, ix, &mut recs).map_err(|e| e.to_string())?;
         header.push(format!(
             "STDDS file {ix}: {} (digest {}); message frames {}, other frames {}, damaged frames {}, messages not TAIS or refused {}, TAIS records {}, gzip damaged {}, gzip truncated {}",
             info.path,
@@ -75,7 +83,7 @@ fn run(adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String, String> {
         ));
     }
     let addrs: BTreeSet<u32> = recs.iter().filter_map(|r| r.addr).collect();
-    let refs = build_refs(adsb, &addrs, out)?;
+    let refs = build_refs(g, adsb, &addrs, out)?;
     header.extend(refs.header.iter().cloned());
     let truth = TruthSource {
         truth: &refs.truth.truth,

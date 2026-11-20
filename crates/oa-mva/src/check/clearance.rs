@@ -231,7 +231,7 @@ pub(crate) fn scan_grid(
         }
     }
     for (k, xs) in rows.iter_mut().enumerate() {
-        xs.sort_by(f64::total_cmp);
+        xs.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
         let r = rmin.saturating_add(k as i64);
         let lat = g.lat0 - r as f64 * g.dlat;
         for &[xa, xb] in xs.as_chunks::<2>().0 {

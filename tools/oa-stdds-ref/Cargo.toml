@@ -15,6 +15,7 @@ oa-adsb = { path = "../../crates/oa-adsb" }
 oa-bench = { path = "../../crates/oa-bench" }
 oa-feed = { path = "../../crates/oa-feed" }
 oa-geo = { path = "../../crates/oa-geo" }
+oa-sealed = { path = "../../crates/oa-sealed" }
 oa-sha256 = { path = "../../crates/oa-sha256" }
 oa-stdds = { path = "../../crates/oa-stdds" }
 oa-track = { path = "../../crates/oa-track" }

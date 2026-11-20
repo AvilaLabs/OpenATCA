@@ -17,14 +17,24 @@
 //! last defence. All arithmetic is `i64` on coordinates saturated to 2^30 (1/16 pixel), so
 //! nothing overflows.
 
-use crate::core::font::{strokes_of, text_width_units, ADVANCE, CAP_HEIGHT};
-use crate::core::list::{DisplayList, ALIGN_CENTRE, ALIGN_RIGHT, MAX_LAYERS};
+use crate::core::font::{strokes_of, text_width_units, ADVANCE, CAP_HEIGHT, MAX_GLYPH_STROKES};
+use crate::core::list::{
+    DisplayList, ALIGN_CENTRE, ALIGN_RIGHT, MAX_LAYERS, MAX_LIST_ROWS, MAX_LIST_TEXT_BYTES,
+};
 use crate::core::palette::{bytes_of, BACKGROUND, PALETTE_LEN};
 use oa_sha256::core::sha256::{Digest, Sha256};
 use std::fmt;
 
 /// Coordinate magnitude limit, 1/16 pixel.
 const LIMIT: i64 = 1 << 30;
+
+/// Maximum visible pixels accepted by display scene construction and software rendering.
+/// The 64-megapixel profile preserves the supported 8192 by 8192 display size.
+pub const MAX_DISPLAY_PIXELS: u64 = 1 << 26;
+
+/// Accepted display API profile: [`crate::MAX_DISPLAY_PIXELS`] pixels and at most 2^34
+/// conservative work units per render. Work is capped separately from the 8192-square profile.
+pub const MAX_RENDER_WORK: u128 = 1 << 34;
 
 /// The geometry of a pixel buffer. `stride` is the length of a row in bytes (a KMS "pitch"),
 /// at least `width * 4` and a multiple of four.
@@ -52,6 +62,11 @@ pub enum RenderError {
     /// The list is inconsistent: a column length, span, colour or layer is wrong.
     BadList(&'static str),
     Hash,
+    /// The frame/list combination exceeds the named raster work allowance; no pixels were written.
+    WorkLimit {
+        requested: u128,
+        limit: u128,
+    },
 }
 
 impl fmt::Display for RenderError {
@@ -61,6 +76,10 @@ impl fmt::Display for RenderError {
             RenderError::FaultedList => write!(f, "the display list overflowed; frame refused"),
             RenderError::BadList(w) => write!(f, "inconsistent display list: {w}"),
             RenderError::Hash => write!(f, "frame hash failed"),
+            RenderError::WorkLimit { requested, limit } => write!(
+                f,
+                "render work {requested} exceeds limit {limit}; frame refused"
+            ),
         }
     }
 }
@@ -77,6 +96,12 @@ pub fn check_frame(spec: &FrameSpec, buf_len: usize) -> Result<(), RenderError> 
             "width and height must be at most 65536",
         ));
     }
+    if u64::from(spec.width) * u64::from(spec.height) > MAX_DISPLAY_PIXELS {
+        return Err(RenderError::WorkLimit {
+            requested: u128::from(spec.width) * u128::from(spec.height),
+            limit: u128::from(MAX_DISPLAY_PIXELS),
+        });
+    }
     if !spec.stride.is_multiple_of(4) || u64::from(spec.stride) < u64::from(spec.width) * 4 {
         return Err(RenderError::BadFrame(
             "stride must be a multiple of 4 and at least width * 4",
@@ -86,6 +111,80 @@ pub fn check_frame(spec: &FrameSpec, buf_len: usize) -> Result<(), RenderError> 
         return Err(RenderError::BadFrame(
             "buffer is shorter than stride * height",
         ));
+    }
+    Ok(())
+}
+
+/// Conservative work charge before list validation or any frame write. A line stroke is charged
+/// for every pixel along both frame axes; rectangles for every pixel; circle scans for both axes.
+/// Each line stroke also pays 128 setup units for analytical clipping and integer square roots.
+/// Text is charged at the checked maximum stroke count per byte. Layer-table scans are
+/// charged for all layers because `draw_layer` visits each table once per used layer.
+fn check_render_work(l: &DisplayList, spec: &FrameSpec) -> Result<(), RenderError> {
+    check_charge(render_work_charge(l, spec)?)
+}
+
+/// The conservative work charge [`rasterize`] checks against [`MAX_RENDER_WORK`], for reporting.
+/// Refused with [`RenderError::WorkLimit`] when a table is beyond its row limit.
+pub fn render_work_charge(l: &DisplayList, spec: &FrameSpec) -> Result<u128, RenderError> {
+    let w = u128::from(spec.width);
+    let h = u128::from(spec.height);
+    let pixels = w * h;
+    let axis = w + h;
+    let rows = [
+        l.lines.x0.len(),
+        l.rects.x0.len(),
+        l.circles.x.len(),
+        l.polylines.start.len(),
+        l.texts.x.len(),
+    ]
+    .iter()
+    .try_fold(0u128, |sum, n| sum.checked_add(*n as u128));
+    let Some(rows) = rows else {
+        return Err(RenderError::WorkLimit {
+            requested: u128::MAX,
+            limit: MAX_RENDER_WORK,
+        });
+    };
+    let poly = l.poly_x.len() as u128;
+    let text = l.text.len() as u128;
+    if rows > (MAX_LIST_ROWS as u128) * 5
+        || poly > MAX_LIST_ROWS as u128
+        || text > MAX_LIST_TEXT_BYTES as u128
+    {
+        return Err(RenderError::WorkLimit {
+            requested: rows.saturating_add(poly).saturating_add(text),
+            limit: MAX_RENDER_WORK,
+        });
+    }
+    // Lists are validated immediately before this function. Charge the actual visits made by
+    // every span, rather than assuming spans partition the shared vertex/string tables.
+    let poly_visits = l
+        .polylines
+        .len
+        .iter()
+        .fold(0u128, |sum, n| sum.saturating_add(u128::from(*n)));
+    let text_visits = l
+        .texts
+        .len
+        .iter()
+        .fold(0u128, |sum, n| sum.saturating_add(u128::from(*n)));
+    let charged = pixels * 2
+        + rows * (MAX_LAYERS as u128 + 16)
+        + (l.rects.x0.len() as u128) * pixels
+        + (l.circles.x.len() as u128) * (axis * 64 + 128)
+        + (l.lines.x0.len() as u128 + poly_visits) * (axis * 2 + 128)
+        + text_visits * MAX_GLYPH_STROKES as u128 * (axis * 2 + 128);
+    Ok(charged)
+}
+
+/// Refuses a charge above [`MAX_RENDER_WORK`]; the charge equal to it is accepted.
+fn check_charge(charged: u128) -> Result<(), RenderError> {
+    if charged > MAX_RENDER_WORK {
+        return Err(RenderError::WorkLimit {
+            requested: charged,
+            limit: MAX_RENDER_WORK,
+        });
     }
     Ok(())
 }
@@ -156,9 +255,9 @@ fn draw_line(c: &mut Canvas<'_>, bytes: [u8; 4], p0: (i64, i64), p1: (i64, i64))
         (m1, n1, m0, n0)
     };
     let dm = m1 - m0;
-    let dn = n1 - n0;
+    let dn: i64 = n1 - n0;
     let adn = dn.abs();
-    let sgn = dn.signum();
+    let sgn = i64::signum(dn);
     let (m_size, n_size) = if steep { (c.h, c.w) } else { (c.w, c.h) };
     // Steps along the major axis whose major coordinate is inside the frame.
     let lo = (-m0).max(0);
@@ -459,7 +558,52 @@ pub fn validate_list(l: &DisplayList) -> Result<(), RenderError> {
 /// each row (stride beyond width) is never written.
 pub fn rasterize(l: &DisplayList, spec: &FrameSpec, buf: &mut [u8]) -> Result<(), RenderError> {
     check_frame(spec, buf.len())?;
+    if [
+        l.lines.x0.len(),
+        l.lines.y0.len(),
+        l.lines.x1.len(),
+        l.lines.y1.len(),
+        l.lines.colour.len(),
+        l.lines.layer.len(),
+        l.lines.width.len(),
+        l.rects.x0.len(),
+        l.rects.y0.len(),
+        l.rects.x1.len(),
+        l.rects.y1.len(),
+        l.rects.colour.len(),
+        l.rects.layer.len(),
+        l.circles.x.len(),
+        l.circles.y.len(),
+        l.circles.r.len(),
+        l.circles.colour.len(),
+        l.circles.layer.len(),
+        l.polylines.start.len(),
+        l.polylines.len.len(),
+        l.polylines.colour.len(),
+        l.polylines.layer.len(),
+        l.polylines.width.len(),
+        l.texts.x.len(),
+        l.texts.y.len(),
+        l.texts.size.len(),
+        l.texts.align.len(),
+        l.texts.start.len(),
+        l.texts.len.len(),
+        l.texts.colour.len(),
+        l.texts.layer.len(),
+        l.poly_x.len(),
+        l.poly_y.len(),
+    ]
+    .iter()
+    .any(|&n| n > MAX_LIST_ROWS)
+        || l.text.len() > MAX_LIST_TEXT_BYTES
+    {
+        return Err(RenderError::WorkLimit {
+            requested: MAX_RENDER_WORK.saturating_add(1),
+            limit: MAX_RENDER_WORK,
+        });
+    }
     validate_list(l)?;
+    check_render_work(l, spec)?;
     let (width, stride, height) = (
         spec.width as usize,
         spec.stride as usize,
@@ -635,6 +779,100 @@ mod tests {
     use super::*;
     use crate::core::list::*;
     use crate::core::palette::{PALETTE, TEXT};
+
+    // REQ: OA-DSP-053
+    #[test]
+    fn frame_work_refusal_leaves_pixels_untouched_and_retry_succeeds() {
+        let l = list_new(ListCaps {
+            lines: 0,
+            rects: 0,
+            circles: 0,
+            polylines: 0,
+            poly_vertices: 0,
+            texts: 0,
+            text_bytes: 0,
+        })
+        .unwrap();
+        let over = FrameSpec {
+            width: 8193,
+            height: 8192,
+            stride: 8193 * 4,
+        };
+        assert!(matches!(
+            check_frame(&over, frame_len(&over)),
+            Err(RenderError::WorkLimit { .. })
+        ));
+
+        let ok = FrameSpec {
+            width: 2,
+            height: 2,
+            stride: 8,
+        };
+        let mut retry = vec![0xA5; frame_len(&ok)];
+        assert!(rasterize(&l, &ok, &mut retry).is_ok());
+        let bg = bytes_of(BACKGROUND).unwrap_or([0; 4]);
+        assert!(retry.chunks_exact(4).all(|p| p == bg));
+    }
+
+    // REQ: OA-DSP-053
+    #[test]
+    fn repeated_polyline_and_text_spans_are_charged_by_actual_visits() {
+        let spec = FrameSpec {
+            width: 4096,
+            height: 1,
+            stride: 4096 * 4,
+        };
+        let mut repeated = list_new(ListCaps {
+            lines: 0,
+            rects: 0,
+            circles: 0,
+            polylines: 3000,
+            poly_vertices: 1000,
+            texts: 0,
+            text_bytes: 0,
+        })
+        .unwrap();
+        repeated.poly_x.resize(1000, 0);
+        repeated.poly_y.resize(1000, 0);
+        repeated.polylines.start.resize(3000, 0);
+        repeated.polylines.len.resize(3000, 1000);
+        repeated.polylines.colour.resize(3000, TEXT);
+        repeated.polylines.layer.resize(3000, 0);
+        repeated.polylines.width.resize(3000, 1);
+        repeated.layers_used = 1;
+        let mut buf = vec![0xA5; frame_len(&spec)];
+        assert!(matches!(
+            rasterize(&repeated, &spec, &mut buf),
+            Err(RenderError::WorkLimit { .. })
+        ));
+        assert!(buf.iter().all(|&b| b == 0xA5));
+
+        let mut repeated_text = list_new(ListCaps {
+            lines: 0,
+            rects: 0,
+            circles: 0,
+            polylines: 0,
+            poly_vertices: 0,
+            texts: 3000,
+            text_bytes: 1000,
+        })
+        .unwrap();
+        repeated_text.text = "A".repeat(1000);
+        repeated_text.texts.x.resize(3000, 0);
+        repeated_text.texts.y.resize(3000, 0);
+        repeated_text.texts.size.resize(3000, 1);
+        repeated_text.texts.align.resize(3000, ALIGN_LEFT);
+        repeated_text.texts.start.resize(3000, 0);
+        repeated_text.texts.len.resize(3000, 1000);
+        repeated_text.texts.colour.resize(3000, TEXT);
+        repeated_text.texts.layer.resize(3000, 0);
+        repeated_text.layers_used = 1;
+        assert!(matches!(
+            rasterize(&repeated_text, &spec, &mut buf),
+            Err(RenderError::WorkLimit { .. })
+        ));
+        assert!(buf.iter().all(|&b| b == 0xA5));
+    }
     use oa_sha256::to_hex;
 
     const GUARD: usize = 64;
@@ -1503,5 +1741,17 @@ mod tests {
         // An unknown character is drawn as the crossed box, not skipped.
         let (xs, _) = extent(ALIGN_LEFT, "~");
         assert_eq!(xs.1 - xs.0, 8);
+    }
+
+    // REQ: OA-DSP-053
+    #[test]
+    fn render_work_limit_is_exact_and_one_above_is_refused() {
+        assert!(check_charge(MAX_RENDER_WORK).is_ok());
+        assert!(matches!(
+            check_charge(MAX_RENDER_WORK + 1),
+            Err(RenderError::WorkLimit { requested, limit })
+                if requested == MAX_RENDER_WORK + 1 && limit == MAX_RENDER_WORK
+        ));
+        assert_eq!(MAX_RENDER_WORK, 1 << 34);
     }
 }

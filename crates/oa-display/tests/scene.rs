@@ -12,6 +12,7 @@ use oa_airspace::snapshot::{decode, encode};
 use oa_display::cli;
 use oa_display::list::*;
 use oa_display::palette as pal;
+use oa_display::probe::list_capacities;
 use oa_display::project::{project, ring_radius16, NM_M};
 use oa_display::raster::{frame_digest, frame_len, rasterize, render, FrameSpec, RenderError};
 use oa_display::scene::*;
@@ -1005,19 +1006,20 @@ fn random_scratch(seed: &mut u64, n: usize) -> Scratch {
     let view = view_new(ORD.0, ORD.1, 50.0, 1920, 1080).unwrap();
     let mut s = scratch_for(&m, &view).unwrap();
     s.bounds = [0, LEGEND_STRIP_PX as i32 * 16, 1920 * 16, 1080 * 16];
+    s.used = n;
     for i in 0..n {
         let chars = 2 + lcg(seed) as usize % 7;
-        s.prio.push(1 + (lcg(seed) % 5) as u8);
-        s.x.push((lcg(seed) % (1920 * 16)) as i32);
-        s.y.push((lcg(seed) % (1080 * 16)) as i32);
-        s.gap.push(8 * 16);
-        s.w.push(((chars * 6 - 2) * 24) as i32);
-        s.point.push(i as u32);
+        s.prio[i] = 1 + (lcg(seed) % 5) as u8;
+        s.x[i] = (lcg(seed) % (1920 * 16)) as i32;
+        s.y[i] = (lcg(seed) % (1080 * 16)) as i32;
+        s.gap[i] = 8 * 16;
+        s.w[i] = ((chars * 6 - 2) * 24) as i32;
+        s.point[i] = i as u32;
     }
     // Priority, then the candidate number as the stable key.
     let mut order: Vec<u32> = (0..n as u32).collect();
     order.sort_by_key(|&i| (s.prio[i as usize], i));
-    s.order = order;
+    s.order[..n].copy_from_slice(&order);
     s
 }
 
@@ -1051,7 +1053,7 @@ fn placement_property_no_overlap_and_a_drop_means_every_offset_is_blocked_by_an_
         // overlapping a label placed earlier, which has equal or higher priority.
         let pos: Vec<usize> = {
             let mut p = vec![0; n];
-            for (o, &i) in s.order.iter().enumerate() {
+            for (o, &i) in s.order[..n].iter().enumerate() {
                 p[i as usize] = o;
             }
             p
@@ -1098,15 +1100,18 @@ fn a_full_grid_cell_drops_the_label_and_counts_it_without_overflowing() {
     let view = view_new(ORD.0, ORD.1, 50.0, 1920, 1080).unwrap();
     let mut s = scratch_for(&m, &view).unwrap();
     s.bounds = [0, 104 * 16, 1920 * 16, 1080 * 16];
+    s.used = n;
     for i in 0..n {
-        s.prio.push(4);
-        s.x.push((i as i32 % 12) * 5 * 16 + 64 * 16 * 3);
-        s.y.push((i as i32 / 12) * 16 * 16 + 64 * 16 * 3);
-        s.gap.push(0);
-        s.w.push(16);
-        s.point.push(i as u32);
+        s.prio[i] = 4;
+        s.x[i] = (i as i32 % 12) * 5 * 16 + 64 * 16 * 3;
+        s.y[i] = (i as i32 / 12) * 16 * 16 + 64 * 16 * 3;
+        s.gap[i] = 0;
+        s.w[i] = 16;
+        s.point[i] = i as u32;
     }
-    s.order = (0..n as u32).collect();
+    for (i, o) in s.order.iter_mut().enumerate() {
+        *o = i as u32;
+    }
     let placed = place_labels(&mut s);
     let full = s
         .outcome
@@ -1887,5 +1892,106 @@ fn a_projection_with_non_finite_numbers_is_refused_by_build_scene() {
             &mut scratch_for(&m, &good).unwrap(),
         );
         assert!(matches!(r, Err(DisplayError::BadView(_))), "{name}: {r:?}");
+    }
+}
+
+fn three_named_points() -> Vec<(u8, String, i32, i32)> {
+    let (la, lo) = ORD;
+    vec![
+        (point_kind::VOR, "ABC".into(), la + 1_200_000, lo + 900_000),
+        (point_kind::FIX, "DEF".into(), la - 900_000, lo + 2_400_000),
+        (
+            point_kind::AIRPORT,
+            "GHI".into(),
+            la + 600_000,
+            lo - 2_000_000,
+        ),
+    ]
+}
+
+fn render_with(m: &Model, view: &View, sc: &mut Scratch) -> (DisplayList, SceneStats) {
+    let index = scene_index(m);
+    let mut l = list_new(scene_caps(m).unwrap()).unwrap();
+    let st = build_scene(&mut l, m, &index, view, sc).unwrap();
+    (l, st)
+}
+
+fn open_view() -> View {
+    let mut view = view_new(ORD.0, ORD.1, 20.0, 1920, 1080).unwrap();
+    all_open(&mut view);
+    view
+}
+
+// REQ: OA-DSP-054
+#[test]
+fn a_cloned_scratch_renders_named_candidates_exactly_like_a_fresh_one() {
+    let m = points_model(&three_named_points());
+    let view = open_view();
+    let (fresh_list, fresh_st) = render_with(&m, &view, &mut scratch_for(&m, &view).unwrap());
+    assert!(fresh_st.labels == 3, "{fresh_st:?}");
+    let sized = scratch_for(&m, &view).unwrap();
+    let mut cloned = sized.clone();
+    let (cloned_list, cloned_st) = render_with(&m, &view, &mut cloned);
+    assert_eq!(cloned_list, fresh_list);
+    assert_eq!(cloned_st, fresh_st);
+    assert_eq!(cloned.used, 3);
+    // Cloning after a frame, and rendering again, still gives the same list.
+    let mut again = cloned.clone();
+    assert_eq!(render_with(&m, &view, &mut again).0, fresh_list);
+}
+
+// REQ: OA-DSP-054
+#[test]
+fn a_reused_scratch_ignores_stale_entries_beyond_the_candidates_it_is_given() {
+    let big = points_model(&three_named_points());
+    let small = points_model(&three_named_points()[1..2]);
+    let view = open_view();
+    let mut sc = scratch_for(&big, &view).unwrap();
+    assert_eq!(render_with(&big, &view, &mut sc).1.labels, 3);
+    assert_eq!(sc.used, 3);
+    let (reused_list, reused_st) = render_with(&small, &view, &mut sc);
+    let (fresh_list, fresh_st) =
+        render_with(&small, &view, &mut scratch_for(&small, &view).unwrap());
+    assert_eq!(reused_list, fresh_list);
+    assert_eq!(reused_st, fresh_st);
+    assert_eq!(sc.used, 1);
+    // And back to the larger frame on the same scratch.
+    let (back, _) = render_with(&big, &view, &mut sc);
+    assert_eq!(
+        back,
+        render_with(&big, &view, &mut scratch_for(&big, &view).unwrap()).0
+    );
+}
+
+// REQ: OA-DSP-054
+#[test]
+fn a_shortened_label_buffer_is_refused_on_a_model_with_named_candidates() {
+    let m = points_model(&three_named_points());
+    let view = open_view();
+    let index = scene_index(&m);
+    let good = scratch_for(&m, &view).unwrap();
+    type Cut = fn(&mut Scratch);
+    let cuts: [(&str, Cut); 9] = [
+        ("prio", |s| s.prio.truncate(2)),
+        ("x", |s| s.x.truncate(2)),
+        ("y", |s| s.y.truncate(2)),
+        ("gap", |s| s.gap.truncate(2)),
+        ("w", |s| s.w.truncate(2)),
+        ("point", |s| s.point.truncate(2)),
+        ("order", |s| s.order.truncate(2)),
+        ("order_tmp", |s| s.order_tmp.truncate(2)),
+        ("outcome", |s| s.outcome.truncate(2)),
+    ];
+    for (name, cut) in cuts {
+        let mut broken = good.clone();
+        cut(&mut broken);
+        let mut l = list_new(scene_caps(&m).unwrap()).unwrap();
+        assert!(
+            matches!(
+                build_scene(&mut l, &m, &index, &view, &mut broken),
+                Err(DisplayError::BadView(_))
+            ),
+            "{name}"
+        );
     }
 }

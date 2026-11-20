@@ -402,7 +402,7 @@ pub fn timing_summary(t: &Timing) -> (f64, f64, f64, f64) {
         return (0.0, 0.0, 0.0, 0.0);
     }
     let mut s = t.samples.clone();
-    s.sort_by(|a, b| a.1.total_cmp(&b.1));
+    s.sort_by(|a, b| oa_math::cmp_canon_f64(a.1, b.1));
     let total: u64 = s.iter().map(|x| u64::from(x.0)).sum();
     let at = |p: f64| {
         let want = (p * total as f64).ceil().max(1.0) as u64;

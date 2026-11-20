@@ -12,6 +12,7 @@ workspace = true
 # Workspace crates only (RULESET F1). The tracker is linked here, in the shell, and never into the
 # display crate (F6, D3).
 [dependencies]
+oa-sealed = { path = "../oa-sealed" }
 oa-display = { path = "../oa-display" }
 oa-track = { path = "../oa-track" }
 oa-adsb = { path = "../oa-adsb" }
