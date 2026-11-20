@@ -1147,6 +1147,7 @@ fn source_types_1_and_8_are_written_as_adsb_with_the_ltt_the_source_gives() {
     assert!(info.other_sources.is_empty());
     let rep = ex.finish().unwrap().commit().unwrap();
     assert_eq!(rep.days[0].stats.records, 3);
+    // seal-allow: reads back a file the test wrote in its own temp dir
     let recs = decode_stream_ed24(&fs::read(out.join("adsb.ast")).unwrap());
     let ltt: Vec<u8> = recs.iter().map(|c| c.mops.unwrap().link).collect();
     // Type 1 is 1090 ES (assumed), type 8 does not say (0, counted), type 0 is 1090 ES.

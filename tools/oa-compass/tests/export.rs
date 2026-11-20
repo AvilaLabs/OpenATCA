@@ -874,6 +874,7 @@ fn stepped_back_cfg(meas: &[oa_track::Measurement]) -> oa_track::TrackerConfig {
 /// Every file and directory under `dir`, relative, sorted.
 fn tree(dir: &std::path::Path) -> Vec<String> {
     fn walk(d: &std::path::Path, base: &std::path::Path, v: &mut Vec<String>) {
+        // seal-allow: lists the test's own temp output dir
         for e in fs::read_dir(d).unwrap().filter_map(Result::ok) {
             let p = e.path();
             v.push(p.strip_prefix(base).unwrap().display().to_string());
