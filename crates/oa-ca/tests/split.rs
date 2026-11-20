@@ -330,3 +330,53 @@ fn the_split_code_agrees_bit_for_bit_with_the_golden_vectors_of_the_original_cod
         "{spans} {preds_known} {preds_unknown}"
     );
 }
+
+// REQ: OA-CA-028
+#[test]
+fn the_first_step_hands_the_root_step_the_three_values_the_proofs_take_within_their_contract() {
+    // The proofs of the first step take `a`, the discriminant and the time of closest approach
+    // under a contract, each proved for the function that computes it; that `horizontal_step`
+    // passes exactly those on, and that the root step's inputs meet the contract of the square
+    // root and the last step, is checked here on inputs inside the stated bounds (the proof of
+    // `horizontal_step` itself does not finish in CBMC). The constants are the proofs' own.
+    const A_MAX: f64 = 3.3e7;
+    const DISC_MAX: f64 = 4.0e19;
+    const TC_MAX: f64 = 4.0e18;
+    let within = |x: f64, m: f64| x.is_finite() && x.abs() <= m;
+    let mut r = Rng(0x2545_f491_4f6c_dd1d);
+    let (mut roots, mut dones) = (0u32, 0u32);
+    for _ in 0..400_000 {
+        let (rx, ry) = (r.val(MAX_COORD_M), r.val(MAX_COORD_M));
+        let (vx, vy) = (r.val(MAX_REL_SPEED_MPS), r.val(MAX_REL_SPEED_MPS));
+        let (h, t) = (r.pos(MAX_RADIUS_M), r.pos(MAX_LOOK_AHEAD_S));
+        if !(within(rx, MAX_COORD_M)
+            && within(ry, MAX_COORD_M)
+            && within(vx, MAX_REL_SPEED_MPS)
+            && within(vy, MAX_REL_SPEED_MPS)
+            && h > 0.0
+            && h <= MAX_RADIUS_M
+            && t > 0.0
+            && t <= MAX_LOOK_AHEAD_S)
+        {
+            continue;
+        }
+        match horizontal_step(rx, ry, vx, vy, h, t) {
+            HorizontalStep::Done(_) => dones += 1,
+            HorizontalStep::Root { now, tc, a, disc } => {
+                roots += 1;
+                let cross = rx * vy - ry * vx;
+                assert_eq!(a.to_bits(), (vx * vx + vy * vy).to_bits());
+                assert_eq!(disc.to_bits(), (h * h * a - cross * cross).to_bits());
+                assert_eq!(tc.to_bits(), (-(rx * vx + ry * vy) / a).to_bits());
+                assert_eq!(now, rx * rx + ry * ry < h * h);
+                assert!(a >= STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS && a <= A_MAX);
+                assert!(disc.is_finite() && disc > 0.0 && disc <= DISC_MAX);
+                assert!(within(tc, TC_MAX));
+                // The contract the root step takes of the square root.
+                let root = oa_ieee::sqrt(disc);
+                assert!(root.is_finite() && root >= 0.0 && root <= 7.0e9);
+            }
+        }
+    }
+    assert!(roots > 10_000 && dones > 10_000, "{roots} {dones}");
+}

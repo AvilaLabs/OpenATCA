@@ -1377,7 +1377,7 @@
     },
     {
       "id": "ca-horizontal-now-step",
-      "requirement": "OA-CA-028: the first step of the horizontal solver, `horizontal_step` itself on every input within the stated bounds, gives a pair inside the limit now a span, or a root step whose squared speed, discriminant and time of closest approach meet the contract the square-root and last-step proofs take.",
+      "requirement": "OA-CA-028: the decision of the first step of the horizontal solver, for a pair inside the limit now and any squared speed, discriminant and time of closest approach within the stated contract, is a current span or a root step with the contract's values.",
       "package": "oa-ca",
       "harness": "solve::proofs::the_decision_of_the_first_step_gives_a_current_pair_a_span_or_a_root_step",
       "enabled": true,
