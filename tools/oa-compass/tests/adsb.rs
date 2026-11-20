@@ -20,6 +20,7 @@ use oa_compass::core::adsb::*;
 use oa_compass::shell::adsb_export::{read_back, AdsbExport, EDITION};
 use oa_compass::shell::error::ExportError;
 use oa_compass::shell::export::Layout;
+use oa_compass::shell::job::reconcile_adsb;
 use oa_compass::shell::notes::{
     data_sources_json, readme_with, Extras, ADSB_SOURCE, OPENATCA_SOURCE,
 };
@@ -61,6 +62,8 @@ fn full() -> AdsbRow {
         version: Some(2),
         gva: Some(2),
         sda: Some(2),
+        nic_baro: Some(1),
+        link: LinkSource::Es1090,
     }
 }
 
@@ -72,13 +75,11 @@ fn noted(c: &AdsbConverted) -> Vec<usize> {
 }
 
 /// Notes every record carries: what the source never has.
-const ALWAYS: [usize; 6] = [
+const ALWAYS: [usize; 4] = [
     ANOTE_TRACK_NUMBER,
     ANOTE_TOA_POSITION,
     ANOTE_TOMR_VELOCITY,
     ANOTE_DESCRIPTOR_DEFAULTS,
-    ANOTE_NICBARO,
-    ANOTE_PIC,
 ];
 
 // REQ: OA-CMP-019
@@ -101,22 +102,29 @@ fn a_full_report_converts_to_the_counts_the_item_definitions_give() {
     assert_eq!(v.ident, Some(*b"DLH7YA  "));
     assert_eq!(v.category, Some(3));
     assert_eq!(v.mops_version, Some(2));
+    // Every field known: the whole chain, with PIC 11 (NIC 8 under version 2, < 0.1 NM).
     assert_eq!(
         v.quality,
-        Some(QualityValues {
+        QualityValues {
             nacv: 2,
             nic: 8,
-            nacp: 8,
-            sil: 3,
-            sils: true,
-            sda: 2,
-            gva: 2
-        })
+            ext1: Some(QualityExt1 {
+                nicbaro: 1,
+                sil: 3,
+                nacp: 8
+            }),
+            ext2: Some(QualityExt2 {
+                sils: true,
+                sda: 2,
+                gva: 2
+            }),
+            pic: Some(11),
+        }
     );
-    // Only what the source never has is noted.
+    // 1090 ES from the source type.
+    assert_eq!(v.link, 2);
+    // Only what the source never has is noted, and the version 2 NIC written as given.
     let mut expect = ALWAYS.to_vec();
-    expect.push(ANOTE_LTT);
-    expect.push(ANOTE_GBS);
     expect.push(ANOTE_NIC_V2);
     expect.sort_unstable();
     assert_eq!(noted(&c), expect);
@@ -145,19 +153,9 @@ fn what_the_report_lacks_is_left_out_and_noted_by_reason() {
     assert!(v.flight_level.is_none() && v.geometric_height.is_none());
     assert!(v.baro_rate.is_none() && v.geometric_rate.is_none());
     assert!(v.ground_vector.is_none() && v.ident.is_none() && v.category.is_none());
-    // I090 is in every record: the primary at the unknown codes.
-    assert_eq!(
-        v.quality,
-        Some(QualityValues {
-            nacv: 0,
-            nic: 0,
-            nacp: 0,
-            sil: 0,
-            sils: false,
-            sda: 0,
-            gva: 0
-        })
-    );
+    // No NACv or NIC: I090 is still written, with the MOPS code 0 for each, and counted.
+    assert_eq!((v.quality.nacv, v.quality.nic), (0, 0));
+    assert!(v.quality.ext1.is_none());
     assert!(v.mops_version.is_none());
     let n = noted(&c);
     for i in [
@@ -167,13 +165,16 @@ fn what_the_report_lacks_is_left_out_and_noted_by_reason() {
         ANOTE_VECTOR_ABSENT,
         ANOTE_IDENT_ABSENT,
         ANOTE_CATEGORY_ABSENT,
-        ANOTE_QUALITY_ABSENT,
+        ANOTE_NACV_UNKNOWN,
+        ANOTE_NIC_UNKNOWN,
         ANOTE_MOPS_ABSENT,
+        ANOTE_GROUND_UNKNOWN,
     ] {
         assert!(n.contains(&i), "{}", ADSB_NOTE_NAMES[i]);
     }
-    // No I210, so no LTT to note; NICBARO and PIC are still not in the source.
-    assert!(n.contains(&ANOTE_NICBARO) && n.contains(&ANOTE_PIC) && !n.contains(&ANOTE_LTT));
+    // No I210, so no LTT to note; no NIC, so no PIC to map.
+    assert!(!n.contains(&ANOTE_LTT_NO_COLUMN) && !n.contains(&ANOTE_LTT_NOT_SAID));
+    assert!(!n.contains(&ANOTE_PIC_UNMAPPED));
     // A callsign padded with NULs is the callsign with spaces; a NUL inside it is refused.
     let mut p = full();
     p.callsign = *b"N911ZP\0\0";
@@ -190,7 +191,7 @@ fn what_the_report_lacks_is_left_out_and_noted_by_reason() {
     assert!(noted(&c).contains(&ANOTE_FL_ABSENT) && noted(&c).contains(&ANOTE_IDENT_ABSENT));
     // I160 is the airborne vector: omitted and counted on the ground, though the report has it.
     assert!(c.values.ground_vector.is_none());
-    assert!(noted(&c).contains(&ANOTE_VECTOR_GROUND) && !noted(&c).contains(&ANOTE_GBS));
+    assert!(noted(&c).contains(&ANOTE_VECTOR_GROUND) && !noted(&c).contains(&ANOTE_GROUND_UNKNOWN));
 }
 
 // REQ: OA-CMP-020
@@ -252,16 +253,17 @@ fn geometric_rate_non_icao_address_ground_and_partial_quality_follow_the_report(
     let v = c.values;
     assert_eq!((v.baro_rate, v.geometric_rate), (None, Some(-348)));
     assert_eq!((v.atp, v.ground), (3, true));
-    let q = v.quality.unwrap();
-    assert_eq!((q.nacv, q.sils), (0, false));
+    // No NACv: written as the MOPS code 0 (unknown), counted; NIC is untouched.
+    assert_eq!((v.quality.nacv, v.quality.nic), (0, 8));
     let n = noted(&c);
-    assert!(n.contains(&ANOTE_ATP_ANONYMOUS) && n.contains(&ANOTE_QUALITY_PARTIAL));
-    // A value that does not fit its bits counts as absent: NACv is three bits.
+    assert!(n.contains(&ANOTE_ATP_ANONYMOUS) && n.contains(&ANOTE_NACV_UNKNOWN));
+    assert!(!n.contains(&ANOTE_NIC_UNKNOWN));
+    // A value that does not fit its bits counts as unknown: NACv is three bits.
     let mut r = full();
     r.nac_v = Some(9);
     let c = adsb_record(&r).unwrap();
-    assert_eq!(c.values.quality.unwrap().nacv, 0);
-    assert!(noted(&c).contains(&ANOTE_QUALITY_PARTIAL));
+    assert_eq!(c.values.quality.nacv, 0);
+    assert!(noted(&c).contains(&ANOTE_NACV_UNKNOWN) && noted(&c).contains(&ANOTE_QUALITY_RANGE));
 }
 
 // REQ: OA-CMP-021
@@ -526,10 +528,13 @@ fn reports_are_written_in_time_order_with_stale_and_non_adsb_ones_left_out_and_c
     assert_eq!(first.descriptor.as_ref().unwrap().ext, vec![0x44]);
     assert!(first.flight_level.is_none() && first.baro_rate.is_none());
     assert_eq!(first.geometric_rate.unwrap().raw, 102);
-    assert_eq!(
-        oa_asterix::cat021::quality_sils(first.quality.as_ref().unwrap()),
-        Some(1)
-    );
+    // The source has no NIC_baro: the primary subfield alone, no extension, no zero in its place.
+    let q = first.quality.as_ref().unwrap();
+    assert_eq!((q.nacv, q.nic, q.ext.len()), (2, 8, 0));
+    assert_eq!(oa_asterix::cat021::quality_sils(q), None);
+    // Source type 0 is 1090 ES; a clip row without the source column has LTT 0.
+    assert_eq!(first.mops.unwrap().link, 2);
+    assert_eq!(blocks[3].mops.unwrap().link, 0);
 }
 
 fn decode_stream_ed24(bytes: &[u8]) -> Vec<oa_asterix::cat021::Cat021> {
@@ -636,6 +641,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
             ..Default::default()
         },
         adsb: None,
+        file_offered: 11,
         gate: oa_track::adsb::AdsbStats {
             rows_in: 10,
             passed: 6,
@@ -665,6 +671,8 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         "SAC 255 SIC 13",
         "split_reports_with",
         "KEEP ALL",
+        "adsb.ast removes copies by its own, finer key, which adds NIC_baro, SDA and GVA",
+        "11 reports remained for the file after that copy removal",
         "3 duplicate reports removed",
         "1 conflicting (address, time) groups holding 2 reports",
         "INDEPENDENCE",
@@ -674,9 +682,19 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         "nacp 3;",
         "source_not_adsb 1;",
         "TIS-B, ADS-R and MLAT",
+        "I090 quality indicators (primary subfield in every record; each extension only while all its fields are known",
         "UNVERIFIED",
-        "not according to Ed 2.4 itself",
-        "asserts \"not on ground\"",
+        "never mapped through the NUCp column",
+        "\"This item shall be present in every ASTERIX record. Extensions are sent only if at least 1 bit is set to \u{201c}1\u{201d}.\"",
+        "version 0, NUCr not available",
+        "PIC is taken from NIC and the MOPS version (1 or 2)",
+        "a clip written before that column existed carries none",
+        "ASSUMED from the source type and not proven",
+        "a decoder cannot tell a known 0 from an extension not sent",
+        "ground state unknown",
+        "DEFAULTS the format forces, not facts about the target",
+        "they are not written and are counted by source type",
+        "written as NUCp/NIC",
         "UK-008",
         "NOT independent of OpenATCA's inputs",
         "ERAM also uses ADS-B",
@@ -684,7 +702,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         "I131 position in WGS-84, high resolution",
         "I071 time of applicability for position: the source has no avionics time",
         "10: I161 track number",
-        "I210 LTT",
+        "LTT comes from the source type",
         "limit 1, enforced",
     ] {
         assert!(text.contains(needle), "missing {needle:?}\n{text}");
@@ -781,16 +799,89 @@ fn a_real_clip_goes_through_the_shared_dedup_into_both_files() {
     let _ = decode_stream; // the whole-file decode is the read-back above
 }
 
+/// The wire octets of the I090 extensions of `f` applied to a full report.
+fn ext_of(f: &dyn Fn(&mut AdsbRow)) -> (Option<Vec<u8>>, Vec<usize>) {
+    use oa_compass::shell::adsb_export::cat021_record;
+    let mut r = full();
+    f(&mut r);
+    let c = adsb_record(&r).unwrap();
+    (
+        cat021_record(&c.values, ADSB_SOURCE).quality.map(|q| q.ext),
+        noted(&c),
+    )
+}
+
 // REQ: OA-CMP-028
 #[test]
-fn quality_is_in_every_record_with_extensions_only_where_a_bit_is_set() {
-    use oa_compass::shell::adsb_export::cat021_record;
-    let ext_of = |f: &dyn Fn(&mut AdsbRow)| {
-        let mut r = full();
-        f(&mut r);
-        let v = adsb_record(&r).unwrap().values;
-        cat021_record(&v, ADSB_SOURCE).quality.unwrap()
-    };
+fn a_full_row_writes_the_whole_chain_and_a_cut_short_row_stops_at_the_first_unknown_extension() {
+    // Full: NICBARO 1, SIL 3, NACp 8 (FX); SILS 1, SDA 2, GVA 2 (FX); PIC 11.
+    let (ext, n) = ext_of(&|_| {});
+    assert_eq!(
+        ext,
+        Some(vec![
+            (1 << 7) | (3 << 5) | (8 << 1) | 1,
+            (1 << 5) | (2 << 3) | (2 << 1) | 1,
+            11 << 4
+        ])
+    );
+    let mut expect = ALWAYS.to_vec();
+    expect.push(ANOTE_NIC_V2);
+    expect.sort_unstable();
+    assert_eq!(n, expect);
+    // Unknown NICBARO (as in every clip row), SIL or NACp: the primary only, the chain cut at
+    // the first extension, nothing after it written even though it is known.
+    for f in [
+        (&|r: &mut AdsbRow| r.nic_baro = None) as &dyn Fn(&mut AdsbRow),
+        &|r| r.sil = None,
+        &|r| r.nac_p = None,
+    ] {
+        let (ext, n) = ext_of(f);
+        assert_eq!(ext, Some(vec![]));
+        assert!(
+            n.contains(&ANOTE_EXT1_CUT) && !n.contains(&ANOTE_EXT2_CUT),
+            "{n:?}"
+        );
+    }
+    // SILS, SDA or GVA unknown: the first extension is written alone, the chain cut at the second.
+    for f in [
+        (&|r: &mut AdsbRow| r.sil_per_sample = None) as &dyn Fn(&mut AdsbRow),
+        &|r| r.sda = None,
+        &|r| r.gva = None,
+    ] {
+        let (ext, n) = ext_of(f);
+        assert_eq!(ext, Some(vec![(1 << 7) | (3 << 5) | (8 << 1)]));
+        assert!(
+            n.contains(&ANOTE_EXT2_CUT) && !n.contains(&ANOTE_EXT1_CUT),
+            "{n:?}"
+        );
+    }
+    // NIC 6 maps to no single PIC row: the first two extensions, no third, counted twice over.
+    let (ext, n) = ext_of(&|r| r.nic = Some(6));
+    assert_eq!(
+        ext.unwrap().len(),
+        2,
+        "the second extension has bits and no third follows"
+    );
+    assert!(
+        n.contains(&ANOTE_PIC_UNMAPPED) && n.contains(&ANOTE_EXT3_CUT),
+        "{n:?}"
+    );
+    // An unknown NACv or NIC: the primary subfield is still written, with the code 0 for it,
+    // counted; the chain rule is unchanged (an unknown NIC leaves no PIC, so it is cut at the
+    // third extension).
+    let (ext, n) = ext_of(&|r| r.nic = None);
+    assert_eq!(ext.unwrap().len(), 2);
+    assert!(n.contains(&ANOTE_NIC_UNKNOWN) && !n.contains(&ANOTE_NACV_UNKNOWN));
+    assert!(n.contains(&ANOTE_EXT3_CUT) && !n.contains(&ANOTE_PIC_UNMAPPED));
+    let (ext, n) = ext_of(&|r| r.nac_v = None);
+    assert_eq!(ext.unwrap().len(), 3);
+    assert!(n.contains(&ANOTE_NACV_UNKNOWN) && !n.contains(&ANOTE_NIC_UNKNOWN));
+}
+
+// REQ: OA-CMP-028
+#[test]
+fn an_extension_with_all_bits_zero_is_sent_only_before_a_later_one_that_has_bits() {
+    // Every known field 0 (NIC 0 is PIC 0: no third extension): the primary alone.
     let zero = |r: &mut AdsbRow| {
         r.nic = Some(0);
         r.nac_p = Some(0);
@@ -799,102 +890,204 @@ fn quality_is_in_every_record_with_extensions_only_where_a_bit_is_set() {
         r.sil_per_sample = Some(false);
         r.sda = Some(0);
         r.gva = Some(0);
+        r.nic_baro = Some(0);
     };
-    // Nothing set: the primary subfield alone, no extension.
-    let q = ext_of(&zero);
-    assert_eq!((q.nacv, q.nic, q.ext.len()), (0, 0, 0));
-    // Only NACp: the first extension alone (FX 0), NACp in bits 5/2.
-    let q = ext_of(&|r| {
-        zero(r);
-        r.nac_p = Some(9);
-    });
-    assert_eq!(q.ext, vec![9 << 1]);
-    // Only GVA: the second extension, with the first (all zero, FX 1) in front of it.
-    let q = ext_of(&|r| {
-        zero(r);
-        r.gva = Some(2);
-    });
-    assert_eq!(q.ext, vec![0x01, 2 << 1]);
-    // A report without any quality data still carries I090.
-    let q = ext_of(&|r| {
-        r.nic = None;
-        r.nac_p = None;
-        r.nac_v = None;
-        r.sil = None;
-        r.sda = None;
-        r.gva = None;
-        r.sil_per_sample = None;
-    });
-    assert_eq!((q.nacv, q.nic, q.ext.len()), (0, 0, 0));
-    // The records decode as Ed 2.4 and every one has I090 (checked in the file test below).
+    assert_eq!(ext_of(&zero).0, Some(vec![]));
+    // Only GVA set: the all-zero first extension chains to the second.
+    assert_eq!(
+        ext_of(&|r| {
+            zero(r);
+            r.gva = Some(2);
+        })
+        .0,
+        Some(vec![0x01, 2 << 1])
+    );
+    // Only NACp set: the first extension alone.
+    assert_eq!(
+        ext_of(&|r| {
+            zero(r);
+            r.nac_p = Some(9);
+        })
+        .0,
+        Some(vec![9 << 1])
+    );
+    // PIC alone (NIC 1 is PIC 1): both zero extensions chain to it.
+    assert_eq!(
+        ext_of(&|r| {
+            zero(r);
+            r.nic = Some(1);
+        })
+        .0,
+        Some(vec![0x01, 0x01, 1 << 4])
+    );
 }
 
 // REQ: OA-CMP-028
 #[test]
-fn values_outside_the_mops_are_not_encoded_and_the_notes_name_sils_and_nic_v2() {
+fn values_outside_the_mops_are_not_encoded_and_count_as_unknown() {
     let mut r = full();
     r.nic = Some(12);
-    r.nac_p = Some(12);
-    r.nac_v = Some(5);
     let c = adsb_record(&r).unwrap();
-    let q = c.values.quality.unwrap();
-    assert_eq!((q.nic, q.nacp, q.nacv), (0, 0, 0));
-    assert!(noted(&c).contains(&ANOTE_QUALITY_RANGE) && noted(&c).contains(&ANOTE_QUALITY_PARTIAL));
+    assert_eq!(c.values.quality.nic, 0);
+    assert!(noted(&c).contains(&ANOTE_QUALITY_RANGE) && noted(&c).contains(&ANOTE_NIC_UNKNOWN));
+    r = full();
+    r.nac_p = Some(12);
+    let c = adsb_record(&r).unwrap();
+    assert!(c.values.quality.ext1.is_none());
+    assert!(noted(&c).contains(&ANOTE_QUALITY_RANGE) && noted(&c).contains(&ANOTE_EXT1_CUT));
     // The limits themselves are encoded.
     let mut r = full();
     r.nic = Some(11);
     r.nac_p = Some(11);
     r.nac_v = Some(4);
-    let q = adsb_record(&r).unwrap().values.quality.unwrap();
-    assert_eq!((q.nic, q.nacp, q.nacv), (11, 11, 4));
-    // No SIL type with a SIL: SILS written 0 and noted; version 2 with a NIC: mapping unverified.
-    let mut r = full();
-    r.sil_per_sample = None;
-    let c = adsb_record(&r).unwrap();
-    assert!(noted(&c).contains(&ANOTE_SILS) && noted(&c).contains(&ANOTE_NIC_V2));
-    r.version = Some(1);
-    assert!(!noted(&adsb_record(&r).unwrap()).contains(&ANOTE_NIC_V2));
+    let q = adsb_record(&r).unwrap().values.quality;
+    assert_eq!(
+        (q.nic, q.nacv, q.ext1.unwrap().nacp, q.pic),
+        (11, 4, 11, Some(14))
+    );
 }
 
 // REQ: OA-CMP-028
 #[test]
-fn the_extension_chain_carries_sils_only_sda_only_and_both_extensions() {
+fn pic_follows_the_ed24_table_for_each_mops_version_and_is_none_where_it_is_not_one_row() {
+    // Version 2 (ED-102A/DO-260B NIC column), the whole table.
+    let v2 = [
+        (0, 0),
+        (1, 1),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (5, 6),
+        (7, 10),
+        (8, 11),
+        (9, 12),
+        (10, 13),
+        (11, 14),
+    ];
+    for (nic, pic) in v2 {
+        assert_eq!(pic_of(Some(2), nic), Some(pic), "v2 NIC {nic}");
+        assert_eq!(pic_of(Some(1), nic), Some(pic), "v1 NIC {nic}");
+    }
+    // NIC 6 is PIC 7, 8 or 9 by the NIC supplements, which the NIC alone does not give.
+    assert_eq!(pic_of(Some(2), 6), None);
+    assert_eq!(pic_of(Some(1), 6), None);
+    // Version 0: readsb's nic is a NIC, not a NUCp, so the NUCp column is never used.
+    for nic in 0..=11 {
+        assert_eq!(pic_of(Some(0), nic), None, "v0 {nic}");
+    }
+    // No version, a NIC above 11, version 3.
+    assert_eq!(pic_of(None, 8), None);
+    assert_eq!(pic_of(Some(2), 12), None);
+    assert_eq!(pic_of(Some(3), 8), None);
+}
+
+// REQ: OA-CMP-028
+#[test]
+fn the_primary_subfield_is_the_source_nic_and_version_0_never_gets_a_nucp_or_a_pic() {
     use oa_compass::shell::adsb_export::cat021_record;
-    let ext_of = |f: &dyn Fn(&mut AdsbRow)| {
+    let primary = |version: u8, nic: u8| {
         let mut r = full();
-        r.nic = Some(0);
-        r.nac_p = Some(0);
-        r.nac_v = Some(0);
-        r.sil = Some(0);
-        r.sil_per_sample = Some(false);
-        r.sda = Some(0);
-        r.gva = Some(0);
-        f(&mut r);
-        let v = adsb_record(&r).unwrap().values;
-        cat021_record(&v, ADSB_SOURCE).quality.unwrap().ext
+        r.version = Some(version);
+        r.nic = Some(nic);
+        let c = adsb_record(&r).unwrap();
+        let q = cat021_record(&c.values, ADSB_SOURCE).quality.unwrap();
+        (q.nacv, q.nic, c.values.quality.pic, noted(&c))
     };
-    // SILS alone and SDA alone: the second extension, the empty first one chaining to it.
-    assert_eq!(
-        ext_of(&|r| r.sil_per_sample = Some(true)),
-        vec![0x01, 1 << 5]
-    );
-    assert_eq!(ext_of(&|r| r.sda = Some(2)), vec![0x01, 2 << 3]);
-    // Both extensions with values: the first carries SIL and NACp, with FX.
-    assert_eq!(
-        ext_of(&|r| {
-            r.sil = Some(3);
-            r.nac_p = Some(8);
-            r.sda = Some(1);
-            r.gva = Some(2);
-            r.sil_per_sample = Some(true);
-        }),
-        vec![(3 << 5) | (8 << 1) | 1, (1 << 5) | (1 << 3) | (2 << 1)]
-    );
+    // Versions 1 and 2: readsb's NIC unchanged; version 2 counts it as an unverified mapping.
+    let (nacv, nic, pic, n) = primary(1, 8);
+    assert_eq!((nacv, nic, pic), (2, 8, Some(11)));
+    assert!(!n.contains(&ANOTE_NIC_V2) && !n.contains(&ANOTE_V0_NUCP));
+    let (nacv, nic, pic, n) = primary(2, 9);
+    assert_eq!((nacv, nic, pic), (2, 9, Some(12)));
+    assert!(n.contains(&ANOTE_NIC_V2));
+    // Version 0: readsb's nic is a NIC, not a NUCp: NUCp 0, counted, no PIC, no NIC count.
+    let (nacv, nic, pic, n) = primary(0, 7);
+    assert_eq!((nacv, nic, pic), (0, 0, None));
+    assert!(n.contains(&ANOTE_V0_NUCP) && !n.contains(&ANOTE_NIC_UNKNOWN));
+    // The same field is a NUCr under version 0: written 0 whatever the NACv holds (2 here, and
+    // also a value the MOPS defines as high), counted as "NUCr not available" and not as an
+    // unknown NACv.
+    let mut r = full();
+    r.version = Some(0);
+    for held in [Some(2u8), Some(4), None] {
+        r.nac_v = held;
+        let c = adsb_record(&r).unwrap();
+        assert_eq!(c.values.quality.nacv, 0, "{held:?}");
+        let n = noted(&c);
+        assert!(
+            n.contains(&ANOTE_V0_NUCR) && !n.contains(&ANOTE_NACV_UNKNOWN),
+            "{held:?}"
+        );
+    }
+    // Versions 1 and 2 keep it: written as given, and an unknown one is the NACv count.
+    r.version = Some(2);
+    r.nac_v = Some(3);
+    let c = adsb_record(&r).unwrap();
+    assert_eq!(c.values.quality.nacv, 3);
+    assert!(!noted(&c).contains(&ANOTE_V0_NUCR));
+    assert!(!n.contains(&ANOTE_PIC_UNMAPPED) && n.contains(&ANOTE_EXT3_CUT));
 }
 
 // REQ: OA-CMP-028
 #[test]
-fn every_record_of_the_file_has_i090_and_ground_records_have_gbs_and_no_i160() {
+fn gbs_comes_from_the_data_and_a_row_with_neither_ground_nor_altitude_is_counted() {
+    // An altitude: airborne, GBS 0, nothing counted.
+    let c = adsb_record(&full()).unwrap();
+    assert!(!c.values.ground && !noted(&c).contains(&ANOTE_GROUND_UNKNOWN));
+    // Geometric height alone also says airborne.
+    let mut r = full();
+    r.baro_alt_ft = None;
+    let c = adsb_record(&r).unwrap();
+    assert!(!c.values.ground && !noted(&c).contains(&ANOTE_GROUND_UNKNOWN));
+    // The ground flag: GBS 1, nothing counted.
+    let mut r = full();
+    r.ground = true;
+    r.baro_alt_ft = None;
+    r.geom_alt_ft = None;
+    let c = adsb_record(&r).unwrap();
+    assert!(c.values.ground && !noted(&c).contains(&ANOTE_GROUND_UNKNOWN));
+    // Neither: GBS 0, counted as unknown.
+    let mut r = full();
+    r.baro_alt_ft = None;
+    r.geom_alt_ft = None;
+    let c = adsb_record(&r).unwrap();
+    assert!(!c.values.ground && noted(&c).contains(&ANOTE_GROUND_UNKNOWN));
+}
+
+// REQ: OA-CMP-028
+#[test]
+fn ltt_follows_the_source_type_and_is_counted_when_it_cannot() {
+    use oa_compass::shell::adsb_export::cat021_record;
+    let link_of = |l: LinkSource| {
+        let mut r = full();
+        r.link = l;
+        let c = adsb_record(&r).unwrap();
+        (
+            cat021_record(&c.values, ADSB_SOURCE).mops.unwrap().link,
+            noted(&c),
+        )
+    };
+    let (ltt, n) = link_of(LinkSource::Es1090);
+    assert_eq!(ltt, 2);
+    assert!(!n.contains(&ANOTE_LTT_NO_COLUMN) && !n.contains(&ANOTE_LTT_NOT_SAID));
+    assert_eq!(link_of(LinkSource::Uat).0, 1);
+    let (ltt, n) = link_of(LinkSource::NoColumn);
+    assert_eq!(ltt, 0);
+    assert!(n.contains(&ANOTE_LTT_NO_COLUMN));
+    let (ltt, n) = link_of(LinkSource::NotSaid);
+    assert_eq!(ltt, 0);
+    assert!(n.contains(&ANOTE_LTT_NOT_SAID));
+    // No version, no I210, no LTT and nothing counted for it.
+    let mut r = full();
+    r.version = None;
+    r.link = LinkSource::NoColumn;
+    let c = adsb_record(&r).unwrap();
+    assert!(!noted(&c).contains(&ANOTE_LTT_NO_COLUMN));
+}
+
+// REQ: OA-CMP-028
+#[test]
+fn i090_is_in_every_record_and_ground_records_have_gbs_and_no_i160() {
     let (lay, out) = layout("i090file", false);
     let mut ex = AdsbExport::new(ADSB_SOURCE, lay);
     let base = full();
@@ -920,8 +1113,9 @@ fn every_record_of_the_file_has_i090_and_ground_records_have_gbs_and_no_i160() {
     let recs = decode_stream_ed24(&fs::read(out.join("adsb.ast")).unwrap());
     assert_eq!(recs.len(), 300);
     let mut ground = 0;
+    let mut with_i090 = 0;
     for rec in &recs {
-        assert!(rec.quality.is_some(), "a record without I090");
+        with_i090 += usize::from(rec.quality.is_some());
         let gbs = rec
             .descriptor
             .as_ref()
@@ -935,6 +1129,147 @@ fn every_record_of_the_file_has_i090_and_ground_records_have_gbs_and_no_i160() {
         }
     }
     assert_eq!(ground, 100);
+    // I090 is in every record, also where a report lacks its quality fields.
+    assert_eq!(with_i090, 300);
+}
+
+// REQ: OA-CMP-028
+#[test]
+fn source_types_1_and_8_are_written_as_adsb_with_the_ltt_the_source_gives() {
+    let mut r = Reports::default();
+    push_row(&mut r, 10.0, 0x100001, |x| x.source = 1); // adsb_icao_nt
+    push_row(&mut r, 11.0, 0x100002, |x| x.source = 8); // adsb_other
+    push_row(&mut r, 12.0, 0x100003, |x| x.source = 0); // adsb_icao
+    let (lay, out) = layout("sources18", false);
+    let mut ex = AdsbExport::new(ADSB_SOURCE, lay);
+    let info = export_adsb_reports(&r, &mut ex).unwrap();
+    assert_eq!((info.rows_in, info.converted, info.refused), (3, 3, 0));
+    assert!(info.other_sources.is_empty());
+    let rep = ex.finish().unwrap().commit().unwrap();
+    assert_eq!(rep.days[0].stats.records, 3);
+    // seal-allow: reads back a file the test wrote in its own temp dir
+    let recs = decode_stream_ed24(&fs::read(out.join("adsb.ast")).unwrap());
+    let ltt: Vec<u8> = recs.iter().map(|c| c.mops.unwrap().link).collect();
+    // Type 1 is 1090 ES (assumed), type 8 does not say (0, counted), type 0 is 1090 ES.
+    assert_eq!(ltt, vec![2, 0, 2]);
+    let notes: u64 = rep.days[0].notes[ANOTE_LTT_NOT_SAID];
+    assert_eq!(notes, 1);
+}
+
+// REQ: OA-CMP-023
+#[test]
+fn a_refused_row_is_counted_and_the_reconciliation_says_whether_it_reconciles() {
+    let mut r = Reports::default();
+    push_row(&mut r, 10.0, 0x100001, |_| {});
+    push_row(&mut r, 11.0, 0x100001, |x| x.flags |= F_STALE);
+    push_row(&mut r, 12.0, 0x100001, |x| x.source = 5); // mlat
+    push_row(&mut r, 13.0, 0x100002, |x| x.lat_e7 = 950_000_000); // beyond 90 degrees
+    let (lay, _out) = layout("refused", false);
+    let mut ex = AdsbExport::new(ADSB_SOURCE, lay);
+    let info = export_adsb_reports(&r, &mut ex).unwrap();
+    assert_eq!(
+        (info.rows_in, info.stale, info.converted, info.refused),
+        (4, 1, 1, 1)
+    );
+    // The count of records the file gives and the refusals it lists are part of the check.
+    let (line, ok) = info.reconciliation(1, 1);
+    assert!(ok, "{line}");
+    assert!(
+        line.starts_with("offered 4 = stale 1 + not ADS-B 1 + written 1 + refused 1 = 4;"),
+        "{line}"
+    );
+    assert!(line.ends_with(": reconciles"), "{line}");
+    // Any one of the four sums or counts off, and it does not reconcile, with the counts shown.
+    let mut off = info.clone();
+    off.refused = 0;
+    assert!(off.reconciliation(1, 1).0.ends_with("DOES NOT RECONCILE"));
+    let (line, ok) = info.reconciliation(2, 1);
+    assert!(
+        !ok && line.contains("written file 2 (written 1)") && line.ends_with("DOES NOT RECONCILE")
+    );
+    let (line, ok) = info.reconciliation(1, 0);
+    assert!(!ok && line.contains("listed by the file 0 (refused 1)"));
+    // Through the finished file: the records on disk are counted by the walker.
+    let fin = ex.finish().unwrap();
+    assert_eq!(fin.records_on_disk().unwrap(), 1);
+    assert!(reconcile_adsb(&info, &fin)
+        .unwrap()
+        .ends_with(": reconciles"));
+    let mut wrong = info.clone();
+    wrong.converted = 2;
+    wrong.stale = 0;
+    let e = reconcile_adsb(&wrong, &fin).unwrap_err().to_string();
+    assert!(
+        e.contains("DOES NOT RECONCILE") && e.contains("written file 1 (written 2)"),
+        "{e}"
+    );
+    let rep = fin.commit().unwrap();
+    assert_eq!(rep.refused, [1, 0]);
+}
+
+// REQ: OA-CMP-023
+#[test]
+fn the_walker_counts_records_by_fspec_and_item_lengths_independently_of_the_decoder() {
+    use oa_compass::core::walk::count_cat021_records;
+    // One record: FSPEC 81 01 30 (FRN 1, then 17 and 18), I010, I090 primary + extensions, I210.
+    let one = [
+        0x15, 0x00, 0x0D, 0x81, 0x01, 0x30, 0xFF, 0x0D, 0x51, 0xF1, 0x35, 0xB0, 0x12,
+    ];
+    assert_eq!(count_cat021_records(&one), Ok(1));
+    // Two such records in one block (LEN 23).
+    let mut two = vec![0x15, 0x00, 0x17];
+    two.extend_from_slice(&one[3..]);
+    two.extend_from_slice(&one[3..]);
+    assert_eq!(count_cat021_records(&two), Ok(2));
+    // A record with a short I090 (primary only, FX 0): FRN 1 and 17 only, FSPEC 81 01 20.
+    let short = [0x15, 0x00, 0x09, 0x81, 0x01, 0x20, 0xFF, 0x0D, 0x50];
+    assert_eq!(count_cat021_records(&short), Ok(1));
+    // Wrong category, wrong LEN, a record cut short, an item the export never writes.
+    assert!(count_cat021_records(&[0x3E, 0x00, 0x03]).is_err());
+    assert!(count_cat021_records(&[0x15, 0x00, 0x05, 0x80]).is_err());
+    assert!(count_cat021_records(&one[..12]).is_err());
+    let only_source = [0x15, 0x00, 0x06, 0x80, 0xFF, 0x0D];
+    assert_eq!(count_cat021_records(&only_source), Ok(1));
+    let cut = [0x15, 0x00, 0x05, 0x80, 0xFF];
+    assert!(count_cat021_records(&cut).is_err());
+    let compound = [0x15, 0x00, 0x06, 0x01, 0x01, 0x02];
+    assert!(count_cat021_records(&compound).is_err());
+}
+
+// REQ: OA-CMP-028
+#[test]
+fn the_i090_and_i210_octets_are_the_ones_the_specification_gives_written_by_hand() {
+    use oa_compass::shell::adsb_export::cat021_record;
+    // NACv 2, NIC 8; NICBARO 1, SIL 3, NACp 8; SILS 1, SDA 2, GVA 2; PIC 11 (NIC 8, version 2);
+    // MOPS version 2 on 1090 ES (source type 0). The octets are worked out from Ed 2.4 5.2.16 and
+    // 5.2.35, not by any decoder of this repository:
+    //   I090 primary   nacv 010, nic 1000, FX 1                    = 0101 0001 = 0x51
+    //   I090 ext 1     nicbaro 1, sil 11, nacp 1000, FX 1          = 1111 0001 = 0xF1
+    //   I090 ext 2     0 0, sils 1, sda 10, gva 10, FX 1           = 0011 0101 = 0x35
+    //   I090 ext 3     pic 1011, 000, FX 0                         = 1011 0000 = 0xB0
+    //   I210           0, vns 0, vn 010, ltt 010                   = 0001 0010 = 0x12
+    let c = adsb_record(&full()).unwrap();
+    let rec = cat021_record(&c.values, ADSB_SOURCE);
+    let only = oa_asterix::cat021::Cat021 {
+        source: ADSB_SOURCE,
+        quality: rec.quality.clone(),
+        mops: rec.mops,
+        ..oa_asterix::cat021::Cat021::default()
+    };
+    let bytes =
+        oa_asterix::encode_block_with(&Block::Cat021(vec![only]), Cat021Edition::Ed24).unwrap();
+    // CAT 21, length 13; FSPEC 0x81 0x01 0x30 (I010; FRN 17 and 18 in the third octet);
+    // I010 SAC 255 SIC 13; the I090 and I210 octets above.
+    assert_eq!(
+        bytes,
+        vec![0x15, 0x00, 0x0D, 0x81, 0x01, 0x30, 0xFF, 0x0D, 0x51, 0xF1, 0x35, 0xB0, 0x12]
+    );
+    // The full record carries the same octets in the same place.
+    let full_bytes =
+        oa_asterix::encode_block_with(&Block::Cat021(vec![rec]), Cat021Edition::Ed24).unwrap();
+    assert!(full_bytes
+        .windows(5)
+        .any(|w| w == [0x51, 0xF1, 0x35, 0xB0, 0x12]));
 }
 
 // REQ: OA-SEAL-014
@@ -992,4 +1327,36 @@ fn the_clip_loader_drops_rows_in_a_sealed_window_and_the_readme_counts_them() {
     .unwrap();
     assert_eq!(info.sealed_window_dropped, 2);
     assert_eq!(info.offered, 2);
+}
+
+// REQ: OA-CMP-023
+#[test]
+fn the_file_keeps_reports_that_differ_only_in_nic_baro_sda_or_gva_the_scorers_key_merges() {
+    use oa_compass::shell::run::export_key;
+    let mut r = Reports::default();
+    // One (address, time): the same but for NIC_baro; the same but for SDA; the same but for GVA;
+    // and an exact copy of the first.
+    push_row(&mut r, 10.0, 0x100001, |x| x.nic_baro = 0);
+    push_row(&mut r, 10.0, 0x100001, |x| x.nic_baro = 1);
+    push_row(&mut r, 10.0, 0x100001, |x| {
+        x.nic_baro = 0;
+        x.sda = 2;
+    });
+    push_row(&mut r, 10.0, 0x100001, |x| {
+        x.nic_baro = 0;
+        x.gva = 2;
+    });
+    push_row(&mut r, 10.0, 0x100001, |x| x.nic_baro = 0);
+    // The scorer's split is unchanged: one observation, four copies removed.
+    let (a, _, st) = oa_track::score::split_reports_with(&r, false);
+    assert_eq!((reports_len(&a), st.duplicates_removed), (1, 4));
+    // The file's key keeps the four that differ and removes the exact copy.
+    let (kept, _, st) = oa_track::score::split_reports_keyed(&r, false, export_key);
+    assert_eq!((reports_len(&kept), st.duplicates_removed), (4, 1));
+    // They reach adsb.ast: four records.
+    let (lay, _out) = layout("keyed", false);
+    let mut ex = AdsbExport::new(ADSB_SOURCE, lay);
+    let info = export_adsb_reports(&kept, &mut ex).unwrap();
+    assert_eq!(info.converted, 4);
+    ex.finish().unwrap().commit().unwrap();
 }

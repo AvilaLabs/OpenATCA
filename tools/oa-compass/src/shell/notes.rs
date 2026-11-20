@@ -133,8 +133,20 @@ fn day_lines(out: &mut String, report: &SystemReport, d: &DayReport) {
     let _ = writeln!(out, "  file: {}", d.file);
     let _ = writeln!(
         out,
-        "  records written: {rows} in {} data blocks, {} octets, {} tracks (I040 numbers 1 to {})",
-        d.sink.blocks, d.sink.bytes, d.tracks, d.tracks
+        "  records written: {rows} in {} data blocks, {} octets, {} track segments (I040 numbers 1 to {}) of {} keys, {} keys with more than one segment",
+        d.sink.blocks, d.sink.bytes, d.tracks, d.tracks, d.keys, d.keys_multi_segment
+    );
+    if d.restarts > 0 || report.name == "OpenATCA" {
+        let _ = writeln!(
+            out,
+            "  track restarts: {} (the tracker dropped a track of the key and later started another; each gets its own track number); each restart leaves its one pair of rows out of the interval statistics",
+            d.restarts
+        );
+    }
+    let _ = writeln!(
+        out,
+        "  track numbers used: {} of the 65535 the 16-bit I040 holds (a day with more track segments than that is refused)",
+        d.tracks
     );
     let _ = writeln!(
         out,
@@ -357,22 +369,32 @@ pub fn readme_with(
     );
     if has_oa || has_eram {
         let mon = match (has_oa, has_eram) {
-            (true, true) => "MON = 1 (monosensor) for OpenATCA because its tracker is fed ADS-B only, one kind of sensor; for ERAM MON = 0 and CNF = 0 are ASSUMPTIONS: the feed carries neither (\"not in the feed\"), so they are written as defaults and counted as a note on every ERAM row, not stated as facts about ERAM",
-            (true, false) => "MON = 1 (monosensor) because the tracker is fed ADS-B only, one kind of sensor",
-            _ => "MON = 0 and CNF = 0 are ASSUMPTIONS: the feed carries neither (\"not in the feed\"), so they are written as defaults and counted as a note on every ERAM row, not stated as facts about ERAM",
+            (true, true) => "MON (Ed 1.21 5.2.6: 0 multisensor, 1 monosensor) is 1 for OpenATCA because its tracker is fed ADS-B only, one kind of sensor (a fact of this run); for ERAM MON = 0 and CNF = 0 are ASSUMED, UNCONFIRMED: the feed carries neither (\"not in the feed\"), so they are written as defaults and counted as a note on every ERAM row, not stated as facts about ERAM",
+            (true, false) => "MON (Ed 1.21 5.2.6: 0 multisensor, 1 monosensor) is 1 because the tracker is fed ADS-B only, one kind of sensor (a fact of this run)",
+            _ => "MON (Ed 1.21 5.2.6) = 0 and CNF = 0 are ASSUMED, UNCONFIRMED: the feed carries neither (\"not in the feed\"), so they are written as defaults and counted as a note on every ERAM row, not stated as facts about ERAM",
         };
         let cnf = if has_oa {
-            " OpenATCA's CNF = 0 (confirmed): the tracker publishes confirmed tracks only. The tracker's O_IDENTITY_UNCONFIRMED flag (the key is a local radar handle, not an aircraft address) is NOT written as CNF = 1: CNF marks a tentative track, and that flag means an unconfirmed identity, which is another thing; its rows are counted below (none in an ADS-B-only run)."
+            " OpenATCA's CNF (5.2.6: 0 confirmed track, 1 tentative track) is 0 because the tracker publishes rows of confirmed tracks only (a property of the tracker, not stated by the specification). Rows with the tracker's O_IDENTITY_UNCONFIRMED flag (the key is a local radar handle, not an aircraft address) are also written CNF = 0: that is ASSUMED, UNCONFIRMED, a choice of this export, because the specification defines CNF for the track and says nothing of an unconfirmed identity; its rows are counted below (none in an ADS-B-only run)."
         } else {
             ""
         };
-        let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. The velocity is the track's, east and north (Vx, Vy). I080: {mon}; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.{cnf}\n");
+        let mut vel = String::new();
+        if has_oa {
+            vel.push_str("OpenATCA velocity (I185): the track's, true east (Vx) and true north (Vy) at the target's own position, the frame the CAT062 specification gives for I062/185 (y-axis to geographical north at the location of the target), not a system plane.");
+        }
+        if has_eram {
+            if !vel.is_empty() {
+                vel.push(' ');
+            }
+            vel.push_str("ERAM velocity (I185): the east and north components as the SFDPS feed gives them; their frame is not verified here.");
+        }
+        let _ = writeln!(o, "Nothing is invented: an item the source row does not have is omitted, and counted below by reason. {vel} I080: {mon}; SPI, MRH and SRC at 0 (I130 is never sent); CST (coasting) from the source's coast flag; OpenATCA's radar-disagrees flag is AFF.{cnf}\n");
     }
     if has_oa {
-        let _ = writeln!(o, "Altitude (OpenATCA): the tracker's altitude is ADS-B barometric (pressure) altitude, filtered: it is a CALCULATED altitude, I135 with QNH = 0. OpenATCA publishes no measured flight level (I136), so COMPASS's \"Mode C Present\" does not apply to it.\n");
+        let _ = writeln!(o, "Altitude (OpenATCA): the tracker's altitude is ADS-B barometric (pressure) altitude, filtered: it is a CALCULATED altitude, I135 (Ed 1.21 5.2.12) with QNH = 0, which the specification defines as no QNH correction applied (pressure altitude is by definition not QNH corrected). OpenATCA publishes no measured flight level (I136), so COMPASS's \"Mode C Present\" does not apply to it.\n");
     }
     if has_eram {
-        let _ = writeln!(o, "Altitude (ERAM): the altitude is the SFDPS field enRoute/position/altitude, in feet, which the feed gives as a surveillance altitude without saying what it is referenced to; it is NOT established as pressure altitude. This project's own comparison (docs/M2_DESIGN.md, altitude reference for T4) found values under 18 000 ft altimeter-corrected (about 400 ft high against pressure altitude on this day) and values at or above 18 000 ft flight levels. The export applies that rule, an inference and not a statement of the feed: at or above 18 000 ft the value is I136 (measured flight level), below it I135 with QNH = 1.\n");
+        let _ = writeln!(o, "Altitude (ERAM): the altitude is the SFDPS field enRoute/position/altitude, in feet, which the feed gives as a surveillance altitude without saying what it is referenced to; it is NOT established as pressure altitude. This project's own comparison (docs/M2_DESIGN.md, altitude reference for T4) found values under 18 000 ft altimeter-corrected (about 400 ft high against pressure altitude on this day) and values at or above 18 000 ft flight levels. The export applies that rule, which is ASSUMED, UNCONFIRMED (an inference from this comparison, not a statement of the feed and not in the specification, which only defines the QNH bit of I062/135 as 0 no QNH correction applied, 1 QNH correction applied, and I062/136 as the measured flight level): at or above 18 000 ft the value is I136, below it I135 with QNH = 1.\n");
         let _ = writeln!(o, "ERAM duplicates: samples are compared on latitude, longitude, altitude, velocity east and north and the coast flag; a sample with the same flight, position time and those six values as an earlier one is a duplicate and is dropped (a row differing only in receive time is a duplicate). Same flight and position time with any difference are both kept and counted.\n");
     }
     match mode {
@@ -416,8 +438,8 @@ fn dedup_text(c: &ClipInfo, mode: Option<InputsMode>) -> String {
         "off (--inputs all)"
     };
     format!(
-        "ADS-B reports before the tracker: the clip's reports go through the same function the scorer's split uses, oa-track's split_reports_with, with the halving {halving}. It removes copies (a report with the address, time and content of one already kept), puts the quality fields through the same carry-forward handling, and keeps every report of different content at one (address, time): the conflict rule is KEEP ALL such reports (in one fixed order), also with the halving off, because nothing says which one is right. Counts: {} reports read, {} aircraft, {} duplicate reports removed, {} conflicting (address, time) groups holding {} reports, {} unreadable rows left out; {} reports offered to the tracker's adapter and to adsb.ast, {} not offered.",
-        st.rows_in, st.aircraft, st.duplicates_removed, st.conflict_groups, st.conflict_rows, st.rows_invalid, c.offered, c.not_offered
+        "ADS-B reports before the tracker: the clip's reports go through the same function the scorer's split uses, oa-track's split_reports_with, with the halving {halving}. It removes copies by the scorer's key (a report with the address, time, position, altitudes, vertical rate, ground speed, track, squawk, flags, source, category, NIC, NACp, NACv, SIL, SIL type and MOPS version of one already kept; the callsign, NIC_baro, SDA and GVA are not in that key, so two reports that differ only in those count as copies for the tracker), puts the quality fields through the same carry-forward handling, and keeps every report of different content at one (address, time): the conflict rule is KEEP ALL such reports (in one fixed order), also with the halving off, because nothing says which one is right. Counts: {} reports read, {} aircraft, {} duplicate reports removed, {} conflicting (address, time) groups holding {} reports, {} unreadable rows left out; {} reports offered to the tracker's adapter, {} not offered. adsb.ast removes copies by its own, finer key, which adds NIC_baro, SDA and GVA to the scorer's (the file writes them; the callsign is still not part of it): two reports that differ only in those are both in the file, and {} reports remained for the file after that copy removal (never fewer than the tracker was offered).",
+        st.rows_in, st.aircraft, st.duplicates_removed, st.conflict_groups, st.conflict_rows, st.rows_invalid, c.offered, c.not_offered, c.file_offered
     )
 }
 
@@ -497,7 +519,7 @@ fn adsb_day_lines(out: &mut String, d: &AdsbDayReport, clip: Option<&ClipInfo>) 
         less(n(ANOTE_CATEGORY_ABSENT) + n(ANOTE_CATEGORY_NO_CODE)),
     );
     item(
-        "I090 quality indicators (in every record; the extensions only when a bit in them is 1)",
+        "I090 quality indicators (primary subfield in every record; each extension only while all its fields are known, counted below)",
         rows,
     );
     item(
@@ -528,22 +550,20 @@ fn adsb_day_lines(out: &mut String, d: &AdsbDayReport, clip: Option<&ClipInfo>) 
 }
 
 /// How the ADS-B file's values were made and what it is (README lines).
-const ADSB_BASIS: [&str; 9] = [
+const ADSB_BASIS: [&str; 7] = [
     "Time: I073 is the report's own time, when the receiver network stamped it (1/128 s, rounded to nearest, error at most 1/256 s). The source has no avionics time of applicability (I071) and no separate reception time for velocity (I075).",
     "Position: I131, 180/2^30 degrees, from the 1e-7 degree of the source; a longitude of +180 is written as -180.",
     "Altitude: I145 is the barometric (pressure) altitude of the report in 1/4 FL (25 ft steps, rounding at most 12.5 ft); I140 is the geometric height in 6.25 ft steps. Neither is clipped: a value outside the item's range is omitted and counted.",
-    "I040: ATP is 0 for an ICAO address and 3 (anonymous) for a non-ICAO one; Ed 2.4 does not say how to code the latter, and the Ed 2.7 note recommends 3. ARC is 2 (unknown), CL is 2 (no information), and DCR, SIM, TST, SAA, RC and RAB are the specification's default 0 because the source has none of them.",
-    "I090 and I210: values are those of the report after the scorer's quality handling, which carries the last known NIC, NACp, NACv, SIL and version forward within an aircraft's sequence; a field the aircraft never sent is written 0, the code for unknown. Defaults written because the format has no absent value: NICBARO is not in the source and Ed 2.4 has no unknown code for it, so it is written 0 (in ED-102A/DO-260B: barometric altitude not cross-checked, the conservative value); I210 LTT is written 0 (other, claiming neither 1090 ES, UAT nor VDL 4) because the source does not say which link carried the report; SILS, when the report has no SIL type, is written 0 (per flight-hour, the default; the bit has no unknown code); DCR, SIM, TST, SAA, RC, RAB are written 0, the specification's defaults. PIC is omitted (the extension is optional). NACv and NIC are to be read with the version in I210.",
-    "Source filter: only reports of ADS-B source types (adsb_icao, adsb_icao_nt, adsb_other; or a clip without a source column) are written; other source types and positions the source marks stale are left out and counted.",
-    "I040 GBS is written from the report's ground flag: 1 when the source says ground, 0 otherwise. The source sets the flag only when it says ground, so a 0 asserts \"not on ground\" without the source saying so. I160 is the airborne vector (5.2.30) and is omitted for a report on the ground.",
-    "NIC under MOPS version 2: Ed 2.4 says version 2 NIC values shall be mapped accordingly to the primary subfield; no mapping table is in the documents held, so the raw NIC is written and that mapping is UNVERIFIED. NIC and NACp above 11 and NACv above 4 are not encoded.",
-    "Where a field is written 0 because the report lacks it: 0 means unknown for NIC, NACp, NACv, SIL, SDA and GVA according to the MOPS (ED-102A/DO-260B), not according to Ed 2.4 itself, which gives these items no value text; for NICBARO (0 = not cross-checked), SILS (0 = per flight-hour), LTT (0 = other) and the I040 bits the format has no unknown code and the 0 is a claim, counted above.",
+    "I040: ATP is 0 for an ICAO address and 3 (anonymous) for a non-ICAO one; Ed 2.4 does not say how to code the latter, and the Ed 2.7 note recommends 3. GBS comes from the data: 1 when the report says ground, 0 when it carries an altitude (so it is airborne: an INFERENCE from readsb, which prints an altitude for airborne reports and \"ground\" on the ground); a report with neither has GBS written 0 because the item has no unknown value, and is counted as \"ground state unknown\". ARC (2, unknown), CL (2, no information) and DCR, SIM, TST, SAA, RC and RAB (0) are DEFAULTS the format forces, not facts about the target: the source has none of them. I160 is the airborne vector (5.2.30) and is omitted for a report on the ground.",
+    "I090 is in every record. Ed 2.4 5.2.16 (I021/090 Quality Indicators), Encoding Rule, quoted from the specification text used (EUROCONTROL-SPEC-0149-12, Ed 2.4, p. 29): \"This item shall be present in every ASTERIX record. Extensions are sent only if at least 1 bit is set to \u{201c}1\u{201d}.\" Its primary subfield is therefore always written. An unknown NACv or NIC is written as the code 0, which the ADS-B MOPS defines as unknown (NACv 0: unknown or 10 m/s or more; NIC 0: Rc unknown); each case is counted (NACv unknown, NIC unknown). NIC is readsb's own value (it already folds in the NIC supplements) and is written as NUCp/NIC. Under MOPS version 2, Ed 2.4 says version 2 NIC values shall be mapped accordingly for readers of the primary subfield and gives no table: readsb's value is written unchanged, that mapping is UNVERIFIED, and every such row is counted. readsb's nic is a NIC, not a NUCp, so for MOPS version 0 the NUCp is written 0 (unknown), counted as \"version 0, NUCp not available\", and under MOPS version 0 the field before it is a NUCr, which the source does not have, so it is written 0 whatever the report's NACv holds and counted as \"version 0, NUCr not available\" (not as an unknown NACv); a version 0 row is never mapped through the NUCp column of the PIC table. Beyond the primary subfield no zero stands in for a missing value: each extension is written only while every field in it is known (first NICBARO, SIL and NACp; second SILS, SDA and GVA; third PIC); the chain stops at the first extension with an unknown field and the rows cut short are counted per extension. NICBARO is read from the clip's NIC_baro column; a clip written before that column existed carries none, so no row of such a clip has the first extension, or any after it, and no PIC is written. PIC is taken from NIC and the MOPS version (1 or 2) by the Ed 2.4 conversion table (NIC 6 gives none) and written when the chain reaches it; rows for which it cannot be taken are counted. An extension whose fields are all known and all 0 is not sent (5.2.16: extensions are sent only if at least one bit is 1), so a decoder cannot tell a known 0 from an extension not sent. NIC and NACp above 11 and NACv above 4 are not encoded and count as unknown. The values are those of the report after the scorer's quality handling, which carries the last known NIC, NACp, NACv, SIL and version forward within an aircraft's sequence; NIC_baro, SIL type, SDA and GVA are the report's own, as readsb printed them on that row.",
+    "I210: VN is the report's MOPS version, 0 to 2. LTT comes from the source type: adsb_icao and adsb_icao_nt are written 2 (1090 ES), which is ASSUMED from the source type and not proven (such a report can come through a UAT-to-ES converter); a UAT source would be 1 (the source types of the clip have none). A clip without the source type column, or the type adsb_other (it does not say which link), is written LTT 0 (other, because the item has no unknown code) and counted.",
+    "Source filter: only reports of the source types adsb_icao, adsb_icao_nt and adsb_other (or a clip without a source column) are written as CAT021. MLAT, TIS-B, ADS-R and every other source type are not ADS-B reports: they are not written and are counted by source type. Positions the source marks stale are left out and counted. The run totals below reconcile the reports offered with stale, not ADS-B, written and refused.",
 ];
 
 /// The relation between `adsb.ast` and what the tracker's adapter was offered.
 fn tracker_relation(clip: Option<&ClipInfo>, written: u64) -> String {
     let mut t = format!(
-        "RELATION TO THE TRACKER'S INPUT: adsb.ast holds the reports after the duplicate removal above, minus those left out here (positions marked stale, source types that are not ADS-B, impossible positions): {written} reports on this day. It is NOT the set the tracker used. The tracker's own adapter (oa-truth's quality gates, run by oa-track) also drops reports below its quality gates (NACp >= {}, NIC >= {}, SIL = {}, MOPS version >= {}) and leaves out TIS-B, ADS-R and MLAT reports and stale rows too, so adsb.ast is a superset of the reports the tracker used.",
+        "RELATION TO THE TRACKER'S INPUT: adsb.ast holds the reports after its own duplicate removal (the finer key above), minus those left out here (positions marked stale, source types that are not ADS-B, impossible positions): {written} reports on this day. It is NOT the set the tracker used. The tracker's own adapter (oa-truth's quality gates, run by oa-track) also drops reports below its quality gates (NACp >= {}, NIC >= {}, SIL = {}, MOPS version >= {}) and leaves out TIS-B, ADS-R and MLAT reports and stale rows too, so adsb.ast is a superset of the reports the tracker used.",
         oa_track::adsb::AdsbConfig::default().gates.min_nacp,
         oa_track::adsb::AdsbConfig::default().gates.min_nic,
         oa_track::adsb::AdsbConfig::default().gates.required_sil,
@@ -589,6 +609,9 @@ fn adsb_run_lines(out: &mut String, report: &AdsbReport) {
     }
     for (label, v) in &report.counts {
         let _ = writeln!(out, "    {label}: {v}");
+    }
+    for l in &report.lines {
+        let _ = writeln!(out, "    {l}");
     }
 }
 

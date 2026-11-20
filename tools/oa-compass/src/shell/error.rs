@@ -46,7 +46,7 @@ impl fmt::Display for ExportError {
             ),
             ExportError::TrackNumbers { system, day } => write!(
                 f,
-                "{system}: more than 65535 distinct tracks on {day}; the 16-bit track number cannot hold them"
+                "{system}: more than 65535 track segments (including restarts) on {day}; the 16-bit track number cannot hold them"
             ),
             ExportError::CrossesMidnight {
                 system,

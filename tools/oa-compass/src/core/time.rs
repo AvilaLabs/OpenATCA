@@ -41,6 +41,15 @@ pub fn day_time_of_ns(t_ns: i64) -> Option<DayTime> {
     })
 }
 
+/// Whether the instant `t_ns` is on UTC day `day` by its raw time (floor division) or by its
+/// rounded time ([`day_time_of_ns`], the day an exported row is filed under): a time within 1/256 s
+/// before midnight is on the day before by its raw time and on the day after once rounded, and
+/// both count.
+pub fn touches_day(t_ns: i64, day: i64) -> bool {
+    floor_div(t_ns, 86_400_000_000_000).0 == day
+        || day_time_of_ns(t_ns).is_some_and(|d| d.day == day)
+}
+
 /// Days since 1970-01-01 of the civil date, `None` unless the date exists in the proleptic
 /// Gregorian calendar (year 1 to 9999).
 pub fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
