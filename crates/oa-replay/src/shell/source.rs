@@ -98,6 +98,7 @@ pub fn list_recordings(dir: &Path) -> io::Result<Vec<PathBuf>> {
     // The sealed hold-out guard sees the directory, and every entry before it is stat-ed.
     oa_sealed::refuse_io(dir)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?;
+    // seal-allow: the directory is refused by the guard above and each entry is checked before it is opened
     for e in std::fs::read_dir(dir)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?
     {

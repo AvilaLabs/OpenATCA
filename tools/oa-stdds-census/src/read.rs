@@ -203,6 +203,7 @@ fn collect(
     // Every directory is checked before it is listed, the given one and each below it.
     refuse_sealed(g, dir).map_err(ReadError::Refused)?;
     let fail = |e: std::io::Error| ReadError::Failed(format!("cannot list the directory: {e}"));
+    // seal-allow: every directory is checked by refuse_sealed above, before it is listed
     for e in std::fs::read_dir(dir).map_err(fail)? {
         let e = e.map_err(fail)?;
         let p = e.path();

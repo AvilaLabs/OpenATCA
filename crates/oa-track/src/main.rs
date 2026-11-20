@@ -212,6 +212,7 @@ impl Clock for SystemClock {
 
 /// `(VmRSS, VmHWM)` of this process in kB, from `/proc/self/status` (None where it is absent).
 fn rss_kb() -> Option<(u64, u64)> {
+    // seal-allow: /proc, not an input
     let s = fs::read_to_string("/proc/self/status").ok()?;
     let get = |k: &str| {
         s.lines()
@@ -756,6 +757,7 @@ struct CanonOut {
 /// thread, which is the whole run: it is one thread), or `/proc/self/stat`'s ticks (10 ms each; the
 /// whole process) where the first is absent.
 fn cpu_ns() -> Option<(u64, &'static str)> {
+    // seal-allow: /proc, not an input
     if let Some(v) = fs::read_to_string("/proc/self/schedstat")
         .ok()
         .and_then(|s| s.split_whitespace().next()?.parse::<u64>().ok())
@@ -763,6 +765,7 @@ fn cpu_ns() -> Option<(u64, &'static str)> {
     {
         return Some((v, "/proc/self/schedstat (main thread)"));
     }
+    // seal-allow: /proc, not an input
     let s = fs::read_to_string("/proc/self/stat").ok()?;
     let rest = s.get(s.rfind(')')? + 2..)?;
     let f: Vec<&str> = rest.split_whitespace().collect();

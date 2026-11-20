@@ -38,13 +38,21 @@ class SealedGuardTests(unittest.TestCase):
 
     # REQ: OA-SEAL-001
     def test_the_list_parses_to_the_sealed_entries(self):
-        root, entries = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
+        root, entries, windows = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
         self.assertEqual([e[0] for e in entries], [
             "scds/rec-20261119/day2*", "scds/rec-20261119/day3*", "scds/rec-20261119/day4*",
-            "scds/rec-20261119/runs*", "scds/stdds-20261119-holdout", "scds/stdds-smoke-20261119*",
-            "raw/adsblol/2026.11.20", "raw/adsblol/2026.11.21", "raw/adsblol/2026.11.22"])
+            "scds/rec-20261119/runs*", "scds/stdds-20261119-holdout*", "scds/stdds-smoke-20261119*",
+            "raw/adsblol/2026.11.20*", "raw/adsblol/2026.11.21*", "raw/adsblol/2026.11.22*",
+            "raw/adsblol/v2026.11.20*", "raw/adsblol/v2026.11.21*", "raw/adsblol/v2026.11.22*",
+            "derived/*2026.11.20*", "derived/*2026.11.21*", "derived/*2026.11.22*"])
+        self.assertEqual([w[0] for w in windows], ["2026-11-20T00:00:00Z 2026-11-23T00:17:00Z"])
         for bad in ("", "root /d\n", "seal a/b\n", "root /d\nseal a/../b\n", "root d\nseal a\n",
-                    "root /d\nseal *\n", "root /d\nfoo bar\n"):
+                    "root /d\nseal *\n", "root /d\nfoo bar\n", "root /d\nseal **\n", "root /d\nseal a/*x\n",
+                    "root /d\nseal a*/b\n", "root /d\nseal a\nwindow 2026-11-20T00:00:00Z\n",
+                    "root /d\nseal a\nwindow 2026-11-20T00:00:00Z 2026-11-20T00:00:00Z\n",
+                    "root /d\nseal a\nwindow 2026-11-21T00:00:00Z 2026-11-20T00:00:00Z\n",
+                    "root /d\nseal a\nwindow 2026-02-29T00:00:00Z 2026-03-01T00:00:00Z\n",
+                    "root /d\nseal a\nwindow 2026-11-20 2026-11-21\n"):
             with self.assertRaises(ValueError):
                 sealed_guard.parse_list(bad)
         broken = sealed_guard.Guard(text="garbage")
@@ -60,6 +68,60 @@ class SealedGuardTests(unittest.TestCase):
                   "/data/rec-20261119",
                   "/data/scds/x/rec-20261119", "/data/scds/stdds-smoke-20261118T1"):
             self.g.check(p)
+
+    # REQ: OA-SEAL-010, OA-SEAL-002
+    def test_every_sealed_adsb_day_in_both_name_forms_and_derived_clips_and_the_stdds_prefix_are_sealed(self):
+        for p in ("/data/raw/adsblol/2026.11.20", "/data/raw/adsblol/2026.11.21/v2026.11.21-planes-readsb-prod-0.tar.aa",
+                  "/data/raw/adsblol/2026.11.22/x.oaf", "/data/raw/adsblol/v2026.11.20-x.tar.aa",
+                  "/data/raw/adsblol/v2026.11.22-planes-readsb-prod-0.tar.aa", "/data/raw/adsblol/2026.11.21.bak",
+                  "/data/derived/adsb/zau-2026.11.21-1s.oaf", "/data/derived/zau-2026.11.20.oaf",
+                  "/data/derived/adsb/2026.11.22/zau.oaf", "/data/scds/stdds-20261119-holdout.tar",
+                  "/data/scds/stdds-20261119-holdout.bak", "/data/scds/stdds-20261119-holdout-copy/x"):
+            self.refused(p)
+        for p in ("/data/raw/adsblol/2026.11.24", "/data/raw/adsblol/2026.11.19/x.oaf",
+                  "/data/raw/adsblol/v2026.11.24-planes-readsb-prod-0.tar.aa", "/data/raw/adsblol", "/data/derived",
+                  "/data/derived/adsb", "/data/derived/adsb/zau-2026.11.14.oaf", "/data/derived/adsb/zau-2026.11.2.oaf",
+                  "/data/scds/stdds-20261119", "/data/scds/stdds-2026111"):
+            self.g.check(p)
+
+    # REQ: OA-SEAL-011, OA-SEAL-001
+    def test_the_window_is_half_open_and_parses_like_the_rust_one(self):
+        _, _, windows = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
+        self.assertEqual(windows[0][1:], (1_795_132_800_000_000_000, 1_795_393_020_000_000_000))
+        lo, hi = windows[0][1:]
+        for t, sealed in ((lo - 1, False), (lo, True), (hi - 1, True), (hi, False), (0, False)):
+            self.assertEqual(self.g.in_window(t), sealed, t)
+            self.assertEqual(sealed_guard.in_sealed_window(t), sealed, t)
+        self.assertTrue(sealed_guard.Guard(text="garbage").in_window(0))
+        two = ("root /d\nseal a\nwindow 2024-02-29T00:00:00Z 2024-03-01T00:00:00Z\n"
+               "window 1970-01-01T00:00:01Z 1970-01-01T00:00:02Z\n")
+        _, _, w2 = sealed_guard.parse_list(two)
+        self.assertEqual((w2[0][1], w2[1][1]), (1_709_164_800_000_000_000, 1_000_000_000))
+        self.assertTrue(sealed_guard.dump(two).endswith("window 1970-01-01T00:00:01Z 1970-01-01T00:00:02Z\n"))
+
+    # REQ: OA-SEAL-012, OA-SEAL-003
+    def test_walk_unsealed_skips_and_counts_sealed_entries(self):
+        adsb = self.root / "raw/adsblol"
+        for d in ("2026.11.19", "2026.11.20", "2026.11.24"):
+            (adsb / d).mkdir(parents=True)
+            (adsb / d / "a.oaf").write_bytes(b"x")
+        (adsb / "v2026.11.21-x.tar.aa").write_bytes(b"x")
+        (adsb / "v2026.11.23-x.tar.aa").write_bytes(b"x")
+        files, skipped = self.g.walk_unsealed(adsb)
+        self.assertEqual([os.path.relpath(f, adsb) for f in files],
+                         ["2026.11.19/a.oaf", "2026.11.24/a.oaf", "v2026.11.23-x.tar.aa"])
+        self.assertEqual(skipped, 2)
+        os.symlink(self.root / "scds/rec-20261119/day2", adsb / "2026.11.30")
+        files, skipped = self.g.walk_unsealed(adsb)
+        self.assertEqual((len(files), skipped), (3, 3))
+        with self.assertRaises(sealed_guard.SealedError):
+            self.g.walk_unsealed(adsb / "2026.11.20")
+        # The data root holds sealed entries: it is walked, and they are skipped and counted.
+        files, skipped = self.g.walk_unsealed(self.root)
+        self.assertGreaterEqual(skipped, 6)
+        self.assertIn(str(self.root / "scds/day-20261118/rec/b.bin"), files)
+        for f in files:
+            self.g.check(f)
 
     # REQ: OA-SEAL-009, OA-SEAL-001, OA-SEAL-002
     def test_only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed(self):
@@ -275,6 +337,61 @@ class SealedGuardTests(unittest.TestCase):
             self.assertIn("OA-SEAL-001", r.stderr, tool)
         self.assertEqual(list(self.base.glob("o.json")) + list(self.base.glob("gate")) + list(self.base.glob("run")), [])
 
+    # REQ: OA-SEAL-012, OA-SEAL-003
+    def test_make_corpora_skips_sealed_directories_and_reads_through_the_guard(self):
+        import gzip
+        import io
+        import shutil
+        import tarfile
+        here = Path(__file__).resolve().parent
+        repo = here.parent
+        copy = self.base / "repo"
+        (copy / "fuzz").mkdir(parents=True)
+        (copy / "tools").mkdir()
+        (copy / "crates/oa-sealed").mkdir(parents=True)
+        shutil.copy(repo / "fuzz/make_corpora.py", copy / "fuzz")
+        shutil.copy(here / "sealed_guard.py", copy / "tools")
+        shutil.copy(repo / "crates/oa-sealed/sealed_paths.txt", copy / "crates/oa-sealed")
+        shutil.copytree(repo / "crates/oa-arinc424/tests/fixtures", copy / "crates/oa-arinc424/tests/fixtures")
+        (copy / "crates/oa-notam/tests/common").mkdir(parents=True)
+        shutil.copy(repo / "crates/oa-notam/tests/common/mod.rs", copy / "crates/oa-notam/tests/common")
+        data = self.base / "mkdata"
+        for f in ("cat048.raw", "cat062cat065.raw", "cat21_re.ast"):
+            (data / "raw/asterix-samples").mkdir(parents=True, exist_ok=True)
+            (data / "raw/asterix-samples" / f).write_bytes(b"")
+
+        (data / "raw/nasr-2026-10-29/x").mkdir(parents=True)
+        for name in ("STAR_BASE", "STAR_APT", "STAR_RTE", "DP_BASE", "DP_APT", "DP_RTE", "AWY_BASE", "AWY_SEG_ALT"):
+            (data / f"raw/nasr-2026-10-29/x/{name}.csv").write_bytes(b"A,B\n1,2\n")
+
+        def part(day, name):
+            bio = io.BytesIO()
+            with tarfile.open(fileobj=bio, mode="w") as t:
+                body = gzip.compress(b'{"day": "%s"}' % name.encode())
+                ti = tarfile.TarInfo(f"traces/{name}.json")
+                ti.size = len(body)
+                t.addfile(ti, io.BytesIO(body))
+            d = data / "raw/adsblol" / day
+            d.mkdir(parents=True)
+            (d / f"v{day}-planes-readsb-prod-0.tar.aa").write_bytes(bio.getvalue())
+
+        part("2026.11.19", "open-day")
+        part("2026.11.21", "sealed-day")
+        env = dict(os.environ, OPENATCA_DATA=str(data))
+        r = subprocess.run([sys.executable, "-I", str(copy / "fuzz/make_corpora.py")], env=env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("traces 1", r.stdout)
+        self.assertIn("sealed entries skipped: 1", r.stdout)
+        corpus = b"".join(f.read_bytes() for f in (data / "fuzz/adsb-trace/corpus").iterdir())
+        self.assertIn(b"open-day", corpus)
+        self.assertNotIn(b"sealed-day", corpus)
+        # Every read goes through the guard: no bare open of an input remains in the script.
+        src = (repo / "fuzz/make_corpora.py").read_text()
+        self.assertNotIn("'rb').read()", src)
+        self.assertNotIn("glob.glob(", src.replace("for p in glob.glob(pattern):", ""))
+        self.assertIn("sealed_guard.open_read", src)
+
     # REQ: OA-SEAL-008
     def test_odd_list_files_are_refused_by_the_python_parser(self):
         for bad in ("root /d\nseal a\tb\n", "root /d\r\nseal a\n", "root  /d\nseal a\n", "root /d\nseal a \n",
@@ -283,6 +400,7 @@ class SealedGuardTests(unittest.TestCase):
             with self.assertRaises(ValueError, msg=repr(bad)):
                 sealed_guard.parse_list(bad)
         sealed_guard.parse_list("# any printable ~!@ in a comment\nroot /d\nseal a/b*")
+        sealed_guard.parse_list("root /d\nseal a/*b*\nwindow 2026-11-20T00:00:00Z 2026-11-21T00:00:00Z")
 
 
 if __name__ == "__main__":

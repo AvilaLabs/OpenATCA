@@ -18,20 +18,20 @@ use oa_xml::Parser;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-fn collect(dir: &Path, in_fns: bool, out: &mut Vec<PathBuf>) {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    entries.sort();
-    for p in entries {
-        if p.is_dir() {
-            let name = p.file_name().unwrap().to_string_lossy().into_owned();
-            collect(&p, in_fns || name.starts_with("fns"), out);
-        } else if in_fns && p.extension().is_some_and(|e| e == "msg") {
-            out.push(p);
-        }
-    }
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+    // Sealed directories are skipped and counted, never descended into (OA-SEAL-012).
+    let walk = oa_sealed::walk_unsealed(dir).unwrap();
+    eprintln!("sealed entries skipped: {}", walk.skipped);
+    out.extend(walk.files.into_iter().filter(|p| {
+        p.extension().is_some_and(|e| e == "msg")
+            && p.strip_prefix(dir)
+                .ok()
+                .and_then(Path::parent)
+                .is_some_and(|q| {
+                    q.components()
+                        .any(|c| c.as_os_str().to_string_lossy().starts_with("fns"))
+                })
+    }));
 }
 
 fn corpus() -> Option<Vec<Vec<u8>>> {
@@ -40,7 +40,7 @@ fn corpus() -> Option<Vec<Vec<u8>>> {
         return None;
     };
     let mut files = Vec::new();
-    collect(Path::new(&dir), false, &mut files);
+    collect(Path::new(&dir), &mut files);
     if files.is_empty() {
         eprintln!(
             "no fns*/ *.msg files under {}: skipping",
@@ -48,7 +48,7 @@ fn corpus() -> Option<Vec<Vec<u8>>> {
         );
         return None;
     }
-    Some(files.iter().map(|f| std::fs::read(f).unwrap()).collect())
+    Some(files.iter().map(|f| oa_sealed::read(f).unwrap()).collect())
 }
 
 fn decode_all(
@@ -200,7 +200,7 @@ fn real_locations_and_polygons_resolve_against_the_model() {
         eprintln!("OPENATCA_SNAPSHOT is not set: skipping the model cross-check");
         return;
     };
-    let model = oa_airspace::snapshot::decode(&std::fs::read(snap).unwrap()).unwrap();
+    let model = oa_airspace::snapshot::decode(&oa_sealed::read(snap).unwrap()).unwrap();
     let mut rows = default_notams();
     let mut dec = new_decoder(Limits::default());
     let mut stats = new_stats(256);

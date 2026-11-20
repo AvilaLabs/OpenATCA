@@ -10,8 +10,6 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-
-[dev-dependencies]
 oa-sealed = { path = "../oa-sealed" }
 
 [package.metadata.openatca]

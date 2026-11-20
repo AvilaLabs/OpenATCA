@@ -451,17 +451,20 @@ fn real_day_archive_first_part() {
         return;
     };
     let dir = PathBuf::from(root).join("raw/adsblol");
-    let part = std::fs::read_dir(&dir).ok().and_then(|rd| {
-        let mut v: Vec<PathBuf> = rd
-            .filter_map(Result::ok)
-            .map(|e| e.path())
+    // Only unsealed days are considered: a sealed day directory or part is skipped and counted,
+    // never opened (OA-SEAL-012), and none left means the test skips.
+    let part = oa_sealed::walk_unsealed(&dir).ok().and_then(|w| {
+        eprintln!("sealed entries skipped: {}", w.skipped);
+        let mut v: Vec<PathBuf> = w
+            .files
+            .into_iter()
             .filter(|p| p.to_string_lossy().ends_with(".tar.aa"))
             .collect();
         v.sort();
         v.pop()
     });
     let Some(part) = part else {
-        eprintln!("skip: no *.tar.aa under {}", dir.display());
+        eprintln!("skip: no unsealed *.tar.aa under {}", dir.display());
         return;
     };
     // The whole 2 GB part takes minutes without optimisation; by default read a prefix.
@@ -471,7 +474,7 @@ fn real_day_archive_first_part() {
     } else {
         8 * 1024 * 1024
     };
-    let f = std::fs::File::open(&part).unwrap().take(limit);
+    let f = oa_sealed::open(&part).unwrap().take(limit);
     let mut all = Reports::default();
     let res = scan_archive(
         vec![std::io::BufReader::new(f)],

@@ -5592,8 +5592,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
-- **OA-SEAL-001** The sealed hold-out data is listed once, in `crates/oa-sealed/sealed_paths.txt` (the data root and the entries
-  `scds/rec-20261119/day2`, `day3`, `day4`, `runs*`, `scds/stdds-20261119-holdout`, `scds/stdds-smoke-20261119*`); the Rust guard compiles the file in and
+- **OA-SEAL-001** The sealed hold-out data is listed once, in `crates/oa-sealed/sealed_paths.txt` (the data root, the entries
+  `scds/rec-20261119/day2`, `day3`, `day4`, `runs*`, `scds/stdds-20261119-holdout*`, `scds/stdds-smoke-20261119*`, the ADS-B days and derived clips of OA-SEAL-010, and the windows of OA-SEAL-011); the Rust guard compiles the file in and
   the Python guard reads it, and both parse it to the same set. A list that does not parse refuses every path.
 - **OA-SEAL-002** A path is resolved before it is checked (relative paths, `..`, every link, a symlinked parent directory, a
   path not yet created through its nearest existing ancestor) and is refused, with a message that names the rule, if it is,
@@ -5610,7 +5610,9 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   track_set_score.py, replay_compare.sh and p002_build.sh.
 - **OA-SEAL-006** Every bin and example target of the workspace, found from the manifests and the source layout, uses the
   sealed guard or is listed with a reason in `crates/oa-sealed/exempt_targets.txt`; a target with neither, a listed target
-  that does not exist, and a listed target that uses the guard all fail the test.
+  that does not exist, and a listed target that uses the guard all fail the test. In the sources of every crate with a
+  target that is not exempt, and in the library openers (oa-zip, oa-nasr, oa-dof, oa-tiff), a bare `File::open`, `fs::read`,
+  `fs::read_to_string` or `fs::read_dir` fails the test unless its line, or the line before, carries `// seal-allow: <why>`.
 - **OA-SEAL-007** The guard opens a file and then checks the real path of the opened descriptor (`/proc/self/fd`), so a
   link swapped in after the path check is caught and the file closed; the loaders of `oa-bench` and `oa-replay` run the
   guard before they stat a listed entry, and every guarded opener is this one function.
@@ -5624,3 +5626,21 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `scds`. A path through `..` or a link into day2 to day4 is refused, and so is a copy that keeps the components
   `scds/rec-20261119/day2` (or day3, day4, runs); a copy renamed outside those components is not caught by any path rule. Tests: `only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed` (Rust,
   `crates/oa-sealed/tests/guard.rs`; Python, `tools/test_sealed_guard.py`).
+- **OA-SEAL-010** The list seals each ADS-B day 2026.11.20 to 2026.11.22 in both name forms as name prefixes under `raw/adsblol`
+  (`2026.11.20*`, `v2026.11.20*`: the day directory, its parts `v2026.11.20-planes-readsb-prod-0.tar.aa` and any renamed or
+  partial copy), any name below `derived` that contains a sealed day (`derived/*2026.11.21*`, written `*X*`: matched
+  against every component at or below the directory part), and `scds/stdds-20261119-holdout*` (so `.tar`, `.bak` and `-copy`
+  variants are sealed). Near misses are accepted: `2026.11.24`, `v2026.11.24-...`, `derived/adsb/zau-2026.11.14.oaf`,
+  `stdds-20261119`. A directory that only holds a substring entry is not a holding directory. Tests:
+  `every_sealed_adsb_day_in_both_name_forms_and_derived_clips_and_the_stdds_prefix_are_sealed` (Rust and Python).
+- **OA-SEAL-011** The list holds `window <from-UTC> <to-UTC>` lines (`YYYY-MM-DDTHH:MM:SSZ`, half-open, from before to):
+  every row or frame whose time falls in one is sealed whichever file holds it. `oa_sealed::in_sealed_window(unix_ns)` and
+  `sealed_windows()` expose them, `sealed_guard.in_sealed_window` and `Guard.windows` do the same in Python, and both
+  parsers read the lines to the same set and refuse a malformed or empty window. The list has
+  `window 2026-11-20T00:00:00Z 2026-11-23T00:17:00Z` (the three ADS-B days and hold-out days A to C of the four-day recording).
+- **OA-SEAL-012** A test or tool that walks a directory uses `oa_sealed::walk_unsealed` (Python `Guard.walk_unsealed`): a
+  directory or file the guard refuses is skipped and counted, never descended into or opened, a directory that only holds a
+  sealed entry (the data root, `raw/adsblol`) is walked, and a sealed walk root is an error. `oa_sealed::read` and
+  `read_to_string` read through the guard's opener. `fuzz/make_corpora.py` reads and globs through the guard.
+- **OA-SEAL-013** Every library function that takes a path and opens it for reading opens it through the guard: `oa_zip::read_archive_file`,
+  `oa_nasr::open`, `oa_dof::read_file`, `oa_tiff::read_file` and the `oa-replay-diff` file readers; a sealed path is an I/O error that names OA-SEAL-001.

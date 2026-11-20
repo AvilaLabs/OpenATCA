@@ -36,7 +36,7 @@ fn a_real_zau_snapshot_renders_the_map_and_reports_frame_time() {
         eprintln!("OPENATCA_SNAPSHOT is not set; skipping real-data test");
         return;
     };
-    let bytes = std::fs::read(&path).unwrap();
+    let bytes = oa_sealed::read(std::path::Path::new(&path)).unwrap();
     let model = decode(&bytes).unwrap();
     validate_model(&model).unwrap();
     assert_eq!(model.meta.artcc, "ZAU");
@@ -209,7 +209,7 @@ fn a_real_zau_snapshot_fits_the_work_limits_at_8192_by_8192() {
         eprintln!("OPENATCA_SNAPSHOT is not set; skipping real-data test");
         return;
     };
-    let model = decode(&std::fs::read(&path).unwrap()).unwrap();
+    let model = decode(&oa_sealed::read(std::path::Path::new(&path)).unwrap()).unwrap();
     let spec = FrameSpec {
         width: 8192,
         height: 8192,

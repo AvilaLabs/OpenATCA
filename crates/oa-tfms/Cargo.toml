@@ -14,5 +14,8 @@ oa-xml = { path = "../oa-xml" }
 # Linkage against SFDPS rows only (src/link.rs); the decoder itself does not use it.
 oa-fixm = { path = "../oa-fixm" }
 
+[dev-dependencies]
+oa-sealed = { path = "../oa-sealed" }
+
 [package.metadata.openatca]
 class = "shell"

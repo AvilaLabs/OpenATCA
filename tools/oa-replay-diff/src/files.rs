@@ -26,7 +26,7 @@ fn read_limited(p: &Path, max: u64) -> Result<String, String> {
         return Err(format!("{name}: {len} bytes, more than the limit of {max}"));
     }
     let mut s = String::new();
-    File::open(p)
+    oa_sealed::open(p)
         .map_err(|e| format!("{name}: {e}"))?
         .take(max.saturating_add(1))
         .read_to_string(&mut s)
@@ -135,7 +135,7 @@ impl<R: Read> Iterator for RowsReader<R> {
 
 /// Opens a rows file for the digest whose total is `digest_rows`.
 pub fn open_rows(p: &Path, digest_rows: u64) -> Result<RowsReader<BufReader<File>>, String> {
-    let f = File::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let f = oa_sealed::open(p).map_err(|e| format!("{}: {e}", p.display()))?;
     RowsReader::new(BufReader::with_capacity(1 << 20, f), digest_rows)
         .map_err(|e| format!("{}: {e}", p.display()))
 }
@@ -255,5 +255,22 @@ mod tests {
         let mut ok = Vec::new();
         write_out(&mut ok, "abc").unwrap();
         assert_eq!(ok, b"abc");
+    }
+
+    // REQ: OA-SEAL-013
+    #[test]
+    fn the_file_readers_refuse_a_sealed_path() {
+        let p = Path::new("/x/scds/stdds-20261119-holdout.bak");
+        let d = std::env::temp_dir().join(format!(
+            "oa-rd-seal-{}/derived/zau-2026.11.21",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("a.txt");
+        std::fs::write(&f, "x").unwrap();
+        let e = read_limited(&f, 10).unwrap_err();
+        assert!(e.contains("OA-SEAL-001"), "{e}");
+        let e = open_rows(p, 0).err().unwrap();
+        assert!(e.contains("OA-SEAL-001"), "{e}");
     }
 }

@@ -118,6 +118,7 @@ fn main() -> ExitCode {
 
 /// A `kB` figure from `/proc/self/status` (0 where there is none): resident or peak memory.
 fn status_kb(key: &str) -> u64 {
+    // seal-allow: /proc, not an input
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {

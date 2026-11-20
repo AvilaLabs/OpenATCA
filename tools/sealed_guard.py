@@ -15,21 +15,41 @@ message naming the rule otherwise; `sealed_guard.py --dump` prints the parsed li
 """
 from __future__ import annotations
 
+import calendar
 import functools
 import os
+import re
 import sys
 from pathlib import Path
 
 LIST_PATH = Path(__file__).resolve().parent.parent / "crates" / "oa-sealed" / "sealed_paths.txt"
 MAX_LINKS = 40
+MAX_WALK_DEPTH = 64
+
+
+_UTC = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z")
 
 
 class SealedError(Exception):
     """A path is sealed (or cannot be shown not to be)."""
 
 
+def _parse_utc_ns(t: str):
+    """`YYYY-MM-DDTHH:MM:SSZ` (exactly that shape) as nanoseconds since the Unix epoch, or None."""
+    m = _UTC.fullmatch(t)
+    if not m:
+        return None
+    y, mo, d, h, mi, sec = (int(g) for g in m.groups())
+    if not 1970 <= y <= 2200 or not 1 <= mo <= 12 or d < 1 or h > 23 or mi > 59 or sec > 59:
+        return None
+    if d > calendar.monthrange(y, mo)[1]:
+        return None
+    return calendar.timegm((y, mo, d, h, mi, sec)) * 1_000_000_000
+
+
 def parse_list(text: str):
-    """Returns (root, [(entry_text, parts, is_prefix)]). Anything not understood is an error."""
+    """Returns (root, [(entry_text, parts, kind)], [(window_text, from_ns, to_ns)]); kind is
+    "exact", "prefix" (`X*`) or "contains" (`*X*`). Anything not understood is an error."""
     # Only printable ASCII and newline; a line is `word`, one space, `value` (the Rust parser
     # reads the same rules, so the two cannot read the file differently).
     for ch in text:
@@ -37,11 +57,12 @@ def parse_list(text: str):
             raise ValueError(f"byte {ord(ch):#04x}: only printable ASCII and newline are allowed")
     root = None
     entries = []
+    windows = []
     for i, line in enumerate(text.split("\n"), 1):
         if not line or line.startswith("#"):
             continue
         if " " not in line:
-            raise ValueError(f"line {i}: expected `root <path>` or `seal <path>`")
+            raise ValueError(f"line {i}: expected `root <path>`, `seal <path>` or `window <from> <to>`")
         word, value = line.split(" ", 1)
         if not value or value.startswith(" ") or value.endswith(" "):
             raise ValueError(f"line {i}: extra white space around the value")
@@ -53,19 +74,35 @@ def parse_list(text: str):
             parts = value.split("/")
             if any(p in ("", ".", "..") for p in parts):
                 raise ValueError(f"line {i}: bad sealed path")
-            prefix = parts[-1].endswith("*")
-            if prefix:
+            kind = "exact"
+            if parts[-1].endswith("*"):
                 parts[-1] = parts[-1][:-1]
-                if not parts[-1]:
-                    raise ValueError(f"line {i}: bare `*`")
-            entries.append((value, parts, prefix))
+                kind = "prefix"
+                if parts[-1].startswith("*"):
+                    parts[-1] = parts[-1][1:]
+                    kind = "contains"
+                if not parts[-1] or "*" in parts[-1]:
+                    raise ValueError(f"line {i}: bare or inner `*`")
+            elif "*" in parts[-1]:
+                raise ValueError(f"line {i}: `*` only as `X*` or `*X*`")
+            if any("*" in p for p in parts[:-1]):
+                raise ValueError(f"line {i}: `*` only in the last component")
+            entries.append((value, parts, kind))
+        elif word == "window":
+            bits = value.split(" ", 1)
+            ns = [_parse_utc_ns(b) for b in bits]
+            if len(bits) != 2 or None in ns:
+                raise ValueError(f"line {i}: expected `window <from-UTC> <to-UTC>`")
+            if ns[0] >= ns[1]:
+                raise ValueError(f"line {i}: the window is empty or reversed")
+            windows.append((value, ns[0], ns[1]))
         else:
             raise ValueError(f"line {i}: unknown word `{word}`")
     if root is None:
         raise ValueError("no root line")
     if not entries:
         raise ValueError("no seal lines")
-    return root, entries
+    return root, entries, windows
 
 
 def _list_text() -> str:
@@ -75,8 +112,9 @@ def _list_text() -> str:
 
 def dump(text: str | None = None) -> str:
     """The list as the Rust guard's `List::dump` prints it."""
-    root, entries = parse_list(_list_text() if text is None else text)
-    return f"root {root}\n" + "".join(f"seal {e[0]}\n" for e in entries)
+    root, entries, windows = parse_list(_list_text() if text is None else text)
+    return (f"root {root}\n" + "".join(f"seal {e[0]}\n" for e in entries)
+            + "".join(f"window {w[0]}\n" for w in windows))
 
 
 def _names(path: str) -> list[str]:
@@ -84,17 +122,18 @@ def _names(path: str) -> list[str]:
 
 
 def _matches_at(entry, names: list[str]) -> bool:
-    _, parts, prefix = entry
+    _, parts, kind = entry
     n = len(parts)
     if len(names) < n:
         return False
-    for i in range(n):
-        if i == n - 1 and prefix:
-            if not names[i].startswith(parts[i]):
-                return False
-        elif names[i] != parts[i]:
-            return False
-    return True
+    if names[: n - 1] != parts[: n - 1]:
+        return False
+    last = parts[-1]
+    if kind == "exact":
+        return names[n - 1] == last
+    if kind == "prefix":
+        return names[n - 1].startswith(last)
+    return any(last in a for a in names[n - 1:])
 
 
 def _named_in(entry, names: list[str]) -> bool:
@@ -103,7 +142,8 @@ def _named_in(entry, names: list[str]) -> bool:
 
 def _is_ancestor(entry, names: list[str]) -> bool:
     parts = entry[1]
-    return len(names) < len(parts) and parts[: len(names)] == names
+    # A substring entry seals names, not a folder: its directory part is an ordinary folder.
+    return entry[2] != "contains" and len(names) < len(parts) and parts[: len(names)] == names
 
 
 def _resolve(path: str, depth: int = 0) -> str:
@@ -141,11 +181,11 @@ class Guard:
 
     def __init__(self, text: str | None = None, root: str | os.PathLike | None = None):
         try:
-            r, self.entries = parse_list(_list_text() if text is None else text)
+            r, self.entries, self.windows = parse_list(_list_text() if text is None else text)
             self.broken = False
         except (ValueError, OSError, UnicodeError):
             # The list is unreadable: the guard fails closed and refuses every path.
-            r, self.entries, self.broken = "", [], True
+            r, self.entries, self.windows, self.broken = "", [], [], True
         if root is not None:
             r = os.fspath(root)
         try:
@@ -153,7 +193,40 @@ class Guard:
         except SealedError:
             self.root = r
 
-    def check(self, path: str | os.PathLike) -> None:
+    def in_window(self, unix_ns: int) -> bool:
+        """Whether `unix_ns` (nanoseconds since the Unix epoch, UTC) is in a sealed window
+        (half-open). A guard whose list does not parse seals every instant."""
+        return self.broken or any(w[1] <= unix_ns < w[2] for w in self.windows)
+
+    def walk_unsealed(self, root: str | os.PathLike):
+        """(files, skipped): the unsealed files below `root`, sorted; a directory or file the
+        guard refuses is skipped and counted, never descended into (a directory that only holds a
+        sealed entry, such as the data root or raw/adsblol, is walked). `root` itself refused raises
+        SealedError."""
+        self.check(root, True)
+        files: list[str] = []
+        skipped = 0
+
+        def walk(d: str, depth: int) -> None:
+            nonlocal skipped
+            if not os.path.isdir(d):
+                files.append(d)
+                return
+            if depth > MAX_WALK_DEPTH:
+                return
+            for name in sorted(os.listdir(d)):
+                p = os.path.join(d, name)
+                try:
+                    self.check(p, True)
+                except SealedError:
+                    skipped += 1
+                    continue
+                walk(p, depth + 1)
+
+        walk(os.fspath(root), 0)
+        return sorted(files), skipped
+
+    def check(self, path: str | os.PathLike, walking: bool = False) -> None:
         """Raises SealedError if `path` is, is inside, resolves into, or holds a sealed entry.
 
         The path is used exactly as given: a caller that expands `~` must do so first and then
@@ -169,9 +242,9 @@ class Guard:
             raise SealedError(
                 f"{given}: refused by OA-SEAL-001: the path cannot be resolved (a link loop, an unreadable link or a bad path)"
             ) from None
-        self._check_resolved(given, real)
+        self._check_resolved(given, real, walking)
 
-    def _check_resolved(self, given: str, real: str) -> None:
+    def _check_resolved(self, given: str, real: str, walking: bool = False) -> None:
         given_names, real_names = _names(given), _names(real)
         inside = self.root and (real == self.root or real.startswith(self.root.rstrip("/") + "/"))
         below = _names(real[len(self.root):]) if inside else None
@@ -182,7 +255,7 @@ class Guard:
                 how = "the path resolves to"
             elif below is not None and _matches_at(e, below):
                 how = "the path is inside"
-            elif below is not None and _is_ancestor(e, below):
+            elif not walking and below is not None and _is_ancestor(e, below):
                 how = "the path is a directory that holds (name something below it)"
             else:
                 continue
@@ -223,6 +296,16 @@ def production() -> Guard:
 def open_read(path, mode="r", **kw):
     """Production opener (check, open, verify the opened file)."""
     return production().open(path, mode, **kw)
+
+
+def in_sealed_window(unix_ns: int) -> bool:
+    """Production: whether `unix_ns` is in a sealed window of the list."""
+    return production().in_window(unix_ns)
+
+
+def walk_unsealed(root):
+    """Production walk: (unsealed files, count of sealed entries skipped)."""
+    return production().walk_unsealed(root)
 
 
 def refuse(*paths) -> None:

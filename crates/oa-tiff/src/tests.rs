@@ -1080,3 +1080,11 @@ fn the_fuzzer_found_offset_overflow_is_refused_not_a_panic() {
         let _ = grid_elevation_at(&g, 45.0, -90.0);
     }
 }
+
+// REQ: OA-SEAL-013
+#[test]
+fn read_file_refuses_a_sealed_path() {
+    let p = std::path::Path::new("/x/raw/adsblol/2026.11.21/a.tif");
+    let e = read_file(p).unwrap_err().to_string();
+    assert!(e.contains("OA-SEAL-001"), "{e}");
+}

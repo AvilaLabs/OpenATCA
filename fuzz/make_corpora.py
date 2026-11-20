@@ -4,14 +4,35 @@ refreshes the small synthetic seeds in fuzz/seeds/. Real data never goes into th
     python3 -I fuzz/make_corpora.py
 """
 import os, sys, struct, glob, gzip, io, zlib, tarfile, zipfile, random
+# The sealed hold-out guard (tools/sealed_guard.py); -I does not put the script's directory on the path.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
+import sealed_guard
 D = os.environ['OPENATCA_DATA']
 R = D + '/raw'
 S = D + '/scds'
 REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'seeds')
 random.seed(1)
+SEALED_SKIPPED = 0
+def gl(pattern):
+    """glob() without the sealed paths: each is skipped and counted, never opened (OA-SEAL-012)."""
+    global SEALED_SKIPPED
+    keep = []
+    for p in glob.glob(pattern):
+        try:
+            sealed_guard.production().check(p)
+        except sealed_guard.SealedError:
+            SEALED_SKIPPED += 1
+            continue
+        keep.append(p)
+    return keep
+def rb(path, mode='rb'):
+    """Whole file through the guard's opener."""
+    with sealed_guard.open_read(path, mode) as f:
+        return f.read()
 def out(target, name, data, cap=300_000):
     if len(data) > cap or len(data) == 0: return
     d = f'{D}/fuzz/{target}/corpus'
+    sealed_guard.refuse(d)
     os.makedirs(d, exist_ok=True)
     open(f'{d}/{name}', 'wb').write(data)
 def repo(target, name, data):
@@ -29,11 +50,11 @@ def blocks(buf):
         if n < 3 or i + n > len(buf): break
         yield buf[i:i+n]; i += n
 for f in ['cat048.raw', 'cat062cat065.raw', 'cat21_re.ast']:
-    b = open(f'{A}/{f}', 'rb').read()
+    b = rb(f'{A}/{f}')
     out('asterix', f'{f}-whole', b)
     for k, blk in enumerate(blocks(b)): out('asterix', f'{f}-{k}', blk)
-for f in glob.glob(A + '/*.pcap'):
-    b = open(f, 'rb').read()
+for f in gl(A + '/*.pcap'):
+    b = rb(f)
     be = b[:4] == b'\xa1\xb2\xc3\xd4'
     e = '>' if be else '<'
     i = 24; k = 0
@@ -47,12 +68,12 @@ for f in glob.glob(A + '/*.pcap'):
 
 # --- xml family from scds message dumps
 def msgs(pattern, n, maxsz=200_000):
-    fs = sorted(glob.glob(pattern))
+    fs = sorted(gl(pattern))
     random.shuffle(fs)
     c = 0
     for f in fs:
         if os.path.getsize(f) <= maxsz:
-            yield os.path.basename(f), open(f, 'rb').read(); c += 1
+            yield os.path.basename(f), rb(f); c += 1
             if c >= n: break
 for tgt, pat, n in [('tbfm', S+'/tbfm-*/*.msg', 600), ('tfms', S+'/tfms-*/*.msg', 600), ('fixm', S+'/sfdps-*/*.msg', 600)]:
     for nm, d in msgs(pat, n):
@@ -63,8 +84,8 @@ for i, x in enumerate([b'<a/>', b'<a xmlns="u"><b:c xmlns:b="v" d="&amp;&#65;"/>
     repo('xml', f'x{i}.xml', x)
 
 # --- feed frames from the recordings
-for f in glob.glob(S + '/rec/*.oaf'):
-    b = open(f, 'rb').read(); i = 0; fr = []
+for f in gl(S + '/rec/*.oaf'):
+    b = rb(f); i = 0; fr = []
     while i + 40 <= len(b):
         if b[i:i+4] != b'OAF1': break
         n = struct.unpack('<I', b[i+32:i+36])[0]
@@ -75,10 +96,15 @@ for f in glob.glob(S + '/rec/*.oaf'):
         out('feed-frame', f'{os.path.basename(f)}-run{k}', b''.join(fr[k*5:k*5+5]), 200_000)
 
 # --- adsb traces, json
-tf = glob.glob(R + '/adsblol/*.tar.aa')[0]
+# The newest part among the unsealed days (the real layout is raw/adsblol/YYYY.MM.DD/v*.tar.aa);
+# a sealed day directory is skipped and counted, never listed.
+adsb_parts, adsb_skipped = sealed_guard.walk_unsealed(R + '/adsblol') if os.path.isdir(R + '/adsblol') else ([], 0)
+SEALED_SKIPPED += adsb_skipped
+adsb_parts = sorted(p for p in adsb_parts if p.endswith('.tar.aa'))
 n = 0; tot = 0
 try:
-    with tarfile.open(tf, 'r|') as t:
+    if not adsb_parts: raise FileNotFoundError('no unsealed *.tar.aa part')
+    with tarfile.open(fileobj=sealed_guard.open_read(adsb_parts[-1], 'rb'), mode='r|') as t:
         for m in t:
             if not (m.isfile() and m.name.endswith('.json')): continue
             if m.size > 120_000: continue
@@ -93,16 +119,16 @@ try:
 except Exception as e:
     print('tar stop', e)
 print('traces', n)
-for f in glob.glob(R + '/jsontestsuite/test_parsing/*.json'):
-    out('json', 'jts-' + os.path.basename(f), open(f, 'rb').read())
+for f in gl(R + '/jsontestsuite/test_parsing/*.json'):
+    out('json', 'jts-' + os.path.basename(f), rb(f))
 # awc
 awc = {0: ['metar'], 1: ['taf'], 2: ['pirep'], 3: ['sigmet', 'isigmet'], 4: ['airsigmet'], 5: ['gairmet']}
-for f in glob.glob(R + '/awc/*/*.json'):
+for f in gl(R + '/awc/*/*.json'):
     nm = os.path.basename(f)
     for sel, keys in awc.items():
         if any(nm.startswith(k + '-') or nm.startswith(k + '_') for k in keys):
             if nm.startswith('sigmet') and sel != 3: continue
-            d = open(f, 'rb').read()
+            d = rb(f)
             out('awc', nm, bytes([sel]) + d, 1_500_000)
             out('json', 'awc-' + nm, d, 1_500_000) if len(d) < 400_000 and random.random() < .3 else None
             break
@@ -115,8 +141,8 @@ def gsplit(b):
         if n < 16 or i + n > len(b): break
         yield b[i:i+n]; i += n
 k = 0
-for f in sorted(glob.glob(R + '/grib2-testdata/*.grib2')) + sorted(glob.glob(R + '/hrrr/*')) [:0]:
-    b = open(f, 'rb').read()
+for f in sorted(gl(R + '/grib2-testdata/*.grib2')) + sorted(gl(R + '/hrrr/*')) [:0]:
+    b = rb(f)
     out('grib2', os.path.basename(f), b, 3_000_000)
     for m in gsplit(b):
         out('grib2', f'm{k}', m, 400_000)
@@ -191,7 +217,7 @@ repo('tar', 'gnu.tar', mktar(tarfile.GNU_FORMAT, ['y' * 130 + '.json']))
 NA = R + '/nasr-2026-10-29/x'
 CI = R + '/cifp-2026-10-29/x/FAACIFP18'
 OAR = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'crates')
-def rd(path): return open(path, 'rb').read()
+def rd(path): return rb(path)
 
 # csv: the first byte is the BufReader capacity (1-64), the rest is the file.
 for i, (cap, body) in enumerate([
@@ -205,7 +231,7 @@ for i, (cap, body) in enumerate([
     (64, b'"unterminated,1\n'),
 ]):
     repo('csv', f's{i}.csv', bytes([cap]) + body)
-nasr_csvs = sorted(glob.glob(NA + '/*.csv'))
+nasr_csvs = sorted(gl(NA + '/*.csv'))
 for k, f in enumerate(nasr_csvs):
     lines = rd(f).split(b'\n')
     for j in range(4):
@@ -232,7 +258,7 @@ for kind, sel0 in [('STAR', 14), ('DP', 0x8e)]:
 for k in range(20):
     n = [1, 2, 4, 8][k % 4]
     out('nasr', f'awy-{k}', bytes([8]) + head_rows('AWY_BASE', n) + b'\x0c' + head_rows('AWY_SEG_ALT', n * 2), 60_000)
-for st in sorted(glob.glob(NA + '/*_CSV_DATA_STRUCTURE.csv')):
+for st in sorted(gl(NA + '/*_CSV_DATA_STRUCTURE.csv')):
     out('nasr', 'schema-' + os.path.basename(st), bytes([15]) + rd(st), 200_000)
     base = os.path.basename(st).replace('_CSV_DATA_STRUCTURE.csv', '')
     for name in [os.path.basename(x)[:-4] for x in nasr_csvs if os.path.basename(x).startswith(base + '_') and 'STRUCTURE' not in x][:3]:
@@ -259,12 +285,12 @@ SUB = [('KORD', 'KQQA'), ('KMDW', 'KQQB'), ('KMSP', 'KQQC'), ('CHICAGO MIDWAY IN
        ('MINNEAPOLIS-ST PAUL INTL/WOLD-', 'SAMPLETON-NORTH INTL/EXAMPLE-'), ('HARE INTL', 'TEST INTL'),
        ('CHICAGO', 'QUINCY ')]
 def fx(name):
-    t = open(f'{FX}/{name}.txt').read()
+    t = rb(f'{FX}/{name}.txt', 'r')
     for a, b in SUB:
         t = t.replace(a, b[:len(a)].ljust(len(a)))
     return t
 def cifp(body):
-    hdr = open(f'{FX}/header.txt').read().split('\n')[:5]
+    hdr = rb(f'{FX}/header.txt', 'r').split('\n')[:5]
     n = len([l for l in body.split('\n') if l])
     hdr[0] = hdr[0][:28] + f'{n:07d}' + hdr[0][35:]
     return ('\n'.join(hdr) + '\n' + body).encode()
@@ -288,7 +314,7 @@ if os.path.exists(CI):
 
 # notam: the synthetic message of the oa-notam tests (it is made up, no real feed data).
 import re
-cm = open(OAR + '/oa-notam/tests/common/mod.rs').read()
+cm = rb(OAR + '/oa-notam/tests/common/mod.rs', 'r')
 def rawstr(name):
     return re.search(r'pub const ' + name + r': &str = r#"(.*?)"#;', cm, re.S).group(1)
 nhead, nev, ntail = rawstr('HEAD'), rawstr('EVENT'), '</message:AIXMBasicMessage>'
@@ -315,11 +341,12 @@ repo('mva', 'fus3.xml', mva_msg('XYZ_MVA_FUS3_2024_v1', two))
 repo('mva', 'fus5.xml', mva_msg('XYZ_MVA_FUS5_2024_v1', two[:1]))
 repo('mva', 'sub.xml', mva_msg('XYZ_SAV_LHW_MVA_2024', two[:1]))
 repo('mva', 'open-ring.xml', mva_msg('XYZ_MVA_FUS3_2024_v1', two[:1]).replace(b'-88.00000 42.00000</ns1:posList>', b'-88.00000 42.50000</ns1:posList>'))
-for f in sorted(glob.glob(R + '/mva*/*.xml')):
+for f in sorted(gl(R + '/mva*/*.xml')):
     out('mva', os.path.basename(f), rd(f), 400_000)
 
 # every committed seed also goes into its corpus
 for t in os.listdir(REPO):
     for f in os.listdir(f'{REPO}/{t}'):
-        out(t, 'seed-' + f, open(f'{REPO}/{t}/{f}', 'rb').read())
+        out(t, 'seed-' + f, rb(f'{REPO}/{t}/{f}'))
+print('sealed entries skipped:', SEALED_SKIPPED)
 print('done')

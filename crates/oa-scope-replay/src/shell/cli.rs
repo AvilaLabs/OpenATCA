@@ -687,6 +687,7 @@ fn create_new(path: &Path) -> Result<std::fs::File, CliError> {
 /// exist is fine.
 fn check_out_dir(dir: &Path, overwrite: bool) -> Result<(), CliError> {
     oa_sealed::refuse(dir).map_err(CliError::Failed)?;
+    // seal-allow: the output directory is refused by the guard above; only its emptiness is read
     let mut entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         // A directory that does not exist yet is fine; any other failure (permission, not a
@@ -709,6 +710,7 @@ fn check_out_dir(dir: &Path, overwrite: bool) -> Result<(), CliError> {
 fn remove_ours(dir: &Path) -> Result<u64, CliError> {
     let mut removed = 0u64;
     let entries =
+        // seal-allow: the output directory (checked when it was chosen); only names of the tool's own files are read
         std::fs::read_dir(dir).map_err(|e| failed(&format!("read {}", dir.display()), e))?;
     for entry in entries {
         let entry = entry.map_err(|e| failed(&format!("read {}", dir.display()), e))?;

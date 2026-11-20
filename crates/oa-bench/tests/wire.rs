@@ -484,14 +484,16 @@ fn real_clip_with_no_overlap_gives_no_pairs_and_a_full_exclusions_table() {
         eprintln!("OPENATCA_DATA / OPENATCA_ADSB_CLIP not set: skipping the real-data smoke run");
         return;
     };
-    let sf = std::fs::read_dir(PathBuf::from(&data).join("scds"))
-        .ok()
-        .and_then(|rd| {
-            rd.flatten().map(|e| e.path()).find(|p| {
-                p.file_name()
-                    .is_some_and(|n| n.to_string_lossy().starts_with("sfdps-"))
-            })
-        });
+    // A sealed entry is skipped and counted, never descended into (OA-SEAL-012).
+    let scds = PathBuf::from(&data).join("scds");
+    let sf = oa_sealed::walk_unsealed(&scds).ok().and_then(|w| {
+        eprintln!("sealed entries skipped: {}", w.skipped);
+        w.files.iter().find_map(|f| {
+            let first = f.strip_prefix(&scds).ok()?.components().next()?;
+            let name = first.as_os_str().to_string_lossy();
+            name.starts_with("sfdps-").then(|| scds.join(first))
+        })
+    });
     let Some(sf) = sf else {
         eprintln!("no SFDPS sample under OPENATCA_DATA/scds: skipping");
         return;

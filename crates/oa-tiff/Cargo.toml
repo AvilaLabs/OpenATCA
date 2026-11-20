@@ -10,6 +10,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+oa-sealed = { path = "../oa-sealed" }
 # F1: path dependency inside this workspace, for the DEFLATE inflater (TIFF Deflate is zlib).
 oa-zip = { path = "../oa-zip" }
 

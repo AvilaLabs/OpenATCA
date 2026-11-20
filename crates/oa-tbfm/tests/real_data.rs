@@ -19,20 +19,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-fn collect(dir: &Path, in_tbfm: bool, out: &mut Vec<PathBuf>) {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    entries.sort();
-    for p in entries {
-        if p.is_dir() {
-            let name = p.file_name().unwrap().to_string_lossy().into_owned();
-            collect(&p, in_tbfm || name.starts_with("tbfm"), out);
-        } else if in_tbfm && p.extension().is_some_and(|e| e == "msg") {
-            out.push(p);
-        }
-    }
+fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+    // Sealed directories are skipped and counted, never descended into (OA-SEAL-012).
+    let walk = oa_sealed::walk_unsealed(dir).unwrap();
+    eprintln!("sealed entries skipped: {}", walk.skipped);
+    out.extend(walk.files.into_iter().filter(|p| {
+        p.extension().is_some_and(|e| e == "msg")
+            && p.strip_prefix(dir)
+                .ok()
+                .and_then(Path::parent)
+                .is_some_and(|q| {
+                    q.components()
+                        .any(|c| c.as_os_str().to_string_lossy().starts_with("tbfm"))
+                })
+    }));
 }
 
 fn corpus() -> Option<Vec<Vec<u8>>> {
@@ -41,7 +41,7 @@ fn corpus() -> Option<Vec<Vec<u8>>> {
         return None;
     };
     let mut files = Vec::new();
-    collect(Path::new(&dir), false, &mut files);
+    collect(Path::new(&dir), &mut files);
     if files.is_empty() {
         eprintln!(
             "no tbfm*/ *.msg files under {}: skipping",
@@ -49,7 +49,7 @@ fn corpus() -> Option<Vec<Vec<u8>>> {
         );
         return None;
     }
-    Some(files.iter().map(|f| std::fs::read(f).unwrap()).collect())
+    Some(files.iter().map(|f| oa_sealed::read(f).unwrap()).collect())
 }
 
 fn decode_all(data: &[Vec<u8>], rows: &mut Rows, keep: bool) -> oa_tbfm::Stats {
@@ -227,7 +227,7 @@ fn real_meter_fixes_and_airports_resolve_against_the_model() {
         eprintln!("OPENATCA_SNAPSHOT is not set: skipping the model cross-check");
         return;
     };
-    let model = oa_airspace::snapshot::decode(&std::fs::read(snap).unwrap()).unwrap();
+    let model = oa_airspace::snapshot::decode(&oa_sealed::read(snap).unwrap()).unwrap();
     let mut rows = new_rows(200_000);
     let stats = decode_all(&data, &mut rows, true);
     assert_eq!(stats.rejects.iter().sum::<u64>(), 0);

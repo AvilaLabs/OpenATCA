@@ -10,6 +10,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+oa-sealed = { path = "../oa-sealed" }
 
 [dev-dependencies]
 # F1: path dependency inside this workspace, to read the FAA zip in the real-data test.

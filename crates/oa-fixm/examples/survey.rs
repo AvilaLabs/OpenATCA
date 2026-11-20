@@ -14,6 +14,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
         eprintln!("survey: {e}");
         std::process::exit(2);
     }
+    // seal-allow: the directory was refused by the guard above; each subdirectory is recursed through the same check
     let mut v: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())
@@ -46,7 +47,7 @@ fn main() {
     let mut uoms: BTreeMap<String, u64> = BTreeMap::new();
     let mut root_types: BTreeMap<String, u64> = BTreeMap::new();
     for f in &files {
-        let bytes = std::fs::read(f).unwrap();
+        let bytes = oa_sealed::read(f).unwrap();
         let d = parser.parse(&bytes).unwrap();
         let n = d.elem_name.len();
         // Message of each element: the child of the root.

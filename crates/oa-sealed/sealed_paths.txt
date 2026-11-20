@@ -2,7 +2,8 @@
 # (tools/sealed_guard.py). A test checks that both parse this file to the same set.
 #
 # root  the data root; the production guard resolves every path against it.
-# seal  a path below the root, as components; a last component ending in `*` is a name prefix.
+# seal  a path below the root, as components; a last component `X*` is a name prefix and `*X*` matches
+#       any component at or below the directory part that contains `X`.
 #       The names are also matched anywhere in a path as consecutive components, so a copy of the
 #       data under another root is refused too.
 root /home/connoravila/Documents/Avila-Labs/openatca-data
@@ -13,9 +14,21 @@ seal scds/rec-20261119/day2*
 seal scds/rec-20261119/day3*
 seal scds/rec-20261119/day4*
 seal scds/rec-20261119/runs*
-seal scds/stdds-20261119-holdout
+seal scds/stdds-20261119-holdout*
 seal scds/stdds-smoke-20261119*
 # The ADS-B days of hold-out days A, B and C (20 to 22 November 2026).
-seal raw/adsblol/2026.11.20
-seal raw/adsblol/2026.11.21
-seal raw/adsblol/2026.11.22
+# Each day in both name forms (the day directory `2026.11.20` and the parts `v2026.11.20-planes-...`),
+# as prefixes so a renamed or partial copy is sealed too; and any derived name that holds a day.
+seal raw/adsblol/2026.11.20*
+seal raw/adsblol/2026.11.21*
+seal raw/adsblol/2026.11.22*
+seal raw/adsblol/v2026.11.20*
+seal raw/adsblol/v2026.11.21*
+seal raw/adsblol/v2026.11.22*
+seal derived/*2026.11.20*
+seal derived/*2026.11.21*
+seal derived/*2026.11.22*
+# window  a half-open UTC span (from inclusive, to exclusive) in which every row or frame is
+#         sealed, whichever file holds it: the three ADS-B days and hold-out days A to C of the
+#         four-day recording (19 Nov 00:17Z, then 24 h each). Readers drop and count such rows.
+window 2026-11-20T00:00:00Z 2026-11-23T00:17:00Z

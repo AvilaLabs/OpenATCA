@@ -174,16 +174,22 @@ fn scds_msgs(dir: &str) -> Option<Vec<Vec<u8>>> {
         return None;
     };
     let d = PathBuf::from(root).join("scds").join(dir);
-    let Ok(rd) = std::fs::read_dir(&d) else {
-        eprintln!("{} is absent: skipping the real {dir} replay", d.display());
+    // A sealed entry is skipped and counted, never opened (OA-SEAL-012).
+    let Ok(walk) = oa_sealed::walk_unsealed(&d) else {
+        eprintln!(
+            "{} is absent or sealed: skipping the real {dir} replay",
+            d.display()
+        );
         return None;
     };
-    let mut files: Vec<PathBuf> = rd
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "msg"))
+    eprintln!("sealed entries skipped: {}", walk.skipped);
+    let mut files: Vec<PathBuf> = walk
+        .files
+        .into_iter()
+        .filter(|p| p.parent() == Some(d.as_path()) && p.extension().is_some_and(|x| x == "msg"))
         .collect();
     files.sort();
-    Some(files.iter().map(|f| std::fs::read(f).unwrap()).collect())
+    Some(files.iter().map(|f| oa_sealed::read(f).unwrap()).collect())
 }
 
 /// Raw `.msg` files carry no receive time (oa-bench reads them the same way), so the test gives

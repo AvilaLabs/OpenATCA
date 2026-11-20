@@ -756,9 +756,10 @@ fn read_central(cd: &[u8], p: usize, limits: &Limits) -> Result<(Entry, usize), 
     Ok((e, next))
 }
 
-/// Read a whole archive file into memory, refusing files above [`MAX_ARCHIVE_BYTES`].
+/// Read a whole archive file into memory, refusing files above [`MAX_ARCHIVE_BYTES`]. The file is
+/// opened through the sealed-data guard (OA-SEAL-013): a sealed path is refused as an I/O error.
 pub fn read_archive_file(path: &Path) -> Result<Vec<u8>, ZipError> {
-    let f = std::fs::File::open(path).map_err(ZipError::Io)?;
+    let f = oa_sealed::open(path).map_err(ZipError::Io)?;
     let mut buf = Vec::new();
     // Read one byte past the limit so an oversize file is detected, not silently truncated.
     f.take(MAX_ARCHIVE_BYTES + 1)

@@ -1306,6 +1306,7 @@ fn git_state() -> GitState {
 }
 
 fn peak_rss_mb() -> f64 {
+    // seal-allow: /proc, not an input
     fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {

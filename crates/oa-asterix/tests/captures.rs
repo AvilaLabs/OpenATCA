@@ -46,12 +46,12 @@ fn dirs() -> Option<(PathBuf, PathBuf)> {
 
 fn read(name: &str) -> Option<Vec<u8>> {
     let (d, _) = dirs()?;
-    Some(std::fs::read(d.join(name)).unwrap())
+    Some(oa_sealed::read(d.join(name)).unwrap())
 }
 
 fn read_expected(name: &str) -> Option<String> {
     let (_, e) = dirs()?;
-    std::fs::read_to_string(e.join(name)).ok()
+    oa_sealed::read_to_string(e.join(name)).ok()
 }
 
 /// Counts for one capture file.

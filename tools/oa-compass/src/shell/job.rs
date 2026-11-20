@@ -127,6 +127,7 @@ pub fn run_job(
 fn remove_run_dirs(out: &Path, layout: &Layout, created: &[PathBuf], run_dirs: &[PathBuf]) {
     remove_created(created);
     if layout.split {
+        // seal-allow: the output directory; only subdirectories of the tool's own run are removed
         if let Ok(rd) = fs::read_dir(out) {
             for e in rd.filter_map(Result::ok) {
                 if e.path().is_dir() {

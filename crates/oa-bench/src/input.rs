@@ -45,6 +45,7 @@ pub fn list_inputs(dir: &Path) -> io::Result<(DirKind, Vec<PathBuf>)> {
     let mut msgs: Vec<PathBuf> = Vec::new();
     // The sealed hold-out guard sees the directory, and every entry before it is stat-ed.
     oa_sealed::refuse_io(dir)?;
+    // seal-allow: the directory is refused by the guard above and each entry is checked before it is opened
     for e in fs::read_dir(dir)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?
     {

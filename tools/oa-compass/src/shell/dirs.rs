@@ -37,6 +37,7 @@ pub fn remove_created(created: &[PathBuf]) {
 /// The files under `dir` (two levels), as paths relative to it, and whether anything else is
 /// there (a non-regular entry or a level deeper).
 fn walk(dir: &Path, rel: &Path, depth: u32, files: &mut Vec<PathBuf>, other: &mut bool) {
+    // seal-allow: the output directory; only entry names are read
     let Ok(rd) = fs::read_dir(dir) else {
         *other = true;
         return;
@@ -57,6 +58,7 @@ pub fn check_out(out: &Path) -> Result<(), ExportError> {
     if !out.exists() {
         return Ok(());
     }
+    // seal-allow: the output directory; only its emptiness is read
     let is_empty = fs::read_dir(out)
         .map_err(|e| io_err(out, &e))?
         .next()

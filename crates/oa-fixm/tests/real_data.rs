@@ -18,22 +18,15 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .collect();
-    entries.sort();
-    for p in entries {
-        if p.is_dir() {
-            collect(&p, out);
-        } else if p.extension().is_some_and(|e| e == "msg")
+    // Sealed directories are skipped and counted, never descended into (OA-SEAL-012).
+    let walk = oa_sealed::walk_unsealed(dir).unwrap();
+    eprintln!("sealed entries skipped: {}", walk.skipped);
+    out.extend(walk.files.into_iter().filter(|p| {
+        p.extension().is_some_and(|e| e == "msg")
             && p.parent()
                 .and_then(|d| d.file_name())
                 .is_some_and(|n| n.to_string_lossy().starts_with("sfdps-"))
-        {
-            out.push(p);
-        }
-    }
+    }));
 }
 
 // REQ: OA-FIXM-014
@@ -46,7 +39,7 @@ fn every_real_sfdps_message_decodes() {
     let mut files = Vec::new();
     collect(Path::new(&dir), &mut files);
     assert!(!files.is_empty(), "no sfdps-*/*.msg files found");
-    let data: Vec<Vec<u8>> = files.iter().map(|f| std::fs::read(f).unwrap()).collect();
+    let data: Vec<Vec<u8>> = files.iter().map(|f| oa_sealed::read(f).unwrap()).collect();
     let total: usize = data.iter().map(Vec::len).sum();
 
     let mut parser = Parser::new(oa_xml::Limits::default()).unwrap();

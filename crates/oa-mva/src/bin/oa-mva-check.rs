@@ -57,6 +57,7 @@ fn newest_dof(dir: &std::path::Path) -> Option<PathBuf> {
         eprintln!("oa-mva-check: {e}");
         std::process::exit(2);
     }
+    // seal-allow: the directory was refused by the guard above; the chosen file is opened through the guarded oa_zip
     let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)

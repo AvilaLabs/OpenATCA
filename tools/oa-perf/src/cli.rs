@@ -250,6 +250,7 @@ fn child(o: &Opts, n: usize) -> Result<Kv, String> {
     }
     let p = o.out.join(format!("cap_{}.kv", tag(o, n)));
     Ok(Kv::parse(
+        // seal-allow: the tool's own output file from the run it just made
         &std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?,
     ))
 }

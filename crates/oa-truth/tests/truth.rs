@@ -1247,7 +1247,7 @@ fn clip() -> Option<Reports> {
     use oa_adsb::decode_payload;
     use oa_feed::{FrameReader, Kind, MAX_FRAME_LEN};
     let path = std::env::var("OPENATCA_ADSB_CLIP").ok()?;
-    let bytes = std::fs::read(&path).ok()?;
+    let bytes = oa_sealed::read(std::path::Path::new(&path)).ok()?;
     let mut buf = vec![0u8; MAX_FRAME_LEN];
     let mut rd = FrameReader::new(&mut buf).unwrap();
     let mut out = Reports::default();

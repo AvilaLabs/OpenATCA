@@ -10,6 +10,7 @@ authors.workspace = true
 workspace = true
 
 [dev-dependencies]
+oa-sealed = { path = "../oa-sealed" }
 # Workspace crate only, not an outside dependency (RULESET F1): the test that builds a
 # CAT021 record from a real oa-adsb row.
 oa-adsb = { path = "../oa-adsb" }

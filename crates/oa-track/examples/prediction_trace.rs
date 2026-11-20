@@ -414,6 +414,7 @@ pub(crate) const OUTPUT_HEADER: &str = "kind,t_ns,address_hex,lat_e7,lon_e7,vel_
 
 fn run(args: Args) -> Result<(), String> {
     if args.out.exists() {
+        // seal-allow: the output directory; only its emptiness is read
         let mut entries = fs::read_dir(&args.out).map_err(|e| e.to_string())?;
         if entries.next().is_some() {
             return Err(format!(
