@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
-use oa_feed_gaps::core::clip::parse_clip_log;
+use oa_feed_gaps::core::clip::{parse_clip_log, ClipLog};
 use oa_feed_gaps::core::gaps::{reasons, scan_unsorted, Scan, Stats, Window, GAP_CAP};
 use oa_feed_gaps::core::report::{render, Feed};
 use oa_feed_gaps::core::timefmt::{iso, parse_iso};
@@ -34,14 +34,29 @@ fn run(w: Window, times: &[i64]) -> Stats {
     scan_unsorted(w, &mut t)
 }
 
+/// A log of a clean run that kept no rows (for the feeds with no clip in the test).
+fn ok_log() -> ClipLog {
+    parse_clip_log("traces_refused=0 kept=0 frames=0\narchive: complete\n")
+}
+
+/// A clean log for the clip the feed was read from.
+fn log_for(f: &Feed) -> ClipLog {
+    parse_clip_log(&format!(
+        "traces_refused=0 kept={} frames=1\narchive: complete\n",
+        f.decoded.unwrap()
+    ))
+}
+
 fn verdict(st: &Stats, damage: &[(String, u64)]) -> (String, bool) {
     let f = Feed {
         name: "SFDPS",
         stats: st.clone(),
         damage: damage.to_vec(),
         info: vec![],
+        files: vec![],
+        decoded: None,
     };
-    render(st.window, &[f], None)
+    render(st.window, &[f], &ok_log())
 }
 
 // REQ: OA-GAP-001
@@ -233,35 +248,63 @@ fn excluded_time_of_3600_s_is_clean_and_3601_s_is_damaged() {
 
 // REQ: OA-GAP-015
 #[test]
-fn the_clip_log_is_read_and_a_refused_trace_or_an_incomplete_archive_is_damage() {
+fn the_clip_log_is_read_and_tied_to_the_clip() {
     let w = win(600);
     let st = run(w, &[0, 300 * S, 600 * S]);
-    let f = |log: Option<&str>| {
+    let f = |log: &str| {
         let feed = Feed {
             name: "ADS-B",
             stats: st.clone(),
             damage: vec![],
             info: vec![],
+            files: vec![],
+            decoded: Some(3),
         };
-        let c = log.map(parse_clip_log);
-        render(w, &[feed], c.as_ref())
+        render(w, &[feed], &parse_clip_log(log))
     };
-    let good = "traces_read=5 traces_refused=0 kept=3\nmeasurements_bad 0\narchive: complete\n";
-    let (t, d) = f(Some(good));
+    let good =
+        "traces_read=5 traces_refused=0 kept=3 frames=2\nmeasurements_bad 0\narchive: complete\n";
+    let (t, d) = f(good);
     assert!(
-        !d && t.contains("traces_refused=0 archive_complete=true"),
+        !d && t.contains("traces_refused=0 kept=3 archive_complete=true"),
         "{t}"
     );
-    let (t, d) = f(Some(&good.replace("traces_refused=0", "traces_refused=2")));
+    let (t, d) = f(&good.replace("traces_refused=0", "traces_refused=2"));
     assert!(d && t.contains("clip tool refused 2 trace(s)"), "{t}");
-    let (t, d) = f(Some("traces_refused=0\narchive: TRUNCATED at byte 5\n"));
+    let (t, d) = f("traces_refused=0 kept=3\narchive: TRUNCATED at byte 5\n");
     assert!(d && t.contains("TRUNCATED"), "{t}");
-    let (_, d) = f(Some("traces_refused=0\n"));
+    let (_, d) = f("traces_refused=0 kept=3\n");
     assert!(d);
-    let (t, d) = f(Some(""));
-    assert!(d && t.contains("no traces_refused summary"), "{t}");
-    let (t, d) = f(None);
-    assert!(!d && t.contains("clip checks: not made"), "{t}");
+    let (t, d) = f("");
+    assert!(d && t.contains("0 summary lines"), "{t}");
+    // Several summary or archive lines: a log of more than one run.
+    let (t, d) = f(&format!("{good}{good}"));
+    assert!(
+        d && t.contains("2 summary lines") && t.contains("2 archive: lines"),
+        "{t}"
+    );
+}
+
+// REQ: OA-GAP-016
+#[test]
+fn a_log_of_another_clip_with_the_wrong_count_is_damaged_with_both_numbers() {
+    let w = win(600);
+    let st = run(w, &[0, 300 * S, 600 * S]);
+    let feed = Feed {
+        name: "ADS-B",
+        stats: st,
+        damage: vec![],
+        info: vec![],
+        files: vec![],
+        decoded: Some(3),
+    };
+    let other = parse_clip_log("traces_refused=0 kept=4792350 frames=9\narchive: complete\n");
+    let (t, d) = render(w, &[feed], &other);
+    assert!(d, "{t}");
+    assert!(
+        t.contains("kept=4792350 but the clip holds 3 reports"),
+        "{t}"
+    );
 }
 
 // REQ: OA-GAP-002
@@ -399,7 +442,7 @@ fn a_damaged_frame_in_the_recording_is_counted_as_damage() {
     assert_eq!(f.stats.count, 2);
     let total: u64 = f.damage.iter().map(|(_, n)| n).sum();
     assert!(total > 0, "{:?}", f.damage);
-    let (text, damaged) = render(win(40), &[f], None);
+    let (text, damaged) = render(win(40), &[f], &ok_log());
     assert!(damaged && text.contains("DAMAGED:"), "{text}");
 }
 
@@ -446,7 +489,8 @@ fn the_adsb_clip_is_checked_sorted_for_gaps_and_for_damaged_frames() {
     adsb_clip(&clip, &[0, 700, 710]);
     let f = read_adsb(&clip, win(710)).unwrap();
     assert_eq!(f.stats.over_total, 1);
-    assert!(!render(win(710), &[f], None).1);
+    let l = log_for(&f);
+    assert!(!render(win(710), &[f], &l).1);
     // A flipped byte in a frame is a damaged frame.
     adsb_clip(&clip, &[0, 10, 20]);
     let mut b = fs::read(&clip).unwrap();
@@ -461,7 +505,8 @@ fn the_adsb_clip_is_checked_sorted_for_gaps_and_for_damaged_frames() {
         "{:?}",
         f.damage
     );
-    assert!(render(win(20), &[f], None).1);
+    let l = log_for(&f);
+    assert!(render(win(20), &[f], &l).1);
 }
 
 const BIN: &str = env!("CARGO_BIN_EXE_oa-feed-gaps");
@@ -473,6 +518,8 @@ fn cli(d: &Path, from: &str, to: &str, extra: &[&str]) -> std::process::Output {
         .arg("--adsb")
         .arg(d.join("c.oaf"))
         .args(["--from", from, "--to", to])
+        .arg("--clip-log")
+        .arg(d.join("clip.log"))
         .args(extra)
         .output()
         .unwrap()
@@ -485,6 +532,12 @@ fn the_exit_status_is_0_clean_1_damaged_2_error_and_the_report_is_written_atomic
     fs::create_dir_all(d.join("sfdps")).unwrap();
     sfdps_file(&d.join("sfdps"), 0, &[0, 300, 600, 900]);
     adsb_clip(&d.join("c.oaf"), &[0, 300, 600, 900]);
+    let log = d.join("clip.log");
+    fs::write(
+        &log,
+        "traces_refused=0 kept=4 frames=4\narchive: complete\n",
+    )
+    .unwrap();
     let (from, to) = ("2026-11-15T00:00:00Z", "2026-11-15T00:15:00Z");
     let o = cli(&d, from, to, &[]);
     assert_eq!(o.status.code(), Some(0));
@@ -495,27 +548,43 @@ fn the_exit_status_is_0_clean_1_damaged_2_error_and_the_report_is_written_atomic
     assert!(o.stdout.is_empty());
     assert!(fs::read_to_string(&out).unwrap().ends_with("CLEAN\n"));
     assert!(!d.join("report.txt.partial").exists());
-    // The same report twice is the same bytes.
+    // An existing output is refused before any work and is left as it is: exit 2.
     let first = fs::read(&out).unwrap();
-    cli(&d, from, to, &["--out", out.to_str().unwrap()]);
+    let o = cli(&d, from, to, &["--out", out.to_str().unwrap()]);
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("already exists"));
     assert_eq!(first, fs::read(&out).unwrap());
+    // The report names the files it used.
+    assert!(
+        String::from_utf8_lossy(&first).contains("file: scds-sfdps-20261115T000000Z-0000.oaf\n")
+    );
+    assert!(String::from_utf8_lossy(&first).contains("file: c.oaf\n"));
     // A window that runs on for hours past the last message has over an hour excluded: damaged.
     let o = cli(&d, from, "2026-11-15T03:00:00Z", &[]);
     assert_eq!(o.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&o.stdout).contains("DAMAGED:"));
-    // The clip log: complete is clean, a refused trace is damaged, a missing file is exit 2.
-    let log = d.join("clip.log");
-    fs::write(&log, "traces_refused=0\narchive: complete\n").unwrap();
-    let l = log.to_str().unwrap();
-    assert_eq!(cli(&d, from, to, &["--clip-log", l]).status.code(), Some(0));
-    fs::write(&log, "traces_refused=1\narchive: complete\n").unwrap();
-    assert_eq!(cli(&d, from, to, &["--clip-log", l]).status.code(), Some(1));
-    assert_eq!(
-        cli(&d, from, to, &["--clip-log", "/nonexistent/x"])
-            .status
-            .code(),
-        Some(2)
-    );
+    // The clip log: a refused trace or a count of another clip is damaged; a missing file or a
+    // missing --clip-log is exit 2.
+    fs::write(&log, "traces_refused=1 kept=4\narchive: complete\n").unwrap();
+    assert_eq!(cli(&d, from, to, &[]).status.code(), Some(1));
+    fs::write(&log, "traces_refused=0 kept=5\narchive: complete\n").unwrap();
+    let o = cli(&d, from, to, &[]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stdout).contains("kept=5 but the clip holds 4 reports"));
+    fs::write(&log, "traces_refused=0 kept=4\narchive: complete\n").unwrap();
+    fs::remove_file(&log).unwrap();
+    assert_eq!(cli(&d, from, to, &[]).status.code(), Some(2));
+    fs::write(&log, "traces_refused=0 kept=4\narchive: complete\n").unwrap();
+    let o = Command::new(BIN)
+        .arg("--sfdps-dir")
+        .arg(d.join("sfdps"))
+        .arg("--adsb")
+        .arg(d.join("c.oaf"))
+        .args(["--from", from, "--to", to])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("--clip-log is required"));
     // Usage and read errors.
     assert_eq!(cli(&d, from, "nonsense", &[]).status.code(), Some(2));
     assert_eq!(cli(&d, to, from, &[]).status.code(), Some(2));
@@ -523,9 +592,81 @@ fn the_exit_status_is_0_clean_1_damaged_2_error_and_the_report_is_written_atomic
     assert_eq!(o.status.code(), Some(2));
     fs::remove_file(d.join("c.oaf")).unwrap();
     assert_eq!(cli(&d, from, to, &[]).status.code(), Some(2));
-    // A failed write leaves no partial file and is exit 2.
+    // A failed write leaves no partial file.
     let bad = d.join("no-such-dir/report.txt");
     assert!(write_atomic(&bad, "x").is_err());
+}
+
+// REQ: OA-GAP-017
+#[test]
+fn a_file_in_the_recording_directory_that_is_not_a_recording_is_refused_by_name() {
+    let d = tmp("unrecognised");
+    sfdps_file(&d, 0, &[10, 20]);
+    fs::write(d.join("scds-sfdps-20261115T000000Z-0002.oaf.bak"), b"x").unwrap();
+    fs::write(d.join("notes.txt"), b"x").unwrap();
+    let e = read_sfdps(&d, win(40)).err().unwrap().to_string();
+    assert!(
+        e.contains("scds-sfdps-20261115T000000Z-0002.oaf.bak") && e.contains("notes.txt"),
+        "{e}"
+    );
+}
+
+// REQ: OA-GAP-018
+#[test]
+fn an_exclude_line_parses_back_to_the_same_window_with_a_fractional_boundary() {
+    // The scorer's grammar is the whole-second `YYYY-MM-DDTHH:MM:SSZ` of `oa_adsb::cli::parse_iso`
+    // (the clip tool's) plus a nine-digit fraction; parse each line with that and compare.
+    let back = |t: &str| -> i64 {
+        let (head, frac) = t.split_once('.').unwrap();
+        let frac = frac.strip_suffix('Z').unwrap();
+        assert_eq!(frac.len(), 9);
+        oa_adsb::cli::parse_iso(&format!("{head}Z")).unwrap() * S + frac.parse::<i64>().unwrap()
+    };
+    let w = win(7200);
+    let gap_end = 1200 * S + 1_004_760_000_001;
+    let st = run(
+        w,
+        &[
+            0,
+            600 * S,
+            1200 * S,
+            gap_end,
+            2800 * S,
+            3400 * S,
+            4000 * S,
+            4600 * S,
+            5200 * S,
+            5800 * S,
+            6400 * S,
+            7000 * S,
+            7200 * S,
+        ],
+    );
+    let (text, _) = verdict(&st, &[]);
+    let line = text.lines().find(|l| l.starts_with("exclude ")).unwrap();
+    let mut it = line.split(' ').skip(1);
+    let (a, b) = (back(it.next().unwrap()), back(it.next().unwrap()));
+    assert_eq!(a, BASE + 1200 * S);
+    assert_eq!(b, BASE + gap_end + 300 * S);
+    assert_eq!(b - a, 1_004_760_000_001 + 300 * S);
+}
+
+// REQ: OA-GAP-019
+#[test]
+fn the_report_file_is_new_synced_and_renamed_never_replaced() {
+    let d = tmp("atomic");
+    let out = d.join("r.txt");
+    write_atomic(&out, "a").unwrap();
+    assert_eq!(fs::read_to_string(&out).unwrap(), "a");
+    assert!(!d.join("r.txt.partial").exists());
+    assert!(write_atomic(&out, "b").is_err());
+    assert_eq!(fs::read_to_string(&out).unwrap(), "a");
+    // A temporary file left by someone else is not replaced either.
+    let out2 = d.join("r2.txt");
+    fs::write(d.join("r2.txt.partial"), "x").unwrap();
+    assert!(write_atomic(&out2, "y").is_err());
+    assert_eq!(fs::read_to_string(d.join("r2.txt.partial")).unwrap(), "x");
+    assert!(!out2.exists());
 }
 
 // REQ: OA-GAP-011
@@ -540,6 +681,8 @@ fn a_sealed_input_is_refused_through_the_shared_guard() {
         .arg(&sealed)
         .arg("--adsb")
         .arg(sealed.join("clip.oaf"))
+        .arg("--clip-log")
+        .arg(t.join("clip.log"))
         .args([
             "--from",
             "2026-11-15T00:00:00Z",
@@ -578,9 +721,12 @@ fn times_and_arguments_are_parsed_strictly() {
         "2026-11-15T00:00:00Z",
         "--to",
         "2026-11-15T01:00:00Z",
+        "--clip-log",
+        "l",
     ];
     assert!(a(&ok).is_ok());
     assert!(a(&ok[..ok.len() - 2]).is_err());
+    assert!(a(&ok[..ok.len() - 4]).is_err());
     assert!(a(&[&ok[..], &["--bogus", "x"]].concat()).is_err());
     assert!(a(&[&ok[..], &["--from", "2026-11-15T00:00:00Z"]].concat()).is_err());
 }

@@ -22,6 +22,8 @@ pub fn read_sfdps(dir: &Path, window: Window) -> io::Result<Feed> {
             dir.display()
         )));
     }
+    refuse_unrecognised(dir)?;
+    let names = file_names(&files);
     let n_files = files.len();
     let mut times: Vec<i64> = Vec::new();
     let (mut prev, mut regress) = (i64::MIN, 0u64);
@@ -50,6 +52,8 @@ pub fn read_sfdps(dir: &Path, window: Window) -> io::Result<Feed> {
         name: "SFDPS",
         stats: scan_unsorted(window, &mut times),
         damage,
+        files: names,
+        decoded: None,
         info: vec![
             ("files".to_string(), n_files as u64),
             ("reader gzip and frame errors".to_string(), total),
@@ -65,6 +69,51 @@ pub fn read_sfdps(dir: &Path, window: Window) -> io::Result<Feed> {
     })
 }
 
+fn file_names(files: &[std::path::PathBuf]) -> Vec<String> {
+    files
+        .iter()
+        .map(|p| {
+            p.file_name().map_or_else(
+                || p.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// A regular file directly in `dir` that is not `.oaf` or `.oaf.gz` is refused by name: a
+/// recording renamed or left out would otherwise be skipped silently.
+fn refuse_unrecognised(dir: &Path) -> io::Result<()> {
+    let walk = oa_sealed::walk_unsealed(dir)?;
+    let mut bad: Vec<String> = Vec::new();
+    for p in &walk.files {
+        if p.parent() != Some(dir) {
+            continue;
+        }
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned());
+        if let Some(n) = name {
+            if !(n.ends_with(".oaf") || n.ends_with(".oaf.gz")) {
+                bad.push(n);
+            }
+        }
+    }
+    if bad.is_empty() {
+        return Ok(());
+    }
+    let more = bad.len().saturating_sub(20);
+    bad.truncate(20);
+    Err(io::Error::other(format!(
+        "{}: unrecognised files (not .oaf or .oaf.gz): {}{}",
+        dir.display(),
+        bad.join(", "),
+        if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        }
+    )))
+}
+
 /// The ADS-B clip: every report time in the window, sorted, and the clip's damage counts.
 pub fn read_adsb(path: &Path, window: Window) -> io::Result<Feed> {
     oa_sealed::refuse_io(path)?;
@@ -77,10 +126,13 @@ pub fn read_adsb(path: &Path, window: Window) -> io::Result<Feed> {
         .copied()
         .filter(|t| *t >= window.from_ns && *t <= window.to_ns)
         .collect();
+    let decoded = clip.reports.time_ns.len() as u64;
     let stats: Stats = scan_unsorted(window, &mut times);
     Ok(Feed {
         name: "ADS-B",
         stats,
+        files: file_names(&[path.to_path_buf()]),
+        decoded: Some(decoded),
         damage: vec![("damaged frames".to_string(), clip.bad_frames)],
         info: vec![
             (

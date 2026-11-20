@@ -6225,4 +6225,9 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-GAP-012** `--from` and `--to` are `YYYY-MM-DDTHH:MM:SSZ`, both required, from before to.
 - **OA-GAP-013** An excluded interval is the interval over 600 s and the 300 s after it, in either feed, cut at the window end; each merged block is written as `exclude <from ISO ns> <to ISO ns>`.
 - **OA-GAP-014** Excluded intervals are merged where they overlap; more than 3600 s in total makes the window damaged.
-- **OA-GAP-015** With `--clip-log`, a refused trace, a missing summary or an archive not reported complete makes the window damaged; without it the report says the clip checks were not made.
+- **OA-GAP-015** `--clip-log` is required. A refused trace, not exactly one summary line and one `archive:` line, or an archive not reported complete makes the window damaged.
+- **OA-GAP-016** The clip log's `kept` must equal the reports decoded from the clip; a mismatch is damage, with both numbers printed.
+- **OA-GAP-017** A regular file in the SFDPS directory that is not `.oaf` or `.oaf.gz` is a read error (exit 2) that names it; the report names the files used.
+- **OA-GAP-018** An `exclude` line parses back to the same nanosecond window.
+- **OA-GAP-019** An existing `--out` is refused (exit 2); the report is written to a new temporary file, synced, then renamed.
+

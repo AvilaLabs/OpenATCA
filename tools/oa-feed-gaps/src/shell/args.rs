@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::core::gaps::Window;
 use crate::core::timefmt::parse_iso;
 
-pub const USAGE: &str = "usage: oa-feed-gaps --sfdps-dir <dir> --adsb <clip.oaf> --from <ISO time> --to <ISO time> [--clip-log <file>] [--out <file>]";
+pub const USAGE: &str = "usage: oa-feed-gaps --sfdps-dir <dir> --adsb <clip.oaf> --from <ISO time> --to <ISO time> --clip-log <file> [--out <file>]";
 
 /// What a run is asked to do.
 // A7.2: cold struct, size guard waived
@@ -14,7 +14,7 @@ pub struct Args {
     pub sfdps_dir: PathBuf,
     pub adsb: PathBuf,
     pub window: Window,
-    pub clip_log: Option<PathBuf>,
+    pub clip_log: PathBuf,
     pub out: Option<PathBuf>,
 }
 
@@ -49,7 +49,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         sfdps_dir: PathBuf::from(need(sfdps, "--sfdps-dir")?),
         adsb: PathBuf::from(need(adsb, "--adsb")?),
         window,
-        clip_log: clip_log.map(PathBuf::from),
+        clip_log: PathBuf::from(need(clip_log, "--clip-log")?),
         out: out.map(PathBuf::from),
     })
 }

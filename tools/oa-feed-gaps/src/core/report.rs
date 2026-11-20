@@ -16,6 +16,10 @@ pub struct Feed {
     pub damage: Vec<(String, u64)>,
     /// Counts that are reported and not damage, by name.
     pub info: Vec<(String, u64)>,
+    /// File names read (not paths).
+    pub files: Vec<String>,
+    /// Reports decoded from the clip (the ADS-B feed only).
+    pub decoded: Option<u64>,
 }
 
 fn gap_line(g: &Gap) -> String {
@@ -30,6 +34,9 @@ fn gap_line(g: &Gap) -> String {
 fn feed_text(f: &Feed, out: &mut String) {
     let st = &f.stats;
     out.push_str(&format!("[{}]\n", f.name));
+    for n in &f.files {
+        out.push_str(&format!("file: {n}\n"));
+    }
     for (k, v) in &f.info {
         out.push_str(&format!("{k}: {v}\n"));
     }
@@ -70,7 +77,7 @@ fn feed_text(f: &Feed, out: &mut String) {
 }
 
 /// The report text and whether the day is damaged.
-pub fn render(window: Window, feeds: &[Feed], clip: Option<&ClipLog>) -> (String, bool) {
+pub fn render(window: Window, feeds: &[Feed], clip: &ClipLog) -> (String, bool) {
     let mut out = String::new();
     out.push_str("oa-feed-gaps report (P-006 section 6)\n");
     out.push_str(&format!(
@@ -107,18 +114,16 @@ pub fn render(window: Window, feeds: &[Feed], clip: Option<&ClipLog>) -> (String
             secs(LIMIT_NS)
         ));
     }
-    match clip {
-        Some(c) => {
-            out.push_str(&format!(
-                "clip log: traces_refused={} archive_complete={}\n",
-                c.traces_refused
-                    .map_or("none".to_string(), |n| n.to_string()),
-                c.complete
-            ));
-            why.extend(clip_reasons(c));
-        }
-        None => out.push_str("clip checks: not made (no --clip-log)\n"),
-    }
+    let decoded = feeds.iter().find_map(|f| f.decoded).unwrap_or(0);
+    out.push_str(&format!(
+        "clip log: summaries={} archive_lines={} traces_refused={} kept={} archive_complete={} reports_in_clip={decoded}\n",
+        clip.summaries,
+        clip.archive_lines,
+        clip.traces_refused.map_or("none".to_string(), |n| n.to_string()),
+        clip.kept.map_or("none".to_string(), |n| n.to_string()),
+        clip.complete
+    ));
+    why.extend(clip_reasons(clip, decoded));
     let damaged = !why.is_empty();
     if damaged {
         out.push_str(&format!("DAMAGED: {}\n", why.join("; ")));

@@ -13,19 +13,41 @@ use crate::shell::read::{read_adsb, read_sfdps};
 pub fn check(a: &Args) -> io::Result<(String, bool)> {
     let sfdps = read_sfdps(&a.sfdps_dir, a.window)?;
     let adsb = read_adsb(&a.adsb, a.window)?;
-    let clip = match &a.clip_log {
-        Some(p) => Some(parse_clip_log(&read_log(p)?)),
-        None => None,
-    };
-    Ok(render(a.window, &[sfdps, adsb], clip.as_ref()))
+    let clip = parse_clip_log(&read_log(&a.clip_log)?);
+    Ok(render(a.window, &[sfdps, adsb], &clip))
 }
 
-/// Writes `text` to a temporary file next to `out`, then renames it over `out`.
+/// Refuses an output path that already exists (a link included).
+pub fn refuse_existing(out: &Path) -> io::Result<()> {
+    // seal-allow: a stat of the tool's own output path, which is never read
+    if fs::symlink_metadata(out).is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{}: already exists", out.display()),
+        ));
+    }
+    Ok(())
+}
+
+/// Writes `text` to a new temporary file next to `out`, syncs it, then renames it to `out`. An
+/// existing `out` or temporary file is an error and is never replaced.
 pub fn write_atomic(out: &Path, text: &str) -> io::Result<()> {
+    refuse_existing(out)?;
     let mut tmp = out.as_os_str().to_owned();
     tmp.push(".partial");
     let tmp = std::path::PathBuf::from(tmp);
-    let r = fs::write(&tmp, text.as_bytes()).and_then(|()| fs::rename(&tmp, out));
+    // A temporary file that already exists is someone else's: error, and leave it.
+    // seal-allow: create-new write of the tool's own report; nothing is read
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let r = (|| {
+        io::Write::write_all(&mut f, text.as_bytes())?;
+        f.sync_all()?;
+        refuse_existing(out)?;
+        fs::rename(&tmp, out)
+    })();
     if r.is_err() {
         let _ = fs::remove_file(&tmp);
     }
