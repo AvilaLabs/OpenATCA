@@ -787,6 +787,45 @@ fn landing(o: &mut String, i: &mut DiagIn) {
         ttv: f64,
         on_strip: bool,
     }
+    // The deepest: each alert judged 500 ft or more below its floor, as numbers only: depth,
+    // the altimeter's age (seconds at the end of the 5 min bucket; -1 where the setting was the
+    // lowest-in-12-h one or none), the stale-extrapolated flag at the worst cycle, the track's age
+    // (seconds from its first row in the window to the worst cycle) and the age of its last row.
+    let mut deep: Vec<String> = Vec::new();
+    for (a, _) in &rows {
+        if a.worst_margin_ft > -500.0 {
+            continue;
+        }
+        let (lat, lon) = (
+            f64::from(a.worst_lat_e7) / 1e7,
+            f64::from(a.worst_lon_e7) / 1e7,
+        );
+        let t_s = a.worst_ns.div_euclid(1_000_000_000);
+        let age = match i.qnh.as_deref() {
+            Some(q) if a.worst_flags & AF_QNH_MISSING == 0 => {
+                q.setting_age_s(lat, lon, t_s).unwrap_or(-1)
+            }
+            _ => -1,
+        };
+        let v = i.rows.get(&a.addr);
+        let first = v
+            .and_then(|v| v.first())
+            .map_or(f64::NAN, |r| (a.worst_ns - r.0) as f64 / 1e9);
+        let last = v
+            .and_then(|v| v.iter().rev().find(|r| r.0 <= a.worst_ns))
+            .map_or(f64::NAN, |r| (a.worst_ns - r.0) as f64 / 1e9);
+        deep.push(format!(
+            "    {:.0}; {age}; {}; {first:.0}; {last:.1}",
+            -a.worst_margin_ft,
+            u8::from(a.worst_flags & oa_msaw::AF_STALE_EXTRAPOLATED != 0)
+        ));
+    }
+    let _ = writeln!(
+        o,
+        "  the {} alerts judged 500 ft or more below the floor (depth ft; altimeter age s; stale-extrapolated 0/1; track age s since its first row in the window; age of its last row s):\n{}",
+        deep.len(),
+        deep.join("\n")
+    );
     let mut out: Vec<R> = Vec::new();
     for (a, k) in &rows {
         let (lat, lon) = (
@@ -899,7 +938,10 @@ fn landing(o: &mut String, i: &mut DiagIn) {
     // lookup of the point alone (not the circle) would still put the aircraft below it.
     if let Some(d) = i.dof {
         let (mut agl, mut dist, mut still, mut n) = (Vec::new(), Vec::new(), 0usize, 0usize);
-        for (a, _) in &rows {
+        // The obstacle's top less the highest surface of the corridors holding the point, at the
+        // obstacle's own position: positive is above the surface (it counts), negative below.
+        let mut over: Vec<f64> = Vec::new();
+        for (a, k) in &rows {
             if a.worst_kind != FloorKind::Obstacle {
                 continue;
             }
@@ -911,6 +953,16 @@ fn landing(o: &mut String, i: &mut DiagIn) {
             if let Some((_, rec, dpt)) = i.floors.obstacle_record_within(lat, lon, eff) {
                 n += 1;
                 agl.push(f64::from(d.agl_ft.get(rec as usize).copied().unwrap_or(0)));
+                let r = rec as usize;
+                let (ola, olo) = (
+                    d.lat_e7.get(r).copied().unwrap_or(0),
+                    d.lon_e7.get(r).copied().unwrap_or(0),
+                );
+                if let Some(s) = oa_msaw::corridor_hit_ft(&k.corridor, ola, olo, 0.0, i.cfg)
+                    .and_then(|h| h.surface_ft)
+                {
+                    over.push(f64::from(d.amsl_ft.get(r).copied().unwrap_or(0)) - f64::from(s));
+                }
                 dist.push(dpt);
             }
             let judged = f64::from(a.worst_margin_ft) + f64::from(a.worst_floor_ft);
@@ -923,9 +975,12 @@ fn landing(o: &mut String, i: &mut DiagIn) {
         }
         let _ = writeln!(
             o,
-            "  the {n} obstacle floors: height above ground of the obstacle {}; distance from the worst point to it {}; with a lookup of the point alone ({POINT_M} m) {still} would still be below an obstacle top",
+            "  the {n} obstacle floors: height above ground of the obstacle {}; distance from the worst point to it {}; obstacle top less the corridor surface at the obstacle ({} of {} inside the corridor) {}; with a lookup of the point alone ({POINT_M} m) {still} would still be below an obstacle top",
             buckets(&agl, &[20.0, 50.0, 100.0, 200.0], " ft"),
-            buckets(&dist, &[100.0, 250.0, 500.0, 1000.0], " m")
+            buckets(&dist, &[100.0, 250.0, 500.0, 1000.0], " m"),
+            over.len(),
+            n,
+            buckets(&over, &[-100.0, -25.0, 0.0, 25.0, 100.0], " ft")
         );
     }
     let _ = writeln!(o, "  10 alerts spread through the depth order (depth ft; floor kind; floor ft; height above the threshold ft; distance before the threshold NM; angle flown deg; procedure's angle deg; altimeter; time to violation s):");

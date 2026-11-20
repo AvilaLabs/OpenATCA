@@ -6666,6 +6666,9 @@ FAA value.
 - **OA-MSAW-076** `--landing-of <alerts.csv>` counts the alerts of another run whose worst point is in the landing
   zone, by the corridors and geometry of this run; the diagnosis gives the landing alerts' depth, floor, height and
   distance, flown angle and altimeter, and how many alerts used the lowest-in-12-h setting.
+- **OA-MSAW-077** Where a lookup circle is wholly inside surface-bearing corridors (approach corridors and runway
+  strips) and no departure corridor reaches it, an obstacle whose top is not above the highest of their surfaces,
+  less the allowance, at the obstacle's own position does not raise the floor; elsewhere every obstacle does.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.
 ## Runway geometry and occupancy (oa-runway)

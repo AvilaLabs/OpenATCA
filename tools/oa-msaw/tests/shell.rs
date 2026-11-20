@@ -1286,9 +1286,110 @@ fn the_alerts_of_another_run_are_counted_in_the_landing_zone_by_this_runs_corrid
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(t.contains("alerts in alerts.csv: 2;"), "{t}");
     assert!(
-        t.ends_with(
+        t.contains(
             "last 1 NM of a capture box: 1; no altimeter setting in reach at the worst cycle: 1\n"
         ),
         "{t}"
     );
+    assert!(
+        t.contains("obstacle-floor alerts with the worst point in no corridor: 0\n"),
+        "{t}"
+    );
+}
+
+/// A 3 degree approach to a 600 ft threshold at 40 N 88 W, out toward the south, and the lookup
+/// point 1,400 m out in the last mile, at the centre of its lookup cell.
+fn tower_rig(
+    tower_top_ft: i32,
+    cross_m: f64,
+    departure: bool,
+) -> (oa_msaw::MsawConfig, Floors, oa_msaw::SamplePoint) {
+    use oa_msaw::{Corridor, CK_APPROACH, CK_DEPARTURE};
+    let m = 111_194.926_644_558_74;
+    let mut cfg = settings().msaw;
+    cfg.corridors[0] = Corridor {
+        kind: CK_APPROACH,
+        thr_lat_e7: 400_000_000,
+        thr_lon_e7: -880_000_000,
+        out_bearing_deg: 180.0,
+        length_m: 9260.0,
+        near_half_width_m: 1852.0,
+        far_half_width_m: 1852.0,
+        thr_elev_ft: 600,
+        faf_alt_ft: 2250,
+        land_from_m: 0.0,
+        path_angle_deg: 3.0,
+        tch_ft: 50,
+    };
+    cfg.n_corridors = 1;
+    if departure {
+        cfg.corridors[1] = Corridor {
+            kind: CK_DEPARTURE,
+            out_bearing_deg: 180.0,
+            near_half_width_m: 1852.0,
+            far_half_width_m: 1852.0,
+            ..cfg.corridors[0]
+        };
+        cfg.n_corridors = 2;
+    }
+    let lat = ((40.0f64 - 1400.0 / m) / 0.002).floor() * 0.002 + 0.001;
+    let lon = (-88.0f64 / 0.002).floor() * 0.002 + 0.001;
+    let tower = (
+        (lat * 1e7).round() as i32,
+        ((lon + cross_m / (m * 40.0f64.to_radians().cos())) * 1e7).round() as i32,
+        tower_top_ft,
+    );
+    let mut f = Floors::new(
+        None,
+        Some(ObstacleIndex::from_points(std::iter::once(tower))),
+        None,
+    );
+    f.set_corridors(&cfg);
+    (cfg, f, point(lat, lon, 100.0))
+}
+
+// REQ: OA-MSAW-077
+#[test]
+fn an_obstacle_below_the_approach_surface_at_its_own_position_is_left_to_the_surface() {
+    use oa_msaw::{corridor_hit_ft, floor_of};
+    let judge = |top: i32, cross: f64, departure: bool| {
+        let (cfg, mut f, p) = tower_rig(top, cross, departure);
+        let mut s = f.floor_at(&p).unwrap();
+        s.terrain_ft = 600;
+        let hit = corridor_hit_ft(&cfg.corridors[0], p.lat_e7, p.lon_e7, 100.0, &cfg);
+        (s.obstacle_ft, floor_of(&s, hit, &cfg).unwrap().0)
+    };
+    // The surface about 1,450 m out is near 600 + 50 + 250 - 100 = 800 ft. A 150 ft tower on 600 ft ground
+    // 300 m beside the final mile (top 750) is below it: it does not raise the floor, so an
+    // aircraft at 820 ft is not below it.
+    let (o, floor) = judge(750, 300.0, false);
+    assert_eq!(o, FLOOR_NONE);
+    assert!((780..=810).contains(&floor), "{floor}");
+    // A tower that penetrates the surface (top 850) still raises the floor to its top, and the
+    // aircraft at 820 ft is below it.
+    let (o, floor) = judge(850, 300.0, false);
+    assert_eq!(o, 850);
+    assert_eq!(floor, 850);
+    assert!(820 < floor);
+    // The same low tower with a departure corridor over the circle counts in full.
+    assert_eq!(judge(750, 300.0, true).0, 750);
+    // Outside the corridor nothing changes: the same tower in a net with no corridor counts, and
+    // so does one in the corridor's net whose circle is not inside it.
+    let (_, mut f, p) = tower_rig(750, 300.0, false);
+    f.set_corridors(&oa_msaw::MsawConfig {
+        n_corridors: 0,
+        ..settings().msaw
+    });
+    assert_eq!(f.floor_at(&p).unwrap().obstacle_ft, 750);
+    let (cfg, _, mut p) = tower_rig(750, 300.0, false);
+    p.lon_e7 += 500_000;
+    let mut g = Floors::new(
+        None,
+        Some(ObstacleIndex::from_points(std::iter::once((
+            p.lat_e7, p.lon_e7, 750,
+        )))),
+        None,
+    );
+    g.set_corridors(&cfg);
+    assert_eq!(g.floor_at(&p).unwrap().obstacle_ft, 750);
 }

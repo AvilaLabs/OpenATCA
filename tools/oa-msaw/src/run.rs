@@ -586,7 +586,16 @@ pub fn landing_of(
             ));
         };
         let fl = col("worst_flags_raw");
+        let (ka, ks, kf, kk) = (
+            col("address_hex"),
+            col("start_s"),
+            col("worst_floor_ft"),
+            col("worst_floor_kind"),
+        );
         let (mut n, mut inside, mut no_setting) = (0usize, 0usize, 0usize);
+        // The alerts with an obstacle floor whose worst point is in no corridor at all, as
+        // `address start floor`, for comparing two runs.
+        let mut free: Vec<String> = Vec::new();
         for l in lines {
             let f: Vec<&str> = l.split(',').collect();
             let (Some(a), Some(b)) = (
@@ -599,6 +608,15 @@ pub fn landing_of(
             let (lat, lon) = ((a * 1e7).round() as i32, (b * 1e7).round() as i32);
             if crate::report::landing_corridor(corridors, lat, lon, cfg).is_some() {
                 inside += 1;
+            }
+            let in_any = cfg
+                .corridors
+                .iter()
+                .take(cfg.n_corridors)
+                .any(|c| oa_msaw::corridor_hit_ft(c, lat, lon, 0.0, cfg).is_some());
+            if !in_any && kk.and_then(|c| f.get(c)) == Some(&"obstacle") {
+                let g = |c: Option<usize>| c.and_then(|c| f.get(c)).copied().unwrap_or("");
+                free.push(format!("{} {} {}", g(ka), g(ks), g(kf)));
             }
             if let Some(flags) = fl
                 .and_then(|c| f.get(c))
@@ -617,6 +635,13 @@ pub fn landing_of(
                 String::new()
             }
         ));
+        out.push_str(&format!(
+            "obstacle-floor alerts with the worst point in no corridor: {}\n",
+            free.len()
+        ));
+        for l in free {
+            out.push_str(&format!("  {l}\n"));
+        }
     }
     Ok(out)
 }
@@ -972,6 +997,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let mut floors = Floors::new(args.terrain.clone(), obstacles, chart);
     floors.set_areas(gtm_areas(g, &set)?);
     floors.set_airports(apt_areas);
+    floors.set_corridors(&set.msaw);
     used.terrain = floors.has_terrain();
     used.chart = floors.has_chart();
     used.cifp_corridors = cifp_corridors;

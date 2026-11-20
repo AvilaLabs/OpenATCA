@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use oa_dof::Dof;
-use oa_msaw::{FloorSample, SamplePoint, FLOOR_NONE};
+use oa_msaw::{
+    corridor_hit_ft, Corridor, FloorSample, MsawConfig, SamplePoint, CK_DEPARTURE, FLOOR_NONE,
+};
 use oa_mva::Model;
 use oa_sealed::Sealed;
 use oa_tiff::{Grid, TileSet, METRES_PER_FOOT};
@@ -184,6 +186,36 @@ impl ObstacleIndex {
         best
     }
 
+    /// The highest top within `radius_m` of the point among the obstacles `keep` accepts (it is
+    /// given the obstacle's latitude and longitude, 1e-7 degree, and its top), feet;
+    /// [`FLOOR_NONE`] if there is none.
+    pub fn highest_where(
+        &self,
+        lat: f64,
+        lon: f64,
+        radius_m: f64,
+        keep: &dyn Fn(i32, i32, i32) -> bool,
+    ) -> i32 {
+        let cos = lat.to_radians().cos().max(0.01);
+        let (dlat, dlon) = (
+            radius_m / M_PER_DEG_LAT_MIN,
+            radius_m / (M_PER_DEG_LAT_MIN * cos),
+        );
+        let mut best = FLOOR_NONE;
+        for a in cell_of(lat - dlat, OBST_CELL_DEG)..=cell_of(lat + dlat, OBST_CELL_DEG) {
+            for b in cell_of(lon - dlon, OBST_CELL_DEG)..=cell_of(lon + dlon, OBST_CELL_DEG) {
+                for &(la, lo, top, _) in self.cells.get(&(a, b)).map_or(&[][..], |v| &v[..]) {
+                    let dy = (f64::from(la) / 1e7 - lat) * M_PER_DEG_LAT_MIN;
+                    let dx = (f64::from(lo) / 1e7 - lon) * M_PER_DEG_LAT_MIN * cos;
+                    if dx * dx + dy * dy <= radius_m * radius_m && top > best && keep(la, lo, top) {
+                        best = top;
+                    }
+                }
+            }
+        }
+        best
+    }
+
     /// The highest top within `radius_m` of the point, feet; [`FLOOR_NONE`] if there is none.
     pub fn highest_within(&self, lat: f64, lon: f64, radius_m: f64) -> i32 {
         let cos = lat.to_radians().cos().max(0.01);
@@ -324,7 +356,22 @@ pub struct Floors {
     cache: HashMap<(i32, i32, u32), CellFloors>,
     areas: Vec<(Area, i32)>,
     airports: Vec<AirportArea>,
+    /// The corridors of the net, for the obstacles an approach surface stands for.
+    corridors: Option<Box<MsawConfig>>,
     pub stats: FloorStats,
+}
+
+/// Whether a circle of `radius_m` at (`lat`, `lon`) can touch the corridor: its centre is within
+/// the corridor widened by the radius (a bound that only adds).
+fn reaches(c: &Corridor, lat: f64, lon: f64, radius_m: f64) -> bool {
+    let (tlat, tlon) = (f64::from(c.thr_lat_e7) / 1e7, f64::from(c.thr_lon_e7) / 1e7);
+    let dy = (lat - tlat) * 111_200.0;
+    let dx = (lon - tlon) * 111_200.0 * tlat.to_radians().cos();
+    let b = c.out_bearing_deg.to_radians();
+    let along = dx * b.sin() + dy * b.cos();
+    let across = (dx * b.cos() - dy * b.sin()).abs();
+    let wide = c.near_half_width_m.max(c.far_half_width_m);
+    along >= -radius_m && along <= c.length_m + radius_m && across <= wide + 2.0 * radius_m
 }
 
 /// Whole feet rounded up, held to the range of an `i32` with room for a clearance.
@@ -364,6 +411,7 @@ impl Floors {
             cache: HashMap::new(),
             areas: Vec::new(),
             airports: Vec::new(),
+            corridors: None,
             stats: FloorStats::default(),
         }
     }
@@ -384,6 +432,46 @@ impl Floors {
     }
 
     /// Areas with their own clearance above terrain; where several hold a point the highest wins.
+    /// Gives the lookups the corridors of the net. Where a lookup circle is wholly inside corridors
+    /// that all have a surface (approach corridors and runway strips) and no departure corridor
+    /// reaches it, an obstacle whose top is not above the highest surface of those corridors at
+    /// the obstacle's own position, less the allowance, is left out: the surface stands for it.
+    /// Elsewhere every obstacle counts.
+    pub fn set_corridors(&mut self, cfg: &MsawConfig) {
+        self.corridors = (cfg.n_corridors > 0).then(|| Box::new(*cfg));
+    }
+
+    /// The highest obstacle top for the lookup circle at (`lat`, `lon`) of `radius_m`.
+    fn obstacle_top(&self, lat: f64, lon: f64, radius_m: f64) -> i32 {
+        let Some(ix) = self.obstacles.as_ref() else {
+            return FLOOR_NONE;
+        };
+        let Some(cfg) = self.corridors.as_deref() else {
+            return ix.highest_within(lat, lon, radius_m);
+        };
+        let (la, lo) = ((lat * 1e7).round() as i32, (lon * 1e7).round() as i32);
+        let mut holding: Vec<&Corridor> = Vec::new();
+        for c in cfg.corridors.iter().take(cfg.n_corridors) {
+            if c.kind == CK_DEPARTURE {
+                if reaches(c, lat, lon, radius_m) {
+                    return ix.highest_within(lat, lon, radius_m);
+                }
+            } else if corridor_hit_ft(c, la, lo, radius_m, cfg).is_some() {
+                holding.push(c);
+            }
+        }
+        if holding.is_empty() {
+            return ix.highest_within(lat, lon, radius_m);
+        }
+        ix.highest_where(lat, lon, radius_m, &|ola, olo, top| {
+            let surface = holding
+                .iter()
+                .filter_map(|c| corridor_hit_ft(c, ola, olo, 0.0, cfg).and_then(|h| h.surface_ft))
+                .max();
+            surface.is_none_or(|s| top > s)
+        })
+    }
+
     pub fn set_areas(&mut self, areas: Vec<(Area, i32)>) {
         self.areas = areas;
     }
@@ -448,10 +536,7 @@ impl Floors {
                 oa_msaw::FloorKind::Terrain if me.tile_dir.is_some() => {
                     me.terrain_ft(lat, lon, r).unwrap_or(FLOOR_NONE)
                 }
-                oa_msaw::FloorKind::Obstacle => me
-                    .obstacles
-                    .as_ref()
-                    .map_or(FLOOR_NONE, |ix| ix.highest_within(lat, lon, r)),
+                oa_msaw::FloorKind::Obstacle => me.obstacle_top(lat, lon, r),
                 _ => FLOOR_NONE,
             }
         };
@@ -647,10 +732,7 @@ impl Floors {
                 FLOOR_NONE
             };
             let t1 = Instant::now();
-            let o = self
-                .obstacles
-                .as_ref()
-                .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
+            let o = self.obstacle_top(clat, clon, radius);
             self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
             let g = self.gtm_at(clat, clon, radius);
             let (ac, ak) = self.apt_at(clat, clon, radius);
@@ -688,10 +770,7 @@ impl Floors {
                     FLOOR_NONE
                 };
                 let t1 = Instant::now();
-                let o = self
-                    .obstacles
-                    .as_ref()
-                    .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
+                let o = self.obstacle_top(clat, clon, radius);
                 self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
                 let g = self.gtm_at(clat, clon, radius);
                 let (ac, ak) = self.apt_at(clat, clon, radius);
