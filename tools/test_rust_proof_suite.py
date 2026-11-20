@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 58)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 58)
+        self.assertEqual(registry["expected_proof_count"], 63)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 63)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 53)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 58)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -82,11 +82,16 @@ class SuiteConfigurationTests(unittest.TestCase):
         self.assertEqual(set(ca), {
             "ca-horizontal-span",
             "ca-vertical-span",
-            "ca-horizontal-now-has-span",
+            "ca-horizontal-now-step",
+            "ca-horizontal-now-bounds",
+            "ca-horizontal-now-approach",
+            "ca-horizontal-now-root",
+            "ca-horizontal-now-sqrt",
             "ca-vertical-now-has-span",
-            "ca-horizontal-miss",
+            "ca-horizontal-miss-point",
             "ca-meet",
-            "ca-predict",
+            "ca-predict-span",
+            "ca-predict-ttl",
             "ca-unknown-altitude",
         })
         for proof in ca.values():

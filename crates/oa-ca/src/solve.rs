@@ -46,15 +46,60 @@ pub struct Span {
     pub now: bool,
 }
 
-/// The loss interval of the horizontal separation, or `None` if the pair is never inside the
-/// limit `h` within `[0, t_max]`. `(rx, ry)` is the relative position, `(vx, vy)` the relative
-/// velocity.
-pub fn horizontal_span(rx: f64, ry: f64, vx: f64, vy: f64, h: f64, t_max: f64) -> Option<Span> {
+/// What the horizontal solver has once the discriminant is known: the answer where no square root
+/// is needed, or the quantities the root step takes.
+// A7.2: transient, one per pair evaluation; size guard waived.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HorizontalStep {
+    /// The span (or none) without a square root.
+    Done(Option<Span>),
+    /// The pair needs `sqrt(disc)`: `disc > 0`, `a` the squared relative speed (at least the
+    /// stationary threshold squared), `tc` the time of closest approach.
+    Root {
+        now: bool,
+        tc: f64,
+        a: f64,
+        disc: f64,
+    },
+}
+
+/// The first step of [`horizontal_span`]: everything up to the square root of the discriminant.
+/// The values it works from are computed apart (the squared speed, the discriminant, the time of
+/// closest approach) and the decision on them is [`step_of`], so that each is proved alone.
+pub fn horizontal_step(rx: f64, ry: f64, vx: f64, vy: f64, h: f64, t_max: f64) -> HorizontalStep {
     let hh = h * h;
     let now = rx * rx + ry * ry < hh;
     let a = vx * vx + vy * vy;
     if a < STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS {
-        return if now {
+        // A speed taken as zero: the other two values are not used (and `tc` would divide by it).
+        return step_of(now, a, 0.0, 0.0, t_max);
+    }
+    step_of(
+        now,
+        a,
+        discriminant(rx, ry, vx, vy, hh, a),
+        approach_time(rx, ry, vx, vy, a),
+        t_max,
+    )
+}
+
+/// The discriminant `H^2 a - cross(r, v)^2` of the horizontal loss quadratic.
+fn discriminant(rx: f64, ry: f64, vx: f64, vy: f64, hh: f64, a: f64) -> f64 {
+    let cross = rx * vy - ry * vx;
+    hh * a - cross * cross
+}
+
+/// The unclamped time of closest approach `-(r.v) / a`.
+fn approach_time(rx: f64, ry: f64, vx: f64, vy: f64, a: f64) -> f64 {
+    -(rx * vx + ry * vy) / a
+}
+
+/// The decision of [`horizontal_step`] from `now`, the squared speed `a`, the discriminant and the
+/// time of closest approach `tc` (the proofs take each of the last three under the contract
+/// proved for the function that computes it).
+pub fn step_of(now: bool, a: f64, disc: f64, tc: f64, t_max: f64) -> HorizontalStep {
+    if a < STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS {
+        return HorizontalStep::Done(if now {
             Some(Span {
                 lo: 0.0,
                 hi: t_max,
@@ -62,15 +107,12 @@ pub fn horizontal_span(rx: f64, ry: f64, vx: f64, vy: f64, h: f64, t_max: f64) -
             })
         } else {
             None
-        };
+        });
     }
-    let cross = rx * vy - ry * vx;
-    let disc = hh * a - cross * cross;
-    let tc = -(rx * vx + ry * vy) / a;
     if disc <= 0.0 {
         // Never inside; or inside now by less than the rounding of the discriminant, in which
         // case the pair is kept as current and leaves at the closest approach.
-        return if now {
+        return HorizontalStep::Done(if now {
             let hi = if tc < 0.0 {
                 0.0
             } else if tc > t_max {
@@ -81,9 +123,16 @@ pub fn horizontal_span(rx: f64, ry: f64, vx: f64, vy: f64, h: f64, t_max: f64) -
             Some(Span { lo: 0.0, hi, now })
         } else {
             None
-        };
+        });
     }
-    let w = oa_ieee::sqrt(disc) / a;
+    HorizontalStep::Root { now, tc, a, disc }
+}
+
+/// The last step of [`horizontal_span`]: the span from the square root of the discriminant,
+/// `root = sqrt(disc)`. It takes `root` as a parameter so that it is proved apart from the square
+/// root (the contract it is proved for is in the proofs module).
+pub fn span_from_root(now: bool, tc: f64, a: f64, t_max: f64, root: f64) -> Option<Span> {
+    let w = root / a;
     let t1 = tc - w;
     let t2 = tc + w;
     let lo = if now || t1 < 0.0 { 0.0 } else { t1 };
@@ -100,6 +149,18 @@ pub fn horizontal_span(rx: f64, ry: f64, vx: f64, vy: f64, h: f64, t_max: f64) -
         None
     } else {
         Some(Span { lo, hi, now })
+    }
+}
+
+/// The loss interval of the horizontal separation, or `None` if the pair is never inside the
+/// limit `h` within `[0, t_max]`. `(rx, ry)` is the relative position, `(vx, vy)` the relative
+/// velocity.
+pub fn horizontal_span(rx: f64, ry: f64, vx: f64, vy: f64, h: f64, t_max: f64) -> Option<Span> {
+    match horizontal_step(rx, ry, vx, vy, h, t_max) {
+        HorizontalStep::Done(s) => s,
+        HorizontalStep::Root { now, tc, a, disc } => {
+            span_from_root(now, tc, a, t_max, oa_ieee::sqrt(disc))
+        }
     }
 }
 
@@ -155,10 +216,11 @@ pub fn meet(h: &Span, v: &Span) -> Option<Span> {
     }
 }
 
-/// The smallest horizontal separation over `[0, t_max]` for straight-line motion, metres.
-pub fn horizontal_miss(rx: f64, ry: f64, vx: f64, vy: f64, t_max: f64) -> f64 {
+/// The time in `[0, t_max]` of the closest horizontal approach for straight-line motion, seconds
+/// (zero for a relative speed taken as zero).
+pub fn closest_time(rx: f64, ry: f64, vx: f64, vy: f64, t_max: f64) -> f64 {
     let a = vx * vx + vy * vy;
-    let t = if a < STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS {
+    if a < STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS {
         0.0
     } else {
         let tc = -(rx * vx + ry * vy) / a;
@@ -169,8 +231,19 @@ pub fn horizontal_miss(rx: f64, ry: f64, vx: f64, vy: f64, t_max: f64) -> f64 {
         } else {
             tc
         }
-    };
-    oa_math::hypot(rx + vx * t, ry + vy * t)
+    }
+}
+
+/// The relative position, metres, at the time of [`closest_time`].
+pub fn closest_point(rx: f64, ry: f64, vx: f64, vy: f64, t_max: f64) -> (f64, f64) {
+    let t = closest_time(rx, ry, vx, vy, t_max);
+    (rx + vx * t, ry + vy * t)
+}
+
+/// The smallest horizontal separation over `[0, t_max]` for straight-line motion, metres.
+pub fn horizontal_miss(rx: f64, ry: f64, vx: f64, vy: f64, t_max: f64) -> f64 {
+    let (x, y) = closest_point(rx, ry, vx, vy, t_max);
+    oa_math::hypot(x, y)
 }
 
 /// The smallest vertical separation over `[0, t_max]` for straight-line motion, feet.
@@ -258,15 +331,25 @@ pub fn predict(
     t_max: f64,
 ) -> Option<Prediction> {
     let m = conflict_span(rx, ry, vx, vy, h_eff, vert, t_max)?;
-    Some(Prediction {
-        ttl_s: if m.now { 0.0 } else { m.lo },
-        now: m.now,
-        h_miss_m: horizontal_miss(rx, ry, vx, vy, t_max),
-        v_miss_ft: match vert {
+    Some(prediction_of(
+        &m,
+        horizontal_miss(rx, ry, vx, vy, t_max),
+        match vert {
             Some(z) => vertical_miss(z.dz_ft, z.dvz_fps, t_max),
             None => f64::NAN,
         },
-    })
+    ))
+}
+
+/// The prediction of a conflict span `m` and the two smallest separations: the part of
+/// [`predict`] after the span and the misses are known, proved apart from them.
+pub fn prediction_of(m: &Span, h_miss_m: f64, v_miss_ft: f64) -> Prediction {
+    Prediction {
+        ttl_s: if m.now { 0.0 } else { m.lo },
+        now: m.now,
+        h_miss_m,
+        v_miss_ft,
+    }
 }
 
 #[cfg(kani)]
@@ -319,17 +402,106 @@ mod proofs {
         assert!(m.is_finite() && m >= 0.0);
     }
 
+    // The proofs that follow split the horizontal solver and the miss at the square root and the
+    // hypot, which the proofs of the arithmetic around them take as a parameter. Each states the
+    // contract it takes (a comment on its bounds) and a lemma proof shows the library function
+    // meets it on the bounded inputs. A composition proof is the whole property (the step, the
+    // contract, the last step) only because the production code is exactly that composition:
+    // `horizontal_span` is `horizontal_step`, then `span_from_root` of `oa_ieee::sqrt(disc)`;
+    // `horizontal_miss` is `closest_point`, then `oa_math::hypot`; `predict` is `conflict_span`,
+    // `horizontal_miss` and `vertical_miss`, then `prediction_of` (tested bit for bit against the
+    // unsplit code in `tests`).
+
+    /// Bounds of what the first step hands the root step, for the stated input bounds: the
+    /// squared relative speed at most 2 (4e3)^2 and the discriminant at most H^2 a, both with
+    /// room for rounding; the time of closest approach at most 2 (1e6)(4e3) / (5e-5)^2.
+    const A_MAX: f64 = 3.3e7;
+    const DISC_MAX: f64 = 4.0e19;
+    const TC_MAX: f64 = 4.0e18;
+    /// The contract on the square root: for a finite `disc` in `(0, DISC_MAX]`, `root` is finite,
+    /// not negative and at most this (sqrt of `DISC_MAX`, with room).
+    const ROOT_MAX: f64 = 7.0e9;
+    /// The bound on the horizontal coordinates of the closest point: 1e6 + 4e3 * 1e4, with room.
+    const POINT_MAX: f64 = 5.0e7;
+
     // REQ: OA-CA-028
     #[kani::proof]
-    fn a_pair_inside_the_horizontal_limit_now_has_a_span() {
-        let (rx, ry, vx, vy, h, t) = horizontal_inputs();
-        if rx * rx + ry * ry < h * h {
-            let s = horizontal_span(rx, ry, vx, vy, h, t);
-            assert!(s.is_some());
-            if let Some(s) = s {
-                assert!(s.now && s.lo == 0.0 && 0.0 <= s.hi && s.hi <= t);
+    fn the_decision_of_the_first_step_gives_a_current_pair_a_span_or_a_root_step() {
+        // The contract on the three values it takes: `a` finite, from 0 to A_MAX; `disc` finite;
+        // `tc` finite and at most TC_MAX when `a` is not taken as zero (proved for the functions
+        // that compute them, the three proofs below).
+        let (a, disc, tc, t): (f64, f64, f64, f64) =
+            (kani::any(), kani::any(), kani::any(), kani::any());
+        kani::assume(a >= 0.0 && a <= A_MAX);
+        kani::assume(disc.is_finite());
+        kani::assume(a < STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS || within(tc, TC_MAX));
+        kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);
+        match step_of(true, a, disc, tc, t) {
+            HorizontalStep::Done(s) => {
+                assert!(s.is_some());
+                if let Some(s) = s {
+                    assert!(s.now && s.lo == 0.0 && 0.0 <= s.hi && s.hi <= t);
+                }
+            }
+            HorizontalStep::Root {
+                now,
+                tc: rtc,
+                a: ra,
+                disc: rd,
+            } => {
+                assert!(now && within(rtc, TC_MAX) && rtc == tc);
+                assert!(ra >= STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS && ra <= A_MAX);
+                assert!(rd.is_finite() && rd > 0.0 && rd == disc);
             }
         }
+    }
+
+    // REQ: OA-CA-028
+    #[kani::proof]
+    fn the_squared_speed_and_the_discriminant_of_bounded_inputs_are_within_their_bounds() {
+        let (rx, ry, vx, vy, h, _t) = horizontal_inputs();
+        let hh = h * h;
+        let a = vx * vx + vy * vy;
+        assert!(a >= 0.0 && a <= A_MAX);
+        let d = discriminant(rx, ry, vx, vy, hh, a);
+        assert!(d.is_finite());
+        // The upper bound that the root contract needs (a negative one is no root step).
+        assert!(d <= DISC_MAX);
+    }
+
+    // REQ: OA-CA-028
+    #[kani::proof]
+    fn the_approach_time_of_bounded_inputs_is_finite_and_bounded_when_the_speed_is_not_zero() {
+        let (rx, ry, vx, vy, _h, _t) = horizontal_inputs();
+        let a = vx * vx + vy * vy;
+        kani::assume(a >= STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS);
+        assert!(within(approach_time(rx, ry, vx, vy, a), TC_MAX));
+    }
+
+    // REQ: OA-CA-028
+    #[kani::proof]
+    fn the_span_of_a_current_pair_from_any_root_within_the_contract_is_current() {
+        let (tc, a, t, root): (f64, f64, f64, f64) =
+            (kani::any(), kani::any(), kani::any(), kani::any());
+        kani::assume(within(tc, TC_MAX));
+        kani::assume(a >= STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS && a <= A_MAX);
+        kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);
+        // The root contract: finite, not negative, at most ROOT_MAX.
+        kani::assume(root >= 0.0 && root <= ROOT_MAX);
+        let s = span_from_root(true, tc, a, t, root);
+        assert!(s.is_some());
+        if let Some(s) = s {
+            assert!(s.now && s.lo == 0.0 && 0.0 <= s.hi && s.hi <= t);
+        }
+    }
+
+    // REQ: OA-CA-028
+    #[kani::proof]
+    fn the_square_root_of_a_bounded_discriminant_meets_the_root_contract() {
+        let disc: f64 = kani::any();
+        kani::assume(disc.is_finite() && disc > 0.0 && disc <= DISC_MAX);
+        let root = oa_ieee::sqrt(disc);
+        assert!(root >= 0.0 && root <= ROOT_MAX);
     }
 
     // REQ: OA-CA-028
@@ -349,33 +521,54 @@ mod proofs {
         }
     }
 
+    // The horizontal miss is `oa_math::hypot` of the closest point, and takes this contract of it:
+    // for finite `x` and `y`, each at most POINT_MAX in magnitude, the result is finite and not
+    // negative. It is NOT proved here: CBMC did not finish a proof of `hypot` over these inputs
+    // in 30 minutes (the result of its double-double path and its scaling are bit-level
+    // arithmetic of about forty products and divisions). The contract is the documented one
+    // (`oa_math::hypot`: faithfully rounded, no intermediate overflow, the result overflows only
+    // when it does not fit; the closest point is under 7.1e7 from the origin), checked against
+    // the reference data of `crates/oa-math/tests/reference.rs` (OA-MATH-005) and, for this
+    // crate, by `crates/oa-ca/tests/split.rs`.
+    //
     // REQ: OA-CA-029
     #[kani::proof]
-    fn the_horizontal_miss_is_finite_and_not_negative() {
+    fn the_closest_point_is_finite_and_bounded() {
         let (rx, ry, vx, vy, _h, t) = horizontal_inputs();
-        let m = horizontal_miss(rx, ry, vx, vy, t);
-        assert!(m.is_finite() && m >= 0.0);
+        let (x, y) = closest_point(rx, ry, vx, vy, t);
+        assert!(within(x, POINT_MAX) && within(y, POINT_MAX));
+        let ct = closest_time(rx, ry, vx, vy, t);
+        assert!(ct >= 0.0 && ct <= t);
     }
 
     // REQ: OA-CA-029
     #[kani::proof]
-    fn the_meet_of_two_ordered_spans_is_ordered_and_finite() {
+    fn a_conflict_span_of_any_ordered_horizontal_span_is_ordered_and_finite() {
+        // Any ordered horizontal span inside the look-ahead (the solver's own are such: proved
+        // in `horizontal_span_is_finite_and_ordered_for_bounded_inputs`), with the vertical part
+        // known: the conflict span `combine_spans` gives is finite, ordered, inside the look-ahead.
         let t: f64 = kani::any();
         kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);
-        let (a, b, c, d): (f64, f64, f64, f64) =
-            (kani::any(), kani::any(), kani::any(), kani::any());
-        kani::assume(0.0 <= a && a <= b && b <= t && 0.0 <= c && c <= d && d <= t);
-        let h = Span {
-            lo: a,
-            hi: b,
-            now: kani::any(),
+        let (lo, hi): (f64, f64) = (kani::any(), kani::any());
+        kani::assume(0.0 <= lo && lo <= hi && hi <= t);
+        let hs = if kani::any() {
+            Some(Span {
+                lo,
+                hi,
+                now: kani::any(),
+            })
+        } else {
+            None
         };
-        let v = Span {
-            lo: c,
-            hi: d,
-            now: kani::any(),
+        let (dz, dvz, v): (f64, f64, f64) = (kani::any(), kani::any(), kani::any());
+        kani::assume(within(dz, MAX_ALT_FT) && within(dvz, MAX_ABS_VRATE_FPS));
+        kani::assume(v > 0.0 && v <= MAX_ALT_FT);
+        let z = Vertical {
+            dz_ft: dz,
+            dvz_fps: dvz,
+            v_eff_ft: v,
         };
-        if let Some(m) = meet(&h, &v) {
+        if let Some(m) = combine_spans(hs, Some(&z), t) {
             assert!(m.lo.is_finite() && m.hi.is_finite());
             assert!(0.0 <= m.lo && m.lo <= m.hi && m.hi <= t);
         }
@@ -383,21 +576,25 @@ mod proofs {
 
     // REQ: OA-CA-029
     #[kani::proof]
-    fn a_prediction_is_finite_where_it_is_defined() {
-        let (rx, ry, vx, vy, h, t) = horizontal_inputs();
-        let (dz, dvz, v): (f64, f64, f64) = (kani::any(), kani::any(), kani::any());
-        kani::assume(within(dz, MAX_ALT_FT) && within(dvz, MAX_ABS_VRATE_FPS));
-        kani::assume(v > 0.0 && v <= MAX_ALT_FT);
-        let vert = Vertical {
-            dz_ft: dz,
-            dvz_fps: dvz,
-            v_eff_ft: v,
+    fn the_time_to_loss_of_a_prediction_is_finite_and_inside_the_look_ahead() {
+        // With the two misses any finite not negative values (the horizontal miss is proved in
+        // `the_closest_point_is_finite_and_bounded` and the hypot lemma, the vertical miss in
+        // `vertical_span_is_finite_and_ordered_for_bounded_inputs`).
+        let t: f64 = kani::any();
+        kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);
+        let (lo, hi, hm, vm): (f64, f64, f64, f64) =
+            (kani::any(), kani::any(), kani::any(), kani::any());
+        kani::assume(0.0 <= lo && lo <= hi && hi <= t);
+        kani::assume(hm.is_finite() && hm >= 0.0 && vm.is_finite() && vm >= 0.0);
+        let m = Span {
+            lo,
+            hi,
+            now: kani::any(),
         };
-        if let Some(p) = predict(rx, ry, vx, vy, h, Some(&vert), t) {
-            assert!(p.ttl_s.is_finite() && 0.0 <= p.ttl_s && p.ttl_s <= t);
-            assert!(p.h_miss_m.is_finite() && p.h_miss_m >= 0.0);
-            assert!(p.v_miss_ft.is_finite() && p.v_miss_ft >= 0.0);
-        }
+        let p = prediction_of(&m, hm, vm);
+        assert!(p.ttl_s.is_finite() && 0.0 <= p.ttl_s && p.ttl_s <= t);
+        assert!(p.h_miss_m.is_finite() && p.h_miss_m >= 0.0);
+        assert!(p.v_miss_ft.is_finite() && p.v_miss_ft >= 0.0);
     }
 
     // REQ: OA-CA-021

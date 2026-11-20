@@ -5459,6 +5459,7 @@ configuration with no default; the crate's tests use synthetic values.
   negative.
 - **OA-CA-021** Proved (Kani, bounded): an unknown altitude never removes a conflict: whenever a pair is in
   conflict with the altitude known it is in conflict with it unknown, starting no later and no less current.
+  (Kani proof `ca-unknown-altitude`, unchanged.)
 - **OA-CA-022** The tool's arguments are strict, and it exits 2, before opening or creating anything, for an
   input, configuration or output path that is, is inside, or resolves into a sealed 2026-11-19 recording.
 - **OA-CA-023** The configuration file has no defaults: every key is required, an unknown or repeated key, a
@@ -5481,10 +5482,23 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-CA-028** A pair inside the horizontal limit now, or inside the vertical limit now, always has a
   loss interval of that kind, current, starting at zero and ending inside the look-ahead, even when the
   rounding of the solution puts the end of the interval a hair before zero; the exact edge is not inside.
-  Tested at margins from 1 m to 1e-12 m and proved (Kani, bounded) for both solvers.
-- **OA-CA-029** Proved (Kani, bounded): the horizontal miss is finite and not negative; the meet of two
-  ordered intervals is finite and ordered inside the look-ahead; a prediction has a finite time to loss
-  inside the look-ahead and finite, not negative misses.
+  Tested at margins from 1 m to 1e-12 m and proved (Kani, bounded) for both solvers. The horizontal proof is
+  split at the square root: the first step (`horizontal_step`: the squared speed, the discriminant, the time
+  of closest approach, then the decision `step_of`) and the last (`span_from_root`, taking `root`) are
+  proved apart, each in seconds (`ca-horizontal-now-step`, `-bounds`, `-approach`, `-root`), with the root
+  a free value under the contract "finite, not negative, at most 7e9", which the square root of a finite
+  discriminant in `(0, 4e19]` meets (`ca-horizontal-now-sqrt`). The split is the same arithmetic in the same
+  order (`crates/oa-ca/tests/split.rs`: bit for bit against the unsplit code on a million inputs).
+- **OA-CA-029** Proved (Kani, bounded), in parts: the meet of two ordered intervals is finite and ordered
+  inside the look-ahead (`ca-meet`); the conflict span of any ordered horizontal span and a bounded vertical
+  part is finite and ordered (`ca-predict-span`); the time to loss of a prediction made from an ordered span
+  is finite and inside the look-ahead, the misses carried unchanged (`ca-predict-ttl`; `predict` is the
+  conflict span, the two misses, then `prediction_of`); the vertical miss is finite and not negative
+  (`ca-vertical-span`); the closest point of the horizontal miss is finite, within 5e7 m of the origin, at a
+  time inside the look-ahead (`ca-horizontal-miss-point`). Not proved: that `oa_math::hypot` of such a
+  point is finite and not negative, which the horizontal miss takes as a contract; CBMC did not finish
+  that lemma in 30 minutes. The contract is the documented behaviour of `hypot` (OA-MATH-005, tested
+  against reference data); a Kani proof of it needs a split of `oa_math::hypot` itself.
 - **OA-CA-030** The tool uses the shared sealed-path guard (`oa-sealed`) for every path: the clip, the
   configuration and the output directory are checked as given and after links before anything is opened or
   created, and the configuration is opened, then verified as the file opened (a link swapped between check
