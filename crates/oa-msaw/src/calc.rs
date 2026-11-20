@@ -4,13 +4,14 @@
 //! [`crate::MAX_ABS_VRATE_FPM`].
 
 use crate::types::{
-    Corridor, FloorKind, FloorSample, Grade, MsawConfig, SamplePoint, FLOOR_NONE, MAX_ABS_ALT_FT,
-    MAX_ABS_LAT_DEG, MAX_CLEARANCE_FT, MAX_FLOOR_FT, MAX_RADIUS_M,
+    Corridor, CorridorHit, FloorKind, FloorSample, Grade, MsawConfig, SamplePoint, CK_DEPARTURE,
+    CK_RUNWAY, FLOOR_NONE, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG, MAX_CLEARANCE_FT, MAX_FLOOR_FT,
+    MAX_RADIUS_M,
 };
 
 /// Metres per degree of latitude (mean radius 6,371,008.8 m).
-const M_PER_DEG: f64 = 111_194.926_644_558_74;
-const RAD_PER_DEG: f64 = 0.017_453_292_519_943_295;
+pub(crate) const M_PER_DEG: f64 = 111_194.926_644_558_74;
+pub(crate) const RAD_PER_DEG: f64 = 0.017_453_292_519_943_295;
 /// Feet and whole numbers beyond this are held to it before they become an `i32`.
 const I32_HOLD: f64 = 1.0e9;
 
@@ -47,25 +48,25 @@ pub fn deg_to_e7(x: f64) -> i32 {
     oa_math::clamp_f64(oa_ieee::round(x * 1.0e7), -1.8e9, 1.8e9) as i32
 }
 
-/// The floor at a point and what set it. `surface_ft` is the approach surface of the corridor the
-/// point's whole query circle lies inside (`None` outside every corridor, see
-/// [`corridor_surface_at`]). `None` when the point has no coverage (rule 1): no floor is invented.
+/// The floor at a point and what set it. `hit` is what the corridors say of the point (`None`
+/// outside every corridor whose whole query circle holds it, see [`corridor_hit_at`]). `None`
+/// when the point has no coverage (rule 1): no floor is invented.
 ///
 /// Outside the corridors the floor is the higher of terrain plus its clearance, the obstacle top
 /// plus its clearance and the chart altitude. Inside one the chart altitude does not apply and
-/// the floor is the higher of the surface and terrain or the obstacle top plus the approach
-/// clearance: terrain and obstacles protect an approach always. Terrain, the obstacle data and
-/// (outside a corridor only) the chart must all be there.
+/// the floor is the higher of the surface, if the corridor has one, and terrain or the obstacle
+/// top plus the corridor's clearance: terrain and obstacles protect an approach or a departure
+/// always. Terrain, the obstacle data and (outside a corridor only) the chart must all be there.
 pub fn floor_of(
     s: &FloorSample,
-    surface_ft: Option<i32>,
+    hit: Option<CorridorHit>,
     cfg: &MsawConfig,
 ) -> Option<(i32, FloorKind)> {
     if s.terrain_ft == FLOOR_NONE || !s.obstacle_covered {
         return None;
     }
-    let (tc, oc) = match surface_ft {
-        Some(_) => (cfg.approach_min_clearance_ft, cfg.approach_min_clearance_ft),
+    let (tc, oc) = match hit {
+        Some(h) => (h.clearance_ft, h.clearance_ft),
         None => (cfg.terrain_clearance_ft, cfg.obstacle_clearance_ft),
     };
     let mut best = (s.terrain_ft.saturating_add(tc), FloorKind::Terrain);
@@ -75,10 +76,12 @@ pub fn floor_of(
             best = (o, FloorKind::Obstacle);
         }
     }
-    match surface_ft {
-        Some(a) => {
-            if a > best.0 {
-                best = (a, FloorKind::Procedure);
+    match hit {
+        Some(h) => {
+            if let Some(a) = h.surface_ft {
+                if a > best.0 {
+                    best = (a, FloorKind::Procedure);
+                }
             }
         }
         None => {
@@ -109,19 +112,20 @@ fn alt_ceil_ft(x: f64) -> i32 {
     oa_math::clamp_f64(oa_ieee::ceil(x), -I32_HOLD, I32_HOLD) as i32
 }
 
-/// The approach surface of corridor `c` for a query circle at (`lat_e7`, `lon_e7`) of `radius_m`:
-/// `Some` only if the whole circle lies inside the corridor, then the surface at the circle's far
-/// side along the centreline (the highest it reaches), rounded up. The surface is a straight line
-/// from the threshold elevation at the threshold to the published altitude at the fix lowered by
-/// `allowance_ft` at the far end. The circle is inside when its centre is at least `radius_m`
-/// from every one of the four edges.
-pub fn corridor_surface_ft(
+/// What corridor `c` says of a query circle at (`lat_e7`, `lon_e7`) of `radius_m`: `Some` only if
+/// the whole circle lies inside the corridor, then the corridor's clearance and its surface at
+/// the circle's far side along the centreline (the highest it reaches), rounded up. An approach
+/// surface is a straight line from the threshold elevation at the threshold to the published
+/// altitude at the fix lowered by the allowance at the far end; a runway surface is the threshold
+/// elevation; a departure corridor has none. The circle is inside when its centre is at least
+/// `radius_m` from every one of the four edges.
+pub fn corridor_hit_ft(
     c: &Corridor,
     lat_e7: i32,
     lon_e7: i32,
     radius_m: f64,
-    allowance_ft: i32,
-) -> Option<i32> {
+    cfg: &MsawConfig,
+) -> Option<CorridorHit> {
     let thr_lat = f64::from(c.thr_lat_e7) * 1.0e-7;
     let cos_lat = oa_math::cos(thr_lat * RAD_PER_DEG);
     let (sin_b, cos_b) = oa_math::sin_cos(c.out_bearing_deg * RAD_PER_DEG);
@@ -143,24 +147,50 @@ pub fn corridor_surface_ft(
         return None;
     }
     let far = oa_math::min_f64(along + radius_m, c.length_m);
-    let top = f64::from(c.faf_alt_ft) - f64::from(allowance_ft);
-    let base = f64::from(c.thr_elev_ft);
-    Some(alt_ceil_ft(base + (top - base) * far / c.length_m))
+    Some(match c.kind {
+        CK_DEPARTURE => CorridorHit {
+            surface_ft: None,
+            clearance_ft: cfg.departure_min_clearance_ft,
+        },
+        CK_RUNWAY => CorridorHit {
+            surface_ft: Some(c.thr_elev_ft),
+            clearance_ft: cfg.approach_min_clearance_ft,
+        },
+        _ => {
+            let top = f64::from(c.faf_alt_ft) - f64::from(cfg.approach_allowance_ft);
+            let base = f64::from(c.thr_elev_ft);
+            CorridorHit {
+                surface_ft: Some(alt_ceil_ft(base + (top - base) * far / c.length_m)),
+                clearance_ft: cfg.approach_min_clearance_ft,
+            }
+        }
+    })
 }
 
-/// The approach surface at a point: the highest surface of the corridors of `cfg` that hold the
-/// point's whole query circle, `None` if no corridor does.
-pub fn corridor_surface_at(cfg: &MsawConfig, p: &SamplePoint) -> Option<i32> {
-    let mut best: Option<i32> = None;
+/// The union of two hits: the higher surface and the higher clearance.
+pub(crate) fn hit_union(a: Option<CorridorHit>, b: CorridorHit) -> CorridorHit {
+    match a {
+        None => b,
+        Some(a) => CorridorHit {
+            surface_ft: match (a.surface_ft, b.surface_ft) {
+                (Some(x), Some(y)) => Some(x.max(y)),
+                (x, None) => x,
+                (None, y) => y,
+            },
+            clearance_ft: a.clearance_ft.max(b.clearance_ft),
+        },
+    }
+}
+
+/// What the corridors of `cfg` say of a point: the union of the hits of every corridor that
+/// holds the point's whole query circle, `None` if none does. Looks at every corridor; the net
+/// uses [`crate::corridor_hit_at`], which looks at those whose cell holds the point and gives the
+/// same answer (tested against this).
+pub fn corridor_hit_linear(cfg: &MsawConfig, p: &SamplePoint) -> Option<CorridorHit> {
+    let mut best: Option<CorridorHit> = None;
     for c in cfg.corridors.iter().take(cfg.n_corridors) {
-        if let Some(v) = corridor_surface_ft(
-            c,
-            p.lat_e7,
-            p.lon_e7,
-            f64::from(p.radius_m),
-            cfg.approach_allowance_ft,
-        ) {
-            best = Some(best.map_or(v, |b| b.max(v)));
+        if let Some(h) = corridor_hit_ft(c, p.lat_e7, p.lon_e7, f64::from(p.radius_m), cfg) {
+            best = Some(hit_union(best, h));
         }
     }
     best
@@ -285,7 +315,7 @@ const _: () = assert!(MAX_ABS_ALT_FT < 1.0e9);
 mod proofs {
     //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
     use super::*;
-    use crate::types::{MAX_ABS_VRATE_FPM, MAX_CORRIDORS, MAX_LOOK_AHEAD_S};
+    use crate::types::{CK_APPROACH, MAX_ABS_VRATE_FPM, MAX_CORRIDORS, MAX_LOOK_AHEAD_S};
 
     fn cfg_with(tc: i32, oc: i32, amc: i32) -> MsawConfig {
         MsawConfig {
@@ -302,8 +332,10 @@ mod proofs {
             r95_cap_m: 1000.0,
             approach_allowance_ft: 0,
             approach_min_clearance_ft: amc,
+            departure_min_clearance_ft: amc,
             velocity_uncertainty_mps: 0.0,
             corridors: [Corridor {
+                kind: CK_APPROACH,
                 thr_lat_e7: 0,
                 thr_lon_e7: 0,
                 out_bearing_deg: 0.0,
@@ -347,7 +379,15 @@ mod proofs {
         // are both covered, the surface is a value the geometry gives and is held fixed.
         let a: i32 = kani::any();
         let use_surface: bool = kani::any();
-        let surface = if use_surface { Some(a) } else { None };
+        let in_corridor: bool = kani::any();
+        let hit = if in_corridor {
+            Some(CorridorHit {
+                surface_ft: if use_surface { Some(a) } else { None },
+                clearance_ft: amc,
+            })
+        } else {
+            None
+        };
         // The second sample is at least as high in every input, none without coverage.
         kani::assume(t1 != FLOOR_NONE && m1 != FLOOR_NONE);
         kani::assume(t1 <= t2 && m1 <= m2);
@@ -365,8 +405,7 @@ mod proofs {
             obstacle_covered: true,
             mva_ft: m2,
         };
-        if let (Some((f1, _)), Some((f2, _))) =
-            (floor_of(&s1, surface, &cfg), floor_of(&s2, surface, &cfg))
+        if let (Some((f1, _)), Some((f2, _))) = (floor_of(&s1, hit, &cfg), floor_of(&s2, hit, &cfg))
         {
             assert!(f1 <= f2);
             if violates(alt, f1) {
@@ -414,7 +453,11 @@ mod proofs {
             obstacle_covered: covered,
             mva_ft: m,
         };
-        if let Some((f, _)) = floor_of(&s, Some(a), &cfg) {
+        let hit = CorridorHit {
+            surface_ft: Some(a),
+            clearance_ft: amc,
+        };
+        if let Some((f, _)) = floor_of(&s, Some(hit), &cfg) {
             // An answer needs terrain and the obstacle data, and then it holds the floor above
             // both (the chart altitude is not a condition inside a corridor).
             assert!(t != FLOOR_NONE && covered);

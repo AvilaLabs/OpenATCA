@@ -13,9 +13,10 @@ use oa_safety::inhibit::{inhibit_suppress, InhibitTable};
 use oa_safety::net::{state_report, Area, NetId, NetReport, Reason, StateTable};
 
 use crate::calc::{
-    alt_floor_ft, corridor_surface_at, deg_to_e7, floor_of, grade_of, lowest_alt_ft,
-    predicted_alt_ft, sample_points, sample_span_s, violates, violation_time_s, PathStart,
+    alt_floor_ft, deg_to_e7, floor_of, grade_of, lowest_alt_ft, predicted_alt_ft, sample_points,
+    sample_span_s, violates, violation_time_s, PathStart,
 };
+use crate::corridor::corridor_hit_at;
 use crate::state::{alert_push, skip_push, MsawState};
 use crate::types::{
     Alert, AlertLog, CycleStats, FloorKind, FloorSample, Grade, MsawTrack, SamplePoint, SkipLog,
@@ -297,8 +298,8 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         partial: false,
     };
     for (k, (p, s)) in pts.iter().zip(floors.iter()).enumerate() {
-        let surface_ft = corridor_surface_at(cfg, p);
-        let Some((floor, kind)) = floor_of(s, surface_ft, cfg) else {
+        let hit = corridor_hit_at(cfg, &st.cidx, p);
+        let Some((floor, kind)) = floor_of(s, hit, cfg) else {
             v.partial = true;
             continue;
         };

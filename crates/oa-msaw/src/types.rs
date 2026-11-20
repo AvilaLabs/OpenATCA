@@ -6,9 +6,11 @@ use alloc::vec::Vec;
 /// obstacle and chart lookup per point and track, so the bound is also a bound on that work; 32
 /// points over a look-ahead of a few minutes is a point every few seconds.
 pub const MAX_SAMPLES: usize = 32;
-/// Most final-approach corridors a configuration may name. C2: one per runway end that has an
-/// instrument approach; a facility's airports are some tens of runway ends.
-pub const MAX_CORRIDORS: usize = 256;
+/// Most corridors a configuration may name. C2: per runway end that has an instrument approach or
+/// a departure procedure, an approach corridor, a strip along the runway and a departure
+/// corridor; a facility's airports are some tens of runway ends, and the grid index of the
+/// corridors holds a few dozen cells for each.
+pub const MAX_CORRIDORS: usize = 1024;
 /// Largest `max_tracks` the configuration may ask for (every per-track table is allocated whole).
 pub const MAX_TRACKS_LIMIT: usize = 1 << 20;
 /// Largest `max_open` the configuration may ask for.
@@ -129,30 +131,53 @@ pub struct FloorSample {
     pub mva_ft: i32,
 }
 
-/// A final-approach corridor: the strip under the extended centreline of a runway end that has an
-/// instrument approach, from the landing threshold outward to the final approach fix. Inside it
-/// (whole query circle) the floor is a surface rising from the threshold to the published
-/// altitude of the fix, never below terrain and obstacles plus a clearance, and the chart
-/// altitude does not apply. A trapezoid: its half-width runs linearly from the threshold end to
-/// the far end.
+/// [`Corridor::kind`]: a final-approach corridor, from the landing threshold outward to the final
+/// approach fix, under a surface rising to the fix altitude.
+pub const CK_APPROACH: u8 = 0;
+/// [`Corridor::kind`]: the strip along a runway, held under a flat surface at the threshold
+/// elevation: the approach corridor's continuation.
+pub const CK_RUNWAY: u8 = 1;
+/// [`Corridor::kind`]: a departure corridor, from the departure end outward along the runway
+/// heading, with no surface and its own clearance above terrain and obstacles.
+pub const CK_DEPARTURE: u8 = 2;
+
+/// A corridor: the strip under the extended centreline of a runway end that has an instrument
+/// approach, from the landing threshold outward to the final approach fix ([`CK_APPROACH`]), along
+/// the runway ([`CK_RUNWAY`]) or out from its departure end ([`CK_DEPARTURE`]). Inside it (whole
+/// query circle) the floor is the higher of the corridor's surface, if it has one, and terrain and
+/// obstacles plus a clearance, and the chart altitude does not apply. A trapezoid: its half-width
+/// runs linearly from the threshold end to the far end. An approach surface rises from the
+/// threshold elevation to the published altitude of the fix; a runway surface is the threshold
+/// elevation.
 // A7.2: cold struct (adaptation), size guard waived. Held inline so that the configuration stays
 // `Copy` and allocates nothing (C1); there are at most `MAX_CORRIDORS`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Corridor {
-    /// The landing threshold, 1e-7 degree.
+    /// `CK_*`.
+    pub kind: u8,
+    /// The near end of the strip (the landing threshold, or the departure end), 1e-7 degree.
     pub thr_lat_e7: i32,
     pub thr_lon_e7: i32,
-    /// The direction of the centreline from the threshold outward (away from the runway), degrees
-    /// true clockwise from north.
+    /// The direction of the centreline from the near end outward, degrees true clockwise from
+    /// north.
     pub out_bearing_deg: f64,
-    /// Threshold to the far end, metres.
+    /// Near end to the far end, metres.
     pub length_m: f64,
-    /// Half-width at the threshold and at the far end, metres.
+    /// Half-width at the near end and at the far end, metres.
     pub near_half_width_m: f64,
     pub far_half_width_m: f64,
-    /// The threshold elevation and the published altitude at the fix, feet MSL.
+    /// The threshold elevation and the published altitude at the fix, feet MSL (the altitude is
+    /// not used by a runway or departure corridor).
     pub thr_elev_ft: i32,
     pub faf_alt_ft: i32,
+}
+
+/// What the corridors say of a point: the surface of the highest corridor that holds it, if any
+/// has one, and the highest clearance of those that hold it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorridorHit {
+    pub surface_ft: Option<i32>,
+    pub clearance_ft: i32,
 }
 
 /// The settings of the net. Every value is the caller's (no defaults: no safety value is chosen
@@ -184,8 +209,10 @@ pub struct MsawConfig {
     pub r95_cap_m: f64,
     /// Inside a corridor the surface is held this far below the published altitude at the fix, feet.
     pub approach_allowance_ft: i32,
-    /// Inside a corridor the clearance above terrain and obstacle tops, feet.
+    /// Inside an approach or runway corridor the clearance above terrain and obstacle tops, feet.
     pub approach_min_clearance_ft: i32,
+    /// Inside a departure corridor the clearance above terrain and obstacle tops, feet.
+    pub departure_min_clearance_ft: i32,
     /// The growth of a sample point's radius with the prediction time, metres per second.
     pub velocity_uncertainty_mps: f64,
     /// The corridors; `n_corridors` of them are used.

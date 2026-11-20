@@ -2,10 +2,11 @@
 
 use alloc::vec::Vec;
 
+use crate::corridor::{corridor_index_new, CorridorIndex};
 use crate::types::{
-    Alert, AlertLog, CycleStats, MsawConfig, MsawTrack, SamplePoint, SkipLog, Skipped,
-    MAX_CLEARANCE_FT, MAX_CORRIDORS, MAX_CORRIDOR_LENGTH_M, MAX_LOOK_AHEAD_S, MAX_OPEN_LIMIT,
-    MAX_RADIUS_M, MAX_SAMPLES, MAX_SPEED_LIMIT_MPS, MAX_TRACKS_LIMIT,
+    Alert, AlertLog, CycleStats, MsawConfig, MsawTrack, SamplePoint, SkipLog, Skipped, CK_APPROACH,
+    CK_DEPARTURE, MAX_CLEARANCE_FT, MAX_CORRIDORS, MAX_CORRIDOR_LENGTH_M, MAX_LOOK_AHEAD_S,
+    MAX_OPEN_LIMIT, MAX_RADIUS_M, MAX_SAMPLES, MAX_SPEED_LIMIT_MPS, MAX_TRACKS_LIMIT,
 };
 
 /// Most points of one cycle (`max_tracks` times `samples`): the table of points is allocated
@@ -18,6 +19,8 @@ const MAX_POINTS_LIMIT: usize = 1 << 24;
 #[derive(Debug)]
 pub struct MsawState {
     pub(crate) cfg: MsawConfig,
+    /// The grid index of the corridors.
+    pub(crate) cidx: CorridorIndex,
     /// The tracks planned this cycle, in address order.
     pub(crate) plan: Vec<MsawTrack>,
     /// Their sample points, `cfg.samples` for each.
@@ -71,6 +74,7 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
         (c.obstacle_clearance_ft, "obstacle_clearance_ft"),
         (c.approach_allowance_ft, "approach_allowance_ft"),
         (c.approach_min_clearance_ft, "approach_min_clearance_ft"),
+        (c.departure_min_clearance_ft, "departure_min_clearance_ft"),
     ] {
         if !(0..=MAX_CLEARANCE_FT).contains(&v) {
             return Err(name);
@@ -101,7 +105,8 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
     }
     for p in c.corridors.iter().take(c.n_corridors) {
         let sane_m = |v: f64| v.is_finite() && v > 0.0 && v <= MAX_CORRIDOR_LENGTH_M;
-        if !(sane_m(p.length_m)
+        if !((CK_APPROACH..=CK_DEPARTURE).contains(&p.kind)
+            && sane_m(p.length_m)
             && sane_m(p.near_half_width_m)
             && sane_m(p.far_half_width_m)
             && p.out_bearing_deg.is_finite()
@@ -134,6 +139,7 @@ pub fn msaw_new(cfg: &MsawConfig) -> Result<MsawState, &'static str> {
     msaw_check(cfg)?;
     Ok(MsawState {
         cfg: *cfg,
+        cidx: corridor_index_new(cfg)?,
         plan: table(cfg.max_tracks, "max_tracks: cannot be allocated")?,
         points: table(
             cfg.max_tracks.saturating_mul(cfg.samples),

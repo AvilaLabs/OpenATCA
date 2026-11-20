@@ -9,8 +9,8 @@
 )]
 
 use oa_msaw::calc::{
-    alt_floor_ft, corridor_surface_ft, grade_of, lowest_alt_ft, predicted_alt_ft, sample_points,
-    sample_span_s, sample_time_s, violation_time_s, PathStart,
+    alt_floor_ft, corridor_hit_ft, corridor_hit_linear, grade_of, lowest_alt_ft, predicted_alt_ft,
+    sample_points, sample_span_s, sample_time_s, violation_time_s, PathStart,
 };
 use oa_msaw::*;
 use oa_safety::inhibit::{
@@ -36,6 +36,7 @@ fn cfg() -> MsawConfig {
         r95_cap_m: 2000.0,
         approach_allowance_ft: 300,
         approach_min_clearance_ft: 100,
+        departure_min_clearance_ft: 100,
         velocity_uncertainty_mps: 5.0,
         corridors: [blank_corridor(); MAX_CORRIDORS],
         n_corridors: 0,
@@ -44,6 +45,7 @@ fn cfg() -> MsawConfig {
 
 fn blank_corridor() -> Corridor {
     Corridor {
+        kind: CK_APPROACH,
         thr_lat_e7: 0,
         thr_lon_e7: 0,
         out_bearing_deg: 0.0,
@@ -556,6 +558,7 @@ fn the_floor_is_the_higher_of_terrain_obstacle_and_chart_with_clearances() {
 /// is about 2,245 ft).
 fn north_corridor() -> Corridor {
     Corridor {
+        kind: CK_APPROACH,
         thr_lat_e7: 400_000_000,
         thr_lon_e7: -880_000_000,
         out_bearing_deg: 180.0,
@@ -579,6 +582,18 @@ fn south_m(m: f64) -> f64 {
     40.0 - m / 111_194.926_644_558_74
 }
 
+/// What a corridor with a surface of `ft` says: the approach clearance of `cfg()`.
+fn hit(ft: i32) -> CorridorHit {
+    CorridorHit {
+        surface_ft: Some(ft),
+        clearance_ft: 100,
+    }
+}
+
+fn surf(ft: i32) -> Option<CorridorHit> {
+    Some(hit(ft))
+}
+
 // REQ: OA-MSAW-009
 #[test]
 fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
@@ -588,7 +603,7 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
         let lat = (south_m(m) * 1e7).round() as i32;
         let lon = ((-88.0 + cross_m / (111_194.926_644_558_74 * 40.0f64.to_radians().cos())) * 1e7)
             .round() as i32;
-        corridor_surface_ft(&k, lat, lon, r, c.approach_allowance_ft)
+        corridor_hit_ft(&k, lat, lon, r, &c).map(|h| h.surface_ft.unwrap())
     };
     // The surface runs from 600 ft at the threshold to 1,950 ft (2,250 less the allowance) at
     // the far end, taken at the far side of the circle, rounded up.
@@ -619,11 +634,11 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
         lon_e7: -880_000_000,
         radius_m: 100.0,
     };
-    let one = calc::corridor_surface_at(&c, &p).unwrap();
-    let both = calc::corridor_surface_at(&two, &p).unwrap();
+    let one = corridor_hit_linear(&c, &p).unwrap().surface_ft.unwrap();
+    let both = corridor_hit_linear(&two, &p).unwrap().surface_ft.unwrap();
     assert!(both > one);
     assert_eq!(
-        calc::corridor_surface_at(&cfg(), &p),
+        corridor_hit_linear(&cfg(), &p),
         None,
         "no corridor configured"
     );
@@ -637,11 +652,11 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
     };
     assert_eq!(floor_of(&s, None, &c), Some((3000, FloorKind::Mva)));
     assert_eq!(
-        floor_of(&s, Some(900), &c),
+        floor_of(&s, surf(900), &c),
         Some((1100, FloorKind::Obstacle))
     );
     assert_eq!(
-        floor_of(&s, Some(1500), &c),
+        floor_of(&s, surf(1500), &c),
         Some((1500, FloorKind::Procedure))
     );
     let low = FloorSample {
@@ -650,7 +665,7 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
         ..s
     };
     assert_eq!(
-        floor_of(&low, Some(1500), &c),
+        floor_of(&low, surf(1500), &c),
         Some((1800, FloorKind::Terrain))
     );
     // Terrain and the obstacle data are needed in a corridor; the chart is not.
@@ -658,18 +673,18 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
         mva_ft: FLOOR_NONE,
         ..s
     };
-    assert!(floor_of(&nochart, Some(900), &c).is_some());
+    assert!(floor_of(&nochart, surf(900), &c).is_some());
     assert_eq!(floor_of(&nochart, None, &c), None);
     let noterrain = FloorSample {
         terrain_ft: FLOOR_NONE,
         ..s
     };
-    assert_eq!(floor_of(&noterrain, Some(900), &c), None);
+    assert_eq!(floor_of(&noterrain, surf(900), &c), None);
     let noobst = FloorSample {
         obstacle_covered: false,
         ..s
     };
-    assert_eq!(floor_of(&noobst, Some(900), &c), None);
+    assert_eq!(floor_of(&noobst, surf(900), &c), None);
     assert_eq!(floor_of(&noobst, None, &c), None);
 }
 
@@ -1203,8 +1218,8 @@ fn a_higher_floor_never_removes_an_alert_over_a_sweep() {
                         mva_ft: mva + bump,
                     };
                     for surface in [None, Some(0), Some(1500), Some(9000)] {
-                        let (fa, _) = floor_of(&a, surface, &c).unwrap();
-                        let (fb, _) = floor_of(&b, surface, &c).unwrap();
+                        let (fa, _) = floor_of(&a, surface.map(hit), &c).unwrap();
+                        let (fb, _) = floor_of(&b, surface.map(hit), &c).unwrap();
                         assert!(fa <= fb);
                         for alt in [-100, 0, 1000, 2000, 6000] {
                             if violates(alt, fa) {
@@ -1279,4 +1294,149 @@ fn a_track_flagged_with_no_altimeter_setting_is_counted_listed_and_evaluated() {
     let o = cycle(&mut r, S, &[b], &flat(0, 2000));
     assert_eq!(o.stats.qnh_missing, 0);
     assert_eq!(o.report, NetReport::Running);
+}
+
+/// A made-up departure corridor from the departure end at 40.0 N, 88.0 W heading north: 5 NM,
+/// 556 m either side at the end widening to 1,852 m.
+fn departure_corridor() -> Corridor {
+    Corridor {
+        kind: CK_DEPARTURE,
+        thr_lat_e7: 400_000_000,
+        thr_lon_e7: -880_000_000,
+        out_bearing_deg: 0.0,
+        length_m: 9260.0,
+        near_half_width_m: 556.0,
+        far_half_width_m: 1852.0,
+        thr_elev_ft: 600,
+        faf_alt_ft: 0,
+    }
+}
+
+// REQ: OA-MSAW-053
+#[test]
+fn a_departure_climbing_normally_does_not_alert_and_one_levelling_off_below_its_floor_does() {
+    let mut c = cfg();
+    c.corridors[0] = departure_corridor();
+    c.n_corridors = 1;
+    c.departure_min_clearance_ft = 100;
+    // Terrain 1,000 ft everywhere, the chart at 6,000 ft: inside the corridor only terrain plus
+    // the departure clearance (1,100 ft) is the floor, the chart does not apply.
+    let world = flat(1000, 6000);
+    let dep = |k: i64, alt: f32, vr: f32| {
+        let along = 600.0 + 70.0 * k as f64;
+        tr(
+            9,
+            40.0 + along / 111_194.926_644_558_74,
+            -88.0,
+            0.0,
+            70.0,
+            alt,
+            vr,
+        )
+    };
+    let mut r = rig(&c);
+    for k in 0..=30 {
+        let o = cycle(
+            &mut r,
+            k * S,
+            &[dep(k, 1200.0 + 25.0 * k as f32, 1500.0)],
+            &world,
+        );
+        assert_eq!(o.stats.violations, 0, "cycle {k}");
+    }
+    // Levelling off at 1,050 ft, 50 ft below terrain plus the clearance.
+    let mut r = rig(&c);
+    for k in 0..=30 {
+        cycle(&mut r, k * S, &[dep(k, 1050.0, 0.0)], &world);
+    }
+    msaw_finish(&mut r.st, &mut r.alerts);
+    assert_eq!(r.alerts.items.len(), 1);
+    assert_eq!(r.alerts.items[0].worst_kind, FloorKind::Terrain);
+    assert_eq!(r.alerts.items[0].worst_floor_ft, 1100);
+    // The same flight outside the corridor (3 km east of the line) is held to the chart.
+    let mut r = rig(&c);
+    for k in 0..=30 {
+        let mut t = dep(k, 1200.0 + 25.0 * k as f32, 1500.0);
+        t.lon_deg = -88.0 + 3000.0 / (111_194.926_644_558_74 * 40.0f64.to_radians().cos());
+        cycle(&mut r, k * S, &[t], &world);
+    }
+    msaw_finish(&mut r.st, &mut r.alerts);
+    assert_eq!(r.alerts.items.len(), 1);
+    assert_eq!(r.alerts.items[0].worst_kind, FloorKind::Mva);
+}
+
+// REQ: OA-MSAW-053
+#[test]
+fn a_runway_corridor_holds_the_threshold_elevation_and_the_approach_clearance_and_no_chart() {
+    let mut c = cfg();
+    let mut k = departure_corridor();
+    k.kind = CK_RUNWAY;
+    k.length_m = 2500.0;
+    c.corridors[0] = k;
+    c.n_corridors = 1;
+    let at = |along_m: f64| {
+        let p = SamplePoint {
+            lat_e7: (((40.0 + along_m / 111_194.926_644_558_74) * 1e7).round()) as i32,
+            lon_e7: -880_000_000,
+            radius_m: 100.0,
+        };
+        corridor_hit_linear(&c, &p)
+    };
+    assert_eq!(
+        at(1000.0),
+        Some(CorridorHit {
+            surface_ft: Some(600),
+            clearance_ft: 100
+        })
+    );
+    assert_eq!(at(2450.0), None, "the circle reaches past the far end");
+    assert_eq!(at(50.0), None, "the circle reaches past the near end");
+}
+
+// REQ: OA-MSAW-054
+#[test]
+fn the_corridor_index_gives_the_answer_of_looking_at_every_corridor() {
+    let mut state = 12345u64;
+    let mut rnd = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 11) as f64) / ((1u64 << 53) as f64)
+    };
+    let mut c = cfg();
+    for k in 0..400 {
+        c.corridors[k] = Corridor {
+            kind: [CK_APPROACH, CK_RUNWAY, CK_DEPARTURE][k % 3],
+            thr_lat_e7: 400_000_000 + (rnd() * 1.0e7) as i32 - 5_000_000,
+            thr_lon_e7: -880_000_000 + (rnd() * 1.0e7) as i32 - 5_000_000,
+            out_bearing_deg: rnd() * 360.0,
+            length_m: 1000.0 + rnd() * 20_000.0,
+            near_half_width_m: 100.0 + rnd() * 600.0,
+            far_half_width_m: 100.0 + rnd() * 2000.0,
+            thr_elev_ft: (rnd() * 3000.0) as i32,
+            faf_alt_ft: (rnd() * 6000.0) as i32,
+        };
+    }
+    c.n_corridors = 400;
+    let ix = corridor_index_new(&c).unwrap();
+    assert!(ix.len() >= 400);
+    let (mut inside, mut outside) = (0u32, 0u32);
+    for _ in 0..20_000 {
+        let p = SamplePoint {
+            lat_e7: 400_000_000 + (rnd() * 1.0e7) as i32 - 5_000_000,
+            lon_e7: -880_000_000 + (rnd() * 1.0e7) as i32 - 5_000_000,
+            radius_m: (rnd() * 700.0) as f32,
+        };
+        let (fast, slow) = (corridor_hit_at(&c, &ix, &p), corridor_hit_linear(&c, &p));
+        assert_eq!(fast, slow, "{p:?}");
+        if slow.is_some() {
+            inside += 1;
+        } else {
+            outside += 1;
+        }
+    }
+    assert!(
+        inside > 500 && outside > 500,
+        "{inside} inside, {outside} outside"
+    );
 }
