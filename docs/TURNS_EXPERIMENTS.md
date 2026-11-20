@@ -213,6 +213,25 @@ Day 19, 41,000 ft and above band (n = 149 common samples, 43 flights): nearest-r
 
 ERAM age: samples.csv has no ERAM input-age or coast column; `eram_row_dt_ms` is 0 on every row (the grid is on ERAM's row times).
 
+How to read the spacing. An ERAM row is ERAM's estimate at the instant it was published, made from
+whatever surveillance ERAM had received by then. The spacing is how often SFDPS publishes a row for the
+aircraft, not how often ERAM receives data, and the archive does not say what ERAM received. The samples
+are taken at ERAM's row times, so ERAM is always scored at the moment of its own estimate. OpenATCA is
+scored at the same moment, from input that may be up to one archive gap old (8 to 9 s median). ERAM's
+error being flat against the spacing fits that, but does not show ERAM's input rate.
+
+What this round shows, on days 15 and 19:
+- OpenATCA beats dead reckoning from its last report in every group and at every age, so the tracker
+  loses nothing on a coast.
+- The track's heading at the last report is 0.1° off the reference's at the median, 0.55° at p95. The
+  tail past 5 s is not a heading error.
+- In level flight 5 to 8 s after a report, OpenATCA's p95 is 18.5 m (day 15) and 21.9 m (day 19),
+  against ERAM's 19.8 and 19.2.
+- The tail comes from aircraft that turn inside the gap. No coast can see such a turn from the report
+  before it, which is why dead reckoning's p95 grows with age as fast as OpenATCA's.
+- Closing the gap to ERAM's p95 therefore needs input at the rate ERAM receives it, not a change to the
+  tracker.
+
 | Day | ERAM row spacing (previous grid row of the aircraft) | n | ERAM cross-track median / p95 / RMS m |
 |---|---|---|---|
 | 15 | under 5 s | 841 | 8.5 / 38.1 / 34.8 |
