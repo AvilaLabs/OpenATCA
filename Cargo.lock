@@ -313,6 +313,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-stdds-census"
+version = "0.0.1"
+dependencies = [
+ "oa-feed",
+ "oa-stdds",
+ "oa-xml",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-tar"
 version = "0.0.1"
 

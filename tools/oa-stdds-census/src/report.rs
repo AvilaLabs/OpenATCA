@@ -1,0 +1,325 @@
+//! The printed census: counts, shares and distributions only. The only text taken from the data
+//! is the producing facility's source id, and only when it is plain letters and digits.
+
+use crate::census::{
+    ClassStats, DirStats, Group, IdShare, Results, CHANGE_BIN_NAMES, CLASS_NAMES, FLAG_NAMES,
+};
+use crate::hist::{Hist, COARSE_BINS};
+use crate::read::ReadStats;
+use oa_stdds::STD_ERROR_NAMES;
+use std::fmt::Write;
+
+fn pct(n: u64, d: u64) -> String {
+    if d == 0 {
+        "n/a".to_string()
+    } else {
+        format!("{:.2}%", n as f64 * 100.0 / d as f64)
+    }
+}
+
+fn secs(v: Option<f64>) -> String {
+    v.map_or_else(|| "n/a".to_string(), |s| format!("{s:.3}"))
+}
+
+/// One line of summary for a distribution: n, median, p10, p90, zero-length count, and the
+/// count at 15 s and over.
+pub fn hist_line(h: &Hist) -> String {
+    let (_, over) = h.coarse();
+    format!(
+        "n {} median {} s p10 {} s p90 {} s zero {} at-or-over-15s {} ({})",
+        h.n,
+        secs(h.quantile(1, 2)),
+        secs(h.quantile(1, 10)),
+        secs(h.quantile(9, 10)),
+        h.zeros(),
+        over,
+        pct(over, h.n)
+    )
+}
+
+fn hist_bins(out: &mut String, h: &Hist) {
+    let (bins, over) = h.coarse();
+    for i in 0..COARSE_BINS {
+        let c = bins.get(i).copied().unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "    [{:4.1},{:4.1}) s {c} {}",
+            i as f64 * 0.5,
+            (i + 1) as f64 * 0.5,
+            pct(c, h.n)
+        );
+    }
+    let _ = writeln!(out, "    [15.0, 120] s {over} {}", pct(over, h.n));
+}
+
+fn ids(out: &mut String, indent: &str, s: &IdShare) {
+    let _ = writeln!(out, "{indent}updates {}", s.n);
+    for (name, c) in [
+        ("with an address field (acAddress, any value)", s.icao_field),
+        ("  of which the address reads zero", s.icao_zero),
+        ("with a non-zero Mode S address", s.icao),
+        ("with a Mode 3/A code (reportedBeaconCode)", s.beacon),
+        ("with code 1200", s.beacon_1200),
+        ("with a callsign (flightPlan/acid)", s.acid),
+        ("with a flight plan (any flightPlan field)", s.plan),
+        ("with non-zero address and Mode 3/A code", s.icao_and_beacon),
+        (
+            "with none of non-zero address, Mode 3/A code, callsign",
+            s.none_of_icao_beacon_acid,
+        ),
+        ("pseudo flag true", s.pseudo),
+        ("frozen flag true", s.frozen),
+        ("new flag true", s.is_new),
+    ] {
+        let _ = writeln!(out, "{indent}  {name}: {c} {}", pct(c, s.n));
+    }
+}
+
+fn dir_block(out: &mut String, name: &str, d: &DirStats) {
+    let _ = writeln!(out, "  {name}: changes {}", d.changes);
+    let _ = writeln!(
+        out,
+        "    interval before the change: {}",
+        hist_line(&d.before)
+    );
+    let _ = writeln!(
+        out,
+        "    interval across the change: {}",
+        hist_line(&d.across)
+    );
+    let _ = writeln!(
+        out,
+        "    interval after the change:  {}",
+        hist_line(&d.after)
+    );
+}
+
+/// The facility label: the source id when it is 1 to 8 letters and digits, else a placeholder.
+pub fn fac_label(k: &[u8; 8], index: usize) -> String {
+    let n = k.iter().position(|&b| b == 0).unwrap_or(8);
+    let t = k.get(..n).unwrap_or(&[]);
+    if t.is_empty() {
+        "(no src)".to_string()
+    } else if t.iter().all(u8::is_ascii_alphanumeric) {
+        String::from_utf8_lossy(t).into_owned()
+    } else {
+        format!("(other #{index})")
+    }
+}
+
+fn class_line(c: &ClassStats) -> String {
+    format!(
+        "tracks {} updates false {} (non-zero address {}) true {}; intervals false: {}; true: {}",
+        c.tracks,
+        c.updates[0],
+        pct(c.false_nonzero, c.updates[0]),
+        c.updates[1],
+        hist_line(&c.iv[0]),
+        hist_line(&c.iv[1])
+    )
+}
+
+fn fac_line(g: &Group) -> String {
+    let flagged = g.updates[0] + g.updates[1];
+    format!(
+        "updates {} (false {} true {} absent {}) false share {}; tracks {} (with false {}, of which false carried a non-zero address {}); interval false: {}; true: {}; false updates with non-zero address {} callsign {} flight plan {} code 1200 {}",
+        g.updates.iter().sum::<u64>(),
+        g.updates[0],
+        g.updates[1],
+        g.updates[2],
+        pct(g.updates[0], flagged),
+        g.tracks,
+        g.tracks_with_false,
+        g.tracks_false_with_icao,
+        hist_line(&g.iv[0]),
+        hist_line(&g.iv[1]),
+        pct(g.ids[0].icao, g.ids[0].n),
+        pct(g.ids[0].acid, g.ids[0].n),
+        pct(g.ids[0].plan, g.ids[0].n),
+        pct(g.ids[0].beacon_1200, g.ids[0].n),
+    )
+}
+
+/// The whole report.
+pub fn render(rs: &ReadStats, r: &Results) -> String {
+    let mut o = String::new();
+    let g = &r.global;
+    let _ = writeln!(
+        o,
+        "STDDS TAIS adsb-flag census (counts and distributions only)"
+    );
+    let _ = writeln!(o, "== 0. read ==");
+    let _ = writeln!(
+        o,
+        "files {} (gzip truncated {}, gzip damaged {}); frames: message {} other {} damaged {}; frame reader stalled, bytes not read {}",
+        rs.files, rs.files_gzip_truncated, rs.files_gzip_damaged, rs.frames, rs.other_frames, rs.bad_frames, rs.stalled_bytes
+    );
+    let _ = writeln!(
+        o,
+        "TAIS messages {} records {}; other-kind messages {}",
+        rs.tais_messages, rs.tais_records, rs.other_messages
+    );
+    for (name, c) in STD_ERROR_NAMES.iter().zip(&rs.refused) {
+        let _ = writeln!(o, "refused whole, {name}: {c}");
+    }
+    let flagged = g.updates[0] + g.updates[1];
+    for (name, c) in FLAG_NAMES.iter().zip(&g.updates) {
+        let _ = writeln!(o, "updates {name}: {c}");
+    }
+    let _ = writeln!(
+        o,
+        "adsb=false share of flagged updates: {}",
+        pct(g.updates[0], flagged)
+    );
+    let _ = writeln!(
+        o,
+        "tracks (facility, recSTARSSrcID, trackNum): {}; records with no trackNum {}; distinct recSTARSSrcID {}; facilities {}",
+        g.tracks,
+        r.no_track_num,
+        r.distinct_src_ids,
+        r.facs.len()
+    );
+    let _ = writeln!(
+        o,
+        "updates with no mrtTime {}; with a time before the track's previous {}; with a gap over 120 s (reset, counted not binned) {}",
+        g.no_mrt, g.backwards, g.resets
+    );
+
+    let _ = writeln!(
+        o,
+        "== 1. update interval by flag (track time mrtTime, per track) =="
+    );
+    for (i, name) in FLAG_NAMES.iter().take(2).enumerate() {
+        if let Some(h) = g.iv.get(i) {
+            let _ = writeln!(o, "{name}: {}", hist_line(h));
+            hist_bins(&mut o, h);
+        }
+    }
+    let _ = writeln!(o, "by track class (the flags seen on the track):");
+    for (name, c) in CLASS_NAMES.iter().zip(&r.classes) {
+        let _ = writeln!(o, "  {name}: {}", class_line(c));
+    }
+
+    let _ = writeln!(o, "== 2. flag changes within a track ==");
+    let _ = writeln!(
+        o,
+        "changes {} on {} tracks; flagged update pairs {} (change rate per pair {})",
+        r.changes,
+        r.tracks_with_change,
+        r.flagged_pairs,
+        pct(r.changes, r.flagged_pairs)
+    );
+    let _ = writeln!(
+        o,
+        "tracks with 2 or more flagged updates, by number of changes:"
+    );
+    for (name, c) in CHANGE_BIN_NAMES.iter().zip(&r.change_bins) {
+        let _ = writeln!(o, "  {name}: {c}");
+    }
+    dir_block(&mut o, "false to true", &r.dirs[0]);
+    dir_block(&mut o, "true to false", &r.dirs[1]);
+
+    let _ = writeln!(o, "== 3. identity carried by the updates ==");
+    for (i, name) in FLAG_NAMES.iter().take(2).enumerate() {
+        let _ = writeln!(o, "{name}:");
+        if let Some(s) = g.ids.get(i) {
+            ids(&mut o, "  ", s);
+        }
+    }
+    let _ = writeln!(
+        o,
+        "tracks with an adsb=false update: {}; of those, tracks whose adsb=false updates ever carried a non-zero address: {} ({})",
+        g.tracks_with_false,
+        g.tracks_false_with_icao,
+        pct(g.tracks_false_with_icao, g.tracks_with_false)
+    );
+
+    let _ = writeln!(
+        o,
+        "== 4. per source facility (the source id the data carries) =="
+    );
+    let _ = writeln!(o, "facilities: {}", r.facs.len());
+    let mut order: Vec<usize> = (0..r.facs.len()).collect();
+    order.sort_by_key(|&i| {
+        std::cmp::Reverse(
+            r.facs
+                .get(i)
+                .map_or(0, |(_, f)| f.updates.iter().sum::<u64>()),
+        )
+    });
+    for i in order {
+        if let Some((k, f)) = r.facs.get(i) {
+            let _ = writeln!(o, "facility {}: {}", fac_label(k, i), fac_line(f));
+        }
+    }
+
+    let _ = writeln!(
+        o,
+        "== 5. cross-check against an ADS-B recording of the same day =="
+    );
+    let _ = writeln!(
+        o,
+        "not run (TODO: no ADS-B clip for 2026-11-20 exists; the counting function is in crosscheck.rs, tested on synthetic data only)"
+    );
+    o
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::census::tests::{rec, src};
+    use crate::census::Census;
+    use oa_stdds::tais::tais_bit;
+    use oa_stdds::TaisField;
+
+    // REQ: OA-CEN-007
+    #[test]
+    fn output_has_counts_and_no_aircraft_values() {
+        let mut c = Census::new();
+        for i in 0..4 {
+            let mut r = rec(1, i * 4600, Some(false));
+            r.present |= tais_bit(TaisField::AcAddress)
+                | tais_bit(TaisField::Acid)
+                | tais_bit(TaisField::ReportedBeacon);
+            r.mode_s_addr = 0xABCDEF;
+            r.acid = *b"CALLSIGN";
+            r.reported_beacon = 5432;
+            r.lat_e7 = 401_234_567;
+            r.lon_e7 = -747_654_321;
+            r.mrt_time_ms = 1_893_553_440_123 + i * 4600;
+            c.observe(src("ZZA"), &r);
+        }
+        let text = render(&crate::read::ReadStats::new(), &c.finish());
+        for forbidden in [
+            "ABCDEF", "abcdef", "CALLSIGN", "5432", "4012345", "7476543", "1893553",
+        ] {
+            assert!(!text.contains(forbidden), "{forbidden}");
+        }
+        assert!(text.contains("facility ZZA"));
+        assert!(text.contains("with a non-zero Mode S address: 4 100.00%"));
+        assert!(text.contains("TODO"));
+    }
+
+    // REQ: OA-CEN-007
+    #[test]
+    fn facility_label_prints_only_plain_ids() {
+        assert_eq!(fac_label(&src("ZZA"), 0), "ZZA");
+        assert_eq!(fac_label(&[0; 8], 1), "(no src)");
+        let mut odd = src("AB");
+        odd[2] = b'<';
+        assert_eq!(fac_label(&odd, 7), "(other #7)");
+    }
+
+    // REQ: OA-CEN-001
+    #[test]
+    fn histogram_lines_cover_all_bins() {
+        let mut h = Hist::new();
+        h.add(470);
+        let mut o = String::new();
+        hist_bins(&mut o, &h);
+        assert_eq!(o.lines().count(), COARSE_BINS + 1);
+        assert!(o.contains("[ 4.5, 5.0) s 1 100.00%"));
+        assert!(hist_line(&h).contains("median 4.705 s"));
+    }
+}

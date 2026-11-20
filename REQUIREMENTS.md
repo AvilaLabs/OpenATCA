@@ -5457,3 +5457,32 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   "other". It exits 3 with a count of the bytes dropped if the frame reader stalls, reads until two bytes to
   sniff gzip, and refuses (exit 2) a path with a sealed name inside any component, as given or resolved, and
   any path it cannot resolve.
+
+## STDDS adsb-flag census (tools/oa-stdds-census)
+
+- **OA-CEN-001** The update interval of a TAIS track is the difference of consecutive `mrtTime` values of
+  one track (facility, `recSTARSSrcID`, `trackNum`), attributed to the `adsb` flag of the update that ends
+  it, kept in 10 ms bins to 120 s; the census prints per flag the count, median, 10th and 90th percentile
+  and a histogram in 0.5 s bins to 15 s with the count at 15 s and over.
+- **OA-CEN-002** Flag changes within a track are counted (total, tracks with one, tracks by number of
+  changes), and for each direction the interval across the change, the one before it and the one after it
+  are distributions of their own; intervals across a change stay out of the per-flag distributions.
+- **OA-CEN-003** For the updates of each flag the census counts the share carrying a Mode S address, a
+  Mode 3/A code, code 1200, a callsign, any flight plan field, address with code, and none of address,
+  code and callsign, plus the share with the pseudo, frozen and new flags; and the tracks whose adsb=false
+  updates ever carried an address.
+- **OA-CEN-004** Every count and distribution is also kept per source facility (the message `src`); a
+  track number at two facilities, or under two `recSTARSSrcID`, is two tracks.
+- **OA-CEN-005** An update with no `adsb` element is counted apart (never as false); updates with no
+  `mrtTime`, with a time before the track's previous one, or with a gap over 120 s (a reset) are counted
+  and make no interval; a record with no `trackNum` is counted and not tracked; a frame cut short or a
+  gzip file that ends inside a member (a recording still being written) is counted, never fatal.
+- **OA-CEN-006** Second mode, STUB: the share of adsb=false addresses (and of adsb=false samples) with an
+  ADS-B sample of the same address within a window (10 s) is a counting function tested on synthetic
+  samples only; the command line refuses it until an ADS-B clip of the same day exists.
+- **OA-CEN-007** The output holds counts, shares and distributions only: no position, address, callsign,
+  code, flight-plan content or individual time; the only text from the data is a source id of letters and
+  digits. A path with a sealed name in any component, as given or resolved, is refused before it is
+  opened or listed.
+- **OA-CEN-008** Tracks are classed by the flags seen on them (fewer than two flagged updates, all
+  adsb=false, all adsb=true, mixed), with their update counts and per-flag interval distributions.

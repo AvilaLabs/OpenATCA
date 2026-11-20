@@ -1,0 +1,24 @@
+[package]
+name = "oa-stdds-census"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates; not outside dependencies (RULESET F1).
+oa-feed = { path = "../../crates/oa-feed" }
+oa-stdds = { path = "../../crates/oa-stdds" }
+oa-xml = { path = "../../crates/oa-xml" }
+oa-zip = { path = "../../crates/oa-zip" }
+
+[[bin]]
+name = "oa-stdds-census"
+path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"
