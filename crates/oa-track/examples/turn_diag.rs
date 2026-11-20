@@ -87,6 +87,8 @@ struct Sample {
     er_cross: f64,
     er_hdg: f64,
     band: String,
+    /// p002's flight phase (climb, cruise, descent).
+    flight: String,
 }
 
 /// What the tracker's row says at a sample.
@@ -101,6 +103,7 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let (mut adsb, mut samples, mut out) = (None, None, None);
     let mut rescore = false;
+    let mut thin = 1usize;
     while let Some(a) = args.next() {
         if a == "--rescore" {
             rescore = true;
@@ -108,6 +111,12 @@ fn main() -> ExitCode {
         }
         let v = args.next();
         match a.as_str() {
+            "--thin" => {
+                thin = v
+                    .and_then(|x| x.parse().ok())
+                    .filter(|&n| n >= 1)
+                    .unwrap_or(0)
+            }
             "--adsb" => adsb = v.map(PathBuf::from),
             "--samples" => samples = v.map(PathBuf::from),
             "--out" => out = v.map(PathBuf::from),
@@ -119,17 +128,21 @@ fn main() -> ExitCode {
     }
     let (Some(adsb), Some(samples), Some(out)) = (adsb, samples, out) else {
         eprintln!(
-            "usage: turn_diag --adsb <clip.oaf> --samples <p002 samples.csv> --out <dir> [--rescore]"
+            "usage: turn_diag --adsb <clip.oaf> --samples <p002 samples.csv> --out <dir> [--rescore [--thin N]]"
         );
         return ExitCode::from(2);
     };
+    if thin == 0 || (thin > 1 && !rescore) {
+        eprintln!("turn_diag: --thin N needs N >= 1 and --rescore");
+        return ExitCode::from(2);
+    }
     for p in [&adsb, &samples, &out] {
         if let Err(e) = oa_sealed::refuse(p) {
             eprintln!("turn_diag: {e}");
             return ExitCode::from(2);
         }
     }
-    match run(&adsb, &samples, &out, rescore) {
+    match run(&adsb, &samples, &out, rescore, thin) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -162,6 +175,7 @@ fn parse_samples(text: &str) -> Result<Vec<Sample>, String> {
     let col = |n: &str| head.get(n).copied().ok_or(format!("no column {n}"));
     let (c_addr, c_t, c_band, c_common) =
         (col("addr")?, col("t_ms")?, col("band")?, col("common")?);
+    let c_flight = col("phase")?;
     let (c_cross, c_hdg, c_dt) = (
         col("oa_cross_m")?,
         col("oa_track_err_deg")?,
@@ -196,6 +210,7 @@ fn parse_samples(text: &str) -> Result<Vec<Sample>, String> {
             er_cross,
             er_hdg,
             band: g(c_band).to_string(),
+            flight: g(c_flight).to_string(),
         });
     }
     Ok(v)
@@ -307,7 +322,13 @@ impl Table {
     }
 }
 
-fn run(adsb: &Path, samples_path: &Path, out_dir: &Path, rescore: bool) -> Result<String, String> {
+fn run(
+    adsb: &Path,
+    samples_path: &Path,
+    out_dir: &Path,
+    rescore: bool,
+    thin: usize,
+) -> Result<String, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let mut samples = read_samples(samples_path)?;
     eprintln!("{} common samples", samples.len());
@@ -321,8 +342,18 @@ fn run(adsb: &Path, samples_path: &Path, out_dir: &Path, rescore: bool) -> Resul
     let clip = clip.map_err(|e| e.to_string())?;
     let (set_a, set_b, _) = split_reports(&clip.reports);
     drop(clip);
-    let (meas, _) = adsb_measurements(&set_a, &AdsbConfig::default());
+    let (mut meas, _) = adsb_measurements(&set_a, &AdsbConfig::default());
     drop(set_a);
+    if thin > 1 {
+        // Every `thin`th report of each aircraft goes to the tracker; the grid and the reference
+        // are unchanged.
+        let mut seen: BTreeMap<u32, usize> = BTreeMap::new();
+        meas.retain(|m| {
+            let k = seen.entry(m.addr).or_insert(0);
+            *k += 1;
+            (*k - 1) % thin == 0
+        });
+    }
     // The report times of the aircraft of the samples (ms): the age of a sample's last report and
     // the gap it opens.
     let addrs: BTreeSet<u32> = samples.iter().map(|s| s.addr).collect();
@@ -557,6 +588,19 @@ fn run(adsb: &Path, samples_path: &Path, out_dir: &Path, rescore: bool) -> Resul
     );
     let mut by_gap_turn = Table::new("  ... turning samples only", edge_labels(&GAP_EDGES));
     let mut all = Table::new("All common samples", vec!["all".to_string()]);
+    let flight_labels: Vec<String> = ["all", "climb", "cruise", "descent", "steady turn"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut by_flight_near = Table::new(
+        "By flight phase, samples within 2 s of a report",
+        flight_labels.clone(),
+    );
+    let mut by_flight_far = Table::new(
+        "By flight phase, samples more than 5 s from a report",
+        flight_labels.clone(),
+    );
+    let mut by_flight_any = Table::new("By flight phase, any report age", flight_labels);
     let mut by_band = BTreeMap::new();
     // Tracker's heading rate against the reference's, per rate bin: signed medians.
     let mut est: Vec<(Vec<f64>, Vec<f64>)> = (0..6).map(|_| Default::default()).collect();
@@ -583,6 +627,27 @@ fn run(adsb: &Path, samples_path: &Path, out_dir: &Path, rescore: bool) -> Resul
             by_age_str.add(ab, s);
         }
         all.add(0, s);
+        let fb = [
+            Some(0),
+            match s.flight.as_str() {
+                "climb" => Some(1),
+                "cruise" => Some(2),
+                "descent" => Some(3),
+                _ => None,
+            },
+            (r.phase == 1).then_some(4),
+        ];
+        let near = age.is_some_and(|a| a <= 2.0);
+        let far = age.is_some_and(|a| a > 5.0);
+        for b in fb.into_iter().flatten() {
+            by_flight_any.add(b, s);
+            if near {
+                by_flight_near.add(b, s);
+            }
+            if far {
+                by_flight_far.add(b, s);
+            }
+        }
         by_band
             .entry(s.band.clone())
             .or_insert_with(|| Table::new(&format!("Band {}", s.band), vec!["all".to_string()]))
@@ -617,7 +682,27 @@ fn run(adsb: &Path, samples_path: &Path, out_dir: &Path, rescore: bool) -> Resul
         samples.len(),
         rows.len()
     );
+    let mut gaps: Vec<f64> = times
+        .values()
+        .flat_map(|v| {
+            v.windows(2).filter_map(|w| match w {
+                [a, b] => Some((b - a) as f64 / 1000.0),
+                _ => None,
+            })
+        })
+        .collect();
+    gaps.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
+    let _ = writeln!(
+        o,
+        "thin {thin}: input reports of the sample aircraft {}, gaps {}, median input gap {:.2} s",
+        times.values().map(Vec::len).sum::<usize>(),
+        gaps.len(),
+        gaps.get(gaps.len() / 2).copied().unwrap_or(f64::NAN)
+    );
     all.write(&mut o);
+    for t in [&by_flight_any, &by_flight_near, &by_flight_far] {
+        t.write(&mut o);
+    }
     by_rate.write(&mut o);
     by_phase.write(&mut o);
     by_mu.write(&mut o);
@@ -726,6 +811,7 @@ mod tests {
         let s = v.first().unwrap();
         assert_eq!((s.addr, s.t_ms), (0xabc123, 1020));
         assert_eq!((s.oa_cross, s.er_cross), (-3.5, 7.0));
+        assert_eq!(s.flight, "climb");
         assert!(parse_samples("addr,t_ms\n").is_err());
     }
 }
