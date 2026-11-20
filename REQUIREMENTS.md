@@ -1062,6 +1062,22 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   root that the decoder recognises as `message` elements; a foreign sibling counts for neither.
 - **OA-FIXM-021** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the
   month; hour 24 is refused.
+- **OA-FIXM-022** The assigned altitude is decoded with its form as a state: `simple` and `vfrPlus` (the
+  value in `assigned_ft`), `vfr` (no number and no `AssignedAlt` field), `block` (limits `above` to `below`) and
+  `altFixAlt` (altitude before and after a named fix); the form is its own field and no number stands for VFR.
+- **OA-FIXM-023** A doubled assigned-altitude form, a block with a limit missing or with `above` over `below`, and
+  an altitude at a fix with the fix or a value missing or unreadable, are a counted field error on the form; the
+  row is kept.
+- **OA-FIXM-024** The interim altitude is a value, or `xsi:nil` (flag `FLAG_INTERIM_NIL`: ERAM states there is
+  none); an absent element is neither, and an empty element without nil, a nil that is not a boolean and a doubled
+  element are a field error.
+- **OA-FIXM-025** The requested altitude is decoded as `simple`, `vfrPlus` or `vfr`, in its own columns, and a
+  doubled or unreadable form is a field error; the `vfr` form is a known path.
+- **OA-FIXM-026** The handoff `event` (initiation, acceptance, update, retraction, failure, take control) and the
+  accepting unit are decoded; a handoff with no event has none; an event outside the six is a field error and
+  the rest of the row is kept.
+- **OA-FIXM-027** The ADS-B (Mode S) address of `aircraftDescription@aircraftAddress` is decoded as exactly six
+  hexadecimal digits, not all zero; any other value is a field error.
 
 ### TBFM metering publication (oa-tbfm)
 

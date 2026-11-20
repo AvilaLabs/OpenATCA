@@ -10,7 +10,7 @@
 
 use oa_fixm::{
     clear_events, code_str, has_field, new_events, unknown_text, Decoder, Field, FixmError, Limits,
-    ALL_FIELDS, FIELD_NAMES, REJECT_NAMES,
+    ALL_FIELDS, FIELD_COUNT, FIELD_NAMES, REJECT_NAMES,
 };
 use oa_xml::Parser;
 use std::collections::HashSet;
@@ -56,7 +56,7 @@ fn every_real_sfdps_message_decodes() {
     let mut unsupported = 0usize;
     let mut rows_with_pos = 0usize;
     let mut with_error = 0usize;
-    let mut present = [0usize; 27];
+    let mut present = [0usize; FIELD_COUNT];
     let mut gufis: HashSet<u128> = HashSet::new();
     let mut callsigns: HashSet<[u8; 8]> = HashSet::new();
     let mut rows = 0usize;
