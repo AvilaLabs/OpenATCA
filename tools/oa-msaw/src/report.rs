@@ -6,15 +6,18 @@ use std::fmt::Write as _;
 
 use oa_msaw::{
     Alert, CycleStats, FloorKind, Grade, MsawConfig, SkipWhy, AF_COAST, AF_GROUND_UNKNOWN,
-    AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_UNCERTAIN,
+    AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE, AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN,
+    AF_UNCERTAIN,
 };
 use oa_safety::net::{reason_text, NetState};
 
+use crate::cifp::{nearest_airport_nm, CifpCorridor};
 use crate::floors::FloorStats;
+use crate::qnh::QnhStats;
 use crate::run::{HiddenAgg, MadeInhibit, SkipAgg};
 
 /// The flag bits of an alert with their names, in the order the summary lists them.
-pub const FLAG_NAMES: [(u16, &str); 7] = [
+pub const FLAG_NAMES: [(u16, &str); 8] = [
     (AF_RATE_UNKNOWN, "rate_unknown"),
     (AF_COAST, "coast"),
     (AF_UNCERTAIN, "uncertain"),
@@ -22,6 +25,7 @@ pub const FLAG_NAMES: [(u16, &str); 7] = [
     (AF_IDENTITY_UNCONFIRMED, "identity_unconfirmed"),
     (AF_PARTIAL_COVERAGE, "partial_coverage"),
     (AF_GROUND_UNKNOWN, "ground_unknown"),
+    (AF_QNH_MISSING, "qnh_missing"),
 ];
 
 /// The names of the bits of `f` joined by `|`; empty if none.
@@ -40,7 +44,7 @@ pub fn kind_text(k: FloorKind) -> &'static str {
         FloorKind::Terrain => "terrain",
         FloorKind::Obstacle => "obstacle",
         FloorKind::Mva => "mva",
-        FloorKind::Procedure => "procedure",
+        FloorKind::Procedure => "approach_surface",
     }
 }
 
@@ -60,6 +64,7 @@ pub fn why_text(w: u8) -> &'static str {
         x if x == SkipWhy::OverBudget as u8 => "OVER_BUDGET",
         x if x == SkipWhy::BadRow as u8 => "BAD_ROW",
         x if x == SkipWhy::OverCapacity as u8 => "OVER_CAPACITY",
+        x if x == SkipWhy::QnhMissing as u8 => "QNH_MISSING",
         _ => "?",
     }
 }
@@ -80,18 +85,67 @@ fn opt_secs(ns: Option<i64>) -> String {
     ns.map_or_else(String::new, secs)
 }
 
-/// `alerts.csv`: one row per alert, sorted by start time then address. It holds addresses and is
-/// not for publication.
-pub fn alerts_csv(alerts: &[Alert]) -> String {
+/// What a track was doing at its alert, from a first look at its rate, speed, height and distance
+/// to an airport with an approach (development thresholds, not an operational rule: the data has
+/// no flight rules or intent).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Doing {
+    OnApproach,
+    Departing,
+    VfrLow,
+    Other,
+}
+
+/// The names of [`Doing`], in order.
+pub const DOING_NAMES: [(Doing, &str); 4] = [
+    (Doing::OnApproach, "on approach"),
+    (Doing::Departing, "departing"),
+    (Doing::VfrLow, "VFR at low level"),
+    (Doing::Other, "other"),
+];
+
+/// Within this of an airport with an approach, nautical miles.
+pub const NEAR_AIRPORT_NM: f64 = 10.0;
+/// Descending or climbing at least this much, feet per minute, near an airport.
+const CLIMB_DESCENT_FPM: f32 = 300.0;
+/// Low level and slow: below this altitude (feet) and this speed (metres per second).
+const LOW_FT: f32 = 5000.0;
+const SLOW_MPS: f32 = 100.0;
+
+/// What the track of an alert was doing (a first look, see [`Doing`]).
+pub fn classify(a: &Alert, near_nm: Option<f64>) -> Doing {
+    let near = near_nm.is_some_and(|d| d <= NEAR_AIRPORT_NM);
+    if near && a.vrate_fpm <= -CLIMB_DESCENT_FPM {
+        Doing::OnApproach
+    } else if near && a.vrate_fpm >= CLIMB_DESCENT_FPM {
+        Doing::Departing
+    } else if a.alt_ft < LOW_FT && a.speed_mps < SLOW_MPS {
+        Doing::VfrLow
+    } else {
+        Doing::Other
+    }
+}
+
+fn near_of(a: &Alert, airports: &[(String, f64, f64)]) -> Option<f64> {
+    nearest_airport_nm(
+        airports,
+        f64::from(a.lat_e7) / 1e7,
+        f64::from(a.lon_e7) / 1e7,
+    )
+}
+
+/// `alerts.csv`: one row per alert, sorted by start time then address, with the distance to the
+/// nearest airport that has an approach. It holds addresses and is not for publication.
+pub fn alerts_csv(alerts: &[Alert], airports: &[(String, f64, f64)]) -> String {
     let mut o = String::from(
-        "address_hex,start_s,end_s,caution_s,warning_s,peak,lat_deg,lon_deg,altitude_ft,worst_margin_ft,worst_floor_ft,worst_floor_kind,ttv_min_s,cycles,flags,flags_raw\n",
+        "address_hex,start_s,end_s,caution_s,warning_s,peak,lat_deg,lon_deg,altitude_ft,vrate_fpm,speed_mps,nearest_approach_airport_nm,worst_margin_ft,worst_floor_ft,worst_floor_kind,ttv_min_s,cycles,flags,flags_raw\n",
     );
     let mut v = alerts.to_vec();
     v.sort_by_key(|a| (a.start_ns, a.addr));
     for a in v {
         let _ = writeln!(
             o,
-            "{:08X},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{}",
+            "{:08X},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{}",
             a.addr,
             secs(a.start_ns),
             secs(a.end_ns),
@@ -101,6 +155,9 @@ pub fn alerts_csv(alerts: &[Alert]) -> String {
             f64::from(a.lat_e7) / 1e7,
             f64::from(a.lon_e7) / 1e7,
             f(a.alt_ft, 0),
+            f(a.vrate_fpm, 0),
+            f(a.speed_mps, 1),
+            near_of(&a, airports).map_or_else(String::new, |d| format!("{d:.1}")),
             f(a.worst_margin_ft, 0),
             a.worst_floor_ft,
             kind_text(a.worst_kind),
@@ -191,8 +248,20 @@ pub struct DataUsed {
     pub obstacles: Option<usize>,
     /// Chart files loaded, refused, and the sectors of the model.
     pub chart_files: Option<(usize, usize, usize)>,
-    /// The CIFP areas: label, floor in feet and approaches that gave it.
-    pub cifp_areas: Vec<(String, i32, usize)>,
+    /// The corridors the CIFP gave, and the runway ends with an approach that got none.
+    pub cifp_corridors: Vec<CifpCorridor>,
+    pub without_corridor: Vec<String>,
+    /// The airports of the CIFP that have an approach: identifier, latitude, longitude.
+    pub airports: Vec<(String, f64, f64)>,
+    /// The altimeter files read (`None`: no `--metar`).
+    pub metar: Option<QnhStats>,
+    /// The one-off loads, nanoseconds, by name; the peak resident memory (kB) after them and at the
+    /// end; the CPU seconds of the steady state; and its wall times by part.
+    pub load_ns: Vec<(&'static str, u64)>,
+    pub rss_load_kb: Option<u64>,
+    pub rss_end_kb: Option<u64>,
+    pub steady_cpu_s: Option<f64>,
+    pub times: crate::run::RunTimes,
 }
 
 /// What the summary is made from. A7.2: cold struct, size guard waived.
@@ -216,6 +285,8 @@ pub struct SummaryInput<'a> {
     pub expired_ns: &'a BTreeMap<u32, i64>,
     pub suppressed_overflow: u64,
     pub floor_stats: FloorStats,
+    /// The altimeter lookups of the run (`None`: altitudes were used as given).
+    pub qnh_stats: Option<QnhStats>,
     pub data: &'a DataUsed,
     /// Listed (address, reason) rows of `skipped.csv`.
     pub skipped_listed: usize,
@@ -267,16 +338,59 @@ pub fn summary_text(i: &SummaryInput) -> String {
         "clearance above terrain {} ft, above obstacles {} ft; track budget {}, track capacity {}",
         c.terrain_clearance_ft, c.obstacle_clearance_ft, c.track_budget, c.max_tracks
     );
-    let _ = writeln!(o, "data:");
-    let _ = writeln!(o, "  terrain tiles given: {}", yes(i.data.terrain));
     let _ = writeln!(
         o,
-        "  terrain tiles loaded {}, absent {}; terrain queries {} of which without a complete answer {}",
-        i.floor_stats.tiles_loaded,
-        i.floor_stats.tiles_absent,
-        i.floor_stats.terrain_queries,
-        i.floor_stats.terrain_absent
+        "approach corridors: surface {} ft below the fix altitude, clearance above terrain and obstacles {} ft; radius grows {} m/s of prediction time",
+        c.approach_allowance_ft, c.approach_min_clearance_ft, c.velocity_uncertainty_mps
     );
+    let _ = writeln!(o, "data:");
+    let _ = writeln!(o, "  terrain tiles given: {}", yes(i.data.terrain));
+    let fs = &i.floor_stats;
+    let _ = writeln!(
+        o,
+        "  terrain tiles loaded {}, absent {}, read again {}; terrain queries {} of which without a complete answer {}",
+        fs.tiles_loaded, fs.tiles_absent, fs.tiles_reloaded, fs.terrain_queries, fs.terrain_absent
+    );
+    let answered = fs.terrain_queries - fs.terrain_absent;
+    let _ = writeln!(
+        o,
+        "  terrain answer rate {:.4} % ({} of {} queries)",
+        if fs.terrain_queries == 0 {
+            0.0
+        } else {
+            100.0 * answered as f64 / fs.terrain_queries as f64
+        },
+        answered,
+        fs.terrain_queries
+    );
+    let _ = writeln!(
+        o,
+        "  unanswered: area outside the tiles {}, nodata {}, tiles not on one lattice {}, other {}; blocks of tiles not on one lattice {}",
+        fs.terrain_missing,
+        fs.terrain_nodata,
+        fs.terrain_misaligned,
+        fs.terrain_refused,
+        fs.blocks_misaligned
+    );
+    match (&i.qnh_stats, &i.data.metar) {
+        (Some(q), Some(m)) => {
+            let _ = writeln!(
+                o,
+                "  altimeter: {} METAR files, {} rows, {} stations; altitudes corrected {}, at or above FL180 {}, without a setting (lowered by the allowance) {}; lookups {} ({} from the cache)",
+                m.files, m.rows, m.stations, q.corrected, q.standard, q.missing, q.lookups, q.cache_hits
+            );
+        }
+        (Some(q), None) => {
+            let _ = writeln!(
+                o,
+                "  altimeter: no METAR given; altitudes below FL180 without a setting {} (lowered by the allowance), at or above FL180 {}",
+                q.missing, q.standard
+            );
+        }
+        _ => {
+            let _ = writeln!(o, "  altimeter: altitudes used as given");
+        }
+    }
     let _ = writeln!(o, "  charts given: {}", yes(i.data.chart));
     if let Some((ok, bad, sectors)) = i.data.chart_files {
         let _ = writeln!(
@@ -305,15 +419,74 @@ pub fn summary_text(i: &SummaryInput) -> String {
         "  points looked up {} ({} from the cell cache)",
         i.floor_stats.points, i.floor_stats.cache_hits
     );
+    let from_cifp = i
+        .data
+        .cifp_corridors
+        .iter()
+        .filter(|c| c.faf_from_cifp)
+        .count();
     let _ = writeln!(
         o,
-        "procedure areas {} ({} from the CIFP)",
-        i.cfg.n_procs,
-        i.data.cifp_areas.len()
+        "corridors {} ({} from the CIFP, {} of them with the fix placed by the CIFP); runway ends with an approach and no corridor {}; airports with an approach {}",
+        i.cfg.n_corridors,
+        i.data.cifp_corridors.len(),
+        from_cifp,
+        i.data.without_corridor.len(),
+        i.data.airports.len()
     );
-    for (label, floor, n) in &i.data.cifp_areas {
-        let _ = writeln!(o, "  {label}: floor {floor} ft from {n} approaches");
+    for c in &i.data.cifp_corridors {
+        let _ = writeln!(
+            o,
+            "  {}: {:.1} NM{}, threshold {} ft, fix {} ft, from {} approaches",
+            c.label,
+            c.faf_nm,
+            if c.faf_from_cifp { "" } else { " (default)" },
+            c.corridor.thr_elev_ft,
+            c.corridor.faf_alt_ft,
+            c.approaches
+        );
     }
+    for w in &i.data.without_corridor {
+        let _ = writeln!(o, "  no corridor, {w}");
+    }
+    let _ = writeln!(o, "compute:");
+    for (n, ns) in &i.data.load_ns {
+        let _ = writeln!(o, "  one-off load, {n}: {:.2} s", *ns as f64 / 1e9);
+    }
+    let _ = writeln!(
+        o,
+        "  peak resident memory after the loads {} MB, at the end {} MB",
+        i.data.rss_load_kb.map_or(0, |k| k / 1024),
+        i.data.rss_end_kb.map_or(0, |k| k / 1024)
+    );
+    let sim_s = i.totals.cycles as f64;
+    let w = &i.data.times;
+    let fl = &i.floor_stats;
+    let sec = |ns: u64| ns as f64 / 1e9;
+    let _ =
+        writeln!(
+        o,
+        "  steady state, {} simulated seconds: wall {:.2} s, CPU {} s, CPU per simulated second {}",
+        i.totals.cycles,
+        sec(w.steady_ns),
+        i.data.steady_cpu_s.map_or("?".to_string(), |c| format!("{c:.2}")),
+        i.data
+            .steady_cpu_s
+            .map_or("?".to_string(), |c| format!("{:.4}", c / sim_s.max(1.0)))
+    );
+    let _ = writeln!(
+        o,
+        "    wall seconds in: planning {:.2}, floor lookups {:.2} (terrain {:.2}, tile reads {:.2}, obstacles {:.2}, chart {:.2}), evaluation {:.2}, altimeter correction {:.2}, tracker and the rest {:.2}",
+        sec(w.plan_ns),
+        sec(w.floors_ns),
+        sec(fl.ns_terrain),
+        sec(fl.ns_tile_read),
+        sec(fl.ns_obstacle),
+        sec(fl.ns_chart),
+        sec(w.eval_ns),
+        sec(w.qnh_ns),
+        sec(w.steady_ns.saturating_sub(w.plan_ns + w.floors_ns + w.eval_ns + w.qnh_ns))
+    );
     let _ = writeln!(
         o,
         "measurements {}, tracker rows (ticks) {}, tracker rows lost {}, columns missing {}",
@@ -325,6 +498,11 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let _ = writeln!(o, "excluded on the ground {}", t.ground_excluded);
     let _ = writeln!(o, "ground state unknown (evaluated) {}", t.ground_unknown);
     let _ = writeln!(o, "no altitude (listed, rule 4) {}", t.alt_missing);
+    let _ = writeln!(
+        o,
+        "tracks with no altimeter setting (listed, rule 1) {}",
+        t.qnh_missing
+    );
     let _ = writeln!(
         o,
         "tracks with a point without coverage (listed, rule 1) {}",
@@ -380,12 +558,74 @@ pub fn summary_text(i: &SummaryInput) -> String {
         warnings,
         i.alerts.len() - warnings
     );
+    // One cycle a second: the cycles are the seconds of the run.
+    let hours = t.cycles as f64 / 3600.0;
+    if hours > 0.0 {
+        let _ = writeln!(
+            o,
+            "alerts per hour over {:.4} h: reached warning {:.1}, caution only {:.1}, all {:.1}",
+            hours,
+            warnings as f64 / hours,
+            (i.alerts.len() - warnings) as f64 / hours,
+            i.alerts.len() as f64 / hours
+        );
+    }
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
     for a in i.alerts {
         *kinds.entry(kind_text(a.worst_kind)).or_default() += 1;
     }
     for (k, n) in kinds {
         let _ = writeln!(o, "  worst floor set by {k}: {n}");
+    }
+    let nears: Vec<Option<f64>> = i
+        .alerts
+        .iter()
+        .map(|a| near_of(a, &i.data.airports))
+        .collect();
+    let near_n = nears
+        .iter()
+        .filter(|d| d.is_some_and(|d| d <= NEAR_AIRPORT_NM))
+        .count();
+    let _ = writeln!(
+        o,
+        "alerts within {NEAR_AIRPORT_NM} NM of an airport with an approach: {near_n} of {}",
+        i.alerts.len()
+    );
+    // A first classification: every alert, and 20 of them spread evenly through the sorted list.
+    let mut order: Vec<usize> = (0..i.alerts.len()).collect();
+    order.sort_by_key(|&k| i.alerts.get(k).map_or((0, 0), |a| (a.start_ns, a.addr)));
+    let count = |picked: &[usize]| {
+        let mut n = [0usize; 4];
+        for &k in picked {
+            if let (Some(a), Some(d)) = (i.alerts.get(k), nears.get(k)) {
+                let slot = DOING_NAMES.iter().position(|(x, _)| *x == classify(a, *d));
+                if let Some(c) = slot.and_then(|s| n.get_mut(s)) {
+                    *c += 1;
+                }
+            }
+        }
+        n
+    };
+    let sample: Vec<usize> = if order.len() <= 20 {
+        order.clone()
+    } else {
+        (0..20)
+            .filter_map(|k| order.get(k * order.len() / 20).copied())
+            .collect()
+    };
+    for (what, picked) in [("20 spread through the list", &sample), ("all", &order)] {
+        let n = count(picked);
+        let _ = writeln!(
+            o,
+            "what the track was doing, {what} ({} alerts): {}",
+            picked.len(),
+            DOING_NAMES
+                .iter()
+                .zip(n.iter())
+                .map(|((_, name), c)| format!("{name} {c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     let _ = writeln!(o, "net state by cycle:");
     for (s, n) in i.net_cycles {

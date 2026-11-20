@@ -167,6 +167,7 @@ fn a_clip_that_fails_after_rows_were_dropped_still_reports_the_true_count() {
         dof: None,
         mva: None,
         cifp: None,
+        metar: None,
         window_s: None,
         scorer_half: false,
     };

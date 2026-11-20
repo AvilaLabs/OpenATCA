@@ -356,6 +356,12 @@ fn raise(
         lat_e7,
         lon_e7,
         alt_ft: tr.alt_ft,
+        vrate_fpm: if tr.flags & IF_RATE_UNKNOWN != 0 {
+            f32::NAN
+        } else {
+            tr.vrate_fpm
+        },
+        speed_mps: oa_math::hypot(f64::from(tr.vel_east_mps), f64::from(tr.vel_north_mps)) as f32,
         worst_margin_ft: v.worst_margin_ft as f32,
         worst_floor_ft: v.worst_floor_ft,
         worst_kind: v.worst_kind,

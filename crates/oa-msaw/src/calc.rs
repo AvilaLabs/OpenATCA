@@ -139,7 +139,7 @@ pub fn corridor_surface_ft(
     let k = (c.far_half_width_m - c.near_half_width_m) / c.length_m;
     let half = c.near_half_width_m + k * along;
     let side = (half - cross) / oa_ieee::sqrt(1.0 + k * k);
-    if !(side >= radius_m) {
+    if side.is_nan() || side < radius_m {
         return None;
     }
     let far = oa_math::min_f64(along + radius_m, c.length_m);

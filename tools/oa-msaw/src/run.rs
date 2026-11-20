@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
+use std::time::Instant;
 
 use oa_bench::input::{file_opener, load_adsb_counted, Opener};
 use oa_encounter_run::run::{ground_at, ground_table, GroundTable};
@@ -11,7 +12,7 @@ use oa_msaw::{
     alert_log_clear, alert_log_new, msaw_check, msaw_evaluate, msaw_finish, msaw_new,
     msaw_note_lost_input, msaw_plan, msaw_points, msaw_totals, skip_log_clear, skip_log_new, Alert,
     AlertLog, CycleStats, FloorSample, MsawState, MsawTrack, SkipLog, SkipWhy, FLOOR_NONE, F_COAST,
-    F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY, F_UNCERTAIN, MAX_PROCS,
+    F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN, MAX_CORRIDORS,
 };
 use oa_safety::geom::Vertex;
 use oa_safety::inhibit::{
@@ -30,10 +31,11 @@ use oa_track::{
 };
 
 use crate::args::Args;
-use crate::cifp::{areas_from_cifp, CifpArea};
+use crate::cifp::{approach_airports, corridors_from_cifp, CifpCorridor};
 use crate::config::{parse_config, InhibitSpec, Settings};
 use crate::floors::{obstacle_index, FloorStats, Floors, ObstacleIndex};
 use crate::guard::{open_guarded, refuse_sealed, OpenFail};
+use crate::qnh::{Qnh, QnhStats};
 use crate::report::{
     alerts_csv, inhibitions_csv, skipped_csv, state_text, summary_text, DataUsed, SummaryInput,
 };
@@ -106,15 +108,36 @@ pub struct Record {
     pub expired_ns: BTreeMap<u32, i64>,
     pub suppressed_overflow: u64,
     pub floor_stats: FloorStats,
+    /// The altimeter lookups of the run; `None` when the altitudes were used as given.
+    pub qnh_stats: Option<QnhStats>,
+    pub times: RunTimes,
+}
+
+/// Wall time of the steady state, nanoseconds, by part. A7.2: cold struct, size guard waived.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunTimes {
+    pub plan_ns: u64,
+    /// Looking up every floor (terrain, obstacle and chart, with the tile reads inside it).
+    pub floors_ns: u64,
+    pub eval_ns: u64,
+    /// The whole of the tracker and the net over the clip, from the first measurement.
+    pub steady_ns: u64,
+    /// The altimeter correction of the rows.
+    pub qnh_ns: u64,
 }
 
 struct Feed<'a> {
+    times: RunTimes,
     st: MsawState,
     alerts: AlertLog,
     skips: SkipLog,
     net: StateTable,
     inh: Box<InhibitTable>,
     floors: Floors,
+    /// The altitude datum: `None` takes the altitudes as given (a test whose altitudes are
+    /// already heights above mean sea level).
+    qnh: Option<Qnh>,
+    no_qnh_allowance_ft: i32,
     floor_buf: Vec<FloorSample>,
     batch: Vec<MsawTrack>,
     cur: Option<i64>,
@@ -145,7 +168,10 @@ fn flush(f: &mut Feed) {
         return;
     }
     inhibit_expire(&mut f.inh, t);
+    let t0 = Instant::now();
     msaw_plan(&mut f.st, t, &f.batch, &mut f.skips);
+    f.times.plan_ns += t0.elapsed().as_nanos() as u64;
+    let t1 = Instant::now();
     f.floor_buf.clear();
     for p in msaw_points(&f.st) {
         match f.floors.floor_at(p) {
@@ -155,11 +181,14 @@ fn flush(f: &mut Feed) {
                 f.floor_buf.push(FloorSample {
                     terrain_ft: FLOOR_NONE,
                     obstacle_ft: FLOOR_NONE,
+                    obstacle_covered: false,
                     mva_ft: FLOOR_NONE,
                 });
             }
         }
     }
+    f.times.floors_ns += t1.elapsed().as_nanos() as u64;
+    let t2 = Instant::now();
     msaw_evaluate(
         &mut f.st,
         &f.floor_buf,
@@ -168,6 +197,7 @@ fn flush(f: &mut Feed) {
         &mut f.net,
         &mut f.inh,
     );
+    f.times.eval_ns += t2.elapsed().as_nanos() as u64;
     f.last_t = t;
     f.batch.clear();
     f.all.extend_from_slice(&f.alerts.items);
@@ -280,16 +310,34 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
             f.cur = Some(t);
         }
         f.tick_rows += 1;
+        let (lat, lon) = (f64::from(la) / 1e7, f64::from(lo) / 1e7);
+        let mut flags = flags_of(fl);
+        let mut alt_ft = if fl & O_HAS_ALT != 0 { alt } else { f32::NAN };
+        let tq = Instant::now();
+        if let (Some(q), true) = (f.qnh.as_mut(), alt_ft.is_finite()) {
+            let (a, missing) = q.datum_ft(
+                lat,
+                lon,
+                t.div_euclid(1_000_000_000),
+                f64::from(alt_ft),
+                f.no_qnh_allowance_ft,
+            );
+            alt_ft = a as f32;
+            if missing {
+                flags |= F_QNH_MISSING;
+            }
+        }
+        f.times.qnh_ns += tq.elapsed().as_nanos() as u64;
         f.batch.push(MsawTrack {
-            lat_deg: f64::from(la) / 1e7,
-            lon_deg: f64::from(lo) / 1e7,
+            lat_deg: lat,
+            lon_deg: lon,
             addr,
             vel_east_mps: ve,
             vel_north_mps: vn,
             r95_m: r95_of(cov),
-            alt_ft: if fl & O_HAS_ALT != 0 { alt } else { f32::NAN },
+            alt_ft,
             vrate_fpm: if fl & O_HAS_ALT != 0 { vr } else { f32::NAN },
-            flags: flags_of(fl),
+            flags,
             ground: ground_at(f.ground, addr, t),
         });
     }
@@ -338,6 +386,7 @@ pub fn track_and_alert(
     ground: &GroundTable,
     set: &Settings,
     floors: Floors,
+    qnh: Option<Qnh>,
     t0_ns: i64,
 ) -> Result<Record, String> {
     msaw_check(&set.msaw).map_err(|e| format!("MSAW configuration: {e}"))?;
@@ -346,6 +395,7 @@ pub fn track_and_alert(
     let mut inh = Box::new(inhibits_new());
     let made = make_inhibits(&mut inh, set, t0_ns)?;
     let mut f = Feed {
+        times: RunTimes::default(),
         st: msaw_new(&set.msaw)?,
         alerts: alert_log_new(set.alert_log_capacity)?,
         skips: skip_log_new(set.skip_log_capacity)?,
@@ -353,6 +403,8 @@ pub fn track_and_alert(
             .map_err(|e| format!("net state table: {e:?}"))?,
         inh,
         floors,
+        qnh,
+        no_qnh_allowance_ft: set.no_qnh_allowance_ft,
         floor_buf: Vec::new(),
         batch: Vec::new(),
         cur: None,
@@ -368,6 +420,7 @@ pub fn track_and_alert(
         last_t: 0,
         error: None,
     };
+    let steady = Instant::now();
     let drain = cfg.out_capacity.min(1 << 16) / 2;
     for m in meas {
         tracker_update(&mut t, m, &mut out);
@@ -381,6 +434,7 @@ pub fn track_and_alert(
     tracker_flush(&mut t, end, &mut out);
     consume(&mut f, &out);
     flush(&mut f);
+    f.times.steady_ns = steady.elapsed().as_nanos() as u64;
     if let Some(e) = f.error.take() {
         return Err(e);
     }
@@ -403,6 +457,8 @@ pub fn track_and_alert(
         expired_ns: f.expired_ns,
         suppressed_overflow: suppressed_overflow(&f.inh),
         floor_stats: f.floors.stats,
+        qnh_stats: f.qnh.as_ref().map(|q| q.stats),
+        times: f.times,
     })
 }
 
@@ -487,11 +543,45 @@ fn read_dof(p: &Path) -> Result<ObstacleIndex, String> {
     Ok(obstacle_index(&d))
 }
 
+/// A figure of `/proc/self/status` in kilobytes (`None` where there is no such file).
+fn proc_kb(key: &str) -> Option<u64> {
+    // seal-allow: reads the process's own /proc status for its memory figure
+    let t = fs::read_to_string("/proc/self/status").ok()?;
+    let l = t.lines().find(|l| l.starts_with(key))?;
+    l.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// CPU seconds (user and system) of the process so far, at 100 ticks a second.
+fn cpu_seconds() -> Option<f64> {
+    // seal-allow: reads the process's own /proc stat for its CPU time
+    let t = fs::read_to_string("/proc/self/stat").ok()?;
+    let rest = t.rsplit_once(')')?.1;
+    let f: Vec<&str> = rest.split_whitespace().collect();
+    let (u, s): (f64, f64) = (f.get(11)?.parse().ok()?, f.get(12)?.parse().ok()?);
+    Some((u + s) / 100.0)
+}
+
+/// The CIFP: `FAACIFP18` itself, or the zip that holds it.
+fn read_cifp(g: &Sealed, p: &Path) -> Result<oa_arinc424::Cifp, String> {
+    let is_zip = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    if is_zip {
+        let z = oa_zip::read_archive_file(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let bytes = oa_zip::Archive::parse(&z)
+            .and_then(|a| a.extract("FAACIFP18"))
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+        return oa_arinc424::parse_bytes(&bytes, &p.to_string_lossy())
+            .map_err(|e| format!("{}: {e}", p.display()));
+    }
+    let f = opened(g, p)?;
+    oa_arinc424::parse_reader(BufReader::with_capacity(1 << 16, f), &p.to_string_lossy())
+        .map_err(|e| format!("{}: {e}", p.display()))
+}
+
 /// [`run_counted`] with the clip opened by `open` (a test hands it a clip that fails).
 pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<String, String> {
     let g = Sealed::production();
     // Every path is checked before anything is opened or created, for a caller of the library too.
-    let optional = [&args.terrain, &args.dof, &args.mva, &args.cifp];
+    let optional = [&args.terrain, &args.dof, &args.mva, &args.cifp, &args.metar];
     for p in [&args.adsb, &args.config, &args.out]
         .into_iter()
         .chain(optional.into_iter().flatten())
@@ -510,7 +600,10 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let mut used = DataUsed::default();
     let obstacles = match &args.dof {
         Some(p) => {
+            let tl = Instant::now();
             let ix = read_dof(p)?;
+            used.load_ns
+                .push(("obstacle file", tl.elapsed().as_nanos() as u64));
             used.obstacles = Some(ix.count);
             Some(ix)
         }
@@ -518,7 +611,9 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     };
     let chart = match &args.mva {
         Some(p) => {
+            let tl = Instant::now();
             let l = oa_mva::aixm::load_directory(p).map_err(|e| format!("{}: {e}", p.display()))?;
+            used.load_ns.push(("chart", tl.elapsed().as_nanos() as u64));
             used.chart_files = Some((
                 l.files.iter().filter(|(_, r)| r.is_ok()).count(),
                 l.files.iter().filter(|(_, r)| r.is_err()).count(),
@@ -533,34 +628,48 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
             return Err(format!("{}: not a directory", d.display()));
         }
     }
-    let mut cifp_areas: Vec<CifpArea> = Vec::new();
-    if !set.cifp_airports.is_empty() {
-        let p = args
-            .cifp
-            .as_ref()
-            .ok_or("the configuration has cifp_airport lines and there is no --cifp")?;
-        let f = opened(g, p)?;
-        let c =
-            oa_arinc424::parse_reader(BufReader::with_capacity(1 << 16, f), &p.to_string_lossy())
-                .map_err(|e| format!("{}: {e}", p.display()))?;
+    let mut cifp_corridors: Vec<CifpCorridor> = Vec::new();
+    let mut without_corridor: Vec<String> = Vec::new();
+    let mut airports: Vec<(String, f64, f64)> = Vec::new();
+    if let Some(p) = &args.cifp {
+        let tl = Instant::now();
+        let c = read_cifp(g, p)?;
+        used.load_ns.push(("CIFP", tl.elapsed().as_nanos() as u64));
+        airports = approach_airports(&c);
         for a in &set.cifp_airports {
-            cifp_areas.extend(areas_from_cifp(&c, a, set.cifp_radius_nm)?);
+            let made = corridors_from_cifp(&c, a)?;
+            cifp_corridors.extend(made.corridors);
+            without_corridor.extend(made.without_corridor);
         }
+    } else if !set.cifp_airports.is_empty() {
+        return Err("the configuration has cifp_airport lines and there is no --cifp".to_string());
     }
-    if set.msaw.n_procs + cifp_areas.len() > MAX_PROCS {
+    if set.msaw.n_corridors + cifp_corridors.len() > MAX_CORRIDORS {
         return Err(format!(
-            "n_procs: {} procedure areas and {} from the CIFP are more than {MAX_PROCS}",
-            set.msaw.n_procs,
-            cifp_areas.len()
+            "n_corridors: {} corridors and {} from the CIFP are more than {MAX_CORRIDORS}",
+            set.msaw.n_corridors,
+            cifp_corridors.len()
         ));
     }
-    for a in &cifp_areas {
-        let n = set.msaw.n_procs;
-        if let Some(slot) = set.msaw.procs.get_mut(n) {
-            *slot = a.area;
-            set.msaw.n_procs += 1;
+    for a in &cifp_corridors {
+        let n = set.msaw.n_corridors;
+        if let Some(slot) = set.msaw.corridors.get_mut(n) {
+            *slot = a.corridor;
+            set.msaw.n_corridors += 1;
         }
     }
+    // The altimeter settings: the METAR files, or none (every altitude below FL180 then reads as
+    // having no setting, which the net counts).
+    let qnh = match &args.metar {
+        Some(d) => {
+            let tl = Instant::now();
+            let q = Qnh::from_dir(d, set.metar_radius_nm, set.metar_max_age_s)?;
+            used.load_ns.push(("METAR", tl.elapsed().as_nanos() as u64));
+            q
+        }
+        None => Qnh::empty(set.metar_radius_nm, set.metar_max_age_s),
+    };
+    used.metar = args.metar.is_some().then_some(qnh.stats);
     // The count goes straight into `sealed`, so a clip that fails after rows were dropped still
     // reports them.
     let clip = load_adsb_counted(&args.adsb, open, sealed).map_err(|e| e.to_string())?;
@@ -601,13 +710,17 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let floors = Floors::new(args.terrain.clone(), obstacles, chart);
     used.terrain = floors.has_terrain();
     used.chart = floors.has_chart();
-    used.cifp_areas = cifp_areas
-        .iter()
-        .map(|a| (a.label.clone(), a.area.floor_ft, a.approaches))
-        .collect();
-    let rec = track_and_alert(&meas, &cfg, &ground, &set, floors, t0_ns)?;
+    used.cifp_corridors = cifp_corridors;
+    used.without_corridor = without_corridor;
+    used.airports = airports;
+    used.rss_load_kb = proc_kb("VmHWM:");
+    let cpu0 = cpu_seconds();
+    let rec = track_and_alert(&meas, &cfg, &ground, &set, floors, Some(qnh), t0_ns)?;
+    used.steady_cpu_s = cpu_seconds().zip(cpu0).map(|(b, a)| b - a);
+    used.rss_end_kb = proc_kb("VmHWM:");
+    used.times = rec.times;
     fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
-    let csv = alerts_csv(&rec.alerts);
+    let csv = alerts_csv(&rec.alerts, &used.airports);
     let csv_sha = to_hex(&sha256(csv.as_bytes()));
     let name_of = |p: &Path| {
         p.file_name()
@@ -632,6 +745,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         expired_ns: &rec.expired_ns,
         suppressed_overflow: rec.suppressed_overflow,
         floor_stats: rec.floor_stats,
+        qnh_stats: rec.qnh_stats,
         data: &used,
         skipped_listed: rec.skips.len(),
         clip_name: &name_of(&args.adsb),

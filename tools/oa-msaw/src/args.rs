@@ -1,10 +1,10 @@
 //! The command line:
 //! `oa-msaw --adsb <clip.oaf> --config <file> --out <dir> [--terrain <dir>] [--dof <zip|dat>]
-//! [--mva <dir>] [--cifp <file>] [--from-s <n> --to-s <n>] [--scorer-half]`.
+//! [--mva <dir>] [--cifp <file>] [--metar <dir>] [--from-s <n> --to-s <n>] [--scorer-half]`.
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: oa-msaw --adsb <clip.oaf> --config <file.cfg> --out <dir> [--terrain <3dep dir>] [--dof <DOF zip or DOF.DAT>] [--mva <dir>] [--cifp <FAACIFP18>] [--from-s <n> --to-s <n>] [--scorer-half]";
+pub const USAGE: &str = "usage: oa-msaw --adsb <clip.oaf> --config <file.cfg> --out <dir> [--terrain <3dep dir>] [--dof <DOF zip or DOF.DAT>] [--mva <dir>] [--cifp <FAACIFP18 or the CIFP zip>] [--metar <dir of metar_NNz_hours1.json>] [--from-s <n> --to-s <n>] [--scorer-half]";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived
@@ -21,8 +21,12 @@ pub struct Args {
     pub dof: Option<PathBuf>,
     /// A directory of MVA charts (AIXM). Without it no point has chart coverage and the net says so.
     pub mva: Option<PathBuf>,
-    /// The CIFP file, for the procedure areas of the `cifp_airport` lines.
+    /// The CIFP (`FAACIFP18`, or the zip that holds it), for the corridors of the `cifp_airport`
+    /// lines and the airports with an approach.
     pub cifp: Option<PathBuf>,
+    /// A directory of METAR files (`metar_00z_hours1.json` to `metar_23z_hours1.json`), for the
+    /// altimeter settings. Without it no altitude below FL180 has a setting and the net says so.
+    pub metar: Option<PathBuf>,
     /// Track only the measurements from `from_s` to `to_s` seconds after the first one.
     pub window_s: Option<(f64, f64)>,
     /// Track only the scorer's half A of the clip (the reports the scoring harness gives the
@@ -44,10 +48,10 @@ fn seconds(flag: &str, v: &str) -> Result<f64, String> {
 /// Parses the arguments after the program name. A flag value that starts with `--` is a missing
 /// value; a repeated flag, an unknown flag and a missing flag are errors.
 pub fn parse(argv: &[String]) -> Result<Args, String> {
-    let mut paths: [Option<PathBuf>; 7] = Default::default();
+    let mut paths: [Option<PathBuf>; 8] = Default::default();
     let (mut from, mut to): (Option<f64>, Option<f64>) = (None, None);
     let mut scorer_half = false;
-    const NAMES: [&str; 7] = [
+    const NAMES: [&str; 8] = [
         "--adsb",
         "--config",
         "--out",
@@ -55,6 +59,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         "--dof",
         "--mva",
         "--cifp",
+        "--metar",
     ];
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
@@ -102,7 +107,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         (Some(_), Some(_)) => return Err("--from-s must be less than --to-s".to_string()),
         _ => return Err("--from-s and --to-s go together".to_string()),
     };
-    let [adsb, config, out, terrain, dof, mva, cifp] = paths;
+    let [adsb, config, out, terrain, dof, mva, cifp, metar] = paths;
     match (adsb, config, out) {
         (Some(adsb), Some(config), Some(out)) => Ok(Args {
             adsb,
@@ -112,6 +117,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             dof,
             mva,
             cifp,
+            metar,
             window_s,
             scorer_half,
         }),

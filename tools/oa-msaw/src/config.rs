@@ -6,20 +6,20 @@
 //! Three keys may repeat:
 //!
 //! ```text
-//! procedure = <floor_ft> <lat>,<lon> <lat>,<lon> <lat>,<lon> ...
+//! corridor = <thr_lat> <thr_lon> <out_bearing_deg> <length_m> <near_half_m> <far_half_m> <thr_elev_ft> <faf_alt_ft>
 //! cifp_airport = <ICAO identifier>
 //! inhibit = <start_s> <end_s> <alt_lo_ft> <alt_hi_ft> <author> <reason> <lat>,<lon> <lat>,<lon> <lat>,<lon> ...
 //! ```
 //!
-//! A procedure line is a procedure area of the core, with its published altitude. A `cifp_airport`
-//! line asks for the procedure areas the CIFP gives at that airport (needs `--cifp`). An inhibit
+//! A corridor line is a final-approach corridor of the core. A `cifp_airport` line asks for the
+//! corridors the CIFP gives at that airport (needs `--cifp`). An inhibit
 //! line is an inhibition of the net made when the run starts: its times are seconds after the
 //! first measurement of the clip, the author and the reason are one word each (`_` is a space).
 
 use std::collections::BTreeMap;
 
-use oa_msaw::{MsawConfig, ProcArea, MAX_PROCS};
-use oa_safety::geom::{polygon_new, POLYGON_EMPTY};
+use oa_msaw::{Corridor, MsawConfig, MAX_CORRIDORS};
+use oa_safety::geom::polygon_new;
 use oa_safety::inhibit::InhibitConfig;
 use oa_safety::net::NET_COUNT;
 
@@ -58,17 +58,28 @@ pub struct Settings {
     pub inhibit_cfg: InhibitConfig,
     pub inhibits: Vec<InhibitSpec>,
     pub cifp_airports: Vec<String>,
-    /// The radius of the procedure area drawn round a runway threshold, nautical miles.
-    pub cifp_radius_nm: f64,
+    /// A track below FL180 with no usable altimeter setting is given its pressure altitude lowered
+    /// by this, feet (the conservative direction), and counted.
+    pub no_qnh_allowance_ft: i32,
+    /// The altimeter setting is taken from the nearest METAR station within this, nautical miles,
+    /// whose observation is at most `metar_max_age_s` seconds old.
+    pub metar_radius_nm: f64,
+    pub metar_max_age_s: i64,
 }
 
-const KEYS: [&str; 22] = [
+const KEYS: [&str; 27] = [
     "look_ahead_s",
     "warning_s",
     "samples",
     "hysteresis_s",
     "terrain_clearance_ft",
     "obstacle_clearance_ft",
+    "approach_allowance_ft",
+    "approach_min_clearance_ft",
+    "velocity_uncertainty_mps",
+    "no_qnh_allowance_ft",
+    "metar_radius_nm",
+    "metar_max_age_s",
     "max_tracks",
     "max_open",
     "track_budget",
@@ -81,8 +92,7 @@ const KEYS: [&str; 22] = [
     "inhibit_max_duration_s",
     "inhibit_max_start_ahead_s",
     "inhibit_max_extent_deg",
-    "cifp_radius_nm",
-    "procedure",
+    "corridor",
     "cifp_airport",
     "inhibit",
 ];
@@ -158,15 +168,22 @@ fn points(what: &str, p: &[&str]) -> Result<Vec<(i32, i32)>, String> {
     Ok(out)
 }
 
-fn procedure(v: &str) -> Result<ProcArea, String> {
+fn corridor(v: &str) -> Result<Corridor, String> {
     let f: Vec<&str> = v.split_whitespace().collect();
-    let (floor, pts) = f
-        .split_first()
-        .ok_or_else(|| "procedure: empty".to_string())?;
-    let verts = points("procedure", pts)?;
-    Ok(ProcArea {
-        area: polygon_new(&verts).map_err(|e| format!("procedure polygon: {e}"))?,
-        floor_ft: feet("procedure floor_ft", floor)?,
+    let [la, lo, bearing, length, near, far, thr_elev, faf_alt] = f.as_slice() else {
+        return Err(format!(
+            "corridor: `{v}` needs thr_lat thr_lon out_bearing_deg length_m near_half_m far_half_m thr_elev_ft faf_alt_ft"
+        ));
+    };
+    Ok(Corridor {
+        thr_lat_e7: e7("corridor lat", la, 90.0)?,
+        thr_lon_e7: e7("corridor lon", lo, 180.0)?,
+        out_bearing_deg: finite("corridor out_bearing_deg", bearing)?,
+        length_m: finite("corridor length_m", length)?,
+        near_half_width_m: finite("corridor near_half_m", near)?,
+        far_half_width_m: finite("corridor far_half_m", far)?,
+        thr_elev_ft: feet("corridor thr_elev_ft", thr_elev)?,
+        faf_alt_ft: feet("corridor faf_alt_ft", faf_alt)?,
     })
 }
 
@@ -225,7 +242,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             return Err(format!("line {}: unknown key `{k}`", n + 1));
         }
         match k {
-            "procedure" => procs.push(v),
+            "corridor" => procs.push(v),
             "cifp_airport" => airports.push(v),
             "inhibit" => inhibits.push(v),
             _ => {
@@ -240,20 +257,26 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             .copied()
             .ok_or_else(|| format!("the configuration has no `{k}`"))
     };
-    if procs.len() > MAX_PROCS {
-        return Err(format!("more than {MAX_PROCS} procedure areas"));
+    if procs.len() > MAX_CORRIDORS {
+        return Err(format!("more than {MAX_CORRIDORS} corridors"));
     }
     if airports.len() > MAX_LINES || inhibits.len() > MAX_LINES {
         return Err(format!(
             "more than {MAX_LINES} cifp_airport or inhibit lines"
         ));
     }
-    let mut list = [ProcArea {
-        area: POLYGON_EMPTY,
-        floor_ft: 0,
-    }; MAX_PROCS];
+    let mut list = [Corridor {
+        thr_lat_e7: 0,
+        thr_lon_e7: 0,
+        out_bearing_deg: 0.0,
+        length_m: 1.0,
+        near_half_width_m: 1.0,
+        far_half_width_m: 1.0,
+        thr_elev_ft: 0,
+        faf_alt_ft: 0,
+    }; MAX_CORRIDORS];
     for (slot, v) in list.iter_mut().zip(procs.iter()) {
-        *slot = procedure(v)?;
+        *slot = corridor(v)?;
     }
     let msaw = MsawConfig {
         max_tracks: to_usize("max_tracks", get("max_tracks")?)?,
@@ -267,8 +290,17 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         obstacle_clearance_ft: feet("obstacle_clearance_ft", get("obstacle_clearance_ft")?)?,
         max_speed_mps: finite("max_speed_mps", get("max_speed_mps")?)?,
         r95_cap_m: finite("r95_cap_m", get("r95_cap_m")?)?,
-        procs: list,
-        n_procs: procs.len(),
+        approach_allowance_ft: feet("approach_allowance_ft", get("approach_allowance_ft")?)?,
+        approach_min_clearance_ft: feet(
+            "approach_min_clearance_ft",
+            get("approach_min_clearance_ft")?,
+        )?,
+        velocity_uncertainty_mps: finite(
+            "velocity_uncertainty_mps",
+            get("velocity_uncertainty_mps")?,
+        )?,
+        corridors: list,
+        n_corridors: procs.len(),
     };
     oa_msaw::msaw_check(&msaw).map_err(|e| format!("configuration refused by the MSAW: {e}"))?;
     let max_duration = seconds_ns("inhibit_max_duration_s", get("inhibit_max_duration_s")?)?;
@@ -284,9 +316,17 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             180.0,
         )?),
     };
-    let cifp_radius_nm = finite("cifp_radius_nm", get("cifp_radius_nm")?)?;
-    if !(cifp_radius_nm > 0.0 && cifp_radius_nm <= 50.0) {
-        return Err("cifp_radius_nm: must be above 0 and at most 50".to_string());
+    let no_qnh_allowance_ft = feet("no_qnh_allowance_ft", get("no_qnh_allowance_ft")?)?;
+    if no_qnh_allowance_ft < 0 {
+        return Err("no_qnh_allowance_ft: must not be negative".to_string());
+    }
+    let metar_radius_nm = finite("metar_radius_nm", get("metar_radius_nm")?)?;
+    if !(metar_radius_nm > 0.0 && metar_radius_nm <= 1000.0) {
+        return Err("metar_radius_nm: must be above 0 and at most 1000".to_string());
+    }
+    let metar_max_age_s = seconds_ns("metar_max_age_s", get("metar_max_age_s")?)? / 1_000_000_000;
+    if metar_max_age_s <= 0 {
+        return Err("metar_max_age_s: must be above 0".to_string());
     }
     let mut specs = Vec::new();
     for v in &inhibits {
@@ -301,6 +341,8 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         inhibit_cfg,
         inhibits: specs,
         cifp_airports: airports.iter().map(|s| (*s).to_string()).collect(),
-        cifp_radius_nm,
+        no_qnh_allowance_ft,
+        metar_radius_nm,
+        metar_max_age_s,
     })
 }

@@ -14,5 +14,6 @@ pub mod cifp;
 pub mod config;
 pub mod floors;
 pub mod guard;
+pub mod qnh;
 pub mod report;
 pub mod run;

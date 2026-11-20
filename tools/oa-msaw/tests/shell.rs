@@ -17,16 +17,16 @@ use std::process::Command;
 use oa_encounter_run::run::GroundTable;
 use oa_msaw::{AIRBORNE, FLOOR_NONE, GROUND_UNKNOWN, ON_GROUND};
 use oa_msaw_run::args::parse;
-use oa_msaw_run::cifp::{approach_runway, areas_from_cifp};
+use oa_msaw_run::cifp::{approach_runway, corridors_from_cifp};
 use oa_msaw_run::config::{parse_config, Settings};
 use oa_msaw_run::floors::{ceil_ft, tile_name, Floors, ObstacleIndex};
+use oa_msaw_run::qnh::Qnh;
 use oa_msaw_run::report::{
     alerts_csv, flags_text, inhibitions_csv, skipped_csv, state_text, summary_text, DataUsed,
     SummaryInput,
 };
 use oa_msaw_run::run::{r95_of, track_and_alert, Record};
 use oa_mva::{new_model, Model, SetKind};
-use oa_safety::geom::polygon_contains;
 use oa_safety::net::{NetState, Reason};
 use oa_tiff::{Grid, TileSet};
 use oa_track::{Measurement, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT};
@@ -60,6 +60,8 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
         "m",
         "--cifp",
         "f",
+        "--metar",
+        "w",
         "--from-s",
         "10",
         "--to-s",
@@ -71,6 +73,7 @@ fn arguments_are_strict_and_a_sealed_path_exits_2_before_anything_is_opened() {
     assert_eq!(ok.window_s, Some((10.0, 70.0)));
     assert_eq!(ok.terrain, Some(PathBuf::from("t")));
     assert_eq!(ok.cifp, Some(PathBuf::from("f")));
+    assert_eq!(ok.metar, Some(PathBuf::from("w")));
     let base = a(&["--adsb", "a", "--config", "k", "--out", "c"]).unwrap();
     assert!(!base.scorer_half && base.terrain.is_none() && base.window_s.is_none());
     assert!(a(&["--adsb", "a", "--out", "c"]).is_err());
@@ -138,7 +141,19 @@ fn the_configuration_has_no_defaults_and_names_what_is_wrong() {
         (c.terrain_clearance_ft, c.obstacle_clearance_ft),
         (500, 500)
     );
-    assert_eq!(c.n_procs, 0);
+    assert_eq!(c.n_corridors, 0);
+    assert_eq!(
+        (
+            c.approach_allowance_ft,
+            c.approach_min_clearance_ft,
+            c.velocity_uncertainty_mps
+        ),
+        (300, 100, 5.0)
+    );
+    assert_eq!(
+        (s.no_qnh_allowance_ft, s.metar_radius_nm, s.metar_max_age_s),
+        (300, 100.0, 7200)
+    );
     assert!(s.inhibits.is_empty() && s.cifp_airports.is_empty());
     assert!(DEV_CFG.contains("DEVELOPMENT VALUES, NOT FAA VALUES"));
     // Every single-valued key is required: take each line away in turn.
@@ -170,30 +185,41 @@ fn the_configuration_has_no_defaults_and_names_what_is_wrong() {
     assert!(e.contains("samples"), "{e}");
     let e = parse_config(&DEV_CFG.replace("warning_s = 20", "warning_s = nan")).unwrap_err();
     assert!(e.contains("warning_s"), "{e}");
-    // A procedure area, a CIFP airport and an inhibition.
+    // A corridor, a CIFP airport and an inhibition.
     let s = parse_config(&with(
-        "procedure = 1200 40,-88 40,-87.9 40.1,-87.9 40.1,-88\ncifp_airport = KORD\n\
+        "corridor = 40 -88 180 9260 556 1852 600 2250\ncifp_airport = KORD\n\
          inhibit = 5 65 -1000 20000 SUP_1 NUISANCE_ALERTS 13.2,144.6 13.2,145 13.6,145 13.6,144.6",
     ))
     .unwrap();
-    assert_eq!(s.msaw.n_procs, 1);
-    assert_eq!(s.msaw.procs[0].floor_ft, 1200);
+    assert_eq!(s.msaw.n_corridors, 1);
+    assert_eq!(s.msaw.corridors[0].faf_alt_ft, 2250);
+    assert_eq!(s.msaw.corridors[0].thr_lat_e7, 400_000_000);
     assert_eq!(s.cifp_airports, vec!["KORD".to_string()]);
     assert_eq!(s.inhibits[0].reason, "NUISANCE ALERTS");
     assert_eq!(s.inhibits[0].author, "SUP 1");
     assert_eq!(s.inhibits[0].vertices.len(), 4);
     for bad in [
-        "procedure = 1200 40,-88 40,-87.9",
-        "procedure = 1200 40,-88 40,-87.9 x",
+        "corridor = 40 -88 180 9260 556 1852 600",
+        "corridor = 40 -88 x 9260 556 1852 600 2250",
+        "corridor = 40 -88 400 9260 556 1852 600 2250",
         "inhibit = 5 4 0 1 A B 1,1 1,2 2,2",
         "inhibit = 5 6 0 1 A B 1,1 1,2",
         "inhibit = 5 6 0 1 A",
     ] {
         assert!(parse_config(&with(bad)).is_err(), "{bad}");
     }
-    let e =
-        parse_config(&DEV_CFG.replace("cifp_radius_nm = 5", "cifp_radius_nm = 80")).unwrap_err();
-    assert!(e.contains("cifp_radius_nm"), "{e}");
+    let e = parse_config(&DEV_CFG.replace("metar_radius_nm = 100", "metar_radius_nm = 5000"))
+        .unwrap_err();
+    assert!(e.contains("metar_radius_nm"), "{e}");
+    let e = parse_config(&DEV_CFG.replace("no_qnh_allowance_ft = 300", "no_qnh_allowance_ft = -1"))
+        .unwrap_err();
+    assert!(e.contains("no_qnh_allowance_ft"), "{e}");
+    let e = parse_config(&DEV_CFG.replace(
+        "velocity_uncertainty_mps = 5",
+        "velocity_uncertainty_mps = -1",
+    ))
+    .unwrap_err();
+    assert!(e.contains("velocity_uncertainty_mps"), "{e}");
 }
 
 /// A grid whose elevation rises north of latitude 13.40, 3,000 ft per 0.1 degree, in metres: the
@@ -259,7 +285,7 @@ fn ridge_floors() -> Floors {
         TileSet {
             tiles: vec![ridge_grid()],
         },
-        None,
+        Some(ObstacleIndex::from_points(std::iter::empty())),
         Some(chart(100, 13.2, 13.65, 144.65, 144.95)),
     )
 }
@@ -306,6 +332,17 @@ fn the_floor_lookups_are_conservative_and_absent_where_there_is_no_data() {
     );
     assert_eq!(s.mva_ft, 100);
     assert_eq!(s.obstacle_ft, FLOOR_NONE);
+    assert!(
+        s.obstacle_covered,
+        "an obstacle file with none near is data"
+    );
+    assert!(
+        !Floors::new(None, None, None)
+            .floor_at(&point(13.5, 144.8, 100.0))
+            .unwrap()
+            .obstacle_covered,
+        "no DOF given: no obstacle data"
+    );
     // A circle that leaves the grid has no complete answer: absent, never the lower bound.
     let s = f.floor_at(&point(13.7, 144.80, 100.0)).unwrap();
     assert_eq!(s.terrain_ft, FLOOR_NONE);
@@ -332,6 +369,7 @@ fn fixture_cifp() -> oa_arinc424::Cifp {
     let body = [
         include_str!("../../../crates/oa-arinc424/tests/fixtures/airports.txt"),
         include_str!("../../../crates/oa-arinc424/tests/fixtures/runways.txt"),
+        include_str!("../../../crates/oa-arinc424/tests/fixtures/terminal_waypoints.txt"),
         include_str!("../../../crates/oa-arinc424/tests/fixtures/approach.txt"),
     ]
     .concat();
@@ -345,35 +383,59 @@ fn fixture_cifp() -> oa_arinc424::Cifp {
 
 // REQ: OA-MSAW-034
 #[test]
-fn procedure_areas_come_from_the_lowest_published_floor_altitude_of_a_runways_approaches() {
+fn corridors_come_from_the_runway_end_and_the_final_approach_fix_of_its_approaches() {
     assert_eq!(approach_runway("I04R").as_deref(), Some("04R"));
     assert_eq!(approach_runway("R22L-Z").as_deref(), Some("22L"));
     assert_eq!(approach_runway("L09").as_deref(), Some("09"));
     assert_eq!(approach_runway("V-A"), None);
     assert_eq!(approach_runway("I"), None);
-    let c = fixture_cifp();
-    let a = areas_from_cifp(&c, "KORD", 5.0).unwrap();
-    assert_eq!(a.len(), 1, "{a:?}");
-    assert_eq!(a[0].label, "KORD RW04R");
-    assert_eq!(a[0].approaches, 1);
-    // The lowest floor altitude of the fixture's ILS 04R legs is the 713 ft at the threshold
-    // (the at-or-below and the other-coded altitudes are not floors).
-    assert_eq!(a[0].area.floor_ft, 713);
-    // The circle holds the threshold and not a point 10 NM away.
+    let mut c = fixture_cifp();
+    // The fixture's terminal waypoints do not hold the fix REKKS: the corridor takes 5 NM.
+    let a = corridors_from_cifp(&c, "KORD").unwrap();
+    assert_eq!(a.corridors.len(), 1, "{a:?}");
+    let k = &a.corridors[0];
+    assert_eq!(k.label, "KORD RW04R");
+    assert_eq!(k.approaches, 1);
+    assert!(!k.faf_from_cifp);
+    assert_eq!(k.faf_nm, 5.0);
+    assert!((k.corridor.length_m - 5.0 * 1852.0).abs() < 1e-6);
+    // 0.3 NM at the threshold and 1.0 NM at the far end, the threshold elevation, and the fix
+    // altitude the ILS publishes at REKKS (the glide slope intercept altitude, 2,200 ft).
+    assert!((k.corridor.near_half_width_m - 0.3 * 1852.0).abs() < 1e-6);
+    assert!((k.corridor.far_half_width_m - 1852.0).abs() < 1e-6);
+    assert_eq!(k.corridor.thr_elev_ft, 661);
+    assert_eq!(k.corridor.faf_alt_ft, 2200);
+    // The runway course is 045 magnetic with a 3 degree west variation: 042 true, so the
+    // corridor runs out toward 222.
+    assert!(
+        (k.corridor.out_bearing_deg - 222.0).abs() < 0.01,
+        "{}",
+        k.corridor.out_bearing_deg
+    );
     let rw = c.runways.iter().find(|r| r.ident == "RW04R").unwrap();
-    let e7 = |x: f64| (x * 1e7).round() as i32;
-    assert!(polygon_contains(
-        &a[0].area.area,
-        e7(rw.threshold.lat),
-        e7(rw.threshold.lon)
-    ));
-    assert!(!polygon_contains(
-        &a[0].area.area,
-        e7(rw.threshold.lat + 10.0 / 60.0),
-        e7(rw.threshold.lon)
-    ));
+    assert_eq!(
+        k.corridor.thr_lat_e7,
+        (rw.threshold.lat * 1e7).round() as i32
+    );
+    // With the fix placed 6.2 NM out along the corridor, the CIFP gives the length.
+    let mut w = c.terminal_waypoints[0].clone();
+    w.area = "KORD".to_string();
+    w.ident = "REKKS".to_string();
+    let out = 222.0f64.to_radians();
+    w.position = oa_arinc424::Position {
+        lat: rw.threshold.lat + 6.2 / 60.0 * out.cos(),
+        lon: rw.threshold.lon + 6.2 / 60.0 * out.sin() / rw.threshold.lat.to_radians().cos(),
+    };
+    c.terminal_waypoints.push(w);
+    let a = corridors_from_cifp(&c, "KORD").unwrap();
+    let k = &a.corridors[0];
+    assert!(k.faf_from_cifp);
+    assert!((k.faf_nm - 6.2).abs() < 0.05, "{}", k.faf_nm);
+    // A runway end whose approach publishes no altitude at a fix gets no corridor, and is said.
+    let b = corridors_from_cifp(&c, "KMDW").unwrap();
+    assert!(b.corridors.is_empty());
     // An airport the file does not hold is an error, never an empty list.
-    let e = areas_from_cifp(&c, "KXYZ", 5.0).unwrap_err();
+    let e = corridors_from_cifp(&c, "KXYZ").unwrap_err();
     assert!(e.contains("KXYZ"), "{e}");
 }
 
@@ -431,6 +493,7 @@ fn go(m: &[Measurement], set: &Settings, floors: Floors) -> Record {
         &none,
         set,
         floors,
+        None,
         m.first().map_or(0, |x| x.toa_ns),
     )
     .unwrap()
@@ -454,7 +517,7 @@ fn guam_synthetic_through_the_tracker_alerts_caution_then_warning() {
         "{:?}",
         r.net_cycles
     );
-    let csv = alerts_csv(&r.alerts);
+    let csv = alerts_csv(&r.alerts, &[]);
     assert!(csv
         .lines()
         .next()
@@ -599,6 +662,7 @@ fn summary_of(r: &Record, set: &Settings) -> String {
         expired_ns: &r.expired_ns,
         suppressed_overflow: r.suppressed_overflow,
         floor_stats: r.floor_stats,
+        qnh_stats: r.qnh_stats,
         data: &used,
         skipped_listed: r.skips.len(),
         clip_name: "clip.oaf",
@@ -618,11 +682,11 @@ fn the_files_are_deterministic_and_the_summary_names_no_aircraft() {
     let set = settings();
     let a = go(&approach(0xA1B2C3, true), &set, ridge_floors());
     let b = go(&approach(0xA1B2C3, true), &set, ridge_floors());
-    assert_eq!(alerts_csv(&a.alerts), alerts_csv(&b.alerts));
+    assert_eq!(alerts_csv(&a.alerts, &[]), alerts_csv(&b.alerts, &[]));
     assert_eq!(skipped_csv(&a.skips), skipped_csv(&b.skips));
     let (s1, s2) = (summary_of(&a, &set), summary_of(&b, &set));
     assert_eq!(s1, s2);
-    assert!(alerts_csv(&a.alerts).contains("00A1B2C3"));
+    assert!(alerts_csv(&a.alerts, &[]).contains("00A1B2C3"));
     assert!(
         !s1.to_uppercase().contains("A1B2C3"),
         "no address in the summary"
@@ -661,4 +725,106 @@ fn the_radius_of_a_covariance_and_the_ground_codes_are_the_cores() {
     assert_eq!(oa_encounter::AIRBORNE, AIRBORNE);
     assert_eq!(oa_encounter::ON_GROUND, ON_GROUND);
     assert_eq!(oa_encounter::GROUND_UNKNOWN, GROUND_UNKNOWN);
+}
+
+fn go_qnh(m: &[Measurement], set: &Settings, floors: Floors, q: Qnh) -> Record {
+    let none = GroundTable::new();
+    track_and_alert(
+        m,
+        &DEFAULT_CONFIG,
+        &none,
+        set,
+        floors,
+        Some(q),
+        m.first().map_or(0, |x| x.toa_ns),
+    )
+    .unwrap()
+}
+
+// REQ: OA-MSAW-048
+#[test]
+fn below_fl180_the_altitude_takes_the_nearest_fresh_station_and_the_rest_is_lowered() {
+    // Stations are (lat, lon, observations); times in Unix seconds, one hour before the query
+    // time T0 for the fresh ones.
+    const T0: i64 = 1_800_000_000;
+    let fresh = vec![(T0 - 3600, 1023.25)];
+    let stale = vec![(T0 - 3 * 3600, 1003.25)];
+    let mut q = Qnh::from_stations(
+        vec![
+            (40.0, -88.0, fresh.clone()),
+            (40.2, -88.0, stale.clone()),
+            (45.0, -88.0, fresh.clone()),
+        ],
+        100.0,
+        7200,
+    );
+    // 10 hPa above standard: about 270 ft more than the pressure altitude.
+    let (a, missing) = q.datum_ft(40.01, -88.0, T0, 2000.0, 300);
+    assert!(!missing);
+    assert!((a - 2000.0 - 270.0).abs() < 25.0, "{a}");
+    // The nearest station has only a stale observation: the next nearest within the radius is used.
+    let mut q2 = Qnh::from_stations(
+        vec![(40.0, -88.0, stale.clone()), (40.5, -88.0, fresh.clone())],
+        100.0,
+        7200,
+    );
+    let (a, missing) = q2.datum_ft(40.0, -88.0, T0, 2000.0, 300);
+    assert!(!missing && a > 2200.0, "{a}");
+    // No station within 100 NM (the one at 45 N is 300 NM away) or only stale ones: lowered by
+    // the allowance and counted as missing.
+    let mut far = Qnh::from_stations(vec![(45.0, -88.0, fresh)], 100.0, 7200);
+    assert_eq!(far.datum_ft(40.0, -88.0, T0, 2000.0, 300), (1700.0, true));
+    let mut old = Qnh::from_stations(vec![(40.0, -88.0, stale)], 100.0, 7200);
+    assert_eq!(old.datum_ft(40.0, -88.0, T0, 2000.0, 300), (1700.0, true));
+    // At and above FL180 the standard setting is flown: no correction, no flag, whatever the data.
+    assert_eq!(
+        far.datum_ft(40.0, -88.0, T0, 18_000.0, 300),
+        (18_000.0, false)
+    );
+    assert_eq!(
+        far.datum_ft(40.0, -88.0, T0, 35_000.0, 300),
+        (35_000.0, false)
+    );
+    assert_eq!(far.stats.missing, 1);
+    assert_eq!(far.stats.standard, 2);
+    // An observation after the query time is not used.
+    let mut future = Qnh::from_stations(vec![(40.0, -88.0, vec![(T0 + 60, 1023.25)])], 100.0, 7200);
+    assert_eq!(
+        future.datum_ft(40.0, -88.0, T0, 2000.0, 300),
+        (1700.0, true)
+    );
+}
+
+// REQ: OA-MSAW-049
+#[test]
+fn a_run_with_no_altimeter_setting_lowers_the_altitudes_counts_them_and_degrades_the_net() {
+    let set = settings();
+    let m = approach(0x801, true);
+    let t0 = m[0].toa_ns / S;
+    // With a station in range the altitude is corrected and nothing is missing.
+    let q = Qnh::from_stations(vec![(13.4, 144.8, vec![(t0 - 600, 1013.25)])], 100.0, 7200);
+    let with = go_qnh(&m, &set, ridge_floors(), q);
+    assert_eq!(with.totals.qnh_missing, 0);
+    assert!(
+        with.net_cycles.keys().any(|k| k == "RUNNING"),
+        "{:?}",
+        with.net_cycles
+    );
+    let first_with = with.alerts[0].start_ns;
+    // With none, every row below FL180 is counted and listed, the net reads degraded, and the
+    // altitude is 300 ft lower, so the alert comes at least as early.
+    let none = go_qnh(&m, &set, ridge_floors(), Qnh::empty(100.0, 7200));
+    assert!(none.totals.qnh_missing > 50, "{:?}", none.totals);
+    assert!(none
+        .net_cycles
+        .keys()
+        .any(|k| k == "DEGRADED: INPUT MISSING"));
+    assert!(!none.net_cycles.contains_key("RUNNING"));
+    assert!(none
+        .skips
+        .keys()
+        .any(|k| k.1 == oa_msaw::SkipWhy::QnhMissing as u8));
+    assert!(skipped_csv(&none.skips).contains("QNH_MISSING"));
+    assert!(none.alerts[0].start_ns <= first_with);
+    assert_ne!(none.alerts[0].flags & oa_msaw::AF_QNH_MISSING, 0);
 }

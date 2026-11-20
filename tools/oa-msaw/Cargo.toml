@@ -14,9 +14,11 @@ workspace = true
 # close-encounter tool's own, shared so the tools agree.
 oa-adsb = { path = "../../crates/oa-adsb" }
 oa-arinc424 = { path = "../../crates/oa-arinc424" }
+oa-awc = { path = "../../crates/oa-awc" }
 oa-bench = { path = "../../crates/oa-bench" }
 oa-dof = { path = "../../crates/oa-dof" }
 oa-encounter-run = { path = "../oa-encounter" }
+oa-math = { path = "../../crates/oa-math" }
 oa-msaw = { path = "../../crates/oa-msaw" }
 oa-mva = { path = "../../crates/oa-mva" }
 oa-safety = { path = "../../crates/oa-safety" }

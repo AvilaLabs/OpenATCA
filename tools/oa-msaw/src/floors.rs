@@ -7,7 +7,10 @@
 //!   0.002 degrees and a radius bucket of 250 m: the query is made at the cell's centre with the
 //!   bucket's radius plus the cell's half diagonal, which covers every circle in the cell and
 //!   bucket. If any sample under the circle is nodata or in a tile that is not loaded, the answer
-//!   is absent: the lower bound the query still holds is never used.
+//!   is absent: the lower bound the query still holds is never used. Each query is made over a
+//!   tile set of only the tiles of the one-degree cells its box touches, so that a tile whose
+//!   lattice does not match its neighbours spoils only the queries that touch it; that is counted
+//!   and reported on stderr, never silent.
 //! * Obstacles are the highest top of every obstacle within the circle (distances taken with the
 //!   smallest metre-per-degree scales, which only adds obstacles); none is not an absence of data.
 //! * The chart is the highest minimum altitude of the FUS3, FUS5 and TAV sectors that contain the
@@ -15,6 +18,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use oa_dof::Dof;
 use oa_msaw::{FloorSample, SamplePoint, FLOOR_NONE};
@@ -29,6 +33,11 @@ const CELL_DEG: f64 = 0.002;
 /// Half the diagonal of a cell, metres, at the equator (the largest): 0.002 degrees is 222.4 m of
 /// latitude and at most as much of longitude.
 const CELL_HALF_DIAG_M: f64 = 158.0;
+/// The most tiles held in memory at once (a 3DEP tile is some 50 MB); the least recently used is
+/// dropped and read again if it is needed.
+const MAX_RESIDENT_TILES: usize = 24;
+/// The most blocks whose misaligned tiles are described on stderr; the rest are only counted.
+const MAX_MISALIGN_NOTES: usize = 40;
 /// The radius bucket, metres.
 const RADIUS_STEP_M: f64 = 250.0;
 /// The obstacle index cell, degrees.
@@ -43,10 +52,28 @@ pub struct FloorStats {
     pub points: u64,
     pub cache_hits: u64,
     pub terrain_queries: u64,
-    /// Terrain queries that gave no complete answer (a tile absent or nodata under the circle).
+    /// Terrain queries that gave no complete answer: the sum of the four that follow.
     pub terrain_absent: u64,
+    /// The circle reaches an area no tile holds (a tile absent, or the edge of the data).
+    pub terrain_missing: u64,
+    /// The circle holds a sample that is nodata in every tile (and none is missing).
+    pub terrain_nodata: u64,
+    /// The tiles of the query do not share one sample lattice.
+    pub terrain_misaligned: u64,
+    /// Any other refusal of the query.
+    pub terrain_refused: u64,
     pub tiles_loaded: u64,
     pub tiles_absent: u64,
+    /// Tiles read again after being dropped for room.
+    pub tiles_reloaded: u64,
+    /// Wall time, nanoseconds: in the terrain query itself, reading tiles from disk, in the
+    /// obstacle index and in the chart.
+    pub ns_terrain: u64,
+    pub ns_tile_read: u64,
+    pub ns_obstacle: u64,
+    pub ns_chart: u64,
+    /// Distinct blocks of tiles (the tiles one query touches) found not to share one lattice.
+    pub blocks_misaligned: u64,
     pub chart_absent: u64,
 }
 
@@ -129,8 +156,13 @@ pub struct Floors {
     /// The tiles were given whole (a test), none are read from `tile_dir`.
     preloaded: bool,
     set: TileSet,
-    loaded: BTreeSet<(i32, i32)>,
+    /// The tiles read, by the south-west corner of their cell, and when each was last used.
+    resident: HashMap<(i32, i32), (Grid, u64)>,
+    ever_loaded: BTreeSet<(i32, i32)>,
     absent: BTreeSet<(i32, i32)>,
+    /// The blocks of cells found misaligned (reported once each).
+    misaligned: BTreeSet<Vec<(i32, i32)>>,
+    clock: u64,
     obstacles: Option<ObstacleIndex>,
     chart: Option<Model>,
     cache: HashMap<(i32, i32, u32), (i32, i32)>,
@@ -167,8 +199,11 @@ impl Floors {
             tile_dir,
             preloaded: false,
             set: TileSet::default(),
-            loaded: BTreeSet::new(),
+            resident: HashMap::new(),
+            ever_loaded: BTreeSet::new(),
             absent: BTreeSet::new(),
+            misaligned: BTreeSet::new(),
+            clock: 0,
             obstacles,
             chart,
             cache: HashMap::new(),
@@ -200,48 +235,177 @@ impl Floors {
         self.chart.is_some()
     }
 
-    /// Loads the tiles of the cells the circle's box touches (a tile that is not there is noted,
-    /// once). A tile that is there and cannot be read is an error, never a missing one.
-    fn ensure_tiles(&mut self, lat: f64, lon: f64, radius_m: f64) -> Result<(), String> {
-        let Some(dir) = self.tile_dir.clone() else {
-            return Ok(());
-        };
-        if self.preloaded {
-            return Ok(());
-        }
+    /// The cells (south-west corner, whole degrees) the circle's box touches, in order.
+    fn cells_of(lat: f64, lon: f64, radius_m: f64) -> Vec<(i32, i32)> {
         let dlat = radius_m / M_PER_DEG_LAT_MIN + 0.001;
         let dlon = radius_m / (M_PER_DEG_LAT_MIN * lat.to_radians().cos().max(0.01)) + 0.001;
+        let mut cells = Vec::new();
         for la in (lat - dlat).floor() as i32..=(lat + dlat).floor() as i32 {
             for lo in (lon - dlon).floor() as i32..=(lon + dlon).floor() as i32 {
-                if self.loaded.contains(&(la, lo)) || self.absent.contains(&(la, lo)) {
-                    continue;
-                }
-                let name = tile_name(la, lo);
-                let path = name.map(|n| dir.join(n));
-                match path {
-                    Some(p) if p.is_file() => {
-                        self.set.tiles.push(read_tile(&p)?);
-                        self.loaded.insert((la, lo));
-                        self.stats.tiles_loaded += 1;
-                    }
-                    _ => {
-                        self.absent.insert((la, lo));
-                        self.stats.tiles_absent += 1;
-                    }
-                }
+                cells.push((la, lo));
             }
         }
-        Ok(())
+        cells
+    }
+
+    /// The grid of a cell, from memory or from its file; `None` if there is no file (noted, once).
+    /// A tile that is there and cannot be read is an error, never a missing one.
+    fn grid_of(&mut self, cell: (i32, i32)) -> Result<Option<Grid>, String> {
+        if let Some((g, _)) = self.resident.remove(&cell) {
+            return Ok(Some(g));
+        }
+        if self.absent.contains(&cell) {
+            return Ok(None);
+        }
+        let Some(dir) = self.tile_dir.clone() else {
+            return Ok(None);
+        };
+        let path = tile_name(cell.0, cell.1).map(|n| dir.join(n));
+        match path {
+            Some(p) if p.is_file() => {
+                let t0 = Instant::now();
+                let g = read_tile(&p)?;
+                self.stats.ns_tile_read += t0.elapsed().as_nanos() as u64;
+                if self.ever_loaded.insert(cell) {
+                    self.stats.tiles_loaded += 1;
+                } else {
+                    self.stats.tiles_reloaded += 1;
+                }
+                Ok(Some(g))
+            }
+            _ => {
+                self.absent.insert(cell);
+                self.stats.tiles_absent += 1;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Says on stderr, once for the block, which tile does not match the first (spacing ratio and
+    /// the offset from the first tile's lattice in steps), and counts the block.
+    fn note_misaligned(&mut self, block: &[(i32, i32)], grids: &[Grid]) {
+        if !self.misaligned.insert(block.to_vec()) {
+            return;
+        }
+        self.stats.blocks_misaligned += 1;
+        if self.misaligned.len() > MAX_MISALIGN_NOTES {
+            return;
+        }
+        let Some(r) = grids.first() else {
+            return;
+        };
+        for (cell, g) in block.iter().zip(grids.iter()).skip(1) {
+            let (rl, rt) = (g.dlon / r.dlon - 1.0, g.dlat / r.dlat - 1.0);
+            let fc = (g.lon0 - r.lon0) / r.dlon;
+            let fr = (r.lat0 - g.lat0) / r.dlat;
+            eprintln!(
+                "oa-msaw: terrain tile of cell {},{} does not share the lattice of cell {},{}: \
+                 spacing ratio - 1 = {:.3e} (lon) {:.3e} (lat), offset {:.6} columns {:.6} rows \
+                 from a whole number of steps {:.6} {:.6}",
+                cell.0,
+                cell.1,
+                block.first().map_or(0, |c| c.0),
+                block.first().map_or(0, |c| c.1),
+                rl,
+                rt,
+                fc,
+                fr,
+                fc - fc.round(),
+                fr - fr.round()
+            );
+        }
     }
 
     fn terrain_ft(&mut self, lat: f64, lon: f64, radius_m: f64) -> Result<i32, String> {
-        self.ensure_tiles(lat, lon, radius_m)?;
+        let t0 = Instant::now();
+        let tile0 = self.stats.ns_tile_read;
+        let r = self.terrain_query(lat, lon, radius_m);
+        let spent = t0.elapsed().as_nanos() as u64;
+        self.stats.ns_terrain += spent.saturating_sub(self.stats.ns_tile_read - tile0);
+        r
+    }
+
+    fn terrain_query(&mut self, lat: f64, lon: f64, radius_m: f64) -> Result<i32, String> {
         self.stats.terrain_queries += 1;
         let nm = (radius_m / NM_M).max(1.0e-6);
-        match max_elevation_in_radius_conservative(&self.set, lat, lon, nm) {
+        let result = if self.preloaded {
+            max_elevation_in_radius_conservative(&self.set, lat, lon, nm)
+        } else {
+            // Only the tiles of the cells the box touches (at most a handful), in cell order so
+            // that the reference lattice of the set is the same for the same block.
+            let cells = Self::cells_of(lat, lon, radius_m);
+            let mut set = TileSet::default();
+            let mut present = Vec::new();
+            let mut failed = None;
+            for &c in &cells {
+                match self.grid_of(c) {
+                    Ok(Some(g)) => {
+                        present.push(c);
+                        set.tiles.push(g);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
+                }
+            }
+            let r = if failed.is_none() {
+                max_elevation_in_radius_conservative(&set, lat, lon, nm)
+            } else {
+                Err(oa_tiff::QueryError::NoTiles)
+            };
+            if matches!(r, Err(oa_tiff::QueryError::TilesNotAligned)) {
+                self.note_misaligned(&present, &set.tiles);
+            }
+            // The grids go back, marked as just used; the least recently used are dropped.
+            self.clock += 1;
+            for (c, g) in present.into_iter().zip(set.tiles) {
+                self.resident.insert(c, (g, self.clock));
+            }
+            while self.resident.len() > MAX_RESIDENT_TILES {
+                let oldest = self
+                    .resident
+                    .iter()
+                    .min_by_key(|(c, (_, t))| (*t, **c))
+                    .map(|(c, _)| *c);
+                match oldest {
+                    Some(c) => {
+                        self.resident.remove(&c);
+                    }
+                    None => break,
+                }
+            }
+            if let Some(e) = failed {
+                return Err(e);
+            }
+            r
+        };
+        match result {
             Ok(TerrainMax::Complete { peak, .. }) => Ok(ceil_ft(f64::from(peak.metres))),
-            _ => {
+            Ok(TerrainMax::Incomplete {
+                missing_nodes,
+                nodata_nodes,
+                ..
+            }) => {
                 self.stats.terrain_absent += 1;
+                if missing_nodes > 0 {
+                    self.stats.terrain_missing += 1;
+                } else if nodata_nodes > 0 {
+                    self.stats.terrain_nodata += 1;
+                } else {
+                    self.stats.terrain_refused += 1;
+                }
+                Ok(FLOOR_NONE)
+            }
+            Err(oa_tiff::QueryError::TilesNotAligned) => {
+                self.stats.terrain_absent += 1;
+                self.stats.terrain_misaligned += 1;
+                Ok(FLOOR_NONE)
+            }
+            Err(_) => {
+                self.stats.terrain_absent += 1;
+                self.stats.terrain_refused += 1;
                 Ok(FLOOR_NONE)
             }
         }
@@ -267,7 +431,9 @@ impl Floors {
     pub fn floor_at(&mut self, p: &SamplePoint) -> Result<FloorSample, String> {
         self.stats.points += 1;
         let (lat, lon) = (f64::from(p.lat_e7) / 1e7, f64::from(p.lon_e7) / 1e7);
+        let t0 = Instant::now();
         let mva_ft = self.chart_ft(lat, lon);
+        self.stats.ns_chart += t0.elapsed().as_nanos() as u64;
         let bucket = (f64::from(p.radius_m) / RADIUS_STEP_M).ceil().max(1.0);
         let key = (
             cell_of(lat, CELL_DEG),
@@ -288,16 +454,19 @@ impl Floors {
             } else {
                 FLOOR_NONE
             };
+            let t1 = Instant::now();
             let o = self
                 .obstacles
                 .as_ref()
                 .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
+            self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
             self.cache.insert(key, (t, o));
             (t, o)
         };
         Ok(FloorSample {
             terrain_ft,
             obstacle_ft,
+            obstacle_covered: self.obstacles.is_some(),
             mva_ft,
         })
     }

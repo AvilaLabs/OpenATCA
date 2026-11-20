@@ -241,11 +241,13 @@ version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-arinc424",
+ "oa-awc",
  "oa-bench",
  "oa-dof",
  "oa-encounter",
  "oa-encounter-run",
  "oa-feed",
+ "oa-math",
  "oa-msaw",
  "oa-mva",
  "oa-safety",

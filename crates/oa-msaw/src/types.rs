@@ -228,6 +228,10 @@ pub struct Alert {
     pub lat_e7: i32,
     pub lon_e7: i32,
     pub alt_ft: f32,
+    /// Vertical rate (feet per minute, NaN when unknown) and ground speed (metres per second) at
+    /// the first cycle: what the track was doing.
+    pub vrate_fpm: f32,
+    pub speed_mps: f32,
     /// Smallest predicted margin over the floor (altitude minus floor, feet; negative is
     /// below), at the worst cycle and point; and what set that floor.
     pub worst_margin_ft: f32,
