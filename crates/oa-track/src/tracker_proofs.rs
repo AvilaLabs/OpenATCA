@@ -1384,6 +1384,7 @@ fn filter_apply_rejects_as_the_real_path(
 #[derive(Clone, Copy, PartialEq)]
 enum Part {
     Scalars,
+    Category,
     Current,
     Anchor,
     Ring,
@@ -1450,19 +1451,22 @@ fn not_applied_scenario(
         t.hits[PROOF_SLOT] = kani::any();
         t.ring_len[PROOF_SLOT] = kani::any();
         t.ring_head[PROOF_SLOT] = kani::any();
-        t.cat[PROOF_SLOT] = arbitrary_category_state();
     } else {
         t.last_ns[PROOF_SLOT] = PROOF_TIME - 5;
         t.updates[PROOF_SLOT] = 7;
         t.hits[PROOF_SLOT] = 3;
         t.ring_len[PROOF_SLOT] = 2;
         t.ring_head[PROOF_SLOT] = 1;
-        t.cat[PROOF_SLOT] = CategoryState {
+    }
+    t.cat[PROOF_SLOT] = if part == Part::Category {
+        arbitrary_category_state()
+    } else {
+        CategoryState {
             trusted: 0xA3,
             cand: 0,
             cand_n: 0,
-        };
-    }
+        }
+    };
     let before = track_txn(t, PROOF_SLOT);
     let vote = t.mv_old_vote_ns[PROOF_SLOT];
     let (start, first_ns, first_sens) = (
@@ -1483,7 +1487,7 @@ fn not_applied_scenario(
     (before, after, vote, m, original)
 }
 
-// What these four prove, and only this: the production `update_in_order_held`, with `decide`
+// What these five prove, and only this: the production `update_in_order_held`, with `decide`
 // stubbed to what the real rejected path does (one more jump rejection counted, one more in the
 // filter's run of refusals), `filter_apply` stubbed likewise, and any distances (so every
 // verdict of `resolve_decide`), given a report that is not applied, leaves the whole track as
@@ -1491,11 +1495,11 @@ fn not_applied_scenario(
 // more, as the real rejected path adds it), and the move as it was (still active, the same
 // snapshot index, start, first report time and sensor, `hold_on` off) with the snapshot in the
 // pool equal to the one taken, field for field, bit for bit; the moved track differs from the
-// snapshot in every group (scalar columns and category, current filter, anchor filter, ring), one
+// snapshot in every group (scalar columns, category, current filter, anchor filter, ring), one
 // group by any value in each harness and the others by one fixed value each. The only counters
 // that change are `jump_rejected` (one more) and at most one of `moves_decision_rejected`,
 // `moves_old_path_votes`, `moves_old_path_unpredictable` (one more, the vote also setting the
-// old-path vote time to the report's); no outcome is counted, no row is made. Four harnesses,
+// old-path vote time to the report's); no outcome is counted, no row is made. Five harnesses,
 // one for each part of the track, because a proof comparing every float at once does not fit the
 // memory budget. The stubs hold for the default configuration: `resync_consistent_k` is 0 (off)
 // and the run of refusals is below `RESYNC_AFTER`, so the refused report does not resynchronise
@@ -1524,9 +1528,6 @@ fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refus
     assert_eq!(after.disagree_until_ns, before.disagree_until_ns);
     assert_eq!(after.expected_ns, before.expected_ns);
     assert_eq!(after.newest_update_ns, before.newest_update_ns);
-    assert_eq!(after.cat.trusted, before.cat.trusted);
-    assert_eq!(after.cat.cand, before.cat.cand);
-    assert_eq!(after.cat.cand_n, before.cat.cand_n);
     assert_eq!(after.updates, before.updates);
     assert_eq!(after.state, before.state);
     assert_eq!(after.hits, before.hits);
@@ -1555,6 +1556,21 @@ fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refus
         votes + unpredictable + decision_rejected == 0,
         "too soon to decide"
     );
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(decide, decide_rejected_as_the_real_path)]
+#[kani::stub(filter_miss_m, any_miss)]
+#[kani::stub(filter_apply, filter_apply_rejects_as_the_real_path)]
+fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_category() {
+    let mut t = proof_tracker_with_pool(CONFIRMED, 1);
+    let (before, after, _, _, original) = not_applied_scenario(&mut t, Part::Category);
+    assert_eq!(after.cat.trusted, before.cat.trusted);
+    assert_eq!(after.cat.cand, before.cat.cand);
+    assert_eq!(after.cat.cand_n, before.cat.cand_n);
+    assert_snap_bits(&t.snaps[0], &original);
 }
 
 // REQ: OA-TRK-354

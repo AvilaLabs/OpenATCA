@@ -19,7 +19,7 @@ from kani_validation import LOOP_UNWIND_PRESETS
 
 
 REGISTRY_VERSION = 1
-MAX_PROOFS = 64
+MAX_PROOFS = 96
 ALLOWED_PACKAGES = {"oa-track", "oa-replay", "oa-safety"}
 ALLOWED_CFGS = {"kani_full_capacity", "kani_late_replay_covers"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
