@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 63)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 63)
+        self.assertEqual(registry["expected_proof_count"], 72)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 72)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 58)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 63)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -64,6 +64,10 @@ class SuiteConfigurationTests(unittest.TestCase):
             "full-sensor-update",
             "late-append-combined",
             "late-overflow-combined",
+            "hypot-dd-square",
+            "hypot-dd-root",
+            "hypot-fast-plain",
+            "hypot-fast-scaled",
         })
 
     def test_the_safety_net_inhibition_proofs_are_registered(self):
@@ -97,6 +101,22 @@ class SuiteConfigurationTests(unittest.TestCase):
         for proof in ca.values():
             self.assertTrue(proof["enabled"] and not proof["experimental"])
             self.assertTrue(proof["harness"].startswith("solve::proofs::"))
+
+    def test_the_hypot_proofs_are_registered_in_oa_math(self):
+        registry, errors = load_registry(REGISTRY_PATH)
+        self.assertEqual(errors, [])
+        math = {p["id"]: p for p in registry["proofs"] if p["package"] == "oa-math"}
+        self.assertEqual(
+            {i for i, p in math.items() if p["enabled"]},
+            {"hypot-operands-ordered", "hypot-slow-operands", "hypot-dd-operands",
+             "hypot-dd-sum", "hypot-scale-round"},
+        )
+        self.assertEqual(
+            {i for i, p in math.items() if not p["enabled"]},
+            {"hypot-dd-square", "hypot-dd-root", "hypot-fast-plain", "hypot-fast-scaled"},
+        )
+        for proof in math.values():
+            self.assertTrue(proof["harness"].startswith("root::proofs::"))
 
     def test_late_rollback_conjunction_has_every_component_and_reachability_case(self):
         registry, errors = load_registry(REGISTRY_PATH)

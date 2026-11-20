@@ -230,6 +230,21 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-MATH-037** Outside `order.rs`, no source of `oa-math` calls `total_cmp`, `is_sign_negative` or
   `is_sign_positive` (method, path call or path as a value): the sign and order of a NaN come from the `*_canon_*`
   functions only. The purity scan fails on one, and a planted-detection test shows the matcher finds each form.
+- **OA-MATH-038** `hypot` was split into the operand ordering (`order_by_bits`), the first step of the
+  slow path (`hypot_slow_operands`), the double-double core (`hypot_dd`: `dd_operands`,
+  `hypot_dd_root`, `scale_round`) so that each is proved apart: the split code equals the code before it
+  bit for bit (`fast`, `slow` and `hypot`, on a million inputs: zero, subnormals, the limits of the fast
+  paths, the domain edge 5e7, ratios near 2^-60, arbitrary bit patterns). The reference-data tests of
+  OA-MATH-005 are unchanged.
+- **OA-MATH-039** Proved (Kani, `root::proofs`), for finite `x` and `y` with `|x|, |y| <= 5e7`, the parts of
+  `hypot` that do not depend on an exact product: the ordering (`hypot-operands-ordered`), the first step
+  of the slow path (`hypot-slow-operands`), the scaling of the operands (`hypot-dd-operands`), the sum of
+  two squares given bounds on their parts (`hypot-dd-sum`) and the scaling back (`hypot-scale-round`).
+  Not proved, each over 10 minutes in CBMC (registered disabled): the exact square of a scaled operand
+  (`hypot-dd-square`), the double-double root (`hypot-dd-root`), the plain fast path
+  (`hypot-fast-plain`) and the scaled fast path (`hypot-fast-scaled`); all four need the exactness of
+  the Veltkamp-split products, which is a multiplier-equivalence problem for the SAT solver. So
+  `hypot` finite and not negative on that domain is not proved.
 
 ### NASR (oa-nasr)
 
@@ -5496,9 +5511,10 @@ configuration with no default; the crate's tests use synthetic values.
   conflict span, the two misses, then `prediction_of`); the vertical miss is finite and not negative
   (`ca-vertical-span`); the closest point of the horizontal miss is finite, within 5e7 m of the origin, at a
   time inside the look-ahead (`ca-horizontal-miss-point`). Not proved: that `oa_math::hypot` of such a
-  point is finite and not negative, which the horizontal miss takes as a contract; CBMC did not finish
-  that lemma in 30 minutes. The contract is the documented behaviour of `hypot` (OA-MATH-005, tested
-  against reference data); a Kani proof of it needs a split of `oa_math::hypot` itself.
+  point is finite and not negative, which the horizontal miss takes as a contract. The parts of `hypot`
+  that were proved are in OA-MATH-039; four parts that need the exactness of double-double products did
+  not finish in 10 minutes in CBMC (the exact square, the double-double root, and the two fast paths).
+  The contract is the documented behaviour of `hypot` (OA-MATH-005, tested against reference data).
 - **OA-CA-030** The tool uses the shared sealed-path guard (`oa-sealed`) for every path: the clip, the
   configuration and the output directory are checked as given and after links before anything is opened or
   created, and the configuration is opened, then verified as the file opened (a link swapped between check

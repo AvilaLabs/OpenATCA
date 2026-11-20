@@ -162,6 +162,40 @@ itself is a bijection tested by the unit tests, not proved.
 * A symbolic ADS-B payload with more than 4 records, and the real (unstubbed) record decoder inside
   the payload loop: 1 record with everything real ran past 15 minutes and 4.5 GB.
 
+### Conflict alert: the end-to-end property of `predict` is a composition of named proofs
+
+`oa_ca::solve::predict(...)` returns `None` or a prediction whose time to loss is finite and inside
+the look-ahead and whose two misses are finite and not negative (OA-CA-029). CBMC does not finish
+that as one harness, so it is the composition below. `predict` is exactly `conflict_span`, then
+`horizontal_miss` and `vertical_miss`, then `prediction_of`; the split equals the unsplit code bit
+for bit (`crates/oa-ca/tests/split.rs`). Constants: `A_MAX = 3.3e7`, `DISC_MAX = 4e19`,
+`TC_MAX = 4e18`, `ROOT_MAX = 7e9`, `POINT_MAX = 5e7`. Every harness is in
+`crates/oa-ca/src/solve.rs` (`solve::proofs`) unless named otherwise; registry ids in
+`tools/rust_proofs.json`.
+
+| Contract | Established by | Used by |
+|---|---|---|
+| `a = vx^2 + vy^2` in `[0, A_MAX]`; discriminant finite and `<= DISC_MAX` | `ca-horizontal-now-bounds` | `ca-horizontal-now-step` |
+| time of closest approach finite, `<= TC_MAX`, for a speed not taken as zero | `ca-horizontal-now-approach` | `ca-horizontal-now-step`, `ca-horizontal-now-root` |
+| `sqrt(disc)` finite, `0 <= root <= ROOT_MAX`, for finite `disc` in `(0, DISC_MAX]` | `ca-horizontal-now-sqrt` | `ca-horizontal-now-root` |
+| a pair inside the limit now: `step_of` gives a current span or a root step with `disc > 0` | `ca-horizontal-now-step` | `ca-horizontal-now-root` (OA-CA-028) |
+| the horizontal span is finite and ordered inside the look-ahead | `ca-horizontal-span` (whole solver) | `ca-predict-span` (as the ordered span it takes) |
+| the vertical span is finite and ordered; the vertical miss is finite, not negative | `ca-vertical-span` | `ca-predict-span`, `ca-predict-ttl` (the vertical miss) |
+| the meet of ordered spans is ordered | `ca-meet` | `ca-predict-span` |
+| the conflict span is finite and ordered inside the look-ahead | `ca-predict-span` | `ca-predict-ttl` |
+| the closest point is finite, within `POINT_MAX`, at a time in `[0, t]` | `ca-horizontal-miss-point` | the `hypot` contract below |
+| `hypot(x, y)` finite and not negative for `|x|, |y| <= POINT_MAX` | **not proved**, see below | the horizontal miss, so `ca-predict-ttl`'s `h_miss` |
+| time to loss finite and in `[0, t]`; misses carried unchanged | `ca-predict-ttl` | the end-to-end property |
+
+`hypot` (`oa-math`, OA-MATH-038/039): the ordering, the first step of the slow path, the scaling of
+its operands, the sum of two squares and the scaling back are proved (`hypot-operands-ordered`,
+`hypot-slow-operands`, `hypot-dd-operands`, `hypot-dd-sum`, `hypot-scale-round`). The exact square of
+a scaled operand, the double-double root, and the plain and scaled fast paths did not finish in 10
+minutes each (`hypot-dd-square`, `hypot-dd-root`, `hypot-fast-plain`, `hypot-fast-scaled`, registered
+disabled). They depend on the exactness of the Veltkamp-split products, a multiplier-equivalence
+problem for the SAT solver, so the horizontal miss's finiteness rests on the documented, tested
+behaviour of `hypot` (OA-MATH-005), not on a proof.
+
 ## What the proofs do not cover
 
 * **Inputs beyond the bound.** A 25-octet item, a 4-octet CAT021 FSPEC, a 5-record ADS-B payload

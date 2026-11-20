@@ -19,8 +19,8 @@ from kani_validation import LOOP_UNWIND_PRESETS
 
 
 REGISTRY_VERSION = 1
-MAX_PROOFS = 64
-ALLOWED_PACKAGES = {"oa-track", "oa-replay", "oa-safety", "oa-ca"}
+MAX_PROOFS = 80
+ALLOWED_PACKAGES = {"oa-track", "oa-replay", "oa-safety", "oa-ca", "oa-math"}
 ALLOWED_CFGS = {"kani_full_capacity", "kani_late_replay_covers"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 HARNESS_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$")
