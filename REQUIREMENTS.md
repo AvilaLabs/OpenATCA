@@ -5459,7 +5459,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
 - **OA-SEAL-001** The sealed hold-out data is listed once, in `crates/oa-sealed/sealed_paths.txt` (the data root and the entries
-  `scds/rec-20261119`, `scds/stdds-20261119-holdout`, `scds/stdds-smoke-20261119*`); the Rust guard compiles the file in and
+  `scds/rec-20261119/day2`, `day3`, `day4`, `runs*`, `scds/stdds-20261119-holdout`, `scds/stdds-smoke-20261119*`); the Rust guard compiles the file in and
   the Python guard reads it, and both parse it to the same set. A list that does not parse refuses every path.
 - **OA-SEAL-002** A path is resolved before it is checked (relative paths, `..`, every link, a symlinked parent directory, a
   path not yet created through its nearest existing ancestor) and is refused, with a message that names the rule, if it is,
@@ -5482,3 +5482,9 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   guard before they stat a listed entry, and every guarded opener is this one function.
 - **OA-SEAL-008** The list file is printable ASCII and newline only, each line `word`, one space, `value`; both parsers
   refuse anything else, and the same inputs are refused by both.
+- **OA-SEAL-009** Of the four-day recording `scds/rec-20261119`, the sealed list seals `day2`, `day3` and `day4` (hold-out days A,
+  B and C of protocol P-001) and `runs*` (the recorder's run log, which covers every day); `day1` (the tune day, usable
+  freely) and `bin` are not sealed, so a path below them is accepted. The folder itself holds sealed entries and is refused
+  as a holding directory (OA-SEAL-002), like `scds`. A path through `..` or a link into day2 to day4 is refused, and so is
+  a copy of the days under another root. Tests: `only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed` (Rust,
+  `crates/oa-sealed/tests/guard.rs`; Python, `tools/test_sealed_guard.py`).

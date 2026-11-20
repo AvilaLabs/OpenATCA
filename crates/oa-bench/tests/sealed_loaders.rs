@@ -16,7 +16,7 @@ use std::process::Command;
 use oa_bench::input::{hash_files, list_inputs, load, load_adsb, read_capped_file, FeedInput};
 use oa_replay::FeedKind;
 
-/// `T/scds/rec-20261119/x/clip.oaf` and, outside it, links into it.
+/// `T/scds/rec-20261119/day2/x/clip.oaf` and, outside it, links into it.
 struct Tree {
     t: PathBuf,
     link_file: PathBuf,
@@ -29,7 +29,7 @@ struct Tree {
 fn tree(name: &str) -> Tree {
     let t = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("sealed_{name}"));
     let _ = fs::remove_dir_all(&t);
-    let sealed = t.join("scds/rec-20261119/x");
+    let sealed = t.join("scds/rec-20261119/day2/x");
     fs::create_dir_all(&sealed).unwrap();
     fs::write(sealed.join("clip.oaf"), b"x").unwrap();
     fs::write(sealed.join("metar1.json"), b"{}").unwrap();
@@ -37,7 +37,7 @@ fn tree(name: &str) -> Tree {
     fs::create_dir_all(&open).unwrap();
     symlink(sealed.join("clip.oaf"), open.join("link_file.oaf")).unwrap();
     symlink(&sealed, open.join("link_dir")).unwrap();
-    symlink(t.join("scds/rec-20261119"), open.join("parent")).unwrap();
+    symlink(t.join("scds/rec-20261119/day2"), open.join("parent")).unwrap();
     let dir_with_link = open.join("dir_with_link");
     fs::create_dir_all(&dir_with_link).unwrap();
     symlink(sealed.join("clip.oaf"), dir_with_link.join("a.oaf")).unwrap();

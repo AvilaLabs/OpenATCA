@@ -442,7 +442,7 @@ fn a_sidecar_or_source_file_that_links_into_sealed_data_is_refused_and_nothing_i
     use std::os::unix::fs::symlink;
     // A fake sealed tree; the links to it sit inside otherwise ordinary source folders.
     let t = tmp("sealed-tree");
-    let sealed = t.join("scds/rec-20261119");
+    let sealed = t.join("scds/rec-20261119/day2");
     fs::create_dir_all(&sealed).unwrap();
     fs::write(
         sealed.join("side.txt"),
@@ -465,6 +465,12 @@ fn a_sidecar_or_source_file_that_links_into_sealed_data_is_refused_and_nothing_i
     }
     // The source folder itself, reached through a symlinked parent.
     symlink(t.join("scds"), t.join("via")).unwrap();
-    let e = slice_dir(&t.join("via/rec-20261119"), &tmp("sealed-out-x"), 0, 128).unwrap_err();
+    let e = slice_dir(
+        &t.join("via/rec-20261119/day2"),
+        &tmp("sealed-out-x"),
+        0,
+        128,
+    )
+    .unwrap_err();
     assert!(e.to_string().contains("OA-SEAL-001"), "{e}");
 }

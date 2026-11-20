@@ -12,10 +12,11 @@ import sealed_guard  # noqa: E402
 
 def fake_root(base: Path) -> Path:
     root = base / "data"
-    for d in ("scds/rec-20261119/sfdps", "scds/stdds-20261119-holdout",
+    for d in ("scds/rec-20261119/day2/sfdps", "scds/rec-20261119/day1", "scds/rec-20261119/bin",
+              "scds/stdds-20261119-holdout",
               "scds/stdds-smoke-20261119T192936Z", "scds/day-20261118/rec"):
         (root / d).mkdir(parents=True)
-    (root / "scds/rec-20261119/sfdps/a.bin").write_bytes(b"x")
+    (root / "scds/rec-20261119/day2/sfdps/a.bin").write_bytes(b"x")
     (root / "scds/day-20261118/rec/b.bin").write_bytes(b"y")
     return root
 
@@ -39,7 +40,8 @@ class SealedGuardTests(unittest.TestCase):
     def test_the_list_parses_to_the_sealed_entries(self):
         root, entries = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
         self.assertEqual([e[0] for e in entries], [
-            "scds/rec-20261119", "scds/stdds-20261119-holdout", "scds/stdds-smoke-20261119*",
+            "scds/rec-20261119/day2", "scds/rec-20261119/day3", "scds/rec-20261119/day4",
+            "scds/rec-20261119/runs*", "scds/stdds-20261119-holdout", "scds/stdds-smoke-20261119*",
             "raw/adsblol/2026.11.20", "raw/adsblol/2026.11.21", "raw/adsblol/2026.11.22"])
         for bad in ("", "root /d\n", "seal a/b\n", "root /d\nseal a/../b\n", "root d\nseal a\n",
                     "root /d\nseal *\n", "root /d\nfoo bar\n"):
@@ -51,25 +53,54 @@ class SealedGuardTests(unittest.TestCase):
 
     # REQ: OA-SEAL-002
     def test_names_as_given_and_near_misses(self):
-        for p in ("x/scds/rec-20261119", "/data/scds/rec-20261119/sub/f", "/data/scds/stdds-20261119-holdout/a",
+        for p in ("x/scds/rec-20261119/day2", "/data/scds/rec-20261119/day2/sub/f", "/data/scds/rec-20261119/runs.log", "/data/scds/stdds-20261119-holdout/a",
                   "/data/scds/stdds-smoke-20261119T192936Z/b", "/data/scds/stdds-smoke-20261119"):
             self.refused(p)
-        for p in ("/data/scds/day-20261114/rec", "/data/scds/rec-20261119x", "/data/rec-20261119",
+        for p in ("/data/scds/day-20261114/rec", "/data/scds/rec-20261119x", "/data/scds/rec-20261119/day1/x", "/data/scds/rec-20261119/day2x",
+                  "/data/rec-20261119",
                   "/data/scds/x/rec-20261119", "/data/scds/stdds-smoke-20261118T1"):
             self.g.check(p)
+
+    # REQ: OA-SEAL-001
+    # REQ: OA-SEAL-002
+    def test_only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed(self):
+        rec = self.root / "scds/rec-20261119"
+        (rec / "day1/x").write_bytes(b"x")
+        (rec / "day3").mkdir()
+        (rec / "day4").mkdir()
+        (rec / "bin/run-days.sh").write_bytes(b"x")
+        for p in ("day1/x", "bin/run-days.sh", "bin", "day1"):
+            self.g.check(rec / p)
+        # The folder itself holds sealed entries, so it is refused as a holding directory (as
+        # `scds` is): a tool names day1 or bin directly.
+        with self.assertRaises(sealed_guard.SealedError) as c:
+            self.g.check(rec)
+        self.assertIn("holds", str(c.exception))
+        for p in ("day2/x", "day3", "day3/x", "day4/x", "runs.log", "runs.log.1", "day1/../day2/x"):
+            self.refused(rec / p)
+        work = self.base / "work"
+        work.mkdir()
+        os.symlink(rec / "day2/sfdps/a.bin", rec / "day1/link")
+        self.refused(rec / "day1/link")
+        os.symlink(rec / "day2", work / "day1")
+        self.refused(work / "day1")
+        self.refused(work / "day1/sfdps/a.bin")
+        self.refused("/elsewhere/scds/rec-20261119/day2/x")
+        self.refused("/elsewhere/scds/rec-20261119/runs.log")
+        self.g.check("/elsewhere/scds/rec-20261119/day1/x")
 
     # REQ: OA-SEAL-002
     def test_paths_are_resolved_before_the_check(self):
         work = self.base / "work"
         work.mkdir()
-        sealed = self.root / "scds/rec-20261119"
+        sealed = self.root / "scds/rec-20261119/day2"
         os.symlink(sealed, work / "dir")
         os.symlink(sealed / "sfdps/a.bin", work / "file")
         os.symlink(work / "dir", work / "chain")
         for p in (work / "dir", work / "dir/sfdps/a.bin", work / "file", work / "chain/sfdps",
-                  self.root / "scds/day-20261118/../rec-20261119/sfdps",
+                  self.root / "scds/day-20261118/../rec-20261119/day2/sfdps",
                   work / "dir/new-output", work / "dir/not/yet/here",
-                  self.root / "scds/day-20261118/nothing/../../rec-20261119"):
+                  self.root / "scds/day-20261118/nothing/../../rec-20261119/day2"):
             self.refused(p)
         rel = os.path.relpath(sealed, os.getcwd())
         self.refused(rel)
@@ -96,7 +127,7 @@ class SealedGuardTests(unittest.TestCase):
     # REQ: OA-SEAL-003
     def test_the_opener_refuses_before_it_opens(self):
         dev = self.root / "scds/day-20261118/rec"
-        os.symlink(self.root / "scds/rec-20261119/sfdps/a.bin", dev / "sneaky")
+        os.symlink(self.root / "scds/rec-20261119/day2/sfdps/a.bin", dev / "sneaky")
         read, refused = 0, 0
         for p in sorted(dev.iterdir()):
             try:
@@ -114,7 +145,7 @@ class SealedGuardTests(unittest.TestCase):
         r = subprocess.run([sys.executable, "-I", sealed_guard.__file__, "--off", "x"],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
-        sealed_dir = self.root / "scds/rec-20261119/sfdps/a.bin"
+        sealed_dir = self.root / "scds/rec-20261119/day2/sfdps/a.bin"
         self.refused(sealed_dir)
 
     # REQ: OA-SEAL-005
@@ -135,13 +166,13 @@ class SealedGuardTests(unittest.TestCase):
         out = self.base / "out"
         # Fake paths that only name a sealed folder: nothing real is touched.
         r = subprocess.run(["bash", str(here / "replay_compare.sh"), "HEAD", "HEAD",
-                            "/nonexistent-fake/scds/rec-20261119/clip.oaf", str(out)],
+                            "/nonexistent-fake/scds/rec-20261119/day2/clip.oaf", str(out)],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 2)
         self.assertIn("OA-SEAL-001", r.stderr)
         self.assertFalse(out.exists())
         # An output directory under a link to a sealed folder is refused as well.
-        os.symlink(self.root / "scds/rec-20261119", self.base / "lnk")
+        os.symlink(self.root / "scds/rec-20261119/day2", self.base / "lnk")
         r = subprocess.run(["bash", str(here / "replay_compare.sh"), "HEAD", "HEAD",
                             str(self.base / "clip.oaf"), str(self.base / "lnk/out")],
                            capture_output=True, text=True)
@@ -154,7 +185,7 @@ class SealedGuardTests(unittest.TestCase):
 
     # REQ: OA-SEAL-007
     def test_a_file_swapped_in_after_the_check_is_caught_on_the_opened_descriptor(self):
-        os.symlink(self.root / "scds/rec-20261119/sfdps/a.bin", self.base / "late")
+        os.symlink(self.root / "scds/rec-20261119/day2/sfdps/a.bin", self.base / "late")
         g = sealed_guard.Guard(root=self.root)
         g.check = lambda p: None  # as if the link was swapped in after the check
         with self.assertRaises(sealed_guard.SealedError) as c:
@@ -171,7 +202,7 @@ class SealedGuardTests(unittest.TestCase):
     def test_each_argument_of_each_python_tool_is_refused_on_its_own(self):
         here = Path(__file__).resolve().parent
         t = self.base / "tree"
-        sealed = t / "scds" / "rec-20261119" / "x"
+        sealed = t / "scds" / "rec-20261119" / "day2" / "x"
         sealed.mkdir(parents=True)
         (sealed / "f.csv").write_bytes(b"x")
         open_dir = t / "open"
@@ -197,7 +228,7 @@ class SealedGuardTests(unittest.TestCase):
             if tool in required:
                 base_args = {f: benign for f in flags if f in required[tool]}
             for flag in flags:
-                for link in (open_dir / "file-link", open_dir / "dir-link", open_dir / "parent-link" / "rec-20261119" / "x" / "f.csv"):
+                for link in (open_dir / "file-link", open_dir / "dir-link", open_dir / "parent-link" / "rec-20261119" / "day2" / "x" / "f.csv"):
                     args = dict(base_args)
                     args[flag] = str(link)
                     argv = [a for kv in args.items() for a in kv] + fixed.get(tool, [])

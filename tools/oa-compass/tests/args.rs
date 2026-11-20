@@ -115,8 +115,8 @@ fn a_value_that_looks_like_a_flag_is_a_missing_value_and_a_repeated_flag_is_an_e
 // REQ: OA-CMP-047
 #[test]
 fn any_input_path_through_the_sealed_recording_is_refused_and_nothing_is_created() {
-    assert!(refuse_holdout(Path::new("/data/scds/rec-20261119/sfdps")).is_err());
-    assert!(refuse_holdout(Path::new("scds/rec-20261119")).is_err());
+    assert!(refuse_holdout(Path::new("/data/scds/rec-20261119/day2/sfdps")).is_err());
+    assert!(refuse_holdout(Path::new("scds/rec-20261119/day2")).is_err());
     // Only the exact component pair: neighbours are not it.
     assert!(refuse_holdout(Path::new("/data/scds/rec-20261119x")).is_ok());
     assert!(refuse_holdout(Path::new("/data/scds/day-20261114/rec/sfdps")).is_ok());
@@ -138,8 +138,14 @@ fn any_input_path_through_the_sealed_recording_is_refused_and_nothing_is_created
         self_test_adsb_offset_e7: 0,
     };
     for j in [
-        mk(Some(PathBuf::from("x/scds/rec-20261119/clip.oaf")), None),
-        mk(None, Some(PathBuf::from("x/scds/rec-20261119/rec/sfdps"))),
+        mk(
+            Some(PathBuf::from("x/scds/rec-20261119/day2/clip.oaf")),
+            None,
+        ),
+        mk(
+            None,
+            Some(PathBuf::from("x/scds/rec-20261119/day2/rec/sfdps")),
+        ),
     ] {
         let e = run_job(j, &mut |_| Ok(()), &mut |_| {})
             .unwrap_err()
@@ -150,7 +156,7 @@ fn any_input_path_through_the_sealed_recording_is_refused_and_nothing_is_created
     // A link into it is caught by the resolved path.
     #[cfg(unix)]
     {
-        let real = work.join("scds").join("rec-20261119");
+        let real = work.join("scds").join("rec-20261119").join("day2");
         fs::create_dir_all(&real).unwrap();
         let link = work.join("innocent");
         std::os::unix::fs::symlink(&real, &link).unwrap();
