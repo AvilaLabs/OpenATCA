@@ -1,0 +1,44 @@
+[package]
+name = "oa-msaw-run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates; not outside dependencies (RULESET F1). The ground table of the clip is the
+# close-encounter tool's own, shared so the tools agree.
+oa-adsb = { path = "../../crates/oa-adsb" }
+oa-arinc424 = { path = "../../crates/oa-arinc424" }
+oa-bench = { path = "../../crates/oa-bench" }
+oa-dof = { path = "../../crates/oa-dof" }
+oa-encounter-run = { path = "../oa-encounter" }
+oa-msaw = { path = "../../crates/oa-msaw" }
+oa-mva = { path = "../../crates/oa-mva" }
+oa-safety = { path = "../../crates/oa-safety" }
+oa-sealed = { path = "../../crates/oa-sealed" }
+oa-sha256 = { path = "../../crates/oa-sha256" }
+oa-tiff = { path = "../../crates/oa-tiff" }
+oa-track = { path = "../../crates/oa-track" }
+oa-zip = { path = "../../crates/oa-zip" }
+
+[dev-dependencies]
+# Workspace crates, not outside dependencies (RULESET F1): frame the recording of the sealed-window
+# test; the ground codes the core shares with the close-encounter record.
+oa-encounter = { path = "../../crates/oa-encounter" }
+oa-feed = { path = "../../crates/oa-feed" }
+
+[lib]
+name = "oa_msaw_run"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oa-msaw"
+path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"

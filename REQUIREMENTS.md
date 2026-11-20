@@ -6256,3 +6256,28 @@ FAA value.
 - **OA-MSAW-022** The time of a predicted violation is finite and inside its span for bounded inputs (Kani).
 - **OA-MSAW-023** A capacity above its bound is refused with the name of the key.
 - **OA-MSAW-024** The same cycles give the same alerts.
+
+### The tool (tools/oa-msaw)
+
+- **OA-MSAW-030** The arguments are strict; a sealed input, configuration, output, terrain, obstacle, chart or
+  CIFP path exits 2 before anything is opened or created.
+- **OA-MSAW-031** The shared guard refuses sealed folders, links into them and a link swapped after the check.
+- **OA-MSAW-032** Every single-valued configuration key is required (no defaults), an unknown or repeated key or
+  a value that does not parse is an error naming it, and the core's refusal names its key; procedure areas,
+  CIFP airports and inhibitions are lines of the file, and the file labels its values as not FAA values.
+- **OA-MSAW-033** Terrain is the conservative maximum under the point's circle in whole feet rounded up and
+  absent where any sample is missing or nodata; obstacles are the highest top within the circle; the chart is
+  the highest FUS3, FUS5 or TAV altitude of the sectors containing the point and absent outside them all.
+- **OA-MSAW-034** A runway's procedure area is a circle round its threshold at the lowest floor altitude its
+  approaches publish in the CIFP; an airport the file lacks is an error.
+- **OA-MSAW-035** The output files are written whole or not at all and a failed run leaves none of an earlier run's.
+- **OA-MSAW-036** Clip rows in a sealed window are dropped and counted, and the count is printed once on every exit.
+- **OA-MSAW-037** Synthetic Guam case through the tracker: the early descent alerts at caution and then warning.
+- **OA-MSAW-038** Synthetic Guam case with an inhibition over the area: no alert, the net reads inhibited for the
+  run, and inhibitions.csv shows the inhibition with its end time, reason, author and what it hid; once it
+  ends the alert comes and its expiry is recorded.
+- **OA-MSAW-039** With no terrain or chart the run alerts on nothing and says so (degraded, listed); a track with
+  no altitude and a track over the budget are counted, listed and degrade the net.
+- **OA-MSAW-040** The files are deterministic and the summary names no aircraft.
+- **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
+  ground codes of the core are the close-encounter record's.

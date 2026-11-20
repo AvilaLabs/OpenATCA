@@ -236,6 +236,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-msaw-run"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-arinc424",
+ "oa-bench",
+ "oa-dof",
+ "oa-encounter",
+ "oa-encounter-run",
+ "oa-feed",
+ "oa-msaw",
+ "oa-mva",
+ "oa-safety",
+ "oa-sealed",
+ "oa-sha256",
+ "oa-tiff",
+ "oa-track",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-mva"
 version = "0.0.1"
 dependencies = [
