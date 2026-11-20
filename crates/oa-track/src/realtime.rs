@@ -181,8 +181,45 @@ pub fn outside_timers_s(window_s: f64, timers_ns: u64) -> Option<f64> {
     }
 }
 
-/// The CPU source note: empty when every one of the `readings` used the per-thread counter, else
-/// the number that fell back to the process's `/proc/self/stat` ticks and the assumed tick rate
+/// The printed line for the seconds with at least one measurement.
+pub fn busy_line(s: &RealtimeSummary) -> String {
+    let ms = |ns: u64| ns as f64 / 1e6;
+    if s.busy_seconds == 0 {
+        return "processing time over the busy seconds only (seconds with at least one measurement): n/a, no second had a measurement".to_string();
+    }
+    format!(
+        "processing time over the {} busy seconds only (seconds with at least one measurement): p50 {:.3} ms, p99 {:.3} ms",
+        s.busy_seconds,
+        ms(s.busy_work_p50_ns),
+        ms(s.busy_work_p99_ns)
+    )
+}
+
+/// The printed line for the queue model, the backlog and the bounds on a report's wait and latency.
+pub fn queue_line(s: &RealtimeSummary) -> String {
+    let ms = |ns: u64| ns as f64 / 1e6;
+    format!(
+        "real time, queue model: each second's reports form one batch, available when the second ends, processed during the next second, with leftover work carried to the one after (backlog = max(0, backlog + work - 1 s)); a second finishes late when backlog is left. {} seconds whose work took longer than the second, {} seconds that finished late, longest backlog {:.3} ms; a report waits at most 1 s plus the backlog ahead of its batch before processing starts, so at most {:.3} ms; a batch completes at most its own work later, so a report's latency is at most 1 s + backlog + that second's work, at most {:.3} ms here. An upper bound: real reports arrive spread through the second and could be processed earlier",
+        s.over_one_second,
+        s.finished_late,
+        ms(s.backlog_max_ns),
+        ms(s.wait_bound_ns),
+        ms(s.wait_bound_ns.saturating_add(s.work_max_ns))
+    )
+}
+
+/// The printed line for the sum of the per-second timers against the update window's wall time.
+pub fn timers_line(timers_ns: u64, window_s: f64) -> String {
+    format!(
+        "sum of the per-second timers (wall only; no CPU is read per second): {:.3} s; the window below also holds the track-count scan, the log and the batching, {} outside the per-second timers: track counts, bookkeeping; the window's CPU includes the same work",
+        timers_ns as f64 / 1e9,
+        outside_timers_s(window_s, timers_ns)
+            .map_or("n/a (timers exceed the window)".to_string(), |d| format!("{d:.3} s wall"))
+    )
+}
+
+/// The CPU source note: empty when none of the `readings` that returned a value fell back
+/// (`readings` counts only those); else the number that fell back to the process's `/proc/self/stat` ticks and the assumed tick rate
 /// (the clock tick rate cannot be read without `unsafe` or a new dependency, so 100 Hz is assumed).
 pub fn cpu_fallback_note(fallback: usize, readings: usize) -> Option<String> {
     (fallback > 0).then(|| {

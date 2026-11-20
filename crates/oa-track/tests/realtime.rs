@@ -2,8 +2,9 @@
 //! The per-second log of `oa-track-run --realtime` (OA-TRK-388).
 
 use oa_track::realtime::{
-    check_flags, cpu_fallback_note, cpu_use, outside_timers_s, realtime_failure, realtime_summary,
-    run_summary_digest, seconds_csv, CpuMarks, SecondLog,
+    busy_line, check_flags, cpu_fallback_note, cpu_use, outside_timers_s, queue_line,
+    realtime_failure, realtime_summary, run_summary_digest, seconds_csv, timers_line, CpuMarks,
+    SecondLog,
 };
 use oa_track::types::{log_new, TrackerStats};
 
@@ -278,4 +279,26 @@ fn the_cpu_fallback_is_named_only_when_used() {
     assert_eq!(cpu_fallback_note(0, 5), None);
     let n = cpu_fallback_note(2, 5).unwrap();
     assert!(n.contains("2 of 5") && n.contains("100 Hz"));
+    // The denominator is the readings that returned a value.
+    assert!(cpu_fallback_note(1, 3)
+        .unwrap()
+        .starts_with("1 of 3 CPU readings"));
+}
+
+// REQ: OA-TRK-388
+#[test]
+fn the_printed_lines_show_na_for_no_busy_seconds_and_an_inconsistent_window() {
+    let none = realtime_summary(&SecondLog::default());
+    let b = busy_line(&none);
+    assert!(b.contains(": n/a,") && !b.contains("0.000 ms"), "{b}");
+    let busy = realtime_summary(&log_of(&[(0, 1, 10 * MS)]));
+    assert!(busy_line(&busy).contains("over the 1 busy seconds only"));
+    let t = timers_line(500 * MS, 0.4);
+    assert!(t.contains("n/a (timers exceed the window)"), "{t}");
+    let t = timers_line(500 * MS, 0.6);
+    assert!(t.contains("0.100 s wall outside the per-second timers: track counts, bookkeeping"));
+    // 1.5 s of work: backlog 0.5 s, wait bound 1500 ms, latency bound 3000 ms.
+    let q = queue_line(&realtime_summary(&log_of(&[(0, 1, 1_500 * MS)])));
+    assert!(q.contains("so at most 1500.000 ms;"), "{q}");
+    assert!(q.contains("work, at most 3000.000 ms here"), "{q}");
 }

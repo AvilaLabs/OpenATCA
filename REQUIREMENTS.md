@@ -3827,7 +3827,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   this queue model: each second's reports form one batch, available when the second ends, processed during
   the next second, leftover work carried on (backlog = max(0, backlog + work - 1 s)), a second finishing late
   when backlog is left, so a report waits at most 1 s plus the backlog ahead of its batch before processing
-  starts, an upper bound because real reports arrive spread through the second; the final advance and
+  starts and a batch completes at most its own work later (latency at most 1 s + backlog + that second's work), an upper bound because real reports arrive spread through the second; the final advance and
   flush apart (including the output spill with `--with-output`), CPU and wall time of the update window,
   which also hold the per-second track-count scan and bookkeeping, next to the sum of the per-second timers
   and the difference named as outside them (the sum is at most the window) and, read right after the final flush and before any

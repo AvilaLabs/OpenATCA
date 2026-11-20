@@ -46,8 +46,8 @@ use oa_track::latency::{
     LATENCY_CAPACITY, STAGES, STAGE_NAMES,
 };
 use oa_track::realtime::{
-    check_flags, cpu_fallback_note, cpu_use, outside_timers_s, realtime_failure, realtime_summary,
-    run_summary_digest, seconds_csv, CpuMarks, SecondLog,
+    busy_line, check_flags, cpu_fallback_note, cpu_use, queue_line, realtime_failure,
+    realtime_summary, run_summary_digest, seconds_csv, timers_line, CpuMarks, SecondLog,
 };
 use oa_track::score::{
     initiation_delays, interval_stats, run_tracker_spilled, score_source, scoring_config,
@@ -988,21 +988,8 @@ fn run_realtime_inner(
         s.work_max_s,
         s.work_total_ns as f64 / 1e9
     );
-    let _ = writeln!(
-        o,
-        "processing time over the {} busy seconds only (seconds with at least one measurement): p50 {:.3} ms, p99 {:.3} ms",
-        s.busy_seconds,
-        ms(s.busy_work_p50_ns),
-        ms(s.busy_work_p99_ns)
-    );
-    let _ = writeln!(
-        o,
-        "real time, queue model: each second's reports form one batch, available when the second ends, processed during the next second, with leftover work carried to the one after (backlog = max(0, backlog + work - 1 s)); a second finishes late when backlog is left. {} seconds whose work took longer than the second, {} seconds that finished late, longest backlog {:.3} ms; a report waits at most 1 s plus the backlog ahead of its batch before processing starts, so at most {:.3} ms. An upper bound: real reports arrive spread through the second and could be processed earlier",
-        s.over_one_second,
-        s.finished_late,
-        ms(s.backlog_max_ns),
-        ms(s.wait_bound_ns)
-    );
+    let _ = writeln!(o, "{}", busy_line(&s));
+    let _ = writeln!(o, "{}", queue_line(&s));
     let _ = writeln!(
         o,
         "final advance and flush after the last second: {:.3} ms{}",
@@ -1017,13 +1004,7 @@ fn run_realtime_inner(
         o,
         "conditions: the input was decoded and held in memory before timing, sorted by time, and processed on one thread, so the figures exclude network input, decoding and the interrupts of a live feed; a second with no measurements does no tick work: the tick rows for a gap are emitted with the next update and charged to that second"
     );
-    let _ = writeln!(
-        o,
-        "sum of the per-second timers (wall only; no CPU is read per second): {:.3} s; the window below also holds the track-count scan, the log and the batching, {} outside the per-second timers: track counts, bookkeeping; the window's CPU includes the same work",
-        s.work_total_ns as f64 / 1e9,
-        outside_timers_s(loop_wall_s, s.work_total_ns)
-            .map_or("n/a (timers exceed the window)".to_string(), |d| format!("{d:.3} s wall"))
-    );
+    let _ = writeln!(o, "{}", timers_line(s.work_total_ns, loop_wall_s));
     let _ = writeln!(
         o,
         "update window (one thread): wall {loop_wall_s:.3} s for {traffic_s:.0} s of traffic, CPU {} s; share of one core (over the {traffic_s:.0} s span of the traffic), update only: wall {:.4}%, CPU {}",
@@ -1045,6 +1026,7 @@ fn run_realtime_inner(
         cpu_looped,
         cpu_finished,
     ];
+    let got = readings.iter().flatten().count();
     let fallback = readings
         .iter()
         .flatten()
@@ -1054,7 +1036,7 @@ fn run_realtime_inner(
         o,
         "cpu source: {} (the run is single-threaded today){}",
         cpu_loaded.map_or("none", |c| c.1),
-        cpu_fallback_note(fallback, readings.len()).map_or(String::new(), |n| format!("; {n}"))
+        cpu_fallback_note(fallback, got).map_or(String::new(), |n| format!("; {n}"))
     );
     let _ = writeln!(
         o,
