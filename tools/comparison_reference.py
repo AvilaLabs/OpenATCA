@@ -21,6 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+# The sealed hold-out guard (tools/sealed_guard.py); the script's own directory may not be on the path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import sealed_guard  # noqa: E402
+
 
 TRUTH_FIELDS = (
     "scenario_id",
@@ -96,17 +100,19 @@ class MeasurementRow:
 
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
-    with path.open("rb") as f:
+    with sealed_guard.open_read(path, "rb") as f:
         for block in iter(lambda: f.read(1024 * 1024), b""):
             h.update(block)
     return h.hexdigest()
 
 
 def _read_json(path: Path, max_bytes: int) -> dict[str, Any]:
+    sealed_guard.refuse(path)
     if path.stat().st_size > max_bytes:
         raise ValidationError(f"{path.name} exceeds the protocol JSON byte limit")
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        with sealed_guard.open_read(path, "r", encoding="utf-8") as handle:
+            data = json.loads(handle.read())
     except (OSError, UnicodeError, json.JSONDecodeError) as e:
         raise ValidationError(f"cannot parse {path.name}: {e}") from e
     if not isinstance(data, dict):
@@ -137,6 +143,7 @@ def _int(value: str, label: str) -> int:
 
 
 def _bounded_rows(path: Path, expected_fields: tuple[str, ...], max_rows: int) -> Iterable[dict[str, str]]:
+    sealed_guard.refuse(path)
     try:
         size = path.stat().st_size
     except OSError as e:
@@ -145,7 +152,7 @@ def _bounded_rows(path: Path, expected_fields: tuple[str, ...], max_rows: int) -
         raise ValidationError(f"{path.name} exceeds the hard {MAX_FILE_BYTES}-byte input limit")
     csv.field_size_limit(MAX_CSV_FIELD_BYTES)
     try:
-        f = path.open("r", encoding="utf-8-sig", newline="")
+        f = sealed_guard.open_read(path, "r", encoding="utf-8-sig", newline="")
     except OSError as e:
         raise ValidationError(f"cannot open {path}: {e}") from e
     with f:
@@ -551,6 +558,7 @@ def validate(
     runner_source_path: Path | None = None,
 ) -> dict[str, Any]:
     """Validate a synthetic world and return a status-bearing, hash-bound evidence object."""
+    sealed_guard.refuse(truth_path, measurement_path, manifest_path, protocol_path, runner_source_path)
     paths = {
         "truth_sha256": truth_path,
         "measurements_sha256": measurement_path,
@@ -985,7 +993,12 @@ def _cli() -> int:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--runner-source", type=Path)
     args = parser.parse_args()
-    result = validate(args.truth, args.measurements, args.manifest, args.protocol, args.runner_source)
+    try:
+        sealed_guard.refuse(args.truth, args.measurements, args.manifest, args.protocol, args.out, args.runner_source)
+        result = validate(args.truth, args.measurements, args.manifest, args.protocol, args.runner_source)
+    except sealed_guard.SealedError as e:
+        print(f"comparison_reference: {e}", file=sys.stderr)
+        return 2
     try:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         with args.out.open("w", encoding="utf-8", newline="\n") as f:

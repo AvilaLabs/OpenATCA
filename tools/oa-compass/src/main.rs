@@ -16,7 +16,8 @@
 //! directory must be new or empty. `--inputs all` (the default) offers the tracker's adapter every
 //! ADS-B report of the clip, like ERAM, `split` offers it set A of the scorer's split only.
 //! `--openatca-rows ticks` (the default) writes the tracker's one-second tick rows, `updates` its
-//! update rows (one per applied report, at the report's time). Only development days may be exported: any input path with the components `scds/rec-20261119` (the sealed hold-out recording), as given or after resolving links, is refused.
+//! update rows (one per applied report, at the report's time). Only development days may be exported:
+//! any input path the shared sealed list refuses, as given or after resolving links, is refused.
 //! `--eram-contradicted-address keep` (the default) writes every ERAM address as published and
 //! only reports the flights whose track contradicts theirs; `drop` writes those flights without
 //! the address, and the README says the file was altered.

@@ -8,6 +8,7 @@ version = "0.0.1"
 dependencies = [
  "oa-feed",
  "oa-json",
+ "oa-sealed",
  "oa-tar",
  "oa-zip",
 ]
@@ -22,6 +23,7 @@ dependencies = [
  "oa-ieee",
  "oa-math",
  "oa-nasr",
+ "oa-sealed",
  "oa-sha256",
  "oa-zip",
 ]
@@ -45,6 +47,7 @@ dependencies = [
  "oa-geo",
  "oa-json",
  "oa-math",
+ "oa-sealed",
 ]
 
 [[package]]
@@ -59,6 +62,7 @@ dependencies = [
  "oa-geo",
  "oa-math",
  "oa-replay",
+ "oa-sealed",
  "oa-sha256",
  "oa-tbfm",
  "oa-tfms",
@@ -83,6 +87,7 @@ dependencies = [
  "oa-json",
  "oa-math",
  "oa-replay",
+ "oa-sealed",
  "oa-track",
  "oa-truth",
 ]
@@ -107,6 +112,7 @@ dependencies = [
  "oa-ieee",
  "oa-math",
  "oa-safety",
+ "oa-sealed",
  "oa-sha256",
 ]
 
@@ -136,6 +142,7 @@ dependencies = [
  "oa-flight",
  "oa-flight-sfdps",
  "oa-nasr",
+ "oa-sealed",
  "oa-sha256",
  "oa-track",
  "oa-zip",
@@ -146,6 +153,7 @@ name = "oa-feed"
 version = "0.0.1"
 dependencies = [
  "oa-deflate",
+ "oa-sealed",
  "oa-zip",
 ]
 
@@ -153,6 +161,7 @@ dependencies = [
 name = "oa-fixm"
 version = "0.0.1"
 dependencies = [
+ "oa-sealed",
  "oa-xml",
 ]
 
@@ -212,6 +221,7 @@ version = "0.0.1"
 dependencies = [
  "oa-dof",
  "oa-math",
+ "oa-sealed",
  "oa-tiff",
  "oa-xml",
  "oa-zip",
@@ -243,6 +253,7 @@ version = "0.0.1"
 dependencies = [
  "oa-geo",
  "oa-math",
+ "oa-sealed",
  "oa-sensorsim",
  "oa-track",
  "oa-truth",
@@ -257,6 +268,7 @@ dependencies = [
  "oa-feed",
  "oa-fixm",
  "oa-notam",
+ "oa-sealed",
  "oa-sha256",
  "oa-tbfm",
  "oa-tfms",
@@ -268,6 +280,7 @@ dependencies = [
 name = "oa-replay-diff"
 version = "0.0.1"
 dependencies = [
+ "oa-sealed",
  "oa-track",
 ]
 
@@ -286,10 +299,15 @@ dependencies = [
  "oa-geo",
  "oa-ieee",
  "oa-math",
+ "oa-sealed",
  "oa-sha256",
  "oa-track",
  "oa-truth",
 ]
+
+[[package]]
+name = "oa-sealed"
+version = "0.0.1"
 
 [[package]]
 name = "oa-sensorsim"
@@ -300,6 +318,7 @@ dependencies = [
  "oa-feed",
  "oa-geo",
  "oa-math",
+ "oa-sealed",
  "oa-truth",
 ]
 
@@ -315,6 +334,7 @@ dependencies = [
  "oa-bench",
  "oa-math",
  "oa-replay",
+ "oa-sealed",
  "oa-sha256",
  "oa-track",
  "oa-truth",
@@ -325,6 +345,22 @@ name = "oa-stdds"
 version = "0.0.1"
 dependencies = [
  "oa-feed",
+ "oa-sealed",
+ "oa-xml",
+ "oa-zip",
+]
+
+[[package]]
+name = "oa-stdds-census"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-feed",
+ "oa-math",
+ "oa-sealed",
+ "oa-stdds",
+ "oa-truth",
  "oa-xml",
  "oa-zip",
 ]
@@ -373,6 +409,7 @@ dependencies = [
  "oa-geo",
  "oa-math",
  "oa-replay",
+ "oa-sealed",
  "oa-sensorsim",
  "oa-sha256",
  "oa-truth",
@@ -387,6 +424,7 @@ dependencies = [
  "oa-geo",
  "oa-ieee",
  "oa-math",
+ "oa-sealed",
  "oa-sha256",
 ]
 
@@ -398,6 +436,7 @@ dependencies = [
  "oa-awc",
  "oa-grib2",
  "oa-math",
+ "oa-sealed",
 ]
 
 [[package]]
@@ -407,3 +446,6 @@ version = "0.0.1"
 [[package]]
 name = "oa-zip"
 version = "0.0.1"
+dependencies = [
+ "oa-sealed",
+]

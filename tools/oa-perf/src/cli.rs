@@ -443,6 +443,9 @@ fn clip_part(o: &Opts, kvs: &mut Kv) -> Result<String, String> {
     let Some(path) = o.clip.clone() else {
         return Ok("clip latency skipped: OPENATCA_ADSB_CLIP (or --clip) is not set\n".to_string());
     };
+    // The clip may come from the environment: it is checked here, before it is read, as is the output.
+    oa_sealed::refuse(std::path::Path::new(&path))?;
+    oa_sealed::refuse(&o.out)?;
     let r = run_clip(&ClipCfg {
         path,
         secs: o.clip_secs,

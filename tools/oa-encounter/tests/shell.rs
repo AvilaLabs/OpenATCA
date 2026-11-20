@@ -34,8 +34,8 @@ fn scratch(name: &str) -> PathBuf {
 #[test]
 fn the_sealed_recordings_are_refused_as_given() {
     for p in [
-        "x/scds/rec-20261119",
-        "x/scds/rec-20261119/sub/file.oaf",
+        "x/scds/rec-20261119/day2",
+        "x/scds/rec-20261119/day2/sub/file.oaf",
         "/data/scds/stdds-20261119-holdout",
         "/data/scds/stdds-20261119-holdout/a",
         "/data/scds/stdds-smoke-20261119T192936Z/b.bin",
@@ -59,13 +59,13 @@ fn the_sealed_recordings_are_refused_as_given() {
 fn a_link_into_a_sealed_recording_is_refused_and_so_is_an_output_below_one() {
     let root = scratch("link");
     for sealed in [
-        "rec-20261119",
+        "rec-20261119/day2",
         "stdds-20261119-holdout",
         "stdds-smoke-20261119T000000Z",
     ] {
         let dir = root.join("scds").join(sealed);
         std::fs::create_dir_all(&dir).unwrap();
-        let link = root.join(format!("innocent-{sealed}"));
+        let link = root.join(format!("innocent-{}", sealed.replace('/', "-")));
         std::os::unix::fs::symlink(&dir, &link).unwrap();
         assert!(refuse_sealed(&link).is_err(), "{sealed}");
         // An output directory that does not exist yet, below the link: its nearest existing
@@ -86,7 +86,10 @@ fn the_program_exits_2_for_a_sealed_path_and_opens_and_creates_nothing() {
     let out = scratch("exit");
     let fine = out.join("fine.oaf");
     for (adsb, o) in [
-        (PathBuf::from("/x/scds/rec-20261119/a.oaf"), out.join("o")),
+        (
+            PathBuf::from("/x/scds/rec-20261119/day2/a.oaf"),
+            out.join("o"),
+        ),
         (
             fine.clone(),
             PathBuf::from("/x/scds/stdds-smoke-20261119T1/o"),

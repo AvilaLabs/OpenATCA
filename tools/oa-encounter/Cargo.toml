@@ -17,6 +17,7 @@ oa-encounter = { path = "../../crates/oa-encounter" }
 oa-flight = { path = "../../crates/oa-flight" }
 oa-flight-sfdps = { path = "../../crates/oa-flight-sfdps" }
 oa-nasr = { path = "../../crates/oa-nasr" }
+oa-sealed = { path = "../../crates/oa-sealed" }
 oa-sha256 = { path = "../../crates/oa-sha256" }
 oa-track = { path = "../../crates/oa-track" }
 oa-zip = { path = "../../crates/oa-zip" }

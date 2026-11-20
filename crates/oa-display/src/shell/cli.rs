@@ -237,7 +237,9 @@ pub fn run_render(args: &[String], out: &mut dyn Write) -> Result<(), CliError> 
             a.snapshot.display()
         )));
     }
-    let bytes = std::fs::read(&a.snapshot)
+    let mut bytes = Vec::new();
+    oa_sealed::open(&a.snapshot)
+        .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut bytes))
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
     let model = decode(&bytes).map_err(|e| failed("snapshot", e))?;
     let mut view = view_new(
