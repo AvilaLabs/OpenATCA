@@ -1938,18 +1938,24 @@ fn the_tracker_holds_one_track_per_address_so_simultaneous_reports_make_one_trac
 #[test]
 fn an_out_inside_a_sealed_folder_is_refused_and_nothing_is_created() {
     let work = tmp("sealed-out");
-    let out = work.join("scds").join("rec-20261119").join("export");
+    let out = work
+        .join("scds")
+        .join("stdds-20261119-holdout")
+        .join("export");
     let e = run(job(&out, None, true, false, OpenatcaRows::Ticks)).unwrap_err();
-    assert!(e.to_string().contains("sealed hold-out recording"), "{e}");
+    assert!(e.to_string().contains("OA-SEAL-001"), "{e}");
     assert!(!work.join("scds").exists());
     #[cfg(unix)]
     {
-        let real = work.join("real").join("stdds-20261119-holdout");
+        let real = work
+            .join("real")
+            .join("scds")
+            .join("stdds-20261119-holdout");
         fs::create_dir_all(&real).unwrap();
         let link = work.join("lnk");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let e = run(job(&link.join("o"), None, true, false, OpenatcaRows::Ticks)).unwrap_err();
-        assert!(e.to_string().contains("sealed hold-out recording"), "{e}");
+        assert!(e.to_string().contains("OA-SEAL-001"), "{e}");
         assert!(names(&real).is_empty());
     }
 }

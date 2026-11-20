@@ -344,6 +344,8 @@ pub fn slice_dir_with(
     hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
 ) -> Result<Vec<SliceFile>, ExportError> {
     check_window(from, to)?;
+    // Before the directory is listed: a sealed source is never read, not even its names.
+    refuse_holdout(input)?;
     let mut names: Vec<PathBuf> = fs::read_dir(input)
         .map_err(|e| io_err(input, &e))?
         .filter_map(Result::ok)
@@ -371,6 +373,7 @@ pub fn slice_dir_with(
     }
     // Not the input directory (by canonical path), and new or empty: nothing of an earlier run is
     // mixed in; a directory of only partial files says so.
+    refuse_holdout(out)?;
     if out.exists() {
         let (cin, cout) = (
             fs::canonicalize(input).map_err(|e| io_err(input, &e))?,
@@ -425,6 +428,9 @@ pub fn slice_dir_with(
             )));
         }
         let ds = input.join("data_sources.json");
+        // The guard comes before the first stat of the sidecar, and the copy reads it through
+        // the guarded opener, not `fs::copy`.
+        refuse_holdout(&ds)?;
         if ds.exists() {
             let dest = out.join("data_sources.json");
             let partial = out.join("data_sources.json.partial");

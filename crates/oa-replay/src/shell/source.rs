@@ -32,7 +32,6 @@
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -72,7 +71,7 @@ pub fn spec_from_paths(feed: FeedKind, paths: Vec<PathBuf>) -> StreamSpec {
         open: Box::new(move || {
             let p = it.next()?;
             Some(
-                File::open(&p)
+                oa_sealed::open(&p)
                     .map(|f| Box::new(f) as Box<dyn Read>)
                     .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display()))),
             )
@@ -96,10 +95,14 @@ pub fn spec_from_bytes(feed: FeedKind, files: Vec<Vec<u8>>) -> StreamSpec {
 /// recordings is creation order.
 pub fn list_recordings(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut out = Vec::new();
+    // The sealed hold-out guard sees the directory, and every entry before it is stat-ed.
+    oa_sealed::refuse_io(dir)
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?;
     for e in std::fs::read_dir(dir)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?
     {
         let p = e?.path();
+        oa_sealed::refuse_io(&p)?;
         let ok = p.is_file()
             && p.file_name()
                 .and_then(|n| n.to_str())

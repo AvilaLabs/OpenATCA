@@ -1,8 +1,6 @@
 //! Reads an OAF1 clip (docs/ADSB_PAYLOAD.md) into ADS-B reports, with caps. Shell (B7): owns the file.
 //! Shared by `oa-truth-check` and `oa-sensorsim`.
 
-use std::fs::File;
-
 use oa_adsb::{decode_payload_lenient, Reports};
 use oa_feed::{read_frames, Kind};
 
@@ -69,7 +67,7 @@ pub fn read_clip(
     max_rows: u64,
 ) -> Result<(Reports, u64, u64), ClipError> {
     let io = |e: std::io::Error| ClipError::Io(format!("{path}: {e}"));
-    let mut f = File::open(path).map_err(io)?;
+    let mut f = oa_sealed::open(std::path::Path::new(path)).map_err(io)?;
     let bytes = f.metadata().map_err(io)?.len();
     if bytes > max_bytes {
         return Err(ClipError::TooManyBytes {

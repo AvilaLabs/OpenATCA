@@ -453,6 +453,7 @@ impl Recorder {
 fn existing_recording_bytes(dir: &Path, entry_limit: usize) -> io::Result<u64> {
     let mut total = 0u64;
     let mut entries = 0usize;
+    oa_sealed::refuse_io(dir)?;
     for entry in fs::read_dir(dir)? {
         if entries >= entry_limit {
             return Err(io::Error::new(

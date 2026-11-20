@@ -30,8 +30,15 @@ def result(injected=False):
             "fusion_anonymous_init_and_assoc",
             "nam_session_activate_traffic_retry_full_deactivate",
             "display_rows_traffic_frame_refusal",
+            "safety_state_inhibit_display",
         ],
         "route_ids": [
+            'safety_banner_clamp', 'safety_banner_draw', 'safety_build_error',
+            'safety_events_take', 'safety_inhibit_create', 'safety_inhibit_draw',
+            'safety_inhibit_expire', 'safety_inhibit_refusal', 'safety_inhibit_remove',
+            'safety_net_status', 'safety_state_backdated', 'safety_state_future_refusal',
+            'safety_state_report', 'safety_suppress_log', 'safety_suppressed_overflow',
+            'safety_table_full',
             'fusion_adsb_ingest',
             'fusion_adsb_pending_drain',
             'fusion_adsb_pending_overflow',
@@ -177,6 +184,14 @@ def result(injected=False):
             "convert_trail_dropped": 63, "convert_time_overflow": 2718,
             "draw_trail_dropped": 20, "stamp_clipped": 5, "digests": 20,
         },
+        "safety": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "state_reports": 4, "stale_unavailable": 4, "created": 3, "refused": 3,
+            "refused_full": 1, "suppressed_logged": 4096, "suppressed_overflow": 3,
+            "removed": 1, "expired": 63, "events": 128, "banner_lines": 160,
+            "inhibitions_drawn": 20, "inhibitions_unplaced": 20, "state_backdated": 1,
+            "state_future_refused": 1, "banner_hidden": 140, "error_builds": 20,
+        },
     }
 
 
@@ -220,6 +235,7 @@ oa-display = { path = "../../crates/oa-display" }
 oa-scope-replay = { path = "../../crates/oa-scope-replay" }
 oa-airspace = { path = "../../crates/oa-airspace" }
 oa-geo = { path = "../../crates/oa-geo" }
+oa-safety = { path = "../../crates/oa-safety" }
 ''')
     write(root / "validation/oa-alloc-check/src/main.rs", '''
 #![deny(unsafe_code)]
@@ -470,6 +486,27 @@ probe = { path = "../../validation/oa-alloc-check" }
             self.assertEqual(gate.allocation_layout_errors(root), [])
             write(root / "validation/oa-alloc-check/src/allocator.rs", '#![allow(unsafe_code)]\n#[global_allocator]\n#[global_allocator]\nstatic A: System = System;\nunsafe impl GlobalAlloc for A {}\n')
             self.assertTrue(any("exactly one global allocator" in e for e in gate.allocation_layout_errors(root)))
+
+
+
+
+class SafetyWindowTests(unittest.TestCase):
+    def test_safety_evidence_must_be_exact_and_exercised(self):
+        self.assertEqual(gate.evaluate_allocator_result(json.dumps(result())), [])
+        for name, bad in (("suppressed_overflow", 2), ("suppressed_logged", 4095),
+                          ("error_builds", 0), ("state_future_refused", 0), ("created", 0)):
+            value = result()
+            value["safety"][name] = bad
+            self.assertTrue(any(f"safety.{name}" in e for e in
+                                gate.evaluate_allocator_result(json.dumps(value))), name)
+        value = result()
+        value["safety"]["alloc"] = 1
+        self.assertTrue(any("normal safety.alloc" in e for e in
+                            gate.evaluate_allocator_result(json.dumps(value))))
+        value = result(injected=True)
+        value["safety"]["alloc"] = 0
+        self.assertTrue(any("injected safety.alloc" in e for e in
+                            gate.evaluate_allocator_result(json.dumps(value), expect_injected=True)))
 
 
 if __name__ == "__main__":

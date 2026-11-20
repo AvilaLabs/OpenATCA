@@ -105,6 +105,23 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
                 *slot = *c;
             }
         }
+        if row_has(ev, row, Field::Beacon) {
+            if let (Some(&b), Some(&ts)) = (ev.beacon.get(row), ev.ts_ms.get(row)) {
+                let changed = leg.flights.beacon.get(fi) != Some(&b);
+                if changed && ts == NO_TIME {
+                    leg.counts.note(DROP_SFDPS_BEACON_NO_TIME.into(), 1);
+                } else if changed && leg.beacons.flight.len() >= leg.limits.beacons {
+                    leg.counts.note(DROP_SFDPS_BEACON_FULL.into(), 1);
+                } else if changed {
+                    leg.beacons.flight.push(f);
+                    leg.beacons.ts_ms.push(ts);
+                    leg.beacons.code.push(b);
+                }
+                if let Some(slot) = leg.flights.beacon.get_mut(fi) {
+                    *slot = b;
+                }
+            }
+        }
         if row_has(ev, row, Field::FlightPlanId) {
             if let (Some(c), Some(slot)) = (ev.plan_id.get(row), leg.flights.plan_id.get_mut(fi)) {
                 *slot = *c;
@@ -191,6 +208,11 @@ fn note_rejects(c: &mut Counts, feed: &str, fields: &[u32], kinds: &[u32], names
 /// Report labels of rows ingest drops, one reason each (E6).
 const DROP_SFDPS_NO_GUFI: &str = "SFDPS rows dropped, reason no GUFI column entry";
 const DROP_SFDPS_FLIGHT_FULL: &str = "SFDPS rows dropped, reason flight table full";
+/// Label of the note counting beacon changes the table had no room for (a run that has any is
+/// incomplete).
+pub const DROP_SFDPS_BEACON_FULL: &str = "SFDPS beacon changes dropped, reason table full";
+/// Label of the note counting beacon changes whose message carried no time.
+pub const DROP_SFDPS_BEACON_NO_TIME: &str = "SFDPS beacon changes dropped, reason no message time";
 const DROP_SFDPS_NO_POS_TIME: &str = "SFDPS position rows without a position time (no TH sample)";
 const DROP_SFDPS_NO_POS_COLUMN: &str = "SFDPS rows dropped, reason position column entry missing";
 const DROP_TBFM_NO_ROW: &str = "TBFM rows dropped, reason row not readable";

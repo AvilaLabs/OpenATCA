@@ -28,6 +28,8 @@ pub const NO_TIME: i64 = i64::MIN;
 pub const NO_ALT: i32 = i32::MIN;
 /// Absent velocity component, 0.1 knot.
 pub const NO_VEL: i16 = i16::MIN;
+/// Absent transponder code.
+pub const NO_BEACON: u16 = u16::MAX;
 /// Absent coordinate, 1e-7 degree.
 pub const NO_COORD: i32 = i32::MIN;
 
@@ -59,6 +61,7 @@ pub struct Limits {
     pub route_points: usize,
     pub tbfm: usize,
     pub tfms: usize,
+    pub beacons: usize,
 }
 
 impl Default for Limits {
@@ -71,6 +74,7 @@ impl Default for Limits {
             route_points: MAX_ROUTE_POINTS,
             tbfm: MAX_TBFM,
             tfms: MAX_TFMS,
+            beacons: MAX_BEACON_ROWS,
         }
     }
 }
@@ -128,6 +132,9 @@ pub struct Flights {
     /// `+` is dropped), [`NONE`] when absent. Unconfirmed in the FAA documentation; on the
     /// 2026-11-14 sample it equals `aircraftAddress` in 112 of the 115 flights that carry both.
     pub addr_hint: Vec<u32>,
+    /// The last transponder code a message gave (`currentBeaconCode`, four octal digits read as
+    /// a decimal number, as the ADS-B squawk is), [`NO_BEACON`] when no message carried one.
+    pub beacon: Vec<u16>,
     /// `flightPlan@identifier`, zero padded.
     pub plan_id: Vec<[u8; 12]>,
     pub dep: Vec<[u8; 12]>,
@@ -153,6 +160,22 @@ pub struct ThTable {
     /// 1 when the message carried the coast indicator.
     pub coast: Vec<u8>,
 }
+
+/// Transponder code changes of ERAM flights: one row each time a message gave a flight a code
+/// other than the one it had (the first code counts), so the code in force at a time is the last
+/// row of the flight at or before it. Capped at `Limits::beacons` ([`MAX_BEACON_ROWS`] by default); a row that does not fit is
+/// counted, not stored.
+// A3: one Vec per column.
+#[derive(Clone, Debug, Default)]
+pub struct BeaconTable {
+    pub flight: Vec<u32>,
+    /// Message timestamp, Unix ms.
+    pub ts_ms: Vec<i64>,
+    pub code: Vec<u16>,
+}
+
+/// Most beacon change rows (a flight changes code a few times).
+pub const MAX_BEACON_ROWS: usize = 1 << 22;
 
 /// Handoff events.
 // A3: one Vec per column.
@@ -279,6 +302,7 @@ impl Counts {
 pub struct Legacy {
     pub flights: Flights,
     pub th: ThTable,
+    pub beacons: BeaconTable,
     pub handoffs: HandoffTable,
     pub routes: RouteTable,
     pub route_points: RoutePoints,
@@ -308,6 +332,7 @@ pub fn flight_ix(leg: &mut Legacy, gufi: u128) -> Option<u32> {
     leg.flights.callsign.push([0; 8]);
     leg.flights.addr.push(NONE);
     leg.flights.addr_hint.push(NONE);
+    leg.flights.beacon.push(NO_BEACON);
     leg.flights.plan_id.push([0; 12]);
     leg.flights.dep.push([0; 12]);
     leg.flights.arr.push([0; 12]);

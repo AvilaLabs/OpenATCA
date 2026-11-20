@@ -10,6 +10,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Err(e) = oa_sealed::refuse(dir) {
+        eprintln!("survey: {e}");
+        std::process::exit(2);
+    }
     let mut v: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().path())

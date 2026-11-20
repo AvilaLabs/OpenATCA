@@ -8,6 +8,7 @@ version = "0.0.1"
 dependencies = [
  "oa-feed",
  "oa-json",
+ "oa-sealed",
  "oa-tar",
  "oa-zip",
 ]
@@ -22,6 +23,7 @@ dependencies = [
  "oa-ieee",
  "oa-math",
  "oa-nasr",
+ "oa-sealed",
  "oa-sha256",
  "oa-zip",
 ]
@@ -34,6 +36,7 @@ dependencies = [
  "oa-display",
  "oa-geo",
  "oa-nam",
+ "oa-safety",
  "oa-scope-replay",
  "oa-track",
 ]
@@ -53,6 +56,7 @@ dependencies = [
  "oa-geo",
  "oa-json",
  "oa-math",
+ "oa-sealed",
 ]
 
 [[package]]
@@ -67,6 +71,7 @@ dependencies = [
  "oa-geo",
  "oa-math",
  "oa-replay",
+ "oa-sealed",
  "oa-sha256",
  "oa-tbfm",
  "oa-tfms",
@@ -93,6 +98,8 @@ dependencies = [
  "oa-geo",
  "oa-ieee",
  "oa-math",
+ "oa-safety",
+ "oa-sealed",
  "oa-sha256",
 ]
 
@@ -101,6 +108,7 @@ name = "oa-feed"
 version = "0.0.1"
 dependencies = [
  "oa-deflate",
+ "oa-sealed",
  "oa-zip",
 ]
 
@@ -162,12 +170,17 @@ dependencies = [
  "oa-feed",
  "oa-fixm",
  "oa-notam",
+ "oa-sealed",
  "oa-sha256",
  "oa-tbfm",
  "oa-tfms",
  "oa-xml",
  "oa-zip",
 ]
+
+[[package]]
+name = "oa-safety"
+version = "0.0.1"
 
 [[package]]
 name = "oa-scope-replay"
@@ -180,9 +193,14 @@ dependencies = [
  "oa-geo",
  "oa-ieee",
  "oa-math",
+ "oa-sealed",
  "oa-sha256",
  "oa-track",
 ]
+
+[[package]]
+name = "oa-sealed"
+version = "0.0.1"
 
 [[package]]
 name = "oa-sensorsim"
@@ -192,6 +210,8 @@ dependencies = [
  "oa-asterix",
  "oa-feed",
  "oa-geo",
+ "oa-math",
+ "oa-sealed",
  "oa-truth",
 ]
 
@@ -228,6 +248,7 @@ dependencies = [
  "oa-feed",
  "oa-geo",
  "oa-math",
+ "oa-sealed",
  "oa-sensorsim",
  "oa-sha256",
  "oa-truth",
@@ -242,6 +263,7 @@ dependencies = [
  "oa-geo",
  "oa-ieee",
  "oa-math",
+ "oa-sealed",
  "oa-sha256",
 ]
 

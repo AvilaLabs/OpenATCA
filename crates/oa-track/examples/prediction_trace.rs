@@ -679,7 +679,14 @@ fn run(args: Args) -> Result<(), String> {
 }
 
 fn main() -> ExitCode {
-    match parse_args().and_then(run) {
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    let sealed = |a: Args| -> Result<Args, String> {
+        for p in [&a.clip, &a.out] {
+            oa_sealed::refuse(p)?;
+        }
+        Ok(a)
+    };
+    match parse_args().and_then(sealed).and_then(run) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("prediction_trace: {e}");

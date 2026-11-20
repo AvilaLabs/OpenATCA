@@ -10,6 +10,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+oa-sealed = { path = "../oa-sealed" }
 # Workspace crates; not outside dependencies (RULESET F1).
 oa-json = { path = "../oa-json" }
 oa-tar = { path = "../oa-tar" }

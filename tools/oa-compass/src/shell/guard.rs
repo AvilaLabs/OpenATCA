@@ -1,27 +1,22 @@
-//! Shell (B1): the sealed hold-out recordings of 2026-11-19. Two checks stand between this tool
-//! and them, and neither is complete alone.
+//! Shell (B1): the sealed hold-out data. Two checks stand between this tool and it, and neither
+//! is complete alone.
 //!
-//! By path: a path whose components include `scds` followed by `rec-20261119`, or a component
-//! `stdds-20261119-holdout`, or one that starts with `stdds-smoke-20261119`, is refused, on the
-//! path as given and on its canonical form (so a symbolic link into one is caught). Every file
-//! the run opens is resolved once, checked, and then opened by the resolved path.
+//! By path: the rule and the list live in the shared guard (`oa-sealed`,
+//! `crates/oa-sealed/sealed_paths.txt`); this module maps its refusals to the export's error. Every
+//! path is resolved and checked there, as given and after links, and every file the run opens is
+//! opened through it (checked before and after the open).
 //!
-//! The limits of the path check: a hard link, a copy, a renamed folder or a bind mount of a
-//! sealed file has no sealed component in its path and is not detectable by path. That is why
-//! the time pre-scan (`job::prescan_sealed`) exists: it refuses any input time that is on the
-//! sealed day, whatever file it came from.
+//! By content: a hard link, a copy, a renamed folder or a bind mount of a sealed file has no sealed
+//! component in its path. That is why the time pre-scan (`job::prescan_sealed`) exists: it refuses
+//! any input time that is on the sealed day (2026-11-19), whatever file it came from.
 
-use std::fs::File;
-use std::io::{self, Read};
-use std::path::{Component, Path};
-use std::rc::Rc;
-
-use oa_bench::input::Opener;
+use std::io::Read;
+use std::path::Path;
 
 use super::error::ExportError;
 
 /// The sealed hold-out day, 2026-11-19, as days since 1970-01-01. The one place it is named: the
-/// date argument, the path guard's day and the row check all use it.
+/// date argument and the row check use it.
 pub const SEALED_DAY: i64 = 20_776;
 /// The sealed day as text, for messages.
 pub const SEALED_DAY_TEXT: &str = "2026-11-19";
@@ -46,64 +41,46 @@ pub fn refuse_sealed_row(system: &str, day: i64) -> Result<(), ExportError> {
     Ok(())
 }
 
-/// An opener that refuses any file whose resolved path is in the sealed recording, for the
-/// loaders that open each file of a directory themselves.
-pub fn guarded_opener() -> Opener {
-    Rc::new(move |p: &Path| {
-        let resolved = resolve_checked(p).map_err(|e| io::Error::other(e.to_string()))?;
-        File::open(&resolved)
-            .map(|f| Box::new(f) as Box<dyn Read>)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", resolved.display())))
-    })
+/// The opener every input file goes through: `oa_bench`'s file opener is itself guarded.
+pub fn guarded_opener() -> oa_bench::input::Opener {
+    oa_bench::input::file_opener()
 }
 
-fn names(p: &Path) -> Vec<String> {
-    p.components()
-        .filter_map(|c| match c {
-            Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect()
+/// Refuses `path` if it is, is inside, resolves into or holds a sealed recording. The path may
+/// not exist yet.
+pub fn refuse_holdout(path: &Path) -> Result<(), ExportError> {
+    oa_sealed::refuse(path).map_err(ExportError::Input)
 }
 
-/// Whether the components of a path name a sealed folder.
-fn holds_sealed(p: &Path) -> bool {
-    let n = names(p);
-    let pair = n
-        .windows(2)
-        .any(|w| matches!(w, [a, b] if a == "scds" && b == "rec-20261119"));
-    pair || n
-        .iter()
-        .any(|c| c == "stdds-20261119-holdout" || c.starts_with("stdds-smoke-20261119"))
+/// Refuses an output path that is, is inside or resolves into sealed data (the same rule: a path
+/// still to be created is resolved through its nearest existing ancestor).
+pub fn refuse_holdout_out(path: &Path) -> Result<(), ExportError> {
+    refuse_holdout(path)
 }
 
-/// Resolves `path` once and refuses it if the path as given or its resolved form is, or is
-/// inside, a sealed recording. A path that cannot be resolved is refused, not passed. Returns the
-/// resolved path, which is the one to open.
+/// Opens `path` for reading through the shared guard (checked before and after the open).
+pub fn open(path: &Path) -> std::io::Result<std::fs::File> {
+    oa_sealed::open(path)
+}
+
+/// Resolves `path` once and refuses it if the path as given or its resolved form is sealed. A path
+/// that cannot be resolved is refused, not passed. Returns the resolved path.
 pub fn resolve_checked(path: &Path) -> Result<std::path::PathBuf, ExportError> {
     let canonical = std::fs::canonicalize(path).map_err(|e| {
         ExportError::Input(format!(
-            "{}: cannot be resolved, so it cannot be checked against the sealed hold-out recordings: {e}",
+            "{}: cannot be resolved, so it cannot be checked against the sealed hold-out data: {e}",
             path.display()
         ))
     })?;
-    if holds_sealed(path) || holds_sealed(&canonical) {
-        return Err(sealed_path_error(path));
-    }
+    refuse_holdout(path)?;
+    refuse_holdout(&canonical)?;
     Ok(canonical)
 }
 
-fn sealed_path_error(path: &Path) -> ExportError {
-    ExportError::Input(format!(
-        "{}: this is a sealed hold-out recording (scds/rec-20261119 or a stdds sealed folder); it is never read",
-        path.display()
-    ))
-}
-
 /// Opens a file by its resolved path, after the check.
-pub fn open_guarded(path: &Path) -> Result<File, ExportError> {
+pub fn open_guarded(path: &Path) -> Result<std::fs::File, ExportError> {
     let p = resolve_checked(path)?;
-    File::open(&p).map_err(|e| super::error::io_err(&p, &e))
+    open(&p).map_err(|e| super::error::io_err(&p, &e))
 }
 
 /// Reads a text file by its resolved path, after the check.
@@ -115,51 +92,11 @@ pub fn read_to_string_guarded(path: &Path) -> Result<String, ExportError> {
     Ok(s)
 }
 
-/// Copies a file from its resolved path, after the check.
+/// Copies a file from its resolved path, after the check, through the guarded opener.
 pub fn copy_guarded(from: &Path, to: &Path) -> Result<(), ExportError> {
-    let p = resolve_checked(from)?;
-    std::fs::copy(&p, to)
+    let mut src = open_guarded(from)?;
+    let mut dst = std::fs::File::create(to).map_err(|e| super::error::io_err(to, &e))?;
+    std::io::copy(&mut src, &mut dst)
         .map(|_| ())
-        .map_err(|e| super::error::io_err(&p, &e))
-}
-
-/// Refuses `path` if it is, or is inside, a sealed recording, by the path as given and by its
-/// resolved form when it resolves. For arguments, which may not exist yet; the files themselves
-/// are opened only through [`open_guarded`] and [`guarded_opener`], which refuse what cannot be
-/// resolved.
-pub fn refuse_holdout(path: &Path) -> Result<(), ExportError> {
-    let canonical = std::fs::canonicalize(path).ok();
-    if holds_sealed(path) || canonical.as_deref().is_some_and(holds_sealed) {
-        return Err(sealed_path_error(path));
-    }
-    Ok(())
-}
-
-/// Refuses an output path that is, or is inside, a sealed recording folder: the path as given, and
-/// its resolved form where it exists (the nearest existing ancestor resolved, with the rest of
-/// the components appended, for a path that is yet to be created).
-pub fn refuse_holdout_out(path: &Path) -> Result<(), ExportError> {
-    if holds_sealed(path) {
-        return Err(sealed_path_error(path));
-    }
-    let mut rest: Vec<std::ffi::OsString> = Vec::new();
-    let mut at = Some(path);
-    while let Some(p) = at {
-        if let Ok(c) = std::fs::canonicalize(p) {
-            let mut full = c;
-            for r in rest.iter().rev() {
-                full.push(r);
-            }
-            if holds_sealed(&full) {
-                return Err(sealed_path_error(path));
-            }
-            return Ok(());
-        }
-        match p.file_name() {
-            Some(n) => rest.push(n.to_os_string()),
-            None => break,
-        }
-        at = p.parent();
-    }
-    Ok(())
+        .map_err(|e| super::error::io_err(from, &e))
 }

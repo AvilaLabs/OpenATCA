@@ -16,6 +16,7 @@ oa-bench = { path = "../oa-bench" }
 oa-feed = { path = "../oa-feed" }
 oa-geo = { path = "../oa-geo" }
 oa-math = { path = "../oa-math" }
+oa-sealed = { path = "../oa-sealed" }
 oa-sensorsim = { path = "../oa-sensorsim" }
 oa-sha256 = { path = "../oa-sha256" }
 oa-truth = { path = "../oa-truth" }

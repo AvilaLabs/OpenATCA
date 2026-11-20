@@ -115,8 +115,8 @@ fn a_value_that_looks_like_a_flag_is_a_missing_value_and_a_repeated_flag_is_an_e
 // REQ: OA-CMP-047
 #[test]
 fn any_input_path_through_the_sealed_recording_is_refused_and_nothing_is_created() {
-    assert!(refuse_holdout(Path::new("/data/scds/rec-20261119/sfdps")).is_err());
-    assert!(refuse_holdout(Path::new("scds/rec-20261119")).is_err());
+    assert!(refuse_holdout(Path::new("/data/scds/rec-20261119/day2/sfdps")).is_err());
+    assert!(refuse_holdout(Path::new("scds/rec-20261119/day2")).is_err());
     // Only the exact component pair: neighbours are not it.
     assert!(refuse_holdout(Path::new("/data/scds/rec-20261119x")).is_ok());
     assert!(refuse_holdout(Path::new("/data/scds/day-20261114/rec/sfdps")).is_ok());
@@ -138,8 +138,14 @@ fn any_input_path_through_the_sealed_recording_is_refused_and_nothing_is_created
         self_test_adsb_offset_e7: 0,
     };
     for j in [
-        mk(Some(PathBuf::from("x/scds/rec-20261119/clip.oaf")), None),
-        mk(None, Some(PathBuf::from("x/scds/rec-20261119/rec/sfdps"))),
+        mk(
+            Some(PathBuf::from("x/scds/rec-20261119/day2/clip.oaf")),
+            None,
+        ),
+        mk(
+            None,
+            Some(PathBuf::from("x/scds/rec-20261119/day2/rec/sfdps")),
+        ),
     ] {
         let e = run_job(j, &mut |_| Ok(()), &mut |_| {})
             .unwrap_err()
@@ -150,7 +156,7 @@ fn any_input_path_through_the_sealed_recording_is_refused_and_nothing_is_created
     // A link into it is caught by the resolved path.
     #[cfg(unix)]
     {
-        let real = work.join("scds").join("rec-20261119");
+        let real = work.join("scds").join("rec-20261119").join("day2");
         fs::create_dir_all(&real).unwrap();
         let link = work.join("innocent");
         std::os::unix::fs::symlink(&real, &link).unwrap();
@@ -192,7 +198,7 @@ fn the_sealed_date_is_refused_in_every_accepted_syntax() {
 #[cfg(unix)]
 fn a_link_in_an_innocent_directory_into_the_sealed_recording_is_refused_for_every_file() {
     let work = tmp("links");
-    let real = work.join("scds").join("rec-20261119");
+    let real = work.join("scds").join("stdds-20261119-holdout");
     fs::create_dir_all(&real).unwrap();
     fs::write(real.join("secret.msg"), b"x").unwrap();
     let inn = work.join("innocent");
@@ -217,7 +223,7 @@ fn a_link_in_an_innocent_directory_into_the_sealed_recording_is_refused_for_ever
     let e = run_job(j, &mut |_| Ok(()), &mut |_| {})
         .unwrap_err()
         .to_string();
-    assert!(e.contains("sealed hold-out recording"), "{e}");
+    assert!(e.contains("OA-SEAL-001"), "{e}");
     assert!(!work.join("out").exists());
     // An ADS-B clip that is a link.
     std::os::unix::fs::symlink(real.join("secret.msg"), inn.join("c.oaf")).unwrap();
@@ -225,7 +231,7 @@ fn a_link_in_an_innocent_directory_into_the_sealed_recording_is_refused_for_ever
     let e = run_job(j, &mut |_| Ok(()), &mut |_| {})
         .unwrap_err()
         .to_string();
-    assert!(e.contains("sealed hold-out recording"), "{e}");
+    assert!(e.contains("OA-SEAL-001"), "{e}");
     assert!(!work.join("out2").exists());
     // A slice source with one .ast that is a link.
     let src = work.join("slicesrc");
@@ -234,6 +240,50 @@ fn a_link_in_an_innocent_directory_into_the_sealed_recording_is_refused_for_ever
     let e = slice_dir(&src, &work.join("o3"), 0, 128)
         .unwrap_err()
         .to_string();
-    assert!(e.contains("sealed hold-out recording"), "{e}");
+    assert!(e.contains("OA-SEAL-001"), "{e}");
     assert!(!work.join("o3").exists());
+}
+
+// REQ: OA-SEAL-005
+#[test]
+fn an_export_refuses_a_link_into_sealed_data_for_the_clip_the_eram_folder_and_the_output() {
+    use std::os::unix::fs::symlink;
+    let work = tmp("export-links");
+    let sealed = work.join("scds/stdds-20261119-holdout");
+    fs::create_dir_all(sealed.join("sfdps")).unwrap();
+    fs::write(sealed.join("clip.oaf"), b"x").unwrap();
+    symlink(sealed.join("clip.oaf"), work.join("clip-link.oaf")).unwrap();
+    symlink(sealed.join("sfdps"), work.join("sfdps-link")).unwrap();
+    symlink(&sealed, work.join("out-link")).unwrap();
+    let job = |out: PathBuf, adsb: Option<PathBuf>, sfdps: Option<PathBuf>| Job {
+        layout: Layout {
+            out,
+            day: 20_772,
+            split: false,
+        },
+        adsb,
+        sfdps: sfdps.map(EramSource::Dir),
+        mode: InputsMode::All,
+        rows: OpenatcaRows::Ticks,
+        eram_address: EramAddress::Keep,
+        self_test_eram_offset_e7: 0,
+        self_test_adsb_offset_e7: 0,
+    };
+    let fresh = work.join("fresh/out");
+    for j in [
+        job(fresh.clone(), Some(work.join("clip-link.oaf")), None),
+        job(fresh.clone(), None, Some(work.join("sfdps-link"))),
+        job(
+            work.join("out-link/new"),
+            None,
+            Some(work.join("elsewhere")),
+        ),
+    ] {
+        let e = run_job(j, &mut |_| Ok(()), &mut |_| {})
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("OA-SEAL-001"), "{e}");
+        assert!(!work.join("fresh").exists());
+        assert!(!sealed.join("new").exists());
+    }
 }

@@ -442,7 +442,7 @@ fn a_slice_out_with_only_partial_files_says_an_earlier_run_was_interrupted() {
 fn a_symlink_to_a_directory_in_a_sealed_folder_is_refused_for_slice() {
     let real_src = source("sealed-src");
     let base = tmp("sealed-w");
-    let sealed = base.join("scds").join("rec-20261119");
+    let sealed = base.join("scds").join("stdds-20261119-holdout");
     fs::create_dir_all(&sealed).unwrap();
     for f in [
         "openatca.ast",
@@ -456,16 +456,20 @@ fn a_symlink_to_a_directory_in_a_sealed_folder_is_refused_for_slice() {
     std::os::unix::fs::symlink(&sealed, &link).unwrap();
     let out = base.join("o").join("x");
     let e = slice_dir(&link, &out, units(12, 0, 0), units(13, 0, 0)).unwrap_err();
-    assert!(e.to_string().contains("sealed hold-out recording"), "{e}");
+    assert!(e.to_string().contains("OA-SEAL-001"), "{e}");
     assert!(!base.join("o").exists());
     // The STDDS sealed folder names are components too.
-    let stdds = base.join("stdds-20261119-holdout");
+    let stdds = base.join("scds").join("stdds-20261119-holdout");
     fs::create_dir_all(&stdds).unwrap();
     assert!(oa_compass::shell::guard::refuse_holdout(&stdds).is_err());
-    assert!(
-        oa_compass::shell::guard::refuse_holdout(&base.join("stdds-smoke-20261119-a")).is_err()
-    );
-    assert!(oa_compass::shell::guard::refuse_holdout(&base.join("stdds-smoke-20261118")).is_ok());
+    assert!(oa_compass::shell::guard::refuse_holdout(
+        &base.join("scds").join("stdds-smoke-20261119-a")
+    )
+    .is_err());
+    assert!(oa_compass::shell::guard::refuse_holdout(
+        &base.join("scds").join("stdds-smoke-20261118")
+    )
+    .is_ok());
 }
 
 // REQ: OA-CMP-047
@@ -500,18 +504,63 @@ fn a_source_on_the_sealed_date_or_without_a_date_line_and_a_sealed_out_are_refus
     slice_dir(&inp, &base.join("ok"), units(12, 0, 0), units(13, 0, 0)).unwrap();
     // --out inside a sealed folder: as given, and through a link to one.
     let inp = source("sd-in4");
-    let sealed_out = base.join("scds").join("rec-20261119").join("slice");
+    let sealed_out = base
+        .join("scds")
+        .join("stdds-20261119-holdout")
+        .join("slice");
     let e = slice_dir(&inp, &sealed_out, units(12, 0, 0), units(13, 0, 0)).unwrap_err();
-    assert!(e.to_string().contains("sealed hold-out recording"), "{e}");
+    assert!(e.to_string().contains("OA-SEAL-001"), "{e}");
     assert!(!base.join("scds").exists());
     #[cfg(unix)]
     {
-        let real = base.join("real").join("scds").join("rec-20261119");
+        let real = base
+            .join("real")
+            .join("scds")
+            .join("stdds-20261119-holdout");
         fs::create_dir_all(&real).unwrap();
         let link = base.join("lnk");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let e = slice_dir(&inp, &link.join("new"), units(12, 0, 0), units(13, 0, 0)).unwrap_err();
-        assert!(e.to_string().contains("sealed hold-out recording"), "{e}");
+        assert!(e.to_string().contains("OA-SEAL-001"), "{e}");
         assert!(!real.join("new").exists());
     }
+}
+
+// REQ: OA-SEAL-005
+#[test]
+fn a_sidecar_or_source_file_that_links_into_sealed_data_is_refused_and_nothing_is_created() {
+    use std::os::unix::fs::symlink;
+    // A fake sealed tree; the links to it sit inside otherwise ordinary source folders.
+    let t = tmp("sealed-tree");
+    let sealed = t.join("scds/rec-20261119/day2");
+    fs::create_dir_all(&sealed).unwrap();
+    fs::write(
+        sealed.join("side.txt"),
+        b"UTC date to give at import (UTC Day): 2026.11.15\n",
+    )
+    .unwrap();
+    for (case, victim) in [
+        ("readme", "README.txt"),
+        ("sources", "data_sources.json"),
+        ("ast", "adsb.ast"),
+    ] {
+        let inp = source(&format!("sealed-{case}"));
+        let out = tmp(&format!("sealed-out-{case}"));
+        fs::remove_dir_all(&out).unwrap();
+        fs::remove_file(inp.join(victim)).unwrap();
+        symlink(sealed.join("side.txt"), inp.join(victim)).unwrap();
+        let e = slice_dir(&inp, &out, units(12, 0, 0), units(13, 0, 0)).unwrap_err();
+        assert!(e.to_string().contains("OA-SEAL-001"), "{case}: {e}");
+        assert!(!out.exists(), "{case}");
+    }
+    // The source folder itself, reached through a symlinked parent.
+    symlink(t.join("scds"), t.join("via")).unwrap();
+    let e = slice_dir(
+        &t.join("via/rec-20261119/day2"),
+        &tmp("sealed-out-x"),
+        0,
+        128,
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("OA-SEAL-001"), "{e}");
 }
