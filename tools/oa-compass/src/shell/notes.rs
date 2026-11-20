@@ -14,8 +14,8 @@ use super::run::{ClipInfo, InputsMode, OpenatcaRows};
 use crate::core::adsb::{
     ADSB_NOTES, ADSB_NOTE_NAMES, ANOTE_CATEGORY_ABSENT, ANOTE_CATEGORY_NO_CODE, ANOTE_FL_ABSENT,
     ANOTE_FL_RANGE, ANOTE_HEIGHT_ABSENT, ANOTE_HEIGHT_RANGE, ANOTE_IDENT_ABSENT, ANOTE_IDENT_CHARS,
-    ANOTE_MOPS_ABSENT, ANOTE_MOPS_VERSION, ANOTE_RATE_ABSENT, ANOTE_RATE_RANGE,
-    ANOTE_VECTOR_ABSENT, ANOTE_VECTOR_GROUND, ANOTE_VECTOR_RANGE,
+    ANOTE_MOPS_ABSENT, ANOTE_MOPS_VERSION, ANOTE_QUALITY_ABSENT, ANOTE_RATE_ABSENT,
+    ANOTE_RATE_RANGE, ANOTE_VECTOR_ABSENT, ANOTE_VECTOR_GROUND, ANOTE_VECTOR_RANGE,
 };
 use crate::core::convert::{
     NOTES, NOTE_ACCURACY_ABSENT, NOTE_ADDRESS, NOTE_ADDRESS_WITHHELD, NOTE_ALT_ABSENT,
@@ -519,8 +519,8 @@ fn adsb_day_lines(out: &mut String, d: &AdsbDayReport, clip: Option<&ClipInfo>) 
         less(n(ANOTE_CATEGORY_ABSENT) + n(ANOTE_CATEGORY_NO_CODE)),
     );
     item(
-        "I090 quality indicators (in every record; the extensions only when a bit in them is 1)",
-        rows,
+        "I090 quality indicators (primary subfield; each extension only while all its fields are known, counted below)",
+        less(n(ANOTE_QUALITY_ABSENT)),
     );
     item(
         "I210 MOPS version",

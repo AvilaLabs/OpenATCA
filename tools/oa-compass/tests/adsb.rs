@@ -668,6 +668,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         "nacp 3;",
         "source_not_adsb 1;",
         "TIS-B, ADS-R and MLAT",
+        "I090 quality indicators (primary subfield; each extension only while all its fields are known",
         "no row of this export has the first extension",
         "ground state unknown",
         "DEFAULTS the format forces, not facts about the target",
