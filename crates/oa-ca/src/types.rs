@@ -37,7 +37,7 @@ pub const AF_RADAR_ONLY: u16 = 8;
 pub const AF_IDENTITY_UNCONFIRMED: u16 = 16;
 /// [`Alert::flags`]: either aircraft was on the ground.
 pub const AF_ONE_GROUND: u16 = 32;
-/// [`Alert::flags`]: a vertical rate was unknown on either track (taken as level).
+/// [`Alert::flags`]: a vertical rate was unknown on either track (the pair was tested horizontally only).
 pub const AF_RATE_UNKNOWN: u16 = 64;
 
 /// The vertical limit is widened by this for each aircraft of a pair whose track is coasting or
@@ -250,8 +250,9 @@ pub struct CycleStats {
     /// Of `not_evaluated`: candidates that did not fit the candidate table.
     pub candidates_dropped: u64,
     pub evaluated: u64,
-    /// Candidates not evaluated: those beyond the evaluation budget (the largest separations),
-    /// those that did not fit the candidate table and those whose projection failed.
+    /// Candidates not evaluated: those beyond the evaluation budget (the largest current
+    /// separations), those that did not fit the candidate table (the largest, see
+    /// `max_candidates`) and those whose projection failed.
     pub not_evaluated: u64,
     /// Of `not_evaluated`: pairs whose projection or velocity conversion failed.
     pub eval_failed: u64,
@@ -274,4 +275,11 @@ pub struct CycleStats {
     pub alerts_dropped: u64,
     /// Reports to the net state table that it refused.
     pub net_refused: u64,
+    /// Evaluated pairs with both altitudes known and a rate unknown, tested horizontally only.
+    pub rate_unknown_pairs: u64,
+    /// Rows the caller says were lost before they reached this cycle (a table that overflowed, a
+    /// row with a column missing): see [`crate::ca_note_lost_input`].
+    pub rows_lost_upstream: u64,
+    /// Of `alerts_dropped`: alerts ended by [`crate::ca_finish`], after the last report.
+    pub finish_dropped: u64,
 }

@@ -25,7 +25,7 @@ use oa_ca_run::report::{
 use oa_ca_run::run::{r95_of, track_and_alert};
 use oa_encounter_run::run::GroundTable;
 use oa_safety::net::{NetState, Reason};
-use oa_track::{Measurement, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT};
+use oa_track::{Measurement, TrackerConfig, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT};
 
 const DEV_CFG: &str = include_str!("../testdata/dev.cfg");
 
@@ -287,6 +287,9 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
             tracker_overflow: 0,
             measurements: 10,
             tick_rows: 20,
+            rows_skipped: 0,
+            cycles_both: 0,
+            final_net: "RUNNING",
             clip_name: "clip.oaf",
             clip_sha256: &"0".repeat(64),
             config_name: "dev.cfg",
@@ -316,6 +319,9 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
     assert!(t.contains("  RUNNING: 3598\n") && t.contains("  DEGRADED: BUDGET EXCEEDED: 2\n"));
     assert!(t.contains("altitude lost (a track that had an altitude and lost it): 2 (on the ground when lost: 1, not: 1)"));
     assert!(t.contains("net state: complete"));
+    assert!(t.contains("look-ahead 120 s, hysteresis 10 s;"));
+    assert!(t.contains("net state after the end of the run (alerts ended last included): RUNNING"));
+    assert!(t.contains("pairs tested horizontally only (vertical rate unknown): 0"));
     assert!(t.contains("default volume: horizontal 5.00 NM, vertical 1000 ft"));
     assert!(t.contains("volume 1: box lat 41.4000 to 42.4000, lon -88.4000 to -87.4000, -2000 to 17999 ft, horizontal 3.00 NM"));
     assert!(t.contains(&format!("alerts.csv sha256 {}", "1".repeat(64))));
@@ -357,6 +363,20 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
             "rows whose 95% radius was held to the cap: 4",
             CycleStats {
                 r95_clamped: 4,
+                ..ok
+            },
+        ),
+        (
+            "rows lost before a cycle (told to conflict alert): 6",
+            CycleStats {
+                rows_lost_upstream: 6,
+                ..ok
+            },
+        ),
+        (
+            "of them, lost at the end of the run (after the last cycle's report): 2",
+            CycleStats {
+                finish_dropped: 2,
                 ..ok
             },
         ),
@@ -456,4 +476,20 @@ fn a_converging_pair_through_the_tracker_is_one_alert_that_repeats_exactly() {
     // The same crossing 5,000 ft apart vertically is no alert.
     assert!(go(&head_on(25_000)).alerts.is_empty());
     let _ = AIRBORNE;
+    // A tracker output table too small for its rows loses some: conflict alert is told, counts
+    // them, and no cycle that follows a loss reads as running.
+    let small = TrackerConfig {
+        out_capacity: 6,
+        ..DEFAULT_CONFIG
+    };
+    let r = track_and_alert(&head_on(20_000), &small, &none, &set).unwrap();
+    assert!(r.tracker_overflow > 0, "no overflow to test");
+    assert_eq!(
+        r.totals.rows_lost_upstream,
+        r.tracker_overflow + r.rows_skipped
+    );
+    assert!(r
+        .net_cycles
+        .keys()
+        .any(|k| k.starts_with("DEGRADED: INPUT MISSING")));
 }

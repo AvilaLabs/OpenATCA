@@ -183,6 +183,12 @@ pub struct SummaryInput<'a> {
     pub tracker_overflow: u64,
     pub measurements: u64,
     pub tick_rows: u64,
+    /// Rows of the tracker's output left out for a missing column.
+    pub rows_skipped: u64,
+    /// Cycles that left work undone and also had input missing.
+    pub cycles_both: u64,
+    /// The net state after the last report of the run, the end of it included.
+    pub final_net: &'a str,
     pub clip_name: &'a str,
     pub clip_sha256: &'a str,
     pub config_name: &'a str,
@@ -207,6 +213,9 @@ pub fn degraded(i: &SummaryInput) -> bool {
         + t.alerts_dropped
         + t.alt_lost_dropped
         + t.net_refused
+        + t.rows_lost_upstream
+        + t.finish_dropped
+        + i.rows_skipped
         + i.log_overflow
         + i.event_overflow
         + i.tracker_overflow
@@ -229,8 +238,8 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let _ = writeln!(
         o,
         "look-ahead {} s, hysteresis {} s; straight-line prediction; horizontal minimum widened by both 95% radii, vertical by {:.0} ft per coasting or uncertain track",
-        cfg.look_ahead_ns / 1_000_000_000,
-        cfg.hysteresis_ns / 1_000_000_000,
+        cfg.look_ahead_ns as f64 / 1e9,
+        cfg.hysteresis_ns as f64 / 1e9,
         oa_ca::COAST_V_ALLOWANCE_FT
     );
     let _ = writeln!(
@@ -278,6 +287,16 @@ pub fn summary_text(i: &SummaryInput) -> String {
     for (k, n) in i.net_cycles {
         let _ = writeln!(o, "  {k}: {n}");
     }
+    let _ = writeln!(
+        o,
+        "  cycles with work left undone and input missing together: {} (the state shows the work's reason with both counts)",
+        i.cycles_both
+    );
+    let _ = writeln!(
+        o,
+        "net state after the end of the run (alerts ended last included): {}",
+        i.final_net
+    );
     let _ = writeln!(o, "\nalerts: {}", i.alerts.len());
     let _ = writeln!(o, "\ncontexts (one per alert, from its flags)");
     for (k, name) in CONTEXT_NAMES.iter().enumerate() {
@@ -355,14 +374,30 @@ pub fn summary_text(i: &SummaryInput) -> String {
             "pairs tested horizontally only (altitude unknown)",
             t.alt_unknown_pairs,
         ),
+        (
+            "pairs tested horizontally only (vertical rate unknown)",
+            t.rate_unknown_pairs,
+        ),
         ("pair cycles in conflict", t.in_conflict),
         ("alerts opened", t.opened),
         ("alerts closed", t.closed),
         ("alerts not opened (table full)", t.open_dropped),
         ("alerts lost to a full log", i.log_overflow),
+        (
+            "  of them, lost at the end of the run (after the last cycle's report)",
+            t.finish_dropped,
+        ),
         ("altitude-loss events lost to a full log", i.event_overflow),
         ("net state reports refused by the table", t.net_refused),
         ("tracker output rows lost", i.tracker_overflow),
+        (
+            "tracker output rows left out: a column missing",
+            i.rows_skipped,
+        ),
+        (
+            "rows lost before a cycle (told to conflict alert)",
+            t.rows_lost_upstream,
+        ),
     ] {
         let _ = writeln!(o, "  {name}: {n}");
     }

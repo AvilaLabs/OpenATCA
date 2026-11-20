@@ -31,12 +31,12 @@ fn in_band(v: &Volume, alt_ft: f64) -> bool {
 /// With a known altitude, the first volume of the list whose area and altitude band hold the
 /// midpoint; none: the default volume. With an unknown altitude the band cannot be tested, so the
 /// answer is the larger horizontal and the larger vertical minimum among the volumes whose area
-/// holds the midpoint (whatever their band), or the default volume's if none does: a missing
-/// altitude never picks the smaller minimum (M5 rule 4). Work: at most [`crate::MAX_VOLUMES`]
-/// volumes.
+/// holds the midpoint (whatever their band) AND the default volume, which a known altitude
+/// outside every band would get: a missing altitude never picks a smaller minimum than any
+/// altitude would (M5 rule 4). Work: at most [`crate::MAX_VOLUMES`] volumes.
 pub fn volume_minima(cfg: &CaConfig, lat_e7: i32, lon_e7: i32, alt_ft: Option<f64>) -> (f64, f64) {
     let n = cfg.n_volumes.min(cfg.volumes.len());
-    let mut best: Option<(f64, f64)> = None;
+    let mut best = (cfg.default_volume.h_m, cfg.default_volume.v_ft);
     for v in cfg.volumes.iter().take(n) {
         if !in_area(&v.area, lat_e7, lon_e7) {
             continue;
@@ -48,17 +48,19 @@ pub fn volume_minima(cfg: &CaConfig, lat_e7: i32, lon_e7: i32, alt_ft: Option<f6
                 }
             }
             None => {
-                best = Some(match best {
-                    Some((h, z)) => (
-                        if v.h_m > h { v.h_m } else { h },
-                        if v.v_ft > z { v.v_ft } else { z },
-                    ),
-                    None => (v.h_m, v.v_ft),
-                });
+                if v.h_m > best.0 {
+                    best.0 = v.h_m;
+                }
+                if v.v_ft > best.1 {
+                    best.1 = v.v_ft;
+                }
             }
         }
     }
-    best.unwrap_or((cfg.default_volume.h_m, cfg.default_volume.v_ft))
+    match alt_ft {
+        Some(_) => (cfg.default_volume.h_m, cfg.default_volume.v_ft),
+        None => best,
+    }
 }
 
 /// The largest horizontal and vertical minima of the configuration, default volume included

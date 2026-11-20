@@ -22,6 +22,13 @@ pub struct CycleOut {
     pub stats: CycleStats,
     /// The report given to the state table (M5 rule 1).
     pub report: NetReport,
+    /// Everything left undone by the budgets and capacities of the cycle (pairs and tracks not
+    /// evaluated, rows over capacity, alerts and events lost to a full table), whether or not
+    /// an input cause was present too.
+    pub work_short: u64,
+    /// Rows or values left out or altered: bad, duplicate, above the latitude limit, with a
+    /// radius held to the cap, or lost before reaching the cycle.
+    pub input_short: u64,
 }
 
 fn add(t: &mut CycleStats, s: &CycleStats) {
@@ -52,6 +59,9 @@ fn add(t: &mut CycleStats, s: &CycleStats) {
     t.alt_lost_dropped += s.alt_lost_dropped;
     t.alerts_dropped += s.alerts_dropped;
     t.net_refused += s.net_refused;
+    t.rate_unknown_pairs += s.rate_unknown_pairs;
+    t.rows_lost_upstream += s.rows_lost_upstream;
+    t.finish_dropped += s.finish_dropped;
 }
 
 fn row_ok(c: &CaConfig, o: &CaTrack) -> bool {
@@ -259,26 +269,24 @@ fn evaluate(st: &mut CaState, i: usize, j: usize, t_ns: i64, stats: &mut CycleSt
         }
     }
     let mut flags = track_flags(&oi) | track_flags(&oj);
-    let vert = if alt_known {
-        let rate_known = oi.vrate_fpm.is_finite() && oj.vrate_fpm.is_finite();
-        if !rate_known {
-            flags |= AF_RATE_UNKNOWN;
-        }
-        let rate = |o: &CaTrack| {
-            if o.vrate_fpm.is_finite() {
-                f64::from(o.vrate_fpm)
-            } else {
-                0.0
-            }
-        };
+    // A rate is as needed as an altitude: an unknown one (the track has none, or the aircraft is
+    // maybe not level) makes the vertical part of the test unsafe to assume, so the pair is
+    // tested horizontally only and flagged, as with an unknown altitude.
+    let rate_known = oi.vrate_fpm.is_finite() && oj.vrate_fpm.is_finite();
+    let vert = if alt_known && rate_known {
         Some(Vertical {
             dz_ft: f64::from(oj.alt_ft) - f64::from(oi.alt_ft),
-            dvz_fps: (rate(&oj) - rate(&oi)) / 60.0,
+            dvz_fps: (f64::from(oj.vrate_fpm) - f64::from(oi.vrate_fpm)) / 60.0,
             v_eff_ft: v_eff,
         })
     } else {
-        flags |= AF_ALT_UNKNOWN;
-        stats.alt_unknown_pairs += 1;
+        if alt_known {
+            flags |= AF_RATE_UNKNOWN;
+            stats.rate_unknown_pairs += 1;
+        } else {
+            flags |= AF_ALT_UNKNOWN;
+            stats.alt_unknown_pairs += 1;
+        }
         None
     };
     let Some(p) = predict(
@@ -298,7 +306,7 @@ fn evaluate(st: &mut CaState, i: usize, j: usize, t_ns: i64, stats: &mut CycleSt
         p,
         h_now_m: h_now,
         h_eff_m: h_eff,
-        v_eff_ft: if alt_known { v_eff } else { f64::NAN },
+        v_eff_ft: if vert.is_some() { v_eff } else { f64::NAN },
         alt_ft: if alt_known { mid_alt } else { f64::NAN },
         lat_e7,
         lon_e7,
@@ -417,21 +425,30 @@ fn sat32(x: u64) -> u32 {
     u32::try_from(x).unwrap_or(u32::MAX)
 }
 
-/// The net's report for a cycle (M5 rules 1 and 5): running when everything was evaluated;
-/// degraded, with the count, when work was left undone or rows were left out.
-pub fn net_report_of(s: &CycleStats) -> NetReport {
+/// The work a cycle left undone and the input it left out or altered, as counts: `(work, input)`.
+fn shortfalls(s: &CycleStats) -> (u64, u64) {
     let work = s.not_evaluated
         + s.tracks_unscanned
         + s.rows_over_capacity
         + s.open_dropped
         + s.alerts_dropped
         + s.alt_lost_dropped;
-    let input = s.rows_bad + s.rows_duplicate + s.rows_high_lat + s.r95_clamped;
+    let input =
+        s.rows_bad + s.rows_duplicate + s.rows_high_lat + s.r95_clamped + s.rows_lost_upstream;
+    (work, input)
+}
+
+/// The net's report for a cycle (M5 rules 1 and 5): running when everything was evaluated;
+/// degraded otherwise. The count is every shortfall of the cycle, work and input together (the
+/// state table holds one reason, so it is the work's when there is any work left undone, else the
+/// input's; [`CycleOut`] carries the two counts apart).
+pub fn net_report_of(s: &CycleStats) -> NetReport {
+    let (work, input) = shortfalls(s);
     if work > 0 {
         NetReport::Degraded {
             reason: Reason::BudgetExceeded,
             area: Area::Whole,
-            count: sat32(work),
+            count: sat32(work + input),
         }
     } else if input > 0 {
         NetReport::Degraded {
@@ -481,11 +498,17 @@ pub fn ca_cycle(
         };
         publish(net, report, t_ns, &mut stats);
         add(&mut st.totals, &stats);
-        return CycleOut { stats, report };
+        return CycleOut {
+            stats,
+            report,
+            work_short: 0,
+            input_short: 0,
+        };
     }
     st.started = true;
     st.last_ns = t_ns;
     stats.cycles = 1;
+    stats.rows_lost_upstream = core::mem::take(&mut st.lost_input);
     load(st, rows, &mut stats);
     grid_build(st);
     // The flat test is a superset test up to this latitude for the largest radius of the cycle.
@@ -570,9 +593,15 @@ pub fn ca_cycle(
         }
     });
     let report = net_report_of(&stats);
+    let (work_short, input_short) = shortfalls(&stats);
     publish(net, report, t_ns, &mut stats);
     add(&mut st.totals, &stats);
-    CycleOut { stats, report }
+    CycleOut {
+        stats,
+        report,
+        work_short,
+        input_short,
+    }
 }
 
 fn keep_pair(st: &mut CaState, c: &Cand, t_ns: i64) {
@@ -584,15 +613,31 @@ fn keep_pair(st: &mut CaState, c: &Cand, t_ns: i64) {
 }
 
 /// Ends every open alert at its last cycle in conflict (the run is over) and returns how many.
-pub fn ca_finish(st: &mut CaState, alerts: &mut AlertLog) -> u64 {
+/// Alerts the log cannot hold are counted ([`CycleStats::finish_dropped`], also in
+/// `alerts_dropped`), and a final report of degraded is given to `net` at the last cycle's time:
+/// they come after the last cycle's own report, so nothing else would show them.
+pub fn ca_finish(st: &mut CaState, alerts: &mut AlertLog, net: &mut StateTable) -> u64 {
     let mut n = 0u64;
+    let mut dropped = 0u64;
     for o in &st.open {
         if !alert_push(alerts, o) {
-            st.totals.alerts_dropped += 1;
+            dropped += 1;
         }
         n += 1;
     }
     st.open.clear();
     st.totals.closed += n;
+    st.totals.alerts_dropped += dropped;
+    st.totals.finish_dropped += dropped;
+    if dropped > 0 && st.started {
+        let r = NetReport::Degraded {
+            reason: Reason::BudgetExceeded,
+            area: Area::Whole,
+            count: sat32(dropped),
+        };
+        if state_report(net, NetId::ConflictAlert, r, st.last_ns, st.last_ns).is_err() {
+            st.totals.net_refused += 1;
+        }
+    }
     n
 }

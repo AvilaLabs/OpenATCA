@@ -5,9 +5,9 @@ use std::fs;
 
 use oa_bench::input::load_adsb;
 use oa_ca::{
-    alert_log_clear, alert_log_new, ca_check, ca_cycle, ca_finish, ca_new, ca_totals,
-    event_log_clear, event_log_new, Alert, AlertLog, AltLost, CaState, CaTrack, CycleStats,
-    EventLog, F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY, F_UNCERTAIN,
+    alert_log_clear, alert_log_new, ca_check, ca_cycle, ca_finish, ca_new, ca_note_lost_input,
+    ca_totals, event_log_clear, event_log_new, Alert, AlertLog, AltLost, CaState, CaTrack,
+    CycleStats, EventLog, F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY, F_UNCERTAIN,
 };
 use oa_encounter_run::run::{ground_at, ground_table, GroundTable};
 use oa_safety::inhibit::{inhibits_new, InhibitTable};
@@ -53,6 +53,12 @@ pub struct Record {
     pub event_overflow: u64,
     pub tracker_overflow: u64,
     pub tick_rows: u64,
+    /// Rows of the tracker's output left out for a missing column (also in `totals`).
+    pub rows_skipped: u64,
+    /// Cycles that left work undone and also had input missing.
+    pub cycles_both: u64,
+    /// The net state after the last report, the end of the run included.
+    pub final_net: String,
 }
 
 struct Feed<'a> {
@@ -68,11 +74,15 @@ struct Feed<'a> {
     all_events: Vec<AltLost>,
     net_cycles: BTreeMap<String, u64>,
     tick_rows: u64,
+    rows_skipped: u64,
+    cycles_both: u64,
+    last_overflow: u64,
+    last_t: i64,
 }
 
 fn flush(f: &mut Feed) {
     if let Some(t) = f.cur.take() {
-        ca_cycle(
+        let out = ca_cycle(
             &mut f.st,
             t,
             &f.batch,
@@ -80,6 +90,10 @@ fn flush(f: &mut Feed) {
             &mut f.events,
             &mut f.net,
         );
+        f.last_t = t;
+        if out.work_short > 0 && out.input_short > 0 {
+            f.cycles_both += 1;
+        }
         f.batch.clear();
         f.all.extend_from_slice(&f.alerts.items);
         alert_log_clear(&mut f.alerts);
@@ -109,6 +123,10 @@ fn flags_of(o: u8) -> u8 {
 /// Takes the one-second rows (every live track at a tick, one time after another) of a drained
 /// table; a change of time ends the cycle.
 fn consume(f: &mut Feed, o: &TrackOutput) {
+    // Rows the tracker's output table dropped for want of room since the last look were never
+    // seen by conflict alert: the next cycle must not read as running.
+    ca_note_lost_input(&mut f.st, o.overflow.saturating_sub(f.last_overflow));
+    f.last_overflow = o.overflow;
     for k in 0..output_len(o) {
         let (
             Some(&fl),
@@ -134,6 +152,9 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
             o.pos_cov_m2.get(k),
         )
         else {
+            // A row with a column missing cannot be read: counted, and told to the core.
+            f.rows_skipped += 1;
+            ca_note_lost_input(&mut f.st, 1);
             continue;
         };
         if fl & O_TICK == 0 {
@@ -184,6 +205,10 @@ pub fn track_and_alert(
         all_events: Vec::new(),
         net_cycles: BTreeMap::new(),
         tick_rows: 0,
+        rows_skipped: 0,
+        cycles_both: 0,
+        last_overflow: 0,
+        last_t: 0,
     };
     let drain = cfg.out_capacity.min(1 << 16) / 2;
     for m in meas {
@@ -198,8 +223,9 @@ pub fn track_and_alert(
     tracker_flush(&mut t, end, &mut out);
     consume(&mut f, &out);
     flush(&mut f);
-    ca_finish(&mut f.st, &mut f.alerts);
+    ca_finish(&mut f.st, &mut f.alerts, &mut f.net);
     f.all.extend_from_slice(&f.alerts.items);
+    let final_net = state_text(&net_status(&f.net, &f.inh, NetId::ConflictAlert, f.last_t).state);
     Ok(Record {
         alerts: f.all,
         events: f.all_events,
@@ -209,6 +235,9 @@ pub fn track_and_alert(
         event_overflow: f.events.overflow,
         tracker_overflow: out.overflow,
         tick_rows: f.tick_rows,
+        rows_skipped: f.rows_skipped,
+        cycles_both: f.cycles_both,
+        final_net,
     })
 }
 
@@ -264,6 +293,9 @@ pub fn run(args: &Args) -> Result<String, String> {
         tracker_overflow: rec.tracker_overflow,
         measurements: meas.len() as u64,
         tick_rows: rec.tick_rows,
+        rows_skipped: rec.rows_skipped,
+        cycles_both: rec.cycles_both,
+        final_net: &rec.final_net,
         clip_name: &name_of(&args.adsb),
         clip_sha256: &clip_sha,
         config_name: &name_of(&args.config),

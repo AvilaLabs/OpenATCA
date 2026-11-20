@@ -259,7 +259,7 @@ fn a_coasting_or_uncertain_track_widens_the_vertical_minimum_and_is_flagged() {
         p[1].flags = fb;
         let mut r = rig();
         step(&mut r, 0, &p);
-        ca_finish(&mut r.st, &mut r.alerts);
+        ca_finish(&mut r.st, &mut r.alerts, &mut r.net);
         r.alerts.items.clone()
     };
     assert!(run(0, 0).is_empty());
@@ -303,7 +303,7 @@ fn an_unknown_altitude_never_hides_a_horizontal_conflict_and_carries_alt_unknown
         let out = step(&mut r, 0, &p);
         assert_eq!(ca_open_len(&r.st), 1, "{unknown:?}");
         assert_eq!(out.stats.alt_unknown_pairs, 1);
-        ca_finish(&mut r.st, &mut r.alerts);
+        ca_finish(&mut r.st, &mut r.alerts, &mut r.net);
         let a = r.alerts.items[0];
         assert_eq!(a.flags & AF_ALT_UNKNOWN, AF_ALT_UNKNOWN);
         assert!(a.min_v_miss_ft.is_nan() && a.v_eff_ft.is_nan() && a.alt_ft.is_nan());
@@ -423,6 +423,16 @@ fn the_volume_of_a_pair_is_the_one_holding_its_midpoint_and_altitude() {
     assert_eq!(volume_minima(&c, lat, lon, None), (6000.0, 500.0));
     assert_eq!(volume_minima(&c, 300_000_000, lon, None), (5000.0, 300.0));
     assert_eq!(volume_maxima(&c), (6000.0, 500.0));
+    // Whatever the altitude, an unknown one never gets a smaller minimum than a known one.
+    for alt in [
+        -500.0, 0.0, 10_000.0, 18_000.0, 18_001.0, 36_000.0, 60_000.0, 70_000.0,
+    ] {
+        for la in [lat, 300_000_000] {
+            let k = volume_minima(&c, la, lon, Some(alt));
+            let u = volume_minima(&c, la, lon, None);
+            assert!(u.0 >= k.0 && u.1 >= k.1, "{alt} {la}: {u:?} < {k:?}");
+        }
+    }
     // Through a cycle: a pass 5,500 m abeam is clear in the low volume and in none of the others.
     let pass = |c: &CaConfig, alt: f32| {
         let mut p = [
@@ -455,6 +465,56 @@ fn the_volume_of_a_pair_is_the_one_holding_its_midpoint_and_altitude() {
         volume_minima(&c, 420_000_000, lon, Some(10_000.0)),
         (5000.0, 300.0)
     );
+}
+
+// REQ: OA-CA-008
+#[test]
+fn an_unknown_altitude_never_gets_less_than_the_default_volume_a_known_one_outside_the_bands_gets()
+{
+    // Synthetic: the default volume (9,000 m, 700 ft) is larger than the area's volume (2,000 m,
+    // 200 ft, up to 18,000 ft). Above 18,000 ft a known altitude gets the default; an unknown
+    // one must get at least that, not the area's smaller minimum.
+    let mut c = cfg();
+    c.default_volume = vol(9000.0, 700.0);
+    c.volumes[0] = Volume {
+        area: area_box(),
+        alt_lo_ft: 0,
+        alt_hi_ft: 18_000,
+        h_m: 2000.0,
+        v_ft: 200.0,
+    };
+    c.n_volumes = 1;
+    let (lat, lon) = (415_000_000, -880_000_000);
+    assert_eq!(volume_minima(&c, lat, lon, Some(10_000.0)), (2000.0, 200.0));
+    assert_eq!(volume_minima(&c, lat, lon, Some(35_000.0)), (9000.0, 700.0));
+    assert_eq!(volume_minima(&c, lat, lon, None), (9000.0, 700.0));
+    for alt in [
+        -500.0, 0.0, 10_000.0, 18_000.0, 18_001.0, 35_000.0, 90_000.0,
+    ] {
+        let k = volume_minima(&c, lat, lon, Some(alt));
+        let u = volume_minima(&c, lat, lon, None);
+        assert!(u.0 >= k.0 && u.1 >= k.1, "{alt}: {u:?} < {k:?}");
+    }
+    // Through a cycle: two aircraft at 35,000 ft in the box, 7,000 m abeam, converging: a conflict
+    // with known altitudes (the default's 9,000 m), and the same with one altitude lost.
+    let run = |a1: f32, a2: f32| {
+        let mut p = [
+            trk(1, -20_000.0, 7000.0, 200.0, 0.0, a1),
+            trk(2, 20_000.0, 0.0, -200.0, 0.0, a2),
+        ];
+        let mut r = rig_with(&c);
+        // Place the pair inside the box: the base point of the tests is in it.
+        for t in &mut p {
+            t.vrate_fpm = if t.alt_ft.is_nan() { f32::NAN } else { 0.0 };
+        }
+        step(&mut r, 0, &p);
+        ca_open_len(&r.st)
+    };
+    assert_eq!(run(35_000.0, 35_000.0), 1);
+    assert_eq!(run(35_000.0, f32::NAN), 1);
+    assert_eq!(run(f32::NAN, f32::NAN), 1);
+    // In the area's own band the smaller minimum applies, and 7,000 m abeam is clear.
+    assert_eq!(run(10_000.0, 10_000.0), 0);
 }
 
 /// A deterministic scatter of `n` tracks over `span` metres with speeds up to 250 m/s.
@@ -612,6 +672,50 @@ fn over_budget_the_closest_pairs_are_evaluated_the_rest_counted_and_open_alerts_
         out.stats.candidates,
         out.stats.evaluated + out.stats.not_evaluated
     );
+    // The pair given up is the one with the larger separation, in either scan order.
+    assert_eq!(
+        ca_open(&r.st).iter().map(|a| a.addr_a).collect::<Vec<_>>(),
+        [1]
+    );
+    let mut r = rig_with(&c);
+    step(&mut r, 0, &[far[0], far[1], near[0], near[1]]);
+    assert_eq!(
+        ca_open(&r.st).iter().map(|a| a.addr_a).collect::<Vec<_>>(),
+        [1]
+    );
+    // Many pairs, a small table: the table holds exactly the nearest, whatever the row order.
+    let mut c = cfg();
+    c.max_candidates = 5;
+    c.look_ahead_ns = 10 * S;
+    let rows: Vec<CaTrack> = (0..20u32)
+        .flat_map(|k| {
+            still(
+                10 + 2 * k,
+                30_000.0 * f64::from(k),
+                0.0,
+                100.0 + 200.0 * f64::from(k),
+            )
+        })
+        .collect();
+    let mut want: Option<Vec<u32>> = None;
+    for order in 0..3 {
+        let mut rows = rows.clone();
+        match order {
+            1 => rows.reverse(),
+            2 => rows.rotate_left(7),
+            _ => {}
+        }
+        let mut r = rig_with(&c);
+        let out = step(&mut r, 0, &rows);
+        assert_eq!(out.stats.candidates, 20);
+        assert_eq!(out.stats.candidates_dropped, 15);
+        let got: Vec<u32> = ca_open(&r.st).iter().map(|a| a.addr_a).collect();
+        assert!(got.len() <= 5);
+        if let Some(w) = &want {
+            assert_eq!(&got, w);
+        }
+        want = Some(got);
+    }
     // Rows past the track capacity are counted and degrade it.
     let mut c = cfg();
     c.max_tracks = 3;
@@ -722,6 +826,40 @@ fn every_cycle_publishes_the_net_state_and_a_refused_cycle_is_unavailable() {
             reason: Reason::InputMissing
         }
     ));
+    // Rows lost before the cycle (told by the caller) are an input shortfall: not running.
+    let mut r = rig();
+    let both = [still(1, 0.0, 0.0, 500.0), still(3, 0.0, 50_000.0, 500.0)].concat();
+    let out = step(&mut r, 0, &both);
+    assert_eq!(out.report, NetReport::Running);
+    ca_note_lost_input(&mut r.st, 4);
+    let out = step(&mut r, 1, &both);
+    assert_eq!(out.stats.rows_lost_upstream, 4);
+    assert!(matches!(
+        out.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            count: 4,
+            ..
+        }
+    ));
+    // The note covers one cycle only.
+    assert_eq!(step(&mut r, 2, &both).report, NetReport::Running);
+    // Work and input shortfalls in one cycle: the report is the work's reason with the count of
+    // both, and the two counts are given apart.
+    let mut c = cfg();
+    c.eval_budget = 1;
+    let mut r = rig_with(&c);
+    ca_note_lost_input(&mut r.st, 3);
+    let out = step(&mut r, 0, &both);
+    assert_eq!((out.work_short, out.input_short), (1, 3));
+    assert!(matches!(
+        out.report,
+        NetReport::Degraded {
+            reason: Reason::BudgetExceeded,
+            count: 4,
+            ..
+        }
+    ));
 }
 
 // REQ: OA-CA-012
@@ -773,7 +911,7 @@ fn one_conflict_is_one_alert_with_a_start_a_peak_and_an_end_after_the_hysteresis
     for t in 6..20 {
         step(&mut r, t, if t == 14 { &pair } else { &[] });
     }
-    ca_finish(&mut r.st, &mut r.alerts);
+    ca_finish(&mut r.st, &mut r.alerts, &mut r.net);
     assert_eq!(r.alerts.items.len(), 2);
     assert_eq!(
         (r.alerts.items[0].start_ns, r.alerts.items[0].end_ns),
@@ -878,6 +1016,30 @@ fn a_full_alert_log_counts_what_it_loses_and_degrades_the_net() {
     // The consumer clears the log, keeping the allocation and the count.
     alert_log_clear(&mut r.alerts);
     assert_eq!((r.alerts.items.len(), r.alerts.overflow), (0, 2));
+    // Alerts the log cannot hold when the run ends come after the last report: they are counted
+    // apart and the final net state shows them.
+    let mut r = rig();
+    r.alerts = alert_log_new(1);
+    step(&mut r, 0, &rows);
+    assert_eq!(ca_open_len(&r.st), 3);
+    assert_eq!(ca_finish(&mut r.st, &mut r.alerts, &mut r.net), 3);
+    let t = ca_totals(&r.st);
+    assert_eq!((t.alerts_dropped, t.finish_dropped), (2, 2));
+    let st = net_status(
+        &r.net,
+        &oa_safety::inhibit::inhibits_new(),
+        NetId::ConflictAlert,
+        0,
+    )
+    .state;
+    assert!(matches!(
+        st,
+        NetState::Degraded {
+            reason: Reason::BudgetExceeded,
+            count: 2,
+            ..
+        }
+    ));
 }
 
 // REQ: OA-CA-015
@@ -934,7 +1096,7 @@ fn two_aircraft_on_the_ground_are_counted_apart_and_one_on_the_ground_is_flagged
     p[0].alt_ft = f32::NAN;
     p[0].vrate_fpm = f32::NAN;
     step(&mut r, 0, &p);
-    ca_finish(&mut r.st, &mut r.alerts);
+    ca_finish(&mut r.st, &mut r.alerts, &mut r.net);
     let a = r.alerts.items[0];
     assert_eq!(
         a.flags & (AF_ONE_GROUND | AF_ALT_UNKNOWN),
@@ -945,16 +1107,26 @@ fn two_aircraft_on_the_ground_are_counted_apart_and_one_on_the_ground_is_flagged
 
 // REQ: OA-CA-017
 #[test]
-fn an_unknown_vertical_rate_is_taken_as_level_and_flagged() {
-    let mut p = head_on(10_100.0);
+fn an_unknown_vertical_rate_is_tested_horizontally_only_and_flagged() {
+    // 4,000 ft apart and no rate for one of them: the level assumption would clear the pair, a
+    // rate nobody knows might not. Horizontal only, flagged RATE_UNKNOWN (and not ALT_UNKNOWN).
+    let mut p = head_on(14_000.0);
     p[1].vrate_fpm = f32::NAN;
     let mut r = rig();
-    step(&mut r, 0, &p);
-    ca_finish(&mut r.st, &mut r.alerts);
+    let out = step(&mut r, 0, &p);
+    assert_eq!(
+        (out.stats.rate_unknown_pairs, out.stats.alt_unknown_pairs),
+        (1, 0)
+    );
+    ca_finish(&mut r.st, &mut r.alerts, &mut r.net);
     let a = r.alerts.items[0];
     assert_eq!(a.flags & AF_RATE_UNKNOWN, AF_RATE_UNKNOWN);
     assert_eq!(a.flags & AF_ALT_UNKNOWN, 0);
-    assert_eq!(a.min_v_miss_ft, 100.0);
+    assert!(a.min_v_miss_ft.is_nan() && a.v_eff_ft.is_nan());
+    // With both rates known the same pair is vertically clear.
+    let mut r = rig();
+    step(&mut r, 0, &head_on(14_000.0));
+    assert_eq!(ca_open_len(&r.st), 0);
 }
 
 // REQ: OA-CA-027
@@ -1025,4 +1197,158 @@ fn the_conflict_decision_agrees_with_a_brute_force_scan_of_sampled_times_within_
         }
     }
     assert!(hits > 500 && clear > 500, "{hits} {clear}");
+}
+
+// REQ: OA-CA-028
+#[test]
+fn a_pair_inside_a_limit_now_always_has_a_span_even_by_a_hair() {
+    // Starting a hair inside the horizontal limit, in every direction of motion, slow, fast or
+    // stationary: always a current span from zero.
+    let h = 5000.0;
+    for margin in [1.0, 1e-3, 1e-6, 1e-9, 1e-12] {
+        for k in 0..64 {
+            let ang = f64::from(k) / 64.0 * std::f64::consts::TAU;
+            let (rx, ry) = ((h - margin) * ang.cos(), (h - margin) * ang.sin());
+            for sp in [0.0, 4.0e-5, 1.0e-3, 1.0, 250.0, 700.0] {
+                for dir in 0..8 {
+                    let d = f64::from(dir) / 8.0 * std::f64::consts::TAU;
+                    let (vx, vy) = (sp * d.cos(), sp * d.sin());
+                    if rx * rx + ry * ry >= h * h {
+                        continue;
+                    }
+                    let s = horizontal_span(rx, ry, vx, vy, h, 120.0)
+                        .unwrap_or_else(|| panic!("none: {margin} {k} {sp} {dir}"));
+                    assert!(s.now && s.lo == 0.0 && s.hi >= 0.0 && s.hi <= 120.0);
+                }
+            }
+        }
+        // Vertically: a hair inside the limit, climbing or descending at any rate or level.
+        let v = 1000.0;
+        for dz in [v - margin, margin - v, 0.0] {
+            for dvz in [
+                0.0, 4.0e-5, -4.0e-5, 1e-3, -1e-3, 50.0, -50.0, 2000.0, -2000.0,
+            ] {
+                let s = vertical_span(dz, dvz, v, 120.0)
+                    .unwrap_or_else(|| panic!("none: {margin} {dz} {dvz}"));
+                assert!(s.now && s.lo == 0.0 && s.hi >= 0.0 && s.hi <= 120.0);
+            }
+        }
+    }
+    // The exact edge is not inside, in either dimension.
+    assert!(horizontal_span(h, 0.0, 0.0, 0.0, h, 120.0).is_none());
+    assert!(vertical_span(1000.0, 0.0, 1000.0, 120.0).is_none());
+    // Conflict (both) from a hair inside both, whatever the relative velocity.
+    let z = Vertical {
+        dz_ft: 1000.0 - 1e-9,
+        dvz_fps: 20.0,
+        v_eff_ft: 1000.0,
+    };
+    let p = predict(h - 1e-9, 0.0, 300.0, 0.0, h, Some(&z), 120.0).unwrap();
+    assert!(p.now && p.ttl_s == 0.0);
+}
+
+/// The decision of one pair against a scan of the look-ahead every 1/8 s, with the tolerances of
+/// the test below. Returns `(certain, got)` after asserting the two rules.
+fn scan_agrees(p: [f64; 9]) -> (bool, bool) {
+    const TOL_M: f64 = 1.0;
+    const TOL_FT: f64 = 1.0;
+    let [rx, ry, vx, vy, h, dz, dvz, v, t_max] = p;
+    let (mut certain, mut possible) = (false, false);
+    let steps = (t_max * 8.0) as usize;
+    for k in 0..=steps {
+        let t = (k as f64 / 8.0).min(t_max);
+        let d = ((rx + vx * t).hypot(ry + vy * t), (dz + dvz * t).abs());
+        certain |= d.0 < h - TOL_M && d.1 < v - TOL_FT;
+        possible |= d.0 < h + TOL_M && d.1 < v + TOL_FT;
+    }
+    let z = Vertical {
+        dz_ft: dz,
+        dvz_fps: dvz,
+        v_eff_ft: v,
+    };
+    let span = conflict_span(rx, ry, vx, vy, h, Some(&z), t_max);
+    if certain {
+        assert!(span.is_some(), "missed: {p:?}");
+    }
+    if let Some(s) = span {
+        assert!(
+            possible || s.hi - s.lo <= 0.125 + 1e-9 || s.now,
+            "invented: {p:?} {s:?}"
+        );
+        assert!(0.0 <= s.lo && s.lo <= s.hi && s.hi <= t_max, "{p:?} {s:?}");
+    }
+    (certain, span.is_some())
+}
+
+// REQ: OA-CA-027
+#[test]
+fn the_decision_agrees_with_a_scan_for_stationary_level_current_and_edge_pairs() {
+    let mut s = 0xD1B5_4A32_D192_ED03u64;
+    let mut u = move || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        (s >> 11) as f64 / (1u64 << 53) as f64
+    };
+    let tau = std::f64::consts::TAU;
+    let (mut certain_n, mut got_n) = ([0u32; 4], [0u32; 4]);
+    for n in 0..40_000u32 {
+        let kind = (n % 4) as usize;
+        let t_max = 30.0 + u() * 270.0;
+        let h = 500.0 + u() * 20_000.0;
+        let v = 100.0 + u() * 1500.0;
+        let sp = u() * 700.0;
+        let ang = u() * tau;
+        let (mut vx, mut vy) = (sp * ang.cos(), sp * ang.sin());
+        let mut dvz = (u() - 0.5) * 60.0;
+        let mut dz = (u() - 0.5) * 3000.0;
+        let a = u() * tau;
+        let d: f64;
+        match kind {
+            // Stationary or slower than the threshold, close enough to be inside, near the edge.
+            0 => {
+                let sp = if n % 8 == 0 { 0.0 } else { u() * 4.0e-5 };
+                vx = sp * ang.cos();
+                vy = sp * ang.sin();
+                d = h + (u() - 0.5) * 6.0;
+            }
+            // Level (no relative rate, or one under the threshold) and a vertical separation at the
+            // edge.
+            1 => {
+                dvz = if n % 8 == 1 {
+                    0.0
+                } else {
+                    (u() - 0.5) * 8.0e-5
+                };
+                dz = v + (u() - 0.5) * 6.0;
+                dz = if n % 2 == 0 { dz } else { -dz };
+                d = u() * h * 1.5;
+            }
+            // Current: inside both now, by a margin of a hair to a few metres.
+            2 => {
+                d = h - 10f64.powf(-9.0 + u() * 9.0);
+                dz = v - 10f64.powf(-9.0 + u() * 9.0);
+            }
+            // At the edge of the look-ahead: the pair reaches the limit about at t_max.
+            _ => {
+                let toward = (u() - 0.5) * 6.0;
+                vx = -sp * a.cos();
+                vy = -sp * a.sin();
+                d = h + sp * t_max + toward;
+                dz = (u() - 0.5) * v;
+                dvz = 0.0;
+            }
+        }
+        let (rx, ry) = (d * a.cos(), d * a.sin());
+        let (c, g) = scan_agrees([rx, ry, vx, vy, h, dz, dvz, v, t_max]);
+        certain_n[kind] += u32::from(c);
+        got_n[kind] += u32::from(g);
+    }
+    // Every kind produced both certain losses and decisions, so none is tested vacuously.
+    for k in 0..4 {
+        assert!(
+            certain_n[k] > 100 && got_n[k] > 100,
+            "{k} {certain_n:?} {got_n:?}"
+        );
+    }
 }

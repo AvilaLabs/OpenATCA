@@ -18,6 +18,9 @@ use crate::types::{CycleStats, COAST_V_ALLOWANCE_FT, F_COAST, F_UNCERTAIN};
 pub(crate) const M_PER_DEG_LOW: f64 = 110_900.0;
 /// The flat-earth test accepts this multiple of the radius, covering its own error.
 pub(crate) const CHEAP_MARGIN: f64 = 1.02;
+/// The exact test's reach is this multiple of the pair radius (the grid's flat test accepts
+/// [`CHEAP_MARGIN`], more, so the exact test never sees less than the grid passes on).
+pub(crate) const EXACT_MARGIN: f64 = 1.01;
 const MAX_CELLS: u64 = u32::MAX as u64;
 /// Metres of the smallest sphere radius the flat test is proved against.
 pub(crate) const R_MIN_M: f64 = 6_356_752.0;
@@ -230,13 +233,12 @@ pub(crate) fn grid_scan(st: &mut CaState, stats: &mut CycleStats) {
                             continue;
                         }
                         stats.candidates += 1;
-                        if st.cands.len() < st.cfg.max_candidates {
-                            st.cands.push(Cand {
-                                d2: d2 as u64,
-                                i: i as u32,
-                                j: j as u32,
-                            });
-                        } else {
+                        let c = Cand {
+                            d2: d2 as u64,
+                            i: i as u32,
+                            j: j as u32,
+                        };
+                        if !keep_nearest(&mut st.cands, st.cfg.max_candidates, c) {
                             stats.candidates_dropped += 1;
                         }
                     }
@@ -247,16 +249,63 @@ pub(crate) fn grid_scan(st: &mut CaState, stats: &mut CycleStats) {
     stats.grid_work = work;
 }
 
+/// Keeps the `cap` smallest candidates (nearest first, ties by track numbers) in `v`, a binary
+/// max-heap on `Cand`'s order, so a full table gives up its largest separation, whatever the
+/// scan order; bounded (`log cap` steps) and deterministic (the order is total). True if `c` is
+/// nothing was dropped; false is one pair dropped (`c`, or the largest pair it displaced), which
+/// the caller counts.
+fn keep_nearest(v: &mut alloc::vec::Vec<Cand>, cap: usize, c: Cand) -> bool {
+    if v.len() < cap {
+        v.push(c);
+        let mut k = v.len() - 1;
+        while k > 0 {
+            let p = (k - 1) / 2;
+            let (Some(&a), Some(&b)) = (v.get(k), v.get(p)) else {
+                break;
+            };
+            if a <= b {
+                break;
+            }
+            v.swap(k, p);
+            k = p;
+        }
+        return true;
+    }
+    let Some(&worst) = v.first() else {
+        return false;
+    };
+    if c >= worst {
+        return false;
+    }
+    if let Some(root) = v.first_mut() {
+        *root = c;
+    }
+    let n = v.len();
+    let mut k = 0;
+    loop {
+        let (l, r) = (2 * k + 1, 2 * k + 2);
+        let mut m = k;
+        if l < n && v.get(l) > v.get(m) {
+            m = l;
+        }
+        if r < n && v.get(r) > v.get(m) {
+            m = r;
+        }
+        if m == k {
+            break;
+        }
+        v.swap(k, m);
+        k = m;
+    }
+    // The old largest went out in place of `c`.
+    false
+}
+
 /// The exact pair radius, metres: beyond it two tracks cannot be inside the largest minimum and
-/// both 95 % radii at any time in the look-ahead.
+/// both 95 % radii at any time in the look-ahead, with a margin of 1 % for the scale of the
+/// azimuthal projection the pair is measured in.
 pub(crate) fn exact_radius(st: &CaState, i: usize, j: usize) -> Option<f64> {
     let (a, b) = (st.obs.get(i)?, st.obs.get(j)?);
     let (va, vb) = (st.speed.get(i).copied()?, st.speed.get(j).copied()?);
-    Some(pair_radius(
-        st,
-        va,
-        vb,
-        f64::from(a.r95_m),
-        f64::from(b.r95_m),
-    ))
+    Some(pair_radius(st, va, vb, f64::from(a.r95_m), f64::from(b.r95_m)) * EXACT_MARGIN)
 }

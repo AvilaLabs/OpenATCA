@@ -50,8 +50,8 @@ mod volume;
 
 pub use cycle::{ca_cycle, ca_finish, ca_publish_refused, net_report_of, CycleOut};
 pub use state::{
-    alert_log_clear, alert_log_new, ca_check, ca_new, ca_open, ca_open_len, ca_totals,
-    event_log_clear, event_log_new, CaState,
+    alert_log_clear, alert_log_new, ca_check, ca_new, ca_note_lost_input, ca_open, ca_open_len,
+    ca_totals, event_log_clear, event_log_new, CaState,
 };
 pub use types::{
     Alert, AlertLog, AltLost, Area, CaConfig, CaTrack, CycleStats, EventLog, Volume,

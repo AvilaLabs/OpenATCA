@@ -5366,22 +5366,28 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-CA-008** The minima of a pair are those of the first configured volume whose area holds the
   midpoint of the pair and whose altitude band holds the mean altitude; a pair outside every volume uses
   the required default volume; with an unknown altitude the larger horizontal and the larger vertical
-  minimum of the volumes whose area holds the midpoint apply (the default volume if none does). An area is a
-  latitude and longitude box or an `oa-safety` polygon.
+  minimum among the volumes whose area holds the midpoint AND the default volume apply, so an unknown
+  altitude never gets a smaller minimum than any known altitude at that place. An area is a latitude and
+  longitude box or an `oa-safety` polygon.
 - **OA-CA-009** The candidate grid finds every pair inside its radius (look-ahead times the closing speed
   bound, plus the largest horizontal minimum and both 95 % radii), the same pairs for any grid cell size and
   at least those a brute-force exact test finds; a pair with both altitudes and rates known that cannot come
   within the vertical minimum in the look-ahead is skipped and counted; a pair with an unknown rate is not
   skipped.
 - **OA-CA-010** The grid scan and the pair evaluation count their work against configured budgets; over
-  budget the pairs are evaluated in order of smallest current horizontal separation (ties by address), the
-  remainder is counted as not evaluated, an open alert whose pair was not evaluated is kept alive and marked,
-  and tracks not scanned, candidates dropped, rows over capacity and alerts not opened are counts that make the
-  net degraded.
+  budget the pairs are evaluated in order of smallest current horizontal separation (ties by address; the
+  order is by separation now, not by time to loss), the remainder is counted as not evaluated, an open alert
+  whose pair was not evaluated is kept alive and marked, and tracks not scanned, candidates dropped, rows
+  over capacity and alerts not opened are counts that make the net degraded. A candidate table that fills
+  keeps the pairs with the smallest current separation (ties by track numbers), whatever the scan order,
+  with bounded work per pair, and counts each pair it gives up.
 - **OA-CA-011** Each cycle publishes the net's state to the `oa-safety` table: running when everything was
-  evaluated; degraded, with the count (`BudgetExceeded` for work left undone or lost, `InputMissing` for rows
-  left out), otherwise; unavailable (`SurveillanceLost`) for a cycle whose time is not after the last, and
-  unavailable (`InputMissing`) when the configuration was refused; reports the table refuses are counted.
+  evaluated; degraded, with the count of every shortfall of the cycle (`BudgetExceeded` when work was left
+  undone or lost, `InputMissing` for rows left out, lost before the cycle or altered; the cycle result gives
+  the work and input counts apart), otherwise; unavailable (`SurveillanceLost`) for a cycle whose time is not
+  after the last, and unavailable (`InputMissing`) when the configuration was refused (the batch tool exits
+  rather than publishing it); reports the table refuses are counted. A caller that lost rows before a cycle
+  says so, and that cycle is not running.
 - **OA-CA-012** One conflict is one alert from its first cycle in conflict to its last, ended when the pair
   has been out of conflict for the hysteresis (a return within it continues the alert, a later one is a new
   alert), with its start, peak (the smallest time to loss) and end.
@@ -5389,14 +5395,16 @@ configuration with no default; the crate's tests use synthetic values.
   hysteresis, budgets, speed, radius cap, grid band, volumes (minima, altitude band, area), and a look-ahead
   and speed whose reach is beyond the bound the solver is proved for.
 - **OA-CA-014** A full alert log counts what it loses (`overflow`), the lost alerts degrade the net, and the
-  consumer clears the log keeping the allocation and the count.
-- **OA-CA-015** The alerts are a deterministic function of the rows: any row order gives the same alerts and
-  counts; rows sharing an address are all left out, and rows with a bad position, a speed over the bound, a
-  non-finite value or an altitude or rate out of range are refused, all counted.
+  consumer clears the log keeping the allocation and the count. Alerts ended when the run finishes and lost
+  to a full log come after the last cycle's report: they are counted apart (`finish_dropped`) and the final
+  net state is degraded with their count.
+- **OA-CA-015** The alerts are a deterministic function of the rows: below the track capacity any row order
+  gives the same alerts and counts; rows sharing an address are all left out, and rows with a bad position, a
+  speed over the bound, a non-finite value or an altitude or rate out of range are refused, all counted.
 - **OA-CA-016** A pair with both aircraft on the ground is left out and counted; a pair with one on the
   ground is tested and its alert carries `ONE_GROUND`.
-- **OA-CA-017** A pair with both altitudes and an unknown vertical rate is tested with the unknown rate taken
-  as level and its alert carries `RATE_UNKNOWN`.
+- **OA-CA-017** A pair with both altitudes known and a vertical rate unknown on either track is tested
+  horizontally only (the rate is not assumed level), counted, and its alert carries `RATE_UNKNOWN`.
 - **OA-CA-018** Proved (Kani, bounded): for every relative position, velocity, limit and look-ahead within the
   stated bounds, the horizontal solver returns no NaN or infinity and an ordered interval inside the
   look-ahead.
@@ -5420,4 +5428,13 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-CA-027** The conflict decision (both intervals together) agrees with a brute-force scan of sampled times
   within 1 m (1 ft vertically) over tens of thousands of pseudo-random pairs: every pair with a sampled time
   more than the tolerance inside both limits is a conflict, and a conflict that no sampled time shows is an
-  overlap shorter than one scan step. Not proved: the bounded proofs of this decision did not finish in an hour (see the proof notes).
+  overlap shorter than one scan step; the pairs include stationary and level ones, pairs inside both limits
+  now by a hair, and pairs at the limit and at the end of the look-ahead. Not proved: the bounded proofs of
+  this decision did not finish in an hour.
+- **OA-CA-028** A pair inside the horizontal limit now, or inside the vertical limit now, always has a
+  loss interval of that kind, current, starting at zero and ending inside the look-ahead, even when the
+  rounding of the solution puts the end of the interval a hair before zero; the exact edge is not inside.
+  Tested at margins from 1 m to 1e-12 m and proved (Kani, bounded) for both solvers.
+- **OA-CA-029** Proved (Kani, bounded): the horizontal miss is finite and not negative; the meet of two
+  ordered intervals is finite and ordered inside the look-ahead; a prediction has a finite time to loss
+  inside the look-ahead and finite, not negative misses.

@@ -87,7 +87,15 @@ pub fn horizontal_span(rx: f64, ry: f64, vx: f64, vy: f64, h: f64, t_max: f64) -
     let t1 = tc - w;
     let t2 = tc + w;
     let lo = if now || t1 < 0.0 { 0.0 } else { t1 };
-    let hi = if t2 > t_max { t_max } else { t2 };
+    let hi = if t2 > t_max {
+        t_max
+    } else if now && t2 < 0.0 {
+        // Inside now: the pair leaves at `t2 >= 0` in exact arithmetic; a rounded `t2` just
+        // below zero (a tiny discriminant) must not turn a current loss into no loss.
+        0.0
+    } else {
+        t2
+    };
     if lo > hi {
         None
     } else {
@@ -114,7 +122,15 @@ pub fn vertical_span(dz: f64, dvz: f64, v: f64, t_max: f64) -> Option<Span> {
     let tb = (v - dz) / dvz;
     let (t1, t2) = if dvz > 0.0 { (ta, tb) } else { (tb, ta) };
     let lo = if now || t1 < 0.0 { 0.0 } else { t1 };
-    let hi = if t2 > t_max { t_max } else { t2 };
+    let hi = if t2 > t_max {
+        t_max
+    } else if now && t2 < 0.0 {
+        // Inside now: the pair leaves at `t2 >= 0` in exact arithmetic; a rounded `t2` just
+        // below zero (a tiny discriminant) must not turn a current loss into no loss.
+        0.0
+    } else {
+        t2
+    };
     if lo > hi {
         None
     } else {
@@ -301,6 +317,87 @@ mod proofs {
         // The vertical miss is finite and not negative.
         let m = vertical_miss(dz, dvz, t);
         assert!(m.is_finite() && m >= 0.0);
+    }
+
+    // REQ: OA-CA-028
+    #[kani::proof]
+    fn a_pair_inside_the_horizontal_limit_now_has_a_span() {
+        let (rx, ry, vx, vy, h, t) = horizontal_inputs();
+        if rx * rx + ry * ry < h * h {
+            let s = horizontal_span(rx, ry, vx, vy, h, t);
+            assert!(s.is_some());
+            if let Some(s) = s {
+                assert!(s.now && s.lo == 0.0 && 0.0 <= s.hi && s.hi <= t);
+            }
+        }
+    }
+
+    // REQ: OA-CA-028
+    #[kani::proof]
+    fn a_pair_inside_the_vertical_limit_now_has_a_span() {
+        let (dz, dvz, v, t): (f64, f64, f64, f64) =
+            (kani::any(), kani::any(), kani::any(), kani::any());
+        kani::assume(within(dz, MAX_ALT_FT) && within(dvz, MAX_ABS_VRATE_FPS));
+        kani::assume(v > 0.0 && v <= MAX_ALT_FT);
+        kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);
+        if dz < v && -dz < v {
+            let s = vertical_span(dz, dvz, v, t);
+            assert!(s.is_some());
+            if let Some(s) = s {
+                assert!(s.now && s.lo == 0.0 && 0.0 <= s.hi && s.hi <= t);
+            }
+        }
+    }
+
+    // REQ: OA-CA-029
+    #[kani::proof]
+    fn the_horizontal_miss_is_finite_and_not_negative() {
+        let (rx, ry, vx, vy, _h, t) = horizontal_inputs();
+        let m = horizontal_miss(rx, ry, vx, vy, t);
+        assert!(m.is_finite() && m >= 0.0);
+    }
+
+    // REQ: OA-CA-029
+    #[kani::proof]
+    fn the_meet_of_two_ordered_spans_is_ordered_and_finite() {
+        let t: f64 = kani::any();
+        kani::assume(t > 0.0 && t <= MAX_LOOK_AHEAD_S);
+        let (a, b, c, d): (f64, f64, f64, f64) =
+            (kani::any(), kani::any(), kani::any(), kani::any());
+        kani::assume(0.0 <= a && a <= b && b <= t && 0.0 <= c && c <= d && d <= t);
+        let h = Span {
+            lo: a,
+            hi: b,
+            now: kani::any(),
+        };
+        let v = Span {
+            lo: c,
+            hi: d,
+            now: kani::any(),
+        };
+        if let Some(m) = meet(&h, &v) {
+            assert!(m.lo.is_finite() && m.hi.is_finite());
+            assert!(0.0 <= m.lo && m.lo <= m.hi && m.hi <= t);
+        }
+    }
+
+    // REQ: OA-CA-029
+    #[kani::proof]
+    fn a_prediction_is_finite_where_it_is_defined() {
+        let (rx, ry, vx, vy, h, t) = horizontal_inputs();
+        let (dz, dvz, v): (f64, f64, f64) = (kani::any(), kani::any(), kani::any());
+        kani::assume(within(dz, MAX_ALT_FT) && within(dvz, MAX_ABS_VRATE_FPS));
+        kani::assume(v > 0.0 && v <= MAX_ALT_FT);
+        let vert = Vertical {
+            dz_ft: dz,
+            dvz_fps: dvz,
+            v_eff_ft: v,
+        };
+        if let Some(p) = predict(rx, ry, vx, vy, h, Some(&vert), t) {
+            assert!(p.ttl_s.is_finite() && 0.0 <= p.ttl_s && p.ttl_s <= t);
+            assert!(p.h_miss_m.is_finite() && p.h_miss_m >= 0.0);
+            assert!(p.v_miss_ft.is_finite() && p.v_miss_ft >= 0.0);
+        }
     }
 
     // REQ: OA-CA-021
