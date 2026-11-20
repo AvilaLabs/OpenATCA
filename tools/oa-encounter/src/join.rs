@@ -753,7 +753,7 @@ pub fn join_text(
 }
 
 fn median(v: &mut [f64]) -> Option<f64> {
-    v.sort_by(|a, b| a.total_cmp(b));
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     v.get(v.len() / 2).copied()
 }
 
