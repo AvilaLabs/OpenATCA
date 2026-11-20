@@ -68,8 +68,10 @@ fn add(a: &mut CycleStats, b: &CycleStats) {
 }
 
 /// The net's report for a cycle (rules 1, 4 and 5): running when every track was evaluated with
-/// every floor; degraded otherwise, with the reason of highest priority (budget, then missing
-/// input, then missing altitude) and the count of every shortfall of the cycle.
+/// every floor; degraded for a shortfall of the system only, with the reason of highest priority
+/// (budget, then missing input) and the count of every shortfall of the cycle. A track with no
+/// altitude or a stale one is a gap of that aircraft, not of the system: it is counted and listed
+/// per track (`alt_missing`, `alt_stale`) and does not degrade the net.
 pub fn net_report_of(s: &CycleStats) -> NetReport {
     let work = s
         .over_budget
@@ -82,14 +84,11 @@ pub fn net_report_of(s: &CycleStats) -> NetReport {
         .saturating_add(s.rows_bad)
         .saturating_add(s.qnh_missing)
         .saturating_add(s.rows_lost_upstream);
-    let alt = s.alt_missing.saturating_add(s.alt_stale);
-    let all = work.saturating_add(input).saturating_add(alt);
+    let all = work.saturating_add(input);
     let (reason, count) = if work > 0 {
         (Reason::BudgetExceeded, all)
     } else if input > 0 {
         (Reason::InputMissing, all)
-    } else if alt > 0 {
-        (Reason::AltitudeMissing, alt)
     } else {
         return NetReport::Running;
     };

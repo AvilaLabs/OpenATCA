@@ -6218,8 +6218,8 @@ FAA value.
 - **OA-MSAW-001** A configuration out of range is refused with the name of the key; every table is
   allocated whole at the start and a capacity above its bound is refused.
 - **OA-MSAW-002** Aircraft on the ground are excluded and counted.
-- **OA-MSAW-003** A track with no altitude is counted, listed and the net reads degraded
-  (`AltitudeMissing`); the other tracks are still evaluated.
+- **OA-MSAW-003** A track with no altitude is counted and listed on that track (a gap of the aircraft)
+  and does not degrade the net; the other tracks are still evaluated.
 - **OA-MSAW-004** A path point with no terrain or chart coverage is counted, listed and the net reads
   degraded (`InputMissing`); it is never treated as safe, and the covered points are still evaluated.
 - **OA-MSAW-005** Over the track budget the lowest predicted altitudes (altitude plus the descent over the
@@ -6248,7 +6248,7 @@ FAA value.
   the 95 % radius plus half the distance to the next point.
 - **OA-MSAW-016** A point's floor is judged against the lowest predicted altitude over the span the point
   stands for, and the violation time lies inside that span.
-- **OA-MSAW-017** The net report gives the reason of highest priority (budget, input, altitude) and the count
+- **OA-MSAW-017** The net report gives the reason of highest priority (budget, input) and the count
   of every shortfall of the cycle; rows told lost upstream degrade the next cycle.
 - **OA-MSAW-018** An unknown vertical rate predicts level and is flagged.
 - **OA-MSAW-019** A bad row is counted and listed; a missing or oversized 95 % radius is held to the cap and counted.
@@ -6317,8 +6317,8 @@ FAA value.
 - **OA-MSAW-058** The clearance above terrain outside the corridors is `gtm_clearance_ft` (a development value),
   or that of a `gtm_clearance` box or polygon file holding the point (the highest wins); corridors keep their own.
 - **OA-MSAW-059** Within `airport_area_nm` of an airport with a CIFP approach, below `airport_area_ceiling_ft_agl`,
-  the general clearance is `airport_area_clearance_ft`; never an inhibit; the lowest of overlapping areas applies and
-  a `gtm_clearance` line overrides it; obstacles keep their own clearance.
+  the clearance above terrain and above obstacles is `airport_area_clearance_ft`; never an inhibit; the lowest of
+  overlapping areas applies and a `gtm_clearance` line overrides it for terrain.
 - **OA-MSAW-060** An approach corridor is a capture box of constant half-width `approach_half_width_nm` from the
   threshold to the fix (5 NM when absent or farther); a track outside the box falls to the general rules; the
   departure corridor widens to 2 NM.
@@ -6331,6 +6331,9 @@ FAA value.
   prediction time is `terminal_lookahead_s`, else `look_ahead_s`, by where the track is now; the check of the present
   position is unchanged.
 - **OA-MSAW-065** A track whose latest barometric altitude is older than `max_altitude_age_s` is not judged, is
-  counted and listed as altitude stale, and degrades the net as a missing altitude does; an unknown age is taken as fresh.
+  counted and listed as altitude stale on that track, and does not degrade the net (a gap of the aircraft, not of the
+  system); an unknown age is taken as fresh.
+- **OA-MSAW-066** The summary reports alert episodes (alerts of one track 20 s or less apart count as one) and the
+  tracks with an alert beside the alert count; the alerts and the hysteresis are unchanged.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.

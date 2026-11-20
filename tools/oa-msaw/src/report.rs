@@ -72,6 +72,42 @@ pub fn why_text(w: u8) -> &'static str {
     }
 }
 
+/// The gap, seconds, within which two alerts of one track are one episode.
+pub const EPISODE_GAP_S: i64 = 20;
+
+/// Alert episodes: the alerts of one track whose gaps (from the end of one to the start of the next)
+/// are at most `gap_s` seconds count as one. Returns the episodes and the tracks with an alert.
+/// A report only: the alerts and the hysteresis are as they were.
+pub fn episodes(alerts: &[Alert], gap_s: i64) -> (usize, usize) {
+    let mut by: BTreeMap<u32, Vec<(i64, i64)>> = BTreeMap::new();
+    for a in alerts {
+        by.entry(a.addr).or_default().push((a.start_ns, a.end_ns));
+    }
+    let gap_ns = gap_s.saturating_mul(1_000_000_000);
+    let mut n = 0;
+    for v in by.values_mut() {
+        v.sort_unstable();
+        let mut end: Option<i64> = None;
+        for &(s, e) in v.iter() {
+            if end.is_none_or(|p| s.saturating_sub(p) > gap_ns) {
+                n += 1;
+            }
+            end = Some(end.map_or(e, |p| p.max(e)));
+        }
+    }
+    (n, by.len())
+}
+
+/// The status the controller reads on a track the net did not monitor: a gap of that aircraft,
+/// never a fault of the net. Empty for the other reasons.
+pub fn status_text(w: u8) -> &'static str {
+    match w {
+        x if x == SkipWhy::AltitudeMissing as u8 => "MSAW not monitoring: altitude missing",
+        x if x == SkipWhy::AltitudeStale as u8 => "MSAW not monitoring: altitude stale",
+        _ => "",
+    }
+}
+
 fn f(x: f32, prec: usize) -> String {
     if x.is_finite() {
         format!("{x:.prec$}")
@@ -208,7 +244,7 @@ pub fn below_mva_csv(skips: &BTreeMap<(u32, u8), SkipAgg>) -> String {
 }
 
 fn skip_rows(skips: &BTreeMap<(u32, u8), SkipAgg>, below: bool) -> String {
-    let mut o = String::from("address_hex,reason,first_s,last_s,cycles,lat_deg,lon_deg\n");
+    let mut o = String::from("address_hex,reason,first_s,last_s,cycles,lat_deg,lon_deg,status\n");
     let mut v: Vec<(&(u32, u8), &SkipAgg)> = skips
         .iter()
         .filter(|(k, _)| (k.1 == SkipWhy::BelowMva as u8) == below)
@@ -217,14 +253,15 @@ fn skip_rows(skips: &BTreeMap<(u32, u8), SkipAgg>, below: bool) -> String {
     for ((addr, why), a) in v {
         let _ = writeln!(
             o,
-            "{:08X},{},{},{},{},{:.5},{:.5}",
+            "{:08X},{},{},{},{},{:.5},{:.5},{}",
             addr,
             why_text(*why),
             secs(a.first_ns),
             secs(a.last_ns),
             a.cycles,
             f64::from(a.lat_e7) / 1e7,
-            f64::from(a.lon_e7) / 1e7
+            f64::from(a.lon_e7) / 1e7,
+            status_text(*why)
         );
     }
     o
@@ -290,6 +327,8 @@ pub struct DataUsed {
     pub without_corridor: Vec<String>,
     /// Per alert (address, start), the distance in metres to the cell that set its floor.
     pub setter_m: BTreeMap<(u32, i64), f32>,
+    /// The terrain tiles a query needed that the directory did not hold, by file name.
+    pub tiles_absent: Vec<String>,
     /// The airports of the CIFP that have an approach: identifier, latitude, longitude.
     pub airports: Vec<(String, f64, f64)>,
     /// The altimeter files read (`None`: no `--metar`).
@@ -402,6 +441,14 @@ pub fn summary_text(i: &SummaryInput) -> String {
         fs.terrain_grid_bytes as f64 / 1_048_576.0,
         fs.chart_blocks
     );
+    if !i.data.tiles_absent.is_empty() {
+        let _ = writeln!(
+            o,
+            "  terrain tiles needed and not in the directory ({}): {}",
+            i.data.tiles_absent.len(),
+            i.data.tiles_absent.join(", ")
+        );
+    }
     let answered = fs.terrain_queries - fs.terrain_absent;
     let _ = writeln!(
         o,
@@ -574,7 +621,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let _ = writeln!(o, "no altitude (listed, rule 4) {}", t.alt_missing);
     let _ = writeln!(
         o,
-        "not monitored: altitude stale (older than {} s; listed, degrades the net as a missing altitude does) {}",
+        "not monitored: altitude stale (older than {} s; listed per track, a gap of the aircraft, the net stays as it is) {}",
         i.cfg.max_altitude_age_s, t.alt_stale
     );
     let _ = writeln!(
@@ -657,6 +704,12 @@ pub fn summary_text(i: &SummaryInput) -> String {
             i.alerts.len() as f64 / hours
         );
     }
+    let (eps, with_alert) = episodes(i.alerts, EPISODE_GAP_S);
+    let _ = writeln!(
+        o,
+        "alert episodes (alerts of one track {EPISODE_GAP_S} s or less apart count as one): {eps}, tracks with an alert {with_alert}, per hour {:.1} episodes",
+        eps as f64 / hours.max(1.0e-9)
+    );
     if let Some(e) = &i.data.eligibility {
         eligibility_lines(&mut o, e, hours, i.data);
     }
@@ -724,6 +777,19 @@ pub fn summary_text(i: &SummaryInput) -> String {
         let _ = writeln!(o, "  {s}: {n}");
     }
     let _ = writeln!(o, "net state at the end: {}", i.final_net);
+    let _ = writeln!(
+        o,
+        "track-cycles by reason (a per-track status in skipped.csv; the altitude ones do not degrade the net):"
+    );
+    for (name, n) in [
+        ("MSAW not monitoring: altitude missing", t.alt_missing),
+        ("MSAW not monitoring: altitude stale", t.alt_stale),
+        ("no altimeter setting", t.qnh_missing),
+        ("point without coverage", t.no_coverage),
+        ("not evaluated for want of budget", t.over_budget),
+    ] {
+        let _ = writeln!(o, "  {name}: {n}");
+    }
     let _ = writeln!(o, "inhibitions {}", i.made.len());
     for m in i.made {
         let h = i.hidden.get(&m.id);

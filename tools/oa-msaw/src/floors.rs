@@ -477,6 +477,14 @@ impl Floors {
         Ok(())
     }
 
+    /// The names of the tiles that a query needed and the directory did not hold.
+    pub fn absent_tiles(&self) -> Vec<String> {
+        self.absent
+            .iter()
+            .filter_map(|&(la, lo)| tile_name(la, lo))
+            .collect()
+    }
+
     fn terrain_ft(&mut self, lat: f64, lon: f64, radius_m: f64) -> Result<i32, String> {
         let t0 = Instant::now();
         let tile0 = self.stats.ns_tile_read;

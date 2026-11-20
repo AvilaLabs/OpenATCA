@@ -64,6 +64,9 @@ pub fn floor_of(
     if s.terrain_ft == FLOOR_NONE || !s.obstacle_covered {
         return None;
     }
+    // A sample that [`with_airport_area`] has resolved holds its area's clearance and no ceiling:
+    // the clearance then applies to obstacles as it does to terrain.
+    let in_area = s.apt_clearance_ft != FLOOR_NONE && s.apt_ceiling_ft == FLOOR_NONE;
     let (tc, oc) = match hit {
         Some(h) => (h.clearance_ft, h.clearance_ft),
         None => (
@@ -72,7 +75,11 @@ pub fn floor_of(
             } else {
                 s.gtm_clearance_ft
             },
-            cfg.obstacle_clearance_ft,
+            if in_area {
+                s.apt_clearance_ft
+            } else {
+                cfg.obstacle_clearance_ft
+            },
         ),
     };
     let mut best = (s.terrain_ft.saturating_add(tc), FloorKind::Terrain);
@@ -93,7 +100,8 @@ pub fn floor_of(
 /// The sample with the airport terminal area's clearance in place of the general one: where an area
 /// holds the point, no `gtm_clearance` line does, and the lowest predicted altitude of the span is
 /// below the area's ceiling. Never an inhibit: the floor stays terrain and obstacles plus the
-/// clearance.
+/// area's clearance, the same for both. The returned sample marks the area as applied by dropping
+/// its ceiling.
 pub fn with_airport_area(s: &FloorSample, low_ft: i32) -> FloorSample {
     if s.gtm_clearance_ft == FLOOR_NONE
         && s.apt_clearance_ft != FLOOR_NONE
@@ -102,6 +110,7 @@ pub fn with_airport_area(s: &FloorSample, low_ft: i32) -> FloorSample {
     {
         FloorSample {
             gtm_clearance_ft: s.apt_clearance_ft,
+            apt_ceiling_ft: FLOOR_NONE,
             ..*s
         }
     } else {
@@ -532,10 +541,10 @@ mod proofs {
         let cfg = cfg_with(tc, 0, 0);
         if let Some((f, _)) = floor_of(&with_airport_area(&s, low), None, &cfg) {
             // The floor is an area object, never an inhibit: it holds terrain plus the area's
-            // clearance and the obstacle top plus its own.
+            // clearance and the obstacle top plus the same clearance.
             assert!(f >= t.saturating_add(ac));
             if o != FLOOR_NONE {
-                assert!(f >= o);
+                assert!(f >= o.saturating_add(ac));
             }
         } else {
             assert!(t == FLOOR_NONE);
@@ -545,6 +554,8 @@ mod proofs {
     // REQ: OA-MSAW-065
     #[kani::proof]
     fn a_stale_altitude_is_never_monitored_and_a_fresh_or_unknown_one_always_is() {
+        // A gap of the aircraft: the track is not judged and carries its own status; it is never read
+        // as clear and never a fault of the net.
         let (age, max): (f32, f64) = (kani::any(), kani::any());
         kani::assume(max.is_finite() && max > 0.0);
         let stale = altitude_stale(age, max);

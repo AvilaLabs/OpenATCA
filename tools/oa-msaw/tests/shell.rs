@@ -678,9 +678,7 @@ fn missing_terrain_and_missing_altitude_degrade_the_net_end_to_end_and_are_liste
         .keys()
         .any(|k| k.0 == 0x801 && k.1 == oa_msaw::SkipWhy::AltitudeMissing as u8));
     assert!(
-        r.net_cycles
-            .keys()
-            .any(|k| k == "DEGRADED: ALTITUDE MISSING"),
+        r.net_cycles.keys().all(|k| !k.contains("ALTITUDE")),
         "{:?}",
         r.net_cycles
     );
@@ -1093,8 +1091,33 @@ fn a_track_whose_altitude_stops_arriving_is_not_monitored_once_it_is_stale_and_i
         .keys()
         .any(|k| k.1 == oa_msaw::SkipWhy::AltitudeStale as u8));
     assert!(
-        r.net_cycles.keys().any(|k| k.contains("ALTITUDE MISSING")),
+        r.net_cycles.keys().all(|k| !k.contains("ALTITUDE")),
         "{:?}",
         r.net_cycles
     );
+    // The track carries the status.
+    let csv = skipped_csv(&r.skips);
+    assert!(
+        csv.contains("ALTITUDE_STALE") && csv.contains("MSAW not monitoring: altitude stale"),
+        "{csv}"
+    );
+}
+
+// REQ: OA-MSAW-066
+#[test]
+fn alerts_of_one_track_20_s_apart_or_less_are_one_episode() {
+    use oa_msaw_run::report::{episodes, EPISODE_GAP_S};
+    let r = go(&approach(0x801, true), &settings(), ridge_floors());
+    let a = r.alerts[0];
+    let at = |addr: u32, s: i64, e: i64| oa_msaw::Alert {
+        addr,
+        start_ns: s * 1_000_000_000,
+        end_ns: e * 1_000_000_000,
+        ..a
+    };
+    // Gaps of 20 s (merged) and 21 s (not), and a second track.
+    let v = [at(1, 0, 10), at(1, 30, 40), at(1, 61, 70), at(2, 5, 6)];
+    assert_eq!(episodes(&v, EPISODE_GAP_S), (3, 2));
+    assert_eq!(episodes(&[], EPISODE_GAP_S), (0, 0));
+    assert_eq!(episodes(&v, 0), (4, 2));
 }

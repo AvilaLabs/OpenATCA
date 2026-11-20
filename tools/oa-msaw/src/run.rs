@@ -902,6 +902,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let mut rec = track_and_alert(&meas, &cfg, &ground, &set, floors, Some(qnh), t0_ns)?;
     used.steady_cpu_s = cpu_seconds().zip(cpu0).map(|(b, a)| b - a - rec.diag_cpu_s);
     used.diag_cpu_s = rec.diag_cpu_s;
+    used.tiles_absent = rec.floors.absent_tiles();
     used.rss_end_kb = proc_kb("VmHWM:");
     used.times = rec.times;
     used.setter_m = rec.setter_m.clone();

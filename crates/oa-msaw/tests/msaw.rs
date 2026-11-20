@@ -198,7 +198,7 @@ fn aircraft_on_the_ground_are_excluded_and_counted() {
 
 // REQ: OA-MSAW-003
 #[test]
-fn a_track_with_no_altitude_is_counted_listed_and_the_net_is_degraded() {
+fn a_track_with_no_altitude_is_counted_and_listed_and_the_net_stays_running() {
     let mut r = rig(&cfg());
     let a = tr(7, 40.0, -88.0, 0.0, 100.0, f32::NAN, f32::NAN);
     let b = tr(8, 40.1, -88.0, 0.0, 100.0, 20_000.0, 0.0);
@@ -207,15 +207,9 @@ fn a_track_with_no_altitude_is_counted_listed_and_the_net_is_degraded() {
     assert_eq!(r.skips.items.len(), 1);
     let s = r.skips.items[0];
     assert_eq!((s.addr, s.why, s.t_ns), (7, SkipWhy::AltitudeMissing, S));
-    assert_eq!(
-        o.report,
-        NetReport::Degraded {
-            reason: Reason::AltitudeMissing,
-            area: oa_safety::net::Area::Whole,
-            count: 1
-        }
-    );
-    assert!(matches!(state(&r, S), NetState::Degraded { count: 1, .. }));
+    // A gap of one aircraft, not of the system.
+    assert_eq!(o.report, NetReport::Running);
+    assert!(matches!(state(&r, S), NetState::Running));
     // The other track was still evaluated.
     assert_eq!(o.stats.evaluated, 1);
 }
@@ -949,7 +943,7 @@ fn a_full_log_counts_what_it_drops_and_the_net_reads_degraded() {
         o.report,
         NetReport::Degraded {
             reason: Reason::BudgetExceeded,
-            count: 2,
+            count: 1,
             ..
         }
     ));
@@ -1084,14 +1078,10 @@ fn the_report_gives_the_reason_of_highest_priority_and_the_whole_count() {
         alt_missing: 2,
         ..s
     };
-    assert!(matches!(
-        net_report_of(&alt),
-        NetReport::Degraded {
-            reason: Reason::AltitudeMissing,
-            count: 2,
-            ..
-        }
-    ));
+    // Altitude gaps are per aircraft: counted, and no shortfall of the net.
+    assert_eq!(net_report_of(&alt), NetReport::Running);
+    let stale = CycleStats { alt_stale: 3, ..s };
+    assert_eq!(net_report_of(&stale), NetReport::Running);
     let input = CycleStats {
         no_coverage: 1,
         rows_bad: 1,
@@ -1102,7 +1092,7 @@ fn the_report_gives_the_reason_of_highest_priority_and_the_whole_count() {
         net_report_of(&input),
         NetReport::Degraded {
             reason: Reason::InputMissing,
-            count: 5,
+            count: 3,
             ..
         }
     ));
@@ -1114,7 +1104,7 @@ fn the_report_gives_the_reason_of_highest_priority_and_the_whole_count() {
         net_report_of(&work),
         NetReport::Degraded {
             reason: Reason::BudgetExceeded,
-            count: 9,
+            count: 7,
             ..
         }
     ));
@@ -1619,13 +1609,18 @@ fn a_visual_base_leg_in_an_airport_area_alerts_only_for_a_tower_and_the_floor_is
     let mut r = rig(&cfg());
     let o = cycle(&mut r, S, &[base], &flat(600, FLOOR_NONE));
     assert_eq!(o.stats.violations, 1, "the general floor would alert");
-    // 150 ft above a 1,000 ft tower (top 1,600 ft) within the radius: the obstacle keeps its
-    // 500 ft clearance and the track alerts.
+    // 150 ft above a 1,000 ft tower (top 1,600 ft) within the radius: the area's 200 ft holds for
+    // the obstacle as for terrain, and the track alerts; at 250 ft above it, it does not.
     let level = tr(5, 40.0, -88.0, 70.0, 0.0, 1750.0, 0.0);
     let mut r = rig(&cfg());
     let o = cycle(&mut r, S, &[level], &airport_world(600, 1600));
     assert_eq!(o.stats.violations, 1);
     assert_eq!(msaw_open(&r.st)[0].worst_kind, FloorKind::Obstacle);
+    assert_eq!(msaw_open(&r.st)[0].worst_floor_ft, 1800);
+    let clear = tr(5, 40.0, -88.0, 70.0, 0.0, 1850.0, 0.0);
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[clear], &airport_world(600, 1600));
+    assert_eq!(o.stats.violations, 0);
     // Above the area's ceiling the general clearance holds again.
     let high = tr(5, 40.0, -88.0, 70.0, 0.0, 4000.0, -3500.0);
     let mut r = rig(&cfg());
@@ -1689,7 +1684,7 @@ fn the_guam_descent_in_a_terminal_area_alerts_later_by_the_look_ahead_difference
 
 // REQ: OA-MSAW-065
 #[test]
-fn an_altitude_older_than_the_limit_is_not_monitored_is_counted_listed_and_degrades_the_net() {
+fn an_altitude_older_than_the_limit_is_not_monitored_and_is_counted_and_listed_per_track() {
     let mut old = tr(9, 40.0, -88.0, 70.0, 0.0, 700.0, 0.0);
     old.alt_age_s = 20.0;
     let mut r = rig(&cfg());
@@ -1699,14 +1694,11 @@ fn an_altitude_older_than_the_limit_is_not_monitored_is_counted_listed_and_degra
         (1, 0, 0)
     );
     assert_eq!(r.skips.items[0].why, SkipWhy::AltitudeStale);
-    assert!(matches!(
+    assert_eq!(
         o.report,
-        NetReport::Degraded {
-            reason: Reason::AltitudeMissing,
-            count: 1,
-            ..
-        }
-    ));
+        NetReport::Running,
+        "a gap of the aircraft, not of the net"
+    );
     // 11 s old is judged; an unknown age is taken as fresh.
     old.alt_age_s = 11.0;
     let o = cycle(&mut r, 2 * S, &[old], &airport_world(600, FLOOR_NONE));
