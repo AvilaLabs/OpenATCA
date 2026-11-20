@@ -12,5 +12,8 @@ workspace = true
 [dependencies]
 oa-xml = { path = "../oa-xml" }
 
+[dev-dependencies]
+oa-sealed = { path = "../oa-sealed" }
+
 [package.metadata.openatca]
 class = "shell"

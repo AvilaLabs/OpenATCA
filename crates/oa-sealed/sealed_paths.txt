@@ -1,0 +1,21 @@
+# The sealed hold-out data: one list, read by the Rust guard (tools/oa-sealed) and the Python guard
+# (tools/sealed_guard.py). A test checks that both parse this file to the same set.
+#
+# root  the data root; the production guard resolves every path against it.
+# seal  a path below the root, as components; a last component ending in `*` is a name prefix.
+#       The names are also matched anywhere in a path as consecutive components, so a copy of the
+#       data under another root is refused too.
+root /home/connoravila/Documents/Avila-Labs/openatca-data
+# The four-day recording: day1 is protocol P-001's tune day and is not sealed; days 2 to 4 are
+# hold-out days A to C, sealed as name prefixes so a renamed or partial copy beside them is sealed
+# too; the recorder's run log covers every day and stays sealed.
+seal scds/rec-20261119/day2*
+seal scds/rec-20261119/day3*
+seal scds/rec-20261119/day4*
+seal scds/rec-20261119/runs*
+seal scds/stdds-20261119-holdout
+seal scds/stdds-smoke-20261119*
+# The ADS-B days of hold-out days A, B and C (20 to 22 November 2026).
+seal raw/adsblol/2026.11.20
+seal raw/adsblol/2026.11.21
+seal raw/adsblol/2026.11.22

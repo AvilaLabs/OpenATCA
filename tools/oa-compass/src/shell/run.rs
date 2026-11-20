@@ -366,7 +366,7 @@ pub fn export_adsb_clip(
     mode: InputsMode,
     rows: OpenatcaRows,
 ) -> Result<(TrackRunInfo, ClipInfo), ExportError> {
-    let clip = oa_bench::input::load_adsb(path)
+    let clip = oa_bench::input::load_adsb_with(path, &super::guard::guarded_opener())
         .map_err(|e| ExportError::Input(format!("{}: {e}", path.display())))?;
     let positions = ref_points(&clip.reports);
     let (fed_set, other, split) = split_reports_with(&clip.reports, mode == InputsMode::Split);

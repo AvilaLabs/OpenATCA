@@ -10,6 +10,10 @@ fn main() {
         eprintln!("usage: extract_all <archive.zip>");
         std::process::exit(2);
     };
+    if let Err(e) = oa_sealed::refuse(Path::new(&path)) {
+        eprintln!("extract_all: {e}");
+        std::process::exit(2);
+    }
     let bytes = match read_archive_file(Path::new(&path)) {
         Ok(b) => b,
         Err(e) => {

@@ -555,7 +555,7 @@ pub fn track_window(
     let mut sum = TrackSummary::default();
     let mut reports = Reports::default();
     let mut file =
-        std::fs::File::open(adsb).map_err(|e| failed(&format!("read {}", adsb.display()), e))?;
+        oa_sealed::open(adsb).map_err(|e| failed(&format!("read {}", adsb.display()), e))?;
     let mut window_full = false;
     let mut dec = DecodeTotals::default();
     let (mut outside, mut undecodable) = (0u64, 0u64);
@@ -686,6 +686,7 @@ fn create_new(path: &Path) -> Result<std::fs::File, CliError> {
 /// Refuses an output directory that holds anything, unless `overwrite`. A directory that does not
 /// exist is fine.
 fn check_out_dir(dir: &Path, overwrite: bool) -> Result<(), CliError> {
+    oa_sealed::refuse(dir).map_err(CliError::Failed)?;
     let mut entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         // A directory that does not exist yet is fine; any other failure (permission, not a
@@ -835,7 +836,9 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
             a.snapshot.display()
         )));
     }
-    let bytes = std::fs::read(&a.snapshot)
+    let mut bytes = Vec::new();
+    oa_sealed::open(&a.snapshot)
+        .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut bytes))
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
     let model = oa_airspace::snapshot::decode(&bytes).map_err(|e| failed("snapshot", e))?;
 

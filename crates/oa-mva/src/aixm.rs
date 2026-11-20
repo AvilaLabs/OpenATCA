@@ -124,11 +124,16 @@ pub fn new_parser() -> Result<Parser, MvaError> {
 
 /// Shell: reads a whole file, refusing one over [`MAX_FILE_BYTES`].
 pub fn read_file(path: &Path) -> Result<Vec<u8>, MvaError> {
+    oa_sealed::refuse_io(path).map_err(|e| MvaError::Io(e.to_string()))?;
     let meta = std::fs::metadata(path).map_err(|e| MvaError::Io(e.to_string()))?;
     if meta.len() > MAX_FILE_BYTES {
         return Err(MvaError::FileTooLarge(meta.len()));
     }
-    std::fs::read(path).map_err(|e| MvaError::Io(e.to_string()))
+    let mut out = Vec::new();
+    oa_sealed::open(path)
+        .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut out))
+        .map_err(|e| MvaError::Io(e.to_string()))?;
+    Ok(out)
 }
 
 /// What one loaded message added. Plain data (A1).
@@ -1190,6 +1195,7 @@ pub struct DirLoad {
 /// Shell: loads every `*.xml` file of `dir`, in file-name order, into one model. A file that is
 /// refused is reported in [`DirLoad::files`] and the rest still load.
 pub fn load_directory(dir: &Path) -> Result<DirLoad, MvaError> {
+    oa_sealed::refuse_io(dir).map_err(|e| MvaError::Io(e.to_string()))?;
     let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| MvaError::Io(e.to_string()))?
         .filter_map(Result::ok)

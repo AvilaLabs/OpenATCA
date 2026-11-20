@@ -128,6 +128,21 @@ fn main() -> ExitCode {
         eprintln!("oa-track-run: {why}\n{USAGE}");
         return ExitCode::from(2);
     }
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    for p in [
+        Some(&adsb),
+        Some(&out),
+        canon.digest.as_ref(),
+        canon.rows.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Err(e) = oa_sealed::refuse(p) {
+            eprintln!("oa-track-run: {e}");
+            return ExitCode::from(2);
+        }
+    }
     let result = if realtime {
         run_realtime(&adsb, &out, with_output, max_tracks)
     } else {

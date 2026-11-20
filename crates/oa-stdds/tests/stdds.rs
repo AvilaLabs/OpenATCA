@@ -787,7 +787,7 @@ fn the_summary_example_refuses_sealed_folders_as_given_and_through_links() {
     let root = std::env::temp_dir().join(format!("oa-stdds-seal-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     for name in [
-        "rec-20261119",
+        "rec-20261119/day2",
         "stdds-20261119-holdout",
         "stdds-smoke-20261119",
     ] {
@@ -795,10 +795,11 @@ fn the_summary_example_refuses_sealed_folders_as_given_and_through_links() {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a.oaf");
         std::fs::write(&file, b"").unwrap();
+        let name = name.replace('/', "-");
         // As given.
         let o = run(&file);
         assert_eq!(o.status.code(), Some(2), "{name}");
-        assert!(String::from_utf8_lossy(&o.stderr).contains("refused"));
+        assert!(String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"));
         // A link to the file, and a link to the folder, from outside `scds`.
         let outside = root.join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
@@ -826,14 +827,10 @@ fn the_summary_example_refuses_sealed_folders_as_given_and_through_links() {
     std::fs::create_dir_all(&ok).unwrap();
     std::fs::write(ok.join("a.oaf"), b"").unwrap();
     assert_eq!(run(&ok.join("a.oaf")).status.code(), Some(0));
-    // A sealed name anywhere in a component refuses, and so does a path that cannot be resolved.
-    let sub = root.join("copy-of-rec-20261119-x");
-    std::fs::create_dir_all(&sub).unwrap();
-    std::fs::write(sub.join("a.oaf"), b"").unwrap();
-    assert_eq!(run(&sub.join("a.oaf")).status.code(), Some(2));
+    // A path that cannot be opened exits 2 as well, naming the path.
     let o = run(&ok.join("none.oaf"));
     assert_eq!(o.status.code(), Some(2), "fail closed");
-    assert!(String::from_utf8_lossy(&o.stderr).contains("cannot resolve"));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("unreadable"));
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -927,6 +924,57 @@ fn an_empty_raw_flight_rules_element_is_present_empty_and_other_empty_fields_sta
     assert_eq!(st.field_error_kinds[FieldErrorKind::Empty as usize], 0);
     // A record with only a present-empty field is not an empty record.
     assert_eq!(st.empty_records, 0);
+}
+
+// REQ: OA-STD-043
+#[test]
+fn track_coast_decodes_true_false_absent_and_unreadable() {
+    let t = tais_rec("<track><coast>true</coast></track>");
+    assert!(
+        t.errors.is_empty() && t.unknown_elements == 0,
+        "{:?}",
+        t.errors
+    );
+    assert!(t.records[0].coast);
+    assert_ne!(
+        t.records[0].present & (1 << TaisField::TrackCoast as u32),
+        0
+    );
+    let f = tais_rec("<track><coast>0</coast></track>");
+    assert!(!f.records[0].coast);
+    assert_ne!(
+        f.records[0].present & (1 << TaisField::TrackCoast as u32),
+        0
+    );
+    // Absent stays absent: not present, and not false-counted.
+    let a = tais_rec("<track><adsb>true</adsb></track>");
+    assert!(!a.records[0].coast);
+    assert_eq!(
+        a.records[0].present & (1 << TaisField::TrackCoast as u32),
+        0
+    );
+    // Present but unreadable is a counted field error, and the field is absent.
+    let bad = tais_rec("<track><coast>maybe</coast></track>");
+    assert_eq!(bad.errors[0].field, "track/coast");
+    assert_eq!(bad.errors[0].kind, FieldErrorKind::Syntax);
+    assert_eq!(
+        bad.records[0].present & (1 << TaisField::TrackCoast as u32),
+        0
+    );
+    // The stats keep the presence count and the value histogram.
+    let mut p = parser();
+    let mut st = new_stats();
+    for (v, n) in [("true", 2), ("false", 1), ("x", 1)] {
+        for _ in 0..n {
+            let xml = format!(
+                r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><track><coast>{v}</coast></track></record></a:TATrackAndFlightPlan>"#
+            );
+            parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+        }
+    }
+    assert_eq!(st.tais_present[TaisField::TrackCoast as usize], 3);
+    assert_eq!(st.tais_errors[TaisField::TrackCoast as usize], 1);
+    assert_eq!(st.tais_flags[4], [1, 2]);
 }
 
 // REQ: OA-STD-027

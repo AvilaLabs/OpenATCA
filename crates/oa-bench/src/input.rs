@@ -43,10 +43,13 @@ pub enum DirKind {
 /// The input files of a directory in reading order, and what they are.
 pub fn list_inputs(dir: &Path) -> io::Result<(DirKind, Vec<PathBuf>)> {
     let mut msgs: Vec<PathBuf> = Vec::new();
+    // The sealed hold-out guard sees the directory, and every entry before it is stat-ed.
+    oa_sealed::refuse_io(dir)?;
     for e in fs::read_dir(dir)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", dir.display())))?
     {
         let p = e?.path();
+        oa_sealed::refuse_io(&p)?;
         if p.is_file() && p.extension().is_some_and(|x| x == "msg") {
             msgs.push(p);
         }
@@ -89,8 +92,9 @@ pub(crate) fn manifest_hash(label: &str, files: &[PathBuf], sums: &[(Digest, u64
 pub fn hash_files(label: &str, files: &[PathBuf]) -> io::Result<InputHash> {
     let mut sums = Vec::with_capacity(files.len());
     for p in files {
+        oa_sealed::refuse_io(p)?;
         let len = fs::metadata(p)?.len();
-        let f = fs::File::open(p)
+        let f = oa_sealed::open(p)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))?;
         let d = sha256_reader(io::BufReader::new(f)).map_err(io::Error::other)?;
         sums.push((d, len));
@@ -148,6 +152,7 @@ impl<R: Read> Read for Capped<R> {
 /// is allocated.
 pub fn read_capped_file(path: &Path, max: u64) -> io::Result<Vec<u8>> {
     let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+    oa_sealed::refuse_io(path).map_err(named)?;
     let len = fs::metadata(path).map_err(named)?.len();
     if len > max {
         return Err(named(io::Error::new(
@@ -155,7 +160,7 @@ pub fn read_capped_file(path: &Path, max: u64) -> io::Result<Vec<u8>> {
             format!("{len} bytes, past the limit of {max} bytes"),
         )));
     }
-    let f = fs::File::open(path).map_err(named)?;
+    let f = oa_sealed::open(path).map_err(named)?;
     let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
     Capped {
         inner: f,
@@ -175,7 +180,7 @@ pub type Opener = Rc<dyn Fn(&Path) -> io::Result<Box<dyn Read>>>;
 /// The opener that reads files from disk.
 pub fn file_opener() -> Opener {
     Rc::new(|p: &Path| {
-        fs::File::open(p)
+        oa_sealed::open(p)
             .map(|f| Box::new(f) as Box<dyn Read>)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))
     })
@@ -466,7 +471,7 @@ pub struct AdsbClip {
 /// returns the number of frames that were damaged (bad CRC or length, or a partial frame at the
 /// end of the file; counted, not hidden).
 pub fn for_each_adsb_frame(path: &Path, f: &mut dyn FnMut(i64, &[u8])) -> io::Result<u64> {
-    let mut file = fs::File::open(path)
+    let mut file = oa_sealed::open(path)
         .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
     oa_feed::read_frames(&mut file, &mut |fr| {
         if fr.kind == oa_feed::Kind::Message {
