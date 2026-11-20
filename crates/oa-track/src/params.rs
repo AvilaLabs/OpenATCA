@@ -87,6 +87,9 @@ pub const OMEGA_MAX: f64 = 0.5;
 /// common samples fell from 45.4 to 34.8 m (2026-11-15) and from 41.2 to 30.4 m (2026-11-19), the
 /// median from 1.9 to 1.7 m on both; 1.5 s was worse than 1.0 s on 2026-11-15.
 pub const VEL_LAG_S: f64 = 1.0;
+/// The longest velocity lag a measurement may carry, seconds (a longer one, or one that is not a
+/// number, refuses the measurement as a bad velocity).
+pub const VEL_LAG_MAX_S: f64 = 10.0;
 /// Mean time the straight model persists, seconds. Set from the distribution of straight
 /// segment lengths in the recorded day.
 pub const H_TAU_CV_S: f64 = 100.0;

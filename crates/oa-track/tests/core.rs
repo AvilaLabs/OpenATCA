@@ -1665,6 +1665,30 @@ fn a_velocity_is_accepted_up_to_the_supported_speed_envelope_and_refused_above_i
     assert_eq!(tracker_stats(&t).started, 1);
 }
 
+// REQ: OA-TRK-401
+#[test]
+fn a_velocity_lag_outside_zero_to_ten_seconds_or_not_a_number_refuses_the_velocity() {
+    let mut base = base_measurements(0xD00003, 3, 1.0, 1)[0];
+    base.vel_cov_m2s2 = [1.0, 0.0, 1.0];
+    base.flags |= M_HAS_VEL;
+    for (lag, ok) in [
+        (0.0, true),
+        (1.0, true),
+        (10.0, true),
+        (10.5, false),
+        (-0.5, false),
+        (f32::NAN, false),
+        (f32::INFINITY, false),
+    ] {
+        let mut m = base;
+        m.vel_lag_s = lag;
+        assert_eq!(measurement_check(&m).is_ok(), ok, "lag {lag}");
+        // Without a velocity the lag means nothing.
+        m.flags &= !M_HAS_VEL;
+        assert!(measurement_check(&m).is_ok(), "lag {lag} without velocity");
+    }
+}
+
 // REQ: OA-TRK-078
 #[test]
 fn a_late_report_does_not_erase_the_run_of_rejected_reports() {

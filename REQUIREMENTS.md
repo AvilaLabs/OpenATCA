@@ -5315,7 +5315,7 @@ scope.
   build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,
   and the working tree at run time is at that commit and clean. This gates which runs count as
   hold-out scores; it does not change what is computed.
-- **OA-TRK-401** A measurement carries the lag `vel_lag_s` of its velocity behind the aircraft's (zero unless
+- **OA-TRK-401** A measurement carries the lag `vel_lag_s` of its velocity behind the aircraft's (0 to 10 s, else the velocity is refused; zero unless
   the source says otherwise; ADS-B sets `VEL_LAG_S`, 1.0 s). The horizontal filter takes the velocity as the
   aircraft's `vel_lag_s` before the report: against the state the measurement is `z = R(-w L) v`, the
   velocity turned back by the state's turn rate `w` over the lag `L`, linearised at the state so that it
