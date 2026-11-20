@@ -21,7 +21,7 @@ use super::error::ExportError;
 use super::export::SystemExport;
 use super::guard::guarded_opener;
 use crate::core::addrcheck::{check_flight, RefPoint, Verdict};
-use crate::core::adsb::{adsb_record, AdsbRow};
+use crate::core::adsb::{adsb_record, AdsbRow, LinkSource};
 use crate::core::convert::{eram_record, eram_refusal, track_record, EramRow, TrackRow};
 
 /// What a tracker run did besides the rows exported. A7.2: cold.
@@ -421,6 +421,12 @@ fn adsb_row(r: &oa_adsb::Row) -> AdsbRow {
         version: u8_of(r.version),
         gva: u8_of(r.gva),
         sda: u8_of(r.sda),
+        nic_baro: None,
+        link: match r.source {
+            NONE_U8 => LinkSource::NoColumn,
+            0 | 1 => LinkSource::Es1090,
+            _ => LinkSource::NotSaid,
+        },
     }
 }
 

@@ -91,6 +91,8 @@ fn source(name: &str) -> PathBuf {
             version: Some(2),
             gva: Some(2),
             sda: Some(2),
+            nic_baro: Some(0),
+            link: oa_compass::core::adsb::LinkSource::Es1090,
         };
         ax.push(&adsb_record(&r).unwrap(), (r.lat_e7, r.lon_e7))
             .unwrap();

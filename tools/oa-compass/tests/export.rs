@@ -609,7 +609,7 @@ fn the_readme_states_the_date_the_sources_the_items_and_every_omission_with_its_
         "ingest: flight table overflow (must be 0): 0",
         "a row differing only in receive time is a duplicate",
         "it is NOT established as pressure altitude",
-        "MON = 0 and CNF = 0 are ASSUMPTIONS",
+        "MON (Ed 1.21 5.2.6) = 0 and CNF = 0 are ASSUMED, UNCONFIRMED",
         "not an outside conformance test",
         "input: test input",
         "Edition 1.21",

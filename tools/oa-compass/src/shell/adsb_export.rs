@@ -52,18 +52,29 @@ pub fn cat021_record(v: &AdsbValues, source: SourceId) -> Cat021 {
         tomr_position: Some(v.time),
         geometric_height: v.geometric_height,
         quality: v.quality.map(|q| {
-            // First extension: NICBARO 0 (bit 8), SIL (bits 7/6), NACp (bits 5/2); second: SILS
-            // (bit 6), SDA (bits 5/4), GVA (bits 3/2). Extensions are sent only if a bit in them
-            // is 1 (5.2.16 encoding rule); the second needs the first to chain to.
-            let ext1 = (q.sil << 5) | (q.nacp << 1);
-            let ext2 = (u8::from(q.sils) << 5) | (q.sda << 3) | (q.gva << 1);
-            let ext = if ext2 != 0 {
-                vec![ext1 | 1, ext2]
-            } else if ext1 != 0 {
-                vec![ext1]
-            } else {
-                Vec::new()
-            };
+            // First extension: NICBARO (bit 8), SIL (bits 7/6), NACp (bits 5/2); second: SILS
+            // (bit 6), SDA (bits 5/4), GVA (bits 3/2); third: PIC (bits 8/5). The core gives an
+            // extension only when it and those before it are fully known. One whose bits are all 0
+            // is sent only if a later one is (5.2.16 encoding rule).
+            let mut ext: Vec<u8> = Vec::new();
+            if let Some(e) = q.ext1 {
+                ext.push((e.nicbaro << 7) | (e.sil << 5) | (e.nacp << 1));
+                if let Some(e) = q.ext2 {
+                    ext.push((u8::from(e.sils) << 5) | (e.sda << 3) | (e.gva << 1));
+                    if let Some(pic) = q.pic {
+                        ext.push(pic << 4);
+                    }
+                }
+            }
+            while ext.last() == Some(&0) {
+                ext.pop();
+            }
+            let n = ext.len();
+            for (i, o) in ext.iter_mut().enumerate() {
+                if i + 1 < n {
+                    *o |= 1;
+                }
+            }
             Quality021 {
                 nacv: q.nacv,
                 nic: q.nic,
@@ -73,7 +84,7 @@ pub fn cat021_record(v: &AdsbValues, source: SourceId) -> Cat021 {
         mops: v.mops_version.map(|version| Mops {
             not_supported: false,
             version,
-            link: 0,
+            link: v.link,
         }),
         flight_level: v.flight_level,
         baro_rate: v.baro_rate.map(|raw| FlagS15 {

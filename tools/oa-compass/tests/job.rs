@@ -444,6 +444,8 @@ fn an_export_whose_position_error_is_over_the_limit_fails_and_commits_nothing() 
         version: None,
         gva: None,
         sda: None,
+        nic_baro: None,
+        link: oa_compass::core::adsb::LinkSource::NoColumn,
     };
     let c = oa_compass::core::adsb::adsb_record(&r).unwrap();
     ax.push(&c, (r.lat_e7 + 40, r.lon_e7)).unwrap();
@@ -582,7 +584,8 @@ fn the_readme_says_openatca_has_a_calculated_altitude_and_no_measured_flight_lev
     .unwrap();
     let r = fs::read_to_string(out.join("README.txt")).unwrap();
     assert!(
-        r.contains("CALCULATED altitude, I135 with QNH = 0. OpenATCA publishes no measured flight level (I136), so COMPASS's \"Mode C Present\" does not apply to it"),
+        r.contains("CALCULATED altitude, I135 (Ed 1.21 5.2.12) with QNH = 0, which the specification defines as no QNH correction applied")
+            && r.contains("OpenATCA publishes no measured flight level (I136), so COMPASS's \"Mode C Present\" does not apply to it"),
         "{r}"
     );
     // And the records agree: I135 present, I136 never.
@@ -1285,6 +1288,8 @@ fn the_limit_plus_one_fails_and_a_scale_error_or_a_late_failure_leaves_nothing()
             version: None,
             gva: None,
             sda: None,
+            nic_baro: None,
+            link: oa_compass::core::adsb::LinkSource::NoColumn,
         };
         let c = oa_compass::core::adsb::adsb_record(&r).unwrap();
         ax.push(&c, (r.lat_e7 + LIMIT_021 + extra, r.lon_e7))
@@ -1810,6 +1815,8 @@ fn the_second_check_refuses_a_sealed_day_row_at_the_eram_and_cat021_paths() {
         version: None,
         gva: None,
         sda: None,
+        nic_baro: None,
+        link: oa_compass::core::adsb::LinkSource::NoColumn,
     };
     let c = adsb_record(&a).unwrap();
     let e = ax.push(&c, (0, 0)).unwrap_err().to_string();

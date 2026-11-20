@@ -4677,13 +4677,13 @@ scope.
 - **OA-CMP-019** One ADS-B report converts to the counts of CAT021 Ed 2.4's items exactly as the item definitions
   give them: I073 (1/128 s), I131 (180/2^30 degrees), I080, I145 (1/4 FL), I140 (6.25 ft), I155 or I157
   (6.25 ft/min, by the report's rate flag), I160 (2^-14 NM/s, 360/2^16 degrees), I170, I020, I090, I210 and
-  I040 (ATP, GBS, CL 2); a full report notes only what the source never has.
+  I040 (ATP, GBS, CL 2); a full report (every I090 field known) notes only what the source never has.
 - **OA-CMP-020** What a report lacks, or has outside the range of its item (FL -15 to 1500, height -1500 to
   150 000 ft, vertical rate 15 bits, a track of 360 degrees, a character outside A-Z 0-9 space, an emitter
   category without an I020 code, MOPS version 3), is left out of the record and counted by item and reason;
   nothing is clipped.
 - **OA-CMP-021** A non-ICAO address is written with ATP 3, a ground report sets GBS and has no flight level, a
-  field that does not fit its bits counts as absent, a callsign padded with NUL is the callsign padded with
+  field that does not fit its bits counts as unknown, a callsign padded with NUL is the callsign padded with
   spaces (a NUL inside it is refused), and the emitter categories map to the I020 codes.
 - **OA-CMP-022** A position beyond 90 or 180 degrees refuses the report; +180 degrees is written as -180 and
   counted; the position error is at most 1 unit of 1e-7 degree; a time within 1/256 s before midnight belongs
@@ -4705,11 +4705,23 @@ scope.
   again unchanged in verified blocks, reads each file back, copies `data_sources.json` and writes a README with
   the window, the source directory and the records in and kept per file; a window across midnight or empty, a
   category other than 21 and 62, and a damaged file are refused, leaving no partial file.
-- **OA-CMP-028** I090 is in every ADS-B record: with nothing known the primary subfield at NACv 0 / NIC 0, and
-  an extension only when a bit in it is 1; NIC or NACp above 11 and NACv above 4 are not encoded and counted;
-  a missing SIL type (SILS), the unverified NIC mapping under MOPS version 2 and the GBS assertion are counted;
-  I160 is omitted on a ground report and counted; the README states that adsb.ast is a superset of what the
-  tracker was fed, with the tracker adapter's removals per reason, and keeps the independence statement (UK-008).
+- **OA-CMP-028** No zero stands in for a value the source lacks in an ADS-B record. I090: the primary subfield
+  (NACv and NIC, written as NUCp/NIC; readsb's `nic` already folds in the NIC supplements) is written only when
+  both are known, else the item is omitted and counted; each extension (first NICBARO, SIL, NACp; second SILS,
+  SDA, GVA; third PIC) is written only while every field in it and in those before it is known, the chain stops
+  at the first extension with an unknown field and the rows cut short are counted per extension; an extension
+  with all bits 0 is sent only before a later one that has bits. The source has no NIC_baro, so no clip row has
+  the first extension or any after it. PIC follows the Ed 2.4 table for the row's MOPS version (`pic_of`) and is
+  written only where the NIC maps to exactly one PIC row (NIC 6 needs the supplements and maps to none; PIC 0 is
+  never generated); rows whose NIC maps to none are counted. NIC or NACp above 11 and NACv above 4 are not
+  encoded and count as unknown. I040 GBS is 1 when the report says ground and 0 when it carries an altitude; a
+  row with neither is written GBS 0 and counted as "ground state unknown"; ARC, CL, RC, RAB, DCR, SIM, TST and SAA
+  are defaults, listed in the README as defaults and not facts. I210 LTT is 2 for the source types adsb_icao and
+  adsb_icao_nt, 1 for a UAT source (the clip's types have none), and 0, counted, for a clip without the source
+  type column or for adsb_other; the source types mlat, tisb_*, adsr_*, mode_s and the rest are not ADS-B
+  reports, are not written and are counted by source type. I160 is omitted on a ground report and counted; the
+  README states that adsb.ast is a superset of what the tracker was fed, with the tracker adapter's removals per
+  reason, and keeps the independence statement (UK-008).
 - **OA-CMP-029** The three data sources are SAC 255 with SIC 11 (OpenATCA), 12 (ERAM) and 13 (ADS-B), one constant
   each; 255/1 is left free because COMPASS writes its reference there, and the README says so.
 - **OA-CMP-030** The export refuses an `--out` that exists and is not empty (the same rule as `slice`), before
