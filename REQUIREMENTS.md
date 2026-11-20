@@ -5485,7 +5485,9 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 ## STDDS adsb-flag census (tools/oa-stdds-census)
 
 - **OA-CEN-001** The update interval of a TAIS track is the difference of consecutive `mrtTime` values of
-  one track segment (a run of one key, facility, `recSTARSSrcID` and `trackNum`, that no restart has cut; see OA-CEN-019), attributed to the `adsb` flag of the update that ends
+  one track segment (a run of one key, facility, `recSTARSSrcID` and `trackNum`, that no restart has cut; see OA-CEN-019;
+  a coasting, pseudo or frozen update takes part in the time state, so a coast keeps a segment alive across a gap, since
+  STARS kept the track), attributed to the `adsb` flag of the update that ends
   it, kept in 10 ms bins to 120 s; the census prints per flag the count, median, 10th and 90th percentile
   and a histogram in 0.5 s bins to 15 s with the count at 15 s and over.
 - **OA-CEN-002** Flag changes within a track segment are counted (total, segments with one, segments by number of
@@ -5493,7 +5495,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   are distributions of their own; intervals across a change stay out of the per-flag distributions.
 - **OA-CEN-003** For the updates of each flag the census counts the share carrying a Mode S address, a
   Mode 3/A code, code 1200, a callsign, any flight plan field, address with code, and none of address,
-  code and callsign, plus the share with the pseudo, frozen and new flags; and the track segments whose adsb=false
+  code and callsign, plus the share with the new flag (the identity shares leave out pseudo, frozen and coasting updates,
+  OA-CEN-021); and the track segments whose adsb=false
   updates ever carried an address.
 - **OA-CEN-004** Every count and distribution is also kept per source facility (the message `src`); a
   track number at two facilities, or under two `recSTARSSrcID`, is two tracks. A record with neither `src` nor
@@ -5519,6 +5522,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   the flags seen on them (fewer than two flagged updates, all adsb=false, all adsb=true, mixed), with their update
   counts and per-flag interval distributions. Class, flag counts, changes, change bins, segments with adsb=false,
   false address counts and the cross-check by class are all taken per segment; the report says "track segments".
+  A segment with no flagged update (only status updates, or only updates with no flag) is counted as "segments with no
+  flagged update" and is in no class; the class "one flagged update" holds segments with exactly one.
 - **OA-CEN-009** Position cross-check (with an ADS-B clip, read by the loader oa-encounter and oa-bench use):
   each tracked update with a flag, position and `mrtTime` is compared with every ADS-B aircraft interpolated
   linearly to `mrtTime` between the two reports around it (at most 5 s apart by default, 30 s at most; `--max-gap-s`; a
@@ -5565,8 +5570,12 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   any indexed ADS-B aircraft within 30 NM at their time.
 - **OA-CEN-016** The cross-check counts reconcile exactly with the update counts per flag: updates equal
   checked plus no position or time, above 85 degrees, no trackNum, pseudo, frozen or coasting update, outside the
-  ADS-B clip's time span, and duplicates of the track's previous update (time and position; exact repeats of the
-  whole update are dropped earlier, OA-CEN-022); updates with no flag equal the not-checked no-flag count.
+  ADS-B clip's time span, and updates with the same time and position as the track's previous update (updates with
+  the same key, time, position and flags are dropped earlier, OA-CEN-022); updates with no flag equal the not-checked no-flag count.
+  The report also reconciles, with or without a clip, the input TAIS records read against the updates, the duplicates
+  dropped, the updates outside the window and the updates with no time outside the window; with a clip, per flag and
+  shift of the placebo, matched plus not matched plus outside the clip against checked. Each line says "reconciles" or
+  "DOES NOT RECONCILE".
 - **OA-CEN-017** A null control is run beside the real match: the same positions with the STDDS time
   shifted by plus and minus 60 s, printing per flag the outcome counts and the horizontal difference
   distribution of its exactly-one matches; the placebo exactly-one count (mean of the two shifts) over the
@@ -5604,12 +5613,15 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   in the flag tallies, the track-segment class, the change counts or the interval census (the interval that starts at
   one is not counted either); they remain in the update totals and have their own counts per kind and flag, so the
   report shows how many coasts carried adsb=false and how many adsb=true. An all adsb=true segment with coasting
-  adsb=false updates stays "all adsb=true".
-- **OA-CEN-022** An update repeated exactly (same facility, `recSTARSSrcID`, `trackNum`, `mrtTime`, position and flags),
-  across files or within a file, is dropped before any count and counted as "duplicate updates dropped"; the
+  adsb=false updates stays "all adsb=true". The identity shares (address, callsign, code 1200), the adsb=false share of
+  flagged updates and the per-facility false share also leave out these updates, so they agree with the class lines;
+  the update totals still count them.
+- **OA-CEN-022** An update with the same facility, `recSTARSSrcID`, `trackNum`, `mrtTime`, position and flags as one
+  already seen, across files or within a file, is dropped before any count and counted as "duplicate updates dropped";
+  updates without a time or a track number are not checked for duplicates; the
   consecutive-repeat rule of the position check (OA-CEN-016) stays. With `--from` and `--to`, an update with no
   `mrtTime` is outside every window: it is excluded and counted as "no time, outside the window". `--from` and `--to`
-  take whole seconds; a fractional value is a usage error (exit 2).
+  take whole seconds; a fractional value, or one whose milliseconds do not fit an i64, is a usage error (exit 2).
 - **OA-CEN-023** An update whose `mrtTime` lies outside the ADS-B clip's time span is counted, per flag, as "outside the
   ADS-B clip", never as no candidate or no ADS-B, and not checked; the run goes on. Exit 2 stays for no overlap at all.
   The spans are printed to the second.

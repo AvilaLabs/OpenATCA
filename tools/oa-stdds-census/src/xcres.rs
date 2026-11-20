@@ -124,7 +124,7 @@ pub struct NotChecked {
     pub polar: [u64; 2],
     /// No `trackNum` (so no track to attach the result to).
     pub no_track: [u64; 2],
-    /// An exact repeat of the track's previous update (time and position).
+    /// The same time and position as the track's previous update.
     pub duplicate: [u64; 2],
     /// A pseudo, frozen or coasting track update (not a measured position).
     pub status: [u64; 2],

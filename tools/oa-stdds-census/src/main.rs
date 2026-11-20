@@ -26,6 +26,11 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: oa-stdds-census DIR [--from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft N] [--max-gap-s S]]\n  with --adsb the census also compares the updates' positions with ADS-B; the horizontal gate N\n  (default 1 NM) is tried with 0.5 and 2 as well, the vertical gate defaults to 500 ft; --max-gap-s (default 5) is the widest gap between two ADS-B reports that is interpolated;\n  --from/--to restrict both sides to a time of the UTC day, in seconds; the run is refused\n  if its memory estimate is above 4 GB";
 
+/// Whether `g` is a whole number of seconds whose milliseconds fit in an `i64`.
+fn whole_seconds(g: f64) -> bool {
+    g.fract() == 0.0 && g.abs() <= (i64::MAX / 1000) as f64 - 1.0
+}
+
 fn usage() -> ExitCode {
     eprintln!("{USAGE}");
     ExitCode::from(2)
@@ -72,12 +77,13 @@ fn main() -> ExitCode {
                 }
                 _ => return usage(),
             },
-            // A window bound is whole seconds; a fractional one is a usage error, not truncated.
-            "--from" => match num(it.next()).filter(|g| g.fract() == 0.0) {
+            // A window bound is whole seconds that fit in milliseconds as an i64; a fractional or
+            // larger one is a usage error, not truncated or saturated.
+            "--from" => match num(it.next()).filter(|g| whole_seconds(*g)) {
                 Some(g) => from = Some(g as i64),
                 None => return usage(),
             },
-            "--to" => match num(it.next()).filter(|g| g.fract() == 0.0) {
+            "--to" => match num(it.next()).filter(|g| whole_seconds(*g)) {
                 Some(g) => to = Some(g as i64),
                 None => return usage(),
             },

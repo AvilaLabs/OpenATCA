@@ -31,7 +31,7 @@ pub const FLAG_NAMES: [&str; 3] = ["adsb=false", "adsb=true", "adsb absent"];
 
 /// Track classes by the flags seen on the track's updates.
 pub const CLASS_NAMES: [&str; 4] = [
-    "fewer than 2 flagged updates",
+    "one flagged update",
     "all adsb=false",
     "all adsb=true",
     "mixed (flag changes)",
@@ -56,14 +56,13 @@ pub struct IdShare {
     pub plan: u64,
     pub icao_and_beacon: u64,
     pub none_of_icao_beacon_acid: u64,
-    pub pseudo: u64,
-    pub frozen: u64,
     pub is_new: u64,
 }
 
 /// A 128-bit fingerprint of what makes two updates the same: facility, source id, track number,
-/// `mrtTime`, position and flags. Two std hashes with different prefixes; a collision would drop
-/// a distinct update, at about n squared over 2^129.
+/// `mrtTime`, position and flags. Two hashes of the unspecified std hasher with different
+/// prefixes; a collision would drop a distinct update, and the collision odds are heuristic (the
+/// hasher is not specified to be uniform).
 fn fingerprint(src: [u8; 8], r: &TaisRecord, mrt: i64) -> u128 {
     use std::hash::{Hash, Hasher};
     let flags = [
@@ -107,8 +106,6 @@ impl IdShare {
         self.plan += u64::from(r.present & plan_mask() != 0);
         self.icao_and_beacon += u64::from(icao && beacon);
         self.none_of_icao_beacon_acid += u64::from(!icao && !beacon && !acid);
-        self.pseudo += u64::from(has(r, TaisField::TrackPseudo) && r.pseudo);
-        self.frozen += u64::from(has(r, TaisField::TrackFrozen) && r.frozen);
         self.is_new += u64::from(has(r, TaisField::TrackNew) && r.is_new);
     }
 }
@@ -119,6 +116,8 @@ impl IdShare {
 pub struct Group {
     /// Updates with the flag false, true, absent.
     pub updates: [u64; 3],
+    /// Identity counts of the updates with a flag, leaving out pseudo, frozen and coasting
+    /// ones (so `ids[f].n` counts what the class lines count).
     pub ids: [IdShare; 2],
     /// Interval distributions by the flag of the update that ends the interval; intervals that
     /// span a flag change are kept apart (see [`Results::dirs`]).
@@ -173,7 +172,8 @@ impl Group {
         if let Some(c) = self.status_any.get_mut(i) {
             *c += u64::from(kinds.contains(&true));
         }
-        if let Some(f) = flag {
+        // The identity shares, like the tallies, leave out pseudo, frozen and coasting updates.
+        if let Some(f) = flag.filter(|_| !kinds.contains(&true)) {
             if let Some(s) = self.ids.get_mut(usize::from(f)) {
                 s.add(r);
             }
@@ -442,6 +442,9 @@ pub struct Results {
     /// Flag changes in all, and tracks with at least one.
     pub changes: u64,
     pub segments_with_change: u64,
+    /// Segments with no flagged update (only status updates, or only updates with no flag); in
+    /// no class.
+    pub segments_no_flag: u64,
     /// Over tracks with two or more flagged updates, the tracks by number of changes.
     pub change_bins: [u64; 6],
     /// Consecutive flagged update pairs on tracks (the chances for a change).
@@ -451,7 +454,8 @@ pub struct Results {
     /// Updates left out by the time window, and (with a window) updates with no `mrtTime`.
     pub outside_window: u64,
     pub no_time_outside: u64,
-    /// Updates repeated exactly (key, time, position, flags) and dropped.
+    /// Updates with the same key, time, position and flags as one seen, dropped. Updates without
+    /// a time or a track number are not checked.
     pub duplicates: u64,
     /// Distinct track keys (facility, recSTARSSrcID, trackNum).
     pub track_keys: u64,
@@ -544,8 +548,9 @@ impl Census {
                 Some(_) => {}
             }
         }
-        // An update repeated exactly (same key, time, position and flags), across files or
-        // within one, is dropped and counted.
+        // An update with the same key, time, position and flags as one seen, across files or
+        // within one, is dropped and counted. Updates without a time or track number are not
+        // checked.
         if let (Some(m), true) = (mrt, has(r, TaisField::TrackNum)) {
             if !self.seen.insert(fingerprint(src, r, m)) {
                 self.duplicates += 1;
@@ -776,6 +781,7 @@ impl Census {
         let mut dirs: [DirStats; 2] = Default::default();
         let mut changes = 0u64;
         let mut segments_with_change = 0u64;
+        let mut segments_no_flag = 0u64;
         let mut change_bins = [0u64; 6];
         let mut flagged_pairs = 0u64;
         let track_keys = tracks.len() as u64;
@@ -792,7 +798,8 @@ impl Census {
                     (0, _) => 2,
                     _ => 3,
                 };
-                if let Some(c) = classes.get_mut(class) {
+                segments_no_flag += u64::from(flagged == 0);
+                if let Some(c) = classes.get_mut(class).filter(|_| flagged > 0) {
                     c.segments += 1;
                     c.updates[0] += u64::from(nf);
                     c.updates[1] += u64::from(nt);
@@ -906,6 +913,7 @@ impl Census {
             dirs,
             changes,
             segments_with_change,
+            segments_no_flag,
             change_bins,
             flagged_pairs,
             distinct_src_ids: src_ids.len() as u64,
@@ -1137,17 +1145,17 @@ pub(crate) mod tests {
         }
         let s = c.finish().global.ids;
         let f = &s[0];
-        assert_eq!(f.n, 5);
+        // The pseudo update is left out of the identity shares.
+        assert_eq!(f.n, 4);
         assert_eq!(f.icao, 1);
         assert_eq!(f.icao_field, 2);
         assert_eq!(f.icao_zero, 1);
         assert_eq!(f.beacon, 2);
         assert_eq!(f.beacon_1200, 1);
         assert_eq!(f.acid, 1);
-        assert_eq!(f.plan, 2);
+        assert_eq!(f.plan, 1);
         assert_eq!(f.icao_and_beacon, 1);
-        assert_eq!(f.none_of_icao_beacon_acid, 3);
-        assert_eq!(f.pseudo, 1);
+        assert_eq!(f.none_of_icao_beacon_acid, 2);
         assert_eq!(s[1].n, 1);
         assert_eq!(s[1].icao, 1);
     }
@@ -1545,8 +1553,8 @@ pub(crate) mod tests {
             assert_eq!(total, r.global.updates[f], "flag {f}");
         }
         assert_eq!(r.global.updates[2], nc.no_flag);
-        // And the report says so.
-        let text = crate::report::render(&crate::read::ReadStats::new(), &r);
+        // And the report says so (eight records were observed).
+        let text = crate::report::render(&with_records(8), &r);
         assert!(text.contains("(reconciles)"));
         assert!(!text.contains("DOES NOT RECONCILE"));
     }
@@ -2290,5 +2298,174 @@ pub(crate) mod tests {
         assert_eq!(keys, [[0; 8], src("X1")]);
         assert_eq!(crate::report::fac_label(&keys[0], 0), "facility unknown");
         assert_eq!(crate::report::fac_label(&keys[1], 1), "X1");
+    }
+
+    /// Asserts two segments, all false then all true, and no mixed one.
+    fn two_pure_segments(r: &Results) {
+        assert_eq!(r.global.segments, 2);
+        assert_eq!(r.classes[1].segments, 1);
+        assert_eq!(r.classes[2].segments, 1);
+        assert_eq!(r.classes[3].segments, 0, "a cut, not a mixed track");
+    }
+
+    // REQ: OA-CEN-019
+    #[test]
+    fn an_update_flagged_new_cuts_the_segment() {
+        let mut c = Census::new();
+        c.observe(src("AAA"), &rec(1, 0, Some(false)));
+        c.observe(src("AAA"), &rec(1, 4_600, Some(false)));
+        let mut n = rec(1, 9_200, Some(true));
+        n.present |= tais_bit(TaisField::TrackNew);
+        n.is_new = true;
+        c.observe(src("AAA"), &n);
+        c.observe(src("AAA"), &rec(1, 13_800, Some(true)));
+        two_pure_segments(&c.finish());
+    }
+
+    // REQ: OA-CEN-019
+    #[test]
+    fn three_backward_updates_in_a_row_cut_the_segment() {
+        let mut c = Census::new();
+        for t in [100_000, 104_600, 90_000, 80_000] {
+            c.observe(src("AAA"), &rec(1, t, Some(false)));
+        }
+        // The third backward update starts the new segment.
+        for t in [70_000, 74_600, 79_200] {
+            c.observe(src("AAA"), &rec(1, t, Some(true)));
+        }
+        let r = c.finish();
+        assert_eq!(r.global.resyncs, 1);
+        two_pure_segments(&r);
+    }
+
+    // REQ: OA-CEN-019
+    #[test]
+    fn a_timed_update_after_an_untimed_one_cuts_the_segment() {
+        let mut c = Census::new();
+        let mut no_time = rec(1, 0, Some(false));
+        no_time.present &= !tais_bit(TaisField::MrtTime);
+        c.observe(src("AAA"), &rec(1, 0, Some(false)));
+        c.observe(src("AAA"), &rec(1, 4_600, Some(false)));
+        c.observe(src("AAA"), &no_time);
+        c.observe(src("AAA"), &rec(1, 9_200, Some(true)));
+        c.observe(src("AAA"), &rec(1, 13_800, Some(true)));
+        two_pure_segments(&c.finish());
+    }
+
+    // REQ: OA-CEN-001
+    #[test]
+    fn a_coast_keeps_a_segment_alive_across_a_gap_and_only_status_segments_are_counted_apart() {
+        // Measured updates 200 s apart are two segments; with coasts between them (STARS kept
+        // the track) they are one.
+        let mut c = Census::new();
+        c.observe(src("AAA"), &rec(1, 0, Some(false)));
+        c.observe(src("AAA"), &rec(1, 200_000, Some(false)));
+        assert_eq!(c.finish().global.segments, 2);
+        let mut c = Census::new();
+        c.observe(src("AAA"), &rec(1, 0, Some(false)));
+        for t in [60_000, 120_000, 180_000] {
+            c.observe(src("AAA"), &coast(1, t, true));
+        }
+        c.observe(src("AAA"), &rec(1, 200_000, Some(false)));
+        // A track number with only coasting updates, and one with only untagged flags.
+        c.observe(src("AAA"), &coast(2, 0, false));
+        c.observe(src("AAA"), &coast(2, 4_000, true));
+        c.observe(src("AAA"), &rec(3, 0, None));
+        let r = c.finish();
+        assert_eq!(r.global.segments, 3);
+        assert_eq!(r.classes[1].segments, 1, "the measured track");
+        assert_eq!(r.segments_no_flag, 2);
+        assert_eq!(r.classes[0].segments, 0, "not in the one-flagged class");
+        // The interval that starts at a coast is not counted: none between 0 and 200 s.
+        assert_eq!(r.global.iv[0].n, 0);
+    }
+
+    // REQ: OA-CEN-021
+    #[test]
+    fn the_shares_leave_out_status_updates_like_the_class_lines() {
+        let mut c = Census::new();
+        for k in 0..4 {
+            c.observe(src("AAA"), &rec(1, k * 4_000, Some(true)));
+        }
+        for k in 0..4 {
+            c.observe(src("AAA"), &coast(1, 20_000 + k * 1_000, false));
+        }
+        let r = c.finish();
+        // Totals count every update; the flagged and identity counts do not count the coasts.
+        assert_eq!(r.global.updates, [4, 4, 0]);
+        assert_eq!((r.global.ids[0].n, r.global.ids[1].n), (0, 4));
+        assert_eq!(r.classes[2].updates, [0, 4]);
+        let text = crate::report::render(&crate::read::ReadStats::new(), &r);
+        assert!(text.contains("(as the class lines do): 0.00%"), "{text}");
+        assert!(text.contains("false share of the measured flagged updates 0.00%"));
+    }
+
+    fn with_records(n: u64) -> crate::read::ReadStats {
+        let mut rs = crate::read::ReadStats::new();
+        rs.tais_records = n;
+        rs
+    }
+
+    // REQ: OA-CEN-016
+    #[test]
+    fn the_input_reconciliation_is_printed_without_a_clip_and_fails_when_it_should() {
+        let w = Window::new(0, 100).unwrap();
+        let mut c = Census::new().with_window(Some(w));
+        let mut nt = rec(1, 0, Some(false));
+        nt.present &= !tais_bit(TaisField::MrtTime);
+        for r in [
+            rec(1, 1_000, Some(false)),
+            rec(1, 1_000, Some(false)),
+            rec(1, 500_000, Some(false)),
+            nt,
+        ] {
+            c.observe(src("AAA"), &r);
+        }
+        let r = c.finish();
+        let ok = crate::report::render(&with_records(4), &r);
+        assert!(
+            ok.contains("input TAIS records 4 = updates 1 + duplicate updates dropped 1 + outside the window 1 + no time, outside the window 1 (reconciles)"),
+            "{ok}"
+        );
+        let bad = crate::report::render(&with_records(5), &r);
+        assert!(bad.contains("no time, outside the window 1 (DOES NOT RECONCILE)"));
+    }
+
+    // REQ: OA-CEN-016
+    #[test]
+    fn the_no_flag_and_placebo_lines_say_whether_they_reconcile() {
+        let lat = 40.0;
+        let mut c = xcensus(fly(1, -75.0, lat, 10_000));
+        for k in 0..3 {
+            c.observe(
+                src("AAA"),
+                &upd(
+                    1,
+                    100_300 + k * 1_000,
+                    Some(false),
+                    -75.0,
+                    lat,
+                    10_000,
+                    0.0,
+                    0.0,
+                    0.0,
+                ),
+            );
+        }
+        c.observe(src("AAA"), &rec(2, 5_000, None));
+        let r = c.finish();
+        let text = crate::report::render(&with_records(4), &r);
+        assert!(text.contains("no flag: updates 1 = not checked 1 (reconciles)"));
+        assert!(text.contains(
+            "placebo reconciliation: matched 0 + not matched 0 + outside the clip 3 = checked 3 (reconciles)"
+        ));
+        assert!(!text.contains("DOES NOT RECONCILE"), "{text}");
+        // A placebo count that is off by one is reported.
+        let mut bad = r.clone();
+        if let Some(x) = bad.xc.as_mut() {
+            x.global.pout[0] += 1;
+        }
+        let text = crate::report::render(&with_records(4), &bad);
+        assert!(text.contains("outside the clip 4 = checked 3 (DOES NOT RECONCILE)"));
     }
 }

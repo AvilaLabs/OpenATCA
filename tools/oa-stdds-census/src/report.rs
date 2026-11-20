@@ -22,6 +22,15 @@ fn pct(n: u64, d: u64) -> String {
     }
 }
 
+/// "reconciles" or "DOES NOT RECONCILE".
+fn verdict(ok: bool) -> &'static str {
+    if ok {
+        "reconciles"
+    } else {
+        "DOES NOT RECONCILE"
+    }
+}
+
 fn secs(v: Option<f64>) -> String {
     v.map_or_else(|| "n/a".to_string(), |s| format!("{s:.3}"))
 }
@@ -72,8 +81,6 @@ fn ids(out: &mut String, indent: &str, s: &IdShare) {
             "with none of non-zero address, Mode 3/A code, callsign",
             s.none_of_icao_beacon_acid,
         ),
-        ("pseudo flag true", s.pseudo),
-        ("frozen flag true", s.frozen),
         ("new flag true", s.is_new),
     ] {
         let _ = writeln!(out, "{indent}  {name}: {c} {}", pct(c, s.n));
@@ -125,14 +132,15 @@ fn class_line(c: &ClassStats) -> String {
 }
 
 fn fac_line(g: &Group) -> String {
-    let flagged = g.updates[0] + g.updates[1];
+    // The share leaves out pseudo, frozen and coasting updates, like the class lines.
+    let flagged = g.ids[0].n + g.ids[1].n;
     format!(
-        "updates {} (false {} true {} absent {}) false share {}; track segments {} (with false {}, of which false carried a non-zero address {}); interval false: {}; true: {}; false updates with non-zero address {} callsign {} flight plan {} code 1200 {}",
+        "updates {} (false {} true {} absent {}) false share of the measured flagged updates {}; track segments {} (with false {}, of which false carried a non-zero address {}); interval false: {}; true: {}; false updates with non-zero address {} callsign {} flight plan {} code 1200 {}",
         g.updates.iter().sum::<u64>(),
         g.updates[0],
         g.updates[1],
         g.updates[2],
-        pct(g.updates[0], flagged),
+        pct(g.ids[0].n, flagged),
         g.segments,
         g.segments_with_false,
         g.segments_false_with_icao,
@@ -355,7 +363,7 @@ fn xc_section(o: &mut String, r: &Results) {
             + at(&nc.outside_clip, f);
         let _ = writeln!(
             o,
-            "  {name}: updates {} = checked {checked} + no position or time {} + above 85 degrees {} + no trackNum {} + exact duplicate of the track's previous update {} + pseudo, frozen or coasting {} + outside the ADS-B clip (time span) {} ({})",
+            "  {name}: updates {} = checked {checked} + no position or time {} + above 85 degrees {} + no trackNum {} + same time and position as the track's previous update {} + pseudo, frozen or coasting {} + outside the ADS-B clip (time span) {} ({})",
             at(&r.global.updates, f),
             at(&nc.no_position, f),
             at(&nc.polar, f),
@@ -363,14 +371,15 @@ fn xc_section(o: &mut String, r: &Results) {
             at(&nc.duplicate, f),
             at(&nc.status, f),
             at(&nc.outside_clip, f),
-            if total == at(&r.global.updates, f) { "reconciles" } else { "DOES NOT RECONCILE" }
+            verdict(total == at(&r.global.updates, f))
         );
     }
     let _ = writeln!(
         o,
-        "  no flag: updates {} not checked {}",
+        "  no flag: updates {} = not checked {} ({})",
         at(&r.global.updates, 2),
-        nc.no_flag
+        nc.no_flag,
+        verdict(at(&r.global.updates, 2) == nc.no_flag)
     );
     let _ = writeln!(o, "outcome per update (only exactly-one is used):");
     for (f, name) in FLAG_NAMES.iter().take(2).enumerate() {
@@ -420,11 +429,20 @@ fn xc_section(o: &mut String, r: &Results) {
         for (k, sh) in ["+60 s", "-60 s"].iter().enumerate() {
             let code = k * 2 + f;
             let c: Vec<u64> = (0..3).map(|j| at(&g.pcounts, code * 3 + j)).collect();
+            let checked: u64 = (0..3).map(|j| at(&g.counts, cidx(f, 0, j))).sum();
             let _ = writeln!(
                 o,
                 "  {name}, shifted {sh}: {}; placebo outside the clip {}",
                 outcomes_line(&c),
                 at(&g.pout, code)
+            );
+            let _ = writeln!(
+                o,
+                "    placebo reconciliation: matched {} + not matched {} + outside the clip {} = checked {checked} ({})",
+                at(&c, 1),
+                at(&c, 0) + at(&c, 2),
+                at(&g.pout, code),
+                verdict(at(&c, 0) + at(&c, 1) + at(&c, 2) + at(&g.pout, code) == checked)
             );
             if let Some(s) = g.psums.get(code) {
                 let _ = writeln!(
@@ -538,14 +556,31 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
     for (name, c) in STD_ERROR_NAMES.iter().zip(&rs.refused) {
         let _ = writeln!(o, "refused whole, {name}: {c}");
     }
-    let flagged = g.updates[0] + g.updates[1];
+    let flagged = g.ids[0].n + g.ids[1].n;
     for (name, c) in FLAG_NAMES.iter().zip(&g.updates) {
         let _ = writeln!(o, "updates {name}: {c}");
     }
     let _ = writeln!(
         o,
-        "adsb=false share of flagged updates: {}",
-        pct(g.updates[0], flagged)
+        "adsb=false share of flagged updates, leaving out pseudo, frozen and coasting ones (as the class lines do): {}",
+        pct(g.ids[0].n, flagged)
+    );
+    let input = rs.tais_records;
+    let accounted = g
+        .updates
+        .iter()
+        .sum::<u64>()
+        .saturating_add(r.duplicates)
+        .saturating_add(r.outside_window)
+        .saturating_add(r.no_time_outside);
+    let _ = writeln!(
+        o,
+        "input TAIS records {input} = updates {} + duplicate updates dropped {} + outside the window {} + no time, outside the window {} ({})",
+        g.updates.iter().sum::<u64>(),
+        r.duplicates,
+        r.outside_window,
+        r.no_time_outside,
+        verdict(input == accounted)
     );
     let _ = writeln!(
         o,
@@ -569,7 +604,7 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
 
     let _ = writeln!(
         o,
-        "duplicate updates dropped (same key, time, position and flags, across files or within one): {}; with a window, updates with no time, outside the window: {}",
+        "duplicate updates dropped (same key, time, position and flags, across files or within one; updates without a time or track number are not checked for duplicates): {}; with a window, updates with no time, outside the window: {}",
         r.duplicates, r.no_time_outside
     );
     for (name, row) in STATUS_NAMES.iter().zip(&g.status) {
@@ -591,11 +626,16 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
             hist_bins(&mut o, h);
         }
     }
-    let _ = writeln!(o, "by track class (the flags seen on the track segment):");
+    let _ = writeln!(o, "by track class (the flags seen on the track segment; pseudo, frozen and coasting updates not counted):");
     for (name, c) in CLASS_NAMES.iter().zip(&r.classes) {
         let _ = writeln!(o, "  {name}: {}", class_line(c));
     }
 
+    let _ = writeln!(
+        o,
+        "track segments with no flagged update (only status updates, or only updates with no flag; in no class): {}",
+        r.segments_no_flag
+    );
     let _ = writeln!(o, "== 2. flag changes within a track ==");
     let _ = writeln!(
         o,
@@ -617,7 +657,7 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
 
     let _ = writeln!(o, "== 3. identity carried by the updates ==");
     for (i, name) in FLAG_NAMES.iter().take(2).enumerate() {
-        let _ = writeln!(o, "{name}:");
+        let _ = writeln!(o, "{name} (pseudo, frozen and coasting updates left out):");
         if let Some(s) = g.ids.get(i) {
             ids(&mut o, "  ", s);
         }
