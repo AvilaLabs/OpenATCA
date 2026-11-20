@@ -120,6 +120,8 @@ mod util;
 mod fast_tests;
 #[cfg(test)]
 mod helper_tests;
+#[cfg(test)]
+mod root_split_tests;
 
 pub use atan::{acos, asin, atan, atan2};
 pub use exp::exp;

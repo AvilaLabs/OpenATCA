@@ -6,3 +6,4 @@ pub mod adsb;
 pub mod convert;
 pub mod stats;
 pub mod time;
+pub mod walk;

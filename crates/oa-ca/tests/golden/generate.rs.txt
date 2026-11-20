@@ -1,0 +1,125 @@
+//! Writes golden vectors of the solver functions of this checkout: inputs and outputs, as hex
+//! bit patterns, one case per line.
+use oa_ca::solve::*;
+
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 52) as f64 - 1.0
+    }
+    fn val(&mut self, m: f64) -> f64 {
+        match self.next() % 16 {
+            0 => 0.0,
+            1 => -0.0,
+            2 => m,
+            3 => -m,
+            4 => f64::from_bits(self.next() % 1000 + 1),
+            5 => -f64::from_bits(self.next() % 1000 + 1),
+            6 => self.unit() * 1.0e-9,
+            7 => self.unit() * 5.0e-5,
+            8 => 5.0e-5,
+            9 => -5.0e-5,
+            10 => f64::from_bits(self.next()),
+            11 => self.unit() * m * 1.0e-4,
+            _ => self.unit() * m,
+        }
+    }
+    fn pos(&mut self, m: f64) -> f64 {
+        match self.next() % 8 {
+            0 => m,
+            1 => f64::from_bits(self.next() % 1000 + 1),
+            2 => 5.0e-5,
+            3 => f64::from_bits(self.next()),
+            _ => (self.unit().abs() + 1.0e-12) * m,
+        }
+    }
+}
+
+fn h(x: f64) -> String {
+    format!("{:016x}", x.to_bits())
+}
+
+fn span(s: &Option<Span>) -> String {
+    match s {
+        None => "N".to_string(),
+        Some(s) => format!("S {} {} {}", h(s.lo), h(s.hi), u8::from(s.now)),
+    }
+}
+
+fn pred(p: &Option<Prediction>) -> String {
+    match p {
+        None => "N".to_string(),
+        Some(p) => format!(
+            "P {} {} {} {}",
+            h(p.ttl_s),
+            u8::from(p.now),
+            h(p.h_miss_m),
+            h(p.v_miss_ft)
+        ),
+    }
+}
+
+fn main() {
+    let n: usize = std::env::args().nth(1).unwrap().parse().unwrap();
+    let mut r = Rng(0x9e37_79b9_7f4a_7c15);
+    for k in 0..n {
+        let (rx, ry, vx, vy, hh, t, z);
+        if k % 2 == 0 {
+            // Edge values of every input (zero, the thresholds, the bounds, subnormals, any bits).
+            rx = r.val(MAX_COORD_M);
+            ry = r.val(MAX_COORD_M);
+            vx = r.val(MAX_REL_SPEED_MPS);
+            vy = r.val(MAX_REL_SPEED_MPS);
+            hh = r.pos(MAX_RADIUS_M);
+            t = r.pos(MAX_LOOK_AHEAD_S);
+            z = Vertical {
+                dz_ft: r.val(MAX_ALT_FT),
+                dvz_fps: r.val(MAX_ABS_VRATE_FPS),
+                v_eff_ft: r.pos(MAX_ALT_FT),
+            };
+        } else {
+            // Plausible conflicts: tens of kilometres, hundreds of metres per second.
+            rx = r.unit() * 6.0e4;
+            ry = r.unit() * 6.0e4;
+            vx = r.unit() * 400.0;
+            vy = r.unit() * 400.0;
+            hh = (r.unit().abs() + 0.01) * 2.0e4;
+            t = (r.unit().abs() + 0.01) * 600.0;
+            z = Vertical {
+                dz_ft: r.unit() * 3000.0,
+                dvz_fps: r.unit() * 40.0,
+                v_eff_ft: (r.unit().abs() + 0.01) * 1500.0,
+            };
+        }
+        let hs = horizontal_span(rx, ry, vx, vy, hh, t);
+        let miss = horizontal_miss(rx, ry, vx, vy, t);
+        let pz = predict(rx, ry, vx, vy, hh, Some(&z), t);
+        let pn = predict(rx, ry, vx, vy, hh, None, t);
+        println!(
+            "{} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            h(rx),
+            h(ry),
+            h(vx),
+            h(vy),
+            h(hh),
+            h(t),
+            h(z.dz_ft),
+            h(z.dvz_fps),
+            h(z.v_eff_ft),
+            span(&hs),
+            h(miss),
+            pred(&pz),
+            "|",
+            pred(&pn)
+        );
+    }
+}

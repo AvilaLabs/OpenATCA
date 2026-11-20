@@ -190,12 +190,15 @@ impl SealCheck {
 /// The records of an ADS-B payload whose raw time (the i64 at byte 24 of the record) is in
 /// `window`, read with no validation of the record: the record length is the header's own, the
 /// count is the bytes that hold whole records. `None` when the records cannot be located (no
-/// ADS1/ADS2 header, a record too short to hold a time, or a count the payload cannot hold).
+/// ADS1/ADS2/ADS3 header, a record too short to hold a time, or a count the payload cannot hold).
 fn raw_times_in_window(payload: &[u8], window: oa_sealed::DropWindow) -> Option<u64> {
     const HEADER: usize = 16;
     const TIME_AT: usize = 24;
     let magic = payload.get(..4)?;
-    if magic != b"ADS2" && magic != b"ADS1" {
+    if magic != oa_adsb::PAYLOAD_MAGIC
+        && magic != oa_adsb::PREVIOUS_PAYLOAD_MAGIC
+        && magic != oa_adsb::LEGACY_PAYLOAD_MAGIC
+    {
         return None;
     }
     let rec = usize::from(u16::from_le_bytes(payload.get(4..6)?.try_into().ok()?));

@@ -36,7 +36,7 @@ fn payload_round_trips_and_has_the_documented_layout() {
     let mut p = Vec::new();
     encode_payload(&mut p, &r, 10, 60).unwrap();
     assert_eq!(p.len(), PAYLOAD_HEADER_LEN + 50 * RECORD_LEN);
-    assert_eq!(&p[..4], b"ADS2");
+    assert_eq!(&p[..4], b"ADS3");
     assert_eq!(RECORD_LEN, 80);
     assert_eq!(u16::from_le_bytes([p[4], p[5]]), 80);
     assert_eq!(u32::from_le_bytes([p[8], p[9], p[10], p[11]]), 50);
@@ -57,7 +57,7 @@ fn payload_round_trips_and_has_the_documented_layout() {
     );
     assert_eq!(&rec[40..48], b"UAL123\0\0");
     assert_eq!(rec[50], row10.nac_p);
-    // Measurements at 57..79 are absent in this sample; the last byte is reserved.
+    // Measurements at 57..79 and the NIC_baro byte (79) are absent in this sample.
     assert!(rec[57..71].iter().all(|&b| b == 0xff));
     assert!(rec[71..79].chunks(2).all(|c| c == [0x00, 0x80]));
     assert_eq!(rec[79], 0);
@@ -98,7 +98,7 @@ fn bad_payloads_are_refused_and_append_nothing() {
     bad(&m, PayloadError::TooManyRows);
     // Record 3: latitude out of range, then unknown flag bits, then unknown source, then a
     // non-zero reserved byte.
-    for (at, v) in [(4usize, 0x7fu8), (38, 0x80), (39, 14), (79, 1)] {
+    for (at, v) in [(4usize, 0x7fu8), (38, 0x80), (39, 14), (79, 9)] {
         let mut m = p.clone();
         let rec = 16 + 3 * RECORD_LEN;
         if at == 4 {
@@ -382,7 +382,7 @@ fn a_bad_record_does_not_refuse_the_frame_the_valid_ones_are_kept_and_the_bad_on
     m[rec(3) + 39] = 14; // record 3: unknown source type
     m[rec(4) + 59] = 0x68; // record 4: wind direction 360 or more
     m[rec(4) + 60] = 0x01;
-    m[rec(5) + 79] = 1; // record 5: reserved byte set
+    m[rec(5) + 79] = 9; // record 5: reserved byte set
                         // Strict: the whole payload is refused at the first bad record (unchanged).
     let mut out = Reports::default();
     assert_eq!(
