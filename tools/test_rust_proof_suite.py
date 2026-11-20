@@ -57,7 +57,7 @@ def registry_with(*proofs):
 class SuiteConfigurationTests(unittest.TestCase):
     def test_every_registered_harness_exists_as_a_kani_proof_in_its_package(self):
         # A registry entry whose harness was renamed or removed fails in CI only after the
-        # proofs before it have run (ca-meet, 2026-11-20); this finds it locally in a second.
+        # proofs before it have run (a harness registered under a name that did not exist, 2026-11-20); this finds it locally in a second.
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         root = REGISTRY_PATH.parent.parent

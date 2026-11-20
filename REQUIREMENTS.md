@@ -4102,8 +4102,14 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   table bound and cannot increase when only the clock advances with the same nonnegative drop
   interval. Updating an existing sensor preserves its maximum accepted timestamp; inserting a
   new sensor into a full table replaces the first least-recent slot and saturating-increments
-  eviction exactly once, preserving every other entry. Proof results state their fixture,
-  timestamp domain and capacity explicitly; they do not imply whole-clock-policy correctness.
+  eviction exactly once, preserving every other entry.
+  - Proved with Kani, at the production capacity: the count cannot increase when only the clock advances
+    (`full-sensor-monotonicity`), and the update and insert behaviour (`full-sensor-note-existing`,
+    `full-sensor-note-new`). Each proof states its fixture, timestamp domain and capacity; none implies
+    that the whole clock policy is correct.
+  - Tested, not proved: the count equals the number of sensors inside the drop interval, against an i128
+    reference, on 20,000 random full tables with clocks over all of `i64`, `i64::MIN` and `i64::MAX`
+    stored, and drops up to one day.
 - **OA-TRK-318** The coarse query lists each track at most once as it appends, so its output never
   holds more entries than the index has tracks and a buffer sized for the tracks is never grown, whatever
   the pieces of the rectangle share (tracks on the boundary of two pieces included); the tracks listed
@@ -5545,10 +5551,11 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   empty, longer than its field or not printable ASCII. A duration exactly the maximum is accepted.
 - **OA-SAF-006** A full table refuses the request and counts it; no inhibition is evicted, and an
   id is never reused.
-- **OA-SAF-007** An inhibition is in force at `t` iff `start <= t < end` (the start instant in, the
-  end instant out; never for an empty or reversed span). Proved with Kani over every `i64` triple.
-- **OA-SAF-008** The altitude band is inclusive at both ends and empty when reversed. Proved with
-  Kani over every `i32` triple.
+- **OA-SAF-007** An inhibition is in force at `t` iff `start <= t < end`: the start instant is in, the end
+  instant out, and an empty or reversed span is never in force. Tested at both boundaries and on an empty
+  and a reversed span (`an_inhibition_is_in_force_from_its_start_to_just_before_its_end`).
+- **OA-SAF-008** The altitude band is inclusive at both ends and empty when reversed. Tested at both
+  boundaries and on a reversed band (`the_altitude_band_is_inclusive_at_both_ends`).
 - **OA-SAF-009** The query names the inhibitions that hide an alert at a position, altitude and
   time: on the net, in force, the point strictly inside the area (a point on an edge or vertex is
   not hidden), the altitude in the band. An unknown altitude is hidden by none. The pure query
@@ -5770,32 +5777,47 @@ configuration with no default; the crate's tests use synthetic values.
   now by a hair, and pairs at the limit and at the end of the look-ahead. Not proved: the bounded proofs of
   this decision did not finish in an hour.
 - **OA-CA-028** A pair inside the horizontal limit now, or inside the vertical limit now, always has a
-  loss interval of that kind, current, starting at zero and ending inside the look-ahead, even when the
-  rounding of the solution puts the end of the interval a hair before zero; the exact edge is not inside.
-  Tested at margins from 1 m to 1e-12 m and proved (Kani, bounded) for both solvers. The horizontal proof is
-  split at the square root: the first step (`horizontal_step`: the squared speed, the discriminant, the time
-  of closest approach, then the decision `step_of`) and the last (`span_from_root`, taking `root`) are
-  proved apart, each in seconds (`ca-horizontal-now-step`, `-bounds`, `-approach`, `-root`), with the root
-  a free value under the contract "finite, not negative, at most 7e9", which the square root of a finite
-  discriminant in `(0, 4e19]` meets (`ca-horizontal-now-sqrt`). The split is the same arithmetic in the same
-  order (`crates/oa-ca/tests/split.rs`: bit for bit against 2,400 vectors computed by the unsplit code at
-  commit 4eee1aa, in `tests/golden/`, and against a copy of it on a million inputs). The hand-off between the
-  two is tested, not proved: the first step's output meets the contract the root step is proved under on
-  400,000 bounded inputs (a proof of the real `horizontal_step` does not finish in ten minutes).
-- **OA-CA-029** Proved (Kani, bounded), in parts: the meet of two ordered intervals is finite and ordered
-  inside the look-ahead (`ca-meet`); the conflict span of any ordered horizontal span and a bounded vertical
-  part is finite and ordered (`ca-predict-span`); the time to loss of a prediction made from an ordered span
-  is finite and inside the look-ahead, the misses carried unchanged (`ca-predict-ttl`; `predict` is the
-  conflict span, the two misses, then `prediction_of`); the vertical miss is finite and not negative
-  (`ca-vertical-span`); the closest point of the horizontal miss is finite, within 5e7 m of the origin, at a
-  time inside the look-ahead (`ca-horizontal-miss-point`); and the horizontal miss itself, the exactly rounded
-  square root of `x*x + y*y` at that point, is finite and not negative (`ca-horizontal-miss`, on the real
-  function): at most 5e7 m on each axis the sum cannot overflow. The chain rests on the exact rounding of
-  `oa_ieee::sqrt`, as the root proof of OA-CA-028 does, and on no other library contract; the crate no
-  longer calls `hypot`. Tested, not proved: the miss agrees with `oa_math::hypot` to 2 units in the last
-  place wherever the larger coordinate is at least 1e-150 m, and to 1e-150 m below that, where the squares
-  underflow (`tests/miss.rs`, on the real function). Beyond about 1e154 m the square overflows to infinity, far outside
-  the bound the configuration check enforces (OA-CA-013).
+  loss interval of that kind, current, starting at zero and ending inside the look-ahead. This holds even
+  when the rounding of the solution puts the end of the interval a hair before zero; the exact edge is not
+  inside.
+  - The horizontal solver is split at the square root, in the same arithmetic and the same order as the
+    unsplit code (`crates/oa-ca/tests/split.rs`: bit for bit against 2,400 vectors from the unsplit code at
+    commit 4eee1aa, in `tests/golden/`, and against a copy of it on a million inputs).
+  - Proved with Kani, bounded:
+    - the squared speed and the discriminant stay within their bounds (`ca-horizontal-now-bounds`);
+    - the time of closest approach is finite and bounded when the speed is not zero
+      (`ca-horizontal-now-approach`);
+    - the square root of a finite discriminant in `(0, 4e19]` is finite, not negative and at most 7e9
+      (`ca-horizontal-now-sqrt`);
+    - from any root under that contract, the span of a current pair is current (`ca-horizontal-now-root`).
+  - Tested, not proved:
+    - the decision of the first step, `step_of`: a current pair gets a current span or a root step with a
+      positive discriminant. Tested at margins from 1 m to 1e-12 m and on 40,000 random inputs over the
+      domain the bounds proof covers;
+    - the hand-off between the two steps: the first step's output meets the root step's contract, on
+      400,000 bounded inputs. A proof of the real `horizontal_step` does not finish in ten minutes.
+- **OA-CA-029** A prediction is made from the horizontal and vertical spans, then their conflict span, the
+  two misses, and `prediction_of`.
+  - Proved with Kani, bounded:
+    - the conflict span of any ordered horizontal span and a bounded vertical part, through `meet`, is
+      finite and ordered inside the look-ahead (`ca-predict-span`);
+    - the vertical miss is finite and not negative (`ca-vertical-span`);
+    - the closest point of the horizontal miss is finite, within 5e7 m of the origin, at a time inside the
+      look-ahead (`ca-horizontal-miss-point`);
+    - the horizontal miss, the exactly rounded square root of `x*x + y*y` at that point, is finite and not
+      negative (`ca-horizontal-miss`, on the real function). At most 5e7 m on each axis, the sum cannot
+      overflow.
+  - Tested, not proved:
+    - `prediction_of`: the time to loss is the span's start, or zero for a current span, and lies inside the
+      look-ahead; the misses are carried unchanged, a NaN vertical miss included. Tested on edge cases and on
+      40,000 random spans and misses;
+    - the miss agrees with `oa_math::hypot` to 2 units in the last place wherever the larger coordinate is
+      at least 1e-150 m, and to 1e-150 m below that, where the squares underflow (`tests/miss.rs`, on the
+      real function).
+  - The chain rests on the exact rounding of `oa_ieee::sqrt`, as the root proof of OA-CA-028 does, and on no
+    other library contract; the crate no longer calls `hypot`.
+  - Beyond about 1e154 m the square overflows to infinity, far outside the bound the configuration check
+    enforces (OA-CA-013).
 - **OA-CA-030** The tool uses the shared sealed-path guard (`oa-sealed`) for every path: the clip, the
   configuration and the output directory are checked as given and after links before anything is opened or
   created, and the configuration is opened, then verified as the file opened (a link swapped between check
@@ -5836,10 +5858,8 @@ configuration with no default; the crate's tests use synthetic values.
   - The development configuration's cap is 100 km. On the national hour of 19 November 2026 it bound
     9 rows in 3,601 cycles, against 26,872 at 20 km.
 - **OA-CA-034** What is proved and what is tested for OA-CA-033:
-  - Proved (Kani, bounded): the squared chord of two vectors with components in [-1, 1] is finite and
-    not negative (`ca-chord-d2`). That is a small property; the trigonometry is outside what the
-    harnesses reach.
-  - Tested, not proved, by deterministic random pairs in `grid::tests`:
+  - Nothing in it is proved. Tested by deterministic random pairs in `grid::tests`:
+    - the squared chord of two vectors with components in [-1, 1] is finite and not negative;
     - the chord is never longer than the exact distance the evaluation uses, on 200,000 pairs up to
       85 degrees and 400 km apart, the smallest ratio being 1.000000068;
     - where the flat test is valid it accepts every pair the exact projection accepts;
@@ -6556,30 +6576,31 @@ configuration with no default; the crate's tests use synthetic values.
   touching. Tests `unknown_position_or_radius_occupies_everything`, `a_runway_with_a_non_finite_number_never_clears_a_target`
   (nine fields) and `real_coordinates_run_end_to_end_through_the_plane_and_the_test` (KMDW, from latitude and
   longitude).
-- **OA-RWY-008** Raising the radius never removes a region from the result (test `a_larger_radius_only_adds_occupancy`,
-  a sweep of radii at six positions). For the whole of `occupies` this is tested, not proved; OA-RWY-009 proves it
-  for the one-region test underneath.
-- **OA-RWY-009** For every region box and every coordinate pair within 1e9 m, and finite radii 0 <= r1 <= r2, the
-  one-region test `in_box`, which every occupancy flag uses, is true at r2 whenever it is true at r1; the runway-axis
-  coordinates do not depend on the radius. Proved with Kani (`occupancy_is_monotone_in_r95`, with `kani::cover!` that
-  gaining a region is reachable). A proof through `occupies` with a symbolic runway did not finish in the time budget.
-- **OA-RWY-010** For every runway, every non-finite, negative or beyond-1e9 m position or radius occupies every region
-  and is marked unknown (Kani `non_finite_input_occupies`), and for every runway with any non-finite number, every
-  position and radius does too (Kani `non_finite_runway_occupies`).
-- **OA-RWY-011** For every runway of the kind `build_runway` makes and every finite radius of at least zero, a target
-  whose coordinates in the runway axes lie inside the rectangle touches it. Proved with Kani
-  (`point_in_rectangle_occupies`); the rotation from the plane into the runway axes is covered by the unit tests, not
-  the proof.
+- **OA-RWY-008** Raising the radius never removes a region from the result. Tested by a sweep of radii at six
+  positions (`a_larger_radius_only_adds_occupancy`) and by OA-RWY-009.
+- **OA-RWY-009** For finite radii 0 <= r1 <= r2, a target that occupies a region at r1 occupies it at r2,
+  and the runway-axis coordinates do not depend on the radius. Tested, not proved: on 30,000 random runways at
+  any heading, positions within 1e9 m and radii up to 1e9 m, through `occupies` itself
+  (`a_larger_radius_never_clears_a_region_for_random_runways_positions_and_radii`).
+- **OA-RWY-010** A non-finite, negative or beyond-1e9 m position or radius occupies every region and is marked
+  unknown, and so does every position and radius on a runway with any non-finite number. Tested, not proved: at
+  the edge values, and on 30,000 random runways with a position, a radius or one of the runway's 16 numbers set to
+  NaN, infinity or beyond the limit
+  (`a_position_radius_or_runway_that_is_not_known_occupies_every_region_for_random_runways`).
+- **OA-RWY-011** For every runway of the kind `build_runway` makes and every finite radius of at least zero, a
+  target whose coordinates in the runway axes lie inside the rectangle touches it. Tested, not proved: 1e-6 m
+  inside the edges and on the edges themselves with a radius above zero
+  (`a_target_inside_the_runway_rectangle_touches_it_at_every_radius`), and on 30,000 random runways
+  (`a_target_inside_a_random_runway_rectangle_touches_it_at_every_radius`).
 - **OA-RWY-012** For every runway of the kind `build_runway` makes (finite geometry within 1e9 m, axis components
   within [-1, 1]) and every position and radius, any `f64` bit pattern included, `occupies` returns without panic,
   and for a known position the coordinates in the runway axes are finite and under 1e10 m. Proved with Kani
   (`occupies_never_panics`). The proof checks panics and those assertions; it does not run a separate float-overflow
   check.
-- **OA-RWY-013** For every plane scale `plane_new` can produce, the conversion from degrees gives no position for a
-  non-finite input, and any position it gives is finite and within 20 km on each axis. Proved with Kani
-  (`local_plane_is_bounded`). The disc limit itself (east squared plus north squared within the extent squared) is
-  tested, not proved.
-
+- **OA-RWY-013** The conversion from degrees to the local plane gives no position for a non-finite input, and any
+  position it gives is finite, within 20 km on each axis and inside the extent's disc. Tested, not proved: on
+  30,000 random origins and points, up to `f64::MAX`, NaN and infinity included
+  (`a_point_in_the_local_plane_is_finite_and_inside_the_extent_or_refused_for_random_origins_and_points`).
 ## Feed damage check (oa-feed-gaps, P-006 section 6 and P-007)
 
 - **OA-GAP-001** An interval between consecutive times of a feed over 600 s is an excluded interval (P-007), not damage by itself; exactly 600 s is not over.

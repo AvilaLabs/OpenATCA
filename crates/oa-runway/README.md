@@ -23,24 +23,19 @@ The approach and departure dimensions are development values, not FAA values.
 
 ## What is proved and what is tested
 
-Six Kani proofs are registered in `tools/rust_proofs.json`:
+One Kani proof is registered in `tools/rust_proofs.json`: `occupies_never_panics`. It shows that
+`occupies` does not panic for any input, any `f64` bit pattern included, and that the runway-axis
+coordinates of a known position are finite (43 s on the development laptop, including compilation).
 
-| Proof | Shows | Time |
-|---|---|---|
-| `non_finite_input_occupies` | an unknown position or radius occupies every region | 6 s |
-| `non_finite_runway_occupies` | a runway with a non-finite number occupies every region | 6 s |
-| `point_in_rectangle_occupies` | a point inside the rectangle, in runway axes, touches it at every radius | 5 s |
-| `occupies_never_panics` | no panic for any input; the runway-axis coordinates are finite | 43 s |
-| `local_plane_is_bounded` | the plane gives a finite position within 20 km on each axis, or none | 16 s |
-| `occupancy_is_monotone_in_r95` | in the one-region test, a larger radius never removes a region | 341 s |
+The other properties are tested by seeded sweeps of 30,000 random runways at any heading, with
+positions and radii over the whole input range, and by edge cases (`tests/runway.rs`):
+- a larger radius never clears a region, through `occupies` itself;
+- an unknown position or radius, or a runway with any non-finite number, occupies every region;
+- a target inside the rectangle, in runway axes, touches it at every radius;
+- the plane gives a finite position within 20 km on each axis and inside the extent's disc, or none.
 
-The times are single runs on the development laptop and include compilation.
-
-Three things are tested, not proved:
-
-- monotonicity through the whole of `occupies` (a proof with a symbolic runway did not finish);
-- the disc limit of the plane;
-- the rotation from the plane into the runway axes.
+Five of these were Kani proofs until 2026-11-20. They were bounded proofs of single steps, and the
+sweeps check the same properties through the whole function (see [Verification](../../docs/VERIFICATION.md)).
 
 The tests run on real runways: KMDW 04L/22R, which is displaced at both ends, KAUS 18L/36R and
 KSFO 10L/28R, all from the NASR 2026-10-29 values.
