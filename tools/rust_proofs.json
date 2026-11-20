@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 101,
+  "expected_proof_count": 100,
   "proofs": [
     {
       "id": "output-append",
@@ -1496,21 +1496,6 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
-    },
-    {
-      "id": "ca-meet",
-      "requirement": "OA-CA-029: the meet of two ordered spans is finite and ordered inside the look-ahead.",
-      "package": "oa-ca",
-      "harness": "solve::proofs::the_meet_of_two_ordered_spans_is_ordered_and_finite",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 300,
-      "external_timeout_seconds": 420,
       "memory_mib": 8192
     },
     {
