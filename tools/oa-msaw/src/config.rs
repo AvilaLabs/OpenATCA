@@ -106,6 +106,14 @@ pub struct Settings {
     pub cifp_airports: Vec<String>,
     pub requests: Vec<RequestSpec>,
     pub gtm_areas: Vec<GtmArea>,
+    /// Half-width of an approach corridor, nautical miles (legacy's lateral monitor distance).
+    pub approach_half_width_nm: f64,
+    /// Radius of an airport terminal area around the reference point, nautical miles.
+    pub airport_area_nm: f64,
+    /// The area applies below this height above the airport, feet.
+    pub airport_area_ceiling_ft_agl: i32,
+    /// The clearance above terrain and obstacles in an airport terminal area, feet.
+    pub airport_area_clearance_ft: i32,
     /// A track below FL180 with no usable altimeter setting is given its pressure altitude lowered
     /// by this, feet (the conservative direction), and counted.
     pub no_qnh_allowance_ft: i32,
@@ -115,14 +123,18 @@ pub struct Settings {
     pub metar_max_age_s: i64,
 }
 
-const KEYS: [&str; 30] = [
+const KEYS: [&str; 34] = [
     "look_ahead_s",
     "warning_s",
     "samples",
     "hysteresis_s",
     "gtm_clearance_ft",
     "obstacle_clearance_ft",
+    "approach_half_width_nm",
     "approach_allowance_ft",
+    "airport_area_nm",
+    "airport_area_ceiling_ft_agl",
+    "airport_area_clearance_ft",
     "approach_min_clearance_ft",
     "departure_min_clearance_ft",
     "velocity_uncertainty_mps",
@@ -192,6 +204,14 @@ fn e7(key: &str, v: &str, limit_deg: f64) -> Result<i32, String> {
         return Err(format!("{key}: `{v}` is off the globe"));
     }
     Ok((d * 1.0e7).round() as i32)
+}
+
+fn positive(key: &str, v: &str, max: f64) -> Result<f64, String> {
+    let x = finite(key, v)?;
+    if x <= 0.0 || x > max {
+        return Err(format!("{key}: `{v}` is out of range (0 to {max})"));
+    }
+    Ok(x)
 }
 
 fn feet(key: &str, v: &str) -> Result<i32, String> {
@@ -470,6 +490,13 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
     for v in &requests {
         reqs.push(request(v)?);
     }
+    let apt_ft = feet(
+        "airport_area_clearance_ft",
+        get("airport_area_clearance_ft")?,
+    )?;
+    if !(0..=oa_msaw::MAX_CLEARANCE_FT).contains(&apt_ft) {
+        return Err("airport_area_clearance_ft: out of range".to_string());
+    }
     Ok(Settings {
         msaw,
         net_stale_limit_ns: seconds_ns("net_stale_limit_s", get("net_stale_limit_s")?)?,
@@ -481,6 +508,20 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         cifp_airports: airports.iter().map(|s| (*s).to_string()).collect(),
         requests: reqs,
         gtm_areas,
+        approach_half_width_nm: positive(
+            "approach_half_width_nm",
+            get("approach_half_width_nm")?,
+            5.0,
+        )?,
+        airport_area_nm: positive("airport_area_nm", get("airport_area_nm")?, 30.0)?,
+        airport_area_ceiling_ft_agl: feet(
+            "airport_area_ceiling_ft_agl",
+            get("airport_area_ceiling_ft_agl")?,
+        )?,
+        airport_area_clearance_ft: feet(
+            "airport_area_clearance_ft",
+            get("airport_area_clearance_ft")?,
+        )?,
         no_qnh_allowance_ft,
         metar_radius_nm,
         metar_max_age_s,

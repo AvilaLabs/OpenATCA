@@ -150,7 +150,7 @@ fn the_configuration_has_no_defaults_and_names_what_is_wrong() {
             c.approach_min_clearance_ft,
             c.velocity_uncertainty_mps
         ),
-        (300, 100, 5.0)
+        (100, 100, 5.0)
     );
     assert_eq!(
         (s.no_qnh_allowance_ft, s.metar_radius_nm, s.metar_max_age_s),
@@ -419,9 +419,9 @@ fn corridors_come_from_the_runway_end_and_the_final_approach_fix_of_its_approach
     assert!(!k.faf_from_cifp);
     assert_eq!(k.faf_nm, 5.0);
     assert!((k.corridor.length_m - 5.0 * 1852.0).abs() < 1e-6);
-    // 0.3 NM at the threshold and 1.0 NM at the far end, the threshold elevation, and the fix
+    // The capture box: 1.0 NM either side all along, the threshold elevation, and the fix
     // altitude the ILS publishes at REKKS (the glide slope intercept altitude, 2,200 ft).
-    assert!((k.corridor.near_half_width_m - 0.3 * 1852.0).abs() < 1e-6);
+    assert!((k.corridor.near_half_width_m - 1852.0).abs() < 1e-6);
     assert!((k.corridor.far_half_width_m - 1852.0).abs() < 1e-6);
     assert_eq!(k.corridor.thr_elev_ft, 661);
     assert_eq!(k.corridor.faf_alt_ft, 2200);
@@ -437,20 +437,21 @@ fn corridors_come_from_the_runway_end_and_the_final_approach_fix_of_its_approach
         k.corridor.thr_lat_e7,
         (rw.threshold.lat * 1e7).round() as i32
     );
-    // With the fix placed 6.2 NM out along the corridor, the CIFP gives the length.
+    // With the fix placed 4.2 NM out along the corridor, the CIFP gives the length; a fix farther
+    // than 5 NM gives 5 NM (A2.08).
     let mut w = c.terminal_waypoints[0].clone();
     w.area = "KORD".to_string();
     w.ident = "REKKS".to_string();
     let out = 222.0f64.to_radians();
     w.position = oa_arinc424::Position {
-        lat: rw.threshold.lat + 6.2 / 60.0 * out.cos(),
-        lon: rw.threshold.lon + 6.2 / 60.0 * out.sin() / rw.threshold.lat.to_radians().cos(),
+        lat: rw.threshold.lat + 4.2 / 60.0 * out.cos(),
+        lon: rw.threshold.lon + 4.2 / 60.0 * out.sin() / rw.threshold.lat.to_radians().cos(),
     };
     c.terminal_waypoints.push(w);
     let a = corridors_from_cifp(&c, "KORD").unwrap();
     let k = &a.corridors[0];
     assert!(k.faf_from_cifp);
-    assert!((k.faf_nm - 6.2).abs() < 0.05, "{}", k.faf_nm);
+    assert!((k.faf_nm - 4.2).abs() < 0.05, "{}", k.faf_nm);
     // A runway end whose approach publishes no altitude at a fix gets no corridor, and is said.
     let b = corridors_from_cifp(&c, "KMDW").unwrap();
     assert!(b.corridors.is_empty());
@@ -487,7 +488,7 @@ fn a_runway_end_with_a_sid_gets_a_departure_corridor_from_its_far_end() {
     let rwy = c.runways.iter().find(|r| r.ident == "RW04R").unwrap();
     assert!((d.corridor.length_m - 5.0 * 1852.0).abs() < 1e-6);
     assert!((d.corridor.near_half_width_m - 0.3 * 1852.0).abs() < 1e-6);
-    assert!((d.corridor.far_half_width_m - 1852.0).abs() < 1e-6);
+    assert!((d.corridor.far_half_width_m - 2.0 * 1852.0).abs() < 1e-6);
     assert!((d.corridor.out_bearing_deg - 42.0).abs() < 0.01);
     // It starts at the far end: the threshold moved along the heading by the runway less the
     // displacement.
@@ -961,5 +962,70 @@ fn a_gtm_clearance_area_gives_its_clearance_to_the_cells_it_holds_and_a_bad_line
         "gtm_clearance = hex 1",
     ] {
         assert!(parse_config(&format!("{base}\n{bad}\n")).is_err(), "{bad}");
+    }
+}
+
+// REQ: OA-MSAW-059
+#[test]
+fn an_airport_area_gives_its_lower_clearance_and_ceiling_to_the_cells_it_holds_whole() {
+    use oa_msaw_run::floors::AirportArea;
+    let mut f = Floors::new(None, None, None);
+    let area = |lat: f64, ceiling_ft: i32, clearance_ft: i32| AirportArea {
+        lat,
+        lon: 144.80,
+        radius_m: 5.0 * 1852.0,
+        ceiling_ft,
+        clearance_ft,
+    };
+    // Two overlapping areas: the lower clearance and the lower ceiling apply.
+    f.set_airports(vec![area(13.50, 3600, 200), area(13.52, 3000, 150)]);
+    let s = f.floor_at(&point(13.51, 144.80, 100.0)).unwrap();
+    assert_eq!((s.apt_clearance_ft, s.apt_ceiling_ft), (150, 3000));
+    // Inside only the first one.
+    let s = f.floor_at(&point(13.425, 144.80, 100.0)).unwrap();
+    assert_eq!((s.apt_clearance_ft, s.apt_ceiling_ft), (200, 3600));
+    // Outside every area, and an explicit gtm_clearance is a separate field.
+    let s = f.floor_at(&point(13.8, 144.80, 100.0)).unwrap();
+    assert_eq!(
+        (s.apt_clearance_ft, s.apt_ceiling_ft),
+        (FLOOR_NONE, FLOOR_NONE)
+    );
+    assert_eq!(s.gtm_clearance_ft, FLOOR_NONE);
+    // The new keys are required and range-checked.
+    for k in [
+        "approach_half_width_nm",
+        "airport_area_nm",
+        "airport_area_ceiling_ft_agl",
+        "airport_area_clearance_ft",
+    ] {
+        let cut: String = DEV_CFG
+            .lines()
+            .filter(|l| !l.starts_with(k))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(parse_config(&cut).unwrap_err().contains(k), "{k}");
+    }
+    let bad = DEV_CFG.replace("approach_half_width_nm = 1.0", "approach_half_width_nm = 0");
+    assert!(parse_config(&bad).is_err());
+}
+
+// REQ: OA-MSAW-062
+#[test]
+fn the_summary_gives_counts_per_bucket_for_the_diagnostics_of_the_alerts() {
+    let set = settings();
+    let a = go(&approach(0xA1B2C3, true), &set, ridge_floors());
+    assert_eq!(a.alerts.len(), 1);
+    // The violating point and its radius are kept.
+    assert!(a.alerts[0].worst_radius_m > 0.0);
+    let t = summary_of(&a, &set);
+    assert!(t.contains("diagnostics of the 1 alerts:"), "{t}");
+    for k in [
+        "depth below the floor at the predicted violation:",
+        "time to violation:",
+        "query radius at the violating point:",
+        "distance from the violating point to the cell that set the floor (0 alerts",
+        "aligned within 30 degrees of a runway heading at the nearest airport: yes 0, no 0, no corridors 1",
+    ] {
+        assert!(t.contains(k), "{k}");
     }
 }

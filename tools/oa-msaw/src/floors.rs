@@ -155,6 +155,10 @@ impl ObstacleIndex {
     }
 }
 
+/// What a lookup cell holds: terrain, obstacle, explicit area clearance, airport area clearance and
+/// ceiling.
+type CellFloors = (i32, i32, i32, i32, i32);
+
 /// An area with its own clearance above terrain (degrees).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Area {
@@ -162,12 +166,19 @@ pub enum Area {
     Box(f64, f64, f64, f64),
     /// Vertices as (latitude, longitude).
     Polygon(Vec<(f64, f64)>),
+    /// Centre latitude, longitude and radius in metres.
+    Circle(f64, f64, f64),
 }
 
 impl Area {
     pub fn holds(&self, lat: f64, lon: f64) -> bool {
         match self {
             Area::Box(s, n, w, e) => lat >= *s && lat <= *n && lon >= *w && lon <= *e,
+            Area::Circle(la, lo, r) => {
+                let dy = (lat - la) * 111_194.926_644_558_74;
+                let dx = (lon - lo) * 111_194.926_644_558_74 * la.to_radians().cos();
+                dx * dx + dy * dy <= r * r
+            }
             Area::Polygon(v) => {
                 let mut inside = false;
                 let mut j = v.len().saturating_sub(1);
@@ -184,6 +195,20 @@ impl Area {
     }
 }
 
+/// An airport terminal area: a circle around the airport reference point, below a ceiling, with a
+/// clearance above terrain in place of the general one (A2.08 gives legacy's terrain inhibit
+/// areas around airports for practice, visual and circling approaches; this lowers the clearance
+/// there and inhibits nothing). Development values, set by the configuration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AirportArea {
+    pub lat: f64,
+    pub lon: f64,
+    pub radius_m: f64,
+    /// The airport elevation plus the ceiling above ground, feet MSL.
+    pub ceiling_ft: i32,
+    pub clearance_ft: i32,
+}
+
 /// The lookups with their data and cache. A7.2: cold struct, size guard waived.
 pub struct Floors {
     tile_dir: Option<PathBuf>,
@@ -195,8 +220,9 @@ pub struct Floors {
     absent: BTreeSet<(i32, i32)>,
     obstacles: Option<ObstacleIndex>,
     chart: Option<ChartRaster>,
-    cache: HashMap<(i32, i32, u32), (i32, i32, i32)>,
+    cache: HashMap<(i32, i32, u32), CellFloors>,
     areas: Vec<(Area, i32)>,
+    airports: Vec<AirportArea>,
     pub stats: FloorStats,
 }
 
@@ -236,6 +262,7 @@ impl Floors {
             chart: chart.map(ChartRaster::new),
             cache: HashMap::new(),
             areas: Vec::new(),
+            airports: Vec::new(),
             stats: FloorStats::default(),
         }
     }
@@ -260,6 +287,32 @@ impl Floors {
         self.areas = areas;
     }
 
+    /// The airport terminal areas. Where several hold a whole cell the lowest clearance applies, with
+    /// the lowest ceiling.
+    pub fn set_airports(&mut self, a: Vec<AirportArea>) {
+        self.airports = a;
+    }
+
+    /// The airport area clearance and ceiling over a lookup cell: the areas that hold its centre
+    /// and all four corners (an edge errs toward the general clearance); [`FLOOR_NONE`] twice if none.
+    fn apt_at(&self, clat: f64, clon: f64) -> (i32, i32) {
+        let h = CELL_DEG / 2.0;
+        let mut best: Option<(i32, i32)> = None;
+        for a in &self.airports {
+            let c = Area::Circle(a.lat, a.lon, a.radius_m);
+            let all = [(0.0, 0.0), (h, h), (h, -h), (-h, h), (-h, -h)]
+                .iter()
+                .all(|(dy, dx)| c.holds(clat + dy, clon + dx));
+            if all {
+                best = Some(match best {
+                    None => (a.clearance_ft, a.ceiling_ft),
+                    Some((c0, k0)) => (c0.min(a.clearance_ft), k0.min(a.ceiling_ft)),
+                });
+            }
+        }
+        best.unwrap_or((FLOOR_NONE, FLOOR_NONE))
+    }
+
     /// The clearance of the areas over a lookup cell: the highest of those holding its centre or a
     /// corner (so that an area's edge is on the high side); [`FLOOR_NONE`] if none does.
     fn gtm_at(&self, clat: f64, clon: f64) -> i32 {
@@ -274,6 +327,45 @@ impl Floors {
             }
         }
         best
+    }
+
+    /// How far from a point the cell that sets its floor is: the smallest radius, up to `radius_m`,
+    /// at which the terrain (kind `Terrain`) or the obstacle top (`Obstacle`) reaches the value
+    /// found over the whole radius, metres, to a metre. `None` for any other kind or no data.
+    pub fn setter_distance_m(
+        &mut self,
+        lat_e7: i32,
+        lon_e7: i32,
+        radius_m: f64,
+        kind: oa_msaw::FloorKind,
+    ) -> Option<f64> {
+        let (lat, lon) = (f64::from(lat_e7) / 1e7, f64::from(lon_e7) / 1e7);
+        let at = |me: &mut Self, r: f64| -> i32 {
+            match kind {
+                oa_msaw::FloorKind::Terrain if me.tile_dir.is_some() => {
+                    me.terrain_ft(lat, lon, r).unwrap_or(FLOOR_NONE)
+                }
+                oa_msaw::FloorKind::Obstacle => me
+                    .obstacles
+                    .as_ref()
+                    .map_or(FLOOR_NONE, |ix| ix.highest_within(lat, lon, r)),
+                _ => FLOOR_NONE,
+            }
+        };
+        let top = at(self, radius_m);
+        if top == FLOOR_NONE {
+            return None;
+        }
+        let (mut lo, mut hi) = (0.0, radius_m);
+        while hi - lo > 1.0 {
+            let mid = (lo + hi) / 2.0;
+            if at(self, mid) >= top {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        Some(hi)
     }
 
     pub fn has_terrain(&self) -> bool {
@@ -416,7 +508,8 @@ impl Floors {
                 .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
             self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
             let g = self.gtm_at(clat, clon);
-            self.cache.insert(key, (t, o, g));
+            let (ac, ak) = self.apt_at(clat, clon);
+            self.cache.insert(key, (t, o, g, ac, ak));
         }
         Ok(())
     }
@@ -434,36 +527,40 @@ impl Floors {
             cell_of(lon, CELL_DEG),
             bucket as u32,
         );
-        let (terrain_ft, obstacle_ft, gtm_clearance_ft) = if let Some(&v) = self.cache.get(&key) {
-            self.stats.cache_hits += 1;
-            v
-        } else {
-            let (clat, clon) = (
-                (f64::from(key.0) + 0.5) * CELL_DEG,
-                (f64::from(key.1) + 0.5) * CELL_DEG,
-            );
-            let radius = bucket * RADIUS_STEP_M + CELL_HALF_DIAG_M;
-            let t = if self.tile_dir.is_some() {
-                self.terrain_ft(clat, clon, radius)?
+        let (terrain_ft, obstacle_ft, gtm_clearance_ft, apt_clearance_ft, apt_ceiling_ft) =
+            if let Some(&v) = self.cache.get(&key) {
+                self.stats.cache_hits += 1;
+                v
             } else {
-                FLOOR_NONE
+                let (clat, clon) = (
+                    (f64::from(key.0) + 0.5) * CELL_DEG,
+                    (f64::from(key.1) + 0.5) * CELL_DEG,
+                );
+                let radius = bucket * RADIUS_STEP_M + CELL_HALF_DIAG_M;
+                let t = if self.tile_dir.is_some() {
+                    self.terrain_ft(clat, clon, radius)?
+                } else {
+                    FLOOR_NONE
+                };
+                let t1 = Instant::now();
+                let o = self
+                    .obstacles
+                    .as_ref()
+                    .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
+                self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
+                let g = self.gtm_at(clat, clon);
+                let (ac, ak) = self.apt_at(clat, clon);
+                self.cache.insert(key, (t, o, g, ac, ak));
+                (t, o, g, ac, ak)
             };
-            let t1 = Instant::now();
-            let o = self
-                .obstacles
-                .as_ref()
-                .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
-            self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
-            let g = self.gtm_at(clat, clon);
-            self.cache.insert(key, (t, o, g));
-            (t, o, g)
-        };
         Ok(FloorSample {
             terrain_ft,
             obstacle_ft,
             obstacle_covered: self.obstacles.is_some(),
             mva_ft,
             gtm_clearance_ft,
+            apt_clearance_ft,
+            apt_ceiling_ft,
         })
     }
 }

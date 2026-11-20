@@ -3,8 +3,8 @@
 //!
 //! For each runway end of an airport that has an instrument approach with a published altitude at
 //! its final approach fix, one corridor: the strip under the extended centreline from the landing
-//! threshold outward to the fix (5 NM when the fix cannot be placed), 0.3 NM either side at the
-//! threshold widening to 1.0 NM at the far end, with the surface from the threshold elevation to
+//! threshold outward to the fix (5 NM when the fix cannot be placed or is farther), a constant
+//! half-width either side (legacy's capture box of 1 NM, FAA ARTS IIA A2.08), with the surface from the threshold elevation to
 //! the published fix altitude (the core takes the allowance off it). The fix is the leg whose
 //! fourth waypoint description code is `F`; its altitude is read as a floor (at, at or above,
 //! the lower bound of a between; an at-or-below altitude is a ceiling and is not one). Where a
@@ -19,7 +19,7 @@
 //! begins 1 NM outside the threshold, so that a circle over the threshold is inside one of them).
 //! At each runway end that has a SID (a runway transition of one) or is the reverse of an
 //! approach end, a departure corridor runs 5 NM from the departure end along the runway heading,
-//! 0.3 NM either side widening to 1.0 NM, with no surface (the core gives it terrain and obstacle
+//! 0.3 NM either side widening to 2.0 NM (A2.08's departure area reaches 2 NM), with no surface (the core gives it terrain and obstacle
 //! clearance alone, and no chart altitude). A runway with a departure corridor and no approach
 //! corridor gets the strip along it as well.
 
@@ -33,15 +33,19 @@ use std::collections::BTreeSet;
 /// Metres per degree of latitude (mean radius), the core's.
 const M_PER_DEG: f64 = 111_194.926_644_558_74;
 const NM_M: f64 = 1852.0;
-/// Half-width of a corridor at the threshold and at its far end, nautical miles.
+/// Half-width of a departure corridor at its start and at its far end, nautical miles. A2.08: the
+/// departure area reaches 2 NM. Development values, to be fitted only on development days.
 pub const NEAR_HALF_WIDTH_NM: f64 = 0.3;
-pub const FAR_HALF_WIDTH_NM: f64 = 1.0;
-/// The length of a corridor when the fix cannot be placed, nautical miles.
+pub const FAR_HALF_WIDTH_NM: f64 = 2.0;
+/// The half-width of an approach corridor when the caller gives none, nautical miles (A2.08:
+/// lateral monitor distance 1 NM either side of the centreline; a development value).
+pub const APPROACH_HALF_WIDTH_NM: f64 = 1.0;
+/// The length of an approach corridor when the fix cannot be placed or is farther than this
+/// (A2.08: 5 NM with no final approach fix or one further out), nautical miles.
 pub const DEFAULT_FAF_NM: f64 = 5.0;
-/// A fix closer to the threshold than this or farther than that is not taken for the final
-/// approach fix of a straight-in approach, nautical miles.
+/// A fix closer to the threshold than this is not taken for the final approach fix of a
+/// straight-in approach, nautical miles.
 const FAF_MIN_NM: f64 = 1.0;
-const FAF_MAX_NM: f64 = 15.0;
 /// Length of a departure corridor, nautical miles.
 pub const DEPARTURE_NM: f64 = 5.0;
 /// Half-width of the strip along a runway beyond the runway's own, nautical miles.
@@ -182,6 +186,15 @@ fn fix_position(c: &Cifp, airport: &str, fix: &FixRef) -> Option<Position> {
 /// the file does not hold is an error: a configuration naming it would otherwise run with no
 /// corridors, silently.
 pub fn corridors_from_cifp(c: &Cifp, airport: &str) -> Result<CifpCorridors, String> {
+    corridors_from_cifp_with(c, airport, APPROACH_HALF_WIDTH_NM)
+}
+
+/// As [`corridors_from_cifp`], with the half-width of an approach corridor, nautical miles.
+pub fn corridors_from_cifp_with(
+    c: &Cifp,
+    airport: &str,
+    approach_half_width_nm: f64,
+) -> Result<CifpCorridors, String> {
     let Some(apt) = c.airports.iter().find(|a| a.ident == airport) else {
         return Err(format!("the CIFP has no airport {airport}"));
     };
@@ -241,7 +254,7 @@ pub fn corridors_from_cifp(c: &Cifp, airport: &str) -> Result<CifpCorridors, Str
             continue;
         };
         let (faf_nm, faf_from_cifp) = match dist.map(|d| d / NM_M) {
-            Some(nm) if (FAF_MIN_NM..=FAF_MAX_NM).contains(&nm) => (nm, true),
+            Some(nm) if (FAF_MIN_NM..=DEFAULT_FAF_NM).contains(&nm) => (nm, true),
             _ => (DEFAULT_FAF_NM, false),
         };
         out.corridors.push(CifpCorridor {
@@ -253,8 +266,8 @@ pub fn corridors_from_cifp(c: &Cifp, airport: &str) -> Result<CifpCorridors, Str
                 thr_lon_e7: (r.threshold.lon * 1e7).round() as i32,
                 out_bearing_deg: (landing_course + 180.0).rem_euclid(360.0),
                 length_m: faf_nm * NM_M,
-                near_half_width_m: NEAR_HALF_WIDTH_NM * NM_M,
-                far_half_width_m: FAR_HALF_WIDTH_NM * NM_M,
+                near_half_width_m: approach_half_width_nm * NM_M,
+                far_half_width_m: approach_half_width_nm * NM_M,
                 thr_elev_ft,
                 faf_alt_ft,
             },
@@ -387,10 +400,22 @@ fn add_runway_corridors(c: &Cifp, airport: &str, out: &mut CifpCorridors) {
 /// The airports of the CIFP that have an instrument approach (the file marks them): identifier and
 /// reference point, for the count of alerts near an airport with an approach.
 pub fn approach_airports(c: &Cifp) -> Vec<(String, f64, f64)> {
+    airports_with_approach(c)
+        .into_iter()
+        .map(|(i, la, lo, _)| (i, la, lo))
+        .collect()
+}
+
+/// The same with the airport elevation, feet (airports the file gives none for are left out: the
+/// ceiling of their terminal area cannot be placed).
+pub fn airports_with_approach(c: &Cifp) -> Vec<(String, f64, f64, i32)> {
     c.airports
         .iter()
         .filter(|a| a.ifr_capable)
-        .map(|a| (a.ident.clone(), a.position.lat, a.position.lon))
+        .filter_map(|a| {
+            let e = a.elevation_ft?;
+            Some((a.ident.clone(), a.position.lat, a.position.lon, e))
+        })
         .collect()
 }
 

@@ -90,6 +90,25 @@ pub fn floor_of(
     Some(best)
 }
 
+/// The sample with the airport terminal area's clearance in place of the general one: where an area
+/// holds the point, no `gtm_clearance` line does, and the lowest predicted altitude of the span is
+/// below the area's ceiling. Never an inhibit: the floor stays terrain and obstacles plus the
+/// clearance.
+pub fn with_airport_area(s: &FloorSample, low_ft: i32) -> FloorSample {
+    if s.gtm_clearance_ft == FLOOR_NONE
+        && s.apt_clearance_ft != FLOOR_NONE
+        && s.apt_ceiling_ft != FLOOR_NONE
+        && low_ft < s.apt_ceiling_ft
+    {
+        FloorSample {
+            gtm_clearance_ft: s.apt_clearance_ft,
+            ..*s
+        }
+    } else {
+        *s
+    }
+}
+
 /// True if a predicted altitude is below the floor: a violation. Monotone: a higher floor never
 /// removes one (proved).
 pub fn violates(alt_ft: i32, floor_ft: i32) -> bool {
@@ -396,6 +415,8 @@ mod proofs {
             obstacle_covered: true,
             mva_ft: m1,
             gtm_clearance_ft: g,
+            apt_clearance_ft: FLOOR_NONE,
+            apt_ceiling_ft: FLOOR_NONE,
         };
         let s2 = FloorSample {
             terrain_ft: t2,
@@ -403,6 +424,8 @@ mod proofs {
             obstacle_covered: true,
             mva_ft: m2,
             gtm_clearance_ft: g,
+            apt_clearance_ft: FLOOR_NONE,
+            apt_ceiling_ft: FLOOR_NONE,
         };
         if let (Some((f1, _)), Some((f2, _))) = (floor_of(&s1, hit, &cfg), floor_of(&s2, hit, &cfg))
         {
@@ -452,6 +475,8 @@ mod proofs {
             obstacle_covered: covered,
             mva_ft: m,
             gtm_clearance_ft: FLOOR_NONE,
+            apt_clearance_ft: FLOOR_NONE,
+            apt_ceiling_ft: FLOOR_NONE,
         };
         let hit = CorridorHit {
             surface_ft: Some(a),
@@ -468,6 +493,43 @@ mod proofs {
             }
         } else {
             assert!(t == FLOOR_NONE || !covered);
+        }
+    }
+
+    // REQ: OA-MSAW-059
+    #[kani::proof]
+    fn the_airport_area_floor_is_never_below_terrain_or_obstacles_plus_the_area_clearance() {
+        let (t, o, ac, ak, low, tc): (i32, i32, i32, i32, i32, i32) = (
+            kani::any(),
+            kani::any(),
+            kani::any(),
+            kani::any(),
+            kani::any(),
+            kani::any(),
+        );
+        kani::assume(ac >= 0 && ac <= MAX_CLEARANCE_FT);
+        kani::assume(tc >= 0 && tc <= MAX_CLEARANCE_FT);
+        // Inside the area (below its ceiling) with no explicit gtm_clearance.
+        kani::assume(ak != FLOOR_NONE && low < ak);
+        let s = FloorSample {
+            terrain_ft: t,
+            obstacle_ft: o,
+            obstacle_covered: true,
+            mva_ft: FLOOR_NONE,
+            gtm_clearance_ft: FLOOR_NONE,
+            apt_clearance_ft: ac,
+            apt_ceiling_ft: ak,
+        };
+        let cfg = cfg_with(tc, 0, 0);
+        if let Some((f, _)) = floor_of(&with_airport_area(&s, low), None, &cfg) {
+            // The floor is an area object, never an inhibit: it holds terrain plus the area's
+            // clearance and the obstacle top plus its own.
+            assert!(f >= t.saturating_add(ac));
+            if o != FLOOR_NONE {
+                assert!(f >= o);
+            }
+        } else {
+            assert!(t == FLOOR_NONE);
         }
     }
 }

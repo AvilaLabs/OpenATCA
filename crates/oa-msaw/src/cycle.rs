@@ -14,7 +14,7 @@ use oa_safety::net::{state_report, Area, NetId, NetReport, Reason, StateTable};
 
 use crate::calc::{
     alt_floor_ft, deg_to_e7, floor_of, grade_of, lowest_alt_ft, predicted_alt_ft, sample_points,
-    sample_span_s, violates, violation_time_s, PathStart,
+    sample_span_s, violates, violation_time_s, with_airport_area, PathStart,
 };
 use crate::corridor::corridor_hit_at;
 use crate::state::{alert_push, skip_push, MsawState};
@@ -285,6 +285,7 @@ struct Verdict {
     worst_margin_ft: i32,
     worst_floor_ft: i32,
     worst_kind: FloorKind,
+    worst_at: (i32, i32, f32),
     partial: bool,
     /// Some point outside the corridors with a chart altitude is above the alert floor and the
     /// predicted altitude is below the chart altitude there.
@@ -299,17 +300,19 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         worst_margin_ft: i32::MAX,
         worst_floor_ft: 0,
         worst_kind: FloorKind::Mva,
+        worst_at: (0, 0, 0.0),
         partial: false,
         below_mva: false,
     };
     for (k, (p, s)) in pts.iter().zip(floors.iter()).enumerate() {
         let hit = corridor_hit_at(cfg, &st.cidx, p);
+        let (lo, hi) = sample_span_s(k, cfg.samples, cfg.look_ahead_s);
+        let low = alt_floor_ft(lowest_alt_ft(alt, vr, lo, hi));
+        let s = &with_airport_area(s, low);
         let Some((floor, kind)) = floor_of(s, hit, cfg) else {
             v.partial = true;
             continue;
         };
-        let (lo, hi) = sample_span_s(k, cfg.samples, cfg.look_ahead_s);
-        let low = alt_floor_ft(lowest_alt_ft(alt, vr, lo, hi));
         if hit.is_none() && s.mva_ft != FLOOR_NONE && low < s.mva_ft {
             v.below_mva = true;
         }
@@ -318,6 +321,7 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
             v.worst_margin_ft = margin;
             v.worst_floor_ft = floor;
             v.worst_kind = kind;
+            v.worst_at = (p.lat_e7, p.lon_e7, p.radius_m);
         }
         if violates(low, floor) {
             let t = violation_time_s(alt, vr, floor, lo, hi);
@@ -374,6 +378,11 @@ fn raise(
         worst_margin_ft: v.worst_margin_ft as f32,
         worst_floor_ft: v.worst_floor_ft,
         worst_kind: v.worst_kind,
+        worst_lat_e7: v.worst_at.0,
+        worst_lon_e7: v.worst_at.1,
+        worst_radius_m: v.worst_at.2,
+        vel_east_mps: tr.vel_east_mps,
+        vel_north_mps: tr.vel_north_mps,
         ttv_min_s: ttv_s as f32,
         cycles: 1,
         flags,
@@ -392,6 +401,9 @@ fn raise(
                     a.worst_margin_ft = v.worst_margin_ft as f32;
                     a.worst_floor_ft = v.worst_floor_ft;
                     a.worst_kind = v.worst_kind;
+                    a.worst_lat_e7 = v.worst_at.0;
+                    a.worst_lon_e7 = v.worst_at.1;
+                    a.worst_radius_m = v.worst_at.2;
                 }
                 if (ttv_s as f32) < a.ttv_min_s {
                     a.ttv_min_s = ttv_s as f32;

@@ -45,7 +45,7 @@ mod cycle;
 mod state;
 mod types;
 
-pub use calc::{corridor_hit_ft, corridor_hit_linear, floor_of, violates};
+pub use calc::{corridor_hit_ft, corridor_hit_linear, floor_of, violates, with_airport_area};
 pub use corridor::{corridor_hit_at, corridor_index_new, CorridorIndex};
 pub use cycle::{
     msaw_evaluate, msaw_finish, msaw_plan, msaw_publish_refused, net_report_of, CycleOut,

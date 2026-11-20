@@ -132,6 +132,12 @@ pub struct FloorSample {
     /// The clearance above terrain outside the corridors at the point, feet, where an area of the
     /// adaptation sets one; [`FLOOR_NONE`] for the configuration's `terrain_clearance_ft`.
     pub gtm_clearance_ft: i32,
+    /// The clearance above terrain in an airport terminal area holding the point, feet (the lowest
+    /// of the areas); [`FLOOR_NONE`] if none. It applies below `apt_ceiling_ft` and only where no
+    /// `gtm_clearance_ft` is set.
+    pub apt_clearance_ft: i32,
+    /// The altitude below which `apt_clearance_ft` applies, feet MSL (the lowest of the areas).
+    pub apt_ceiling_ft: i32,
 }
 
 /// [`Corridor::kind`]: a final-approach corridor, from the landing threshold outward to the final
@@ -267,6 +273,13 @@ pub struct Alert {
     pub worst_margin_ft: f32,
     pub worst_floor_ft: i32,
     pub worst_kind: FloorKind,
+    /// The path point (1e-7 degree) and query radius (metres) of that worst margin, and the
+    /// track's velocity (east, north, metres per second) at the first cycle: for diagnostics.
+    pub worst_lat_e7: i32,
+    pub worst_lon_e7: i32,
+    pub worst_radius_m: f32,
+    pub vel_east_mps: f32,
+    pub vel_north_mps: f32,
     /// Shortest time to violation over the alert, seconds (zero: below the floor now).
     pub ttv_min_s: f32,
     pub cycles: u32,

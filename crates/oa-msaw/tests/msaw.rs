@@ -119,6 +119,8 @@ fn flat(terrain: i32, mva: i32) -> impl Fn(i32, i32) -> FloorSample {
         obstacle_covered: true,
         mva_ft: mva,
         gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
     }
 }
 
@@ -227,6 +229,8 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
         obstacle_covered: true,
         mva_ft: 2000,
         gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
     };
     let o = cycle(&mut r, S, &[a], &none_t);
     assert_eq!(o.stats.no_coverage, 1);
@@ -247,6 +251,8 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
         obstacle_covered: true,
         mva_ft: FLOOR_NONE,
         gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
     };
     let o = cycle(&mut r, 2 * S, &[a], &none_m);
     assert_eq!(o.stats.no_coverage, 0);
@@ -260,6 +266,8 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
                 obstacle_covered: true,
                 mva_ft: 2000,
                 gtm_clearance_ft: FLOOR_NONE,
+                apt_clearance_ft: FLOOR_NONE,
+                apt_ceiling_ft: FLOOR_NONE,
             }
         } else {
             FloorSample {
@@ -268,6 +276,8 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
                 obstacle_covered: true,
                 mva_ft: FLOOR_NONE,
                 gtm_clearance_ft: FLOOR_NONE,
+                apt_clearance_ft: FLOOR_NONE,
+                apt_ceiling_ft: FLOOR_NONE,
             }
         }
     };
@@ -383,6 +393,8 @@ fn ridge(lat_e7: i32, _lon: i32) -> FloorSample {
         obstacle_covered: true,
         mva_ft: 100,
         gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
     }
 }
 
@@ -535,6 +547,8 @@ fn the_floor_is_the_higher_of_terrain_and_obstacle_with_clearances_and_the_chart
         obstacle_covered: true,
         mva_ft: m,
         gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
     };
     assert_eq!(
         floor_of(&s(1000, FLOOR_NONE, 1200), None, &c),
@@ -659,6 +673,8 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
         obstacle_covered: true,
         mva_ft: 3000,
         gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
     };
     assert_eq!(floor_of(&s, None, &c), Some((1500, FloorKind::Obstacle)));
     assert_eq!(
@@ -682,6 +698,8 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
     let nochart = FloorSample {
         mva_ft: FLOOR_NONE,
         gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
         ..s
     };
     assert!(floor_of(&nochart, surf(900), &c).is_some());
@@ -714,6 +732,8 @@ fn ridge_world(terrain_ft: i32, ridge_ft: i32) -> impl Fn(i32, i32) -> FloorSamp
             obstacle_covered: true,
             mva_ft: 100,
             gtm_clearance_ft: FLOOR_NONE,
+            apt_clearance_ft: FLOOR_NONE,
+            apt_ceiling_ft: FLOOR_NONE,
         }
     }
 }
@@ -1219,6 +1239,8 @@ fn a_higher_floor_never_removes_an_alert_over_a_sweep() {
                         obstacle_covered: true,
                         mva_ft: mva,
                         gtm_clearance_ft: FLOOR_NONE,
+                        apt_clearance_ft: FLOOR_NONE,
+                        apt_ceiling_ft: FLOOR_NONE,
                     };
                     let b = FloorSample {
                         terrain_ft: terrain + bump,
@@ -1230,6 +1252,8 @@ fn a_higher_floor_never_removes_an_alert_over_a_sweep() {
                         obstacle_covered: true,
                         mva_ft: mva + bump,
                         gtm_clearance_ft: FLOOR_NONE,
+                        apt_clearance_ft: FLOOR_NONE,
+                        apt_ceiling_ft: FLOOR_NONE,
                     };
                     for surface in [None, Some(0), Some(1500), Some(9000)] {
                         let (fa, _) = floor_of(&a, surface.map(hit), &c).unwrap();
@@ -1258,6 +1282,8 @@ fn no_obstacle_data_is_no_coverage_and_the_net_reads_degraded() {
         obstacle_covered: false,
         mva_ft: 2000,
         gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
     };
     let o = cycle(&mut r, S, &[a], &no_dof);
     assert_eq!(o.stats.no_coverage, 1);
@@ -1510,10 +1536,14 @@ fn an_area_clearance_replaces_the_general_one_outside_the_corridors() {
         obstacle_covered: true,
         mva_ft: FLOOR_NONE,
         gtm_clearance_ft: 200,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
     };
     assert_eq!(floor_of(&s, None, &c), Some((1200, FloorKind::Terrain)));
     let general = FloorSample {
         gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
         ..s
     };
     assert_eq!(
@@ -1522,4 +1552,76 @@ fn an_area_clearance_replaces_the_general_one_outside_the_corridors() {
     );
     // In a corridor the corridor's clearance holds, not the area's.
     assert_eq!(floor_of(&s, surf(0), &c), Some((1100, FloorKind::Terrain)));
+}
+
+/// The capture box of the A2.08 standard: 1 NM either side of the centreline all along.
+fn box_cfg() -> MsawConfig {
+    let mut c = corridor_cfg();
+    c.corridors[0].near_half_width_m = 1852.0;
+    c.corridors[0].far_half_width_m = 1852.0;
+    c
+}
+
+/// Metres east of the centreline in degrees of longitude at 40 N.
+fn east_deg(m: f64) -> f64 {
+    -88.0 + m / (111_194.926_644_558_74 * 40.0f64.to_radians().cos())
+}
+
+// REQ: OA-MSAW-060
+#[test]
+fn an_approach_inside_the_capture_box_is_judged_by_the_surface_and_outside_it_by_the_general_floor()
+{
+    let world = ridge_world(600, 600);
+    // 400 ft below the path, 8,000 m out: under the surface, above terrain plus 500 ft.
+    let mut t = final_track(0, 8000.0, -400.0, 0.0);
+    t.lon_deg = east_deg(0.8 * 1852.0);
+    let mut r = rig(&box_cfg());
+    let o = cycle(&mut r, S, &[t], &world);
+    assert_eq!(o.stats.violations, 1);
+    assert_eq!(msaw_open(&r.st)[0].worst_kind, FloorKind::Procedure);
+    // 1.2 NM off the centreline is outside the box: the general rules, no alert.
+    t.lon_deg = east_deg(1.2 * 1852.0);
+    let mut r = rig(&box_cfg());
+    let o = cycle(&mut r, S, &[t], &world);
+    assert_eq!(o.stats.violations, 0);
+}
+
+fn airport_world(terrain: i32, tower_top: i32) -> impl Fn(i32, i32) -> FloorSample {
+    move |_, _| FloorSample {
+        terrain_ft: terrain,
+        obstacle_ft: tower_top,
+        obstacle_covered: true,
+        mva_ft: FLOOR_NONE,
+        gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: 200,
+        apt_ceiling_ft: terrain + 3000,
+    }
+}
+
+// REQ: OA-MSAW-059
+#[test]
+fn a_visual_base_leg_in_an_airport_area_alerts_only_for_a_tower_and_the_floor_is_never_an_inhibit()
+{
+    // 900 ft AGL over flat terrain, descending 500 ft/min: 1,000 ft in a minute, above terrain
+    // plus 200 ft (800) and below terrain plus the general 500 ft (1,100).
+    let base = tr(5, 40.0, -88.0, 70.0, 0.0, 1500.0, -500.0);
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[base], &airport_world(600, FLOOR_NONE));
+    assert_eq!(o.stats.violations, 0);
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[base], &flat(600, FLOOR_NONE));
+    assert_eq!(o.stats.violations, 1, "the general floor would alert");
+    // 150 ft above a 1,000 ft tower (top 1,600 ft) within the radius: the obstacle keeps its
+    // 500 ft clearance and the track alerts.
+    let level = tr(5, 40.0, -88.0, 70.0, 0.0, 1750.0, 0.0);
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[level], &airport_world(600, 1600));
+    assert_eq!(o.stats.violations, 1);
+    assert_eq!(msaw_open(&r.st)[0].worst_kind, FloorKind::Obstacle);
+    // Above the area's ceiling the general clearance holds again.
+    let high = tr(5, 40.0, -88.0, 70.0, 0.0, 4000.0, -3500.0);
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[high], &airport_world(600, FLOOR_NONE));
+    assert_eq!(o.stats.violations, 1);
+    assert_eq!(msaw_open(&r.st)[0].worst_floor_ft, 800);
 }

@@ -6316,5 +6316,13 @@ FAA value.
   and is no shortfall of the net.
 - **OA-MSAW-058** The clearance above terrain outside the corridors is `gtm_clearance_ft` (a development value),
   or that of a `gtm_clearance` box or polygon file holding the point (the highest wins); corridors keep their own.
+- **OA-MSAW-059** Within `airport_area_nm` of an airport with a CIFP approach, below `airport_area_ceiling_ft_agl`,
+  the general clearance is `airport_area_clearance_ft`; never an inhibit; the lowest of overlapping areas applies and
+  a `gtm_clearance` line overrides it; obstacles keep their own clearance.
+- **OA-MSAW-060** An approach corridor is a capture box of constant half-width `approach_half_width_nm` from the
+  threshold to the fix (5 NM when absent or farther); a track outside the box falls to the general rules; the
+  departure corridor widens to 2 NM.
+- **OA-MSAW-062** The summary gives distributions of the remaining alerts: depth below the floor, time to violation,
+  query radius, distance to the floor-setting cell, and alignment with a runway heading.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.

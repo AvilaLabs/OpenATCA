@@ -287,6 +287,8 @@ pub struct DataUsed {
     /// The corridors the CIFP gave, and the runway ends with an approach that got none.
     pub cifp_corridors: Vec<CifpCorridor>,
     pub without_corridor: Vec<String>,
+    /// Per alert (address, start), the distance in metres to the cell that set its floor.
+    pub setter_m: BTreeMap<(u32, i64), f32>,
     /// The airports of the CIFP that have an approach: identifier, latitude, longitude.
     pub airports: Vec<(String, f64, f64)>,
     /// The altimeter files read (`None`: no `--metar`).
@@ -703,6 +705,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
         );
     }
     nuisance_lines(&mut o, i, &order, &nears);
+    diagnostic_lines(&mut o, i);
     let _ = writeln!(o, "net state by cycle:");
     for (s, n) in i.net_cycles {
         let _ = writeln!(o, "  {s}: {n}");
@@ -809,6 +812,127 @@ fn eligibility_lines(o: &mut String, e: &EligibilityReport, hours: f64, data: &D
             .map(|((_, name), x)| format!("{name} {x}"))
             .collect::<Vec<_>>()
             .join(", ")
+    );
+}
+
+/// Counts per bucket: `edges` are the upper bounds (exclusive) of all buckets but the last.
+fn buckets(values: &[f64], edges: &[f64], unit: &str) -> String {
+    let mut n = vec![0usize; edges.len() + 1];
+    for v in values {
+        let k = edges.iter().position(|e| v < e).unwrap_or(edges.len());
+        if let Some(c) = n.get_mut(k) {
+            *c += 1;
+        }
+    }
+    let mut parts = Vec::new();
+    for (k, c) in n.iter().enumerate() {
+        let lo = if k == 0 { None } else { edges.get(k - 1) };
+        let hi = edges.get(k);
+        let name = match (lo, hi) {
+            (None, Some(h)) => format!("under {h}{unit}"),
+            (Some(l), Some(h)) => format!("{l} to {h}{unit}"),
+            (Some(l), None) => format!("{l}{unit} or more"),
+            (None, None) => "all".to_string(),
+        };
+        parts.push(format!("{name} {c}"));
+    }
+    parts.join(", ")
+}
+
+/// Smallest difference between two courses, degrees (0 to 180).
+fn course_gap(a: f64, b: f64) -> f64 {
+    let d = (a - b).rem_euclid(360.0);
+    d.min(360.0 - d)
+}
+
+/// The distributions of the alerts that remain: depth below the floor at the predicted violation,
+/// time to violation, query radius at the violating point, distance from that point to the cell
+/// that set the floor, and whether the track is aligned within 30 degrees of a runway heading of
+/// the nearest airport with corridors. Counts per bucket; no aircraft is named.
+fn diagnostic_lines(o: &mut String, i: &SummaryInput) {
+    let a = i.alerts;
+    let depth: Vec<f64> = a
+        .iter()
+        .map(|x| f64::from((-x.worst_margin_ft).max(0.0)))
+        .collect();
+    let ttv: Vec<f64> = a.iter().map(|x| f64::from(x.ttv_min_s)).collect();
+    let radius: Vec<f64> = a.iter().map(|x| f64::from(x.worst_radius_m)).collect();
+    let setter: Vec<f64> = a
+        .iter()
+        .filter_map(|x| {
+            i.data
+                .setter_m
+                .get(&(x.addr, x.start_ns))
+                .map(|d| f64::from(*d))
+        })
+        .collect();
+    let _ = writeln!(o, "diagnostics of the {} alerts:", a.len());
+    let _ = writeln!(
+        o,
+        "  depth below the floor at the predicted violation: {}",
+        buckets(&depth, &[25.0, 50.0, 100.0, 200.0, 500.0], " ft")
+    );
+    let _ = writeln!(
+        o,
+        "  time to violation: {}",
+        buckets(&ttv, &[1.0, 10.0, 20.0, 30.0, 45.0], " s")
+    );
+    let _ = writeln!(
+        o,
+        "  query radius at the violating point: {}",
+        buckets(&radius, &[100.0, 200.0, 300.0, 500.0, 1000.0], " m")
+    );
+    let _ = writeln!(
+        o,
+        "  distance from the violating point to the cell that set the floor ({} alerts with a terrain or obstacle floor): {}",
+        setter.len(),
+        buckets(&setter, &[50.0, 100.0, 200.0, 500.0, 1000.0], " m")
+    );
+    let (mut yes, mut no, mut none) = (0usize, 0usize, 0usize);
+    for x in a {
+        let (here_lat, here_lon) = (
+            f64::from(x.worst_lat_e7) / 1e7,
+            f64::from(x.worst_lon_e7) / 1e7,
+        );
+        // The nearest corridor threshold names the airport; its runways give the headings.
+        let near = i
+            .data
+            .cifp_corridors
+            .iter()
+            .map(|c| {
+                let (la, lo) = (
+                    f64::from(c.corridor.thr_lat_e7) / 1e7,
+                    f64::from(c.corridor.thr_lon_e7) / 1e7,
+                );
+                let (dy, dx) = (la - here_lat, (lo - here_lon) * here_lat.to_radians().cos());
+                (dy * dy + dx * dx, c.label.split(' ').next().unwrap_or(""))
+            })
+            .min_by(|p, q| oa_math::cmp_canon_f64(p.0, q.0));
+        let Some((_, apt)) = near else {
+            none += 1;
+            continue;
+        };
+        let course = f64::from(x.vel_east_mps)
+            .atan2(f64::from(x.vel_north_mps))
+            .to_degrees();
+        let aligned = i
+            .data
+            .cifp_corridors
+            .iter()
+            .filter(|c| c.label.split(' ').next() == Some(apt))
+            .any(|c| {
+                let h = c.corridor.out_bearing_deg;
+                course_gap(course, h) <= 30.0 || course_gap(course, h + 180.0) <= 30.0
+            });
+        if aligned {
+            yes += 1;
+        } else {
+            no += 1;
+        }
+    }
+    let _ = writeln!(
+        o,
+        "  aligned within 30 degrees of a runway heading at the nearest airport: yes {yes}, no {no}, no corridors {none}"
     );
 }
 

@@ -31,12 +31,14 @@ use oa_track::{
 };
 
 use crate::args::Args;
-use crate::cifp::{approach_airports, corridors_from_cifp, CifpCorridor};
+use crate::cifp::{
+    airports_with_approach, approach_airports, corridors_from_cifp_with, CifpCorridor,
+};
 use crate::config::GtmShape;
 use crate::config::{parse_config, InhibitSpec, Settings};
 use crate::eligibility::{callsign_timeline, first_seen, judge, Inputs};
-use crate::floors::Area;
 use crate::floors::{obstacle_index, FloorStats, Floors, ObstacleIndex};
+use crate::floors::{AirportArea, Area};
 use crate::guard::{open_guarded, refuse_sealed, OpenFail};
 use crate::qnh::{Qnh, QnhStats};
 use crate::report::{
@@ -115,6 +117,9 @@ pub struct Record {
     /// The altimeter lookups of the run; `None` when the altitudes were used as given.
     pub qnh_stats: Option<QnhStats>,
     pub times: RunTimes,
+    /// For each alert, by address and start, the distance in metres from its violating point to
+    /// the cell that set its floor (terrain or obstacle floors only).
+    pub setter_m: BTreeMap<(u32, i64), f32>,
 }
 
 /// Wall time of the steady state, nanoseconds, by part. A7.2: cold struct, size guard waived.
@@ -192,6 +197,8 @@ fn flush(f: &mut Feed) {
                     obstacle_covered: false,
                     mva_ft: FLOOR_NONE,
                     gtm_clearance_ft: FLOOR_NONE,
+                    apt_clearance_ft: FLOOR_NONE,
+                    apt_ceiling_ft: FLOOR_NONE,
                 });
             }
         }
@@ -467,7 +474,19 @@ pub fn track_and_alert(
     msaw_finish(&mut f.st, &mut f.alerts);
     f.all.extend_from_slice(&f.alerts.items);
     let final_net = state_text(&net_status(&f.net, &f.inh, NetId::Msaw, f.last_t).state);
+    let mut setter_m = BTreeMap::new();
+    for a in &f.all {
+        if let Some(d) = f.floors.setter_distance_m(
+            a.worst_lat_e7,
+            a.worst_lon_e7,
+            f64::from(a.worst_radius_m),
+            a.worst_kind,
+        ) {
+            setter_m.insert((a.addr, a.start_ns), d as f32);
+        }
+    }
     Ok(Record {
+        setter_m,
         alerts: f.all,
         skips: f.skip_agg,
         totals: msaw_totals(&f.st),
@@ -708,13 +727,24 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let mut cifp_corridors: Vec<CifpCorridor> = Vec::new();
     let mut without_corridor: Vec<String> = Vec::new();
     let mut airports: Vec<(String, f64, f64)> = Vec::new();
+    let mut apt_areas: Vec<AirportArea> = Vec::new();
     if let Some(p) = &args.cifp {
         let tl = Instant::now();
         let c = read_cifp(g, p)?;
         used.load_ns.push(("CIFP", tl.elapsed().as_nanos() as u64));
         airports = approach_airports(&c);
+        apt_areas = airports_with_approach(&c)
+            .into_iter()
+            .map(|(_, lat, lon, elev)| AirportArea {
+                lat,
+                lon,
+                radius_m: set.airport_area_nm * 1852.0,
+                ceiling_ft: elev.saturating_add(set.airport_area_ceiling_ft_agl),
+                clearance_ft: set.airport_area_clearance_ft,
+            })
+            .collect();
         for a in &set.cifp_airports {
-            let made = corridors_from_cifp(&c, a)?;
+            let made = corridors_from_cifp_with(&c, a, set.approach_half_width_nm)?;
             cifp_corridors.extend(made.corridors);
             without_corridor.extend(made.without_corridor);
         }
@@ -799,6 +829,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
     let mut floors = Floors::new(args.terrain.clone(), obstacles, chart);
     floors.set_areas(gtm_areas(g, &set)?);
+    floors.set_airports(apt_areas);
     used.terrain = floors.has_terrain();
     used.chart = floors.has_chart();
     used.cifp_corridors = cifp_corridors;
@@ -819,6 +850,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     used.steady_cpu_s = cpu_seconds().zip(cpu0).map(|(b, a)| b - a);
     used.rss_end_kb = proc_kb("VmHWM:");
     used.times = rec.times;
+    used.setter_m = rec.setter_m.clone();
     fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     // Who is alerted: the rest of the violations are advisories, listed and counted.
     let tracks = first_seen(&meas);
