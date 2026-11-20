@@ -475,6 +475,12 @@ fn assert_f64_bits(a: f64, b: f64) {
 }
 
 fn assert_filter_bits(a: &Filter, b: &Filter) {
+    assert_filter_bits_horizontal(a, b);
+    assert_filter_bits_rest(a, b);
+}
+
+/// The horizontal half of `assert_filter_bits`: both models' state, covariance and weight.
+fn assert_filter_bits_horizontal(a: &Filter, b: &Filter) {
     for model in 0..2 {
         for axis in 0..5 {
             assert_f64_bits(a.h.m[model].x[axis], b.h.m[model].x[axis]);
@@ -483,6 +489,12 @@ fn assert_filter_bits(a: &Filter, b: &Filter) {
             }
         }
         assert_f64_bits(a.h.mu[model], b.h.mu[model]);
+    }
+}
+
+/// The rest of `assert_filter_bits`: the vertical filter, the trigonometry and every scalar.
+fn assert_filter_bits_rest(a: &Filter, b: &Filter) {
+    for model in 0..2 {
         for axis in 0..2 {
             assert_f64_bits(a.v.m[model].x[axis], b.v.m[model].x[axis]);
         }
@@ -1668,11 +1680,40 @@ fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refus
 {
     let mut t = proof_tracker_with_pool(CONFIRMED, 1);
     let (before, after, _, _, original) = not_applied_scenario(&mut t, Part::Current);
-    // The current filter's run of refusals grew by one; the rest of it is as it was.
+    // The current filter's run of refusals grew by one; the rest of it is as it was. The
+    // horizontal half and the snapshot are proved by the two harnesses after this one: one
+    // harness for all of it needs more memory than a CI runner has (13.7 GB peak).
     let mut expected = before.cur;
     expected.rej_h = expected.rej_h.saturating_add(1);
-    assert_filter_bits(&after.cur, &expected);
+    assert_filter_bits_rest(&after.cur, &expected);
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(decide, decide_rejected_as_the_real_path)]
+#[kani::stub(filter_miss_m, any_miss)]
+#[kani::stub(filter_apply, filter_apply_rejects_as_the_real_path)]
+fn update_in_order_held_with_a_report_that_is_not_applied_keeps_the_snapshot_with_any_current_filter(
+) {
+    let mut t = proof_tracker_with_pool(CONFIRMED, 1);
+    let (_, _, _, _, original) = not_applied_scenario(&mut t, Part::Current);
+    // The snapshot in the pool is unchanged bit for bit, with the current filter symbolic.
     assert_snap_bits(&t.snaps[0], &original);
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(decide, decide_rejected_as_the_real_path)]
+#[kani::stub(filter_miss_m, any_miss)]
+#[kani::stub(filter_apply, filter_apply_rejects_as_the_real_path)]
+fn update_in_order_held_with_a_report_that_is_not_applied_keeps_the_horizontal_current_filter() {
+    let mut t = proof_tracker_with_pool(CONFIRMED, 1);
+    let (before, after, _, _, _) = not_applied_scenario(&mut t, Part::Current);
+    // The horizontal half of the current filter is as it was (the run of refusals is in the
+    // other half).
+    assert_filter_bits_horizontal(&after.cur, &before.cur);
 }
 
 // REQ: OA-TRK-354
@@ -1684,8 +1725,23 @@ fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refus
 fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refusals_anchor_filter()
 {
     let mut t = proof_tracker_with_pool(CONFIRMED, 1);
-    let (before, after, _, _, original) = not_applied_scenario(&mut t, Part::Anchor);
+    let (before, after, _, _, _) = not_applied_scenario(&mut t, Part::Anchor);
+    // The snapshot is proved by the harness after this one: one harness for both needs more
+    // memory than a CI runner has (13.8 GB peak).
     assert_filter_bits(&after.anchor, &before.anchor);
+}
+
+// REQ: OA-TRK-354
+#[kani::proof]
+#[kani::solver(cadical)]
+#[kani::stub(decide, decide_rejected_as_the_real_path)]
+#[kani::stub(filter_miss_m, any_miss)]
+#[kani::stub(filter_apply, filter_apply_rejects_as_the_real_path)]
+fn update_in_order_held_with_a_report_that_is_not_applied_keeps_the_snapshot_with_any_anchor_filter(
+) {
+    let mut t = proof_tracker_with_pool(CONFIRMED, 1);
+    let (_, _, _, _, original) = not_applied_scenario(&mut t, Part::Anchor);
+    // The snapshot in the pool is unchanged bit for bit, with the anchor filter symbolic.
     assert_snap_bits(&t.snaps[0], &original);
 }
 
