@@ -327,6 +327,7 @@ fn export_all(
         let mut ex = SystemExport::new("ERAM", "eram.ast", ERAM_SOURCE, layout.clone());
         ex.set_source_offset(job.self_test_eram_offset_e7);
         let refs = job.adsb.is_some().then_some(positions.as_slice());
+        let mut eram_sealed = 0u64;
         let (info, inputs) = match src {
             EramSource::Dir(dir) => {
                 let loaded = load_with(
@@ -348,6 +349,7 @@ fn export_all(
                         return Err(e);
                     }
                 };
+                eram_sealed = loaded.sealed_window_dropped;
                 let inputs: Vec<String> = loaded
                     .inputs
                     .iter()
@@ -374,9 +376,14 @@ fn export_all(
         for (l, v) in eram_counts(&info) {
             ex.counts.push((l, v));
         }
+        ex.counts
+            .push(("sealed-window rows dropped".to_string(), eram_sealed));
         let mut f = ex.finish()?;
         f.report.inputs = inputs;
         f.report.details = eram_details(&info);
+        f.report.details.push(
+            "sealed-window rows dropped (ERAM): SFDPS frames left out by their receive time and records left out by their own time (message timestamp or position time) because they are in a sealed window".to_string(),
+        );
         done.systems.push(f);
     }
     Ok(())

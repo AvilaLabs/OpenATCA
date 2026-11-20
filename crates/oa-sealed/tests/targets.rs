@@ -284,3 +284,61 @@ fn the_bare_call_scan_finds_a_call_and_honours_the_allow_comment_and_the_test_mo
     let flags: Vec<(usize, bool)> = got.iter().map(|(n, _, ok)| (*n, *ok)).collect();
     assert_eq!(flags, [(1, false), (3, true), (4, true)]);
 }
+
+/// The accepted exceptions: oa-arinc424 must stay free of dependencies (so it cannot use
+/// oa-sealed) and oa-geo is a core crate (core crates do not depend on the shell crate oa-sealed).
+/// Their opens are in tests only, on fixtures and on the env-named inputs `OPENATCA_CIFP` and
+/// `OPENATCA_GEODTEST`; each file and its count of bare calls is pinned here.
+const EXCEPTION_CRATES: [(&str, &[(&str, usize)]); 2] = [
+    (
+        "oa-arinc424",
+        &[
+            ("tests/cifp_full.rs", 1),
+            ("tests/common/mod.rs", 1),
+            ("tests/file_and_limits.rs", 3),
+            ("tests/nasr_cross.rs", 2),
+        ],
+    ),
+    (
+        "oa-geo",
+        &[
+            ("tests/general.rs", 3),
+            ("tests/geodesic.rs", 1),
+            ("tests/purity.rs", 2),
+        ],
+    ),
+];
+
+// REQ: OA-SEAL-006
+#[test]
+fn the_arinc424_and_geo_exceptions_gain_no_bare_open_beyond_the_pinned_test_lines() {
+    for (krate, pinned) in EXCEPTION_CRATES {
+        let root = repo().join("crates").join(krate);
+        let mut files = Vec::new();
+        for sub in ["src", "examples", "tests", "benches"] {
+            rs_files(&root.join(sub), &mut files);
+        }
+        let mut found: BTreeMap<String, usize> = BTreeMap::new();
+        for f in files {
+            // A test module inside a source file is not cut off here: every bare call counts.
+            let text = std::fs::read_to_string(&f).unwrap();
+            let n = text
+                .lines()
+                .filter(|l| {
+                    let code = l.split("//").next().unwrap_or("");
+                    !code.trim_start().starts_with("///") && BARE.iter().any(|b| code.contains(b))
+                })
+                .count();
+            if n > 0 {
+                let rel = f.strip_prefix(&root).unwrap().to_string_lossy().to_string();
+                found.insert(rel, n);
+            }
+        }
+        let want: BTreeMap<String, usize> =
+            pinned.iter().map(|(f, n)| (f.to_string(), *n)).collect();
+        assert_eq!(
+            found, want,
+            "{krate}: a bare open or read was added (accepted exceptions are pinned, OA-SEAL-006)"
+        );
+    }
+}

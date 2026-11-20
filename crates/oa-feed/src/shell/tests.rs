@@ -2794,3 +2794,20 @@ fn replay_resyncs_past_a_corrupt_maximum_length_frame_in_the_larger_storage() {
     assert_eq!(r.health.messages, 1 + tail as u64);
     assert_eq!(r.bytes, stream.len() as u64);
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn replay_drops_and_counts_frames_received_in_a_sealed_window() {
+    // The window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
+    const FROM: i64 = 1_795_132_800_000_000_000;
+    const TO: i64 = 1_795_393_020_000_000_000;
+    let mut bytes = Vec::new();
+    for (i, t) in [FROM - 1, FROM, TO - 1, TO].iter().enumerate() {
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, 1, FLAG_BYTES, i as u64, *t, t / 1_000_000, b"x").unwrap();
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let rep = replay_sources(vec![std::io::Cursor::new(bytes)]).unwrap();
+    assert_eq!(rep.sealed_window_dropped, 2);
+    assert_eq!(rep.health.frames, 2);
+}

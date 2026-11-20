@@ -155,6 +155,7 @@ fn main() -> ExitCode {
     if extract_only {
         return match load(&feeds) {
             Ok(l) => {
+                eprintln!("sealed-window rows dropped: {}", l.sealed_window_dropped);
                 print!("{}", counts_text(&l));
                 ExitCode::SUCCESS
             }
@@ -263,6 +264,11 @@ struct RecordedOpts {
 /// report.
 fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), String> {
     let loaded = load(feeds).map_err(|e| e.to_string())?;
+    // Frames (by receive time) and records (by their own time) of the message feeds.
+    eprintln!(
+        "sealed-window rows dropped: {}",
+        loaded.sealed_window_dropped
+    );
     let clip = load_adsb(&o.clip).map_err(|e| e.to_string())?;
     let mut tcfg = config_with(o.bracket_s, o.max_sigma_m);
     tcfg.loo = !o.no_loo;

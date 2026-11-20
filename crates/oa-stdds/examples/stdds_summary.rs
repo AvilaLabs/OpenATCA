@@ -30,6 +30,8 @@ struct Ctx {
     frames: u64,
     other_frames: u64,
     bad_frames: u64,
+    /// Message frames received in a sealed window (OA-SEAL-014): dropped, counted.
+    sealed_window_dropped: u64,
     refused: [u64; 4],
     /// Bytes the frame reader would not take after a drain (a stall): counted, never dropped
     /// silently; the run exits non-zero.
@@ -39,6 +41,12 @@ struct Ctx {
 fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
     while let Some(ev) = reader.next() {
         match ev {
+            Ok(f)
+                if f.kind == FrameKind::Message && oa_sealed::in_sealed_window(f.recv_unix_ns) =>
+            {
+                ctx.sealed_window_dropped += 1;
+                oa_sealed::note_window_drops(1);
+            }
             Ok(f) if f.kind == FrameKind::Message => {
                 ctx.frames += 1;
                 if let Err(e) =
@@ -97,6 +105,7 @@ fn main() {
         frames: 0,
         other_frames: 0,
         bad_frames: 0,
+        sealed_window_dropped: 0,
         refused: [0; 4],
         stalled_bytes: 0,
     };
@@ -139,6 +148,10 @@ fn main() {
     println!(
         "frames: message {} other {} damaged {}",
         ctx.frames, ctx.other_frames, ctx.bad_frames
+    );
+    println!(
+        "sealed-window rows dropped: {} (frames, by receive time)",
+        ctx.sealed_window_dropped
     );
     println!("gzip: damaged {gz_damaged} truncated {truncated}");
     println!("messages parsed: {}", s.messages);

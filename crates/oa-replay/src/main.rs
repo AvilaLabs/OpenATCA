@@ -98,9 +98,12 @@ fn main() -> ExitCode {
         }
     };
     let elapsed = t0.elapsed();
+    // Frames by receive time, plus SFDPS, TBFM and TFMS rows by their own time.
     eprintln!(
-        "sealed-window rows dropped: {}",
-        report.sealed_window_dropped
+        "sealed-window rows dropped: {} (frames {}, rows {})",
+        report.sealed_window_dropped + p.sealed_window_dropped,
+        report.sealed_window_dropped,
+        p.sealed_window_dropped
     );
     // The frames' last checkpoints are drained before the summary, so none is left unprinted.
     if let Err(e) = drain_checkpoint_lines(&mut p, &mut out, quiet) {

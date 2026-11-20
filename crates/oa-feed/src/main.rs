@@ -74,6 +74,11 @@ fn replay(files: &[PathBuf]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Frames, not rows: a frame received in a sealed window is left out of the health record.
+    eprintln!(
+        "sealed-window rows dropped: {} (frames, by receive time)",
+        rep.sealed_window_dropped
+    );
     for fe in &rep.errors {
         println!("file={} {}", fe.file, fe.error);
     }

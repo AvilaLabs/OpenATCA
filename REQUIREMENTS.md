@@ -5613,6 +5613,10 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   that does not exist, and a listed target that uses the guard all fail the test. In the sources of every crate with a
   target that is not exempt, and in the library openers (oa-zip, oa-nasr, oa-dof, oa-tiff), a bare `File::open`, `fs::read`,
   `fs::read_to_string` or `fs::read_dir` fails the test unless its line, or the line before, carries `// seal-allow: <why>`.
+  Two crates are accepted exceptions, with the reason: oa-arinc424 (a no-dependency crate, so it cannot use oa-sealed) and
+  oa-geo (a core crate, which does not depend on the shell crate oa-sealed). Their bare opens are in tests only (fixtures and
+  the env-named `OPENATCA_CIFP` and `OPENATCA_GEODTEST` inputs); a test pins the count of bare calls per file and fails if
+  either crate gains one.
 - **OA-SEAL-007** The guard opens a file and then checks the real path of the opened descriptor (`/proc/self/fd`), so a
   link swapped in after the path check is caught and the file closed; the loaders of `oa-bench` and `oa-replay` run the
   guard before they stat a listed entry, and every guarded opener is this one function.
@@ -5652,6 +5656,12 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   tool built on them prints `sealed-window rows dropped: N` (also when N is 0) and, where it writes a report or README,
   records the line there: oa-bench (report note), oa-compass (README), oa-encounter (summary), oa-shadow (report header),
   oa-stdds-census (the read section); oa-truth-check, oa-sensorsim, oa-track and its examples, oa-replay print it.
+  The message loaders do the same by frame and by record: `oa_bench::input::load_with` (SFDPS, TBFM, TFMS; frames by receive
+  time, and a record whose own time (SFDPS message timestamp or position time, TBFM `msgTime`, TFMS `sourceTimeStamp`) is in
+  the window even when its frame was received outside it; `Loaded::sealed_window_dropped`, `Counts::sealed_window_dropped`),
+  the `oa-replay` pipeline (rows by their own time; `Pipeline::sealed_window_dropped`), `oa-feed replay` (frames;
+  `Report::sealed_window_dropped`), the `oa-stdds-census` reader (TAIS records by `mrtTime`) and the `stdds_summary` example.
+  For these the printed count is frames plus records and the tool says so.
 - **OA-SEAL-015** `oa-adsb-clip` refuses to clip a report whose time is in a sealed window: exit 2, nothing written, the count
   printed as `sealed-window rows dropped: N` (the reports are counted, not clipped). Otherwise it writes `<out>.source` next
   to the clip (not for `--out -`): each input path with its SHA-256, the window (`--from`, `--to` in Unix nanoseconds, `none`

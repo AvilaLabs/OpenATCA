@@ -291,6 +291,9 @@ pub struct Loaded {
     /// The replay state hash in hex, or why there is none.
     pub replay_hash: String,
     pub notes: Vec<String>,
+    /// Frames left out by receive time and records left out by their own time because they are in
+    /// a sealed window (OA-SEAL-014); counted, not hidden.
+    pub sealed_window_dropped: u64,
 }
 
 fn ingest_one(leg: &mut Legacy, r: &mut Reader, feed: FeedKind, bytes: &[u8], recv_ms: i64) {
@@ -327,6 +330,7 @@ pub fn load_with_max(feeds: &[FeedInput], open: &Opener, max_msg: u64) -> io::Re
     }
     let all_oaf = !listed.is_empty() && listed.iter().all(|(_, k, _, _)| *k == DirKind::Oaf);
     let mut notes = Vec::new();
+    let mut sealed_frames = 0u64;
     let replay = if all_oaf {
         let mut p = new_pipeline(PipelineConfig::default())
             .map_err(|e| io::Error::other(format!("{e:?}")))?;
@@ -350,6 +354,7 @@ pub fn load_with_max(feeds: &[FeedInput], open: &Opener, max_msg: u64) -> io::Re
             }
         };
         let rep = merge_streams(specs, 1 << 16, &mut sink)?;
+        sealed_frames += rep.sealed_window_dropped;
         let bad: u64 = rep.errors.iter().sum();
         if bad > 0 {
             notes.push(format!(
@@ -424,7 +429,8 @@ pub fn load_with_max(feeds: &[FeedInput], open: &Opener, max_msg: u64) -> io::Re
                             );
                         }
                     };
-                    merge_streams(specs, 1 << 16, &mut sink)?;
+                    sealed_frames +=
+                        merge_streams(specs, 1 << 16, &mut sink)?.sealed_window_dropped;
                 }
             }
         }
@@ -447,11 +453,17 @@ pub fn load_with_max(feeds: &[FeedInput], open: &Opener, max_msg: u64) -> io::Re
         );
         inputs.push(input_hash(&label, files, dones)?);
     }
+    let sealed_window_dropped = sealed_frames + leg.counts.sealed_window_dropped;
+    notes.push(format!(
+        "sealed-window rows dropped: {sealed_window_dropped} (frames left out by receive time: {sealed_frames}; records left out by their own time: {})",
+        leg.counts.sealed_window_dropped
+    ));
     Ok(Loaded {
         legacy: leg,
         inputs,
         replay_hash: replay,
         notes,
+        sealed_window_dropped,
     })
 }
 

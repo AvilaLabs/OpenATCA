@@ -72,6 +72,9 @@ pub struct Report {
     pub errors: Vec<FileError>,
     /// Every truncated or damaged compressed file.
     pub gzip: Vec<GzNote>,
+    /// Frames left out of `health` because their receive time is in a sealed window
+    /// (OA-SEAL-014); counted, not hidden.
+    pub sealed_window_dropped: u64,
 }
 
 /// How one source is being read.
@@ -91,6 +94,7 @@ pub fn replay_sources<R: Read>(sources: Vec<R>) -> io::Result<Report> {
     let mut gzip = Vec::new();
     let mut bytes = 0u64;
     let mut files = 0usize;
+    let mut sealed = 0u64;
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
     let mut chunk = vec![0u8; 64 * 1024];
     for (i, mut src) in sources.into_iter().enumerate() {
@@ -118,13 +122,13 @@ pub fn replay_sources<R: Read>(sources: Vec<R>) -> io::Result<Report> {
             match &mut mode {
                 Mode::Raw => {
                     bytes += n as u64;
-                    feed_frames(&mut reader, &mut health, &mut errors, i, data)
+                    feed_frames(&mut reader, &mut health, &mut errors, &mut sealed, i, data)
                         .map_err(work_refusal_error)?;
                 }
                 Mode::Gzip(g) => {
                     let r = g.push(data, &mut |b: &[u8]| -> Result<(), FrameWorkRefusal> {
                         bytes += b.len() as u64;
-                        feed_frames(&mut reader, &mut health, &mut errors, i, b)?;
+                        feed_frames(&mut reader, &mut health, &mut errors, &mut sealed, i, b)?;
                         Ok(())
                     });
                     match r {
@@ -153,7 +157,7 @@ pub fn replay_sources<R: Read>(sources: Vec<R>) -> io::Result<Report> {
                 });
             }
         }
-        drain(&mut reader, &mut health, &mut errors, i).map_err(work_refusal_error)?;
+        drain(&mut reader, &mut health, &mut errors, &mut sealed, i).map_err(work_refusal_error)?;
         if let Some(e) = reader.finish() {
             observe_error(&mut health, &e);
             errors.push(FileError { file: i, error: e });
@@ -167,6 +171,7 @@ pub fn replay_sources<R: Read>(sources: Vec<R>) -> io::Result<Report> {
         bytes,
         errors,
         gzip,
+        sealed_window_dropped: sealed,
     })
 }
 
@@ -175,6 +180,7 @@ fn feed_frames(
     reader: &mut FrameReader<'_>,
     health: &mut FeedHealth,
     errors: &mut Vec<FileError>,
+    sealed: &mut u64,
     file: usize,
     data: &[u8],
 ) -> Result<(), FrameWorkRefusal> {
@@ -184,7 +190,7 @@ fn feed_frames(
         let budget = FrameWorkBudget::for_capacity(reader.capacity());
         let took = reader.push_with_budget(data.get(off..).unwrap_or(&[]), budget)?;
         off += took;
-        drain(reader, health, errors, file)?;
+        drain(reader, health, errors, sealed, file)?;
         if took == 0 {
             break;
         }
@@ -196,6 +202,7 @@ fn drain(
     r: &mut FrameReader<'_>,
     h: &mut FeedHealth,
     errors: &mut Vec<FileError>,
+    sealed: &mut u64,
     file: usize,
 ) -> Result<(), FrameWorkRefusal> {
     loop {
@@ -204,6 +211,11 @@ fn drain(
             return Ok(());
         };
         match ev {
+            // A frame received inside a sealed window is dropped and counted (OA-SEAL-014).
+            Ok(f) if oa_sealed::in_sealed_window(f.recv_unix_ns) => {
+                *sealed += 1;
+                oa_sealed::note_window_drops(1);
+            }
             Ok(f) => observe_frame(h, &f, f.recv_unix_ns),
             Err(e) => {
                 observe_error(h, &e);

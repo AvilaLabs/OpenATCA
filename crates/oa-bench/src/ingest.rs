@@ -94,6 +94,15 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
             leg.counts.note(DROP_SFDPS_NO_GUFI.into(), 1);
             continue;
         };
+        // A record whose own time is in a sealed window is dropped and counted, whatever the
+        // receive time of its frame.
+        if ev.ts_ms.get(row).is_some_and(|&t| sealed_ms(t))
+            || (row_has(ev, row, Field::PositionTime)
+                && ev.pos_time_ms.get(row).is_some_and(|&t| sealed_ms(t)))
+        {
+            drop_sealed(leg);
+            continue;
+        }
         let Some(f) = flight_ix(leg, gufi) else {
             leg.counts.note(DROP_SFDPS_FLIGHT_FULL.into(), 1);
             continue;
@@ -220,6 +229,17 @@ const DROP_TBFM_NO_TIME: &str = "TBFM values dropped, reason time absent";
 const DROP_TFMS_NO_ROW: &str = "TFMS rows dropped, reason row not readable";
 const DROP_TFMS_NOT_ESTIMATE: &str = "TFMS times dropped, reason type is not ESTIMATED";
 
+/// Whether a record's own time (Unix milliseconds) is in a sealed window.
+fn sealed_ms(t: i64) -> bool {
+    oa_sealed::in_sealed_window(t.saturating_mul(1_000_000))
+}
+
+/// Counts a record left out for its own time in a sealed window (OA-SEAL-014).
+fn drop_sealed(leg: &mut Legacy) {
+    leg.counts.sealed_window_dropped += 1;
+    oa_sealed::note_window_drops(1);
+}
+
 fn tb_time(t: i64) -> Option<i64> {
     (t != TBFM_NO_TIME).then_some(t)
 }
@@ -255,6 +275,10 @@ pub fn ingest_tbfm(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
             leg.counts.note(DROP_TBFM_NO_ROW.into(), 1);
             continue;
         };
+        if sealed_ms(row.msg_ms) {
+            drop_sealed(leg);
+            continue;
+        }
         let entries: [(u8, usize, bool); 4] = [
             (tbfm_kind::ETA_MFX, pt::MFX, true),
             (tbfm_kind::ETA_RWY, pt::RWY, true),
@@ -328,6 +352,10 @@ pub fn ingest_tfms(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
             leg.counts.note(DROP_TFMS_NO_ROW.into(), 1);
             continue;
         };
+        if sealed_ms(f.src_ms) {
+            drop_sealed(leg);
+            continue;
+        }
         let issue = if f.src_ms == TFMS_NO_TIME {
             NO_TIME
         } else {

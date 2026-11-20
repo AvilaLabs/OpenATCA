@@ -351,6 +351,9 @@ pub struct Pipeline {
     /// TBFM rows with no usable key, TFMS flight rows with no flight reference, and FNS
     /// cancellations that name no NOTAM held.
     pub rows_unlinked: u64,
+    /// SFDPS, TBFM and TFMS rows left out because their own time is in a sealed window
+    /// (OA-SEAL-014); not applied, not in `rows_seen`.
+    pub sealed_window_dropped: u64,
     /// TBFM messages by `oa_tbfm::MsgKind`.
     pub tbfm_kinds: [u64; MSG_KIND_COUNT],
     /// Failures by kind.
@@ -397,6 +400,7 @@ pub fn new_pipeline(cfg: PipelineConfig) -> Result<Pipeline, PipelineError> {
         rows_out_of_order: [0; FEED_COUNT],
         rows_refused_full: [0; FEED_COUNT],
         rows_unlinked: 0,
+        sealed_window_dropped: 0,
         tbfm_kinds: [0; MSG_KIND_COUNT],
         errors: [0; ERR_COUNT],
     })
@@ -738,10 +742,29 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
     };
     count_error(&mut p.errors, full, u64::from(summary.not_decoded));
     for i in 0..p.events.len {
+        // A row whose own time is in a sealed window is dropped and counted, whatever the receive
+        // time of its frame.
+        if p.events.ts_ms.get(i).is_some_and(|&t| sealed_ms(t))
+            || (oa_fixm::has_field(&p.events, i, oa_fixm::Field::PositionTime)
+                && p.events.pos_time_ms.get(i).is_some_and(|&t| sealed_ms(t)))
+        {
+            drop_sealed(p);
+            continue;
+        }
         let a = apply_sfdps(&mut p.table, &p.events, i, now);
         bump(&mut p.rows_seen, FeedKind::Sfdps, 1);
         note(p, FeedKind::Sfdps, a);
     }
+}
+
+/// Whether a row's own time (Unix milliseconds) is in a sealed window.
+fn sealed_ms(t: i64) -> bool {
+    oa_sealed::in_sealed_window(t.saturating_mul(1_000_000))
+}
+
+fn drop_sealed(p: &mut Pipeline) {
+    p.sealed_window_dropped += 1;
+    oa_sealed::note_window_drops(1);
 }
 
 fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) {
@@ -807,6 +830,10 @@ fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     }
     for i in 0..rows_len(&p.rows) {
+        if oa_tbfm::row_at(&p.rows, i).is_some_and(|r| sealed_ms(r.msg_ms)) {
+            drop_sealed(p);
+            continue;
+        }
         let a = apply_tbfm(&mut p.table, &p.rows, i, now);
         bump(&mut p.rows_seen, FeedKind::Tbfm, 1);
         note(p, FeedKind::Tbfm, a);
@@ -840,6 +867,10 @@ fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     }
     for i in 0..flights_len(&p.tfms_rows.flights) {
+        if oa_tfms::flight_at(&p.tfms_rows.flights, i).is_some_and(|f| sealed_ms(f.src_ms)) {
+            drop_sealed(p);
+            continue;
+        }
         let a = apply_tfms_flight(&mut p.tfms, &p.table, &p.tfms_rows, i, now);
         bump(&mut p.rows_seen, FeedKind::Tfms, 1);
         match a {

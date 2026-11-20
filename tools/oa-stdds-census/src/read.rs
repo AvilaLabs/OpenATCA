@@ -97,6 +97,14 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
                         ctx.rs.tais_messages += 1;
                         let src = if m.src_present { m.src } else { [0; 8] };
                         for r in &m.records {
+                            // A record timed (`mrtTime`) inside a sealed window is dropped and
+                            // counted even when its frame was received outside it.
+                            if oa_sealed::in_sealed_window(r.mrt_time_ms.saturating_mul(1_000_000))
+                            {
+                                ctx.rs.sealed_window_dropped += 1;
+                                oa_sealed::note_window_drops(1);
+                                continue;
+                            }
                             ctx.rs.tais_records += 1;
                             ctx.census.observe(src, r);
                         }
@@ -621,7 +629,7 @@ mod tests {
         // The list's window: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z.
         const FROM: i64 = 1_795_132_800_000_000_000;
         const TO: i64 = 1_795_393_020_000_000_000;
-        let m = msg("ZZA", &[(1, "2026-11-20T00:00:00Z", None)]).into_bytes();
+        let m = msg("ZZA", &[(1, "2026-11-19T12:00:00Z", None)]).into_bytes();
         let mut bytes = Vec::new();
         for (i, t) in [FROM - 1, FROM, TO - 1, TO].into_iter().enumerate() {
             let mut buf = vec![0u8; MAX_FRAME_LEN];
@@ -633,5 +641,30 @@ mod tests {
         let rs = read_bytes(&bytes, &mut census).unwrap();
         assert_eq!((rs.frames, rs.sealed_window_dropped), (2, 2));
         assert_eq!(rs.tais_messages, 2);
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
+    fn a_record_timed_in_the_window_is_dropped_though_its_frame_was_received_before_it() {
+        const FROM: i64 = 1_795_132_800_000_000_000;
+        // One message, four records: mrtTime at from - 1 s (kept), at from (dropped), at to - 1 s
+        // (dropped), at to (kept).
+        let m = msg(
+            "ZZA",
+            &[
+                (1, "2026-11-19T23:59:59Z", None),
+                (2, "2026-11-20T00:00:00Z", None),
+                (3, "2026-11-23T00:16:59Z", None),
+                (4, "2026-11-23T00:17:00Z", None),
+            ],
+        )
+        .into_bytes();
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        // The frame was received at from - 1 ns, outside the window.
+        let n = encode_frame(&mut buf, FrameKind::Message as u8, 0, 0, FROM - 1, 0, &m).unwrap();
+        let mut census = Census::new();
+        let rs = read_bytes(&buf[..n], &mut census).unwrap();
+        assert_eq!((rs.frames, rs.tais_messages, rs.tais_records), (1, 1, 2));
+        assert_eq!(rs.sealed_window_dropped, 2);
     }
 }

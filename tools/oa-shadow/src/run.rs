@@ -155,6 +155,18 @@ pub fn load_eram(
         open,
     )
     .map_err(|e| format!("{}: {e}", args.sfdps_dir.display()))?;
+    header.push(format!(
+        "sealed-window rows dropped: {}",
+        loaded.sealed_window_dropped
+    ));
+    header.push(
+        "  (the line above counts SFDPS frames by receive time and records by their own time)"
+            .to_string(),
+    );
+    eprintln!(
+        "sealed-window rows dropped: {}",
+        loaded.sealed_window_dropped
+    );
     for i in &loaded.inputs {
         header.push(format!(
             "SFDPS input: {} files, {} bytes, sha256 {}",
