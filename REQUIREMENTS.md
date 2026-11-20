@@ -6208,3 +6208,26 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   truth altitude and the median ratio of STDDS speed to truth speed on the paired samples, with "units
   suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
   ratio is outside 0.8 to 1.25.
+
+## M4 legacy trajectory measurement (tools/oa-legacy-traj)
+
+- **OA-LTJ-001** The time an aircraft reached a point is the time of closest approach of its ADS-B truth path to the point, interpolated linearly between the two samples either side of it.
+- **OA-LTJ-002** A crossing counts only when the closest approach is within the configured cut distance (development value 2 NM); the closest approach of every (flight, point) searched is counted by distance bucket in the report.
+- **OA-LTJ-003** A passage that begins or ends at the start or end of the truth path, or at a hole in the truth, is not scored and is counted as such; a path with no sample is counted separately.
+- **OA-LTJ-004** An estimate is scored against the first passage whose closest approach is not before the time the estimate was issued; the estimated time never chooses the passage.
+- **OA-LTJ-005** The landing time is the last airborne report before the first ground report, where that report is within the runway radius (5 NM) of the airport reference point and the gap to the ground report is within the configured limit; a landing outside either is counted by reason.
+- **OA-LTJ-006** The look-ahead is the actual time minus the issue time of the message that carried the estimate; the bins are 0-5, 5-10, 10-20, 20-40, 40-60 and 60-120 minutes, lower edge included, and a look-ahead outside them is excluded and counted.
+- **OA-LTJ-007** The error is the estimate minus the actual time, in seconds: positive when the estimate is later than what happened.
+- **OA-LTJ-008** Each bin reports n, median, mean, 5th and 95th percentile and RMS, computed in a fixed order whatever order the values arrive in.
+- **OA-LTJ-009** A flight that carries an aircraft address joins by it when a truth leg of that address overlaps the flight's interval; otherwise it has no truth, and its callsign is not tried.
+- **OA-LTJ-010** A flight without an address joins by callsign when the truth legs with that callsign that overlap its interval are of one aircraft; several aircraft is ambiguous, none is no truth.
+- **OA-LTJ-011** A flight with no address and no callsign, and a flight whose records name more than one address, each have their own join outcome.
+- **OA-LTJ-012** Every flight is counted under one join outcome and every estimate is either in a bin or under one exclusion reason; a flight with no truth is counted and its estimates are excluded, none is dropped.
+- **OA-LTJ-013** The report text and the CSV are a function of the counts alone, and every number carries its n.
+- **OA-LTJ-014** ERAM's predicted time at each point of a converted route is scored against the crossing of the point, by look-ahead from the route message; a point's position is its own coordinates, else the one place its name has in the recordings.
+- **OA-LTJ-015** TBFM's meter-fix and scheduled times are scored against the crossing of the meter fix, and its runway times against the landing at the arrival airport.
+- **OA-LTJ-016** TFMS's arrival estimates are scored against the landing at the arrival airport; its departure estimates are counted and not scored.
+- **OA-LTJ-017** The tool takes the three recording directories, one or more ADS-B clips and the output directory, refuses a missing, repeated or unknown argument, and states its defaults.
+- **OA-LTJ-018** Output files are written under a temporary name and renamed only after all are written, and none is left under its temporary name.
+- **OA-LTJ-019** The tool refuses every input and output path that resolves into sealed data, before anything is opened or created.
+- **OA-LTJ-020** An airport reference point is the place the route points give its code when they give one; otherwise it is derived from the recordings as the centre of the largest group of at least three landings within 5 NM of each other among those of the aircraft of the flights that name the airport as their arrival, and an airport with no such group has none.

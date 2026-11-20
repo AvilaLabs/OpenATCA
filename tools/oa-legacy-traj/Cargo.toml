@@ -1,0 +1,22 @@
+[package]
+name = "oa-legacy-traj"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates; not outside dependencies (RULESET F1).
+oa-adsb = { path = "../../crates/oa-adsb" }
+oa-bench = { path = "../../crates/oa-bench" }
+oa-math = { path = "../../crates/oa-math" }
+oa-replay = { path = "../../crates/oa-replay" }
+oa-ieee = { path = "../../crates/oa-ieee" }
+oa-sealed = { path = "../../crates/oa-sealed" }
+
+[package.metadata.openatca]
+class = "split"

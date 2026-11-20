@@ -46,6 +46,7 @@ members = [
     "crates/oa-sealed",
     "tools/oa-build-info",
     "tools/oa-encounter",
+    "tools/oa-legacy-traj",
     "tools/oa-compass",
     "tools/oa-perf",
     "tools/oa-replay-diff",
