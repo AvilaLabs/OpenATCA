@@ -1,0 +1,34 @@
+oa-feed-gaps report (P-006 section 6)
+window: 2026-11-15T00:17:00.000000000Z to 2026-11-15T23:59:59.000000000Z (85379.000000000 s)
+limit: 600.000000000 s; an interval over it is damage
+[SFDPS]
+file: scds-sfdps-20261115T001704Z-0000.oaf
+files: 1
+reader gzip and frame errors: 0
+frames earlier than the one before in file order (sorted, not damage): 0
+frames left out in a sealed window (not damage): 0
+messages in window: 138
+first message: 2026-11-15T00:17:04.000000000Z (4.000000000 s after the window start)
+last message: 2026-11-15T11:57:04.000000000Z (43375.000000000 s before the window end)
+largest interval: 43375.000000000 s from 2026-11-15T11:57:04.000000000Z to 2026-11-15T23:59:59.000000000Z
+intervals over 600 s: 2
+  1200.000000000 s from 2026-11-15T00:47:04.000000000Z to 2026-11-15T01:07:04.000000000Z
+  43375.000000000 s from 2026-11-15T11:57:04.000000000Z to 2026-11-15T23:59:59.000000000Z
+out-of-order times: 0
+[ADS-B]
+file: c.oaf
+records dropped from decoded frames (not damage): 0
+rows left out in a sealed window (not damage): 0
+messages in window: 282
+first message: 2026-11-15T00:17:04.000000000Z (4.000000000 s after the window start)
+last message: 2026-11-15T23:57:04.000000000Z (175.000000000 s before the window end)
+largest interval: 1200.000000000 s from 2026-11-15T00:47:04.000000000Z to 2026-11-15T01:07:04.000000000Z
+intervals over 600 s: 1
+  1200.000000000 s from 2026-11-15T00:47:04.000000000Z to 2026-11-15T01:07:04.000000000Z
+out-of-order times: 0
+damaged frames: 0
+excluded intervals (each over 600 s and the 300.000000000 s after it, merged): 2, 44875.000000000 s of the 3600.000000000 s allowed
+exclude 2026-11-15T00:47:04.000000000Z 2026-11-15T01:12:04.000000000Z
+exclude 2026-11-15T11:57:04.000000000Z 2026-11-15T23:59:59.000000000Z
+clip log: summaries=1 archive_lines=1 traces_refused=0 kept=282 archive_complete=true reports_in_clip=282
+DAMAGED: excluded intervals total 44875.000000000 s, over 3600.000000000 s

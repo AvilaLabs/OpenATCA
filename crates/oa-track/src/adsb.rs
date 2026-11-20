@@ -29,7 +29,7 @@ use oa_truth::{
     nacp_epu_m, quality_check, QualityState, TruthConfig, DEFAULT_CONFIG, REMOVE_KINDS, SIGMA95,
 };
 
-use crate::params::{BARO_QUANT_FT, DEFAULT_NACV, NACV_VEL_SIGMA_MPS, POS_SIGMA_SCALE};
+use crate::params::{BARO_QUANT_FT, DEFAULT_NACV, NACV_VEL_SIGMA_MPS, POS_SIGMA_SCALE, VEL_LAG_S};
 use crate::types::{Measurement, M_ALT_GEOMETRIC, M_HAS_VEL, NONE_I32 as NONE_ALT, NO_IDENT};
 
 const MPS_PER_KT: f64 = 0.514_444_444_444;
@@ -158,6 +158,7 @@ pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measuremen
             },
             flags: 0,
             category: row.category,
+            vel_lag_s: 0.0,
         };
         if row.gs_dkt != NONE_U16 && row.track_ddeg != NONE_U16 {
             let nacv = match v.nacv {
@@ -181,6 +182,7 @@ pub fn adsb_measurements(reports: &Reports, cfg: &AdsbConfig) -> (Vec<Measuremen
                 let vv = (sv * sv) as f32;
                 m.vel_cov_m2s2 = [vv, 0.0, vv];
                 m.flags |= M_HAS_VEL;
+                m.vel_lag_s = VEL_LAG_S as f32;
                 stats.with_velocity += 1;
             } else {
                 stats.velocity_refused += 1;

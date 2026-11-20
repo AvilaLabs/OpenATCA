@@ -23,7 +23,7 @@ Harnesses are compiled only under `#[cfg(kani)]`. They are not in any shipped bu
 `crates/oa-asterix/src/proofs.rs`, `crates/oa-asterix/src/proofs_wire.rs`,
 `crates/oa-adsb/src/frames.rs`, `crates/oa-feed/src/core/health.rs` and
 `crates/oa-replay/src/core/clock.rs`, `crates/oa-track/src/time_gate.rs`, `crates/oa-track/src/fixed_map.rs`,
-`crates/oa-math/src/trig.rs` and `crates/oa-truth/src/shell/clip.rs` (each at the end, in a `proofs` module).
+`crates/oa-math/src/trig.rs`, `crates/oa-truth/src/shell/clip.rs` and `crates/oa-runway/src/occupy.rs` (each at the end, in a `proofs` module).
 
 Each harness is tagged `// REQ: OA-...-1nn` directly above `#[kani::proof]`. `oa-trace` links the
 harness to the requirement and lists it as a proof harness, apart from tests. It does not run
@@ -32,6 +32,28 @@ Kani; the results are the table below.
 Python tests in `test_*.py` modules use `# REQ: OA-...` directly above `def test_*`. They link as tests, with malformed/non-test tags refused. Traceability records linkage; it does not execute Rust, Python or proof checks.
 
 The registered suite also uses `types_proofs.rs`, `tracker_proofs.rs`, `tracker_rollback_paths.rs` and `time_gate_proofs_full.rs` under `crates/oa-track/src`. Its caller, late-fixture and full-capacity sensor claim boundaries are stated in [Rust assurance](RUST_ASSURANCE.md).
+
+## Which method for which property
+
+Kani is used where a bounded search of every input is both feasible and the strongest check
+available:
+- parsers and decoders of untrusted input (ASTERIX, the ADS-B frames, the feed frames), whose inputs
+  are bounded by nature;
+- integer and state logic: the clock, the time gate, fixed-capacity tables and rollback;
+- the absence of panics.
+
+Floating-point geometry and the safety predicates built on it (conflict alert, MSAW, runway occupancy)
+are not given Kani proofs as a rule. Bounded proofs of symbolic doubles mostly do not finish, and the
+ones that do have proved small properties. They are checked instead by:
+1. seeded property sweeps over the whole input domain, with the edge cases kept as separate tests;
+2. a search for missed or late alerts, each failure kept as a regression test (being built for
+   conflict alert and MSAW);
+3. dense tests against exact or high-precision oracles.
+
+A property that was proved and is now tested says so in its requirement. On 2026-11-20 eleven proofs
+were retired this way and their properties moved to sweeps of 20,000 to 40,000 cases. The ids were
+`full-sensor-live-count`, `inhibition-in-force`, `inhibition-band`, `ca-horizontal-now-step`,
+`ca-predict-ttl`, `ca-chord-d2` and five of the runway proofs.
 
 ## How to run
 
@@ -43,7 +65,7 @@ cargo kani -p oa-asterix --harness fspec_cat048_5
 cargo kani -p oa-replay  --harness clock_observe_total_and_confirms
 cargo kani -p oa-feed    --harness observe_seq_accumulation_saturates
 cargo kani -p oa-adsb    --harness decode_row_total_ads2
-cargo kani -p oa-adsb    --harness payload_records_ads2_4 -Z stubbing
+cargo kani -p oa-adsb    --harness payload_records_ads3_4 -Z stubbing
 cargo kani -p oa-track   --harness gate_step_back_needs_span_count_and_spread
 ```
 
@@ -55,6 +77,16 @@ into `target/`.
 
 Run on one laptop, single job, CBMC 6.11.0. Time is wall clock including compilation; memory is the
 peak resident size of the run. Every harness below verified successfully (no counterexample).
+
+These are the runs as first recorded. Registration is a separate step: only a harness in
+`tools/rust_proofs.json` is run by CI, and the registry records its own CI time per proof
+(`ci_seconds`). Registered on 2026-11-20 from this table: the ASTERIX primitives, time and
+identification round trips, block framing at three octets, the CAT048 walk and the three FSPEC proofs,
+and the five ADS-B proofs. Not registered:
+- `walk_every_item_cat021_24` and `walk_every_item_cat062_24`. Under the registry runner both ran out
+  of their 900 s budget without a result, so they count as unproved until they finish there;
+- the clock, time gate, `fixed_map`, trigonometry, clip and feed-sequence harnesses, which have not yet
+  been run under the registry runner.
 
 | Harness | Property | Bound | Result | Time | Peak memory |
 |---|---|---|---|---|---|
@@ -71,7 +103,7 @@ peak resident size of the run. Every harness below verified successfully (no cou
 | `decode_row_total_ads2` (oa-adsb) | record decoder: no panic or overflow; a kept row has an in-range position, a known or `unknown` or absent source, anomaly bits among the three that exist | every 80-octet record | proved | 0:14 | 251 MB |
 | `decode_row_total_ads1` | same for the first layout | every 64-octet record | proved | 0:07 | 213 MB |
 | `parse_header_any_bytes_up_to_2_records` | payload header check: no panic; an accepted header means length is exactly header plus count records | any bytes up to 176 octets (header and 2 records) | proved | 0:15 | 328 MB |
-| `payload_records_ads2_4` | `decode_payload_lenient` and `decode_payload`: no panic or overflow, kept + dropped = records, each anomaly count at most kept, strict reports only a record below the count | valid header, exactly 4 records, `ADS2`; `decode_row` and `reports_push` stubbed (see below) | proved | 3:32 | 3.2 GB |
+| `payload_records_ads3_4` | `decode_payload_lenient` and `decode_payload`: no panic or overflow, kept + dropped = records, each anomaly count at most kept, strict reports only a record below the count | valid header, exactly 4 records, the current (`ADS3`) magic; the records are all zero and the stubbed `decode_row` chooses keep or drop, so the counts are checked, not the record content; `reports_push` stubbed (see below). The previous (`ADS2`) magic shares the header branch and is not proved separately | proved | 4:54 | 5.7 GB |
 | `payload_records_ads1_4` | same | same, `ADS1` (64-octet records) | proved | 2:49 | 3.2 GB |
 | `observe_seq_accumulation_saturates` (oa-feed) | `observe_seq`: no panic or overflow; a forward jump adds one gap, the saturated missing count and records that gap; a late frame inside the last gap takes exactly one off `missing`, counts as reordered and not as a regression, and leaves the expectation; the open gap stays inside `missing` and below the next expected number; `missing` never exceeds the sum of every gap length added (a ghost total) | every `seq`, every `frames`, `seq_next`, `seq_last`, `gaps`, `missing`, `reordered`; `duplicates`, `regressions` and `reordered` below `u64::MAX`; the gap record inside `missing` and below `seq_next` (none before the first frame); `missing` at most the ghost total | proved | 0:12 | not re-measured |
 | `clock_observe_total_and_confirms` (oa-replay) | `clock_observe` over the per-feed clock: no panic or overflow for any feed index, `now` and `t`; a step carries the saturated difference, comes only from a candidate count of at least `CLOCK_CONFIRM_FRAMES - 1` in the frame's own feed, clears every count, and none comes from an empty candidate state; a frame never adds candidates to another feed; every count stays at most `CLOCK_CONFIRM_FRAMES` | any `usize` feed, every `i64` pair, five feeds each with `cand_n` at most `CLOCK_CONFIRM_FRAMES`, counters below `u64::MAX` | proved | 0:17 | not re-measured |
@@ -186,6 +218,42 @@ itself is a bijection tested by the unit tests, not proved.
   `Reports` pushes did not finish within 10 minutes. It stays tested.
 * A symbolic ADS-B payload with more than 4 records, and the real (unstubbed) record decoder inside
   the payload loop: 1 record with everything real ran past 15 minutes and 4.5 GB.
+
+### Conflict alert: what is proved and what is tested in `predict`
+
+`oa_ca::solve::predict(...)` returns `None` or a prediction whose time to loss is finite and inside
+the look-ahead and whose two misses are finite and not negative (OA-CA-029). `predict` is exactly
+`conflict_span`, then `horizontal_miss` and `vertical_miss`, then `prediction_of`. The split equals
+the unsplit code bit for bit (`crates/oa-ca/tests/split.rs`). Constants: `A_MAX = 3.3e7`,
+`DISC_MAX = 4e19`, `TC_MAX = 4e18`, `ROOT_MAX = 7e9`, `POINT_MAX = 5e7`. Harnesses are in
+`crates/oa-ca/src/solve.rs` (`solve::proofs`); the ids are those of `tools/rust_proofs.json`.
+
+| Contract | Established by | Used by |
+|---|---|---|
+| `a = vx^2 + vy^2` in `[0, A_MAX]`; discriminant finite and `<= DISC_MAX` | proved, `ca-horizontal-now-bounds` | the decision of the first step |
+| time of closest approach finite, `<= TC_MAX`, for a speed not taken as zero | proved, `ca-horizontal-now-approach` | the first step, `ca-horizontal-now-root` |
+| `sqrt(disc)` finite, `0 <= root <= ROOT_MAX`, for finite `disc` in `(0, DISC_MAX]` | proved, `ca-horizontal-now-sqrt` | `ca-horizontal-now-root` |
+| a pair inside the limit now: `step_of` gives a current span or a root step with `disc > 0` | tested: edge margins and 40,000 random inputs | `ca-horizontal-now-root` (OA-CA-028) |
+| the horizontal span is finite and ordered inside the look-ahead | proved, `ca-horizontal-span` (whole solver) | `ca-predict-span` (as the ordered span it takes) |
+| the vertical span is finite and ordered; the vertical miss is finite, not negative | proved, `ca-vertical-span` | `ca-predict-span`, `prediction_of` |
+| the conflict span, through `meet`, is finite and ordered inside the look-ahead | proved, `ca-predict-span` | `prediction_of` |
+| the closest point is finite, within `POINT_MAX`, at a time in `[0, t]` | proved, `ca-horizontal-miss-point` | the horizontal miss |
+| the horizontal miss, the exactly rounded root of `x*x + y*y`, is finite and not negative | proved, `ca-horizontal-miss`, on the real function | `prediction_of` |
+| time to loss finite and in `[0, t]`; misses carried unchanged | tested: edge cases and 40,000 random spans and misses | the end-to-end property |
+
+So the end-to-end property is a composition of proofs with two tested links, the first step's
+decision and `prediction_of`. Both are short branching functions that the sweeps cover over their
+whole domain. The miss rests on the exact rounding of `oa_ieee::sqrt` and on no other library
+contract. The crate no longer calls `oa_math::hypot`; its agreement with `hypot` is tested
+(`tests/miss.rs`).
+
+### Conflict alert: the grid's pair test (OA-CA-033, OA-CA-034)
+
+Nothing in the pair test is proved. The squared chord of two vectors with components in `[-1, 1]` is
+finite, not negative, symmetric and zero for one point, and the flat test's validity only narrows as a
+tangent or the radius grows. That the chord is never longer than the arc, and that a valid flat test
+accepts every pair the exact projection does, rest on the trigonometry of `oa_math`. All of these are
+dense deterministic tests (`grid::tests`, `tests/ca.rs`).
 
 ## What the proofs do not cover
 

@@ -88,7 +88,13 @@ fn slice_main(args: &[String]) -> ExitCode {
         }
     };
     let (inp, out, from, to) = (a.input, a.out, a.from, a.to);
-    match slice::slice_dir(&inp, &out, from, to) {
+    // The records that could be in a sealed window are counted and the drop line printed on every
+    // exit, a refusal included.
+    let mut drops = oa_sealed::DropReport::to_stdout();
+    let mut sealed = 0u64;
+    let result = slice::slice_dir_tallied(&inp, &out, from, to, &mut sealed);
+    drops.add(sealed);
+    match result {
         Ok(files) => {
             for f in &files {
                 println!(

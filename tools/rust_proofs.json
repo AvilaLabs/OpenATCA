@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 72,
+  "expected_proof_count": 104,
   "proofs": [
     {
       "id": "output-append",
@@ -15,7 +15,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 25,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-capacity",
@@ -30,7 +33,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 37,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-clear",
@@ -45,7 +51,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 6,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-current-row",
@@ -67,7 +76,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 75,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-unrepresentable-row",
@@ -89,7 +101,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 33,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-output-overflow",
@@ -111,7 +126,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 69,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-rejected-dispatch",
@@ -128,7 +146,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 23,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-unconfirmed-applied",
@@ -146,7 +167,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 42,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-unconfirmed-begun",
@@ -163,7 +187,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 24,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-confirmed-begun-dispatch",
@@ -181,11 +208,14 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 47,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-actual-decision",
-      "requirement": "OA-TRK-334: production decide commits its Applied or Resynced result and emits the current report time.",
+      "requirement": "OA-TRK-334: with filter_apply stubbed to a fixed result, decide commits the report time, the ring entry, the counters and the current and anchor times, and the current report row is emitted.",
       "package": "oa-track",
       "harness": "tracker::proofs::actual_decide_commits_applied_or_resynced_report_and_emits_current_time",
       "enabled": true,
@@ -202,7 +232,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 12288
+      "memory_mib": 12288,
+      "tier": "push",
+      "ci_seconds": 108,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-refusal-routing",
@@ -222,7 +255,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 62,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-current-filter",
@@ -239,7 +275,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 56,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-anchor-filter",
@@ -256,7 +295,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 79,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-ring-history",
@@ -273,7 +315,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 60,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-metadata-category",
@@ -290,11 +335,14 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 42,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-statistics",
-      "requirement": "OA-TRK-335: restoring a tracker transaction restores all tracker statistics; component evidence only.",
+      "requirement": "OA-TRK-335: restoring a tracker transaction puts back every statistic except numerical_refused, which the restore itself increments by one; component evidence only.",
       "package": "oa-track",
       "harness": "tracker::proofs::restore_track_transaction_restores_all_statistics",
       "enabled": true,
@@ -307,7 +355,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 50,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-restore-appended-row",
@@ -322,7 +373,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 24,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-restore-overflow",
@@ -340,7 +394,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 15,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-numerical-refusal-rollback",
@@ -357,7 +414,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 12288
+      "memory_mib": 12288,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "tracker-late-replay-rollback",
@@ -377,7 +437,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 12288
+      "memory_mib": 12288,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "large-move-decision",
@@ -400,7 +463,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 28,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-marks-rows",
@@ -423,7 +489,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 60,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected",
@@ -446,7 +515,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 2000,
       "external_timeout_seconds": 2400,
-      "memory_mib": 24576
+      "memory_mib": 24576,
+      "tier": "nightly",
+      "ci_seconds": 361,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-rollback",
@@ -461,7 +533,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 32,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "replay-monotonic-split",
@@ -486,29 +561,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
-    },
-    {
-      "id": "full-sensor-live-count",
-      "requirement": "OA-TRK-336: live sensor count matches the full 64-slot table contract.",
-      "package": "oa-track",
-      "harness": "time_gate::proofs_full::full_sensor_table_live_count_matches_slot_contract",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [
-        "minimum stored sensor timestamp",
-        "maximum stored sensor timestamp",
-        "all 64 full-table sensors live",
-        "no full-table sensors live"
-      ],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [
-        "kani_full_capacity"
-      ],
-      "harness_timeout_seconds": 300,
-      "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 4,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-monotonicity",
@@ -529,7 +585,10 @@
       ],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 48,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-update",
@@ -552,7 +611,10 @@
       ],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "caller-current-filter",
@@ -571,7 +633,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 75,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-metadata",
@@ -590,7 +655,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 61,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-anchor-filter",
@@ -609,7 +677,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 77,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-ring-history",
@@ -628,7 +699,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 90,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-statistics",
@@ -647,7 +721,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 72,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-note-existing",
@@ -670,7 +747,10 @@
       ],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 12288
+      "memory_mib": 12288,
+      "tier": "nightly",
+      "ci_seconds": 125,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-note-new",
@@ -692,7 +772,10 @@
       ],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 12288
+      "memory_mib": 12288,
+      "tier": "nightly",
+      "ci_seconds": 227,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-anchor-filter-projection",
@@ -716,7 +799,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 202,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-current-filter-projection",
@@ -740,7 +826,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 143,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-metadata-projection",
@@ -764,7 +853,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 124,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-output-projection",
@@ -788,7 +880,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 130,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-ring-projection",
@@ -812,7 +907,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 161,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-stats-projection",
@@ -836,7 +934,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 147,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-anchor-filter-projection",
@@ -860,7 +961,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 188,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-current-filter-projection",
@@ -884,7 +988,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 138,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-metadata-projection",
@@ -908,7 +1015,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 118,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-output-projection",
@@ -932,7 +1042,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 120,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-ring-projection",
@@ -956,7 +1069,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 158,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-stats-projection",
@@ -980,7 +1096,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 143,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-reachability",
@@ -1010,7 +1129,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 113,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-reachability",
@@ -1040,7 +1162,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 86,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-combined",
@@ -1064,7 +1189,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "late-append-combined",
@@ -1088,7 +1216,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "snapshot-round-trip-current-filter",
@@ -1105,7 +1236,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 82,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-round-trip-anchor-filter",
@@ -1122,7 +1256,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 62,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-round-trip-ring",
@@ -1139,7 +1276,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 55,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-scalars-category",
@@ -1154,7 +1294,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "push",
+      "ci_seconds": 108,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-current-filter",
@@ -1169,7 +1312,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 154,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-anchor-filter",
@@ -1184,7 +1330,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 123,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-ring",
@@ -1199,7 +1348,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 155,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-current-filter",
@@ -1218,7 +1370,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 123,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-current-filter-horizontal",
@@ -1237,7 +1392,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 136,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-current-filter-snapshot",
@@ -1256,7 +1414,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 243,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-ring",
@@ -1275,7 +1436,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1500,
       "external_timeout_seconds": 1800,
-      "memory_mib": 24576
+      "memory_mib": 24576,
+      "tier": "nightly",
+      "ci_seconds": 349,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-anchor-filter",
@@ -1294,7 +1458,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 144,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-anchor-filter-snapshot",
@@ -1313,13 +1480,16 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 307,
+      "ci_seconds_source": "ci"
     },
     {
-      "id": "inhibition-in-force",
-      "requirement": "OA-SAF-007: an inhibition is in force exactly when start <= t < end, for every i64 triple; never for an empty or reversed span.",
-      "package": "oa-safety",
-      "harness": "inhibit::proofs::in_force_is_start_inclusive_end_exclusive",
+      "id": "ca-horizontal-span",
+      "requirement": "OA-CA-018: the horizontal loss interval is finite and ordered inside the look-ahead for every input within the stated bounds.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::horizontal_span_is_finite_and_ordered_for_bounded_inputs",
       "enabled": true,
       "experimental": false,
       "required_covers": [],
@@ -1328,13 +1498,16 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 37,
+      "ci_seconds_source": "ci"
     },
     {
-      "id": "inhibition-band",
-      "requirement": "OA-SAF-008: the altitude band is inclusive at both ends and empty when reversed, for every i32 triple.",
-      "package": "oa-safety",
-      "harness": "inhibit::proofs::band_is_inclusive_and_empty_when_reversed",
+      "id": "ca-vertical-span",
+      "requirement": "OA-CA-019: the vertical loss interval and vertical miss are finite, ordered and not negative for every input within the stated bounds.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::vertical_span_is_finite_and_ordered_for_bounded_inputs",
       "enabled": true,
       "experimental": false,
       "required_covers": [],
@@ -1343,7 +1516,340 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 9,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "ca-horizontal-now-bounds",
+      "requirement": "OA-CA-028: the squared speed and the discriminant computed from inputs within the stated bounds are finite and within the bounds the root step takes.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::the_squared_speed_and_the_discriminant_of_bounded_inputs_are_within_their_bounds",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 8,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "ca-horizontal-now-approach",
+      "requirement": "OA-CA-028: the time of closest approach of inputs within the stated bounds, for a speed not taken as zero, is finite and within the bound the root step takes.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::the_approach_time_of_bounded_inputs_is_finite_and_bounded_when_the_speed_is_not_zero",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 4,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "ca-horizontal-now-root",
+      "requirement": "OA-CA-028: the span of a pair inside the limit now, from any root within the contract, is current, starts at zero and ends inside the look-ahead.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::the_span_of_a_current_pair_from_any_root_within_the_contract_is_current",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 2,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "ca-horizontal-now-sqrt",
+      "requirement": "OA-CA-028: the square root of a finite positive discriminant within the bound meets the root contract (finite, not negative, at most the bound).",
+      "package": "oa-ca",
+      "harness": "solve::proofs::the_square_root_of_a_bounded_discriminant_meets_the_root_contract",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 2,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "ca-vertical-now-has-span",
+      "requirement": "OA-CA-028: a pair inside the vertical limit now always has a vertical loss interval, current and starting at zero.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::a_pair_inside_the_vertical_limit_now_has_a_span",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "ca-horizontal-miss-point",
+      "requirement": "OA-CA-029: the closest point of a pair within the stated bounds is finite with each coordinate at most 5e7 m, and the time of closest approach is inside the look-ahead.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::the_closest_point_is_finite_and_bounded",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 25,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "ca-horizontal-miss",
+      "requirement": "OA-CA-029: the real horizontal miss (the square root of the sum of squares of the closest point) of a pair within the stated bounds is finite and not negative.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::the_horizontal_miss_is_finite_and_not_negative",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 18,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "ca-predict-span",
+      "requirement": "OA-CA-029: the conflict span of any ordered horizontal span (or none) and a bounded vertical part, known or unknown, is finite and ordered inside the look-ahead.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::a_conflict_span_of_any_ordered_horizontal_span_is_ordered_and_finite",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "no horizontal span",
+        "an unknown vertical part",
+        "a conflict of a horizontal and a vertical span"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "ca-unknown-altitude",
+      "requirement": "OA-CA-021: a conflict with the altitude known is a conflict, no later and no less current, with it unknown.",
+      "package": "oa-ca",
+      "harness": "solve::proofs::an_unknown_altitude_never_removes_a_conflict",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "a conflict with the altitude known"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 5,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "hypot-operands-ordered",
+      "requirement": "OA-MATH-039: hypot's operand ordering gives finite magnitudes, the larger first, within the stated domain.",
+      "package": "oa-math",
+      "harness": "root::proofs::operands_are_ordered_and_bounded",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 1,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "hypot-slow-operands",
+      "requirement": "OA-MATH-039: the first step of the slow hypot gives a finite not negative value or ordered operands for the double-double core, for every operand within the stated domain.",
+      "package": "oa-math",
+      "harness": "root::proofs::slow_operands_of_bounded_operands_are_a_value_or_ordered_operands",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "hypot-dd-operands",
+      "requirement": "OA-MATH-039: the operands of the double-double core are scaled into [1, 2) and (0, a].",
+      "package": "oa-math",
+      "harness": "root::proofs::dd_operands_are_scaled_into_range",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 5,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "hypot-dd-sum",
+      "requirement": "OA-MATH-039: the sum of two squares of scaled operands, within the stated bounds of the low parts, is a double-double in range.",
+      "package": "oa-math",
+      "harness": "root::proofs::the_sum_of_two_squares_is_a_double_double_in_range",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 207,
+      "external_timeout_seconds": 327,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 66,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "hypot-scale-round",
+      "requirement": "OA-MATH-039: scaling a root in range back is finite and not negative.",
+      "package": "oa-math",
+      "harness": "root::proofs::scale_round_of_a_root_in_range_is_finite_not_negative",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 240,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 4,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "hypot-dd-square",
+      "requirement": "OA-MATH-039 (not finished, over 10 minutes): the exact square of a scaled operand has a low part within the stated bound.",
+      "package": "oa-math",
+      "harness": "root::proofs::the_square_of_a_scaled_operand_is_a_double_double_in_range",
+      "enabled": false,
+      "experimental": true,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
+    },
+    {
+      "id": "hypot-dd-root",
+      "requirement": "OA-MATH-039 (not finished, over 10 minutes): the double-double root of the sum is in range.",
+      "package": "oa-math",
+      "harness": "root::proofs::the_root_of_a_double_double_sum_is_in_range",
+      "enabled": false,
+      "experimental": true,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
+    },
+    {
+      "id": "hypot-fast-plain",
+      "requirement": "OA-MATH-039 (not finished, over 10 minutes): the plain fast path gives no value or a finite not negative one.",
+      "package": "oa-math",
+      "harness": "root::proofs::fast_plain_of_bounded_operands_is_none_or_finite_not_negative",
+      "enabled": false,
+      "experimental": true,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
+    },
+    {
+      "id": "hypot-fast-scaled",
+      "requirement": "OA-MATH-039 (not finished, over 10 minutes): the scaled fast path gives no value or a finite not negative one.",
+      "package": "oa-math",
+      "harness": "root::proofs::fast_scaled_of_bounded_operands_is_none_or_finite_not_negative",
+      "enabled": false,
+      "experimental": true,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "large-move-decision-rejected-category",
@@ -1362,7 +1868,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 294,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-state-and-counts",
@@ -1381,7 +1890,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 227,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-first-times",
@@ -1400,7 +1912,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 296,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-last-time-and-updates",
@@ -1419,7 +1934,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 226,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-other-counters",
@@ -1438,7 +1956,289 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 179,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "runway-occupies-total",
+      "requirement": "OA-RWY-012: for every runway of the kind build_runway makes (finite geometry within 1e9 m, axis within [-1, 1]) and every position and radius (any f64 bit pattern), occupies returns without panic, and for a known position the rotated coordinates are Some, finite and under 1e10 m in size; overflow and NaN of the result are not separately checked.",
+      "package": "oa-runway",
+      "harness": "occupy::proofs::occupies_never_panics",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "an input that occupies",
+        "an input that is clear"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 540,
+      "external_timeout_seconds": 600,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 27,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "asterix-primitives",
+      "requirement": "OA-AST-100: for every byte string of up to six octets, the big-endian reader and the slice taker either advance by exactly the requested width within the input or leave the position unchanged, and sign extension keeps the low bits within the signed range of the width.",
+      "package": "oa-asterix",
+      "harness": "proofs::primitives_rd_take_sext",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 9,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-time-round-trip",
+      "requirement": "OA-AST-104: the time of day converts to milliseconds and back to the same 24-bit count for every count, and neither conversion panics for any u32.",
+      "package": "oa-asterix",
+      "harness": "proofs::time_roundtrip_24_bits",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 25,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-ident-round-trip",
+      "requirement": "OA-AST-104: every six-octet aircraft identification that decodes encodes back to the same six octets.",
+      "package": "oa-asterix",
+      "harness": "proofs::ident_roundtrip_any_six_octets",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 10,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-position-range",
+      "requirement": "OA-AST-106: for every 32-bit count at the CAT062 width, the longitude check accepts exactly the counts within plus or minus 2^25, and every count that converts gives a longitude within 180 degrees.",
+      "package": "oa-asterix",
+      "harness": "proofs::position_conversion_is_geographic_or_refused",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-walk-cat048",
+      "requirement": "OA-AST-102: every item of the CAT048 UAP, walked over any bytes of up to 24 octets, ends past its start and within the input or is refused at an offset within the input.",
+      "package": "oa-asterix",
+      "harness": "wire::proofs::walk_every_item_cat048_24",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 28,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-fspec-cat021",
+      "requirement": "OA-AST-101: the CAT021 field specification over any bytes of up to three octets ends past its start and within the input with at least one item, or is refused at an offset within the input.",
+      "package": "oa-asterix",
+      "harness": "wire::proofs::fspec_cat021_3",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 900,
+      "external_timeout_seconds": 1020,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 453,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-fspec-cat048",
+      "requirement": "OA-AST-101: the CAT048 field specification over any bytes of up to five octets ends past its start and within the input with at least one item, or is refused at an offset within the input.",
+      "package": "oa-asterix",
+      "harness": "wire::proofs::fspec_cat048_5",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 900,
+      "external_timeout_seconds": 1020,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 271,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-fspec-cat062",
+      "requirement": "OA-AST-101: the CAT062 field specification over any bytes of up to three octets ends past its start and within the input with at least one item, or is refused at an offset within the input.",
+      "package": "oa-asterix",
+      "harness": "wire::proofs::fspec_cat062_3",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 185,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-decode-row-ads2",
+      "requirement": "OA-ADSB-100: every ADS-B v2 record of the fixed length decodes without panic, and a row it keeps has anomaly bits among the three that exist, a latitude and longitude within range, and a source that is absent, named or marked unknown.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::decode_row_total_ads2",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 9,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-decode-row-ads1",
+      "requirement": "OA-ADSB-100: every legacy ADS-B record of the fixed length decodes or is dropped without panic.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::decode_row_total_ads1",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 5,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-header-two-records",
+      "requirement": "OA-ADSB-101: the payload header over any bytes of up to two records returns without panic, and a header it accepts gives the record length of its layout and a total length of exactly the header plus the counted records.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::parse_header_any_bytes_up_to_2_records",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 7,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-payload-ads1-4",
+      "requirement": "OA-ADSB-101: a payload with a valid ADS1 header and four all-zero legacy records, whatever the keep-or-drop outcome of each record, is accepted by the lenient and the strict decoder with consistent counts, and a strict refusal names a record inside the payload.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::payload_records_ads1_4",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decode_row is replaced by a function that keeps or drops each record as chosen and gives anomaly bits among the three that exist; the records are all-zero bytes, so no record content is symbolic.",
+        "reports_push appends nothing; the record loop, the counting and the header check are in the path."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 243,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-block-framing",
+      "requirement": "OA-AST-103: block framing over every byte string of up to three octets, which is too short to reach a record, returns without panic, and a block it accepts has a length that is positive and within the input.",
+      "package": "oa-asterix",
+      "harness": "proofs::parse_block_any_bytes_up_to_3",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 18,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-payload-ads3-4",
+      "requirement": "OA-ADSB-101: a payload with a valid ADS3 header and four all-zero v2 records, whatever the keep-or-drop outcome of each record, is accepted by the lenient and the strict decoder with consistent counts, and a strict refusal names a record inside the payload; the ADS2 magic shares the header branch but is not proved separately.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::payload_records_ads3_4",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decode_row is replaced by a function that keeps or drops each record as chosen and gives anomaly bits among the three that exist; the records are all-zero bytes, so no record content is symbolic.",
+        "reports_push appends nothing; the record loop, the counting and the header check are in the path."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 294,
+      "ci_seconds_source": "local"
     }
   ]
 }

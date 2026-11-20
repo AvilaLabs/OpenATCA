@@ -427,19 +427,53 @@ pub(crate) fn h_gate_d2(pred: &HFilter, z: &[f64; 2], r: &[f64; 3]) -> f64 {
     best
 }
 
-/// The gating distance of a velocity `v` with covariance `vr`: the smallest normalised squared
-/// innovation over the two models, each against its own predicted velocity covariance. Mirrors
-/// [`h_gate_d2`].
-pub(crate) fn h_vel_gate_d2(pred: &HFilter, v: &[f64; 2], vr: &[f64; 3]) -> f64 {
+/// A velocity measurement: the velocity in the plane, its covariance `[ee, en, nn]`, and how far
+/// it lags the aircraft's velocity, seconds (zero when it is current).
+pub(crate) type VelMeas = ([f64; 2], [f64; 3], f64);
+
+/// The velocity a model expects of a report that lags the aircraft's by `lag` seconds, and the
+/// measurement matrix at the model's state: `z = R(-w lag) v`, the velocity turned back by the
+/// state's turn rate over the lag. The matrix has the velocity columns 2 and 3 and the turn rate
+/// column 4. At `lag` 0 these are the state's velocity and the plain selection (callers take the
+/// plain path then).
+fn lagged_expectation(x: &V5, lag: f64) -> ([f64; 2], [[f64; 5]; 2]) {
+    let w = x[4].clamp(-OMEGA_MAX, OMEGA_MAX);
+    let (s, c) = sin_cos_near_zero(w * lag);
+    let zh = [c * x[2] + s * x[3], -s * x[2] + c * x[3]];
+    let hm = [
+        [0.0, 0.0, c, s, lag * zh[1]],
+        [0.0, 0.0, -s, c, -lag * zh[0]],
+    ];
+    (zh, hm)
+}
+
+/// The gating distance of a velocity `v` with covariance `vr` that lags by `lag` seconds: the
+/// smallest normalised squared innovation over the two models, each against the velocity it
+/// expects of such a report ([`lagged_expectation`], the one the update uses) and its own
+/// innovation covariance. Mirrors [`h_gate_d2`]. At `lag` 0 the expectation is the model's
+/// velocity and the covariance its velocity block.
+pub(crate) fn h_vel_gate_d2(pred: &HFilter, v: &[f64; 2], vr: &[f64; 3], lag: f64) -> f64 {
     let mut best = f64::INFINITY;
     for m in pred.m.iter() {
         let p = &m.p;
-        let (s00, s01, s11) = (p[2][2] + vr[0], p[2][3] + vr[1], p[3][3] + vr[2]);
+        let (s00, s01, s11, y0, y1);
+        if lag == 0.0 {
+            (s00, s01, s11) = (p[2][2] + vr[0], p[2][3] + vr[1], p[3][3] + vr[2]);
+            (y0, y1) = (v[0] - m.x[2], v[1] - m.x[3]);
+        } else {
+            let (zh, hm) = lagged_expectation(&m.x, lag);
+            let hph = |a: usize, b: usize| -> f64 {
+                (0..5)
+                    .map(|i| (0..5).map(|j| hm[a][i] * p[i][j] * hm[b][j]).sum::<f64>())
+                    .sum()
+            };
+            (s00, s01, s11) = (hph(0, 0) + vr[0], hph(0, 1) + vr[1], hph(1, 1) + vr[2]);
+            (y0, y1) = (v[0] - zh[0], v[1] - zh[1]);
+        }
         let det = s00 * s11 - s01 * s01;
         if det.is_nan() || det <= 0.0 {
             continue;
         }
-        let (y0, y1) = (v[0] - m.x[2], v[1] - m.x[3]);
         let d2 = (y0 * (s11 * y0 - s01 * y1) + y1 * (s00 * y1 - s01 * y0)) / det;
         best = best.min(d2);
     }
@@ -498,6 +532,61 @@ fn update_sel(
     Some((d2, det))
 }
 
+/// The velocity measurement of a report that lags the aircraft's by `lag` seconds: against the
+/// state it is `z = R(-w lag) v + noise`, the velocity turned back by the turn rate `w` over the
+/// lag (the state's rate; zero for the straight model, whose measurement is then the plain
+/// velocity one). Linearised at the state, the measurement also carries the turn rate. At `lag` 0
+/// this is [`update_sel`] on the velocity states, bit for bit. Updates `x` and `p` and returns the
+/// quadratic form and determinant of the innovation covariance as [`update_sel`] does; `None`,
+/// with `x` and `p` unchanged, if that covariance is singular.
+fn update_vel_lagged(
+    x: &mut V5,
+    p: &mut M5,
+    z: &[f64; 2],
+    r: &[f64; 3],
+    lag: f64,
+) -> Option<(f64, f64)> {
+    if lag == 0.0 {
+        return update_sel(x, p, [2, 3], z, r);
+    }
+    let (zh, hm) = lagged_expectation(x, lag);
+    let old = *p;
+    // P H^T, five rows by two.
+    let mut pht = [[0.0f64; 2]; 5];
+    for (row, out) in pht.iter_mut().enumerate() {
+        for (k, o) in out.iter_mut().enumerate() {
+            *o = (0..5).map(|j| old[row][j] * hm[k][j]).sum();
+        }
+    }
+    let hpht = |k: usize, l: usize| -> f64 { (0..5).map(|j| hm[k][j] * pht[j][l]).sum() };
+    let s00 = hpht(0, 0) + r[0];
+    let s01 = hpht(0, 1) + r[1];
+    let s11 = hpht(1, 1) + r[2];
+    let det = s00 * s11 - s01 * s01;
+    if det.is_nan() || det <= 0.0 {
+        return None;
+    }
+    let (y0, y1) = (z[0] - zh[0], z[1] - zh[1]);
+    let (n00, n01, n11) = (s11 / det, -s01 / det, s00 / det);
+    let d2 = y0 * (n00 * y0 + n01 * y1) + y1 * (n01 * y0 + n11 * y1);
+    let mut k = [[0.0f64; 2]; 5];
+    for (kr, pr) in k.iter_mut().zip(pht.iter()) {
+        *kr = [pr[0] * n00 + pr[1] * n01, pr[0] * n01 + pr[1] * n11];
+    }
+    for (xr, kr) in x.iter_mut().zip(k.iter()) {
+        *xr += kr[0] * y0 + kr[1] * y1;
+    }
+    let mut pn = old;
+    for (row, kr) in k.iter().enumerate() {
+        for col in 0..5 {
+            // (H P)[k][col] is P H^T transposed, P being symmetric.
+            pn[row][col] -= kr[0] * pht[col][0] + kr[1] * pht[col][1];
+        }
+    }
+    *p = symmetrise(&pn);
+    Some((d2, det))
+}
+
 /// The model probabilities after a measurement, before the floor and the normalisation: the
 /// prior `prior[j]` times the likelihood, scaled so the larger is 1. Each model's `fit[j]` is
 /// the sum `q` of the quadratic forms and the product `det` of the innovation determinants of
@@ -539,19 +628,21 @@ pub(crate) fn imm_weights(prior: [f64; 2], fit: [Option<(f64, f64)>; 2]) -> [f64
 }
 
 /// Updates the predicted filter with a position (and a velocity if given), then the model
-/// probabilities from the likelihoods and the predicted probabilities.
+/// probabilities from the likelihoods and the predicted probabilities. The velocity update is the
+/// lagged one ([`update_vel_lagged`]) with the lag of the measurement.
 pub(crate) fn h_update(
     pred: &HFilter,
     z: &[f64; 2],
     r: &[f64; 3],
-    vel: Option<([f64; 2], [f64; 3])>,
+    vel: Option<VelMeas>,
     mode: u8,
 ) -> HFilter {
     let mut out = *pred;
     if mode != 0 {
         let m = &mut out.m[0];
         update_sel(&mut m.x, &mut m.p, [0, 1], z, r);
-        if let Some((v, vr)) = vel {
+        if let Some((v, vr, _)) = vel {
+            // One straight model: its turn rate is zero, so the lag changes nothing.
             update_sel(&mut m.x, &mut m.p, [2, 3], &v, &vr);
         }
         m.x[4] = 0.0;
@@ -560,8 +651,8 @@ pub(crate) fn h_update(
     let mut fit = [None; 2];
     for (j, m) in out.m.iter_mut().enumerate() {
         let mut f = update_sel(&mut m.x, &mut m.p, [0, 1], z, r);
-        if let Some((v, vr)) = vel {
-            let g = update_sel(&mut m.x, &mut m.p, [2, 3], &v, &vr);
+        if let Some((v, vr, lag)) = vel {
+            let g = update_vel_lagged(&mut m.x, &mut m.p, &v, &vr, lag);
             f = f.zip(g).map(|((q, d), (q2, d2))| (q + q2, d * d2));
         }
         fit[j] = f;
@@ -1006,5 +1097,230 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A state flying at 230 m/s east and `vn` m/s north, turn rate `w`, with the given velocity
+    /// and rate variances.
+    fn lag_state_v(w: f64, vn: f64, pvv: f64, pww: f64) -> (V5, M5) {
+        let mut p = ZERO;
+        p[2][2] = pvv;
+        p[3][3] = pvv;
+        p[4][4] = pww;
+        ([0.0, 0.0, 230.0, vn, w], p)
+    }
+
+    fn lag_state(w: f64, pvv: f64, pww: f64) -> (V5, M5) {
+        lag_state_v(w, 0.0, pvv, pww)
+    }
+
+    // REQ: OA-TRK-401
+    #[test]
+    fn a_lag_of_zero_is_the_plain_velocity_update_bit_for_bit() {
+        // A turning state, a full covariance with cross terms: the lagless path is `update_sel`.
+        let (mut x1, mut p1) = lag_state_v(0.05, 20.0, 4.0, 1.0e-3);
+        p1[2][4] = 0.01;
+        p1[4][2] = 0.01;
+        p1[0][2] = 0.3;
+        p1[2][0] = 0.3;
+        let (mut x2, mut p2) = (x1, p1);
+        let z = [228.0, 23.0];
+        let r = [0.36, 0.05, 0.49];
+        let a = update_vel_lagged(&mut x1, &mut p1, &z, &r, 0.0).expect("regular");
+        let b = update_sel(&mut x2, &mut p2, [2, 3], &z, &r).expect("regular");
+        assert_eq!(
+            (a.0.to_bits(), a.1.to_bits()),
+            (b.0.to_bits(), b.1.to_bits())
+        );
+        assert_eq!(x1.map(f64::to_bits), x2.map(f64::to_bits));
+        assert_eq!(
+            p1.map(|r| r.map(f64::to_bits)),
+            p2.map(|r| r.map(f64::to_bits))
+        );
+        // The gate at a lag of zero is the velocity block's.
+        let pred = h_init(
+            &[100.0, 0.0, 100.0],
+            Some(([230.0, 20.0], [4.0, 0.0, 4.0])),
+            0,
+        );
+        let d2 = h_vel_gate_d2(&pred, &[228.0, 23.0], &[0.36, 0.0, 0.36], 0.0);
+        let want = (4.0 / 4.36) + (9.0 / 4.36);
+        assert!((d2 - want).abs() < 1.0e-9, "{d2} {want}");
+    }
+
+    // REQ: OA-TRK-401
+    #[test]
+    fn a_state_without_turn_takes_the_plain_velocity_update_at_any_lag() {
+        // No turn rate and a northward velocity: the lag does not change the measurement, and the
+        // turn-rate column meets a zero variance.
+        let (mut x1, mut p1) = lag_state_v(0.0, 40.0, 4.0, 0.0);
+        let (mut x2, mut p2) = (x1, p1);
+        let z = [228.0, 43.0];
+        let r = [0.36, 0.0, 0.36];
+        let a = update_vel_lagged(&mut x1, &mut p1, &z, &r, 1.0).expect("regular");
+        let b = update_sel(&mut x2, &mut p2, [2, 3], &z, &r).expect("regular");
+        assert!((a.0 - b.0).abs() < 1.0e-12 && (a.1 - b.1).abs() < 1.0e-12);
+        for i in 0..N {
+            assert!((x1[i] - x2[i]).abs() < 1.0e-12);
+            for j in 0..N {
+                assert!((p1[i][j] - p2[i][j]).abs() < 1.0e-12);
+            }
+        }
+    }
+
+    // REQ: OA-TRK-401
+    #[test]
+    fn the_straight_model_of_an_update_is_the_old_update_at_any_lag() {
+        let pred = h_init(
+            &[100.0, 0.0, 100.0],
+            Some(([230.0, 40.0], [4.0, 0.0, 4.0])),
+            0,
+        );
+        let (z, r) = ([3.0, -2.0], [100.0, 0.0, 100.0]);
+        let (v, vr) = ([228.0, 43.0], [0.36, 0.0, 0.36]);
+        let old = h_update(&pred, &z, &r, Some((v, vr, 0.0)), 0);
+        let new = h_update(&pred, &z, &r, Some((v, vr, 1.0)), 0);
+        assert_eq!(old.m[0].x.map(f64::to_bits), new.m[0].x.map(f64::to_bits));
+        assert_eq!(
+            old.m[0].p.map(|r| r.map(f64::to_bits)),
+            new.m[0].p.map(|r| r.map(f64::to_bits))
+        );
+        // The turn model does differ: its velocity measurement carries its turn rate.
+        assert_ne!(old.m[1].x[4].to_bits(), new.m[1].x[4].to_bits());
+    }
+
+    // REQ: OA-TRK-401
+    #[test]
+    fn the_measurement_matrix_is_the_derivative_of_the_lagged_velocity() {
+        // Central differences of z = R(-w L) v in the velocity and in the turn rate, against the
+        // matrix: a lag dropped or doubled in the turn-rate column fails this.
+        let lag = 1.0;
+        let z_of = |x: &V5| lagged_expectation(x, lag).0;
+        let x0: V5 = [0.0, 0.0, 230.0, 40.0, 0.04];
+        let (_, hm) = lagged_expectation(&x0, lag);
+        for col in 2..5 {
+            let h = if col == 4 { 1.0e-6 } else { 1.0e-3 };
+            let (mut up, mut dn) = (x0, x0);
+            up[col] += h;
+            dn[col] -= h;
+            let (zu, zd) = (z_of(&up), z_of(&dn));
+            for row in 0..2 {
+                let fd = (zu[row] - zd[row]) / (2.0 * h);
+                assert!(
+                    (fd - hm[row][col]).abs() < 1.0e-6 * (1.0 + fd.abs()),
+                    "row {row} col {col}: {fd} against {}",
+                    hm[row][col]
+                );
+            }
+        }
+        // And the turn-rate column is not small, so the comparison above can tell a wrong lag.
+        assert!(hm[0][4].abs() > 5.0 || hm[1][4].abs() > 5.0, "{hm:?}");
+        // The matrix scales with the lag.
+        let (_, hm2) = lagged_expectation(&[0.0, 0.0, 230.0, 0.0, 0.0], 2.0);
+        assert!((hm2[1][4] + 460.0).abs() < 1.0e-9, "{}", hm2[1][4]);
+    }
+
+    // REQ: OA-TRK-401
+    #[test]
+    fn the_covariance_after_a_lagged_update_is_symmetric_and_not_negative() {
+        let (mut x, mut p) = lag_state_v(0.04, 30.0, 9.0, 4.0e-4);
+        // A full, correlated covariance (a diagonally dominant one, so a valid one).
+        for i in 0..N {
+            for j in 0..N {
+                if i != j {
+                    p[i][j] =
+                        0.2 / (1.0 + (i + j) as f64) * if (i + j) % 2 == 0 { 1.0 } else { -1.0 };
+                }
+            }
+        }
+        p[0][0] = 100.0;
+        p[1][1] = 100.0;
+        let before = p;
+        update_vel_lagged(&mut x, &mut p, &[229.0, 36.0], &[0.36, 0.0, 0.36], 1.0)
+            .expect("regular");
+        for i in 0..N {
+            for j in 0..N {
+                assert_eq!(p[i][j].to_bits(), p[j][i].to_bits(), "{i} {j}");
+            }
+            assert!(p[i][i] >= 0.0 && p[i][i] <= before[i][i] + 1.0e-12, "{i}");
+        }
+        // x' P x over a spread of directions, scaled to the standard deviations.
+        let mut seed = 12345u64;
+        for _ in 0..500 {
+            let mut v = [0.0; N];
+            for (i, e) in v.iter_mut().enumerate() {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                *e = ((seed >> 40) as f64 / (1u64 << 24) as f64 - 0.5) * p[i][i].sqrt();
+            }
+            let q: f64 = (0..N)
+                .map(|i| (0..N).map(|j| v[i] * p[i][j] * v[j]).sum::<f64>())
+                .sum();
+            assert!(q >= -1.0e-9, "{q}");
+        }
+    }
+
+    // REQ: OA-TRK-401
+    #[test]
+    fn in_a_turn_the_reported_velocity_is_taken_as_that_of_a_lag_ago() {
+        // Turning left at 2 degrees per second; the report, a lag old, still points east.
+        let w = 2.0_f64.to_radians();
+        let (mut x, mut p) = lag_state(w, 100.0, 1.0e-12);
+        update_vel_lagged(&mut x, &mut p, &[230.0, 0.0], &[0.01, 0.0, 0.01], 1.0).expect("regular");
+        // The aircraft's velocity is the report's turned forward by the rate over the lag (the
+        // update is linear, so the east component is right to second order in the angle).
+        let a = w;
+        assert!((x[2] - 230.0 * a.cos()).abs() < 0.5, "{}", x[2]);
+        assert!((x[3] - 230.0 * a.sin()).abs() < 0.05, "{}", x[3]);
+        // A report that agrees with that leaves the state where it was.
+        let (mut x, mut p) = lag_state(w, 100.0, 1.0e-6);
+        let before = x;
+        let z = [230.0 * a.cos(), -230.0 * a.sin()];
+        update_vel_lagged(&mut x, &mut p, &z, &[0.01, 0.0, 0.01], 1.0).expect("regular");
+        for i in 0..N {
+            assert!((x[i] - before[i]).abs() < 1.0e-9, "{i}");
+        }
+    }
+
+    // REQ: OA-TRK-401
+    #[test]
+    fn a_report_behind_the_velocity_by_more_than_the_lag_says_the_turn_is_faster() {
+        // The state turns at 1 degree per second; the report points 3 degrees clockwise of the
+        // velocity, so over the lag the aircraft is turning counter-clockwise faster.
+        let (mut x, mut p) = lag_state(1.0_f64.to_radians(), 0.36, 1.0e-3);
+        let a = 3.0_f64.to_radians();
+        let z = [230.0 * a.cos(), -230.0 * a.sin()];
+        let before = x[4];
+        update_vel_lagged(&mut x, &mut p, &z, &[0.36, 0.0, 0.36], 1.0).expect("regular");
+        assert!(x[4] > before, "{}", x[4]);
+        // A singular innovation covariance changes nothing.
+        let (mut x, mut p) = lag_state(0.0, 0.0, 0.0);
+        let keep = (x, p);
+        assert!(update_vel_lagged(&mut x, &mut p, &[1.0, 1.0], &[0.0, 0.0, 0.0], 1.0).is_none());
+        assert_eq!((x, p), keep);
+    }
+
+    // REQ: OA-TRK-401
+    #[test]
+    fn a_lagged_report_in_a_six_degree_turn_passes_the_velocity_gate() {
+        // Turning at 6 degrees per second at 230 m/s: the report a second old is 6 degrees behind,
+        // 24 m/s off the aircraft's velocity, 400 times its variance. Against the velocity the
+        // turn model expects of a lagged report it agrees.
+        let w = 6.0_f64.to_radians();
+        let mut pred = h_init(
+            &[100.0, 0.0, 100.0],
+            Some(([230.0, 0.0], [1.0, 0.0, 1.0])),
+            0,
+        );
+        for m in pred.m.iter_mut() {
+            m.x[4] = w;
+        }
+        pred.m[1].p[4][4] = 1.0e-4;
+        let z = [230.0 * w.cos(), -230.0 * w.sin()];
+        let vr = [0.36, 0.0, 0.36];
+        let plain = h_vel_gate_d2(&pred, &z, &vr, 0.0);
+        let lagged = h_vel_gate_d2(&pred, &z, &vr, 1.0);
+        assert!(plain > 400.0, "{plain}");
+        assert!(lagged < 1.0, "{lagged}");
     }
 }

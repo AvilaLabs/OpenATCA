@@ -6,7 +6,8 @@
 
 use oa_bench::legacy::{Counts, Legacy, NONE, NO_ALT, NO_VEL};
 use oa_track::score::{
-    interval_stats, scoring_config, split_reports_with, IntervalStats, SplitStats, DRAIN_ROWS,
+    interval_stats, scoring_config, split_reports_keyed, split_reports_with, IntervalStats,
+    SplitStats, DRAIN_ROWS,
 };
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
@@ -19,13 +20,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use super::adsb_export::AdsbExport;
 use super::error::ExportError;
 use super::export::SystemExport;
+use super::guard::guarded_opener;
 use crate::core::addrcheck::{check_flight, RefPoint, Verdict};
-use crate::core::adsb::{adsb_record, AdsbRow};
+use crate::core::adsb::{adsb_record, AdsbRow, LinkSource};
 use crate::core::convert::{eram_record, eram_refusal, track_record, EramRow, TrackRow};
 
 /// What a tracker run did besides the rows exported. A7.2: cold.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TrackRunInfo {
     pub measurements: u64,
     /// Tick rows written (`--openatca-rows ticks`); a row refused by the conversion is not one.
@@ -49,6 +51,28 @@ pub struct TrackRunInfo {
     pub uncertain: u64,
     pub reacquired: u64,
     pub coasting: u64,
+    /// Per address, the last time (Unix ns) at which each track instance the tracker dropped
+    /// could still have a row: its last applied update plus the drop age, in time order. A row of
+    /// the address later than the k-th of these is of an instance after the k-th: that is how a
+    /// restart is told apart, from the tracker's own end events and not from gaps between rows.
+    /// Valid only when the tracker never stepped its clock back: a step back drops every track
+    /// updated after the new clock at once, at the step and not at `last + drop age`, so a run
+    /// with `time_steps_back` or `time_future_dropped` above zero fails (`note_ends`) before
+    /// these are used.
+    /// An instance's rows are all at or before its own entry (a tick row is on the table through
+    /// the tick at which the age equals the drop age) and the next instance of the address starts
+    /// only after the sweep that dropped the old one, which is after it (age over the drop age).
+    pub ends: BTreeMap<u32, Vec<i64>>,
+}
+
+impl TrackRunInfo {
+    /// The instance (0, 1, ...) of the address `key` that a row at `t_ns` belongs to: how many
+    /// dropped instances of the address ended before it.
+    pub fn instance_of(&self, key: u32, t_ns: i64) -> u32 {
+        self.ends.get(&key).map_or(0, |v| {
+            u32::try_from(v.partition_point(|&end| end < t_ns)).unwrap_or(u32::MAX)
+        })
+    }
 }
 
 /// The row at index `i` of `out` and the key of its track.
@@ -127,7 +151,8 @@ pub fn export_output(
         }
         match track_record(&row) {
             Ok(c) => {
-                ex.push(&c, key, (row.lat_e7, row.lon_e7))?;
+                let segment = info.instance_of(key, row.t_ns);
+                ex.push_segment(&c, key, segment, (row.lat_e7, row.lon_e7))?;
                 if rows == OpenatcaRows::Updates {
                     info.last_update_ns = Some(row.t_ns);
                     info.update_rows = info.update_rows.saturating_add(1);
@@ -162,8 +187,10 @@ pub fn run_tracker(
         measurements: meas.len() as u64,
         ..TrackRunInfo::default()
     };
+    let mut logged = 0usize;
     for m in meas {
         tracker_update(&mut t, m, &mut scratch);
+        note_ends(&t, cfg.drop_after_ns, &mut logged, &mut info)?;
         if output_len(&scratch) > DRAIN_ROWS.min(cfg.out_capacity / 2) {
             export_output(&scratch, ex, &mut info, mono, rows)?;
             output_clear(&mut scratch);
@@ -172,6 +199,7 @@ pub fn run_tracker(
     let end = meas.last().map_or(0, |m| m.toa_ns);
     tracker_advance(&mut t, end, &mut scratch);
     tracker_flush(&mut t, end, &mut scratch);
+    note_ends(&t, cfg.drop_after_ns, &mut logged, &mut info)?;
     export_output(&scratch, ex, &mut info, mono, rows)?;
     info.overflow = scratch.overflow;
     if info.overflow > 0 {
@@ -181,6 +209,53 @@ pub fn run_tracker(
         )));
     }
     Ok(info)
+}
+
+/// Reads the tracks the tracker has dropped since the last call from its log into `info.ends`.
+/// A dropped track that was never confirmed has no rows and is not an instance. A full log would
+/// lose events, so it fails the run.
+fn note_ends(
+    t: &oa_track::Tracker,
+    drop_after_ns: i64,
+    logged: &mut usize,
+    info: &mut TrackRunInfo,
+) -> Result<(), ExportError> {
+    let log = oa_track::tracker_log(t);
+    if log.overflow > 0 {
+        return Err(ExportError::Input(format!(
+            "the tracker's track log lost {} ended tracks to a full table; the track numbers would be wrong",
+            log.overflow
+        )));
+    }
+    // A step back drops every track updated after the new clock at once: the end of each is the
+    // moment of the step, not `last + drop_after`, and the tracker's log does not say when that
+    // was. The numbers would be wrong, so the run fails.
+    let st = oa_track::tracker_stats(t);
+    if st.time_steps_back > 0 || st.time_future_dropped > 0 {
+        return Err(ExportError::Input(format!(
+            "the tracker moved its clock back {} time(s) and dropped {} track(s), confirmed or not, built on the wrong clock; \
+             track restarts cannot be placed in time, so the run is not complete",
+            st.time_steps_back, st.time_future_dropped
+        )));
+    }
+    for i in *logged..log.addr.len() {
+        let (Some(&addr), Some(&last), Some(&conf), Some(&why)) = (
+            log.addr.get(i),
+            log.last_ns.get(i),
+            log.confirmed_ns.get(i),
+            log.reason.get(i),
+        ) else {
+            continue;
+        };
+        if conf != i64::MIN && why == oa_track::END_DROPPED {
+            info.ends
+                .entry(addr)
+                .or_default()
+                .push(last.saturating_add(drop_after_ns));
+        }
+    }
+    *logged = log.addr.len();
+    Ok(())
 }
 
 /// The scoring configuration for `meas`, as the scorer builds it.
@@ -218,6 +293,9 @@ pub struct ClipInfo {
     pub split: SplitStats,
     /// The ADS-B file, when one was asked for.
     pub adsb: Option<AdsbInfo>,
+    /// Reports left for the file by its own copy removal ([`export_key`]); never fewer than
+    /// `offered`, because its key is finer than the scorer's.
+    pub file_offered: u64,
     /// What the tracker's own adapter (oa-truth's quality gates and the rest) removed from the
     /// reports it was offered.
     pub gate: oa_track::adsb::AdsbStats,
@@ -237,6 +315,44 @@ pub struct AdsbInfo {
     /// Source types that are not ADS-B (`oa_truth::ADSB_SOURCES`), by name.
     pub other_sources: Vec<(String, u64)>,
     pub converted: u64,
+    /// Reports whose position or time cannot be written (refused, counted by the file).
+    pub refused: u64,
+}
+
+impl AdsbInfo {
+    /// The reconciliation of what was offered: offered = stale + not ADS-B + written + refused,
+    /// and the two counts the file itself gives: `in_file`, the records found in the written
+    /// file by the format walker, equal to `written`, and `refused_listed`, the refusals the
+    /// file listed, equal to `refused`. Returns the README line and whether everything agrees.
+    pub fn reconciliation(&self, in_file: u64, refused_listed: u64) -> (String, bool) {
+        let other: u64 = self.other_sources.iter().map(|(_, c)| *c).sum();
+        let sum = self
+            .stale
+            .saturating_add(other)
+            .saturating_add(self.converted)
+            .saturating_add(self.refused);
+        let ok = sum == self.rows_in && in_file == self.converted && refused_listed == self.refused;
+        let verdict = if ok {
+            "reconciles"
+        } else {
+            "DOES NOT RECONCILE"
+        };
+        let line = format!(
+            "offered {} = stale {} + not ADS-B {} + written {} + refused {} = {}; records counted in the written file {} (written {}); refusals listed by the file {} (refused {}): {}",
+            self.rows_in,
+            self.stale,
+            other,
+            self.converted,
+            self.refused,
+            sum,
+            in_file,
+            self.converted,
+            refused_listed,
+            self.refused,
+            verdict
+        );
+        (line, ok)
+    }
 }
 
 /// The reference points of the address check: every report of `reports` that is not stale, of an
@@ -304,7 +420,10 @@ pub fn export_adsb_reports(
                 ax.push(&c, (row.lat_e7, row.lon_e7))?;
                 info.converted = info.converted.saturating_add(1);
             }
-            Err(r) => ax.refuse(r),
+            Err(r) => {
+                ax.refuse(r);
+                info.refused = info.refused.saturating_add(1);
+            }
         }
     }
     for (s, &c) in other.iter().enumerate() {
@@ -349,7 +468,23 @@ fn adsb_row(r: &oa_adsb::Row) -> AdsbRow {
         version: u8_of(r.version),
         gva: u8_of(r.gva),
         sda: u8_of(r.sda),
+        nic_baro: u8_of(r.nic_baro),
+        link: match r.source {
+            NONE_U8 => LinkSource::NoColumn,
+            0 | 1 => LinkSource::Es1090,
+            _ => LinkSource::NotSaid,
+        },
     }
+}
+
+/// The identity of an observation for the ADS-B file: the scorer's key and, in addition, the
+/// fields the file writes that the scorer does not read, NIC_baro, SDA and GVA. Two reports that
+/// agree on the scorer's key and differ in one of these are not copies here.
+pub fn export_key(r: &oa_adsb::Row) -> (oa_bench::split_check::Key, [u8; 3]) {
+    (
+        oa_bench::split_check::observation_key(r),
+        [r.nic_baro, r.sda, r.gva],
+    )
 }
 
 /// Loads the ADS-B clip at `path`, removes the copies of reports through the scorer's own split
@@ -359,8 +494,10 @@ fn adsb_row(r: &oa_adsb::Row) -> AdsbRow {
 /// fed ADS-B only, so the tracks are monosensor.
 ///
 /// Conflict rule: reports of one address and time with different content are all kept, in one
-/// fixed order (the tracker sees them as the scorer's split gives them); only exact copies are
-/// removed. This holds in both modes.
+/// fixed order (the tracker sees them as the scorer's split gives them). What counts as a copy
+/// differs by path: the tracker's feed removes copies by the scorer's key (`observation_key`,
+/// which does not hold NIC_baro, SDA, GVA or the callsign), and the file by [`export_key`], which
+/// adds NIC_baro, SDA and GVA (the callsign is still not part of either). This holds in both modes.
 pub fn export_adsb_clip(
     path: &std::path::Path,
     ex: &mut SystemExport,
@@ -368,11 +505,32 @@ pub fn export_adsb_clip(
     mode: InputsMode,
     rows: OpenatcaRows,
 ) -> Result<(TrackRunInfo, ClipInfo), ExportError> {
-    let clip = oa_bench::input::load_adsb_with(path, &super::guard::guarded_opener())
+    let clip = oa_bench::input::load_adsb_with(path, &guarded_opener())
         .map_err(|e| ExportError::Input(format!("{}: {e}", path.display())))?;
+    export_adsb_loaded(clip, ex, adsb, mode, rows)
+}
+
+/// [`export_adsb_clip`] over a clip that is already loaded, so that what a caller inspected
+/// first is what is exported.
+pub fn export_adsb_loaded(
+    clip: oa_bench::input::AdsbClip,
+    ex: &mut SystemExport,
+    adsb: Option<&mut AdsbExport>,
+    mode: InputsMode,
+    rows: OpenatcaRows,
+) -> Result<(TrackRunInfo, ClipInfo), ExportError> {
     let sealed_window_dropped = clip.sealed_window_dropped;
     let positions = ref_points(&clip.reports);
-    let (fed_set, other, split) = split_reports_with(&clip.reports, mode == InputsMode::Split);
+    let halve = mode == InputsMode::Split;
+    let (fed_set, other, split) = split_reports_with(&clip.reports, halve);
+    // The file's own copy removal, with a key that also holds NIC_baro, SDA and GVA (the scorer's
+    // does not read them, but the file writes them): the groups are the same, so the sets are the
+    // same observations, and two reports that differ only in those are both written.
+    let file_set = if adsb.is_some() {
+        Some(split_reports_keyed(&clip.reports, halve, export_key).0)
+    } else {
+        None
+    };
     drop(clip);
     let mut info = ClipInfo {
         offered: oa_adsb::reports_len(&fed_set) as u64,
@@ -380,12 +538,14 @@ pub fn export_adsb_clip(
         sealed_window_dropped,
         split,
         adsb: None,
+        file_offered: 0,
         gate: oa_track::adsb::AdsbStats::default(),
         positions,
     };
     drop(other);
-    if let Some(ax) = adsb {
-        info.adsb = Some(export_adsb_reports(&fed_set, ax)?);
+    if let (Some(ax), Some(file_set)) = (adsb, file_set) {
+        info.file_offered = oa_adsb::reports_len(&file_set) as u64;
+        info.adsb = Some(export_adsb_reports(&file_set, ax)?);
     }
     let (meas, gate) =
         oa_track::adsb::adsb_measurements(&fed_set, &oa_track::adsb::AdsbConfig::default());

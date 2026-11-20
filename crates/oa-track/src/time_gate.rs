@@ -656,3 +656,122 @@ mod proofs {
 #[cfg(all(kani, kani_full_capacity))]
 #[path = "time_gate_proofs_full.rs"]
 mod proofs_full;
+
+#[cfg(test)]
+#[allow(clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    /// A full table: sensor `i` last accepted at `times[i]`.
+    fn full(times: &[i64; SENSOR_TABLE]) -> GateState {
+        let mut g = gate_new();
+        for (i, &t) in times.iter().enumerate() {
+            gate_note_applied(&mut g, i as u16, t);
+        }
+        assert_eq!(g.evicted, 0);
+        g
+    }
+
+    // REQ: OA-TRK-336
+    #[test]
+    fn the_live_count_of_a_full_table_is_the_number_of_sensors_inside_the_drop_interval() {
+        let mut times = [0i64; SENSOR_TABLE];
+        for (i, t) in times.iter_mut().enumerate() {
+            *t = 1_000 + 10 * i as i64;
+        }
+        let g = full(&times);
+        let drop_ns = 100;
+        for clock in [
+            0, 900, 1_000, 1_100, 1_345, 1_639, 1_640, 1_739, 1_740, 5_000,
+        ] {
+            // Counted by hand from the list of times: those at or after `clock - drop`.
+            let want = times.iter().filter(|&&t| t >= clock - drop_ns).count();
+            assert_eq!(gate_live_sensors(&g, clock, drop_ns), want, "clock {clock}");
+        }
+        assert_eq!(gate_live_sensors(&g, 1_000, 0), SENSOR_TABLE);
+        assert_eq!(gate_live_sensors(&g, 5_000, 0), 0);
+    }
+
+    // REQ: OA-TRK-336
+    #[test]
+    fn the_live_count_of_a_full_table_holds_at_the_signed_extremes_and_never_grows_with_the_clock()
+    {
+        let mut times = [0i64; SENSOR_TABLE];
+        for (i, t) in times.iter_mut().enumerate() {
+            *t = match i % 4 {
+                0 => i64::MIN,
+                1 => i64::MAX,
+                2 => 0,
+                _ => -1_000 * i as i64,
+            };
+        }
+        let g = full(&times);
+        for drop_ns in [0, 1, 86_400 * 1_000_000_000] {
+            let mut last = SENSOR_TABLE;
+            for clock in [i64::MIN, -5_000, -1, 0, 1, 5_000, i64::MAX - 1, i64::MAX] {
+                let n = gate_live_sensors(&g, clock, drop_ns);
+                let floor = clock.saturating_sub(drop_ns);
+                assert_eq!(n, times.iter().filter(|&&t| t >= floor).count());
+                assert!(
+                    n <= SENSOR_TABLE && n <= last,
+                    "clock {clock} drop {drop_ns}"
+                );
+                last = n;
+            }
+        }
+    }
+
+    // REQ: OA-TRK-336
+    #[test]
+    fn the_live_count_of_a_full_table_matches_an_i128_reference_for_random_times_clocks_and_drops()
+    {
+        const MAX_DROP_NS: u64 = 86_400 * 1_000_000_000;
+        // splitmix64: the same sweep on every run, no outside crate.
+        struct Sweep(u64);
+        impl Sweep {
+            fn next(&mut self) -> u64 {
+                self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let mut z = self.0;
+                z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+                z ^ (z >> 31)
+            }
+            /// Any i64, with the extremes and zero drawn often.
+            fn time(&mut self) -> i64 {
+                match self.next() % 32 {
+                    0 => i64::MIN,
+                    1 => i64::MAX,
+                    2 => 0,
+                    _ => self.next() as i64,
+                }
+            }
+        }
+        let mut sw = Sweep(0x7a11_9a7e);
+        let (mut none_live, mut all_live) = (0u32, 0u32);
+        for case in 0..20_000u32 {
+            let mut times = [0i64; SENSOR_TABLE];
+            for t in &mut times {
+                *t = sw.time();
+            }
+            // Every table holds the signed minimum; the maximum is there half of the time.
+            times[0] = i64::MIN;
+            if case % 2 == 0 {
+                times[1] = i64::MAX;
+            }
+            let g = full(&times);
+            let clock = sw.time();
+            let drop_ns = (sw.next() % (MAX_DROP_NS + 1)) as i64;
+            // The reference in 128 bits, with no saturation to reason about.
+            let floor = (i128::from(clock) - i128::from(drop_ns)).max(i128::from(i64::MIN));
+            let want = times.iter().filter(|&&t| i128::from(t) >= floor).count();
+            let got = gate_live_sensors(&g, clock, drop_ns);
+            assert_eq!(got, want, "case {case}");
+            none_live += u32::from(got == 0);
+            all_live += u32::from(got == SENSOR_TABLE);
+            // The clock moving forward by the same drop never adds a live sensor.
+            let later = clock.saturating_add((sw.next() % 1_000_000_000_000) as i64);
+            assert!(gate_live_sensors(&g, later, drop_ns) <= got, "case {case}");
+        }
+        assert!(none_live > 0 && all_live > 100, "{none_live} {all_live}");
+    }
+}

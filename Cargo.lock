@@ -77,6 +77,31 @@ name = "oa-build-info"
 version = "0.0.1"
 
 [[package]]
+name = "oa-ca"
+version = "0.0.1"
+dependencies = [
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
+ "oa-safety",
+]
+
+[[package]]
+name = "oa-ca-run"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-ca",
+ "oa-encounter-run",
+ "oa-feed",
+ "oa-safety",
+ "oa-sealed",
+ "oa-sha256",
+ "oa-track",
+]
+
+[[package]]
 name = "oa-compass"
 version = "0.0.1"
 dependencies = [
@@ -161,6 +186,17 @@ dependencies = [
  "oa-deflate",
  "oa-sealed",
  "oa-zip",
+]
+
+[[package]]
+name = "oa-feed-gaps"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-feed",
+ "oa-replay",
+ "oa-sealed",
 ]
 
 [[package]]
@@ -310,6 +346,15 @@ version = "0.0.1"
 dependencies = [
  "oa-sealed",
  "oa-track",
+]
+
+[[package]]
+name = "oa-runway"
+version = "0.0.1"
+dependencies = [
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
 ]
 
 [[package]]

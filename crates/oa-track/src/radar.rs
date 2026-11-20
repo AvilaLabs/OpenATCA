@@ -594,6 +594,7 @@ pub fn plot_convert(
         },
         flags: 0,
         category: 0,
+        vel_lag_s: 0.0,
     };
     Ok(Converted { m, geo })
 }

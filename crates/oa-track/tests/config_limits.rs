@@ -69,6 +69,7 @@ fn meas(addr: u32, toa_ns: i64) -> Measurement {
         ident: NO_IDENT,
         flags: 0,
         category: 0,
+        vel_lag_s: 0.0,
     }
 }
 
