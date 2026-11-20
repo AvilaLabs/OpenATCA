@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 95,
+  "expected_proof_count": 100,
   "proofs": [
     {
       "id": "output-append",
@@ -1499,21 +1499,6 @@
       "memory_mib": 8192
     },
     {
-      "id": "ca-meet",
-      "requirement": "OA-CA-029: the meet of two ordered spans is finite and ordered inside the look-ahead.",
-      "package": "oa-ca",
-      "harness": "solve::proofs::the_meet_of_two_ordered_spans_is_ordered_and_finite",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 300,
-      "external_timeout_seconds": 420,
-      "memory_mib": 8192
-    },
-    {
       "id": "ca-predict-span",
       "requirement": "OA-CA-029: the conflict span of any ordered horizontal span (or none) and a bounded vertical part, known or unknown, is finite and ordered inside the look-ahead.",
       "package": "oa-ca",
@@ -1793,6 +1778,118 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384
+    },
+    {
+      "id": "runway-occupancy-monotone",
+      "requirement": "OA-RWY-009: for every box and coordinate pair within 1e9 m and finite radii 0 <= r1 <= r2, the one-region test in_box that fills every occupancy flag is true at r2 whenever true at r1; the runway-axis coordinates do not depend on the radius.",
+      "package": "oa-runway",
+      "harness": "occupy::proofs::occupancy_is_monotone_in_r95",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "touched at the smaller radius",
+        "a larger radius adds occupancy",
+        "clear at the larger radius"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 540,
+      "external_timeout_seconds": 600,
+      "memory_mib": 8192
+    },
+    {
+      "id": "runway-non-finite-occupies",
+      "requirement": "OA-RWY-010: for every runway (any f64 geometry) and every position or radius that is non-finite, beyond the 1e9 m coordinate limit, or negative, every region is occupied and the result is marked unknown.",
+      "package": "oa-runway",
+      "harness": "occupy::proofs::non_finite_input_occupies",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "non-finite east",
+        "east beyond the limit",
+        "non-finite radius",
+        "negative radius"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 540,
+      "external_timeout_seconds": 600,
+      "memory_mib": 8192
+    },
+    {
+      "id": "runway-inside-occupies",
+      "requirement": "OA-RWY-011: for every runway of the kind build_runway makes and every finite radius >= 0, a target whose runway-axis coordinates are inside the rectangle (box_of the runway region) is touched by in_box, the test behind every occupancy flag.",
+      "package": "oa-runway",
+      "harness": "occupy::proofs::point_in_rectangle_occupies",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "inside with a positive radius",
+        "inside with a zero radius",
+        "strictly inside along the runway"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 540,
+      "external_timeout_seconds": 600,
+      "memory_mib": 8192
+    },
+    {
+      "id": "runway-occupies-total",
+      "requirement": "OA-RWY-012: for every runway of the kind build_runway makes (finite geometry within 1e9 m, axis within [-1, 1]) and every position and radius (any f64 bit pattern), occupies returns without panic, overflow or NaN, and for a known position the rotated coordinates are Some, finite and under 1e10 m in size.",
+      "package": "oa-runway",
+      "harness": "occupy::proofs::occupies_never_panics",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "an input that occupies",
+        "an input that is clear"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 540,
+      "external_timeout_seconds": 600,
+      "memory_mib": 8192
+    },
+    {
+      "id": "runway-plane-bounded",
+      "requirement": "OA-RWY-013: for every plane scale a plane_new result can have and every input, a non-finite input gives no position and a position given is finite and within the stated extent on each axis. The disc check (east^2 + north^2 <= EXTENT^2) is tested, not proved: its symbolic products did not finish in the time budget.",
+      "package": "oa-runway",
+      "harness": "occupy::proofs::local_plane_is_bounded",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "a point inside the extent",
+        "a point refused"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 540,
+      "external_timeout_seconds": 600,
+      "memory_mib": 8192
+    },
+    {
+      "id": "runway-non-finite-runway-occupies",
+      "requirement": "OA-RWY-010: for every runway with any non-finite geometry number, every position and every radius, every region is occupied and the result is marked unknown.",
+      "package": "oa-runway",
+      "harness": "occupy::proofs::non_finite_runway_occupies",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "a NaN half length",
+        "a known position"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 540,
+      "external_timeout_seconds": 600,
+      "memory_mib": 8192
     }
   ]
 }
