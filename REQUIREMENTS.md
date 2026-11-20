@@ -6208,3 +6208,51 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   truth altitude and the median ratio of STDDS speed to truth speed on the paired samples, with "units
   suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
   ratio is outside 0.8 to 1.25.
+
+## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
+
+Build order step 7 of docs/M5_DESIGN.md. `oa-msaw` is a core crate; the shell lookups of terrain,
+obstacles and charts cross as plain values. Every configured value is a development value, not an
+FAA value.
+
+- **OA-MSAW-001** A configuration out of range is refused with the name of the key; every table is
+  allocated whole at the start and a capacity above its bound is refused.
+- **OA-MSAW-002** Aircraft on the ground are excluded and counted.
+- **OA-MSAW-003** A track with no altitude is counted, listed and the net reads degraded
+  (`AltitudeMissing`); the other tracks are still evaluated.
+- **OA-MSAW-004** A path point with no terrain or chart coverage is counted, listed and the net reads
+  degraded (`InputMissing`); it is never treated as safe, and the covered points are still evaluated.
+- **OA-MSAW-005** Over the track budget the lowest altitudes are evaluated first, the rest are counted
+  and listed, and the net reads degraded (`BudgetExceeded`) with the count; rows past the track
+  capacity are counted the same way.
+- **OA-MSAW-006** Synthetic Guam case: an approach descending early onto rising terrain alerts at
+  caution and then at warning.
+- **OA-MSAW-007** An inhibition of the net in force at the track's position and altitude hides the
+  alert, is recorded against its id, shows the net as inhibited with the inhibition and its end time,
+  and stops hiding at its end time; an inhibition of another net or band hides nothing.
+- **OA-MSAW-008** The floor is the higher of terrain plus clearance, obstacle top plus clearance and the
+  chart altitude; no coverage gives no floor.
+- **OA-MSAW-009** In a procedure area the published altitude replaces the chart altitude when lower and
+  the clearances are the procedure clearance; outside it nothing changes.
+- **OA-MSAW-010** An alert is a warning when the predicted violation is within the warning time, else a
+  caution; a track already below its floor is a warning.
+- **OA-MSAW-011** One alert is kept per track from its first to its last violating cycle and ends after the
+  hysteresis; the end of the run ends what is open.
+- **OA-MSAW-012** An alert that does not fit the open table is logged at once and counted, and the net
+  reads degraded.
+- **OA-MSAW-013** What a full alert or skip log cannot hold is counted and the net reads degraded.
+- **OA-MSAW-014** A cycle not after the previous one, or with floors that do not match the planned
+  points, publishes the net unavailable.
+- **OA-MSAW-015** Each track's path is sampled in a straight line from its velocity; a point's radius is
+  the 95 % radius plus half the distance to the next point.
+- **OA-MSAW-016** A point's floor is judged against the lowest predicted altitude over the span the point
+  stands for, and the violation time lies inside that span.
+- **OA-MSAW-017** The net report gives the reason of highest priority (budget, input, altitude) and the count
+  of every shortfall of the cycle; rows told lost upstream degrade the next cycle.
+- **OA-MSAW-018** An unknown vertical rate predicts level and is flagged.
+- **OA-MSAW-019** A bad row is counted and listed; a missing or oversized 95 % radius is held to the cap and counted.
+- **OA-MSAW-020** The altitude predicted at any time inside the look-ahead is finite for bounded inputs (Kani).
+- **OA-MSAW-021** The floor is monotone in its inputs, so a higher floor never removes an alert (Kani).
+- **OA-MSAW-022** The time of a predicted violation is finite and inside its span for bounded inputs (Kani).
+- **OA-MSAW-023** A capacity above its bound is refused with the name of the key.
+- **OA-MSAW-024** The same cycles give the same alerts.

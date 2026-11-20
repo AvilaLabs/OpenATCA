@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 72,
+  "expected_proof_count": 75,
   "proofs": [
     {
       "id": "output-append",
@@ -1439,6 +1439,51 @@
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
       "memory_mib": 16384
+    },
+    {
+      "id": "msaw-predicted-altitude-finite",
+      "requirement": "OA-MSAW-020: the straight-line altitude predicted at any time inside the look-ahead is finite for bounded altitude, rate and time.",
+      "package": "oa-msaw",
+      "harness": "calc::proofs::predicted_altitude_is_finite_inside_the_look_ahead_for_bounded_inputs",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "msaw-floor-monotone",
+      "requirement": "OA-MSAW-021: the floor is monotone in terrain, obstacle and chart altitude, so a higher floor never removes an alert.",
+      "package": "oa-msaw",
+      "harness": "calc::proofs::a_higher_floor_never_removes_an_alert",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "msaw-violation-time-in-span",
+      "requirement": "OA-MSAW-022: the time of a predicted violation is finite and inside its sample span for bounded inputs.",
+      "package": "oa-msaw",
+      "harness": "calc::proofs::a_violation_time_stays_inside_its_span_for_bounded_inputs",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
     }
   ]
 }

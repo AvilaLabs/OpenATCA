@@ -227,6 +227,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-msaw"
+version = "0.0.1"
+dependencies = [
+ "oa-ieee",
+ "oa-math",
+ "oa-safety",
+]
+
+[[package]]
 name = "oa-mva"
 version = "0.0.1"
 dependencies = [

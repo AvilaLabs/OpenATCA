@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 72)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 72)
+        self.assertEqual(registry["expected_proof_count"], 75)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 75)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 67)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 70)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -74,6 +74,19 @@ class SuiteConfigurationTests(unittest.TestCase):
         for proof in safety.values():
             self.assertTrue(proof["enabled"] and not proof["experimental"])
             self.assertTrue(proof["harness"].startswith("inhibit::proofs::"))
+
+    def test_the_msaw_proofs_are_registered(self):
+        registry, errors = load_registry(REGISTRY_PATH)
+        self.assertEqual(errors, [])
+        msaw = {p["id"]: p for p in registry["proofs"] if p["package"] == "oa-msaw"}
+        self.assertEqual(set(msaw), {
+            "msaw-predicted-altitude-finite",
+            "msaw-floor-monotone",
+            "msaw-violation-time-in-span",
+        })
+        for proof in msaw.values():
+            self.assertTrue(proof["enabled"] and not proof["experimental"])
+            self.assertTrue(proof["harness"].startswith("calc::proofs::"))
 
     def test_late_rollback_conjunction_has_every_component_and_reachability_case(self):
         registry, errors = load_registry(REGISTRY_PATH)
