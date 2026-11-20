@@ -2444,3 +2444,38 @@ fn an_actual_event_time_in_the_window_drops_a_message_stamped_after_it() {
     let act = plan.replace(r#"type="PROPOSED""#, r#"type="ACTUAL""#);
     assert_eq!(decode_with_window(&wrap_flight(&act), w).0, Ok(sealed(1)));
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_times_a_flow_message_or_a_tmi_list_reports_are_window_keys_too() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let after = "2026-11-24T01:00:00Z";
+    let inw = "2026-11-22T23:00:00Z";
+    // A flow message stamped after the window that reports a sent time inside it.
+    let adv = stamped(&gadv(), after).replace(
+        "<ns11:dateSent>2030-01-02T03:00:00Z",
+        &format!("<ns11:dateSent>{inw}"),
+    );
+    assert_eq!(decode_with_window(&wrap_fi(&adv), w).0, Ok(sealed(1)));
+    let kept = stamped(&gadv(), after);
+    assert_eq!(
+        decode_with_window(&wrap_fi(&kept), w)
+            .0
+            .unwrap()
+            .sealed_dropped,
+        0
+    );
+    // A TMI list entry whose last update time is inside the window.
+    let list = stamped(&tmi_list(), after);
+    let t = list
+        .split("lastUpdateTime=\"")
+        .nth(1)
+        .map(|r| r[..r.find('"').unwrap()].to_string());
+    if let Some(t) = t {
+        let x = list.replace(
+            &format!("lastUpdateTime=\"{t}\""),
+            &format!("lastUpdateTime=\"{inw}\""),
+        );
+        assert_eq!(decode_with_window(&wrap_fi(&x), w).0, Ok(sealed(1)));
+    }
+}
