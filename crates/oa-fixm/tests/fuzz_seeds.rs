@@ -48,5 +48,5 @@ fn every_committed_seed_decodes_or_is_refused_as_named() {
         }
     }
     eprintln!("fixm seeds: {accepted} accepted, {refused} refused");
-    assert_eq!((accepted, refused), (23, 14));
+    assert_eq!((accepted, refused), (28, 15));
 }

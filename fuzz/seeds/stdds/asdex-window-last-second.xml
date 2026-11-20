@@ -1,1 +1,1 @@
-<a:asdexMsg xmlns:a="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:smes:surfacemovementevent"><airport>ZZB</airport><positionReport><seqNum>1</seqNum><time>2026-11-23T00:16:59Z</time></positionReport></a:asdexMsg>
+<a:asdexMsg xmlns:a="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:smes:surfacemovementevent"><airport>ZZB</airport><positionReport><seqNum>1</seqNum><time>2026-11-23T00:31:59Z</time></positionReport></a:asdexMsg>

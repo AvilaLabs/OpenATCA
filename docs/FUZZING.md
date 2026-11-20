@@ -119,7 +119,9 @@ input twice, with the window empty (`DropWindow::empty_for_tests_and_fuzz`) and 
 sealed decoder keeps has an observation time in the window, and that a document the sealed decoder did not drop
 decodes exactly as with no window (same result, same rows). `fuzz/seal_times.dict` holds the time names and the
 window edges (`-dict=fuzz/seal_times.dict`), and the `seal` seeds of each of the five targets carry in-window and
-edge times (made-up values, from the tests' own fixtures).
+edge times of the widened window (the listed one less and plus 15 minutes), fractions of 4 to 9 digits, long padding and
+actual-event times (made-up values, from the tests' own fixtures). The oracles also cover the actual-event times of the
+rows (fixm `dep_actual_ms`; TFMS out, off, on, in, runway, gate and boundary times).
 
 Not fuzzed: `oa-dof`, `oa-airspace`, `oa-replay`, `oa-wind`. (`oa-notam`, `oa-mva`, `oa-nasr`,
 `oa-arinc424` and `oa-csv` were added in a second pass, below.)

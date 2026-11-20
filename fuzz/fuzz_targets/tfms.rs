@@ -57,7 +57,22 @@ fuzz_target!(|data: &[u8]| {
             let nf = oa_tfms::flights_len(&sealed.flights);
             for i in 0..nf {
                 let r = oa_tfms::flight_at(&sealed.flights, i).expect("a row below the length");
-                assert!(!w.contains(r.src_ms) && !w.contains(r.pos_ms), "kept flight in the window");
+                // The message time, the position time and the actual-event times a pre-scan reads.
+                for t in [
+                    r.src_ms,
+                    r.pos_ms,
+                    r.out_ms,
+                    r.off_ms,
+                    r.on_ms,
+                    r.in_ms,
+                    r.rwy_dep_ms,
+                    r.rwy_arr_ms,
+                    r.gate_dep_ms,
+                    r.gate_arr_ms,
+                    r.bnd_ms,
+                ] {
+                    assert!(!w.contains(t), "kept flight in the window");
+                }
             }
             for i in 0..oa_tfms::flows_len(&sealed.flows) {
                 let r = oa_tfms::flow_at(&sealed.flows, i).expect("a row below the length");

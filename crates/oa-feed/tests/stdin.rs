@@ -236,8 +236,8 @@ fn stdin_mode_records_compressed_and_replay_matches_the_raw_recording() {
 // REQ: OA-SEAL-014
 #[test]
 fn replay_counts_bytes_after_the_window_gate() {
-    // 2026-11-20T00:00:00Z in Unix nanoseconds, the start of the sealed window.
-    const FROM: i64 = 1_795_132_800_000_000_000;
+    // 2026-11-19T23:45:00Z in Unix nanoseconds, the start of the sealed window (widened).
+    const FROM: i64 = 1_795_131_900_000_000_000;
     let frame = |i: u64, t: i64| {
         let mut buf = vec![0u8; HEADER_LEN + 1 + TRAILER_LEN];
         let n = encode_frame(&mut buf, 1, 0, i, t, 0, b"x").unwrap();

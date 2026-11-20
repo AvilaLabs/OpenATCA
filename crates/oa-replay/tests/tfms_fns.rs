@@ -1855,16 +1855,30 @@ fn a_local_format_cancellation_removes_the_notam_of_its_own_location_only() {
 #[test]
 fn a_notam_issued_in_a_sealed_window_is_dropped_and_counted() {
     let mut p = new_pipeline(PipelineConfig::default()).unwrap();
-    // 2026-11-20T00:00:00Z is the first instant of the window; the frame was received before it.
-    let from_ns: i64 = 1_795_132_800_000_000_000;
+    // 2026-11-19T23:45:00Z is the first instant of the window (the listed start less the
+    // margin); the frame was received before it.
+    let from_ns: i64 = 1_795_131_900_000_000_000;
     let mut inside = nt("A", 1);
-    inside.issued = "2026-11-20T00:00:00.000Z";
+    inside.issued = "2026-11-19T23:45:00.000Z";
     let mut before = nt("A", 2);
-    before.issued = "2026-11-19T23:59:59.999Z";
+    before.issued = "2026-11-19T23:44:59.999Z";
     feed(&mut p, FeedKind::Fns, from_ns - 1, &notam(&inside));
+    // The dropped document is in no count but the drop: not a frame, not a message.
+    assert_eq!(
+        (p.sealed_window_dropped, p.frames[FeedKind::Fns as usize]),
+        (1, 0)
+    );
+    assert_eq!(p.messages[FeedKind::Fns as usize], 0);
     feed(&mut p, FeedKind::Fns, from_ns - 1, &notam(&before));
     assert_eq!(p.sealed_window_dropped, 1);
     assert_eq!(p.rows_seen[FeedKind::Fns as usize], 1);
+    assert_eq!(
+        (
+            p.frames[FeedKind::Fns as usize],
+            p.messages[FeedKind::Fns as usize]
+        ),
+        (1, 1)
+    );
 }
 
 // REQ: OA-SEAL-014
@@ -1885,4 +1899,52 @@ fn a_tfms_flow_timed_in_a_window_is_not_applied_though_its_frame_was_received_be
     feed(&mut p, FeedKind::Tfms, at(3, 0, 1), &doc);
     assert_eq!(p.sealed_window_dropped, 1);
     assert_eq!(p.rows_applied[FeedKind::Tfms as usize], 1);
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_document_dropped_whole_is_in_no_frame_message_or_byte_count_for_every_feed() {
+    // 2026-11-21T00:00:00Z, in the window, as milliseconds from `common::DAY`.
+    let inside_ms = 1_795_219_200_000 - DAY;
+    let tfms = wrap_fi(&rstr((3, 0, 0), 7, 20, 6));
+    let mut inside_nt = nt("A", 1);
+    inside_nt.issued = "2026-11-21T00:00:00.000Z";
+    let cases: Vec<(FeedKind, String, String)> = vec![
+        (
+            FeedKind::Sfdps,
+            sf_doc(&[sf(1, inside_ms)]),
+            sf_doc(&[sf(1, 0)]),
+        ),
+        (
+            FeedKind::Tbfm,
+            tb_doc(inside_ms, "ZTT", &[tb(inside_ms, None, "T00001")]),
+            tb_doc(0, "ZTT", &[tb(0, None, "T00001")]),
+        ),
+        (
+            FeedKind::Tfms,
+            tfms.replace(&ts(3, 0, 0), "2026-11-21T00:00:00Z"),
+            tfms.clone(),
+        ),
+        (FeedKind::Fns, notam(&inside_nt), notam(&nt("A", 2))),
+    ];
+    for (feed_kind, inside, outside) in cases {
+        // Both frames are received outside the window: only their documents tell them apart.
+        let kept = common::frame(1, 1, at(3, 0, 1), outside.as_bytes());
+        let mut all = common::frame(1, 0, at(3, 0, 0), inside.as_bytes());
+        all.extend(kept.clone());
+        let mut q = pl();
+        let rep = oa_replay::run_streams(
+            &mut q,
+            vec![oa_replay::spec_from_bytes(feed_kind, vec![all])],
+            4096,
+            &mut |_| {},
+        )
+        .unwrap();
+        let f = feed_kind as usize;
+        let name = format!("{feed_kind:?}");
+        assert_eq!(q.sealed_window_dropped, 1, "{name}");
+        assert!(!q.last_doc_dropped, "{name}");
+        assert_eq!((q.frames[f], q.messages[f]), (1, 1), "{name}");
+        assert_eq!(rep.bytes, kept.len() as u64, "{name}");
+    }
 }

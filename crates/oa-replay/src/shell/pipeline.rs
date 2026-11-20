@@ -664,7 +664,9 @@ pub fn process_frame_mono(
         FeedKind::Fns => process_fns(p, payload, now),
     };
     // A document the decoder dropped whole for a message in the sealed window is in no count
-    // but the drop (OA-SEAL-014). The clock above is not a printed count.
+    // but the drop (OA-SEAL-014). The clock and the sweeps above ran on the receive time of the
+    // frame, which the gate has checked is outside the widened window; what they print (the replay
+    // time, the clock's own counters) comes from receive times, not from the document.
     p.last_doc_dropped = dropped;
     if !dropped {
         if let Some(c) = p.frames.get_mut(f) {
@@ -775,10 +777,6 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) -> bool {
     false
 }
 
-fn drop_sealed(p: &mut Pipeline) {
-    note_sealed(p, 1);
-}
-
 /// Adds rows the decoders or the loops above dropped for their own time in the window.
 fn note_sealed(p: &mut Pipeline, n: u64) {
     p.sealed_window_dropped += n;
@@ -803,16 +801,19 @@ fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) -> bool {
             return false;
         }
     }
-    for i in 0..reports_len(&p.reports) {
-        // A row timed in a sealed window is dropped and counted, whatever its frame's time.
-        if p.reports
-            .time_ns
-            .get(i)
-            .is_some_and(|&t| oa_sealed::in_sealed_window(t))
-        {
-            drop_sealed(p);
-            continue;
-        }
+    // A frame with any row timed in a sealed window is dropped whole, as a document is
+    // (OA-SEAL-014): its rows are counted as dropped, and it is in no other count.
+    let rows = reports_len(&p.reports);
+    if p.reports
+        .time_ns
+        .iter()
+        .take(rows)
+        .any(|&t| oa_sealed::in_sealed_window(t))
+    {
+        note_sealed(p, rows as u64);
+        return true;
+    }
+    for i in 0..rows {
         let a = apply_adsb(&mut p.adsb, &p.reports, i, now);
         bump(&mut p.rows_seen, FeedKind::Adsb, 1);
         match a {

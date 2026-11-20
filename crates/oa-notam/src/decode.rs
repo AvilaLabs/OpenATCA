@@ -750,39 +750,40 @@ fn count_reject(stats: &mut Stats, e: &DocError) {
     }
 }
 
-/// Reads the text of every `issued` and `canceled` element of the document, directly from the
-/// parsed tree and whatever else is valid in it. True if any is in `window`. A time that cannot
-/// be read is not in the window (the frame's receive time gates it).
-fn prescan(doc: &Doc<'_>, window: DropWindow) -> bool {
+/// Fills the first-text-node index of the decoder for `doc` (see [`text`]).
+fn index_texts(dec: &mut Decoder, doc: &Doc<'_>) {
+    let n = doc.elem_name.len();
+    dec.elem_text.iter_mut().take(n).for_each(|t| *t = NO_TEXT);
+    for (t, owner) in doc.text_owner.iter().enumerate() {
+        if let Some(slot) = dec.elem_text.get_mut(owner.0 as usize) {
+            *slot = if *slot == NO_TEXT {
+                t as u32
+            } else {
+                MANY_TEXT
+            };
+        }
+    }
+}
+
+/// Reads the text of every `issued` and `canceled` element of the document with the decoder's
+/// own text reader (`text`, with the buffer and the `parse_iso_ms` of the field parsers), directly
+/// from the parsed tree and whatever else is valid in it. True if any is in the drop window.
+/// A time that cannot be read is not in the window (the frame's receive time gates it).
+fn prescan(dec: &mut Decoder, doc: &Doc<'_>) -> bool {
+    let window = dec.limits.drop_window;
     if window.span().is_none() {
         return false;
     }
-    let total = doc.text_owner.len();
-    let mut t = 0usize;
-    while t < total {
-        let Some(&owner) = doc.text_owner.get(t) else {
-            break;
-        };
-        let first = t;
-        while doc.text_owner.get(t) == Some(&owner) {
-            t += 1;
-        }
-        let name = doc
-            .elem_name
-            .get(owner.0 as usize)
-            .copied()
-            .unwrap_or_default();
+    index_texts(dec, doc);
+    let mut b1 = [0u8; 64];
+    for i in 0..doc.elem_name.len() {
+        let name = doc.elem_name.get(i).copied().unwrap_or_default();
         let name = name_bytes(doc.input, name);
         if name != b"issued" && name != b"canceled" {
             continue;
         }
-        // A text that a comment or CDATA section splits is one value.
-        let mut buf = [0u8; 64];
-        if let Ok(n) = oa_xml::decode_text_run(doc, first, t - first, &mut buf) {
-            if buf
-                .get(..n)
-                .is_some_and(|v| parse_iso_ms(trim(v)).is_some_and(|t| window.contains(t)))
-            {
+        if let Raw::Val(v) = text(doc, &dec.elem_text, i, &mut b1) {
+            if parse_iso_ms(trim(v)).is_some_and(|t| window.contains(t)) {
                 return true;
             }
         }
@@ -800,7 +801,7 @@ pub fn decode_doc(
 ) -> Result<Outcome, DocError> {
     // The first step, before any count, row or table is touched: a NOTAM issued or cancelled in
     // the sealed window is dropped whole.
-    if prescan(doc, dec.limits.drop_window) {
+    if prescan(dec, doc) {
         stats.sealed_window_dropped = stats.sealed_window_dropped.saturating_add(1);
         return Ok(Outcome {
             row: 0,
@@ -876,16 +877,7 @@ fn decode_inner(
         return Err(DocError::Capacity(CapacityKind::Rows));
     }
     // First text node of each element, for value elements.
-    dec.elem_text.iter_mut().take(n).for_each(|t| *t = NO_TEXT);
-    for (t, owner) in doc.text_owner.iter().enumerate() {
-        if let Some(slot) = dec.elem_text.get_mut(owner.0 as usize) {
-            *slot = if *slot == NO_TEXT {
-                t as u32
-            } else {
-                MANY_TEXT
-            };
-        }
-    }
+    index_texts(dec, doc);
     let mut m = new_msg(start);
     let mut unknown_el = 0u32;
     let mut unknown_at = 0u32;

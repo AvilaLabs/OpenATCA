@@ -104,7 +104,15 @@ impl Entry {
     }
 }
 
-/// A sealed span of time, half-open: `from_ns <= t < to_ns`, in nanoseconds since the Unix epoch.
+/// How far each listed `window` is widened on both sides, in nanoseconds: 15 minutes. It covers
+/// rounding of a fraction, differences between a scan and a parser, and the lag between a
+/// feed's own time and the time its frame was received (the SFDPS lag floor is 58 s). Data
+/// within the margin of an edge is dropped and counted (OA-SEAL-011, OA-SEAL-014). The Python
+/// guard (`tools/sealed_guard.py`) uses the same value.
+pub const WINDOW_MARGIN_NS: i64 = 15 * 60 * 1_000_000_000;
+
+/// A sealed span of time, half-open (the listed span widened by [`WINDOW_MARGIN_NS`] on each
+/// side): `from_ns <= t < to_ns`, in nanoseconds since the Unix epoch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Window {
     /// The span as written in the list (`<from> <to>`).
@@ -395,10 +403,11 @@ pub fn parse_list(text: &str) -> Result<List, String> {
                 if from_ns >= to_ns {
                     return Err(format!("line {}: the window is empty or reversed", i + 1));
                 }
+                // The span is widened by the margin on each side (the listed text is kept).
                 windows.push(Window {
                     text: value.to_owned(),
-                    from_ns,
-                    to_ns,
+                    from_ns: from_ns.saturating_sub(WINDOW_MARGIN_NS),
+                    to_ns: to_ns.saturating_add(WINDOW_MARGIN_NS),
                 });
             }
             _ => return Err(format!("line {}: unknown word `{word}`", i + 1)),
@@ -825,9 +834,28 @@ pub struct DropReport {
     stdout: bool,
 }
 
+/// The warning a tool prints at start when the list has no `window` line (and so seals every
+/// instant): `None` when it has one.
+pub fn no_window_warning(guard: &Sealed) -> Option<&'static str> {
+    (guard.windows().is_empty() && !guard.broken)
+        .then_some("seal list has no window: every timed row is dropped")
+}
+
+/// Prints [`no_window_warning`] for the compiled-in list, once per process, on standard error.
+/// A tool makes its [`DropReport`] first thing, so this is printed at start.
+fn warn_if_no_window() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if let Some(w) = no_window_warning(Sealed::production()) {
+            eprintln!("{w}");
+        }
+    });
+}
+
 impl DropReport {
     /// A report that prints its line on standard error.
     pub fn new() -> DropReport {
+        warn_if_no_window();
         DropReport {
             n: 0,
             stdout: false,
@@ -836,6 +864,7 @@ impl DropReport {
 
     /// A report that prints its line on standard output (a tool whose output is that stream).
     pub fn to_stdout() -> DropReport {
+        warn_if_no_window();
         DropReport { n: 0, stdout: true }
     }
 
@@ -967,7 +996,8 @@ mod tests {
     #[test]
     fn the_window_in_milliseconds_is_the_listed_span_and_the_report_adds() {
         let (a, b) = sealed_window_ms().unwrap();
-        assert_eq!((a, b), (1_795_132_800_000, 1_795_393_020_000));
+        // The listed span widened by 15 minutes on each side.
+        assert_eq!((a, b), (1_795_131_900_000, 1_795_393_920_000));
         let mut r = DropReport::new();
         r.add(2);
         r.add(3);
@@ -984,7 +1014,7 @@ mod tests {
         assert_eq!(DropWindow::sealed().span(), sealed_window_ms());
         assert_eq!(
             DropWindow::sealed().span(),
-            Some((1_795_132_800_000, 1_795_393_020_000))
+            Some((1_795_131_900_000, 1_795_393_920_000))
         );
     }
 
@@ -995,7 +1025,7 @@ mod tests {
         // The compiled-in list: its own span.
         assert_eq!(
             Sealed::with_list(LIST, None).drop_window().span(),
-            Some((1_795_132_800_000, 1_795_393_020_000))
+            Some((1_795_131_900_000, 1_795_393_920_000))
         );
         // A list that does not parse, and one with no window line: all time.
         assert_eq!(Sealed::with_list("not a list\n", None).drop_window(), all);
@@ -1007,6 +1037,21 @@ mod tests {
         let g = Sealed::with_list(&none, None);
         assert!(g.windows().is_empty());
         assert_eq!(g.drop_window(), all);
+    }
+
+    #[test]
+    fn a_list_with_no_window_line_gives_a_start_warning_and_one_with_a_window_does_not() {
+        let none: String = LIST
+            .lines()
+            .filter(|l| !l.starts_with("window"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(
+            no_window_warning(&Sealed::with_list(&none, None)),
+            Some("seal list has no window: every timed row is dropped")
+        );
+        assert_eq!(no_window_warning(&Sealed::with_list(LIST, None)), None);
+        assert_eq!(no_window_warning(Sealed::production()), None);
     }
 
     #[test]
@@ -1033,5 +1078,22 @@ mod tests {
             Some((1, 3))
         );
         assert_eq!(DropWindow::sealed().span(), sealed_window_ms());
+    }
+
+    #[test]
+    fn the_sealed_window_is_the_listed_one_widened_by_fifteen_minutes() {
+        let w = DropWindow::sealed();
+        // Dropped: a time that rounds to the listed end, one inside the end margin, and the
+        // first instant of the start margin.
+        for ms in [1_795_393_020_000, 1_795_393_919_000, 1_795_131_900_000] {
+            assert!(w.contains(ms), "{ms}");
+            assert!(in_sealed_window(ms * 1_000_000), "{ms}");
+        }
+        // Kept: one second before the start margin and the end of the end margin.
+        for ms in [1_795_131_899_000, 1_795_393_920_000] {
+            assert!(!w.contains(ms), "{ms}");
+            assert!(!in_sealed_window(ms * 1_000_000), "{ms}");
+        }
+        assert_eq!(WINDOW_MARGIN_NS, 15 * 60 * 1_000_000_000);
     }
 }

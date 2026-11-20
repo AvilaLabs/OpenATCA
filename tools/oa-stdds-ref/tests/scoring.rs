@@ -1045,13 +1045,13 @@ fn an_existing_output_exits_1_and_an_output_link_into_sealed_data_exits_2() {
 // REQ: OA-SEAL-014
 #[test]
 fn a_frame_or_a_record_in_a_sealed_window_is_dropped_and_counted() {
-    // The window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
-    const FROM: i64 = 1_795_132_800_000_000_000;
+    // The window of the list: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes), Unix nanoseconds.
+    const FROM: i64 = 1_795_131_900_000_000_000;
     let m = tais_xml(&[
-        (Some("A1B2C3"), "2026-11-19T23:59:59.000Z", "40.5", "-75.5"),
-        (Some("A1B2C3"), "2026-11-20T00:00:00.000Z", "40.6", "-75.6"),
+        (Some("A1B2C3"), "2026-11-19T23:44:59.000Z", "40.5", "-75.5"),
+        (Some("A1B2C3"), "2026-11-19T23:45:00.000Z", "40.6", "-75.6"),
     ]);
-    let kept = tais_xml(&[(Some("A1B2C3"), "2026-11-19T23:59:58.000Z", "40.4", "-75.4")]);
+    let kept = tais_xml(&[(Some("A1B2C3"), "2026-11-19T23:44:58.000Z", "40.4", "-75.4")]);
     let mut bytes = Vec::new();
     for (i, (t, x)) in [(FROM - 1, &m), (FROM - 1, &kept), (FROM, &kept)]
         .into_iter()

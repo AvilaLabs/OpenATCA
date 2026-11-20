@@ -588,7 +588,7 @@ fn is_xmlns(doc: &Doc<'_>, a: usize) -> bool {
 /// the `time` of every `actual` element, directly from the parsed tree and whatever else is valid in it. If any is in `window`,
 /// returns how many messages the document has (all are dropped, at least 1); otherwise 0. A time
 /// that cannot be read is not in the window (the frame's receive time gates it).
-fn prescan(doc: &Doc<'_>, window: oa_sealed::DropWindow) -> u32 {
+pub fn prescan(doc: &Doc<'_>, window: oa_sealed::DropWindow) -> u32 {
     if window.span().is_none() {
         return 0;
     }

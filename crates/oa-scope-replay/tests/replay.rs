@@ -1450,9 +1450,9 @@ fn only_exact_output_names_are_ours_and_a_link_is_never_followed() {
 // REQ: OA-SEAL-014
 #[test]
 fn the_clip_reader_drops_sealed_window_frames_and_rows_and_counts_them() {
-    // The list's window: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
-    const FROM: i64 = 1_795_132_800_000_000_000;
-    const TO: i64 = 1_795_393_020_000_000_000;
+    // The list's window: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes), Unix nanoseconds.
+    const FROM: i64 = 1_795_131_900_000_000_000;
+    const TO: i64 = 1_795_393_920_000_000_000;
     let dir = tmp("seal_window");
     // One frame per entry: (frame receive time, [row times]).
     let frames: [(i64, &[i64]); 4] = [

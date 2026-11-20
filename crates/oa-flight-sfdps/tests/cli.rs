@@ -49,11 +49,11 @@ fn an_unsealed_missing_directory_is_a_failed_run_not_a_refusal() {
 fn a_refusal_prints_the_drop_line_and_a_stop_at_to_counts_the_frames_the_merge_dropped() {
     let (_, err) = run("/nonexistent/openatca-data/scds/stdds-20261119-holdout");
     assert!(err.contains("sealed-window rows dropped: 0"), "{err}");
-    // The list's window is 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z. Frames received 2 s before
+    // The list's window is 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes). Frames received 2 s before
     // it, in it, and 1 s after it; `--to` ends the run just before the window, so the run
     // stops at the third frame, and the frame in the window is still counted.
-    const FROM: i64 = 1_795_132_800_000_000_000;
-    const TO: i64 = 1_795_393_020_000_000_000;
+    const FROM: i64 = 1_795_131_900_000_000_000;
+    const TO: i64 = 1_795_393_920_000_000_000;
     let xml =
         r#"<?xml version="1.0"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0"/>"#;
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("flight-to-cut");
@@ -83,7 +83,7 @@ fn a_refusal_prints_the_drop_line_and_a_stop_at_to_counts_the_frames_the_merge_d
 // REQ: OA-SEAL-014
 #[test]
 fn a_file_that_cannot_be_opened_partway_through_the_list_keeps_the_count_of_the_files_read() {
-    const FROM: i64 = 1_795_132_800_000_000_000;
+    const FROM: i64 = 1_795_131_900_000_000_000;
     let xml =
         r#"<?xml version="1.0"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0"/>"#;
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("flight-open-fails");

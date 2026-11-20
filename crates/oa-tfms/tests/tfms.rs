@@ -2326,10 +2326,11 @@ fn every_observation_time_is_a_window_key_in_any_encoding_and_a_reference_time_i
     let (r, rows, _) = decode_with_window(&pos, w);
     assert_eq!((r, rows), (Ok(sealed(1)), 0));
     // The oceanic position's `time`.
-    let oc = pos.replace("timeAtPosition", "time");
-    assert!(decode_with_window(&oc, w)
-        .0
-        .map_or(true, |o| o.sealed_dropped == 1 || o.flight_rows == 0));
+    let oc = wrap_flight(&oceanic().replace("2030-01-02T03:00:00Z", inw));
+    assert_eq!(decode_with_window(&oc, w).0, Ok(sealed(1)));
+    // The same message with the position time outside the window is kept, with its row.
+    let (r, rows, _) = decode_with_window(&wrap_flight(&oceanic()), w);
+    assert_eq!((r.unwrap().sealed_dropped, rows), (0, 1));
     // Entity-encoded (the final Z as a character reference), in the message time and the
     // position time, and split by a comment.
     let enc = wrap_flight(&track()).replace(
@@ -2339,17 +2340,16 @@ fn every_observation_time_is_a_window_key_in_any_encoding_and_a_reference_time_i
     assert_eq!(decode_with_window(&enc, w).0, Ok(sealed(1)));
     let split = pos.replace(inw, "2026-11-21T00:00:<!--x-->00Z");
     assert_eq!(decode_with_window(&split, w).0, Ok(sealed(1)));
-    // Padded with whitespace: if the decoder would read the value as a time in the window the
-    // document is dropped; if it refuses the value there is no row holding it.
+    // Padded with whitespace: the decoder's time reader refuses the padded value, so the scan,
+    // which reads with the same function, does not read it as a time: the document is not
+    // dropped, and the message is refused (rejected) with no row.
     let pad = wrap_flight(&track()).replace(
         r#"sourceTimeStamp="2030-01-02T03:04:05Z""#,
         r#"sourceTimeStamp=" 2026-11-21T00:00:00Z ""#,
     );
     let (r, rows, _) = decode_with_window(&pad, w);
-    assert!(
-        matches!(r, Ok(o) if o.sealed_dropped == 1) || rows == 0,
-        "{r:?} {rows}"
-    );
+    let o = r.unwrap();
+    assert_eq!((o.sealed_dropped, o.rejected, rows), (0, 1, 0));
     // A repeated position time element: both are read, so the one in the window is found.
     let dup = wrap_flight(&track().replace(
         "<nxcm:timeAtPosition>2030-01-02T03:04:00Z</nxcm:timeAtPosition>",
@@ -2478,4 +2478,22 @@ fn the_times_a_flow_message_or_a_tmi_list_reports_are_window_keys_too() {
         );
         assert_eq!(decode_with_window(&wrap_fi(&x), w).0, Ok(sealed(1)));
     }
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_count_of_a_dropped_document_is_its_messages_and_at_least_one() {
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let inw = "2026-11-22T23:00:00Z";
+    // A time key on an element that is not a message: the document has no message, and the
+    // count is still one (the drop is never silent).
+    let bare = wrap_flight(&format!(r#"<x sourceTimeStamp="{inw}"/>"#));
+    assert_eq!(decode_with_window(&bare, w).0, Ok(sealed(1)));
+    // Messages and status outputs are each counted.
+    let two = wrap_flight(&format!(
+        "{}{}<tfmsStatusOutput/><tfmsStatusOutput/>",
+        stamped(&track(), inw),
+        track()
+    ));
+    assert_eq!(decode_with_window(&two, w).0, Ok(sealed(4)));
 }

@@ -553,8 +553,8 @@ fn trace_tar_at(name: &str, first_unix_s: i64, n: usize) -> String {
 // REQ: OA-SEAL-015
 #[test]
 fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwise() {
-    // The window starts at 2026-11-20T00:00:00Z = 1795132800 s.
-    const FROM: i64 = 1_795_132_800;
+    // The window starts at 2026-11-19T23:45:00Z = 1795131900 s.
+    const FROM: i64 = 1_795_131_900;
     let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
     let run = |args: &[&str]| clip_cmd(exe, args);
     // Rows at from-1 s, from and from+1 s: refused, exit 2, nothing written, the count printed.
@@ -623,8 +623,8 @@ fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwis
     assert_eq!(std::fs::read_to_string(&side).unwrap(), text);
     let _ = std::fs::remove_file(&out);
     let _ = std::fs::remove_file(&side);
-    // A report at the window end (to = 2026-11-23T00:17:00Z = 1795393020 s) is not sealed.
-    let tar = trace_tar_at("seal-after.tar", 1_795_393_020, 1);
+    // A report at the window end (to = 2026-11-23T00:32:00Z = 1795393920 s) is not sealed.
+    let tar = trace_tar_at("seal-after.tar", 1_795_393_920, 1);
     let o = run(&["--out", out.to_str().unwrap(), &tar]);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     // Standard output has no sidecar.
@@ -635,8 +635,8 @@ fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwis
 // REQ: OA-SEAL-014
 #[test]
 fn the_archive_reader_drops_and_counts_trace_rows_in_a_sealed_window() {
-    // The window starts at 2026-11-20T00:00:00Z = 1795132800 s; rows at from-1 s, from, from+1 s.
-    const FROM: i64 = 1_795_132_800;
+    // The window starts at 2026-11-19T23:45:00Z = 1795131900 s; rows at from-1 s, from, from+1 s.
+    const FROM: i64 = 1_795_131_900;
     let tar = trace_tar_at("seal-scan.tar", FROM - 1, 3);
     let f = Filter {
         from_ns: i64::MIN,
@@ -653,7 +653,7 @@ fn the_archive_reader_drops_and_counts_trace_rows_in_a_sealed_window() {
 // REQ: OA-SEAL-015
 #[test]
 fn clip_creates_the_sidecar_and_the_clip_new_and_never_follows_or_replaces_a_name() {
-    const AFTER: i64 = 1_795_393_020;
+    const AFTER: i64 = 1_795_393_920;
     let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
     let tar = trace_tar_at("new-only.tar", AFTER, 1);
     let go = |out: &PathBuf| {
@@ -707,7 +707,7 @@ fn clip_creates_the_sidecar_and_the_clip_new_and_never_follows_or_replaces_a_nam
 fn clip_prints_the_drop_line_when_the_tar_layer_fails_after_rows_were_dropped() {
     // Three rows from the window start (all in the window), then a header block that is not a tar
     // header: the scan stops with a tar error, and the line still has the rows dropped before it.
-    const FROM: i64 = 1_795_132_800;
+    const FROM: i64 = 1_795_131_900;
     let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
     let good = trace_tar_at("tar-fail.tar", FROM, 3);
     // seal-allow: reads a tar the test wrote in its own temp directory

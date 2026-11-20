@@ -232,8 +232,8 @@ fn links_into_sealed_data_are_refused_for_each_argument_and_inside_the_sfdps_fol
 // REQ: OA-SEAL-014
 #[test]
 fn the_program_counts_sfdps_frames_and_clip_rows_in_a_sealed_window_once() {
-    // The window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
-    const FROM: i64 = 1_795_132_800_000_000_000;
+    // The window of the list: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes), Unix nanoseconds.
+    const FROM: i64 = 1_795_131_900_000_000_000;
     let root = scratch("window-count");
     let sfdps = root.join("sfdps");
     std::fs::create_dir_all(&sfdps).unwrap();

@@ -246,7 +246,16 @@ fn the_window_is_half_open_and_both_parsers_read_it_the_same() {
     let w = &l.windows[0];
     assert_eq!(
         (w.from_ns, w.to_ns),
-        (1_795_132_800_000_000_000, 1_795_393_020_000_000_000)
+        // The listed 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, widened by 15 minutes.
+        (
+            1_795_132_800_000_000_000 - 900_000_000_000,
+            1_795_393_020_000_000_000 + 900_000_000_000
+        )
+    );
+    assert_eq!(oa_sealed::WINDOW_MARGIN_NS, 900_000_000_000);
+    assert_eq!(
+        l.windows[0].text,
+        "2026-11-20T00:00:00Z 2026-11-23T00:17:00Z"
     );
     let g = Sealed::with_root(&fake_root("window"));
     for (t, sealed) in [
@@ -266,8 +275,11 @@ fn the_window_is_half_open_and_both_parsers_read_it_the_same() {
     // Two windows and a leap day.
     let two = "root /d\nseal a\nwindow 2024-02-29T00:00:00Z 2024-03-01T00:00:00Z\nwindow 1970-01-01T00:00:01Z 1970-01-01T00:00:02Z\n";
     let l2 = parse_list(two).unwrap();
-    assert_eq!(l2.windows[0].from_ns, 1_709_164_800_000_000_000);
-    assert_eq!(l2.windows[1].from_ns, 1_000_000_000);
+    assert_eq!(
+        l2.windows[0].from_ns,
+        1_709_164_800_000_000_000 - 900_000_000_000
+    );
+    assert_eq!(l2.windows[1].from_ns, 1_000_000_000 - 900_000_000_000);
     let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sealed_guard.py");
     let f = scratch("window-parity").join("two.txt");
     fs::write(&f, two).unwrap();

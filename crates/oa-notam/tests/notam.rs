@@ -1549,14 +1549,20 @@ fn issue_and_cancel_times_are_window_keys_in_any_encoding_and_validity_times_are
     let issued = "<event:issued>2030-03-05T09:00:00.000Z</event:issued>";
     let base = msg(&[&airport()]);
     let with = |t: &str| rep(&base, issued, &format!("<event:issued>{t}</event:issued>"));
-    // Entity-encoded, padded with whitespace, and split by a comment.
+    // Entity-encoded and padded with whitespace.
     for t in [
         "2026-11-21T00:00:00.000&#90;",
         " 2026-11-21T00:00:00.000Z\n",
-        "2026-11-21T00:00:<!--x-->00.000Z",
     ] {
         assert!(decode_with_window(&with(t), w).0.sealed_dropped, "{t:?}");
     }
+    // A text split by a comment is not a value the decoder reads (it is a bad field), so the
+    // scan, which reads with the decoder's own text reader, does not read it either.
+    assert!(
+        !decode_with_window(&with("2026-11-21T00:00:<!--x-->00.000Z"), w)
+            .0
+            .sealed_dropped
+    );
     // A repeated issue element: both are read, so the one in the window is found.
     let dup = rep(
         &base,

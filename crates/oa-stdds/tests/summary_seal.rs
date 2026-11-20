@@ -9,9 +9,9 @@
 
 use oa_feed::frame::{encode_frame, Kind as FrameKind, MAX_FRAME_LEN};
 
-/// The window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
-const FROM: i64 = 1_795_132_800_000_000_000;
-const TO: i64 = 1_795_393_020_000_000_000;
+/// The window of the list: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes), Unix nanoseconds.
+const FROM: i64 = 1_795_131_900_000_000_000;
+const TO: i64 = 1_795_393_920_000_000_000;
 
 fn message(times: &[&str]) -> Vec<u8> {
     let mut s = String::from(
@@ -48,14 +48,14 @@ fn the_summary_example_drops_sealed_frames_and_records_and_prints_the_count() {
         (
             FROM - 1,
             vec![
-                "2026-11-19T23:59:59Z",
-                "2026-11-20T00:00:00Z",
-                "2026-11-23T00:16:59Z",
+                "2026-11-19T23:44:59Z",
+                "2026-11-19T23:45:00Z",
+                "2026-11-23T00:31:59Z",
             ],
         ),
         (FROM, vec!["2026-11-19T12:00:00Z"]),
         (TO - 1, vec!["2026-11-19T12:00:00Z"]),
-        (TO, vec!["2026-11-23T00:17:00Z"]),
+        (TO, vec!["2026-11-23T00:32:00Z"]),
     ];
     for (i, (t, recs)) in frames.iter().enumerate() {
         let m = message(recs);

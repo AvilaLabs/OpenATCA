@@ -49,6 +49,10 @@ def _parse_utc_ns(t: str):
     return calendar.timegm((y, mo, d, h, mi, sec)) * 1_000_000_000
 
 
+# How far each listed window is widened on both sides: 15 minutes, in nanoseconds (OA-SEAL-011).
+WINDOW_MARGIN_NS = 15 * 60 * 1_000_000_000
+
+
 def parse_list(text: str):
     """Returns (root, [(entry_text, parts, kind)], days, [(window_text, from_ns, to_ns)]); kind is
     "exact", "prefix" (`X*`) or "contains" (`*X*`); days is (days, scopes, exempt), the days as
@@ -111,7 +115,8 @@ def parse_list(text: str):
                 raise ValueError(f"line {i}: expected `window <from-UTC> <to-UTC>`")
             if ns[0] >= ns[1]:
                 raise ValueError(f"line {i}: the window is empty or reversed")
-            windows.append((value, ns[0], ns[1]))
+            # Widened by the margin on each side (the listed text is kept), as in `oa-sealed`.
+            windows.append((value, ns[0] - WINDOW_MARGIN_NS, ns[1] + WINDOW_MARGIN_NS))
         else:
             raise ValueError(f"line {i}: unknown word `{word}`")
     if root is None:
@@ -251,7 +256,7 @@ class Guard:
     def in_window(self, unix_ns: int) -> bool:
         """Whether `unix_ns` (nanoseconds since the Unix epoch, UTC) is in a sealed window
         (half-open). A guard whose list does not parse seals every instant."""
-        return self.broken or any(w[1] <= unix_ns < w[2] for w in self.windows)
+        return self.broken or not self.windows or any(w[1] <= unix_ns < w[2] for w in self.windows)
 
     def walk_unsealed(self, root: str | os.PathLike):
         """(files, skipped, already_visited): the unsealed files below `root`, sorted; a directory
@@ -372,7 +377,12 @@ class Guard:
 
 @functools.lru_cache(maxsize=1)
 def production() -> Guard:
-    return Guard()
+    g = Guard()
+    # A list with no window line seals every instant; say so, once (the guard is cached), on
+    # stderr, at start.
+    if not g.broken and not g.windows:
+        print("seal list has no window: every timed row is dropped", file=sys.stderr)
+    return g
 
 
 def open_read(path, mode="r", **kw):

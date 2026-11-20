@@ -1909,3 +1909,32 @@ fn observation_times_are_window_keys_in_any_encoding_and_a_foreign_one_is_droppe
         1,
     );
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_production_window_has_a_margin_that_covers_the_rounding_of_a_fraction() {
+    let mut p = parser();
+    let limits = Limits::new(oa_sealed::DropWindow::sealed());
+    let at = |t: &str| {
+        tais_xml(&format!(
+            "<record><track><mrtTime>{t}</mrtTime></track></record>"
+        ))
+    };
+    // The fourth fraction digit rounds half up, so this time is 00:17:00.000, past the listed end;
+    // the margin still drops it, as it drops the time 15 minutes after the listed end, less a
+    // second, and the first instant 15 minutes before the listed start.
+    for t in [
+        "2026-11-23T00:16:59.9995Z",
+        "2026-11-23T00:31:59Z",
+        "2026-11-19T23:45:00Z",
+    ] {
+        let mut st = new_stats();
+        parse_message(&mut p, at(t).as_bytes(), &limits, &mut st).unwrap();
+        assert_eq!((st.sealed_window_dropped, st.records), (1, 0), "{t}");
+    }
+    for t in ["2026-11-19T23:44:59Z", "2026-11-23T00:32:00Z"] {
+        let mut st = new_stats();
+        parse_message(&mut p, at(t).as_bytes(), &limits, &mut st).unwrap();
+        assert_eq!((st.sealed_window_dropped, st.records), (0, 1), "{t}");
+    }
+}

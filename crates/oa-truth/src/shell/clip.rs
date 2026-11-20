@@ -175,9 +175,9 @@ mod tests {
     #[test]
     fn rows_at_the_window_edges_are_kept_or_dropped_and_counted() {
         use oa_adsb::{encode_payload, reports_push, ROW_EMPTY};
-        // The list's window: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z.
-        const FROM: i64 = 1_795_132_800_000_000_000;
-        const TO: i64 = 1_795_393_020_000_000_000;
+        // The list's window: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes).
+        const FROM: i64 = 1_795_131_900_000_000_000;
+        const TO: i64 = 1_795_393_920_000_000_000;
         let mut r = Reports::default();
         for (i, t) in [FROM - 1, FROM, TO - 1, TO].into_iter().enumerate() {
             let mut row = ROW_EMPTY;

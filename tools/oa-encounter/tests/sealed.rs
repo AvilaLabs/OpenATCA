@@ -52,9 +52,9 @@ fn a_link_into_sealed_data_is_refused_for_the_clip_the_output_and_the_nasr_file(
 // REQ: OA-SEAL-014
 #[test]
 fn the_program_prints_the_count_of_clip_rows_dropped_for_a_sealed_window_once() {
-    // The window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
-    const FROM: i64 = 1_795_132_800_000_000_000;
-    const TO: i64 = 1_795_393_020_000_000_000;
+    // The window of the list: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes), Unix nanoseconds.
+    const FROM: i64 = 1_795_131_900_000_000_000;
+    const TO: i64 = 1_795_393_920_000_000_000;
     let t = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("enc-window");
     let _ = fs::remove_dir_all(&t);
     fs::create_dir_all(&t).unwrap();

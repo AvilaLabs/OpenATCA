@@ -648,9 +648,9 @@ mod tests {
     // REQ: OA-SEAL-014
     #[test]
     fn frames_at_the_window_edges_are_kept_or_dropped_and_counted() {
-        // The list's window: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z.
-        const FROM: i64 = 1_795_132_800_000_000_000;
-        const TO: i64 = 1_795_393_020_000_000_000;
+        // The list's window: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes).
+        const FROM: i64 = 1_795_131_900_000_000_000;
+        const TO: i64 = 1_795_393_920_000_000_000;
         let m = msg("ZZA", &[(1, "2026-11-19T12:00:00Z", None)]).into_bytes();
         let mut bytes = Vec::new();
         for (i, t) in [FROM - 1, FROM, TO - 1, TO].into_iter().enumerate() {
@@ -668,20 +668,20 @@ mod tests {
     // REQ: OA-SEAL-014
     #[test]
     fn a_record_timed_in_the_window_is_dropped_though_its_frame_was_received_before_it() {
-        const FROM: i64 = 1_795_132_800_000_000_000;
+        const FROM: i64 = 1_795_131_900_000_000_000;
         // One message, four records: mrtTime at from - 1 s, at from, at to - 1 s and at to. The
         // two inside the window drop the whole message, not just themselves.
         let m = msg(
             "ZZA",
             &[
-                (1, "2026-11-19T23:59:59Z", None),
-                (2, "2026-11-20T00:00:00Z", None),
-                (3, "2026-11-23T00:16:59Z", None),
-                (4, "2026-11-23T00:17:00Z", None),
+                (1, "2026-11-19T23:44:59Z", None),
+                (2, "2026-11-19T23:45:00Z", None),
+                (3, "2026-11-23T00:31:59Z", None),
+                (4, "2026-11-23T00:32:00Z", None),
             ],
         )
         .into_bytes();
-        let kept = msg("ZZA", &[(5, "2026-11-19T23:59:59Z", None)]).into_bytes();
+        let kept = msg("ZZA", &[(5, "2026-11-19T23:44:59Z", None)]).into_bytes();
         let mut bytes = Vec::new();
         // The frames were received at from - 1 ns, outside the window.
         for (i, x) in [&m, &kept].into_iter().enumerate() {

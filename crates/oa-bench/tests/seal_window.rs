@@ -12,9 +12,9 @@ use oa_adsb::{encode_payload, reports_len, reports_push, Reports, ROW_EMPTY};
 use oa_bench::input::{for_each_adsb_frame_counted, load_adsb};
 use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
 
-/// The window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
-const FROM: i64 = 1_795_132_800_000_000_000;
-const TO: i64 = 1_795_393_020_000_000_000;
+/// The window of the list: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes), Unix nanoseconds.
+const FROM: i64 = 1_795_131_900_000_000_000;
+const TO: i64 = 1_795_393_920_000_000_000;
 
 fn rows_at(times: &[i64]) -> Reports {
     let mut r = Reports::default();

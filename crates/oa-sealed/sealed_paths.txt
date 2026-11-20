@@ -38,4 +38,6 @@ dayexempt raw/awc
 # window  a half-open UTC span (from inclusive, to exclusive) in which every row or frame is
 #         sealed, whichever file holds it: the three ADS-B days and hold-out days A to C of the
 #         four-day recording (19 Nov 00:17Z, then 24 h each). Readers drop and count such rows.
+#         Both ends are widened by 15 minutes when the list is read (`WINDOW_MARGIN_NS`), so
+#         rows within 15 minutes of either edge are dropped too; the line below is the listed span.
 window 2026-11-20T00:00:00Z 2026-11-23T00:17:00Z

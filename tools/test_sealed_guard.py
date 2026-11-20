@@ -160,7 +160,9 @@ class SealedGuardTests(unittest.TestCase):
     # REQ: OA-SEAL-011, OA-SEAL-001
     def test_the_window_is_half_open_and_parses_like_the_rust_one(self):
         _, _, _, windows = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
-        self.assertEqual(windows[0][1:], (1_795_132_800_000_000_000, 1_795_393_020_000_000_000))
+        m = sealed_guard.WINDOW_MARGIN_NS
+        self.assertEqual(m, 900_000_000_000)
+        self.assertEqual(windows[0][1:], (1_795_132_800_000_000_000 - m, 1_795_393_020_000_000_000 + m))
         lo, hi = windows[0][1:]
         for t, sealed in ((lo - 1, False), (lo, True), (hi - 1, True), (hi, False), (0, False)):
             self.assertEqual(self.g.in_window(t), sealed, t)
@@ -169,7 +171,9 @@ class SealedGuardTests(unittest.TestCase):
         two = ("root /d\nseal a\nwindow 2024-02-29T00:00:00Z 2024-03-01T00:00:00Z\n"
                "window 1970-01-01T00:00:01Z 1970-01-01T00:00:02Z\n")
         _, _, _, w2 = sealed_guard.parse_list(two)
-        self.assertEqual((w2[0][1], w2[1][1]), (1_709_164_800_000_000_000, 1_000_000_000))
+        self.assertEqual((w2[0][1], w2[1][1]), (1_709_164_800_000_000_000 - m, 1_000_000_000 - m))
+        # A list with no window line seals every instant (fails closed).
+        self.assertTrue(sealed_guard.Guard(text="root /d\nseal a\n").in_window(0))
         self.assertTrue(sealed_guard.dump(two).endswith("window 1970-01-01T00:00:01Z 1970-01-01T00:00:02Z\n"))
 
     # REQ: OA-SEAL-012, OA-SEAL-003

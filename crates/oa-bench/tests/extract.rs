@@ -562,9 +562,9 @@ fn tfms_times_that_are_not_estimates_are_counted() {
     );
 }
 
-/// The sealed window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
-const SEAL_FROM: i64 = 1_795_132_800_000_000_000;
-const SEAL_TO: i64 = 1_795_393_020_000_000_000;
+/// The sealed window of the list: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z, Unix nanoseconds.
+const SEAL_FROM: i64 = 1_795_131_900_000_000_000;
+const SEAL_TO: i64 = 1_795_393_920_000_000_000;
 
 fn oaf_frames(frames: &[(i64, &str)]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -590,36 +590,36 @@ fn oaf_frames(frames: &[(i64, &str)]) -> Vec<u8> {
 fn sfdps_records_timed_in_a_sealed_window_are_dropped_and_counted() {
     let before = th(
         GUFI_A,
-        "2026-11-19T23:59:59.999Z",
-        "2026-11-19T23:59:59Z",
+        "2026-11-19T23:44:59.999Z",
+        "2026-11-19T23:44:59Z",
         false,
         "",
     );
     let at_from = th(
         GUFI_A,
-        "2026-11-20T00:00:00.000Z",
-        "2026-11-19T23:59:59Z",
+        "2026-11-19T23:45:00.000Z",
+        "2026-11-19T23:44:59Z",
         false,
         "",
     );
     let pos_in = th(
         GUFI_B,
-        "2026-11-19T23:59:59.999Z",
-        "2026-11-20T00:00:00Z",
+        "2026-11-19T23:44:59.999Z",
+        "2026-11-19T23:45:00Z",
         false,
         "",
     );
     let last_in = th(
         GUFI_B,
-        "2026-11-23T00:16:59.999Z",
-        "2026-11-19T23:59:59Z",
+        "2026-11-23T00:31:59.999Z",
+        "2026-11-19T23:44:59Z",
         false,
         "",
     );
     let at_to = th(
         GUFI_B,
-        "2026-11-23T00:17:00.000Z",
-        "2026-11-23T00:17:00Z",
+        "2026-11-23T00:32:00.000Z",
+        "2026-11-23T00:32:00Z",
         false,
         "",
     );
@@ -639,10 +639,10 @@ fn sfdps_records_timed_in_a_sealed_window_are_dropped_and_counted() {
 #[test]
 fn tbfm_and_tfms_records_timed_in_a_sealed_window_are_dropped_and_counted() {
     for (msg, kept) in [
-        ("2026-11-19T23:59:59.999Z", true),
-        ("2026-11-20T00:00:00.000Z", false),
-        ("2026-11-23T00:16:59.999Z", false),
-        ("2026-11-23T00:17:00.000Z", true),
+        ("2026-11-19T23:44:59.999Z", true),
+        ("2026-11-19T23:45:00.000Z", false),
+        ("2026-11-23T00:31:59.999Z", false),
+        ("2026-11-23T00:32:00.000Z", true),
     ] {
         let mut leg = new_legacy();
         let mut r = new_reader().unwrap();
@@ -656,10 +656,10 @@ fn tbfm_and_tfms_records_timed_in_a_sealed_window_are_dropped_and_counted() {
         assert_eq!(leg.counts.sealed_window_dropped, u64::from(!kept), "{msg}");
     }
     for (src, kept) in [
-        ("2026-11-19T23:59:59Z", true),
-        ("2026-11-20T00:00:00Z", false),
-        ("2026-11-23T00:16:59Z", false),
-        ("2026-11-23T00:17:00Z", true),
+        ("2026-11-19T23:44:59Z", true),
+        ("2026-11-19T23:45:00Z", false),
+        ("2026-11-23T00:31:59Z", false),
+        ("2026-11-23T00:32:00Z", true),
     ] {
         let mut leg = new_legacy();
         let mut r = new_reader().unwrap();
@@ -685,8 +685,8 @@ fn load_drops_sealed_frames_by_receive_time_and_a_record_inside_a_frame_received
     // Received at from - 1 ns but timed inside the window: the record goes, the frame does not.
     let late = sfdps(&th(
         GUFI_B,
-        "2026-11-20T00:00:00.000Z",
-        "2026-11-19T23:59:59Z",
+        "2026-11-19T23:45:00.000Z",
+        "2026-11-19T23:44:59Z",
         false,
         "",
     ));

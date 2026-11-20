@@ -12,9 +12,9 @@ use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
 use oa_replay::{merge_streams, spec_from_bytes, FeedKind};
 use oa_replay::{new_pipeline, process_frame, FeedKind as Feed, PipelineConfig};
 
-/// The window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
-const FROM: i64 = 1_795_132_800_000_000_000;
-const TO: i64 = 1_795_393_020_000_000_000;
+/// The window of the list: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes), Unix nanoseconds.
+const FROM: i64 = 1_795_131_900_000_000_000;
+const TO: i64 = 1_795_393_920_000_000_000;
 
 fn file(times: &[i64]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -104,32 +104,84 @@ fn a_row_timed_in_a_window_is_not_applied_though_its_frame_was_received_before_i
 
 // REQ: OA-SEAL-014
 #[test]
-fn an_adsb_row_timed_in_a_window_is_not_applied_though_its_frame_was_received_before_it() {
+fn an_adsb_frame_with_a_row_in_a_window_is_dropped_whole_and_is_in_no_other_count() {
+    let payload = |times: &[i64]| {
+        let mut r = oa_adsb::Reports::default();
+        for (k, t) in times.iter().enumerate() {
+            let mut row = oa_adsb::ROW_EMPTY;
+            row.time_ns = *t;
+            row.icao = 0xA00001 + k as u32;
+            row.lat_e7 = 410_000_000;
+            row.lon_e7 = -880_000_000;
+            row.nic = 8;
+            row.nac_p = 10;
+            row.sil = 3;
+            row.version = 2;
+            oa_adsb::reports_push(&mut r, &row);
+        }
+        let mut payload = Vec::new();
+        oa_adsb::encode_payload(&mut payload, &r, 0, times.len()).unwrap();
+        payload
+    };
+    // One frame, received before the window, with rows at from - 1 ns, from, to - 1 ns and to:
+    // two rows are inside, so the whole frame is dropped and its four rows are counted.
     let mut p = new_pipeline(PipelineConfig::default()).unwrap();
-    let mut r = oa_adsb::Reports::default();
-    for (k, t) in [FROM - 1, FROM, TO - 1, TO].into_iter().enumerate() {
-        let mut row = oa_adsb::ROW_EMPTY;
-        row.time_ns = t;
-        row.icao = 0xA00001 + k as u32;
-        row.lat_e7 = 410_000_000;
-        row.lon_e7 = -880_000_000;
-        row.nic = 8;
-        row.nac_p = 10;
-        row.sil = 3;
-        row.version = 2;
-        oa_adsb::reports_push(&mut r, &row);
-    }
-    let mut payload = Vec::new();
-    oa_adsb::encode_payload(&mut payload, &r, 0, 4).unwrap();
     process_frame(
         &mut p,
         Feed::Adsb,
         oa_feed::Kind::Message,
         FROM - 1,
-        &payload,
+        &payload(&[FROM - 1, FROM, TO - 1, TO]),
     );
-    assert_eq!(p.sealed_window_dropped, 2);
+    assert_eq!(p.sealed_window_dropped, 4);
+    assert!(p.last_doc_dropped);
+    assert_eq!(p.rows_seen[Feed::Adsb as usize], 0);
+    assert_eq!(
+        (
+            p.frames[Feed::Adsb as usize],
+            p.messages[Feed::Adsb as usize]
+        ),
+        (0, 0)
+    );
+    assert_eq!(p.adsb.live, 0);
+    // A frame with every row outside it is applied and counted as usual.
+    process_frame(
+        &mut p,
+        Feed::Adsb,
+        oa_feed::Kind::Message,
+        FROM - 1,
+        &payload(&[FROM - 1, TO]),
+    );
+    assert_eq!(p.sealed_window_dropped, 4);
     assert_eq!(p.rows_seen[Feed::Adsb as usize], 2);
+    assert_eq!(
+        (
+            p.frames[Feed::Adsb as usize],
+            p.messages[Feed::Adsb as usize]
+        ),
+        (1, 1)
+    );
+    // The bytes of the dropped frame are not in the byte count either.
+    let frame = |seq: u64, times: &[i64]| {
+        let body = payload(times);
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, 1, FLAG_BYTES, seq, FROM - 1, 0, &body).unwrap();
+        buf[..n].to_vec()
+    };
+    let kept = frame(0, &[FROM - 1, TO]);
+    let mut all = kept.clone();
+    all.extend(frame(1, &[FROM, TO]));
+    let mut q = new_pipeline(PipelineConfig::default()).unwrap();
+    let rep = oa_replay::run_streams(
+        &mut q,
+        vec![spec_from_bytes(FeedKind::Adsb, vec![all])],
+        4096,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(q.sealed_window_dropped, 2);
+    assert_eq!(q.frames[Feed::Adsb as usize], 1);
+    assert_eq!(rep.bytes, kept.len() as u64);
 }
 
 // REQ: OA-SEAL-014

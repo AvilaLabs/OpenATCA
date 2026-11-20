@@ -300,8 +300,8 @@ fn a_handoff_unit_the_faa_gives_as_unknown_makes_no_operation_and_is_counted() {
 // REQ: OA-SEAL-014
 #[test]
 fn the_replay_drops_sealed_window_frames_and_rows_and_counts_them() {
-    // The window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
-    const FROM: i64 = 1_795_132_800_000_000_000;
+    // The window of the list: 2026-11-19T23:45:00Z to 2026-11-23T00:32:00Z (the listed window widened by 15 minutes), Unix nanoseconds.
+    const FROM: i64 = 1_795_131_900_000_000_000;
     let dir = temp_dir("sealed");
     let body = r#"<flightStatus fdpsFlightStatus="ACTIVE"/>"#;
     let ok = doc(&msg("TH", "2026-11-19T23:00:00.000Z", body));

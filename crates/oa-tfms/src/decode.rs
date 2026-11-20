@@ -214,9 +214,17 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
             _ => false,
         };
         if key {
+            // The decoder's own value reader on the same text value as `leaf_text` builds it.
+            let v = Val {
+                span: doc.text_span.get(first).copied().unwrap_or_default(),
+                flagged: text_needs_decode(doc, oa_xml::TextIx(first as u32)),
+                kind: SpanKind::Text,
+                first,
+                count: t - first,
+            };
             let mut buf = [0u8; MAX_VALUE];
-            if let Ok(n) = decode_text_run(doc, first, t - first, &mut buf) {
-                hit |= buf.get(..n).is_some_and(in_window);
+            if let Ok(v) = value_bytes(doc, v, &mut buf) {
+                hit |= in_window(v);
             }
         }
     }

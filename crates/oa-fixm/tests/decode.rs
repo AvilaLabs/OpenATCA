@@ -1778,3 +1778,23 @@ fn message_and_position_times_are_window_keys_in_any_encoding_and_event_times_ar
     );
     assert_eq!(dropped(&doc(&[est])), 0);
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_count_of_a_dropped_document_is_its_messages_and_at_least_one() {
+    // A time key on an element that is not a message: the document has no message, and the
+    // count is still one.
+    let bare = r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0"><other timestamp="2026-11-21T00:00:00Z"/></ns5:MessageCollection>"#;
+    let (r, res) = run_with(bare, 64, 1 << 16, windowed());
+    res.unwrap();
+    assert_eq!(r.sum.sealed_window_dropped, 1);
+    // Three messages, one in the window: all three are counted.
+    let three = doc(&[
+        at("2030-01-02T03:04:05Z", ""),
+        at("2026-11-21T00:00:00Z", ""),
+        at("2030-01-02T03:04:07Z", ""),
+    ]);
+    let (r, res) = run_with(&three, 64, 1 << 16, windowed());
+    res.unwrap();
+    assert_eq!(r.sum.sealed_window_dropped, 3);
+}

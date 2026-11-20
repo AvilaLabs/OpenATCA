@@ -74,28 +74,10 @@ fn run() -> Result<(), String> {
         // A file with a message whose own timestamp or position time is in the sealed window is
         // dropped whole (OA-SEAL-014), before any count below has seen it; only the number of
         // its messages is counted, as each file is scanned so a later file's error keeps it.
-        let mut hit = false;
-        let mut in_file = 0u64;
-        for i in 0..n {
-            let p = d.elem_parent[i];
-            if p == ElemIx::NONE {
-                continue;
-            }
-            in_file += u64::from(d.elem_parent[p.0 as usize] == ElemIx::NONE);
-            let first = d.elem_first_attr[i].0 as usize;
-            for a in first..first + d.elem_attr_count[i] as usize {
-                let an = s(&d, d.attr_name[a]);
-                if an == "timestamp"
-                    || an == "positionTime"
-                    || (an == "time" && s(&d, d.elem_name[i]) == "actual")
-                {
-                    let t = oa_fixm::parse_iso_ms(s(&d, d.attr_value[a]).as_bytes());
-                    hit |= t.is_some_and(|t| window.contains(t));
-                }
-            }
-        }
-        if hit {
-            drops.add(in_file.max(1));
+        // The decoder's own pre-scan (no reader of the survey's own), and the messages of the file.
+        let gone = oa_fixm::prescan(&d, window);
+        if gone > 0 {
+            drops.add(u64::from(gone));
             continue;
         }
         // Message of each element: the child of the root.

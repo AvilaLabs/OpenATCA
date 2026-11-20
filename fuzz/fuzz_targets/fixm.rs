@@ -53,7 +53,9 @@ fuzz_target!(|data: &[u8]| {
             // Oracle 1: no event the sealed decoder keeps has an observation time in the window.
             for i in 0..sealed_events.len {
                 assert!(
-                    !w.contains(sealed_events.ts_ms[i]) && !w.contains(sealed_events.pos_time_ms[i]),
+                    !w.contains(sealed_events.ts_ms[i])
+                        && !w.contains(sealed_events.pos_time_ms[i])
+                        && !w.contains(sealed_events.dep_actual_ms[i]),
                     "kept event in the window"
                 );
             }
