@@ -49,7 +49,7 @@ So the design starts from four rules, before any prediction:
 | TBFM (`oa-tbfm`) | Arrival estimates and scheduled times at meter, delay and scheduling fixes and at the runway | `flt`, `mrp`, `eta`, `sta`, `sch` sections | 12 of ZAU's meter points are adaptation names that are not public |
 | NASR and CIFP (`oa-nasr`, `oa-arinc424`, `oa-airspace`) | Fixes, navaids, airways with MEAs, SIDs, STARs, approaches, special use airspace | Yes (M0) | Radar-vector SIDs have no coded legs (UK-003); preferred routes not parsed |
 | RAP and HRRR winds (`oa-wind`, `oa-grib2`) | Wind and temperature at a point and time | Yes | Refuses rather than extrapolates |
-| OpenAP v2.6.2 | Aircraft performance | Not read by any code yet | Data files GPL-3.0: read at run time from `openatca-data`, never copied into this repository |
+| ADS-B climbs and descents (our own performance model) | Climb and descent profiles by aircraft type, altitude and temperature, fitted from recorded US traffic, with the FAA registry for the type | Not built | Empirical: no mass or thrust; rare types fall back to their class |
 | NOTAMs (`oa-notam`) | Temporary restrictions and airspace status | Yes | — |
 
 The flight data we hold is a national SFDPS, TFMS, TBFM and FNS recording from 16:13Z on
@@ -118,7 +118,7 @@ yet; the model has every ingredient.
 ## 4. One trajectory per flight
 
 For each active flight: a 4D path from the current track state along the converted route to the
-destination, with climb and descent from OpenAP performance for the aircraft type, winds and
+destination, with climb and descent from our own performance model for the aircraft type, winds and
 temperature from RAP or HRRR, and the constraints of the procedures and the cleared altitudes.
 Each predicted point carries an uncertainty along track, across track and vertically, growing with
 look-ahead, so a consumer can ask not only where the aircraft will be but how sure that is.
@@ -199,12 +199,19 @@ question is tens of metres at most (RT-288 simulation).
 7. **Ownership and handoffs**, with the derived sector boundaries.
 8. **The conflict probe and meter-fix times.**
 
+## Aircraft performance
+
+Decided by Connor on 2026-11-19: the performance model is our own, fitted to ADS-B climbs and
+descents of US traffic. OpenAP's data files are GPL-3.0, and a deployed system would have to ship
+them beside an Apache-2.0 one; its climb and descent data were themselves fitted from ADS-B,
+mostly European. OpenAP is kept as an outside reference that the benchmarks score against, read
+from `openatca-data` and never shipped. The model is empirical (ADS-B carries no mass or thrust),
+and types with too few recorded flights fall back to their class; both limits are measured and
+stated with every result.
+
 ## Open questions for Connor
 
 1. **More flight data.** SFDPS, TFMS and TBFM were recorded for about 24 hours (14 to 15 November)
    and have not been recorded since. The STDDS capture shows another continuous capture is
    practical. Should SFDPS, TFMS and TBFM run again for the 30 November flight and for a second
    hold-out day?
-2. **OpenAP's data licence.** The performance data is GPL-3.0 and is read at run time, never
-   copied into this repository (SCOPE §5). Is that boundary acceptable to you for M4, or should the
-   performance model be our own, fitted to ADS-B climbs and descents?
