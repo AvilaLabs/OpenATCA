@@ -26,9 +26,10 @@ pub struct SecondLog {
     pub work_ns: Vec<u64>,
     /// Measurements of each second.
     pub reports: Vec<u32>,
-    /// Confirmed tracks at the close of each second.
+    /// Confirmed tracks after the last update of each second (a second with no updates carries
+    /// the previous second's count; the tracker is not advanced to the second boundary).
     pub confirmed: Vec<u32>,
-    /// Tentative tracks at the close of each second.
+    /// Tentative tracks, counted the same way.
     pub tentative: Vec<u32>,
     /// Measurements refused because the second was before the first, not after the previous one,
     /// or more than [`MAX_SECONDS`] from the first. A run with any of these has no valid figures.
@@ -37,7 +38,8 @@ pub struct SecondLog {
 
 impl SecondLog {
     /// Closes second `sec`: `reports` measurements took `work_ns` nanoseconds in all, and the
-    /// tracker then held `confirmed` and `tentative` tracks. Seconds between the previous entry
+    /// tracker then, after the last of those updates, held `confirmed` and `tentative` tracks.
+    /// The counts are sampled once per second, so a peak between two samples is not seen. Seconds between the previous entry
     /// and `sec` have no traffic, no work and the previous second's counts (nothing changed them).
     pub fn push_second(
         &mut self,
@@ -99,7 +101,7 @@ pub struct RealtimeSummary {
     pub finished_late: usize,
     /// The longest the queue got behind the traffic, nanoseconds.
     pub backlog_max_ns: u64,
-    /// Peak confirmed and tentative tracks at the close of a second.
+    /// Peak confirmed and tentative tracks, sampled once per second after its last update.
     pub confirmed_peak: u32,
     pub tentative_peak: u32,
 }
@@ -172,6 +174,8 @@ pub fn realtime_failure(
     log: &SecondLog,
     measurements: usize,
     capacity_refused: u64,
+    output_overflow: u64,
+    log_overflow: u64,
 ) -> Option<String> {
     if measurements == 0 {
         return Some(
@@ -189,7 +193,63 @@ pub fn realtime_failure(
             "{capacity_refused} measurements refused for lack of a track slot: not a full-load measurement, raise --max-tracks"
         ));
     }
+    if output_overflow > 0 || log_overflow > 0 {
+        return Some(format!(
+            "{output_overflow} output rows and {log_overflow} track log entries were lost to a full table: the digests then cover truncated data"
+        ));
+    }
     None
+}
+
+/// CPU counter readings (nanoseconds on the process's own counter), in the order the shell takes
+/// them: at the start, after reading and the adapter, at the start and end of the update window,
+/// and right after the final advance and flush, before any digest is computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// A7.2: cold struct, size guard waived
+pub struct CpuMarks {
+    pub start: u64,
+    pub loaded: u64,
+    pub loop_start: u64,
+    pub looped: u64,
+    pub finished: u64,
+}
+
+/// CPU seconds and shares of one core over the span of the traffic. Plain record (A1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+// A7.2: cold struct, size guard waived
+pub struct CpuUse {
+    /// Reading, decoding and the adapter.
+    pub ingest_s: f64,
+    /// The update window alone.
+    pub update_s: f64,
+    /// From the start to the final flush: ingest, set-up, updates and the flush.
+    pub total_s: f64,
+    /// `update_s` and `total_s` as percent of one core, the denominator being `traffic_s`
+    /// (the seconds from the first to the last of the traffic, at least one).
+    pub update_pct: f64,
+    pub total_pct: f64,
+}
+
+/// The CPU use from the readings, or `None` when they are not in the order they were taken
+/// (a counter that went backwards means the figures cannot be trusted).
+pub fn cpu_use(m: &CpuMarks, traffic_s: f64) -> Option<CpuUse> {
+    let in_order = m.start <= m.loaded
+        && m.loaded <= m.loop_start
+        && m.loop_start <= m.looped
+        && m.looped <= m.finished;
+    if !in_order {
+        return None;
+    }
+    let s = |ns: u64| ns as f64 / 1e9;
+    let span = if traffic_s < 1.0 { 1.0 } else { traffic_s };
+    let (update_s, total_s) = (s(m.looped - m.loop_start), s(m.finished - m.start));
+    Some(CpuUse {
+        ingest_s: s(m.loaded - m.start),
+        update_s,
+        total_s,
+        update_pct: 100.0 * update_s / span,
+        total_pct: 100.0 * total_s / span,
+    })
 }
 
 /// Why the flags given to `oa-track-run` do not go together, or `None`. `--realtime` takes the

@@ -1170,13 +1170,44 @@ fn realtime_writes_per_second_counts_and_a_digest_that_repeats() {
         assert_eq!(last[3], "3", "{last:?}");
         let reports: u64 = rows[1..].iter().map(|r| r[1].parse::<u64>().unwrap()).sum();
         assert!(text_after(&text, "counters:").contains(&format!("offered {reports},")));
-        assert!(text_after(&text, "peak tracks").contains("confirmed 3"));
+        assert!(
+            text_after(&text, "peak tracks, sampled once per second").contains(": confirmed 3,")
+        );
+        // One row per second from the first to the last, and the traffic line says the same.
+        let first: i64 = rows[1][0].parse().unwrap();
+        let last_s: i64 = last[0].parse().unwrap();
+        assert_eq!(rows.len() as i64 - 1, last_s - first + 1);
+        assert!(text_after(&text, "traffic:").starts_with(&format!(
+            "traffic: {} s from unix second {first} ",
+            last_s - first + 1
+        )));
+        // Every second with reports has work in it, and the work adds up to the printed total.
+        let mut sum_us = 0.0;
+        for r in &rows[1..] {
+            let (n, us): (u64, f64) = (r[1].parse().unwrap(), r[2].parse().unwrap());
+            assert!(n == 0 || us > 0.0, "{r:?}");
+            sum_us += us;
+        }
+        let printed: f64 = text_after(&text, "processing time of a second")
+            .split("total ")
+            .last()
+            .unwrap()
+            .trim_end_matches(" s")
+            .parse()
+            .unwrap();
+        assert!((sum_us / 1e6 - printed).abs() < 0.002, "{sum_us} {printed}");
+        // The CPU share is over the traffic span.
+        let span = last_s - first + 1;
+        assert!(text_after(&text, "update window")
+            .contains(&format!("(over the {span} s span of the traffic)")));
         for needle in [
             "config (scoring_config from the full clip): max_tracks 4096",
             "final advance and flush",
-            "share of one core, update only",
+            "s span of the traffic), update only",
             "share of one core, total including ingest",
             "cpu source:",
+            "single-threaded today",
+            "the same --max-tracks and the same build",
             "process peak",
             "an upper bound",
             "counting as zero",

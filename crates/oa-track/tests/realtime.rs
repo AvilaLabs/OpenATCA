@@ -2,7 +2,8 @@
 //! The per-second log of `oa-track-run --realtime` (OA-TRK-388).
 
 use oa_track::realtime::{
-    check_flags, realtime_failure, realtime_summary, run_summary_digest, seconds_csv, SecondLog,
+    check_flags, cpu_use, realtime_failure, realtime_summary, run_summary_digest, seconds_csv,
+    CpuMarks, SecondLog,
 };
 use oa_track::types::{log_new, TrackerStats};
 
@@ -76,7 +77,7 @@ fn percentiles_of_zero_one_and_many_seconds() {
 #[test]
 fn a_slow_second_queues_work_behind_it() {
     // 1.5 s of work in the first second, then 0.2 s each: 0.5 s behind after the first, caught up
-    // by the third (0.5 + 0.2 - 1 < 0).
+    // by the second after it (0.5 + 0.2 - 1 < 0).
     let l = log_of(&[
         (0, 1, 1_500 * MS),
         (1, 1, 200 * MS),
@@ -86,33 +87,104 @@ fn a_slow_second_queues_work_behind_it() {
     let s = realtime_summary(&l);
     assert_eq!((s.over_one_second, s.finished_late), (1, 1));
     assert_eq!(s.backlog_max_ns, 500 * MS);
+    // 1.5 s, 1.5 s, 0.1 s: the queue is 0.5 s, then 1.0 s, then 0.1 s; all three finish late.
+    let s = realtime_summary(&log_of(&[
+        (0, 1, 1_500 * MS),
+        (1, 1, 1_500 * MS),
+        (2, 1, 100 * MS),
+    ]));
+    assert_eq!((s.over_one_second, s.finished_late), (2, 3));
+    assert_eq!(s.backlog_max_ns, 1_000 * MS);
     let huge = realtime_summary(&log_of(&[(0, 1, u64::MAX), (1, 1, u64::MAX)]));
     assert!(huge.backlog_max_ns > 0);
 }
 
 // REQ: OA-TRK-388
 #[test]
-fn a_dropped_measurement_an_empty_run_and_a_full_table_each_fail_the_run() {
+fn a_dropped_measurement_an_empty_run_a_full_table_and_an_overflow_each_fail_the_run() {
+    let ok = log_of(&[(1, 1, 1)]);
     let mut l = log_of(&[(1000, 2, 1)]);
     l.push_second(999, 4, 5, 0, 0);
     l.push_second(1000 + 10_000_000, 1, 5, 0, 0);
     assert_eq!(l.dropped, 5);
     assert_eq!(l.work_ns.len(), 1);
-    let why = realtime_failure(&l, 7, 0).unwrap();
+    let why = realtime_failure(&l, 7, 0, 0, 0).unwrap();
     assert!(
         why.starts_with("5 measurements fall outside the log"),
         "{why}"
     );
-    assert!(realtime_failure(&log_of(&[(1, 1, 1)]), 0, 0)
+    assert!(realtime_failure(&ok, 0, 0, 0, 0)
         .unwrap()
         .contains("no measurements"));
-    let full = realtime_failure(&log_of(&[(1, 1, 1)]), 3, 12).unwrap();
+    let full = realtime_failure(&ok, 3, 12, 0, 0).unwrap();
     assert!(
         full.starts_with("12 measurements refused for lack of a track slot"),
         "{full}"
     );
     assert!(full.contains("not a full-load measurement"));
-    assert_eq!(realtime_failure(&log_of(&[(1, 1, 1)]), 3, 0), None);
+    // Rows or track log entries lost to a full table: the digests cover truncated data.
+    let rows = realtime_failure(&ok, 3, 0, 9, 0).unwrap();
+    assert!(
+        rows.starts_with("9 output rows and 0 track log entries were lost"),
+        "{rows}"
+    );
+    let tracks = realtime_failure(&ok, 3, 0, 0, 4).unwrap();
+    assert!(
+        tracks.starts_with("0 output rows and 4 track log entries were lost"),
+        "{tracks}"
+    );
+    assert!(tracks.contains("digests then cover truncated data"));
+    assert_eq!(realtime_failure(&ok, 3, 0, 0, 0), None);
+}
+
+// REQ: OA-TRK-388
+#[test]
+fn cpu_use_splits_the_readings_and_divides_by_the_span_of_the_traffic() {
+    const S: u64 = 1_000_000_000;
+    // start 0, loaded 4 s, update window 5 s to 105 s (100 s), finished 110 s.
+    let m = CpuMarks {
+        start: 0,
+        loaded: 4 * S,
+        loop_start: 5 * S,
+        looped: 105 * S,
+        finished: 110 * S,
+    };
+    let u = cpu_use(&m, 3600.0).unwrap();
+    assert_eq!((u.ingest_s, u.update_s, u.total_s), (4.0, 100.0, 110.0));
+    // The denominator is the span of the traffic: 100 s over 3,600 s is 2.777...%.
+    assert!((u.update_pct - 100.0 * 100.0 / 3600.0).abs() < 1e-12);
+    assert!((u.total_pct - 100.0 * 110.0 / 3600.0).abs() < 1e-12);
+    // A shorter span gives a larger share; under one second the span is one second.
+    assert!((cpu_use(&m, 200.0).unwrap().update_pct - 50.0).abs() < 1e-12);
+    assert!((cpu_use(&m, 0.0).unwrap().total_pct - 11_000.0).abs() < 1e-9);
+    // A reading taken out of order (a digest's time before the final flush's) is refused.
+    let late_flush = CpuMarks {
+        finished: 100 * S,
+        ..m
+    };
+    assert_eq!(cpu_use(&late_flush, 3600.0), None);
+}
+
+// REQ: OA-TRK-388
+#[test]
+fn the_total_cpu_is_read_before_the_digests_in_the_shell() {
+    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    let body = &src[src.find("fn run_realtime_inner").unwrap()
+        ..src
+            .find(
+                "
+fn run(",
+            )
+            .unwrap()];
+    let at = |needle: &str| body.find(needle).unwrap();
+    let flush = at("tracker_flush(&mut t, end, &mut out);");
+    let finished = at("let cpu_finished = cpu_ns();");
+    assert!(flush < finished);
+    assert!(finished < at("run_summary_digest("));
+    assert!(finished < at("spill_finish("));
+    assert!(finished < at("cpu_use(&m, traffic_s)"));
+    // No other reading of the CPU counter comes after it.
+    assert_eq!(body[finished..].matches("cpu_ns()").count(), 1);
 }
 
 // REQ: OA-TRK-388

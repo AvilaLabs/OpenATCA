@@ -46,7 +46,8 @@ use oa_track::latency::{
     LATENCY_CAPACITY, STAGES, STAGE_NAMES,
 };
 use oa_track::realtime::{
-    check_flags, realtime_failure, realtime_summary, run_summary_digest, seconds_csv, SecondLog,
+    check_flags, cpu_use, realtime_failure, realtime_summary, run_summary_digest, seconds_csv,
+    CpuMarks, SecondLog,
 };
 use oa_track::score::{
     initiation_delays, interval_stats, run_tracker_spilled, score_source, scoring_config,
@@ -754,17 +755,26 @@ fn cpu_ns() -> Option<(u64, &'static str)> {
     Some((ticks * 10_000_000, "/proc/self/stat (process, 10 ms ticks)"))
 }
 
-/// Seconds of CPU between two [`cpu_ns`] readings.
-fn cpu_delta(a: Option<(u64, &'static str)>, b: Option<(u64, &'static str)>) -> Option<f64> {
-    a.zip(b).map(|(a, b)| b.0.saturating_sub(a.0) as f64 / 1e9)
-}
-
-/// `--realtime`: the whole clip through the tracker, each second's updates timed together, per
-/// second of traffic (OA-TRK-388). Reading, decoding and the adapter are timed apart, not in the
-/// per-second figures.
+/// `--realtime`: removes the spill directory on every way out, then runs [`run_realtime_inner`].
 fn run_realtime(
     clip_path: &Path,
     out_dir: &Path,
+    with_output: bool,
+    max_tracks: Option<usize>,
+) -> Result<(), String> {
+    let spill_root = out_dir.join(format!("spill-{}", std::process::id()));
+    let r = run_realtime_inner(clip_path, out_dir, &spill_root, with_output, max_tracks);
+    let _ = fs::remove_dir_all(&spill_root);
+    r
+}
+
+/// The whole clip through the tracker, each second's updates timed together, per
+/// second of traffic (OA-TRK-388). Reading, decoding and the adapter are timed apart, not in the
+/// per-second figures.
+fn run_realtime_inner(
+    clip_path: &Path,
+    out_dir: &Path,
+    spill_root: &Path,
     with_output: bool,
     max_tracks: Option<usize>,
 ) -> Result<(), String> {
@@ -784,12 +794,11 @@ fn run_realtime(
     check_adsb_config(&adsb_cfg).map_err(|e| format!("adapter configuration: {e}"))?;
     let (meas, ad) = adsb_measurements(&clip.reports, &adsb_cfg);
     drop(clip);
-    if let Some(f) = realtime_failure(&SecondLog::default(), meas.len(), 0) {
+    if let Some(f) = realtime_failure(&SecondLog::default(), meas.len(), 0, 0, 0) {
         return Err(f);
     }
     let load_wall_s = secs(load_wall);
     let cpu_loaded = cpu_ns();
-    let load_cpu_s = cpu_delta(cpu_start, cpu_loaded);
     let iv = interval_stats(&meas).unwrap_or(IntervalStats {
         n: 0,
         p50_ns: 1_000_000_000,
@@ -805,7 +814,6 @@ fn run_realtime(
     addrs.sort_unstable();
     addrs.dedup();
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
-    let spill_root = out_dir.join(format!("spill-{}", std::process::id()));
     let mut t = tracker_new(&cfg).map_err(|e| e.to_string())?;
     let tracker_mem = tracker_bytes(&t);
     let mut out = output_new(cfg.out_capacity);
@@ -818,7 +826,7 @@ fn run_realtime(
     let mut log = SecondLog::default();
     let mut rows = 0u64;
     let mut failed: Option<String> = None;
-    let (wall0, cpu0) = (Instant::now(), cpu_ns());
+    let (wall0, cpu_loop_start) = (Instant::now(), cpu_ns());
     let mut i = 0;
     while i < meas.len() {
         let sec = meas
@@ -837,7 +845,7 @@ fn run_realtime(
             tracker_update(&mut t, m, &mut out);
             if output_len(&out) > drain_rows {
                 rows += output_len(&out) as u64;
-                if let Some(w) = w.as_mut() {
+                if let (Some(w), None) = (w.as_mut(), failed.as_ref()) {
                     if let Err(e) = spill_append(w, &out) {
                         failed = Some(e.to_string());
                     }
@@ -852,23 +860,27 @@ fn run_realtime(
     }
     let loop_wall_s = secs(wall0);
     let cpu_looped = cpu_ns();
-    let loop_cpu_s = cpu_delta(cpu0, cpu_looped);
     let end = meas.last().map_or(0, |m| m.toa_ns);
     let finish = Instant::now();
     tracker_advance(&mut t, end, &mut out);
     tracker_flush(&mut t, end, &mut out);
     rows += output_len(&out) as u64;
-    if let Some(w) = w.as_mut() {
-        spill_append(w, &out).map_err(|e| e.to_string())?;
+    if let (Some(w), None) = (w.as_mut(), failed.as_ref()) {
+        if let Err(e) = spill_append(w, &out) {
+            failed = Some(e.to_string());
+        }
     }
     let finish_s = secs(finish);
+    // Total CPU is read here, right after the final flush: the digests and the spill's
+    // finishing below are not part of the tracker's work and are not charged to it.
+    let cpu_finished = cpu_ns();
     phases.mark("tracker run");
     if let Some(e) = failed {
         return Err(format!("spilled output: {e}"));
     }
     let stats = *tracker_stats(&t);
     if log.dropped > 0 {
-        return Err(realtime_failure(&log, meas.len(), 0).unwrap_or_default());
+        return Err(realtime_failure(&log, meas.len(), 0, 0, 0).unwrap_or_default());
     }
     let overflow = out.overflow;
     let summary_digest = run_summary_digest(tracker_log(&t), &stats);
@@ -891,8 +903,24 @@ fn run_realtime(
     let traffic_s = s.seconds as f64;
     let ms = |ns: u64| ns as f64 / 1e6;
     let cpu_or = |c: Option<f64>, f: &dyn Fn(f64) -> String| c.map_or("n/a".to_string(), f);
-    let share = |c: Option<f64>| cpu_or(c, &|c| format!("{:.4}%", 100.0 * c / traffic_s.max(1.0)));
-    let total_cpu = cpu_delta(cpu_start, cpu_ns());
+    let marks = match (
+        cpu_start,
+        cpu_loaded,
+        cpu_loop_start,
+        cpu_looped,
+        cpu_finished,
+    ) {
+        (Some(a), Some(b), Some(c), Some(d), Some(e)) => Some(CpuMarks {
+            start: a.0,
+            loaded: b.0,
+            loop_start: c.0,
+            looped: d.0,
+            finished: e.0,
+        }),
+        _ => None,
+    };
+    let cpu = marks.and_then(|m| cpu_use(&m, traffic_s));
+    let pct = |c: Option<f64>| cpu_or(c, &|c| format!("{c:.4}%"));
     let mut o = String::new();
     let _ = writeln!(
         o,
@@ -927,7 +955,7 @@ fn run_realtime(
     );
     let _ = writeln!(
         o,
-        "peak tracks at the close of a second: confirmed {}, tentative {}",
+        "peak tracks, sampled once per second after the last update of the second: confirmed {}, tentative {}",
         s.confirmed_peak, s.tentative_peak
     );
     let _ = writeln!(
@@ -955,19 +983,23 @@ fn run_realtime(
     );
     let _ = writeln!(
         o,
-        "update window (one thread): wall {loop_wall_s:.3} s for {traffic_s:.0} s of traffic, CPU {} s; share of one core, update only: wall {:.4}%, CPU {}",
-        cpu_or(loop_cpu_s, &|c| format!("{c:.3}")),
+        "update window (one thread): wall {loop_wall_s:.3} s for {traffic_s:.0} s of traffic, CPU {} s; share of one core (over the {traffic_s:.0} s span of the traffic), update only: wall {:.4}%, CPU {}",
+        cpu_or(cpu.map(|c| c.update_s), &|c| format!("{c:.3}")),
         100.0 * loop_wall_s / traffic_s.max(1.0),
-        share(loop_cpu_s)
+        pct(cpu.map(|c| c.update_pct))
     );
     let _ = writeln!(
         o,
-        "ingest (read, decode, adapter; not in the per-second figures): wall {load_wall_s:.3} s, CPU {} s; share of one core, total including ingest and the final flush: CPU {} ({} s)",
-        cpu_or(load_cpu_s, &|c| format!("{c:.3}")),
-        share(total_cpu),
-        cpu_or(total_cpu, &|c| format!("{c:.3}"))
+        "ingest (read, decode, adapter; not in the per-second figures): wall {load_wall_s:.3} s, CPU {} s; share of one core, total including ingest, set-up and the final flush (read right after the flush, before the digests): CPU {} ({} s)",
+        cpu_or(cpu.map(|c| c.ingest_s), &|c| format!("{c:.3}")),
+        pct(cpu.map(|c| c.total_pct)),
+        cpu_or(cpu.map(|c| c.total_s), &|c| format!("{c:.3}"))
     );
-    let _ = writeln!(o, "cpu source: {}", cpu_loaded.map_or("none", |c| c.1));
+    let _ = writeln!(
+        o,
+        "cpu source: {} (the run is single-threaded today)",
+        cpu_loaded.map_or("none", |c| c.1)
+    );
     let _ = writeln!(
         o,
         "tracker tables: {} bytes ({:.1} MiB) for {} tracks",
@@ -1003,7 +1035,7 @@ fn run_realtime(
     );
     let _ = writeln!(
         o,
-        "run summary digest (track log and counters, after the timed window; oa-track has no tracker state hash; comparable only between realtime runs of the same clip, not with the golden digests): {summary_digest}"
+        "run summary digest (track log and counters, after the timed window; oa-track has no tracker state hash; comparable only between realtime runs of the same clip, the same --max-tracks and the same build, not with the golden digests): {summary_digest}"
     );
     let _ = writeln!(
         o,
@@ -1020,7 +1052,13 @@ fn run_realtime(
     for (n, r, h) in &phases.0 {
         let _ = writeln!(o, "  {n:<44} rss {r:>9}  process peak {h:>9}");
     }
-    let failure = realtime_failure(&log, meas.len(), stats.capacity_refused);
+    let failure = realtime_failure(
+        &log,
+        meas.len(),
+        stats.capacity_refused,
+        overflow,
+        tracker_log(&t).overflow,
+    );
     if let Some(f) = &failure {
         let _ = writeln!(o, "NOT A FULL-LOAD MEASUREMENT: {f}");
     }
@@ -1031,7 +1069,6 @@ fn run_realtime(
     };
     wr("realtime.txt", o)?;
     wr("seconds.csv", seconds_csv(&log))?;
-    let _ = fs::remove_dir_all(&spill_root);
     failure.map_or(Ok(()), Err)
 }
 
