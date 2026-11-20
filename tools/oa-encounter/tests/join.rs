@@ -10,8 +10,9 @@
 use oa_encounter::Encounter;
 use oa_encounter_run::args::parse;
 use oa_encounter_run::join::{
-    answer_queries, assigned_of, effective_of, is_near_climb, join_text, observe, timeline, Answer,
-    CallsignObs, Clearance, CsReject, CsResult, DiagClass, JoinStats, Key, Query, Sfdps,
+    answer_queries, assigned_of, effective_of, is_near_climb, join_text, observe, timeline,
+    AddrResult, Answer, CallsignObs, Clearance, CsReject, CsResult, DiagClass, JoinStats, Key,
+    Query, Resolution, Sfdps,
 };
 use oa_encounter_run::run::run;
 use oa_flight::{Alt, ALT_AT_FIX, ALT_NIL, ALT_SIMPLE, ALT_VFR};
@@ -698,35 +699,29 @@ fn plans_of_one_aircraft_are_picked_by_the_newest_stamp_only_where_they_share_a_
 fn a_disagreement_between_the_keys_is_classed_and_looked_at_again_half_an_hour_on() {
     let addr = |a: &str| format!("<aircraftDescription aircraftAddress=\"{a}\"/>");
     let end = |n: u32, dt: i64, cs: &str| frame(100 + u64::from(n), n, dt, &id(cs, "COMPLETED"));
+    let at = |lat: &str| pos(lat, "-87.9", "03:05:30");
     let frames = [
-        // Aircraft 100: its plan 1 holds the address with callsign SAM1 and is dropped; plan 2
-        // states SAM1 on the same route, and ends 20 min on.
+        // Aircraft 100: its plan 1 holds the address with callsign SAM1 and is far off; plan 2
+        // states SAM1 on the same route near the ADS-B position, and the callsign join (with the
+        // newest-plan pick on) takes plan 2.
         frame(
             1,
             1,
             0,
             &format!(
-                "{}{}",
+                "{}{}{}",
                 plan("SAM1", "ACTIVE", "KAAA", "KBBB"),
-                addr("000064")
+                addr("000064"),
+                at("43.5")
             ),
         ),
-        frame(2, 1, 1, &id("SAM1", "DROPPED")),
-        frame(3, 2, 0, &plan("SAM1", "ACTIVE", "KAAA", "KBBB")),
-        // Aircraft 101: another arrival.
         frame(
-            4,
             3,
+            2,
             0,
-            &format!(
-                "{}{}",
-                plan("OTH2", "ACTIVE", "KAAA", "KBBB"),
-                addr("000065")
-            ),
+            &format!("{}{}", plan("SAM1", "ACTIVE", "KAAA", "KBBB"), at("41.95")),
         ),
-        frame(5, 3, 1, &id("OTH2", "DROPPED")),
-        frame(6, 4, 0, &plan("OTH2", "ACTIVE", "KAAA", "KCCC")),
-        // Aircraft 102: the address flight has another callsign.
+        // Aircraft 102: the address flight has another callsign; neither has a position.
         frame(
             7,
             5,
@@ -738,30 +733,203 @@ fn a_disagreement_between_the_keys_is_classed_and_looked_at_again_half_an_hour_o
             ),
         ),
         frame(8, 6, 0, &plan("NEW3", "ACTIVE", "KAAA", "KBBB")),
-        // Frames are in the order received. Plan 2 of aircraft 100 ends 20 min on, and a frame
-        // after the 30 min lets the replay reach the second look.
+        // Frames are in the order received. Plans 1 and 2 of aircraft 100 end 20 min on, and a
+        // frame after the 30 min lets the replay reach the second look.
+        end(1, 20 * 60, "SAM1"),
         end(2, 20 * 60, "SAM1"),
         frame(9, 7, 33 * 60, &id("LATE9", "ACTIVE")),
     ];
-    let sf = recording("diag", &frames);
-    let queries = [
-        q(0x64, 120, cs("SAM1"), CHI),
-        q(0x65, 120, cs("OTH2"), CHI),
-        q(0x66, 120, cs("NEW3"), CHI),
-    ];
+    let sf = with_pick(recording("diag", &frames), true);
+    let queries = [q(0x64, 150, cs("SAM1"), CHI), q(0x66, 150, cs("NEW3"), CHI)];
     let (r, d, _) = answer_queries(&sf, &queries).unwrap();
-    assert!(r.iter().all(|x| x.key == Key::Address), "{r:?}");
-    assert_eq!(d.len(), 3);
+    assert_eq!(r[0].key, Key::CallsignOverAddress, "{r:?}");
+    assert_eq!(r[1].key, Key::Address);
+    assert_eq!(d.len(), 2);
     let by = |k: usize| d.iter().find(|x| x.query == k).unwrap();
     assert_eq!(by(0).class, DiagClass::SameRoute);
-    assert_eq!(by(1).class, DiagClass::OtherRoute);
-    assert_eq!(by(2).class, DiagClass::OtherCallsign);
+    assert_eq!(by(1).class, DiagClass::OtherCallsign);
     assert!(d.iter().all(|x| x.probed));
-    assert!(
-        by(0).addr_ended_later && by(0).cs_ended_later,
-        "dropped, and completed"
-    );
-    assert!(!by(2).addr_ended_later && !by(2).cs_ended_later);
+    assert!(by(0).addr_ended_later && by(0).cs_ended_later, "both ended");
+    assert!(!by(1).addr_ended_later && !by(1).cs_ended_later);
     assert!(!by(0).refile_near);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+/// A flight message of gufi `n` that states aircraft address `addr`, callsign `c`, assigned
+/// altitude `ft` and, where given, a position at 03:05:30 (85 s into the fixtures).
+fn claim(
+    (seq, n, dt_s): (u64, u32, i64),
+    addr: &str,
+    c: &str,
+    status: &str,
+    ft: i32,
+    at: Option<(&str, &str)>,
+) -> Vec<u8> {
+    let p = at
+        .map(|(la, lo)| pos(la, lo, "03:05:30"))
+        .unwrap_or_default();
+    frame(
+        seq,
+        n,
+        dt_s,
+        &format!(
+            "{}<aircraftDescription aircraftAddress=\"{addr}\"/><assignedAltitude><simple uom=\"FEET\">{ft}.0</simple></assignedAltitude>{p}",
+            id(c, status)
+        ),
+    )
+}
+
+const NEAR: Option<(&str, &str)> = Some(("41.95", "-87.9"));
+const FAR: Option<(&str, &str)> = Some(("43.5", "-87.9"));
+
+// REQ: OA-FLT-033
+#[test]
+fn the_address_join_walks_every_claimant_and_takes_the_one_that_is_flying() {
+    // 2 claimed the address first and flies; 1 claimed it later (so it is the newest) and ended.
+    let frames = [
+        claim((1, 2, 0), "A1B2C3", "OLD2", "ACTIVE", 31_000, None),
+        claim((2, 1, 1), "A1B2C3", "NEW1", "ACTIVE", 25_000, None),
+        claim((3, 1, 2), "A1B2C3", "NEW1", "COMPLETED", 25_000, None),
+    ];
+    let sf = recording("walk", &frames);
+    let (r, d, _) = answer_queries(&sf, &[q(0x00A1_B2C3, 150, CallsignObs::Absent, CHI)]).unwrap();
+    assert_eq!(r[0].addr, AddrResult::One);
+    assert_eq!(r[0].key, Key::Address);
+    assert!(!r[0].ended);
+    assert_eq!(
+        r[0].assigned,
+        simple(31_000),
+        "the flying one, not the newest"
+    );
+    assert!(d.is_empty());
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-034
+#[test]
+fn with_no_claimant_flying_the_address_finds_nothing_and_the_callsign_is_tried() {
+    let frames = [
+        claim((1, 1, 0), "A1B2C3", "DONE1", "ACTIVE", 25_000, None),
+        claim((2, 2, 1), "A1B2C3", "DONE2", "ACTIVE", 26_000, None),
+        claim((3, 1, 2), "A1B2C3", "DONE1", "COMPLETED", 25_000, None),
+        claim((4, 2, 3), "A1B2C3", "DONE2", "CANCELLED", 26_000, None),
+        claim((5, 3, 4), "000001", "SOLO3", "ACTIVE", 33_000, NEAR),
+    ];
+    let sf = recording("none", &frames);
+    let (r, _d, _) = answer_queries(
+        &sf,
+        &[
+            q(0x00A1_B2C3, 150, cs("SOLO3"), CHI),
+            q(0x00A1_B2C3, 150, CallsignObs::Absent, CHI),
+            q(0x00FF_FFFF, 150, CallsignObs::Absent, CHI),
+        ],
+    )
+    .unwrap();
+    assert_eq!(r[0].addr, AddrResult::NoneFlying);
+    assert!(r[0].ended);
+    assert_eq!(r[0].addr_flight, None);
+    assert_eq!(
+        r[0].key,
+        Key::CallsignChecked,
+        "the callsign join is tried next"
+    );
+    assert_eq!(r[0].assigned, simple(33_000));
+    assert_eq!(r[1].addr, AddrResult::NoneFlying);
+    assert_eq!(r[1].key, Key::None);
+    assert_eq!(r[2].addr, AddrResult::NoClaimant);
+    assert!(!r[2].ended);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-035
+#[test]
+fn with_several_claimants_flying_the_one_whose_position_agrees_is_taken() {
+    let frames = [
+        claim((1, 1, 0), "A1B2C3", "FARA1", "ACTIVE", 31_000, FAR),
+        claim((2, 2, 1), "A1B2C3", "NEARA2", "ACTIVE", 25_000, NEAR),
+        // 3 and 4 both near; 5 and 6 have no position.
+        claim((3, 3, 2), "B1B2C3", "TWIN3", "ACTIVE", 20_000, NEAR),
+        claim((4, 4, 3), "B1B2C3", "TWIN4", "ACTIVE", 21_000, NEAR),
+        claim((5, 5, 4), "C1B2C3", "NOPOS5", "ACTIVE", 22_000, None),
+        claim((6, 6, 5), "C1B2C3", "NOPOS6", "ACTIVE", 23_000, None),
+        // A third callsign flight to fall back to.
+        claim((7, 7, 6), "000007", "FALL7", "ACTIVE", 35_000, NEAR),
+    ];
+    let sf = recording("several", &frames);
+    let (r, d, _) = answer_queries(
+        &sf,
+        &[
+            q(0x00A1_B2C3, 150, CallsignObs::Absent, CHI),
+            q(0x00B1_B2C3, 150, CallsignObs::Absent, CHI),
+            q(0x00C1_B2C3, 150, CallsignObs::Absent, CHI),
+            q(0x00B1_B2C3, 150, cs("FALL7"), CHI),
+            q(0x00C1_B2C3, 150, cs("FALL7"), CHI),
+        ],
+    )
+    .unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralByPosition);
+    assert_eq!(r[0].key, Key::Address);
+    assert_eq!(
+        r[0].assigned,
+        simple(25_000),
+        "the near one, though not asked by callsign"
+    );
+    for k in [1, 2] {
+        assert_eq!(r[k].addr, AddrResult::SeveralUnresolved);
+        assert_eq!(r[k].key, Key::None);
+        assert!(!r[k].flight);
+        assert!(!r[k].ended);
+    }
+    // Not resolved: the callsign join is tried next.
+    for k in [3, 4] {
+        assert_eq!(r[k].addr, AddrResult::SeveralUnresolved);
+        assert_eq!(r[k].key, Key::CallsignChecked);
+        assert_eq!(r[k].assigned, simple(35_000));
+    }
+    assert!(d.is_empty());
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-036
+#[test]
+fn where_the_address_and_the_callsign_name_different_flights_the_position_decides() {
+    let frames = [
+        // Address 1: flight 1 (address) far, flight 2 (callsign) near.
+        claim((1, 1, 0), "A1B2C3", "ADR1", "ACTIVE", 30_000, FAR),
+        claim((2, 2, 1), "000002", "CSN2", "ACTIVE", 31_000, NEAR),
+        // Address 2: address flight near, callsign flight has no position to check.
+        claim((3, 3, 2), "B1B2C3", "ADR3", "ACTIVE", 32_000, NEAR),
+        claim((4, 4, 3), "000004", "CSF4", "ACTIVE", 33_000, None),
+        // Address 3: both near.
+        claim((5, 5, 4), "C1B2C3", "ADR5", "ACTIVE", 34_000, NEAR),
+        claim((6, 6, 5), "000006", "CSN6", "ACTIVE", 35_000, NEAR),
+        // Address 4: neither has a position.
+        claim((7, 7, 6), "D1B2C3", "ADR7", "ACTIVE", 36_000, None),
+        claim((8, 8, 7), "000008", "CSX8", "ACTIVE", 37_000, None),
+    ];
+    let sf = recording("differ", &frames);
+    let (r, d, _) = answer_queries(
+        &sf,
+        &[
+            q(0x00A1_B2C3, 150, cs("CSN2"), CHI),
+            q(0x00B1_B2C3, 150, cs("CSF4"), CHI),
+            q(0x00C1_B2C3, 150, cs("CSN6"), CHI),
+            q(0x00D1_B2C3, 150, cs("CSX8"), CHI),
+        ],
+    )
+    .unwrap();
+    let want = [
+        (Key::CallsignOverAddress, 31_000, Resolution::CallsignTaken),
+        (Key::Address, 32_000, Resolution::AddressTaken),
+        (Key::Address, 34_000, Resolution::BothPass),
+        (Key::Address, 36_000, Resolution::NeitherPass),
+    ];
+    for (k, (key, ft, res)) in want.into_iter().enumerate() {
+        assert_eq!(r[k].key, key, "query {k}");
+        assert_eq!(r[k].assigned, simple(ft), "query {k}");
+        let got = d.iter().find(|x| x.query == k).map(|x| x.resolution);
+        assert_eq!(got, Some(res), "query {k}");
+    }
+    assert_eq!(d.len(), 4, "every disagreement stays in the cross-check");
     let _ = std::fs::remove_dir_all(&sf.dir);
 }

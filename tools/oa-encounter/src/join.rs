@@ -13,8 +13,8 @@ use std::path::PathBuf;
 
 use oa_encounter::Encounter;
 use oa_flight::{
-    flight_by_address, flight_get, flight_is_flying, flight_is_live, flights_flying_by_callsign,
-    Alt, Flight, FlightConfig, FlightKey, FlightTable, ALT_AT_FIX, ALT_BLOCK, ALT_NIL, ALT_SIMPLE,
+    flight_get, flight_is_flying, flights_claiming_address, flights_flying_by_callsign, Alt,
+    Flight, FlightConfig, FlightKey, FlightTable, ALT_AT_FIX, ALT_BLOCK, ALT_NIL, ALT_SIMPLE,
     ALT_VFR, ALT_VFR_ON_TOP_PLUS, KEY_GUFI,
 };
 use oa_flight_sfdps::{
@@ -36,13 +36,62 @@ pub enum Key {
     /// No flight.
     #[default]
     None,
-    /// A live flight claims the aircraft address.
+    /// The address names a flying flight.
     Address,
     /// The callsign names one flying flight and its own position agrees with the ADS-B one.
     CallsignChecked,
     /// The callsign names one flying flight and it has no position within the window.
     CallsignUnchecked,
+    /// The address and the callsign named different flights and only the callsign flight's own
+    /// position agreed with the ADS-B one.
+    CallsignOverAddress,
 }
+
+/// What the address join found. Every flight that claims the address is considered, not only
+/// the newest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AddrResult {
+    /// No flight claims the address.
+    #[default]
+    NoClaimant,
+    /// Flights claim it and none is flying (all ended or dropped).
+    NoneFlying,
+    /// One claimant is flying.
+    One,
+    /// Several are flying and exactly one has its own position within 120 s within 10 NM of the
+    /// ADS-B one.
+    SeveralByPosition,
+    /// Several are flying and none, or more than one, passes the position check.
+    SeveralUnresolved,
+}
+
+pub const ADDR_NAMES: [&str; 5] = [
+    "no flight claims the address",
+    "address claimants, none flying",
+    "one claimant flying",
+    "several flying, one passes the position check",
+    "several flying claimants, not resolved",
+];
+
+/// How a disagreement between the address flight and the callsign flight was settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resolution {
+    /// Only the callsign flight's position agrees: the callsign flight was taken.
+    CallsignTaken,
+    /// Only the address flight's position agrees.
+    AddressTaken,
+    /// Both agree: the address flight stands.
+    BothPass,
+    /// Neither agrees (or has a position to check): the address flight stands.
+    NeitherPass,
+}
+
+pub const RESOLUTION_NAMES: [&str; 4] = [
+    "callsign flight taken (only its position agrees)",
+    "address flight taken (only its position agrees)",
+    "both positions agree, address flight stands",
+    "neither position agrees, address flight stands",
+];
 
 /// Why the callsign join found nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,6 +153,7 @@ pub struct Answer {
     pub interim: Alt,
     /// How the chosen flight was found.
     pub key: Key,
+    pub addr: AddrResult,
     /// The flight the address names, and the flight the accepted callsign names: both kept, so
     /// the two joins can be compared where both are possible.
     pub addr_flight: Option<FlightKey>,
@@ -336,6 +386,8 @@ pub struct Diag {
     pub t_ms: i64,
     pub addr_key: FlightKey,
     pub cs_key: FlightKey,
+    /// How it was settled.
+    pub resolution: Resolution,
     /// The callsign join was position checked, and took one of several plans.
     pub cs_checked: bool,
     pub cs_several: bool,
@@ -370,6 +422,7 @@ fn diag_of(
     query: usize,
     (fa, fc): (&Flight, &Flight),
     (cs_checked, cs_several): (bool, bool),
+    resolution: Resolution,
 ) -> Diag {
     let t_ms = q.t_ns.div_euclid(1_000_000);
     let class = if fa.callsign == [0; 8] || fc.callsign == [0; 8] {
@@ -400,6 +453,7 @@ fn diag_of(
     Diag {
         query,
         class,
+        resolution,
         t_ms,
         addr_key: fa.key,
         cs_key: fc.key,
@@ -419,6 +473,37 @@ fn diag_of(
     }
 }
 
+/// Whether the flight's own position within 120 s is within 10 NM of the ADS-B position.
+fn position_passes(pos: &Positions, f: &Flight, q: &Query) -> bool {
+    let t_ms = q.t_ns.div_euclid(1_000_000);
+    own_position(pos, f, t_ms)
+        .is_some_and(|p| distance_m((p.lat_e7, p.lon_e7), (q.lat_e7, q.lon_e7)) <= POSITION_DIST_M)
+}
+
+/// Most claimants of one address that are looked at: an airframe states its address on a few legs
+/// a day.
+const MAX_CLAIMANTS: usize = 32;
+
+/// The address join over every claimant of the address that is flying at the query time.
+fn addr_join(t: &FlightTable, pos: &Positions, q: &Query) -> (AddrResult, Option<Flight>) {
+    let mut claimants = Vec::new();
+    if flights_claiming_address(t, q.addr, &mut claimants, MAX_CLAIMANTS) == 0 {
+        return (AddrResult::NoClaimant, None);
+    }
+    let flying: Vec<Flight> = claimants.into_iter().filter(flight_is_flying).collect();
+    match flying.as_slice() {
+        [] => (AddrResult::NoneFlying, None),
+        [f] => (AddrResult::One, Some(*f)),
+        many => {
+            let mut passing = many.iter().filter(|f| position_passes(pos, f, q));
+            match (passing.next(), passing.next()) {
+                (Some(f), None) => (AddrResult::SeveralByPosition, Some(*f)),
+                _ => (AddrResult::SeveralUnresolved, None),
+            }
+        }
+    }
+}
+
 fn lookup(
     t: &FlightTable,
     pos: &Positions,
@@ -428,16 +513,13 @@ fn lookup(
 ) -> (Answer, Option<Diag>) {
     let mut a = Answer::default();
     let mut chosen = None;
-    let mut addr_f = None;
-    match flight_by_address(t, q.addr) {
-        Some(f) if flight_is_live(&f) => {
-            a.addr_flight = Some(f.key);
-            a.key = Key::Address;
-            chosen = Some(f);
-            addr_f = Some(f);
-        }
-        Some(_) => a.ended = true,
-        None => {}
+    let (addr, addr_f) = addr_join(t, pos, q);
+    a.addr = addr;
+    a.ended = addr == AddrResult::NoneFlying;
+    if let Some(f) = addr_f {
+        a.addr_flight = Some(f.key);
+        a.key = Key::Address;
+        chosen = Some(f);
     }
     let mut diag = None;
     if q.try_callsign {
@@ -455,7 +537,27 @@ fn lookup(
                     chosen = Some(fc);
                 }
                 Some(fa) if fa.key != fc.key => {
-                    diag = Some(diag_of(pos, q, query, (&fa, &fc), (checked, several)));
+                    // Take the flight whose own position agrees with the ADS-B one; if both or
+                    // neither does, the address flight stands.
+                    let addr_pass = position_passes(pos, &fa, q);
+                    let resolution = match (addr_pass, checked) {
+                        (false, true) => Resolution::CallsignTaken,
+                        (true, false) => Resolution::AddressTaken,
+                        (true, true) => Resolution::BothPass,
+                        (false, false) => Resolution::NeitherPass,
+                    };
+                    if resolution == Resolution::CallsignTaken {
+                        a.key = Key::CallsignOverAddress;
+                        chosen = Some(fc);
+                    }
+                    diag = Some(diag_of(
+                        pos,
+                        q,
+                        query,
+                        (&fa, &fc),
+                        (checked, several),
+                        resolution,
+                    ));
                 }
                 Some(_) => {}
             }
@@ -753,7 +855,7 @@ pub fn join_text(
 }
 
 fn median(v: &mut [f64]) -> Option<f64> {
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
     v.get(v.len() / 2).copied()
 }
 
@@ -777,6 +879,21 @@ fn diag_text(
             .filter(|d| !only_group || in_group(d))
             .collect();
         let _ = writeln!(o, "  disagreements, {label}: {}", sel.len());
+        for (k, name) in RESOLUTION_NAMES.iter().enumerate() {
+            let n = sel
+                .iter()
+                .filter(|d| {
+                    matches!(
+                        (k, d.resolution),
+                        (0, Resolution::CallsignTaken)
+                            | (1, Resolution::AddressTaken)
+                            | (2, Resolution::BothPass)
+                            | (3, Resolution::NeitherPass)
+                    )
+                })
+                .count();
+            let _ = writeln!(o, "    settled, {name}: {n}");
+        }
         for (k, name) in DIAG_NAMES.iter().enumerate() {
             let of_class: Vec<&&Diag> = sel
                 .iter()
@@ -877,24 +994,48 @@ impl Cross {
     }
 }
 
+/// The weakness of a key, for the weakest of a pair: the address first, a position-checked
+/// callsign (alone or over the address) next, then a callsign with no position check.
 fn key_rank(k: Key) -> u8 {
     match k {
         Key::Address => 0,
-        Key::CallsignChecked => 1,
+        Key::CallsignChecked | Key::CallsignOverAddress => 1,
         Key::CallsignUnchecked => 2,
         Key::None => 3,
     }
 }
 
-const KEY_NAMES: [&str; 4] = [
+/// The slot of a key in the per-key table.
+fn key_slot(k: Key) -> usize {
+    match k {
+        Key::Address => 0,
+        Key::CallsignChecked => 1,
+        Key::CallsignUnchecked => 2,
+        Key::CallsignOverAddress => 3,
+        Key::None => 4,
+    }
+}
+
+const KEY_NAMES: [&str; 5] = [
     "address",
     "callsign, position checked",
     "callsign, no position check",
+    "callsign over the address (only its position agreed)",
     "none",
 ];
 
 /// The join split by the key that found the flight, the callsign rejections, and the two keys
 /// compared where both are possible. Counts only.
+fn addr_index(r: AddrResult) -> usize {
+    match r {
+        AddrResult::NoClaimant => 0,
+        AddrResult::NoneFlying => 1,
+        AddrResult::One => 2,
+        AddrResult::SeveralByPosition => 3,
+        AddrResult::SeveralUnresolved => 4,
+    }
+}
+
 fn key_text(
     encounters: &[Encounter],
     answers: &[Answer],
@@ -912,7 +1053,8 @@ fn key_text(
         "  callsign rule: one flying flight with the callsign (not ended, not dropped); its own SFDPS position within {} s, if it has one, within 10 NM of the ADS-B one; the ADS-B callsign stable over the previous 60 s",
         POSITION_AGE_MS / 1000
     );
-    let mut per_key = [0u64; 4];
+    let mut per_key = [0u64; 5];
+    let mut addr_results = [0u64; 5];
     let mut rejects = [0u64; 5];
     let (mut aircraft, mut not_tried, mut several) = (0u64, 0u64, 0u64);
     let (mut addr_both, mut addr_one, mut addr_none) = (0u64, 0u64, 0u64);
@@ -946,11 +1088,14 @@ fn key_text(
         let v = verdict(&a, &b, assigned_of);
         for x in [&a, &b] {
             aircraft += 1;
-            if let Some(c) = per_key.get_mut(usize::from(key_rank(x.key))) {
+            if let Some(c) = per_key.get_mut(key_slot(x.key)) {
                 *c += 1;
             }
             if x.cs == CsResult::NotTried {
                 not_tried += 1;
+            }
+            if let Some(c) = addr_results.get_mut(addr_index(x.addr)) {
+                *c += 1;
             }
             if x.addr_flight.is_none() && matches!(x.cs, CsResult::Accepted { several: true, .. }) {
                 several += 1;
@@ -992,6 +1137,13 @@ fn key_text(
     );
     let _ = writeln!(o, "  aircraft by the key that found their flight:");
     for (name, c) in KEY_NAMES.iter().zip(per_key) {
+        let _ = writeln!(o, "    {name}: {c}");
+    }
+    let _ = writeln!(
+        o,
+        "  the address join, over every flight that claims the address:"
+    );
+    for (name, c) in ADDR_NAMES.iter().zip(addr_results) {
         let _ = writeln!(o, "    {name}: {c}");
     }
     let _ = writeln!(

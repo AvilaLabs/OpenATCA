@@ -98,6 +98,46 @@ pub(crate) fn slot_of_key(t: &FlightTable, k: &FlightKey) -> Option<u32> {
     })
 }
 
+/// Every flight that claims this aircraft address, newest claimant first, by walking the chain of
+/// the address index: appends copies to `out` (at most `max`) and returns how many flights claim
+/// the address. The walk is at most the length of the table.
+pub fn flights_claiming_address(
+    t: &FlightTable,
+    address: u32,
+    out: &mut Vec<Flight>,
+    max: usize,
+) -> usize {
+    if address == 0 {
+        return 0;
+    }
+    let flights = &t.flights;
+    let Some(mut cur) = index_find(&t.by_addr, hash_addr(address), |s| {
+        flights
+            .get(s as usize)
+            .is_some_and(|f| f.address == address)
+    }) else {
+        return 0;
+    };
+    let mut n = 0usize;
+    for _ in 0..t.flights.len() {
+        let Some(f) = t.flights.get(cur as usize) else {
+            break;
+        };
+        if f.address != address {
+            break;
+        }
+        n += 1;
+        if out.len() < max {
+            out.push(*f);
+        }
+        if f.addr_next == 0 {
+            break;
+        }
+        cur = f.addr_next - 1;
+    }
+    n
+}
+
 /// A copy of the flight with this key.
 pub fn flight_get(t: &FlightTable, k: &FlightKey) -> Option<Flight> {
     slot_of_key(t, k).and_then(|s| t.flights.get(s as usize).copied())

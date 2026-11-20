@@ -5599,6 +5599,15 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-FLT-032** A disagreement between the address and the callsign is classed (same callsign and route, same callsign and another
   route, different callsigns, other), the distances between the flights' positions and from the ADS-B position are kept, and
   the two flights are looked at again 30 min later for whether either stopped flying; the second look joins nothing.
+- **OA-FLT-033** The core lists every flight that claims an aircraft address, newest first, by walking the chain of the address
+  index, bounded by the table, and counts them all.
+- **OA-FLT-034** The address join walks every claimant of the address, keeps those flying at the query time under the same as-of,
+  no-peek rule, takes the one that is flying if only one is, and with none flying finds nothing (counted as address claimants,
+  none flying) and the callsign join is tried next.
+- **OA-FLT-035** With several claimants flying, the address join takes the one whose own position within 120 s is within 10 NM of the
+  ADS-B position; if none or more than one passes, it gives several flying claimants and the callsign join is tried next.
+- **OA-FLT-036** Where the address join and the callsign join name different flights, the one whose position check passes is taken;
+  if both or neither pass the address flight stands; each case is counted and kept in the cross-check.
 - **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
   refuses a window that is open at one end or runs backwards.
 

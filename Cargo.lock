@@ -142,6 +142,7 @@ dependencies = [
  "oa-feed",
  "oa-flight",
  "oa-flight-sfdps",
+ "oa-math",
  "oa-nasr",
  "oa-sealed",
  "oa-sha256",

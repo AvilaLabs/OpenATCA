@@ -1536,3 +1536,41 @@ fn of_several_flying_flights_with_one_callsign_the_newest_plan_is_found_the_same
     }
     assert!(!flights_flying_by_callsign(&t, &code("XYZ9")).same_route);
 }
+
+// REQ: OA-FLT-033
+#[test]
+fn every_flight_that_claims_an_address_is_walked_newest_first() {
+    let mut t = table();
+    let claim = |t: &mut FlightTable, n: u128, ts: i64| {
+        live(t, gk(n));
+        let mut o = op(OP_ADDRESS, gk(n), ZAU, ts);
+        o.address = 0xABCDEF;
+        apply(t, &o);
+    };
+    for (n, ts) in [(1u128, 2_000), (2, 3_000), (3, 4_000)] {
+        claim(&mut t, n, ts);
+    }
+    let mut out = Vec::new();
+    assert_eq!(flights_claiming_address(&t, 0xABCDEF, &mut out, 8), 3);
+    let keys: Vec<FlightKey> = out.iter().map(|f| f.key).collect();
+    assert_eq!(keys, [gk(3), gk(2), gk(1)]);
+    // The most asked for is kept; the count is of all of them.
+    let mut few = Vec::new();
+    assert_eq!(flights_claiming_address(&t, 0xABCDEF, &mut few, 2), 3);
+    assert_eq!(few.len(), 2);
+    assert_eq!(
+        flights_claiming_address(&t, 0x123456, &mut Vec::new(), 8),
+        0
+    );
+    assert_eq!(flights_claiming_address(&t, 0, &mut Vec::new(), 8), 0);
+    // A flight that takes another address leaves the chain.
+    let mut o = op(OP_ADDRESS, gk(2), ZAU, 9_000);
+    o.address = 0x111111;
+    apply(&mut t, &o);
+    let mut out = Vec::new();
+    assert_eq!(flights_claiming_address(&t, 0xABCDEF, &mut out, 8), 2);
+    assert_eq!(
+        out.iter().map(|f| f.key).collect::<Vec<_>>(),
+        [gk(3), gk(1)]
+    );
+}
