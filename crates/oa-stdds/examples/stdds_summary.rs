@@ -3,7 +3,7 @@
 //! reader, parses every message frame and prints per-kind counts, parse-error counts and
 //! per-field presence counts. It prints no position, identity, time or other message value;
 //! the unknown-path and unknown-root lines are element and namespace names (schema text).
-//! Paths under `scds/rec-20261119`, `scds/stdds-20261119-holdout` and `scds/stdds-smoke-20261119` are refused.
+//! Paths into the sealed hold-out data (`oa-sealed`, `crates/oa-sealed/sealed_paths.txt`) are refused.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -68,43 +68,6 @@ fn feed(reader: &mut FrameReader<'_>, ctx: &mut Ctx, data: &[u8]) {
     }
 }
 
-/// Names of sealed hold-out and smoke recordings; a path with any of them in a component is never read.
-const SEALED: [&str; 3] = [
-    "rec-20261119",
-    "stdds-20261119-holdout",
-    "stdds-smoke-20261119",
-];
-
-/// Whether any component of `p` contains a sealed name anywhere in it.
-fn names_sealed(p: &std::path::Path) -> bool {
-    p.components().any(|c| {
-        let c = c.as_os_str().to_string_lossy();
-        SEALED.iter().any(|s| c.contains(s))
-    })
-}
-
-/// Refuses (exit 2, before the file is opened) a path that names a sealed folder as given, or
-/// whose every prefix, with links resolved, does. A prefix that cannot be resolved fails closed.
-fn refuse_sealed(path: &str) {
-    let given = std::path::Path::new(path);
-    let mut bad = names_sealed(given);
-    let mut prefix = std::path::PathBuf::new();
-    for comp in given.components() {
-        prefix.push(comp);
-        match std::fs::canonicalize(&prefix) {
-            Ok(real) => bad |= names_sealed(&real),
-            Err(e) => {
-                eprintln!("refused: cannot resolve the path ({e}), so it cannot be checked");
-                std::process::exit(2);
-            }
-        }
-    }
-    if bad {
-        eprintln!("refused: the sealed hold-out recording is not read");
-        std::process::exit(2);
-    }
-}
-
 /// Whether `t` is 1 to `max` ASCII letters and digits and the `extra` characters.
 fn safe_text(t: &str, extra: &[u8], max: usize) -> bool {
     !t.is_empty()
@@ -118,8 +81,15 @@ fn main() {
         eprintln!("usage: stdds_summary FILE.oaf[.gz]");
         std::process::exit(2);
     });
-    refuse_sealed(&path);
-    let mut src = std::fs::File::open(&path).unwrap();
+    // The shared sealed hold-out guard (`oa-sealed`): the path is resolved and checked, the file
+    // is opened and the opened file is checked again.
+    let mut src = match oa_sealed::open(std::path::Path::new(&path)) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("refused or unreadable: {path}: {e}");
+            std::process::exit(2);
+        }
+    };
     let mut ctx = Ctx {
         parser: Parser::new(XmlLimits::default()).unwrap(),
         stats: new_stats(),

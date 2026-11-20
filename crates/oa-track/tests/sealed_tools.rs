@@ -71,7 +71,7 @@ fn oa_track_fusion_refuses_a_sealed_clip() {
     let mut c = Command::new(env!("CARGO_BIN_EXE_oa-track-fusion"));
     c.args(["--quick", "--clip", CLIP, "--out"]).arg(&out);
     let o = c.output().unwrap();
-    assert!(!o.status.success());
+    assert_eq!(o.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"));
     assert!(!out.exists());
 }
@@ -105,4 +105,48 @@ fn the_examples_that_read_recordings_refuse_a_sealed_path() {
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"));
     assert!(!out.exists());
+}
+
+// REQ: OA-SEAL-005
+#[test]
+fn the_tools_refuse_links_into_sealed_data_and_loaders_refuse_links_inside_a_folder() {
+    use std::os::unix::fs::symlink;
+    let t = out_dir("links");
+    let sealed = t.join("scds/rec-20261119");
+    std::fs::create_dir_all(&sealed).unwrap();
+    std::fs::write(sealed.join("a.oaf"), b"x").unwrap();
+    symlink(sealed.join("a.oaf"), t.join("clip.oaf")).unwrap();
+    symlink(&sealed, t.join("dir")).unwrap();
+    let out = t.join("out");
+    let mut c = Command::new(env!("CARGO_BIN_EXE_oa-track-run"));
+    c.args(["--adsb"])
+        .arg(t.join("clip.oaf"))
+        .arg("--out")
+        .arg(&out);
+    refused(c, &out);
+    for name in ["p002", "vs_eram"] {
+        // The clip is fine; the SFDPS folder is a link, or holds a link into sealed data.
+        std::fs::write(t.join("fine.oaf"), b"x").unwrap();
+        {
+            let sfdps = t.join("dir");
+            let mut c = Command::new(example(name));
+            c.arg("--adsb")
+                .arg(t.join("fine.oaf"))
+                .arg("--sfdps-dir")
+                .arg(&sfdps)
+                .arg("--out")
+                .arg(&out);
+            if name == "p002" {
+                c.arg("--development");
+            }
+            let o = c.output().unwrap();
+            assert!(!o.status.success(), "{name} {sfdps:?}");
+            assert!(
+                String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"),
+                "{name}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            assert!(!out.exists());
+        }
+    }
 }

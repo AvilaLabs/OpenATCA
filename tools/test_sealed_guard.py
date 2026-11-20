@@ -151,6 +151,79 @@ class SealedGuardTests(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("OA-SEAL-001", r.stderr)
 
+    # REQ: OA-SEAL-007
+    def test_a_file_swapped_in_after_the_check_is_caught_on_the_opened_descriptor(self):
+        os.symlink(self.root / "scds/rec-20261119/sfdps/a.bin", self.base / "late")
+        g = sealed_guard.Guard(root=self.root)
+        g.check = lambda p: None  # as if the link was swapped in after the check
+        with self.assertRaises(sealed_guard.SealedError) as c:
+            g.open(self.base / "late", "rb")
+        self.assertIn("OA-SEAL-001", str(c.exception))
+        # Write modes are not offered; a bad path is a SealedError, not a traceback.
+        with self.assertRaises(ValueError):
+            self.g.open(self.base / "x", "w")
+        for bad in ("a\0b", ""):
+            if bad:
+                self.refused(bad)
+
+    # REQ: OA-SEAL-005
+    def test_each_argument_of_each_python_tool_is_refused_on_its_own(self):
+        here = Path(__file__).resolve().parent
+        t = self.base / "tree"
+        sealed = t / "scds" / "rec-20261119" / "x"
+        sealed.mkdir(parents=True)
+        (sealed / "f.csv").write_bytes(b"x")
+        open_dir = t / "open"
+        open_dir.mkdir()
+        os.symlink(sealed / "f.csv", open_dir / "file-link")
+        os.symlink(sealed, open_dir / "dir-link")
+        os.symlink(t / "scds", open_dir / "parent-link")
+        benign = str(self.base / "benign")
+        tools = {
+            "track_set_score.py": ["--truth", "--outputs", "--manifest", "--out"],
+            "comparison_reference.py": ["--truth", "--measurements", "--manifest", "--protocol", "--out", "--runner-source"],
+            "comparison_evaluator.py": ["--truth", "--measurements", "--candidate", "--baseline", "--metadata", "--out"],
+            "validate_candidate.py": ["--repo", "--target-dir", "--out", "--reference-env", "--clip"],
+            "run_comparison.py": ["--repo", "--out", "--target-dir", "--runner"],
+        }
+        fixed = {"validate_candidate.py": ["--revision", "x"]}
+        required = {
+            "validate_candidate.py": ["--repo", "--target-dir", "--out"],
+            "run_comparison.py": ["--out"],
+        }
+        for tool, flags in tools.items():
+            base_args = {f: benign for f in flags}
+            if tool in required:
+                base_args = {f: benign for f in flags if f in required[tool]}
+            for flag in flags:
+                for link in (open_dir / "file-link", open_dir / "dir-link", open_dir / "parent-link" / "rec-20261119" / "x" / "f.csv"):
+                    args = dict(base_args)
+                    args[flag] = str(link)
+                    argv = [a for kv in args.items() for a in kv] + fixed.get(tool, [])
+                    r = subprocess.run([sys.executable, str(here / tool), *argv], capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 2, (tool, flag, str(link), r.stderr))
+                    self.assertIn("OA-SEAL-001", r.stderr, (tool, flag))
+
+    # REQ: OA-SEAL-005
+    def test_validate_candidate_guards_every_path_it_takes_from_the_reference_env(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import validate_candidate as vc
+        t = self.base / "tree2"
+        sealed = t / "scds" / "stdds-20261119-holdout"
+        sealed.mkdir(parents=True)
+        (sealed / "clip.oaf").write_bytes(b"x")
+        link = self.base / "clip-link.oaf"
+        os.symlink(sealed / "clip.oaf", link)
+        dlink = self.base / "dir-link"
+        os.symlink(sealed, dlink)
+        for key, value in (("OPENATCA_ADSB_CLIP", link), ("OPENATCA_RAW", dlink), ("OPENATCA_DATA", dlink)):
+            with self.assertRaises(sealed_guard.SealedError, msg=key):
+                vc.resolve_reference_paths({key: str(value)}, self.base)
+        with self.assertRaises(sealed_guard.SealedError):
+            vc.directory_manifest(dlink, {})
+        with self.assertRaises(sealed_guard.SealedError):
+            vc.sha(link)
+
     # REQ: OA-SEAL-005
     def test_the_python_tools_refuse_a_sealed_path_with_exit_2_and_write_nothing(self):
         here = Path(__file__).resolve().parent
@@ -170,6 +243,15 @@ class SealedGuardTests(unittest.TestCase):
             self.assertEqual(r.returncode, 2, (tool, r.stderr))
             self.assertIn("OA-SEAL-001", r.stderr, tool)
         self.assertEqual(list(self.base.glob("o.json")) + list(self.base.glob("gate")) + list(self.base.glob("run")), [])
+
+    # REQ: OA-SEAL-008
+    def test_odd_list_files_are_refused_by_the_python_parser(self):
+        for bad in ("root /d\nseal a\tb\n", "root /d\r\nseal a\n", "root  /d\nseal a\n", "root /d\nseal a \n",
+                    "root /d\n seal a\n", "root /d\nseal \x00a\n", "root /d\nseal a\x0bb\n", "root /d\nseal a\x1cb\n",
+                    "root /d\nseal \u00e9\n", "root /d\nseal a\u2028b\n", "root /d\n \nseal a\n", "root /d\nseal a//b\n"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                sealed_guard.parse_list(bad)
+        sealed_guard.parse_list("# any printable ~!@ in a comment\nroot /d\nseal a/b*")
 
 
 if __name__ == "__main__":

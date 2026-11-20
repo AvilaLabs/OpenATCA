@@ -1175,6 +1175,11 @@ fn main() -> ExitCode {
             eprintln!("{e}");
             ExitCode::from(2)
         }
+        // A sealed hold-out path is a usage refusal, like the other tools: exit 2.
+        Err(e) if e.contains("OA-SEAL-001") => {
+            eprintln!("oa-track-fusion: {e}");
+            ExitCode::from(2)
+        }
         Err(e) => {
             eprintln!("oa-track-fusion: {e}");
             ExitCode::FAILURE

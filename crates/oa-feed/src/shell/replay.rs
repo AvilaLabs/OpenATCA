@@ -11,7 +11,6 @@
 //! is never mistaken for a complete one.
 
 use std::convert::Infallible;
-use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
@@ -244,7 +243,7 @@ pub fn replay_files(paths: &[impl AsRef<Path>]) -> io::Result<Report> {
     let mut srcs = Vec::with_capacity(paths.len());
     for p in paths {
         srcs.push(
-            File::open(p.as_ref())
+            oa_sealed::open(p.as_ref())
                 .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.as_ref().display())))?,
         );
     }

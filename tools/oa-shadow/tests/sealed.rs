@@ -189,3 +189,42 @@ fn an_output_directory_that_does_not_exist_yet_is_resolved_through_its_existing_
     assert!(refuse_sealed(&root.join("fresh").join("out")).is_ok());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// REQ: OA-SEAL-005
+#[test]
+#[cfg(unix)]
+fn links_into_sealed_data_are_refused_for_each_argument_and_inside_the_sfdps_folder() {
+    use std::os::unix::fs::symlink;
+    let exe = env!("CARGO_BIN_EXE_oa-shadow");
+    let t = scratch("links");
+    let sealed = t.join("scds/rec-20261119");
+    std::fs::create_dir_all(&sealed).unwrap();
+    std::fs::write(sealed.join("a.oaf"), b"x").unwrap();
+    std::fs::write(t.join("fine.oaf"), b"x").unwrap();
+    symlink(sealed.join("a.oaf"), t.join("clip-link.oaf")).unwrap();
+    symlink(&sealed, t.join("dir-link")).unwrap();
+    let inner = t.join("inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    symlink(sealed.join("a.oaf"), inner.join("x.oaf")).unwrap();
+    let out = t.join("out");
+    for (adsb, sfdps, o) in [
+        (t.join("clip-link.oaf"), t.join("inner"), out.clone()),
+        (t.join("fine.oaf"), t.join("dir-link"), out.clone()),
+        (t.join("fine.oaf"), t.join("inner"), out.clone()),
+        (t.join("fine.oaf"), t.join("inner"), t.join("dir-link/new")),
+    ] {
+        let r = Command::new(exe)
+            .arg("--adsb")
+            .arg(&adsb)
+            .arg("--sfdps-dir")
+            .arg(&sfdps)
+            .arg("--out")
+            .arg(&o)
+            .output()
+            .unwrap();
+        assert!(!r.status.success(), "{adsb:?} {sfdps:?} {o:?}");
+        assert!(String::from_utf8_lossy(&r.stderr).contains("OA-SEAL-001"));
+        assert!(!out.exists() && !sealed.join("new").exists());
+    }
+    let _ = std::fs::remove_dir_all(&t);
+}

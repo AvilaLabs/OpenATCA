@@ -66,9 +66,8 @@ class Point:
 
 
 def _sha256(path: Path) -> str:
-    sealed_guard.refuse(path)
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with sealed_guard.open_read(path, "rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
@@ -80,7 +79,7 @@ def _bounded_csv(path: Path, expected_fields: tuple[str, ...], kind: str) -> tup
         if path.stat().st_size > MAX_FILE_BYTES:
             raise ScoreError(f"{kind} exceeds byte limit {MAX_FILE_BYTES}")
         csv.field_size_limit(MAX_FIELD_CHARS)
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        with sealed_guard.open_read(path, "r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle, strict=True)
             if reader.fieldnames is None or tuple(reader.fieldnames) != expected_fields:
                 raise ScoreError(f"{kind} header must exactly equal {','.join(expected_fields)}")
@@ -374,7 +373,8 @@ def _load_manifest(path: Path) -> dict[str, Any]:
     try:
         if path.stat().st_size > 1024 * 1024:
             raise ScoreError("manifest exceeds 1 MiB limit")
-        data = json.loads(path.read_text(encoding="utf-8"))
+        with sealed_guard.open_read(path, "r", encoding="utf-8") as handle:
+            data = json.loads(handle.read())
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ScoreError(f"cannot read manifest: {exc}") from exc
     if not isinstance(data, dict) or data.get("schema_version") != 1:

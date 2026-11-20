@@ -10,6 +10,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+oa-sealed = { path = "../oa-sealed" }
 oa-geo = { path = "../oa-geo" }
 oa-math = { path = "../oa-math" }
 oa-ieee = { path = "../oa-ieee" }

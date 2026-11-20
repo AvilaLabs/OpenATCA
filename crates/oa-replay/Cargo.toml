@@ -20,6 +20,7 @@ oa-zip = { path = "../oa-zip" }
 oa-adsb = { path = "../oa-adsb" }
 oa-tfms = { path = "../oa-tfms" }
 oa-notam = { path = "../oa-notam" }
+oa-sealed = { path = "../oa-sealed" }
 
 [dev-dependencies]
 # Workspace crate: compresses test recordings to .oaf.gz.

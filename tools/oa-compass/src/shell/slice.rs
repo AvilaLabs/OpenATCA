@@ -148,8 +148,7 @@ fn slice_file(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    refuse_holdout(input)?;
-    let f = File::open(input).map_err(|e| io_err(input, &e))?;
+    let f = super::guard::open(input).map_err(|e| io_err(input, &e))?;
     let mut r = BufReader::with_capacity(1 << 20, f);
     let partial = out_path.with_extension("ast.partial");
     let mut w = BufWriter::with_capacity(
@@ -364,6 +363,7 @@ pub fn slice_dir_with(
     }
     // Not the input directory (by canonical path), and new or empty: nothing of an earlier run is
     // mixed in; a directory of only partial files says so.
+    refuse_holdout(out)?;
     if out.exists() {
         let (cin, cout) = (
             fs::canonicalize(input).map_err(|e| io_err(input, &e))?,
@@ -374,9 +374,12 @@ pub fn slice_dir_with(
         }
     }
     // The source README is needed for the import date line: read before anything is created.
-    let src_readme = fs::read_to_string(input.join("README.txt"))
-        .map_err(|e| io_err(&input.join("README.txt"), &e))?;
-    refuse_holdout(out)?;
+    // A sidecar may be a link into sealed data: it goes through the guarded opener.
+    let readme_path = input.join("README.txt");
+    let mut src_readme = String::new();
+    super::guard::open(&readme_path)
+        .and_then(|mut f| std::io::Read::read_to_string(&mut f, &mut src_readme))
+        .map_err(|e| io_err(&readme_path, &e))?;
     check_out(out)?;
     let mut run_dirs: Vec<PathBuf> = Vec::new();
     create_tracked(out, &mut run_dirs)?;
@@ -409,11 +412,16 @@ pub fn slice_dir_with(
             )));
         }
         let ds = input.join("data_sources.json");
+        // The guard comes before the first stat of the sidecar, and the copy reads it through
+        // the guarded opener, not `fs::copy`.
+        refuse_holdout(&ds)?;
         if ds.exists() {
             let dest = out.join("data_sources.json");
             let partial = out.join("data_sources.json.partial");
             pending.push((partial.clone(), dest));
-            fs::copy(&ds, &partial).map_err(|e| io_err(&ds, &e))?;
+            let mut src = super::guard::open(&ds).map_err(|e| io_err(&ds, &e))?;
+            let mut dst = File::create(&partial).map_err(|e| io_err(&partial, &e))?;
+            std::io::copy(&mut src, &mut dst).map_err(|e| io_err(&ds, &e))?;
         }
         let readme = slice_readme(input, from, to, &files, &src_readme);
         let (rp, rf) = (out.join("README.txt.partial"), out.join("README.txt"));

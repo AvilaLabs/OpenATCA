@@ -172,8 +172,7 @@ pub fn report_path(out: &Path) -> PathBuf {
 }
 
 fn read_snapshot(path: &Path) -> Result<Vec<u8>, CliError> {
-    let f =
-        std::fs::File::open(path).map_err(|e| failed(&format!("open {}", path.display()), e))?;
+    let f = oa_sealed::open(path).map_err(|e| failed(&format!("open {}", path.display()), e))?;
     let mut buf = Vec::new();
     // One byte past the limit shows an oversized file without reading all of it.
     f.take(MAX_SNAPSHOT_BYTES as u64 + 1)

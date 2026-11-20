@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 //! `oa-sealed` (shell, B1): the one guard for the sealed hold-out data. The list of sealed paths
-//! is `tools/sealed_paths.txt`, compiled in; `tools/sealed_guard.py` reads the same file, so the
+//! is `crates/oa-sealed/sealed_paths.txt`, compiled in; `tools/sealed_guard.py` reads the same file, so the
 //! Rust and Python tools cannot drift. There is no environment variable, flag or file that
 //! switches the guard off.
 //!
@@ -13,6 +13,15 @@
 //! sealed entry (the data root, `scds`) is refused too: a tool must name something below it.
 //! Nothing inside a sealed directory is listed or read to decide this.
 //!
+//! The in-root and holding-directory rules need the real data root to exist (they compare the
+//! resolved path with the resolved root); the name rule needs nothing, so it still works in CI,
+//! where there is no data root.
+//!
+//! [`Sealed::open`] checks, opens, and then asks the kernel which file the descriptor is
+//! (`/proc/self/fd/N`) and checks that path too, so a link swapped in between the check and the
+//! open is caught and the file closed. Where `/proc` is missing, only the check before the open
+//! is made.
+//!
 //! The shared guard owns the path part of the rule only. A recording or row timestamped on UTC
 //! day 2026-11-19 is a content rule: it needs the tool's own parser, so each reader keeps it.
 //!
@@ -22,9 +31,10 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 /// The list file, compiled in.
-pub const LIST: &str = include_str!("../../sealed_paths.txt");
+pub const LIST: &str = include_str!("../sealed_paths.txt");
 
 /// A deepest chain of links followed by hand before a path is refused as unresolvable.
 const MAX_LINKS: usize = 40;
@@ -88,18 +98,33 @@ impl List {
 }
 
 /// Parses the list file text. Anything it does not understand is an error, never skipped.
+/// Only printable ASCII and `\n` are allowed anywhere in the file, and a line is exactly
+/// `word`, one space, `value` (no other white space), so the Python parser cannot read it
+/// differently.
 pub fn parse_list(text: &str) -> Result<List, String> {
+    if let Some(b) = text
+        .bytes()
+        .find(|b| *b != b'\n' && !(0x20..=0x7e).contains(b))
+    {
+        return Err(format!(
+            "byte 0x{b:02x}: only printable ASCII and newline are allowed"
+        ));
+    }
     let mut root: Option<PathBuf> = None;
     let mut entries = Vec::new();
-    for (i, raw) in text.lines().enumerate() {
-        let line = raw.trim();
+    for (i, line) in text.split('\n').enumerate() {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let (word, value) = line
             .split_once(' ')
             .ok_or_else(|| format!("line {}: expected `root <path>` or `seal <path>`", i + 1))?;
-        let value = value.trim();
+        if value.is_empty() || value.starts_with(' ') || value.ends_with(' ') {
+            return Err(format!(
+                "line {}: extra white space around the value",
+                i + 1
+            ));
+        }
         match word {
             "root" => {
                 if root.is_some() || !value.starts_with('/') {
@@ -146,12 +171,7 @@ pub struct Refusal {
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}: refused by OA-SEAL-001: {}",
-            self.path.display(),
-            self.why
-        )
+        write!(f, "{}: {}", self.path.display(), self.why)
     }
 }
 
@@ -209,9 +229,10 @@ fn resolve(path: &Path, depth: usize) -> Result<PathBuf, ()> {
 }
 
 impl Sealed {
-    /// The guard for the list compiled in and the real data root (production).
-    pub fn production() -> Sealed {
-        Sealed::with_list(LIST, None)
+    /// The guard for the compiled-in list and the real data root, built once (production).
+    pub fn production() -> &'static Sealed {
+        static PRODUCTION: OnceLock<Sealed> = OnceLock::new();
+        PRODUCTION.get_or_init(|| Sealed::with_list(LIST, None))
     }
 
     /// The guard for the compiled-in entries under `root` (tests build a fake root).
@@ -247,57 +268,70 @@ impl Sealed {
 
     /// Refuses `path` if it is, is inside, resolves into, or holds a sealed entry.
     pub fn check(&self, path: &Path) -> Result<(), Refusal> {
-        let refuse = |why: String| Refusal {
-            path: path.to_path_buf(),
-            why,
-        };
         if self.broken {
-            return Err(refuse(
-                "the sealed list does not parse, so nothing is read".into(),
-            ));
+            return Err(Refusal {
+                path: path.to_path_buf(),
+                why: "refused by OA-SEAL-001: the sealed list does not parse, so nothing is read"
+                    .into(),
+            });
         }
-        let real = match resolve(path, 0) {
-            Ok(r) => r,
-            Err(()) => {
-                return Err(refuse(
-                    "the path cannot be resolved (a link loop or an unreadable link)".into(),
-                ))
-            }
-        };
+        match resolve(path, 0) {
+            Ok(real) => self.check_resolved(path, &real),
+            Err(()) => Err(Refusal {
+                path: path.to_path_buf(),
+                why: "refused by OA-SEAL-001: the path cannot be resolved (a link loop or an unreadable link)"
+                    .into(),
+            }),
+        }
+    }
+
+    /// The rule on a path as given and its resolved form.
+    fn check_resolved(&self, path: &Path, real: &Path) -> Result<(), Refusal> {
+        let (given, resolved) = (names(path), names(real));
+        let below = real.strip_prefix(&self.root).ok().map(names);
         for e in &self.list.entries {
-            let rule = |how: &str| {
-                refuse(format!(
-                    "{how} the sealed hold-out entry `{}` (tools/sealed_paths.txt); sealed data is never read",
-                    e.text
-                ))
+            let how = if e.named_in(&given) {
+                "the path names"
+            } else if e.named_in(&resolved) {
+                "the path resolves to"
+            } else if below.as_ref().is_some_and(|b| e.matches_at(b)) {
+                "the path is inside"
+            } else if below.as_ref().is_some_and(|b| e.is_ancestor(b)) {
+                "the path is a directory that holds (name something below it)"
+            } else {
+                continue;
             };
-            if e.named_in(&names(path)) {
-                return Err(rule("the path names"));
-            }
-            if e.named_in(&names(&real)) {
-                return Err(rule("the path resolves to"));
-            }
-            {
-                if let Ok(below) = real.strip_prefix(&self.root) {
-                    let below = names(below);
-                    if e.matches_at(&below) {
-                        return Err(rule("the path is inside"));
-                    }
-                    if e.is_ancestor(&below) {
-                        return Err(rule(
-                            "the path is a directory that holds (name something below it)",
-                        ));
-                    }
-                }
-            }
+            return Err(Refusal {
+                path: path.to_path_buf(),
+                why: format!(
+                    "refused by OA-SEAL-001: {how} the sealed hold-out entry `{}` (crates/oa-sealed/sealed_paths.txt); sealed data is never read",
+                    e.text
+                ),
+            });
         }
         Ok(())
     }
 
-    /// Checks `path`, then opens it for reading: the opener every file a tool reads goes through.
+    /// Checks `path`, opens it for reading, then checks what the descriptor really is: the
+    /// opener every file a tool reads goes through. The error of a refusal carries the rule and
+    /// no path (the caller names the path).
     pub fn open(&self, path: &Path) -> io::Result<File> {
-        self.check(path).map_err(io::Error::other)?;
-        File::open(path)
+        self.check(path).map_err(|r| io::Error::other(r.why))?;
+        let file = File::open(path)?;
+        self.verify_open(path, &file)?;
+        Ok(file)
+    }
+
+    /// Asks the kernel for the real path of an open file and refuses a sealed one. A platform
+    /// without `/proc/self/fd` skips this (the check before the open stands).
+    pub fn verify_open(&self, path: &Path, file: &File) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let link = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+        if let Ok(real) = fs::read_link(&link) {
+            self.check_resolved(path, &real)
+                .map_err(|r| io::Error::other(r.why))?;
+        }
+        Ok(())
     }
 }
 
@@ -306,12 +340,15 @@ pub fn refuse(path: &Path) -> Result<(), String> {
     Sealed::production().check(path).map_err(|e| e.to_string())
 }
 
-/// Production check as an I/O error, for an opener a loader calls on every file it reads.
+/// Production check as an I/O error (the rule, no path) for a loader that adds the path itself.
 pub fn refuse_io(path: &Path) -> io::Result<()> {
-    Sealed::production().check(path).map_err(io::Error::other)
+    Sealed::production()
+        .check(path)
+        .map_err(|r| io::Error::other(r.why))
 }
 
-/// Production opener: refuses a sealed path, then opens the file for reading.
+/// Production opener: refuses a sealed path, opens the file for reading and verifies the
+/// opened file.
 pub fn open(path: &Path) -> io::Result<File> {
     Sealed::production().open(path)
 }

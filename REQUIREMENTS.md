@@ -5397,8 +5397,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   directly; the summary example reads such a feed (raw or gzip) and prints counts and schema names only,
   never a position, identity or time.
 - **OA-STD-024** The summary example exits 2 before opening the file when the path, as given or with links
-  resolved on any prefix, names `scds/rec-20261119`, `scds/stdds-20261119-holdout` or
-  `scds/stdds-smoke-20261119`, including through a link to the file, to the folder or to a link.
+  resolved, is sealed by the shared guard (OA-SEAL-001, OA-SEAL-002), including through a link to the
+  file, to the folder or to a link.
 - **OA-STD-025** Forms the real feed uses are accepted: a decimal with up to 24 fraction digits (a heading
   printed as a binary double, still range checked), a callsign with an inner space, a runway with `*` or `+`,
   a flight plan status word up to 16 characters (`terminated`), and the sender's no-value words
@@ -5455,11 +5455,10 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-STD-042** The summary example prints a status text only if it is `[A-Za-z0-9 _-]` (up to 64 bytes) and
   an unknown element or root name only if it is those characters or `:./{}`; anything else is counted as
   "other". It exits 3 with a count of the bytes dropped if the frame reader stalls, reads until two bytes to
-  sniff gzip, and refuses (exit 2) a path with a sealed name inside any component, as given or resolved, and
-  any path it cannot resolve.
+  sniff gzip, and exits 2 for a sealed path (the shared guard) and for a path it cannot open.
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)
-- **OA-SEAL-001** The sealed hold-out data is listed once, in `tools/sealed_paths.txt` (the data root and the entries
+- **OA-SEAL-001** The sealed hold-out data is listed once, in `crates/oa-sealed/sealed_paths.txt` (the data root and the entries
   `scds/rec-20261119`, `scds/stdds-20261119-holdout`, `scds/stdds-smoke-20261119*`); the Rust guard compiles the file in and
   the Python guard reads it, and both parse it to the same set. A list that does not parse refuses every path.
 - **OA-SEAL-002** A path is resolved before it is checked (relative paths, `..`, every link, a symlinked parent directory, a
@@ -5475,3 +5474,11 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   names the rule, and nothing written: oa-compass, oa-encounter, oa-shadow, oa-track-run, oa-track-fusion, p002,
   oa-replay-diff, validate_candidate.py, comparison_reference.py, comparison_evaluator.py, run_comparison.py,
   track_set_score.py, replay_compare.sh and p002_build.sh.
+- **OA-SEAL-006** Every bin and example target of the workspace, found from the manifests and the source layout, uses the
+  sealed guard or is listed with a reason in `crates/oa-sealed/exempt_targets.txt`; a target with neither, a listed target
+  that does not exist, and a listed target that uses the guard all fail the test.
+- **OA-SEAL-007** The guard opens a file and then checks the real path of the opened descriptor (`/proc/self/fd`), so a
+  link swapped in after the path check is caught and the file closed; the loaders of `oa-bench` and `oa-replay` run the
+  guard before they stat a listed entry, and every guarded opener is this one function.
+- **OA-SEAL-008** The list file is printable ASCII and newline only, each line `word`, one space, `value`; both parsers
+  refuse anything else, and the same inputs are refused by both.

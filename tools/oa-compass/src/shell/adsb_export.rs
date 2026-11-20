@@ -390,8 +390,7 @@ pub fn read_back(
     bytes: u64,
 ) -> Result<(u64, u64), ExportError> {
     let bad = |s: String| ExportError::Verify(format!("{}: {s}", path.display()));
-    super::guard::refuse_holdout(path)?;
-    let f = File::open(path).map_err(|e| io_err(path, &e))?;
+    let f = super::guard::open(path).map_err(|e| io_err(path, &e))?;
     let mut r = BufReader::with_capacity(1 << 20, f);
     let (mut n_rec, mut n_blk, mut n_bytes, mut last) = (0u64, 0u64, 0u64, 0u32);
     let mut buf = Vec::new();

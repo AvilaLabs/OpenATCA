@@ -54,7 +54,7 @@ def _csv(path, kind):
     try:
         if __import__('os').path.getsize(path) > MAX_FILE_BYTES:
             raise EvaluationError(f"{path}: exceeds byte limit {MAX_FILE_BYTES}")
-        with open(path, newline="", encoding="utf-8-sig") as f:
+        with sealed_guard.open_read(path, "r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f, strict=True)
             if reader.fieldnames is None or len(reader.fieldnames) != len(set(reader.fieldnames)):
                 raise EvaluationError(f"{path}: missing or duplicate header")
@@ -138,7 +138,7 @@ def _sha256(path):
     sealed_guard.refuse(path)
     if os.path.getsize(path)>MAX_FILE_BYTES: raise EvaluationError(f"{path}: exceeds byte limit {MAX_FILE_BYTES}")
     digest=hashlib.sha256()
-    with open(path,"rb") as f:
+    with sealed_guard.open_read(path,"rb") as f:
         for block in iter(lambda:f.read(65536),b""): digest.update(block)
     return digest.hexdigest()
 
@@ -203,7 +203,7 @@ def _profile_gate(role,init_ns,coast_limit_ns,epochs_complete,coverage,minimum=N
 def _read_json(path):
     sealed_guard.refuse(path)
     if os.path.getsize(path)>MAX_FILE_BYTES: raise EvaluationError(f"{path}: exceeds byte limit {MAX_FILE_BYTES}")
-    with open(path,encoding="utf-8") as f: return _loads_json(f.read())
+    with sealed_guard.open_read(path,"r",encoding="utf-8") as f: return _loads_json(f.read())
 
 def _loads_json(text):
     def unique(pairs):
@@ -220,7 +220,7 @@ def _frozen_protocol(path=None):
     sealed_guard.refuse(path)
     try:
         if os.path.getsize(path)>MAX_FILE_BYTES: return None
-        with open(path,"rb") as f: raw=f.read()
+        with sealed_guard.open_read(path,"rb") as f: raw=f.read()
         if hashlib.sha256(raw).hexdigest()!=PROTOCOL_V1_SHA256: return None
         data=_loads_json(raw.decode("utf-8"))
         return data if isinstance(data,dict) else None
@@ -266,7 +266,7 @@ def _ledger_throughput(ledger):
 def _validate_identity_binding(path, truth_keys, output_rows):
     fields=["system","scenario_id","flight_id","score_ns","track_id","truth_flight_id"]
     try:
-        with open(path,newline="",encoding="utf-8-sig") as f:
+        with sealed_guard.open_read(path,"r",newline="",encoding="utf-8-sig") as f:
             reader=csv.DictReader(f,strict=True)
             if reader.fieldnames!=fields: return False,"identity_binding_schema_mismatch"
             seen=set(); track_truth={}; bound={"candidate":set(),"baseline":set()}

@@ -159,3 +159,47 @@ fn any_input_path_through_the_sealed_recording_is_refused_and_nothing_is_created
         assert!(!work.join("o2").exists());
     }
 }
+
+// REQ: OA-SEAL-005
+#[test]
+fn an_export_refuses_a_link_into_sealed_data_for_the_clip_the_eram_folder_and_the_output() {
+    use std::os::unix::fs::symlink;
+    let work = tmp("export-links");
+    let sealed = work.join("scds/stdds-20261119-holdout");
+    fs::create_dir_all(sealed.join("sfdps")).unwrap();
+    fs::write(sealed.join("clip.oaf"), b"x").unwrap();
+    symlink(sealed.join("clip.oaf"), work.join("clip-link.oaf")).unwrap();
+    symlink(sealed.join("sfdps"), work.join("sfdps-link")).unwrap();
+    symlink(&sealed, work.join("out-link")).unwrap();
+    let job = |out: PathBuf, adsb: Option<PathBuf>, sfdps: Option<PathBuf>| Job {
+        layout: Layout {
+            out,
+            day: 20_772,
+            split: false,
+        },
+        adsb,
+        sfdps: sfdps.map(EramSource::Dir),
+        mode: InputsMode::All,
+        rows: OpenatcaRows::Ticks,
+        eram_address: EramAddress::Keep,
+        self_test_eram_offset_e7: 0,
+        self_test_adsb_offset_e7: 0,
+    };
+    let fresh = work.join("fresh/out");
+    for j in [
+        job(fresh.clone(), Some(work.join("clip-link.oaf")), None),
+        job(fresh.clone(), None, Some(work.join("sfdps-link"))),
+        job(
+            work.join("out-link/new"),
+            None,
+            Some(work.join("elsewhere")),
+        ),
+    ] {
+        let e = run_job(j, &mut |_| Ok(()), &mut |_| {})
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("OA-SEAL-001"), "{e}");
+        assert!(!work.join("fresh").exists());
+        assert!(!sealed.join("new").exists());
+    }
+}

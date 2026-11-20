@@ -50,7 +50,7 @@ fn io_err(path: &Path, e: &std::io::Error) -> LoadError {
 
 /// Valid time of a file from its first message only (a few tens of kilobytes are read).
 fn peek_valid_time(path: &Path) -> Result<i64, LoadError> {
-    let mut f = File::open(path).map_err(|e| io_err(path, &e))?;
+    let mut f = oa_sealed::open(path).map_err(|e| io_err(path, &e))?;
     let mut head = [0u8; 16];
     f.read_exact(&mut head).map_err(|e| io_err(path, &e))?;
     // message_length needs the whole message, so take the length from the head and read on.
@@ -154,7 +154,7 @@ impl Archive {
 /// Reads a whole file of at most `limit` bytes: its length is checked first, and the read
 /// itself stops one byte past the limit, so a file that grows meanwhile is refused too.
 pub fn read_file_capped(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
-    let f = File::open(path)?;
+    let f = oa_sealed::open(path)?;
     if f.metadata()?.len() > limit {
         return Err(std::io::ErrorKind::InvalidInput.into());
     }
@@ -167,7 +167,7 @@ pub fn read_file_capped(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
 }
 
 fn read_ranges(path: &Path, ranges: &[(u64, u64)]) -> std::io::Result<Vec<u8>> {
-    let mut f = File::open(path)?;
+    let mut f = oa_sealed::open(path)?;
     let mut out = Vec::new();
     for &(a, b) in ranges {
         let n = b - a + 1;
@@ -231,7 +231,7 @@ fn message_starts(f: &mut File, file_len: u64) -> Result<Vec<(u64, u64)>, LoadEr
 /// variable and level of its first field agree with the index's first row for it whenever
 /// either one is a field an hour wants.
 fn check_index_against_file(path: &Path, idx: &Idx, file_len: u64) -> Result<(), LoadError> {
-    let mut f = File::open(path).map_err(|e| io_err(path, &e))?;
+    let mut f = oa_sealed::open(path).map_err(|e| io_err(path, &e))?;
     let starts = message_starts(&mut f, file_len)?;
     let mut offsets: Vec<u64> = idx.offset.clone();
     offsets.dedup();

@@ -49,7 +49,7 @@ fn the_list_has_the_three_sealed_folders_and_the_python_guard_parses_it_to_the_s
             "scds/stdds-smoke-20261119*"
         ]
     );
-    let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../sealed_guard.py");
+    let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sealed_guard.py");
     let out = Command::new("python3")
         .arg("-I")
         .arg(&py)
@@ -231,8 +231,83 @@ fn nothing_switches_the_guard_off() {
         assert!(!src.contains(word), "{word}");
     }
     assert!(g.check(&sealed).is_err());
-    let py = include_str!("../../sealed_guard.py");
+    let py = include_str!("../../../tools/sealed_guard.py");
     for word in ["os.environ", "getenv", "argparse"] {
         assert!(!py.contains(word), "{word}");
+    }
+}
+
+// REQ: OA-SEAL-007
+#[test]
+fn a_file_opened_after_a_swapped_in_link_is_caught_on_the_descriptor() {
+    let root = fake_root("toctou");
+    let g = Sealed::with_root(&root);
+    let work = root.parent().unwrap().join("work");
+    fs::create_dir_all(&work).unwrap();
+    let sealed_file = root.join("scds/rec-20261119/sfdps/a.bin");
+    symlink(&sealed_file, work.join("late")).unwrap();
+    // As if the path check had passed before the link was put there: the file is opened without
+    // the check and then verified.
+    let f = fs::File::open(work.join("late")).unwrap();
+    let e = g
+        .verify_open(&work.join("fine"), &f)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("OA-SEAL-001"), "{e}");
+    // A file that is not sealed passes the same verification.
+    let ok = fs::File::open(root.join("scds/day-20261118/rec/b.bin")).unwrap();
+    g.verify_open(&work.join("fine"), &ok).unwrap();
+    // The opener does both steps and refuses the link (the error has the rule and no path).
+    let e = g.open(&work.join("late")).unwrap_err().to_string();
+    assert!(e.contains("OA-SEAL-001") && !e.contains("late"), "{e}");
+}
+
+// REQ: OA-SEAL-008
+#[test]
+fn odd_list_files_are_refused_by_both_parsers_and_good_ones_read_the_same() {
+    let dir = scratch("parity");
+    let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sealed_guard.py");
+    let cases: Vec<(&str, bool)> = vec![
+        ("root /d\nseal a/b\n", true),
+        (
+            "# a comment ~!@ with odd printable characters\nroot /d\nseal a/b*",
+            true,
+        ),
+        ("root /d\n\n\nseal a\nseal b/c\n", true),
+        ("root /d\nseal a\tb\n", false),
+        ("root /d\r\nseal a\n", false),
+        ("root  /d\nseal a\n", false),
+        ("root /d\nseal a \n", false),
+        ("root /d\n seal a\n", false),
+        ("root /d\n \nseal a\n", false),
+        ("root /d\nseal \u{0}a\n", false),
+        ("root /d\nseal a\u{b}b\n", false),
+        ("root /d\nseal a\u{c}b\n", false),
+        ("root /d\nseal a\u{1c}b\n", false),
+        ("root /d\nseal a\u{85}b\n", false),
+        ("root /d\nseal \u{e9}\n", false),
+        ("root /d\nseal a\u{2028}b\n", false),
+        ("root /d\nseal a//b\n", false),
+        ("root /d\nseal ../b\n", false),
+        ("root d\nseal a\n", false),
+    ];
+    for (i, (text, good)) in cases.iter().enumerate() {
+        let f = dir.join(format!("case{i}.txt"));
+        fs::write(&f, text.as_bytes()).unwrap();
+        let rust = parse_list(text);
+        assert_eq!(rust.is_ok(), *good, "rust {text:?}");
+        let out = Command::new("python3")
+            .arg("-I")
+            .arg(&py)
+            .arg("--parse-list")
+            .arg(&f)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.success(), *good, "python {text:?}");
+        if let Ok(l) = rust {
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), l.dump(), "{text:?}");
+        } else {
+            assert_eq!(out.status.code(), Some(2), "{text:?}");
+        }
     }
 }

@@ -44,9 +44,8 @@ SAFE_DATA_CHILDREN = {"raw", "derived", "tools", "fuzz"}
 
 
 def sha(path):
-    sealed_guard.refuse(path)
     h = hashlib.sha256()
-    with path.open("rb") as f:
+    with sealed_guard.open_read(path, "rb") as f:
         for block in iter(lambda: f.read(1024 * 1024), b""):
             h.update(block)
     return h.hexdigest()
@@ -63,7 +62,10 @@ def resolve_reference_paths(reference, repo):
         candidate = Path(value).expanduser()
         if not candidate.is_absolute():
             candidate = repo / candidate
+        # The sealed hold-out guard sees the expanded path before anything is stat-ed or listed.
+        sealed_guard.refuse(candidate)
         path = candidate.resolve(strict=True)
+        sealed_guard.refuse(path)
         if forbidden_path(path):
             raise ValueError(f"{key} resolves through a forbidden SCDS/REC path")
         expected = PATH_TYPES[key]
@@ -73,6 +75,7 @@ def resolve_reference_paths(reference, repo):
             raise ValueError(f"{key} must resolve to an existing file")
         if key == "OPENATCA_DATA":
             children = list(path.iterdir())
+            sealed_guard.refuse(*children)
             bad = [p.name for p in children if p.name not in SAFE_DATA_CHILDREN]
             if bad or {p.name for p in children} != SAFE_DATA_CHILDREN:
                 raise ValueError("OPENATCA_DATA must contain only raw/derived/tools/fuzz entries")
@@ -95,12 +98,15 @@ def resolve_reference_paths(reference, repo):
 
 def directory_manifest(root, shared_hashes):
     """Hash a deterministic tree, confined to one resolved root, rejecting links/cycles out of it."""
+    sealed_guard.refuse(root)
     real_root = Path(root).resolve(strict=True)
+    sealed_guard.refuse(real_root)
     if forbidden_path(real_root) or not real_root.is_dir():
         raise ValueError(f"unsafe or invalid directory root: {real_root}")
     entries, active = [], set()
 
     def visit(path, rel):
+        sealed_guard.refuse(path)
         if forbidden_path(rel) or forbidden_path(path):
             raise ValueError(f"forbidden SCDS/REC component under {real_root}")
         real_dir = path.resolve(strict=True)
@@ -117,7 +123,9 @@ def directory_manifest(root, shared_hashes):
             if forbidden_path(child.name):
                 raise ValueError(f"forbidden SCDS/REC component under {real_root}")
             child_rel = rel / child.name
+            sealed_guard.refuse(child)
             target = child.resolve(strict=True)
+            sealed_guard.refuse(target)
             if forbidden_path(child_rel) or forbidden_path(target):
                 raise ValueError(f"forbidden SCDS/REC component under {real_root}")
             if child.is_symlink() and not (target == real_root or real_root in target.parents):
@@ -144,7 +152,9 @@ def directory_manifest(root, shared_hashes):
 
 def safeview_manifest(root, shared_hashes):
     """Hash the four declared roots independently; nested links stay inside their own root."""
+    sealed_guard.refuse(root)
     real_root = Path(root).resolve(strict=True)
+    sealed_guard.refuse(real_root)
     if forbidden_path(real_root) or not real_root.is_dir():
         raise ValueError(f"unsafe safe-view root: {real_root}")
     children = sorted(real_root.iterdir(), key=lambda p: p.name)
@@ -154,7 +164,9 @@ def safeview_manifest(root, shared_hashes):
     for child in children:
         if forbidden_path(child.name) or not child.is_symlink():
             raise ValueError("safe-view entries must be the four declared safe symlinks")
+        sealed_guard.refuse(child)
         target = child.resolve(strict=True)
+        sealed_guard.refuse(target)
         if forbidden_path(target) or not target.is_dir() or target.name != child.name:
             raise ValueError(f"unsafe safe-view target for {child.name}")
         roots[child.name] = target
@@ -183,7 +195,9 @@ def input_snapshot(resolved, reference_env_path=None, clip_path=None):
     files, directories = {}, {}
     for key, path in resolved.items():
         if PATH_TYPES[key] == "file":
+            sealed_guard.refuse(path)
             canonical = Path(path).resolve(strict=True)
+            sealed_guard.refuse(canonical)
             if forbidden_path(canonical) or not canonical.is_file():
                 raise ValueError(f"invalid explicit file input: {key}")
             name = str(canonical)
@@ -551,7 +565,10 @@ def checkout_target_dir(repo, cache_root):
 
 
 def run_gate(args):
-    sealed_guard.refuse(args.repo, args.target_dir, args.out, args.reference_env, args.clip)
+    # The paths are guarded in the form the gate uses them: `~` expanded first.
+    sealed_guard.refuse(args.repo, args.target_dir, args.out,
+                        args.reference_env and args.reference_env.expanduser(),
+                        args.clip and args.clip.expanduser())
     repo = args.repo.resolve()
     out = args.out.resolve()
     target_root = args.target_dir.resolve()
@@ -574,12 +591,14 @@ def run_gate(args):
     reference_env_hash_start = None
     if args.reference_env:
         reference_env_path = args.reference_env.expanduser().resolve(strict=True)
+        sealed_guard.refuse(reference_env_path)
         if any(part.casefold() in {"scds", "rec"} for part in reference_env_path.parts):
             raise ValueError("reference-env resolves through a forbidden SCDS/REC path")
         if not reference_env_path.is_file():
             raise ValueError("reference-env must resolve to a file")
         reference_env_hash_start = sha(reference_env_path)
-        reference = json.loads(reference_env_path.read_text())
+        with sealed_guard.open_read(reference_env_path) as handle:
+            reference = json.loads(handle.read())
         if not isinstance(reference, dict) or set(reference) - ALLOWED_ENV:
             raise ValueError("reference-env contains an unsupported OPENATCA key")
         if any(not isinstance(v, str) for v in reference.values()):
@@ -590,6 +609,7 @@ def run_gate(args):
     clip_hash_start = None
     if args.clip:
         clip_path = args.clip.expanduser().resolve(strict=True)
+        sealed_guard.refuse(clip_path)
         if any(part.casefold() in {"scds", "rec"} for part in clip_path.parts):
             raise ValueError("--clip resolves through a forbidden SCDS/REC path")
         if not clip_path.is_file():

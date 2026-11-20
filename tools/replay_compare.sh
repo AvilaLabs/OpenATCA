@@ -96,8 +96,11 @@ commit_b="$(resolve "$spec_b")"
 # The digest format a commit will emit, read from its tree (no build): the overlay's canon.rs is
 # v2, a commit with canon.rs says its own header constant, a half-way commit is refused.
 digest_format() {
-    local c="$1" canon has_flag=0
-    git -C "$repo" show "$c:crates/oa-track/src/main.rs" 2>/dev/null | grep -q -- '"--digest"' && has_flag=1
+    local c="$1" canon main_rs has_flag=0
+    # Not `git show | grep -q`: grep exits at the first match, git then dies of SIGPIPE, and under
+    # pipefail the pipeline fails, which read a commit that has the flag as one without it.
+    main_rs="$(git -C "$repo" show "$c:crates/oa-track/src/main.rs" 2>/dev/null || true)"
+    case "$main_rs" in *'"--digest"'*) has_flag=1 ;; esac
     if canon="$(git -C "$repo" show "$c:crates/oa-track/src/canon.rs" 2>/dev/null)"; then
         [ "$has_flag" = 1 ] || { echo half-way; return; }
         case "$canon" in
