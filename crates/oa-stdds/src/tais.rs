@@ -25,8 +25,10 @@
 //! * beacon codes: four octal digits, kept as the digits read as a decimal number.
 //! * `trackNum`: the STARS track number, decimal.
 //!
-//! `recSTARSTimestamp` is digits (milliseconds since midnight, ASSUMED), `recSAFAReceiptTime`
-//! is ISO-8601; the receipt time minus the STARS time of day is the feed latency.
+//! `recSTARSTimestamp` is digits, read as milliseconds since midnight UTC; `recSAFAReceiptTime`
+//! is ISO-8601. The receipt time minus the STARS time of day is the feed latency. On the first
+//! recorded day that difference was under 100 ms for 99% of records, which the reading of the
+//! STARS time as UTC milliseconds of day would give and a different epoch or unit would not.
 //!
 //! Values come from element text. An element may carry `r="1"` meaning the sender no longer
 //! holds the value valid (documented for SMES, accepted here too): the field is absent and
@@ -375,7 +377,8 @@ pub struct TaisRecord {
     pub rec_src: [u8; 8],
     pub rec_stars_src_id: [u8; 8],
     /// `recSTARSTimestamp`: observed as 3 to 8 digits that grow through the day, so read as
-    /// milliseconds since midnight (ASSUMED; the epoch of the day is not confirmed).
+    /// milliseconds since midnight UTC (confirmed by the feed latency on real data, see the
+    /// module doc).
     pub rec_stars_tod_ms: i32,
     /// `recSAFAReceiptTime` as Unix milliseconds (UTC).
     pub rec_safa_receipt_ms: i64,

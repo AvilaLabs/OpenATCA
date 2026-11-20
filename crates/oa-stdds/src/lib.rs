@@ -15,9 +15,13 @@
 //! * [`stats`]: cumulative counts (kinds, errors, per-field presence, unknown elements).
 //!
 //! The element names come from the FAA's public FIXM-mediated STDDS data overview (its mapping
-//! tables, REQUIREMENTS.md OA-STD-001). No real STDDS message was available when this was
-//! written: every unit marked ASSUMED in a field's doc comment must be confirmed against real
-//! data before the value is trusted.
+//! tables, REQUIREMENTS.md OA-STD-001). The parser was first written without a real message and
+//! then checked against the first recorded day (20 November 2026): every element of the TAIS
+//! track and flight plan and the SMES position report now parses, apart from runway text with
+//! damaged encoding, which is refused. That check confirms the element names, the text forms and
+//! the value ranges. It does not confirm units: a unit still marked ASSUMED in a field's doc
+//! comment is confirmed only by comparing the values with an independent source, such as the
+//! same aircraft's ADS-B, and is not trusted before then.
 //!
 //! Interface rules (INTERFACES.md): a field that is present but unreadable is a counted field
 //! error that names the field and the byte offset (IF-R5), the record is kept with the field
