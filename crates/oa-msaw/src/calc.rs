@@ -4,10 +4,9 @@
 //! [`crate::MAX_ABS_VRATE_FPM`].
 
 use crate::types::{
-    FloorKind, FloorSample, Grade, MsawConfig, SamplePoint, FLOOR_NONE, MAX_ABS_ALT_FT,
-    MAX_ABS_LAT_DEG, MAX_CLEARANCE_FT, MAX_RADIUS_M,
+    Corridor, FloorKind, FloorSample, Grade, MsawConfig, SamplePoint, FLOOR_NONE, MAX_ABS_ALT_FT,
+    MAX_ABS_LAT_DEG, MAX_CLEARANCE_FT, MAX_FLOOR_FT, MAX_RADIUS_M,
 };
-use oa_safety::geom::polygon_contains;
 
 /// Metres per degree of latitude (mean radius 6,371,008.8 m).
 const M_PER_DEG: f64 = 111_194.926_644_558_74;
@@ -48,40 +47,50 @@ pub fn deg_to_e7(x: f64) -> i32 {
     oa_math::clamp_f64(oa_ieee::round(x * 1.0e7), -1.8e9, 1.8e9) as i32
 }
 
-/// The floor at a point and what set it. `proc_ft` is the highest published altitude of the
-/// procedure areas that contain the point (`None` outside them all). `None` when the point has
-/// no terrain or chart coverage (rule 1): no floor is invented.
+/// The floor at a point and what set it. `surface_ft` is the approach surface of the corridor the
+/// point's whole query circle lies inside (`None` outside every corridor, see
+/// [`corridor_surface_at`]). `None` when the point has no coverage (rule 1): no floor is invented.
 ///
-/// The normal floor is the higher of terrain plus its clearance, the obstacle top plus its
-/// clearance and the chart altitude. In a procedure area the floor is the published altitude when
-/// that is lower than the normal floor: a lower floor in that area only, and never a higher one.
-/// (A published procedure altitude already protects its path from terrain and obstacles, which is
-/// why the clearances do not apply under it.)
+/// Outside the corridors the floor is the higher of terrain plus its clearance, the obstacle top
+/// plus its clearance and the chart altitude. Inside one the chart altitude does not apply and
+/// the floor is the higher of the surface and terrain or the obstacle top plus the approach
+/// clearance: terrain and obstacles protect an approach always. Terrain, the obstacle data and
+/// (outside a corridor only) the chart must all be there.
 pub fn floor_of(
     s: &FloorSample,
-    proc_ft: Option<i32>,
+    surface_ft: Option<i32>,
     cfg: &MsawConfig,
 ) -> Option<(i32, FloorKind)> {
-    if s.terrain_ft == FLOOR_NONE || s.mva_ft == FLOOR_NONE {
+    if s.terrain_ft == FLOOR_NONE || !s.obstacle_covered {
         return None;
     }
-    let mut best = (
-        s.terrain_ft.saturating_add(cfg.terrain_clearance_ft),
-        FloorKind::Terrain,
-    );
+    let (tc, oc) = match surface_ft {
+        Some(_) => (cfg.approach_min_clearance_ft, cfg.approach_min_clearance_ft),
+        None => (cfg.terrain_clearance_ft, cfg.obstacle_clearance_ft),
+    };
+    let mut best = (s.terrain_ft.saturating_add(tc), FloorKind::Terrain);
     if s.obstacle_ft != FLOOR_NONE {
-        let o = s.obstacle_ft.saturating_add(cfg.obstacle_clearance_ft);
+        let o = s.obstacle_ft.saturating_add(oc);
         if o > best.0 {
             best = (o, FloorKind::Obstacle);
         }
     }
-    if s.mva_ft > best.0 {
-        best = (s.mva_ft, FloorKind::Mva);
+    match surface_ft {
+        Some(a) => {
+            if a > best.0 {
+                best = (a, FloorKind::Procedure);
+            }
+        }
+        None => {
+            if s.mva_ft == FLOOR_NONE {
+                return None;
+            }
+            if s.mva_ft > best.0 {
+                best = (s.mva_ft, FloorKind::Mva);
+            }
+        }
     }
-    match proc_ft {
-        Some(p) if p < best.0 => Some((p, FloorKind::Procedure)),
-        _ => Some(best),
-    }
+    Some(best)
 }
 
 /// True if a predicted altitude is below the floor: a violation. Monotone: a higher floor never
@@ -90,12 +99,68 @@ pub fn violates(alt_ft: i32, floor_ft: i32) -> bool {
     alt_ft < floor_ft
 }
 
-/// The highest published altitude of the procedure areas of `cfg` that contain the point.
-pub fn proc_floor_at(cfg: &MsawConfig, lat_e7: i32, lon_e7: i32) -> Option<i32> {
+/// Whole feet rounded up, held to `+-1e9` (a surface is conservative when it is high).
+// E8: the value is held within the i32 range first, so the cast does not truncate.
+#[allow(clippy::cast_possible_truncation)]
+fn alt_ceil_ft(x: f64) -> i32 {
+    if x.is_nan() {
+        return i32::MAX;
+    }
+    oa_math::clamp_f64(oa_ieee::ceil(x), -I32_HOLD, I32_HOLD) as i32
+}
+
+/// The approach surface of corridor `c` for a query circle at (`lat_e7`, `lon_e7`) of `radius_m`:
+/// `Some` only if the whole circle lies inside the corridor, then the surface at the circle's far
+/// side along the centreline (the highest it reaches), rounded up. The surface is a straight line
+/// from the threshold elevation at the threshold to the published altitude at the fix lowered by
+/// `allowance_ft` at the far end. The circle is inside when its centre is at least `radius_m`
+/// from every one of the four edges.
+pub fn corridor_surface_ft(
+    c: &Corridor,
+    lat_e7: i32,
+    lon_e7: i32,
+    radius_m: f64,
+    allowance_ft: i32,
+) -> Option<i32> {
+    let thr_lat = f64::from(c.thr_lat_e7) * 1.0e-7;
+    let cos_lat = oa_math::cos(thr_lat * RAD_PER_DEG);
+    let (sin_b, cos_b) = oa_math::sin_cos(c.out_bearing_deg * RAD_PER_DEG);
+    let dy = f64::from(lat_e7.saturating_sub(c.thr_lat_e7)) * 1.0e-7 * M_PER_DEG;
+    let dx = f64::from(lon_e7.saturating_sub(c.thr_lon_e7)) * 1.0e-7 * M_PER_DEG * cos_lat;
+    let along = dx * sin_b + dy * cos_b;
+    let across = dx * cos_b - dy * sin_b;
+    let cross = if across < 0.0 { -across } else { across };
+    if !(along.is_finite() && cross.is_finite() && radius_m >= 0.0) {
+        return None;
+    }
+    if along < radius_m || c.length_m - along < radius_m {
+        return None;
+    }
+    let k = (c.far_half_width_m - c.near_half_width_m) / c.length_m;
+    let half = c.near_half_width_m + k * along;
+    let side = (half - cross) / oa_ieee::sqrt(1.0 + k * k);
+    if !(side >= radius_m) {
+        return None;
+    }
+    let far = oa_math::min_f64(along + radius_m, c.length_m);
+    let top = f64::from(c.faf_alt_ft) - f64::from(allowance_ft);
+    let base = f64::from(c.thr_elev_ft);
+    Some(alt_ceil_ft(base + (top - base) * far / c.length_m))
+}
+
+/// The approach surface at a point: the highest surface of the corridors of `cfg` that hold the
+/// point's whole query circle, `None` if no corridor does.
+pub fn corridor_surface_at(cfg: &MsawConfig, p: &SamplePoint) -> Option<i32> {
     let mut best: Option<i32> = None;
-    for p in cfg.procs.iter().take(cfg.n_procs) {
-        if polygon_contains(&p.area, lat_e7, lon_e7) {
-            best = Some(best.map_or(p.floor_ft, |b| b.max(p.floor_ft)));
+    for c in cfg.corridors.iter().take(cfg.n_corridors) {
+        if let Some(v) = corridor_surface_ft(
+            c,
+            p.lat_e7,
+            p.lon_e7,
+            f64::from(p.radius_m),
+            cfg.approach_allowance_ft,
+        ) {
+            best = Some(best.map_or(v, |b| b.max(v)));
         }
     }
     best
@@ -128,7 +193,8 @@ pub fn sample_span_s(k: usize, n: usize, look_ahead_s: f64) -> (f64, f64) {
 /// The sample points of a straight-line path: `out` is filled with `cfg.samples` points (fewer
 /// if `out` is shorter) and the count is returned. `None` if the row cannot be projected (a
 /// position beyond the latitude of a flat scale, a velocity that is not finite). The radius of a
-/// point is the 95 % radius plus half the distance to the next point.
+/// point is the 95 % radius plus the velocity uncertainty times the prediction time of the point,
+/// plus half the distance to the next point.
 pub fn sample_points(t: &PathStart, cfg: &MsawConfig, out: &mut [SamplePoint]) -> Option<usize> {
     if !(t.lat_deg.is_finite()
         && t.lon_deg.is_finite()
@@ -150,9 +216,12 @@ pub fn sample_points(t: &PathStart, cfg: &MsawConfig, out: &mut [SamplePoint]) -
     } else {
         0.0
     };
-    let radius = oa_math::min_f64(t.r95_m + speed * step_s / 2.0, MAX_RADIUS_M);
     for (k, slot) in out.iter_mut().take(n).enumerate() {
         let ts = sample_time_s(k, cfg.samples, cfg.look_ahead_s);
+        let radius = oa_math::min_f64(
+            t.r95_m + cfg.velocity_uncertainty_mps * ts + speed * step_s / 2.0,
+            MAX_RADIUS_M,
+        );
         let lat = t.lat_deg + t.vn * ts / M_PER_DEG;
         let lon = t.lon_deg + t.ve * ts / (M_PER_DEG * cos_lat);
         *slot = SamplePoint {
@@ -209,16 +278,16 @@ pub fn grade_of(ttv_s: f64, warning_s: f64) -> Grade {
 /// The largest clearance or floor magnitude the configuration may state is in `i32` range with
 /// room for the sum with a terrain elevation.
 const _: () = assert!(MAX_CLEARANCE_FT < 1_000_000);
+const _: () = assert!(MAX_FLOOR_FT == 1_000_000 + MAX_CLEARANCE_FT);
 const _: () = assert!(MAX_ABS_ALT_FT < 1.0e9);
 
 #[cfg(kani)]
 mod proofs {
     //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
     use super::*;
-    use crate::types::{ProcArea, MAX_ABS_VRATE_FPM, MAX_LOOK_AHEAD_S, MAX_PROCS};
-    use oa_safety::geom::POLYGON_EMPTY;
+    use crate::types::{MAX_ABS_VRATE_FPM, MAX_CORRIDORS, MAX_LOOK_AHEAD_S};
 
-    fn cfg_with(tc: i32, oc: i32) -> MsawConfig {
+    fn cfg_with(tc: i32, oc: i32, amc: i32) -> MsawConfig {
         MsawConfig {
             max_tracks: 1,
             max_open: 1,
@@ -231,11 +300,20 @@ mod proofs {
             obstacle_clearance_ft: oc,
             max_speed_mps: 300.0,
             r95_cap_m: 1000.0,
-            procs: [ProcArea {
-                area: POLYGON_EMPTY,
-                floor_ft: 0,
-            }; MAX_PROCS],
-            n_procs: 0,
+            approach_allowance_ft: 0,
+            approach_min_clearance_ft: amc,
+            velocity_uncertainty_mps: 0.0,
+            corridors: [Corridor {
+                thr_lat_e7: 0,
+                thr_lon_e7: 0,
+                out_bearing_deg: 0.0,
+                length_m: 1.0,
+                near_half_width_m: 1.0,
+                far_half_width_m: 1.0,
+                thr_elev_ft: 0,
+                faf_alt_ft: 0,
+            }; MAX_CORRIDORS],
+            n_corridors: 0,
         }
     }
 
@@ -261,29 +339,34 @@ mod proofs {
             kani::any(),
             kani::any(),
         );
-        let (tc, oc): (i32, i32) = (kani::any(), kani::any());
+        let (tc, oc, amc): (i32, i32, i32) = (kani::any(), kani::any(), kani::any());
         kani::assume(tc >= 0 && tc <= MAX_CLEARANCE_FT);
         kani::assume(oc >= 0 && oc <= MAX_CLEARANCE_FT);
-        let p: i32 = kani::any();
-        let use_proc: bool = kani::any();
-        let proc_ft = if use_proc { Some(p) } else { None };
+        kani::assume(amc >= 0 && amc <= MAX_CLEARANCE_FT);
+        // The same corridor surface (or none) at both points: the corridor and the normal floor
+        // are both covered, the surface is a value the geometry gives and is held fixed.
+        let a: i32 = kani::any();
+        let use_surface: bool = kani::any();
+        let surface = if use_surface { Some(a) } else { None };
         // The second sample is at least as high in every input, none without coverage.
         kani::assume(t1 != FLOOR_NONE && m1 != FLOOR_NONE);
         kani::assume(t1 <= t2 && m1 <= m2);
         kani::assume(o1 == FLOOR_NONE || (o2 != FLOOR_NONE && o1 <= o2));
-        let cfg = cfg_with(tc, oc);
+        let cfg = cfg_with(tc, oc, amc);
         let s1 = FloorSample {
             terrain_ft: t1,
             obstacle_ft: o1,
+            obstacle_covered: true,
             mva_ft: m1,
         };
         let s2 = FloorSample {
             terrain_ft: t2,
             obstacle_ft: o2,
+            obstacle_covered: true,
             mva_ft: m2,
         };
         if let (Some((f1, _)), Some((f2, _))) =
-            (floor_of(&s1, proc_ft, &cfg), floor_of(&s2, proc_ft, &cfg))
+            (floor_of(&s1, surface, &cfg), floor_of(&s2, surface, &cfg))
         {
             assert!(f1 <= f2);
             if violates(alt, f1) {
@@ -295,6 +378,10 @@ mod proofs {
     }
 
     // REQ: OA-MSAW-022
+    // The domain proved: any finite altitude within MAX_ABS_ALT_FT, any finite vertical rate
+    // within MAX_ABS_VRATE_FPM, any span inside [0, MAX_LOOK_AHEAD_S], and any floor the net can
+    // compute, which is MAX_FLOOR_FT in magnitude (terrain held to a million feet plus the largest
+    // clearance).
     #[kani::proof]
     fn a_violation_time_stays_inside_its_span_for_bounded_inputs() {
         let (alt, vr, lo, hi): (f64, f64, f64, f64) =
@@ -303,8 +390,41 @@ mod proofs {
         kani::assume(alt.is_finite() && alt >= -MAX_ABS_ALT_FT && alt <= MAX_ABS_ALT_FT);
         kani::assume(vr.is_finite() && vr >= -MAX_ABS_VRATE_FPM && vr <= MAX_ABS_VRATE_FPM);
         kani::assume(lo >= 0.0 && lo <= hi && hi <= MAX_LOOK_AHEAD_S);
-        kani::assume(floor >= -MAX_CLEARANCE_FT && floor <= MAX_CLEARANCE_FT);
+        kani::assume(floor >= -MAX_FLOOR_FT && floor <= MAX_FLOOR_FT);
         let t = violation_time_s(alt, vr, floor, lo, hi);
         assert!(t >= lo && t <= hi);
+    }
+
+    // REQ: OA-MSAW-043
+    #[kani::proof]
+    fn the_corridor_floor_is_never_below_terrain_or_obstacles_plus_the_approach_clearance() {
+        let (t, o, m, a, amc): (i32, i32, i32, i32, i32) = (
+            kani::any(),
+            kani::any(),
+            kani::any(),
+            kani::any(),
+            kani::any(),
+        );
+        let covered: bool = kani::any();
+        kani::assume(amc >= 0 && amc <= MAX_CLEARANCE_FT);
+        let cfg = cfg_with(0, 0, amc);
+        let s = FloorSample {
+            terrain_ft: t,
+            obstacle_ft: o,
+            obstacle_covered: covered,
+            mva_ft: m,
+        };
+        if let Some((f, _)) = floor_of(&s, Some(a), &cfg) {
+            // An answer needs terrain and the obstacle data, and then it holds the floor above
+            // both (the chart altitude is not a condition inside a corridor).
+            assert!(t != FLOOR_NONE && covered);
+            assert!(f >= t.saturating_add(amc));
+            assert!(f >= a);
+            if o != FLOOR_NONE {
+                assert!(f >= o.saturating_add(amc));
+            }
+        } else {
+            assert!(t == FLOOR_NONE || !covered);
+        }
     }
 }

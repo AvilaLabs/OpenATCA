@@ -4,8 +4,8 @@ use alloc::vec::Vec;
 
 use crate::types::{
     Alert, AlertLog, CycleStats, MsawConfig, MsawTrack, SamplePoint, SkipLog, Skipped,
-    MAX_CLEARANCE_FT, MAX_LOOK_AHEAD_S, MAX_OPEN_LIMIT, MAX_PROCS, MAX_RADIUS_M, MAX_SAMPLES,
-    MAX_SPEED_LIMIT_MPS, MAX_TRACKS_LIMIT,
+    MAX_CLEARANCE_FT, MAX_CORRIDORS, MAX_CORRIDOR_LENGTH_M, MAX_LOOK_AHEAD_S, MAX_OPEN_LIMIT,
+    MAX_RADIUS_M, MAX_SAMPLES, MAX_SPEED_LIMIT_MPS, MAX_TRACKS_LIMIT,
 };
 
 /// Most points of one cycle (`max_tracks` times `samples`): the table of points is allocated
@@ -69,6 +69,8 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
     for (v, name) in [
         (c.terrain_clearance_ft, "terrain_clearance_ft"),
         (c.obstacle_clearance_ft, "obstacle_clearance_ft"),
+        (c.approach_allowance_ft, "approach_allowance_ft"),
+        (c.approach_min_clearance_ft, "approach_min_clearance_ft"),
     ] {
         if !(0..=MAX_CLEARANCE_FT).contains(&v) {
             return Err(name);
@@ -80,21 +82,39 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
     if !(pos(c.r95_cap_m) && c.r95_cap_m <= MAX_RADIUS_M) {
         return Err("r95_cap_m");
     }
+    if !(c.velocity_uncertainty_mps.is_finite()
+        && c.velocity_uncertainty_mps >= 0.0
+        && c.velocity_uncertainty_mps <= MAX_SPEED_LIMIT_MPS)
+    {
+        return Err("velocity_uncertainty_mps");
+    }
     // The query radius of a point is not held down (a held radius would not be conservative):
     // the configuration must keep it inside the bound.
     let half_step = c.look_ahead_s / ((c.samples - 1) as f64) / 2.0;
-    if c.r95_cap_m + c.max_speed_mps * half_step > MAX_RADIUS_M {
+    if c.r95_cap_m + c.velocity_uncertainty_mps * c.look_ahead_s + c.max_speed_mps * half_step
+        > MAX_RADIUS_M
+    {
         return Err("look_ahead_s and samples: query radius beyond the bound");
     }
-    if c.n_procs > MAX_PROCS {
-        return Err("n_procs");
+    if c.n_corridors > MAX_CORRIDORS {
+        return Err("n_corridors");
     }
-    for p in c.procs.iter().take(c.n_procs) {
-        if p.area.n < 3 {
-            return Err("procedure area vertex count");
+    for p in c.corridors.iter().take(c.n_corridors) {
+        let sane_m = |v: f64| v.is_finite() && v > 0.0 && v <= MAX_CORRIDOR_LENGTH_M;
+        if !(sane_m(p.length_m)
+            && sane_m(p.near_half_width_m)
+            && sane_m(p.far_half_width_m)
+            && p.out_bearing_deg.is_finite()
+            && (0.0..360.0).contains(&p.out_bearing_deg)
+            && p.thr_lat_e7.unsigned_abs() <= 850_000_000
+            && p.thr_lon_e7.unsigned_abs() <= 1_800_000_000)
+        {
+            return Err("corridor geometry");
         }
-        if !(-MAX_CLEARANCE_FT..=MAX_CLEARANCE_FT).contains(&p.floor_ft) {
-            return Err("procedure floor_ft");
+        if !(-MAX_CLEARANCE_FT..=MAX_CLEARANCE_FT).contains(&p.thr_elev_ft)
+            || !(-MAX_CLEARANCE_FT..=MAX_CLEARANCE_FT).contains(&p.faf_alt_ft)
+        {
+            return Err("corridor elevation");
         }
     }
     Ok(())

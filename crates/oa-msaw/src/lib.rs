@@ -12,8 +12,11 @@
 //! * The floor is the higher of terrain plus a clearance, an obstacle top plus a clearance and the
 //!   minimum vectoring altitude of the sector ([`floor_of`]). Terrain and obstacles are the
 //!   shell's conservative maxima over the point's radius (the track's 95 % radius plus half a
-//!   step). Inside a procedure area the published altitude is the floor when lower than
-//!   that: a lower floor in that area only.
+//!   step, with the radius growing with the prediction time). Inside a final-approach corridor
+//!   (the strip under the extended centreline of a runway end with an approach, whole query
+//!   circle inside) the chart altitude does not apply and the floor is a surface from the
+//!   threshold to the published altitude at the fix, never below terrain or obstacles plus the
+//!   approach clearance.
 //! * Nothing here has a default: the look-ahead, the warning time, every clearance, the budgets
 //!   and the procedure areas come from the caller in an [`MsawConfig`]. The tests use made-up
 //!   values and say so; no FAA value is in this crate.
@@ -25,8 +28,9 @@
 //!   track budget is named; over it the lowest altitudes are evaluated first and the rest are
 //!   counted, listed and the net reads degraded. Aircraft on the ground are excluded and counted.
 //! * Limits, stated: the prediction is a straight line from the cycle's position and velocity;
-//!   the altitude is the tracker's barometric altitude as given (no altimeter correction yet);
-//!   a row beyond latitude 85 degrees is refused as bad.
+//!   the altitude is on the datum of the floors, which the shell must have corrected (a track
+//!   flagged [`F_QNH_MISSING`] had no altimeter setting: counted, listed, the net degraded); a
+//!   row beyond latitude 85 degrees is refused as bad.
 
 // The width of `usize` is fixed by construction: this crate does not build for a target whose
 // pointers are not 64 bits (RULESET B10).
@@ -40,7 +44,7 @@ mod cycle;
 mod state;
 mod types;
 
-pub use calc::{floor_of, violates};
+pub use calc::{corridor_surface_at, corridor_surface_ft, floor_of, violates};
 pub use cycle::{
     msaw_evaluate, msaw_finish, msaw_plan, msaw_publish_refused, net_report_of, CycleOut,
 };
@@ -49,10 +53,11 @@ pub use state::{
     msaw_open_len, msaw_planned, msaw_points, msaw_totals, skip_log_clear, skip_log_new, MsawState,
 };
 pub use types::{
-    Alert, AlertLog, CycleStats, FloorKind, FloorSample, Grade, MsawConfig, MsawTrack, ProcArea,
+    Alert, AlertLog, Corridor, CycleStats, FloorKind, FloorSample, Grade, MsawConfig, MsawTrack,
     SamplePoint, SkipLog, SkipWhy, Skipped, AF_COAST, AF_GROUND_UNKNOWN, AF_IDENTITY_UNCONFIRMED,
-    AF_PARTIAL_COVERAGE, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_UNCERTAIN, AIRBORNE, FLOOR_NONE,
-    F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN, MAX_ABS_ALT_FT,
-    MAX_ABS_LAT_DEG, MAX_ABS_VRATE_FPM, MAX_CLEARANCE_FT, MAX_LOOK_AHEAD_S, MAX_OPEN_LIMIT,
-    MAX_PROCS, MAX_RADIUS_M, MAX_SAMPLES, MAX_SPEED_LIMIT_MPS, MAX_TRACKS_LIMIT, ON_GROUND,
+    AF_PARTIAL_COVERAGE, AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_UNCERTAIN, AIRBORNE,
+    FLOOR_NONE, F_COAST, F_IDENTITY_UNCONFIRMED, F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN,
+    GROUND_UNKNOWN, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG, MAX_ABS_VRATE_FPM, MAX_CLEARANCE_FT,
+    MAX_CORRIDORS, MAX_CORRIDOR_LENGTH_M, MAX_LOOK_AHEAD_S, MAX_OPEN_LIMIT, MAX_RADIUS_M,
+    MAX_SAMPLES, MAX_SPEED_LIMIT_MPS, MAX_TRACKS_LIMIT, ON_GROUND,
 };

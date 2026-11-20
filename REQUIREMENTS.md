@@ -6222,8 +6222,8 @@ FAA value.
   (`AltitudeMissing`); the other tracks are still evaluated.
 - **OA-MSAW-004** A path point with no terrain or chart coverage is counted, listed and the net reads
   degraded (`InputMissing`); it is never treated as safe, and the covered points are still evaluated.
-- **OA-MSAW-005** Over the track budget the lowest altitudes are evaluated first, the rest are counted
-  and listed, and the net reads degraded (`BudgetExceeded`) with the count; rows past the track
+- **OA-MSAW-005** Over the track budget the lowest predicted altitudes (altitude plus the descent over the
+  look-ahead, ties by address) are evaluated first, the rest are counted and listed, and the net reads degraded (`BudgetExceeded`) with the count; rows past the track
   capacity are counted the same way.
 - **OA-MSAW-006** Synthetic Guam case: an approach descending early onto rising terrain alerts at
   caution and then at warning.
@@ -6232,8 +6232,9 @@ FAA value.
   and stops hiding at its end time; an inhibition of another net or band hides nothing.
 - **OA-MSAW-008** The floor is the higher of terrain plus clearance, obstacle top plus clearance and the
   chart altitude; no coverage gives no floor.
-- **OA-MSAW-009** In a procedure area the published altitude is the floor when lower than the normal
-  floor and never raises it; outside the area nothing changes.
+- **OA-MSAW-009** A final-approach corridor gives its floor only where the whole query circle is inside it:
+  the higher of the surface and terrain or obstacle plus the approach clearance, with no chart floor;
+  elsewhere the normal floor applies.
 - **OA-MSAW-010** An alert is a warning when the predicted violation is within the warning time, else a
   caution; a track already below its floor is a warning.
 - **OA-MSAW-011** One alert is kept per track from its first to its last violating cycle and ends after the
@@ -6256,6 +6257,14 @@ FAA value.
 - **OA-MSAW-022** The time of a predicted violation is finite and inside its span for bounded inputs (Kani).
 - **OA-MSAW-023** A capacity above its bound is refused with the name of the key.
 - **OA-MSAW-024** The same cycles give the same alerts.
+- **OA-MSAW-042** In a final-approach corridor a normal approach does not alert and an early descent over
+  a ridge does (by the surface, and by terrain plus the approach clearance alone); outside the corridor
+  or straddling its edge the normal floor applies.
+- **OA-MSAW-043** The corridor floor is never below terrain or obstacle plus the approach clearance (Kani).
+- **OA-MSAW-044** No obstacle data is no coverage: the floor is unavailable and the net reads degraded.
+- **OA-MSAW-045** A track flagged with no altimeter setting is counted, listed, evaluated and the net
+  reads degraded (`InputMissing`).
+- **OA-MSAW-046** A point's radius grows with its prediction time by the velocity uncertainty.
 
 ### The tool (tools/oa-msaw)
 

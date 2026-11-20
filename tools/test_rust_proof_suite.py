@@ -50,13 +50,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 75)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 75)
+        self.assertEqual(registry["expected_proof_count"], 76)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 76)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 70)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 71)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -83,6 +83,7 @@ class SuiteConfigurationTests(unittest.TestCase):
             "msaw-predicted-altitude-finite",
             "msaw-floor-monotone",
             "msaw-violation-time-in-span",
+            "msaw-corridor-floor-above-terrain",
         })
         for proof in msaw.values():
             self.assertTrue(proof["enabled"] and not proof["experimental"])

@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 75,
+  "expected_proof_count": 76,
   "proofs": [
     {
       "id": "output-append",
@@ -1457,7 +1457,7 @@
     },
     {
       "id": "msaw-floor-monotone",
-      "requirement": "OA-MSAW-021: the floor is monotone in terrain, obstacle and chart altitude, so a higher floor never removes an alert.",
+      "requirement": "OA-MSAW-021: the floor, with or without a corridor surface, is monotone in terrain, obstacle and chart altitude, so a higher floor never removes an alert.",
       "package": "oa-msaw",
       "harness": "calc::proofs::a_higher_floor_never_removes_an_alert",
       "enabled": true,
@@ -1472,9 +1472,24 @@
     },
     {
       "id": "msaw-violation-time-in-span",
-      "requirement": "OA-MSAW-022: the time of a predicted violation is finite and inside its sample span for bounded inputs.",
+      "requirement": "OA-MSAW-022: the time of a predicted violation is finite and inside its sample span for bounded altitude, rate, span and any computable floor (1,100,000 ft in magnitude).",
       "package": "oa-msaw",
       "harness": "calc::proofs::a_violation_time_stays_inside_its_span_for_bounded_inputs",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 8192
+    },
+    {
+      "id": "msaw-corridor-floor-above-terrain",
+      "requirement": "OA-MSAW-043: the corridor floor is never below terrain or obstacle plus the approach clearance, and needs terrain and obstacle data.",
+      "package": "oa-msaw",
+      "harness": "calc::proofs::the_corridor_floor_is_never_below_terrain_or_obstacles_plus_the_approach_clearance",
       "enabled": true,
       "experimental": false,
       "required_covers": [],

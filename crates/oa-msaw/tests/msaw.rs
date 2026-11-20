@@ -9,11 +9,10 @@
 )]
 
 use oa_msaw::calc::{
-    alt_floor_ft, grade_of, lowest_alt_ft, predicted_alt_ft, proc_floor_at, sample_points,
+    alt_floor_ft, corridor_surface_ft, grade_of, lowest_alt_ft, predicted_alt_ft, sample_points,
     sample_span_s, sample_time_s, violation_time_s, PathStart,
 };
 use oa_msaw::*;
-use oa_safety::geom::{polygon_new, POLYGON_EMPTY};
 use oa_safety::inhibit::{
     inhibit_create, inhibits_new, inhibits_slice, suppressed_log, text_of, InhibitConfig,
     InhibitRequest, InhibitTable,
@@ -35,11 +34,24 @@ fn cfg() -> MsawConfig {
         obstacle_clearance_ft: 500,
         max_speed_mps: 400.0,
         r95_cap_m: 2000.0,
-        procs: [ProcArea {
-            area: POLYGON_EMPTY,
-            floor_ft: 0,
-        }; MAX_PROCS],
-        n_procs: 0,
+        approach_allowance_ft: 300,
+        approach_min_clearance_ft: 100,
+        velocity_uncertainty_mps: 5.0,
+        corridors: [blank_corridor(); MAX_CORRIDORS],
+        n_corridors: 0,
+    }
+}
+
+fn blank_corridor() -> Corridor {
+    Corridor {
+        thr_lat_e7: 0,
+        thr_lon_e7: 0,
+        out_bearing_deg: 0.0,
+        length_m: 1.0,
+        near_half_width_m: 1.0,
+        far_half_width_m: 1.0,
+        thr_elev_ft: 0,
+        faf_alt_ft: 0,
     }
 }
 
@@ -102,6 +114,7 @@ fn flat(terrain: i32, mva: i32) -> impl Fn(i32, i32) -> FloorSample {
     move |_, _| FloorSample {
         terrain_ft: terrain,
         obstacle_ft: FLOOR_NONE,
+        obstacle_covered: true,
         mva_ft: mva,
     }
 }
@@ -142,8 +155,21 @@ fn a_configuration_out_of_range_is_refused_naming_the_key() {
     c.samples = 2;
     assert!(msaw_check(&c).unwrap_err().contains("query radius"));
     let mut c = cfg();
-    c.n_procs = 1;
-    assert_eq!(msaw_check(&c).unwrap_err(), "procedure area vertex count");
+    c.n_corridors = 1;
+    c.corridors[0].length_m = 0.0;
+    assert_eq!(msaw_check(&c).unwrap_err(), "corridor geometry");
+    c.corridors[0] = north_corridor();
+    assert!(msaw_check(&c).is_ok());
+    c.corridors[0].faf_alt_ft = MAX_CLEARANCE_FT + 1;
+    assert_eq!(msaw_check(&c).unwrap_err(), "corridor elevation");
+    c.n_corridors = MAX_CORRIDORS + 1;
+    assert_eq!(msaw_check(&c).unwrap_err(), "n_corridors");
+    let mut c = cfg();
+    c.velocity_uncertainty_mps = -1.0;
+    assert_eq!(msaw_check(&c).unwrap_err(), "velocity_uncertainty_mps");
+    let mut c = cfg();
+    c.approach_min_clearance_ft = -1;
+    assert_eq!(msaw_check(&c).unwrap_err(), "approach_min_clearance_ft");
 }
 
 // REQ: OA-MSAW-002
@@ -195,6 +221,7 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
     let none_t = |_: i32, _: i32| FloorSample {
         terrain_ft: FLOOR_NONE,
         obstacle_ft: FLOOR_NONE,
+        obstacle_covered: true,
         mva_ft: 2000,
     };
     let o = cycle(&mut r, S, &[a], &none_t);
@@ -213,6 +240,7 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
     let none_m = |_: i32, _: i32| FloorSample {
         terrain_ft: 0,
         obstacle_ft: FLOOR_NONE,
+        obstacle_covered: true,
         mva_ft: FLOOR_NONE,
     };
     let o = cycle(&mut r, 2 * S, &[a], &none_m);
@@ -223,12 +251,14 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
             FloorSample {
                 terrain_ft: 0,
                 obstacle_ft: FLOOR_NONE,
+                obstacle_covered: true,
                 mva_ft: 2000,
             }
         } else {
             FloorSample {
                 terrain_ft: FLOOR_NONE,
                 obstacle_ft: FLOOR_NONE,
+                obstacle_covered: true,
                 mva_ft: FLOOR_NONE,
             }
         }
@@ -246,7 +276,7 @@ fn no_terrain_or_chart_coverage_is_counted_and_never_treated_as_safe() {
 
 // REQ: OA-MSAW-005
 #[test]
-fn over_budget_the_lowest_altitudes_are_evaluated_first_and_the_rest_counted() {
+fn over_budget_the_lowest_predicted_altitudes_are_evaluated_first_and_the_rest_counted() {
     let mut c = cfg();
     c.track_budget = 2;
     let mut r = rig(&c);
@@ -286,7 +316,39 @@ fn over_budget_the_lowest_altitudes_are_evaluated_first_and_the_rest_counted() {
             count: 3
         }
     );
+    // The order is by the altitude predicted at the end of the look-ahead: a higher aircraft
+    // descending fast (5,000 ft at -6,000 fpm is at -1,000 ft in a minute) comes before a lower
+    // one that is level (3,000 ft), and an equal prediction goes by address.
+    let mut c = cfg();
+    c.track_budget = 2;
+    let mut r = rig(&c);
+    let rows = [
+        tr(30, 40.0, -88.0, 0.0, 50.0, 3000.0, 0.0),
+        tr(31, 40.5, -88.0, 0.0, 50.0, 5000.0, -6000.0),
+        tr(32, 41.0, -88.0, 0.0, 50.0, 4000.0, 0.0),
+        tr(33, 41.5, -88.0, 0.0, 50.0, 3000.0, 0.0),
+    ];
+    cycle(&mut r, S, &rows, &flat(0, 1000));
+    let kept: Vec<u32> = msaw_planned(&r.st).iter().map(|t| t.addr).collect();
+    assert_eq!(
+        kept,
+        vec![30, 31],
+        "the fast descent and the lowest level one; ties by address"
+    );
     // Rows past the track capacity are counted too.
+    let rows: Vec<MsawTrack> = (0..5u32)
+        .map(|i| {
+            tr(
+                10 + i,
+                40.0 + f64::from(i) * 0.5,
+                -88.0,
+                0.0,
+                50.0,
+                8000.0,
+                0.0,
+            )
+        })
+        .collect();
     let mut c = cfg();
     c.max_tracks = 2;
     let mut r = rig(&c);
@@ -310,6 +372,7 @@ fn ridge(lat_e7: i32, _lon: i32) -> FloorSample {
     FloorSample {
         terrain_ft: t.ceil() as i32,
         obstacle_ft: FLOOR_NONE,
+        obstacle_covered: true,
         mva_ft: 100,
     }
 }
@@ -460,6 +523,7 @@ fn the_floor_is_the_higher_of_terrain_obstacle_and_chart_with_clearances() {
     let s = |t, o, m| FloorSample {
         terrain_ft: t,
         obstacle_ft: o,
+        obstacle_covered: true,
         mva_ft: m,
     };
     assert_eq!(
@@ -486,65 +550,242 @@ fn the_floor_is_the_higher_of_terrain_obstacle_and_chart_with_clearances() {
     assert!(floor_of(&s(0, FLOOR_NONE, 0), None, &c).is_some());
 }
 
+/// A made-up corridor for a runway end at 40.0 N, 88.0 W landed north: it runs south from the
+/// threshold 5 NM (9,260 m), 556 m either side at the threshold widening to 1,852 m; the
+/// threshold is 600 ft and the fix is published at 2,250 ft (the 3 degree path at that distance
+/// is about 2,245 ft).
+fn north_corridor() -> Corridor {
+    Corridor {
+        thr_lat_e7: 400_000_000,
+        thr_lon_e7: -880_000_000,
+        out_bearing_deg: 180.0,
+        length_m: 9260.0,
+        near_half_width_m: 556.0,
+        far_half_width_m: 1852.0,
+        thr_elev_ft: 600,
+        faf_alt_ft: 2250,
+    }
+}
+
+fn corridor_cfg() -> MsawConfig {
+    let mut c = cfg();
+    c.corridors[0] = north_corridor();
+    c.n_corridors = 1;
+    c
+}
+
+/// Degrees of latitude south of the threshold for `m` metres.
+fn south_m(m: f64) -> f64 {
+    40.0 - m / 111_194.926_644_558_74
+}
+
 // REQ: OA-MSAW-009
 #[test]
-fn a_procedure_area_lowers_the_floor_in_that_area_only() {
-    let mut c = cfg();
-    let sq =
-        |a: i32, b: i32, c2: i32, d: i32| polygon_new(&[(a, c2), (a, d), (b, d), (b, c2)]).unwrap();
-    c.procs[0] = ProcArea {
-        area: sq(400_000_000, 401_000_000, -880_000_000, -879_000_000),
-        floor_ft: 1200,
+fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
+    let c = corridor_cfg();
+    let k = north_corridor();
+    let at = |m: f64, cross_m: f64, r: f64| {
+        let lat = (south_m(m) * 1e7).round() as i32;
+        let lon = ((-88.0 + cross_m / (111_194.926_644_558_74 * 40.0f64.to_radians().cos())) * 1e7)
+            .round() as i32;
+        corridor_surface_ft(&k, lat, lon, r, c.approach_allowance_ft)
     };
-    c.procs[1] = ProcArea {
-        area: sq(400_000_000, 401_000_000, -880_000_000, -879_000_000),
-        floor_ft: 1500,
+    // The surface runs from 600 ft at the threshold to 1,950 ft (2,250 less the allowance) at
+    // the far end, taken at the far side of the circle, rounded up.
+    assert_eq!(at(4630.0, 0.0, 100.0), Some(600 + 1350 * 4730 / 9260 + 1));
+    // The whole circle inside: on the centreline at 2 NM with a 500 m circle.
+    assert!(at(3704.0, 0.0, 500.0).is_some());
+    // Straddling the threshold end, the far end or a side: none.
+    assert_eq!(at(400.0, 0.0, 500.0), None);
+    assert_eq!(at(9000.0, 0.0, 500.0), None);
+    assert_eq!(at(3704.0, 700.0, 500.0), None);
+    // Just outside the side (half-width 556 + 0.14 * 1,000 m at 1 km is 696 m): none; just
+    // inside with room for the circle: some.
+    assert_eq!(at(1000.0, 800.0, 10.0), None);
+    assert!(at(1000.0, 600.0, 10.0).is_some());
+    // The other side of the line, and the runway side of the threshold, are not in it.
+    assert_eq!(at(-2000.0, 0.0, 10.0), None);
+    assert_eq!(at(3704.0, -1200.0, 10.0), None);
+    assert!(at(3704.0, -800.0, 10.0).is_some());
+    // The highest surface of two corridors that hold the circle.
+    let mut two = c;
+    two.corridors[1] = Corridor {
+        faf_alt_ft: 3250,
+        ..north_corridor()
     };
-    c.n_procs = 2;
-    assert!(msaw_check(&c).is_ok());
-    // Inside, the highest procedure altitude of the areas that contain the point; outside, none.
-    assert_eq!(proc_floor_at(&c, 400_500_000, -879_500_000), Some(1500));
-    assert_eq!(proc_floor_at(&c, 410_500_000, -879_500_000), None);
+    two.n_corridors = 2;
+    let p = SamplePoint {
+        lat_e7: (south_m(4630.0) * 1e7).round() as i32,
+        lon_e7: -880_000_000,
+        radius_m: 100.0,
+    };
+    let one = calc::corridor_surface_at(&c, &p).unwrap();
+    let both = calc::corridor_surface_at(&two, &p).unwrap();
+    assert!(both > one);
+    assert_eq!(
+        calc::corridor_surface_at(&cfg(), &p),
+        None,
+        "no corridor configured"
+    );
+    // The floor inside: the higher of the surface and terrain or obstacle plus the approach
+    // clearance, and no chart floor; outside: the normal floor with the chart.
     let s = FloorSample {
-        terrain_ft: 600,
-        obstacle_ft: FLOOR_NONE,
+        terrain_ft: 650,
+        obstacle_ft: 1000,
+        obstacle_covered: true,
         mva_ft: 3000,
     };
-    // Outside: the normal floor. Inside: the published altitude, when lower.
     assert_eq!(floor_of(&s, None, &c), Some((3000, FloorKind::Mva)));
+    assert_eq!(
+        floor_of(&s, Some(900), &c),
+        Some((1100, FloorKind::Obstacle))
+    );
     assert_eq!(
         floor_of(&s, Some(1500), &c),
         Some((1500, FloorKind::Procedure))
     );
-    // A procedure altitude above the normal floor never raises it.
-    assert_eq!(floor_of(&s, Some(4000), &c), Some((3000, FloorKind::Mva)));
-    // No coverage is no floor, inside a procedure area as well.
-    let n = FloorSample {
+    let low = FloorSample {
+        terrain_ft: 1700,
+        obstacle_ft: FLOOR_NONE,
+        ..s
+    };
+    assert_eq!(
+        floor_of(&low, Some(1500), &c),
+        Some((1800, FloorKind::Terrain))
+    );
+    // Terrain and the obstacle data are needed in a corridor; the chart is not.
+    let nochart = FloorSample {
+        mva_ft: FLOOR_NONE,
+        ..s
+    };
+    assert!(floor_of(&nochart, Some(900), &c).is_some());
+    assert_eq!(floor_of(&nochart, None, &c), None);
+    let noterrain = FloorSample {
         terrain_ft: FLOOR_NONE,
         ..s
     };
-    assert_eq!(floor_of(&n, Some(1500), &c), None);
-    // Through a cycle: a landing aircraft at 1,600 ft inside the area is clear; outside it alerts.
-    let mut rg = rig(&c);
-    let inside = tr(
-        1,
-        400_500_000.0 / 1e7,
-        -879_500_000.0 / 1e7 + 0.0,
-        0.0,
-        0.0,
-        1600.0,
-        0.0,
-    );
-    let world = |_: i32, _: i32| FloorSample {
-        terrain_ft: 600,
-        obstacle_ft: FLOOR_NONE,
-        mva_ft: 3000,
+    assert_eq!(floor_of(&noterrain, Some(900), &c), None);
+    let noobst = FloorSample {
+        obstacle_covered: false,
+        ..s
     };
-    let o = cycle(&mut rg, S, &[inside], &world);
+    assert_eq!(floor_of(&noobst, Some(900), &c), None);
+    assert_eq!(floor_of(&noobst, None, &c), None);
+}
+
+/// A flat world at `terrain_ft` with the chart at 100 ft, except a ridge of `ridge_ft` 3 NM
+/// south of the threshold (a kilometre wide, whatever the longitude).
+fn ridge_world(terrain_ft: i32, ridge_ft: i32) -> impl Fn(i32, i32) -> FloorSample {
+    move |lat_e7, _| {
+        let m_south = (40.0 - f64::from(lat_e7) / 1e7) * 111_194.926_644_558_74;
+        FloorSample {
+            terrain_ft: if (m_south - 5556.0).abs() < 600.0 {
+                ridge_ft
+            } else {
+                terrain_ft
+            },
+            obstacle_ft: FLOOR_NONE,
+            obstacle_covered: true,
+            mva_ft: 100,
+        }
+    }
+}
+
+/// An aircraft heading north at 70 m/s, `m` metres south of the threshold at `c` seconds into
+/// the cycles, with the altitude of the 3 degree path (650 ft at the threshold) plus `above` ft.
+fn final_track(c: i64, start_m: f64, above: f64, vr: f32) -> MsawTrack {
+    let d = start_m - 70.0 * c as f64;
+    let alt = 650.0 + 0.1728 * d + above;
+    tr(77, south_m(d), -88.0, 0.0, 70.0, alt as f32, vr)
+}
+
+// REQ: OA-MSAW-042
+#[test]
+fn a_normal_three_degree_approach_in_its_corridor_does_not_alert() {
+    let mut r = rig(&corridor_cfg());
+    for c in 0..=30 {
+        let o = cycle(
+            &mut r,
+            c * S,
+            &[final_track(c, 8000.0, 0.0, -722.0)],
+            &ridge_world(600, 600),
+        );
+        assert_eq!(o.stats.violations, 0, "cycle {c}");
+        assert_eq!(o.report, NetReport::Running);
+    }
+}
+
+// REQ: OA-MSAW-042
+#[test]
+fn guam_synthetic_an_early_descent_in_the_corridor_over_a_ridge_alerts() {
+    // The ridge is 700 ft, 3 NM from the threshold; the aircraft has descended early to 650 ft
+    // inside the corridor and flies level into it. The surface (about 1,400 ft there) is above
+    // it, and so would terrain plus the approach clearance be (800 ft).
+    let mut r = rig(&corridor_cfg());
+    let a = |c: i64| {
+        let d = 9000.0 - 70.0 * c as f64;
+        tr(801, south_m(d), -88.0, 0.0, 70.0, 650.0, 0.0)
+    };
+    for c in 0..=20 {
+        cycle(&mut r, c * S, &[a(c)], &ridge_world(600, 700));
+    }
+    msaw_finish(&mut r.st, &mut r.alerts);
+    assert_eq!(r.alerts.items.len(), 1);
+    assert_eq!(r.alerts.items[0].worst_kind, FloorKind::Procedure);
+    // The same with a surface far below the ridge (the fix published at 0 ft): the terrain
+    // clearance alone alerts, in the corridor.
+    let mut c = corridor_cfg();
+    c.corridors[0].faf_alt_ft = 0;
+    c.corridors[0].thr_elev_ft = 0;
+    let mut r = rig(&c);
+    for k in 0..=20 {
+        cycle(&mut r, k * S, &[a(k)], &ridge_world(600, 700));
+    }
+    msaw_finish(&mut r.st, &mut r.alerts);
+    assert_eq!(r.alerts.items.len(), 1);
+    assert_eq!(r.alerts.items[0].worst_kind, FloorKind::Terrain);
+    assert_eq!(r.alerts.items[0].worst_floor_ft, 800);
+    // The same aircraft on the path (50 ft above it) does not alert over a 600 ft ridge.
+    let mut r = rig(&corridor_cfg());
+    for k in 0..=20 {
+        let o = cycle(
+            &mut r,
+            k * S,
+            &[final_track(k, 9000.0, 50.0, -722.0)],
+            &ridge_world(600, 600),
+        );
+        assert_eq!(o.stats.violations, 0, "cycle {k}");
+    }
+}
+
+// REQ: OA-MSAW-042
+#[test]
+fn outside_the_corridor_or_straddling_its_edge_the_normal_floor_applies() {
+    // A stationary aircraft at 400 ft, 1,200 m south of the threshold: inside the corridor the
+    // floor there is the surface (about 250 ft), clear; 1,500 m east of the line it is outside,
+    // and the normal floor (terrain 0 plus 500 ft) alerts.
+    let mut k = corridor_cfg();
+    k.corridors[0].thr_elev_ft = 0;
+    k.corridors[0].faf_alt_ft = 1800;
+    let world = flat(0, 100);
+    let still = |cross_m: f64| {
+        let lon = -88.0 + cross_m / (111_194.926_644_558_74 * 40.0f64.to_radians().cos());
+        tr(5, south_m(1200.0), lon, 0.0, 0.0, 400.0, 0.0)
+    };
+    let mut r = rig(&k);
+    let o = cycle(&mut r, S, &[still(0.0)], &world);
     assert_eq!(o.stats.violations, 0);
-    let outside = tr(2, 41.0, -87.0, 0.0, 0.0, 1600.0, 0.0);
-    let o = cycle(&mut rg, 2 * S, &[outside], &world);
+    let mut r = rig(&k);
+    let o = cycle(&mut r, S, &[still(1500.0)], &world);
     assert_eq!(o.stats.violations, 1);
+    assert_eq!(msaw_open(&r.st)[0].worst_kind, FloorKind::Terrain);
+    // 500 m east: the centre is inside, but the circle (50 m growing 5 m per second) leaves the
+    // side after 34 s, and from there the normal floor applies.
+    let mut r = rig(&k);
+    let o = cycle(&mut r, S, &[still(500.0)], &world);
+    assert_eq!(o.stats.violations, 1);
+    assert_eq!(msaw_open(&r.st)[0].worst_floor_ft, 500);
+    assert_eq!(msaw_open(&r.st)[0].worst_kind, FloorKind::Terrain);
 }
 
 // REQ: OA-MSAW-010
@@ -709,6 +950,7 @@ fn a_cycle_out_of_order_or_with_the_wrong_floors_publishes_unavailable() {
 }
 
 // REQ: OA-MSAW-015
+// REQ: OA-MSAW-046
 #[test]
 fn the_sample_points_follow_the_straight_path_with_a_radius_that_covers_the_gaps() {
     let c = cfg();
@@ -730,8 +972,11 @@ fn the_sample_points_follow_the_straight_path_with_a_radius_that_covers_the_gaps
     let dlon = f64::from(out[12].lon_e7 + 880_000_000) / 1e7;
     assert!((dlon - 0.0704).abs() < 0.001, "{dlon}");
     assert_eq!(out[12].lat_e7, 400_000_000);
-    // Radius: 50 m plus half the 5 s step at 100 m/s.
-    assert!((f64::from(out[3].radius_m) - 300.0).abs() < 0.01);
+    // Radius: 50 m, plus 5 m/s of velocity uncertainty times the prediction time, plus half the
+    // 5 s step at 100 m/s (250 m).
+    assert!((f64::from(out[0].radius_m) - 300.0).abs() < 0.01);
+    assert!((f64::from(out[3].radius_m) - 375.0).abs() < 0.01);
+    assert!((f64::from(out[12].radius_m) - 600.0).abs() < 0.01);
     // Times and spans.
     assert_eq!(sample_time_s(12, 13, 60.0), 60.0);
     assert_eq!(sample_span_s(0, 13, 60.0), (0.0, 2.5));
@@ -945,6 +1190,7 @@ fn a_higher_floor_never_removes_an_alert_over_a_sweep() {
                     let a = FloorSample {
                         terrain_ft: terrain,
                         obstacle_ft: obstacle,
+                        obstacle_covered: true,
                         mva_ft: mva,
                     };
                     let b = FloorSample {
@@ -954,18 +1200,84 @@ fn a_higher_floor_never_removes_an_alert_over_a_sweep() {
                         } else {
                             obstacle + bump
                         },
+                        obstacle_covered: true,
                         mva_ft: mva + bump,
                     };
-                    let (fa, _) = floor_of(&a, None, &c).unwrap();
-                    let (fb, _) = floor_of(&b, None, &c).unwrap();
-                    assert!(fa <= fb);
-                    for alt in [-100, 0, 1000, 2000, 6000] {
-                        if violates(alt, fa) {
-                            assert!(violates(alt, fb));
+                    for surface in [None, Some(0), Some(1500), Some(9000)] {
+                        let (fa, _) = floor_of(&a, surface, &c).unwrap();
+                        let (fb, _) = floor_of(&b, surface, &c).unwrap();
+                        assert!(fa <= fb);
+                        for alt in [-100, 0, 1000, 2000, 6000] {
+                            if violates(alt, fa) {
+                                assert!(violates(alt, fb));
+                            }
                         }
                     }
                 }
             }
         }
     }
+}
+
+// REQ: OA-MSAW-044
+#[test]
+fn no_obstacle_data_is_no_coverage_and_the_net_reads_degraded() {
+    let mut r = rig(&cfg());
+    let a = tr(1, 40.0, -88.0, 0.0, 100.0, 100.0, 0.0);
+    let no_dof = |_: i32, _: i32| FloorSample {
+        terrain_ft: 0,
+        obstacle_ft: FLOOR_NONE,
+        obstacle_covered: false,
+        mva_ft: 2000,
+    };
+    let o = cycle(&mut r, S, &[a], &no_dof);
+    assert_eq!(o.stats.no_coverage, 1);
+    assert_eq!(
+        o.stats.violations, 0,
+        "nothing is judged against a floor that is not known"
+    );
+    assert_eq!(r.skips.items[0].why, SkipWhy::NoCoverage);
+    assert!(matches!(
+        o.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            count: 1,
+            ..
+        }
+    ));
+}
+
+// REQ: OA-MSAW-045
+#[test]
+fn a_track_flagged_with_no_altimeter_setting_is_counted_listed_and_evaluated() {
+    let mut r = rig(&cfg());
+    let mut a = tr(1, 40.0, -88.0, 0.0, 100.0, 100.0, 0.0);
+    a.flags |= F_QNH_MISSING;
+    let o = cycle(&mut r, S, &[a], &flat(0, 2000));
+    assert_eq!(o.stats.qnh_missing, 1);
+    assert_eq!(o.stats.evaluated, 1);
+    assert_eq!(
+        o.stats.violations, 1,
+        "evaluated, and below the chart floor"
+    );
+    assert!(r
+        .skips
+        .items
+        .iter()
+        .any(|s| s.why == SkipWhy::QnhMissing && s.addr == 1));
+    assert!(matches!(
+        o.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            count: 1,
+            ..
+        }
+    ));
+    assert_ne!(msaw_open(&r.st)[0].flags & AF_QNH_MISSING, 0);
+    // A track with a setting is not counted.
+    let mut r = rig(&cfg());
+    let b = tr(2, 40.0, -88.0, 0.0, 100.0, 5000.0, 0.0);
+    let o = cycle(&mut r, S, &[b], &flat(0, 2000));
+    assert_eq!(o.stats.qnh_missing, 0);
+    assert_eq!(o.report, NetReport::Running);
 }

@@ -1,21 +1,22 @@
 //! Plain data of the minimum safe altitude warning. Core (pure).
 
 use alloc::vec::Vec;
-use oa_safety::geom::Polygon;
 
 /// Most sample points of the predicted path of one track. C2: the shell does one terrain,
 /// obstacle and chart lookup per point and track, so the bound is also a bound on that work; 32
 /// points over a look-ahead of a few minutes is a point every few seconds.
 pub const MAX_SAMPLES: usize = 32;
-/// Most procedure areas a configuration may name. C2: a facility's approach and departure areas
-/// are runway ends, tens of them in a terminal area.
-pub const MAX_PROCS: usize = 32;
+/// Most final-approach corridors a configuration may name. C2: one per runway end that has an
+/// instrument approach; a facility's airports are some tens of runway ends.
+pub const MAX_CORRIDORS: usize = 256;
 /// Largest `max_tracks` the configuration may ask for (every per-track table is allocated whole).
 pub const MAX_TRACKS_LIMIT: usize = 1 << 20;
 /// Largest `max_open` the configuration may ask for.
 pub const MAX_OPEN_LIMIT: usize = 1 << 20;
 /// Largest look-ahead, seconds (a data-sanity bound, so that the arithmetic bounds hold).
 pub const MAX_LOOK_AHEAD_S: f64 = 600.0;
+/// Largest corridor length, metres (a data-sanity bound).
+pub const MAX_CORRIDOR_LENGTH_M: f64 = 1.0e5;
 /// Largest speed the configuration may allow, metres per second.
 pub const MAX_SPEED_LIMIT_MPS: f64 = 1.0e3;
 /// Largest altitude magnitude a row may carry, feet; a row beyond it is refused as bad.
@@ -26,12 +27,16 @@ pub const MAX_ABS_VRATE_FPM: f64 = 6.0e4;
 pub const MAX_RADIUS_M: f64 = 2.0e5;
 /// Largest clearance or floor a configuration may state, feet.
 pub const MAX_CLEARANCE_FT: i32 = 100_000;
+/// Largest floor magnitude the net can compute, feet: the shell holds a terrain or obstacle value
+/// to a million feet, and a clearance is at most [`MAX_CLEARANCE_FT`]; a corridor surface and a
+/// chart altitude are far inside it. The time-to-violation proof holds over this whole range.
+pub const MAX_FLOOR_FT: i32 = 1_100_000;
 /// The latitude beyond which a row is refused as bad (east-west distances are no longer a flat
 /// scale there), degrees.
 pub const MAX_ABS_LAT_DEG: f64 = 85.0;
 
 /// [`FloorSample`] value: the shell found no coverage (terrain, chart) or, for an obstacle, no
-/// obstacle.
+/// obstacle (see [`FloorSample::obstacle_covered`] for the absence of the obstacle data).
 pub const FLOOR_NONE: i32 = i32::MIN;
 
 /// [`MsawTrack::flags`]: the track is coasting (no report this cycle).
@@ -42,6 +47,9 @@ pub const F_UNCERTAIN: u8 = 2;
 pub const F_RADAR_ONLY: u8 = 4;
 /// [`MsawTrack::flags`]: the identity of the track is not confirmed.
 pub const F_IDENTITY_UNCONFIRMED: u8 = 8;
+/// [`MsawTrack::flags`]: the shell had no usable altimeter setting and gave the pressure altitude
+/// lowered by its allowance instead.
+pub const F_QNH_MISSING: u8 = 16;
 
 /// [`MsawTrack::ground`]: the tracker does not say (the track is evaluated).
 pub const GROUND_UNKNOWN: u8 = 0;
@@ -65,6 +73,8 @@ pub const AF_IDENTITY_UNCONFIRMED: u16 = 16;
 pub const AF_PARTIAL_COVERAGE: u16 = 32;
 /// [`Alert::flags`]: the ground state was unknown at some cycle.
 pub const AF_GROUND_UNKNOWN: u16 = 64;
+/// [`Alert::flags`]: the altitude had no altimeter setting at some cycle of the alert.
+pub const AF_QNH_MISSING: u16 = 128;
 
 /// One track's state at a cycle, as given by the shell from the tracker's row.
 // A7.2: cold struct (a copy of the tracker's row), size guard waived.
@@ -78,11 +88,13 @@ pub struct MsawTrack {
     pub vel_north_mps: f32,
     /// 95 % horizontal position radius from the tracker's covariance, metres.
     pub r95_m: f32,
-    /// Barometric altitude, feet; NaN when the track has none.
+    /// Altitude on the datum of the floors (mean sea level, corrected by the shell), feet; NaN
+    /// when the track has none.
     pub alt_ft: f32,
     /// Vertical rate, feet per minute; NaN when the track has none.
     pub vrate_fpm: f32,
-    /// [`F_COAST`], [`F_UNCERTAIN`], [`F_RADAR_ONLY`], [`F_IDENTITY_UNCONFIRMED`].
+    /// [`F_COAST`], [`F_UNCERTAIN`], [`F_RADAR_ONLY`], [`F_IDENTITY_UNCONFIRMED`],
+    /// [`F_QNH_MISSING`].
     pub flags: u8,
     /// [`GROUND_UNKNOWN`], [`AIRBORNE`] or [`ON_GROUND`].
     pub ground: u8,
@@ -94,14 +106,16 @@ pub struct MsawTrack {
 pub struct SamplePoint {
     pub lat_e7: i32,
     pub lon_e7: i32,
-    /// The query radius, metres: the track's 95 % radius plus half the distance to the next
-    /// point, so that the terrain and obstacles between two points are inside some radius.
+    /// The query radius, metres: the track's 95 % radius grown with the prediction time by the
+    /// velocity uncertainty, plus half the distance to the next point, so that the terrain and
+    /// obstacles between two points are inside some radius.
     pub radius_m: f32,
 }
 
 /// What the shell found at a [`SamplePoint`], in whole feet, rounded up (never down: a floor is
 /// conservative when it is high). [`FLOOR_NONE`] means no coverage for `terrain_ft` and
-/// `mva_ft` (the net is unavailable there, rule 1) and no obstacle for `obstacle_ft`.
+/// `mva_ft` (the net is unavailable there, rule 1) and no obstacle for `obstacle_ft`; with
+/// `obstacle_covered` false there is no obstacle data at all, which is no coverage too.
 // A7.2: cold struct, size guard waived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FloorSample {
@@ -109,18 +123,36 @@ pub struct FloorSample {
     pub terrain_ft: i32,
     /// The highest obstacle top over the point's radius, feet MSL.
     pub obstacle_ft: i32,
+    /// The shell had obstacle data for the point (false: the floor is unavailable, rule 1).
+    pub obstacle_covered: bool,
     /// The minimum vectoring altitude of the sector containing the point, feet MSL.
     pub mva_ft: i32,
 }
 
-/// A procedure area: where a published approach or departure altitude lowers the floor.
-// A7.2: cold struct (adaptation), size guard waived. The polygon is held inline so that the
-// configuration stays `Copy` and allocates nothing (C1); there are at most `MAX_PROCS`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcArea {
-    pub area: Polygon,
-    /// The published altitude, feet MSL: in the area it is the floor when lower than the normal floor.
-    pub floor_ft: i32,
+/// A final-approach corridor: the strip under the extended centreline of a runway end that has an
+/// instrument approach, from the landing threshold outward to the final approach fix. Inside it
+/// (whole query circle) the floor is a surface rising from the threshold to the published
+/// altitude of the fix, never below terrain and obstacles plus a clearance, and the chart
+/// altitude does not apply. A trapezoid: its half-width runs linearly from the threshold end to
+/// the far end.
+// A7.2: cold struct (adaptation), size guard waived. Held inline so that the configuration stays
+// `Copy` and allocates nothing (C1); there are at most `MAX_CORRIDORS`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Corridor {
+    /// The landing threshold, 1e-7 degree.
+    pub thr_lat_e7: i32,
+    pub thr_lon_e7: i32,
+    /// The direction of the centreline from the threshold outward (away from the runway), degrees
+    /// true clockwise from north.
+    pub out_bearing_deg: f64,
+    /// Threshold to the far end, metres.
+    pub length_m: f64,
+    /// Half-width at the threshold and at the far end, metres.
+    pub near_half_width_m: f64,
+    pub far_half_width_m: f64,
+    /// The threshold elevation and the published altitude at the fix, feet MSL.
+    pub thr_elev_ft: i32,
+    pub faf_alt_ft: i32,
 }
 
 /// The settings of the net. Every value is the caller's (no defaults: no safety value is chosen
@@ -131,8 +163,8 @@ pub struct MsawConfig {
     pub max_tracks: usize,
     /// Open alerts at once.
     pub max_open: usize,
-    /// Tracks evaluated per cycle: the named budget of rule 5. Above it, the lowest altitudes
-    /// are evaluated first and the rest are counted.
+    /// Tracks evaluated per cycle: the named budget of rule 5. Above it, the lowest predicted
+    /// altitudes are evaluated first and the rest are counted.
     pub track_budget: usize,
     /// Look-ahead, seconds.
     pub look_ahead_s: f64,
@@ -150,9 +182,15 @@ pub struct MsawConfig {
     pub max_speed_mps: f64,
     /// A track's 95 % radius is held to this, metres (a row without a usable radius takes it).
     pub r95_cap_m: f64,
-    /// The procedure areas; `n_procs` of them are used.
-    pub procs: [ProcArea; MAX_PROCS],
-    pub n_procs: usize,
+    /// Inside a corridor the surface is held this far below the published altitude at the fix, feet.
+    pub approach_allowance_ft: i32,
+    /// Inside a corridor the clearance above terrain and obstacle tops, feet.
+    pub approach_min_clearance_ft: i32,
+    /// The growth of a sample point's radius with the prediction time, metres per second.
+    pub velocity_uncertainty_mps: f64,
+    /// The corridors; `n_corridors` of them are used.
+    pub corridors: [Corridor; MAX_CORRIDORS],
+    pub n_corridors: usize,
 }
 
 /// What set the floor at the worst point of an alert.
@@ -162,7 +200,7 @@ pub enum FloorKind {
     Terrain = 1,
     Obstacle = 2,
     Mva = 3,
-    /// A procedure area's published altitude.
+    /// The surface of a final-approach corridor.
     Procedure = 4,
 }
 
@@ -218,6 +256,9 @@ pub enum SkipWhy {
     BadRow = 4,
     /// The row was past the track capacity.
     OverCapacity = 5,
+    /// No altimeter setting was usable for the track's altitude (it was lowered by the allowance
+    /// and evaluated).
+    QnhMissing = 6,
 }
 
 /// A track a cycle did not (fully) evaluate, listed and never silently passed.
@@ -279,6 +320,8 @@ pub struct CycleStats {
     pub over_budget: u64,
     /// Tracks evaluated.
     pub evaluated: u64,
+    /// Rows whose altitude had no altimeter setting (lowered by the allowance, evaluated).
+    pub qnh_missing: u64,
     /// Tracks with at least one point without coverage (rule 1).
     pub no_coverage: u64,
     /// Track cycles below the floor within the look-ahead.

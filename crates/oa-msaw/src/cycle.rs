@@ -2,7 +2,7 @@
 //!
 //! 1. [`msaw_plan`] takes the cycle's tracks, leaves out the ones on the ground, with no altitude
 //!    or with a bad value (each counted, and listed unless on the ground), keeps the tracks the
-//!    budget allows, lowest altitude first, and gives back the sample points of each predicted path.
+//!    budget allows, lowest predicted altitude first, and gives back the sample points of each predicted path.
 //! 2. The shell looks up the terrain, obstacles and chart at every point (conservatively, within
 //!    the point's radius) and hands the answers back in the same order.
 //! 3. [`msaw_evaluate`] judges each path against the floors, hides what an inhibition covers
@@ -13,15 +13,16 @@ use oa_safety::inhibit::{inhibit_suppress, InhibitTable};
 use oa_safety::net::{state_report, Area, NetId, NetReport, Reason, StateTable};
 
 use crate::calc::{
-    alt_floor_ft, deg_to_e7, floor_of, grade_of, lowest_alt_ft, proc_floor_at, sample_points,
-    sample_span_s, violates, violation_time_s, PathStart,
+    alt_floor_ft, corridor_surface_at, deg_to_e7, floor_of, grade_of, lowest_alt_ft,
+    predicted_alt_ft, sample_points, sample_span_s, violates, violation_time_s, PathStart,
 };
 use crate::state::{alert_push, skip_push, MsawState};
 use crate::types::{
     Alert, AlertLog, CycleStats, FloorKind, FloorSample, Grade, MsawTrack, SamplePoint, SkipLog,
     SkipWhy, Skipped, AF_COAST, AF_GROUND_UNKNOWN, AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE,
-    AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_UNCERTAIN, F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY,
-    F_UNCERTAIN, GROUND_UNKNOWN, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG, MAX_ABS_VRATE_FPM, ON_GROUND,
+    AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_UNCERTAIN, F_COAST, F_IDENTITY_UNCONFIRMED,
+    F_QNH_MISSING, F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG,
+    MAX_ABS_VRATE_FPM, ON_GROUND,
 };
 
 /// Internal bit of a planned row's flags: the vertical rate was unknown and is taken as zero.
@@ -50,6 +51,7 @@ fn add(a: &mut CycleStats, b: &CycleStats) {
     a.rows_lost_upstream = a.rows_lost_upstream.saturating_add(b.rows_lost_upstream);
     a.over_budget = a.over_budget.saturating_add(b.over_budget);
     a.evaluated = a.evaluated.saturating_add(b.evaluated);
+    a.qnh_missing = a.qnh_missing.saturating_add(b.qnh_missing);
     a.no_coverage = a.no_coverage.saturating_add(b.no_coverage);
     a.violations = a.violations.saturating_add(b.violations);
     a.suppressed = a.suppressed.saturating_add(b.suppressed);
@@ -75,6 +77,7 @@ pub fn net_report_of(s: &CycleStats) -> NetReport {
     let input = s
         .no_coverage
         .saturating_add(s.rows_bad)
+        .saturating_add(s.qnh_missing)
         .saturating_add(s.rows_lost_upstream);
     let all = work.saturating_add(input).saturating_add(s.alt_missing);
     let (reason, count) = if work > 0 {
@@ -188,6 +191,10 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
         if r.ground == GROUND_UNKNOWN {
             stats.ground_unknown = stats.ground_unknown.saturating_add(1);
         }
+        if row.flags & F_QNH_MISSING != 0 {
+            stats.qnh_missing = stats.qnh_missing.saturating_add(1);
+            skip(skips, &mut stats, t_ns, r, SkipWhy::QnhMissing);
+        }
         if row.vrate_fpm.is_nan() {
             stats.rate_unknown = stats.rate_unknown.saturating_add(1);
             row.vrate_fpm = 0.0;
@@ -200,11 +207,16 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
         }
         st.scratch.push(row);
     }
-    // Over the budget the lowest altitudes are kept (ties by address), the rest counted and listed.
+    // Over the budget the lowest predicted altitudes are kept (ties by address), the rest counted
+    // and listed.
     if st.scratch.len() > cfg.track_budget {
+        let la = cfg.look_ahead_s;
+        let key = |r: &MsawTrack| {
+            let (alt, vr) = (f64::from(r.alt_ft), f64::from(r.vrate_fpm));
+            alt + oa_math::min_f64(0.0, predicted_alt_ft(0.0, vr, la))
+        };
         st.scratch.sort_unstable_by(|a, b| {
-            oa_math::cmp_canon_f64(f64::from(a.alt_ft), f64::from(b.alt_ft))
-                .then(a.addr.cmp(&b.addr))
+            oa_math::cmp_canon_f64(key(a), key(b)).then(a.addr.cmp(&b.addr))
         });
         for r in st.scratch.iter().skip(cfg.track_budget) {
             stats.over_budget = stats.over_budget.saturating_add(1);
@@ -252,6 +264,7 @@ fn flags_of(tr: &MsawTrack) -> u16 {
         (F_RADAR_ONLY, AF_RADAR_ONLY),
         (F_IDENTITY_UNCONFIRMED, AF_IDENTITY_UNCONFIRMED),
         (IF_RATE_UNKNOWN, AF_RATE_UNKNOWN),
+        (F_QNH_MISSING, AF_QNH_MISSING),
     ] {
         if tr.flags & bit != 0 {
             f |= af;
@@ -284,8 +297,8 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         partial: false,
     };
     for (k, (p, s)) in pts.iter().zip(floors.iter()).enumerate() {
-        let proc_ft = proc_floor_at(cfg, p.lat_e7, p.lon_e7);
-        let Some((floor, kind)) = floor_of(s, proc_ft, cfg) else {
+        let surface_ft = corridor_surface_at(cfg, p);
+        let Some((floor, kind)) = floor_of(s, surface_ft, cfg) else {
             v.partial = true;
             continue;
         };
