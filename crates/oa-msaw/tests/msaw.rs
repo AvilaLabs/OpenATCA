@@ -949,8 +949,7 @@ fn a_cycle_out_of_order_or_with_the_wrong_floors_publishes_unavailable() {
     assert!(msaw_publish_refused(&mut net, 3 * S));
 }
 
-// REQ: OA-MSAW-015
-// REQ: OA-MSAW-046
+// REQ: OA-MSAW-015, OA-MSAW-046
 #[test]
 fn the_sample_points_follow_the_straight_path_with_a_radius_that_covers_the_gaps() {
     let c = cfg();

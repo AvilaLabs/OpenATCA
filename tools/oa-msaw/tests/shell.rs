@@ -828,3 +828,46 @@ fn a_run_with_no_altimeter_setting_lowers_the_altitudes_counts_them_and_degrades
     assert!(none.alerts[0].start_ns <= first_with);
     assert_ne!(none.alerts[0].flags & oa_msaw::AF_QNH_MISSING, 0);
 }
+
+// REQ: OA-MSAW-050
+#[test]
+fn the_summary_gives_compute_rates_and_a_first_classification_counts_only() {
+    let set = settings();
+    let r = go(&approach(0xA1B2C3, true), &set, ridge_floors());
+    let text = summary_of(&r, &set);
+    for want in [
+        "compute:",
+        "CPU per simulated second",
+        "alerts per hour",
+        "worst floor set by terrain",
+        "alerts within 10 NM of an airport with an approach: 0 of 1",
+        "what the track was doing, all (1 alerts)",
+    ] {
+        assert!(text.contains(want), "{want}: {text}");
+    }
+    let a = r.alerts[0];
+    let base = |vr: f32, alt: f32, speed: f32| oa_msaw::Alert {
+        vrate_fpm: vr,
+        alt_ft: alt,
+        speed_mps: speed,
+        ..a
+    };
+    use oa_msaw_run::report::{classify, Doing};
+    assert_eq!(
+        classify(&base(-700.0, 2000.0, 70.0), Some(4.0)),
+        Doing::OnApproach
+    );
+    assert_eq!(
+        classify(&base(900.0, 2000.0, 70.0), Some(4.0)),
+        Doing::Departing
+    );
+    assert_eq!(
+        classify(&base(0.0, 1500.0, 50.0), Some(30.0)),
+        Doing::VfrLow
+    );
+    assert_eq!(
+        classify(&base(-700.0, 9000.0, 200.0), Some(30.0)),
+        Doing::Other
+    );
+    assert_eq!(classify(&base(-700.0, 2000.0, 70.0), None), Doing::VfrLow);
+}

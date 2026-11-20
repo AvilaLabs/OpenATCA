@@ -377,11 +377,11 @@ mod proofs {
         }
     }
 
-    // REQ: OA-MSAW-022
     // The domain proved: any finite altitude within MAX_ABS_ALT_FT, any finite vertical rate
     // within MAX_ABS_VRATE_FPM, any span inside [0, MAX_LOOK_AHEAD_S], and any floor the net can
     // compute, which is MAX_FLOOR_FT in magnitude (terrain held to a million feet plus the largest
     // clearance).
+    // REQ: OA-MSAW-022
     #[kani::proof]
     fn a_violation_time_stays_inside_its_span_for_bounded_inputs() {
         let (alt, vr, lo, hi): (f64, f64, f64, f64) =
