@@ -97,7 +97,9 @@ pub fn parse_iso_ms(s: &[u8]) -> Option<i64> {
 }
 
 /// Strict decimal `[-]digits[.digits]` scaled by `10^scale` and rounded half away from zero.
-/// At most 12 integer digits and 12 fraction digits; no sign `+`, no exponent, no spaces.
+/// At most 12 integer digits and 24 fraction digits (a binary double printed in full has 17 or
+/// more); digits past `scale + 1` only decide nothing, rounding reads the first dropped digit. No
+/// sign `+`, no exponent, no spaces.
 pub fn parse_scaled(s: &[u8], scale: u32) -> Option<i64> {
     let (neg, body) = match s.split_first()? {
         (b'-', rest) => (true, rest),
@@ -107,7 +109,7 @@ pub fn parse_scaled(s: &[u8], scale: u32) -> Option<i64> {
         Some(p) => (body.get(..p)?, body.get(p + 1..)?),
         None => (body, &[][..]),
     };
-    if int.is_empty() || int.len() > 12 || frac.len() > 12 {
+    if int.is_empty() || int.len() > 12 || frac.len() > 24 {
         return None;
     }
     if body.contains(&b'.') && frac.is_empty() {

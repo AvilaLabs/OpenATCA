@@ -53,6 +53,11 @@ fn code(c: [u8; 8]) -> String {
     String::from_utf8(c[..n].to_vec()).unwrap()
 }
 
+fn code16(c: [u8; 16]) -> String {
+    let n = c.iter().position(|&b| b == 0).unwrap_or(16);
+    String::from_utf8(c[..n].to_vec()).unwrap()
+}
+
 const FULL_TS_MS: i64 = 1_893_553_445_678;
 
 // REQ: OA-STD-001
@@ -123,7 +128,7 @@ fn a_full_tais_message_parses_every_field_in_its_unit() {
     assert!(m.errors.is_empty());
     assert_eq!(m.unknown_elements, 0);
     let r = &m.records[0];
-    assert_eq!(r.present, (1u32 << TAIS_FIELD_COUNT) - 1, "all 27 fields");
+    assert_eq!(r.present, (1u64 << TAIS_FIELD_COUNT) - 1, "all fields");
     assert_eq!((r.errors, r.invalidated), (0, 0));
     assert_eq!(r.track_num, 1234);
     assert_eq!(r.mrt_time_ms, FULL_TS_MS);
@@ -148,7 +153,14 @@ fn a_full_tais_message_parses_every_field_in_its_unit() {
     assert_eq!(code(r.entry_fix), "ENTRY");
     assert_eq!(code(r.exit_fix), "EXITF");
     assert_eq!(code(r.plan_type), "ARRIVAL");
-    assert_eq!(code(r.plan_status), "ACTIVE");
+    assert_eq!(code16(r.plan_status), "ACTIVE");
+    assert_eq!(
+        (r.pseudo, r.frozen, r.is_new, r.adsb),
+        (false, false, true, true)
+    );
+    assert_eq!(code(r.rec_type), "TAIS");
+    assert_eq!(code(r.rec_stars_src_id), "ZZA1");
+    assert_eq!(r.rec_safa_receipt_ms, FULL_TS_MS);
     // The second record has only a track, with whole-second time and a southern latitude.
     let r2 = &m.records[1];
     assert_eq!(r2.mrt_time_ms, 1_893_553_446_000);
@@ -186,11 +198,11 @@ fn each_optional_field_absent_clears_only_its_bit() {
             assert_eq!(m.errors.len(), 1, "{name}");
             assert_eq!(m.errors[0].kind, FieldErrorKind::PairIncomplete, "{name}");
             assert_eq!(r.present, base.present & !both, "{name}");
-            assert_eq!(r.errors, both & !(1u32 << i), "{name}");
+            assert_eq!(r.errors, both & !(1u64 << i), "{name}");
             continue;
         }
         assert!(m.errors.is_empty(), "{name}: {:?}", m.errors);
-        assert_eq!(r.present, base.present & !(1u32 << i), "{name}");
+        assert_eq!(r.present, base.present & !(1u64 << i), "{name}");
         assert_eq!(r.errors, 0, "{name}");
     }
 }
@@ -521,7 +533,7 @@ fn an_asdex_position_report_parses_every_field_in_its_unit() {
     assert!(m.airport_present && m.errors.is_empty());
     assert_eq!(m.records.len(), 1);
     let r = &m.records[0];
-    assert_eq!(r.present, (1u32 << SMES_FIELD_COUNT) - 1);
+    assert_eq!(r.present, (1u64 << SMES_FIELD_COUNT) - 1);
     assert_eq!(r.time_ms, 1_893_553_445_123);
     assert_eq!((r.lat_e7, r.lon_e7), (406_398_000, -737_789_000));
     assert_eq!(r.altitude_ft, 0);
@@ -811,4 +823,319 @@ fn the_summary_example_refuses_sealed_folders_as_given_and_through_links() {
     std::fs::create_dir_all(&ok).unwrap();
     assert_ne!(run(&ok.join("none.oaf")).status.code(), Some(2));
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+const TAIS_NS: &str =
+    "urn:us:gov:dot:faa:atm:terminal:entities:v4-0:tais:terminalautomationinformation";
+const SMES_NS: &str = "urn:us:gov:dot:faa:atm:terminal:entities:v4-0:smes:surfacemovementevent";
+const STATUS_NS: &str = "urn:us:gov:dot:faa:atm:terminal:entities:v4-0:status";
+
+/// A TAIS message with one record holding `body`.
+fn tais_rec(body: &str) -> oa_stdds::TaisMessage {
+    let xml = format!(
+        r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record>{body}</record></a:TATrackAndFlightPlan>"#
+    );
+    tais(xml.as_bytes())
+}
+
+/// An SMES message with one report holding `body`.
+fn smes_rec(body: &str) -> oa_stdds::SmesMessage {
+    let xml = format!(
+        r#"<a:asdexMsg xmlns:a="{SMES_NS}"><positionReport>{body}</positionReport></a:asdexMsg>"#
+    );
+    let mut p = parser();
+    let mut st = new_stats();
+    match parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap() {
+        Message::Smes(m) => m,
+        other => panic!("not SMES: {other:?}"),
+    }
+}
+
+// REQ: OA-STD-025
+#[test]
+fn forms_the_real_feed_uses_are_accepted_and_damaged_text_is_still_refused() {
+    // A heading printed as a binary double (13 fraction digits) is a heading.
+    let m = smes_rec("<movement><heading>123.4567890123456</heading></movement>");
+    assert!(m.errors.is_empty(), "{:?}", m.errors);
+    assert_eq!(m.records[0].heading_cdeg, 12_346);
+    // Still bounded: a heading past a circle is out of range.
+    let m = smes_rec("<movement><heading>360.5000000000000</heading></movement>");
+    assert_eq!(m.errors[0].kind, FieldErrorKind::Range);
+    // A callsign with an inner space; a runway with `*` and `+`.
+    let m = smes_rec("<flightId><aircraftId>TST 12</aircraftId></flightId>");
+    assert!(m.errors.is_empty(), "{:?}", m.errors);
+    assert_eq!(code(m.records[0].aircraft_id), "TST 12");
+    let m = tais_rec("<flightPlan><runway>2*L</runway><status>terminated</status></flightPlan>");
+    assert!(m.errors.is_empty(), "{:?}", m.errors);
+    assert_eq!(code(m.records[0].runway), "2*L");
+    assert_eq!(code16(m.records[0].plan_status), "terminated");
+    let m = tais_rec("<flightPlan><runway>2+</runway></flightPlan>");
+    assert!(m.errors.is_empty(), "{:?}", m.errors);
+    // The word a sender prints for no value is absent, not an error.
+    let m = tais_rec(
+        "<flightPlan><entryFix>unassigned</entryFix><exitFix>unassigned</exitFix></flightPlan>",
+    );
+    assert!(m.errors.is_empty(), "{:?}", m.errors);
+    let r = &m.records[0];
+    assert_eq!(r.present, 0);
+    assert_eq!(
+        r.present_empty,
+        tais_bit(TaisField::EntryFix) | tais_bit(TaisField::ExitFix)
+    );
+    let m = smes_rec("<status><vertRate>unavailable</vertRate></status>");
+    assert!(m.errors.is_empty());
+    assert_eq!(m.records[0].present_empty, smes_bit(SmesField::VertRate));
+    // A word is not a number, and an encoding-damaged runway (U+FFFD) is refused.
+    let m = smes_rec("<status><vertRate>unknown</vertRate></status>");
+    assert_eq!(m.errors[0].kind, FieldErrorKind::Syntax);
+    let m = tais_rec("<flightPlan><runway>\u{fffd}</runway></flightPlan>");
+    assert_eq!(m.errors[0].kind, FieldErrorKind::Syntax);
+    // A fix that is simply too long is still too long.
+    let m = tais_rec("<flightPlan><entryFix>unassigned1</entryFix></flightPlan>");
+    assert_eq!(m.errors[0].kind, FieldErrorKind::TooLong);
+}
+
+// REQ: OA-STD-026
+#[test]
+fn an_empty_raw_flight_rules_element_is_present_empty_and_other_empty_fields_stay_errors() {
+    let m = tais_rec("<flightPlan><rawFlightRules/><acid></acid></flightPlan>");
+    let r = &m.records[0];
+    assert_eq!(r.present_empty, tais_bit(TaisField::RawFlightRules));
+    assert_eq!(r.errors, tais_bit(TaisField::Acid));
+    assert_eq!(m.errors.len(), 1);
+    assert_eq!(m.errors[0].kind, FieldErrorKind::Empty);
+    let mut p = parser();
+    let mut st = new_stats();
+    let xml = format!(
+        r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><flightPlan><rawFlightRules> </rawFlightRules></flightPlan></record></a:TATrackAndFlightPlan>"#
+    );
+    parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+    assert_eq!(st.tais_present_empty[TaisField::RawFlightRules as usize], 1);
+    assert_eq!(st.tais_errors[TaisField::RawFlightRules as usize], 0);
+    assert_eq!(st.field_error_kinds[FieldErrorKind::Empty as usize], 0);
+    // A record with only a present-empty field is not an empty record.
+    assert_eq!(st.empty_records, 0);
+}
+
+// REQ: OA-STD-027
+#[test]
+fn track_flags_decode_and_the_stats_keep_a_histogram_of_them() {
+    let m = tais_rec(
+        "<track><pseudo>false</pseudo><frozen>1</frozen><new>true</new><adsb>false</adsb></track>",
+    );
+    let r = &m.records[0];
+    assert!(m.errors.is_empty(), "{:?}", m.errors);
+    assert_eq!(
+        (r.pseudo, r.frozen, r.is_new, r.adsb),
+        (false, true, true, false)
+    );
+    assert_eq!(m.unknown_elements, 0);
+    let bad = tais_rec("<track><adsb>maybe</adsb></track>");
+    assert_eq!(bad.errors[0].field, "track/adsb");
+    assert_eq!(bad.errors[0].kind, FieldErrorKind::Syntax);
+    assert_eq!(bad.records[0].present, 0);
+    let mut p = parser();
+    let mut st = new_stats();
+    for (a, n) in [("true", 3), ("false", 1)] {
+        let xml = format!(
+            r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><track><adsb>{a}</adsb></track></record></a:TATrackAndFlightPlan>"#
+        );
+        for _ in 0..n {
+            parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+        }
+    }
+    // [false, true] per flag; only adsb was given.
+    assert_eq!(st.tais_flags[3], [1, 3]);
+    assert_eq!(st.tais_flags[0], [0, 0]);
+}
+
+// REQ: OA-STD-028
+#[test]
+fn the_record_header_decodes_and_latency_and_distinct_sources_are_counted() {
+    let hdr = |src: &str, stars: &str, safa: &str| {
+        format!(
+            "<recType>TAIS</recType><recSrc>ZZ1</recSrc><recSTARSSrcID>{src}</recSTARSSrcID><recSTARSTimestamp>{stars}</recSTARSTimestamp><recSAFAReceiptTime>{safa}</recSAFAReceiptTime>"
+        )
+    };
+    // 03:04:05.678 is 11_045_678 ms into the day.
+    let m = tais_rec(&hdr("ZZA1", "11045600", "2030-01-02T03:04:05.678Z"));
+    let r = &m.records[0];
+    assert!(m.errors.is_empty(), "{:?}", m.errors);
+    assert_eq!(code(r.rec_type), "TAIS");
+    assert_eq!(code(r.rec_src), "ZZ1");
+    assert_eq!(code(r.rec_stars_src_id), "ZZA1");
+    assert_eq!(r.rec_stars_tod_ms, 11_045_600);
+    assert_eq!(r.rec_safa_receipt_ms, FULL_TS_MS);
+    let mut p = parser();
+    let mut st = new_stats();
+    // Latencies 78 ms, 5 ms, a negative wrapped to a day (past the last bucket), 20 ms.
+    for (src, stars, safa) in [
+        ("ZZA1", "11045600", "2030-01-02T03:04:05.678Z"),
+        ("ZZA1", "11045673", "2030-01-02T03:04:05.678Z"),
+        ("ZZA2", "11045700", "2030-01-02T03:04:05.678Z"),
+        ("ZZA2", "11045658", "2030-01-02T03:04:05.678Z"),
+    ] {
+        let xml = format!(
+            r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record>{}</record></a:TATrackAndFlightPlan>"#,
+            hdr(src, stars, safa)
+        );
+        parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+    }
+    assert_eq!(st.src_ids.len(), 2);
+    assert_eq!(st.latency[1], 1, "0-9 ms");
+    assert_eq!(st.latency[2], 1, "10-49 ms");
+    assert_eq!(st.latency[3], 1, "50-99 ms");
+    assert_eq!(st.latency[8], 1, "negative wraps to a day");
+    assert_eq!(st.latency_missing, 0);
+    // One time missing: counted apart, no bucket.
+    let m = tais_rec("<recSAFAReceiptTime>2030-01-02T03:04:05Z</recSAFAReceiptTime>");
+    assert!(m.errors.is_empty());
+    let mut st = new_stats();
+    let xml = format!(
+        r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><recSAFAReceiptTime>2030-01-02T03:04:05Z</recSAFAReceiptTime></record></a:TATrackAndFlightPlan>"#
+    );
+    parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+    assert_eq!((st.latency_missing, st.latency.iter().sum::<u64>()), (1, 0));
+    // A time of day past 24 h, and a receipt time that is not a time, are refused.
+    let m = tais_rec("<recSTARSTimestamp>86400000</recSTARSTimestamp><recSAFAReceiptTime>soon</recSAFAReceiptTime>");
+    assert_eq!(m.errors.len(), 2);
+    assert_eq!(m.errors[0].kind, FieldErrorKind::Range);
+    assert_eq!(m.errors[1].kind, FieldErrorKind::Syntax);
+}
+
+// REQ: OA-STD-029
+#[test]
+fn the_status_roots_become_stdds_status_with_service_and_state() {
+    let mut p = parser();
+    let mut st = new_stats();
+    let lim = Limits::default();
+    let svc = r#"<s:AirportDataServiceStatus xmlns:s="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:status"><rvrLinks><rvrLink><linkStatus>Normal</linkStatus></rvrLink></rvrLinks><serviceStatus>Degraded</serviceStatus></s:AirportDataServiceStatus>"#;
+    match parse_message(&mut p, svc.as_bytes(), &lim, &mut st).unwrap() {
+        Message::Status(m) => {
+            assert_eq!(m.root, "AirportDataServiceStatus");
+            assert_eq!(m.states.len(), 1);
+            assert_eq!(m.states[0].name, "AirportDataServiceStatus");
+            assert_eq!(m.states[0].value, "Degraded");
+        }
+        other => panic!("{other:?}"),
+    }
+    let stdds = format!(
+        r#"<s:STDDSStatus xmlns:s="{STATUS_NS}"><p k="ntpStatus" v="NORMAL"/><p k="DRSserviceStatus"><p k="x" v="1"/></p><p k="DRSserviceState" v="ENABLED"/><p k="swVersion" v="1.2"/></s:STDDSStatus>"#
+    );
+    match parse_message(&mut p, stdds.as_bytes(), &lim, &mut st).unwrap() {
+        Message::Status(m) => {
+            let got: Vec<_> = m
+                .states
+                .iter()
+                .map(|s| (s.name.as_str(), s.value.as_str()))
+                .collect();
+            assert_eq!(
+                got,
+                [("ntpStatus", "NORMAL"), ("DRSserviceState", "ENABLED")]
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    // Every root of the namespace that is one of the five names; other roots stay unknown.
+    for root in oa_stdds::kind::STATUS_ROOTS {
+        let xml = format!(r#"<s:{root} xmlns:s="{STATUS_NS}"/>"#);
+        assert_eq!(
+            classify(&parser().parse(xml.as_bytes()).unwrap()),
+            Kind::StddsStatus,
+            "{root}"
+        );
+    }
+    let other = format!(r#"<s:SomethingElse xmlns:s="{STATUS_NS}"/>"#);
+    assert_eq!(
+        classify(&parser().parse(other.as_bytes()).unwrap()),
+        Kind::Unknown
+    );
+    // Counted: kind, and the state histogram (service states, not identifying).
+    assert_eq!(st.kinds[Kind::StddsStatus as usize], 2);
+    assert!(st.status_values.contains(&(
+        "AirportDataServiceStatus AirportDataServiceStatus=Degraded".to_string(),
+        1
+    )));
+    assert_eq!(kind_name_of("stdds-status"), Kind::StddsStatus);
+}
+
+fn kind_name_of(n: &str) -> Kind {
+    let i = KIND_NAMES.iter().position(|k| *k == n).unwrap();
+    [Kind::StddsStatus, Kind::MmixmAsset]
+        .into_iter()
+        .find(|k| *k as usize == i)
+        .unwrap()
+}
+
+// REQ: OA-STD-030
+#[test]
+fn an_mmixm_asset_message_is_counted_by_kind_and_not_decoded() {
+    let xml =
+        r#"<m:AssetMessage xmlns:m="https://mmixm.aero/base/1.1.1"><x>1</x></m:AssetMessage>"#;
+    let mut p = parser();
+    let mut st = new_stats();
+    match parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap() {
+        Message::Other(k) => assert_eq!(k, Kind::MmixmAsset),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(st.kinds[Kind::MmixmAsset as usize], 1);
+    assert!(st.unknown_roots.is_empty());
+    // Another root in that namespace is unknown.
+    let xml = r#"<m:Other xmlns:m="https://mmixm.aero/base/1.1.1"/>"#;
+    assert_eq!(
+        classify(&parser().parse(xml.as_bytes()).unwrap()),
+        Kind::Unknown
+    );
+}
+
+// REQ: OA-STD-031
+#[test]
+fn asdex_status_sub_elements_stay_unknown_and_counted() {
+    let m = smes_rec(
+        "<status><vertRate>-300</vertRate><mon>1</mon><src>x</src><nc>2</nc></status><targetExtent>1</targetExtent>",
+    );
+    assert!(m.errors.is_empty(), "{:?}", m.errors);
+    assert_eq!(m.records[0].vvert_ftmin, -300);
+    assert_eq!(m.unknown_elements, 4);
+    let mut p = parser();
+    let mut st = new_stats();
+    let xml = format!(
+        r#"<a:asdexMsg xmlns:a="{SMES_NS}"><positionReport><status><mon>1</mon><mon>1</mon></status></positionReport></a:asdexMsg>"#
+    );
+    parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+    assert_eq!(
+        st.unknown,
+        [oa_stdds::UnknownPath {
+            text: "status/mon".to_string(),
+            count: 2
+        }]
+    );
+}
+
+// REQ: OA-STD-032
+#[test]
+fn a_refused_field_is_diagnosed_by_shape_and_never_by_value() {
+    use oa_stdds::Shape;
+    let s = Shape::of(b"123.4567-ab");
+    assert_eq!((s.len, s.pattern().as_str()), (11, "9.9-a"));
+    assert_eq!(Shape::of(b"AB 12").pattern(), "A~9");
+    assert_eq!(Shape::of("\u{fffd}".as_bytes()).pattern(), "?");
+    assert_eq!(Shape::of(b"").len, 0);
+    // Long text is cut to the first 12 classes but keeps its true length.
+    let long = Shape::of(b"a1a1a1a1a1a1a1a1a1a1");
+    assert_eq!((long.len, long.pattern().len()), (20, 12));
+    let m = tais_rec("<flightPlan><runway>#12</runway><acType>Z9Z9Z9Z9Z9</acType></flightPlan>");
+    assert_eq!(m.errors.len(), 2);
+    assert_eq!(m.errors[0].shape.pattern(), "#9");
+    assert_eq!(m.errors[1].shape.len, 10);
+    let mut p = parser();
+    let mut st = new_stats();
+    let xml = format!(
+        r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><flightPlan><runway>#12</runway></flightPlan></record><record><flightPlan><runway>#34</runway></flightPlan></record></a:TATrackAndFlightPlan>"#
+    );
+    parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+    assert_eq!(st.shapes.len(), 1);
+    assert_eq!(st.shapes[0].field, "flightPlan/runway");
+    assert_eq!((st.shapes[0].len, st.shapes[0].count), (3, 2));
+    assert_eq!(st.shapes[0].pattern, "#9");
 }

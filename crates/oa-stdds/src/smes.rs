@@ -86,7 +86,7 @@ const SPECS: [Spec; SMES_FIELD_COUNT] = [
     },
     Spec {
         path: &["flightId", "aircraftId"],
-        val: Val::Code,
+        val: Val::Callsign,
     },
     Spec {
         path: &["flightId", "mode3ACode"],
@@ -138,7 +138,7 @@ const SPECS: [Spec; SMES_FIELD_COUNT] = [
     },
     Spec {
         path: &["runway"],
-        val: Val::Code,
+        val: Val::Runway,
     },
     Spec {
         path: &["seqNum"],
@@ -183,9 +183,10 @@ const SKIP: [&[&str]; 12] = [
 // A7.2: cold struct, size guard waived (a parse result held per message, not a hot collection)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SmesRecord {
-    pub present: u32,
-    pub errors: u32,
-    pub invalidated: u32,
+    pub present: u64,
+    pub errors: u64,
+    pub invalidated: u64,
+    pub present_empty: u64,
     /// Byte offset of the `positionReport` element's name.
     pub offset: u32,
     /// `time` as Unix milliseconds (UTC).
@@ -228,8 +229,8 @@ pub struct SmesMessage {
 }
 
 /// A bit for field `f`.
-pub const fn smes_bit(f: SmesField) -> u32 {
-    1u32 << (f as u32)
+pub const fn smes_bit(f: SmesField) -> u64 {
+    1u64 << (f as u32)
 }
 
 fn int(slots: &[Slot], f: SmesField) -> Option<i64> {
@@ -305,7 +306,7 @@ pub fn parse_smes(
                     msg.airport = v;
                     msg.airport_present = true;
                 }
-                Ok(Got::Int(_)) => {}
+                Ok(_) => {}
                 Err(kind) => sink.error("airport", kind, elem_offset(doc, c)),
             },
             other => note_unknown(&mut sink, &[other]),
@@ -355,13 +356,14 @@ fn report(
             );
         }
     }
-    let (mut present, mut errors, mut invalidated) = (0u32, 0u32, 0u32);
+    let (mut present, mut errors, mut invalidated, mut present_empty) = (0u64, 0u64, 0u64, 0u64);
     for (i, s) in slots.iter().enumerate() {
-        let bit = 1u32 << i;
+        let bit = 1u64 << i;
         match s {
             Slot::Ok(_) => present |= bit,
             Slot::Bad => errors |= bit,
             Slot::Invalid => invalidated |= bit,
+            Slot::Blank => present_empty |= bit,
             Slot::Empty => {}
         }
     }
@@ -380,6 +382,7 @@ fn report(
         present,
         errors,
         invalidated,
+        present_empty,
         offset,
         time_ms: int(&slots, SmesField::Time).unwrap_or(0),
         lat_e7: i32_of(SmesField::Latitude),

@@ -5399,3 +5399,30 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-STD-024** The summary example exits 2 before opening the file when the path, as given or with links
   resolved on any prefix, names `scds/rec-20261119`, `scds/stdds-20261119-holdout` or
   `scds/stdds-smoke-20261119`, including through a link to the file, to the folder or to a link.
+- **OA-STD-025** Forms the real feed uses are accepted: a decimal with up to 24 fraction digits (a heading
+  printed as a binary double, still range checked), a callsign with an inner space, a runway with `*` or `+`,
+  a flight plan status word up to 16 characters (`terminated`), and the sender's no-value words
+  (`unavailable` for the vertical rate, `unassigned` for an entry or exit fix) as an absent field counted
+  as present-empty, not an error. Encoding-damaged text (U+FFFD) and any other word stay refused.
+- **OA-STD-026** An element with no text is a counted `present_empty` field, not a field error, for
+  `flightPlan/rawFlightRules` (the real feed prints it empty as its normal absent form); every other field
+  keeps an empty element as a refused field. A record with only present-empty fields is not an empty record.
+- **OA-STD-027** The TAIS `track/pseudo`, `track/frozen`, `track/new` and `track/adsb` decode as booleans
+  (`true`, `false`, `1`, `0`); the stats keep a `[false, true]` count per flag, which the summary prints (the
+  flags are not identifying). `track/adsb` is the candidate radar-only marker.
+- **OA-STD-028** The TAIS record header decodes: `recType`, `recSrc`, `recSTARSSrcID` as codes,
+  `recSTARSTimestamp` as milliseconds since midnight (ASSUMED from the observed digits; range 0 to 24 h) and
+  `recSAFAReceiptTime` as ISO-8601. The stats count the latency (receipt time of day minus STARS time of
+  day, wrapped into a day) in ms buckets, the records lacking a time, and the distinct `recSTARSSrcID` values,
+  never printing a time or an identifier.
+- **OA-STD-029** The five service-status roots in the `...:vN-M:status` namespace (`AirportDataServiceStatus`,
+  `TerminalAutomationInformationServiceStatus`, `TowerDepartureEventServiceStatus`,
+  `SurfaceMovementEventServiceStatus`, `STDDSStatus`) classify as kind `stdds-status`; the service name and
+  state are decoded (the root's `serviceStatus` text, or the top-level `p@k` ending in `Status` or `State` with
+  its `v` for `STDDSStatus`) and counted as a value histogram. Any other root of that namespace is unknown.
+- **OA-STD-030** An `AssetMessage` in the `https://mmixm.aero/base/` namespace classifies as kind `mmixm-asset`
+  and is counted, not decoded.
+- **OA-STD-031** ASDE-X `status/*` sub-elements other than `vertRate` stay unknown and are counted.
+- **OA-STD-032** A refused field is diagnosed by its text's shape (length and the first 12 character classes
+  with runs collapsed), kept per field and error kind in the stats and printed by the summary; no value is
+  kept or printed.

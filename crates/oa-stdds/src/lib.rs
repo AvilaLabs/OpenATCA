@@ -30,6 +30,7 @@ pub mod kind;
 pub mod scalar;
 pub mod smes;
 pub mod stats;
+pub mod status;
 pub mod tais;
 mod walk;
 
@@ -40,7 +41,8 @@ pub use kind::{classify, kind_name, Kind, KIND_COUNT, KIND_NAMES};
 pub use smes::{
     parse_smes, SmesField, SmesMessage, SmesRecord, SMES_FIELD_COUNT, SMES_FIELD_NAMES,
 };
-pub use stats::{new_stats, Stats, UnknownPath};
+pub use stats::{new_stats, ShapeCount, Stats, UnknownPath, LATENCY_BUCKETS, LATENCY_BUCKET_NAMES};
+pub use status::{parse_status, StatusMessage, StatusState};
 pub use tais::{
     parse_tais, TaisField, TaisMessage, TaisRecord, TAIS_FIELD_COUNT, TAIS_FIELD_NAMES,
 };
@@ -106,6 +108,70 @@ pub const ERROR_KIND_NAMES: [&str; ERROR_KIND_COUNT] = [
     "undecodable text",
 ];
 
+/// The shape of a refused text, never its value: its length and its character classes with
+/// runs collapsed (`9` digit, `A` upper-case letter, `a` lower-case letter, `~` space, `?`
+/// non-ASCII, `#` other control or symbol, and `-+.:/_,;=` as themselves), first
+/// [`SHAPE_LEN`] classes. Used to diagnose a refused field without keeping any value.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shape {
+    /// Length in bytes (saturating); 0 when the text was not available (longer than the buffer).
+    pub len: u16,
+    /// The collapsed classes, zero padded.
+    pub classes: [u8; SHAPE_LEN],
+}
+
+/// Most character classes a [`Shape`] keeps.
+pub const SHAPE_LEN: usize = 12;
+
+impl Shape {
+    /// No text was available.
+    pub const NONE: Shape = Shape {
+        len: 0,
+        classes: [0; SHAPE_LEN],
+    };
+
+    /// The shape of `s`.
+    pub fn of(s: &[u8]) -> Shape {
+        let mut out = Shape {
+            len: u16::try_from(s.len()).unwrap_or(u16::MAX),
+            classes: [0; SHAPE_LEN],
+        };
+        let mut n = 0usize;
+        let mut last = 0u8;
+        for &b in s {
+            let c = match b {
+                b'0'..=b'9' => b'9',
+                b'A'..=b'Z' => b'A',
+                b'a'..=b'z' => b'a',
+                b' ' => b'~',
+                b'-' | b'+' | b'.' | b':' | b'/' | b'_' | b',' | b';' | b'=' => b,
+                0x80..=0xff => b'?',
+                _ => b'#',
+            };
+            if c == last {
+                continue;
+            }
+            last = c;
+            match out.classes.get_mut(n) {
+                Some(slot) => *slot = c,
+                None => break,
+            }
+            n += 1;
+        }
+        out
+    }
+
+    /// The classes as text.
+    pub fn pattern(&self) -> String {
+        self.classes
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| char::from(c))
+            .collect()
+    }
+}
+
 /// One refused field: which, why and where (the byte offset of its element name).
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +181,8 @@ pub struct FieldError {
     pub kind: FieldErrorKind,
     /// Byte offset in the message of the field's element name.
     pub offset: u32,
+    /// The refused text's shape (no value).
+    pub shape: Shape,
 }
 
 impl fmt::Display for FieldError {
@@ -187,6 +255,7 @@ impl std::error::Error for StdError {}
 pub enum Message {
     Tais(TaisMessage),
     Smes(SmesMessage),
+    Status(StatusMessage),
     /// A message of a kind that is classified only (or unknown), counted in the stats.
     Other(Kind),
 }
@@ -212,6 +281,7 @@ pub fn parse_message(
     match k {
         Kind::TaisTrackAndFlightPlan => parse_tais(&doc, limits, stats).map(Message::Tais),
         Kind::AsdexPositionReport => parse_smes(&doc, limits, stats).map(Message::Smes),
+        Kind::StddsStatus => parse_status(&doc, limits, stats).map(Message::Status),
         other => Ok(Message::Other(other)),
     }
 }

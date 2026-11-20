@@ -25,6 +25,9 @@
 //! * beacon codes: four octal digits, kept as the digits read as a decimal number.
 //! * `trackNum`: the STARS track number, decimal.
 //!
+//! `recSTARSTimestamp` is digits (milliseconds since midnight, ASSUMED), `recSAFAReceiptTime`
+//! is ISO-8601; the receipt time minus the STARS time of day is the feed latency.
+//!
 //! Values come from element text. An element may carry `r="1"` meaning the sender no longer
 //! holds the value valid (documented for SMES, accepted here too): the field is absent and
 //! counted, not an error.
@@ -67,10 +70,19 @@ pub enum TaisField {
     ExitFix,
     PlanType,
     PlanStatus,
+    TrackPseudo,
+    TrackFrozen,
+    TrackNew,
+    TrackAdsb,
+    RecType,
+    RecSrc,
+    RecStarsSrcId,
+    RecStarsTimestamp,
+    RecSafaReceiptTime,
 }
 
 /// Number of [`TaisField`] values.
-pub const TAIS_FIELD_COUNT: usize = 27;
+pub const TAIS_FIELD_COUNT: usize = 36;
 
 /// Field names, in order; the element path below `record` with the unit where it has one.
 pub const TAIS_FIELD_NAMES: [&str; TAIS_FIELD_COUNT] = [
@@ -101,6 +113,15 @@ pub const TAIS_FIELD_NAMES: [&str; TAIS_FIELD_COUNT] = [
     "flightPlan/exitFix",
     "flightPlan/type",
     "flightPlan/status",
+    "track/pseudo",
+    "track/frozen",
+    "track/new",
+    "track/adsb",
+    "recType",
+    "recSrc",
+    "recSTARSSrcID",
+    "recSTARSTimestamp",
+    "recSAFAReceiptTime",
 ];
 
 const ALT: Val = Val::Scaled {
@@ -113,6 +134,9 @@ const VEL: Val = Val::Scaled {
     lo: -300_000,
     hi: 300_000,
 };
+
+/// Milliseconds in a day.
+const MS_PER_DAY: i64 = 86_400_000;
 
 const SPECS: [Spec; TAIS_FIELD_COUNT] = [
     Spec {
@@ -189,7 +213,7 @@ const SPECS: [Spec; TAIS_FIELD_COUNT] = [
     },
     Spec {
         path: &["flightPlan", "runway"],
-        val: Val::Code,
+        val: Val::Runway,
     },
     Spec {
         path: &["flightPlan", "flightRules"],
@@ -225,7 +249,47 @@ const SPECS: [Spec; TAIS_FIELD_COUNT] = [
     },
     Spec {
         path: &["flightPlan", "status"],
+        val: Val::Word,
+    },
+    Spec {
+        path: &["track", "pseudo"],
+        val: Val::Flag,
+    },
+    Spec {
+        path: &["track", "frozen"],
+        val: Val::Flag,
+    },
+    Spec {
+        path: &["track", "new"],
+        val: Val::Flag,
+    },
+    Spec {
+        path: &["track", "adsb"],
+        val: Val::Flag,
+    },
+    Spec {
+        path: &["recType"],
         val: Val::Code,
+    },
+    Spec {
+        path: &["recSrc"],
+        val: Val::Code,
+    },
+    Spec {
+        path: &["recSTARSSrcID"],
+        val: Val::Code,
+    },
+    Spec {
+        path: &["recSTARSTimestamp"],
+        val: Val::Scaled {
+            scale: 0,
+            lo: 0,
+            hi: MS_PER_DAY - 1,
+        },
+    },
+    Spec {
+        path: &["recSAFAReceiptTime"],
+        val: Val::TimeMs,
     },
 ];
 
@@ -244,13 +308,15 @@ const SKIP: [&[&str]; 8] = [
 /// One `record`: a track and the flight plan it is associated with, in fixed units. A field is
 /// meaningful only if its bit is set in `present`; `errors` has the bit of every field that was
 /// present but refused (see the message's error list); `invalidated` has the bit of every
-/// field the sender marked `r="1"`.
+/// field the sender marked `r="1"`; `present_empty` has the bit of every text field whose
+/// element is present with no text (absent, not an error).
 // A7.2: cold struct, size guard waived (a parse result held per message, not a hot collection)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TaisRecord {
-    pub present: u32,
-    pub errors: u32,
-    pub invalidated: u32,
+    pub present: u64,
+    pub errors: u64,
+    pub invalidated: u64,
+    pub present_empty: u64,
     /// Byte offset of the `record` element's name in the message.
     pub offset: u32,
     /// `track/mrtTime` as Unix milliseconds (UTC).
@@ -293,7 +359,22 @@ pub struct TaisRecord {
     pub entry_fix: [u8; 8],
     pub exit_fix: [u8; 8],
     pub plan_type: [u8; 8],
-    pub plan_status: [u8; 8],
+    pub plan_status: [u8; 16],
+    /// `track/pseudo`, `track/frozen`, `track/new`, `track/adsb` (`xs:boolean`); each meaningful
+    /// only if its bit is set in `present`. `adsb` is the candidate radar-only marker.
+    pub pseudo: bool,
+    pub frozen: bool,
+    pub is_new: bool,
+    pub adsb: bool,
+    /// Record header `recType`, `recSrc` and `recSTARSSrcID`.
+    pub rec_type: [u8; 8],
+    pub rec_src: [u8; 8],
+    pub rec_stars_src_id: [u8; 8],
+    /// `recSTARSTimestamp`: observed as 3 to 8 digits that grow through the day, so read as
+    /// milliseconds since midnight (ASSUMED; the epoch of the day is not confirmed).
+    pub rec_stars_tod_ms: i32,
+    /// `recSAFAReceiptTime` as Unix milliseconds (UTC).
+    pub rec_safa_receipt_ms: i64,
 }
 
 /// A whole TAIS message.
@@ -313,13 +394,20 @@ pub struct TaisMessage {
 }
 
 /// A bit for field `f`.
-pub const fn tais_bit(f: TaisField) -> u32 {
-    1u32 << (f as u32)
+pub const fn tais_bit(f: TaisField) -> u64 {
+    1u64 << (f as u32)
 }
 
 fn int(slots: &[Slot], f: TaisField) -> Option<i64> {
     match slots.get(f as usize) {
         Some(Slot::Ok(Got::Int(v))) => Some(*v),
+        _ => None,
+    }
+}
+
+fn word(slots: &[Slot], f: TaisField) -> Option<[u8; 16]> {
+    match slots.get(f as usize) {
+        Some(Slot::Ok(Got::Word(c))) => Some(*c),
         _ => None,
     }
 }
@@ -390,7 +478,7 @@ pub fn parse_tais(
                     msg.src = v;
                     msg.src_present = true;
                 }
-                Ok(Got::Int(_)) => {}
+                Ok(_) => {}
                 Err(kind) => sink.error("src", kind, elem_offset(doc, c)),
             },
             other => note_unknown(&mut sink, &[other]),
@@ -441,13 +529,14 @@ fn record(
             );
         }
     }
-    let (mut present, mut errors, mut invalidated) = (0u32, 0u32, 0u32);
+    let (mut present, mut errors, mut invalidated, mut present_empty) = (0u64, 0u64, 0u64, 0u64);
     for (i, s) in slots.iter().enumerate() {
-        let bit = 1u32 << i;
+        let bit = 1u64 << i;
         match s {
             Slot::Ok(_) => present |= bit,
             Slot::Bad => errors |= bit,
             Slot::Invalid => invalidated |= bit,
+            Slot::Blank => present_empty |= bit,
             Slot::Empty => {}
         }
     }
@@ -471,6 +560,7 @@ fn record(
         present,
         errors,
         invalidated,
+        present_empty,
         offset,
         mrt_time_ms: int(&slots, TaisField::MrtTime).unwrap_or(0),
         lat_e7: i32_of(TaisField::Lat),
@@ -498,6 +588,15 @@ fn record(
         entry_fix: c(TaisField::EntryFix),
         exit_fix: c(TaisField::ExitFix),
         plan_type: c(TaisField::PlanType),
-        plan_status: c(TaisField::PlanStatus),
+        plan_status: word(&slots, TaisField::PlanStatus).unwrap_or([0; 16]),
+        pseudo: int(&slots, TaisField::TrackPseudo) == Some(1),
+        frozen: int(&slots, TaisField::TrackFrozen) == Some(1),
+        is_new: int(&slots, TaisField::TrackNew) == Some(1),
+        adsb: int(&slots, TaisField::TrackAdsb) == Some(1),
+        rec_type: c(TaisField::RecType),
+        rec_src: c(TaisField::RecSrc),
+        rec_stars_src_id: c(TaisField::RecStarsSrcId),
+        rec_stars_tod_ms: i32_of(TaisField::RecStarsTimestamp),
+        rec_safa_receipt_ms: int(&slots, TaisField::RecSafaReceiptTime).unwrap_or(0),
     })
 }

@@ -16,7 +16,7 @@ use oa_feed::reader::FrameReader;
 use oa_feed::replay::REPLAY_LIMITS;
 use oa_stdds::{
     new_stats, parse_message, std_error_index, Limits, Stats, ERROR_KIND_NAMES, KIND_NAMES,
-    SMES_FIELD_NAMES, STD_ERROR_NAMES, TAIS_FIELD_NAMES,
+    LATENCY_BUCKET_NAMES, SMES_FIELD_NAMES, STD_ERROR_NAMES, TAIS_FIELD_NAMES,
 };
 use oa_xml::{Limits as XmlLimits, Parser};
 use oa_zip::GzipReader;
@@ -166,16 +166,63 @@ fn main() {
     }
     for (i, name) in TAIS_FIELD_NAMES.iter().enumerate() {
         println!(
-            "tais field {name}: present {} refused {}",
-            s.tais_present[i], s.tais_errors[i]
+            "tais field {name}: present {} present_empty {} refused {}",
+            s.tais_present[i], s.tais_present_empty[i], s.tais_errors[i]
         );
     }
     for (i, name) in SMES_FIELD_NAMES.iter().enumerate() {
         println!(
-            "smes field {name}: present {} refused {}",
-            s.smes_present[i], s.smes_errors[i]
+            "smes field {name}: present {} present_empty {} refused {}",
+            s.smes_present[i], s.smes_present_empty[i], s.smes_errors[i]
         );
     }
+    // Refused-field diagnostics: the text's length and character classes, never a value.
+    for h in &s.shapes {
+        println!(
+            "refused shape {} {} len {} classes {}: {}",
+            h.field,
+            ERROR_KIND_NAMES
+                .get(h.kind as usize)
+                .copied()
+                .unwrap_or("?"),
+            h.len,
+            h.pattern,
+            h.count
+        );
+    }
+    println!("refused shape overflow: {}", s.shapes_overflow);
+    // Track flags are not identifying; their value histogram is printed.
+    for (name, c) in ["pseudo", "frozen", "new", "adsb"]
+        .iter()
+        .zip(&s.tais_flags)
+    {
+        let total = c[0] + c[1];
+        println!(
+            "tais flag track/{name}: false {} true {} of {total}",
+            c[0], c[1]
+        );
+    }
+    let adsb = s.tais_flags[3];
+    if adsb[0] + adsb[1] > 0 {
+        println!(
+            "tais adsb false share: {:.4}",
+            adsb[0] as f64 / (adsb[0] + adsb[1]) as f64
+        );
+    }
+    for (name, c) in LATENCY_BUCKET_NAMES.iter().zip(&s.latency) {
+        println!("latency recSAFAReceiptTime-recSTARSTimestamp ms {name}: {c}");
+    }
+    println!("latency missing a time: {}", s.latency_missing);
+    println!(
+        "distinct recSTARSSrcID: {} overflow {}",
+        s.src_ids.len(),
+        s.src_ids_overflow
+    );
+    // Service states are not identifying; the value histogram is printed.
+    for (t, c) in &s.status_values {
+        println!("stdds-status {t}: {c}");
+    }
+    println!("stdds-status overflow: {}", s.status_values_overflow);
     for u in &s.unknown {
         println!("unknown element {}: {}", u.text, u.count);
     }

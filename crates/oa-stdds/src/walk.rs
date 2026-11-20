@@ -6,13 +6,13 @@ use crate::kind::{attr_value, name_of};
 use crate::scalar::{
     parse_beacon, parse_code, parse_hex24, parse_iso_ms, parse_scaled, parse_uint, trim,
 };
-use crate::{FieldError, FieldErrorKind};
+use crate::{FieldError, FieldErrorKind, Shape};
 use oa_xml::{decode_text_run, Doc, ElemIx, XmlError};
 
 /// Deepest path (names below the base element) the walker follows.
 pub(crate) const MAX_PATH: usize = 8;
 /// Longest value text read (bytes); longer is [`FieldErrorKind::TooLong`].
-const VALUE_BUF: usize = 64;
+pub(crate) const VALUE_BUF: usize = 64;
 /// Most distinct unknown paths one message adds (the XML element limit bounds the rest).
 const MAX_UNKNOWN_PER_MESSAGE: usize = 64;
 
@@ -33,6 +33,14 @@ pub(crate) enum Val {
     Uint(usize),
     /// Up to 8 ASCII letters, digits and `-_/.`.
     Code,
+    /// Up to 16 ASCII letters, digits and `-_/.` (a status word such as `terminated`).
+    Word,
+    /// Up to 8 ASCII letters, digits and `-_/.*+` (a runway designator as STARS prints it).
+    Runway,
+    /// Up to 8 ASCII letters, digits, `-_/.` and inner spaces (a callsign).
+    Callsign,
+    /// An `xs:boolean`: `true`, `false`, `1` or `0`, as 1 or 0.
+    Flag,
 }
 
 /// One expected path and the field it fills.
@@ -47,6 +55,7 @@ pub(crate) struct Spec {
 pub(crate) enum Got {
     Int(i64),
     Code([u8; 8]),
+    Word([u8; 16]),
 }
 
 /// The state of one field slot while a record is walked.
@@ -58,6 +67,9 @@ pub(crate) enum Slot {
     Bad,
     /// Marked no longer valid by the sender (`r="1"`): absent, not an error.
     Invalid,
+    /// An element present with no text, in a field of [`BLANK_OK`] or carrying a [`NO_VALUE`]
+    /// word: absent, counted apart from errors.
+    Blank,
 }
 
 /// For each element, its first text node and how many text nodes it owns.
@@ -94,11 +106,22 @@ pub(crate) struct Sink<'s> {
 
 impl Sink<'_> {
     pub(crate) fn error(&mut self, field: &'static str, kind: FieldErrorKind, offset: u32) {
+        self.error_shaped(field, kind, offset, Shape::NONE);
+    }
+
+    pub(crate) fn error_shaped(
+        &mut self,
+        field: &'static str,
+        kind: FieldErrorKind,
+        offset: u32,
+        shape: Shape,
+    ) {
         if self.errors.len() < self.max_errors {
             self.errors.push(FieldError {
                 field,
                 kind,
                 offset,
+                shape,
             });
         } else {
             *self.errors_dropped += 1;
@@ -167,6 +190,28 @@ fn next(doc: &Doc<'_>, base: ElemIx, d: ElemIx, skip: bool) -> Option<ElemIx> {
     }
 }
 
+fn code8(s: &[u8], extra: &[u8]) -> Result<Got, FieldErrorKind> {
+    if s.len() > 8 {
+        return Err(FieldErrorKind::TooLong);
+    }
+    parse_code::<8>(s, extra)
+        .map(Got::Code)
+        .ok_or(FieldErrorKind::Syntax)
+}
+
+/// Words a sender prints in place of a value: `(field name, text)`. The element is present and
+/// carries no value: absent, counted apart from errors ([`Slot::Blank`]).
+const NO_VALUE: [(&str, &[u8]); 3] = [
+    ("status/vertRate", b"unavailable"),
+    ("flightPlan/entryFix", b"unassigned"),
+    ("flightPlan/exitFix", b"unassigned"),
+];
+
+/// Text fields whose element may be present with no text (observed on real data as the normal
+/// form of an absent value): absent and counted apart from errors ([`Slot::Blank`]). Every other
+/// field keeps an empty element as a refused field.
+const BLANK_OK: [&str; 1] = ["flightPlan/rawFlightRules"];
+
 fn parse_val(v: Val, s: &[u8]) -> Result<Got, FieldErrorKind> {
     use FieldErrorKind::{Range, Syntax, TooLong};
     match v {
@@ -193,17 +238,25 @@ fn parse_val(v: Val, s: &[u8]) -> Result<Got, FieldErrorKind> {
             let x = parse_uint(s, digits).ok_or(Syntax)?;
             i64::try_from(x).map(Got::Int).map_err(|_| Range)
         }
-        Val::Code => {
-            if s.len() > 8 {
+        Val::Flag => match s {
+            b"true" | b"1" => Ok(Got::Int(1)),
+            b"false" | b"0" => Ok(Got::Int(0)),
+            _ => Err(Syntax),
+        },
+        Val::Code => code8(s, b"-_/."),
+        Val::Runway => code8(s, b"-_/.*+"),
+        Val::Callsign => code8(s, b"-_/. "),
+        Val::Word => {
+            if s.len() > 16 {
                 return Err(TooLong);
             }
-            parse_code::<8>(s, b"-_/.").map(Got::Code).ok_or(Syntax)
+            parse_code::<16>(s, b"-_/.").map(Got::Word).ok_or(Syntax)
         }
     }
 }
 
 /// Reads the text of leaf element `e`, trimmed, into `buf`.
-fn leaf_text<'b>(
+pub(crate) fn leaf_text<'b>(
     doc: &Doc<'_>,
     tx: &TextIndex,
     e: ElemIx,
@@ -313,13 +366,26 @@ fn read_field(
         sink.invalidated += 1;
         return;
     }
-    match leaf_text(doc, tx, e, tbuf).and_then(|t| parse_val(spec.val, t)) {
-        Ok(g) => *slot = Slot::Ok(g),
-        Err(k) => {
-            *slot = Slot::Bad;
-            sink.error(name, k, off);
+    let (kind, shape) = match leaf_text(doc, tx, e, tbuf) {
+        Ok(t) if NO_VALUE.iter().any(|&(n, w)| n == name && w == t) => {
+            *slot = Slot::Blank;
+            return;
         }
+        Ok(t) => match parse_val(spec.val, t) {
+            Ok(g) => {
+                *slot = Slot::Ok(g);
+                return;
+            }
+            Err(k) => (k, Shape::of(t)),
+        },
+        Err(k) => (k, Shape::NONE),
+    };
+    if kind == FieldErrorKind::Empty && BLANK_OK.contains(&name) {
+        *slot = Slot::Blank;
+        return;
     }
+    *slot = Slot::Bad;
+    sink.error_shaped(name, kind, off, shape);
 }
 
 pub(crate) fn note_unknown(sink: &mut Sink<'_>, path: &[&[u8]]) {
