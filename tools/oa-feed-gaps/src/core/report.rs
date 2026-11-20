@@ -1,5 +1,7 @@
 //! Core (B1): the report text and the verdict.
 
+use super::clip::{clip_reasons, ClipLog};
+use super::exclude::{excluded, too_much, total_ns, LIMIT_NS, MARGIN_NS};
 use super::gaps::{reasons, Gap, Stats, Window, GAP_CAP, OVER_NS};
 use super::timefmt::{iso, secs};
 
@@ -68,7 +70,7 @@ fn feed_text(f: &Feed, out: &mut String) {
 }
 
 /// The report text and whether the day is damaged.
-pub fn render(window: Window, feeds: &[Feed]) -> (String, bool) {
+pub fn render(window: Window, feeds: &[Feed], clip: Option<&ClipLog>) -> (String, bool) {
     let mut out = String::new();
     out.push_str("oa-feed-gaps report (P-006 section 6)\n");
     out.push_str(&format!(
@@ -85,6 +87,37 @@ pub fn render(window: Window, feeds: &[Feed]) -> (String, bool) {
     for f in feeds {
         feed_text(f, &mut out);
         why.extend(reasons(f.name, &f.stats, &f.damage));
+    }
+    let stats: Vec<&Stats> = feeds.iter().map(|f| &f.stats).collect();
+    let merged = excluded(window, &stats);
+    out.push_str(&format!(
+        "excluded intervals (each over 600 s and the {} after it, merged): {}, {} of the {} allowed\n",
+        secs(MARGIN_NS),
+        merged.len(),
+        secs(total_ns(&merged)),
+        secs(LIMIT_NS)
+    ));
+    for g in &merged {
+        out.push_str(&format!("exclude {} {}\n", iso(g.start_ns), iso(g.end_ns)));
+    }
+    if too_much(&merged) {
+        why.push(format!(
+            "excluded intervals total {}, over {}",
+            secs(total_ns(&merged)),
+            secs(LIMIT_NS)
+        ));
+    }
+    match clip {
+        Some(c) => {
+            out.push_str(&format!(
+                "clip log: traces_refused={} archive_complete={}\n",
+                c.traces_refused
+                    .map_or("none".to_string(), |n| n.to_string()),
+                c.complete
+            ));
+            why.extend(clip_reasons(c));
+        }
+        None => out.push_str("clip checks: not made (no --clip-log)\n"),
     }
     let damaged = !why.is_empty();
     if damaged {

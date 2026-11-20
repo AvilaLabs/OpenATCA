@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use crate::core::gaps::Window;
 use crate::core::timefmt::parse_iso;
 
-pub const USAGE: &str = "usage: oa-feed-gaps --sfdps-dir <dir> --adsb <clip.oaf> --from <ISO time> --to <ISO time> [--out <file>]";
+pub const USAGE: &str = "usage: oa-feed-gaps --sfdps-dir <dir> --adsb <clip.oaf> --from <ISO time> --to <ISO time> [--clip-log <file>] [--out <file>]";
 
 /// What a run is asked to do.
 // A7.2: cold struct, size guard waived
@@ -14,12 +14,14 @@ pub struct Args {
     pub sfdps_dir: PathBuf,
     pub adsb: PathBuf,
     pub window: Window,
+    pub clip_log: Option<PathBuf>,
     pub out: Option<PathBuf>,
 }
 
 /// Parses the arguments after the program name; the error text is the usage failure.
 pub fn parse(argv: &[String]) -> Result<Args, String> {
     let (mut sfdps, mut adsb, mut from, mut to, mut out) = (None, None, None, None, None);
+    let mut clip_log = None;
     let mut it = argv.iter();
     while let Some(a) = it.next() {
         let v = it.next().ok_or_else(|| format!("{a} needs a value"))?;
@@ -29,6 +31,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             "--from" => &mut from,
             "--to" => &mut to,
             "--out" => &mut out,
+            "--clip-log" => &mut clip_log,
             _ => return Err(format!("unknown option {a}")),
         };
         if slot.replace(v.clone()).is_some() {
@@ -46,6 +49,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         sfdps_dir: PathBuf::from(need(sfdps, "--sfdps-dir")?),
         adsb: PathBuf::from(need(adsb, "--adsb")?),
         window,
+        clip_log: clip_log.map(PathBuf::from),
         out: out.map(PathBuf::from),
     })
 }

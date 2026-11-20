@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use oa_feed::{encode_frame, FLAG_BYTES, MAX_FRAME_LEN};
+use oa_feed_gaps::core::clip::parse_clip_log;
 use oa_feed_gaps::core::gaps::{reasons, scan_unsorted, Scan, Stats, Window, GAP_CAP};
 use oa_feed_gaps::core::report::{render, Feed};
 use oa_feed_gaps::core::timefmt::{iso, parse_iso};
@@ -40,7 +41,7 @@ fn verdict(st: &Stats, damage: &[(String, u64)]) -> (String, bool) {
         damage: damage.to_vec(),
         info: vec![],
     };
-    render(st.window, &[f])
+    render(st.window, &[f], None)
 }
 
 // REQ: OA-GAP-001
@@ -57,24 +58,210 @@ fn a_feed_without_a_gap_is_clean() {
 
 // REQ: OA-GAP-001
 #[test]
-fn an_interval_of_exactly_600_s_is_clean_and_600_001_s_is_damaged() {
+fn an_interval_of_exactly_600_s_is_not_over_and_600_001_s_is() {
     let w = win(1200);
     let st = run(w, &[0, 600 * S, 1200 * S]);
     assert_eq!(st.largest.unwrap().len_ns(), 600 * S);
-    assert!(reasons("SFDPS", &st, &[]).is_empty());
+    assert_eq!(st.over_total, 0);
     let st = run(w, &[0, 600 * S + MS, 1200 * S]);
     assert_eq!(st.over_total, 1);
     let g = st.over[0];
     assert_eq!((g.start_ns, g.end_ns), (BASE, BASE + 600 * S + MS));
+    // Over the limit is an excluded interval, not damage by itself.
     let (text, damaged) = verdict(&st, &[]);
+    assert!(!damaged, "{text}");
     assert!(
-        damaged && text.contains("DAMAGED: SFDPS has 1 interval(s) over 600 s"),
+        text.contains("exclude 2026-11-15T00:00:00.000000000Z"),
+        "{text}"
+    );
+}
+
+// REQ: OA-GAP-013
+#[test]
+fn a_1005_s_gap_is_clean_with_one_excluded_interval_of_1305_s() {
+    let w = win(7200);
+    let st = run(
+        w,
+        &[
+            0,
+            600 * S,
+            1200 * S,
+            2205 * S,
+            2800 * S,
+            3400 * S,
+            4000 * S,
+            4600 * S,
+            5200 * S,
+            5800 * S,
+            6400 * S,
+            7000 * S,
+            7200 * S,
+        ],
+    );
+    assert_eq!(st.over_total, 1);
+    let (text, damaged) = verdict(&st, &[]);
+    assert!(!damaged && text.ends_with("CLEAN\n"), "{text}");
+    assert!(
+        text.contains("exclude 2026-11-15T00:20:00.000000000Z 2026-11-15T00:41:45.000000000Z\n"),
         "{text}"
     );
     assert!(
-        text.contains("600.001000000 s from 2026-11-15T00:00:00.000000000Z"),
+        text.contains("1 interval") || text.contains(": 1, 1305.000000000 s"),
         "{text}"
     );
+}
+
+// REQ: OA-GAP-014
+#[test]
+fn excluded_intervals_whose_margins_overlap_are_merged_and_over_an_hour_is_damaged() {
+    let w = win(20_000);
+    // Gaps 0-700 s and 800-1500 s in one feed: margins 300 s reach 1000 s and 1800 s, so one block.
+    let a = run(
+        w,
+        &[
+            0,
+            700 * S,
+            800 * S,
+            1500 * S,
+            2000 * S,
+            2600 * S,
+            3200 * S,
+            3800 * S,
+            4400 * S,
+            5000 * S,
+            5600 * S,
+            6200 * S,
+            6800 * S,
+            7400 * S,
+            8000 * S,
+            8600 * S,
+            9200 * S,
+            9800 * S,
+            10_400 * S,
+            11_000 * S,
+            11_600 * S,
+            12_200 * S,
+            12_800 * S,
+            13_400 * S,
+            14_000 * S,
+            14_600 * S,
+            15_200 * S,
+            15_800 * S,
+            16_400 * S,
+            17_000 * S,
+            17_600 * S,
+            18_200 * S,
+            18_800 * S,
+            19_400 * S,
+            20_000 * S,
+        ],
+    );
+    assert_eq!(a.over_total, 2);
+    let (text, damaged) = verdict(&a, &[]);
+    assert!(!damaged, "{text}");
+    assert_eq!(text.matches("\nexclude ").count(), 1, "{text}");
+    assert!(
+        text.contains("exclude 2026-11-15T00:00:00.000000000Z 2026-11-15T00:30:00.000000000Z"),
+        "{text}"
+    );
+    // Merged across the two feeds too.
+    let b = run(
+        w,
+        &[
+            0,
+            1000 * S,
+            1200 * S,
+            1500 * S,
+            2100 * S,
+            2700 * S,
+            3300 * S,
+            3900 * S,
+            4500 * S,
+            5100 * S,
+            5700 * S,
+            6300 * S,
+            6900 * S,
+            7500 * S,
+            8100 * S,
+            8700 * S,
+            9300 * S,
+            9900 * S,
+            10_500 * S,
+            11_100 * S,
+            11_700 * S,
+            12_300 * S,
+            12_900 * S,
+            13_500 * S,
+            14_100 * S,
+            14_700 * S,
+            15_300 * S,
+            15_900 * S,
+            16_500 * S,
+            17_100 * S,
+            17_700 * S,
+            18_300 * S,
+            18_900 * S,
+            19_500 * S,
+            20_000 * S,
+        ],
+    );
+    let (merged, _) = (oa_feed_gaps::core::exclude::excluded(w, &[&a, &b]), ());
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        (merged[0].start_ns, merged[0].end_ns),
+        (BASE, BASE + 1800 * S)
+    );
+}
+
+// REQ: OA-GAP-014
+#[test]
+fn excluded_time_of_3600_s_is_clean_and_3601_s_is_damaged() {
+    // One gap of G s, excluded G + 300 s: G = 3300 gives 3600, G = 3301 gives 3601.
+    for (g, bad) in [(3300, false), (3301, true)] {
+        let w = win(g + 600);
+        let st = run(w, &[0, g * S, (g + 600) * S]);
+        let (text, damaged) = verdict(&st, &[]);
+        assert_eq!(damaged, bad, "{g}: {text}");
+        if bad {
+            assert!(
+                text.contains("excluded intervals total 3601.000000000 s"),
+                "{text}"
+            );
+        }
+    }
+}
+
+// REQ: OA-GAP-015
+#[test]
+fn the_clip_log_is_read_and_a_refused_trace_or_an_incomplete_archive_is_damage() {
+    let w = win(600);
+    let st = run(w, &[0, 300 * S, 600 * S]);
+    let f = |log: Option<&str>| {
+        let feed = Feed {
+            name: "ADS-B",
+            stats: st.clone(),
+            damage: vec![],
+            info: vec![],
+        };
+        let c = log.map(parse_clip_log);
+        render(w, &[feed], c.as_ref())
+    };
+    let good = "traces_read=5 traces_refused=0 kept=3\nmeasurements_bad 0\narchive: complete\n";
+    let (t, d) = f(Some(good));
+    assert!(
+        !d && t.contains("traces_refused=0 archive_complete=true"),
+        "{t}"
+    );
+    let (t, d) = f(Some(&good.replace("traces_refused=0", "traces_refused=2")));
+    assert!(d && t.contains("clip tool refused 2 trace(s)"), "{t}");
+    let (t, d) = f(Some("traces_refused=0\narchive: TRUNCATED at byte 5\n"));
+    assert!(d && t.contains("TRUNCATED"), "{t}");
+    let (_, d) = f(Some("traces_refused=0\n"));
+    assert!(d);
+    let (t, d) = f(Some(""));
+    assert!(d && t.contains("no traces_refused summary"), "{t}");
+    let (t, d) = f(None);
+    assert!(!d && t.contains("clip checks: not made"), "{t}");
 }
 
 // REQ: OA-GAP-002
@@ -89,16 +276,16 @@ fn a_gap_at_the_start_or_the_end_of_the_window_counts() {
     assert_eq!(st.over[0].start_ns, BASE);
     assert_eq!(st.over[0].end_ns, BASE + 601 * S);
     assert_eq!(st.first_ns, Some(BASE + 601 * S));
-    assert!(!reasons("SFDPS", &st, &[]).is_empty());
+    assert_eq!(st.over_total, 1);
     // Last message 601 s before the window end.
     let st = run(w, &[0, 600 * S, 1200 * S, 1800 * S, 2400 * S, 2999 * S]);
     assert_eq!(st.over[0].start_ns, BASE + 2999 * S);
     assert_eq!(st.over[0].end_ns, BASE + 3600 * S);
     assert_eq!(st.last_ns, Some(BASE + 2999 * S));
-    assert!(!reasons("SFDPS", &st, &[]).is_empty());
+    assert_eq!(st.over_total, 1);
     // Exactly 600 s at either edge is clean.
     let st = run(w, &[600 * S, 1200 * S, 1800 * S, 2400 * S, 3000 * S]);
-    assert!(reasons("SFDPS", &st, &[]).is_empty());
+    assert_eq!(st.over_total, 0);
     // Times outside the window are not counted.
     let st = run(w, &[-5 * S, 0, 3600 * S, 3601 * S]);
     assert_eq!(st.count, 2);
@@ -212,7 +399,7 @@ fn a_damaged_frame_in_the_recording_is_counted_as_damage() {
     assert_eq!(f.stats.count, 2);
     let total: u64 = f.damage.iter().map(|(_, n)| n).sum();
     assert!(total > 0, "{:?}", f.damage);
-    let (text, damaged) = render(win(40), &[f]);
+    let (text, damaged) = render(win(40), &[f], None);
     assert!(damaged && text.contains("DAMAGED:"), "{text}");
 }
 
@@ -259,7 +446,7 @@ fn the_adsb_clip_is_checked_sorted_for_gaps_and_for_damaged_frames() {
     adsb_clip(&clip, &[0, 700, 710]);
     let f = read_adsb(&clip, win(710)).unwrap();
     assert_eq!(f.stats.over_total, 1);
-    assert!(render(win(710), &[f]).1);
+    assert!(!render(win(710), &[f], None).1);
     // A flipped byte in a frame is a damaged frame.
     adsb_clip(&clip, &[0, 10, 20]);
     let mut b = fs::read(&clip).unwrap();
@@ -274,7 +461,7 @@ fn the_adsb_clip_is_checked_sorted_for_gaps_and_for_damaged_frames() {
         "{:?}",
         f.damage
     );
-    assert!(render(win(20), &[f]).1);
+    assert!(render(win(20), &[f], None).1);
 }
 
 const BIN: &str = env!("CARGO_BIN_EXE_oa-feed-gaps");
@@ -312,10 +499,23 @@ fn the_exit_status_is_0_clean_1_damaged_2_error_and_the_report_is_written_atomic
     let first = fs::read(&out).unwrap();
     cli(&d, from, to, &["--out", out.to_str().unwrap()]);
     assert_eq!(first, fs::read(&out).unwrap());
-    // A window that runs on 700 s past the last message is damaged.
-    let o = cli(&d, from, "2026-11-15T00:30:00Z", &[]);
+    // A window that runs on for hours past the last message has over an hour excluded: damaged.
+    let o = cli(&d, from, "2026-11-15T03:00:00Z", &[]);
     assert_eq!(o.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&o.stdout).contains("DAMAGED:"));
+    // The clip log: complete is clean, a refused trace is damaged, a missing file is exit 2.
+    let log = d.join("clip.log");
+    fs::write(&log, "traces_refused=0\narchive: complete\n").unwrap();
+    let l = log.to_str().unwrap();
+    assert_eq!(cli(&d, from, to, &["--clip-log", l]).status.code(), Some(0));
+    fs::write(&log, "traces_refused=1\narchive: complete\n").unwrap();
+    assert_eq!(cli(&d, from, to, &["--clip-log", l]).status.code(), Some(1));
+    assert_eq!(
+        cli(&d, from, to, &["--clip-log", "/nonexistent/x"])
+            .status
+            .code(),
+        Some(2)
+    );
     // Usage and read errors.
     assert_eq!(cli(&d, from, "nonsense", &[]).status.code(), Some(2));
     assert_eq!(cli(&d, to, from, &[]).status.code(), Some(2));

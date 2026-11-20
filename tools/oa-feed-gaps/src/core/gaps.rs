@@ -1,7 +1,7 @@
 //! Core (B1): the intervals of one feed over the scored window.
 
-/// An interval over this many nanoseconds is damage (P-006 section 6: 10 minutes). Exactly this
-/// long is not over.
+/// An interval over this many nanoseconds is an excluded interval (P-007: 10 minutes). Exactly
+/// this long is not over.
 pub const OVER_NS: i64 = 600_000_000_000;
 
 /// The most intervals over the limit that are listed; the rest are counted.
@@ -143,20 +143,13 @@ pub fn scan_unsorted(window: Window, times: &mut [i64]) -> Stats {
     sc.finish()
 }
 
-/// The reasons one feed is damaged, empty when it is not. `counts` are the reader's damage
+/// The reasons one feed is damaged, empty when it is not. An interval over 600 s is not one (P-007:
+/// it is excluded, see `exclude`). `counts` are the reader's damage
 /// counts by name; any non-zero one is a reason.
 pub fn reasons(feed: &str, st: &Stats, counts: &[(String, u64)]) -> Vec<String> {
     let mut out = Vec::new();
     if st.count == 0 {
         out.push(format!("{feed} has no message in the window"));
-    }
-    if st.over_total > 0 {
-        let l = st.largest.map_or(0, |g| g.len_ns());
-        out.push(format!(
-            "{feed} has {} interval(s) over 600 s, the largest {}",
-            st.over_total,
-            super::timefmt::secs(l)
-        ));
     }
     if st.overflow > 0 {
         out.push(format!(

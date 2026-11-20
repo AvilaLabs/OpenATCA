@@ -6211,10 +6211,10 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 
 ## Feed damage check (oa-feed-gaps, P-006 section 6)
 
-- **OA-GAP-001** An interval between consecutive times of a feed over 600 s is damage; exactly 600 s is not.
+- **OA-GAP-001** An interval between consecutive times of a feed over 600 s is an excluded interval (P-007), not damage by itself; exactly 600 s is not over.
 - **OA-GAP-002** The interval from the window start to the first time, and from the last time to the window end, counts.
-- **OA-GAP-003** A window with no message in it is damaged.
-- **OA-GAP-004** At most 1,000 intervals over 600 s are listed; the rest are counted and still make the window damaged.
+- **OA-GAP-003** A window with no message in a feed is damaged.
+- **OA-GAP-004** At most 1,000 intervals over 600 s are listed; the rest are counted and make the window damaged.
 - **OA-GAP-005** Any reader gzip or frame error count, and any ADS-B damaged-frame count, makes the window damaged.
 - **OA-GAP-006** A time earlier than the one before it is counted, left out of the intervals, and makes the window damaged.
 - **OA-GAP-007** SFDPS times are the recorder's receive times, sorted, so files that overlap or are named out of order give the true intervals.
@@ -6223,3 +6223,6 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-GAP-010** Exit 0 clean, 1 damaged, 2 usage or read error; the report is deterministic and written by temporary file and rename.
 - **OA-GAP-011** Both inputs go through the shared sealed guard (OA-SEAL-001); a refusal is exit 2.
 - **OA-GAP-012** `--from` and `--to` are `YYYY-MM-DDTHH:MM:SSZ`, both required, from before to.
+- **OA-GAP-013** An excluded interval is the interval over 600 s and the 300 s after it, in either feed, cut at the window end; each merged block is written as `exclude <from ISO ns> <to ISO ns>`.
+- **OA-GAP-014** Excluded intervals are merged where they overlap; more than 3600 s in total makes the window damaged.
+- **OA-GAP-015** With `--clip-log`, a refused trace, a missing summary or an archive not reported complete makes the window damaged; without it the report says the clip checks were not made.
