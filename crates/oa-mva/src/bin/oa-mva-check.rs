@@ -53,6 +53,10 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn newest_dof(dir: &std::path::Path) -> Option<PathBuf> {
+    if let Err(e) = oa_sealed::refuse(dir) {
+        eprintln!("oa-mva-check: {e}");
+        std::process::exit(2);
+    }
     let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)

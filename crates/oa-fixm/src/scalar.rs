@@ -195,6 +195,25 @@ pub fn parse_beacon(s: &[u8]) -> Option<u16> {
     Some(v)
 }
 
+/// A 24-bit ICAO (Mode S) aircraft address: exactly six hexadecimal digits (either case), not
+/// all zero (address 0 is no aircraft).
+pub fn parse_hex24(s: &[u8]) -> Option<u32> {
+    if s.len() != 6 {
+        return None;
+    }
+    let mut v = 0u32;
+    for &b in s {
+        let d = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return None,
+        };
+        v = v << 4 | u32::from(d);
+    }
+    (v != 0).then_some(v)
+}
+
 /// Copies `s` into a zero-padded array when it is 1 to `N` ASCII letters, digits or the
 /// characters in `extra`.
 pub fn parse_code<const N: usize>(s: &[u8], extra: &[u8]) -> Option<[u8; N]> {

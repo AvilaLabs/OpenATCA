@@ -25,6 +25,10 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 fn list(dir: &Path, prefix: &str, suffix: &str) -> Vec<PathBuf> {
+    if let Err(e) = oa_sealed::refuse(dir) {
+        eprintln!("oa-wind-check: {e}");
+        std::process::exit(2);
+    }
     let mut v: Vec<PathBuf> = match std::fs::read_dir(dir) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())

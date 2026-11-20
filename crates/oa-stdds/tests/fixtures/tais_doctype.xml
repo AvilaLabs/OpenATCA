@@ -1,0 +1,3 @@
+<?xml version="1.0"?>
+<!DOCTYPE x [<!ENTITY e "boom">]>
+<ns2:TATrackAndFlightPlan xmlns:ns2="urn:us:gov:dot:faa:atm:terminal:entities:v4-0:tais:terminalautomationinformation"><record><track><trackNum>&e;</trackNum></track></record></ns2:TATrackAndFlightPlan>

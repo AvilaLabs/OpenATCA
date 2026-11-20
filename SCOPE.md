@@ -1,6 +1,6 @@
 # OpenATCA — Scope
 
-Status: scoping, 2026-11-13; milestones and benchmarks revised 2026-11-14. Owner: Connor Avila (Avila Labs).
+Status: scoping, 2026-11-13; milestones and benchmarks revised 2026-11-14; runway safety added 2026-11-20. Owner: Connor Avila (Avila Labs).
 
 ## 1. What this is
 
@@ -51,6 +51,13 @@ same interface and are indistinguishable to it. One core, five uses.
 - Migration machinery: shadow mode, comparator, per-function cutover and rollback, adapters to
   legacy formats.
 - The simulation and replay that rungs 1 and 2 need.
+- Runway safety (added 2026-11-20): tracking aircraft on the airport surface and alerting on
+  runway hazards: a landing or departure onto an occupied runway, two aircraft cleared onto one
+  runway at once, or an aircraft lined up to land on a taxiway. It is built on the
+  surface positions ADS-B already carries, so it can serve airports that have no surface radar,
+  as Austin did not in the 2023 near-collision there. Where an airport has ASDE-X, its output on
+  STDDS is the reference the tracking is measured against. Sequenced after the M5 airborne
+  safety nets. Design: `docs/RUNWAY_SAFETY_DESIGN.md`.
 
 ### Out of scope
 
@@ -58,7 +65,10 @@ same interface and are indistinguishable to it. One core, five uses.
 - Voice communications.
 - Traffic flow management (TFMS, the SMART tool) and NOTAMs: separate FAA systems, though our
   interfaces must exchange data with them.
-- Tower surface surveillance (ASDE-X) and airborne systems.
+- Replacing ASDE-X, the surface radar and multilateration system itself: its raw sensor data is
+  not available to us, so aircraft and vehicles without ADS-B are seen only where ASDE-X output
+  exists.
+- Airborne systems.
 - Oceanic airspace (ATOP): later. The RFI mentions oceanic scale, so the data model must not
   rule it out.
 

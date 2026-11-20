@@ -151,7 +151,7 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             );
             continue;
         }
-        let files: Result<Vec<File>, _> = parts.iter().map(File::open).collect();
+        let files: Result<Vec<File>, _> = parts.iter().map(|p| oa_sealed::open(p)).collect();
         let files = match files {
             Ok(f) => f,
             Err(e) => {

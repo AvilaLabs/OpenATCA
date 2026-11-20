@@ -43,7 +43,7 @@ use oa_bench::adsb_truth;
 use oa_bench::assoc::{associate, astatus, TruthIndex};
 use oa_bench::chunked::truth_index;
 use oa_bench::geo::KT_MPS;
-use oa_bench::input::{load, load_adsb, FeedInput};
+use oa_bench::input::{load_adsb, load_with, FeedInput};
 use oa_bench::legacy::{Legacy, NO_ALT};
 use oa_bench::pair::{build_pairs_with, PairTable};
 use oa_bench::run::RunConfig;
@@ -121,6 +121,13 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     };
+    // Every path is checked, as given and resolved, before anything is opened or created.
+    for p in [&adsb, &sfdps, &out] {
+        if let Err(e) = oa_sealed::refuse(p) {
+            eprintln!("p002: {e}");
+            return ExitCode::from(2);
+        }
+    }
     let git = git_state();
     if git_is_dirty(&git) && !allow_dirty {
         eprintln!(
@@ -1424,10 +1431,18 @@ fn run(
     flag_gate(mode, flag_unmatched, flag_dup_rows, flag_conflicts)?;
 
     // ERAM pairs.
-    let loaded = load(&[FeedInput {
-        feed: FeedKind::Sfdps,
-        dir: sfdps.to_path_buf(),
-    }])
+    // Every file of the directory is checked against the sealed list as it is opened.
+    let open: oa_bench::input::Opener = std::rc::Rc::new(|p: &Path| {
+        oa_sealed::refuse_io(p)?;
+        oa_bench::input::file_opener()(p)
+    });
+    let loaded = load_with(
+        &[FeedInput {
+            feed: FeedKind::Sfdps,
+            dir: sfdps.to_path_buf(),
+        }],
+        &open,
+    )
     .map_err(|e| e.to_string())?;
     let sfdps_inputs: Vec<String> = loaded
         .inputs

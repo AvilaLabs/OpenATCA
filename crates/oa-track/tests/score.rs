@@ -1112,3 +1112,168 @@ fn the_split_check_passes_the_split_of_the_scorer_and_refuses_a_shared_report_ti
     let (a, b, _) = split_reports(&clip.reports);
     assert_eq!(check_split(&a, &b), Ok(()));
 }
+
+/// Runs `oa-track-run` on the synthetic clip with `args` after `--adsb <clip> --out <out>`.
+fn run_realtime_binary(name: &str, args: &[&str]) -> (std::process::Output, PathBuf) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let clip = dir.join("track_realtime.oaf");
+    write_clip(&clip, &synthetic_reports());
+    let out = dir.join(name);
+    let _ = std::fs::remove_dir_all(&out);
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-track-run"))
+        .args([
+            "--adsb",
+            clip.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    (o, out)
+}
+
+fn text_after<'a>(text: &'a str, key: &str) -> &'a str {
+    text.lines()
+        .find(|l| l.contains(key))
+        .unwrap_or_else(|| panic!("no {key:?} in\n{text}"))
+}
+
+// REQ: OA-TRK-388
+#[test]
+fn realtime_writes_per_second_counts_and_a_digest_that_repeats() {
+    let mut digests = Vec::new();
+    let mut summary = Vec::new();
+    for k in 0..2 {
+        let (o, out) =
+            run_realtime_binary(&format!("track_rt_{k}"), &["--realtime", "--with-output"]);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let text = std::fs::read_to_string(out.join("realtime.txt")).unwrap();
+        assert_eq!(text, String::from_utf8_lossy(&o.stdout));
+        let csv = std::fs::read_to_string(out.join("seconds.csv")).unwrap();
+        let rows: Vec<Vec<&str>> = csv.lines().map(|l| l.split(',').collect()).collect();
+        assert_eq!(
+            rows[0],
+            [
+                "unix_second",
+                "reports",
+                "work_us",
+                "confirmed_tracks",
+                "tentative_tracks"
+            ]
+        );
+        // Three aircraft report every 2 s for 600 s: a row for every second, 1 to 3 reports in
+        // each odd or even second, and the last second holds the three confirmed tracks.
+        assert!(rows.len() > 500, "{}", rows.len());
+        assert!(rows[1..].iter().all(|r| r.len() == 5));
+        let last = rows.last().unwrap();
+        assert_eq!(last[3], "3", "{last:?}");
+        let reports: u64 = rows[1..].iter().map(|r| r[1].parse::<u64>().unwrap()).sum();
+        assert!(text_after(&text, "counters:").contains(&format!("offered {reports},")));
+        assert!(
+            text_after(&text, "peak tracks, sampled once per second").contains(": confirmed 3,")
+        );
+        // One row per second from the first to the last, and the traffic line says the same.
+        let first: i64 = rows[1][0].parse().unwrap();
+        let last_s: i64 = last[0].parse().unwrap();
+        assert_eq!(rows.len() as i64 - 1, last_s - first + 1);
+        assert!(text_after(&text, "traffic:").starts_with(&format!(
+            "traffic: {} s from unix second {first} ",
+            last_s - first + 1
+        )));
+        // Every second with reports has work in it, and the work adds up to the printed total.
+        let mut sum_us = 0.0;
+        for r in &rows[1..] {
+            let (n, us): (u64, f64) = (r[1].parse().unwrap(), r[2].parse().unwrap());
+            assert!(n == 0 || us > 0.0, "{r:?}");
+            sum_us += us;
+        }
+        let printed: f64 = text_after(&text, "processing time of a second")
+            .split("total ")
+            .last()
+            .unwrap()
+            .trim_end_matches(" s")
+            .parse()
+            .unwrap();
+        assert!((sum_us / 1e6 - printed).abs() < 0.002, "{sum_us} {printed}");
+        // The CPU share is over the traffic span.
+        let span = last_s - first + 1;
+        assert!(text_after(&text, "update window")
+            .contains(&format!("(over the {span} s span of the traffic)")));
+        for needle in [
+            "config (scoring_config from the full clip): max_tracks 4096",
+            "final advance and flush",
+            "s span of the traffic), update only",
+            "share of one core, total including ingest",
+            "cpu source:",
+            "single-threaded today",
+            "the same --max-tracks and the same build",
+            "process peak",
+            "An upper bound",
+            "counting as zero",
+            "processing time over the 300 busy seconds only (seconds with at least one measurement): p50 ",
+            "so at most 1000.000 ms; a batch completes at most its own work later, so a report's latency is at most 1 s + backlog + that second's work, at most ",
+            "conditions: the input was decoded and held in memory before timing, sorted by time, and processed on one thread, so the figures exclude network input, decoding and the interrupts of a live feed",
+            "the tick rows for a gap are emitted with the next update and charged to that second",
+            "sum of the per-second timers (wall only; no CPU is read per second): ",
+            " s wall outside the per-second timers: track counts, bookkeeping",
+            "final advance and flush after the last second: ",
+            "(includes the output spill)",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?}\n{text}");
+        }
+        assert!(text.contains("refused no_address: 0"));
+        digests.push(text_after(&text, "output rows digest:").to_string());
+        summary.push(text_after(&text, "run summary digest").to_string());
+        assert!(!out.join("report.txt").exists());
+    }
+    assert_eq!(digests[0], digests[1]);
+    assert_eq!(summary[0], summary[1]);
+    assert!(!digests[0].contains("not computed"));
+    let (o, out) = run_realtime_binary("track_rt_plain", &["--realtime"]);
+    assert!(o.status.success());
+    let text = std::fs::read_to_string(out.join("realtime.txt")).unwrap();
+    assert!(text_after(&text, "output rows digest:").contains("not computed"));
+    // Without rows the run summary digest is the same.
+    assert_eq!(text_after(&text, "run summary digest"), summary[0]);
+}
+
+// REQ: OA-TRK-388
+#[test]
+fn realtime_fails_on_a_full_table_an_empty_clip_and_flags_that_do_not_apply() {
+    // One track slot for three aircraft: refusals, a report that says so, and a failing exit.
+    let (o, out) = run_realtime_binary("track_rt_full", &["--realtime", "--max-tracks", "1"]);
+    assert_eq!(o.status.code(), Some(1));
+    let text = std::fs::read_to_string(out.join("realtime.txt")).unwrap();
+    assert!(text.contains("NOT A FULL-LOAD MEASUREMENT"), "{text}");
+    assert!(!text_after(&text, "counters:").contains("capacity-refused 0"));
+    // An empty clip.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let empty = dir.join("track_rt_empty.oaf");
+    std::fs::write(&empty, b"").unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-track-run"))
+        .args([
+            "--adsb",
+            empty.to_str().unwrap(),
+            "--out",
+            dir.join("track_rt_empty_out").to_str().unwrap(),
+            "--realtime",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("no reports"));
+    // Flags that do not apply are usage errors.
+    for args in [
+        vec!["--with-output"],
+        vec!["--max-tracks", "9"],
+        vec!["--realtime", "--digest", "d.txt"],
+        vec!["--realtime", "--rows", "r.bin"],
+        vec!["--realtime", "--no-score"],
+        vec!["--realtime", "--no-compare"],
+        vec!["--realtime", "--max-tracks", "many"],
+    ] {
+        let (o, _) = run_realtime_binary("track_rt_usage", &args);
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+    }
+}

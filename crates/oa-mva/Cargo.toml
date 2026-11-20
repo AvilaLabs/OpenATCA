@@ -10,6 +10,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+oa-sealed = { path = "../oa-sealed" }
 # F1: path dependencies inside this workspace. oa-xml reads the AIXM messages; oa-tiff, oa-dof
 # and oa-zip serve the offline terrain and obstacle clearance check (`check`, `oa-mva-check`),
 # which the core model and queries do not touch.

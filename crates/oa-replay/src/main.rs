@@ -28,6 +28,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Every input path is checked, as given and resolved, before anything is opened.
+    for i in &cmd.inputs {
+        if let Err(e) = oa_sealed::refuse(&i.path) {
+            eprintln!("oa-replay: {e}");
+            return ExitCode::from(2);
+        }
+    }
     let mut specs = Vec::with_capacity(cmd.inputs.len());
     for i in &cmd.inputs {
         let paths = if i.dir {

@@ -1,0 +1,333 @@
+//! The summary text and the per-sample CSV. Both are pure functions of the analysis and the
+//! header lines: no clock, no path of the run's own, so the same inputs give the same bytes.
+
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
+
+use oa_bench::stats::{stats_of, Stats};
+
+use crate::engine::{Analysis, FitMiss, PairErr, Row, Sample, SET_CODES, SET_NAMES};
+use crate::model::{Class, Unpaired, CLASSES, MIN_SPEED_MPS};
+
+/// The two finished outputs.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    /// The summary text; its last line is the digest line.
+    pub summary: String,
+    pub csv: String,
+}
+
+type Metric = (&'static str, fn(&PairErr) -> Option<f64>);
+
+/// The metrics of every set, with their units.
+const METRICS: [Metric; 5] = [
+    ("horizontal (m)", |e| Some(e.h_m)),
+    ("along track (m)", |e| e.along_m),
+    ("cross track (m)", |e| e.cross_m),
+    ("altitude (ft)", |e| e.dalt_ft),
+    ("velocity (m/s)", |e| e.dvel_mps),
+];
+
+/// Milliseconds as seconds with one decimal, by integer arithmetic.
+fn secs(ms: i64) -> String {
+    let sign = if ms < 0 { "-" } else { "" };
+    let a = ms.unsigned_abs();
+    format!("{sign}{}.{}", a / 1000, (a % 1000) / 100)
+}
+
+fn stat_line(s: &Stats) -> String {
+    if s.n == 0 {
+        return "no data".to_string();
+    }
+    format!(
+        "n {:>7}  rms {:>9.2}  mean {:>9.2}  p50 {:>9.2}  p95 {:>9.2}  p99 {:>9.2}",
+        s.n, s.rms, s.mean, s.median, s.p95, s.p99
+    )
+}
+
+/// Nearest-rank percentile `p` of sorted integers.
+fn rank(sorted: &[i64], p: usize) -> Option<i64> {
+    let n = sorted.len();
+    let r = (p * n).div_ceil(100).clamp(1, n.max(1));
+    sorted.get(r.checked_sub(1)?).copied()
+}
+
+fn counts(
+    out: &mut String,
+    label: &str,
+    rows: &[&Row],
+    pick: fn(&Row) -> &Result<Sample, Unpaired>,
+) {
+    let mut paired = 0u64;
+    let mut extrapolated = 0u64;
+    let mut why: BTreeMap<Unpaired, u64> = BTreeMap::new();
+    for r in rows {
+        match pick(r) {
+            Ok(s) => {
+                paired += 1;
+                extrapolated += u64::from(s.tracker_extrapolated);
+            }
+            Err(e) => *why.entry(*e).or_default() += 1,
+        }
+    }
+    let _ = writeln!(
+        out,
+        "{label}: paired {paired} (tracker fix extrapolated within 1 s: {extrapolated}), unpaired {}",
+        rows.len() as u64 - paired
+    );
+    for (e, c) in &why {
+        let _ = writeln!(out, "    unpaired, {e}: {c}");
+    }
+}
+
+fn metrics(
+    out: &mut String,
+    label: &str,
+    rows: &[&Row],
+    pick: fn(&Row) -> &Result<Sample, Unpaired>,
+) {
+    let _ = writeln!(out, "  {label}");
+    for (si, set) in SET_NAMES.iter().enumerate() {
+        let _ = writeln!(out, "    set: {set}");
+        for (name, f) in METRICS {
+            let v: Vec<f64> = rows
+                .iter()
+                .filter_map(|r| pick(r).as_ref().ok())
+                .filter_map(|s| s.errs.get(si).and_then(f))
+                .collect();
+            let _ = writeln!(out, "      {name:<16} {}", stat_line(&stats_of(&v)));
+        }
+    }
+}
+
+fn plain(r: &Row) -> &Result<Sample, Unpaired> {
+    &r.plain
+}
+
+fn fitted(r: &Row) -> &Result<Sample, Unpaired> {
+    &r.fitted
+}
+
+/// Altitude medians further apart than this factor (values floored at [`ALT_FLOOR_FT`]) are suspect.
+const ALT_FACTOR: f64 = 10.0;
+/// Altitudes below this are taken as this, so aircraft on the ground do not trip the check, feet.
+const ALT_FLOOR_FT: f64 = 100.0;
+/// The median STDDS to truth speed ratio is suspect outside this range.
+const SPEED_RATIO: (f64, f64) = (0.8, 1.25);
+
+/// Whether two altitude medians differ by more than [`ALT_FACTOR`].
+pub fn altitude_suspect(std_ft: f64, truth_ft: f64) -> bool {
+    let (a, b) = (
+        std_ft.abs().max(ALT_FLOOR_FT),
+        truth_ft.abs().max(ALT_FLOOR_FT),
+    );
+    a.max(b) / a.min(b) > ALT_FACTOR
+}
+
+/// Whether a median speed ratio is outside [`SPEED_RATIO`].
+pub fn speed_suspect(ratio: f64) -> bool {
+    !(SPEED_RATIO.0..=SPEED_RATIO.1).contains(&ratio)
+}
+
+/// The unit sanity lines of one class, on the paired samples at the published stamp.
+fn unit_check(out: &mut String, rows: &[&Row]) {
+    let samples: Vec<&Sample> = rows.iter().filter_map(|r| r.plain.as_ref().ok()).collect();
+    let pairs: Vec<(f64, f64)> = samples
+        .iter()
+        .filter_map(|s| Some((s.std_alt_ft?, s.tru_alt_ft?)))
+        .collect();
+    let ratios: Vec<f64> = samples
+        .iter()
+        .filter_map(|s| {
+            let (a, b) = (s.std_speed_mps?, s.tru_speed_mps?);
+            (b >= MIN_SPEED_MPS).then_some(a / b)
+        })
+        .collect();
+    let (sa, ta): (Vec<f64>, Vec<f64>) = pairs.into_iter().unzip();
+    let (sm, tm) = (stats_of(&sa), stats_of(&ta));
+    let rm = stats_of(&ratios);
+    if sm.n == 0 {
+        let _ = writeln!(out, "unit check, altitude: no data");
+    } else {
+        let flag = if altitude_suspect(sm.median, tm.median) {
+            "  units suspect"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "unit check, altitude: median STDDS {:.0} ft, median ADS-B truth {:.0} ft (n {}){flag}",
+            sm.median, tm.median, sm.n
+        );
+    }
+    if rm.n == 0 {
+        let _ = writeln!(out, "unit check, speed: no data");
+    } else {
+        let flag = if speed_suspect(rm.median) {
+            "  units suspect"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "unit check, speed: median ratio STDDS to ADS-B truth {:.3} (n {}){flag}",
+            rm.median, rm.n
+        );
+    }
+}
+
+fn class_section(out: &mut String, class: Class, a: &Analysis) {
+    let rows: Vec<&Row> = a.rows.iter().filter(|r| r.rec.class == class).collect();
+    let with_addr = rows.iter().filter(|r| r.rec.addr.is_some()).count();
+    let _ = writeln!(out);
+    let _ = writeln!(out, "== independence class: {} ==", class.name());
+    let _ = writeln!(
+        out,
+        "records {}, with Mode S address {with_addr}, without address {} (counted, never paired)",
+        rows.len(),
+        rows.len() - with_addr
+    );
+    counts(out, "stamp as published", &rows, plain);
+    counts(
+        out,
+        "stamp corrected by the fitted track offset",
+        &rows,
+        fitted,
+    );
+
+    let fits: Vec<_> = a.fits.iter().filter(|f| f.class == class).collect();
+    let mut offs: Vec<i64> = fits
+        .iter()
+        .filter_map(|f| f.result.ok().map(|x| x.offset_ms))
+        .collect();
+    offs.sort_unstable();
+    let edge = fits
+        .iter()
+        .filter(|f| f.result.is_ok_and(|x| x.at_edge))
+        .count();
+    let miss = |m: FitMiss| fits.iter().filter(|f| f.result == Err(m)).count();
+    let _ = writeln!(
+        out,
+        "time offsets: tracks {}, fitted {}, not fitted {}, at the edge of the search range {edge}",
+        fits.len(),
+        offs.len(),
+        fits.len() - offs.len()
+    );
+    let _ = writeln!(
+        out,
+        "    not fitted, no ADS-B truth over the +-15 s window: {}",
+        miss(FitMiss::NoTruthCoverage)
+    );
+    let _ = writeln!(
+        out,
+        "    not fitted, fewer than 8 usable samples: {}",
+        miss(FitMiss::TooFewSamples)
+    );
+    if !offs.is_empty() {
+        let at = |p| rank(&offs, p).map_or("NA".to_string(), secs);
+        let _ = writeln!(
+            out,
+            "    offset s (stamp late when positive): min {} p05 {} p50 {} p95 {} max {}",
+            offs.first().map_or("NA".to_string(), |&m| secs(m)),
+            at(5),
+            at(50),
+            at(95),
+            offs.last().map_or("NA".to_string(), |&m| secs(m)),
+        );
+    }
+    unit_check(out, &rows);
+    metrics(out, "stamp as published (offset 0)", &rows, plain);
+    metrics(
+        out,
+        "stamp corrected by the fitted track offset",
+        &rows,
+        fitted,
+    );
+}
+
+fn cell(v: Option<f64>) -> String {
+    v.map_or(String::new(), |x| format!("{x:.3}"))
+}
+
+fn status(r: &Result<Sample, Unpaired>) -> String {
+    match r {
+        Ok(_) => "paired".to_string(),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// One row per STDDS record: its place in the input (file and record number), class, status, fitted
+/// offset and errors. No address, track number, callsign, time or position: the real recordings are
+/// reported as counts and aggregate statistics only.
+fn csv_of(a: &Analysis) -> String {
+    let mut o = String::from("file,record,class,status_plain,offset_ms,status_fitted");
+    for mode in ["p", "f"] {
+        for set in SET_CODES {
+            for (name, _) in METRICS {
+                let short = name.split(' ').next().unwrap_or(name);
+                let _ = write!(o, ",{mode}_{set}_{short}");
+            }
+        }
+    }
+    o.push('\n');
+    for r in &a.rows {
+        let rec = &r.rec;
+        let _ = write!(
+            o,
+            "{},{},{},{},{},{}",
+            rec.file,
+            rec.index,
+            rec.class.code(),
+            status(&r.plain),
+            r.offset_ms.map_or(String::new(), |x| x.to_string()),
+            status(&r.fitted),
+        );
+        for res in [&r.plain, &r.fitted] {
+            for si in 0..SET_NAMES.len() {
+                let e = res.as_ref().ok().and_then(|s| s.errs.get(si));
+                for (_, f) in METRICS {
+                    o.push(',');
+                    o.push_str(&cell(e.and_then(f)));
+                }
+            }
+        }
+        o.push('\n');
+    }
+    o
+}
+
+/// The report of `a`. `header` lines (inputs and their digests) are printed first, verbatim.
+pub fn build_report(header: &[String], a: &Analysis) -> Report {
+    let mut s = String::new();
+    s.push_str("OpenATCA tracker and ADS-B truth against STDDS terminal radar tracks (TAIS)\n");
+    for h in header {
+        let _ = writeln!(s, "{h}");
+    }
+    s.push_str("Units assumed, not verified against the feed (oa-stdds tais.rs): STDDS altitude in feet, STDDS velocity in m/s east and north; each class prints a unit check.\n");
+    s.push_str("Altitude compared: the tracker row's altitude is the barometric one of the ADS-B report where it has one and the geometric one otherwise (the row does not say which); the ADS-B truth's is barometric.\n");
+    s.push_str("Independence: STARS in fusion mode uses ADS-B as one of its sensors, so every number is per class (class names state the flag value, not a meaning) and there is no all-class line.\n");
+    s.push_str("Error sets, all on the same paired samples (first minus second): tracker - stdds, ADS-B truth - stdds, tracker - ADS-B truth.\n");
+    s.push_str("Diagnostic: if STDDS follows ADS-B, the set ADS-B truth - stdds is small.\n");
+    s.push_str("Along and cross track use the direction of the ADS-B truth velocity (cross positive to the right); a truth slower than 2 m/s has none.\n");
+    s.push_str("Statistics: rms and signed mean over the values; p50, p95, p99 nearest-rank over absolute values.\n");
+    s.push_str("Pairing: Mode S address only; fixes at the STDDS stamp by interpolation (tracker rows up to 5 s apart; at most 1 s of extrapolation at a track end, counted).\n");
+    s.push_str("Offsets: per STDDS track, minimising along-track error against ADS-B truth only, -15 s to +15 s in 0.1 s steps, ties toward 0.\n");
+    let mut any = false;
+    for c in CLASSES {
+        if a.rows.iter().any(|r| r.rec.class == c) {
+            any = true;
+            class_section(&mut s, c, a);
+        }
+    }
+    if !any {
+        s.push_str("\nno STDDS records\n");
+    }
+    let csv = csv_of(a);
+    let mut all = s.clone().into_bytes();
+    all.extend_from_slice(b"\n--csv--\n");
+    all.extend_from_slice(csv.as_bytes());
+    let digest = oa_sha256::to_hex(&oa_sha256::sha256(&all));
+    let _ = writeln!(s, "\ndigest (summary above and the csv): {digest}");
+    Report { summary: s, csv }
+}
