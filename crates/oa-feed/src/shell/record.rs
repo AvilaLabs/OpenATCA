@@ -454,7 +454,9 @@ impl Recorder {
 fn existing_recording_bytes(dir: &Path, entry_limit: usize) -> io::Result<u64> {
     let mut total = 0u64;
     let mut entries = 0usize;
-    oa_sealed::refuse_io(dir)?;
+    // The recorder is capture: it checks against the compiled-in list and never fails closed on
+    // a changed list file (oa-sealed, `Sealed::production_embedded`).
+    oa_sealed::refuse_io_embedded(dir)?;
     // seal-allow: the recorder's own output directory: sizes only, nothing is read
     for entry in fs::read_dir(dir)? {
         if entries >= entry_limit {

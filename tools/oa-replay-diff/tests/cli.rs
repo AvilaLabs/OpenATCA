@@ -166,3 +166,114 @@ fn a_sealed_path_is_refused_with_exit_2_naming_the_rule_and_nothing_is_written()
     }
     assert!(!summary.exists());
 }
+
+/// A digest with one line per `(second, rows)`.
+fn digest_at(lines: &[(i64, u64)]) -> String {
+    let (h, mut prev) = ([7u8; 32], [0u8; 32]);
+    let mut t = format!("{DIGEST_HEADER}\n");
+    let mut total = 0u64;
+    for (s, r) in lines {
+        prev = chain_next(&prev, *s, &h, *r);
+        total += r;
+        t.push_str(&format!("{s} {} {} {r}\n", hex32(&prev), hex32(&h)));
+    }
+    t.push_str(&format!("end {} {total} {}\n", lines.len(), hex32(&prev)));
+    t
+}
+
+// The first second of the sealed window (the listed window widened by 15 minutes).
+const WINDOW_SECOND: i64 = 1_795_131_900;
+
+// REQ: OA-SEAL-014
+#[test]
+fn an_input_with_a_second_in_the_sealed_window_is_refused_with_a_count_and_no_differences() {
+    let d = dir("sealed_second");
+    let (a, b, ok) = (d.join("a.txt"), d.join("b.txt"), d.join("ok.txt"));
+    fs::write(&a, digest_at(&[(WINDOW_SECOND, 1), (WINDOW_SECOND + 5, 1)])).unwrap();
+    fs::write(&b, digest_at(&[(WINDOW_SECOND, 2)])).unwrap();
+    fs::write(&ok, digest_at(&[(100, 1)])).unwrap();
+    // In either position, a differing pair and an identical one.
+    for (x, y) in [(&a, &b), (&ok, &b), (&a, &a), (&b, &ok)] {
+        let o = bin().arg(x).arg(y).output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{o:?}");
+        assert!(
+            o.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&o.stdout)
+        );
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            err.contains("digest seconds are in the sealed window"),
+            "{err}"
+        );
+        assert!(err.contains("sealed-window rows dropped:"), "{err}");
+        assert!(!err.contains("sealed-window rows dropped: 0"), "{err}");
+    }
+    // The second just before the window is read, and the drop line is printed with 0.
+    let (c, e) = (d.join("c.txt"), d.join("e.txt"));
+    fs::write(&c, digest_at(&[(WINDOW_SECOND - 1, 1)])).unwrap();
+    fs::write(&e, digest_at(&[(WINDOW_SECOND - 1, 1)])).unwrap();
+    let o = bin().arg(&c).arg(&e).output().unwrap();
+    assert_eq!(o.status.code(), Some(0), "{o:?}");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("sealed-window rows dropped: 0"));
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_rows_file_with_a_row_in_the_sealed_window_is_refused_with_a_count_and_no_differences() {
+    use oa_track::canon::{canon_row, rows_header};
+    use oa_track::OutRow;
+    let row = |t_ns: i64| {
+        canon_row(&OutRow {
+            t_ns,
+            addr: 1,
+            lat_e7: 1,
+            lon_e7: 2,
+            vel_east_mps: 0.0,
+            vel_north_mps: 0.0,
+            pos_cov_m2: [0.0; 3],
+            vel_cov_m2s2: [0.0; 3],
+            turn_rate_rps: 0.0,
+            alt_ft: 0.0,
+            alt_var_ft2: 0.0,
+            vrate_fpm: 0.0,
+            mu_h: [0.0; 2],
+            mu_v: [0.0; 2],
+            flags: 0,
+        })
+    };
+    let d = dir("sealed_row");
+    let (a, b) = (d.join("a.txt"), d.join("b.txt"));
+    fs::write(&a, digest_at(&[(100, 1)])).unwrap();
+    fs::write(&b, digest_at(&[(100, 1)])).unwrap();
+    let rows = |name: &str, t_ns: i64| {
+        let p = d.join(name);
+        let mut bytes = rows_header(1).to_vec();
+        bytes.extend_from_slice(&row(t_ns));
+        fs::write(&p, bytes).unwrap();
+        p
+    };
+    // The digest second is clean; the row's own time is in the window.
+    let (ra, rb) = (
+        rows("ra.bin", 100_000_000_000),
+        rows("rb.bin", (WINDOW_SECOND + 1) * 1_000_000_000),
+    );
+    let o = bin()
+        .arg(&a)
+        .arg(&b)
+        .arg("--rows-a")
+        .arg(&ra)
+        .arg("--rows-b")
+        .arg(&rb)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2), "{o:?}");
+    assert!(
+        o.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&o.stdout)
+    );
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("1 rows are in the sealed window"), "{err}");
+    assert!(err.contains("sealed-window rows dropped: 1"), "{err}");
+}

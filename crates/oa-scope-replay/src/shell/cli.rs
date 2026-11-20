@@ -865,7 +865,11 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     }
     let a = parse_args(args)?;
     check_out_dir(&a.out_dir, a.overwrite)?;
-    let meta = std::fs::metadata(&a.snapshot)
+    // The guard first: the file is opened through it, and its size is read from the opened file.
+    let file = oa_sealed::open(&a.snapshot)
+        .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
+    let meta = file
+        .metadata()
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
     if meta.len() > oa_airspace::snapshot::MAX_SNAPSHOT_BYTES as u64 {
         return Err(CliError::Failed(format!(
@@ -874,8 +878,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         )));
     }
     let mut bytes = Vec::new();
-    oa_sealed::open(&a.snapshot)
-        .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut bytes))
+    std::io::Read::read_to_end(&mut &file, &mut bytes)
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
     let model = oa_airspace::snapshot::decode(&bytes).map_err(|e| failed("snapshot", e))?;
 

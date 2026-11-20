@@ -78,6 +78,9 @@ fn run(
     // An existing output is refused before any work is done (and again, race-free, at the create).
     for name in [TXT, CSV] {
         let p = out.join(name);
+        // The guard first: an output name inside sealed data is refused before it is probed.
+        g.check(&p).map_err(|e| e.to_string())?;
+        // seal-allow: the guard checked this output name on the line above; the probe reads no file
         if std::fs::symlink_metadata(&p).is_ok() {
             return Err(format!(
                 "{}: output file exists (never overwritten)",

@@ -1,0 +1,37 @@
+[package]
+name = "oa-ca-run"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates; not outside dependencies (RULESET F1). The ground
+# table of the clip is the close-encounter tool's own, shared so the two tools agree.
+oa-adsb = { path = "../../crates/oa-adsb" }
+oa-bench = { path = "../../crates/oa-bench" }
+oa-ca = { path = "../../crates/oa-ca" }
+oa-encounter-run = { path = "../oa-encounter" }
+oa-sealed = { path = "../../crates/oa-sealed" }
+oa-safety = { path = "../../crates/oa-safety" }
+oa-sha256 = { path = "../../crates/oa-sha256" }
+oa-track = { path = "../../crates/oa-track" }
+
+[dev-dependencies]
+# Workspace crate, not an outside dependency (RULESET F1): frames the recording of the sealed-window test.
+oa-feed = { path = "../../crates/oa-feed" }
+
+[lib]
+name = "oa_ca_run"
+path = "src/lib.rs"
+
+[[bin]]
+name = "oa-ca"
+path = "src/main.rs"
+
+[package.metadata.openatca]
+class = "shell"

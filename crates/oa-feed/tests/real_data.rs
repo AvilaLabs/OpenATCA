@@ -70,8 +70,9 @@ fn real_recordings_compress_and_replay_identically() {
         let t = Instant::now();
         let gz = convert(raw, &dir, "rec");
         let make_s = t.elapsed().as_secs_f64();
-        let raw_len = std::fs::metadata(raw).unwrap().len();
-        let gz_len: u64 = gz.iter().map(|p| std::fs::metadata(p).unwrap().len()).sum();
+        let len = |p: &Path| oa_sealed::open(p).unwrap().metadata().unwrap().len();
+        let raw_len = len(raw);
+        let gz_len: u64 = gz.iter().map(|p| len(p)).sum();
         let t = Instant::now();
         let a = replay_files(std::slice::from_ref(raw)).unwrap();
         let raw_s = t.elapsed().as_secs_f64();

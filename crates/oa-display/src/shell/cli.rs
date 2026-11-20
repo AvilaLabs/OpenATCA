@@ -229,7 +229,11 @@ fn display_err(e: DisplayError) -> CliError {
 /// `render`: snapshot in, PPM out; the summary goes to `out`.
 pub fn run_render(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     let a = parse_render_args(args)?;
-    let meta = std::fs::metadata(&a.snapshot)
+    // The guard first: the file is opened through it, and its size is read from the opened file.
+    let file = oa_sealed::open(&a.snapshot)
+        .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
+    let meta = file
+        .metadata()
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
     if meta.len() > MAX_SNAPSHOT_BYTES as u64 {
         return Err(CliError::Failed(format!(
@@ -238,8 +242,7 @@ pub fn run_render(args: &[String], out: &mut dyn Write) -> Result<(), CliError> 
         )));
     }
     let mut bytes = Vec::new();
-    oa_sealed::open(&a.snapshot)
-        .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut bytes))
+    std::io::Read::read_to_end(&mut &file, &mut bytes)
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
     let model = decode(&bytes).map_err(|e| failed("snapshot", e))?;
     let mut view = view_new(

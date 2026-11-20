@@ -19,7 +19,7 @@ use oa_track::fusion::{
     fusion_stats, fusion_tracker_config,
 };
 use oa_track::fusion_score::{make_radar, simulate_adsb, simulate_plots, Kind, ADSB_STUDY};
-use oa_track::fusion_world::clip_world;
+use oa_track::fusion_world::clip_world_tallied;
 use oa_track::radar::{RadarPlot, RadarSite};
 use oa_track::{
     output_clear, output_new, tracker_new, tracker_update, Measurement, TrackerConfig,
@@ -76,9 +76,11 @@ pub struct ClipResult {
     pub load_end: String,
 }
 
-/// Builds the inputs from the clip.
-pub fn clip_inputs(cfg: &ClipCfg) -> Result<ClipInputs, String> {
-    let built = clip_world(&cfg.path)?;
+/// Builds the inputs from the clip. The rows and frames the clip reader dropped for their time
+/// (a sealed window, OA-SEAL-014) are put in `sealed` as soon as the clip is read, so the caller
+/// has the count on an error exit too.
+pub fn clip_inputs(cfg: &ClipCfg, sealed: &mut u64) -> Result<ClipInputs, String> {
+    let built = clip_world_tallied(&cfg.path, sealed)?;
     let (mut lo, mut hi) = (i64::MAX, i64::MIN);
     for l in 0..built.legs.len() {
         let leg = oa_truth::LegIx(l as u32);
@@ -206,10 +208,11 @@ pub fn run_tracker_only(adsb: &[Measurement]) -> Result<Dist, String> {
     Ok(dist_of(&upd))
 }
 
-/// The whole clip run: ADS-B only, radar only, both, and the tracker alone.
-pub fn run_clip(cfg: &ClipCfg) -> Result<ClipResult, String> {
+/// The whole clip run: ADS-B only, radar only, both, and the tracker alone. The sealed-window
+/// count of the clip read is put in `sealed` (see [`clip_inputs`]).
+pub fn run_clip(cfg: &ClipCfg, sealed: &mut u64) -> Result<ClipResult, String> {
     let load_start = loadavg3();
-    let inp = clip_inputs(cfg)?;
+    let inp = clip_inputs(cfg, sealed)?;
     let none: Vec<&[RadarPlot]> = inp.plots.iter().map(|_| &[][..]).collect();
     let all: Vec<&[RadarPlot]> = inp.plots.iter().map(Vec::as_slice).collect();
     let passes = vec![
