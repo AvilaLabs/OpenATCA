@@ -125,9 +125,10 @@ fn a_frame_received_in_the_window_is_dropped_whole_and_counted_whatever_its_rows
                 seen.push(t)
             })
             .unwrap();
-        assert_eq!((damaged, sealed, seen.len()), (0, 1, 0));
+        // The frame holds two rows: it counts for two.
+        assert_eq!((damaged, sealed, seen.len()), (0, 2, 0));
         let c = load_adsb(&clip_received("recv_load.oaf", &r, recv)).unwrap();
-        assert_eq!((reports_len(&c.reports), c.sealed_window_dropped), (0, 1));
+        assert_eq!((reports_len(&c.reports), c.sealed_window_dropped), (0, 2));
     }
     let mut seen = Vec::new();
     let (_, sealed) =

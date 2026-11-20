@@ -114,8 +114,9 @@ pub fn read_clip_tallied(
     let damaged = read_frames(&mut f, &mut |fr| {
         // A frame received in a sealed window is dropped whole and counted once.
         if fr.kind == Kind::Message && oa_sealed::in_sealed_window(fr.recv_unix_ns) {
-            sealed += 1;
-            oa_sealed::note_window_drops(1);
+            let n = oa_adsb::dropped_frame_units(fr.payload);
+            sealed += n;
+            oa_sealed::note_window_drops(n);
             return;
         }
         if fr.kind == Kind::Message && over.is_none() {
@@ -171,6 +172,9 @@ pub struct SealCheck {
     pub rows_in_window: u64,
     /// Frames that did not parse: damaged, or a payload that does not decode.
     pub unreadable: u64,
+    /// What a drop line would count: the rows of each frame received in the window, and the rows
+    /// timed in it in the others (see `oa_sealed::DropReport`).
+    pub units: u64,
 }
 
 impl SealCheck {
@@ -181,6 +185,31 @@ impl SealCheck {
             && self.rows_in_window == 0
             && self.unreadable == 0
     }
+}
+
+/// The records of an ADS-B payload whose raw time (the i64 at byte 24 of the record) is in
+/// `window`, read with no validation of the record: the record length is the header's own, the
+/// count is the bytes that hold whole records. `None` when the records cannot be located (no
+/// ADS1/ADS2 header, a record too short to hold a time, or a count the payload cannot hold).
+fn raw_times_in_window(payload: &[u8], window: oa_sealed::DropWindow) -> Option<u64> {
+    const HEADER: usize = 16;
+    const TIME_AT: usize = 24;
+    let magic = payload.get(..4)?;
+    if magic != b"ADS2" && magic != b"ADS1" {
+        return None;
+    }
+    let rec = usize::from(u16::from_le_bytes(payload.get(4..6)?.try_into().ok()?));
+    let count = u32::from_le_bytes(payload.get(8..12)?.try_into().ok()?) as usize;
+    if rec < TIME_AT + 8 || payload.len() < HEADER.checked_add(count.checked_mul(rec)?)? {
+        return None;
+    }
+    let mut n = 0u64;
+    for i in 0..count {
+        let at = HEADER + i * rec + TIME_AT;
+        let t = i64::from_le_bytes(payload.get(at..at + 8)?.try_into().ok()?);
+        n += u64::from(window.contains(t.div_euclid(1_000_000)));
+    }
+    Some(n)
 }
 
 /// Opens a clip through the seal guard and checks every frame's receive time and every row's time
@@ -205,16 +234,16 @@ pub fn seal_check_clip(
     let mut frame = Reports::default();
     let damaged = read_frames(&mut f, &mut |fr| {
         c.frames += 1;
-        if window.contains(fr.recv_unix_ns.div_euclid(1_000_000)) {
-            c.frames_in_window += 1;
-        }
+        let frame_in = window.contains(fr.recv_unix_ns.div_euclid(1_000_000));
+        c.frames_in_window += u64::from(frame_in);
+        let mut in_rows = 0u64;
         if fr.kind == Kind::Message {
             reports_clear(&mut frame);
             match decode_payload_lenient(fr.payload, &mut frame) {
                 Ok(_) => {
                     let n = reports_len(&frame);
                     c.rows += n as u64;
-                    c.rows_in_window += frame
+                    in_rows = frame
                         .time_ns
                         .iter()
                         .take(n)
@@ -223,7 +252,22 @@ pub fn seal_check_clip(
                 }
                 Err(_) => c.unreadable += 1,
             }
+            // The raw time of every record, with no validation: a record the decoder drops (an
+            // older commit's decoder may keep it) is still counted. A payload whose records
+            // cannot be located does not parse.
+            match raw_times_in_window(fr.payload, window) {
+                Some(raw) => in_rows = in_rows.max(raw),
+                None => c.unreadable += 1,
+            }
         }
+        c.rows_in_window += in_rows;
+        // What the drop line counts: the rows of a frame received in the window, else the rows
+        // timed in it.
+        c.units += if frame_in {
+            oa_adsb::dropped_frame_units(fr.payload)
+        } else {
+            in_rows
+        };
     });
     c.unreadable += damaged.map_err(io)?;
     Ok(c)
@@ -495,6 +539,51 @@ mod tests {
 
     // REQ: OA-SEAL-014
     #[test]
+    fn the_seal_check_counts_a_record_the_decoder_drops_by_its_raw_time() {
+        use oa_adsb::{encode_payload, reports_push, ROW_EMPTY};
+        const B: i64 = 1_700_000_000_000_000_000;
+        let w = oa_sealed::DropWindow::from_ns_span(B + 1_000_000_000_000, B + 2_000_000_000_000);
+        let clip = |lat: i32, t: i64, recv: i64| {
+            let mut r = Reports::default();
+            let mut row = ROW_EMPTY;
+            row.icao = 0xA00001;
+            row.time_ns = t;
+            row.lat_e7 = 410_000_000;
+            row.lon_e7 = -880_000_000;
+            reports_push(&mut r, &row);
+            let mut payload = Vec::new();
+            encode_payload(&mut payload, &r, 0, 1).unwrap();
+            // The latitude of the one record (byte 4 of it, after the 16-byte header).
+            payload[20..24].copy_from_slice(&lat.to_le_bytes());
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(&mut buf, 1, FLAG_BYTES, 0, recv, 0, &payload).unwrap();
+            write("rawtime.oaf", &buf[..n])
+        };
+        let out = B + 3_000_000_000_000;
+        // A record with an impossible latitude is dropped by the decoder; its raw time counts.
+        let c = seal_check_clip(&clip(i32::MAX, B + 1_500_000_000_000, out), 1 << 20, w).unwrap();
+        assert_eq!((c.rows, c.rows_in_window), (0, 1), "{c:?}");
+        assert!(!c.clean());
+        // The same record outside the window is clean, whatever its latitude.
+        let c = seal_check_clip(&clip(i32::MAX, out, out), 1 << 20, w).unwrap();
+        assert_eq!(c.rows_in_window, 0);
+        // A record too short to hold a time refuses the clip: the record length field says 16.
+        let mut r = Reports::default();
+        let mut row = ROW_EMPTY;
+        row.time_ns = out;
+        row.lat_e7 = 1;
+        reports_push(&mut r, &row);
+        let mut payload = Vec::new();
+        encode_payload(&mut payload, &r, 0, 1).unwrap();
+        payload[4..6].copy_from_slice(&16u16.to_le_bytes());
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, 1, FLAG_BYTES, 0, out, 0, &payload).unwrap();
+        let c = seal_check_clip(&write("short.oaf", &buf[..n]), 1 << 20, w).unwrap();
+        assert!(c.unreadable > 0 && !c.clean(), "{c:?}");
+    }
+
+    // REQ: OA-SEAL-014
+    #[test]
     fn the_seal_check_refuses_a_clip_that_does_not_parse_and_one_with_no_frames() {
         let w = oa_sealed::DropWindow::from_ns_span(1_000_000_000_000, 2_000_000_000_000);
         let mut bytes = timed_clip(&[(0, &[0])]);
@@ -518,11 +607,12 @@ mod tests {
     fn a_frame_received_in_the_window_is_dropped_whole_whatever_its_rows_say() {
         const FROM: i64 = 1_795_131_900_000_000_000;
         let out = FROM - 3_600_000_000_000;
-        let bytes = timed_clip(&[(FROM + 5, &[out]), (out, &[out + 1])]);
+        let bytes = timed_clip(&[(FROM + 5, &[out, out + 2]), (out, &[out + 1])]);
         let (got, bad, dropped, sealed) =
             read_clip_counted(&write("recv.oaf", &bytes), 1 << 20, 1000).unwrap();
         assert_eq!(got.time_ns, [out + 1]);
-        assert_eq!((bad, dropped, sealed), (0, 0, 1));
+        // The dropped frame holds two rows: it counts for two.
+        assert_eq!((bad, dropped, sealed), (0, 0, 2));
     }
 }
 

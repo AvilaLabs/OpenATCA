@@ -519,6 +519,16 @@ pub fn reports_extend_unsealed(dst: &mut Reports, src: &Reports) -> u64 {
     0
 }
 
+/// What a frame dropped because it was received in a sealed window counts for in the drop line:
+/// the rows its payload holds when it decodes (at least 1), else 1.
+pub fn dropped_frame_units(payload: &[u8]) -> u64 {
+    let mut r = Reports::default();
+    match decode_payload_lenient(payload, &mut r) {
+        Ok(_) => (reports_len(&r) as u64).max(1),
+        Err(_) => 1,
+    }
+}
+
 /// What to keep: a latitude/longitude box and a time window, applied while decoding. A report
 /// is kept when its position is inside the box (edges included) and its time is in
 /// `[from_ns, to_ns)`. Plain record (A1).

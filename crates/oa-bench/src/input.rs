@@ -520,8 +520,8 @@ pub fn for_each_adsb_frame(path: &Path, f: &mut dyn FnMut(i64, &[u8])) -> io::Re
 }
 
 /// [`for_each_adsb_frame`], also returning the number of rows in the frames left out because a
-/// row's time is in a sealed window, plus one for each frame left out because it was received in
-/// one (the count is added to the process-wide one as well).
+/// row's time is in a sealed window, plus the rows of each frame left out because it was received in
+/// one (1 if its payload does not decode) (the count is added to the process-wide one as well).
 pub fn for_each_adsb_frame_counted(
     path: &Path,
     f: &mut dyn FnMut(i64, &[u8]),
@@ -535,7 +535,7 @@ pub fn for_each_adsb_frame_counted(
             // A frame received in a sealed window is dropped whole and counted (once), as the
             // replay source does, whatever its rows say.
             if oa_sealed::in_sealed_window(fr.recv_unix_ns) {
-                sealed += 1;
+                sealed += oa_adsb::dropped_frame_units(fr.payload);
                 return;
             }
             oa_adsb::reports_clear(&mut tmp);
@@ -580,8 +580,9 @@ pub fn load_adsb_counted(path: &Path, open: &Opener, sealed: &mut u64) -> io::Re
         if fr.kind == oa_feed::Kind::Message {
             // A frame received in a sealed window is dropped whole and counted once.
             if oa_sealed::in_sealed_window(fr.recv_unix_ns) {
-                sealed_window_dropped += 1;
-                oa_sealed::note_window_drops(1);
+                let n = oa_adsb::dropped_frame_units(fr.payload);
+                sealed_window_dropped += n;
+                oa_sealed::note_window_drops(n);
                 return;
             }
             // Rows in a sealed window are dropped and counted (OA-SEAL-014).

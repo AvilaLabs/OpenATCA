@@ -24,7 +24,7 @@ fn run(drops: &mut oa_sealed::DropReport) -> Result<ExitCode, String> {
         return Err("the seal list has no usable window (fail-closed): clip refused".to_string());
     }
     let c = seal_check_clip(path, MAX_CLIP_BYTES, window).map_err(|e| e.to_string())?;
-    drops.add(c.frames_in_window + c.rows_in_window);
+    drops.add(c.units);
     println!(
         "clip {path}: {} frames, {} rows; in the sealed window: {} frames by receive time, {} rows; unreadable frames: {}",
         c.frames, c.rows, c.frames_in_window, c.rows_in_window, c.unreadable
