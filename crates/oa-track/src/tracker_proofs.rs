@@ -1562,16 +1562,18 @@ fn update_in_order_held_with_a_report_that_is_not_applied_changes_only_the_refus
     let votes = a.moves_old_path_votes - b.moves_old_path_votes;
     let unpredictable = a.moves_old_path_unpredictable - b.moves_old_path_unpredictable;
     let decision_rejected = a.moves_decision_rejected - b.moves_decision_rejected;
-    assert!(votes + unpredictable + decision_rejected <= 1);
+    // A refused report on an old path that cannot be predicted decides nothing: it is counted
+    // as the refusal it is (`moves_decision_rejected`), never as unpredictable (RT-239 review).
+    assert_eq!(unpredictable, 0);
+    assert!(votes + decision_rejected <= 1);
     assert_eq!(
         t.mv_old_vote_ns[PROOF_SLOT],
         if votes == 1 { m.toa_ns } else { vote }
     );
     kani::cover!(decision_rejected == 1, "a deciding report was refused");
     kani::cover!(votes == 1, "a first report on the old path");
-    kani::cover!(unpredictable == 1, "an old path that cannot be predicted");
     kani::cover!(
-        votes + unpredictable + decision_rejected == 0,
+        votes + decision_rejected == 0,
         "too soon to decide"
     );
 }
