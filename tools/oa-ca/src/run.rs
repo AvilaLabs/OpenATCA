@@ -2,9 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
+use std::path::Path;
 
-use oa_bench::input::load_adsb;
+use oa_bench::input::{file_opener, load_adsb_counted, Opener};
 use oa_ca::{
     alert_log_clear, alert_log_new, ca_check, ca_cycle, ca_finish, ca_new, ca_note_lost_input,
     ca_totals, event_log_clear, event_log_new, Alert, AlertLog, AltLost, CaState, CaTrack,
@@ -196,8 +197,8 @@ pub fn track_and_alert(
     let mut out = output_new(cfg.out_capacity);
     let mut f = Feed {
         st: ca_new(&set.ca)?,
-        alerts: alert_log_new(set.alert_log_capacity),
-        events: event_log_new(set.event_log_capacity),
+        alerts: alert_log_new(set.alert_log_capacity)?,
+        events: event_log_new(set.event_log_capacity)?,
         net: state_table_new(set.net_stale_limit_ns, set.net_future_horizon_ns)
             .map_err(|e| format!("net state table: {e:?}"))?,
         inh: Box::new(inhibits_new()),
@@ -251,12 +252,60 @@ pub fn run(args: &Args) -> Result<String, String> {
 }
 
 /// [`run`], also giving `sealed` the count of clip rows left out for a sealed window (set as soon
-/// as the clip is read, so an error after that still carries it).
+/// as the frames are read, so an error after that, or in reading the rest, still carries it).
 pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
+    run_counted_with(args, &file_opener(), sealed)
+}
+
+/// The names of the output files, the summary last: it is the mark of a complete run.
+const OUTPUTS: [&str; 3] = ["alerts.csv", "altitude_lost.csv", "summary.txt"];
+
+/// Removes the output files of an earlier run, each path checked by the guard first, so that a
+/// run that fails never leaves files that look like its own result.
+fn remove_stale_outputs(out: &Path) -> Result<(), String> {
+    for name in OUTPUTS {
+        let p = out.join(name);
+        refuse_sealed(Sealed::production(), &p)?;
+        match fs::remove_file(&p) {
+            Ok(()) => {}
+            // No such file, or no such directory (the run then fails on creating it, with its
+            // own message, after the clip is read).
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(e) => return Err(format!("{}: {e}", p.display())),
+        }
+    }
+    Ok(())
+}
+
+/// Writes `text` to `dir/name` whole or not at all: to a temporary name in the same directory,
+/// flushed to disk, then renamed over the final name.
+fn write_atomic(dir: &Path, name: &str, text: &str) -> Result<(), String> {
+    let tmp = dir.join(format!(".{name}.tmp"));
+    let fin = dir.join(name);
+    let written = (|| -> std::io::Result<()> {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, &fin)
+    })();
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("{}: {e}", fin.display()));
+    }
+    Ok(())
+}
+
+/// [`run_counted`] with the clip opened by `open` (a test hands it a clip that fails).
+pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<String, String> {
     // Every path is checked before anything is opened or created, for a caller of the library too.
     for p in [&args.adsb, &args.config, &args.out] {
         refuse_sealed(Sealed::production(), p)?;
     }
+    remove_stale_outputs(&args.out)?;
     let mut cfg_bytes = Vec::new();
     open_guarded(Sealed::production(), &args.config)
         .map_err(|e| match e {
@@ -267,8 +316,9 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     let cfg_text = String::from_utf8(cfg_bytes.clone())
         .map_err(|_| format!("{}: not UTF-8 text", args.config.display()))?;
     let set = parse_config(&cfg_text).map_err(|e| format!("{}: {e}", args.config.display()))?;
-    let clip = load_adsb(&args.adsb).map_err(|e| e.to_string())?;
-    *sealed = clip.sealed_window_dropped;
+    // The count goes straight into `sealed`, so a clip that fails after rows were dropped still
+    // reports them.
+    let clip = load_adsb_counted(&args.adsb, open, sealed).map_err(|e| e.to_string())?;
     let clip_sha = clip.hash.sha256.clone();
     let (reports, scope) = if args.scorer_half {
         let (a, b, _) = split_reports(&clip.reports);
@@ -324,13 +374,12 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         alerts_sha256: &csv_sha,
     });
     let events = events_csv(&rec.events);
-    for (file, text) in [
-        ("alerts.csv", &csv),
-        ("altitude_lost.csv", &events),
-        ("summary.txt", &summary),
-    ] {
-        let p = args.out.join(file);
-        fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    for (file, text) in OUTPUTS.into_iter().zip([&csv, &events, &summary]) {
+        write_atomic(&args.out, file, text)?;
     }
+    // The renames reach the disk with the directory.
+    fs::File::open(&args.out)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| format!("{}: {e}", args.out.display()))?;
     Ok(summary)
 }

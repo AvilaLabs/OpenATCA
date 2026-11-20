@@ -20,6 +20,10 @@ use oa_safety::geom::polygon_new;
 
 const NM: f64 = 1852.0;
 const S_NS: f64 = 1.0e9;
+/// The most entries a log may be asked to hold (the tables are allocated whole at the start).
+const MAX_LOG_CAPACITY: usize = 1 << 24;
+/// The longest configuration text read, bytes (a real one is a few hundred lines).
+const MAX_TEXT_BYTES: usize = 1 << 20;
 
 /// What the tool needs beyond the core's configuration.
 // A7.2: cold struct, size guard waived
@@ -74,6 +78,15 @@ fn to_usize(key: &str, v: &str) -> Result<usize, String> {
     usize::try_from(whole(key, v)?).map_err(|_| format!("{key}: `{v}` is too large"))
 }
 
+/// A capacity of a log: at most [`MAX_LOG_CAPACITY`].
+fn log_capacity(key: &str, v: &str) -> Result<usize, String> {
+    let n = to_usize(key, v)?;
+    if n > MAX_LOG_CAPACITY {
+        return Err(format!("{key}: `{v}` is more than {MAX_LOG_CAPACITY}"));
+    }
+    Ok(n)
+}
+
 fn seconds_ns(key: &str, v: &str) -> Result<i64, String> {
     let s = finite(key, v)?;
     let ns = s * S_NS;
@@ -115,6 +128,12 @@ fn volume(v: &str) -> Result<Volume, String> {
             v_ft: finite("volume v_ft", z)?,
         }),
         ["polygon", z0, z1, h, z, points @ ..] if points.len() >= 3 => {
+            if points.len() > oa_safety::geom::MAX_VERTICES {
+                return Err(format!(
+                    "volume polygon: more than {} points",
+                    oa_safety::geom::MAX_VERTICES
+                ));
+            }
             let mut pts = Vec::new();
             for p in points {
                 let (la, lo) = p
@@ -139,6 +158,9 @@ fn volume(v: &str) -> Result<Volume, String> {
 
 /// Parses the configuration text, and checks it with the core's own check.
 pub fn parse_config(text: &str) -> Result<Settings, String> {
+    if text.len() > MAX_TEXT_BYTES {
+        return Err(format!("the configuration is longer than {MAX_TEXT_BYTES} bytes"));
+    }
     let mut kv: BTreeMap<&str, &str> = BTreeMap::new();
     let mut volumes: Vec<&str> = Vec::new();
     for (n, raw) in text.lines().enumerate() {
@@ -203,7 +225,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         ca,
         net_stale_limit_ns: seconds_ns("net_stale_limit_s", get("net_stale_limit_s")?)?,
         net_future_horizon_ns: seconds_ns("net_future_horizon_s", get("net_future_horizon_s")?)?,
-        alert_log_capacity: to_usize("alert_log_capacity", get("alert_log_capacity")?)?,
-        event_log_capacity: to_usize("event_log_capacity", get("event_log_capacity")?)?,
+        alert_log_capacity: log_capacity("alert_log_capacity", get("alert_log_capacity")?)?,
+        event_log_capacity: log_capacity("event_log_capacity", get("event_log_capacity")?)?,
     })
 }

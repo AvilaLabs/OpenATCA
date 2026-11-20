@@ -169,6 +169,33 @@ fn the_configuration_has_no_defaults_and_names_what_is_wrong() {
     assert!(parse_config(&bad).unwrap_err().contains("off the globe"));
 }
 
+// REQ: OA-CA-013
+#[test]
+fn a_log_capacity_beyond_the_bound_is_refused_by_name_and_the_bound_itself_is_accepted() {
+    let bound = 1usize << 24;
+    for key in ["alert_log_capacity", "event_log_capacity"] {
+        let with = |n: usize| {
+            let line = DEV_CFG
+                .lines()
+                .find(|l| l.starts_with(key))
+                .unwrap()
+                .to_string();
+            DEV_CFG.replace(&line, &format!("{key} = {n}"))
+        };
+        assert!(parse_config(&with(bound)).is_ok(), "{key}");
+        let e = parse_config(&with(bound + 1)).unwrap_err();
+        assert!(e.contains(key), "{e}");
+        let e = parse_config(&with(usize::MAX)).unwrap_err();
+        assert!(e.contains(key), "{e}");
+    }
+    // More polygon points than the core holds, and a text no configuration is as long as.
+    let many: String = (0..40).map(|k| format!(" 41.{k:02},-88.0")).collect();
+    let bad = format!("{DEV_CFG}\nvolume = polygon 0 5000 2 500{many}\n");
+    assert!(parse_config(&bad).unwrap_err().contains("points"));
+    let long = format!("{DEV_CFG}\n#{}\n", "x".repeat(1 << 20));
+    assert!(parse_config(&long).unwrap_err().contains("longer than"));
+}
+
 // REQ: OA-CA-024
 #[test]
 fn the_95_percent_radius_is_the_larger_eigenvalue_with_the_chi_square_quantile() {

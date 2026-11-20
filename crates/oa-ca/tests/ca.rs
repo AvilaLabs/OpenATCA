@@ -83,8 +83,8 @@ struct Rig {
 fn rig_with(c: &CaConfig) -> Rig {
     Rig {
         st: ca_new(c).unwrap(),
-        alerts: alert_log_new(256),
-        events: event_log_new(256),
+        alerts: alert_log_new(256).unwrap(),
+        events: event_log_new(256).unwrap(),
         net: state_table_new(10 * S, S).unwrap(),
     }
 }
@@ -353,7 +353,7 @@ fn a_track_that_loses_its_altitude_raises_one_event_per_loss_and_is_still_tested
     assert_eq!(ca_totals(&r.st).alt_lost, 2);
     // The event log is bounded and counts what it loses.
     let mut r = rig();
-    r.events = event_log_new(1);
+    r.events = event_log_new(1).unwrap();
     for (t, alt) in [(0, 9000.0), (1, f32::NAN), (2, 9000.0), (3, f32::NAN)] {
         let out = step(&mut r, t, &with(alt));
         if t == 3 {
@@ -985,7 +985,7 @@ fn a_configuration_out_of_range_is_refused_naming_the_value() {
 #[test]
 fn a_full_alert_log_counts_what_it_loses_and_degrades_the_net() {
     let mut r = rig();
-    r.alerts = alert_log_new(1);
+    r.alerts = alert_log_new(1).unwrap();
     let rows = [
         still(1, 0.0, 0.0, 500.0),
         still(3, 100_000.0, 0.0, 500.0),
@@ -1019,7 +1019,7 @@ fn a_full_alert_log_counts_what_it_loses_and_degrades_the_net() {
     // Alerts the log cannot hold when the run ends come after the last report: they are counted
     // apart and the final net state shows them.
     let mut r = rig();
-    r.alerts = alert_log_new(1);
+    r.alerts = alert_log_new(1).unwrap();
     step(&mut r, 0, &rows);
     assert_eq!(ca_open_len(&r.st), 3);
     assert_eq!(ca_finish(&mut r.st, &mut r.alerts, &mut r.net), 3);
@@ -1351,4 +1351,12 @@ fn the_decision_agrees_with_a_scan_for_stationary_level_current_and_edge_pairs()
             "{k} {certain_n:?} {got_n:?}"
         );
     }
+}
+
+// REQ: OA-CA-013
+#[test]
+fn a_log_too_large_to_allocate_is_an_error_not_an_abort() {
+    assert!(alert_log_new(usize::MAX).is_err());
+    assert!(event_log_new(usize::MAX).is_err());
+    assert!(alert_log_new(4).is_ok() && event_log_new(4).is_ok());
 }

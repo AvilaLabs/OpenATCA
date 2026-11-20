@@ -172,6 +172,15 @@ pub fn ca_check(c: &CaConfig) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// An empty vector with room for `n`, or the refusal if the allocator has none (a capacity
+/// the machine cannot hold is an error, never an abort).
+fn table<T>(n: usize) -> Result<Vec<T>, &'static str> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(n)
+        .map_err(|_| "a table's capacity cannot be allocated")?;
+    Ok(v)
+}
+
 /// Conflict alert with every table allocated for `cfg`.
 pub fn ca_new(cfg: &CaConfig) -> Result<CaState, &'static str> {
     ca_check(cfg)?;
@@ -187,16 +196,16 @@ pub fn ca_new(cfg: &CaConfig) -> Result<CaState, &'static str> {
         lon_cells,
         first_cell,
         cos_edge,
-        scratch: Vec::with_capacity(cfg.max_tracks),
-        obs: Vec::with_capacity(cfg.max_tracks),
-        cos_lat: Vec::with_capacity(cfg.max_tracks),
-        speed: Vec::with_capacity(cfg.max_tracks),
-        frames: Vec::with_capacity(cfg.max_tracks),
-        keys: Vec::with_capacity(cfg.max_tracks),
-        cands: Vec::with_capacity(cfg.max_candidates),
-        open: Vec::with_capacity(cfg.max_open),
-        alt_prev: Vec::with_capacity(cfg.max_tracks),
-        alt_next: Vec::with_capacity(cfg.max_tracks),
+        scratch: table(cfg.max_tracks)?,
+        obs: table(cfg.max_tracks)?,
+        cos_lat: table(cfg.max_tracks)?,
+        speed: table(cfg.max_tracks)?,
+        frames: table(cfg.max_tracks)?,
+        keys: table(cfg.max_tracks)?,
+        cands: table(cfg.max_candidates)?,
+        open: table(cfg.max_open)?,
+        alt_prev: table(cfg.max_tracks)?,
+        alt_next: table(cfg.max_tracks)?,
         last_ns: i64::MIN,
         started: false,
         totals: CycleStats::default(),
@@ -225,13 +234,13 @@ pub fn ca_totals(st: &CaState) -> CycleStats {
     st.totals
 }
 
-/// A log with room for `capacity` alerts.
-pub fn alert_log_new(capacity: usize) -> AlertLog {
-    AlertLog {
+/// A log with room for `capacity` alerts, or the refusal if that much cannot be allocated.
+pub fn alert_log_new(capacity: usize) -> Result<AlertLog, &'static str> {
+    Ok(AlertLog {
         capacity,
         overflow: 0,
-        items: Vec::with_capacity(capacity),
-    }
+        items: table(capacity)?,
+    })
 }
 
 /// Removes the alerts, keeping the allocation and the overflow count.
@@ -239,13 +248,14 @@ pub fn alert_log_clear(l: &mut AlertLog) {
     l.items.clear();
 }
 
-/// A log with room for `capacity` altitude-loss events.
-pub fn event_log_new(capacity: usize) -> EventLog {
-    EventLog {
+/// A log with room for `capacity` altitude-loss events, or the refusal if that much cannot be
+/// allocated.
+pub fn event_log_new(capacity: usize) -> Result<EventLog, &'static str> {
+    Ok(EventLog {
         capacity,
         overflow: 0,
-        items: Vec::with_capacity(capacity),
-    }
+        items: table(capacity)?,
+    })
 }
 
 /// Removes the events, keeping the allocation and the overflow count.
