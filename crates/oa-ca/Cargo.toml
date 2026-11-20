@@ -1,0 +1,20 @@
+[package]
+name = "oa-ca"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace crates, not outside dependencies (RULESET F1); all core.
+oa-geo = { path = "../oa-geo" }
+oa-ieee = { path = "../oa-ieee" }
+oa-math = { path = "../oa-math" }
+oa-safety = { path = "../oa-safety" }
+
+[package.metadata.openatca]
+class = "core"

@@ -5331,3 +5331,93 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-SHD-038** The screen reads only usable raw ADS-B positions (not stale, not on the ground, an ADS-B source, a
   non-zero latitude), one per millisecond per address, with the NACp carried forward from the last known value
   (1 to 15) within the truth configuration's carry age; an absent or zero NACp is unknown.
+
+## M5 — Conflict alert (oa-ca, tools/oa-ca)
+
+Build order step 3 of docs/M5_DESIGN.md (rules 1, 4 and 5 for conflict alert). `oa-ca` is a core crate
+with no allocation after start; times are nanoseconds, positions degrees, altitudes feet, relative
+motion in the projection's metres and metres per second. Every value of the alerting rules is
+configuration with no default; the crate's tests use synthetic values.
+
+- **OA-CA-001** The horizontal loss interval of a pair is the solved quadratic `|r + v t| < H` inside
+  `[0, T]`, from the closest-approach time and the perpendicular miss; the edges are strict (a pass at
+  exactly `H` is not a loss), a relative speed under 5e-5 m/s is zero (inside for the whole look-ahead or
+  never), the discriminant is handled exactly, and the smallest horizontal miss over the look-ahead is
+  reported.
+- **OA-CA-002** The vertical loss interval is `|dz + dvz t| < V` inside `[0, T]` with strict edges; a
+  relative vertical rate under 5e-5 ft/s is zero; the smallest vertical miss over the look-ahead is
+  reported (zero when the altitudes cross).
+- **OA-CA-003** A pair is in conflict when the horizontal and vertical intervals meet in an overlap of
+  positive length or both hold at `t = 0`; the prediction reports the time to loss (the start of the
+  overlap, zero when current), both predicted misses and whether the loss is current; an alert carries
+  its first and peak time to loss and the misses.
+- **OA-CA-004** The horizontal minimum of a pair is the volume's plus both tracks' 95 % radii (a poor
+  track widens the alert and never hides it); a row whose radius is not finite, is negative or is over the
+  configured cap takes the cap and is counted.
+- **OA-CA-005** The vertical minimum is widened by a named constant (100 ft) for each aircraft whose
+  track is coasting or uncertain; the alert carries the coasting, uncertain, radar-only and
+  identity-unconfirmed flags of either track.
+- **OA-CA-006** A pair with an altitude unknown on either track is tested horizontally only and its alert
+  carries `ALT_UNKNOWN`; a pair that is horizontally clear stays clear; an unknown altitude never removes
+  a conflict (rule 4).
+- **OA-CA-007** A track that had a known altitude and has none raises one `ALTITUDE_LOST` event, once per
+  loss and again only after the altitude has returned and gone; the event log is bounded, counts what it
+  loses and degrades the net.
+- **OA-CA-008** The minima of a pair are those of the first configured volume whose area holds the
+  midpoint of the pair and whose altitude band holds the mean altitude; a pair outside every volume uses
+  the required default volume; with an unknown altitude the larger horizontal and the larger vertical
+  minimum of the volumes whose area holds the midpoint apply (the default volume if none does). An area is a
+  latitude and longitude box or an `oa-safety` polygon.
+- **OA-CA-009** The candidate grid finds every pair inside its radius (look-ahead times the closing speed
+  bound, plus the largest horizontal minimum and both 95 % radii), the same pairs for any grid cell size and
+  at least those a brute-force exact test finds; a pair with both altitudes and rates known that cannot come
+  within the vertical minimum in the look-ahead is skipped and counted; a pair with an unknown rate is not
+  skipped.
+- **OA-CA-010** The grid scan and the pair evaluation count their work against configured budgets; over
+  budget the pairs are evaluated in order of smallest current horizontal separation (ties by address), the
+  remainder is counted as not evaluated, an open alert whose pair was not evaluated is kept alive and marked,
+  and tracks not scanned, candidates dropped, rows over capacity and alerts not opened are counts that make the
+  net degraded.
+- **OA-CA-011** Each cycle publishes the net's state to the `oa-safety` table: running when everything was
+  evaluated; degraded, with the count (`BudgetExceeded` for work left undone or lost, `InputMissing` for rows
+  left out), otherwise; unavailable (`SurveillanceLost`) for a cycle whose time is not after the last, and
+  unavailable (`InputMissing`) when the configuration was refused; reports the table refuses are counted.
+- **OA-CA-012** One conflict is one alert from its first cycle in conflict to its last, ended when the pair
+  has been out of conflict for the hysteresis (a return within it continues the alert, a later one is a new
+  alert), with its start, peak (the smallest time to loss) and end.
+- **OA-CA-013** An out-of-range configuration is refused with the name of the value: capacities, look-ahead,
+  hysteresis, budgets, speed, radius cap, grid band, volumes (minima, altitude band, area), and a look-ahead
+  and speed whose reach is beyond the bound the solver is proved for.
+- **OA-CA-014** A full alert log counts what it loses (`overflow`), the lost alerts degrade the net, and the
+  consumer clears the log keeping the allocation and the count.
+- **OA-CA-015** The alerts are a deterministic function of the rows: any row order gives the same alerts and
+  counts; rows sharing an address are all left out, and rows with a bad position, a speed over the bound, a
+  non-finite value or an altitude or rate out of range are refused, all counted.
+- **OA-CA-016** A pair with both aircraft on the ground is left out and counted; a pair with one on the
+  ground is tested and its alert carries `ONE_GROUND`.
+- **OA-CA-017** A pair with both altitudes and an unknown vertical rate is tested with the unknown rate taken
+  as level and its alert carries `RATE_UNKNOWN`.
+- **OA-CA-018** Proved (Kani, bounded): for every relative position, velocity, limit and look-ahead within the
+  stated bounds, the horizontal solver returns no NaN or infinity and an ordered interval inside the
+  look-ahead.
+- **OA-CA-019** Proved (Kani, bounded): the same for the vertical solver and the vertical miss, which is not
+  negative.
+- **OA-CA-021** Proved (Kani, bounded): an unknown altitude never removes a conflict: whenever a pair is in
+  conflict with the altitude known it is in conflict with it unknown, starting no later and no less current.
+- **OA-CA-022** The tool's arguments are strict, and it exits 2, before opening or creating anything, for an
+  input, configuration or output path that is, is inside, or resolves into a sealed 2026-11-19 recording.
+- **OA-CA-023** The configuration file has no defaults: every key is required, an unknown or repeated key, a
+  value that is not a finite number, a malformed volume (box or polygon) and a value the core refuses are
+  errors naming the value.
+- **OA-CA-024** A track's 95 % radius is the square root of the chi-square quantile (2 degrees of freedom, 95
+  %) times the larger eigenvalue of its position covariance; an unusable covariance gives NaN.
+- **OA-CA-025** The tool writes `alerts.csv`, `altitude_lost.csv` and `summary.txt` deterministically, sorted
+  by start time; the summary has the alerts by context, by flag, per hour, the net-state cycles by state, the
+  altitude losses, every shortfall with its count and a degraded state when any is non-zero and the digest of
+  `alerts.csv`, and contains no aircraft address.
+- **OA-CA-026** A pair converging through the tracker gives one alert that repeats exactly, with no shortfall
+  and every cycle running; the same crossing a volume apart vertically gives none.
+- **OA-CA-027** The conflict decision (both intervals together) agrees with a brute-force scan of sampled times
+  within 1 m (1 ft vertically) over tens of thousands of pseudo-random pairs: every pair with a sampled time
+  more than the tolerance inside both limits is a conflict, and a conflict that no sampled time shows is an
+  overlap shorter than one scan step. Not proved: the bounded proofs of this decision did not finish in an hour (see the proof notes).

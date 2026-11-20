@@ -1,0 +1,284 @@
+//! The run: clip, tracker, conflict alert, files. Shell (B3).
+
+use std::collections::BTreeMap;
+use std::fs;
+
+use oa_bench::input::load_adsb;
+use oa_ca::{
+    alert_log_clear, alert_log_new, ca_check, ca_cycle, ca_finish, ca_new, ca_totals,
+    event_log_clear, event_log_new, Alert, AlertLog, AltLost, CaState, CaTrack, CycleStats,
+    EventLog, F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY, F_UNCERTAIN,
+};
+use oa_encounter_run::run::{ground_at, ground_table, GroundTable};
+use oa_safety::inhibit::{inhibits_new, InhibitTable};
+use oa_safety::net::{net_status, state_table_new, NetId, StateTable};
+use oa_sha256::{sha256, to_hex};
+use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
+use oa_track::score::{interval_stats, scoring_config, split_reports, IntervalStats};
+use oa_track::{
+    output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
+    tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG, O_COAST, O_HAS_ALT,
+    O_IDENTITY_UNCONFIRMED, O_TICK, O_UNCERTAIN,
+};
+
+use crate::args::Args;
+use crate::config::{parse_config, Settings};
+use crate::report::{alerts_csv, events_csv, state_text, summary_text, SummaryInput};
+
+/// The chi-square quantile of 2 degrees of freedom at 95 %: the 95 % radius of a circular
+/// Gaussian is `sqrt(CHI2_2_95 * variance)`; for the covariance of a track the larger eigenvalue
+/// takes the variance, so the radius holds in every direction.
+pub const CHI2_2_95: f64 = 5.991_464_547_107_98;
+
+/// The 95 % horizontal radius, metres, of a position covariance `[ee, en, nn]` (m^2); NaN if the
+/// covariance is not usable (the core then holds it to the cap and counts it).
+pub fn r95_of(cov: [f32; 3]) -> f32 {
+    let (ee, en, nn) = (f64::from(cov[0]), f64::from(cov[1]), f64::from(cov[2]));
+    if !(ee.is_finite() && en.is_finite() && nn.is_finite()) || ee < 0.0 || nn < 0.0 {
+        return f32::NAN;
+    }
+    let half = (ee - nn) / 2.0;
+    let lam = (ee + nn) / 2.0 + (half * half + en * en).sqrt();
+    (CHI2_2_95 * lam).sqrt() as f32
+}
+
+/// What a run of the tracker and conflict alert produced. A7.2: cold struct, size guard waived.
+pub struct Record {
+    pub alerts: Vec<Alert>,
+    pub events: Vec<AltLost>,
+    pub totals: CycleStats,
+    /// Cycles by the text of the net state after each.
+    pub net_cycles: BTreeMap<String, u64>,
+    pub log_overflow: u64,
+    pub event_overflow: u64,
+    pub tracker_overflow: u64,
+    pub tick_rows: u64,
+}
+
+struct Feed<'a> {
+    st: CaState,
+    alerts: AlertLog,
+    events: EventLog,
+    net: StateTable,
+    inh: Box<InhibitTable>,
+    batch: Vec<CaTrack>,
+    cur: Option<i64>,
+    ground: &'a GroundTable,
+    all: Vec<Alert>,
+    all_events: Vec<AltLost>,
+    net_cycles: BTreeMap<String, u64>,
+    tick_rows: u64,
+}
+
+fn flush(f: &mut Feed) {
+    if let Some(t) = f.cur.take() {
+        ca_cycle(
+            &mut f.st,
+            t,
+            &f.batch,
+            &mut f.alerts,
+            &mut f.events,
+            &mut f.net,
+        );
+        f.batch.clear();
+        f.all.extend_from_slice(&f.alerts.items);
+        alert_log_clear(&mut f.alerts);
+        f.all_events.extend_from_slice(&f.events.items);
+        event_log_clear(&mut f.events);
+        let s = net_status(&f.net, &f.inh, NetId::ConflictAlert, t);
+        *f.net_cycles.entry(state_text(&s.state)).or_default() += 1;
+    }
+}
+
+/// The core's flag byte of the tracker's. The tracker's one identity flag is the radar-handle
+/// key of a track with no ADS-B address, so it sets both radar-only and identity-unconfirmed.
+fn flags_of(o: u8) -> u8 {
+    let mut f = 0;
+    if o & O_COAST != 0 {
+        f |= F_COAST;
+    }
+    if o & O_UNCERTAIN != 0 {
+        f |= F_UNCERTAIN;
+    }
+    if o & O_IDENTITY_UNCONFIRMED != 0 {
+        f |= F_RADAR_ONLY | F_IDENTITY_UNCONFIRMED;
+    }
+    f
+}
+
+/// Takes the one-second rows (every live track at a tick, one time after another) of a drained
+/// table; a change of time ends the cycle.
+fn consume(f: &mut Feed, o: &TrackOutput) {
+    for k in 0..output_len(o) {
+        let (
+            Some(&fl),
+            Some(&t),
+            Some(&addr),
+            Some(&la),
+            Some(&lo),
+            Some(&alt),
+            Some(&vr),
+            Some(&ve),
+            Some(&vn),
+            Some(&cov),
+        ) = (
+            o.flags.get(k),
+            o.t_ns.get(k),
+            o.addr.get(k),
+            o.lat_e7.get(k),
+            o.lon_e7.get(k),
+            o.alt_ft.get(k),
+            o.vrate_fpm.get(k),
+            o.vel_east_mps.get(k),
+            o.vel_north_mps.get(k),
+            o.pos_cov_m2.get(k),
+        )
+        else {
+            continue;
+        };
+        if fl & O_TICK == 0 {
+            continue;
+        }
+        if f.cur != Some(t) {
+            flush(f);
+            f.cur = Some(t);
+        }
+        f.tick_rows += 1;
+        f.batch.push(CaTrack {
+            lat_deg: f64::from(la) / 1e7,
+            lon_deg: f64::from(lo) / 1e7,
+            addr,
+            vel_east_mps: ve,
+            vel_north_mps: vn,
+            r95_m: r95_of(cov),
+            alt_ft: if fl & O_HAS_ALT != 0 { alt } else { f32::NAN },
+            vrate_fpm: if fl & O_HAS_ALT != 0 { vr } else { f32::NAN },
+            flags: flags_of(fl),
+            ground: ground_at(f.ground, addr, t),
+        });
+    }
+}
+
+/// Runs the tracker over `meas` (in time order) as the scoring run does and gives its one-second
+/// rows to conflict alert, one cycle per tick.
+pub fn track_and_alert(
+    meas: &[Measurement],
+    cfg: &TrackerConfig,
+    ground: &GroundTable,
+    set: &Settings,
+) -> Result<Record, String> {
+    ca_check(&set.ca).map_err(|e| format!("conflict alert configuration: {e}"))?;
+    let mut t = tracker_new(cfg).map_err(|e| e.to_string())?;
+    let mut out = output_new(cfg.out_capacity);
+    let mut f = Feed {
+        st: ca_new(&set.ca)?,
+        alerts: alert_log_new(set.alert_log_capacity),
+        events: event_log_new(set.event_log_capacity),
+        net: state_table_new(set.net_stale_limit_ns, set.net_future_horizon_ns)
+            .map_err(|e| format!("net state table: {e:?}"))?,
+        inh: Box::new(inhibits_new()),
+        batch: Vec::new(),
+        cur: None,
+        ground,
+        all: Vec::new(),
+        all_events: Vec::new(),
+        net_cycles: BTreeMap::new(),
+        tick_rows: 0,
+    };
+    let drain = cfg.out_capacity.min(1 << 16) / 2;
+    for m in meas {
+        tracker_update(&mut t, m, &mut out);
+        if output_len(&out) > drain {
+            consume(&mut f, &out);
+            output_clear(&mut out);
+        }
+    }
+    let end = meas.last().map_or(0, |m| m.toa_ns);
+    tracker_advance(&mut t, end, &mut out);
+    tracker_flush(&mut t, end, &mut out);
+    consume(&mut f, &out);
+    flush(&mut f);
+    ca_finish(&mut f.st, &mut f.alerts);
+    f.all.extend_from_slice(&f.alerts.items);
+    Ok(Record {
+        alerts: f.all,
+        events: f.all_events,
+        totals: ca_totals(&f.st),
+        net_cycles: f.net_cycles,
+        log_overflow: f.alerts.overflow,
+        event_overflow: f.events.overflow,
+        tracker_overflow: out.overflow,
+        tick_rows: f.tick_rows,
+    })
+}
+
+/// The whole run: reads the clip and the configuration, writes `alerts.csv`,
+/// `altitude_lost.csv` and `summary.txt` under `args.out`, and returns the summary text.
+pub fn run(args: &Args) -> Result<String, String> {
+    let cfg_bytes =
+        fs::read(&args.config).map_err(|e| format!("{}: {e}", args.config.display()))?;
+    let cfg_text = String::from_utf8(cfg_bytes.clone())
+        .map_err(|_| format!("{}: not UTF-8 text", args.config.display()))?;
+    let set = parse_config(&cfg_text).map_err(|e| format!("{}: {e}", args.config.display()))?;
+    let clip = load_adsb(&args.adsb).map_err(|e| e.to_string())?;
+    let clip_sha = clip.hash.sha256.clone();
+    let (reports, scope) = if args.scorer_half {
+        let (a, b, _) = split_reports(&clip.reports);
+        oa_bench::split_check::check_split(&a, &b)
+            .map_err(|v| format!("the split of the clip is not valid, run refused: {v:?}"))?;
+        (
+            a,
+            "the scorer's half A of the clip (as oa-track-run)".to_string(),
+        )
+    } else {
+        (clip.reports, "every report of the clip".to_string())
+    };
+    let adsb_cfg = AdsbConfig::default();
+    check_adsb_config(&adsb_cfg).map_err(|e| format!("adapter configuration: {e}"))?;
+    let ground = ground_table(&reports);
+    let (meas, _) = adsb_measurements(&reports, &adsb_cfg);
+    drop(reports);
+    let iv = interval_stats(&meas).unwrap_or(IntervalStats {
+        n: 0,
+        p50_ns: 1_000_000_000,
+        p90_ns: 1_000_000_000,
+        p99_ns: 1_000_000_000,
+    });
+    let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
+    let rec = track_and_alert(&meas, &cfg, &ground, &set)?;
+    fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
+    let csv = alerts_csv(&rec.alerts);
+    let csv_sha = to_hex(&sha256(csv.as_bytes()));
+    let name_of = |p: &std::path::Path| {
+        p.file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+    };
+    let summary = summary_text(&SummaryInput {
+        cfg: &set.ca,
+        alerts: &rec.alerts,
+        events: &rec.events,
+        totals: rec.totals,
+        net_cycles: &rec.net_cycles,
+        log_overflow: rec.log_overflow,
+        event_overflow: rec.event_overflow,
+        tracker_overflow: rec.tracker_overflow,
+        measurements: meas.len() as u64,
+        tick_rows: rec.tick_rows,
+        clip_name: &name_of(&args.adsb),
+        clip_sha256: &clip_sha,
+        config_name: &name_of(&args.config),
+        config_sha256: &to_hex(&sha256(&cfg_bytes)),
+        scope: &scope,
+        alerts_sha256: &csv_sha,
+    });
+    let events = events_csv(&rec.events);
+    for (file, text) in [
+        ("alerts.csv", &csv),
+        ("altitude_lost.csv", &events),
+        ("summary.txt", &summary),
+    ] {
+        let p = args.out.join(file);
+        fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    Ok(summary)
+}
