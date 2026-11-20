@@ -5410,6 +5410,10 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-STD-027** The TAIS `track/pseudo`, `track/frozen`, `track/new` and `track/adsb` decode as booleans
   (`true`, `false`, `1`, `0`); the stats keep a `[false, true]` count per flag, which the summary prints (the
   flags are not identifying). `track/adsb` is the candidate radar-only marker.
+- **OA-STD-043** The TAIS `track/coast` decodes as a boolean like the other track flags (`true`, `false`,
+  `1`, `0`; an element is no longer skipped): absent stays absent, a present but unreadable value is a counted
+  field error and the field is absent, and the stats keep its presence count and a `[false, true]` count
+  (fifth flag), which the summary prints.
 - **OA-STD-028** The TAIS record header decodes: `recType`, `recSrc`, `recSTARSSrcID` as codes,
   `recSTARSTimestamp` as milliseconds since midnight (ASSUMED from the observed digits; range 0 to 24 h) and
   `recSAFAReceiptTime` as ISO-8601. The stats count the latency (receipt time of day minus STARS time of
@@ -5493,8 +5497,8 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   segment faster than 600 m/s is left out and counted; ground reports are left out). A candidate is one aircraft inside the horizontal gate and, when both altitudes exist, the
   vertical gate (both inclusive; defaults 0.5, 1 and 2 NM with 500 ft, 1 NM primary). Per flag and gate the
   update is counted no candidate, exactly one, or ambiguous; only exactly-one is used. A horizontal-only
-  count is kept at the primary gate. Updates with no position or time, with no flag, or on a pseudo or frozen
-  track are counted apart (coasting is not read by the STDDS parser, so it is not excluded). A
+  count is kept at the primary gate. Updates with no position or time, with no flag, or on a pseudo, frozen or
+  coasting track update are counted apart (a coasting position is dead-reckoned, not measured). A
   gate above 10 NM, a gap above 30 s, or an unusable parameter is refused.
 - **OA-CEN-010** For exactly-one matches at the primary gate, per flag, the
   horizontal difference, the vertical difference, and the along-track and cross-track differences (STDDS
@@ -5531,7 +5535,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-CEN-015** Coverage is counted apart from no candidate: per flag, the share of checked updates with
   any indexed ADS-B aircraft within 30 NM at their time.
 - **OA-CEN-016** The cross-check counts reconcile exactly with the update counts per flag: updates equal
-  checked plus no position or time, above 85 degrees, no trackNum, pseudo or frozen track, and exact
+  checked plus no position or time, above 85 degrees, no trackNum, pseudo, frozen or coasting update, and exact
   duplicates of the track's previous update (time and position); updates with no flag equal the not-checked no-flag count.
 - **OA-CEN-017** A null control is run beside the real match: the same positions with the STDDS time
   shifted by plus and minus 60 s, printing per flag the outcome counts and the horizontal difference

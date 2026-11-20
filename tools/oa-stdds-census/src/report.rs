@@ -354,7 +354,7 @@ fn xc_section(o: &mut String, r: &Results) {
             + at(&nc.status, f);
         let _ = writeln!(
             o,
-            "  {name}: updates {} = checked {checked} + no position or time {} + above 85 degrees {} + no trackNum {} + exact duplicate of the track's previous update {} + pseudo or frozen track {} ({})",
+            "  {name}: updates {} = checked {checked} + no position or time {} + above 85 degrees {} + no trackNum {} + exact duplicate of the track's previous update {} + pseudo, frozen or coasting {} ({})",
             at(&r.global.updates, f),
             at(&nc.no_position, f),
             at(&nc.polar, f),

@@ -79,8 +79,8 @@ With `--adsb`, each update is compared with the ADS-B aircraft at the same place
   one track number that no gap over 120 s, new flag or resync has cut, so a reused track number
   is not one aircraft. adsb=false is headlined by track class (all false, mixed, all true);
   adsb=true is printed as ADS-B-fused, not independent of the truth.
-- Updates on pseudo or frozen tracks are counted and not checked. Coasting is not read by the
-  STDDS parser, so coasting updates are not excluded.
+- Updates flagged pseudo, frozen or coasting (a dead-reckoned position) are counted and not
+  checked, with their own count.
 - adsb=true updates that carry a Mode S address are also checked by address (that aircraft at that
   time, no gate), reported apart from the proximity matches.
 

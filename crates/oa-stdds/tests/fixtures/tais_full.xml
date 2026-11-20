@@ -23,6 +23,7 @@
       <frozen>0</frozen>
       <new>true</new>
       <adsb>1</adsb>
+      <coast>false</coast>
     </track>
     <flightPlan>
       <acid>TST123</acid>

@@ -925,6 +925,57 @@ fn an_empty_raw_flight_rules_element_is_present_empty_and_other_empty_fields_sta
     assert_eq!(st.empty_records, 0);
 }
 
+// REQ: OA-STD-043
+#[test]
+fn track_coast_decodes_true_false_absent_and_unreadable() {
+    let t = tais_rec("<track><coast>true</coast></track>");
+    assert!(
+        t.errors.is_empty() && t.unknown_elements == 0,
+        "{:?}",
+        t.errors
+    );
+    assert!(t.records[0].coast);
+    assert_ne!(
+        t.records[0].present & (1 << TaisField::TrackCoast as u32),
+        0
+    );
+    let f = tais_rec("<track><coast>0</coast></track>");
+    assert!(!f.records[0].coast);
+    assert_ne!(
+        f.records[0].present & (1 << TaisField::TrackCoast as u32),
+        0
+    );
+    // Absent stays absent: not present, and not false-counted.
+    let a = tais_rec("<track><adsb>true</adsb></track>");
+    assert!(!a.records[0].coast);
+    assert_eq!(
+        a.records[0].present & (1 << TaisField::TrackCoast as u32),
+        0
+    );
+    // Present but unreadable is a counted field error, and the field is absent.
+    let bad = tais_rec("<track><coast>maybe</coast></track>");
+    assert_eq!(bad.errors[0].field, "track/coast");
+    assert_eq!(bad.errors[0].kind, FieldErrorKind::Syntax);
+    assert_eq!(
+        bad.records[0].present & (1 << TaisField::TrackCoast as u32),
+        0
+    );
+    // The stats keep the presence count and the value histogram.
+    let mut p = parser();
+    let mut st = new_stats();
+    for (v, n) in [("true", 2), ("false", 1), ("x", 1)] {
+        for _ in 0..n {
+            let xml = format!(
+                r#"<a:TATrackAndFlightPlan xmlns:a="{TAIS_NS}"><record><track><coast>{v}</coast></track></record></a:TATrackAndFlightPlan>"#
+            );
+            parse_message(&mut p, xml.as_bytes(), &Limits::default(), &mut st).unwrap();
+        }
+    }
+    assert_eq!(st.tais_present[TaisField::TrackCoast as usize], 3);
+    assert_eq!(st.tais_errors[TaisField::TrackCoast as usize], 1);
+    assert_eq!(st.tais_flags[4], [1, 2]);
+}
+
 // REQ: OA-STD-027
 #[test]
 fn track_flags_decode_and_the_stats_keep_a_histogram_of_them() {

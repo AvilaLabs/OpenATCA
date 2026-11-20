@@ -112,7 +112,7 @@ pub struct NotChecked {
     pub no_track: [u64; 2],
     /// An exact repeat of the track's previous update (time and position).
     pub duplicate: [u64; 2],
-    /// A pseudo or frozen track (not a measured position). Coasting is not read by the parser.
+    /// A pseudo, frozen or coasting track update (not a measured position).
     pub status: [u64; 2],
     /// No `adsb` element at all.
     pub no_flag: u64,

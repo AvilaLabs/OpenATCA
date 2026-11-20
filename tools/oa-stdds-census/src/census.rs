@@ -520,6 +520,7 @@ impl Census {
                     let fi = usize::from(f);
                     if (has(r, TaisField::TrackPseudo) && r.pseudo)
                         || (has(r, TaisField::TrackFrozen) && r.frozen)
+                        || (has(r, TaisField::TrackCoast) && r.coast)
                     {
                         if let Some(c) = self.xc_nc.status.get_mut(fi) {
                             *c += 1;
@@ -815,6 +816,7 @@ pub(crate) mod tests {
             plan_status: [0; 16],
             pseudo: false,
             frozen: false,
+            coast: false,
             is_new: false,
             adsb: false,
             rec_type: [0; 8],
@@ -1732,7 +1734,7 @@ pub(crate) mod tests {
 
     // REQ: OA-CEN-009
     #[test]
-    fn pseudo_and_frozen_updates_are_not_checked_and_reconcile() {
+    fn pseudo_frozen_and_coasting_updates_are_not_checked_and_reconcile() {
         let mut c = xcensus(two(40.0));
         let mut a = upd(1, 10_300, Some(false), -75.0, 40.0, 10_000, 0.0, 0.0, 0.0);
         a.present |= tais_bit(TaisField::TrackPseudo);
@@ -1740,16 +1742,22 @@ pub(crate) mod tests {
         let mut b = upd(2, 10_300, Some(true), -75.0, 40.0, 10_000, 0.0, 0.0, 0.0);
         b.present |= tais_bit(TaisField::TrackFrozen);
         b.frozen = true;
+        let mut k = upd(4, 10_300, Some(false), -75.0, 40.0, 10_000, 0.0, 0.0, 0.0);
+        k.present |= tais_bit(TaisField::TrackCoast);
+        k.coast = true;
+        // A coast flag that is present and false is a measured position.
+        let mut nk = upd(5, 10_300, Some(false), -75.0, 40.0, 10_000, 0.0, 0.0, 0.0);
+        nk.present |= tais_bit(TaisField::TrackCoast);
         let ok = upd(3, 10_300, Some(false), -75.0, 40.0, 10_000, 0.0, 0.0, 0.0);
-        for r in [&a, &b, &ok] {
+        for r in [&a, &b, &k, &nk, &ok] {
             c.observe(src("AAA"), r);
         }
         let r = c.finish();
         let x = r.xc.unwrap();
-        assert_eq!(x.not_checked.status, [1, 1]);
+        assert_eq!(x.not_checked.status, [2, 1]);
         let checked = |f: usize| (0..3).map(|k| x.global.counts[cidx(f, 0, k)]).sum::<u64>();
-        assert_eq!((checked(0), checked(1)), (1, 0));
-        assert_eq!(r.global.updates[0], 2);
+        assert_eq!((checked(0), checked(1)), (2, 0));
+        assert_eq!(r.global.updates[0], 4);
     }
 
     // REQ: OA-CEN-012
