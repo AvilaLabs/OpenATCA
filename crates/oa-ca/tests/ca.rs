@@ -1545,3 +1545,44 @@ fn rows_above_85_degrees_are_counted_and_the_net_is_degraded_for_input() {
         }
     );
 }
+
+// REQ: OA-CA-033
+#[test]
+fn pairs_straddling_the_antimeridian_are_found_inside_their_reach_and_not_beyond_it() {
+    // Two aircraft at 300 m/s: a pair radius of 120 * 600 + 5,000 m. The second track is the point
+    // `frac` of the radius due east (or west) of the first by the exact projection, with the first
+    // placed so that the pair has the antimeridian between them; the oracle is that projection.
+    let radius = 120.0 * 600.0 + 5000.0;
+    for band_m in [10_000.0, 100_000.0, 1.0e6] {
+        let mut c = cfg();
+        c.grid_band_m = band_m;
+        for lat in [60.0, 75.0, 84.9, -60.0, -75.0, -84.9] {
+            for east in [true, false] {
+                for (frac, found) in [(0.99, 1u64), (1.05, 0)] {
+                    for swap in [false, true] {
+                        let d = frac * radius;
+                        let half = d / (110_900.0 * f64::cos(f64::to_radians(lat))) / 2.0;
+                        let lon1 = if east { 180.0 - half } else { -180.0 + half };
+                        let f = frame_new(lat, lon1);
+                        let (lat2, lon2) = unproject(&f, if east { d } else { -d }, 0.0).unwrap();
+                        // They straddle the antimeridian.
+                        assert!(lon1 * lon2 < 0.0, "{lat} {east} {lon1} {lon2}");
+                        let (x, y) = oa_geo::aeqd::project(&f, lat2, lon2);
+                        assert_eq!(x.hypot(y) <= radius, found == 1, "{lat} {east} {frac}");
+                        let (a, b) = (
+                            at(1, lat, lon1, 300.0, 0.0, 0.0),
+                            at(2, lat2, lon2, -300.0, 0.0, 0.0),
+                        );
+                        let rows = if swap { [b, a] } else { [a, b] };
+                        let mut r = rig_with(&c);
+                        let out = step(&mut r, 0, &rows);
+                        assert_eq!(
+                            out.stats.candidates, found,
+                            "lat {lat} east {east} frac {frac} swap {swap} band {band_m}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

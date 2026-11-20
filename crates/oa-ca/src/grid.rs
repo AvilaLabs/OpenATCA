@@ -344,7 +344,8 @@ pub(crate) fn grid_scan(st: &mut CaState, stats: &mut CycleStats) {
 /// max-heap on `Cand`'s order, so a full table gives up its largest separation, whatever the
 /// scan order; bounded (`log cap` steps) and deterministic (the order is total). True if `c` is
 /// nothing was dropped; false is one pair dropped (`c`, or the largest pair it displaced), which
-/// the caller counts.
+/// the caller counts. The separations of flat-tested and chord-tested pairs rank alike only
+/// within about 1 %; every drop is counted and degrades the net.
 fn keep_nearest(v: &mut alloc::vec::Vec<Cand>, cap: usize, c: Cand) -> bool {
     if v.len() < cap {
         v.push(c);
@@ -495,6 +496,33 @@ mod tests {
                 "{lat} {lon} {d}: {chord} {arc}"
             );
         }
+    }
+
+    // REQ: OA-CA-033
+    #[test]
+    fn the_chord_is_never_longer_than_the_exact_distance_the_evaluation_uses() {
+        // The exact distance is the projection's, as `evaluate` takes it: the radius of curvature
+        // at the first position times the central angle. No margin.
+        let mut g = Lcg(31);
+        let mut smallest = f64::INFINITY;
+        for _ in 0..200_000 {
+            let lat = (g.next() - 0.5) * 2.0 * MAX_LAT_DEG;
+            let lon = (g.next() - 0.5) * 360.0;
+            let d = 100.0 + g.next() * 400_000.0;
+            let (lat2, lon2) = offset(lat, lon, d, g.next() * core::f64::consts::TAU);
+            let (a, b) = (track(lat, lon), track(lat2, lon2));
+            let (ua, ub) = (vectors_of(&a).0, vectors_of(&b).0);
+            let chord = oa_ieee::sqrt(chord_d2(&ua, &ub));
+            let (x, y) = project(&frame_new(lat, lon), lat2, lon2);
+            let exact = oa_ieee::sqrt(x * x + y * y);
+            assert!(
+                chord <= exact,
+                "{lat} {lon} {d}: chord {chord} exact {exact}"
+            );
+            smallest = smallest.min(exact / chord);
+        }
+        std::eprintln!("smallest exact/chord ratio {smallest:.9}");
+        assert!(smallest >= 1.0);
     }
 
     // REQ: OA-CA-033
