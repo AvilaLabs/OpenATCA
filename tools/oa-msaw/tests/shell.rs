@@ -1029,3 +1029,44 @@ fn the_summary_gives_counts_per_bucket_for_the_diagnostics_of_the_alerts() {
         assert!(t.contains(k), "{k}");
     }
 }
+
+// REQ: OA-MSAW-063
+#[test]
+fn the_diagnosis_gives_the_altitude_radius_obstacle_and_terrain_sections_and_names_no_aircraft() {
+    use oa_msaw_run::diagnose::{diagnosis_text, DiagIn};
+    let argv = |extra: &[&str]| -> Vec<String> {
+        ["--adsb", "c.oaf", "--config", "d.cfg", "--out", "o"]
+            .iter()
+            .chain(extra.iter())
+            .map(|s| (*s).to_string())
+            .collect()
+    };
+    assert!(parse(&argv(&["--diagnose"])).unwrap().diagnose);
+    assert!(!parse(&argv(&[])).unwrap().diagnose);
+    assert!(parse(&argv(&["--diagnose", "--diagnose"])).is_err());
+    let set = settings();
+    let a = go(&approach(0xA1B2C3, true), &set, ridge_floors());
+    let mut f = Floors::new(None, None, None);
+    let rows = BTreeMap::new();
+    let t = diagnosis_text(&mut DiagIn {
+        alerts: &a.alerts,
+        rows: &rows,
+        floors: &mut f,
+        dof: None,
+        cfg: &set.msaw,
+        terrain_dir: None,
+        airports: &[],
+        sealed: oa_sealed::Sealed::production(),
+    });
+    for k in [
+        "1. the altitude judged",
+        "2. the query radius",
+        "3. the obstacles",
+        "4. the terrain-floor alerts",
+        "5. what the predicted depth is made of",
+        "dominant term over all 1 alerts",
+    ] {
+        assert!(t.contains(k), "{k}\n{t}");
+    }
+    assert!(!t.to_uppercase().contains("A1B2C3"));
+}

@@ -278,6 +278,9 @@ pub struct Alert {
     pub worst_lat_e7: i32,
     pub worst_lon_e7: i32,
     pub worst_radius_m: f32,
+    /// The sample index of that point and the track's 95 % radius as given, metres.
+    pub worst_k: u8,
+    pub r95_m: f32,
     pub vel_east_mps: f32,
     pub vel_north_mps: f32,
     /// Shortest time to violation over the alert, seconds (zero: below the floor now).

@@ -83,7 +83,7 @@ pub struct FloorStats {
 type Lookup = ((i32, i32, u32), f64, f64, f64);
 
 /// One obstacle: latitude and longitude in 1e-7 degree, top in feet MSL.
-type Obstacle = (i32, i32, i32);
+type Obstacle = (i32, i32, i32, u32);
 
 /// The obstacles in a grid of cells for the circle query.
 // A7.2: cold struct, size guard waived
@@ -113,14 +113,44 @@ impl ObstacleIndex {
     pub fn from_points(points: impl Iterator<Item = (i32, i32, i32)>) -> ObstacleIndex {
         let mut ix = ObstacleIndex::default();
         for (la, lo, top) in points {
+            let rec = ix.count as u32;
             let key = (
                 cell_of(f64::from(la) / 1e7, OBST_CELL_DEG),
                 cell_of(f64::from(lo) / 1e7, OBST_CELL_DEG),
             );
-            ix.cells.entry(key).or_default().push((la, lo, top));
+            ix.cells.entry(key).or_default().push((la, lo, top, rec));
             ix.count += 1;
         }
         ix
+    }
+
+    /// The highest obstacle within `radius_m` of the point: its top (feet), its record number in
+    /// the order the points were given, and its distance (metres).
+    pub fn highest_record_within(
+        &self,
+        lat: f64,
+        lon: f64,
+        radius_m: f64,
+    ) -> Option<(i32, u32, f64)> {
+        let cos = lat.to_radians().cos().max(0.01);
+        let (dlat, dlon) = (
+            radius_m / M_PER_DEG_LAT_MIN,
+            radius_m / (M_PER_DEG_LAT_MIN * cos),
+        );
+        let mut best: Option<(i32, u32, f64)> = None;
+        for a in cell_of(lat - dlat, OBST_CELL_DEG)..=cell_of(lat + dlat, OBST_CELL_DEG) {
+            for b in cell_of(lon - dlon, OBST_CELL_DEG)..=cell_of(lon + dlon, OBST_CELL_DEG) {
+                for &(la, lo, top, rec) in self.cells.get(&(a, b)).map_or(&[][..], |v| &v[..]) {
+                    let dy = (f64::from(la) / 1e7 - lat) * M_PER_DEG_LAT_MIN;
+                    let dx = (f64::from(lo) / 1e7 - lon) * M_PER_DEG_LAT_MIN * cos;
+                    let d = (dx * dx + dy * dy).sqrt();
+                    if d <= radius_m && best.is_none_or(|(t, _, _)| top > t) {
+                        best = Some((top, rec, d));
+                    }
+                }
+            }
+        }
+        best
     }
 
     /// The highest top within `radius_m` of the point, feet; [`FLOOR_NONE`] if there is none.
@@ -142,7 +172,7 @@ impl ObstacleIndex {
                 let Some(v) = self.cells.get(&(a, b)) else {
                     continue;
                 };
-                for &(la, lo, top) in v {
+                for &(la, lo, top, _) in v {
                     let dy = (f64::from(la) / 1e7 - lat) * M_PER_DEG_LAT_MIN;
                     let dx = (f64::from(lo) / 1e7 - lon) * M_PER_DEG_LAT_MIN * cos;
                     if dx * dx + dy * dy <= radius_m * radius_m && top > best {
@@ -240,7 +270,7 @@ pub fn tile_name(lat: i32, lon: i32) -> Option<String> {
     Some(format!("USGS_1_n{:02}w{:03}.tif", lat + 1, -lon))
 }
 
-fn read_tile(path: &Path) -> Result<Grid, String> {
+pub fn read_tile(path: &Path) -> Result<Grid, String> {
     refuse_sealed(Sealed::production(), path)?;
     let bytes = oa_tiff::read_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
     oa_tiff::read_geotiff(&bytes).map_err(|e| format!("{}: {e}", path.display()))
@@ -373,6 +403,32 @@ impl Floors {
             }
         }
         Some(hi)
+    }
+
+    /// The radius a lookup really uses for a point of radius `radius_m`: the bucket it falls in
+    /// plus the cell's half diagonal, metres.
+    pub fn effective_radius_m(radius_m: f64) -> f64 {
+        (radius_m / RADIUS_STEP_M).ceil().max(1.0) * RADIUS_STEP_M + CELL_HALF_DIAG_M
+    }
+
+    /// The highest terrain within `radius_m` of a point, feet; for the diagnosis.
+    pub fn terrain_within_ft(&mut self, lat: f64, lon: f64, radius_m: f64) -> i32 {
+        if self.tile_dir.is_none() {
+            return FLOOR_NONE;
+        }
+        self.terrain_ft(lat, lon, radius_m).unwrap_or(FLOOR_NONE)
+    }
+
+    /// The highest obstacle record within `radius_m` of a point; for the diagnosis.
+    pub fn obstacle_record_within(
+        &self,
+        lat: f64,
+        lon: f64,
+        radius_m: f64,
+    ) -> Option<(i32, u32, f64)> {
+        self.obstacles
+            .as_ref()?
+            .highest_record_within(lat, lon, radius_m)
     }
 
     pub fn has_terrain(&self) -> bool {

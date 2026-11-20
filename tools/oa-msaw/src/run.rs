@@ -122,6 +122,8 @@ pub struct Record {
     pub setter_m: BTreeMap<(u32, i64), f32>,
     /// CPU seconds the diagnostics after the last cycle took (outside the steady state).
     pub diag_cpu_s: f64,
+    /// The floor lookups, kept for the diagnosis.
+    pub floors: Floors,
 }
 
 /// Wall time of the steady state, nanoseconds, by part. A7.2: cold struct, size guard waived.
@@ -509,6 +511,7 @@ pub fn track_and_alert(
         floor_stats: f.floors.stats,
         qnh_stats: f.qnh.as_ref().map(|q| q.stats),
         times: f.times,
+        floors: f.floors,
     })
 }
 
@@ -623,7 +626,7 @@ fn gtm_areas(g: &Sealed, set: &Settings) -> Result<Vec<(Area, i32)>, String> {
 }
 
 /// The obstacles of a DOF file: the zip that holds `DOF.DAT`, or the file itself.
-fn read_dof(p: &Path) -> Result<ObstacleIndex, String> {
+fn read_dof(p: &Path) -> Result<(ObstacleIndex, oa_dof::Dof), String> {
     let is_zip = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
     let bytes = if is_zip {
         let z = oa_zip::read_archive_file(p).map_err(|e| format!("{}: {e}", p.display()))?;
@@ -634,7 +637,7 @@ fn read_dof(p: &Path) -> Result<ObstacleIndex, String> {
         oa_dof::read_file(p).map_err(|e| format!("{}: {e}", p.display()))?
     };
     let d = oa_dof::parse_dof(&bytes).map_err(|e| format!("{}: {e}", p.display()))?;
-    Ok(obstacle_index(&d))
+    Ok((obstacle_index(&d), d))
 }
 
 /// A figure of `/proc/self/status` in kilobytes (`None` where there is no such file).
@@ -699,10 +702,14 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let mut set = parse_config(&cfg_text).map_err(|e| format!("{}: {e}", args.config.display()))?;
     // The data first: a file that cannot be read is an error before the clip is read.
     let mut used = DataUsed::default();
+    let mut dof_records: Option<oa_dof::Dof> = None;
     let obstacles = match &args.dof {
         Some(p) => {
             let tl = Instant::now();
-            let ix = read_dof(p)?;
+            let (ix, d) = read_dof(p)?;
+            if args.diagnose {
+                dof_records = Some(d);
+            }
             used.load_ns
                 .push(("obstacle file", tl.elapsed().as_nanos() as u64));
             used.obstacles = Some(ix.count);
@@ -733,11 +740,16 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let mut without_corridor: Vec<String> = Vec::new();
     let mut airports: Vec<(String, f64, f64)> = Vec::new();
     let mut apt_areas: Vec<AirportArea> = Vec::new();
+    let mut apt_elev: Vec<(String, f64, f64, i32)> = Vec::new();
     if let Some(p) = &args.cifp {
         let tl = Instant::now();
         let c = read_cifp(g, p)?;
         used.load_ns.push(("CIFP", tl.elapsed().as_nanos() as u64));
         airports = approach_airports(&c);
+        apt_elev = airports_with_approach(&c)
+            .into_iter()
+            .filter(|a| set.cifp_airports.contains(&a.0))
+            .collect();
         apt_areas = airports_with_approach(&c)
             .into_iter()
             .map(|(_, lat, lon, elev)| AirportArea {
@@ -824,6 +836,25 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     } else {
         Default::default()
     };
+    // The altitudes of the rows for the diagnosis, by address.
+    let mut diag_rows: BTreeMap<u32, Vec<crate::diagnose::Row>> = BTreeMap::new();
+    if args.diagnose {
+        for k in 0..oa_adsb::reports_len(&reports) {
+            if let Some(r) = oa_adsb::reports_row(&reports, k) {
+                if r.time_ns >= t0_ns.saturating_sub(60_000_000_000) {
+                    diag_rows.entry(r.icao).or_default().push((
+                        r.time_ns,
+                        r.baro_alt_ft,
+                        r.geom_alt_ft,
+                        r.nac_p,
+                    ));
+                }
+            }
+        }
+        for v in diag_rows.values_mut() {
+            v.sort_by_key(|r| r.0);
+        }
+    }
     drop(reports);
     let iv = interval_stats(&meas).unwrap_or(IntervalStats {
         n: 0,
@@ -851,7 +882,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         used.rss_load_kb.map_or(0, |k| k / 1024)
     );
     let cpu0 = cpu_seconds();
-    let rec = track_and_alert(&meas, &cfg, &ground, &set, floors, Some(qnh), t0_ns)?;
+    let mut rec = track_and_alert(&meas, &cfg, &ground, &set, floors, Some(qnh), t0_ns)?;
     used.steady_cpu_s = cpu_seconds().zip(cpu0).map(|(b, a)| b - a - rec.diag_cpu_s);
     used.diag_cpu_s = rec.diag_cpu_s;
     used.rss_end_kb = proc_kb("VmHWM:");
@@ -934,6 +965,19 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         alerts_sha256: &csv_sha,
         t0_ns,
     });
+    if args.diagnose {
+        let text = crate::diagnose::diagnosis_text(&mut crate::diagnose::DiagIn {
+            alerts: &alerted,
+            rows: &diag_rows,
+            floors: &mut rec.floors,
+            dof: dof_records.as_ref(),
+            cfg: &set.msaw,
+            terrain_dir: args.terrain.as_deref(),
+            airports: &apt_elev,
+            sealed: g,
+        });
+        write_atomic(&args.out, "diagnosis.txt", &text)?;
+    }
     for (file, text) in OUTPUTS.into_iter().zip([
         &csv,
         &advisory,

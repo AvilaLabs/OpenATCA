@@ -153,6 +153,8 @@ fn alert(addr: u32, start_s: i64) -> Alert {
         worst_lat_e7: 0,
         worst_lon_e7: 0,
         worst_radius_m: 0.0,
+        worst_k: 0,
+        r95_m: 0.0,
         vel_east_mps: 0.0,
         vel_north_mps: 0.0,
         ttv_min_s: 0.0,

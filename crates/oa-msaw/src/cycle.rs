@@ -285,7 +285,7 @@ struct Verdict {
     worst_margin_ft: i32,
     worst_floor_ft: i32,
     worst_kind: FloorKind,
-    worst_at: (i32, i32, f32),
+    worst_at: (i32, i32, f32, u8),
     partial: bool,
     /// Some point outside the corridors with a chart altitude is above the alert floor and the
     /// predicted altitude is below the chart altitude there.
@@ -300,7 +300,7 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         worst_margin_ft: i32::MAX,
         worst_floor_ft: 0,
         worst_kind: FloorKind::Mva,
-        worst_at: (0, 0, 0.0),
+        worst_at: (0, 0, 0.0, 0),
         partial: false,
         below_mva: false,
     };
@@ -321,7 +321,7 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
             v.worst_margin_ft = margin;
             v.worst_floor_ft = floor;
             v.worst_kind = kind;
-            v.worst_at = (p.lat_e7, p.lon_e7, p.radius_m);
+            v.worst_at = (p.lat_e7, p.lon_e7, p.radius_m, k as u8);
         }
         if violates(low, floor) {
             let t = violation_time_s(alt, vr, floor, lo, hi);
@@ -381,6 +381,8 @@ fn raise(
         worst_lat_e7: v.worst_at.0,
         worst_lon_e7: v.worst_at.1,
         worst_radius_m: v.worst_at.2,
+        worst_k: v.worst_at.3,
+        r95_m: tr.r95_m,
         vel_east_mps: tr.vel_east_mps,
         vel_north_mps: tr.vel_north_mps,
         ttv_min_s: ttv_s as f32,
@@ -404,6 +406,7 @@ fn raise(
                     a.worst_lat_e7 = v.worst_at.0;
                     a.worst_lon_e7 = v.worst_at.1;
                     a.worst_radius_m = v.worst_at.2;
+                    a.worst_k = v.worst_at.3;
                 }
                 if (ttv_s as f32) < a.ttv_min_s {
                     a.ttv_min_s = ttv_s as f32;

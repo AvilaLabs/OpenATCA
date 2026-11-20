@@ -1,10 +1,10 @@
 //! The command line:
 //! `oa-msaw --adsb <clip.oaf> --config <file> --out <dir> [--terrain <dir>] [--dof <zip|dat>]
-//! [--mva <dir>] [--cifp <file>] [--metar <dir>] [--sfdps <dir>] [--from-s <n> --to-s <n>] [--scorer-half]`.
+//! [--mva <dir>] [--cifp <file>] [--metar <dir>] [--sfdps <dir>] [--from-s <n> --to-s <n>] [--scorer-half] [--diagnose]`.
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: oa-msaw --adsb <clip.oaf> --config <file.cfg> --out <dir> [--terrain <3dep dir>] [--dof <DOF zip or DOF.DAT>] [--mva <dir>] [--cifp <FAACIFP18 or the CIFP zip>] [--metar <dir of metar_NNz_hours1.json>] [--sfdps <recording dir>] [--from-s <n> --to-s <n>] [--scorer-half]";
+pub const USAGE: &str = "usage: oa-msaw --adsb <clip.oaf> --config <file.cfg> --out <dir> [--terrain <3dep dir>] [--dof <DOF zip or DOF.DAT>] [--mva <dir>] [--cifp <FAACIFP18 or the CIFP zip>] [--metar <dir of metar_NNz_hours1.json>] [--sfdps <recording dir>] [--from-s <n> --to-s <n>] [--scorer-half] [--diagnose]";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived
@@ -35,6 +35,9 @@ pub struct Args {
     /// Track only the scorer's half A of the clip (the reports the scoring harness gives the
     /// tracker), not every report.
     pub scorer_half: bool,
+    /// Also write `diagnosis.txt`: the altitude, radius, obstacle and terrain behind the alerts
+    /// (numbers only, no aircraft named).
+    pub diagnose: bool,
 }
 
 fn seconds(flag: &str, v: &str) -> Result<f64, String> {
@@ -54,6 +57,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
     let mut paths: [Option<PathBuf>; 9] = Default::default();
     let (mut from, mut to): (Option<f64>, Option<f64>) = (None, None);
     let mut scorer_half = false;
+    let mut diagnose = false;
     const NAMES: [&str; 9] = [
         "--adsb",
         "--config",
@@ -70,6 +74,12 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         if flag == "--scorer-half" {
             if std::mem::replace(&mut scorer_half, true) {
                 return Err("--scorer-half given twice".to_string());
+            }
+            continue;
+        }
+        if flag == "--diagnose" {
+            if std::mem::replace(&mut diagnose, true) {
+                return Err("--diagnose given twice".to_string());
             }
             continue;
         }
@@ -125,6 +135,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
             sfdps,
             window_s,
             scorer_half,
+            diagnose,
         }),
         _ => Err("--adsb, --config and --out are all required".to_string()),
     }

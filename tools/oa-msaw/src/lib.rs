@@ -14,6 +14,7 @@ pub mod chart_raster;
 pub mod cifp;
 pub mod coarse;
 pub mod config;
+pub mod diagnose;
 pub mod eligibility;
 pub mod floors;
 pub mod guard;
