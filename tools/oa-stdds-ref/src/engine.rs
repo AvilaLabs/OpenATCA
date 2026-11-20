@@ -50,6 +50,18 @@ pub struct PairErr {
 pub struct Sample {
     pub errs: [PairErr; 3],
     pub tracker_extrapolated: bool,
+    /// STDDS altitude as published (assumed feet) and the truth's barometric altitude, feet.
+    pub std_alt_ft: Option<f64>,
+    pub tru_alt_ft: Option<f64>,
+    /// STDDS speed (assumed m/s) and the truth's speed, m/s; `None` without a velocity.
+    pub std_speed_mps: Option<f64>,
+    pub tru_speed_mps: Option<f64>,
+}
+
+fn speed(f: &Fix) -> Option<f64> {
+    let (e, n) = f.vel?;
+    let s = e.hypot(n);
+    s.is_finite().then_some(s)
 }
 
 /// The unit direction of a fix's velocity, `None` below [`MIN_SPEED_MPS`].
@@ -120,6 +132,10 @@ pub fn evaluate(
         (Some(a), Some(b), Some(c)) => Ok(Sample {
             errs: [a, b, c],
             tracker_extrapolated: trk.extrapolated,
+            std_alt_ft: std.alt_ft,
+            tru_alt_ft: tru.alt_ft,
+            std_speed_mps: speed(&std),
+            tru_speed_mps: speed(&tru),
         }),
         _ => Err(Unpaired::NotFinite),
     }
@@ -131,7 +147,12 @@ pub type TrackKey = (u32, [u8; 8], Option<u32>);
 /// Why a track has no fitted offset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FitMiss {
-    /// Fewer than [`FIT_MIN_SAMPLES`] samples have a moving truth fix at every offset searched.
+    /// The track has enough records, but fewer than [`FIT_MIN_SAMPLES`] of the samples taken have
+    /// an ADS-B truth fix at every offset of the search window (the truth does not cover
+    /// the +-15 s around them).
+    NoTruthCoverage,
+    /// Fewer than [`FIT_MIN_SAMPLES`] usable samples for another reason: the track has too few
+    /// records, or the truth is covered but too slow to give a direction.
     TooFewSamples,
 }
 
@@ -170,25 +191,32 @@ pub fn fit_offset(recs: &[&Rec], truth: &dyn Reference) -> Result<Fitted, FitMis
     let take = n.min(FIT_MAX_SAMPLES);
     let mut sums = vec![0.0f64; width];
     let mut used = 0usize;
+    // Samples with a truth fix at every offset, moving or not.
+    let mut covered = 0usize;
     'sample: for k in 0..take {
-        let Some(rec) = recs.get(k * n / take.max(1)) else {
+        let Some(rec) = recs.get(k * n / take) else {
             continue;
         };
         let (Some(addr), Some(t), Some(std)) = (rec.addr, rec.t_ms, stdds_fix(rec)) else {
             continue;
         };
         let mut along = Vec::with_capacity(width);
+        let mut moving = true;
         for j in -steps..=steps {
             let Ok(tru) = truth.at(addr, t - j * OFFSET_STEP_MS) else {
                 continue 'sample;
             };
-            let Some(a) = direction(&tru)
+            match direction(&tru)
                 .and_then(|d| pair_err(&std, &tru, Some(d)))
                 .and_then(|e| e.along_m)
-            else {
-                continue 'sample;
-            };
-            along.push(a);
+            {
+                Some(a) => along.push(a),
+                None => moving = false,
+            }
+        }
+        covered += 1;
+        if !moving {
+            continue;
         }
         for (s, a) in sums.iter_mut().zip(&along) {
             *s += a * a;
@@ -196,7 +224,11 @@ pub fn fit_offset(recs: &[&Rec], truth: &dyn Reference) -> Result<Fitted, FitMis
         used += 1;
     }
     if used < FIT_MIN_SAMPLES {
-        return Err(FitMiss::TooFewSamples);
+        return Err(if take >= FIT_MIN_SAMPLES && covered < FIT_MIN_SAMPLES {
+            FitMiss::NoTruthCoverage
+        } else {
+            FitMiss::TooFewSamples
+        });
     }
     let mut best: Option<(i64, f64)> = None;
     for m in 0..=steps {
@@ -244,20 +276,25 @@ pub struct Analysis {
 /// Scores every record: at its own stamp, and at the stamp corrected by its track's fitted
 /// offset. Rows are in the order of `recs`; fits are in track-key order.
 pub fn analyse(recs: &[Rec], tracker: &dyn Reference, truth: &dyn Reference) -> Analysis {
-    let mut tracks: BTreeMap<TrackKey, Vec<&Rec>> = BTreeMap::new();
+    // A track is one address, facility and track number within one class: a coasting stretch of a
+    // track is fitted on its own and never pooled with the rest.
+    let mut tracks: BTreeMap<(Class, TrackKey), Vec<&Rec>> = BTreeMap::new();
     for r in recs {
         if let (Some(a), Some(_), Some(_)) = (r.addr, r.t_ms, r.pos) {
-            tracks.entry((a, r.src, r.track_num)).or_default().push(r);
+            tracks
+                .entry((r.class, (a, r.src, r.track_num)))
+                .or_default()
+                .push(r);
         }
     }
     let mut fits = Vec::with_capacity(tracks.len());
-    let mut offsets: BTreeMap<TrackKey, i64> = BTreeMap::new();
-    for (key, v) in &mut tracks {
+    let mut offsets: BTreeMap<(Class, TrackKey), i64> = BTreeMap::new();
+    for ((class, key), v) in &mut tracks {
         v.sort_by_key(|r| (r.t_ms, r.file, r.index));
-        let class = v.first().map_or(Class::Unknown, |r| r.class);
+        let class = *class;
         let result = fit_offset(v, truth);
         if let Ok(f) = result {
-            offsets.insert(*key, f.offset_ms);
+            offsets.insert((class, *key), f.offset_ms);
         }
         fits.push(TrackFit {
             class,
@@ -270,7 +307,7 @@ pub fn analyse(recs: &[Rec], tracker: &dyn Reference, truth: &dyn Reference) -> 
         .map(|rec| {
             let offset_ms = rec
                 .addr
-                .and_then(|a| offsets.get(&(a, rec.src, rec.track_num)))
+                .and_then(|a| offsets.get(&(rec.class, (a, rec.src, rec.track_num))))
                 .copied();
             let (plain, fitted) = match (rec.addr, rec.t_ms, rec.pos) {
                 (None, _, _) => (Err(Unpaired::NoAddress), Err(Unpaired::NoAddress)),

@@ -3,7 +3,7 @@
 //! radar tracks. Class `shell`: it reads recordings and writes the report.
 //!
 //! STARS in fusion mode uses ADS-B as one of its sensors, so a STDDS track is not independent of
-//! the ADS-B truth. Every STDDS record gets an independence class ([`model::classify_record`]),
+//! the ADS-B truth. Every STDDS record gets a class from its own flags ([`model::classify_record`]),
 //! every metric is reported per class, and per class three error sets are computed on the same
 //! paired samples: tracker against STDDS, ADS-B truth against STDDS, tracker against ADS-B truth.
 //! If STDDS follows ADS-B the second set is small; that is the diagnostic.

@@ -11,7 +11,7 @@ use oa_stdds::{new_stats, parse_message, Limits, Message};
 use oa_stdds_ref::engine::{analyse, evaluate, fit_offset, pair_err, FitMiss, FIT_MIN_SAMPLES};
 use oa_stdds_ref::load::{load_reader, rec_of};
 use oa_stdds_ref::model::{classify_record, Class, Fix, Miss, Rec, Reference, Unpaired};
-use oa_stdds_ref::report::build_report;
+use oa_stdds_ref::report::{altitude_suspect, build_report, speed_suspect};
 use oa_stdds_ref::sources::{interpolate, Row, TrackerSource};
 use oa_xml::{Limits as XmlLimits, Parser};
 
@@ -137,7 +137,7 @@ fn records_are_paired_by_mode_s_address_only() {
     };
     // The record's position is on `l`, but its address is the other aircraft's: it must not be
     // paired with `l`, whatever the position says.
-    let mut r = rec(&l, Some(0x123456), T0 + 50_000, 0, Class::Unknown);
+    let mut r = rec(&l, Some(0x123456), T0 + 50_000, 0, Class::AdsbAbsent);
     let both = TrackerSource::from_rows(
         [&l, &other]
             .iter()
@@ -179,7 +179,7 @@ fn records_are_paired_by_mode_s_address_only() {
 #[test]
 fn a_record_without_an_address_is_counted_and_not_paired() {
     let l = line();
-    let mut recs = track(0, Class::Unknown);
+    let mut recs = track(0, Class::AdsbAbsent);
     recs.push(Rec {
         addr: None,
         ..recs[0]
@@ -204,7 +204,7 @@ fn a_record_without_an_address_is_counted_and_not_paired() {
 #[test]
 fn a_record_without_time_or_position_is_counted_and_not_paired() {
     let l = line();
-    let base = track(0, Class::Unknown)[10];
+    let base = track(0, Class::AdsbAbsent)[10];
     let recs = [Rec { t_ms: None, ..base }, Rec { pos: None, ..base }, base];
     let a = analyse(&recs, &tracker_of(&l), &l);
     assert_eq!(a.rows[0].plain, Err(Unpaired::NoTimeOrPosition));
@@ -244,15 +244,58 @@ fn parse(xml: &[u8]) -> oa_stdds::TaisMessage {
 
 // REQ: OA-SRF-002
 #[test]
-fn every_record_is_class_unknown_for_now() {
+fn every_record_is_classed_by_its_own_flags() {
+    use oa_stdds::tais::tais_bit;
+    use oa_stdds::TaisField as F;
     let m = parse(&tais_xml(&[
         (Some("A1B2C3"), "2030-01-02T03:04:05.000Z", "40.5", "-75.5"),
         (None, "2030-01-02T03:04:06.000Z", "40.6", "-75.6"),
     ]));
     assert_eq!(m.records.len(), 2);
+    let base = m.records[0];
+    // A flag with its bit clear is absent, whatever the struct holds (never read as false or true).
+    let mut r = base;
+    r.present &= !(tais_bit(F::TrackAdsb)
+        | tais_bit(F::TrackPseudo)
+        | tais_bit(F::TrackFrozen)
+        | tais_bit(F::TrackCoast));
+    (r.adsb, r.pseudo, r.frozen, r.coast) = (false, true, true, true);
+    assert_eq!(classify_record(&r, &m), Class::AdsbAbsent);
+    r.adsb = true;
+    assert_eq!(classify_record(&r, &m), Class::AdsbAbsent);
+    // adsb present: false and true.
+    r.present |= tais_bit(F::TrackAdsb);
+    r.adsb = false;
+    assert_eq!(classify_record(&r, &m), Class::AdsbFalse);
+    r.adsb = true;
+    assert_eq!(classify_record(&r, &m), Class::AdsbTrue);
+    // Each of pseudo, frozen and coast, present and true, wins over adsb, either value.
+    for f in [F::TrackPseudo, F::TrackFrozen, F::TrackCoast] {
+        for adsb in [false, true] {
+            let mut r = base;
+            r.present |= tais_bit(F::TrackAdsb);
+            r.adsb = adsb;
+            (r.pseudo, r.frozen, r.coast) = (false, false, false);
+            r.present |= tais_bit(f);
+            match f {
+                F::TrackPseudo => r.pseudo = true,
+                F::TrackFrozen => r.frozen = true,
+                _ => r.coast = true,
+            }
+            assert_eq!(classify_record(&r, &m), Class::PseudoFrozenCoast);
+            // The same flag present but false does not.
+            match f {
+                F::TrackPseudo => r.pseudo = false,
+                F::TrackFrozen => r.frozen = false,
+                _ => r.coast = false,
+            }
+            assert_ne!(classify_record(&r, &m), Class::PseudoFrozenCoast);
+        }
+    }
+    // Parsed from XML: no flag elements, so the class is "adsb absent", and rec_of carries it.
     for r in &m.records {
-        assert_eq!(classify_record(r, &m), Class::Unknown);
-        assert_eq!(rec_of(0, 0, &m, r).class, Class::Unknown);
+        assert_eq!(classify_record(r, &m), Class::AdsbAbsent);
+        assert_eq!(rec_of(0, 0, &m, r).class, Class::AdsbAbsent);
     }
     let a = rec_of(0, 0, &m, &m.records[0]);
     assert_eq!(a.addr, Some(0xA1B2C3));
@@ -316,14 +359,14 @@ fn a_recording_is_read_into_records_with_counts_and_a_digest() {
 #[test]
 fn a_stamp_late_by_2_3_s_recovers_an_offset_of_2_3_s() {
     let l = line();
-    let recs = track(2_300, Class::Unknown);
+    let recs = track(2_300, Class::AdsbAbsent);
     let refs: Vec<&Rec> = recs.iter().collect();
     let f = fit_offset(&refs, &l).unwrap();
     assert_eq!(f.offset_ms, 2_300);
     assert!(!f.at_edge);
     assert_eq!(f.samples, 81);
     // Early stamps recover a negative offset.
-    let early = track(-4_700, Class::Unknown);
+    let early = track(-4_700, Class::AdsbAbsent);
     let refs: Vec<&Rec> = early.iter().collect();
     assert_eq!(fit_offset(&refs, &l).unwrap().offset_ms, -4_700);
     // Through the whole analysis: published error is the 460 m the clock costs, the fitted one
@@ -342,7 +385,7 @@ fn a_stamp_late_by_2_3_s_recovers_an_offset_of_2_3_s() {
 #[test]
 fn the_offset_is_fitted_against_the_truth_never_the_tracker() {
     let l = line();
-    let recs = track(2_300, Class::Unknown);
+    let recs = track(2_300, Class::AdsbAbsent);
     // A tracker whose clock is 6 s wrong must change neither the fit nor the truth set.
     let bad = Line {
         shift_ms: 6_000,
@@ -366,21 +409,21 @@ fn the_offset_is_fitted_against_the_truth_never_the_tracker() {
 fn offset_search_edges_are_flagged_and_ties_go_toward_zero() {
     let l = line();
     // Exactly at the edge is found and flagged.
-    let r = track(15_000, Class::Unknown);
+    let r = track(15_000, Class::AdsbAbsent);
     let refs: Vec<&Rec> = r.iter().collect();
     let f = fit_offset(&refs, &l).unwrap();
     assert_eq!((f.offset_ms, f.at_edge), (15_000, true));
-    let r = track(-15_000, Class::Unknown);
+    let r = track(-15_000, Class::AdsbAbsent);
     let refs: Vec<&Rec> = r.iter().collect();
     let f = fit_offset(&refs, &l).unwrap();
     assert_eq!((f.offset_ms, f.at_edge), (-15_000, true));
     // Beyond the range the best in range is the edge, flagged: the true offset may lie past it.
-    let r = track(20_000, Class::Unknown);
+    let r = track(20_000, Class::AdsbAbsent);
     let refs: Vec<&Rec> = r.iter().collect();
     let f = fit_offset(&refs, &l).unwrap();
     assert_eq!((f.offset_ms, f.at_edge), (15_000, true));
     // Too few samples: not fitted, and no offset is made up.
-    let few = track(2_300, Class::Unknown);
+    let few = track(2_300, Class::AdsbAbsent);
     let refs: Vec<&Rec> = few.iter().take(FIT_MIN_SAMPLES - 1).collect();
     assert_eq!(fit_offset(&refs, &l), Err(FitMiss::TooFewSamples));
     // A truth that is the same at every offset ties every offset: zero wins.
@@ -396,7 +439,7 @@ fn offset_search_edges_are_flagged_and_ties_go_toward_zero() {
             })
         }
     }
-    let r = track(2_300, Class::Unknown);
+    let r = track(2_300, Class::AdsbAbsent);
     let refs: Vec<&Rec> = r.iter().collect();
     let f = fit_offset(&refs, &Still).unwrap();
     assert_eq!((f.offset_ms, f.at_edge), (0, false));
@@ -405,24 +448,31 @@ fn offset_search_edges_are_flagged_and_ties_go_toward_zero() {
         t1: T0 + 40_000,
         ..l
     };
-    let r = track(0, Class::Unknown);
+    let r = track(0, Class::AdsbAbsent);
     let refs: Vec<&Rec> = r.iter().collect();
-    assert_eq!(fit_offset(&refs, &short), Err(FitMiss::TooFewSamples));
+    assert_eq!(fit_offset(&refs, &short), Err(FitMiss::NoTruthCoverage));
 }
 
 // REQ: OA-SRF-005
 #[test]
 fn a_track_that_is_not_fitted_has_no_fitted_samples() {
     let l = line();
-    let recs: Vec<Rec> = track(2_300, Class::Unknown).into_iter().take(3).collect();
+    let recs: Vec<Rec> = track(2_300, Class::AdsbAbsent)
+        .into_iter()
+        .take(3)
+        .collect();
     let a = analyse(&recs, &tracker_of(&l), &l);
     assert!(a.rows[0].plain.is_ok());
     assert_eq!(a.rows[0].offset_ms, None);
     assert_eq!(a.rows[0].fitted, Err(Unpaired::NotFitted));
     let r = build_report(&[], &a);
+    assert!(r.summary.contains("not fitted 1,"));
     assert!(r
         .summary
-        .contains("not fitted (fewer than 8 usable samples) 1"));
+        .contains("not fitted, fewer than 8 usable samples: 1"));
+    assert!(r
+        .summary
+        .contains("not fitted, no ADS-B truth over the +-15 s window: 0"));
     assert!(r
         .summary
         .contains("unpaired, track has no fitted time offset: 3"));
@@ -497,9 +547,9 @@ fn extrapolated_tracker_fixes_are_counted_in_the_report() {
     };
     let gen = line();
     let recs = vec![
-        rec(&gen, Some(ADDR), l.t1 - 5_000, 0, Class::Unknown),
-        rec(&gen, Some(ADDR), l.t1 - 250, 1, Class::Unknown),
-        rec(&gen, Some(ADDR), l.t1, 2, Class::Unknown),
+        rec(&gen, Some(ADDR), l.t1 - 5_000, 0, Class::AdsbAbsent),
+        rec(&gen, Some(ADDR), l.t1 - 250, 1, Class::AdsbAbsent),
+        rec(&gen, Some(ADDR), l.t1, 2, Class::AdsbAbsent),
     ];
     let mut tracker_rows = tracker_of(&short);
     let a = analyse(&recs, &tracker_rows, &l);
@@ -547,7 +597,7 @@ fn the_three_error_sets_are_on_the_same_sample() {
         pos: Some((f.lat + dla50, f.lon)),
         alt_ft: Some(10_100.0),
         vel: Some((190.0, 0.0)),
-        ..track(0, Class::Unknown)[0]
+        ..track(0, Class::AdsbAbsent)[0]
     };
     let s = evaluate(&r, T0 + 60_000, &tracker, &l).unwrap();
     let [ts, us, tu] = s.errs;
@@ -608,13 +658,13 @@ fn metrics_have_n_rms_percentiles_and_absent_values_are_not_zero() {
                 pos: Some((f.lat + dla, f.lon)),
                 t_ms: Some(T0 + 30_000 + 2_000 * k),
                 index: k as u32,
-                ..track(0, Class::Unknown)[0]
+                ..track(0, Class::AdsbAbsent)[0]
             }
         })
         .collect();
     let a = analyse(&recs, &tracker_of(&l), &l);
     let r = build_report(&[], &a);
-    let sec = section(&r.summary, "unknown");
+    let sec = section(&r.summary, "adsb absent");
     let p = sec.find("stamp as published (offset 0)").unwrap();
     let block = &sec[p..];
     let tracker_set = &block[block.find("set: tracker - stdds").unwrap()..];
@@ -654,9 +704,9 @@ fn metrics_have_n_rms_percentiles_and_absent_values_are_not_zero() {
 #[test]
 fn every_metric_is_reported_per_class_and_never_blended() {
     let l = line();
-    let mut recs = track(0, Class::Unknown);
+    let mut recs = track(0, Class::AdsbAbsent);
     // The second class's records sit 100 m north of the line: a different error entirely.
-    let shifted: Vec<Rec> = track(0, Class::FusedAdsb)
+    let shifted: Vec<Rec> = track(0, Class::AdsbTrue)
         .into_iter()
         .map(|mut r| {
             let (la, lo) = r.pos.unwrap();
@@ -672,8 +722,8 @@ fn every_metric_is_reported_per_class_and_never_blended() {
     recs.extend(shifted);
     let a = analyse(&recs, &tracker_of(&l), &l);
     let r = build_report(&[], &a);
-    let unknown = section(&r.summary, "unknown");
-    let fused = section(&r.summary, "fused-adsb");
+    let unknown = section(&r.summary, "adsb absent");
+    let fused = section(&r.summary, "adsb=true");
     let line_of = |s: &str| {
         let b = &s[s.find("stamp as published (offset 0)").unwrap()..];
         b.lines()
@@ -693,27 +743,30 @@ fn every_metric_is_reported_per_class_and_never_blended() {
     );
     assert!(unknown.contains("records 81,") && fused.contains("records 81,"));
     // A class with no records has no section, and there is no all-class section or line.
-    assert!(!r.summary.contains("independence class: radar-only"));
+    assert!(!r.summary.contains("independence class: adsb=false"));
+    assert!(!r.summary.contains("independence class: pseudo"));
     assert!(!r.summary.contains("independence class: all"));
     assert_eq!(r.summary.matches("== independence class:").count(), 2);
     // Tracks are fitted per class too.
     assert!(unknown.contains("time offsets: tracks 1,"));
     assert!(fused.contains("time offsets: tracks 1,"));
-    assert!(r.csv.lines().nth(1).unwrap().contains(",unknown,"));
-    assert!(r.csv.lines().last().unwrap().contains(",fused-adsb,"));
+    assert!(r.csv.lines().nth(1).unwrap().contains(",adsb-absent,"));
+    assert!(r.csv.lines().last().unwrap().contains(",adsb-true,"));
 }
 
 // REQ: OA-SRF-009
 #[test]
-fn the_report_is_deterministic_and_carries_digests() {
+fn the_summary_carries_the_digests_and_both_outputs_are_deterministic() {
     let l = line();
-    let recs = track(2_300, Class::Unknown);
+    let recs = track(2_300, Class::AdsbAbsent);
     let header = vec!["STDDS file 0: x (digest abc)".to_string()];
     let a = analyse(&recs, &tracker_of(&l), &l);
     let r1 = build_report(&header, &a);
     let r2 = build_report(&header, &analyse(&recs, &tracker_of(&l), &l));
     assert_eq!(r1, r2);
     assert!(r1.summary.contains("STDDS file 0: x (digest abc)"));
+    // The CSV carries neither the input digests nor the output digest.
+    assert!(!r1.csv.contains("digest") && !r1.csv.contains("abc"));
     let last = r1.summary.lines().last().unwrap();
     let hex = last
         .strip_prefix("digest (summary above and the csv): ")
@@ -734,7 +787,7 @@ fn the_report_is_deterministic_and_carries_digests() {
 #[test]
 fn the_text_output_holds_none_of_the_fixture_identifiers() {
     let l = line();
-    let mut recs = track(2_300, Class::Unknown);
+    let mut recs = track(2_300, Class::AdsbAbsent);
     for (k, r) in recs.iter_mut().enumerate() {
         r.src = *b"QQZ\0\0\0\0\0";
         r.track_num = Some(31_337);
@@ -829,5 +882,155 @@ fn a_sealed_path_exits_2_naming_it_before_anything_is_opened() {
     let o = run(&missing, &holdout.join("out"), &fine);
     assert_eq!(o.status.code(), Some(2));
     assert!(!holdout.join("out").exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// REQ: OA-SRF-015
+#[test]
+fn tracks_not_fitted_are_reported_by_reason() {
+    let l = line();
+    // No truth over the +-15 s window: the truth ends 40 s in, the track runs to 180 s.
+    let short = Line {
+        t1: T0 + 40_000,
+        ..l
+    };
+    let recs = track(0, Class::AdsbAbsent);
+    let r = build_report(&[], &analyse(&recs, &tracker_of(&l), &short));
+    assert!(r.summary.contains("not fitted 1,"), "{}", r.summary);
+    assert!(r
+        .summary
+        .contains("not fitted, no ADS-B truth over the +-15 s window: 1"));
+    assert!(r
+        .summary
+        .contains("not fitted, fewer than 8 usable samples: 0"));
+    // Few records: the other reason.
+    let few: Vec<Rec> = recs.iter().take(3).copied().collect();
+    let r = build_report(&[], &analyse(&few, &tracker_of(&l), &l));
+    assert!(r
+        .summary
+        .contains("not fitted, no ADS-B truth over the +-15 s window: 0"));
+    assert!(r
+        .summary
+        .contains("not fitted, fewer than 8 usable samples: 1"));
+    // A truth that is covered but too slow to give a direction: also the second reason.
+    struct Slow;
+    impl Reference for Slow {
+        fn at(&self, _: u32, _: i64) -> Result<Fix, Miss> {
+            Ok(Fix {
+                lat: LAT,
+                lon: LON,
+                alt_ft: None,
+                vel: Some((0.5, 0.0)),
+                extrapolated: false,
+            })
+        }
+    }
+    let refs: Vec<&Rec> = recs.iter().collect();
+    assert_eq!(fit_offset(&refs, &Slow), Err(FitMiss::TooFewSamples));
+}
+
+// REQ: OA-SRF-017
+#[test]
+fn unit_checks_flag_altitude_and_speed_scales() {
+    let l = line();
+    let report = |f: &dyn Fn(&mut Rec)| {
+        let mut recs = track(0, Class::AdsbAbsent);
+        recs.iter_mut().for_each(f);
+        build_report(&[], &analyse(&recs, &tracker_of(&l), &l)).summary
+    };
+    // Same units: the medians agree and no line is flagged.
+    let ok = report(&|_| {});
+    assert!(ok.contains("unit check, altitude: median STDDS 10000 ft, median ADS-B truth 10000 ft"));
+    assert!(ok.contains("unit check, speed: median ratio STDDS to ADS-B truth 1.000"));
+    assert!(!ok.contains("units suspect"), "{ok}");
+    // Altitude in hundreds of feet: a factor of 100 apart.
+    let alt = report(&|r| r.alt_ft = r.alt_ft.map(|a| a / 100.0));
+    assert!(
+        alt.lines()
+            .any(|x| x.starts_with("unit check, altitude") && x.ends_with("units suspect")),
+        "{alt}"
+    );
+    assert!(!alt
+        .lines()
+        .any(|x| x.starts_with("unit check, speed") && x.ends_with("units suspect")));
+    // Speed in knots (about 1.94 times the m/s value) and in km/h-like halves.
+    for k in [1.94, 0.5] {
+        let sp = report(&|r| r.vel = r.vel.map(|(e, n)| (e * k, n * k)));
+        assert!(
+            sp.lines()
+                .any(|x| x.starts_with("unit check, speed") && x.ends_with("units suspect")),
+            "{sp}"
+        );
+    }
+    // The thresholds themselves.
+    assert!(!altitude_suspect(10_000.0, 1_000.0 + 1.0));
+    assert!(altitude_suspect(10_000.0, 999.0));
+    assert!(altitude_suspect(999.0, 10_000.0));
+    assert!(!altitude_suspect(0.0, 50.0), "ground traffic is floored");
+    assert!(!speed_suspect(0.8) && !speed_suspect(1.25) && !speed_suspect(1.0));
+    assert!(speed_suspect(0.79) && speed_suspect(1.26));
+}
+
+// REQ: OA-SRF-003
+#[test]
+fn a_pseudo_frozen_or_coasting_class_is_reported_on_its_own() {
+    let l = line();
+    let mut recs = track(0, Class::AdsbTrue);
+    recs.extend(track(0, Class::PseudoFrozenCoast).into_iter().map(|mut r| {
+        r.index += 100;
+        r
+    }));
+    let a = analyse(&recs, &tracker_of(&l), &l);
+    // Same address, facility and track number, but a separate track (and fit) per class.
+    assert_eq!(a.fits.len(), 2);
+    let r = build_report(&[], &a);
+    assert_eq!(r.summary.matches("== independence class:").count(), 2);
+    assert!(r
+        .summary
+        .contains("== independence class: pseudo, frozen or coasting =="));
+    assert!(r.summary.contains("== independence class: adsb=true =="));
+    assert!(r.csv.lines().any(|x| x.contains(",pseudo-frozen-coast,")));
+}
+
+// REQ: OA-SRF-016
+#[test]
+fn an_existing_output_exits_1_and_an_output_link_into_sealed_data_exits_2() {
+    use std::os::unix::fs::symlink;
+    let base = std::env::temp_dir().join(format!("oa-stdds-ref-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let out = base.join("out");
+    let sealed = base.join("scds").join("rec-20261119").join("day2");
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::create_dir_all(&sealed).unwrap();
+    let input = base.join("in.oaf");
+    std::fs::write(&input, b"synthetic").unwrap();
+    let exe = env!("CARGO_BIN_EXE_oa-stdds-ref");
+    let run = || {
+        std::process::Command::new(exe)
+            .arg("--adsb")
+            .arg(base.join("no-such-clip.oaf"))
+            .arg("--out")
+            .arg(&out)
+            .arg(&input)
+            .output()
+            .unwrap()
+    };
+    // An existing output is never overwritten: exit 1, the file named.
+    let existing = out.join("stdds_ref.csv");
+    std::fs::write(&existing, b"keep").unwrap();
+    let o = run();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(1), "{err}");
+    assert!(err.contains(&*existing.to_string_lossy()), "{err}");
+    assert_eq!(std::fs::read(&existing).unwrap(), b"keep");
+    std::fs::remove_file(&existing).unwrap();
+    // An output name that is a link into sealed data is refused by the guard: exit 2, named.
+    let link = out.join("stdds_ref.txt");
+    symlink(sealed.join("new.txt"), &link).unwrap();
+    let o = run();
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(o.status.code(), Some(2), "{err}");
+    assert!(err.contains(&*link.to_string_lossy()), "{err}");
+    assert!(!sealed.join("new.txt").exists());
     let _ = std::fs::remove_dir_all(&base);
 }

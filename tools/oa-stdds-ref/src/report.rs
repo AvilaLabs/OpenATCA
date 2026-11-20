@@ -6,8 +6,8 @@ use std::fmt::Write as _;
 
 use oa_bench::stats::{stats_of, Stats};
 
-use crate::engine::{Analysis, PairErr, Row, Sample, SET_CODES, SET_NAMES};
-use crate::model::{Class, Unpaired, CLASSES};
+use crate::engine::{Analysis, FitMiss, PairErr, Row, Sample, SET_CODES, SET_NAMES};
+use crate::model::{Class, Unpaired, CLASSES, MIN_SPEED_MPS};
 
 /// The two finished outputs.
 // A7.2: cold struct, size guard waived
@@ -109,6 +109,74 @@ fn fitted(r: &Row) -> &Result<Sample, Unpaired> {
     &r.fitted
 }
 
+/// Altitude medians further apart than this factor (values floored at [`ALT_FLOOR_FT`]) are suspect.
+const ALT_FACTOR: f64 = 10.0;
+/// Altitudes below this are taken as this, so aircraft on the ground do not trip the check, feet.
+const ALT_FLOOR_FT: f64 = 100.0;
+/// The median STDDS to truth speed ratio is suspect outside this range.
+const SPEED_RATIO: (f64, f64) = (0.8, 1.25);
+
+/// Whether two altitude medians differ by more than [`ALT_FACTOR`].
+pub fn altitude_suspect(std_ft: f64, truth_ft: f64) -> bool {
+    let (a, b) = (
+        std_ft.abs().max(ALT_FLOOR_FT),
+        truth_ft.abs().max(ALT_FLOOR_FT),
+    );
+    a.max(b) / a.min(b) > ALT_FACTOR
+}
+
+/// Whether a median speed ratio is outside [`SPEED_RATIO`].
+pub fn speed_suspect(ratio: f64) -> bool {
+    !(SPEED_RATIO.0..=SPEED_RATIO.1).contains(&ratio)
+}
+
+/// The unit sanity lines of one class, on the paired samples at the published stamp.
+fn unit_check(out: &mut String, rows: &[&Row]) {
+    let samples: Vec<&Sample> = rows.iter().filter_map(|r| r.plain.as_ref().ok()).collect();
+    let pairs: Vec<(f64, f64)> = samples
+        .iter()
+        .filter_map(|s| Some((s.std_alt_ft?, s.tru_alt_ft?)))
+        .collect();
+    let ratios: Vec<f64> = samples
+        .iter()
+        .filter_map(|s| {
+            let (a, b) = (s.std_speed_mps?, s.tru_speed_mps?);
+            (b >= MIN_SPEED_MPS).then_some(a / b)
+        })
+        .collect();
+    let (sa, ta): (Vec<f64>, Vec<f64>) = pairs.into_iter().unzip();
+    let (sm, tm) = (stats_of(&sa), stats_of(&ta));
+    let rm = stats_of(&ratios);
+    if sm.n == 0 {
+        let _ = writeln!(out, "unit check, altitude: no data");
+    } else {
+        let flag = if altitude_suspect(sm.median, tm.median) {
+            "  units suspect"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "unit check, altitude: median STDDS {:.0} ft, median ADS-B truth {:.0} ft (n {}){flag}",
+            sm.median, tm.median, sm.n
+        );
+    }
+    if rm.n == 0 {
+        let _ = writeln!(out, "unit check, speed: no data");
+    } else {
+        let flag = if speed_suspect(rm.median) {
+            "  units suspect"
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            out,
+            "unit check, speed: median ratio STDDS to ADS-B truth {:.3} (n {}){flag}",
+            rm.median, rm.n
+        );
+    }
+}
+
 fn class_section(out: &mut String, class: Class, a: &Analysis) {
     let rows: Vec<&Row> = a.rows.iter().filter(|r| r.rec.class == class).collect();
     let with_addr = rows.iter().filter(|r| r.rec.addr.is_some()).count();
@@ -138,12 +206,23 @@ fn class_section(out: &mut String, class: Class, a: &Analysis) {
         .iter()
         .filter(|f| f.result.is_ok_and(|x| x.at_edge))
         .count();
+    let miss = |m: FitMiss| fits.iter().filter(|f| f.result == Err(m)).count();
     let _ = writeln!(
         out,
-        "time offsets: tracks {}, fitted {}, not fitted (fewer than 8 usable samples) {}, at the edge of the search range {edge}",
+        "time offsets: tracks {}, fitted {}, not fitted {}, at the edge of the search range {edge}",
         fits.len(),
         offs.len(),
         fits.len() - offs.len()
+    );
+    let _ = writeln!(
+        out,
+        "    not fitted, no ADS-B truth over the +-15 s window: {}",
+        miss(FitMiss::NoTruthCoverage)
+    );
+    let _ = writeln!(
+        out,
+        "    not fitted, fewer than 8 usable samples: {}",
+        miss(FitMiss::TooFewSamples)
     );
     if !offs.is_empty() {
         let at = |p| rank(&offs, p).map_or("NA".to_string(), secs);
@@ -157,6 +236,7 @@ fn class_section(out: &mut String, class: Class, a: &Analysis) {
             offs.last().map_or("NA".to_string(), |&m| secs(m)),
         );
     }
+    unit_check(out, &rows);
     metrics(out, "stamp as published (offset 0)", &rows, plain);
     metrics(
         out,
@@ -198,7 +278,7 @@ fn csv_of(a: &Analysis) -> String {
             "{},{},{},{},{},{}",
             rec.file,
             rec.index,
-            rec.class.name(),
+            rec.class.code(),
             status(&r.plain),
             r.offset_ms.map_or(String::new(), |x| x.to_string()),
             status(&r.fitted),
@@ -224,7 +304,9 @@ pub fn build_report(header: &[String], a: &Analysis) -> Report {
     for h in header {
         let _ = writeln!(s, "{h}");
     }
-    s.push_str("Independence: STARS in fusion mode uses ADS-B as one of its sensors, so every number is per class and there is no all-class line.\n");
+    s.push_str("Units assumed, not verified against the feed (oa-stdds tais.rs): STDDS altitude in feet, STDDS velocity in m/s east and north; each class prints a unit check.\n");
+    s.push_str("Altitude compared: the tracker row's altitude is the barometric one of the ADS-B report where it has one and the geometric one otherwise (the row does not say which); the ADS-B truth's is barometric.\n");
+    s.push_str("Independence: STARS in fusion mode uses ADS-B as one of its sensors, so every number is per class (class names state the flag value, not a meaning) and there is no all-class line.\n");
     s.push_str("Error sets, all on the same paired samples (first minus second): tracker - stdds, ADS-B truth - stdds, tracker - ADS-B truth.\n");
     s.push_str("Diagnostic: if STDDS follows ADS-B, the set ADS-B truth - stdds is small.\n");
     s.push_str("Along and cross track use the direction of the ADS-B truth velocity (cross positive to the right); a truth slower than 2 m/s has none.\n");

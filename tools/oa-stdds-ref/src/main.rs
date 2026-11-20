@@ -1,22 +1,25 @@
 //! `oa-stdds-ref --adsb <clip.oaf> --out <dir> <stdds.oaf[.gz]>...`
 //!
-//! Writes `stdds_ref.txt` (printed too) and `stdds_ref.csv` to `--out`. Paths that name a sealed
+//! Creates `stdds_ref.txt` (printed too) and `stdds_ref.csv` in `--out`; an existing output is refused (exit 1), never overwritten. Paths that name a sealed
 //! recording folder or ADS-B day, as given or through links, exit 2 before anything is opened; the
 //! refusal is made by the shared guard `oa-sealed` and names the path. The text printed holds counts
 //! and aggregate statistics only, never a track number, callsign, address or position.
 
 use std::collections::BTreeSet;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use oa_sealed::Sealed;
 use oa_stdds_ref::engine::analyse;
-use oa_stdds_ref::guard::{is_refusal, refuse_sealed};
+use oa_stdds_ref::guard::{create_output, is_refusal, refuse_sealed};
 use oa_stdds_ref::load::load_file;
 use oa_stdds_ref::report::build_report;
 use oa_stdds_ref::run::build_refs;
 use oa_stdds_ref::sources::TruthSource;
 
+const TXT: &str = "stdds_ref.txt";
+const CSV: &str = "stdds_ref.csv";
 const USAGE: &str = "usage: oa-stdds-ref --adsb <clip.oaf> --out <dir> <stdds.oaf[.gz]>...";
 
 fn main() -> ExitCode {
@@ -43,7 +46,8 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     let g = Sealed::production();
-    for p in [&adsb, &out].into_iter().chain(&files) {
+    let outputs = [out.join(TXT), out.join(CSV)];
+    for p in [&adsb, &out].into_iter().chain(&outputs).chain(&files) {
         if let Err(e) = refuse_sealed(g, p) {
             eprintln!("oa-stdds-ref: refused: {e}");
             return ExitCode::from(2);
@@ -63,6 +67,16 @@ fn main() -> ExitCode {
 }
 
 fn run(g: &Sealed, adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String, String> {
+    // An existing output is refused before any work is done (and again, race-free, at the create).
+    for name in [TXT, CSV] {
+        let p = out.join(name);
+        if std::fs::symlink_metadata(&p).is_ok() {
+            return Err(format!(
+                "{}: output file exists (never overwritten)",
+                p.display()
+            ));
+        }
+    }
     std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
     let mut recs = Vec::new();
     let mut header = Vec::new();
@@ -90,7 +104,11 @@ fn run(g: &Sealed, adsb: &Path, out: &Path, files: &[PathBuf]) -> Result<String,
     };
     let analysis = analyse(&recs, &refs.tracker, &truth);
     let report = build_report(&header, &analysis);
-    std::fs::write(out.join("stdds_ref.txt"), &report.summary).map_err(|e| e.to_string())?;
-    std::fs::write(out.join("stdds_ref.csv"), &report.csv).map_err(|e| e.to_string())?;
+    for (name, text) in [(TXT, &report.summary), (CSV, &report.csv)] {
+        let p = out.join(name);
+        let mut f = create_output(g, &p).map_err(|e| e.to_string())?;
+        f.write_all(text.as_bytes())
+            .map_err(|e| format!("{}: {e}", p.display()))?;
+    }
     Ok(report.summary)
 }

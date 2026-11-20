@@ -1,5 +1,5 @@
 //! The plain values of the scoring: one STDDS record, one position fix of a reference, why a
-//! record could not be paired, and the independence class.
+//! record could not be paired, and the class.
 
 use std::fmt;
 
@@ -12,51 +12,73 @@ pub const EXTRAP_MS: i64 = 1_000;
 /// split of that sample is absent (the horizontal error is kept).
 pub const MIN_SPEED_MPS: f64 = 2.0;
 
-/// How independent of ADS-B a STDDS record is. STARS in fusion mode uses ADS-B as one of its
-/// sensors, so a STDDS track may follow the same aircraft reports the truth is built from: no
-/// metric may blend the classes. Only [`Class::Unknown`] is ever assigned until the real feed
-/// shows which field separates them (see [`classify_record`]).
+/// The class of a STDDS record, from its own flags. STARS in fusion mode may use ADS-B as one of its
+/// sensors, so a STDDS track may follow the same aircraft reports the truth is built from, and no
+/// metric may blend the classes. The class names state the value of the flag, not a meaning: what
+/// `track/adsb` means is not yet confirmed (the census, `tools/oa-stdds-census`, measures it).
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Class {
-    /// No field known to say how the track was made.
-    Unknown,
-    /// Reserved: a track that real data shows is made from radar sensors only.
-    RadarOnly,
-    /// Reserved: a track that real data shows used ADS-B in the fusion.
-    FusedAdsb,
+    /// `track/pseudo`, `track/frozen` or `track/coast` is present and true. Reported on its own and
+    /// never pooled with the others, whatever `track/adsb` says.
+    PseudoFrozenCoast,
+    /// None of those, and `track/adsb` is present and false.
+    AdsbFalse,
+    /// None of those, and `track/adsb` is present and true.
+    AdsbTrue,
+    /// None of those, and `track/adsb` is absent.
+    AdsbAbsent,
 }
 
 /// Every class, in report order.
-pub const CLASSES: [Class; 3] = [Class::Unknown, Class::RadarOnly, Class::FusedAdsb];
+pub const CLASSES: [Class; 4] = [
+    Class::PseudoFrozenCoast,
+    Class::AdsbFalse,
+    Class::AdsbTrue,
+    Class::AdsbAbsent,
+];
 
 impl Class {
+    /// The name in the report.
     pub fn name(self) -> &'static str {
         match self {
-            Class::Unknown => "unknown",
-            Class::RadarOnly => "radar-only",
-            Class::FusedAdsb => "fused-adsb",
+            Class::PseudoFrozenCoast => "pseudo, frozen or coasting",
+            Class::AdsbFalse => "adsb=false",
+            Class::AdsbTrue => "adsb=true",
+            Class::AdsbAbsent => "adsb absent",
+        }
+    }
+
+    /// The name in the CSV (no comma, no space).
+    pub fn code(self) -> &'static str {
+        match self {
+            Class::PseudoFrozenCoast => "pseudo-frozen-coast",
+            Class::AdsbFalse => "adsb-false",
+            Class::AdsbTrue => "adsb-true",
+            Class::AdsbAbsent => "adsb-absent",
         }
     }
 }
 
-/// The independence class of one STDDS record. One function, so the rule is in one place.
-///
-/// Today it returns [`Class::Unknown`] for every record: the parser has no field confirmed to
-/// say which sensors made a track. Fields to check on the first real day, in this order:
-/// * `track/status` (`TaisRecord::track_status`): does it carry a source, sensor or fusion state
-///   (for example coasting, radar only, ADS-B, mixed)?
-/// * `track/coast` and the other element paths the parser counts as unknown (`Stats::unknown`,
-///   printed by the `stdds_summary` example): any `sensor`, `source`, `surveillance`, `fusion`,
-///   `adsb`, `mode` or `radar` element below `track`, `record` or the root.
-/// * `track/reportedBeaconCode` present with no `acAddress` (a radar-only Mode 3/A track) against
-///   `acAddress` present (a Mode S or ADS-B derived identity).
-/// * the message `src` (the producing TRACON) as a proxy: a facility known to run fusion mode.
-/// * `flightPlan/rawFlightRules` and equipment suffix as a proxy for ADS-B equipage.
-///
-/// The Mode S address alone does NOT separate the classes: a radar Mode S reply carries it too.
-pub fn classify_record(_record: &oa_stdds::TaisRecord, _message: &oa_stdds::TaisMessage) -> Class {
-    Class::Unknown
+/// The class of one STDDS record. One function, so the rule is in one place, and the same as the
+/// census's: a flag is read only when its bit is in `present` (an absent flag is never false).
+/// The first of `pseudo`, `frozen`, `coast` that is present and true wins over `adsb`.
+pub fn classify_record(record: &oa_stdds::TaisRecord, _message: &oa_stdds::TaisMessage) -> Class {
+    use oa_stdds::tais::tais_bit;
+    use oa_stdds::TaisField;
+    let has = |f: TaisField| record.present & tais_bit(f) != 0;
+    if (has(TaisField::TrackPseudo) && record.pseudo)
+        || (has(TaisField::TrackFrozen) && record.frozen)
+        || (has(TaisField::TrackCoast) && record.coast)
+    {
+        Class::PseudoFrozenCoast
+    } else if !has(TaisField::TrackAdsb) {
+        Class::AdsbAbsent
+    } else if record.adsb {
+        Class::AdsbTrue
+    } else {
+        Class::AdsbFalse
+    }
 }
 
 /// One STDDS record reduced to what the scoring uses. A missing field is `None`, never 0.

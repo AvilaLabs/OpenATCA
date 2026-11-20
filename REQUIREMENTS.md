@@ -5629,23 +5629,29 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 
 - **OA-SRF-001** A STDDS record is paired with the tracker and the ADS-B truth by its Mode S address
   (`acAddress`, 24 bits) only; a record without an address is counted and never paired.
-- **OA-SRF-002** Every STDDS record has an independence class from one function; it returns `unknown` for
-  every record until real data shows which field separates fused from radar-only tracks.
+- **OA-SRF-002** Every STDDS record has a class from its own flags, by one function, read as the census
+  reads them and only when a flag's bit is in `present` (an absent flag is never false): `track/pseudo`,
+  `track/frozen` or `track/coast` present and true is "pseudo, frozen or coasting"; otherwise `track/adsb`
+  present gives "adsb=false" or "adsb=true", and absent gives "adsb absent". The names state the flag value,
+  not a meaning: what `track/adsb` means is not confirmed (the census measures it).
 - **OA-SRF-003** Every metric, count and time-offset distribution is reported per class; no line or section
-  blends the classes.
+  blends the classes, "pseudo, frozen or coasting" is never pooled with another, and a class's records are
+  fitted as tracks of their own.
 - **OA-SRF-004** Per class, three error sets are computed on the same paired samples: tracker minus STDDS,
   ADS-B truth minus STDDS, tracker minus ADS-B truth (the second is the diagnostic for STDDS following ADS-B).
 - **OA-SRF-005** Per STDDS track the stamp offset is fitted against the ADS-B truth only, never the tracker,
   over -15 s to +15 s in 0.1 s steps minimising along-track error, ties toward zero; every metric is reported
   at offset 0 and at the fitted offset, and a track with no fit has no fitted samples.
 - **OA-SRF-006** The offset search is exact at its edges, flags an offset at either end of the range, and
-  refuses a fit with fewer than 8 samples that have a moving truth at every offset.
+  refuses a fit with fewer than 8 samples that have a moving truth at every offset (OA-SRF-015 gives the
+  reason).
 - **OA-SRF-007** Tracker fixes are interpolated between rows at most 5 s apart; at a track end a fix is
   extrapolated by the end row's velocity up to 1 s and counted, and refused beyond that.
 - **OA-SRF-008** Per set: horizontal error, along and cross track, altitude difference (feet) and velocity
   difference (m/s), each with n, rms, mean, p50, p95 and p99; an absent value is no data, never 0.
-- **OA-SRF-009** The summary and the per-sample CSV (record place, class, status, offset and errors) are byte-identical for the same inputs and carry the
-  input file digests and a digest of the output.
+- **OA-SRF-009** The summary carries the SHA-256 of each input file and one digest over the summary and the
+  per-sample CSV; the CSV (record place, class, status, offset and errors) carries neither. Both outputs
+  are byte-identical for the same inputs given by the same paths.
 - **OA-SRF-010** The tool uses the shared guard (`oa-sealed`, OA-SEAL-001, OA-SEAL-002) and no guard of
   its own: every path it is given (the STDDS files, the ADS-B clip, the output folder) is checked before
   anything is read or created, and a sealed one (a sealed folder, a sealed ADS-B day, a link into sealed
@@ -5658,3 +5664,14 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-SRF-011** A `.oaf` or `.oaf.gz` recording is read into records with counts of frames, other products
   and damage, and the SHA-256 of the file's stored bytes.
 - **OA-SRF-012** A record with no time or no position is counted as its own unpaired reason, never paired.
+- **OA-SRF-015** Tracks that are not fitted are reported per class by reason: no ADS-B truth over the
+  +-15 s window at enough samples (the track has at least 8 sample records), and fewer than 8 usable samples
+  (too few records, or a covered truth too slow to give a direction).
+- **OA-SRF-016** The tool creates `stdds_ref.txt` and `stdds_ref.csv` with create-new and never overwrites:
+  an existing output (or link) exits 1 with its path named, before any work; each output path is checked
+  through the shared guard before it is created, and one that leads into sealed data exits 2.
+- **OA-SRF-017** The report states the assumed units (STDDS altitude feet, velocity m/s east and north) and
+  which tracker altitude is compared, and prints per class the median STDDS altitude against the median
+  truth altitude and the median ratio of STDDS speed to truth speed on the paired samples, with "units
+  suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
+  ratio is outside 0.8 to 1.25.

@@ -40,6 +40,28 @@ pub fn open_guarded_with(
     Ok(file)
 }
 
+/// Creates the output file `path` for writing: checked through the guard first, then created with
+/// `create_new`, so an existing file (or link, even a dangling one) is refused, never overwritten
+/// or followed. The error names the path; a sealed path is a refusal (`OA-SEAL-001`).
+pub fn create_output(g: &Sealed, path: &Path) -> io::Result<File> {
+    refuse_sealed(g, path).map_err(io::Error::other)?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            let why = if e.kind() == io::ErrorKind::AlreadyExists {
+                "output file exists (never overwritten)".to_string()
+            } else {
+                e.to_string()
+            };
+            io::Error::new(e.kind(), format!("{}: {why}", path.display()))
+        })?;
+    g.verify_open(path, &file)
+        .map_err(|e| io::Error::other(format!("{}: {e}", path.display())))?;
+    Ok(file)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -139,6 +161,35 @@ mod tests {
         let l2 = root.join("m.oaf");
         std::os::unix::fs::symlink(root.join("fine.oaf"), &l2).unwrap();
         assert!(open_guarded(&g, &l2).is_ok());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // REQ: OA-SRF-016
+    #[test]
+    fn an_output_is_created_never_overwritten_and_never_into_sealed_data() {
+        let root = tree("out");
+        let g = guard(&root);
+        let p = root.join("o.txt");
+        std::fs::write(&p, b"keep").unwrap();
+        let e = create_output(&g, &p).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
+        assert!(e.to_string().contains(&*p.to_string_lossy()), "{e}");
+        assert_eq!(std::fs::read(&p).unwrap(), b"keep");
+        // A dangling link is not followed to create the file behind it.
+        let dangling = root.join("d.txt");
+        std::os::unix::fs::symlink(root.join("nowhere"), &dangling).unwrap();
+        assert!(create_output(&g, &dangling).is_err());
+        assert!(!root.join("nowhere").exists());
+        // A link into sealed data is refused by the guard, and nothing is created there.
+        let sealed = root.join("scds").join("stdds-20261119-holdout");
+        std::fs::create_dir_all(&sealed).unwrap();
+        let link = root.join("l.txt");
+        std::os::unix::fs::symlink(sealed.join("new.txt"), &link).unwrap();
+        let e = create_output(&g, &link).unwrap_err();
+        assert!(is_refusal(&e.to_string()), "{e}");
+        assert!(!sealed.join("new.txt").exists());
+        // A fresh path is created.
+        assert!(create_output(&g, &root.join("fresh.txt")).is_ok());
         std::fs::remove_dir_all(&root).unwrap();
     }
 
