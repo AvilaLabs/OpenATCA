@@ -376,3 +376,42 @@ fn a_plan_filed_again_over_an_ended_one_is_remembered_with_its_time() {
     assert_eq!(rep.positions.refiled_at(g + 1), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// REQ: OA-FLT-040
+#[test]
+fn the_position_of_a_flight_the_table_removes_is_forgotten_with_it() {
+    let dir = temp_dir("forget");
+    let ts = parse_iso_ms(b"2030-01-02T03:04:05.000Z").unwrap();
+    let other = "99999999-2222-3333-4444-555555555555";
+    let pos = r#"<enRoute><position positionTime="2030-01-02T03:04:00Z"><position><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>41.9 -87.9</pos></location></position></position></enRoute>"#;
+    let active = format!(r#"<flightStatus fdpsFlightStatus="ACTIVE"/>{pos}"#);
+    let done = r#"<flightStatus fdpsFlightStatus="COMPLETED"/>"#;
+    let at = |s: &str| format!("2030-01-02T03:{s}.000Z");
+    let m = |g: &str, t: &str, b: &str| msg("TH", t, b).replace(GUFI, g);
+    let frames = [
+        frame(1, ts + 10_000, &doc(&m(GUFI, &at("04:05"), &active))),
+        frame(2, ts + 11_000, &doc(&m(GUFI, &at("04:06"), done))),
+        frame(3, ts + 600_000, &doc(&m(other, &at("14:05"), &active))),
+        frame(4, ts + 700_000, &doc(&m(other, &at("15:45"), &active))),
+    ];
+    std::fs::write(dir.join("a.oaf"), frames.concat()).unwrap();
+    let mut c = cfg(i64::MIN, i64::MAX);
+    c.retain_ms = 60_000;
+    let g = 0x1111_1111_2222_3333_4444_5555_5555_5555u128;
+    let mut held_before_sweep = false;
+    let rep = replay_sfdps(recordings_in(&dir).unwrap(), &c, &mut |_, p, avail| {
+        if avail < ts + 300_000 && p.get(g).is_some() {
+            held_before_sweep = true;
+        }
+    })
+    .unwrap();
+    assert!(
+        held_before_sweep,
+        "the position was held while the flight was"
+    );
+    assert_eq!(rep.removed_by_reason.iter().sum::<u64>(), 1);
+    assert!(rep.positions.get(g).is_none());
+    assert_eq!(rep.positions.refiled_at(g), None);
+    assert_eq!(rep.positions.refiled_len(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

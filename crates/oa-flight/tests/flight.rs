@@ -1539,7 +1539,7 @@ fn of_several_flying_flights_with_one_callsign_the_newest_plan_is_found_the_same
 
 // REQ: OA-FLT-033
 #[test]
-fn every_flight_that_claims_an_address_is_walked_newest_first() {
+fn every_flight_that_claims_an_address_is_counted_and_the_flying_ones_copied_newest_first() {
     let mut t = table();
     let claim = |t: &mut FlightTable, n: u128, ts: i64| {
         live(t, gk(n));
@@ -1551,26 +1551,50 @@ fn every_flight_that_claims_an_address_is_walked_newest_first() {
         claim(&mut t, n, ts);
     }
     let mut out = Vec::new();
-    assert_eq!(flights_claiming_address(&t, 0xABCDEF, &mut out, 8), 3);
+    let c = flights_claiming_address(&t, 0xABCDEF, &mut out, 8);
+    assert_eq!((c.total, c.flying, c.sole_dropped), (3, 3, false));
     let keys: Vec<FlightKey> = out.iter().map(|f| f.key).collect();
     assert_eq!(keys, [gk(3), gk(2), gk(1)]);
-    // The most asked for is kept; the count is of all of them.
+    // The most asked for is copied; the counts are of all of them.
     let mut few = Vec::new();
-    assert_eq!(flights_claiming_address(&t, 0xABCDEF, &mut few, 2), 3);
-    assert_eq!(few.len(), 2);
+    let c = flights_claiming_address(&t, 0xABCDEF, &mut few, 2);
+    assert_eq!((c.total, c.flying, few.len()), (3, 3, 2));
     assert_eq!(
         flights_claiming_address(&t, 0x123456, &mut Vec::new(), 8),
-        0
+        Claimants::default()
     );
-    assert_eq!(flights_claiming_address(&t, 0, &mut Vec::new(), 8), 0);
+    assert_eq!(flights_claiming_address(&t, 0, &mut Vec::new(), 8).total, 0);
     // A flight that takes another address leaves the chain.
     let mut o = op(OP_ADDRESS, gk(2), ZAU, 9_000);
     o.address = 0x111111;
     apply(&mut t, &o);
     let mut out = Vec::new();
-    assert_eq!(flights_claiming_address(&t, 0xABCDEF, &mut out, 8), 2);
+    assert_eq!(flights_claiming_address(&t, 0xABCDEF, &mut out, 8).total, 2);
     assert_eq!(
         out.iter().map(|f| f.key).collect::<Vec<_>>(),
         [gk(3), gk(1)]
     );
+    // A claimant that is dropped is counted and not copied; alone it is flagged.
+    apply(&mut t, &op(OP_DROP, gk(1), ZAU, 10_000));
+    let mut out = Vec::new();
+    let c = flights_claiming_address(&t, 0xABCDEF, &mut out, 8);
+    assert_eq!(
+        (c.total, c.flying, c.sole_dropped, out.len()),
+        (2, 1, false, 1)
+    );
+    apply(&mut t, &op(OP_DROP, gk(3), ZAU, 11_000));
+    let mut out = Vec::new();
+    let c = flights_claiming_address(&t, 0xABCDEF, &mut out, 8);
+    assert_eq!(
+        (c.total, c.flying, c.sole_dropped, out.len()),
+        (2, 0, false, 0)
+    );
+    let mut lone = table();
+    live(&mut lone, gk(7));
+    let mut o = op(OP_ADDRESS, gk(7), ZAU, 2_000);
+    o.address = 0x777777;
+    apply(&mut lone, &o);
+    apply(&mut lone, &op(OP_DROP, gk(7), ZAU, 3_000));
+    let c = flights_claiming_address(&lone, 0x777777, &mut Vec::new(), 8);
+    assert_eq!((c.total, c.flying, c.sole_dropped), (1, 0, true));
 }

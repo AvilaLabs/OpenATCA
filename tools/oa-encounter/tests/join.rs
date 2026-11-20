@@ -10,12 +10,13 @@
 use oa_encounter::Encounter;
 use oa_encounter_run::args::parse;
 use oa_encounter_run::join::{
-    answer_queries, assigned_of, effective_of, is_near_climb, join_text, observe, timeline,
-    AddrResult, Answer, CallsignObs, Clearance, CsReject, CsResult, DiagClass, JoinStats, Key,
-    Query, Resolution, Sfdps,
+    answer_queries, assigned_of, effective_of, fresh_position, is_near_climb, join_text, observe,
+    timeline, AddrResult, Answer, CallsignObs, Clearance, CsReject, CsResult, DiagClass, JoinStats,
+    Key, Query, Resolution, Sfdps, FLYING_CAP,
 };
 use oa_encounter_run::run::run;
 use oa_flight::{Alt, ALT_AT_FIX, ALT_NIL, ALT_SIMPLE, ALT_VFR};
+use oa_flight_sfdps::Position;
 
 fn enc(v: f32, vr: f32, class: u8) -> Encounter {
     Encounter {
@@ -79,6 +80,9 @@ fn stats() -> JoinStats {
         flights_held: 3,
         positions: 0,
         positions_refused: 0,
+        refiles: 0,
+        refiles_refused: 0,
+        positions_bad_time: 0,
     }
 }
 
@@ -1043,33 +1047,106 @@ fn a_claimant_dropped_at_the_query_is_excluded_and_counted_on_its_own() {
         "the join before the walk took a dropped flight"
     );
     assert_eq!(r[1].addr, AddrResult::NoneFlying);
-    assert!(!r[1].many_claimants);
     let _ = std::fs::remove_dir_all(&sf.dir);
 }
 
 // REQ: OA-FLT-039
 #[test]
-fn an_address_with_more_than_32_claimants_is_walked_whole_and_flagged() {
+fn an_address_with_more_than_the_cap_flying_is_counted_and_left_unresolved() {
     let mut frames = Vec::new();
-    for n in 1..=40u32 {
+    for n in 1..=(FLYING_CAP as u32 + 1) {
         let c = if n == 1 { "FIRST" } else { "MANY" };
         frames.push(claim(
             (u64::from(n), n, i64::from(n)),
             "A1B2C3",
             c,
             "ACTIVE",
-            20_000 + 1000 * n as i32,
+            20_000 + 10 * n as i32,
             None,
         ));
     }
-    let sf = recording("many", &frames);
+    // An address with exactly the cap flying is looked at: the callsign decides.
+    let at_cap: Vec<Vec<u8>> = (1..=FLYING_CAP as u32)
+        .map(|n| {
+            let c = if n == 1 { "FIRST" } else { "MANY" };
+            claim(
+                (u64::from(n), n, i64::from(n)),
+                "A1B2C3",
+                c,
+                "ACTIVE",
+                20_000,
+                None,
+            )
+        })
+        .collect();
+    let sf = recording("over-cap", &frames);
     let (r, _d, _) = answer_queries(&sf, &[q(0x00A1_B2C3, 150, cs("FIRST"), CHI)]).unwrap();
-    assert!(r[0].many_claimants);
-    assert_eq!(r[0].addr, AddrResult::SeveralCallsignDecides);
+    assert_eq!(r[0].addr, AddrResult::SeveralOverCap);
+    assert!(!r[0].ended);
+    assert_eq!(r[0].addr_flight, None);
     assert_eq!(
-        r[0].assigned,
-        simple(21_000),
-        "the oldest claimant is found"
+        r[0].key,
+        Key::CallsignUnchecked,
+        "unresolved: the callsign join is tried next"
     );
     let _ = std::fs::remove_dir_all(&sf.dir);
+    let sf = recording("at-cap", &at_cap);
+    let (r, _d, _) = answer_queries(&sf, &[q(0x00A1_B2C3, 150, cs("FIRST"), CHI)]).unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralCallsignDecides);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-038
+#[test]
+fn an_all_proposed_set_does_not_narrow_to_none_and_a_callsign_step_that_leaves_two_goes_on() {
+    let frames = [
+        // All proposed, one near: the state step must leave the set, and the position picks.
+        claim((1, 1, 0), "A1B2C3", "P1", "PROPOSED", 20_000, FAR),
+        claim((2, 2, 1), "A1B2C3", "P2", "PROPOSED", 21_000, NEAR),
+        // The callsign leaves two (X, near and far); a third with another callsign is near too:
+        // without the callsign step the position would not resolve.
+        claim((3, 3, 2), "B1B2C3", "X3", "ACTIVE", 22_000, FAR),
+        claim((4, 4, 3), "B1B2C3", "X3", "ACTIVE", 23_000, NEAR),
+        claim((5, 5, 4), "B1B2C3", "Y5", "ACTIVE", 24_000, NEAR),
+    ];
+    let sf = recording("narrow", &frames);
+    let none = |a, c| Query {
+        try_callsign: false,
+        ..q(a, 150, c, CHI)
+    };
+    let (r, _d, _) = answer_queries(
+        &sf,
+        &[
+            none(0x00A1_B2C3, CallsignObs::Absent),
+            none(0x00B1_B2C3, cs("X3")),
+            none(0x00B1_B2C3, CallsignObs::Absent),
+        ],
+    )
+    .unwrap();
+    assert_eq!(r[0].addr, AddrResult::SeveralByPosition);
+    assert_eq!(r[0].assigned, simple(21_000));
+    assert_eq!(r[1].addr, AddrResult::SeveralByPosition);
+    assert_eq!(r[1].assigned, simple(23_000));
+    assert_eq!(r[2].addr, AddrResult::SeveralUnresolved);
+    let _ = std::fs::remove_dir_all(&sf.dir);
+}
+
+// REQ: OA-FLT-041
+#[test]
+fn a_position_counts_only_when_stamped_at_or_before_the_question_and_within_120_s() {
+    let p = |ts_ms| Position {
+        ts_ms,
+        avail_ms: ts_ms,
+        lat_e7: 1,
+        lon_e7: 2,
+    };
+    let t = 1_000_000;
+    assert!(fresh_position(Some(&p(t)), t).is_some());
+    assert!(fresh_position(Some(&p(t - 120_000)), t).is_some());
+    assert!(fresh_position(Some(&p(t - 120_001)), t).is_none());
+    assert!(
+        fresh_position(Some(&p(t + 1)), t).is_none(),
+        "stamped after the question"
+    );
+    assert!(fresh_position(None, t).is_none());
 }

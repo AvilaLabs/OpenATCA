@@ -98,17 +98,30 @@ pub(crate) fn slot_of_key(t: &FlightTable, k: &FlightKey) -> Option<u32> {
     })
 }
 
-/// Every flight that claims this aircraft address, newest claimant first, by walking the chain of
-/// the address index: appends copies to `out` (at most `max`) and returns how many flights claim
-/// the address. The walk is at most the length of the table.
+/// What the chain of flights that claim one aircraft address holds.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Claimants {
+    /// Every flight that claims the address.
+    pub total: usize,
+    /// Those flying ([`flight_is_flying`]).
+    pub flying: usize,
+    /// The only claimant is live but not flying (dropped).
+    pub sole_dropped: bool,
+}
+
+/// Walks the chain of the address index, newest claimant first, and counts every flight that
+/// claims the address. Appends a copy of each flying one to `out`, at most `max`; the flights not
+/// flying are not copied. The walk is at most the length of the table.
 pub fn flights_claiming_address(
     t: &FlightTable,
     address: u32,
     out: &mut Vec<Flight>,
     max: usize,
-) -> usize {
+) -> Claimants {
+    let mut r = Claimants::default();
     if address == 0 {
-        return 0;
+        return r;
     }
     let flights = &t.flights;
     let Some(mut cur) = index_find(&t.by_addr, hash_addr(address), |s| {
@@ -116,9 +129,9 @@ pub fn flights_claiming_address(
             .get(s as usize)
             .is_some_and(|f| f.address == address)
     }) else {
-        return 0;
+        return r;
     };
-    let mut n = 0usize;
+    let mut only: Option<Flight> = None;
     for _ in 0..t.flights.len() {
         let Some(f) = t.flights.get(cur as usize) else {
             break;
@@ -126,16 +139,22 @@ pub fn flights_claiming_address(
         if f.address != address {
             break;
         }
-        n += 1;
-        if out.len() < max {
-            out.push(*f);
+        r.total += 1;
+        if flight_is_flying(f) {
+            r.flying += 1;
+            if out.len() < max {
+                out.push(*f);
+            }
+        } else if r.total == 1 {
+            only = Some(*f);
         }
         if f.addr_next == 0 {
             break;
         }
         cur = f.addr_next - 1;
     }
-    n
+    r.sole_dropped = r.total == 1 && only.is_some_and(|f| flight_is_live(&f));
+    r
 }
 
 /// A copy of the flight with this key.

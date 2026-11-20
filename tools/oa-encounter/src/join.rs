@@ -69,9 +69,11 @@ pub enum AddrResult {
     SeveralByPosition,
     /// Several are flying and none of the steps leaves one.
     SeveralUnresolved,
+    /// More than [`FLYING_CAP`] are flying: not looked at, unresolved.
+    SeveralOverCap,
 }
 
-pub const ADDR_NAMES: [&str; 8] = [
+pub const ADDR_NAMES: [&str; 9] = [
     "no flight claims the address",
     "the only claimant is dropped",
     "address claimants, none flying (other)",
@@ -80,6 +82,7 @@ pub const ADDR_NAMES: [&str; 8] = [
     "several flying, state decides",
     "several flying, one passes the position check",
     "several flying claimants, not resolved",
+    "more than the cap flying (unresolved, not looked at)",
 ];
 
 /// How a disagreement between the address flight and the callsign flight was settled.
@@ -171,8 +174,6 @@ pub struct Answer {
     /// The join before the walk (the newest claimant, if not ended, else the callsign) found a
     /// flight: for counting what the walk lost and gained.
     pub old_found: bool,
-    /// More than [`MANY_CLAIMANTS`] flights claim the address.
-    pub many_claimants: bool,
 }
 
 /// The callsign an aircraft's ADS-B reports carry over the 60 s before a time.
@@ -305,6 +306,11 @@ pub struct JoinStats {
     /// Flights that reported a position, and positions the bounded table could not take.
     pub positions: usize,
     pub positions_refused: u64,
+    /// Flights with a refile time held, refile times the bounded table could not take, and
+    /// positions left out for a stamp too far ahead of their receipt.
+    pub refiles: usize,
+    pub refiles_refused: u64,
+    pub positions_bad_time: u64,
 }
 
 /// The flight-record configuration of the tool: the national day holds about 45,000 flights, so
@@ -361,12 +367,17 @@ fn cs_join(
     }
 }
 
-/// The flight's own latest position if it is within [`POSITION_AGE_MS`] of the time.
+/// The flight's own latest position if it is stamped at or before the time and within
+/// [`POSITION_AGE_MS`] of it.
 fn own_position(pos: &Positions, f: &Flight, t_ms: i64) -> Option<Position> {
     (f.key.kind == KEY_GUFI)
-        .then(|| pos.get(f.key.gufi))
+        .then(|| fresh_position(pos.get(f.key.gufi), t_ms))
         .flatten()
-        .filter(|p| (t_ms - p.ts_ms).abs() <= POSITION_AGE_MS)
+}
+
+/// A position stamped at or before `t_ms` and no more than [`POSITION_AGE_MS`] before it.
+pub fn fresh_position(p: Option<&Position>, t_ms: i64) -> Option<Position> {
+    p.filter(|p| p.ts_ms <= t_ms && t_ms - p.ts_ms <= POSITION_AGE_MS)
         .copied()
 }
 
@@ -494,9 +505,10 @@ fn position_passes(pos: &Positions, f: &Flight, q: &Query) -> bool {
         .is_some_and(|p| distance_m((p.lat_e7, p.lon_e7), (q.lat_e7, q.lon_e7)) <= POSITION_DIST_M)
 }
 
-/// An address claimed by more flights than this is counted in the report. All claimants are
-/// looked at whatever their number.
-pub const MANY_CLAIMANTS: usize = 32;
+/// The most flying claimants of one address that are copied and looked at. An airframe states its
+/// address on a few legs a day; an address with more flying is counted in the report and left
+/// unresolved. The walk of the chain is the whole of it, whatever the cap.
+pub const FLYING_CAP: usize = 64;
 
 /// Whether some view of the flight is active or departed.
 fn is_underway(f: &Flight) -> bool {
@@ -510,48 +522,51 @@ fn is_underway(f: &Flight) -> bool {
 /// flying are narrowed in turn, each step only narrowing (a step that would leave none changes
 /// nothing): by the ADS-B callsign, by state (active or departed over proposed), by the position
 /// check.
-fn addr_join(t: &FlightTable, pos: &Positions, q: &Query) -> (AddrResult, Option<Flight>, bool) {
-    let mut claimants = Vec::new();
-    let n = flights_claiming_address(t, q.addr, &mut claimants, usize::MAX);
-    let many = n > MANY_CLAIMANTS;
-    let flying: Vec<Flight> = claimants.iter().copied().filter(flight_is_flying).collect();
-    let r = match flying.as_slice() {
-        [] => match claimants.as_slice() {
-            [] => (AddrResult::NoClaimant, None),
-            [f] if flight_is_live(f) => (AddrResult::OnlyClaimantDropped, None),
-            _ => (AddrResult::NoneFlying, None),
-        },
-        [f] => (AddrResult::One, Some(*f)),
-        many => {
-            let mut set: Vec<Flight> = many.to_vec();
-            if let CallsignObs::Stable(c) = q.callsign {
-                let kept: Vec<Flight> = set.iter().copied().filter(|f| f.callsign == c).collect();
-                if let [f] = kept.as_slice() {
-                    return (AddrResult::SeveralCallsignDecides, Some(*f), many_flag(n));
-                }
-                if !kept.is_empty() {
-                    set = kept;
-                }
-            }
-            let kept: Vec<Flight> = set.iter().copied().filter(is_underway).collect();
-            if let [f] = kept.as_slice() {
-                return (AddrResult::SeveralStateDecides, Some(*f), many_flag(n));
-            }
-            if !kept.is_empty() {
-                set = kept;
-            }
-            let mut passing = set.iter().filter(|f| position_passes(pos, f, q));
-            match (passing.next(), passing.next()) {
-                (Some(f), None) => (AddrResult::SeveralByPosition, Some(*f)),
-                _ => (AddrResult::SeveralUnresolved, None),
-            }
+fn addr_join(t: &FlightTable, pos: &Positions, q: &Query) -> (AddrResult, Option<Flight>) {
+    let mut flying = Vec::new();
+    let c = flights_claiming_address(t, q.addr, &mut flying, FLYING_CAP);
+    if c.total == 0 {
+        return (AddrResult::NoClaimant, None);
+    }
+    if c.flying == 0 {
+        let r = if c.sole_dropped {
+            AddrResult::OnlyClaimantDropped
+        } else {
+            AddrResult::NoneFlying
+        };
+        return (r, None);
+    }
+    if c.flying > FLYING_CAP {
+        return (AddrResult::SeveralOverCap, None);
+    }
+    if let [f] = flying.as_slice() {
+        return (AddrResult::One, Some(*f));
+    }
+    if let CallsignObs::Stable(cs) = q.callsign {
+        let kept: Vec<Flight> = flying
+            .iter()
+            .copied()
+            .filter(|f| f.callsign == cs)
+            .collect();
+        if let [f] = kept.as_slice() {
+            return (AddrResult::SeveralCallsignDecides, Some(*f));
         }
-    };
-    (r.0, r.1, many)
-}
-
-fn many_flag(n: usize) -> bool {
-    n > MANY_CLAIMANTS
+        if !kept.is_empty() {
+            flying = kept;
+        }
+    }
+    let kept: Vec<Flight> = flying.iter().copied().filter(is_underway).collect();
+    if let [f] = kept.as_slice() {
+        return (AddrResult::SeveralStateDecides, Some(*f));
+    }
+    if !kept.is_empty() {
+        flying = kept;
+    }
+    let mut passing = flying.iter().filter(|f| position_passes(pos, f, q));
+    match (passing.next(), passing.next()) {
+        (Some(f), None) => (AddrResult::SeveralByPosition, Some(*f)),
+        _ => (AddrResult::SeveralUnresolved, None),
+    }
 }
 
 fn lookup(
@@ -563,9 +578,8 @@ fn lookup(
 ) -> (Answer, Option<Diag>) {
     let mut a = Answer::default();
     let mut chosen = None;
-    let (addr, addr_f, many) = addr_join(t, pos, q);
+    let (addr, addr_f) = addr_join(t, pos, q);
     a.addr = addr;
-    a.many_claimants = many;
     a.ended = matches!(
         addr,
         AddrResult::NoneFlying | AddrResult::OnlyClaimantDropped
@@ -691,6 +705,9 @@ pub fn answer_queries(
         flights_held: oa_flight::flights_len(&rep.table),
         positions: rep.positions.len(),
         positions_refused: rep.positions.refused_full,
+        refiles: rep.positions.refiled_len(),
+        refiles_refused: rep.positions.refiled_refused,
+        positions_bad_time: rep.positions.bad_time,
     };
     Ok((answers, diags, stats))
 }
@@ -825,6 +842,15 @@ pub fn join_text(
     );
     let _ = writeln!(
         o,
+        "  positions held at the end {}, positions refused (table full) {}, refile times held {}, refiles refused (table full) {}, positions left out for a stamp too far ahead {}",
+        stats.positions,
+        stats.positions_refused,
+        stats.refiles,
+        stats.refiles_refused,
+        stats.positions_bad_time
+    );
+    let _ = writeln!(
+        o,
         "  the flight record is read as of each encounter's closest approach: an operation counts from the later of its receipt and its timestamp plus the lag floor"
     );
     let _ = writeln!(
@@ -910,9 +936,14 @@ pub fn join_text(
     o
 }
 
+/// The median: the mean of the middle two where there is an even number.
 fn median(v: &mut [f64]) -> Option<f64> {
     v.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
-    v.get(v.len() / 2).copied()
+    let n = v.len();
+    match (n.checked_sub(1).map(|k| k / 2), v.get(n / 2)) {
+        (Some(lo), Some(hi)) => Some((v.get(lo).copied()? + hi) / 2.0),
+        _ => None,
+    }
 }
 
 /// The disagreements between the two keys, by kind. Counts and distances only.
@@ -1092,6 +1123,7 @@ fn addr_index(r: AddrResult) -> usize {
         AddrResult::SeveralStateDecides => 5,
         AddrResult::SeveralByPosition => 6,
         AddrResult::SeveralUnresolved => 7,
+        AddrResult::SeveralOverCap => 8,
     }
 }
 
@@ -1105,7 +1137,7 @@ fn key_text(
     let ans = |i: usize| answers.get(i).copied().unwrap_or_default();
     let _ = writeln!(
         o,
-        "\n  join by key (the callsign is used only where the address names no live flight)"
+        "\n  join by key (the callsign is tried where the address names no flight, and may override the address flight where its position agrees and the address flight's does not)"
     );
     let _ = writeln!(
         o,
@@ -1113,8 +1145,7 @@ fn key_text(
         POSITION_AGE_MS / 1000
     );
     let mut per_key = [0u64; 5];
-    let mut addr_results = [0u64; 8];
-    let mut many_claimants = 0u64;
+    let mut addr_results = [0u64; 9];
     // Encounters with a record for both before the walk and not after, by cause; and the reverse.
     let (mut lost, mut gained) = ([0u64; 3], 0u64);
     let mut rejects = [0u64; 5];
@@ -1159,7 +1190,6 @@ fn key_text(
             if let Some(c) = addr_results.get_mut(addr_index(x.addr)) {
                 *c += 1;
             }
-            many_claimants += u64::from(x.many_claimants);
             if x.addr_flight.is_none() && matches!(x.cs, CsResult::Accepted { several: true, .. }) {
                 several += 1;
             }
@@ -1226,11 +1256,7 @@ fn key_text(
     }
     let _ = writeln!(
         o,
-        "  addresses claimed by more than {MANY_CLAIMANTS} flights (aircraft counted): {many_claimants}"
-    );
-    let _ = writeln!(
-        o,
-        "  record for both before the walk (newest claimant only) and not after, by cause: only claimant dropped {}, several flying not resolved and the callsign found nothing {}, anything else {}; the reverse (a record for both only after): {gained}",
+        "  compared with a re-derived old join (the newest claimant only, a dropped flight counted), record for both under the old and not now, by cause: only claimant dropped {}, several flying not resolved and the callsign found nothing {}, anything else {}; the reverse (a record for both now and not under the old join): {gained}",
         lost[0], lost[1], lost[2]
     );
     let _ = writeln!(

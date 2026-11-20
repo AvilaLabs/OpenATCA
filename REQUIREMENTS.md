@@ -5577,7 +5577,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   opens anything, and exits 2; every recording it reads is opened through the same guard.
 - **OA-FLT-024** A question about a flight is answered as of its time: an operation received before it but not yet aged in by the
   lag floor is not seen by it, and one that has aged in is.
-- **OA-FLT-025** The callsign join names a flight only where the address names none, and only when the ADS-B callsign is stable,
+- **OA-FLT-025** The callsign join is tried where the address names no flight, and may override the address flight under OA-FLT-036; it names a flight only when the ADS-B callsign is stable,
   exactly one flight that is flying (a plan proposed, active or departed; not ended, not dropped) states it, and the flight's own
   SFDPS position within 120 s of the question, where it has one, is within 10 NM of the ADS-B position; with no such position the
   join stands and is counted apart as unchecked. Each rejection (no callsign, unstable callsign, no live flight, several live
@@ -5588,7 +5588,7 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   flight and of different flights are reported, as the measure of the callsign join's error.
 - **OA-FLT-028** The ADS-B callsign of an aircraft is stable when the reports of the previous 60 s carry one callsign (upper
   case, trimmed); none is no callsign and more than one is unstable; the position is the latest report not after the question
-  and not older than 60 s.
+  and not older than 60 s, and with none in that span it is the midpoint of the two aircraft of the pair's closest approach.
 - **OA-FLT-029** The adapter makes a callsign upper case and trimmed, and the replay keeps the latest position of each flight,
   bounded, as of the time it ages in.
 - **OA-FLT-030** Where several flying flights state one callsign, all with the same departure and arrival, the callsign join may take
@@ -5604,8 +5604,9 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-FLT-034** The address join walks every claimant of the address, keeps those flying at the query time under the same as-of,
   no-peek rule, takes the one that is flying if only one is, and with none flying finds nothing (counted as address claimants,
   none flying) and the callsign join is tried next.
-- **OA-FLT-035** With several claimants flying, the address join takes the one whose own position within 120 s is within 10 NM of the
-  ADS-B position; if none or more than one passes, it gives several flying claimants and the callsign join is tried next.
+- **OA-FLT-035** Among the claimants left after OA-FLT-037 and OA-FLT-038, the address join takes the one whose own position within
+  120 s is within 10 NM of the ADS-B position; if none or more than one passes, it gives several flying claimants and the callsign
+  join is tried next.
 - **OA-FLT-036** Where the address join and the callsign join name different flights, the one whose position check passes is taken;
   if both or neither pass the address flight stands; each case is counted and kept in the cross-check.
 - **OA-FLT-037** With several claimants flying, the claimants whose callsign equals the ADS-B callsign are kept first; if one remains
@@ -5613,7 +5614,13 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-FLT-038** Then claimants with a view active or departed are kept over those only proposed; if one remains it is taken and
   counted as several flying, state decides; then the position check; otherwise the claimants stay unresolved.
 - **OA-FLT-039** A dropped flight is not flying; an address whose only claimant is dropped at the query time is counted on its own
-  line, every claimant is walked whatever their number, and addresses with more than 32 claimants are counted in the report.
+  line. The walk counts every claimant of the chain (time linear in the chain, at most the table) and copies only the flying ones,
+  at most 64 (FLYING_CAP, 64 flights of 768 B, 48 KiB per question); an address with more than 64 flying is counted on its own
+  line and left unresolved, so the callsign join is tried.
+- **OA-FLT-040** The replay drops the position and the refile time of a flight when the table removes the flight; positions held,
+  positions refused (table full), refile times held and refiles refused are printed, also at zero, and so are positions left out for
+  a stamp too far ahead of their receipt.
+- **OA-FLT-041** A flight's own position counts only when stamped at or before the question and no more than 120 s before it.
 - **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
   refuses a window that is open at one end or runs backwards.
 

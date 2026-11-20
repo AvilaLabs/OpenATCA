@@ -50,7 +50,7 @@ pub use apply::{flights_apply, flights_op_avail, op_new};
 pub use table::{
     flight_by_address, flight_get, flight_is_flying, flight_is_live, flights_check,
     flights_claiming_address, flights_digest, flights_flying_by_callsign, flights_len,
-    flights_log_clear, flights_new, flights_remove, flights_sweep, view_of, Flying,
+    flights_log_clear, flights_new, flights_remove, flights_sweep, view_of, Claimants, Flying,
 };
 pub use types::{
     key_gufi, key_tfms, Alt, Conflict, Flight, FlightConfig, FlightError, FlightKey, FlightStats,

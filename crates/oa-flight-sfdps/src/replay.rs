@@ -136,8 +136,9 @@ pub struct Position {
 }
 
 /// The latest position of each flight, keyed by GUFI, bounded: a flight that would take the table
-/// past its capacity is refused and counted, none is evicted. A position older than the one held
-/// is counted and not kept. A7.2: cold struct, size guard waived.
+/// past its capacity is refused and counted, none is evicted by a newcomer; the entries of a flight
+/// go when the table removes the flight ([`Positions::forget`]). A position older than the one
+/// held is counted and not kept. A7.2: cold struct, size guard waived.
 #[derive(Clone, Debug, Default)]
 pub struct Positions {
     map: BTreeMap<u128, Position>,
@@ -145,6 +146,8 @@ pub struct Positions {
     /// each flight, by GUFI, bounded like the positions.
     refiled: BTreeMap<u128, i64>,
     pub refiled_refused: u64,
+    /// Positions left out because their message is stamped too far ahead of its receipt.
+    pub bad_time: u64,
     capacity: usize,
     pub updated: u64,
     pub refused_full: u64,
@@ -180,8 +183,19 @@ impl Positions {
         }
     }
 
+    /// Drops what is held for the flight with this GUFI: the position and the refile time.
+    pub fn forget(&mut self, gufi: u128) {
+        self.map.remove(&gufi);
+        self.refiled.remove(&gufi);
+    }
+
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    /// How many flights have a refile time held.
+    pub fn refiled_len(&self) -> usize {
+        self.refiled.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -309,11 +323,15 @@ pub fn replay_sfdps(
             // A position is as available as the operations of its message (the clock after
             // them); a message with no operation is placed as an operation of its time would be,
             // and the question is announced first.
-            if let Some(avail) = position_avail(&events, row, seen_ms, &table) {
-                if avail > table.clock_ms {
-                    before_op(&table, &positions, avail);
+            match position_avail(&events, row, seen_ms, &table) {
+                PositionAvail::NoPosition => {}
+                PositionAvail::BadTime => positions.bad_time += 1,
+                PositionAvail::At(avail) => {
+                    if avail > table.clock_ms {
+                        before_op(&table, &positions, avail);
+                    }
+                    note_position(&events, row, avail, &mut positions);
                 }
-                note_position(&events, row, avail, &mut positions);
             }
         }
         drain_refusals(&mut table, &mut rep, &mut positions);
@@ -321,7 +339,7 @@ pub fn replay_sfdps(
             if next_sweep != i64::MIN {
                 let now = table.clock_ms;
                 flights_sweep(&mut table, now, cfg.retain_ms, cfg.silence_ms);
-                drain_removals(&mut table, &mut rep);
+                drain_removals(&mut table, &mut rep, &mut positions);
             }
             next_sweep = table.clock_ms.saturating_add(cfg.sweep_every_ms);
         }
@@ -334,7 +352,7 @@ pub fn replay_sfdps(
     }
     before_op(&table, &positions, i64::MAX);
     drain_refusals(&mut table, &mut rep, &mut positions);
-    drain_removals(&mut table, &mut rep);
+    drain_removals(&mut table, &mut rep, &mut positions);
     for f in table
         .flights
         .iter()
@@ -352,23 +370,32 @@ pub fn replay_sfdps(
     Ok(rep)
 }
 
-/// When the position of a row becomes available, `None` if the row has none or its message is
-/// stamped too far ahead of its receipt (counted by the caller's positions as bad time).
+/// When the position of a row becomes available.
+enum PositionAvail {
+    /// The row has no position.
+    NoPosition,
+    /// Its message is stamped too far ahead of its receipt: counted as bad time, not kept.
+    BadTime,
+    At(i64),
+}
+
 fn position_avail(
     ev: &oa_fixm::Events,
     row: usize,
     seen_ms: i64,
     table: &FlightTable,
-) -> Option<i64> {
+) -> PositionAvail {
     use oa_fixm::{has_field, Field};
     if !has_field(ev, row, Field::Position) || !has_field(ev, row, Field::PositionTime) {
-        return None;
+        return PositionAvail::NoPosition;
     }
-    let ts = *ev.ts_ms.get(row)?;
+    let Some(&ts) = ev.ts_ms.get(row) else {
+        return PositionAvail::NoPosition;
+    };
     if ts.saturating_sub(seen_ms) > table.cfg.max_future_ms {
-        return None;
+        return PositionAvail::BadTime;
     }
-    Some(
+    PositionAvail::At(
         seen_ms
             .max(ts.saturating_add(table.cfg.lag_floor_ms))
             .max(table.clock_ms),
@@ -468,8 +495,12 @@ fn drain_refusals(t: &mut FlightTable, rep: &mut ReplayReport, positions: &mut P
     t.conflicts.clear();
 }
 
-fn drain_removals(t: &mut FlightTable, rep: &mut ReplayReport) {
+/// Counts the removals the table listed and drops what the replay held for those flights.
+fn drain_removals(t: &mut FlightTable, rep: &mut ReplayReport, positions: &mut Positions) {
     for r in &t.removals {
+        if r.key.kind == oa_flight::KEY_GUFI {
+            positions.forget(r.key.gufi);
+        }
         if let Some(c) = rep.removed_by_reason.get_mut(usize::from(r.reason)) {
             *c += 1;
         }
@@ -483,3 +514,45 @@ pub const REASONS: usize = R_COUNT;
 pub const OPS: usize = OP_COUNT;
 /// The number of conflict kinds.
 pub const CONFLICTS: usize = C_COUNT;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(ts_ms: i64) -> Position {
+        Position {
+            ts_ms,
+            avail_ms: ts_ms,
+            lat_e7: 1,
+            lon_e7: 2,
+        }
+    }
+
+    // REQ: OA-FLT-040
+    #[test]
+    fn a_forgotten_flight_frees_its_place_so_the_table_fills_to_capacity_again() {
+        let mut p = Positions::new(3);
+        for g in 1..=3u128 {
+            p.put(g, at(100));
+            p.note_refile(g, 100);
+        }
+        // Full: a newcomer is refused and counted.
+        p.put(4, at(100));
+        p.note_refile(4, 100);
+        assert_eq!((p.len(), p.refused_full, p.refiled_refused), (3, 1, 1));
+        // The flight is removed: its entries go, and the table fills to capacity again.
+        p.forget(2);
+        assert!(p.get(2).is_none() && p.refiled_at(2).is_none());
+        assert_eq!((p.len(), p.refiled_len()), (2, 2));
+        p.put(4, at(200));
+        p.note_refile(4, 200);
+        assert_eq!((p.len(), p.refiled_len()), (3, 3));
+        assert!(p.get(4).is_some());
+        p.put(5, at(300));
+        p.note_refile(5, 300);
+        assert_eq!((p.refused_full, p.refiled_refused), (2, 2));
+        // Forgetting a flight never held is harmless.
+        p.forget(99);
+        assert_eq!(p.len(), 3);
+    }
+}
