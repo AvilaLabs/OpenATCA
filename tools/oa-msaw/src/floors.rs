@@ -289,7 +289,8 @@ impl Floors {
 
     /// The airport terminal areas. Where several hold a whole cell the lowest clearance applies, with
     /// the lowest ceiling.
-    pub fn set_airports(&mut self, a: Vec<AirportArea>) {
+    pub fn set_airports(&mut self, mut a: Vec<AirportArea>) {
+        a.sort_by(|x, y| oa_math::cmp_canon_f64(x.lat, y.lat));
         self.airports = a;
     }
 
@@ -298,7 +299,13 @@ impl Floors {
     fn apt_at(&self, clat: f64, clon: f64) -> (i32, i32) {
         let h = CELL_DEG / 2.0;
         let mut best: Option<(i32, i32)> = None;
-        for a in &self.airports {
+        // The areas are sorted by latitude: only those within the largest radius are looked at.
+        let reach = self.airports.iter().map(|a| a.radius_m).fold(0.0, f64::max)
+            / 111_194.926_644_558_74
+            + h;
+        let from = self.airports.partition_point(|a| a.lat < clat - reach);
+        let to = self.airports.partition_point(|a| a.lat <= clat + reach);
+        for a in self.airports.get(from..to).unwrap_or(&[]) {
             let c = Area::Circle(a.lat, a.lon, a.radius_m);
             let all = [(0.0, 0.0), (h, h), (h, -h), (-h, h), (-h, -h)]
                 .iter()

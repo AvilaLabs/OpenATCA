@@ -120,6 +120,8 @@ pub struct Record {
     /// For each alert, by address and start, the distance in metres from its violating point to
     /// the cell that set its floor (terrain or obstacle floors only).
     pub setter_m: BTreeMap<(u32, i64), f32>,
+    /// CPU seconds the diagnostics after the last cycle took (outside the steady state).
+    pub diag_cpu_s: f64,
 }
 
 /// Wall time of the steady state, nanoseconds, by part. A7.2: cold struct, size guard waived.
@@ -474,6 +476,7 @@ pub fn track_and_alert(
     msaw_finish(&mut f.st, &mut f.alerts);
     f.all.extend_from_slice(&f.alerts.items);
     let final_net = state_text(&net_status(&f.net, &f.inh, NetId::Msaw, f.last_t).state);
+    let diag0 = cpu_seconds();
     let mut setter_m = BTreeMap::new();
     for a in &f.all {
         if let Some(d) = f.floors.setter_distance_m(
@@ -485,8 +488,10 @@ pub fn track_and_alert(
             setter_m.insert((a.addr, a.start_ns), d as f32);
         }
     }
+    let diag_cpu_s = cpu_seconds().zip(diag0).map_or(0.0, |(b, a)| b - a);
     Ok(Record {
         setter_m,
+        diag_cpu_s,
         alerts: f.all,
         skips: f.skip_agg,
         totals: msaw_totals(&f.st),
@@ -847,7 +852,8 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     );
     let cpu0 = cpu_seconds();
     let rec = track_and_alert(&meas, &cfg, &ground, &set, floors, Some(qnh), t0_ns)?;
-    used.steady_cpu_s = cpu_seconds().zip(cpu0).map(|(b, a)| b - a);
+    used.steady_cpu_s = cpu_seconds().zip(cpu0).map(|(b, a)| b - a - rec.diag_cpu_s);
+    used.diag_cpu_s = rec.diag_cpu_s;
     used.rss_end_kb = proc_kb("VmHWM:");
     used.times = rec.times;
     used.setter_m = rec.setter_m.clone();

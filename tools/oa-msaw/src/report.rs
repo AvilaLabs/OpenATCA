@@ -299,6 +299,8 @@ pub struct DataUsed {
     pub rss_load_kb: Option<u64>,
     pub rss_end_kb: Option<u64>,
     pub steady_cpu_s: Option<f64>,
+    /// CPU seconds of the diagnostics after the last cycle (not in the steady state).
+    pub diag_cpu_s: f64,
     pub times: crate::run::RunTimes,
     /// Who was alerted and why; `None` when the run did not judge (a test of the report alone).
     pub eligibility: Option<EligibilityReport>,
@@ -539,6 +541,11 @@ pub fn summary_text(i: &SummaryInput) -> String {
             (c - sec(fl.ns_tile_read)) / sim_s.max(1.0)
         );
     }
+    let _ = writeln!(
+        o,
+        "  diagnostics after the last cycle (distance to the cell that set each floor): CPU {:.2} s",
+        i.data.diag_cpu_s
+    );
     let _ = writeln!(
         o,
         "    wall seconds in: planning {:.2}, floor lookups {:.2} (terrain {:.2}, tile reads {:.2} of which reducing to grids {:.2}, obstacles {:.2}, chart {:.2}), evaluation {:.2}, altimeter correction {:.2}, tracker and the rest {:.2}",
