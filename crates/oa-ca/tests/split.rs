@@ -369,12 +369,12 @@ fn the_first_step_hands_the_root_step_the_three_values_the_proofs_take_within_th
                 assert_eq!(disc.to_bits(), (h * h * a - cross * cross).to_bits());
                 assert_eq!(tc.to_bits(), (-(rx * vx + ry * vy) / a).to_bits());
                 assert_eq!(now, rx * rx + ry * ry < h * h);
-                assert!(a >= STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS && a <= A_MAX);
+                assert!((STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS..=A_MAX).contains(&a));
                 assert!(disc.is_finite() && disc > 0.0 && disc <= DISC_MAX);
                 assert!(within(tc, TC_MAX));
                 // The contract the root step takes of the square root.
                 let root = oa_ieee::sqrt(disc);
-                assert!(root.is_finite() && root >= 0.0 && root <= 7.0e9);
+                assert!(root.is_finite() && (0.0..=7.0e9).contains(&root));
             }
         }
     }
