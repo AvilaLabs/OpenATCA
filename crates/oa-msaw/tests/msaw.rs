@@ -39,6 +39,8 @@ fn cfg() -> MsawConfig {
         departure_min_clearance_ft: 100,
         velocity_uncertainty_mps: 5.0,
         max_altitude_age_s: 12.0,
+        stale_hold_s: 30.0,
+        altitude_loss_degrade_share: 0.5,
         terminal_lookahead_s: 15.0,
         corridors: [blank_corridor(); MAX_CORRIDORS],
         n_corridors: 0,
@@ -56,6 +58,7 @@ fn blank_corridor() -> Corridor {
         far_half_width_m: 1.0,
         thr_elev_ft: 0,
         faf_alt_ft: 0,
+        land_from_m: 0.0,
     }
 }
 
@@ -192,7 +195,12 @@ fn aircraft_on_the_ground_are_excluded_and_counted() {
     assert_eq!(o.stats.evaluated, 1);
     assert_eq!(msaw_planned(&r.st).len(), 1);
     assert_eq!(o.stats.violations, 0);
-    assert!(r.skips.items.is_empty());
+    // The track on the ground is listed, per track.
+    assert_eq!(r.skips.items.len(), 1);
+    assert_eq!(
+        (r.skips.items[0].addr, r.skips.items[0].why),
+        (1, SkipWhy::GroundExcluded)
+    );
     assert_eq!(o.report, NetReport::Running);
 }
 
@@ -587,6 +595,7 @@ fn north_corridor() -> Corridor {
         far_half_width_m: 1852.0,
         thr_elev_ft: 600,
         faf_alt_ft: 2250,
+        land_from_m: 0.0,
     }
 }
 
@@ -607,6 +616,7 @@ fn hit(ft: i32) -> CorridorHit {
     CorridorHit {
         surface_ft: Some(ft),
         clearance_ft: 100,
+        landing_elev_ft: None,
     }
 }
 
@@ -646,6 +656,7 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
     let mut two = c;
     two.corridors[1] = Corridor {
         faf_alt_ft: 3250,
+        land_from_m: 0.0,
         ..north_corridor()
     };
     two.n_corridors = 2;
@@ -943,7 +954,7 @@ fn a_full_log_counts_what_it_drops_and_the_net_reads_degraded() {
         o.report,
         NetReport::Degraded {
             reason: Reason::BudgetExceeded,
-            count: 1,
+            count: 2,
             ..
         }
     ));
@@ -1348,6 +1359,7 @@ fn departure_corridor() -> Corridor {
         far_half_width_m: 1852.0,
         thr_elev_ft: 600,
         faf_alt_ft: 0,
+        land_from_m: 0.0,
     }
 }
 
@@ -1426,8 +1438,9 @@ fn a_runway_corridor_holds_the_threshold_elevation_and_the_approach_clearance_an
     assert_eq!(
         at(1000.0),
         Some(CorridorHit {
-            surface_ft: Some(600),
-            clearance_ft: 100
+            surface_ft: Some(600 - 300),
+            clearance_ft: 0,
+            landing_elev_ft: Some(600)
         })
     );
     assert_eq!(at(2450.0), None, "the circle reaches past the far end");
@@ -1456,6 +1469,7 @@ fn the_corridor_index_gives_the_answer_of_looking_at_every_corridor() {
             far_half_width_m: 100.0 + rnd() * 2000.0,
             thr_elev_ft: (rnd() * 3000.0) as i32,
             faf_alt_ft: (rnd() * 6000.0) as i32,
+            land_from_m: 0.0,
         };
     }
     c.n_corridors = 400;
@@ -1548,8 +1562,17 @@ fn an_area_clearance_replaces_the_general_one_outside_the_corridors() {
         floor_of(&general, None, &c),
         Some((1500, FloorKind::Terrain))
     );
-    // In a corridor the corridor's clearance holds, not the area's.
-    assert_eq!(floor_of(&s, surf(0), &c), Some((1100, FloorKind::Terrain)));
+    // In a corridor the corridor's clearance holds, but the area's own clearance is a lower bound
+    // there too: a deliberate site setting is never undercut (OA-MSAW-067).
+    assert_eq!(floor_of(&s, surf(0), &c), Some((1200, FloorKind::Terrain)));
+    let tight = FloorSample {
+        gtm_clearance_ft: 50,
+        ..s
+    };
+    assert_eq!(
+        floor_of(&tight, surf(0), &c),
+        Some((1100, FloorKind::Terrain))
+    );
 }
 
 /// The capture box of the A2.08 standard: 1 NM either side of the centreline all along.
@@ -1631,33 +1654,30 @@ fn a_visual_base_leg_in_an_airport_area_alerts_only_for_a_tower_and_the_floor_is
 
 // REQ: OA-MSAW-064
 #[test]
-fn inside_an_airport_area_the_prediction_is_15_s_and_outside_it_is_the_general_look_ahead() {
+fn an_airport_area_keeps_the_general_look_ahead_and_only_a_capture_box_shortens_it() {
     // 2,000 ft, 1,200 ft above the area floor (terrain 600 + 200), descending 1,500 ft/min: 1,625 ft
-    // in 15 s, 500 ft in 60 s.
+    // in 15 s, 500 ft in 60 s. The area's 200 ft clearance holds, with the general 60 s: the path
+    // reaches 500 ft, below the area floor.
     let arrival = tr(9, 40.0, -88.0, 70.0, 0.0, 2000.0, -1500.0);
     let mut r = rig(&cfg());
     let o = cycle(&mut r, S, &[arrival], &airport_world(600, FLOOR_NONE));
-    assert_eq!(o.stats.violations, 0);
-    // The same geometry outside any terminal area: the general floor (1,100 ft) and look-ahead.
-    let mut r = rig(&cfg());
-    let o = cycle(&mut r, S, &[arrival], &flat(600, FLOOR_NONE));
     assert_eq!(o.stats.violations, 1);
+    // A path that stays above the area floor in 60 s is clear.
+    let gentle = tr(9, 40.0, -88.0, 70.0, 0.0, 2000.0, -500.0);
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[gentle], &airport_world(600, FLOOR_NONE));
+    assert_eq!(o.stats.violations, 0);
     // Below the area's floor now: an alert at once, with a time to violation of zero.
     let low = tr(9, 40.0, -88.0, 70.0, 0.0, 700.0, 0.0);
     let mut r = rig(&cfg());
     let o = cycle(&mut r, S, &[low], &airport_world(600, FLOOR_NONE));
     assert_eq!(o.stats.violations, 1);
     assert_eq!(msaw_open(&r.st)[0].ttv_min_s, 0.0);
-    // Above the area's ceiling the general look-ahead holds again.
-    let high = tr(9, 40.0, -88.0, 70.0, 0.0, 4600.0, -4000.0);
-    let mut r = rig(&cfg());
-    let o = cycle(&mut r, S, &[high], &airport_world(600, FLOOR_NONE));
-    assert_eq!(o.stats.violations, 1);
 }
 
 // REQ: OA-MSAW-064
 #[test]
-fn the_guam_descent_in_a_terminal_area_alerts_later_by_the_look_ahead_difference() {
+fn the_guam_descent_in_a_terminal_area_alerts_as_early_as_outside_it() {
     let first = |terminal: bool| {
         let mut r = rig(&cfg());
         for c in 0..60 {
@@ -1675,35 +1695,299 @@ fn the_guam_descent_in_a_terminal_area_alerts_later_by_the_look_ahead_difference
         assert_eq!(r.alerts.items.len(), 1, "the alert is not lost");
         r.alerts.items[0].start_ns
     };
-    let (general, terminal) = (first(false), first(true));
-    assert_eq!(general, 0);
-    // The violation is 38 s ahead at the first cycle: seen from 15 s ahead it is 23 s later, 24 s
-    // on the 5 s sample grid.
-    assert_eq!(terminal, 24 * S, "{terminal}");
+    // The area does not shorten the look-ahead (only a capture box does).
+    assert_eq!((first(false), first(true)), (0, 0));
 }
 
 // REQ: OA-MSAW-065
 #[test]
-fn an_altitude_older_than_the_limit_is_not_monitored_and_is_counted_and_listed_per_track() {
+fn an_altitude_past_the_hold_is_not_monitored_is_counted_and_listed_and_ends_an_open_alert() {
     let mut old = tr(9, 40.0, -88.0, 70.0, 0.0, 700.0, 0.0);
-    old.alt_age_s = 20.0;
     let mut r = rig(&cfg());
-    let o = cycle(&mut r, S, &[old], &airport_world(600, FLOOR_NONE));
+    // An alert opens on a fresh altitude below the area floor (800 ft).
+    cycle(&mut r, S, &[old], &airport_world(600, FLOOR_NONE));
+    assert_eq!(msaw_open_len(&r.st), 1);
+    old.alt_age_s = 40.0;
+    // Another aircraft in the air keeps the lost share within what degrades the net.
+    let other = tr(12, 40.5, -88.0, 70.0, 0.0, 20_000.0, 0.0);
+    let o = cycle(
+        &mut r,
+        2 * S,
+        &[old, other],
+        &airport_world(600, FLOOR_NONE),
+    );
     assert_eq!(
         (o.stats.alt_stale, o.stats.evaluated, o.stats.violations),
-        (1, 0, 0)
+        (1, 1, 0)
     );
-    assert_eq!(r.skips.items[0].why, SkipWhy::AltitudeStale);
+    assert_eq!(r.skips.items.last().unwrap().why, SkipWhy::AltitudeStale);
     assert_eq!(
         o.report,
         NetReport::Running,
         "a gap of the aircraft, not of the net"
     );
-    // 11 s old is judged; an unknown age is taken as fresh.
-    old.alt_age_s = 11.0;
-    let o = cycle(&mut r, 2 * S, &[old], &airport_world(600, FLOOR_NONE));
-    assert_eq!((o.stats.alt_stale, o.stats.violations), (0, 1));
+    // The open alert ended at once, saying why, not by a silent lapse.
+    assert_eq!(msaw_open_len(&r.st), 0);
+    assert_eq!(r.alerts.items.len(), 1);
+    assert_eq!(r.alerts.items[0].end_reason, END_LOST_ALTITUDE_STALE);
+    // An unknown age is taken as fresh and counted.
     old.alt_age_s = f32::NAN;
     let o = cycle(&mut r, 3 * S, &[old], &airport_world(600, FLOOR_NONE));
-    assert_eq!(o.stats.alt_stale, 0);
+    assert_eq!((o.stats.alt_stale, o.stats.alt_age_unknown), (0, 1));
+}
+
+// REQ: OA-MSAW-068
+#[test]
+fn a_stale_altitude_within_the_hold_is_extrapolated_down_never_up_and_says_so() {
+    let world = airport_world(600, FLOOR_NONE);
+    let mut t = tr(9, 40.0, -88.0, 70.0, 0.0, 900.0, -600.0);
+    let mut r = rig(&cfg());
+    // 20 s stale: 900 - 600 * 20 / 60 = 700 ft, below the floor now: an alert, flagged.
+    t.alt_age_s = 20.0;
+    let o = cycle(&mut r, 2 * S, &[t], &world);
+    assert_eq!((o.stats.alt_extrapolated, o.stats.violations), (1, 1));
+    assert_eq!(
+        r.skips.items.last().unwrap().why,
+        SkipWhy::AltitudeExtrapolated
+    );
+    assert_eq!(
+        msaw_open(&r.st)[0].flags & AF_STALE_EXTRAPOLATED,
+        AF_STALE_EXTRAPOLATED
+    );
+    // A climb is never extrapolated: the altitude is judged as it was.
+    let mut up = tr(10, 40.0, -88.0, 70.0, 0.0, 900.0, 600.0);
+    up.alt_age_s = 20.0;
+    let mut r = rig(&cfg());
+    let o = cycle(&mut r, S, &[up], &world);
+    assert_eq!((o.stats.alt_extrapolated, o.stats.violations), (1, 0));
+    // An unknown rate carries the altitude level.
+    let mut flat = tr(11, 40.0, -88.0, 70.0, 0.0, 900.0, f32::NAN);
+    flat.alt_age_s = 20.0;
+    let o = cycle(&mut r, 2 * S, &[flat], &world);
+    assert_eq!(o.stats.violations, 0);
+}
+
+// REQ: OA-MSAW-068
+#[test]
+fn an_alert_stays_open_while_its_altitude_is_stale_within_the_hold_and_ends_lost_after() {
+    let world = airport_world(600, FLOOR_NONE);
+    let mut t = tr(9, 40.0, -88.0, 70.0, 0.0, 700.0, 0.0);
+    let mut r = rig(&cfg());
+    cycle(&mut r, S, &[t], &world);
+    assert_eq!(msaw_open_len(&r.st), 1);
+    // Stale from 13 s to 29 s, and now clear (carried level at 2,000 ft): held open past the 5 s
+    // hysteresis.
+    t.alt_ft = 2000.0;
+    for (k, age) in [(2, 13.0f32), (10, 21.0), (20, 29.0)] {
+        t.alt_age_s = age;
+        cycle(&mut r, k * S, &[t], &world);
+        assert_eq!(msaw_open_len(&r.st), 1, "held open at {k} s");
+    }
+    // Past the hold it ends, lost.
+    t.alt_age_s = 31.0;
+    cycle(&mut r, 21 * S, &[t], &world);
+    assert_eq!(msaw_open_len(&r.st), 0);
+    assert_eq!(r.alerts.items[0].end_reason, END_LOST_ALTITUDE_STALE);
+}
+
+// REQ: OA-MSAW-069
+#[test]
+fn the_net_degrades_when_more_than_the_share_of_airborne_tracks_lose_their_altitude() {
+    let world = flat(500, 2000);
+    let rows = |n_lost: u32| -> Vec<MsawTrack> {
+        (0..4u32)
+            .map(|k| {
+                let mut t = tr(
+                    k + 1,
+                    40.0 + f64::from(k) * 0.1,
+                    -88.0,
+                    0.0,
+                    100.0,
+                    20_000.0,
+                    0.0,
+                );
+                if k < n_lost {
+                    t.alt_ft = f32::NAN;
+                }
+                t
+            })
+            .collect()
+    };
+    let mut r = rig(&cfg());
+    // Two of four is the share, not more: running. Three of four is more: input missing.
+    let o = cycle(&mut r, S, &rows(2), &world);
+    assert_eq!(o.report, NetReport::Running);
+    let o = cycle(&mut r, 2 * S, &rows(3), &world);
+    assert!(matches!(
+        o.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            count: 3,
+            ..
+        }
+    ));
+    assert_eq!(o.stats.alt_loss, 3);
+}
+
+/// The strip along a runway north from 1 NM before the threshold at 40 N, 88 W, 4,352 m long and
+/// 600 m either side, with the runway itself from 1,852 m.
+fn runway_strip() -> Corridor {
+    Corridor {
+        kind: CK_RUNWAY,
+        thr_lat_e7: (south_m(1852.0) * 1e7).round() as i32,
+        thr_lon_e7: -880_000_000,
+        out_bearing_deg: 0.0,
+        length_m: 4352.0,
+        near_half_width_m: 600.0,
+        far_half_width_m: 600.0,
+        thr_elev_ft: 600,
+        faf_alt_ft: 600,
+        land_from_m: 1852.0,
+    }
+}
+
+/// The 3 degree final to the threshold at 600 ft, the runway strip, terrain 300 ft (below runway
+/// level) and a 100 ft allowance.
+fn landing_cfg() -> MsawConfig {
+    let mut c = corridor_cfg();
+    c.approach_allowance_ft = 100;
+    c.corridors[0].faf_alt_ft = 2000;
+    c.corridors[1] = runway_strip();
+    c.n_corridors = 2;
+    c
+}
+
+fn landing_world(obstacle_top: i32, obstacle_m_short: f64) -> impl Fn(i32, i32) -> FloorSample {
+    move |lat_e7, _| {
+        let m_south = (40.0 - f64::from(lat_e7) / 1e7) * 111_194.926_644_558_74;
+        FloorSample {
+            terrain_ft: 300,
+            obstacle_ft: if (m_south - obstacle_m_short).abs() < 250.0 {
+                obstacle_top
+            } else {
+                FLOOR_NONE
+            },
+            obstacle_covered: true,
+            mva_ft: 100,
+            gtm_clearance_ft: FLOOR_NONE,
+            apt_clearance_ft: FLOOR_NONE,
+            apt_ceiling_ft: FLOOR_NONE,
+        }
+    }
+}
+
+// REQ: OA-MSAW-070
+#[test]
+fn a_normal_three_degree_landing_from_8_nm_to_touchdown_gives_no_alert() {
+    let c = landing_cfg();
+    let world = landing_world(FLOOR_NONE, 0.0);
+    let mut r = rig(&c);
+    let mut landed = 0;
+    // 8 NM out to 3 s after passing the 50 ft threshold crossing height: the roll-out is the
+    // aircraft on the ground.
+    for k in 0..=250 {
+        let t = final_track(k, 14_816.0, 0.0, -722.0);
+        if t.alt_ft < 600.0 {
+            break;
+        }
+        let o = cycle(&mut r, k * S, &[t], &world);
+        assert_eq!(o.stats.violations, 0, "cycle {k}");
+        landed += o.stats.landings;
+    }
+    assert!(landed > 0, "the path was seen reaching the runway");
+    msaw_finish(&mut r.st, &mut r.alerts);
+    assert!(r.alerts.items.is_empty());
+}
+
+// REQ: OA-MSAW-070
+#[test]
+fn a_final_300_ft_below_the_path_at_1_nm_alerts_on_the_surface() {
+    let c = landing_cfg();
+    let world = landing_world(FLOOR_NONE, 0.0);
+    let mut r = rig(&c);
+    let o = cycle(&mut r, S, &[final_track(0, 2100.0, -300.0, -722.0)], &world);
+    assert_eq!(o.stats.violations, 1);
+    assert_eq!(msaw_open(&r.st)[0].worst_kind, FloorKind::Procedure);
+    // On the path it does not.
+    let mut r = rig(&c);
+    let o = cycle(&mut r, S, &[final_track(0, 2100.0, 0.0, -722.0)], &world);
+    assert_eq!(o.stats.violations, 0);
+}
+
+// REQ: OA-MSAW-070
+#[test]
+fn a_final_that_will_hit_a_200_ft_obstacle_half_a_mile_short_alerts_and_one_above_it_does_not() {
+    let c = landing_cfg();
+    // A 150 ft tower (750 ft MSL), 926 m short of the threshold: no clearance is added on the
+    // final, so the 3 degree path (810 ft there) clears it.
+    let mut r = rig(&c);
+    let o = cycle(
+        &mut r,
+        S,
+        &[final_track(0, 1900.0, 0.0, -722.0)],
+        &landing_world(750, 926.0),
+    );
+    assert_eq!(o.stats.violations, 0);
+    // A 200 ft tower (800 ft MSL) that the path will hit, 100 ft low: an alert on the obstacle.
+    let mut r = rig(&c);
+    let o = cycle(
+        &mut r,
+        S,
+        &[final_track(0, 1900.0, -100.0, -722.0)],
+        &landing_world(800, 926.0),
+    );
+    assert_eq!(o.stats.violations, 1);
+    assert_eq!(msaw_open(&r.st)[0].worst_kind, FloorKind::Obstacle);
+}
+
+// REQ: OA-MSAW-070
+#[test]
+fn a_path_that_reaches_the_runway_elevation_short_of_the_runway_is_no_landing_and_alerts() {
+    let c = landing_cfg();
+    let world = landing_world(FLOOR_NONE, 0.0);
+    // 150 ft under the path 1,200 m out, descending 722 ft/min: it reaches 600 ft about 500 m short
+    // of the threshold, in the strip's lead-in, which is not the runway.
+    let mut r = rig(&c);
+    let o = cycle(&mut r, S, &[final_track(0, 1200.0, -150.0, -722.0)], &world);
+    assert_eq!(o.stats.violations, 1);
+    assert_eq!(o.stats.landings, 0);
+}
+
+// REQ: OA-MSAW-070
+#[test]
+fn a_path_at_or_below_the_runway_elevation_over_the_runway_is_not_a_violation() {
+    // The predicate the proof covers: below a floor that is above the runway, over the runway.
+    assert!(!is_violation(590, 650, Some(600)));
+    assert!(!is_violation(600, 650, Some(600)));
+    assert!(is_violation(601, 650, Some(600)));
+    assert!(is_violation(590, 650, None));
+}
+
+// REQ: OA-MSAW-067
+#[test]
+fn an_explicit_area_clearance_is_a_lower_bound_inside_a_corridor_too() {
+    let c = cfg();
+    let s = FloorSample {
+        terrain_ft: 1000,
+        obstacle_ft: FLOOR_NONE,
+        obstacle_covered: true,
+        mva_ft: FLOOR_NONE,
+        gtm_clearance_ft: 400,
+        apt_clearance_ft: FLOOR_NONE,
+        apt_ceiling_ft: FLOOR_NONE,
+    };
+    // The corridor's 100 ft would give 1,100: the site's 400 ft holds.
+    assert_eq!(floor_of(&s, surf(0), &c), Some((1400, FloorKind::Terrain)));
+    // An airport area's clearance is not an explicit one: the corridor stays as it is.
+    let apt = FloorSample {
+        gtm_clearance_ft: FLOOR_NONE,
+        apt_clearance_ft: 400,
+        apt_ceiling_ft: 4000,
+        ..s
+    };
+    let resolved = with_airport_area(&apt, 2000);
+    assert_eq!(
+        floor_of(&resolved, surf(0), &c),
+        Some((1100, FloorKind::Terrain))
+    );
 }

@@ -123,7 +123,7 @@ pub struct Settings {
     pub metar_max_age_s: i64,
 }
 
-const KEYS: [&str; 36] = [
+const KEYS: [&str; 38] = [
     "look_ahead_s",
     "warning_s",
     "samples",
@@ -139,6 +139,8 @@ const KEYS: [&str; 36] = [
     "departure_min_clearance_ft",
     "velocity_uncertainty_mps",
     "max_altitude_age_s",
+    "stale_hold_s",
+    "altitude_loss_degrade_share",
     "terminal_lookahead_s",
     "no_qnh_allowance_ft",
     "metar_radius_nm",
@@ -258,6 +260,7 @@ fn corridor(v: &str) -> Result<Corridor, String> {
         far_half_width_m: finite("corridor far_half_m", far)?,
         thr_elev_ft: feet("corridor thr_elev_ft", thr_elev)?,
         faf_alt_ft: feet("corridor faf_alt_ft", faf_alt)?,
+        land_from_m: 0.0,
     })
 }
 
@@ -422,6 +425,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         far_half_width_m: 1.0,
         thr_elev_ft: 0,
         faf_alt_ft: 0,
+        land_from_m: 0.0,
     }; MAX_CORRIDORS];
     for (slot, v) in list.iter_mut().zip(procs.iter()) {
         *slot = corridor(v)?;
@@ -452,6 +456,11 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             get("velocity_uncertainty_mps")?,
         )?,
         max_altitude_age_s: finite("max_altitude_age_s", get("max_altitude_age_s")?)?,
+        stale_hold_s: finite("stale_hold_s", get("stale_hold_s")?)?,
+        altitude_loss_degrade_share: finite(
+            "altitude_loss_degrade_share",
+            get("altitude_loss_degrade_share")?,
+        )?,
         terminal_lookahead_s: finite("terminal_lookahead_s", get("terminal_lookahead_s")?)?,
         corridors: list,
         n_corridors: procs.len(),

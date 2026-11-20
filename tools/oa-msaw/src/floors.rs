@@ -91,6 +91,12 @@ type Obstacle = (i32, i32, i32, u32);
 pub struct ObstacleIndex {
     cells: HashMap<(i32, i32), Vec<Obstacle>>,
     pub count: usize,
+    /// The extent of the DOF file the obstacles came from, 1e-7 degree: south, north, west, east
+    /// (the bounding area of its obstacles). `None`: no extent was given (the data is taken as
+    /// covering everywhere, as a test hands it over).
+    pub extent: Option<(i32, i32, i32, i32)>,
+    /// How many states and countries the file names.
+    pub regions: usize,
 }
 
 fn cell_of(deg: f64, size: f64) -> i32 {
@@ -99,13 +105,22 @@ fn cell_of(deg: f64, size: f64) -> i32 {
 
 /// Indexes the obstacles of `d` (position 1e-7 degree, top feet above mean sea level).
 pub fn obstacle_index(d: &Dof) -> ObstacleIndex {
-    ObstacleIndex::from_points(
+    let mut ix = ObstacleIndex::from_points(
         d.lat_e7
             .iter()
             .zip(d.lon_e7.iter())
             .zip(d.amsl_ft.iter())
             .map(|((&la, &lo), &top)| (la, lo, top)),
-    )
+    );
+    let bounds = |v: &[i32]| v.iter().copied().min().zip(v.iter().copied().max());
+    if let (Some((s, n)), Some((w, e))) = (bounds(&d.lat_e7), bounds(&d.lon_e7)) {
+        ix.extent = Some((s, n, w, e));
+    }
+    let mut r: Vec<[u8; 2]> = d.oas_code.clone();
+    r.sort_unstable();
+    r.dedup();
+    ix.regions = r.len();
+    ix
 }
 
 impl ObstacleIndex {
@@ -122,6 +137,22 @@ impl ObstacleIndex {
             ix.count += 1;
         }
         ix
+    }
+
+    /// True if the circle of `radius_m` around the point lies inside the extent of the file the
+    /// obstacles came from (or no extent was given): obstacle data covers it. A point outside has
+    /// no obstacle data, which is no coverage, never "no obstacle".
+    pub fn covers(&self, lat: f64, lon: f64, radius_m: f64) -> bool {
+        let Some((s, n, w, e)) = self.extent else {
+            return true;
+        };
+        let cos = lat.to_radians().cos().max(0.01);
+        let (dlat, dlon) = (
+            radius_m / M_PER_DEG_LAT_MIN,
+            radius_m / (M_PER_DEG_LAT_MIN * cos),
+        );
+        let deg = |x: i32| f64::from(x) / 1e7;
+        lat - dlat >= deg(s) && lat + dlat <= deg(n) && lon - dlon >= deg(w) && lon + dlon <= deg(e)
     }
 
     /// The highest obstacle within `radius_m` of the point: its top (feet), its record number in
@@ -220,6 +251,46 @@ impl Area {
                     j = i;
                 }
                 inside
+            }
+        }
+    }
+}
+
+impl Area {
+    /// True if any part of the circle of `radius_m` around (`lat`, `lon`) lies in the area: the
+    /// conservative direction for an area that raises the floor. A polygon is tested by its
+    /// vertices, the circle's centre and 16 points of the circle's edge.
+    pub fn overlaps(&self, lat: f64, lon: f64, radius_m: f64) -> bool {
+        const M: f64 = 111_194.926_644_558_74;
+        let cos = lat.to_radians().cos().max(0.01);
+        match self {
+            Area::Box(s, n, w, e) => {
+                let (ny, nx) = (lat.clamp(*s, *n), lon.clamp(*w, *e));
+                let (dy, dx) = ((lat - ny) * M, (lon - nx) * M * cos);
+                dx * dx + dy * dy <= radius_m * radius_m
+            }
+            Area::Circle(la, lo, r) => {
+                let dy = (lat - la) * M;
+                let dx = (lon - lo) * M * la.to_radians().cos();
+                (dx * dx + dy * dy).sqrt() <= r + radius_m
+            }
+            Area::Polygon(v) => {
+                if self.holds(lat, lon) {
+                    return true;
+                }
+                if v.iter().any(|&(vy, vx)| {
+                    let (dy, dx) = ((vy - lat) * M, (vx - lon) * M * cos);
+                    dx * dx + dy * dy <= radius_m * radius_m
+                }) {
+                    return true;
+                }
+                (0..16).any(|k| {
+                    let a = f64::from(k) * core::f64::consts::TAU / 16.0;
+                    self.holds(
+                        lat + radius_m * a.cos() / M,
+                        lon + radius_m * a.sin() / (M * cos),
+                    )
+                })
             }
         }
     }
@@ -324,23 +395,22 @@ impl Floors {
         self.airports = a;
     }
 
-    /// The airport area clearance and ceiling over a lookup cell: the areas that hold its centre
-    /// and all four corners (an edge errs toward the general clearance); [`FLOOR_NONE`] twice if none.
-    fn apt_at(&self, clat: f64, clon: f64) -> (i32, i32) {
-        let h = CELL_DEG / 2.0;
+    /// The airport area clearance and ceiling over a lookup circle (the cell's centre and the
+    /// radius that covers the point's query circle): the areas that hold the whole circle, so that
+    /// a point near an edge errs toward the general clearance; [`FLOOR_NONE`] twice if none.
+    fn apt_at(&self, clat: f64, clon: f64, radius_m: f64) -> (i32, i32) {
+        const M: f64 = 111_194.926_644_558_74;
         let mut best: Option<(i32, i32)> = None;
         // The areas are sorted by latitude: only those within the largest radius are looked at.
-        let reach = self.airports.iter().map(|a| a.radius_m).fold(0.0, f64::max)
-            / 111_194.926_644_558_74
-            + h;
+        let reach = self.airports.iter().map(|a| a.radius_m).fold(0.0, f64::max) / M;
         let from = self.airports.partition_point(|a| a.lat < clat - reach);
         let to = self.airports.partition_point(|a| a.lat <= clat + reach);
         for a in self.airports.get(from..to).unwrap_or(&[]) {
-            let c = Area::Circle(a.lat, a.lon, a.radius_m);
-            let all = [(0.0, 0.0), (h, h), (h, -h), (-h, h), (-h, -h)]
-                .iter()
-                .all(|(dy, dx)| c.holds(clat + dy, clon + dx));
-            if all {
+            let (dy, dx) = (
+                (a.lat - clat) * M,
+                (a.lon - clon) * M * a.lat.to_radians().cos(),
+            );
+            if (dx * dx + dy * dy).sqrt() + radius_m <= a.radius_m {
                 best = Some(match best {
                     None => (a.clearance_ft, a.ceiling_ft),
                     Some((c0, k0)) => (c0.min(a.clearance_ft), k0.min(a.ceiling_ft)),
@@ -350,16 +420,12 @@ impl Floors {
         best.unwrap_or((FLOOR_NONE, FLOOR_NONE))
     }
 
-    /// The clearance of the areas over a lookup cell: the highest of those holding its centre or a
-    /// corner (so that an area's edge is on the high side); [`FLOOR_NONE`] if none does.
-    fn gtm_at(&self, clat: f64, clon: f64) -> i32 {
-        let h = CELL_DEG / 2.0;
+    /// The clearance of the areas over a lookup circle: the highest of those it overlaps at all (an
+    /// area that raises the floor errs to the high side); [`FLOOR_NONE`] if none does.
+    fn gtm_at(&self, clat: f64, clon: f64, radius_m: f64) -> i32 {
         let mut best = FLOOR_NONE;
         for (a, ft) in &self.areas {
-            let any = [(0.0, 0.0), (h, h), (h, -h), (-h, h), (-h, -h)]
-                .iter()
-                .any(|(dy, dx)| a.holds(clat + dy, clon + dx));
-            if any && *ft > best {
+            if *ft > best && a.overlaps(clat, clon, radius_m) {
                 best = *ft;
             }
         }
@@ -477,6 +543,14 @@ impl Floors {
         Ok(())
     }
 
+    /// The extent of the obstacle file (south, north, west, east, 1e-7 degree) and how many states
+    /// and countries it names; `None` if there is none or no extent was given.
+    pub fn obstacle_extent(&self) -> Option<((i32, i32, i32, i32), usize)> {
+        self.obstacles
+            .as_ref()
+            .and_then(|o| o.extent.map(|e| (e, o.regions)))
+    }
+
     /// The names of the tiles that a query needed and the directory did not hold.
     pub fn absent_tiles(&self) -> Vec<String> {
         self.absent
@@ -578,8 +652,8 @@ impl Floors {
                 .as_ref()
                 .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
             self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
-            let g = self.gtm_at(clat, clon);
-            let (ac, ak) = self.apt_at(clat, clon);
+            let g = self.gtm_at(clat, clon, radius);
+            let (ac, ak) = self.apt_at(clat, clon, radius);
             self.cache.insert(key, (t, o, g, ac, ak));
         }
         Ok(())
@@ -619,15 +693,18 @@ impl Floors {
                     .as_ref()
                     .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
                 self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
-                let g = self.gtm_at(clat, clon);
-                let (ac, ak) = self.apt_at(clat, clon);
+                let g = self.gtm_at(clat, clon, radius);
+                let (ac, ak) = self.apt_at(clat, clon, radius);
                 self.cache.insert(key, (t, o, g, ac, ak));
                 (t, o, g, ac, ak)
             };
         Ok(FloorSample {
             terrain_ft,
             obstacle_ft,
-            obstacle_covered: self.obstacles.is_some(),
+            obstacle_covered: self
+                .obstacles
+                .as_ref()
+                .is_some_and(|o| o.covers(lat, lon, f64::from(p.radius_m))),
             mva_ft,
             gtm_clearance_ft,
             apt_clearance_ft,

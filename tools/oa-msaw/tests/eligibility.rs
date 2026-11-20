@@ -160,6 +160,7 @@ fn alert(addr: u32, start_s: i64) -> Alert {
         ttv_min_s: 0.0,
         cycles: 1,
         flags: 0,
+        end_reason: 0,
     }
 }
 

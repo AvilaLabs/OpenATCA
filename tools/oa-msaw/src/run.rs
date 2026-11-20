@@ -106,6 +106,8 @@ pub struct Record {
     pub tick_rows: u64,
     /// Rows of the tracker's output left out for a missing column.
     pub rows_skipped: u64,
+    /// Rows whose altitude had no barometric measurement behind it (taken as no altitude).
+    pub alt_age_unknown: u64,
     /// The net state after the last report, the end of the run included.
     pub final_net: String,
     pub made: Vec<MadeInhibit>,
@@ -167,6 +169,8 @@ struct Feed<'a> {
     /// The times of the latest barometric altitudes of each aircraft (a few, oldest first), for the
     /// age of a track's altitude.
     alt_times: std::collections::HashMap<u32, Vec<i64>>,
+    /// Rows with an altitude but no barometric measurement of it: taken as no altitude.
+    alt_age_unknown: u64,
     last_t: i64,
     /// The first terrain file that could not be read: the run is then refused.
     error: Option<String>,
@@ -352,6 +356,18 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
         let (lat, lon) = (f64::from(la) / 1e7, f64::from(lo) / 1e7);
         let mut flags = flags_of(fl);
         let mut alt_ft = if fl & O_HAS_ALT != 0 { alt } else { f32::NAN };
+        let alt_age_s = f.alt_times.get(&addr).map_or(f32::NAN, |v| {
+            let i = v.partition_point(|&x| x <= t);
+            i.checked_sub(1)
+                .and_then(|i| v.get(i))
+                .map_or(f32::NAN, |&x| ((t - x) as f64 / 1e9) as f32)
+        });
+        if alt_ft.is_finite() && alt_age_s.is_nan() {
+            // An altitude with no barometric measurement behind it (geometric only): the net
+            // cannot age it, so it has none.
+            f.alt_age_unknown += 1;
+            alt_ft = f32::NAN;
+        }
         let tq = Instant::now();
         if let (Some(q), true) = (f.qnh.as_mut(), alt_ft.is_finite()) {
             let (a, missing) = q.datum_ft(
@@ -378,13 +394,19 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
             vrate_fpm: if fl & O_HAS_ALT != 0 { vr } else { f32::NAN },
             flags,
             ground: ground_at(f.ground, addr, t),
-            alt_age_s: f.alt_times.get(&addr).map_or(f32::NAN, |v| {
-                let i = v.partition_point(|&x| x <= t);
-                i.checked_sub(1)
-                    .and_then(|i| v.get(i))
-                    .map_or(f32::NAN, |&x| ((t - x) as f64 / 1e9) as f32)
-            }),
+            alt_age_s,
         });
+    }
+}
+
+/// Drops the barometric times older than `keep_ns` before the last row consumed, keeping each
+/// address's newest one at or before that point: the rows still to come are aged from them, so a
+/// row drained late is aged right. (The window is `stale_hold_s` + 30 s.)
+fn trim_alt_times(f: &mut Feed, keep_ns: i64) {
+    let cut = f.last_t.saturating_sub(keep_ns);
+    for v in f.alt_times.values_mut() {
+        let k = v.partition_point(|&x| x < cut);
+        v.drain(..k.saturating_sub(1));
     }
 }
 
@@ -464,23 +486,22 @@ pub fn track_and_alert(
         rows_skipped: 0,
         last_overflow: 0,
         alt_times: std::collections::HashMap::new(),
+        alt_age_unknown: 0,
         last_t: 0,
         error: None,
     };
+    let keep_ns = ((set.msaw.stale_hold_s + 30.0) * 1e9) as i64;
     let steady = Instant::now();
     let drain = cfg.out_capacity.min(1 << 16) / 2;
     for m in meas {
         if m.alt_ft != oa_track::NONE_I32 && m.flags & oa_track::M_ALT_GEOMETRIC == 0 {
-            let v = f.alt_times.entry(m.addr).or_default();
-            if v.len() >= 8 {
-                v.remove(0);
-            }
-            v.push(m.toa_ns);
+            f.alt_times.entry(m.addr).or_default().push(m.toa_ns);
         }
         tracker_update(&mut t, m, &mut out);
         if output_len(&out) > drain {
             consume(&mut f, &out);
             output_clear(&mut out);
+            trim_alt_times(&mut f, keep_ns);
         }
     }
     let end = meas.last().map_or(0, |m| m.toa_ns);
@@ -520,6 +541,7 @@ pub fn track_and_alert(
         tracker_overflow: out.overflow,
         tick_rows: f.tick_rows,
         rows_skipped: f.rows_skipped,
+        alt_age_unknown: f.alt_age_unknown,
         final_net,
         made,
         hidden: f.hidden,
@@ -903,6 +925,8 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     used.steady_cpu_s = cpu_seconds().zip(cpu0).map(|(b, a)| b - a - rec.diag_cpu_s);
     used.diag_cpu_s = rec.diag_cpu_s;
     used.tiles_absent = rec.floors.absent_tiles();
+    used.alt_age_unknown = rec.alt_age_unknown;
+    used.obstacle_extent = rec.floors.obstacle_extent();
     used.rss_end_kb = proc_kb("VmHWM:");
     used.times = rec.times;
     used.setter_m = rec.setter_m.clone();

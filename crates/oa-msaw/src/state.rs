@@ -89,6 +89,18 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
     if !(c.max_altitude_age_s.is_finite() && c.max_altitude_age_s > 0.0) {
         return Err("max_altitude_age_s");
     }
+    if !(c.stale_hold_s.is_finite()
+        && c.stale_hold_s >= c.max_altitude_age_s
+        && c.stale_hold_s <= MAX_LOOK_AHEAD_S)
+    {
+        return Err("stale_hold_s");
+    }
+    if !(c.altitude_loss_degrade_share.is_finite()
+        && c.altitude_loss_degrade_share >= 0.0
+        && c.altitude_loss_degrade_share <= 1.0)
+    {
+        return Err("altitude_loss_degrade_share");
+    }
     if !(c.terminal_lookahead_s.is_finite()
         && c.terminal_lookahead_s > 0.0
         && c.terminal_lookahead_s <= c.look_ahead_s)

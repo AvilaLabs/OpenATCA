@@ -810,6 +810,26 @@ fn go_qnh(m: &[Measurement], set: &Settings, floors: Floors, q: Qnh) -> Record {
     .unwrap()
 }
 
+// REQ: OA-MSAW-072
+#[test]
+fn with_no_setting_in_reach_the_lowest_setting_of_the_last_12_h_within_200_nm_is_used() {
+    const T0: i64 = 1_800_000_000;
+    let stale = vec![(T0 - 3 * 3600, 1003.25)];
+    // Only a stale observation (3 h old, 10 hPa below standard): the lowest setting of the last
+    // 12 h within 200 NM is used, still flagged as having no setting of its own (OA-MSAW-072).
+    let mut old = Qnh::from_stations(vec![(40.0, -88.0, stale)], 100.0, 7200);
+    let (a, missing) = old.datum_ft(40.0, -88.0, T0, 2000.0, 300);
+    assert!(missing && (a - 2000.0 + 270.0).abs() < 25.0, "{a}");
+    assert_eq!(old.stats.fallback, 1);
+    // Older than 12 h: the allowance.
+    let mut older = Qnh::from_stations(
+        vec![(40.0, -88.0, vec![(T0 - 13 * 3600, 1003.25)])],
+        100.0,
+        7200,
+    );
+    assert_eq!(older.datum_ft(40.0, -88.0, T0, 2000.0, 300), (1700.0, true));
+}
+
 // REQ: OA-MSAW-048
 #[test]
 fn below_fl180_the_altitude_takes_the_nearest_fresh_station_and_the_rest_is_lowered() {
@@ -839,12 +859,10 @@ fn below_fl180_the_altitude_takes_the_nearest_fresh_station_and_the_rest_is_lowe
     );
     let (a, missing) = q2.datum_ft(40.0, -88.0, T0, 2000.0, 300);
     assert!(!missing && a > 2200.0, "{a}");
-    // No station within 100 NM (the one at 45 N is 300 NM away) or only stale ones: lowered by
-    // the allowance and counted as missing.
+    // No station within 200 NM (the one at 45 N is 300 NM away): lowered by the allowance and
+    // counted as missing.
     let mut far = Qnh::from_stations(vec![(45.0, -88.0, fresh)], 100.0, 7200);
     assert_eq!(far.datum_ft(40.0, -88.0, T0, 2000.0, 300), (1700.0, true));
-    let mut old = Qnh::from_stations(vec![(40.0, -88.0, stale)], 100.0, 7200);
-    assert_eq!(old.datum_ft(40.0, -88.0, T0, 2000.0, 300), (1700.0, true));
     // At and above FL180 the standard setting is flown: no correction, no flag, whatever the data.
     assert_eq!(
         far.datum_ft(40.0, -88.0, T0, 18_000.0, 300),
@@ -963,6 +981,67 @@ fn a_gtm_clearance_area_gives_its_clearance_to_the_cells_it_holds_and_a_bad_line
     }
 }
 
+// REQ: OA-MSAW-071
+#[test]
+fn an_airport_area_needs_the_whole_query_circle_inside_and_an_explicit_area_any_overlap() {
+    use oa_msaw_run::floors::{AirportArea, Area};
+    let mut f = Floors::new(None, None, None);
+    f.set_airports(vec![AirportArea {
+        lat: 13.50,
+        lon: 144.80,
+        radius_m: 9260.0,
+        ceiling_ft: 3000,
+        clearance_ft: 200,
+    }]);
+    let m = 111_194.926_644_558_74;
+    let at = |north_m: f64| point(13.50 + north_m / m, 144.80, 100.0);
+    // The lookup circle is 408 m (one 250 m bucket and a cell's half diagonal): inside at 8,800 m
+    // from the centre, partly outside at 9,000 m, though the point itself is inside the area.
+    assert_eq!(f.floor_at(&at(8800.0)).unwrap().apt_clearance_ft, 200);
+    assert_eq!(
+        f.floor_at(&at(9000.0)).unwrap().apt_clearance_ft,
+        FLOOR_NONE
+    );
+    // An explicit area raises the floor: any overlap of the circle takes it, though the point is
+    // outside the box.
+    f.set_areas(vec![(Area::Box(14.0, 14.5, 144.0, 145.0), 700)]);
+    let to_box = |south_m: f64| point(14.0 - south_m / m, 144.5, 100.0);
+    assert_eq!(f.floor_at(&to_box(300.0)).unwrap().gtm_clearance_ft, 700);
+    assert_eq!(
+        f.floor_at(&to_box(1000.0)).unwrap().gtm_clearance_ft,
+        FLOOR_NONE
+    );
+    // A polygon is overlapped by its edge too.
+    let tri = Area::Polygon(vec![(14.0, 144.0), (14.5, 144.0), (14.0, 145.0)]);
+    assert!(tri.overlaps(14.0 - 300.0 / m, 144.5, 408.0));
+    assert!(!tri.overlaps(14.0 - 1000.0 / m, 144.5, 408.0));
+}
+
+// REQ: OA-MSAW-073
+#[test]
+fn a_point_outside_the_obstacle_file_extent_has_no_obstacle_data_and_inside_it_has() {
+    use oa_msaw_run::floors::ObstacleIndex;
+    let mut ix = ObstacleIndex::from_points(std::iter::once((400_000_000, -880_000_000, 900)));
+    // No extent given: covered everywhere (as a test hands the data over).
+    assert!(ix.covers(10.0, 10.0, 100.0));
+    ix.extent = Some((380_000_000, 460_000_000, -935_000_000, -835_000_000));
+    assert!(ix.covers(40.0, -88.0, 5000.0));
+    // Outside, or a circle that crosses the edge: not covered, never "no obstacle".
+    assert!(!ix.covers(47.0, -88.0, 100.0));
+    assert!(!ix.covers(46.0, -88.0, 100_000.0));
+    let mut f = Floors::new(None, Some(ix), None);
+    assert!(
+        f.floor_at(&point(40.0, -88.0, 100.0))
+            .unwrap()
+            .obstacle_covered
+    );
+    assert!(
+        !f.floor_at(&point(47.0, -88.0, 100.0))
+            .unwrap()
+            .obstacle_covered
+    );
+}
+
 // REQ: OA-MSAW-059
 #[test]
 fn an_airport_area_gives_its_lower_clearance_and_ceiling_to_the_cells_it_holds_whole() {
@@ -1069,6 +1148,26 @@ fn the_diagnosis_gives_the_altitude_radius_obstacle_and_terrain_sections_and_nam
     assert!(!t.to_uppercase().contains("A1B2C3"));
 }
 
+// REQ: OA-MSAW-074
+#[test]
+fn an_altitude_with_only_geometric_measurements_is_no_altitude_and_is_listed_so() {
+    let mut m = approach(0xA1B2C3, true);
+    for x in &mut m {
+        x.flags |= oa_track::M_ALT_GEOMETRIC;
+    }
+    let r = go(&m, &settings(), ridge_floors());
+    // The tracker keeps no altitude from them, and a row that had one with no barometric time
+    // behind it would be counted in `alt_age_unknown` and taken as none.
+    assert_eq!(r.totals.alt_age_unknown, 0);
+    assert!(r.totals.alt_missing > 20, "{:?}", r.totals);
+    assert!(r.alerts.is_empty());
+    let csv = skipped_csv(&r.skips);
+    assert!(
+        csv.contains("MSAW not monitoring: altitude missing"),
+        "{csv}"
+    );
+}
+
 // REQ: OA-MSAW-065
 #[test]
 fn a_track_whose_altitude_stops_arriving_is_not_monitored_once_it_is_stale_and_is_counted() {
@@ -1084,7 +1183,12 @@ fn a_track_whose_altitude_stops_arriving_is_not_monitored_once_it_is_stale_and_i
     }
     let r = go(&m, &set, ridge_floors());
     // Rows from about 12 s after the last altitude are stale; before that they are judged.
-    assert!(r.totals.alt_stale > 40, "{}", r.totals.alt_stale);
+    assert!(r.totals.alt_stale > 30, "{}", r.totals.alt_stale);
+    assert!(
+        r.totals.alt_extrapolated > 10,
+        "{}",
+        r.totals.alt_extrapolated
+    );
     assert!(r.totals.evaluated >= 20, "{}", r.totals.evaluated);
     assert!(r
         .skips

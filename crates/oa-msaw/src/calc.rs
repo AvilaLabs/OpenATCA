@@ -94,6 +94,14 @@ pub fn floor_of(
             best = (a, FloorKind::Procedure);
         }
     }
+    // A clearance the adaptation sets for an area (not the airport area's) is a lower bound inside
+    // a corridor too: a deliberate site setting is never undercut.
+    if hit.is_some() && s.gtm_clearance_ft != FLOOR_NONE && !in_area {
+        let g = s.terrain_ft.saturating_add(s.gtm_clearance_ft);
+        if g > best.0 {
+            best = (g, FloorKind::Terrain);
+        }
+    }
     Some(best)
 }
 
@@ -118,11 +126,47 @@ pub fn with_airport_area(s: &FloorSample, low_ft: i32) -> FloorSample {
     }
 }
 
-/// True if a track's altitude is too old to be monitored: older than `max_age_s`. An age that is
-/// not known (NaN) is taken as fresh; infinity is stale. A stale altitude is counted and listed
-/// by the cycle, never judged and never read as clear.
+/// True if a track's altitude is too old to be taken as it is: older than `max_age_s`. An age that
+/// is not known (NaN) is taken as fresh (and counted by the cycle); infinity is stale.
 pub fn altitude_stale(age_s: f32, max_age_s: f64) -> bool {
     f64::from(age_s) > max_age_s
+}
+
+/// How a track's altitude is used, from its age.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AltUse {
+    /// Judged as it is.
+    Fresh,
+    /// Stale within the hold: judged at an extrapolated altitude, and said so.
+    Extrapolated,
+    /// Past the hold: not monitored, and said so, never read as clear.
+    Lost,
+}
+
+/// The use of an altitude of age `age_s` (NaN: unknown, fresh) with the limits `max_s` and `hold_s`.
+pub fn altitude_use(age_s: f32, max_s: f64, hold_s: f64) -> AltUse {
+    let a = f64::from(age_s);
+    if a > hold_s {
+        AltUse::Lost
+    } else if a > max_s {
+        AltUse::Extrapolated
+    } else {
+        AltUse::Fresh
+    }
+}
+
+/// The altitude a stale track is judged at: the altitude carried on at its vertical rate for its
+/// age if that is a descent, never a climb (an unknown rate, NaN, carries it level).
+pub fn extrapolated_alt_ft(alt_ft: f64, vrate_fpm: f64, age_s: f64) -> f64 {
+    let vr = if vrate_fpm.is_nan() { 0.0 } else { vrate_fpm };
+    oa_math::min_f64(alt_ft, predicted_alt_ft(alt_ft, vr, age_s))
+}
+
+/// True if the path is a violation at a point: below the floor and not a landing, that is not
+/// reaching the runway elevation `landing_elev_ft` over the runway strip. Proved: a path at or
+/// below the runway elevation over the runway is never a violation.
+pub fn is_violation(low_ft: i32, floor_ft: i32, landing_elev_ft: Option<i32>) -> bool {
+    violates(low_ft, floor_ft) && landing_elev_ft.is_none_or(|e| low_ft > e)
 }
 
 /// True if a predicted altitude is below the floor: a violation. Monotone: a higher floor never
@@ -180,21 +224,45 @@ pub fn corridor_hit_ft(
         CK_DEPARTURE => CorridorHit {
             surface_ft: None,
             clearance_ft: cfg.departure_min_clearance_ft,
+            landing_elev_ft: None,
         },
+        // The runway strip: an aircraft on final is necessarily close to the ground, so no
+        // clearance is added over terrain or obstacles, the surface is the runway elevation less
+        // the allowance, and reaching the runway elevation here is a landing.
         CK_RUNWAY => CorridorHit {
-            surface_ft: Some(c.thr_elev_ft),
-            clearance_ft: cfg.approach_min_clearance_ft,
+            surface_ft: Some(c.thr_elev_ft.saturating_sub(cfg.approach_allowance_ft)),
+            clearance_ft: 0,
+            landing_elev_ft: if along - radius_m >= c.land_from_m {
+                Some(c.thr_elev_ft)
+            } else {
+                None
+            },
         },
         _ => {
             let top = f64::from(c.faf_alt_ft) - f64::from(cfg.approach_allowance_ft);
             let base = f64::from(c.thr_elev_ft);
-            CorridorHit {
-                surface_ft: Some(alt_ceil_ft(base + (top - base) * far / c.length_m)),
-                clearance_ft: cfg.approach_min_clearance_ft,
+            let surface = alt_ceil_ft(base + (top - base) * far / c.length_m);
+            if along + radius_m <= FINAL_ZONE_M {
+                // The last 1 NM of the box: as the strip, with the surface lowered by the allowance.
+                CorridorHit {
+                    surface_ft: Some(surface.saturating_sub(cfg.approach_allowance_ft)),
+                    clearance_ft: 0,
+                    landing_elev_ft: None,
+                }
+            } else {
+                CorridorHit {
+                    surface_ft: Some(surface),
+                    clearance_ft: cfg.approach_min_clearance_ft,
+                    landing_elev_ft: None,
+                }
             }
         }
     })
 }
+
+/// The last stretch of a capture box before the threshold, metres (1 NM), where the floor takes no
+/// clearance over terrain or obstacles.
+pub const FINAL_ZONE_M: f64 = 1852.0;
 
 /// The union of two hits: the higher surface and the higher clearance.
 pub(crate) fn hit_union(a: Option<CorridorHit>, b: CorridorHit) -> CorridorHit {
@@ -207,6 +275,11 @@ pub(crate) fn hit_union(a: Option<CorridorHit>, b: CorridorHit) -> CorridorHit {
                 (None, y) => y,
             },
             clearance_ft: a.clearance_ft.max(b.clearance_ft),
+            landing_elev_ft: match (a.landing_elev_ft, b.landing_elev_ft) {
+                (Some(x), Some(y)) => Some(x.max(y)),
+                (x, None) => x,
+                (None, y) => y,
+            },
         },
     }
 }
@@ -364,6 +437,8 @@ mod proofs {
             departure_min_clearance_ft: amc,
             velocity_uncertainty_mps: 0.0,
             max_altitude_age_s: 12.0,
+            stale_hold_s: 30.0,
+            altitude_loss_degrade_share: 0.5,
             terminal_lookahead_s: 15.0,
             corridors: [Corridor {
                 kind: CK_APPROACH,
@@ -375,6 +450,7 @@ mod proofs {
                 far_half_width_m: 1.0,
                 thr_elev_ft: 0,
                 faf_alt_ft: 0,
+                land_from_m: 0.0,
             }; MAX_CORRIDORS],
             n_corridors: 0,
         }
@@ -415,6 +491,7 @@ mod proofs {
             Some(CorridorHit {
                 surface_ft: if use_surface { Some(a) } else { None },
                 clearance_ft: amc,
+                landing_elev_ft: None,
             })
         } else {
             None
@@ -499,6 +576,7 @@ mod proofs {
         let hit = CorridorHit {
             surface_ft: Some(a),
             clearance_ft: amc,
+            landing_elev_ft: None,
         };
         if let Some((f, _)) = floor_of(&s, Some(hit), &cfg) {
             // An answer needs terrain and the obstacle data, and then it holds the floor above
@@ -551,19 +629,36 @@ mod proofs {
         }
     }
 
+    // The plan-level property (a row past the hold is never planned) did not finish in 10 minutes
+    // under Kani (msaw_plan with its allocation); it is a test (OA-MSAW-065). What is proved is the
+    // classification msaw_plan switches on.
     // REQ: OA-MSAW-065
     #[kani::proof]
-    fn a_stale_altitude_is_never_monitored_and_a_fresh_or_unknown_one_always_is() {
-        // A gap of the aircraft: the track is not judged and carries its own status; it is never read
-        // as clear and never a fault of the net.
-        let (age, max): (f32, f64) = (kani::any(), kani::any());
-        kani::assume(max.is_finite() && max > 0.0);
-        let stale = altitude_stale(age, max);
-        if !age.is_nan() && f64::from(age) > max {
-            assert!(stale);
+    fn an_altitude_older_than_the_hold_is_classed_lost_and_an_extrapolation_never_climbs() {
+        let (age, max, hold): (f32, f64, f64) = (kani::any(), kani::any(), kani::any());
+        kani::assume(max.is_finite() && max > 0.0 && hold.is_finite() && hold >= max);
+        let u = altitude_use(age, max, hold);
+        if !age.is_nan() && f64::from(age) > hold {
+            assert!(u == AltUse::Lost);
         }
         if age.is_nan() || f64::from(age) <= max {
-            assert!(!stale);
+            assert!(u == AltUse::Fresh);
         }
+        // A descent is carried on, a climb never: the extrapolated altitude is not above the altitude.
+        let (alt, vr, a): (f64, f64, f64) = (kani::any(), kani::any(), kani::any());
+        kani::assume(alt.is_finite() && alt >= -MAX_ABS_ALT_FT && alt <= MAX_ABS_ALT_FT);
+        kani::assume(vr.is_nan() || (vr.is_finite() && vr.abs() <= MAX_ABS_VRATE_FPM));
+        kani::assume(a.is_finite() && a >= 0.0 && a <= MAX_LOOK_AHEAD_S);
+        assert!(extrapolated_alt_ft(alt, vr, a) <= alt);
+    }
+
+    // REQ: OA-MSAW-070
+    #[kani::proof]
+    fn a_path_at_or_below_the_runway_elevation_over_the_runway_is_never_a_violation() {
+        let (low, floor, elev): (i32, i32, i32) = (kani::any(), kani::any(), kani::any());
+        kani::assume(low <= elev);
+        assert!(!is_violation(low, floor, Some(elev)));
+        // Elsewhere the decision is the plain comparison.
+        assert!(is_violation(low, floor, None) == violates(low, floor));
     }
 }

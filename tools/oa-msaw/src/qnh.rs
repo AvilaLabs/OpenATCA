@@ -29,6 +29,11 @@ const M_PER_DEG: f64 = 111_194.926_644_558_74;
 /// The cell and time bucket of a lookup.
 const CELL_DEG: f64 = 0.1;
 const BUCKET_S: i64 = 300;
+/// With no setting at the usual radius and age, the lowest setting of any station within this
+/// distance in the last `FALLBACK_AGE_S` is used: a low setting lowers the indicated altitude, the
+/// conservative direction.
+const FALLBACK_RADIUS_NM: f64 = 200.0;
+const FALLBACK_AGE_S: i64 = 12 * 3600;
 /// The altitude from which the standard setting is flown, feet.
 pub const FL180_FT: f64 = 18_000.0;
 
@@ -53,6 +58,9 @@ pub struct QnhStats {
     pub corrected: u64,
     pub standard: u64,
     pub missing: u64,
+    /// Of the altitudes without a setting at the usual radius and age, those corrected with the
+    /// lowest setting of the last 12 h within 200 NM (the rest take the allowance).
+    pub fallback: u64,
     pub lookups: u64,
     pub cache_hits: u64,
 }
@@ -63,6 +71,7 @@ pub struct Qnh {
     radius_m: f64,
     max_age_s: i64,
     cache: HashMap<(i32, i32, i64), Option<f64>>,
+    low_cache: HashMap<(i32, i32, i64), Option<f64>>,
     pub stats: QnhStats,
 }
 
@@ -78,6 +87,7 @@ impl Qnh {
             radius_m: radius_nm * NM_M,
             max_age_s,
             cache: HashMap::new(),
+            low_cache: HashMap::new(),
             stats: QnhStats::default(),
         }
     }
@@ -192,6 +202,39 @@ impl Qnh {
         found
     }
 
+    /// The lowest altimeter setting reported within 200 NM in the 12 h before the time's bucket, hPa;
+    /// `None` if no station within that distance reported one.
+    pub fn lowest_recent_hpa(&mut self, lat: f64, lon: f64, t_s: i64) -> Option<f64> {
+        let bucket = t_s.div_euclid(BUCKET_S);
+        let key = (cell_of(lat), cell_of(lon), bucket);
+        if let Some(&v) = self.low_cache.get(&key) {
+            return v;
+        }
+        let (clat, clon) = (
+            (f64::from(key.0) + 0.5) * CELL_DEG,
+            (f64::from(key.1) + 0.5) * CELL_DEG,
+        );
+        let start = bucket * BUCKET_S;
+        let cos = clat.to_radians().cos().max(0.01);
+        let limit = FALLBACK_RADIUS_NM * NM_M;
+        let mut low: Option<f64> = None;
+        for s in &self.stations {
+            let (dy, dx) = ((s.lat - clat) * M_PER_DEG, (s.lon - clon) * M_PER_DEG * cos);
+            if (dx * dx + dy * dy).sqrt() > limit {
+                continue;
+            }
+            let hi = s.obs.partition_point(|&(o, _)| o <= start);
+            let lo = s.obs.partition_point(|&(o, _)| o < start - FALLBACK_AGE_S);
+            for &(_, hpa) in s.obs.get(lo..hi).unwrap_or(&[]) {
+                if low.is_none_or(|l| hpa < l) {
+                    low = Some(hpa);
+                }
+            }
+        }
+        self.low_cache.insert(key, low);
+        low
+    }
+
     /// An altitude on the datum of the floors. `pressure_alt_ft` is the pressure altitude of the
     /// report; the answer is the altitude to hand to the net and whether the setting was missing.
     pub fn datum_ft(
@@ -214,6 +257,15 @@ impl Qnh {
             return (v, false);
         }
         self.stats.missing += 1;
+        // No setting in reach: the lowest of the last 12 h within 200 NM, if any; the track stays
+        // flagged as having no setting of its own.
+        if let Some(v) = self
+            .lowest_recent_hpa(lat, lon, t_s)
+            .and_then(|hpa| indicated_altitude_ft(pressure_alt_ft, hpa))
+        {
+            self.stats.fallback += 1;
+            return (v, true);
+        }
         (pressure_alt_ft - f64::from(no_qnh_allowance_ft), true)
     }
 }

@@ -7,7 +7,8 @@ use std::fmt::Write as _;
 use oa_msaw::{
     Alert, CycleStats, FloorKind, Grade, MsawConfig, SkipWhy, AF_COAST, AF_GROUND_UNKNOWN,
     AF_IDENTITY_UNCONFIRMED, AF_PARTIAL_COVERAGE, AF_QNH_MISSING, AF_RADAR_ONLY, AF_RATE_UNKNOWN,
-    AF_UNCERTAIN, CK_APPROACH, CK_DEPARTURE, CK_RUNWAY,
+    AF_STALE_EXTRAPOLATED, AF_UNCERTAIN, CK_APPROACH, CK_DEPARTURE, CK_RUNWAY,
+    END_LOST_ALTITUDE_MISSING, END_LOST_ALTITUDE_STALE,
 };
 use oa_safety::net::{reason_text, NetState};
 
@@ -18,7 +19,7 @@ use crate::qnh::QnhStats;
 use crate::run::{HiddenAgg, MadeInhibit, SkipAgg};
 
 /// The flag bits of an alert with their names, in the order the summary lists them.
-pub const FLAG_NAMES: [(u16, &str); 8] = [
+pub const FLAG_NAMES: [(u16, &str); 9] = [
     (AF_RATE_UNKNOWN, "rate_unknown"),
     (AF_COAST, "coast"),
     (AF_UNCERTAIN, "uncertain"),
@@ -27,7 +28,17 @@ pub const FLAG_NAMES: [(u16, &str); 8] = [
     (AF_PARTIAL_COVERAGE, "partial_coverage"),
     (AF_GROUND_UNKNOWN, "ground_unknown"),
     (AF_QNH_MISSING, "qnh_missing"),
+    (AF_STALE_EXTRAPOLATED, "stale_extrapolated"),
 ];
+
+/// The text of how an alert ended.
+pub fn end_text(e: u8) -> &'static str {
+    match e {
+        x if x == END_LOST_ALTITUDE_STALE => "lost: altitude stale",
+        x if x == END_LOST_ALTITUDE_MISSING => "lost: altitude missing",
+        _ => "cleared",
+    }
+}
 
 /// The names of the bits of `f` joined by `|`; empty if none.
 pub fn flags_text(f: u16) -> String {
@@ -68,6 +79,8 @@ pub fn why_text(w: u8) -> &'static str {
         x if x == SkipWhy::QnhMissing as u8 => "QNH_MISSING",
         x if x == SkipWhy::BelowMva as u8 => "BELOW_MVA",
         x if x == SkipWhy::AltitudeStale as u8 => "ALTITUDE_STALE",
+        x if x == SkipWhy::AltitudeExtrapolated as u8 => "ALTITUDE_STALE_EXTRAPOLATED",
+        x if x == SkipWhy::GroundExcluded as u8 => "GROUND_EXCLUDED",
         _ => "?",
     }
 }
@@ -104,6 +117,10 @@ pub fn status_text(w: u8) -> &'static str {
     match w {
         x if x == SkipWhy::AltitudeMissing as u8 => "MSAW not monitoring: altitude missing",
         x if x == SkipWhy::AltitudeStale as u8 => "MSAW not monitoring: altitude stale",
+        x if x == SkipWhy::AltitudeExtrapolated as u8 => {
+            "MSAW monitoring: altitude stale-extrapolated"
+        }
+        x if x == SkipWhy::GroundExcluded as u8 => "MSAW not monitoring: on the ground",
         _ => "",
     }
 }
@@ -190,7 +207,7 @@ pub fn alerts_csv_with_basis(rows: &[(Alert, Basis)], airports: &[(String, f64, 
 fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> String {
     let labelled = rows.iter().any(|r| r.1.is_some());
     let mut o = String::from(
-        "address_hex,start_s,end_s,caution_s,warning_s,peak,lat_deg,lon_deg,altitude_ft,vrate_fpm,speed_mps,nearest_approach_airport_nm,worst_margin_ft,worst_floor_ft,worst_floor_kind,ttv_min_s,cycles,flags,flags_raw",
+        "address_hex,start_s,end_s,caution_s,warning_s,peak,lat_deg,lon_deg,altitude_ft,vrate_fpm,speed_mps,nearest_approach_airport_nm,worst_margin_ft,worst_floor_ft,worst_floor_kind,ttv_min_s,cycles,flags,flags_raw,end_reason",
     );
     if labelled {
         o.push_str(",basis");
@@ -201,7 +218,7 @@ fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> St
     for (a, basis) in v {
         let _ = write!(
             o,
-            "{:08X},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{}",
+            "{:08X},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{},{}",
             a.addr,
             secs(a.start_ns),
             secs(a.end_ns),
@@ -220,7 +237,8 @@ fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> St
             f(a.ttv_min_s, 1),
             a.cycles,
             flags_text(a.flags),
-            a.flags
+            a.flags,
+            end_text(a.end_reason)
         );
         if let Some(b) = basis {
             let _ = write!(o, ",{b}");
@@ -329,6 +347,10 @@ pub struct DataUsed {
     pub setter_m: BTreeMap<(u32, i64), f32>,
     /// The terrain tiles a query needed that the directory did not hold, by file name.
     pub tiles_absent: Vec<String>,
+    /// Rows whose altitude had no barometric measurement behind it: counted, taken as no altitude.
+    pub alt_age_unknown: u64,
+    /// The extent of the obstacle file and how many states it names.
+    pub obstacle_extent: Option<((i32, i32, i32, i32), usize)>,
     /// The airports of the CIFP that have an approach: identifier, latitude, longitude.
     pub airports: Vec<(String, f64, f64)>,
     /// The altimeter files read (`None`: no `--metar`).
@@ -424,7 +446,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
     );
     let _ = writeln!(
         o,
-        "approach corridors: surface {} ft below the fix altitude, clearance above terrain and obstacles {} ft; radius grows {} m/s of prediction time",
+        "approach corridors: surface {} ft below the fix altitude, clearance above terrain and obstacles {} ft; in the runway strip and the last 1 NM of a capture box no clearance and the surface lowered by the allowance, and a path that reaches the runway elevation over the runway is a landing; radius grows {} m/s of prediction time",
         c.approach_allowance_ft, c.approach_min_clearance_ft, c.velocity_uncertainty_mps
     );
     let _ = writeln!(o, "data:");
@@ -474,8 +496,8 @@ pub fn summary_text(i: &SummaryInput) -> String {
         (Some(q), Some(m)) => {
             let _ = writeln!(
                 o,
-                "  altimeter: {} METAR files, {} rows, {} stations; altitudes corrected {}, at or above FL180 {}, without a setting (lowered by the allowance) {}; lookups {} ({} from the cache)",
-                m.files, m.rows, m.stations, q.corrected, q.standard, q.missing, q.lookups, q.cache_hits
+                "  altimeter: {} METAR files, {} rows, {} stations; altitudes corrected {}, at or above FL180 {}, without a setting {} (of which the lowest setting of the last 12 h within 200 NM was used {}, the allowance for the rest); lookups {} ({} from the cache)",
+                m.files, m.rows, m.stations, q.corrected, q.standard, q.missing, q.fallback, q.lookups, q.cache_hits
             );
         }
         (Some(q), None) => {
@@ -504,6 +526,14 @@ pub fn summary_text(i: &SummaryInput) -> String {
     match i.data.obstacles {
         Some(n) => {
             let _ = writeln!(o, "  obstacles indexed {n}");
+            if let Some(((s, nn, w, e), regions)) = i.data.obstacle_extent {
+                let d = |x: i32| f64::from(x) / 1e7;
+                let _ = writeln!(
+                    o,
+                    "  obstacle data covers latitude {:.2} to {:.2}, longitude {:.2} to {:.2} ({} states or countries); a point outside is obstacle data absent (counted as without coverage)",
+                    d(s), d(nn), d(w), d(e), regions
+                );
+            }
         }
         None => {
             let _ = writeln!(
@@ -616,13 +646,32 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let _ = writeln!(o, "cycles {} (out of order {})", t.cycles, t.out_of_order);
     let _ = writeln!(o, "track rows {}", t.rows);
     let _ = writeln!(o, "tracks evaluated {}", t.evaluated);
-    let _ = writeln!(o, "excluded on the ground {}", t.ground_excluded);
+    let _ = writeln!(
+        o,
+        "excluded on the ground (listed per track) {}",
+        t.ground_excluded
+    );
     let _ = writeln!(o, "ground state unknown (evaluated) {}", t.ground_unknown);
     let _ = writeln!(o, "no altitude (listed, rule 4) {}", t.alt_missing);
     let _ = writeln!(
         o,
-        "not monitored: altitude stale (older than {} s; listed per track, a gap of the aircraft, the net stays as it is) {}",
-        i.cfg.max_altitude_age_s, t.alt_stale
+        "not monitored: altitude stale (older than the hold of {} s; listed per track, a gap of the aircraft; the net degrades only when more than {} of the airborne tracks of a cycle are lost this way, {} track cycles) {}",
+        i.cfg.stale_hold_s, i.cfg.altitude_loss_degrade_share, t.alt_loss, t.alt_stale
+    );
+    let _ = writeln!(
+        o,
+        "monitored at an extrapolated altitude (stale from {} s to the hold; a descent carried on, never a climb; listed per track) {}",
+        i.cfg.max_altitude_age_s, t.alt_extrapolated
+    );
+    let _ = writeln!(
+        o,
+        "altitude of unknown age taken as fresh by the core {}; rows with only a geometric altitude taken as no altitude by the shell {}",
+        t.alt_age_unknown, i.data.alt_age_unknown
+    );
+    let _ = writeln!(
+        o,
+        "paths that reached the runway over the runway (landings, not violations) {}",
+        t.landings
     );
     let _ = writeln!(
         o,
@@ -770,6 +819,50 @@ pub fn summary_text(i: &SummaryInput) -> String {
                 .join(", ")
         );
     }
+    // Alerts and episodes by what the track was doing.
+    let mut phases = Vec::new();
+    for (d, name) in DOING_NAMES {
+        let of: Vec<Alert> = i
+            .alerts
+            .iter()
+            .zip(nears.iter())
+            .filter(|(a, n)| classify(a, **n) == d)
+            .map(|(a, _)| *a)
+            .collect();
+        let (eps, tracks) = episodes(&of, EPISODE_GAP_S);
+        phases.push(format!(
+            "{name}: {} alerts, {eps} episodes, {tracks} tracks",
+            of.len()
+        ));
+    }
+    let _ = writeln!(o, "by phase: {}", phases.join("; "));
+    let in_final = |a: &Alert| {
+        i.data.cifp_corridors.iter().any(|k| {
+            oa_msaw::corridor_hit_ft(&k.corridor, a.worst_lat_e7, a.worst_lon_e7, 0.0, i.cfg)
+                .is_some_and(|h| h.clearance_ft == 0)
+        })
+    };
+    let landing: Vec<Alert> = i.alerts.iter().filter(|a| in_final(a)).copied().collect();
+    let (leps, ltracks) = episodes(&landing, EPISODE_GAP_S);
+    let _ = writeln!(
+        o,
+        "landing alerts (the worst point in the runway strip or the last 1 NM of a capture box): {} alerts, {leps} episodes, {ltracks} tracks",
+        landing.len()
+    );
+    let ext = i
+        .alerts
+        .iter()
+        .filter(|a| a.flags & AF_STALE_EXTRAPOLATED != 0)
+        .count();
+    let lost = i
+        .alerts
+        .iter()
+        .filter(|a| a.end_reason != oa_msaw::END_CLEAR)
+        .count();
+    let _ = writeln!(
+        o,
+        "alerts judged at a stale-extrapolated altitude at some cycle {ext}; alerts ended \"lost: altitude\" {lost}"
+    );
     nuisance_lines(&mut o, i, &order, &nears);
     diagnostic_lines(&mut o, i);
     let _ = writeln!(o, "net state by cycle:");

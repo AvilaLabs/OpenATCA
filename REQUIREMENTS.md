@@ -6585,8 +6585,8 @@ FAA value.
   absent where any sample is missing or nodata; obstacles are the highest top within the circle; the chart is
   the highest FUS3, FUS5 or TAV altitude of the sectors containing the point and absent outside them all.
 - **OA-MSAW-034** A runway end with an approach gets a corridor from its threshold to the final approach fix
-  (5 NM if the CIFP does not place it), 0.3 NM wide either side widening to 1.0 NM, from the threshold
-  elevation to the lowest fix altitude its approaches publish; an airport the file lacks is an error.
+  (5 NM if the CIFP does not place it), a capture box of constant half-width `approach_half_width_nm` (1 NM), from
+  the threshold elevation to the lowest fix altitude its approaches publish; an airport the file lacks is an error.
 - **OA-MSAW-035** The output files are written whole or not at all and a failed run leaves none of an earlier run's.
 - **OA-MSAW-036** Clip rows in a sealed window are dropped and counted, and the count is printed once on every exit.
 - **OA-MSAW-037** Synthetic Guam case through the tracker: the early descent alerts at caution and then warning.
@@ -6624,8 +6624,9 @@ FAA value.
 - **OA-MSAW-058** The clearance above terrain outside the corridors is `gtm_clearance_ft` (a development value),
   or that of a `gtm_clearance` box or polygon file holding the point (the highest wins); corridors keep their own.
 - **OA-MSAW-059** Within `airport_area_nm` of an airport with a CIFP approach, below `airport_area_ceiling_ft_agl`,
-  the clearance above terrain and above obstacles is `airport_area_clearance_ft`; never an inhibit; the lowest of
-  overlapping areas applies and a `gtm_clearance` line overrides it for terrain.
+  the clearance above terrain and above obstacles is `airport_area_clearance_ft`, where the whole query circle is
+  inside the area; never an inhibit; the lowest of overlapping areas applies and a `gtm_clearance` line overrides it
+  for terrain.
 - **OA-MSAW-060** An approach corridor is a capture box of constant half-width `approach_half_width_nm` from the
   threshold to the fix (5 NM when absent or farther); a track outside the box falls to the general rules; the
   departure corridor widens to 2 NM.
@@ -6634,14 +6635,31 @@ FAA value.
 - **OA-MSAW-063** With `--diagnose` the tool writes `diagnosis.txt`: the altitude judged against the geometric one,
   the terms of the query radius, the obstacle and terrain records behind the floors and what the depth is made of;
   numbers only.
-- **OA-MSAW-064** Inside an approach or departure corridor or an airport terminal area below its ceiling the
-  prediction time is `terminal_lookahead_s`, else `look_ahead_s`, by where the track is now; the check of the present
-  position is unchanged.
-- **OA-MSAW-065** A track whose latest barometric altitude is older than `max_altitude_age_s` is not judged, is
-  counted and listed as altitude stale on that track, and does not degrade the net (a gap of the aircraft, not of the
-  system); an unknown age is taken as fresh.
+- **OA-MSAW-064** Inside an approach or departure corridor (capture box) the prediction time is
+  `terminal_lookahead_s`, else `look_ahead_s`, by where the track is now; airport terminal areas and `gtm_clearance`
+  areas keep `look_ahead_s`; the check of the present position is unchanged.
+- **OA-MSAW-065** A track whose latest barometric altitude is older than `stale_hold_s` is never planned for
+  judging, is counted and listed as altitude stale on that track, and an alert open on it ends "lost: altitude
+  stale"; a gap of the aircraft, not of the system (Kani on the classification, the plan in a test). An unknown
+  age is taken as fresh and counted.
 - **OA-MSAW-066** The summary reports alert episodes (alerts of one track 20 s or less apart count as one) and the
   tracks with an alert beside the alert count; the alerts and the hysteresis are unchanged.
+- **OA-MSAW-067** A `gtm_clearance` area's clearance is a lower bound of the terrain floor inside a corridor too;
+  the airport area's is not.
+- **OA-MSAW-068** From `max_altitude_age_s` to `stale_hold_s` a track is judged at `min(alt, alt + vrate x age)`
+  (a descent, never a climb), flagged stale-extrapolated on the alert and the track; an alert open on it is held open.
+- **OA-MSAW-069** The net reads InputMissing when more than `altitude_loss_degrade_share` of a cycle's airborne
+  tracks are not monitored for altitude.
+- **OA-MSAW-070** In the runway strip and the last 1 NM of a capture box the floor is the higher of the surface
+  less the allowance, terrain and the obstacle top, with no clearance; a path that reaches the runway elevation over
+  the runway is a landing, not a violation (Kani on the predicate).
+- **OA-MSAW-071** The airport area's clearance applies only where the whole query circle is inside the area; a
+  `gtm_clearance` area applies where the circle overlaps it at all.
+- **OA-MSAW-072** With no setting within the radius and age, the lowest setting of the last 12 h within 200 NM is
+  used; only with none the allowance; the track stays flagged and the net InputMissing.
+- **OA-MSAW-073** A point outside the obstacle file's extent has no obstacle data: counted as without coverage.
+- **OA-MSAW-074** Tracks on the ground are listed per track; an altitude with no barometric measurement behind it is
+  no altitude, and is counted apart.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.
 ## Runway geometry and occupancy (oa-runway)

@@ -78,6 +78,17 @@ pub const AF_GROUND_UNKNOWN: u16 = 64;
 /// [`Alert::flags`]: the altitude had no altimeter setting at some cycle of the alert.
 pub const AF_QNH_MISSING: u16 = 128;
 
+/// [`Alert::flags`]: the altitude was stale at some cycle of the alert and judged at an
+/// extrapolated altitude (a descent continued, never a climb).
+pub const AF_STALE_EXTRAPOLATED: u16 = 256;
+
+/// [`Alert::end_reason`]: the alert ended by the hysteresis (the track was clear).
+pub const END_CLEAR: u8 = 0;
+/// [`Alert::end_reason`]: the alert ended because the track's altitude went stale past the hold.
+pub const END_LOST_ALTITUDE_STALE: u8 = 1;
+/// [`Alert::end_reason`]: the alert ended because the track lost its altitude.
+pub const END_LOST_ALTITUDE_MISSING: u8 = 2;
+
 /// One track's state at a cycle, as given by the shell from the tracker's row.
 // A7.2: cold struct (a copy of the tracker's row), size guard waived.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -101,7 +112,7 @@ pub struct MsawTrack {
     /// [`GROUND_UNKNOWN`], [`AIRBORNE`] or [`ON_GROUND`].
     pub ground: u8,
     /// Seconds since the track's latest barometric altitude was measured; NaN if not known (the
-    /// altitude is then taken as fresh).
+    /// altitude is then taken as fresh, and counted as of unknown age).
     pub alt_age_s: f32,
 }
 
@@ -182,6 +193,10 @@ pub struct Corridor {
     /// not used by a runway or departure corridor).
     pub thr_elev_ft: i32,
     pub faf_alt_ft: i32,
+    /// For a runway strip: how far along it from the near end the runway itself begins, metres (the
+    /// strip may start before the threshold). A path that reaches the runway elevation beyond it is
+    /// landing. Zero for the other kinds.
+    pub land_from_m: f64,
 }
 
 /// What the corridors say of a point: the surface of the highest corridor that holds it, if any
@@ -190,6 +205,9 @@ pub struct Corridor {
 pub struct CorridorHit {
     pub surface_ft: Option<i32>,
     pub clearance_ft: i32,
+    /// The runway elevation where the whole query circle lies over the runway strip: a path that
+    /// reaches it there is landing, not in violation.
+    pub landing_elev_ft: Option<i32>,
 }
 
 /// The settings of the net. Every value is the caller's (no defaults: no safety value is chosen
@@ -227,8 +245,14 @@ pub struct MsawConfig {
     pub departure_min_clearance_ft: i32,
     /// The growth of a sample point's radius with the prediction time, metres per second.
     pub velocity_uncertainty_mps: f64,
-    /// A track whose latest barometric altitude is older than this, seconds, is not monitored.
+    /// A track whose latest barometric altitude is older than this, seconds, is judged at an
+    /// extrapolated altitude until `stale_hold_s`.
     pub max_altitude_age_s: f64,
+    /// Past this age of the altitude, seconds, a track is not monitored (not above 600 s).
+    pub stale_hold_s: f64,
+    /// The net degrades when more than this share (0 to 1) of the airborne tracks of a cycle are
+    /// not monitored for altitude.
+    pub altitude_loss_degrade_share: f64,
     /// The prediction time inside an approach or departure corridor and an airport terminal area
     /// below its ceiling, seconds; not above `look_ahead_s`.
     pub terminal_lookahead_s: f64,
@@ -296,6 +320,8 @@ pub struct Alert {
     pub cycles: u32,
     /// [`AF_RATE_UNKNOWN`] and the other `AF_` bits, of any cycle of the alert.
     pub flags: u16,
+    /// [`END_CLEAR`], [`END_LOST_ALTITUDE_STALE`] or [`END_LOST_ALTITUDE_MISSING`].
+    pub end_reason: u8,
 }
 
 /// Why a track was left out of a cycle's evaluation, wholly or in part.
@@ -320,9 +346,15 @@ pub enum SkipWhy {
     /// Predicted below the minimum vectoring altitude but not below the alert floor: listed and
     /// counted, never an alert and never a shortfall of the net.
     BelowMva = 7,
-    /// The latest barometric altitude was older than `max_altitude_age_s`: not monitored, and said
-    /// so; it degrades the net as a missing altitude does.
+    /// The latest barometric altitude was older than `stale_hold_s`: the track is not monitored, and
+    /// says so on that track. A gap of the aircraft: it does not degrade the net unless the share
+    /// of tracks lost this way exceeds `altitude_loss_degrade_share`.
     AltitudeStale = 8,
+    /// The latest barometric altitude was older than `max_altitude_age_s` and within `stale_hold_s`:
+    /// the track is judged at an extrapolated altitude and says so.
+    AltitudeExtrapolated = 9,
+    /// The track is on the ground: excluded, and listed per track.
+    GroundExcluded = 10,
 }
 
 /// A track a cycle did not (fully) evaluate, listed and never silently passed.
@@ -370,8 +402,17 @@ pub struct CycleStats {
     pub ground_unknown: u64,
     /// Rows with no altitude (rule 4).
     pub alt_missing: u64,
-    /// Rows whose altitude was older than the limit (not monitored).
+    /// Rows whose altitude was older than the hold (not monitored).
     pub alt_stale: u64,
+    /// Rows whose altitude was stale within the hold (judged at an extrapolated altitude).
+    pub alt_extrapolated: u64,
+    /// Rows whose altitude had no known age (taken as fresh).
+    pub alt_age_unknown: u64,
+    /// Tracks not monitored for altitude in a cycle where they were more than the share that
+    /// degrades the net.
+    pub alt_loss: u64,
+    /// Track cycles whose path reached the runway over the runway: a landing, not a violation.
+    pub landings: u64,
     /// Rows with no vertical rate (predicted level).
     pub rate_unknown: u64,
     /// Rows with a bad value.
