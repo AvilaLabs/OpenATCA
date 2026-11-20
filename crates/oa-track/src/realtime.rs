@@ -2,10 +2,12 @@
 //! national tracking in real time). Core (pure): the shell measures the time of each update with
 //! its own clock and hands the nanoseconds here; nothing in this module reads a clock.
 //!
-//! A second of traffic is a whole second of the measurements' time of applicability. Work is
-//! queued the way a live feed would queue it: a second's work starts when the previous second's
-//! work is finished, and a second finishes in real time when the backlog it leaves is zero. Real
-//! reports arrive spread through the second, so this queue is an upper bound on the lateness.
+//! A second of traffic is a whole second of the measurements' time of applicability. Queue model:
+//! each second's reports form one batch, available when the second ends, processed during the
+//! next second, with work left over carried to the one after (backlog = max(0, backlog + work -
+//! 1 s)); a second finishes late when backlog is left. A report therefore waits at most 1 s plus
+//! the backlog ahead of its batch before processing starts, and because real reports arrive
+//! spread through the second and could be processed earlier, the lateness is an upper bound.
 
 use crate::types::{TrackLog, TrackerStats};
 
@@ -94,6 +96,10 @@ pub struct RealtimeSummary {
     pub work_p99_ns: u64,
     pub work_max_ns: u64,
     pub work_max_s: i64,
+    /// Nearest-rank percentiles over the seconds with at least one measurement only.
+    pub busy_work_p50_ns: u64,
+    pub busy_work_p99_ns: u64,
+    /// The sum of the per-second timers.
     pub work_total_ns: u64,
     /// Seconds whose work alone took longer than the second.
     pub over_one_second: usize,
@@ -101,6 +107,8 @@ pub struct RealtimeSummary {
     pub finished_late: usize,
     /// The longest the queue got behind the traffic, nanoseconds.
     pub backlog_max_ns: u64,
+    /// The most a report waits before its batch starts processing: 1 s plus the longest backlog.
+    pub wait_bound_ns: u64,
     /// Peak confirmed and tentative tracks, sampled once per second after its last update.
     pub confirmed_peak: u32,
     pub tentative_peak: u32,
@@ -146,9 +154,42 @@ pub fn realtime_summary(log: &SecondLog) -> RealtimeSummary {
     sorted.sort_unstable();
     s.work_p50_ns = rank(&sorted, 50);
     s.work_p99_ns = rank(&sorted, 99);
+    let mut busy: Vec<u64> = log
+        .work_ns
+        .iter()
+        .zip(log.reports.iter())
+        .filter(|(_, &r)| r > 0)
+        .map(|(&w, _)| w)
+        .collect();
+    busy.sort_unstable();
+    s.busy_work_p50_ns = rank(&busy, 50);
+    s.busy_work_p99_ns = rank(&busy, 99);
+    s.wait_bound_ns = NS_PER_S.saturating_add(s.backlog_max_ns);
     s.confirmed_peak = log.confirmed.iter().copied().max().unwrap_or(0);
     s.tentative_peak = log.tentative.iter().copied().max().unwrap_or(0);
     s
+}
+
+/// The update window's wall seconds not inside the per-second timers (track counts, `push_second`,
+/// batching), or `None` when the timers sum to more than the window (the readings are wrong).
+pub fn outside_timers_s(window_s: f64, timers_ns: u64) -> Option<f64> {
+    let d = window_s - timers_ns as f64 / 1e9;
+    if d.is_nan() || d < 0.0 {
+        None
+    } else {
+        Some(d)
+    }
+}
+
+/// The CPU source note: empty when every one of the `readings` used the per-thread counter, else
+/// the number that fell back to the process's `/proc/self/stat` ticks and the assumed tick rate
+/// (the clock tick rate cannot be read without `unsafe` or a new dependency, so 100 Hz is assumed).
+pub fn cpu_fallback_note(fallback: usize, readings: usize) -> Option<String> {
+    (fallback > 0).then(|| {
+        format!(
+            "{fallback} of {readings} CPU readings came from /proc/self/stat (whole process, ticks of an assumed 100 Hz clock, 10 ms resolution)"
+        )
+    })
 }
 
 /// The csv of a log: one line per second.

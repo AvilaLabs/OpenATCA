@@ -3822,11 +3822,20 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   with no measurements and the last, the measurements, the processing time and the confirmed and tentative
   track counts after the last update in the second (a second with no updates carries the previous counts;
   the tracker is not advanced to the second boundary, and the peaks are sampled once per second). It reports the time's p50, p99 and maximum over all those seconds
-  (an empty second counts as zero), the seconds that did not finish within the second and the longest queue
-  behind the traffic (an upper bound: a second's work starts when the second ends), the final advance and
-  flush apart, CPU and wall time of the update window and, read right after the final flush and before any
+  (an empty second counts as zero) and, labelled as such with their count, p50 and p99 over the seconds with
+  at least one measurement; the seconds that did not finish within the second and the longest backlog under
+  this queue model: each second's reports form one batch, available when the second ends, processed during
+  the next second, leftover work carried on (backlog = max(0, backlog + work - 1 s)), a second finishing late
+  when backlog is left, so a report waits at most 1 s plus the backlog ahead of its batch before processing
+  starts, an upper bound because real reports arrive spread through the second; the final advance and
+  flush apart (including the output spill with `--with-output`), CPU and wall time of the update window,
+  which also hold the per-second track-count scan and bookkeeping, next to the sum of the per-second timers
+  and the difference named as outside them (the sum is at most the window) and, read right after the final flush and before any
   digest, of the run from its start (ingest, set-up, updates, flush) against the traffic's span with the CPU
-  source named, every refusal and overflow counter, resident memory with the process peak
+  source named (and, when the `/proc/self/stat` fallback served any reading, how many and its assumed 100 Hz
+  tick rate), the conditions (input decoded and held in memory before timing, sorted by time, one thread:
+  the figures exclude network input, decoding and interrupts of a live feed; a second with no measurements
+  does no tick work, its tick rows are emitted with the next update and charged to that second), every refusal and overflow counter, resident memory with the process peak
   labelled, and the tracker table bytes. A run summary digest (the track log and the counters, taken after the
   timed window; `oa-track` has no tracker state hash) is always printed; `--with-output` also writes the output
   rows to column files and prints their digest. These digests are comparable only between realtime runs of the

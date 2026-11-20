@@ -2,8 +2,8 @@
 //! The per-second log of `oa-track-run --realtime` (OA-TRK-388).
 
 use oa_track::realtime::{
-    check_flags, cpu_use, realtime_failure, realtime_summary, run_summary_digest, seconds_csv,
-    CpuMarks, SecondLog,
+    check_flags, cpu_fallback_note, cpu_use, outside_timers_s, realtime_failure, realtime_summary,
+    run_summary_digest, seconds_csv, CpuMarks, SecondLog,
 };
 use oa_track::types::{log_new, TrackerStats};
 
@@ -228,4 +228,54 @@ fn the_run_summary_digest_is_stable_and_sees_the_log_and_the_counters() {
     assert_ne!(d, run_summary_digest(&log, &more));
     log.updates[0] = 5;
     assert_ne!(d, run_summary_digest(&log, &stats));
+}
+
+// REQ: OA-TRK-388
+#[test]
+fn the_batch_queue_with_09_s_of_work_a_second_never_runs_late_and_with_11_s_always_does() {
+    let n = 50u64;
+    let each = |w: u64| log_of(&(0..n as i64).map(|i| (i, 1, w)).collect::<Vec<_>>());
+    let ok = realtime_summary(&each(900 * MS));
+    assert_eq!((ok.finished_late, ok.backlog_max_ns), (0, 0));
+    assert_eq!(ok.wait_bound_ns, 1_000 * MS);
+    let slow = realtime_summary(&each(1_100 * MS));
+    // Every second leaves backlog; it grows 0.1 s a second.
+    assert_eq!(slow.finished_late, n as usize);
+    assert_eq!(slow.backlog_max_ns, n * 100 * MS);
+    assert_eq!(slow.wait_bound_ns, 1_000 * MS + n * 100 * MS);
+}
+
+// REQ: OA-TRK-388
+#[test]
+fn busy_second_percentiles_leave_out_empty_seconds_and_all_second_ones_count_them() {
+    // Seconds 0, 3, 4 busy (10, 20, 30 ms); 1 and 2 empty.
+    let l = log_of(&[(0, 1, 10 * MS), (3, 1, 20 * MS), (4, 1, 30 * MS)]);
+    let s = realtime_summary(&l);
+    assert_eq!((s.seconds, s.busy_seconds), (5, 3));
+    assert_eq!((s.work_p50_ns, s.work_p99_ns), (10 * MS, 30 * MS));
+    assert_eq!((s.busy_work_p50_ns, s.busy_work_p99_ns), (20 * MS, 30 * MS));
+    let none = realtime_summary(&SecondLog::default());
+    assert_eq!((none.busy_work_p50_ns, none.busy_work_p99_ns), (0, 0));
+}
+
+// REQ: OA-TRK-388
+#[test]
+fn the_per_second_timers_sum_to_at_most_the_window_and_the_difference_is_named() {
+    let l = log_of(&[(0, 1, 300 * MS), (1, 1, 200 * MS)]);
+    let sum = realtime_summary(&l).work_total_ns;
+    assert_eq!(sum, 500 * MS);
+    let d = outside_timers_s(0.6, sum).unwrap();
+    assert!((d - 0.1).abs() < 1e-9);
+    assert_eq!(outside_timers_s(0.5, sum), Some(0.0));
+    // Timers summing to more than the window are not a valid reading.
+    assert_eq!(outside_timers_s(0.4, sum), None);
+    assert_eq!(outside_timers_s(f64::NAN, sum), None);
+}
+
+// REQ: OA-TRK-388
+#[test]
+fn the_cpu_fallback_is_named_only_when_used() {
+    assert_eq!(cpu_fallback_note(0, 5), None);
+    let n = cpu_fallback_note(2, 5).unwrap();
+    assert!(n.contains("2 of 5") && n.contains("100 Hz"));
 }

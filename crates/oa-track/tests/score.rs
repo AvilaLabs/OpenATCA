@@ -1209,7 +1209,7 @@ fn realtime_writes_per_second_counts_and_a_digest_that_repeats() {
             "single-threaded today",
             "the same --max-tracks and the same build",
             "process peak",
-            "an upper bound",
+            "An upper bound",
             "counting as zero",
         ] {
             assert!(text.contains(needle), "missing {needle:?}\n{text}");

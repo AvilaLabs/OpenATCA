@@ -46,8 +46,8 @@ use oa_track::latency::{
     LATENCY_CAPACITY, STAGES, STAGE_NAMES,
 };
 use oa_track::realtime::{
-    check_flags, cpu_use, realtime_failure, realtime_summary, run_summary_digest, seconds_csv,
-    CpuMarks, SecondLog,
+    check_flags, cpu_fallback_note, cpu_use, outside_timers_s, realtime_failure, realtime_summary,
+    run_summary_digest, seconds_csv, CpuMarks, SecondLog,
 };
 use oa_track::score::{
     initiation_delays, interval_stats, run_tracker_spilled, score_source, scoring_config,
@@ -753,8 +753,9 @@ struct CanonOut {
 }
 
 /// On-CPU nanoseconds of this process and where they come from: `/proc/self/schedstat` (the main
-/// thread, which is the whole run: it is one thread), or `/proc/self/stat`'s ticks (10 ms each; the
-/// whole process) where the first is absent.
+/// thread, which is the whole run: it is one thread), or `/proc/self/stat`'s ticks (assumed 100 Hz,
+/// 10 ms each, as the tick rate cannot be read without `unsafe`; the whole process) where the first
+/// is absent.
 fn cpu_ns() -> Option<(u64, &'static str)> {
     if let Some(v) = fs::read_to_string("/proc/self/schedstat")
         .ok()
@@ -767,7 +768,10 @@ fn cpu_ns() -> Option<(u64, &'static str)> {
     let rest = s.get(s.rfind(')')? + 2..)?;
     let f: Vec<&str> = rest.split_whitespace().collect();
     let ticks = f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?;
-    Some((ticks * 10_000_000, "/proc/self/stat (process, 10 ms ticks)"))
+    Some((
+        ticks * 10_000_000,
+        "/proc/self/stat (process, assumed 100 Hz ticks)",
+    ))
 }
 
 /// `--realtime`: removes the spill directory on every way out, then runs [`run_realtime_inner`].
@@ -986,15 +990,39 @@ fn run_realtime_inner(
     );
     let _ = writeln!(
         o,
-        "real time: {} seconds whose work took longer than the second, {} seconds that finished late behind queued work, longest queue {:.3} ms (an upper bound: real reports arrive spread through the second, this model has each second's work start when the second ends)",
-        s.over_one_second,
-        s.finished_late,
-        ms(s.backlog_max_ns)
+        "processing time over the {} busy seconds only (seconds with at least one measurement): p50 {:.3} ms, p99 {:.3} ms",
+        s.busy_seconds,
+        ms(s.busy_work_p50_ns),
+        ms(s.busy_work_p99_ns)
     );
     let _ = writeln!(
         o,
-        "final advance and flush after the last second: {:.3} ms",
-        finish_s * 1e3
+        "real time, queue model: each second's reports form one batch, available when the second ends, processed during the next second, with leftover work carried to the one after (backlog = max(0, backlog + work - 1 s)); a second finishes late when backlog is left. {} seconds whose work took longer than the second, {} seconds that finished late, longest backlog {:.3} ms; a report waits at most 1 s plus the backlog ahead of its batch before processing starts, so at most {:.3} ms. An upper bound: real reports arrive spread through the second and could be processed earlier",
+        s.over_one_second,
+        s.finished_late,
+        ms(s.backlog_max_ns),
+        ms(s.wait_bound_ns)
+    );
+    let _ = writeln!(
+        o,
+        "final advance and flush after the last second: {:.3} ms{}",
+        finish_s * 1e3,
+        if with_output {
+            " (includes the output spill)"
+        } else {
+            ""
+        }
+    );
+    let _ = writeln!(
+        o,
+        "conditions: the input was decoded and held in memory before timing, sorted by time, and processed on one thread, so the figures exclude network input, decoding and the interrupts of a live feed; a second with no measurements does no tick work: the tick rows for a gap are emitted with the next update and charged to that second"
+    );
+    let _ = writeln!(
+        o,
+        "sum of the per-second timers (wall only; no CPU is read per second): {:.3} s; the window below also holds the track-count scan, the log and the batching, {} outside the per-second timers: track counts, bookkeeping; the window's CPU includes the same work",
+        s.work_total_ns as f64 / 1e9,
+        outside_timers_s(loop_wall_s, s.work_total_ns)
+            .map_or("n/a (timers exceed the window)".to_string(), |d| format!("{d:.3} s wall"))
     );
     let _ = writeln!(
         o,
@@ -1010,10 +1038,23 @@ fn run_realtime_inner(
         pct(cpu.map(|c| c.total_pct)),
         cpu_or(cpu.map(|c| c.total_s), &|c| format!("{c:.3}"))
     );
+    let readings = [
+        cpu_start,
+        cpu_loaded,
+        cpu_loop_start,
+        cpu_looped,
+        cpu_finished,
+    ];
+    let fallback = readings
+        .iter()
+        .flatten()
+        .filter(|c| c.1.starts_with("/proc/self/stat"))
+        .count();
     let _ = writeln!(
         o,
-        "cpu source: {} (the run is single-threaded today)",
-        cpu_loaded.map_or("none", |c| c.1)
+        "cpu source: {} (the run is single-threaded today){}",
+        cpu_loaded.map_or("none", |c| c.1),
+        cpu_fallback_note(fallback, readings.len()).map_or(String::new(), |n| format!("; {n}"))
     );
     let _ = writeln!(
         o,
