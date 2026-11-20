@@ -5596,15 +5596,19 @@ configuration with no default; the crate's tests use synthetic values.
   the required default volume; with an unknown altitude the larger horizontal and the larger vertical
   minimum among the volumes whose area holds the midpoint AND the default volume apply, so an unknown
   altitude never gets a smaller minimum than any known altitude at that place. An area is a latitude and
-  longitude box or an `oa-safety` polygon.
+  longitude box or an `oa-safety` polygon. The volume is chosen once per evaluation, from the midpoint and
+  mean altitude now, and holds for the whole look-ahead: a pair that climbs or descends out of the band
+  during the look-ahead keeps the minima it started with.
 - **OA-CA-009** The candidate grid finds every pair inside its radius (look-ahead times the closing speed
   bound, plus the largest horizontal minimum and both 95 % radii), the same pairs for any grid cell size and
   at least those a brute-force exact test finds; a pair with both altitudes and rates known that cannot come
   within the vertical minimum in the look-ahead is skipped and counted; a pair with an unknown rate is not
   skipped.
 - **OA-CA-010** The grid scan and the pair evaluation count their work against configured budgets; over
-  budget the pairs are evaluated in order of smallest current horizontal separation (ties by address; the
-  order is by separation now, not by time to loss), the remainder is counted as not evaluated, an open alert
+  budget the pairs are evaluated in order of the least lower bound on the time to reach the limit (the
+  flat separation less the widest limit, over the sum of the ground speeds, a missing speed taken as the
+  configured maximum; zero inside the limit), ties by separation now and then by track numbers, so a
+  distant pair closing fast is not put behind a near pair moving apart; the remainder is counted as not evaluated, an open alert
   whose pair was not evaluated is kept alive and marked, and tracks not scanned, candidates dropped, rows
   over capacity and alerts not opened are counts that make the net degraded. A candidate table that fills
   keeps the pairs with the smallest current separation (ties by track numbers), whatever the scan order,
@@ -5621,7 +5625,9 @@ configuration with no default; the crate's tests use synthetic values.
   alert), with its start, peak (the smallest time to loss) and end.
 - **OA-CA-013** An out-of-range configuration is refused with the name of the value: capacities, look-ahead,
   hysteresis, budgets, speed, radius cap, grid band, volumes (minima, altitude band, area), and a look-ahead
-  and speed whose reach is beyond the bound the solver is proved for.
+  and speed whose reach is beyond the bound the solver is proved for. Log capacities above 2^24, an area of
+  more than 32 points and a configuration text above 1 MiB are refused; an allocation that fails is an
+  error, never an abort.
 - **OA-CA-014** A full alert log counts what it loses (`overflow`), the lost alerts degrade the net, and the
   consumer clears the log keeping the allocation and the count. Alerts ended when the run finishes and lost
   to a full log come after the last cycle's report: they are counted apart (`finish_dropped`) and the final
@@ -5640,7 +5646,7 @@ configuration with no default; the crate's tests use synthetic values.
   negative.
 - **OA-CA-021** Proved (Kani, bounded): an unknown altitude never removes a conflict: whenever a pair is in
   conflict with the altitude known it is in conflict with it unknown, starting no later and no less current.
-  (Kani proof `ca-unknown-altitude`, unchanged.)
+  (Kani proof `ca-unknown-altitude`.)
 - **OA-CA-022** The tool's arguments are strict, and it exits 2, before opening or creating anything, for an
   input, configuration or output path that is, is inside, or resolves into a sealed 2026-11-19 recording.
 - **OA-CA-023** The configuration file has no defaults: every key is required, an unknown or repeated key, a
@@ -5651,7 +5657,9 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-CA-025** The tool writes `alerts.csv`, `altitude_lost.csv` and `summary.txt` deterministically, sorted
   by start time; the summary has the alerts by context, by flag, per hour, the net-state cycles by state, the
   altitude losses, every shortfall with its count and a degraded state when any is non-zero and the digest of
-  `alerts.csv`, and contains no aircraft address.
+  `alerts.csv`, and contains no aircraft address. Each file is written to a temporary name, flushed and
+  renamed, `summary.txt` last, and the output files of an earlier run are removed before the run starts, so
+  a failed run leaves none.
 - **OA-CA-026** A pair converging through the tracker gives one alert that repeats exactly, with no shortfall
   and every cycle running; the same crossing a volume apart vertically gives none.
 - **OA-CA-027** The conflict decision (both intervals together) agrees with a brute-force scan of sampled times
@@ -5669,7 +5677,10 @@ configuration with no default; the crate's tests use synthetic values.
   proved apart, each in seconds (`ca-horizontal-now-step`, `-bounds`, `-approach`, `-root`), with the root
   a free value under the contract "finite, not negative, at most 7e9", which the square root of a finite
   discriminant in `(0, 4e19]` meets (`ca-horizontal-now-sqrt`). The split is the same arithmetic in the same
-  order (`crates/oa-ca/tests/split.rs`: bit for bit against the unsplit code on a million inputs).
+  order (`crates/oa-ca/tests/split.rs`: bit for bit against 2,400 vectors computed by the unsplit code at
+  commit 4eee1aa, in `tests/golden/`, and against a copy of it on a million inputs). The hand-off between the
+  two is tested, not proved: the first step's output meets the contract the root step is proved under on
+  400,000 bounded inputs (a proof of the real `horizontal_step` does not finish in ten minutes).
 - **OA-CA-029** Proved (Kani, bounded), in parts: the meet of two ordered intervals is finite and ordered
   inside the look-ahead (`ca-meet`); the conflict span of any ordered horizontal span and a bounded vertical
   part is finite and ordered (`ca-predict-span`); the time to loss of a prediction made from an ordered span
@@ -5690,7 +5701,8 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-CA-031** The tool drops the clip rows whose time is in a sealed window (the reader's own rule,
   OA-SEAL-014) and prints `sealed-window rows dropped: N` once on standard error on every exit that comes back
   through `main`, a usage error, a refusal and a failed run included (with N the count, 0 when nothing was
-  read), through `oa_sealed::DropReport`; the count is also a line of `summary.txt`.
+  read), through `oa_sealed::DropReport`; the count is also a line of `summary.txt`. A failure while the clip
+  is being read still reports the rows dropped up to that point.
 
 ## SWIM STDDS terminal data (oa-stdds)
 

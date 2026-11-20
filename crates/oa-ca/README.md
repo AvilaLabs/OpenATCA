@@ -57,6 +57,6 @@ gap.
 
 ## Verification
 
-Requirements OA-CA-001 to OA-CA-030 in `REQUIREMENTS.md`, each with its tests. The solvers have
+Requirements OA-CA-001 to OA-CA-031 in `REQUIREMENTS.md` (there is no OA-CA-020), each with its tests. The solvers have
 Kani harnesses (`solve`), registered with the proof suite (`tools/rust_proof_suite.py`). Their
 results go into `VERIFICATION.md` when they have been run.

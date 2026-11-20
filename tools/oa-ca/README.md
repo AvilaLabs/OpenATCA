@@ -78,9 +78,13 @@ Each alert has one context, from its flags, tested in this order:
 
 On the development hour with `testdata/dev.cfg`, compared with the `oa-encounter` record of the
 same clip: every C2 encounter (28 of 28) and every C3 encounter (174 of 174) had an alert. Of the
-244 C4 encounters (3 to 5 NM), 150 had one. All 94 without an alert are inside the ORD terminal
-box, whose configured horizontal minimum is 3 NM, so a pass between 3 and 5 NM there is not a
-conflict under that configuration.
+244 C4 encounters (3 to 5 NM), 150 had one. The 94 without an alert were reported to lie inside the
+ORD terminal box, whose configured horizontal minimum is 3 NM, so a pass between 3 and 5 NM there is
+not a conflict under that configuration.
+
+These numbers come from one run of the tool before the review fixes of 20 November 2026, and nothing
+in the repository reproduces them: the clip is not in it, and no test checks that the 94 lie inside
+the box. They will be replaced by a computed table from a run of the landed build.
 
 This is a development result on development values. It says the net finds what it is configured
 to find. It does not say those values are right for any airspace.
