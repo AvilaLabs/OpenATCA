@@ -441,18 +441,24 @@ fn compare(a: &Kv, b: &Kv) -> String {
     s
 }
 
-fn clip_part(o: &Opts, kvs: &mut Kv) -> Result<String, String> {
+fn clip_part(o: &Opts, kvs: &mut Kv, drops: &mut oa_sealed::DropReport) -> Result<String, String> {
     let Some(path) = o.clip.clone() else {
         return Ok("clip latency skipped: OPENATCA_ADSB_CLIP (or --clip) is not set\n".to_string());
     };
     // The clip may come from the environment: it is checked here, before it is read, as is the output.
     oa_sealed::refuse(std::path::Path::new(&path))?;
     oa_sealed::refuse(&o.out)?;
-    let r = run_clip(&ClipCfg {
-        path,
-        secs: o.clip_secs,
-        seed: 500 + o.seed,
-    })?;
+    let mut sealed = 0u64;
+    let r = run_clip(
+        &ClipCfg {
+            path,
+            secs: o.clip_secs,
+            seed: 500 + o.seed,
+        },
+        &mut sealed,
+    );
+    drops.add(sealed);
+    let r = r?;
     let text = clip_text(&r);
     write(&o.out.join("clip.txt"), &text)?;
     let kv = clip_kv(&r);
@@ -481,11 +487,20 @@ fn header(o: &Opts) -> String {
 
 /// Runs the command line.
 pub fn run(args: &[String]) -> Result<(), String> {
+    // Prints `sealed-window rows dropped: N` (on standard error) when this returns, an error
+    // included.
+    let mut drops = oa_sealed::DropReport::new();
+    run_counted(args, &mut drops)
+}
+
+fn run_counted(args: &[String], drops: &mut oa_sealed::DropReport) -> Result<(), String> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{USAGE}");
         return Ok(());
     }
     let o = parse_args(args).map_err(|e| format!("{e}\n{USAGE}"))?;
+    // The output directory is checked before it is created.
+    oa_sealed::refuse(&o.out)?;
     std::fs::create_dir_all(&o.out).map_err(|e| format!("{}: {e}", o.out.display()))?;
     if o.cmd == "one" {
         return one(&o, o.n);
@@ -497,7 +512,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     kvs.put("nproc", nproc());
     kvs.put("load_before", loadavg());
     if (o.cmd == "all" || o.cmd == "clip") && !(o.no_clip && o.cmd == "all") {
-        let t = clip_part(&o, &mut kvs)?;
+        let t = clip_part(&o, &mut kvs, drops)?;
         print!("{t}");
         summary.push_str(&t);
     }
