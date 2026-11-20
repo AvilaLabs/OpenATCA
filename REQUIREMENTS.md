@@ -5299,6 +5299,9 @@ scope.
   printed.
 - **OA-TRK-395** The scorer writes `p002.txt` and `samples.csv` only if neither exists; otherwise it refuses
   and writes nothing. It prints the SFDPS loader notes, the replay hash and the ingest drop counts.
+- **OA-TRK-396** `--exclude-window <from ISO> <to ISO>` (repeatable, whole-nanosecond or whole-second ISO times)
+  removes every grid sample inside any window for all three systems alike, before any metric; each window and
+  the number of samples it removed are printed and written to the `CLAIM` lines.
 ## Shadow comparator (oa-shadow)
 
 A tool crate (`tools/oa-shadow`, class `shell`) that runs OpenATCA's tracker beside ERAM's published track

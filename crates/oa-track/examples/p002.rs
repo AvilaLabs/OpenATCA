@@ -114,7 +114,22 @@ fn main() -> ExitCode {
     let (mut allow_dirty, mut development) = (false, false);
     let mut frozen: Option<String> = None;
     let mut candidate: Option<String> = None;
+    let mut windows: Vec<Window> = Vec::new();
     while let Some(a) = args.next() {
+        if a == "--exclude-window" {
+            let (Some(from), Some(to)) = (args.next(), args.next()) else {
+                eprintln!("p002: --exclude-window needs <from ISO> <to ISO>");
+                return ExitCode::from(2);
+            };
+            match Window::parse(&from, &to) {
+                Ok(w) => windows.push(w),
+                Err(e) => {
+                    eprintln!("p002: --exclude-window: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+            continue;
+        }
         if a == "--allow-dirty" {
             allow_dirty = true;
             continue;
@@ -139,7 +154,7 @@ fn main() -> ExitCode {
     }
     let (Some(adsb), Some(sfdps), Some(out)) = (adsb, sfdps, out) else {
         eprintln!(
-            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>]\n       p002 --combine <dirA> <dirB> <dirC>"
+            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]...\n       p002 --combine <dirA> <dirB> <dirC>"
         );
         return ExitCode::from(2);
     };
@@ -185,7 +200,18 @@ fn main() -> ExitCode {
         eprintln!("p002: refused: {e}");
         return ExitCode::from(2);
     }
-    match run(&adsb, &sfdps, &out, &label, &git, mode, &commits) {
+    match run(
+        &adsb,
+        &sfdps,
+        &out,
+        &git,
+        &Opts {
+            label: &label,
+            mode,
+            commits: &commits,
+            windows: &windows,
+        },
+    ) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -1677,6 +1703,112 @@ fn write_groups(
 // The run.
 // ---------------------------------------------------------------------------------------------
 
+/// A time window excluded from the grid for every system alike (P-007 section 2), in Unix ns.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Window {
+    from_ns: i64,
+    to_ns: i64,
+    /// The times as given.
+    from: String,
+    to: String,
+}
+
+/// Days since 1970-01-01 of a proleptic Gregorian date.
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// `YYYY-MM-DDTHH:MM:SS[.n{1,9}]Z` as Unix nanoseconds.
+fn parse_iso_ns(t: &str) -> Result<i64, String> {
+    let bad = || format!("`{t}` is not YYYY-MM-DDTHH:MM:SS[.nnnnnnnnn]Z");
+    let body = t.strip_suffix('Z').ok_or_else(bad)?;
+    let (main, frac) = match body.split_once('.') {
+        Some((m, f)) => (m, f),
+        None => (body, ""),
+    };
+    if frac.len() > 9 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let (date, time) = main.split_once('T').ok_or_else(bad)?;
+    let num = |x: &str, w: usize| -> Result<i64, String> {
+        if x.len() != w || !x.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(bad());
+        }
+        x.parse::<i64>().map_err(|_| bad())
+    };
+    let dp: Vec<&str> = date.split('-').collect();
+    let tp: Vec<&str> = time.split(':').collect();
+    let ([y, mo, d], [h, mi, se]) = (dp.as_slice(), tp.as_slice()) else {
+        return Err(bad());
+    };
+    let (y, mo, d) = (num(y, 4)?, num(mo, 2)?, num(d, 2)?);
+    let (h, mi, se) = (num(h, 2)?, num(mi, 2)?, num(se, 2)?);
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 59 {
+        return Err(bad());
+    }
+    let fr = if frac.is_empty() {
+        0
+    } else {
+        format!("{frac:0<9}").parse::<i64>().map_err(|_| bad())?
+    };
+    let secs = days_from_civil(y, mo, d) * 86_400 + h * 3600 + mi * 60 + se;
+    Ok(secs * 1_000_000_000 + fr)
+}
+
+impl Window {
+    fn parse(from: &str, to: &str) -> Result<Window, String> {
+        let (f, t) = (parse_iso_ns(from)?, parse_iso_ns(to)?);
+        if t < f {
+            return Err(format!("the window {from} to {to} ends before it starts"));
+        }
+        Ok(Window {
+            from_ns: f,
+            to_ns: t,
+            from: from.to_string(),
+            to: to.to_string(),
+        })
+    }
+
+    /// Whether the sample time `t_ms` is in the window (both ends included).
+    fn holds_ms(&self, t_ms: i64) -> bool {
+        let t = t_ms.saturating_mul(1_000_000);
+        t >= self.from_ns && t <= self.to_ns
+    }
+}
+
+/// The grid without the samples inside any window, and per window the number of grid samples it
+/// holds (a sample in two windows is counted in both, removed once).
+fn exclude_windows(grid: &PerAc, windows: &[Window]) -> (PerAc, Vec<u64>, u64) {
+    let mut counts = vec![0u64; windows.len()];
+    let mut removed = 0u64;
+    let mut out: PerAc = BTreeMap::new();
+    for (&a, v) in grid {
+        let mut keep = Vec::with_capacity(v.len());
+        for s in v {
+            let mut hit = false;
+            for (w, c) in windows.iter().zip(counts.iter_mut()) {
+                if w.holds_ms(s.t) {
+                    *c += 1;
+                    hit = true;
+                }
+            }
+            if hit {
+                removed += 1;
+            } else {
+                keep.push(*s);
+            }
+        }
+        out.insert(a, keep);
+    }
+    (out, counts, removed)
+}
+
 /// `git -C dir args`: its standard output, `None` when git failed or could not run.
 fn git_run(dir: &Path, args: &[&str]) -> Option<String> {
     // seal-allow: git describes this source tree for the report; it reads no input data
@@ -1860,7 +1992,13 @@ struct ClaimPiece {
 }
 
 /// The machine-readable lines of a run, for `--combine`.
-fn claim_lines(holdout: bool, c: &Commits, pieces: &[ClaimPiece]) -> String {
+fn claim_lines(
+    holdout: bool,
+    c: &Commits,
+    pieces: &[ClaimPiece],
+    windows: &[Window],
+    removed: &[u64],
+) -> String {
     let mut o = String::new();
     let _ = writeln!(
         o,
@@ -1869,6 +2007,9 @@ fn claim_lines(holdout: bool, c: &Commits, pieces: &[ClaimPiece]) -> String {
         c.frozen.as_deref().unwrap_or("none"),
         c.candidate.as_deref().unwrap_or("none")
     );
+    for (w, n) in windows.iter().zip(removed) {
+        let _ = writeln!(o, "CLAIM window from={} to={} removed={n}", w.from, w.to);
+    }
     for p in pieces {
         let better = PRIMARY
             .iter()
@@ -1894,6 +2035,8 @@ struct DayClaim {
     frozen: String,
     candidate: String,
     pieces: Vec<ClaimPiece>,
+    /// The excluded windows as `(from, to, grid samples removed)`.
+    windows: Vec<(String, String, u64)>,
 }
 
 /// Reads the `CLAIM` lines of a `p002.txt`. Every primary metric must appear once, its direction
@@ -1901,6 +2044,7 @@ struct DayClaim {
 fn parse_claim_lines(text: &str) -> Result<DayClaim, String> {
     let mut run: Option<(bool, String, String)> = None;
     let mut pieces: Vec<ClaimPiece> = Vec::new();
+    let mut windows: Vec<(String, String, u64)> = Vec::new();
     for line in text.lines().filter_map(|l| l.strip_prefix("CLAIM ")) {
         let kv: BTreeMap<&str, &str> = line
             .split_whitespace()
@@ -1920,6 +2064,11 @@ fn parse_claim_lines(text: &str) -> Result<DayClaim, String> {
                 get("frozen")?.to_string(),
                 get("candidate")?.to_string(),
             ));
+        } else if line.starts_with("window ") {
+            let n = get("removed")?
+                .parse::<u64>()
+                .map_err(|_| format!("CLAIM removed is not a count: {line}"))?;
+            windows.push((get("from")?.to_string(), get("to")?.to_string(), n));
         } else {
             let num = |k: &str| -> Result<f64, String> {
                 get(k)?
@@ -1966,6 +2115,7 @@ fn parse_claim_lines(text: &str) -> Result<DayClaim, String> {
         frozen,
         candidate,
         pieces,
+        windows,
     })
 }
 
@@ -2006,6 +2156,14 @@ fn combine(days: [&str; 3]) -> Result<String, String> {
         o,
         "rule: the 95% interval of OpenATCA minus ERAM excludes zero in OpenATCA's favour on A and on B, and C's interval does not exclude zero in ERAM's favour"
     );
+    for (day, d) in [("A", a), ("B", b), ("C", c)] {
+        for (f, t, n) in &d.windows {
+            let _ = writeln!(
+                o,
+                "{day}: excluded window {f} to {t}: {n} grid samples removed"
+            );
+        }
+    }
     for (id, _, name) in PRIMARY {
         let v = |d: &DayClaim| {
             d.pieces
@@ -2195,15 +2353,29 @@ fn passthrough_pairs(
     Ok((pair_legacy(&legacy, truth, tix, rcfg), c_addr.len()))
 }
 
+/// What a run was asked for besides its inputs and output.
+#[derive(Clone, Copy)]
+// A7.2: cold struct, size guard waived
+struct Opts<'a> {
+    label: &'a str,
+    mode: Mode,
+    commits: &'a Commits,
+    windows: &'a [Window],
+}
+
 fn run(
     clip_path: &Path,
     sfdps: &Path,
     out_dir: &Path,
-    label: &str,
     git: &GitState,
-    mode: Mode,
-    commits: &Commits,
+    opts: &Opts<'_>,
 ) -> Result<String, String> {
+    let Opts {
+        label,
+        mode,
+        commits,
+        windows,
+    } = *opts;
     outputs_free(out_dir)?;
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let t_start = Instant::now();
@@ -2301,6 +2473,26 @@ fn run(
     pair_points(&ep.pairs, &|_, _| true, &mut er_pts, &mut er_drop);
     let mut er_old: TimesBy = BTreeMap::new();
     old_rule_times(&ep.pairs, &mut er_old);
+    // P-007: the samples inside an excluded window leave the grid for every system alike. The
+    // scored legs, the passthrough pairs and the other systems' samples are made from the grid
+    // as it was, so no remaining value changes.
+    let (er_grid, win_removed, n_win_removed) = exclude_windows(&er_pts, windows);
+    let er_old_win = {
+        let t = |m: &TimesBy| -> TimesBy {
+            m.iter()
+                .map(|(&a, v)| {
+                    (
+                        a,
+                        v.iter()
+                            .copied()
+                            .filter(|&t| !windows.iter().any(|w| w.holds_ms(t)))
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+        t(&er_old)
+    };
     let scored = scored_legs(&er_pts, &legs);
     let on_leg = |a: u32, t: i64| on_scored_leg(&scored, &legs, a, t);
     eprintln!("ERAM paired aircraft: {}", er_pts.len());
@@ -2438,15 +2630,15 @@ fn run(
     let set_a_reports = reports_len(&set_a);
     drop(set_a);
     let old_cov = [
-        old_rule_coverage(&er_old, &oa_old),
-        old_rule_coverage(&er_old, &er_old),
-        old_rule_coverage(&er_old, &pt_old),
+        old_rule_coverage(&er_old_win, &oa_old),
+        old_rule_coverage(&er_old_win, &er_old),
+        old_rule_coverage(&er_old_win, &pt_old),
     ];
     drop((oa_old, pt_old, er_old));
 
     // The grid.
     let g = build_grid(
-        &er_pts,
+        &er_grid,
         &oa_pts,
         &pt_pts,
         [&oa_row_times, &er_times, &pt_row_times],
@@ -2575,6 +2767,18 @@ fn run(
     let _ = writeln!(
         o,
         "  P-004: an aircraft's scored legs are the truth legs that contain its grid samples; every system, the passthrough included, is scored on those legs and no others"
+    );
+    for (w, n) in windows.iter().zip(&win_removed) {
+        let _ = writeln!(
+            o,
+            "  excluded window (P-007) {} to {}: {n} grid samples removed for all three systems",
+            w.from, w.to
+        );
+    }
+    let _ = writeln!(
+        o,
+        "  excluded windows: {}; grid samples removed in all: {n_win_removed}",
+        windows.len()
     );
     let _ = writeln!(
         o,
@@ -2866,7 +3070,13 @@ fn run(
         "  the rule across the three days is met for a metric only if the A and B parts and the C part are all met: not decidable from one day"
     );
     let _ = writeln!(o, "  machine-readable (read by --combine):");
-    o.push_str(&claim_lines(mode.holdout, commits, &pieces));
+    o.push_str(&claim_lines(
+        mode.holdout,
+        commits,
+        &pieces,
+        windows,
+        &win_removed,
+    ));
     let _ = writeln!(o);
 
     // M1 to M3, M5.
@@ -3897,7 +4107,10 @@ mod tests {
                 verdict: verdict_of(lo, hi, *lower),
             })
             .collect();
-        format!("other text\n{}", claim_lines(holdout, &c, &pieces))
+        format!(
+            "other text\n{}",
+            claim_lines(holdout, &c, &pieces, &[], &[])
+        )
     }
 
     const OA_WINS: [(f64, f64, f64); 3] =
@@ -4099,5 +4312,111 @@ mod tests {
         let text = counts_lines(&c).join("\n");
         assert!(text.contains("SFDPS messages rejected: 7"), "{text}");
         assert!(text.contains("drop reason: a reason: 3"), "{text}");
+    }
+
+    // REQ: OA-TRK-396
+    #[test]
+    fn iso_times_parse_to_nanoseconds() {
+        assert_eq!(parse_iso_ns("1970-01-01T00:00:00Z"), Ok(0));
+        assert_eq!(
+            parse_iso_ns("1970-01-02T00:00:01.5Z"),
+            Ok(86_401_500_000_000)
+        );
+        assert_eq!(
+            parse_iso_ns("2026-11-19T23:24:42.123456789Z"),
+            Ok((20_776 * 86_400 + 23 * 3600 + 24 * 60 + 42) * 1_000_000_000 + 123_456_789)
+        );
+        assert_eq!(
+            parse_iso_ns("2000-03-01T00:00:00Z"),
+            Ok(951_868_800_000_000_000)
+        );
+        for bad in [
+            "2026-11-19 23:24:42Z",
+            "2026-11-19T23:24:42",
+            "2026-13-19T00:00:00Z",
+            "2026-11-19T00:00:00.1234567890Z",
+        ] {
+            assert!(parse_iso_ns(bad).is_err(), "{bad}");
+        }
+        assert!(Window::parse("1970-01-01T00:00:10Z", "1970-01-01T00:00:05Z").is_err());
+    }
+
+    // REQ: OA-TRK-396
+    #[test]
+    fn a_window_removes_the_same_samples_from_every_system_and_changes_no_other_value() {
+        let mut er: PerAc = BTreeMap::new();
+        er.insert(1, (0..10).map(|i| pt_at(i * 1000)).collect());
+        er.insert(2, (0..10).map(|i| pt_at(i * 1000)).collect());
+        // OpenATCA and passthrough miss every third sample.
+        let thin = |k: i64| -> PerAc {
+            (1..=2)
+                .map(|a| {
+                    (
+                        a,
+                        (0..10)
+                            .filter(|i| i % k != 0)
+                            .map(|i| Pt {
+                                cross: i as f64,
+                                ..pt_at(i * 1000)
+                            })
+                            .collect(),
+                    )
+                })
+                .collect()
+        };
+        let (oa, pt) = (thin(3), thin(2));
+        let none = TimesBy::new();
+        let times = times_of(&er);
+        let rt = [&times, &times, &times];
+        let full = build_grid(&er, &oa, &pt, rt);
+        let w = Window::parse("1970-01-01T00:00:03Z", "1970-01-01T00:00:05.000000000Z").unwrap();
+        let (cut, counts, removed) = exclude_windows(&er, &[w.clone()]);
+        // Samples at 3, 4 and 5 s of both aircraft.
+        assert_eq!((counts, removed), (vec![6], 6));
+        let g = build_grid(&cut, &oa, &pt, rt);
+        assert_eq!(g.rows.len(), full.rows.len() - 6);
+        let kept: Vec<&Row> = full.rows.iter().filter(|r| !w.holds_ms(r.t)).collect();
+        assert_eq!(kept.len(), g.rows.len());
+        for (a, b) in kept.iter().zip(&g.rows) {
+            assert_eq!((a.addr, a.t), (b.addr, b.t));
+            for s in 0..3 {
+                assert_eq!(
+                    a.val[s].map(|v| v.pt.cross.to_bits()),
+                    b.val[s].map(|v| v.pt.cross.to_bits())
+                );
+            }
+        }
+        // No removed time is left for any system.
+        assert!(g.rows.iter().all(|r| !w.holds_ms(r.t)));
+        let _ = none;
+        // The window is recorded in the machine-readable lines and read back.
+        let c = Commits {
+            frozen: Some("a".repeat(40)),
+            candidate: Some("c".repeat(40)),
+        };
+        let text = day_text_with(&c, &[w], &[6]);
+        let d = parse_claim_lines(&text).unwrap();
+        assert_eq!(
+            d.windows,
+            vec![(
+                "1970-01-01T00:00:03Z".to_string(),
+                "1970-01-01T00:00:05.000000000Z".to_string(),
+                6
+            )]
+        );
+    }
+
+    fn day_text_with(c: &Commits, w: &[Window], n: &[u64]) -> String {
+        let pieces: Vec<ClaimPiece> = PRIMARY
+            .iter()
+            .map(|(id, lower, _)| ClaimPiece {
+                id: (*id).into(),
+                diff: -1.0,
+                lo: -2.0,
+                hi: -0.5,
+                verdict: verdict_of(-2.0, -0.5, *lower),
+            })
+            .collect();
+        claim_lines(true, c, &pieces, w, n)
     }
 }
