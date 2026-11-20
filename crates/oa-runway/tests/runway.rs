@@ -86,43 +86,46 @@ fn mdw() -> (Plane, RunwayInput<'static>) {
     )
 }
 
-/// A runway of a published length, width and alignment whose far end is found by the geodesic
-/// direct problem from a near-true threshold. NOT NASR cycle values: the coordinates are
-/// approximate stand-ins (no network or data directory was available), the length, width and
-/// alignment are the published ones. Replace with the cycle's values when they are typed in.
-fn synthetic(
-    lat: f64,
-    lon: f64,
-    az: f64,
-    len_ft: f64,
-    width_ft: f64,
-    na: &'static str,
-    nb: &'static str,
-) -> (Plane, RunwayInput<'static>) {
-    let ell = wgs84();
-    let p1 = LatLon::new(lat, lon).unwrap();
-    let p2 = ell.direct(p1, az, len_ft * FT_TO_M).unwrap().position;
-    let plane = plane_new(lat, lon).unwrap();
-    let back = (az + 180.0) % 360.0;
+/// Austin-Bergstrom (KAUS) runway 18L/36R, real FAA NASR values, cycle 2026/10/29 (APT_RWY and
+/// APT_RWY_END, from the public airport data): 9,000 x 150 ft, no displacement. 18L is the runway
+/// of the 4 February 2023 incident.
+fn kaus() -> (Plane, RunwayInput<'static>) {
+    let plane = plane_new(30.1945, -97.6699).unwrap();
+    let mut a = end("18L", 179.0, g(30.20383005, -97.65789105));
+    a.elev_ft = Some(491.6);
+    let mut b = end("36R", 359.0, g(30.17909102, -97.65724333));
+    b.elev_ft = Some(473.6);
     (
         plane,
         RunwayInput {
-            length_ft: Some(len_ft),
-            width_ft: Some(width_ft),
-            a: end(na, az.round(), g(p1.lat(), p1.lon())),
-            b: end(nb, back.round(), g(p2.lat(), p2.lon())),
+            length_ft: Some(9000.0),
+            width_ft: Some(150.0),
+            a,
+            b,
         },
     )
 }
 
-fn kaus() -> (Plane, RunwayInput<'static>) {
-    // 18L/36R, published 12,250 x 150 ft; true alignment of 18L about 181 degrees.
-    synthetic(30.2120, -97.6740, 181.0, 12_250.0, 150.0, "18L", "36R")
-}
-
+/// San Francisco (KSFO) runway 10L/28R, real FAA NASR values, cycle 2026/10/29 (APT_RWY and
+/// APT_RWY_END, from the public airport data): 11,870 x 200 ft. 28R has a displaced threshold
+/// of 300 ft; 10L has none.
 fn ksfo() -> (Plane, RunwayInput<'static>) {
-    // 28R/10L, published 11,870 x 200 ft; true alignment of 28R about 297 degrees.
-    synthetic(37.6280, -122.3930, 117.0, 11_870.0, 200.0, "10L", "28R")
+    let plane = plane_new(37.6213, -122.3790).unwrap();
+    let mut a = end("10L", 118.0, g(37.62873872, -122.39339186));
+    a.elev_ft = Some(5.5);
+    let mut b = end("28R", 298.0, g(37.61353361, -122.35714111));
+    b.elev_ft = Some(13.0);
+    b.displaced_position = Some(g(37.61391813, -122.35805769));
+    b.displaced_len_ft = Some(300.0);
+    (
+        plane,
+        RunwayInput {
+            length_ft: Some(11_870.0),
+            width_ft: Some(200.0),
+            a,
+            b,
+        },
+    )
 }
 
 // REQ: OA-RWY-002
@@ -178,14 +181,14 @@ fn midway_geometry_is_hand_worked() {
 // REQ: OA-RWY-002
 #[test]
 fn austin_and_san_francisco_geometry() {
-    for (plane, input, len_ft, width_ft) in [
+    for (plane, input, len_ft, width_ft, displaced_b) in [
         {
             let (p, i) = kaus();
-            (p, i, 12_250.0, 150.0)
+            (p, i, 9_000.0, 150.0, false)
         },
         {
             let (p, i) = ksfo();
-            (p, i, 11_870.0, 200.0)
+            (p, i, 11_870.0, 200.0, true)
         },
     ] {
         let rw = build_runway(&plane, &input).unwrap();
@@ -193,9 +196,14 @@ fn austin_and_san_francisco_geometry() {
         assert!(near(rw.width_m, width_ft * FT_TO_M, 1e-9));
         // Physical ends are the thresholds where nothing is displaced.
         assert_eq!(rw.ends[0].physical, rw.ends[0].threshold);
-        assert_eq!(rw.ends[1].physical, rw.ends[1].threshold);
-        assert!(near(rw.half_len_m * 2.0, len_ft * FT_TO_M, 0.5));
-        // The rectangle's corners are 2 x half length apart along the axis.
+        assert!(rw.ends[0].displacement_m.abs() < 1.0);
+        if displaced_b {
+            assert!(rw.ends[1].physical != rw.ends[1].threshold);
+            assert!(near(rw.ends[1].displacement_m, 300.0 * FT_TO_M, 5.0));
+        } else {
+            assert_eq!(rw.ends[1].physical, rw.ends[1].threshold);
+        }
+        assert!(near(rw.half_len_m * 2.0, len_ft * FT_TO_M, 30.0));
         let o = occupies(&rw, rw.center, 0.0);
         assert!(o.on_runway);
         let past = Local {
@@ -203,7 +211,15 @@ fn austin_and_san_francisco_geometry() {
             north_m: rw.center.north_m + rw.uy * (rw.half_len_m + 1.0),
         };
         let o = occupies(&rw, past, 0.0);
-        assert!(!o.on_runway && o.departure[1] && o.approach[1]);
+        assert!(!o.on_runway && o.departure[1]);
+        // End b's approach area starts at its landing threshold: inside the physical end by the
+        // displacement.
+        assert!(near(
+            rw.approach_along[1][0],
+            rw.half_len_m - rw.ends[1].displacement_m,
+            1e-6
+        ));
+        assert!(o.approach[1]);
     }
 }
 
