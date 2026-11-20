@@ -15,6 +15,7 @@ oa-airspace = { path = "../oa-airspace" }
 oa-geo = { path = "../oa-geo" }
 
 [dev-dependencies]
+# Workspace crate, not an outside dependency (RULESET F1): the sealed hold-out guard, so the tests read their inputs through it.
 oa-sealed = { path = "../oa-sealed" }
 
 [package.metadata.openatca]

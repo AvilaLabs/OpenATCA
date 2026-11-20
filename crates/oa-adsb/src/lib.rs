@@ -626,6 +626,9 @@ pub struct Stats {
     pub outside_box: u64,
     /// Rows inside the box but outside the time window.
     pub outside_time: u64,
+    /// Rows that would be kept but whose time is in a sealed window (OA-SEAL-014): not output,
+    /// counted here.
+    pub sealed_window_dropped: u64,
     /// Rows of traces whose address is reserved (0x000000 or 0xFFFFFF, not flagged non-ICAO):
     /// a misconfigured transponder's reports are not one aircraft's, so none are output.
     pub reserved_address: u64,
@@ -689,6 +692,7 @@ pub fn stats_add(a: &mut Stats, b: &Stats) {
     }
     a.outside_box += b.outside_box;
     a.outside_time += b.outside_time;
+    a.sealed_window_dropped += b.sealed_window_dropped;
     a.reserved_address += b.reserved_address;
     a.kept += b.kept;
     a.bad_measurements += b.bad_measurements;

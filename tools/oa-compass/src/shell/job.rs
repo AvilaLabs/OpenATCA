@@ -60,9 +60,16 @@ struct Done {
     systems: Vec<Finished>,
     adsb: Option<AdsbFinished>,
     clip: Option<ClipInfo>,
+    /// Frames and records of the ERAM (SFDPS) input left out for a sealed window (OA-SEAL-014).
+    eram_sealed: u64,
 }
 
 impl Done {
+    /// The rows and frames dropped for a sealed window over every input, each counted once.
+    fn sealed_window_dropped(&self) -> u64 {
+        self.eram_sealed + self.clip.as_ref().map_or(0, |c| c.sealed_window_dropped)
+    }
+
     fn abort(self) {
         for f in self.systems {
             f.abort();
@@ -82,6 +89,16 @@ pub fn run_job(
     hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
     log: &mut dyn FnMut(String),
 ) -> Result<Vec<String>, ExportError> {
+    run_job_counted(job, hook, log).map(|(lines, _)| lines)
+}
+
+/// [`run_job`], also returning the count of rows and frames dropped because their time is in a
+/// sealed window, summed over the inputs, each counted once (OA-SEAL-014).
+pub fn run_job_counted(
+    job: Job,
+    hook: &mut dyn FnMut(Stage) -> Result<(), ExportError>,
+    log: &mut dyn FnMut(String),
+) -> Result<(Vec<String>, u64), ExportError> {
     let t0 = Instant::now();
     let out = job.layout.out.clone();
     // The refusals that need no output directory come first: the sealed recording, a missing
@@ -100,8 +117,10 @@ pub fn run_job(
     let mut created: Vec<PathBuf> = Vec::new();
     let mut done = Done::default();
     let has_adsb = job.adsb.is_some();
+    let mut sealed = 0u64;
     let result = match export_all(&job, &mut done, t0, log) {
         Ok(()) => {
+            sealed = done.sealed_window_dropped();
             let mode = has_adsb.then_some(job.mode);
             commit_staged(&job, done, mode, hook, &mut created, t0)
         }
@@ -111,7 +130,7 @@ pub fn run_job(
         }
     };
     match result {
-        Ok(lines) => Ok(lines),
+        Ok(lines) => Ok((lines, sealed)),
         Err(e) => {
             // `done` was moved into the commit; its partials are removed there on failure. What
             // can remain is a partial of a system that failed in `export_all`, which that
@@ -378,6 +397,7 @@ fn export_all(
         }
         ex.counts
             .push(("sealed-window rows dropped".to_string(), eram_sealed));
+        done.eram_sealed = eram_sealed;
         let mut f = ex.finish()?;
         f.report.inputs = inputs;
         f.report.details = eram_details(&info);

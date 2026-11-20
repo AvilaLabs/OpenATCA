@@ -144,6 +144,7 @@ impl Recorder {
         format: Format,
     ) -> io::Result<Recorder> {
         let opener: Opener = Box::new(|path: &Path| {
+            // seal-allow: creates a recording file (create_new); reads nothing
             let f: File = OpenOptions::new().write(true).create_new(true).open(path)?;
             Ok(Box::new(f) as Box<dyn Write + Send>)
         });

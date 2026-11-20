@@ -226,6 +226,7 @@ fn child(o: &Opts, n: usize) -> Result<Kv, String> {
     o.no_early_stop = o.no_early_stop || o.cmd == "overload";
     let o = &o;
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // seal-allow: starts this binary again on a synthetic load; it reads no input data
     let st = Command::new(exe)
         .arg("one")
         .args(["--n", &n.to_string()])

@@ -949,7 +949,7 @@ fn only_dependencies_are_the_in_workspace_csv_and_sealed_guard_crates() {
         .lines()
         .skip(1)
         .take_while(|l| !l.trim_start().starts_with('['))
-        .filter(|l| !l.trim().is_empty())
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .collect();
     // oa-sealed opens the input (OA-SEAL-013); it has no dependencies of its own.
     assert_eq!(deps.len(), 2, "{deps:?}");

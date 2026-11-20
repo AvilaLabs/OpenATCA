@@ -10,6 +10,7 @@ authors.workspace = true
 workspace = true
 
 [dev-dependencies]
+# Workspace crate, not an outside dependency (RULESET F1): the sealed hold-out guard, so the tests read their inputs through it.
 oa-sealed = { path = "../oa-sealed" }
 # Workspace crate only, not an outside dependency (RULESET F1): the test that builds a
 # CAT021 record from a real oa-adsb row.

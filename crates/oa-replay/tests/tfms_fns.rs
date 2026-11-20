@@ -1831,3 +1831,19 @@ fn a_local_format_cancellation_removes_the_notam_of_its_own_location_only() {
     assert!(fns_slot_of(&p.fns, &key("!QQB", 42)).is_none());
     assert!(fns_slot_of(&p.fns, &key("!QQB", 44)).is_some());
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_notam_issued_in_a_sealed_window_is_dropped_and_counted() {
+    let mut p = new_pipeline(PipelineConfig::default()).unwrap();
+    // 2026-11-20T00:00:00Z is the first instant of the window; the frame was received before it.
+    let from_ns: i64 = 1_795_132_800_000_000_000;
+    let mut inside = nt("A", 1);
+    inside.issued = "2026-11-20T00:00:00.000Z";
+    let mut before = nt("A", 2);
+    before.issued = "2026-11-19T23:59:59.999Z";
+    feed(&mut p, FeedKind::Fns, from_ns - 1, &notam(&inside));
+    feed(&mut p, FeedKind::Fns, from_ns - 1, &notam(&before));
+    assert_eq!(p.sealed_window_dropped, 1);
+    assert_eq!(p.rows_seen[FeedKind::Fns as usize], 1);
+}

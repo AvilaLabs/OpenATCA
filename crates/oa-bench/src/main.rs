@@ -264,11 +264,6 @@ struct RecordedOpts {
 /// report.
 fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), String> {
     let loaded = load(feeds).map_err(|e| e.to_string())?;
-    // Frames (by receive time) and records (by their own time) of the message feeds.
-    eprintln!(
-        "sealed-window rows dropped: {}",
-        loaded.sealed_window_dropped
-    );
     let clip = load_adsb(&o.clip).map_err(|e| e.to_string())?;
     let mut tcfg = config_with(o.bracket_s, o.max_sigma_m);
     tcfg.loo = !o.no_loo;
@@ -334,11 +329,14 @@ fn recorded(feeds: &[FeedInput], o: &RecordedOpts, out: &Path) -> Result<(), Str
     let mut notes = loaded.notes.clone();
     // Wall-clock time goes to stderr only: the report must be the same bytes on every run.
     eprintln!("truth built in {truth_secs:.2} s");
+    // Once, after the last read: the message feeds' frames (by receive time) and records (by their
+    // own time), and the clip's rows, each input counted once.
+    let sealed_total = loaded.sealed_window_dropped + clip.sealed_window_dropped;
     notes.push(format!(
-        "sealed-window rows dropped: {}",
-        clip.sealed_window_dropped
+        "sealed-window rows dropped: {sealed_total} (message feeds {}, ADS-B clip {})",
+        loaded.sealed_window_dropped, clip.sealed_window_dropped
     ));
-    eprintln!("sealed-window rows dropped: {}", clip.sealed_window_dropped);
+    eprintln!("sealed-window rows dropped: {sealed_total}");
     notes.push(format!(
         "truth: ADS-B clip, {} reports decoded, {} frames refused, {} records dropped",
         clip.reports.icao.len(),

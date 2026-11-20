@@ -139,6 +139,7 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
     let mut obs: Vec<AdsbObs> = Vec::new();
     let mut dropped = 0usize;
     let mut scanned = 0usize;
+    let mut sealed = 0u64;
     for (key, parts) in day_groups(&raw.join("adsblol")) {
         let Some(d0) = day_start(&key) else {
             println!("  {key}: day not readable from the name; skipped");
@@ -165,16 +166,19 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             Ok(())
         });
         match res {
-            Ok(r) => println!(
-                "  {key}: {} traces read, {} refused, {} rows kept in box and window{}",
-                r.stats.traces_read,
-                r.stats.traces_refused,
-                r.stats.kept,
-                match r.end {
-                    ScanEnd::Complete => "",
-                    ScanEnd::Truncated(_) => " (archive ended early)",
-                }
-            ),
+            Ok(r) => {
+                sealed += r.stats.sealed_window_dropped;
+                println!(
+                    "  {key}: {} traces read, {} refused, {} rows kept in box and window{}",
+                    r.stats.traces_read,
+                    r.stats.traces_refused,
+                    r.stats.kept,
+                    match r.end {
+                        ScanEnd::Complete => "",
+                        ScanEnd::Truncated(_) => " (archive ended early)",
+                    }
+                )
+            }
             Err(ScanError::Tar(e)) => {
                 eprintln!("oa-wind-check adsb: {key}: {e}");
                 return ExitCode::FAILURE;
@@ -185,6 +189,8 @@ pub fn run(root: &Path, args: &[String]) -> ExitCode {
             }
         }
     }
+    // After the last archive read: trace rows in a sealed window, left out of the comparison.
+    println!("sealed-window rows dropped: {sealed}");
     if scanned == 0 || obs.is_empty() {
         println!(
             "ADS-B vs RAP: no adsb.lol day overlaps the RAP hours (or none has a wind or temperature in them); nothing to compare. The comparison runs when an archive for a day the RAP files cover is in raw/adsblol."

@@ -800,7 +800,8 @@ fn run_realtime_inner(
     phases.mark("start");
     let (load_wall, cpu_start) = (Instant::now(), cpu_ns());
     let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
-    eprintln!("{}", oa_sealed::window_drop_line());
+    // The only read of the clip: its own count, once.
+    eprintln!("{}", oa_sealed::drop_line(clip.sealed_window_dropped));
     let (clip_reports, clip_bad) = (reports_len(&clip.reports), clip.bad_frames);
     if clip_reports == 0 {
         return Err(format!(
@@ -1101,7 +1102,9 @@ fn run(
     let mut phases = Phases::default();
     phases.mark("start");
     let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
-    eprintln!("{}", oa_sealed::window_drop_line());
+    // The count of the clip read, printed once after the last read (the latency replay below
+    // reads the same file again and drops the same frames; they are not counted twice).
+    let clip_sealed = clip.sealed_window_dropped;
     phases.mark("clip decoded (all reports in memory)");
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
@@ -1160,6 +1163,7 @@ fn run(
         }
         Err(e) => return Err(format!("latency replay: {e}")),
     };
+    eprintln!("{}", oa_sealed::drop_line(clip_sealed));
     phases.mark("latency replay (frames to output)");
     if !score_it {
         let mut perf = Perf {

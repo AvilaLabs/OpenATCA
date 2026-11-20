@@ -52,7 +52,7 @@ use crate::rows::{
     NS_PER_S,
 };
 use crate::store::{store_add, store_finish};
-use oa_adsb::{decode_payload_lenient, reports_len, Reports};
+use oa_adsb::{decode_payload_lenient, reports_clear, reports_len, Reports};
 use oa_display::cli::{parse_centre, parse_size};
 use oa_display::project::{MAX_RANGE_NM, MIN_RANGE_NM};
 use oa_display::raster::frame_digest;
@@ -513,6 +513,9 @@ pub struct TrackSummary {
     pub frames_outside_window: u64,
     /// LOSS: frames the reader refused, and a partial frame at the end.
     pub damaged_frames: u64,
+    /// Frames received in a sealed window and rows timed in one, dropped and counted
+    /// (OA-SEAL-014); not a loss.
+    pub sealed_window_dropped: u64,
     /// LOSS: payloads in the window that could not be decoded at all.
     pub undecodable_payloads: u64,
     /// LOSS: reject frames in the window: messages the bridge refused to frame, so input that
@@ -560,7 +563,15 @@ pub fn track_window(
     let mut dec = DecodeTotals::default();
     let (mut outside, mut undecodable) = (0u64, 0u64);
     let (mut rejects, mut statuses) = (0u64, 0u64);
+    let mut sealed = 0u64;
+    let mut scratch_rows = Reports::default();
     let damaged = oa_feed::read_frames(&mut file, &mut |fr| {
+        // A frame received in a sealed window is dropped and counted, never decoded.
+        if oa_sealed::in_sealed_window(fr.recv_unix_ns) {
+            sealed += 1;
+            oa_sealed::note_window_drops(1);
+            return;
+        }
         if !(from_ns..=to_ns).contains(&fr.recv_unix_ns) {
             outside += 1;
             return;
@@ -581,8 +592,11 @@ pub fn track_window(
             window_full = true;
             return;
         }
-        match decode_payload_lenient(fr.payload, &mut reports) {
+        reports_clear(&mut scratch_rows);
+        match decode_payload_lenient(fr.payload, &mut scratch_rows) {
             Ok(c) => {
+                // A row timed in a sealed window is dropped even when its frame was not.
+                sealed += oa_adsb::reports_extend_unsealed(&mut reports, &scratch_rows);
                 dec.records += c.records as u64;
                 dec.kept += c.kept as u64;
                 dec.dropped += c.dropped as u64;
@@ -611,6 +625,7 @@ pub fn track_window(
     sum.reports = n;
     sum.frames_outside_window = outside;
     sum.damaged_frames = damaged;
+    sum.sealed_window_dropped = sealed;
     sum.undecodable_payloads = undecodable;
     sum.reject_frames = rejects;
     sum.status_frames = statuses;
@@ -676,6 +691,7 @@ fn is_ours(name: &str) -> bool {
 /// Creates a new file, failing if the name exists in any form (a symlink included, never
 /// followed).
 fn create_new(path: &Path) -> Result<std::fs::File, CliError> {
+    // seal-allow: creates the tool's own output file (create_new); reads nothing
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -868,6 +884,8 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         a.start_ns.checked_sub(history_ns).ok_or_else(overflow)?,
     )?;
     let track_time = t0.elapsed();
+    // After the last read of the clip; frames by receive time plus rows by their own time.
+    eprintln!("sealed-window rows dropped: {}", tr.sealed_window_dropped);
 
     let cfg = ReplayConfig {
         centre_lat_e7: a.centre_lat_e7,
@@ -943,9 +961,9 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     );
     let _ = writeln!(
         out,
-        "clip     {} payload records read in the window: {} kept, {} dropped as invalid ({} with a bad time), {} of unknown source, {} with a bad measurement; {} clip frames outside the window; in the window {} reject frames (input the bridge refused: loss), {} status frames (not loss), {} damaged frames and {} undecodable payloads (loss)",
+        "clip     {} payload records read in the window: {} kept, {} dropped as invalid ({} with a bad time), {} of unknown source, {} with a bad measurement; {} clip frames outside the window; {} frames and rows in a sealed window dropped (OA-SEAL-014); in the window {} reject frames (input the bridge refused: loss), {} status frames (not loss), {} damaged frames and {} undecodable payloads (loss)",
         dc.records, dc.kept, dc.dropped, dc.bad_time, dc.unknown_source, dc.bad_measurement,
-        tr.frames_outside_window, tr.reject_frames, tr.status_frames, tr.damaged_frames,
+        tr.frames_outside_window, tr.sealed_window_dropped, tr.reject_frames, tr.status_frames, tr.damaged_frames,
         tr.undecodable_payloads
     );
     let _ = writeln!(

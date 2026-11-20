@@ -19,6 +19,7 @@ import calendar
 import functools
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -201,11 +202,15 @@ class Guard:
     def walk_unsealed(self, root: str | os.PathLike):
         """(files, skipped): the unsealed files below `root`, sorted; a directory or file the
         guard refuses is skipped and counted, never descended into (a directory that only holds a
-        sealed entry, such as the data root or raw/adsblol, is walked). `root` itself refused raises
-        SealedError."""
+        sealed entry, such as the data root or raw/adsblol, is walked); a directory already visited
+        (a link back) is skipped and counted. `root` itself refused raises SealedError; a missing
+        root raises OSError, and nesting deeper than MAX_WALK_DEPTH raises SealedError. The files
+        are sorted bytewise by the string form of the path."""
         self.check(root, True)
+        os.stat(root)
         files: list[str] = []
         skipped = 0
+        visited: set[str] = set()
 
         def walk(d: str, depth: int) -> None:
             nonlocal skipped
@@ -213,7 +218,14 @@ class Guard:
                 files.append(d)
                 return
             if depth > MAX_WALK_DEPTH:
+                raise SealedError(
+                    f"{d}: directories nested deeper than {MAX_WALK_DEPTH}; the walk stops with an error, not silently"
+                )
+            real = os.path.realpath(d)
+            if real in visited:
+                skipped += 1
                 return
+            visited.add(real)
             for name in sorted(os.listdir(d)):
                 p = os.path.join(d, name)
                 try:
@@ -224,7 +236,7 @@ class Guard:
                 walk(p, depth + 1)
 
         walk(os.fspath(root), 0)
-        return sorted(files), skipped
+        return sorted(files, key=os.fsencode), skipped
 
     def check(self, path: str | os.PathLike, walking: bool = False) -> None:
         """Raises SealedError if `path` is, is inside, resolves into, or holds a sealed entry.
@@ -277,6 +289,11 @@ class Guard:
                 real = os.readlink(f"/proc/self/fd/{fd}")
             except OSError:
                 real = None
+            st = os.fstat(fd)
+            if stat.S_ISREG(st.st_mode) and st.st_nlink > 1:
+                raise SealedError(
+                    f"{path}: refused by OA-SEAL-002: the file has {st.st_nlink} hard links, so its other names could be sealed data under a neutral name; copy it instead"
+                )
             if real is not None:
                 self._check_resolved(os.fspath(path) if not isinstance(path, bytes) else os.fsdecode(path), real)
             return open(fd, mode, closefd=True, **kw)

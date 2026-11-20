@@ -39,12 +39,13 @@ class SealedGuardTests(unittest.TestCase):
     # REQ: OA-SEAL-001
     def test_the_list_parses_to_the_sealed_entries(self):
         root, entries, windows = sealed_guard.parse_list(sealed_guard.LIST_PATH.read_text())
-        self.assertEqual([e[0] for e in entries], [
-            "scds/rec-20261119/day2*", "scds/rec-20261119/day3*", "scds/rec-20261119/day4*",
-            "scds/rec-20261119/runs*", "scds/stdds-20261119-holdout*", "scds/stdds-smoke-20261119*",
-            "raw/adsblol/2026.11.20*", "raw/adsblol/2026.11.21*", "raw/adsblol/2026.11.22*",
-            "raw/adsblol/v2026.11.20*", "raw/adsblol/v2026.11.21*", "raw/adsblol/v2026.11.22*",
-            "derived/*2026.11.20*", "derived/*2026.11.21*", "derived/*2026.11.22*"])
+        want = ["scds/rec-20261119/day2*", "scds/rec-20261119/day3*", "scds/rec-20261119/day4*",
+                "scds/rec-20261119/runs*", "scds/stdds-20261119-holdout*", "scds/stdds-smoke-20261119*"]
+        for d in ("raw/adsblol", "scds", "derived"):
+            for form in ("2026.11.2", "2026-11-2", "2026_11_2", "2026112"):
+                for n in "012":
+                    want.append(f"{d}/*{form}{n}*")
+        self.assertEqual([e[0] for e in entries], want)
         self.assertEqual([w[0] for w in windows], ["2026-11-20T00:00:00Z 2026-11-23T00:17:00Z"])
         for bad in ("", "root /d\n", "seal a/b\n", "root /d\nseal a/../b\n", "root d\nseal a\n",
                     "root /d\nseal *\n", "root /d\nfoo bar\n", "root /d\nseal **\n", "root /d\nseal a/*x\n",
@@ -76,13 +77,57 @@ class SealedGuardTests(unittest.TestCase):
                   "/data/raw/adsblol/v2026.11.22-planes-readsb-prod-0.tar.aa", "/data/raw/adsblol/2026.11.21.bak",
                   "/data/derived/adsb/zau-2026.11.21-1s.oaf", "/data/derived/zau-2026.11.20.oaf",
                   "/data/derived/adsb/2026.11.22/zau.oaf", "/data/scds/stdds-20261119-holdout.tar",
-                  "/data/scds/stdds-20261119-holdout.bak", "/data/scds/stdds-20261119-holdout-copy/x"):
+                  "/data/scds/stdds-20261119-holdout.bak", "/data/scds/stdds-20261119-holdout-copy/x",
+                  "/data/raw/adsblol/dev/2026.11.21/x.oaf", "/data/raw/adsblol/zau-2026.11.20.tar",
+                  "/data/raw/adsblol/zau-2026-11-21.tar", "/data/raw/adsblol/zau_2026_11_22.tar",
+                  "/data/scds/day-20261120", "/data/scds/rec-20261120", "/data/scds/a/b/c/2026-11-22",
+                  "/data/derived/zau-20261121.oaf"):
             self.refused(p)
         for p in ("/data/raw/adsblol/2026.11.24", "/data/raw/adsblol/2026.11.19/x.oaf",
                   "/data/raw/adsblol/v2026.11.24-planes-readsb-prod-0.tar.aa", "/data/raw/adsblol", "/data/derived",
                   "/data/derived/adsb", "/data/derived/adsb/zau-2026.11.14.oaf", "/data/derived/adsb/zau-2026.11.2.oaf",
-                  "/data/scds/stdds-20261119", "/data/scds/stdds-2026111"):
+                  "/data/scds/stdds-20261119", "/data/scds/stdds-2026111",
+                  "/data/scds/day-20261124", "/data/scds/rec-20261119/day1", "/data/raw/adsblol/2026.11.14",
+                  "/data/raw/rap/rap.20261120.t00z.grib2", "/data/raw/awc/2026-11-21.json"):
             self.g.check(p)
+
+    # REQ: OA-SEAL-012
+    def test_walk_unsealed_links_back_depth_missing_root_and_order(self):
+        w = self.root / "work"
+        (w / "a").mkdir(parents=True)
+        (w / "a/f.bin").write_bytes(b"x")
+        os.symlink(w, w / "a/self")
+        files, skipped = self.g.walk_unsealed(w)
+        self.assertEqual((len(files), skipped), (1, 1))
+        os.symlink(w, w / "a/self2")
+        files, skipped = self.g.walk_unsealed(w)
+        self.assertEqual((len(files), skipped), (1, 2))
+        deep = self.root / "deep"
+        for _ in range(70):
+            deep = deep / "d"
+        deep.mkdir(parents=True)
+        (deep / "f").write_bytes(b"x")
+        with self.assertRaises(sealed_guard.SealedError):
+            self.g.walk_unsealed(self.root / "deep")
+        with self.assertRaises(OSError):
+            self.g.walk_unsealed(self.root / "nothing-here")
+        s = self.root / "sorted"
+        (s / "a").mkdir(parents=True)
+        (s / "a/b").write_bytes(b"x")
+        (s / "a.b").write_bytes(b"x")
+        files, _ = self.g.walk_unsealed(s)
+        self.assertEqual([os.path.relpath(f, s) for f in files], ["a.b", "a/b"])
+
+    # REQ: OA-SEAL-002, OA-SEAL-007
+    def test_a_file_with_a_second_hard_link_is_refused_when_opened(self):
+        sealed = self.root / "scds/rec-20261119/day2/sfdps/a.bin"
+        neutral = self.root / "derived-copy.bin"
+        os.link(sealed, neutral)
+        with self.assertRaises(sealed_guard.SealedError):
+            self.g.open(neutral, "rb")
+        one = self.root / "one.bin"
+        one.write_bytes(b"x")
+        self.g.open(one, "rb").close()
 
     # REQ: OA-SEAL-011, OA-SEAL-001
     def test_the_window_is_half_open_and_parses_like_the_rust_one(self):

@@ -76,3 +76,33 @@ fn a_row_timed_in_a_window_is_not_applied_though_its_frame_was_received_before_i
     assert_eq!(p.sealed_window_dropped, 2);
     assert_eq!(p.rows_seen[Feed::Sfdps as usize], 2);
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn an_adsb_row_timed_in_a_window_is_not_applied_though_its_frame_was_received_before_it() {
+    let mut p = new_pipeline(PipelineConfig::default()).unwrap();
+    let mut r = oa_adsb::Reports::default();
+    for (k, t) in [FROM - 1, FROM, TO - 1, TO].into_iter().enumerate() {
+        let mut row = oa_adsb::ROW_EMPTY;
+        row.time_ns = t;
+        row.icao = 0xA00001 + k as u32;
+        row.lat_e7 = 410_000_000;
+        row.lon_e7 = -880_000_000;
+        row.nic = 8;
+        row.nac_p = 10;
+        row.sil = 3;
+        row.version = 2;
+        oa_adsb::reports_push(&mut r, &row);
+    }
+    let mut payload = Vec::new();
+    oa_adsb::encode_payload(&mut payload, &r, 0, 4).unwrap();
+    process_frame(
+        &mut p,
+        Feed::Adsb,
+        oa_feed::Kind::Message,
+        FROM - 1,
+        &payload,
+    );
+    assert_eq!(p.sealed_window_dropped, 2);
+    assert_eq!(p.rows_seen[Feed::Adsb as usize], 2);
+}

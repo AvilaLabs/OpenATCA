@@ -1290,6 +1290,7 @@ fn write_groups(
 fn git_state() -> GitState {
     let dir = env!("CARGO_MANIFEST_DIR");
     let git = |args: &[&str]| {
+        // seal-allow: git describes this source tree for the report; it reads no input data
         Command::new("git")
             .arg("-C")
             .arg(dir)
@@ -1336,7 +1337,7 @@ fn run(
 
     // Tracker on set A (as vs_eram).
     let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
-    eprintln!("{}", oa_sealed::window_drop_line());
+    let clip_sealed = clip.sealed_window_dropped;
     let clip_hash = clip.hash.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
@@ -1446,6 +1447,11 @@ fn run(
         &open,
     )
     .map_err(|e| e.to_string())?;
+    // After the last read: the clip's count and the SFDPS loader's, each input once.
+    eprintln!(
+        "{}",
+        oa_sealed::drop_line(clip_sealed + loaded.sealed_window_dropped)
+    );
     let sfdps_inputs: Vec<String> = loaded
         .inputs
         .iter()

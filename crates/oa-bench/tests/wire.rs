@@ -384,7 +384,7 @@ fn an_identifier_naming_two_places_is_ambiguous_not_the_first_row() {
     assert!(l.fix_all("NOPE").is_empty());
 }
 
-// REQ: OA-BENCH-033
+// REQ: OA-BENCH-033, OA-SEAL-014
 #[test]
 fn the_binary_scores_a_known_cross_track_error_end_to_end() {
     let (d, clip, sf) = fixture("e2e");
@@ -399,6 +399,13 @@ fn the_binary_scores_a_known_cross_track_error_end_to_end() {
     ];
     let o = run(&args);
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // The count line is printed once, after the last read (message feeds and clip together).
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(
+        err.matches("sealed-window rows dropped: 0").count(),
+        1,
+        "{err}"
+    );
     let csv = std::fs::read_to_string(out.join("report.csv")).unwrap();
     let txt = std::fs::read_to_string(out.join("report.txt")).unwrap();
     // 21 track messages, all associated by address and paired.

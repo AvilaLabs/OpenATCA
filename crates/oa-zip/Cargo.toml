@@ -10,6 +10,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
+# Workspace crate, not an outside dependency (RULESET F1): the sealed hold-out guard every input path is opened through.
 oa-sealed = { path = "../oa-sealed" }
 
 [package.metadata.openatca]

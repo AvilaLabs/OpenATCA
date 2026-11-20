@@ -426,7 +426,7 @@ fn run(args: Args) -> Result<(), String> {
         fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     }
     let clip = load_adsb(&args.clip).map_err(|e| e.to_string())?;
-    eprintln!("{}", oa_sealed::window_drop_line());
+    let clip_sealed = clip.sealed_window_dropped;
     let full_reports = reports_len(&clip.reports);
     let clip_hash = clip.hash.sha256.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);
@@ -443,6 +443,9 @@ fn run(args: Args) -> Result<(), String> {
     let built = adsb_truth::build(&set_b, &TRUTH_DEFAULT).map_err(|e| e.to_string())?;
     let truth_n = oa_truth::leg_count(&built.truth);
     let received = receive_times(&args.clip, &args.addresses)?;
+    // After the last read of the clip (receive_times reads it again and drops the same frames,
+    // which are not counted twice).
+    eprintln!("{}", oa_sealed::drop_line(clip_sealed));
     let mut raw_counts: BTreeMap<GroupKey, u64> = BTreeMap::new();
     let mut measurement_counts: BTreeMap<GroupKey, u64> = BTreeMap::new();
     let mut raw_rows = Vec::new();

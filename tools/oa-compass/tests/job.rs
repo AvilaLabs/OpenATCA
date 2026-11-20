@@ -25,7 +25,7 @@ use oa_compass::shell::adsb_export::AdsbExport;
 use oa_compass::shell::encode::MAX_POSITION_ERROR_E7;
 use oa_compass::shell::error::ExportError;
 use oa_compass::shell::export::{Layout, SystemExport};
-use oa_compass::shell::job::{run_job, EramSource, Job};
+use oa_compass::shell::job::{run_job, run_job_counted, EramSource, Job};
 use oa_compass::shell::notes::{ADSB_SOURCE, OPENATCA_SOURCE};
 use oa_compass::shell::run::{export_output, EramAddress, InputsMode, OpenatcaRows, TrackRunInfo};
 use oa_compass::shell::slice::Stage;
@@ -1343,4 +1343,22 @@ fn the_modified_flag_of_the_build_commit_follows_the_tracked_files_of_the_built_
             );
         }
     }
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_run_returns_the_sealed_window_count_summed_over_its_inputs_and_the_readme_says_it() {
+    let work = tmp("sealed-count");
+    let clip = write_clip(&work, 120);
+    let out = work.join("out");
+    let (_, sealed) = run_job_counted(
+        job(&out, Some(clip), true, false, OpenatcaRows::Ticks),
+        &mut |_| Ok(()),
+        &mut |_| {},
+    )
+    .unwrap();
+    // Nothing of this clip or of the ERAM table is in the window.
+    assert_eq!(sealed, 0);
+    let readme = std::fs::read_to_string(out.join("README.txt")).unwrap();
+    assert!(readme.contains("sealed-window rows dropped"), "{readme}");
 }

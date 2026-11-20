@@ -331,7 +331,7 @@ fn write_clip(path: &PathBuf, r: &Reports) {
     std::fs::write(path, &bytes).unwrap();
 }
 
-// REQ: OA-TRK-028
+// REQ: OA-TRK-028, OA-SEAL-014
 #[test]
 fn the_binary_writes_the_scored_report_deterministically_and_refuses_bad_usage() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
@@ -351,6 +351,13 @@ fn the_binary_writes_the_scored_report_deterministically_and_refuses_bad_usage()
             .output()
             .unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        // The count line is printed once, after the clip's last read.
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(
+            err.matches("sealed-window rows dropped: 0").count(),
+            1,
+            "{err}"
+        );
         let report = std::fs::read_to_string(out.join("report.txt")).unwrap();
         for needle in [
             "Tracker (oa-track), ADS-B only, scored on split reports",

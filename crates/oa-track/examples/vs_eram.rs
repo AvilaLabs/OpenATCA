@@ -225,7 +225,7 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path) -> Result<String, String>
 
     // Tracker on set A.
     let clip = load_adsb(clip_path).map_err(|e| e.to_string())?;
-    eprintln!("{}", oa_sealed::window_drop_line());
+    let clip_sealed = clip.sealed_window_dropped;
     let clip_hash = clip.hash.sha256.clone();
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
@@ -319,6 +319,11 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path) -> Result<String, String>
         &open,
     )
     .map_err(|e| e.to_string())?;
+    // After the last read: the clip's count and the SFDPS loader's, each input once.
+    eprintln!(
+        "{}",
+        oa_sealed::drop_line(clip_sealed + loaded.sealed_window_dropped)
+    );
     let leg = &loaded.legacy;
     let ix = build_th_index(&leg.th, leg.flights.gufi.len());
     let assoc = associate(leg, &ix, &truth, &tix, &rcfg.assoc);

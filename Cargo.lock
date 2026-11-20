@@ -143,6 +143,7 @@ dependencies = [
  "oa-adsb",
  "oa-bench",
  "oa-encounter",
+ "oa-feed",
  "oa-nasr",
  "oa-sealed",
  "oa-sha256",
@@ -328,6 +329,7 @@ version = "0.0.1"
 dependencies = [
  "oa-adsb",
  "oa-bench",
+ "oa-feed",
  "oa-math",
  "oa-replay",
  "oa-sealed",

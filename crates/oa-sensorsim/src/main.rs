@@ -22,7 +22,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use oa_asterix::SourceId;
-use oa_sensorsim::clip::read_clip;
+use oa_sensorsim::clip::read_clip_counted;
 use oa_sensorsim::geom::{FT_M, NM_M};
 use oa_sensorsim::plots::{plots_len, plots_row, to_cat048, NONE_ADDR, NONE_ALT, NONE_CODE};
 use oa_sensorsim::profile::{
@@ -93,8 +93,8 @@ fn run() -> Result<(), String> {
         .unwrap_or(1);
     let name = flag(&args, "--name").unwrap_or_else(|| name.to_string());
     let t_total = Instant::now();
-    let (reports, bad, dropped) = read_clip(clip)?;
-    println!("{}", oa_sealed::window_drop_line());
+    let (reports, bad, dropped, sealed) = read_clip_counted(clip)?;
+    println!("{}", oa_sealed::drop_line(sealed));
     println!(
         "clip: {} reports ({bad} frames not decoded, {dropped} records dropped)",
         oa_adsb::reports_len(&reports)

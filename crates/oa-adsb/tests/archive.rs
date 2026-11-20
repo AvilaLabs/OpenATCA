@@ -240,8 +240,25 @@ fn split_archive_gives_the_same_result_and_first_part_alone_is_truncated() {
     assert!(matches!(r, Err(ScanError::Sink(ref s)) if s == "disk full"));
 }
 
+/// A path under the target temp directory, with nothing at it or at its `.source` (the clip tool
+/// never replaces an existing output).
 fn tmp(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
+    let p = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_file(&p);
+    let _ = std::fs::remove_file(format!("{}.source", p.display()));
+    p
+}
+
+/// Runs the clip tool; an existing output named by `--out` and its sidecar are removed first (the
+/// tool never replaces them).
+fn clip_cmd(exe: &str, args: &[&str]) -> std::process::Output {
+    if let Some(i) = args.iter().position(|a| *a == "--out") {
+        if let Some(o) = args.get(i + 1).filter(|o| **o != "-") {
+            let _ = std::fs::remove_file(o);
+            let _ = std::fs::remove_file(format!("{o}.source"));
+        }
+    }
+    Command::new(exe).args(args).output().unwrap()
 }
 
 fn read_frames(path: &PathBuf) -> (Vec<u8>, Reports, usize) {
@@ -277,7 +294,7 @@ fn clip_binary_writes_time_sorted_oaf_frames_and_reports_truncation() {
     std::fs::write(&b, &d.tar[cut..]).unwrap();
     let out = tmp("clip.oaf");
     let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
-    let run = |args: &[&str]| Command::new(exe).args(args).output().unwrap();
+    let run = |args: &[&str]| clip_cmd(exe, args);
     let (sa, sb, so) = (
         a.to_str().unwrap(),
         b.to_str().unwrap(),
@@ -373,7 +390,7 @@ fn clip_frames_split_by_report_time_and_keep_every_report_once_in_order() {
         let mut a = vec!["--out", so];
         a.extend_from_slice(extra);
         a.push(&tar);
-        let o = Command::new(exe).args(&a).output().unwrap();
+        let o = clip_cmd(exe, &a);
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
         read_frames(&out)
     };
@@ -427,7 +444,7 @@ fn clip_refuses_a_frame_span_outside_1_to_60000_ms() {
         a.extend_from_slice(bad);
         a.push(&tar);
         // `--frame-ms` last in the list takes the part as its value and then has no parts.
-        let o = Command::new(exe).args(&a).output().unwrap();
+        let o = clip_cmd(exe, &a);
         assert_eq!(o.status.code(), Some(2), "{bad:?}");
         assert!(
             String::from_utf8_lossy(&o.stderr).contains("usage"),
@@ -435,10 +452,7 @@ fn clip_refuses_a_frame_span_outside_1_to_60000_ms() {
         );
     }
     for ok in ["1", "60000"] {
-        let o = Command::new(exe)
-            .args(["--out", so, "--frame-ms", ok, &tar])
-            .output()
-            .unwrap();
+        let o = clip_cmd(exe, &["--out", so, "--frame-ms", ok, &tar]);
         assert!(o.status.success(), "{ok}");
     }
 }
@@ -540,7 +554,7 @@ fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwis
     // The window starts at 2026-11-20T00:00:00Z = 1795132800 s.
     const FROM: i64 = 1_795_132_800;
     let exe = env!("CARGO_BIN_EXE_oa-adsb-clip");
-    let run = |args: &[&str]| Command::new(exe).args(args).output().unwrap();
+    let run = |args: &[&str]| clip_cmd(exe, args);
     // Rows at from-1 s, from and from+1 s: refused, exit 2, nothing written, the count printed.
     let tar = trace_tar_at("seal-edge.tar", FROM - 1, 3);
     let out = tmp("seal-edge.oaf");
@@ -587,6 +601,22 @@ fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwis
     ] {
         assert!(text.contains(k), "{k} {text}");
     }
+    // An existing output or sidecar is refused and left as it was.
+    let o = Command::new(exe)
+        .args([
+            "--out",
+            out.to_str().unwrap(),
+            "--to",
+            &FROM.to_string(),
+            &tar,
+        ])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("exists"));
+    assert_eq!(std::fs::read_to_string(&side).unwrap(), text);
+    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&side);
     // A report at the window end (to = 2026-11-23T00:17:00Z = 1795393020 s) is not sealed.
     let tar = trace_tar_at("seal-after.tar", 1_795_393_020, 1);
     let o = run(&["--out", out.to_str().unwrap(), &tar]);
@@ -594,4 +624,21 @@ fn clip_refuses_a_report_in_a_sealed_window_and_writes_a_source_sidecar_otherwis
     // Standard output has no sidecar.
     let o = run(&["--out", "-", &tar]);
     assert!(o.status.success());
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_archive_reader_drops_and_counts_trace_rows_in_a_sealed_window() {
+    // The window starts at 2026-11-20T00:00:00Z = 1795132800 s; rows at from-1 s, from, from+1 s.
+    const FROM: i64 = 1_795_132_800;
+    let tar = trace_tar_at("seal-scan.tar", FROM - 1, 3);
+    let f = Filter {
+        from_ns: i64::MIN,
+        to_ns: i64::MAX,
+        ..ZAU_BOX
+    };
+    let (res, calls) = scan(vec![Cursor::new(std::fs::read(&tar).unwrap())], &f);
+    assert_eq!(res.stats.sealed_window_dropped, 2);
+    assert_eq!(res.stats.kept, 1);
+    assert_eq!(calls, [(0xaaaaaa, 1)]);
 }

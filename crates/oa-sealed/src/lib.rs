@@ -31,6 +31,7 @@
 //!
 //! Requirements: OA-SEAL-001 and the following, in REQUIREMENTS.md.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File};
 use std::io;
@@ -309,8 +310,9 @@ impl std::error::Error for Refusal {}
 /// A deepest directory nesting [`Sealed::walk_unsealed`] descends to.
 const MAX_WALK_DEPTH: usize = 64;
 
-/// What [`Sealed::walk_unsealed`] found: the unsealed files, sorted, and the count of sealed
-/// entries (files or directories) that were skipped.
+/// What [`Sealed::walk_unsealed`] found: the unsealed files, sorted bytewise by the string form of
+/// the path, and the count of entries (files or directories) skipped: sealed ones, and
+/// directories already visited (a link back to a directory the walk is in or has been in).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Walk {
     pub files: Vec<PathBuf>,
@@ -476,28 +478,51 @@ impl Sealed {
     /// being refused is an error (the caller names the path). A name that is a file is returned
     /// as the only file.
     pub fn walk_unsealed(&self, root: &Path) -> io::Result<Walk> {
+        use std::os::unix::ffi::OsStrExt;
         self.check_with(root, true)
             .map_err(|r| io::Error::other(r.why))?;
+        // A root that does not exist is an error, not an empty walk.
+        fs::metadata(root)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", root.display())))?;
         let mut walk = Walk::default();
-        self.walk_into(root, 0, &mut walk)?;
-        walk.files.sort();
+        let mut visited = BTreeSet::new();
+        self.walk_into(root, 0, &mut walk, &mut visited)?;
+        walk.files
+            .sort_by(|a, b| a.as_os_str().as_bytes().cmp(b.as_os_str().as_bytes()));
         Ok(walk)
     }
 
-    fn walk_into(&self, dir: &Path, depth: usize, walk: &mut Walk) -> io::Result<()> {
+    fn walk_into(
+        &self,
+        dir: &Path,
+        depth: usize,
+        walk: &mut Walk,
+        visited: &mut BTreeSet<PathBuf>,
+    ) -> io::Result<()> {
         if !dir.is_dir() {
             walk.files.push(dir.to_path_buf());
             return Ok(());
         }
         if depth > MAX_WALK_DEPTH {
+            return Err(io::Error::other(format!(
+                "{}: directories nested deeper than {MAX_WALK_DEPTH}; the walk stops with an error, not silently",
+                dir.display()
+            )));
+        }
+        // Each canonical directory is walked once, so a link back to a directory already seen is
+        // skipped and counted rather than followed round again.
+        let real = fs::canonicalize(dir)?;
+        if !visited.insert(real) {
+            walk.skipped += 1;
             return Ok(());
         }
+        // seal-allow: the guard's own walk; every entry is checked below before it is used
         for e in fs::read_dir(dir)? {
             let p = e?.path();
             if self.check_with(&p, true).is_err() {
                 walk.skipped += 1;
             } else if p.is_dir() {
-                self.walk_into(&p, depth + 1, walk)?;
+                self.walk_into(&p, depth + 1, walk, visited)?;
             } else {
                 walk.files.push(p);
             }
@@ -510,6 +535,7 @@ impl Sealed {
     /// no path (the caller names the path).
     pub fn open(&self, path: &Path) -> io::Result<File> {
         self.check(path).map_err(|r| io::Error::other(r.why))?;
+        // seal-allow: the guard's own opener; the path was checked above and the file is verified below
         let file = File::open(path)?;
         self.verify_open(path, &file)?;
         Ok(file)
@@ -519,6 +545,18 @@ impl Sealed {
     /// without `/proc/self/fd` skips this (the check before the open stands).
     pub fn verify_open(&self, path: &Path, file: &File) -> io::Result<()> {
         use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        // A regular file with more than one name is refused: a hard link under a neutral name
+        // to a sealed file would pass the name check, and the real path of the descriptor is
+        // only one of its names.
+        if let Ok(m) = file.metadata() {
+            if m.is_file() && m.nlink() > 1 {
+                return Err(io::Error::other(format!(
+                    "refused by OA-SEAL-002: the file has {} hard links, so its other names could be sealed data under a neutral name; copy it instead",
+                    m.nlink()
+                )));
+            }
+        }
         let link = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
         if let Ok(real) = fs::read_link(&link) {
             self.check_resolved(path, &real, false)
@@ -587,13 +625,21 @@ pub fn note_window_drops(n: u64) {
     WINDOW_DROPPED.fetch_add(n, Ordering::Relaxed);
 }
 
-/// The process-wide count of rows or frames dropped in a sealed window so far.
+/// The process-wide count of rows or frames dropped in a sealed window so far. A cross-check for
+/// tests only: a tool prints the sum of its readers' own counts ([`drop_line`]), so an input
+/// read twice is counted once.
 pub fn window_dropped_total() -> u64 {
     WINDOW_DROPPED.load(Ordering::Relaxed)
 }
 
-/// The line every tool that reads rows prints, also with a count of 0:
-/// `sealed-window rows dropped: N`.
+/// The line every tool that reads rows prints once, after its last read, also with a count of 0:
+/// `sealed-window rows dropped: N`, `n` being the sum of the per-reader counts (each input
+/// counted once).
+pub fn drop_line(n: u64) -> String {
+    format!("sealed-window rows dropped: {n}")
+}
+
+/// The line for the process-wide count (see [`window_dropped_total`]): a cross-check for tests.
 pub fn window_drop_line() -> String {
     format!("sealed-window rows dropped: {}", window_dropped_total())
 }
@@ -611,7 +657,7 @@ mod tests {
     #[test]
     fn the_compiled_in_list_parses() {
         let l = parse_list(LIST).unwrap();
-        assert_eq!(l.entries.len(), 15);
+        assert_eq!(l.entries.len(), 42);
         assert_eq!(l.windows.len(), 1);
     }
 }

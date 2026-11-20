@@ -146,6 +146,7 @@ pub fn load_eram(
     args: &Args,
     open: &Opener,
     header: &mut Vec<String>,
+    sealed: &mut u64,
 ) -> Result<Vec<EramFlight>, String> {
     let loaded = load_with(
         &[FeedInput {
@@ -155,18 +156,9 @@ pub fn load_eram(
         open,
     )
     .map_err(|e| format!("{}: {e}", args.sfdps_dir.display()))?;
-    header.push(format!(
-        "sealed-window rows dropped: {}",
-        loaded.sealed_window_dropped
-    ));
-    header.push(
-        "  (the line above counts SFDPS frames by receive time and records by their own time)"
-            .to_string(),
-    );
-    eprintln!(
-        "sealed-window rows dropped: {}",
-        loaded.sealed_window_dropped
-    );
+    // SFDPS frames (by receive time) and records (by their own time) left out for a sealed
+    // window; the caller prints the one line after its last read.
+    *sealed += loaded.sealed_window_dropped;
     for i in &loaded.inputs {
         header.push(format!(
             "SFDPS input: {} files, {} bytes, sha256 {}",
@@ -256,11 +248,7 @@ pub fn run(args: &Args) -> Result<String, String> {
     let clip =
         load_adsb_with(&args.adsb, &open).map_err(|e| format!("{}: {e}", args.adsb.display()))?;
     header.push(format!("ADS-B clip sha256 {}", clip.hash.sha256));
-    header.push(format!(
-        "sealed-window rows dropped: {}",
-        clip.sealed_window_dropped
-    ));
-    eprintln!("sealed-window rows dropped: {}", clip.sealed_window_dropped);
+    let mut sealed = clip.sealed_window_dropped;
     let (set_a, set_b, split) = split_reports(&clip.reports);
     oa_bench::split_check::check_split(&set_a, &set_b)
         .map_err(|v| format!("split refused: {v:?}"))?;
@@ -322,7 +310,15 @@ pub fn run(args: &Args) -> Result<String, String> {
         .collect();
 
     // ERAM: the SFDPS track positions in the box.
-    let mut eram = load_eram(args, &open, &mut header)?;
+    let mut eram = load_eram(args, &open, &mut header, &mut sealed)?;
+    // After the last read: the clip's count and the SFDPS loader's, each input once; the line is
+    // in the summary header and on standard error.
+    header.push(oa_sealed::drop_line(sealed));
+    header.push(
+        "  (the line above counts ADS-B rows and SFDPS frames by receive time and records by their own time)"
+            .to_string(),
+    );
+    eprintln!("{}", oa_sealed::drop_line(sealed));
     // The recorded extents inside the box (the clip is boxed, so only those are comparable).
     let eram_extent = extent(eram.iter().flat_map(|f| f.samples.iter().map(|s| s.t_ms)));
     let oa_extent = extent(
@@ -467,16 +463,21 @@ pub fn run_screen(args: &Args) -> Result<String, String> {
         .map_err(|e| format!("{}: {e}", args.sfdps_dir.display()))?;
     fs::create_dir_all(&args.out).map_err(|e| format!("{}: {e}", args.out.display()))?;
     let mut header: Vec<String> = Vec::new();
-    let mut eram = load_eram(args, &open, &mut header)?;
+    let mut sealed = 0u64;
+    let mut eram = load_eram(args, &open, &mut header, &mut sealed)?;
     let wanted: BTreeSet<u32> = eram.iter().filter_map(|f| f.addr).collect();
     let clip =
         load_adsb_with(&args.adsb, &open).map_err(|e| format!("{}: {e}", args.adsb.display()))?;
     header.push(format!("ADS-B clip sha256 {}", clip.hash.sha256));
-    header.push(format!(
-        "sealed-window rows dropped: {}",
-        clip.sealed_window_dropped
-    ));
-    eprintln!("sealed-window rows dropped: {}", clip.sealed_window_dropped);
+    // After the last read: the SFDPS loader's count and the clip's, each input once; the line is
+    // in the summary header and on standard error.
+    sealed += clip.sealed_window_dropped;
+    header.push(oa_sealed::drop_line(sealed));
+    header.push(
+        "  (the line above counts ADS-B rows and SFDPS frames by receive time and records by their own time)"
+            .to_string(),
+    );
+    eprintln!("{}", oa_sealed::drop_line(sealed));
     let raw = raw_reports(&clip.reports, &wanted);
     // The smoother, as the scorer builds it (default settings), over every report of the clip.
     let built =

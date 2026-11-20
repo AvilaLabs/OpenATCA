@@ -15,7 +15,6 @@
 //! `--allow-truncated` is given (the frames written are still valid). A summary goes to
 //! standard error; standard output carries frames only, and only with `--out -`.
 
-use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::process::ExitCode;
 
@@ -71,7 +70,7 @@ fn reorder(src: &Reports, ix: &[u32]) -> Reports {
 
 /// Writes `<out>.source` next to the clip: each input path and its SHA-256, the window
 /// (`--from`, `--to`; `none` when open) and the counts.
-fn write_source(a: &Args, st: &oa_adsb::Stats, frames: u64) -> Result<(), String> {
+fn write_source(a: &Args, st: &oa_adsb::Stats, frames: u64, path: &str) -> Result<(), String> {
     let mut text = String::from("oa-adsb-clip source\n");
     text.push_str(&format!("out: {}\n", a.out));
     for p in &a.parts {
@@ -92,11 +91,10 @@ fn write_source(a: &Args, st: &oa_adsb::Stats, frames: u64) -> Result<(), String
         bound(a.filter.to_ns)
     ));
     text.push_str(&format!(
-        "rows_seen: {}\noutside_box: {}\noutside_time: {}\nkept: {}\nframes: {frames}\nsealed-window rows dropped: 0\n",
-        st.rows_seen, st.outside_box, st.outside_time, st.kept
+        "rows_seen: {}\noutside_box: {}\noutside_time: {}\nkept: {}\nframes: {frames}\nsealed-window rows dropped: {}\n",
+        st.rows_seen, st.outside_box, st.outside_time, st.kept, st.sealed_window_dropped
     ));
-    let path = format!("{}.source", a.out);
-    std::fs::write(&path, text).map_err(|e| format!("{path}: {e}"))
+    std::fs::write(path, text).map_err(|e| format!("{path}: {e}"))
 }
 
 fn run(a: &Args) -> Result<ExitCode, String> {
@@ -131,13 +129,9 @@ fn run(a: &Args) -> Result<ExitCode, String> {
     });
     let sorted = reorder(&held, &ix);
     drop(held);
-    // A report whose time is in a sealed window is never clipped (OA-SEAL-015): the run is
-    // refused before anything is written, and the count is printed.
-    let sealed = sorted
-        .time_ns
-        .iter()
-        .filter(|t| oa_sealed::in_sealed_window(**t))
-        .count();
+    // A report whose time is in a sealed window is never clipped (OA-SEAL-015): the archive reader
+    // dropped and counted them, and the run is refused before anything is written.
+    let sealed = res.stats.sealed_window_dropped;
     eprintln!("sealed-window rows dropped: {sealed}");
     if sealed > 0 {
         eprintln!(
@@ -145,20 +139,43 @@ fn run(a: &Args) -> Result<ExitCode, String> {
         );
         return Ok(ExitCode::from(2));
     }
+    // An existing output or sidecar is never replaced or truncated; the clip and the sidecar are
+    // written to temporary names and renamed into place once both are complete.
+    let side = format!("{}.source", a.out);
+    let tmp_out = format!("{}.tmp{}", a.out, std::process::id());
+    let tmp_side = format!("{side}.tmp{}", std::process::id());
+    if a.out != "-" {
+        for p in [&a.out, &side] {
+            if std::fs::symlink_metadata(p).is_ok() {
+                return Err(format!(
+                    "{p}: exists; it is never replaced, remove it first"
+                ));
+            }
+        }
+    }
     let frames = if a.out == "-" {
         let mut w = BufWriter::new(io::stdout().lock());
         let n = write_frames(&sorted, a.frame_ms, &mut w)?;
         w.flush().map_err(|e| e.to_string())?;
         n
     } else {
-        let mut w = BufWriter::new(File::create(&a.out).map_err(|e| format!("{}: {e}", a.out))?);
+        // seal-allow: creates the clip's own temporary output (create_new); reads nothing
+        let mut w = BufWriter::new(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp_out)
+                .map_err(|e| format!("{tmp_out}: {e}"))?,
+        );
         let n = write_frames(&sorted, a.frame_ms, &mut w)?;
         w.flush().map_err(|e| e.to_string())?;
         n
     };
     let st = &res.stats;
     if a.out != "-" {
-        write_source(a, st, frames)?;
+        write_source(a, st, frames, &tmp_side)?;
+        std::fs::rename(&tmp_out, &a.out).map_err(|e| format!("{}: {e}", a.out))?;
+        std::fs::rename(&tmp_side, &side).map_err(|e| format!("{side}: {e}"))?;
     }
     let sum = summarize(&sorted);
     eprintln!(

@@ -124,6 +124,7 @@ pub fn spill_create(dir: &Path) -> io::Result<SpillWriter> {
     let mut made: Vec<PathBuf> = Vec::with_capacity(COLS.len());
     for c in COLS {
         let path = dir.join(c);
+        // seal-allow: creates the run's own spill file (create_new); reads nothing
         match fs::OpenOptions::new()
             .write(true)
             .create_new(true)

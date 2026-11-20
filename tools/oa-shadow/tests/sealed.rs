@@ -228,3 +228,67 @@ fn links_into_sealed_data_are_refused_for_each_argument_and_inside_the_sfdps_fol
     }
     let _ = std::fs::remove_dir_all(&t);
 }
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_program_counts_sfdps_frames_and_clip_rows_in_a_sealed_window_once() {
+    // The window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
+    const FROM: i64 = 1_795_132_800_000_000_000;
+    let root = scratch("window-count");
+    let sfdps = root.join("sfdps");
+    std::fs::create_dir_all(&sfdps).unwrap();
+    let frame = |t: i64, payload: &[u8]| {
+        let mut buf = vec![0u8; payload.len() + 256];
+        let n = oa_feed::encode_frame(
+            &mut buf,
+            1,
+            oa_feed::FLAG_BYTES,
+            0,
+            t,
+            t / 1_000_000,
+            payload,
+        )
+        .unwrap();
+        buf[..n].to_vec()
+    };
+    // One SFDPS frame received in the window (dropped by receive time, never parsed).
+    std::fs::write(sfdps.join("a.oaf"), frame(FROM, b"<x/>")).unwrap();
+    // A clip of two rows: one before the window, one at its first instant (dropped).
+    let mut r = oa_adsb::Reports::default();
+    for (k, t) in [FROM - 1_000_000_000, FROM].into_iter().enumerate() {
+        let mut row = oa_adsb::ROW_EMPTY;
+        row.time_ns = t;
+        row.icao = 0xA00001 + k as u32;
+        row.lat_e7 = 410_000_000;
+        row.lon_e7 = -880_000_000;
+        row.nic = 8;
+        row.nac_p = 10;
+        row.sil = 3;
+        row.version = 2;
+        oa_adsb::reports_push(&mut r, &row);
+    }
+    let mut payload = Vec::new();
+    oa_adsb::encode_payload(&mut payload, &r, 0, 2).unwrap();
+    let clip = root.join("neutral.oaf");
+    std::fs::write(&clip, frame(FROM - 1_000_000_000, &payload)).unwrap();
+    let out = root.join("out");
+    // The two recordings do not overlap in time, so the run ends with an error after its reads;
+    // the count line is on standard error once, before it.
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-shadow"))
+        .arg("--adsb")
+        .arg(&clip)
+        .arg("--sfdps-dir")
+        .arg(&sfdps)
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&o.stderr);
+    // One SFDPS frame by receive time plus one clip row: 2.
+    assert_eq!(
+        err.matches("sealed-window rows dropped: 2").count(),
+        1,
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

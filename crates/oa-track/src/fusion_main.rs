@@ -29,7 +29,7 @@ use oa_track::fusion_score::{
     StudyRadar, Table, Variant, ADSB_STUDY, SPLIT_DAZ_DEG, SPLIT_DR_M, V_BASE_Q1, V_BASE_Q5,
     V_OURS_NOREG, V_OURS_REG,
 };
-use oa_track::fusion_world::{base_world, clip_world, pair_world, PAIR_GEOMS};
+use oa_track::fusion_world::{base_world, clip_world_counted, pair_world, PAIR_GEOMS};
 use oa_track::radar::RadarPlot;
 use oa_track::score::{CLASS_NAMES, CLASS_STRAIGHT, CLASS_TURN};
 
@@ -907,9 +907,9 @@ fn section_false(rep: &mut Report, kind: Kind, opts: &Opts) -> Result<(), String
 }
 
 /// Section 5: the clip's shapes.
-fn section_clip(rep: &mut Report, path: &str) -> Result<(), String> {
+fn section_clip(rep: &mut Report, path: &str) -> Result<u64, String> {
     let t0 = Instant::now();
-    let built = clip_world(path)?;
+    let (built, sealed) = clip_world_counted(path)?;
     let aircraft = built.truth.ac_addr.len();
     let _ = writeln!(
         rep.txt,
@@ -1026,7 +1026,7 @@ fn section_clip(rep: &mut Report, path: &str) -> Result<(), String> {
             );
         }
     }
-    Ok(())
+    Ok(sealed)
 }
 
 fn run(args: &[String]) -> Result<(), String> {
@@ -1148,9 +1148,12 @@ unmatched RMS values alone do not establish a better estimator."
             }
         }
     }
+    // Rows of the clip left out because their time is in a sealed window; printed once below,
+    // after the last read.
+    let mut sealed = 0u64;
     if let (Some(c), true) = (clip, wants(&opts, "clip")) {
         eprintln!("clip ({:.0} s)", started.elapsed().as_secs_f64());
-        section_clip(&mut rep, &c)?;
+        sealed = section_clip(&mut rep, &c)?;
     } else {
         let _ = writeln!(rep.txt, "\n(real-clip shapes not run)");
     }
@@ -1163,6 +1166,7 @@ unmatched RMS values alone do not establish a better estimator."
     fs::write(out.join("report.txt"), &rep.txt).map_err(|e| e.to_string())?;
     fs::write(out.join("tables.csv"), &rep.csv).map_err(|e| e.to_string())?;
     print!("{}", rep.txt);
+    eprintln!("{}", oa_sealed::drop_line(sealed));
     let _ = (CLASS_NAMES, CLASS_STRAIGHT, CLASS_TURN);
     Ok(())
 }

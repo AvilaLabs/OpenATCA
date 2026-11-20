@@ -539,7 +539,7 @@ fn registration_removes_a_radar_bias_from_radar_only_aircraft_that_adsb_aircraft
     assert!(eq_c <= eq_b * 1.05 + 0.5, "equipped {eq_c} vs {eq_b}");
 }
 
-// REQ: OA-TRK-065
+// REQ: OA-TRK-065, OA-SEAL-014
 #[test]
 fn the_binary_writes_the_report_and_refuses_bad_usage() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fusion_out");
@@ -557,6 +557,13 @@ fn the_binary_writes_the_report_and_refuses_bad_usage() {
         .output()
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // The count line is printed once, after the last read (no clip here: 0).
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert_eq!(
+        err.matches("sealed-window rows dropped: 0").count(),
+        1,
+        "{err}"
+    );
     let report = std::fs::read_to_string(dir.join("report.txt")).unwrap();
     for needle in [
         "scored against EXACT truth",

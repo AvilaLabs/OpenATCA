@@ -15,8 +15,8 @@ use oa_feed::frame::{Kind as FrameKind, MAX_FRAME_LEN};
 use oa_feed::reader::FrameReader;
 use oa_feed::replay::REPLAY_LIMITS;
 use oa_stdds::{
-    new_stats, parse_message, std_error_index, Limits, Stats, ERROR_KIND_NAMES, KIND_NAMES,
-    LATENCY_BUCKET_NAMES, SMES_FIELD_NAMES, STD_ERROR_NAMES, TAIS_FIELD_NAMES,
+    new_stats, parse_message, std_error_index, Limits, Message, Stats, ERROR_KIND_NAMES,
+    KIND_NAMES, LATENCY_BUCKET_NAMES, SMES_FIELD_NAMES, STD_ERROR_NAMES, TAIS_FIELD_NAMES,
 };
 use oa_xml::{Limits as XmlLimits, Parser};
 use oa_zip::GzipReader;
@@ -49,11 +49,24 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
             }
             Ok(f) if f.kind == FrameKind::Message => {
                 ctx.frames += 1;
-                if let Err(e) =
-                    parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats)
-                {
-                    if let Some(c) = ctx.refused.get_mut(std_error_index(&e)) {
-                        *c += 1;
+                match parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats) {
+                    Ok(Message::Tais(m)) => {
+                        // A record timed (`mrtTime`) in a sealed window is counted as dropped
+                        // even when its frame was received outside it; the per-field counts
+                        // below are parse counts and still include it.
+                        for r in &m.records {
+                            if oa_sealed::in_sealed_window(r.mrt_time_ms.saturating_mul(1_000_000))
+                            {
+                                ctx.sealed_window_dropped += 1;
+                                oa_sealed::note_window_drops(1);
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        if let Some(c) = ctx.refused.get_mut(std_error_index(&e)) {
+                            *c += 1;
+                        }
                     }
                 }
             }
@@ -150,7 +163,7 @@ fn main() {
         ctx.frames, ctx.other_frames, ctx.bad_frames
     );
     println!(
-        "sealed-window rows dropped: {} (frames, by receive time)",
+        "sealed-window rows dropped: {} (frames by receive time, TAIS records by mrtTime)",
         ctx.sealed_window_dropped
     );
     println!("gzip: damaged {gz_damaged} truncated {truncated}");

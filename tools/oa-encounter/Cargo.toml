@@ -20,6 +20,10 @@ oa-sha256 = { path = "../../crates/oa-sha256" }
 oa-track = { path = "../../crates/oa-track" }
 oa-zip = { path = "../../crates/oa-zip" }
 
+[dev-dependencies]
+# Workspace crate, not an outside dependency (RULESET F1): frames the clip the sealed-window test writes.
+oa-feed = { path = "../../crates/oa-feed" }
+
 [lib]
 name = "oa_encounter_run"
 path = "src/lib.rs"

@@ -1,0 +1,82 @@
+//! The `stdds_summary` example drops and counts frames and TAIS records in a sealed window
+//! (OA-SEAL-014). The example is run as built by cargo for this package.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+
+use oa_feed::frame::{encode_frame, Kind as FrameKind, MAX_FRAME_LEN};
+
+/// The window of the list: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, Unix nanoseconds.
+const FROM: i64 = 1_795_132_800_000_000_000;
+const TO: i64 = 1_795_393_020_000_000_000;
+
+fn message(times: &[&str]) -> Vec<u8> {
+    let mut s = String::from(
+        "<?xml version=\"1.0\"?><ns2:TATrackAndFlightPlan xmlns:ns2=\"urn:us:gov:dot:faa:atm:terminal:entities:v4-0:tais:terminalautomationinformation\"><src>ZZA</src>",
+    );
+    for (n, t) in times.iter().enumerate() {
+        s += &format!(
+            "<record><track><trackNum>{n}</trackNum><mrtTime>{t}</mrtTime></track></record>"
+        );
+    }
+    s += "</ns2:TATrackAndFlightPlan>";
+    s.into_bytes()
+}
+
+fn example() -> std::path::PathBuf {
+    // target/<profile>/deps/<test> -> target/<profile>/examples/stdds_summary
+    let exe = std::env::current_exe().unwrap();
+    exe.parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join("stdds_summary")
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn the_summary_example_drops_sealed_frames_and_records_and_prints_the_count() {
+    let mut bytes = Vec::new();
+    // (frame time, record times): the first frame, received at from - 1 ns, carries two records
+    // in the window and one before it; the next two frames are received in the window; the last
+    // is received at to.
+    let frames: [(i64, Vec<&str>); 4] = [
+        (
+            FROM - 1,
+            vec![
+                "2026-11-19T23:59:59Z",
+                "2026-11-20T00:00:00Z",
+                "2026-11-23T00:16:59Z",
+            ],
+        ),
+        (FROM, vec!["2026-11-19T12:00:00Z"]),
+        (TO - 1, vec!["2026-11-19T12:00:00Z"]),
+        (TO, vec!["2026-11-23T00:17:00Z"]),
+    ];
+    for (i, (t, recs)) in frames.iter().enumerate() {
+        let m = message(recs);
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, FrameKind::Message as u8, 0, i as u64, *t, 0, &m).unwrap();
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let dir = std::env::temp_dir().join(format!("oa-stdds-seal-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("clip.oaf");
+    std::fs::write(&file, bytes).unwrap();
+    let exe = example();
+    assert!(exe.exists(), "{}", exe.display());
+    let out = std::process::Command::new(exe).arg(&file).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Two frames by receive time and two records by their own time.
+    assert!(
+        text.contains("sealed-window rows dropped: 4 "),
+        "{}",
+        text.lines().take(6).collect::<Vec<_>>().join("\n")
+    );
+    assert!(text.contains("frames: message 2 "), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
+}

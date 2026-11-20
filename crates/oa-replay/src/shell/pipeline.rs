@@ -786,6 +786,15 @@ fn process_adsb(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     }
     for i in 0..reports_len(&p.reports) {
+        // A row timed in a sealed window is dropped and counted, whatever its frame's time.
+        if p.reports
+            .time_ns
+            .get(i)
+            .is_some_and(|&t| oa_sealed::in_sealed_window(t))
+        {
+            drop_sealed(p);
+            continue;
+        }
         let a = apply_adsb(&mut p.adsb, &p.reports, i, now);
         bump(&mut p.rows_seen, FeedKind::Adsb, 1);
         match a {
@@ -916,6 +925,14 @@ fn process_fns(p: &mut Pipeline, payload: &[u8], now: i64) {
         }
     }
     for i in 0..notams_len(&p.notams) {
+        // A NOTAM issued or cancelled in a sealed window is dropped and counted; its validity
+        // span is not a message time and is not checked.
+        if oa_notam::row_at(&p.notams, i)
+            .is_some_and(|r| sealed_ms(r.issued_ms) || sealed_ms(r.canceled_ms))
+        {
+            drop_sealed(p);
+            continue;
+        }
         let a = apply_fns(&mut p.fns, &p.notams, i, now);
         bump(&mut p.rows_seen, FeedKind::Fns, 1);
         match a {

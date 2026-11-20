@@ -16,18 +16,46 @@ seal scds/rec-20261119/day4*
 seal scds/rec-20261119/runs*
 seal scds/stdds-20261119-holdout*
 seal scds/stdds-smoke-20261119*
-# The ADS-B days of hold-out days A, B and C (20 to 22 November 2026).
-# Each day in both name forms (the day directory `2026.11.20` and the parts `v2026.11.20-planes-...`),
-# as prefixes so a renamed or partial copy is sealed too; and any derived name that holds a day.
-seal raw/adsblol/2026.11.20*
-seal raw/adsblol/2026.11.21*
-seal raw/adsblol/2026.11.22*
-seal raw/adsblol/v2026.11.20*
-seal raw/adsblol/v2026.11.21*
-seal raw/adsblol/v2026.11.22*
+# The three hold-out days 20 to 22 November 2026 (ADS-B days and hold-out days A to C), in any spelling:
+# `2026.11.2d`, `2026-11-2d`, `2026_11_2d` and `2026112d` (case-sensitive), as a substring of any component
+# at any depth below raw/adsblol, scds and derived, so a renamed, partial or archived copy is sealed too.
+# The weather inputs (raw/rap, raw/awc, ...) are inputs, not scored data, and stay unsealed.
+seal raw/adsblol/*2026.11.20*
+seal raw/adsblol/*2026.11.21*
+seal raw/adsblol/*2026.11.22*
+seal raw/adsblol/*2026-11-20*
+seal raw/adsblol/*2026-11-21*
+seal raw/adsblol/*2026-11-22*
+seal raw/adsblol/*2026_11_20*
+seal raw/adsblol/*2026_11_21*
+seal raw/adsblol/*2026_11_22*
+seal raw/adsblol/*20261120*
+seal raw/adsblol/*20261121*
+seal raw/adsblol/*20261122*
+seal scds/*2026.11.20*
+seal scds/*2026.11.21*
+seal scds/*2026.11.22*
+seal scds/*2026-11-20*
+seal scds/*2026-11-21*
+seal scds/*2026-11-22*
+seal scds/*2026_11_20*
+seal scds/*2026_11_21*
+seal scds/*2026_11_22*
+seal scds/*20261120*
+seal scds/*20261121*
+seal scds/*20261122*
 seal derived/*2026.11.20*
 seal derived/*2026.11.21*
 seal derived/*2026.11.22*
+seal derived/*2026-11-20*
+seal derived/*2026-11-21*
+seal derived/*2026-11-22*
+seal derived/*2026_11_20*
+seal derived/*2026_11_21*
+seal derived/*2026_11_22*
+seal derived/*20261120*
+seal derived/*20261121*
+seal derived/*20261122*
 # window  a half-open UTC span (from inclusive, to exclusive) in which every row or frame is
 #         sealed, whichever file holds it: the three ADS-B days and hold-out days A to C of the
 #         four-day recording (19 Nov 00:17Z, then 24 h each). Readers drop and count such rows.

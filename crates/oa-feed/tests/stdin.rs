@@ -55,7 +55,7 @@ fn without_mono(recorded: &[u8]) -> Vec<u8> {
     out
 }
 
-// REQ: OA-FEED-023, OA-FEED-026
+// REQ: OA-FEED-023, OA-FEED-026, OA-SEAL-014
 #[test]
 fn stdin_mode_records_verbatim_and_replay_agrees() {
     let dir = std::env::temp_dir().join(format!("oa-feed-it-{}", std::process::id()));
@@ -99,6 +99,14 @@ fn stdin_mode_records_verbatim_and_replay_agrees() {
         .output()
         .unwrap();
     assert!(rep.status.success());
+    // The count line (frames), printed once.
+    let rerr = String::from_utf8_lossy(&rep.stderr);
+    assert_eq!(
+        rerr.matches("sealed-window rows dropped: 0 (frames")
+            .count(),
+        1,
+        "{rerr}"
+    );
     let text = String::from_utf8(rep.stdout).unwrap();
     assert!(text.starts_with("replay files=1 bytes="), "{text}");
     assert!(

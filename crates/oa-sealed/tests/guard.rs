@@ -43,26 +43,26 @@ fn fake_root(name: &str) -> PathBuf {
 fn the_list_has_the_sealed_folders_and_the_python_guard_parses_it_to_the_same_set() {
     let l = parse_list(LIST).unwrap();
     let texts: Vec<&str> = l.entries.iter().map(|e| e.text.as_str()).collect();
-    assert_eq!(
-        texts,
-        [
-            "scds/rec-20261119/day2*",
-            "scds/rec-20261119/day3*",
-            "scds/rec-20261119/day4*",
-            "scds/rec-20261119/runs*",
-            "scds/stdds-20261119-holdout*",
-            "scds/stdds-smoke-20261119*",
-            "raw/adsblol/2026.11.20*",
-            "raw/adsblol/2026.11.21*",
-            "raw/adsblol/2026.11.22*",
-            "raw/adsblol/v2026.11.20*",
-            "raw/adsblol/v2026.11.21*",
-            "raw/adsblol/v2026.11.22*",
-            "derived/*2026.11.20*",
-            "derived/*2026.11.21*",
-            "derived/*2026.11.22*"
-        ]
-    );
+    let mut want: Vec<String> = [
+        "scds/rec-20261119/day2*",
+        "scds/rec-20261119/day3*",
+        "scds/rec-20261119/day4*",
+        "scds/rec-20261119/runs*",
+        "scds/stdds-20261119-holdout*",
+        "scds/stdds-smoke-20261119*",
+    ]
+    .iter()
+    .map(|t| t.to_string())
+    .collect();
+    // Each sealed day in four spellings, as a substring at any depth below three directories.
+    for dir in ["raw/adsblol", "scds", "derived"] {
+        for form in ["2026.11.2", "2026-11-2", "2026_11_2", "2026112"] {
+            for d in ["0", "1", "2"] {
+                want.push(format!("{dir}/*{form}{d}*"));
+            }
+        }
+    }
+    assert_eq!(texts, want);
     let w: Vec<&str> = l.windows.iter().map(|w| w.text.as_str()).collect();
     assert_eq!(w, ["2026-11-20T00:00:00Z 2026-11-23T00:17:00Z"]);
     let py = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/sealed_guard.py");
@@ -159,6 +159,15 @@ fn every_sealed_adsb_day_in_both_name_forms_and_derived_clips_and_the_stdds_pref
         "/data/scds/stdds-20261119-holdout.tar",
         "/data/scds/stdds-20261119-holdout.bak",
         "/data/scds/stdds-20261119-holdout-copy/x",
+        // Any spelling of a sealed day, as a substring, at any depth below the three directories.
+        "/data/raw/adsblol/dev/2026.11.21/x.oaf",
+        "/data/raw/adsblol/zau-2026.11.20.tar",
+        "/data/raw/adsblol/zau-2026-11-21.tar",
+        "/data/raw/adsblol/zau_2026_11_22.tar",
+        "/data/scds/day-20261120",
+        "/data/scds/rec-20261120",
+        "/data/scds/a/b/c/2026-11-22",
+        "/data/derived/zau-20261121.oaf",
     ] {
         let e = g.check(Path::new(p)).unwrap_err().to_string();
         assert!(e.contains("OA-SEAL-001") && e.contains(p), "{e}");
@@ -174,6 +183,12 @@ fn every_sealed_adsb_day_in_both_name_forms_and_derived_clips_and_the_stdds_pref
         "/data/derived/adsb/zau-2026.11.2.oaf",
         "/data/scds/stdds-20261119",
         "/data/scds/stdds-2026111",
+        "/data/scds/day-20261124",
+        "/data/scds/rec-20261119/day1",
+        "/data/raw/adsblol/2026.11.14",
+        // Case-sensitive, and the weather inputs are not scored data.
+        "/data/raw/rap/rap.20261120.t00z.grib2",
+        "/data/raw/awc/2026-11-21.json",
     ] {
         assert!(g.check(Path::new(p)).is_ok(), "{p}");
     }
@@ -569,4 +584,63 @@ fn odd_list_files_are_refused_by_both_parsers_and_good_ones_read_the_same() {
             assert_eq!(out.status.code(), Some(2), "{text:?}");
         }
     }
+}
+
+// REQ: OA-SEAL-012
+#[test]
+fn walk_unsealed_skips_links_back_errors_on_depth_and_a_missing_root_and_sorts_bytewise() {
+    let root = fake_root("walkloops");
+    let g = Sealed::with_root(&root);
+    let w = root.join("work");
+    fs::create_dir_all(w.join("a")).unwrap();
+    fs::write(w.join("a/f.bin"), b"x").unwrap();
+    // A self-link: the directory is visited once, the link is skipped and counted.
+    symlink(&w, w.join("a/self")).unwrap();
+    let r = g.walk_unsealed(&w).unwrap();
+    assert_eq!((r.files.len(), r.skipped), (1, 1));
+    // Two self-links.
+    symlink(&w, w.join("a/self2")).unwrap();
+    let r = g.walk_unsealed(&w).unwrap();
+    assert_eq!((r.files.len(), r.skipped), (1, 2));
+    // A tree deeper than the limit is an error, not a silent stop.
+    let mut deep = root.join("deep");
+    for _ in 0..70 {
+        deep = deep.join("d");
+    }
+    fs::create_dir_all(&deep).unwrap();
+    fs::write(deep.join("f"), b"x").unwrap();
+    let e = g.walk_unsealed(&root.join("deep")).unwrap_err().to_string();
+    assert!(e.contains("deeper"), "{e}");
+    // A missing root is an error.
+    assert!(g.walk_unsealed(&root.join("nothing-here")).is_err());
+    // The order is bytewise on the string form of the path: `a.b` sorts before `a/b` ('.' < '/'),
+    // which a component-wise sort would not give.
+    let s = root.join("sorted");
+    fs::create_dir_all(s.join("a")).unwrap();
+    fs::write(s.join("a/b"), b"x").unwrap();
+    fs::write(s.join("a.b"), b"x").unwrap();
+    let names: Vec<String> = g
+        .walk_unsealed(&s)
+        .unwrap()
+        .files
+        .iter()
+        .map(|p| p.strip_prefix(&s).unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["a.b", "a/b"]);
+}
+
+// REQ: OA-SEAL-002, OA-SEAL-007
+#[test]
+fn a_file_with_a_second_hard_link_is_refused_when_opened() {
+    let root = fake_root("hardlink");
+    let g = Sealed::with_root(&root);
+    let sealed = root.join("scds/rec-20261119/day2/sfdps/a.bin");
+    let neutral = root.join("derived-copy.bin");
+    fs::hard_link(&sealed, &neutral).unwrap();
+    let e = g.open(&neutral).unwrap_err().to_string();
+    assert!(e.contains("hard links"), "{e}");
+    // A file with one name opens.
+    let one = root.join("one.bin");
+    fs::write(&one, b"x").unwrap();
+    assert!(g.open(&one).is_ok());
 }
