@@ -7,7 +7,7 @@
 //! | [`open_rows`], [`RowsReader`] | shell: stream a rows file as groups of rows |
 //! | [`write_out`] | shell: write text, an error (a closed pipe included) is returned |
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::Path;
 
@@ -21,14 +21,14 @@ use crate::diff::{
 /// the bytes read (a file that grows between the two).
 fn read_limited(p: &Path, max: u64) -> Result<String, String> {
     let name = p.display();
-    let len = fs::metadata(p).map_err(|e| format!("{name}: {e}"))?.len();
+    // The guard first: the path is checked before anything, metadata included, reads it.
+    let f = oa_sealed::open(p).map_err(|e| format!("{name}: {e}"))?;
+    let len = f.metadata().map_err(|e| format!("{name}: {e}"))?.len();
     if len > max {
         return Err(format!("{name}: {len} bytes, more than the limit of {max}"));
     }
     let mut s = String::new();
-    oa_sealed::open(p)
-        .map_err(|e| format!("{name}: {e}"))?
-        .take(max.saturating_add(1))
+    f.take(max.saturating_add(1))
         .read_to_string(&mut s)
         .map_err(|e| format!("{name}: {e}"))?;
     if u64::try_from(s.len()).unwrap_or(u64::MAX) > max {

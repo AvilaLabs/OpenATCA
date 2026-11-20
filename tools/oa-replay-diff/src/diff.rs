@@ -7,6 +7,7 @@
 //!
 //! | item | what |
 //! |---|---|
+//! | [`second_in_window`], [`digest_seconds_in_window`], [`row_in_window`] | the sealed window against seconds and rows |
 //! | [`parse_digest`] | text to verified [`DigestLine`]s: header, fields, order, limits, chain |
 //! | [`compare_digests`], [`first_difference`] | [`DigestDiff`] of two digests |
 //! | [`diff_second`] | [`SecondDiff`] of the rows of one second |
@@ -40,6 +41,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use oa_sealed::DropWindow;
 use oa_track::canon::{
     chain_next, field_at, from_hex32, hash_rows, row_second, CanonRow, DIGEST_HEADER,
     MAX_ROWS_PER_SECOND, MAX_SECONDS, OFF_ADDR, OFF_ALT, OFF_ALT_VAR, OFF_FLAGS, OFF_LAT, OFF_LON,
@@ -190,6 +192,30 @@ pub fn nothing_to_compare(a: &[DigestLine], b: &[DigestLine]) -> Result<(), Stri
         return Err("no seconds to compare: both digests are empty".to_string());
     }
     Ok(())
+}
+
+/// Whether any part of the Unix second `second` is in the window (a second is a span of 1000
+/// milliseconds; the fail-closed all-time window holds every second).
+pub fn second_in_window(w: DropWindow, second: i64) -> bool {
+    if w == DropWindow::all_time() {
+        return true;
+    }
+    w.span().is_some_and(|(from, to)| {
+        second.saturating_mul(1000) < to && second.saturating_add(1).saturating_mul(1000) > from
+    })
+}
+
+/// How many seconds of a digest are in the window.
+pub fn digest_seconds_in_window(lines: &[DigestLine], w: DropWindow) -> u64 {
+    lines
+        .iter()
+        .filter(|l| second_in_window(w, l.second))
+        .count() as u64
+}
+
+/// Whether the time of a canonical row is in the window.
+pub fn row_in_window(w: DropWindow, row: &CanonRow) -> bool {
+    w.contains(i64::from_le_bytes(field_at::<OFF_T_NS, 8>(row)).div_euclid(1_000_000))
 }
 
 /// How two digests compare.
