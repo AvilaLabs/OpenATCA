@@ -22,14 +22,17 @@ pub enum SplitViolation {
 /// The identity of one observation: address, time and the fields `Key` lists.
 pub type Key = (u32, i64, [i64; 17]);
 
-/// What makes two reports the same observation, for the split and for its check. An exact copy
-/// agrees on the address, the time and every field that scoring or quality handling reads:
-/// position, both altitudes, vertical rate, ground speed, track, squawk, the flags (stale,
+/// What makes two reports the same observation, for the scorer's split and for its check. An
+/// exact copy agrees on the address, the time and every field that scoring or quality handling
+/// reads: position, both altitudes, vertical rate, ground speed, track, squawk, the flags (stale,
 /// new-leg, geometric and ground bits), source, emitter category, NIC, NACp, NACv, SIL, SIL
 /// type and version. Reports that agree on address and time but differ in any of these are
 /// different observations (one may be stale or MLAT while the other is current ADS-B). Fields
-/// that nothing downstream reads (callsign, GVA, SDA, wind and temperature, speeds, headings,
-/// roll and track rate) are not part of the identity.
+/// that scoring does not read (callsign, NIC_baro, GVA, SDA, wind and temperature, speeds,
+/// headings, roll and track rate) are NOT part of this identity, so under this key two reports
+/// that differ only in them are merged into one: "copy" here means a copy as far as scoring
+/// can tell. A consumer that writes those fields out (the COMPASS export of `adsb.ast`) uses a
+/// finer key of its own and does not rely on this one.
 pub fn observation_key(r: &Row) -> Key {
     (
         r.icao,

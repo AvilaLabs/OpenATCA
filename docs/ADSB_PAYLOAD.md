@@ -1,6 +1,6 @@
-# ADS-B reports in OAF1 frames (ADS2, reads ADS1)
+# ADS-B reports in OAF1 frames (ADS3, reads ADS2 and ADS1)
 
-Status: adopted 2026-11-14; `ADS2` (measurements) 2026-11-14. Written by `oa-adsb-clip` (crate `oa-adsb`), read by
+Status: adopted 2026-11-14; `ADS2` (measurements) 2026-11-14; `ADS3` (NIC_baro in byte 79) 2026-11-20. Written by `oa-adsb-clip` (crate `oa-adsb`), read by
 `oa_adsb::decode_payload`. Source data: adsb.lol `globe_history` day archives (readsb trace
 files, ODbL); the format of those is described in the `oa-adsb` crate documentation, with the
 readsb commit it was read from.
@@ -34,13 +34,18 @@ of ADS-B reports is a feed of its own kind: one file per feed, as with SFDPS, TB
   `oa-adsb-clip`; bytes 57 to 63 of a record are reserved and zero.
 * `ADS2`: 80-byte records, at most 50 000 per frame (16 + 80 * 50 000 stays under the 4 MiB
   payload limit). Bytes 0 to 56 are the `ADS1` record unchanged; bytes 57 to 78 add the
-  measurements below; byte 79 is reserved and zero. Only `ADS2` is written now.
+  measurements below; byte 79 is reserved and zero.
+* `ADS3`: the `ADS2` record with byte 79 holding NIC_baro plus one (below). Only `ADS3` is written
+  now.
 
-`decode_payload` reads both, by magic; an `ADS1` record decodes with every measurement absent.
+`decode_payload` reads all three, by magic; an `ADS1` record decodes with every measurement absent,
+and an `ADS1` or `ADS2` record decodes with NIC_baro absent. Under the magic `ADS2` (or `ADS1`) a
+non-zero byte 79 is a reserved byte set: it is counted and ignored and is never read as NIC_baro.
 The OAF1 frame, its sequence and its time use are identical, so `oa-replay` and `oa-truth`
 (which decode through `decode_payload` and use none of the measurements) see the same reports from an old clip as before,
-and the hashes of their tables do not change. A reader that knows only `ADS1` refuses an `ADS2`
-payload by its magic.
+and the hashes of their tables do not change. A reader that knows only `ADS1` and `ADS2` refuses an
+`ADS3` payload by its magic, so a clip that carries NIC_baro cannot be read silently as one that
+does not.
 
 ## Payload
 
@@ -48,7 +53,7 @@ All integers little-endian. A 16-byte header, then `count` records.
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 4 | magic, ASCII `ADS2` (or `ADS1`) |
+| 0 | 4 | magic, ASCII `ADS3` (or `ADS2`, `ADS1`) |
 | 4 | 2 | record length, 80 (64 for `ADS1`) |
 | 6 | 2 | reserved, 0 |
 | 8 | 4 | count, u32, at most 50 000 (60 000 for `ADS1`) |
@@ -93,7 +98,7 @@ Record (offsets from the start of the record):
 | 73 | 2 | total air temperature `tat`, i16 | whole degrees C, readsb-derived; `-32768` absent |
 | 75 | 2 | roll, i16 | 0.01 degree, negative is left, within 18000 in magnitude; `-32768` absent |
 | 77 | 2 | track rate, i16 | 0.01 degree per second; `-32768` absent |
-| 79 | 1 | reserved, 0 | |
+| 79 | 1 | nic_baro + 1 (`ADS3` only) | 0 absent, 1 for NIC_baro 0, 2 for NIC_baro 1; any other value is ignored and counted. In `ADS2` this byte is reserved, 0 |
 
 (`ADS1` records have bytes 57 to 63 reserved, 0, and no measurements.)
 
@@ -118,7 +123,7 @@ can read and counts the rest (`PayloadCounts`):
 * a record whose source is not 0 to 13 or 255 is kept with source 13 (`unknown`);
 * a record whose wind direction is 360 or more, whose heading is 36000 or more or whose roll is
   beyond 180 degrees is kept with that value absent;
-* a non-zero reserved byte (79, or 57 to 63 of `ADS1`) is ignored and counted.
+* a non-zero reserved byte (57 to 63 of `ADS1`), or a byte 79 above 2 under `ADS3`, or any non-zero byte 79 under `ADS2`, is ignored and counted.
 
 `decode_payload` is the strict form: any of those makes it refuse the whole payload with
 `BadRecord(n)`, as before. A payload with none of them decodes the same by both.

@@ -118,6 +118,18 @@ pub fn split_reports(r: &Reports) -> (Reports, Reports, SplitStats) {
 /// observations of one (address, time) kept, in one fixed order) and quality handling, and no
 /// report is withheld.
 pub fn split_reports_with(r: &Reports, halve: bool) -> (Reports, Reports, SplitStats) {
+    split_reports_keyed(r, halve, observation_key)
+}
+
+/// [`split_reports_with`] with the identity of an observation given by `key`: two reports of one
+/// (address, time) are copies when their keys are equal. The scorer's own key is
+/// [`observation_key`] (`split_reports_with` passes it); a caller with a finer key keeps reports
+/// the scorer's key would merge. Everything else is the same code.
+pub fn split_reports_keyed<K: Ord>(
+    r: &Reports,
+    halve: bool,
+    key: impl Fn(&oa_adsb::Row) -> K,
+) -> (Reports, Reports, SplitStats) {
     let n = reports_len(r);
     let mut order: Vec<(u32, i64, u32)> = Vec::with_capacity(n);
     for (i, (&a, &t)) in r.icao.iter().zip(r.time_ns.iter()).enumerate() {
@@ -150,10 +162,7 @@ pub fn split_reports_with(r: &Reports, halve: bool) -> (Reports, Reports, SplitS
                 st.rows_invalid += 1;
                 continue;
             };
-            if group
-                .iter()
-                .any(|x| observation_key(x) == observation_key(&row))
-            {
+            if group.iter().any(|x| key(x) == key(&row)) {
                 st.duplicates_removed += 1;
             } else {
                 group.push(row);
@@ -161,7 +170,7 @@ pub fn split_reports_with(r: &Reports, halve: bool) -> (Reports, Reports, SplitS
         }
         g = end;
         // Siblings go through quality handling in one fixed order, not the input order.
-        group.sort_by_key(observation_key);
+        group.sort_by_key(&key);
         if group.len() > 1 {
             st.conflict_groups += 1;
             st.conflict_rows += group.len() as u64;

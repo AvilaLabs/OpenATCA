@@ -166,6 +166,84 @@ fn any_input_path_through_the_sealed_recording_is_refused_and_nothing_is_created
     }
 }
 
+// REQ: OA-CMP-047
+#[test]
+fn the_sealed_date_is_refused_in_every_accepted_syntax() {
+    for d in [
+        "2026.11.19",
+        "2026-11-19",
+        "2026.11.019",
+        "2026-011-019",
+        "+2026-11-19",
+    ] {
+        let e = parse_export(&v(&["--date", d, "--out", "o", "--adsb", "c"])).unwrap_err();
+        assert!(
+            e.contains("2026-11-19 is the sealed hold-out day; it is never exported"),
+            "{d}: {e}"
+        );
+    }
+    // Forms that are not a date at all are rejected as such, not accepted as the sealed day.
+    for d in ["20261119", "2026-11-19T00:00Z", "1795046400", "2026/11/19"] {
+        let e = parse_export(&v(&["--date", d, "--out", "o", "--adsb", "c"])).unwrap_err();
+        assert!(
+            e.contains("is not a date") && !e.contains("sealed"),
+            "{d}: {e}"
+        );
+    }
+    assert!(parse_export(&v(&["--date", "2026.11.18", "--out", "o", "--adsb", "c"])).is_ok());
+}
+
+// REQ: OA-CMP-047
+#[test]
+#[cfg(unix)]
+fn a_link_in_an_innocent_directory_into_the_sealed_recording_is_refused_for_every_file() {
+    let work = tmp("links");
+    let real = work.join("scds").join("stdds-20261119-holdout");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("secret.msg"), b"x").unwrap();
+    let inn = work.join("innocent");
+    fs::create_dir_all(&inn).unwrap();
+    let mk = |out: PathBuf, adsb: Option<PathBuf>, sfdps: Option<PathBuf>| Job {
+        layout: Layout {
+            out,
+            day: 20_772,
+            split: false,
+        },
+        adsb,
+        sfdps: sfdps.map(EramSource::Dir),
+        mode: InputsMode::All,
+        rows: OpenatcaRows::Ticks,
+        eram_address: EramAddress::Keep,
+        self_test_eram_offset_e7: 0,
+        self_test_adsb_offset_e7: 0,
+    };
+    // An SFDPS directory that looks innocent whose one file is a link into the sealed one.
+    std::os::unix::fs::symlink(real.join("secret.msg"), inn.join("a.msg")).unwrap();
+    let j = mk(work.join("out"), None, Some(inn.clone()));
+    let e = run_job(j, &mut |_| Ok(()), &mut |_| {})
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("OA-SEAL-001"), "{e}");
+    assert!(!work.join("out").exists());
+    // An ADS-B clip that is a link.
+    std::os::unix::fs::symlink(real.join("secret.msg"), inn.join("c.oaf")).unwrap();
+    let j = mk(work.join("out2"), Some(inn.join("c.oaf")), None);
+    let e = run_job(j, &mut |_| Ok(()), &mut |_| {})
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("OA-SEAL-001"), "{e}");
+    assert!(!work.join("out2").exists());
+    // A slice source with one .ast that is a link.
+    let src = work.join("slicesrc");
+    fs::create_dir_all(&src).unwrap();
+    std::os::unix::fs::symlink(real.join("secret.msg"), src.join("a.ast")).unwrap();
+    let e = slice_dir(&src, &work.join("o3"), 0, 128)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("OA-SEAL-001"), "{e}");
+    assert!(!work.join("o3").exists());
+}
+
 // REQ: OA-SEAL-005
 #[test]
 fn an_export_refuses_a_link_into_sealed_data_for_the_clip_the_eram_folder_and_the_output() {
