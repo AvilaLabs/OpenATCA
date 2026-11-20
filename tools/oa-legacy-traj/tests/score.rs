@@ -7,8 +7,6 @@
     clippy::panic
 )]
 
-use std::collections::BTreeMap;
-
 use oa_adsb::{reports_push, Reports, F_GROUND, ROW_EMPTY};
 use oa_bench::adsb_truth;
 use oa_bench::legacy::{
@@ -18,7 +16,7 @@ use oa_bench::legacy::{
 use oa_legacy_traj::core::join::OUTCOME_NAMES;
 use oa_legacy_traj::core::report::{render_counts_csv, render_text};
 use oa_legacy_traj::core::types::{exclusion_index, Config, Exclusion, Place};
-use oa_legacy_traj::shell::places::PlacesFile;
+use oa_legacy_traj::shell::places::{apply_places, PlaceTable, PlacesFile};
 use oa_legacy_traj::shell::run::{score_all, Inputs, Scored};
 
 const M_PER_DEG: f64 = 111_194.926_644_558_74;
@@ -233,6 +231,18 @@ fn scored() -> Scored {
     let mut places = PlacesFile::default();
     places.airports.insert("ORD".to_string(), AIRPORT);
     places.fixes.push((pad(b"MFXC"), P));
+    places.fixes.push((pad(b"MFXA"), P));
+    // A name with two places 60 NM apart: the one nearest the route's own coordinates is taken.
+    places.fixes.push((pad(b"AMBIG"), P));
+    places.fixes.push((
+        pad(b"AMBIG"),
+        Place {
+            lat_deg: 42.0,
+            lon_deg: -88.0,
+        },
+    ));
+    let mut table = PlaceTable::default();
+    apply_places(&mut table, &places);
     let leg = legacy();
     score_all(
         &Inputs {
@@ -240,7 +250,7 @@ fn scored() -> Scored {
             built: &built,
             cfg: cfg(),
             step_ms: 5000,
-            places,
+            table,
         },
         reports,
     )
@@ -289,23 +299,25 @@ fn eram_is_scored_along_its_route_by_look_ahead_with_the_sign_estimate_minus_act
     let s = scored();
     let k = &s.systems[0].kinds[0];
     // Flight 1 at 7 minutes (bin 5 to 10): WPTP 30 s late, MFXA 45 s late, the first AMBIG point
-    // 60 s late. Flight 3 at 2 minutes (bin 0 to 5): 10 s late.
+    // 60 s late, and the AMBIG point without coordinates, whose nearer place is taken, 60 s late.
+    // Flight 3 at 2 minutes (bin 0 to 5): 10 s late.
     assert_eq!(k.errors[0].len(), 1);
     near(k.errors[0][0], 10.0);
-    assert_eq!(k.errors[1].len(), 3);
+    assert_eq!(k.errors[1].len(), 4);
     let mut e = k.errors[1].clone();
     e.sort_by(|a, b| a.partial_cmp(b).unwrap());
     near(e[0], 30.0);
     near(e[1], 45.0);
     near(e[2], 60.0);
+    near(e[3], 60.0);
+    assert_eq!(k.resolved_ambiguous, 1);
     assert!(k.errors[2..].iter().all(Vec::is_empty));
     let x = |r: Exclusion| k.exclusions[exclusion_index(r)];
     assert_eq!(x(Exclusion::BeyondCut), 2);
-    assert_eq!(x(Exclusion::PlaceAmbiguous), 1);
+    assert_eq!(x(Exclusion::PlaceAmbiguous), 0);
     assert_eq!(x(Exclusion::PlaceUnknown), 1);
     assert_eq!(x(Exclusion::NoEstimate), 1);
-    // Beyond the cut: the far point and the second AMBIG point with coordinates (60 NM away). The
-    // AMBIG point with no coordinates has two places in the book: ambiguous.
+    // Beyond the cut: the far point and the second AMBIG point with coordinates (60 NM away).
     assert_eq!(x(Exclusion::NotJoined), 2);
 }
 
@@ -328,8 +340,6 @@ fn tbfm_is_scored_against_the_meter_fix_crossing_and_the_landing() {
     assert_eq!(rwy.errors[3][0], -50.0);
     assert_eq!(t.outcomes[0], 2);
     assert_eq!(rwy.estimates, 1);
-    // One airport reference point in use: the one the places file gave.
-    assert_eq!(s.arps, 1);
 }
 
 // REQ: OA-LTJ-016
@@ -341,7 +351,7 @@ fn tfms_arrival_estimates_are_scored_against_the_landing_and_departures_are_not(
     assert_eq!(k.errors[5], vec![120.0]);
     assert_eq!(k.estimates, 2);
     assert_eq!(s.etd_rows, 1);
-    let text = render_text(&[], &cfg(), &s.systems);
+    let text = render_text(&[], &cfg(), &s.sections, &s.systems);
     assert!(
         text.contains("60 to 120 min: n=1 flights=1 median=120.0"),
         "{text}"
@@ -350,54 +360,39 @@ fn tfms_arrival_estimates_are_scored_against_the_landing_and_departures_are_not(
 
 // REQ: OA-LTJ-020
 #[test]
-fn a_reference_point_is_derived_only_where_enough_landings_agree() {
-    use oa_legacy_traj::core::types::AirState;
-    use oa_legacy_traj::shell::places::derive_airports;
-    let landing = |lat: f64, t_s: i64| {
-        vec![
-            AirState {
-                t_ms: t_s * 1000,
-                lat_deg: lat,
-                lon_deg: -88.0,
-                ground: false,
-            },
-            AirState {
-                t_ms: (t_s + 10) * 1000,
-                lat_deg: lat,
-                lon_deg: -88.0,
-                ground: true,
-            },
-        ]
-    };
-    let mut states = BTreeMap::new();
-    // Four aircraft land within 0.2 NM of one spot; one lands 100 NM away (a later leg of the
-    // same day); a fifth airport has two landings only.
-    for (k, lat) in [41.50, 41.501, 41.499, 41.5005, 43.2]
-        .into_iter()
-        .enumerate()
-    {
-        states.insert(k as u32, landing(lat, 1000));
-    }
-    states.insert(10, landing(40.0, 1000));
-    states.insert(11, landing(40.0, 1000));
-    let mut flights: Vec<(String, u32, i64, i64)> = (0..5)
-        .map(|k| ("ORD".to_string(), k, 0, 5_000_000))
-        .collect();
-    flights.push(("XYZ".to_string(), 10, 0, 5_000_000));
-    flights.push(("XYZ".to_string(), 11, 0, 5_000_000));
-    // A landing outside the flight's interval is not a candidate.
-    flights.push(("ORD".to_string(), 10, 0, 500_000));
-    let arps = derive_airports(&flights, &states);
-    assert_eq!(arps.len(), 1);
-    let p = arps["ORD"];
-    assert!((p.lat_deg - 41.5).abs() < 0.01, "{}", p.lat_deg);
-    assert!((p.lon_deg + 88.0).abs() < 1e-9);
+fn an_airport_that_is_not_in_the_table_is_excluded_and_counted_never_derived() {
+    // The synthetic day has the landing at ORD; with no place for ORD the runway estimates are
+    // excluded as airport unknown, though the aircraft lands within a few miles of a spot.
+    let reports = clip();
+    let mut tcfg = adsb_truth::config_with(None, None);
+    tcfg.loo = false;
+    let built = adsb_truth::build(&reports, &tcfg).unwrap();
+    let leg = legacy();
+    let s = score_all(
+        &Inputs {
+            legacy: &leg,
+            built: &built,
+            cfg: cfg(),
+            step_ms: 5000,
+            table: PlaceTable::default(),
+        },
+        reports,
+    );
+    let rwy = &s.systems[1].kinds[2];
+    assert!(rwy.errors.iter().all(Vec::is_empty));
+    assert_eq!(
+        rwy.exclusions[exclusion_index(Exclusion::AirportUnknown)],
+        1
+    );
+    let tf = &s.systems[2].kinds[0];
+    assert!(tf.errors.iter().all(Vec::is_empty));
+    assert!(tf.exclusions[exclusion_index(Exclusion::AirportUnknown)] >= 1);
 }
 
 // REQ: OA-LTJ-021
 #[test]
 fn a_places_file_gives_named_points_and_airports_and_a_bad_line_is_named() {
-    use oa_legacy_traj::shell::places::{find, parse_places, place_book, Found};
+    use oa_legacy_traj::shell::places::{airport_places, parse_places, point_places};
     let f = parse_places(
         "# points\nfix, abc, 41.5, -88.25\nfix,ABC,43.5,-88.25\nfix,SOLO,41.0,-88.0\n\nairport,KORD,41.98,-87.9\n",
     )
@@ -405,11 +400,12 @@ fn a_places_file_gives_named_points_and_airports_and_a_bad_line_is_named() {
     assert_eq!(f.fixes.len(), 3);
     assert_eq!(f.airports.len(), 1);
     assert!(f.airports.contains_key("ORD"));
-    let book = place_book(&new_legacy(), &f);
-    // A name with two places far apart is ambiguous; one with a single place has it.
-    assert_eq!(find(&book, &pad(b"ABC")), Found::Ambiguous);
-    assert!(matches!(find(&book, &pad(b"SOLO")), Found::At(p) if p.lat_deg == 41.0));
-    assert_eq!(find(&book, &pad(b"NONE")), Found::Unknown);
+    let mut t = PlaceTable::default();
+    apply_places(&mut t, &f);
+    assert_eq!(point_places(&t, "ABC").len(), 2);
+    assert_eq!(point_places(&t, "SOLO")[0].lat_deg, 41.0);
+    assert!(point_places(&t, "NONE").is_empty());
+    assert_eq!(airport_places(&t, "KORD").len(), 1);
     for (bad, line) in [
         ("fix,AB,1,2\nfix,CD,x,2", 2),
         ("fix,AB,95,2", 1),
@@ -421,4 +417,29 @@ fn a_places_file_gives_named_points_and_airports_and_a_bad_line_is_named() {
         let e = parse_places(bad).unwrap_err();
         assert!(e.contains(&format!("line {line}")), "{bad}: {e}");
     }
+}
+
+// REQ: OA-LTJ-024
+#[test]
+fn nasr_gives_fixes_navaids_and_airports_by_both_codes_and_a_places_file_overrides_it() {
+    use oa_legacy_traj::shell::places::{airport_places, point_places, table_from_csv};
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../crates/oa-nasr/tests/fixtures/"
+    );
+    let rd = |n: &str| std::fs::read(format!("{dir}{n}.csv")).unwrap();
+    let mut t = table_from_csv(&rd("FIX_BASE"), &rd("NAV_BASE"), &rd("APT_BASE")).unwrap();
+    // A fix, a navaid and an airport (FAA and K-prefixed ICAO form).
+    assert_eq!(point_places(&t, "aaall").len(), 1);
+    assert!((point_places(&t, "AAALL")[0].lat_deg - 42.12018888).abs() < 1e-6);
+    assert_eq!(point_places(&t, "DPA").len(), 1);
+    assert_eq!(airport_places(&t, "ORD").len(), 1);
+    assert_eq!(airport_places(&t, "KORD").len(), 1);
+    // A route may name an airport: the point lookup falls back to airports.
+    assert_eq!(point_places(&t, "ORD").len(), 1);
+    assert!(point_places(&t, "NOSUCH").is_empty());
+    let f = oa_legacy_traj::shell::places::parse_places("fix,AAALL,10.0,20.0\n").unwrap();
+    apply_places(&mut t, &f);
+    assert_eq!(point_places(&t, "AAALL").len(), 1);
+    assert_eq!(point_places(&t, "AAALL")[0].lat_deg, 10.0);
 }

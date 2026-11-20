@@ -227,8 +227,11 @@ dependencies = [
  "oa-bench",
  "oa-ieee",
  "oa-math",
+ "oa-nasr",
  "oa-replay",
  "oa-sealed",
+ "oa-sha256",
+ "oa-zip",
 ]
 
 [[package]]

@@ -25,6 +25,7 @@ fn main() -> ExitCode {
         .into_iter()
         .chain(args.adsb.iter())
         .chain(args.places.iter())
+        .chain(args.nasr.iter())
     {
         if let Err(e) = refuse_sealed(p) {
             eprintln!("oa-legacy-traj: {e}");

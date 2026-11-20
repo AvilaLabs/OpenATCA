@@ -54,6 +54,7 @@ pub fn score(
         error_s: (est_ms - actual_ms) as f64 / 1000.0,
         look_ahead_s: look_ahead_ms as f64 / 1000.0,
         bin,
+        est_bin: bin_of(est_ms - issue_ms),
     })
 }
 
@@ -69,16 +70,13 @@ pub struct Stats {
     pub rms: f64,
 }
 
-/// The value at fraction `q` of the sorted values, by linear interpolation between the two
-/// nearest ranks (rank `q * (n - 1)`). `sorted` is not empty.
-fn quantile(sorted: &[f64], q: f64) -> f64 {
-    let n = sorted.len();
-    let rank = q * (n - 1) as f64;
-    let lo = oa_ieee::floor(rank) as usize;
-    let frac = rank - lo as f64;
-    let a = sorted.get(lo).copied().unwrap_or(f64::NAN);
-    let b = sorted.get(lo + 1).copied().unwrap_or(a);
-    a + (b - a) * frac
+/// The nearest-rank percentile `p` of an ascending slice, as `oa-bench` and `p002` define it:
+/// the value at 1-based rank `ceil(p * n / 100)`, no interpolation. `sorted` is not empty. (They
+/// apply it to absolute values; here it is applied to the signed errors.)
+pub fn nearest_rank(sorted: &[f64], p: u64) -> f64 {
+    let n = sorted.len() as u64;
+    let k = (p * n).div_ceil(100).clamp(1, n);
+    sorted.get((k - 1) as usize).copied().unwrap_or(f64::NAN)
 }
 
 /// The statistics of `values`; `None` for no value. Values are put in order first, so the sums
@@ -98,10 +96,10 @@ pub fn stats(values: &[f64]) -> Option<Stats> {
     }
     Some(Stats {
         n: v.len() as u64,
-        median: quantile(&v, 0.5),
+        median: nearest_rank(&v, 50),
         mean: sum / n,
-        p5: quantile(&v, 0.05),
-        p95: quantile(&v, 0.95),
+        p5: nearest_rank(&v, 5),
+        p95: nearest_rank(&v, 95),
         rms: oa_ieee::sqrt(sq / n),
     })
 }

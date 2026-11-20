@@ -1,30 +1,139 @@
-//! Where the named points are. The recordings are the only source: a route point of an SFDPS
-//! expanded route carries its coordinates, and a name with coordinates in any route has a place.
-//! A name that has coordinates at two places more than a nautical mile apart is ambiguous and
-//! gets none. Nothing is looked up in a navigation database.
+//! Where the named points and the airports are: NASR (FIX_BASE, NAV_BASE, APT_BASE) and an
+//! optional places file that overrides it. Nothing is derived from the recordings.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::core::cross::flat_dist_m;
-use crate::core::types::{AirState, Place};
-use oa_bench::legacy::{Legacy, NO_COORD};
+use crate::core::types::Place;
 
-/// Metres in the distance within which two coordinates of one name are the same place.
+/// Metres within which two places of one name are the same place.
 const SAME_PLACE_M: f64 = 1852.0;
 
-/// What a name resolved to.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Found {
-    At(Place),
-    Unknown,
-    Ambiguous,
-}
-
-/// The places of the names of the route points of a legacy table.
+/// The places of every name: points (fixes, waypoints, navaids) and airports.
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Debug, Default)]
-pub struct PlaceBook {
-    names: BTreeMap<[u8; 8], Vec<Place>>,
+pub struct PlaceTable {
+    /// Distinct places by upper case identifier, fixes and navaids together.
+    pub points: BTreeMap<String, Vec<Place>>,
+    /// Distinct places by airport key (the FAA identifier and the ICAO identifier with the K of a
+    /// contiguous US code dropped).
+    pub airports: BTreeMap<String, Vec<Place>>,
+    /// Rows NASR parsing rejected, by file.
+    pub rejected: u64,
+}
+
+fn add(m: &mut BTreeMap<String, Vec<Place>>, name: &str, here: Place) {
+    if name.is_empty() {
+        return;
+    }
+    let list = m.entry(name.to_string()).or_default();
+    if !list
+        .iter()
+        .any(|q| flat_dist_m(*q, here.lat_deg, here.lon_deg) <= SAME_PLACE_M)
+    {
+        list.push(here);
+    }
+}
+
+/// The airport key of a code: upper case, the K of a four-letter contiguous US code dropped, so
+/// `KORD` and `ORD` are one airport.
+pub fn airport_key(code: &str) -> String {
+    let s = code.trim().to_ascii_uppercase();
+    match s.strip_prefix('K') {
+        Some(rest) if s.len() == 4 => rest.to_string(),
+        _ => s,
+    }
+}
+
+/// Builds the table from the three NASR CSV files (`FIX_BASE`, `NAV_BASE`, `APT_BASE`).
+pub fn table_from_csv(fix: &[u8], nav: &[u8], apt: &[u8]) -> Result<PlaceTable, String> {
+    let mut t = PlaceTable::default();
+    let fixes =
+        oa_nasr::fix::parse_fixes("FIX_BASE.csv", fix).map_err(|e| format!("FIX_BASE.csv: {e}"))?;
+    t.rejected += fixes.rejected.len() as u64 + fixes.rejected_dropped;
+    for f in &fixes.records {
+        let here = Place {
+            lat_deg: f.position.lat,
+            lon_deg: f.position.lon,
+        };
+        add(&mut t.points, &f.fix_id.to_ascii_uppercase(), here);
+    }
+    let navs = oa_nasr::nav::parse_navaids("NAV_BASE.csv", nav)
+        .map_err(|e| format!("NAV_BASE.csv: {e}"))?;
+    t.rejected += navs.rejected.len() as u64 + navs.rejected_dropped;
+    for n in &navs.records {
+        let here = Place {
+            lat_deg: n.position.lat,
+            lon_deg: n.position.lon,
+        };
+        add(&mut t.points, &n.nav_id.to_ascii_uppercase(), here);
+    }
+    let apts = oa_nasr::apt::parse_airports("APT_BASE.csv", apt)
+        .map_err(|e| format!("APT_BASE.csv: {e}"))?;
+    t.rejected += apts.rejected.len() as u64 + apts.rejected_dropped;
+    for a in apts.records.iter().filter(|a| a.site_type_code == "A") {
+        let here = Place {
+            lat_deg: a.position.lat,
+            lon_deg: a.position.lon,
+        };
+        add(&mut t.airports, &airport_key(&a.arpt_id), here);
+        if let Some(icao) = &a.icao_id {
+            add(&mut t.airports, &airport_key(icao), here);
+        }
+    }
+    Ok(t)
+}
+
+/// Reads the table from an NASR CSV archive, through the seal guard; also the archive's SHA-256.
+pub fn load_nasr(path: &Path) -> Result<(PlaceTable, String), String> {
+    let bytes = oa_zip::read_archive_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let zip = oa_zip::Archive::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let get = |n: &str| {
+        zip.extract(n)
+            .map_err(|e| format!("{}: {n}: {e}", path.display()))
+    };
+    let t = table_from_csv(
+        &get("FIX_BASE.csv")?,
+        &get("NAV_BASE.csv")?,
+        &get("APT_BASE.csv")?,
+    )?;
+    Ok((t, oa_sha256::to_hex(&oa_sha256::sha256(&bytes))))
+}
+
+/// Applies a places file: a name it gives has only the places the file gives.
+pub fn apply_places(t: &mut PlaceTable, f: &PlacesFile) {
+    let mut seen: BTreeMap<String, bool> = BTreeMap::new();
+    for (name, here) in &f.fixes {
+        let n = oa_bench::legacy::name(name).to_string();
+        if seen.insert(n.clone(), true).is_none() {
+            t.points.remove(&n);
+        }
+        add(&mut t.points, &n, *here);
+    }
+    for (apt, here) in &f.airports {
+        t.airports.insert(apt.clone(), vec![*here]);
+    }
+}
+
+/// The places of a point name (a fix or navaid; failing that, an airport code, since routes
+/// name airports too).
+pub fn point_places<'a>(t: &'a PlaceTable, name: &str) -> &'a [Place] {
+    let n = name.trim().to_ascii_uppercase();
+    match t.points.get(&n) {
+        Some(v) if !v.is_empty() => v,
+        _ => t
+            .airports
+            .get(&airport_key(&n))
+            .map_or(&[][..], Vec::as_slice),
+    }
+}
+
+/// The places of an airport code.
+pub fn airport_places<'a>(t: &'a PlaceTable, code: &str) -> &'a [Place] {
+    t.airports
+        .get(&airport_key(code))
+        .map_or(&[][..], Vec::as_slice)
 }
 
 /// The place of a coordinate pair in 1e-7 degree.
@@ -35,34 +144,8 @@ pub fn place_of_e7(lat_e7: i32, lon_e7: i32) -> Place {
     }
 }
 
-fn add_place(book: &mut PlaceBook, name: [u8; 8], here: Place) {
-    let list = book.names.entry(name).or_default();
-    if !list
-        .iter()
-        .any(|q| flat_dist_m(*q, here.lat_deg, here.lon_deg) <= SAME_PLACE_M)
-    {
-        list.push(here);
-    }
-}
-
-/// Collects the places of every named route point that has coordinates, and of the named points
-/// of a places file.
-pub fn place_book(leg: &Legacy, file: &PlacesFile) -> PlaceBook {
-    let mut book = PlaceBook::default();
-    let p = &leg.route_points;
-    for ((fix, &lat), &lon) in p.fix.iter().zip(&p.lat_e7).zip(&p.lon_e7) {
-        if lat == NO_COORD || lon == NO_COORD || fix.iter().all(|&b| b == 0) {
-            continue;
-        }
-        add_place(&mut book, *fix, place_of_e7(lat, lon));
-    }
-    for (name, here) in &file.fixes {
-        add_place(&mut book, *name, *here);
-    }
-    book
-}
-
-/// The named points and airport reference points a caller supplies.
+/// The named points and airport reference points a caller supplies, which replace NASR's for
+/// the names they give.
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PlacesFile {
@@ -104,7 +187,7 @@ pub fn parse_places(text: &str) -> Result<PlacesFile, String> {
             }
             "fix" => return Err(bad("a fix name is 1 to 8 characters")),
             "airport" if !upper.is_empty() => {
-                let key = crate::shell::run::airport_key(upper.as_bytes());
+                let key = airport_key(&upper);
                 if out.airports.insert(key, here).is_some() {
                     return Err(bad("airport given twice"));
                 }
@@ -113,99 +196,4 @@ pub fn parse_places(text: &str) -> Result<PlacesFile, String> {
         }
     }
     Ok(out)
-}
-
-/// The place of a name.
-pub fn find(book: &PlaceBook, name: &[u8; 8]) -> Found {
-    match book.names.get(name).map(Vec::as_slice) {
-        None | Some([]) => Found::Unknown,
-        Some([one]) => Found::At(*one),
-        Some(_) => Found::Ambiguous,
-    }
-}
-
-/// Counts of the book: names with one place, and names with several.
-pub fn book_counts(book: &PlaceBook) -> (u64, u64) {
-    let one = book.names.values().filter(|v| v.len() == 1).count() as u64;
-    let many = book.names.values().filter(|v| v.len() > 1).count() as u64;
-    (one, many)
-}
-
-/// The most candidate landings kept per airport when deriving its reference point.
-const MAX_CANDIDATES: usize = 2000;
-/// Fewest landings that must agree for a derived reference point.
-const MIN_AGREE: usize = 3;
-/// Landings within this of each other agree, metres (the runway radius of the scoring).
-const AGREE_M: f64 = 5.0 * 1852.0;
-
-/// The airports' reference points where the recordings give none: for each airport that flights
-/// name as their arrival, the centre of the largest group of landings (an airborne report followed
-/// by a ground one, within 120 s) of those flights' aircraft that lie within [`AGREE_M`] of each
-/// other, found among the landings in the flight's interval; at least [`MIN_AGREE`] must agree.
-/// The result is the average position of the last airborne reports of that group. A landing
-/// that happens at the airport by construction is within the radius of it, so the landing test
-/// against a derived point only rejects landings that are elsewhere.
-pub fn derive_airports(
-    flights: &[(String, u32, i64, i64)],
-    states: &BTreeMap<u32, Vec<AirState>>,
-) -> BTreeMap<String, Place> {
-    let mut cand: BTreeMap<&str, Vec<Place>> = BTreeMap::new();
-    for (apt, addr, from, to) in flights {
-        let Some(st) = states.get(addr) else {
-            continue;
-        };
-        let list = cand.entry(apt.as_str()).or_default();
-        for w in st.windows(2) {
-            let (Some(a), Some(b)) = (w.first(), w.get(1)) else {
-                continue;
-            };
-            if !a.ground
-                && b.ground
-                && b.t_ms - a.t_ms <= 120_000
-                && a.t_ms >= *from
-                && a.t_ms <= *to
-            {
-                list.push(Place {
-                    lat_deg: a.lat_deg,
-                    lon_deg: a.lon_deg,
-                });
-            }
-        }
-    }
-    let mut out = BTreeMap::new();
-    for (apt, mut list) in cand {
-        list.truncate(MAX_CANDIDATES);
-        let mut best: Option<(usize, usize)> = None;
-        for (i, p) in list.iter().enumerate() {
-            let n = list
-                .iter()
-                .filter(|q| flat_dist_m(*p, q.lat_deg, q.lon_deg) <= AGREE_M)
-                .count();
-            if best.is_none_or(|b| n > b.0) {
-                best = Some((n, i));
-            }
-        }
-        let Some((n, i)) = best else {
-            continue;
-        };
-        let Some(&centre) = list.get(i) else {
-            continue;
-        };
-        if n < MIN_AGREE {
-            continue;
-        }
-        let group: Vec<&Place> = list
-            .iter()
-            .filter(|q| flat_dist_m(centre, q.lat_deg, q.lon_deg) <= AGREE_M)
-            .collect();
-        let k = group.len() as f64;
-        out.insert(
-            apt.to_string(),
-            Place {
-                lat_deg: group.iter().map(|q| q.lat_deg).sum::<f64>() / k,
-                lon_deg: group.iter().map(|q| q.lon_deg).sum::<f64>() / k,
-            },
-        );
-    }
-    out
 }

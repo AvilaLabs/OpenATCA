@@ -4,5 +4,6 @@
 pub mod bins;
 pub mod cross;
 pub mod join;
+pub mod places;
 pub mod report;
 pub mod types;

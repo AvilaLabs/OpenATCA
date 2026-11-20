@@ -97,11 +97,12 @@ pub enum Exclusion {
     NoIssueTime,
     /// The flight was not joined to an ADS-B aircraft (see the join counts for why).
     NotJoined,
-    /// The point has no known position.
+    /// The point's name is not in NASR or the places file.
     PlaceUnknown,
-    /// The point's name has more than one position in the recordings.
+    /// The point's name has several places and none could be chosen (no reference to choose by,
+    /// or the places are over 500 NM apart).
     PlaceAmbiguous,
-    /// The airport has no known reference point.
+    /// The airport is not in NASR or the places file.
     AirportUnknown,
     /// The joined aircraft has no truth sample in the flight's interval.
     NoTruthPath,
@@ -126,9 +127,9 @@ pub const EXCLUSION_NAMES: [&str; EXCLUSION_COUNT] = [
     "message gave no time for the point",
     "message carries no issue time",
     "flight not joined to an ADS-B aircraft",
-    "point has no known position",
-    "point name has several positions",
-    "airport has no known reference point",
+    "point name not in NASR or the places file",
+    "point name has several places, none chosen",
+    "airport not in NASR or the places file",
     "no truth sample of the aircraft in the flight's interval",
     "truth path never within the cut distance",
     "every passage before the estimate was issued",
@@ -167,4 +168,6 @@ pub struct Sample {
     pub look_ahead_s: f64,
     /// The look-ahead bin, an index into [`crate::core::bins::BIN_NAMES`].
     pub bin: usize,
+    /// The bin of the estimated look-ahead (the estimate minus the issue time), if in range.
+    pub est_bin: Option<usize>,
 }

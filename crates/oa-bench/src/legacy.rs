@@ -312,6 +312,9 @@ pub struct Legacy {
     pub route_points: RoutePoints,
     pub tbfm: TbfmTable,
     pub tfms: TfmsTable,
+    /// TFMS arrival times of type `ACTUAL`, one row each (kind [`tfms_kind::ETA`]). Kept apart
+    /// from [`Legacy::tfms`], whose rows are all estimates, so no estimate metric reads them.
+    pub tfms_actual: TfmsTable,
     pub counts: Counts,
     pub limits: Limits,
     by_gufi: HashMap<u128, u32>,
@@ -489,6 +492,22 @@ pub fn push_tfms(leg: &mut Legacy, e: &TfmsIn) {
         return;
     }
     let t = &mut leg.tfms;
+    t.plan_id.push(e.plan_id);
+    t.acid.push(e.acid);
+    t.dep.push(e.dep);
+    t.arr.push(e.arr);
+    t.kind.push(e.kind);
+    t.time_ms.push(e.time_ms);
+    t.issue_ms.push(e.issue_ms);
+}
+
+/// Appends a TFMS actual arrival time to [`Legacy::tfms_actual`], or counts the overflow.
+pub fn push_tfms_actual(leg: &mut Legacy, e: &TfmsIn) {
+    if leg.tfms_actual.kind.len() >= leg.limits.tfms {
+        leg.counts.overflow_tfms = leg.counts.overflow_tfms.saturating_add(1);
+        return;
+    }
+    let t = &mut leg.tfms_actual;
     t.plan_id.push(e.plan_id);
     t.acid.push(e.acid);
     t.dep.push(e.dep);

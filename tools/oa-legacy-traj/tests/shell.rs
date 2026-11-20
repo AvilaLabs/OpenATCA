@@ -28,6 +28,13 @@ fn the_arguments_take_the_inputs_in_any_order_and_state_the_defaults() {
     assert!(a.places.is_none());
     let a = parse(&argv(&format!("{BASE} --adsb a.oaf --places p.csv"))).unwrap();
     assert_eq!(a.places.as_deref(), Some(std::path::Path::new("p.csv")));
+    assert!(a.nasr.is_none());
+    let a = parse(&argv(&format!("{BASE} --adsb a.oaf --nasr n.zip"))).unwrap();
+    assert_eq!(a.nasr.as_deref(), Some(std::path::Path::new("n.zip")));
+    assert!(parse(&argv(&format!(
+        "{BASE} --adsb a.oaf --nasr n.zip --nasr m.zip"
+    )))
+    .is_err());
     assert_eq!(a.cut_nm, 2.0);
     assert_eq!(a.runway_nm, 5.0);
     assert_eq!(a.landing_gap_s, 120);
@@ -128,5 +135,23 @@ fn a_link_into_sealed_data_is_refused_for_every_input_and_the_output() {
         assert!(String::from_utf8_lossy(&o.stderr).contains("OA-SEAL-001"));
     }
     assert!(!out.exists() && !sealed.join("new").exists());
+    // The NASR archive path is checked like every other input.
+    let o = Command::new(env!("CARGO_BIN_EXE_oa-legacy-traj"))
+        .args(["--sfdps"])
+        .arg(t.join("fine.oaf"))
+        .arg("--tbfm")
+        .arg(t.join("fine.oaf"))
+        .arg("--tfms")
+        .arg(t.join("fine.oaf"))
+        .arg("--adsb")
+        .arg(t.join("fine.oaf"))
+        .arg("--nasr")
+        .arg(t.join("clip-link.oaf"))
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(2));
+    assert!(!out.exists());
     let _ = fs::remove_dir_all(&t);
 }

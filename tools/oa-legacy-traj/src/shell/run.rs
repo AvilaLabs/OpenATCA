@@ -14,9 +14,10 @@ use oa_replay::FeedKind;
 use crate::core::bins::score;
 use crate::core::cross::{approach, choose_landing, choose_passage, landings};
 use crate::core::join::{index_legs, join, legs_of, outcome_index, Leg, LegIndex, Outcome, Unit};
+use crate::core::places::{classify, resolve, Resolution, CLASS_NAMES};
 use crate::core::report::{
-    closest_add, kind_add, kind_exclude, render_counts_csv, render_csv, render_text, system_new,
-    SystemReport,
+    closest_add, kind_add, kind_add_with, kind_exclude, render_counts_csv, render_csv, render_text,
+    system_new, Extra, Section, SystemReport,
 };
 use crate::core::types::{
     AirState, Approach, Config, Exclusion, Landing, PathPoint, Place, Sample, NO_ADDR,
@@ -24,8 +25,8 @@ use crate::core::types::{
 use crate::shell::args::Args;
 use crate::shell::guard::guarded_opener;
 use crate::shell::places::{
-    book_counts, derive_airports, find, parse_places, place_book, place_of_e7, Found, PlaceBook,
-    PlacesFile,
+    airport_key, airport_places, apply_places, load_nasr, parse_places, place_of_e7, point_places,
+    PlaceTable, PlacesFile,
 };
 use crate::shell::write::write_all;
 
@@ -42,18 +43,41 @@ struct Ctx<'a> {
     step_ms: i64,
     built: &'a BuiltTruth,
     ix: &'a LegIndex,
-    book: &'a PlaceBook,
+    table: &'a PlaceTable,
     states: &'a BTreeMap<u32, Vec<AirState>>,
-    arps: &'a BTreeMap<String, Place>,
+    /// The TFMS actual arrival time by plan identifier, Unix ms (the latest issued).
+    tfms_actual: &'a BTreeMap<[u8; 12], i64>,
 }
 
-/// The airport code as the tables compare it: upper case, with the K of a four-letter contiguous
-/// US code dropped, so `KORD` and `ORD` are one airport.
-pub fn airport_key(code: &[u8]) -> String {
-    let s: String = name(code).trim().to_ascii_uppercase();
-    match s.strip_prefix('K') {
-        Some(rest) if s.len() == 4 => rest.to_string(),
-        _ => s,
+/// The airport key of a code held as bytes.
+fn key_of(code: &[u8]) -> String {
+    airport_key(name(code))
+}
+
+/// At most this many reference places are taken from a path or a list of states.
+const MAX_REFS: usize = 200;
+
+/// Reference places for choosing among places of one name: every n-th of `v`, at most
+/// [`MAX_REFS`].
+fn thin(v: impl ExactSizeIterator<Item = Place>) -> Vec<Place> {
+    let step = (v.len() / MAX_REFS).max(1);
+    v.step_by(step).collect()
+}
+
+/// Resolves a point name against the table; the places of the route reference are asked for
+/// only when the name has several. `Ok` carries whether one of several was taken.
+fn point_result(
+    table: &PlaceTable,
+    nm: &str,
+    refs: impl FnOnce() -> Vec<Place>,
+) -> Result<(Place, bool), Exclusion> {
+    let cands = point_places(table, nm);
+    let r = if cands.len() > 1 { refs() } else { Vec::new() };
+    match resolve(cands, &r) {
+        Resolution::NotFound => Err(Exclusion::PlaceUnknown),
+        Resolution::Unique(p) => Ok((p, false)),
+        Resolution::Picked(p) => Ok((p, true)),
+        Resolution::Refused => Err(Exclusion::PlaceAmbiguous),
     }
 }
 
@@ -165,6 +189,8 @@ struct TableUnit {
     rows: Vec<u32>,
     /// The airport the flight lands at, as [`airport_key`], when the records name one.
     arrival: Option<String>,
+    /// The plan identifier, to find the TFMS actual arrival of the flight.
+    plan: [u8; 12],
 }
 
 /// The aircraft address the flights of `cands` carry: none, one, or conflicting.
@@ -187,7 +213,7 @@ fn arrival_of(leg: &Legacy, cands: &[u32]) -> Option<String> {
     let set: BTreeSet<String> = cands
         .iter()
         .filter_map(|&f| leg.flights.arr.get(f as usize))
-        .map(|a| airport_key(a))
+        .map(|a| key_of(a))
         .filter(|a| !a.is_empty())
         .collect();
     let mut it = set.iter();
@@ -251,6 +277,7 @@ fn tbfm_units(
             outcome,
             rows,
             arrival,
+            plan: key,
         });
     }
     out
@@ -292,7 +319,7 @@ fn tfms_units(leg: &Legacy, plans: &PlanIndex, ix: &LegIndex) -> Vec<TableUnit> 
         let arr: BTreeSet<String> = rows
             .iter()
             .filter_map(|&r| leg.tfms.arr.get(r as usize))
-            .map(|a| airport_key(a))
+            .map(|a| key_of(a))
             .filter(|a| !a.is_empty())
             .collect();
         let mut it = arr.iter();
@@ -305,6 +332,7 @@ fn tfms_units(leg: &Legacy, plans: &PlanIndex, ix: &LegIndex) -> Vec<TableUnit> 
             outcome,
             rows,
             arrival,
+            plan: norm_id::<12>(&plan),
         });
     }
     out
@@ -313,6 +341,14 @@ fn tfms_units(leg: &Legacy, plans: &PlanIndex, ix: &LegIndex) -> Vec<TableUnit> 
 fn joined_addr(o: Outcome) -> Option<u32> {
     match o {
         Outcome::ByAddress(a) | Outcome::ByCallsign(a) => Some(a),
+        _ => None,
+    }
+}
+
+fn by_callsign(o: Outcome) -> Option<bool> {
+    match o {
+        Outcome::ByAddress(_) => Some(false),
+        Outcome::ByCallsign(_) => Some(true),
         _ => None,
     }
 }
@@ -392,6 +428,40 @@ fn eram(leg: &Legacy, ctx: &Ctx<'_>, sys: &mut SystemReport, flights_total: &mut
         };
         let path = sample_path(ctx, addr, &legs_of_unit(ctx, addr, &unit), from_ms, to_ms);
         let mut searches = Searches::default();
+        // Several places of one name: the one nearest the route's own coordinates, else nearest
+        // the flown path.
+        let route_refs = || {
+            let mut v: Vec<Place> = Vec::new();
+            for &r in routes {
+                let (first, len) = (
+                    leg.routes.first.get(r as usize).copied().unwrap_or(0) as usize,
+                    leg.routes.len.get(r as usize).copied().unwrap_or(0) as usize,
+                );
+                for p in first..first + len {
+                    if let (Some(&la), Some(&lo)) = (
+                        leg.route_points.lat_e7.get(p),
+                        leg.route_points.lon_e7.get(p),
+                    ) {
+                        if la != NO_COORD && lo != NO_COORD {
+                            v.push(place_of_e7(la, lo));
+                        }
+                    }
+                }
+            }
+            if v.is_empty() {
+                v = thin(path.iter().map(|q| Place {
+                    lat_deg: q.lat_deg,
+                    lon_deg: q.lon_deg,
+                }));
+            } else {
+                v = thin(v.into_iter());
+            }
+            v
+        };
+        let extra = Extra {
+            by_callsign: by_callsign(outcome),
+            ..Extra::default()
+        };
         for &r in routes {
             let issue = ts(r);
             let (first, len) = (
@@ -409,20 +479,32 @@ fn eram(leg: &Legacy, ctx: &Ctx<'_>, sys: &mut SystemReport, flights_total: &mut
                 } else if est == NO_TIME {
                     Err(Exclusion::NoEstimate)
                 } else {
-                    match point_place(leg, ctx, p, lat, lon) {
+                    let mut picked = false;
+                    let placed = if lat != NO_COORD && lon != NO_COORD {
+                        Ok(place_of_e7(lat, lon))
+                    } else {
+                        let fix = leg.route_points.fix.get(p).copied().unwrap_or([0; 8]);
+                        point_result(ctx.table, name(&fix), route_refs).map(|(pl, pk)| {
+                            picked = pk;
+                            pl
+                        })
+                    };
+                    match placed {
                         Err(x) => Err(x),
-                        Ok(place) if path.is_empty() => {
-                            let _ = place;
-                            Err(Exclusion::NoTruthPath)
-                        }
+                        Ok(_) if path.is_empty() => Err(Exclusion::NoTruthPath),
                         Ok(place) => {
+                            if picked {
+                                if let Some(k) = sys.kinds.first_mut() {
+                                    k.resolved_ambiguous += 1;
+                                }
+                            }
                             let a = approach_of(&mut searches, sys, &path, place, &ctx.cfg);
                             score_cross(a, est, issue, &ctx.cfg)
                         }
                     }
                 };
                 if let Some(k) = sys.kinds.first_mut() {
-                    kind_add(k, f, result);
+                    kind_add_with(k, f, result, extra);
                 }
             }
         }
@@ -431,25 +513,6 @@ fn eram(leg: &Legacy, ctx: &Ctx<'_>, sys: &mut SystemReport, flights_total: &mut
 
 fn legs_of_unit(ctx: &Ctx<'_>, addr: u32, u: &Unit) -> Vec<u32> {
     legs_of(ctx.ix, addr, u)
-}
-
-/// The place of route point `p`: its own coordinates, else the place the name has in the book.
-fn point_place(
-    leg: &Legacy,
-    ctx: &Ctx<'_>,
-    p: usize,
-    lat: i32,
-    lon: i32,
-) -> Result<Place, Exclusion> {
-    if lat != NO_COORD && lon != NO_COORD {
-        return Ok(place_of_e7(lat, lon));
-    }
-    let fix = leg.route_points.fix.get(p).copied().unwrap_or([0; 8]);
-    match find(ctx.book, &fix) {
-        Found::At(pl) => Ok(pl),
-        Found::Unknown => Err(Exclusion::PlaceUnknown),
-        Found::Ambiguous => Err(Exclusion::PlaceAmbiguous),
-    }
 }
 
 /// TBFM: the meter-fix and runway estimates and the scheduled times, against the crossing of the
@@ -468,7 +531,7 @@ fn tbfm(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
         let addr = joined_addr(u.outcome);
         let mut path: Option<Vec<PathPoint>> = None;
         let mut searches = Searches::default();
-        let mut lands: BTreeMap<String, Vec<Landing>> = BTreeMap::new();
+        let mut lands: BTreeMap<String, AirportLandings> = BTreeMap::new();
         for &r in &u.rows {
             let ri = r as usize;
             let kind = leg.tbfm.kind.get(ri).copied().unwrap_or(0);
@@ -485,61 +548,145 @@ fn tbfm(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
                 Err(Exclusion::NoEstimate)
             } else if let (Some(a), true) = (addr, slot < 2) {
                 let fix = leg.tbfm.fix.get(ri).copied().unwrap_or([0; 8]);
-                match find(ctx.book, &fix) {
-                    Found::Unknown => Err(Exclusion::PlaceUnknown),
-                    Found::Ambiguous => Err(Exclusion::PlaceAmbiguous),
-                    Found::At(place) => {
-                        let p = path.get_or_insert_with(|| {
-                            sample_path(
-                                ctx,
-                                a,
-                                &legs_of_unit(ctx, a, &u.unit),
-                                u.unit.from_ms,
-                                u.unit.to_ms,
-                            )
-                        });
-                        if p.is_empty() {
-                            Err(Exclusion::NoTruthPath)
-                        } else {
-                            let ap = approach_of(&mut searches, sys, p, place, &ctx.cfg);
-                            score_cross(ap, est, issue, &ctx.cfg)
+                let nm = name(&fix);
+                if point_places(ctx.table, nm).is_empty() {
+                    Err(Exclusion::PlaceUnknown)
+                } else {
+                    let p = path.get_or_insert_with(|| {
+                        sample_path(
+                            ctx,
+                            a,
+                            &legs_of_unit(ctx, a, &u.unit),
+                            u.unit.from_ms,
+                            u.unit.to_ms,
+                        )
+                    });
+                    if p.is_empty() {
+                        Err(Exclusion::NoTruthPath)
+                    } else {
+                        let refs = || {
+                            thin(p.iter().map(|q| Place {
+                                lat_deg: q.lat_deg,
+                                lon_deg: q.lon_deg,
+                            }))
+                        };
+                        match point_result(ctx.table, nm, refs) {
+                            Err(x) => Err(x),
+                            Ok((place, picked)) => {
+                                if picked {
+                                    if let Some(k) = sys.kinds.get_mut(slot) {
+                                        k.resolved_ambiguous += 1;
+                                    }
+                                }
+                                let ap = approach_of(&mut searches, sys, p, place, &ctx.cfg);
+                                score_cross(ap, est, issue, &ctx.cfg)
+                                    .map(|sm| (sm, Extra::default()))
+                            }
                         }
                     }
                 }
             } else if let Some(a) = addr {
-                landing_result(ctx, a, u.arrival.as_deref(), &mut lands, est, issue)
+                let actual_arr = ctx.tfms_actual.get(&u.plan).copied();
+                landing_result(
+                    ctx,
+                    a,
+                    u.arrival.as_deref(),
+                    &mut lands,
+                    est,
+                    issue,
+                    actual_arr,
+                )
+                .map(|(sm, x, pk)| {
+                    if pk {
+                        if let Some(k) = sys.kinds.get_mut(slot) {
+                            k.resolved_ambiguous += 1;
+                        }
+                    }
+                    (sm, x)
+                })
             } else {
                 Err(Exclusion::NotJoined)
             };
             if let Some(k) = sys.kinds.get_mut(slot) {
-                kind_add(k, uix as u32, result);
+                add_result(k, uix as u32, result, by_callsign(u.outcome));
             }
         }
     }
 }
 
-/// An estimate of a landing time against the landing of the aircraft at the airport.
+/// Adds a scored estimate, with the diagnostics it carries, or its exclusion.
+fn add_result(
+    k: &mut crate::core::report::KindTable,
+    unit: u32,
+    r: Result<(Sample, Extra), Exclusion>,
+    cs: Option<bool>,
+) {
+    match r {
+        Ok((sm, mut x)) => {
+            x.by_callsign = cs;
+            kind_add_with(k, unit, Ok(sm), x);
+        }
+        Err(e) => kind_add(k, unit, Err(e)),
+    }
+}
+
+/// An airport of a flight: its place (and whether one of several was taken), and the landings of
+/// the aircraft near it.
+type AirportLandings = Result<(bool, Vec<Landing>), Exclusion>;
+
+/// An estimate of a landing time against the landing of the aircraft at the airport. `actual_arr`
+/// is the TFMS actual arrival time of the flight, if it has one (a diagnostic: the same estimate
+/// is also scored against it). Returns the sample, its diagnostics, and whether the airport had
+/// several places and one was taken.
 fn landing_result(
     ctx: &Ctx<'_>,
     addr: u32,
     arrival: Option<&str>,
-    cache: &mut BTreeMap<String, Vec<Landing>>,
+    cache: &mut BTreeMap<String, AirportLandings>,
     est: i64,
     issue: i64,
-) -> Result<Sample, Exclusion> {
+    actual_arr: Option<i64>,
+) -> Result<(Sample, Extra, bool), Exclusion> {
     let Some(apt) = arrival else {
         return Err(Exclusion::AirportUnknown);
     };
-    let Some(&arp) = ctx.arps.get(apt) else {
-        return Err(Exclusion::AirportUnknown);
-    };
-    let l = cache.entry(apt.to_string()).or_insert_with(|| {
-        ctx.states
-            .get(&addr)
-            .map_or_else(Vec::new, |s| landings(s, arp, &ctx.cfg))
+    let entry = cache.entry(apt.to_string()).or_insert_with(|| {
+        let states = ctx.states.get(&addr).map_or(&[][..], Vec::as_slice);
+        let refs = thin(
+            states
+                .iter()
+                .map(|s| Place {
+                    lat_deg: s.lat_deg,
+                    lon_deg: s.lon_deg,
+                })
+                .collect::<Vec<_>>()
+                .into_iter(),
+        );
+        match resolve(airport_places(ctx.table, apt), &refs) {
+            Resolution::NotFound => Err(Exclusion::AirportUnknown),
+            Resolution::Refused => Err(Exclusion::PlaceAmbiguous),
+            Resolution::Unique(arp) => Ok((false, landings(states, arp, &ctx.cfg))),
+            Resolution::Picked(arp) => Ok((true, landings(states, arp, &ctx.cfg))),
+        }
     });
-    let actual = choose_landing(l, issue, &ctx.cfg)?;
-    score(est, actual, issue, &ctx.cfg)
+    let (picked, l) = match entry {
+        Ok((p, l)) => (*p, l),
+        Err(e) => return Err(*e),
+    };
+    let landing = choose_landing(l, issue, &ctx.cfg)?;
+    let sm = score(est, landing.t_ms, issue, &ctx.cfg)?;
+    let alt = actual_arr.map(|t| {
+        (
+            (est - t) as f64 / 1000.0,
+            (landing.t_ms - t) as f64 / 1000.0,
+        )
+    });
+    let x = Extra {
+        gap_s: Some(landing.gap_ms as f64 / 1000.0),
+        alt,
+        by_callsign: None,
+    };
+    Ok((sm, x, picked))
 }
 
 /// TFMS: the arrival estimates, against the landing at the arrival airport.
@@ -549,7 +696,8 @@ fn tfms(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
             *c += 1;
         }
         let addr = joined_addr(u.outcome);
-        let mut lands: BTreeMap<String, Vec<Landing>> = BTreeMap::new();
+        let mut lands: BTreeMap<String, AirportLandings> = BTreeMap::new();
+        let actual_arr = ctx.tfms_actual.get(&u.plan).copied();
         for &r in &u.rows {
             let ri = r as usize;
             let issue = leg.tfms.issue_ms.get(ri).copied().unwrap_or(NO_TIME);
@@ -558,10 +706,26 @@ fn tfms(leg: &Legacy, ctx: &Ctx<'_>, units: &[TableUnit], sys: &mut SystemReport
                 None => Err(Exclusion::NotJoined),
                 Some(_) if issue == NO_TIME => Err(Exclusion::NoIssueTime),
                 Some(_) if est == NO_TIME => Err(Exclusion::NoEstimate),
-                Some(a) => landing_result(ctx, a, u.arrival.as_deref(), &mut lands, est, issue),
+                Some(a) => landing_result(
+                    ctx,
+                    a,
+                    u.arrival.as_deref(),
+                    &mut lands,
+                    est,
+                    issue,
+                    actual_arr,
+                )
+                .map(|(sm, x, pk)| {
+                    if pk {
+                        if let Some(k) = sys.kinds.first_mut() {
+                            k.resolved_ambiguous += 1;
+                        }
+                    }
+                    (sm, x)
+                }),
             };
             if let Some(k) = sys.kinds.first_mut() {
-                kind_add(k, uix as u32, result);
+                add_result(k, uix as u32, result, by_callsign(u.outcome));
             }
         }
     }
@@ -575,9 +739,8 @@ pub struct Inputs<'a> {
     pub cfg: Config,
     /// The step of the truth path sampling, ms.
     pub step_ms: i64,
-    /// The named points and airport reference points the caller supplied; an airport with none
-    /// is derived from the recordings.
-    pub places: PlacesFile,
+    /// Where the named points and airports are.
+    pub table: PlaceTable,
 }
 
 /// What the scoring produced. Cold container (A7.2).
@@ -589,10 +752,143 @@ pub struct Scored {
     pub sfdps_flights: (u64, u64),
     /// TFMS departure estimate rows, which are not scored.
     pub etd_rows: u64,
-    /// Names with one place in the book, names with several.
-    pub places: (u64, u64),
-    /// Airport reference points used.
-    pub arps: usize,
+    /// The match rates of the names against the table.
+    pub sections: Vec<Section>,
+}
+
+/// How many of the most frequent unresolved names are listed.
+const TOP_UNRESOLVED: usize = 20;
+
+/// The match of the names in `occ` (name and how many times it occurs) against the table.
+fn match_section(
+    title: &str,
+    what: &str,
+    occ: &BTreeMap<String, u64>,
+    class_of: impl Fn(&str) -> usize,
+) -> Section {
+    let mut names = [0u64; 4];
+    let mut times = [0u64; 4];
+    let mut bad: Vec<(u64, &String, usize)> = Vec::new();
+    for (nm, &n) in occ {
+        let c = class_of(nm);
+        if let (Some(a), Some(b)) = (names.get_mut(c), times.get_mut(c)) {
+            *a += 1;
+            *b += n;
+        }
+        if c == 0 || c == 3 {
+            bad.push((n, nm, c));
+        }
+    }
+    let (tn, tt): (u64, u64) = (names.iter().sum(), times.iter().sum());
+    let pct = |a: u64, b: u64| {
+        if b == 0 {
+            "n/a".to_string()
+        } else {
+            format!("{:.1}%", 100.0 * a as f64 / b as f64)
+        }
+    };
+    let mut lines = vec![format!("{what}: {tn} distinct, {tt} occurrences")];
+    for (k, c) in CLASS_NAMES.iter().enumerate() {
+        let (a, b) = (
+            names.get(k).copied().unwrap_or(0),
+            times.get(k).copied().unwrap_or(0),
+        );
+        lines.push(format!(
+            "  {c}: {a} names ({}), {b} occurrences ({})",
+            pct(a, tn),
+            pct(b, tt)
+        ));
+    }
+    let resolved = |v: &[u64; 4]| v.get(1).copied().unwrap_or(0) + v.get(2).copied().unwrap_or(0);
+    lines.push(format!(
+        "  resolvable: {} names ({}), {} occurrences ({})",
+        resolved(&names),
+        pct(resolved(&names), tn),
+        resolved(&times),
+        pct(resolved(&times), tt)
+    ));
+    bad.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    lines.push(format!(
+        "  the {TOP_UNRESOLVED} most frequent names not resolvable (occurrences, name, class):"
+    ));
+    for (n, nm, c) in bad.iter().take(TOP_UNRESOLVED) {
+        lines.push(format!(
+            "    {n} {nm} ({})",
+            CLASS_NAMES.get(*c).copied().unwrap_or("?")
+        ));
+    }
+    Section {
+        title: title.to_string(),
+        lines,
+    }
+}
+
+/// The match rates of the three name sets of the recordings against the table.
+fn match_sections(leg: &Legacy, table: &PlaceTable) -> Vec<Section> {
+    let mut eram: BTreeMap<String, u64> = BTreeMap::new();
+    let (mut with_coord, mut total) = (0u64, 0u64);
+    for (i, fx) in leg.route_points.fix.iter().enumerate() {
+        total += 1;
+        let has = leg
+            .route_points
+            .lat_e7
+            .get(i)
+            .is_some_and(|&v| v != NO_COORD)
+            && leg
+                .route_points
+                .lon_e7
+                .get(i)
+                .is_some_and(|&v| v != NO_COORD);
+        if has {
+            with_coord += 1;
+        } else if !name(fx).is_empty() {
+            *eram.entry(name(fx).to_ascii_uppercase()).or_default() += 1;
+        }
+    }
+    let mut tb: BTreeMap<String, u64> = BTreeMap::new();
+    for (i, k) in leg.tbfm.kind.iter().enumerate() {
+        if *k == tbfm_kind::ETA_MFX || *k == tbfm_kind::STA_SFX {
+            let nm = leg.tbfm.fix.get(i).map_or("", |f| name(f));
+            if !nm.is_empty() {
+                *tb.entry(nm.to_ascii_uppercase()).or_default() += 1;
+            }
+        }
+    }
+    let mut tf: BTreeMap<String, u64> = BTreeMap::new();
+    for (i, k) in leg.tfms.kind.iter().enumerate() {
+        if *k == tfms_kind::ETA {
+            let c = leg.tfms.arr.get(i).map_or_else(String::new, |a| key_of(a));
+            if !c.is_empty() {
+                *tf.entry(c).or_default() += 1;
+            }
+        }
+    }
+    let mut out = vec![match_section(
+        "match rates: ERAM route-point names (points without coordinates in the message)",
+        "name-only route points",
+        &eram,
+        |n| classify(point_places(table, n)),
+    )];
+    out.push(Section {
+        title: "ERAM route points by coordinates".to_string(),
+        lines: vec![format!(
+            "{total} route points, {with_coord} carry coordinates in the message, {} are name only",
+            total - with_coord
+        )],
+    });
+    out.push(match_section(
+        "match rates: TBFM meter-fix and scheduling-fix names (eta_mfx, sta_sfx rows)",
+        "fix names",
+        &tb,
+        |n| classify(point_places(table, n)),
+    ));
+    out.push(match_section(
+        "match rates: TFMS arrival codes (arrival estimate rows)",
+        "arrival codes",
+        &tf,
+        |n| classify(airport_places(table, n)),
+    ));
+    out
 }
 
 /// Scores the three systems. `reports` is the ADS-B clip the truth was built from; it is taken
@@ -600,15 +896,27 @@ pub struct Scored {
 pub fn score_all(inp: &Inputs<'_>, reports: Reports) -> Scored {
     let leg = inp.legacy;
     let ix = index_legs(&core_legs(inp.built));
-    let book = place_book(leg, &inp.places);
     let plans = plan_index(leg);
     let mut tfms_arr: BTreeMap<[u8; 12], String> = BTreeMap::new();
     for (p, a) in leg.tfms.plan_id.iter().zip(&leg.tfms.arr) {
-        let k = airport_key(a);
+        let k = key_of(a);
         if !k.is_empty() {
             tfms_arr.entry(norm_id::<12>(p)).or_insert(k);
         }
     }
+    let mut tfms_actual: BTreeMap<[u8; 12], (i64, i64)> = BTreeMap::new();
+    for (i, p) in leg.tfms_actual.plan_id.iter().enumerate() {
+        let (t, iss) = (
+            leg.tfms_actual.time_ms.get(i).copied().unwrap_or(NO_TIME),
+            leg.tfms_actual.issue_ms.get(i).copied().unwrap_or(NO_TIME),
+        );
+        let e = tfms_actual.entry(norm_id::<12>(p)).or_insert((t, iss));
+        if iss > e.1 {
+            *e = (t, iss);
+        }
+    }
+    let tfms_actual: BTreeMap<[u8; 12], i64> =
+        tfms_actual.into_iter().map(|(k, (t, _))| (k, t)).collect();
     let tb_units = tbfm_units(leg, &plans, &ix, &tfms_arr);
     let tf_units = tfms_units(leg, &plans, &ix);
     let want: BTreeSet<u32> = tb_units
@@ -618,18 +926,14 @@ pub fn score_all(inp: &Inputs<'_>, reports: Reports) -> Scored {
         .collect();
     let states = air_states(&reports, &want);
     drop(reports);
-    let mut arps = derive_airports(&arrival_flights(&tb_units, &tf_units), &states);
-    for (apt, p) in &inp.places.airports {
-        arps.insert(apt.clone(), *p);
-    }
     let ctx = Ctx {
         cfg: inp.cfg,
         step_ms: inp.step_ms,
         built: inp.built,
         ix: &ix,
-        book: &book,
+        table: &inp.table,
         states: &states,
-        arps: &arps,
+        tfms_actual: &tfms_actual,
     };
     let mut e = system_new("ERAM", &["route point time"]);
     let mut counts = (0u64, 0u64);
@@ -647,8 +951,7 @@ pub fn score_all(inp: &Inputs<'_>, reports: Reports) -> Scored {
             .iter()
             .filter(|&&k| k == tfms_kind::ETD)
             .count() as u64,
-        places: book_counts(&book),
-        arps: arps.len(),
+        sections: match_sections(leg, &inp.table),
     }
 }
 
@@ -661,6 +964,20 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         landing_gap_max_ms: args.landing_gap_s * 1000,
         max_look_ahead_ms: MAX_LOOK_AHEAD_MIN * MS_PER_MIN,
     };
+    let mut table = PlaceTable::default();
+    let mut nasr_line = "none given: no point or airport has a place".to_string();
+    if let Some(z) = &args.nasr {
+        let (t, sha) = load_nasr(z)?;
+        nasr_line = format!(
+            "{}: {} point names, {} airport codes, {} rows rejected by the parser, sha256 {sha}",
+            z.file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+            t.points.len(),
+            t.airports.len(),
+            t.rejected
+        );
+        table = t;
+    }
     let places = match &args.places {
         Some(p) => {
             let bytes = read_capped_file(p, MAX_PLACES_BYTES).map_err(|e| e.to_string())?;
@@ -670,7 +987,9 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         }
         None => PlacesFile::default(),
     };
+    apply_places(&mut table, &places);
     let mut header: Vec<(String, String)> = Vec::new();
+    header.push(("nasr".to_string(), nasr_line));
     let mut reports = Reports::default();
     let mut clip_sealed = 0u64;
     for p in &args.adsb {
@@ -755,7 +1074,6 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     l.th = Default::default();
     l.handoffs = Default::default();
     l.beacons = Default::default();
-    let n_given_airports = places.airports.len();
     header.push((
         "places file".to_string(),
         format!(
@@ -770,17 +1088,10 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
             built: &built,
             cfg,
             step_ms: args.step_s * 1000,
-            places,
+            table,
         },
         reports,
     );
-    header.push((
-        "named points".to_string(),
-        format!(
-            "{} names with one place from route coordinates, {} with several",
-            scored.places.0, scored.places.1
-        ),
-    ));
     header.push((
         "SFDPS flights".to_string(),
         format!(
@@ -793,17 +1104,10 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         format!("{} rows, not scored (the task is arrival)", scored.etd_rows),
     ));
     header.push((
-        "airport reference points".to_string(),
-        format!(
-            "{} in use ({} from the places file, the rest derived from the recordings)",
-            scored.arps, n_given_airports
-        ),
-    ));
-    header.push((
         "sealed-window rows dropped".to_string(),
         (*sealed).to_string(),
     ));
-    let text = render_text(&header, &cfg, &scored.systems);
+    let text = render_text(&header, &cfg, &scored.sections, &scored.systems);
     let mut files = vec![("report.txt".to_string(), text.clone())];
     for s in &scored.systems {
         let n = s.name.to_ascii_lowercase();
@@ -812,20 +1116,4 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     }
     write_all(&args.out, &files)?;
     Ok(text)
-}
-
-/// The arrival airport of every joined flight with its aircraft and interval, for deriving
-/// reference points.
-fn arrival_flights(a: &[TableUnit], b: &[TableUnit]) -> Vec<(String, u32, i64, i64)> {
-    a.iter()
-        .chain(b.iter())
-        .filter_map(|u| {
-            Some((
-                u.arrival.clone()?,
-                joined_addr(u.outcome)?,
-                u.unit.from_ms,
-                u.unit.to_ms,
-            ))
-        })
-        .collect()
 }

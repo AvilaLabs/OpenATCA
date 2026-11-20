@@ -181,7 +181,7 @@ fn the_landing_is_the_last_airborne_report_before_the_ground_within_the_radius()
     assert_eq!(l[0].gap_ms, 10_000);
     assert!(l[0].at_airport);
     assert!(!l[1].at_airport);
-    assert_eq!(choose_landing(&l, 0, &cfg()), Ok(100_000));
+    assert_eq!(choose_landing(&l, 0, &cfg()), Ok(l[0]));
     // Issued after the landing: nothing at the airport is left.
     assert_eq!(
         choose_landing(&l, 200_000, &cfg()),
@@ -245,6 +245,7 @@ fn the_error_is_the_estimate_minus_the_actual_time() {
 }
 
 // REQ: OA-LTJ-008
+// REQ: OA-LTJ-025
 #[test]
 fn statistics_have_n_median_mean_percentiles_and_rms_in_any_input_order() {
     assert!(stats(&[]).is_none());
@@ -262,7 +263,9 @@ fn statistics_have_n_median_mean_percentiles_and_rms_in_any_input_order() {
     let s = stats(&[-3.0, 4.0]).unwrap();
     assert_eq!(s.n, 2);
     assert_eq!(s.mean, 0.5);
-    assert_eq!(s.median, 0.5);
+    // Nearest rank, as oa-bench and p002 define it: rank ceil(p n / 100), no interpolation.
+    assert_eq!(s.median, -3.0);
+    assert_eq!(s.p95, 4.0);
     assert!((s.rms - 12.5f64.sqrt()).abs() < 1e-12);
     let one = stats(&[7.0]).unwrap();
     assert_eq!((one.median, one.p5, one.p95, one.rms), (7.0, 7.0, 7.0, 7.0));
@@ -365,8 +368,8 @@ fn the_report_is_deterministic_and_every_number_carries_its_n() {
     }
     kind_add(&mut s.kinds[0], 3, Err(Exclusion::NotJoined));
     let header = vec![("input".to_string(), "x".to_string())];
-    let text = render_text(&header, &c, &[s.clone()]);
-    assert_eq!(text, render_text(&header, &c, &[s.clone()]));
+    let text = render_text(&header, &c, &[], &[s.clone()]);
+    assert_eq!(text, render_text(&header, &c, &[], &[s.clone()]));
     assert!(
         text.contains("5 to 10 min: n=3 flights=2 median=10.0 mean=0.0"),
         "{text}"
@@ -377,13 +380,76 @@ fn the_report_is_deterministic_and_every_number_carries_its_n() {
     assert!(text.contains("joined by address: n=2"));
     assert!(text.contains("all flights: n=3"));
     let csv = render_csv(&s);
-    assert!(csv.starts_with("system,kind,bin,n,flights,median_s,mean_s,p5_s,p95_s,rms_s\n"));
+    assert!(
+        csv.starts_with("system,kind,bin,n,flights,median_s,mean_s,p5_s,p95_s,rms_s,over_1800s\n")
+    );
     assert!(
         csv.contains("SYS,kind a,5 to 10 min,3,2,10.0,0.0,"),
         "{csv}"
     );
-    assert!(csv.contains("SYS,kind a,0 to 5 min,0,0,,,,,\n"));
+    assert!(csv.contains("SYS,kind a,0 to 5 min,0,0,,,,,,\n"));
     let counts = render_counts_csv(&s);
     assert!(counts.contains("SYS,estimates,kind a,4\n"));
     assert!(counts.contains("SYS,excluded kind a,flight not joined to an ADS-B aircraft,1\n"));
+}
+
+// REQ: OA-LTJ-022
+#[test]
+fn a_name_with_several_places_takes_the_one_nearest_the_route_and_far_apart_ones_are_refused() {
+    use oa_legacy_traj::core::places::{classify, resolve, Resolution};
+    let at = |lat: f64, lon: f64| Place {
+        lat_deg: lat,
+        lon_deg: lon,
+    };
+    let (east, west) = (at(41.0, -75.0), at(41.0, -80.0));
+    // About 227 NM apart: the one nearer the route is taken, whichever is listed first.
+    let route = [at(41.2, -79.0)];
+    assert_eq!(resolve(&[east, west], &route), Resolution::Picked(west));
+    assert_eq!(resolve(&[west, east], &route), Resolution::Picked(west));
+    assert_eq!(classify(&[east, west]), 2);
+    // No reference: none is taken.
+    assert_eq!(resolve(&[east, west], &[]), Resolution::Refused);
+    assert_eq!(resolve(&[], &route), Resolution::NotFound);
+    assert_eq!(resolve(&[east], &[]), Resolution::Unique(east));
+    // Over 500 NM apart (Pennsylvania and Oregon): refused however near the route.
+    let far = at(45.0, -122.0);
+    assert_eq!(resolve(&[east, far], &[far]), Resolution::Refused);
+    assert_eq!(classify(&[east, far]), 3);
+    assert_eq!(classify(&[]), 0);
+    assert_eq!(classify(&[east]), 1);
+}
+
+// REQ: OA-LTJ-023
+#[test]
+fn the_error_report_splits_by_estimated_look_ahead_join_type_and_large_errors() {
+    let c = cfg();
+    let mut s = system_new("SYS", &["kind a"]);
+    // Estimated 8 min after issue, actual 2 min after: actual look-ahead bin 0 to 5, estimated
+    // bin 5 to 10, error +360 s.
+    let issue = 10_000_000;
+    let r = score(issue + 480_000, issue + 120_000, issue, &c);
+    let x = oa_legacy_traj::core::report::Extra {
+        gap_s: Some(4.0),
+        alt: Some((300.0, 60.0)),
+        by_callsign: Some(true),
+    };
+    oa_legacy_traj::core::report::kind_add_with(&mut s.kinds[0], 1, r, x);
+    let r = score(issue + 100_000, issue + 130_000 + 2_000_000, issue, &c);
+    let x = oa_legacy_traj::core::report::Extra {
+        by_callsign: Some(false),
+        ..Default::default()
+    };
+    oa_legacy_traj::core::report::kind_add_with(&mut s.kinds[0], 2, r, x);
+    let k = &s.kinds[0];
+    assert_eq!(k.errors[0], vec![360.0]);
+    assert_eq!(k.errors_est[1], vec![360.0]);
+    assert_eq!(k.errors_join[1], vec![360.0]);
+    assert_eq!(k.errors_join[0].len(), 1);
+    assert_eq!(k.errors_alt[0], vec![300.0]);
+    assert_eq!(k.landing_minus_actual_s, vec![60.0]);
+    assert_eq!(k.gaps_s, vec![4.0]);
+    let text = render_text(&[], &c, &[], &[s]);
+    assert!(text.contains("error by estimated look-ahead"), "{text}");
+    assert!(text.contains("joined by callsign: n=1"), "{text}");
+    assert!(text.contains("over 1800s: n=1 (100.0%)"), "{text}");
 }

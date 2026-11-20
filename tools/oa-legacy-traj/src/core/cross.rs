@@ -190,7 +190,7 @@ pub fn landings(states: &[AirState], arp: Place, cfg: &Config) -> Vec<Landing> {
 
 /// The landing time for an estimate issued at `issue_ms`: the first landing at the airport that
 /// is not before the issue.
-pub fn choose_landing(l: &[Landing], issue_ms: i64, cfg: &Config) -> Result<i64, Exclusion> {
+pub fn choose_landing(l: &[Landing], issue_ms: i64, cfg: &Config) -> Result<Landing, Exclusion> {
     let mut too_long = false;
     let mut before = false;
     for x in l.iter().filter(|x| x.at_airport) {
@@ -199,7 +199,7 @@ pub fn choose_landing(l: &[Landing], issue_ms: i64, cfg: &Config) -> Result<i64,
         } else if x.gap_ms > cfg.landing_gap_max_ms {
             too_long = true;
         } else {
-            return Ok(x.t_ms);
+            return Ok(*x);
         }
     }
     if too_long {
@@ -209,4 +209,14 @@ pub fn choose_landing(l: &[Landing], issue_ms: i64, cfg: &Config) -> Result<i64,
     } else {
         Err(Exclusion::NoLanding)
     }
+}
+
+/// The great-circle distance in metres between two places (haversine, sphere of 6,371,008.8 m).
+pub fn great_circle_m(a: Place, b: Place) -> f64 {
+    let rad = core::f64::consts::PI / 180.0;
+    let (la, lb) = (a.lat_deg * rad, b.lat_deg * rad);
+    let sin_dlat = oa_math::sin((lb - la) / 2.0);
+    let sin_dlon = oa_math::sin((b.lon_deg - a.lon_deg) * rad / 2.0);
+    let h = sin_dlat * sin_dlat + oa_math::cos(la) * oa_math::cos(lb) * sin_dlon * sin_dlon;
+    2.0 * 6_371_008.8 * oa_math::asin(oa_math::min_f64(1.0, oa_ieee::sqrt(h)))
 }
