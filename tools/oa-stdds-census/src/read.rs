@@ -91,14 +91,20 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
                 oa_sealed::note_window_drops(1);
             }
             Ok(f) if f.kind == FrameKind::Message => {
+                let before = ctx.rs.stats.sealed_window_dropped;
+                let parsed =
+                    parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.rs.stats);
+                // A message with a record timed in a sealed window was dropped whole by the
+                // parser (`Limits::drop_window`), before any count, even when its frame was
+                // received outside the window: it is in no count here but the drop.
+                if ctx.rs.stats.sealed_window_dropped > before {
+                    continue;
+                }
                 ctx.rs.frames += 1;
-                match parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.rs.stats) {
+                match parsed {
                     Ok(Message::Tais(m)) => {
                         ctx.rs.tais_messages += 1;
                         let src = if m.src_present { m.src } else { [0; 8] };
-                        // A record timed (`mrtTime`) inside a sealed window was dropped by the
-                        // parser (`Limits::drop_window`), before any count, even when its frame
-                        // was received outside it.
                         for r in &m.records {
                             ctx.rs.tais_records += 1;
                             ctx.census.observe(src, r);
@@ -663,8 +669,8 @@ mod tests {
     #[test]
     fn a_record_timed_in_the_window_is_dropped_though_its_frame_was_received_before_it() {
         const FROM: i64 = 1_795_132_800_000_000_000;
-        // One message, four records: mrtTime at from - 1 s (kept), at from (dropped), at to - 1 s
-        // (dropped), at to (kept).
+        // One message, four records: mrtTime at from - 1 s, at from, at to - 1 s and at to. The
+        // two inside the window drop the whole message, not just themselves.
         let m = msg(
             "ZZA",
             &[
@@ -675,14 +681,28 @@ mod tests {
             ],
         )
         .into_bytes();
-        let mut buf = vec![0u8; MAX_FRAME_LEN];
-        // The frame was received at from - 1 ns, outside the window.
-        let n = encode_frame(&mut buf, FrameKind::Message as u8, 0, 0, FROM - 1, 0, &m).unwrap();
+        let kept = msg("ZZA", &[(5, "2026-11-19T23:59:59Z", None)]).into_bytes();
+        let mut bytes = Vec::new();
+        // The frames were received at from - 1 ns, outside the window.
+        for (i, x) in [&m, &kept].into_iter().enumerate() {
+            let mut buf = vec![0u8; MAX_FRAME_LEN];
+            let n = encode_frame(
+                &mut buf,
+                FrameKind::Message as u8,
+                0,
+                i as u64,
+                FROM - 1,
+                0,
+                x,
+            )
+            .unwrap();
+            bytes.extend_from_slice(&buf[..n]);
+        }
         let mut census = Census::new();
-        let rs = read_bytes(&buf[..n], &mut census).unwrap();
-        assert_eq!((rs.frames, rs.tais_messages, rs.tais_records), (1, 1, 2));
-        assert_eq!(rs.sealed_window_dropped, 2);
-        // The parse-level counts do not hold the dropped records either.
-        assert_eq!(rs.stats.records, 2);
+        let rs = read_bytes(&bytes, &mut census).unwrap();
+        // Only the second message is counted; the first is in no count but the drop (4 records).
+        assert_eq!((rs.frames, rs.tais_messages, rs.tais_records), (1, 1, 1));
+        assert_eq!(rs.sealed_window_dropped, 4);
+        assert_eq!(rs.stats.records, 1);
     }
 }

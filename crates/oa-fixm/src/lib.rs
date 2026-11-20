@@ -297,7 +297,7 @@ pub const MAX_PATH_TEXT: usize = 160;
 
 /// One unknown element or attribute path and how often it was seen.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnknownPath {
     pub hash: u64,
     pub count: u64,
@@ -309,7 +309,7 @@ pub struct UnknownPath {
 
 /// Cumulative counts over every document a [`Decoder`] has seen.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stats {
     pub docs: u64,
     /// Messages dropped because their own time is in [`Limits::drop_window`]: in no other count.

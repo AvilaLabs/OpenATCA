@@ -305,7 +305,8 @@ fn the_replay_drops_sealed_window_frames_and_rows_and_counts_them() {
     let dir = temp_dir("sealed");
     let body = r#"<flightStatus fdpsFlightStatus="ACTIVE"/>"#;
     let ok = doc(&msg("TH", "2026-11-19T23:00:00.000Z", body));
-    // Received at from - 1 ns but timestamped at from: the row is dropped, the frame is not.
+    // Received at from - 1 ns but timestamped at from: the document is dropped whole by the
+    // decoder, so its frame is in no count but the drop.
     let late = doc(&msg("TH", "2026-11-20T00:00:00.000Z", body));
     let at = |seq: u64, t: i64, xml: &str| {
         let mut buf = vec![0u8; xml.len() + 64];
@@ -323,8 +324,9 @@ fn the_replay_drops_sealed_window_frames_and_rows_and_counts_them() {
         &mut |_, _, _| {},
     )
     .unwrap();
-    assert_eq!(rep.frames, 2);
+    assert_eq!(rep.frames, 1);
     assert_eq!(rep.sealed_window_dropped, 2);
+    assert_eq!(rep.fixm.docs, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

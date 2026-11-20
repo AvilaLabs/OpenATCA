@@ -10,13 +10,16 @@ use std::cell::RefCell;
 struct State {
     parser: oa_xml::Parser,
     dec: Decoder,
+    // The same decoder with the sealed window, so the whole-document pre-scan runs too.
+    sealed: Decoder,
     rows: Notams,
 }
 
 thread_local! {
     static STATE: RefCell<State> = RefCell::new(State {
         parser: oa_xml::Parser::new(oa_xml::Limits::default()).expect("default limits are valid"),
-        dec: new_decoder(Limits::default()),
+        dec: new_decoder(Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())),
+        sealed: new_decoder(Limits::new(oa_sealed::DropWindow::sealed())),
         rows: new_notams(16, 1 << 16, 32, 4096),
     });
 }
@@ -41,9 +44,18 @@ fuzz_target!(|data: &[u8]| {
 
     STATE.with(|s| {
         let mut s = s.borrow_mut();
-        let State { parser, dec, rows } = &mut *s;
+        let State {
+            parser,
+            dec,
+            sealed,
+            rows,
+        } = &mut *s;
         clear_notams(rows);
         let mut stats: Stats = new_stats(64);
+        let _ = oa_notam::decode_bytes(parser, dec, data, rows, &mut stats);
+        clear_notams(rows);
+        let _ = oa_notam::decode_bytes(parser, sealed, data, rows, &mut new_stats(64));
+        clear_notams(rows);
         let _ = oa_notam::decode_bytes(parser, dec, data, rows, &mut stats);
         for u in &stats.unknown {
             let _ = unknown_text(u);

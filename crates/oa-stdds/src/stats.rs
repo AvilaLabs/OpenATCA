@@ -76,7 +76,7 @@ pub struct ShapeCount {
 
 /// Counts. Fields are public plain data; [`new_stats`] makes an empty one.
 // A7.2: cold struct, size guard waived
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stats {
     /// Messages seen (parsed XML or not).
     pub messages: u64,

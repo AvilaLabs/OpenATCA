@@ -5904,24 +5904,25 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   `DropWindow::empty_for_tests_and_fuzz()` drops nothing and is for tests and fuzz targets only (its name says so). A test per
   shell asserts the window it passes equals the sealed one (oa-replay `doc_fixm_limits`, `doc_notam_limits` and the TBFM and
   TFMS row tables, which `oa-bench` and `oa-flight` use through `Reader::drop_windows` and `decoder_limits`, the census, the
-  `oa-stdds-ref` loader and the `stdds_summary` example). A row timed in the window is dropped before any count, by its own
-  time: a TAIS record by `mrtTime` and an ASDE-X report by `time` (`parse_tais`, `parse_smes`), an SFDPS message by its
-  `timestamp` or `positionTime`, a TBFM flight by `msgTime`, a TFMS message by `sourceTimeStamp`, a NOTAM by `issued` or
-  `canceled` (its validity span is not a message time). It is in no message, row, kind, rejection (`rejected`,
-  `reject_fields`, `reject_kinds`), refused-field, field-error, shape, flag, unknown-path or unknown-root count, and the
-  scratch it filled is rolled back; it is counted in `Stats::sealed_window_dropped` (or `Outcome::sealed_dropped`). A
-  message or document whose rows were all dropped by time is not counted as a message, a document, a kind or an unknown root
-  either. A row refused whole before its time was read has no known time and is counted as refused, and so is a document
-  refused whole (not XML, wrong root). In stdds the unknown elements and errors at the message root (outside any record)
-  have no row time and stay counted. Two refusals: for `TooManyRecords` the refusal is counted in `errors`, and
-  `sealed_window_dropped` is a lower bound for the records after the refusal point, which are never parsed or counted
-  anywhere; for `TooDeep` (not reachable by any document today, because the walk descends only into known containers) the
-  half-walked record has no known time, so its scratch is discarded and only the refusal is counted in `errors`. The
-  `oa-bench` SFDPS scan (hints, addresses, handoffs, routes) skips every message the decoder dropped by time
-  (`Decoder::dropped_messages`), so none reaches those tables. A recording's byte count (`oa-replay`, `oa-feed replay`) is
+  `oa-stdds-ref` loader and the `stdds_summary` example). A document is dropped whole by the times of its messages. Every decoder's first step is
+  a pre-scan of the whole document (the whole message for stdds), before any counter, row, table or string store is touched. It
+  reads each message's or record's own time by the feed's known path, directly from the parsed tree, in any attribute order:
+  a TAIS record by `mrtTime` and an ASDE-X report by `time` (`parse_tais`, `parse_smes`), an SFDPS message by its
+  `timestamp` or `positionTime`, a TBFM `tma` by `msgTime`, a TFMS message, flow or TMI-list entry by `sourceTimeStamp`, a
+  NOTAM by `issued` or `canceled` (its validity span is not a message time). If any is in the window the whole document
+  is dropped and a sealed outcome carries only the count of its messages (or records): `Stats::sealed_window_dropped` or
+  `Outcome::sealed_dropped`. It is in no other count (no message, document, row, kind, rejection, refused-field,
+  field-error, shape, flag, unknown-path or unknown-root count) and touches no table or string store. No refusal can be
+  caused by an in-window message, because the pre-scan has no record or row limit and runs before the decode. There is no
+  rollback in any decoder. TFMS TMI-list counts are therefore for the whole document, not per entry. A time that cannot be
+  read falls to the receive-time gate of its frame; a document refused whole (not XML, wrong root) has no known time and is
+  counted as refused. Development-day documents near the window edges that carry an in-window message are lost whole, and
+  counted. `DropWindow::sealed()` fails closed: if the sealed list has no window or does not parse it is a window covering
+  all time (`DropWindow::all_time()`). The `oa-bench` scan (hints, addresses, handoffs, routes) runs only on documents that passed the pre-scan, and `docs` counts a
+  document after it. A recording's byte count (`oa-replay`, `oa-feed replay`) is
   the bytes after the window gate: the bytes of a frame dropped by receive time are not in it. A failed read still adds what
   was counted so far (`oa-stdds-ref` `load_file_counted`, `stdds_summary`, the fixm survey, which returns an error through
-  `main` instead of unwrapping). `oa-bench` and `oa-stdds-census` record the line in their report and also print one
+  `main` instead of unwrapping). The SHA-256 `oa-stdds-ref` prints is a file identity (of the file as a whole, as a name for it), not a statistic of its contents. `oa-bench` and `oa-stdds-census` record the line in their report and also print one
   stderr line at exit, which is the same count printed once. Other message kinds (service status, classified only) carry no row time and go by
   the receive time of their frame. Tests assert the `records:`, a TAIS field and a flag count, a refused message whose early
   records are in the window, the fixm, TBFM, TFMS and NOTAM stats, the oa-replay TFMS flow rows, and the oa-bench tables. `oa-scope-replay` prints its line on every exit, an empty window included, and its decoder `records` and

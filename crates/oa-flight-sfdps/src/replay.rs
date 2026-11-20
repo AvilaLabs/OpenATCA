@@ -235,6 +235,13 @@ pub fn replay_sfdps(
     replay_sfdps_counted(paths, cfg, before_op, &mut 0)
 }
 
+/// Counts one frame that reached the decoder's report.
+fn note_frame(rep: &mut ReplayReport, recv_ns: i64) {
+    rep.frames += 1;
+    rep.first_recv_ns = rep.first_recv_ns.min(recv_ns);
+    rep.last_recv_ns = rep.last_recv_ns.max(recv_ns);
+}
+
 /// The decoder limits of every replay here: the replay pipeline's own, with the sealed window as
 /// the drop window (OA-SEAL-014).
 pub fn decoder_limits() -> oa_fixm::Limits {
@@ -303,13 +310,11 @@ pub fn replay_sfdps_counted(
             ended = true;
             return Err(io::Error::other(WINDOW_END));
         }
-        rep.frames += 1;
-        rep.first_recv_ns = rep.first_recv_ns.min(m.recv_ns);
-        rep.last_recv_ns = rep.last_recv_ns.max(m.recv_ns);
         let seen_ms = m.recv_ns.div_euclid(1_000_000);
         let doc = match parser.parse(m.payload) {
             Ok(d) => d,
             Err(_) => {
+                note_frame(&mut rep, m.recv_ns);
                 rep.docs_unparsed += 1;
                 return Ok(());
             }
@@ -317,10 +322,15 @@ pub fn replay_sfdps_counted(
         oa_fixm::clear_events(&mut events);
         let decoded = decoder.decode_prefix(&doc, m.payload, &mut events);
         if let Ok(s) = &decoded {
-            // Messages the decoder dropped for their own time (OA-SEAL-014).
-            *sealed += u64::from(s.sealed_window_dropped);
-            oa_sealed::note_window_drops(u64::from(s.sealed_window_dropped));
+            if s.sealed_window_dropped > 0 {
+                // The decoder dropped the whole document for a message timed in the sealed
+                // window: the frame is in no count here but the drop (OA-SEAL-014).
+                *sealed += u64::from(s.sealed_window_dropped);
+                oa_sealed::note_window_drops(u64::from(s.sealed_window_dropped));
+                return Ok(());
+            }
         }
+        note_frame(&mut rep, m.recv_ns);
         if let Err(e) = decoded {
             rep.docs_refused += 1;
             let k = match e {

@@ -1433,53 +1433,67 @@ fn a_referred_number_and_year_without_a_series_is_a_local_format_reference() {
 
 // REQ: OA-SEAL-014
 #[test]
-fn a_notam_issued_in_the_drop_window_is_dropped_before_any_count_and_the_drop_is_counted() {
+fn a_notam_issued_or_cancelled_in_the_drop_window_is_dropped_whole_and_every_counter_is_as_for_an_empty_run(
+) {
     // 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z, the sealed window, in Unix ms.
     let w = oa_sealed::DropWindow::new(1_795_132_800_000, 1_795_393_020_000);
-    let mut p = parser();
-    let mut d = new_decoder(Limits::new(w));
-    let mut out = small();
-    let mut stats = default_stats();
+    let issued = "<event:issued>2030-03-05T09:00:00.000Z</event:issued>";
+    let in_issued = |t: &str| format!("<event:issued>{t}</event:issued>");
     let base = rep(
         &msg(&[&airport()]),
         "</event:NOTAM>",
         "<event:zzz>1</event:zzz></event:NOTAM>",
     );
-    // Issued in the window, with an unknown element and a refused field: in no count.
     let bad = rep(
         &base,
         "<event:radius>5</event:radius>",
         "<event:radius>x</event:radius>",
     );
-    for xml in [
-        rep(
-            &base,
-            "<event:issued>2030-03-05T09:00:00.000Z</event:issued>",
-            "<event:issued>2026-11-21T00:00:00.000Z</event:issued>",
-        ),
-        rep(
-            &bad,
-            "<event:issued>2030-03-05T09:00:00.000Z</event:issued>",
-            "<event:issued>2026-11-22T00:00:00.000Z</event:issued>",
-        ),
-    ] {
+    // A cancel time in the window: the element is added to the NOTAM.
+    let cancelled = rep(
+        &base,
+        "</event:NOTAM>",
+        "</event:NOTAM><fnse:canceled>2026-11-22T00:00:00.000Z</fnse:canceled>",
+    );
+    // An invalid field comes before the issue time in the document, and a field after it.
+    let early = rep(&bad, issued, &in_issued("2026-11-21T00:00:00.000Z"));
+    let docs = [
+        rep(&base, issued, &in_issued("2026-11-21T00:00:00.000Z")),
+        early,
+        rep(&cancelled, issued, issued),
+    ];
+    let mut p = parser();
+    for xml in docs {
+        let mut d = new_decoder(Limits::new(w));
+        let mut out = small();
+        let mut stats = default_stats();
         let o = decode_bytes(&mut p, &mut d, xml.as_bytes(), &mut out, &mut stats).unwrap();
         assert!(o.sealed_dropped);
-        assert_eq!((o.field_errors, o.unknown_elements), (0, 0));
+        assert_eq!(
+            o,
+            Outcome {
+                row: 0,
+                field_errors: 0,
+                unknown_elements: 0,
+                unknown_attributes: 0,
+                sealed_dropped: true,
+            }
+        );
+        assert_eq!(out.len, 0);
+        assert_eq!(mark(&out), mark(&small()));
+        assert_eq!(
+            stats,
+            Stats {
+                sealed_window_dropped: 1,
+                ..default_stats()
+            }
+        );
     }
-    assert_eq!(out.len, 0);
-    assert_eq!(mark(&out), mark(&small()));
-    assert_eq!(stats.sealed_window_dropped, 2);
-    assert_eq!((stats.docs, stats.accepted, stats.rows), (0, 0, 0));
-    assert_eq!(stats.unknown_elements + stats.unknown_attributes, 0);
-    assert!(stats.unknown.is_empty());
-    assert_eq!(stats.field_errors.iter().sum::<u64>(), 0);
     // Outside it (the end is excluded) the NOTAM is kept and its unknown element counted.
-    let xml = rep(
-        &base,
-        "<event:issued>2030-03-05T09:00:00.000Z</event:issued>",
-        "<event:issued>2026-11-23T00:17:00.000Z</event:issued>",
-    );
+    let mut d = new_decoder(Limits::new(w));
+    let mut out = small();
+    let mut stats = default_stats();
+    let xml = rep(&base, issued, &in_issued("2026-11-23T00:17:00.000Z"));
     let o = decode_bytes(&mut p, &mut d, xml.as_bytes(), &mut out, &mut stats).unwrap();
     assert!(!o.sealed_dropped);
     assert_eq!((out.len, stats.docs, stats.rows), (1, 1, 1));
@@ -1487,5 +1501,5 @@ fn a_notam_issued_in_the_drop_window_is_dropped_before_any_count_and_the_drop_is
     // A document refused whole has no known time and is counted as refused.
     let r = decode_bytes(&mut p, &mut d, b"<notaixm/>", &mut out, &mut stats);
     assert!(r.is_err());
-    assert_eq!(stats.sealed_window_dropped, 2);
+    assert_eq!(stats.sealed_window_dropped, 0);
 }

@@ -1712,79 +1712,105 @@ fn the_summary_prints_status_and_unknown_names_only_when_they_are_plain_text() {
 /// 2026-11-20T00:00:00Z and 2026-11-23T00:17:00Z in Unix milliseconds: the sealed window.
 const DROP: (i64, i64) = (1_795_132_800_000, 1_795_393_020_000);
 
+fn windowed(max_records: usize) -> Limits {
+    Limits {
+        max_records,
+        ..Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1))
+    }
+}
+
+/// Parses `xml` with the sealed window and checks the message is dropped whole: it is a message
+/// with no records, and the stats are those of an empty run with the drop count set.
+fn assert_dropped_whole(xml: &str, max_records: usize, n: u64) {
+    let mut p = parser();
+    let mut st = new_stats();
+    let m = parse_message(&mut p, xml.as_bytes(), &windowed(max_records), &mut st).unwrap();
+    match m {
+        Message::Tais(t) => assert!(t.records.is_empty() && t.errors.is_empty()),
+        Message::Smes(t) => assert!(t.records.is_empty() && t.errors.is_empty()),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        st,
+        oa_stdds::Stats {
+            sealed_window_dropped: n,
+            ..new_stats()
+        }
+    );
+}
+
+const TAIS_OUT: &str = "<record><track><trackNum>1</trackNum><mrtTime>2030-01-02T03:00:00Z</mrtTime><zzz>1</zzz></track></record>";
+const TAIS_IN: &str = "<record><track><trackNum>2</trackNum><mrtTime>2026-11-21T00:00:00Z</mrtTime><lat>bad</lat><qqq>1</qqq></track></record>";
+
 // REQ: OA-SEAL-014
 #[test]
-fn a_record_timed_in_the_drop_window_is_in_no_count_not_even_when_the_message_is_refused() {
-    let mut p = parser();
-    // Two records in the window (one with a refused field, an unknown element and an invalidated
-    // field), then two outside it; the limit of one record refuses the message at the second.
-    let xml = tais_xml(
-        r#"<record><track><trackNum>1</trackNum><mrtTime>2026-11-20T00:00:00Z</mrtTime><lat>bad</lat><lon>1</lon><zzz>1</zzz><vx r="1">1</vx></track></record>
-<record><track><trackNum>2</trackNum><mrtTime>2026-11-23T00:16:59.999Z</mrtTime><pseudo>1</pseudo></track></record>
-<record><track><trackNum>3</trackNum><mrtTime>2026-11-19T23:59:59Z</mrtTime><pseudo>1</pseudo></track></record>
-<record><track><trackNum>4</trackNum><mrtTime>2026-11-23T00:17:00Z</mrtTime></track></record>"#,
+fn a_tais_message_with_a_record_in_the_window_is_dropped_whole_and_every_counter_is_as_for_an_empty_run(
+) {
+    // One in-window record among others: the message is dropped, and n is its records.
+    assert_dropped_whole(
+        &tais_xml(&format!("{TAIS_OUT}{TAIS_IN}{TAIS_OUT}")),
+        4096,
+        3,
     );
-    let lim = Limits {
-        max_records: 1,
-        drop_window: oa_sealed::DropWindow::new(DROP.0, DROP.1),
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+    // The window record is past max_records: the scan has no record limit, so it is found and
+    // there is no TooManyRecords refusal.
+    assert_dropped_whole(&tais_xml(&format!("{TAIS_OUT}{TAIS_OUT}{TAIS_IN}")), 1, 3);
+    // A record whose invalid field and unknown element come before its mrtTime, and one whose
+    // time is the first thing in it.
+    let early = "<record><track><lat>bad</lat><zzz>1</zzz><mrtTime>2026-11-22T00:00:00Z</mrtTime></track></record>";
+    assert_dropped_whole(&tais_xml(early), 4096, 1);
+    // The window edges: from is in, to is out.
+    let at = |t: &str| {
+        tais_xml(&format!(
+            "<record><track><mrtTime>{t}</mrtTime></track></record>"
+        ))
     };
-    let mut st = new_stats();
-    let r = parse_message(&mut p, xml.as_bytes(), &lim, &mut st);
-    assert!(matches!(r, Err(StdError::TooManyRecords { .. })), "{r:?}");
-    assert_eq!(st.sealed_window_dropped, 2);
-    // Only the record at 23:59:59 on the 19th was kept before the refusal.
-    assert_eq!(st.records, 1);
-    assert_eq!(st.tais_present[TaisField::TrackNum as usize], 1);
-    assert_eq!(st.tais_flags[0], [0, 1]);
-    // Nothing the dropped records had is in the tables: no field error, shape, unknown path or
-    // invalidated field.
-    assert_eq!(st.field_error_kinds, [0; ERROR_KIND_COUNT]);
-    assert!(st.shapes.is_empty() && st.unknown.is_empty());
-    assert_eq!((st.invalidated, st.unknown_overflow), (0, 0));
-    assert_eq!(st.tais_errors, [0; TAIS_FIELD_COUNT]);
-    // The same message without a window counts every record parsed before the refusal.
-    let mut all = new_stats();
-    let lim0 = Limits {
-        max_records: 4,
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
-    };
-    parse_message(&mut p, xml.as_bytes(), &lim0, &mut all).unwrap();
-    assert_eq!((all.records, all.sealed_window_dropped), (4, 0));
-    assert!(all.invalidated > 0 && !all.unknown.is_empty());
+    assert_dropped_whole(&at("2026-11-20T00:00:00Z"), 4096, 1);
+    assert_dropped_whole(&at("2026-11-23T00:16:59.999Z"), 4096, 1);
+    let mut p = parser();
+    for t in ["2026-11-19T23:59:59.999Z", "2026-11-23T00:17:00Z"] {
+        let mut st = new_stats();
+        parse_message(&mut p, at(t).as_bytes(), &windowed(4096), &mut st).unwrap();
+        assert_eq!(
+            (st.sealed_window_dropped, st.records, st.messages),
+            (0, 1, 1)
+        );
+    }
 }
 
 // REQ: OA-SEAL-014
 #[test]
-fn an_asdex_report_timed_in_the_drop_window_is_dropped_before_the_counts_and_one_without_a_time_is_kept(
-) {
-    let mut p = parser();
+fn an_asdex_message_with_a_report_in_the_window_is_dropped_whole() {
     let rep = |t: &str| {
         format!(
             "<positionReport><seqNum>1</seqNum>{t}<track>3</track><qqq>1</qqq></positionReport>"
         )
     };
-    let xml = format!(
-        r#"<a:asdexMsg xmlns:a="{SMES_NS}"><airport>ZZB</airport>{}{}{}</a:asdexMsg>"#,
-        rep("<time>2026-11-21T12:00:00Z</time>"),
-        rep("<time>2026-11-19T12:00:00Z</time>"),
-        rep(""),
-    );
-    let lim = Limits {
-        drop_window: oa_sealed::DropWindow::new(DROP.0, DROP.1),
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
+    let xml = |reports: &[String]| {
+        format!(
+            r#"<a:asdexMsg xmlns:a="{SMES_NS}"><airport>ZZB</airport>{}</a:asdexMsg>"#,
+            reports.concat()
+        )
     };
+    // The time of one report is after an invalid field of it; one has no time at all.
+    assert_dropped_whole(
+        &xml(&[
+            rep("<time>2030-01-02T03:00:00Z</time>"),
+            rep("<time>2026-11-21T12:00:00Z</time>"),
+            rep(""),
+        ]),
+        1,
+        3,
+    );
+    // Without a time in the window the reports (one with no time) are kept.
+    let mut p = parser();
     let mut st = new_stats();
-    let m = match parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap() {
-        Message::Smes(m) => m,
-        _ => panic!("not smes"),
-    };
+    let x = xml(&[rep("<time>2030-01-02T03:00:00Z</time>"), rep("")]);
+    parse_message(&mut p, x.as_bytes(), &windowed(4096), &mut st).unwrap();
     assert_eq!(
-        (m.records.len(), st.records, st.sealed_window_dropped),
-        (2, 2, 1)
+        (st.sealed_window_dropped, st.records, st.messages),
+        (0, 2, 1)
     );
-    // One unknown element per kept report, none for the dropped one.
-    assert_eq!(st.unknown.iter().map(|u| u.count).sum::<u64>(), 2);
 }
 
 // REQ: OA-SEAL-014
@@ -1797,76 +1823,4 @@ fn the_summary_example_passes_the_sealed_window_to_the_decoder() {
     .unwrap();
     assert!(src.contains("Limits::new(oa_sealed::DropWindow::sealed())"));
     assert!(!src.contains("empty_for_tests_and_fuzz"));
-}
-
-// REQ: OA-SEAL-014
-#[test]
-fn nesting_below_an_unknown_element_is_one_unknown_element_and_never_a_too_deep_refusal() {
-    let mut p = parser();
-    // The walk descends only into containers of known paths (two levels at most), so no document
-    // reaches the deeper-than-eight refusal; the branch that takes it discards the half-walked
-    // record's scratch (no known time) and counts the refusal in `errors` only.
-    let deep = format!("{}1{}", "<d>".repeat(12), "</d>".repeat(12));
-    let xml = tais_xml(&format!(
-        "<record><track><trackNum>2</trackNum>{deep}</track></record>"
-    ));
-    let mut st = new_stats();
-    let lim = Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1));
-    let m = parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap();
-    assert!(matches!(m, Message::Tais(_)));
-    assert_eq!((st.errors[3], st.records), (0, 1));
-    assert_eq!(st.unknown.iter().map(|u| u.count).sum::<u64>(), 1);
-}
-
-// REQ: OA-SEAL-014
-#[test]
-fn records_after_a_too_many_records_refusal_are_never_parsed_so_the_dropped_count_is_a_lower_bound()
-{
-    let mut p = parser();
-    let rec = |n: u32, t: &str| {
-        format!("<record><track><trackNum>{n}</trackNum><mrtTime>{t}</mrtTime></track></record>")
-    };
-    // One kept record, the refusal at the second, then two timed in the window that nothing reads.
-    let xml = tais_xml(&format!(
-        "{}{}{}{}",
-        rec(1, "2026-11-19T00:00:00Z"),
-        rec(2, "2026-11-19T00:00:01Z"),
-        rec(3, "2026-11-21T00:00:00Z"),
-        rec(4, "2026-11-21T00:00:01Z"),
-    ));
-    let lim = Limits {
-        max_records: 1,
-        ..Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1))
-    };
-    let mut st = new_stats();
-    let r = parse_message(&mut p, xml.as_bytes(), &lim, &mut st);
-    assert!(matches!(r, Err(StdError::TooManyRecords { .. })), "{r:?}");
-    // The refusal is counted; the two window records after it are in no count, not even the
-    // sealed-window one, which is a lower bound for the records after a refusal.
-    assert_eq!(
-        (st.errors[2], st.records, st.sealed_window_dropped),
-        (1, 1, 0)
-    );
-}
-
-// REQ: OA-SEAL-014
-#[test]
-fn a_message_whose_records_were_all_dropped_by_time_is_not_a_message_a_kind_or_an_unknown_root() {
-    let mut p = parser();
-    let lim = Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1));
-    let mut st = new_stats();
-    let xml = tais_xml(
-        "<record><track><trackNum>1</trackNum><mrtTime>2026-11-21T00:00:00Z</mrtTime></track></record>",
-    );
-    parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap();
-    assert_eq!(st.sealed_window_dropped, 1);
-    assert_eq!(st.messages, 0);
-    assert_eq!(st.kinds.iter().sum::<u64>(), 0);
-    assert!(st.unknown_roots.is_empty());
-    // A message with one kept record is counted as usual.
-    let xml = tais_xml(
-        "<record><track><trackNum>1</trackNum><mrtTime>2026-11-21T00:00:00Z</mrtTime></track></record><record><track><trackNum>2</trackNum></track></record>",
-    );
-    parse_message(&mut p, xml.as_bytes(), &lim, &mut st).unwrap();
-    assert_eq!((st.messages, st.sealed_window_dropped), (1, 2));
 }

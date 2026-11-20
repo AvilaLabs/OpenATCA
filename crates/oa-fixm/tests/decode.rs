@@ -1591,134 +1591,107 @@ fn at(ts: &str, body: &str) -> String {
     )
 }
 
+/// A decoder's stats as they are before it has seen anything, with the drop count set.
+fn untouched(limits: Limits, dropped: u64) -> oa_fixm::Stats {
+    let mut s = Decoder::new(limits).stats().clone();
+    s.sealed_window_dropped = dropped;
+    s
+}
+
+fn windowed() -> Limits {
+    Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1))
+}
+
 // REQ: OA-SEAL-014
 #[test]
-fn a_message_timed_in_the_drop_window_is_in_no_count_of_the_decoder() {
+fn a_document_with_a_message_in_the_window_is_dropped_whole_and_every_counter_is_as_for_an_empty_run(
+) {
     let unknown = r#"<flightStatus fdpsFlightStatus="ACTIVE" newAttr="x"/><newThing><inner/></newThing><supplementalData><additionalFlightInformation><nameValue name="BRAND_NEW" value="1"/></additionalFlightInformation></supplementalData>"#;
     let in_pos =
         format!(r#"{unknown}<enRoute><position positionTime="2026-11-22T00:00:00Z"/></enRoute>"#);
-    let limits = Limits {
-        drop_window: oa_sealed::DropWindow::new(DROP.0, DROP.1),
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
-    };
-    // Sealed by the message timestamp, by the position time, and a sealed message that is also
-    // refused (no GUFI): none of them counts as a message, row, rejection or unknown path.
     let nogufi = message_with(
         r#"centre="ZXX" source="TH" system="SLC" timestamp="2026-11-21T00:00:00Z""#,
         unknown,
     );
+    // Kept messages around: one timed in the window by its timestamp, one by its position time,
+    // one refused (no GUFI) and in the window; the rest, with unknown paths, are outside it.
     let all = doc(&[
-        at("2026-11-21T01:00:00Z", unknown),
         at("2030-01-02T03:04:05Z", unknown),
+        at("2026-11-21T01:00:00Z", unknown),
         at("2026-11-19T23:59:59Z", &in_pos),
         nogufi,
         at("2026-11-23T00:17:00Z", unknown),
     ]);
-    let (a, res) = run_with(&all, 64, 1 << 16, limits);
+    let (r, res) = run_with(&all, 64, 1 << 16, windowed());
     res.unwrap();
-    // The same without the sealed messages.
+    // Dropped whole: the count is the five messages of the document, and nothing else moved.
+    assert_eq!(
+        r.sum,
+        Summary {
+            sealed_window_dropped: 5,
+            ..Summary::default()
+        }
+    );
+    assert_eq!(r.dec.stats(), &untouched(windowed(), 5));
+    assert_eq!((r.ev.len, r.ev.strings_used), (0, 0));
+    // Without a message in the window the same kept messages are all decoded as usual.
     let kept = doc(&[
         at("2030-01-02T03:04:05Z", unknown),
         at("2026-11-23T00:17:00Z", unknown),
     ]);
-    let (b, res) = run_with(
-        &kept,
-        64,
-        1 << 16,
-        Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
-    );
+    let (r, res) = run_with(&kept, 64, 1 << 16, windowed());
     res.unwrap();
-    let (sa, sb) = (a.dec.stats(), b.dec.stats());
-    assert_eq!(sa.sealed_window_dropped, 3);
-    assert_eq!(a.sum.sealed_window_dropped, 3);
     assert_eq!(
-        (sa.messages, sa.rows, sa.rejected),
-        (sb.messages, sb.rows, sb.rejected)
+        (r.sum.sealed_window_dropped, r.sum.messages, r.ev.len),
+        (0, 2, 2)
     );
-    assert_eq!(a.ev.len, 2);
-    assert_eq!(a.sum.messages, 2);
-    assert_eq!(
-        (
-            sa.unknown_elements,
-            sa.unknown_attributes,
-            sa.unknown_overflow
-        ),
-        (
-            sb.unknown_elements,
-            sb.unknown_attributes,
-            sb.unknown_overflow
-        )
-    );
-    assert_eq!(sa.field_errors, sb.field_errors);
-    let texts = |s: &oa_fixm::Stats| {
-        s.unknown
-            .iter()
-            .map(|u| (unknown_text(u).to_string(), u.count))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(texts(sa), texts(sb));
 }
 
 // REQ: OA-SEAL-014
 #[test]
-fn a_dropped_message_that_overflowed_the_unknown_table_takes_the_overflow_back_out() {
-    let limits = Limits {
-        drop_window: oa_sealed::DropWindow::new(DROP.0, DROP.1),
-        max_unknown_paths: 1,
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
-    };
+fn an_in_window_message_after_a_full_table_or_a_prefix_cut_is_still_found() {
+    let m = |ts: &str| at(ts, "");
+    // Three messages, room for one row: a plain decode would be refused for capacity, and a
+    // prefix decode would stop at the second. The in-window third message is read first.
     let xml = doc(&[
-        at("2030-01-02T03:04:05Z", "<first/>"),
-        at("2026-11-21T00:00:00Z", "<second/><third/>"),
+        m("2030-01-02T03:04:05Z"),
+        m("2030-01-02T03:04:06Z"),
+        m("2026-11-21T00:00:00Z"),
     ]);
-    let (r, res) = run_with(&xml, 8, 1 << 12, limits);
-    res.unwrap();
-    let st = r.dec.stats();
-    assert_eq!(
-        (st.unknown_elements, st.unknown_overflow, st.unknown.len()),
-        (1, 0, 1)
+    for prefix in [false, true] {
+        let mut parser = Parser::new(XmlLimits::default()).unwrap();
+        let d = parser.parse(xml.as_bytes()).unwrap();
+        let mut dec = Decoder::new(windowed());
+        let mut ev = new_events(1, 1 << 12);
+        let r = if prefix {
+            dec.decode_prefix(&d, xml.as_bytes(), &mut ev)
+        } else {
+            dec.decode(&d, xml.as_bytes(), &mut ev)
+        };
+        assert_eq!(
+            r.unwrap(),
+            Summary {
+                sealed_window_dropped: 3,
+                ..Summary::default()
+            },
+            "prefix {prefix}"
+        );
+        assert_eq!(dec.stats(), &untouched(windowed(), 3));
+        assert_eq!(ev.len, 0);
+    }
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_message_with_an_invalid_field_before_its_time_is_still_dropped_with_its_document() {
+    // An invalid GUFI and a bad attribute come before the timestamp in document order.
+    let bad = message_with(
+        r#"centre="ZXX" source="TH" system="SLC" bogus="1" timestamp="2026-11-21T00:00:00Z""#,
+        "<gufi>not-a-uuid</gufi>",
     );
-    assert_eq!(st.sealed_window_dropped, 1);
-}
-
-// REQ: OA-SEAL-014
-#[test]
-fn a_dropped_message_leaves_the_unknown_path_a_kept_message_put_in_the_table_and_takes_back_its_own_count(
-) {
-    let limits = Limits {
-        drop_window: oa_sealed::DropWindow::new(DROP.0, DROP.1),
-        ..Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz())
-    };
-    // The same unknown element in a kept message, a dropped one, and another kept one.
-    let xml = doc(&[
-        at("2030-01-02T03:04:05Z", "<same/>"),
-        at("2026-11-21T00:00:00Z", "<same/><same/>"),
-        at("2030-01-02T03:04:06Z", "<same/>"),
-    ]);
-    let (r, res) = run_with(&xml, 8, 1 << 12, limits);
+    let xml = doc(&[at("2030-01-02T03:04:05Z", "<x/>"), bad]);
+    let (r, res) = run_with(&xml, 64, 1 << 16, windowed());
     res.unwrap();
-    let st = r.dec.stats();
-    assert_eq!(st.sealed_window_dropped, 1);
-    assert_eq!(st.unknown_elements, 2);
-    assert_eq!(st.unknown.len(), 1);
-    assert_eq!(st.unknown.first().map(|u| u.count), Some(2));
-    // The dropped message is named by its element index, for a caller that reads the document
-    // again.
-    assert_eq!(r.dec.dropped_messages().len(), 1);
-}
-
-// REQ: OA-SEAL-014
-#[test]
-fn a_document_whose_messages_were_all_dropped_by_time_is_not_counted_as_a_document() {
-    let limits = Limits::new(oa_sealed::DropWindow::new(DROP.0, DROP.1));
-    let xml = doc(&[
-        at("2026-11-21T00:00:00Z", "<x/>"),
-        at("2026-11-22T00:00:00Z", "<y/>"),
-    ]);
-    let (r, res) = run_with(&xml, 8, 1 << 12, limits);
-    res.unwrap();
-    let st = r.dec.stats();
-    assert_eq!(st.sealed_window_dropped, 2);
-    assert_eq!((st.docs, st.messages, st.rows), (0, 0, 0));
-    assert!(st.unknown.is_empty());
+    assert_eq!(r.dec.stats(), &untouched(windowed(), 2));
+    assert_eq!(r.sum.sealed_window_dropped, 2);
 }

@@ -1402,65 +1402,101 @@ fn a_namespace_written_with_a_character_reference_is_the_same_namespace() {
 /// The sealed window of the list in Unix ms: 2026-11-20T00:00:00Z to 2026-11-23T00:17:00Z.
 const SEAL: (i64, i64) = (1_795_132_800_000, 1_795_393_020_000);
 
-/// `xml` with its message time (`msgTime`) set to `ts`.
-fn timed(xml: &str, ts: &str) -> String {
-    xml.replace(
-        "msgTime=\"2026-11-14T14:11:42.420Z\"",
-        &format!("msgTime=\"{ts}\""),
+/// An envelope of several `tma` messages, each given by its attributes and body.
+fn env_many(tmas: &[(&str, &str)]) -> String {
+    let body: String = tmas
+        .iter()
+        .map(|(attrs, b)| format!("<tma {attrs}>{b}</tma>"))
+        .collect();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><env xmlns=\"{NS}\" \
+         targetNamespace=\"{NS}\" envTime=\"2026-11-14T14:11:42.420Z\" envSrce=\"TMA.ZTT.FAA.GOV\">{body}</env>"
     )
 }
 
-// REQ: OA-SEAL-014
-#[test]
-fn a_flight_timed_in_the_drop_window_is_dropped_before_any_count_even_when_it_has_a_refused_field()
-{
+const OUT: &str = "msgTime=\"2030-01-02T03:04:05Z\" msgId=\"1\"";
+const IN: &str = "msgTime=\"2026-11-21T00:00:00Z\" msgId=\"2\"";
+
+/// The outcome of a document dropped whole: only the count.
+fn sealed(n: u32) -> Outcome {
+    Outcome {
+        kind: MsgKind::Empty,
+        rows: 0,
+        unknown_paths: 0,
+        ignored_paths: 0,
+        center: [0; 4],
+        env_ms: NO_TIME,
+        dropped: 0,
+        rejected: 0,
+        first_reject: None,
+        reject_fields: [0; FIELD_COUNT],
+        reject_kinds: [0; oa_tbfm::ERROR_KIND_COUNT],
+        unknown_words: 0,
+        unknown_units: 0,
+        sealed_dropped: n,
+    }
+}
+
+/// Decodes `xml` with the sealed window into `rows` of `cap`, checks the outcome and the stats
+/// against an empty run, and returns nothing: a document dropped whole leaves no trace.
+fn assert_dropped_whole(xml: &str, cap: usize, n: u32) {
     let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
     let mut p = Parser::new(default_limits()).unwrap();
-    let mut stats = new_stats();
-    let mut rows = new_rows(16, w);
-    let bad = air(&format!("{FLT}{ETA}<sta><sta_rwy>garbage</sta_rwy></sta>"));
-    // Timed in the window: with a good flight and with a refused one. Neither is in a count.
-    for xml in [air(FLT), bad.clone()] {
-        let xml = timed(&xml, "2026-11-21T00:00:00Z");
-        let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
-        let o = r.as_ref().unwrap();
-        assert_eq!(
-            (o.sealed_dropped, o.rows, o.rejected, o.dropped),
-            (1, 0, 0, 0)
-        );
-        assert_eq!(o.reject_fields.iter().sum::<u32>(), 0);
-        assert_eq!(o.reject_kinds.iter().sum::<u32>(), 0);
+    for prefix in [false, true] {
+        let mut rows = new_rows(cap, w);
+        let before = new_rows(cap, w);
+        let doc = p.parse(xml.as_bytes()).unwrap();
+        let r = if prefix {
+            oa_tbfm::decode_doc_prefix(&doc, &mut rows)
+        } else {
+            decode_doc(&doc, &mut rows)
+        };
+        assert_eq!(r, Ok(sealed(n)), "prefix {prefix}");
+        assert_eq!(rows_len(&rows), 0);
+        assert_eq!(rows.cap, before.cap);
+        assert_eq!(rows.msg_id.len(), 0);
+        let mut stats = new_stats();
         observe(&mut stats, &r, &rows.section);
+        assert_eq!(
+            stats,
+            oa_tbfm::Stats {
+                sealed_window_dropped: u64::from(n),
+                ..new_stats()
+            }
+        );
     }
-    assert_eq!(rows_len(&rows), 0);
-    assert_eq!(stats.sealed_window_dropped, 2);
-    assert_eq!((stats.messages, stats.accepted, stats.rows), (0, 0, 0));
-    assert_eq!(stats.kinds.iter().sum::<u64>(), 0);
-    assert_eq!(stats.rejected_flights, 0);
-    assert_eq!(stats.field_errors.iter().sum::<u64>(), 0);
-    assert_eq!(stats.reject_kinds.iter().sum::<u64>(), 0);
-    // Outside it (the end is excluded), the same flights are kept and refused as usual.
-    let xml = timed(&air(FLT), "2026-11-23T00:17:00Z");
-    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
-    assert_eq!(r.as_ref().unwrap().sealed_dropped, 0);
-    observe(&mut stats, &r, &rows.section);
-    let xml = timed(&bad, "2026-11-19T23:59:59Z");
-    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
-    assert_eq!(r.as_ref().unwrap().rejected, 1);
-    observe(&mut stats, &r, &rows.section);
-    assert_eq!((stats.messages, stats.sealed_window_dropped), (2, 2));
 }
 
 // REQ: OA-SEAL-014
 #[test]
-fn a_message_with_no_known_time_is_not_dropped_and_a_refused_one_is_counted_as_refused() {
+fn a_document_with_a_message_in_the_window_is_dropped_whole_and_every_counter_is_as_for_an_empty_run(
+) {
+    let air_in = format!("<air {AIR_ATTRS}>{FLT}</air>");
+    // One in-window message among others: the document is dropped, and n is its messages.
+    assert_dropped_whole(
+        &env_many(&[(OUT, &air_in), (IN, &air_in), (OUT, &air_in)]),
+        16,
+        3,
+    );
+    // The same with a full table: two flights in the window, room for one row.
+    let two = format!("{air_in}{air_in}");
+    assert_dropped_whole(&env_many(&[(IN, &two)]), 1, 1);
+    // An in-window message with no flight at all (a bare tma).
+    assert_dropped_whole(&env_many(&[(OUT, &air_in), (IN, "")]), 16, 2);
+    // An invalid msgId before the msgTime, and a refused flight, in the window.
+    assert_dropped_whole(
+        &env_many(&[(
+            "msgId=\"x\" msgTime=\"2026-11-22T00:00:00Z\"",
+            &format!("<air {AIR_ATTRS}><bad/></air>"),
+        )]),
+        16,
+        1,
+    );
+    // Outside the window (the end is excluded), the same flights decode as usual.
     let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
-    let mut p = Parser::new(default_limits()).unwrap();
     let mut rows = new_rows(16, w);
-    // The message time is refused, so the message has no time to drop by: refused as before.
-    let xml = timed(&air(FLT), "not-a-time");
-    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
-    let o = r.unwrap();
-    assert_eq!((o.sealed_dropped, o.rejected), (0, 1));
-    assert_eq!(rows_len(&rows), 0);
+    let mut p = Parser::new(default_limits()).unwrap();
+    let xml = env_many(&[("msgTime=\"2026-11-23T00:17:00Z\" msgId=\"3\"", &air_in)]);
+    let o = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
+    assert_eq!((o.sealed_dropped, rows_len(&rows)), (0, 1));
 }

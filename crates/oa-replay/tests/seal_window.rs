@@ -57,24 +57,33 @@ fn a_row_timed_in_a_window_is_not_applied_though_its_frame_was_received_before_i
     // The fixtures count milliseconds from `DAY`.
     let from_ms = FROM / 1_000_000 - DAY;
     let mut p = new_pipeline(PipelineConfig::default()).unwrap();
-    // One frame received at from - 1 ns: the row timed at from - 1 ms is applied, the rows timed
-    // at from and at to - 1 ms are dropped and counted, the row timed at to is applied.
+    // Frames received at from - 1 ns, one row each: the rows timed at from - 1 ms and at to are
+    // applied; the rows timed at from and at to - 1 ms drop their whole document, and are counted.
     let to_ms = TO / 1_000_000 - DAY;
-    let doc = sf_doc(&[
-        sf(1, from_ms - 1),
-        sf(2, from_ms),
-        sf(3, to_ms - 1),
-        sf(4, to_ms),
-    ]);
+    for t in [from_ms - 1, from_ms, to_ms - 1, to_ms] {
+        let doc = sf_doc(&[sf(1, t)]);
+        process_frame(
+            &mut p,
+            Feed::Sfdps,
+            oa_feed::Kind::Message,
+            FROM - 1,
+            doc.as_bytes(),
+        );
+    }
+    assert_eq!(p.sealed_window_dropped, 2);
+    assert_eq!(p.rows_seen[Feed::Sfdps as usize], 2);
+    // One document with a row in the window and others outside it is dropped whole.
+    let mut q = new_pipeline(PipelineConfig::default()).unwrap();
+    let doc = sf_doc(&[sf(1, from_ms - 1), sf(2, from_ms), sf(3, to_ms)]);
     process_frame(
-        &mut p,
+        &mut q,
         Feed::Sfdps,
         oa_feed::Kind::Message,
         FROM - 1,
         doc.as_bytes(),
     );
-    assert_eq!(p.sealed_window_dropped, 2);
-    assert_eq!(p.rows_seen[Feed::Sfdps as usize], 2);
+    assert_eq!(q.sealed_window_dropped, 3);
+    assert_eq!(q.rows_seen[Feed::Sfdps as usize], 0);
 }
 
 // REQ: OA-SEAL-014

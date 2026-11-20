@@ -79,11 +79,17 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
                 oa_sealed::note_window_drops(1);
             }
             Ok(f) if f.kind == FrameKind::Message => {
+                let before = ctx.stats.sealed_window_dropped;
+                let parsed = parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats);
+                // A message with a record timed in a sealed window was dropped whole by the
+                // parser (`Limits::drop_window`), before any count: it is in no count here but
+                // the drop.
+                if ctx.stats.sealed_window_dropped > before {
+                    continue;
+                }
                 ctx.info.frames_message += 1;
-                match parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats) {
+                match parsed {
                     Ok(Message::Tais(m)) => {
-                        // A record timed in a sealed window was dropped by the parser
-                        // (`Limits::drop_window`), before any count.
                         for r in &m.records {
                             let index = u32::try_from(ctx.info.records).unwrap_or(u32::MAX);
                             ctx.out.push(rec_of(ctx.file, index, &m, r));

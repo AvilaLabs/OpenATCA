@@ -2182,55 +2182,94 @@ fn stamped(xml: &str, ts: &str) -> String {
     )
 }
 
-// REQ: OA-SEAL-014
-#[test]
-fn a_message_timed_in_the_drop_window_is_dropped_before_any_count_flights_flows_and_refused_ones() {
+/// The outcome of a document dropped whole: only the count.
+fn sealed(n: u32) -> Outcome {
+    Outcome {
+        kind: DocKind::Empty,
+        messages: 0,
+        flight_rows: 0,
+        flow_rows: 0,
+        unknown_paths: 0,
+        ignored_paths: 0,
+        dropped: 0,
+        rejected: 0,
+        first_reject: None,
+        reject_fields: [0; FIELD_COUNT],
+        reject_kinds: [0; oa_tfms::ERROR_KIND_COUNT],
+        unknown_words: 0,
+        unknown_units: 0,
+        sealed_dropped: n,
+    }
+}
+
+/// Decodes `xml` (prefix and plain) with the sealed window into tables of the given sizes, and
+/// checks that the outcome is the sealed one, the tables are untouched and the stats are those
+/// of an empty run with the drop count set.
+fn assert_dropped_whole(xml: &str, flights: usize, flows: usize, n: u32) {
     let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
     let mut p = Parser::new(default_limits()).unwrap();
-    let mut rows = new_rows(16, 8, 1 << 16, w);
-    let mut s = new_stats();
-    let refused = track().replace(
+    for prefix in [false, true] {
+        let mut rows = new_rows(flights, flows, 1 << 12, w);
+        let doc = p.parse(xml.as_bytes()).unwrap();
+        let r = if prefix {
+            oa_tfms::decode_doc_prefix(&doc, &mut rows)
+        } else {
+            oa_tfms::decode_doc(&doc, &mut rows)
+        };
+        assert_eq!(r, Ok(sealed(n)), "prefix {prefix}");
+        assert_eq!(flights_len(&rows.flights), 0);
+        assert_eq!(flows_len(&rows.flows), 0);
+        assert_eq!(rows.strings_used, 0);
+        let mut s = new_stats();
+        observe(&mut s, &r, &[], &[]);
+        assert_eq!(
+            s,
+            oa_tfms::Stats {
+                sealed_window_dropped: u64::from(n),
+                ..new_stats()
+            }
+        );
+    }
+}
+
+// REQ: OA-SEAL-014
+#[test]
+fn a_document_with_a_message_in_the_window_is_dropped_whole_and_every_counter_is_as_for_an_empty_run(
+) {
+    let inside = |x: String| stamped(&x, "2026-11-21T00:00:00Z");
+    let outside = |x: String| x;
+    // One in-window message among others: the document is dropped and n is its messages.
+    let mixed = format!(
+        "{}{}{}",
+        outside(track()),
+        inside(track()),
+        outside(track())
+    );
+    assert_dropped_whole(&wrap_flight(&mixed), 16, 8, 3);
+    // A full table: three flights, room for one, the in-window one last.
+    assert_dropped_whole(&wrap_flight(&mixed), 1, 1, 3);
+    // A flow message, and a TMI flight list (its entries have no time of their own).
+    assert_dropped_whole(&wrap_fi(&inside(gadv())), 16, 8, 1);
+    assert_dropped_whole(&wrap_fi(&inside(tmi_list())), 16, 8, 1);
+    assert_dropped_whole(
+        &wrap_fi(&format!("{}{}", gadv(), inside(tmi_list()))),
+        1,
+        1,
+        2,
+    );
+    // An invalid attribute before the time, and an invalid field after it, in the window.
+    let early = track().replace(r#"cdmPart="false""#, r#"cdmPart="maybe""#);
+    assert_dropped_whole(&wrap_flight(&inside(early)), 16, 8, 1);
+    let late = track().replace(
         "<nxcm:speed>276</nxcm:speed>",
         "<nxcm:speed>zzz</nxcm:speed>",
     );
-    for xml in [
-        wrap_flight(&track()),
-        wrap_flight(&refused),
-        wrap_fi(&gadv()),
-    ] {
-        let xml = stamped(&xml, "2026-11-21T00:00:00Z");
-        let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
-        let o = r.as_ref().unwrap();
-        assert_eq!(o.sealed_dropped, 1, "{o:?}");
-        assert_eq!((o.messages, o.rejected, o.dropped), (0, 0, 0));
-        assert_eq!(o.reject_fields.iter().sum::<u32>(), 0);
-        assert_eq!(o.reject_kinds.iter().sum::<u32>(), 0);
-        observe(&mut s, &r, &[], &[]);
-    }
-    assert_eq!(flights_len(&rows.flights), 0);
-    assert_eq!(flows_len(&rows.flows), 0);
-    assert_eq!(rows.strings_used, 0);
-    assert_eq!(s.sealed_window_dropped, 3);
-    assert_eq!(
-        (s.documents, s.accepted, s.messages, s.rejected_messages),
-        (0, 0, 0, 0)
-    );
-    assert_eq!(s.field_errors.iter().sum::<u64>(), 0);
-    assert_eq!(s.reject_kinds.iter().sum::<u64>(), 0);
-    // Just outside it, a message is kept; and one refused with no known time is refused as before.
-    let xml = stamped(&wrap_flight(&track()), "2026-11-19T23:59:59Z");
-    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
-    assert_eq!(r.as_ref().unwrap().sealed_dropped, 0);
-    assert_eq!(flights_len(&rows.flights), 1);
-    // Refused after its time was read (a bad body field) and timed in the window: dropped for its
-    // time, not refused.
-    let xml = stamped(&wrap_flight(&refused), "2026-11-21T00:00:00Z");
-    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
-    assert_eq!((r.sealed_dropped, r.rejected), (1, 0));
-    // Refused before its time is read (the message type is looked up before the other attributes and this one has none):
-    // no known time, so it is refused.
-    let early = wrap_flight(&track()).replace(r#" msgType="trackInformation""#, "");
-    let xml = stamped(&early, "2026-11-21T00:00:00Z");
-    let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
-    assert_eq!((r.sealed_dropped, r.rejected), (0, 1));
+    assert_dropped_whole(&wrap_flight(&inside(late)), 16, 8, 1);
+    // Without a message in the window (the end is excluded) the document decodes as usual.
+    let w = oa_sealed::DropWindow::new(SEAL.0, SEAL.1);
+    let mut rows = new_rows(16, 8, 1 << 16, w);
+    let mut p = Parser::new(default_limits()).unwrap();
+    let xml = stamped(&wrap_flight(&track()), "2026-11-23T00:17:00Z");
+    let o = decode_bytes(&mut p, xml.as_bytes(), &mut rows).unwrap();
+    assert_eq!((o.sealed_dropped, flights_len(&rows.flights)), (0, 1));
 }

@@ -36,9 +36,10 @@ use crate::fields::{
 };
 use crate::rows::{
     change, pt, push_row, rows_len, sch_flag, section, spd_unit, truncate_rows, Name12, Name14,
-    Name16, Name20, Name24, Name4, Name8, Row, Rows, BLANK_ROW,
+    Name16, Name20, Name24, Name4, Name8, Row, Rows, BLANK_ROW, NO_TIME,
 };
 use crate::time::parse_iso_ms;
+use oa_sealed::DropWindow;
 use oa_xml::{
     attr_needs_decode, decode_into, decode_text_run, ns_uri_bytes, resolve_elem_ns, span_bytes,
     text_needs_decode, Doc, ElemIx, Limits, Ns, Parser, Span, SpanKind,
@@ -79,8 +80,9 @@ pub struct Outcome {
     pub unknown_words: u32,
     /// Speeds whose form is neither knots nor Mach, stored with the unknown unit.
     pub unknown_units: u32,
-    /// Rows dropped because their own time (`msgTime`) is in [`Rows::window`]: the row is not
-    /// appended and nothing it counted is kept; no other field of the outcome includes it.
+    /// Messages (`tma`) of a document dropped whole because one of them has its `msgTime` in
+    /// [`Rows::window`] (OA-SEAL-014). The document was not decoded: every other field of the
+    /// outcome is zero and nothing was touched.
     pub sealed_dropped: u32,
 }
 
@@ -113,7 +115,66 @@ pub fn decode_doc_prefix(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocE
     decode_with(doc, rows, true)
 }
 
+/// Reads the `msgTime` of every `tma` message of the document, directly from the parsed tree and
+/// whatever else is valid in it. If any is in `window`, returns how many messages the document
+/// has (all are dropped); otherwise 0. A time that cannot be read is not in the window (the
+/// frame's receive time gates it).
+fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
+    if window.span().is_none() {
+        return 0;
+    }
+    let (mut messages, mut hit) = (0u32, false);
+    for i in 0..doc.elem_name.len() {
+        let e = ElemIx(i as u32);
+        if elem_name(doc, e) != b"tma" {
+            continue;
+        }
+        messages = messages.saturating_add(1);
+        let n = doc.elem_attr_count.get(i).copied().unwrap_or(0);
+        for k in 0..n {
+            let a = attr_ref(doc, e, k);
+            let mut buf = [0u8; MAX_VALUE];
+            if a.name == b"msgTime" {
+                if let Ok(v) = attr_val(doc, &a, Field::MsgTime, &mut buf) {
+                    hit |= parse_time(v).is_ok_and(|t| window.contains(t));
+                }
+            }
+        }
+    }
+    if hit {
+        messages
+    } else {
+        0
+    }
+}
+
+/// The outcome of a document dropped whole by [`prescan`]: only the count, nothing else.
+fn sealed_outcome(messages: u32) -> Outcome {
+    Outcome {
+        kind: MsgKind::Empty,
+        rows: 0,
+        unknown_paths: 0,
+        ignored_paths: 0,
+        center: [0; 4],
+        env_ms: NO_TIME,
+        dropped: 0,
+        rejected: 0,
+        first_reject: None,
+        reject_fields: [0; FIELD_COUNT],
+        reject_kinds: [0; ERROR_KIND_COUNT],
+        unknown_words: 0,
+        unknown_units: 0,
+        sealed_dropped: messages,
+    }
+}
+
 fn decode_with(doc: &Doc<'_>, rows: &mut Rows, prefix: bool) -> Result<Outcome, DocError> {
+    // The first step, before any count, row or table is touched: a document with a message in
+    // the sealed window is dropped whole.
+    let gone = prescan(doc, rows.window);
+    if gone > 0 {
+        return Ok(sealed_outcome(gone));
+    }
     let start = rows_len(rows);
     let mut acc = Acc {
         t: 0,
@@ -127,8 +188,6 @@ fn decode_with(doc: &Doc<'_>, rows: &mut Rows, prefix: bool) -> Result<Outcome, 
         reject_kinds: [0; ERROR_KIND_COUNT],
         unknown_words: 0,
         unknown_units: 0,
-        sealed: 0,
-        msg_ms: None,
     };
     let r = decode_root(doc, &mut acc, rows);
     if r.is_err() {
@@ -151,11 +210,6 @@ struct Acc {
     reject_kinds: [u32; ERROR_KIND_COUNT],
     unknown_words: u32,
     unknown_units: u32,
-    /// Rows dropped for their time in the window.
-    sealed: u32,
-    /// The message time of the `tma` being decoded, once read: a flight refused after it is
-    /// known is dropped for its time instead (the time is known, so it is not a refusal).
-    msg_ms: Option<i64>,
 }
 
 /// Runs `f` (the decode of one flight or one `tma`); a refused field rolls the rows and the
@@ -176,36 +230,7 @@ fn guarded<T>(
         acc.unknown_units,
     );
     match f(acc, rows) {
-        Ok(v) => {
-            // A flight timed (`msgTime`) in the window is dropped like a refused one: its rows
-            // and everything it counted are rolled back, and only the drop is counted.
-            let gone = rows.msg_ms.get(start..).map_or(0, |t| {
-                t.iter().filter(|&&t| rows.window.contains(t)).count()
-            });
-            if gone == 0 {
-                return Ok(Some(v));
-            }
-            truncate_rows(rows, start);
-            acc.unknown = unknown;
-            acc.ignored = ignored;
-            acc.dropped = dropped;
-            acc.unknown_words = words;
-            acc.unknown_units = units;
-            acc.sealed = acc
-                .sealed
-                .saturating_add(u32::try_from(gone).unwrap_or(u32::MAX));
-            Ok(None)
-        }
-        Err(DocError::Field(_)) if acc.msg_ms.is_some_and(|t| rows.window.contains(t)) => {
-            truncate_rows(rows, start);
-            acc.unknown = unknown;
-            acc.ignored = ignored;
-            acc.dropped = dropped;
-            acc.unknown_words = words;
-            acc.unknown_units = units;
-            acc.sealed = acc.sealed.saturating_add(1);
-            Ok(None)
-        }
+        Ok(v) => Ok(Some(v)),
         Err(DocError::Field(fe)) => {
             truncate_rows(rows, start);
             acc.unknown = unknown;
@@ -886,7 +911,7 @@ fn decode_env(
         reject_kinds: acc.reject_kinds,
         unknown_words: acc.unknown_words,
         unknown_units: acc.unknown_units,
-        sealed_dropped: acc.sealed,
+        sealed_dropped: 0,
     })
 }
 
@@ -898,7 +923,6 @@ fn decode_tma(
     rows: &mut Rows,
 ) -> Result<MsgKind, DocError> {
     let at = elem_at(doc, tma);
-    acc.msg_ms = None;
     let mut msg_ms = None;
     let mut msg_id = None;
     let n = doc
@@ -939,7 +963,6 @@ fn decode_tma(
     base.env_ms = env.time_ms;
     base.msg_ms = msg_ms;
     base.msg_id = msg_id;
-    acc.msg_ms = Some(msg_ms);
 
     let mut kind = MsgKind::Empty;
     let mut c = first_child(doc, tma);

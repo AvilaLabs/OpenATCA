@@ -727,8 +727,12 @@ fn process_sfdps(p: &mut Pipeline, payload: &[u8], now: i64) {
             return;
         }
     };
-    // Messages the decoder dropped for their own time (OA-SEAL-014).
-    note_sealed(p, u64::from(summary.sealed_window_dropped));
+    // The decoder dropped the whole document for a message timed in the sealed window
+    // (OA-SEAL-014): nothing else of it is counted or applied.
+    if summary.sealed_window_dropped > 0 {
+        note_sealed(p, u64::from(summary.sealed_window_dropped));
+        return;
+    }
     let after = p.fixm.stats().rejected;
     for r in 0..REJECT_COUNT {
         let d = after
@@ -819,10 +823,10 @@ fn process_tbfm(p: &mut Pipeline, payload: &[u8], now: i64) {
     };
     match decode_doc_prefix(&doc, &mut p.rows) {
         Ok(out) => {
-            // Flights the decoder dropped for their own time (OA-SEAL-014); a message with
-            // nothing else in it is in no other count.
-            note_sealed(p, u64::from(out.sealed_dropped));
-            if out.sealed_dropped > 0 && out.rows == 0 && out.rejected == 0 && out.dropped == 0 {
+            // The decoder dropped the whole document for a message timed in the sealed window
+            // (OA-SEAL-014): nothing else of it is counted or applied.
+            if out.sealed_dropped > 0 {
+                note_sealed(p, u64::from(out.sealed_dropped));
                 return;
             }
             count_error(&mut p.errors, ErrKind::TbfmCapacity, u64::from(out.dropped));
@@ -862,11 +866,10 @@ fn process_tfms(p: &mut Pipeline, payload: &[u8], now: i64) {
     };
     match decode_tfms_doc(&doc, &mut p.tfms_rows) {
         Ok(out) => {
-            // Messages the decoder dropped for their own time, flights and flows alike
-            // (OA-SEAL-014); a document with nothing else in it is in no other count.
-            note_sealed(p, u64::from(out.sealed_dropped));
-            if out.sealed_dropped > 0 && out.messages == 0 && out.rejected == 0 && out.dropped == 0
-            {
+            // The decoder dropped the whole document for a message timed in the sealed window
+            // (OA-SEAL-014): nothing else of it is counted or applied.
+            if out.sealed_dropped > 0 {
+                note_sealed(p, u64::from(out.sealed_dropped));
                 return;
             }
             count_error(&mut p.errors, ErrKind::TfmsCapacity, u64::from(out.dropped));

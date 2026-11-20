@@ -64,10 +64,11 @@ pub struct Limits {
     pub max_errors: usize,
     /// Most distinct unknown element paths kept in [`Stats`]; further ones are counted as overflow.
     pub max_unknown_paths: usize,
-    /// The span in which a record (TAIS) or report (SMES) timed by its own `mrtTime` or `time`
-    /// is dropped before any statistic is updated: it is not in the message, the counts or the
-    /// unknown and error tables, and it is counted in [`Stats::sealed_window_dropped`]. A record
-    /// with no time is kept. Required: there is no `Default`, so a caller cannot forget it.
+    /// The span in which a record (TAIS `track/mrtTime`) or report (SMES `time`) is timed. The
+    /// first step of a decode reads every record's time, with no record limit; if any is in the
+    /// span the whole message is dropped, with nothing counted but the number of its records in
+    /// [`Stats::sealed_window_dropped`]. A record with no readable time does not count. Required:
+    /// there is no `Default`, so a caller cannot forget it.
     pub drop_window: DropWindow,
 }
 
@@ -81,11 +82,6 @@ impl Limits {
             max_unknown_paths: 128,
             drop_window: window,
         }
-    }
-
-    /// Whether `t_ms` is in [`Limits::drop_window`].
-    pub fn drops(&self, t_ms: i64) -> bool {
-        self.drop_window.contains(t_ms)
     }
 }
 

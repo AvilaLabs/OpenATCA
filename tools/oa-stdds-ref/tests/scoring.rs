@@ -1051,17 +1051,22 @@ fn a_frame_or_a_record_in_a_sealed_window_is_dropped_and_counted() {
         (Some("A1B2C3"), "2026-11-19T23:59:59.000Z", "40.5", "-75.5"),
         (Some("A1B2C3"), "2026-11-20T00:00:00.000Z", "40.6", "-75.6"),
     ]);
+    let kept = tais_xml(&[(Some("A1B2C3"), "2026-11-19T23:59:58.000Z", "40.4", "-75.4")]);
     let mut bytes = Vec::new();
-    for (i, t) in [FROM - 1, FROM].into_iter().enumerate() {
-        let mut buf = vec![0u8; m.len() + 256];
-        let n = oa_feed::encode_frame(&mut buf, 1, 0, i as u64, t, 0, &m).unwrap();
+    for (i, (t, x)) in [(FROM - 1, &m), (FROM - 1, &kept), (FROM, &kept)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut buf = vec![0u8; x.len() + 256];
+        let n = oa_feed::encode_frame(&mut buf, 1, 0, i as u64, t, 0, x).unwrap();
         bytes.extend_from_slice(&buf[..n]);
     }
     let mut out = Vec::new();
     let info = load_reader(&bytes[..], "mem", 0, &mut out).unwrap();
-    // The frame at from is dropped; in the frame at from - 1 ns the record timed at from is.
+    // The frame at from is dropped; the message of the frame at from - 1 ns has a record timed at
+    // from, so it is dropped whole (both its records are counted), and only `kept` is read.
     assert_eq!((info.frames_message, info.records), (1, 1));
-    assert_eq!(info.sealed_window_dropped, 2);
+    assert_eq!(info.sealed_window_dropped, 3);
 }
 
 // REQ: OA-SEAL-014

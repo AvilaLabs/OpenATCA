@@ -26,8 +26,9 @@
 //! any component at or below that point that contains `X` (so `derived/*2026.11.21*` seals any
 //! derived clip of that day, at any depth). The content rule is the list's `window` lines: a
 //! half-open UTC span in which every row or frame is sealed, whatever file holds it. The guard
-//! owns the windows ([`in_sealed_window`]); each reader, which has the parser, drops and counts
-//! the rows that fall in one.
+//! owns the windows ([`in_sealed_window`]); each decoder pre-scans a whole document (a whole
+//! message for stdds) for a message time in one, before it touches any counter or row, and drops
+//! the document whole, counting only its messages.
 //!
 //! Requirements: OA-SEAL-001 and the following, in REQUIREMENTS.md.
 
@@ -617,6 +618,18 @@ impl Sealed {
         &self.list.windows
     }
 
+    /// The windows of the list as one span of Unix milliseconds for the decoders. A list with no
+    /// window, or one that does not parse, gives the window that holds all time (fails closed).
+    pub fn drop_window(&self) -> DropWindow {
+        let up = |ns: i64| ns.div_euclid(1_000_000) + i64::from(ns.rem_euclid(1_000_000) != 0);
+        let from = self.list.windows.iter().map(|x| x.from_ns).min();
+        let to = self.list.windows.iter().map(|x| x.to_ns).max();
+        match (self.broken, from, to) {
+            (false, Some(a), Some(b)) => DropWindow::new(up(a), up(b)),
+            _ => DropWindow::all_time(),
+        }
+    }
+
     /// Whether `unix_ns` (nanoseconds since the Unix epoch, UTC) is in a sealed window. A guard
     /// whose list does not parse seals every instant.
     pub fn in_window(&self, unix_ns: i64) -> bool {
@@ -878,11 +891,19 @@ impl DropWindow {
         }
     }
 
-    /// The sealed window of the list ([`sealed_window_ms`]); empty when the list has none.
+    /// The sealed window of the compiled-in list ([`sealed_window_ms`]). It fails closed, like
+    /// the path guard: if the list has no window or does not parse, the window covers all time
+    /// and every row is dropped.
     pub fn sealed() -> DropWindow {
-        sealed_window_ms().map_or(DropWindow::empty_for_tests_and_fuzz(), |(a, b)| {
-            DropWindow::new(a, b)
-        })
+        Sealed::production().drop_window()
+    }
+
+    /// A window that holds all time (the closed failure of [`DropWindow::sealed`]).
+    pub const fn all_time() -> DropWindow {
+        DropWindow {
+            from_ms: i64::MIN,
+            to_ms: i64::MAX,
+        }
     }
 
     /// Whether `t_ms` is in the window.
@@ -958,5 +979,26 @@ mod tests {
             DropWindow::sealed().span(),
             Some((1_795_132_800_000, 1_795_393_020_000))
         );
+    }
+
+    #[test]
+    fn the_drop_window_fails_closed_when_the_list_has_no_window_or_does_not_parse() {
+        let all = DropWindow::all_time();
+        assert!(all.contains(0) && all.contains(1_795_200_000_000) && all.contains(i64::MIN));
+        // The compiled-in list: its own span.
+        assert_eq!(
+            Sealed::with_list(LIST, None).drop_window().span(),
+            Some((1_795_132_800_000, 1_795_393_020_000))
+        );
+        // A list that does not parse, and one with no window line: all time.
+        assert_eq!(Sealed::with_list("not a list\n", None).drop_window(), all);
+        let none: String = LIST
+            .lines()
+            .filter(|l| !l.starts_with("window"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let g = Sealed::with_list(&none, None);
+        assert!(g.windows().is_empty());
+        assert_eq!(g.drop_window(), all);
     }
 }

@@ -49,12 +49,16 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx) {
                 ctx.sealed_frames += 1;
             }
             Ok(f) if f.kind == FrameKind::Message => {
-                // A record or report timed in a sealed window is dropped inside the parser,
-                // before any count is updated (`Limits::drop_window`).
+                // A message with a record or report timed in a sealed window is dropped whole
+                // inside the parser, before any count is updated (`Limits::drop_window`): it is
+                // in no count here but the drop.
+                let before = ctx.stats.sealed_window_dropped;
+                let parsed = parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats);
+                if ctx.stats.sealed_window_dropped > before {
+                    continue;
+                }
                 ctx.frames += 1;
-                if let Err(e) =
-                    parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.stats)
-                {
+                if let Err(e) = parsed {
                     if let Some(c) = ctx.refused.get_mut(std_error_index(&e)) {
                         *c += 1;
                     }

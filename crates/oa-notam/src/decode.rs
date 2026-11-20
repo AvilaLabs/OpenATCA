@@ -75,8 +75,9 @@ pub struct Outcome {
     pub field_errors: u32,
     pub unknown_elements: u32,
     pub unknown_attributes: u32,
-    /// The NOTAM was dropped for its time in [`Limits::drop_window`]: no row was appended (`row`
-    /// is then 0 and names nothing) and no count but `Stats::sealed_window_dropped` has it.
+    /// The document was dropped whole for the time of its NOTAM in [`Limits::drop_window`]: it
+    /// was not decoded, no row was appended (`row` is then 0 and names nothing) and no count but
+    /// `Stats::sealed_window_dropped` has it.
     pub sealed_dropped: bool,
 }
 
@@ -749,6 +750,37 @@ fn count_reject(stats: &mut Stats, e: &DocError) {
     }
 }
 
+/// Reads the text of every `issued` and `canceled` element of the document, directly from the
+/// parsed tree and whatever else is valid in it. True if any is in `window`. A time that cannot
+/// be read is not in the window (the frame's receive time gates it).
+fn prescan(doc: &Doc<'_>, window: DropWindow) -> bool {
+    if window.span().is_none() {
+        return false;
+    }
+    for (t, owner) in doc.text_owner.iter().enumerate() {
+        let name = doc
+            .elem_name
+            .get(owner.0 as usize)
+            .copied()
+            .unwrap_or_default();
+        let name = name_bytes(doc.input, name);
+        if name != b"issued" && name != b"canceled" {
+            continue;
+        }
+        let Some(&sp) = doc.text_span.get(t) else {
+            continue;
+        };
+        let mut buf = [0u8; 64];
+        let ent = text_needs_decode(doc, TextIx(t as u32));
+        if let Raw::Val(v) = raw_bytes(doc.input, sp, ent, SpanKind::Text, &mut buf) {
+            if parse_iso_ms(trim(v)).is_some_and(|t| window.contains(t)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Decodes one parsed document into `out`: appends one row, or on `Err` leaves `out` exactly
 /// as it was. Refusals, field errors and unknown paths are counted in `stats`.
 pub fn decode_doc(
@@ -757,40 +789,21 @@ pub fn decode_doc(
     out: &mut Notams,
     stats: &mut Stats,
 ) -> Result<Outcome, DocError> {
+    // The first step, before any count, row or table is touched: a NOTAM issued or cancelled in
+    // the sealed window is dropped whole.
+    if prescan(doc, dec.limits.drop_window) {
+        stats.sealed_window_dropped = stats.sealed_window_dropped.saturating_add(1);
+        return Ok(Outcome {
+            row: 0,
+            field_errors: 0,
+            unknown_elements: 0,
+            unknown_attributes: 0,
+            sealed_dropped: true,
+        });
+    }
     stats.docs = stats.docs.saturating_add(1);
     let start = mark(out);
-    // What the walk may change before the time of the NOTAM is known, to put back if it is
-    // dropped for its time.
-    let snap = (
-        stats.unknown.clone(),
-        stats.unknown_elements,
-        stats.unknown_attributes,
-        stats.unknown_overflow,
-    );
     let r = decode_inner(dec, doc, out, stats, start);
-    if let Ok(o) = &r {
-        let i = o.row as usize;
-        let w = dec.limits.drop_window;
-        let timed = |v: &[i64]| v.get(i).is_some_and(|&t| w.contains(t));
-        if timed(&out.issued_ms) || timed(&out.canceled_ms) {
-            truncate_notams(out, start);
-            stats.docs = stats.docs.saturating_sub(1);
-            (
-                stats.unknown,
-                stats.unknown_elements,
-                stats.unknown_attributes,
-                stats.unknown_overflow,
-            ) = snap;
-            stats.sealed_window_dropped = stats.sealed_window_dropped.saturating_add(1);
-            return Ok(Outcome {
-                row: 0,
-                field_errors: 0,
-                unknown_elements: 0,
-                unknown_attributes: 0,
-                sealed_dropped: true,
-            });
-        }
-    }
     match &r {
         Ok(o) => {
             stats.accepted = stats.accepted.saturating_add(1);

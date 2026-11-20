@@ -12,8 +12,8 @@ use crate::rows::section;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Stats {
     pub messages: u64,
-    /// Rows dropped because their own time is in the window (OA-SEAL-014); a message that held
-    /// only such rows is in no other count.
+    /// Messages of documents dropped whole because one has its time in the window
+    /// (OA-SEAL-014); such a document is in no other count.
     pub sealed_window_dropped: u64,
     pub accepted: u64,
     pub rows: u64,
@@ -64,11 +64,10 @@ pub const fn new_stats() -> Stats {
 /// Folds one decode result into `s`. `sections_added` is the `section` column of the rows the
 /// decode appended (`&rows.section[before..]`), counted by section.
 pub fn observe(s: &mut Stats, result: &Result<Outcome, DocError>, sections_added: &[u8]) {
+    // A document dropped whole for its time is in no count but this one.
     if let Ok(o) = result {
         s.sealed_window_dropped += u64::from(o.sealed_dropped);
-        // A message whose every row was dropped for its time (nothing refused, nothing else in
-        // it) is in no message, kind or other count.
-        if o.sealed_dropped > 0 && o.rows == 0 && o.rejected == 0 && o.dropped == 0 {
+        if o.sealed_dropped > 0 {
             return;
         }
     }

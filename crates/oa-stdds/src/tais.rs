@@ -35,7 +35,7 @@
 //! counted, not an error.
 
 use crate::kind::{children, in_message_ns, name_of, Kind};
-use crate::walk::{elem_offset, text_index, walk, Got, Scratch, Sink, Slot, Spec, Val};
+use crate::walk::{elem_offset, prescan, text_index, walk, Got, Sink, Slot, Spec, Val};
 use crate::{FieldError, FieldErrorKind, Limits, Stats, StdError};
 use oa_xml::{Doc, ElemIx};
 
@@ -437,9 +437,7 @@ fn code(slots: &[Slot], f: TaisField) -> Option<[u8; 8]> {
 /// with a refused field is kept with the field absent. Counts records, fields and unknown
 /// elements into `stats`, including the records read before a [`StdError::TooManyRecords`] or
 /// [`StdError::TooDeep`] refusal; the refusal itself is counted in `stats.errors`. It does not
-/// count the message: [`crate::parse_message`] does, once, when it classifies. The half-walked
-/// record of a `TooDeep` refusal has no known time and is not counted at all; the records after a
-/// refusal are never parsed, so [`Stats::sealed_window_dropped`] is a lower bound for them.
+/// count the message: [`crate::parse_message`] does, once, when it classifies.
 pub fn parse_tais(
     doc: &Doc<'_>,
     limits: &Limits,
@@ -452,6 +450,26 @@ pub fn parse_tais(
         return Err(e);
     }
     let tx = text_index(doc);
+    // The first step, before any count: a message with a record timed in the sealed window is
+    // dropped whole (OA-SEAL-014).
+    let gone = prescan(
+        doc,
+        &tx,
+        limits.drop_window,
+        b"record",
+        &[b"track", b"mrtTime"],
+    );
+    if gone > 0 {
+        stats.sealed_window_dropped += gone;
+        return Ok(TaisMessage {
+            src: [0; 8],
+            src_present: false,
+            records: Vec::new(),
+            errors: Vec::new(),
+            errors_dropped: 0,
+            unknown_elements: 0,
+        });
+    }
     let root = ElemIx(0);
     let mut msg = TaisMessage {
         src: [0; 8],
@@ -489,7 +507,6 @@ pub fn parse_tais(
         msg.src_present = true;
     }
     let mut refusal = None;
-    let mut sealed_dropped = 0u64;
     for c in children(doc, root) {
         if name_of(doc, c) != b"record" || !in_message_ns(doc, c) {
             continue;
@@ -501,28 +518,9 @@ pub fn parse_tais(
             });
             break;
         }
-        // The record is walked into a scratch sink: one timed in the drop window is discarded
-        // with everything it counted, before any statistic is updated.
-        let mut scratch = Scratch::default();
-        let (res, ud, inv) = {
-            let mut tmp = scratch.sink(limits.max_errors);
-            let res = record(doc, &tx, c, &mut tmp);
-            (res, tmp.unknown_dropped, tmp.invalidated)
-        };
-        match res {
-            Ok(r)
-                if r.present & tais_bit(TaisField::MrtTime) != 0 && limits.drops(r.mrt_time_ms) =>
-            {
-                sealed_dropped += 1;
-            }
-            Ok(r) => {
-                sink.absorb(scratch, ud, inv);
-                msg.records.push(r);
-            }
+        match record(doc, &tx, c, &mut sink) {
+            Ok(r) => msg.records.push(r),
             Err(off) => {
-                // The half-walked record has no known time: its scratch is discarded, not
-                // absorbed, and the refusal is counted in `errors` only.
-                let _ = (ud, inv);
                 refusal = Some(StdError::TooDeep { offset: off });
                 break;
             }
@@ -533,7 +531,6 @@ pub fn parse_tais(
     msg.errors = errors;
     msg.errors_dropped = dropped;
     msg.unknown_elements = unknown.iter().map(|(_, n)| *n).sum::<u64>() + unknown_dropped;
-    stats.sealed_window_dropped += sealed_dropped;
     stats.observe_tais(&msg, &unknown, unknown_dropped, invalidated, limits);
     match refusal {
         Some(e) => {
