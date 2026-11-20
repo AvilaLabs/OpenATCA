@@ -123,8 +123,7 @@ fn sealed_names_are_refused_as_given_with_the_rule_named_and_near_misses_are_not
     }
 }
 
-// REQ: OA-SEAL-001
-// REQ: OA-SEAL-002
+// REQ: OA-SEAL-009, OA-SEAL-001, OA-SEAL-002
 #[test]
 fn only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed() {
     let root = fake_root("tune");

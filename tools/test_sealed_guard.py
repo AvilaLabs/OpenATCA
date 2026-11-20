@@ -61,8 +61,7 @@ class SealedGuardTests(unittest.TestCase):
                   "/data/scds/x/rec-20261119", "/data/scds/stdds-smoke-20261118T1"):
             self.g.check(p)
 
-    # REQ: OA-SEAL-001
-    # REQ: OA-SEAL-002
+    # REQ: OA-SEAL-009, OA-SEAL-001, OA-SEAL-002
     def test_only_days_two_to_four_and_the_run_log_of_the_recording_are_sealed(self):
         rec = self.root / "scds/rec-20261119"
         (rec / "day1/x").write_bytes(b"x")

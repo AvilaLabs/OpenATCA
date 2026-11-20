@@ -41,6 +41,7 @@ mod hfilter;
 pub mod latency;
 pub mod params;
 pub mod radar;
+pub mod realtime;
 pub mod registration;
 pub mod score;
 pub mod spill;

@@ -3832,6 +3832,27 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   scoring, writes `core.txt` with throughput with and without the one-second output, per-stage latency,
   and resident memory per phase, and the replay's output digest equals the scoring run's.
 
+- **OA-TRK-388** `oa-track-run --adsb <clip.oaf> --out <dir> --realtime [--with-output] [--max-tracks <n>]` offers
+  every report of the clip to the tracker (no split, no scoring; the configuration is `scoring_config` of the
+  full clip, printed with the run) and times each second's updates together with the shell's monotonic clock.
+  It writes `realtime.txt` and `seconds.csv`: for every second from the first to the last, including seconds
+  with no measurements and the last, the measurements, the processing time and the confirmed and tentative
+  track counts after the last update in the second (a second with no updates carries the previous counts;
+  the tracker is not advanced to the second boundary, and the peaks are sampled once per second). It reports the time's p50, p99 and maximum over all those seconds
+  (an empty second counts as zero), the seconds that did not finish within the second and the longest queue
+  behind the traffic (an upper bound: a second's work starts when the second ends), the final advance and
+  flush apart, CPU and wall time of the update window and, read right after the final flush and before any
+  digest, of the run from its start (ingest, set-up, updates, flush) against the traffic's span with the CPU
+  source named, every refusal and overflow counter, resident memory with the process peak
+  labelled, and the tracker table bytes. A run summary digest (the track log and the counters, taken after the
+  timed window; `oa-track` has no tracker state hash) is always printed; `--with-output` also writes the output
+  rows to column files and prints their digest. These digests are comparable only between realtime runs of the
+  same clip, the same `--max-tracks` and the same build, not with the golden digests of the split, scored run. The run fails (non-zero exit) on an empty
+  clip, on no measurements after the adapter, on any measurement outside the per-second log (no figures are
+  computed over a truncated span), and, after printing its report, on any capacity refusal (not a full-load
+  measurement) and on any lost output row or track log entry (the digests would cover truncated data). `--with-output` and `--max-tracks` need `--realtime`; `--realtime` refuses `--digest`,
+  `--rows`, `--no-score` and `--no-compare`. The per-second log is a pure function of what it is given.
+
 ### Radar fusion with registration (oa-track: radar, assoc, registration, fusion; study binary oa-track-fusion)
 
 - **OA-TRK-030** A radar plot (slant range, azimuth, Mode C altitude) becomes a position in the track's local
