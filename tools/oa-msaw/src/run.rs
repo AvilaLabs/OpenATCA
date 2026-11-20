@@ -128,6 +128,7 @@ pub struct RunTimes {
 
 struct Feed<'a> {
     times: RunTimes,
+    cycles_done: u64,
     st: MsawState,
     alerts: AlertLog,
     skips: SkipLog,
@@ -173,6 +174,9 @@ fn flush(f: &mut Feed) {
     f.times.plan_ns += t0.elapsed().as_nanos() as u64;
     let t1 = Instant::now();
     f.floor_buf.clear();
+    if let Err(e) = f.floors.prepare(msaw_points(&f.st)) {
+        f.error = Some(e);
+    }
     for p in msaw_points(&f.st) {
         match f.floors.floor_at(p) {
             Ok(s) => f.floor_buf.push(s),
@@ -200,6 +204,22 @@ fn flush(f: &mut Feed) {
     f.times.eval_ns += t2.elapsed().as_nanos() as u64;
     f.last_t = t;
     f.batch.clear();
+    f.cycles_done += 1;
+    if f.cycles_done % 60 == 0 {
+        let fs = &f.floors.stats;
+        eprintln!(
+            "oa-msaw: {} cycles; terrain tiles read {} (again {}), terrain {:.1} s, tile reads {:.1} s, obstacles {:.1} s, chart {:.1} s, planning {:.1} s, evaluation {:.1} s",
+            f.cycles_done,
+            fs.tiles_loaded,
+            fs.tiles_reloaded,
+            fs.ns_terrain as f64 / 1e9,
+            fs.ns_tile_read as f64 / 1e9,
+            fs.ns_obstacle as f64 / 1e9,
+            fs.ns_chart as f64 / 1e9,
+            f.times.plan_ns as f64 / 1e9,
+            f.times.eval_ns as f64 / 1e9
+        );
+    }
     f.all.extend_from_slice(&f.alerts.items);
     alert_log_clear(&mut f.alerts);
     for s in &f.skips.items {
@@ -396,6 +416,7 @@ pub fn track_and_alert(
     let made = make_inhibits(&mut inh, set, t0_ns)?;
     let mut f = Feed {
         times: RunTimes::default(),
+        cycles_done: 0,
         st: msaw_new(&set.msaw)?,
         alerts: alert_log_new(set.alert_log_capacity)?,
         skips: skip_log_new(set.skip_log_capacity)?,
@@ -714,6 +735,15 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     used.without_corridor = without_corridor;
     used.airports = airports;
     used.rss_load_kb = proc_kb("VmHWM:");
+    eprintln!(
+        "oa-msaw: loaded ({}); peak memory {} MB",
+        used.load_ns
+            .iter()
+            .map(|(n, ns)| format!("{n} {:.1} s", *ns as f64 / 1e9))
+            .collect::<Vec<_>>()
+            .join(", "),
+        used.rss_load_kb.map_or(0, |k| k / 1024)
+    );
     let cpu0 = cpu_seconds();
     let rec = track_and_alert(&meas, &cfg, &ground, &set, floors, Some(qnh), t0_ns)?;
     used.steady_cpu_s = cpu_seconds().zip(cpu0).map(|(b, a)| b - a);

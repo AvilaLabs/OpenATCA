@@ -33,9 +33,12 @@ const CELL_DEG: f64 = 0.002;
 /// Half the diagonal of a cell, metres, at the equator (the largest): 0.002 degrees is 222.4 m of
 /// latitude and at most as much of longitude.
 const CELL_HALF_DIAG_M: f64 = 158.0;
-/// The most tiles held in memory at once (a 3DEP tile is some 50 MB); the least recently used is
-/// dropped and read again if it is needed.
-const MAX_RESIDENT_TILES: usize = 24;
+/// The most tiles held in memory at once (a 3DEP tile is some 50 MB, a facility's 99 tiles over
+/// 5 GB); the least recently used is dropped and read again if it is needed. A smaller number
+/// than the tiles in use thrashes: every track crosses a new lookup cell every second, so the
+/// queries of one cycle are spread over the whole facility and each tile is wanted every cycle
+/// (a tile read is 0.8 s).
+const MAX_RESIDENT_TILES: usize = 100;
 /// The most blocks whose misaligned tiles are described on stderr; the rest are only counted.
 const MAX_MISALIGN_NOTES: usize = 40;
 /// The radius bucket, metres.
@@ -298,10 +301,17 @@ impl Floors {
             let (rl, rt) = (g.dlon / r.dlon - 1.0, g.dlat / r.dlat - 1.0);
             let fc = (g.lon0 - r.lon0) / r.dlon;
             let fr = (r.lat0 - g.lat0) / r.dlat;
+            // Only a tile that fails the check against the first is named: the spacing more than
+            // a part in 1e9 apart, or a position not a whole number of steps (to a thousandth).
+            let spacing_bad = rl.abs() > 1.0e-9 || rt.abs() > 1.0e-9;
+            let offset_bad = (fc - fc.round()).abs() > 1.0e-3 || (fr - fr.round()).abs() > 1.0e-3;
+            if !(spacing_bad || offset_bad) {
+                continue;
+            }
             eprintln!(
                 "oa-msaw: terrain tile of cell {},{} does not share the lattice of cell {},{}: \
-                 spacing ratio - 1 = {:.3e} (lon) {:.3e} (lat), offset {:.6} columns {:.6} rows \
-                 from a whole number of steps {:.6} {:.6}",
+                 spacing ratio - 1 = {:.3e} (lon) {:.3e} (lat), offset {:.6} columns {:.6} rows, \
+                 {:.6} and {:.6} from a whole number of steps",
                 cell.0,
                 cell.1,
                 block.first().map_or(0, |c| c.0),
@@ -425,6 +435,52 @@ impl Floors {
             self.stats.chart_absent += 1;
         }
         best
+    }
+
+    /// The cache key of a point and the query it stands for: the cell, the radius bucket, and the
+    /// centre and radius the terrain and obstacle lookups are made at.
+    fn key_of(p: &SamplePoint) -> ((i32, i32, u32), f64, f64, f64) {
+        let (lat, lon) = (f64::from(p.lat_e7) / 1e7, f64::from(p.lon_e7) / 1e7);
+        let bucket = (f64::from(p.radius_m) / RADIUS_STEP_M).ceil().max(1.0);
+        let key = (
+            cell_of(lat, CELL_DEG),
+            cell_of(lon, CELL_DEG),
+            bucket as u32,
+        );
+        let (clat, clon) = (
+            (f64::from(key.0) + 0.5) * CELL_DEG,
+            (f64::from(key.1) + 0.5) * CELL_DEG,
+        );
+        (key, clat, clon, bucket * RADIUS_STEP_M + CELL_HALF_DIAG_M)
+    }
+
+    /// Answers the terrain and obstacle lookups of `points` that are not cached yet, in the order
+    /// of their cells (south to north, then west to east), so that a tile is read about once for
+    /// the whole batch and not once for every time the points move on and back. The answers are
+    /// the same as lookup by lookup (the cache is keyed by cell and radius bucket alone).
+    pub fn prepare(&mut self, points: &[SamplePoint]) -> Result<(), String> {
+        let mut todo: Vec<((i32, i32, u32), f64, f64, f64)> = points
+            .iter()
+            .map(Self::key_of)
+            .filter(|k| !self.cache.contains_key(&k.0))
+            .collect();
+        todo.sort_by_key(|k| k.0);
+        todo.dedup_by_key(|k| k.0);
+        for (key, clat, clon, radius) in todo {
+            let t = if self.tile_dir.is_some() {
+                self.terrain_ft(clat, clon, radius)?
+            } else {
+                FLOOR_NONE
+            };
+            let t1 = Instant::now();
+            let o = self
+                .obstacles
+                .as_ref()
+                .map_or(FLOOR_NONE, |ix| ix.highest_within(clat, clon, radius));
+            self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
+            self.cache.insert(key, (t, o));
+        }
+        Ok(())
     }
 
     /// The floor sample at a point. A terrain file that cannot be read is an error.

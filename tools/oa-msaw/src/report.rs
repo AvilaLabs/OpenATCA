@@ -474,6 +474,14 @@ pub fn summary_text(i: &SummaryInput) -> String {
             .steady_cpu_s
             .map_or("?".to_string(), |c| format!("{:.4}", c / sim_s.max(1.0)))
     );
+    if let Some(c) = i.data.steady_cpu_s {
+        let _ = writeln!(
+            o,
+            "  steady state without the terrain tile reads: CPU {:.2} s, per simulated second {:.4}",
+            c - sec(fl.ns_tile_read),
+            (c - sec(fl.ns_tile_read)) / sim_s.max(1.0)
+        );
+    }
     let _ = writeln!(
         o,
         "    wall seconds in: planning {:.2}, floor lookups {:.2} (terrain {:.2}, tile reads {:.2}, obstacles {:.2}, chart {:.2}), evaluation {:.2}, altimeter correction {:.2}, tracker and the rest {:.2}",
