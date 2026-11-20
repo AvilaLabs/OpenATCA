@@ -41,6 +41,7 @@ members = [
     "crates/oa-track",
     "crates/oa-encounter",
     "crates/oa-flight",
+    "crates/oa-flight-sfdps",
     "crates/oa-safety",
     "tools/oa-build-info",
     "tools/oa-encounter",

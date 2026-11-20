@@ -5522,3 +5522,21 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
 - **OA-FLT-015** The same operations in the same order give the same table, logs included, and the same digest after every step.
 - **OA-FLT-016** The table allocates nothing after it is made: the capacity of every collection is unchanged by twenty thousand
   operations with sweeps.
+- **OA-FLT-017** The SFDPS adapter turns one decoded message into the operations it carries and no others: the plan from the
+  status, a departure from an actual departure time on an active plan, the assigned, interim and requested altitudes with
+  their forms (an interim stated as none is the state "none", not a number; VFR is never a number), the controlling unit,
+  the aircraft address and the identity; each carries the message's own time and the time it was received.
+- **OA-FLT-018** A controlling unit the FAA gives as unknown makes no owner operation, a handoff `receivingUnit` with no event
+  makes no handoff operation, and a handoff event missing a unit it needs makes none; each is counted. The handoff events
+  make their own operations: offer, update, acceptance, retraction, failure and taking control.
+- **OA-FLT-019** A replay reads SFDPS recordings in receive order into the record, counts the lag of every message (received
+  minus stamped), skips frames before the window and ends at the first frame after it, and announces each operation's
+  availability time to the caller before applying it, so a question asked as of a time sees only what had aged in.
+- **OA-FLT-020** The climbing and descending encounters near 1,000 ft (airborne, not at the vertical minimum, 900 ft up to
+  the record volume apart at the closest approach, either aircraft at 300 fpm or more) are each split once, by the
+  clearances of the two aircraft in the flight record at the closest approach: cleared 1,000 ft or more apart is a
+  level-off, less apart is a climb or descent that does not stop; no record, no altitude and an altitude that is not one
+  level (VFR, block, at a fix) are counted apart; the split is given on the assigned altitude and on the interim altitude
+  over the assigned one.
+- **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
+  refuses a window that is open at one end or runs backwards.

@@ -46,7 +46,7 @@ mod index;
 mod table;
 mod types;
 
-pub use apply::{flights_apply, op_new};
+pub use apply::{flights_apply, flights_op_avail, op_new};
 pub use table::{
     flight_by_address, flight_get, flight_is_live, flights_check, flights_digest, flights_len,
     flights_log_clear, flights_new, flights_remove, flights_sweep, view_of,

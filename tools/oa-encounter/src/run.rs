@@ -20,6 +20,7 @@ use oa_track::{
 };
 
 use crate::args::Args;
+use crate::join::{answer_queries, join_text, Sfdps};
 use crate::report::{band_of, encounters_csv, summary_text, Airport, SummaryInput};
 
 const NM: f64 = 1852.0;
@@ -316,6 +317,21 @@ pub fn report_separations(
     out
 }
 
+/// The reports of a clip by UTC hour (Unix hour number and count), one per line.
+pub fn hour_counts(r: &Reports) -> String {
+    let mut by: BTreeMap<i64, u64> = BTreeMap::new();
+    for i in 0..reports_len(r) {
+        if let Some(&ns) = r.time_ns.get(i) {
+            *by.entry(ns.div_euclid(3600 * S_NS)).or_default() += 1;
+        }
+    }
+    let mut o = String::new();
+    for (h, n) in by {
+        o.push_str(&format!("hour_start_unix_s {} reports {n}\n", h * 3600));
+    }
+    o
+}
+
 /// The whole run: reads the clip, writes `encounters.csv` and `summary.txt` under `args.out`, and
 /// returns the summary text.
 pub fn run(args: &Args) -> Result<String, String> {
@@ -332,11 +348,17 @@ pub fn run(args: &Args) -> Result<String, String> {
     } else {
         (clip.reports, "every report of the clip".to_string())
     };
+    if args.hours {
+        return Ok(hour_counts(&reports));
+    }
     let adsb_cfg = AdsbConfig::default();
     check_adsb_config(&adsb_cfg).map_err(|e| format!("adapter configuration: {e}"))?;
     let ground = ground_table(&reports);
-    let (meas, _) = adsb_measurements(&reports, &adsb_cfg);
+    let (mut meas, _) = adsb_measurements(&reports, &adsb_cfg);
     drop(reports);
+    if let Some((from, to)) = args.window {
+        meas.retain(|m| m.toa_ns >= from * S_NS && m.toa_ns < to * S_NS);
+    }
     let iv = interval_stats(&meas).unwrap_or(IntervalStats {
         n: 0,
         p50_ns: S_NS,
@@ -366,13 +388,38 @@ pub fn run(args: &Args) -> Result<String, String> {
         ),
     };
     let report_sep = report_separations(&meas, &rec.encounters);
+    let mut join = String::new();
+    if let Some(dir) = &args.sfdps {
+        let queries: Vec<(u32, i64)> = rec
+            .encounters
+            .iter()
+            .flat_map(|e| [(e.addr_a, e.closest_ns), (e.addr_b, e.closest_ns)])
+            .collect();
+        let sf = Sfdps {
+            dir: dir.clone(),
+            lag_floor_ms: args.lag_floor_s * 1000,
+        };
+        let (answers, st) = answer_queries(&sf, &queries)?;
+        let window = args.window.map_or_else(
+            || "the whole clip".to_string(),
+            |(f, t)| format!("Unix seconds {f} up to {t}"),
+        );
+        join = join_text(
+            &rec.encounters,
+            &answers,
+            &airports,
+            ecfg.volume_v_ft as f32,
+            &st,
+            &window,
+        );
+    }
     let csv = encounters_csv(&rec.encounters, &airports, ecfg.volume_v_ft as f32);
     let csv_sha = to_hex(&sha256(csv.as_bytes()));
     let name = args
         .adsb
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let summary = summary_text(&SummaryInput {
+    let mut summary = summary_text(&SummaryInput {
         cfg: &ecfg,
         encounters: &rec.encounters,
         airports: &airports,
@@ -389,6 +436,7 @@ pub fn run(args: &Args) -> Result<String, String> {
         scope: &scope,
         csv_sha256: &csv_sha,
     });
+    summary.push_str(&join);
     for (file, text) in [("encounters.csv", &csv), ("summary.txt", &summary)] {
         let p = args.out.join(file);
         fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;

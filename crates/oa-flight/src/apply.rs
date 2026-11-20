@@ -200,6 +200,15 @@ fn is_zero8(u: &[u8; 8]) -> bool {
     *u == [0; 8]
 }
 
+/// When `op` would become available if it were applied now: `max(seen, stamped + lag floor)`,
+/// held at the clock. A driver that answers a question "as of" a time calls this to know
+/// which operations are still in its future.
+pub fn flights_op_avail(t: &FlightTable, op: &Op) -> i64 {
+    op.seen_ms
+        .max(op.ts_ms.saturating_add(t.cfg.lag_floor_ms))
+        .max(t.clock_ms)
+}
+
 /// Applies one operation. The availability time of the operation is
 /// `max(seen, stamped + lag floor)`, held at the clock when an earlier operation was available
 /// later; operations are to be given in the order they were seen. The outcome says whether the
