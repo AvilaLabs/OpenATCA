@@ -3822,7 +3822,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   and the longest queue behind the traffic (a second's work starts when the earlier work is done), the
   process's CPU and wall time against the traffic's span, every refusal and overflow counter, resident
   memory and the tracker table bytes. `--with-output` also writes the output rows to column files and
-  reports their digest. The per-second log is a pure function of the nanoseconds it is given.
+  reports their digest. `--max-tracks <n>` sets the track table size (the per-region default otherwise). The
+  per-second log is a pure function of the nanoseconds it is given.
 
 ### Radar fusion with registration (oa-track: radar, assoc, registration, fusion; study binary oa-track-fusion)
 

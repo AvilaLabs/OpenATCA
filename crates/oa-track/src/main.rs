@@ -5,7 +5,7 @@
 //! ```text
 //! oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score]
 //!                [--digest <file>] [--rows <file>]
-//! oa-track-run --adsb <clip.oaf> --out <dir> --realtime [--with-output]
+//! oa-track-run --adsb <clip.oaf> --out <dir> --realtime [--with-output] [--max-tracks <n>]
 //! ```
 //!
 //! The clip's reports are split into two disjoint halves (`oa_track::score::SPLIT_TEXT`); the
@@ -18,7 +18,8 @@
 //! the per-second digest of the output rows and `--rows` the canonical rows themselves
 //! (`oa_track::canon`), for `oa-replay-diff`; without them nothing else changes. `--realtime` is the M9 interim marker's measurement: every
 //! report goes to the tracker (no split, no scoring) and each update is timed, per second of traffic;
-//! `--with-output` also writes the rows to column files, as a display or feed would need.
+//! `--with-output` also writes the rows to column files, as a display or feed would need;
+//! `--max-tracks` sets the track table (the default is the per-region size).
 //!
 //! The tracker's output goes to column files under `<dir>/spill-<pid>` as it is produced and
 //! scoring reads it back one address range at a time, so memory does not grow with the run. The
@@ -58,7 +59,7 @@ use oa_track::{
 };
 use oa_truth::{DEFAULT_CONFIG as TRUTH_DEFAULT, REMOVE_NAMES};
 
-const USAGE: &str = "usage: oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score] [--digest <file>] [--rows <file>] | --adsb <clip.oaf> --out <dir> --realtime [--with-output]";
+const USAGE: &str = "usage: oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score] [--digest <file>] [--rows <file>] | --adsb <clip.oaf> --out <dir> --realtime [--with-output] [--max-tracks <n>]";
 
 fn main() -> ExitCode {
     let mut adsb: Option<PathBuf> = None;
@@ -67,6 +68,7 @@ fn main() -> ExitCode {
     let mut score_it = true;
     let mut canon = CanonOut::default();
     let (mut realtime, mut with_output) = (false, false);
+    let mut max_tracks: Option<usize> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -74,10 +76,17 @@ fn main() -> ExitCode {
             "--no-score" => score_it = false,
             "--realtime" => realtime = true,
             "--with-output" => with_output = true,
-            "--adsb" | "--out" | "--digest" | "--rows" => match args.next() {
+            "--adsb" | "--out" | "--digest" | "--rows" | "--max-tracks" => match args.next() {
                 Some(v) if a == "--adsb" => adsb = Some(PathBuf::from(v)),
                 Some(v) if a == "--digest" => canon.digest = Some(PathBuf::from(v)),
                 Some(v) if a == "--rows" => canon.rows = Some(PathBuf::from(v)),
+                Some(v) if a == "--max-tracks" => match v.parse::<usize>() {
+                    Ok(n) => max_tracks = Some(n),
+                    Err(_) => {
+                        eprintln!("oa-track-run: --max-tracks needs a whole number\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                },
                 Some(v) => out = Some(PathBuf::from(v)),
                 None => {
                     eprintln!("oa-track-run: {a} needs a value\n{USAGE}");
@@ -95,7 +104,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let result = if realtime {
-        run_realtime(&adsb, &out, with_output)
+        run_realtime(&adsb, &out, with_output, max_tracks)
     } else {
         run(&adsb, &out, compare, score_it, &canon)
     };
@@ -727,7 +736,12 @@ fn cpu_text(a: Option<u64>, b: Option<u64>) -> Option<f64> {
 
 /// `--realtime`: the whole clip through the tracker, each update timed, per second of traffic
 /// (OA-TRK-388). Reading, decoding and the adapter are timed apart, not in the per-second figures.
-fn run_realtime(clip_path: &Path, out_dir: &Path, with_output: bool) -> Result<(), String> {
+fn run_realtime(
+    clip_path: &Path,
+    out_dir: &Path,
+    with_output: bool,
+    max_tracks: Option<usize>,
+) -> Result<(), String> {
     let mut phases = Phases::default();
     phases.mark("start");
     let (load_wall, load_cpu0) = (Instant::now(), cpu_ns());
@@ -746,7 +760,10 @@ fn run_realtime(clip_path: &Path, out_dir: &Path, with_output: bool) -> Result<(
         p90_ns: 1_000_000_000,
         p99_ns: 1_000_000_000,
     });
-    let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
+    let mut cfg = scoring_config(&DEFAULT_CONFIG, &iv);
+    if let Some(n) = max_tracks {
+        cfg.max_tracks = n;
+    }
     phases.mark("measurements built");
     let mut addrs: Vec<u32> = meas.iter().map(|m| m.addr).collect();
     addrs.sort_unstable();
