@@ -6208,3 +6208,18 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   truth altitude and the median ratio of STDDS speed to truth speed on the paired samples, with "units
   suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
   ratio is outside 0.8 to 1.25.
+
+## Feed damage check (oa-feed-gaps, P-006 section 6)
+
+- **OA-GAP-001** An interval between consecutive times of a feed over 600 s is damage; exactly 600 s is not.
+- **OA-GAP-002** The interval from the window start to the first time, and from the last time to the window end, counts.
+- **OA-GAP-003** A window with no message in it is damaged.
+- **OA-GAP-004** At most 1,000 intervals over 600 s are listed; the rest are counted and still make the window damaged.
+- **OA-GAP-005** Any reader gzip or frame error count, and any ADS-B damaged-frame count, makes the window damaged.
+- **OA-GAP-006** A time earlier than the one before it is counted, left out of the intervals, and makes the window damaged.
+- **OA-GAP-007** SFDPS times are the recorder's receive times, sorted, so files that overlap or are named out of order give the true intervals.
+- **OA-GAP-008** A frame the reader finds damaged is counted by kind, never skipped silently.
+- **OA-GAP-009** ADS-B report times are sorted before the intervals are taken.
+- **OA-GAP-010** Exit 0 clean, 1 damaged, 2 usage or read error; the report is deterministic and written by temporary file and rename.
+- **OA-GAP-011** Both inputs go through the shared sealed guard (OA-SEAL-001); a refusal is exit 2.
+- **OA-GAP-012** `--from` and `--to` are `YYYY-MM-DDTHH:MM:SSZ`, both required, from before to.

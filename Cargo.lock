@@ -164,6 +164,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-feed-gaps"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-feed",
+ "oa-replay",
+ "oa-sealed",
+]
+
+[[package]]
 name = "oa-fixm"
 version = "0.0.1"
 dependencies = [
