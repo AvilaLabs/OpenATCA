@@ -445,25 +445,10 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             "more than {MAX_LINES} cifp_airport, msaw_request or inhibit lines"
         ));
     }
-    let mut list = [Corridor {
-        kind: CK_APPROACH,
-        thr_lat_e7: 0,
-        thr_lon_e7: 0,
-        out_bearing_deg: 0.0,
-        length_m: 1.0,
-        near_half_width_m: 1.0,
-        far_half_width_m: 1.0,
-        thr_elev_ft: 0,
-        faf_alt_ft: 0,
-        land_from_m: 0.0,
-        pave_half_m: 0.0,
-        far_elev_ft: 0,
-        path_angle_deg: 3.0,
-        tch_ft: 50,
-    }; MAX_CORRIDORS];
-    for (slot, v) in list.iter_mut().zip(procs.iter()) {
-        *slot = corridor(v)?;
-    }
+    let list = procs
+        .iter()
+        .map(|v| corridor(v))
+        .collect::<Result<Vec<Corridor>, String>>()?;
     let msaw = MsawConfig {
         max_tracks: to_usize("max_tracks", get("max_tracks")?)?,
         max_open: to_usize("max_open", get("max_open")?)?,
@@ -497,8 +482,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         )?,
         terminal_lookahead_s: finite("terminal_lookahead_s", get("terminal_lookahead_s")?)?,
         capture_heading_deg: finite("capture_heading_deg", get("capture_heading_deg")?)?,
-        corridors: list,
-        n_corridors: procs.len(),
+        corridors: list.into_boxed_slice(),
     };
     oa_msaw::msaw_check(&msaw).map_err(|e| format!("configuration refused by the MSAW: {e}"))?;
     let max_duration = seconds_ns("inhibit_max_duration_s", get("inhibit_max_duration_s")?)?;

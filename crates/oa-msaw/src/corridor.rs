@@ -71,7 +71,7 @@ fn cells_of(c: &Corridor) -> (i32, i32, i32, i32) {
 /// The index of the corridors of `cfg`, or the refusal if the allocator has no room.
 pub fn corridor_index_new(cfg: &MsawConfig) -> Result<CorridorIndex, &'static str> {
     let mut n = 0u64;
-    for c in cfg.corridors.iter().take(cfg.n_corridors) {
+    for c in cfg.corridors.iter() {
         let (a0, a1, b0, b1) = cells_of(c);
         let (h, w) = (i64::from(a1 - a0) + 1, i64::from(b1 - b0) + 1);
         n = n.saturating_add(h.saturating_mul(w).unsigned_abs());
@@ -80,9 +80,9 @@ pub fn corridor_index_new(cfg: &MsawConfig) -> Result<CorridorIndex, &'static st
     entries
         .try_reserve_exact(usize::try_from(n).map_err(|_| "corridors: the index is too large")?)
         .map_err(|_| "corridors: the index cannot be allocated")?;
-    for (k, c) in cfg.corridors.iter().take(cfg.n_corridors).enumerate() {
+    for (k, c) in cfg.corridors.iter().enumerate() {
         let (a0, a1, b0, b1) = cells_of(c);
-        let k = u16::try_from(k).map_err(|_| "n_corridors")?;
+        let k = u16::try_from(k).map_err(|_| "corridors")?;
         for a in a0..=a1 {
             for b in b0..=b1 {
                 entries.push((a, b, k));

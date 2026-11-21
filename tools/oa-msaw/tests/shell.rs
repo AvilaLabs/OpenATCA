@@ -143,7 +143,7 @@ fn the_configuration_has_no_defaults_and_names_what_is_wrong() {
         (c.terrain_clearance_ft, c.obstacle_clearance_ft),
         (500, 500)
     );
-    assert_eq!(c.n_corridors, 0);
+    assert_eq!(c.corridors.len(), 0);
     assert_eq!(
         (
             c.approach_allowance_ft,
@@ -193,7 +193,7 @@ fn the_configuration_has_no_defaults_and_names_what_is_wrong() {
          inhibit = 5 65 -1000 20000 SUP_1 NUISANCE_ALERTS 13.2,144.6 13.2,145 13.6,145 13.6,144.6",
     ))
     .unwrap();
-    assert_eq!(s.msaw.n_corridors, 1);
+    assert_eq!(s.msaw.corridors.len(), 1);
     assert_eq!(s.msaw.corridors[0].faf_alt_ft, 2250);
     assert_eq!(s.msaw.corridors[0].thr_lat_e7, 400_000_000);
     assert_eq!(s.cifp_airports, vec!["KORD".to_string()]);
@@ -1459,32 +1459,40 @@ fn tower_rig(
     let m = 111_194.926_644_558_74;
     let mut cfg = settings().msaw;
     cfg.approach_allowance_ft = 100;
-    cfg.corridors[0] = Corridor {
-        kind: CK_APPROACH,
-        thr_lat_e7: 400_000_000,
-        thr_lon_e7: -880_000_000,
-        out_bearing_deg: 180.0,
-        length_m: 9260.0,
-        near_half_width_m: 1852.0,
-        far_half_width_m: 1852.0,
-        thr_elev_ft: 600,
-        faf_alt_ft: 2250,
-        land_from_m: 0.0,
-        pave_half_m: 0.0,
-        far_elev_ft: 0,
-        path_angle_deg: 3.0,
-        tch_ft: 50,
-    };
-    cfg.n_corridors = 1;
-    if departure {
-        cfg.corridors[1] = Corridor {
-            kind: CK_DEPARTURE,
+    put_corridor(
+        &mut cfg,
+        0,
+        Corridor {
+            kind: CK_APPROACH,
+            thr_lat_e7: 400_000_000,
+            thr_lon_e7: -880_000_000,
             out_bearing_deg: 180.0,
+            length_m: 9260.0,
             near_half_width_m: 1852.0,
             far_half_width_m: 1852.0,
-            ..cfg.corridors[0]
-        };
-        cfg.n_corridors = 2;
+            thr_elev_ft: 600,
+            faf_alt_ft: 2250,
+            land_from_m: 0.0,
+            pave_half_m: 0.0,
+            far_elev_ft: 0,
+            path_angle_deg: 3.0,
+            tch_ft: 50,
+        },
+    );
+    set_corridor_count(&mut cfg, 1);
+    if departure {
+        put_corridor(
+            &mut cfg,
+            1,
+            Corridor {
+                kind: CK_DEPARTURE,
+                out_bearing_deg: 180.0,
+                near_half_width_m: 1852.0,
+                far_half_width_m: 1852.0,
+                ..cfg.corridors[0]
+            },
+        );
+        set_corridor_count(&mut cfg, 2);
     }
     let lat = ((40.0f64 - 1400.0 / m) / 0.002).floor() * 0.002 + 0.001;
     let lon = (-88.0f64 / 0.002).floor() * 0.002 + 0.001;
@@ -1534,7 +1542,7 @@ fn an_obstacle_below_the_approach_surface_at_its_own_position_is_left_to_the_sur
     // so does one in the corridor's net whose circle is not inside it.
     let (_, mut f, p) = tower_rig(750, 300.0, false);
     f.set_corridors(&oa_msaw::MsawConfig {
-        n_corridors: 0,
+        corridors: Box::default(),
         ..settings().msaw
     });
     assert_eq!(f.floor_at(&p).unwrap().obstacle_ft, 750);
@@ -1748,4 +1756,57 @@ fn an_empty_obstacle_file_is_an_error_not_full_coverage() {
         .expect_err("an empty file is refused");
     assert!(!e.is_empty());
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Sets corridor `i` of a configuration, growing its slice with blank corridors where needed.
+fn put_corridor(c: &mut oa_msaw::MsawConfig, i: usize, k: Corridor) {
+    let mut v = std::mem::take(&mut c.corridors).into_vec();
+    if v.len() <= i {
+        v.resize(
+            i + 1,
+            oa_msaw::Corridor {
+                kind: oa_msaw::CK_APPROACH,
+                thr_lat_e7: 0,
+                thr_lon_e7: 0,
+                out_bearing_deg: 0.0,
+                length_m: 1.0,
+                near_half_width_m: 1.0,
+                far_half_width_m: 1.0,
+                thr_elev_ft: 0,
+                faf_alt_ft: 0,
+                land_from_m: 0.0,
+                pave_half_m: 0.0,
+                far_elev_ft: 0,
+                path_angle_deg: 3.0,
+                tch_ft: 50,
+            },
+        );
+    }
+    v[i] = k;
+    c.corridors = v.into_boxed_slice();
+}
+
+/// Makes a configuration's slice exactly `n` corridors long (blank ones added).
+fn set_corridor_count(c: &mut oa_msaw::MsawConfig, n: usize) {
+    let mut v = std::mem::take(&mut c.corridors).into_vec();
+    v.resize(
+        n,
+        oa_msaw::Corridor {
+            kind: oa_msaw::CK_APPROACH,
+            thr_lat_e7: 0,
+            thr_lon_e7: 0,
+            out_bearing_deg: 0.0,
+            length_m: 1.0,
+            near_half_width_m: 1.0,
+            far_half_width_m: 1.0,
+            thr_elev_ft: 0,
+            faf_alt_ft: 0,
+            land_from_m: 0.0,
+            pave_half_m: 0.0,
+            far_elev_ft: 0,
+            path_angle_deg: 3.0,
+            tch_ft: 50,
+        },
+    );
+    c.corridors = v.into_boxed_slice();
 }

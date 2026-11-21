@@ -393,7 +393,7 @@ pub(crate) fn hit_union(a: Option<CorridorHit>, b: CorridorHit) -> CorridorHit {
 /// same answer (tested against this).
 pub fn corridor_hit_linear(cfg: &MsawConfig, p: &SamplePoint) -> Option<CorridorHit> {
     let mut best: Option<CorridorHit> = None;
-    for c in cfg.corridors.iter().take(cfg.n_corridors) {
+    for c in cfg.corridors.iter() {
         if let Some(h) = corridor_hit_for(
             c,
             p.lat_e7,
@@ -529,7 +529,7 @@ const _: () = assert!(MAX_ABS_ALT_FT < 1.0e9);
 mod proofs {
     //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
     use super::*;
-    use crate::types::{CK_APPROACH, MAX_ABS_VRATE_FPM, MAX_CORRIDORS, MAX_LOOK_AHEAD_S};
+    use crate::types::{CK_APPROACH, MAX_ABS_VRATE_FPM, MAX_LOOK_AHEAD_S};
 
     fn cfg_with(tc: i32, oc: i32, amc: i32) -> MsawConfig {
         MsawConfig {
@@ -553,23 +553,7 @@ mod proofs {
             altitude_loss_degrade_share: 0.5,
             terminal_lookahead_s: 15.0,
             capture_heading_deg: 30.0,
-            corridors: [Corridor {
-                kind: CK_APPROACH,
-                thr_lat_e7: 0,
-                thr_lon_e7: 0,
-                out_bearing_deg: 0.0,
-                length_m: 1.0,
-                near_half_width_m: 1.0,
-                far_half_width_m: 1.0,
-                thr_elev_ft: 0,
-                faf_alt_ft: 0,
-                land_from_m: 0.0,
-                pave_half_m: 0.0,
-                far_elev_ft: 0,
-                path_angle_deg: 3.0,
-                tch_ft: 50,
-            }; MAX_CORRIDORS],
-            n_corridors: 0,
+            corridors: Box::default(),
         }
     }
 

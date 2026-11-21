@@ -1,5 +1,6 @@
 //! Plain data of the minimum safe altitude warning. Core (pure).
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 /// Most sample points of the predicted path of one track. C2: the shell does one terrain,
@@ -10,7 +11,7 @@ pub const MAX_SAMPLES: usize = 32;
 /// a departure procedure, an approach corridor, a strip along the runway and a departure
 /// corridor; a facility's airports are some tens of runway ends, and the grid index of the
 /// corridors holds a few dozen cells for each.
-pub const MAX_CORRIDORS: usize = 3072;
+pub const MAX_CORRIDORS: usize = 16384;
 /// Largest `max_tracks` the configuration may ask for (every per-track table is allocated whole).
 pub const MAX_TRACKS_LIMIT: usize = 1 << 20;
 /// Largest `max_open` the configuration may ask for.
@@ -205,8 +206,8 @@ pub const CK_DEPARTURE: u8 = 2;
 /// runs linearly from the threshold end to the far end. An approach surface is the procedure's own
 /// path (`tch_ft` over the threshold elevation at `path_angle_deg`); a runway surface is the
 /// threshold elevation.
-// A7.2: cold struct (adaptation), size guard waived. Held inline so that the configuration stays
-// `Copy` and allocates nothing (C1); there are at most `MAX_CORRIDORS`.
+// A7.2: cold struct (adaptation), size guard waived. The corridors of a configuration are one boxed
+// slice, allocated once at load (C1); there are at most `MAX_CORRIDORS`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Corridor {
     /// `CK_*`.
@@ -261,7 +262,7 @@ pub const KB_DEPARTURE: u8 = 4;
 
 /// The settings of the net. Every value is the caller's (no defaults: no safety value is chosen
 /// by the core). A7.2: cold struct, size guard waived.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MsawConfig {
     /// Tracks per cycle (capacity of every per-track table).
     pub max_tracks: usize,
@@ -309,9 +310,8 @@ pub struct MsawConfig {
     /// An approach corridor holds a track whose ground track is within this many degrees of its
     /// inbound course, a runway strip one within this of either direction of the runway.
     pub capture_heading_deg: f64,
-    /// The corridors; `n_corridors` of them are used.
-    pub corridors: [Corridor; MAX_CORRIDORS],
-    pub n_corridors: usize,
+    /// The corridors, at most `MAX_CORRIDORS`, held on the heap and allocated once at load.
+    pub corridors: Box<[Corridor]>,
 }
 
 /// What set the floor at the worst point of an alert.

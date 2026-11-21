@@ -43,8 +43,7 @@ fn cfg() -> MsawConfig {
         altitude_loss_degrade_share: 0.5,
         terminal_lookahead_s: 15.0,
         capture_heading_deg: 30.0,
-        corridors: [blank_corridor(); MAX_CORRIDORS],
-        n_corridors: 0,
+        corridors: Box::default(),
     }
 }
 
@@ -65,6 +64,23 @@ fn blank_corridor() -> Corridor {
         path_angle_deg: 3.0,
         tch_ft: 50,
     }
+}
+
+/// Sets corridor `i` of a configuration, growing its slice with blank corridors where needed.
+fn put_corridor(c: &mut MsawConfig, i: usize, k: Corridor) {
+    let mut v = std::mem::take(&mut c.corridors).into_vec();
+    if v.len() <= i {
+        v.resize(i + 1, blank_corridor());
+    }
+    v[i] = k;
+    c.corridors = v.into_boxed_slice();
+}
+
+/// Makes a configuration's slice exactly `n` corridors long (blank ones added).
+fn set_corridor_count(c: &mut MsawConfig, n: usize) {
+    let mut v = std::mem::take(&mut c.corridors).into_vec();
+    v.resize(n, blank_corridor());
+    c.corridors = v.into_boxed_slice();
 }
 
 struct Rig {
@@ -173,15 +189,15 @@ fn a_configuration_out_of_range_is_refused_naming_the_key() {
     c.samples = 2;
     assert!(msaw_check(&c).unwrap_err().contains("query radius"));
     let mut c = cfg();
-    c.n_corridors = 1;
+    set_corridor_count(&mut c, 1);
     c.corridors[0].length_m = 0.0;
     assert_eq!(msaw_check(&c).unwrap_err(), "corridor geometry");
-    c.corridors[0] = north_corridor();
+    put_corridor(&mut c, 0, north_corridor());
     assert!(msaw_check(&c).is_ok());
     c.corridors[0].faf_alt_ft = MAX_CLEARANCE_FT + 1;
     assert_eq!(msaw_check(&c).unwrap_err(), "corridor elevation");
-    c.n_corridors = MAX_CORRIDORS + 1;
-    assert_eq!(msaw_check(&c).unwrap_err(), "n_corridors");
+    set_corridor_count(&mut c, MAX_CORRIDORS + 1);
+    assert_eq!(msaw_check(&c).unwrap_err(), "corridors");
     let mut c = cfg();
     c.velocity_uncertainty_mps = -1.0;
     assert_eq!(msaw_check(&c).unwrap_err(), "velocity_uncertainty_mps");
@@ -614,8 +630,8 @@ fn north_corridor() -> Corridor {
 
 fn corridor_cfg() -> MsawConfig {
     let mut c = cfg();
-    c.corridors[0] = north_corridor();
-    c.n_corridors = 1;
+    put_corridor(&mut c, 0, north_corridor());
+    set_corridor_count(&mut c, 1);
     c
 }
 
@@ -667,16 +683,20 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
     assert!(at(3704.0, -800.0, 10.0).is_some());
     // The highest surface of two corridors that hold the circle.
     let mut two = c;
-    two.corridors[1] = Corridor {
-        faf_alt_ft: 3250,
-        land_from_m: 0.0,
-        pave_half_m: 0.0,
-        far_elev_ft: 0,
-        path_angle_deg: 4.0,
-        tch_ft: 50,
-        ..north_corridor()
-    };
-    two.n_corridors = 2;
+    put_corridor(
+        &mut two,
+        1,
+        Corridor {
+            faf_alt_ft: 3250,
+            land_from_m: 0.0,
+            pave_half_m: 0.0,
+            far_elev_ft: 0,
+            path_angle_deg: 4.0,
+            tch_ft: 50,
+            ..north_corridor()
+        },
+    );
+    set_corridor_count(&mut two, 2);
     let p = SamplePoint {
         lat_e7: (south_m(4630.0) * 1e7).round() as i32,
         lon_e7: -880_000_000,
@@ -1417,8 +1437,8 @@ fn departure_corridor() -> Corridor {
 #[test]
 fn a_departure_climbing_normally_does_not_alert_and_one_levelling_off_below_its_floor_does() {
     let mut c = cfg();
-    c.corridors[0] = departure_corridor();
-    c.n_corridors = 1;
+    put_corridor(&mut c, 0, departure_corridor());
+    set_corridor_count(&mut c, 1);
     c.departure_min_clearance_ft = 100;
     // Terrain 1,000 ft everywhere, the chart at 6,000 ft: inside the corridor only terrain plus
     // the departure clearance (1,100 ft) is the floor, the chart does not apply.
@@ -1475,8 +1495,8 @@ fn a_runway_corridor_holds_the_threshold_elevation_and_the_approach_clearance_an
     let mut k = departure_corridor();
     k.kind = CK_RUNWAY;
     k.length_m = 2500.0;
-    c.corridors[0] = k;
-    c.n_corridors = 1;
+    put_corridor(&mut c, 0, k);
+    set_corridor_count(&mut c, 1);
     let at = |along_m: f64| {
         let p = SamplePoint {
             lat_e7: (((40.0 + along_m / 111_194.926_644_558_74) * 1e7).round()) as i32,
@@ -1510,24 +1530,28 @@ fn the_corridor_index_gives_the_answer_of_looking_at_every_corridor() {
     };
     let mut c = cfg();
     for k in 0..400 {
-        c.corridors[k] = Corridor {
-            kind: [CK_APPROACH, CK_RUNWAY, CK_DEPARTURE][k % 3],
-            thr_lat_e7: 400_000_000 + (rnd() * 1.0e7) as i32 - 5_000_000,
-            thr_lon_e7: -880_000_000 + (rnd() * 1.0e7) as i32 - 5_000_000,
-            out_bearing_deg: rnd() * 360.0,
-            length_m: 1000.0 + rnd() * 20_000.0,
-            near_half_width_m: 100.0 + rnd() * 600.0,
-            far_half_width_m: 100.0 + rnd() * 2000.0,
-            thr_elev_ft: (rnd() * 3000.0) as i32,
-            faf_alt_ft: (rnd() * 6000.0) as i32,
-            land_from_m: 0.0,
-            pave_half_m: 0.0,
-            far_elev_ft: 0,
-            path_angle_deg: 3.0,
-            tch_ft: 50,
-        };
+        put_corridor(
+            &mut c,
+            k,
+            Corridor {
+                kind: [CK_APPROACH, CK_RUNWAY, CK_DEPARTURE][k % 3],
+                thr_lat_e7: 400_000_000 + (rnd() * 1.0e7) as i32 - 5_000_000,
+                thr_lon_e7: -880_000_000 + (rnd() * 1.0e7) as i32 - 5_000_000,
+                out_bearing_deg: rnd() * 360.0,
+                length_m: 1000.0 + rnd() * 20_000.0,
+                near_half_width_m: 100.0 + rnd() * 600.0,
+                far_half_width_m: 100.0 + rnd() * 2000.0,
+                thr_elev_ft: (rnd() * 3000.0) as i32,
+                faf_alt_ft: (rnd() * 6000.0) as i32,
+                land_from_m: 0.0,
+                pave_half_m: 0.0,
+                far_elev_ft: 0,
+                path_angle_deg: 3.0,
+                tch_ft: 50,
+            },
+        );
     }
-    c.n_corridors = 400;
+    set_corridor_count(&mut c, 400);
     let ix = corridor_index_new(&c).unwrap();
     assert!(ix.len() >= 400);
     let (mut inside, mut outside) = (0u32, 0u32);
@@ -1935,8 +1959,8 @@ fn landing_cfg() -> MsawConfig {
     let mut c = corridor_cfg();
     c.approach_allowance_ft = 100;
     c.corridors[0].faf_alt_ft = 2000;
-    c.corridors[1] = runway_strip();
-    c.n_corridors = 2;
+    put_corridor(&mut c, 1, runway_strip());
+    set_corridor_count(&mut c, 2);
     c
 }
 
@@ -2277,8 +2301,9 @@ fn only_a_capture_box_shortens_the_look_ahead_a_strip_and_a_departure_corridor_k
     assert_eq!(o.stats.violations, 0, "the box looks 15 s ahead");
     // The same track in the strip alone (no box): the general 60 s reaches it.
     let mut c = landing_cfg();
-    c.corridors[0] = c.corridors[1];
-    c.n_corridors = 1;
+    let second = c.corridors[1];
+    put_corridor(&mut c, 0, second);
+    set_corridor_count(&mut c, 1);
     let mut r = rig(&c);
     let o = cycle(&mut r, S, &[level(1500.0)], &ridge);
     assert_eq!(o.stats.violations, 1, "the strip looks 60 s ahead");
@@ -2287,8 +2312,8 @@ fn only_a_capture_box_shortens_the_look_ahead_a_strip_and_a_departure_corridor_k
     let mut dep = departure_corridor();
     dep.thr_lat_e7 = c.corridors[0].thr_lat_e7;
     dep.out_bearing_deg = 180.0;
-    c.corridors[2] = dep;
-    c.n_corridors = 3;
+    put_corridor(&mut c, 2, dep);
+    set_corridor_count(&mut c, 3);
     let mut r = rig(&c);
     let o = cycle(&mut r, S, &[level(1500.0)], &ridge);
     assert_eq!(o.stats.violations, 1, "a departure corridor over the box");
@@ -2439,12 +2464,16 @@ fn overlapping_boxes_each_hold_the_track_aligned_with_it_and_parallel_ones_both(
     };
     // A runs south from the threshold, B (a crossing runway) east of it, C is A's parallel with a
     // higher path angle.
-    c.corridors[0] = wide(180.0, 2250);
-    c.corridors[1] = wide(90.0, 2250);
-    c.corridors[2] = Corridor {
-        path_angle_deg: 4.0,
-        ..wide(180.0, 2250)
-    };
+    put_corridor(&mut c, 0, wide(180.0, 2250));
+    put_corridor(&mut c, 1, wide(90.0, 2250));
+    put_corridor(
+        &mut c,
+        2,
+        Corridor {
+            path_angle_deg: 4.0,
+            ..wide(180.0, 2250)
+        },
+    );
     let point = |deg: i16| SamplePoint {
         lat_e7: (south_m(1000.0) * 1e7).round() as i32,
         lon_e7: -880_000_000
@@ -2454,7 +2483,7 @@ fn overlapping_boxes_each_hold_the_track_aligned_with_it_and_parallel_ones_both(
     };
     let surface = |n: usize, deg: i16| {
         let mut k = c;
-        k.n_corridors = n;
+        set_corridor_count(&mut k, n);
         corridor_hit_linear(&k, &point(deg)).map(|h| h.surface_ft.unwrap())
     };
     let (a, b, ac) = (
@@ -2473,12 +2502,12 @@ fn overlapping_boxes_each_hold_the_track_aligned_with_it_and_parallel_ones_both(
     assert!(ac > a.unwrap());
     let index = corridor_index_new(&{
         let mut k = c;
-        k.n_corridors = 3;
+        set_corridor_count(&mut k, 3);
         k
     })
     .unwrap();
     let mut k = c;
-    k.n_corridors = 3;
+    set_corridor_count(&mut k, 3);
     assert_eq!(
         corridor_hit_at(&k, &index, &point(0)),
         corridor_hit_linear(&k, &point(0))
@@ -2492,8 +2521,8 @@ fn a_runway_strip_holds_a_track_aligned_with_either_direction_of_the_runway() {
     let mut k = departure_corridor();
     k.kind = CK_RUNWAY;
     k.length_m = 2500.0;
-    c.corridors[0] = k;
-    c.n_corridors = 1;
+    put_corridor(&mut c, 0, k);
+    set_corridor_count(&mut c, 1);
     let at = |deg: i16| {
         let p = SamplePoint {
             lat_e7: (((40.0_f64 + 1000.0 / 111_194.926_644_558_74) * 1e7).round()) as i32,

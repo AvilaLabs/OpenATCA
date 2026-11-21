@@ -130,10 +130,10 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
     {
         return Err("look_ahead_s and samples: query radius beyond the bound");
     }
-    if c.n_corridors > MAX_CORRIDORS {
-        return Err("n_corridors");
+    if c.corridors.len() > MAX_CORRIDORS {
+        return Err("corridors");
     }
-    for p in c.corridors.iter().take(c.n_corridors) {
+    for p in c.corridors.iter() {
         let sane_m = |v: f64| v.is_finite() && v > 0.0 && v <= MAX_CORRIDOR_LENGTH_M;
         if !((CK_APPROACH..=CK_DEPARTURE).contains(&p.kind)
             && sane_m(p.length_m)
@@ -182,7 +182,7 @@ fn table<T>(n: usize, key: &'static str) -> Result<Vec<T>, &'static str> {
 pub fn msaw_new(cfg: &MsawConfig) -> Result<MsawState, &'static str> {
     msaw_check(cfg)?;
     Ok(MsawState {
-        cfg: *cfg,
+        cfg: cfg.clone(),
         cidx: corridor_index_new(cfg)?,
         plan: table(cfg.max_tracks, "max_tracks: cannot be allocated")?,
         points: table(

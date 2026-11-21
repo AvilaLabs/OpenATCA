@@ -746,7 +746,6 @@ pub fn landing_of(
             let in_any = cfg
                 .corridors
                 .iter()
-                .take(cfg.n_corridors)
                 .any(|c| oa_msaw::corridor_hit_ft(c, lat, lon, 0.0, cfg).is_some());
             if !in_any && kk.and_then(|c| f.get(c)) == Some(&"obstacle") {
                 let g = |c: Option<usize>| c.and_then(|c| f.get(c)).copied().unwrap_or("");
@@ -1071,20 +1070,14 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     } else if set.cifp_area_margin_nm.is_some() {
         return Err("the configuration has cifp_area_margin_nm and there is no --cifp".to_string());
     }
-    if set.msaw.n_corridors + cifp_corridors.len() > MAX_CORRIDORS {
+    if set.msaw.corridors.len() + cifp_corridors.len() > MAX_CORRIDORS {
         return Err(format!(
-            "n_corridors: {} corridors and {} from the CIFP are more than {MAX_CORRIDORS}",
-            set.msaw.n_corridors,
+            "corridors: {} corridors and {} from the CIFP are more than {MAX_CORRIDORS}",
+            set.msaw.corridors.len(),
             cifp_corridors.len()
         ));
     }
-    for a in &cifp_corridors {
-        let n = set.msaw.n_corridors;
-        if let Some(slot) = set.msaw.corridors.get_mut(n) {
-            *slot = a.corridor;
-            set.msaw.n_corridors += 1;
-        }
-    }
+    append_corridors(&mut set.msaw, cifp_corridors.iter().map(|a| a.corridor));
     // The altimeter settings: the METAR files, or none (every altitude below FL180 then reads as
     // having no setting, which the net counts).
     let qnh = match &args.metar {
@@ -1233,19 +1226,13 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
                 &set.cifp_airports,
                 set.approach_half_width_nm,
             )?;
-            let have = set.msaw.n_corridors + made.corridors.len();
+            let have = set.msaw.corridors.len() + made.corridors.len();
             if have > MAX_CORRIDORS {
                 return Err(format!(
-                    "n_corridors: {have} corridors with the CIFP's of the area are more than {MAX_CORRIDORS}"
+                    "corridors: {have} corridors with the CIFP's of the area are more than {MAX_CORRIDORS}"
                 ));
             }
-            for a in &made.corridors {
-                let k = set.msaw.n_corridors;
-                if let Some(slot) = set.msaw.corridors.get_mut(k) {
-                    *slot = a.corridor;
-                    set.msaw.n_corridors += 1;
-                }
-            }
+            append_corridors(&mut set.msaw, made.corridors.iter().map(|a| a.corridor));
             let count = |k: u8| made.corridors.iter().filter(|c| c.kind == k).count();
             area_info = Some(crate::report::AreaInfo {
                 area,
@@ -1434,4 +1421,11 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         .and_then(|d| d.sync_all())
         .map_err(|e| format!("{}: {e}", args.out.display()))?;
     Ok(summary)
+}
+
+/// Appends corridors to the configuration's boxed slice (at load, before the net is built).
+fn append_corridors(c: &mut oa_msaw::MsawConfig, more: impl Iterator<Item = oa_msaw::Corridor>) {
+    let mut v = core::mem::take(&mut c.corridors).into_vec();
+    v.extend(more);
+    c.corridors = v.into_boxed_slice();
 }

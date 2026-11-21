@@ -559,8 +559,8 @@ impl Floors {
     /// the obstacle's own position, less the allowance, is left out: the surface stands for it.
     /// Elsewhere every obstacle counts.
     pub fn set_corridors(&mut self, cfg: &MsawConfig) {
-        self.corridors = (cfg.n_corridors > 0).then(|| Box::new(*cfg));
-        self.cidx = if cfg.n_corridors > 0 {
+        self.corridors = (!cfg.corridors.is_empty()).then(|| Box::new(cfg.clone()));
+        self.cidx = if !cfg.corridors.is_empty() {
             oa_msaw::corridor_index_new(cfg).ok()
         } else {
             None

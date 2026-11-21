@@ -648,7 +648,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
     let _ = writeln!(
         o,
         "corridors {} ({} from the CIFP: {} approach, {} along runways, {} departure; {} approach corridors with the fix placed by the CIFP); runway ends with an approach and no corridor {}; airports with an approach {}",
-        i.cfg.n_corridors,
+        i.cfg.corridors.len(),
         i.data.cifp_corridors.len(),
         of_kind(CK_APPROACH),
         of_kind(CK_RUNWAY),

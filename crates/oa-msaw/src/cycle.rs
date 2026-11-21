@@ -191,7 +191,7 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
     st.last_ns = t_ns;
     stats.cycles = 1;
     stats.rows_lost_upstream = core::mem::take(&mut st.lost_input);
-    let cfg = st.cfg;
+    let cfg = &st.cfg;
     for (i, r) in rows.iter().enumerate() {
         stats.rows = stats.rows.saturating_add(1);
         if i >= cfg.max_tracks {
@@ -212,7 +212,14 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
         if r.alt_ft.is_nan() {
             stats.alt_missing = stats.alt_missing.saturating_add(1);
             skip(skips, &mut stats, t_ns, r, SkipWhy::AltitudeMissing);
-            lose_protection(st, &mut stats, skips, t_ns, r, END_LOST_ALTITUDE_MISSING);
+            lose_protection(
+                &mut st.open,
+                &mut stats,
+                skips,
+                t_ns,
+                r,
+                END_LOST_ALTITUDE_MISSING,
+            );
             continue;
         }
         let mut row = *r;
@@ -233,7 +240,14 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
             AltUse::Lost => {
                 stats.alt_stale = stats.alt_stale.saturating_add(1);
                 skip(skips, &mut stats, t_ns, r, SkipWhy::AltitudeStale);
-                lose_protection(st, &mut stats, skips, t_ns, r, END_LOST_ALTITUDE_STALE);
+                lose_protection(
+                    &mut st.open,
+                    &mut stats,
+                    skips,
+                    t_ns,
+                    r,
+                    END_LOST_ALTITUDE_STALE,
+                );
                 continue;
             }
             AltUse::Extrapolated => {
@@ -326,7 +340,7 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
         let filled = st
             .points
             .get_mut(base..)
-            .and_then(|out| sample_points(&start, &cfg, out));
+            .and_then(|out| sample_points(&start, cfg, out));
         if filled == Some(cfg.samples) {
             st.plan.push(*r);
         } else {
@@ -344,7 +358,7 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
 /// closed as cleared, and the track says so; the alert ends when the altitude returns and the
 /// track is clear, or when the track ends.
 fn lose_protection(
-    st: &mut MsawState,
+    open: &mut [Alert],
     stats: &mut CycleStats,
     skips: &mut SkipLog,
     t_ns: i64,
@@ -352,8 +366,8 @@ fn lose_protection(
     why: u8,
 ) {
     stats.protection_lost = stats.protection_lost.saturating_add(1);
-    if let Ok(i) = st.open.binary_search_by_key(&r.addr, |a| a.addr) {
-        if let Some(a) = st.open.get_mut(i) {
+    if let Ok(i) = open.binary_search_by_key(&r.addr, |a| a.addr) {
+        if let Some(a) = open.get_mut(i) {
             a.end_reason = why;
             a.protect_ns = t_ns;
             stats.protection_lost_open = stats.protection_lost_open.saturating_add(1);
