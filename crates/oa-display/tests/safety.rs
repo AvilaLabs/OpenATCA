@@ -288,6 +288,46 @@ fn a_feed_that_is_slow_or_lost_is_a_banner_line_with_its_age() {
     assert!(build_safety(&mut l, &proj(), &sc).is_err());
 }
 
+// REQ: OA-DSP-061, OA-DSP-063, OA-DSP-064
+#[test]
+fn a_stale_picture_feed_and_net_are_all_announced_then_clear_on_recovery() {
+    let mut st = state_table_new(10 * S, 5 * S).unwrap();
+    state_report(&mut st, NetId::Msaw, NetReport::Running, NOW - 11 * S, NOW).unwrap();
+    let inh = Box::new(inhibits_new());
+    let mut feeds = vec![FeedStatus {
+        name: *b"ADSB\0\0\0\0",
+        state: FeedState::Lost { age_ms: 11_000 },
+    }];
+
+    let mut outage = scene(&st, &inh, &feeds);
+    outage.newest_track_ns = Some(NOW - 11 * S);
+    let (l, stats) = draw(&outage);
+    assert!(stats.frozen);
+    assert_eq!(stats.nets_shown, 1);
+    assert_eq!(stats.feeds_shown, 1);
+    let outage_lines = texts(&l);
+    assert!(outage_lines.contains(&"PICTURE FROZEN 11.0S".to_string()));
+    assert!(outage_lines.contains(&"MSAW UNAVAILABLE: STATE STALE, AGE 11S".to_string()));
+    assert!(outage_lines.contains(&"FEED ADSB LOST 11.0S".to_string()));
+    assert!(l.texts.colour.iter().all(|&colour| colour == pal::ALERT));
+
+    // Synthetic recovery transition: all inputs are explicitly refreshed together.
+    let recovered_at = NOW + S;
+    state_report(
+        &mut st,
+        NetId::Msaw,
+        NetReport::Running,
+        recovered_at,
+        recovered_at,
+    )
+    .unwrap();
+    feeds[0].state = FeedState::Live;
+    let mut recovery = scene(&st, &inh, &feeds);
+    recovery.now_ns = recovered_at;
+    recovery.newest_track_ns = Some(recovered_at);
+    assert!(empty(&draw(&recovery).0));
+}
+
 // REQ: OA-DSP-065
 #[test]
 fn the_worst_state_fits_the_capacities_and_the_work_budget() {
