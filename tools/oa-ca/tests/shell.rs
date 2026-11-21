@@ -532,18 +532,18 @@ fn evaluation_budget_saturation_prioritizes_and_surfaces_deferred_pairs_determin
     set.ca.eval_budget = 1;
     let none = GroundTable::new();
     let mut traffic = Vec::new();
-    // Two independent head-on pairs on separate latitude lanes. Pair 3/4 reaches the
-    // configured loss radius first; pair 1/2 is the lower-priority candidate while both
-    // are in look-ahead. The lanes are separated by 30 km for the 5 NM minimum.
+    // Pair 1/2 starts closer but closes at 140 m/s. Pair 3/4 starts farther
+    // apart and closes at 400 m/s, reaching the 5 NM threshold first. Both
+    // crossing times are inside the 120 s look-ahead once the tracks confirm.
     for t in 0..140 {
         let s = t as f64;
-        for (a, b, start_m, y_m) in [
-            (0x100001, 0x100002, 50_000.0, 0.0),
-            (0x100003, 0x100004, 30_000.0, 30_000.0),
+        for (a, b, start_m, y_m, speed) in [
+            (0x100001, 0x100002, 25_000.0, 0.0, 70.0),
+            (0x100003, 0x100004, 40_000.0, 150_000.0, 200.0),
         ] {
-            let d = 200.0 * s;
-            traffic.push(meas(t, a, d, y_m, 200.0, 20_000));
-            traffic.push(meas(t, b, start_m - d, y_m, -200.0, 20_000));
+            let d = f64::from(speed) * s;
+            traffic.push(meas(t, a, d, y_m, speed, 20_000));
+            traffic.push(meas(t, b, start_m - d, y_m, -speed, 20_000));
         }
     }
     let run = |rows: &[Measurement]| track_and_alert(rows, &DEFAULT_CONFIG, &none, &set).unwrap();
@@ -556,12 +556,11 @@ fn evaluation_budget_saturation_prioritizes_and_surfaces_deferred_pairs_determin
         .net_cycles
         .keys()
         .any(|state| state == "DEGRADED: BUDGET EXCEEDED"));
-    assert!(
-        first
-            .alerts
-            .iter()
-            .any(|a| (a.addr_a, a.addr_b) == (0x100003, 0x100004)),
-        "the earlier predicted loss case must receive the single evaluation slot"
+    let first_alert = first.alerts.iter().min_by_key(|a| a.start_ns).unwrap();
+    assert_eq!(
+        (first_alert.addr_a, first_alert.addr_b),
+        (0x100003, 0x100004),
+        "the first evaluation slot goes to the pair with the earlier predicted loss"
     );
 
     // Reverse aircraft rows within each timestamp. The evaluation order, surfaced deferrals,
