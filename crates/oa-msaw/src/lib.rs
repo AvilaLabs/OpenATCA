@@ -4,25 +4,26 @@
 //! (`docs/M5_DESIGN.md` section 3, the five rules). Class: core (RULESET B1, B7).
 //!
 //! Each cycle the tracker's live tracks go to [`msaw_plan`], which gives the points of every
-//! track's straight-line path over the look-ahead; the shell looks up the floor at each point
-//! (terrain, obstacle, chart: plain values, no callback) and [`msaw_evaluate`] judges the paths
-//! against them. A track whose predicted altitude is below its floor within the look-ahead is
-//! alerted: a caution, and a warning once the time to the violation is within the warning time.
+//! track's straight-line path over the look-ahead; the shell looks up terrain and obstacle floors
+//! at each point and reports coverage gaps (plain values, no callback), and [`msaw_evaluate`]
+//! judges the paths against them. A track whose predicted altitude is below its floor within the
+//! look-ahead is alerted: a caution, and a warning once the time to the violation is within the
+//! warning time.
 //!
-//! * The floor is the higher of terrain plus a clearance, an obstacle top plus a clearance and the
-//!   minimum vectoring altitude of the sector ([`floor_of`]). Terrain and obstacles are the
-//!   shell's conservative maxima over the point's radius (the track's 95 % radius plus half a
-//!   step, with the radius growing with the prediction time). Inside a final-approach corridor
-//!   (the strip under the extended centreline of a runway end with an approach, whole query
-//!   circle inside) the chart altitude does not apply and the floor is a surface from the
-//!   threshold to the published altitude at the fix, never below terrain or obstacles plus the
-//!   approach clearance.
+//! * The alert floor is the higher of terrain plus its clearance, obstacle top plus its clearance,
+//!   and the applicable procedure surface ([`floor_of`]). MVA is reported separately; it is never
+//!   an alert floor. The shell supplies exact terrain and obstacle lookups over each point's query
+//!   radius (the track's 95 % radius plus half a step, with the radius growing with prediction
+//!   time). Missing terrain or obstacle coverage is reported and degrades the net. Inside an
+//!   approach capture box, only an aligned track receives the approach surface and terminal
+//!   look-ahead; runway strips and departure corridors have their own direction and floor rules.
 //! * Nothing here has a default: the look-ahead, the warning time, every clearance, the budgets
 //!   and the procedure areas come from the caller in an [`MsawConfig`]. The tests use made-up
 //!   values and say so; no FAA value is in this crate.
-//! * Rule 4: a track with no altitude is counted, listed and the net reads degraded. Rule 1: a
-//!   point with no terrain or chart coverage is counted, listed and the net reads degraded; the
-//!   covered points are still evaluated, and nothing is treated as safe for want of data.
+//! * A missing per-aircraft altitude is counted; the net degrades only when the configured share
+//!   of airborne tracks is not monitored for altitude. Missing terrain or obstacle coverage is
+//!   counted and degrades the net; covered points are still evaluated, and nothing is treated as
+//!   safe for want of data.
 //!   Rule 2: an alert is hidden only by an `oa-safety` inhibition of the net in force at the
 //!   track's position and altitude, and every hidden violation is recorded there. Rule 5: the
 //!   track budget is named; over it the lowest altitudes are evaluated first and the rest are

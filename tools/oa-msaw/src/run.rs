@@ -1131,7 +1131,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         let addr = meas
             .iter()
             .map(|m| m.addr)
-            .find(|a| hash8(*a).starts_with(prefix.as_str()))
+            .find(|a| hash8(*a) == *prefix)
             .ok_or_else(|| format!("--rows-of: no address in the run has the hash {prefix}"))?;
         set.trace_addr = Some(addr);
         for k in 0..oa_adsb::reports_len(&reports) {

@@ -458,7 +458,7 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         tr.flags & IF_RATE_UNKNOWN == 0,
         vr,
         f64::from(tr.alt_change_10s_ft),
-    ) && tr.flags & (F_QNH_MISSING | IF_STALE_EXTRAPOLATED) == 0;
+    ) && tr.flags & (F_QNH_MISSING | F_COLD_CORRECTED | IF_STALE_EXTRAPOLATED) == 0;
     for (k, (p, s)) in pts.iter().zip(floors.iter()).enumerate() {
         let hit = corridor_hit_at(cfg, &st.cidx, p);
         let (lo, hi) = sample_span_s(k, cfg.samples, cfg.look_ahead_s);

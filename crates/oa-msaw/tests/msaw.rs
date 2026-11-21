@@ -682,7 +682,7 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
     assert_eq!(at(3704.0, -1200.0, 10.0), None);
     assert!(at(3704.0, -800.0, 10.0).is_some());
     // The highest surface of two corridors that hold the circle.
-    let mut two = c;
+    let mut two = c.clone();
     put_corridor(
         &mut two,
         1,
@@ -2381,9 +2381,9 @@ fn only_a_fresh_descending_altitude_with_a_real_setting_and_a_whole_circle_on_th
     assert_eq!(at(250.0, 10.0, 0), (1, 0));
     assert_eq!(at(-500.0, 10.0, 0), (1, 0));
     assert_eq!(at(-500.0, f32::NAN, 0), (1, 0));
-    // A cold-corrected altitude with a real setting is exempt (the correction is near zero at the
-    // runway); a stale-extrapolated and a no-setting altitude are not.
-    assert_eq!(at(-500.0, -30.0, F_COLD_CORRECTED), (0, 1));
+    // Cold correction is deliberately one-sided for warning: a lowered altitude is not exact enough
+    // to establish touchdown and suppress the remaining forecast.
+    assert_eq!(at(-500.0, -30.0, F_COLD_CORRECTED), (1, 0));
     assert_eq!(at(-500.0, -30.0, F_QNH_MISSING), (1, 0));
     // A circle wider than the pavement and its margin does not land: r95 of 100 m on a runway whose
     // pavement is 30 m either side and 60 m allowed.
@@ -2482,7 +2482,7 @@ fn overlapping_boxes_each_hold_the_track_aligned_with_it_and_parallel_ones_both(
         track_deg: deg,
     };
     let surface = |n: usize, deg: i16| {
-        let mut k = c;
+        let mut k = c.clone();
         set_corridor_count(&mut k, n);
         corridor_hit_linear(&k, &point(deg)).map(|h| h.surface_ft.unwrap())
     };
@@ -2501,12 +2501,12 @@ fn overlapping_boxes_each_hold_the_track_aligned_with_it_and_parallel_ones_both(
     // Parallel boxes aligned with the track: the higher surface of the two.
     assert!(ac > a.unwrap());
     let index = corridor_index_new(&{
-        let mut k = c;
+        let mut k = c.clone();
         set_corridor_count(&mut k, 3);
         k
     })
     .unwrap();
-    let mut k = c;
+    let mut k = c.clone();
     set_corridor_count(&mut k, 3);
     assert_eq!(
         corridor_hit_at(&k, &index, &point(0)),

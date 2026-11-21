@@ -101,20 +101,19 @@ So every safety net here is designed from the start around five rules, before an
 - Predicted vertical path, over the look-ahead, against the conservative terrain and obstacle
   height plus clearance. The clearance is set per area in adaptation, so a facility can match its
   own terrain maps.
-- Approach corridors, runway strips and departure corridors come from CIFP. On a final approach
-  the floor is the higher of a surface from the threshold to the final approach fix and terrain
-  or obstacle plus a clearance; that is what catches a Guam-style early descent. Departures and
-  the runway itself are held to terrain or obstacle plus a clearance.
+- CIFP supplies geometry for approach capture boxes, runway strips and departure corridors.
+  Within an aligned capture box the floor combines the approach surface, terrain and obstacles.
+  The surface helps detect an early descent below the approach path. The terrain and obstacle
+  clearances depend on the corridor and proximity to the runway.
 - The MVA or MIA is not an alert floor. Legacy MSAW alerts on terrain maps and, on approach, on
   the published minimum descent altitude, not on the MVA, which carries 1,000 to 2,000 ft of
   margin and is routinely flown below on published and visual approaches. A first version that
   alerted on the MVA gave 639 IFR alerts an hour in ZAU, 595 of them set by the MVA (2026-11-20).
   A track predicted below the MVA is recorded and counted, not alerted.
-- Alerts go to aircraft on an active IFR flight plan, or to an aircraft whose pilot asked for
-  the service, as FAA practice does for VFR aircraft. Every other aircraft is still evaluated,
-  and its violations are recorded and counted as advisories, never dropped.
-- Guam is the test case: a recorded approach that descends early must alert, and an inhibition
-  over the area must be visible, time-limited and replayable.
+- The replay records violations for identified VFR tracks as advisories unless a service request
+  applies. Unmatched tracks without a configured VFR beacon code remain eligible for alerts.
+- The synthetic Guam-style test exercises an early descent toward terrain. An inhibition over
+  its area must be visible, time-limited and replayable.
 
 ## 4. Area proximity warning and approach path monitoring
 

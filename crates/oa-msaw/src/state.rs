@@ -177,12 +177,25 @@ fn table<T>(n: usize, key: &'static str) -> Result<Vec<T>, &'static str> {
     Ok(v)
 }
 
+/// Clones the immutable configuration without making the corridor allocation infallible.
+fn config_copy(c: &MsawConfig) -> Result<MsawConfig, &'static str> {
+    let mut corridors = Vec::new();
+    corridors
+        .try_reserve_exact(c.corridors.len())
+        .map_err(|_| "corridors: cannot be allocated")?;
+    corridors.extend_from_slice(&c.corridors);
+    Ok(MsawConfig {
+        corridors: corridors.into_boxed_slice(),
+        ..*c
+    })
+}
+
 /// The net with every table allocated for `cfg`. A capacity the allocator cannot give is refused
 /// with the name of the key.
 pub fn msaw_new(cfg: &MsawConfig) -> Result<MsawState, &'static str> {
     msaw_check(cfg)?;
     Ok(MsawState {
-        cfg: cfg.clone(),
+        cfg: config_copy(cfg)?,
         cidx: corridor_index_new(cfg)?,
         plan: table(cfg.max_tracks, "max_tracks: cannot be allocated")?,
         points: table(

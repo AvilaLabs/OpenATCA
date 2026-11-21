@@ -6527,8 +6527,8 @@ FAA value.
 - **OA-MSAW-002** Aircraft on the ground are excluded and counted.
 - **OA-MSAW-003** A track with no altitude is counted and listed on that track (a gap of the aircraft)
   and does not degrade the net; the other tracks are still evaluated.
-- **OA-MSAW-004** A path point with no terrain or chart coverage is counted, listed and the net reads
-  degraded (`InputMissing`); it is never treated as safe, and the covered points are still evaluated.
+- **OA-MSAW-004** A path point without terrain or obstacle coverage is counted and listed. The net
+  reports degraded input (`InputMissing`) and evaluates the points with coverage.
 - **OA-MSAW-005** Over the track budget the lowest predicted heights above the highest terrain of the track's own
   cell (a track with none given first; height plus the descent over the look-ahead, ties by address) are evaluated first, the rest are counted and listed, and the net reads degraded (`BudgetExceeded`) with the count; rows past the track
   capacity are counted the same way.
@@ -6593,8 +6593,8 @@ FAA value.
 - **OA-MSAW-038** Synthetic Guam case with an inhibition over the area: no alert, the net reads inhibited for the
   run, and inhibitions.csv shows the inhibition with its end time, reason, author and what it hid; once it
   ends the alert comes and its expiry is recorded.
-- **OA-MSAW-039** With no terrain or chart the run alerts on nothing and says so (degraded, listed); a track with
-  no altitude and a track over the budget are counted, listed and degrade the net.
+- **OA-MSAW-039** With no terrain coverage the tool reports degraded input and issues no alerts for
+  the uncovered points. The tool counts and lists tracks without altitude and tracks over budget.
 - **OA-MSAW-040** The files are deterministic and the summary names no aircraft.
 - **OA-MSAW-047** Terrain is reduced once per tile to a grid of 0.002-degree cells and looked up from it; a
   missing neighbour and a nodata sample are counted apart, each tile is reduced alone (no common lattice is
@@ -6637,11 +6637,10 @@ FAA value.
 - **OA-MSAW-063** With `--diagnose` the tool writes `diagnosis.txt`: the altitude judged against the geometric one,
   the terms of the query radius, the obstacle and terrain records behind the floors and what the depth is made of,
   and the alerts 500 ft or more below the floor classified and grouped; numbers only, addresses hashed.
-- **OA-MSAW-064** Where the track is now inside an approach capture box and no departure corridor the prediction
-  time is `terminal_lookahead_s`, else `look_ahead_s`; runway strips, departure corridors, airport terminal areas and
-  `gtm_clearance` areas keep `look_ahead_s`; the check of the present position is unchanged. Every violation found
-  in a box is within `terminal_lookahead_s`, so with `warning_s` at or above it a track starting in a box is never
-  a caution.
+- **OA-MSAW-064** The prediction uses `terminal_lookahead_s` when the track starts inside an aligned
+  approach capture box and outside a departure corridor. Otherwise it uses `look_ahead_s`. Both
+  include the present position. When `warning_s` is at least `terminal_lookahead_s`, violations found
+  on the shorter prediction are warnings.
 - **OA-MSAW-065** A track whose latest barometric altitude is older than `stale_hold_s` is never planned for
   judging, is counted and listed as altitude stale on that track, and an alert open on it is held open as
   "protection lost: altitude stale" until the altitude returns or the track ends; the same for a missing altitude;
@@ -6657,24 +6656,25 @@ FAA value.
   not known is carried as a descent of 1,000 ft/min, flagged; an alert open on it is held open.
 - **OA-MSAW-069** The net reads InputMissing when more than `altitude_loss_degrade_share` of a cycle's airborne
   tracks are not monitored for altitude.
-- **OA-MSAW-070** In the runway strip and the last 1 NM of a capture box the floor is the higher of the surface
-  less the allowance, terrain and the obstacle top, with no clearance. A point is a landing, and not judged, only if
-  the whole 95 % circle of the track is over the pavement plus 60 m, the track is not climbing (a known rate not
-  above zero and no rise over the last 10 s), its altitude is fresh with a real setting (cold-corrected is allowed) and not
-  stale-extrapolated, and the altitude at the point (not the lowest of its span) is at or below the runway elevation
-  interpolated between the two thresholds there. The points after the first such point are the roll-out and are not
-  judged; they are counted, with those outside every runway strip. Every point of a track that does not qualify is
-  judged. The strip margin gives no landing.
+- **OA-MSAW-070** In the runway strip and last 1 NM of a capture box, the floor is the highest of the
+  approach surface less its allowance, terrain and obstacle top. A predicted touchdown requires
+  an aligned track whose 95 % circle fits within the pavement plus 60 m. It requires a known
+  nonpositive vertical rate, no rise over the last 10 s, and altitude with a current altimeter
+  setting and without stale extrapolation or cold-temperature correction. At that point, the
+  predicted altitude must be at or below the runway elevation interpolated between the thresholds.
+  The net omits the touchdown and subsequent rollout points from floor checks and counts the
+  rollout points, including those outside every runway strip.
 - **OA-MSAW-071** The airport area's clearance applies only where the whole query circle is inside the area; a
   `gtm_clearance` area applies where the circle overlaps it at all.
 - **OA-MSAW-072** With no setting within the radius and age, the lowest setting of the last 12 h within 200 NM is
   used; only with none the allowance; the track stays flagged and the net InputMissing. `--metar` names a directory
   of hourly files, METAR files, or several of either separated by commas; each path is checked against the sealed days.
-- **OA-MSAW-073** A point outside the obstacle data has no obstacle data: counted as without coverage. The data is
-  the union of each loaded file's own covered 0.5 degree cells: a cell with an obstacle, or an empty cell with obstacle
-  cells on both sides within 4 cells along its row or along its column (an interior gap, found in each file alone);
-  edges, borders with an unloaded area and coasts are not filled. An empty file is an error. `--dof` takes a comma-separated list; the track rows outside the coverage are
-  counted.
+- **OA-MSAW-073** The tool estimates coverage for each loaded obstacle file on a 0.5 degree
+  grid, then takes the union. Coverage includes cells with obstacles and enclosed empty
+  cells with obstacle cells within four cells on both sides of their row or column.
+  Empty cells with a path to the file's bounding edge through adjacent empty cells
+  remain uncovered. The tool counts track rows outside coverage and rejects an empty
+  obstacle file. `--dof` accepts a comma-separated list.
 - **OA-MSAW-074** Tracks on the ground are listed per track; an altitude with no barometric measurement behind it is
   no altitude, and is counted apart.
 - **OA-MSAW-075** An approach corridor's surface is its procedure's own path: the threshold crossing height over the

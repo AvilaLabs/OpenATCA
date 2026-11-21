@@ -110,10 +110,20 @@ fn cell_of(deg: f64, size: f64) -> i32 {
 const GAP_CELLS: i32 = 4;
 
 /// The covered cells of one file's positions (1e-7 degree): the cells that hold an obstacle, and an
-/// empty cell with obstacle cells on both sides of it within [`GAP_CELLS`] along its row OR along
-/// its column (an interior gap, found in each file alone; the files' union is taken afterwards). Edges and borders are not filled: a cell outside the obstacles'
-/// own spread is not covered.
+/// empty cell with obstacle cells on both sides of it within [`GAP_CELLS`] along its row or column.
+/// Empty cells connected to a file's bounding edge remain uncovered. Fill each file's interior
+/// gaps before taking the union of the files.
 fn cover_cells(points: impl Iterator<Item = (i32, i32)>) -> std::collections::HashSet<(i32, i32)> {
+    const NEIGHBOURS: [(i32, i32); 8] = [
+        (-1, -1),
+        (-1, 0),
+        (-1, 1),
+        (0, -1),
+        (0, 1),
+        (1, -1),
+        (1, 0),
+        (1, 1),
+    ];
     let mut have = std::collections::HashSet::new();
     for (la, lo) in points {
         have.insert((
@@ -132,10 +142,26 @@ fn cover_cells(points: impl Iterator<Item = (i32, i32)>) -> std::collections::Ha
     let side = |a: i32, b: i32, da: i32, db: i32| {
         (1..=GAP_CELLS).any(|k| have.contains(&(a + da * k, b + db * k)))
     };
+    let mut exterior = std::collections::HashSet::new();
+    let mut pending: Vec<_> = (a0..=a1)
+        .flat_map(|a| [(a, b0), (a, b1)])
+        .chain((b0..=b1).flat_map(|b| [(a0, b), (a1, b)]))
+        .collect();
+    while let Some((a, b)) = pending.pop() {
+        if !(a0..=a1).contains(&a)
+            || !(b0..=b1).contains(&b)
+            || have.contains(&(a, b))
+            || !exterior.insert((a, b))
+        {
+            continue;
+        }
+        pending.extend(NEIGHBOURS.iter().map(|(da, db)| (a + da, b + db)));
+    }
     let mut gaps = Vec::new();
     for a in a0..=a1 {
         for b in b0..=b1 {
             if !have.contains(&(a, b))
+                && !exterior.contains(&(a, b))
                 && ((side(a, b, 0, -1) && side(a, b, 0, 1))
                     || (side(a, b, -1, 0) && side(a, b, 1, 0)))
             {

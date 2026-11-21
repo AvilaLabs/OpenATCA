@@ -130,7 +130,13 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         _ => return Err("--from-s and --to-s go together".to_string()),
     };
     let [adsb, config, out, terrain, dof, mva, cifp, metar, sfdps, landing_of, rows_of] = paths;
-    let rows_of = rows_of.map(|p| p.to_string_lossy().into_owned());
+    let rows_of = rows_of.map(|p| p.to_string_lossy().to_ascii_lowercase());
+    if rows_of
+        .as_ref()
+        .is_some_and(|s| s.len() != 8 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return Err("--rows-of needs exactly 8 hexadecimal digits".to_string());
+    }
     let landing_of = landing_of.map(|p| p.to_string_lossy().into_owned());
     match (adsb, config, out) {
         (Some(adsb), Some(config), Some(out)) => Ok(Args {
