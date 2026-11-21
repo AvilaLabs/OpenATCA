@@ -441,6 +441,7 @@ fn interpolate_truth(truth: &[TruthPoint], time_ms: i64) -> Option<TruthPoint> {
         time_ms,
         place,
         altitude_ft,
+        gap_before: false,
     })
 }
 
@@ -479,9 +480,9 @@ fn altitude_at(track: TrackState, assigned: Option<f64>, seconds: f64) -> Option
     let rate = track.vertical_rate_fpm.filter(|v| v.is_finite())?;
     let raw = current + rate * seconds / 60.0;
     let value = assigned.filter(|v| v.is_finite()).map_or(raw, |target| {
-        if rate.is_some_and(|r| r > 0.0) && target >= current {
+        if rate > 0.0 && target >= current {
             oa_math::min_f64(raw, target)
-        } else if rate.is_some_and(|r| r < 0.0) && target <= current {
+        } else if rate < 0.0 && target <= current {
             oa_math::max_f64(raw, target)
         } else {
             raw
