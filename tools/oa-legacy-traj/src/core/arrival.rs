@@ -587,6 +587,15 @@ mod tests {
         );
         let truth = [
             TruthPoint {
+                time_ms: 1_290_000,
+                place: Place {
+                    lon_deg: fix.place.lon_deg - 0.10,
+                    ..fix.place
+                },
+                altitude_ft: None,
+                gap_before: false,
+            },
+            TruthPoint {
                 time_ms: 1_300_000,
                 place: predicted.positions[0].place.unwrap(),
                 altitude_ft: None,
@@ -611,6 +620,15 @@ mod tests {
                 time_ms: 1_350_000,
                 place: Place {
                     lon_deg: fix.place.lon_deg + 0.02,
+                    ..fix.place
+                },
+                altitude_ft: None,
+                gap_before: false,
+            },
+            TruthPoint {
+                time_ms: 1_360_000,
+                place: Place {
+                    lon_deg: fix.place.lon_deg + 0.04,
                     ..fix.place
                 },
                 altitude_ft: None,
