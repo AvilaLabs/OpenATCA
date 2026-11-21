@@ -514,7 +514,7 @@ impl Replica {
             }
             if line.starts_with("MACHINE_LOSS_ACK ") {
                 validate_worker_ack(&line, second);
-                return line;
+                return line.trim_end_matches(['\r', '\n']).to_owned();
             }
         }
     }
