@@ -29,6 +29,15 @@ module's class.
 | `ppm`     | shell | binary PPM (P6) writer                                             |
 | `cli`     | shell | the `oa-scope` command line, file reads and writes                 |
 
+`safety::build_safety` derives warning lines from the supplied net table, feed states and
+newest-track timestamp. It marks the picture frozen once that timestamp reaches the configured
+age, and `oa-safety` reports stale net states as unavailable.
+
+The `oa-scope-replay` frame builder draws map, traffic and frame labels. For each address,
+`targets_at` selects the newest row at or before frame time. The target stays visible through
+`stale_ns` and returns after expiry when a newer row arrives. Callers supply a separate safety
+scene to `build_safety` when they need feed and net warnings alongside traffic.
+
 ## `oa-scope`
 
 ```text

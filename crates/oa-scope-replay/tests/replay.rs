@@ -228,6 +228,77 @@ fn a_frame_uses_only_rows_up_to_its_time_and_drops_ended_tracks() {
 
 // REQ: OA-DSP-043
 #[test]
+fn replay_frame_expires_only_the_silent_track_and_restores_it_on_a_new_row() {
+    const A: u32 = 101;
+    const B: u32 = 202;
+    let mut o = output_new(8);
+    push(&mut o, T0, A, ORD, (0.0, 50.0), 0.0, COV, 0);
+    push(
+        &mut o,
+        T0,
+        B,
+        (ORD.0 + 10_000, ORD.1),
+        (0.0, 50.0),
+        0.0,
+        COV,
+        0,
+    );
+    // B continues updating while A is silent.
+    push(
+        &mut o,
+        T0 + 3 * S,
+        B,
+        (ORD.0 + 13_000, ORD.1),
+        (0.0, 50.0),
+        0.0,
+        COV,
+        0,
+    );
+    // A becomes a real target again only when its own new row arrives.
+    push(
+        &mut o,
+        T0 + 4 * S,
+        A,
+        (ORD.0 + 4_000, ORD.1),
+        (0.0, 50.0),
+        0.0,
+        COV,
+        0,
+    );
+    push(
+        &mut o,
+        T0 + 4 * S,
+        B,
+        (ORD.0 + 14_000, ORD.1),
+        (0.0, 50.0),
+        0.0,
+        COV,
+        0,
+    );
+    let store = store_of(&o);
+    let mut replay = replay_new(model(), &frame_cfg()).unwrap();
+    let build = |r: &mut oa_scope_replay::frame::Replay, at: i64| {
+        replay_build(r, &store, &Callsigns::default(), at, "SYNTH").unwrap()
+    };
+
+    // At the documented inclusive boundary, A is still present (age == stale_ns).
+    let boundary = build(&mut replay, T0 + 3 * S);
+    assert_eq!(boundary.convert.added, 2);
+    assert_eq!(targets_columns(&replay.set).addr, &[A, B]);
+
+    // One nanosecond later, B remains current on its update while A expires alone.
+    let expired = build(&mut replay, T0 + 3 * S + 1);
+    assert_eq!((expired.convert.added, expired.convert.ended), (1, 1));
+    assert_eq!(targets_columns(&replay.set).addr, &[B]);
+
+    // A's later row restores it through the ordinary replay conversion and drawing path.
+    let recovered = build(&mut replay, T0 + 4 * S);
+    assert_eq!(recovered.convert.added, 2);
+    assert_eq!(targets_columns(&replay.set).addr, &[A, B]);
+}
+
+// REQ: OA-DSP-043
+#[test]
 fn the_trail_takes_rows_a_step_apart_and_stops_at_the_start_of_the_track() {
     let mut o = output_new(64);
     for k in 0..=20 {
