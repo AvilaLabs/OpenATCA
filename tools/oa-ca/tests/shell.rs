@@ -524,3 +524,54 @@ fn a_converging_pair_through_the_tracker_is_one_alert_that_repeats_exactly() {
         .keys()
         .any(|k| k.starts_with("DEGRADED: INPUT MISSING")));
 }
+
+// REQ: OA-CA-010
+#[test]
+fn evaluation_budget_saturation_prioritizes_and_surfaces_deferred_pairs_deterministically() {
+    let mut set = parse_config(DEV_CFG).unwrap();
+    set.ca.eval_budget = 1;
+    let none = GroundTable::new();
+    let mut traffic = Vec::new();
+    // Two independent head-on pairs on separate latitude lanes. Pair 3/4 reaches the
+    // configured loss radius first; pair 1/2 is the lower-priority candidate while both
+    // are in look-ahead. The lanes are separated by 30 km for the 5 NM minimum.
+    for t in 0..140 {
+        let s = t as f64;
+        for (a, b, start_m, y_m) in [
+            (0x100001, 0x100002, 50_000.0, 0.0),
+            (0x100003, 0x100004, 30_000.0, 30_000.0),
+        ] {
+            let d = 200.0 * s;
+            traffic.push(meas(t, a, d, y_m, 200.0, 20_000));
+            traffic.push(meas(t, b, start_m - d, y_m, -200.0, 20_000));
+        }
+    }
+    let run = |rows: &[Measurement]| track_and_alert(rows, &DEFAULT_CONFIG, &none, &set).unwrap();
+    let first = run(&traffic);
+    assert!(
+        first.totals.not_evaluated > 0,
+        "budget saturation was not counted"
+    );
+    assert!(first
+        .net_cycles
+        .keys()
+        .any(|state| state == "DEGRADED: BUDGET EXCEEDED"));
+    assert!(
+        first
+            .alerts
+            .iter()
+            .any(|a| (a.addr_a, a.addr_b) == (0x100003, 0x100004)),
+        "the earlier predicted loss case must receive the single evaluation slot"
+    );
+
+    // Reverse aircraft rows within each timestamp. The evaluation order, surfaced deferrals,
+    // and resulting alerts must not depend on input row order.
+    let mut permuted = traffic.clone();
+    for rows in permuted.chunks_exact_mut(4) {
+        rows.reverse();
+    }
+    let again = run(&permuted);
+    assert_eq!(first.totals, again.totals);
+    assert_eq!(first.net_cycles, again.net_cycles);
+    assert_eq!(alerts_csv(&first.alerts), alerts_csv(&again.alerts));
+}
