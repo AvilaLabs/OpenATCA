@@ -102,6 +102,9 @@ fn sfdps_extraction_reads_track_address_handoff_and_route() {
     assert_eq!(&leg.handoffs.to[0][4..6], b"07");
     // Expanded route: two fixes and one point with coordinates.
     assert_eq!(leg.routes.flight.len(), 1);
+    // REQ: OA-LTJ-053
+    assert_eq!(leg.routes.recv_ms, [1_893_553_300_000]);
+    assert_eq!(leg.routes.addr_at_receive, [NONE]);
     assert_eq!(leg.routes.len[0], 3);
     assert_eq!(&leg.route_points.fix[1][..5], b"MIDFX");
     assert_ne!(leg.route_points.est_ms[1], NO_TIME);

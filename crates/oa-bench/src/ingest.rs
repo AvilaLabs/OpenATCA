@@ -14,7 +14,7 @@ use crate::legacy::{
     flight_ix, pad, push_tbfm, push_tfms, push_tfms_actual, push_th, row_has, tbfm_kind, tfms_kind,
     Counts, Legacy, TfmsIn, NO_ALT, NO_TIME,
 };
-use crate::scan::scan_doc;
+use crate::scan::scan_received;
 
 // The parser limits, decode mode (decode as far as the tables fit, count the rest) and table
 // sizes are the replay pipeline's own (`oa_replay::doc_xml_limits` and the others), so a document
@@ -183,7 +183,7 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
             push_th(leg, f, pt, recv_ms, lat, lon, alt, vel, coast);
         }
     }
-    scan_doc(&doc, &mut r.text, leg);
+    scan_received(&doc, &mut r.text, leg, recv_ms);
 }
 
 /// Field error kind names of `oa-tbfm`, by `error_kind_index`.

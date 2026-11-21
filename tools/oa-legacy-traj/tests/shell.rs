@@ -20,6 +20,25 @@ fn argv(s: &str) -> Vec<String> {
 
 const BASE: &str = "--sfdps s --tbfm b --tfms f --out o";
 
+// REQ: OA-LTJ-053
+#[test]
+fn arrival_mode_accepts_a_meter_fix_and_uses_two_feeds() {
+    let args = parse(&argv(
+        "--sfdps s --tbfm b --adsb a.oaf --out o --nasr n.zip --arrival-meter-fix auto",
+    ))
+    .unwrap();
+    assert_eq!(args.arrival_meter_fix.as_deref(), Some("AUTO"));
+    assert!(args.tfms.is_none());
+    assert!(parse(&argv(
+        "--sfdps s --tbfm b --adsb a.oaf --out o --arrival-meter-fix auto"
+    ))
+    .is_err());
+    assert!(parse(&argv(
+        "--sfdps s --tbfm b --adsb a.oaf --out o --nasr n.zip"
+    ))
+    .is_err());
+}
+
 // REQ: OA-LTJ-017
 #[test]
 fn the_arguments_take_the_inputs_in_any_order_and_state_the_defaults() {
@@ -121,6 +140,25 @@ fn files_are_written_under_a_temporary_name_and_renamed_with_none_left_behind() 
     assert_eq!(fs::read_to_string(t.join("a.csv")).unwrap(), "three");
     assert_eq!(fs::read_to_string(t.join("b.csv")).unwrap(), "two");
     let _ = fs::remove_dir_all(&t);
+}
+
+// REQ: OA-LTJ-018, OA-LTJ-019
+#[test]
+fn an_existing_temporary_report_link_does_not_touch_its_target() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ltj-partial-link");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("sentinel");
+    fs::write(&target, "unchanged").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join("arrival-report.txt.partial")).unwrap();
+    assert!(write_all(
+        &dir,
+        &[("arrival-report.txt".to_string(), "new".to_string())]
+    )
+    .is_err());
+    assert_eq!(fs::read_to_string(target).unwrap(), "unchanged");
+    assert!(!dir.join("arrival-report.txt").exists());
+    fs::remove_dir_all(dir).unwrap();
 }
 
 // REQ: OA-LTJ-019, OA-LTJ-033

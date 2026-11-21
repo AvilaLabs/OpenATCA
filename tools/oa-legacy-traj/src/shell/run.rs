@@ -1834,6 +1834,12 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         clip_sealed += s;
         *sealed = clip_sealed;
         let clip = clip.map_err(|e| e.to_string())?;
+        if args.arrival_meter_fix.is_some()
+            && reports_len(&reports).saturating_add(reports_len(&clip.reports))
+                > crate::shell::arrival::MAX_REPORTS
+        {
+            return Err("arrival experiment exceeds the ADS-B report budget".into());
+        }
         header.push((
             "adsb clip".to_string(),
             format!(
@@ -1865,7 +1871,7 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         "truth".to_string(),
         format!("{} legs, digest {}", built.legs.len(), built.digest),
     ));
-    let feeds = [
+    let mut feeds = vec![
         FeedInput {
             feed: FeedKind::Sfdps,
             dir: args.sfdps.clone(),
@@ -1874,11 +1880,17 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
             feed: FeedKind::Tbfm,
             dir: args.tbfm.clone(),
         },
-        FeedInput {
-            feed: FeedKind::Tfms,
-            dir: args.tfms.clone(),
-        },
     ];
+    if let Some(dir) = args
+        .tfms
+        .as_ref()
+        .filter(|_| args.arrival_meter_fix.is_none())
+    {
+        feeds.push(FeedInput {
+            feed: FeedKind::Tfms,
+            dir: dir.clone(),
+        });
+    }
     let mut feeds_sealed = 0u64;
     let loaded = load_counted(&feeds, &guarded_opener(), msg_limit(), &mut feeds_sealed);
     *sealed += feeds_sealed;
@@ -1910,6 +1922,15 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     l.th = Default::default();
     l.handoffs = Default::default();
     l.beacons = Default::default();
+    if let Some(fix) = &args.arrival_meter_fix {
+        let text =
+            crate::shell::arrival::report(fix, l, &table, &reports, &built, &header, *sealed)?;
+        write_all(
+            &args.out,
+            &[("arrival-report.txt".to_string(), text.clone())],
+        )?;
+        return Ok(text);
+    }
     header.push((
         "places file".to_string(),
         format!(

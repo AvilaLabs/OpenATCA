@@ -26,6 +26,21 @@ Running it with no arguments prints every default and every fixed setting. Witho
 `--places`, no point or airport has a place, so nothing can be scored. Every input goes through the
 sealed-data guard.
 
+### ORD arrival forecast experiment
+
+```
+oa-legacy-traj --sfdps <dir> --tbfm <dir> --adsb <clip.oaf> --nasr <zip> --out <dir> --arrival-meter-fix <NAME|auto>
+```
+
+This experiment issues one forecast per eligible ORD flight using the route available at receive
+time and the latest eligible ADS-B observation. It writes `arrival-report.txt` with position and
+altitude coverage and error at 5, 10 and 20 minutes, plus selected-fix ETA errors for OpenATCA,
+ERAM and TBFM when comparable estimates exist. `auto` selects a resolvable fix by the number of
+distinct ORD flight plans with a TBFM estimate, before scoring. OpenATCA uses the received route's
+geometry and observed motion. Its ETA does not depend on the legacy time predictions. The ADS-B
+archive records observation time and has no comparable receive clock. This baseline has no winds,
+aircraft performance model or procedure altitude model.
+
 ## Method
 
 1. **Join.** Each flight is joined to one ADS-B aircraft by its address, or by its callsign when it has

@@ -2,6 +2,7 @@
 //! half-written report.
 
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 /// Writes `text` to `dir/name`: to `dir/name.partial` first, then renamed over the final name.
@@ -17,6 +18,14 @@ pub fn write_atomic(dir: &Path, name: &str, text: &str) -> Result<(), String> {
 /// is removed, and the error says which files were already renamed (their new content is in
 /// place; the others are as they were).
 pub fn write_all(dir: &Path, files: &[(String, String)]) -> Result<(), String> {
+    oa_sealed::refuse(dir).map_err(|e| e.to_string())?;
+    for (name, _) in files {
+        if Path::new(name).file_name().and_then(|n| n.to_str()) != Some(name.as_str()) {
+            return Err("report output needs a single file name".into());
+        }
+        oa_sealed::refuse(&dir.join(name)).map_err(|e| e.to_string())?;
+        oa_sealed::refuse(&dir.join(format!("{name}.partial"))).map_err(|e| e.to_string())?;
+    }
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let tmp_of = |name: &str| dir.join(format!("{name}.partial"));
     let mut created: Vec<&str> = Vec::new();
@@ -27,15 +36,18 @@ pub fn write_all(dir: &Path, files: &[(String, String)]) -> Result<(), String> {
     };
     for (name, text) in files {
         let tmp = tmp_of(name);
-        if let Err(e) = fs::write(&tmp, text) {
-            // The file may have been created before the write failed.
-            if tmp.is_file() {
+        let result = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .and_then(|mut file| {
                 created.push(name);
-            }
+                file.write_all(text.as_bytes())
+            });
+        if let Err(e) = result {
             clean(&created);
             return Err(format!("{}: {e}; nothing was renamed", tmp.display()));
         }
-        created.push(name);
     }
     let mut renamed: Vec<&str> = Vec::new();
     for (name, _) in files {

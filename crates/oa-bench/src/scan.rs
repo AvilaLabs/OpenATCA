@@ -9,8 +9,8 @@ use oa_fixm::{parse_iso_ms, parse_uuid};
 use oa_xml::{attr_needs_decode, span_bytes, text_needs_decode, Doc, ElemIx};
 
 use crate::legacy::{
-    flight_ix, hev, pad, push_handoff, push_route, set_addr, set_addr_hint, Legacy, RoutePointIn,
-    NO_COORD, NO_TIME,
+    flight_ix, hev, pad, push_handoff, push_route_received, set_addr, set_addr_hint, Legacy,
+    RoutePointIn, NO_COORD, NO_TIME,
 };
 
 /// Most route points kept per route; a longer route is cut at this and the rest ignored (the
@@ -159,6 +159,10 @@ fn route_points(doc: &Doc<'_>, first: &[u32], er: usize, leg: &mut Legacy) -> Ve
 /// only on a document the decoder did not drop for a message timed in the sealed window, so no
 /// such message reaches a hint, address, handoff or route count or table (OA-SEAL-014).
 pub fn scan_doc(doc: &Doc<'_>, scratch: &mut Vec<u32>, leg: &mut Legacy) {
+    scan_received(doc, scratch, leg, NO_TIME);
+}
+
+pub(crate) fn scan_received(doc: &Doc<'_>, scratch: &mut Vec<u32>, leg: &mut Legacy, recv_ms: i64) {
     first_texts(doc, scratch);
     let n = doc.elem_name.len();
     let starts: Vec<usize> = (1..n)
@@ -166,11 +170,11 @@ pub fn scan_doc(doc: &Doc<'_>, scratch: &mut Vec<u32>, leg: &mut Legacy) {
         .collect();
     for (k, &s) in starts.iter().enumerate() {
         let e = starts.get(k + 1).copied().unwrap_or(n);
-        scan_message(doc, scratch, leg, s, e);
+        scan_message(doc, scratch, leg, s, e, recv_ms);
     }
 }
 
-fn scan_message(doc: &Doc<'_>, first: &[u32], leg: &mut Legacy, s: usize, e: usize) {
+fn scan_message(doc: &Doc<'_>, first: &[u32], leg: &mut Legacy, s: usize, e: usize, recv_ms: i64) {
     let mut gufi: Option<u128> = None;
     let mut ts = NO_TIME;
     let mut addr: Option<u32> = None;
@@ -231,6 +235,6 @@ fn scan_message(doc: &Doc<'_>, first: &[u32], leg: &mut Legacy, s: usize, e: usi
     }
     if let Some(er) = route {
         let pts = route_points(doc, first, er, leg);
-        push_route(leg, f, ts, &pts);
+        push_route_received(leg, f, ts, recv_ms, &pts);
     }
 }

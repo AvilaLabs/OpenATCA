@@ -299,7 +299,13 @@ pub struct Loaded {
 fn ingest_one(leg: &mut Legacy, r: &mut Reader, feed: FeedKind, bytes: &[u8], recv_ms: i64) {
     match feed {
         FeedKind::Sfdps => ingest_sfdps(leg, r, bytes, recv_ms),
-        FeedKind::Tbfm => ingest_tbfm(leg, r, bytes),
+        FeedKind::Tbfm => {
+            let first = leg.tbfm.recv_ms.len();
+            ingest_tbfm(leg, r, bytes);
+            if let Some(received) = leg.tbfm.recv_ms.get_mut(first..) {
+                received.fill(recv_ms);
+            }
+        }
         FeedKind::Tfms => ingest_tfms(leg, r, bytes),
         FeedKind::Fns | FeedKind::Adsb => {}
     }

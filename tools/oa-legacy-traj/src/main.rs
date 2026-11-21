@@ -21,8 +21,9 @@ fn main() -> ExitCode {
         }
     };
     // Every path is checked, as given and resolved, before anything is opened or created.
-    for p in [&args.sfdps, &args.tbfm, &args.tfms, &args.out]
+    for p in [&args.sfdps, &args.tbfm, &args.out]
         .into_iter()
+        .chain(args.tfms.iter())
         .chain(args.adsb.iter())
         .chain(args.places.iter())
         .chain(args.nasr.iter())

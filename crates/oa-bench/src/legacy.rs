@@ -197,6 +197,12 @@ pub struct HandoffTable {
 pub struct RouteTable {
     pub flight: Vec<u32>,
     pub ts_ms: Vec<i64>,
+    /// When this route was available in the recording, or [`NO_TIME`].
+    pub recv_ms: Vec<i64>,
+    /// Flight identity known when this route was captured.
+    pub addr_at_receive: Vec<u32>,
+    pub plan_at_receive: Vec<[u8; 12]>,
+    pub arrival_at_receive: Vec<[u8; 12]>,
     /// First point in [`RoutePoints`] and the number of points.
     pub first: Vec<u32>,
     pub len: Vec<u32>,
@@ -228,6 +234,8 @@ pub struct TbfmTable {
     pub time_ms: Vec<i64>,
     /// When TBFM published the value (`msgTime`), Unix ms.
     pub issue_ms: Vec<i64>,
+    /// When the estimate was available in the recording, or [`NO_TIME`].
+    pub recv_ms: Vec<i64>,
 }
 
 /// TFMS arrival and departure estimates, one row per estimate.
@@ -432,6 +440,16 @@ pub struct RoutePointIn {
 
 /// Appends an expanded route with its points, or counts the overflow (nothing is kept then).
 pub fn push_route(leg: &mut Legacy, flight: u32, ts_ms: i64, points: &[RoutePointIn]) {
+    push_route_received(leg, flight, ts_ms, NO_TIME, points);
+}
+
+pub(crate) fn push_route_received(
+    leg: &mut Legacy,
+    flight: u32,
+    ts_ms: i64,
+    recv_ms: i64,
+    points: &[RoutePointIn],
+) {
     if leg.routes.flight.len() >= leg.limits.routes
         || leg.route_points.fix.len().saturating_add(points.len()) > leg.limits.route_points
     {
@@ -447,6 +465,28 @@ pub fn push_route(leg: &mut Legacy, flight: u32, ts_ms: i64, points: &[RoutePoin
     }
     leg.routes.flight.push(flight);
     leg.routes.ts_ms.push(ts_ms);
+    leg.routes.recv_ms.push(recv_ms);
+    leg.routes.addr_at_receive.push(
+        leg.flights
+            .addr
+            .get(flight as usize)
+            .copied()
+            .unwrap_or(NONE),
+    );
+    leg.routes.plan_at_receive.push(
+        leg.flights
+            .plan_id
+            .get(flight as usize)
+            .copied()
+            .unwrap_or([0; 12]),
+    );
+    leg.routes.arrival_at_receive.push(
+        leg.flights
+            .arr
+            .get(flight as usize)
+            .copied()
+            .unwrap_or([0; 12]),
+    );
     leg.routes.first.push(first);
     leg.routes.len.push(points.len() as u32);
 }
@@ -472,6 +512,7 @@ pub fn push_tbfm(
     t.kind.push(kind);
     t.time_ms.push(time_ms);
     t.issue_ms.push(issue_ms);
+    t.recv_ms.push(NO_TIME);
 }
 
 /// One TFMS estimate being appended.

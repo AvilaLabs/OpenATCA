@@ -6629,6 +6629,14 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-LTJ-050** Next to each headline the report gives, per bin, the share of the offered rows excluded as truth path never within the cut, passage at an edge, and no ground report, and the headline recomputed without the rows whose place was resolved against the flown path. Exact duplicate rows (same flight, point, issue time and estimate) are dropped before scoring and counted.
 - **OA-LTJ-051** An in-progress leg is owned by a flight whose departure and arrival airports are both known only when the departure matches (or the leg begins at the clip box edge) and the arrival matches (or the leg ends there), at least one of them matching; the rows whose bound leg this changes are counted. ADS-B legs carry no flight-plan identity, so no binding by GUFI is possible.
 - **OA-LTJ-052** A truth path segment longer than 30 s is a hole for the edge rule and is counted (the truth answers only within 10 s of a report on both sides, so none arises at a step of 30 s or less).
+- **OA-LTJ-053** The opt-in ORD arrival experiment uses the route and flight identity recorded at
+  receipt, the latest eligible airborne ADS-B report at or before that issue, and the latest
+  available TBFM estimate at the same cutoff. Ambiguous observations are excluded and counted.
+  The report is aggregate and states its offered, issued and scored denominators.
+- **OA-LTJ-054** An issued arrival forecast provides 5, 10 and 20 minute positions and a
+  selected-fix ETA when inputs support them. Scoring uses future truth without bridging gaps,
+  the first valid post-issue meter passage, and optional comparisons available at issue time.
+  A missing measurement remains absent.
 
 ## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
 
