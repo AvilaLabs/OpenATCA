@@ -1949,7 +1949,10 @@ fn partial_storage_failure_preserves_completed_file_and_same_second_restart() {
     impl Write for PrefixThenFull {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             if self.left == 0 {
-                return Err(io::Error::other("synthetic disk full"));
+                return Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "synthetic disk full",
+                ));
             }
             let n = bytes.len().min(self.left);
             let wrote = self.file.write(&bytes[..n])?;
@@ -1985,9 +1988,10 @@ fn partial_storage_failure_preserves_completed_file_and_same_second_restart() {
         Outcome::Written
     );
     // Rotation finalizes the first member before opening the failing second file.
-    assert!(rec
+    let error = rec
         .write_frame(&second, 1_700_000_000, 1_700_000_000)
-        .is_err());
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::StorageFull);
     rec.finish().unwrap();
     assert_eq!(rec.failure(), Some("synthetic disk full"));
     assert_eq!(rec.lost_frames(), 1);
@@ -1995,7 +1999,7 @@ fn partial_storage_failure_preserves_completed_file_and_same_second_restart() {
 
     let completed = dir.join("outage-20231114T221320Z-0001.oaf.gz");
     let completed_bytes = std::fs::read(&completed).unwrap();
-    let replay = replay_files(&[completed.clone()]).unwrap();
+    let replay = replay_files(std::slice::from_ref(&completed)).unwrap();
     assert_eq!(replay.health.messages, 1);
     assert!(replay.gzip.is_empty());
     assert_eq!(std::fs::read(&completed).unwrap(), completed_bytes);
@@ -2003,7 +2007,12 @@ fn partial_storage_failure_preserves_completed_file_and_same_second_restart() {
     // The failed active interval left its created name behind. Restarting in the same second
     // skips both existing names and preserves them byte for byte.
     let failed_path = dir.join("outage-20231114T221320Z-0002.oaf.gz");
-    assert_eq!(std::fs::read(&failed_path).unwrap().len(), 3);
+    let failed_bytes = std::fs::read(&failed_path).unwrap();
+    assert_eq!(failed_bytes.len(), 3);
+    let damaged = replay_files(std::slice::from_ref(&failed_path)).unwrap();
+    assert_eq!(damaged.health.messages, 0);
+    assert_eq!(damaged.gzip.len(), 1);
+    assert!(matches!(damaged.gzip[0].kind, GzNoteKind::Truncated(_)));
     let mut restarted = Recorder::open(&dir, "outage", u64::MAX, u64::MAX, Format::Gzip).unwrap();
     restarted
         .write_frame(&msg(12, b"after restart"), 1_700_000_000, 1_700_000_000)
@@ -2015,7 +2024,7 @@ fn partial_storage_failure_preserves_completed_file_and_same_second_restart() {
     assert_eq!(replay.health.messages, 1);
     assert!(replay.gzip.is_empty());
     assert_eq!(std::fs::read(&completed).unwrap(), completed_bytes);
-    assert_eq!(std::fs::read(&failed_path).unwrap().len(), 3);
+    assert_eq!(std::fs::read(&failed_path).unwrap(), failed_bytes);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

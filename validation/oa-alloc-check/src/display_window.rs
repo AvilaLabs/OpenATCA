@@ -13,14 +13,19 @@ use oa_airspace::model::{
 use oa_display::list::{list_clear, list_new};
 use oa_display::project::projection_new;
 use oa_display::raster::frame_digest;
+use oa_display::safety::{FeedState, FeedStatus};
 use oa_display::scene::{build_scene, scene_caps, scene_index, scratch_for, view_new};
 use oa_display::traffic::{
     build_traffic, caps_add, targets_clear, targets_new, targets_push, traffic_caps, Target,
     TrafficError, TrafficStats, DEFAULT_STYLE, MAX_TRAIL, NO_ALT, NO_REACQ, T_COAST, T_CS_CONFLICT,
     T_UNCERTAIN,
 };
+use oa_safety::inhibit::inhibits_new;
+use oa_safety::net::state_table_new;
 use oa_scope_replay::adapt::row_flags;
-use oa_scope_replay::frame::{replay_build, replay_new, replay_raster, ReplayConfig};
+use oa_scope_replay::frame::{
+    replay_build, replay_build_with_safety, replay_new, replay_raster, ReplayConfig, ReplaySafety,
+};
 use oa_scope_replay::rows::{
     targets_at, ConvertConfig, ConvertStats, RowColumns, RowStore, DEFAULT_CONVERT, RF_HAS_ALT,
 };
@@ -529,7 +534,20 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
     })?;
     add_counts(&mut counts, c);
 
-    // Window 3: the whole frame chain, map and traffic and stamp, then the pixels.
+    // Window 3: the whole frame chain with a degraded safety overlay, then the pixels.
+    let states = state_table_new(10 * S, 0).map_err(|_| "safety state table")?;
+    let inhibits = inhibits_new();
+    let feeds = [FeedStatus {
+        name: *b"ADSB\0\0\0\0",
+        state: FeedState::Lost { age_ms: 25_000 },
+    }];
+    let safety = ReplaySafety {
+        states: &states,
+        inhibits: &inhibits,
+        feeds: &feeds,
+        newest_track_ns: Some(T0),
+        frozen_limit_ns: 5 * S,
+    };
     let mut frame = TrafficStats::default();
     let mut scene_items = 0u64;
     let mut frame_ok = true;
@@ -541,7 +559,7 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         } else {
             "2026-11-15T20:00:25Z"
         };
-        match replay_build(&mut replay, &store, &calls, t, stamp) {
+        match replay_build_with_safety(&mut replay, &store, &calls, t, stamp, &safety) {
             Ok(info) => {
                 stamp_clipped += u64::from(info.stamp_clipped);
                 acc(&mut frame, &info.traffic);

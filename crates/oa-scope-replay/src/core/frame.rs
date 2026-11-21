@@ -1,4 +1,5 @@
-//! The frame chain (**core**, B1): map and traffic into one display list, then pixels. Every
+//! The frame chain (**core**, B1): map, traffic and optional safety indications into one display
+//! list, then pixels. Every
 //! public function here is core. Every table is allocated once in [`replay_new`]; a frame
 //! ([`replay_build`], [`replay_raster`]) allocates nothing: its text is written into a stack
 //! buffer. The time text of the frame is an input (the shell formats it).
@@ -95,8 +96,8 @@ pub struct Replay {
     ell: oa_geo::Ellipsoid,
 }
 
-/// Live health telemetry supplied by the scope producer for one frame. The replay command has no
-/// such telemetry and must not infer it from its historical clip.
+/// Health telemetry supplied by the scope producer as of the frame time. The historical replay
+/// command uses [`replay_build`] because its clip provides traffic observations only.
 #[derive(Clone, Copy, Debug)]
 pub struct ReplaySafety<'a> {
     pub states: &'a StateTable,
@@ -188,6 +189,8 @@ pub fn replay_build(
 }
 
 /// Builds the scope frame with independent feed, track-freshness and safety-net telemetry.
+/// If safety rendering returns an error after drawing a fallback banner, the caller can still
+/// render that banner. [`replay_raster`] continues to reject a faulted list.
 pub fn replay_build_with_safety(
     r: &mut Replay,
     store: &RowStore,

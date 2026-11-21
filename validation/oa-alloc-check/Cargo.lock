@@ -197,6 +197,7 @@ dependencies = [
  "oa-geo",
  "oa-ieee",
  "oa-math",
+ "oa-safety",
  "oa-sealed",
  "oa-sha256",
  "oa-track",

@@ -555,6 +555,7 @@ fn a_replay_frame_marks_state_and_says_when_targets_were_not_drawn() {
     }));
 }
 
+// REQ: OA-DSP-063, OA-DSP-064
 #[test]
 fn safety_overlay_keeps_each_feed_outage_independent_of_track_freshness() {
     use oa_display::safety::{FeedState, FeedStatus};
