@@ -145,6 +145,12 @@ fn alt_var_quant(quant_ft: u16) -> f64 {
     q * q / 12.0 + ALT_BASE_SIGMA_FT * ALT_BASE_SIGMA_FT
 }
 
+/// Squared displacement tolerance: four standard deviations or one barometric quantum.
+fn baro_tolerance_sq(variance_ft2: f64) -> f64 {
+    let quantum_ft = f64::from(crate::params::BARO_QUANT_FT);
+    (16.0 * variance_ft2).max(quantum_ft * quantum_ft)
+}
+
 /// Rates beyond four unknown-state prior sigmas are held back until raw altitude movement
 /// corroborates them. This preserves ordinary climb starts while blocking extreme initial rates.
 const RISKY_VRATE_FPM: f64 = 4.0 * V_PRIOR_RATE_STD_FPS * 60.0;
@@ -183,11 +189,13 @@ fn rate_evidence(f: &Filter, m: &Measurement) -> BaroRateEvidence {
     let dt = dt_ns as f64 / NS_PER_S as f64;
     let observed_ft = (i64::from(m.alt_ft) - i64::from(f.last_baro_alt_ft)) as f64;
     let reported_ft = f64::from(m.vrate_fpm) * dt / 60.0;
-    let uncertainty_ft = (alt_var(m) + alt_var_quant(f.last_baro_quant_ft)).sqrt();
-    let tolerance_ft = (4.0 * uncertainty_ft).max(f64::from(crate::params::BARO_QUANT_FT));
-    if (reported_ft - observed_ft).abs() > tolerance_ft {
+    let tolerance_sq = baro_tolerance_sq(alt_var(m) + alt_var_quant(f.last_baro_quant_ft));
+    let error_ft = reported_ft - observed_ft;
+    if error_ft * error_ft > tolerance_sq {
         BaroRateEvidence::Contradicted
-    } else if risky && (reported_ft.abs() <= tolerance_ft || observed_ft.abs() <= tolerance_ft) {
+    } else if risky
+        && (reported_ft * reported_ft <= tolerance_sq || observed_ft * observed_ft <= tolerance_sq)
+    {
         BaroRateEvidence::Insufficient
     } else {
         BaroRateEvidence::Corroborated
@@ -204,12 +212,12 @@ fn altitude_derived_rate(f: &Filter, m: &Measurement) -> Option<(f64, f64)> {
     }
     let dt = dt_ns as f64 / NS_PER_S as f64;
     let delta_ft = (i64::from(m.alt_ft) - i64::from(f.last_baro_alt_ft)) as f64;
-    let sigma_ft = (alt_var(m) + alt_var_quant(f.last_baro_quant_ft)).sqrt();
-    if delta_ft.abs() <= (4.0 * sigma_ft).max(f64::from(crate::params::BARO_QUANT_FT)) {
+    let variance_ft2 = alt_var(m) + alt_var_quant(f.last_baro_quant_ft);
+    if delta_ft * delta_ft <= baro_tolerance_sq(variance_ft2) {
         return None;
     }
     let rate_fps = delta_ft / dt;
-    let rate_var = (sigma_ft / dt).powi(2);
+    let rate_var = variance_ft2 / (dt * dt);
     (rate_fps.is_finite() && rate_fps.abs() <= 30_000.0 / 60.0 && rate_var.is_finite())
         .then_some((rate_fps, rate_var))
 }
