@@ -292,7 +292,14 @@ fn a_feed_that_is_slow_or_lost_is_a_banner_line_with_its_age() {
 #[test]
 fn a_stale_picture_feed_and_net_are_all_announced_then_clear_on_recovery() {
     let mut st = state_table_new(10 * S, 5 * S).unwrap();
-    state_report(&mut st, NetId::Msaw, NetReport::Running, NOW - 11 * S, NOW).unwrap();
+    for net in NETS {
+        let reported_at = if net == NetId::Msaw {
+            NOW - 11 * S
+        } else {
+            NOW
+        };
+        state_report(&mut st, net, NetReport::Running, reported_at, NOW).unwrap();
+    }
     let inh = Box::new(inhibits_new());
     let mut feeds = vec![FeedStatus {
         name: *b"ADSB\0\0\0\0",
