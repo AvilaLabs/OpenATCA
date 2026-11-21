@@ -26,6 +26,9 @@ oa-airspace = { path = "../oa-airspace" }
 
 # Test only: the removal-reason names kept in the shell are held equal to oa-truth's.
 [dev-dependencies]
+# F1: Connor approved this test-only link so the fault-injection drill exercises oa-ca's real
+# conflict-cycle state and transition identities; it adds no product dependency.
+oa-ca = { path = "../oa-ca" }
 oa-truth = { path = "../oa-truth" }
 
 [package.metadata.openatca]

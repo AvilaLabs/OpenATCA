@@ -1,0 +1,35 @@
+# Offline machine-loss drill
+
+Run with:
+
+```sh
+cargo test -p oa-scope-replay --test outage_drill serving_process_loss_promotes_synchronized_scope_replica -- --nocapture
+```
+
+The test launches two child copies of its own Rust integration-test executable. Each child
+consumes the same synthetic track measurements at the same source seconds and runs the real
+`oa-track` tracker, `oa-scope-replay` row adaptation, `replay_build_with_safety` display path,
+and `oa-ca::ca_cycle` conflict alert core. Both replicas receive the same three-report tracker
+warmup before the fixed 15-step synthetic stream, so the first compared frame contains confirmed
+tracks.
+The parent also runs an uninterrupted in-process reference. At source second 10, the serving OS
+process is killed after both child replicas agree on their frame digest and Mode S address list.
+With no records delivered during the synthetic outage, the standby is promoted and resumes at
+second 40, followed by recovery seconds 41 through 43. Every resumed frame is checked against the
+reference digest, visible identities, and emitted FEED/PICTURE/MSAW warning count. The CA fixture
+has an early conflict pair that is open at the takeover checkpoint and closes after promotion,
+plus a second pair that opens after recovery. It records ordered `OPEN` and `CLOSE` identities
+(pair addresses and first-alert time), the currently open alert identity, and compares every
+event token on every frame with the uninterrupted reference. Both pre-kill and post-recovery
+opening transitions are required. Each worker validates the fixed 15-step stream and command
+order. Child protocol lines are limited to 1 KiB, responses have a 60-second deadline, and
+shutdown is bounded. The test prints the 30-second logical frame gap separately from wall-clock
+time from process kill to the first promoted frame.
+
+This proves deterministic replay and process-loss behavior for this test slice. It does not
+implement a production supervisor, durable checkpoint transfer, network feed reconnection,
+fencing, or system-level failover. CA rows are synthetic and independent of the visible tracker
+targets; the tracker/display path remains active on its own synthetic identities. The test-only
+`oa-ca` dependency is approved under F1. No callsign conflict or terrain warning source is present,
+so those warning types are not exercised.
+No live or sealed input is opened.
