@@ -237,11 +237,11 @@ fn tbfm_index(legacy: &Legacy, meter: RouteFix) -> Result<BTreeMap<Plan, Vec<Eta
     let mut offered = 0usize;
     for (i, &kind) in legacy.tbfm.kind.iter().enumerate() {
         if kind != tbfm_kind::ETA_MFX
-            || !legacy
+            || legacy
                 .tbfm
                 .fix
                 .get(i)
-                .is_some_and(|k| norm_id::<8>(k) == meter.name)
+                .is_none_or(|k| norm_id::<8>(k) != meter.name)
         {
             continue;
         }
