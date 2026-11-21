@@ -1935,6 +1935,90 @@ fn a_failed_idle_flush_or_finish_also_fails_the_recording() {
     assert_eq!(rec.failure(), Some("no space left on device"));
 }
 
+// REQ: OA-FEED-051, OA-FEED-170
+#[test]
+fn partial_storage_failure_preserves_completed_file_and_same_second_restart() {
+    use std::io::{self, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct PrefixThenFull {
+        file: std::fs::File,
+        left: usize,
+    }
+    impl Write for PrefixThenFull {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.left == 0 {
+                return Err(io::Error::other("synthetic disk full"));
+            }
+            let n = bytes.len().min(self.left);
+            let wrote = self.file.write(&bytes[..n])?;
+            self.left -= wrote;
+            Ok(wrote)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            self.file.flush()
+        }
+    }
+
+    let dir = tmpdir("partial-storage");
+    let first = msg(10, b"already completed");
+    let second = msg(11, b"partial active interval");
+    let opens = Arc::new(AtomicUsize::new(0));
+    let opener_opens = opens.clone();
+    let opener: Opener = Box::new(move |path| {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?;
+        if opener_opens.fetch_add(1, Ordering::SeqCst) == 1 {
+            Ok(Box::new(PrefixThenFull { file, left: 3 }) as Box<dyn Write + Send>)
+        } else {
+            Ok(Box::new(file) as Box<dyn Write + Send>)
+        }
+    });
+
+    let mut rec = Recorder::open_with(&dir, "outage", 1, u64::MAX, Format::Gzip, opener).unwrap();
+    assert_eq!(
+        rec.write_frame(&first, 1_700_000_000, 1_700_000_000)
+            .unwrap(),
+        Outcome::Written
+    );
+    // Rotation finalizes the first member before opening the failing second file.
+    assert!(rec
+        .write_frame(&second, 1_700_000_000, 1_700_000_000)
+        .is_err());
+    rec.finish().unwrap();
+    assert_eq!(rec.failure(), Some("synthetic disk full"));
+    assert_eq!(rec.lost_frames(), 1);
+    assert!(format_recording("outage", &rec).contains("FAILED lost_frames=1"));
+
+    let completed = dir.join("outage-20231114T221320Z-0001.oaf.gz");
+    let completed_bytes = std::fs::read(&completed).unwrap();
+    let replay = replay_files(&[completed.clone()]).unwrap();
+    assert_eq!(replay.health.messages, 1);
+    assert!(replay.gzip.is_empty());
+    assert_eq!(std::fs::read(&completed).unwrap(), completed_bytes);
+
+    // The failed active interval left its created name behind. Restarting in the same second
+    // skips both existing names and preserves them byte for byte.
+    let failed_path = dir.join("outage-20231114T221320Z-0002.oaf.gz");
+    assert_eq!(std::fs::read(&failed_path).unwrap().len(), 3);
+    let mut restarted = Recorder::open(&dir, "outage", u64::MAX, u64::MAX, Format::Gzip).unwrap();
+    restarted
+        .write_frame(&msg(12, b"after restart"), 1_700_000_000, 1_700_000_000)
+        .unwrap();
+    restarted.finish().unwrap();
+    let resumed = dir.join("outage-20231114T221320Z-0003.oaf.gz");
+    assert!(resumed.exists());
+    let replay = replay_files(&[resumed]).unwrap();
+    assert_eq!(replay.health.messages, 1);
+    assert!(replay.gzip.is_empty());
+    assert_eq!(std::fs::read(&completed).unwrap(), completed_bytes);
+    assert_eq!(std::fs::read(&failed_path).unwrap().len(), 3);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 // ---------------------------------------------------------------- pinned behaviour
 
 // REQ: OA-FEED-150
