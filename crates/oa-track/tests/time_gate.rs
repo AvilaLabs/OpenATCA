@@ -13,8 +13,9 @@ mod common;
 
 use common::*;
 use oa_track::{
-    output_new, tracker_flush, tracker_live, tracker_new, tracker_stats, tracker_update,
-    Measurement, TrackOutput, Tracker, TrackerConfig, DEFAULT_CONFIG,
+    output_new, tracker_advance, tracker_flush, tracker_live, tracker_new, tracker_stats,
+    tracker_update, Measurement, TrackOutput, Tracker, TrackerConfig, DEFAULT_CONFIG, O_COAST,
+    O_REACQUIRED, O_TICK,
 };
 
 const S: i64 = 1_000_000_000;
@@ -182,6 +183,81 @@ fn one_aircraft_one_sensor_at_17_second_intervals_has_every_report_applied_and_n
     assert_eq!(st.late_window, 0);
     assert_eq!(st.applied, 11);
     assert_eq!(st.time_steps, 10);
+}
+
+// REQ: OA-TRK-343, OA-TRK-344
+#[test]
+fn simultaneous_sensor_blackout_coasts_tracks_and_staggered_returns_recover_without_restarts() {
+    let mut t = tracker_new(&big_config()).unwrap();
+    let mut out = output_new(1024);
+    let mut rng = Rng(23);
+
+    // Four independent identities are established across four sensors. The feeds stop together,
+    // so every track must age and coast even though no report arrives to drive the clock.
+    for s in 0..=10 {
+        for a in 0..4 {
+            tracker_update(&mut t, &meas(a, 1 + a as u16, s as f64, &mut rng), &mut out);
+        }
+    }
+    assert_eq!(tracker_live(&t).len(), 4);
+    let started = tracker_stats(&t).started;
+    tracker_advance(&mut t, 40 * S, &mut out);
+    let saw_coast = (0..out.t_ns.len()).any(|i| {
+        out.addr[i] == 0xA00000
+            && out.t_ns[i] >= 20 * S
+            && out.flags[i] & O_TICK != 0
+            && out.flags[i] & O_COAST != 0
+    });
+    assert!(saw_coast, "the blackout did not produce coast rows");
+    assert_eq!(
+        tracker_live(&t).len(),
+        4,
+        "tracks expired before the feeds returned"
+    );
+
+    // Three sensors resume in separate lanes. The remaining identity is deliberately silent and
+    // must remain the same coasting track while the others reacquire.
+    for (a, sensor, at_s) in [(0, 1, 41), (1, 2, 42), (2, 3, 43)] {
+        tracker_update(&mut t, &meas(a, sensor, at_s as f64, &mut rng), &mut out);
+        assert_eq!(
+            tracker_live(&t).len(),
+            4,
+            "a returning report changed track count"
+        );
+        assert_eq!(
+            tracker_stats(&t).started,
+            started,
+            "a returning report restarted a track"
+        );
+        assert!(
+            out.addr.iter().enumerate().any(|(i, addr)| {
+                *addr == 0xA00000 + a && out.t_ns[i] == at_s * S && out.flags[i] & O_REACQUIRED != 0
+            }),
+            "returning identity {a} did not publish reacquisition"
+        );
+    }
+    assert!(tracker_live(&t)
+        .iter()
+        .all(|(addr, _)| (0xA00000..0xA00004).contains(addr)));
+    assert_eq!(tracker_stats(&t).applied, tracker_stats(&t).offered);
+    assert_eq!(
+        tracker_stats(&t).ended[usize::from(oa_track::END_DROPPED)],
+        0
+    );
+
+    tracker_advance(&mut t, 60 * S, &mut out);
+    let silent = tracker_live(&t)
+        .iter()
+        .find(|(addr, _)| *addr == 0xA00003)
+        .expect("the unrelated silent identity was lost");
+    assert_eq!(
+        silent.1,
+        10 * S,
+        "coasting must preserve the last update time"
+    );
+    assert!(out.addr.iter().enumerate().any(|(i, addr)| {
+        *addr == 0xA00003 && out.t_ns[i] >= 43 * S && out.flags[i] & O_COAST != 0
+    }));
 }
 
 // REQ: OA-TRK-199
