@@ -26,7 +26,7 @@ fn point_on_route(route: [Place; 4], distance_m: f64) -> Place {
     last
 }
 
-fn main() {
+fn main() -> Result<(), String> {
     let fix = RouteFix {
         name: *b"ORDMTR  ",
         place: Place {
@@ -65,7 +65,8 @@ fn main() {
         route: vec![jot, fix, ord],
         meter_fix: Some(fix),
     };
-    let forecast = forecast(&snapshot).expect("valid synthetic issue snapshot");
+    let forecast =
+        forecast(&snapshot).map_err(|reason| format!("synthetic issue refused: {reason:?}"))?;
     let synthetic_route = [snapshot.track.place, jot.place, fix.place, ord.place];
     let truth = (0..=40)
         .map(|minute| TruthPoint {
@@ -93,20 +94,17 @@ fn main() {
         }),
         1_000.0,
     )
-    .expect("valid synthetic truth and issue");
+    .map_err(|reason| format!("synthetic score refused: {reason:?}"))?;
 
     println!(
         "synthetic arrival issue_ms={} coverage={}/{}",
         forecast.issued_ms, result.forecast_covered, result.forecast_possible
     );
-    for (minutes, point) in [5, 10, 20].into_iter().zip(forecast.positions) {
-        // Explicit indexes avoid interpreting a missing score as zero.
-        let index = match minutes {
-            5 => 0,
-            10 => 1,
-            _ => 2,
-        };
-        let error = result.forecast[index];
+    for ((minutes, point), error) in [5, 10, 20]
+        .into_iter()
+        .zip(forecast.positions)
+        .zip(result.forecast)
+    {
         println!("{minutes}m lat={:?} lon={:?} alt_ft={:?} horizontal_error_m={:?} vertical_error_ft={:?}",
             point.place.map(|p| p.lat_deg), point.place.map(|p| p.lon_deg), point.altitude_ft,
             error.horizontal_error_m, error.vertical_error_ft);
@@ -119,4 +117,5 @@ fn main() {
         result.eram_eta_error_s,
         result.tb_fm_eta_error_s
     );
+    Ok(())
 }
