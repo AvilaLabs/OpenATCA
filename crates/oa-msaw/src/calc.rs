@@ -529,7 +529,8 @@ const _: () = assert!(MAX_ABS_ALT_FT < 1.0e9);
 mod proofs {
     //! Kani proof harnesses (docs/VERIFICATION.md). Compiled only under `cargo kani`.
     use super::*;
-    use crate::types::{CK_APPROACH, MAX_ABS_VRATE_FPM, MAX_LOOK_AHEAD_S};
+    use crate::types::{MAX_ABS_VRATE_FPM, MAX_LOOK_AHEAD_S};
+    use alloc::boxed::Box;
 
     fn cfg_with(tc: i32, oc: i32, amc: i32) -> MsawConfig {
         MsawConfig {
