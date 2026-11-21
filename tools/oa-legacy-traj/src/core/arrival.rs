@@ -5,11 +5,9 @@
 //! meter fix are supplied by the caller after resolving names against NASR; unresolved names are
 //! represented as absent and produce absent metrics.
 
-use crate::core::cross::approach;
+use crate::core::cross::{approach, great_circle_m};
 use crate::core::types::{PathPoint, Place};
 
-const EARTH_M: f64 = 6_371_008.8;
-const RAD_PER_DEG: f64 = core::f64::consts::PI / 180.0;
 const HORIZON_S: [i64; 3] = [300, 600, 1200];
 /// C7: converted routes above this limit are refused before any route scan.
 pub const MAX_ROUTE_FIXES: usize = 256;
@@ -539,16 +537,6 @@ fn valid_place(p: Place) -> bool {
         && (-90.0..=90.0).contains(&p.lat_deg)
         && (-180.0..=180.0).contains(&p.lon_deg)
 }
-fn great_circle_m(a: Place, b: Place) -> f64 {
-    let p1 = a.lat_deg * RAD_PER_DEG;
-    let p2 = b.lat_deg * RAD_PER_DEG;
-    let dp = (b.lat_deg - a.lat_deg) * RAD_PER_DEG;
-    let dl = (b.lon_deg - a.lon_deg) * RAD_PER_DEG;
-    let sdp = oa_math::sin(dp / 2.0);
-    let sdl = oa_math::sin(dl / 2.0);
-    let x = sdp * sdp + oa_math::cos(p1) * oa_math::cos(p2) * sdl * sdl;
-    2.0 * EARTH_M * oa_math::asin(oa_math::clamp_f64(x, 0.0, 1.0))
-}
 fn interpolate_place(a: Place, b: Place, f: f64) -> Place {
     Place {
         lat_deg: a.lat_deg + (b.lat_deg - a.lat_deg) * f,
@@ -606,7 +594,25 @@ mod tests {
             },
             TruthPoint {
                 time_ms: 1_330_000,
-                place: predicted.positions[0].place.unwrap(),
+                place: Place {
+                    lon_deg: fix.place.lon_deg - 0.02,
+                    ..fix.place
+                },
+                altitude_ft: None,
+                gap_before: false,
+            },
+            TruthPoint {
+                time_ms: 1_340_000,
+                place: fix.place,
+                altitude_ft: None,
+                gap_before: false,
+            },
+            TruthPoint {
+                time_ms: 1_350_000,
+                place: Place {
+                    lon_deg: fix.place.lon_deg + 0.02,
+                    ..fix.place
+                },
                 altitude_ft: None,
                 gap_before: false,
             },
@@ -619,7 +625,10 @@ mod tests {
                 issued_ms: 1_000_001,
                 eta_ms: 1_200_000,
             }),
-            None,
+            Some(LegacyEta {
+                issued_ms: 999_000,
+                eta_ms: 1_350_000,
+            }),
             500.0,
         )
         .expect("valid future truth");
@@ -627,7 +636,9 @@ mod tests {
         assert!(score.forecast[0].covered);
         assert_eq!(score.forecast[0].vertical_error_ft, None);
         assert_eq!(score.forecast[1].horizontal_error_m, None);
+        assert_eq!(score.actual_meter_ms, Some(1_340_000));
         assert_eq!(score.eram_eta_error_s, None);
+        assert_eq!(score.tb_fm_eta_error_s, Some(10.0));
         assert_eq!(score.forecast_covered, 1);
     }
 
@@ -704,7 +715,7 @@ mod tests {
     // REQ: OA-LTJ-054
     #[test]
     fn duplicate_conflict_and_nonpositive_realization_are_refused() {
-        let (snapshot, _) = fixture();
+        let (snapshot, fix) = fixture();
         let mut predicted = forecast(&snapshot).expect("valid snapshot");
         predicted.positions[0].time_ms = 0;
         assert_eq!(
@@ -734,7 +745,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            score(&predicted, &duplicate, None, None, None, 1_000.0),
+            score(&predicted, &duplicate, Some(fix), None, None, 1_000.0),
             Err(ScoreRefusal::ConflictingTruthTimestamp)
         );
     }
