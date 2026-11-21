@@ -247,7 +247,7 @@ fn simultaneous_sensor_blackout_coasts_tracks_and_staggered_returns_recover_with
 
     tracker_advance(&mut t, 60 * S, &mut out);
     let silent = tracker_live(&t)
-        .iter()
+        .into_iter()
         .find(|(addr, _)| *addr == 0xA00003)
         .expect("the unrelated silent identity was lost");
     assert_eq!(
