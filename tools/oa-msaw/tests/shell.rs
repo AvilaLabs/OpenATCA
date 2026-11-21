@@ -1216,9 +1216,12 @@ fn the_diagnosis_gives_the_altitude_radius_obstacle_and_terrain_sections_and_nam
         cfg: &set.msaw,
         terrain_dir: None,
         airports: &[],
+        all_airports: &[],
+        all_thresholds: &[],
         sealed: oa_sealed::Sealed::production(),
         corridors: &[],
         qnh: None,
+        basis: &BTreeMap::new(),
     });
     for k in [
         "1. the altitude judged",
@@ -1227,6 +1230,7 @@ fn the_diagnosis_gives_the_altitude_radius_obstacle_and_terrain_sections_and_nam
         "4. the terrain-floor alerts",
         "5. what the predicted depth is made of",
         "6. the landing zone",
+        "7. the deep alerts",
         "dominant term over all 1 alerts",
     ] {
         assert!(t.contains(k), "{k}\n{t}");
@@ -1509,6 +1513,104 @@ fn the_coverage_of_several_files_is_the_union_of_each_files_own_extent() {
             .unwrap()
             .obstacle_covered
     );
+}
+
+// REQ: OA-MSAW-073
+#[test]
+fn a_gap_is_filled_along_its_row_or_its_column_in_each_file_alone() {
+    use oa_msaw_run::floors::ObstacleIndex;
+    // One obstacle in the middle of each 0.5 degree cell of a block, but for some holes.
+    let block = |a0: i32, a1: i32, b0: i32, b1: i32, holes: &dyn Fn(i32, i32) -> bool| {
+        let mut v = Vec::new();
+        for a in a0..a1 {
+            for b in b0..b1 {
+                if !holes(a, b) {
+                    v.push((a * 5_000_000 + 2_500_000, b * 5_000_000 + 2_500_000, 900));
+                }
+            }
+        }
+        v
+    };
+    let at = |a: i32, b: i32| (f64::from(a) * 0.5 + 0.25, f64::from(b) * 0.5 + 0.25);
+    // A lake of 10 cells north to south and 3 east to west in a national file: obstacles on both
+    // sides along the rows, none within 4 cells along the columns. Covered by the row.
+    let national = ObstacleIndex::from_file_points(block(0, 20, 0, 20, &|a, b| {
+        (5..15).contains(&a) && (8..11).contains(&b)
+    }));
+    let (la, lo) = at(10, 9);
+    assert!(national.covers(la, lo, 100.0), "the lake, along its rows");
+    // The same lake turned: 3 north to south and 10 east to west, covered by the column.
+    let turned = ObstacleIndex::from_file_points(block(0, 20, 0, 20, &|a, b| {
+        (8..11).contains(&a) && (5..15).contains(&b)
+    }));
+    let (la, lo) = at(9, 10);
+    assert!(turned.covers(la, lo, 100.0), "the lake, along its columns");
+    // A hole 8 cells across either way is not within 4 cells of obstacles on both sides: not
+    // covered, in its middle.
+    let wide = ObstacleIndex::from_file_points(block(0, 20, 0, 20, &|a, b| {
+        (6..14).contains(&a) && (6..14).contains(&b)
+    }));
+    let (la, lo) = at(10, 10);
+    assert!(!wide.covers(la, lo, 100.0), "a hole wider than 4 cells");
+    // A coast: the block ends; the cells past its edge and a notch open to the sea (obstacles on
+    // one side only) are not covered.
+    let coast = ObstacleIndex::from_file_points(block(0, 20, 0, 20, &|a, b| {
+        (5..15).contains(&a) && b >= 14
+    }));
+    let (la, lo) = at(10, 15);
+    assert!(!coast.covers(la, lo, 100.0), "a notch open to the sea");
+    let (la, lo) = at(10, 21);
+    assert!(!coast.covers(la, lo, 100.0), "open ocean past the edge");
+    // Maryland and New Jersey loaded, Delaware (2 cells wide) between them, no file of it: each
+    // file's own gaps are filled, the strip between the two files is not.
+    let md = ObstacleIndex::from_file_points(block(0, 12, 0, 10, &|_, _| false));
+    let nj = ObstacleIndex::from_file_points(block(4, 16, 12, 22, &|_, _| false));
+    let mut both = md;
+    both.merge(nj);
+    let (la, lo) = at(8, 10);
+    assert!(!both.covers(la, lo, 100.0), "Delaware, west cell");
+    let (la, lo) = at(8, 11);
+    assert!(!both.covers(la, lo, 100.0), "Delaware, east cell");
+    let (la, lo) = at(8, 5);
+    assert!(both.covers(la, lo, 100.0), "Maryland");
+    let (la, lo) = at(8, 15);
+    assert!(both.covers(la, lo, 100.0), "New Jersey");
+}
+
+// REQ: OA-MSAW-072
+#[test]
+fn the_metar_argument_names_a_directory_or_files_separated_by_commas() {
+    let dir = scratch("metar-list");
+    let rec = |obs: i64, report: &str, altim: f64, a: u32| {
+        format!(
+            "[{{\"icaoId\":\"KMNM\",\"receiptTime\":\"{report}\",\"obsTime\":{obs},\"reportTime\":\"{report}\",\"temp\":6.1,\"dewp\":-0.6,\"wdir\":330,\"wspd\":9,\"visib\":\"10+\",\"altim\":{altim},\"slp\":1024.3,\"qcField\":14,\"metarType\":\"METAR\",\"rawOb\":\"METAR KMNM 141757Z AUTO 33009KT 10SM CLR 06/M01 A{a} RMK AO2\",\"lat\":45.126,\"lon\":-87.639,\"elev\":188,\"name\":\"Menominee\",\"cover\":\"CLR\",\"clouds\":[],\"fltCat\":\"VFR\"}}]"
+        )
+    };
+    let (a, b) = (dir.join("first.json"), dir.join("second-hour.json"));
+    std::fs::write(
+        &a,
+        rec(1_794_679_020, "2026-11-14T18:00:00.000Z", 1023.8, 3023),
+    )
+    .unwrap();
+    std::fs::write(
+        &b,
+        rec(1_794_682_620, "2026-11-14T19:00:00.000Z", 1020.4, 3013),
+    )
+    .unwrap();
+    let list = PathBuf::from(format!("{},{}", a.display(), b.display()));
+    let mut q = Qnh::from_dir(&list, 100.0, 7200).unwrap();
+    assert_eq!(q.stats.files, 2);
+    // Each file's observation is the current one at its own time.
+    let at = |q: &mut Qnh, t: i64| q.setting_hpa(45.1, -87.6, t).unwrap();
+    assert!((at(&mut q, 1_794_679_200) - 1023.8).abs() < 0.2);
+    assert!((at(&mut q, 1_794_682_800) - 1020.4).abs() < 0.2);
+    // A name that is neither a file nor a directory is an error, not an empty set.
+    let bad = PathBuf::from(format!(
+        "{},{}",
+        a.display(),
+        dir.join("none.json").display()
+    ));
+    assert!(Qnh::from_dir(&bad, 100.0, 7200).is_err());
 }
 
 // REQ: OA-MSAW-078

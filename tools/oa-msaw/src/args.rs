@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-pub const USAGE: &str = "usage: oa-msaw --adsb <clip.oaf> --config <file.cfg> --out <dir> [--terrain <3dep dir>] [--dof <DOF zip or DOF.DAT>] [--mva <dir>] [--cifp <FAACIFP18 or the CIFP zip>] [--metar <dir of metar_NNz_hours1.json>] [--sfdps <recording dir>] [--from-s <n> --to-s <n>] [--scorer-half] [--diagnose] [--landing-of <alerts.csv of another run>]";
+pub const USAGE: &str = "usage: oa-msaw --adsb <clip.oaf> --config <file.cfg> --out <dir> [--terrain <3dep dir>] [--dof <DOF zip or DOF.DAT>] [--mva <dir>] [--cifp <FAACIFP18 or the CIFP zip>] [--metar <dir of metar_NNz_hours1.json, or files, comma separated>] [--sfdps <recording dir>] [--from-s <n> --to-s <n>] [--scorer-half] [--diagnose] [--landing-of <alerts.csv of another run>]";
 
 /// The parsed arguments.
 // A7.2: cold struct, size guard waived
@@ -24,8 +24,8 @@ pub struct Args {
     /// The CIFP (`FAACIFP18`, or the zip that holds it), for the corridors of the `cifp_airport`
     /// lines and the airports with an approach.
     pub cifp: Option<PathBuf>,
-    /// A directory of METAR files (`metar_00z_hours1.json` to `metar_23z_hours1.json`), for the
-    /// altimeter settings. Without it no altitude below FL180 has a setting and the net says so.
+    /// A directory of METAR files (`metar_00z_hours1.json` to `metar_23z_hours1.json`), a METAR
+    /// file, or several of either separated by commas, for the altimeter settings. Without it no altitude below FL180 has a setting and the net says so.
     pub metar: Option<PathBuf>,
     /// The SFDPS recordings, for the flight plans that decide who is alerted. Without them every
     /// track is alerted and the summary says that eligibility was not judged.

@@ -44,10 +44,16 @@ pub struct DiagIn<'a> {
     pub terrain_dir: Option<&'a Path>,
     /// Airports of the CIFP with an approach: identifier, latitude, longitude, elevation in feet.
     pub airports: &'a [(String, f64, f64, i32)],
+    /// Every airport with an approach (identifier, latitude, longitude) and every runway threshold
+    /// (latitude, longitude) of them, for the distances of the deep alerts.
+    pub all_airports: &'a [(String, f64, f64)],
+    pub all_thresholds: &'a [(f64, f64)],
     pub sealed: &'a Sealed,
     /// The corridors of the CIFP, and the altimeter settings, for the landing zone.
     pub corridors: &'a [CifpCorridor],
     pub qnh: Option<&'a mut Qnh>,
+    /// Why each alert is alerted (its address and start): empty where eligibility was not judged.
+    pub basis: &'a BTreeMap<(u32, i64), crate::eligibility::Basis>,
 }
 
 struct Tiles<'a> {
@@ -171,6 +177,7 @@ pub fn diagnosis_text(i: &mut DiagIn) -> String {
     terrain(&mut o, i, &mut tiles);
     depth(&mut o, i);
     landing(&mut o, i);
+    deep(&mut o, i, &mut tiles);
     o
 }
 
@@ -1002,5 +1009,432 @@ fn landing(o: &mut String, i: &mut DiagIn) {
             datum_name(r.datum),
             r.ttv
         );
+    }
+}
+
+/// An alert judged this far below its floor is deep (feet).
+const DEEP_FT: f64 = 500.0;
+/// Within this distance of a threshold, a descending track is on final, and within it of an airport a
+/// climbing one is departing (nautical miles).
+const NEAR_NM: f64 = 10.0;
+/// Descending and climbing, feet per minute.
+const VRATE_FPM: f64 = 200.0;
+
+/// One deep alert, classified.
+struct Deep {
+    hash: String,
+    clock: String,
+    depth: f64,
+    kind: FloorKind,
+    height_terrain: Option<f64>,
+    apt_nm: f64,
+    thr_nm: f64,
+    corridor: &'static str,
+    phase: &'static str,
+    setting_age_s: i64,
+    cold_ft: f64,
+    basis: &'static str,
+    ttv: f64,
+    /// Stale-extrapolated at the worst cycle, and the judged altitude less the first cycle's, feet.
+    stale: bool,
+    alt_delta: f64,
+    /// Seconds ahead of the cycle of the worst point, seconds from the alert's start to that cycle,
+    /// and the track's heading less the inbound heading of the approach corridor holding the worst
+    /// point, degrees (-180 to 180).
+    ahead_s: f64,
+    span_s: f64,
+    hdg_off: Option<f64>,
+    /// The nearest airport with an approach and whether the configuration gives it corridors.
+    apt_id: String,
+    has_corridors: bool,
+    obst: Option<(f64, f64)>,
+    r95: f64,
+    growth: f64,
+    half: f64,
+    rounding: f64,
+    eff: f64,
+    r95_still: bool,
+    point_still: bool,
+}
+
+/// Every alert 500 ft or more below its floor, classified by what floor it is, how high above the
+/// terrain, how far from an airport and a threshold (all of the CIFP's), whether in a corridor of the
+/// configured airports, what the track was doing,
+/// the altimeter behind its altitude, why it is alerted, the time to violation, the obstacle behind an
+/// obstacle floor and what the lookup radius was made of. No rule is changed by it. Addresses are
+/// hashed. The groups are by floor kind, phase, distance to the nearest airport with an approach and
+/// corridor.
+fn deep(o: &mut String, i: &mut DiagIn, tiles: &mut Tiles) {
+    let _ = writeln!(
+        o,
+        "\n7. the deep alerts ({DEEP_FT} ft or more below the floor at the worst point)"
+    );
+    let step = i.cfg.look_ahead_s / ((i.cfg.samples.saturating_sub(1)).max(1) as f64);
+    let mut all: Vec<Deep> = Vec::new();
+    let mut shallow_eff: Vec<f64> = Vec::new();
+    let mut shallow_apt: Vec<f64> = Vec::new();
+    for a in i.alerts {
+        let eff = Floors::effective_radius_m(f64::from(a.worst_radius_m));
+        let (lat, lon) = (f64::from(a.lat_e7) / 1e7, f64::from(a.lon_e7) / 1e7);
+        let (apt_nm, apt_id) = i
+            .all_airports
+            .iter()
+            .map(|(id, la, lo)| (dist_m((lat, lon), (*la, *lo)) / M_PER_NM, id.as_str()))
+            .fold((f64::INFINITY, ""), |b, x| if x.0 < b.0 { x } else { b });
+        if f64::from(a.worst_margin_ft) > -DEEP_FT {
+            shallow_eff.push(eff);
+            shallow_apt.push(apt_nm);
+            continue;
+        }
+        let thr_nm = i
+            .all_thresholds
+            .iter()
+            .map(|t| dist_m((lat, lon), *t) / M_PER_NM)
+            .fold(f64::INFINITY, f64::min);
+        let (wlat, wlon) = (
+            f64::from(a.worst_lat_e7) / 1e7,
+            f64::from(a.worst_lon_e7) / 1e7,
+        );
+        let has_corridors = i
+            .corridors
+            .iter()
+            .any(|k| k.label.split(' ').next() == Some(apt_id));
+        let heading = f64::from(a.vel_east_mps)
+            .atan2(f64::from(a.vel_north_mps))
+            .to_degrees();
+        let mut kinds = [false; 3];
+        // The heading off the best aligned runway or approach corridor holding the worst point (a
+        // strip is held by both of its ends, so the better aligned end counts).
+        let mut off: Option<f64> = None;
+        for k in i.corridors {
+            if oa_msaw::corridor_hit_ft(&k.corridor, a.worst_lat_e7, a.worst_lon_e7, 0.0, i.cfg)
+                .is_some()
+            {
+                if k.kind != oa_msaw::CK_DEPARTURE {
+                    let d = (heading - (k.corridor.out_bearing_deg + 180.0) + 540.0)
+                        .rem_euclid(360.0)
+                        - 180.0;
+                    if off.is_none_or(|b| d.abs() < b.abs()) {
+                        off = Some(d);
+                    }
+                }
+                if let Some(f) = kinds.get_mut(usize::from(k.kind)) {
+                    *f = true;
+                }
+            }
+        }
+        let corridor = match kinds {
+            [_, true, _] => "runway strip",
+            [true, _, _] => "approach box",
+            [_, _, true] => "departure",
+            _ => "none",
+        };
+        let vr = f64::from(a.vrate_fpm);
+        let phase = if vr.is_nan() {
+            "rate unknown"
+        } else if thr_nm <= NEAR_NM && vr <= -VRATE_FPM {
+            "final (descending, within 10 NM of a threshold)"
+        } else if apt_nm <= NEAR_NM && vr >= VRATE_FPM {
+            "departure (climbing, within 10 NM of an airport)"
+        } else if apt_nm <= NEAR_NM {
+            "level or slow near an airport"
+        } else if vr <= -VRATE_FPM {
+            "descending away from airports"
+        } else if vr >= VRATE_FPM {
+            "climbing away from airports"
+        } else {
+            "level away from airports"
+        };
+        let t_s = a.worst_ns.div_euclid(1_000_000_000);
+        let judged = f64::from(a.worst_margin_ft) + f64::from(a.worst_floor_ft);
+        let (setting_age_s, cold_ft) = match i.qnh.as_deref_mut() {
+            Some(q) => {
+                let age = if a.worst_flags & AF_QNH_MISSING == 0 {
+                    q.setting_age_s(wlat, wlon, t_s).unwrap_or(-1)
+                } else {
+                    -1
+                };
+                let (c, _) = q.cold_ft(wlat, wlon, t_s, judged);
+                (age, judged - c)
+            }
+            None => (-1, 0.0),
+        };
+        let ts =
+            oa_msaw::calc::sample_time_s(usize::from(a.worst_k), i.cfg.samples, i.cfg.look_ahead_s);
+        let speed = f64::from(a.vel_east_mps).hypot(f64::from(a.vel_north_mps));
+        let (r95, growth, half) = (
+            f64::from(a.r95_m),
+            i.cfg.velocity_uncertainty_mps * ts,
+            speed * step / 2.0,
+        );
+        let obst = if a.worst_kind == FloorKind::Obstacle {
+            i.floors
+                .obstacle_record_within(wlat, wlon, eff)
+                .map(|(_, rec, dpt)| {
+                    let agl = i
+                        .dof
+                        .and_then(|d| d.agl_ft.get(rec as usize).copied())
+                        .map_or(f64::NAN, f64::from);
+                    (agl, dpt)
+                })
+        } else {
+            None
+        };
+        // Still below an obstacle top with the lookup circle cut to the track's 95 % radius, and to
+        // the point alone.
+        let still = |fl: &mut Floors, r: f64| {
+            a.worst_kind == FloorKind::Obstacle
+                && fl
+                    .obstacle_record_within(wlat, wlon, r)
+                    .is_some_and(|x| judged < f64::from(x.0))
+        };
+        let (r95_still, point_still) = (still(i.floors, r95), still(i.floors, POINT_M));
+        let digest = oa_sha256::to_hex(&oa_sha256::sha256(&a.addr.to_be_bytes()));
+        let secs = a.worst_ns.div_euclid(1_000_000_000).rem_euclid(86_400);
+        all.push(Deep {
+            hash: digest.chars().take(8).collect(),
+            clock: format!("{:02}:{:02}:{:02}Z", secs / 3600, secs / 60 % 60, secs % 60),
+            depth: -f64::from(a.worst_margin_ft),
+            kind: a.worst_kind,
+            height_terrain: tiles
+                .peak(lat, lon, r95.max(POINT_M))
+                .map(|(m, _)| f64::from(a.alt_ft) - m),
+            apt_nm,
+            thr_nm,
+            corridor,
+            phase,
+            setting_age_s,
+            cold_ft,
+            basis: i
+                .basis
+                .get(&(a.addr, a.start_ns))
+                .map_or("not judged", |b| b.text()),
+            ttv: f64::from(a.ttv_min_s),
+            stale: a.worst_flags & oa_msaw::AF_STALE_EXTRAPOLATED != 0,
+            alt_delta: judged - f64::from(a.alt_ft),
+            ahead_s: ts,
+            span_s: (a.worst_ns - a.start_ns) as f64 / 1e9,
+            hdg_off: off,
+            apt_id: apt_id.to_string(),
+            has_corridors,
+            obst,
+            r95,
+            growth,
+            half,
+            rounding: eff - f64::from(a.worst_radius_m),
+            eff,
+            r95_still,
+            point_still,
+        });
+    }
+    let _ = writeln!(
+        o,
+        "  {} of {} alerts are deep. Phase: within {NEAR_NM} NM of a threshold and descending at {VRATE_FPM} fpm or more is final, within {NEAR_NM} NM of an airport with an approach and climbing at {VRATE_FPM} fpm or more is departure (the track's heading is not used). Height above the terrain is the alert's first-cycle altitude less the highest terrain within the 95 % radius of the track's present position.",
+        all.len(),
+        i.alerts.len()
+    );
+    if all.is_empty() {
+        return;
+    }
+    let col = |f: &dyn Fn(&Deep) -> f64| all.iter().map(f).collect::<Vec<_>>();
+    let count = |f: &dyn Fn(&Deep) -> String| {
+        let mut m: BTreeMap<String, usize> = BTreeMap::new();
+        for d in &all {
+            *m.entry(f(d)).or_default() += 1;
+        }
+        format!("{m:?}")
+    };
+    let _ = writeln!(
+        o,
+        "  floor kind: {}",
+        count(&|d| crate::report::kind_text(d.kind).to_string())
+    );
+    let _ = writeln!(o, "  phase: {}", count(&|d| d.phase.to_string()));
+    let _ = writeln!(
+        o,
+        "  in a corridor at the worst point: {}",
+        count(&|d| d.corridor.to_string())
+    );
+    let _ = writeln!(
+        o,
+        "  eligibility basis: {}",
+        count(&|d| d.basis.to_string())
+    );
+    let _ = writeln!(
+        o,
+        "  the nearest airport has corridors in the configuration: {}; the nearest airport: {}",
+        count(&|d| d.has_corridors.to_string()),
+        count(&|d| d.apt_id.clone())
+    );
+    let _ = writeln!(
+        o,
+        "  depth below the floor, ft: {}",
+        buckets(
+            &col(&|d| d.depth),
+            &[750.0, 1000.0, 1500.0, 2000.0, 3000.0],
+            " ft"
+        )
+    );
+    let heights: Vec<f64> = all.iter().filter_map(|d| d.height_terrain).collect();
+    let _ = writeln!(
+        o,
+        "  track height above the highest terrain within its 95 % radius ({} of {} have terrain data): {}",
+        heights.len(),
+        all.len(),
+        buckets(&heights, &[0.0, 500.0, 1000.0, 2000.0, 4000.0], " ft")
+    );
+    let _ = writeln!(
+        o,
+        "  distance to the nearest airport with an approach, NM: {}",
+        buckets(&col(&|d| d.apt_nm), &[3.0, 5.0, 10.0, 20.0, 40.0], " NM")
+    );
+    let _ = writeln!(
+        o,
+        "  distance to the nearest runway threshold, NM: {}",
+        buckets(&col(&|d| d.thr_nm), &[3.0, 5.0, 10.0, 20.0, 40.0], " NM")
+    );
+    let _ = writeln!(
+        o,
+        "  altimeter setting age (-1: fallback or none), s: {}",
+        buckets(
+            &col(&|d| d.setting_age_s as f64),
+            &[0.0, 1800.0, 3600.0, 7200.0],
+            " s"
+        )
+    );
+    let _ = writeln!(
+        o,
+        "  cold correction at the judged altitude (about, ft): {}",
+        buckets(
+            &col(&|d| d.cold_ft),
+            &[0.5, 25.0, 50.0, 100.0, 200.0],
+            " ft"
+        )
+    );
+    let _ = writeln!(
+        o,
+        "  time to violation, s: {}",
+        buckets(&col(&|d| d.ttv), &[0.5, 5.0, 10.0, 15.0, 20.0], " s")
+    );
+    let _ = writeln!(
+        o,
+        "  stale-extrapolated at the worst cycle {} of {}; judged altitude less the first cycle's, ft: {}",
+        all.iter().filter(|d| d.stale).count(),
+        all.len(),
+        buckets(&col(&|d| d.alt_delta), &[-1000.0, -500.0, -100.0, -1.0, 1.0], " ft")
+    );
+    let hdg: Vec<f64> = all.iter().filter_map(|d| d.hdg_off).collect();
+    let _ = writeln!(
+        o,
+        "  how far ahead the worst point was, s: {}; seconds from the alert's start to the worst cycle: {}; track heading less the inbound heading of the best aligned runway or approach corridor holding the worst point ({} of {} are in one), degrees: {}",
+        buckets(&col(&|d| d.ahead_s), &[1.0, 10.0, 30.0, 50.0], " s"),
+        buckets(&col(&|d| d.span_s), &[1.0, 10.0, 30.0, 60.0, 120.0], " s"),
+        hdg.len(),
+        all.len(),
+        buckets(&hdg, &[-90.0, -30.0, -10.0, 10.0, 30.0, 90.0], " deg")
+    );
+    let _ = writeln!(
+        o,
+        "  lookup radius, m: effective {}; 95 % radius of the track {}; speed term (half the step) {}; growth (velocity uncertainty x time) {}; rounding to the lookup {}",
+        buckets(&col(&|d| d.eff), &[250.0, 500.0, 1000.0, 2000.0, 4000.0], " m"),
+        buckets(&col(&|d| d.r95), &[100.0, 250.0, 500.0, 1000.0], " m"),
+        buckets(&col(&|d| d.half), &[100.0, 200.0, 400.0, 800.0], " m"),
+        buckets(&col(&|d| d.growth), &[50.0, 100.0, 200.0, 400.0], " m"),
+        buckets(&col(&|d| d.rounding), &[100.0, 200.0, 400.0], " m")
+    );
+    // The suspicion that large circles near airports pick up tall obstacles: the obstacle floors
+    // among them, against the other alerts, and what a smaller circle would say.
+    let ob: Vec<&Deep> = all.iter().filter(|d| d.obst.is_some()).collect();
+    let _ = writeln!(
+        o,
+        "  the circle against the rest: the deep alerts' median effective radius {:.0} m, median distance to an airport {:.1} NM, within 5 NM of an airport {} of {}; the shallower alerts' {:.0} m, {:.1} NM, {} of {}",
+        median(&mut col(&|d| d.eff)).unwrap_or(f64::NAN),
+        median(&mut col(&|d| d.apt_nm)).unwrap_or(f64::NAN),
+        all.iter().filter(|d| d.apt_nm <= 5.0).count(),
+        all.len(),
+        median(&mut shallow_eff.clone()).unwrap_or(f64::NAN),
+        median(&mut shallow_apt.clone()).unwrap_or(f64::NAN),
+        shallow_apt.iter().filter(|x| **x <= 5.0).count(),
+        shallow_apt.len()
+    );
+    let agl: Vec<f64> = ob.iter().filter_map(|d| d.obst.map(|x| x.0)).collect();
+    let dist: Vec<f64> = ob.iter().filter_map(|d| d.obst.map(|x| x.1)).collect();
+    let beyond_r95 = ob
+        .iter()
+        .filter(|d| d.obst.is_some_and(|x| x.1 > d.r95))
+        .count();
+    let _ = writeln!(
+        o,
+        "  the {} deep obstacle floors: obstacle height above ground {}; distance from the worst point to the obstacle {}; obstacle farther than the track's 95 % radius {}; still below an obstacle top with the lookup cut to the 95 % radius {}, and to the point alone ({POINT_M} m) {}",
+        ob.len(),
+        buckets(&agl, &[20.0, 50.0, 100.0, 200.0, 500.0], " ft"),
+        buckets(&dist, &[100.0, 250.0, 500.0, 1000.0, 2000.0], " m"),
+        beyond_r95,
+        ob.iter().filter(|d| d.r95_still).count(),
+        ob.iter().filter(|d| d.point_still).count()
+    );
+    // The groups.
+    let mut groups: BTreeMap<String, Vec<&Deep>> = BTreeMap::new();
+    for d in &all {
+        let apt = if d.apt_nm <= 3.0 {
+            "airport within 3 NM"
+        } else if d.apt_nm <= NEAR_NM {
+            "airport 3 to 10 NM"
+        } else {
+            "airport over 10 NM"
+        };
+        groups
+            .entry(format!(
+                "{} | {} | {apt} | corridor: {}",
+                crate::report::kind_text(d.kind),
+                d.phase,
+                d.corridor
+            ))
+            .or_default()
+            .push(d);
+    }
+    let mut order: Vec<(&String, &Vec<&Deep>)> = groups.iter().collect();
+    order.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(b.0)));
+    let _ = writeln!(
+        o,
+        "  {} groups; the 10 largest, each with its deepest, a middle and its shallowest alert (hash; time; nearest airport; depth ft; height above terrain ft; airport NM; threshold NM; setting age s; cold ft; basis; ttv s; stale 0/1; judged less first altitude ft; worst point ahead s; start to worst cycle s; heading off the corridor deg; obstacle height above ground ft and distance m; lookup radius m = r95 + growth + speed term, rounding, effective):",
+        groups.len()
+    );
+    for (name, g) in order.into_iter().take(10) {
+        let _ = writeln!(o, "   {} alerts: {name}", g.len());
+        let mut v: Vec<&&Deep> = g.iter().collect();
+        v.sort_by(|a, b| oa_math::cmp_canon_f64(b.depth, a.depth));
+        let mut picks = vec![0, v.len() / 2, v.len().saturating_sub(1)];
+        picks.dedup();
+        for k in picks {
+            let Some(d) = v.get(k) else { continue };
+            let _ = writeln!(
+                o,
+                "     {}; {}; {}; {:.0}; {}; {:.1}; {:.1}; {}; {:.0}; {}; {:.1}; {}; {:.0}; {:.0}; {:.0}; {}; {}; {:.0} = {:.0} + {:.0} + {:.0}, {:.0}, {:.0}",
+                d.hash,
+                d.clock,
+                d.apt_id,
+                d.depth,
+                d.height_terrain.map_or("n/a".to_string(), |x| format!("{x:.0}")),
+                d.apt_nm,
+                d.thr_nm,
+                d.setting_age_s,
+                d.cold_ft,
+                d.basis,
+                d.ttv,
+                u8::from(d.stale),
+                d.alt_delta,
+                d.ahead_s,
+                d.span_s,
+                d.hdg_off.map_or("-".to_string(), |x| format!("{x:.0}")),
+                d.obst.map_or("-".to_string(), |x| format!("{:.0} ft, {:.0} m", x.0, x.1)),
+                d.r95 + d.growth + d.half,
+                d.r95,
+                d.growth,
+                d.half,
+                d.rounding,
+                d.eff
+            );
+        }
     }
 }

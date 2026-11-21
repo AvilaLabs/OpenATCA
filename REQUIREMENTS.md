@@ -6635,8 +6635,8 @@ FAA value.
 - **OA-MSAW-062** The summary gives distributions of the remaining alerts: depth below the floor, time to violation,
   query radius, distance to the floor-setting cell, and alignment with a runway heading.
 - **OA-MSAW-063** With `--diagnose` the tool writes `diagnosis.txt`: the altitude judged against the geometric one,
-  the terms of the query radius, the obstacle and terrain records behind the floors and what the depth is made of;
-  numbers only.
+  the terms of the query radius, the obstacle and terrain records behind the floors and what the depth is made of,
+  and the alerts 500 ft or more below the floor classified and grouped; numbers only, addresses hashed.
 - **OA-MSAW-064** Where the track is now inside an approach capture box and no departure corridor the prediction
   time is `terminal_lookahead_s`, else `look_ahead_s`; runway strips, departure corridors, airport terminal areas and
   `gtm_clearance` areas keep `look_ahead_s`; the check of the present position is unchanged. Every violation found
@@ -6660,19 +6660,20 @@ FAA value.
 - **OA-MSAW-070** In the runway strip and the last 1 NM of a capture box the floor is the higher of the surface
   less the allowance, terrain and the obstacle top, with no clearance. A point is a landing, and not judged, only if
   the whole 95 % circle of the track is over the pavement plus 60 m, the track is not climbing (a known rate not
-  above zero and no rise over the last 10 s), its altitude is fresh with a real setting and neither stale-extrapolated
-  nor cold-corrected, and the altitude at the point (not the lowest of its span) is at or below the runway elevation
+  above zero and no rise over the last 10 s), its altitude is fresh with a real setting (cold-corrected is allowed) and not
+  stale-extrapolated, and the altitude at the point (not the lowest of its span) is at or below the runway elevation
   interpolated between the two thresholds there. The points after the first such point are the roll-out and are not
   judged; they are counted, with those outside every runway strip. Every point of a track that does not qualify is
   judged. The strip margin gives no landing.
 - **OA-MSAW-071** The airport area's clearance applies only where the whole query circle is inside the area; a
   `gtm_clearance` area applies where the circle overlaps it at all.
 - **OA-MSAW-072** With no setting within the radius and age, the lowest setting of the last 12 h within 200 NM is
-  used; only with none the allowance; the track stays flagged and the net InputMissing.
+  used; only with none the allowance; the track stays flagged and the net InputMissing. `--metar` names a directory
+  of hourly files, METAR files, or several of either separated by commas; each path is checked against the sealed days.
 - **OA-MSAW-073** A point outside the obstacle data has no obstacle data: counted as without coverage. The data is
   the union of each loaded file's own covered 0.5 degree cells: a cell with an obstacle, or an empty cell with obstacle
-  cells on both sides within 4 cells along its row and along its column (an interior gap); edges and borders are not
-  filled. An empty file is an error. `--dof` takes a comma-separated list; the track rows outside the coverage are
+  cells on both sides within 4 cells along its row or along its column (an interior gap, found in each file alone);
+  edges, borders with an unloaded area and coasts are not filled. An empty file is an error. `--dof` takes a comma-separated list; the track rows outside the coverage are
   counted.
 - **OA-MSAW-074** Tracks on the ground are listed per track; an altitude with no barometric measurement behind it is
   no altitude, and is counted apart.

@@ -892,17 +892,16 @@ fn read_cifp(g: &Sealed, p: &Path) -> Result<oa_arinc424::Cifp, String> {
 pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<String, String> {
     let g = Sealed::production();
     // Every path is checked before anything is opened or created, for a caller of the library too.
-    let optional = [
-        &args.terrain,
-        &args.dof,
-        &args.mva,
-        &args.cifp,
-        &args.metar,
-        &args.sfdps,
-    ];
+    let optional = [&args.terrain, &args.dof, &args.mva, &args.cifp, &args.sfdps];
+    let metar_parts = args
+        .metar
+        .as_deref()
+        .map(crate::qnh::path_parts)
+        .unwrap_or_default();
     for p in [&args.adsb, &args.config, &args.out]
         .into_iter()
         .chain(optional.into_iter().flatten())
+        .chain(metar_parts.iter())
     {
         refuse_sealed(g, p)?;
     }
@@ -975,11 +974,20 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let mut airports: Vec<(String, f64, f64)> = Vec::new();
     let mut apt_areas: Vec<AirportArea> = Vec::new();
     let mut apt_elev: Vec<(String, f64, f64, i32)> = Vec::new();
+    // Every runway threshold of the airports with an approach, for the diagnosis.
+    let mut all_thresholds: Vec<(f64, f64)> = Vec::new();
     if let Some(p) = &args.cifp {
         let tl = Instant::now();
         let c = read_cifp(g, p)?;
         used.load_ns.push(("CIFP", tl.elapsed().as_nanos() as u64));
         airports = approach_airports(&c);
+        let ifr: std::collections::HashSet<&str> = airports.iter().map(|a| a.0.as_str()).collect();
+        all_thresholds = c
+            .runways
+            .iter()
+            .filter(|r| ifr.contains(r.airport_ident.as_str()))
+            .map(|r| (r.threshold.lat, r.threshold.lon))
+            .collect();
         apt_elev = airports_with_approach(&c)
             .into_iter()
             .filter(|a| set.cifp_airports.contains(&a.0))
@@ -1163,6 +1171,11 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         alerts_csv(&alerted, &used.airports)
     };
     let advisory = alerts_csv_with_basis(&elig.advisories, &used.airports);
+    let elig_basis = if elig.judged {
+        elig.basis.clone()
+    } else {
+        BTreeMap::new()
+    };
     used.eligibility = Some(elig);
     let csv_sha = to_hex(&sha256(csv.as_bytes()));
     let name_of = |p: &Path| {
@@ -1219,9 +1232,12 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
             cfg: &set.msaw,
             terrain_dir: args.terrain.as_deref(),
             airports: &apt_elev,
+            all_airports: &used.airports,
+            all_thresholds: &all_thresholds,
             sealed: g,
             corridors: &used.cifp_corridors,
             qnh: rec.qnh.as_mut(),
+            basis: &elig_basis,
         });
         write_atomic(&args.out, "diagnosis.txt", &text)?;
     }

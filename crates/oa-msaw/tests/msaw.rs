@@ -2350,8 +2350,9 @@ fn only_a_fresh_descending_altitude_with_a_real_setting_and_a_whole_circle_on_th
     assert_eq!(at(250.0, 10.0, 0), (1, 0));
     assert_eq!(at(-500.0, 10.0, 0), (1, 0));
     assert_eq!(at(-500.0, f32::NAN, 0), (1, 0));
-    // A cold-corrected, a stale-extrapolated and a no-setting altitude are not exempt.
-    assert_eq!(at(-500.0, -30.0, F_COLD_CORRECTED), (1, 0));
+    // A cold-corrected altitude with a real setting is exempt (the correction is near zero at the
+    // runway); a stale-extrapolated and a no-setting altitude are not.
+    assert_eq!(at(-500.0, -30.0, F_COLD_CORRECTED), (0, 1));
     assert_eq!(at(-500.0, -30.0, F_QNH_MISSING), (1, 0));
     // A circle wider than the pavement and its margin does not land: r95 of 100 m on a runway whose
     // pavement is 30 m either side and 60 m allowed.

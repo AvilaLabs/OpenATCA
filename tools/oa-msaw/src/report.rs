@@ -559,7 +559,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
             if let Some((_, regions)) = i.data.obstacle_extent {
                 let _ = writeln!(
                     o,
-                    "  obstacle data covers {} cells of 0.5 degree ({} states or countries): a cell with an obstacle of a loaded file, or an empty cell with obstacle cells on both sides within 4 cells along its row and along its column (an interior gap); edges and borders are not filled; a point outside is obstacle data absent (counted as without coverage)",
+                    "  obstacle data covers {} cells of 0.5 degree ({} states or countries): a cell with an obstacle of a loaded file, or an empty cell with obstacle cells on both sides within 4 cells along its row or along its column (an interior gap, found in each file alone, then the union); edges, coasts and borders with an unloaded area are not filled; a point outside is obstacle data absent (counted as without coverage)",
                     i.data.obstacle_cells.unwrap_or(0),
                     regions
                 );
@@ -725,7 +725,7 @@ pub fn summary_text(i: &SummaryInput) -> String {
     );
     let _ = writeln!(
         o,
-        "track cycles with a point that qualified as a landing (the whole 95 % circle over the pavement plus 60 m, a known rate not above zero and no rise over 10 s, a fresh altitude with a real setting and no cold correction, at or below the runway elevation at the point; the points after it are the roll-out and are not judged) {}",
+        "track cycles with a point that qualified as a landing (the whole 95 % circle over the pavement plus 60 m, a known rate not above zero and no rise over 10 s, a fresh altitude with a real setting, at or below the runway elevation at the point; the points after it are the roll-out and are not judged) {}",
         t.landings
     );
     let _ = writeln!(

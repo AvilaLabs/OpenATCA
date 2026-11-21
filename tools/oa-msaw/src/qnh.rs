@@ -13,7 +13,7 @@
 //! old at its end, so that the age of what a track uses is never more than the limit.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use oa_awc::{
     finalize_metar, indicated_altitude_ft, metar_altim_hpa, metar_len, new_metar_table,
@@ -147,16 +147,27 @@ impl Qnh {
     /// Reads the METAR files `metar_00z_hours1.json` to `metar_23z_hours1.json` of `dir` that are
     /// there (each name is opened by name, through the guard), de-duplicates them and builds the
     /// set. A file that is there and cannot be read or parsed is an error.
+    /// `dir` is a directory of `metar_NNz_hours1.json`, a METAR file, or several of either
+    /// separated by commas; a named file is read whatever its name.
     pub fn from_dir(dir: &Path, radius_nm: f64, max_age_s: i64) -> Result<Qnh, String> {
         let g = Sealed::production();
         let mut table = new_metar_table();
         let mut ms = MetarStats::default();
         let mut files = 0u64;
-        for hour in 0..24 {
-            let p = dir.join(format!("metar_{hour:02}z_hours1.json"));
-            if !p.is_file() {
-                continue;
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for part in path_parts(dir) {
+            if part.is_dir() {
+                for hour in 0..24 {
+                    let p = part.join(format!("metar_{hour:02}z_hours1.json"));
+                    if p.is_file() {
+                        paths.push(p);
+                    }
+                }
+            } else {
+                paths.push(part);
             }
+        }
+        for p in paths {
             let mut f = open_guarded(g, &p).map_err(|e| match e {
                 OpenFail::Refused(m) | OpenFail::Io(m) => m,
             })?;
@@ -382,4 +393,13 @@ impl Qnh {
         }
         (pressure_alt_ft - f64::from(no_qnh_allowance_ft), true)
     }
+}
+
+/// The parts of a path argument that names several paths separated by commas.
+pub fn path_parts(p: &Path) -> Vec<PathBuf> {
+    p.to_string_lossy()
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect()
 }

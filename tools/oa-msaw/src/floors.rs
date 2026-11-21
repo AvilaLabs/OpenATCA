@@ -120,8 +120,8 @@ fn cell_of(deg: f64, size: f64) -> i32 {
 const GAP_CELLS: i32 = 4;
 
 /// The covered cells of one file's positions (1e-7 degree): the cells that hold an obstacle, and an
-/// empty cell with obstacle cells on both sides of it within [`GAP_CELLS`] along its row AND along
-/// its column (an interior gap). Edges and borders are not filled: a cell outside the obstacles'
+/// empty cell with obstacle cells on both sides of it within [`GAP_CELLS`] along its row OR along
+/// its column (an interior gap, found in each file alone; the files' union is taken afterwards). Edges and borders are not filled: a cell outside the obstacles'
 /// own spread is not covered.
 fn cover_cells(points: impl Iterator<Item = (i32, i32)>) -> std::collections::HashSet<(i32, i32)> {
     let mut have = std::collections::HashSet::new();
@@ -146,10 +146,8 @@ fn cover_cells(points: impl Iterator<Item = (i32, i32)>) -> std::collections::Ha
     for a in a0..=a1 {
         for b in b0..=b1 {
             if !have.contains(&(a, b))
-                && side(a, b, 0, -1)
-                && side(a, b, 0, 1)
-                && side(a, b, -1, 0)
-                && side(a, b, 1, 0)
+                && ((side(a, b, 0, -1) && side(a, b, 0, 1))
+                    || (side(a, b, -1, 0) && side(a, b, 1, 0)))
             {
                 gaps.push((a, b));
             }

@@ -433,13 +433,14 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         _ => cfg.look_ahead_s,
     };
     // A point over the pavement is a landing only for a track that is not climbing (a known rate not
-    // above zero and no rise over 10 s) and whose altitude is fresh, has a real setting and is not
-    // corrected for cold air: only then is the altitude as exact as the runway elevation.
+    // above zero and no rise over 10 s) and whose altitude is fresh, has a real setting (a cold
+    // correction of a real setting is near zero at the runway): only then is the altitude as exact as
+    // the runway elevation.
     let may_land = not_climbing(
         tr.flags & IF_RATE_UNKNOWN == 0,
         vr,
         f64::from(tr.alt_change_10s_ft),
-    ) && tr.flags & (F_QNH_MISSING | F_COLD_CORRECTED | IF_STALE_EXTRAPOLATED) == 0;
+    ) && tr.flags & (F_QNH_MISSING | IF_STALE_EXTRAPOLATED) == 0;
     for (k, (p, s)) in pts.iter().zip(floors.iter()).enumerate() {
         let hit = corridor_hit_at(cfg, &st.cidx, p);
         let (lo, hi) = sample_span_s(k, cfg.samples, cfg.look_ahead_s);
