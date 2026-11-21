@@ -578,9 +578,9 @@ mod tests {
 
     // REQ: OA-LTJ-054
     #[test]
-    fn cutoff_snapshot_and_absent_altitude_keep_metrics_absent() {
+    fn cutoff_snapshot_and_absent_altitude_keep_metrics_absent() -> Result<(), String> {
         let (snapshot, fix) = fixture();
-        let predicted = forecast(&snapshot).expect("valid issue-time fixture");
+        let predicted = forecast(&snapshot).map_err(|error| format!("forecast: {error:?}"))?;
         assert_eq!(
             predicted.positions.map(|p| p.time_ms),
             [1_300_000, 1_600_000, 2_200_000]
@@ -597,7 +597,7 @@ mod tests {
             },
             TruthPoint {
                 time_ms: 1_300_000,
-                place: predicted.positions[0].place.unwrap(),
+                place: predicted.positions[0].place.ok_or("missing 5-minute fix")?,
                 altitude_ft: None,
                 gap_before: false,
             },
@@ -649,7 +649,7 @@ mod tests {
             }),
             500.0,
         )
-        .expect("valid future truth");
+        .map_err(|error| format!("score: {error:?}"))?;
         assert_eq!(predicted.issued_ms, snapshot.cutoff_ms);
         assert!(score.forecast[0].covered);
         assert_eq!(score.forecast[0].vertical_error_ft, None);
@@ -658,6 +658,7 @@ mod tests {
         assert_eq!(score.eram_eta_error_s, None);
         assert_eq!(score.tb_fm_eta_error_s, Some(10.0));
         assert_eq!(score.forecast_covered, 1);
+        Ok(())
     }
 
     // REQ: OA-LTJ-054
@@ -732,15 +733,15 @@ mod tests {
 
     // REQ: OA-LTJ-054
     #[test]
-    fn duplicate_conflict_and_nonpositive_realization_are_refused() {
+    fn duplicate_conflict_and_nonpositive_realization_are_refused() -> Result<(), ForecastRefusal> {
         let (snapshot, fix) = fixture();
-        let mut predicted = forecast(&snapshot).expect("valid snapshot");
+        let mut predicted = forecast(&snapshot)?;
         predicted.positions[0].time_ms = 0;
         assert_eq!(
             score(&predicted, &[], None, None, None, 1_000.0),
             Err(ScoreRefusal::InvalidForecast)
         );
-        predicted = forecast(&snapshot).expect("valid snapshot");
+        predicted = forecast(&snapshot)?;
         let p = Place {
             lat_deg: 41.5,
             lon_deg: -88.0,
@@ -766,50 +767,57 @@ mod tests {
             score(&predicted, &duplicate, Some(fix), None, None, 1_000.0),
             Err(ScoreRefusal::ConflictingTruthTimestamp)
         );
+        Ok(())
     }
 
     // REQ: OA-LTJ-054
     #[test]
-    fn route_end_and_empty_route_are_absent_or_refused() {
+    fn route_end_and_empty_route_are_absent_or_refused() -> Result<(), ForecastRefusal> {
         let (mut snapshot, _) = fixture();
-        let result = forecast(&snapshot).expect("valid routed snapshot");
+        let result = forecast(&snapshot)?;
         assert_eq!(result.positions[2].place, None);
         snapshot.route.clear();
         assert_eq!(forecast(&snapshot), Err(ForecastRefusal::EmptyRoute));
+        Ok(())
     }
 
     // REQ: OA-LTJ-054
     #[test]
-    fn horizon_and_eta_elapsed_time_start_at_track_observation() {
+    fn horizon_and_eta_elapsed_time_start_at_track_observation() -> Result<(), String> {
         let (mut aged, _) = fixture();
         aged.track.time_ms = 995_000;
         aged.track.altitude_ft = Some(12_000.0);
         aged.track.vertical_rate_fpm = Some(-600.0);
         aged.assigned_altitude_ft = Some(5_000.0);
-        let aged_forecast = forecast(&aged).expect("valid aged track");
+        let aged_forecast = forecast(&aged).map_err(|error| format!("aged forecast: {error:?}"))?;
         assert_eq!(aged_forecast.positions[0].altitude_ft, Some(8_950.0));
 
         let (baseline, _) = fixture();
-        let baseline_forecast = forecast(&baseline).expect("valid issue-time track");
+        let baseline_forecast =
+            forecast(&baseline).map_err(|error| format!("baseline forecast: {error:?}"))?;
         let horizontal_shift = great_circle_m(
-            aged_forecast.positions[0].place.expect("on route"),
-            baseline_forecast.positions[0].place.expect("on route"),
+            aged_forecast.positions[0].place.ok_or("missing aged fix")?,
+            baseline_forecast.positions[0]
+                .place
+                .ok_or("missing baseline fix")?,
         );
         assert!((horizontal_shift - 900.0).abs() < 10.0);
         let elapsed_shift_ms = aged_forecast
             .meter_eta
-            .expect("meter reachable after issue")
+            .ok_or("missing aged meter ETA")?
             .time_ms
             - baseline_forecast
                 .meter_eta
-                .expect("meter reachable after issue")
+                .ok_or("missing baseline meter ETA")?
                 .time_ms;
         assert_eq!(elapsed_shift_ms, -5_000);
+        Ok(())
     }
 
     // REQ: OA-LTJ-054
     #[test]
-    fn elapsed_meter_crossing_before_issue_has_no_eta_and_score_rejects_other_fix() {
+    fn elapsed_meter_crossing_before_issue_has_no_eta_and_score_rejects_other_fix(
+    ) -> Result<(), ForecastRefusal> {
         let (mut snapshot, fix) = fixture();
         snapshot.track.time_ms = snapshot.issued_ms - MAX_TRACK_AGE_MS;
         snapshot.track.speed_mps = Some(180.0);
@@ -822,11 +830,11 @@ mod tests {
         };
         snapshot.route = vec![near];
         snapshot.meter_fix = Some(near);
-        let passed_fix = forecast(&snapshot).expect("valid stale but bounded track");
+        let passed_fix = forecast(&snapshot)?;
         assert_eq!(passed_fix.meter_eta, None);
 
         let (snapshot, _) = fixture();
-        let forecast = forecast(&snapshot).expect("valid forecast");
+        let forecast = forecast(&snapshot)?;
         let other = RouteFix {
             name: *b"OTHER   ",
             place: Place {
@@ -839,17 +847,20 @@ mod tests {
             Err(ScoreRefusal::MeterFixMismatch)
         );
         assert_eq!(forecast.meter_fix, Some(fix));
+        Ok(())
     }
 
     // REQ: OA-LTJ-054
     #[test]
-    fn an_out_of_range_altitude_does_not_erase_horizontal_coverage() {
+    fn an_out_of_range_altitude_does_not_erase_horizontal_coverage() -> Result<(), ForecastRefusal>
+    {
         let (mut snapshot, _) = fixture();
         snapshot.track.altitude_ft = Some(1_000.0);
         snapshot.track.vertical_rate_fpm = Some(-2_500.0);
         snapshot.assigned_altitude_ft = None;
-        let forecast = forecast(&snapshot).expect("position forecast remains usable");
+        let forecast = forecast(&snapshot)?;
         assert!(forecast.positions[0].place.is_some());
         assert_eq!(forecast.positions[0].altitude_ft, None);
+        Ok(())
     }
 }
