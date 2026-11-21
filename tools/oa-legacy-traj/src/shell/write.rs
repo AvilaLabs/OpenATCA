@@ -36,6 +36,7 @@ pub fn write_all(dir: &Path, files: &[(String, String)]) -> Result<(), String> {
     };
     for (name, text) in files {
         let tmp = tmp_of(name);
+        // seal-allow: creates a new write-only temporary file whose path was checked above
         let result = fs::OpenOptions::new()
             .write(true)
             .create_new(true)

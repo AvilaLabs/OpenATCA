@@ -4,4 +4,5 @@
 # An entry that no longer exists, or that uses the guard after all, fails the test.
 example:speed reads only /proc/self/schedstat; no recording
 example:diag synthetic load only; reads /proc/loadavg, no clip
+example:arrival_slice uses fixed synthetic inputs and opens no files
 bin:oa-trace reads the repository's own sources and requirements, no recording
