@@ -166,6 +166,9 @@ fn arbitrary_filter() -> Filter {
         rej_h: kani::any(),
         rej_v: kani::any(),
         has_alt: kani::any(),
+        last_baro_alt_ft: kani::any(),
+        last_baro_t_ns: kani::any(),
+        last_baro_quant_ft: kani::any(),
         h_mode: kani::any(),
         rej_c: kani::any(),
         reacq: kani::any(),
@@ -518,6 +521,9 @@ fn assert_filter_bits_rest(a: &Filter, b: &Filter) {
     assert_eq!(a.reacq, b.reacq);
     assert_eq!(a.rej_v, b.rej_v);
     assert_eq!(a.has_alt, b.has_alt);
+    assert_eq!(a.last_baro_alt_ft, b.last_baro_alt_ft);
+    assert_eq!(a.last_baro_t_ns, b.last_baro_t_ns);
+    assert_eq!(a.last_baro_quant_ft, b.last_baro_quant_ft);
     assert_eq!(a.h_mode, b.h_mode);
 }
 

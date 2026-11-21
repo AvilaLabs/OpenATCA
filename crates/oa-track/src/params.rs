@@ -169,7 +169,7 @@ pub const CONFIRM_MIN_SEP_NS: i64 = NS_PER_S / 2;
 /// nothing). The rule is written for two: the moved side needs one more, the old side keeps one
 /// earlier vote (`const` assertion in `confirm`).
 pub const CONFIRM_REPORTS: u8 = 2;
-/// How many unconfirmed moves can hold a rollback snapshot at once (2200 bytes each): 64, 141 kB.
+/// How many unconfirmed moves can hold a rollback snapshot at once (2232 bytes each): 64, 143 kB.
 /// Measured on the two development days (the 2026-11-14 day to choose, 2026-11-15 as the
 /// check): the most tracks with an unconfirmed move at once was 7 on 2026-11-14 and
 /// 7 on 2026-11-15, so 64 is about nine times the largest peak seen; a move is open

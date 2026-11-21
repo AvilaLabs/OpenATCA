@@ -1560,7 +1560,7 @@ fn tracker_memory_is_linear_in_capacity_and_about_a_quarter_of_the_full_state_ri
     // A ring of 12 full filter states and 12 measurements cost 8.9 kB per track. The large-move
     // rule (RT-239) adds 39 bytes of columns per track (the bound was 2300 before it).
     assert!(per(b, 38_000) < 2_300.0);
-    // And its pool of rollback snapshots, 2200 bytes each and a 4-byte free-list entry, a fixed
+    // And its pool of rollback snapshots, 2232 bytes each and a 4-byte free-list entry, a fixed
     // cost independent of the number of tracks.
     let with_pool = tracker_bytes(
         &tracker_new(&TrackerConfig {
@@ -1573,7 +1573,7 @@ fn tracker_memory_is_linear_in_capacity_and_about_a_quarter_of_the_full_state_ri
     );
     assert_eq!(
         with_pool - a,
-        oa_track::params::CONFIRM_POOL * (2_200 + 4),
+        oa_track::params::CONFIRM_POOL * (2_232 + 4),
         "the pool"
     );
     println!("tracker_bytes with the pool: 4096 tracks {with_pool}");

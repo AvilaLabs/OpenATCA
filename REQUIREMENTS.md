@@ -4517,7 +4517,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   distance that does not scale with the gap or the covariance) from the track's predicted position
   at the report's time is applied at once, exactly as a tracker without the rule applies it, and
   counted in `moves_unconfirmed`. The track keeps its measurement state from before the report
-  (the update's own transaction capture without the tracker's counters, 2200 bytes) in a bounded
+  (the update's own transaction capture without the tracker's counters, 2232 bytes) in a bounded
   pool of `confirm_pool` entries (64 by default, allocated once; the per-track columns are
   39 bytes: the move's flag, start, first report (time and sensor), old-path vote time, the end of a resynchronised move's marking and the snapshot index); a move that finds the pool full is applied and marked all the same, without a
   snapshot (`move_no_snapshot`): it can be confirmed or left standing but not rolled back. Until
@@ -4664,6 +4664,18 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   (`resync_consistent_k` 0 and the run of refusals below `RESYNC_AFTER`): the refusal that
   resynchronises is the integration test of OA-TRK-352. Not covered by any proof (integration tests): a report that is applied or is itself a large
   move, ticks, forecasts, the late replay and the rows it emits.
+- **OA-TRK-355** The vertical filter cross-checks a reported barometric vertical rate against
+  accepted raw barometric altitude history when the earlier altitude is more than 0 s and at
+  most 10 s older. A rate above four unknown-state prior standard deviations (7,200 ft/min) is not used to
+  initialize velocity until its integrated displacement both exceeds the quantization uncertainty
+  and agrees with the independent altitude delta. An insufficient high-rate sample does not move
+  the raw-altitude anchor, so dense samples can accumulate evidence. A clearly contradictory rate
+  is omitted while an accepted altitude still updates the filter. The raw history advances only on
+  accepted, strictly later barometric altitudes; repeated altitude-gate rejection resynchronizes
+  from the raw altitude-derived rate only when its displacement exceeds the same uncertainty
+  bound. Coverage: tracker-entry tests for stable altitude under -15,000 ft/min, corroborated
+  rapid descent, and a contradictory rate during an established descent; Kani rollback field
+  comparisons include the raw history.
 - **OA-TRK-350** A report whose distance from the predicted position is at most `confirm_move_m`
   is applied exactly as before: its outputs are bit for bit those of a tracker with the rule off.
   A move over it is applied exactly as without the rule too: a confirmed move leaves every row's

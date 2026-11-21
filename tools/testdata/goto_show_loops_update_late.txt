@@ -102,16 +102,16 @@ Loop _RNvNtNtCs54ksHOfKhD_8oa_track7tracker6proofs29observe_track_fields_directl
   file crates/oa-track/src/tracker_proofs.rs line 769 column 5 function tracker::proofs::observe_track_fields_directly
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.0:
-  file crates/oa-track/src/tracker.rs line 1569 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1572 column 5 function tracker::update_late
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.1:
-  file crates/oa-track/src/tracker.rs line 1588 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1591 column 5 function tracker::update_late
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.2:
-  file crates/oa-track/src/tracker.rs line 1626 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1629 column 5 function tracker::update_late
 
 Loop _RNvNtCs54ksHOfKhD_8oa_track7tracker11update_late.3:
-  file crates/oa-track/src/tracker.rs line 1656 column 5 function tracker::update_late
+  file crates/oa-track/src/tracker.rs line 1659 column 5 function tracker::update_late
 
 Loop _RNvMs4_NtCs6xMQmN1AWUs_5alloc3vecINtB5_3VecNtNtCs54ksHOfKhD_8oa_track5types11MeasurementE11extend_withBJ_.0:
   file /home/runner/.rustup/toolchains/nightly-2026-08-21-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc/src/vec/mod.rs line 3727 column 13 function std::vec::Vec::<types::Measurement>::extend_with

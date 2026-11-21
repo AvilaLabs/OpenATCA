@@ -17,7 +17,7 @@
 //! gives exactly the state the filter had then (a measurement in the ring was applied, and
 //! applying is a pure function of the state and the measurement). So the ring holds
 //! `RING_DEPTH` measurements and one filter state instead of `RING_DEPTH` of each: the memory of
-//! a track falls from about 8.9 kB to about 2.1 kB. Keeping the anchor costs one more filter
+//! a track falls from about 8.9 kB to about 2.2 kB. Keeping the anchor costs one more filter
 //! application per update once the ring is full (the oldest entry's successor is applied to it).
 //!
 //! # Time ordering
@@ -194,6 +194,9 @@ fn blank_filter() -> Filter {
         rej_h: 0,
         rej_v: 0,
         has_alt: 0,
+        last_baro_alt_ft: NONE_I32,
+        last_baro_t_ns: 0,
+        last_baro_quant_ft: 0,
         h_mode: 0,
         rej_c: 0,
         reacq: 0,
@@ -911,11 +914,11 @@ struct TrackTxn {
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 648-byte filters, twelve 72-byte measurements, 472-byte statistics (328 before
+// Budget: two 664-byte filters, twelve 72-byte measurements, 472-byte statistics (328 before
 // the eighteen large-move counters of RT-239), six 8-byte times, 8-byte category, 4-byte update
 // count and four byte fields.
 // One bounded stack checkpoint; no track key changes during an update or its replay.
-const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2696);
+const _: () = assert!(core::mem::size_of::<TrackTxn>() == 2728);
 
 /// The pool entry of a move with no snapshot.
 const NO_SNAP: u32 = u32::MAX;
@@ -941,9 +944,9 @@ struct TrackSnap {
     ring_len: u8,
     ring_head: u8,
 }
-// Budget: two 648-byte filters, twelve 72-byte measurements, three 8-byte times, 8-byte
+// Budget: two 664-byte filters, twelve 72-byte measurements, three 8-byte times, 8-byte
 // category, 4-byte update count and four byte fields.
-const _: () = assert!(core::mem::size_of::<TrackSnap>() == 2200);
+const _: () = assert!(core::mem::size_of::<TrackSnap>() == 2232);
 
 fn blank_snap() -> TrackSnap {
     TrackSnap {
@@ -2319,7 +2322,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::types::{output_new, DEFAULT_CONFIG};
+    use crate::types::{output_new, DEFAULT_CONFIG, O_HAS_ALT};
 
     const S: i64 = NS_PER_S;
     const ADDR: u32 = 0xABC123;
@@ -2347,6 +2350,87 @@ mod tests {
             sensor: 1,
             ..blank_measurement()
         }
+    }
+
+    fn baro(t_ns: i64, altitude_ft: i32, rate_fpm: i32) -> Measurement {
+        Measurement {
+            toa_ns: t_ns,
+            alt_ft: altitude_ft,
+            vrate_fpm: rate_fpm,
+            alt_quant_ft: 25,
+            ..at(0, 0, 100.0)
+        }
+    }
+
+    // REQ: OA-TRK-355
+    #[test]
+    fn contradictory_barometric_rate_is_discarded_without_losing_altitude() {
+        let c = cfg(1, 0);
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for k in 0..8 {
+            tracker_update(&mut t, &baro(k * S / 2, 2_700, -15_000), &mut out);
+        }
+        let (row, _, _) = tracker_predict(&t, ADDR, 4 * S).unwrap();
+        assert!(row.flags & O_HAS_ALT != 0);
+        assert!((row.alt_ft - 2_700.0).abs() < 100.0);
+        assert!(row.vrate_fpm.abs() < 1_000.0);
+    }
+
+    // REQ: OA-TRK-355
+    #[test]
+    fn coherent_rapid_barometric_descent_keeps_its_rate() {
+        let c = cfg(1, 0);
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for k in 0..8 {
+            tracker_update(
+                &mut t,
+                &baro(k * S, 10_000 - 250 * k as i32, -15_000),
+                &mut out,
+            );
+        }
+        let (row, _, _) = tracker_predict(&t, ADDR, 8 * S).unwrap();
+        assert!(row.flags & O_HAS_ALT != 0);
+        assert!((row.vrate_fpm + 15_000.0).abs() < 2_000.0);
+    }
+
+    // REQ: OA-TRK-355
+    #[test]
+    fn a_fast_descent_after_a_long_gap_builds_new_local_rate_evidence() {
+        let c = cfg(1, 0);
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for m in [
+            baro(0, 10_000, -15_000),
+            baro(20 * S, 10_000, -15_000),
+            baro(21 * S, 9_750, -15_000),
+        ] {
+            tracker_update(&mut t, &m, &mut out);
+        }
+        let (row, _, _) = tracker_predict(&t, ADDR, 22 * S).unwrap();
+        assert!(row.flags & O_HAS_ALT != 0);
+        assert!((row.vrate_fpm + 15_000.0).abs() < 2_000.0);
+    }
+
+    // REQ: OA-TRK-355
+    #[test]
+    fn contradictory_rate_does_not_erase_established_altitude_derived_descent() {
+        let c = cfg(1, 0);
+        let mut t = tracker_new(&c).unwrap();
+        let mut out = output_new(c.out_capacity);
+        for k in 0..8 {
+            let rate = if k == 5 { -15_000 } else { -2_400 };
+            tracker_update(&mut t, &baro(k * S, 10_000 - 40 * k as i32, rate), &mut out);
+            if k == 5 {
+                let (row, _, _) = tracker_predict(&t, ADDR, k * S).unwrap();
+                assert!((row.vrate_fpm + 2_400.0).abs() < 1_000.0);
+            }
+        }
+        let (row, _, _) = tracker_predict(&t, ADDR, 8 * S).unwrap();
+        assert!(row.flags & O_HAS_ALT != 0);
+        assert!((row.alt_ft - 9_680.0).abs() < 150.0);
+        assert!((row.vrate_fpm + 2_400.0).abs() < 1_000.0);
     }
 
     /// Everything the order of arrival must not change about the track.

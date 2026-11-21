@@ -34,7 +34,7 @@ use crate::hfilter::{
 };
 use crate::params::{
     ALT_BASE_SIGMA_FT, ALT_GATE_SIGMAS, GATE_CHI2, NS_PER_S, PLAUSIBLE_SLACK_M, RESYNC_AFTER,
-    VRATE_SIGMA_FPS,
+    VRATE_SIGMA_FPS, V_PRIOR_RATE_STD_FPS,
 };
 use crate::types::{
     to_e7, Measurement, OutRow, PredictError, TrackerConfig, TrackerStats, M_ALT_GEOMETRIC,
@@ -67,6 +67,12 @@ pub struct Filter {
     pub rej_v: u8,
     /// The vertical filter holds an altitude.
     pub has_alt: u8,
+    /// Accepted raw barometric altitude used as the anchor for checking reported rates.
+    pub last_baro_alt_ft: i32,
+    /// Time of `last_baro_alt_ft`.
+    pub last_baro_t_ns: i64,
+    /// Quantisation step of `last_baro_alt_ft`.
+    pub last_baro_quant_ft: u16,
     /// Horizontal filter mode: 0 interacting pair, 1 to 3 single straight-model baselines.
     pub h_mode: u8,
     /// Length of the run of rejected reports each plausible after the one before it.
@@ -76,9 +82,9 @@ pub struct Filter {
     pub reacq: u8,
 }
 // Budget: 496 (horizontal) + 96 (vertical) + 8 (time) + 8 (origin) + 16 (origin trig) + 16
-// (newest rejected report) + 6 counters/flags = 646 packed; 648 with alignment. Stored twice per
-// track: the current state and the ring anchor.
-const _: () = assert!(core::mem::size_of::<Filter>() == 648);
+// (newest rejected report) + 14 (raw barometric history) + 6 counters/flags = 660 packed;
+// 664 with alignment. Stored twice per track: the current state and the ring anchor.
+const _: () = assert!(core::mem::size_of::<Filter>() == 664);
 
 /// What [`filter_apply`] did with a measurement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,8 +137,99 @@ fn vel_of(m: &Measurement, from_true: &Mat2) -> Option<VelMeas> {
 
 /// Altitude variance: quantisation `step^2 / 12` plus the base term.
 fn alt_var(m: &Measurement) -> f64 {
-    let q = f64::from(m.alt_quant_ft);
+    alt_var_quant(m.alt_quant_ft)
+}
+
+fn alt_var_quant(quant_ft: u16) -> f64 {
+    let q = f64::from(quant_ft);
     q * q / 12.0 + ALT_BASE_SIGMA_FT * ALT_BASE_SIGMA_FT
+}
+
+/// Rates beyond four unknown-state prior sigmas are held back until raw altitude movement
+/// corroborates them. This preserves ordinary climb starts while blocking extreme initial rates.
+const RISKY_VRATE_FPM: f64 = 4.0 * V_PRIOR_RATE_STD_FPS * 60.0;
+/// Rate corroboration is local in time, bounded by the existing velocity-lag horizon.
+const BARO_RATE_CHECK_MAX_GAP_NS: i64 = crate::params::VEL_LAG_MAX_S as i64 * NS_PER_S;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BaroRateEvidence {
+    NotRisky,
+    Insufficient,
+    Corroborated,
+    Contradicted,
+}
+
+/// A rate can aid the vertical filter only when it agrees with the change between independent
+/// raw barometric observations. Replay reconstructs this history with the rest of the state.
+fn rate_evidence(f: &Filter, m: &Measurement) -> BaroRateEvidence {
+    if m.vrate_fpm == NONE_I32 {
+        return BaroRateEvidence::NotRisky;
+    }
+    let risky = f64::from(m.vrate_fpm).abs() > RISKY_VRATE_FPM;
+    let Some(dt_ns) = m.toa_ns.checked_sub(f.last_baro_t_ns) else {
+        return if risky {
+            BaroRateEvidence::Insufficient
+        } else {
+            BaroRateEvidence::NotRisky
+        };
+    };
+    if dt_ns <= 0 || dt_ns > BARO_RATE_CHECK_MAX_GAP_NS || f.last_baro_alt_ft == NONE_I32 {
+        return if risky {
+            BaroRateEvidence::Insufficient
+        } else {
+            BaroRateEvidence::NotRisky
+        };
+    }
+    let dt = dt_ns as f64 / NS_PER_S as f64;
+    let observed_ft = (i64::from(m.alt_ft) - i64::from(f.last_baro_alt_ft)) as f64;
+    let reported_ft = f64::from(m.vrate_fpm) * dt / 60.0;
+    let uncertainty_ft = (alt_var(m) + alt_var_quant(f.last_baro_quant_ft)).sqrt();
+    let tolerance_ft = (4.0 * uncertainty_ft).max(f64::from(crate::params::BARO_QUANT_FT));
+    if (reported_ft - observed_ft).abs() > tolerance_ft {
+        BaroRateEvidence::Contradicted
+    } else if risky && (reported_ft.abs() <= tolerance_ft || observed_ft.abs() <= tolerance_ft) {
+        BaroRateEvidence::Insufficient
+    } else {
+        BaroRateEvidence::Corroborated
+    }
+}
+
+fn altitude_derived_rate(f: &Filter, m: &Measurement) -> Option<(f64, f64)> {
+    if f.last_baro_alt_ft == NONE_I32 {
+        return None;
+    }
+    let dt_ns = m.toa_ns.checked_sub(f.last_baro_t_ns)?;
+    if dt_ns <= 0 || dt_ns > BARO_RATE_CHECK_MAX_GAP_NS {
+        return None;
+    }
+    let dt = dt_ns as f64 / NS_PER_S as f64;
+    let delta_ft = (i64::from(m.alt_ft) - i64::from(f.last_baro_alt_ft)) as f64;
+    let sigma_ft = (alt_var(m) + alt_var_quant(f.last_baro_quant_ft)).sqrt();
+    if delta_ft.abs() <= (4.0 * sigma_ft).max(f64::from(crate::params::BARO_QUANT_FT)) {
+        return None;
+    }
+    let rate_fps = delta_ft / dt;
+    let rate_var = (sigma_ft / dt).powi(2);
+    (rate_fps.is_finite() && rate_fps.abs() <= 30_000.0 / 60.0 && rate_var.is_finite())
+        .then_some((rate_fps, rate_var))
+}
+
+fn advance_baro_history(f: &mut Filter, m: &Measurement, evidence: BaroRateEvidence) {
+    // An insufficient high-rate sample leaves the anchor in place so dense quantized reports can
+    // accumulate enough independent displacement to corroborate or contradict it. A stale anchor
+    // is replaced so a new local rate can be judged after a long outage.
+    let has_history = f.last_baro_alt_ft != NONE_I32;
+    if has_history && m.toa_ns <= f.last_baro_t_ns {
+        return;
+    }
+    let gap_ns = m.toa_ns.checked_sub(f.last_baro_t_ns);
+    let stale = has_history && gap_ns.is_none_or(|gap| gap > BARO_RATE_CHECK_MAX_GAP_NS);
+    if evidence == BaroRateEvidence::Insufficient && has_history && !stale {
+        return;
+    }
+    f.last_baro_alt_ft = m.alt_ft;
+    f.last_baro_t_ns = m.toa_ns;
+    f.last_baro_quant_ft = m.alt_quant_ft;
 }
 
 fn has_baro_alt(m: &Measurement) -> bool {
@@ -140,12 +237,13 @@ fn has_baro_alt(m: &Measurement) -> bool {
 }
 
 fn vertical_init(m: &Measurement) -> VFilter {
-    let rate = (m.vrate_fpm != NONE_I32).then(|| {
-        (
-            f64::from(m.vrate_fpm) / 60.0,
-            VRATE_SIGMA_FPS * VRATE_SIGMA_FPS,
-        )
-    });
+    let rate =
+        (m.vrate_fpm != NONE_I32 && f64::from(m.vrate_fpm).abs() <= RISKY_VRATE_FPM).then(|| {
+            (
+                f64::from(m.vrate_fpm) / 60.0,
+                VRATE_SIGMA_FPS * VRATE_SIGMA_FPS,
+            )
+        });
     v_init(f64::from(m.alt_ft), alt_var(m), rate)
 }
 
@@ -179,6 +277,9 @@ pub(crate) fn filter_init(m: &Measurement, mode: u8) -> Filter {
         rej_h: 0,
         rej_v: 0,
         has_alt: u8::from(has_alt),
+        last_baro_alt_ft: if has_alt { m.alt_ft } else { NONE_I32 },
+        last_baro_t_ns: if has_alt { m.toa_ns } else { 0 },
+        last_baro_quant_ft: if has_alt { m.alt_quant_ft } else { 0 },
         h_mode: mode,
         rej_c: 0,
         reacq: 0,
@@ -437,7 +538,13 @@ fn apply(
     }
     if has_baro_alt(m) {
         let var = alt_var(m);
-        let rate = (m.vrate_fpm != NONE_I32).then(|| {
+        let evidence = rate_evidence(f, m);
+        let rate_ok = matches!(
+            evidence,
+            BaroRateEvidence::NotRisky | BaroRateEvidence::Corroborated
+        );
+        let mut accepted_alt = has_alt == 0;
+        let rate = (m.vrate_fpm != NONE_I32 && rate_ok).then(|| {
             (
                 f64::from(m.vrate_fpm) / 60.0,
                 VRATE_SIGMA_FPS * VRATE_SIGMA_FPS,
@@ -453,12 +560,22 @@ fn apply(
                 stats.alt_rejected += 1;
                 rej_v = rej_v.saturating_add(1);
                 if rej_v >= RESYNC_AFTER {
-                    v = vertical_init(m);
+                    let restart_rate = if evidence == BaroRateEvidence::Contradicted {
+                        altitude_derived_rate(f, m)
+                    } else {
+                        rate
+                    };
+                    v = v_init(f64::from(m.alt_ft), var, restart_rate);
+                    accepted_alt = true;
                     rej_v = 0;
                 }
             } else {
+                accepted_alt = true;
                 v = v_update(&v, Some((f64::from(m.alt_ft), var)), rate);
                 rej_v = 0;
+            }
+            if accepted_alt {
+                advance_baro_history(f, m, evidence);
             }
         }
     }
