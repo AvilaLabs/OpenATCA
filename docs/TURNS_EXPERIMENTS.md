@@ -3,7 +3,7 @@
 Fitted on the two development days only (2026-11-15 and 2026-11-19), with
 `crates/oa-track/examples/turn_diag.rs` (screening, `--rescore`) and `p002 --development`.
 Cross-track error in metres, common set: median / p95 / RMS. ERAM on the same sets: day 15
-7.5 / 26.9 / 26.6, day 19 7.7 / 28.2 / 26.4. The lead will rewrite this file.
+7.5 / 26.9 / 26.6, day 19 7.7 / 28.2 / 26.4.
 
 Finding: the reported ADS-B velocity lags the position-derived reference by about 1 s, and the
 tracker trusted it tightly, so in a turn it under-turned; the error grows with the time since
@@ -38,9 +38,8 @@ more).
 Not reached: OpenATCA p95 above ERAM's remains in cruise (day 15 89.5 vs 34.1, day 19 63.9 vs
 33.9), in the 18000 ft and above bands on both days, and the 41000 ft and above band on day 19
 (n = 149) got worse, 70.3 to 105.8 m p95. Rollout (the first seconds after a turn) is slightly
-worse in p95 and RMS on both days (47.4 to 50.9 and 40.9 to 47.1 m p95): the lag model keeps
-the turn rate a little too long. The remaining tail is mostly unobserved manoeuvres inside
-long report gaps (the tracker input is thinned, median gap about 7 s).
+worse in p95 and RMS on both days (47.4 to 50.9 and 40.9 to 47.1 m p95). The lag model may keep
+the turn rate too long during rollout. Larger errors are concentrated at longer report ages.
 
 ## Thinning (turn_diag --rescore --thin N, kept change)
 
@@ -220,17 +219,17 @@ are taken at ERAM's row times, so ERAM is always scored at the moment of its own
 scored at the same moment, from input that may be up to one archive gap old (8 to 9 s median). ERAM's
 error being flat against the spacing fits that, but does not show ERAM's input rate.
 
-What this round shows, on days 15 and 19:
-- OpenATCA beats dead reckoning from its last report in every group and at every age, so the tracker
-  loses nothing on a coast.
-- The track's heading at the last report is 0.1° off the reference's at the median, 0.55° at p95. The
-  tail past 5 s is not a heading error.
-- In level flight 5 to 8 s after a report, OpenATCA's p95 is 18.5 m (day 15) and 21.9 m (day 19),
-  against ERAM's 19.8 and 19.2.
-- The tail comes from aircraft that turn inside the gap. No coast can see such a turn from the report
-  before it, which is why dead reckoning's p95 grows with age as fast as OpenATCA's.
-- Closing the gap to ERAM's p95 therefore needs input at the rate ERAM receives it, not a change to the
-  tracker.
+For level samples, dead reckoning has lower p95 cross-track error at several ages between 1 and
+4 seconds and in the over-20-second groups on both days. Beyond 5 seconds it also has lower RMS
+on both days. In the 5-to-8-second group, OpenATCA's p95 is 18.5 m on day 15 and 21.9 m on day 19,
+against ERAM's 19.8 m and 19.2 m.
+
+Among level samples more than 5 seconds after a report, OpenATCA's median heading error at
+the last report is about 0.1°. For the subset with more than 50 m of cross-track error, median
+heading error rises to 0.69° and 0.56°, and p95 reaches 1.96° and 3.51°. Heading error and residual
+turn estimates warrant investigation. The groups in these tables use reference turn rate at
+the sample time. Establishing which turns began during the gap requires comparing the reference
+heading over the gap. The observed ERAM publication intervals leave its input rate unknown.
 
 | Day | ERAM row spacing (previous grid row of the aircraft) | n | ERAM cross-track median / p95 / RMS m |
 |---|---|---|---|
@@ -242,4 +241,21 @@ What this round shows, on days 15 and 19:
 | 19 | 5-10 s | 1430 | 7.5 / 29.4 / 40.5 |
 | 19 | 10-20 s | 6760 | 7.4 / 25.3 / 21.8 |
 | 19 | 20 s or more | 6327 | 7.7 / 28.5 / 23.5 |
+
+## Straight-line forecast after 12 seconds
+
+The development sweep on 15 November compared the current forecast with four turn-rate decay
+settings and three ages at which to switch to a straight-line forecast. The 12-second switch
+advanced to the 19 November tune run. Both runs used the p002 common set for the table below.
+
+| Metric | 15 Nov current | 15 Nov 12-second switch | 19 Nov current | 19 Nov 12-second switch |
+|---|---|---|---|---|
+| M1 cross-track p95 (m) | 32.473 | 32.143 | 32.561 | 32.327 |
+| M1 cross-track RMS (m) | 26.140 | 25.358 | 23.538 | 21.246 |
+| M2 raw along-track RMS (m) | 68.430 | 69.113 | 15.852 | 16.424 |
+| M2t rounding-tolerant along-track RMS (m) | 66.333 | 67.022 | 7.626 | 8.618 |
+
+The switch improved cross-track p95 and RMS on both days and increased along-track RMS on both
+days. The acceptance rule requires improvement on both days without a metric getting worse.
+The tracker keeps its current forecast for the hold-out candidate.
 
