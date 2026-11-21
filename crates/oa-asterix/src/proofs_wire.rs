@@ -64,7 +64,9 @@ fn walk_every_item_cat062_24() {
 }
 
 /// The FSPEC of category `uap` over any bytes of up to `N` octets. The FSPEC ends or is refused
-/// within `uap.slots.len() / 7` octets, so `N` one above that covers every input.
+/// within `uap.slots.len() / 7` octets (rounded up); only where `N` reaches that (CAT048 with
+/// five) is every input covered. CAT021 and CAT062 with three octets cover inputs up to three
+/// octets, not the longer FSPECs those tables can address.
 fn fspec_total<const N: usize>(uap: &'static Uap) {
     let buf: [u8; N] = kani::any();
     let len: usize = kani::any();

@@ -481,9 +481,11 @@ mod proofs {
     }
 
     /// Stands for `decode_row`, whose own contract is proved by `decode_row_total_ads2` and
-    /// `decode_row_total_ads1`: any record may be dropped or kept, and the anomaly bits are
-    /// among the three that exist. With it the loop and the counting are proved for symbolic
-    /// records without the solver re-deriving the record decoder for every record.
+    /// `decode_row_total_ads1` (record layouts, not payload magics): each record is kept or
+    /// dropped as the solver chooses, with anomaly bits among the three that exist. The record
+    /// bytes themselves are not symbolic here (the payload is zero-filled past its header), so the
+    /// proof is of the loop and the counting over any keep/drop sequence, not of any record's
+    /// contents; the solver is spared re-deriving the record decoder for every record.
     fn any_row(_: &[u8], _: bool) -> Option<(Row, u8)> {
         if kani::any() {
             let anom: u8 = kani::any();
@@ -498,21 +500,18 @@ mod proofs {
     /// record are what the solver cannot afford, so the output columns are not inspected.
     fn push_nothing(_: &mut Reports, _: &Row) {}
 
-    /// A payload with a valid header for exactly `K` records of the layout `LEGACY` selects,
-    /// through the lenient and the strict decoder. The length is a constant: a symbolic slice
-    /// length costs the solver more than the records do, and
+    /// A payload with a valid header carrying `magic` for exactly `K` all-zero records of the
+    /// layout `LEGACY` selects, through the lenient and the strict decoder. The length is a
+    /// constant: a symbolic slice length costs the solver more than the records do, and
     /// `parse_header_any_bytes_up_to_2_records` covers every other length.
-    fn records_total<const K: usize, const LEGACY: bool>() {
+    /// The ADS2 magic takes the same header branch as ADS3 and runs the same loop; a harness for
+    /// it took 305 s, over the 300 s budget, so only ADS3 and ADS1 are proved.
+    fn records_total<const K: usize, const LEGACY: bool>(magic: [u8; 4]) {
         let mut buf = [0u8; PAYLOAD_HEADER_LEN + RECORD_LEN * 8];
         let rec = if LEGACY {
             LEGACY_RECORD_LEN
         } else {
             RECORD_LEN
-        };
-        let magic = if LEGACY {
-            LEGACY_PAYLOAD_MAGIC
-        } else {
-            PAYLOAD_MAGIC
         };
         buf[..4].copy_from_slice(&magic);
         buf[4..6].copy_from_slice(&(rec as u16).to_le_bytes());
@@ -546,8 +545,8 @@ mod proofs {
     #[kani::unwind(10)]
     #[kani::stub(decode_row, any_row)]
     #[kani::stub(reports_push, push_nothing)]
-    fn payload_records_ads2_4() {
-        records_total::<4, false>();
+    fn payload_records_ads3_4() {
+        records_total::<4, false>(PAYLOAD_MAGIC);
     }
 
     // REQ: OA-ADSB-101
@@ -556,6 +555,6 @@ mod proofs {
     #[kani::stub(decode_row, any_row)]
     #[kani::stub(reports_push, push_nothing)]
     fn payload_records_ads1_4() {
-        records_total::<4, true>();
+        records_total::<4, true>(LEGACY_PAYLOAD_MAGIC);
     }
 }

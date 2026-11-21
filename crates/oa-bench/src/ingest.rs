@@ -11,8 +11,8 @@ use oa_tfms::NO_TIME as TFMS_NO_TIME;
 use oa_xml::Parser;
 
 use crate::legacy::{
-    flight_ix, pad, push_tbfm, push_tfms, push_th, row_has, tbfm_kind, tfms_kind, Counts, Legacy,
-    TfmsIn, NO_ALT, NO_TIME,
+    flight_ix, pad, push_tbfm, push_tfms, push_tfms_actual, push_th, row_has, tbfm_kind, tfms_kind,
+    Counts, Legacy, TfmsIn, NO_ALT, NO_TIME,
 };
 use crate::scan::scan_doc;
 
@@ -388,6 +388,16 @@ pub fn ingest_tfms(leg: &mut Legacy, r: &mut Reader, bytes: &[u8]) {
             if ms != TFMS_NO_TIME && ty != ttype::ESTIMATED {
                 leg.counts.note(DROP_TFMS_NOT_ESTIMATE.into(), 1);
             }
+        }
+        if f.eta_ms != TFMS_NO_TIME && f.eta_type == ttype::ACTUAL {
+            push_tfms_actual(
+                leg,
+                &TfmsIn {
+                    kind: tfms_kind::ETA,
+                    time_ms: f.eta_ms,
+                    ..base
+                },
+            );
         }
         if f.eta_ms != TFMS_NO_TIME && f.eta_type == ttype::ESTIMATED {
             push_tfms(

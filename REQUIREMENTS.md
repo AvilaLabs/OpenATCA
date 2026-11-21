@@ -3346,6 +3346,7 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   no time, is counted under the notes and not stored.
 - **OA-BENCH-135** A beacon change beyond the cap is counted under the label `DROP_SFDPS_BEACON_FULL` and the flight
   still holds the last code.
+- **OA-BENCH-136** `Legacy::tfms_actual` holds the TFMS arrival times of type ACTUAL, apart from `Legacy::tfms`; a row that does not fit is counted in `overflow_tfms_actual`, and neither the table nor the counter appears in any oa-bench report line.
 
 ## Winds aloft (oa-wind)
 
@@ -4102,8 +4103,14 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   table bound and cannot increase when only the clock advances with the same nonnegative drop
   interval. Updating an existing sensor preserves its maximum accepted timestamp; inserting a
   new sensor into a full table replaces the first least-recent slot and saturating-increments
-  eviction exactly once, preserving every other entry. Proof results state their fixture,
-  timestamp domain and capacity explicitly; they do not imply whole-clock-policy correctness.
+  eviction exactly once, preserving every other entry.
+  - Proved with Kani, at the production capacity: the count cannot increase when only the clock advances
+    (`full-sensor-monotonicity`), and the update and insert behaviour (`full-sensor-note-existing`,
+    `full-sensor-note-new`). Each proof states its fixture, timestamp domain and capacity; none implies
+    that the whole clock policy is correct.
+  - Tested, not proved: the count equals the number of sensors inside the drop interval, against an i128
+    reference, on 20,000 random full tables with clocks over all of `i64`, `i64::MIN` and `i64::MAX`
+    stored, and drops up to one day.
 - **OA-TRK-318** The coarse query lists each track at most once as it appends, so its output never
   holds more entries than the index has tracks and a buffer sized for the tracks is never grown, whatever
   the pieces of the rectangle share (tracks on the boundary of two pieces included); the tracks listed
@@ -5355,6 +5362,30 @@ scope.
 - **OA-TRK-400** OpenATCA's and ERAM's time offsets are fitted on the two-way common set, the passthrough's on
   the three-way set (P-008 §1).
 
+- **OA-TRK-401** Velocity lag. A measurement carries `vel_lag_s`, how far its velocity lags behind the
+  aircraft's.
+  - It is zero unless the source sets it. ADS-B sets `VEL_LAG_S`, 1.0 s. A lag outside 0 to 10 s, or not a
+    number, refuses the velocity as bad.
+  - The horizontal filter treats the velocity as the aircraft's velocity `L = vel_lag_s` seconds before the
+    report. Against the state, the expected measurement is `z = R(-w L) v`: the state's velocity turned back
+    by its turn rate `w` over `L`. The update is linearised at the state, so a lagged velocity also
+    corrects the turn rate, and the turn-rate column of the Jacobian is the derivative of `z`.
+  - The velocity gate compares the report against the same expectation, with the same innovation
+    covariance as the update.
+  - At a lag of zero the update and the gate are the plain velocity ones, bit for bit. The straight model's
+    turn rate is zero, so its update is always the plain one.
+  - A report that agrees with the expectation leaves the state unchanged. The covariance stays symmetric
+    and not negative. A singular innovation covariance changes nothing.
+  - Limit: with the ADS-B lag, the shipped gate accepts a report forged 2 km away after a 9 s gap in the
+    track's reports, against 10 s without the lag (docs/TURNS_EXPERIMENTS.md).
+- **OA-TRK-402** `turn_diag` reports OpenATCA's and ERAM's cross-track and track-angle error on the common
+  samples of a P-002 `samples.csv`: n, median, p95 and RMS of the absolute values, by nearest rank.
+  - It bins them by the reference's turn rate, the turn phase, the tracker's turn-model probability, the
+    time since the track's last report, and the gap the sample falls in. A value goes to the highest bin
+    whose lower edge it reaches.
+  - It reports how far the reported velocity's track angle lags behind the reference's.
+  - With `--rescore`, `--thin N` keeps every Nth input report per aircraft and `--vel-lag` sets the lag, so both effects can
+    be measured on the same day.
 - **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
   refused in every date syntax. Any input path the shared sealed list refuses (`oa-sealed`, OA-SEAL-001), and every file the run opens
   (each file of the feed directory, the ADS-B clip, each file and the README of a `slice` source), is checked
@@ -5545,10 +5576,11 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   empty, longer than its field or not printable ASCII. A duration exactly the maximum is accepted.
 - **OA-SAF-006** A full table refuses the request and counts it; no inhibition is evicted, and an
   id is never reused.
-- **OA-SAF-007** An inhibition is in force at `t` iff `start <= t < end` (the start instant in, the
-  end instant out; never for an empty or reversed span). Proved with Kani over every `i64` triple.
-- **OA-SAF-008** The altitude band is inclusive at both ends and empty when reversed. Proved with
-  Kani over every `i32` triple.
+- **OA-SAF-007** An inhibition is in force at `t` iff `start <= t < end`: the start instant is in, the end
+  instant out, and an empty or reversed span is never in force. Tested at both boundaries and on an empty
+  and a reversed span (`an_inhibition_is_in_force_from_its_start_to_just_before_its_end`).
+- **OA-SAF-008** The altitude band is inclusive at both ends and empty when reversed. Tested at both
+  boundaries and on a reversed band (`the_altitude_band_is_inclusive_at_both_ends`).
 - **OA-SAF-009** The query names the inhibitions that hide an alert at a position, altitude and
   time: on the net, in force, the point strictly inside the area (a point on an edge or vertex is
   not hidden), the altitude in the band. An unknown altitude is hidden by none. The pure query
@@ -5770,32 +5802,47 @@ configuration with no default; the crate's tests use synthetic values.
   now by a hair, and pairs at the limit and at the end of the look-ahead. Not proved: the bounded proofs of
   this decision did not finish in an hour.
 - **OA-CA-028** A pair inside the horizontal limit now, or inside the vertical limit now, always has a
-  loss interval of that kind, current, starting at zero and ending inside the look-ahead, even when the
-  rounding of the solution puts the end of the interval a hair before zero; the exact edge is not inside.
-  Tested at margins from 1 m to 1e-12 m and proved (Kani, bounded) for both solvers. The horizontal proof is
-  split at the square root: the first step (`horizontal_step`: the squared speed, the discriminant, the time
-  of closest approach, then the decision `step_of`) and the last (`span_from_root`, taking `root`) are
-  proved apart, each in seconds (`ca-horizontal-now-step`, `-bounds`, `-approach`, `-root`), with the root
-  a free value under the contract "finite, not negative, at most 7e9", which the square root of a finite
-  discriminant in `(0, 4e19]` meets (`ca-horizontal-now-sqrt`). The split is the same arithmetic in the same
-  order (`crates/oa-ca/tests/split.rs`: bit for bit against 2,400 vectors computed by the unsplit code at
-  commit 4eee1aa, in `tests/golden/`, and against a copy of it on a million inputs). The hand-off between the
-  two is tested, not proved: the first step's output meets the contract the root step is proved under on
-  400,000 bounded inputs (a proof of the real `horizontal_step` does not finish in ten minutes).
-- **OA-CA-029** Proved (Kani, bounded), in parts: the meet of two ordered intervals is finite and ordered
-  inside the look-ahead (`ca-meet`); the conflict span of any ordered horizontal span and a bounded vertical
-  part is finite and ordered (`ca-predict-span`); the time to loss of a prediction made from an ordered span
-  is finite and inside the look-ahead, the misses carried unchanged (`ca-predict-ttl`; `predict` is the
-  conflict span, the two misses, then `prediction_of`); the vertical miss is finite and not negative
-  (`ca-vertical-span`); the closest point of the horizontal miss is finite, within 5e7 m of the origin, at a
-  time inside the look-ahead (`ca-horizontal-miss-point`); and the horizontal miss itself, the exactly rounded
-  square root of `x*x + y*y` at that point, is finite and not negative (`ca-horizontal-miss`, on the real
-  function): at most 5e7 m on each axis the sum cannot overflow. The chain rests on the exact rounding of
-  `oa_ieee::sqrt`, as the root proof of OA-CA-028 does, and on no other library contract; the crate no
-  longer calls `hypot`. Tested, not proved: the miss agrees with `oa_math::hypot` to 2 units in the last
-  place wherever the larger coordinate is at least 1e-150 m, and to 1e-150 m below that, where the squares
-  underflow (`tests/miss.rs`, on the real function). Beyond about 1e154 m the square overflows to infinity, far outside
-  the bound the configuration check enforces (OA-CA-013).
+  loss interval of that kind, current, starting at zero and ending inside the look-ahead. This holds even
+  when the rounding of the solution puts the end of the interval a hair before zero; the exact edge is not
+  inside.
+  - The horizontal solver is split at the square root, in the same arithmetic and the same order as the
+    unsplit code (`crates/oa-ca/tests/split.rs`: bit for bit against 2,400 vectors from the unsplit code at
+    commit 4eee1aa, in `tests/golden/`, and against a copy of it on a million inputs).
+  - Proved with Kani, bounded:
+    - the squared speed and the discriminant stay within their bounds (`ca-horizontal-now-bounds`);
+    - the time of closest approach is finite and bounded when the speed is not zero
+      (`ca-horizontal-now-approach`);
+    - the square root of a finite discriminant in `(0, 4e19]` is finite, not negative and at most 7e9
+      (`ca-horizontal-now-sqrt`);
+    - from any root under that contract, the span of a current pair is current (`ca-horizontal-now-root`).
+  - Tested, not proved:
+    - the decision of the first step, `step_of`: a current pair gets a current span or a root step with a
+      positive discriminant. Tested at margins from 1 m to 1e-12 m and on 40,000 random inputs over the
+      domain the bounds proof covers;
+    - the hand-off between the two steps: the first step's output meets the root step's contract, on
+      400,000 bounded inputs. A proof of the real `horizontal_step` does not finish in ten minutes.
+- **OA-CA-029** A prediction is made from the horizontal and vertical spans, then their conflict span, the
+  two misses, and `prediction_of`.
+  - Proved with Kani, bounded:
+    - the conflict span of any ordered horizontal span and a bounded vertical part, through `meet`, is
+      finite and ordered inside the look-ahead (`ca-predict-span`);
+    - the vertical miss is finite and not negative (`ca-vertical-span`);
+    - the closest point of the horizontal miss is finite, within 5e7 m of the origin, at a time inside the
+      look-ahead (`ca-horizontal-miss-point`);
+    - the horizontal miss, the exactly rounded square root of `x*x + y*y` at that point, is finite and not
+      negative (`ca-horizontal-miss`, on the real function). At most 5e7 m on each axis, the sum cannot
+      overflow.
+  - Tested, not proved:
+    - `prediction_of`: the time to loss is the span's start, or zero for a current span, and lies inside the
+      look-ahead; the misses are carried unchanged, a NaN vertical miss included. Tested on edge cases and on
+      40,000 random spans and misses;
+    - the miss agrees with `oa_math::hypot` to 2 units in the last place wherever the larger coordinate is
+      at least 1e-150 m, and to 1e-150 m below that, where the squares underflow (`tests/miss.rs`, on the
+      real function).
+  - The chain rests on the exact rounding of `oa_ieee::sqrt`, as the root proof of OA-CA-028 does, and on no
+    other library contract; the crate no longer calls `hypot`.
+  - Beyond about 1e154 m the square overflows to infinity, far outside the bound the configuration check
+    enforces (OA-CA-013).
 - **OA-CA-030** The tool uses the shared sealed-path guard (`oa-sealed`) for every path: the clip, the
   configuration and the output directory are checked as given and after links before anything is opened or
   created, and the configuration is opened, then verified as the file opened (a link swapped between check
@@ -5836,10 +5883,8 @@ configuration with no default; the crate's tests use synthetic values.
   - The development configuration's cap is 100 km. On the national hour of 19 November 2026 it bound
     9 rows in 3,601 cycles, against 26,872 at 20 km.
 - **OA-CA-034** What is proved and what is tested for OA-CA-033:
-  - Proved (Kani, bounded): the squared chord of two vectors with components in [-1, 1] is finite and
-    not negative (`ca-chord-d2`). That is a small property; the trigonometry is outside what the
-    harnesses reach.
-  - Tested, not proved, by deterministic random pairs in `grid::tests`:
+  - Nothing in it is proved. Tested by deterministic random pairs in `grid::tests`:
+    - the squared chord of two vectors with components in [-1, 1] is finite and not negative;
     - the chord is never longer than the exact distance the evaluation uses, on 200,000 pairs up to
       85 degrees and 400 km apart, the smallest ratio being 1.000000068;
     - where the flat test is valid it accepts every pair the exact projection accepts;
@@ -6516,6 +6561,61 @@ configuration with no default; the crate's tests use synthetic values.
   suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
   ratio is outside 0.8 to 1.25.
 
+## M4 legacy trajectory measurement (tools/oa-legacy-traj)
+
+- **OA-LTJ-001** The time an aircraft reached a point is the time of closest approach of its ADS-B truth path to the point, interpolated linearly between the two samples either side of it.
+- **OA-LTJ-002** A crossing counts only when the closest approach is within the configured cut distance (development value 2 NM); the closest approach of every (flight, point) searched is counted by distance bucket in the report.
+- **OA-LTJ-003** A passage is at an edge, and not scored (counted as such), only when the segment of its closest approach, or a segment directly next to it, begins or ends at the start or end of the truth path or at a hole in the truth; a path with no sample is counted separately.
+- **OA-LTJ-004** An estimate is scored against one passage of the bound leg, chosen by the rule of OA-LTJ-049 from the passages whose closest approach is not before the time the estimate was issued. When every passage is before it, the last one is taken: the event happened before the message, and the error is kept. The estimated time never chooses the passage.
+- **OA-LTJ-005** The touchdown time is the middle of the gap between the last airborne report and the first ground report, the gap at most the configured limit (development value 30 s); the last airborne report is within the runway radius (5 NM) of the airport reference point; a landing outside either is counted by reason.
+- **OA-LTJ-006** The bin of an estimate is that of its stated lead, the estimate minus the issue time of the message that carried it; the bins are 0-5, 5-10, 10-20, 20-40, 40-60 and 60-120 minutes, lower edge included; a stated lead that is negative or outside them is excluded and counted. The actual time minus the issue time is a sensitivity binning.
+- **OA-LTJ-007** The error is the estimate minus the actual time, in seconds: positive when the estimate is later than what happened.
+- **OA-LTJ-008** Each bin reports n, the median, 95th and 99th percentile of the absolute error (nearest rank, OA-LTJ-025) as the headline columns, the signed median and mean as bias, the signed 5th and 95th percentile as spread, and the RMS and the share over 1,800 s, computed in a fixed order whatever order the values arrive in; the 95th and 99th percentiles and the spread percentiles are printed only for n of 100 or more, else `n<100` (empty in the CSV).
+- **OA-LTJ-009** A flight that carries an aircraft address joins by it when a truth leg of that address overlaps the flight's interval; otherwise it has no truth, and its callsign is not tried.
+- **OA-LTJ-010** A flight without an address joins by callsign when the truth legs with that callsign that overlap its interval are of one aircraft; several aircraft is ambiguous, none is no truth.
+- **OA-LTJ-011** A flight with no address and no callsign, and a flight whose records name more than one address, each have their own join outcome.
+- **OA-LTJ-012** Every flight is counted under one join outcome and every estimate is either in a bin or under one exclusion reason; a flight with no truth is counted and its estimates are excluded, none is dropped; a callsign join that fails the conditions of OA-LTJ-030 counts as no truth.
+- **OA-LTJ-013** The report text and the CSV are a function of the counts alone, and every number carries its n.
+- **OA-LTJ-014** ERAM's predicted time at each point of a converted route is scored against the crossing of the point, by look-ahead from the route message; a point's position is its own coordinates, else the one place its name has in the recordings.
+- **OA-LTJ-015** TBFM's meter-fix and scheduled times are scored against the crossing of the meter fix, and its runway times against the landing at the arrival airport.
+- **OA-LTJ-016** TFMS's arrival estimates are scored against the landing at the arrival airport; its departure estimates are counted and not scored.
+- **OA-LTJ-017** The tool takes the three recording directories, one or more ADS-B clips and the output directory, and refuses a missing, repeated or unknown argument. A NASR archive and a places file are optional. Its usage text prints every default and every fixed setting, and the test checks that text against the values the tool uses.
+- **OA-LTJ-018** Output files are written under a temporary name and renamed only after all are written. On any failure every temporary file is removed, and the error names the files already renamed, which keep their new content; a failed run can therefore leave new and old files side by side, and says so.
+- **OA-LTJ-019** The tool refuses every input and output path that resolves into sealed data, before anything is opened or created.
+- **OA-LTJ-020** An airport's place is taken from NASR (`APT_BASE`, by its FAA identifier and its ICAO identifier) or the places file, never derived from the recordings; an airport with no place is excluded and counted as airport unknown.
+- **OA-LTJ-021** A named point's place is its own coordinates in a route message, else NASR (`FIX_BASE`, `NAV_BASE`, and an airport where a route names one) as overridden by the places file; a name with no place is unknown and counted as an exclusion; a malformed places line is refused naming its line.
+- **OA-LTJ-022** A name with several places takes the one nearest the flight's route and the estimate is counted as ambiguous-resolved: for ERAM, the distance by great circle from the candidate to the nearest of the filed route's neighbouring points with coordinates (two each side in the same route), else of the flight's other route points with coordinates, else of the flown path (thinned to at most 200 places), and the report counts which was used; for TBFM the flown path; the name is refused and counted as ambiguous when its places are more than 500 NM apart or the flight has no reference place.
+- **OA-LTJ-023** Scored rows are in four blocks: address-joined and airborne at issue (the headline), address-joined and not airborne at issue (pre-departure, labelled as including departure delay), and the same two for callsign joins; each block reports as OA-LTJ-008, with the rows kept whose event was before the issue counted per bin. Headline-only diagnostics: the error by actual lead, a histogram, the error against the TFMS actual arrival time, the touchdown at the last airborne and at the first ground report, the gap of the landings used, one row per flight and bin (the last message in the bin) for every kind, and the crossing at the cuts 0.5, 1, 2 and 5 NM.
+- **OA-LTJ-024** `--nasr` reads `FIX_BASE`, `NAV_BASE` and `APT_BASE` from a NASR CSV archive through the sealed-data guard; the report gives, for ERAM name-only route points, TBFM meter-fix and scheduling-fix names and TFMS arrival codes, how many names and occurrences are not found, have one place, have several within 500 NM, or several over 500 NM, and lists the 20 most frequent names not resolvable.
+- **OA-LTJ-025** Percentiles are nearest rank, as `oa-bench` and `p002` define them: the value at 1-based rank ceil(p n / 100) of the sorted values, no interpolation.
+- **OA-LTJ-026** A passage in progress at the issue time is chosen by its closest approach like any other; one whose closest approach is before the issue is the last passage and is kept.
+- **OA-LTJ-027** A change from airborne to ground is a landing only when no airborne report follows within 30 s of the last airborne report and that report is below the airport elevation (NASR) plus 1,000 ft or below 80 m/s; refused changes near the airport are counted (touch and go, blip, too high and fast); a landing elsewhere is a diversion exclusion; a leg with no ground report is excluded as `bound leg has no ground report`, checked after the look-ahead range; the landing exclusions are split by whether the bound leg ends inside the clip box or within 10 NM of its edge.
+- **OA-LTJ-028** A row whose event happened before the issue time and whose estimate is not before it is scored, not excluded, and counted per bin.
+- **OA-LTJ-029** Each message binds exactly one truth leg of the flight's own. A leg in progress at the issue time binds only when the aircraft is airborne on it (OA-LTJ-031), it lands after the issue, and it took off within 10 NM of the departure airport or lands within 10 NM of the arrival airport, or, with neither airport known, carries the flight's callsign; a leg that had landed before the issue never binds as in progress. Otherwise the first leg not yet airborne at the issue binds when it starts within 3 h after the issue and took off at the departure airport, or, with the departure airport unknown or not in NASR, carries the flight's callsign; else none (counted as no leg, no leg of the flight's own, or departure past the window). The crossing and the landing are searched only on that leg; joined flights whose interval touched more than one leg are counted.
+- **OA-LTJ-030** A callsign join needs a leg that starts no later than 3 h after the flight's first issue (or is in progress at it) and, when the departure or arrival airport is known, that took off at the departure airport or landed at the arrival airport (within 10 NM of its place); a join refused is counted by the condition that refused it.
+- **OA-LTJ-031** A row is airborne at issue when the issue time is between the bound leg's first airborne report and its landing (the first ground report of the first change to ground that holds up, OA-LTJ-027), or its last report when it does not land; otherwise it is pre-departure.
+- **OA-LTJ-032** The report header gives, for each system, the flights in the recording, the flights joined to an ADS-B aircraft in the clip and their share, the flights with a scored estimate, and the estimates excluded because the bound leg has no ground report.
+- **OA-LTJ-033** The NASR archive and the places file go through the sealed-data guard, by the tool's path check and by the readers themselves.
+- **OA-LTJ-034** No two distinct NASR airports share an airport key; a shared key is detected and counted in the report header.
+- **OA-LTJ-035** An in-progress leg that is another flight's is refused and counted, and the message falls through to the flight's own next leg: a turnaround where one fix lies on both the inbound and the outbound legs scores the outbound flight's message against the outbound passage only.
+- **OA-LTJ-036** A leg that landed before the issue time (taxi-in) never binds as in progress; it is counted as refused.
+- **OA-LTJ-037** The airborne span of a leg runs from its first airborne report to the first ground report of the first change to ground that holds up, else to its last report; a leg with no airborne report has none.
+- **OA-LTJ-038** The landing persistence of 30 s is measured from the last airborne report.
+- **OA-LTJ-039** A passage is at an edge only as OA-LTJ-003 says: a path that merely begins or ends within the cut, far from the closest approach, is not.
+- **OA-LTJ-040** For each kind and stated-lead bin the report gives the estimates offered, those with no leg (of which no leg of the flight's own, and departure past the window) and those scored; the landing exclusions are split by where the bound leg ends (OA-LTJ-027); a table gives, per arrival airport (the 30 with most estimates), the estimates offered, scored and the share.
+- **OA-LTJ-041** For every kind the report gives the headline as one message per flight and stated-lead bin (the last message of the flight in the bin, all its rows), beside the message-weighted one.
+- **OA-LTJ-042** A leg ends at the clip box edge when its last place is within 10 NM of an edge of the box.
+- **OA-LTJ-043** The estimate of a name with several places in an ERAM route is resolved against the route's neighbouring points, else the route's other points, else the flown path, and the report counts each.
+- **OA-LTJ-044** A runway or arrival estimate whose stated lead is out of range is excluded for that reason before the ground-report check.
+- **OA-LTJ-045** The headline crossing is searched at the cuts 0.5, 1, 2 and 5 NM, the headline stays at 2 NM, every row scored at a smaller cut is scored at each larger one (OA-LTJ-048; a violation is counted), and headline crossings whose closest approach is from 2 to 5 NM are reported apart as the abeam table; every cut reports its rows per bin.
+- **OA-LTJ-046** The TBFM `sta_sfx` and `sta_rwy` kinds are labelled a schedule target (metering), not a forecast.
+- **OA-LTJ-048** The passage of a (message, point) is chosen once, among the passages found at the largest cut, by the rule of OA-LTJ-049; each cut scores that passage when its closest approach is within the cut and it is not at an edge, so a row scored at a cut is scored at every larger one.
+- **OA-LTJ-047** The report gives, for the ERAM headline rows at 60 to 120 minutes under the binding of the earlier rounds (in progress or next leg with no ownership test), what became of each under the present binding, counted by reason.
+- **OA-LTJ-049** A run of consecutive truth segments within the cut is split into passages where the distance to the point rises 0.5 NM above the run's closest approach and then falls 0.5 NM below its largest, so each loop of a hold is its own passage. Of the passages not before the issue the first whose closest approach is within 0.5 NM is chosen; if none, the closest (the earliest on a tie); if none is at or after the issue, the last before it. The report counts the (message, point) rows with more than one passage and those whose choice differs from the runs-not-split closest rule.
+- **OA-LTJ-050** Next to each headline the report gives, per bin, the share of the offered rows excluded as truth path never within the cut, passage at an edge, and no ground report, and the headline recomputed without the rows whose place was resolved against the flown path. Exact duplicate rows (same flight, point, issue time and estimate) are dropped before scoring and counted.
+- **OA-LTJ-051** An in-progress leg is owned by a flight whose departure and arrival airports are both known only when the departure matches (or the leg begins at the clip box edge) and the arrival matches (or the leg ends there), at least one of them matching; the rows whose bound leg this changes are counted. ADS-B legs carry no flight-plan identity, so no binding by GUFI is possible.
+- **OA-LTJ-052** A truth path segment longer than 30 s is a hole for the edge rule and is counted (the truth answers only within 10 s of a report on both sides, so none arises at a step of 30 s or less).
+
 ## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
 
 Build order step 7 of docs/M5_DESIGN.md. `oa-msaw` is a core crate; the shell lookups of terrain,
@@ -6706,6 +6806,7 @@ FAA value.
   (barometric and geometric altitude, vertical rate and its kind), its measurements and the tracker's rows.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.
+
 ## Runway geometry and occupancy (oa-runway)
 
 - **OA-RWY-001** An airport's local east-north plane is a tangent plane about its reference point with the WGS-84
@@ -6746,30 +6847,31 @@ FAA value.
   touching. Tests `unknown_position_or_radius_occupies_everything`, `a_runway_with_a_non_finite_number_never_clears_a_target`
   (nine fields) and `real_coordinates_run_end_to_end_through_the_plane_and_the_test` (KMDW, from latitude and
   longitude).
-- **OA-RWY-008** Raising the radius never removes a region from the result (test `a_larger_radius_only_adds_occupancy`,
-  a sweep of radii at six positions). For the whole of `occupies` this is tested, not proved; OA-RWY-009 proves it
-  for the one-region test underneath.
-- **OA-RWY-009** For every region box and every coordinate pair within 1e9 m, and finite radii 0 <= r1 <= r2, the
-  one-region test `in_box`, which every occupancy flag uses, is true at r2 whenever it is true at r1; the runway-axis
-  coordinates do not depend on the radius. Proved with Kani (`occupancy_is_monotone_in_r95`, with `kani::cover!` that
-  gaining a region is reachable). A proof through `occupies` with a symbolic runway did not finish in the time budget.
-- **OA-RWY-010** For every runway, every non-finite, negative or beyond-1e9 m position or radius occupies every region
-  and is marked unknown (Kani `non_finite_input_occupies`), and for every runway with any non-finite number, every
-  position and radius does too (Kani `non_finite_runway_occupies`).
-- **OA-RWY-011** For every runway of the kind `build_runway` makes and every finite radius of at least zero, a target
-  whose coordinates in the runway axes lie inside the rectangle touches it. Proved with Kani
-  (`point_in_rectangle_occupies`); the rotation from the plane into the runway axes is covered by the unit tests, not
-  the proof.
+- **OA-RWY-008** Raising the radius never removes a region from the result. Tested by a sweep of radii at six
+  positions (`a_larger_radius_only_adds_occupancy`) and by OA-RWY-009.
+- **OA-RWY-009** For finite radii 0 <= r1 <= r2, a target that occupies a region at r1 occupies it at r2,
+  and the runway-axis coordinates do not depend on the radius. Tested, not proved: on 30,000 random runways at
+  any heading, positions within 1e9 m and radii up to 1e9 m, through `occupies` itself
+  (`a_larger_radius_never_clears_a_region_for_random_runways_positions_and_radii`).
+- **OA-RWY-010** A non-finite, negative or beyond-1e9 m position or radius occupies every region and is marked
+  unknown, and so does every position and radius on a runway with any non-finite number. Tested, not proved: at
+  the edge values, and on 30,000 random runways with a position, a radius or one of the runway's 16 numbers set to
+  NaN, infinity or beyond the limit
+  (`a_position_radius_or_runway_that_is_not_known_occupies_every_region_for_random_runways`).
+- **OA-RWY-011** For every runway of the kind `build_runway` makes and every finite radius of at least zero, a
+  target whose coordinates in the runway axes lie inside the rectangle touches it. Tested, not proved: 1e-6 m
+  inside the edges and on the edges themselves with a radius above zero
+  (`a_target_inside_the_runway_rectangle_touches_it_at_every_radius`), and on 30,000 random runways
+  (`a_target_inside_a_random_runway_rectangle_touches_it_at_every_radius`).
 - **OA-RWY-012** For every runway of the kind `build_runway` makes (finite geometry within 1e9 m, axis components
   within [-1, 1]) and every position and radius, any `f64` bit pattern included, `occupies` returns without panic,
   and for a known position the coordinates in the runway axes are finite and under 1e10 m. Proved with Kani
   (`occupies_never_panics`). The proof checks panics and those assertions; it does not run a separate float-overflow
   check.
-- **OA-RWY-013** For every plane scale `plane_new` can produce, the conversion from degrees gives no position for a
-  non-finite input, and any position it gives is finite and within 20 km on each axis. Proved with Kani
-  (`local_plane_is_bounded`). The disc limit itself (east squared plus north squared within the extent squared) is
-  tested, not proved.
-
+- **OA-RWY-013** The conversion from degrees to the local plane gives no position for a non-finite input, and any
+  position it gives is finite, within 20 km on each axis and inside the extent's disc. Tested, not proved: on
+  30,000 random origins and points, up to `f64::MAX`, NaN and infinity included
+  (`a_point_in_the_local_plane_is_finite_and_inside_the_extent_or_refused_for_random_origins_and_points`).
 ## Feed damage check (oa-feed-gaps, P-006 section 6 and P-007)
 
 - **OA-GAP-001** An interval between consecutive times of a feed over 600 s is an excluded interval (P-007), not damage by itself; exactly 600 s is not over.

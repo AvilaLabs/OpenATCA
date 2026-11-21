@@ -3,20 +3,27 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   kani:
     runs-on: ubuntu-24.04
-    # The enabled proofs add up to about 2 h 16 min on the development laptop, so the registry
-    # runs as two jobs of half of it each (every second enabled proof), well inside the limit.
+    # A push or pull request runs the push tier of the packages the change reaches (a change to
+    # the registry, the runner or this workflow reaches all of them); the nightly schedule and a
+    # manual run take the whole registry, as two jobs of half of it each (every second enabled
+    # proof), well inside the limit.
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        shard: ["0/2", "1/2"]
+        shard: ["0/4", "1/4", "2/4", "3/4"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Install pinned product Rust compiler
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
       - name: Install Kani installer compiler
@@ -35,11 +42,28 @@ jobs:
         run: python3 tools/test_rust_proof_suite.py
       - name: Test Kani runner and result bindings
         run: python3 tools/test_kani_validation.py
+      - name: Pick the proofs this run covers
+        id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # Scheduled and manual runs take the full suite; a push compares with the previous
+          # commit on main and a pull request with its base.
+          case "$EVENT" in
+            push) echo "changed_from=$PUSH_BEFORE" >> "$GITHUB_OUTPUT" ;;
+            pull_request) echo "changed_from=$PR_BASE" >> "$GITHUB_OUTPUT" ;;
+            *) echo "changed_from=" >> "$GITHUB_OUTPUT" ;;
+          esac
       - name: Run registered proof suite sequentially
+        env:
+          CHANGED_FROM: ${{ steps.pick.outputs.changed_from }}
         run: >-
           python3 tools/rust_proof_suite.py
           --fail-fast
           --shard "${{ matrix.shard }}"
+          ${CHANGED_FROM:+--changed-from "$CHANGED_FROM"}
           --repo "$GITHUB_WORKSPACE"
           --registry "$GITHUB_WORKSPACE/tools/rust_proofs.json"
           --out "$RUNNER_TEMP/kani-proof-evidence"

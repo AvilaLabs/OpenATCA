@@ -189,6 +189,7 @@ fn arbitrary_measurement() -> Measurement {
         ident: kani::any(),
         flags: kani::any(),
         category: kani::any(),
+        vel_lag_s: 0.0,
     }
 }
 

@@ -405,3 +405,158 @@ fn the_first_step_hands_the_root_step_the_three_values_the_proofs_take_within_th
     }
     assert!(roots > 10_000 && dones > 10_000, "{roots} {dones}");
 }
+
+// REQ: OA-CA-028
+#[test]
+fn the_decision_of_the_first_step_gives_a_current_pair_a_span_or_a_root_step() {
+    let t = 120.0;
+    let slow = STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS * 0.5;
+    // A pair at rest relative to each other: the whole look-ahead when current, none otherwise.
+    assert_eq!(
+        step_of(true, slow, 1.0, 5.0, t),
+        HorizontalStep::Done(Some(Span {
+            lo: 0.0,
+            hi: t,
+            now: true
+        }))
+    );
+    assert_eq!(
+        step_of(false, slow, 1.0, 5.0, t),
+        HorizontalStep::Done(None)
+    );
+    // No positive discriminant and a current pair: kept current to the closest approach, clamped
+    // to the look-ahead.
+    for (tc, hi) in [(-3.0, 0.0), (0.0, 0.0), (40.0, 40.0), (t, t), (500.0, t)] {
+        match step_of(true, 10.0, 0.0, tc, t) {
+            HorizontalStep::Done(Some(s)) => assert!(s.now && s.lo == 0.0 && s.hi == hi),
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(
+        step_of(false, 10.0, -1.0, 40.0, t),
+        HorizontalStep::Done(None)
+    );
+    // A positive discriminant hands the root step the same three numbers.
+    assert_eq!(
+        step_of(true, 10.0, 7.0, -2.5, t),
+        HorizontalStep::Root {
+            now: true,
+            tc: -2.5,
+            a: 10.0,
+            disc: 7.0
+        }
+    );
+}
+
+// REQ: OA-CA-029
+#[test]
+fn the_time_to_loss_of_a_prediction_is_the_span_start_or_zero_and_the_misses_are_carried() {
+    let t = 120.0;
+    for (lo, hi) in [(0.0, 0.0), (0.0, t), (30.0, 30.0), (30.0, 90.0), (t, t)] {
+        let span = Span { lo, hi, now: false };
+        let p = prediction_of(&span, 12.5, 300.0);
+        assert!(!p.now && p.ttl_s == lo && p.h_miss_m == 12.5 && p.v_miss_ft == 300.0);
+        assert!((0.0..=t).contains(&p.ttl_s));
+        let current = Span { lo, hi, now: true };
+        let p = prediction_of(&current, 0.0, 0.0);
+        assert!(p.now && p.ttl_s == 0.0);
+    }
+    // An unknown altitude has no vertical miss: the NaN is carried, not hidden.
+    let p = prediction_of(
+        &Span {
+            lo: 5.0,
+            hi: 9.0,
+            now: false,
+        },
+        1.0,
+        f64::NAN,
+    );
+    assert!(p.v_miss_ft.is_nan() && p.ttl_s == 5.0 && p.h_miss_m == 1.0);
+}
+
+// REQ: OA-CA-028
+#[test]
+fn the_decision_of_the_first_step_holds_over_random_inputs_in_the_contract() {
+    // The domain of the retired proof: `a` finite from 0 to A_MAX, any finite discriminant, a time
+    // of closest approach within TC_MAX (any finite value where `a` is taken as zero), a look-ahead
+    // in (0, MAX_LOOK_AHEAD_S].
+    const A_MAX: f64 = 3.3e7;
+    const TC_MAX: f64 = 4.0e18;
+    let still = STATIONARY_SPEED_MPS * STATIONARY_SPEED_MPS;
+    let mut r = Rng(0x51e9_0f01);
+    let (mut spans, mut roots, mut nones) = (0u32, 0u32, 0u32);
+    for case in 0..40_000u32 {
+        let a = match r.next() % 8 {
+            0 => 0.0,
+            1 => still,
+            2 => still * 0.999,
+            3 => A_MAX,
+            4 => r.unit().abs() * still,
+            _ => r.unit().abs() * A_MAX,
+        };
+        let disc = [0.0, -0.0, 1.0e-300, -1.0e-300, f64::MAX, f64::MIN][(r.next() % 6) as usize];
+        let disc = if r.next() % 3 == 0 {
+            disc
+        } else {
+            r.unit() * 10f64.powi((r.next() % 80) as i32 - 40)
+        };
+        let tc = if a < still && r.next() % 2 == 0 {
+            [f64::MAX, f64::MIN, 1.0e300][(r.next() % 3) as usize]
+        } else {
+            r.unit() * TC_MAX * if r.next() % 4 == 0 { 1.0e-12 } else { 1.0 }
+        };
+        let t = (r.unit().abs() * MAX_LOOK_AHEAD_S).max(1.0e-9);
+        let now = r.next() % 2 == 0;
+        match step_of(now, a, disc, tc, t) {
+            HorizontalStep::Done(Some(s)) => {
+                spans += 1;
+                assert!(now && s.now && s.lo == 0.0, "{case}");
+                assert!(0.0 <= s.hi && s.hi <= t && s.hi.is_finite(), "{case} {s:?}");
+            }
+            HorizontalStep::Done(None) => {
+                nones += 1;
+                assert!(!now, "{case}");
+            }
+            HorizontalStep::Root {
+                now: n,
+                tc: rtc,
+                a: ra,
+                disc: rd,
+            } => {
+                roots += 1;
+                assert!(n == now && rtc == tc && ra == a && rd == disc, "{case}");
+                assert!(ra >= still && rd.is_finite() && rd > 0.0, "{case}");
+            }
+        }
+    }
+    assert!(
+        spans > 2_000 && roots > 2_000 && nones > 2_000,
+        "{spans} {roots} {nones}"
+    );
+}
+
+// REQ: OA-CA-029
+#[test]
+fn the_time_to_loss_of_a_prediction_holds_over_random_spans_and_misses() {
+    let mut r = Rng(0x51e9_0f02);
+    for case in 0..40_000u32 {
+        let t = (r.unit().abs() * MAX_LOOK_AHEAD_S).max(1.0e-9);
+        let (x, y) = (r.unit().abs() * t, r.unit().abs() * t);
+        let (lo, hi) = (x.min(y), x.max(y));
+        let now = r.next() % 2 == 0;
+        let hm = r.unit().abs() * 10f64.powi((r.next() % 20) as i32 - 5);
+        let vm = match r.next() % 6 {
+            0 => 0.0,
+            1 => f64::NAN,
+            _ => r.unit().abs() * 10f64.powi((r.next() % 12) as i32 - 3),
+        };
+        let p = prediction_of(&Span { lo, hi, now }, hm, vm);
+        assert_eq!(p.now, now);
+        assert!(
+            p.ttl_s.is_finite() && 0.0 <= p.ttl_s && p.ttl_s <= t,
+            "{case}"
+        );
+        assert_eq!(p.ttl_s, if now { 0.0 } else { lo }, "{case}");
+        assert!(p.h_miss_m.to_bits() == hm.to_bits() && p.v_miss_ft.to_bits() == vm.to_bits());
+    }
+}

@@ -80,7 +80,8 @@ fn ident_roundtrip_any_six_octets() {
 
 /// Block framing over every byte string of up to 3 octets: a short header, a LEN below three or
 /// past the input, a block with LEN three (no record) and a category the crate does not carry.
-/// A block with a record is six octets at least.
+/// A block with a record is six octets at least, so no input here reaches a record: the walk of
+/// a record is covered by the item harnesses of `proofs_wire`. Six octets did not finish in 900 s.
 // REQ: OA-AST-103
 #[kani::proof]
 #[kani::unwind(6)]

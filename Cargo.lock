@@ -256,6 +256,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-legacy-traj"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-bench",
+ "oa-ieee",
+ "oa-math",
+ "oa-nasr",
+ "oa-replay",
+ "oa-sealed",
+ "oa-sha256",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-math"
 version = "0.0.1"
 dependencies = [

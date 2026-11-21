@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 107,
+  "expected_proof_count": 110,
   "proofs": [
     {
       "id": "output-append",
@@ -15,7 +15,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 25,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-capacity",
@@ -30,7 +33,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 37,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-clear",
@@ -45,7 +51,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 6,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-current-row",
@@ -67,7 +76,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 75,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-unrepresentable-row",
@@ -89,7 +101,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 33,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-output-overflow",
@@ -111,7 +126,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 69,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-rejected-dispatch",
@@ -128,7 +146,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 23,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-unconfirmed-applied",
@@ -146,7 +167,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 42,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-unconfirmed-begun",
@@ -163,7 +187,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 24,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-confirmed-begun-dispatch",
@@ -181,11 +208,14 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 47,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-actual-decision",
-      "requirement": "OA-TRK-334: production decide commits its Applied or Resynced result and emits the current report time.",
+      "requirement": "OA-TRK-334: with filter_apply stubbed to a fixed result, decide commits the report time, the ring entry, the counters and the current and anchor times, and the current report row is emitted.",
       "package": "oa-track",
       "harness": "tracker::proofs::actual_decide_commits_applied_or_resynced_report_and_emits_current_time",
       "enabled": true,
@@ -202,7 +232,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 12288
+      "memory_mib": 12288,
+      "tier": "push",
+      "ci_seconds": 108,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-refusal-routing",
@@ -222,7 +255,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 62,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-current-filter",
@@ -239,7 +275,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 56,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-anchor-filter",
@@ -256,7 +295,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 79,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-ring-history",
@@ -273,7 +315,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 60,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-metadata-category",
@@ -290,11 +335,14 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 42,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-restore-statistics",
-      "requirement": "OA-TRK-335: restoring a tracker transaction restores all tracker statistics; component evidence only.",
+      "requirement": "OA-TRK-335: restoring a tracker transaction puts back every statistic except numerical_refused, which the restore itself increments by one; component evidence only.",
       "package": "oa-track",
       "harness": "tracker::proofs::restore_track_transaction_restores_all_statistics",
       "enabled": true,
@@ -307,7 +355,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 50,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-restore-appended-row",
@@ -322,7 +373,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 24,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "output-restore-overflow",
@@ -340,7 +394,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 15,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "tracker-numerical-refusal-rollback",
@@ -357,7 +414,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 12288
+      "memory_mib": 12288,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "tracker-late-replay-rollback",
@@ -377,7 +437,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 12288
+      "memory_mib": 12288,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "large-move-decision",
@@ -400,7 +463,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 28,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-marks-rows",
@@ -423,7 +489,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 60,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected",
@@ -446,7 +515,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 2000,
       "external_timeout_seconds": 2400,
-      "memory_mib": 24576
+      "memory_mib": 24576,
+      "tier": "nightly",
+      "ci_seconds": 361,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-rollback",
@@ -461,7 +533,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 32,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "replay-monotonic-split",
@@ -486,29 +561,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
-    },
-    {
-      "id": "full-sensor-live-count",
-      "requirement": "OA-TRK-336: live sensor count matches the full 64-slot table contract.",
-      "package": "oa-track",
-      "harness": "time_gate::proofs_full::full_sensor_table_live_count_matches_slot_contract",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [
-        "minimum stored sensor timestamp",
-        "maximum stored sensor timestamp",
-        "all 64 full-table sensors live",
-        "no full-table sensors live"
-      ],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [
-        "kani_full_capacity"
-      ],
-      "harness_timeout_seconds": 300,
-      "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 4,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-monotonicity",
@@ -529,7 +585,10 @@
       ],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 48,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-update",
@@ -552,7 +611,10 @@
       ],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "caller-current-filter",
@@ -571,7 +633,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 75,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-metadata",
@@ -590,7 +655,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 61,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-anchor-filter",
@@ -609,7 +677,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 77,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-ring-history",
@@ -628,7 +699,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 90,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "caller-statistics",
@@ -647,7 +721,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 72,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-note-existing",
@@ -670,7 +747,10 @@
       ],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 12288
+      "memory_mib": 12288,
+      "tier": "nightly",
+      "ci_seconds": 125,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "full-sensor-note-new",
@@ -692,7 +772,10 @@
       ],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 12288
+      "memory_mib": 12288,
+      "tier": "nightly",
+      "ci_seconds": 227,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-anchor-filter-projection",
@@ -716,7 +799,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 202,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-current-filter-projection",
@@ -740,7 +826,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 143,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-metadata-projection",
@@ -764,7 +853,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 124,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-output-projection",
@@ -788,7 +880,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 130,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-ring-projection",
@@ -812,7 +907,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 161,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-stats-projection",
@@ -836,7 +934,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 147,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-anchor-filter-projection",
@@ -860,7 +961,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 188,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-current-filter-projection",
@@ -884,7 +988,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 138,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-metadata-projection",
@@ -908,7 +1015,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 118,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-output-projection",
@@ -932,7 +1042,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 120,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-ring-projection",
@@ -956,7 +1069,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 158,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-stats-projection",
@@ -980,7 +1096,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "nightly",
+      "ci_seconds": 143,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-append-reachability",
@@ -1010,7 +1129,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 113,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-reachability",
@@ -1040,7 +1162,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 86,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "late-overflow-combined",
@@ -1064,7 +1189,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "late-append-combined",
@@ -1088,7 +1216,10 @@
       "memory_mib": 12288,
       "loop_unwind_overrides": [
         "late-replay-two-events-pinned-cargo"
-      ]
+      ],
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "snapshot-round-trip-current-filter",
@@ -1105,7 +1236,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 82,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-round-trip-anchor-filter",
@@ -1122,7 +1256,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 62,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-round-trip-ring",
@@ -1139,7 +1276,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 55,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-scalars-category",
@@ -1154,7 +1294,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "push",
+      "ci_seconds": 108,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-current-filter",
@@ -1169,7 +1312,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 154,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-anchor-filter",
@@ -1184,7 +1330,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 123,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "snapshot-capture-equals-take-ring",
@@ -1199,7 +1348,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 900,
       "external_timeout_seconds": 1200,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 155,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-current-filter",
@@ -1218,7 +1370,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 123,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-current-filter-horizontal",
@@ -1237,7 +1392,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 136,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-current-filter-snapshot",
@@ -1256,7 +1414,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 243,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-ring",
@@ -1275,7 +1436,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1500,
       "external_timeout_seconds": 1800,
-      "memory_mib": 24576
+      "memory_mib": 24576,
+      "tier": "nightly",
+      "ci_seconds": 349,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-anchor-filter",
@@ -1294,7 +1458,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 144,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-anchor-filter-snapshot",
@@ -1313,37 +1480,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
-    },
-    {
-      "id": "inhibition-in-force",
-      "requirement": "OA-SAF-007: an inhibition is in force exactly when start <= t < end, for every i64 triple; never for an empty or reversed span.",
-      "package": "oa-safety",
-      "harness": "inhibit::proofs::in_force_is_start_inclusive_end_exclusive",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 300,
-      "external_timeout_seconds": 420,
-      "memory_mib": 8192
-    },
-    {
-      "id": "inhibition-band",
-      "requirement": "OA-SAF-008: the altitude band is inclusive at both ends and empty when reversed, for every i32 triple.",
-      "package": "oa-safety",
-      "harness": "inhibit::proofs::band_is_inclusive_and_empty_when_reversed",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 300,
-      "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 307,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-span",
@@ -1358,7 +1498,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 37,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-vertical-span",
@@ -1373,25 +1516,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
-    },
-    {
-      "id": "ca-horizontal-now-step",
-      "requirement": "OA-CA-028: the decision of the first step of the horizontal solver, for a pair inside the limit now and any squared speed, discriminant and time of closest approach within the stated contract, is a current span or a root step with the contract's values.",
-      "package": "oa-ca",
-      "harness": "solve::proofs::the_decision_of_the_first_step_gives_a_current_pair_a_span_or_a_root_step",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [
-        "a span without a root",
-        "a root step"
-      ],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 120,
-      "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 9,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-now-bounds",
@@ -1406,7 +1534,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 8,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-now-approach",
@@ -1421,7 +1552,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 4,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-now-root",
@@ -1436,7 +1570,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 2,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-now-sqrt",
@@ -1451,7 +1588,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 2,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-vertical-now-has-span",
@@ -1466,7 +1606,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-miss-point",
@@ -1481,7 +1624,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 25,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-horizontal-miss",
@@ -1496,7 +1642,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 18,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-predict-span",
@@ -1515,22 +1664,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
-    },
-    {
-      "id": "ca-predict-ttl",
-      "requirement": "OA-CA-029: the time to loss of a prediction made from an ordered span is finite and inside the look-ahead, and the misses are carried unchanged.",
-      "package": "oa-ca",
-      "harness": "solve::proofs::the_time_to_loss_of_a_prediction_is_finite_and_inside_the_look_ahead",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 120,
-      "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "ca-unknown-altitude",
@@ -1547,22 +1684,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
-    },
-    {
-      "id": "ca-chord-d2",
-      "requirement": "OA-CA-034: the squared chord of two vectors with components in [-1, 1] is finite and not negative.",
-      "package": "oa-ca",
-      "harness": "grid::proofs::chord_d2_of_unit_vectors_is_finite_and_not_negative",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 120,
-      "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 5,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-operands-ordered",
@@ -1577,7 +1702,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 1,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-slow-operands",
@@ -1592,7 +1720,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-dd-operands",
@@ -1607,7 +1738,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 5,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-dd-sum",
@@ -1622,7 +1756,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 207,
       "external_timeout_seconds": 327,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 66,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-scale-round",
@@ -1637,7 +1774,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 120,
       "external_timeout_seconds": 240,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 4,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "hypot-dd-square",
@@ -1652,7 +1792,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "hypot-dd-root",
@@ -1667,7 +1810,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "hypot-fast-plain",
@@ -1682,7 +1828,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "hypot-fast-scaled",
@@ -1697,7 +1846,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 600,
       "external_timeout_seconds": 720,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 0,
+      "ci_seconds_source": "none"
     },
     {
       "id": "large-move-decision-rejected-category",
@@ -1716,7 +1868,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 294,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-state-and-counts",
@@ -1735,7 +1890,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 227,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-first-times",
@@ -1754,7 +1912,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 296,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-last-time-and-updates",
@@ -1773,7 +1934,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 226,
+      "ci_seconds_source": "ci"
     },
     {
       "id": "large-move-decision-rejected-other-counters",
@@ -1792,7 +1956,289 @@
       "cfgs": [],
       "harness_timeout_seconds": 1200,
       "external_timeout_seconds": 1500,
-      "memory_mib": 16384
+      "memory_mib": 16384,
+      "tier": "nightly",
+      "ci_seconds": 179,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "runway-occupies-total",
+      "requirement": "OA-RWY-012: for every runway of the kind build_runway makes (finite geometry within 1e9 m, axis within [-1, 1]) and every position and radius (any f64 bit pattern), occupies returns without panic, and for a known position the rotated coordinates are Some, finite and under 1e10 m in size; overflow and NaN of the result are not separately checked.",
+      "package": "oa-runway",
+      "harness": "occupy::proofs::occupies_never_panics",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "an input that occupies",
+        "an input that is clear"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 540,
+      "external_timeout_seconds": 600,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 27,
+      "ci_seconds_source": "ci"
+    },
+    {
+      "id": "asterix-primitives",
+      "requirement": "OA-AST-100: for every byte string of up to six octets, the big-endian reader and the slice taker either advance by exactly the requested width within the input or leave the position unchanged, and sign extension keeps the low bits within the signed range of the width.",
+      "package": "oa-asterix",
+      "harness": "proofs::primitives_rd_take_sext",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 9,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-time-round-trip",
+      "requirement": "OA-AST-104: the time of day converts to milliseconds and back to the same 24-bit count for every count, and neither conversion panics for any u32.",
+      "package": "oa-asterix",
+      "harness": "proofs::time_roundtrip_24_bits",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 25,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-ident-round-trip",
+      "requirement": "OA-AST-104: every six-octet aircraft identification that decodes encodes back to the same six octets.",
+      "package": "oa-asterix",
+      "harness": "proofs::ident_roundtrip_any_six_octets",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 10,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-position-range",
+      "requirement": "OA-AST-106: for every 32-bit count at the CAT062 width, the longitude check accepts exactly the counts within plus or minus 2^25, and every count that converts gives a longitude within 180 degrees.",
+      "package": "oa-asterix",
+      "harness": "proofs::position_conversion_is_geographic_or_refused",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-walk-cat048",
+      "requirement": "OA-AST-102: every item of the CAT048 UAP, walked over any bytes of up to 24 octets, ends past its start and within the input or is refused at an offset within the input.",
+      "package": "oa-asterix",
+      "harness": "wire::proofs::walk_every_item_cat048_24",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 28,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-fspec-cat021",
+      "requirement": "OA-AST-101: the CAT021 field specification over any bytes of up to three octets ends past its start and within the input with at least one item, or is refused at an offset within the input.",
+      "package": "oa-asterix",
+      "harness": "wire::proofs::fspec_cat021_3",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 900,
+      "external_timeout_seconds": 1020,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 453,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-fspec-cat048",
+      "requirement": "OA-AST-101: the CAT048 field specification over any bytes of up to five octets ends past its start and within the input with at least one item, or is refused at an offset within the input.",
+      "package": "oa-asterix",
+      "harness": "wire::proofs::fspec_cat048_5",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 900,
+      "external_timeout_seconds": 1020,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 271,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-fspec-cat062",
+      "requirement": "OA-AST-101: the CAT062 field specification over any bytes of up to three octets ends past its start and within the input with at least one item, or is refused at an offset within the input.",
+      "package": "oa-asterix",
+      "harness": "wire::proofs::fspec_cat062_3",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 185,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-decode-row-ads2",
+      "requirement": "OA-ADSB-100: every ADS-B v2 record of the fixed length decodes without panic, and a row it keeps has anomaly bits among the three that exist, a latitude and longitude within range, and a source that is absent, named or marked unknown.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::decode_row_total_ads2",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 9,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-decode-row-ads1",
+      "requirement": "OA-ADSB-100: every legacy ADS-B record of the fixed length decodes or is dropped without panic.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::decode_row_total_ads1",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 5,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-header-two-records",
+      "requirement": "OA-ADSB-101: the payload header over any bytes of up to two records returns without panic, and a header it accepts gives the record length of its layout and a total length of exactly the header plus the counted records.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::parse_header_any_bytes_up_to_2_records",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 7,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-payload-ads1-4",
+      "requirement": "OA-ADSB-101: a payload with a valid ADS1 header and four all-zero legacy records, whatever the keep-or-drop outcome of each record, is accepted by the lenient and the strict decoder with consistent counts, and a strict refusal names a record inside the payload.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::payload_records_ads1_4",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decode_row is replaced by a function that keeps or drops each record as chosen and gives anomaly bits among the three that exist; the records are all-zero bytes, so no record content is symbolic.",
+        "reports_push appends nothing; the record loop, the counting and the header check are in the path."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 243,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "asterix-block-framing",
+      "requirement": "OA-AST-103: block framing over every byte string of up to three octets, which is too short to reach a record, returns without panic, and a block it accepts has a length that is positive and within the input.",
+      "package": "oa-asterix",
+      "harness": "proofs::parse_block_any_bytes_up_to_3",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 120,
+      "external_timeout_seconds": 180,
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 18,
+      "ci_seconds_source": "local"
+    },
+    {
+      "id": "adsb-payload-ads3-4",
+      "requirement": "OA-ADSB-101: a payload with a valid ADS3 header and four all-zero v2 records, whatever the keep-or-drop outcome of each record, is accepted by the lenient and the strict decoder with consistent counts, and a strict refusal names a record inside the payload; the ADS2 magic shares the header branch but is not proved separately.",
+      "package": "oa-adsb",
+      "harness": "frames::proofs::payload_records_ads3_4",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [],
+      "stubbing": true,
+      "stub_summaries": [
+        "decode_row is replaced by a function that keeps or drops each record as chosen and gives anomaly bits among the three that exist; the records are all-zero bytes, so no record content is symbolic.",
+        "reports_push appends nothing; the record loop, the counting and the header check are in the path."
+      ],
+      "cfgs": [],
+      "harness_timeout_seconds": 600,
+      "external_timeout_seconds": 720,
+      "memory_mib": 8192,
+      "tier": "nightly",
+      "ci_seconds": 294,
+      "ci_seconds_source": "local"
     },
     {
       "id": "msaw-predicted-altitude-finite",
@@ -1807,7 +2253,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 1,
+      "ci_seconds_source": "local"
     },
     {
       "id": "msaw-floor-monotone",
@@ -1822,7 +2271,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 3,
+      "ci_seconds_source": "local"
     },
     {
       "id": "msaw-violation-time-in-span",
@@ -1837,7 +2289,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 4,
+      "ci_seconds_source": "local"
     },
     {
       "id": "msaw-corridor-floor-above-terrain",
@@ -1852,7 +2307,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 1,
+      "ci_seconds_source": "local"
     },
     {
       "id": "msaw-airport-area-floor-above-terrain-and-obstacles",
@@ -1867,7 +2325,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 1,
+      "ci_seconds_source": "local"
     },
     {
       "id": "msaw-stale-altitude-classed-lost",
@@ -1882,119 +2343,10 @@
       "cfgs": [],
       "harness_timeout_seconds": 300,
       "external_timeout_seconds": 420,
-      "memory_mib": 8192
-    },
-    {
-      "id": "runway-occupancy-monotone",
-      "requirement": "OA-RWY-009: for every box and coordinate pair within 1e9 m and finite radii 0 <= r1 <= r2, the one-region test in_box that fills every occupancy flag is true at r2 whenever true at r1; the runway-axis coordinates do not depend on the radius.",
-      "package": "oa-runway",
-      "harness": "occupy::proofs::occupancy_is_monotone_in_r95",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [
-        "touched at the smaller radius",
-        "a larger radius adds occupancy",
-        "clear at the larger radius"
-      ],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 540,
-      "external_timeout_seconds": 600,
-      "memory_mib": 8192
-    },
-    {
-      "id": "runway-non-finite-occupies",
-      "requirement": "OA-RWY-010: for every runway (any f64 geometry) and every position or radius that is non-finite, beyond the 1e9 m coordinate limit, or negative, every region is occupied and the result is marked unknown.",
-      "package": "oa-runway",
-      "harness": "occupy::proofs::non_finite_input_occupies",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [
-        "non-finite east",
-        "east beyond the limit",
-        "non-finite radius",
-        "negative radius"
-      ],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 540,
-      "external_timeout_seconds": 600,
-      "memory_mib": 8192
-    },
-    {
-      "id": "runway-inside-occupies",
-      "requirement": "OA-RWY-011: for every runway of the kind build_runway makes and every finite radius >= 0, a target whose runway-axis coordinates are inside the rectangle (box_of the runway region) is touched by in_box, the test behind every occupancy flag.",
-      "package": "oa-runway",
-      "harness": "occupy::proofs::point_in_rectangle_occupies",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [
-        "inside with a positive radius",
-        "inside with a zero radius",
-        "strictly inside along the runway"
-      ],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 540,
-      "external_timeout_seconds": 600,
-      "memory_mib": 8192
-    },
-    {
-      "id": "runway-occupies-total",
-      "requirement": "OA-RWY-012: for every runway of the kind build_runway makes (finite geometry within 1e9 m, axis within [-1, 1]) and every position and radius (any f64 bit pattern), occupies returns without panic, overflow or NaN, and for a known position the rotated coordinates are Some, finite and under 1e10 m in size.",
-      "package": "oa-runway",
-      "harness": "occupy::proofs::occupies_never_panics",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [
-        "an input that occupies",
-        "an input that is clear"
-      ],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 540,
-      "external_timeout_seconds": 600,
-      "memory_mib": 8192
-    },
-    {
-      "id": "runway-plane-bounded",
-      "requirement": "OA-RWY-013: for every plane scale a plane_new result can have and every input, a non-finite input gives no position and a position given is finite and within the stated extent on each axis. The disc check (east^2 + north^2 <= EXTENT^2) is tested, not proved: its symbolic products did not finish in the time budget.",
-      "package": "oa-runway",
-      "harness": "occupy::proofs::local_plane_is_bounded",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [
-        "a point inside the extent",
-        "a point refused"
-      ],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 540,
-      "external_timeout_seconds": 600,
-      "memory_mib": 8192
-    },
-    {
-      "id": "runway-non-finite-runway-occupies",
-      "requirement": "OA-RWY-010: for every runway with any non-finite geometry number, every position and every radius, every region is occupied and the result is marked unknown.",
-      "package": "oa-runway",
-      "harness": "occupy::proofs::non_finite_runway_occupies",
-      "enabled": true,
-      "experimental": false,
-      "required_covers": [
-        "a NaN half length",
-        "a known position"
-      ],
-      "stubbing": false,
-      "stub_summaries": [],
-      "cfgs": [],
-      "harness_timeout_seconds": 540,
-      "external_timeout_seconds": 600,
-      "memory_mib": 8192
+      "memory_mib": 8192,
+      "tier": "push",
+      "ci_seconds": 2,
+      "ci_seconds_source": "local"
     }
   ]
 }

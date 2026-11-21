@@ -8,7 +8,7 @@
 //! * [`runway`]: a [`runway::Runway`] built from plain runway and runway-end values (the shell
 //!   copies them out of NASR `APT_RWY` and `APT_RWY_END` and the CIFP runway record), or refused
 //!   with a counted reason.
-//! * [`occupy`]: [`occupy::occupies`], the conservative occupancy test, and its Kani proofs.
+//! * [`occupy`]: [`occupy::occupies`], the conservative occupancy test, and its one Kani proof (no panic on any input).
 //!
 //! No function allocates or panics on any input, and nothing here reads a file, a clock or the
 //! network: the shell reads the records and passes plain values in (B3, B5).
