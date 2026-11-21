@@ -692,12 +692,15 @@ pub fn msaw_evaluate(
             .rollout_off_runway
             .saturating_add(u64::from(v.rollout_off));
         let Some(ttv) = v.ttv_s else {
-            // An alert open for a track whose altitude is stale within the hold stays open: the
-            // hysteresis does not close it on an altitude that is no longer measured.
-            if tr.flags & IF_STALE_EXTRAPOLATED != 0 {
+            // Hold an open alert until fresh altitude and complete floor coverage let the net
+            // judge that the path is clear.
+            if v.partial || tr.flags & IF_STALE_EXTRAPOLATED != 0 {
                 if let Ok(i) = st.open.binary_search_by_key(&tr.addr, |a| a.addr) {
                     if let Some(a) = st.open.get_mut(i) {
                         a.end_ns = t_ns;
+                        if v.partial {
+                            a.flags |= AF_PARTIAL_COVERAGE;
+                        }
                     }
                 }
             }

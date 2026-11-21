@@ -126,11 +126,17 @@ fn cycle(
     rows: &[MsawTrack],
     world: &dyn Fn(i32, i32) -> FloorSample,
 ) -> CycleOut {
+    cycle_with_lookup(r, t, rows, |point| world(point.lat_e7, point.lon_e7))
+}
+
+fn cycle_with_lookup(
+    r: &mut Rig,
+    t: i64,
+    rows: &[MsawTrack],
+    lookup: impl Fn(&SamplePoint) -> FloorSample,
+) -> CycleOut {
     msaw_plan(&mut r.st, t, rows, &mut r.skips);
-    let floors: Vec<FloorSample> = msaw_points(&r.st)
-        .iter()
-        .map(|p| world(p.lat_e7, p.lon_e7))
-        .collect();
+    let floors: Vec<FloorSample> = msaw_points(&r.st).iter().map(lookup).collect();
     msaw_evaluate(
         &mut r.st,
         &floors,
@@ -2285,6 +2291,161 @@ fn a_flicker_of_the_altitude_does_not_split_the_episode_and_the_count_is_publish
     assert_eq!(r.alerts.items.len(), 1);
     assert_eq!(r.alerts.items[0].start_ns, S);
     assert_eq!(r.alerts.items[0].end_reason, END_CLEAR);
+}
+
+// REQ: OA-MSAW-010, OA-MSAW-042, OA-MSAW-064
+#[test]
+fn resilience_approach_warns_when_the_crossing_enters_the_terminal_horizon() {
+    let config = landing_cfg();
+    let mut r = rig(&config);
+    // The adapted terrain floor is 1,430 ft. At 20 ft/s down from 1,800 ft the
+    // aircraft crosses it at 18.5 s, entering the 15 s horizon at the fourth tick.
+    let terrain = |_, _| FloorSample {
+        gtm_clearance_ft: 430,
+        ..flat(1000, FLOOR_NONE)(0, 0)
+    };
+    for elapsed in 0..=4_u16 {
+        let track = over_runway(
+            3500.0 - 70.0 * f64::from(elapsed),
+            0.0,
+            1800.0 - 20.0 * f32::from(elapsed),
+            -1200.0,
+        );
+        let now = (i64::from(elapsed) + 1) * S;
+        let out = cycle(&mut r, now, &[track], &terrain);
+        assert_eq!(out.report, NetReport::Running);
+        assert_eq!(
+            out.stats.violations,
+            u64::from(elapsed == 4),
+            "tick {elapsed}"
+        );
+    }
+    let alert = &msaw_open(&r.st)[0];
+    assert_eq!(alert.warning_ns, Some(5 * S));
+    assert!((alert.ttv_min_s - 14.5).abs() < 0.01);
+}
+
+// REQ: OA-MSAW-010, OA-MSAW-015, OA-MSAW-070
+#[test]
+fn resilience_go_around_warns_before_reaching_high_ground_past_the_runway() {
+    let config = landing_cfg();
+    let mut r = rig(&config);
+    // The threshold is at 40 N. The aircraft starts 300 m north of it and climbs
+    // at 10 ft/s while covering 70 m/s. It reaches the terrain step at about 34.3 s,
+    // well below its floor, so a 20 s warning is due by about 14.3 s into the flight.
+    let north_of_threshold = 2700.0;
+    let collision_s = (north_of_threshold - 300.0) / 70.0;
+    assert!(800.0 + 10.0 * collision_s < 2100.0);
+    let lookup = |point: &SamplePoint| {
+        let north_m = (f64::from(point.lat_e7) / 1e7 - 40.0) * 111_194.926_644_558_74;
+        let terrain_ft = if north_m + f64::from(point.radius_m) >= north_of_threshold {
+            1600
+        } else {
+            300
+        };
+        flat(terrain_ft, FLOOR_NONE)(0, 0)
+    };
+    for elapsed in 0..=14_u16 {
+        let track = over_runway(
+            -(300.0 + 70.0 * f64::from(elapsed)),
+            0.0,
+            800.0 + 10.0 * f32::from(elapsed),
+            600.0,
+        );
+        let now = (i64::from(elapsed) + 1) * S;
+        let out = cycle_with_lookup(&mut r, now, &[track], lookup);
+        assert_eq!(out.stats.landings, 0, "tick {elapsed}");
+        if elapsed == 0 {
+            let alert = &msaw_open(&r.st)[0];
+            assert_eq!(alert.peak, Grade::Caution);
+            assert_eq!(alert.warning_ns, None);
+        }
+    }
+    let warning = msaw_open(&r.st)[0].warning_ns.expect("warning by tick 14");
+    let elapsed_at_warning_s = i32::try_from((warning - S) / S).unwrap();
+    assert!(f64::from(elapsed_at_warning_s) <= collision_s - config.warning_s);
+}
+
+// REQ: OA-MSAW-004, OA-MSAW-011, OA-MSAW-065
+#[test]
+fn resilience_simultaneous_altitude_and_coverage_loss_preserve_active_warnings() {
+    let mut r = rig(&cfg());
+    let rows = [
+        tr(1, 40.0, -88.0, 0.0, 0.0, 1550.0, -600.0),
+        tr(2, 40.2, -88.0, 0.0, 0.0, 1550.0, -600.0),
+        tr(3, 40.5, -88.0, 0.0, 0.0, 1550.0, -600.0),
+    ];
+    // All three predictions cross the 1,400 ft floor in 15 s.
+    let full = flat(900, FLOOR_NONE);
+    let first = cycle(&mut r, S, &rows, &full);
+    assert_eq!(first.stats.violations, 3);
+    assert!(msaw_open(&r.st)
+        .iter()
+        .all(|alert| { alert.warning_ns == Some(S) && (alert.ttv_min_s - 15.0).abs() < 0.01 }));
+
+    let mut interrupted = rows;
+    interrupted[0].alt_ft = f32::NAN;
+    let partial = |lat, lon| FloorSample {
+        obstacle_covered: !(402_000_000..403_000_000).contains(&lat),
+        ..full(lat, lon)
+    };
+    // Keep both input failures active beyond the five-second alert hysteresis.
+    for tick in 2..=8 {
+        let out = cycle(&mut r, tick * S, &interrupted, &partial);
+        assert_eq!(
+            (
+                out.stats.protection_lost_open,
+                out.stats.no_coverage,
+                out.stats.violations
+            ),
+            (1, 1, 1)
+        );
+        assert!(matches!(
+            out.report,
+            NetReport::Degraded {
+                reason: Reason::InputMissing,
+                count: 1,
+                ..
+            }
+        ));
+    }
+    let alerts = msaw_open(&r.st);
+    assert_eq!(
+        alerts.len(),
+        3,
+        "each open warning must survive the input outage"
+    );
+    assert_eq!(alerts[0].end_reason, END_LOST_ALTITUDE_MISSING);
+    assert_ne!(alerts[1].flags & AF_PARTIAL_COVERAGE, 0);
+    assert_eq!(
+        alerts[2].end_ns,
+        8 * S,
+        "the covered flight keeps being evaluated"
+    );
+
+    let recovered = cycle(&mut r, 9 * S, &rows, &full);
+    assert_eq!(recovered.report, NetReport::Running);
+    assert_eq!(recovered.stats.violations, 3);
+    assert_eq!(recovered.stats.opened, 0);
+
+    // A later clear, fully covered path goes through the ordinary hysteresis.
+    let mut clear = rows;
+    clear[1].alt_ft = 1800.0;
+    clear[1].vrate_fpm = 600.0;
+    for tick in 10..=14 {
+        cycle(&mut r, tick * S, &clear, &full);
+        assert_eq!(msaw_open_len(&r.st), 3);
+    }
+    let settled = cycle(&mut r, 15 * S, &clear, &full);
+    assert_eq!(settled.stats.closed, 1);
+    assert_eq!(r.alerts.items[0].addr, 2);
+    msaw_finish(&mut r.st, &mut r.alerts);
+    assert_eq!(r.alerts.items.len(), 3);
+    assert!(r
+        .alerts
+        .items
+        .iter()
+        .all(|alert| { alert.start_ns == S && alert.end_reason == END_CLEAR }));
 }
 
 // REQ: OA-MSAW-064

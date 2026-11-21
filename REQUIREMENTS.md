@@ -6644,8 +6644,9 @@ FAA value.
   elsewhere the normal floor applies.
 - **OA-MSAW-010** An alert is a warning when the predicted violation is within the warning time, else a
   caution; a track already below its floor is a warning.
-- **OA-MSAW-011** One alert is kept per track from its first to its last violating cycle and ends after the
-  hysteresis; the end of the run ends what is open.
+- **OA-MSAW-011** The net keeps one alert per track. A fully evaluated clear path ends the alert
+  after hysteresis. If a path has missing floor coverage, the net keeps its open alert with a
+  partial-coverage flag. Ending the run closes all open alerts.
 - **OA-MSAW-012** An alert that does not fit the open table is logged at once and counted, and the net
   reads degraded.
 - **OA-MSAW-013** What a full alert or skip log cannot hold is counted and the net reads degraded.
