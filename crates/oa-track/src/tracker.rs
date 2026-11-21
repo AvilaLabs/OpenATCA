@@ -2383,14 +2383,16 @@ mod tests {
         let c = cfg(1, 0);
         let mut t = tracker_new(&c).unwrap();
         let mut out = output_new(c.out_capacity);
-        for k in 0..8 {
+        // At 10 Hz, the displacement from just one interval is inside measurement
+        // uncertainty. A retained anchor lets subsequent reports corroborate the descent.
+        for k in 0..=80 {
             tracker_update(
                 &mut t,
-                &baro(k * S, 10_000 - 250 * k as i32, -15_000),
+                &baro(k * S / 10, 10_000 - 25 * k as i32, -15_000),
                 &mut out,
             );
         }
-        let (row, _, _) = tracker_predict(&t, ADDR, 8 * S).unwrap();
+        let (row, _, _) = tracker_predict(&t, ADDR, 8 * S + S / 10).unwrap();
         assert!(row.flags & O_HAS_ALT != 0);
         assert!((row.vrate_fpm + 15_000.0).abs() < 2_000.0);
     }
@@ -2401,14 +2403,21 @@ mod tests {
         let c = cfg(1, 0);
         let mut t = tracker_new(&c).unwrap();
         let mut out = output_new(c.out_capacity);
-        for m in [
-            baro(0, 10_000, -15_000),
-            baro(20 * S, 10_000, -15_000),
-            baro(21 * S, 9_750, -15_000),
-        ] {
-            tracker_update(&mut t, &m, &mut out);
+        tracker_update(&mut t, &baro(0, 10_000, -15_000), &mut out);
+        tracker_update(&mut t, &baro(20 * S, 10_000, -15_000), &mut out);
+        let slot = lookup(&t, ADDR).unwrap();
+        assert_eq!(t.cur[slot].last_baro_t_ns, 20 * S);
+
+        // The normal altitude gate still requires repeated reports if descent starts
+        // abruptly from level flight. Corroboration must survive that re-anchor.
+        for k in 1..=8 {
+            tracker_update(
+                &mut t,
+                &baro((20 + k) * S, 10_000 - 250 * k as i32, -15_000),
+                &mut out,
+            );
         }
-        let (row, _, _) = tracker_predict(&t, ADDR, 22 * S).unwrap();
+        let (row, _, _) = tracker_predict(&t, ADDR, 29 * S).unwrap();
         assert!(row.flags & O_HAS_ALT != 0);
         assert!((row.vrate_fpm + 15_000.0).abs() < 2_000.0);
     }
