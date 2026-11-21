@@ -50,7 +50,7 @@ fn route_msg(gufi: &str, ts: &str) -> String {
     )
 }
 
-// REQ: OA-BENCH-004
+// REQ: OA-BENCH-004, OA-LTJ-053
 #[test]
 fn sfdps_extraction_reads_track_address_handoff_and_route() {
     let mut leg = new_legacy();
@@ -102,7 +102,6 @@ fn sfdps_extraction_reads_track_address_handoff_and_route() {
     assert_eq!(&leg.handoffs.to[0][4..6], b"07");
     // Expanded route: two fixes and one point with coordinates.
     assert_eq!(leg.routes.flight.len(), 1);
-    // REQ: OA-LTJ-053
     assert_eq!(leg.routes.recv_ms, [1_893_553_300_000]);
     assert_eq!(leg.routes.addr_at_receive, [NONE]);
     assert_eq!(leg.routes.len[0], 3);
