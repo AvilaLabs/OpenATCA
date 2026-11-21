@@ -1154,7 +1154,8 @@ fn the_split_check_passes_the_split_of_the_scorer_and_refuses_a_shared_report_ti
 /// Runs `oa-track-run` on the synthetic clip with `args` after `--adsb <clip> --out <out>`.
 fn run_realtime_binary(name: &str, args: &[&str]) -> (std::process::Output, PathBuf) {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let clip = dir.join("track_realtime.oaf");
+    // Each parallel caller needs its own clip so it cannot truncate another caller's input.
+    let clip = dir.join(format!("{name}.oaf"));
     write_clip(&clip, &synthetic_reports());
     let out = dir.join(name);
     let _ = std::fs::remove_dir_all(&out);
