@@ -3835,8 +3835,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-041** A tracker filled to `MAX_TRACKS` aircraft with more reports each than the ring holds
   refuses the next aircraft under its own counter, re-filters a late report of a track in the full table,
   and reallocates no buffer.
-- **OA-TRK-042** Tracker memory is linear in the track capacity and under 2.2 kB per track (4,096 tracks:
-  8.8 MB; 38,000 tracks: 81.7 MB; it was 8.9 kB and 339 MB with a filter state in every ring slot).
+- **OA-TRK-042** Tracker table memory is linear in track capacity. The full default table and
+  rollback pool fit within 2,300 bytes per track plus the raw-altitude history from OA-TRK-355
+  (32 bytes per track and 32 bytes per reserved snapshot). At 38,000 tracks without the fixed
+  rollback pool, the table still uses less than 2,300 bytes per track.
 - **OA-TRK-043** The chunked benchmark's millisecond histogram gives the statistics of the values it was
   made from: count, median, p95, p99 and maximum exactly, mean and RMS to rounding (bit for bit for whole
   seconds), and adding two histograms gives the histogram of the union.

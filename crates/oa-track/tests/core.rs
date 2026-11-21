@@ -1527,13 +1527,14 @@ fn a_full_table_of_max_tracks_refuses_the_next_aircraft_and_never_reallocates() 
         "tracker_bytes at {n} tracks: {bytes} ({} per track)",
         bytes / n
     );
-    // The columns, one current and one anchor filter and the measurement ring: under 2.3 kB each
-    // (it was 8.9 kB with a filter state in every ring slot; 2.2 kB before the filter carried
-    // the newest rejected report of a run, 16 bytes in each of its two copies). The large-move
-    // rule's 39 bytes of columns per track (the sum of its columns, checked in the tracker's own tests) and its pool of 64 rollback snapshots (RT-239,
-    // 141 kB in all, 34 bytes per track at this 4096-track size, under 4 at 38,000) bring it to
-    // 2.27 kB: still under 2.3 kB.
-    assert!(bytes / n < 2_300, "{} bytes per track", bytes / n);
+    // Add only the budget for raw altitude history to the previous 2,300 bytes per track.
+    // Each track and each rollback snapshot hold two filters with 16 extra bytes each.
+    let history_bytes = (n + cfg.confirm_pool) * 32;
+    assert!(
+        bytes < n * 2_300 + history_bytes,
+        "{} bytes per track",
+        bytes / n
+    );
 }
 
 // REQ: OA-TRK-042
