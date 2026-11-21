@@ -10,7 +10,7 @@ pub const MAX_SAMPLES: usize = 32;
 /// a departure procedure, an approach corridor, a strip along the runway and a departure
 /// corridor; a facility's airports are some tens of runway ends, and the grid index of the
 /// corridors holds a few dozen cells for each.
-pub const MAX_CORRIDORS: usize = 1024;
+pub const MAX_CORRIDORS: usize = 3072;
 /// Largest `max_tracks` the configuration may ask for (every per-track table is allocated whole).
 pub const MAX_TRACKS_LIMIT: usize = 1 << 20;
 /// Largest `max_open` the configuration may ask for.
@@ -155,6 +155,10 @@ pub struct SamplePoint {
     /// velocity uncertainty, plus half the distance to the next point, so that the terrain and
     /// obstacles between two points are inside some radius.
     pub radius_m: f32,
+    /// The track's ground track, whole degrees true clockwise from north (0 to 359), or -1 where
+    /// the track is too slow to have one. The approach and runway corridors hold a point only for a
+    /// track aligned with them.
+    pub track_deg: i16,
 }
 
 /// What the shell found at a [`SamplePoint`], in whole feet, rounded up (never down: a floor is
@@ -302,6 +306,9 @@ pub struct MsawConfig {
     /// The prediction time inside an approach corridor (a capture box) and no departure corridor,
     /// and in an airport terminal area below its ceiling, seconds; not above `look_ahead_s`.
     pub terminal_lookahead_s: f64,
+    /// An approach corridor holds a track whose ground track is within this many degrees of its
+    /// inbound course, a runway strip one within this of either direction of the runway.
+    pub capture_heading_deg: f64,
     /// The corridors; `n_corridors` of them are used.
     pub corridors: [Corridor; MAX_CORRIDORS],
     pub n_corridors: usize,
@@ -366,6 +373,10 @@ pub struct Alert {
     pub vel_north_mps: f32,
     /// Shortest time to violation over the alert, seconds (zero: below the floor now).
     pub ttv_min_s: f32,
+    /// The track's ground track at the first cycle (whole degrees, -1: none) and the kinds (`KB_*`)
+    /// of the corridors that held the worst point for it: what rules applied there.
+    pub track_deg: i16,
+    pub worst_kinds: u8,
     pub cycles: u32,
     /// [`AF_RATE_UNKNOWN`] and the other `AF_` bits, of any cycle of the alert.
     pub flags: u16,

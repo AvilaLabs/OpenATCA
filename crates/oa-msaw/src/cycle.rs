@@ -14,8 +14,8 @@ use oa_safety::net::{state_report, Area, NetId, NetReport, Reason, StateTable};
 
 use crate::calc::{
     alt_floor_ft, altitude_use, deg_to_e7, extrapolated_alt_ft, floor_of, grade_of, lowest_alt_ft,
-    not_climbing, predicted_alt_ft, sample_points, sample_span_s, sample_time_s, violates,
-    violation_time_s, with_airport_area, AltUse, PathStart,
+    not_climbing, predicted_alt_ft, sample_points, sample_span_s, sample_time_s, track_deg_of,
+    violates, violation_time_s, with_airport_area, AltUse, PathStart,
 };
 use crate::corridor::{corridor_hit_at, corridor_runway_elev_at};
 use crate::state::{alert_push, skip_push, MsawState};
@@ -320,6 +320,7 @@ pub fn msaw_plan(st: &mut MsawState, t_ns: i64, rows: &[MsawTrack], skips: &mut 
             lat_e7: 0,
             lon_e7: 0,
             radius_m: 0.0,
+            track_deg: -1,
         };
         st.points.resize(base.saturating_add(cfg.samples), blank);
         let filled = st
@@ -394,6 +395,8 @@ struct Verdict {
     worst_floor_ft: i32,
     worst_kind: FloorKind,
     worst_at: (i32, i32, f32, u8),
+    /// The kinds (`KB_*`) of the corridors that held the worst point for the track.
+    worst_kinds: u8,
     partial: bool,
     /// Some point outside the corridors with a chart altitude is above the alert floor and the
     /// predicted altitude is below the chart altitude there.
@@ -416,6 +419,7 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
         worst_floor_ft: 0,
         worst_kind: FloorKind::Mva,
         worst_at: (0, 0, 0.0, 0),
+        worst_kinds: 0,
         partial: false,
         below_mva: false,
         landed: false,
@@ -489,6 +493,7 @@ fn judge(tr: &MsawTrack, pts: &[SamplePoint], floors: &[FloorSample], st: &MsawS
             v.worst_floor_ft = floor;
             v.worst_kind = kind;
             v.worst_at = (p.lat_e7, p.lon_e7, p.radius_m, k as u8);
+            v.worst_kinds = hit.map_or(0, |h| h.kinds);
         }
         if violates(low, floor) {
             let t = violation_time_s(alt, vr, floor, lo, hi);
@@ -555,6 +560,8 @@ fn raise(
         vel_east_mps: tr.vel_east_mps,
         vel_north_mps: tr.vel_north_mps,
         ttv_min_s: ttv_s as f32,
+        track_deg: track_deg_of(f64::from(tr.vel_east_mps), f64::from(tr.vel_north_mps)),
+        worst_kinds: v.worst_kinds,
         cycles: 1,
         flags,
         end_reason: END_CLEAR,
@@ -580,6 +587,7 @@ fn raise(
                     a.worst_k = v.worst_at.3;
                     a.worst_ns = t_ns;
                     a.worst_flags = flags;
+                    a.worst_kinds = v.worst_kinds;
                 }
                 if (ttv_s as f32) < a.ttv_min_s {
                     a.ttv_min_s = ttv_s as f32;

@@ -4,9 +4,9 @@
 //! [`crate::MAX_ABS_VRATE_FPM`].
 
 use crate::types::{
-    Corridor, CorridorHit, FloorKind, FloorSample, Grade, MsawConfig, SamplePoint, CK_DEPARTURE,
-    CK_RUNWAY, FLOOR_NONE, KB_APPROACH, KB_DEPARTURE, KB_RUNWAY, MAX_ABS_ALT_FT, MAX_ABS_LAT_DEG,
-    MAX_CLEARANCE_FT, MAX_FLOOR_FT, MAX_RADIUS_M,
+    Corridor, CorridorHit, FloorKind, FloorSample, Grade, MsawConfig, SamplePoint, CK_APPROACH,
+    CK_DEPARTURE, CK_RUNWAY, FLOOR_NONE, KB_APPROACH, KB_DEPARTURE, KB_RUNWAY, MAX_ABS_ALT_FT,
+    MAX_ABS_LAT_DEG, MAX_CLEARANCE_FT, MAX_FLOOR_FT, MAX_RADIUS_M,
 };
 
 /// Metres per degree of latitude (mean radius 6,371,008.8 m).
@@ -300,6 +300,71 @@ pub fn corridor_hit_ft(
     })
 }
 
+/// A track slower than this has no ground track, metres per second.
+pub const MIN_TRACK_SPEED_MPS: f64 = 2.0;
+
+/// The ground track of a velocity (east, north metres per second), whole degrees true clockwise
+/// from north (0 to 359); -1 where the speed is below [`MIN_TRACK_SPEED_MPS`] or not a number.
+// E8: the value is in 0..360 before the cast.
+#[allow(clippy::cast_possible_truncation)]
+pub fn track_deg_of(ve: f64, vn: f64) -> i16 {
+    let speed = oa_math::hypot(ve, vn);
+    if !(speed.is_finite() && speed >= MIN_TRACK_SPEED_MPS) {
+        return -1;
+    }
+    let d = oa_math::atan2(ve, vn) / RAD_PER_DEG;
+    let r = oa_ieee::round(d);
+    let r = if r < 0.0 { r + 360.0 } else { r };
+    let r = if r >= 360.0 { r - 360.0 } else { r };
+    oa_math::clamp_f64(r, 0.0, 359.0) as i16
+}
+
+/// The smallest angle between two bearings, degrees (0 to 180).
+pub fn bearing_gap_deg(a: f64, b: f64) -> f64 {
+    let d = a - b;
+    let d = d - 360.0 * oa_ieee::floor(d / 360.0 + 0.5);
+    if d < 0.0 {
+        -d
+    } else {
+        d
+    }
+}
+
+/// True if a track with ground track `track_deg` is aligned with corridor `c`: an approach corridor
+/// with its inbound course (the way out reversed) within `tol_deg`, a runway strip with either
+/// direction of the runway within it. A departure corridor holds any track; a track with no ground
+/// track (-1) is aligned with no approach corridor or runway strip.
+pub fn aligned(c: &Corridor, track_deg: i16, tol_deg: f64) -> bool {
+    if c.kind == CK_DEPARTURE {
+        return true;
+    }
+    if track_deg < 0 {
+        return false;
+    }
+    let t = f64::from(track_deg);
+    let inbound = bearing_gap_deg(t, c.out_bearing_deg + 180.0);
+    if c.kind == CK_APPROACH {
+        return inbound <= tol_deg;
+    }
+    inbound <= tol_deg || bearing_gap_deg(t, c.out_bearing_deg) <= tol_deg
+}
+
+/// [`corridor_hit_ft`] for a track with ground track `track_deg`: nothing where the track is not
+/// aligned with the corridor ([`aligned`]).
+pub fn corridor_hit_for(
+    c: &Corridor,
+    lat_e7: i32,
+    lon_e7: i32,
+    radius_m: f64,
+    track_deg: i16,
+    cfg: &MsawConfig,
+) -> Option<CorridorHit> {
+    if !aligned(c, track_deg, cfg.capture_heading_deg) {
+        return None;
+    }
+    corridor_hit_ft(c, lat_e7, lon_e7, radius_m, cfg)
+}
+
 /// The last stretch of a capture box before the threshold, metres (1 NM), where the floor takes no
 /// clearance over terrain or obstacles.
 pub const FINAL_ZONE_M: f64 = 1852.0;
@@ -329,7 +394,14 @@ pub(crate) fn hit_union(a: Option<CorridorHit>, b: CorridorHit) -> CorridorHit {
 pub fn corridor_hit_linear(cfg: &MsawConfig, p: &SamplePoint) -> Option<CorridorHit> {
     let mut best: Option<CorridorHit> = None;
     for c in cfg.corridors.iter().take(cfg.n_corridors) {
-        if let Some(h) = corridor_hit_ft(c, p.lat_e7, p.lon_e7, f64::from(p.radius_m), cfg) {
+        if let Some(h) = corridor_hit_for(
+            c,
+            p.lat_e7,
+            p.lon_e7,
+            f64::from(p.radius_m),
+            p.track_deg,
+            cfg,
+        ) {
             best = Some(hit_union(best, h));
         }
     }
@@ -381,6 +453,7 @@ pub fn sample_points(t: &PathStart, cfg: &MsawConfig, out: &mut [SamplePoint]) -
         return None;
     }
     let speed = oa_math::hypot(t.ve, t.vn);
+    let track_deg = track_deg_of(t.ve, t.vn);
     let step_s = if cfg.samples > 1 {
         cfg.look_ahead_s / ((cfg.samples - 1) as f64)
     } else {
@@ -398,6 +471,7 @@ pub fn sample_points(t: &PathStart, cfg: &MsawConfig, out: &mut [SamplePoint]) -
             lat_e7: deg_to_e7(lat),
             lon_e7: deg_to_e7(lon),
             radius_m: radius as f32,
+            track_deg,
         };
     }
     Some(n)
@@ -478,6 +552,7 @@ mod proofs {
             stale_hold_s: 30.0,
             altitude_loss_degrade_share: 0.5,
             terminal_lookahead_s: 15.0,
+            capture_heading_deg: 30.0,
             corridors: [Corridor {
                 kind: CK_APPROACH,
                 thr_lat_e7: 0,

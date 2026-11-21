@@ -324,6 +324,54 @@ pub fn corridors_from_cifp_with(
     Ok(out)
 }
 
+/// What [`corridors_from_cifp_area`] made. A7.2: cold struct.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AreaCorridors {
+    pub corridors: Vec<CifpCorridor>,
+    pub without_corridor: Vec<String>,
+    /// The airports with an instrument approach in the area that were looked at (not those left to
+    /// the configuration), and the identifiers of those that got at least one corridor.
+    pub airports: usize,
+    pub with_corridors: Vec<String>,
+}
+
+/// The approach capture boxes and runway strips of every airport with an instrument approach whose
+/// reference point is in the box (south, north, west, east, degrees), but for the airports in
+/// `skip` (the configuration's own, which have theirs with departure corridors). A runway end with
+/// an approach gets its capture box and, with the strip along its runway, no departure corridor.
+pub fn corridors_from_cifp_area(
+    c: &Cifp,
+    area: (f64, f64, f64, f64),
+    skip: &[String],
+    approach_half_width_nm: f64,
+) -> Result<AreaCorridors, String> {
+    let (s, n, w, e) = area;
+    let mut out = AreaCorridors::default();
+    for a in &c.airports {
+        let p = &a.position;
+        if !a.ifr_capable
+            || !(s..=n).contains(&p.lat)
+            || !(w..=e).contains(&p.lon)
+            || skip.contains(&a.ident)
+        {
+            continue;
+        }
+        out.airports += 1;
+        let made = corridors_from_cifp_with(c, &a.ident, approach_half_width_nm)?;
+        let before = out.corridors.len();
+        out.corridors.extend(
+            made.corridors
+                .into_iter()
+                .filter(|k| k.kind != CK_DEPARTURE),
+        );
+        out.without_corridor.extend(made.without_corridor);
+        if out.corridors.len() > before {
+            out.with_corridors.push(a.ident.clone());
+        }
+    }
+    Ok(out)
+}
+
 /// The runway numbers a SID names by a runway transition (`RW27L` gives `27L`; `RW27B`, both
 /// parallel runways, gives `27L`, `27R` and `27C`).
 fn sid_runways(c: &Cifp, airport: &str) -> BTreeSet<String> {

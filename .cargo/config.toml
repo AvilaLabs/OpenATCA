@@ -1,0 +1,4 @@
+# The configuration of the MSAW net holds its corridors inline (it is `Copy` and allocates nothing),
+# about 300 KB; a test thread has room for a few copies of it only with a larger stack.
+[env]
+RUST_MIN_STACK = { value = "16777216", force = false }

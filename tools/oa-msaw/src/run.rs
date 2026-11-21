@@ -134,6 +134,10 @@ pub struct Record {
     pub floors: Floors,
     /// The altimeter settings, kept for the diagnosis.
     pub qnh: Option<Qnh>,
+    /// The lines of `--rows-of`: measurements and tracker rows of the one address.
+    pub trace: Vec<String>,
+    pub fast_rows: u64,
+    pub fast_tracks: usize,
 }
 
 /// Wall time of the steady state, nanoseconds, by part. A7.2: cold struct, size guard waived.
@@ -181,6 +185,13 @@ struct Feed<'a> {
     /// The times of the latest barometric altitudes of each aircraft (a few, oldest first), for the
     /// age of a track's altitude.
     alt_times: std::collections::HashMap<u32, Vec<i64>>,
+    /// The address `--rows-of` follows, and the lines of its measurements and tracker rows.
+    trace_addr: Option<u32>,
+    trace: Vec<String>,
+    t0_ns: i64,
+    /// Track rows with a vertical rate above 6,000 ft/min either way below 10,000 ft, and the tracks.
+    fast_rows: u64,
+    fast_addrs: std::collections::BTreeSet<u32>,
     /// The altitudes (after the datum) of each aircraft over the last 15 s, for the level evidence
     /// of a landing.
     alt_hist: std::collections::HashMap<u32, Vec<(i64, f32)>>,
@@ -452,6 +463,21 @@ fn consume(f: &mut Feed, o: &TrackOutput) {
             f32::NAN
         };
         f.times.qnh_ns += tq.elapsed().as_nanos() as u64;
+        if alt_ft.is_finite() && alt < 10_000.0 && vr.abs() > 6000.0 {
+            f.fast_rows += 1;
+            f.fast_addrs.insert(addr);
+        }
+        if Some(addr) == f.trace_addr {
+            f.trace.push(format!(
+                "tracker,{:.1},{:.0},{:.0},{:.1},{:.1},{:.1}",
+                (t - f.t0_ns) as f64 / 1e9,
+                alt,
+                alt_ft,
+                vr,
+                ve,
+                vn
+            ));
+        }
         f.batch.push(MsawTrack {
             lat_deg: lat,
             lon_deg: lon,
@@ -558,6 +584,11 @@ pub fn track_and_alert(
         last_overflow: 0,
         st_track_budget: set.msaw.track_budget,
         alt_times: std::collections::HashMap::new(),
+        t0_ns,
+        fast_rows: 0,
+        fast_addrs: std::collections::BTreeSet::new(),
+        trace_addr: set.trace_addr,
+        trace: Vec::new(),
         alt_hist: std::collections::HashMap::new(),
         alt_age_unknown: 0,
         cov_rows: 0,
@@ -570,6 +601,28 @@ pub fn track_and_alert(
     let steady = Instant::now();
     let drain = cfg.out_capacity.min(1 << 16) / 2;
     for m in meas {
+        if Some(m.addr) == f.trace_addr {
+            f.trace.push(format!(
+                "measurement,{:.1},{},{},{},{}",
+                (m.toa_ns - t0_ns) as f64 / 1e9,
+                if m.alt_ft == oa_track::NONE_I32 {
+                    String::new()
+                } else {
+                    m.alt_ft.to_string()
+                },
+                if m.vrate_fpm == oa_track::NONE_I32 {
+                    String::new()
+                } else {
+                    m.vrate_fpm.to_string()
+                },
+                if m.flags & oa_track::M_ALT_GEOMETRIC != 0 {
+                    "geometric_alt"
+                } else {
+                    "baro_alt"
+                },
+                m.sensor
+            ));
+        }
         if m.alt_ft != oa_track::NONE_I32 && m.flags & oa_track::M_ALT_GEOMETRIC == 0 {
             f.alt_times.entry(m.addr).or_default().push(m.toa_ns);
         }
@@ -600,6 +653,7 @@ pub fn track_and_alert(
             a.worst_lon_e7,
             f64::from(a.worst_radius_m),
             a.worst_kind,
+            a.track_deg,
         ) {
             setter_m.insert((a.addr, a.start_ns), d as f32);
         }
@@ -631,6 +685,9 @@ pub fn track_and_alert(
         times: f.times,
         floors: f.floors,
         qnh: f.qnh,
+        trace: f.trace,
+        fast_rows: f.fast_rows,
+        fast_tracks: f.fast_addrs.len(),
     })
 }
 
@@ -974,6 +1031,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let mut airports: Vec<(String, f64, f64)> = Vec::new();
     let mut apt_areas: Vec<AirportArea> = Vec::new();
     let mut apt_elev: Vec<(String, f64, f64, i32)> = Vec::new();
+    let mut cifp_data: Option<oa_arinc424::Cifp> = None;
     // Every runway threshold of the airports with an approach, for the diagnosis.
     let mut all_thresholds: Vec<(f64, f64)> = Vec::new();
     if let Some(p) = &args.cifp {
@@ -1007,8 +1065,11 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
             cifp_corridors.extend(made.corridors);
             without_corridor.extend(made.without_corridor);
         }
+        cifp_data = Some(c);
     } else if !set.cifp_airports.is_empty() {
         return Err("the configuration has cifp_airport lines and there is no --cifp".to_string());
+    } else if set.cifp_area_margin_nm.is_some() {
+        return Err("the configuration has cifp_area_margin_nm and there is no --cifp".to_string());
     }
     if set.msaw.n_corridors + cifp_corridors.len() > MAX_CORRIDORS {
         return Err(format!(
@@ -1065,6 +1126,46 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         meas.retain(|m| m.toa_ns >= lo && m.toa_ns <= hi);
         scope = format!("{scope}, measurements from {a} s to {b} s after the first");
     }
+    // `--rows-of`: the one aircraft whose address has that hash, and its clip rows.
+    let mut clip_trace: Vec<String> = Vec::new();
+    if let Some(prefix) = &args.rows_of {
+        let hash8 = |a: u32| -> String {
+            oa_sha256::to_hex(&sha256(&a.to_be_bytes()))
+                .chars()
+                .take(8)
+                .collect()
+        };
+        let addr = meas
+            .iter()
+            .map(|m| m.addr)
+            .find(|a| hash8(*a).starts_with(prefix.as_str()))
+            .ok_or_else(|| format!("--rows-of: no address in the run has the hash {prefix}"))?;
+        set.trace_addr = Some(addr);
+        for k in 0..oa_adsb::reports_len(&reports) {
+            if let Some(r) = oa_adsb::reports_row(&reports, k).filter(|r| r.icao == addr) {
+                let none = |v: i32| {
+                    if v == oa_adsb::NONE_I32 {
+                        String::new()
+                    } else {
+                        v.to_string()
+                    }
+                };
+                clip_trace.push(format!(
+                    "clip,{:.1},{},{},{},{},{}",
+                    (r.time_ns - t0_ns) as f64 / 1e9,
+                    none(r.baro_alt_ft),
+                    none(r.geom_alt_ft),
+                    none(r.vrate_fpm),
+                    if r.flags & oa_adsb::F_RATE_GEOM != 0 {
+                        "rate_is_geometric"
+                    } else {
+                        "rate_is_barometric"
+                    },
+                    r.nac_p
+                ));
+            }
+        }
+    }
     // The callsigns the reports carry, for the flight join and the requests (before the reports go).
     let callsigns = if args.sfdps.is_some() || !set.requests.is_empty() {
         let addrs: std::collections::BTreeSet<u32> = meas.iter().map(|m| m.addr).collect();
@@ -1105,6 +1206,66 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         p99_ns: 1_000_000_000,
     });
     let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
+    // The capture boxes and runway strips of every airport with an approach in the area of the run:
+    // the bounding box of the rows, widened by the margin. The configured airports keep their own.
+    let configured_count = cifp_corridors.len();
+    let mut area_info: Option<crate::report::AreaInfo> = None;
+    if let (Some(margin_nm), Some(c)) = (set.cifp_area_margin_nm, cifp_data.as_ref()) {
+        let t = Instant::now();
+        let rss0 = proc_kb("VmRSS:");
+        let lat = |m: &oa_track::Measurement| f64::from(m.lat_e7) / 1e7;
+        let lon = |m: &oa_track::Measurement| f64::from(m.lon_e7) / 1e7;
+        let (mut s, mut n) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut w, mut e) = (f64::INFINITY, f64::NEG_INFINITY);
+        for m in &meas {
+            s = s.min(lat(m));
+            n = n.max(lat(m));
+            w = w.min(lon(m));
+            e = e.max(lon(m));
+        }
+        if s <= n {
+            let dlat = margin_nm / 60.0;
+            let dlon = margin_nm / 60.0 / ((s + n) / 2.0).to_radians().cos().max(0.05);
+            let area = (s - dlat, n + dlat, w - dlon, e + dlon);
+            let made = crate::cifp::corridors_from_cifp_area(
+                c,
+                area,
+                &set.cifp_airports,
+                set.approach_half_width_nm,
+            )?;
+            let have = set.msaw.n_corridors + made.corridors.len();
+            if have > MAX_CORRIDORS {
+                return Err(format!(
+                    "n_corridors: {have} corridors with the CIFP's of the area are more than {MAX_CORRIDORS}"
+                ));
+            }
+            for a in &made.corridors {
+                let k = set.msaw.n_corridors;
+                if let Some(slot) = set.msaw.corridors.get_mut(k) {
+                    *slot = a.corridor;
+                    set.msaw.n_corridors += 1;
+                }
+            }
+            let count = |k: u8| made.corridors.iter().filter(|c| c.kind == k).count();
+            area_info = Some(crate::report::AreaInfo {
+                area,
+                airports: made.airports,
+                airports_with_corridors: made.with_corridors.len(),
+                approach_boxes: count(oa_msaw::CK_APPROACH),
+                strips: count(oa_msaw::CK_RUNWAY),
+                without: made.without_corridor.len(),
+                build_s: t.elapsed().as_secs_f64(),
+                rss_before_kb: rss0,
+                rss_after_kb: proc_kb("VmRSS:"),
+                built_airports: made.with_corridors.clone(),
+            });
+            cifp_corridors.extend(made.corridors);
+            without_corridor.extend(made.without_corridor);
+        }
+    }
+    drop(cifp_data);
+    used.configured_corridors = configured_count;
+    used.area = area_info;
     let mut floors = Floors::new(args.terrain.clone(), obstacles, chart);
     floors.set_areas(gtm_areas(g, &set)?);
     floors.set_airports(apt_areas);
@@ -1128,6 +1289,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
     let mut rec = track_and_alert(&meas, &cfg, &ground, &set, floors, Some(qnh), t0_ns)?;
     used.steady_cpu_s = cpu_seconds().zip(cpu0).map(|(b, a)| b - a - rec.diag_cpu_s);
     used.diag_cpu_s = rec.diag_cpu_s;
+    used.fast_rate = (rec.fast_rows, rec.fast_tracks);
     used.tiles_absent = rec.floors.absent_tiles();
     used.alt_age_unknown = rec.alt_age_unknown;
     used.obstacle_cells = rec.floors.obstacle_cells();
@@ -1234,12 +1396,23 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
             airports: &apt_elev,
             all_airports: &used.airports,
             all_thresholds: &all_thresholds,
+            n_configured: used.configured_corridors,
             sealed: g,
             corridors: &used.cifp_corridors,
             qnh: rec.qnh.as_mut(),
             basis: &elig_basis,
         });
         write_atomic(&args.out, "diagnosis.txt", &text)?;
+    }
+    if args.rows_of.is_some() {
+        let mut text = String::from(
+            "# clip: source,time_s,baro_alt_ft,geom_alt_ft,vertical_rate_fpm,rate_kind,nac_p\n# measurement: source,time_s,alt_ft,vertical_rate_fpm,altitude_kind,sensor\n# tracker: source,time_s,alt_ft,alt_judged_ft,vertical_rate_fpm,vel_east_mps,vel_north_mps\n",
+        );
+        for l in clip_trace.iter().chain(rec.trace.iter()) {
+            text.push_str(l);
+            text.push('\n');
+        }
+        write_atomic(&args.out, "rows_of.csv", &text)?;
     }
     if let Some(p) = &args.landing_of {
         let text = landing_of(g, p, &used.cifp_corridors, &set.msaw)?;

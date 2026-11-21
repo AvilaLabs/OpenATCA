@@ -297,6 +297,7 @@ fn point(lat: f64, lon: f64, radius_m: f32) -> oa_msaw::SamplePoint {
         lat_e7: (lat * 1e7).round() as i32,
         lon_e7: (lon * 1e7).round() as i32,
         radius_m,
+        track_deg: -1,
     }
 }
 
@@ -356,10 +357,9 @@ fn the_floor_lookups_are_conservative_and_absent_where_there_is_no_data() {
     assert_eq!(s.mva_ft, FLOOR_NONE);
     assert!(s.terrain_ft >= 0);
     assert!(f.stats.terrain_absent >= 1 && f.stats.chart_absent >= 1);
-    // The same cell and bucket is answered from the cache.
-    let before = f.stats.cache_hits;
+    // Every lookup is made at the point itself: nothing is answered from a cell.
     f.floor_at(&point(13.30, 144.80, 100.0)).unwrap();
-    assert_eq!(f.stats.cache_hits, before + 1);
+    assert_eq!(f.stats.cache_hits, 0);
     // With nothing at all, every part is absent.
     let mut none = Floors::new(None, None, None);
     let s = none.floor_at(&point(13.3, 144.8, 100.0)).unwrap();
@@ -382,6 +382,65 @@ fn fixture_cifp() -> oa_arinc424::Cifp {
     text.push('\n');
     text.push_str(&body);
     oa_arinc424::parse_bytes(text.as_bytes(), "fixture").unwrap()
+}
+
+// REQ: OA-MSAW-082
+#[test]
+fn rows_of_takes_one_address_hash_and_is_given_once() {
+    let a = |v: &[&str]| parse(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let base = ["--adsb", "a", "--config", "k", "--out", "c"];
+    let with = |extra: &[&str]| a(&[&base[..], extra].concat());
+    assert_eq!(
+        with(&["--rows-of", "cd5161b4"]).unwrap().rows_of.as_deref(),
+        Some("cd5161b4")
+    );
+    assert_eq!(with(&[]).unwrap().rows_of, None);
+    assert!(with(&["--rows-of"]).is_err());
+    assert!(with(&["--rows-of", "a", "--rows-of", "b"]).is_err());
+}
+
+// REQ: OA-MSAW-080
+#[test]
+fn every_airport_with_an_approach_in_the_area_gets_its_box_and_strip_and_a_configured_one_is_left_alone(
+) {
+    use oa_msaw_run::cifp::corridors_from_cifp_area;
+    let c = fixture_cifp();
+    let area = (41.0, 43.0, -89.0, -87.0);
+    let made = corridors_from_cifp_area(&c, area, &[], 1.0).unwrap();
+    assert!(made.airports >= 1);
+    assert!(made.with_corridors.contains(&"KORD".to_string()));
+    // The box of the runway end with the approach and the strip along it, and no departure corridor.
+    let ord: Vec<_> = made
+        .corridors
+        .iter()
+        .filter(|k| k.label.starts_with("KORD "))
+        .collect();
+    let kinds: Vec<u8> = ord.iter().map(|k| k.kind).collect();
+    assert_eq!(kinds, vec![CK_APPROACH, CK_RUNWAY]);
+    assert!(made.corridors.iter().all(|k| k.kind != CK_DEPARTURE));
+    // The same as the airport's own, but for what the area leaves out.
+    let own = corridors_from_cifp(&c, "KORD").unwrap();
+    assert!(own.corridors.iter().all(|k| ord.iter().any(|o| **o == *k)));
+    // An airport outside the box, or one the configuration names, is not built.
+    assert_eq!(
+        corridors_from_cifp_area(&c, (0.0, 1.0, 0.0, 1.0), &[], 1.0)
+            .unwrap()
+            .airports,
+        0
+    );
+    let skipped = corridors_from_cifp_area(&c, area, &["KORD".to_string()], 1.0).unwrap();
+    assert!(skipped.airports + 1 == made.airports);
+    assert!(skipped
+        .corridors
+        .iter()
+        .all(|k| !k.label.starts_with("KORD ")));
+    // The configuration key, and the heading tolerance beside it.
+    let base = DEV_CFG;
+    let with = parse_config(&format!("{base}\ncifp_area_margin_nm = 10\n")).unwrap();
+    assert_eq!(with.cifp_area_margin_nm, Some(10.0));
+    assert_eq!(with.msaw.capture_heading_deg, 30.0);
+    assert!(parse_config(&format!("{base}\ncifp_area_margin_nm = 0\n")).is_err());
+    assert_eq!(parse_config(base).unwrap().cifp_area_margin_nm, None);
 }
 
 // REQ: OA-MSAW-034
@@ -513,7 +572,7 @@ fn the_path_angle_is_the_final_approachs_only_and_the_strip_holds_its_pavement_a
 fn the_surface_stands_for_an_obstacle_only_where_the_allowance_covers_the_rise_over_that_lookups_radius(
 ) {
     // A 150 ft tower (top 590) beside the final mile, below the surface at its own position: left to
-    // the surface with the lookup circle of 100 m (rise over about 408 m is 70 ft against the
+    // the surface with the lookup circle of 400 m (the rise over it is 70 ft against the
     // allowance of 100 ft), and counted whole with a circle of 1.2 km (the rise is about 240 ft).
     let (cfg, mut f, mut p) = tower_rig(590, 300.0, false);
     assert_eq!(f.floor_at(&p).unwrap().obstacle_ft, FLOOR_NONE);
@@ -1072,18 +1131,18 @@ fn an_airport_area_needs_the_whole_query_circle_inside_and_an_explicit_area_any_
     }]);
     let m = 111_194.926_644_558_74;
     let at = |north_m: f64| point(13.50 + north_m / m, 144.80, 100.0);
-    // The lookup circle is 408 m (one 250 m bucket and a cell's half diagonal): inside at 8,800 m
-    // from the centre, partly outside at 9,000 m, though the point itself is inside the area.
-    assert_eq!(f.floor_at(&at(8800.0)).unwrap().apt_clearance_ft, 200);
+    // The lookup circle is the point's own, 100 m: inside at 9,100 m from the centre, partly outside
+    // at 9,200 m, though the point itself is inside the area.
+    assert_eq!(f.floor_at(&at(9100.0)).unwrap().apt_clearance_ft, 200);
     assert_eq!(
-        f.floor_at(&at(9000.0)).unwrap().apt_clearance_ft,
+        f.floor_at(&at(9200.0)).unwrap().apt_clearance_ft,
         FLOOR_NONE
     );
     // An explicit area raises the floor: any overlap of the circle takes it, though the point is
     // outside the box.
     f.set_areas(vec![(Area::Box(14.0, 14.5, 144.0, 145.0), 700)]);
     let to_box = |south_m: f64| point(14.0 - south_m / m, 144.5, 100.0);
-    assert_eq!(f.floor_at(&to_box(300.0)).unwrap().gtm_clearance_ft, 700);
+    assert_eq!(f.floor_at(&to_box(50.0)).unwrap().gtm_clearance_ft, 700);
     assert_eq!(
         f.floor_at(&to_box(1000.0)).unwrap().gtm_clearance_ft,
         FLOOR_NONE
@@ -1092,6 +1151,33 @@ fn an_airport_area_needs_the_whole_query_circle_inside_and_an_explicit_area_any_
     let tri = Area::Polygon(vec![(14.0, 144.0), (14.5, 144.0), (14.0, 145.0)]);
     assert!(tri.overlaps(14.0 - 300.0 / m, 144.5, 408.0));
     assert!(!tri.overlaps(14.0 - 1000.0 / m, 144.5, 408.0));
+}
+
+// REQ: OA-MSAW-081
+#[test]
+fn a_lookup_circle_is_the_points_own_radius_with_no_cell_and_no_bucket() {
+    use oa_msaw_run::floors::ObstacleIndex;
+    let m = 111_194.926_644_558_74;
+    // A 900 ft tower 300 m north of the point.
+    let tower = ((40.0_f64 + 300.0 / m) * 1e7).round() as i32;
+    let mut f = Floors::new(
+        None,
+        Some(ObstacleIndex::from_points(std::iter::once((
+            tower,
+            -880_000_000,
+            900,
+        )))),
+        None,
+    );
+    let at = |r: f32| point(40.0, -88.0, r);
+    assert_eq!(f.floor_at(&at(250.0)).unwrap().obstacle_ft, FLOOR_NONE);
+    assert_eq!(f.floor_at(&at(280.0)).unwrap().obstacle_ft, FLOOR_NONE);
+    assert_eq!(f.floor_at(&at(320.0)).unwrap().obstacle_ft, 900);
+    // The same circle from a neighbouring point of the old 0.002 degree cell: the same answer
+    // wherever the point is in it, since the circle is the point's.
+    let off = point(40.0 - 0.0019, -88.0, 100.0);
+    assert_eq!(f.floor_at(&off).unwrap().obstacle_ft, FLOOR_NONE);
+    assert_eq!(Floors::effective_radius_m(250.0), 250.0);
 }
 
 // REQ: OA-MSAW-073
@@ -1218,6 +1304,7 @@ fn the_diagnosis_gives_the_altitude_radius_obstacle_and_terrain_sections_and_nam
         airports: &[],
         all_airports: &[],
         all_thresholds: &[],
+        n_configured: 0,
         sealed: oa_sealed::Sealed::production(),
         corridors: &[],
         qnh: None,
@@ -1231,6 +1318,7 @@ fn the_diagnosis_gives_the_altitude_radius_obstacle_and_terrain_sections_and_nam
         "5. what the predicted depth is made of",
         "6. the landing zone",
         "7. the deep alerts",
+        "8. the alignment of every alert",
         "dominant term over all 1 alerts",
     ] {
         assert!(t.contains(k), "{k}\n{t}");
@@ -1411,7 +1499,10 @@ fn tower_rig(
         None,
     );
     f.set_corridors(&cfg);
-    (cfg, f, point(lat, lon, 100.0))
+    let mut p = point(lat, lon, 400.0);
+    // On final: heading north, the inbound course of the corridor.
+    p.track_deg = 0;
+    (cfg, f, p)
 }
 
 // REQ: OA-MSAW-077

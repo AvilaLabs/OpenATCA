@@ -46,9 +46,9 @@ mod state;
 mod types;
 
 pub use calc::{
-    altitude_use, corridor_hit_ft, corridor_hit_linear, extrapolated_alt_ft, floor_of,
-    not_climbing, runway_elev_at, violates, with_airport_area, AltUse, PAVEMENT_MARGIN_M,
-    UNKNOWN_RATE_DESCENT_FPM,
+    aligned, altitude_use, bearing_gap_deg, corridor_hit_for, corridor_hit_ft, corridor_hit_linear,
+    extrapolated_alt_ft, floor_of, not_climbing, runway_elev_at, track_deg_of, violates,
+    with_airport_area, AltUse, PAVEMENT_MARGIN_M, UNKNOWN_RATE_DESCENT_FPM,
 };
 pub use corridor::{corridor_hit_at, corridor_index_new, corridor_runway_elev_at, CorridorIndex};
 pub use cycle::{

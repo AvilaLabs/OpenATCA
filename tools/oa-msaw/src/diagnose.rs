@@ -48,6 +48,9 @@ pub struct DiagIn<'a> {
     /// (latitude, longitude) of them, for the distances of the deep alerts.
     pub all_airports: &'a [(String, f64, f64)],
     pub all_thresholds: &'a [(f64, f64)],
+    /// How many of `corridors` are the configured airports' (the first ones); the rest are the
+    /// area's.
+    pub n_configured: usize,
     pub sealed: &'a Sealed,
     /// The corridors of the CIFP, and the altimeter settings, for the landing zone.
     pub corridors: &'a [CifpCorridor],
@@ -178,6 +181,7 @@ pub fn diagnosis_text(i: &mut DiagIn) -> String {
     depth(&mut o, i);
     landing(&mut o, i);
     deep(&mut o, i, &mut tiles);
+    alignment(&mut o, i);
     o
 }
 
@@ -1046,7 +1050,7 @@ struct Deep {
     hdg_off: Option<f64>,
     /// The nearest airport with an approach and whether the configuration gives it corridors.
     apt_id: String,
-    has_corridors: bool,
+    apt_cat: &'static str,
     obst: Option<(f64, f64)>,
     r95: f64,
     growth: f64,
@@ -1095,40 +1099,8 @@ fn deep(o: &mut String, i: &mut DiagIn, tiles: &mut Tiles) {
             f64::from(a.worst_lat_e7) / 1e7,
             f64::from(a.worst_lon_e7) / 1e7,
         );
-        let has_corridors = i
-            .corridors
-            .iter()
-            .any(|k| k.label.split(' ').next() == Some(apt_id));
-        let heading = f64::from(a.vel_east_mps)
-            .atan2(f64::from(a.vel_north_mps))
-            .to_degrees();
-        let mut kinds = [false; 3];
-        // The heading off the best aligned runway or approach corridor holding the worst point (a
-        // strip is held by both of its ends, so the better aligned end counts).
-        let mut off: Option<f64> = None;
-        for k in i.corridors {
-            if oa_msaw::corridor_hit_ft(&k.corridor, a.worst_lat_e7, a.worst_lon_e7, 0.0, i.cfg)
-                .is_some()
-            {
-                if k.kind != oa_msaw::CK_DEPARTURE {
-                    let d = (heading - (k.corridor.out_bearing_deg + 180.0) + 540.0)
-                        .rem_euclid(360.0)
-                        - 180.0;
-                    if off.is_none_or(|b| d.abs() < b.abs()) {
-                        off = Some(d);
-                    }
-                }
-                if let Some(f) = kinds.get_mut(usize::from(k.kind)) {
-                    *f = true;
-                }
-            }
-        }
-        let corridor = match kinds {
-            [_, true, _] => "runway strip",
-            [true, _, _] => "approach box",
-            [_, _, true] => "departure",
-            _ => "none",
-        };
+        let apt_cat = airport_category(i, apt_id, apt_nm);
+        let (corridor, off) = rules_of(a, i);
         let vr = f64::from(a.vrate_fpm);
         let phase = if vr.is_nan() {
             "rate unknown"
@@ -1216,7 +1188,7 @@ fn deep(o: &mut String, i: &mut DiagIn, tiles: &mut Tiles) {
             span_s: (a.worst_ns - a.start_ns) as f64 / 1e9,
             hdg_off: off,
             apt_id: apt_id.to_string(),
-            has_corridors,
+            apt_cat,
             obst,
             r95,
             growth,
@@ -1262,8 +1234,8 @@ fn deep(o: &mut String, i: &mut DiagIn, tiles: &mut Tiles) {
     );
     let _ = writeln!(
         o,
-        "  the nearest airport has corridors in the configuration: {}; the nearest airport: {}",
-        count(&|d| d.has_corridors.to_string()),
+        "  the nearest airport is: {}; the nearest airport: {}",
+        count(&|d| d.apt_cat.to_string()),
         count(&|d| d.apt_id.clone())
     );
     let _ = writeln!(
@@ -1437,4 +1409,137 @@ fn deep(o: &mut String, i: &mut DiagIn, tiles: &mut Tiles) {
             );
         }
     }
+}
+
+/// The rules that held the worst point of an alert, and how far the track's ground track was off the
+/// best aligned runway or approach corridor that holds the point (degrees, -180 to 180): `box rules,
+/// approach box` and `box rules, runway strip` where the core held it in an aligned corridor,
+/// `general rules, in a box but not aligned` where a box or strip holds the point and the track is
+/// not aligned with it, `general rules, no box` elsewhere.
+fn rules_of(a: &Alert, i: &DiagIn) -> (&'static str, Option<f64>) {
+    let mut held = false;
+    let mut off: Option<f64> = None;
+    for k in i.corridors {
+        if k.kind == oa_msaw::CK_DEPARTURE {
+            continue;
+        }
+        if oa_msaw::corridor_hit_ft(
+            &k.corridor,
+            a.worst_lat_e7,
+            a.worst_lon_e7,
+            f64::from(a.worst_radius_m),
+            i.cfg,
+        )
+        .is_some()
+        {
+            held = true;
+            if a.track_deg >= 0 {
+                let t = f64::from(a.track_deg);
+                let mut d =
+                    (t - (k.corridor.out_bearing_deg + 180.0) + 540.0).rem_euclid(360.0) - 180.0;
+                if k.kind == oa_msaw::CK_RUNWAY {
+                    let e = (t - k.corridor.out_bearing_deg + 540.0).rem_euclid(360.0) - 180.0;
+                    if e.abs() < d.abs() {
+                        d = e;
+                    }
+                }
+                if off.is_none_or(|b| d.abs() < b.abs()) {
+                    off = Some(d);
+                }
+            }
+        }
+    }
+    let rules = if a.worst_kinds & oa_msaw::KB_RUNWAY != 0 {
+        "box rules, runway strip"
+    } else if a.worst_kinds & oa_msaw::KB_APPROACH != 0 {
+        "box rules, approach box"
+    } else if held {
+        "general rules, in a box but not aligned"
+    } else {
+        "general rules, no box"
+    };
+    (rules, off)
+}
+
+/// The nearest airport with an approach to an alert, by what the run built for it: `configured` (its
+/// own corridors from the configuration), `CIFP-built` (built from the CIFP for the area),
+/// `approach, no corridors` (it has an approach and got none) and `no approach airport within 10 NM`.
+fn airport_category(i: &DiagIn, id: &str, nm: f64) -> &'static str {
+    let label_is = |k: &crate::cifp::CifpCorridor| k.label.split(' ').next() == Some(id);
+    if nm > NEAR_NM {
+        "no approach airport within 10 NM"
+    } else if i.corridors.iter().take(i.n_configured).any(label_is) {
+        "configured"
+    } else if i.corridors.iter().skip(i.n_configured).any(label_is) {
+        "CIFP-built"
+    } else {
+        "approach, no corridors"
+    }
+}
+
+/// What rules held the worst point of every alert, and of the airports they were near.
+fn alignment(o: &mut String, i: &DiagIn) {
+    let _ = writeln!(
+        o,
+        "\n8. the alignment of every alert (rules at the worst point; the track's ground track is the first cycle's)"
+    );
+    let mut rules: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut cross: BTreeMap<(&str, &str), usize> = BTreeMap::new();
+    let mut off_all: Vec<f64> = Vec::new();
+    let mut off_unaligned: Vec<f64> = Vec::new();
+    let mut shallow_deep: BTreeMap<(&str, bool), usize> = BTreeMap::new();
+    for a in i.alerts {
+        let (r, off) = rules_of(a, i);
+        *rules.entry(r).or_default() += 1;
+        let (lat, lon) = (f64::from(a.lat_e7) / 1e7, f64::from(a.lon_e7) / 1e7);
+        let (apt_nm, apt_id) = i
+            .all_airports
+            .iter()
+            .map(|(id, la, lo)| (dist_m((lat, lon), (*la, *lo)) / M_PER_NM, id.as_str()))
+            .fold((f64::INFINITY, ""), |b, x| if x.0 < b.0 { x } else { b });
+        let cat = airport_category(i, apt_id, apt_nm);
+        *cross.entry((cat, r)).or_default() += 1;
+        *shallow_deep
+            .entry((r, f64::from(a.worst_margin_ft) <= -DEEP_FT))
+            .or_default() += 1;
+        if let Some(d) = off {
+            off_all.push(d.abs());
+            if r == "general rules, in a box but not aligned" {
+                off_unaligned.push(d.abs());
+            }
+        }
+    }
+    let _ = writeln!(
+        o,
+        "  rules at the worst point, all {} alerts: {rules:?}",
+        i.alerts.len()
+    );
+    let fast: Vec<&Alert> = i
+        .alerts
+        .iter()
+        .filter(|a| f64::from(a.vrate_fpm).abs() > 6000.0 && a.alt_ft < 10_000.0)
+        .collect();
+    let _ = writeln!(
+        o,
+        "  alerts whose vertical rate at the first cycle was over 6,000 ft/min either way below 10,000 ft: {} (of the 500 ft or more deep ones {})",
+        fast.len(),
+        fast.iter()
+            .filter(|a| f64::from(a.worst_margin_ft) <= -DEEP_FT)
+            .count()
+    );
+    for ((cat, r), n) in &cross {
+        let _ = writeln!(o, "  nearest airport {cat}; {r}: {n}");
+    }
+    let _ = writeln!(
+        o,
+        "  by depth (rules; 500 ft or more below the floor): {shallow_deep:?}"
+    );
+    let _ = writeln!(
+        o,
+        "  ground track off the best aligned runway or approach corridor holding the worst point (absolute, degrees; {} alerts have one): {}; of them not aligned (general rules) {}: {}",
+        off_all.len(),
+        buckets(&off_all, &[10.0, 30.0, 60.0, 120.0, 150.0], " deg"),
+        off_unaligned.len(),
+        buckets(&off_unaligned, &[60.0, 120.0, 150.0], " deg")
+    );
 }

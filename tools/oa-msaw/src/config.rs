@@ -8,6 +8,7 @@
 //! ```text
 //! corridor = <thr_lat> <thr_lon> <out_bearing_deg> <length_m> <near_half_m> <far_half_m> <thr_elev_ft> <faf_alt_ft>
 //! cifp_airport = <ICAO identifier>
+//! cifp_area_margin_nm = <nautical miles>   (optional)
 //! gtm_clearance = box <lat_min> <lat_max> <lon_min> <lon_max> <ft>
 //! gtm_clearance = file <path of lat,lon lines> <ft>
 //! msaw_request = <addr:HEX24 | call:CALLSIGN> <start_s> <end_s>
@@ -19,7 +20,9 @@
 //! wins). The chart altitude is no alert floor.
 //!
 //! A corridor line is a final-approach corridor of the core. A `cifp_airport` line asks for the
-//! corridors the CIFP gives at that airport (needs `--cifp`). An inhibit
+//! corridors the CIFP gives at that airport (needs `--cifp`). `cifp_area_margin_nm` asks for the approach
+//! capture boxes and runway strips of every airport with an instrument approach in the area of the clip
+//! widened by that margin; the `cifp_airport` lines give theirs, with departure corridors, instead. An inhibit
 //! line is an inhibition of the net made when the run starts: its times are seconds after the
 //! first measurement of the clip, the author and the reason are one word each (`_` is a space). A
 //! `msaw_request` line is a pilot's request for MSAW service: a track with that address or callsign
@@ -104,6 +107,11 @@ pub struct Settings {
     pub inhibit_cfg: InhibitConfig,
     pub inhibits: Vec<InhibitSpec>,
     pub cifp_airports: Vec<String>,
+    /// With `--cifp`: corridors for every runway end with an approach at every airport within the
+    /// area of the clip widened by this many nautical miles (`cifp_airport` lines are overrides).
+    pub cifp_area_margin_nm: Option<f64>,
+    /// The address whose rows `--rows-of` asks for (set by the run, not the configuration).
+    pub trace_addr: Option<u32>,
     pub requests: Vec<RequestSpec>,
     /// The beacon codes of VFR traffic: 1200 and the `vfr_beacon_code` lines.
     pub vfr_codes: Vec<u16>,
@@ -125,7 +133,7 @@ pub struct Settings {
     pub metar_max_age_s: i64,
 }
 
-const KEYS: [&str; 39] = [
+const KEYS: [&str; 41] = [
     "look_ahead_s",
     "warning_s",
     "samples",
@@ -144,6 +152,8 @@ const KEYS: [&str; 39] = [
     "stale_hold_s",
     "altitude_loss_degrade_share",
     "terminal_lookahead_s",
+    "capture_heading_deg",
+    "cifp_area_margin_nm",
     "no_qnh_allowance_ft",
     "metar_radius_nm",
     "metar_max_age_s",
@@ -486,6 +496,7 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             get("altitude_loss_degrade_share")?,
         )?,
         terminal_lookahead_s: finite("terminal_lookahead_s", get("terminal_lookahead_s")?)?,
+        capture_heading_deg: finite("capture_heading_deg", get("capture_heading_deg")?)?,
         corridors: list,
         n_corridors: procs.len(),
     };
@@ -543,6 +554,11 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         inhibit_cfg,
         inhibits: specs,
         cifp_airports: airports.iter().map(|s| (*s).to_string()).collect(),
+        trace_addr: None,
+        cifp_area_margin_nm: match kv.get("cifp_area_margin_nm") {
+            Some(v) => Some(positive("cifp_area_margin_nm", v, 100.0)?),
+            None => None,
+        },
         requests: reqs,
         vfr_codes,
         gtm_areas,

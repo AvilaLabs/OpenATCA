@@ -230,7 +230,7 @@ pub fn alerts_csv_with_basis(rows: &[(Alert, Basis)], airports: &[(String, f64, 
 fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> String {
     let labelled = rows.iter().any(|r| r.1.is_some());
     let mut o = String::from(
-        "address_hex,start_s,end_s,caution_s,warning_s,peak,lat_deg,lon_deg,altitude_ft,vrate_fpm,speed_mps,nearest_approach_airport_nm,worst_margin_ft,worst_floor_ft,worst_floor_kind,ttv_min_s,cycles,flags,flags_raw,end_reason,worst_lat_deg,worst_lon_deg,worst_flags_raw",
+        "address_hex,start_s,end_s,caution_s,warning_s,peak,lat_deg,lon_deg,altitude_ft,vrate_fpm,speed_mps,nearest_approach_airport_nm,worst_margin_ft,worst_floor_ft,worst_floor_kind,ttv_min_s,cycles,flags,flags_raw,end_reason,worst_lat_deg,worst_lon_deg,worst_flags_raw,track_deg,worst_point_corridors",
     );
     if labelled {
         o.push_str(",basis");
@@ -241,7 +241,7 @@ fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> St
     for (a, basis) in v {
         let _ = write!(
             o,
-            "{:08X},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{}",
+            "{:08X},{},{},{},{},{},{:.5},{:.5},{},{},{},{},{},{},{},{},{},{},{},{},{:.5},{:.5},{},{},{}",
             a.addr,
             secs(a.start_ns),
             secs(a.end_ns),
@@ -264,7 +264,13 @@ fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> St
             end_text(a.end_reason),
             f64::from(a.worst_lat_e7) / 1e7,
             f64::from(a.worst_lon_e7) / 1e7,
-            a.worst_flags
+            a.worst_flags,
+            if a.track_deg < 0 {
+                String::new()
+            } else {
+                a.track_deg.to_string()
+            },
+            kinds_text(a.worst_kinds)
         );
         if let Some(b) = basis {
             let _ = write!(o, ",{b}");
@@ -272,6 +278,26 @@ fn csv_of(rows: &[(Alert, Option<&str>)], airports: &[(String, f64, f64)]) -> St
         o.push('\n');
     }
     o
+}
+
+/// The corridors that held a point for the track, as the rules that applied there: the kinds of the
+/// capture box, runway strip and departure corridor the track was aligned with, or `general`.
+pub fn kinds_text(k: u8) -> String {
+    let mut v = Vec::new();
+    for (bit, name) in [
+        (oa_msaw::KB_APPROACH, "approach_box"),
+        (oa_msaw::KB_RUNWAY, "runway_strip"),
+        (oa_msaw::KB_DEPARTURE, "departure"),
+    ] {
+        if k & bit != 0 {
+            v.push(name);
+        }
+    }
+    if v.is_empty() {
+        "general".to_string()
+    } else {
+        v.join("+")
+    }
 }
 
 /// `skipped.csv`: one row per track and reason that the net did not (fully) evaluate, with the
@@ -369,6 +395,11 @@ pub struct DataUsed {
     /// The corridors the CIFP gave, and the runway ends with an approach that got none.
     pub cifp_corridors: Vec<CifpCorridor>,
     pub without_corridor: Vec<String>,
+    /// How many of `cifp_corridors` the configuration's `cifp_airport` lines gave (the first ones);
+    /// the rest are the area's.
+    pub configured_corridors: usize,
+    /// The corridors built for the area of the run, with their cost.
+    pub area: Option<AreaInfo>,
     /// Per alert (address, start), the distance in metres to the cell that set its floor.
     pub setter_m: BTreeMap<(u32, i64), f32>,
     /// The terrain tiles a query needed that the directory did not hold, by file name.
@@ -393,9 +424,29 @@ pub struct DataUsed {
     pub steady_cpu_s: Option<f64>,
     /// CPU seconds of the diagnostics after the last cycle (not in the steady state).
     pub diag_cpu_s: f64,
+    /// Track rows with a vertical rate over 6,000 ft/min either way below 10,000 ft, and their tracks.
+    pub fast_rate: (u64, usize),
     pub times: crate::run::RunTimes,
     /// Who was alerted and why; `None` when the run did not judge (a test of the report alone).
     pub eligibility: Option<EligibilityReport>,
+}
+
+/// What building the corridors of every airport in the area of the run took and gave. A7.2: cold
+/// struct, size guard waived.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AreaInfo {
+    /// South, north, west, east, degrees: the area of the rows widened by the margin.
+    pub area: (f64, f64, f64, f64),
+    pub airports: usize,
+    pub airports_with_corridors: usize,
+    pub approach_boxes: usize,
+    pub strips: usize,
+    pub without: usize,
+    pub build_s: f64,
+    pub rss_before_kb: Option<u64>,
+    pub rss_after_kb: Option<u64>,
+    /// The identifiers of the airports that got corridors from the area.
+    pub built_airports: Vec<String>,
 }
 
 /// What the summary is made from. A7.2: cold struct, size guard waived.
@@ -584,8 +635,8 @@ pub fn summary_text(i: &SummaryInput) -> String {
     }
     let _ = writeln!(
         o,
-        "  points looked up {} ({} from the cell cache)",
-        i.floor_stats.points, i.floor_stats.cache_hits
+        "  points looked up {}, each at the point over its own radius (no cell, no radius bucket)",
+        i.floor_stats.points
     );
     let from_cifp = i
         .data
@@ -606,6 +657,25 @@ pub fn summary_text(i: &SummaryInput) -> String {
         i.data.without_corridor.len(),
         i.data.airports.len()
     );
+    if let Some(a) = &i.data.area {
+        let _ = writeln!(
+            o,
+            "corridors of the area (latitude {:.2} to {:.2}, longitude {:.2} to {:.2}: the rows widened by the margin): {} airports with an instrument approach, {} of them with corridors, {} approach capture boxes and {} runway strips, {} runway ends with an approach and no corridor; the configured airports ({} corridors) keep their own, with departure corridors; built in {:.2} s, resident memory {} MB before and {} MB after",
+            a.area.0,
+            a.area.1,
+            a.area.2,
+            a.area.3,
+            a.airports,
+            a.airports_with_corridors,
+            a.approach_boxes,
+            a.strips,
+            a.without,
+            i.data.configured_corridors,
+            a.build_s,
+            a.rss_before_kb.map_or(0, |k| k / 1024),
+            a.rss_after_kb.map_or(0, |k| k / 1024)
+        );
+    }
     let apps: Vec<&CifpCorridor> = i
         .data
         .cifp_corridors
@@ -620,7 +690,14 @@ pub fn summary_text(i: &SummaryInput) -> String {
         apps.iter().filter(|c| c.tch_from_cifp).count(),
         apps.iter().filter(|c| !c.angle_from_cifp && !c.tch_from_cifp).count()
     );
-    for c in apps {
+    for c in apps.into_iter().filter(|c| {
+        i.data.area.is_none()
+            || i.data
+                .cifp_corridors
+                .iter()
+                .take(i.data.configured_corridors)
+                .any(|k| std::ptr::eq(k, *c))
+    }) {
         let _ = writeln!(
             o,
             "  {}: {:.1} NM{}, threshold {} ft, fix {} ft, from {} approaches",
@@ -635,6 +712,11 @@ pub fn summary_text(i: &SummaryInput) -> String {
     for w in &i.data.without_corridor {
         let _ = writeln!(o, "  no corridor, {w}");
     }
+    let _ = writeln!(
+        o,
+        "track rows with a vertical rate over 6,000 ft/min either way below 10,000 ft: {} rows of {} tracks",
+        i.data.fast_rate.0, i.data.fast_rate.1
+    );
     let _ = writeln!(o, "compute:");
     for (n, ns) in &i.data.load_ns {
         let _ = writeln!(o, "  one-off load, {n}: {:.2} s", *ns as f64 / 1e9);

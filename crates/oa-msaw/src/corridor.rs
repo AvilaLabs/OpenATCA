@@ -6,7 +6,7 @@
 
 use alloc::vec::Vec;
 
-use crate::calc::{corridor_hit_ft, hit_union, runway_elev_at, M_PER_DEG, RAD_PER_DEG};
+use crate::calc::{aligned, corridor_hit_for, hit_union, runway_elev_at, M_PER_DEG, RAD_PER_DEG};
 use crate::types::{Corridor, CorridorHit, MsawConfig, SamplePoint};
 
 /// The cell of the index, 1e-7 degree (0.1 degree).
@@ -93,6 +93,46 @@ pub fn corridor_index_new(cfg: &MsawConfig) -> Result<CorridorIndex, &'static st
     Ok(CorridorIndex { entries })
 }
 
+impl CorridorIndex {
+    /// The numbers of the corridors whose cells the box of `radius_m` around a point touches (a
+    /// superset of those that can hold or reach a circle of that radius), each once.
+    // E8: the values are held within the i32 range before the cast.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn near(&self, lat_e7: i32, lon_e7: i32, radius_m: f64) -> Vec<u16> {
+        let dlat = radius_m / M_PER_DEG * 1.0e7 + MARGIN_E7;
+        // The widest the degree of longitude is: the narrowest, at the latitude of the point.
+        let cos_lat =
+            oa_math::max_f64(oa_math::cos(f64::from(lat_e7) * 1.0e-7 * RAD_PER_DEG), 0.05);
+        let dlon = radius_m / (M_PER_DEG * cos_lat) * 1.0e7 + MARGIN_E7;
+        let cell = |v: f64| {
+            oa_math::clamp_f64(oa_ieee::floor(v / f64::from(CELL_E7)), -2.0e3, 2.0e3) as i32
+        };
+        let (a0, a1) = (
+            cell(f64::from(lat_e7) - dlat),
+            cell(f64::from(lat_e7) + dlat),
+        );
+        let (b0, b1) = (
+            cell(f64::from(lon_e7) - dlon),
+            cell(f64::from(lon_e7) + dlon),
+        );
+        let mut out: Vec<u16> = Vec::new();
+        for a in a0..=a1 {
+            for b in b0..=b1 {
+                let from = self.entries.partition_point(|&(x, y, _)| (x, y) < (a, b));
+                for &(x, y, k) in self.entries.get(from..).unwrap_or(&[]) {
+                    if (x, y) != (a, b) {
+                        break;
+                    }
+                    if !out.contains(&k) {
+                        out.push(k);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
 /// What the corridors say of a point: the union of the hits of the corridors of the point's cell
 /// that hold the point's whole query circle, `None` if none does.
 pub fn corridor_hit_at(
@@ -113,7 +153,14 @@ pub fn corridor_hit_at(
         let Some(c) = cfg.corridors.get(usize::from(k)) else {
             continue;
         };
-        if let Some(h) = corridor_hit_ft(c, p.lat_e7, p.lon_e7, f64::from(p.radius_m), cfg) {
+        if let Some(h) = corridor_hit_for(
+            c,
+            p.lat_e7,
+            p.lon_e7,
+            f64::from(p.radius_m),
+            p.track_deg,
+            cfg,
+        ) {
             best = Some(hit_union(best, h));
         }
     }
@@ -141,6 +188,9 @@ pub fn corridor_runway_elev_at(
         let Some(c) = cfg.corridors.get(usize::from(k)) else {
             continue;
         };
+        if !aligned(c, p.track_deg, cfg.capture_heading_deg) {
+            continue;
+        }
         if let Some(e) = runway_elev_at(c, p.lat_e7, p.lon_e7, radius_m) {
             best = Some(best.map_or(e, |b| b.min(e)));
         }

@@ -122,7 +122,8 @@ fn point(lat: f64, lon: f64) -> SamplePoint {
     SamplePoint {
         lat_e7: (lat * 1e7).round() as i32,
         lon_e7: (lon * 1e7).round() as i32,
-        radius_m: 100.0,
+        radius_m: 400.0,
+        track_deg: -1,
     }
 }
 

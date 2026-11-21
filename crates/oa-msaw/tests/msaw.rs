@@ -42,6 +42,7 @@ fn cfg() -> MsawConfig {
         stale_hold_s: 30.0,
         altitude_loss_degrade_share: 0.5,
         terminal_lookahead_s: 15.0,
+        capture_heading_deg: 30.0,
         corridors: [blank_corridor(); MAX_CORRIDORS],
         n_corridors: 0,
     }
@@ -680,6 +681,7 @@ fn a_corridor_gives_its_floor_only_where_the_whole_query_circle_is_inside() {
         lat_e7: (south_m(4630.0) * 1e7).round() as i32,
         lon_e7: -880_000_000,
         radius_m: 100.0,
+        track_deg: 0,
     };
     let one = corridor_hit_linear(&c, &p).unwrap().surface_ft.unwrap();
     let both = corridor_hit_linear(&two, &p).unwrap().surface_ft.unwrap();
@@ -843,7 +845,8 @@ fn outside_the_corridor_or_straddling_its_edge_the_normal_floor_applies() {
     let world = flat(0, 100);
     let still = |cross_m: f64| {
         let lon = -88.0 + cross_m / (111_194.926_644_558_74 * 40.0f64.to_radians().cos());
-        tr(5, south_m(1200.0), lon, 0.0, 0.0, 400.0, 0.0)
+        // Slowly north, toward the threshold: a track with a ground track, aligned with the box.
+        tr(5, south_m(1200.0), lon, 0.0, 2.5, 400.0, 0.0)
     };
     let mut r = rig(&k);
     let o = cycle(&mut r, S, &[still(0.0)], &world);
@@ -1042,6 +1045,7 @@ fn the_sample_points_follow_the_straight_path_with_a_radius_that_covers_the_gaps
         lat_e7: 0,
         lon_e7: 0,
         radius_m: 0.0,
+        track_deg: -1,
     }; 13];
     assert_eq!(sample_points(&start, &c, &mut out), Some(13));
     assert_eq!((out[0].lat_e7, out[0].lon_e7), (400_000_000, -880_000_000));
@@ -1478,6 +1482,7 @@ fn a_runway_corridor_holds_the_threshold_elevation_and_the_approach_clearance_an
             lat_e7: (((40.0 + along_m / 111_194.926_644_558_74) * 1e7).round()) as i32,
             lon_e7: -880_000_000,
             radius_m: 100.0,
+            track_deg: 0,
         };
         corridor_hit_linear(&c, &p)
     };
@@ -1531,6 +1536,7 @@ fn the_corridor_index_gives_the_answer_of_looking_at_every_corridor() {
             lat_e7: 400_000_000 + (rnd() * 1.0e7) as i32 - 5_000_000,
             lon_e7: -880_000_000 + (rnd() * 1.0e7) as i32 - 5_000_000,
             radius_m: (rnd() * 700.0) as f32,
+            track_deg: (rnd() * 361.0) as i16 - 1,
         };
         let (fast, slow) = (corridor_hit_at(&c, &ix, &p), corridor_hit_linear(&c, &p));
         assert_eq!(fast, slow, "{p:?}");
@@ -2378,4 +2384,131 @@ fn the_roll_out_points_are_counted_and_those_off_the_runway_apart() {
     assert_eq!(o.stats.landings, 1);
     assert!(o.stats.rollout_points > 0);
     assert!(o.stats.rollout_off_runway > 0 && o.stats.rollout_off_runway <= o.stats.rollout_points);
+}
+
+// REQ: OA-MSAW-079
+#[test]
+fn the_box_rules_apply_to_an_aligned_track_and_a_reciprocal_or_crossing_one_gets_the_general_rules()
+{
+    // On the 3 degree path 2,500 m south of the threshold (1,082 ft over a 600 ft terrain): inside
+    // the box the floor is the surface, and the track is clear; under the general floor (terrain
+    // plus 500 ft is 1,100 ft) it is below at once. The corridor runs south from the threshold, so
+    // the inbound course is north (0 degrees).
+    let world = ridge_world(600, 600);
+    let run = |ve: f32, vn: f32| {
+        let mut r = rig(&corridor_cfg());
+        let mut t = final_track(0, 2500.0, 0.0, -722.0);
+        t.vel_east_mps = ve;
+        t.vel_north_mps = vn;
+        let o = cycle(&mut r, S, &[t], &world);
+        (
+            o.stats.violations,
+            msaw_open(&r.st).first().map(|a| a.track_deg),
+        )
+    };
+    assert_eq!(run(0.0, 70.0), (0, None), "aligned: the box rules");
+    assert_eq!(
+        run(23.9, 65.8),
+        (0, None),
+        "20 degrees off the inbound course is aligned"
+    );
+    assert_eq!(run(0.0, -70.0).0, 1, "reciprocal: the general rules");
+    assert_eq!(run(70.0, 0.0).0, 1, "crossing: the general rules");
+    assert_eq!(run(45.0, 53.6).0, 1, "40 degrees off: the general rules");
+    // The alert says what the track was doing and which rules held its worst point.
+    let mut r = rig(&corridor_cfg());
+    let mut t = final_track(0, 2500.0, 0.0, -722.0);
+    t.vel_north_mps = -70.0;
+    cycle(&mut r, S, &[t], &world);
+    let a = msaw_open(&r.st)[0];
+    assert_eq!((a.track_deg, a.worst_kinds), (180, 0));
+    // A track too slow to have a ground track is aligned with no box.
+    assert_eq!(run(0.0, 1.0).0, 1);
+}
+
+// REQ: OA-MSAW-079
+#[test]
+fn overlapping_boxes_each_hold_the_track_aligned_with_it_and_parallel_ones_both() {
+    let mut c = cfg();
+    let wide = |bearing: f64, faf: i32| Corridor {
+        near_half_width_m: 2000.0,
+        far_half_width_m: 2000.0,
+        out_bearing_deg: bearing,
+        faf_alt_ft: faf,
+        ..north_corridor()
+    };
+    // A runs south from the threshold, B (a crossing runway) east of it, C is A's parallel with a
+    // higher path angle.
+    c.corridors[0] = wide(180.0, 2250);
+    c.corridors[1] = wide(90.0, 2250);
+    c.corridors[2] = Corridor {
+        path_angle_deg: 4.0,
+        ..wide(180.0, 2250)
+    };
+    let point = |deg: i16| SamplePoint {
+        lat_e7: (south_m(1000.0) * 1e7).round() as i32,
+        lon_e7: -880_000_000
+            + (1000.0 / (111_194.926_644_558_74 * 40.0f64.to_radians().cos()) * 1e7) as i32,
+        radius_m: 100.0,
+        track_deg: deg,
+    };
+    let surface = |n: usize, deg: i16| {
+        let mut k = c;
+        k.n_corridors = n;
+        corridor_hit_linear(&k, &point(deg)).map(|h| h.surface_ft.unwrap())
+    };
+    let (a, b, ac) = (
+        surface(1, 0),
+        surface(2, 270).unwrap(),
+        surface(3, 0).unwrap(),
+    );
+    // The track aligned with A takes A's surface although B holds the point too, and the one aligned
+    // with B takes B's.
+    assert_eq!(surface(2, 0), a);
+    assert_eq!(surface(2, 270), Some(b));
+    // Between them, aligned with neither: the general rules.
+    assert_eq!(surface(2, 45), None);
+    assert_eq!(surface(2, -1), None);
+    // Parallel boxes aligned with the track: the higher surface of the two.
+    assert!(ac > a.unwrap());
+    let index = corridor_index_new(&{
+        let mut k = c;
+        k.n_corridors = 3;
+        k
+    })
+    .unwrap();
+    let mut k = c;
+    k.n_corridors = 3;
+    assert_eq!(
+        corridor_hit_at(&k, &index, &point(0)),
+        corridor_hit_linear(&k, &point(0))
+    );
+}
+
+// REQ: OA-MSAW-079
+#[test]
+fn a_runway_strip_holds_a_track_aligned_with_either_direction_of_the_runway() {
+    let mut c = cfg();
+    let mut k = departure_corridor();
+    k.kind = CK_RUNWAY;
+    k.length_m = 2500.0;
+    c.corridors[0] = k;
+    c.n_corridors = 1;
+    let at = |deg: i16| {
+        let p = SamplePoint {
+            lat_e7: (((40.0_f64 + 1000.0 / 111_194.926_644_558_74) * 1e7).round()) as i32,
+            lon_e7: -880_000_000,
+            radius_m: 100.0,
+            track_deg: deg,
+        };
+        corridor_hit_linear(&c, &p).is_some()
+    };
+    assert!(at(0) && at(180) && at(20) && at(160) && at(340));
+    assert!(!at(90) && !at(270) && !at(45) && !at(-1));
+    assert_eq!(track_deg_of(0.0, 70.0), 0);
+    assert_eq!(track_deg_of(70.0, 0.0), 90);
+    assert_eq!(track_deg_of(-70.0, 0.0), 270);
+    assert_eq!(track_deg_of(0.0, -70.0), 180);
+    assert_eq!(track_deg_of(-1.0, 1.0), -1);
+    assert!((bearing_gap_deg(350.0, 10.0) - 20.0).abs() < 1e-9);
 }

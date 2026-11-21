@@ -110,6 +110,12 @@ pub fn msaw_check(c: &MsawConfig) -> Result<(), &'static str> {
     {
         return Err("terminal_lookahead_s");
     }
+    if !(c.capture_heading_deg.is_finite()
+        && c.capture_heading_deg > 0.0
+        && c.capture_heading_deg <= 90.0)
+    {
+        return Err("capture_heading_deg");
+    }
     if !(c.velocity_uncertainty_mps.is_finite()
         && c.velocity_uncertainty_mps >= 0.0
         && c.velocity_uncertainty_mps <= MAX_SPEED_LIMIT_MPS)

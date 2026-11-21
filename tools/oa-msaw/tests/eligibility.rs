@@ -187,6 +187,8 @@ fn alert(addr: u32, start_s: i64) -> Alert {
         vel_east_mps: 0.0,
         vel_north_mps: 0.0,
         ttv_min_s: 0.0,
+        track_deg: -1,
+        worst_kinds: 0,
         cycles: 1,
         flags: 0,
         end_reason: 0,

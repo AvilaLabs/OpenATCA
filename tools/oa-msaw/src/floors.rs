@@ -23,8 +23,8 @@ use std::time::Instant;
 
 use oa_dof::Dof;
 use oa_msaw::{
-    corridor_hit_ft, Corridor, FloorSample, MsawConfig, SamplePoint, CK_APPROACH, CK_DEPARTURE,
-    FLOOR_NONE,
+    corridor_hit_for, corridor_hit_ft, Corridor, FloorSample, MsawConfig, SamplePoint, CK_APPROACH,
+    CK_DEPARTURE, FLOOR_NONE,
 };
 use oa_mva::Model;
 use oa_sealed::Sealed;
@@ -34,13 +34,6 @@ use crate::chart_raster::ChartRaster;
 use crate::coarse::{Coarse, CoarseTerrain, CELLS_PER_DEG};
 use crate::guard::refuse_sealed;
 
-/// The cell of a lookup, degrees.
-const CELL_DEG: f64 = 0.002;
-/// Half the diagonal of a cell, metres, at the equator (the largest): 0.002 degrees is 222.4 m of
-/// latitude and at most as much of longitude.
-const CELL_HALF_DIAG_M: f64 = 158.0;
-/// The radius bucket, metres.
-const RADIUS_STEP_M: f64 = 250.0;
 /// The obstacle index cell, degrees.
 const OBST_CELL_DEG: f64 = 0.1;
 /// Metres per degree of latitude, the smallest anywhere (at the equator).
@@ -81,9 +74,6 @@ pub struct FloorStats {
     pub terrain_grid_bytes: u64,
     pub chart_blocks: u64,
 }
-
-/// A lookup to make: its cache key, and the centre and radius of the query.
-type Lookup = ((i32, i32, u32), f64, f64, f64);
 
 /// One obstacle: latitude and longitude in 1e-7 degree, top in feet MSL.
 type Obstacle = (i32, i32, i32, u32);
@@ -382,10 +372,6 @@ impl ObstacleIndex {
     }
 }
 
-/// What a lookup cell holds: terrain, obstacle, explicit area clearance, airport area clearance and
-/// ceiling.
-type CellFloors = (i32, i32, i32, i32, i32);
-
 /// An area with its own clearance above terrain (degrees).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Area {
@@ -487,11 +473,12 @@ pub struct Floors {
     absent: BTreeSet<(i32, i32)>,
     obstacles: Option<ObstacleIndex>,
     chart: Option<ChartRaster>,
-    cache: HashMap<(i32, i32, u32), CellFloors>,
     areas: Vec<(Area, i32)>,
     airports: Vec<AirportArea>,
     /// The corridors of the net, for the obstacles an approach surface stands for.
     corridors: Option<Box<MsawConfig>>,
+    /// The grid index of those corridors.
+    cidx: Option<oa_msaw::CorridorIndex>,
     pub stats: FloorStats,
 }
 
@@ -542,10 +529,10 @@ impl Floors {
             absent: BTreeSet::new(),
             obstacles,
             chart: chart.map(ChartRaster::new),
-            cache: HashMap::new(),
             areas: Vec::new(),
             airports: Vec::new(),
             corridors: None,
+            cidx: None,
             stats: FloorStats::default(),
         }
     }
@@ -573,24 +560,34 @@ impl Floors {
     /// Elsewhere every obstacle counts.
     pub fn set_corridors(&mut self, cfg: &MsawConfig) {
         self.corridors = (cfg.n_corridors > 0).then(|| Box::new(*cfg));
+        self.cidx = if cfg.n_corridors > 0 {
+            oa_msaw::corridor_index_new(cfg).ok()
+        } else {
+            None
+        };
     }
 
-    /// The highest obstacle top for the lookup circle at (`lat`, `lon`) of `radius_m`.
-    fn obstacle_top(&self, lat: f64, lon: f64, radius_m: f64) -> i32 {
+    /// The highest obstacle top for the lookup circle at (`lat`, `lon`) of `radius_m`, for a track
+    /// with ground track `track_deg` (whole degrees, -1: none): the approach corridors and runway
+    /// strips that count are those the track is aligned with.
+    fn obstacle_top(&self, lat: f64, lon: f64, radius_m: f64, track_deg: i16) -> i32 {
         let Some(ix) = self.obstacles.as_ref() else {
             return FLOOR_NONE;
         };
-        let Some(cfg) = self.corridors.as_deref() else {
+        let (Some(cfg), Some(cidx)) = (self.corridors.as_deref(), self.cidx.as_ref()) else {
             return ix.highest_within(lat, lon, radius_m);
         };
         let (la, lo) = ((lat * 1e7).round() as i32, (lon * 1e7).round() as i32);
         let mut holding: Vec<&Corridor> = Vec::new();
-        for c in cfg.corridors.iter().take(cfg.n_corridors) {
+        for k in cidx.near(la, lo, radius_m) {
+            let Some(c) = cfg.corridors.get(usize::from(k)) else {
+                continue;
+            };
             if c.kind == CK_DEPARTURE {
                 if reaches(c, lat, lon, radius_m) {
                     return ix.highest_within(lat, lon, radius_m);
                 }
-            } else if corridor_hit_ft(c, la, lo, radius_m, cfg).is_some() {
+            } else if corridor_hit_for(c, la, lo, radius_m, track_deg, cfg).is_some() {
                 holding.push(c);
             }
         }
@@ -675,6 +672,7 @@ impl Floors {
         lon_e7: i32,
         radius_m: f64,
         kind: oa_msaw::FloorKind,
+        track_deg: i16,
     ) -> Option<f64> {
         let (lat, lon) = (f64::from(lat_e7) / 1e7, f64::from(lon_e7) / 1e7);
         let at = |me: &mut Self, r: f64| -> i32 {
@@ -682,7 +680,7 @@ impl Floors {
                 oa_msaw::FloorKind::Terrain if me.tile_dir.is_some() => {
                     me.terrain_ft(lat, lon, r).unwrap_or(FLOOR_NONE)
                 }
-                oa_msaw::FloorKind::Obstacle => me.obstacle_top(lat, lon, r),
+                oa_msaw::FloorKind::Obstacle => me.obstacle_top(lat, lon, r, track_deg),
                 _ => FLOOR_NONE,
             }
         };
@@ -702,10 +700,9 @@ impl Floors {
         Some(hi)
     }
 
-    /// The radius a lookup really uses for a point of radius `radius_m`: the bucket it falls in
-    /// plus the cell's half diagonal, metres.
+    /// The radius a lookup really uses for a point of radius `radius_m`: the radius itself, metres.
     pub fn effective_radius_m(radius_m: f64) -> f64 {
-        (radius_m / RADIUS_STEP_M).ceil().max(1.0) * RADIUS_STEP_M + CELL_HALF_DIAG_M
+        radius_m
     }
 
     /// The highest terrain within `radius_m` of a point, feet; for the diagnosis.
@@ -852,94 +849,38 @@ impl Floors {
         best
     }
 
-    /// The cache key of a point and the query it stands for: the cell, the radius bucket, and the
-    /// centre and radius the terrain and obstacle lookups are made at.
-    fn key_of(p: &SamplePoint) -> Lookup {
-        let (lat, lon) = (f64::from(p.lat_e7) / 1e7, f64::from(p.lon_e7) / 1e7);
-        let bucket = (f64::from(p.radius_m) / RADIUS_STEP_M).ceil().max(1.0);
-        let key = (
-            cell_of(lat, CELL_DEG),
-            cell_of(lon, CELL_DEG),
-            bucket as u32,
-        );
-        let (clat, clon) = (
-            (f64::from(key.0) + 0.5) * CELL_DEG,
-            (f64::from(key.1) + 0.5) * CELL_DEG,
-        );
-        (key, clat, clon, bucket * RADIUS_STEP_M + CELL_HALF_DIAG_M)
-    }
-
-    /// Answers the terrain and obstacle lookups of `points` that are not cached yet, in the order
-    /// of their cells (south to north, then west to east), so that a tile is read about once for
-    /// the whole batch and not once for every time the points move on and back. The answers are
-    /// the same as lookup by lookup (the cache is keyed by cell and radius bucket alone).
-    pub fn prepare(&mut self, points: &[SamplePoint]) -> Result<(), String> {
-        let mut todo: Vec<Lookup> = points
-            .iter()
-            .map(Self::key_of)
-            .filter(|k| !self.cache.contains_key(&k.0))
-            .collect();
-        todo.sort_by_key(|k| k.0);
-        todo.dedup_by_key(|k| k.0);
-        for (key, clat, clon, radius) in todo {
-            let t = if self.tile_dir.is_some() {
-                self.terrain_ft(clat, clon, radius)?
-            } else {
-                FLOOR_NONE
-            };
-            let t1 = Instant::now();
-            let o = self.obstacle_top(clat, clon, radius);
-            self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
-            let g = self.gtm_at(clat, clon, radius);
-            let (ac, ak) = self.apt_at(clat, clon, radius);
-            self.cache.insert(key, (t, o, g, ac, ak));
-        }
+    /// Nothing to prepare: every lookup is made at the point itself with its own radius.
+    pub fn prepare(&mut self, _points: &[SamplePoint]) -> Result<(), String> {
         Ok(())
     }
 
-    /// The floor sample at a point. A terrain file that cannot be read is an error.
+    /// The floor sample at a point, looked up at the point itself over its own radius (no cell and no
+    /// radius bucket: the circle is exactly the point's). A terrain file that cannot be read is an
+    /// error.
     pub fn floor_at(&mut self, p: &SamplePoint) -> Result<FloorSample, String> {
         self.stats.points += 1;
         let (lat, lon) = (f64::from(p.lat_e7) / 1e7, f64::from(p.lon_e7) / 1e7);
+        let radius = f64::from(p.radius_m);
         let t0 = Instant::now();
         let mva_ft = self.chart_ft(lat, lon);
         self.stats.ns_chart += t0.elapsed().as_nanos() as u64;
-        let bucket = (f64::from(p.radius_m) / RADIUS_STEP_M).ceil().max(1.0);
-        let key = (
-            cell_of(lat, CELL_DEG),
-            cell_of(lon, CELL_DEG),
-            bucket as u32,
-        );
-        let (terrain_ft, obstacle_ft, gtm_clearance_ft, apt_clearance_ft, apt_ceiling_ft) =
-            if let Some(&v) = self.cache.get(&key) {
-                self.stats.cache_hits += 1;
-                v
-            } else {
-                let (clat, clon) = (
-                    (f64::from(key.0) + 0.5) * CELL_DEG,
-                    (f64::from(key.1) + 0.5) * CELL_DEG,
-                );
-                let radius = bucket * RADIUS_STEP_M + CELL_HALF_DIAG_M;
-                let t = if self.tile_dir.is_some() {
-                    self.terrain_ft(clat, clon, radius)?
-                } else {
-                    FLOOR_NONE
-                };
-                let t1 = Instant::now();
-                let o = self.obstacle_top(clat, clon, radius);
-                self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
-                let g = self.gtm_at(clat, clon, radius);
-                let (ac, ak) = self.apt_at(clat, clon, radius);
-                self.cache.insert(key, (t, o, g, ac, ak));
-                (t, o, g, ac, ak)
-            };
+        let terrain_ft = if self.tile_dir.is_some() {
+            self.terrain_ft(lat, lon, radius)?
+        } else {
+            FLOOR_NONE
+        };
+        let t1 = Instant::now();
+        let obstacle_ft = self.obstacle_top(lat, lon, radius, p.track_deg);
+        self.stats.ns_obstacle += t1.elapsed().as_nanos() as u64;
+        let gtm_clearance_ft = self.gtm_at(lat, lon, radius);
+        let (apt_clearance_ft, apt_ceiling_ft) = self.apt_at(lat, lon, radius);
         Ok(FloorSample {
             terrain_ft,
             obstacle_ft,
             obstacle_covered: self
                 .obstacles
                 .as_ref()
-                .is_some_and(|o| o.covers(lat, lon, f64::from(p.radius_m))),
+                .is_some_and(|o| o.covers(lat, lon, radius)),
             mva_ft,
             gtm_clearance_ft,
             apt_clearance_ft,

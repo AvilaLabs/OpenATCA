@@ -6691,6 +6691,19 @@ FAA value.
 - **OA-MSAW-078** An altitude below FL180 with a setting is lowered by the ICAO Doc 8168 cold-temperature correction
   from the METAR temperature at the altimeter station, up to 5,000 ft above the station (never raised, flagged);
   with no station temperature, or higher than that, there is no correction, flagged.
+- **OA-MSAW-079** The approach capture box rules (the terminal look-ahead, the approach surface as a floor, the
+  obstacle-under-surface filter) apply only to a track whose ground track is within `capture_heading_deg` of the box's
+  inbound course; a runway strip holds a track within it of either direction of the runway. Any other track, a
+  reciprocal or crossing one or one too slow to have a ground track, gets the general rules (the full look-ahead,
+  terrain and obstacle floors). Where boxes overlap a track takes those it is aligned with. The alert records the
+  ground track and the corridors that held its worst point.
+- **OA-MSAW-080** With `cifp_area_margin_nm` and `--cifp`, the approach capture box and runway strip of every runway
+  end with a published instrument approach at every airport within the area of the run's rows, widened by the margin,
+  are built from the CIFP; the airports of the `cifp_airport` lines keep their own, with departure corridors. The
+  summary reports the airports, boxes, strips, build time and memory.
+- **OA-MSAW-081** A floor lookup is made at the point itself over its own radius, with no cell and no radius bucket.
+- **OA-MSAW-082** `--rows-of <8 hex digits of an address hash>` writes `rows_of.csv`: that aircraft's clip rows
+  (barometric and geometric altitude, vertical rate and its kind), its measurements and the tracker's rows.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.
 ## Runway geometry and occupancy (oa-runway)
