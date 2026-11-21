@@ -2,6 +2,7 @@
 //! bins and their statistics, the join rule and the report text. No I/O, no clock, no hash maps.
 
 pub mod bins;
+pub mod arrival;
 pub mod cross;
 pub mod join;
 pub mod places;
