@@ -17,7 +17,9 @@ use oa_display::traffic::{
 };
 use oa_scope_replay::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use oa_scope_replay::cli;
-use oa_scope_replay::frame::{replay_build, replay_new, replay_raster, ReplayConfig};
+use oa_scope_replay::frame::{
+    replay_build, replay_build_with_safety, replay_new, replay_raster, ReplayConfig, ReplaySafety,
+};
 use oa_scope_replay::rows::*;
 use oa_scope_replay::store::*;
 use oa_sha256::to_hex;
@@ -551,6 +553,58 @@ fn a_replay_frame_marks_state_and_says_when_targets_were_not_drawn() {
         let (s, n) = (r.list.texts.start[i] as usize, r.list.texts.len[i] as usize);
         r.list.text[s..s + n].starts_with("TARGETS NOT DRAWN: 1")
     }));
+}
+
+#[test]
+fn safety_overlay_keeps_each_feed_outage_independent_of_track_freshness() {
+    use oa_display::safety::{FeedState, FeedStatus};
+    use oa_safety::inhibit::inhibits_new;
+    use oa_safety::net::{state_report, state_table_new, NetReport, NETS};
+
+    let mut states = state_table_new(30 * S, S).unwrap();
+    for net in NETS {
+        state_report(&mut states, net, NetReport::Running, T0, T0).unwrap();
+    }
+    let inhibits = inhibits_new();
+    let feeds = [
+        FeedStatus {
+            name: *b"RADAR1\0\0",
+            state: FeedState::Live,
+        },
+        FeedStatus {
+            name: *b"ADSB\0\0\0\0",
+            state: FeedState::Lost { age_ms: 12_000 },
+        },
+    ];
+    let mut replay = replay_new(model(), &frame_cfg()).unwrap();
+    let safety = ReplaySafety {
+        states: &states,
+        inhibits: &inhibits,
+        feeds: &feeds,
+        newest_track_ns: Some(T0),
+        frozen_limit_ns: 5 * S,
+    };
+    replay_build_with_safety(
+        &mut replay,
+        &RowStore::default(),
+        &Callsigns::default(),
+        T0 + 6 * S,
+        "SYNTH",
+        &safety,
+    )
+    .unwrap();
+    let texts: Vec<&str> = (0..replay.list.texts.x.len())
+        .map(|i| {
+            let (start, len) = (
+                replay.list.texts.start[i] as usize,
+                replay.list.texts.len[i] as usize,
+            );
+            &replay.list.text[start..start + len]
+        })
+        .collect();
+    assert!(texts.iter().any(|s| s.starts_with("PICTURE FROZEN")));
+    assert!(texts.iter().any(|s| s.starts_with("FEED ADSB LOST")));
+    assert!(!texts.iter().any(|s| s.starts_with("FEED RADAR1")));
 }
 
 fn tmp(name: &str) -> std::path::PathBuf {

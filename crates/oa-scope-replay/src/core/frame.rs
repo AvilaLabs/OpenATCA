@@ -12,6 +12,7 @@ use oa_display::core::list::{
 };
 use oa_display::core::palette;
 use oa_display::core::raster::{frame_len, rasterize, FrameSpec, RenderError};
+use oa_display::core::safety::{build_safety, safety_caps, FeedStatus, SafetyScene};
 use oa_display::core::scene::{
     build_scene, scene_caps, scene_index, scratch_for, view_new, SceneIndex, SceneStats, Scratch,
     View,
@@ -21,6 +22,8 @@ use oa_display::core::traffic::{
     build_traffic, caps_add, targets_clear, targets_malformed, targets_new, targets_refused,
     traffic_caps, TargetSet, TrafficStats, TrafficStyle, LAYER_BLOCK,
 };
+use oa_safety::inhibit::InhibitTable;
+use oa_safety::net::StateTable;
 use std::fmt;
 
 /// The frame's own text: the time and the target count, bottom right.
@@ -92,6 +95,18 @@ pub struct Replay {
     ell: oa_geo::Ellipsoid,
 }
 
+/// Live health telemetry supplied by the scope producer for one frame. The replay command has no
+/// such telemetry and must not infer it from its historical clip.
+#[derive(Clone, Copy, Debug)]
+pub struct ReplaySafety<'a> {
+    pub states: &'a StateTable,
+    pub inhibits: &'a InhibitTable,
+    pub feeds: &'a [FeedStatus],
+    /// Time of the newest accepted track update, not merely the newest emitted row.
+    pub newest_track_ns: Option<i64>,
+    pub frozen_limit_ns: i64,
+}
+
 /// What one frame build drew and left out. A7.2: cold struct (one per frame).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameInfo {
@@ -140,7 +155,7 @@ pub fn replay_new(model: Model, cfg: &ReplayConfig) -> Result<Replay, ReplayErro
     let caps = caps_add(
         &caps_add(
             &scene_caps(&model)?,
-            &traffic_caps(cfg.max_targets, &cfg.style)?,
+            &caps_add(&traffic_caps(cfg.max_targets, &cfg.style)?, &safety_caps())?,
         )?,
         &stamp,
     )?;
@@ -169,10 +184,45 @@ pub fn replay_build(
     t_ns: i64,
     stamp: &str,
 ) -> Result<FrameInfo, ReplayError> {
+    replay_build_inner(r, store, calls, t_ns, stamp, None)
+}
+
+/// Builds the scope frame with independent feed, track-freshness and safety-net telemetry.
+pub fn replay_build_with_safety(
+    r: &mut Replay,
+    store: &RowStore,
+    calls: &Callsigns,
+    t_ns: i64,
+    stamp: &str,
+    safety: &ReplaySafety<'_>,
+) -> Result<FrameInfo, ReplayError> {
+    replay_build_inner(r, store, calls, t_ns, stamp, Some(safety))
+}
+
+fn replay_build_inner(
+    r: &mut Replay,
+    store: &RowStore,
+    calls: &Callsigns,
+    t_ns: i64,
+    stamp: &str,
+    safety: Option<&ReplaySafety<'_>>,
+) -> Result<FrameInfo, ReplayError> {
     targets_clear(&mut r.set);
     let convert = targets_at(store, calls, t_ns, &r.cfg.convert, &r.view.proj, &mut r.set);
     let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
     let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
+    if let Some(s) = safety {
+        let scene = SafetyScene {
+            states: s.states,
+            inhibits: s.inhibits,
+            now_ns: t_ns,
+            feeds: s.feeds,
+            newest_track_ns: s.newest_track_ns,
+            frozen_limit_ns: s.frozen_limit_ns,
+            targets: &r.set,
+        };
+        build_safety(&mut r.list, &r.view.proj, &scene)?;
+    }
     let mut tb = text_new();
     text_push_str(&mut tb, stamp);
     text_push_str(&mut tb, "  TARGETS ");
