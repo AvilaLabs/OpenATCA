@@ -488,7 +488,9 @@ fn altitude_at(track: TrackState, assigned: Option<f64>, seconds: f64) -> Option
             raw
         }
     });
-    value.is_finite().then_some(value)
+    (MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT)
+        .contains(&value)
+        .then_some(value)
 }
 
 fn route_position(start: Place, speed: f64, route: &[RouteFix], seconds: f64) -> Option<Place> {
@@ -791,8 +793,8 @@ mod tests {
         };
         snapshot.route = vec![near];
         snapshot.meter_fix = Some(near);
-        let forecast = forecast(&snapshot).expect("valid stale but bounded track");
-        assert_eq!(forecast.meter_eta, None);
+        let passed_fix = forecast(&snapshot).expect("valid stale but bounded track");
+        assert_eq!(passed_fix.meter_eta, None);
 
         let (snapshot, _) = fixture();
         let forecast = forecast(&snapshot).expect("valid forecast");
@@ -808,5 +810,17 @@ mod tests {
             Err(ScoreRefusal::MeterFixMismatch)
         );
         assert_eq!(forecast.meter_fix, Some(fix));
+    }
+
+    // REQ: OA-LTJ-054
+    #[test]
+    fn an_out_of_range_altitude_does_not_erase_horizontal_coverage() {
+        let (mut snapshot, _) = fixture();
+        snapshot.track.altitude_ft = Some(1_000.0);
+        snapshot.track.vertical_rate_fpm = Some(-2_500.0);
+        snapshot.assigned_altitude_ft = None;
+        let forecast = forecast(&snapshot).expect("position forecast remains usable");
+        assert!(forecast.positions[0].place.is_some());
+        assert_eq!(forecast.positions[0].altitude_ft, None);
     }
 }
