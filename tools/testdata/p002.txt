@@ -1,0 +1,4 @@
+SYNTHETIC fixture; no operational or real-aircraft data
+P-002 scoring with the P-003 to P-006 amendments: OpenATCA, ERAM, passthrough baseline
+  label: SYNTHETIC tracker-tail test fixture
+  excluded windows: 0; grid samples removed in all: 0

@@ -1,0 +1,8 @@
+# SYNTHETIC fixture; no operational or real-aircraft data
+addr,t_ms,phase,band,common,common_two_way,oa_miss,oa_cross_m,oa_along_raw_m,oa_along_fit_m,oa_h_fit_m,oa_along_tol_m,oa_h_tol_m,oa_speed_err_mps,oa_track_err_deg,oa_row_dt_ms,eram_miss,eram_cross_m,eram_along_raw_m,eram_along_fit_m,eram_h_fit_m,eram_along_tol_m,eram_h_tol_m,eram_speed_err_mps,eram_track_err_deg,eram_row_dt_ms,pt_miss,pt_cross_m,pt_along_raw_m,pt_along_fit_m,pt_h_fit_m,pt_along_tol_m,pt_h_tol_m,pt_speed_err_mps,pt_track_err_deg,pt_row_dt_ms,oa_coast,oa_uncertain,oa_reacquired
+A00001,1000,cruise,29000 to 40999 ft,1,1,0,2.0,,,,,,,0.2,,0,,,,,,,,,,0,,,,,,,,,,0,0,0
+A00001,11000,cruise,29000 to 40999 ft,1,1,0,5.0,,,,,,,0.5,,0,,,,,,,,,,0,,,,,,,,,,0,0,0
+A00001,72001,cruise,29000 to 40999 ft,1,1,0,80.0,,,,,,,18.0,,0,,,,,,,,,,0,,,,,,,,,,0,1,1
+A00002,1000,descent,below 10000 ft,1,1,0,1.0,,,,,,,0.1,,0,,,,,,,,,,0,,,,,,,,,,0,0,0
+A00002,11000,descent,below 10000 ft,1,1,0,3.0,,,,,,,0.8,,0,,,,,,,,,,0,,,,,,,,,,0,0,0
+A00002,21000,descent,below 10000 ft,1,1,0,4.0,,,,,,,1.4,,0,,,,,,,,,,0,,,,,,,,,,0,0,0
