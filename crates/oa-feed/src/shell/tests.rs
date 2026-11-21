@@ -1693,6 +1693,97 @@ fn crashed_and_damaged_compressed_files_replay_what_is_good() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+// REQ: OA-FEED-013, OA-FEED-027, OA-FEED-030
+#[test]
+fn interrupted_recording_restart_replays_only_saved_frames_and_exposes_loss() {
+    let dir = tmpdir("restart");
+    let base = 1_700_000_000i64;
+    let make = |seq, sec: i64| {
+        frame(
+            1,
+            0,
+            seq,
+            sec * SEC,
+            sec * 1_000,
+            format!("saved-{seq}").as_bytes(),
+        )
+    };
+
+    // The second frame causes a compressor sync flush. The third is handed to the still-open
+    // member but is not flushed before this recorder is dropped, modeling a process crash.
+    let first = make(10, base);
+    let second = make(11, base + 1);
+    let lost = make(12, base + 1);
+    {
+        let mut recorder =
+            Recorder::open(&dir, "restart", u64::MAX, u64::MAX, Format::Gzip).unwrap();
+        assert_eq!(
+            recorder.write_frame(&first, base, base).unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(
+            recorder.write_frame(&second, base + 1, base + 1).unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(
+            recorder.write_frame(&lost, base + 1, base + 1).unwrap(),
+            Outcome::Written
+        );
+        // Deliberately drop without finish: only the successful sync flush is recoverable.
+    }
+
+    // Restart with the same local second. create_new must select the next suffix rather than
+    // overwrite the crashed evidence; the next accepted frame makes the missing sequence
+    // observable.
+    let restarted = make(13, base + 2);
+    let mut recorder = Recorder::open(&dir, "restart", u64::MAX, u64::MAX, Format::Gzip).unwrap();
+    assert_eq!(
+        recorder.write_frame(&restarted, base + 2, base).unwrap(),
+        Outcome::Written
+    );
+    recorder.finish().unwrap();
+
+    let names = files_in(&dir);
+    assert_eq!(
+        names.len(),
+        2,
+        "crash file is preserved beside restarted output"
+    );
+    assert!(names[0].ends_with("-0001.oaf.gz"));
+    assert!(names[1].ends_with("-0002.oaf.gz"));
+    let old_path = dir.join(&names[0]);
+    let (recovered, gzip_status) = gunzip_all(&std::fs::read(&old_path).unwrap());
+    assert_eq!(recovered, [first.as_slice(), second.as_slice()].concat());
+    assert!(
+        gzip_status.truncated.is_some(),
+        "the open member remains visibly incomplete"
+    );
+
+    let report = replay_files(&names.iter().map(|n| dir.join(n)).collect::<Vec<_>>()).unwrap();
+    assert_eq!(
+        report.health.messages, 3,
+        "each complete saved frame is replayed once"
+    );
+    assert_eq!(
+        report.bytes,
+        (first.len() + second.len() + restarted.len()) as u64
+    );
+    assert_eq!(report.health.gaps, 1);
+    assert_eq!(
+        report.health.missing, 1,
+        "sequence 12 was not invented during recovery"
+    );
+    assert_eq!(report.health.first_recv_ns, base * SEC);
+    assert_eq!(report.health.last_recv_ns, (base + 2) * SEC);
+    assert_eq!(
+        report.gzip.len(),
+        1,
+        "the crashed file is reported during replay"
+    );
+    assert!(matches!(report.gzip[0].kind, GzNoteKind::Truncated(_)));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 // REQ: OA-FEED-033
 #[test]
 fn flush_and_file_name_follow_local_clock_not_frame_stamp() {
