@@ -261,6 +261,13 @@ fn ca_active_detail(drill: &Drill) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputFault {
+    None,
+    FailBeforeApply,
+    CrashAfterApply,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkerCommand {
     Step {
         second: i32,
@@ -270,8 +277,7 @@ enum WorkerCommand {
         key: InputKey,
         second: i32,
         feed_live: bool,
-        fail_before_apply: bool,
-        crash_after_apply: bool,
+        fault: InputFault,
     },
     QuarantineSkip {
         key: InputKey,
@@ -329,8 +335,11 @@ fn parse_worker_command(line: &str) -> Option<WorkerCommand> {
                     key,
                     second,
                     feed_live,
-                    fail_before_apply: command == "FAIL_BEFORE_APPLY",
-                    crash_after_apply: command == "CRASH_AFTER_APPLY",
+                    fault: match command {
+                        "FAIL_BEFORE_APPLY" => InputFault::FailBeforeApply,
+                        "CRASH_AFTER_APPLY" => InputFault::CrashAfterApply,
+                        _ => InputFault::None,
+                    },
                 }
             }
         }
@@ -1433,8 +1442,7 @@ fn machine_loss_worker_process() {
                 key,
                 second,
                 feed_live,
-                fail_before_apply,
-                crash_after_apply,
+                fault,
             } => {
                 let identity = QuarantineRecord {
                     key,
@@ -1455,7 +1463,7 @@ fn machine_loss_worker_process() {
                     let _ = std::io::stdout().flush();
                     break;
                 }
-                if fail_before_apply {
+                if fault == InputFault::FailBeforeApply {
                     println!(
                         "MACHINE_LOSS_FAIL_BEFORE_APPLY {} {} {} {} {}",
                         key.publisher_id,
@@ -1484,7 +1492,7 @@ fn machine_loss_worker_process() {
                 } else {
                     drill.process(second, feed_live)
                 };
-                if crash_after_apply {
+                if fault == InputFault::CrashAfterApply {
                     let fields: Vec<_> = ack.split_whitespace().collect();
                     println!(
                         "MACHINE_LOSS_APPLIED_NO_ACK {} {} {} {} {} {} {} {}",
@@ -1881,6 +1889,15 @@ fn crash_after_apply_before_ack_replays_from_verified_prefix() {
         Some(87),
         "post-apply crash injection was not exercised"
     );
+    let terminal_output = crashed
+        .output
+        .as_ref()
+        .unwrap()
+        .recv_timeout(WORKER_TIMEOUT);
+    assert!(
+        matches!(terminal_output, Err(mpsc::RecvTimeoutError::Disconnected)),
+        "expected EOF after the fault marker, got {terminal_output:?}"
+    );
     drop(crashed);
 
     // The replacement receives only the retained prefix, so it reconstructs the applied-but-
@@ -1889,7 +1906,8 @@ fn crash_after_apply_before_ack_replays_from_verified_prefix() {
     for (&(prefix_second, _), expected) in prefix.iter().zip(&expected_prefix) {
         assert_eq!(replacement.recovered_prefix_line(prefix_second), *expected);
     }
-    let replayed = replacement.step(second, live);
+    let line = replacement.input(identity, second, live);
+    let replayed = validate_input_ack(&line, identity, second);
     assert_eq!(
         replayed, expected_applied,
         "replacement diverged on replayed step"
@@ -2096,8 +2114,7 @@ fn worker_protocol_is_typed_and_caps_output_lines() {
             key,
             second: 12,
             feed_live: true,
-            fail_before_apply: false,
-            crash_after_apply: false,
+            fault: InputFault::None,
         })
     );
     assert_eq!(
@@ -2106,8 +2123,7 @@ fn worker_protocol_is_typed_and_caps_output_lines() {
             key,
             second: 12,
             feed_live: true,
-            fail_before_apply: true,
-            crash_after_apply: false,
+            fault: InputFault::FailBeforeApply,
         })
     );
     assert_eq!(
@@ -2116,8 +2132,7 @@ fn worker_protocol_is_typed_and_caps_output_lines() {
             key,
             second: 12,
             feed_live: false,
-            fail_before_apply: false,
-            crash_after_apply: true,
+            fault: InputFault::CrashAfterApply,
         })
     );
     assert_eq!(
