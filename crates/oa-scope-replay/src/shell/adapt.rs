@@ -11,6 +11,7 @@ use crate::store::callsigns_build;
 use oa_adsb::Reports;
 use oa_display::safety::{FeedState, FeedStatus};
 use oa_feed::health::{FeedHealth, STATE_CONNECTED, STATE_DISCONNECTED, STATE_UNKNOWN};
+use oa_track::fusion::FusionStats;
 use oa_track::{r95_m_of, TrackOutput, O_COAST, O_HAS_ALT, O_REACQUIRED, O_UNCERTAIN};
 
 /// Caller-supplied feed freshness limits. The slow threshold is inclusive for `Slow`; the lost
@@ -95,6 +96,45 @@ pub fn feed_status_from_health(
         FeedState::NoMessageSeen
     };
     FeedStatus { name, state }
+}
+
+// The counters count different, sometimes overlapping work units. Comparing them separately
+// preserves the indication without claiming a total number of affected aircraft.
+fn radar_work_counters(stats: &FusionStats) -> [u64; 12] {
+    [
+        stats.bucket_plot_overflow,
+        stats.bucket_work_capped,
+        stats.assoc_refused,
+        stats.prediction_refused,
+        stats.cand_capacity,
+        stats.track_refused,
+        stats.scratch_full,
+        stats.anon_plots_ungated,
+        stats.init_capped,
+        stats.init_plots_refused,
+        stats.wide_full,
+        stats.init_wide_full,
+    ]
+}
+
+/// Supplies an extra scope banner when radar association or initiation loses work. Both
+/// snapshots must refer to the same fusion instance and span the frame's reporting interval.
+/// A decrease makes the work counters inconsistent. Use source freshness telemetry for arrival
+/// and connectivity status. Each loss counter remains available in the fusion report.
+pub fn radar_work_notice(previous: &FusionStats, current: &FusionStats) -> Option<FeedStatus> {
+    let before = radar_work_counters(previous);
+    let after = radar_work_counters(current);
+    let state = if before.iter().zip(after).any(|(&old, new)| old > new) {
+        FeedState::InvalidHealth
+    } else if before != after {
+        FeedState::CoverageLimited
+    } else {
+        return None;
+    };
+    Some(FeedStatus {
+        name: *b"RADAR\0\0\0",
+        state,
+    })
 }
 
 /// The two columns that are computed, not viewed: reused from drain to drain. Plain data.

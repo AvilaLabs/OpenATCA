@@ -140,7 +140,9 @@ pub enum FeedState {
     LostAgeOverflow,
     /// The bridge reports a disconnected or reconnecting transport.
     Disconnected,
-    /// The supplied counters and last-MESSAGE evidence disagree.
+    /// Surveillance processing omitted work during the reported interval.
+    CoverageLimited,
+    /// The supplied health evidence is inconsistent.
     InvalidHealth,
 }
 
@@ -346,6 +348,7 @@ pub fn feed_line(b: &mut TextBuf, f: &FeedStatus) {
         FeedState::SlowAgeOverflow => (" SLOW >49D", None),
         FeedState::LostAgeOverflow => (" LOST >49D", None),
         FeedState::Disconnected => (" DISCONNECTED", None),
+        FeedState::CoverageLimited => (" COVERAGE LIMITED", None),
         FeedState::InvalidHealth => (" HEALTH INCONSISTENT", None),
     };
     text_push_str(b, "FEED ");

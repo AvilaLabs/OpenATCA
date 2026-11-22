@@ -2399,6 +2399,99 @@ fn warning_count(scope: &Replay) -> usize {
         .count()
 }
 
+// REQ: OA-DSP-073
+#[test]
+fn radar_processing_loss_appears_on_a_fresh_scope() {
+    use oa_scope_replay::adapt::radar_work_notice;
+    use oa_track::fusion::{
+        fusion_advance, fusion_config, fusion_new, fusion_plots, fusion_stats,
+        fusion_tracker_config,
+    };
+    use oa_track::fusion_params::MAX_BUCKET_PLOTS;
+    use oa_track::radar::{RadarPlot, RadarSite, NONE_CODE, PLOT_NO_ADDR};
+
+    let site = RadarSite {
+        lat_deg: 41.9,
+        lon_deg: -87.9,
+        height_m: 200.0,
+        sigma_range_m: 70.0,
+        sigma_az_deg: 0.08,
+        range_quantum_m: 0.0,
+        alt_quantum_ft: 100,
+        period_ns: 4 * S,
+        epoch_ns: EPOCH - S,
+        sensor: 3,
+    };
+    let mut cfg = fusion_config(fusion_tracker_config(
+        &oa_track::TrackerConfig {
+            max_tracks: 8,
+            out_capacity: 256,
+            log_capacity: 16,
+            confirm_pool: 8,
+            ..DEFAULT_CONFIG
+        },
+        &[site],
+    ));
+    cfg.registration = false;
+    let mut fusion = fusion_new(&cfg, &[site]).unwrap();
+    let mut rows = output_new(256);
+    let quiet = *fusion_stats(&fusion);
+    let plot = RadarPlot {
+        time_ns: EPOCH - S,
+        range_m: 25_000.0,
+        az_deg: 90.0,
+        alt_ft: 12_000,
+        addr: PLOT_NO_ADDR,
+        label: A,
+        mode_a: NONE_CODE,
+    };
+    fusion_plots(&mut fusion, 0, &[plot]);
+    fusion_advance(&mut fusion, EPOCH, &mut rows);
+    let healthy = *fusion_stats(&fusion);
+    assert_eq!(healthy.plots_in, 1);
+    assert_eq!(healthy.plots_refused, 0);
+    assert!(radar_work_notice(&quiet, &healthy).is_none());
+
+    let mut d = Drill::new();
+    for net in NETS {
+        state_report(&mut d.states, net, NetReport::Running, EPOCH, EPOCH).unwrap();
+    }
+    d.warmup();
+    d.offer(A, 1, 0);
+    d.offer(B, 2, 0);
+    d.frame(0, &[]);
+
+    // One bucket exceeds the real per-radar plot limit by one. Flight picture updates
+    // continue independently, so only the newly reported radar work loss is visible.
+    let burst = vec![
+        RadarPlot {
+            time_ns: EPOCH,
+            ..plot
+        };
+        MAX_BUCKET_PLOTS + 1
+    ];
+    fusion_plots(&mut fusion, 0, &burst);
+    fusion_advance(&mut fusion, EPOCH + S, &mut rows);
+    let limited = *fusion_stats(&fusion);
+    assert_eq!(
+        limited.bucket_plot_overflow - healthy.bucket_plot_overflow,
+        1
+    );
+    let warning = radar_work_notice(&healthy, &limited).unwrap();
+    assert_eq!(warning.state, FeedState::CoverageLimited);
+    assert!(radar_work_notice(&limited, &limited).is_none());
+    assert_eq!(
+        radar_work_notice(&limited, &healthy).unwrap().state,
+        FeedState::InvalidHealth,
+    );
+    d.feeds[1] = warning;
+    d.offer(A, 1, 1);
+    d.offer(B, 2, 1);
+    d.frame(1, &["FEED RADAR COVERAGE LIMITED"]);
+    let colour = palette::bytes_of(palette::ALERT).unwrap();
+    assert!(d.scope.buf.chunks_exact(4).any(|pixel| pixel == colour));
+}
+
 // This is a process fault injection over synthetic records; it does not claim production
 // supervision or durable state transfer. Both workers replay the same stream through real code.
 #[test]

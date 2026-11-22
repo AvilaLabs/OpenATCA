@@ -5698,6 +5698,10 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   exclusions are counted separately from age-stale observations and rows withheld for later receipt.
   Conflicting latest observations are refused and counted. The frame carries `RAW SURVEILLANCE ONLY`,
   and a failed build makes its list unavailable to the rasterizer.
+- **OA-DSP-073** The offline scope replay can show `FEED RADAR COVERAGE LIMITED` when same-instance
+  interval counters report omitted work in radar association or initiation. The indication is
+  independent of source freshness and does not total unlike or overlapping work counters. A
+  decrease in a relevant counter is displayed as inconsistent health.
 - **OA-SHD-030** `oa-shadow screen` compares ADS-B with ERAM's reports of address-paired aircraft: ADS-B is
   evaluated at each ERAM report time by oa-truth's smoother (default settings) and the offset ADS-B minus ERAM is
   resolved along and across the ADS-B velocity direction. The along offset is `c - L x speed`: L is the apparent
