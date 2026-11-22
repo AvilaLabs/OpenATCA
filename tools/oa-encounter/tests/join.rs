@@ -415,7 +415,7 @@ fn the_callsign_names_a_flight_only_when_it_is_the_one_flying_flight_with_it() {
                 "{}{}{}",
                 id("NEAR1", "ACTIVE"),
                 alt("30000.0"),
-                pos("41.95", "-87.9", "03:05:30")
+                pos("41.95", "-87.9", "03:04:15")
             ),
         ),
         frame(
@@ -431,7 +431,7 @@ fn the_callsign_names_a_flight_only_when_it_is_the_one_flying_flight_with_it() {
             &format!(
                 "{}{}",
                 id("FAR3", "ACTIVE"),
-                pos("43.5", "-87.9", "03:05:30")
+                pos("43.5", "-87.9", "03:04:15")
             ),
         ),
         // 4 and 5 share a callsign; 6 ended, 7 flying with the same callsign.
@@ -458,7 +458,7 @@ fn the_callsign_names_a_flight_only_when_it_is_the_one_flying_flight_with_it() {
         ),
     ];
     let sf = recording("cs", &frames);
-    let t = 100; // everything has aged in; the positions are 15 s old
+    let t = 100; // everything has aged in; the positions are 90 s old
     let a = |addr| q(addr, t, CallsignObs::Absent, CHI);
     let queries = [
         q(1, t, cs("NEAR1"), CHI),
@@ -471,7 +471,8 @@ fn the_callsign_names_a_flight_only_when_it_is_the_one_flying_flight_with_it() {
         a(8),
         q(9, 300, cs("OLD8"), CHI),
     ];
-    let (r, _d, _) = answer_queries(&sf, &queries).unwrap();
+    let (r, _d, stats) = answer_queries(&sf, &queries).unwrap();
+    assert_eq!(stats.positions_bad_source_time, 0);
     assert_eq!(r[0].key, Key::CallsignChecked);
     assert_eq!(r[0].assigned.a_ft, 30_000);
     assert_eq!(
@@ -705,7 +706,7 @@ fn plans_of_one_aircraft_are_picked_by_the_newest_stamp_only_where_they_share_a_
 fn a_disagreement_between_the_keys_is_classed_and_looked_at_again_half_an_hour_on() {
     let addr = |a: &str| format!("<aircraftDescription aircraftAddress=\"{a}\"/>");
     let end = |n: u32, dt: i64, cs: &str| frame(100 + u64::from(n), n, dt, &id(cs, "COMPLETED"));
-    let at = |lat: &str| pos(lat, "-87.9", "03:05:30");
+    let at = |lat: &str| pos(lat, "-87.9", "03:04:15");
     let frames = [
         // Aircraft 100: its plan 1 holds the address with callsign SAM1 and is far off; plan 2
         // states SAM1 on the same route near the ADS-B position, and the callsign join (with the
@@ -746,7 +747,7 @@ fn a_disagreement_between_the_keys_is_classed_and_looked_at_again_half_an_hour_o
         frame(9, 7, 33 * 60, &id("LATE9", "ACTIVE")),
     ];
     let sf = with_pick(recording("diag", &frames), true);
-    let queries = [q(0x64, 150, cs("SAM1"), CHI), q(0x66, 150, cs("NEW3"), CHI)];
+    let queries = [q(0x64, 125, cs("SAM1"), CHI), q(0x66, 125, cs("NEW3"), CHI)];
     let (r, d, _) = answer_queries(&sf, &queries).unwrap();
     assert_eq!(r[0].key, Key::CallsignOverAddress, "{r:?}");
     assert_eq!(r[1].key, Key::Address);
@@ -762,7 +763,7 @@ fn a_disagreement_between_the_keys_is_classed_and_looked_at_again_half_an_hour_o
 }
 
 /// A flight message of gufi `n` that states aircraft address `addr`, callsign `c`, assigned
-/// altitude `ft` and, where given, a position at 03:05:30 (85 s into the fixtures).
+/// altitude `ft` and, where given, a position at 03:04:15, no later than the frame receipt.
 fn claim(
     (seq, n, dt_s): (u64, u32, i64),
     addr: &str,
@@ -772,7 +773,7 @@ fn claim(
     at: Option<(&str, &str)>,
 ) -> Vec<u8> {
     let p = at
-        .map(|(la, lo)| pos(la, lo, "03:05:30"))
+        .map(|(la, lo)| pos(la, lo, "03:04:15"))
         .unwrap_or_default();
     frame(
         seq,
@@ -825,9 +826,9 @@ fn with_no_claimant_flying_the_address_finds_nothing_and_the_callsign_is_tried()
     let (r, _d, _) = answer_queries(
         &sf,
         &[
-            q(0x00A1_B2C3, 150, cs("SOLO3"), CHI),
-            q(0x00A1_B2C3, 150, CallsignObs::Absent, CHI),
-            q(0x00FF_FFFF, 150, CallsignObs::Absent, CHI),
+            q(0x00A1_B2C3, 125, cs("SOLO3"), CHI),
+            q(0x00A1_B2C3, 125, CallsignObs::Absent, CHI),
+            q(0x00FF_FFFF, 125, CallsignObs::Absent, CHI),
         ],
     )
     .unwrap();
@@ -865,11 +866,11 @@ fn with_several_claimants_flying_the_one_whose_position_agrees_is_taken() {
     let (r, d, _) = answer_queries(
         &sf,
         &[
-            q(0x00A1_B2C3, 150, CallsignObs::Absent, CHI),
-            q(0x00B1_B2C3, 150, CallsignObs::Absent, CHI),
-            q(0x00C1_B2C3, 150, CallsignObs::Absent, CHI),
-            q(0x00B1_B2C3, 150, cs("FALL7"), CHI),
-            q(0x00C1_B2C3, 150, cs("FALL7"), CHI),
+            q(0x00A1_B2C3, 125, CallsignObs::Absent, CHI),
+            q(0x00B1_B2C3, 125, CallsignObs::Absent, CHI),
+            q(0x00C1_B2C3, 125, CallsignObs::Absent, CHI),
+            q(0x00B1_B2C3, 125, cs("FALL7"), CHI),
+            q(0x00C1_B2C3, 125, cs("FALL7"), CHI),
         ],
     )
     .unwrap();
@@ -917,10 +918,10 @@ fn where_the_address_and_the_callsign_name_different_flights_the_position_decide
     let (r, d, _) = answer_queries(
         &sf,
         &[
-            q(0x00A1_B2C3, 150, cs("CSN2"), CHI),
-            q(0x00B1_B2C3, 150, cs("CSF4"), CHI),
-            q(0x00C1_B2C3, 150, cs("CSN6"), CHI),
-            q(0x00D1_B2C3, 150, cs("CSX8"), CHI),
+            q(0x00A1_B2C3, 125, cs("CSN2"), CHI),
+            q(0x00B1_B2C3, 125, cs("CSF4"), CHI),
+            q(0x00C1_B2C3, 125, cs("CSN6"), CHI),
+            q(0x00D1_B2C3, 125, cs("CSX8"), CHI),
         ],
     )
     .unwrap();
@@ -958,17 +959,17 @@ fn with_several_claimants_flying_the_adsb_callsign_decides_before_state_and_posi
         &sf,
         &[
             // The callsign picks the proposed, far flight: a wins over b and c.
-            q(0x00A1_B2C3, 150, cs("NOW1"), CHI),
-            q(0x00B1_B2C3, 150, cs("TWO4"), CHI),
+            q(0x00A1_B2C3, 125, cs("NOW1"), CHI),
+            q(0x00B1_B2C3, 125, cs("TWO4"), CHI),
             // No claimant has the callsign: nothing narrows by it, and the position decides.
             Query {
                 try_callsign: false,
-                ..q(0x00C1_B2C3, 150, cs("NONE"), CHI)
+                ..q(0x00C1_B2C3, 125, cs("NONE"), CHI)
             },
             // No callsign seen: the position decides.
             Query {
                 try_callsign: false,
-                ..q(0x00C1_B2C3, 150, CallsignObs::Absent, CHI)
+                ..q(0x00C1_B2C3, 125, CallsignObs::Absent, CHI)
             },
         ],
     )
@@ -1005,7 +1006,7 @@ fn with_several_claimants_flying_active_or_departed_wins_over_proposed() {
     let sf = recording("state-decides", &frames);
     let none = |a| Query {
         try_callsign: false,
-        ..q(a, 150, CallsignObs::Absent, CHI)
+        ..q(a, 125, CallsignObs::Absent, CHI)
     };
     let (r, _d, _) = answer_queries(
         &sf,
@@ -1114,7 +1115,7 @@ fn an_all_proposed_set_does_not_narrow_to_none_and_a_callsign_step_that_leaves_t
     let sf = recording("narrow", &frames);
     let none = |a, c| Query {
         try_callsign: false,
-        ..q(a, 150, c, CHI)
+        ..q(a, 125, c, CHI)
     };
     let (r, _d, _) = answer_queries(
         &sf,
