@@ -9,6 +9,7 @@
 //! 1 if a file cannot be read or stdout cannot be written (the run stops at the failed write, with
 //! one line on stderr), 2 for a usage error.
 
+use std::cell::RefCell;
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -30,13 +31,14 @@ fn main() -> ExitCode {
         }
     };
     let verify_prefix = cmd.verify_prefix;
-    let mut input_fingerprint =
-        (cmd.input_fingerprint || verify_prefix.is_some()).then(InputFingerprint::default);
+    let verify_mode = verify_prefix.is_some();
+    let fingerprint_enabled = cmd.input_fingerprint || verify_mode;
+    let input_fingerprint = RefCell::new(fingerprint_enabled.then(InputFingerprint::default));
     // Every input path is checked, as given and resolved, before anything is opened.
     for i in &cmd.inputs {
         if let Err(e) = oa_sealed::refuse(&i.path) {
             eprintln!("oa-replay: {e}");
-            if let Some(fingerprint) = &input_fingerprint {
+            if let Some(fingerprint) = input_fingerprint.borrow().as_ref() {
                 print_fingerprint(fingerprint, "incomplete", Some(1), 0, 0, None);
             }
             return ExitCode::from(2);
@@ -51,7 +53,7 @@ fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("oa-replay: {e}");
-                    if let Some(fingerprint) = &input_fingerprint {
+                    if let Some(fingerprint) = input_fingerprint.borrow().as_ref() {
                         print_fingerprint(fingerprint, "incomplete", None, 0, 0, None);
                     }
                     return ExitCode::from(1);
@@ -73,47 +75,39 @@ fn main() -> ExitCode {
     let mut out = std::io::stdout().lock();
     let mut first_ns = i64::MIN;
     let mut next_progress = i64::MIN;
-    let quiet = cmd.quiet;
+    let quiet = cmd.quiet || verify_mode;
     let progress_ns = cmd.progress_ns;
     let mut prefix_verified = false;
-    let mut prefix_refusal: Option<&'static str> = None;
     let mut write_err: Option<std::io::Error> = None;
     let mut hook = |p: &mut Pipeline| -> std::io::Result<()> {
-        let verify_mode = verify_prefix.is_some();
-        if let Err(e) = drain_checkpoint_lines(p, &mut out, quiet || verify_mode) {
+        if let Err(e) = drain_checkpoint_lines(p, &mut out, quiet) {
             let stop = std::io::Error::new(e.kind(), "output write failed");
             write_err = Some(e);
             return Err(stop);
         }
-        if let (Some(witness), Some(fingerprint)) = (verify_prefix, input_fingerprint.as_ref()) {
+        if let Some(witness) = verify_prefix.filter(|_| !prefix_verified) {
+            let observed = input_fingerprint.borrow();
+            let fingerprint = observed
+                .as_ref()
+                .ok_or_else(|| std::io::Error::other("ordered-input digest unavailable"))?;
             if fingerprint.frames() == witness.frames {
-                let Some(input_digest) = fingerprint.finalize() else {
-                    prefix_refusal = Some("ordered-input digest unavailable at prefix boundary");
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "prefix verification refused",
-                    ));
-                };
+                let input_digest = fingerprint.finalize().ok_or_else(|| {
+                    std::io::Error::other("ordered-input digest unavailable at prefix boundary")
+                })?;
                 if input_digest != witness.input_digest {
-                    prefix_refusal = Some("ordered-input digest mismatch at prefix boundary");
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "prefix verification refused",
+                    return Err(std::io::Error::other(
+                        "ordered-input digest mismatch at prefix boundary",
                     ));
                 }
                 if replay_state_digest(p) != witness.state_digest {
-                    prefix_refusal = Some("replay-state digest mismatch at prefix boundary");
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "prefix verification refused",
+                    return Err(std::io::Error::other(
+                        "replay-state digest mismatch at prefix boundary",
                     ));
                 }
                 prefix_verified = true;
             } else if fingerprint.frames() > witness.frames {
-                prefix_refusal = Some("prefix boundary was not observed exactly");
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "prefix verification refused",
+                return Err(std::io::Error::other(
+                    "prefix boundary was not observed exactly",
                 ));
             }
         }
@@ -139,18 +133,23 @@ fn main() -> ExitCode {
         Ok(())
     };
     let mut sealed_frames = 0u64;
-    let ran = if let Some(fingerprint) = &mut input_fingerprint {
+    let ran = if fingerprint_enabled {
         run_streams_observed(
             &mut p,
             specs,
             cmd.chunk,
             &mut hook,
             &mut sealed_frames,
-            &mut |frame| fingerprint.observe(frame),
+            &mut |frame| {
+                if let Some(fingerprint) = input_fingerprint.borrow_mut().as_mut() {
+                    fingerprint.observe(frame);
+                }
+            },
         )
     } else {
         run_streams_counted(&mut p, specs, cmd.chunk, &mut hook, &mut sealed_frames)
     };
+    let input_fingerprint = input_fingerprint.into_inner();
     // Frames by receive time, plus SFDPS, TBFM and TFMS rows by their own time, added before the
     // result is looked at, so the line is printed on every exit after this point.
     drops.add(sealed_frames);
@@ -158,12 +157,8 @@ fn main() -> ExitCode {
     let report = match ran {
         Ok(r) => r,
         Err(e) => {
-            if let Some(reason) = prefix_refusal {
-                eprintln!("oa-replay: prefix verification refused: {reason}");
-                return ExitCode::from(1);
-            }
-            if verify_prefix.is_some() {
-                eprintln!("oa-replay: prefix verification refused: replay read failed or was incomplete before acceptance");
+            if verify_mode {
+                eprintln!("oa-replay: prefix verification refused: {e}");
                 return ExitCode::from(1);
             }
             if let Some(fingerprint) = &input_fingerprint {
@@ -182,6 +177,18 @@ fn main() -> ExitCode {
             };
         }
     };
+    let fingerprint_quality = input_fingerprint.as_ref().map(|_| {
+        let source_rejected = errors_total(&report.errors);
+        let semantic_errors = errors_total(&p.errors).saturating_sub(source_rejected);
+        let partial = source_rejected > 0
+            || report.sealed_window_dropped > 0
+            || p.sealed_window_dropped > 0
+            || semantic_errors > 0
+            || p.adsb.stats.future_refused > 0
+            || p.rows_out_of_order.iter().any(|&n| n != 0)
+            || p.rows_refused_full.iter().any(|&n| n != 0);
+        (source_rejected, semantic_errors, partial)
+    });
     if let Some(witness) = verify_prefix {
         if !prefix_verified {
             eprintln!(
@@ -201,23 +208,14 @@ fn main() -> ExitCode {
             );
             return ExitCode::from(1);
         }
-        let source_rejected = errors_total(&report.errors);
-        let semantic_errors = errors_total(&p.errors).saturating_sub(source_rejected);
-        if source_rejected > 0
-            || report.sealed_window_dropped > 0
-            || p.sealed_window_dropped > 0
-            || semantic_errors > 0
-            || p.adsb.stats.future_refused > 0
-            || p.rows_out_of_order.iter().any(|&n| n != 0)
-            || p.rows_refused_full.iter().any(|&n| n != 0)
-        {
+        if fingerprint_quality.is_none_or(|(_, _, partial)| partial) {
             eprintln!("oa-replay: prefix verification refused: replay is partial or incomplete");
             return ExitCode::from(1);
         }
     }
     let elapsed = t0.elapsed();
     // The frames' last checkpoints are drained before the summary, so none is left unprinted.
-    if let Err(e) = drain_checkpoint_lines(&mut p, &mut out, quiet || verify_prefix.is_some()) {
+    if let Err(e) = drain_checkpoint_lines(&mut p, &mut out, quiet) {
         return fail_write(&e);
     }
     let peak = status_kb("VmHWM:");
@@ -231,21 +229,10 @@ fn main() -> ExitCode {
     ) {
         return fail_write(&e);
     }
-    if let Some(fingerprint) = &input_fingerprint {
-        let source_rejected = errors_total(&report.errors);
-        let semantic_errors = errors_total(&p.errors).saturating_sub(source_rejected);
-        let status = if source_rejected > 0
-            || report.sealed_window_dropped > 0
-            || p.sealed_window_dropped > 0
-            || semantic_errors > 0
-            || p.adsb.stats.future_refused > 0
-            || p.rows_out_of_order.iter().any(|&n| n != 0)
-            || p.rows_refused_full.iter().any(|&n| n != 0)
-        {
-            "partial"
-        } else {
-            "complete"
-        };
+    if let (Some(fingerprint), Some((source_rejected, semantic_errors, partial))) =
+        (&input_fingerprint, fingerprint_quality)
+    {
+        let status = if partial { "partial" } else { "complete" };
         print_fingerprint(
             fingerprint,
             status,
@@ -254,6 +241,9 @@ fn main() -> ExitCode {
             p.sealed_window_dropped,
             Some(semantic_errors),
         );
+    }
+    if let Some(witness) = verify_prefix {
+        eprintln!("verified replay prefix frames={}", witness.frames);
     }
     ExitCode::SUCCESS
 }

@@ -75,13 +75,14 @@ pub const USAGE: &str = "usage: oa-replay (--sfdps|--tbfm|--tfms|--fns|--adsb <f
 
 fn digest(flag: &str, v: Option<&String>) -> Result<Digest, String> {
     let value = v.ok_or_else(|| format!("missing value for {flag}"))?;
-    if value.len() != 64 || !value.is_ascii() {
+    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(format!("{flag} needs 64 hexadecimal digits"));
     }
     let mut result = [0u8; 32];
     for (i, byte) in result.iter_mut().enumerate() {
         let start = i * 2;
-        *byte = u8::from_str_radix(&value[start..start + 2], 16)
+        let pair = value.get(start..start + 2).ok_or("digest length changed")?;
+        *byte = u8::from_str_radix(pair, 16)
             .map_err(|_| format!("{flag} needs 64 hexadecimal digits"))?;
     }
     Ok(result)
@@ -167,6 +168,9 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             "--quiet" => quiet = true,
             "--input-fingerprint" => input_fingerprint = true,
             "--verify-prefix" => {
+                if verify_prefix.is_some() {
+                    return Err("--verify-prefix may be supplied once".into());
+                }
                 let frames = number(a, it.next())?;
                 let input_digest = digest("--verify-prefix input digest", it.next())?;
                 let state_digest = digest("--verify-prefix state digest", it.next())?;

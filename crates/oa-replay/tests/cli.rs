@@ -201,9 +201,9 @@ fn verify_prefix_gates_stdout_on_both_digests_and_complete_suffix() {
     let prefix = dir.join("prefix.oaf");
     let full = dir.join("full.oaf");
     let t0 = DAY * 1_000_000;
-    let first = frame(3, 0, t0, sf_doc(&[sf(71, 0).status("ACTIVE")]).as_bytes());
+    let first = frame(1, 0, t0, sf_doc(&[sf(71, 0).status("ACTIVE")]).as_bytes());
     let second = frame(
-        3,
+        1,
         1,
         t0 + NS,
         sf_doc(&[sf(71, 1_000).status("ACTIVE")]).as_bytes(),
@@ -212,6 +212,7 @@ fn verify_prefix_gates_stdout_on_both_digests_and_complete_suffix() {
     let (code, prefix_out, prefix_err) =
         run_bin(&["--input-fingerprint", "--sfdps", prefix.to_str().unwrap()]);
     assert_eq!(code, 0, "{prefix_err}");
+    assert!(prefix_err.contains("status=complete"), "{prefix_err}");
     let (frames, input, state) = fingerprint_witness(&prefix_err, &prefix_out);
     assert_eq!(frames, 1);
     std::fs::write(&full, [first.as_slice(), second.as_slice()].concat()).unwrap();
@@ -229,6 +230,11 @@ fn verify_prefix_gates_stdout_on_both_digests_and_complete_suffix() {
     assert_eq!(code, 0, "{err}");
     assert!(out.contains("final state_digest="));
     assert!(!out.contains("checkpoint "));
+    assert!(err.contains("verified replay prefix frames=1"));
+    let (normal_code, normal_out, normal_err) =
+        run_bin(&["--quiet", "--sfdps", full.to_str().unwrap()]);
+    assert_eq!(normal_code, 0, "{normal_err}");
+    assert_eq!(stable(&out), stable(&normal_out));
 
     let wrong_input = format!(
         "{}{}",
@@ -266,6 +272,17 @@ fn verify_prefix_gates_stdout_on_both_digests_and_complete_suffix() {
     assert_ne!(code, 0);
     assert!(out.is_empty());
     assert!(err.contains("prefix verification refused"), "{err}");
+
+    let (sealed_from_ms, _) = oa_sealed::sealed_window_ms().unwrap();
+    let sealed = dir.join("synthetic-window.oaf");
+    let mut bytes = first;
+    bytes.extend(frame(3, 1, sealed_from_ms * 1_000_000, b"state=up\n"));
+    std::fs::write(&sealed, bytes).unwrap();
+    let (code, out, err) = verify(frames, &input, &state, &sealed);
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
+    assert!(err.contains("prefix verification refused"), "{err}");
+    assert!(err.contains("sealed-window rows dropped: 1"), "{err}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
