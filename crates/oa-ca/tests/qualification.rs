@@ -498,7 +498,7 @@ fn synthetic_maneuver_grid_scores_sampled_alerts_and_coverage_separately() {
                 .truth_interval_s
                 .is_some_and(|(entry, exit)| t > entry && t < exit);
             assert_eq!(sampled_truth, declared_truth, "{} tick {tick}", case.name);
-            let rows = [
+            let mut rows = [
                 track_xy(
                     addr_a,
                     (-case.rel_start_m.0 - case.rel_velocity_mps.0 * t) / 2.0,

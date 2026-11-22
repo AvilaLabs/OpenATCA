@@ -12,8 +12,8 @@ use oa_track::fusion::{
     fusion_radar_tracks, fusion_stats, fusion_tracker_config,
 };
 use oa_track::fusion_score::identify_tracks;
-use oa_track::radar::{NONE_CODE, RadarPlot, RadarSite, polar_of, radar_geom};
-use oa_track::{DEFAULT_CONFIG, NO_ADDR, output_new};
+use oa_track::radar::{polar_of, radar_geom, RadarPlot, RadarSite, NONE_CODE};
+use oa_track::{output_new, DEFAULT_CONFIG, NO_ADDR};
 
 const SITE: RadarSite = RadarSite {
     lat_deg: 41.976_940_27,

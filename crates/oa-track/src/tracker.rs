@@ -2265,31 +2265,6 @@ pub fn tracker_predict_checked(
     tracker_forecast(t, key, at_ns).map(|(row, confirmed, last, _)| (row, confirmed, last))
 }
 
-/// Forecast the filter state used by association, without computing the output-only widened
-/// covariance for an unconfirmed move. Association uses the filter covariance to keep a forged
-/// move refutable; its gate reads the numeric row and `O_HAS_ALT`, not the move marker.
-pub(crate) fn tracker_predict_association_checked(
-    t: &Tracker,
-    key: u32,
-    at_ns: i64,
-) -> Result<(OutRow, bool, i64), PredictError> {
-    let slot = lookup(t, key).ok_or(PredictError::NoTrack)?;
-    if col(&t.state, slot, FREE) == FREE {
-        return Err(PredictError::NoTrack);
-    }
-    let f = col(&t.cur, slot, blank_filter());
-    let mut row = filter_output_checked(&f, at_ns.max(f.t_ns))?;
-    row.addr = key;
-    if key >= RADAR_KEY_BASE {
-        row.flags |= O_IDENTITY_UNCONFIRMED;
-    }
-    Ok((
-        row,
-        col(&t.state, slot, FREE) == CONFIRMED,
-        col(&t.last_ns, slot, 0),
-    ))
-}
-
 /// Runs the full forecast only when the precise vertical forecast may pass the caller's gate.
 /// A missing altitude preserves the usual forecast path.
 pub(crate) fn tracker_predict_if_altitude(
@@ -3222,45 +3197,6 @@ mod tests {
         assert!(tracker_has_key(&t, ADDR));
         assert_eq!(history_snap(&t, slot), before);
         assert_eq!(t.stats, stats);
-    }
-
-    // REQ: OA-TRK-177
-    #[test]
-    fn association_forecast_matches_checked_forecast_without_move_output_work() {
-        let (t, _out, slot) = full_ring_tracker();
-        let at_ns = col(&t.last_ns, slot, 0) + S;
-
-        assert_eq!(
-            tracker_predict_association_checked(&t, ADDR, at_ns),
-            tracker_predict_checked(&t, ADDR, at_ns)
-        );
-
-        let c = TrackerConfig {
-            tick_ns: 100_000 * S,
-            ..cfg(1, 0)
-        };
-        let mut moving = tracker_new(&c).unwrap();
-        let mut out = output_new(c.out_capacity);
-        for k in 0..=20 {
-            tracker_update(&mut moving, &at(k, 0, 100.0), &mut out);
-        }
-        for (ms, d) in [
-            (40_000, 225_000),
-            (40_100, 225_000),
-            (40_200, 225_000),
-            (40_300, 225_000),
-        ] {
-            tracker_update(&mut moving, &north(ms, d), &mut out);
-        }
-        let moving_slot = lookup(&moving, ADDR).unwrap();
-        assert!(move_active(&moving, moving_slot));
-        let moving_at_ns = col(&moving.last_ns, moving_slot, 0) + S;
-        let mut expected = tracker_predict_checked(&moving, ADDR, moving_at_ns).unwrap();
-        expected.0.flags &= !O_MOVE_UNCONFIRMED;
-        assert_eq!(
-            tracker_predict_association_checked(&moving, ADDR, moving_at_ns),
-            Ok(expected)
-        );
     }
 
     // REQ: OA-TRK-331

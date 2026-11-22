@@ -56,8 +56,10 @@ const MAX_LAUNCHER_ARGS: usize = 16;
 const MAX_LAUNCHER_ARG_BYTES: usize = 1_024;
 const MAX_LAUNCHER_ARGS_BYTES: usize = 8_192;
 const RECOVERY_MAGIC: &[u8; 8] = b"OARCP002";
+const RECOVERY_MAGIC_WITH_OWNERSHIP: &[u8; 8] = b"OARCP003";
 const RECOVERY_HEADER_BYTES: usize = 8 + 4 + 32 + 4 + 4 + 8 + 8 + 8;
 const RECOVERY_RECORD_BYTES: usize = 4 + 1;
+const RECOVERY_OWNERSHIP_BYTES: usize = 8 + 8 + 1 + 8;
 const QUARANTINE_MAGIC: &[u8; 8] = b"OAPQ0001";
 const QUARANTINE_BODY_BYTES: usize = 8 + 4 + 4 + 8 + 8 + 32;
 const QUARANTINE_RECORD_BYTES: usize = QUARANTINE_BODY_BYTES + 32;
@@ -65,8 +67,8 @@ const RECOVERY_INITIAL_GENERATION: u64 = 6;
 const RECOVERY_GENERATION: u64 = 7;
 const RECOVERY_PUBLISHER: u32 = 0x4F415031;
 const RECOVERY_SOURCE: u32 = 0x534E5331;
-// C2/C7: three five-byte records with OAF1 framing and a 76-byte envelope; 4 KiB is a fixed
-// file-read ceiling with ample format headroom, never input-controlled.
+// C2/C7: three five-byte records with OAF1 framing, a 76-byte envelope, and at most 26 witness
+// bytes; 4 KiB is a fixed file-read ceiling with ample format headroom, never input-controlled.
 const RECOVERY_MAX_BYTES: usize = 4_096;
 const RECOVERY_MAX_RECORDS: usize = 3;
 const SYNTHETIC_STREAM: [(i32, bool); 15] = [
@@ -548,13 +550,33 @@ fn validate_quarantine_for_stream(
     Ok(())
 }
 
-// This test-only envelope stores real OAF1 frames. Its digest covers the complete frame prefix;
-// the inner feed framing checks each CRC and source timestamp. The trailing publisher fence is
-// fixture metadata, not the NODE_NETWORK signed-checkpoint schema.
+// This test-only envelope stores real OAF1 frames. OARCP002 hashes the frame prefix as before;
+// OARCP003 hashes that prefix and its optional ownership witness. The inner feed framing checks
+// each CRC and source timestamp. The publisher fence is fixture metadata, not the NODE_NETWORK
+// signed-checkpoint schema.
 fn encode_recovery_checkpoint(
     steps: &[(i32, bool)],
     initial_fence: PublisherFence,
     generation: u64,
+) -> Vec<u8> {
+    encode_recovery_checkpoint_inner(steps, initial_fence, generation, None, false)
+}
+
+fn encode_recovery_checkpoint_with_ownership(
+    steps: &[(i32, bool)],
+    initial_fence: PublisherFence,
+    generation: u64,
+    ownership: Option<OwnershipStatus>,
+) -> Vec<u8> {
+    encode_recovery_checkpoint_inner(steps, initial_fence, generation, ownership, true)
+}
+
+fn encode_recovery_checkpoint_inner(
+    steps: &[(i32, bool)],
+    initial_fence: PublisherFence,
+    generation: u64,
+    ownership: Option<OwnershipStatus>,
+    include_ownership_extension: bool,
 ) -> Vec<u8> {
     assert!(!steps.is_empty() && steps.len() <= RECOVERY_MAX_RECORDS);
     let mut frames = Vec::new();
@@ -583,24 +605,97 @@ fn encode_recovery_checkpoint(
         .expect("bounded fixture frame fits");
         frames.extend_from_slice(&frame[..len]);
     }
-    let mut checkpoint = Vec::with_capacity(RECOVERY_HEADER_BYTES + frames.len());
-    checkpoint.extend_from_slice(RECOVERY_MAGIC);
+    let mut body = frames;
+    if include_ownership_extension {
+        match ownership {
+            Some(witness) => {
+                body.push(1);
+                body.extend_from_slice(&encode_ownership_witness(witness));
+            }
+            None => body.push(0),
+        }
+    }
+    let magic = if include_ownership_extension {
+        RECOVERY_MAGIC_WITH_OWNERSHIP
+    } else {
+        RECOVERY_MAGIC
+    };
+    let mut checkpoint = Vec::with_capacity(RECOVERY_HEADER_BYTES + body.len());
+    checkpoint.extend_from_slice(magic);
     checkpoint.extend_from_slice(&(steps.len() as u32).to_le_bytes());
-    checkpoint.extend_from_slice(&oa_sha256::sha256(&frames));
+    checkpoint.extend_from_slice(&oa_sha256::sha256(&body));
     checkpoint.extend_from_slice(&fence.publisher_id.to_le_bytes());
     checkpoint.extend_from_slice(&fence.source_id.to_le_bytes());
     checkpoint.extend_from_slice(&fence.generation.to_le_bytes());
     checkpoint.extend_from_slice(&fence.last_sequence.to_le_bytes());
     checkpoint.extend_from_slice(&fence.watermark_ns.to_le_bytes());
-    checkpoint.extend_from_slice(&frames);
+    checkpoint.extend_from_slice(&body);
     assert!(checkpoint.len() <= RECOVERY_MAX_BYTES);
     checkpoint
+}
+
+fn encode_ownership_witness(witness: OwnershipStatus) -> [u8; RECOVERY_OWNERSHIP_BYTES] {
+    let mut encoded = [0; RECOVERY_OWNERSHIP_BYTES];
+    encoded[..8].copy_from_slice(&witness.callsign);
+    encoded[8..16].copy_from_slice(&witness.current_owner);
+    let (phase, unit) = match witness.phase {
+        OwnershipPhase::Current => (0, [0; 8]),
+        OwnershipPhase::Offered { to } => (1, to),
+        OwnershipPhase::Accepted { by } => (2, by),
+        OwnershipPhase::StaleOffer { to } => (3, to),
+    };
+    encoded[16] = phase;
+    encoded[17..25].copy_from_slice(&unit);
+    encoded
+}
+
+fn decode_ownership_witness(bytes: &[u8]) -> Result<OwnershipStatus, &'static str> {
+    if bytes.len() != RECOVERY_OWNERSHIP_BYTES {
+        return Err("checkpoint_ownership_bytes");
+    }
+    let callsign: [u8; 8] = bytes[..8]
+        .try_into()
+        .map_err(|_| "checkpoint_ownership_shape")?;
+    let current_owner: [u8; 8] = bytes[8..16]
+        .try_into()
+        .map_err(|_| "checkpoint_ownership_shape")?;
+    let unit: [u8; 8] = bytes[17..25]
+        .try_into()
+        .map_err(|_| "checkpoint_ownership_shape")?;
+    if !valid_ownership_identifier(&callsign) || !valid_ownership_identifier(&current_owner) {
+        return Err("checkpoint_ownership_identity");
+    }
+    let phase = match bytes[16] {
+        0 if unit == [0; 8] => OwnershipPhase::Current,
+        1 if valid_ownership_identifier(&unit) => OwnershipPhase::Offered { to: unit },
+        2 if valid_ownership_identifier(&unit) => OwnershipPhase::Accepted { by: unit },
+        3 if valid_ownership_identifier(&unit) => OwnershipPhase::StaleOffer { to: unit },
+        _ => return Err("checkpoint_ownership_phase"),
+    };
+    Ok(OwnershipStatus {
+        callsign,
+        current_owner,
+        phase,
+    })
+}
+
+fn valid_ownership_identifier(bytes: &[u8; 8]) -> bool {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    end > 0
+        && bytes[..end]
+            .iter()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        && bytes[end..].iter().all(|byte| *byte == 0)
 }
 
 // A7.2: one cold decoded fixture checkpoint per worker startup.
 struct RecoveryCheckpoint {
     steps: Vec<(i32, bool)>,
     fence: PublisherFence,
+    ownership: Option<OwnershipStatus>,
 }
 
 fn decode_recovery_checkpoint(
@@ -610,9 +705,11 @@ fn decode_recovery_checkpoint(
     if bytes.len() > RECOVERY_MAX_BYTES || bytes.len() < RECOVERY_HEADER_BYTES {
         return Err("checkpoint_size_or_header");
     }
-    if bytes.get(..8) != Some(RECOVERY_MAGIC.as_slice()) {
-        return Err("checkpoint_magic");
-    }
+    let has_ownership_extension = match bytes.get(..8) {
+        Some(magic) if magic == RECOVERY_MAGIC.as_slice() => false,
+        Some(magic) if magic == RECOVERY_MAGIC_WITH_OWNERSHIP.as_slice() => true,
+        _ => return Err("checkpoint_magic"),
+    };
     let count_bytes: [u8; 4] = bytes
         .get(8..12)
         .and_then(|slice| slice.try_into().ok())
@@ -673,15 +770,39 @@ fn decode_recovery_checkpoint(
         )
         .map_err(refusal_name)?
     };
-    let frames = bytes
+    let body = bytes
         .get(RECOVERY_HEADER_BYTES..)
         .ok_or("checkpoint_header")?;
-    if oa_sha256::sha256(frames) != expected {
-        return Err("checkpoint_digest");
-    }
     let frame_bytes = oa_feed::HEADER_LEN + RECOVERY_RECORD_BYTES + oa_feed::TRAILER_LEN;
-    if frames.len() != count.saturating_mul(frame_bytes) {
+    let frame_prefix_bytes = count
+        .checked_mul(frame_bytes)
+        .ok_or("checkpoint_frame_bytes")?;
+    if body.len() < frame_prefix_bytes {
         return Err("checkpoint_frame_bytes");
+    }
+    let frames = body
+        .get(..frame_prefix_bytes)
+        .ok_or("checkpoint_frame_bytes")?;
+    let ownership = if has_ownership_extension {
+        let extension = body
+            .get(frame_prefix_bytes..)
+            .ok_or("checkpoint_ownership_bytes")?;
+        match extension.first() {
+            Some(0) if extension.len() == 1 => None,
+            Some(1) if extension.len() == 1 + RECOVERY_OWNERSHIP_BYTES => {
+                Some(decode_ownership_witness(&extension[1..])?)
+            }
+            Some(0 | 1) => return Err("checkpoint_ownership_bytes"),
+            _ => return Err("checkpoint_ownership_tag"),
+        }
+    } else {
+        if body.len() != frame_prefix_bytes {
+            return Err("checkpoint_frame_bytes");
+        }
+        None
+    };
+    if oa_sha256::sha256(body) != expected {
+        return Err("checkpoint_digest");
     }
     let mut input = vec![0u8; oa_feed::MAX_FRAME_LEN];
     let mut reader = oa_feed::FrameReader::new(&mut input).map_err(|_| "reader_capacity")?;
@@ -735,7 +856,11 @@ fn decode_recovery_checkpoint(
     if fence != stored_fence {
         return Err("checkpoint_fence_mismatch");
     }
-    Ok(RecoveryCheckpoint { steps, fence })
+    Ok(RecoveryCheckpoint {
+        steps,
+        fence,
+        ownership,
+    })
 }
 
 fn read_recovery_checkpoint(path: &Path) -> Result<Vec<u8>, &'static str> {
@@ -1382,7 +1507,35 @@ fn machine_loss_worker_process() {
                 return;
             }
         };
+        if visible_ca && checkpoint.ownership.is_some() {
+            println!("MACHINE_LOSS_ERROR checkpoint_ownership_mode_mismatch");
+            let _ = std::io::stdout().flush();
+            return;
+        }
         let retained_fence = checkpoint.fence;
+        if retained_fence.generation < publisher_fence.generation {
+            println!("MACHINE_LOSS_ERROR checkpoint_generation_regression");
+            let _ = std::io::stdout().flush();
+            return;
+        }
+        if retained_fence.generation > publisher_fence.generation {
+            publisher_fence = match advance_generation(
+                publisher_fence,
+                retained_fence.publisher_id,
+                retained_fence.source_id,
+                retained_fence.generation,
+            ) {
+                Ok(next) => next,
+                Err(refusal) => {
+                    println!(
+                        "MACHINE_LOSS_ERROR checkpoint_generation_{}",
+                        refusal_name(refusal)
+                    );
+                    let _ = std::io::stdout().flush();
+                    return;
+                }
+            };
+        }
         for (index, &(second, live)) in checkpoint.steps.iter().enumerate() {
             if stream.get(step_no) != Some(&(second, live)) {
                 println!("MACHINE_LOSS_ERROR checkpoint_prefix_mismatch");
@@ -1409,7 +1562,7 @@ fn machine_loss_worker_process() {
             let ack = if visible_ca {
                 drill.process_visible_ca(second, live)
             } else {
-                drill.process(second, live)
+                drill.process_with_ownership(second, live, checkpoint.ownership.as_ref())
             };
             println!("{ack}");
             let _ = std::io::stdout().flush();
@@ -2825,13 +2978,6 @@ fn partitioned_handoff_promotes_standby_and_fences_reconnected_primary() {
     let executable = PathBuf::from(std::env::var_os("OA_CONTROLLER_TAKEOVER_EXECUTABLE").unwrap());
     let promoted_generation = RECOVERY_GENERATION + 1;
     let files = TempCheckpointFiles::new();
-    let checkpoint_bytes = encode_recovery_checkpoint(
-        &SYNTHETIC_STREAM[..PREFIX_LEN],
-        INITIAL_FENCE,
-        promoted_generation,
-    );
-    let checkpoint_path = files.write("partition-prefix.oarc", &checkpoint_bytes);
-    let retained = decode_recovery_checkpoint(&checkpoint_bytes, INITIAL_FENCE).unwrap();
 
     let mut primary = Replica::start_transport("LEFT");
     let mut primary_control = Replica::start_controller(&executable);
@@ -2845,13 +2991,21 @@ fn partitioned_handoff_promotes_standby_and_fences_reconnected_primary() {
     assert_eq!(pending, standby_control.controller_step(b'P'));
     assert_eq!(pending, reference_control.controller_step(b'P'));
     let pending_ownership = controller_ownership(&pending, "P");
+    let checkpoint_bytes = encode_recovery_checkpoint_with_ownership(
+        &SYNTHETIC_STREAM[..PREFIX_LEN],
+        INITIAL_FENCE,
+        promoted_generation,
+        Some(pending_ownership),
+    );
+    let checkpoint_path = files.write("partition-prefix.oarc", &checkpoint_bytes);
+    let retained = decode_recovery_checkpoint(&checkpoint_bytes, INITIAL_FENCE).unwrap();
     let mut fence = INITIAL_FENCE;
     let mut prefix_acks = Vec::with_capacity(PREFIX_LEN);
     for (step, &(second, live)) in SYNTHETIC_STREAM.iter().enumerate().take(PREFIX_LEN) {
         let ack = primary.owned_step(second, live, &pending);
         assert_eq!(
             ack,
-            local_reference_step(&mut reference_scope, second, live)
+            reference_scope.process_with_ownership(second, live, Some(&pending_ownership))
         );
         let publication = publication_for_step(fence, step, second).unwrap();
         fence = accept_publication(fence, publication).unwrap();
@@ -2890,7 +3044,7 @@ fn partitioned_handoff_promotes_standby_and_fences_reconnected_primary() {
             let standby_ack = standby.owned_step(second, live, &standby_witness);
             assert_eq!(
                 standby_ack,
-                local_reference_step(&mut reference_scope, second, live)
+                reference_scope.process_with_ownership(second, live, Some(&owner))
             );
             let publication = publication_for_step(fence, step, second).unwrap();
             fence = accept_publication(fence, publication).unwrap();
@@ -2931,18 +3085,16 @@ fn partitioned_handoff_promotes_standby_and_fences_reconnected_primary() {
             );
         }
 
+        let owner = controller_ownership(&standby_witness, "R");
         let standby_ack = standby.owned_step(second, live, &standby_witness);
         assert_eq!(
             standby_ack,
-            local_reference_step(&mut reference_scope, second, live)
+            reference_scope.process_with_ownership(second, live, Some(&owner))
         );
         let publication = publication_for_step(fence, step, second).unwrap();
         fence = accept_publication(fence, publication).unwrap();
         accepted_publications += 1;
-        accepted_owners.push(controller_ownership(
-            &standby_witness,
-            if step == PREFIX_LEN + 1 { "R" } else { "T" },
-        ));
+        accepted_owners.push(owner);
 
         let primary_ack = primary.owned_step(second, live, &primary_witness);
         assert_eq!(primary_ack, standby_ack);
@@ -2962,6 +3114,7 @@ fn partitioned_handoff_promotes_standby_and_fences_reconnected_primary() {
     assert!(primary_reconnected);
     assert_eq!(accepted_publications, SYNTHETIC_STREAM.len() - PREFIX_LEN);
     assert_eq!(stale_publications_refused, accepted_publications);
+    assert_ne!(accepted_owners[0], pending_ownership);
     assert!(accepted_owners
         .iter()
         .all(|owner| *owner == accepted_owners[0]));

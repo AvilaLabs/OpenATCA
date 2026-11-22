@@ -60,9 +60,10 @@ The opt-in `partitioned_handoff_promotes_standby_and_fences_reconnected_primary`
 that bounded checkpoint and fence with the two transport launchers and the `oa-flight` controller
 worker. Both controller copies first reach the accepted-handoff state while the old generation
 serves three synthetic frames. The primary then stays alive without receiving records while the
-standby replays the synced prefix at the next generation. The standby takes control and publishes
-each remaining synthetic frame; after the first promoted frame, the old primary reconnects, makes
-the same local handoff transition and emits the same source records. The sink accepts exactly one
+standby replays the synced prefix at the next generation, applying the checkpoint's retained
+pending-ownership witness to each recovered frame. It then takes control and publishes each
+remaining synthetic frame; after the first promoted frame, the old primary reconnects, makes the
+same local handoff transition and emits the same source records. The sink accepts exactly one
 publication per source sequence and rejects every old-generation publication. All accepted scope
 output is compared with a local uninterrupted reference, and each accepted ownership witness names
 `ZMP34` as the sole current owner.
@@ -90,6 +91,10 @@ checkpoint delivery, establish production publisher authority or leases, or test
 effects. The flight owner and publication fence are independent test fixtures; together they verify
 the stated transition and stale-generation rejection without claiming an operational controller
 failover implementation.
+
+The test-only checkpoint carries one ownership snapshot for the entire three-record prefix. It
+does not model an ownership transition inside a checkpointed prefix; that would require a bounded
+per-record ownership representation.
 
 The `crash_after_apply_before_ack_replays_from_verified_prefix` fixture restores a three-step
 synthetic prefix into a fresh child, processes the next tracker-to-scope/raster/CA step, and exits
