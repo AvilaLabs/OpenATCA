@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use oa_adsb::{Reports, F_GROUND, F_RATE_GEOM, NONE_I32, NONE_U16};
+use oa_adsb::{Reports, F_GROUND, F_RATE_GEOM, F_STALE, NONE_I32, NONE_U16};
 use oa_bench::adsb_truth::{query, BuiltTruth};
 use oa_bench::assignment::{
     assignment_at_issue, AssignmentEvidence, AssignmentIssue, AssignmentQuery,
@@ -44,6 +44,12 @@ const TRUTH_STEP_MS: i64 = 5_000;
 const TRUTH_STEPS: i64 = 720;
 const MIN_FROM_FIX_M: f64 = 40.0 * 1852.0;
 const MAX_FROM_FIX_M: f64 = 200.0 * 1852.0;
+
+enum TrackSelection {
+    Available(TrackState, f64),
+    SourceFlagStale,
+    Refused,
+}
 
 #[derive(Clone, Copy)]
 struct RouteIx(u32);
@@ -369,46 +375,71 @@ fn meter_index(legacy: &Legacy, row: RouteIx, meter: RouteFix) -> Option<usize> 
     matches.next().is_none().then_some(index)
 }
 
-fn track_at(reports: &Reports, rows: &[ReportIx], cutoff: i64) -> Option<(TrackState, f64)> {
-    let cutoff_ns = cutoff.checked_mul(1_000_000)?;
+fn track_at(reports: &Reports, rows: &[ReportIx], cutoff: i64) -> TrackSelection {
+    let Some(cutoff_ns) = cutoff.checked_mul(1_000_000) else {
+        return TrackSelection::Refused;
+    };
     let i = rows.partition_point(|ix| {
         reports
             .time_ns
             .get(ix.0 as usize)
             .is_some_and(|&t| t <= cutoff_ns)
     });
-    let picked = rows.get(i.checked_sub(1)?)?.0 as usize;
-    let time_ns = *reports.time_ns.get(picked)?;
+    let Some(picked) = i
+        .checked_sub(1)
+        .and_then(|ix| rows.get(ix))
+        .map(|ix| ix.0 as usize)
+    else {
+        return TrackSelection::Refused;
+    };
+    let Some(&time_ns) = reports.time_ns.get(picked) else {
+        return TrackSelection::Refused;
+    };
     // Multiple reports with equal observation time give no unique as-of state.
     if i.checked_sub(2)
         .and_then(|j| rows.get(j))
         .and_then(|ix| reports.time_ns.get(ix.0 as usize))
         == Some(&time_ns)
     {
-        return None;
+        return TrackSelection::Refused;
     }
     let time_ms = time_ns / 1_000_000;
-    let speed = *reports.gs_dkt.get(picked)?;
-    let course = *reports.track_ddeg.get(picked)?;
-    let flags = *reports.flags.get(picked)?;
-    if cutoff.checked_sub(time_ms)? > MAX_TRACK_AGE_MS
+    let (Some(&speed), Some(&course), Some(&flags)) = (
+        reports.gs_dkt.get(picked),
+        reports.track_ddeg.get(picked),
+        reports.flags.get(picked),
+    ) else {
+        return TrackSelection::Refused;
+    };
+    if flags & F_STALE != 0 {
+        return TrackSelection::SourceFlagStale;
+    }
+    if cutoff
+        .checked_sub(time_ms)
+        .is_none_or(|age| age > MAX_TRACK_AGE_MS)
         || flags & F_GROUND != 0
         || speed == NONE_U16
         || course >= 3600
     {
-        return None;
+        return TrackSelection::Refused;
     }
-    let alt = *reports.baro_alt_ft.get(picked)?;
-    let rate = *reports.vrate_fpm.get(picked)?;
+    let (Some(&alt), Some(&rate), Some(&lat), Some(&lon)) = (
+        reports.baro_alt_ft.get(picked),
+        reports.vrate_fpm.get(picked),
+        reports.lat_e7.get(picked),
+        reports.lon_e7.get(picked),
+    ) else {
+        return TrackSelection::Refused;
+    };
     let track = TrackState {
         time_ms,
-        place: place_of_e7(*reports.lat_e7.get(picked)?, *reports.lon_e7.get(picked)?),
+        place: place_of_e7(lat, lon),
         altitude_ft: (alt != NONE_I32).then_some(f64::from(alt)),
         speed_mps: Some(f64::from(speed) * (1852.0 / 36_000.0)),
         vertical_rate_fpm: (rate != NONE_I32 && flags & F_RATE_GEOM == 0)
             .then_some(f64::from(rate)),
     };
-    Some((track, f64::from(course) / 10.0))
+    TrackSelection::Available(track, f64::from(course) / 10.0)
 }
 
 fn distance(a: Place, b: Place) -> f64 {
@@ -577,6 +608,7 @@ pub(crate) struct ArrivalPlan {
     no_meter: usize,
     ambiguous_routes: usize,
     no_track: usize,
+    stale_source_track: usize,
     outside_issue_window: usize,
     unusable_route: usize,
     baseline_forecast_refused: BTreeMap<String, usize>,
@@ -749,6 +781,7 @@ pub(crate) fn build_plan(
 
     let mut ambiguous_routes = 0usize;
     let mut no_track = 0usize;
+    let mut stale_source_track = 0usize;
     let mut outside_issue_window = 0usize;
     let mut unusable_route = 0usize;
     let mut baseline_forecast_refused = BTreeMap::new();
@@ -782,11 +815,19 @@ pub(crate) fn build_plan(
                     return None;
                 }
                 let addr = *legacy.routes.addr_at_receive.get(row.0 as usize)?;
-                let Some((track, course)) =
-                    adsb.get(&addr).and_then(|rows| track_at(reports, rows, at))
-                else {
-                    no_track += 1;
-                    return None;
+                let selected = adsb
+                    .get(&addr)
+                    .map_or(TrackSelection::Refused, |rows| track_at(reports, rows, at));
+                let (track, course) = match selected {
+                    TrackSelection::Available(track, course) => (track, course),
+                    TrackSelection::SourceFlagStale => {
+                        stale_source_track += 1;
+                        return None;
+                    }
+                    TrackSelection::Refused => {
+                        no_track += 1;
+                        return None;
+                    }
                 };
                 if !(MIN_FROM_FIX_M..=MAX_FROM_FIX_M).contains(&distance(track.place, meter.place))
                 {
@@ -851,6 +892,7 @@ pub(crate) fn build_plan(
         no_meter,
         ambiguous_routes,
         no_track,
+        stale_source_track,
         outside_issue_window,
         unusable_route,
         baseline_forecast_refused,
@@ -984,7 +1026,7 @@ pub(crate) fn report(
             writeln!(text, "{kind} refused: {reason} {count}").map_err(|e| e.to_string())?;
         }
     }
-    writeln!(text, "route messages excluded: outside selected fix or repeated fix {}; ambiguous same-time routes {}; missing, stale or conflicting ADS-B state {}; outside issue distance {}; unresolved forward route {}", plan.no_meter, plan.ambiguous_routes, plan.no_track, plan.outside_issue_window, plan.unusable_route).map_err(|e| e.to_string())?;
+    writeln!(text, "route messages excluded: outside selected fix or repeated fix {}; ambiguous same-time routes {}; missing, old, on-ground or conflicting ADS-B state {}; source-flag stale ADS-B state {}; outside issue distance {}; unresolved forward route {}", plan.no_meter, plan.ambiguous_routes, plan.no_track, plan.stale_source_track, plan.outside_issue_window, plan.unusable_route).map_err(|e| e.to_string())?;
     for (((mins, h), v), coverage) in [5, 10, 20]
         .into_iter()
         .zip(&mut totals.horizontal)
@@ -1076,6 +1118,7 @@ mod assignment_plan_tests {
             no_meter: 0,
             ambiguous_routes: 0,
             no_track: 0,
+            stale_source_track: 0,
             outside_issue_window: 0,
             unusable_route: 0,
             baseline_forecast_refused: BTreeMap::new(),
@@ -1109,6 +1152,55 @@ mod assignment_plan_tests {
             issues.first().map(|issue| (issue.gufi, issue.cutoff_ms)),
             Some((0x1111, cutoff_ms))
         );
+    }
+}
+
+#[cfg(test)]
+mod issue_track_quality_tests {
+    use super::*;
+
+    fn reports(times_ms: &[i64], flags: &[u8]) -> Reports {
+        Reports {
+            time_ns: times_ms.iter().map(|&t| t * 1_000_000).collect(),
+            lat_e7: vec![417_000_000; times_ms.len()],
+            lon_e7: vec![-879_000_000; times_ms.len()],
+            baro_alt_ft: vec![12_000; times_ms.len()],
+            gs_dkt: vec![2_500; times_ms.len()],
+            track_ddeg: vec![900; times_ms.len()],
+            vrate_fpm: vec![NONE_I32; times_ms.len()],
+            flags: flags.to_vec(),
+            ..Reports::default()
+        }
+    }
+
+    fn rows(count: usize) -> Vec<ReportIx> {
+        (0..count).map(|i| ReportIx(i as u32)).collect()
+    }
+
+    #[test]
+    fn selected_stale_source_report_is_refused_without_falling_back() {
+        let cutoff = 1_000_000;
+        let reports = reports(&[cutoff - 5_000, cutoff - 1_000], &[0, F_STALE]);
+        assert!(matches!(
+            track_at(&reports, &rows(2), cutoff),
+            TrackSelection::SourceFlagStale
+        ));
+    }
+
+    #[test]
+    fn healthy_report_is_available_and_future_stale_report_is_after_cutoff() {
+        let cutoff = 1_000_000;
+        let healthy = reports(&[cutoff - 1_000], &[0]);
+        assert!(matches!(
+            track_at(&healthy, &rows(1), cutoff),
+            TrackSelection::Available(_, _)
+        ));
+
+        let with_future = reports(&[cutoff - 1_000, cutoff + 1_000], &[0, F_STALE]);
+        assert!(matches!(
+            track_at(&with_future, &rows(2), cutoff),
+            TrackSelection::Available(_, _)
+        ));
     }
 }
 
