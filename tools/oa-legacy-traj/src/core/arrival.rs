@@ -1035,8 +1035,13 @@ mod tests {
         (snapshot, fix)
     }
 
-    fn wind_profile(snapshot: &IssueSnapshot, along: f64, cross: f64) -> WindProfile {
-        let end = snapshot.route[0].place;
+    fn wind_profile(
+        snapshot: &IssueSnapshot,
+        first: RouteFix,
+        along: f64,
+        cross: f64,
+    ) -> WindProfile {
+        let end = first.place;
         let start = snapshot.track.place;
         let radians = core::f64::consts::PI / 180.0;
         let lat1 = start.lat_deg * radians;
@@ -1060,12 +1065,19 @@ mod tests {
         }
     }
 
+    fn meter_time(forecast: &Forecast) -> Result<i64, ForecastRefusal> {
+        forecast
+            .meter_eta
+            .map(|eta| eta.time_ms)
+            .ok_or(ForecastRefusal::EtaOverflow)
+    }
+
     #[test]
     fn zero_wind_matches_constant_ground_speed_and_head_tail_crosswind_are_consistent(
     ) -> Result<(), ForecastRefusal> {
         let (snapshot, fix) = fixture();
         let baseline = forecast(&snapshot)?;
-        let calm = forecast_with_wind(&snapshot, &wind_profile(&snapshot, 0.0, 0.0))?;
+        let calm = forecast_with_wind(&snapshot, &wind_profile(&snapshot, fix, 0.0, 0.0))?;
         for (wind_point, baseline_point) in calm.positions.iter().zip(&baseline.positions) {
             assert_eq!(wind_point.time_ms, baseline_point.time_ms);
             assert_eq!(wind_point.altitude_ft, baseline_point.altitude_ft);
@@ -1079,15 +1091,18 @@ mod tests {
         }
         assert_eq!(calm.meter_eta, baseline.meter_eta);
         assert_eq!(
-            calm.wind_profile.as_ref().unwrap().legs[0].provenance,
-            WindProvenance::Synthetic
+            calm.wind_profile
+                .as_ref()
+                .and_then(|profile| profile.legs.first())
+                .map(|leg| leg.provenance),
+            Some(WindProvenance::Synthetic)
         );
         let mut aged = snapshot.clone();
         aged.track.time_ms -= 5_000;
         aged.track.altitude_ft = Some(12_000.0);
         aged.track.vertical_rate_fpm = Some(-600.0);
         let aged_baseline = forecast(&aged)?;
-        let aged_wind = forecast_with_wind(&aged, &wind_profile(&aged, 0.0, 0.0))?;
+        let aged_wind = forecast_with_wind(&aged, &wind_profile(&aged, fix, 0.0, 0.0))?;
         assert_eq!(aged_wind.meter_eta, aged_baseline.meter_eta);
         assert_eq!(
             aged_wind.positions[0].altitude_ft,
@@ -1095,47 +1110,55 @@ mod tests {
         );
         assert!(
             great_circle_m(
-                aged_wind.positions[0].place.unwrap(),
-                aged_baseline.positions[0].place.unwrap()
+                aged_wind.positions[0]
+                    .place
+                    .ok_or(ForecastRefusal::InvalidRoutePlace)?,
+                aged_baseline.positions[0]
+                    .place
+                    .ok_or(ForecastRefusal::InvalidRoutePlace)?
             ) < 0.01
         );
         let mut no_ground_speed = snapshot.clone();
         no_ground_speed.track.speed_mps = None;
-        assert!(forecast_with_wind(&no_ground_speed, &wind_profile(&snapshot, 0.0, 0.0)).is_ok());
+        assert!(
+            forecast_with_wind(&no_ground_speed, &wind_profile(&snapshot, fix, 0.0, 0.0)).is_ok()
+        );
 
-        let headwind = forecast_with_wind(&snapshot, &wind_profile(&snapshot, -20.0, 0.0))?;
-        let tailwind = forecast_with_wind(&snapshot, &wind_profile(&snapshot, 20.0, 0.0))?;
-        let baseline_eta = baseline
-            .meter_eta
-            .ok_or(ForecastRefusal::EtaOverflow)?
-            .time_ms;
-        assert!(headwind.meter_eta.unwrap().time_ms > baseline_eta);
-        assert!(tailwind.meter_eta.unwrap().time_ms < baseline_eta);
+        let headwind = forecast_with_wind(&snapshot, &wind_profile(&snapshot, fix, -20.0, 0.0))?;
+        let tailwind = forecast_with_wind(&snapshot, &wind_profile(&snapshot, fix, 20.0, 0.0))?;
+        let baseline_eta = meter_time(&baseline)?;
+        assert!(meter_time(&headwind)? > baseline_eta);
+        assert!(meter_time(&tailwind)? < baseline_eta);
         assert!(headwind.positions[0].place.is_some());
         assert!(tailwind.positions[0].place.is_some());
 
-        let crosswind = forecast_with_wind(&snapshot, &wind_profile(&snapshot, 0.0, 30.0))?;
-        assert!(crosswind.meter_eta.unwrap().time_ms > baseline_eta);
+        let crosswind = forecast_with_wind(&snapshot, &wind_profile(&snapshot, fix, 0.0, 30.0))?;
+        assert!(meter_time(&crosswind)? > baseline_eta);
         assert_eq!(crosswind.meter_fix, Some(fix));
         Ok(())
     }
 
     #[test]
-    fn wind_profile_cutoff_and_wind_triangle_failures_are_explicit() {
-        let (snapshot, _) = fixture();
-        let mut profile = wind_profile(&snapshot, 0.0, 0.0);
-        profile.legs[0].available_ms += 1;
+    fn wind_profile_cutoff_and_wind_triangle_failures_are_explicit() -> Result<(), ForecastRefusal>
+    {
+        let (snapshot, fix) = fixture();
+        let mut profile = wind_profile(&snapshot, fix, 0.0, 0.0);
+        profile
+            .legs
+            .first_mut()
+            .ok_or(ForecastRefusal::MissingWindInput)?
+            .available_ms += 1;
         assert_eq!(
             forecast_with_wind(&snapshot, &profile),
             Err(ForecastRefusal::WindAfterCutoff)
         );
 
-        let impossible = wind_profile(&snapshot, 0.0, 181.0);
+        let impossible = wind_profile(&snapshot, fix, 0.0, 181.0);
         assert_eq!(
             forecast_with_wind(&snapshot, &impossible),
             Err(ForecastRefusal::ImpossibleCrosswind)
         );
-        let stopped = wind_profile(&snapshot, -200.0, 0.0);
+        let stopped = wind_profile(&snapshot, fix, -200.0, 0.0);
         assert_eq!(
             forecast_with_wind(&snapshot, &stopped),
             Err(ForecastRefusal::NonpositiveGroundSpeed)
@@ -1143,12 +1166,13 @@ mod tests {
 
         let missing = WindProfile {
             legs: Vec::new(),
-            ..wind_profile(&snapshot, 0.0, 0.0)
+            ..wind_profile(&snapshot, fix, 0.0, 0.0)
         };
         assert_eq!(
             forecast_with_wind(&snapshot, &missing),
             Err(ForecastRefusal::MissingWindInput)
         );
+        Ok(())
     }
 
     #[test]
@@ -1172,7 +1196,7 @@ mod tests {
         snapshot.track.vertical_rate_fpm = Some(-600.0);
         snapshot.route = vec![near, meter];
         let make_profile = |along| {
-            let mut profile = wind_profile(&snapshot, along, 0.0);
+            let mut profile = wind_profile(&snapshot, near, along, 0.0);
             profile.legs.push(LegWind {
                 east_mps: 0.0,
                 north_mps: 0.0,
@@ -1186,7 +1210,7 @@ mod tests {
         assert_eq!(headwind.positions[0].time_ms, tailwind.positions[0].time_ms);
         assert!(headwind.positions[0].place.is_some());
         assert!(tailwind.positions[0].place.is_some());
-        assert!(headwind.meter_eta.unwrap().time_ms > tailwind.meter_eta.unwrap().time_ms);
+        assert!(meter_time(&headwind)? > meter_time(&tailwind)?);
         assert!(matches!(
             headwind.positions[0].vertical_status,
             VerticalStatus::ConstraintConflict { .. }
