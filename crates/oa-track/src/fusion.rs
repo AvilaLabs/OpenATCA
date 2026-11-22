@@ -5934,7 +5934,7 @@ mod tests {
         }
     }
 
-    // REQ: OA-TRK-050, OA-TRK-302, OA-TRK-344
+    // REQ: OA-TRK-051, OA-TRK-302, OA-TRK-344
     #[test]
     fn an_adsb_gap_keeps_the_mode_s_track_live_and_reacquires_when_both_sources_are_absent() {
         const ADDR: u32 = 0xA00001;
