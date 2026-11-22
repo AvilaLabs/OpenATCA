@@ -50,6 +50,7 @@ fn start_flight(table: &mut FlightTable, key: FlightKey, msg: u64) {
     assert_eq!(flights_apply(table, &owner), Outcome::Applied);
 }
 
+// REQ: OA-FLT-010, OA-FLT-011
 #[test]
 fn two_sector_offer_accept_timeout_and_stale_duplicate_delivery() {
     let accepted_key = key_gufi(901);

@@ -11,7 +11,7 @@
 use oa_ca::*;
 use oa_geo::aeqd::{frame_new, unproject};
 use oa_safety::inhibit::inhibits_new;
-use oa_safety::net::{NetId, NetReport, NetState, Reason, net_status, state_table_new};
+use oa_safety::net::{net_status, state_table_new, NetId, NetReport, NetState, Reason};
 
 const SECOND: i64 = 1_000_000_000;
 const BASE: (f64, f64) = (41.5, -88.0);
@@ -116,6 +116,7 @@ fn alerted(rows: &[CaTrack]) -> bool {
     ca_open_len(&state) > 0
 }
 
+// REQ: OA-CA-002, OA-CA-003, OA-CA-012
 #[test]
 fn synthetic_truth_qualification_counts_misses_nuisance_and_lead_time() {
     // Output is evaluated against the declarations above, with rates defined per declared case:
@@ -147,6 +148,7 @@ fn synthetic_truth_qualification_counts_misses_nuisance_and_lead_time() {
     assert_eq!(TRUTH[1].name, "vertically_separated_pass");
 }
 
+// REQ: OA-CA-006, OA-CA-011, OA-CA-012
 #[test]
 fn missing_input_and_unknown_altitude_degrade_without_clearing_an_open_warning() {
     let (mut state, mut alerts, mut events, mut net) = rig();

@@ -46,13 +46,13 @@ use oa_bench::thindex::build_th_index;
 use oa_bench::tracker_input::{legacy_from_track_samples_by_leg, TrackSamples};
 use oa_bench::truth::Truth;
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
-use oa_track::DEFAULT_CONFIG;
 use oa_track::score::{
     interval_stats, score_ranges, scoring_config, split_reports, IntervalStats, RowSet, RowSource,
     DRAIN_ROWS, SCORE_CHUNK_ROWS,
 };
 use oa_track::spill::{spill_append, spill_finish, spill_new};
 use oa_track::types::{output_clear, output_len, output_new, TrackOutput, M_HAS_VEL, O_TICK};
+use oa_track::DEFAULT_CONFIG;
 use oa_track::{tracker_advance, tracker_flush, tracker_new, tracker_update};
 use oa_track::{tracker_log, tracker_stats};
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
