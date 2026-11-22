@@ -54,6 +54,7 @@ const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_LAUNCHER_PATH_BYTES: usize = 4_096;
 const MAX_LAUNCHER_ARGS: usize = 16;
 const MAX_LAUNCHER_ARG_BYTES: usize = 1_024;
+const MAX_LAUNCHER_ARGS_BYTES: usize = 8_192;
 const RECOVERY_MAGIC: &[u8; 8] = b"OARCP002";
 const RECOVERY_HEADER_BYTES: usize = 8 + 4 + 32 + 4 + 4 + 8 + 8 + 8;
 const RECOVERY_RECORD_BYTES: usize = 4 + 1;
@@ -1734,27 +1735,28 @@ impl Replica {
             path.is_absolute(),
             "transport launcher path must be absolute"
         );
-        let path_text = path.as_os_str().to_string_lossy();
         assert!(
-            path_text.len() <= MAX_LAUNCHER_PATH_BYTES,
+            path.as_os_str().as_encoded_bytes().len() <= MAX_LAUNCHER_PATH_BYTES,
             "transport launcher path exceeds bound"
         );
         // The local launcher is a caller-supplied test executable. Refuse sealed artifacts before
         // invoking it; remote launchers remain responsible for their own authenticated setup.
         oa_sealed::refuse(&path).expect("transport launcher must not be a sealed input artifact");
-        let args = std::env::var(&args_key).unwrap_or_default();
+        let args = std::env::var_os(&args_key).unwrap_or_default();
+        let args = args
+            .to_str()
+            .expect("transport launcher arguments require UTF-8");
         assert!(
-            args.len() <= 8_192,
+            args.len() <= MAX_LAUNCHER_ARGS_BYTES,
             "transport launcher argument list exceeds total bound"
         );
         let mut command = Command::new(path);
         if !args.is_empty() {
-            let parsed: Vec<_> = args.split('\n').collect();
-            assert!(
-                parsed.len() <= MAX_LAUNCHER_ARGS,
-                "too many transport launcher arguments"
-            );
-            for arg in parsed {
+            for (index, arg) in args.split('\n').enumerate() {
+                assert!(
+                    index < MAX_LAUNCHER_ARGS,
+                    "too many transport launcher arguments"
+                );
                 assert!(
                     !arg.is_empty(),
                     "transport launcher arguments cannot be empty lines"
@@ -2771,7 +2773,7 @@ fn serving_process_loss_promotes_synchronized_scope_replica() {
 // MACHINE_LOSS line protocol over stdin/stdout to a worker on another host. No network client,
 // credentials, remote kill, or production endpoint is selected by this test.
 #[test]
-#[ignore = "set OA_MACHINE_LOSS_TRANSPORT_LAUNCHER to an explicit synthetic protocol bridge"]
+#[ignore = "configure both OA_MACHINE_LOSS_TRANSPORT launchers"]
 fn transport_separated_workers_match_synthetic_scope_reference() {
     let mut left = Replica::start_transport("LEFT");
     let mut right = Replica::start_transport("RIGHT");
@@ -2803,7 +2805,7 @@ fn transport_separated_workers_match_synthetic_scope_reference() {
         "right launcher exited unsuccessfully: {right_status}"
     );
     eprintln!(
-        "transport-drill: workers=2 records={} result=synthetic-output-equivalence launcher_exit=observed remote_process_death=not_claimed",
+        "transport-drill: workers=2 records={} result=synthetic-output-equivalence launcher_exit=observed",
         SYNTHETIC_STREAM.len()
     );
 }
