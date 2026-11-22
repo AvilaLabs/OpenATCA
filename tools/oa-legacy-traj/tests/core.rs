@@ -81,42 +81,44 @@ fn the_crossing_is_the_closest_approach_interpolated_between_samples() {
 // REQ: OA-LTJ-057
 #[test]
 fn a_dateline_segment_crosses_the_dateline_and_stays_far_from_greenwich() {
-    let path = [
-        PathPoint {
-            t_ms: 10_000,
-            lat_deg: 0.0,
-            lon_deg: 179.98,
-            gap_before: false,
-        },
-        PathPoint {
-            t_ms: 30_000,
-            lat_deg: 0.0,
-            lon_deg: -179.98,
-            gap_before: false,
-        },
-    ];
-    let dateline = approach(
-        &path,
-        Place {
-            lat_deg: 0.0,
-            lon_deg: 180.0,
-        },
-        NM,
-    );
-    assert_eq!(dateline.passages.len(), 1);
-    assert_eq!(dateline.passages[0].t_ms, 20_000);
-    assert!(dateline.min_dist_m < 0.01);
+    for direction in [1.0, -1.0] {
+        let path = [
+            PathPoint {
+                t_ms: 10_000,
+                lat_deg: 0.0,
+                lon_deg: direction * 179.98,
+                gap_before: false,
+            },
+            PathPoint {
+                t_ms: 30_000,
+                lat_deg: 0.0,
+                lon_deg: -direction * 179.98,
+                gap_before: false,
+            },
+        ];
+        let dateline = approach(
+            &path,
+            Place {
+                lat_deg: 0.0,
+                lon_deg: 180.0,
+            },
+            NM,
+        );
+        assert_eq!(dateline.passages.len(), 1);
+        assert_eq!(dateline.passages[0].t_ms, 20_000);
+        assert!(dateline.min_dist_m < 0.01);
 
-    let greenwich = approach(
-        &path,
-        Place {
-            lat_deg: 0.0,
-            lon_deg: 0.0,
-        },
-        NM,
-    );
-    assert!(greenwich.passages.is_empty());
-    assert!(greenwich.min_dist_m > 19_000_000.0);
+        let greenwich = approach(
+            &path,
+            Place {
+                lat_deg: 0.0,
+                lon_deg: 0.0,
+            },
+            NM,
+        );
+        assert!(greenwich.passages.is_empty());
+        assert!(greenwich.min_dist_m > 19_000_000.0);
+    }
 }
 
 // REQ: OA-LTJ-002
