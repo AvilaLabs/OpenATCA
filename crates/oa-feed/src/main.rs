@@ -53,7 +53,7 @@ struct SourceGate {
 enum SendAttempt {
     Sent,
     Full(Msg),
-    Closed(Msg),
+    Closed,
 }
 
 #[derive(Default)]
@@ -67,7 +67,7 @@ struct CutoffInput {
 fn try_send_from_reader(tx: &SyncSender<Msg>, gate: &Mutex<SourceGate>, msg: Msg) -> SendAttempt {
     let mut state = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if !state.accepting {
-        return SendAttempt::Closed(msg);
+        return SendAttempt::Closed;
     }
     match tx.try_send(msg) {
         Ok(()) => {
@@ -82,7 +82,7 @@ fn try_send_from_reader(tx: &SyncSender<Msg>, gate: &Mutex<SourceGate>, msg: Msg
             }
             SendAttempt::Full(msg)
         }
-        Err(TrySendError::Disconnected(msg)) => SendAttempt::Closed(msg),
+        Err(TrySendError::Disconnected(_)) => SendAttempt::Closed,
     }
 }
 
@@ -90,7 +90,7 @@ fn send_from_reader(tx: &SyncSender<Msg>, gate: &Mutex<SourceGate>, mut msg: Msg
     loop {
         match try_send_from_reader(tx, gate, msg) {
             SendAttempt::Sent => return true,
-            SendAttempt::Closed(_) => return false,
+            SendAttempt::Closed => return false,
             SendAttempt::Full(next) => {
                 msg = next;
                 thread::sleep(Duration::from_millis(1));
@@ -887,11 +887,11 @@ mod tests {
         assert_eq!(cutoff.sender_held_bytes, 5);
         assert!(matches!(
             try_send_from_reader(&tx, &gate, held),
-            SendAttempt::Closed(_)
+            SendAttempt::Closed
         ));
         assert!(matches!(
             try_send_from_reader(&tx, &gate, Msg::End(None)),
-            SendAttempt::Closed(_)
+            SendAttempt::Closed
         ));
     }
 
