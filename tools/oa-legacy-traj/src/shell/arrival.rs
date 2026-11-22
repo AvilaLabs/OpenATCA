@@ -575,7 +575,7 @@ struct PlannedIssue {
 /// The fixed no-assignment cohort selected before cutoff-specific assignment evidence is queried.
 pub(crate) struct ArrivalPlan {
     requested: String,
-    meter: Place,
+    meter: RouteFix,
     offered_flights: usize,
     no_addr: usize,
     no_meter: usize,
@@ -1073,7 +1073,7 @@ mod assignment_plan_tests {
         let cutoff_ms = 1_794_664_309_564;
         let plan = ArrivalPlan {
             requested: "ORD".into(),
-            meter: fix.place,
+            meter: fix,
             offered_flights: 1,
             no_addr: 0,
             no_meter: 0,

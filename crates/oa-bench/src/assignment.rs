@@ -367,6 +367,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::unwrap_used)]
     fn query() -> AssignmentQuery {
         assignment_query(&[AssignmentIssue {
             gufi: 1,
