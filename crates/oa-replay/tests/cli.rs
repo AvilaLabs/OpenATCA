@@ -173,6 +173,33 @@ fn a_receive_time_drop_marks_the_input_fingerprint_partial() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn a_future_adsb_refusal_marks_the_input_fingerprint_partial() {
+    let dir = scratch("fingerprint-future");
+    let path = dir.join("synthetic.oaf");
+    let t0 = DAY * 1_000_000;
+    let mut reports = oa_adsb::Reports::default();
+    oa_adsb::reports_push(
+        &mut reports,
+        &oa_adsb::Row {
+            icao: 0xAB_0000,
+            time_ns: t0 + oa_replay::ADSB_MAX_AHEAD_NS + 1,
+            lat_e7: 420_000_000,
+            lon_e7: -880_000_000,
+            baro_alt_ft: 30_000,
+            ..oa_adsb::ROW_EMPTY
+        },
+    );
+    let mut payload = Vec::new();
+    oa_adsb::encode_payload(&mut payload, &reports, 0, 1).unwrap();
+    std::fs::write(&path, frame(1, 0, t0, &payload)).unwrap();
+    let (code, out, err) = run_bin(&["--adsb", path.to_str().unwrap(), "--input-fingerprint"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("future_refused=1"), "{out}");
+    assert!(err.contains("status=partial pipeline_frames=1"), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 // REQ: OA-RPL-024, OA-SEAL-014
 #[test]
 fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {

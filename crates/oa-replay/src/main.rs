@@ -156,6 +156,8 @@ fn main() -> ExitCode {
             || report.sealed_window_dropped > 0
             || p.sealed_window_dropped > 0
             || semantic_errors > 0
+            || p.adsb.stats.future_refused > 0
+            || p.rows_out_of_order.iter().any(|&n| n != 0)
             || p.rows_refused_full.iter().any(|&n| n != 0)
         {
             "partial"

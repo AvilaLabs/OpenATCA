@@ -149,8 +149,10 @@ digest alongside the existing state digest. It hashes validated metadata, replay
 and payload bytes after the frame and document sealed-window checks. It counts source framing
 and gzip refusals, pipeline errors, and sealed drops separately. The result is partial if the
 replay encounters a refusal or a drop, and incomplete if it stops on an error. The recorded
-receive and monotonic timestamps are input fields. Compare local runs with the same replay
-settings and stream grouping. Peer authentication and complete delivery require separate evidence.
+receive and monotonic timestamps are input fields. Compare complete local runs with the same
+replay settings and stream grouping. A frame dropped by a document guard may still advance the
+replay clock using its accepted receive time, so a partial digest cannot explain every state
+difference. Peer authentication and complete delivery require separate evidence.
 
 The input hash determines how a disagreement between peer checkpoints is classified.
 
