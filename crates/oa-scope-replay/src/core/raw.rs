@@ -191,7 +191,7 @@ pub fn raw_targets_at(
                 .zip(columns.alt_ft.get(index))
                 .zip(columns.gs_dkt.get(index))
                 .zip(columns.track_ddeg.get(index))
-                .map(|(((((lat, lon), alt), gs), track))| (*lat, *lon, *alt, *gs, *track));
+                .map(|((((&lat, &lon), &alt), &gs), &track)| (lat, lon, alt, gs, track));
             let Some(payload) = payload else {
                 return Err(RawInputError::ColumnLength {
                     column: "observation",
