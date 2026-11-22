@@ -78,12 +78,12 @@ unevaluated seconds are counted in the `ticks_unevaluated` column.
 
 ## Offline safety-net qualification seam
 
-`crates/oa-ca/tests/qualification.rs` is a companion, synthetic-only qualification slice for
-conflict-alert behavior. It declares analytic encounter intervals and alert desire before
-evaluating alert output, and defines miss, nuisance and lead-time denominators. It also checks an
-unknown-altitude cycle, a degraded input report and preservation of an active warning. It does not
-consume this tool's recorded-traffic output, estimate operational rates or establish readiness;
-M5's recorded-traffic evaluation remains a separate build step.
+`crates/oa-ca/tests/qualification.rs` and the synthetic terrain case in
+`crates/oa-msaw/tests/msaw.rs` are companion offline qualification slices. They declare analytic
+encounter or terrain-violation truth and alert desire before evaluating output, and define miss,
+nuisance and lead-time denominators. Both check input degradation while preserving active warning
+state. They do not consume this tool's recorded-traffic output, estimate operational rates or
+establish readiness; M5's recorded-traffic evaluation remains a separate build step.
 
 ## Output
 

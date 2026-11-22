@@ -2366,6 +2366,124 @@ fn resilience_go_around_warns_before_reaching_high_ground_past_the_runway() {
     assert!(f64::from(elapsed_at_warning_s) <= collision_s - config.warning_s);
 }
 
+// Small offline MSAW qualification. This is a made-up flat terrain case, separate from the Guam
+// illustration and from recorded traffic. Truth is declared from the synthetic terrain and
+// vertical path before asking the net for an alert.
+#[test]
+fn synthetic_terrain_warning_scores_declared_violation_and_preserves_warning_through_gaps() {
+    const TERRAIN_FT: i32 = 900;
+    const CLEARANCE_FT: i32 = 500;
+    const FLOOR_FT: i32 = TERRAIN_FT + CLEARANCE_FT;
+    const START_ALT_FT: i32 = 1700;
+    const DESCENT_FPM: i32 = -600;
+    const WARNING_LEAD_S: i64 = 20;
+    const VIOLATION_S: i64 = 30;
+    const WARNING_EXPECTED_S: i64 = VIOLATION_S - WARNING_LEAD_S;
+    const WANT_ALERT: bool = true;
+    const NUISANCE_WANTS_ALERT: bool = false;
+
+    // The true altitude is 1,700 - 10t ft. Against a synthetic 1,400 ft floor, the strict
+    // below-floor interval begins at t=30 s. A 20 s warning threshold therefore calls for the
+    // warning at t=10 s. The control track stays above the floor for the full 60 s look-ahead.
+    assert_eq!(FLOOR_FT, 1400);
+    assert_eq!(
+        START_ALT_FT - FLOOR_FT,
+        -DESCENT_FPM / 60 * VIOLATION_S as i32
+    );
+    let truth_violation_interval_s = (VIOLATION_S, 60);
+    let expected_warning_time_s = WARNING_EXPECTED_S;
+
+    let mut r = rig(&cfg());
+    let hazard = tr(
+        901,
+        40.0,
+        -88.0,
+        0.0,
+        0.0,
+        START_ALT_FT as f32,
+        DESCENT_FPM as f32,
+    );
+    let control = tr(902, 40.2, -88.0, 0.0, 0.0, 2600.0, -600.0);
+    let full_coverage = flat(TERRAIN_FT, FLOOR_NONE);
+
+    // Metrics: misses / declared desired-warning cases; nuisance alerts / declared no-alert
+    // control cases. Lead time is the independently declared first violation time minus the
+    // observed warning time. All denominators are counts of these two synthetic tracks.
+    let first = cycle(&mut r, 0, &[hazard, control], &full_coverage);
+    assert_eq!(first.stats.violations, 1);
+    let caution = msaw_open(&r.st)
+        .iter()
+        .find(|alert| alert.addr == 901)
+        .expect("declared hazard has an open caution");
+    assert_eq!(caution.caution_ns, Some(0));
+    assert_eq!(caution.warning_ns, None);
+    assert!(!msaw_open(&r.st).iter().any(|alert| alert.addr == 902));
+
+    let mut at_ten = hazard;
+    at_ten.alt_ft = 1600.0;
+    let second = cycle(&mut r, 10 * S, &[at_ten, control], &full_coverage);
+    assert_eq!(second.stats.violations, 1);
+    let warning = msaw_open(&r.st)
+        .iter()
+        .find(|alert| alert.addr == 901)
+        .expect("declared hazard remains open");
+    let observed_warning = warning.warning_ns.map(|time_ns| time_ns / S);
+    let lead_time_s = observed_warning.map_or(0, |time_s| VIOLATION_S - time_s);
+    let misses = usize::from(WANT_ALERT && warning.warning_ns.is_none());
+    let desired_denominator = usize::from(WANT_ALERT);
+    let nuisance_alerts = usize::from(
+        !NUISANCE_WANTS_ALERT && msaw_open(&r.st).iter().any(|alert| alert.addr == 902),
+    );
+    let nuisance_denominator = usize::from(!NUISANCE_WANTS_ALERT);
+    assert_eq!((misses, desired_denominator), (0, 1));
+    assert_eq!((nuisance_alerts, nuisance_denominator), (0, 1));
+    let observed_warning_s = observed_warning.expect("declared warning was detected");
+    assert_eq!(observed_warning_s, expected_warning_time_s);
+    assert_eq!(lead_time_s, WARNING_LEAD_S);
+    assert_eq!(truth_violation_interval_s.0, VIOLATION_S);
+    assert!(truth_violation_interval_s.1 > truth_violation_interval_s.0);
+
+    // During the active warning, the hazard loses altitude and the control loses floor coverage.
+    // Both are explicit input gaps. The active warning stays published and the net degrades.
+    let mut lost_altitude = at_ten;
+    lost_altitude.alt_ft = f32::NAN;
+    lost_altitude.vrate_fpm = f32::NAN;
+    let no_control_coverage = |lat: i32, lon: i32| {
+        let sample = full_coverage(lat, lon);
+        if (402_000_000..403_000_000).contains(&lat) {
+            FloorSample {
+                obstacle_covered: false,
+                ..sample
+            }
+        } else {
+            sample
+        }
+    };
+    let degraded = cycle(
+        &mut r,
+        11 * S,
+        &[lost_altitude, control],
+        &no_control_coverage,
+    );
+    assert_eq!(
+        (degraded.stats.alt_missing, degraded.stats.no_coverage),
+        (1, 1)
+    );
+    assert!(matches!(
+        degraded.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            ..
+        }
+    ));
+    let preserved = msaw_open(&r.st)
+        .iter()
+        .find(|alert| alert.addr == 901)
+        .expect("input loss must not clear the warning");
+    assert_eq!(preserved.warning_ns, Some(expected_warning_time_s * S));
+    assert_eq!(preserved.end_reason, END_LOST_ALTITUDE_MISSING);
+}
+
 // REQ: OA-MSAW-004, OA-MSAW-011, OA-MSAW-065
 #[test]
 fn resilience_simultaneous_altitude_and_coverage_loss_preserve_active_warnings() {
