@@ -2441,12 +2441,16 @@ mod tests {
 
             // Geometric-only reports do not supply barometric evidence; the track then coasts.
             for k in 8..10 {
-                let mut m = at(k * S, 0, 100.0);
+                let mut m = at(0, 0, 100.0);
+                m.toa_ns = k * S;
                 m.alt_ft = 10_000 + 5_000 * k as i32;
                 m.alt_quant_ft = 25;
                 m.flags |= M_ALT_GEOMETRIC;
                 tracker_update(&mut t, &m, &mut out);
             }
+            let (geometric_only, _, _) = tracker_predict(&t, ADDR, 10 * S).unwrap();
+            assert!((geometric_only.alt_ft - 10_000.0).abs() < 100.0);
+            assert!(geometric_only.vrate_fpm.abs() < 1_000.0);
             assert!(tracker_set_expected_interval(&mut t, ADDR, S));
             tracker_advance(&mut t, 20 * S, &mut out);
             assert!(out.flags.iter().any(|flags| flags & O_COAST != 0));
