@@ -180,8 +180,8 @@ pub const MAX_BUCKET_PAIRS: usize = 1 << 18;
 pub const MAX_BUCKET_TESTS: usize = 1 << 20;
 /// Initiation work units shared by every radar in one bucket. One million units matches the
 /// existing association work ceiling, so their separate caps give two million charged units
-/// combined. One unit is a candidate visit/exact pair; grid build/sort charges input visits,
-/// loop iterations, comparisons and swaps; query charges each column, probe, and key visit.
+/// combined. One unit is a candidate visit or exact pair. Grid construction charges input visits
+/// and bounded sorting work. Queries charge each column, probe, and key visit.
 /// The sole refusal-accounting pass is separate and is bounded by
 /// `MAX_RADARS * MAX_BUCKET_PLOTS` (131,072) plot-slot visits
 /// per bucket; `FusionStats::init_refusal_pass_visits` reports that work.

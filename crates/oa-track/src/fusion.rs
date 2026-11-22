@@ -62,8 +62,8 @@ use crate::assoc::{
 use crate::coarse::{
     coarse_buffer, coarse_build, coarse_distance, coarse_new, coarse_passes, coarse_query,
     point_grid_buffer, point_grid_build_budgeted, point_grid_new, point_grid_query_budgeted,
-    sort_unique_indices_budgeted, CoarseIndex, PointGrid, PointGridBuildResult,
-    PointGridQueryResult, SortUniqueResult,
+    point_grid_radix_buffer, sort_unique_indices_budgeted, CoarseIndex, PointGrid,
+    PointGridBuildResult, PointGridQueryResult, SortUniqueResult,
 };
 use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
@@ -771,6 +771,7 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
         f.hold_run.buffer(),
         f.plot_scan.buffer(),
         point_grid_buffer(&f.init_grid),
+        point_grid_radix_buffer(&f.init_grid),
         f.keyinfo.buffer(),
     ]);
     v.extend(f.pairs_bufs.iter().map(of));

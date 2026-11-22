@@ -404,6 +404,10 @@ fn piece_cells(ix: &CoarseIndex, out: &mut Vec<u32>, boxes: &[PieceBox], k: usiz
 pub const POINT_RINGS_MAX: i64 = 3;
 /// Cells either side of the origin along each axis.
 const POINT_CELLS: i64 = 1 << 15;
+/// Large point grids use four stable byte passes over the packed 32-bit cell key.
+const POINT_RADIX_THRESHOLD: usize = 256;
+const POINT_RADIX_BUCKETS: usize = 256;
+const POINT_RADIX_PASSES: usize = 4;
 
 /// A uniform grid of points in a plane (metres), for the initiation of tracks: the candidates of
 /// a radar are put in by predicted position, and the plot looks only at the cells round it. The
@@ -413,13 +417,17 @@ const POINT_CELLS: i64 = 1 << 15;
 #[derive(Debug, Default)]
 pub struct PointGrid {
     keys: Vec<u64>,
+    radix_scratch: Vec<u64>,
     cell_m: f64,
 }
 
 /// A grid of cells `cell_m` wide with room for `capacity` points, which is all it will ever hold.
 pub fn point_grid_new(capacity: usize, cell_m: f64) -> PointGrid {
+    let keys = Vec::with_capacity(capacity);
+    let radix_scratch = vec![0; keys.capacity()];
     PointGrid {
-        keys: Vec::with_capacity(capacity),
+        keys,
+        radix_scratch,
         cell_m: cell_m.max(1.0),
     }
 }
@@ -427,6 +435,14 @@ pub fn point_grid_new(capacity: usize, cell_m: f64) -> PointGrid {
 /// The address and capacity of the buffer, to check that nothing is reallocated.
 pub fn point_grid_buffer(g: &PointGrid) -> (usize, usize) {
     (g.keys.as_ptr() as usize, g.keys.capacity())
+}
+
+/// The address and capacity of the preallocated large-grid radix scratch.
+pub fn point_grid_radix_buffer(g: &PointGrid) -> (usize, usize) {
+    (
+        g.radix_scratch.as_ptr() as usize,
+        g.radix_scratch.capacity(),
+    )
 }
 
 fn point_cell(g: &PointGrid, x: f64, y: f64) -> (i64, i64) {
@@ -463,10 +479,10 @@ pub enum PointGridBuildResult {
     CapacityFull,
 }
 
-/// Builds and sorts a point grid without allocation, charging each input visit, sort-loop
-/// iteration, comparison, and swap before doing it. `remaining` is reduced by completed/attempted
-/// units and `spent` reports the same units. On any incomplete result, the partial grid is cleared
-/// and must not be queried.
+/// Builds and sorts a point grid without allocation. Large grids use a stable radix sort of the
+/// packed 32-bit cell key; small grids retain the budgeted heapsort. Work is charged before each
+/// input visit or, for radix, before the complete fixed-pass bound. On any incomplete result, the
+/// partial grid is cleared and must not be queried.
 pub fn point_grid_build_budgeted(
     g: &mut PointGrid,
     n: usize,
@@ -489,11 +505,83 @@ pub fn point_grid_build_budgeted(
         let (cx, cy) = point_cell(g, x, y);
         g.keys.push(u64::from(point_key(cx, cy)) << 32 | i as u64);
     }
-    if !sort_budgeted(&mut g.keys, remaining, spent) {
+    let sorted = if g.keys.len() > POINT_RADIX_THRESHOLD {
+        point_grid_radix_sort_budgeted(g, remaining, spent)
+    } else {
+        sort_budgeted(&mut g.keys, remaining, spent)
+    };
+    if !sorted {
         g.keys.clear();
         return PointGridBuildResult::Capped;
     }
     PointGridBuildResult::Complete
+}
+
+/// Stable radix sorting works on the 32-bit cell half of each key. Input indexes are appended in
+/// ascending order by the builder, so stability also preserves the low 32-bit index ordering.
+/// The complete bound is reserved before either buffer is modified: two length scans (count and
+/// scatter), histogram clear, and prefix sum per byte pass.
+fn point_grid_radix_sort_budgeted(
+    g: &mut PointGrid,
+    remaining: &mut usize,
+    spent: &mut usize,
+) -> bool {
+    let len = g.keys.len();
+    let Some(per_pass) = len
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(2 * POINT_RADIX_BUCKETS))
+    else {
+        return false;
+    };
+    let Some(required) = per_pass.checked_mul(POINT_RADIX_PASSES) else {
+        return false;
+    };
+    let Some(scratch) = g.radix_scratch.get_mut(..len) else {
+        return false;
+    };
+    if !charge_work_many(remaining, spent, required) {
+        return false;
+    }
+
+    let keys = g.keys.as_mut_slice();
+    for pass in (0..POINT_RADIX_PASSES).step_by(2) {
+        let shift = 32 + pass * 8;
+        if !point_grid_radix_pass(keys, scratch, shift)
+            || !point_grid_radix_pass(scratch, keys, shift + 8)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn point_grid_radix_pass(source: &[u64], target: &mut [u64], shift: usize) -> bool {
+    let bucket = |key| ((key >> shift) & 0xff_u64) as usize;
+    let mut positions = [0usize; POINT_RADIX_BUCKETS];
+    for &key in source {
+        let Some(count) = positions.get_mut(bucket(key)) else {
+            return false;
+        };
+        *count += 1;
+    }
+    let mut offset = 0usize;
+    for position in &mut positions {
+        // The histogram counts each source element once, so the total fits the source length.
+        let next = offset + *position;
+        *position = offset;
+        offset = next;
+    }
+    for &key in source {
+        let Some(position) = positions.get_mut(bucket(key)) else {
+            return false;
+        };
+        let Some(slot) = target.get_mut(*position) else {
+            return false;
+        };
+        *slot = key;
+        *position += 1;
+    }
+    true
 }
 
 /// In-place heapsort with no allocation. Each sort-loop iteration, comparison, and swap consumes
@@ -584,6 +672,18 @@ fn charge_work(remaining: &mut usize, spent: &mut usize) -> bool {
         return false;
     }
     *remaining -= 1;
+    *spent = next_spent;
+    true
+}
+
+fn charge_work_many(remaining: &mut usize, spent: &mut usize, amount: usize) -> bool {
+    let Some(next_spent) = spent.checked_add(amount) else {
+        return false;
+    };
+    if *remaining < amount {
+        return false;
+    }
+    *remaining -= amount;
     *spent = next_spent;
     true
 }
@@ -1440,6 +1540,42 @@ mod tests {
         assert_eq!(visits.get(), 0);
         assert_eq!((remaining, spent), (100, 0));
         assert!(grid.keys.is_empty());
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn large_budgeted_point_grid_matches_offline_order_and_refuses_short_radix_budget() {
+        let n = 4_096usize;
+        let place = |i: usize| {
+            let x = ((i * 37 % 31) as i32 - 15) as f64 * 1_000.0;
+            let y = ((i * 83 % 11) as i32 - 5) as f64 * 1_000.0;
+            Some((x, y))
+        };
+        let mut expected = point_grid_new(n, 1_000.0);
+        point_grid_build(&mut expected, n, place);
+        let mut grid = point_grid_new(n + 1_024, 1_000.0);
+        let keys_before = point_grid_buffer(&grid);
+        let scratch_before = point_grid_radix_buffer(&grid);
+        let radix_work = POINT_RADIX_PASSES * (2 * n + 2 * POINT_RADIX_BUCKETS);
+        let (mut remaining, mut spent) = (n + radix_work, 0usize);
+        assert_eq!(
+            point_grid_build_budgeted(&mut grid, n, place, &mut remaining, &mut spent,),
+            PointGridBuildResult::Complete
+        );
+        assert_eq!(grid.keys, expected.keys);
+        assert_eq!((remaining, spent), (0, n + radix_work));
+        assert_eq!(point_grid_buffer(&grid), keys_before);
+        assert_eq!(point_grid_radix_buffer(&grid), scratch_before);
+
+        let (mut remaining, mut spent) = (n + radix_work - 1, 0usize);
+        assert_eq!(
+            point_grid_build_budgeted(&mut grid, n, place, &mut remaining, &mut spent,),
+            PointGridBuildResult::Capped
+        );
+        assert!(grid.keys.is_empty());
+        assert_eq!((remaining, spent), (radix_work - 1, n));
+        assert_eq!(point_grid_buffer(&grid), keys_before);
+        assert_eq!(point_grid_radix_buffer(&grid), scratch_before);
     }
 
     // REQ: OA-TRK-325
