@@ -202,12 +202,13 @@ fn main() -> ExitCode {
     println!("view_states {:?}", rep.view_states);
     println!("removed_by_reason {:?}", rep.removed_by_reason);
     println!(
-        "position_evidence held={} updates={} capacity_refusals={} out_of_order_ignored={} future_message_time_ignored={} refiled_held={} refile_capacity_refusals={}",
+        "position_evidence held={} updates={} capacity_refusals={} out_of_order_ignored={} future_message_time_ignored={} future_position_time_ignored={} refiled_held={} refile_capacity_refusals={}",
         rep.positions.len(),
         rep.positions.updated,
         rep.positions.refused_full,
         rep.positions.out_of_order,
         rep.positions.bad_time,
+        rep.positions.bad_position_time,
         rep.positions.refiled_len(),
         rep.positions.refiled_refused,
     );

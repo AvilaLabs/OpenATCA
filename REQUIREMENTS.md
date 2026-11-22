@@ -6178,7 +6178,8 @@ configuration with no default; the crate's tests use synthetic values.
   line and left unresolved, so the callsign join is tried.
 - **OA-FLT-040** The replay drops the position and the refile time of a flight when the table removes the flight; positions held,
   positions refused (table full), refile times held and refiles refused are printed, also at zero, and so are positions left out for
-  a stamp too far ahead of their receipt.
+  a parent-message stamp too far ahead of receipt or a position stamp later than its availability time; the two timestamp
+  rejection counts are separate. A rejected position does not replace the last usable position.
 - **OA-FLT-041** A flight's own position counts only when stamped at or before the question and no more than 120 s before it.
 - **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
   refuses a window that is open at one end or runs backwards.

@@ -153,8 +153,10 @@ pub struct Positions {
     /// each flight, by GUFI, bounded like the positions.
     refiled: BTreeMap<u128, i64>,
     pub refiled_refused: u64,
-    /// Positions left out because their message is stamped too far ahead of its receipt.
+    /// Positions left out because their parent message is stamped too far ahead of receipt.
     pub bad_time: u64,
+    /// Positions whose own timestamp is beyond availability or too far ahead of receipt.
+    pub bad_position_time: u64,
     capacity: usize,
     pub updated: u64,
     pub refused_full: u64,
@@ -418,7 +420,8 @@ fn replay_sfdps_counted_inner(
             // and the question is announced first.
             match position_avail(&events, row, seen_ms, &table) {
                 PositionAvail::NoPosition => {}
-                PositionAvail::BadTime => positions.bad_time += 1,
+                PositionAvail::BadMessageTime => positions.bad_time += 1,
+                PositionAvail::BadPositionTime => positions.bad_position_time += 1,
                 PositionAvail::At(avail) => {
                     if avail > table.clock_ms {
                         before_op(&table, &positions, avail);
@@ -474,8 +477,10 @@ fn replay_sfdps_counted_inner(
 enum PositionAvail {
     /// The row has no position.
     NoPosition,
-    /// Its message is stamped too far ahead of its receipt: counted as bad time, not kept.
-    BadTime,
+    /// Its parent message is stamped too far ahead of receipt.
+    BadMessageTime,
+    /// Its own position timestamp is too far ahead of receipt or availability.
+    BadPositionTime,
     At(i64),
 }
 
@@ -493,13 +498,18 @@ fn position_avail(
         return PositionAvail::NoPosition;
     };
     if ts.saturating_sub(seen_ms) > table.cfg.max_future_ms {
-        return PositionAvail::BadTime;
+        return PositionAvail::BadMessageTime;
     }
-    PositionAvail::At(
-        seen_ms
-            .max(ts.saturating_add(table.cfg.lag_floor_ms))
-            .max(table.clock_ms),
-    )
+    let avail = seen_ms
+        .max(ts.saturating_add(table.cfg.lag_floor_ms))
+        .max(table.clock_ms);
+    let Some(&position_ts) = ev.pos_time_ms.get(row) else {
+        return PositionAvail::NoPosition;
+    };
+    if position_ts.saturating_sub(seen_ms) > table.cfg.max_future_ms || position_ts > avail {
+        return PositionAvail::BadPositionTime;
+    }
+    PositionAvail::At(avail)
 }
 
 fn note_position(ev: &oa_fixm::Events, row: usize, avail_ms: i64, positions: &mut Positions) {

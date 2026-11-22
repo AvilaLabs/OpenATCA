@@ -391,6 +391,72 @@ fn a_callsign_is_made_upper_case_and_trimmed_and_a_position_is_kept_as_it_ages_i
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// REQ: OA-FLT-040, OA-FLT-041
+#[test]
+fn future_position_time_does_not_replace_usable_evidence_before_a_valid_followup() {
+    let dir = temp_dir("future-position-time");
+    let position = |time: &str, coords: &str| {
+        format!(
+            r#"<flightStatus fdpsFlightStatus="ACTIVE"/><enRoute><position positionTime="{time}"><position><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>{coords}</pos></location></position></position></enRoute>"#
+        )
+    };
+    let frames = [
+        (
+            1,
+            "2030-01-02T03:04:05.000Z",
+            "2030-01-02T03:05:05.000Z",
+            position("2030-01-02T03:04:55Z", "41.9 -87.9"),
+        ),
+        (
+            2,
+            "2030-01-02T03:04:10.000Z",
+            "2030-01-02T03:05:10.000Z",
+            position("2030-01-02T03:05:11Z", "42.0 -88.0"),
+        ),
+        (
+            3,
+            "2030-01-02T03:05:05.000Z",
+            "2030-01-02T03:06:05.000Z",
+            position("2030-01-02T03:05:50Z", "42.1 -88.1"),
+        ),
+    ];
+    let mut bytes = Vec::new();
+    for (seq, message_time, received_time, body) in frames {
+        let xml = doc(&msg("TH", message_time, &body));
+        let received_ms = parse_iso_ms(received_time.as_bytes()).unwrap();
+        bytes.extend(frame(seq, received_ms, &xml));
+    }
+    std::fs::write(dir.join("a.oaf"), bytes).unwrap();
+
+    let g = 0x1111_1111_2222_3333_4444_5555_5555_5555u128;
+    let second_receive_ms = parse_iso_ms(b"2030-01-02T03:05:10.000Z").unwrap();
+    let mut old_at_future_position = None;
+    let rep = replay_sfdps(
+        recordings_in(&dir).unwrap(),
+        &cfg(i64::MIN, i64::MAX),
+        &mut |_, positions, avail| {
+            if avail == second_receive_ms {
+                old_at_future_position = positions.get(g).map(|p| (p.ts_ms, p.lat_e7));
+            }
+        },
+    )
+    .unwrap();
+
+    assert_eq!(rep.positions.bad_time, 0, "the parent timestamps are valid");
+    assert_eq!(rep.positions.bad_position_time, 1);
+    assert_eq!(
+        old_at_future_position,
+        Some((parse_iso_ms(b"2030-01-02T03:04:55Z").unwrap(), 419_000_000))
+    );
+    let final_position = rep.positions.get(g).unwrap();
+    assert_eq!(
+        final_position.ts_ms,
+        parse_iso_ms(b"2030-01-02T03:05:50Z").unwrap()
+    );
+    assert_eq!(final_position.lat_e7, 421_000_000);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 fn flight_by_callsign_via_table(rep: &oa_flight_sfdps::ReplayReport) -> usize {
     oa_flight::flights_flying_by_callsign(&rep.table, b"ABC12\0\0\0").count
 }

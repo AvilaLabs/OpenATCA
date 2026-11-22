@@ -145,7 +145,7 @@ fn normal_replay_cli_reports_held_position_and_future_message_time_rejection() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(
-        stdout.contains("position_evidence held=1 updates=1 capacity_refusals=0 out_of_order_ignored=0 future_message_time_ignored=1 refiled_held=0 refile_capacity_refusals=0"),
+        stdout.contains("position_evidence held=1 updates=1 capacity_refusals=0 out_of_order_ignored=0 future_message_time_ignored=1 future_position_time_ignored=0 refiled_held=0 refile_capacity_refusals=0"),
         "{stdout}"
     );
     let _ = std::fs::remove_dir_all(&dir);
