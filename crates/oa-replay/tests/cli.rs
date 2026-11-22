@@ -153,6 +153,26 @@ fn stable(out: &str) -> String {
         .join("\n")
 }
 
+// REQ: OA-SEAL-014
+#[test]
+fn a_receive_time_drop_marks_the_input_fingerprint_partial() {
+    let (sealed_from_ms, _) = oa_sealed::sealed_window_ms().unwrap();
+    let sealed_from_ns = sealed_from_ms * 1_000_000;
+    let dir = scratch("fingerprint-window");
+    let path = dir.join("synthetic.oaf");
+    let mut bytes = frame(3, 0, sealed_from_ns - NS_PER_S, b"state=up\n");
+    bytes.extend(frame(3, 1, sealed_from_ns, b"state=up\n"));
+    std::fs::write(&path, bytes).unwrap();
+    let (code, _, err) = run_bin(&["--sfdps", path.to_str().unwrap(), "--input-fingerprint"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(err.contains("status=partial pipeline_frames=1"), "{err}");
+    assert!(
+        err.contains("source_sealed_drops=1 semantic_sealed_drops=0"),
+        "{err}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 // REQ: OA-RPL-024, OA-SEAL-014
 #[test]
 fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {
