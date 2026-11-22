@@ -40,6 +40,8 @@ format, wrapped in a versioned header and SHA-256 digest. A fresh child process 
 digest, frame CRCs, record count, order and source timestamps before replaying the prefix through
 the same tracker, scope, display and CA path. Its output and alert identities are compared with an
 uninterrupted in-process reference at each source second, then the child continues the suffix.
-Wrong-digest and internally truncated prefixes are explicitly refused. Source timestamps are
-synthetic; the test does not measure wall-clock recovery time or claim production checkpoint
-compatibility, persistence guarantees, or operational failover.
+The file is exclusively created and `sync_all` completes before the serving process is killed;
+the reader uses `oa_sealed::open`. Wrong-digest and internally truncated prefixes are refused by
+the fresh worker and reported with a reason. Source timestamps are synthetic; the test does not
+measure wall-clock recovery time or claim power-loss durability, production checkpoint
+compatibility, or operational failover.

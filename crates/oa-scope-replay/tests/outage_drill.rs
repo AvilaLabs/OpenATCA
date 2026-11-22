@@ -23,6 +23,7 @@ use oa_track::{
     NO_IDENT, O_REACQUIRED,
 };
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
@@ -59,6 +60,50 @@ const SYNTHETIC_STREAM: [(i32, bool); 15] = [
     (42, true),
     (43, true),
 ];
+
+struct TempCheckpointFiles {
+    dir: PathBuf,
+}
+
+impl TempCheckpointFiles {
+    fn new() -> Self {
+        let base = std::env::temp_dir();
+        let mut created = None;
+        for suffix in 0..1_000u32 {
+            let candidate = base.join(format!("oa-recovery-drill-{}-{suffix}", std::process::id()));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => {
+                    created = Some(candidate);
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("cannot create owned checkpoint directory: {error}"),
+            }
+        }
+        Self {
+            dir: created.expect("could not reserve unique checkpoint directory"),
+        }
+    }
+
+    fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = self.dir.join(name);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create checkpoint without replacing an existing file");
+        file.write_all(bytes).expect("write synthetic checkpoint");
+        file.sync_all()
+            .expect("sync synthetic checkpoint before fault injection");
+        path
+    }
+}
+
+impl Drop for TempCheckpointFiles {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
 
 fn conflict_track(addr: u32, lat_deg: f64, lon_deg: f64) -> CaTrack {
     CaTrack {
@@ -208,6 +253,18 @@ fn decode_recovery_checkpoint(bytes: &[u8]) -> Result<Vec<(i32, bool)>, &'static
         return Err("checkpoint_truncated_or_count");
     }
     Ok(steps)
+}
+
+fn read_recovery_checkpoint(path: &Path) -> Result<Vec<u8>, &'static str> {
+    let file = oa_sealed::open(path).map_err(|_| "checkpoint_open")?;
+    let mut bytes = Vec::with_capacity(RECOVERY_MAX_BYTES);
+    Read::take(file, RECOVERY_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "checkpoint_read")?;
+    if bytes.len() > RECOVERY_MAX_BYTES {
+        return Err("checkpoint_size_or_header");
+    }
+    Ok(bytes)
 }
 
 fn validate_worker_ack(line: &str, expected_second: i32) {
@@ -529,20 +586,16 @@ fn machine_loss_worker_process() {
     drill.warmup();
     let mut step_no = 0usize;
     if let Some(path) = std::env::var_os("OA_MACHINE_LOSS_CHECKPOINT") {
-        let loaded = std::fs::File::open(path).ok().and_then(|file| {
-            let mut bytes = Vec::with_capacity(RECOVERY_MAX_BYTES);
-            Read::take(file, RECOVERY_MAX_BYTES as u64 + 1)
-                .read_to_end(&mut bytes)
-                .ok()?;
-            Some(bytes)
-        });
-        let Some(steps) = loaded
-            .as_deref()
-            .and_then(|data| decode_recovery_checkpoint(data).ok())
-        else {
-            println!("MACHINE_LOSS_ERROR checkpoint_refused");
-            let _ = std::io::stdout().flush();
-            return;
+        let path = PathBuf::from(path);
+        let steps = match read_recovery_checkpoint(&path)
+            .and_then(|data| decode_recovery_checkpoint(&data))
+        {
+            Ok(steps) => steps,
+            Err(reason) => {
+                println!("MACHINE_LOSS_ERROR checkpoint_refused {reason}");
+                let _ = std::io::stdout().flush();
+                return;
+            }
         };
         for &(second, live) in &steps {
             if SYNTHETIC_STREAM.get(step_no) != Some(&(second, live)) {
@@ -637,6 +690,20 @@ impl Replica {
         line.trim_end_matches(['\r', '\n']).to_owned()
     }
 
+    fn assert_checkpoint_refused(&mut self, reason: &str) {
+        let output = self.output.as_ref().expect("worker output receiver exists");
+        let line = output
+            .recv_timeout(WORKER_TIMEOUT)
+            .expect("checkpoint refusal response timed out")
+            .expect("checkpoint refusal output is readable");
+        assert_eq!(
+            line.trim_end_matches(['\r', '\n']),
+            format!("MACHINE_LOSS_ERROR checkpoint_refused {reason}")
+        );
+        let status = wait_bounded(&mut self.child).expect("refusing worker exits promptly");
+        assert!(status.success(), "refusal worker test failed: {status}");
+    }
+
     fn step(&mut self, second: i32, live: bool) -> String {
         writeln!(
             self.input,
@@ -690,25 +757,22 @@ fn durable_prefix_recovers_in_fresh_process_and_refuses_damage() {
     let checkpoint = encode_recovery_checkpoint(prefix);
     let mut wrong_checkpoint = checkpoint.clone();
     wrong_checkpoint[12] ^= 1;
-    assert_eq!(
-        decode_recovery_checkpoint(&wrong_checkpoint),
-        Err("checkpoint_digest")
-    );
     let mut truncated = checkpoint.clone();
     truncated.pop();
     let truncated_digest = oa_sha256::sha256(&truncated[RECOVERY_HEADER_BYTES..]);
     truncated[12..44].copy_from_slice(&truncated_digest);
-    assert_eq!(
-        decode_recovery_checkpoint(&truncated),
-        Err("checkpoint_frame_bytes")
-    );
 
     // The prefix carries synthetic Unix source times. No wall clock value is fed to the core;
     // this drill makes no failover-latency claim (the companion drill measures that separately).
-    let dir = std::env::temp_dir().join(format!("oa-recovery-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("synthetic-prefix.oarc");
-    std::fs::write(&path, &checkpoint).unwrap();
+    let files = TempCheckpointFiles::new();
+    let path = files.write("synthetic-prefix.oarc", &checkpoint);
+    let bad_digest_path = files.write("wrong-digest.oarc", &wrong_checkpoint);
+    let truncated_path = files.write("truncated-prefix.oarc", &truncated);
+
+    let mut bad_digest = Replica::start_with_checkpoint(Some(&bad_digest_path));
+    bad_digest.assert_checkpoint_refused("checkpoint_digest");
+    let mut bad_prefix = Replica::start_with_checkpoint(Some(&truncated_path));
+    bad_prefix.assert_checkpoint_refused("checkpoint_frame_bytes");
 
     let mut serving = Replica::start();
     let mut reference = Drill::new();
@@ -744,8 +808,6 @@ fn durable_prefix_recovers_in_fresh_process_and_refuses_damage() {
     }
     let status = recovered.shutdown().unwrap();
     assert!(status.success());
-    std::fs::remove_file(path).unwrap();
-    std::fs::remove_dir(dir).unwrap();
 }
 
 impl Drop for Replica {
