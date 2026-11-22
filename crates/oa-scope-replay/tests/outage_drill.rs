@@ -858,7 +858,7 @@ impl Drill {
                 assert_eq!(targets.alt_ft[index], oa_display::traffic::NO_ALT);
                 f32::NAN
             };
-            let r95_m = r95_m_of(row.pos_cov_m2);
+            let r95_m = r95_m_of(&row.pos_cov_m2);
             assert!(r95_m.is_finite() && r95_m >= 0.0);
             assert!(row.vel_east_mps.is_finite() && row.vel_north_mps.is_finite());
             rows.push(CaTrack {

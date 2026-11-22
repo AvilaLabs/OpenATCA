@@ -214,28 +214,6 @@ fn stalled_peer_times_out_in_bounded_batches_then_reconnects() {
     assert!(actions.as_slice().is_empty());
     assert_eq!(s.state, State::Active);
 
-    let late_lam = wire_header(Header {
-        kind: Kind::Lam,
-        id: MsgId {
-            sender: c.peer,
-            receiver: c.local,
-            number: 78,
-        },
-        reference: Some(MsgId {
-            sender: c.local,
-            receiver: c.peer,
-            number: old_number,
-        }),
-    });
-    let (s, actions) = step(&c, s, Event::Received(late_lam), 312);
-    assert_eq!(
-        actions.as_slice(),
-        [Action::Discard {
-            reason: Discard::UnmatchedResponse
-        }]
-    );
-    assert_eq!(discard_count(&s, Discard::UnmatchedResponse), 1);
-
     // The restarted peer sends one FPL, repeats it, skips one number, then sends a lower number.
     // The current modulo classifier labels that final message Gap(998), while preserving delivery.
     let (s, seq) = received_fpl(&c, s, 40, 320);
@@ -247,4 +225,30 @@ fn stalled_peer_times_out_in_bounded_batches_then_reconnects() {
     let (s, seq) = received_fpl(&c, s, 41, 323);
     assert_eq!(seq, Seq::Gap(998));
     assert_eq!(s.rx_last_number, Some(41));
+
+    // A current wire message can carry a response to an abandoned request. It participates
+    // in the received message sequence but matches no pending request.
+    let late_lam = wire_header(Header {
+        kind: Kind::Lam,
+        id: MsgId {
+            sender: c.peer,
+            receiver: c.local,
+            number: 42,
+        },
+        reference: Some(MsgId {
+            sender: c.local,
+            receiver: c.peer,
+            number: old_number,
+        }),
+    });
+    let (s, actions) = step(&c, s, Event::Received(late_lam), 324);
+    assert_eq!(
+        actions.as_slice(),
+        [Action::Discard {
+            reason: Discard::UnmatchedResponse
+        }]
+    );
+    assert_eq!(discard_count(&s, Discard::UnmatchedResponse), 1);
+    assert_eq!(s.rx_last_number, Some(42));
+    assert!(s.pending().is_empty());
 }
