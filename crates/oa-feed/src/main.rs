@@ -12,7 +12,10 @@
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command as Proc, ExitCode, Stdio};
-use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+use std::sync::mpsc::{
+    sync_channel, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError,
+};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -35,6 +38,90 @@ enum Msg {
     /// A chunk read, with the recorder's monotonic time (ns since start) when it arrived.
     Data(Vec<u8>, u64),
     End(Option<String>),
+}
+
+/// The cutoff gate makes a successful channel send and the final queue snapshot mutually
+/// exclusive. It is held only around nonblocking sends, never around a source read or wait.
+/// Bytes still inside a blocking source read at cutoff have not entered the accepted queue and
+/// are outside this run; the main thread never waits for that read to finish.
+struct SourceGate {
+    accepting: bool,
+    pending_data_bytes: usize,
+    pending_end_reason: Option<String>,
+}
+
+enum SendAttempt {
+    Sent,
+    Full(Msg),
+    Closed(Msg),
+}
+
+#[derive(Default)]
+struct CutoffInput {
+    queued_chunks: u64,
+    queued_bytes: u64,
+    sender_held_bytes: usize,
+    end_reason: Option<String>,
+}
+
+fn try_send_from_reader(tx: &SyncSender<Msg>, gate: &Mutex<SourceGate>, msg: Msg) -> SendAttempt {
+    let mut state = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !state.accepting {
+        return SendAttempt::Closed(msg);
+    }
+    match tx.try_send(msg) {
+        Ok(()) => {
+            state.pending_data_bytes = 0;
+            state.pending_end_reason = None;
+            SendAttempt::Sent
+        }
+        Err(TrySendError::Full(msg)) => {
+            match &msg {
+                Msg::Data(bytes, _) => state.pending_data_bytes = bytes.len(),
+                Msg::End(reason) => state.pending_end_reason = reason.clone(),
+            }
+            SendAttempt::Full(msg)
+        }
+        Err(TrySendError::Disconnected(msg)) => SendAttempt::Closed(msg),
+    }
+}
+
+fn send_from_reader(tx: &SyncSender<Msg>, gate: &Mutex<SourceGate>, mut msg: Msg) -> bool {
+    loop {
+        match try_send_from_reader(tx, gate, msg) {
+            SendAttempt::Sent => return true,
+            SendAttempt::Closed(_) => return false,
+            SendAttempt::Full(next) => {
+                msg = next;
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+}
+
+/// Closes source acceptance and accounts the entire bounded channel while sends are excluded.
+/// The reader thread may still be blocked in `Read`; no join or unbounded wait is needed.
+fn cutoff_source(rx: &Receiver<Msg>, gate: &Mutex<SourceGate>) -> CutoffInput {
+    let mut state = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    state.accepting = false;
+    let mut input = CutoffInput {
+        sender_held_bytes: state.pending_data_bytes,
+        end_reason: state.pending_end_reason.clone(),
+        ..CutoffInput::default()
+    };
+    for _ in 0..QUEUE_CHUNKS {
+        match rx.try_recv() {
+            Ok(Msg::Data(bytes, _)) => {
+                input.queued_chunks = input.queued_chunks.saturating_add(1);
+                input.queued_bytes = input
+                    .queued_bytes
+                    .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            }
+            Ok(Msg::End(reason)) => input.end_reason = reason,
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+        }
+    }
+    input
 }
 
 fn main() -> ExitCode {
@@ -151,12 +238,18 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
         }
     };
     let (tx, rx) = sync_channel::<Msg>(QUEUE_CHUNKS);
+    let source_gate = Arc::new(Mutex::new(SourceGate {
+        accepting: true,
+        pending_data_bytes: 0,
+        pending_end_reason: None,
+    }));
+    let reader_gate = Arc::clone(&source_gate);
     let start = Instant::now();
     thread::spawn(move || loop {
         let mut buf = vec![0u8; CHUNK];
         match src.read(&mut buf) {
             Ok(0) => {
-                let _ = tx.send(Msg::End(None));
+                let _ = send_from_reader(&tx, reader_gate.as_ref(), Msg::End(None));
                 return;
             }
             Ok(n) => {
@@ -164,13 +257,13 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                 // recorder that is slow to drain does not move it.
                 let mono = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 buf.truncate(n);
-                if tx.send(Msg::Data(buf, mono)).is_err() {
+                if !send_from_reader(&tx, reader_gate.as_ref(), Msg::Data(buf, mono)) {
                     return;
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             Err(e) => {
-                let _ = tx.send(Msg::End(Some(e.to_string())));
+                let _ = send_from_reader(&tx, reader_gate.as_ref(), Msg::End(Some(e.to_string())));
                 return;
             }
         }
@@ -247,6 +340,22 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
             deferred_drain,
         );
         if plan == TurnPlan::Stop {
+            // Freeze source acceptance under the same gate used by try_send, then account the
+            // entire bounded queue without waiting for stdin or the bridge reader thread.
+            let input = cutoff_source(&rx, source_gate.as_ref());
+            if input.queued_chunks > 0 || input.sender_held_bytes > 0 {
+                eprintln!(
+                    "oa-feed: ERROR feed={} duration cutoff discarded {} accepted queued chunks ({} bytes) and {} not-yet-accepted sender-held bytes; exit status is failure",
+                    cfg.feed,
+                    input.queued_chunks,
+                    input.queued_bytes,
+                    input.sender_held_bytes
+                );
+                exit = ExitCode::FAILURE;
+            }
+            if let Some(reason) = input.end_reason {
+                end_reason = Some(reason);
+            }
             break;
         }
         let wake = if stopping {
@@ -734,7 +843,10 @@ mod tests {
         clippy::unwrap_used
     )]
 
-    use super::{deferral_warning, finalize_reader, judge, turn_plan, TurnPlan, Verdict, Work};
+    use super::{
+        cutoff_source, deferral_warning, finalize_reader, judge, try_send_from_reader, turn_plan,
+        Msg, SendAttempt, SourceGate, TurnPlan, Verdict, Work,
+    };
     use oa_feed::{
         encode_frame, ErrorKind, FeedHealth, FrameReader, FrameWorkBudget, FrameWorkKind,
         FrameWorkRefusal, MAX_FRAME_LEN, TRAILER_LEN,
@@ -750,6 +862,63 @@ mod tests {
             required,
             available: 0,
         }
+    }
+
+    #[test]
+    fn duration_cutoff_counts_accepted_queue_and_sender_held_data_without_waiting() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let gate = std::sync::Mutex::new(SourceGate {
+            accepting: true,
+            pending_data_bytes: 0,
+            pending_end_reason: None,
+        });
+        assert!(matches!(
+            try_send_from_reader(&tx, &gate, Msg::Data(vec![1, 2, 3], 1)),
+            SendAttempt::Sent
+        ));
+        let held = match try_send_from_reader(&tx, &gate, Msg::Data(vec![4; 5], 2)) {
+            SendAttempt::Full(msg) => msg,
+            _ => panic!("full channel did not retain the sender chunk"),
+        };
+
+        let cutoff = cutoff_source(&rx, &gate);
+        assert_eq!(cutoff.queued_chunks, 1);
+        assert_eq!(cutoff.queued_bytes, 3);
+        assert_eq!(cutoff.sender_held_bytes, 5);
+        assert!(matches!(
+            try_send_from_reader(&tx, &gate, held),
+            SendAttempt::Closed(_)
+        ));
+        assert!(matches!(
+            try_send_from_reader(&tx, &gate, Msg::End(None)),
+            SendAttempt::Closed(_)
+        ));
+    }
+
+    #[test]
+    fn duration_cutoff_preserves_a_source_error_held_behind_the_full_queue() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let gate = std::sync::Mutex::new(SourceGate {
+            accepting: true,
+            pending_data_bytes: 0,
+            pending_end_reason: None,
+        });
+        assert!(matches!(
+            try_send_from_reader(&tx, &gate, Msg::Data(vec![1], 1)),
+            SendAttempt::Sent
+        ));
+        assert!(matches!(
+            try_send_from_reader(
+                &tx,
+                &gate,
+                Msg::End(Some("synthetic source error".to_owned()))
+            ),
+            SendAttempt::Full(_)
+        ));
+
+        let cutoff = cutoff_source(&rx, &gate);
+        assert_eq!(cutoff.queued_chunks, 1);
+        assert_eq!(cutoff.end_reason.as_deref(), Some("synthetic source error"));
     }
 
     // REQ: OA-FEED-186
