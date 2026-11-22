@@ -683,6 +683,25 @@ fn tracker_capacity_refusal_degrades_from_the_observation_cycle_and_is_counted()
     assert_eq!(recovered.totals.rows_lost_upstream, 0);
     assert!(recovered.totals.tracks > refused.totals.tracks);
     assert_eq!(recovered.final_net, "RUNNING");
+
+    // Dense distinct identities arrive in one tick interval. The runner must retain their
+    // count without retaining one timestamp entry per refusal.
+    let mut dense: Vec<Measurement> = (0..=12)
+        .map(|t| meas(t, 0x100001, 70.0 * t as f64, 0.0, 70.0, 20_000))
+        .collect();
+    for i in 0..256u32 {
+        let mut candidate = meas(10, 0x200000 + i, 60_000.0, 150_000.0, 0.0, 20_000);
+        candidate.toa_ns += i64::from(i) * 1_000_000 + 1;
+        dense.push(candidate);
+    }
+    dense.sort_by_key(|m| m.toa_ns);
+    let high_density = track_and_alert(&dense, &one_slot, &none, &set).unwrap();
+    assert_eq!(high_density.tracker_capacity_refused, 256);
+    assert_eq!(high_density.totals.rows_lost_upstream, 256);
+    assert!(high_density
+        .net_cycles
+        .keys()
+        .any(|state| state == "DEGRADED: INPUT MISSING"));
 }
 
 // REQ: OA-CA-010

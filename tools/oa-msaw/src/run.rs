@@ -186,7 +186,8 @@ struct Feed<'a> {
     last_overflow: u64,
     tracker_capacity_refused: u64,
     capacity_refused_seen: u64,
-    capacity_refused_by_time: BTreeMap<i64, u64>,
+    capacity_refused_pending: u64,
+    capacity_refused_pending_at_ns: Option<i64>,
     /// The number of tracks the core evaluates in a cycle (its budget).
     st_track_budget: usize,
     /// The times of the latest barometric altitudes of each aircraft (a few, oldest first), for the
@@ -227,15 +228,11 @@ fn flush(f: &mut Feed) {
         f.batch.clear();
         return;
     }
-    let ready: Vec<(i64, u64)> = f
-        .capacity_refused_by_time
-        .range(..=t)
-        .map(|(&at, &count)| (at, count))
-        .collect();
-    for (at, count) in ready {
-        f.capacity_refused_by_time.remove(&at);
-        // A refused observation at `at` cannot affect earlier tick cycles. Charge it to
-        // the first cycle at or after the observation via the existing upstream-loss path.
+    if f.capacity_refused_pending_at_ns.is_some_and(|at| at <= t) {
+        let count = std::mem::take(&mut f.capacity_refused_pending);
+        f.capacity_refused_pending_at_ns = None;
+        // Capacity refusal is detected by the tracker call, not reported per held input.
+        // Charge it to the first cycle at or after that detection time.
         msaw_note_lost_input(&mut f.st, count);
     }
     inhibit_expire(&mut f.inh, t);
@@ -602,7 +599,8 @@ pub fn track_and_alert(
         last_overflow: 0,
         tracker_capacity_refused: 0,
         capacity_refused_seen: 0,
-        capacity_refused_by_time: BTreeMap::new(),
+        capacity_refused_pending: 0,
+        capacity_refused_pending_at_ns: None,
         st_track_budget: set.msaw.track_budget,
         alt_times: std::collections::HashMap::new(),
         t0_ns,
@@ -651,10 +649,20 @@ pub fn track_and_alert(
         let refused = tracker_stats(&t).capacity_refused;
         let newly_refused = refused.saturating_sub(f.capacity_refused_seen);
         if newly_refused > 0 {
+            // A sorted offline update can apply held earlier measurements before this call's
+            // current measurement. The tracker exposes only a cumulative refusal count, so this
+            // call time is the earliest defensible detection time. Drain and close earlier
+            // cycles before adding this loss; those cycles were already known and stay unchanged.
+            consume(&mut f, &out);
+            output_clear(&mut out);
+            flush(&mut f);
             f.capacity_refused_seen = refused;
             f.tracker_capacity_refused = f.tracker_capacity_refused.saturating_add(newly_refused);
-            let count = f.capacity_refused_by_time.entry(m.toa_ns).or_default();
-            *count = count.saturating_add(newly_refused);
+            f.capacity_refused_pending = f.capacity_refused_pending.saturating_add(newly_refused);
+            f.capacity_refused_pending_at_ns = Some(
+                f.capacity_refused_pending_at_ns
+                    .map_or(m.toa_ns, |at| at.max(m.toa_ns)),
+            );
         }
         if output_len(&out) > drain {
             consume(&mut f, &out);
@@ -674,22 +682,17 @@ pub fn track_and_alert(
     msaw_finish(&mut f.st, &mut f.alerts);
     f.all.extend_from_slice(&f.alerts.items);
     let mut final_t = f.last_t;
-    if let Some((&last_fault_ns, _)) = f.capacity_refused_by_time.last_key_value() {
+    if let Some(last_fault_ns) = f.capacity_refused_pending_at_ns {
         // No tracker tick followed the final refusal. Report the run-level shortfall at its
-        // observation time so the final status does not remain RUNNING.
+        // detection time so the final status does not remain RUNNING.
         final_t = final_t.max(last_fault_ns);
-        let pending = f
-            .capacity_refused_by_time
-            .values()
-            .copied()
-            .fold(0u64, u64::saturating_add);
         let _ = state_report(
             &mut f.net,
             NetId::Msaw,
             NetReport::Degraded {
                 reason: Reason::InputMissing,
                 area: Area::Whole,
-                count: u32::try_from(pending).unwrap_or(u32::MAX),
+                count: u32::try_from(f.capacity_refused_pending).unwrap_or(u32::MAX),
             },
             last_fault_ns,
             last_fault_ns,
