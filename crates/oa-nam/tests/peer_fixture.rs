@@ -95,6 +95,7 @@ fn active(c: &Config) -> Session {
     s
 }
 
+// REQ: OA-NAM-014, OA-NAM-015, OA-NAM-016, OA-NAM-023, OA-NAM-025
 #[test]
 fn stalled_peer_times_out_in_bounded_batches_then_reconnects() {
     let c = config();

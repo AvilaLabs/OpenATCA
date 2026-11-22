@@ -364,7 +364,7 @@ fn active_connection_lost_goes_inactive() {
     assert_eq!(a, [Action::AbandonPending { count: 1 }]);
 }
 
-// REQ: OA-NAM-026
+// REQ: OA-NAM-014, OA-NAM-023, OA-NAM-026
 #[test]
 fn reconnect_starts_a_fresh_inbound_sequence_and_abandons_old_requests() {
     let c = cfg();
@@ -510,7 +510,7 @@ fn message_numbers_run_000_to_999_and_wrap() {
     assert_eq!(seen, [998, 999, 0, 1]);
 }
 
-// REQ: OA-NAM-014
+// REQ: OA-NAM-014, OA-NAM-015, OA-NAM-034
 #[test]
 fn wrapped_number_still_pending_is_refused_without_advancing_sequence() {
     let c = cfg();

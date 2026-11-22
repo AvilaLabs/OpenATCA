@@ -4732,10 +4732,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   still processed and sent; pending messages are abandoned and counted when the session ends
   (3.2.2.4.1.4).
 - **OA-NAM-014** Message numbers run 000 to 999 and wrap; a received message from or to the wrong
-  unit is discarded; received numbers are classified first, in order, duplicate or gap.
+  unit is discarded; received numbers are classified first, in order, duplicate or gap. Entering
+  INACTIVE clears the inbound sequence baseline so the next tracked number is classified first.
 - **OA-NAM-015** An answered-message table of at most 128 entries matches each LAM, RLA, PLA or LRM
   to the message it answers by kind and number, reports an overdue one (resending first when
-  configured), and refuses a new message, numbering nothing, when full.
+  configured), and refuses a new message, numbering nothing, when full. A response-expected send
+  whose next number remains pending is refused and counted without advancing the sequence.
 - **OA-NAM-016** The session step is a pure function of configuration, state, event and time; it
   returns at most 8 actions, never reads a clock, and reports the next timer deadline.
 - **OA-NAM-017** Every LRM code the codec can produce is in the code table, in increasing order,
@@ -6868,11 +6870,12 @@ FAA value.
   inside, and outside by the margin and just past it, and the KMDW test checks the hand-worked interval ends.
 - **OA-RWY-007** `occupies` reports whether a target touches the rectangle, either approach area or either departure
   area, with its position widened by its 95 % radius plus the 1.5 m plane error bound and a 1e-6 m rounding pad. A
-  non-finite or negative position or radius, a coordinate beyond 1e9 m, or a runway with any non-finite number,
-  counts as occupying every region and is marked unknown. Every comparison is written so that a NaN reads as
-  touching. Tests `unknown_position_or_radius_occupies_everything`, `a_runway_with_a_non_finite_number_never_clears_a_target`
-  (nine fields) and `real_coordinates_run_end_to_end_through_the_plane_and_the_test` (KMDW, from latitude and
-  longitude).
+  non-finite position or radius, negative radius, coordinate beyond 1e9 m, non-finite runway geometry,
+  or inconsistent published and derived runway widths counts as occupying every region and is marked unknown.
+  Every comparison is written so that a NaN reads as touching. Tests `unknown_position_or_radius_occupies_everything`,
+  `a_runway_with_a_non_finite_number_never_clears_a_target`,
+  `a_torn_finite_width_change_is_unknown_while_a_coherent_geometry_change_can_clear` and
+  `real_coordinates_run_end_to_end_through_the_plane_and_the_test` (KMDW, from latitude and longitude).
 - **OA-RWY-008** Raising the radius never removes a region from the result. Tested by a sweep of radii at six
   positions (`a_larger_radius_only_adds_occupancy`) and by OA-RWY-009.
 - **OA-RWY-009** For finite radii 0 <= r1 <= r2, a target that occupies a region at r1 occupies it at r2,
