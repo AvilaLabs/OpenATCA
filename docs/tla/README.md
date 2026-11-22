@@ -246,8 +246,11 @@ counterexample to `NoUnqualifiedCandidateServing` (install, then premature promo
 java -cp /path/to/tla2tools.jar tlc2.TLC -config StagedRollout_WeakPromotion.cfg StagedRollout.tla
 ```
 
-All comparison success/failure is abstract input to this policy model. It does not implement a
-release signer, comparator, deployment service, health monitor, automatic rollback mechanism, or
-operator/authority decision. In particular, when the primary fails before qualification, the
-policy prefers an explicit unavailable state over serving the unqualified candidate. This model
-does not claim availability when both replicas fail or establish M6's measured availability goal.
+TLC 2.19 with Java 21 and two workers checked both configurations. The strong model generated 45
+states, found 24 distinct states at depth 7, and satisfied all invariants. The weak model produced
+a three-state counterexample. It installed the candidate and promoted it with zero comparisons.
+
+The model takes comparison results as abstract inputs and applies a single rollout policy.
+Release signing, comparison, deployment, health monitoring and operational rollback require
+implementation and separate evidence. When the primary fails before qualification, the model
+marks service unavailable. M6's availability goal requires measured performance under faults.
