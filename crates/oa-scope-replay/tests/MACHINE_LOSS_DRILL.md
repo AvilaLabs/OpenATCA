@@ -40,8 +40,13 @@ format, wrapped in a versioned header and SHA-256 digest. A fresh child process 
 digest, frame CRCs, record count, order and source timestamps before replaying the prefix through
 the same tracker, scope, display and CA path. Its output and alert identities are compared with an
 uninterrupted in-process reference at each source second, then the child continues the suffix.
+The fixture also retains a publisher/source identity, generation, sequence and source-time
+watermark. A newer timestamp cannot revive a lower generation, a same-generation sequence replay
+is refused, and only a caller-supplied higher-generation step can advance the copied fixture
+fence. Fixture sequence numbers continue across generations. Recovery checks that replayed prefix
+state matches the stored fence before continuing.
 The file is exclusively created and `sync_all` completes before the serving process is killed;
 the reader uses `oa_sealed::open`. Wrong-digest and internally truncated prefixes are refused by
 the fresh worker and reported with a reason. Source timestamps are synthetic; the test does not
 measure wall-clock recovery time or claim power-loss durability, production checkpoint
-compatibility, or operational failover.
+compatibility, a production publisher-generation schema, or operational failover.

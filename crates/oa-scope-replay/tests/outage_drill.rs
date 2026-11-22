@@ -37,10 +37,15 @@ const LAT: i32 = 419_000_000;
 const LON: i32 = -879_000_000;
 const MAX_WORKER_LINE_BYTES: usize = 1_024;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
-const RECOVERY_MAGIC: &[u8; 8] = b"OARCP001";
-const RECOVERY_HEADER_BYTES: usize = 8 + 4 + 32;
-// C2/C7: three five-byte payloads, each with one OAF1 header and CRC, plus 44 envelope bytes;
-// 4 KiB is a fixed file-read ceiling with ample format headroom, never input-controlled.
+const RECOVERY_MAGIC: &[u8; 8] = b"OARCP002";
+const RECOVERY_HEADER_BYTES: usize = 8 + 4 + 32 + 4 + 4 + 8 + 8 + 8;
+const RECOVERY_RECORD_BYTES: usize = 4 + 1;
+const RECOVERY_INITIAL_GENERATION: u64 = 6;
+const RECOVERY_GENERATION: u64 = 7;
+const RECOVERY_PUBLISHER: u32 = 0x4F415031;
+const RECOVERY_SOURCE: u32 = 0x534E5331;
+// C2/C7: three five-byte records with OAF1 framing and a 76-byte envelope; 4 KiB is a fixed
+// file-read ceiling with ample format headroom, never input-controlled.
 const RECOVERY_MAX_BYTES: usize = 4_096;
 const RECOVERY_MAX_RECORDS: usize = 3;
 const SYNTHETIC_STREAM: [(i32, bool); 15] = [
@@ -63,6 +68,85 @@ const SYNTHETIC_STREAM: [(i32, bool); 15] = [
 
 struct TempCheckpointFiles {
     dir: PathBuf,
+}
+
+// A7.2: one cold, test-only fixture value. This models publication order only; it is not a
+// production node identity, signed checkpoint, control grant, or lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PublisherFence {
+    publisher_id: u32,
+    source_id: u32,
+    generation: u64,
+    last_sequence: u64,
+    watermark_ns: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// A7.2: one transient publication value per synthetic input step.
+struct Publication {
+    publisher_id: u32,
+    source_id: u32,
+    generation: u64,
+    sequence: u64,
+    source_time_ns: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FenceRefusal {
+    Identity,
+    Generation,
+    SequenceReplay,
+    WatermarkRegression,
+    GenerationNotHigher,
+}
+
+const INITIAL_FENCE: PublisherFence = PublisherFence {
+    publisher_id: RECOVERY_PUBLISHER,
+    source_id: RECOVERY_SOURCE,
+    generation: RECOVERY_INITIAL_GENERATION,
+    last_sequence: 0,
+    watermark_ns: EPOCH - S,
+};
+
+fn accept_publication(
+    fence: PublisherFence,
+    publication: Publication,
+) -> Result<PublisherFence, FenceRefusal> {
+    if publication.publisher_id != fence.publisher_id || publication.source_id != fence.source_id {
+        return Err(FenceRefusal::Identity);
+    }
+    if publication.generation != fence.generation {
+        return Err(FenceRefusal::Generation);
+    }
+    if publication.sequence <= fence.last_sequence {
+        return Err(FenceRefusal::SequenceReplay);
+    }
+    if publication.source_time_ns < fence.watermark_ns {
+        return Err(FenceRefusal::WatermarkRegression);
+    }
+    Ok(PublisherFence {
+        last_sequence: publication.sequence,
+        watermark_ns: publication.source_time_ns,
+        ..fence
+    })
+}
+
+fn advance_generation(
+    fence: PublisherFence,
+    publisher_id: u32,
+    source_id: u32,
+    generation: u64,
+) -> Result<PublisherFence, FenceRefusal> {
+    if publisher_id != fence.publisher_id || source_id != fence.source_id {
+        return Err(FenceRefusal::Identity);
+    }
+    if generation <= fence.generation {
+        return Err(FenceRefusal::GenerationNotHigher);
+    }
+    Ok(PublisherFence {
+        generation,
+        ..fence
+    })
 }
 
 impl TempCheckpointFiles {
@@ -155,13 +239,57 @@ fn parse_worker_command(line: &str) -> Option<WorkerCommand> {
     }
 }
 
+fn source_time_ns(second: i32) -> Option<i64> {
+    i64::from(second)
+        .checked_mul(S)
+        .and_then(|offset| EPOCH.checked_add(offset))
+}
+
+fn publication_for_step(
+    fence: PublisherFence,
+    stream_index: usize,
+    second: i32,
+) -> Option<Publication> {
+    Some(Publication {
+        publisher_id: fence.publisher_id,
+        source_id: fence.source_id,
+        generation: fence.generation,
+        sequence: u64::try_from(stream_index).ok()?.checked_add(1)?,
+        source_time_ns: source_time_ns(second)?,
+    })
+}
+
+fn refusal_name(refusal: FenceRefusal) -> &'static str {
+    match refusal {
+        FenceRefusal::Identity => "identity",
+        FenceRefusal::Generation => "generation",
+        FenceRefusal::SequenceReplay => "sequence_replay",
+        FenceRefusal::WatermarkRegression => "watermark_regression",
+        FenceRefusal::GenerationNotHigher => "generation_not_higher",
+    }
+}
+
 // This test-only envelope stores real OAF1 frames. Its digest covers the complete frame prefix;
-// the inner feed framing then independently checks each frame's CRC and exact source timestamp.
-fn encode_recovery_checkpoint(steps: &[(i32, bool)]) -> Vec<u8> {
+// the inner feed framing checks each CRC and source timestamp. The trailing publisher fence is
+// fixture metadata, not the NODE_NETWORK signed-checkpoint schema.
+fn encode_recovery_checkpoint(
+    steps: &[(i32, bool)],
+    initial_fence: PublisherFence,
+    generation: u64,
+) -> Vec<u8> {
     assert!(!steps.is_empty() && steps.len() <= RECOVERY_MAX_RECORDS);
     let mut frames = Vec::new();
-    let mut frame = vec![0u8; oa_feed::HEADER_LEN + 5 + oa_feed::TRAILER_LEN];
+    let mut frame = vec![0u8; oa_feed::HEADER_LEN + RECOVERY_RECORD_BYTES + oa_feed::TRAILER_LEN];
+    let mut fence = advance_generation(
+        initial_fence,
+        initial_fence.publisher_id,
+        initial_fence.source_id,
+        generation,
+    )
+    .expect("fixture caller explicitly supplied a higher generation");
     for (seq, &(second, live)) in steps.iter().enumerate() {
+        let publication = publication_for_step(fence, seq, second).expect("fixture time fits");
+        fence = accept_publication(fence, publication).expect("fixture publication advances");
         let mut payload = second.to_le_bytes().to_vec();
         payload.push(u8::from(live));
         let len = oa_feed::encode_frame(
@@ -169,7 +297,7 @@ fn encode_recovery_checkpoint(steps: &[(i32, bool)]) -> Vec<u8> {
             1,
             0,
             seq as u64,
-            EPOCH + i64::from(second) * S,
+            publication.source_time_ns,
             0,
             &payload,
         )
@@ -180,12 +308,26 @@ fn encode_recovery_checkpoint(steps: &[(i32, bool)]) -> Vec<u8> {
     checkpoint.extend_from_slice(RECOVERY_MAGIC);
     checkpoint.extend_from_slice(&(steps.len() as u32).to_le_bytes());
     checkpoint.extend_from_slice(&oa_sha256::sha256(&frames));
+    checkpoint.extend_from_slice(&fence.publisher_id.to_le_bytes());
+    checkpoint.extend_from_slice(&fence.source_id.to_le_bytes());
+    checkpoint.extend_from_slice(&fence.generation.to_le_bytes());
+    checkpoint.extend_from_slice(&fence.last_sequence.to_le_bytes());
+    checkpoint.extend_from_slice(&fence.watermark_ns.to_le_bytes());
     checkpoint.extend_from_slice(&frames);
     assert!(checkpoint.len() <= RECOVERY_MAX_BYTES);
     checkpoint
 }
 
-fn decode_recovery_checkpoint(bytes: &[u8]) -> Result<Vec<(i32, bool)>, &'static str> {
+// A7.2: one cold decoded fixture checkpoint per worker startup.
+struct RecoveryCheckpoint {
+    steps: Vec<(i32, bool)>,
+    fence: PublisherFence,
+}
+
+fn decode_recovery_checkpoint(
+    bytes: &[u8],
+    initial_fence: PublisherFence,
+) -> Result<RecoveryCheckpoint, &'static str> {
     if bytes.len() > RECOVERY_MAX_BYTES || bytes.len() < RECOVERY_HEADER_BYTES {
         return Err("checkpoint_size_or_header");
     }
@@ -204,13 +346,61 @@ fn decode_recovery_checkpoint(bytes: &[u8]) -> Result<Vec<(i32, bool)>, &'static
         .get(12..44)
         .and_then(|slice| slice.try_into().ok())
         .ok_or("checkpoint_header")?;
+    let stored_fence = PublisherFence {
+        publisher_id: u32::from_le_bytes(
+            bytes
+                .get(44..48)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or("checkpoint_header")?,
+        ),
+        source_id: u32::from_le_bytes(
+            bytes
+                .get(48..52)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or("checkpoint_header")?,
+        ),
+        generation: u64::from_le_bytes(
+            bytes
+                .get(52..60)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or("checkpoint_header")?,
+        ),
+        last_sequence: u64::from_le_bytes(
+            bytes
+                .get(60..68)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or("checkpoint_header")?,
+        ),
+        watermark_ns: i64::from_le_bytes(
+            bytes
+                .get(68..76)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or("checkpoint_header")?,
+        ),
+    };
+    if stored_fence.publisher_id != initial_fence.publisher_id
+        || stored_fence.source_id != initial_fence.source_id
+    {
+        return Err("checkpoint_identity");
+    }
+    let mut fence = if stored_fence.generation == initial_fence.generation {
+        initial_fence
+    } else {
+        advance_generation(
+            initial_fence,
+            stored_fence.publisher_id,
+            stored_fence.source_id,
+            stored_fence.generation,
+        )
+        .map_err(|refusal| refusal_name(refusal))?
+    };
     let frames = bytes
         .get(RECOVERY_HEADER_BYTES..)
         .ok_or("checkpoint_header")?;
     if oa_sha256::sha256(frames) != expected {
         return Err("checkpoint_digest");
     }
-    let frame_bytes = oa_feed::HEADER_LEN + 5 + oa_feed::TRAILER_LEN;
+    let frame_bytes = oa_feed::HEADER_LEN + RECOVERY_RECORD_BYTES + oa_feed::TRAILER_LEN;
     if frames.len() != count.saturating_mul(frame_bytes) {
         return Err("checkpoint_frame_bytes");
     }
@@ -224,7 +414,10 @@ fn decode_recovery_checkpoint(bytes: &[u8]) -> Result<Vec<(i32, bool)>, &'static
         let next = reader.next();
         let Some(frame) = next else { break };
         let frame = frame.map_err(|_| "checkpoint_frame_invalid")?;
-        if frame.kind != oa_feed::Kind::Message || frame.flags != 0 || frame.payload.len() != 5 {
+        if frame.kind != oa_feed::Kind::Message
+            || frame.flags != 0
+            || frame.payload.len() != RECOVERY_RECORD_BYTES
+        {
             return Err("checkpoint_record_shape");
         }
         let seq = steps.len() as u64;
@@ -237,13 +430,21 @@ fn decode_recovery_checkpoint(bytes: &[u8]) -> Result<Vec<(i32, bool)>, &'static
             1 => true,
             _ => return Err("checkpoint_record_shape"),
         };
-        let expected_source_ns = i64::from(second)
-            .checked_mul(S)
-            .and_then(|offset| EPOCH.checked_add(offset))
-            .ok_or("checkpoint_source_time_overflow")?;
+        let expected_source_ns = source_time_ns(second).ok_or("checkpoint_source_time_overflow")?;
         if frame.seq != seq || frame.recv_unix_ns != expected_source_ns {
             return Err("checkpoint_sequence_or_time");
         }
+        let publication = Publication {
+            publisher_id: stored_fence.publisher_id,
+            source_id: stored_fence.source_id,
+            generation: stored_fence.generation,
+            sequence: frame
+                .seq
+                .checked_add(1)
+                .ok_or("checkpoint_sequence_overflow")?,
+            source_time_ns: frame.recv_unix_ns,
+        };
+        fence = accept_publication(fence, publication).map_err(|refusal| refusal_name(refusal))?;
         steps.push((second, live));
         if steps.len() > count {
             return Err("checkpoint_record_count");
@@ -252,7 +453,10 @@ fn decode_recovery_checkpoint(bytes: &[u8]) -> Result<Vec<(i32, bool)>, &'static
     if reader.finish().is_some() || steps.len() != count {
         return Err("checkpoint_truncated_or_count");
     }
-    Ok(steps)
+    if fence != stored_fence {
+        return Err("checkpoint_fence_mismatch");
+    }
+    Ok(RecoveryCheckpoint { steps, fence })
 }
 
 fn read_recovery_checkpoint(path: &Path) -> Result<Vec<u8>, &'static str> {
@@ -265,6 +469,84 @@ fn read_recovery_checkpoint(path: &Path) -> Result<Vec<u8>, &'static str> {
         return Err("checkpoint_size_or_header");
     }
     Ok(bytes)
+}
+
+fn exercise_fixture_fence(fence: PublisherFence) {
+    let later_time = fence
+        .watermark_ns
+        .checked_add(S)
+        .expect("small synthetic watermark has room");
+    let next_sequence = fence
+        .last_sequence
+        .checked_add(1)
+        .expect("small synthetic sequence has room");
+    let other_publisher = fence
+        .publisher_id
+        .checked_add(1)
+        .expect("synthetic publisher id has room");
+    let old_generation = fence
+        .generation
+        .checked_sub(1)
+        .expect("configured generation is above the fixture floor");
+    let next_generation = fence
+        .generation
+        .checked_add(1)
+        .expect("synthetic generation has room");
+    assert_eq!(
+        accept_publication(
+            fence,
+            Publication {
+                publisher_id: other_publisher,
+                source_id: fence.source_id,
+                generation: fence.generation,
+                sequence: next_sequence,
+                source_time_ns: later_time,
+            }
+        ),
+        Err(FenceRefusal::Identity)
+    );
+    assert_eq!(
+        accept_publication(
+            fence,
+            Publication {
+                publisher_id: fence.publisher_id,
+                source_id: fence.source_id,
+                generation: old_generation,
+                sequence: next_sequence,
+                source_time_ns: later_time,
+            }
+        ),
+        Err(FenceRefusal::Generation),
+        "newer source time cannot revive an older generation"
+    );
+    assert_eq!(
+        accept_publication(
+            fence,
+            Publication {
+                publisher_id: fence.publisher_id,
+                source_id: fence.source_id,
+                generation: fence.generation,
+                sequence: fence.last_sequence,
+                source_time_ns: later_time,
+            }
+        ),
+        Err(FenceRefusal::SequenceReplay),
+        "same-generation duplicate sequence is refused"
+    );
+    let advanced = advance_generation(fence, fence.publisher_id, fence.source_id, next_generation)
+        .expect("caller explicitly activated higher fixture generation");
+    assert_eq!(advanced.generation, next_generation);
+    assert!(accept_publication(
+        advanced,
+        Publication {
+            publisher_id: advanced.publisher_id,
+            source_id: advanced.source_id,
+            generation: advanced.generation,
+            sequence: next_sequence,
+            source_time_ns: later_time,
+        }
+    )
+    .is_ok());
 }
 
 fn validate_worker_ack(line: &str, expected_second: i32) {
@@ -585,28 +867,58 @@ fn machine_loss_worker_process() {
     let mut drill = Drill::new();
     drill.warmup();
     let mut step_no = 0usize;
+    let mut publisher_fence = advance_generation(
+        INITIAL_FENCE,
+        RECOVERY_PUBLISHER,
+        RECOVERY_SOURCE,
+        RECOVERY_GENERATION,
+    )
+    .expect("fixture explicitly activates its configured generation");
     if let Some(path) = std::env::var_os("OA_MACHINE_LOSS_CHECKPOINT") {
         let path = PathBuf::from(path);
-        let steps = match read_recovery_checkpoint(&path)
-            .and_then(|data| decode_recovery_checkpoint(&data))
+        let checkpoint = match read_recovery_checkpoint(&path)
+            .and_then(|data| decode_recovery_checkpoint(&data, INITIAL_FENCE))
         {
-            Ok(steps) => steps,
+            Ok(checkpoint) => checkpoint,
             Err(reason) => {
                 println!("MACHINE_LOSS_ERROR checkpoint_refused {reason}");
                 let _ = std::io::stdout().flush();
                 return;
             }
         };
-        for &(second, live) in &steps {
+        let retained_fence = checkpoint.fence;
+        for (index, &(second, live)) in checkpoint.steps.iter().enumerate() {
             if SYNTHETIC_STREAM.get(step_no) != Some(&(second, live)) {
                 println!("MACHINE_LOSS_ERROR checkpoint_prefix_mismatch");
                 let _ = std::io::stdout().flush();
                 return;
             }
+            let Some(publication) = publication_for_step(publisher_fence, index, second) else {
+                println!("MACHINE_LOSS_ERROR checkpoint_source_time_overflow");
+                let _ = std::io::stdout().flush();
+                return;
+            };
+            publisher_fence = match accept_publication(publisher_fence, publication) {
+                Ok(next) => next,
+                Err(refusal) => {
+                    println!(
+                        "MACHINE_LOSS_ERROR checkpoint_fence_{}",
+                        refusal_name(refusal)
+                    );
+                    let _ = std::io::stdout().flush();
+                    return;
+                }
+            };
             step_no += 1;
             println!("{}", drill.process(second, live));
             let _ = std::io::stdout().flush();
         }
+        if publisher_fence != retained_fence {
+            println!("MACHINE_LOSS_ERROR checkpoint_fence_not_retained");
+            let _ = std::io::stdout().flush();
+            return;
+        }
+        exercise_fixture_fence(publisher_fence);
     }
     loop {
         let line = match read_bounded_line(&mut input, &mut line_bytes) {
@@ -637,6 +949,22 @@ fn machine_loss_worker_process() {
             let _ = std::io::stdout().flush();
             break;
         }
+        let Some(publication) = publication_for_step(publisher_fence, step_no, second) else {
+            println!("MACHINE_LOSS_ERROR source_time_overflow");
+            let _ = std::io::stdout().flush();
+            break;
+        };
+        publisher_fence = match accept_publication(publisher_fence, publication) {
+            Ok(next) => next,
+            Err(refusal) => {
+                println!(
+                    "MACHINE_LOSS_ERROR publication_refused_{}",
+                    refusal_name(refusal)
+                );
+                let _ = std::io::stdout().flush();
+                break;
+            }
+        };
         step_no = step_no.saturating_add(1);
         let ack = drill.process(second, live);
         println!("{ack}");
@@ -661,6 +989,7 @@ impl Replica {
         command
             .args(["--exact", "machine_loss_worker_process", "--nocapture"])
             .env("OA_MACHINE_LOSS_WORKER", "1")
+            .env_remove("OA_MACHINE_LOSS_CHECKPOINT")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -756,7 +1085,7 @@ impl Replica {
 #[test]
 fn durable_prefix_recovers_in_fresh_process_and_refuses_damage() {
     let prefix = &SYNTHETIC_STREAM[..RECOVERY_MAX_RECORDS];
-    let checkpoint = encode_recovery_checkpoint(prefix);
+    let checkpoint = encode_recovery_checkpoint(prefix, INITIAL_FENCE, RECOVERY_GENERATION);
     let mut wrong_checkpoint = checkpoint.clone();
     wrong_checkpoint[12] ^= 1;
     let mut truncated = checkpoint.clone();
