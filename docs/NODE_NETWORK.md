@@ -307,6 +307,9 @@ for their own receiver; there is no token or payment.
 - **Protocol model.** The bounded TLA+ slice in `docs/tla/RecoveryProtocol.tla` checks verified
   checkpoint acceptance, replay-watermark fencing and crash/restart recovery. Its README states
   the model bounds and limits. Isolation and rebuild remain outside this model's scope.
+  `docs/tla/SinkCutoverFence.tla` checks a publication sink with delayed generation delivery. The
+  modeled transfer waits for acknowledgement that the sink stopped old output and persisted its
+  new minimum generation.
 - **Proofs.** Kani proofs on the Merkle, signature-envelope and parsing code, as for the rest of
   the project (docs/VERIFICATION.md).
 - **Monitor mutation study.** Bugs are planted in the tracker and the share the safety monitor

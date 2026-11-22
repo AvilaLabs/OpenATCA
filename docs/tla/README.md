@@ -258,26 +258,20 @@ marks service unavailable. M6's availability goal requires measured performance 
 ## SinkCutoverFence: durable output-sink cutover
 
 `SinkCutoverFence.tla` models one output sink and one externally supplied generation change from
-1 to 2. The external authority is a modeling input; there is no election, consensus, controller
-authority, or procedure for deciding which sink or authority is correct. Before granting generation
-2, the strong protocol requires a delivered acknowledgement that the sink has stopped old output
-and persisted its minimum generation as 2. The sink emits that acknowledgement only after the
-durable fence transition. The acknowledgement can be lost or delayed across a partition, leaving
-the sink unavailable and the external grant unadvanced.
+1 to 2. The strong protocol requires the authority to receive acknowledgement that the sink
+stopped old output and persisted its minimum generation before granting generation 2.
+A lost or delayed acknowledgement can leave the sink unavailable and the transfer pending.
 
 Output admission uses only the sink's local durable minimum, locally delivered durable grant, and
-matching local evidence. It never reads the model's external `authorityGen`. The model records the
-external generation at the instant of each admitted output solely so `NoStaleOutput` can check
-whether an old queued output escaped after a grant. Restart reconstructs service only from the
-sink's durable minimum, grant and matching evidence. A stale queued output is rejected after the
-fence, even if grant delivery later resumes.
+matching local evidence. `NoStaleOutput` compares each admitted output against the external
+generation at the instant of emission. Restart reconstructs service from the durable minimum,
+grant and matching evidence. A stale queued output is rejected after the fence, including after
+delivery of the replacement grant.
 
-The finite model has one sink, two generations, one bounded queued output and one transfer. It
-checks `NoGrantBeforeFence`, `ServingHasLocalEvidence`, `NoStaleOutput` and `TypeOK`. The strong
-configuration also admits a normal transfer, stale queued-output rejection, current output, crash
-and restart path. There are no fairness or availability claims. In particular, an unreachable
-sink blocks the external grant in this abstract protocol; deployment would need an external
-isolation/fencing guarantee before safely bypassing that wait.
+The model holds at most one queued output. It checks `NoGrantBeforeFence`,
+`ServingHasLocalEvidence`, `NoStaleOutput` and `TypeOK`. The strong state graph reaches an admitted
+generation-2 output. An unreachable sink can block the grant, so a runtime that bypasses the wait
+would need independent proof of isolation.
 
 Run the intended model from this directory with:
 
@@ -285,17 +279,21 @@ Run the intended model from this directory with:
 java -cp /path/to/tla2tools.jar tlc2.TLC -config SinkCutoverFence.cfg SinkCutoverFence.tla
 ```
 
-`SinkCutoverFence_WeakGrant.cfg` removes only the external requirement for a delivered durable
-fence acknowledgement. Its `NoStaleOutput` invariant is expected to fail: after queuing generation
-1 output, the external authority can grant generation 2 while the sink is partitioned or before it
-fences; the old local grant then admits the queued generation 1 output. This is a non-vacuity
-control, not a deployable configuration:
+`SinkCutoverFence_WeakGrant.cfg` removes the acknowledgement prerequisite. In its counterexample,
+the external authority grants generation 2 before fencing, and the sink then queues and emits
+generation 1 using its still-current local evidence.
 
 ```sh
 java -cp /path/to/tla2tools.jar tlc2.TLC -config SinkCutoverFence_WeakGrant.cfg SinkCutoverFence.tla
 ```
 
-These commands are the expected checks; this model has not been run with TLC. The abstraction
-assumes the external authority honors the acknowledgement rule and that the sink's durable fence
-survives restart. Real sink isolation, storage durability, acknowledgement authentication,
-multi-sink scope, and any safe bypass of an unreachable sink require separate design and evidence.
+TLC 2.19 with Java 21, two workers and a 1 GB heap ran both configurations.
+
+| Configuration | Result | States generated / distinct |
+|---|---|---|
+| `SinkCutoverFence.cfg` | All invariants hold, complete depth 11 | 345 / 102 |
+| `SinkCutoverFence_WeakGrant.cfg` | `NoStaleOutput` fails in a five-state trace | 103 / 52 at failure |
+
+The model assumes durable fence state survives restart and the external authority observes the
+acknowledgement rule. It covers publication at one sink. Storage faults, acknowledgement
+authentication, multiple sinks, and fairness need separate checks.
