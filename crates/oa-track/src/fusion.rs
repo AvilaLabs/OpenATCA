@@ -2221,6 +2221,9 @@ fn initiate(
     dec: &[Decision],
     out: &mut TrackOutput,
 ) {
+    let (Some(&g), Some(&s)) = (f.geoms.get(radar), f.sites.get(radar)) else {
+        return;
+    };
     // Each plot can add at most one candidate. Hold the cost of reading and compacting that
     // maximum before any search can exhaust the remaining credit. Return unused credit to
     // the bucket so the next radar pays only for work actually charged.
@@ -2235,15 +2238,19 @@ fn initiate(
         return;
     };
     f.init_work_left = search_budget;
-    initiate_candidates(f, radar, plots, dec);
+    initiate_candidates(f, radar, &g, &s, plots, dec);
     f.init_work_left += retire_work;
     retire_candidates(f, radar, plots, out);
 }
 
-fn initiate_candidates(f: &mut Fusion, radar: usize, plots: &[RadarPlot], dec: &[Decision]) {
-    let (Some(&g), Some(&s)) = (f.geoms.get(radar), f.sites.get(radar)) else {
-        return;
-    };
+fn initiate_candidates(
+    f: &mut Fusion,
+    radar: usize,
+    g: &RadarGeom,
+    s: &RadarSite,
+    plots: &[RadarPlot],
+    dec: &[Decision],
+) {
     let bias = if f.cfg.registration {
         f.reg.get(radar).map_or(NO_BIAS, reg_bias)
     } else {
@@ -2309,7 +2316,7 @@ fn initiate_candidates(f: &mut Fusion, radar: usize, plots: &[RadarPlot], dec: &
     for &j in &free {
         let Some(p) = plots.get(j) else { continue };
         if f.cfg.use_address && p.addr != NO_ADDR {
-            let Ok(c) = plot_convert(&g, &s, p, &bias, None, p.addr) else {
+            let Ok(c) = plot_convert(g, s, p, &bias, None, p.addr) else {
                 f.stats.cand_no_height += 1;
                 continue;
             };
@@ -2487,7 +2494,7 @@ fn initiate_candidates(f: &mut Fusion, radar: usize, plots: &[RadarPlot], dec: &
         };
         // A plot with Mode C converts the same for every candidate: once, and the candidates it can
         // reach are those near it (if its noise is too wide for the grid, all of them).
-        let own = (p.alt_ft != NONE_ALT).then(|| plot_convert(&g, &s, p, &bias, None, NO_ADDR));
+        let own = (p.alt_ft != NONE_ALT).then(|| plot_convert(g, s, p, &bias, None, NO_ADDR));
         let (conv_own, window) = match &own {
             Some(Ok(c)) => {
                 let q = project(&frame, c.geo.lat_deg, c.geo.lon_deg);
@@ -2639,7 +2646,7 @@ fn initiate_candidates(f: &mut Fusion, radar: usize, plots: &[RadarPlot], dec: &
                         .map(|m| m.alt_ft)
                         .filter(|&a| a != NONE_I32);
                     let h = last_alt.map(|a| (f64::from(a) * FT_M, 15.0));
-                    let Ok(conv) = plot_convert(&g, &s, p, &bias, h, NO_ADDR) else {
+                    let Ok(conv) = plot_convert(g, s, p, &bias, h, NO_ADDR) else {
                         continue;
                     };
                     conv.m
@@ -2696,7 +2703,7 @@ fn initiate_candidates(f: &mut Fusion, radar: usize, plots: &[RadarPlot], dec: &
             }
         }
         // Starts a candidate if it has an altitude to convert at.
-        match plot_convert(&g, &s, p, &bias, None, NO_ADDR) {
+        match plot_convert(g, s, p, &bias, None, NO_ADDR) {
             Ok(c) => start_candidate(f, radar, NO_ADDR, c.m, p.label, scan),
             Err(_) => f.stats.cand_no_height += 1,
         }
