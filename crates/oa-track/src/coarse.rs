@@ -696,7 +696,7 @@ pub fn point_grid_query(g: &PointGrid, out: &mut Vec<u32>, x: f64, y: f64, r: f6
     true
 }
 
-/// Point-grid query that charges before every cell, binary-search comparison, and key visit.
+/// Point-grid query that charges before every column, binary-search comparison, and key visit.
 /// `remaining` is decreased only for completed/attempted work, and `spent` reports the same
 /// units for the owner's counter. `out` needs room for every indexed point to avoid growing.
 /// On `Capped`, callers must discard `out` and refuse the query.
@@ -721,43 +721,36 @@ pub fn point_grid_query_budgeted(
         return PointGridQueryResult::Complete(false);
     }
     let (cx, cy) = point_cell(g, x, y);
+    let min_y = (cy - rings).max(-POINT_CELLS);
+    let max_y = (cy + rings).min(POINT_CELLS - 1);
     for ix in (cx - rings).max(-POINT_CELLS)..=(cx + rings).min(POINT_CELLS - 1) {
-        for iy in (cy - rings).max(-POINT_CELLS)..=(cy + rings).min(POINT_CELLS - 1) {
+        if !charge_point_grid(remaining, spent) {
+            return PointGridQueryResult::Capped;
+        }
+        // Keys sort by x, then y, then point index. The y range is contiguous within each x.
+        let lo_key = u64::from(point_key(ix, min_y)) << 32;
+        let hi_cell = u64::from(point_key(ix, max_y));
+        let mut lo = 0usize;
+        let mut hi = g.keys.len();
+        while lo < hi {
             if !charge_point_grid(remaining, spent) {
                 return PointGridQueryResult::Capped;
             }
-            let cell = point_key(ix, iy);
-            let lo_key = u64::from(cell) << 32;
-            let mut lo = 0usize;
-            let mut hi = g.keys.len();
-            while lo < hi {
-                if !charge_point_grid(remaining, spent) {
-                    return PointGridQueryResult::Capped;
-                }
-                let mid = lo + (hi - lo) / 2;
-                if g.keys.get(mid).is_some_and(|&key| key < lo_key) {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
+            let mid = lo + (hi - lo) / 2;
+            if g.keys.get(mid).is_some_and(|&key| key < lo_key) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
             }
-            let mut at = lo;
-            loop {
-                if at >= g.keys.len() {
-                    break;
-                }
-                if !charge_point_grid(remaining, spent) {
-                    return PointGridQueryResult::Capped;
-                }
-                let Some(&key) = g.keys.get(at) else {
-                    break;
-                };
-                if key >> 32 != u64::from(cell) {
-                    break;
-                }
-                out.push(key as u32);
-                at += 1;
+        }
+        for &key in g.keys.get(lo..).unwrap_or_default() {
+            if !charge_point_grid(remaining, spent) {
+                return PointGridQueryResult::Capped;
             }
+            if key >> 32 > hi_cell {
+                break;
+            }
+            out.push(key as u32);
         }
     }
     PointGridQueryResult::Complete(true)
@@ -1189,6 +1182,38 @@ mod tests {
             let mut extra = ring(3_000.0);
             extra.extend(ring(10_000.0));
             finds_extras(&s, n, extra, (1_100_000.0, 0.0), 20_000.0, 10);
+        }
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn budgeted_point_grid_returns_the_same_keys_in_column_order() {
+        let points = [
+            (1.99, -2.0),
+            (0.0, 4.0),
+            (-2.0, -3.0),
+            (4.0, 0.0),
+            (1.1, -2.3),
+            (3.1, 3.1),
+            (0.0, -4.1),
+            (0.0, 0.0),
+            (32_767.1, -32_769.0),
+        ];
+        let mut grid = point_grid_new(points.len(), 1.0);
+        point_grid_build(&mut grid, points.len(), |i| points.get(i).copied());
+        for (x, y) in [(0.0, 0.0), (32_767.5, -32_768.1)] {
+            let mut expected = Vec::with_capacity(points.len());
+            assert!(point_grid_query(&grid, &mut expected, x, y, 3.0));
+            assert!(!expected.is_empty());
+            let mut out = Vec::with_capacity(points.len());
+            let (mut remaining, mut spent) = (49, 0);
+            assert_eq!(
+                point_grid_query_budgeted(&grid, &mut out, x, y, 3.0, &mut remaining, &mut spent),
+                PointGridQueryResult::Complete(true)
+            );
+            assert_eq!(out, expected);
+            assert!(spent < 49);
+            assert_eq!(remaining + spent, 49);
         }
     }
 
