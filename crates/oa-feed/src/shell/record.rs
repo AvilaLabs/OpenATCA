@@ -30,7 +30,9 @@
 //! so the shell can report it and exit non-zero. A stop at the size cap exits non-zero too
 //! ([`Recorder::exit_reason`]): the run did not record what it was asked to.
 //! A closed-segment sync failure also stops recording, but its segment is reported as persistence
-//! unconfirmed rather than as known lost frames.
+//! unconfirmed rather than as known lost frames. In sync mode, a generic write/flush/finalize
+//! failure likewise reports accepted frames in the active segment not counted as lost from the
+//! unflushed compressor interval; a triggering write frame remains lost.
 //!
 //! Startup counts existing recordings across at most [`DEFAULT_MAX_DIRECTORY_ENTRIES`] directory
 //! entries. This is an operational enumeration cap, not an elapsed-time guarantee; unrelated and
@@ -640,7 +642,7 @@ impl Recorder {
     }
 
     fn finish_inner(&mut self) -> io::Result<()> {
-        let Some(mut cur) = self.current.take() else {
+        let Some(cur) = self.current.as_mut() else {
             return Ok(());
         };
         if let Some(gz) = cur.gz.as_mut() {
@@ -658,17 +660,18 @@ impl Recorder {
         cur.file.flush()?;
         self.unflushed = 0;
         if cur.file.is_syncing() {
+            let frames = cur.frames;
             self.sync_started = self.sync_started.saturating_add(1);
             eprintln!(
                 "oa-feed: feed={} closed_segment_sync started frames={}",
-                self.feed, cur.frames
+                self.feed, frames
             );
             if let Err(error) = cur.file.sync_all() {
-                return Err(self.fail_sync("file", error, cur.frames));
+                return Err(self.fail_sync("file", error, frames));
             }
             eprintln!(
                 "oa-feed: feed={} closed_segment_sync started stage=directory frames={}",
-                self.feed, cur.frames
+                self.feed, frames
             );
             let directory_result = match &mut self.opener {
                 RecorderOpener::SyncClosedSegments { directory, .. } => directory(),
@@ -677,14 +680,15 @@ impl Recorder {
                 )),
             };
             if let Err(error) = directory_result {
-                return Err(self.fail_sync("directory", error, cur.frames));
+                return Err(self.fail_sync("directory", error, frames));
             }
             self.sync_completed = self.sync_completed.saturating_add(1);
             eprintln!(
                 "oa-feed: feed={} closed_segment_sync completed frames={}",
-                self.feed, cur.frames
+                self.feed, frames
             );
         }
+        self.current = None;
         Ok(())
     }
 
@@ -738,6 +742,12 @@ impl Recorder {
     /// frames the compressor still held, not yet flushed to the file, are lost with it.
     fn fail(&mut self, e: io::Error) -> io::Error {
         self.lost_frames = self.lost_frames.saturating_add(self.unflushed);
+        if let Some(cur) = self.current.as_ref().filter(|cur| cur.file.is_syncing()) {
+            let flushed_frames = cur.frames.saturating_sub(self.unflushed);
+            self.persistence_unconfirmed_frames = self
+                .persistence_unconfirmed_frames
+                .saturating_add(flushed_frames);
+        }
         self.unflushed = 0;
         if self.failed.is_none() {
             self.failed = Some(e.to_string());
@@ -1042,19 +1052,29 @@ mod closed_segment_sync_tests {
         None,
         File,
         Directory,
+        WriteAfterFirst,
+        Flush,
     }
 
     struct FakeFile {
         events: Arc<Mutex<Vec<&'static str>>>,
         fail_at: FailAt,
+        writes: u8,
     }
 
     impl Write for FakeFile {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes = self.writes.saturating_add(1);
+            if self.fail_at == FailAt::WriteAfterFirst && self.writes > 1 {
+                return Err(io::Error::other("write denied"));
+            }
             Ok(bytes.len())
         }
 
         fn flush(&mut self) -> io::Result<()> {
+            if self.fail_at == FailAt::Flush {
+                return Err(io::Error::other("flush denied"));
+            }
             Ok(())
         }
     }
@@ -1095,6 +1115,7 @@ mod closed_segment_sync_tests {
             Ok(Box::new(FakeFile {
                 events: Arc::clone(&file_events),
                 fail_at,
+                writes: 0,
             }) as Box<dyn SyncingWriter>)
         });
         let directory_events = Arc::clone(&events);
@@ -1223,6 +1244,40 @@ mod closed_segment_sync_tests {
             let line = format_recording(name, &rec);
             assert!(line.contains("persistence_unconfirmed_frames=1"));
             assert!(line.contains("lost_frames=0"));
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    // REQ: OA-FEED-170
+    #[test]
+    fn write_and_flush_failures_report_accepted_persistence_separately_from_lost_frames() {
+        for (name, fail_at, finish, expected_lost) in [
+            ("write-failure", FailAt::WriteAfterFirst, false, 1),
+            ("flush-failure", FailAt::Flush, true, 0),
+        ] {
+            let dir = temp_dir(name);
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut rec = recorder(
+                &dir,
+                name,
+                Format::Raw,
+                u64::MAX,
+                u64::MAX,
+                fail_at,
+                Arc::clone(&events),
+            );
+            rec.write_frame(b"accepted", 1_700_000_000, 1_700_000_000)
+                .unwrap();
+            if finish {
+                assert!(rec.finish().is_err());
+            } else {
+                assert!(rec
+                    .write_frame(b"triggering", 1_700_000_001, 1_700_000_001)
+                    .is_err());
+            }
+            assert_eq!(rec.persistence_unconfirmed_frames, 1);
+            assert_eq!(rec.lost_frames(), expected_lost);
+            assert!(format_recording(name, &rec).contains("persistence_unconfirmed_frames=1"));
             let _ = fs::remove_dir_all(dir);
         }
     }

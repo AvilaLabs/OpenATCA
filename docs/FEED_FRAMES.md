@@ -110,6 +110,11 @@ bounded backpressure. Idle compressor flushes do not close or sync the active se
 open segment is not promised across power loss. Reported completion is the operating system's
 sync result, not a claim that storage hardware or its power-loss protection was certified. The
 default recording mode does not request these syncs.
+If writing, gzip finalization or flushing fails before sync, the report separately counts accepted
+frames in the active segment whose persistence was not confirmed: it excludes frames already
+counted as lost from the compressor's unflushed interval. The frame that triggered a write failure
+is still counted as lost, while earlier accepted frames are not silently treated as durable. This
+counter is an uncertainty count, not proof that those frames were lost or persisted.
 
 ## Bridge behaviour (adapters/scds-bridge)
 

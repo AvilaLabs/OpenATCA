@@ -915,7 +915,9 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   when only the other option is given.
 - **OA-FEED-170** When a flush or the finish of a compressed recording fails, the frames written since the last
   successful flush, which the compressor still held, are counted as lost with the frame that hit the error
-  (`lost_frames`); a raw recording holds none back. Tested with a writer that fails on demand.
+  (`lost_frames`); a raw recording holds none back. In opt-in closed-segment sync mode, generic write/flush/finish
+  failures also count accepted active-segment frames not classified as lost as persistence-unconfirmed; the write
+  that triggers the failure remains counted as lost. Tested with a writer that fails on demand.
 - **OA-FEED-171** A recording that stopped at its size cap makes the run exit non-zero with the reason printed
   (`Recorder::exit_reason`; a failure takes precedence over the cap); a healthy recording has no reason. Tested on
   the mapping function.
