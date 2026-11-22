@@ -1,5 +1,10 @@
 //! Synthetic outage drill from tracker measurements through the scope's safety display.
-#![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 
 use oa_airspace::model::{empty_model, Meta};
 use oa_ca::{
@@ -419,7 +424,7 @@ fn decode_recovery_checkpoint(
             stored_fence.source_id,
             stored_fence.generation,
         )
-        .map_err(|refusal| refusal_name(refusal))?
+        .map_err(refusal_name)?
     };
     let frames = bytes
         .get(RECOVERY_HEADER_BYTES..)
@@ -471,7 +476,7 @@ fn decode_recovery_checkpoint(
                 .ok_or("checkpoint_sequence_overflow")?,
             source_time_ns: frame.recv_unix_ns,
         };
-        fence = accept_publication(fence, publication).map_err(|refusal| refusal_name(refusal))?;
+        fence = accept_publication(fence, publication).map_err(refusal_name)?;
         steps.push((second, live));
         if steps.len() > count {
             return Err("checkpoint_record_count");
