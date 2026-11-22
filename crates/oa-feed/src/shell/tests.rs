@@ -971,9 +971,12 @@ fn hot_structs_keep_their_budgeted_sizes() {
     use core::mem::size_of;
     assert_eq!(size_of::<Frame<'static>>(), 88);
     assert_eq!(size_of::<crate::health::Slot>(), 16);
-    assert_eq!(size_of::<FeedHealth>(), 2440);
+    assert_eq!(size_of::<FeedHealth>(), 2456);
     // The size budget has no hidden padding: fields sum to the struct size.
-    assert_eq!(24 * 8 + 2 * 4 + 8 + 24 * 8 + 133 * 8 + 61 * 16, 2440);
+    assert_eq!(
+        24 * 8 + size_of::<Option<i64>>() + 2 * 4 + 8 + 24 * 8 + 133 * 8 + 61 * 16,
+        2456
+    );
 }
 
 // REQ: OA-FEED-024
