@@ -1132,6 +1132,14 @@ mod tests {
     // REQ: OA-LTJ-058
     #[test]
     fn directional_projection_has_cardinal_signs_and_preserves_scalar_error() {
+        assert_eq!(
+            project_directional_error(0.0, 120.0, 0.0, 1.0),
+            (120.0, 0.0)
+        );
+        assert_eq!(
+            project_directional_error(0.0, -120.0, 0.0, 1.0),
+            (-120.0, 0.0)
+        );
         let northbound = project_directional_error(120.0, 0.0, 0.0, 1.0);
         assert_eq!(northbound, (0.0, 120.0));
         let eastbound = project_directional_error(0.0, 80.0, 1.0, 0.0);
