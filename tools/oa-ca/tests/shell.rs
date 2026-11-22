@@ -23,8 +23,9 @@ use oa_ca_run::report::{
     CONTEXT_NAMES,
 };
 use oa_ca_run::run::{r95_of, track_and_alert};
+use oa_encounter_run::qualification::{score, AlertEpisode, Case, CaseResult, Outcome, Subject};
 use oa_encounter_run::run::GroundTable;
-use oa_safety::net::{NetState, Reason};
+use oa_safety::net::{NetReport, NetState, Reason};
 use oa_track::{Measurement, TrackerConfig, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT};
 
 const DEV_CFG: &str = include_str!("../testdata/dev.cfg");
@@ -482,6 +483,18 @@ fn head_on(alt_b: i32) -> Vec<Measurement> {
     v
 }
 
+fn synthetic_crossing_and_vertical_control() -> Vec<Measurement> {
+    let mut v = Vec::new();
+    for t in 0..190 {
+        let d = 200.0 * t as f64;
+        v.push(meas(t, 0x100001, d, 0.0, 200.0, 20_000));
+        v.push(meas(t, 0x100002, 60_000.0 - d, 0.0, -200.0, 20_000));
+        v.push(meas(t, 0x100003, d, 150_000.0, 200.0, 20_000));
+        v.push(meas(t, 0x100004, 60_000.0 - d, 150_000.0, -200.0, 25_000));
+    }
+    v
+}
+
 // REQ: OA-CA-026
 #[test]
 fn a_converging_pair_through_the_tracker_is_one_alert_that_repeats_exactly() {
@@ -523,6 +536,108 @@ fn a_converging_pair_through_the_tracker_is_one_alert_that_repeats_exactly() {
         .net_cycles
         .keys()
         .any(|k| k.starts_with("DEGRADED: INPUT MISSING")));
+}
+
+#[test]
+fn synthetic_tracker_crossing_and_vertical_control_are_scored_against_declared_windows() {
+    // Truth is calculated from the generated measurement trajectories and configured synthetic
+    // volume before running tracker or CA. Relative distance is 60,000 - 400t m.
+    let set = parse_config(DEV_CFG).unwrap();
+    let truth_h_m = set.ca.default_volume.h_m;
+    let entry_s = (60_000.0 - truth_h_m) / 400.0;
+    let exit_s = (60_000.0 + truth_h_m) / 400.0;
+    const LAST_TICK_S: i64 = 189;
+    const S: i64 = 1_000_000_000;
+    assert!(5000.0 >= set.ca.default_volume.v_ft);
+
+    let ground = GroundTable::new();
+    let record = track_and_alert(
+        &synthetic_crossing_and_vertical_control(),
+        &DEFAULT_CONFIG,
+        &ground,
+        &set,
+    )
+    .unwrap();
+    assert_eq!(record.alerts.len(), 1);
+    assert_eq!(
+        record.log_overflow + record.event_overflow + record.tracker_overflow,
+        0
+    );
+    assert_eq!(
+        record.totals.not_evaluated + record.totals.tracks_unscanned,
+        0
+    );
+    assert_eq!(record.net_cycles.len(), 1);
+    assert_eq!(
+        record.net_cycles.get("RUNNING"),
+        Some(&record.totals.cycles)
+    );
+
+    let alerts: Vec<AlertEpisode> = record
+        .alerts
+        .iter()
+        .map(|alert| AlertEpisode {
+            subject: Subject {
+                a: alert.addr_a,
+                b: alert.addr_b,
+            },
+            start_ns: alert.start_ns,
+            end_ns: alert.end_ns,
+            warning_ns: Some(alert.start_ns),
+        })
+        .collect();
+    let cases = [
+        Case {
+            subject: Subject {
+                a: 0x100001,
+                b: 0x100002,
+            },
+            window_start_ns: 0,
+            window_end_ns: LAST_TICK_S * S,
+            violation: Some((
+                (entry_s * S as f64).round() as i64,
+                (exit_s * S as f64).round() as i64,
+            )),
+            alert_desired: true,
+            warning_from_ns: 0,
+            warning_deadline_ns: ((entry_s - 20.0) * S as f64).floor() as i64,
+            evaluation: NetReport::Running,
+        },
+        Case {
+            subject: Subject {
+                a: 0x100003,
+                b: 0x100004,
+            },
+            window_start_ns: 0,
+            window_end_ns: LAST_TICK_S * S,
+            violation: None,
+            alert_desired: false,
+            warning_from_ns: 0,
+            warning_deadline_ns: LAST_TICK_S * S,
+            evaluation: NetReport::Running,
+        },
+    ];
+    let mut results = [CaseResult {
+        outcome: Outcome::Miss,
+        warning_index: None,
+        lead_ns: None,
+    }; 2];
+    let totals = score(&cases, &alerts, &mut results).unwrap();
+    assert_eq!(
+        (totals.desired_cases, totals.hits, totals.misses),
+        (1, 1, 0)
+    );
+    assert_eq!(
+        (
+            totals.no_alert_cases,
+            totals.nuisance_controls,
+            totals.quiet_controls
+        ),
+        (1, 0, 1)
+    );
+    let lead_ns = results[0].lead_ns.expect("scored warning lead time");
+    assert!(lead_ns >= 20 * S, "lead {lead_ns} ns");
+    assert_eq!(results[1].outcome, Outcome::Quiet);
 }
 
 // REQ: OA-CA-010

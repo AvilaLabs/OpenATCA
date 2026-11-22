@@ -86,10 +86,12 @@ state. They do not consume this tool's recorded-traffic output, estimate operati
 establish readiness; M5's recorded-traffic evaluation remains a separate build step.
 
 `oa_encounter_run::qualification` is a bounded pure matcher for callers that already have
-independently labelled cases and warning intervals. It matches by track or canonical pair, counts
-one hit per label, reports exact lead time, and keeps degraded/unavailable labels in explicit
-denominators with their reasons. It neither creates truth labels nor adapts CA/MSAW output; the
-synthetic matcher fixtures test only the scorer contract.
+independently labelled cases and alert episodes. A warning-grade onset is separate from the
+episode's full span, so a lower-grade MSAW alert can still count as nuisance on a no-alert control.
+It matches by track or canonical pair, counts one hit per label, reports exact lead time, and keeps
+degraded/unavailable labels in explicit denominators with their reasons. It neither creates truth
+labels nor consumes recorded traffic; tool integration tests manually map synthetic CA/MSAW run
+records into the scorer.
 
 ## Output
 

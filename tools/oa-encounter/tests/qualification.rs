@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use oa_encounter_run::qualification::{
-    score, Case, CaseResult, Outcome, ScoreError, Subject, Warning, MAX_CASES, MAX_WARNINGS,
+    score, AlertEpisode, Case, CaseResult, Outcome, ScoreError, Subject, MAX_CASES, MAX_WARNINGS,
 };
 use oa_safety::net::{Area, NetReport, Reason};
 
@@ -62,28 +62,32 @@ fn matching_is_subject_specific_deduplicated_and_keeps_gaps_in_denominators() {
         ),
     ];
     let warnings = [
-        Warning {
+        AlertEpisode {
             subject: pair_hit,
             start_ns: 60,
             end_ns: 70,
+            warning_ns: Some(60),
         },
         // Duplicate record for one onset must not yield another hit or lead sample.
-        Warning {
+        AlertEpisode {
             subject: pair_hit,
             start_ns: 60,
             end_ns: 75,
+            warning_ns: Some(60),
         },
         // A warning for the wrong target cannot satisfy the desired event.
-        Warning {
+        AlertEpisode {
             subject: pair_wrong_target,
             start_ns: 60,
             end_ns: 70,
+            warning_ns: Some(60),
         },
         // The warning exists, but the matching label is unevaluable and must remain unknown.
-        Warning {
+        AlertEpisode {
             subject: pair_unknown,
             start_ns: 60,
             end_ns: 70,
+            warning_ns: Some(60),
         },
     ];
     let mut results = [CaseResult {
@@ -142,10 +146,11 @@ fn misses_nuisance_controls_and_capacity_failures_are_explicit() {
         desired(pair_missed, NetReport::Running),
         control(track_nuisance, NetReport::Running),
     ];
-    let warnings = [Warning {
+    let warnings = [AlertEpisode {
         subject: track_nuisance,
         start_ns: 50,
         end_ns: 90,
+        warning_ns: Some(50),
     }];
     let mut results = [CaseResult {
         outcome: Outcome::Quiet,

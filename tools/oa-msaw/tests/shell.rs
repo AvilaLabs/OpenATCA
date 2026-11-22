@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
+use oa_encounter_run::qualification::{score, AlertEpisode, Case, CaseResult, Outcome, Subject};
 use oa_encounter_run::run::GroundTable;
 use oa_msaw::{
     AIRBORNE, CK_APPROACH, CK_DEPARTURE, CK_RUNWAY, FLOOR_NONE, GROUND_UNKNOWN, ON_GROUND,
@@ -29,7 +30,7 @@ use oa_msaw_run::report::{
 };
 use oa_msaw_run::run::{r95_of, track_and_alert, Record};
 use oa_mva::{new_model, Model, SetKind};
-use oa_safety::net::{NetState, Reason};
+use oa_safety::net::{NetReport, NetState, Reason};
 use oa_tiff::{Grid, TileSet};
 use oa_track::{Measurement, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT};
 
@@ -289,6 +290,28 @@ fn ridge_floors() -> Floors {
         },
         Some(ObstacleIndex::from_points(std::iter::empty())),
         Some(chart(100, 13.2, 13.65, 144.65, 144.95)),
+    )
+}
+
+fn flat_qualification_floors() -> Floors {
+    Floors::with_tiles(
+        TileSet {
+            tiles: vec![Grid {
+                width: 300,
+                height: 400,
+                lon0: 144.7,
+                lat0: 13.7,
+                dlon: 0.001,
+                dlat: 0.001,
+                elev: vec![0.0; 300 * 400],
+                nodata_count: 0,
+                point_registered: true,
+                crs: 4269,
+                vertical_cs: None,
+            }],
+        },
+        Some(ObstacleIndex::from_points(std::iter::empty())),
+        None,
     )
 }
 
@@ -715,6 +738,105 @@ fn guam_synthetic_through_the_tracker_alerts_caution_then_warning() {
         .unwrap()
         .starts_with("address_hex,start_s"));
     assert!(csv.contains("WARNING") && csv.contains("terrain"));
+}
+
+#[test]
+fn synthetic_flat_terrain_descent_and_level_control_are_scored_from_runner_output() {
+    const S: i64 = 1_000_000_000;
+    const LAST_TICK_S: i64 = 149;
+
+    let set = settings();
+    let floor_ft = i64::from(set.msaw.gtm_clearance_ft);
+    assert_eq!(floor_ft, 500);
+    let event_start_s = (1800 - floor_ft) / 10;
+
+    // Truth is from the generated measurements and flat synthetic terrain: the hazard is
+    // 1,800 - 10t ft over the configured flat-terrain floor, so its strict below-floor interval starts just after
+    // t=130 s. The control stays at 4,000 ft. These declarations precede runner output.
+    let event_start_ns = event_start_s * S;
+    let mut rows = Vec::new();
+    for t in 0..=LAST_TICK_S {
+        let t_f = t as f64;
+        let lat = 13.40 + 0.0009 * t_f;
+        rows.push(meas(
+            t,
+            0x901,
+            lat,
+            144.80,
+            100.0,
+            (1800 - 10 * t) as i32,
+            -600,
+        ));
+        rows.push(meas(t, 0x902, lat, 144.80, 100.0, 4000, 0));
+    }
+
+    let record = go(&rows, &set, flat_qualification_floors());
+    assert_eq!(record.net_cycles.len(), 1);
+    assert_eq!(
+        record.net_cycles.get("RUNNING"),
+        Some(&record.totals.cycles)
+    );
+    assert_eq!(record.totals.no_coverage, 0);
+    assert_eq!(
+        record.tracker_overflow + record.alert_overflow + record.skip_overflow,
+        0
+    );
+
+    let episodes: Vec<AlertEpisode> = record
+        .alerts
+        .iter()
+        .map(|alert| AlertEpisode {
+            subject: Subject {
+                a: alert.addr,
+                b: 0,
+            },
+            start_ns: alert.start_ns,
+            end_ns: alert.end_ns,
+            warning_ns: alert.warning_ns,
+        })
+        .collect();
+    let cases = [
+        Case {
+            subject: Subject { a: 0x901, b: 0 },
+            window_start_ns: 0,
+            window_end_ns: LAST_TICK_S * S,
+            violation: Some((event_start_ns, LAST_TICK_S * S)),
+            alert_desired: true,
+            warning_from_ns: 0,
+            warning_deadline_ns: event_start_ns - (set.msaw.warning_s * S as f64).round() as i64,
+            evaluation: NetReport::Running,
+        },
+        Case {
+            subject: Subject { a: 0x902, b: 0 },
+            window_start_ns: 0,
+            window_end_ns: LAST_TICK_S * S,
+            violation: None,
+            alert_desired: false,
+            warning_from_ns: 0,
+            warning_deadline_ns: LAST_TICK_S * S,
+            evaluation: NetReport::Running,
+        },
+    ];
+    let mut results = [CaseResult {
+        outcome: Outcome::Miss,
+        warning_index: None,
+        lead_ns: None,
+    }; 2];
+    let totals = score(&cases, &episodes, &mut results).unwrap();
+    assert_eq!(
+        (totals.desired_cases, totals.hits, totals.misses),
+        (1, 1, 0)
+    );
+    assert_eq!(
+        (
+            totals.no_alert_cases,
+            totals.nuisance_controls,
+            totals.quiet_controls
+        ),
+        (1, 0, 1)
+    );
+    assert_eq!(results[0].lead_ns, Some(20 * S));
+    assert_eq!(results[1].outcome, Outcome::Quiet);
 }
 
 // REQ: OA-MSAW-038

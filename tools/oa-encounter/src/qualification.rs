@@ -35,15 +35,17 @@ pub struct Case {
     pub evaluation: NetReport,
 }
 
-/// A warning episode copied from the normal alert API's start/end times and subject.
+/// An alert episode copied from the normal alert API. `warning_ns` is the warning-grade onset;
+/// the episode start/end still count lower-grade alerts on no-alert controls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Warning {
+pub struct AlertEpisode {
     pub subject: Subject,
     pub start_ns: i64,
     pub end_ns: i64,
+    pub warning_ns: Option<i64>,
 }
 
-/// Outcome for one input label. `warning_index` points to the first eligible warning.
+/// Outcome for one input label. `warning_index` points to the first eligible alert episode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Hit,
@@ -92,12 +94,12 @@ pub enum ScoreError {
 }
 
 /// Scores labels against alert episodes. Labels for a subject must be in window-start order. A
-/// warning can satisfy at most one desired case; duplicate records for the same subject and onset
-/// are treated as one onset. Work is bounded by
+/// warning-grade onset can satisfy at most one desired case; duplicate records for the same
+/// subject and warning-grade onset are treated as one onset. Work is bounded by
 /// `MAX_CASES^2 + MAX_CASES * MAX_WARNINGS + MAX_WARNINGS^2` comparisons.
 pub fn score(
     cases: &[Case],
-    warnings: &[Warning],
+    warnings: &[AlertEpisode],
     results: &mut [CaseResult],
 ) -> Result<Totals, ScoreError> {
     if cases.len() > MAX_CASES {
@@ -121,7 +123,6 @@ pub fn score(
                 }
                 if case.warning_from_ns > case.warning_deadline_ns
                     || case.warning_from_ns < case.window_start_ns
-                    || case.warning_deadline_ns > case.window_end_ns
                     || case.warning_deadline_ns >= start
                 {
                     return Err(ScoreError::InconsistentLabel);
@@ -141,7 +142,11 @@ pub fn score(
     }
     for warning in warnings {
         validate_subject(warning.subject)?;
-        if warning.start_ns > warning.end_ns {
+        if warning.start_ns > warning.end_ns
+            || warning
+                .warning_ns
+                .is_some_and(|t| t < warning.start_ns || t > warning.end_ns)
+        {
             return Err(ScoreError::InvalidWarning);
         }
     }
@@ -155,30 +160,33 @@ pub fn score(
                     totals.desired_cases += 1;
                     totals.desired_evaluable += 1;
                     let (event_start, _) = case.violation.ok_or(ScoreError::InconsistentLabel)?;
-                    let mut selected: Option<(usize, &Warning)> = None;
+                    let mut selected: Option<(usize, i64)> = None;
                     for (warning_ix, (warning, &used)) in warnings.iter().zip(&consumed).enumerate()
                     {
+                        let Some(warning_ns) = warning.warning_ns else {
+                            continue;
+                        };
                         if used
                             || warning.subject != case.subject
-                            || warning.start_ns < case.warning_from_ns
-                            || warning.start_ns > case.warning_deadline_ns
+                            || warning_ns < case.warning_from_ns
+                            || warning_ns > case.warning_deadline_ns
                         {
                             continue;
                         }
-                        if selected.is_none_or(|(_, best)| warning.start_ns < best.start_ns) {
-                            selected = Some((warning_ix, warning));
+                        if selected.is_none_or(|(_, best_ns)| warning_ns < best_ns) {
+                            selected = Some((warning_ix, warning_ns));
                         }
                     }
-                    if let Some((warning_ix, warning)) = selected {
+                    if let Some((warning_ix, warning_ns)) = selected {
                         for (duplicate, used) in warnings.iter().zip(&mut consumed) {
-                            if duplicate.subject == warning.subject
-                                && duplicate.start_ns == warning.start_ns
+                            if duplicate.subject == case.subject
+                                && duplicate.warning_ns == Some(warning_ns)
                             {
                                 *used = true;
                             }
                         }
                         let lead_ns = event_start
-                            .checked_sub(warning.start_ns)
+                            .checked_sub(warning_ns)
                             .ok_or(ScoreError::InvalidInterval)?;
                         totals.hits += 1;
                         CaseResult {
