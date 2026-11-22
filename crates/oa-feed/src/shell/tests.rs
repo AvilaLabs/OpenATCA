@@ -1345,6 +1345,44 @@ fn rotation_after_wall_clock_step_back_keeps_file_replay_order() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+// REQ: OA-FEED-027, OA-FEED-033
+#[test]
+fn a_clock_step_back_flushes_a_quiet_compressed_feed() {
+    let dir = tmpdir("flush-clock-step");
+    let start = 1_700_000_000;
+    let mut recorder = Recorder::open(&dir, "clock", u64::MAX, u64::MAX, Format::Gzip).unwrap();
+    let path = dir.join("clock-20231114T221320Z-0001.oaf.gz");
+    recorder
+        .write_frame(&msg(0, b"before"), start, start)
+        .unwrap();
+    assert_eq!(
+        replay_files(std::slice::from_ref(&path))
+            .unwrap()
+            .health
+            .messages,
+        0
+    );
+
+    recorder.idle_flush(start - 60).unwrap();
+    let prefix = replay_files(std::slice::from_ref(&path)).unwrap();
+    assert_eq!(prefix.health.messages, 1);
+    assert!(matches!(prefix.gzip[0].kind, GzNoteKind::Truncated(_)));
+
+    recorder
+        .write_frame(&msg(1, b"after"), start, start - 59)
+        .unwrap();
+    assert_eq!(
+        replay_files(std::slice::from_ref(&path))
+            .unwrap()
+            .health
+            .messages,
+        2
+    );
+    recorder.finish().unwrap();
+    assert!(replay_files(&[path]).unwrap().gzip.is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 // REQ: OA-FEED-026
 #[test]
 fn compressed_recording_names_and_content() {

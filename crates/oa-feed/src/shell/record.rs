@@ -10,7 +10,7 @@
 //! warning, and nothing is deleted (a recording is evidence, A8).
 //!
 //! Compressed recordings (oa-deflate, level 6) are a sequence of gzip members, one per file. The
-//! compressor is sync-flushed when local time has moved a whole second past the last
+//! compressor is sync-flushed when the local whole second changes after the last
 //! flush, and by [`Recorder::idle_flush`] when the feed is quiet, so a crash loses at most about
 //! one second of frames; each file is finished (final block and CRC-32 trailer) on rotation, at
 //! the cap and in [`Recorder::finish`]. Rotation and the cap count the compressed bytes that are
@@ -259,7 +259,7 @@ impl Recorder {
                     Ok(())
                 };
                 let mut r = gz.write(raw, &mut sink);
-                if r.is_ok() && now_unix_secs >= cur.flushed_secs.saturating_add(1) {
+                if r.is_ok() && now_unix_secs != cur.flushed_secs {
                     cur.flushed_secs = now_unix_secs;
                     r = gz.flush(&mut sink);
                     flushed = true;
@@ -282,7 +282,7 @@ impl Recorder {
         Ok(Outcome::Written)
     }
 
-    /// Sync-flushes the compressor if a whole second has passed since the last flush; for a feed
+    /// Sync-flushes the compressor once the local whole second changes; for a feed
     /// that has gone quiet, so frames already written do not sit in the compressor. A flush with
     /// nothing new writes nothing. A no-op for raw recordings.
     pub fn idle_flush(&mut self, now_unix_secs: i64) -> io::Result<()> {
@@ -300,7 +300,7 @@ impl Recorder {
         let Some(gz) = cur.gz.as_mut() else {
             return Ok(());
         };
-        if now_unix_secs < cur.flushed_secs.saturating_add(1) {
+        if now_unix_secs == cur.flushed_secs {
             return Ok(());
         }
         cur.flushed_secs = now_unix_secs;

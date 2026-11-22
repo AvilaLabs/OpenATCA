@@ -844,8 +844,8 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-026** `--record` writes `<feed>-<UTC start>.oaf.gz` (gzip, level 6) and
   `--record-raw` keeps the plain `.oaf`; the two are exclusive; the recorded frames are the input
   frames exactly.
-- **OA-FEED-027** A compressed recording is sync-flushed once a frame's receive time is a second
-  past the last flush, by an idle flush when the feed is quiet, and on rotation and exit (each
+- **OA-FEED-027** A compressed recording is sync-flushed when the local whole second changes in
+  either direction, on a write or an idle flush. It is also flushed on rotation and exit (each
   file is finished with its trailer): a file read while recording, or after a crash, holds every
   frame up to the last flush.
 - **OA-FEED-028** Rotation and the total cap count the compressed bytes on disk, including
