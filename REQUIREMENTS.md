@@ -5681,8 +5681,11 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   (`TARGETS UNDER BANNER: n`) and in the stats.
 - **OA-DSP-072** The offline raw replay uses bounded surveillance observations available to its
   caller as of the frame. Only the newest fresh on-map observation for each address can take a
-  target slot. Conflicting latest observations are refused and counted. The frame carries
-  `RAW SURVEILLANCE ONLY`, and a failed build makes its list unavailable to the rasterizer.
+  target slot. A newest ADS-B `F_STALE` observation suppresses its address without falling back
+  to older observations; a same-time fresh/stale disagreement is refused as a conflict. Source-stale
+  exclusions are counted separately from age-stale observations and rows withheld for later receipt.
+  Conflicting latest observations are refused and counted. The frame carries `RAW SURVEILLANCE ONLY`,
+  and a failed build makes its list unavailable to the rasterizer.
 - **OA-SHD-030** `oa-shadow screen` compares ADS-B with ERAM's reports of address-paired aircraft: ADS-B is
   evaluated at each ERAM report time by oa-truth's smoother (default settings) and the offset ADS-B minus ERAM is
   resolved along and across the ADS-B velocity direction. The along offset is `c - L x speed`: L is the apparent

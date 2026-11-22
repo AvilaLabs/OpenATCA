@@ -1698,6 +1698,39 @@ fn raw_message_rows(frame_time_ns: i64, rows: &[(i64, u32, i32)]) -> Vec<u8> {
     frame
 }
 
+fn raw_flagged_message(
+    seq: u64,
+    frame_time_ns: i64,
+    row_time_ns: i64,
+    addr: u32,
+    lon_e7: i32,
+    flags: u8,
+) -> Vec<u8> {
+    let mut reports = Reports::default();
+    let mut row: Row = ROW_EMPTY;
+    row.time_ns = row_time_ns;
+    row.icao = addr;
+    row.lat_e7 = ORD.0;
+    row.lon_e7 = lon_e7;
+    row.flags = flags;
+    reports_push(&mut reports, &row);
+    let mut payload = Vec::new();
+    encode_payload(&mut payload, &reports, 0, 1).unwrap();
+    let mut frame = vec![0u8; payload.len() + 256];
+    let n = oa_feed::encode_frame(
+        &mut frame,
+        1,
+        oa_feed::FLAG_BYTES,
+        seq,
+        frame_time_ns,
+        frame_time_ns / 1_000_000,
+        &payload,
+    )
+    .unwrap();
+    frame.truncate(n);
+    frame
+}
+
 fn raw_cli_args(
     snapshot: &std::path::Path,
     source: &std::path::Path,
@@ -1783,6 +1816,71 @@ fn raw_only_cli_applies_observation_and_declared_receipt_cutoffs() {
         "declared archive proxy admits B exactly at the observation boundary t=9.5"
     );
     assert!(said.contains("RAW SURVEILLANCE ONLY"), "{said}");
+}
+
+// REQ: OA-DSP-072
+#[test]
+fn raw_only_cli_withholds_source_stale_latest_and_same_time_disagreement_then_recovers() {
+    let dir = tmp("raw-source-stale");
+    let (snap, _) = write_inputs(&dir);
+    let addr = 0xA00031;
+    let mut bytes = Vec::new();
+    for frame in [
+        raw_flagged_message(1, T0 + 8 * S, T0 + 8 * S, addr, ORD.1, 0),
+        raw_flagged_message(
+            2,
+            T0 + 9 * S,
+            T0 + 9 * S,
+            addr,
+            ORD.1 + 100,
+            oa_adsb::F_STALE,
+        ),
+        // Same observation time and payload as the stale row, received later. Its fresh/stale
+        // disagreement must withhold the address, independent of unstable equal-key sort order.
+        raw_flagged_message(3, T0 + 9 * S + S / 2, T0 + 9 * S, addr, ORD.1 + 100, 0),
+        raw_flagged_message(
+            4,
+            T0 + 10 * S + S / 2,
+            T0 + 10 * S + S / 2,
+            addr,
+            ORD.1 + 200,
+            0,
+        ),
+    ] {
+        bytes.extend(frame);
+    }
+    let source = dir.join("source-stale.oaf");
+    std::fs::write(&source, bytes).unwrap();
+    let out_dir = dir.join("out");
+    let mut args_out = raw_cli_args(&snap, &source, &out_dir, "recorded");
+    let start = args_out
+        .iter()
+        .position(|value| value == "--start")
+        .unwrap();
+    args_out[start + 1] = "1794772808.5".into();
+    let duration = args_out
+        .iter()
+        .position(|value| value == "--duration-s")
+        .unwrap();
+    args_out[duration + 1] = "2.5".into();
+    args_out.extend(args(&["--allow-loss"]));
+
+    let mut report = Vec::new();
+    cli::run(&args_out, &mut report).unwrap();
+    let report = String::from_utf8(report).unwrap();
+    assert!(report.contains("display  totals over 5 frames"), "{report}");
+    assert!(
+        report.contains("2 target admissions; 2 targets drawn"),
+        "{report}"
+    );
+    assert!(
+        report.contains("1 source-stale address groups excluded; 2 source-stale same-time conflicts (included in contradictory total); 0 age-stale address groups (age > 3 s)"),
+        "{report}"
+    );
+    assert!(
+        report.contains("7 observation visits withheld for later receipt"),
+        "{report}"
+    );
 }
 
 // REQ: OA-DSP-072
@@ -1883,7 +1981,7 @@ fn raw_only_cli_returns_loss_for_a_contradictory_latest_observation() {
     let (result, said) = run_text(&raw_cli_args(&snap, &clip, &out, "recorded"));
     assert!(matches!(result, Err(cli::CliError::Loss(_))), "{said}");
     assert!(
-        said.contains("4 contradictory same-time addresses"),
+        said.contains("4 contradictory same-time address groups"),
         "{said}"
     );
     assert!(said.contains("0 targets drawn"), "{said}");

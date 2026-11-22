@@ -49,7 +49,8 @@
 
 use crate::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use crate::frame::{
-    replay_build, replay_build_raw, replay_new, replay_raster, ReplayConfig, ReplayError,
+    replay_build, replay_build_raw_with_source_stale, replay_new, replay_raster, ReplayConfig,
+    ReplayError,
 };
 use crate::raw::{RawObservationColumns, MAX_RAW_OBSERVATIONS, RAW_STALE_CUTOFF_NS};
 use crate::rows::{
@@ -749,6 +750,7 @@ struct ReceivedObservation {
     alt: i32,
     speed: u16,
     track: u16,
+    source_stale: bool,
 }
 
 impl ReceivedObservation {
@@ -769,6 +771,7 @@ impl ReceivedObservation {
             alt,
             speed: row.gs_dkt,
             track: row.track_ddeg,
+            source_stale: row.flags & oa_adsb::F_STALE != 0,
         }
     }
 }
@@ -961,6 +964,7 @@ struct RawFrameColumns {
     alt: Vec<i32>,
     speed: Vec<u16>,
     track: Vec<u16>,
+    source_stale: Vec<bool>,
 }
 
 impl RawFrameColumns {
@@ -973,6 +977,7 @@ impl RawFrameColumns {
             alt: Vec::with_capacity(n),
             speed: Vec::with_capacity(n),
             track: Vec::with_capacity(n),
+            source_stale: Vec::with_capacity(n),
         }
     }
     fn fill(&mut self, history: &RawHistory, as_of_ns: i64) -> u64 {
@@ -983,6 +988,7 @@ impl RawFrameColumns {
         self.alt.clear();
         self.speed.clear();
         self.track.clear();
+        self.source_stale.clear();
         let mut later_receipts = 0;
         for row in &history.rows {
             if row.received_ns > as_of_ns {
@@ -996,6 +1002,7 @@ impl RawFrameColumns {
             self.alt.push(row.alt);
             self.speed.push(row.speed);
             self.track.push(row.track);
+            self.source_stale.push(row.source_stale);
         }
         later_receipts
     }
@@ -1009,6 +1016,9 @@ impl RawFrameColumns {
             gs_dkt: &self.speed,
             track_ddeg: &self.track,
         }
+    }
+    fn source_stale(&self) -> &[bool] {
+        &self.source_stale
     }
 }
 
@@ -1220,7 +1230,13 @@ fn run_raw_only(
             .ok_or_else(|| CliError::Failed("raw frame time is outside clock range".into()))?;
         total.later_receipts += columns.fill(&history, t_ns);
         let stamp = stamp_of(t_ns);
-        let (info, stats) = replay_build_raw(&mut replay, &columns.columns(), t_ns, &stamp)?;
+        let (info, stats) = replay_build_raw_with_source_stale(
+            &mut replay,
+            &columns.columns(),
+            Some(columns.source_stale()),
+            t_ns,
+            &stamp,
+        )?;
         replay_raster(&mut replay)?;
         let digest = frame_digest(&replay.spec, &replay.buf).map_err(|e| failed("hash", e))?;
         hashes.push_str(&format!("{i:04} {} {}\n", unix_text(t_ns), to_hex(&digest)));
@@ -1239,6 +1255,8 @@ fn run_raw_only(
         total.draw_loss += traffic_loss(&info.traffic) + u64::from(info.stamp_clipped);
         total.future_observations += stats.future_observations;
         total.future_only_addresses += stats.future_only_addresses;
+        total.source_stale_addresses += stats.source_stale_addresses;
+        total.source_stale_conflicts += stats.source_stale_conflicts;
         total.stale_addresses += stats.stale_addresses;
         total.conflicts += stats.conflicting_timestamps;
         total.refused += stats.refused_capacity + stats.refused_malformed;
@@ -1260,7 +1278,7 @@ fn run_raw_only(
     let _ = writeln!(out, "availability {}", provenance);
     let _ = writeln!(out, "raw      {} source observations retained; {} frames; {} source-frame sealed drops; {} reject frames; {} status frames; {} undecodable payloads; {} frames outside the receipt window; {} decoded observations outside the display window", history.rows.len(), total.frames, history.sealed_frames, history.refused_frames, history.status_frames, history.undecodable, history.outside, history.outside_rows);
     let _ = writeln!(out, "decode   {} records, {} retained, {} dropped (bad time {}, unknown source {}, bad measurement {}, reserved {}); {} damaged frames", history.decode_records, history.decode_kept, history.decode_dropped, history.decode_bad_time, history.decode_unknown_source, history.decode_bad_measurement, history.decode_reserved, history.damaged_frames);
-    let _ = writeln!(out, "display  totals over {} frames: {} observations considered ({} future at frame time); {} observation visits withheld for later receipt; {} target admissions; {} targets drawn; {} draw losses (including target refusal); {} future-only addresses; {} stale addresses (age > {} s); {} contradictory same-time addresses; {} refused targets; invalid positions {}; unprojectable {}; off-map {}", total.frames, total.observations_seen, total.future_observations, total.later_receipts, total.targets_admitted, total.targets_drawn, total.draw_loss, total.future_only_addresses, total.stale_addresses, RAW_STALE_CUTOFF_NS / NS_PER_S, total.conflicts, total.refused, total.invalid_positions, total.unprojectable_positions, total.off_map_positions);
+    let _ = writeln!(out, "display  totals over {} frames: {} observations considered ({} future at frame time); {} observation visits withheld for later receipt; {} target admissions; {} targets drawn; {} draw losses (including target refusal); {} future-only addresses; {} source-stale address groups excluded; {} source-stale same-time conflicts (included in contradictory total); {} age-stale address groups (age > {} s); {} contradictory same-time address groups; {} refused targets; invalid positions {}; unprojectable {}; off-map {}", total.frames, total.observations_seen, total.future_observations, total.later_receipts, total.targets_admitted, total.targets_drawn, total.draw_loss, total.future_only_addresses, total.source_stale_addresses, total.source_stale_conflicts, total.stale_addresses, RAW_STALE_CUTOFF_NS / NS_PER_S, total.conflicts, total.refused, total.invalid_positions, total.unprojectable_positions, total.off_map_positions);
     let _ = writeln!(out, "hashes   {}", hashes_path.display());
     let loss = history.refused_frames
         + history.undecodable
@@ -1302,6 +1320,8 @@ struct RawRunStats {
     draw_loss: u64,
     future_observations: u64,
     future_only_addresses: u64,
+    source_stale_addresses: u64,
+    source_stale_conflicts: u64,
     stale_addresses: u64,
     conflicts: u64,
     refused: u64,

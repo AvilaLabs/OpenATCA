@@ -4,7 +4,9 @@
 //! ([`replay_build`], [`replay_raster`]) allocates nothing: its text is written into a stack
 //! buffer. The time text of the frame is an input (the shell formats it).
 
-use crate::core::raw::{raw_targets_at, RawInputError, RawObservationColumns, RawStats};
+use crate::core::raw::{
+    raw_targets_at_with_source_stale, RawInputError, RawObservationColumns, RawStats,
+};
 use crate::core::rows::{
     convert_check, targets_at, Callsigns, ConvertConfig, ConvertStats, RowStore, RowsError,
 };
@@ -235,6 +237,17 @@ pub fn replay_build_raw(
     as_of_ns: i64,
     stamp: &str,
 ) -> Result<(FrameInfo, RawStats), ReplayError> {
+    replay_build_raw_with_source_stale(r, observations, None, as_of_ns, stamp)
+}
+
+/// Raw replay for a shell that has source-stale metadata alongside the stable public columns.
+pub(crate) fn replay_build_raw_with_source_stale(
+    r: &mut Replay,
+    observations: &RawObservationColumns<'_>,
+    source_stale: Option<&[bool]>,
+    as_of_ns: i64,
+    stamp: &str,
+) -> Result<(FrameInfo, RawStats), ReplayError> {
     list_clear(&mut r.list);
     targets_clear(&mut r.set);
     let result = (|| {
@@ -253,7 +266,13 @@ pub fn replay_build_raw(
         {
             return Err(ReplayError::RawBannerDoesNotFit { width, height });
         }
-        let raw = raw_targets_at(observations, as_of_ns, &r.view.proj, &mut r.set)?;
+        let raw = raw_targets_at_with_source_stale(
+            observations,
+            source_stale,
+            as_of_ns,
+            &r.view.proj,
+            &mut r.set,
+        )?;
         let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
         let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
 

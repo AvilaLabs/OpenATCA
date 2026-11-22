@@ -3,7 +3,9 @@
 //! observations available by the as-of time: these columns encode observation time, not receipt
 //! time. This path does not accept tracker rows, infer ownership, extrapolate, or coast. Only the
 //! newest observation at or before the display time is eligible; age at the inclusive finite
-//! cutoff is shown, and anything older is dropped.
+//! cutoff is shown, and anything older is dropped. The CLI can separately supply a bounded
+//! per-row source-stale bit: a stale newest row suppresses its address without fallback, and a
+//! same-time fresh/stale disagreement is withheld as a conflict.
 
 use oa_display::core::project::Projection;
 use oa_display::core::traffic::{
@@ -40,6 +42,10 @@ pub struct RawStats {
     pub observations_in: u64,
     pub future_observations: u64,
     pub future_only_addresses: u64,
+    /// Address groups whose newest unambiguous observation had the ADS-B source stale flag.
+    pub source_stale_addresses: u64,
+    /// Newest same-time groups with both fresh and source-stale rows; withheld as conflicts.
+    pub source_stale_conflicts: u64,
     pub stale_addresses: u64,
     pub invalid_positions: u64,
     pub unprojectable_positions: u64,
@@ -93,7 +99,10 @@ fn same_or_before(a_addr: u32, a_time: i64, b_addr: u32, b_time: i64) -> bool {
 }
 
 /// Validates all column lengths, size, and the address/time sort before changing set.
-fn validate_raw(columns: &RawObservationColumns<'_>) -> Result<usize, RawInputError> {
+fn validate_raw(
+    columns: &RawObservationColumns<'_>,
+    source_stale: Option<&[bool]>,
+) -> Result<usize, RawInputError> {
     let n = columns.t_ns.len();
     for (column, got) in [
         ("addr", columns.addr.len()),
@@ -117,6 +126,15 @@ fn validate_raw(columns: &RawObservationColumns<'_>) -> Result<usize, RawInputEr
             max: MAX_RAW_OBSERVATIONS,
         });
     }
+    if let Some(stale) = source_stale {
+        if stale.len() != n {
+            return Err(RawInputError::ColumnLength {
+                column: "source_stale",
+                got: stale.len(),
+                want: n,
+            });
+        }
+    }
     let mut prev: Option<(u32, i64)> = None;
     for (index, (&addr, &t_ns)) in columns.addr.iter().zip(columns.t_ns).enumerate() {
         if prev.is_some_and(|(a, t)| !same_or_before(a, t, addr, t_ns)) {
@@ -138,7 +156,19 @@ pub fn raw_targets_at(
     proj: &Projection,
     set: &mut TargetSet,
 ) -> Result<RawStats, RawInputError> {
-    let n = validate_raw(columns)?;
+    raw_targets_at_with_source_stale(columns, None, as_of_ns, proj, set)
+}
+
+/// As [`raw_targets_at`], with one optional source-stale bit per row. The plain public columns
+/// stay unchanged for existing callers; raw CLI input can preserve ADS-B source quality here.
+pub(crate) fn raw_targets_at_with_source_stale(
+    columns: &RawObservationColumns<'_>,
+    source_stale: Option<&[bool]>,
+    as_of_ns: i64,
+    proj: &Projection,
+    set: &mut TargetSet,
+) -> Result<RawStats, RawInputError> {
+    let n = validate_raw(columns, source_stale)?;
     targets_clear(set);
     let mut stats = RawStats {
         observations_in: n as u64,
@@ -180,9 +210,20 @@ pub fn raw_targets_at(
         };
         let mut newest_payload = None;
         let mut conflict = false;
+        let mut source_stale_conflict = false;
+        let mut first_source_stale = None;
         for index in start..end {
             if columns.t_ns.get(index).copied() != Some(newest_time) {
                 continue;
+            }
+            let row_source_stale = source_stale
+                .and_then(|stale| stale.get(index))
+                .copied()
+                .unwrap_or(false);
+            if first_source_stale.is_some_and(|seen| seen != row_source_stale) {
+                source_stale_conflict = true;
+            } else if first_source_stale.is_none() {
+                first_source_stale = Some(row_source_stale);
             }
             let payload = columns
                 .lat_e7
@@ -191,7 +232,9 @@ pub fn raw_targets_at(
                 .zip(columns.alt_ft.get(index))
                 .zip(columns.gs_dkt.get(index))
                 .zip(columns.track_ddeg.get(index))
-                .map(|((((&lat, &lon), &alt), &gs), &track)| (lat, lon, alt, gs, track));
+                .map(|((((&lat, &lon), &alt), &gs), &track)| {
+                    (lat, lon, alt, gs, track, row_source_stale)
+                });
             let Some(payload) = payload else {
                 return Err(RawInputError::ColumnLength {
                     column: "observation",
@@ -201,22 +244,32 @@ pub fn raw_targets_at(
             };
             if newest_payload.is_some_and(|previous| previous != payload) {
                 conflict = true;
-                break;
+            } else if newest_payload.is_none() {
+                newest_payload = Some(payload);
             }
-            newest_payload = Some(payload);
         }
         if conflict {
             stats.conflicting_timestamps = stats.conflicting_timestamps.saturating_add(1);
+            if source_stale_conflict {
+                stats.source_stale_conflicts = stats.source_stale_conflicts.saturating_add(1);
+            }
             start = end;
             continue;
         }
-        let Some((lat_e7, lon_e7, alt_ft, gs_dkt, track_ddeg)) = newest_payload else {
+        let Some((lat_e7, lon_e7, alt_ft, gs_dkt, track_ddeg, newest_source_stale)) =
+            newest_payload
+        else {
             return Err(RawInputError::ColumnLength {
                 column: "observation",
                 got: start,
                 want: n,
             });
         };
+        if newest_source_stale {
+            stats.source_stale_addresses = stats.source_stale_addresses.saturating_add(1);
+            start = end;
+            continue;
+        }
         if as_of_ns
             .checked_sub(newest_time)
             .is_none_or(|age| age > RAW_STALE_CUTOFF_NS)
@@ -256,4 +309,30 @@ pub fn raw_targets_at(
     stats.refused_capacity = u64::from(targets_refused(set));
     stats.refused_malformed = u64::from(targets_malformed(set));
     Ok(stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{validate_raw, RawInputError, RawObservationColumns};
+
+    #[test]
+    fn optional_source_stale_column_must_match_the_observation_count() {
+        let columns = RawObservationColumns {
+            t_ns: &[],
+            addr: &[],
+            lat_e7: &[],
+            lon_e7: &[],
+            alt_ft: &[],
+            gs_dkt: &[],
+            track_ddeg: &[],
+        };
+        assert_eq!(
+            validate_raw(&columns, Some(&[true])),
+            Err(RawInputError::ColumnLength {
+                column: "source_stale",
+                got: 1,
+                want: 0,
+            })
+        );
+    }
 }
