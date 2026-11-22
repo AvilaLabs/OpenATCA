@@ -84,6 +84,16 @@ fn main() -> ExitCode {
         "docs_unparsed {} docs_refused {}",
         rep.docs_unparsed, rep.docs_refused
     );
+    if let Some(scan) = &rep.merge {
+        println!(
+            "input_scan files={} decoded_bytes={} frame_and_gzip_errors={} sealed_frames={} sealed_message_rows={}",
+            scan.files,
+            scan.bytes,
+            oa_replay::errors_total(&scan.errors),
+            scan.sealed_window_dropped,
+            rep.sealed_window_dropped.saturating_sub(scan.sealed_window_dropped),
+        );
+    }
     println!(
         "rows {} lag_ms min {} max {}",
         rep.lag.rows, rep.lag.min_ms, rep.lag.max_ms

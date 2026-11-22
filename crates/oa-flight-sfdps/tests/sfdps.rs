@@ -233,7 +233,13 @@ fn frames_outside_the_window_are_skipped_and_the_run_ends_at_its_end() {
     let base = parse_iso_ms(b"2030-01-02T03:05:05.000Z").unwrap();
     let mut bytes = Vec::new();
     for k in 0..6 {
-        bytes.extend(frame(k, base + k as i64 * 1000, &x));
+        let time = base + k as i64 * 1000;
+        if k == 2 {
+            let mut corrupt = frame(99, time, &x);
+            *corrupt.last_mut().expect("encoded frame has a CRC") ^= 1;
+            bytes.extend(corrupt);
+        }
+        bytes.extend(frame(k, time, &x));
     }
     std::fs::write(dir.join("a.oaf"), bytes).unwrap();
     let from = (base + 1000) * 1_000_000;
@@ -250,6 +256,10 @@ fn frames_outside_the_window_are_skipped_and_the_run_ends_at_its_end() {
         rep.frames_after_end, 1,
         "the run ends at the first frame past the window"
     );
+    let scan = rep
+        .merge
+        .expect("window-limited run retains reader diagnostics");
+    assert_eq!(scan.errors[oa_replay::ErrKind::FrameCrc as usize], 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

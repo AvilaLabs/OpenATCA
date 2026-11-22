@@ -111,10 +111,11 @@ pub struct ReplayReport {
     /// Plan view states at the end of the run, over every view of every flight.
     pub view_states: [u64; ST_COUNT],
     pub removed_by_reason: [u64; REM_COUNT],
+    /// Reader diagnostics through the stopping point, including a normal bounded-window stop.
+    /// Decoded byte counts may include buffered data beyond the stopping frame.
     pub merge: Option<MergeReport>,
     /// SFDPS frames (by receive time) and rows (by their own time) left out because they are in a
-    /// sealed window (OA-SEAL-014). The frame count comes from the merge, so a run stopped early
-    /// by `--to` does not include the frames dropped before the stop.
+    /// sealed window (OA-SEAL-014). A bounded run counts only drops encountered before stopping.
     pub sealed_window_dropped: u64,
     pub positions: Positions,
     pub table: FlightTable,
@@ -389,10 +390,11 @@ pub fn replay_sfdps_counted(
     *sealed += report.sealed_window_dropped;
     rep.sealed_window_dropped = *sealed;
     match res {
-        Ok(()) => rep.merge = Some(report),
+        Ok(()) => {}
         Err(e) if ended && e.to_string() == WINDOW_END => {}
         Err(e) => return Err(e),
     }
+    rep.merge = Some(report);
     before_op(&table, &positions, i64::MAX);
     drain_refusals(&mut table, &mut rep, &mut positions);
     drain_removals(&mut table, &mut rep, &mut positions);

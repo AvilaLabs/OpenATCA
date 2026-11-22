@@ -6109,6 +6109,7 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-FLT-019** A replay reads SFDPS recordings in receive order into the record, counts the lag of every message (received
   minus stamped), skips frames before the window and ends at the first frame after it, and announces each operation's
   availability time to the caller before applying it, so a question asked as of a time sees only what had aged in.
+  The report retains reader errors and sealed-frame counts encountered before a bounded window ends.
 - **OA-FLT-020** The climbing and descending encounters near 1,000 ft (airborne, not at the vertical minimum, 900 ft up to
   the record volume apart at the closest approach, either aircraft at 300 fpm or more) are each split once, by the
   clearances of the two aircraft in the flight record at the closest approach: cleared 1,000 ft or more apart is a

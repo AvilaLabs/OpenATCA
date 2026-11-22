@@ -78,6 +78,8 @@ fn a_refusal_prints_the_drop_line_and_a_stop_at_to_counts_the_frames_the_merge_d
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(o.status.success(), "{err}");
     assert!(err.contains("sealed-window rows dropped: 1"), "{err}");
+    let report = String::from_utf8_lossy(&o.stdout);
+    assert!(report.contains("frame_and_gzip_errors=0 sealed_frames=1 sealed_message_rows=0"));
 }
 
 // REQ: OA-SEAL-014
