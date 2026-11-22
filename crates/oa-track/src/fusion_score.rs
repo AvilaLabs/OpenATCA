@@ -588,17 +588,43 @@ pub struct Ident {
 pub fn identify(run: &RunOut) -> Ident {
     let mut per_key: BTreeMap<u32, Vec<(i64, u32)>> = BTreeMap::new();
     for i in 0..run.assign.t_ns.len() {
-        if let (Some(&t), Some(&k), Some(&l)) = (
+        if let (Some(&t), Some(&key), Some(&label)) = (
             run.assign.t_ns.get(i),
             run.assign.key.get(i),
             run.assign.label.get(i),
         ) {
-            per_key.entry(k).or_default().push((t, l));
+            per_key.entry(key).or_default().push((t, label));
         }
     }
-    for &k in &run.out.addr {
-        per_key.entry(k).or_default();
+    for &key in &run.out.addr {
+        per_key.entry(key).or_default();
     }
+    identify_per_key(per_key)
+}
+
+/// Identifies the supplied track keys using only their plot-assignment evidence. This is the
+/// same identity rule as [`identify`], scoped to a chosen track roster (for example, a final live
+/// snapshot); labels are scoring evidence and are never consulted by fusion decisions.
+pub fn identify_tracks(assign: &AssignLog, track_keys: &[u32]) -> Ident {
+    let selected: BTreeSet<u32> = track_keys.iter().copied().collect();
+    let mut per_key: BTreeMap<u32, Vec<(i64, u32)>> = BTreeMap::new();
+    for &key in track_keys {
+        per_key.entry(key).or_default();
+    }
+    for i in 0..assign.t_ns.len() {
+        if let (Some(&t), Some(&k), Some(&l)) =
+            (assign.t_ns.get(i), assign.key.get(i), assign.label.get(i))
+        {
+            if selected.contains(&k) {
+                per_key.entry(k).or_default().push((t, l));
+            }
+        }
+    }
+    identify_per_key(per_key)
+}
+
+/// Applies the identity adjudication shared by full-run and selected-snapshot scoring.
+fn identify_per_key(mut per_key: BTreeMap<u32, Vec<(i64, u32)>>) -> Ident {
     let mut id = Ident::default();
     // Candidates per truth address: (is address key, true plots, key).
     let mut claims: BTreeMap<u32, Vec<(bool, usize, u32)>> = BTreeMap::new();
@@ -801,4 +827,45 @@ pub fn count_kind(kinds: &[u8], kind: u8) -> usize {
 /// Plots that are false or split, for the report.
 pub fn false_and_split(kinds: &[u8]) -> (usize, usize) {
     (count_kind(kinds, KIND_FALSE), count_kind(kinds, KIND_SPLIT))
+}
+
+#[cfg(test)]
+mod identify_tracks_tests {
+    use super::*;
+
+    #[test]
+    fn identity_uses_only_the_supplied_snapshot_keys() {
+        let radar_a = KEY_RADAR_BASE + 7;
+        let radar_false = KEY_RADAR_BASE + 8;
+        let radar_duplicate = KEY_RADAR_BASE + 9;
+        let excluded = KEY_RADAR_BASE + 10;
+        let mut assign = AssignLog::default();
+        for (t_ns, key, label) in [
+            (1, radar_a, 101),
+            (2, radar_a, 102),
+            (3, radar_a, 101),
+            (4, radar_a, u32::MAX),
+            (5, radar_false, u32::MAX),
+            (6, radar_false, 103),
+            (7, radar_false, u32::MAX),
+            (8, radar_duplicate, 101),
+            (9, excluded, 104),
+        ] {
+            assign.t_ns.push(t_ns);
+            assign.key.push(key);
+            assign.label.push(label);
+            assign.radar.push(0);
+            assign.how.push(0);
+        }
+
+        let id = identify_tracks(&assign, &[101, radar_a, radar_false, radar_duplicate]);
+        assert_eq!(id.tracks, 4);
+        assert_eq!(id.truth_of.get(&101), Some(&101));
+        assert_eq!(id.truth_of.values().filter(|&&addr| addr == 101).count(), 1);
+        assert_eq!(id.duplicates, 2);
+        assert_eq!(id.false_tracks, 1);
+        assert_eq!(id.false_applied, 1);
+        assert_eq!(id.swaps, 2);
+        assert!(!id.truth_of.values().any(|&addr| addr == 104));
+    }
 }

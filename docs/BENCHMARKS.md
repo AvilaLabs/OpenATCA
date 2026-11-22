@@ -240,3 +240,15 @@ measured duration or the comparison is rejected. Output-overflow seconds have an
 cohort count. The count covers only the confirmed, known-address ADS-B cohort live at cutover;
 it counts non-coasting tracker rows and is a continuity proxy, not a sensor-freshness score.
 Anonymous radar tracks and reacquisition timing are not scored by this mode.
+
+For example, `oa-perf one --n 8192 --warmup 60 --duration 15 --truth-score` enables the fusion
+assignment log (bounded at 4,194,304 rows) and
+scores identity only for confirmed tracks live at the final run time. It reuses the scorer's
+assignment-label majority rule, with cumulative assignment evidence from warm-up and measurement
+filtered to those final keys. The denominator is distinct known truth aircraft offered during
+measurement; duplicate, false-track, false-assignment and swap counts are reported separately.
+The log is opt-in because it adds memory and timing overhead. Truncated runs, unknown offered
+labels, incomplete assignment columns or log overflow produce an explicit unavailable result.
+This is a final-snapshot identity diagnostic, not a trajectory-accuracy score; it cannot report
+anonymous tracks that ended before the snapshot. It currently cannot be combined with
+`--adsb-dropout`.

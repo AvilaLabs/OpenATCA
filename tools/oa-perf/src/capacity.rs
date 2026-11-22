@@ -12,12 +12,12 @@ use std::collections::{BTreeSet, HashMap};
 use std::time::Instant;
 
 use oa_track::fusion::{
-    fusion_adsb, fusion_advance, fusion_bookkeeping_len, fusion_buffers, fusion_config, fusion_new,
-    fusion_plots, fusion_stats, fusion_take_radar_tracks, fusion_tracker, fusion_tracker_config,
-    fusion_tracker_stats, FusionStats,
+    fusion_adsb, fusion_advance, fusion_assign_log, fusion_bookkeeping_len, fusion_buffers,
+    fusion_config, fusion_new, fusion_plots, fusion_stats, fusion_take_radar_tracks,
+    fusion_tracker, fusion_tracker_config, fusion_tracker_stats, FusionStats,
 };
-use oa_track::fusion_params::KEY_RADAR_BASE;
-use oa_track::fusion_score::{Kind, EPOCH_NS};
+use oa_track::fusion_params::{ASSIGN_LOG_MAX, KEY_RADAR_BASE};
+use oa_track::fusion_score::{identify_tracks, Kind, EPOCH_NS};
 use oa_track::{
     output_clear, output_new, tracker_bytes, tracker_counts, tracker_live_iter, Measurement,
     TrackerConfig, TrackerStats, DEFAULT_CONFIG, O_COAST, O_TICK, REFUSE_NAMES,
@@ -47,6 +47,28 @@ pub struct CapCfg {
     pub early_stop: bool,
     /// Optional measured-window ADS-B outage, in seconds, beginning at the warm-up boundary.
     pub adsb_dropout_s: Option<i64>,
+    /// Opt-in bounded final-snapshot identity summary from plot-assignment evidence.
+    pub truth_score: bool,
+}
+
+/// Truth-derived identity summary for final confirmed tracks. A7.2: cold report data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TruthSnapshotScore {
+    /// Confirmed track keys live at the final run time.
+    pub snapshot_tracks: usize,
+    /// Distinct known truth aircraft offered during the measured interval.
+    pub offered_aircraft: usize,
+    /// Distinct offered truth aircraft represented by a final snapshot track.
+    pub matched_aircraft: usize,
+    /// Offered truth aircraft with no final snapshot track matched to them.
+    pub missing_aircraft: usize,
+    /// Duplicate final tracks for a truth identity, per fusion_score::identify.
+    pub duplicate_tracks: u64,
+    pub false_tracks: u64,
+    pub false_applied: u64,
+    pub swaps: u64,
+    /// Assignment evidence spans warm-up and measured traffic, but is restricted to snapshot keys.
+    pub assignment_rows: usize,
 }
 
 /// What a capacity run measured.
@@ -114,6 +136,10 @@ pub struct CapResult {
     pub continuity_noncoast: Vec<(i64, Option<usize>)>,
     /// Exact confirmed ADS-B addresses in the warm-up cutover cohort. Used to verify paired runs.
     pub continuity_addresses: Vec<u32>,
+    /// Available only when `CapCfg::truth_score` is enabled and complete evidence exists.
+    pub truth_score: Option<TruthSnapshotScore>,
+    /// The truth score was requested but could not be computed honestly.
+    pub truth_score_unavailable: Option<&'static str>,
     pub radar_track_recs_taken: u64,
     pub bookkeeping: (usize, usize),
     pub buffers_stable: bool,
@@ -505,8 +531,70 @@ fn offered_plots(coverage: &mut OfferedCoverage, radar_plots: &[Vec<oa_track::ra
     }
 }
 
+/// Scores final confirmed keys from their cumulative assignment evidence. Work is bounded by the
+/// generated aircraft count, final live-key count and `ASSIGN_LOG_MAX`.
+fn truth_snapshot_score(
+    fusion: &oa_track::fusion::Fusion,
+    offered: &OfferedCoverage,
+) -> Result<TruthSnapshotScore, &'static str> {
+    if fusion_stats(fusion).assign_log_overflow > 0 {
+        return Err("assignment log overflowed; identity score unavailable");
+    }
+    if offered.unknown > 0 {
+        return Err("unknown offered labels prevent a complete truth denominator");
+    }
+    if offered.unique == 0 {
+        return Err("no known truth aircraft were offered during measurement");
+    }
+    let assign = fusion_assign_log(fusion);
+    if assign.t_ns.len() > ASSIGN_LOG_MAX
+        || assign.key.len() != assign.t_ns.len()
+        || assign.label.len() != assign.t_ns.len()
+        || assign.radar.len() != assign.t_ns.len()
+        || assign.how.len() != assign.t_ns.len()
+    {
+        return Err("assignment log columns are incomplete or exceed their bound");
+    }
+    let keys: Vec<u32> = tracker_live_iter(fusion_tracker(fusion))
+        .map(|(key, _)| key)
+        .collect();
+    let identified = identify_tracks(assign, &keys);
+    let offered_truth: BTreeSet<u32> = offered
+        .by_addr
+        .iter()
+        .filter_map(|(&addr, &index)| {
+            offered
+                .seen
+                .get(index)
+                .copied()
+                .unwrap_or(false)
+                .then_some(addr)
+        })
+        .collect();
+    let matched_truth: BTreeSet<u32> = identified
+        .truth_of
+        .values()
+        .filter(|&&addr| offered_truth.contains(&addr))
+        .copied()
+        .collect();
+    Ok(TruthSnapshotScore {
+        snapshot_tracks: keys.len(),
+        offered_aircraft: offered_truth.len(),
+        matched_aircraft: matched_truth.len(),
+        missing_aircraft: offered_truth.len().saturating_sub(matched_truth.len()),
+        duplicate_tracks: identified.duplicates,
+        false_tracks: identified.false_tracks,
+        false_applied: identified.false_applied,
+        swaps: identified.swaps,
+        assignment_rows: assign.t_ns.len(),
+    })
+}
+
 /// Runs the traffic through the layer and measures it.
 pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
+    if cfg.truth_score && cfg.adsb_dropout_s.is_some() {
+        return Err("truth-score and dropout cannot be combined".to_string());
+    }
     if cfg.warmup_s < 0 {
         return Err("capacity warm-up cannot be negative".to_string());
     }
@@ -542,7 +630,8 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let mut traffic = Traffic::new(&cfg.traffic)?;
     let sites = traffic.sites();
     let base = tracker_cfg(cfg.max_tracks, n);
-    let fcfg = fusion_config(fusion_tracker_config(&base, &sites));
+    let mut fcfg = fusion_config(fusion_tracker_config(&base, &sites));
+    fcfg.log_assign = cfg.truth_score;
     let mut f = fusion_new(&fcfg, &sites).map_err(|e| e.to_string())?;
     // OA-GEN traffic is fixed truth: prebuild the bounded address index and coverage bits before
     // any core timing. Multiple radar labels for one aircraft intentionally count once.
@@ -711,6 +800,19 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let (tent, conf) = tracker_counts(fusion_tracker(&f));
     let md = measure_done.max(1) as f64;
     let advance_ms = dist_of(&adv_ms);
+    let (truth_score, truth_score_unavailable) = if !cfg.truth_score {
+        (None, None)
+    } else if truncated || stopped_early || measure_done != cfg.measure_s {
+        (
+            None,
+            Some("run did not complete the full measured interval"),
+        )
+    } else {
+        match truth_snapshot_score(&f, &offered) {
+            Ok(score) => (Some(score), None),
+            Err(reason) => (None, Some(reason)),
+        }
+    };
     Ok(CapResult {
         n,
         layout: cfg.traffic.layout,
@@ -759,6 +861,8 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         continuity_cohort: continuity_cohort.len(),
         continuity_noncoast,
         continuity_addresses: continuity_cohort.into_iter().collect(),
+        truth_score,
+        truth_score_unavailable,
         radar_track_recs_taken: recs_taken,
         bookkeeping: fusion_bookkeeping_len(&f),
         buffers_stable: fusion_buffers(&f) == buffers0,
@@ -818,6 +922,28 @@ pub fn cap_kv(r: &CapResult) -> Kv {
                 .filter(|(_, n)| n.is_none())
                 .count(),
         );
+    }
+    if let Some(score) = r.truth_score {
+        kv.put("truth_score.status", "available");
+        kv.put(
+            "truth_score.snapshot_time_s",
+            r.warmup_s.saturating_add(r.measure_s_done),
+        );
+        kv.put("truth_score.snapshot_tracks", score.snapshot_tracks);
+        kv.put("truth_score.offered_aircraft", score.offered_aircraft);
+        kv.put("truth_score.matched_aircraft", score.matched_aircraft);
+        kv.put("truth_score.missing_aircraft", score.missing_aircraft);
+        kv.put("truth_score.duplicate_tracks", score.duplicate_tracks);
+        kv.put("truth_score.false_tracks", score.false_tracks);
+        kv.put("truth_score.false_applied", score.false_applied);
+        kv.put("truth_score.swaps", score.swaps);
+        kv.put(
+            "truth_score.assignment_rows_run_cumulative",
+            score.assignment_rows,
+        );
+    } else if let Some(reason) = r.truth_score_unavailable {
+        kv.put("truth_score.status", "unavailable");
+        kv.put("truth_score.reason", reason);
     }
     kv.put("age_unknown_rows", r.age_unknown);
     kv.put_dist("age_tick_rows", "ms", &r.age_tick_ms);
@@ -1045,6 +1171,25 @@ pub fn cap_text(r: &CapResult) -> String {
             r.adsb_dropout_reports, r.continuity_cohort, uncertain
         ));
     }
+    if let Some(score) = r.truth_score {
+        s.push_str(&format!(
+            "  truth-derived final snapshot at t={} s: {} confirmed keys, {} / {} distinct known measured-window truth aircraft matched, {} missing; {} duplicate tracks, {} false tracks, {} false assignments, {} swaps. Identity uses cumulative assignments since run start, filtered to final snapshot keys ({} logged rows total). Timings include assignment logging.\n",
+            r.warmup_s.saturating_add(r.measure_s_done),
+            score.snapshot_tracks,
+            score.matched_aircraft,
+            score.offered_aircraft,
+            score.missing_aircraft,
+            score.duplicate_tracks,
+            score.false_tracks,
+            score.false_applied,
+            score.swaps,
+            score.assignment_rows
+        ));
+    } else if let Some(reason) = r.truth_score_unavailable {
+        s.push_str(&format!(
+            "  truth-derived final snapshot: unavailable ({reason})\n"
+        ));
+    }
     let moved: Vec<String> = r
         .loss()
         .into_iter()
@@ -1180,6 +1325,7 @@ mod tests {
             max_wall_s: 120.0,
             early_stop: false,
             adsb_dropout_s: None,
+            truth_score: false,
         }
     }
 
@@ -1221,6 +1367,25 @@ mod tests {
         cfg = small(20, 2, 4);
         cfg.adsb_dropout_s = Some(5);
         assert!(run_capacity(&cfg).is_err());
+    }
+
+    #[test]
+    fn opt_in_truth_score_uses_the_final_confirmed_snapshot() {
+        let mut cfg = small(80, 10, 5);
+        cfg.truth_score = true;
+        let result = run_capacity(&cfg).unwrap();
+        let score = result.truth_score.expect("complete assignment evidence");
+        assert_eq!(result.truth_score_unavailable, None);
+        assert!(score.snapshot_tracks > 0);
+        assert!(score.assignment_rows > 0);
+        assert!(score.offered_aircraft > 0);
+        assert_eq!(
+            score.matched_aircraft + score.missing_aircraft,
+            score.offered_aircraft
+        );
+        assert_eq!(result.fusion.assign_log_overflow, 0);
+        assert!(cap_text(&result).contains("truth-derived final snapshot"));
+        assert!(cap_kv(&result).get("truth_score.status").is_some());
     }
 
     // REQ: OA-PRF-012

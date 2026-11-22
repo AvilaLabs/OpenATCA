@@ -41,6 +41,7 @@ flags (defaults in brackets):
   --refine K         bisection steps between the knee and the first failing size [2]
   --seed N           traffic seed [1]
   --adsb-dropout S   opt-in paired run: withhold ADS-B for S measured seconds, then resume
+  --truth-score      opt-in final-snapshot truth identity summary (bounded assignment log)
   --no-clip --no-overload   leave a part out
   --no-early-stop    feed the whole run even when it is far slower than real time";
 
@@ -66,6 +67,7 @@ pub struct Opts {
     pub no_overload: bool,
     pub no_early_stop: bool,
     pub adsb_dropout_s: Option<i64>,
+    pub truth_score: bool,
 }
 
 impl Default for Opts {
@@ -90,6 +92,7 @@ impl Default for Opts {
             no_overload: false,
             no_early_stop: false,
             adsb_dropout_s: None,
+            truth_score: false,
         }
     }
 }
@@ -169,6 +172,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             "--refine" => o.refine = num(a, it.next())?,
             "--seed" => o.seed = num(a, it.next())?,
             "--adsb-dropout" => o.adsb_dropout_s = Some(num(a, it.next())?),
+            "--truth-score" => o.truth_score = true,
             "--no-clip" => o.no_clip = true,
             "--no-overload" => o.no_overload = true,
             "--no-early-stop" => o.no_early_stop = true,
@@ -192,6 +196,12 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             );
         }
     }
+    if o.truth_score && o.cmd != "one" {
+        return Err("--truth-score is available with `one` only".to_string());
+    }
+    if o.truth_score && o.adsb_dropout_s.is_some() {
+        return Err("--truth-score cannot yet be combined with --adsb-dropout".to_string());
+    }
     check_times(&o)?;
     parse_radars(&o.radars)?;
     Ok(o)
@@ -214,6 +224,7 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
         max_wall_s: o.max_wall,
         early_stop: !o.no_early_stop,
         adsb_dropout_s: o.adsb_dropout_s,
+        truth_score: o.truth_score,
     })
 }
 
@@ -293,6 +304,8 @@ fn one(o: &Opts, n: usize) -> Result<(), String> {
     print!("{text}");
     let t = if o.adsb_dropout_s.is_some() {
         format!("{}_n{n}_dropout", o.layout.name())
+    } else if o.truth_score {
+        format!("{}_n{n}_truthscore", o.layout.name())
     } else {
         tag(o, n)
     };
@@ -641,6 +654,9 @@ mod tests {
         assert!(parse_args(&a("nothing")).is_err());
         assert!(parse_args(&a("one --radars e,x")).is_err());
         assert!(parse_args(&a("one --n")).is_err());
+        assert!(parse_args(&a("one --truth-score")).unwrap().truth_score);
+        assert!(parse_args(&a("sweep --truth-score")).is_err());
+        assert!(parse_args(&a("one --truth-score --adsb-dropout 5")).is_err());
         assert_eq!(cap_cfg(&o, 20).unwrap().traffic.n, 20);
     }
 
