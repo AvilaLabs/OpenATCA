@@ -21,7 +21,8 @@ use oa_safety::inhibit::{
     suppressed_overflow, Event, EventKind, InhibitRequest, InhibitTable,
 };
 use oa_safety::net::{
-    net_status, state_report, state_table_new, Area, NetId, NetReport, Reason, StateTable,
+    net_status, state_report, state_table_new, Area as NetArea, NetId, NetReport, Reason,
+    StateTable,
 };
 use oa_sealed::Sealed;
 use oa_sha256::{sha256, to_hex};
@@ -691,7 +692,7 @@ pub fn track_and_alert(
             NetId::Msaw,
             NetReport::Degraded {
                 reason: Reason::InputMissing,
-                area: Area::Whole,
+                area: NetArea::Whole,
                 count: u32::try_from(f.capacity_refused_pending).unwrap_or(u32::MAX),
             },
             last_fault_ns,
