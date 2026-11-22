@@ -182,13 +182,14 @@ fn main() -> ExitCode {
             };
         }
     };
-    let fingerprint_quality = input_fingerprint.as_ref().map(|_| {
+    let fingerprint_quality = input_fingerprint.as_ref().map(|fingerprint| {
         let source_rejected = errors_total(&report.errors);
         let semantic_errors = errors_total(&p.errors).saturating_sub(source_rejected);
         let partial = source_rejected > 0
             || report.sealed_window_dropped > 0
             || p.sealed_window_dropped > 0
             || semantic_errors > 0
+            || fingerprint.bridge_reject_frames() > 0
             || p.adsb.stats.future_refused > 0
             || p.rows_out_of_order.iter().any(|&n| n != 0)
             || p.rows_refused_full.iter().any(|&n| n != 0);
@@ -301,9 +302,10 @@ fn print_fingerprint(
         .map(|n| n.to_string())
         .unwrap_or_else(|| "unknown".to_string());
     eprintln!(
-        "input_fingerprint version=1 status={status} pipeline_frames={} pipeline_payload_bytes={} sha256={digest} source_rejected={source_rejected} source_sealed_drops={source_sealed} semantic_sealed_drops={semantic_sealed} semantic_errors={semantic_errors} note=diagnostic_only_not_completeness_or_cross_clock_equivalence",
+        "input_fingerprint version=1 status={status} pipeline_frames={} pipeline_payload_bytes={} sha256={digest} source_rejected={source_rejected} source_sealed_drops={source_sealed} semantic_sealed_drops={semantic_sealed} semantic_errors={semantic_errors} bridge_reject_frames={} note=diagnostic_only_not_completeness_or_cross_clock_equivalence",
         fingerprint.frames(),
         fingerprint.payload_bytes(),
+        fingerprint.bridge_reject_frames(),
     );
 }
 

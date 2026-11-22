@@ -395,6 +395,69 @@ fn verify_end_accepts_the_complete_recording_and_refuses_a_clean_truncation() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+// REQ: OA-RPL-277
+#[test]
+fn bridge_rejects_make_witness_verification_partial_without_rejecting_status_frames() {
+    let dir = scratch("verify-bridge-refusal");
+    let prefix_path = dir.join("prefix.oaf");
+    let status_path = dir.join("status.oaf");
+    let reject_path = dir.join("reject.oaf");
+    let t0 = DAY * 1_000_000;
+    let prefix = frame(3, 0, t0, b"state=up\n");
+    let suffix = |kind, payload| frame(kind, 1, t0 + NS, payload);
+    std::fs::write(&prefix_path, &prefix).unwrap();
+    std::fs::write(
+        &status_path,
+        [prefix.as_slice(), &suffix(3, b"state=up\n")].concat(),
+    )
+    .unwrap();
+    std::fs::write(
+        &reject_path,
+        [
+            prefix.as_slice(),
+            &suffix(2, b"refused synthetic message\n"),
+        ]
+        .concat(),
+    )
+    .unwrap();
+
+    let inspect = |path: &std::path::Path, expected_status, bridge_rejects| {
+        let (code, out, err) = run_bin(&["--input-fingerprint", "--sfdps", path.to_str().unwrap()]);
+        assert_eq!(code, 0, "{err}");
+        assert!(err.contains(&format!("status={expected_status} ")), "{err}");
+        assert!(
+            err.contains(&format!("bridge_reject_frames={bridge_rejects} ")),
+            "{err}"
+        );
+        fingerprint_witness(&err, &out)
+    };
+    let prefix = inspect(&prefix_path, "complete", 0);
+    let status = inspect(&status_path, "complete", 0);
+    let reject = inspect(&reject_path, "partial", 1);
+    assert_eq!((prefix.0, status.0, reject.0), (1, 2, 2));
+
+    let verify = |path: &std::path::Path, flag, witness: &(u64, String, String)| {
+        run_bin(&[
+            flag,
+            &witness.0.to_string(),
+            &witness.1,
+            &witness.2,
+            "--sfdps",
+            path.to_str().unwrap(),
+        ])
+    };
+    let (code, out, err) = verify(&status_path, "--verify-end", &status);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("final state_digest="), "{out}");
+    for (flag, witness) in [("--verify-prefix", &prefix), ("--verify-end", &reject)] {
+        let (code, out, err) = verify(&reject_path, flag, witness);
+        assert_eq!(code, 1, "{err}");
+        assert!(out.is_empty(), "{out}");
+        assert!(err.contains("replay is partial or incomplete"), "{err}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 // REQ: OA-SEAL-014
 #[test]
 fn a_receive_time_drop_marks_the_input_fingerprint_partial() {

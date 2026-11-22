@@ -4,6 +4,7 @@
 //! It is not a source identity, completeness proof, or equivalence claim across independently
 //! clocked feeds. Payload bytes are absorbed into the digest and are never formatted or logged.
 
+use oa_feed::Kind;
 use oa_sha256::{Digest, Sha256};
 
 use crate::source::Merged;
@@ -16,6 +17,7 @@ pub struct InputFingerprint {
     hash: Option<Sha256>,
     frames: u64,
     payload_bytes: u64,
+    bridge_reject_frames: u64,
 }
 
 impl Default for InputFingerprint {
@@ -26,6 +28,7 @@ impl Default for InputFingerprint {
             hash: ok.then_some(hash),
             frames: 0,
             payload_bytes: 0,
+            bridge_reject_frames: 0,
         }
     }
 }
@@ -33,6 +36,9 @@ impl Default for InputFingerprint {
 impl InputFingerprint {
     /// Absorb one validated frame that was not omitted by the pipeline's sealed-document gate.
     pub fn observe(&mut self, frame: &Merged<'_>) {
+        if frame.kind == Kind::Reject {
+            self.bridge_reject_frames = self.bridge_reject_frames.saturating_add(1);
+        }
         let Some(hash) = self.hash.as_mut() else {
             return;
         };
@@ -76,6 +82,11 @@ impl InputFingerprint {
         self.payload_bytes
     }
 
+    /// Admitted REJECT markers that record an upstream message refusal.
+    pub fn bridge_reject_frames(&self) -> u64 {
+        self.bridge_reject_frames
+    }
+
     /// Final digest, or `None` if the SHA-256 implementation's input limit was exceeded.
     pub fn finalize(&self) -> Option<Digest> {
         self.hash.clone().map(Sha256::finalize)
@@ -86,7 +97,6 @@ impl InputFingerprint {
 mod tests {
     use super::*;
     use crate::pipeline::FeedKind;
-    use oa_feed::Kind;
 
     fn frame<'a>(payload: &'a [u8], recv_ns: i64, mono_ns: Option<u64>, seq: u64) -> Merged<'a> {
         Merged {

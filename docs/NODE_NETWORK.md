@@ -147,7 +147,7 @@ membership this needs no outside witness network.
 For offline replay triage, `oa-replay --input-fingerprint` can emit a bounded ordered-input
 digest alongside the existing state digest. It hashes validated metadata, replay stream identity,
 and payload bytes after the frame and document sealed-window checks. It counts source framing
-and gzip refusals, pipeline errors, and sealed drops separately. The result is partial if the
+and gzip refusals, bridge REJECT markers, pipeline errors, and sealed drops separately. The result is partial if the
 replay encounters a refusal or a drop, and incomplete if it stops on an error. The recorded
 receive and monotonic timestamps are input fields. Compare complete local runs with the same
 replay settings and stream grouping. A frame dropped by a document guard may still advance the
