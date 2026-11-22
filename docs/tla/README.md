@@ -155,3 +155,48 @@ They do not cover streams with several jumps, a regression smaller than TOL, lon
 or three feeds that all jump.
 
 The model follows the rules in `core/clock.rs`; no tool checks that the two stay in step.
+
+## RecoveryProtocol: checkpoint recovery and stale-publication fence
+
+`RecoveryProtocol.tla` is a bounded protocol model for the checkpoint recovery and stale
+publication rejection named in `docs/NODE_NETWORK.md` section 11. It models two replicas and an
+external generation value. Only an explicit `AdvanceAuthority` action can raise that value; the
+model has no election, quorum, transfer protocol, or way to infer authority from peer messages.
+
+A publication carries a peer identity, generation, replay watermark, and abstract checkpoint
+metadata. The `CheckpointVerified` predicate stands for the combined result of peer identity,
+authentication, and binding the checkpoint's generation and watermark to the publication. It is
+not a signature, parser, hash, Merkle, or on-disk format model. The network can hold a bounded
+message, delay its delivery,
+duplicate it into another slot, or deliver it after an authority change or receiver restart.
+`NetworkOffer` injects valid and invalid offers so the model can check refusal behavior. A crash
+clears runtime serving state but preserves durable and high-water values; restart serves only a
+verified durable checkpoint for the currently authorized generation.
+
+The finite configuration uses generations 1..2, watermarks 1..2, two nodes, and two message
+slots. It checks:
+
+* `NoRegression`: accepted generation and watermark high-water marks never decrease.
+* `NoUnverifiedServing`: an unverified or mismatched checkpoint cannot become serving state.
+* `NoStaleServing`: serving state uses the currently authorized generation, including after
+  crash/restart.
+* `OutputAtHighWater` and `DurableAtHighWater`: serving and durable state equal the node's
+  retained accepted high-water marks; replayed duplicates cannot replace them.
+* `TypeOK`: variables stay within the finite model bounds.
+
+Run the intended fence configuration from this directory with:
+
+```sh
+java -cp /path/to/tla2tools.jar tlc2.TLC -config RecoveryProtocol.cfg RecoveryProtocol.tla
+```
+
+`RecoveryProtocol_WeakFence.cfg` sets `RequireVerified = FALSE`. It is an intentionally weakened
+control: the `NoUnverifiedServing` invariant should find a counterexample when an invalid network
+offer is accepted. This control is included to check that the verification invariant is
+non-vacuous; it is not a model of an implementation option.
+
+These files were added as a model specification and bounded configuration. TLC has not been run
+for this model. The bounds do not establish unbounded protocol correctness, cryptographic
+security, power-loss behavior, real storage durability, control transfer, network timing, or
+operational suitability. The model is only a small check of the stated abstract acceptance and
+restart rules.

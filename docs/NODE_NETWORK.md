@@ -272,7 +272,9 @@ for their own receiver; there is no token or payment.
   node whose processor computes wrong on every cycle (section 6). The
   comparison itself is the state checker, and every failure replays from its seed. This is the
   method of FoundationDB's simulator and TigerBeetle's VOPR.
-- **Protocol model.** A TLA+ model of the checkpoint, isolation and rebuild protocol.
+- **Protocol model.** The bounded TLA+ slice in `docs/tla/RecoveryProtocol.tla` checks verified
+  checkpoint acceptance, replay-watermark fencing and crash/restart recovery. Its README states
+  the model bounds and limits. Isolation and rebuild remain outside this model's scope.
 - **Proofs.** Kani proofs on the Merkle, signature-envelope and parsing code, as for the rest of
   the project (docs/VERIFICATION.md).
 - **Monitor mutation study.** Bugs are planted in the tracker and the share the safety monitor
