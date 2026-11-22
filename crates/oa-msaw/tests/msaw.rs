@@ -3028,3 +3028,111 @@ fn a_runway_strip_holds_a_track_aligned_with_either_direction_of_the_runway() {
     assert_eq!(track_deg_of(-1.0, 1.0), -1);
     assert!((bearing_gap_deg(350.0, 10.0) - 20.0).abs() < 1e-9);
 }
+
+#[derive(Clone, Copy)]
+enum SurveillancePerturbation {
+    Late,
+    Missing,
+    Duplicate,
+    Reordered,
+}
+
+fn next_seed(value: &mut u32) -> u32 {
+    *value ^= *value << 13;
+    *value ^= *value >> 17;
+    *value ^= *value << 5;
+    *value
+}
+
+// REQ: OA-MSAW-004, OA-MSAW-010, OA-MSAW-011
+#[test]
+fn seeded_surveillance_perturbations_preserve_terrain_warning_and_safe_control() {
+    // Sixteen fixed seeds each select one perturbation at one of three ticks around the declared
+    // warning transition. Late altitude is at most three seconds old and carries its age. The
+    // independent truth is a flat 1,400 ft floor and a 1,700 - 10t ft descent: violation begins
+    // strictly after t=30, and a 20 s warning is due at t=10. The level control stays at 2,600 ft.
+    const SEEDS: u32 = 16;
+    const WARNING_S: i64 = 10;
+    const MAX_WARNING_DELAY_S: i64 = 1;
+    let full = flat(900, FLOOR_NONE);
+    let mut desired_cases = 0;
+    let mut misses = 0;
+    let mut safe_cases = 0;
+    let mut false_alerts = 0;
+    let mut warning_times = Vec::new();
+
+    for seed in 1..=SEEDS {
+        let mut rng = seed;
+        let perturbation = match seed % 4 {
+            0 => SurveillancePerturbation::Late,
+            1 => SurveillancePerturbation::Missing,
+            2 => SurveillancePerturbation::Duplicate,
+            _ => SurveillancePerturbation::Reordered,
+        };
+        let perturb_tick = 9 + (next_seed(&mut rng) % 3) as i64;
+        let delay = 1 + (next_seed(&mut rng) % 3) as i64;
+        let mut r = rig(&cfg());
+        let mut warning_ns = None;
+        let mut control_alerted = false;
+
+        for tick in 0..=40_i64 {
+            if matches!(perturbation, SurveillancePerturbation::Missing) && tick == perturb_tick {
+                continue;
+            }
+            let source_tick =
+                if matches!(perturbation, SurveillancePerturbation::Late) && tick == perturb_tick {
+                    tick - delay
+                } else {
+                    tick
+                };
+            let mut hazard = tr(
+                3101,
+                40.0,
+                -88.0,
+                0.0,
+                0.0,
+                1700.0 - 10.0 * source_tick as f32,
+                -600.0,
+            );
+            if matches!(perturbation, SurveillancePerturbation::Late) && tick == perturb_tick {
+                hazard.alt_age_s = delay as f32;
+            }
+            let control = tr(3102, 40.2, -88.0, 0.0, 0.0, 2600.0, 0.0);
+            let mut rows = vec![hazard, control];
+            if matches!(perturbation, SurveillancePerturbation::Duplicate) && tick == perturb_tick {
+                rows.push(control);
+            }
+            if matches!(perturbation, SurveillancePerturbation::Reordered) && tick == perturb_tick {
+                rows.reverse();
+            }
+            cycle(&mut r, tick * S, &rows, &full);
+            if let Some(alert) = msaw_open(&r.st).iter().find(|alert| alert.addr == 3101) {
+                if let Some(at) = alert.warning_ns {
+                    warning_ns.get_or_insert(at);
+                }
+            }
+            control_alerted |= msaw_open(&r.st).iter().any(|alert| alert.addr == 3102);
+        }
+
+        desired_cases += 1;
+        let warning_s = warning_ns.map(|at| at / S);
+        misses += usize::from(warning_s.is_none_or(|time| time > WARNING_S + MAX_WARNING_DELAY_S));
+        if let Some(time) = warning_s {
+            assert!(
+                (WARNING_S..=WARNING_S + MAX_WARNING_DELAY_S).contains(&time),
+                "seed {seed}: warning at {time}s"
+            );
+            warning_times.push(time);
+        }
+        safe_cases += 1;
+        false_alerts += usize::from(control_alerted);
+        assert!(
+            !control_alerted,
+            "safe paired control alerted for seed {seed}"
+        );
+    }
+
+    assert_eq!((misses, desired_cases), (0, SEEDS as usize));
+    assert_eq!((false_alerts, safe_cases), (0, SEEDS as usize));
+    assert_eq!(warning_times.len(), SEEDS as usize);
+}

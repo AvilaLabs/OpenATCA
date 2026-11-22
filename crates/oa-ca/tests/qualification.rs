@@ -498,7 +498,7 @@ fn synthetic_maneuver_grid_scores_sampled_alerts_and_coverage_separately() {
                 .truth_interval_s
                 .is_some_and(|(entry, exit)| t > entry && t < exit);
             assert_eq!(sampled_truth, declared_truth, "{} tick {tick}", case.name);
-            let mut rows = [
+            let rows = [
                 track_xy(
                     addr_a,
                     (-case.rel_start_m.0 - case.rel_velocity_mps.0 * t) / 2.0,
@@ -587,4 +587,121 @@ fn synthetic_maneuver_grid_scores_sampled_alerts_and_coverage_separately() {
     assert!((lead_seconds[2] - 60.0).abs() < 1e-6);
     // Availability has a cycle denominator separate from the three desired-alert cases.
     assert_eq!((degraded_cycles, expected_cycles), (1, 5 * 121));
+}
+
+#[derive(Clone, Copy)]
+enum SurveillancePerturbation {
+    Late,
+    Missing,
+    Duplicate,
+    Reordered,
+}
+
+fn next_seed(value: &mut u32) -> u32 {
+    *value ^= *value << 13;
+    *value ^= *value >> 17;
+    *value ^= *value << 5;
+    *value
+}
+
+// REQ: OA-CA-003, OA-CA-006, OA-CA-015
+#[test]
+fn seeded_surveillance_perturbations_preserve_conflict_detection_and_safe_controls() {
+    // Sixteen fixed nonzero seeds each select one perturbation. Each stream has exactly one
+    // perturbation, at one of ten ticks, with at most four seconds of delay. Truth is analytic:
+    // the 120 km initial separation closes at 400 m/s, so a 5 km conflict starts at 287.5 s.
+    // The paired control follows the same horizontal path at a constant 1,000 ft separation.
+    const SEEDS: u32 = 16;
+    const ENTRY_S: f64 = 287.5;
+    const LAST_TICK: i64 = 320;
+    let mut desired_cases = 0;
+    let mut misses = 0;
+    let mut safe_cases = 0;
+    let mut false_alerts = 0;
+    let mut warning_leads = Vec::new();
+
+    for seed in 1..=SEEDS {
+        let mut rng = seed;
+        let perturbation = match seed % 4 {
+            0 => SurveillancePerturbation::Late,
+            1 => SurveillancePerturbation::Missing,
+            2 => SurveillancePerturbation::Duplicate,
+            _ => SurveillancePerturbation::Reordered,
+        };
+        let perturb_tick = 160 + (next_seed(&mut rng) % 10) as i64;
+        let delay = 1 + (next_seed(&mut rng) % 4) as i64;
+        let (mut state, mut alerts, mut events, mut net) = rig();
+        let mut first_hazard_alert_s = None;
+        let mut control_alerted = false;
+
+        for tick in 0..=LAST_TICK {
+            if matches!(perturbation, SurveillancePerturbation::Missing) && tick == perturb_tick {
+                continue;
+            }
+            let source_tick =
+                if matches!(perturbation, SurveillancePerturbation::Late) && tick == perturb_tick {
+                    tick - delay
+                } else {
+                    tick
+                };
+            let hazard_e = -60_000.0 + 200.0 * source_tick as f64;
+            let other_e = 60_000.0 - 200.0 * tick as f64;
+            let rows = [
+                track_xy(2101, hazard_e, 0.0, 200.0, 0.0, 10_000.0),
+                track_xy(2102, other_e, 0.0, -200.0, 0.0, 10_000.0),
+                track_xy(2103, hazard_e, 20_000.0, 200.0, 0.0, 10_000.0),
+                track_xy(2104, other_e, 20_000.0, -200.0, 0.0, 11_000.0),
+            ];
+            let mut input = rows.to_vec();
+            if matches!(perturbation, SurveillancePerturbation::Duplicate) && tick == perturb_tick {
+                input.push(rows[0]);
+            }
+            if matches!(perturbation, SurveillancePerturbation::Reordered) && tick == perturb_tick {
+                input.reverse();
+            }
+            let out = ca_cycle(
+                &mut state,
+                tick * SECOND,
+                &input,
+                &mut alerts,
+                &mut events,
+                &mut net,
+            );
+            if matches!(perturbation, SurveillancePerturbation::Duplicate) && tick == perturb_tick {
+                assert_eq!(out.stats.rows_duplicate, 2, "seed {seed}");
+            }
+            let open = ca_open(&state);
+            if open
+                .iter()
+                .any(|alert| alert.addr_a == 2101 && alert.addr_b == 2102)
+            {
+                first_hazard_alert_s.get_or_insert(tick as f64);
+            }
+            control_alerted |= open
+                .iter()
+                .any(|alert| alert.addr_a == 2103 && alert.addr_b == 2104);
+        }
+
+        desired_cases += 1;
+        let alert_s = first_hazard_alert_s;
+        misses += usize::from(alert_s.is_none_or(|time| time >= ENTRY_S));
+        if let Some(time) = alert_s {
+            let lead = ENTRY_S - time;
+            assert!(
+                (100.0..=130.0).contains(&lead),
+                "seed {seed} warning lead {lead}s outside the declared timing band"
+            );
+            warning_leads.push(lead);
+        }
+        safe_cases += 1;
+        false_alerts += usize::from(control_alerted);
+        assert!(
+            !control_alerted,
+            "safe paired control alerted for seed {seed}"
+        );
+    }
+
+    assert_eq!((misses, desired_cases), (0, SEEDS as usize));
+    assert_eq!((false_alerts, safe_cases), (0, SEEDS as usize));
+    assert_eq!(warning_leads.len(), SEEDS as usize);
 }
