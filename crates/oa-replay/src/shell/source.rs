@@ -136,6 +136,7 @@ struct Head {
     /// The frame's bytes, header and trailer included.
     frame_len: u64,
     kind: Kind,
+    flags: u8,
     payload: Vec<u8>,
 }
 
@@ -200,6 +201,7 @@ impl<'b> Stream<'b> {
                 offset: 0,
                 frame_len: 0,
                 kind: Kind::Message,
+                flags: 0,
                 payload: Vec::new(),
             },
             bytes: 0,
@@ -265,6 +267,7 @@ impl Stream<'_> {
                 self.head.offset = f.offset;
                 self.head.frame_len = f.raw.len() as u64;
                 self.head.kind = f.kind;
+                self.head.flags = f.flags;
                 self.head.payload.clear();
                 self.head.payload.extend_from_slice(f.payload);
                 return Ok(AdvanceStep::Frame);
@@ -384,6 +387,8 @@ pub struct Merged<'a> {
     pub feed: FeedKind,
     /// Frame kind.
     pub kind: Kind,
+    /// Validated frame flags, including unknown bits preserved by the frame format.
+    pub flags: u8,
     /// Bridge wall clock at receipt, ns.
     pub recv_ns: i64,
     /// The recorder's monotonic time at receipt, ns since it started; `None` for a frame of a
@@ -485,6 +490,7 @@ pub fn merge_counted(
             sink(&Merged {
                 feed: s.feed,
                 kind: s.head.kind,
+                flags: s.head.flags,
                 recv_ns: s.head.recv_ns,
                 mono_ns: s.head.mono_ns,
                 seq: s.head.seq,
@@ -564,6 +570,20 @@ pub fn run_streams_counted(
     after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
     sealed_frames: &mut u64,
 ) -> io::Result<MergeReport> {
+    run_streams_observed(p, specs, chunk, after_frame, sealed_frames, &mut |_| {})
+}
+
+/// [`run_streams_counted`] with an observer for frames passed through the pipeline. A message whose
+/// document decoder drops it as sealed is omitted from `on_pipeline_frame`; receive-time sealed frames
+/// never reach the observer and remain in the returned source refusal count.
+pub fn run_streams_observed(
+    p: &mut Pipeline,
+    specs: Vec<StreamSpec>,
+    chunk: usize,
+    after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
+    sealed_frames: &mut u64,
+    on_pipeline_frame: &mut dyn FnMut(&Merged<'_>),
+) -> io::Result<MergeReport> {
     // The bytes of the frames whose document the decoder dropped whole (OA-SEAL-014): not in
     // the byte count, like the frames dropped by receive time.
     let mut dropped_bytes = 0u64;
@@ -571,6 +591,8 @@ pub fn run_streams_counted(
         process_frame_mono(p, m.feed, m.kind, m.recv_ns, m.stream, m.mono_ns, m.payload);
         if p.last_doc_dropped {
             dropped_bytes += m.frame_len;
+        } else {
+            on_pipeline_frame(m);
         }
         after_frame(p)
     });

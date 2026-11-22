@@ -9,6 +9,7 @@
 mod common;
 
 use common::*;
+use oa_deflate::GzipWriter;
 use oa_replay::cli::{parse_args, Input, DEFAULT_CHUNK};
 use oa_replay::{FeedKind, NS_PER_S};
 use std::path::PathBuf;
@@ -72,6 +73,12 @@ fn command_line_gives_each_file_its_feed_kind_and_validates_numbers() {
     assert_eq!(c.cfg.table.max_age_ns, 30 * 60 * NS_PER_S);
     assert_eq!(c.cfg.table.capacity, 32_768);
     assert_eq!((c.chunk, c.quiet), (DEFAULT_CHUNK, false));
+    assert!(!c.input_fingerprint);
+    assert!(
+        parse_args(&args(&["--sfdps", "x", "--input-fingerprint"]))
+            .unwrap()
+            .input_fingerprint
+    );
     let c = parse_args(&args(&[
         "--tbfm",
         "x",
@@ -126,6 +133,18 @@ fn run_bin(a: &[&str]) -> (i32, String, String) {
     )
 }
 
+fn gzip(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut writer = GzipWriter::new(6);
+    let mut sink = |bytes: &[u8]| -> Result<(), ()> {
+        out.extend_from_slice(bytes);
+        Ok(())
+    };
+    writer.write(data, &mut sink).unwrap();
+    writer.finish(&mut sink).unwrap();
+    out
+}
+
 /// The output without the throughput line, which is the only one that depends on the clock.
 fn stable(out: &str) -> String {
     out.lines()
@@ -164,6 +183,7 @@ fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {
     let (sp, tp) = (sf_path.to_str().unwrap(), tb_path.to_str().unwrap());
     let (code, out, err) = run_bin(&["--sfdps", sp, "--tbfm", tp]);
     assert_eq!(code, 0);
+    assert!(!err.contains("input_fingerprint"));
     // The count line, printed once.
     assert_eq!(
         err.matches("sealed-window rows dropped: 0").count(),
@@ -209,7 +229,17 @@ fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {
     };
     for (d, bytes) in [(&sdir, &s), (&tdir, &t)] {
         for (i, part) in cut(bytes).iter().enumerate() {
-            std::fs::write(d.join(format!("scds-x-{:04}.oaf", i + 1)), part).unwrap();
+            let compressed = i % 2 == 0;
+            let name = if compressed {
+                format!("scds-x-{:04}.oaf.gz", i + 1)
+            } else {
+                format!("scds-x-{:04}.oaf", i + 1)
+            };
+            std::fs::write(
+                d.join(name),
+                if compressed { gzip(part) } else { part.clone() },
+            )
+            .unwrap();
         }
     }
     std::fs::write(sdir.join("notes.txt"), b"not a recording").unwrap();
@@ -227,6 +257,26 @@ fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {
             .collect()
     };
     assert_eq!(norm(&out), norm(&outd));
+    let (_, fingerprint_out, raw_fingerprint) =
+        run_bin(&["--input-fingerprint", "--sfdps", sp, "--tbfm", tp]);
+    assert_eq!(stable(&out), stable(&fingerprint_out));
+    let (_, _, split_fingerprint) = run_bin(&[
+        "--input-fingerprint",
+        "--sfdps-dir",
+        sdir.to_str().unwrap(),
+        "--tbfm-dir",
+        tdir.to_str().unwrap(),
+        "--chunk-bytes",
+        "37",
+    ]);
+    let input_line = |err: &str| {
+        err.lines()
+            .find(|line| line.starts_with("input_fingerprint "))
+            .unwrap()
+    };
+    assert_eq!(input_line(&raw_fingerprint), input_line(&split_fingerprint));
+    assert!(input_line(&raw_fingerprint).contains("status=complete"));
+    assert!(input_line(&raw_fingerprint).contains("pipeline_frames=120"));
     let (code, _, err) = run_bin(&["--sfdps-dir", dir.join("nodir").to_str().unwrap()]);
     assert_eq!(code, 1);
     assert!(err.contains("nodir"));

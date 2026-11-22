@@ -4,7 +4,7 @@
 //! oa-replay (--sfdps | --tbfm | --tfms | --fns | --adsb <file> | --sfdps-dir | --tbfm-dir
 //!           | --tfms-dir | --fns-dir | --adsb-dir <dir>)... [--checkpoint-secs <n>] [--max-age-secs <n>]
 //!           [--active-age-secs <n>] [--proposed-age-secs <n>] [--terminal-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] [--chunk-bytes <n>] [--progress-minutes <n>]
-//!           [--quiet]
+//!           [--quiet] [--input-fingerprint]
 //! ```
 //!
 //! Each file is `.oaf` or `.oaf.gz` (told apart by its first bytes) and is given a feed kind by
@@ -46,6 +46,8 @@ pub struct Command {
     pub chunk: usize,
     /// Print only the summary, not every checkpoint.
     pub quiet: bool,
+    /// Print the bounded ordered-input digest diagnostic to stderr.
+    pub input_fingerprint: bool,
 }
 
 /// The usage text.
@@ -53,7 +55,7 @@ pub const USAGE: &str = "usage: oa-replay (--sfdps|--tbfm|--tfms|--fns|--adsb <f
 --sfdps-dir|--tbfm-dir|--tfms-dir|--fns-dir|--adsb-dir <dir>)... \
 [--checkpoint-secs <n>] [--max-age-secs <n>] [--active-age-secs <n>] [--proposed-age-secs <n>] \
 [--terminal-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] \
-[--chunk-bytes <n>] [--progress-minutes <n>] [--quiet]";
+[--chunk-bytes <n>] [--progress-minutes <n>] [--quiet] [--input-fingerprint]";
 
 fn number(flag: &str, v: Option<&String>) -> Result<u64, String> {
     let v = v.ok_or_else(|| format!("missing value for {flag}"))?;
@@ -70,6 +72,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut cfg = PipelineConfig::default();
     let mut chunk = DEFAULT_CHUNK;
     let mut quiet = false;
+    let mut input_fingerprint = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -131,6 +134,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
                     .map_err(|_| "--chunk-bytes is too large".to_string())?;
             }
             "--quiet" => quiet = true,
+            "--input-fingerprint" => input_fingerprint = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -143,6 +147,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         cfg,
         chunk,
         quiet,
+        input_fingerprint,
     })
 }
 

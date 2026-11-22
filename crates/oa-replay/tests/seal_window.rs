@@ -249,6 +249,47 @@ fn the_bytes_of_a_document_dropped_whole_are_not_in_the_byte_count() {
 
 // REQ: OA-SEAL-014
 #[test]
+fn input_fingerprint_excludes_both_sealed_drop_gates() {
+    let from_ms = FROM / 1_000_000 - DAY;
+    let frame = |seq: u64, recv_ns: i64, row_ms: i64| {
+        let doc = sf_doc(&[sf(1, row_ms)]);
+        let mut buf = vec![0u8; MAX_FRAME_LEN];
+        let n = encode_frame(&mut buf, 1, FLAG_BYTES, seq, recv_ns, 0, doc.as_bytes()).unwrap();
+        buf[..n].to_vec()
+    };
+    let kept = frame(0, FROM - 1, from_ms - 1);
+    let document_dropped = frame(1, FROM - 1, from_ms);
+    let source_dropped = file(&[FROM]);
+    let mut all = kept.clone();
+    all.extend(document_dropped);
+    all.extend(source_dropped);
+
+    let run = |bytes: Vec<u8>| {
+        let mut p = new_pipeline(PipelineConfig::default()).unwrap();
+        let mut fingerprint = oa_replay::input_fingerprint::InputFingerprint::default();
+        let mut sealed_frames = 0;
+        let report = oa_replay::run_streams_observed(
+            &mut p,
+            vec![spec_from_bytes(FeedKind::Sfdps, vec![bytes])],
+            4096,
+            &mut |_| Ok(()),
+            &mut sealed_frames,
+            &mut |m| fingerprint.observe(m),
+        )
+        .unwrap();
+        (p, fingerprint, sealed_frames, report)
+    };
+    let (p, fingerprint, source_drops, _) = run(all);
+    let (_, baseline, baseline_source_drops, _) = run(kept);
+    assert_eq!(source_drops, 1);
+    assert_eq!(baseline_source_drops, 0);
+    assert_eq!(p.sealed_window_dropped, 1);
+    assert_eq!(fingerprint.frames(), 1);
+    assert_eq!(fingerprint.finalize(), baseline.finalize());
+}
+
+// REQ: OA-SEAL-014
+#[test]
 fn a_dropped_adsb_frame_adds_to_no_error_count_even_with_a_bad_record() {
     let mut r = oa_adsb::Reports::default();
     for (k, t) in [FROM, FROM - 1, TO].into_iter().enumerate() {

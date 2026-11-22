@@ -12,6 +12,7 @@ pub mod apply;
 pub mod cli;
 pub mod fns;
 pub mod hash;
+pub mod input_fingerprint;
 pub mod pipeline;
 pub mod report;
 pub mod source;

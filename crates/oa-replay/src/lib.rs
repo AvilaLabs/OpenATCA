@@ -43,7 +43,9 @@ pub mod core;
 pub mod shell;
 
 pub use crate::core::{clock, errors, feed, index, slots, table};
-pub use crate::shell::{adsb, apply, cli, fns, hash, pipeline, report, source, tfms};
+pub use crate::shell::{
+    adsb, apply, cli, fns, hash, input_fingerprint, pipeline, report, source, tfms,
+};
 
 pub use adsb::{
     adsb_advance, adsb_shift_times, adsb_slot_of, adsb_stale_count, adsb_sweep, apply_adsb,
@@ -71,8 +73,8 @@ pub use pipeline::{
 };
 pub use source::{
     list_recordings, merge_counted, merge_key, merge_streams, run_streams, run_streams_counted,
-    run_streams_with, spec_from_bytes, spec_from_paths, try_merge_streams, MergeReport, Merged,
-    StreamSpec,
+    run_streams_observed, run_streams_with, spec_from_bytes, spec_from_paths, try_merge_streams,
+    MergeReport, Merged, StreamSpec,
 };
 pub use table::{
     advance_time, class_of_status, flights_live, is_stale, new_table, shift_times, slot_of_gufi,

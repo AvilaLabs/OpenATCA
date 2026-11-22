@@ -15,8 +15,8 @@ use std::time::Instant;
 use oa_replay::cli::{parse_args, USAGE};
 use oa_replay::report::{drain_checkpoint_lines, write_failure_message, write_summary};
 use oa_replay::{
-    frames_total, list_recordings, new_pipeline, run_streams_counted, spec_from_paths, Pipeline,
-    NS_PER_S,
+    errors_total, frames_total, input_fingerprint::InputFingerprint, list_recordings, new_pipeline,
+    run_streams_counted, run_streams_observed, spec_from_paths, Pipeline, NS_PER_S,
 };
 
 fn main() -> ExitCode {
@@ -28,10 +28,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let mut input_fingerprint = InputFingerprint::default();
     // Every input path is checked, as given and resolved, before anything is opened.
     for i in &cmd.inputs {
         if let Err(e) = oa_sealed::refuse(&i.path) {
             eprintln!("oa-replay: {e}");
+            if cmd.input_fingerprint {
+                print_fingerprint(&input_fingerprint, "incomplete", Some(1), 0, 0, None);
+            }
             return ExitCode::from(2);
         }
     }
@@ -44,6 +48,9 @@ fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("oa-replay: {e}");
+                    if cmd.input_fingerprint {
+                        print_fingerprint(&input_fingerprint, "incomplete", None, 0, 0, None);
+                    }
                     return ExitCode::from(1);
                 }
             }
@@ -64,6 +71,7 @@ fn main() -> ExitCode {
     let mut first_ns = i64::MIN;
     let mut next_progress = i64::MIN;
     let quiet = cmd.quiet;
+    let print_input_fingerprint = cmd.input_fingerprint;
     let progress_ns = cmd.progress_ns;
     let mut write_err: Option<std::io::Error> = None;
     let mut hook = |p: &mut Pipeline| -> std::io::Result<()> {
@@ -91,7 +99,18 @@ fn main() -> ExitCode {
         Ok(())
     };
     let mut sealed_frames = 0u64;
-    let ran = run_streams_counted(&mut p, specs, cmd.chunk, &mut hook, &mut sealed_frames);
+    let ran = if print_input_fingerprint {
+        run_streams_observed(
+            &mut p,
+            specs,
+            cmd.chunk,
+            &mut hook,
+            &mut sealed_frames,
+            &mut |frame| input_fingerprint.observe(frame),
+        )
+    } else {
+        run_streams_counted(&mut p, specs, cmd.chunk, &mut hook, &mut sealed_frames)
+    };
     // Frames by receive time, plus SFDPS, TBFM and TFMS rows by their own time, added before the
     // result is looked at, so the line is printed on every exit after this point.
     drops.add(sealed_frames);
@@ -99,10 +118,20 @@ fn main() -> ExitCode {
     let report = match ran {
         Ok(r) => r,
         Err(e) => {
+            if print_input_fingerprint {
+                print_fingerprint(
+                    &input_fingerprint,
+                    "incomplete",
+                    None,
+                    sealed_frames,
+                    p.sealed_window_dropped,
+                    None,
+                );
+            }
             return match write_err {
                 Some(w) => fail_write(&w),
                 None => fail_read(&e),
-            }
+            };
         }
     };
     let elapsed = t0.elapsed();
@@ -121,7 +150,50 @@ fn main() -> ExitCode {
     ) {
         return fail_write(&e);
     }
+    if print_input_fingerprint {
+        let source_rejected = oa_replay::errors_total(&report.errors);
+        let semantic_errors = errors_total(&p.errors).saturating_sub(source_rejected);
+        let status = if source_rejected > 0 || p.sealed_window_dropped > 0 || semantic_errors > 0 {
+            "partial"
+        } else {
+            "complete"
+        };
+        print_fingerprint(
+            &input_fingerprint,
+            status,
+            Some(source_rejected),
+            report.sealed_window_dropped,
+            p.sealed_window_dropped,
+            Some(semantic_errors),
+        );
+    }
     ExitCode::SUCCESS
+}
+
+/// One opt-in bounded diagnostic line; it never includes payload data.
+fn print_fingerprint(
+    fingerprint: &InputFingerprint,
+    status: &str,
+    source_rejected: Option<u64>,
+    source_sealed: u64,
+    semantic_sealed: u64,
+    semantic_errors: Option<u64>,
+) {
+    let digest = fingerprint
+        .finalize()
+        .map(|d| oa_sha256::to_hex(&d))
+        .unwrap_or_else(|| "unavailable".to_string());
+    let source_rejected = source_rejected
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let semantic_errors = semantic_errors
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    eprintln!(
+        "input_fingerprint version=1 status={status} pipeline_frames={} pipeline_payload_bytes={} sha256={digest} source_rejected={source_rejected} source_sealed_drops={source_sealed} semantic_sealed_drops={semantic_sealed} semantic_errors={semantic_errors} note=diagnostic_only_not_completeness_or_cross_clock_equivalence",
+        fingerprint.frames(),
+        fingerprint.payload_bytes(),
+    );
 }
 
 /// A `kB` figure from `/proc/self/status` (0 where there is none): resident or peak memory.
