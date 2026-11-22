@@ -4067,8 +4067,9 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-324** Every emitted or predicted row keyed in the reserved radar-only namespace carries
   `O_IDENTITY_UNCONFIRMED` (bit 16): the key is a local tracking handle and may describe the same aircraft
   as another hypothesis. Full aircraft addresses do not carry that flag solely for being addresses.
-- **OA-TRK-325** Initiation has a named work budget shared by all radars of a bucket. Candidate
-  visits, address lookups, index construction/query, exact tests and retirement are charged before
+- **OA-TRK-325** Initiation has a named work budget shared by all radars of a bucket. The remaining
+  budget is divided among radars with plots, carrying unused credit forward. Candidate visits,
+  address lookups, index construction/query, exact tests and retirement are charged before
   their work; exhaustion preserves unvisited candidates, explicitly refuses omitted plots and
   restores scratch buffers. Partial plot pairs never reach the assignment solver.
 - **OA-TRK-326** Aircraft addresses offered to fusion or radar validation fit 24 bits plus the non-ICAO

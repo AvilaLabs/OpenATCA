@@ -360,7 +360,7 @@ pub struct FusionStats {
 pub struct RadarInitStats {
     pub batches: u64,
     pub plots: u64,
-    /// Sum of shared budget available when this radar started each batch.
+    /// Sum of work available to this radar when it started each batch.
     pub opening_work: u64,
     /// Work set aside for retirement, requested before searching each batch.
     pub retirement_requested: u64,
@@ -1987,6 +1987,9 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
     {
         f.init_work_left = MAX_INIT_WORK;
     }
+    // At most MAX_RADARS scratch slots. Each radar with plots gets a share of the remaining
+    // budget. Return its unspent credit to the pool before dividing it among later radars.
+    let mut radars_left = f.rscratch.iter().filter(|rs| !rs.plots.is_empty()).count();
     for r in 0..f.rscratch.len() {
         let Some(rs) = f.rscratch.get_mut(r).map(std::mem::take) else {
             continue;
@@ -2002,7 +2005,12 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
                 }
                 publish_registration(f, r, rs.plots.last().map_or(0, |p| p.time_ns));
             }
+            let share = f.init_work_left.checked_div(radars_left).unwrap_or(0);
+            let held_for_later_radars = f.init_work_left - share;
+            f.init_work_left = share;
             initiate(f, r, &rs.plots, &rs.dec, out);
+            f.init_work_left += held_for_later_radars;
+            radars_left = radars_left.saturating_sub(1);
         }
         if let Some(slot) = f.rscratch.get_mut(r) {
             *slot = rs;
@@ -3254,6 +3262,31 @@ mod tests {
         fusion_advance(&mut f, 21 * NS_PER_S, &mut out);
         fusion_finish(&mut f, 21 * NS_PER_S, &mut out);
         assert_eq!(point_grid_buffer(&f.init_grid), before);
+    }
+
+    // REQ: OA-TRK-325
+    #[test]
+    fn initiation_leaves_a_share_for_each_active_radar() {
+        let mut f = make_fusion_radars(3);
+        f.cfg.init_diagnostics = true;
+        f.init_work_max = 128;
+        let plot = mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0);
+        fusion_plots(&mut f, 0, &[plot; 20]);
+        fusion_plots(&mut f, 2, &[plot]);
+        let mut out = output_new(64);
+        fusion_advance(&mut f, 11 * NS_PER_S, &mut out);
+
+        let stats = fusion_stats(&f);
+        let [first, idle, last, ..] = stats.init_radar;
+        assert_eq!(first.batches, 1, "{stats:?}");
+        assert_eq!(last.batches, 1, "{stats:?}");
+        assert_eq!(idle.batches, 0, "{stats:?}");
+        assert_eq!(first.opening_work, 64, "{stats:?}");
+        assert!(first.capped_batches > 0, "{stats:?}");
+        assert_eq!(last.opening_work, 128 - first.work, "{stats:?}");
+        assert!(last.work > 0, "{stats:?}");
+        assert_eq!(last.refused_plots, 0, "{stats:?}");
+        assert!(stats.init_work <= 128, "{stats:?}");
     }
 
     // REQ: OA-TRK-325
