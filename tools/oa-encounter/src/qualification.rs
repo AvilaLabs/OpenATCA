@@ -126,11 +126,14 @@ pub fn score(
                 {
                     return Err(ScoreError::InconsistentLabel);
                 }
+                if start.checked_sub(case.warning_from_ns).is_none() {
+                    return Err(ScoreError::InvalidInterval);
+                }
             }
             (false, None) => {}
             _ => return Err(ScoreError::InconsistentLabel),
         }
-        if cases[..ix].iter().any(|previous| {
+        if cases.iter().take(ix).any(|previous| {
             previous.subject == case.subject && previous.window_start_ns > case.window_start_ns
         }) {
             return Err(ScoreError::InvalidInterval);
@@ -145,34 +148,33 @@ pub fn score(
 
     let mut consumed = [false; MAX_WARNINGS];
     let mut totals = Totals::default();
-    for (case_ix, case) in cases.iter().enumerate() {
+    for (case, result) in cases.iter().zip(results) {
         let outcome = match case.evaluation {
             NetReport::Running => {
                 if case.alert_desired {
                     totals.desired_cases += 1;
                     totals.desired_evaluable += 1;
                     let (event_start, _) = case.violation.ok_or(ScoreError::InconsistentLabel)?;
-                    let mut selected: Option<usize> = None;
-                    for (warning_ix, warning) in warnings.iter().enumerate() {
-                        if consumed[warning_ix]
+                    let mut selected: Option<(usize, &Warning)> = None;
+                    for (warning_ix, (warning, &used)) in warnings.iter().zip(&consumed).enumerate()
+                    {
+                        if used
                             || warning.subject != case.subject
                             || warning.start_ns < case.warning_from_ns
                             || warning.start_ns > case.warning_deadline_ns
                         {
                             continue;
                         }
-                        if selected.map_or(true, |best| warning.start_ns < warnings[best].start_ns)
-                        {
-                            selected = Some(warning_ix);
+                        if selected.is_none_or(|(_, best)| warning.start_ns < best.start_ns) {
+                            selected = Some((warning_ix, warning));
                         }
                     }
-                    if let Some(warning_ix) = selected {
-                        let warning = warnings[warning_ix];
-                        for (duplicate_ix, duplicate) in warnings.iter().enumerate() {
+                    if let Some((warning_ix, warning)) = selected {
+                        for (duplicate, used) in warnings.iter().zip(&mut consumed) {
                             if duplicate.subject == warning.subject
                                 && duplicate.start_ns == warning.start_ns
                             {
-                                consumed[duplicate_ix] = true;
+                                *used = true;
                             }
                         }
                         let lead_ns = event_start
@@ -252,7 +254,7 @@ pub fn score(
                 }
             }
         };
-        results[case_ix] = outcome;
+        *result = outcome;
     }
     Ok(totals)
 }
