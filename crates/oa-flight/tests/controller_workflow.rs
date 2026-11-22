@@ -192,7 +192,7 @@ fn accepted_controller_state_replays_after_table_replacement_then_takes_control_
 
     // Both histories receive a delayed interim altitude before the new owner takes control.
     let mut stale = op(OP_INTERIM, key, 2_625, 7);
-    stale.recv_ms = 65_500;
+    stale.seen_ms = 65_500;
     stale.alt = Alt {
         form: ALT_SIMPLE,
         a_ft: 22_000,
