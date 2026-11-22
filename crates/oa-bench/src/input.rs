@@ -27,7 +27,11 @@ use oa_replay::{
 };
 use oa_sha256::{sha256, sha256_reader, to_hex, Digest, Sha256};
 
-use crate::ingest::{ingest_sfdps, ingest_tbfm, ingest_tfms, new_reader, Reader};
+use crate::assignment::{assignment_query, AssignmentIssue, AssignmentQuery};
+use crate::ingest::{
+    ingest_assignment_query, ingest_sfdps, ingest_tbfm, ingest_tfms, new_reader,
+    AssignmentDecodeCounts, Reader,
+};
 use crate::legacy::{new_legacy, Legacy, Limits, NO_TIME};
 use crate::report::InputHash;
 
@@ -275,6 +279,34 @@ fn hashed_spec(feed: FeedKind, files: Vec<PathBuf>, dones: Vec<Done>, open: Open
     }
 }
 
+fn read_msg_document(
+    path: &Path,
+    done: &Done,
+    open: &Opener,
+    max_msg: u64,
+) -> io::Result<Option<Vec<u8>>> {
+    // Continue through EOF to hash every byte, even if the document cannot be retained.
+    let mut reader = HashRead::new(open(path)?, done.clone());
+    let mut document = Some(Vec::new());
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+        let Some(chunk) = buf.get(..n).filter(|bytes| !bytes.is_empty()) else {
+            break;
+        };
+        if let Some(kept) = &mut document {
+            if kept.len().saturating_add(n) as u64 > max_msg {
+                document = None;
+            } else {
+                kept.extend_from_slice(chunk);
+            }
+        }
+    }
+    Ok(document)
+}
+
 /// One feed's input directory.
 // A7.2: cold struct, size guard waived
 #[derive(Clone, Debug)]
@@ -294,6 +326,102 @@ pub struct Loaded {
     /// Frames left out by receive time and records left out by their own time because they are in
     /// a sealed window (OA-SEAL-014); counted, not hidden.
     pub sealed_window_dropped: u64,
+}
+
+/// Per-issue assignment evidence and the diagnostics of its verified source scan.
+// A7.2: one aggregate for an offline forecast cohort.
+pub struct AssignmentScan {
+    pub query: AssignmentQuery,
+    pub frame_errors: u64,
+    pub documents_refused: u64,
+    pub messages_rejected: u64,
+    pub messages_undecoded: u64,
+    pub sealed_window_dropped: u64,
+}
+
+/// Re-reads the SFDPS source to resolve one cutoff per requested flight. Assignment extraction
+/// uses each record's own stamp and the recorder receive time, independently of replay clock or
+/// other feeds. Input bytes are hashed on the same descriptors used by the scan. Results are
+/// returned only if their source matches the first pass, including the file count and byte count.
+pub fn scan_sfdps_assignments(
+    dir: &Path,
+    open: &Opener,
+    max_msg: u64,
+    expected: &InputHash,
+    issues: &[AssignmentIssue],
+    sealed: &mut u64,
+) -> io::Result<AssignmentScan> {
+    *sealed = 0;
+    let mut query = assignment_query(issues)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("{e:?}")))?;
+    let (kind, files) = list_inputs(dir)?;
+    if files.len() as u64 != expected.files {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SFDPS source file count changed between arrival passes",
+        ));
+    }
+    let dones: Vec<_> = files.iter().map(|_| new_done()).collect();
+    let mut reader = new_reader().map_err(io::Error::other)?;
+    let mut counts = AssignmentDecodeCounts::default();
+    let mut frame_errors = 0;
+    let mut sealed_frames = 0;
+    let result = (|| -> io::Result<()> {
+        match kind {
+            DirKind::Oaf => {
+                let source =
+                    hashed_spec(FeedKind::Sfdps, files.clone(), dones.clone(), open.clone());
+                let (report, end) = oa_replay::merge_counted(vec![source], 1 << 16, &mut |m| {
+                    if m.kind == oa_feed::Kind::Message {
+                        ingest_assignment_query(
+                            &mut query,
+                            &mut counts,
+                            &mut reader,
+                            m.payload,
+                            m.recv_ns.div_euclid(1_000_000),
+                        );
+                    }
+                    Ok(())
+                });
+                sealed_frames = report.sealed_window_dropped;
+                frame_errors = oa_replay::errors_total(&report.errors);
+                end?;
+            }
+            DirKind::Msg => {
+                for (path, done) in files.iter().zip(&dones) {
+                    if let Some(doc) = read_msg_document(path, done, open, max_msg)? {
+                        ingest_assignment_query(
+                            &mut query,
+                            &mut counts,
+                            &mut reader,
+                            &doc,
+                            NO_TIME,
+                        );
+                    } else {
+                        counts.documents_refused = counts.documents_refused.saturating_add(1);
+                    }
+                }
+            }
+        }
+        let actual = input_hash(&expected.label, &files, &dones)?;
+        if actual != *expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SFDPS source content changed between arrival passes",
+            ));
+        }
+        Ok(())
+    })();
+    *sealed = sealed_frames.saturating_add(counts.sealed);
+    result?;
+    Ok(AssignmentScan {
+        query,
+        frame_errors,
+        documents_refused: counts.documents_refused,
+        messages_rejected: counts.messages_rejected,
+        messages_undecoded: counts.messages_undecoded,
+        sealed_window_dropped: *sealed,
+    })
 }
 
 fn ingest_one(leg: &mut Legacy, r: &mut Reader, feed: FeedKind, bytes: &[u8], recv_ms: i64) {
@@ -403,29 +531,7 @@ pub fn load_counted_with_limits(
                 match kind {
                     DirKind::Msg => {
                         for (f, done) in files.iter().zip(dones) {
-                            // Read to the end through a fixed buffer, so the digest covers every
-                            // byte; only a document within the limit is kept.
-                            let mut hr = HashRead::new(open(f)?, done.clone());
-                            let mut b: Vec<u8> = Vec::new();
-                            let mut buf = [0u8; 8192];
-                            let mut too_long = false;
-                            loop {
-                                let n = hr.read(&mut buf).map_err(|e| {
-                                    io::Error::new(e.kind(), format!("{}: {e}", f.display()))
-                                })?;
-                                let Some(chunk) = buf.get(..n).filter(|c| !c.is_empty()) else {
-                                    break;
-                                };
-                                if !too_long {
-                                    if (b.len() + n) as u64 > max_msg {
-                                        too_long = true;
-                                        b = Vec::new();
-                                    } else {
-                                        b.extend_from_slice(chunk);
-                                    }
-                                }
-                            }
-                            if too_long {
+                            let Some(b) = read_msg_document(f, done, open, max_msg)? else {
                                 let fi = match feed {
                                     FeedKind::Sfdps => Some(0),
                                     FeedKind::Tbfm => Some(1),
@@ -443,7 +549,7 @@ pub fn load_counted_with_limits(
                                 }
                                 leg.counts.note(MSG_TOO_LONG.to_string(), 1);
                                 continue;
-                            }
+                            };
                             ingest_one(&mut leg, &mut reader, *feed, &b, NO_TIME);
                         }
                     }

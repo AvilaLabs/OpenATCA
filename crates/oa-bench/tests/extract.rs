@@ -7,10 +7,11 @@
     clippy::panic
 )]
 
+use oa_bench::assignment::{assignment_at_issue, AssignmentEvidence, AssignmentIssue};
 use oa_bench::ingest::{ingest_sfdps, ingest_tbfm, ingest_tfms, new_reader};
 use oa_bench::input::{
-    file_opener, hash_files, list_inputs, load, load_counted_with_limits, msg_limit, DirKind,
-    FeedInput,
+    file_opener, hash_files, list_inputs, load, load_counted_with_limits, msg_limit,
+    scan_sfdps_assignments, DirKind, FeedInput,
 };
 use oa_bench::legacy::{
     hev, new_legacy, tbfm_kind, tfms_kind, Counts, Limits, NONE, NO_ALT, NO_TIME,
@@ -363,6 +364,93 @@ fn directories_of_msg_files_and_oaf_recordings_load_and_hash() {
     assert_eq!(configured.replay_hash, l.replay_hash);
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(odir);
+}
+
+// REQ: OA-LTJ-055
+#[test]
+fn assignment_scan_resolves_one_cutoff_and_refuses_changed_consumed_bytes() {
+    let dir = scratch("assignments");
+    let path = dir.join("sfdps.oaf");
+    let source_start_ms = 1_893_553_200_000;
+    let recording = |first: &str| {
+        let mut file = Vec::new();
+        for (seq, (value, source, received)) in [
+            (first, "2030-01-02T03:00:05Z", source_start_ms + 50_000),
+            ("14000", "2030-01-02T03:00:10Z", source_start_ms + 90_000),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let doc = sfdps(&th(
+                GUFI_A,
+                source,
+                source,
+                false,
+                &format!(
+                    r#"<assignedAltitude><simple uom="FEET">{value}</simple></assignedAltitude>"#
+                ),
+            ));
+            let mut frame = vec![0; doc.len() + 64];
+            let len = oa_feed::encode_frame(
+                &mut frame,
+                1,
+                0,
+                seq as u64,
+                received * 1_000_000,
+                0,
+                doc.as_bytes(),
+            )
+            .unwrap();
+            file.extend_from_slice(&frame[..len]);
+        }
+        file
+    };
+    std::fs::write(&path, recording("12000")).unwrap();
+    let first = load(&[FeedInput {
+        feed: FeedKind::Sfdps,
+        dir: dir.clone(),
+    }])
+    .unwrap();
+    let gufi = first.legacy.flights.gufi[0];
+    let issues = [AssignmentIssue {
+        gufi,
+        cutoff_ms: source_start_ms + 60_000,
+    }];
+    let mut sealed = 0;
+    let scan = scan_sfdps_assignments(
+        &dir,
+        &file_opener(),
+        msg_limit(),
+        &first.inputs[0],
+        &issues,
+        &mut sealed,
+    )
+    .unwrap();
+    assert_eq!(scan.frame_errors, 0);
+    assert_eq!(sealed, 0);
+    assert_eq!(
+        assignment_at_issue(&scan.query, gufi),
+        Some(AssignmentEvidence::Available {
+            value_ft: 12_000,
+            available_ms: source_start_ms + 50_000,
+        })
+    );
+
+    // Keep the same file count, names and byte lengths while changing the opened content.
+    std::fs::write(&path, recording("15000")).unwrap();
+    let err = scan_sfdps_assignments(
+        &dir,
+        &file_opener(),
+        msg_limit(),
+        &first.inputs[0],
+        &issues,
+        &mut sealed,
+    )
+    .err()
+    .expect("a consumed source with changed bytes is refused");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("content changed"));
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 // REQ: OA-BENCH-024

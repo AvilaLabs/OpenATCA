@@ -10,6 +10,7 @@ use oa_tfms::rows::ttype;
 use oa_tfms::NO_TIME as TFMS_NO_TIME;
 use oa_xml::Parser;
 
+use crate::assignment::{observe_assignment, AssignmentEvent, AssignmentQuery};
 use crate::legacy::{
     flight_ix, pad, push_assigned_altitude, push_tbfm, push_tfms, push_tfms_actual, push_th,
     row_has, tbfm_kind, tfms_kind, Counts, Legacy, TfmsIn, ALT_FORM_INVALID, NO_ALT, NO_TIME,
@@ -67,6 +68,83 @@ pub fn new_reader() -> Result<Reader, ReaderError> {
     })
 }
 
+fn assignment_event(
+    ev: &Events,
+    row: usize,
+    gufi: u128,
+    received_ms: i64,
+) -> Option<AssignmentEvent> {
+    let form = if row_has(ev, row, Field::AssignedForm) {
+        ev.assigned_form.get(row).copied()?
+    } else if field_error(ev, row, Field::AssignedForm) {
+        ALT_FORM_INVALID
+    } else {
+        return None;
+    };
+    let value_ft = if form == ALT_FORM_SIMPLE && row_has(ev, row, Field::AssignedAlt) {
+        ev.assigned_ft.get(row).copied().unwrap_or(NO_ALT)
+    } else {
+        NO_ALT
+    };
+    Some(AssignmentEvent {
+        gufi,
+        source_ms: *ev.ts_ms.get(row)?,
+        received_ms,
+        form,
+        value_ft,
+    })
+}
+
+// A7.2: one aggregate for the offline assignment pass.
+#[derive(Default)]
+pub(crate) struct AssignmentDecodeCounts {
+    pub documents_refused: u64,
+    pub messages_rejected: u64,
+    pub messages_undecoded: u64,
+    pub sealed: u64,
+}
+
+/// Extracts assignment evidence with the same decoder and sealed-document rule as normal ingest.
+pub(crate) fn ingest_assignment_query(
+    query: &mut AssignmentQuery,
+    counts: &mut AssignmentDecodeCounts,
+    reader: &mut Reader,
+    bytes: &[u8],
+    received_ms: i64,
+) {
+    clear_events(&mut reader.events);
+    let Ok(doc) = reader.parser.parse(bytes) else {
+        counts.documents_refused = counts.documents_refused.saturating_add(1);
+        return;
+    };
+    let Ok(summary) = reader.fixm.decode_prefix(&doc, bytes, &mut reader.events) else {
+        counts.documents_refused = counts.documents_refused.saturating_add(1);
+        return;
+    };
+    if summary.sealed_window_dropped > 0 {
+        let dropped = u64::from(summary.sealed_window_dropped);
+        counts.sealed = counts.sealed.saturating_add(dropped);
+        oa_sealed::note_window_drops(dropped);
+        return;
+    }
+    counts.messages_rejected = counts
+        .messages_rejected
+        .saturating_add(u64::from(summary.rejected));
+    counts.messages_undecoded = counts
+        .messages_undecoded
+        .saturating_add(u64::from(summary.not_decoded));
+    let ev = &reader.events;
+    for row in 0..ev.len {
+        if let Some(event) = ev
+            .gufi
+            .get(row)
+            .and_then(|&gufi| assignment_event(ev, row, gufi, received_ms))
+        {
+            observe_assignment(query, event);
+        }
+    }
+}
+
 /// Ingests one SFDPS document. `recv_ms` is the receive time, [`NO_TIME`] when not recorded.
 pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64) {
     clear_events(&mut r.events);
@@ -120,20 +198,15 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
         };
         let fi = f as usize;
         if leg.limits.assigned_altitude_updates != 0 {
-            let assigned_form = if row_has(ev, row, Field::AssignedForm) {
-                ev.assigned_form.get(row).copied()
-            } else if field_error(ev, row, Field::AssignedForm) {
-                Some(ALT_FORM_INVALID)
-            } else {
-                None
-            };
-            if let (Some(form), Some(&ts_ms)) = (assigned_form, ev.ts_ms.get(row)) {
-                let value_ft = if form == ALT_FORM_SIMPLE && row_has(ev, row, Field::AssignedAlt) {
-                    ev.assigned_ft.get(row).copied().unwrap_or(NO_ALT)
-                } else {
-                    NO_ALT
-                };
-                push_assigned_altitude(leg, f, ts_ms, recv_ms, form, value_ft);
+            if let Some(event) = assignment_event(ev, row, gufi, recv_ms) {
+                push_assigned_altitude(
+                    leg,
+                    f,
+                    event.source_ms,
+                    event.received_ms,
+                    event.form,
+                    event.value_ft,
+                );
             }
         }
         if row_has(ev, row, Field::Callsign) {
