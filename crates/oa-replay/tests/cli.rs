@@ -316,11 +316,11 @@ fn binary_prints_checkpoints_and_a_summary_that_is_identical_run_to_run() {
         "--chunk-bytes",
         "37",
     ]);
-    let input_line = |err: &str| {
+    fn input_line(err: &str) -> &str {
         err.lines()
             .find(|line| line.starts_with("input_fingerprint "))
             .unwrap()
-    };
+    }
     assert_eq!(input_line(&raw_fingerprint), input_line(&split_fingerprint));
     assert!(input_line(&raw_fingerprint).contains("status=complete"));
     assert!(input_line(&raw_fingerprint).contains("pipeline_frames=120"));
