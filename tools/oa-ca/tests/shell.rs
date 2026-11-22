@@ -217,6 +217,49 @@ fn the_95_percent_radius_is_the_larger_eigenvalue_with_the_chi_square_quantile()
     assert!(r95_of([f32::NAN, 0.0, 1.0]).is_nan());
     assert!(r95_of([-1.0, 0.0, 1.0]).is_nan());
     assert!(r95_of([f32::INFINITY, 0.0, 1.0]).is_nan());
+
+    // A rank-one covariance is valid, and one f32 ULP above its determinant boundary is within
+    // the documented outward-rounding allowance.
+    let rank_one = r95_of([4.0, 2.0, 1.0]);
+    assert_eq!(rank_one, (5.991_464_547_107_98f64 * 5.0).sqrt() as f32);
+    let one_ulp_up = f32::from_bits(1.0f32.to_bits() + 1);
+    let near_edge = r95_of([1.0, one_ulp_up, 1.0]);
+    let expected = (5.991_464_547_107_98f64 * (1.0 + f64::from(one_ulp_up))).sqrt() as f32;
+    assert_eq!(near_edge, expected);
+    assert!(r95_of([1.0, 2.0, 1.0]).is_nan());
+    let materially_non_psd = 1.0 + 8.0 * f32::EPSILON;
+    assert!(r95_of([1.0, materially_non_psd, 1.0]).is_nan());
+
+    // The existing core boundary treats NaN radius as an input shortfall, and does not call the
+    // affected cycle fully running.
+    let set = parse_config(DEV_CFG).unwrap();
+    let mut state = oa_ca::ca_new(&set.ca).unwrap();
+    let mut alerts = oa_ca::alert_log_new(4).unwrap();
+    let mut events = oa_ca::event_log_new(4).unwrap();
+    let mut net = oa_safety::net::state_table_new(10_000_000_000, 2_000_000_000).unwrap();
+    let row = oa_ca::CaTrack {
+        lat_deg: 41.5,
+        lon_deg: -88.0,
+        addr: 0x100001,
+        vel_east_mps: 0.0,
+        vel_north_mps: 0.0,
+        r95_m: r95_of([1.0, 2.0, 1.0]),
+        alt_ft: 10_000.0,
+        vrate_fpm: 0.0,
+        flags: 0,
+        ground: AIRBORNE,
+    };
+    let out = oa_ca::ca_cycle(&mut state, 0, &[row], &mut alerts, &mut events, &mut net);
+    assert_eq!(out.stats.r95_clamped, 1);
+    assert_eq!(out.input_short, 1);
+    assert!(matches!(
+        out.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            count: 1,
+            ..
+        }
+    ));
 }
 
 fn alert(a: u32, b: u32, start_s: i64, flags: u16, ground: u8, current: u32) -> Alert {

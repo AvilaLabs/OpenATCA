@@ -43,6 +43,14 @@ pub fn r95_of(cov: [f32; 3]) -> f32 {
     if !(ee.is_finite() && en.is_finite() && nn.is_finite()) || ee < 0.0 || nn < 0.0 {
         return f32::NAN;
     }
+    // The covariance is stored as f32. Allow four relative epsilons above the PSD boundary so
+    // independent rounding of the two variances and the cross-term cannot reject a rank-one
+    // covariance; a material violation means its uncertainty is unusable.
+    let cross_limit = (ee * nn).sqrt();
+    let outward_rounding = 4.0 * f64::from(f32::EPSILON);
+    if en.abs() > cross_limit * (1.0 + outward_rounding) {
+        return f32::NAN;
+    }
     let half = (ee - nn) / 2.0;
     let lam = (ee + nn) / 2.0 + (half * half + en * en).sqrt();
     (CHI2_2_95 * lam).sqrt() as f32
