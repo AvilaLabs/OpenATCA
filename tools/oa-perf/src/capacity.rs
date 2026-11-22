@@ -14,9 +14,9 @@ use std::time::Instant;
 use oa_track::fusion::{
     fusion_adsb, fusion_advance, fusion_assign_log, fusion_bookkeeping_len, fusion_buffers,
     fusion_config, fusion_new, fusion_plots, fusion_stats, fusion_take_radar_tracks,
-    fusion_tracker, fusion_tracker_config, fusion_tracker_stats, FusionStats,
+    fusion_tracker, fusion_tracker_config, fusion_tracker_stats, FusionStats, RadarInitStats,
 };
-use oa_track::fusion_params::{ASSIGN_LOG_MAX, KEY_RADAR_BASE};
+use oa_track::fusion_params::{ASSIGN_LOG_MAX, KEY_RADAR_BASE, MAX_RADARS};
 use oa_track::fusion_score::{identify_tracks, Kind, EPOCH_NS};
 use oa_track::{
     output_clear, output_new, tracker_bytes, tracker_counts, tracker_live_iter, Measurement,
@@ -49,6 +49,8 @@ pub struct CapCfg {
     pub adsb_dropout_s: Option<i64>,
     /// Opt-in bounded final-snapshot identity summary from plot-assignment evidence.
     pub truth_score: bool,
+    /// Show per-radar initiation budget diagnostics in the report.
+    pub init_diagnostics: bool,
 }
 
 /// Truth-derived identity summary for final confirmed tracks. A7.2: cold report data.
@@ -78,6 +80,7 @@ pub struct TruthSnapshotScore {
 pub struct CapResult {
     pub n: usize,
     pub layout: Layout,
+    pub init_diagnostics: bool,
     pub adsb_aircraft: usize,
     pub half_km: f64,
     pub warmup_s: i64,
@@ -113,6 +116,8 @@ pub struct CapResult {
     pub delay_adsb_ms: Dist,
     pub delay_plot_ms: Dist,
     pub fusion: FusionStats,
+    /// Per-radar measured-window deltas, excluding warm-up.
+    pub init_radar: [RadarInitStats; MAX_RADARS],
     pub tracker: TrackerStats,
     pub out_overflow: u64,
     /// The same three at the end of the warm-up: the loss counters of the measured window are the
@@ -641,6 +646,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let base = tracker_cfg(cfg.max_tracks, n);
     let mut fcfg = fusion_config(fusion_tracker_config(&base, &sites));
     fcfg.log_assign = cfg.truth_score;
+    fcfg.init_diagnostics = cfg.init_diagnostics;
     let mut f = fusion_new(&fcfg, &sites).map_err(|e| e.to_string())?;
     // OA-GEN traffic is fixed truth: prebuild the bounded address index and coverage bits before
     // any core timing. Multiple radar labels for one aircraft intentionally count once.
@@ -836,6 +842,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     Ok(CapResult {
         n,
         layout: cfg.traffic.layout,
+        init_diagnostics: cfg.init_diagnostics,
         adsb_aircraft: traffic.adsb_count(),
         half_km: half_km(&cfg.traffic),
         warmup_s: cfg.warmup_s,
@@ -866,6 +873,19 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         delay_adsb_ms: h_da.summary(),
         delay_plot_ms: h_dp.summary(),
         fusion: *fusion_stats(&f),
+        init_radar: std::array::from_fn(|i| {
+            let now = fusion_stats(&f).init_radar[i];
+            let before = warm.0.init_radar[i];
+            RadarInitStats {
+                batches: now.batches.saturating_sub(before.batches),
+                plots: now.plots.saturating_sub(before.plots),
+                reserved: now.reserved.saturating_sub(before.reserved),
+                work: now.work.saturating_sub(before.work),
+                pair_tests: now.pair_tests.saturating_sub(before.pair_tests),
+                capped_batches: now.capped_batches.saturating_sub(before.capped_batches),
+                refused_plots: now.refused_plots.saturating_sub(before.refused_plots),
+            }
+        }),
         tracker: *fusion_tracker_stats(&f),
         out_overflow: out.overflow,
         fusion_warm: warm.0,
@@ -925,6 +945,22 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     kv.put("adsb_per_s", fmt_f(r.adsb_per_s));
     kv.put("plots_per_s", fmt_f(r.plots_per_s));
     kv.put("rows_per_s", fmt_f(r.rows_per_s));
+    if r.init_diagnostics {
+        kv.put("init_diagnostics", 1);
+        for (radar, d) in r.init_radar.iter().enumerate() {
+            if d.batches == 0 {
+                continue;
+            }
+            let prefix = format!("init.radar{radar}.");
+            kv.put(&format!("{prefix}batches"), d.batches);
+            kv.put(&format!("{prefix}plots"), d.plots);
+            kv.put(&format!("{prefix}reserved"), d.reserved);
+            kv.put(&format!("{prefix}work"), d.work);
+            kv.put(&format!("{prefix}pair_tests"), d.pair_tests);
+            kv.put(&format!("{prefix}capped_batches"), d.capped_batches);
+            kv.put(&format!("{prefix}refused_plots"), d.refused_plots);
+        }
+    }
     if let Some(s) = r.adsb_dropout_s {
         kv.put("adsb_dropout_reports", r.adsb_dropout_reports);
         kv.put("adsb_dropout_start_s", r.warmup_s);
@@ -1237,6 +1273,18 @@ pub fn cap_text(r: &CapResult) -> String {
             moved.join(" ")
         },
     ));
+    if r.init_diagnostics {
+        s.push_str("  per-radar initiation (measured window; work is charged units, reservation is potential retirement work):\n");
+        for (radar, d) in r.init_radar.iter().enumerate() {
+            if d.batches == 0 {
+                continue;
+            }
+            s.push_str(&format!(
+                "    radar {radar}: {} batches, {} plots, {} work reserved, {} work consumed, {} pair tests, {} capped batches, {} refused plots\n",
+                d.batches, d.plots, d.reserved, d.work, d.pair_tests, d.capped_batches, d.refused_plots
+            ));
+        }
+    }
     s.push_str(&format!(
         "  buffers unchanged across the run: {}; radar-only track records handed on: {}\n",
         r.buffers_stable, r.radar_track_recs_taken
@@ -1360,6 +1408,7 @@ mod tests {
             early_stop: false,
             adsb_dropout_s: None,
             truth_score: false,
+            init_diagnostics: false,
         }
     }
 

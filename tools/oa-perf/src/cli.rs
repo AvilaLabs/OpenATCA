@@ -42,6 +42,7 @@ flags (defaults in brackets):
   --seed N           traffic seed [1]
   --adsb-dropout S   opt-in paired run: withhold ADS-B for S measured seconds, then resume
   --truth-score      opt-in final-snapshot truth identity summary (bounded assignment log)
+  --initiation-diagnostics  opt-in per-radar initiation budget counters
   --no-clip --no-overload   leave a part out
   --no-early-stop    feed the whole run even when it is far slower than real time";
 
@@ -68,6 +69,7 @@ pub struct Opts {
     pub no_early_stop: bool,
     pub adsb_dropout_s: Option<i64>,
     pub truth_score: bool,
+    pub init_diagnostics: bool,
 }
 
 impl Default for Opts {
@@ -93,6 +95,7 @@ impl Default for Opts {
             no_early_stop: false,
             adsb_dropout_s: None,
             truth_score: false,
+            init_diagnostics: false,
         }
     }
 }
@@ -173,6 +176,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             "--seed" => o.seed = num(a, it.next())?,
             "--adsb-dropout" => o.adsb_dropout_s = Some(num(a, it.next())?),
             "--truth-score" => o.truth_score = true,
+            "--initiation-diagnostics" => o.init_diagnostics = true,
             "--no-clip" => o.no_clip = true,
             "--no-overload" => o.no_overload = true,
             "--no-early-stop" => o.no_early_stop = true,
@@ -225,6 +229,7 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
         early_stop: !o.no_early_stop,
         adsb_dropout_s: o.adsb_dropout_s,
         truth_score: o.truth_score,
+        init_diagnostics: o.init_diagnostics,
     })
 }
 
@@ -333,6 +338,11 @@ fn child(o: &Opts, n: usize) -> Result<Kv, String> {
         .args(["--max-wall", &o.max_wall.to_string()])
         .args(["--max-tracks", &o.max_tracks.to_string()])
         .args(["--seed", &o.seed.to_string()])
+        .args(if o.init_diagnostics {
+            vec!["--initiation-diagnostics"]
+        } else {
+            vec![]
+        })
         .args(if o.no_early_stop {
             vec!["--no-early-stop"]
         } else {

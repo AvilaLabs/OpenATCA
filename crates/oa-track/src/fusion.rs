@@ -164,6 +164,8 @@ pub struct FusionConfig {
     pub reg_ref_slots: usize,
     /// Record which plot went to which key (scoring runs).
     pub log_assign: bool,
+    /// Collect fixed-size per-radar initiation budget counters.
+    pub init_diagnostics: bool,
 }
 
 /// The design's values on a tracker configuration.
@@ -179,6 +181,7 @@ pub fn fusion_config(tracker: TrackerConfig) -> FusionConfig {
         init_n: RADAR_INIT_N,
         reg_ref_slots: REG_REF_SLOTS,
         log_assign: false,
+        init_diagnostics: false,
     }
 }
 
@@ -318,6 +321,9 @@ pub struct FusionStats {
     pub init_plots_refused: u64,
     /// Input slots visited by a separate, one-pass refusal count when no work remains.
     pub init_refusal_pass_visits: u64,
+    /// Per-radar initiation budget use. Work includes all charged grid, pair, and cleanup work;
+    /// it is not a wall-time measure. The fixed slots follow radar order in the configured sites.
+    pub init_radar: [RadarInitStats; MAX_RADARS],
     /// Most candidates alive at once.
     pub cands_live_max: u64,
     /// Radar-buckets that had plots to associate, and the sum and the largest of the coarse
@@ -347,6 +353,20 @@ pub struct FusionStats {
     pub init_wide_full: u64,
     /// Legacy diagnostic of withdrawn fresh-track plot suppression; remains zero.
     pub stale_plots_skipped: u64,
+}
+
+/// Initiation counters for one configured radar. A7.2: cold diagnostic record.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RadarInitStats {
+    pub batches: u64,
+    pub plots: u64,
+    /// Reservation made for candidate retirement before searching (two units per possible item).
+    pub reserved: u64,
+    /// Budget units actually charged by this radar, including reservation.
+    pub work: u64,
+    pub pair_tests: u64,
+    pub capped_batches: u64,
+    pub refused_plots: u64,
 }
 
 /// Plot-to-key log for scoring: one row per plot applied or used to start a track. A7.2: cold
@@ -2224,6 +2244,13 @@ fn initiate(
     let (Some(&g), Some(&s)) = (f.geoms.get(radar), f.sites.get(radar)) else {
         return;
     };
+    let diagnostics = f.cfg.init_diagnostics;
+    let before_work = diagnostics.then_some(f.stats.init_work).unwrap_or(0);
+    let before_tests = diagnostics.then_some(f.stats.init_tests).unwrap_or(0);
+    let before_capped = diagnostics.then_some(f.stats.init_capped).unwrap_or(0);
+    let before_refused = diagnostics
+        .then_some(f.stats.init_plots_refused)
+        .unwrap_or(0);
     // Each plot can add at most one candidate. Hold the cost of reading and compacting that
     // maximum before any search can exhaust the remaining credit. Return unused credit to
     // the bucket so the next radar pays only for work actually charged.
@@ -2233,14 +2260,65 @@ fn initiate(
         .saturating_add(plots.len())
         .min(MAX_CANDIDATES)
         .saturating_mul(2);
+    if diagnostics {
+        if let Some(d) = f.stats.init_radar.get_mut(radar) {
+            d.batches = d.batches.saturating_add(1);
+            d.plots = d.plots.saturating_add(plots.len() as u64);
+            d.reserved = d.reserved.saturating_add(retire_work as u64);
+        }
+    }
     let Some(search_budget) = f.init_work_left.checked_sub(retire_work) else {
         refuse_initiation_batch(f, radar, dec);
+        if diagnostics {
+            record_radar_init_delta(
+                f,
+                radar,
+                before_work,
+                before_tests,
+                before_capped,
+                before_refused,
+            );
+        }
         return;
     };
     f.init_work_left = search_budget;
     initiate_candidates(f, radar, &g, &s, plots, dec);
     f.init_work_left += retire_work;
     retire_candidates(f, radar, plots, out);
+    if diagnostics {
+        record_radar_init_delta(
+            f,
+            radar,
+            before_work,
+            before_tests,
+            before_capped,
+            before_refused,
+        );
+    }
+}
+
+fn record_radar_init_delta(
+    f: &mut Fusion,
+    radar: usize,
+    before_work: u64,
+    before_tests: u64,
+    before_capped: u64,
+    before_refused: u64,
+) {
+    if let Some(d) = f.stats.init_radar.get_mut(radar) {
+        d.work = d
+            .work
+            .saturating_add(f.stats.init_work.saturating_sub(before_work));
+        d.pair_tests = d
+            .pair_tests
+            .saturating_add(f.stats.init_tests.saturating_sub(before_tests));
+        d.capped_batches = d
+            .capped_batches
+            .saturating_add(f.stats.init_capped.saturating_sub(before_capped));
+        d.refused_plots = d
+            .refused_plots
+            .saturating_add(f.stats.init_plots_refused.saturating_sub(before_refused));
+    }
 }
 
 fn initiate_candidates(
