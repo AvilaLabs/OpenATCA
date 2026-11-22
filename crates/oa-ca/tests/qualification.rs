@@ -135,9 +135,9 @@ fn finite_over_cap_radius_can_qualify_uncapped_but_is_absent_from_capped_candida
     // radii held to the configured 20 km cap. A conservative 1.10 bracket exceeds the current
     // grid's 1.02 cheap margin, so this fixture remains separated from the capped candidate reach.
     let cfg = config();
-    let uncapped_radius_m = 25_000.0;
+    let uncapped_radius_m = 25_000.0_f32;
     let expected_distance_m = 50_000.0;
-    let uncapped_conflict_limit_m = cfg.default_volume.h_m + 2.0 * uncapped_radius_m;
+    let uncapped_conflict_limit_m = cfg.default_volume.h_m + 2.0 * f64::from(uncapped_radius_m);
     let capped_search_upper_m = (cfg.default_volume.h_m + 2.0 * cfg.r95_cap_m) * 1.10;
     let mut rows = [
         track_xy(501, -expected_distance_m / 2.0, 0.0, 0.0, 0.0, 10_000.0),
