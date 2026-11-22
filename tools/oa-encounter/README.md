@@ -76,6 +76,15 @@ rows above the grid's latitude limit (85.8°). Any of them makes the summary's r
 `DEGRADED`. A shortfall never ends or splits an encounter: the encounter is kept and its
 unevaluated seconds are counted in the `ticks_unevaluated` column.
 
+## Offline safety-net qualification seam
+
+`crates/oa-ca/tests/qualification.rs` is a companion, synthetic-only qualification slice for
+conflict-alert behavior. It declares analytic encounter intervals and alert desire before
+evaluating alert output, and defines miss, nuisance and lead-time denominators. It also checks an
+unknown-altitude cycle, a degraded input report and preservation of an active warning. It does not
+consume this tool's recorded-traffic output, estimate operational rates or establish readiness;
+M5's recorded-traffic evaluation remains a separate build step.
+
 ## Output
 
 `encounters.csv` has one row per encounter, sorted by start time, with the two addresses (8 hex
