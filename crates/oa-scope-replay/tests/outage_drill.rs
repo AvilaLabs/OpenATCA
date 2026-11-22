@@ -199,6 +199,21 @@ impl TempCheckpointFiles {
             .expect("sync synthetic checkpoint before fault injection");
         path
     }
+
+    fn uncreated_path(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+}
+
+fn write_checkpoint_create_new(path: &Path, bytes: &[u8]) {
+    assert!(bytes.len() <= RECOVERY_MAX_BYTES);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .expect("create post-apply checkpoint without replacing a file");
+    file.write_all(bytes).expect("write post-apply checkpoint");
+    file.sync_all().expect("sync post-apply checkpoint");
 }
 
 impl Drop for TempCheckpointFiles {
@@ -265,6 +280,7 @@ enum InputFault {
     None,
     FailBeforeApply,
     CrashAfterApply,
+    CrashAfterCheckpoint,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,7 +331,11 @@ fn parse_worker_command(line: &str) -> Option<WorkerCommand> {
             };
             WorkerCommand::Step { second, feed_live }
         }
-        "INPUT" | "FAIL_BEFORE_APPLY" | "CRASH_AFTER_APPLY" | "QUARANTINE" => {
+        "INPUT"
+        | "FAIL_BEFORE_APPLY"
+        | "CRASH_AFTER_APPLY"
+        | "CRASH_AFTER_CHECKPOINT"
+        | "QUARANTINE" => {
             let key = InputKey {
                 publisher_id: fields.next()?.parse().ok()?,
                 source_id: fields.next()?.parse().ok()?,
@@ -338,6 +358,7 @@ fn parse_worker_command(line: &str) -> Option<WorkerCommand> {
                     fault: match command {
                         "FAIL_BEFORE_APPLY" => InputFault::FailBeforeApply,
                         "CRASH_AFTER_APPLY" => InputFault::CrashAfterApply,
+                        "CRASH_AFTER_CHECKPOINT" => InputFault::CrashAfterCheckpoint,
                         _ => InputFault::None,
                     },
                 }
@@ -1508,6 +1529,32 @@ fn machine_loss_worker_process() {
                     let _ = std::io::stdout().flush();
                     std::process::exit(87);
                 }
+                if fault == InputFault::CrashAfterCheckpoint {
+                    let output = std::env::var_os("OA_MACHINE_LOSS_CHECKPOINT_OUTPUT")
+                        .map(PathBuf::from)
+                        .expect("test child has a fixture checkpoint output path");
+                    let checkpoint = encode_recovery_checkpoint(
+                        &stream[..step_no],
+                        INITIAL_FENCE,
+                        RECOVERY_GENERATION,
+                    );
+                    write_checkpoint_create_new(&output, &checkpoint);
+                    let fields: Vec<_> = ack.split_whitespace().collect();
+                    println!(
+                        "MACHINE_LOSS_CHECKPOINTED_NO_ACK {} {} {} {} {} {} {} {} {}",
+                        key.publisher_id,
+                        key.source_id,
+                        key.generation,
+                        key.sequence,
+                        oa_sha256::to_hex(&identity.payload_digest),
+                        oa_sha256::to_hex(&oa_sha256::sha256(&checkpoint)),
+                        fields[2],
+                        fields[6],
+                        fields[7]
+                    );
+                    let _ = std::io::stdout().flush();
+                    std::process::exit(88);
+                }
                 println!(
                     "MACHINE_LOSS_INPUT_ACK {} {} {} {} {} {ack}",
                     key.publisher_id,
@@ -1547,6 +1594,13 @@ impl Replica {
         Self::start_mode_with_quarantine(None, true, Some(path))
     }
 
+    fn start_visible_ca_with_checkpoint_output(
+        checkpoint: &std::path::Path,
+        output: &std::path::Path,
+    ) -> Self {
+        Self::start_mode_with_checkpoint_output(Some(checkpoint), true, None, Some(output))
+    }
+
     fn start_mode(checkpoint: Option<&std::path::Path>, visible_ca: bool) -> Self {
         Self::start_mode_with_quarantine(checkpoint, visible_ca, None)
     }
@@ -1555,6 +1609,15 @@ impl Replica {
         checkpoint: Option<&std::path::Path>,
         visible_ca: bool,
         quarantine: Option<&std::path::Path>,
+    ) -> Self {
+        Self::start_mode_with_checkpoint_output(checkpoint, visible_ca, quarantine, None)
+    }
+
+    fn start_mode_with_checkpoint_output(
+        checkpoint: Option<&std::path::Path>,
+        visible_ca: bool,
+        quarantine: Option<&std::path::Path>,
+        checkpoint_output: Option<&std::path::Path>,
     ) -> Self {
         let quarantine = quarantine.map(|path| {
             let record = read_quarantine(path).expect("replacement reads durable fixture marker");
@@ -1572,12 +1635,16 @@ impl Replica {
             .args(["--exact", "machine_loss_worker_process", "--nocapture"])
             .env("OA_MACHINE_LOSS_WORKER", "1")
             .env_remove("OA_MACHINE_LOSS_CHECKPOINT")
+            .env_remove("OA_MACHINE_LOSS_CHECKPOINT_OUTPUT")
             .env_remove("OA_MACHINE_LOSS_VISIBLE_CA")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         if let Some(path) = checkpoint {
             command.env("OA_MACHINE_LOSS_CHECKPOINT", path);
+        }
+        if let Some(path) = checkpoint_output {
+            command.env("OA_MACHINE_LOSS_CHECKPOINT_OUTPUT", path);
         }
         if visible_ca {
             command.env("OA_MACHINE_LOSS_VISIBLE_CA", "1");
@@ -1706,6 +1773,15 @@ impl Replica {
 
     fn crash_after_apply(&mut self, identity: QuarantineRecord, second: i32, live: bool) -> String {
         self.input_command("CRASH_AFTER_APPLY", identity.key, second, live)
+    }
+
+    fn crash_after_checkpoint(
+        &mut self,
+        identity: QuarantineRecord,
+        second: i32,
+        live: bool,
+    ) -> String {
+        self.input_command("CRASH_AFTER_CHECKPOINT", identity.key, second, live)
     }
 
     fn shutdown(&mut self) -> io::Result<ExitStatus> {
@@ -1921,6 +1997,106 @@ fn crash_after_apply_before_ack_replays_from_verified_prefix() {
     assert!(replacement.shutdown().unwrap().success());
 }
 
+// REQ: OA-CA-003, OA-CA-009, OA-TRK-343
+#[test]
+fn checkpointed_apply_before_ack_recovers_and_continues() {
+    let prefix_len = 2;
+    let files = TempCheckpointFiles::new();
+    let prefix_path = files.write(
+        "verified-two-step-prefix.oarc",
+        &encode_recovery_checkpoint(
+            &VISIBLE_CA_STREAM[..prefix_len],
+            INITIAL_FENCE,
+            RECOVERY_GENERATION,
+        ),
+    );
+    let checkpoint_path = files.uncreated_path("checkpointed-apply-before-ack.oarc");
+    assert!(!checkpoint_path.exists());
+    let expected_checkpoint = encode_recovery_checkpoint(
+        &VISIBLE_CA_STREAM[..prefix_len + 1],
+        INITIAL_FENCE,
+        RECOVERY_GENERATION,
+    );
+
+    let mut reference = Drill::new();
+    reference.warmup_visible_ca();
+    let mut expected_prefix = Vec::with_capacity(prefix_len + 1);
+    let mut serving =
+        Replica::start_visible_ca_with_checkpoint_output(&prefix_path, &checkpoint_path);
+    for &(second, live) in VISIBLE_CA_STREAM.iter().take(prefix_len) {
+        let expected = reference.process_visible_ca(second, live);
+        assert_eq!(serving.recovered_prefix_line(second), expected);
+        expected_prefix.push(expected);
+    }
+
+    // Apply the third stream step, persist a checkpoint that includes it, and crash without the
+    // normal success ACK. The checkpoint writer uses create_new and sync_all before the marker.
+    let (second, live) = VISIBLE_CA_STREAM[prefix_len];
+    let expected_applied = reference.process_visible_ca(second, live);
+    let active = format!("{}:{}:{}:", A, B, EPOCH);
+    assert_ca_ack_state(&expected_applied, second, "-", &active);
+    let identity = input_identity(prefix_len as u64 + 1, second, live);
+    let fields: Vec<_> = expected_applied.split_whitespace().collect();
+    let marker = serving.crash_after_checkpoint(identity, second, live);
+    assert_eq!(
+        marker,
+        format!(
+            "MACHINE_LOSS_CHECKPOINTED_NO_ACK {} {} {} {} {} {} {} {} {}",
+            identity.key.publisher_id,
+            identity.key.source_id,
+            identity.key.generation,
+            identity.key.sequence,
+            oa_sha256::to_hex(&identity.payload_digest),
+            oa_sha256::to_hex(&oa_sha256::sha256(&expected_checkpoint)),
+            fields[2],
+            fields[6],
+            fields[7]
+        )
+    );
+    let status =
+        wait_bounded(&mut serving.child).expect("checkpointed post-apply fault exits promptly");
+    assert_eq!(
+        status.code(),
+        Some(88),
+        "checkpointed fault was not exercised"
+    );
+    let terminal_output = serving
+        .output
+        .as_ref()
+        .unwrap()
+        .recv_timeout(WORKER_TIMEOUT);
+    assert!(
+        matches!(terminal_output, Err(mpsc::RecvTimeoutError::Disconnected)),
+        "expected EOF after the committed marker, got {terminal_output:?}"
+    );
+    drop(serving);
+
+    // Confirm the exact bounded file is visible through the sealed reader, then recover it in a
+    // fresh process. The worker validates digest, frame, identity and watermark before replay.
+    assert_eq!(
+        read_recovery_checkpoint(&checkpoint_path).unwrap(),
+        expected_checkpoint
+    );
+    expected_prefix.push(expected_applied);
+    let mut recovered = Replica::start_visible_ca(Some(&checkpoint_path));
+    for (&(prefix_second, _), expected) in VISIBLE_CA_STREAM
+        .iter()
+        .take(prefix_len + 1)
+        .zip(&expected_prefix)
+    {
+        assert_eq!(recovered.recovered_prefix_line(prefix_second), *expected);
+    }
+    for &(suffix_second, suffix_live) in VISIBLE_CA_STREAM.iter().skip(prefix_len + 1) {
+        let ack = recovered.step(suffix_second, suffix_live);
+        let expected = reference.process_visible_ca(suffix_second, suffix_live);
+        assert_eq!(
+            ack, expected,
+            "recovered continuation diverged at {suffix_second}s"
+        );
+    }
+    assert!(recovered.shutdown().unwrap().success());
+}
+
 // Exercises the pre-application failure described by IF-R2 and IF-R3 in docs/INTERFACES.md.
 // REQ: OA-CA-003, OA-CA-009, OA-TRK-343
 #[test]
@@ -2133,6 +2309,15 @@ fn worker_protocol_is_typed_and_caps_output_lines() {
             second: 12,
             feed_live: false,
             fault: InputFault::CrashAfterApply,
+        })
+    );
+    assert_eq!(
+        parse_worker_command("CRASH_AFTER_CHECKPOINT 1 2 3 4 12 LOST"),
+        Some(WorkerCommand::Input {
+            key,
+            second: 12,
+            feed_live: false,
+            fault: InputFault::CrashAfterCheckpoint,
         })
     );
     assert_eq!(

@@ -7,6 +7,7 @@ cargo test -p oa-scope-replay --test outage_drill serving_process_loss_promotes_
 cargo test -p oa-scope-replay --test outage_drill durable_prefix_recovers_in_fresh_process_and_refuses_damage -- --nocapture
 cargo test -p oa-scope-replay --test outage_drill visible_tracker_ca_alert_survives_silent_durable_replacement -- --nocapture
 cargo test -p oa-scope-replay --test outage_drill crash_after_apply_before_ack_replays_from_verified_prefix -- --nocapture
+cargo test -p oa-scope-replay --test outage_drill checkpointed_apply_before_ack_recovers_and_continues -- --nocapture
 cargo test -p oa-scope-replay --test outage_drill poison_input_is_quarantined_before_replacement_application -- --nocapture
 ```
 
@@ -65,6 +66,19 @@ effects are process-local; no external publication or durable post-apply effect 
 shows deterministic reconstruction from the last fixture checkpoint, not production exactly-once
 processing or a rule for resolving an externally visible but unacknowledged effect. That ambiguous
 case remains open. The fixture uses synthetic source times and makes no wall-clock recovery claim.
+
+The `checkpointed_apply_before_ack_recovers_and_continues` fixture starts a child from a verified,
+synced two-step visible-CA prefix, then applies the third step through the same
+tracker/scope/raster/CA path. Before exiting without the success ACK, the child creates a separate
+bounded checkpoint containing the three-step synthetic input prefix with `create_new`, writes it
+and calls `sync_all`; its following marker includes the checkpoint digest and applied output
+identity. The parent observes the marker and worker EOF. A fresh worker verifies that exact file
+through the existing checkpoint reader, replays all three steps, then continues the suffix against
+the uninterrupted reference.
+This checkpoint is a replayable input prefix, not a serialized tracker or CA memory image. It
+shows ordering inside this test child between file sync and ACK emission; it does not test
+directory-entry or power-loss durability, external publication, durable downstream effects,
+production exactly-once processing, or supervisor policy. Its timestamps remain synthetic.
 
 The separate `visible_tracker_ca_alert_survives_silent_durable_replacement` fixture obtains its
 CA rows from the identities actually present in the scope target set, then retrieves those
