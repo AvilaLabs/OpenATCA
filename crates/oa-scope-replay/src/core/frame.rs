@@ -4,12 +4,13 @@
 //! ([`replay_build`], [`replay_raster`]) allocates nothing: its text is written into a stack
 //! buffer. The time text of the frame is an input (the shell formats it).
 
+use crate::core::raw::{raw_targets_at, RawInputError, RawObservationColumns, RawStats};
 use crate::core::rows::{
     convert_check, targets_at, Callsigns, ConvertConfig, ConvertStats, RowStore, RowsError,
 };
 use oa_airspace::core::model::Model;
 use oa_display::core::list::{
-    list_new, push_text, DisplayError, DisplayList, ListCaps, ALIGN_RIGHT,
+    list_new, push_text, DisplayError, DisplayList, ListCaps, ALIGN_CENTRE, ALIGN_RIGHT,
 };
 use oa_display::core::ownership::{
     build_ownership_status, ownership_caps, ownership_status_fits, OwnershipStatus,
@@ -35,6 +36,9 @@ const STAMP_SIZE: u8 = 12;
 const STAMP_RIGHT_PX: i32 = 8;
 const STAMP_FROM_BOTTOM_PX: i32 = 22;
 const STAMP_BYTES: usize = 96;
+const RAW_BANNER: &str = "RAW SURVEILLANCE ONLY";
+const RAW_BANNER_SIZE: u8 = 16;
+const RAW_BANNER_TOP_PX: i32 = 10;
 
 /// Why a frame could not be made.
 // A7.2: cold struct, size guard waived (errors are rare).
@@ -44,6 +48,8 @@ pub enum ReplayError {
     Render(RenderError),
     /// The conversion configuration is outside its ranges.
     Config(RowsError),
+    /// The raw fallback input was not a bounded, ordered set of columns.
+    RawInput(RawInputError),
 }
 
 impl fmt::Display for ReplayError {
@@ -52,6 +58,7 @@ impl fmt::Display for ReplayError {
             ReplayError::Display(e) => write!(f, "display list: {e}"),
             ReplayError::Render(e) => write!(f, "render: {e}"),
             ReplayError::Config(e) => write!(f, "configuration: {e}"),
+            ReplayError::RawInput(e) => write!(f, "raw surveillance input: {e}"),
         }
     }
 }
@@ -67,6 +74,12 @@ impl From<DisplayError> for ReplayError {
 impl From<RenderError> for ReplayError {
     fn from(e: RenderError) -> Self {
         ReplayError::Render(e)
+    }
+}
+
+impl From<RawInputError> for ReplayError {
+    fn from(e: RawInputError) -> Self {
+        ReplayError::RawInput(e)
     }
 }
 
@@ -121,7 +134,7 @@ pub struct FrameInfo {
     pub refused: u32,
     /// Targets the set refused as not valid.
     pub malformed: u32,
-    /// The frame's own stamp text did not fit its buffer (LOSS: the stamp on the frame is short).
+    /// Frame status text did not fit its buffer (stamp, or the raw-only banner).
     pub stamp_clipped: bool,
     /// A supplied ownership line was valid but did not fit this projection, so it was omitted.
     pub ownership_clipped: bool,
@@ -155,8 +168,8 @@ pub fn replay_new(model: Model, cfg: &ReplayConfig) -> Result<Replay, ReplayErro
         circles: 0,
         polylines: 0,
         poly_vertices: 0,
-        texts: 1,
-        text_bytes: STAMP_BYTES,
+        texts: 2,
+        text_bytes: STAMP_BYTES + RAW_BANNER.len(),
     };
     let caps = caps_add(
         &caps_add(
@@ -194,6 +207,71 @@ pub fn replay_build(
     stamp: &str,
 ) -> Result<FrameInfo, ReplayError> {
     replay_build_with_overlays(r, store, calls, t_ns, stamp, None, None)
+}
+
+/// Builds a frame directly from caller-owned raw observation columns, without using tracker
+/// output. The as-of time is explicit; only observations at or before it and no older than the
+/// finite cutoff in the raw reducer can appear. No ownership, callsign, coast, trail, or
+/// extrapolated position is inferred. The banner makes this step down visible to the controller.
+/// The caller's columns and reader state are independent of tracker output.
+pub fn replay_build_raw(
+    r: &mut Replay,
+    observations: &RawObservationColumns<'_>,
+    as_of_ns: i64,
+    stamp: &str,
+) -> Result<(FrameInfo, RawStats), ReplayError> {
+    let raw = raw_targets_at(observations, as_of_ns, &mut r.set)?;
+    let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
+    let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
+
+    let mut status = text_new();
+    text_push_str(&mut status, stamp);
+    text_push_str(&mut status, "  TARGETS ");
+    text_push_dec(&mut status, u64::from(traffic.drawn), 0);
+    let y = i32::try_from(r.cfg.height)
+        .unwrap_or(i32::MAX)
+        .saturating_sub(STAMP_FROM_BOTTOM_PX)
+        .saturating_mul(16);
+    let x = i32::try_from(r.cfg.width)
+        .unwrap_or(i32::MAX)
+        .saturating_sub(STAMP_RIGHT_PX)
+        .saturating_mul(16);
+    push_text(
+        &mut r.list,
+        (x, y),
+        STAMP_SIZE,
+        ALIGN_RIGHT,
+        palette::TEXT,
+        LAYER_BLOCK,
+        text_str(&status),
+    )?;
+
+    let banner_x = i32::try_from(r.cfg.width / 2)
+        .unwrap_or(i32::MAX)
+        .saturating_mul(16);
+    let mut banner = text_new();
+    text_push_str(&mut banner, RAW_BANNER);
+    push_text(
+        &mut r.list,
+        (banner_x, RAW_BANNER_TOP_PX.saturating_mul(16)),
+        RAW_BANNER_SIZE,
+        ALIGN_CENTRE,
+        palette::ALERT,
+        LAYER_BLOCK,
+        text_str(&banner),
+    )?;
+    Ok((
+        FrameInfo {
+            scene,
+            traffic,
+            convert: ConvertStats::default(),
+            refused: targets_refused(&r.set),
+            malformed: targets_malformed(&r.set),
+            stamp_clipped: text_clipped(&status) || text_clipped(&banner),
+            ownership_clipped: false,
+        },
+        raw,
+    ))
 }
 
 /// Builds the scope frame with independent feed, track-freshness and safety-net telemetry.

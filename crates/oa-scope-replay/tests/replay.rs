@@ -9,6 +9,7 @@
 
 use oa_adsb::{encode_payload, reports_push, Reports, Row, ROW_EMPTY};
 use oa_airspace::model::{empty_model, Meta, Model};
+use oa_display::core::palette;
 use oa_display::project::projection_new;
 use oa_display::raster::frame_digest;
 use oa_display::traffic::{
@@ -18,8 +19,10 @@ use oa_display::traffic::{
 use oa_scope_replay::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use oa_scope_replay::cli;
 use oa_scope_replay::frame::{
-    replay_build, replay_build_with_safety, replay_new, replay_raster, ReplayConfig, ReplaySafety,
+    replay_build, replay_build_raw, replay_build_with_safety, replay_new, replay_raster,
+    ReplayConfig, ReplaySafety,
 };
+use oa_scope_replay::raw::{RawObservationColumns, RAW_STALE_CUTOFF_NS};
 use oa_scope_replay::rows::*;
 use oa_scope_replay::store::*;
 use oa_sha256::to_hex;
@@ -515,6 +518,81 @@ fn replayed_frames_are_the_same_in_every_run_and_do_not_depend_on_earlier_frames
 }
 
 const GOLDEN: &str = "3d27683429165aaedf3ff3e8341b2ed667adcbf711d356c223222a222efd2980";
+
+#[test]
+fn raw_fallback_is_as_of_finite_and_visibly_bypasses_tracker_rows() {
+    let times = [
+        T0,
+        T0 + 2 * S,
+        T0 + 6 * S,
+        T0 + S,
+        T0 + 6 * S,
+        T0 + 6 * S,
+        T0 + 5 * S,
+    ];
+    let addresses = [11, 11, 11, 22, 22, 33, 44];
+    let latitudes = [ORD.0, ORD.0 + 500, ORD.0 + 900, ORD.0, ORD.0, ORD.0, ORD.0];
+    let longitudes = [ORD.1, ORD.1 + 700, ORD.1 + 900, ORD.1, ORD.1, ORD.1, ORD.1];
+    let altitudes = [24_000; 7];
+    let speeds = [NO_U16; 7];
+    let tracks = [NO_U16; 7];
+    let observations = RawObservationColumns {
+        t_ns: &times,
+        addr: &addresses,
+        lat_e7: &latitudes,
+        lon_e7: &longitudes,
+        alt_ft: &altitudes,
+        gs_dkt: &speeds,
+        track_ddeg: &tracks,
+    };
+    let cfg = ReplayConfig {
+        max_targets: 1,
+        ..frame_cfg()
+    };
+    let mut replay = replay_new(model(), &cfg).unwrap();
+    let as_of = T0 + 5 * S;
+    let (info, raw) = replay_build_raw(&mut replay, &observations, as_of, "RAW TEST").unwrap();
+
+    assert_eq!(
+        RAW_STALE_CUTOFF_NS,
+        3 * S,
+        "the raw-only freshness limit is finite and fixed"
+    );
+    assert_eq!(raw.observations_in, 7);
+    assert_eq!(raw.future_observations, 3);
+    assert_eq!(raw.future_only_addresses, 1);
+    assert_eq!(raw.stale_addresses, 1);
+    assert_eq!(raw.shown, 1);
+    assert_eq!(raw.refused_capacity, 1);
+    assert_eq!((info.traffic.drawn, info.refused), (1, 1));
+    let shown = targets_columns(&replay.set);
+    assert_eq!(shown.addr, &[11]);
+    assert_eq!(
+        (shown.lat_e7[0], shown.lon_e7[0]),
+        (ORD.0 + 500, ORD.1 + 700)
+    );
+    assert_ne!(shown.flags[0] & T_COAST, T_COAST);
+    assert_eq!(shown.flags[0] & T_UNCERTAIN, T_UNCERTAIN);
+    assert!(shown.callsign[0].iter().all(|&b| b == 0));
+    assert!(shown.r95_m[0].is_nan());
+
+    replay_raster(&mut replay).unwrap();
+    let texts: Vec<&str> = (0..replay.list.texts.x.len())
+        .map(|i| {
+            let (start, len) = (
+                replay.list.texts.start[i] as usize,
+                replay.list.texts.len[i] as usize,
+            );
+            &replay.list.text[start..start + len]
+        })
+        .collect();
+    assert!(texts.contains(&"RAW SURVEILLANCE ONLY"));
+    let alert_pixel = palette::PALETTE[usize::from(palette::ALERT)].to_le_bytes();
+    assert!(
+        replay.buf.chunks_exact(4).any(|pixel| pixel == alert_pixel),
+        "the raw-only banner is rasterized in the alert color"
+    );
+}
 
 // REQ: OA-DSP-044
 #[test]

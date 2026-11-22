@@ -27,5 +27,5 @@ compile_error!("this crate supports 64-bit targets only");
 pub mod core;
 pub mod shell;
 
-pub use crate::core::{frame, rows};
+pub use crate::core::{frame, raw, rows};
 pub use crate::shell::{adapt, cli, store};
