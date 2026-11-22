@@ -6643,6 +6643,11 @@ configuration with no default; the crate's tests use synthetic values.
   selected-fix ETA when inputs support them. Scoring uses future truth without bridging gaps,
   the first valid post-issue meter passage, and optional comparisons available at issue time.
   A missing measurement remains absent.
+- **OA-LTJ-055** The arrival forecast uses an assigned altitude only from a supported simple
+  SFDPS assignment received by the issue cutoff. Selection is by source event time among
+  available updates. Valid non-simple replacements, conflicts at the same source stamp,
+  uncertain availability that could change the selection, and incomplete bounded history
+  withhold the scalar with a named reason. The report counts assignment states per issued forecast.
 
 ## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
 

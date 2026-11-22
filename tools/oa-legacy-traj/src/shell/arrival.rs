@@ -934,6 +934,7 @@ mod assigned_altitude_tests {
         ingest_sfdps(legacy, reader, xml.as_bytes(), recv_ms);
     }
 
+    // REQ: OA-LTJ-055
     #[test]
     fn decoder_history_is_cutoff_safe_and_valid_unsupported_form_replaces_simple() {
         let mut legacy = new_legacy();
@@ -1037,6 +1038,7 @@ mod assigned_altitude_tests {
         );
     }
 
+    // REQ: OA-LTJ-055
     #[test]
     fn assigned_altitude_history_is_bounded_per_flight() {
         let mut legacy = new_legacy();
@@ -1079,6 +1081,7 @@ mod assigned_altitude_tests {
         );
     }
 
+    // REQ: OA-LTJ-055
     #[test]
     fn same_stamped_time_conflict_refuses_scalar_and_unknown_receive_is_not_used() {
         let mut legacy = new_legacy();
@@ -1132,6 +1135,7 @@ mod assigned_altitude_tests {
         );
     }
 
+    // REQ: OA-LTJ-055
     #[test]
     fn later_unknown_receipt_blocks_only_after_its_source_time_and_newer_definitive_event_supersedes(
     ) {
