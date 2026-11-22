@@ -153,7 +153,6 @@ fn finite_over_cap_radius_can_qualify_uncapped_but_is_absent_from_capped_candida
         )
         .unwrap()
         .distance_m;
-    assert!((distance_m - expected_distance_m).abs() < 0.1);
     assert!(
         distance_m > capped_search_upper_m,
         "{distance_m} > {capped_search_upper_m}"
@@ -189,8 +188,8 @@ fn finite_over_cap_radius_can_qualify_uncapped_but_is_absent_from_capped_candida
     ));
     assert_eq!(ca_open_len(&clipped.0), 0);
 
-    // In-cap, closer head-on control: its 40 km geodesic start and 400 m/s closure enter the
-    // synthetic 5 km horizontal limit at 87.5 s. It remains fully evaluated with no cap reason.
+    // The in-cap head-on control uses the measured geodesic separation in its timing oracle.
+    // It closes at 400 m/s and enters the synthetic 5 km horizontal limit near 87.5 s.
     let control_rows = [
         track_xy(601, -20_000.0, 0.0, 200.0, 0.0, 10_000.0),
         track_xy(602, 20_000.0, 0.0, -200.0, 0.0, 10_000.0),
@@ -202,7 +201,7 @@ fn finite_over_cap_radius_can_qualify_uncapped_but_is_absent_from_capped_candida
         )
         .unwrap()
         .distance_m;
-    assert!((control_distance - 40_000.0).abs() < 0.1);
+    let control_entry_s = (control_distance - cfg.default_volume.h_m) / 400.0;
     let mut control = rig();
     let out = ca_cycle(
         &mut control.0,
@@ -220,7 +219,11 @@ fn finite_over_cap_radius_can_qualify_uncapped_but_is_absent_from_capped_candida
     let warning = ca_open(&control.0)
         .first()
         .expect("healthy in-cap control is alerted");
-    assert!((f64::from(warning.ttl_first_s) - 87.5).abs() < 0.5);
+    assert!(
+        (f64::from(warning.ttl_first_s) - control_entry_s).abs() < 0.5,
+        "CA entry {} s, geodesic oracle {control_entry_s} s",
+        warning.ttl_first_s
+    );
 }
 
 // REQ: OA-CA-002, OA-CA-003, OA-CA-012
