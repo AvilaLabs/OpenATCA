@@ -1801,7 +1801,8 @@ fn visible_tracker_ca_alert_survives_silent_durable_replacement() {
     assert!(status.success());
 }
 
-// REQ: IF-R2, IF-R3, OA-CA-003, OA-CA-009, OA-TRK-343
+// Exercises the pre-application failure described by IF-R2 and IF-R3 in docs/INTERFACES.md.
+// REQ: OA-CA-003, OA-CA-009, OA-TRK-343
 #[test]
 fn poison_input_is_quarantined_before_replacement_application() {
     // This is a normal, well-formed synthetic tracker measurement. The explicit test command
