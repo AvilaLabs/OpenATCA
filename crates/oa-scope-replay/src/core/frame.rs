@@ -205,7 +205,7 @@ pub fn replay_build_with_safety(
     calls: &Callsigns,
     t_ns: i64,
     stamp: &str,
-    safety: Option<&ReplaySafety<'_>>,
+    safety: &ReplaySafety<'_>,
 ) -> Result<FrameInfo, ReplayError> {
     replay_build_with_overlays(r, store, calls, t_ns, stamp, Some(safety), None)
 }
@@ -214,18 +214,6 @@ pub fn replay_build_with_safety(
 /// Ownership is presentation input only; this function does not infer it from NAM acknowledgments.
 /// A valid line that cannot fit is omitted and reported by `FrameInfo`.
 pub fn replay_build_with_overlays(
-    r: &mut Replay,
-    store: &RowStore,
-    calls: &Callsigns,
-    t_ns: i64,
-    stamp: &str,
-    safety: &ReplaySafety<'_>,
-    ownership: Option<&OwnershipStatus>,
-) -> Result<FrameInfo, ReplayError> {
-    replay_build_inner(r, store, calls, t_ns, stamp, safety, ownership)
-}
-
-fn replay_build_inner(
     r: &mut Replay,
     store: &RowStore,
     calls: &Callsigns,
