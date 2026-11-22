@@ -827,7 +827,8 @@ fn synthetic_flat_terrain_descent_and_level_control_are_scored_from_runner_outpu
     let totals = score(&cases, &episodes, &mut results).unwrap();
     assert_eq!(
         (totals.desired_cases, totals.hits, totals.misses),
-        (1, 1, 0)
+        (1, 1, 0),
+        "cases {cases:?}, alert episodes {episodes:?}, results {results:?}",
     );
     assert_eq!(
         (
