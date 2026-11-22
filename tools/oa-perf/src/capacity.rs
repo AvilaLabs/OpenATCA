@@ -48,6 +48,8 @@ pub struct CapCfg {
     pub early_stop: bool,
     /// Optional measured-window ADS-B outage, in seconds, beginning at the warm-up boundary.
     pub adsb_dropout_s: Option<i64>,
+    /// Remove Mode C altitude from every measured-window radar plot.
+    pub radar_no_altitude: bool,
     /// Opt-in bounded final-snapshot identity summary from plot-assignment evidence.
     pub truth_score: bool,
     /// Show per-radar initiation budget diagnostics in the report.
@@ -144,6 +146,9 @@ pub struct CapResult {
     /// ADS-B reports withheld by the opt-in outage, counted from generated reports.
     pub adsb_dropout_reports: u64,
     pub adsb_dropout_s: Option<i64>,
+    pub radar_no_altitude: bool,
+    /// Generated plot fields removed by the opt-in measured-window degradation.
+    pub radar_altitudes_removed: u64,
     /// Warm address-bearing cohort size and fresh-row coverage in each measured second.
     pub continuity_cohort: usize,
     pub continuity_noncoast: Vec<(i64, Option<usize>)>,
@@ -663,6 +668,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     // any core timing. Multiple radar labels for one aircraft intentionally count once.
     let mut offered = offered_new(traffic.aircraft());
     let mut adsb_dropout_reports = 0u64;
+    let mut radar_altitudes_removed = 0u64;
     let mut continuity_cohort = BTreeSet::<u32>::new();
     let mut continuity_noncoast = Vec::new();
     let rss_after_new_kb = status_kb("VmRSS").unwrap_or(0);
@@ -699,6 +705,14 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         adsb.clear();
         traffic.adsb_window(k, &mut adsb);
         traffic.plot_windows(k, &mut plots);
+        if measured && cfg.radar_no_altitude {
+            for plot in plots.iter_mut().flatten() {
+                if plot.alt_ft != oa_track::radar::NONE_ALT {
+                    plot.alt_ft = oa_track::radar::NONE_ALT;
+                    radar_altitudes_removed = radar_altitudes_removed.saturating_add(1);
+                }
+            }
+        }
         let dropout = cfg
             .adsb_dropout_s
             .is_some_and(|duration| k >= cfg.warmup_s && k < cfg.warmup_s.saturating_add(duration));
@@ -945,6 +959,8 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         unknown_input_labels: offered.unknown,
         adsb_dropout_reports,
         adsb_dropout_s: cfg.adsb_dropout_s,
+        radar_no_altitude: cfg.radar_no_altitude,
+        radar_altitudes_removed,
         continuity_cohort: continuity_cohort.len(),
         continuity_noncoast,
         continuity_addresses: continuity_cohort.into_iter().collect(),
@@ -1049,6 +1065,11 @@ pub fn cap_kv(r: &CapResult) -> Kv {
                 .filter(|(_, n)| n.is_none())
                 .count(),
         );
+    }
+    if r.radar_no_altitude {
+        kv.put("radar_degradation_start_s", r.warmup_s);
+        kv.put("radar_no_altitude", u8::from(r.radar_no_altitude));
+        kv.put("radar_altitudes_removed", r.radar_altitudes_removed);
     }
     if let Some(score) = r.truth_score {
         kv.put("truth_score.status", "available");
@@ -1304,6 +1325,12 @@ pub fn cap_text(r: &CapResult) -> String {
             r.adsb_dropout_reports, r.continuity_cohort, uncertain
         ));
     }
+    if r.radar_no_altitude {
+        s.push_str(&format!(
+            "  measured-window radar degradation: removed {} Mode C altitudes from generated anonymous plots before fusion.\n",
+            r.radar_altitudes_removed
+        ));
+    }
     if let Some(score) = r.truth_score {
         s.push_str(&format!(
             "  truth-derived final snapshot at t={} s: {} confirmed keys, {} / {} distinct known measured-window truth aircraft matched, {} missing; {} duplicate tracks, {} false tracks, {} false assignments, {} swaps. Identity uses cumulative assignments since run start, filtered to final snapshot keys ({} logged rows total). Timings include assignment logging.\n",
@@ -1492,6 +1519,7 @@ mod tests {
             max_wall_s: 120.0,
             early_stop: false,
             adsb_dropout_s: None,
+            radar_no_altitude: false,
             truth_score: false,
             init_diagnostics: false,
             association_diagnostics: false,
@@ -1539,6 +1567,42 @@ mod tests {
             result.fusion.pairs_gated - result.fusion_warm.pairs_gated
         );
         assert_eq!(cap_kv(&result).get("association_diagnostics"), Some("1"));
+    }
+
+    // REQ: OA-PRF-013
+    #[test]
+    fn measured_window_can_remove_every_generated_radar_altitude() {
+        let mut control_cfg = small(48, 24, 3);
+        control_cfg.traffic.adsb_frac = 1.0;
+        let control = run_capacity(&control_cfg).unwrap();
+
+        let mut degraded_cfg = control_cfg;
+        degraded_cfg.radar_no_altitude = true;
+        let degraded = run_capacity(&degraded_cfg).unwrap();
+        let offered_plots = degraded
+            .seconds
+            .iter()
+            .map(|second| second.3 as u64)
+            .sum::<u64>();
+
+        assert_eq!(control.radar_altitudes_removed, 0);
+        assert_eq!(degraded.radar_altitudes_removed, offered_plots);
+        assert!(degraded.radar_altitudes_removed > 0);
+        assert_eq!(
+            control
+                .seconds
+                .iter()
+                .map(|second| second.3)
+                .collect::<Vec<_>>(),
+            degraded
+                .seconds
+                .iter()
+                .map(|second| second.3)
+                .collect::<Vec<_>>()
+        );
+        let kv = cap_kv(&degraded);
+        assert_eq!(kv.get("radar_no_altitude"), Some("1"));
+        assert_eq!(kv.get("radar_degradation_start_s"), Some("24"));
     }
 
     #[test]

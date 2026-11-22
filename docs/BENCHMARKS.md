@@ -263,6 +263,20 @@ completed candidate gating, and the coarse candidate visits and exact checks the
 The `fusion.pairs_rejected_by_altitude` counter records pairs refused by the vertical gate
 before forecasting horizontal motion.
 
+`--radar-no-altitude` removes Mode C altitude from every measured-window radar plot. The generated
+plots are already anonymous. With a mixed-sensor warm-up, this forces anonymous association to use
+the full horizontal forecast path while keeping the seed, aircraft, radar schedule, plot times and
+truth labels unchanged. The report records the start second and exact number of altitudes removed.
+Use a separate output directory for the control and degraded runs.
+
+```sh
+cargo +1.89.0 run --release --locked -p oa-perf -- one \
+  --n 8192 --layout stress --radars e,t,t --adsb-frac 1 --seed 20261123 \
+  --warmup 60 --duration 15 --no-early-stop --max-tracks 16384 --max-wall 120 \
+  --truth-score --association-diagnostics --radar-no-altitude \
+  --out /tmp/oa-radar-no-altitude
+```
+
 Run this radar-only cold start on both revisions with identical traffic settings. The three radars
 cover the same stress area. The score measures identities at 75 seconds of simulated traffic.
 

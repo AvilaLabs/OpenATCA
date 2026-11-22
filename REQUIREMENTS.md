@@ -4464,6 +4464,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   measurement, using ADS-B addresses and radar scoring labels in the shell only. All configured
   aircraft must appear and unknown labels must be zero; repeated sightings count once. Tracker
   hypothesis count is diagnostic and does not establish input load or distinct aircraft identity.
+- **OA-PRF-013** `oa-perf one --radar-no-altitude` removes Mode C altitude from every generated
+  anonymous radar plot in the measured window, after an unchanged warm-up. It reports the start
+  second and exact number removed. The radar schedule, plot count and truth labels remain unchanged,
+  so a control and degraded run with the same seed exercise identical aircraft and plot times.
 
 - **OA-TRK-337** The standalone allocation checker ties every declared measured tracker/fusion
   route to its production source symbol and requires a positive route-specific runtime evidence
