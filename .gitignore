@@ -6,4 +6,5 @@ DEFECTS.md
 *.jar
 *.env
 *.oaf
+!/crates/openatca-core/tests/fixtures/synthetic-adsb.oaf
 /.claude/

@@ -585,3 +585,11 @@ version = "0.0.1"
 dependencies = [
  "oa-sealed",
 ]
+
+[[package]]
+name = "openatca-core"
+version = "0.1.0"
+dependencies = [
+ "oa-track",
+ "oa-truth",
+]

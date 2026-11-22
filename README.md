@@ -91,11 +91,23 @@ These are the design rules. How far the code meets each one today is in
 | `crates/oa-bench` | M2 benchmark harness: legacy sample extraction, association, metrics T1 to T9, F1 to F3, R1, H1, synthetic self-test, truth and airspace wiring (`oa-truth`, M0 model), report writer, and the `oa-bench` binary |
 | `crates/oa-wind` | Wind and temperature aloft at (lat, lon, pressure altitude, time) from RAP analyses, never extrapolated, and the `oa-wind-check` validation tool |
 | `crates/oa-asterix` | ASTERIX category 021, 048 and 062 encoder and decoder: generic core (data block, FSPEC, item kinds, constant UAP tables) and typed items for the tracker |
+| `crates/openatca-core` | Experimental Rust library for replaying recorded ADS-B surveillance clips through the OpenATCA tracker; see [its README](crates/openatca-core/README.md) |
 | `crates/oa-sensorsim` | M3 sensor simulation from `oa-truth`: rotating-beam secondary radar plots (named error profiles from BENCHMARKS 3.1, bias, Pd, false and split plots, line of sight, quantisation) as a table and ASTERIX CAT048, ADS-B spoof transforms (ghost, drift, replay, duplicate address) with row labels, and the `oa-sensorsim` binary |
 | `crates/oa-track` | M3 surveillance tracker: ADS-B and radar plots (exact plot conversion, global-nearest-neighbour association within a per-batch work limit whose cuts are counted, online radar registration against ADS-B) with horizontal and vertical interacting-multiple-model filters in a re-centred local frame, time-of-applicability ordering with re-filtering, M-of-N initiation, coasting, drop, fixed one-second output, split-report scoring against `oa-truth` and `oa-bench`, and the `oa-track-run` and `oa-track-fusion` tools |
 | `tools/oa-trace` | Requirements traceability checker |
 | `tools/oa-perf` | Speed and capacity harness for the tracker's fusion layer |
 | `tools/oa-compass` | Writes a recorded UTC day of OpenATCA tracker output and ERAM tracks as ASTERIX CAT062 Ed 1.21 and the ADS-B reports it was fed as CAT021 Ed 2.4 (with the data-source file and import notes) for OpenATS COMPASS |
+
+## OpenATCA Core and Developer Kit
+
+**OpenATCA Core** is the Rust library for applications that need to replay recorded ADS-B
+surveillance clips through the OpenATCA tracker and inspect timestamped track updates and
+replay health. Version `0.1.0` is experimental and supports offline clips in OpenATCA's OAF
+format. For ASTERIX category 021, 048 and 062 encoding and decoding, use `oa-asterix`.
+
+The **OpenATCA Developer Kit** includes Core, the ASTERIX codec, and examples you can run on
+synthetic data. See the [Core guide](crates/openatca-core/README.md) to add a dependency or run
+the replay example.
 
 ## Building and testing
 

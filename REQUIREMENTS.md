@@ -6980,3 +6980,14 @@ FAA value.
 - **OA-GAP-018** An `exclude` line parses back to the same nanosecond window under the whole-second ISO grammar of `oa_adsb::cli::parse_iso` plus a nine-digit fraction. The scorer's own parser of these lines is tested on its side, not here.
 - **OA-GAP-019** An existing `--out` is refused (exit 2); the report is written to a new temporary file, synced, then renamed.
 
+## OpenATCA Core (offline surveillance replay)
+
+- **OA-CORE-001** Replaying a recorded ADS-B clip uses measurement time, preserves tracker row times
+  and coasting flags, and produces the same update stream for the same clip and settings.
+- **OA-CORE-002** A clip above the configured byte or report-count limit is refused. A truncated
+  frame counts as damaged while earlier complete frames remain available for replay.
+- **OA-CORE-003** Output rows refused by the configured replay buffer are counted in cumulative
+  frame health, and each frame returns at most the configured number of rows.
+- **OA-CORE-004** Offline replay takes its tracker cadence settings from the measured report
+  intervals when available, using the same configuration logic as scope replay.
+

@@ -1,0 +1,22 @@
+[package]
+name = "openatca-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Embed offline ADS-B surveillance replay from OpenATCA"
+repository = "https://github.com/AvilaLabs/OpenATCA"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+# The ADS-B clip reader is shell code in oa-truth; oa-track supplies the normalized adapter and
+# tracker. This crate is a shell-only offline replay façade (RULESET B3, F6).
+[dependencies]
+oa-truth = { path = "../oa-truth" }
+oa-track = { path = "../oa-track" }
+
+[package.metadata.openatca]
+class = "shell"
