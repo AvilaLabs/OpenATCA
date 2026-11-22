@@ -102,28 +102,44 @@ fn the_census_counts_distinct_airborne_addresses_by_hour_and_minute() {
 fn the_track_mode_measures_from_the_start_time_and_reports_its_capacity_counters() {
     let t = scratch("nas-hour-track");
     let c = t.join("c.oaf");
-    // 60 s of warm-up before the hour and 90 s of the hour, four aircraft airborne.
-    clip(&c, HOUR - 60, 150, 5);
-    // seal-allow: runs the example, which checks every path in the guard before opening it
-    let o = Command::new(example())
-        .args(["track"])
-        .arg(&c)
-        .args(["--start", &HOUR.to_string(), "--max-tracks", "1024"])
-        .output()
-        .unwrap();
-    let out = String::from_utf8_lossy(&o.stdout);
-    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
-    let line = out
-        .lines()
-        .find(|l| l.starts_with("measured_reports"))
-        .unwrap();
-    let n: u64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
-    // Every one of the 5 aircraft reports once a second for the 90 measured seconds, and the quality
-    // filter removes none.
-    assert_eq!(n, 450, "{out}");
-    assert!(out.contains("capacity_refused 0"), "{out}");
-    assert!(out.contains("out_overflow 0"), "{out}");
-    assert!(out.contains("tracker_cycle_1s"), "{out}");
+    for (seconds, complete) in [(90, false), (3600, true)] {
+        // The five aircraft each report once a second after 60 s of warm-up.
+        clip(&c, HOUR - 60, 60 + seconds, 5);
+        // seal-allow: runs the example, which checks every path in the guard before opening it
+        let o = Command::new(example())
+            .args(["track"])
+            .arg(&c)
+            .args(["--start", &HOUR.to_string(), "--max-tracks", "1024"])
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&o.stdout);
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("measured_reports"))
+            .unwrap();
+        let n: i64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+        assert_eq!(n, seconds * 5, "{out}");
+        assert!(out.contains("capacity_refused 0"), "{out}");
+        assert!(out.contains("out_overflow 0"), "{out}");
+        assert!(out.contains("tracker_cycle_1s"), "{out}");
+        assert!(
+            out.contains(&format!(
+                "measured_hour_coverage observed_seconds {seconds} expected_seconds 3600 input_intact true"
+            )),
+            "{out}"
+        );
+        let factor = out
+            .lines()
+            .find(|line| line.starts_with("real_time_factor_measured_window "))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap();
+        if complete {
+            assert!(factor.parse::<f64>().is_ok_and(f64::is_finite), "{out}");
+        } else {
+            assert_eq!(factor, "unavailable", "{out}");
+        }
+    }
     let _ = fs::remove_dir_all(&t);
 }
 

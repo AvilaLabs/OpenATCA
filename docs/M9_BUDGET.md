@@ -6,6 +6,10 @@ function at a time, as each function is built. A real-time factor is the CPU tim
 spends divided by the hour of traffic it processed: 1.0 is one core exactly keeping up, and the M9
 budget for everything together is 4.0.
 
+`nas_hour` reports how many seconds in the 3,600-second window received qualifying measurements.
+If a second has no qualifying input, or the loader reports damage or sealed rows, the whole-hour
+real-time factor is unavailable. The reported work and counters still describe the partial run.
+
 What is measured so far, on the busiest UTC hour of 19 November 2026 in a box around the
 contiguous United States (15,107 airborne aircraft in the hour, up to 7,806 tracked at once):
 

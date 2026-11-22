@@ -5878,8 +5878,10 @@ configuration with no default; the crate's tests use synthetic values.
   a budget. With `--rate-hz`, the stream is interpolated linearly between consecutive points of an aircraft no
   more than 60 s apart, at that rate, with the earlier point's quality fields, and nothing is added past an
   aircraft's last point (`oa_ca_run::synth`); the output says "synthetic rate from interpolated trace points".
-  A sealed path is refused and `--start` is required. It scores nothing and changes neither the tracker nor
-  conflict alert (`tests/nas_hour.rs`).
+  The whole-hour real-time factor is available only when input passes framing and seal checks and an
+  accepted measurement is offered in each second of the hour. Observed and expected seconds are printed
+  with the input-integrity status. A sealed path is refused and `--start` is required. It scores nothing
+  and changes neither the tracker nor conflict alert (`tests/nas_hour.rs`).
 - **OA-CA-033** The prefilter never rejects a pair that the exact test would accept, at any latitude
   up to 85 degrees, in either hemisphere and across the antimeridian. Each pair is judged on its own
   radius and latitudes, so one fast or uncertain track no longer limits the latitude of every other

@@ -371,9 +371,16 @@ fn replay(
     rate_hz: Option<f64>,
     ca_cfg: Option<String>,
 ) -> Result<(), String> {
+    let from_ns = start_s
+        .checked_mul(NS)
+        .ok_or("--start is outside replay time")?;
+    let to_ns = from_ns
+        .checked_add(HOUR_S * NS)
+        .ok_or("the measured hour ends outside replay time")?;
     let t_open = Instant::now();
     let mut sealed = 0u64;
     let loaded = load_adsb_counted(clip, &file_opener(), &mut sealed).map_err(|e| e.to_string())?;
+    let input_intact = loaded.bad_frames == 0 && loaded.dropped_records == 0 && sealed == 0;
     let ground = ground_table(&loaded.reports);
     let acfg = AdsbConfig::default();
     check_adsb_config(&acfg)?;
@@ -442,8 +449,6 @@ fn replay(
             })
         }
     };
-    let from_ns = start_s * NS;
-    let to_ns = (start_s + HOUR_S) * NS;
     println!(
         "setup_s {:.1} tracker max_tracks {} out_capacity {} expected_interval_ms {} init_interval_ms {} load {}",
         t_open.elapsed().as_secs_f64(),
@@ -531,8 +536,10 @@ fn replay(
     tracker_advance(&mut t, end, &mut out);
     tracker_flush(&mut t, end, &mut out);
     if let Some(c) = ca.as_mut() {
+        let begin = Instant::now();
         c.consume(&out, from_ns);
         c.flush(from_ns);
+        ca_wall_ns += begin.elapsed().as_nanos() as u64;
     }
     let (c1, w1) = (cpu_s(), Instant::now());
     let rss_end = rss_kb();
@@ -555,9 +562,18 @@ fn replay(
         c1.0 - c0.0,
         c1.1 - c0.1,
     );
+    // A quiet or damaged part of this input cannot count as successfully exercised peak load.
+    let observed_seconds = sec_reports.len();
     println!(
-        "real_time_factor_measured_window {:.5} peak_rss_including_load_kb {}",
-        measured_cpu / HOUR_S as f64,
+        "measured_hour_coverage observed_seconds {observed_seconds} expected_seconds {HOUR_S} input_intact {input_intact}"
+    );
+    let real_time_factor = if input_intact && observed_seconds == HOUR_S as usize {
+        format!("{:.5}", measured_cpu / HOUR_S as f64)
+    } else {
+        "unavailable".to_string()
+    };
+    println!(
+        "real_time_factor_measured_window {real_time_factor} peak_rss_including_load_kb {}",
         hwm_kb()
     );
     println!(
