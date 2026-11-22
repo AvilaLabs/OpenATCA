@@ -76,6 +76,7 @@ fn command_line_gives_each_file_its_feed_kind_and_validates_numbers() {
     assert!(!c.input_fingerprint);
     assert!(c.verify_prefix.is_none());
     assert!(c.verify_end.is_none());
+    assert!(c.verify_settings.is_none());
     assert!(
         parse_args(&args(&["--sfdps", "x", "--input-fingerprint"]))
             .unwrap()
@@ -92,6 +93,20 @@ fn command_line_gives_each_file_its_feed_kind_and_validates_numbers() {
     .unwrap()
     .verify_prefix
     .is_some());
+    let settings = "ef".repeat(32);
+    let strict = parse_args(&args(&[
+        "--sfdps",
+        "x",
+        "--verify-end",
+        "1",
+        &"ab".repeat(32),
+        &"cd".repeat(32),
+        "--verify-settings",
+        &settings,
+    ]))
+    .unwrap();
+    assert_eq!(strict.verify_settings, Some([0xef; 32]));
+    assert!(parse_args(&args(&["--sfdps", "x", "--verify-settings", &settings,])).is_err());
     assert!(parse_args(&args(&[
         "--sfdps",
         "x",
@@ -194,6 +209,16 @@ fn fingerprint_witness(err: &str, out: &str) -> (u64, String, String) {
         .unwrap()
         .to_string();
     (frames, input, state)
+}
+
+fn settings_witness(err: &str) -> String {
+    err.lines()
+        .find(|line| line.starts_with("settings_fingerprint "))
+        .unwrap()
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix("sha256="))
+        .unwrap()
+        .to_string()
 }
 
 // REQ: OA-RPL-277
@@ -392,6 +417,78 @@ fn verify_end_accepts_the_complete_recording_and_refuses_a_clean_truncation() {
         "{err}"
     );
 
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// REQ: OA-RPL-277
+#[test]
+fn settings_precondition_binds_effective_config_but_not_read_chunk_size() {
+    let dir = scratch("verify-settings");
+    let clip = dir.join("synthetic.oaf");
+    let missing = dir.join("not-opened.oaf");
+    let t0 = DAY * 1_000_000;
+    std::fs::write(
+        &clip,
+        frame(1, 0, t0, sf_doc(&[sf(71, 0).status("ACTIVE")]).as_bytes()),
+    )
+    .unwrap();
+
+    let (code, out, err) = run_bin(&["--input-fingerprint", "--sfdps", clip.to_str().unwrap()]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(err.matches("settings_fingerprint ").count(), 1, "{err}");
+    let settings = settings_witness(&err);
+    let (frames, input, state) = fingerprint_witness(&err, &out);
+    let frames = frames.to_string();
+
+    // The old witness still matches if only checkpoint cadence changes for this one-frame clip.
+    let (code, changed_out, changed_err) = run_bin(&[
+        "--verify-end",
+        &frames,
+        &input,
+        &state,
+        "--checkpoint-secs",
+        "17",
+        "--sfdps",
+        clip.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{changed_err}");
+    assert!(changed_out.contains(&format!("final state_digest={state}")));
+    assert_ne!(settings_witness(&changed_err), settings);
+
+    // A strict mismatch refuses before even checking whether the source path exists.
+    let (code, out, err) = run_bin(&[
+        "--verify-end",
+        &frames,
+        &input,
+        &state,
+        "--verify-settings",
+        &settings,
+        "--checkpoint-secs",
+        "17",
+        "--sfdps",
+        missing.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.is_empty());
+    assert!(err.contains("settings verification refused: settings digest mismatch"));
+    assert!(!err.contains("No such file"), "{err}");
+
+    // Chunking is a read representation, not a setting in the canonical digest.
+    let (code, chunked_out, chunked_err) = run_bin(&[
+        "--verify-end",
+        &frames,
+        &input,
+        &state,
+        "--verify-settings",
+        &settings,
+        "--chunk-bytes",
+        "3",
+        "--sfdps",
+        clip.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{chunked_err}");
+    assert_eq!(settings_witness(&chunked_err), settings);
+    assert!(chunked_out.contains(&format!("final state_digest={state}")));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

@@ -44,7 +44,8 @@ pub mod shell;
 
 pub use crate::core::{clock, errors, feed, index, slots, table};
 pub use crate::shell::{
-    adsb, apply, cli, fns, hash, input_fingerprint, pipeline, report, source, tfms,
+    adsb, apply, cli, fns, hash, input_fingerprint, pipeline, report, settings_fingerprint, source,
+    tfms,
 };
 
 pub use adsb::{

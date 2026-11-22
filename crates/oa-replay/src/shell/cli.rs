@@ -7,6 +7,7 @@
 //!           [--quiet] [--input-fingerprint]
 //!           [--verify-prefix <frames> <input-sha256> <state-sha256>]
 //!           [--verify-end <frames> <input-sha256> <state-sha256>]
+//!           [--verify-settings <settings-sha256>]
 //! ```
 //!
 //! Each file is `.oaf` or `.oaf.gz` (told apart by its first bytes) and is given a feed kind by
@@ -55,6 +56,8 @@ pub struct Command {
     pub verify_prefix: Option<PrefixWitness>,
     /// Expected frame count and digests at the end of the recording.
     pub verify_end: Option<ReplayWitness>,
+    /// Optional precondition on the effective pipeline settings and ordered feed stream kinds.
+    pub verify_settings: Option<Digest>,
 }
 
 /// Explicit witness for an admitted-frame boundary in offline replay.
@@ -79,7 +82,7 @@ pub const USAGE: &str = "usage: oa-replay (--sfdps|--tbfm|--tfms|--fns|--adsb <f
 [--terminal-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] \
 [--chunk-bytes <n>] [--progress-minutes <n>] [--quiet] [--input-fingerprint] \
 [--verify-prefix <frames> <input-sha256> <state-sha256>] \
-[--verify-end <frames> <input-sha256> <state-sha256>]";
+[--verify-end <frames> <input-sha256> <state-sha256>] [--verify-settings <settings-sha256>]";
 
 fn digest(flag: &str, v: Option<&String>) -> Result<Digest, String> {
     let value = v.ok_or_else(|| format!("missing value for {flag}"))?;
@@ -114,6 +117,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut input_fingerprint = false;
     let mut verify_prefix = None;
     let mut verify_end = None;
+    let mut verify_settings = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -194,6 +198,12 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
                     state_digest,
                 });
             }
+            "--verify-settings" => {
+                if verify_settings.is_some() {
+                    return Err("--verify-settings may be supplied once".into());
+                }
+                verify_settings = Some(digest(a, it.next())?);
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -205,6 +215,9 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             return Err("--verify-prefix frame count exceeds --verify-end frame count".into());
         }
     }
+    if verify_settings.is_some() && verify_prefix.is_none() && verify_end.is_none() {
+        return Err("--verify-settings requires --verify-prefix or --verify-end".into());
+    }
     Ok(Command {
         inputs,
         progress_ns,
@@ -214,6 +227,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         input_fingerprint,
         verify_prefix,
         verify_end,
+        verify_settings,
     })
 }
 

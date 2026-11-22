@@ -15,5 +15,6 @@ pub mod hash;
 pub mod input_fingerprint;
 pub mod pipeline;
 pub mod report;
+pub mod settings_fingerprint;
 pub mod source;
 pub mod tfms;

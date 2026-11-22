@@ -16,8 +16,8 @@ use oa_replay::cli::{parse_args, USAGE};
 use oa_replay::report::{drain_checkpoint_lines, write_failure_message, write_summary};
 use oa_replay::{
     errors_total, frames_total, input_fingerprint::InputFingerprint, list_recordings, new_pipeline,
-    replay_state_digest, run_streams_counted, run_streams_observed, spec_from_paths, Pipeline,
-    NS_PER_S,
+    replay_state_digest, run_streams_counted, run_streams_observed, settings_fingerprint,
+    spec_from_paths, Pipeline, NS_PER_S,
 };
 
 fn main() -> ExitCode {
@@ -31,6 +31,7 @@ fn main() -> ExitCode {
     };
     let verify_prefix = cmd.verify_prefix;
     let verify_end = cmd.verify_end;
+    let verify_settings = cmd.verify_settings;
     let verify_mode = verify_prefix.is_some() || verify_end.is_some();
     let verification = match (verify_prefix.is_some(), verify_end.is_some()) {
         (true, true) => "prefix and terminal",
@@ -38,6 +39,19 @@ fn main() -> ExitCode {
         _ => "terminal",
     };
     let fingerprint_enabled = cmd.input_fingerprint || verify_mode;
+    if fingerprint_enabled {
+        let Some(observed_settings) =
+            settings_fingerprint::settings_fingerprint(&cmd.cfg, &cmd.inputs)
+        else {
+            eprintln!("oa-replay: settings fingerprint unavailable");
+            return ExitCode::from(1);
+        };
+        print_settings_fingerprint(observed_settings);
+        if verify_settings.is_some_and(|expected| expected != observed_settings) {
+            eprintln!("oa-replay: settings verification refused: settings digest mismatch");
+            return ExitCode::from(1);
+        }
+    }
     let input_fingerprint = RefCell::new(fingerprint_enabled.then(InputFingerprint::default));
     // Every input path is checked, as given and resolved, before anything is opened.
     for i in &cmd.inputs {
@@ -306,6 +320,14 @@ fn print_fingerprint(
         fingerprint.frames(),
         fingerprint.payload_bytes(),
         fingerprint.bridge_reject_frames(),
+    );
+}
+
+/// One canonical configuration digest line, separate from the ordered-input/state witness.
+fn print_settings_fingerprint(digest: oa_sha256::Digest) {
+    eprintln!(
+        "settings_fingerprint version=1 sha256={} note=settings_and_ordered_feed_stream_kinds_only",
+        oa_sha256::to_hex(&digest)
     );
 }
 

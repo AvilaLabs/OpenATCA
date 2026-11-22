@@ -154,6 +154,14 @@ replay settings and stream grouping. A frame dropped by a document guard may sti
 replay clock using its accepted receive time, so a partial digest cannot explain every state
 difference. Peer authentication and complete delivery require separate evidence.
 
+`--input-fingerprint` and witness modes also report a separate `settings_fingerprint` line. Its
+versioned SHA-256 encoding covers every effective `PipelineConfig` and `TableConfig` field and the
+ordered logical feed stream kinds and count. It excludes paths, build identity, read chunk size and
+output controls. Supplying `--verify-settings <settings-sha256>` with either witness mode makes the
+digest a precondition checked before any recording path is inspected or opened; a mismatch
+refuses the witness before stdout. This binds only the selected replay settings and feed grouping.
+It is not a build identity, witness authentication, authority, or completeness claim.
+
 The opt-in offline `oa-replay --verify-prefix <frames> <input-sha256> <state-sha256>` gate accepts
 only when both digests match at the exact admitted-frame boundary. Supply the frame count and
 digests from an independently retained, complete `--input-fingerprint` run over the prefix, using
