@@ -613,11 +613,7 @@ pub(crate) fn filter_output(f: &Filter, t_ns: i64) -> Option<OutRow> {
 
 /// Forecast with a typed failure so a missing track cannot hide failed numerical work.
 pub(crate) fn filter_output_checked(f: &Filter, t_ns: i64) -> Result<OutRow, PredictError> {
-    let dt = t_ns
-        .checked_sub(f.t_ns)
-        .ok_or(PredictError::Unrepresentable)?
-        .max(0) as f64
-        / NS_PER_S as f64;
+    let dt = filter_forecast_seconds(f, t_ns)?;
     let frame = filter_frame(f);
     let (h, vf) = if dt > 0.0 {
         let u = dwell_decay(dt);
@@ -669,6 +665,32 @@ pub(crate) fn filter_output_checked(f: &Filter, t_ns: i64) -> Result<OutRow, Pre
         mu_v: [vf.mu[0] as f32, vf.mu[1] as f32],
         flags: if has_alt { O_HAS_ALT } else { 0 },
     })
+}
+
+fn filter_forecast_seconds(f: &Filter, t_ns: i64) -> Result<f64, PredictError> {
+    let elapsed = t_ns
+        .checked_sub(f.t_ns)
+        .ok_or(PredictError::Unrepresentable)?;
+    Ok(elapsed.max(0) as f64 / NS_PER_S as f64)
+}
+
+/// Forecasts the output altitude and variance using the same vertical model and output
+/// precision as the full forecast. A missing altitude supplies no rejection evidence.
+pub(crate) fn filter_altitude_forecast(
+    f: &Filter,
+    t_ns: i64,
+) -> Result<Option<(f32, f32)>, PredictError> {
+    let dt = filter_forecast_seconds(f, t_ns)?;
+    if f.has_alt == 0 {
+        return Ok(None);
+    }
+    let vertical = if dt > 0.0 {
+        v_predict(&f.v, dt, dwell_decay(dt))
+    } else {
+        f.v
+    };
+    let (state, covariance) = v_combine(&vertical);
+    Ok(Some((state[0] as f32, covariance[0] as f32)))
 }
 
 #[cfg(test)]

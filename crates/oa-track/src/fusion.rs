@@ -90,7 +90,8 @@ use crate::registration::{
 use crate::tracker::{
     check_advance_time, tracker_advance, tracker_buffers, tracker_flush, tracker_has_key,
     tracker_is_confirmed, tracker_live_iter, tracker_new, tracker_note_radar_disagreement,
-    tracker_predict_checked, tracker_set_expected_interval, tracker_stats, tracker_update, Tracker,
+    tracker_predict_checked, tracker_predict_if_altitude, tracker_set_expected_interval,
+    tracker_stats, tracker_update, Tracker,
 };
 use crate::types::{
     output_clear, output_new, output_push, Measurement, OutRow, PredictError, TrackError,
@@ -281,6 +282,8 @@ pub struct FusionStats {
     pub coarse_visits: u64,
     /// Pairs tested by the exact gate, and those inside it.
     pub pairs_tested: u64,
+    /// Pairs that the exact vertical gate could reject before predicting horizontal motion.
+    pub pairs_rejected_by_altitude: u64,
     pub pairs_gated: u64,
     /// Pairs skipped for want of a height (no Mode C and no track altitude).
     pub no_height_pairs: u64,
@@ -1053,15 +1056,33 @@ fn d2_vertical_alt(
     if row.flags & O_HAS_ALT == 0 {
         return 0.0;
     }
+    d2_vertical_values(
+        row.alt_ft,
+        row.alt_var_ft2,
+        alt_ft,
+        quant_ft,
+        since_update_ns,
+        onset_fpm,
+    )
+}
+
+fn d2_vertical_values(
+    track_altitude_ft: f32,
+    track_variance_ft2: f32,
+    alt_ft: f64,
+    quant_ft: u16,
+    since_update_ns: i64,
+    onset_fpm: f64,
+) -> f64 {
     let q = f64::from(quant_ft);
     let dt_min = since_update_ns.clamp(0, (GATE_MANEUVER_MAX_DT_S * NS_PER_S as f64) as i64) as f64
         / (60.0 * NS_PER_S as f64);
     let onset = onset_fpm * dt_min;
-    let var = f64::from(row.alt_var_ft2).max(0.0)
+    let var = f64::from(track_variance_ft2).max(0.0)
         + q * q / 12.0
         + ALT_BASE_SIGMA_FT * ALT_BASE_SIGMA_FT
         + onset * onset;
-    let dz = alt_ft - f64::from(row.alt_ft);
+    let dz = alt_ft - f64::from(track_altitude_ft);
     dz * dz / var
 }
 
@@ -1602,8 +1623,30 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
             ra.capped = true;
             break;
         }
-        let (row, last_ns) = match tracker_predict_checked(&f.tracker, t.key, p.time_ns) {
-            Ok((row, _, last_ns)) => (row, last_ns),
+        let forecast = if p.alt_ft == NONE_ALT {
+            tracker_predict_checked(&f.tracker, t.key, p.time_ns)
+                .map(|(row, _, last)| Some((row, last)))
+        } else {
+            // Each coarse visit also covers this fixed-size vertical check. Its inputs use the
+            // exact forecast's output precision. The full gate still computes the pair cost.
+            tracker_predict_if_altitude(&f.tracker, t.key, p.time_ns, |altitude, variance, last| {
+                let cost = d2_vertical_values(
+                    altitude,
+                    variance,
+                    f64::from(p.alt_ft),
+                    s.alt_quantum_ft,
+                    p.time_ns.saturating_sub(last),
+                    GATE_VRATE_SIGMA_FPM,
+                );
+                cost.partial_cmp(&GATE_V_CHI2) != Some(core::cmp::Ordering::Greater)
+            })
+        };
+        let (row, last_ns) = match forecast {
+            Ok(Some(pair)) => pair,
+            Ok(None) => {
+                f.stats.pairs_rejected_by_altitude += 1;
+                continue;
+            }
             Err(PredictError::NoTrack) => continue,
             Err(PredictError::Numerical | PredictError::Unrepresentable) => {
                 f.stats.prediction_refused += 1;
@@ -4388,6 +4431,65 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    // REQ: OA-TRK-177, OA-TRK-309
+    #[test]
+    fn vertical_precheck_matches_the_full_gate_at_forecast_time() {
+        let key = 0xA00001;
+        let mut f = make_fusion_sites(&[SITE], 16);
+        let mut out = output_new(128);
+        for k in 0..4 {
+            let mut report = adsb_fix(key, k * NS_PER_S);
+            report.alt_ft = 20_000 + 50 * k as i32;
+            fusion_adsb(&mut f, &report);
+        }
+        fusion_advance(&mut f, 5 * NS_PER_S, &mut out);
+        let mut rejected = 0;
+        let mut passed = 0;
+        for t in [4, 9, 24].map(|second| second * NS_PER_S) {
+            let (expected, _, last) = tracker_predict_checked(&f.tracker, key, t).unwrap();
+            assert!(expected.flags & O_HAS_ALT != 0);
+            for altitude in [5_000, 20_200, 22_000, 38_000] {
+                let cost = d2_vertical_alt(
+                    &expected,
+                    Some(f64::from(altitude)),
+                    SITE.alt_quantum_ft,
+                    t - last,
+                    GATE_VRATE_SIGMA_FPM,
+                );
+                let actual = tracker_predict_if_altitude(&f.tracker, key, t, |a, v, n| {
+                    assert_eq!(
+                        (a.to_bits(), v.to_bits(), n),
+                        (
+                            expected.alt_ft.to_bits(),
+                            expected.alt_var_ft2.to_bits(),
+                            last
+                        )
+                    );
+                    d2_vertical_values(
+                        a,
+                        v,
+                        f64::from(altitude),
+                        SITE.alt_quantum_ft,
+                        t - n,
+                        GATE_VRATE_SIGMA_FPM,
+                    ) <= GATE_V_CHI2
+                })
+                .unwrap();
+                assert_eq!(actual.is_some(), cost <= GATE_V_CHI2);
+                if let Some((accepted, _)) = actual {
+                    assert_eq!(
+                        (accepted.lat_e7, accepted.lon_e7),
+                        (expected.lat_e7, expected.lon_e7)
+                    );
+                    passed += 1;
+                } else {
+                    rejected += 1;
+                }
+            }
+        }
+        assert!(passed > 0 && rejected > 0);
     }
 
     // REQ: OA-TRK-177
