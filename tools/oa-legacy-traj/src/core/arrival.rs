@@ -5,7 +5,7 @@
 //! meter fix are supplied by the caller after resolving names against NASR; unresolved names are
 //! represented as absent and produce absent metrics.
 
-use crate::core::cross::{approach, great_circle_m, short_longitude_delta};
+use crate::core::cross::{approach, great_circle_m, local_frame_offset, short_longitude_delta};
 use crate::core::types::{PathPoint, Place};
 
 const HORIZON_S: [i64; 3] = [300, 600, 1200];
@@ -15,6 +15,7 @@ pub const MAX_ROUTE_FIXES: usize = 256;
 pub const MAX_TRUTH_POINTS: usize = 100_000;
 const MAX_TRACK_AGE_MS: i64 = 120_000;
 const MAX_TRUTH_GAP_MS: i64 = 30_000;
+const MIN_DIRECTION_SPEED_MPS: f64 = 1.0;
 const MIN_ALTITUDE_FT: f64 = -2_000.0;
 const MAX_ALTITUDE_FT: f64 = 100_000.0;
 const MAX_VERTICAL_RATE_FPM: f64 = 10_000.0;
@@ -496,12 +497,28 @@ pub struct LegacyEta {
 pub struct HorizonScore {
     pub horizontal_error_m: Option<f64>,
     pub vertical_error_ft: Option<f64>,
+    pub along_track_error_m: Option<f64>,
+    pub cross_track_error_m: Option<f64>,
+    pub direction_status: DirectionStatus,
     pub prediction_available: bool,
     pub truth_available: bool,
     pub truth_altitude_available: bool,
     pub covered: bool,
 }
 // A7.2: cold struct, size guard waived; one-shot score output.
+
+/// Why an along-/cross-track error could not be derived at a scored horizon.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DirectionStatus {
+    Available,
+    MissingPrediction,
+    #[default]
+    MissingTruth,
+    SlowTruth,
+    TruthEdge,
+    TruthGap,
+    UnsupportedGeometry,
+}
 
 /// Scored issue. Coverage counts eligible truth samples; errors are nil if their evidence is
 /// absent. Legacy columns are ETA errors against the actual meter-fix passage.
@@ -597,6 +614,7 @@ pub fn score(
             continue;
         }
         let actual = interpolate_truth(&truth, predicted.time_ms);
+        let direction = truth_direction(&truth, predicted.time_ms);
         slot.prediction_available = predicted.place.is_some();
         slot.truth_available = actual.is_some();
         slot.truth_altitude_available = actual.is_some_and(|point| point.altitude_ft.is_some());
@@ -609,6 +627,28 @@ pub fn score(
             slot.covered = true;
             out.forecast_covered += 1;
         }
+        slot.direction_status = if predicted.place.is_none() {
+            DirectionStatus::MissingPrediction
+        } else {
+            match (actual, direction) {
+                (Some(actual), Ok((along, north))) => {
+                    if let Some((east_error, north_error)) = predicted
+                        .place
+                        .and_then(|p| local_frame_offset(actual.place, p))
+                    {
+                        let (along_error, cross_error) =
+                            project_directional_error(east_error, north_error, along, north);
+                        slot.along_track_error_m = Some(along_error);
+                        slot.cross_track_error_m = Some(cross_error);
+                        DirectionStatus::Available
+                    } else {
+                        DirectionStatus::UnsupportedGeometry
+                    }
+                }
+                (None, Ok(_)) => DirectionStatus::MissingTruth,
+                (_, Err(status)) => status,
+            }
+        };
     }
     let actual_meter = meter_fix
         .and_then(|fix| actual_passage(&truth, forecast.issued_ms, fix, meter_tolerance_m));
@@ -622,6 +662,19 @@ pub fn score(
         out.tb_fm_eta_error_s = comparator_error(tb_fm, forecast.cutoff_ms, actual);
     }
     Ok(out)
+}
+
+/// Projects east/north position error onto a unit truth tangent; positive cross is rightward.
+fn project_directional_error(
+    east_error: f64,
+    north_error: f64,
+    east_unit: f64,
+    north_unit: f64,
+) -> (f64, f64) {
+    (
+        east_error * east_unit + north_error * north_unit,
+        east_error * north_unit - north_error * east_unit,
+    )
 }
 
 fn comparator_error(estimate: Option<LegacyEta>, issue_ms: i64, actual_ms: i64) -> Option<f64> {
@@ -688,6 +741,84 @@ fn interpolate_truth(truth: &[TruthPoint], time_ms: i64) -> Option<TruthPoint> {
         altitude_ft,
         gap_before: false,
     })
+}
+
+fn unit_truth_direction(
+    origin: Place,
+    start: Place,
+    end: Place,
+    duration_ms: i64,
+) -> Result<(f64, f64), DirectionStatus> {
+    if duration_ms <= 0 {
+        return Err(DirectionStatus::UnsupportedGeometry);
+    }
+    let (Some((start_east, start_north)), Some((end_east, end_north))) = (
+        local_frame_offset(origin, start),
+        local_frame_offset(origin, end),
+    ) else {
+        return Err(DirectionStatus::UnsupportedGeometry);
+    };
+    let (east, north) = (end_east - start_east, end_north - start_north);
+    let distance_m = oa_ieee::sqrt(east * east + north * north);
+    let speed_mps = distance_m / (duration_ms as f64 / 1000.0);
+    if !distance_m.is_finite() || !speed_mps.is_finite() {
+        return Err(DirectionStatus::UnsupportedGeometry);
+    }
+    if speed_mps <= MIN_DIRECTION_SPEED_MPS {
+        return Err(DirectionStatus::SlowTruth);
+    }
+    Ok((east / distance_m, north / distance_m))
+}
+
+/// Travel direction at `time_ms`, requiring gap-free segment support. An exact sample needs
+/// valid neighbors on both sides, so an endpoint has no signed frame.
+fn truth_direction(truth: &[TruthPoint], time_ms: i64) -> Result<(f64, f64), DirectionStatus> {
+    if truth.is_empty() {
+        return Err(DirectionStatus::MissingTruth);
+    }
+    if let Some(i) = truth.iter().position(|p| p.time_ms == time_ms) {
+        if i == 0 || i + 1 >= truth.len() {
+            return Err(DirectionStatus::TruthEdge);
+        }
+        let (Some(previous), Some(current), Some(next)) = (
+            i.checked_sub(1).and_then(|j| truth.get(j)),
+            truth.get(i),
+            truth.get(i + 1),
+        ) else {
+            return Err(DirectionStatus::TruthEdge);
+        };
+        let before_ms = current.time_ms.checked_sub(previous.time_ms);
+        let after_ms = next.time_ms.checked_sub(current.time_ms);
+        if current.gap_before
+            || next.gap_before
+            || before_ms.is_none_or(|gap| gap <= 0 || gap > MAX_TRUTH_GAP_MS)
+            || after_ms.is_none_or(|gap| gap <= 0 || gap > MAX_TRUTH_GAP_MS)
+        {
+            return Err(DirectionStatus::TruthGap);
+        }
+        let duration_ms = next
+            .time_ms
+            .checked_sub(previous.time_ms)
+            .ok_or(DirectionStatus::UnsupportedGeometry)?;
+        return unit_truth_direction(current.place, previous.place, next.place, duration_ms);
+    }
+    for pair in truth.windows(2) {
+        let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        if !(a.time_ms < time_ms && time_ms < b.time_ms) {
+            continue;
+        }
+        let duration_ms = b
+            .time_ms
+            .checked_sub(a.time_ms)
+            .ok_or(DirectionStatus::UnsupportedGeometry)?;
+        if b.gap_before || duration_ms <= 0 || duration_ms > MAX_TRUTH_GAP_MS {
+            return Err(DirectionStatus::TruthGap);
+        }
+        return unit_truth_direction(a.place, a.place, b.place, duration_ms);
+    }
+    Err(DirectionStatus::TruthEdge)
 }
 
 fn actual_passage(
@@ -1002,6 +1133,103 @@ fn interpolate_place(a: Place, b: Place, f: f64) -> Place {
 mod tests {
     use super::*;
 
+    // REQ: OA-LTJ-058
+    #[test]
+    fn directional_projection_has_cardinal_signs_and_preserves_scalar_error() {
+        let northbound = project_directional_error(120.0, 0.0, 0.0, 1.0);
+        assert_eq!(northbound, (0.0, 120.0));
+        let eastbound = project_directional_error(0.0, 80.0, 1.0, 0.0);
+        assert_eq!(eastbound, (0.0, -80.0));
+        let (along, cross) = project_directional_error(3.0, 4.0, 0.6, 0.8);
+        assert!((oa_ieee::sqrt(along * along + cross * cross) - 5.0).abs() < 1.0e-12);
+    }
+
+    // REQ: OA-LTJ-058
+    #[test]
+    fn direction_requires_gap_free_support_and_refuses_slow_or_edge_samples() {
+        let place = |lat_deg, lon_deg| Place { lat_deg, lon_deg };
+        let points = [
+            TruthPoint {
+                time_ms: 1_000,
+                place: place(0.0, 0.0),
+                altitude_ft: None,
+                gap_before: false,
+            },
+            TruthPoint {
+                time_ms: 11_000,
+                place: place(0.01, 0.0),
+                altitude_ft: None,
+                gap_before: false,
+            },
+            TruthPoint {
+                time_ms: 21_000,
+                place: place(0.02, 0.0),
+                altitude_ft: None,
+                gap_before: false,
+            },
+        ];
+        let (east, north) = truth_direction(&points, 11_000).expect("valid central direction");
+        assert!(east.abs() < 1.0e-8);
+        assert!(north > 0.999_999);
+        assert_eq!(
+            truth_direction(&points, 1_000),
+            Err(DirectionStatus::TruthEdge)
+        );
+        let mut gap = points;
+        gap[1].gap_before = true;
+        assert_eq!(
+            truth_direction(&gap, 11_000),
+            Err(DirectionStatus::TruthGap)
+        );
+        let stationary = [
+            TruthPoint {
+                time_ms: 1_000,
+                place: place(1.0, 1.0),
+                altitude_ft: None,
+                gap_before: false,
+            },
+            TruthPoint {
+                time_ms: 11_000,
+                place: place(1.0, 1.0),
+                altitude_ft: None,
+                gap_before: false,
+            },
+            TruthPoint {
+                time_ms: 21_000,
+                place: place(1.0, 1.0),
+                altitude_ft: None,
+                gap_before: false,
+            },
+        ];
+        assert_eq!(
+            truth_direction(&stationary, 11_000),
+            Err(DirectionStatus::SlowTruth)
+        );
+    }
+
+    // REQ: OA-LTJ-058
+    #[test]
+    fn direction_uses_short_longitude_wrap_across_dateline() {
+        let (east, north) = unit_truth_direction(
+            Place {
+                lat_deg: 0.0,
+                lon_deg: 180.0,
+            },
+            Place {
+                lat_deg: 0.0,
+                lon_deg: 179.98,
+            },
+            Place {
+                lat_deg: 0.0,
+                lon_deg: -179.98,
+            },
+            10_000,
+        )
+        .expect("short eastbound crossing");
+        assert!(east > 0.999_999);
+        assert!(north.abs() < 1.0e-8);
+    }
+
     fn fixture() -> (IssueSnapshot, RouteFix) {
         let fix = RouteFix {
             name: *b"METER   ",
@@ -1075,7 +1303,11 @@ mod tests {
                 },
             ];
             let scored = score(&prediction, &truth, Some(fix), None, None, 1852.0).unwrap();
-            assert!(scored.forecast.first().unwrap().horizontal_error_m.unwrap() < 0.01);
+            let first = scored.forecast.first().unwrap();
+            assert!(first.horizontal_error_m.unwrap() < 0.01);
+            assert_eq!(first.direction_status, DirectionStatus::Available);
+            assert!(first.along_track_error_m.unwrap().abs() < 0.01);
+            assert!(first.cross_track_error_m.unwrap().abs() < 0.01);
         }
     }
 

@@ -48,6 +48,32 @@ fn flat(origin: Place, lat_deg: f64, lon_deg: f64, cos_lat: f64) -> (f64, f64) {
     )
 }
 
+/// Local east-north offset using the same wrapped spherical frame as path crossing metrics.
+/// Antipodal longitude and polar origins have no supported local direction.
+pub(crate) fn local_frame_offset(origin: Place, point: Place) -> Option<(f64, f64)> {
+    if !origin.lat_deg.is_finite()
+        || !origin.lon_deg.is_finite()
+        || !point.lat_deg.is_finite()
+        || !point.lon_deg.is_finite()
+        || !(-90.0..=90.0).contains(&origin.lat_deg)
+        || !(-180.0..=180.0).contains(&origin.lon_deg)
+        || !(-90.0..=90.0).contains(&point.lat_deg)
+        || !(-180.0..=180.0).contains(&point.lon_deg)
+    {
+        return None;
+    }
+    let dlon = short_longitude_delta(point.lon_deg - origin.lon_deg);
+    if dlon.abs() == 180.0 {
+        return None;
+    }
+    let cos_lat = oa_math::cos(origin.lat_deg * (core::f64::consts::PI / 180.0));
+    if !cos_lat.is_finite() || cos_lat.abs() < 1.0e-6 {
+        return None;
+    }
+    let (east, north) = flat(origin, point.lat_deg, point.lon_deg, cos_lat);
+    (east.is_finite() && north.is_finite()).then_some((east, north))
+}
+
 /// The distance in metres between two places, in the flat frame centred on the first.
 pub fn flat_dist_m(a: Place, lat_deg: f64, lon_deg: f64) -> f64 {
     let cos_lat = oa_math::cos(a.lat_deg * (core::f64::consts::PI / 180.0));

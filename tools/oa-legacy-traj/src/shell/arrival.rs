@@ -795,6 +795,8 @@ struct Totals {
     score_refused: BTreeMap<String, usize>,
     horizontal: [Vec<f64>; 3],
     vertical: [Vec<f64>; 3],
+    along_track: [Vec<f64>; 3],
+    cross_track: [Vec<f64>; 3],
     coverage: [HorizonCoverage; 3],
     assigned_altitude_states: BTreeMap<String, usize>,
     assigned_altitude_pairs: [PairedVertical; 3],
@@ -820,6 +822,7 @@ struct HorizonCoverage {
     no_truth_position: usize,
     no_truth_altitude: usize,
     vertical_unavailable: BTreeMap<String, usize>,
+    direction_unavailable: BTreeMap<String, usize>,
 }
 
 struct PlannedIssue {
@@ -913,11 +916,23 @@ fn note(t: &mut Totals, s: ArrivalScore) {
         if let Some(values) = t.vertical.get_mut(i) {
             values.extend(result.vertical_error_ft);
         }
+        if let Some(values) = t.along_track.get_mut(i) {
+            values.extend(result.along_track_error_m);
+        }
+        if let Some(values) = t.cross_track.get_mut(i) {
+            values.extend(result.cross_track_error_m);
+        }
         if let Some(coverage) = t.coverage.get_mut(i) {
             coverage.no_prediction += usize::from(!result.prediction_available);
             coverage.no_truth_position += usize::from(!result.truth_available);
             coverage.no_truth_altitude +=
                 usize::from(result.truth_available && !result.truth_altitude_available);
+            if result.direction_status != crate::core::arrival::DirectionStatus::Available {
+                *coverage
+                    .direction_unavailable
+                    .entry(format!("{:?}", result.direction_status))
+                    .or_default() += 1;
+            }
         }
     }
     for (all, error) in
@@ -976,6 +991,22 @@ fn summarize(label: &str, values: &mut [f64], denom: usize) -> String {
         values.len(),
         quantiles.0,
         quantiles.1
+    )
+}
+
+fn summarize_direction(label: &str, values: &mut [f64], denom: usize) -> String {
+    values.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
+    if values.is_empty() {
+        return format!("{label}: n=0/{denom}, signed median=n/a, |error| median=n/a, p95=n/a");
+    }
+    let signed_median = nearest_rank(values, 50);
+    let mut absolute = values.iter().map(|value| value.abs()).collect::<Vec<_>>();
+    absolute.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
+    format!(
+        "{label}: n={}/{denom}, signed median={signed_median:.1}, |error| median={:.1}, p95={:.1}",
+        values.len(),
+        nearest_rank(&absolute, 50),
+        nearest_rank(&absolute, 95)
     )
 }
 
@@ -1241,6 +1272,10 @@ pub(crate) fn report(
                     .or_default() += 1;
                 for coverage in &mut totals.coverage {
                     coverage.no_prediction += 1;
+                    *coverage
+                        .direction_unavailable
+                        .entry("ForecastUnavailable".into())
+                        .or_default() += 1;
                 }
                 if pair_eligible {
                     let truth = truth_path(built, planned.addr, at);
@@ -1272,6 +1307,12 @@ pub(crate) fn report(
                         .score_refused
                         .entry(format!("{refusal:?}"))
                         .or_default() += 1;
+                    for coverage in &mut totals.coverage {
+                        *coverage
+                            .direction_unavailable
+                            .entry("ScoreRefused".into())
+                            .or_default() += 1;
+                    }
                     None
                 }
             };
@@ -1389,7 +1430,46 @@ pub(crate) fn report(
             }
         )
         .map_err(|e| e.to_string())?;
+        let index = match mins {
+            5 => 0,
+            10 => 1,
+            _ => 2,
+        };
+        writeln!(
+            text,
+            "{}\n{}",
+            summarize_direction(
+                &format!("{mins} min along-track error (m; +ahead)"),
+                &mut totals.along_track[index],
+                totals.issued
+            ),
+            summarize_direction(
+                &format!("{mins} min cross-track error (m; +right)"),
+                &mut totals.cross_track[index],
+                totals.issued
+            )
+        )
+        .map_err(|e| e.to_string())?;
+        let direction_reasons = coverage
+            .direction_unavailable
+            .iter()
+            .map(|(reason, count)| format!("{reason}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            text,
+            "{mins} min direction unavailable: {}/{} issued; {}",
+            coverage.direction_unavailable.values().sum::<usize>(),
+            totals.issued,
+            if direction_reasons.is_empty() {
+                "none"
+            } else {
+                direction_reasons.as_str()
+            }
+        )
+        .map_err(|e| e.to_string())?;
     }
+    writeln!(text, "Directional errors use the same horizon truth point and gap-free local truth travel direction; exact samples require usable support on both sides, interpolated samples use their bracketing segment, and truth speed at or below 1 m/s has no direction. Retrospective truth support may include samples after the forecast horizon.").map_err(|e| e.to_string())?;
     for (label, values) in ["OpenATCA", "ERAM", "TBFM"]
         .into_iter()
         .zip(&mut totals.eta)
