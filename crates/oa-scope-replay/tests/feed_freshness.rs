@@ -57,15 +57,12 @@ fn frame_texts(replay: &oa_scope_replay::frame::Replay) -> Vec<String> {
         .map(|(&start, &len)| {
             let start = usize::try_from(start).expect("text offset fits usize");
             let len = usize::try_from(len).expect("text length fits usize");
-            String::from_utf8(
-                replay
-                    .list
-                    .text
-                    .get(start..start + len)
-                    .expect("display text range is valid")
-                    .to_vec(),
-            )
-            .expect("display text is UTF-8")
+            replay
+                .list
+                .text
+                .get(start..start + len)
+                .expect("display text range is valid")
+                .to_owned()
         })
         .collect()
 }
