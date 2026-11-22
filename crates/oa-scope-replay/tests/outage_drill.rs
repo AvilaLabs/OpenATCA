@@ -1217,7 +1217,7 @@ impl Replica {
             .env_remove("OA_MACHINE_LOSS_VISIBLE_CA")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::inherit());
         if let Some(path) = checkpoint {
             command.env("OA_MACHINE_LOSS_CHECKPOINT", path);
         }
@@ -1328,11 +1328,11 @@ fn durable_prefix_recovers_in_fresh_process_and_refuses_damage() {
     let mut serving = Replica::start();
     let mut reference = Drill::new();
     reference.warmup();
+    let mut expected_prefix = Vec::with_capacity(prefix.len());
     for &(second, live) in prefix {
-        assert_eq!(
-            serving.step(second, live),
-            local_reference_step(&mut reference, second, live)
-        );
+        let expected = local_reference_step(&mut reference, second, live);
+        assert_eq!(serving.step(second, live), expected);
+        expected_prefix.push(expected);
     }
     let killed_status = {
         serving.child.kill().unwrap();
@@ -1342,9 +1342,8 @@ fn durable_prefix_recovers_in_fresh_process_and_refuses_damage() {
     drop(serving);
 
     let mut recovered = Replica::start_with_checkpoint(Some(&path));
-    for &(second, live) in prefix {
+    for (&(second, _), expected) in prefix.iter().zip(expected_prefix) {
         let recovered_line = recovered.recovered_prefix_line(second);
-        let expected = local_reference_step(&mut reference, second, live);
         assert_eq!(
             recovered_line, expected,
             "durable replay diverged at {second}s"
