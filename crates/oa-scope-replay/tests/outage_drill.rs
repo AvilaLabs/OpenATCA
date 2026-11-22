@@ -188,15 +188,8 @@ impl TempCheckpointFiles {
     }
 
     fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
-        let path = self.dir.join(name);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .expect("create checkpoint without replacing an existing file");
-        file.write_all(bytes).expect("write synthetic checkpoint");
-        file.sync_all()
-            .expect("sync synthetic checkpoint before fault injection");
+        let path = self.uncreated_path(name);
+        write_checkpoint_create_new(&path, bytes);
         path
     }
 
@@ -211,9 +204,9 @@ fn write_checkpoint_create_new(path: &Path, bytes: &[u8]) {
         .write(true)
         .create_new(true)
         .open(path)
-        .expect("create post-apply checkpoint without replacing a file");
-    file.write_all(bytes).expect("write post-apply checkpoint");
-    file.sync_all().expect("sync post-apply checkpoint");
+        .expect("create fixture record without replacing a file");
+    file.write_all(bytes).expect("write fixture record");
+    file.sync_all().expect("sync fixture record");
 }
 
 impl Drop for TempCheckpointFiles {
@@ -2095,6 +2088,21 @@ fn checkpointed_apply_before_ack_recovers_and_continues() {
         );
     }
     assert!(recovered.shutdown().unwrap().success());
+
+    let mut duplicate = Replica::start_visible_ca(Some(&checkpoint_path));
+    for (&(prefix_second, _), expected) in VISIBLE_CA_STREAM
+        .iter()
+        .take(prefix_len + 1)
+        .zip(&expected_prefix)
+    {
+        assert_eq!(duplicate.recovered_prefix_line(prefix_second), *expected);
+    }
+    assert_eq!(
+        duplicate.input(identity, second, live),
+        "MACHINE_LOSS_ERROR input_identity_or_order_mismatch",
+        "the restored prefix already represents this input"
+    );
+    assert!(wait_bounded(&mut duplicate.child).unwrap().success());
 }
 
 // Exercises the pre-application failure described by IF-R2 and IF-R3 in docs/INTERFACES.md.

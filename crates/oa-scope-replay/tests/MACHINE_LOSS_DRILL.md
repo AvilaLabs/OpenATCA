@@ -71,14 +71,15 @@ The `checkpointed_apply_before_ack_recovers_and_continues` fixture starts a chil
 synced two-step visible-CA prefix, then applies the third step through the same
 tracker/scope/raster/CA path. Before exiting without the success ACK, the child creates a separate
 bounded checkpoint containing the three-step synthetic input prefix with `create_new`, writes it
-and calls `sync_all`; its following marker includes the checkpoint digest and applied output
+and calls `sync_all`. The following marker includes the checkpoint digest and applied output
 identity. The parent observes the marker and worker EOF. A fresh worker verifies that exact file
 through the existing checkpoint reader, replays all three steps, then continues the suffix against
-the uninterrupted reference.
-This checkpoint is a replayable input prefix, not a serialized tracker or CA memory image. It
-shows ordering inside this test child between file sync and ACK emission; it does not test
-directory-entry or power-loss durability, external publication, durable downstream effects,
-production exactly-once processing, or supervisor policy. Its timestamps remain synthetic.
+the uninterrupted reference. A separate restored worker refuses redelivery of step three because
+it already appears in the saved sequence.
+
+The checkpoint stores a bounded, replayable synthetic input prefix. The drill checks process
+ordering at the file-sync and acknowledgement boundary. Directory-entry durability, power-loss
+recovery, external effects, and operational supervisor policy require separate evidence.
 
 The separate `visible_tracker_ca_alert_survives_silent_durable_replacement` fixture obtains its
 CA rows from the identities actually present in the scope target set, then retrieves those
