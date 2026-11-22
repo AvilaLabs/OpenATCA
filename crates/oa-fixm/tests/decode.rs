@@ -8,14 +8,14 @@
 )]
 
 use oa_fixm::{
-    clear_events, code_str, field_error, has_field, new_events, parse_iso_ms, parse_scaled,
-    parse_uuid, route_text, sector_code, track_ddeg, unit_code, unknown_text, Decoder, Events,
-    Field, FixmError, Limits, Reject, Summary, ALL_FIELDS, ALT_FORM_AT_FIX, ALT_FORM_BLOCK,
-    ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS, FIELD_COUNT, FIELD_NAMES, FLAG_ASSIGNED_VFR,
-    FLAG_ASSIGNED_VFR_PLUS, FLAG_INTERIM_NIL, FTYPE_SCHEDULED, REJECT_COUNT, REJECT_NAMES,
-    STATUS_ACTIVE, STATUS_CANCELLED, STATUS_PROPOSED,
+    classify_root, clear_events, code_str, field_error, has_field, new_events, parse_iso_ms,
+    parse_scaled, parse_uuid, route_text, sector_code, track_ddeg, unit_code, unknown_text,
+    Decoder, Events, Field, FixmError, Limits, Reject, RootClassification, Summary, ALL_FIELDS,
+    ALT_FORM_AT_FIX, ALT_FORM_BLOCK, ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS, FIELD_COUNT,
+    FIELD_NAMES, FLAG_ASSIGNED_VFR, FLAG_ASSIGNED_VFR_PLUS, FLAG_INTERIM_NIL, FTYPE_SCHEDULED,
+    REJECT_COUNT, REJECT_NAMES, STATUS_ACTIVE, STATUS_CANCELLED, STATUS_PROPOSED,
 };
-use oa_xml::{Limits as XmlLimits, Parser};
+use oa_xml::{Doc, Limits as XmlLimits, Parser};
 
 const HEAD: &str = r#"<?xml version="1.0" encoding="UTF-8"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:ns2="http://www.fixm.aero/base/3.0" xmlns:ns3="http://www.fixm.aero/flight/3.0" xmlns:ns4="http://www.fixm.aero/foundation/3.0">"#;
 const TAIL: &str = "</ns5:MessageCollection>";
@@ -1596,6 +1596,54 @@ fn untouched(limits: Limits, dropped: u64) -> oa_fixm::Stats {
     let mut s = Decoder::new(limits).stats().clone();
     s.sealed_window_dropped = dropped;
     s
+}
+
+// REQ: OA-BENCH-091
+#[test]
+fn unsupported_fixm_roots_have_bounded_categories_without_retaining_names() {
+    let mut parser = Parser::new(XmlLimits::default()).unwrap();
+    let other = parser.parse(b"<unrelated/>").unwrap();
+    assert_eq!(classify_root(&other), RootClassification::OtherLocalName);
+    let wrong_ns = parser
+        .parse(b"<MessageCollection xmlns='urn:example:other'/>")
+        .unwrap();
+    assert_eq!(
+        classify_root(&wrong_ns),
+        RootClassification::MessageCollectionWrongNamespace
+    );
+    let expected = parser
+        .parse(b"<MessageCollection xmlns='http://www.faa.aero/nas/3.0'/>")
+        .unwrap();
+    assert_eq!(
+        classify_root(&expected),
+        RootClassification::MessageCollectionNas
+    );
+
+    // An empty Doc is representable by the public parsed-document view, although normal XML
+    // parsing generally rejects an input without a root before FIXM classification.
+    let no_root = Doc {
+        input: b"",
+        elem_name: &[],
+        elem_prefix: &[],
+        elem_parent: &[],
+        elem_first_attr: &[],
+        elem_attr_count: &[],
+        elem_first_child: &[],
+        elem_next_sibling: &[],
+        attr_name: &[],
+        attr_prefix: &[],
+        attr_value: &[],
+        attr_entity: &[],
+        text_span: &[],
+        text_owner: &[],
+        text_entity: &[],
+        elem_ns_head: &[],
+        ns_prefix: &[],
+        ns_uri: &[],
+        ns_next: &[],
+        ns_buf: &[],
+    };
+    assert_eq!(classify_root(&no_root), RootClassification::NoRoot);
 }
 
 fn windowed() -> Limits {

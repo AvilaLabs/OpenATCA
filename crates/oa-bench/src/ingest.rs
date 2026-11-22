@@ -102,6 +102,9 @@ pub struct AssignmentDocumentRefusals {
     pub xml_limit: u64,
     pub xml_parse: u64,
     pub unsupported_fixm_root: u64,
+    pub unsupported_fixm_root_no_root: u64,
+    pub unsupported_fixm_root_other_local_name: u64,
+    pub unsupported_fixm_root_wrong_namespace: u64,
     pub other_fixm: u64,
 }
 
@@ -154,6 +157,27 @@ pub(crate) fn ingest_assignment_query(
                 &mut counts.document_refusals.other_fixm
             };
             *count = count.saturating_add(1);
+            if e == oa_fixm::FixmError::UnsupportedRoot {
+                let count = match oa_fixm::classify_root(&doc) {
+                    oa_fixm::RootClassification::NoRoot => {
+                        &mut counts.document_refusals.unsupported_fixm_root_no_root
+                    }
+                    oa_fixm::RootClassification::OtherLocalName => {
+                        &mut counts
+                            .document_refusals
+                            .unsupported_fixm_root_other_local_name
+                    }
+                    oa_fixm::RootClassification::MessageCollectionWrongNamespace => {
+                        &mut counts
+                            .document_refusals
+                            .unsupported_fixm_root_wrong_namespace
+                    }
+                    // Defensive mismatch fallback: retain the broad refusal count without
+                    // inventing a root category if the decoder's gate changes independently.
+                    oa_fixm::RootClassification::MessageCollectionNas => return,
+                };
+                *count = count.saturating_add(1);
+            }
             return;
         }
     };

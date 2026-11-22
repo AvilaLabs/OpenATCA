@@ -3238,7 +3238,9 @@ synthetic world only. Tests use hand-made fixtures; the real-sample test reads
   identifier (case, padding) never score differently.
 - **OA-BENCH-091** The extraction counts list what the decoders refused: SFDPS messages rejected by reason and
   field errors in kept rows by field, TBFM flights and TFMS messages refused for a field by field index and by
-  reason, each with its total. A row or field that did not reach scoring is in one of the counts.
+  reason, each with its total. The arrival assigned-altitude rescan also breaks unsupported FIXM roots down into
+  absent roots, other local names and `MessageCollection` roots with a non-NAS namespace, without reporting raw
+  names or namespace values. A row or field that did not reach scoring is in one of the counts.
 - **OA-BENCH-092** An input file is bounded. A `.msg` file longer than the replay parser's document limit plus
   64 KiB, by its length or because it grows while read, is not kept: it is read to its end through a fixed
   buffer and refused as a document (OA-BENCH-102). The airspace snapshot is read with a cap against the

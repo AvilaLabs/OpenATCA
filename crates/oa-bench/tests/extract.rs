@@ -404,9 +404,14 @@ fn assignment_scan_resolves_one_cutoff_and_refuses_changed_consumed_bytes() {
             file.extend_from_slice(&frame[..len]);
         }
         let too_deep = "<a>".repeat(oa_replay::doc_xml_limits().max_depth + 1);
-        for (seq, doc) in [too_deep.as_str(), "<a></b>", "<unrelated/>"]
-            .into_iter()
-            .enumerate()
+        for (seq, doc) in [
+            too_deep.as_str(),
+            "<a></b>",
+            "<unrelated/>",
+            "<MessageCollection xmlns='urn:example:other'/>",
+        ]
+        .into_iter()
+        .enumerate()
         {
             let mut frame = vec![0; doc.len() + 64];
             let len = oa_feed::encode_frame(
@@ -445,10 +450,20 @@ fn assignment_scan_resolves_one_cutoff_and_refuses_changed_consumed_bytes() {
     )
     .unwrap();
     assert_eq!(scan.frame_errors, 0);
-    assert_eq!(scan.documents_refused, 3);
+    assert_eq!(scan.documents_refused, 4);
     assert_eq!(scan.document_refusals.xml_limit, 1);
     assert_eq!(scan.document_refusals.xml_parse, 1);
-    assert_eq!(scan.document_refusals.unsupported_fixm_root, 1);
+    assert_eq!(scan.document_refusals.unsupported_fixm_root, 2);
+    assert_eq!(scan.document_refusals.unsupported_fixm_root_no_root, 0);
+    assert_eq!(
+        scan.document_refusals
+            .unsupported_fixm_root_other_local_name,
+        1
+    );
+    assert_eq!(
+        scan.document_refusals.unsupported_fixm_root_wrong_namespace,
+        1
+    );
     assert_eq!(sealed, 0);
     assert_eq!(
         assignment_at_issue(&scan.query, gufi),

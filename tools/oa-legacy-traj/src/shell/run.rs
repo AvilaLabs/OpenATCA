@@ -1964,11 +1964,14 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
             header.push((
                 "assigned-altitude document refusals".to_string(),
                 format!(
-                    "{} oversized message files, {} XML limits, {} other XML parse failures, {} unsupported FIXM roots, {} other FIXM refusals",
+                    "{} oversized message files, {} XML limits, {} other XML parse failures, {} unsupported FIXM roots ({} no root, {} other local name, {} MessageCollection wrong namespace), {} other FIXM refusals",
                     refused.oversized_msg_file,
                     refused.xml_limit,
                     refused.xml_parse,
                     refused.unsupported_fixm_root,
+                    refused.unsupported_fixm_root_no_root,
+                    refused.unsupported_fixm_root_other_local_name,
+                    refused.unsupported_fixm_root_wrong_namespace,
                     refused.other_fixm,
                 ),
             ));

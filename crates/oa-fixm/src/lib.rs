@@ -25,7 +25,7 @@ mod decode;
 mod known;
 mod scalar;
 
-pub use decode::{prescan, Decoder};
+pub use decode::{classify_root, prescan, Decoder, RootClassification};
 pub use scalar::{parse_beacon, parse_hex24, parse_iso_ms, parse_scaled, parse_uuid};
 
 use oa_sealed::DropWindow;

@@ -34,6 +34,36 @@ fn uri_bytes<'a>(doc: &Doc<'a>, sp: Span) -> &'a [u8] {
 const NS_NAS: &[u8] = b"http://www.faa.aero/nas/3.0";
 const NS_XSI: &[u8] = b"http://www.w3.org/2001/XMLSchema-instance";
 
+/// The bounded root classification used when a parsed document is refused as an unsupported
+/// FIXM root. It contains categories only; input names and namespace values are never retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootClassification {
+    /// The parsed document has no element root. Normal XML parsing may refuse it earlier.
+    NoRoot,
+    /// The root local name is not `MessageCollection`.
+    OtherLocalName,
+    /// The root local name is `MessageCollection`, but its namespace is not FAA NAS 3.0.
+    MessageCollectionWrongNamespace,
+    /// The expected FAA NAS 3.0 `MessageCollection` root.
+    MessageCollectionNas,
+}
+
+/// Classifies a parsed document's root without retaining its input name or namespace.
+pub fn classify_root(doc: &Doc<'_>) -> RootClassification {
+    let Some(&root_name) = doc.elem_name.first() else {
+        return RootClassification::NoRoot;
+    };
+    if span_bytes(doc.input, root_name).unwrap_or_default() != b"MessageCollection" {
+        return RootClassification::OtherLocalName;
+    }
+    if matches!(resolve_elem_ns(doc, ElemIx(0)), Ns::Uri(uri) if ns_uri_bytes(doc, uri) == Some(NS_NAS))
+    {
+        RootClassification::MessageCollectionNas
+    } else {
+        RootClassification::MessageCollectionWrongNamespace
+    }
+}
+
 const ALT_MIN_FT: i64 = -2_000;
 const ALT_MAX_FT: i64 = 100_000;
 /// Speed bound, 0.1 knot (2,000 knots).
@@ -788,10 +818,7 @@ impl Decoder {
                 limit: self.limits.max_elements,
             });
         }
-        let root_ok = n > 0
-            && name_bytes(input, doc.elem_name.first().copied().unwrap_or_default())
-                == b"MessageCollection"
-            && matches!(resolve_elem_ns(doc, ElemIx(0)), Ns::Uri(u) if uri_bytes(doc, u) == NS_NAS);
+        let root_ok = classify_root(doc) == RootClassification::MessageCollectionNas;
         if !root_ok {
             self.stats.unsupported_roots = self.stats.unsupported_roots.saturating_add(1);
             return Err(FixmError::UnsupportedRoot);
