@@ -289,6 +289,46 @@ fn heading_lag_s(reference_deg: f64, reported_deg: f64, reference_rate_dps: f64)
     Some(signed_delta / reference_rate_dps)
 }
 
+/// Index of the report-age cohort, with a final bin for no report at or before the sample.
+fn age_bin(age_s: Option<f64>) -> usize {
+    age_s.map_or(AGE_EDGES.len() + 1, |age| bin_of(&AGE_EDGES, age))
+}
+
+/// Reference turn status: turning, straight, or unavailable.
+fn turn_bin(rate_dps: Option<f64>) -> usize {
+    match rate_dps {
+        Some(rate) if rate.abs() >= TURN_DPS => 0,
+        Some(_) => 1,
+        None => 2,
+    }
+}
+
+#[derive(Default)]
+struct RateCell {
+    samples: u64,
+    matched: u64,
+    reference_dps: Vec<f64>,
+    tracker_dps: Vec<f64>,
+    absolute_error_dps: Vec<f64>,
+}
+
+fn signed_median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| oa_math::cmp_canon_f64(*a, *b));
+    sorted.get(sorted.len() / 2).copied().unwrap_or(f64::NAN)
+}
+
+fn record_rate_sample(cell: &mut RateCell, reference_dps: Option<f64>, tracker: Option<Row>) {
+    cell.samples += 1;
+    if let (Some(reference), Some(tracker)) = (reference_dps, tracker) {
+        cell.matched += 1;
+        cell.reference_dps.push(reference);
+        cell.tracker_dps.push(tracker.omega_dps);
+        cell.absolute_error_dps
+            .push((tracker.omega_dps - reference).abs());
+    }
+}
+
 /// One sample's reference heading rate and turn phase, and its tracker row.
 struct Ref {
     rate: Option<f64>,
@@ -614,6 +654,9 @@ fn run(
     );
     let mut by_age_turn = Table::new("  ... turning samples only", edge_labels(&AGE_EDGES));
     let mut by_age_str = Table::new("  ... not turning samples only", edge_labels(&AGE_EDGES));
+    let mut by_age_turn_rate: Vec<RateCell> = (0..(AGE_EDGES.len() + 2) * 3)
+        .map(|_| RateCell::default())
+        .collect();
     let mut by_gap = Table::new(
         "By the length of the report gap holding the sample (s)",
         edge_labels(&GAP_EDGES),
@@ -636,7 +679,9 @@ fn run(
     let mut by_band = BTreeMap::new();
     // Tracker's heading rate against the reference's, per rate bin: signed medians.
     let mut est: Vec<(Vec<f64>, Vec<f64>)> = (0..6).map(|_| Default::default()).collect();
-    let mut csv = String::from("addr,t_ms,band,oa_cross_m,eram_cross_m,oa_track_err_deg,eram_track_err_deg,ref_rate_dps,phase,mu_turn,est_rate_dps\n");
+    let mut csv = String::from(
+        "addr,t_ms,band,oa_cross_m,eram_cross_m,oa_track_err_deg,eram_track_err_deg,ref_rate_dps,phase,mu_turn,est_rate_dps\n",
+    );
     for (s, r) in samples.iter().zip(&refs) {
         let rb = r.rate.map_or(5, |x| bin_of(&RATE_EDGES, x.abs()));
         let row = rows.get(&(s.addr, s.t_ms));
@@ -650,6 +695,11 @@ fn run(
         let ab = age.map_or(AGE_EDGES.len() + 2, |a| bin_of(&AGE_EDGES, a));
         let gb = gap.map_or(GAP_EDGES.len() + 2, |g| bin_of(&GAP_EDGES, g));
         let turning = r.rate.is_some_and(|x| x.abs() >= TURN_DPS);
+        let turn_class = turn_bin(r.rate);
+        let cell_index = age_bin(age) * 3 + turn_class;
+        if let Some(cell) = by_age_turn_rate.get_mut(cell_index) {
+            record_rate_sample(cell, r.rate, row.copied());
+        }
         by_age.add(ab, s);
         by_gap.add(gb, s);
         if turning {
@@ -740,6 +790,38 @@ fn run(
     by_mu.write(&mut o);
     for t in [&by_age, &by_age_turn, &by_age_str, &by_gap, &by_gap_turn] {
         t.write(&mut o);
+    }
+    let _ = writeln!(
+        o,
+        "\nTracker turn-rate agreement by actual ADS-B report age and reference turn status (rate error = |tracker minus reference|; report-age bin is the last set-A report at or before the p002 sample; coverage requires a reference rate and matching tracker tick; descriptive association, not causal)\n  {:<16} {:<12} {:>8} {:>8} {:>9} {:>9} {:>9} {:>9}",
+        "age", "reference", "samples", "rate rows", "coverage", "ref med", "trk med", "err p95"
+    );
+    let age_labels = edge_labels(&AGE_EDGES);
+    let turn_labels = ["turning", "straight", "no reference rate"];
+    for (ai, age_label) in age_labels.iter().enumerate() {
+        for (ti, turn_label) in turn_labels.iter().enumerate() {
+            let Some(cell) = by_age_turn_rate.get(ai * 3 + ti) else {
+                continue;
+            };
+            let err = stat(&cell.absolute_error_dps);
+            let coverage = if cell.samples == 0 {
+                f64::NAN
+            } else {
+                100.0 * cell.matched as f64 / cell.samples as f64
+            };
+            let _ = writeln!(
+                o,
+                "  {:<16} {:<12} {:>8} {:>8} {:>8.1}% {:>9.3} {:>9.3} {:>9.3}",
+                age_label,
+                turn_label,
+                cell.samples,
+                cell.matched,
+                coverage,
+                signed_median(&cell.reference_dps),
+                signed_median(&cell.tracker_dps),
+                err[2]
+            );
+        }
     }
     for t in by_band.values() {
         t.write(&mut o);
@@ -844,8 +926,39 @@ mod tests {
 
     // REQ: OA-TRK-402
     #[test]
+    fn age_turn_strata_separate_stale_turning_from_stale_straight_samples() {
+        let stale_turning = age_bin(Some(12.0)) * 3 + turn_bin(Some(1.5));
+        let stale_straight = age_bin(Some(12.0)) * 3 + turn_bin(Some(0.0));
+        assert_eq!(stale_turning, stale_straight - 1);
+        assert_eq!(age_bin(Some(0.5)), 0);
+        assert_eq!(turn_bin(None), 2);
+
+        let mut cells: Vec<RateCell> = (0..18).map(|_| RateCell::default()).collect();
+        let turning_row = Row {
+            mu_turn: 0.8,
+            omega_dps: 1.0,
+        };
+        let straight_row = Row {
+            mu_turn: 0.1,
+            omega_dps: 0.0,
+        };
+        record_rate_sample(&mut cells[stale_turning], Some(1.5), Some(turning_row));
+        record_rate_sample(&mut cells[stale_straight], Some(0.0), Some(straight_row));
+        record_rate_sample(&mut cells[stale_turning], Some(1.5), None);
+        let turning = &cells[stale_turning];
+        let straight = &cells[stale_straight];
+        assert_eq!((turning.samples, turning.matched), (2, 1));
+        assert_eq!((straight.samples, straight.matched), (1, 1));
+        assert_eq!(stat(&turning.absolute_error_dps)[2], 0.5);
+        assert_eq!(stat(&straight.absolute_error_dps)[2], 0.0);
+    }
+
+    // REQ: OA-TRK-402
+    #[test]
     fn only_common_samples_with_finite_errors_are_read_from_the_p002_csv() {
-        let mut csv = String::from("# DEVELOPMENT RUN\naddr,t_ms,phase,band,common,oa_miss,oa_cross_m,oa_track_err_deg,oa_row_dt_ms,eram_miss,eram_cross_m,eram_track_err_deg\n");
+        let mut csv = String::from(
+            "# DEVELOPMENT RUN\naddr,t_ms,phase,band,common,oa_miss,oa_cross_m,oa_track_err_deg,oa_row_dt_ms,eram_miss,eram_cross_m,eram_track_err_deg\n",
+        );
         csv.push_str("abc123,1000,climb,below,1,0,-3.5,0.4,20,0,7.0,0.2\n");
         csv.push_str("abc124,1000,climb,below,0,0,1.0,0.1,0,1,,\n");
         csv.push_str("abc125,2000,climb,below,1,0,2.0,,0,0,5.0,0.3\n");
