@@ -2,11 +2,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use oa_encounter_run::qualification::{
-    score, AlertEpisode, Case, CaseResult, Outcome, ScoreError, Subject, MAX_CASES, MAX_WARNINGS,
+    score, AlertEpisode, Case, CaseResult, Evaluation, Outcome, ScoreError, Subject, MAX_CASES,
+    MAX_WARNINGS,
 };
-use oa_safety::net::{Area, NetReport, Reason};
 
-fn desired(subject: Subject, report: NetReport) -> Case {
+fn desired(subject: Subject, report: Evaluation) -> Case {
     Case {
         subject,
         window_start_ns: 40,
@@ -19,7 +19,7 @@ fn desired(subject: Subject, report: NetReport) -> Case {
     }
 }
 
-fn control(subject: Subject, report: NetReport) -> Case {
+fn control(subject: Subject, report: Evaluation) -> Case {
     Case {
         subject,
         window_start_ns: 40,
@@ -39,25 +39,25 @@ fn matching_is_subject_specific_deduplicated_and_keeps_gaps_in_denominators() {
     let pair_unknown = Subject { a: 5, b: 6 };
     let pair_wrong_target = Subject { a: 8, b: 9 };
     let track_unknown = Subject { a: 7, b: 0 };
-    let mut second_event_same_subject = desired(pair_hit, NetReport::Running);
+    let mut second_event_same_subject = desired(pair_hit, Evaluation::Available);
     second_event_same_subject.window_end_ns = 220;
     second_event_same_subject.violation = Some((200, 210));
     let cases = [
-        desired(pair_hit, NetReport::Running),
+        desired(pair_hit, Evaluation::Available),
         second_event_same_subject,
-        control(pair_control, NetReport::Running),
+        control(pair_control, Evaluation::Available),
         desired(
             pair_unknown,
-            NetReport::Degraded {
-                reason: Reason::InputMissing,
-                area: Area::Whole,
-                count: 2,
+            Evaluation::Unavailable {
+                reason: "input missing",
+                shortfall: 2,
             },
         ),
         control(
             track_unknown,
-            NetReport::Unavailable {
-                reason: Reason::SurveillanceLost,
+            Evaluation::Unavailable {
+                reason: "surveillance lost",
+                shortfall: 0,
             },
         ),
     ];
@@ -125,14 +125,14 @@ fn matching_is_subject_specific_deduplicated_and_keeps_gaps_in_denominators() {
     assert_eq!(
         results[3].outcome,
         Outcome::Unavailable {
-            reason: Reason::InputMissing,
+            reason: "input missing",
             shortfall: 2,
         }
     );
     assert_eq!(
         results[4].outcome,
         Outcome::Unavailable {
-            reason: Reason::SurveillanceLost,
+            reason: "surveillance lost",
             shortfall: 0,
         }
     );
@@ -143,8 +143,8 @@ fn misses_nuisance_controls_and_capacity_failures_are_explicit() {
     let pair_missed = Subject { a: 11, b: 12 };
     let track_nuisance = Subject { a: 13, b: 0 };
     let cases = [
-        desired(pair_missed, NetReport::Running),
-        control(track_nuisance, NetReport::Running),
+        desired(pair_missed, Evaluation::Available),
+        control(track_nuisance, Evaluation::Available),
     ];
     let warnings = [AlertEpisode {
         subject: track_nuisance,
@@ -173,7 +173,7 @@ fn misses_nuisance_controls_and_capacity_failures_are_explicit() {
     assert_eq!(results[0].outcome, Outcome::Miss);
     assert_eq!(results[1].outcome, Outcome::Nuisance);
 
-    let too_many_cases = vec![control(track_nuisance, NetReport::Running); MAX_CASES + 1];
+    let too_many_cases = vec![control(track_nuisance, Evaluation::Available); MAX_CASES + 1];
     let mut too_many_results = vec![results[0]; MAX_CASES + 1];
     assert!(score(&too_many_cases, &[], &mut too_many_results).is_err());
     let many_warnings = vec![warnings[0]; MAX_WARNINGS + 1];
@@ -184,13 +184,13 @@ fn misses_nuisance_controls_and_capacity_failures_are_explicit() {
 #[test]
 fn unrepresentable_warning_lead_is_refused_before_any_result_changes() {
     let cases = [
-        control(Subject { a: 1, b: 0 }, NetReport::Running),
+        control(Subject { a: 1, b: 0 }, Evaluation::Available),
         Case {
             window_start_ns: i64::MIN,
             warning_from_ns: i64::MIN,
             warning_deadline_ns: -1,
             violation: Some((0, 110)),
-            ..desired(Subject { a: 2, b: 0 }, NetReport::Running)
+            ..desired(Subject { a: 2, b: 0 }, Evaluation::Available)
         },
     ];
     let initial = [CaseResult {

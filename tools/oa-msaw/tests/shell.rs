@@ -14,7 +14,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
-use oa_encounter_run::qualification::{score, AlertEpisode, Case, CaseResult, Outcome, Subject};
+use oa_encounter_run::qualification::{
+    score, AlertEpisode, Case, CaseResult, Evaluation, Outcome, Subject,
+};
 use oa_encounter_run::run::GroundTable;
 use oa_msaw::{
     AIRBORNE, CK_APPROACH, CK_DEPARTURE, CK_RUNWAY, FLOOR_NONE, GROUND_UNKNOWN, ON_GROUND,
@@ -30,7 +32,7 @@ use oa_msaw_run::report::{
 };
 use oa_msaw_run::run::{r95_of, track_and_alert, Record};
 use oa_mva::{new_model, Model, SetKind};
-use oa_safety::net::{NetReport, NetState, Reason};
+use oa_safety::net::{NetState, Reason};
 use oa_tiff::{Grid, TileSet};
 use oa_track::{Measurement, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT};
 
@@ -804,7 +806,7 @@ fn synthetic_flat_terrain_descent_and_level_control_are_scored_from_runner_outpu
             alert_desired: true,
             warning_from_ns: 0,
             warning_deadline_ns: event_start_ns - (set.msaw.warning_s * S as f64).round() as i64,
-            evaluation: NetReport::Running,
+            evaluation: Evaluation::Available,
         },
         Case {
             subject: Subject { a: 0x902, b: 0 },
@@ -814,7 +816,7 @@ fn synthetic_flat_terrain_descent_and_level_control_are_scored_from_runner_outpu
             alert_desired: false,
             warning_from_ns: 0,
             warning_deadline_ns: LAST_TICK_S * S,
-            evaluation: NetReport::Running,
+            evaluation: Evaluation::Available,
         },
     ];
     let mut results = [CaseResult {

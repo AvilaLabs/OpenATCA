@@ -7,7 +7,6 @@ use crate::core::font::{text_width_units, CAP_HEIGHT};
 use crate::core::list::{push_text, DisplayError, DisplayList, ListCaps, ALIGN_RIGHT};
 use crate::core::palette;
 use crate::core::project::Projection;
-use crate::core::scene::LEGEND_STRIP_PX;
 use crate::core::text::{text_clipped, text_new, text_push_char, text_push_str, text_str, TextBuf};
 
 /// Bytes in a flight callsign or unit designator supplied to the ownership display.

@@ -4,8 +4,6 @@
 //! scoring. A degraded or unavailable net report makes the corresponding label unevaluable; it
 //! never becomes a quiet control or a successful hit.
 
-use oa_safety::net::{NetReport, Reason};
-
 /// Maximum labels and warning episodes accepted by one scoring call (C7).
 pub const MAX_CASES: usize = 64;
 pub const MAX_WARNINGS: usize = 256;
@@ -15,6 +13,16 @@ pub const MAX_WARNINGS: usize = 256;
 pub struct Subject {
     pub a: u32,
     pub b: u32,
+}
+
+/// Whether the runner supplied complete coverage for the declared case window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Evaluation {
+    Available,
+    Unavailable {
+        reason: &'static str,
+        shortfall: u32,
+    },
 }
 
 /// Independently declared truth and evaluation window for one subject.
@@ -32,7 +40,7 @@ pub struct Case {
     pub warning_from_ns: i64,
     pub warning_deadline_ns: i64,
     /// Evaluation state for the label's window. Any degraded or unavailable report is unknown.
-    pub evaluation: NetReport,
+    pub evaluation: Evaluation,
 }
 
 /// An alert episode copied from the normal alert API. `warning_ns` is the warning-grade onset;
@@ -52,7 +60,10 @@ pub enum Outcome {
     Miss,
     Quiet,
     Nuisance,
-    Unavailable { reason: Reason, shortfall: u32 },
+    Unavailable {
+        reason: &'static str,
+        shortfall: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,7 +166,7 @@ pub fn score(
     let mut totals = Totals::default();
     for (case, result) in cases.iter().zip(results) {
         let outcome = match case.evaluation {
-            NetReport::Running => {
+            Evaluation::Available => {
                 if case.alert_desired {
                     totals.desired_cases += 1;
                     totals.desired_evaluable += 1;
@@ -227,7 +238,7 @@ pub fn score(
                     }
                 }
             }
-            NetReport::Degraded { reason, count, .. } => {
+            Evaluation::Unavailable { reason, shortfall } => {
                 if case.alert_desired {
                     totals.desired_cases += 1;
                     totals.desired_unavailable += 1;
@@ -236,27 +247,7 @@ pub fn score(
                     totals.controls_unavailable += 1;
                 }
                 CaseResult {
-                    outcome: Outcome::Unavailable {
-                        reason,
-                        shortfall: count,
-                    },
-                    warning_index: None,
-                    lead_ns: None,
-                }
-            }
-            NetReport::Unavailable { reason } => {
-                if case.alert_desired {
-                    totals.desired_cases += 1;
-                    totals.desired_unavailable += 1;
-                } else {
-                    totals.no_alert_cases += 1;
-                    totals.controls_unavailable += 1;
-                }
-                CaseResult {
-                    outcome: Outcome::Unavailable {
-                        reason,
-                        shortfall: 0,
-                    },
+                    outcome: Outcome::Unavailable { reason, shortfall },
                     warning_index: None,
                     lead_ns: None,
                 }

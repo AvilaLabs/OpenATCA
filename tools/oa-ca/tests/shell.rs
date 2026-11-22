@@ -23,9 +23,11 @@ use oa_ca_run::report::{
     CONTEXT_NAMES,
 };
 use oa_ca_run::run::{r95_of, track_and_alert};
-use oa_encounter_run::qualification::{score, AlertEpisode, Case, CaseResult, Outcome, Subject};
+use oa_encounter_run::qualification::{
+    score, AlertEpisode, Case, CaseResult, Evaluation, Outcome, Subject,
+};
 use oa_encounter_run::run::GroundTable;
-use oa_safety::net::{NetReport, NetState, Reason};
+use oa_safety::net::{NetState, Reason};
 use oa_track::{Measurement, TrackerConfig, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT};
 
 const DEV_CFG: &str = include_str!("../testdata/dev.cfg");
@@ -601,7 +603,7 @@ fn synthetic_tracker_crossing_and_vertical_control_are_scored_against_declared_w
             alert_desired: true,
             warning_from_ns: 0,
             warning_deadline_ns: ((entry_s - 20.0) * S as f64).floor() as i64,
-            evaluation: NetReport::Running,
+            evaluation: Evaluation::Available,
         },
         Case {
             subject: Subject {
@@ -614,7 +616,7 @@ fn synthetic_tracker_crossing_and_vertical_control_are_scored_against_declared_w
             alert_desired: false,
             warning_from_ns: 0,
             warning_deadline_ns: LAST_TICK_S * S,
-            evaluation: NetReport::Running,
+            evaluation: Evaluation::Available,
         },
     ];
     let mut results = [CaseResult {
