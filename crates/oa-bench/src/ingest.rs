@@ -3,10 +3,7 @@
 //! decoders: `oa-fixm` for SFDPS flight data and track positions (with [`crate::scan`] for the
 //! few fields it does not decode), `oa-tbfm` for TBFM, `oa-tfms` for TFMS.
 
-use oa_fixm::{
-    clear_events, code_str, Decoder, Events, Field, ALT_FORM_AT_FIX, ALT_FORM_BLOCK,
-    ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS,
-};
+use oa_fixm::{clear_events, code_str, field_error, Decoder, Events, Field, ALT_FORM_SIMPLE};
 use oa_tbfm::rows::{pt, section};
 use oa_tbfm::NO_TIME as TBFM_NO_TIME;
 use oa_tfms::rows::ttype;
@@ -15,7 +12,7 @@ use oa_xml::Parser;
 
 use crate::legacy::{
     flight_ix, pad, push_assigned_altitude, push_tbfm, push_tfms, push_tfms_actual, push_th,
-    row_has, tbfm_kind, tfms_kind, Counts, Legacy, TfmsIn, NO_ALT, NO_TIME,
+    row_has, tbfm_kind, tfms_kind, Counts, Legacy, TfmsIn, ALT_FORM_INVALID, NO_ALT, NO_TIME,
 };
 use crate::scan::scan_received;
 
@@ -122,24 +119,20 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
             continue;
         };
         let fi = f as usize;
-        if row_has(ev, row, Field::AssignedForm) {
-            if let (Some(&ts_ms), Some(&form)) = (ev.ts_ms.get(row), ev.assigned_form.get(row)) {
-                let value_ft = if form == ALT_FORM_SIMPLE {
-                    if row_has(ev, row, Field::AssignedAlt) {
-                        ev.assigned_ft.get(row).copied().unwrap_or(NO_ALT)
-                    } else {
-                        NO_ALT
-                    }
-                } else if matches!(
-                    form,
-                    ALT_FORM_VFR_PLUS | ALT_FORM_VFR | ALT_FORM_BLOCK | ALT_FORM_AT_FIX
-                ) {
-                    NO_ALT
-                } else {
-                    NO_ALT
-                };
-                push_assigned_altitude(leg, f, ts_ms, recv_ms, form, value_ft);
-            }
+        let assigned_form = if row_has(ev, row, Field::AssignedForm) {
+            ev.assigned_form.get(row).copied()
+        } else if field_error(ev, row, Field::AssignedForm) {
+            Some(ALT_FORM_INVALID)
+        } else {
+            None
+        };
+        if let (Some(form), Some(&ts_ms)) = (assigned_form, ev.ts_ms.get(row)) {
+            let value_ft = if form == ALT_FORM_SIMPLE && row_has(ev, row, Field::AssignedAlt) {
+                ev.assigned_ft.get(row).copied().unwrap_or(NO_ALT)
+            } else {
+                NO_ALT
+            };
+            push_assigned_altitude(leg, f, ts_ms, recv_ms, form, value_ft);
         }
         if row_has(ev, row, Field::Callsign) {
             if let (Some(c), Some(slot)) = (ev.callsign.get(row), leg.flights.callsign.get_mut(fi))

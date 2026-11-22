@@ -23,6 +23,9 @@ pub use oa_fixm::{
     ALT_FORM_AT_FIX, ALT_FORM_BLOCK, ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS,
 };
 
+/// Assigned-altitude field was present but the decoder could not accept its form.
+pub const ALT_FORM_INVALID: u8 = 0;
+
 /// "No index" for flights and addresses (RULESET A4).
 pub const NONE: u32 = u32::MAX;
 /// Absent time, Unix ms.
@@ -151,7 +154,7 @@ pub struct Flights {
 }
 
 /// Typed SFDPS assigned-altitude updates with their message and receive times.
-/// `form` uses oa-fixm ALT_FORM_* codes; `value_ft` is meaningful only for SIMPLE.
+/// `form` uses oa-fixm ALT_FORM_* codes or ALT_FORM_INVALID; `value_ft` is only for SIMPLE.
 // A3: one Vec per column.
 #[derive(Clone, Debug, Default)]
 pub struct AssignedAltitudeTable {
@@ -425,40 +428,12 @@ pub fn push_assigned_altitude(
     form: u8,
     value_ft: i32,
 ) {
-    if ts_ms <= 0 || recv_ms <= 0 || ts_ms > recv_ms {
+    let known_availability = ts_ms > 0 && ts_ms <= recv_ms;
+    if !known_availability {
         leg.counts.assigned_altitude_unknown_availability = leg
             .counts
             .assigned_altitude_unknown_availability
             .saturating_add(1);
-        if leg.assigned_altitudes.flight.len() + leg.unknown_assigned_altitudes.flight.len()
-            >= leg.limits.assigned_altitude_updates
-            || leg
-                .assigned_altitudes_by_flight
-                .get(&flight)
-                .copied()
-                .unwrap_or(0)
-                >= MAX_ASSIGNED_ALTITUDE_UPDATES_PER_FLIGHT
-        {
-            leg.counts.overflow_assigned_altitude_updates = leg
-                .counts
-                .overflow_assigned_altitude_updates
-                .saturating_add(1);
-            let earliest_possible = ts_ms.max(1);
-            let entry = leg
-                .assigned_altitude_overflow_flights
-                .entry(flight)
-                .or_insert(earliest_possible);
-            *entry = (*entry).min(earliest_possible);
-            return;
-        }
-        let table = &mut leg.unknown_assigned_altitudes;
-        table.flight.push(flight);
-        table.source_ms.push(ts_ms.max(0));
-        table.form.push(form);
-        table.value_ft.push(value_ft);
-        let n = leg.assigned_altitudes_by_flight.entry(flight).or_insert(0);
-        *n = (*n).saturating_add(1);
-        return;
     }
     if leg.assigned_altitudes.flight.len() + leg.unknown_assigned_altitudes.flight.len()
         >= leg.limits.assigned_altitude_updates
@@ -473,19 +448,32 @@ pub fn push_assigned_altitude(
             .counts
             .overflow_assigned_altitude_updates
             .saturating_add(1);
+        let earliest_possible = if known_availability {
+            recv_ms
+        } else {
+            ts_ms.max(1)
+        };
         let first_overflow = leg
             .assigned_altitude_overflow_flights
             .entry(flight)
-            .or_insert(recv_ms);
-        *first_overflow = (*first_overflow).min(recv_ms);
+            .or_insert(earliest_possible);
+        *first_overflow = (*first_overflow).min(earliest_possible);
         return;
     }
-    let table = &mut leg.assigned_altitudes;
-    table.flight.push(flight);
-    table.ts_ms.push(ts_ms);
-    table.recv_ms.push(recv_ms);
-    table.form.push(form);
-    table.value_ft.push(value_ft);
+    if known_availability {
+        let table = &mut leg.assigned_altitudes;
+        table.flight.push(flight);
+        table.ts_ms.push(ts_ms);
+        table.recv_ms.push(recv_ms);
+        table.form.push(form);
+        table.value_ft.push(value_ft);
+    } else {
+        let table = &mut leg.unknown_assigned_altitudes;
+        table.flight.push(flight);
+        table.source_ms.push(ts_ms.max(0));
+        table.form.push(form);
+        table.value_ft.push(value_ft);
+    }
     let n = leg.assigned_altitudes_by_flight.entry(flight).or_insert(0);
     *n = (*n).saturating_add(1);
 }
