@@ -8,7 +8,10 @@
 )]
 
 use oa_bench::ingest::{ingest_sfdps, ingest_tbfm, ingest_tfms, new_reader};
-use oa_bench::input::{hash_files, list_inputs, load, DirKind, FeedInput};
+use oa_bench::input::{
+    file_opener, hash_files, list_inputs, load, load_counted_with_limits, msg_limit, DirKind,
+    FeedInput,
+};
 use oa_bench::legacy::{
     hev, new_legacy, tbfm_kind, tfms_kind, Counts, Limits, NONE, NO_ALT, NO_TIME,
 };
@@ -261,7 +264,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
     d
 }
 
-// REQ: OA-BENCH-022
+// REQ: OA-BENCH-022, OA-LTJ-055
 #[test]
 fn directories_of_msg_files_and_oaf_recordings_load_and_hash() {
     // Raw .msg directory: read in name order, no receive time, no replay hash.
@@ -271,7 +274,9 @@ fn directories_of_msg_files_and_oaf_recordings_load_and_hash() {
         "2030-01-02T03:00:05.250Z",
         "2030-01-02T03:00:04Z",
         false,
-        ADDR_AND_HINT,
+        &format!(
+            r#"{ADDR_AND_HINT}<assignedAltitude><simple uom="FEET">12000</simple></assignedAltitude>"#
+        ),
     ));
     let b = sfdps(&th(
         GUFI_A,
@@ -337,6 +342,25 @@ fn directories_of_msg_files_and_oaf_recordings_load_and_hash() {
     }])
     .unwrap();
     assert_eq!(l.replay_hash, l2.replay_hash);
+    assert!(l.legacy.assigned_altitudes.flight.is_empty());
+    let mut sealed = 0;
+    let configured = load_counted_with_limits(
+        &[FeedInput {
+            feed: FeedKind::Sfdps,
+            dir: odir.clone(),
+        }],
+        &file_opener(),
+        msg_limit(),
+        &mut sealed,
+        Limits {
+            assigned_altitude_updates: 2,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(sealed, 0);
+    assert_eq!(configured.legacy.assigned_altitudes.value_ft, [12_000]);
+    assert_eq!(configured.replay_hash, l.replay_hash);
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::remove_dir_all(odir);
 }

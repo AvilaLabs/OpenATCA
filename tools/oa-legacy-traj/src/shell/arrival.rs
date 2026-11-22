@@ -938,6 +938,12 @@ mod assigned_altitude_tests {
     const GUFI: &str = "11111111-2222-4333-8444-555555555555";
     const BASE_RECEIVED_MS: i64 = 1_794_664_309_564;
 
+    fn assignment_history() -> Legacy {
+        let mut legacy = new_legacy();
+        legacy.limits.assigned_altitude_updates = MAX_CAPTURED_ASSIGNED_ALTITUDES;
+        legacy
+    }
+
     fn message(timestamp: &str, assigned: &str) -> String {
         format!(
             r#"<?xml version="1.0"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="{timestamp}"><gufi codeSpace="urn:uuid">{GUFI}</gufi>{assigned}</flight></message></ns5:MessageCollection>"#
@@ -958,7 +964,7 @@ mod assigned_altitude_tests {
     // REQ: OA-LTJ-055
     #[test]
     fn decoder_history_is_cutoff_safe_and_valid_unsupported_form_replaces_simple() {
-        let mut legacy = new_legacy();
+        let mut legacy = assignment_history();
         let mut reader = new_reader().expect("synthetic decoder setup");
         ingest(
             &mut legacy,
@@ -1059,7 +1065,7 @@ mod assigned_altitude_tests {
     // REQ: OA-LTJ-055
     #[test]
     fn malformed_received_assignment_does_not_reuse_the_previous_simple_assignment() {
-        let mut legacy = new_legacy();
+        let mut legacy = assignment_history();
         let mut reader = new_reader().expect("synthetic decoder setup");
         ingest(
             &mut legacy,
@@ -1095,7 +1101,7 @@ mod assigned_altitude_tests {
     // REQ: OA-LTJ-055
     #[test]
     fn assigned_altitude_history_is_bounded_per_flight() {
-        let mut legacy = new_legacy();
+        let mut legacy = assignment_history();
         for i in 0..=MAX_ASSIGNED_ALTITUDE_UPDATES_PER_FLIGHT {
             let recv_ms = BASE_RECEIVED_MS + i64::from(i);
             push_assigned_altitude(
@@ -1140,7 +1146,7 @@ mod assigned_altitude_tests {
     // REQ: OA-LTJ-055
     #[test]
     fn same_stamped_time_conflict_refuses_scalar_and_unknown_receive_is_not_used() {
-        let mut legacy = new_legacy();
+        let mut legacy = assignment_history();
         let mut reader = new_reader().expect("synthetic decoder setup");
         ingest(
             &mut legacy,
@@ -1165,7 +1171,7 @@ mod assigned_altitude_tests {
             }
         );
 
-        let mut unknown = new_legacy();
+        let mut unknown = assignment_history();
         let mut reader = new_reader().expect("synthetic decoder setup");
         ingest(
             &mut unknown,
@@ -1191,7 +1197,7 @@ mod assigned_altitude_tests {
     #[test]
     fn later_unknown_receipt_blocks_only_after_its_source_time_and_newer_definitive_event_supersedes(
     ) {
-        let mut legacy = new_legacy();
+        let mut legacy = assignment_history();
         let mut reader = new_reader().expect("synthetic decoder setup");
         let source_base = BASE_RECEIVED_MS - 60_000;
         ingest(

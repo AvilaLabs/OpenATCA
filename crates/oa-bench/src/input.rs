@@ -28,7 +28,7 @@ use oa_replay::{
 use oa_sha256::{sha256, sha256_reader, to_hex, Digest, Sha256};
 
 use crate::ingest::{ingest_sfdps, ingest_tbfm, ingest_tfms, new_reader, Reader};
-use crate::legacy::{new_legacy, Legacy, NO_TIME};
+use crate::legacy::{new_legacy, Legacy, Limits, NO_TIME};
 use crate::report::InputHash;
 
 /// What a directory holds.
@@ -337,7 +337,19 @@ pub fn load_counted(
     max_msg: u64,
     sealed: &mut u64,
 ) -> io::Result<Loaded> {
+    load_counted_with_limits(feeds, open, max_msg, sealed, Limits::default())
+}
+
+/// Loads the recordings with explicitly chosen bounds for retained legacy history.
+pub fn load_counted_with_limits(
+    feeds: &[FeedInput],
+    open: &Opener,
+    max_msg: u64,
+    sealed: &mut u64,
+    limits: Limits,
+) -> io::Result<Loaded> {
     let mut leg = new_legacy();
+    leg.limits = limits;
     let mut reader = new_reader().map_err(io::Error::other)?;
     let mut listed: Vec<Listed> = Vec::new();
     for fi in feeds {

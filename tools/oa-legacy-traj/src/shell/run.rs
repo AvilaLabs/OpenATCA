@@ -4,10 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use oa_adsb::{reports_extend, reports_len, Reports, F_GROUND, NONE_I32};
 use oa_bench::adsb_truth::{self, BuiltTruth};
-use oa_bench::input::{load_adsb_counted, load_counted, msg_limit, read_capped_file, FeedInput};
+use oa_bench::input::{
+    load_adsb_counted, load_counted_with_limits, msg_limit, read_capped_file, FeedInput,
+};
 use oa_bench::legacy::{
-    name, norm_id, plan_candidates, plan_index, tbfm_kind, tfms_kind, Legacy, PlanIndex, NONE,
-    NO_COORD, NO_TIME,
+    name, norm_id, plan_candidates, plan_index, tbfm_kind, tfms_kind, Legacy, Limits, PlanIndex,
+    MAX_ASSIGNED_ALTITUDE_UPDATES, NONE, NO_COORD, NO_TIME,
 };
 use oa_replay::FeedKind;
 
@@ -1892,7 +1894,17 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         });
     }
     let mut feeds_sealed = 0u64;
-    let loaded = load_counted(&feeds, &guarded_opener(), msg_limit(), &mut feeds_sealed);
+    let mut limits = Limits::default();
+    if args.arrival_meter_fix.is_some() {
+        limits.assigned_altitude_updates = MAX_ASSIGNED_ALTITUDE_UPDATES;
+    }
+    let loaded = load_counted_with_limits(
+        &feeds,
+        &guarded_opener(),
+        msg_limit(),
+        &mut feeds_sealed,
+        limits,
+    );
     *sealed += feeds_sealed;
     let mut loaded = loaded.map_err(|e| e.to_string())?;
     eprintln!("oa-legacy-traj: recordings read");

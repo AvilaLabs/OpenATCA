@@ -119,20 +119,22 @@ pub fn ingest_sfdps(leg: &mut Legacy, r: &mut Reader, bytes: &[u8], recv_ms: i64
             continue;
         };
         let fi = f as usize;
-        let assigned_form = if row_has(ev, row, Field::AssignedForm) {
-            ev.assigned_form.get(row).copied()
-        } else if field_error(ev, row, Field::AssignedForm) {
-            Some(ALT_FORM_INVALID)
-        } else {
-            None
-        };
-        if let (Some(form), Some(&ts_ms)) = (assigned_form, ev.ts_ms.get(row)) {
-            let value_ft = if form == ALT_FORM_SIMPLE && row_has(ev, row, Field::AssignedAlt) {
-                ev.assigned_ft.get(row).copied().unwrap_or(NO_ALT)
+        if leg.limits.assigned_altitude_updates != 0 {
+            let assigned_form = if row_has(ev, row, Field::AssignedForm) {
+                ev.assigned_form.get(row).copied()
+            } else if field_error(ev, row, Field::AssignedForm) {
+                Some(ALT_FORM_INVALID)
             } else {
-                NO_ALT
+                None
             };
-            push_assigned_altitude(leg, f, ts_ms, recv_ms, form, value_ft);
+            if let (Some(form), Some(&ts_ms)) = (assigned_form, ev.ts_ms.get(row)) {
+                let value_ft = if form == ALT_FORM_SIMPLE && row_has(ev, row, Field::AssignedAlt) {
+                    ev.assigned_ft.get(row).copied().unwrap_or(NO_ALT)
+                } else {
+                    NO_ALT
+                };
+                push_assigned_altitude(leg, f, ts_ms, recv_ms, form, value_ft);
+            }
         }
         if row_has(ev, row, Field::Callsign) {
             if let (Some(c), Some(slot)) = (ev.callsign.get(row), leg.flights.callsign.get_mut(fi))

@@ -72,6 +72,7 @@ pub struct Limits {
     pub tbfm: usize,
     pub tfms: usize,
     pub beacons: usize,
+    /// Offline assignment history is collected only when the caller supplies a positive limit.
     pub assigned_altitude_updates: usize,
 }
 
@@ -86,7 +87,7 @@ impl Default for Limits {
             tbfm: MAX_TBFM,
             tfms: MAX_TFMS,
             beacons: MAX_BEACON_ROWS,
-            assigned_altitude_updates: MAX_ASSIGNED_ALTITUDE_UPDATES,
+            assigned_altitude_updates: 0,
         }
     }
 }
@@ -428,6 +429,13 @@ pub fn push_assigned_altitude(
     form: u8,
     value_ft: i32,
 ) {
+    let limit = leg
+        .limits
+        .assigned_altitude_updates
+        .min(MAX_ASSIGNED_ALTITUDE_UPDATES);
+    if limit == 0 {
+        return;
+    }
     let known_availability = ts_ms > 0 && ts_ms <= recv_ms;
     if !known_availability {
         leg.counts.assigned_altitude_unknown_availability = leg
@@ -435,8 +443,7 @@ pub fn push_assigned_altitude(
             .assigned_altitude_unknown_availability
             .saturating_add(1);
     }
-    if leg.assigned_altitudes.flight.len() + leg.unknown_assigned_altitudes.flight.len()
-        >= leg.limits.assigned_altitude_updates
+    if leg.assigned_altitudes.flight.len() + leg.unknown_assigned_altitudes.flight.len() >= limit
         || leg
             .assigned_altitudes_by_flight
             .get(&flight)

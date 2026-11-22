@@ -39,8 +39,9 @@ ERAM and TBFM when comparable estimates exist. `auto` selects a resolvable fix b
 distinct ORD flight plans with a TBFM estimate, before scoring. OpenATCA uses the received route's
 geometry and observed motion. Its ETA does not depend on the legacy time predictions. The ADS-B
 archive records observation time and has no comparable receive clock. This baseline has no winds or
-aircraft performance model. The SFDPS input retains typed assigned-altitude changes with their
-receive time. Only a valid `simple` form supplies a scalar; a later valid VFR, block, or at-fix form
+aircraft performance model. The arrival experiment opts in to a bounded SFDPS assignment history
+that retains typed assigned-altitude changes with their receive time. Only a valid `simple` form
+supplies a scalar; a later valid VFR, block, or at-fix form
 supersedes the prior scalar and is reported as unsupported. A malformed assignment, same-stamp
 conflict, bounded-history overflow, or later event with unknown receive time that could change the
 selected value refuses the scalar. That uncertainty is cutoff-gated by source time when known.
