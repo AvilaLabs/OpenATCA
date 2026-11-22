@@ -48,8 +48,8 @@ fn flat(origin: Place, lat_deg: f64, lon_deg: f64, cos_lat: f64) -> (f64, f64) {
     )
 }
 
-/// Local east-north offset using the same wrapped spherical frame as path crossing metrics.
-/// Antipodal longitude and polar origins have no supported local direction.
+/// Local east-north components of the spherical distance along its initial bearing.
+/// Opposite-meridian bearings and polar origins are outside this direction calculation.
 pub(crate) fn local_frame_offset(origin: Place, point: Place) -> Option<(f64, f64)> {
     if !origin.lat_deg.is_finite()
         || !origin.lon_deg.is_finite()
@@ -66,12 +66,26 @@ pub(crate) fn local_frame_offset(origin: Place, point: Place) -> Option<(f64, f6
     if dlon.abs() == 180.0 {
         return None;
     }
-    let cos_lat = oa_math::cos(origin.lat_deg * (core::f64::consts::PI / 180.0));
-    if !cos_lat.is_finite() || cos_lat.abs() < 1.0e-6 {
+    let rad = core::f64::consts::PI / 180.0;
+    let (sin_origin, cos_origin) = oa_math::sin_cos(origin.lat_deg * rad);
+    if cos_origin.abs() < 1.0e-6 {
         return None;
     }
-    let (east, north) = flat(origin, point.lat_deg, point.lon_deg, cos_lat);
-    (east.is_finite() && north.is_finite()).then_some((east, north))
+    if dlon == 0.0 && origin.lat_deg == point.lat_deg {
+        return Some((0.0, 0.0));
+    }
+    let (sin_point, cos_point) = oa_math::sin_cos(point.lat_deg * rad);
+    let (sin_dlon, cos_dlon) = oa_math::sin_cos(dlon * rad);
+    let east = sin_dlon * cos_point;
+    let north = cos_origin * sin_point - sin_origin * cos_point * cos_dlon;
+    let norm = oa_ieee::sqrt(east * east + north * north);
+    if !norm.is_finite() || norm <= 1.0e-12 {
+        return None;
+    }
+    let distance = great_circle_m(origin, point);
+    distance
+        .is_finite()
+        .then_some((distance * (east / norm), distance * (north / norm)))
 }
 
 /// The distance in metres between two places, in the flat frame centred on the first.

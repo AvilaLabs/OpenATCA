@@ -1469,7 +1469,7 @@ pub(crate) fn report(
         )
         .map_err(|e| e.to_string())?;
     }
-    writeln!(text, "Directional errors use the same horizon truth point and gap-free local truth travel direction; exact samples require usable support on both sides, interpolated samples use their bracketing segment, and truth speed at or below 1 m/s has no direction. Retrospective truth support may include samples after the forecast horizon.").map_err(|e| e.to_string())?;
+    writeln!(text, "Directional errors resolve the same spherical distance along and across the gap-free truth path at each horizon. Exact samples require usable support on both sides. Interpolated samples use their bracketing segment. Directional scoring requires truth speed of at least 10 m/s. Truth samples after the horizon can contribute to this retrospective score.").map_err(|e| e.to_string())?;
     for (label, values) in ["OpenATCA", "ERAM", "TBFM"]
         .into_iter()
         .zip(&mut totals.eta)

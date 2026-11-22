@@ -15,7 +15,8 @@ pub const MAX_ROUTE_FIXES: usize = 256;
 pub const MAX_TRUTH_POINTS: usize = 100_000;
 const MAX_TRACK_AGE_MS: i64 = 120_000;
 const MAX_TRUTH_GAP_MS: i64 = 30_000;
-const MIN_DIRECTION_SPEED_MPS: f64 = 1.0;
+// Same minimum used for directional pairing in oa-bench.
+const MIN_DIRECTION_SPEED_MPS: f64 = 10.0;
 const MIN_ALTITUDE_FT: f64 = -2_000.0;
 const MAX_ALTITUDE_FT: f64 = 100_000.0;
 const MAX_VERTICAL_RATE_FPM: f64 = 10_000.0;
@@ -718,17 +719,14 @@ fn interpolate_truth(truth: &[TruthPoint], time_ms: i64) -> Option<TruthPoint> {
     if time_ms <= 0 {
         return None;
     }
-    if let Some(exact) = truth.iter().find(|p| p.time_ms == time_ms) {
-        return Some(*exact);
+    let upper = match truth.binary_search_by_key(&time_ms, |point| point.time_ms) {
+        Ok(exact) => return truth.get(exact).copied(),
+        Err(upper) => upper,
+    };
+    let (a, b) = truth.get(upper.checked_sub(1)?).zip(truth.get(upper))?;
+    if b.gap_before || b.time_ms - a.time_ms > MAX_TRUTH_GAP_MS {
+        return None;
     }
-    let (a, b) = truth.windows(2).find_map(|w| {
-        let (a, b) = w.first().zip(w.get(1))?;
-        (a.time_ms < time_ms
-            && time_ms < b.time_ms
-            && !b.gap_before
-            && b.time_ms - a.time_ms <= MAX_TRUTH_GAP_MS)
-            .then_some((*a, *b))
-    })?;
     let fraction = (time_ms - a.time_ms) as f64 / (b.time_ms - a.time_ms) as f64;
     let place = interpolate_place(a.place, b.place, fraction);
     let altitude_ft = a
@@ -764,7 +762,7 @@ fn unit_truth_direction(
     if !distance_m.is_finite() || !speed_mps.is_finite() {
         return Err(DirectionStatus::UnsupportedGeometry);
     }
-    if speed_mps <= MIN_DIRECTION_SPEED_MPS {
+    if speed_mps < MIN_DIRECTION_SPEED_MPS {
         return Err(DirectionStatus::SlowTruth);
     }
     Ok((east / distance_m, north / distance_m))
@@ -776,49 +774,47 @@ fn truth_direction(truth: &[TruthPoint], time_ms: i64) -> Result<(f64, f64), Dir
     if truth.is_empty() {
         return Err(DirectionStatus::MissingTruth);
     }
-    if let Some(i) = truth.iter().position(|p| p.time_ms == time_ms) {
-        if i == 0 || i + 1 >= truth.len() {
-            return Err(DirectionStatus::TruthEdge);
+    let upper = match truth.binary_search_by_key(&time_ms, |point| point.time_ms) {
+        Ok(i) => {
+            let (Some(previous), Some(current), Some(next)) = (
+                i.checked_sub(1).and_then(|j| truth.get(j)),
+                truth.get(i),
+                truth.get(i + 1),
+            ) else {
+                return Err(DirectionStatus::TruthEdge);
+            };
+            let before_ms = current.time_ms.checked_sub(previous.time_ms);
+            let after_ms = next.time_ms.checked_sub(current.time_ms);
+            if current.gap_before
+                || next.gap_before
+                || before_ms.is_none_or(|gap| gap <= 0 || gap > MAX_TRUTH_GAP_MS)
+                || after_ms.is_none_or(|gap| gap <= 0 || gap > MAX_TRUTH_GAP_MS)
+            {
+                return Err(DirectionStatus::TruthGap);
+            }
+            let duration_ms = next
+                .time_ms
+                .checked_sub(previous.time_ms)
+                .ok_or(DirectionStatus::UnsupportedGeometry)?;
+            return unit_truth_direction(current.place, previous.place, next.place, duration_ms);
         }
-        let (Some(previous), Some(current), Some(next)) = (
-            i.checked_sub(1).and_then(|j| truth.get(j)),
-            truth.get(i),
-            truth.get(i + 1),
-        ) else {
-            return Err(DirectionStatus::TruthEdge);
-        };
-        let before_ms = current.time_ms.checked_sub(previous.time_ms);
-        let after_ms = next.time_ms.checked_sub(current.time_ms);
-        if current.gap_before
-            || next.gap_before
-            || before_ms.is_none_or(|gap| gap <= 0 || gap > MAX_TRUTH_GAP_MS)
-            || after_ms.is_none_or(|gap| gap <= 0 || gap > MAX_TRUTH_GAP_MS)
-        {
-            return Err(DirectionStatus::TruthGap);
-        }
-        let duration_ms = next
-            .time_ms
-            .checked_sub(previous.time_ms)
-            .ok_or(DirectionStatus::UnsupportedGeometry)?;
-        return unit_truth_direction(current.place, previous.place, next.place, duration_ms);
+        Err(upper) => upper,
+    };
+    let (a, b) = upper
+        .checked_sub(1)
+        .and_then(|lower| truth.get(lower))
+        .zip(truth.get(upper))
+        .ok_or(DirectionStatus::TruthEdge)?;
+    let duration_ms = b
+        .time_ms
+        .checked_sub(a.time_ms)
+        .ok_or(DirectionStatus::UnsupportedGeometry)?;
+    if b.gap_before || duration_ms <= 0 || duration_ms > MAX_TRUTH_GAP_MS {
+        return Err(DirectionStatus::TruthGap);
     }
-    for pair in truth.windows(2) {
-        let (Some(a), Some(b)) = (pair.first(), pair.get(1)) else {
-            continue;
-        };
-        if !(a.time_ms < time_ms && time_ms < b.time_ms) {
-            continue;
-        }
-        let duration_ms = b
-            .time_ms
-            .checked_sub(a.time_ms)
-            .ok_or(DirectionStatus::UnsupportedGeometry)?;
-        if b.gap_before || duration_ms <= 0 || duration_ms > MAX_TRUTH_GAP_MS {
-            return Err(DirectionStatus::TruthGap);
-        }
-        return unit_truth_direction(a.place, a.place, b.place, duration_ms);
-    }
-    Err(DirectionStatus::TruthEdge)
+    let fraction = (time_ms - a.time_ms) as f64 / duration_ms as f64;
+    let origin = interpolate_place(a.place, b.place, fraction);
+    unit_truth_direction(origin, a.place, b.place, duration_ms)
 }
 
 fn actual_passage(
@@ -1142,6 +1138,20 @@ mod tests {
         assert_eq!(eastbound, (0.0, -80.0));
         let (along, cross) = project_directional_error(3.0, 4.0, 0.6, 0.8);
         assert!((oa_ieee::sqrt(along * along + cross * cross) - 5.0).abs() < 1.0e-12);
+
+        let truth = Place {
+            lat_deg: 55.0,
+            lon_deg: 179.7,
+        };
+        let forecast = Place {
+            lat_deg: 55.2,
+            lon_deg: -179.8,
+        };
+        let (east, north) = local_frame_offset(truth, forecast).unwrap();
+        assert!(east > 0.0 && north > 0.0);
+        let (along, cross) = project_directional_error(east, north, 0.6, 0.8);
+        let directional_magnitude = oa_ieee::sqrt(along * along + cross * cross);
+        assert!((directional_magnitude - great_circle_m(forecast, truth)).abs() < 1.0e-6);
     }
 
     // REQ: OA-LTJ-058

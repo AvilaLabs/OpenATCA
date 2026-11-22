@@ -6673,6 +6673,10 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-LTJ-057** Arrival prediction and truth interpolation follow the shorter longitude
   displacement across the antimeridian. Closest-approach segments also follow the shorter
   displacement across the planar chart boundary opposite the scoring point.
+- **OA-LTJ-058** Arrival scores report along-track and cross-track error at each horizon with
+  positive values ahead of and to the right of the truth direction. The components resolve
+  the same spherical distance. Truth direction requires gap-free support and speed of at
+  least 10 m/s. The report counts unavailable directions by reason.
 
 ## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
 
