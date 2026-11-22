@@ -229,3 +229,14 @@ approved for public release" (fetched 2026-11-14).
 | OpenAP validation numbers | Sun, Hoekstra, Ellerbroek, Aerospace 2020 | Retry the publisher page |
 | ERAM and STARS failover time | Not public | Outreach |
 | Interfacility message set (ERAM to adjacent centres) | NAM Common Coordination ICD Rev E (NAS-IC-21009205); the public ERAM–non-US ICD covers only transport: TCP over VPN, 4-byte hex length header, ≤1,800 bytes, 95th-percentile latency ≤225 ms, recovery within 60 s, availability goal 0.9999 | Look for a public copy of Rev E |
+
+## 5. Synthetic ADS-B dropout continuity run
+
+`oa-perf one --adsb-dropout S` is an opt-in synthetic stress run. It writes a steady-feed control
+and an outage run with the same seed, radar schedule, and confirmed address-bearing cutover cohort.
+The outage withholds ADS-B in measured seconds `[warmup, warmup + S)`; radar plots continue, and
+ADS-B resumes after the interval. Both runs disable early stopping and must complete the full
+measured duration or the comparison is rejected. Output-overflow seconds have an uncertain
+cohort count. The count covers only the confirmed, known-address ADS-B cohort live at cutover;
+it counts non-coasting tracker rows and is a continuity proxy, not a sensor-freshness score.
+Anonymous radar tracks and reacquisition timing are not scored by this mode.

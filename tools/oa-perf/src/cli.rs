@@ -40,6 +40,7 @@ flags (defaults in brackets):
   --max-tracks N     tracker capacity [65536]
   --refine K         bisection steps between the knee and the first failing size [2]
   --seed N           traffic seed [1]
+  --adsb-dropout S   opt-in paired run: withhold ADS-B for S measured seconds, then resume
   --no-clip --no-overload   leave a part out
   --no-early-stop    feed the whole run even when it is far slower than real time";
 
@@ -64,6 +65,7 @@ pub struct Opts {
     pub no_clip: bool,
     pub no_overload: bool,
     pub no_early_stop: bool,
+    pub adsb_dropout_s: Option<i64>,
 }
 
 impl Default for Opts {
@@ -87,6 +89,7 @@ impl Default for Opts {
             no_clip: false,
             no_overload: false,
             no_early_stop: false,
+            adsb_dropout_s: None,
         }
     }
 }
@@ -165,6 +168,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             "--max-tracks" => o.max_tracks = num(a, it.next())?,
             "--refine" => o.refine = num(a, it.next())?,
             "--seed" => o.seed = num(a, it.next())?,
+            "--adsb-dropout" => o.adsb_dropout_s = Some(num(a, it.next())?),
             "--no-clip" => o.no_clip = true,
             "--no-overload" => o.no_overload = true,
             "--no-early-stop" => o.no_early_stop = true,
@@ -176,6 +180,17 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     }
     if o.warmup < 0 || o.duration < 1 || o.clip_secs < 1 {
         return Err("--warmup, --duration or --clip-secs out of range".to_string());
+    }
+    if let Some(s) = o.adsb_dropout_s {
+        if o.cmd != "one" {
+            return Err("--adsb-dropout is available with `one` only".to_string());
+        }
+        if s < 1 || s > o.duration || o.warmup < 1 {
+            return Err(
+                "--adsb-dropout must be 1..=--duration seconds and requires --warmup >= 1"
+                    .to_string(),
+            );
+        }
     }
     check_times(&o)?;
     parse_radars(&o.radars)?;
@@ -198,6 +213,7 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
         max_tracks: o.max_tracks,
         max_wall_s: o.max_wall,
         early_stop: !o.no_early_stop,
+        adsb_dropout_s: o.adsb_dropout_s,
     })
 }
 
@@ -211,10 +227,75 @@ fn write(path: &Path, text: &str) -> Result<(), String> {
 
 /// One capacity run in this process; writes `cap_<layout>_n<N>.{txt,kv}` and the per-second CSV.
 fn one(o: &Opts, n: usize) -> Result<(), String> {
-    let r = run_capacity(&cap_cfg(o, n)?)?;
-    let text = cap_text(&r);
+    let mut cfg = cap_cfg(o, n)?;
+    let (control_result, r) = if let Some(dropout_s) = o.adsb_dropout_s {
+        let mut control = cfg.clone();
+        control.adsb_dropout_s = Some(0);
+        control.early_stop = false;
+        cfg.early_stop = false;
+        let control_result = run_capacity(&control)?;
+        cfg.adsb_dropout_s = Some(dropout_s);
+        let r = run_capacity(&cfg)?;
+        for (label, result) in [("control", &control_result), ("dropout", &r)] {
+            if result.truncated || result.stopped_early || result.measure_s_done != o.duration {
+                return Err(format!(
+                    "paired {label} run was incomplete ({}/{} measured seconds); refusing an unmatched comparison",
+                    result.measure_s_done, o.duration
+                ));
+            }
+        }
+        if control_result.continuity_addresses != r.continuity_addresses {
+            return Err(
+                "paired runs produced different confirmed warm-up cohort rosters".to_string(),
+            );
+        }
+        if control_result
+            .seconds
+            .iter()
+            .zip(&r.seconds)
+            .any(|(control, dropout)| control.0 != dropout.0 || control.3 != dropout.3)
+        {
+            return Err(
+                "paired runs did not process the same measured seconds and radar plot counts"
+                    .to_string(),
+            );
+        }
+        (Some(control_result), r)
+    } else {
+        (None, run_capacity(&cfg)?)
+    };
+    if let Some(control_result) = control_result {
+        let control_text = format!(
+            "== matched steady-feed control (same seed/config) ==\n{}",
+            cap_text(&control_result)
+        );
+        let control_tag = format!("{}_n{n}_control", o.layout.name());
+        write(&o.out.join(format!("cap_{control_tag}.txt")), &control_text)?;
+        write(
+            &o.out.join(format!("cap_{control_tag}.kv")),
+            &cap_kv(&control_result).render(),
+        )?;
+        write(
+            &o.out.join(format!("seconds_{control_tag}.csv")),
+            &seconds_csv(&control_result),
+        )?;
+        print!("{control_text}");
+    }
+    let text = format!(
+        "{}{}",
+        if o.adsb_dropout_s.is_some() {
+            "== ADS-B dropout run ==\n"
+        } else {
+            ""
+        },
+        cap_text(&r)
+    );
     print!("{text}");
-    let t = tag(o, n);
+    let t = if o.adsb_dropout_s.is_some() {
+        format!("{}_n{n}_dropout", o.layout.name())
+    } else {
+        tag(o, n)
+    };
     write(&o.out.join(format!("cap_{t}.txt")), &text)?;
     write(&o.out.join(format!("cap_{t}.kv")), &cap_kv(&r).render())?;
     write(&o.out.join(format!("seconds_{t}.csv")), &seconds_csv(&r))

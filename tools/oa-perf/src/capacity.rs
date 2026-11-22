@@ -8,7 +8,7 @@
 //! plot or report reaches the output at the advance that ends its second: between 0 and 1 s of
 //! traffic time after its own time, which the run records as the input-to-effect delay.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Instant;
 
 use oa_track::fusion::{
@@ -45,6 +45,8 @@ pub struct CapCfg {
     /// if more than thirty times (it is far past the knee and the rest would only take long to
     /// say so).
     pub early_stop: bool,
+    /// Optional measured-window ADS-B outage, in seconds, beginning at the warm-up boundary.
+    pub adsb_dropout_s: Option<i64>,
 }
 
 /// What a capacity run measured.
@@ -104,6 +106,14 @@ pub struct CapResult {
     pub offered_aircraft_expected: usize,
     /// Offered ADS-B addresses or plot labels absent from the generated truth address map.
     pub unknown_input_labels: u64,
+    /// ADS-B reports withheld by the opt-in outage, counted from generated reports.
+    pub adsb_dropout_reports: u64,
+    pub adsb_dropout_s: Option<i64>,
+    /// Warm address-bearing cohort size and fresh-row coverage in each measured second.
+    pub continuity_cohort: usize,
+    pub continuity_noncoast: Vec<(i64, Option<usize>)>,
+    /// Exact confirmed ADS-B addresses in the warm-up cutover cohort. Used to verify paired runs.
+    pub continuity_addresses: Vec<u32>,
     pub radar_track_recs_taken: u64,
     pub bookkeeping: (usize, usize),
     pub buffers_stable: bool,
@@ -497,6 +507,35 @@ fn offered_plots(coverage: &mut OfferedCoverage, radar_plots: &[Vec<oa_track::ra
 
 /// Runs the traffic through the layer and measures it.
 pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
+    if cfg.warmup_s < 0 {
+        return Err("capacity warm-up cannot be negative".to_string());
+    }
+    if cfg.adsb_dropout_s.is_some() && cfg.warmup_s < 1 {
+        return Err(
+            "continuity mode requires at least 1 second of mixed-sensor warm-up".to_string(),
+        );
+    }
+    if cfg.measure_s < 1 {
+        return Err("capacity measurement must be at least 1 second".to_string());
+    }
+    if cfg
+        .adsb_dropout_s
+        .is_some_and(|s| s < 0 || s > cfg.measure_s)
+    {
+        return Err(
+            "ADS-B dropout duration must be between 0 and the measured duration".to_string(),
+        );
+    }
+    let total_s = cfg
+        .warmup_s
+        .checked_add(cfg.measure_s)
+        .ok_or("capacity run duration overflows")?;
+    let max_s = (oa_track::TIME_LIMIT_NS - EPOCH_NS) / NS_PER_S;
+    if total_s > max_s {
+        return Err(format!(
+            "capacity run exceeds the tracker time limit of {max_s} seconds"
+        ));
+    }
     let n = cfg.traffic.n;
     let load_start = loadavg3();
     let rss_before_kb = status_kb("VmRSS").unwrap_or(0);
@@ -508,6 +547,9 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     // OA-GEN traffic is fixed truth: prebuild the bounded address index and coverage bits before
     // any core timing. Multiple radar labels for one aircraft intentionally count once.
     let mut offered = offered_new(traffic.aircraft());
+    let mut adsb_dropout_reports = 0u64;
+    let mut continuity_cohort = BTreeSet::<u32>::new();
+    let mut continuity_noncoast = Vec::new();
     let rss_after_new_kb = status_kb("VmRSS").unwrap_or(0);
     let mut out = output_new(base.out_capacity);
     let buffers0 = fusion_buffers(&f);
@@ -526,7 +568,6 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let mut seconds = Vec::new();
     let (mut wall_measured, mut wall_total) = (0.0f64, 0.0f64);
     let (mut sum_adsb, mut sum_plots, mut sum_rows) = (0usize, 0usize, 0usize);
-    let total_s = cfg.warmup_s.saturating_add(cfg.measure_s);
     let started = Instant::now();
     let (mut truncated, mut stopped_early) = (false, false);
     let mut measure_done = 0i64;
@@ -542,11 +583,19 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         adsb.clear();
         traffic.adsb_window(k, &mut adsb);
         traffic.plot_windows(k, &mut plots);
+        let dropout = cfg
+            .adsb_dropout_s
+            .is_some_and(|duration| k >= cfg.warmup_s && k < cfg.warmup_s.saturating_add(duration));
+        if dropout {
+            adsb_dropout_reports = adsb_dropout_reports.saturating_add(adsb.len() as u64);
+            adsb.clear();
+        }
         if measured {
             offered_adsb(&mut offered, &adsb);
             offered_plots(&mut offered, &plots);
         }
         let until = EPOCH_NS.saturating_add((k + 1).saturating_mul(NS_PER_S));
+        let overflow_before = out.overflow;
         if measured {
             snapshot(&f, &mut before);
         }
@@ -566,6 +615,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             adv_ms.push(ms);
             measure_done += 1;
             snapshot(&f, &mut after);
+            let mut fresh_seen = BTreeSet::<u32>::new();
             for m in &adsb {
                 h_da.add((until - m.toa_ns) as f64 * 1.0e-6);
             }
@@ -579,6 +629,12 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
                 else {
                     continue;
                 };
+                if cfg.adsb_dropout_s.is_some()
+                    && continuity_cohort.contains(&key)
+                    && fl & oa_track::O_COAST == 0
+                {
+                    fresh_seen.insert(key);
+                }
                 if fl & (O_TICK | O_COAST) == 0 {
                     h_upd.add(0.0);
                     continue;
@@ -606,6 +662,12 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
                     }
                 }
             }
+            if cfg.adsb_dropout_s.is_some() {
+                continuity_noncoast.push((
+                    k,
+                    (out.overflow == overflow_before).then_some(fresh_seen.len()),
+                ));
+            }
             seconds.push((k, ms, adsb.len(), n_plots, rows));
             sum_adsb += adsb.len();
             sum_plots += n_plots;
@@ -617,6 +679,19 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         if k + 1 == cfg.warmup_s {
             rss_warm_kb = status_kb("VmRSS").unwrap_or(0);
             warm = (*fusion_stats(&f), *fusion_tracker_stats(&f), out.overflow);
+            if cfg.adsb_dropout_s.is_some() {
+                let equipped: BTreeSet<u32> = traffic
+                    .aircraft()
+                    .iter()
+                    .filter(|a| a.adsb)
+                    .map(|a| a.addr)
+                    .collect();
+                for (key, _) in tracker_live_iter(fusion_tracker(&f)) {
+                    if equipped.contains(&key) {
+                        continuity_cohort.insert(key);
+                    }
+                }
+            }
         }
         if cfg.early_stop
             && ((k >= 14 && wall_total > 2.0 * (k + 1) as f64)
@@ -679,6 +754,11 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         offered_aircraft_unique: offered.unique,
         offered_aircraft_expected: n,
         unknown_input_labels: offered.unknown,
+        adsb_dropout_reports,
+        adsb_dropout_s: cfg.adsb_dropout_s,
+        continuity_cohort: continuity_cohort.len(),
+        continuity_noncoast,
+        continuity_addresses: continuity_cohort.into_iter().collect(),
         radar_track_recs_taken: recs_taken,
         bookkeeping: fusion_bookkeeping_len(&f),
         buffers_stable: fusion_buffers(&f) == buffers0,
@@ -721,6 +801,24 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     kv.put("adsb_per_s", fmt_f(r.adsb_per_s));
     kv.put("plots_per_s", fmt_f(r.plots_per_s));
     kv.put("rows_per_s", fmt_f(r.rows_per_s));
+    if let Some(s) = r.adsb_dropout_s {
+        kv.put("adsb_dropout_reports", r.adsb_dropout_reports);
+        kv.put("adsb_dropout_start_s", r.warmup_s);
+        kv.put("adsb_dropout_duration_s", s);
+        kv.put("continuity_cohort", r.continuity_cohort);
+        if r.continuity_cohort > 0 {
+            if let Some(noncoast) = r.continuity_noncoast.iter().filter_map(|(_, n)| *n).min() {
+                kv.put("continuity_noncoast_min", noncoast);
+            }
+        }
+        kv.put(
+            "continuity_uncertain_seconds",
+            r.continuity_noncoast
+                .iter()
+                .filter(|(_, n)| n.is_none())
+                .count(),
+        );
+    }
     kv.put("age_unknown_rows", r.age_unknown);
     kv.put_dist("age_tick_rows", "ms", &r.age_tick_ms);
     kv.put_dist("age_tick_adsb_keys", "ms", &r.age_tick_adsb_ms);
@@ -765,9 +863,29 @@ pub fn cap_kv(r: &CapResult) -> Kv {
 
 /// The per-second table of the measured seconds, as CSV.
 pub fn seconds_csv(r: &CapResult) -> String {
-    let mut s = String::from("second,wall_ms,adsb_offered,plots_offered,rows_emitted\n");
-    for (k, ms, a, p, rows) in &r.seconds {
-        s.push_str(&format!("{k},{ms:.3},{a},{p},{rows}\n"));
+    if r.continuity_noncoast.is_empty() {
+        let mut s = String::from("second,wall_ms,adsb_offered,plots_offered,rows_emitted\n");
+        for (k, ms, a, p, rows) in &r.seconds {
+            s.push_str(&format!("{k},{ms:.3},{a},{p},{rows}\n"));
+        }
+        return s;
+    }
+    let mut s = String::from(
+        "second,wall_ms,adsb_offered,plots_offered,rows_emitted,cohort_noncoast,cohort_missing\n",
+    );
+    for ((k, ms, a, p, rows), (_, count)) in r.seconds.iter().zip(&r.continuity_noncoast) {
+        match count {
+            Some(noncoast) if r.continuity_cohort > 0 => s.push_str(&format!(
+                "{k},{ms:.3},{a},{p},{rows},{noncoast},{}\n",
+                r.continuity_cohort.saturating_sub(*noncoast)
+            )),
+            Some(_) => s.push_str(&format!(
+                "{k},{ms:.3},{a},{p},{rows},,empty-cutover-cohort\n"
+            )),
+            None => s.push_str(&format!(
+                "{k},{ms:.3},{a},{p},{rows},,uncertain-output-overflow\n"
+            )),
+        }
     }
     s
 }
@@ -882,6 +1000,51 @@ pub fn cap_text(r: &CapResult) -> String {
         "  measured input truth coverage: {}/{} unique aircraft offered; unknown labels {}\n",
         r.offered_aircraft_unique, r.offered_aircraft_expected, r.unknown_input_labels
     ));
+    if let Some(dropout_s) = r.adsb_dropout_s {
+        let min_noncoast = r.continuity_noncoast.iter().filter_map(|(_, n)| *n).min();
+        let uncertain = r
+            .continuity_noncoast
+            .iter()
+            .filter(|(_, n)| n.is_none())
+            .count();
+        let mode = if dropout_s == 0 {
+            "steady-feed continuity control"
+        } else {
+            "ADS-B outage"
+        };
+        let interval = if dropout_s == 0 {
+            format!(
+                "continuity measured through seconds {}..{}",
+                r.warmup_s,
+                r.warmup_s.saturating_add(r.measure_s_done)
+            )
+        } else {
+            format!(
+                "measured seconds {}..{} ({}s)",
+                r.warmup_s,
+                r.warmup_s.saturating_add(dropout_s),
+                dropout_s
+            )
+        };
+        let coverage = if r.continuity_cohort == 0 {
+            "empty cutover cohort (zero denominator); missing count unavailable".to_string()
+        } else {
+            min_noncoast.map_or_else(
+                || "no complete-output seconds; cohort missing count unavailable".to_string(),
+                |count| {
+                    format!(
+                        "minimum {count}/{} non-coasting rows in complete-output seconds ({} missing at minimum)",
+                        r.continuity_cohort,
+                        r.continuity_cohort.saturating_sub(count)
+                    )
+                },
+            )
+        };
+        s.push_str(&format!(
+            "  {mode}: {interval}, withheld {} generated ADS-B reports; cutover cohort of {} confirmed address-bearing ADS-B tracks: {coverage}; {} seconds uncertain due to output overflow. Non-coasting tracker rows are a continuity proxy, not a sensor freshness test; anonymous radar tracks are excluded.\n",
+            r.adsb_dropout_reports, r.continuity_cohort, uncertain
+        ));
+    }
     let moved: Vec<String> = r
         .loss()
         .into_iter()
@@ -1016,7 +1179,48 @@ mod tests {
             max_tracks: 4096,
             max_wall_s: 120.0,
             early_stop: false,
+            adsb_dropout_s: None,
         }
+    }
+
+    #[test]
+    fn paired_dropout_keeps_the_same_confirmed_cutover_roster_and_radar_schedule() {
+        let mut control_cfg = small(60, 5, 6);
+        control_cfg.adsb_dropout_s = Some(0);
+        let control = run_capacity(&control_cfg).unwrap();
+        let mut outage_cfg = control_cfg.clone();
+        outage_cfg.adsb_dropout_s = Some(2);
+        let outage = run_capacity(&outage_cfg).unwrap();
+
+        assert!(!control.continuity_addresses.is_empty());
+        assert_eq!(control.continuity_addresses, outage.continuity_addresses);
+        assert_eq!(
+            control.continuity_cohort,
+            control.continuity_addresses.len()
+        );
+        assert_eq!(control.continuity_noncoast.len(), 6);
+        assert_eq!(outage.continuity_noncoast.len(), 6);
+        assert_eq!(control.adsb_dropout_reports, 0);
+        assert_eq!(
+            outage.adsb_dropout_reports,
+            (outage.adsb_aircraft * 2) as u64
+        );
+        for (control_sec, outage_sec) in control.seconds.iter().zip(&outage.seconds) {
+            assert_eq!(control_sec.0, outage_sec.0);
+            assert_eq!(control_sec.3, outage_sec.3, "radar schedule changed");
+        }
+        assert!(outage.seconds[0].2 == 0 && outage.seconds[1].2 == 0);
+        assert!(outage.seconds[2].2 > 0 && outage.seconds[3].2 > 0);
+    }
+
+    #[test]
+    fn dropout_mode_requires_a_positive_warmup_and_bounded_interval() {
+        let mut cfg = small(20, 0, 4);
+        cfg.adsb_dropout_s = Some(0);
+        assert!(run_capacity(&cfg).is_err());
+        cfg = small(20, 2, 4);
+        cfg.adsb_dropout_s = Some(5);
+        assert!(run_capacity(&cfg).is_err());
     }
 
     // REQ: OA-PRF-012
