@@ -163,6 +163,12 @@ checkpoint output, and emits the final summary only if the prefix matches and th
 run is complete. It does not establish peer identity, authority, or equivalence under other
 settings.
 
+`oa-replay --verify-end <frames> <input-sha256> <state-sha256>` also pins the terminal
+boundary. Supply the count and both digests from an independently retained, complete run
+of the intended recording under the same settings. A cleanly omitted or appended segment
+changes the observed count or input digest and withholds the summary. This flag can run on
+its own or with `--verify-prefix` to check both a recovery boundary and the expected tail.
+
 The input hash determines how a disagreement between peer checkpoints is classified.
 
 - **Different inputs:** a data-path fault (loss, delay beyond the window, a feed problem). The

@@ -75,6 +75,7 @@ fn command_line_gives_each_file_its_feed_kind_and_validates_numbers() {
     assert_eq!((c.chunk, c.quiet), (DEFAULT_CHUNK, false));
     assert!(!c.input_fingerprint);
     assert!(c.verify_prefix.is_none());
+    assert!(c.verify_end.is_none());
     assert!(
         parse_args(&args(&["--sfdps", "x", "--input-fingerprint"]))
             .unwrap()
@@ -195,6 +196,7 @@ fn fingerprint_witness(err: &str, out: &str) -> (u64, String, String) {
     (frames, input, state)
 }
 
+// REQ: OA-RPL-277
 #[test]
 fn verify_prefix_gates_stdout_on_both_digests_and_complete_suffix() {
     let dir = scratch("verify-prefix");
@@ -283,6 +285,113 @@ fn verify_prefix_gates_stdout_on_both_digests_and_complete_suffix() {
     assert!(out.is_empty());
     assert!(err.contains("prefix verification refused"), "{err}");
     assert!(err.contains("sealed-window rows dropped: 1"), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// REQ: OA-RPL-277
+#[test]
+fn verify_end_accepts_the_complete_recording_and_refuses_a_clean_truncation() {
+    let dir = scratch("verify-end");
+    let first_path = dir.join("first.oaf");
+    let full_path = dir.join("full.oaf");
+    let changed_path = dir.join("changed.oaf");
+    let t0 = DAY * 1_000_000;
+    let first = frame(1, 0, t0, sf_doc(&[sf(71, 0).status("ACTIVE")]).as_bytes());
+    let second = |gufi| {
+        frame(
+            1,
+            1,
+            t0 + NS,
+            sf_doc(&[sf(gufi, 1_000).status("ACTIVE")]).as_bytes(),
+        )
+    };
+    std::fs::write(&first_path, &first).unwrap();
+    std::fs::write(&full_path, [first.as_slice(), &second(71)].concat()).unwrap();
+    std::fs::write(&changed_path, [first.as_slice(), &second(72)].concat()).unwrap();
+
+    let witness = |path: &std::path::Path| {
+        let (code, out, err) = run_bin(&[
+            "--quiet",
+            "--input-fingerprint",
+            "--sfdps",
+            path.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "{err}");
+        assert!(err.contains("status=complete"), "{err}");
+        (fingerprint_witness(&err, &out), out)
+    };
+    let ((prefix_frames, prefix_input, prefix_state), _) = witness(&first_path);
+    let ((end_frames, end_input, end_state), normal_out) = witness(&full_path);
+    assert_eq!((prefix_frames, end_frames), (1, 2));
+    let prefix_frames = prefix_frames.to_string();
+    let end_frames = end_frames.to_string();
+    let prefix = [
+        "--verify-prefix",
+        &prefix_frames,
+        &prefix_input,
+        &prefix_state,
+    ];
+    let end = ["--verify-end", &end_frames, &end_input, &end_state];
+    let verify = |mode: &[&str], path: &std::path::Path| {
+        let args = [mode, &["--sfdps", path.to_str().unwrap()]].concat();
+        run_bin(&args)
+    };
+
+    let (code, out, err) = verify(&end, &full_path);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(stable(&out), stable(&normal_out));
+    assert!(err.contains("verified replay end frames=2"), "{err}");
+
+    let both = [prefix.as_slice(), end.as_slice()].concat();
+    let (code, out, err) = verify(&both, &full_path);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(stable(&out), stable(&normal_out));
+    assert!(err.contains("verified replay prefix frames=1"), "{err}");
+    assert!(err.contains("verified replay end frames=2"), "{err}");
+
+    let (code, _, err) = verify(&prefix, &first_path);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = verify(&both, &first_path);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.is_empty());
+    assert!(
+        err.contains("expected 2 admitted frames, observed 1"),
+        "{err}"
+    );
+
+    let short_end = ["--verify-end", &prefix_frames, &prefix_input, &prefix_state];
+    let (code, out, err) = verify(&short_end, &full_path);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.is_empty());
+    assert!(
+        err.contains("expected 1 admitted frames, observed 2"),
+        "{err}"
+    );
+
+    let longer_prefix = ["--verify-prefix", &end_frames, &end_input, &end_state];
+    let invalid_order = [longer_prefix.as_slice(), short_end.as_slice()].concat();
+    let (code, out, err) = verify(&invalid_order, &full_path);
+    assert_eq!(code, 2, "{err}");
+    assert!(out.is_empty());
+    assert!(err.contains("frame count exceeds --verify-end"), "{err}");
+
+    let (code, out, err) = verify(&both, &changed_path);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.is_empty());
+    assert!(
+        err.contains("terminal verification refused: ordered-input digest mismatch"),
+        "{err}"
+    );
+
+    let wrong_state = ["--verify-end", &end_frames, &end_input, &"0".repeat(64)];
+    let (code, out, err) = verify(&wrong_state, &full_path);
+    assert_eq!(code, 1, "{err}");
+    assert!(out.is_empty());
+    assert!(
+        err.contains("terminal verification refused: replay-state digest mismatch"),
+        "{err}"
+    );
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 

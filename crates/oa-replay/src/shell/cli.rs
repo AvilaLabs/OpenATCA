@@ -6,6 +6,7 @@
 //!           [--active-age-secs <n>] [--proposed-age-secs <n>] [--terminal-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] [--chunk-bytes <n>] [--progress-minutes <n>]
 //!           [--quiet] [--input-fingerprint]
 //!           [--verify-prefix <frames> <input-sha256> <state-sha256>]
+//!           [--verify-end <frames> <input-sha256> <state-sha256>]
 //! ```
 //!
 //! Each file is `.oaf` or `.oaf.gz` (told apart by its first bytes) and is given a feed kind by
@@ -52,26 +53,33 @@ pub struct Command {
     pub input_fingerprint: bool,
     /// Expected ordered-input and replay-state digest at a prefix boundary.
     pub verify_prefix: Option<PrefixWitness>,
+    /// Expected frame count and digests at the end of the recording.
+    pub verify_end: Option<ReplayWitness>,
 }
 
-/// Explicit prefix witness used only by the offline CLI verification mode.
+/// Explicit witness for an admitted-frame boundary in offline replay.
+// A7.2: cold struct, at most two per invocation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PrefixWitness {
+pub struct ReplayWitness {
     /// Number of admitted pipeline frames at which the witness applies.
     pub frames: u64,
-    /// Ordered-input digest from a complete prefix-only fingerprint run.
+    /// Ordered-input digest from a complete fingerprint run ending at this boundary.
     pub input_digest: Digest,
-    /// Full replay-state digest from that same prefix-only run.
+    /// Full replay-state digest from that same fingerprint run.
     pub state_digest: Digest,
 }
+
+/// A witness for the prefix boundary of a longer recording.
+pub type PrefixWitness = ReplayWitness;
 
 /// The usage text.
 pub const USAGE: &str = "usage: oa-replay (--sfdps|--tbfm|--tfms|--fns|--adsb <file> | \
 --sfdps-dir|--tbfm-dir|--tfms-dir|--fns-dir|--adsb-dir <dir>)... \
 [--checkpoint-secs <n>] [--max-age-secs <n>] [--active-age-secs <n>] [--proposed-age-secs <n>] \
 [--terminal-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] \
-[--chunk-bytes <n>] [--progress-minutes <n>] [--quiet] [--input-fingerprint] \\
-[--verify-prefix <frames> <input-sha256> <state-sha256>]";
+[--chunk-bytes <n>] [--progress-minutes <n>] [--quiet] [--input-fingerprint] \
+[--verify-prefix <frames> <input-sha256> <state-sha256>] \
+[--verify-end <frames> <input-sha256> <state-sha256>]";
 
 fn digest(flag: &str, v: Option<&String>) -> Result<Digest, String> {
     let value = v.ok_or_else(|| format!("missing value for {flag}"))?;
@@ -105,6 +113,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut quiet = false;
     let mut input_fingerprint = false;
     let mut verify_prefix = None;
+    let mut verify_end = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -167,14 +176,19 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             }
             "--quiet" => quiet = true,
             "--input-fingerprint" => input_fingerprint = true,
-            "--verify-prefix" => {
-                if verify_prefix.is_some() {
-                    return Err("--verify-prefix may be supplied once".into());
+            "--verify-prefix" | "--verify-end" => {
+                let slot = if a == "--verify-prefix" {
+                    &mut verify_prefix
+                } else {
+                    &mut verify_end
+                };
+                if slot.is_some() {
+                    return Err(format!("{a} may be supplied once"));
                 }
                 let frames = number(a, it.next())?;
-                let input_digest = digest("--verify-prefix input digest", it.next())?;
-                let state_digest = digest("--verify-prefix state digest", it.next())?;
-                verify_prefix = Some(PrefixWitness {
+                let input_digest = digest(&format!("{a} input digest"), it.next())?;
+                let state_digest = digest(&format!("{a} state digest"), it.next())?;
+                *slot = Some(ReplayWitness {
                     frames,
                     input_digest,
                     state_digest,
@@ -186,6 +200,11 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     if inputs.is_empty() {
         return Err("no recordings given".to_string());
     }
+    if let (Some(prefix), Some(end)) = (verify_prefix, verify_end) {
+        if prefix.frames > end.frames {
+            return Err("--verify-prefix frame count exceeds --verify-end frame count".into());
+        }
+    }
     Ok(Command {
         inputs,
         progress_ns,
@@ -194,6 +213,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         quiet,
         input_fingerprint,
         verify_prefix,
+        verify_end,
     })
 }
 

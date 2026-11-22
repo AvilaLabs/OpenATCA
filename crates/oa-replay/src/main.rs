@@ -6,8 +6,7 @@
 //! Every line except the one starting `timing` is a function of the recordings and the settings
 //! alone, so two runs over the same files print identical text there (RULESET B6). Exit status:
 //! 0 after a complete replay (failures inside the data are counted in the summary, not fatal),
-//! 1 if a file cannot be read or stdout cannot be written (the run stops at the failed write, with
-//! one line on stderr), 2 for a usage error.
+//! 1 on a read, stdout write, or replay verification failure, 2 for a usage error.
 
 use std::cell::RefCell;
 use std::process::ExitCode;
@@ -31,7 +30,13 @@ fn main() -> ExitCode {
         }
     };
     let verify_prefix = cmd.verify_prefix;
-    let verify_mode = verify_prefix.is_some();
+    let verify_end = cmd.verify_end;
+    let verify_mode = verify_prefix.is_some() || verify_end.is_some();
+    let verification = match (verify_prefix.is_some(), verify_end.is_some()) {
+        (true, true) => "prefix and terminal",
+        (true, false) => "prefix",
+        _ => "terminal",
+    };
     let fingerprint_enabled = cmd.input_fingerprint || verify_mode;
     let input_fingerprint = RefCell::new(fingerprint_enabled.then(InputFingerprint::default));
     // Every input path is checked, as given and resolved, before anything is opened.
@@ -158,7 +163,7 @@ fn main() -> ExitCode {
         Ok(r) => r,
         Err(e) => {
             if verify_mode {
-                eprintln!("oa-replay: prefix verification refused: {e}");
+                eprintln!("oa-replay: {verification} verification refused: {e}");
                 return ExitCode::from(1);
             }
             if let Some(fingerprint) = &input_fingerprint {
@@ -189,28 +194,48 @@ fn main() -> ExitCode {
             || p.rows_refused_full.iter().any(|&n| n != 0);
         (source_rejected, semantic_errors, partial)
     });
-    if let Some(witness) = verify_prefix {
-        if !prefix_verified {
-            eprintln!(
-                "oa-replay: prefix verification refused: expected frame boundary {} was not reached (observed {})",
-                witness.frames,
-                input_fingerprint.as_ref().map_or(0, InputFingerprint::frames)
-            );
-            return ExitCode::from(1);
-        }
-        if input_fingerprint
+    if let Some(witness) = verify_prefix.filter(|_| !prefix_verified) {
+        eprintln!(
+            "oa-replay: prefix verification refused: expected frame boundary {} was not reached (observed {})",
+            witness.frames,
+            input_fingerprint.as_ref().map_or(0, InputFingerprint::frames)
+        );
+        return ExitCode::from(1);
+    }
+    if verify_mode {
+        let Some((observed_frames, observed_input)) = input_fingerprint
             .as_ref()
-            .and_then(InputFingerprint::finalize)
-            .is_none()
-        {
+            .and_then(|fingerprint| Some((fingerprint.frames(), fingerprint.finalize()?)))
+        else {
             eprintln!(
-                "oa-replay: prefix verification refused: full ordered-input digest unavailable"
+                "oa-replay: {verification} verification refused: full ordered-input digest unavailable"
+            );
+            return ExitCode::from(1);
+        };
+        if fingerprint_quality.is_none_or(|(_, _, partial)| partial) {
+            eprintln!(
+                "oa-replay: {verification} verification refused: replay is partial or incomplete"
             );
             return ExitCode::from(1);
         }
-        if fingerprint_quality.is_none_or(|(_, _, partial)| partial) {
-            eprintln!("oa-replay: prefix verification refused: replay is partial or incomplete");
-            return ExitCode::from(1);
+        if let Some(witness) = verify_end {
+            if observed_frames != witness.frames {
+                eprintln!(
+                    "oa-replay: terminal verification refused: expected {} admitted frames, observed {observed_frames}",
+                    witness.frames
+                );
+                return ExitCode::from(1);
+            }
+            if observed_input != witness.input_digest {
+                eprintln!(
+                    "oa-replay: terminal verification refused: ordered-input digest mismatch"
+                );
+                return ExitCode::from(1);
+            }
+            if replay_state_digest(&p) != witness.state_digest {
+                eprintln!("oa-replay: terminal verification refused: replay-state digest mismatch");
+                return ExitCode::from(1);
+            }
         }
     }
     let elapsed = t0.elapsed();
@@ -244,6 +269,9 @@ fn main() -> ExitCode {
     }
     if let Some(witness) = verify_prefix {
         eprintln!("verified replay prefix frames={}", witness.frames);
+    }
+    if let Some(witness) = verify_end {
+        eprintln!("verified replay end frames={}", witness.frames);
     }
     ExitCode::SUCCESS
 }

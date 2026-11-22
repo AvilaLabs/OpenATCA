@@ -1589,12 +1589,17 @@ deterministic flight state comes out.
 - **OA-RPL-023** The `oa-replay` command line gives each file the feed kind of the flag that
   names it, sets the checkpoint spacing, age limit, sweep spacing and capacity, and rejects
   missing, zero, non-numeric and unknown arguments.
-- **OA-RPL-024** The `oa-replay` binary prints the checkpoints and a final summary (frames and
+- **OA-RPL-024** In normal mode the `oa-replay` binary prints the checkpoints and a final summary (frames and
   rows per feed, TBFM linking, table totals, errors by kind, flights live and the final state
   hash); checkpoints are printed as they are recorded; a progress line (replay time, frames per
   second, replay-time to wall-time ratio, resident memory) goes to stderr every N minutes of
   replay time (default 10); every stdout line except the `timing` line is identical from run to
   run, whatever the flag order or read size; exit status is 2 for usage errors and 1 for an unreadable file.
+- **OA-RPL-277** Opt-in offline replay verification takes a positive admitted-frame count, an
+  ordered-input digest and a replay-state digest from an independent witness. The prefix flag
+  checks its exact admitted-frame boundary. The terminal flag checks the final count and both
+  digests, including when a recording ends cleanly at the wrong boundary. Either flag suppresses
+  intermediate checkpoints and withholds the final summary on a mismatch or a partial replay.
 - **OA-RPL-025** Replaying the real SCDS recordings under `OPENATCA_REC` (SFDPS and TBFM) twice
   and with another read size gives identical checkpoints and the same final state hash, with no
   frame, gzip or clock error and TBFM rows linked to SFDPS flights (skipped if unset). The final
