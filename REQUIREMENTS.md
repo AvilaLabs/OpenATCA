@@ -1601,6 +1601,8 @@ deterministic flight state comes out.
   digests, including when a recording ends cleanly at the wrong boundary. Either flag suppresses
   intermediate checkpoints and withholds the final summary on a mismatch or a partial replay.
   A bridge `REJECT` marker is counted and makes the replay partial.
+  The optional settings precondition verifies a separate versioned digest of the effective
+  replay settings and ordered logical feed streams before any recording path is used.
 - **OA-RPL-025** Replaying the real SCDS recordings under `OPENATCA_REC` (SFDPS and TBFM) twice
   and with another read size gives identical checkpoints and the same final state hash, with no
   frame, gzip or clock error and TBFM rows linked to SFDPS flights (skipped if unset). The final

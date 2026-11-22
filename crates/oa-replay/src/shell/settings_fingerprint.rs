@@ -83,6 +83,7 @@ mod tests {
     use super::{settings_fingerprint, FeedKind, Input, PipelineConfig};
     use std::path::PathBuf;
 
+    // REQ: OA-RPL-277
     #[test]
     fn ordered_logical_streams_are_bound_independently_of_paths_and_rotation() {
         let config = PipelineConfig::default();

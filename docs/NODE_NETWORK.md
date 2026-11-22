@@ -156,11 +156,10 @@ difference. Peer authentication and complete delivery require separate evidence.
 
 `--input-fingerprint` and witness modes also report a separate `settings_fingerprint` line. Its
 versioned SHA-256 encoding covers every effective `PipelineConfig` and `TableConfig` field and the
-ordered logical feed stream kinds and count. It excludes paths, build identity, read chunk size and
-output controls. Supplying `--verify-settings <settings-sha256>` with either witness mode makes the
-digest a precondition checked before any recording path is inspected or opened; a mismatch
-refuses the witness before stdout. This binds only the selected replay settings and feed grouping.
-It is not a build identity, witness authentication, authority, or completeness claim.
+ordered logical feed stream kinds and count. Supplying `--verify-settings <settings-sha256>` with
+either witness mode checks this precondition before opening a recording. A mismatch withholds
+the summary. The same logical streams keep their settings digest when paths, read chunk size
+or output controls change. Verify build identity and witness provenance separately.
 
 The opt-in offline `oa-replay --verify-prefix <frames> <input-sha256> <state-sha256>` gate accepts
 only when both digests match at the exact admitted-frame boundary. Supply the frame count and
