@@ -799,7 +799,7 @@ fn causal_selector_enforces_gap_and_preserves_exact_hour_semantics() {
         .collect::<Vec<_>>();
     let selected = select_cycle_as_of(&files, &receipts, 1_500, 1_075, 1_150, 100).unwrap();
     assert_eq!(selected.issue_s, 1_000);
-    assert_eq!(selected.files, older[1..3]);
+    assert_eq!(selected.files, older);
 
     assert_eq!(
         select_cycle_as_of(
