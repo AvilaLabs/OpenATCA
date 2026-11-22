@@ -43,6 +43,7 @@ fn empty_finding() -> MonitorFinding {
     }
 }
 
+// REQ: OA-SAF-020
 #[test]
 fn synthetic_mutations_separate_detected_missed_and_unavailable_evidence() {
     let mut inputs = [
@@ -122,7 +123,6 @@ fn synthetic_mutations_separate_detected_missed_and_unavailable_evidence() {
         MonitorStatus::FutureTimestamp,
         MonitorStatus::DuplicateEvidence,
         MonitorStatus::DuplicateEvidence,
-        MonitorStatus::Healthy,
         MonitorStatus::InvalidEvidence,
         MonitorStatus::MissingBoth,
         MonitorStatus::StaleClaim,
@@ -131,6 +131,7 @@ fn synthetic_mutations_separate_detected_missed_and_unavailable_evidence() {
         MonitorStatus::FutureTimestamp,
         MonitorStatus::DuplicateEvidence,
         MonitorStatus::DuplicateEvidence,
+        MonitorStatus::Healthy,
     ];
     for (finding, status) in findings.iter().zip(expected) {
         assert_eq!(finding.status, status);
@@ -145,6 +146,7 @@ fn synthetic_mutations_separate_detected_missed_and_unavailable_evidence() {
     assert_eq!((caught, missed, caught + missed), (2, 1, 3));
 }
 
+// REQ: OA-SAF-020
 #[test]
 fn caller_owned_bounds_fail_before_any_finding_is_written() {
     let inputs = [pair(1), pair(2)];
@@ -169,6 +171,7 @@ fn caller_owned_bounds_fail_before_any_finding_is_written() {
     );
 }
 
+// REQ: OA-SAF-020
 #[test]
 fn unrepresentable_motion_envelope_is_not_reported_healthy() {
     let mut input = [pair(20)];

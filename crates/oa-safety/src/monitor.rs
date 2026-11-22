@@ -255,7 +255,7 @@ fn check_pair(
     if pair.reference_north_mm.abs_diff(pair.claim_north_mm) > horizontal_bound {
         finding.violations |= VIOLATION_NORTH;
     }
-    if pair.reference_alt_ft.abs_diff(pair.claim_alt_ft) > vertical_bound {
+    if u64::from(pair.reference_alt_ft.abs_diff(pair.claim_alt_ft)) > vertical_bound {
         finding.violations |= VIOLATION_ALTITUDE;
     }
     finding.status = if finding.violations == 0 {

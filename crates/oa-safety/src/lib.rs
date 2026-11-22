@@ -14,7 +14,8 @@
 //!
 //! No function allocates: every table is a fixed array whose capacity is a named constant with
 //! its reasoning beside it (C1, C2), and no function panics on any input. Times are signed
-//! nanoseconds (the unit of `oa-replay`'s clock), positions 1e-7 degrees, altitudes feet.
+//! nanoseconds (the unit of `oa-replay`'s clock) and altitudes are in feet. Inhibitions use
+//! positions in 1e-7 degrees. The monitor takes local-plane positions in millimetres.
 
 // The width of `usize` is fixed by construction: no 32-bit build of the core (B10).
 #[cfg(not(target_pointer_width = "64"))]

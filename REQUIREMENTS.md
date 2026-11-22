@@ -5661,6 +5661,10 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   area exactly at the extent is accepted, one unit more is not.
 - **OA-SAF-019** Suppressions lost to a full log mark the net degraded (`SuppressionLogFull`, with
   the count) until the log is cleared; the total lost stays counted.
+- **OA-SAF-020** The independent offline track monitor checks up to 128 caller-paired observations
+  and claims against an explicit clock and local-frame motion envelope. It distinguishes a
+  contradiction from missing, duplicate, stale, future, or unsupported evidence. A capacity refusal
+  leaves the output untouched. The mutation fixture reports detected and in-envelope missed changes.
 - **OA-DSP-067** A newest track update dated after now is never fresh: the banner says `PICTURE TIME
   INCONSISTENT`.
 - **OA-DSP-068** Any loss in the safety record (event log overflow, suppressions lost, expired
