@@ -43,6 +43,7 @@ flags (defaults in brackets):
   --adsb-dropout S   opt-in paired run: withhold ADS-B for S measured seconds, then resume
   --truth-score      opt-in final-snapshot truth identity summary (bounded assignment log)
   --initiation-diagnostics  opt-in per-radar initiation budget counters
+  --association-diagnostics  opt-in per-radar association outcomes and work
   --no-clip --no-overload   leave a part out
   --no-early-stop    feed the whole run even when it is far slower than real time";
 
@@ -70,6 +71,7 @@ pub struct Opts {
     pub adsb_dropout_s: Option<i64>,
     pub truth_score: bool,
     pub init_diagnostics: bool,
+    pub association_diagnostics: bool,
 }
 
 impl Default for Opts {
@@ -96,6 +98,7 @@ impl Default for Opts {
             adsb_dropout_s: None,
             truth_score: false,
             init_diagnostics: false,
+            association_diagnostics: false,
         }
     }
 }
@@ -177,6 +180,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             "--adsb-dropout" => o.adsb_dropout_s = Some(num(a, it.next())?),
             "--truth-score" => o.truth_score = true,
             "--initiation-diagnostics" => o.init_diagnostics = true,
+            "--association-diagnostics" => o.association_diagnostics = true,
             "--no-clip" => o.no_clip = true,
             "--no-overload" => o.no_overload = true,
             "--no-early-stop" => o.no_early_stop = true,
@@ -230,6 +234,7 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
         adsb_dropout_s: o.adsb_dropout_s,
         truth_score: o.truth_score,
         init_diagnostics: o.init_diagnostics,
+        association_diagnostics: o.association_diagnostics,
     })
 }
 
@@ -340,6 +345,11 @@ fn child(o: &Opts, n: usize) -> Result<Kv, String> {
         .args(["--seed", &o.seed.to_string()])
         .args(if o.init_diagnostics {
             vec!["--initiation-diagnostics"]
+        } else {
+            vec![]
+        })
+        .args(if o.association_diagnostics {
+            vec!["--association-diagnostics"]
         } else {
             vec![]
         })

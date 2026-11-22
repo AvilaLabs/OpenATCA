@@ -166,6 +166,8 @@ pub struct FusionConfig {
     pub log_assign: bool,
     /// Collect fixed-size per-radar initiation budget counters.
     pub init_diagnostics: bool,
+    /// Collect fixed-size per-radar association outcomes and work.
+    pub association_diagnostics: bool,
 }
 
 /// The design's values on a tracker configuration.
@@ -182,6 +184,7 @@ pub fn fusion_config(tracker: TrackerConfig) -> FusionConfig {
         reg_ref_slots: REG_REF_SLOTS,
         log_assign: false,
         init_diagnostics: false,
+        association_diagnostics: false,
     }
 }
 
@@ -324,6 +327,9 @@ pub struct FusionStats {
     /// Per-radar initiation budget use. Work includes all charged grid, pair, and cleanup work;
     /// it is not a wall-time measure. The fixed slots follow radar order in the configured sites.
     pub init_radar: [RadarInitStats; MAX_RADARS],
+    /// Per-radar association totals. Outcomes are gate completion, independent of assignment
+    /// verdicts. A7.2: cold diagnostic records in a fixed-size array.
+    pub association_radar: [RadarAssociationStats; MAX_RADARS],
     /// Most candidates alive at once.
     pub cands_live_max: u64,
     /// Radar-buckets that had plots to associate, and the sum and the largest of the coarse
@@ -371,6 +377,18 @@ pub struct RadarInitStats {
     pub pair_tests: u64,
     pub capped_batches: u64,
     pub refused_plots: u64,
+}
+
+/// Association totals for one configured radar. A7.2: cold diagnostic record.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RadarAssociationStats {
+    pub anonymous_offered: u64,
+    pub completed: u64,
+    pub incomplete: u64,
+    pub coarse_candidates_visited: u64,
+    pub exact_checks: u64,
+    pub accepted_pairs: u64,
+    pub capped_batches: u64,
 }
 
 /// Plot-to-key log for scoring: one row per plot applied or used to start a track. A7.2: cold
@@ -1220,6 +1238,9 @@ struct RadarAssoc {
     /// Work spent (coarse candidates visited and exact gates tested) by this radar's plots.
     work: usize,
     capped: bool,
+    coarse_visits: u64,
+    exact_checks: u64,
+    accepted_pairs: u64,
 }
 
 /// The plot the association loop of `radar` starts at in `bucket`, of `n` anonymous plots: a hash
@@ -1506,6 +1527,9 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         last_cut_short: false,
         work: 0,
         capped: false,
+        coarse_visits: 0,
+        exact_checks: 0,
+        accepted_pairs: 0,
     })
 }
 
@@ -1550,6 +1574,9 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
         budget - budget / 4
     };
     f.stats.coarse_visits += visits as u64;
+    if f.cfg.association_diagnostics {
+        ra.coarse_visits = ra.coarse_visits.saturating_add(visits as u64);
+    }
     let mut spent = visits;
     if !brute && visits < cand.len() {
         // Keep the nearest, not the lowest numbered (sorted in place: nothing is allocated).
@@ -1597,6 +1624,9 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
         };
         spent += 1;
         f.stats.pairs_tested += 1;
+        if f.cfg.association_diagnostics {
+            ra.exact_checks = ra.exact_checks.saturating_add(1);
+        }
         let pc = pair_cost(&row, &conv, p, s.alt_quantum_ft, last_ns);
         if pc.dh_gate <= GATE_H_CHI2
             && pc.dv_gate <= GATE_V_CHI2
@@ -1619,6 +1649,9 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
                 cost,
             });
             ra.infos.push(PairInfo { m, row });
+            if f.cfg.association_diagnostics {
+                ra.accepted_pairs = ra.accepted_pairs.saturating_add(1);
+            }
         }
     }
     f.cand_buf = cand;
@@ -1647,6 +1680,9 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         start,
         wrap_pairs,
         last_cut_short,
+        coarse_visits,
+        exact_checks,
+        accepted_pairs,
         ..
     } = ra;
     if let Some(slot) = f.grids.get_mut(radar) {
@@ -1669,6 +1705,22 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         let ordinal = (a + n_anon - start) % n_anon.max(1);
         ordinal >= next || (last_cut_short && ordinal + 1 == next)
     };
+    if f.cfg.association_diagnostics {
+        if let Some(d) = f.stats.association_radar.get_mut(radar) {
+            d.anonymous_offered = d.anonymous_offered.saturating_add(n_anon as u64);
+            for a in 0..n_anon {
+                if gating_incomplete(a) {
+                    d.incomplete = d.incomplete.saturating_add(1);
+                } else {
+                    d.completed = d.completed.saturating_add(1);
+                }
+            }
+            d.coarse_candidates_visited = d.coarse_candidates_visited.saturating_add(coarse_visits);
+            d.exact_checks = d.exact_checks.saturating_add(exact_checks);
+            d.accepted_pairs = d.accepted_pairs.saturating_add(accepted_pairs);
+            d.capped_batches = d.capped_batches.saturating_add(u64::from(capped));
+        }
+    }
     let solved = if f.cfg.assoc == ASSOC_GNN {
         gnn(
             &mut f.assoc,

@@ -14,7 +14,8 @@ use std::time::Instant;
 use oa_track::fusion::{
     fusion_adsb, fusion_advance, fusion_assign_log, fusion_bookkeeping_len, fusion_buffers,
     fusion_config, fusion_new, fusion_plots, fusion_stats, fusion_take_radar_tracks,
-    fusion_tracker, fusion_tracker_config, fusion_tracker_stats, FusionStats, RadarInitStats,
+    fusion_tracker, fusion_tracker_config, fusion_tracker_stats, FusionStats,
+    RadarAssociationStats, RadarInitStats,
 };
 use oa_track::fusion_params::{ASSIGN_LOG_MAX, KEY_RADAR_BASE, MAX_RADARS};
 use oa_track::fusion_score::{identify_tracks, Kind, EPOCH_NS};
@@ -51,6 +52,8 @@ pub struct CapCfg {
     pub truth_score: bool,
     /// Show per-radar initiation budget diagnostics in the report.
     pub init_diagnostics: bool,
+    /// Show per-radar anonymous association outcomes and work.
+    pub association_diagnostics: bool,
 }
 
 /// Truth-derived identity summary for final confirmed tracks. A7.2: cold report data.
@@ -81,6 +84,7 @@ pub struct CapResult {
     pub n: usize,
     pub layout: Layout,
     pub init_diagnostics: bool,
+    pub association_diagnostics: bool,
     pub adsb_aircraft: usize,
     pub half_km: f64,
     pub warmup_s: i64,
@@ -118,6 +122,8 @@ pub struct CapResult {
     pub fusion: FusionStats,
     /// Per-radar measured-window deltas, excluding warm-up.
     pub init_radar: [RadarInitStats; MAX_RADARS],
+    /// Per-radar measured-window deltas, excluding warm-up.
+    pub association_radar: [RadarAssociationStats; MAX_RADARS],
     pub tracker: TrackerStats,
     pub out_overflow: u64,
     /// The same three at the end of the warm-up: the loss counters of the measured window are the
@@ -294,7 +300,8 @@ pub const FUSION_NOT_LOSS: &[&str] = &[
     "init_tests",
     "init_work",
     "init_refusal_pass_visits",
-    "init_radar", // Diagnostic breakdown of existing counters.
+    "init_radar",        // Diagnostic breakdown of existing counters.
+    "association_radar", // Derived breakdown of association outcomes, not a separate loss verdict.
     "cands_live_max",
     "assoc_runs",
     "coarse_width_sum_m",
@@ -648,6 +655,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let mut fcfg = fusion_config(fusion_tracker_config(&base, &sites));
     fcfg.log_assign = cfg.truth_score;
     fcfg.init_diagnostics = cfg.init_diagnostics;
+    fcfg.association_diagnostics = cfg.association_diagnostics;
     let mut f = fusion_new(&fcfg, &sites).map_err(|e| e.to_string())?;
     // OA-GEN traffic is fixed truth: prebuild the bounded address index and coverage bits before
     // any core timing. Multiple radar labels for one aircraft intentionally count once.
@@ -864,10 +872,33 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             };
         }
     }
+    let mut association_radar = [RadarAssociationStats::default(); MAX_RADARS];
+    if cfg.association_diagnostics && measure_done > 0 {
+        for ((delta, now), before) in association_radar
+            .iter_mut()
+            .zip(fusion_stats(&f).association_radar)
+            .zip(warm.0.association_radar)
+        {
+            *delta = RadarAssociationStats {
+                anonymous_offered: now
+                    .anonymous_offered
+                    .saturating_sub(before.anonymous_offered),
+                completed: now.completed.saturating_sub(before.completed),
+                incomplete: now.incomplete.saturating_sub(before.incomplete),
+                coarse_candidates_visited: now
+                    .coarse_candidates_visited
+                    .saturating_sub(before.coarse_candidates_visited),
+                exact_checks: now.exact_checks.saturating_sub(before.exact_checks),
+                accepted_pairs: now.accepted_pairs.saturating_sub(before.accepted_pairs),
+                capped_batches: now.capped_batches.saturating_sub(before.capped_batches),
+            };
+        }
+    }
     Ok(CapResult {
         n,
         layout: cfg.traffic.layout,
         init_diagnostics: cfg.init_diagnostics,
+        association_diagnostics: cfg.association_diagnostics,
         adsb_aircraft: traffic.adsb_count(),
         half_km: half_km(&cfg.traffic),
         warmup_s: cfg.warmup_s,
@@ -899,6 +930,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         delay_plot_ms: h_dp.summary(),
         fusion: *fusion_stats(&f),
         init_radar,
+        association_radar,
         tracker: *fusion_tracker_stats(&f),
         out_overflow: out.overflow,
         fusion_warm: warm.0,
@@ -977,6 +1009,25 @@ pub fn cap_kv(r: &CapResult) -> Kv {
             kv.put(&format!("{prefix}pair_tests"), d.pair_tests);
             kv.put(&format!("{prefix}capped_batches"), d.capped_batches);
             kv.put(&format!("{prefix}refused_plots"), d.refused_plots);
+        }
+    }
+    if r.association_diagnostics {
+        kv.put("association_diagnostics", 1);
+        for (radar, d) in r.association_radar.iter().enumerate() {
+            if d.anonymous_offered == 0 {
+                continue;
+            }
+            let prefix = format!("association.radar{radar}.");
+            kv.put(&format!("{prefix}anonymous_offered"), d.anonymous_offered);
+            kv.put(&format!("{prefix}completed"), d.completed);
+            kv.put(&format!("{prefix}incomplete"), d.incomplete);
+            kv.put(
+                &format!("{prefix}coarse_candidates_visited"),
+                d.coarse_candidates_visited,
+            );
+            kv.put(&format!("{prefix}exact_checks"), d.exact_checks);
+            kv.put(&format!("{prefix}accepted_pairs"), d.accepted_pairs);
+            kv.put(&format!("{prefix}capped_batches"), d.capped_batches);
         }
     }
     if let Some(s) = r.adsb_dropout_s {
@@ -1304,6 +1355,19 @@ pub fn cap_text(r: &CapResult) -> String {
             ));
         }
     }
+    if r.association_diagnostics {
+        s.push_str("  per-radar anonymous association during measurement (gate completion independent of assignment):\n");
+        for (radar, d) in r.association_radar.iter().enumerate() {
+            if d.anonymous_offered == 0 {
+                continue;
+            }
+            s.push_str(&format!(
+                "    radar {radar}: {} anonymous offered, {} completed, {} incomplete, {} coarse candidates visited, {} exact checks, {} accepted pairs, {} capped batches\n",
+                d.anonymous_offered, d.completed, d.incomplete,
+                d.coarse_candidates_visited, d.exact_checks, d.accepted_pairs, d.capped_batches
+            ));
+        }
+    }
     s.push_str(&format!(
         "  buffers unchanged across the run: {}; radar-only track records handed on: {}\n",
         r.buffers_stable, r.radar_track_recs_taken
@@ -1428,7 +1492,43 @@ mod tests {
             adsb_dropout_s: None,
             truth_score: false,
             init_diagnostics: false,
+            association_diagnostics: false,
         }
+    }
+
+    #[test]
+    fn association_diagnostics_attribute_gate_outcomes_and_work_per_radar() {
+        let mut cfg = small(48, 24, 15);
+        cfg.traffic.adsb_frac = 0.0;
+        let default = run_capacity(&cfg).unwrap();
+        assert!(!default.association_diagnostics);
+        assert_eq!(cap_kv(&default).get("association_diagnostics"), None);
+
+        cfg.association_diagnostics = true;
+        let result = run_capacity(&cfg).unwrap();
+        assert_eq!(result.tracks_confirmed, default.tracks_confirmed);
+        let active = result.association_radar.iter().take(3).collect::<Vec<_>>();
+        assert!(active.iter().all(|d| d.anonymous_offered > 0));
+        assert!(active
+            .iter()
+            .all(|d| d.completed + d.incomplete == d.anonymous_offered));
+        assert_eq!(
+            result
+                .association_radar
+                .iter()
+                .map(|d| d.coarse_candidates_visited)
+                .sum::<u64>(),
+            result.fusion.coarse_visits - result.fusion_warm.coarse_visits
+        );
+        assert_eq!(
+            result
+                .association_radar
+                .iter()
+                .map(|d| d.exact_checks)
+                .sum::<u64>(),
+            result.fusion.pairs_tested - result.fusion_warm.pairs_tested
+        );
+        assert_eq!(cap_kv(&result).get("association_diagnostics"), Some("1"));
     }
 
     #[test]
