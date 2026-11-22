@@ -2669,6 +2669,210 @@ mod tests {
 
     // REQ: OA-TRK-344
     #[test]
+    fn synthetic_stale_turn_dropout_compares_model_to_straight_extrapolation() {
+        use crate::synth_truth::{self, Seg, Traj};
+        use crate::types::M_HAS_VEL;
+        use oa_geo::aeqd::{frame_new, project, unproject};
+
+        let frame = frame_new(0.0, 0.0);
+        let measurement = |path: &Traj, time_s: i64| {
+            let truth = synth_truth::state_at(path, time_s as f64);
+            // ADS-B's velocity is one second behind position through a turn. The final straight
+            // segment is an independent analytic rollout, not an output of the tracker model.
+            let vel_time_s = (time_s - 1).max(0) as f64;
+            let reported_velocity = synth_truth::state_at(path, vel_time_s);
+            let (lat, lon) = unproject(&frame, truth.e, truth.n).expect("synthetic position");
+            Measurement {
+                toa_ns: time_s * S,
+                lat_e7: (lat * 1.0e7).round() as i32,
+                lon_e7: (lon * 1.0e7).round() as i32,
+                pos_cov_m2: [25.0, 0.0, 25.0],
+                vel_cov_m2s2: [4.0, 0.0, 4.0],
+                vel_east_mps: reported_velocity.ve as f32,
+                vel_north_mps: reported_velocity.vn as f32,
+                flags: M_HAS_VEL,
+                vel_lag_s: if time_s > 0 { 1.0 } else { 0.0 },
+                sensor: 1,
+                ..blank_measurement()
+            }
+        };
+        let run_case = |path: &Traj, warm_s: i64, gap_s: i64| {
+            let c = TrackerConfig {
+                max_tracks: 2,
+                out_capacity: 1 << 12,
+                tick_ns: S,
+                expected_interval_ns: S,
+                init_interval_ns: S,
+                coast_after_intervals: 3,
+                drop_after_ns: 300 * S,
+                init_m: 1,
+                init_n: 1,
+                ..DEFAULT_CONFIG
+            };
+            let mut t = tracker_new(&c).expect("valid synthetic tracker config");
+            let mut out = output_new(c.out_capacity);
+            for time_s in 0..=warm_s {
+                tracker_update(&mut t, &measurement(path, time_s), &mut out);
+            }
+            let last = tracker_predict_checked(&t, ADDR, warm_s * S)
+                .expect("forecast at last report")
+                .0;
+            let last_ll = (
+                f64::from(last.lat_e7) / 1.0e7,
+                f64::from(last.lon_e7) / 1.0e7,
+            );
+            let last_en = project(&frame, last_ll.0, last_ll.1);
+            crate::types::output_clear(&mut out);
+            let end_s = warm_s + gap_s;
+            tracker_advance(&mut t, end_s * S, &mut out);
+
+            let truth = synth_truth::state_at(path, end_s as f64);
+            let truth_cross = |east: f64, north: f64| {
+                let error_e = east - truth.e;
+                let error_n = north - truth.n;
+                let speed = oa_math::hypot(truth.ve, truth.vn);
+                (error_e * -truth.vn + error_n * truth.ve).abs() / speed
+            };
+            let (forecast, confirmed, last_ns) = match tracker_predict_checked(&t, ADDR, end_s * S)
+            {
+                Ok((row, confirmed, last_ns)) => (Some(row), confirmed, last_ns),
+                Err(_) => (None, false, i64::MIN),
+            };
+            let tick_indices: Vec<usize> = (0..out.t_ns.len())
+                .filter(|&i| {
+                    out.addr[i] == ADDR
+                        && out.flags[i] & O_TICK != 0
+                        && out.t_ns[i] > warm_s * S
+                        && out.t_ns[i] <= end_s * S
+                })
+                .collect();
+            let coast_ticks = tick_indices
+                .iter()
+                .filter(|&&i| out.flags[i] & O_COAST != 0)
+                .count();
+            let uncertain_ticks = tick_indices
+                .iter()
+                .filter(|&&i| out.flags[i] & O_UNCERTAIN != 0)
+                .count();
+            let endpoint_tick = tick_indices
+                .iter()
+                .copied()
+                .find(|&i| out.t_ns[i] == end_s * S);
+            let forecast_error = forecast.map(|row| {
+                let lat = f64::from(row.lat_e7) / 1.0e7;
+                let lon = f64::from(row.lon_e7) / 1.0e7;
+                let (east, north) = project(&frame, lat, lon);
+                (truth_cross(east, north), r95_m(&row.pos_cov_m2))
+            });
+            let straight_e = last_en.0 + f64::from(last.vel_east_mps) * gap_s as f64;
+            let straight_n = last_en.1 + f64::from(last.vel_north_mps) * gap_s as f64;
+            let straight_cross = truth_cross(straight_e, straight_n);
+            let identities = tracker_live_iter(&t).collect::<Vec<_>>();
+            (
+                forecast_error,
+                straight_cross,
+                coast_ticks,
+                uncertain_ticks,
+                tick_indices.len(),
+                endpoint_tick.map(|i| (out.flags[i], r95_m(&out.pos_cov_m2[i]))),
+                confirmed,
+                last_ns,
+                identities,
+            )
+        };
+
+        let trajectories = [
+            (
+                "steady_turn",
+                20,
+                Traj {
+                    addr: ADDR,
+                    t0_s: 0.0,
+                    x0: 0.0,
+                    y0: 0.0,
+                    heading_deg: 0.0,
+                    speed_mps: 220.0,
+                    alt_ft: 30_000.0,
+                    segs: vec![Seg {
+                        dur_s: 100.0,
+                        turn_dps: 0.6,
+                        vrate_fpm: 0.0,
+                    }],
+                },
+            ),
+            (
+                "rollout",
+                35,
+                Traj {
+                    addr: ADDR,
+                    t0_s: 0.0,
+                    x0: 0.0,
+                    y0: 0.0,
+                    heading_deg: 0.0,
+                    speed_mps: 220.0,
+                    alt_ft: 30_000.0,
+                    segs: vec![
+                        Seg {
+                            dur_s: 30.0,
+                            turn_dps: 0.6,
+                            vrate_fpm: 0.0,
+                        },
+                        Seg {
+                            dur_s: 60.0,
+                            turn_dps: 0.0,
+                            vrate_fpm: 0.0,
+                        },
+                    ],
+                },
+            ),
+        ];
+        let mut forecasts_absent = 0;
+        let mut identities_preserved = 0;
+        println!("phase,gap_s,model_cross_m,straight_cross_m,r95_m,coast_ticks,uncertain_ticks,ticks_seen,forecast,identity");
+        for (phase, warm_s, path) in &trajectories {
+            for gap_s in [5, 10, 20] {
+                let (
+                    forecast_error,
+                    straight_cross,
+                    coast_ticks,
+                    uncertain_ticks,
+                    tick_count,
+                    endpoint_tick,
+                    confirmed,
+                    last_ns,
+                    identities,
+                ) = run_case(path, *warm_s, gap_s);
+                let Some((model_cross, r95)) = forecast_error else {
+                    forecasts_absent += 1;
+                    println!("{phase},{gap_s},absent,{straight_cross:.2},absent,{coast_ticks},{uncertain_ticks},{tick_count}/{gap_s},no,no");
+                    continue;
+                };
+                let identity_ok =
+                    confirmed && last_ns == *warm_s * S && identities == [(ADDR, *warm_s * S)];
+                identities_preserved += usize::from(identity_ok);
+                let endpoint = endpoint_tick.expect("one-second endpoint tick");
+                println!(
+                    "{phase},{gap_s},{model_cross:.2},{straight_cross:.2},{r95:.1},{coast_ticks},{uncertain_ticks},{tick_count}/{gap_s},yes,{}",
+                    if identity_ok { "yes" } else { "no" }
+                );
+                assert!(identity_ok, "{phase}, gap {gap_s}: {identities:?}");
+                assert_eq!(tick_count, gap_s as usize, "{phase}, gap {gap_s}");
+                assert!(endpoint.0 & O_COAST != 0, "{phase}, gap {gap_s}");
+                assert_eq!(
+                    endpoint.0 & O_UNCERTAIN != 0,
+                    endpoint.1 > DEFAULT_CONFIG.coast_max_r95_m
+                );
+            }
+        }
+        assert_eq!(forecasts_absent, 0);
+        assert_eq!(identities_preserved, 6);
+        println!(
+            "# absent_forecasts={forecasts_absent}; identity_preserved={identities_preserved}/6"
+        );
+    }
+
+    // REQ: OA-TRK-344
+    #[test]
     fn an_update_after_a_gap_over_fifteen_seconds_is_flagged_reacquired_and_a_short_gap_is_not() {
         let c = TrackerConfig {
             tick_ns: S,
