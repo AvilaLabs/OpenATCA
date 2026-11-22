@@ -8,9 +8,10 @@
 
 use oa_geo::aeqd::{frame_new, unproject};
 use oa_track::fusion::{
-    fusion_advance, fusion_config, fusion_finish, fusion_new, fusion_plots, fusion_radar_tracks,
-    fusion_stats, fusion_tracker_config,
+    fusion_advance, fusion_assign_log, fusion_config, fusion_finish, fusion_new, fusion_plots,
+    fusion_radar_tracks, fusion_stats, fusion_tracker_config,
 };
+use oa_track::fusion_score::identify_tracks;
 use oa_track::radar::{polar_of, radar_geom, RadarPlot, RadarSite, NONE_CODE};
 use oa_track::{output_new, DEFAULT_CONFIG, NO_ADDR};
 
@@ -72,9 +73,10 @@ fn plots(site: &RadarSite, lines: &[Line]) -> Vec<RadarPlot> {
     out
 }
 
-fn run(lines: &[Line]) -> (usize, u64, u64) {
+fn check_hypotheses(lines: &[Line], expected_hypotheses: usize) {
     let sites = sites();
-    let cfg = fusion_config(fusion_tracker_config(&DEFAULT_CONFIG, &sites));
+    let mut cfg = fusion_config(fusion_tracker_config(&DEFAULT_CONFIG, &sites));
+    cfg.log_assign = true;
     let mut fusion = fusion_new(&cfg, &sites).unwrap();
     for (i, site) in sites.iter().enumerate() {
         let p = plots(site, lines);
@@ -85,11 +87,24 @@ fn run(lines: &[Line]) -> (usize, u64, u64) {
     fusion_advance(&mut fusion, end, &mut output);
     fusion_finish(&mut fusion, end + SITE.period_ns, &mut output);
     let stats = fusion_stats(&fusion);
-    (
-        fusion_radar_tracks(&fusion).len(),
-        stats.cand_confirmed,
-        stats.cand_merged_on_confirm,
-    )
+    assert_eq!(stats.cand_confirmed, expected_hypotheses as u64);
+    assert_eq!(stats.cand_merged_on_confirm, 0);
+    let keys: Vec<_> = fusion_radar_tracks(&fusion)
+        .iter()
+        .map(|track| track.key)
+        .collect();
+    assert_eq!(keys.len(), expected_hypotheses);
+    let score = identify_tracks(fusion_assign_log(&fusion), &keys);
+    let mut matched: Vec<_> = score.truth_of.values().copied().collect();
+    matched.sort_unstable();
+    let mut expected: Vec<_> = lines.iter().map(|line| line.label).collect();
+    expected.sort_unstable();
+    assert_eq!(matched, expected);
+    assert_eq!(
+        score.duplicates as usize,
+        expected_hypotheses - expected.len()
+    );
+    assert_eq!(score.false_tracks, 0);
 }
 
 #[test]
@@ -103,7 +118,7 @@ fn one_anonymous_aircraft_confirmed_independently_by_two_radars_reproduces_dupli
         label: 0xA00001,
     }];
     // Each radar's candidate confirms independently; current contract keeps both anonymous keys.
-    assert_eq!(run(&aircraft), (2, 2, 0));
+    check_hypotheses(&aircraft, 2);
 }
 
 #[test]
@@ -126,7 +141,7 @@ fn close_parallel_real_aircraft_remain_four_source_local_hypotheses() {
             label: 0xA00002,
         },
     ];
-    assert_eq!(run(&aircraft), (4, 4, 0));
+    check_hypotheses(&aircraft, 4);
 }
 
 #[test]
@@ -149,5 +164,5 @@ fn crossing_real_aircraft_remain_separate_when_their_altitudes_differ() {
             label: 0xA00002,
         },
     ];
-    assert_eq!(run(&aircraft), (4, 4, 0));
+    check_hypotheses(&aircraft, 4);
 }
