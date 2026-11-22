@@ -1314,6 +1314,7 @@ mod closed_segment_sync_tests {
         let checkpoint = dir.join("before-directory-sync.checkpoint");
         let completed = dir.join("directory-sync.completed");
         let file: SyncingOpener = Box::new(|path| {
+            // seal-allow: create_new writes a synthetic segment in the fixture directory
             let file = OpenOptions::new().write(true).create_new(true).open(path)?;
             Ok(Box::new(super::SyncingFile(file)) as Box<dyn SyncingWriter>)
         });
@@ -1357,6 +1358,7 @@ mod closed_segment_sync_tests {
         let dir = temp_dir("process-restart");
         let checkpoint = dir.join("before-directory-sync.checkpoint");
         let completed = dir.join("directory-sync.completed");
+        // seal-allow: launches this synthetic test with its owned temporary directory
         let mut child = Command::new(std::env::current_exe().unwrap())
             .arg("process_restart_after_file_sync_replays_segment_and_respects_name_and_cap")
             .arg("--nocapture")
@@ -1369,7 +1371,7 @@ mod closed_segment_sync_tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut checkpoint_seen = false;
         while Instant::now() < deadline {
-            if fs::read(&checkpoint).is_ok_and(|bytes| bytes == FILE_SYNC_RETURNED) {
+            if oa_sealed::read(&checkpoint).is_ok_and(|bytes| bytes == FILE_SYNC_RETURNED) {
                 checkpoint_seen = true;
                 break;
             }
@@ -1389,24 +1391,25 @@ mod closed_segment_sync_tests {
             checkpoint_seen,
             "child did not reach the post-file-sync hook"
         );
-        assert_eq!(fs::read(&checkpoint).unwrap(), FILE_SYNC_RETURNED);
+        assert_eq!(oa_sealed::read(&checkpoint).unwrap(), FILE_SYNC_RETURNED);
         assert!(
             !completed.exists(),
             "directory sync must not report completion after process kill"
         );
 
+        // seal-allow: lists only the synthetic segments created in this test's directory
         let first = fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().path())
             .find(|path| path.extension().is_some_and(|ext| ext == "oaf"))
             .unwrap();
-        assert_eq!(fs::read(&first).unwrap(), one_raw_frame());
-        let report = crate::replay::replay_sources(vec![fs::File::open(&first).unwrap()]).unwrap();
+        let recorded = oa_sealed::read(&first).unwrap();
+        assert_eq!(recorded, one_raw_frame());
+        let occupied_bytes = u64::try_from(recorded.len()).unwrap();
+        let report = crate::replay::replay_sources(vec![io::Cursor::new(recorded)]).unwrap();
         assert_eq!(report.health.frames, 1);
         assert!(report.errors.is_empty());
         assert!(report.gzip.is_empty());
-
-        let occupied_bytes = fs::metadata(&first).unwrap().len();
         let mut capped = Recorder::open_sync_closed_segments(
             &dir,
             "restart",
@@ -1434,6 +1437,7 @@ mod closed_segment_sync_tests {
             Outcome::Written
         );
         continued.finish().unwrap();
+        // seal-allow: lists the same owned fixture directory after the restart
         let mut names: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
