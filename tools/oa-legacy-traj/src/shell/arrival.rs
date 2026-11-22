@@ -4,17 +4,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use oa_adsb::{Reports, F_GROUND, F_RATE_GEOM, NONE_I32, NONE_U16};
-use oa_bench::adsb_truth::{query, BuiltTruth};
+use oa_adsb::{F_GROUND, F_RATE_GEOM, NONE_I32, NONE_U16, Reports};
+use oa_bench::adsb_truth::{BuiltTruth, query};
 use oa_bench::geo::{dist_m, enu, heading_deg, wrap180};
-use oa_bench::legacy::{name, norm_id, tbfm_kind, Legacy, NONE, NO_COORD, NO_TIME};
+use oa_bench::legacy::{Legacy, NO_COORD, NO_TIME, NONE, name, norm_id, tbfm_kind};
 use oa_bench::stats::nearest_rank;
 
 use crate::core::arrival::{
-    forecast, score, ArrivalScore, IssueSnapshot, LegacyEta, RouteFix, TrackState, TruthPoint,
+    ArrivalScore, IssueSnapshot, LegacyEta, RouteFix, TrackState, TruthPoint, forecast, score,
 };
 use crate::core::types::Place;
-use crate::shell::places::{place_of_e7, point_places, PlaceTable};
+use crate::shell::places::{PlaceTable, place_of_e7, point_places};
 
 // C7: headroom over the two regional ADS-B days and the one day of route/TBFM recording in the
 // development baseline. Check the volume before indexing and check keyed limits before inserting.
@@ -63,7 +63,11 @@ fn route_fix(legacy: &Legacy, places: &PlaceTable, i: usize) -> Option<RouteFix>
         (_, _, [place]) => *place,
         _ => return None,
     };
-    Some(RouteFix { name: fix, place })
+    Some(RouteFix {
+        name: fix,
+        place,
+        altitude_constraint: None,
+    })
 }
 
 fn route_rows(legacy: &Legacy) -> impl Iterator<Item = RouteIx> + '_ {
@@ -137,6 +141,7 @@ fn select_meter(requested: &str, legacy: &Legacy, places: &PlaceTable) -> Result
     Ok(RouteFix {
         name: selected,
         place: *place,
+        altitude_constraint: None,
     })
 }
 
@@ -333,15 +338,31 @@ struct Totals {
     unusable_route: usize,
     horizontal: [Vec<f64>; 3],
     vertical: [Vec<f64>; 3],
+    no_prediction: [usize; 3],
+    no_truth: [usize; 3],
     eta: [Vec<f64>; 3],
     paired_oa_eta: [Vec<f64>; 2],
 }
 
 fn note(t: &mut Totals, s: ArrivalScore) {
     t.crossing += usize::from(s.actual_meter_ms.is_some());
-    for ((h, v), result) in t.horizontal.iter_mut().zip(&mut t.vertical).zip(s.forecast) {
-        h.extend(result.horizontal_error_m);
-        v.extend(result.vertical_error_ft);
+    for (i, result) in s.forecast.into_iter().enumerate() {
+        if let Some(values) = t.horizontal.get_mut(i) {
+            values.extend(result.horizontal_error_m);
+        }
+        if let Some(values) = t.vertical.get_mut(i) {
+            values.extend(result.vertical_error_ft);
+        }
+        if !result.prediction_available {
+            if let Some(n) = t.no_prediction.get_mut(i) {
+                *n += 1;
+            }
+        }
+        if !result.truth_available {
+            if let Some(n) = t.no_truth.get_mut(i) {
+                *n += 1;
+            }
+        }
     }
     for (all, error) in
         t.eta
@@ -488,6 +509,7 @@ pub(crate) fn report(
                         issued_ms: at,
                         track,
                         assigned_altitude_ft: None,
+                        assigned_altitude_provenance: None,
                         route,
                         meter_fix: Some(meter),
                     },
@@ -577,6 +599,12 @@ pub(crate) fn report(
             summarize(&format!("{mins} min vertical (ft)"), v, totals.issued)
         )
         .map_err(|e| e.to_string())?;
+        let index = match mins {
+            5 => 0,
+            10 => 1,
+            _ => 2,
+        };
+        writeln!(text, "{mins} min coverage: denominator is all {} issued forecasts; missing predicted position {}; no usable truth interpolation {}; forecast selection does not depend on future truth", totals.issued, totals.no_prediction[index], totals.no_truth[index]).map_err(|e| e.to_string())?;
     }
     for (label, values) in ["OpenATCA", "ERAM", "TBFM"]
         .into_iter()

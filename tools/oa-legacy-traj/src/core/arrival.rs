@@ -56,8 +56,27 @@ pub enum ScoreRefusal {
 pub struct RouteFix {
     pub name: [u8; 8],
     pub place: Place,
+    /// Published altitude window at this point when present in the issue input.
+    pub altitude_constraint: Option<AltitudeConstraint>,
 }
 // A7.2: cold struct, size guard waived; one forecast input value.
+
+/// Origin is carried with the value so predictions retain constraint provenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConstraintProvenance {
+    SfdpsAssignedAltitude,
+    PublishedProcedure,
+    Synthetic,
+}
+
+/// Inclusive altitude window in feet, available to the predictor at `available_ms`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AltitudeConstraint {
+    pub minimum_ft: Option<f64>,
+    pub maximum_ft: Option<f64>,
+    pub available_ms: i64,
+    pub provenance: ConstraintProvenance,
+}
 
 /// Track state available at issue time. Speed is ground speed in m/s. Vertical rate is ft/min.
 /// Missing altitude/rate stay missing in forecasts.
@@ -79,6 +98,8 @@ pub struct IssueSnapshot {
     pub issued_ms: i64,
     pub track: TrackState,
     pub assigned_altitude_ft: Option<f64>,
+    /// Source of assigned altitude; absent when its provenance is unknown.
+    pub assigned_altitude_provenance: Option<ConstraintProvenance>,
     /// Ordered converted route points; the first point is the next fix after the track state.
     pub route: Vec<RouteFix>,
     /// The selected metering fix, if its name resolved unambiguously.
@@ -176,6 +197,23 @@ pub fn forecast(snapshot: &IssueSnapshot) -> Result<Forecast, ForecastRefusal> {
     if snapshot.route.iter().any(|p| !valid_place(p.place)) {
         return Err(ForecastRefusal::InvalidRoutePlace);
     }
+    if snapshot
+        .route
+        .iter()
+        .filter_map(|p| p.altitude_constraint)
+        .any(|c| {
+            c.minimum_ft.is_some_and(|v| !v.is_finite())
+                || c.maximum_ft.is_some_and(|v| !v.is_finite())
+                || c.available_ms > snapshot.cutoff_ms
+                || c.minimum_ft
+                    .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
+                || c.maximum_ft
+                    .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
+                || matches!((c.minimum_ft, c.maximum_ft), (Some(lo), Some(hi)) if lo > hi)
+        })
+    {
+        return Err(ForecastRefusal::InvalidTrackValue);
+    }
     if snapshot.meter_fix.is_some_and(|p| !valid_place(p.place)) {
         return Err(ForecastRefusal::InvalidMeterFix);
     }
@@ -202,6 +240,7 @@ pub fn forecast(snapshot: &IssueSnapshot) -> Result<Forecast, ForecastRefusal> {
                 altitude_ft: altitude_at(
                     t,
                     snapshot.assigned_altitude_ft,
+                    reached_constraint(t.place, speed, &snapshot.route, elapsed_ms as f64 / 1000.0),
                     elapsed_ms as f64 / 1000.0,
                 ),
             };
@@ -264,6 +303,8 @@ pub struct LegacyEta {
 pub struct HorizonScore {
     pub horizontal_error_m: Option<f64>,
     pub vertical_error_ft: Option<f64>,
+    pub prediction_available: bool,
+    pub truth_available: bool,
     pub covered: bool,
 }
 // A7.2: cold struct, size guard waived; one-shot score output.
@@ -344,6 +385,10 @@ pub fn score(
             continue;
         }
         let actual = interpolate_truth(&truth, predicted.time_ms);
+        if let Some(slot) = out.forecast.get_mut(i) {
+            slot.prediction_available = predicted.place.is_some();
+            slot.truth_available = actual.is_some();
+        }
         if let (Some(predicted_place), Some(actual)) = (predicted.place, actual) {
             let horiz = Some(great_circle_m(predicted_place, actual.place));
             let vert = predicted
@@ -354,6 +399,8 @@ pub fn score(
                 *slot = HorizonScore {
                     horizontal_error_m: horiz,
                     vertical_error_ft: vert,
+                    prediction_available: true,
+                    truth_available: true,
                     covered: true,
                 };
                 out.forecast_covered += 1;
@@ -473,7 +520,12 @@ fn actual_passage(
         .map(|p| p.t_ms)
 }
 
-fn altitude_at(track: TrackState, assigned: Option<f64>, seconds: f64) -> Option<f64> {
+fn altitude_at(
+    track: TrackState,
+    assigned: Option<f64>,
+    route_constraint: Option<AltitudeConstraint>,
+    seconds: f64,
+) -> Option<f64> {
     let current = track.altitude_ft.filter(|v| v.is_finite())?;
     let rate = track.vertical_rate_fpm.filter(|v| v.is_finite())?;
     let raw = current + rate * seconds / 60.0;
@@ -486,9 +538,37 @@ fn altitude_at(track: TrackState, assigned: Option<f64>, seconds: f64) -> Option
             raw
         }
     });
+    let constrained = route_constraint.map_or(value, |c| {
+        let floor = c.minimum_ft.unwrap_or(MIN_ALTITUDE_FT);
+        let ceiling = c.maximum_ft.unwrap_or(MAX_ALTITUDE_FT);
+        oa_math::max_f64(floor, oa_math::min_f64(value, ceiling))
+    });
     (MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT)
-        .contains(&value)
-        .then_some(value)
+        .contains(&constrained)
+        .then_some(constrained)
+}
+
+fn reached_constraint(
+    start: Place,
+    speed: f64,
+    route: &[RouteFix],
+    seconds: f64,
+) -> Option<AltitudeConstraint> {
+    let mut distance = 0.0;
+    let mut here = start;
+    let traveled = speed * seconds;
+    let mut active = None;
+    for fix in route {
+        distance += great_circle_m(here, fix.place);
+        if distance > traveled {
+            break;
+        }
+        if let Some(constraint) = fix.altitude_constraint {
+            active = Some(constraint);
+        }
+        here = fix.place;
+    }
+    active
 }
 
 fn route_position(start: Place, speed: f64, route: &[RouteFix], seconds: f64) -> Option<Place> {
@@ -555,6 +635,7 @@ mod tests {
                 lat_deg: 41.7,
                 lon_deg: -87.9,
             },
+            altitude_constraint: None,
         };
         let snapshot = IssueSnapshot {
             cutoff_ms: 1_000_000,
@@ -570,6 +651,7 @@ mod tests {
                 vertical_rate_fpm: None,
             },
             assigned_altitude_ft: None,
+            assigned_altitude_provenance: None,
             route: vec![fix],
             meter_fix: Some(fix),
         };
@@ -680,6 +762,7 @@ mod tests {
                 lat_deg: 41.0,
                 lon_deg: -87.0,
             },
+            altitude_constraint: None,
         };
         let samples = [
             (-87.5, 1_000),
@@ -816,8 +899,8 @@ mod tests {
 
     // REQ: OA-LTJ-054
     #[test]
-    fn elapsed_meter_crossing_before_issue_has_no_eta_and_score_rejects_other_fix(
-    ) -> Result<(), ForecastRefusal> {
+    fn elapsed_meter_crossing_before_issue_has_no_eta_and_score_rejects_other_fix()
+    -> Result<(), ForecastRefusal> {
         let (mut snapshot, fix) = fixture();
         snapshot.track.time_ms = snapshot.issued_ms - MAX_TRACK_AGE_MS;
         snapshot.track.speed_mps = Some(180.0);
@@ -827,6 +910,7 @@ mod tests {
                 lat_deg: 41.3,
                 lon_deg: -88.39,
             },
+            altitude_constraint: None,
         };
         snapshot.route = vec![near];
         snapshot.meter_fix = Some(near);
@@ -841,12 +925,42 @@ mod tests {
                 lat_deg: 41.6,
                 lon_deg: -88.1,
             },
+            altitude_constraint: None,
         };
         assert_eq!(
             score(&forecast, &[], Some(other), None, None, 1_000.0),
             Err(ScoreRefusal::MeterFixMismatch)
         );
         assert_eq!(forecast.meter_fix, Some(fix));
+        Ok(())
+    }
+
+    // REQ: OA-LTJ-054
+    #[test]
+    fn issue_available_route_altitude_constraint_is_applied_with_provenance()
+    -> Result<(), ForecastRefusal> {
+        let (mut snapshot, _) = fixture();
+        snapshot.track.altitude_ft = Some(10_000.0);
+        snapshot.track.speed_mps = Some(300.0);
+        snapshot.track.vertical_rate_fpm = Some(-600.0);
+        snapshot.route[0].altitude_constraint = Some(AltitudeConstraint {
+            minimum_ft: Some(9_000.0),
+            maximum_ft: Some(11_000.0),
+            available_ms: snapshot.cutoff_ms,
+            provenance: ConstraintProvenance::Synthetic,
+        });
+        let predicted = forecast(&snapshot)?;
+        assert_eq!(
+            snapshot.route[0].altitude_constraint.unwrap().provenance,
+            ConstraintProvenance::Synthetic
+        );
+        assert_eq!(predicted.positions[0].altitude_ft, Some(9_000.0));
+        snapshot.route[0]
+            .altitude_constraint
+            .as_mut()
+            .unwrap()
+            .available_ms += 1;
+        assert_eq!(forecast(&snapshot), Err(ForecastRefusal::InvalidTrackValue));
         Ok(())
     }
 

@@ -38,8 +38,13 @@ altitude coverage and error at 5, 10 and 20 minutes, plus selected-fix ETA error
 ERAM and TBFM when comparable estimates exist. `auto` selects a resolvable fix by the number of
 distinct ORD flight plans with a TBFM estimate, before scoring. OpenATCA uses the received route's
 geometry and observed motion. Its ETA does not depend on the legacy time predictions. The ADS-B
-archive records observation time and has no comparable receive clock. This baseline has no winds,
-aircraft performance model or procedure altitude model.
+archive records observation time and has no comparable receive clock. This baseline has no winds or
+aircraft performance model. The pure core accepts provenance-stamped route altitude windows and
+an assigned-altitude provenance; synthetic coverage checks exercise them. The current legacy input
+tables carry neither clearance altitude nor published procedure constraints, so the ORD shell leaves
+those fields absent and reports that data gap. Coverage at each horizon is divided by every issued
+forecast; missing predicted positions and missing truth interpolation are counted separately.
+Forecast eligibility is determined before future truth is read.
 
 ## Method
 

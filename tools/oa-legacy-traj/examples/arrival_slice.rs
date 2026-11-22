@@ -3,7 +3,7 @@
 //! No recordings, feeds, network, or private data are read.
 
 use oa_legacy_traj::core::arrival::{
-    forecast, score, IssueSnapshot, LegacyEta, RouteFix, TrackState, TruthPoint,
+    IssueSnapshot, LegacyEta, RouteFix, TrackState, TruthPoint, forecast, score,
 };
 use oa_legacy_traj::core::types::Place;
 
@@ -33,6 +33,7 @@ fn main() -> Result<(), String> {
             lat_deg: 41.70,
             lon_deg: -87.95,
         },
+        altitude_constraint: None,
     };
     let jot = RouteFix {
         name: *b"JOT     ",
@@ -40,6 +41,7 @@ fn main() -> Result<(), String> {
             lat_deg: 41.52,
             lon_deg: -88.34,
         },
+        altitude_constraint: None,
     };
     let ord = RouteFix {
         name: *b"ORD     ",
@@ -47,6 +49,7 @@ fn main() -> Result<(), String> {
             lat_deg: 41.98,
             lon_deg: -87.90,
         },
+        altitude_constraint: None,
     };
     let snapshot = IssueSnapshot {
         cutoff_ms: 1_000_000,
@@ -62,6 +65,7 @@ fn main() -> Result<(), String> {
             vertical_rate_fpm: Some(-900.0),
         },
         assigned_altitude_ft: Some(5_000.0),
+        assigned_altitude_provenance: Some(crate::core::arrival::ConstraintProvenance::Synthetic),
         route: vec![jot, fix, ord],
         meter_fix: Some(fix),
     };
@@ -105,9 +109,14 @@ fn main() -> Result<(), String> {
         .zip(forecast.positions)
         .zip(result.forecast)
     {
-        println!("{minutes}m lat={:?} lon={:?} alt_ft={:?} horizontal_error_m={:?} vertical_error_ft={:?}",
-            point.place.map(|p| p.lat_deg), point.place.map(|p| p.lon_deg), point.altitude_ft,
-            error.horizontal_error_m, error.vertical_error_ft);
+        println!(
+            "{minutes}m lat={:?} lon={:?} alt_ft={:?} horizontal_error_m={:?} vertical_error_ft={:?}",
+            point.place.map(|p| p.lat_deg),
+            point.place.map(|p| p.lon_deg),
+            point.altitude_ft,
+            error.horizontal_error_m,
+            error.vertical_error_ft
+        );
     }
     println!(
         "meter_fix={} forecast_eta_ms={:?} actual_ms={:?} ERAM_error_s={:?} TBFM_error_s={:?}",
