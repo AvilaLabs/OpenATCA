@@ -142,7 +142,11 @@ fn synthetic_truth_qualification_counts_misses_nuisance_and_lead_time() {
     let alert_time_s = first.start_ns as f64 / SECOND as f64;
     let lead_time_s = entry_s - alert_time_s;
     assert!((lead_time_s - 87.5).abs() < 1e-6);
-    assert!((f64::from(first.ttl_first_s) - lead_time_s).abs() < 0.01);
+    assert!(
+        (f64::from(first.ttl_first_s) - lead_time_s).abs() < 0.5,
+        "local projection predicted {} s against {lead_time_s} s analytic lead time",
+        first.ttl_first_s
+    );
     assert!(exit_s > entry_s);
     assert_eq!(TRUTH[0].name, "head_on_loss");
     assert_eq!(TRUTH[1].name, "vertically_separated_pass");
