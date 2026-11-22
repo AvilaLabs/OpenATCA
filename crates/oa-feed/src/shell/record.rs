@@ -143,8 +143,7 @@ fn recording_name_watermark(path: &Path, feed: &str) -> Option<(String, u32)> {
     let stem = name
         .strip_suffix(".oaf.gz")
         .or_else(|| name.strip_suffix(".oaf"))?;
-    let prefix = format!("{feed}-");
-    let body = stem.strip_prefix(prefix.as_str())?;
+    let body = stem.strip_prefix(feed)?.strip_prefix('-')?;
     let (stamp, number) = body.rsplit_once('-')?;
     if number.len() != 4 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
@@ -529,6 +528,7 @@ impl Recorder {
     }
 }
 
+#[cfg(test)]
 fn existing_recording_bytes(dir: &Path, entry_limit: usize) -> io::Result<u64> {
     existing_recording_state(dir, "", entry_limit).map(|state| state.bytes)
 }
@@ -568,7 +568,7 @@ fn existing_recording_state(
         if is_recording(&entry.path()) {
             total = total.saturating_add(entry.metadata()?.len());
             if let Some(candidate) = recording_name_watermark(&entry.path(), feed) {
-                if last_file_name.is_none_or(|last| candidate > last) {
+                if last_file_name.as_ref().is_none_or(|last| &candidate > last) {
                     last_file_name = Some(candidate);
                 }
             }
