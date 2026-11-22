@@ -1126,6 +1126,7 @@ fn interpolate_place(a: Place, b: Place, f: f64) -> Place {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

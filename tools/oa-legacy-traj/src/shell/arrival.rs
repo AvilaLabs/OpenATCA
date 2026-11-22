@@ -1652,6 +1652,7 @@ mod issue_track_quality_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing)]
 mod raw_rate_diagnostic_tests {
     use super::*;
 

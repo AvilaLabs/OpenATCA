@@ -157,6 +157,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::parse;
 
