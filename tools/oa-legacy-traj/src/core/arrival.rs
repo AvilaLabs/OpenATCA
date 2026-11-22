@@ -5,7 +5,7 @@
 //! meter fix are supplied by the caller after resolving names against NASR; unresolved names are
 //! represented as absent and produce absent metrics.
 
-use crate::core::cross::{approach, great_circle_m};
+use crate::core::cross::{approach, great_circle_m, short_longitude_delta};
 use crate::core::types::{PathPoint, Place};
 
 const HORIZON_S: [i64; 3] = [300, 600, 1200];
@@ -677,10 +677,7 @@ fn interpolate_truth(truth: &[TruthPoint], time_ms: i64) -> Option<TruthPoint> {
             .then_some((*a, *b))
     })?;
     let fraction = (time_ms - a.time_ms) as f64 / (b.time_ms - a.time_ms) as f64;
-    let place = Place {
-        lat_deg: a.place.lat_deg + (b.place.lat_deg - a.place.lat_deg) * fraction,
-        lon_deg: a.place.lon_deg + (b.place.lon_deg - a.place.lon_deg) * fraction,
-    };
+    let place = interpolate_place(a.place, b.place, fraction);
     let altitude_ft = a
         .altitude_ft
         .zip(b.altitude_ft)
@@ -994,9 +991,10 @@ fn valid_place(p: Place) -> bool {
         && (-180.0..=180.0).contains(&p.lon_deg)
 }
 fn interpolate_place(a: Place, b: Place, f: f64) -> Place {
+    let dlon = short_longitude_delta(b.lon_deg - a.lon_deg);
     Place {
         lat_deg: a.lat_deg + (b.lat_deg - a.lat_deg) * f,
-        lon_deg: a.lon_deg + (b.lon_deg - a.lon_deg) * f,
+        lon_deg: short_longitude_delta(a.lon_deg + dlon * f),
     }
 }
 
@@ -1033,6 +1031,52 @@ mod tests {
             meter_fix: Some(fix),
         };
         (snapshot, fix)
+    }
+
+    // REQ: OA-LTJ-057
+    #[test]
+    fn forecasts_and_interpolated_truth_cross_the_antimeridian_in_either_direction() {
+        for direction in [1.0, -1.0] {
+            let (mut snapshot, mut fix) = fixture();
+            snapshot.track.place = Place {
+                lat_deg: 0.0,
+                lon_deg: direction * 179.8,
+            };
+            fix.place = Place {
+                lat_deg: 0.0,
+                lon_deg: -direction * 179.8,
+            };
+            snapshot.track.speed_mps =
+                Some(great_circle_m(snapshot.track.place, fix.place) / 600.0);
+            snapshot.route = vec![fix];
+            snapshot.meter_fix = Some(fix);
+
+            let prediction = forecast(&snapshot).unwrap();
+            let horizon = prediction.positions.first().unwrap();
+            assert!((horizon.place.unwrap().lon_deg.abs() - 180.0).abs() < 1.0e-8);
+            let truth = [
+                TruthPoint {
+                    time_ms: horizon.time_ms - 10_000,
+                    place: Place {
+                        lat_deg: 0.0,
+                        lon_deg: direction * 179.98,
+                    },
+                    altitude_ft: None,
+                    gap_before: false,
+                },
+                TruthPoint {
+                    time_ms: horizon.time_ms + 10_000,
+                    place: Place {
+                        lat_deg: 0.0,
+                        lon_deg: -direction * 179.98,
+                    },
+                    altitude_ft: None,
+                    gap_before: false,
+                },
+            ];
+            let scored = score(&prediction, &truth, Some(fix), None, None, 1852.0).unwrap();
+            assert!(scored.forecast.first().unwrap().horizontal_error_m.unwrap() < 0.01);
+        }
     }
 
     fn wind_profile(

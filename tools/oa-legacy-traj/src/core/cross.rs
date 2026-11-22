@@ -28,14 +28,20 @@ const NEAR_M: f64 = 0.5 * 1852.0;
 /// Metres per degree of latitude (a sphere of 6,371,008.8 m).
 const M_PER_DEG: f64 = 111_194.926_644_558_74;
 
+/// Wraps the difference of two valid longitudes to the shortest displacement in degrees.
+pub(crate) fn short_longitude_delta(delta: f64) -> f64 {
+    if delta > 180.0 {
+        delta - 360.0
+    } else if delta < -180.0 {
+        delta + 360.0
+    } else {
+        delta
+    }
+}
+
 /// East and north metres of `(lat, lon)` from `origin` in the flat frame.
 fn flat(origin: Place, lat_deg: f64, lon_deg: f64, cos_lat: f64) -> (f64, f64) {
-    let mut dlon = lon_deg - origin.lon_deg;
-    if dlon > 180.0 {
-        dlon -= 360.0;
-    } else if dlon < -180.0 {
-        dlon += 360.0;
-    }
+    let dlon = short_longitude_delta(lon_deg - origin.lon_deg);
     (
         dlon * cos_lat * M_PER_DEG,
         (lat_deg - origin.lat_deg) * M_PER_DEG,
@@ -63,9 +69,22 @@ struct Item {
     end_edge: bool,
 }
 
+/// Squared distance and time fraction at the closest point on one unwrapped segment.
+fn closest_segment(x: f64, y: f64, dx: f64, dy: f64) -> (f64, f64) {
+    let len2 = dx * dx + dy * dy;
+    let fraction = if len2 > 0.0 {
+        oa_math::clamp_f64(-(x * dx + y * dy) / len2, 0.0, 1.0)
+    } else {
+        0.0
+    };
+    let (cx, cy) = (x + fraction * dx, y + fraction * dy);
+    (cx * cx + cy * cy, fraction)
+}
+
 /// The closest approach of the path to `place`, and every passage within `cut_m`.
 pub fn approach(path: &[PathPoint], place: Place, cut_m: f64) -> Approach {
     let cos_lat = oa_math::cos(place.lat_deg * (core::f64::consts::PI / 180.0));
+    let longitude_span_m = (180.0 * cos_lat * M_PER_DEG) * 2.0;
     let n = path.len();
     let xy: Vec<(f64, f64)> = path
         .iter()
@@ -96,19 +115,30 @@ pub fn approach(path: &[PathPoint], place: Place, cut_m: f64) -> Approach {
         let (Some(&(x1, y1)), Some(p1)) = (xy.get(i + 1), path.get(i + 1)) else {
             continue;
         };
-        let (dx, dy) = (x1 - x0, y1 - y0);
-        let len2 = dx * dx + dy * dy;
-        let u = if len2 > 0.0 {
-            oa_math::clamp_f64(-(x0 * dx + y0 * dy) / len2, 0.0, 1.0)
+        let (mut dx, dy) = (x1 - x0, y1 - y0);
+        // A segment crossing the projection's opposite meridian has endpoints on different
+        // copies of the flat chart. Join them on adjacent copies and test both translations.
+        let shift = if dx > longitude_span_m / 2.0 {
+            longitude_span_m
+        } else if dx < -longitude_span_m / 2.0 {
+            -longitude_span_m
         } else {
             0.0
         };
-        let (cx, cy) = (x0 + u * dx, y0 + u * dy);
+        dx -= shift;
+        let mut nearest = closest_segment(x0, y0, dx, dy);
+        if shift != 0.0 {
+            let alternate = closest_segment(x0 + shift, y0, dx, dy);
+            if alternate.0 < nearest.0 {
+                nearest = alternate;
+            }
+        }
+        let (distance_sq, u) = nearest;
         let span = (p1.t_ms - p0.t_ms) as f64;
         items.push(Item {
             first: i,
             last: i + 1,
-            dist_m: oa_ieee::sqrt(cx * cx + cy * cy),
+            dist_m: oa_ieee::sqrt(distance_sq),
             t_ms: p0.t_ms + oa_ieee::round(u * span) as i64,
             start_edge: i == 0 || !joined(i),
             end_edge: i + 2 >= n || !joined(i + 2),

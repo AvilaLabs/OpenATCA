@@ -6666,6 +6666,9 @@ configuration with no default; the crate's tests use synthetic values.
   available updates. Malformed assignments, valid non-simple replacements, conflicts at the same source stamp,
   uncertain availability that could change the selection, and incomplete bounded history
   withhold the scalar with a named reason. The report counts assignment states per issued forecast.
+- **OA-LTJ-057** Arrival prediction and truth interpolation follow the shorter longitude
+  displacement across the antimeridian. Closest-approach segments also follow the shorter
+  displacement across the planar chart boundary opposite the scoring point.
 
 ## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
 
