@@ -371,6 +371,7 @@ pub(super) fn run_raw_only(
         total.observations_seen += stats.observations_in;
         total.targets_admitted += stats.targets_admitted;
         total.targets_drawn += u64::from(info.traffic.drawn);
+        // The traffic builder copies the target set refusal counts into its traffic stats.
         total.draw_loss += traffic_loss(&info.traffic) + u64::from(info.stamp_clipped);
         total.future_observations += stats.future_observations;
         total.future_only_addresses += stats.future_only_addresses;

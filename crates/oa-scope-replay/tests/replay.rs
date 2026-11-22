@@ -1990,6 +1990,35 @@ fn raw_only_cli_returns_loss_for_a_contradictory_latest_observation() {
 
 // REQ: OA-DSP-072
 #[test]
+fn raw_only_cli_counts_each_full_target_set_refusal_as_loss_once() {
+    let dir = tmp("raw-replay-target-cap");
+    let (snap, _) = write_inputs(&dir);
+    let now = T0 + 9 * S;
+    let clip = dir.join("two-targets.oaf");
+    std::fs::write(
+        &clip,
+        raw_message_rows(
+            now,
+            &[(now, 0xA00001, ORD.1), (now, 0xA00002, ORD.1 + 300_000)],
+        ),
+    )
+    .unwrap();
+    let out = dir.join("limited");
+    let mut cli_args = raw_cli_args(&snap, &clip, &out, "recorded");
+    cli_args.extend(args(&["--max-targets", "1"]));
+    let (result, said) = run_text(&cli_args);
+    assert!(matches!(result, Err(cli::CliError::Loss(_))), "{said}");
+    assert!(said.contains("4 targets drawn"), "{said}");
+    assert!(said.contains("4 refused targets"), "{said}");
+    assert!(
+        said.contains("loss     4 refused or unavailable raw-only work items"),
+        "{said}"
+    );
+    assert_eq!(raw_hashes(&out).len(), 4);
+}
+
+// REQ: OA-DSP-072
+#[test]
 fn raw_only_cli_refuses_an_oversize_clip_before_creating_outputs() {
     let dir = tmp("raw-replay-oversize");
     let (snap, _) = write_inputs(&dir);
