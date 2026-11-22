@@ -29,6 +29,7 @@
 pub mod adsb_truth;
 pub mod airspace_env;
 pub mod altimeters;
+pub mod assignment;
 pub mod assoc;
 pub mod chunked;
 pub mod common_time;
