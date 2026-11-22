@@ -254,3 +254,7 @@ labels, incomplete assignment columns or log overflow produce an explicit unavai
 This is a final-snapshot identity diagnostic, not a trajectory-accuracy score; it cannot report
 anonymous tracks that ended before the snapshot. It currently cannot be combined with
 `--adsb-dropout`.
+
+Add `--initiation-diagnostics` to see how each radar used the shared initiation budget during
+measurement. Each radar reports the work available at the start of its batches, charged work,
+requested and denied retirement reservations, exact pair tests, capped batches, and refused plots.
