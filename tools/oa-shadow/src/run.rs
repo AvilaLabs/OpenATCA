@@ -19,8 +19,8 @@ use oa_track::score::{
 };
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
-    tracker_stats, tracker_update, TrackOutput, TrackerStats, DEFAULT_CONFIG, NONE_I32, NO_IDENT,
-    O_COAST, O_HAS_ALT, O_TICK, RADAR_KEY_BASE,
+    tracker_stats, tracker_update, TrackOutput, TrackerStats, DEFAULT_CONFIG, O_COAST, O_HAS_ALT,
+    O_TICK, RADAR_KEY_BASE,
 };
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
 
@@ -583,7 +583,7 @@ fn run_screen_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         extent_text(adsb_original)
     ));
     header.push(format!(
-        "outside common extent (not discarded from truth build): ERAM reports excluded before {eram_before}, after {eram_after}; eligible addressed ADS-B reports before {adsb_before}, after {adsb_after}"
+        "outside common extent: ERAM reports excluded before {eram_before}, after {eram_after}; eligible addressed ADS-B reports retained for truth before {adsb_before}, after {adsb_after}"
     ));
     header.push(format!(
         "comparison window (overlap of ERAM's in-box extent and the ADS-B reports of its addressed flights): {} to {} UTC",
@@ -625,10 +625,11 @@ fn run_screen_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod completeness_tests {
     use super::*;
+    use oa_track::{NONE_I32, NO_IDENT};
 
-    // REQ: OA-SHD-018
     #[test]
     fn valid_measurement_refused_at_track_capacity_blocks_the_comparison() {
         let mut cfg = DEFAULT_CONFIG;
