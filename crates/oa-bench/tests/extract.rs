@@ -795,15 +795,15 @@ fn load_drops_sealed_frames_by_receive_time_and_a_record_inside_a_frame_received
         "2026-11-19T20:00:00.000Z",
         "2026-11-19T20:00:00Z",
         false,
-        "",
+        r#"<assignedAltitude><simple uom="FEET">12000</simple></assignedAltitude>"#,
     ));
     // Received at from - 1 ns but timed inside the window: the record goes, the frame does not.
     let late = sfdps(&th(
-        GUFI_B,
+        GUFI_A,
         "2026-11-19T23:45:00.000Z",
         "2026-11-19T23:44:59Z",
         false,
-        "",
+        r#"<assignedAltitude><simple uom="FEET">14000</simple></assignedAltitude>"#,
     ));
     let frames = [
         (SEAL_FROM - 1, ok.as_str()),
@@ -827,6 +827,29 @@ fn load_drops_sealed_frames_by_receive_time_and_a_record_inside_a_frame_received
         .notes
         .iter()
         .any(|n| n.starts_with("sealed-window rows dropped: 3")));
+    let gufi = l.legacy.flights.gufi[0];
+    let mut scan_sealed = 0;
+    let scan = scan_sfdps_assignments(
+        &dir,
+        &file_opener(),
+        msg_limit(),
+        &l.inputs[0],
+        &[AssignmentIssue {
+            gufi,
+            cutoff_ms: SEAL_TO.div_euclid(1_000_000),
+        }],
+        &mut scan_sealed,
+    )
+    .unwrap();
+    assert_eq!(scan_sealed, 3);
+    assert_eq!(scan.sealed_window_dropped, 3);
+    assert_eq!(
+        assignment_at_issue(&scan.query, gufi),
+        Some(AssignmentEvidence::Available {
+            value_ft: 12_000,
+            available_ms: (SEAL_FROM - 1).div_euclid(1_000_000),
+        })
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 
