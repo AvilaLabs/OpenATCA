@@ -191,3 +191,89 @@ fn missing_input_and_unknown_altitude_degrade_without_clearing_an_open_warning()
     let status = net_status(&net, &inhibits_new(), NetId::ConflictAlert, SECOND);
     assert!(matches!(status.state, NetState::Degraded { count: 2, .. }));
 }
+
+#[test]
+fn synthetic_per_second_cases_score_crossings_and_safe_passes() {
+    // Truth is declared analytically from the generated trajectories before the CA cycles run.
+    // Each case gets its own state so pairs cannot interact. The open interval is |x| < 5 km.
+    let cases = [
+        (
+            "fast_head_on",
+            20_000.0,
+            200.0,
+            10_000.0,
+            Some((87.5, 112.5)),
+        ),
+        (
+            "slow_head_on",
+            15_000.0,
+            150.0,
+            10_000.0,
+            Some((83.333_333, 116.666_667)),
+        ),
+        ("separated_pass", 20_000.0, 200.0, 11_000.0, None),
+    ];
+    let mut misses = 0;
+    let mut desired_cases = 0;
+    let mut nuisance_alerts = 0;
+    let mut no_alert_cases = 0;
+    let mut leads = Vec::new();
+
+    for (case_ix, (name, half_gap, speed, altitude_b, interval)) in cases.into_iter().enumerate() {
+        let mut rows = [
+            track(100 + case_ix as u32 * 2, -half_gap, speed as f32, 10_000.0),
+            track(
+                101 + case_ix as u32 * 2,
+                half_gap,
+                -(speed as f32),
+                altitude_b,
+            ),
+        ];
+        let (mut state, mut alerts, mut events, mut net) = rig();
+        let mut first_alert_s = None;
+        let mut observed_alert = false;
+        for tick in 0..=120 {
+            let travel = f64::from(tick) * speed;
+            rows[0] = track(rows[0].addr, -half_gap + travel, speed as f32, 10_000.0);
+            rows[1] = track(rows[1].addr, half_gap - travel, -(speed as f32), altitude_b);
+            let out = ca_cycle(
+                &mut state,
+                i64::from(tick) * SECOND,
+                &rows,
+                &mut alerts,
+                &mut events,
+                &mut net,
+            );
+            assert_eq!(out.stats.out_of_order, 0, "{name} tick {tick}");
+            let open = ca_open(&state)
+                .iter()
+                .any(|alert| alert.addr_a == rows[0].addr && alert.addr_b == rows[1].addr);
+            if open {
+                observed_alert = true;
+                first_alert_s.get_or_insert(tick as f64);
+            }
+        }
+
+        if let Some((entry_s, exit_s)) = interval {
+            desired_cases += 1;
+            misses += usize::from(!observed_alert || first_alert_s.is_none());
+            if let Some(alert_s) = first_alert_s {
+                leads.push(entry_s - alert_s);
+                assert!(
+                    alert_s < entry_s,
+                    "{name} warning must precede the loss interval"
+                );
+            }
+            assert!(exit_s > entry_s);
+        } else {
+            no_alert_cases += 1;
+            nuisance_alerts += usize::from(observed_alert);
+        }
+    }
+
+    assert_eq!((misses, desired_cases), (0, 2));
+    assert_eq!((nuisance_alerts, no_alert_cases), (0, 1));
+    assert_eq!(leads.len(), 2);
+    assert!((leads[0] - 87.5).abs() < 1e-6);
+    assert!((leads[1] - 83.333_333).abs() < 1e-6);
+}

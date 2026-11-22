@@ -2484,6 +2484,87 @@ fn synthetic_terrain_warning_scores_declared_violation_and_preserves_warning_thr
     assert_eq!(preserved.end_reason, END_LOST_ALTITUDE_MISSING);
 }
 
+#[test]
+fn synthetic_per_second_descent_and_level_off_score_warning_and_safe_control() {
+    const TERRAIN_FT: i32 = 900;
+    const FLOOR_FT: i32 = TERRAIN_FT + 500;
+    const WARNING_S: i64 = 10;
+    const VIOLATION_ENTRY_S: i64 = 30;
+
+    // Declared truth comes from the input trajectories: the hazard descends 10 ft/s from 1,700
+    // ft and is strictly below the 1,400 ft floor after t=30. The control descends only through
+    // t=10, then levels at 1,850 ft. Its desired alert is false for the whole scripted window.
+    assert_eq!(FLOOR_FT, 1400);
+    let mut r = rig(&cfg());
+    let full = flat(TERRAIN_FT, FLOOR_NONE);
+    let mut detected_warning_s = None;
+    let mut hazard_warning_survived_gap = false;
+    let mut control_alerted = false;
+
+    for tick in 0..=30 {
+        let hazard_alt = if tick == 11 {
+            f32::NAN
+        } else {
+            1700.0 - 10.0 * tick as f32
+        };
+        let hazard_rate = if tick == 11 { f32::NAN } else { -600.0 };
+        let hazard = tr(911, 40.0, -88.0, 0.0, 0.0, hazard_alt, hazard_rate);
+        let control_alt = if tick < 10 {
+            1900.0 - 5.0 * tick as f32
+        } else {
+            1850.0
+        };
+        let control_rate = if tick < 10 { -300.0 } else { 0.0 };
+        let control = tr(912, 40.2, -88.0, 0.0, 0.0, control_alt, control_rate);
+        let gap_world = |lat, lon| {
+            let sample = full(lat, lon);
+            if tick == 11 && (402_000_000..403_000_000).contains(&lat) {
+                FloorSample {
+                    obstacle_covered: false,
+                    ..sample
+                }
+            } else {
+                sample
+            }
+        };
+        let out = cycle(&mut r, tick * S, &[hazard, control], &gap_world);
+        let hazard_open = msaw_open(&r.st).iter().find(|alert| alert.addr == 911);
+        if let Some(alert) = hazard_open {
+            if let Some(warning_ns) = alert.warning_ns {
+                detected_warning_s.get_or_insert(warning_ns / S);
+            }
+        }
+        control_alerted |= msaw_open(&r.st).iter().any(|alert| alert.addr == 912);
+        if tick == 11 {
+            assert_eq!((out.stats.alt_missing, out.stats.no_coverage), (1, 1));
+            assert_eq!(
+                hazard_open.map(|alert| alert.warning_ns),
+                Some(Some(WARNING_S * S))
+            );
+        }
+        if tick == 12 {
+            hazard_warning_survived_gap =
+                hazard_open.and_then(|alert| alert.warning_ns) == Some(WARNING_S * S);
+        }
+    }
+
+    // Case denominators are one truth-positive hazard and one truth-negative control. Warning
+    // lead is the declared floor crossing time minus the observed warning time.
+    let desired_warning_deadline_s = VIOLATION_ENTRY_S - cfg().warning_s as i64;
+    let misses =
+        usize::from(detected_warning_s.map_or(true, |time_s| time_s > desired_warning_deadline_s));
+    let desired_denominator = 1;
+    let nuisance_alerts = usize::from(control_alerted);
+    let no_alert_denominator = 1;
+    assert_eq!((misses, desired_denominator), (0, 1));
+    assert_eq!((nuisance_alerts, no_alert_denominator), (0, 1));
+    let observed_warning_s = detected_warning_s.expect("descent warning was not emitted");
+    let lead_s = VIOLATION_ENTRY_S - observed_warning_s;
+    assert_eq!(observed_warning_s, WARNING_S);
+    assert_eq!(lead_s, VIOLATION_ENTRY_S - WARNING_S);
+    assert!(hazard_warning_survived_gap);
+}
+
 // REQ: OA-MSAW-004, OA-MSAW-011, OA-MSAW-065
 #[test]
 fn resilience_simultaneous_altitude_and_coverage_loss_preserve_active_warnings() {
