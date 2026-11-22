@@ -621,8 +621,10 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
     // Window 5: independent raw display, including a drawn target, target-set capacity refusal,
     // and invalid-input fail-closed raster refusal. Fixtures are prepared before arming; returned
     // counters and rendered bytes witness each route, not merely the called method.
-    let raw_times = [T0 + FIRST_FRAME_S * S];
-    let raw_addresses = [0xA2_0000];
+    let raw_as_of = T0 + FIRST_FRAME_S * S;
+    let raw_address = 0xA2_0000;
+    let raw_times = [raw_as_of];
+    let raw_addresses = [raw_address];
     let raw_latitudes = [ORD.0];
     let raw_longitudes = [ORD.1];
     let raw_altitudes = [24_000];
@@ -637,7 +639,7 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         gs_dkt: &raw_speeds,
         track_ddeg: &raw_tracks,
     };
-    let raw_many_times = [T0 + FIRST_FRAME_S * S; 10];
+    let raw_many_times = [raw_as_of; 10];
     let raw_many_addresses = [
         0xA3_0000, 0xA3_0001, 0xA3_0002, 0xA3_0003, 0xA3_0004, 0xA3_0005, 0xA3_0006, 0xA3_0007,
         0xA3_0008, 0xA3_0009,
@@ -656,7 +658,7 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         gs_dkt: &raw_many_speeds,
         track_ddeg: &raw_many_tracks,
     };
-    let invalid_times = [T0 + FIRST_FRAME_S * S; 2];
+    let invalid_times = [raw_as_of; 2];
     let invalid_addresses = [0xA4_0001, 0xA4_0000];
     let invalid_latitudes = [ORD.0; 2];
     let invalid_longitudes = [ORD.1; 2];
@@ -674,12 +676,15 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
     };
     let mut raw_ok = true;
     let (mut raw_drawn, mut raw_capacity_refused, mut raw_invalid_refused) = (0u64, 0u64, 0u64);
-    let raw_alert = PALETTE[usize::from(ALERT)].to_le_bytes();
+    let raw_alert = PALETTE
+        .get(usize::from(ALERT))
+        .ok_or("raw alert color unavailable")?
+        .to_le_bytes();
     let c = measure(inject, FRAMES, |_| {
-        match replay_build_raw(&mut replay, &raw_one, raw_times[0], "RAW ALLOC") {
+        match replay_build_raw(&mut replay, &raw_one, raw_as_of, "RAW ALLOC") {
             Ok((info, evidence)) => {
                 let target =
-                    targets_columns(&replay.set).addr.first().copied() == Some(raw_addresses[0]);
+                    targets_columns(&replay.set).addr.first().copied() == Some(raw_address);
                 let banner = list_has_text(&replay.list, "RAW SURVEILLANCE ONLY");
                 let raster = replay_raster(&mut replay).is_ok();
                 let pixels = replay.buf.chunks_exact(4).any(|pixel| pixel == raw_alert);
@@ -699,7 +704,7 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
             }
             Err(_) => raw_ok = false,
         }
-        match replay_build_raw(&mut small, &raw_many, raw_times[0], "RAW CAP") {
+        match replay_build_raw(&mut small, &raw_many, raw_as_of, "RAW CAP") {
             Ok((info, evidence)) => {
                 let raster = replay_raster(&mut small).is_ok();
                 let digest = frame_digest(&small.spec, &small.buf).is_ok();
@@ -718,7 +723,7 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
             Err(_) => raw_ok = false,
         }
         let refused =
-            replay_build_raw(&mut replay, &invalid_raw, raw_times[0], "RAW INVALID").is_err();
+            replay_build_raw(&mut replay, &invalid_raw, raw_as_of, "RAW INVALID").is_err();
         let raster_refused = replay_raster(&mut replay).is_err();
         if refused && raster_refused {
             raw_invalid_refused += 1;
