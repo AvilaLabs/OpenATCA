@@ -6,11 +6,15 @@ use std::fmt::Write;
 
 use oa_adsb::{Reports, F_GROUND, F_RATE_GEOM, NONE_I32, NONE_U16};
 use oa_bench::adsb_truth::{query, BuiltTruth};
+use oa_bench::assignment::{
+    assignment_at_issue, AssignmentEvidence, AssignmentIssue, AssignmentQuery,
+};
 use oa_bench::geo::{dist_m, enu, heading_deg, wrap180};
+#[cfg(test)]
+use oa_bench::legacy::{assigned_altitude_history_overflowed, MAX_ASSIGNED_ALTITUDE_UPDATES};
 use oa_bench::legacy::{
-    assigned_altitude_history_overflowed, name, norm_id, tbfm_kind, Legacy, ALT_FORM_AT_FIX,
-    ALT_FORM_BLOCK, ALT_FORM_INVALID, ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS,
-    MAX_ASSIGNED_ALTITUDE_UPDATES, NONE, NO_ALT, NO_COORD, NO_TIME,
+    name, norm_id, tbfm_kind, Legacy, ALT_FORM_AT_FIX, ALT_FORM_BLOCK, ALT_FORM_INVALID,
+    ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS, NONE, NO_ALT, NO_COORD, NO_TIME,
 };
 use oa_bench::stats::nearest_rank;
 
@@ -26,6 +30,7 @@ use crate::shell::places::{place_of_e7, point_places, PlaceTable};
 pub(crate) const MAX_REPORTS: usize = 12_000_000;
 const MAX_CAPTURED_ROUTES: usize = 500_000;
 const MAX_CAPTURED_TBFM: usize = 5_000_000;
+#[cfg(test)]
 const MAX_CAPTURED_ASSIGNED_ALTITUDES: usize = MAX_ASSIGNED_ALTITUDE_UPDATES;
 const MAX_METER_PLAN_PAIRS: usize = 500_000;
 const MAX_ESTIMATES_FOR_FIX: usize = 500_000;
@@ -42,9 +47,11 @@ struct RouteIx(u32);
 #[derive(Clone, Copy)]
 struct ReportIx(u32);
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct AssignedAltitudeIx(u32);
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct UnknownAssignedAltitudeIx(u32);
 
@@ -58,6 +65,7 @@ struct EtaRow {
 
 type Plan = [u8; 12];
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AssignedAltitudeInput {
     Available { value_ft: i32, available_ms: i64 },
@@ -70,40 +78,14 @@ enum AssignedAltitudeInput {
     HistoryOverflow,
 }
 
-fn assigned_altitude_label(input: AssignedAltitudeInput) -> String {
-    match input {
-        AssignedAltitudeInput::Available { .. } => "available simple SFDPS assignment".into(),
-        AssignedAltitudeInput::Missing => "no available assignment".into(),
-        AssignedAltitudeInput::UnsupportedForm { form, .. } => {
-            let name = match form {
-                ALT_FORM_VFR_PLUS => "vfrPlus",
-                ALT_FORM_VFR => "vfr",
-                ALT_FORM_BLOCK => "block",
-                ALT_FORM_AT_FIX => "altFixAlt",
-                _ => "unknown",
-            };
-            format!("unsupported SFDPS assignedAltitude form {name}")
-        }
-        AssignedAltitudeInput::SameTimeConflict { .. } => {
-            "same-stamp conflicting SFDPS assignments".into()
-        }
-        AssignedAltitudeInput::MalformedForm { .. } => "malformed SFDPS assignment".into(),
-        AssignedAltitudeInput::InvalidSimpleValue { .. } => {
-            "invalid SFDPS simple assigned-altitude value".into()
-        }
-        AssignedAltitudeInput::UnknownAvailability { .. } => {
-            "SFDPS assignment could affect snapshot but receive time is unknown".into()
-        }
-        AssignedAltitudeInput::HistoryOverflow => "SFDPS assigned-altitude history overflow".into(),
-    }
-}
-
+#[cfg(test)]
 #[derive(Default)]
 struct AssignedAltitudeIndices {
     known: BTreeMap<u32, Vec<AssignedAltitudeIx>>,
     unknown: BTreeMap<u32, Vec<UnknownAssignedAltitudeIx>>,
 }
 
+#[cfg(test)]
 fn assigned_altitude_index(
     legacy: &Legacy,
     selected_flights: &BTreeSet<u32>,
@@ -151,6 +133,7 @@ fn assigned_altitude_index(
     Ok(index)
 }
 
+#[cfg(test)]
 fn assigned_altitude_at(
     legacy: &Legacy,
     index: &AssignedAltitudeIndices,
@@ -233,6 +216,7 @@ fn assigned_altitude_at(
     }
 }
 
+#[cfg(test)]
 fn unknown_assignment_could_change(
     legacy: &Legacy,
     rows: &[UnknownAssignedAltitudeIx],
@@ -576,6 +560,85 @@ struct HorizonCoverage {
     vertical_unavailable: BTreeMap<String, usize>,
 }
 
+struct PlannedIssue {
+    issue: IssueSnapshot,
+    gufi: u128,
+    addr: u32,
+    route_row: RouteIx,
+    meter_ix: usize,
+}
+
+/// The fixed no-assignment cohort selected before cutoff-specific assignment evidence is queried.
+pub(crate) struct ArrivalPlan {
+    requested: String,
+    meter: Place,
+    offered_flights: usize,
+    no_addr: usize,
+    no_meter: usize,
+    ambiguous_routes: usize,
+    no_track: usize,
+    outside_issue_window: usize,
+    unusable_route: usize,
+    baseline_forecast_refused: BTreeMap<String, usize>,
+    issues: Vec<PlannedIssue>,
+}
+
+impl ArrivalPlan {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.issues.is_empty()
+    }
+
+    pub(crate) fn assignment_issues(&self) -> Vec<AssignmentIssue> {
+        self.issues
+            .iter()
+            .map(|issue| AssignmentIssue {
+                gufi: issue.gufi,
+                cutoff_ms: issue.issue.cutoff_ms,
+            })
+            .collect()
+    }
+}
+
+fn assigned_altitude_label(input: &AssignmentEvidence) -> String {
+    match input {
+        AssignmentEvidence::Available { .. } => "available simple SFDPS assignment".into(),
+        AssignmentEvidence::Missing => "no available assignment".into(),
+        AssignmentEvidence::UnsupportedForm { form, .. } => {
+            let name = match form {
+                ALT_FORM_VFR_PLUS => "vfrPlus",
+                ALT_FORM_VFR => "vfr",
+                ALT_FORM_BLOCK => "block",
+                ALT_FORM_AT_FIX => "altFixAlt",
+                _ => "unknown",
+            };
+            format!("unsupported SFDPS assignedAltitude form {name}")
+        }
+        AssignmentEvidence::SameTimeConflict { .. } => {
+            "same-stamp conflicting SFDPS assignments".into()
+        }
+        AssignmentEvidence::MalformedForm { .. } => "malformed SFDPS assignment".into(),
+        AssignmentEvidence::InvalidSimpleValue { .. } => {
+            "invalid simple SFDPS assigned-altitude value".into()
+        }
+        AssignmentEvidence::UnknownAvailability { .. } => {
+            "SFDPS assignment could affect snapshot but receive time is unknown".into()
+        }
+    }
+}
+
+fn apply_assignment(issue: &mut IssueSnapshot, evidence: &AssignmentEvidence) {
+    if let AssignmentEvidence::Available {
+        value_ft,
+        available_ms,
+    } = evidence
+    {
+        issue.assigned_altitude_ft = Some(f64::from(*value_ft));
+        issue.assigned_altitude_available_ms = Some(*available_ms);
+        issue.assigned_altitude_provenance =
+            Some(crate::core::arrival::ConstraintProvenance::SfdpsAssignedAltitude);
+    }
+}
+
 fn note(t: &mut Totals, s: ArrivalScore) {
     t.crossing += usize::from(s.actual_meter_ms.is_some());
     for (i, result) in s.forecast.into_iter().enumerate() {
@@ -622,19 +685,15 @@ fn summarize(label: &str, values: &mut [f64], denom: usize) -> String {
     )
 }
 
-pub(crate) fn report(
+pub(crate) fn build_plan(
     requested: &str,
     legacy: &Legacy,
     places: &PlaceTable,
     reports: &Reports,
-    built: &BuiltTruth,
-    header: &[(String, String)],
-    sealed: u64,
-) -> Result<String, String> {
+) -> Result<ArrivalPlan, String> {
     if reports.icao.len() > MAX_REPORTS
         || legacy.routes.flight.len() > MAX_CAPTURED_ROUTES
         || legacy.tbfm.kind.len() > MAX_CAPTURED_TBFM
-        || legacy.assigned_altitudes.flight.len() > MAX_CAPTURED_ASSIGNED_ALTITUDES
     {
         return Err(
             "arrival experiment input exceeds the report, route, or estimate budget".into(),
@@ -671,6 +730,7 @@ pub(crate) fn report(
             flights.entry(flight).or_default().push((at, row, meter_ix));
         }
     }
+    let offered_flights = flights.len();
     let mut adsb = BTreeMap::<u32, Vec<ReportIx>>::new();
     for (i, &addr) in reports.icao.iter().enumerate() {
         if addresses.contains(&addr) {
@@ -686,10 +746,12 @@ pub(crate) fn report(
                 .unwrap_or(i64::MAX)
         });
     }
-    let tbfm = tbfm_index(legacy, meter)?;
-    let selected_flights = flights.keys().copied().collect::<BTreeSet<_>>();
-    let assigned_index = assigned_altitude_index(legacy, &selected_flights)?;
-    let mut totals = Totals::default();
+
+    let mut ambiguous_routes = 0usize;
+    let mut no_track = 0usize;
+    let mut outside_issue_window = 0usize;
+    let mut unusable_route = 0usize;
+    let mut baseline_forecast_refused = BTreeMap::new();
     let route_key = |recv, row: RouteIx| {
         (
             recv,
@@ -701,9 +763,10 @@ pub(crate) fn report(
                 .unwrap_or(NO_TIME),
         )
     };
+    let mut issues = Vec::new();
     for routes in flights.values_mut() {
         routes.sort_by_key(|&(recv, row, _)| route_key(recv, row));
-        let issue = routes
+        let candidate = routes
             .iter()
             .enumerate()
             .find_map(|(i, &(at, row, meter_ix))| {
@@ -715,78 +778,134 @@ pub(crate) fn report(
                         .and_then(|previous| routes.get(previous))
                         .is_some_and(|&(t, r, _)| route_key(t, r) == key);
                 if duplicates {
-                    totals.ambiguous_routes += 1;
+                    ambiguous_routes += 1;
                     return None;
                 }
                 let addr = *legacy.routes.addr_at_receive.get(row.0 as usize)?;
                 let Some((track, course)) =
                     adsb.get(&addr).and_then(|rows| track_at(reports, rows, at))
                 else {
-                    totals.no_track += 1;
+                    no_track += 1;
                     return None;
                 };
                 if !(MIN_FROM_FIX_M..=MAX_FROM_FIX_M).contains(&distance(track.place, meter.place))
                 {
-                    totals.outside_issue_window += 1;
+                    outside_issue_window += 1;
                     return None;
                 }
                 let Some(route) = route_ahead(legacy, places, row, meter_ix, track, course) else {
-                    totals.unusable_route += 1;
+                    unusable_route += 1;
                     return None;
-                };
-                let flight = *legacy.routes.flight.get(row.0 as usize)?;
-                let assigned = assigned_altitude_at(legacy, &assigned_index, flight, at);
-                let (
-                    assigned_altitude_ft,
-                    assigned_altitude_available_ms,
-                    assigned_altitude_provenance,
-                ) = match assigned {
-                    AssignedAltitudeInput::Available {
-                        value_ft,
-                        available_ms,
-                    } => (
-                        Some(f64::from(value_ft)),
-                        Some(available_ms),
-                        Some(crate::core::arrival::ConstraintProvenance::SfdpsAssignedAltitude),
-                    ),
-                    _ => (None, None, None),
                 };
                 Some((
                     IssueSnapshot {
                         cutoff_ms: at,
                         issued_ms: at,
                         track,
-                        assigned_altitude_ft,
-                        assigned_altitude_available_ms,
-                        assigned_altitude_provenance,
+                        assigned_altitude_ft: None,
+                        assigned_altitude_available_ms: None,
+                        assigned_altitude_provenance: None,
                         route,
                         meter_fix: Some(meter),
                     },
                     addr,
                     row,
                     meter_ix,
-                    assigned,
                 ))
             });
-        let Some((issue, addr, row, meter_ix, assigned)) = issue else {
+        let Some((issue, addr, route_row, meter_ix)) = candidate else {
             continue;
         };
+        if let Err(refusal) = forecast(&issue) {
+            *baseline_forecast_refused
+                .entry(format!("{refusal:?}"))
+                .or_insert(0) += 1;
+            continue;
+        }
+        let flight = *legacy
+            .routes
+            .flight
+            .get(route_row.0 as usize)
+            .ok_or("inconsistent arrival route flight index")?;
+        let gufi = *legacy
+            .flights
+            .gufi
+            .get(flight as usize)
+            .ok_or("inconsistent arrival flight identity")?;
+        if issues.len() == MAX_ISSUES {
+            return Err("arrival issue plan exceeds its bounded flight budget".into());
+        }
+        issues.push(PlannedIssue {
+            issue,
+            gufi,
+            addr,
+            route_row,
+            meter_ix,
+        });
+    }
+    Ok(ArrivalPlan {
+        requested: requested.to_string(),
+        meter,
+        offered_flights,
+        no_addr,
+        no_meter,
+        ambiguous_routes,
+        no_track,
+        outside_issue_window,
+        unusable_route,
+        baseline_forecast_refused,
+        issues,
+    })
+}
+
+pub(crate) fn report(
+    plan: &ArrivalPlan,
+    assignments: Option<&AssignmentQuery>,
+    legacy: &Legacy,
+    built: &BuiltTruth,
+    header: &[(String, String)],
+    sealed: u64,
+) -> Result<String, String> {
+    if legacy.routes.flight.len() > MAX_CAPTURED_ROUTES
+        || legacy.tbfm.kind.len() > MAX_CAPTURED_TBFM
+    {
+        return Err(
+            "arrival experiment input exceeds the report, route, or estimate budget".into(),
+        );
+    }
+    if !plan.issues.is_empty() && assignments.is_none() {
+        return Err("arrival assignment query is required for the frozen issue plan".into());
+    }
+    let mut totals = Totals::default();
+    totals.forecast_refused = plan.baseline_forecast_refused.clone();
+    totals.issued = plan.issues.len();
+    let tbfm = tbfm_index(legacy, plan.meter)?;
+    let mut assigned_forecast_refused = 0usize;
+    for planned in &plan.issues {
+        let evidence = assignments
+            .and_then(|query| assignment_at_issue(query, planned.gufi))
+            .unwrap_or(AssignmentEvidence::Missing);
+        *totals
+            .assigned_altitude_states
+            .entry(assigned_altitude_label(&evidence))
+            .or_default() += 1;
+        let mut issue = planned.issue.clone();
+        apply_assignment(&mut issue, &evidence);
         let at = issue.issued_ms;
         let predicted = match forecast(&issue) {
             Ok(predicted) => predicted,
             Err(refusal) => {
+                assigned_forecast_refused += 1;
                 *totals
                     .forecast_refused
                     .entry(format!("{refusal:?}"))
                     .or_default() += 1;
+                for coverage in &mut totals.coverage {
+                    coverage.no_prediction += 1;
+                }
                 continue;
             }
         };
-        totals.issued += 1;
-        *totals
-            .assigned_altitude_states
-            .entry(assigned_altitude_label(assigned))
-            .or_default() += 1;
         for (coverage, point) in totals.coverage.iter_mut().zip(&predicted.positions) {
             if point.vertical_status != VerticalStatus::Available {
                 *coverage
@@ -798,7 +917,7 @@ pub(crate) fn report(
         let eram = legacy
             .route_points
             .est_ms
-            .get(meter_ix)
+            .get(planned.meter_ix)
             .copied()
             .filter(|&eta| eta > at)
             .map(|eta_ms| LegacyEta {
@@ -808,13 +927,13 @@ pub(crate) fn report(
         let tb = legacy
             .routes
             .plan_at_receive
-            .get(row.0 as usize)
+            .get(planned.route_row.0 as usize)
             .and_then(|p| tbfm.get(&norm_id(p)))
             .and_then(|entries| estimate_at(entries, at));
         match score(
             &predicted,
-            &truth_path(built, addr, at),
-            Some(meter),
+            &truth_path(built, planned.addr, at),
+            Some(plan.meter),
             eram,
             tb,
             2.0 * 1852.0,
@@ -830,24 +949,35 @@ pub(crate) fn report(
     }
     let mut text = format!(
         "OpenATCA experimental ORD arrival forecast at {}\n",
-        name(&meter.name)
+        name(&plan.meter.name)
     );
     for (label, value) in header {
         writeln!(text, "{label}: {value}").map_err(|e| e.to_string())?;
     }
     writeln!(text, "sealed-window rows dropped: {sealed}").map_err(|e| e.to_string())?;
-    writeln!(text, "Selected flow: {requested}. AUTO ranks resolvable TBFM fixes by distinct ORD flight plans before scoring. One earliest eligible issue per flight, 40 to 200 NM from the fix, using the most recent unique ADS-B report within 30 s. Forecast uses received ERAM route geometry and ADS-B observation time. Legacy ETA values do not enter the model.").map_err(|e| e.to_string())?;
+    writeln!(text, "Selected flow: {}. AUTO ranks resolvable TBFM fixes by distinct ORD flight plans before scoring. One earliest baseline-eligible issue per flight, 40 to 200 NM from the fix, using the most recent unique ADS-B report within 30 s. Issue GUFI and cutoff are frozen after route, track and assignment-free forecast eligibility, before the SFDPS assignment query. Forecast uses received ERAM route geometry and ADS-B observation time. Legacy ETA values do not enter the model.", plan.requested).map_err(|e| e.to_string())?;
     writeln!(text, "Procedure input: the legacy route tables contain no published procedure altitude windows; route constraint checks are unavailable for this run.").map_err(|e| e.to_string())?;
     writeln!(
         text,
-        "Assigned altitude state at issue (sum denominator: {} issued forecasts): {:?}",
-        totals.issued, totals.assigned_altitude_states
+        "Assigned altitude state at issue (sum denominator: {} frozen baseline issues): {:?}",
+        plan.issues.len(),
+        totals.assigned_altitude_states
     )
     .map_err(|e| e.to_string())?;
-    writeln!(text, "Assigned-altitude updates with missing or contradictory receipt time (retained as bounded uncertainty evidence): {}; updates refused by bounded storage: {}", legacy.counts.assigned_altitude_unknown_availability, legacy.counts.overflow_assigned_altitude_updates).map_err(|e| e.to_string())?;
+    writeln!(
+        text,
+        "Assignment query: {}",
+        if assignments.is_some() {
+            "cutoff-specific SFDPS scan for frozen issue GUFIs"
+        } else {
+            "no eligible issue; scan skipped"
+        }
+    )
+    .map_err(|e| e.to_string())?;
     let forecast_refused: usize = totals.forecast_refused.values().sum();
+    let baseline_forecast_refused: usize = plan.baseline_forecast_refused.values().sum();
     let score_refused: usize = totals.score_refused.values().sum();
-    writeln!(text, "offered flights with known address: {}; route messages without address: {no_addr}; issued: {}; scored: {}; without eligible state or route: {}; forecast refused: {forecast_refused}; score refused: {score_refused}; observed passages: {}", flights.len(), totals.issued, totals.issued.saturating_sub(score_refused), flights.len().saturating_sub(totals.issued + forecast_refused), totals.crossing).map_err(|e| e.to_string())?;
+    writeln!(text, "offered flights with known address: {}; route messages without address: {}; frozen baseline issues: {}; scored: {}; no eligible route/track: {}; assignment-free forecast refused: {}; forecast refused with assignment evidence: {}; score refused: {}; observed passages: {}", plan.offered_flights, plan.no_addr, totals.issued, totals.issued.saturating_sub(assigned_forecast_refused + score_refused), plan.offered_flights.saturating_sub(totals.issued + baseline_forecast_refused), baseline_forecast_refused, assigned_forecast_refused, score_refused, totals.crossing).map_err(|e| e.to_string())?;
     for (kind, refusals) in [
         ("forecast", &totals.forecast_refused),
         ("score", &totals.score_refused),
@@ -856,7 +986,7 @@ pub(crate) fn report(
             writeln!(text, "{kind} refused: {reason} {count}").map_err(|e| e.to_string())?;
         }
     }
-    writeln!(text, "route messages excluded: outside selected fix or repeated fix {no_meter}; ambiguous same-time routes {}; missing, stale or conflicting ADS-B state {}; outside issue distance {}; unresolved forward route {}", totals.ambiguous_routes, totals.no_track, totals.outside_issue_window, totals.unusable_route).map_err(|e| e.to_string())?;
+    writeln!(text, "route messages excluded: outside selected fix or repeated fix {}; ambiguous same-time routes {}; missing, stale or conflicting ADS-B state {}; outside issue distance {}; unresolved forward route {}", plan.no_meter, plan.ambiguous_routes, plan.no_track, plan.outside_issue_window, plan.unusable_route).map_err(|e| e.to_string())?;
     for (((mins, h), v), coverage) in [5, 10, 20]
         .into_iter()
         .zip(&mut totals.horizontal)
@@ -923,6 +1053,65 @@ pub(crate) fn report(
         .map_err(|e| e.to_string())?;
     }
     Ok(text)
+}
+
+#[cfg(test)]
+mod assignment_plan_tests {
+    use super::*;
+
+    #[test]
+    fn frozen_plan_exports_one_typed_gufi_and_cutoff_per_issue() {
+        let fix = RouteFix {
+            name: *b"METER   ",
+            place: Place {
+                lat_deg: 41.7,
+                lon_deg: -87.9,
+            },
+            altitude_constraint: None,
+        };
+        let cutoff_ms = 1_794_664_309_564;
+        let plan = ArrivalPlan {
+            requested: "ORD".into(),
+            meter: fix.place,
+            offered_flights: 1,
+            no_addr: 0,
+            no_meter: 0,
+            ambiguous_routes: 0,
+            no_track: 0,
+            outside_issue_window: 0,
+            unusable_route: 0,
+            baseline_forecast_refused: BTreeMap::new(),
+            issues: vec![PlannedIssue {
+                issue: IssueSnapshot {
+                    cutoff_ms,
+                    issued_ms: cutoff_ms,
+                    track: TrackState {
+                        time_ms: cutoff_ms,
+                        place: fix.place,
+                        altitude_ft: None,
+                        speed_mps: None,
+                        vertical_rate_fpm: None,
+                    },
+                    assigned_altitude_ft: None,
+                    assigned_altitude_available_ms: None,
+                    assigned_altitude_provenance: None,
+                    route: vec![fix],
+                    meter_fix: Some(fix),
+                },
+                gufi: 0x1111,
+                addr: 1,
+                route_row: RouteIx(0),
+                meter_ix: 0,
+            }],
+        };
+
+        let issues = plan.assignment_issues();
+        assert_eq!(issues.len(), 1);
+        assert_eq!(
+            issues.first().map(|issue| (issue.gufi, issue.cutoff_ms)),
+            Some((0x1111, cutoff_ms))
+        );
+    }
 }
 
 #[cfg(test)]

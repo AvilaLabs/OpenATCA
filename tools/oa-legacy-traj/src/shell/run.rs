@@ -9,7 +9,7 @@ use oa_bench::input::{
 };
 use oa_bench::legacy::{
     name, norm_id, plan_candidates, plan_index, tbfm_kind, tfms_kind, Legacy, Limits, PlanIndex,
-    MAX_ASSIGNED_ALTITUDE_UPDATES, NONE, NO_COORD, NO_TIME,
+    NONE, NO_COORD, NO_TIME,
 };
 use oa_replay::FeedKind;
 
@@ -1896,7 +1896,9 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     let mut feeds_sealed = 0u64;
     let mut limits = Limits::default();
     if args.arrival_meter_fix.is_some() {
-        limits.assigned_altitude_updates = MAX_ASSIGNED_ALTITUDE_UPDATES;
+        // Arrival assignment evidence is collected in a targeted guarded second pass after its
+        // issue cohort is frozen; avoid retaining national history in this first pass.
+        limits.assigned_altitude_updates = 0;
     }
     let loaded = load_counted_with_limits(
         &feeds,
@@ -1918,6 +1920,57 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         ));
     }
     header.push(("replay state hash".to_string(), loaded.replay_hash.clone()));
+    let plan = if let Some(fix) = &args.arrival_meter_fix {
+        Some(crate::shell::arrival::build_plan(
+            fix,
+            &loaded.legacy,
+            &table,
+            &reports,
+        )?)
+    } else {
+        None
+    };
+    let assignment_scan = if let Some(plan) = &plan {
+        let issues = plan.assignment_issues();
+        if issues.is_empty() {
+            None
+        } else {
+            let expected = loaded
+                .inputs
+                .first()
+                .ok_or("arrival SFDPS input hash is missing")?;
+            let mut assignment_sealed = 0u64;
+            let scan = oa_bench::input::scan_sfdps_assignments(
+                &args.sfdps,
+                &guarded_opener(),
+                msg_limit(),
+                expected,
+                &issues,
+                &mut assignment_sealed,
+            )
+            .map_err(|e| e.to_string())?;
+            header.push((
+                "assigned-altitude scan".to_string(),
+                format!(
+                    "{} frame errors, {} documents refused, {} messages rejected, {} undecoded, {} sealed-window drops",
+                    scan.frame_errors,
+                    scan.documents_refused,
+                    scan.messages_rejected,
+                    scan.messages_undecoded,
+                    scan.sealed_window_dropped
+                ),
+            ));
+            Some(scan)
+        }
+    } else {
+        None
+    };
+    if plan.as_ref().is_some_and(|p| p.is_empty()) {
+        header.push((
+            "assigned-altitude scan".to_string(),
+            "skipped: no frozen baseline issue GUFIs".to_string(),
+        ));
+    }
     let l = &mut loaded.legacy;
     header.push((
         "legacy rows".to_string(),
@@ -1934,9 +1987,9 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     l.th = Default::default();
     l.handoffs = Default::default();
     l.beacons = Default::default();
-    if let Some(fix) = &args.arrival_meter_fix {
-        let text =
-            crate::shell::arrival::report(fix, l, &table, &reports, &built, &header, *sealed)?;
+    if let Some(plan) = &plan {
+        let query = assignment_scan.as_ref().map(|scan| &scan.query);
+        let text = crate::shell::arrival::report(plan, query, l, &built, &header, *sealed)?;
         write_all(
             &args.out,
             &[("arrival-report.txt".to_string(), text.clone())],
