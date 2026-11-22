@@ -52,6 +52,12 @@ feasibility; this is not a fitted vertical solver. Coverage at each horizon is d
 forecast; missing predicted positions and missing truth interpolation are counted separately.
 Forecast eligibility is determined before future truth is read.
 
+The pure core also exposes an opt-in wind route forecast that requires explicit true airspeed and
+one typed, cutoff-safe wind vector for every leg. It cancels crosswind in the wind triangle and
+refuses impossible crosswind or nonpositive along-route speed. All horizon positions, waypoint
+crossing checks, and meter ETA use the same leg speeds. The shell does not connect a weather source
+or infer airspeed from ADS-B ground speed, so the scored baseline remains unchanged.
+
 ## Method
 
 1. **Join.** Each flight is joined to one ADS-B aircraft by its address, or by its callsign when it has
