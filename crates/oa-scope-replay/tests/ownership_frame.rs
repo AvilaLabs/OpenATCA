@@ -369,3 +369,130 @@ fn narrow_ownership_status_is_reported_as_clipped_without_a_partial_line() {
         .all(|text| !text.starts_with("FLIGHT DAL56 OWNER")));
     assert!(!replay.list.faulted);
 }
+
+#[test]
+fn cold_start_requires_fresh_track_net_and_feed_inputs_independently() {
+    let mut replay = replay_new(
+        model(),
+        &ReplayConfig {
+            centre_lat_e7: 419_786_000,
+            centre_lon_e7: -879_048_000,
+            range_nm: 30.0,
+            width: WIDTH,
+            height: HEIGHT,
+            max_targets: 4,
+            style: DEFAULT_STYLE,
+            convert: DEFAULT_CONVERT,
+        },
+    )
+    .unwrap();
+    let mut states = state_table_new(10 * S, 0).unwrap();
+    let inhibits = inhibits_new();
+    let mut feeds = [
+        FeedStatus {
+            name: *b"ADSB\0\0\0\0",
+            state: FeedState::Lost { age_ms: 5_000 },
+        },
+        FeedStatus {
+            name: *b"RADAR\0\0\0",
+            state: FeedState::Lost { age_ms: 5_000 },
+        },
+    ];
+    let empty = RowStore::default();
+
+    let cold = replay_build_with_safety(
+        &mut replay,
+        &empty,
+        &Callsigns::default(),
+        T0,
+        "START",
+        &ReplaySafety {
+            states: &states,
+            inhibits: &inhibits,
+            feeds: &feeds,
+            newest_track_ns: None,
+            frozen_limit_ns: 5 * S,
+        },
+    )
+    .unwrap();
+    assert_eq!(cold.traffic.drawn, 0);
+    replay_raster(&mut replay).unwrap();
+    let cold_labels = texts(&replay);
+    assert!(cold_labels.contains(&"PICTURE FROZEN, NO TRACK UPDATE"));
+    assert!(cold_labels.contains(&"MSAW UNAVAILABLE: NEVER REPORTED, AGE --"));
+    assert!(cold_labels.contains(&"FEED ADSB LOST 5.0S"));
+    assert!(cold_labels.contains(&"FEED RADAR LOST 5.0S"));
+
+    // One synthetic accepted track update makes the picture fresh and restores ADS-B. The MSAW
+    // net has not reported and the separate radar feed is still lost.
+    feeds[0].state = FeedState::Live;
+    feeds[1].state = FeedState::Lost { age_ms: 6_000 };
+    let store = store_of(&output());
+    let first_track = replay_build_with_safety(
+        &mut replay,
+        &store,
+        &callsigns(),
+        T0,
+        "TRACK RETURNED",
+        &ReplaySafety {
+            states: &states,
+            inhibits: &inhibits,
+            feeds: &feeds,
+            newest_track_ns: Some(T0),
+            frozen_limit_ns: 5 * S,
+        },
+    )
+    .unwrap();
+    assert_eq!(first_track.traffic.drawn, 1);
+    replay_raster(&mut replay).unwrap();
+    let track_labels = texts(&replay);
+    assert!(track_labels
+        .iter()
+        .all(|line| !line.starts_with("PICTURE ")));
+    assert!(track_labels.contains(&"MSAW UNAVAILABLE: NEVER REPORTED, AGE --"));
+    assert!(track_labels.contains(&"FEED RADAR LOST 6.0S"));
+    assert!(track_labels
+        .iter()
+        .all(|line| !line.starts_with("FEED ADSB")));
+
+    // A fresh MSAW report and independent radar recovery clear only their own warnings. The other
+    // three nets remain unavailable because this startup supplied no reports for them.
+    state_report(&mut states, NetId::Msaw, NetReport::Running, T0 + S, T0 + S).unwrap();
+    feeds[1].state = FeedState::Live;
+    let recovered = replay_build_with_safety(
+        &mut replay,
+        &store,
+        &callsigns(),
+        T0 + S,
+        "HEALTH RETURNED",
+        &ReplaySafety {
+            states: &states,
+            inhibits: &inhibits,
+            feeds: &feeds,
+            newest_track_ns: Some(T0),
+            frozen_limit_ns: 5 * S,
+        },
+    )
+    .unwrap();
+    assert_eq!(recovered.traffic.drawn, 1);
+    replay_raster(&mut replay).unwrap();
+    let recovered_labels = texts(&replay);
+    assert!(recovered_labels
+        .iter()
+        .all(|line| !line.starts_with("PICTURE ")));
+    assert!(recovered_labels
+        .iter()
+        .all(|line| !line.starts_with("FEED ")));
+    assert!(recovered_labels
+        .iter()
+        .all(|line| !line.starts_with("MSAW ")));
+    assert!(recovered_labels
+        .iter()
+        .any(|line| line.starts_with("CONFLICT ALERT UNAVAILABLE: NEVER REPORTED")));
+    assert!(recovered_labels
+        .iter()
+        .any(|line| line.starts_with("AREA PROXIMITY UNAVAILABLE: NEVER REPORTED")));
+    assert!(recovered_labels
+        .iter()
+        .any(|line| line.starts_with("APPROACH PATH UNAVAILABLE: NEVER REPORTED")));
+}
