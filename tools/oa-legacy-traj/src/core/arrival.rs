@@ -1013,14 +1013,22 @@ mod tests {
             available_ms: snapshot.cutoff_ms,
             provenance: ConstraintProvenance::PublishedProcedure,
         };
-        snapshot.route[0].altitude_constraint = Some(constraint);
+        snapshot
+            .route
+            .first_mut()
+            .ok_or(ForecastRefusal::EmptyRoute)?
+            .altitude_constraint = Some(constraint);
         let predicted = forecast(&snapshot)?;
         assert_eq!(predicted.positions[0].altitude_ft, Some(7_000.0));
         assert_eq!(
             predicted.positions[0].vertical_status,
             VerticalStatus::Available
         );
-        snapshot.route[0].altitude_constraint = Some(AltitudeConstraint {
+        snapshot
+            .route
+            .first_mut()
+            .ok_or(ForecastRefusal::EmptyRoute)?
+            .altitude_constraint = Some(AltitudeConstraint {
             available_ms: snapshot.cutoff_ms + 1,
             ..constraint
         });
@@ -1035,7 +1043,11 @@ mod tests {
         snapshot.track.altitude_ft = Some(10_000.0);
         snapshot.track.speed_mps = Some(180.0);
         snapshot.track.vertical_rate_fpm = Some(-600.0);
-        snapshot.route[0].altitude_constraint = Some(AltitudeConstraint {
+        snapshot
+            .route
+            .first_mut()
+            .ok_or("missing constrained waypoint")?
+            .altitude_constraint = Some(AltitudeConstraint {
             minimum_ft: Some(9_000.0),
             maximum_ft: Some(11_000.0),
             available_ms: snapshot.cutoff_ms,
@@ -1115,7 +1127,11 @@ mod tests {
         conflict.track.vertical_rate_fpm = Some(-600.0);
         conflict.assigned_altitude_ft = Some(9_000.0);
         conflict.assigned_altitude_provenance = Some(ConstraintProvenance::SfdpsAssignedAltitude);
-        conflict.route[0].altitude_constraint = Some(AltitudeConstraint {
+        conflict
+            .route
+            .first_mut()
+            .ok_or(ForecastRefusal::EmptyRoute)?
+            .altitude_constraint = Some(AltitudeConstraint {
             minimum_ft: Some(9_500.0),
             maximum_ft: Some(11_000.0),
             available_ms: conflict.cutoff_ms,

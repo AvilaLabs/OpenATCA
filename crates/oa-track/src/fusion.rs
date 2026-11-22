@@ -3314,7 +3314,7 @@ mod tests {
             .iter()
             .zip(&out.t_ns)
             .all(|(&addr, &t)| addr == 0xA00001 && t >= 5 * NS_PER_S));
-        assert!(out.t_ns.iter().any(|&t| t == 5 * NS_PER_S));
+        assert!(out.t_ns.contains(&(5 * NS_PER_S)));
         assert_eq!(f.next_serial, 0);
         assert_eq!(tracker_live(&f.tracker).len(), 1);
     }
@@ -3391,8 +3391,8 @@ mod tests {
             .filter_map(|(&how, &key)| (how == HOW_INIT).then_some(key))
             .collect();
         assert_eq!(init_logs, [record.key; 3]);
-        assert!(out.addr.iter().any(|&addr| addr == record.key));
-        assert!(!out.addr.iter().any(|&addr| addr == KEY_RADAR_BASE));
+        assert!(out.addr.contains(&record.key));
+        assert!(!out.addr.contains(&KEY_RADAR_BASE));
     }
 
     fn easting(lines: &[Line]) -> Vec<Line> {
