@@ -211,3 +211,42 @@ strong model, an external authority advance revokes serving in the same abstract
 acceptance stores the durable state atomically with publication. The check is bounded to the states
 and transitions above. Dissemination of authority changes, real storage durability, cryptographic
 verification, and operational availability require separate evidence.
+
+## StagedRollout: bounded candidate qualification and rollback
+
+`StagedRollout.tla` models one candidate release across two replicas. The primary keeps the prior
+trusted release while the candidate is installed only on the shadow. Two concordant comparison
+steps are abstract independent evidence; `Qualify` and `Promote` are separate actions so a primary
+failure can occur after the last comparison but before qualification or promotion. A candidate
+failure or evidence disagreement quarantines the candidate and restores service to the prior
+release only when the primary remains healthy. If the primary fails during probation, the model
+allows an explicit unavailable state and cannot qualify the candidate without the trusted
+comparison peer. A later evidence revocation removes a promoted candidate from service; the prior
+release resumes only if it is healthy.
+
+The finite bound is one rollout, two replicas, one prior release, one candidate and two required
+comparison steps. `StagedRollout.cfg` checks type, untouched fallback, qualification-before-serving,
+single-serving, healthy-serving and explicit-unavailability invariants. Its action graph contains
+the positive path `InstallCandidate`, two `GoodComparison` actions, `Qualify`, then `Promote`, as
+well as both orderings of primary failure and qualification and candidate/evidence failure before
+or after promotion. No fairness or measured-liveness claim is made.
+
+Run the strong model from this directory with:
+
+```sh
+java -cp /path/to/tla2tools.jar tlc2.TLC -config StagedRollout.cfg StagedRollout.tla
+```
+
+`StagedRollout_WeakPromotion.cfg` is the non-vacuity control. It permits promotion before the
+qualification threshold while checking the same invariants; TLC is expected to produce a short
+counterexample to `NoUnqualifiedCandidateServing` (install, then premature promote):
+
+```sh
+java -cp /path/to/tla2tools.jar tlc2.TLC -config StagedRollout_WeakPromotion.cfg StagedRollout.tla
+```
+
+All comparison success/failure is abstract input to this policy model. It does not implement a
+release signer, comparator, deployment service, health monitor, automatic rollback mechanism, or
+operator/authority decision. In particular, when the primary fails before qualification, the
+policy prefers an explicit unavailable state over serving the unqualified candidate. This model
+does not claim availability when both replicas fail or establish M6's measured availability goal.
