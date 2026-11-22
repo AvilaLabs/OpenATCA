@@ -3,11 +3,13 @@
 //! a value so naming is testable. Frame stamps never drive flushing or naming.
 //!
 //! Files are named `<feed>-<UTC start>-<NNNN>.oaf.gz` or `.oaf` (UTC as `YYYYMMDDTHHMMSSZ`;
-//! `NNNN` counts from 0001 within one naming second). If the wall clock steps back during one
-//! recording, rotation keeps the last naming second until it catches up, so name order still
-//! follows creation order. Frames are never split across files. The total size of every `.oaf`
-//! and `.oaf.gz` file in the directory is capped; at the cap recording stops, once, with a
-//! warning, and nothing is deleted (a recording is evidence, A8).
+//! `NNNN` counts from 0001 within one naming second). A startup watermark from existing names
+//! for this feed keeps order across a process restart and a backward local-clock step. This
+//! assumes one writer for a feed and directory; `create_new` prevents overwrite but does not
+//! coordinate concurrent recorders or deduplicate broker deliveries. Frames are never split
+//! across files. The total size of every `.oaf` and `.oaf.gz` file in the directory is capped; at
+//! the cap recording stops, once, with a warning, and nothing is deleted (a recording is
+//! evidence, A8).
 //!
 //! Compressed recordings (oa-deflate, level 6) are a sequence of gzip members, one per file. The
 //! compressor is sync-flushed when the local whole second changes after the last
@@ -87,7 +89,7 @@ pub struct Recorder {
     scratch: Vec<u8>,
     stopped: bool,
     files_opened: u32,
-    last_file_name: Option<(i64, u32)>,
+    last_file_name: Option<(String, u32)>,
     rotations_after_clock_step_back: u64,
     implausible_stamps: u64,
     opener: Opener,
@@ -136,10 +138,73 @@ fn is_recording(p: &Path) -> bool {
         .is_some_and(|n| n.ends_with(".oaf") || n.ends_with(".oaf.gz"))
 }
 
+fn recording_name_watermark(path: &Path, feed: &str) -> Option<(String, u32)> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name
+        .strip_suffix(".oaf.gz")
+        .or_else(|| name.strip_suffix(".oaf"))?;
+    let prefix = format!("{feed}-");
+    let body = stem.strip_prefix(prefix.as_str())?;
+    let (stamp, number) = body.rsplit_once('-')?;
+    if number.len() != 4 || !number.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let number = number.parse::<u32>().ok()?;
+    if !(1..=MAX_SAME_SECOND).contains(&number) {
+        return None;
+    }
+    Some((canonical_utc_stamp(stamp)?.to_owned(), number))
+}
+
+/// Validates the fixed-width UTC stamp used in recording names. Its byte order is chronological.
+fn canonical_utc_stamp(stamp: &str) -> Option<&str> {
+    let bytes = stamp.as_bytes();
+    if bytes.len() != 16
+        || bytes.get(8) != Some(&b'T')
+        || bytes.get(15) != Some(&b'Z')
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i == 8 || i == 15 || b.is_ascii_digit())
+    {
+        return None;
+    }
+    let field = |start, end| {
+        std::str::from_utf8(bytes.get(start..end)?)
+            .ok()?
+            .parse::<u32>()
+            .ok()
+    };
+    let (year, month, day) = (field(0, 4)?, field(4, 6)?, field(6, 8)?);
+    let (hour, minute, second) = (field(9, 11)?, field(11, 13)?, field(13, 15)?);
+    if !(1..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(0..=23).contains(&hour)
+        || !(0..=59).contains(&minute)
+        || !(0..=59).contains(&second)
+    {
+        return None;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if !(1..=days_in_month).contains(&day) {
+        return None;
+    }
+
+    Some(stamp)
+}
+
 impl Recorder {
     /// Prepares `dir` (created if missing) and counts the bytes of existing `.oaf` and
     /// `.oaf.gz` files toward the cap. Startup refuses directories with more than
     /// [`DEFAULT_MAX_DIRECTORY_ENTRIES`] total entries, including unrelated entries.
+    /// The caller must provide one active writer per `(dir, feed)`; `create_new` prevents
+    /// overwrites but does not coordinate concurrent recorders.
     pub fn open(
         dir: &Path,
         feed: &str,
@@ -167,19 +232,19 @@ impl Recorder {
     ) -> io::Result<Recorder> {
         check_feed_label(feed).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         fs::create_dir_all(dir)?;
-        let total = existing_recording_bytes(dir, DEFAULT_MAX_DIRECTORY_ENTRIES)?;
+        let existing = existing_recording_state(dir, feed, DEFAULT_MAX_DIRECTORY_ENTRIES)?;
         Ok(Recorder {
             dir: dir.to_path_buf(),
             feed: feed.to_string(),
             format,
             rotate_bytes: rotate_bytes.max(1),
             max_bytes,
-            total,
+            total: existing.bytes,
             current: None,
             scratch: Vec::new(),
             stopped: false,
             files_opened: 0,
-            last_file_name: None,
+            last_file_name: existing.last_file_name,
             rotations_after_clock_step_back: 0,
             implausible_stamps: 0,
             opener,
@@ -412,22 +477,18 @@ impl Recorder {
     }
 
     fn create(&mut self, now_unix_secs: i64) -> io::Result<Current> {
-        let invalid_time = || {
+        let now_stamp = utc_stamp(now_unix_secs).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "local clock is outside the years 1 to 9999; no file name can be made",
             )
-        };
-        if !(UTC_MIN_SECS..=UTC_MAX_SECS).contains(&now_unix_secs) {
-            return Err(invalid_time());
-        }
-        let (stamp_secs, mut n) = match self.last_file_name {
-            Some((last_secs, last_number)) if last_secs >= now_unix_secs => {
-                (last_secs, last_number + 1)
+        })?;
+        let (stamp, mut n) = match &self.last_file_name {
+            Some((last_stamp, last_number)) if last_stamp >= &now_stamp => {
+                (last_stamp.clone(), (*last_number).saturating_add(1))
             }
-            _ => (now_unix_secs, 1),
+            _ => (now_stamp.clone(), 1),
         };
-        let stamp = utc_stamp(stamp_secs).ok_or_else(invalid_time)?;
         let ext = match self.format {
             Format::Gzip => "oaf.gz",
             Format::Raw => "oaf",
@@ -446,8 +507,8 @@ impl Recorder {
             match (self.opener)(&self.dir.join(name)) {
                 Ok(file) => {
                     self.files_opened += 1;
-                    self.last_file_name = Some((stamp_secs, n));
-                    if stamp_secs > now_unix_secs {
+                    self.last_file_name = Some((stamp.clone(), n));
+                    if stamp > now_stamp {
                         self.rotations_after_clock_step_back =
                             self.rotations_after_clock_step_back.saturating_add(1);
                     }
@@ -468,11 +529,25 @@ impl Recorder {
     }
 }
 
+fn existing_recording_bytes(dir: &Path, entry_limit: usize) -> io::Result<u64> {
+    existing_recording_state(dir, "", entry_limit).map(|state| state.bytes)
+}
+
+struct ExistingRecordingState {
+    bytes: u64,
+    last_file_name: Option<(String, u32)>,
+}
+
 // Keep the limit check before the counter increment as well as all entry processing.
 // This also prevents counter overflow when the private helper receives usize::MAX.
 #[allow(clippy::explicit_counter_loop)]
-fn existing_recording_bytes(dir: &Path, entry_limit: usize) -> io::Result<u64> {
+fn existing_recording_state(
+    dir: &Path,
+    feed: &str,
+    entry_limit: usize,
+) -> io::Result<ExistingRecordingState> {
     let mut total = 0u64;
+    let mut last_file_name = None;
     let mut entries = 0usize;
     // The recorder is capture: it checks against the compiled-in list and never fails closed on
     // a changed list file (oa-sealed, `Sealed::production_embedded`).
@@ -492,9 +567,17 @@ fn existing_recording_bytes(dir: &Path, entry_limit: usize) -> io::Result<u64> {
         let entry = entry?;
         if is_recording(&entry.path()) {
             total = total.saturating_add(entry.metadata()?.len());
+            if let Some(candidate) = recording_name_watermark(&entry.path(), feed) {
+                if last_file_name.is_none_or(|last| candidate > last) {
+                    last_file_name = Some(candidate);
+                }
+            }
         }
     }
-    Ok(total)
+    Ok(ExistingRecordingState {
+        bytes: total,
+        last_file_name,
+    })
 }
 
 /// Earliest Unix time [`utc_stamp`] and [`utc_iso`] accept: 0001-01-01T00:00:00Z.
@@ -562,10 +645,10 @@ pub fn format_recording(feed: &str, r: &Recorder) -> String {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod directory_limit_tests {
-    use super::existing_recording_bytes;
+    use super::{existing_recording_bytes, recording_name_watermark};
     use std::fs;
     use std::io::ErrorKind;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn temp_dir() -> PathBuf {
@@ -600,5 +683,32 @@ mod directory_limit_tests {
             3
         );
         let _ = fs::remove_dir_all(dir);
+    }
+
+    // REQ: OA-FEED-019
+    #[test]
+    fn recording_name_watermark_accepts_raw_and_gzip_and_rejects_noncanonical_names() {
+        assert_eq!(
+            recording_name_watermark(Path::new("clock-20231115T001320Z-0001.oaf"), "clock"),
+            Some(("20231115T001320Z".to_owned(), 1))
+        );
+        assert_eq!(
+            recording_name_watermark(Path::new("clock-20231115T001320Z-9999.oaf.gz"), "clock"),
+            Some(("20231115T001320Z".to_owned(), 9_999))
+        );
+        for name in [
+            "clock-20230229T001320Z-0001.oaf",
+            "clock-20231115T241320Z-0001.oaf",
+            "clock-20231115T001320Z-0000.oaf",
+            "clock-20231115T001320Z-10000.oaf.gz",
+            "other-20231115T001320Z-0001.oaf",
+            "clock-20231115T001320Z-0001.txt",
+        ] {
+            assert_eq!(
+                recording_name_watermark(Path::new(name), "clock"),
+                None,
+                "accepted noncanonical recording name {name}"
+            );
+        }
     }
 }

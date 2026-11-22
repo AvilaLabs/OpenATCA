@@ -93,6 +93,14 @@ touched and nothing is created. To go on recording, point `--record` at a direct
 entries. The cap bounds enumeration work by entry count; it makes no elapsed-time
 claim for filesystem metadata or other blocking I/O.
 
+In the same scan, the recorder seeds its naming watermark from the latest canonical UTC timestamp
+and four-digit suffix for the selected feed, across both `.oaf` and `.oaf.gz` files. A process
+restart followed by a backward local-clock step therefore continues after the last name, keeping
+lexical directory order aligned with creation order. Unrecognized or malformed recording names
+still count toward the byte cap, but do not set the watermark. This ordering guarantee assumes a
+single writer for a feed and directory. `create_new` prevents overwriting a colliding path; it does
+not coordinate concurrent recorders, fence multiple processes, or deduplicate broker deliveries.
+
 ## Bridge behaviour (adapters/scds-bridge)
 
 * One process per subscription. Argument: the path of the env file (`SCDS_JMS_URL`, `SCDS_VPN`,

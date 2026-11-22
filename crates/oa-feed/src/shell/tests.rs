@@ -1345,6 +1345,90 @@ fn rotation_after_wall_clock_step_back_keeps_file_replay_order() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+// REQ: OA-FEED-019
+#[test]
+fn restart_after_wall_clock_step_back_keeps_file_replay_order_across_utc_day() {
+    let dir = tmpdir("restart-clock-step");
+    let before_midnight = 1_700_000_000i64;
+    let after_midnight = before_midnight + 7_200;
+    let old_segment = frame(
+        1,
+        0,
+        0,
+        after_midnight * 1_000_000_000,
+        after_midnight * 1_000,
+        b"before restart",
+    );
+    let new_segment = frame(
+        1,
+        0,
+        1,
+        before_midnight * 1_000_000_000,
+        before_midnight * 1_000,
+        b"after restart",
+    );
+
+    {
+        let mut recorder = Recorder::open(&dir, "clock", 1, u64::MAX, Format::Gzip).unwrap();
+        assert_eq!(
+            recorder
+                .write_frame(&old_segment, after_midnight, after_midnight)
+                .unwrap(),
+            Outcome::Written
+        );
+        recorder.finish().unwrap();
+    }
+    {
+        let mut recorder = Recorder::open(&dir, "clock", 1, u64::MAX, Format::Raw).unwrap();
+        assert_eq!(
+            recorder
+                .write_frame(&new_segment, before_midnight, before_midnight)
+                .unwrap(),
+            Outcome::Written
+        );
+        recorder.finish().unwrap();
+    }
+
+    let names = files_in(&dir);
+    assert_eq!(
+        names,
+        [
+            "clock-20231115T001320Z-0001.oaf.gz",
+            "clock-20231115T001320Z-0002.oaf",
+        ]
+    );
+    let paths = names.iter().map(|name| dir.join(name)).collect::<Vec<_>>();
+    let replay = replay_files(&paths).unwrap();
+    assert_eq!(replay.health.messages, 2);
+    assert_eq!(replay.health.gaps, 0);
+    assert_eq!(replay.health.regressions, 0);
+    assert_eq!(replay.health.seq_last, 1);
+    assert_eq!(replay.health.first_recv_ns, after_midnight * 1_000_000_000);
+    assert_eq!(replay.health.last_recv_ns, before_midnight * 1_000_000_000);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+// REQ: OA-FEED-189
+#[test]
+fn malformed_recording_names_still_count_toward_startup_size_cap() {
+    let dir = tmpdir("malformed-recording-name-cap");
+    let existing_name = "clock-20230229T001320Z-0001.oaf";
+    let existing_bytes = b"kept evidence";
+    std::fs::write(dir.join(existing_name), existing_bytes).unwrap();
+    let mut recorder =
+        Recorder::open(&dir, "clock", 1, existing_bytes.len() as u64, Format::Raw).unwrap();
+    assert_eq!(recorder.total_bytes(), existing_bytes.len() as u64);
+    assert_eq!(
+        recorder
+            .write_frame(&msg(0, b"after restart"), 1_700_000_000, 1_700_000_000)
+            .unwrap(),
+        Outcome::StoppedNow
+    );
+    assert_eq!(recorder.total_bytes(), existing_bytes.len() as u64);
+    assert_eq!(files_in(&dir), [existing_name]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 // REQ: OA-FEED-027, OA-FEED-033
 #[test]
 fn a_clock_step_back_flushes_a_quiet_compressed_feed() {
