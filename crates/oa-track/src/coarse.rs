@@ -586,9 +586,17 @@ fn point_grid_radix_pass(source: &[u64], target: &mut [u64], shift: usize) -> bo
 
 /// In-place heapsort with no allocation. Each sort-loop iteration, comparison, and swap consumes
 /// one work unit before it occurs; `false` means the caller must discard the partially sorted
-/// slice. It is concrete to the grid's packed `u64` keys; near-list indexes use the bounded bitset
-/// routine below.
+/// slice. The grid uses packed `u64` keys.
 pub fn sort_budgeted(items: &mut [u64], remaining: &mut usize, spent: &mut usize) -> bool {
+    sort_values_budgeted(items, remaining, spent)
+}
+
+/// The tracker also uses the same counted ordering for packed radar distance keys.
+pub(crate) fn sort_values_budgeted<T: Ord>(
+    items: &mut [T],
+    remaining: &mut usize,
+    spent: &mut usize,
+) -> bool {
     let len = items.len();
     if len < 2 {
         return true;
@@ -620,8 +628,8 @@ pub fn sort_budgeted(items: &mut [u64], remaining: &mut usize, spent: &mut usize
     true
 }
 
-fn sift_down(
-    items: &mut [u64],
+fn sift_down<T: Ord>(
+    items: &mut [T],
     mut root: usize,
     end: usize,
     remaining: &mut usize,

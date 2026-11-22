@@ -178,6 +178,13 @@ pub const MAX_BUCKET_PAIRS: usize = 1 << 18;
 /// given the exact gate costs one unit (about two microseconds) and so does a candidate the coarse
 /// window is applied to (much less), so this is about the longest a bucket can take.
 pub const MAX_BUCKET_TESTS: usize = 1 << 20;
+/// Limit: ordering candidates of plots whose coarse lists exceed their remaining visit share.
+/// At most one plot per radar per bucket uses this allowance. For n supported tracks, reserve
+/// 2n for distance calculation and retained keys, 3n for the outer heap loops, and at most
+/// 1.5n sift paths of floor(log2(n)) levels with up to four charges per level. This covers the
+/// entire ordering even at the configured track limit. An incomplete ordering defers its gates.
+pub const MAX_ASSOC_ORDER_WORK: usize =
+    MAX_ASSOC_TRACKS * (5 + 6 * MAX_ASSOC_TRACKS.ilog2() as usize);
 /// Initiation work units shared by every radar in one bucket. One million units matches the
 /// existing association work ceiling, so their separate caps give two million charged units
 /// combined. One unit is a candidate visit or exact pair. Grid construction charges input visits

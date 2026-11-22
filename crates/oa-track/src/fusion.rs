@@ -62,8 +62,8 @@ use crate::assoc::{
 use crate::coarse::{
     coarse_buffer, coarse_build, coarse_distance, coarse_new, coarse_passes, coarse_query,
     point_grid_buffer, point_grid_build_budgeted, point_grid_new, point_grid_query_budgeted,
-    point_grid_radix_buffer, sort_unique_indices_budgeted, CoarseIndex, PointGrid,
-    PointGridBuildResult, PointGridQueryResult, SortUniqueResult,
+    point_grid_radix_buffer, sort_unique_indices_budgeted, sort_values_budgeted, CoarseIndex,
+    PointGrid, PointGridBuildResult, PointGridQueryResult, SortUniqueResult,
 };
 use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
@@ -71,12 +71,12 @@ use crate::fusion_params::{
     CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_ORDER_WORDS, CAND_SLACK_M,
     COARSE_M, COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2,
     GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, INIT_CELL_M,
-    INIT_STD_M, INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS,
-    MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_INIT_WORK, MAX_PENDING, MAX_RADARS,
-    MAX_SOLVE_TRACKS, MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N,
-    RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M,
-    REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS,
-    REG_REF_SLOTS, REG_REF_SLOTS_MAX, RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
+    INIT_STD_M, INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_ORDER_WORK,
+    MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES,
+    MAX_INIT_WORK, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS, MAX_TRACK_RECS, RADAR_DISAGREE_SCANS,
+    RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS,
+    REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS,
+    REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX, RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
 use crate::radar::{
@@ -591,6 +591,8 @@ pub struct Fusion {
     /// start for the tracker's capacity.
     grids: Vec<CoarseIndex>,
     cand_buf: Vec<u32>,
+    /// Scratch for one packed distance and track index per configured association slot.
+    cand_rank_buf: Vec<u128>,
     /// Work (coarse candidates and exact gates) one bucket's associations may spend in all (a
     /// field so a test can lower it).
     bucket_tests_max: usize,
@@ -703,6 +705,7 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
             .map(|_| coarse_new(cfg.tracker.max_tracks))
             .collect(),
         cand_buf: Vec::with_capacity(cfg.tracker.max_tracks),
+        cand_rank_buf: Vec::with_capacity(cfg.tracker.max_tracks),
         bucket_tests_max: MAX_BUCKET_TESTS,
         init_work_left: MAX_INIT_WORK,
         init_capped_mask: 0,
@@ -756,6 +759,10 @@ pub fn fusion_assoc_buffers(f: &Fusion) -> Vec<(usize, usize)> {
     // The grid of each radar and the candidates of a plot.
     v.extend(f.grids.iter().map(coarse_buffer));
     v.push((f.cand_buf.as_ptr() as usize, f.cand_buf.capacity()));
+    v.push((
+        f.cand_rank_buf.as_ptr() as usize,
+        f.cand_rank_buf.capacity(),
+    ));
     v
 }
 
@@ -1552,10 +1559,37 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
     })
 }
 
-/// Gates the anonymous plot `a` of `ra` against the tracks near it: the coarse window (on the
-/// tracks of the grid cells it can reach, the nearest first if the budget is short, each charged to `budget`) and
-/// then the exact gate. Returns the work spent; a plot that finds the budget or the pair limit
-/// spent stops and marks the association capped.
+/// Merges two sorted, disjoint candidate lists with no new allocation. The check bounds the
+/// added slots and at most one backward merge step per candidate before filling either.
+fn merge_assoc_candidates(candidates: &mut Vec<u32>, wide: &[u32]) -> Option<()> {
+    if wide.is_empty() {
+        return Some(());
+    }
+    const MAX_MERGE_WORK: usize = MAX_ASSOC_TRACKS + WIDE_TRACKS_MAX;
+    let total = candidates.len().checked_add(wide.len())?;
+    if total > candidates.capacity() || total.checked_add(wide.len())? > MAX_MERGE_WORK {
+        return None;
+    }
+    let mut left = candidates.len();
+    let mut right = wide.len();
+    candidates.resize(total, 0);
+    while right != 0 {
+        let &b = wide.get(right - 1)?;
+        let previous = left.checked_sub(1).and_then(|i| candidates.get(i).copied());
+        let slot = candidates.get_mut(left + right - 1)?;
+        if let Some(a) = previous.filter(|&a| a > b) {
+            *slot = a;
+            left -= 1;
+        } else {
+            *slot = b;
+            right -= 1;
+        }
+    }
+    Some(())
+}
+
+/// Gates the anonymous plot's coarse and exact pairs within the shared visit budget.
+/// A capped plot ranks candidates once under a separate, bounded per-radar allowance.
 fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> usize {
     let Some(&j) = ra.anon.get(a) else { return 0 };
     let Some(p) = ra.plots.get(j) else { return 0 };
@@ -1572,14 +1606,11 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
         cand.extend(0..ra.tracks.len() as u32);
     } else {
         coarse_query(&ra.grid, &mut cand, prho, paz, ra.dh_max, COARSE_STD_M);
-        // The wide tracks are in no cell: add them, and keep the candidates in track order.
-        if !ra.wide.is_empty() {
-            for &w in &ra.wide {
-                if !push_within(&mut cand, w) {
-                    f.stats.scratch_full += 1;
-                }
-            }
-            cand.sort_unstable();
+        if merge_assoc_candidates(&mut cand, &ra.wide).is_none() {
+            f.stats.scratch_full += 1;
+            f.cand_buf = cand;
+            ra.capped = true;
+            return 0;
         }
     }
     // Visiting a candidate is work: charged, counted, and the plot stops where the budget does.
@@ -1592,23 +1623,19 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
     } else {
         budget - budget / 4
     };
+    if !brute && visits < cand.len() {
+        ra.capped = true;
+        if visits == 0 || !rank_assoc_candidates(f, ra, &mut cand, (prho, paz), visits) {
+            // No partial gates from this plot. Initiation receives the existing ungated decision.
+            f.cand_buf = cand;
+            return 0;
+        }
+    }
     f.stats.coarse_visits += visits as u64;
     if f.cfg.association_diagnostics {
         ra.coarse_visits = ra.coarse_visits.saturating_add(visits as u64);
     }
     let mut spent = visits;
-    if !brute && visits < cand.len() {
-        // Keep the nearest, not the lowest numbered (sorted in place: nothing is allocated).
-        let key = |ti: u32| match (ra.tracks.get(ti as usize), ra.skip.get(ti as usize)) {
-            (Some(t), Some(false)) => {
-                coarse_distance((prho, paz), (t.rho, t.az, t.ground, t.sigma))
-            }
-            _ => f64::INFINITY,
-        };
-        cand.sort_unstable_by(|&x, &y| oa_math::cmp_canon_f64(key(x), key(y)).then(x.cmp(&y)));
-        cand.truncate(visits);
-        ra.capped = true;
-    }
     for &ti in &cand {
         let ti = ti as usize;
         let (Some(t), false) = (ra.tracks.get(ti), ra.skip.get(ti).copied().unwrap_or(false))
@@ -1695,6 +1722,54 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
     f.cand_buf = cand;
     ra.work += spent;
     spent
+}
+
+fn rank_assoc_candidates(
+    f: &mut Fusion,
+    radar: &RadarAssoc,
+    cand: &mut Vec<u32>,
+    plot: (f64, f64),
+    visits: usize,
+) -> bool {
+    // Both passes are bounded: one distance per candidate and at most one copy per visit.
+    let Some(mut order_left) = cand
+        .len()
+        .checked_add(visits)
+        .and_then(|work| MAX_ASSOC_ORDER_WORK.checked_sub(work))
+    else {
+        return false;
+    };
+    let ranked = &mut f.cand_rank_buf;
+    if cand.len() > ranked.capacity() {
+        f.stats.scratch_full += 1;
+        return false;
+    }
+    ranked.clear();
+    for &index in cand.iter() {
+        let distance = match (
+            radar.tracks.get(index as usize),
+            radar.skip.get(index as usize),
+        ) {
+            (Some(t), Some(false)) => coarse_distance(plot, (t.rho, t.az, t.ground, t.sigma)),
+            _ => f64::INFINITY,
+        };
+        // Finite nonnegative IEEE magnitudes and positive infinity order by their bits.
+        // Normalize signed zero. coarse_distance maps NaN geometry to zero.
+        let bits = if distance > 0.0 {
+            distance.to_bits()
+        } else {
+            0
+        };
+        ranked.push((u128::from(bits) << u32::BITS) | u128::from(index));
+    }
+    let mut spent = 0;
+    if !sort_values_budgeted(ranked, &mut order_left, &mut spent) {
+        return false;
+    }
+    cand.clear();
+    // Distance is the high portion of the key. The low portion is the track index.
+    cand.extend(ranked.iter().take(visits).map(|&key| key as u32));
+    true
 }
 
 /// The third part of one radar's association: the assignment of the gated pairs, and the
@@ -4629,6 +4704,7 @@ mod tests {
         // the exact gates).
         let mut f = make_fusion_sites(&[SITE], 5_000);
         f.bucket_tests_max = 100;
+        let buffers_before = fusion_assoc_buffers(&f);
         let mut out = output_new(1 << 18);
         let mut rng = Rng::from_seed(31);
         let at: Vec<(f64, f64)> = (0..5_000)
@@ -4648,6 +4724,8 @@ mod tests {
         fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
         let st = fusion_stats(&f);
         assert_eq!(st.bucket_work_capped, 1, "{st:?}");
+        assert_eq!(st.coarse_visits, 75, "{st:?}");
+        assert_eq!(fusion_assoc_buffers(&f), buffers_before);
         let log = fusion_assign_log(&f);
         let i = log.label.iter().position(|&l| l == 0);
         assert!(i.is_some(), "the plot was not associated: {st:?}");
