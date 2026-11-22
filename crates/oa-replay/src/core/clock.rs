@@ -641,9 +641,18 @@ mod proofs {
                 assert!(matches!(tick, Tick::Step { .. }));
             }
         }
-        kani::cover!(matches!(tick, Tick::Step { .. }) && !back);
-        kani::cover!(matches!(tick, Tick::Step { .. }) && back);
-        kani::cover!(c.steps_outvoted > before.steps_outvoted);
+        kani::cover!(
+            matches!(tick, Tick::Step { .. }) && !back,
+            "confirmed forward step"
+        );
+        kani::cover!(
+            matches!(tick, Tick::Step { .. }) && back,
+            "backward step with sufficient votes"
+        );
+        kani::cover!(
+            c.steps_outvoted > before.steps_outvoted,
+            "backward step held after losing the vote"
+        );
     }
 
     // REQ: OA-RPL-100
