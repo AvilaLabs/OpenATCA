@@ -297,3 +297,43 @@ TLC 2.19 with Java 21, two workers and a 1 GB heap ran both configurations.
 The model assumes durable fence state survives restart and the external authority observes the
 acknowledgement rule. It covers publication at one sink. Storage faults, acknowledgement
 authentication, multiple sinks, and fairness need separate checks.
+
+## ApplyAckRecovery: lost acknowledgement and retry after worker restart
+
+`ApplyAckRecovery.tla` models one sender-local key (generation, source, sequence), two worker
+incarnations, one good digest, one conflicting digest, one initial application and at most one
+retry. The sender does not receive the first acknowledgement. Worker 1 crashes after application,
+worker 2 restarts, and the sender retries the same key and digest. The abstract downstream effect
+count is bounded to 0..2 and attempt count to 0..1. The strong model's fair `AcceptedRetryPath`
+property requires acceptance of the retry, delivery of its acknowledgement, and a single total
+effect.
+
+With `AtomicCommit = TRUE`, applying the effect and recording its idempotency decision are one
+transition. A same-key, same-digest retry is accepted without another effect; a same-key,
+different-digest probe is refused. The strong config checks at-most-once effect, effect/decision
+coupling, identity binding, collision refusal, and the fair positive path to an accepted retry.
+`AtomicCommit = FALSE` is a deliberately weak control: the effect and durable decision are separate
+transitions. A crash can occur after the first effect and lost acknowledgement but before the
+decision, so the replacement accepts the retry and produces a second effect. The weak config checks
+that `AtMostOnce` fails; its expected counterexample is first effect, lost ACK, crash before ledger
+commit, restart, then a second effect on the same-key retry. Results are pending the coordinator's
+TLC run.
+
+Run the strong model from this directory with:
+
+```sh
+java -cp /path/to/tla2tools.jar tlc2.TLC -config ApplyAckRecovery.cfg ApplyAckRecovery.tla
+```
+
+Run the intentionally weak control with:
+
+```sh
+java -cp /path/to/tla2tools.jar tlc2.TLC -config ApplyAckRecovery_WeakCommit.cfg ApplyAckRecovery.tla
+```
+
+This finite model assumes an atomic durable idempotency record plus downstream effect in the strong
+variant. It does not establish that a real storage system can provide that atomicity, that the
+effect can be rolled back or queried, or that an ACK is authenticated. Digest strings stand for
+content identities; no hash or wire format is implemented. The model has no retries beyond the
+single retry, no generation authority changes, clock, network service, external publication,
+operational policy, or measured liveness claim.
