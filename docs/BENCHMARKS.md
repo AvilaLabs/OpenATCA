@@ -260,6 +260,8 @@ measurement. Each radar reports the work available at the start of its batches, 
 requested and denied retirement reservations, exact pair tests, capped batches, and refused plots.
 Add `--association-diagnostics` to compare the anonymous plots each radar received, how many
 completed candidate gating, and the coarse candidate visits and exact checks they required.
+The `fusion.pairs_rejected_by_altitude` counter records pairs refused by the vertical gate
+before forecasting horizontal motion.
 
 Run this radar-only cold start on both revisions with identical traffic settings. The three radars
 cover the same stress area. The score measures identities at 75 seconds of simulated traffic.

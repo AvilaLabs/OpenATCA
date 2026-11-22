@@ -4490,6 +4490,21 @@ mod tests {
             }
         }
         assert!(passed > 0 && rejected > 0);
+
+        let no_altitude = key + 1;
+        for k in 6..10 {
+            let mut report = adsb_fix(no_altitude, k * NS_PER_S);
+            report.alt_ft = NONE_I32;
+            fusion_adsb(&mut f, &report);
+        }
+        fusion_advance(&mut f, 11 * NS_PER_S, &mut out);
+        let (row, _) =
+            tracker_predict_if_altitude(&f.tracker, no_altitude, 11 * NS_PER_S, |_, _, _| {
+                panic!("an absent altitude supplies no gate evidence")
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.flags & O_HAS_ALT, 0);
     }
 
     // REQ: OA-TRK-177
