@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "usage: oa-legacy-traj --sfdps <dir> --tbfm <dir> --tfms <dir> --adsb <clip.oaf> [--adsb <clip.oaf> ...] --out <dir>
        [--nasr <zip>] [--places <csv>] [--cut-nm <nm>] [--runway-nm <nm>] [--landing-gap-s <s>] [--step-s <s>]
-       oa-legacy-traj --sfdps <dir> --tbfm <dir> --adsb <clip.oaf> --out <dir> --nasr <zip> --arrival-meter-fix <name>
+       oa-legacy-traj --sfdps <dir> --tbfm <dir> --adsb <clip.oaf> --out <dir> --nasr <zip> --arrival-meter-fix <name> [--diagnose-arrival-vertical-rate]
 defaults: --cut-nm 2 (the headline crossing cut; sensitivity cuts 0.5, 1, 2 and 5 NM are always run), --runway-nm 5, --landing-gap-s 30, --step-s 5;
           no --nasr and no --places (no point or airport then has a place)
 fixed settings: leg-airport distance 10 NM, leg window 3 h, landing persistence 30 s, landing altitude 1000 ft above the airport or 80 m/s, longest look-ahead 120 min, clip box edge margin 10 NM";
@@ -25,6 +25,8 @@ pub struct Args {
     pub places: Option<PathBuf>,
     /// A single metering fix for the issue-time arrival forecast exercise.
     pub arrival_meter_fix: Option<String>,
+    /// Include the bounded raw ADS-B rate corroboration proxy in the arrival report.
+    pub diagnose_arrival_vertical_rate: bool,
     /// A truth path counts as at a point within this, nautical miles.
     pub cut_nm: f64,
     /// A landing counts within this of the airport reference point, nautical miles.
@@ -50,6 +52,7 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         (None, None, None);
     let mut adsb: Vec<PathBuf> = Vec::new();
     let mut arrival_meter_fix = None;
+    let mut diagnose_arrival_vertical_rate = false;
     let (mut cut, mut runway, mut gap, mut step): (
         Option<f64>,
         Option<f64>,
@@ -59,6 +62,12 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
         match flag.as_str() {
+            "--diagnose-arrival-vertical-rate" => {
+                if diagnose_arrival_vertical_rate {
+                    return Err(format!("{flag} given twice"));
+                }
+                diagnose_arrival_vertical_rate = true;
+            }
             "--arrival-meter-fix" => {
                 let fix = it.next().filter(|value| {
                     !value.is_empty()
@@ -116,6 +125,9 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
     if arrival_meter_fix.is_none() && tfms.is_none() {
         return Err("--tfms is required for the legacy comparison".to_string());
     }
+    if diagnose_arrival_vertical_rate && arrival_meter_fix.is_none() {
+        return Err("--diagnose-arrival-vertical-rate requires --arrival-meter-fix".to_string());
+    }
     if arrival_meter_fix.is_some() && nasr.is_none() && places.is_none() {
         return Err("--arrival-meter-fix needs --nasr or --places".to_string());
     }
@@ -136,9 +148,53 @@ pub fn parse(argv: &[String]) -> Result<Args, String> {
         nasr,
         places,
         arrival_meter_fix,
+        diagnose_arrival_vertical_rate,
         cut_nm: cut.unwrap_or(2.0),
         runway_nm: runway.unwrap_or(5.0),
         landing_gap_s: landing_gap_s as i64,
         step_s: step_s as i64,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    fn base(arrival: bool) -> Vec<String> {
+        let mut args = [
+            "--sfdps", "sfdps", "--tbfm", "tbfm", "--adsb", "clip.oaf", "--out", "out",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        if arrival {
+            args.extend(
+                ["--arrival-meter-fix", "ORD", "--places", "places.csv"].map(str::to_string),
+            );
+        } else {
+            args.extend(["--tfms", "tfms"].map(str::to_string));
+        }
+        args
+    }
+
+    #[test]
+    fn raw_rate_diagnostic_option_is_arrival_only() {
+        assert!(
+            !parse(&base(true))
+                .expect("default arrival options")
+                .diagnose_arrival_vertical_rate
+        );
+        let mut arrival = base(true);
+        arrival.push("--diagnose-arrival-vertical-rate".to_string());
+        assert!(
+            parse(&arrival)
+                .expect("arrival option accepted")
+                .diagnose_arrival_vertical_rate
+        );
+
+        let mut legacy = base(false);
+        legacy.push("--diagnose-arrival-vertical-rate".to_string());
+        assert!(parse(&legacy)
+            .expect_err("legacy mode refuses arrival-only option")
+            .contains("requires --arrival-meter-fix"));
+    }
 }

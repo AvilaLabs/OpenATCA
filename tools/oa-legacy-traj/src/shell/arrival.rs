@@ -4,7 +4,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use oa_adsb::{Reports, F_GROUND, F_RATE_GEOM, F_STALE, NONE_I32, NONE_U16};
+use oa_adsb::{
+    Reports, F_ALT_GEOM, F_GROUND, F_RATE_GEOM, F_STALE, NONE_I32, NONE_U16, NONE_U8,
+    SOURCE_UNKNOWN,
+};
 use oa_bench::adsb_truth::{query, BuiltTruth};
 use oa_bench::assignment::{
     assignment_at_issue, AssignmentEvidence, AssignmentIssue, AssignmentQuery,
@@ -40,15 +43,77 @@ const MAX_METER_PLAN_PAIRS: usize = 500_000;
 const MAX_ESTIMATES_FOR_FIX: usize = 500_000;
 const MAX_ISSUES: usize = MAX_ASSIGNMENT_ISSUES;
 const MAX_TRACK_AGE_MS: i64 = 30_000;
+const MAX_RATE_DIAGNOSTIC_ROWS: usize = 128;
+const MAX_RATE_DIAGNOSTIC_GAP_NS: i64 = 10_000_000_000;
+const RATE_DIAGNOSTIC_TOLERANCE_FT: f64 = 50.0;
 const TRUTH_STEP_MS: i64 = 5_000;
 const TRUTH_STEPS: i64 = 720;
 const MIN_FROM_FIX_M: f64 = 40.0 * 1852.0;
 const MAX_FROM_FIX_M: f64 = 200.0 * 1852.0;
 
 enum TrackSelection {
-    Available(TrackState, f64),
+    Available(TrackState, f64, usize),
     SourceFlagStale,
     Refused,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawRateStatus {
+    MissingRate,
+    GeometricRate,
+    MissingBarometricAltitude,
+    UnknownSelectedSource,
+    NonAdsbSelectedSource,
+    NoComparablePrior,
+    PriorSourceUnknown,
+    PriorSourceNonAdsb,
+    PriorSourceMismatch,
+    PriorNotBarometricOrStale,
+    PriorTimestampConflict,
+    ScanLimit,
+    Agrees,
+    Contradicts,
+}
+
+#[derive(Default)]
+// A7.2: cold aggregate over the frozen issue cohort, bounded by MAX_ISSUES; guard waived.
+struct RawRateDiagnostic {
+    missing_rate: usize,
+    geometric_rate: usize,
+    missing_baro_altitude: usize,
+    unknown_selected_source: usize,
+    non_adsb_selected_source: usize,
+    no_comparable_prior: usize,
+    prior_source_unknown: usize,
+    prior_source_non_adsb: usize,
+    prior_source_mismatch: usize,
+    prior_not_baro_or_stale: usize,
+    prior_timestamp_conflict: usize,
+    scan_limit: usize,
+    agrees: usize,
+    contradicts: usize,
+}
+
+impl RawRateDiagnostic {
+    fn add(&mut self, status: RawRateStatus) {
+        let count = match status {
+            RawRateStatus::MissingRate => &mut self.missing_rate,
+            RawRateStatus::GeometricRate => &mut self.geometric_rate,
+            RawRateStatus::MissingBarometricAltitude => &mut self.missing_baro_altitude,
+            RawRateStatus::UnknownSelectedSource => &mut self.unknown_selected_source,
+            RawRateStatus::NonAdsbSelectedSource => &mut self.non_adsb_selected_source,
+            RawRateStatus::NoComparablePrior => &mut self.no_comparable_prior,
+            RawRateStatus::PriorSourceUnknown => &mut self.prior_source_unknown,
+            RawRateStatus::PriorSourceNonAdsb => &mut self.prior_source_non_adsb,
+            RawRateStatus::PriorSourceMismatch => &mut self.prior_source_mismatch,
+            RawRateStatus::PriorNotBarometricOrStale => &mut self.prior_not_baro_or_stale,
+            RawRateStatus::PriorTimestampConflict => &mut self.prior_timestamp_conflict,
+            RawRateStatus::ScanLimit => &mut self.scan_limit,
+            RawRateStatus::Agrees => &mut self.agrees,
+            RawRateStatus::Contradicts => &mut self.contradicts,
+        };
+        *count += 1;
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -385,11 +450,10 @@ fn track_at(reports: &Reports, rows: &[ReportIx], cutoff: i64) -> TrackSelection
             .get(ix.0 as usize)
             .is_some_and(|&t| t <= cutoff_ns)
     });
-    let Some(picked) = i
-        .checked_sub(1)
-        .and_then(|ix| rows.get(ix))
-        .map(|ix| ix.0 as usize)
-    else {
+    let Some(selected_position) = i.checked_sub(1) else {
+        return TrackSelection::Refused;
+    };
+    let Some(picked) = rows.get(selected_position).map(|ix| ix.0 as usize) else {
         return TrackSelection::Refused;
     };
     let Some(&time_ns) = reports.time_ns.get(picked) else {
@@ -439,7 +503,155 @@ fn track_at(reports: &Reports, rows: &[ReportIx], cutoff: i64) -> TrackSelection
         vertical_rate_fpm: (rate != NONE_I32 && flags & F_RATE_GEOM == 0)
             .then_some(f64::from(rate)),
     };
-    TrackSelection::Available(track, f64::from(course) / 10.0)
+    TrackSelection::Available(track, f64::from(course) / 10.0, selected_position)
+}
+
+fn raw_rate_status(
+    reports: &Reports,
+    rows: &[ReportIx],
+    selected_position: usize,
+) -> RawRateStatus {
+    let Some(&selected_ix) = rows.get(selected_position) else {
+        return RawRateStatus::NoComparablePrior;
+    };
+    let selected_ix = selected_ix.0 as usize;
+    let (
+        Some(&selected_time),
+        Some(&selected_source),
+        Some(&selected_flags),
+        Some(&selected_alt),
+        Some(&selected_rate),
+    ) = (
+        reports.time_ns.get(selected_ix),
+        reports.source.get(selected_ix),
+        reports.flags.get(selected_ix),
+        reports.baro_alt_ft.get(selected_ix),
+        reports.vrate_fpm.get(selected_ix),
+    )
+    else {
+        return RawRateStatus::NoComparablePrior;
+    };
+    if selected_rate == NONE_I32 {
+        return RawRateStatus::MissingRate;
+    }
+    if selected_flags & F_RATE_GEOM != 0 {
+        return RawRateStatus::GeometricRate;
+    }
+    if selected_alt == NONE_I32 || selected_flags & (F_ALT_GEOM | F_GROUND) != 0 {
+        return RawRateStatus::MissingBarometricAltitude;
+    }
+    if selected_source == NONE_U8 || selected_source == SOURCE_UNKNOWN {
+        return RawRateStatus::UnknownSelectedSource;
+    }
+    if !is_adsb_source(selected_source) {
+        return RawRateStatus::NonAdsbSelectedSource;
+    }
+    if selected_position > 0
+        && rows
+            .get(selected_position - 1)
+            .and_then(|ix| reports.time_ns.get(ix.0 as usize))
+            == Some(&selected_time)
+    {
+        return RawRateStatus::PriorTimestampConflict;
+    }
+    if rows
+        .get(selected_position + 1)
+        .and_then(|ix| reports.time_ns.get(ix.0 as usize))
+        == Some(&selected_time)
+    {
+        return RawRateStatus::PriorTimestampConflict;
+    }
+
+    let mut cursor = selected_position;
+    let mut scanned = 0usize;
+    let mut saw_unknown = false;
+    let mut saw_non_adsb = false;
+    let mut saw_source_mismatch = false;
+    let mut saw_incompatible_baro = false;
+    while cursor > 0 && scanned < MAX_RATE_DIAGNOSTIC_ROWS {
+        let Some(&row_ix) = rows.get(cursor - 1) else {
+            break;
+        };
+        let row_ix = row_ix.0 as usize;
+        let Some(&row_time) = reports.time_ns.get(row_ix) else {
+            break;
+        };
+        if row_time >= selected_time {
+            return RawRateStatus::PriorTimestampConflict;
+        }
+        let Some(gap_ns) = selected_time.checked_sub(row_time) else {
+            return RawRateStatus::PriorTimestampConflict;
+        };
+        if gap_ns > MAX_RATE_DIAGNOSTIC_GAP_NS {
+            break;
+        }
+        let group_start = cursor - 1;
+        if group_start > 0 {
+            if scanned + 1 >= MAX_RATE_DIAGNOSTIC_ROWS {
+                return RawRateStatus::ScanLimit;
+            }
+            if rows
+                .get(group_start - 1)
+                .and_then(|ix| reports.time_ns.get(ix.0 as usize))
+                == Some(&row_time)
+            {
+                return RawRateStatus::PriorTimestampConflict;
+            }
+        }
+        scanned += 1;
+        let Some(&source) = reports.source.get(row_ix) else {
+            saw_unknown = true;
+            cursor = group_start;
+            continue;
+        };
+        if source == NONE_U8 || source == SOURCE_UNKNOWN {
+            saw_unknown = true;
+        } else if !is_adsb_source(source) {
+            saw_non_adsb = true;
+        } else if source != selected_source {
+            saw_source_mismatch = true;
+        } else {
+            let (Some(&flags), Some(&alt)) =
+                (reports.flags.get(row_ix), reports.baro_alt_ft.get(row_ix))
+            else {
+                saw_incompatible_baro = true;
+                cursor = group_start;
+                continue;
+            };
+            if flags & (F_STALE | F_ALT_GEOM | F_GROUND) != 0 || alt == NONE_I32 {
+                saw_incompatible_baro = true;
+            } else {
+                let rate_delta_ft = f64::from(selected_rate) * (gap_ns as f64 / 60_000_000_000.0);
+                let observed_delta_ft = f64::from(selected_alt) - f64::from(alt);
+                return if (rate_delta_ft - observed_delta_ft).abs() <= RATE_DIAGNOSTIC_TOLERANCE_FT
+                {
+                    RawRateStatus::Agrees
+                } else {
+                    RawRateStatus::Contradicts
+                };
+            }
+        }
+        cursor = group_start;
+    }
+    if scanned == MAX_RATE_DIAGNOSTIC_ROWS && cursor > 0 {
+        return RawRateStatus::ScanLimit;
+    }
+    if saw_unknown {
+        RawRateStatus::PriorSourceUnknown
+    } else if saw_non_adsb {
+        RawRateStatus::PriorSourceNonAdsb
+    } else if saw_source_mismatch {
+        RawRateStatus::PriorSourceMismatch
+    } else if saw_incompatible_baro {
+        RawRateStatus::PriorNotBarometricOrStale
+    } else {
+        RawRateStatus::NoComparablePrior
+    }
+}
+
+fn is_adsb_source(source: u8) -> bool {
+    // Known ADS-B source classes accepted by oa-truth; the diagnostic still refuses unknowns.
+    matches!(source, 0 | 1 | 8)
 }
 
 fn distance(a: Place, b: Place) -> f64 {
@@ -610,6 +822,7 @@ struct PlannedIssue {
     addr: u32,
     route_row: RouteIx,
     meter_ix: usize,
+    report_position: usize,
 }
 
 /// The fixed no-assignment cohort selected before cutoff-specific assignment evidence is queried.
@@ -626,6 +839,7 @@ pub(crate) struct ArrivalPlan {
     unusable_route: usize,
     baseline_forecast_refused: BTreeMap<String, usize>,
     issues: Vec<PlannedIssue>,
+    raw_rate_diagnostic: Option<RawRateDiagnostic>,
 }
 
 impl ArrivalPlan {
@@ -764,6 +978,7 @@ pub(crate) fn build_plan(
     legacy: &Legacy,
     places: &PlaceTable,
     reports: &Reports,
+    diagnose_raw_rate: bool,
 ) -> Result<ArrivalPlan, String> {
     if reports.icao.len() > MAX_REPORTS
         || legacy.routes.flight.len() > MAX_CAPTURED_ROUTES
@@ -860,8 +1075,8 @@ pub(crate) fn build_plan(
                 let selected = adsb
                     .get(&addr)
                     .map_or(TrackSelection::Refused, |rows| track_at(reports, rows, at));
-                let (track, course) = match selected {
-                    TrackSelection::Available(track, course) => (track, course),
+                let (track, course, report_position) = match selected {
+                    TrackSelection::Available(track, course, position) => (track, course, position),
                     TrackSelection::SourceFlagStale => {
                         stale_source_track += 1;
                         return None;
@@ -894,9 +1109,10 @@ pub(crate) fn build_plan(
                     addr,
                     row,
                     meter_ix,
+                    report_position,
                 ))
             });
-        let Some((issue, addr, route_row, meter_ix)) = candidate else {
+        let Some((issue, addr, route_row, meter_ix, report_position)) = candidate else {
             continue;
         };
         if let Err(refusal) = forecast(&issue) {
@@ -924,8 +1140,21 @@ pub(crate) fn build_plan(
             addr,
             route_row,
             meter_ix,
+            report_position,
         });
     }
+    let raw_rate_diagnostic = diagnose_raw_rate.then(|| {
+        let mut diagnostic = RawRateDiagnostic::default();
+        for planned in &issues {
+            let status = adsb
+                .get(&planned.addr)
+                .map_or(RawRateStatus::NoComparablePrior, |rows| {
+                    raw_rate_status(reports, rows, planned.report_position)
+                });
+            diagnostic.add(status);
+        }
+        diagnostic
+    });
     Ok(ArrivalPlan {
         requested: requested.to_string(),
         meter,
@@ -939,6 +1168,7 @@ pub(crate) fn build_plan(
         unusable_route,
         baseline_forecast_refused,
         issues,
+        raw_rate_diagnostic,
     })
 }
 
@@ -1056,6 +1286,10 @@ pub(crate) fn report(
     writeln!(text, "sealed-window rows dropped: {sealed}").map_err(|e| e.to_string())?;
     writeln!(text, "Selected flow: {}. AUTO ranks resolvable TBFM fixes by distinct ORD flight plans before scoring. The experiment takes the first eligible route and track snapshot per flight, 40 to 200 NM from the fix, using the most recent unique ADS-B report within 30 s. It freezes each issue GUFI and cutoff after an assignment-free forecast succeeds, before the SFDPS assignment query. Forecast uses received ERAM route geometry and ADS-B observation time. Legacy ETA values do not enter the model.", plan.requested).map_err(|e| e.to_string())?;
     writeln!(text, "Procedure input: the legacy route tables contain no published procedure altitude windows; route constraint checks are unavailable for this run.").map_err(|e| e.to_string())?;
+    if let Some(diagnostic) = &plan.raw_rate_diagnostic {
+        writeln!(text, "Raw vertical-rate diagnostic: aggregate over {} frozen issues; compares the selected raw rate with a unique preceding same-source barometric altitude within 10 s, scanning at most {MAX_RATE_DIAGNOSTIC_ROWS} rows per issue. Agreement uses an illustrative 50 ft tolerance (about two 25 ft altitude quanta). This is a raw-pair proxy, not the tracker decision or receipt-time evidence.", plan.issues.len()).map_err(|e| e.to_string())?;
+        writeln!(text, "raw-rate outcomes: missing rate {}; geometric rate {}; missing barometric altitude {}; selected source unknown {}; selected source non-ADS-B {}; no comparable prior {}; prior source unknown {}; prior source non-ADS-B {}; prior source mismatch {}; prior barometric altitude missing, geometric, or stale {}; prior timestamp conflict {}; preceding-row scan limit {}; agrees {}; contradicts {}", diagnostic.missing_rate, diagnostic.geometric_rate, diagnostic.missing_baro_altitude, diagnostic.unknown_selected_source, diagnostic.non_adsb_selected_source, diagnostic.no_comparable_prior, diagnostic.prior_source_unknown, diagnostic.prior_source_non_adsb, diagnostic.prior_source_mismatch, diagnostic.prior_not_baro_or_stale, diagnostic.prior_timestamp_conflict, diagnostic.scan_limit, diagnostic.agrees, diagnostic.contradicts).map_err(|e| e.to_string())?;
+    }
     writeln!(
         text,
         "Assigned altitude state at issue (sum denominator: {} frozen baseline issues): {:?}",
@@ -1250,6 +1484,7 @@ mod assignment_plan_tests {
             outside_issue_window: 0,
             unusable_route: 0,
             baseline_forecast_refused: BTreeMap::new(),
+            raw_rate_diagnostic: None,
             issues: vec![PlannedIssue {
                 issue: IssueSnapshot {
                     cutoff_ms,
@@ -1271,6 +1506,7 @@ mod assignment_plan_tests {
                 addr: 1,
                 route_row: RouteIx(0),
                 meter_ix: 0,
+                report_position: 0,
             }],
         };
 
@@ -1321,14 +1557,133 @@ mod issue_track_quality_tests {
         let healthy = reports(&[cutoff - 1_000], &[0]);
         assert!(matches!(
             track_at(&healthy, &rows(1), cutoff),
-            TrackSelection::Available(_, _)
+            TrackSelection::Available(_, _, _)
         ));
 
         let with_future = reports(&[cutoff - 1_000, cutoff + 1_000], &[0, F_STALE]);
         assert!(matches!(
             track_at(&with_future, &rows(2), cutoff),
-            TrackSelection::Available(_, _)
+            TrackSelection::Available(_, _, _)
         ));
+    }
+}
+
+#[cfg(test)]
+mod raw_rate_diagnostic_tests {
+    use super::*;
+
+    fn reports(
+        times_ms: &[i64],
+        altitudes_ft: &[i32],
+        rates_fpm: &[i32],
+        sources: &[u8],
+    ) -> Reports {
+        Reports {
+            time_ns: times_ms.iter().map(|&t| t * 1_000_000).collect(),
+            baro_alt_ft: altitudes_ft.to_vec(),
+            vrate_fpm: rates_fpm.to_vec(),
+            flags: vec![0; times_ms.len()],
+            source: sources.to_vec(),
+            ..Reports::default()
+        }
+    }
+
+    fn rows(count: usize) -> Vec<ReportIx> {
+        (0..count).map(|i| ReportIx(i as u32)).collect()
+    }
+
+    #[test]
+    fn raw_pair_proxy_distinguishes_contradiction_and_agreement() {
+        let base = 1_000_000;
+        let contradictory = reports(
+            &[base - 5_000, base],
+            &[10_000, 10_000],
+            &[NONE_I32, 6_144],
+            &[0, 0],
+        );
+        assert_eq!(
+            raw_rate_status(&contradictory, &rows(2), 1),
+            RawRateStatus::Contradicts
+        );
+
+        let matching = reports(
+            &[base - 5_000, base],
+            &[10_000, 10_500],
+            &[NONE_I32, 6_000],
+            &[0, 0],
+        );
+        assert_eq!(
+            raw_rate_status(&matching, &rows(2), 1),
+            RawRateStatus::Agrees
+        );
+    }
+
+    #[test]
+    fn raw_pair_proxy_refuses_wrong_source_and_equal_time_history() {
+        let base = 1_000_000;
+        let wrong_source = reports(
+            &[base - 5_000, base],
+            &[10_000, 10_000],
+            &[NONE_I32, 0],
+            &[5, 0],
+        );
+        assert_eq!(
+            raw_rate_status(&wrong_source, &rows(2), 1),
+            RawRateStatus::PriorSourceNonAdsb
+        );
+
+        let ambiguous = reports(
+            &[base - 5_000, base - 5_000, base],
+            &[10_000, 10_000, 10_000],
+            &[NONE_I32, NONE_I32, 0],
+            &[0, 0, 0],
+        );
+        assert_eq!(
+            raw_rate_status(&ambiguous, &rows(3), 2),
+            RawRateStatus::PriorTimestampConflict
+        );
+    }
+
+    #[test]
+    fn raw_pair_proxy_names_geometric_and_unknown_source_inputs() {
+        let base = 1_000_000;
+        let mut geometric = reports(
+            &[base - 5_000, base],
+            &[10_000, 10_500],
+            &[NONE_I32, 6_000],
+            &[0, 0],
+        );
+        geometric.flags[1] = F_RATE_GEOM;
+        assert_eq!(
+            raw_rate_status(&geometric, &rows(2), 1),
+            RawRateStatus::GeometricRate
+        );
+
+        let unknown = reports(
+            &[base - 5_000, base],
+            &[10_000, 10_500],
+            &[NONE_I32, 6_000],
+            &[0, SOURCE_UNKNOWN],
+        );
+        assert_eq!(
+            raw_rate_status(&unknown, &rows(2), 1),
+            RawRateStatus::UnknownSelectedSource
+        );
+    }
+
+    #[test]
+    fn raw_pair_proxy_does_not_read_future_rows() {
+        let base = 1_000_000;
+        let with_future = reports(
+            &[base - 5_000, base, base + 1_000],
+            &[10_000, 10_500, 20_000],
+            &[NONE_I32, 6_000, -6_000],
+            &[0, 0, 0],
+        );
+        assert_eq!(
+            raw_rate_status(&with_future, &rows(3), 1),
+            RawRateStatus::Agrees
+        );
     }
 }
 

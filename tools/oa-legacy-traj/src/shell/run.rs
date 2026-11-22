@@ -1912,6 +1912,7 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
             &loaded.legacy,
             &table,
             &reports,
+            args.diagnose_arrival_vertical_rate,
         )?)
     } else {
         None
