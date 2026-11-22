@@ -7,6 +7,7 @@
 //!     --size <WxH> --start <unix-seconds|YYYY-MM-DDTHH:MM:SSZ> --duration-s <n> --step-s <n>
 //!     --out-dir <dir> [--leader-min <n>] [--trail-n <n>] [--trail-step-s <n>] [--reacq-s <n>]
 //!     [--max-targets <n>] [--warmup-s <n>] [--hashes-only] [--overwrite] [--allow-loss]
+//!     [--raw-only --raw-receipt recorded|archive-reconstructed]
 //! ```
 //!
 //! Frame `i` shows the tracker state at `start + i * step`, for `i` from 0 while the time is
@@ -14,6 +15,8 @@
 //! time in Unix seconds with milliseconds, the hash that of the visible pixels. The tracker is
 //! started `warmup` before the start so tracks are confirmed and settled when the first frame is
 //! drawn.
+//! In the opt-in raw-only mode the tracker is not constructed; availability provenance must be
+//! declared and the visible frame is explicitly labeled RAW SURVEILLANCE ONLY.
 //!
 //! # What the run says it left out, and when it fails (E6, G6)
 //!
@@ -45,7 +48,10 @@
 //! this tool writes there: `frame-NNNN.ppm` and `hashes.txt`.
 
 use crate::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
-use crate::frame::{replay_build, replay_new, replay_raster, ReplayConfig, ReplayError};
+use crate::frame::{
+    replay_build, replay_build_raw, replay_new, replay_raster, ReplayConfig, ReplayError,
+};
+use crate::raw::{RawObservationColumns, MAX_RAW_OBSERVATIONS, RAW_STALE_CUTOFF_NS};
 use crate::rows::{
     convert_check, store_addresses, store_loss, store_rows, store_stats_add, CallsignStats,
     Callsigns, ConvertConfig, RowStore, StoreStats, DEFAULT_CONVERT, MAX_CALLSIGN_REPORTS,
@@ -101,6 +107,10 @@ pub const DEFAULT_WARMUP_NS: i64 = 180 * NS_PER_S;
 /// 2.7 GB, the largest window this tool is sized for. Checked per payload while reading, so the
 /// store never grows past the limit by more than one payload.
 pub const MAX_WINDOW_REPORTS: usize = MAX_CALLSIGN_REPORTS;
+/// Maximum total report visits across all frames in the opt-in raw-only CLI path.
+pub const MAX_RAW_FRAME_VISITS: usize = 32_000_000;
+/// Upper bound on bytes scanned by this opt-in whole-history raw path.
+pub const MAX_RAW_CLIP_BYTES: u64 = 512 * 1024 * 1024;
 /// Frames of the clip are read from this long before the warm-up start to this long after the
 /// last frame, so no report near the edges is lost to the frame's own receive time.
 const READ_MARGIN_NS: i64 = 2 * NS_PER_S;
@@ -110,7 +120,7 @@ const USAGE: &str = "usage: oa-scope-replay --snapshot <file> --adsb <clip.oaf> 
 --centre <lat,lon> --range-nm <n> --size <WxH> --start <unix-seconds|YYYY-MM-DDTHH:MM:SSZ> \
 --duration-s <n> --step-s <n> --out-dir <dir> [--leader-min <n>] [--trail-n <n>] \
 [--trail-step-s <n>] [--reacq-s <n>] [--max-targets <n>] [--warmup-s <n>] [--hashes-only] \
-[--overwrite] [--allow-loss]";
+[--overwrite] [--allow-loss] [--raw-only --raw-receipt recorded|archive-reconstructed]";
 
 // A7.2: cold struct, size guard waived (errors are rare).
 #[derive(Debug)]
@@ -167,6 +177,17 @@ pub struct ReplayArgs {
     pub overwrite: bool,
     /// Exit zero although work was lost (the report still says so).
     pub allow_loss: bool,
+    /// Explicit independent raw display path; does not construct or consult the tracker.
+    pub raw_only: bool,
+    /// Receipt timestamp provenance declared by the caller for raw-only mode.
+    pub raw_receipt: Option<RawReceiptMode>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RawReceiptMode {
+    Recorded,
+    /// OAF archive proxy: use the latest decoded row time in its frame as availability time.
+    ArchiveReconstructed,
 }
 
 fn parse_finite(text: &str) -> Option<f64> {
@@ -326,7 +347,9 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
     let (mut start, mut duration, mut step, mut out_dir) = (None, None, None, None);
     let (mut leader, mut trail_n, mut trail_step, mut reacq) = (None, None, None, None);
     let (mut max_targets, mut warmup) = (None, None);
-    let (mut hashes_only, mut overwrite, mut allow_loss) = (false, false, false);
+    let (mut hashes_only, mut overwrite, mut allow_loss, mut raw_only) =
+        (false, false, false, false);
+    let mut raw_receipt = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let mut value = || {
@@ -385,6 +408,19 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
             "--hashes-only" => hashes_only = true,
             "--overwrite" => overwrite = true,
             "--allow-loss" => allow_loss = true,
+            "--raw-only" => raw_only = true,
+            "--raw-receipt" => {
+                let mode = match value()?.as_str() {
+                    "recorded" => RawReceiptMode::Recorded,
+                    "archive-reconstructed" => RawReceiptMode::ArchiveReconstructed,
+                    other => {
+                        return Err(CliError::Usage(format!(
+                            "--raw-receipt {other:?} must be recorded or archive-reconstructed"
+                        )))
+                    }
+                };
+                set_once(&mut raw_receipt, flag, mode)?;
+            }
             other => return Err(CliError::Usage(format!("unknown argument {other:?}"))),
         }
     }
@@ -411,6 +447,11 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
         )));
     }
     let start_ns = start.ok_or_else(|| need("--start"))?;
+    if raw_only != raw_receipt.is_some() {
+        return Err(CliError::Usage(
+            "--raw-only requires exactly one --raw-receipt declaration, and --raw-receipt requires --raw-only".into(),
+        ));
+    }
     let warmup_ns = warmup.unwrap_or(DEFAULT_WARMUP_NS);
     // Every time the run computes from these is checked here, once, so the run itself only has to
     // carry explicit errors for what it adds.
@@ -458,6 +499,8 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
         hashes_only,
         overwrite,
         allow_loss,
+        raw_only,
+        raw_receipt,
     })
 }
 
@@ -697,6 +740,237 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
+// A7.2: cold per-run source history, bounded by MAX_RAW_OBSERVATIONS.
+#[derive(Default)]
+struct RawHistory {
+    time: Vec<i64>,
+    received: Vec<i64>,
+    addr: Vec<u32>,
+    lat: Vec<i32>,
+    lon: Vec<i32>,
+    alt: Vec<i32>,
+    speed: Vec<u16>,
+    track: Vec<u16>,
+    sealed_frames: u64,
+    refused_frames: u64,
+    undecodable: u64,
+    status_frames: u64,
+    outside: u64,
+    damaged_frames: u64,
+    decode_records: u64,
+    decode_kept: u64,
+    decode_dropped: u64,
+    decode_bad_time: u64,
+    decode_unknown_source: u64,
+    decode_bad_measurement: u64,
+    decode_reserved: u64,
+}
+
+impl RawHistory {
+    fn push(&mut self, row: oa_adsb::Row, received_ns: i64) {
+        self.time.push(row.time_ns);
+        self.received.push(received_ns);
+        self.addr.push(row.icao);
+        self.lat.push(row.lat_e7);
+        self.lon.push(row.lon_e7);
+        self.alt.push(if row.flags & oa_adsb::F_GROUND != 0 {
+            oa_display::traffic::NO_ALT
+        } else if row.flags & oa_adsb::F_ALT_GEOM != 0 {
+            row.geom_alt_ft
+        } else {
+            row.baro_alt_ft
+        });
+        self.speed.push(row.gs_dkt);
+        self.track.push(row.track_ddeg);
+    }
+
+    fn len(&self) -> usize {
+        self.time.len()
+    }
+}
+
+/// Reads a bounded raw history while retaining each frame's availability time. Archive-reconstructed
+/// mode assigns the maximum decoded observation timestamp in a MESSAGE frame to every row in that
+/// frame; this is an explicit proxy, not recorded receipt evidence.
+fn raw_history(
+    path: &Path,
+    start_ns: i64,
+    end_ns: i64,
+    mode: RawReceiptMode,
+) -> Result<RawHistory, CliError> {
+    let earliest = start_ns
+        .checked_sub(RAW_STALE_CUTOFF_NS)
+        .ok_or_else(|| CliError::Failed("raw history start is outside clock range".into()))?;
+    let mut history = RawHistory::default();
+    let mut capacity_refused = 0u64;
+    let mut file =
+        oa_sealed::open(path).map_err(|e| failed(&format!("read {}", path.display()), e))?;
+    let bytes = file
+        .metadata()
+        .map_err(|e| failed(&format!("stat {}", path.display()), e))?
+        .len();
+    if bytes > MAX_RAW_CLIP_BYTES {
+        return Err(CliError::Failed(format!(
+            "{} exceeds the raw-only input limit of {MAX_RAW_CLIP_BYTES} bytes",
+            path.display()
+        )));
+    }
+    let mut scratch = Reports::default();
+    let damaged = oa_feed::read_frames(&mut file, &mut |frame| {
+        if oa_sealed::in_sealed_window(frame.recv_unix_ns) {
+            history.sealed_frames = history.sealed_frames.saturating_add(1);
+            oa_sealed::note_window_drops(1);
+            return;
+        }
+        if frame.recv_unix_ns > end_ns {
+            history.outside = history.outside.saturating_add(1);
+            return;
+        }
+        match frame.kind {
+            oa_feed::Kind::Reject => {
+                history.refused_frames = history.refused_frames.saturating_add(1);
+                return;
+            }
+            oa_feed::Kind::Status => {
+                history.status_frames = history.status_frames.saturating_add(1);
+                return;
+            }
+            oa_feed::Kind::Message => {}
+        }
+        reports_clear(&mut scratch);
+        let decoded = match decode_payload_lenient(frame.payload, &mut scratch) {
+            Ok(c) => c,
+            Err(_) => {
+                history.undecodable = history.undecodable.saturating_add(1);
+                return;
+            }
+        };
+        let mut received_ns = frame.recv_unix_ns;
+        if mode == RawReceiptMode::ArchiveReconstructed {
+            let mut latest = None;
+            for i in 0..reports_len(&scratch) {
+                if let Some(row) = oa_adsb::reports_row(&scratch, i) {
+                    latest = Some(latest.map_or(row.time_ns, |v: i64| v.max(row.time_ns)));
+                }
+            }
+            let Some(proxy) = latest else {
+                return;
+            };
+            received_ns = proxy;
+        }
+        // Match the tracker loader's frame-level row seal: a sealed row drops the whole payload.
+        if (0..reports_len(&scratch)).any(|i| {
+            oa_adsb::reports_row(&scratch, i)
+                .is_some_and(|row| oa_sealed::in_sealed_window(row.time_ns))
+        }) {
+            history.sealed_frames = history.sealed_frames.saturating_add(1);
+            oa_sealed::note_window_drops(reports_len(&scratch).max(1) as u64);
+            return;
+        }
+        let eligible = (0..reports_len(&scratch))
+            .filter_map(|i| oa_adsb::reports_row(&scratch, i))
+            .filter(|row| (earliest..=end_ns).contains(&row.time_ns) && received_ns <= end_ns)
+            .count();
+        if history.len().saturating_add(eligible) > MAX_RAW_OBSERVATIONS {
+            capacity_refused = capacity_refused.saturating_add(1);
+            return;
+        }
+        for i in 0..reports_len(&scratch) {
+            if let Some(row) = oa_adsb::reports_row(&scratch, i) {
+                if (earliest..=end_ns).contains(&row.time_ns) && received_ns <= end_ns {
+                    history.push(row, received_ns);
+                }
+            }
+        }
+        history.decode_records += decoded.records as u64;
+        history.decode_kept += decoded.kept as u64;
+        history.decode_dropped += decoded.dropped as u64;
+        history.decode_bad_time += decoded.bad_time as u64;
+        history.decode_unknown_source += decoded.unknown_source as u64;
+        history.decode_bad_measurement += decoded.bad_measurement as u64;
+        history.decode_reserved += decoded.reserved_set as u64;
+    })
+    .map_err(|e| failed(&format!("read {}", path.display()), e))?;
+    if capacity_refused > 0 {
+        return Err(CliError::Failed(format!(
+            "raw history refused {capacity_refused} frame(s) at the {MAX_RAW_OBSERVATIONS}-observation limit; narrow the window"
+        )));
+    }
+    history.damaged_frames = damaged;
+    if history.len() == 0 {
+        return Err(CliError::Failed(format!(
+            "{} has no eligible raw observations",
+            path.display()
+        )));
+    }
+    Ok(history)
+}
+
+// A7.2: cold scratch columns reused for each display frame.
+#[derive(Default)]
+struct RawFrameColumns {
+    time: Vec<i64>,
+    addr: Vec<u32>,
+    lat: Vec<i32>,
+    lon: Vec<i32>,
+    alt: Vec<i32>,
+    speed: Vec<u16>,
+    track: Vec<u16>,
+    order: Vec<usize>,
+}
+
+impl RawFrameColumns {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            time: Vec::with_capacity(n),
+            addr: Vec::with_capacity(n),
+            lat: Vec::with_capacity(n),
+            lon: Vec::with_capacity(n),
+            alt: Vec::with_capacity(n),
+            speed: Vec::with_capacity(n),
+            track: Vec::with_capacity(n),
+            order: Vec::with_capacity(n),
+        }
+    }
+    fn fill(&mut self, history: &RawHistory, as_of_ns: i64) {
+        self.time.clear();
+        self.addr.clear();
+        self.lat.clear();
+        self.lon.clear();
+        self.alt.clear();
+        self.speed.clear();
+        self.track.clear();
+        self.order.clear();
+        for i in 0..history.len() {
+            if history.received[i] <= as_of_ns && history.time[i] <= as_of_ns {
+                self.order.push(i);
+            }
+        }
+        self.order
+            .sort_unstable_by_key(|&i| (history.addr[i], history.time[i]));
+        for &i in &self.order {
+            self.time.push(history.time[i]);
+            self.addr.push(history.addr[i]);
+            self.lat.push(history.lat[i]);
+            self.lon.push(history.lon[i]);
+            self.alt.push(history.alt[i]);
+            self.speed.push(history.speed[i]);
+            self.track.push(history.track[i]);
+        }
+    }
+    fn columns(&self) -> RawObservationColumns<'_> {
+        RawObservationColumns {
+            t_ns: &self.time,
+            addr: &self.addr,
+            lat_e7: &self.lat,
+            lon_e7: &self.lon,
+            alt_ft: &self.alt,
+            gs_dkt: &self.speed,
+            track_ddeg: &self.track,
+        }
+    }
+}
+
 /// True for a file name this tool writes: `hashes.txt` or exactly `frame-` four digits `.ppm`
 /// (a run writes at most [`MAX_FRAMES`] frames, so an index never needs more digits).
 fn is_ours(name: &str) -> bool {
@@ -858,6 +1132,137 @@ fn show_counts(names: &[&str], counts: &[u64]) -> String {
 }
 
 /// `oa-scope-replay`: the whole run; the summary goes to `out`.
+fn run_raw_only(
+    a: &ReplayArgs,
+    model: oa_airspace::model::Model,
+    out: &mut dyn Write,
+) -> Result<(), CliError> {
+    let mode = a.raw_receipt.expect("parse_args requires raw receipt mode");
+    let span = i64::try_from(a.frames)
+        .ok()
+        .and_then(|n| n.checked_mul(a.step_ns))
+        .ok_or_else(|| CliError::Failed("raw run span is outside clock range".into()))?;
+    let end_ns = a
+        .start_ns
+        .checked_add(span)
+        .ok_or_else(|| CliError::Failed("raw run end is outside clock range".into()))?;
+    let history = raw_history(&a.adsb, a.start_ns, end_ns, mode)?;
+    if history.len().saturating_mul(a.frames as usize) > MAX_RAW_FRAME_VISITS {
+        return Err(CliError::Failed(format!(
+            "raw history × frames exceeds {MAX_RAW_FRAME_VISITS} report visits; narrow the window or reduce frames"
+        )));
+    }
+    let cfg = ReplayConfig {
+        centre_lat_e7: a.centre_lat_e7,
+        centre_lon_e7: a.centre_lon_e7,
+        range_nm: a.range_nm,
+        width: a.width,
+        height: a.height,
+        max_targets: a.max_targets,
+        style: a.style,
+        convert: a.convert,
+    };
+    let mut replay = replay_new(model, &cfg)?;
+    std::fs::create_dir_all(&a.out_dir)
+        .map_err(|e| failed(&format!("create {}", a.out_dir.display()), e))?;
+    if a.overwrite {
+        remove_ours(&a.out_dir)?;
+    }
+    let mut columns = RawFrameColumns::with_capacity(history.len());
+    let mut hashes = String::new();
+    let mut total = RawRunStats::default();
+    for i in 0..a.frames {
+        let t_ns = i64::try_from(i)
+            .ok()
+            .and_then(|k| k.checked_mul(a.step_ns))
+            .and_then(|d| a.start_ns.checked_add(d))
+            .ok_or_else(|| CliError::Failed("raw frame time is outside clock range".into()))?;
+        columns.fill(&history, t_ns);
+        let stamp = stamp_of(t_ns);
+        let (_info, stats) = replay_build_raw(&mut replay, &columns.columns(), t_ns, &stamp)?;
+        replay_raster(&mut replay)?;
+        let digest = frame_digest(&replay.spec, &replay.buf).map_err(|e| failed("hash", e))?;
+        hashes.push_str(&format!("{i:04} {} {}\n", unix_text(t_ns), to_hex(&digest)));
+        if !a.hashes_only {
+            let path = a.out_dir.join(format!("frame-{i:04}.ppm"));
+            let file = create_new(&path)?;
+            let mut writer = std::io::BufWriter::new(file);
+            oa_display::ppm::write_ppm(&mut writer, &replay.spec, &replay.buf)
+                .and_then(|()| writer.flush())
+                .map_err(|e| failed(&format!("write {}", path.display()), e))?;
+        }
+        total.frames += 1;
+        total.observations_seen += stats.observations_in;
+        total.targets_admitted += stats.targets_admitted;
+        total.future_observations += stats.future_observations;
+        total.future_only_addresses += stats.future_only_addresses;
+        total.stale_addresses += stats.stale_addresses;
+        total.conflicts += stats.conflicting_timestamps;
+        total.refused += stats.refused_capacity + stats.refused_malformed;
+        total.invalid_positions += stats.invalid_positions;
+        total.unprojectable_positions += stats.unprojectable_positions;
+        total.off_map_positions += stats.off_map_positions;
+    }
+    let hashes_path = a.out_dir.join("hashes.txt");
+    create_new(&hashes_path)?
+        .write_all(hashes.as_bytes())
+        .map_err(|e| failed(&format!("write {}", hashes_path.display()), e))?;
+    let provenance = match mode {
+        RawReceiptMode::Recorded => "caller-declared recorded OAF frame receipt timestamp",
+        RawReceiptMode::ArchiveReconstructed => {
+            "reconstructed per-frame availability: maximum row observation time"
+        }
+    };
+    let _ = writeln!(out, "RAW SURVEILLANCE ONLY; independent raw display; no tracker, ownership, extrapolation, or coast");
+    let _ = writeln!(out, "availability {}", provenance);
+    let _ = writeln!(out, "raw      {} source observations retained; {} frames; {} source-frame sealed drops; {} reject frames; {} status frames; {} undecodable payloads; {} out-of-as-of frames", history.len(), total.frames, history.sealed_frames, history.refused_frames, history.status_frames, history.undecodable, history.outside);
+    let _ = writeln!(out, "decode   {} records, {} retained, {} dropped (bad time {}, unknown source {}, bad measurement {}, reserved {}); {} damaged frames", history.decode_records, history.decode_kept, history.decode_dropped, history.decode_bad_time, history.decode_unknown_source, history.decode_bad_measurement, history.decode_reserved, history.damaged_frames);
+    let _ = writeln!(out, "display  totals over {} frames: {} observations considered ({} future at frame time); {} target admissions; {} future-only addresses; {} stale addresses (age > {} s); {} contradictory same-time addresses; {} refused targets; invalid positions {}; unprojectable {}; off-map {}", total.frames, total.observations_seen, total.future_observations, total.targets_admitted, total.future_only_addresses, total.stale_addresses, RAW_STALE_CUTOFF_NS / NS_PER_S, total.conflicts, total.refused, total.invalid_positions, total.unprojectable_positions, total.off_map_positions);
+    let _ = writeln!(out, "hashes   {}", hashes_path.display());
+    let loss = history.refused_frames
+        + history.undecodable
+        + history.decode_dropped
+        + history.damaged_frames
+        + total.refused
+        + total.invalid_positions
+        + total.unprojectable_positions;
+    if loss == 0 {
+        let _ = writeln!(out, "loss     none");
+    } else if a.allow_loss {
+        let _ = writeln!(
+            out,
+            "loss     {loss} refused or unavailable raw-only work items; allowed by --allow-loss"
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "loss     {loss} refused or unavailable raw-only work items"
+        );
+    }
+    if loss > 0 && !a.allow_loss {
+        return Err(CliError::Loss(format!(
+            "raw-only run recorded {loss} refused or unavailable work items"
+        )));
+    }
+    Ok(())
+}
+
+// A7.2: cold run-level raw-path counters.
+#[derive(Default)]
+struct RawRunStats {
+    frames: u64,
+    observations_seen: u64,
+    targets_admitted: u64,
+    future_observations: u64,
+    future_only_addresses: u64,
+    stale_addresses: u64,
+    conflicts: u64,
+    refused: u64,
+    invalid_positions: u64,
+    unprojectable_positions: u64,
+    off_map_positions: u64,
+}
+
 pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     if matches!(args.first().map(String::as_str), Some("--help" | "-h")) {
         let _ = writeln!(out, "{USAGE}");
@@ -881,6 +1286,10 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     std::io::Read::read_to_end(&mut &file, &mut bytes)
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
     let model = oa_airspace::snapshot::decode(&bytes).map_err(|e| failed("snapshot", e))?;
+
+    if a.raw_only {
+        return run_raw_only(&a, model, out);
+    }
 
     // parse_args checked that these fit; they are checked again here, not trusted.
     let overflow =

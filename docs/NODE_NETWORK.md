@@ -268,12 +268,20 @@ Two further rules:
 
 Every step down is logged and counted.
 
-The scope replay crate currently has a callable raw-display prototype for offline and synthetic
-use. It is not wired to live intake, automatic step-down, or operational logging. A caller must
-provide an independent decoded observation path, filter observations by actual availability at
-the as-of time (the prototype columns carry observation time only), and record the returned
-fallback and refusal counters. It draws only the newest eligible position within its fixed finite
-age limit and refuses conflicting equal-time payloads; it does not infer ownership or coast.
+The scope replay crate has an opt-in offline `oa-scope-replay --raw-only` CLI path as well as a
+callable raw-display seam. It is not wired to live intake, automatic step-down, or operational
+logging. The CLI requires an explicit `--raw-receipt recorded|archive-reconstructed` declaration.
+`recorded` uses the OAF frame's receipt timestamp. For `oa-adsb-clip` archives, receipt was
+reconstructed from the first row in each frame; `archive-reconstructed` instead assigns the
+maximum decoded row observation time in each frame to all its rows. That maximum is a conservative
+availability proxy for a batch, not recorded receipt evidence, and the CLI labels it accordingly.
+Both receive availability and row observation time must be at or before each displayed time.
+The path has named 512 MiB input, 65,536 retained-row, and 32 million frame-visit bounds; seals
+remain enforced. A caller of the lower-level columns API must independently filter actual receipt
+availability because those columns encode observation time only. The reducer draws only the
+newest eligible position within its fixed finite age limit and refuses conflicting equal-time
+payloads; it does not infer ownership or coast. Neither interface implements automatic or live
+fallback.
 
 ## 9. Time
 

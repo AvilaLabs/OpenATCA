@@ -995,6 +995,18 @@ fn bad_arguments_are_usage_errors_and_a_window_without_reports_fails_plainly() {
         cli::run(&extra, &mut Vec::new()),
         Err(cli::CliError::Usage(_))
     ));
+    let mut extra = ok.clone();
+    extra.extend(args(&["--raw-only"]));
+    assert!(matches!(
+        cli::parse_args(&extra),
+        Err(cli::CliError::Usage(_))
+    ));
+    let mut extra = ok.clone();
+    extra.extend(args(&["--raw-receipt", "recorded"]));
+    assert!(matches!(
+        cli::parse_args(&extra),
+        Err(cli::CliError::Usage(_))
+    ));
     let mut twice = ok.clone();
     twice.extend(args(&["--step-s", "1"]));
     assert!(matches!(
@@ -1653,6 +1665,104 @@ fn frame_bytes(kind: u8, payload: &[u8]) -> Vec<u8> {
     let n = oa_feed::encode_frame(&mut buf, kind, 0, 9_999, T0 + 120 * S, 0, payload).unwrap();
     buf.truncate(n);
     buf
+}
+
+fn raw_message(frame_time_ns: i64, row_time_ns: i64, addr: u32, lon_e7: i32) -> Vec<u8> {
+    let mut reports = Reports::default();
+    let mut row: Row = ROW_EMPTY;
+    row.time_ns = row_time_ns;
+    row.icao = addr;
+    row.lat_e7 = ORD.0;
+    row.lon_e7 = lon_e7;
+    reports_push(&mut reports, &row);
+    let mut payload = Vec::new();
+    encode_payload(&mut payload, &reports, 0, 1).unwrap();
+    let mut frame = vec![0u8; payload.len() + 256];
+    let n = oa_feed::encode_frame(
+        &mut frame,
+        1,
+        oa_feed::FLAG_BYTES,
+        1,
+        frame_time_ns,
+        frame_time_ns / 1_000_000,
+        &payload,
+    )
+    .unwrap();
+    frame.truncate(n);
+    frame
+}
+
+#[test]
+fn raw_only_cli_applies_observation_and_declared_receipt_cutoffs() {
+    let dir = tmp("replay-raw-receipt");
+    let (snap, _) = write_inputs(&dir);
+    let a_time = T0 + 9 * S;
+    let b_time = T0 + 9 * S + S / 2;
+    let b_received = T0 + 10 * S + S / 2;
+    let mut bytes = raw_message(a_time, a_time, 0xA00001, ORD.1);
+    bytes.extend_from_slice(&raw_message(b_received, b_time, 0xA00001, ORD.1 + 300_000));
+    let clip = dir.join("late.oaf");
+    std::fs::write(&clip, bytes).unwrap();
+    let raw_args = |source: &std::path::Path, out: &std::path::Path, provenance: &str| {
+        let mut a = cli_args(&snap, source, out, &[]);
+        let start = a.iter().position(|v| v == "--start").unwrap();
+        a[start + 1] = "1794772809".into();
+        let duration = a.iter().position(|v| v == "--duration-s").unwrap();
+        a[duration + 1] = "2".into();
+        let step = a.iter().position(|v| v == "--step-s").unwrap();
+        a[step + 1] = "0.5".into();
+        a.extend(args(&["--raw-only", "--raw-receipt", provenance]));
+        a
+    };
+    let base_clip = dir.join("base.oaf");
+    std::fs::write(&base_clip, raw_message(a_time, a_time, 0xA00001, ORD.1)).unwrap();
+    let (base, said) = run_text(&raw_args(&base_clip, &dir.join("base"), "recorded"));
+    assert!(base.is_ok(), "{said}");
+    let (recorded, said) = run_text(&raw_args(&clip, &dir.join("recorded"), "recorded"));
+    assert!(recorded.is_ok(), "{said}");
+    assert!(
+        said.contains("caller-declared recorded OAF frame receipt timestamp"),
+        "{said}"
+    );
+    let recorded_hashes: Vec<String> = std::fs::read_to_string(dir.join("recorded/hashes.txt"))
+        .unwrap()
+        .lines()
+        .map(|line| line.split(' ').nth(2).unwrap().to_owned())
+        .collect();
+    let base_hashes: Vec<String> = std::fs::read_to_string(dir.join("base/hashes.txt"))
+        .unwrap()
+        .lines()
+        .map(|line| line.split(' ').nth(2).unwrap().to_owned())
+        .collect();
+    assert_eq!(recorded_hashes[0], base_hashes[0]);
+    assert_eq!(recorded_hashes[1], base_hashes[1]);
+    assert_eq!(
+        recorded_hashes[2], base_hashes[2],
+        "late receipt is unavailable at the pre-receipt frame t=10"
+    );
+    assert_ne!(
+        recorded_hashes[3], base_hashes[3],
+        "inclusive receipt cutoff admits B exactly at t=10.5"
+    );
+
+    let (archive, said) = run_text(&raw_args(
+        &clip,
+        &dir.join("archive"),
+        "archive-reconstructed",
+    ));
+    assert!(archive.is_ok(), "{said}");
+    assert!(said.contains("maximum row observation time"), "{said}");
+    let archive_hashes: Vec<String> = std::fs::read_to_string(dir.join("archive/hashes.txt"))
+        .unwrap()
+        .lines()
+        .map(|line| line.split(' ').nth(2).unwrap().to_owned())
+        .collect();
+    assert_eq!(archive_hashes[0], base_hashes[0]);
+    assert_ne!(
+        archive_hashes[1], base_hashes[1],
+        "declared archive proxy admits B exactly at the observation boundary t=9.5"
+    );
+    assert!(said.contains("RAW SURVEILLANCE ONLY"), "{said}");
 }
 
 fn run_text(a: &[String]) -> (Result<(), cli::CliError>, String) {
