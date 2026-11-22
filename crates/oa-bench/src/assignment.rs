@@ -427,45 +427,35 @@ mod tests {
             event(20, 35, ALT_FORM_SIMPLE, 9000),
             event(20, 40, ALT_FORM_SIMPLE, 8000),
         ];
-        for order in [
-            [0, 1, 2],
-            [0, 2, 1],
-            [1, 0, 2],
-            [1, 2, 0],
-            [2, 0, 1],
-            [2, 1, 0],
-        ] {
-            let mut q = query();
-            for index in order {
-                observe_assignment(&mut q, conflicting[index]);
-            }
-            assert_eq!(
-                assignment_at_issue(&q, 1),
-                Some(AssignmentEvidence::SameTimeConflict { available_ms: 35 })
-            );
-        }
-
         let uncertain = [
             event(30, 40, ALT_FORM_SIMPLE, 8000),
             event(50, i64::MIN, ALT_FORM_SIMPLE, 9000),
             event(45, i64::MIN, ALT_FORM_VFR, 0),
         ];
-        for order in [
-            [0, 1, 2],
-            [0, 2, 1],
-            [1, 0, 2],
-            [1, 2, 0],
-            [2, 0, 1],
-            [2, 1, 0],
+        for ([a, b, c], expected) in [
+            (
+                conflicting,
+                AssignmentEvidence::SameTimeConflict { available_ms: 35 },
+            ),
+            (
+                uncertain,
+                AssignmentEvidence::UnknownAvailability { source_ms: 50 },
+            ),
         ] {
-            let mut q = query();
-            for index in order {
-                observe_assignment(&mut q, uncertain[index]);
+            for order in [
+                [a, b, c],
+                [a, c, b],
+                [b, a, c],
+                [b, c, a],
+                [c, a, b],
+                [c, b, a],
+            ] {
+                let mut q = query();
+                for event in order {
+                    observe_assignment(&mut q, event);
+                }
+                assert_eq!(assignment_at_issue(&q, 1), Some(expected));
             }
-            assert_eq!(
-                assignment_at_issue(&q, 1),
-                Some(AssignmentEvidence::UnknownAvailability { source_ms: 50 })
-            );
         }
     }
 
@@ -601,8 +591,8 @@ mod tests {
                     cutoff_ms: 101,
                 },
             ])
-            .unwrap_err(),
-            AssignmentQueryError::DuplicateGufi { gufi: 1 }
+            .err(),
+            Some(AssignmentQueryError::DuplicateGufi { gufi: 1 })
         );
         for issue in [
             AssignmentIssue {

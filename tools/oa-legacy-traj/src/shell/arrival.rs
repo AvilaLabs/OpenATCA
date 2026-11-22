@@ -608,7 +608,7 @@ fn assigned_altitude_label(input: &AssignmentEvidence) -> String {
         AssignmentEvidence::Available { .. } => "available simple SFDPS assignment".into(),
         AssignmentEvidence::Missing => "no available assignment".into(),
         AssignmentEvidence::UnsupportedForm { form, .. } => {
-            let name = match form {
+            let name = match *form {
                 ALT_FORM_VFR_PLUS => "vfrPlus",
                 ALT_FORM_VFR => "vfr",
                 ALT_FORM_BLOCK => "block",
@@ -975,7 +975,6 @@ pub(crate) fn report(
         }
     )
     .map_err(|e| e.to_string())?;
-    let forecast_refused: usize = totals.forecast_refused.values().sum();
     let baseline_forecast_refused: usize = plan.baseline_forecast_refused.values().sum();
     let score_refused: usize = totals.score_refused.values().sum();
     writeln!(text, "offered flights with known address: {}; route messages without address: {}; frozen baseline issues: {}; scored: {}; no eligible route/track: {}; assignment-free forecast refused: {}; forecast refused with assignment evidence: {}; score refused: {}; observed passages: {}", plan.offered_flights, plan.no_addr, totals.issued, totals.issued.saturating_sub(assigned_forecast_refused + score_refused), plan.offered_flights.saturating_sub(totals.issued + baseline_forecast_refused), baseline_forecast_refused, assigned_forecast_refused, score_refused, totals.crossing).map_err(|e| e.to_string())?;
