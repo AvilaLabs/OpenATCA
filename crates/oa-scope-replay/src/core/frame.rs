@@ -257,29 +257,30 @@ pub(crate) fn replay_build_raw_with_source_stale(
     targets_clear(&mut r.set);
     let result = (|| {
         let (width, height) = (r.spec.width, r.spec.height);
-        let half_span_at_size = |size: u8| {
-            let banner_width = i64::from(text_width_units(RAW_BANNER.chars().count()))
+        let text_half_span = |label: &str, size: u8| {
+            let banner_width = i64::from(text_width_units(label.chars().count()))
                 .saturating_mul(i64::from(size))
                 .saturating_add(i64::from(CAP_HEIGHT) - 1)
                 / i64::from(CAP_HEIGHT);
             banner_width.saturating_add(1) / 2 + i64::from(RAW_BANNER_PADDING_PX)
         };
-        let full_span = half_span_at_size(RAW_BANNER_SIZE);
+        let top_inset = i64::from(r.view.proj.top_inset);
+        let box_fits = |half_span: i64, bottom: i32| {
+            half_span * 2 <= i64::from(width)
+                && i64::from(bottom) <= i64::from(height)
+                && i64::from(bottom) + i64::from(MAX_TARGET_SYMBOL_RADIUS_PX) < top_inset
+        };
+        let full_span = text_half_span(RAW_BANNER, RAW_BANNER_SIZE);
         let (banner_size, half_span) = if full_span * 2 <= i64::from(width) {
             (RAW_BANNER_SIZE, full_span)
         } else {
             (
                 RAW_BANNER_NARROW_SIZE,
-                half_span_at_size(RAW_BANNER_NARROW_SIZE),
+                text_half_span(RAW_BANNER, RAW_BANNER_NARROW_SIZE),
             )
         };
         let one_line_bottom = RAW_BANNER_TOP_PX + i32::from(banner_size) + RAW_BANNER_PADDING_PX;
-        let one_line_marker_clearance =
-            i64::from(one_line_bottom).saturating_add(i64::from(MAX_TARGET_SYMBOL_RADIUS_PX));
-        if half_span * 2 > i64::from(width)
-            || i64::from(one_line_bottom) > i64::from(height)
-            || one_line_marker_clearance >= i64::from(r.view.proj.top_inset)
-        {
+        if !box_fits(half_span, one_line_bottom) {
             return Err(ReplayError::RawBannerDoesNotFit { width, height });
         }
         let raw = raw_targets_at_with_source_stale(
@@ -291,25 +292,9 @@ pub(crate) fn replay_build_raw_with_source_stale(
         )?;
         let no_fresh_positions = raw.fresh_valid_positions == 0;
         let (banner_bottom, banner_half_span) = if no_fresh_positions {
-            let notice_units = i64::from(text_width_units(RAW_NO_POSITION_NOTICE.chars().count()));
-            let notice_span = notice_units
-                .saturating_mul(i64::from(RAW_NOTICE_SIZE))
-                .saturating_add(i64::from(CAP_HEIGHT) - 1)
-                / i64::from(CAP_HEIGHT);
-            let notice_half_span = (notice_span.saturating_add(1) / 2)
-                .saturating_add(i64::from(RAW_BANNER_PADDING_PX));
-            let half_span = half_span.max(notice_half_span);
-            let notice_bottom = RAW_BANNER_TOP_PX
-                + i32::from(banner_size)
-                + RAW_NOTICE_GAP_PX
-                + i32::from(RAW_NOTICE_SIZE)
-                + RAW_BANNER_PADDING_PX;
-            let marker_clearance_bottom =
-                i64::from(notice_bottom).saturating_add(i64::from(MAX_TARGET_SYMBOL_RADIUS_PX));
-            if half_span.saturating_mul(2) > i64::from(width)
-                || i64::from(notice_bottom) > i64::from(height)
-                || marker_clearance_bottom >= i64::from(r.view.proj.top_inset)
-            {
+            let half_span = half_span.max(text_half_span(RAW_NO_POSITION_NOTICE, RAW_NOTICE_SIZE));
+            let notice_bottom = one_line_bottom + RAW_NOTICE_GAP_PX + i32::from(RAW_NOTICE_SIZE);
+            if !box_fits(half_span, notice_bottom) {
                 return Err(ReplayError::RawBannerDoesNotFit { width, height });
             }
             (notice_bottom, half_span)

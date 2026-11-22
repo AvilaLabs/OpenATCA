@@ -368,6 +368,7 @@ pub(super) fn run_raw_only(
                 .map_err(|e| failed(&format!("write {}", path.display()), e))?;
         }
         total.frames += 1;
+        total.frames_without_fresh_positions += u64::from(stats.fresh_valid_positions == 0);
         total.observations_seen += stats.observations_in;
         total.targets_admitted += stats.targets_admitted;
         total.targets_drawn += u64::from(info.traffic.drawn);
@@ -398,7 +399,7 @@ pub(super) fn run_raw_only(
     let _ = writeln!(out, "availability {}", provenance);
     let _ = writeln!(out, "raw      {} source observations retained; {} frames; {} source-frame sealed drops; {} reject frames; {} status frames; {} undecodable payloads; {} frames outside the receipt window; {} decoded observations outside the display window", history.rows.len(), total.frames, history.sealed_frames, history.refused_frames, history.status_frames, history.undecodable, history.outside, history.outside_rows);
     let _ = writeln!(out, "decode   {} records, {} retained, {} dropped (bad time {}, unknown source {}, bad measurement {}, reserved {}); {} damaged frames", history.decode_records, history.decode_kept, history.decode_dropped, history.decode_bad_time, history.decode_unknown_source, history.decode_bad_measurement, history.decode_reserved, history.damaged_frames);
-    let _ = writeln!(out, "display  totals over {} frames: {} observations considered ({} future at frame time); {} observation visits withheld for later receipt; {} target admissions; {} targets drawn; {} draw losses (including target refusal); {} future-only addresses; {} source-stale address groups excluded; {} source-stale same-time conflicts (included in contradictory total); {} age-stale address groups (age > {} s); {} contradictory same-time address groups; {} refused targets; invalid positions {}; unprojectable {}; off-map {}", total.frames, total.observations_seen, total.future_observations, total.later_receipts, total.targets_admitted, total.targets_drawn, total.draw_loss, total.future_only_addresses, total.source_stale_addresses, total.source_stale_conflicts, total.stale_addresses, RAW_STALE_CUTOFF_NS / NS_PER_S, total.conflicts, total.refused, total.invalid_positions, total.unprojectable_positions, total.off_map_positions);
+    let _ = writeln!(out, "display  totals over {} frames: {} observations considered ({} future at frame time); {} observation visits withheld for later receipt; {} target admissions; {} targets drawn; {} draw losses (including target refusal); {} future-only addresses; {} source-stale address groups excluded; {} source-stale same-time conflicts (included in contradictory total); {} age-stale address groups (age > {} s); {} contradictory same-time address groups; {} refused targets; invalid positions {}; unprojectable {}; off-map {}; {} frames without fresh raw positions", total.frames, total.observations_seen, total.future_observations, total.later_receipts, total.targets_admitted, total.targets_drawn, total.draw_loss, total.future_only_addresses, total.source_stale_addresses, total.source_stale_conflicts, total.stale_addresses, RAW_STALE_CUTOFF_NS / NS_PER_S, total.conflicts, total.refused, total.invalid_positions, total.unprojectable_positions, total.off_map_positions, total.frames_without_fresh_positions);
     let _ = writeln!(out, "hashes   {}", hashes_path.display());
     let loss = history.refused_frames
         + history.undecodable
@@ -433,6 +434,7 @@ pub(super) fn run_raw_only(
 #[derive(Default)]
 struct RawRunStats {
     frames: u64,
+    frames_without_fresh_positions: u64,
     observations_seen: u64,
     later_receipts: u64,
     targets_admitted: u64,
