@@ -20,6 +20,7 @@ use crate::{MAX_ARCHIVE_FILES, MAX_FILE_BYTES, MAX_HOURS_HELD, MAX_IDX_BYTES};
 use oa_grib2::{
     forecast_seconds, inspect_stream, message_length, parse_idx, peek_info, ref_unix_seconds, Idx,
 };
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -29,7 +30,166 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HourFile {
     pub path: PathBuf,
+    /// GRIB forecast reference/issue time, Unix seconds.
+    pub issue_s: i64,
+    /// GRIB forecast lead, seconds.
+    pub lead_s: i64,
+    /// GRIB valid time (`issue_s + lead_s`), Unix seconds.
     pub valid_s: i64,
+}
+
+/// Why issue-cutoff selection could not return one complete forecast cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CausalRefusal {
+    TooManyFiles,
+    InvalidMetadata,
+    NoCycleBeforeCutoff,
+    ReceiptUnknown,
+    ReceiptAfterCutoff,
+    ConflictingCycle,
+    NoValidBracket,
+}
+
+/// One verified reference-time cycle selected using separately supplied receipt evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CycleSelection {
+    pub issue_s: i64,
+    pub first_valid_s: i64,
+    pub last_valid_s: i64,
+    /// Indices into the `HourFile` slice supplied to [`select_cycle_as_of`].
+    pub file_indices: Vec<usize>,
+}
+
+/// Selects the latest verified forecast cycle available by `cutoff_s` that brackets the complete
+/// requested valid-time interval. `receipt_s[i]` is separate evidence supplied by the caller for
+/// `files[i]`; `None` is unknown receipt time, never inferred from a file path, reference time or
+/// file metadata. This selector does not load grid data. Existing [`archive_sample`] remains a
+/// valid-time archive query and does not apply this causal rule. Apply the returned indices to
+/// the `HourFile` slice before calling [`archive_files`]; then load/query that cycle normally.
+/// Every returned hour must have its own receipt evidence, including any hour between the two
+/// brackets. No maximum valid-time gap is imposed by this metadata selector.
+pub fn select_cycle_as_of(
+    files: &[HourFile],
+    receipt_s: &[Option<i64>],
+    cutoff_s: i64,
+    valid_from_s: i64,
+    valid_to_s: i64,
+) -> Result<CycleSelection, CausalRefusal> {
+    if files.len() > MAX_ARCHIVE_FILES {
+        return Err(CausalRefusal::TooManyFiles);
+    }
+    if receipt_s.len() != files.len()
+        || cutoff_s <= 0
+        || valid_from_s <= 0
+        || valid_to_s < valid_from_s
+    {
+        return Err(CausalRefusal::InvalidMetadata);
+    }
+    let mut cycles = BTreeMap::<i64, Vec<usize>>::new();
+    for (i, file) in files.iter().enumerate() {
+        if file.issue_s <= 0
+            || file.lead_s < 0
+            || file.issue_s.checked_add(file.lead_s) != Some(file.valid_s)
+            || file.valid_s <= 0
+            || receipt_s.get(i).is_some_and(|r| r.is_some_and(|v| v <= 0))
+        {
+            return Err(CausalRefusal::InvalidMetadata);
+        }
+        if file.issue_s <= cutoff_s {
+            cycles.entry(file.issue_s).or_default().push(i);
+        }
+    }
+    if cycles.is_empty() {
+        return Err(CausalRefusal::NoCycleBeforeCutoff);
+    }
+
+    let mut saw_unknown_receipt = false;
+    let mut saw_late_receipt = false;
+    let mut saw_conflict = false;
+    let mut saw_no_bracket = false;
+    for (issue_s, mut indices) in cycles.into_iter().rev() {
+        indices.sort_unstable_by_key(|&i| files.get(i).map_or(i64::MAX, |f| f.valid_s));
+        if indices.windows(2).any(|w| {
+            matches!(w, [a, b] if files.get(*a).map(|f| f.valid_s) == files.get(*b).map(|f| f.valid_s))
+        }) {
+            saw_conflict = true;
+            continue;
+        }
+        let lower_all = indices
+            .iter()
+            .copied()
+            .filter(|&i| files.get(i).is_some_and(|f| f.valid_s <= valid_from_s))
+            .max_by_key(|&i| files.get(i).map_or(i64::MIN, |f| f.valid_s));
+        let upper_all = indices
+            .iter()
+            .copied()
+            .filter(|&i| files.get(i).is_some_and(|f| f.valid_s >= valid_to_s))
+            .min_by_key(|&i| files.get(i).map_or(i64::MAX, |f| f.valid_s));
+        let (Some(lower_all), Some(upper_all)) = (lower_all, upper_all) else {
+            saw_no_bracket = true;
+            continue;
+        };
+        let eligible = |i: usize| {
+            receipt_s
+                .get(i)
+                .and_then(|r| *r)
+                .is_some_and(|received| received <= cutoff_s)
+        };
+        let lower = indices
+            .iter()
+            .copied()
+            .filter(|&i| eligible(i) && files.get(i).is_some_and(|f| f.valid_s <= valid_from_s))
+            .max_by_key(|&i| files.get(i).map_or(i64::MIN, |f| f.valid_s));
+        let upper = indices
+            .iter()
+            .copied()
+            .filter(|&i| eligible(i) && files.get(i).is_some_and(|f| f.valid_s >= valid_to_s))
+            .min_by_key(|&i| files.get(i).map_or(i64::MAX, |f| f.valid_s));
+        let (Some(lower), Some(upper)) = (lower, upper) else {
+            for i in [lower_all, upper_all] {
+                match receipt_s.get(i).copied().flatten() {
+                    None => saw_unknown_receipt = true,
+                    Some(received) if received > cutoff_s => saw_late_receipt = true,
+                    Some(_) => {}
+                }
+            }
+            continue;
+        };
+        let lower_pos = indices.iter().position(|&i| i == lower).unwrap_or(0);
+        let upper_pos = indices
+            .iter()
+            .position(|&i| i == upper)
+            .unwrap_or(lower_pos);
+        let selected = indices.get(lower_pos..=upper_pos).unwrap_or(&[]);
+        if let Some(unavailable) = selected.iter().copied().find(|&i| !eligible(i)) {
+            match receipt_s.get(unavailable).copied().flatten() {
+                None => saw_unknown_receipt = true,
+                Some(received) if received > cutoff_s => saw_late_receipt = true,
+                Some(_) => {}
+            }
+            continue;
+        }
+        let selected = selected.to_vec();
+        let first_valid_s = files.get(lower).map_or(valid_from_s, |file| file.valid_s);
+        let last_valid_s = files.get(upper).map_or(valid_to_s, |file| file.valid_s);
+        return Ok(CycleSelection {
+            issue_s,
+            first_valid_s,
+            last_valid_s,
+            file_indices: selected,
+        });
+    }
+    if saw_late_receipt {
+        Err(CausalRefusal::ReceiptAfterCutoff)
+    } else if saw_unknown_receipt {
+        Err(CausalRefusal::ReceiptUnknown)
+    } else if saw_conflict {
+        Err(CausalRefusal::ConflictingCycle)
+    } else if saw_no_bracket {
+        Err(CausalRefusal::NoValidBracket)
+    } else {
+        Err(CausalRefusal::NoValidBracket)
+    }
 }
 
 /// Hour files sorted by valid time and the hours currently held (least recently used first).
@@ -49,7 +209,7 @@ fn io_err(path: &Path, e: &std::io::Error) -> LoadError {
 }
 
 /// Valid time of a file from its first message only (a few tens of kilobytes are read).
-fn peek_valid_time(path: &Path) -> Result<i64, LoadError> {
+fn peek_cycle_time(path: &Path) -> Result<(i64, i64, i64), LoadError> {
     let mut f = oa_sealed::open(path).map_err(|e| io_err(path, &e))?;
     let mut head = [0u8; 16];
     f.read_exact(&mut head).map_err(|e| io_err(path, &e))?;
@@ -75,9 +235,9 @@ fn peek_valid_time(path: &Path) -> Result<i64, LoadError> {
     let info = inspect_stream(&msg);
     let first = info.fields.first().ok_or(LoadError::BadTime)?;
     let lead = forecast_seconds(first.time_unit, first.forecast_time).ok_or(LoadError::BadTime)?;
-    ref_unix_seconds(&first.ref_time)
-        .checked_add(lead)
-        .ok_or(LoadError::BadTime)
+    let issue_s = ref_unix_seconds(&first.ref_time);
+    let valid_s = issue_s.checked_add(lead).ok_or(LoadError::BadTime)?;
+    Ok((issue_s, lead, valid_s))
 }
 
 /// Reads the first message of each file to learn its valid time. Refuses an unreadable file.
@@ -88,9 +248,12 @@ pub fn index_files(paths: &[PathBuf]) -> Result<Vec<HourFile>, LoadError> {
     paths
         .iter()
         .map(|p| {
+            let (issue_s, lead_s, valid_s) = peek_cycle_time(p)?;
             Ok(HourFile {
                 path: p.clone(),
-                valid_s: peek_valid_time(p)?,
+                issue_s,
+                lead_s,
+                valid_s,
             })
         })
         .collect()
@@ -339,6 +502,11 @@ fn ensure_loaded(a: &mut Archive, k: usize, load: Loader<'_>) -> Result<(), Load
     if hour.valid_s != file.valid_s {
         return Err(LoadError::Inconsistent("valid time differs from its index"));
     }
+    if hour.issue_s != file.issue_s || hour.lead_s != file.lead_s {
+        return Err(LoadError::Inconsistent(
+            "forecast cycle differs from its index",
+        ));
+    }
     while a.held.len() >= MAX_HOURS_HELD {
         a.held.remove(0);
     }
@@ -350,8 +518,10 @@ fn held_hour(a: &Archive, k: usize) -> Option<&Hour> {
     a.held.iter().find(|(i, _)| *i == k).map(|(_, h)| h)
 }
 
-/// The query over an archive: loads the (at most two) bracketing hours as needed, evicting the
-/// least recently used beyond [`MAX_HOURS_HELD`].
+/// The valid-time query over an archive: loads the (at most two) bracketing hours as needed,
+/// evicting the least recently used beyond [`MAX_HOURS_HELD`]. This preserves the archive's
+/// valid-time behavior and does not enforce issue-cutoff or receipt-time availability. Callers
+/// needing a causal query can first use [`select_cycle_as_of`] with explicit receipt evidence.
 pub fn archive_sample(a: &mut Archive, q: &Query) -> Result<Sample, QueryError> {
     let mut refused = 0u64;
     let mut load = |p: &Path| {

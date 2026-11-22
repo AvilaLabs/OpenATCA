@@ -20,6 +20,10 @@ use std::collections::BTreeMap;
 // A7.2: cold struct (one per loaded hour; the columns are the hot data), size guard waived
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hour {
+    /// GRIB forecast reference/issue time, Unix seconds.
+    pub issue_s: i64,
+    /// GRIB forecast lead, seconds.
+    pub lead_s: i64,
     /// Valid time, Unix seconds (reference time plus forecast lead).
     pub valid_s: i64,
     pub grid: Grid,
@@ -135,10 +139,12 @@ pub fn build_hour(fields: Vec<Field>) -> Result<Hour, LoadError> {
     if total > MAX_HOUR_VALUES {
         return Err(LoadError::BadSize(total));
     }
-    let valid_s = valid_time(first)?;
+    let (issue_s, lead_s, valid_s) = cycle_time(first)?;
     let per = npts as usize * by_level.len();
     let mut h = Hour {
         valid_s,
+        issue_s,
+        lead_s,
         grid,
         nx,
         ny,
@@ -158,8 +164,12 @@ pub fn build_hour(fields: Vec<Field>) -> Result<Hour, LoadError> {
             if f.values.len() as u64 != npts {
                 return Err(LoadError::Inconsistent("point count"));
             }
-            if valid_time(&f)? != valid_s {
+            let (field_issue_s, field_lead_s, field_valid_s) = cycle_time(&f)?;
+            if field_valid_s != valid_s {
                 return Err(LoadError::Inconsistent("valid time"));
+            }
+            if (field_issue_s, field_lead_s) != (issue_s, lead_s) {
+                return Err(LoadError::Inconsistent("forecast cycle"));
             }
             // NaN marks a missing value and is kept; an infinite cell is a corrupt field.
             if f.values.iter().any(|v| v.is_infinite()) {
@@ -180,11 +190,11 @@ pub fn build_hour(fields: Vec<Field>) -> Result<Hour, LoadError> {
     Ok(h)
 }
 
-fn valid_time(f: &Field) -> Result<i64, LoadError> {
+fn cycle_time(f: &Field) -> Result<(i64, i64, i64), LoadError> {
     let lead = forecast_seconds(f.time_unit, f.forecast_time).ok_or(LoadError::BadTime)?;
-    ref_unix_seconds(&f.ref_time)
-        .checked_add(lead)
-        .ok_or(LoadError::BadTime)
+    let issue = ref_unix_seconds(&f.ref_time);
+    let valid = issue.checked_add(lead).ok_or(LoadError::BadTime)?;
+    Ok((issue, lead, valid))
 }
 
 fn wanted(info_param: Parameter, kind: u8) -> bool {

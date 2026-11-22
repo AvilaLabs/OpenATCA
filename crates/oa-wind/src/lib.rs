@@ -10,7 +10,9 @@
 //! * [`isa`]: the ICAO standard atmosphere, pressure altitude to pressure and back. Core.
 //! * [`sample`]: the query. Shell (pure, over an [`hour::Hour`]).
 //! * [`archive`]: files on disk, a bounded cache of hours ([`MAX_HOURS_HELD`]) and the query
-//!   over a set of hours. Shell (owns the files).
+//!   over a set of hours. Its opt-in [`select_cycle_as_of`] selector uses separately supplied
+//!   receipt evidence; ordinary [`archive_sample`] remains valid-time-only and is not causal.
+//!   Shell (owns the files).
 //! * [`adsb`]: RAP against the winds and temperatures aircraft report over ADS-B.
 //!   Shell (pure, over `oa-adsb` reports).
 //! * [`check`]: the validation statistics used by `oa-wind-check`. Shell (pure, offline).
@@ -53,7 +55,8 @@ pub use crate::core::isa::{altitude_ft_from_pressure_hpa, pressure_hpa_from_alti
 pub use crate::core::limits::*;
 pub use crate::shell::archive::{
     archive_files, archive_sample, index_files, new_archive, read_file_capped, read_hour_file,
-    read_hour_file_report, Archive, HourFile, IndexUse,
+    read_hour_file_report, select_cycle_as_of, Archive, CausalRefusal, CycleSelection, HourFile,
+    IndexUse,
 };
 pub use crate::shell::compare::compare_obs;
 pub use crate::shell::error::{LoadError, QueryError};

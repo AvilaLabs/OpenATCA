@@ -500,6 +500,14 @@ fn build_hour_validates_its_fields() {
         build_hour(late),
         Err(LoadError::Inconsistent("valid time"))
     ));
+    // Same valid time from a different reference/lead pair is still a different cycle.
+    let mut other_cycle = all.clone();
+    other_cycle[5].ref_time.hour = 11;
+    other_cycle[5].forecast_time = 1;
+    assert!(matches!(
+        build_hour(other_cycle),
+        Err(LoadError::Inconsistent("forecast cycle"))
+    ));
     let mut frac = all.clone();
     frac[5].level.value = 50_000.5;
     assert_eq!(build_hour(frac), Err(LoadError::BadLevel));
@@ -569,6 +577,8 @@ fn idx_ranges_select_only_the_needed_messages() {
 fn archive_checks_its_files() {
     let hf = |name: &str, t: i64| HourFile {
         path: PathBuf::from(name),
+        issue_s: t,
+        lead_s: 0,
         valid_s: t,
     };
     assert_eq!(
@@ -611,6 +621,119 @@ fn archive_checks_its_files() {
     assert_eq!(
         index_files(&many),
         Err(LoadError::TooManyFiles(MAX_ARCHIVE_FILES + 1))
+    );
+}
+
+fn manifest_hour(name: &str, issue_s: i64, lead_s: i64) -> HourFile {
+    HourFile {
+        path: PathBuf::from(name),
+        issue_s,
+        lead_s,
+        valid_s: issue_s + lead_s,
+    }
+}
+
+#[test]
+fn causal_selector_pins_latest_received_cycle_and_never_mixes_hours() {
+    let files = [
+        manifest_hour("a0", 1_000, 0),
+        manifest_hour("a1", 1_000, 100),
+        manifest_hour("a2", 1_000, 200),
+        manifest_hour("b0", 1_050, 0),
+        manifest_hour("b1", 1_050, 100),
+        manifest_hour("b2", 1_050, 200),
+    ];
+    let receipts = [
+        Some(1_005),
+        Some(1_105),
+        Some(1_205),
+        Some(1_055),
+        Some(1_155),
+        Some(1_300), // Later valid hour, but not received by the cutoff.
+    ];
+    let selection = select_cycle_as_of(&files, &receipts, 1_200, 1_075, 1_150).unwrap();
+    assert_eq!(selection.issue_s, 1_050);
+    assert_eq!(
+        (selection.first_valid_s, selection.last_valid_s),
+        (1_050, 1_150)
+    );
+    assert_eq!(selection.file_indices, [3, 4]);
+}
+
+#[test]
+fn causal_selector_names_unknown_late_conflicting_and_missing_brackets() {
+    let base = [
+        manifest_hour("a0", 1_000, 0),
+        manifest_hour("a1", 1_000, 100),
+        manifest_hour("a2", 1_000, 200),
+    ];
+    assert_eq!(
+        select_cycle_as_of(
+            &base,
+            &[Some(1_001), Some(1_101), None],
+            1_200,
+            1_050,
+            1_150,
+        ),
+        Err(CausalRefusal::ReceiptUnknown)
+    );
+    // Both requested endpoints are received, but an unavailable intervening hour must not be
+    // silently omitted from the selected cycle.
+    assert_eq!(
+        select_cycle_as_of(
+            &base,
+            &[Some(1_001), None, Some(1_201)],
+            1_300,
+            1_050,
+            1_150,
+        ),
+        Err(CausalRefusal::ReceiptUnknown)
+    );
+    assert_eq!(
+        select_cycle_as_of(
+            &base,
+            &[Some(1_001), Some(1_101), Some(1_201)],
+            1_200,
+            1_050,
+            1_150,
+        ),
+        Err(CausalRefusal::ReceiptAfterCutoff)
+    );
+    let conflict = [base[0].clone(), base[0].clone(), base[2].clone()];
+    assert_eq!(
+        select_cycle_as_of(
+            &conflict,
+            &[Some(1_001), Some(1_002), Some(1_201)],
+            1_300,
+            1_050,
+            1_150,
+        ),
+        Err(CausalRefusal::ConflictingCycle)
+    );
+    assert_eq!(
+        select_cycle_as_of(&base[..2], &[Some(1_001), Some(1_101)], 1_200, 1_050, 1_150,),
+        Err(CausalRefusal::NoValidBracket)
+    );
+}
+
+#[test]
+fn causal_selector_validates_metadata_receipt_shape_and_issue_cutoff() {
+    let file = manifest_hour("future", 2_000, 0);
+    assert_eq!(
+        select_cycle_as_of(&[file], &[Some(1_900)], 1_900, 2_000, 2_000),
+        Err(CausalRefusal::NoCycleBeforeCutoff)
+    );
+    let bad = HourFile {
+        valid_s: 1_101,
+        ..manifest_hour("bad", 1_000, 100)
+    };
+    assert_eq!(
+        select_cycle_as_of(&[bad], &[Some(1_100)], 1_200, 1_100, 1_100),
+        Err(CausalRefusal::InvalidMetadata)
+    );
+    assert_eq!(
+        select_cycle_as_of(&[manifest_hour("ok", 1_000, 0)], &[], 1_200, 1_000, 1_000,),
+        Err(CausalRefusal::InvalidMetadata)
     );
 }
 
@@ -1079,6 +1202,8 @@ fn an_exact_hour_does_not_need_the_other_bracketing_hour() {
 fn an_exact_hour_does_not_read_the_unused_archive_file() {
     let hf = |name: &str, h: u8| HourFile {
         path: PathBuf::from(name),
+        issue_s: valid(h),
+        lead_s: 0,
         valid_s: valid(h),
     };
     let new_a = || archive_files(vec![hf("a", 12), hf("b", 13), hf("c", 14)]).unwrap();
