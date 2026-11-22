@@ -2848,9 +2848,8 @@ mod tests {
                     println!("{phase},{gap_s},absent,{straight_cross:.2},absent,{coast_ticks},{uncertain_ticks},{tick_count}/{gap_s},no,no");
                     continue;
                 };
-                let identity_ok = confirmed
-                    && last_ns == *warm_s * S
-                    && identities.as_slice() == &[(ADDR, *warm_s * S)];
+                let identity_ok =
+                    confirmed && last_ns == *warm_s * S && identities == [(ADDR, *warm_s * S)];
                 identities_preserved += usize::from(identity_ok);
                 let endpoint = endpoint_tick.expect("one-second endpoint tick");
                 println!(

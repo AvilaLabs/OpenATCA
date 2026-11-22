@@ -2552,7 +2552,7 @@ fn synthetic_per_second_descent_and_level_off_score_warning_and_safe_control() {
     // lead is the declared floor crossing time minus the observed warning time.
     let desired_warning_deadline_s = VIOLATION_ENTRY_S - cfg().warning_s as i64;
     let misses =
-        usize::from(detected_warning_s.map_or(true, |time_s| time_s > desired_warning_deadline_s));
+        usize::from(detected_warning_s.is_none_or(|time_s| time_s > desired_warning_deadline_s));
     let desired_denominator = 1;
     let nuisance_alerts = usize::from(control_alerted);
     let no_alert_denominator = 1;
