@@ -10,22 +10,25 @@ use oa_airspace::model::{
     stratum, time_code, AirwayLegIx, Meta, Model, PointIx, PosE7, RouteIx, SegIx, Span, StrIx,
     StrTable, VertexIx, ALT_NONE, ELEV_NONE,
 };
-use oa_display::list::{list_clear, list_new};
+use oa_display::list::{list_clear, list_new, DisplayList};
+use oa_display::palette::{ALERT, PALETTE};
 use oa_display::project::projection_new;
 use oa_display::raster::frame_digest;
 use oa_display::safety::{FeedState, FeedStatus};
 use oa_display::scene::{build_scene, scene_caps, scene_index, scratch_for, view_new};
 use oa_display::traffic::{
-    build_traffic, caps_add, targets_clear, targets_new, targets_push, traffic_caps, Target,
-    TrafficError, TrafficStats, DEFAULT_STYLE, MAX_TRAIL, NO_ALT, NO_REACQ, T_COAST, T_CS_CONFLICT,
-    T_UNCERTAIN,
+    build_traffic, caps_add, targets_clear, targets_columns, targets_new, targets_push,
+    traffic_caps, Target, TrafficError, TrafficStats, DEFAULT_STYLE, MAX_TRAIL, NO_ALT, NO_REACQ,
+    NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
 };
 use oa_safety::inhibit::inhibits_new;
 use oa_safety::net::state_table_new;
 use oa_scope_replay::adapt::row_flags;
 use oa_scope_replay::frame::{
-    replay_build, replay_build_with_safety, replay_new, replay_raster, ReplayConfig, ReplaySafety,
+    replay_build, replay_build_raw, replay_build_with_safety, replay_new, replay_raster,
+    ReplayConfig, ReplaySafety,
 };
+use oa_scope_replay::raw::RawObservationColumns;
 use oa_scope_replay::rows::{
     targets_at, ConvertConfig, ConvertStats, RowColumns, RowStore, DEFAULT_CONVERT, RF_HAS_ALT,
 };
@@ -68,6 +71,9 @@ pub(super) struct DisplayEvidence {
     pub draw_trail_dropped: u64,
     pub stamp_clipped: u64,
     pub digests: u64,
+    pub raw_drawn: u64,
+    pub raw_capacity_refused: u64,
+    pub raw_invalid_refused: u64,
     pub injected: bool,
 }
 
@@ -401,6 +407,21 @@ fn add_counts(a: &mut Counts, b: Counts) {
     a.overflow |= b.overflow;
 }
 
+fn list_has_text(list: &DisplayList, wanted: &str) -> bool {
+    list.texts
+        .start
+        .iter()
+        .zip(&list.texts.len)
+        .any(|(&start, &len)| {
+            let (Ok(start), Ok(len)) = (usize::try_from(start), usize::try_from(len)) else {
+                return false;
+            };
+            list.text
+                .get(start..start.saturating_add(len))
+                .is_some_and(|text| text == wanted)
+        })
+}
+
 /// Runs `work` for `frames` frames inside one armed window; with `inject`, one allocation is forced
 /// inside it (the negative control), and a failure to force it is an error.
 fn measure(inject: bool, frames: i64, mut work: impl FnMut(i64)) -> Result<Counts, &'static str> {
@@ -597,7 +618,120 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         return Err("a measured refusing display frame failed");
     }
 
-    // Window 5: a scene built into a cloned label scratch. A clone of a sized scratch keeps every
+    // Window 5: independent raw display, including a drawn target, target-set capacity refusal,
+    // and invalid-input fail-closed raster refusal. Fixtures are prepared before arming; returned
+    // counters and rendered bytes witness each route, not merely the called method.
+    let raw_times = [T0 + FIRST_FRAME_S * S];
+    let raw_addresses = [0xA2_0000];
+    let raw_latitudes = [ORD.0];
+    let raw_longitudes = [ORD.1];
+    let raw_altitudes = [24_000];
+    let raw_speeds = [NO_U16];
+    let raw_tracks = [NO_U16];
+    let raw_one = RawObservationColumns {
+        t_ns: &raw_times,
+        addr: &raw_addresses,
+        lat_e7: &raw_latitudes,
+        lon_e7: &raw_longitudes,
+        alt_ft: &raw_altitudes,
+        gs_dkt: &raw_speeds,
+        track_ddeg: &raw_tracks,
+    };
+    let raw_many_times = [T0 + FIRST_FRAME_S * S; 10];
+    let raw_many_addresses = [
+        0xA3_0000, 0xA3_0001, 0xA3_0002, 0xA3_0003, 0xA3_0004, 0xA3_0005, 0xA3_0006, 0xA3_0007,
+        0xA3_0008, 0xA3_0009,
+    ];
+    let raw_many_latitudes = [ORD.0; 10];
+    let raw_many_longitudes = [ORD.1; 10];
+    let raw_many_altitudes = [24_000; 10];
+    let raw_many_speeds = [NO_U16; 10];
+    let raw_many_tracks = [NO_U16; 10];
+    let raw_many = RawObservationColumns {
+        t_ns: &raw_many_times,
+        addr: &raw_many_addresses,
+        lat_e7: &raw_many_latitudes,
+        lon_e7: &raw_many_longitudes,
+        alt_ft: &raw_many_altitudes,
+        gs_dkt: &raw_many_speeds,
+        track_ddeg: &raw_many_tracks,
+    };
+    let invalid_times = [T0 + FIRST_FRAME_S * S; 2];
+    let invalid_addresses = [0xA4_0001, 0xA4_0000];
+    let invalid_latitudes = [ORD.0; 2];
+    let invalid_longitudes = [ORD.1; 2];
+    let invalid_altitudes = [24_000; 2];
+    let invalid_speeds = [NO_U16; 2];
+    let invalid_tracks = [NO_U16; 2];
+    let invalid_raw = RawObservationColumns {
+        t_ns: &invalid_times,
+        addr: &invalid_addresses,
+        lat_e7: &invalid_latitudes,
+        lon_e7: &invalid_longitudes,
+        alt_ft: &invalid_altitudes,
+        gs_dkt: &invalid_speeds,
+        track_ddeg: &invalid_tracks,
+    };
+    let mut raw_ok = true;
+    let (mut raw_drawn, mut raw_capacity_refused, mut raw_invalid_refused) = (0u64, 0u64, 0u64);
+    let raw_alert = PALETTE[usize::from(ALERT)].to_le_bytes();
+    let c = measure(inject, FRAMES, |_| {
+        match replay_build_raw(&mut replay, &raw_one, raw_times[0], "RAW ALLOC") {
+            Ok((info, evidence)) => {
+                let target =
+                    targets_columns(&replay.set).addr.first().copied() == Some(raw_addresses[0]);
+                let banner = list_has_text(&replay.list, "RAW SURVEILLANCE ONLY");
+                let raster = replay_raster(&mut replay).is_ok();
+                let pixels = replay.buf.chunks_exact(4).any(|pixel| pixel == raw_alert);
+                let digest = frame_digest(&replay.spec, &replay.buf).is_ok();
+                if target
+                    && banner
+                    && pixels
+                    && raster
+                    && digest
+                    && evidence.targets_admitted == 1
+                    && info.traffic.drawn == 1
+                {
+                    raw_drawn += 1;
+                } else {
+                    raw_ok = false;
+                }
+            }
+            Err(_) => raw_ok = false,
+        }
+        match replay_build_raw(&mut small, &raw_many, raw_times[0], "RAW CAP") {
+            Ok((info, evidence)) => {
+                let raster = replay_raster(&mut small).is_ok();
+                let digest = frame_digest(&small.spec, &small.buf).is_ok();
+                if raster
+                    && digest
+                    && evidence.targets_admitted == 8
+                    && evidence.refused_capacity == 2
+                    && info.refused == 2
+                    && info.traffic.drawn == 8
+                {
+                    raw_capacity_refused += 2;
+                } else {
+                    raw_ok = false;
+                }
+            }
+            Err(_) => raw_ok = false,
+        }
+        let refused =
+            replay_build_raw(&mut replay, &invalid_raw, raw_times[0], "RAW INVALID").is_err();
+        let raster_refused = replay_raster(&mut replay).is_err();
+        if refused && raster_refused {
+            raw_invalid_refused += 1;
+        } else {
+            raw_ok = false;
+        }
+    })?;
+    add_counts(&mut counts, c);
+    if !raw_ok {
+        return Err("a measured raw surveillance display branch failed its witness");
+    }
+
+    // Window 6: a scene built into a cloned label scratch. A clone of a sized scratch keeps every
     // buffer's length, so the frame writes by index and allocates nothing.
     let map = model();
     let view = view_new(ORD.0, ORD.1, 60.0, 1920, 1080).map_err(|_| "view_new")?;
@@ -635,6 +769,9 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         draw_trail_dropped: u64::from(drawn_all.trail_dropped),
         stamp_clipped,
         digests,
+        raw_drawn,
+        raw_capacity_refused,
+        raw_invalid_refused,
         injected: true,
     })
 }

@@ -30,6 +30,7 @@ def result(injected=False):
             "fusion_anonymous_init_and_assoc",
             "nam_session_activate_traffic_retry_full_deactivate",
             "display_rows_traffic_frame_refusal",
+            "display_raw_fallback_draw_capacity_invalid_refusal",
             "safety_state_inhibit_display",
         ],
         "route_ids": [
@@ -74,6 +75,9 @@ def result(injected=False):
             'display_stamp_clipped',
             'display_frame_digest',
             'display_frame_refusal',
+            'display_raw_frame_draw',
+            'display_raw_capacity_refusal',
+            'display_raw_invalid_refusal',
             'nam_session_activation',
             'nam_session_traffic',
             'nam_session_resend',
@@ -183,6 +187,7 @@ def result(injected=False):
             "convert_invalid_position": 18, "convert_unprojectable": 18,
             "convert_trail_dropped": 63, "convert_time_overflow": 2718,
             "draw_trail_dropped": 20, "stamp_clipped": 5, "digests": 20,
+            "raw_drawn": 20, "raw_capacity_refused": 40, "raw_invalid_refused": 20,
         },
         "safety": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
