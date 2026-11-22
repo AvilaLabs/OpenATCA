@@ -42,8 +42,8 @@ oa-replay-diff --compare-witness-files witness-a.txt witness-b.txt
 ```
 
 The mode reads at most 4 KiB from each regular file through the sealed-path guard. It accepts only
-the three version-1 lines above, complete status, valid counts and digests, and zero refusal or
-sealed-drop counters. It prints `MATCH`, `SETTINGS MISMATCH`, `INPUT MISMATCH`, or `STATE MISMATCH`;
+the three version-1 lines above, complete status, a positive admitted-frame count, valid counts and
+digests, and zero refusal or sealed-drop counters. It prints `MATCH`, `SETTINGS MISMATCH`, `INPUT MISMATCH`, or `STATE MISMATCH`;
 exit status is 0 for `MATCH`, 1 for a mismatch, and 2 for malformed or incomparable evidence.
 Settings are compared first, then admitted frame count and ordered-input digest, then final state
 digest. No witness contents or input payloads are printed.

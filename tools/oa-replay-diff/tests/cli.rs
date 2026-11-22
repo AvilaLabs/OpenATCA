@@ -345,11 +345,35 @@ fn witness_mode_refuses_partial_duplicate_and_nonzero_refusal_evidence() {
     let partial = valid.replace("status=complete", "status=incomplete");
     let duplicate = format!("{valid}{}", valid.lines().next().unwrap());
     let nonzero = valid.replace("source_rejected=0", "source_rejected=1");
-    for (index, invalid) in [partial, duplicate, nonzero].into_iter().enumerate() {
+    let zero_frames = replay_witness(1, 2, 3, 0);
+    for (index, invalid) in [partial, duplicate, nonzero, zero_frames]
+        .into_iter()
+        .enumerate()
+    {
         let out = compare_witness_texts(&invalid, &valid, &format!("witness_invalid_{index}"));
         assert_eq!(out.status.code(), Some(2), "{out:?}");
         assert!(out.stdout.is_empty(), "{out:?}");
     }
+}
+
+// REQ: OA-RDF-008, OA-RDF-024
+#[test]
+fn witness_mode_reports_a_failed_verdict_write_as_exit_2() {
+    let d = dir("witness_fullpipe");
+    let (a, b) = (d.join("a.witness"), d.join("b.witness"));
+    let valid = replay_witness(1, 2, 3, 5);
+    fs::write(&a, &valid).unwrap();
+    fs::write(&b, &valid).unwrap();
+    let full = File::options().write(true).open("/dev/full").unwrap();
+    let out = bin()
+        .args(["--compare-witness-files"])
+        .arg(&a)
+        .arg(&b)
+        .stdout(Stdio::from(full))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot write"));
 }
 
 // REQ: OA-SEAL-005, OA-RDF-024

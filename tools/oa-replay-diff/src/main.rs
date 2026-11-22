@@ -47,17 +47,18 @@ fn once(slot: &mut Option<PathBuf>, name: &str, v: String) -> Result<(), String>
 }
 
 fn run(drops: &mut oa_sealed::DropReport) -> Result<u8, String> {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv
-        .first()
+    let mut args = std::env::args().skip(1).peekable();
+    if args
+        .peek()
         .is_some_and(|arg| arg == "--compare-witness-files")
     {
-        return run_witness_comparison(&argv[1..]);
+        let _mode = args.next();
+        let witness_args: Vec<_> = args.collect();
+        return run_witness_comparison(&witness_args);
     }
     let (mut pos, mut rows_a, mut rows_b) = (Vec::new(), None, None);
     let (mut expect, mut summary, mut max_detail) = (None, None, 50usize);
     let mut seen_max_detail = false;
-    let mut args = argv.into_iter();
     while let Some(a) = args.next() {
         if !a.starts_with("--") {
             pos.push(PathBuf::from(a));
@@ -176,16 +177,16 @@ struct ReplayWitness {
     state: [u8; 32],
 }
 
-fn witness_digest(field: &str, token: Option<&str>) -> Result<[u8; 32], String> {
+fn witness_digest(field: &str, token: &str) -> Result<[u8; 32], String> {
     let value = token
-        .and_then(|part| part.strip_prefix(&format!("{field}=")))
+        .strip_prefix(&format!("{field}="))
         .ok_or_else(|| format!("malformed witness {field}"))?;
     from_hex32(value).ok_or_else(|| format!("malformed witness {field}"))
 }
 
-fn witness_count(field: &str, token: Option<&str>) -> Result<u64, String> {
+fn witness_count(field: &str, token: &str) -> Result<u64, String> {
     token
-        .and_then(|part| part.strip_prefix(&format!("{field}=")))
+        .strip_prefix(&format!("{field}="))
         .and_then(|value| value.parse::<u64>().ok())
         .ok_or_else(|| format!("malformed witness {field}"))
 }
@@ -197,39 +198,48 @@ fn parse_witness(text: &str) -> Result<ReplayWitness, String> {
         .ok_or_else(|| "missing settings witness line".to_string())?
         .split_whitespace()
         .collect();
-    if settings.len() != 4
-        || settings[0] != "settings_fingerprint"
-        || settings[1] != "version=1"
-        || settings[3] != "note=settings_and_ordered_feed_stream_kinds_only"
+    let [marker, version, digest, note] = settings.as_slice() else {
+        return Err("malformed settings witness line".to_string());
+    };
+    if *marker != "settings_fingerprint"
+        || *version != "version=1"
+        || *note != "note=settings_and_ordered_feed_stream_kinds_only"
     {
         return Err("malformed settings witness line".to_string());
     }
-    let settings_digest = witness_digest("sha256", settings.get(2).copied())?;
+    let settings_digest = witness_digest("sha256", digest)?;
 
     let input: Vec<_> = lines
         .next()
         .ok_or_else(|| "missing input witness line".to_string())?
         .split_whitespace()
         .collect();
-    if input.len() != 12
-        || input[0] != "input_fingerprint"
-        || input[1] != "version=1"
-        || input[2] != "status=complete"
-        || input[11] != "note=diagnostic_only_not_completeness_or_cross_clock_equivalence"
+    let [marker, version, status, frames_token, payload_token, digest_token, source_rejected, source_sealed, semantic_sealed, semantic_errors, bridge_rejects, note] =
+        input.as_slice()
+    else {
+        return Err("incomplete or malformed input witness line".to_string());
+    };
+    if *marker != "input_fingerprint"
+        || *version != "version=1"
+        || *status != "status=complete"
+        || *note != "note=diagnostic_only_not_completeness_or_cross_clock_equivalence"
     {
         return Err("incomplete or malformed input witness line".to_string());
     }
-    let frames = witness_count("pipeline_frames", input.get(3).copied())?;
-    let _payload_bytes = witness_count("pipeline_payload_bytes", input.get(4).copied())?;
-    let input_digest = witness_digest("sha256", input.get(5).copied())?;
-    for (field, index) in [
-        ("source_rejected", 6),
-        ("source_sealed_drops", 7),
-        ("semantic_sealed_drops", 8),
-        ("semantic_errors", 9),
-        ("bridge_reject_frames", 10),
+    let frames = witness_count("pipeline_frames", frames_token)?;
+    if frames == 0 {
+        return Err("witness has no admitted input frames".to_string());
+    }
+    let _payload_bytes = witness_count("pipeline_payload_bytes", payload_token)?;
+    let input_digest = witness_digest("sha256", digest_token)?;
+    for (field, token) in [
+        ("source_rejected", *source_rejected),
+        ("source_sealed_drops", *source_sealed),
+        ("semantic_sealed_drops", *semantic_sealed),
+        ("semantic_errors", *semantic_errors),
+        ("bridge_reject_frames", *bridge_rejects),
     ] {
-        if witness_count(field, input.get(index).copied())? != 0 {
+        if witness_count(field, token)? != 0 {
             return Err(format!("witness has nonzero {field}"));
         }
     }
@@ -239,10 +249,13 @@ fn parse_witness(text: &str) -> Result<ReplayWitness, String> {
         .ok_or_else(|| "missing final state witness line".to_string())?
         .split_whitespace()
         .collect();
-    if state.len() != 2 || state[0] != "final" {
+    let [marker, digest_token] = state.as_slice() else {
+        return Err("malformed final state witness line".to_string());
+    };
+    if *marker != "final" {
         return Err("malformed final state witness line".to_string());
     }
-    let state_digest = witness_digest("state_digest", state.get(1).copied())?;
+    let state_digest = witness_digest("state_digest", digest_token)?;
     if lines.next().is_some() {
         return Err("extra witness lines".to_string());
     }
@@ -273,6 +286,6 @@ fn run_witness_comparison(args: &[String]) -> Result<u8, String> {
     } else {
         ("MATCH", 0)
     };
-    println!("{result}");
+    write_out(&mut std::io::stdout().lock(), &format!("{result}\n"))?;
     Ok(code)
 }
