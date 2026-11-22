@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use oa_encounter_run::qualification::{
-    score, Case, CaseResult, Outcome, Subject, Warning, MAX_CASES, MAX_WARNINGS,
+    score, Case, CaseResult, Outcome, ScoreError, Subject, Warning, MAX_CASES, MAX_WARNINGS,
 };
 use oa_safety::net::{Area, NetReport, Reason};
 
@@ -174,4 +174,29 @@ fn misses_nuisance_controls_and_capacity_failures_are_explicit() {
     let many_warnings = vec![warnings[0]; MAX_WARNINGS + 1];
     assert!(score(&[], &many_warnings, &mut []).is_err());
     assert!(score(&cases, &warnings, &mut []).is_err());
+}
+
+#[test]
+fn unrepresentable_warning_lead_is_refused_before_any_result_changes() {
+    let cases = [
+        control(Subject { a: 1, b: 0 }, NetReport::Running),
+        Case {
+            window_start_ns: i64::MIN,
+            warning_from_ns: i64::MIN,
+            warning_deadline_ns: -1,
+            violation: Some((0, 110)),
+            ..desired(Subject { a: 2, b: 0 }, NetReport::Running)
+        },
+    ];
+    let initial = [CaseResult {
+        outcome: Outcome::Miss,
+        warning_index: None,
+        lead_ns: None,
+    }; 2];
+    let mut results = initial;
+    assert_eq!(
+        score(&cases, &[], &mut results),
+        Err(ScoreError::InvalidInterval)
+    );
+    assert_eq!(results, initial);
 }
