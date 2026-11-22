@@ -339,11 +339,17 @@ struct Totals {
     unusable_route: usize,
     horizontal: [Vec<f64>; 3],
     vertical: [Vec<f64>; 3],
-    no_prediction: [usize; 3],
-    no_truth: [usize; 3],
-    vertical_unavailable: [BTreeMap<String, usize>; 3],
+    coverage: [HorizonCoverage; 3],
     eta: [Vec<f64>; 3],
     paired_oa_eta: [Vec<f64>; 2],
+}
+
+#[derive(Default)]
+struct HorizonCoverage {
+    no_prediction: usize,
+    no_truth_position: usize,
+    no_truth_altitude: usize,
+    vertical_unavailable: BTreeMap<String, usize>,
 }
 
 fn note(t: &mut Totals, s: ArrivalScore) {
@@ -355,15 +361,11 @@ fn note(t: &mut Totals, s: ArrivalScore) {
         if let Some(values) = t.vertical.get_mut(i) {
             values.extend(result.vertical_error_ft);
         }
-        if !result.prediction_available {
-            if let Some(n) = t.no_prediction.get_mut(i) {
-                *n += 1;
-            }
-        }
-        if !result.truth_available {
-            if let Some(n) = t.no_truth.get_mut(i) {
-                *n += 1;
-            }
+        if let Some(coverage) = t.coverage.get_mut(i) {
+            coverage.no_prediction += usize::from(!result.prediction_available);
+            coverage.no_truth_position += usize::from(!result.truth_available);
+            coverage.no_truth_altitude +=
+                usize::from(result.truth_available && !result.truth_altitude_available);
         }
     }
     for (all, error) in
@@ -535,13 +537,12 @@ pub(crate) fn report(
             }
         };
         totals.issued += 1;
-        for (i, point) in predicted.positions.iter().enumerate() {
+        for (coverage, point) in totals.coverage.iter_mut().zip(&predicted.positions) {
             if point.vertical_status != VerticalStatus::Available {
-                if let Some(counts) = totals.vertical_unavailable.get_mut(i) {
-                    *counts
-                        .entry(format!("{:?}", point.vertical_status))
-                        .or_default() += 1;
-                }
+                *coverage
+                    .vertical_unavailable
+                    .entry(format!("{:?}", point.vertical_status))
+                    .or_default() += 1;
             }
         }
         let eram = legacy
@@ -599,10 +600,11 @@ pub(crate) fn report(
         }
     }
     writeln!(text, "route messages excluded: outside selected fix or repeated fix {no_meter}; ambiguous same-time routes {}; missing, stale or conflicting ADS-B state {}; outside issue distance {}; unresolved forward route {}", totals.ambiguous_routes, totals.no_track, totals.outside_issue_window, totals.unusable_route).map_err(|e| e.to_string())?;
-    for ((mins, h), v) in [5, 10, 20]
+    for (((mins, h), v), coverage) in [5, 10, 20]
         .into_iter()
         .zip(&mut totals.horizontal)
         .zip(&mut totals.vertical)
+        .zip(&totals.coverage)
     {
         writeln!(
             text,
@@ -611,21 +613,17 @@ pub(crate) fn report(
             summarize(&format!("{mins} min vertical (ft)"), v, totals.issued)
         )
         .map_err(|e| e.to_string())?;
-        let index = match mins {
-            5 => 0,
-            10 => 1,
-            _ => 2,
-        };
-        writeln!(text, "{mins} min coverage: denominator is all {} issued forecasts; missing predicted position {}; no usable truth interpolation {}; forecast selection does not depend on future truth", totals.issued, totals.no_prediction[index], totals.no_truth[index]).map_err(|e| e.to_string())?;
-        let reasons = totals.vertical_unavailable[index]
+        writeln!(text, "{mins} min coverage: denominator is all {} issued forecasts; missing predicted position {}; no usable truth position {}; truth position without altitude {}", totals.issued, coverage.no_prediction, coverage.no_truth_position, coverage.no_truth_altitude).map_err(|e| e.to_string())?;
+        let reasons = coverage
+            .vertical_unavailable
             .iter()
             .map(|(reason, count)| format!("{reason}={count}"))
             .collect::<Vec<_>>()
             .join(", ");
         writeln!(
             text,
-            "{mins} min vertical unavailable: {}/{} issued; {}",
-            totals.vertical_unavailable[index].values().sum::<usize>(),
+            "{mins} min forecast vertical unavailable: {}/{} issued; {}",
+            coverage.vertical_unavailable.values().sum::<usize>(),
             totals.issued,
             if reasons.is_empty() {
                 "none"

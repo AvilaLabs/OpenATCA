@@ -329,6 +329,7 @@ pub struct HorizonScore {
     pub vertical_error_ft: Option<f64>,
     pub prediction_available: bool,
     pub truth_available: bool,
+    pub truth_altitude_available: bool,
     pub covered: bool,
 }
 // A7.2: cold struct, size guard waived; one-shot score output.
@@ -405,31 +406,22 @@ pub fn score(
         forecast_possible: 3,
         ..ArrivalScore::default()
     };
-    for (i, predicted) in forecast.positions.iter().enumerate() {
+    for (slot, predicted) in out.forecast.iter_mut().zip(&forecast.positions) {
         if predicted.time_ms <= 0 {
             continue;
         }
         let actual = interpolate_truth(&truth, predicted.time_ms);
-        if let Some(slot) = out.forecast.get_mut(i) {
-            slot.prediction_available = predicted.place.is_some();
-            slot.truth_available = actual.is_some();
-        }
+        slot.prediction_available = predicted.place.is_some();
+        slot.truth_available = actual.is_some();
+        slot.truth_altitude_available = actual.is_some_and(|point| point.altitude_ft.is_some());
         if let (Some(predicted_place), Some(actual)) = (predicted.place, actual) {
-            let horiz = Some(great_circle_m(predicted_place, actual.place));
-            let vert = predicted
+            slot.horizontal_error_m = Some(great_circle_m(predicted_place, actual.place));
+            slot.vertical_error_ft = predicted
                 .altitude_ft
                 .zip(actual.altitude_ft)
                 .map(|(a, b)| (a - b).abs());
-            if let Some(slot) = out.forecast.get_mut(i) {
-                *slot = HorizonScore {
-                    horizontal_error_m: horiz,
-                    vertical_error_ft: vert,
-                    prediction_available: true,
-                    truth_available: true,
-                    covered: true,
-                };
-                out.forecast_covered += 1;
-            }
+            slot.covered = true;
+            out.forecast_covered += 1;
         }
     }
     let actual_meter = meter_fix
@@ -1015,35 +1007,30 @@ mod tests {
         snapshot.track.altitude_ft = Some(10_000.0);
         snapshot.track.speed_mps = Some(300.0);
         snapshot.track.vertical_rate_fpm = Some(-600.0);
-        snapshot.route[0].altitude_constraint = Some(AltitudeConstraint {
+        let constraint = AltitudeConstraint {
             minimum_ft: Some(7_000.0),
             maximum_ft: Some(8_500.0),
             available_ms: snapshot.cutoff_ms,
             provenance: ConstraintProvenance::PublishedProcedure,
-        });
+        };
+        snapshot.route[0].altitude_constraint = Some(constraint);
         let predicted = forecast(&snapshot)?;
         assert_eq!(predicted.positions[0].altitude_ft, Some(7_000.0));
         assert_eq!(
             predicted.positions[0].vertical_status,
             VerticalStatus::Available
         );
-        assert_eq!(
-            snapshot.route[0].altitude_constraint.unwrap().provenance,
-            ConstraintProvenance::PublishedProcedure
-        );
-
-        snapshot.route[0]
-            .altitude_constraint
-            .as_mut()
-            .unwrap()
-            .available_ms += 1;
+        snapshot.route[0].altitude_constraint = Some(AltitudeConstraint {
+            available_ms: snapshot.cutoff_ms + 1,
+            ..constraint
+        });
         assert_eq!(forecast(&snapshot), Err(ForecastRefusal::InvalidTrackValue));
         Ok(())
     }
 
     // REQ: OA-LTJ-054
     #[test]
-    fn infeasible_waypoint_window_marks_vertical_only_unavailable() -> Result<(), ForecastRefusal> {
+    fn infeasible_waypoint_window_marks_vertical_only_unavailable() -> Result<(), String> {
         let (mut snapshot, _) = fixture();
         snapshot.track.altitude_ft = Some(10_000.0);
         snapshot.track.speed_mps = Some(180.0);
@@ -1062,7 +1049,7 @@ mod tests {
             },
             altitude_constraint: None,
         });
-        let predicted = forecast(&snapshot)?;
+        let predicted = forecast(&snapshot).map_err(|e| format!("forecast: {e:?}"))?;
         assert!(predicted.positions[0].place.is_some());
         assert_eq!(predicted.positions[0].altitude_ft, Some(7_000.0));
         assert_eq!(
@@ -1080,7 +1067,9 @@ mod tests {
         );
         let actual = TruthPoint {
             time_ms: predicted.positions[1].time_ms,
-            place: predicted.positions[1].place.unwrap(),
+            place: predicted.positions[1]
+                .place
+                .ok_or("missing 10-minute position")?,
             altitude_ft: None,
             gap_before: false,
         };
@@ -1092,8 +1081,10 @@ mod tests {
             None,
             2_000.0,
         )
-        .expect("horizontal scoring remains available");
+        .map_err(|e| format!("score: {e:?}"))?;
         assert!(scored.forecast[1].horizontal_error_m.is_some());
+        assert!(scored.forecast[1].truth_available);
+        assert!(!scored.forecast[1].truth_altitude_available);
         assert_eq!(scored.forecast[1].vertical_error_ft, None);
         Ok(())
     }
