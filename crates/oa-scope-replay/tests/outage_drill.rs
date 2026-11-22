@@ -11,15 +11,23 @@ use oa_ca::{
     alert_log_new, ca_cycle, ca_new, ca_open, event_log_new, Area, CaConfig, CaTrack, Volume,
     AF_COAST, AIRBORNE, F_COAST, F_IDENTITY_UNCONFIRMED, F_UNCERTAIN, MAX_VOLUMES,
 };
+use oa_display::core::palette;
 use oa_display::raster::frame_digest;
 use oa_display::safety::{FeedState, FeedStatus};
 use oa_display::traffic::{targets_columns, DEFAULT_STYLE, T_COAST};
+use oa_geo::aeqd::{frame_new, project};
 use oa_safety::inhibit::{inhibits_new, InhibitTable};
+use oa_safety::monitor::{
+    check_pairs, MonitorFinding, MonitorLimits, MonitorPair, MonitorStatus, COMMON_LOCAL_FRAME,
+    HAS_CLAIM, HAS_REFERENCE, VIOLATION_ALTITUDE,
+};
 use oa_safety::net::{state_report, state_table_new, NetId, NetReport, StateTable, NETS};
 use oa_scope_replay::adapt::{row_columns, ColumnBuf};
 use oa_scope_replay::frame::{
-    replay_build_with_safety, replay_new, replay_raster, Replay, ReplayConfig, ReplaySafety,
+    replay_build_raw, replay_build_with_safety, replay_new, replay_raster, Replay, ReplayConfig,
+    ReplaySafety,
 };
+use oa_scope_replay::raw::RawObservationColumns;
 use oa_scope_replay::rows::{Callsigns, RowStore, DEFAULT_CONVERT};
 use oa_scope_replay::store::{store_add, store_finish};
 use oa_track::{
@@ -2266,4 +2274,131 @@ fn blackout_and_staggered_recovery_keep_tracks_and_clear_only_recovered_warnings
     )
     .unwrap();
     d.frame(43, &[]);
+}
+
+// REQ: OA-SAF-020, OA-DSP-072
+#[test]
+fn independent_monitor_contradiction_selects_synthetic_raw_fallback() {
+    let mut drill = Drill::new();
+    drill.warmup_visible_ca();
+    drill.offer_with_vrate(A, 1, 0, 0);
+    drill.offer_with_vrate(B, 2, 0, 0);
+    drill.frame_inner(0, None);
+
+    // This label comes from the fixture's accepted synthetic measurement, not from the output.
+    let truth_lat_e7 = LAT + 80_000;
+    let truth_lon_e7 = LON;
+    let truth_alt_ft = 12_000;
+    let truth_time_ns = EPOCH;
+    let frame = frame_new(
+        f64::from(truth_lat_e7) / 10_000_000.0,
+        f64::from(truth_lon_e7) / 10_000_000.0,
+    );
+    let (truth_east, truth_north) = project(
+        &frame,
+        f64::from(truth_lat_e7) / 10_000_000.0,
+        f64::from(truth_lon_e7) / 10_000_000.0,
+    );
+    let (accepted, confirmed, newest_ns) = tracker_predict(&drill.tracker, A, EPOCH)
+        .expect("synthetic warmed target has tracker output");
+    assert!(confirmed, "the monitor pair must use a confirmed track");
+    assert_eq!(accepted.addr, A);
+    assert_eq!(
+        newest_ns, truth_time_ns,
+        "use accepted, fresh measurement state"
+    );
+    assert_eq!(accepted.t_ns, EPOCH);
+
+    let (claim_east, claim_north) = project(
+        &frame,
+        f64::from(accepted.lat_e7) / 10_000_000.0,
+        f64::from(accepted.lon_e7) / 10_000_000.0,
+    );
+    let make_pair = |claim_alt_ft: i32| MonitorPair {
+        reference_id: A,
+        claim_id: accepted.addr,
+        reference_time_ns: truth_time_ns,
+        claim_time_ns: accepted.t_ns,
+        reference_east_mm: (truth_east * 1_000.0).round() as i64,
+        reference_north_mm: (truth_north * 1_000.0).round() as i64,
+        claim_east_mm: (claim_east * 1_000.0).round() as i64,
+        claim_north_mm: (claim_north * 1_000.0).round() as i64,
+        reference_alt_ft: truth_alt_ft,
+        claim_alt_ft,
+        presence: HAS_REFERENCE | HAS_CLAIM | COMMON_LOCAL_FRAME,
+    };
+    let limits = MonitorLimits {
+        max_age_ns: S.unsigned_abs(),
+        max_pair_skew_ns: 0,
+        max_horizontal_rate_mm_s: 0,
+        max_vertical_rate_ft_s: 0,
+        horizontal_tolerance_mm: 100_000,
+        vertical_tolerance_ft: 25,
+    };
+    let mut finding = [MonitorFinding {
+        reference_id: 0,
+        claim_id: 0,
+        status: MonitorStatus::InvalidEvidence,
+        violations: 0,
+    }];
+    let healthy = [make_pair(accepted.alt_ft.round() as i32)];
+    let healthy_report = check_pairs(EPOCH, &healthy, limits, &mut finding).unwrap();
+    assert_eq!(healthy_report.healthy, 1);
+    assert_eq!(finding[0].status, MonitorStatus::Healthy);
+
+    // Mutation is isolated to the checker input. The tracker's original output and the
+    // independently declared raw fallback observation remain unchanged.
+    let mut altered_output = accepted;
+    altered_output.alt_ft += 1_000.0;
+    let altered = [make_pair(altered_output.alt_ft.round() as i32)];
+    let altered_report = check_pairs(EPOCH, &altered, limits, &mut finding).unwrap();
+    assert_eq!(altered_report.contradicted, 1);
+    assert_eq!(finding[0].status, MonitorStatus::Contradiction);
+    assert_eq!(finding[0].violations, VIOLATION_ALTITUDE);
+
+    // This scenario policy chooses the explicit raw-only display after the monitor result.
+    // The monitor does not trigger, authorize, or wire this fallback in product operation.
+    let times = [truth_time_ns];
+    let addresses = [A];
+    let latitudes = [truth_lat_e7];
+    let longitudes = [truth_lon_e7];
+    let altitudes = [truth_alt_ft];
+    let speeds = [oa_display::traffic::NO_U16];
+    let tracks = [oa_display::traffic::NO_U16];
+    let raw = RawObservationColumns {
+        t_ns: &times,
+        addr: &addresses,
+        lat_e7: &latitudes,
+        lon_e7: &longitudes,
+        alt_ft: &altitudes,
+        gs_dkt: &speeds,
+        track_ddeg: &tracks,
+    };
+    let (_, stats) = replay_build_raw(&mut drill.scope, &raw, EPOCH, "MONITOR DRILL").unwrap();
+    assert_eq!(stats.targets_admitted, 1);
+    let shown = targets_columns(&drill.scope.set);
+    assert_eq!(shown.addr, &[A]);
+    assert_eq!(
+        (shown.lat_e7[0], shown.lon_e7[0]),
+        (truth_lat_e7, truth_lon_e7)
+    );
+    assert_eq!(shown.alt_ft[0], truth_alt_ft);
+    replay_raster(&mut drill.scope).unwrap();
+    let text: Vec<&str> = (0..drill.scope.list.texts.x.len())
+        .map(|i| {
+            let start = drill.scope.list.texts.start[i] as usize;
+            let len = drill.scope.list.texts.len[i] as usize;
+            &drill.scope.list.text[start..start + len]
+        })
+        .collect();
+    assert!(text.contains(&"RAW SURVEILLANCE ONLY"));
+    let alert_pixel = palette::PALETTE[usize::from(palette::ALERT)].to_le_bytes();
+    assert!(drill
+        .scope
+        .buf
+        .chunks_exact(drill.scope.spec.stride as usize)
+        .skip(10)
+        .take(16)
+        .flat_map(|line| line.chunks_exact(4))
+        .any(|pixel| pixel == alert_pixel));
 }
