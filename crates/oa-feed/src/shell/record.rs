@@ -1045,9 +1045,12 @@ mod closed_segment_sync_tests {
     };
     use std::fs;
     use std::io::{self, Write};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FailAt {
@@ -1282,5 +1285,162 @@ mod closed_segment_sync_tests {
             assert!(format_recording(name, &rec).contains("persistence_unconfirmed_frames=1"));
             let _ = fs::remove_dir_all(dir);
         }
+    }
+
+    fn one_raw_frame() -> Vec<u8> {
+        let payload = b"synthetic process-restart fixture";
+        let mut frame =
+            vec![0u8; crate::frame::HEADER_LEN + payload.len() + crate::frame::TRAILER_LEN];
+        let n = crate::frame::encode_frame(
+            &mut frame,
+            1,
+            crate::frame::FLAG_BYTES,
+            1,
+            1_700_000_000_000_000_000,
+            1_700_000_000_000,
+            payload,
+        )
+        .unwrap();
+        frame.truncate(n);
+        frame
+    }
+
+    fn pause_after_file_sync(dir: &Path) {
+        use std::fs::OpenOptions;
+
+        let checkpoint = dir.join("before-directory-sync.checkpoint");
+        let completed = dir.join("directory-sync.completed");
+        let file: SyncingOpener = Box::new(|path| {
+            let file = OpenOptions::new().write(true).create_new(true).open(path)?;
+            Ok(Box::new(super::SyncingFile(file)) as Box<dyn SyncingWriter>)
+        });
+        let directory: DirectorySyncer = Box::new(move || {
+            fs::write(
+                &checkpoint,
+                b"file sync returned; directory sync not entered",
+            )?;
+            loop {
+                thread::sleep(Duration::from_secs(1));
+            }
+        });
+        let mut recorder = Recorder::open_sync_closed_segments_with_hooks(
+            dir,
+            "restart",
+            u64::MAX,
+            u64::MAX,
+            Format::Raw,
+            file,
+            directory,
+        )
+        .unwrap();
+        recorder
+            .write_frame(&one_raw_frame(), 1_700_000_000, 1_700_000_000)
+            .unwrap();
+        recorder.finish().unwrap();
+        fs::write(completed, b"directory sync returned").unwrap();
+    }
+
+    // REQ: OA-FEED-170
+    // Process-restart fixture only: visible files and successful sync calls do not certify
+    // power-loss durability.
+    #[test]
+    fn process_restart_after_file_sync_replays_segment_and_respects_name_and_cap() {
+        const CHILD_ENV: &str = "OA_FEED_TEST_SYNC_RESTART_DIR";
+        if let Some(dir) = std::env::var_os(CHILD_ENV) {
+            pause_after_file_sync(Path::new(&dir));
+            return;
+        }
+
+        let dir = temp_dir("process-restart");
+        let checkpoint = dir.join("before-directory-sync.checkpoint");
+        let completed = dir.join("directory-sync.completed");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("process_restart_after_file_sync_replays_segment_and_respects_name_and_cap")
+            .arg("--nocapture")
+            .env(CHILD_ENV, &dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut checkpoint_seen = false;
+        while Instant::now() < deadline {
+            if checkpoint.exists() {
+                checkpoint_seen = true;
+                break;
+            }
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        let status = child.wait().unwrap();
+        assert!(
+            !status.success(),
+            "child must be killed in the sync boundary"
+        );
+        assert!(
+            checkpoint_seen,
+            "child did not reach the post-file-sync hook"
+        );
+        assert_eq!(
+            fs::read(&checkpoint).unwrap(),
+            b"file sync returned; directory sync not entered"
+        );
+        assert!(
+            !completed.exists(),
+            "directory sync must not report completion after process kill"
+        );
+
+        let first = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "oaf"))
+            .unwrap();
+        let report = crate::replay::replay_sources(vec![fs::File::open(&first).unwrap()]).unwrap();
+        assert_eq!(report.health.frames, 1);
+        assert!(report.errors.is_empty());
+        assert!(report.gzip.is_empty());
+
+        let occupied_bytes = fs::metadata(&first).unwrap().len();
+        let mut capped = Recorder::open_sync_closed_segments(
+            &dir,
+            "restart",
+            u64::MAX,
+            occupied_bytes,
+            Format::Raw,
+        )
+        .unwrap();
+        assert_eq!(capped.total_bytes(), occupied_bytes);
+        assert_eq!(
+            capped
+                .write_frame(&one_raw_frame(), 1_700_000_000, 1_700_000_000)
+                .unwrap(),
+            Outcome::StoppedNow
+        );
+        assert_eq!(capped.files_opened(), 0);
+
+        let mut continued =
+            Recorder::open_sync_closed_segments(&dir, "restart", u64::MAX, u64::MAX, Format::Raw)
+                .unwrap();
+        assert_eq!(
+            continued
+                .write_frame(&one_raw_frame(), 1_700_000_000, 1_700_000_000)
+                .unwrap(),
+            Outcome::Written
+        );
+        continued.finish().unwrap();
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".oaf"))
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 2);
+        assert!(names[0].ends_with("-0001.oaf"), "{names:?}");
+        assert!(names[1].ends_with("-0002.oaf"), "{names:?}");
+        let _ = fs::remove_dir_all(dir);
     }
 }
