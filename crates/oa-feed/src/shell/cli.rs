@@ -2,14 +2,17 @@
 //!
 //! ```text
 //! oa-feed (--env <file> [--jar <jar>] [--java <java>] | --stdin) [--feed <name>]
-//!         [--record <dir> | --record-raw <dir>] [--max-bytes <n>] [--rotate-bytes <n>]
+//!         [--record <dir> | --record-raw <dir>] [--sync-closed-segments]
+//!         [--max-bytes <n>] [--rotate-bytes <n>]
 //!         [--duration <s>] [--summary-every <s>]
 //! oa-feed replay <file.oaf | file.oaf.gz>...
 //! ```
 //!
-//! `--record` writes gzip-compressed `.oaf.gz` files, `--record-raw` plain `.oaf`. Sizes
-//! (`--max-bytes`, `--rotate-bytes`) count the bytes on disk. Replay tells the two apart by the
-//! file's first bytes, not its name.
+//! `--record` writes gzip-compressed `.oaf.gz` files, `--record-raw` plain `.oaf`. The optional
+//! `--sync-closed-segments` requests synchronous file and directory-entry sync on Linux whenever
+//! a segment closes; it requires an existing recording directory and can delay capture. It does
+//! not certify hardware power-loss behavior. Sizes (`--max-bytes`, `--rotate-bytes`) count the
+//! bytes written. Replay tells the formats apart by the file's first bytes, not its name.
 
 use std::path::PathBuf;
 
@@ -54,6 +57,8 @@ pub struct Live {
     pub record: Option<PathBuf>,
     /// Record plain `.oaf` instead of gzip-compressed `.oaf.gz`.
     pub record_raw: bool,
+    /// Request OS syncs for each closed recording segment.
+    pub sync_closed_segments: bool,
     /// Total cap on recorded bytes.
     pub max_bytes: u64,
     /// Rotation size of one recording file.
@@ -78,7 +83,7 @@ pub enum Command {
 /// Usage text.
 pub const USAGE: &str =
     "usage:\n  oa-feed (--env <file> [--jar <jar>] [--java <java>] | --stdin) [--feed <name>] \
-[--record <dir> | --record-raw <dir>] [--max-bytes <n>] [--rotate-bytes <n>] [--duration <s>] \
+[--record <dir> | --record-raw <dir>] [--sync-closed-segments] [--max-bytes <n>] [--rotate-bytes <n>] [--duration <s>] \
 [--summary-every <s>]\n  oa-feed replay <file.oaf | file.oaf.gz>...";
 
 /// Parses arguments (without the program name).
@@ -91,6 +96,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut feed = None;
     let mut record = None;
     let mut record_raw = false;
+    let mut sync_closed_segments = false;
     let mut max_bytes = DEFAULT_MAX_BYTES;
     let mut rotate_bytes = DEFAULT_ROTATE_BYTES;
     let mut duration_secs = None;
@@ -121,6 +127,12 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 }
                 record_raw = a == "--record-raw";
                 record = Some(PathBuf::from(value(a)?));
+            }
+            "--sync-closed-segments" => {
+                if sync_closed_segments {
+                    return Err("--sync-closed-segments is given more than once".into());
+                }
+                sync_closed_segments = true;
             }
             "--max-bytes" => max_bytes = number("--max-bytes", &value("--max-bytes")?)?,
             "--rotate-bytes" => rotate_bytes = number("--rotate-bytes", &value("--rotate-bytes")?)?,
@@ -163,12 +175,16 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             .to_string(),
         Source::Stdin => "stdin".to_string(),
     });
+    if sync_closed_segments && record.is_none() {
+        return Err("--sync-closed-segments requires --record or --record-raw".into());
+    }
     check_feed_label(&feed).map_err(|e| format!("--feed: {e}"))?;
     Ok(Command::Live(Live {
         source,
         feed,
         record,
         record_raw,
+        sync_closed_segments,
         max_bytes,
         rotate_bytes,
         duration_secs,

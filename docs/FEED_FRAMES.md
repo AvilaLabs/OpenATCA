@@ -101,6 +101,16 @@ still count toward the byte cap, but do not set the watermark. This ordering gua
 single writer for a feed and directory. `create_new` prevents overwriting a colliding path; it does
 not coordinate concurrent recorders, fence multiple processes, or deduplicate broker deliveries.
 
+`--sync-closed-segments` is an opt-in Linux mode for an existing recording directory. When a
+segment closes at rotation, the size cap or normal finish, `oa-feed` flushes the writer, requests
+`File::sync_all` for the segment, then requests a sync of the containing directory entry. The
+directory and its ancestors must already exist; their own creation durability is outside this
+option. Sync calls are synchronous and can delay the capture loop, which applies its existing
+bounded backpressure. Idle compressor flushes do not close or sync the active segment, so an
+open segment is not promised across power loss. Reported completion is the operating system's
+sync result, not a claim that storage hardware or its power-loss protection was certified. The
+default recording mode does not request these syncs.
+
 ## Bridge behaviour (adapters/scds-bridge)
 
 * One process per subscription. Argument: the path of the env file (`SCDS_JMS_URL`, `SCDS_VPN`,

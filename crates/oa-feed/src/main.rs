@@ -271,17 +271,31 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
 
     let mut recorder = match &cfg.record {
         Some(dir) => Some(
-            Recorder::open(
-                dir,
-                &cfg.feed,
-                cfg.rotate_bytes,
-                cfg.max_bytes,
-                if cfg.record_raw {
-                    Format::Raw
-                } else {
-                    Format::Gzip
-                },
-            )
+            if cfg.sync_closed_segments {
+                Recorder::open_sync_closed_segments(
+                    dir,
+                    &cfg.feed,
+                    cfg.rotate_bytes,
+                    cfg.max_bytes,
+                    if cfg.record_raw {
+                        Format::Raw
+                    } else {
+                        Format::Gzip
+                    },
+                )
+            } else {
+                Recorder::open(
+                    dir,
+                    &cfg.feed,
+                    cfg.rotate_bytes,
+                    cfg.max_bytes,
+                    if cfg.record_raw {
+                        Format::Raw
+                    } else {
+                        Format::Gzip
+                    },
+                )
+            }
             .map_err(|e| format!("cannot open recording directory: {e}"))?,
         ),
         None => None,

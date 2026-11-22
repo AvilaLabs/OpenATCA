@@ -1233,6 +1233,11 @@ fn command_line_parsing() {
         Command::Live(l) => assert_eq!((l.record, l.record_raw), (Some(PathBuf::from("/r")), true)),
         c => panic!("{c:?}"),
     }
+    match cli::parse(&a("--stdin --record /r --sync-closed-segments")).unwrap() {
+        Command::Live(l) => assert!(l.sync_closed_segments),
+        c => panic!("{c:?}"),
+    }
+    assert!(cli::parse(&a("--stdin --sync-closed-segments")).is_err());
     assert!(matches!(cli::parse(&a("--help")).unwrap(), Command::Help));
     for bad in [
         "",
@@ -1246,6 +1251,7 @@ fn command_line_parsing() {
         "--stdin --record /a --record-raw /b",
         "--stdin --record-raw /a --record /b",
         "--stdin --record-raw",
+        "--stdin --record /r --sync-closed-segments --sync-closed-segments",
     ] {
         assert!(cli::parse(&a(bad)).is_err(), "{bad:?} should be refused");
     }

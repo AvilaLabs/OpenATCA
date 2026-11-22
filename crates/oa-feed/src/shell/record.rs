@@ -12,20 +12,25 @@
 //! evidence, A8).
 //!
 //! Compressed recordings (oa-deflate, level 6) are a sequence of gzip members, one per file. The
-//! compressor is sync-flushed when the local whole second changes after the last
-//! flush, and by [`Recorder::idle_flush`] when the feed is quiet, so a crash loses at most about
-//! one second of frames; each file is finished (final block and CRC-32 trailer) on rotation, at
-//! the cap and in [`Recorder::finish`]. Rotation and the cap count the compressed bytes that are
-//! on disk, not the frame bytes: the compressor holds a little back, so a file can pass the
-//! rotation size, and the total the cap, by the output of one flush interval before the next
-//! check sees it. A file cut by a crash is read back up to its last flush (oa-zip
-//! `GzipReader`).
+//! compressor is sync-flushed when the local whole second changes after the last flush, and by
+//! [`Recorder::idle_flush`] when the feed is quiet. With the default writer this helps recovery
+//! after a process crash while the operating system remains running; it is not a power-loss
+//! guarantee. Each file is finished (final block and CRC-32 trailer) on rotation, at the cap and
+//! in [`Recorder::finish`]. The opt-in [`Recorder::open_sync_closed_segments`] requests file and
+//! containing-directory syncs for closed segments only. Those synchronous operations can delay
+//! capture; they are OS requests, not certification of hardware power-loss behavior. Rotation and
+//! the cap count bytes accepted by the writer, not confirmed persistent bytes: the compressor
+//! holds a little back, so a file can pass the rotation size, and the total the cap, by the output
+//! of one flush interval before the next check sees it. A file cut by a process crash is read back
+//! up to its last flush (oa-zip `GzipReader`).
 //!
 //! A write, flush or finish that fails (a full disk) is a persistent failed state, not a
 //! warning: the recorder keeps the first error, stops writing, and counts every frame handed to
 //! it afterwards as lost ([`Recorder::failure`], [`Recorder::lost_frames`], [`format_recording`]),
 //! so the shell can report it and exit non-zero. A stop at the size cap exits non-zero too
 //! ([`Recorder::exit_reason`]): the run did not record what it was asked to.
+//! A closed-segment sync failure also stops recording, but its segment is reported as persistence
+//! unconfirmed rather than as known lost frames.
 //!
 //! Startup counts existing recordings across at most [`DEFAULT_MAX_DIRECTORY_ENTRIES`] directory
 //! entries. This is an operational enumeration cap, not an elapsed-time guarantee; unrelated and
@@ -68,13 +73,85 @@ pub enum Outcome {
 /// creates a real file; tests pass one whose writes fail on demand.
 pub type Opener = Box<dyn FnMut(&Path) -> io::Result<Box<dyn Write + Send>> + Send>;
 
-/// The open file: bytes on disk so far, the compressor, and when it was last flushed.
+trait SyncingWriter: Write + Send {
+    fn sync_all(&mut self) -> io::Result<()>;
+}
+
+type SyncingOpener = Box<dyn FnMut(&Path) -> io::Result<Box<dyn SyncingWriter>> + Send>;
+type DirectorySyncer = Box<dyn FnMut() -> io::Result<()> + Send>;
+
+enum RecorderOpener {
+    FlushOnly(Opener),
+    SyncClosedSegments {
+        file: SyncingOpener,
+        directory: DirectorySyncer,
+    },
+}
+
+enum RecordingFile {
+    FlushOnly(Box<dyn Write + Send>),
+    Syncing(Box<dyn SyncingWriter>),
+}
+
+impl RecordingFile {
+    fn write_all(&mut self, bytes: &[u8]) -> io::Result<()> {
+        match self {
+            Self::FlushOnly(file) => file.write_all(bytes),
+            Self::Syncing(file) => file.write_all(bytes),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::FlushOnly(file) => file.flush(),
+            Self::Syncing(file) => file.flush(),
+        }
+    }
+
+    fn is_syncing(&self) -> bool {
+        matches!(self, Self::Syncing(_))
+    }
+
+    fn sync_all(&mut self) -> io::Result<()> {
+        match self {
+            Self::FlushOnly(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "file sync requested for a flush-only recorder",
+            )),
+            Self::Syncing(file) => file.sync_all(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct SyncingFile(File);
+
+#[cfg(target_os = "linux")]
+impl Write for SyncingFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl SyncingWriter for SyncingFile {
+    fn sync_all(&mut self) -> io::Result<()> {
+        self.0.sync_all()
+    }
+}
+
+/// The open file: bytes accepted by the writer, the compressor, and when it was last flushed.
 // A7.2: cold struct, size guard waived
 struct Current {
-    file: Box<dyn Write + Send>,
+    file: RecordingFile,
     disk: u64,
     gz: Option<GzipWriter>,
     flushed_secs: i64,
+    frames: u64,
 }
 
 /// Recording state for one feed. A subsystem under D5: it owns the open file.
@@ -92,12 +169,19 @@ pub struct Recorder {
     last_file_name: Option<(String, u32)>,
     rotations_after_clock_step_back: u64,
     implausible_stamps: u64,
-    opener: Opener,
+    /// Keeps the checked Linux directory descriptor alive for descriptor-anchored creation.
+    _directory_anchor: Option<File>,
+    opener: RecorderOpener,
+    sync_started: u64,
+    sync_completed: u64,
+    sync_failures: u64,
+    sync_failed_stage: Option<&'static str>,
+    persistence_unconfirmed_frames: u64,
     /// The first error that failed the recording; once set, nothing more is written.
     failed: Option<String>,
     lost_frames: u64,
-    /// Frames given to the compressor since its last successful flush: on disk only once the next
-    /// flush or finish succeeds, and lost if that one fails.
+    /// Frames given to the compressor since its last successful flush: accepted by the writer
+    /// only once the next flush or finish succeeds, and lost if that write or flush fails.
     unflushed: u64,
 }
 
@@ -198,6 +282,42 @@ fn canonical_utc_stamp(stamp: &str) -> Option<&str> {
     Some(stamp)
 }
 
+#[cfg(target_os = "linux")]
+fn checked_directory_anchor(dir: &Path) -> io::Result<(PathBuf, File)> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+
+    oa_sealed::refuse_io_embedded(dir)?;
+    let canonical = fs::canonicalize(dir)?;
+    oa_sealed::refuse_io_embedded(&canonical)?;
+    let expected = fs::metadata(&canonical)?;
+    // seal-allow: opens the caller-checked existing recording directory; it reads no contents
+    let directory = File::open(&canonical)?;
+    let opened = directory.metadata()?;
+    if !opened.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sync-closed-segments requires an existing directory",
+        ));
+    }
+    if (expected.dev(), expected.ino()) != (opened.dev(), opened.ino()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "recording directory changed while its sync descriptor was opened",
+        ));
+    }
+    oa_sealed::Sealed::production_embedded().verify_open(&canonical, &directory)?;
+    let anchor = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    oa_sealed::refuse_io_embedded(&anchor)?;
+    if !fs::metadata(&anchor)?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the checked directory descriptor is not reachable through /proc/self/fd",
+        ));
+    }
+    Ok((anchor, directory))
+}
+
 impl Recorder {
     /// Prepares `dir` (created if missing) and counts the bytes of existing `.oaf` and
     /// `.oaf.gz` files toward the cap. Startup refuses directories with more than
@@ -219,6 +339,71 @@ impl Recorder {
         Recorder::open_with(dir, feed, rotate_bytes, max_bytes, format, opener)
     }
 
+    /// Opens an existing recording directory and requests OS syncs at each closed segment.
+    /// This mode is Linux-only and does not create the directory: its ancestors must already
+    /// exist. File data is synced before the containing directory entry. An open segment is not
+    /// power-loss durable until it closes; sync completion is an OS report, not hardware
+    /// certification.
+    #[cfg(target_os = "linux")]
+    pub fn open_sync_closed_segments(
+        dir: &Path,
+        feed: &str,
+        rotate_bytes: u64,
+        max_bytes: u64,
+        format: Format,
+    ) -> io::Result<Recorder> {
+        check_feed_label(feed).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let (anchor_path, directory_anchor) = checked_directory_anchor(dir)?;
+        use std::os::fd::AsRawFd;
+        let fd = directory_anchor.as_raw_fd();
+        let opener: SyncingOpener = Box::new(move |path| {
+            let name = path.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "recording file has no basename",
+                )
+            })?;
+            let anchored = PathBuf::from(format!("/proc/self/fd/{fd}")).join(name);
+            oa_sealed::refuse_io_embedded(&anchored)?;
+            // seal-allow: creates a recording beside the checked directory descriptor; verifies the open file below
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&anchored)?;
+            oa_sealed::Sealed::production_embedded().verify_open(&anchored, &file)?;
+            Ok(Box::new(SyncingFile(file)) as Box<dyn SyncingWriter>)
+        });
+        let directory_sync_file = directory_anchor.try_clone()?;
+        let directory_sync: DirectorySyncer = Box::new(move || directory_sync_file.sync_all());
+        Self::open_inner(
+            &anchor_path,
+            feed,
+            rotate_bytes,
+            max_bytes,
+            format,
+            RecorderOpener::SyncClosedSegments {
+                file: opener,
+                directory: directory_sync,
+            },
+            Some(directory_anchor),
+        )
+    }
+
+    /// Directory-entry sync is only provided on Linux; other platforms fail explicitly.
+    #[cfg(not(target_os = "linux"))]
+    pub fn open_sync_closed_segments(
+        _dir: &Path,
+        _feed: &str,
+        _rotate_bytes: u64,
+        _max_bytes: u64,
+        _format: Format,
+    ) -> io::Result<Recorder> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "closed-segment file and directory sync is currently supported on Linux only",
+        ))
+    }
+
     /// As [`Recorder::open`], creating each file through `opener` (for a writer that fails on
     /// demand in tests). The same startup directory-entry limit applies.
     pub fn open_with(
@@ -231,6 +416,27 @@ impl Recorder {
     ) -> io::Result<Recorder> {
         check_feed_label(feed).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         fs::create_dir_all(dir)?;
+        Self::open_inner(
+            dir,
+            feed,
+            rotate_bytes,
+            max_bytes,
+            format,
+            RecorderOpener::FlushOnly(opener),
+            None,
+        )
+    }
+
+    fn open_inner(
+        dir: &Path,
+        feed: &str,
+        rotate_bytes: u64,
+        max_bytes: u64,
+        format: Format,
+        opener: RecorderOpener,
+        directory_anchor: Option<File>,
+    ) -> io::Result<Recorder> {
+        check_feed_label(feed).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let existing = existing_recording_state(dir, feed, DEFAULT_MAX_DIRECTORY_ENTRIES)?;
         Ok(Recorder {
             dir: dir.to_path_buf(),
@@ -246,11 +452,40 @@ impl Recorder {
             last_file_name: existing.last_file_name,
             rotations_after_clock_step_back: 0,
             implausible_stamps: 0,
+            _directory_anchor: directory_anchor,
             opener,
+            sync_started: 0,
+            sync_completed: 0,
+            sync_failures: 0,
+            sync_failed_stage: None,
+            persistence_unconfirmed_frames: 0,
             failed: None,
             lost_frames: 0,
             unflushed: 0,
         })
+    }
+
+    #[cfg(all(test, target_os = "linux"))]
+    fn open_sync_closed_segments_with_hooks(
+        dir: &Path,
+        feed: &str,
+        rotate_bytes: u64,
+        max_bytes: u64,
+        format: Format,
+        file: SyncingOpener,
+        directory: DirectorySyncer,
+    ) -> io::Result<Recorder> {
+        check_feed_label(feed).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let (anchor, directory_anchor) = checked_directory_anchor(dir)?;
+        Self::open_inner(
+            &anchor,
+            feed,
+            rotate_bytes,
+            max_bytes,
+            format,
+            RecorderOpener::SyncClosedSegments { file, directory },
+            Some(directory_anchor),
+        )
     }
 
     /// Appends one whole frame, rotating first if needed. `now_unix_secs` is the local clock,
@@ -343,6 +578,7 @@ impl Recorder {
         } else if compressed {
             self.unflushed = self.unflushed.saturating_add(1);
         }
+        cur.frames = cur.frames.saturating_add(1);
         Ok(Outcome::Written)
     }
 
@@ -384,8 +620,9 @@ impl Recorder {
         Ok(())
     }
 
-    /// Ends the open file: the compressed member gets its final block and trailer, and the file
-    /// is synced to the operating system. Call at exit; rotation and the cap do it themselves.
+    /// Ends the open file: the compressed member gets its final block and trailer, and the writer
+    /// is flushed. In sync-closed-segments mode the file and its containing directory are then
+    /// synced. Call at exit; rotation and the cap do it themselves.
     pub fn finish(&mut self) -> io::Result<()> {
         if self.failed.is_some() {
             // Failed earlier: the open file is abandoned as it stands (it replays up to its last
@@ -393,7 +630,13 @@ impl Recorder {
             self.current = None;
             return Ok(());
         }
-        self.finish_inner().map_err(|e| self.fail(e))
+        self.finish_inner().map_err(|e| {
+            if self.failed.is_some() {
+                e
+            } else {
+                self.fail(e)
+            }
+        })
     }
 
     fn finish_inner(&mut self) -> io::Result<()> {
@@ -414,11 +657,39 @@ impl Recorder {
         }
         cur.file.flush()?;
         self.unflushed = 0;
+        if cur.file.is_syncing() {
+            self.sync_started = self.sync_started.saturating_add(1);
+            eprintln!(
+                "oa-feed: feed={} closed_segment_sync started frames={}",
+                self.feed, cur.frames
+            );
+            if let Err(error) = cur.file.sync_all() {
+                return Err(self.fail_sync("file", error, cur.frames));
+            }
+            eprintln!(
+                "oa-feed: feed={} closed_segment_sync started stage=directory frames={}",
+                self.feed, cur.frames
+            );
+            let directory_result = match &mut self.opener {
+                RecorderOpener::SyncClosedSegments { directory, .. } => directory(),
+                RecorderOpener::FlushOnly(_) => Err(io::Error::other(
+                    "syncing writer has no directory sync operation",
+                )),
+            };
+            if let Err(error) = directory_result {
+                return Err(self.fail_sync("directory", error, cur.frames));
+            }
+            self.sync_completed = self.sync_completed.saturating_add(1);
+            eprintln!(
+                "oa-feed: feed={} closed_segment_sync completed frames={}",
+                self.feed, cur.frames
+            );
+        }
         Ok(())
     }
 
-    /// Bytes recorded in the directory so far (on disk, so compressed for `.oaf.gz`), including
-    /// files that were already there.
+    /// Bytes counted for the cap (compressed for `.oaf.gz`), including files already in the
+    /// directory. This count is bytes written, not a persistence confirmation.
     pub fn total_bytes(&self) -> u64 {
         self.total
     }
@@ -475,6 +746,23 @@ impl Recorder {
         e
     }
 
+    fn fail_sync(&mut self, stage: &'static str, error: io::Error, frames: u64) -> io::Error {
+        self.sync_failures = self.sync_failures.saturating_add(1);
+        self.sync_failed_stage = Some(stage);
+        self.persistence_unconfirmed_frames =
+            self.persistence_unconfirmed_frames.saturating_add(frames);
+        self.unflushed = 0;
+        let message = format!(
+            "closed-segment {stage} sync failed: {error}; persistence is unconfirmed for {frames} frames (not counted as lost)"
+        );
+        eprintln!("oa-feed: feed={} {message}", self.feed);
+        if self.failed.is_none() {
+            self.failed = Some(message.clone());
+        }
+        self.current = None;
+        io::Error::new(error.kind(), message)
+    }
+
     fn create(&mut self, now_unix_secs: i64) -> io::Result<Current> {
         let now_stamp = utc_stamp(now_unix_secs).ok_or_else(|| {
             io::Error::new(
@@ -503,7 +791,14 @@ impl Recorder {
                 ));
             }
             let name = format!("{}-{stamp}-{n:04}.{ext}", self.feed);
-            match (self.opener)(&self.dir.join(name)) {
+            let path = self.dir.join(name);
+            let file = match &mut self.opener {
+                RecorderOpener::FlushOnly(opener) => opener(&path).map(RecordingFile::FlushOnly),
+                RecorderOpener::SyncClosedSegments { file, .. } => {
+                    file(&path).map(RecordingFile::Syncing)
+                }
+            };
+            match file {
                 Ok(file) => {
                     self.files_opened += 1;
                     self.last_file_name = Some((stamp.clone(), n));
@@ -519,6 +814,7 @@ impl Recorder {
                             Format::Raw => None,
                         },
                         flushed_secs: now_unix_secs,
+                        frames: 0,
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
@@ -639,6 +935,16 @@ pub fn format_recording(feed: &str, r: &Recorder) -> String {
             r.rotations_after_clock_step_back
         ));
     }
+    if matches!(&r.opener, RecorderOpener::SyncClosedSegments { .. }) {
+        out.push_str(&format!(
+            " sync_closed_segments_started={} completed={} failed={} failed_stage={} persistence_unconfirmed_frames={}",
+            r.sync_started,
+            r.sync_completed,
+            r.sync_failures,
+            r.sync_failed_stage.unwrap_or("none"),
+            r.persistence_unconfirmed_frames
+        ));
+    }
     if let Some(e) = r.failure() {
         out.push_str(&format!(
             " FAILED lost_frames={} first_error=\"{e}\"",
@@ -715,6 +1021,209 @@ mod directory_limit_tests {
                 None,
                 "accepted noncanonical recording name {name}"
             );
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod closed_segment_sync_tests {
+    use super::{
+        format_recording, DirectorySyncer, Format, Outcome, Recorder, SyncingOpener, SyncingWriter,
+    };
+    use std::fs;
+    use std::io::{self, Write};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FailAt {
+        None,
+        File,
+        Directory,
+    }
+
+    struct FakeFile {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail_at: FailAt,
+    }
+
+    impl Write for FakeFile {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl SyncingWriter for FakeFile {
+        fn sync_all(&mut self) -> io::Result<()> {
+            self.events.lock().unwrap().push("file");
+            if self.fail_at == FailAt::File {
+                return Err(io::Error::other("file sync denied"));
+            }
+            Ok(())
+        }
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "oa-feed-sync-{name}-{}-{serial}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn recorder(
+        dir: &std::path::Path,
+        feed: &str,
+        format: Format,
+        rotate_bytes: u64,
+        max_bytes: u64,
+        fail_at: FailAt,
+        events: Arc<Mutex<Vec<&'static str>>>,
+    ) -> Recorder {
+        let file_events = Arc::clone(&events);
+        let file: SyncingOpener = Box::new(move |_| {
+            Ok(Box::new(FakeFile {
+                events: Arc::clone(&file_events),
+                fail_at,
+            }) as Box<dyn SyncingWriter>)
+        });
+        let directory_events = Arc::clone(&events);
+        let directory: DirectorySyncer = Box::new(move || {
+            directory_events.lock().unwrap().push("directory");
+            if fail_at == FailAt::Directory {
+                return Err(io::Error::other("directory sync denied"));
+            }
+            Ok(())
+        });
+        Recorder::open_sync_closed_segments_with_hooks(
+            dir,
+            feed,
+            rotate_bytes,
+            max_bytes,
+            format,
+            file,
+            directory,
+        )
+        .unwrap()
+    }
+
+    // REQ: OA-FEED-170
+    #[test]
+    fn closed_segments_sync_file_then_directory_on_rotation_and_finish() {
+        let dir = temp_dir("order");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut rec = recorder(
+            &dir,
+            "order",
+            Format::Raw,
+            1,
+            u64::MAX,
+            FailAt::None,
+            Arc::clone(&events),
+        );
+        let frame = b"frame";
+        assert!(matches!(
+            rec.write_frame(frame, 1_700_000_000, 1_700_000_000),
+            Ok(Outcome::Written)
+        ));
+        assert!(matches!(
+            rec.write_frame(frame, 1_700_000_001, 1_700_000_001),
+            Ok(Outcome::Written)
+        ));
+        rec.finish().unwrap();
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["file", "directory", "file", "directory"]
+        );
+        assert_eq!(
+            (rec.sync_started, rec.sync_completed, rec.sync_failures),
+            (2, 2, 0)
+        );
+        assert!(format_recording("order", &rec)
+            .contains("sync_closed_segments_started=2 completed=2 failed=0"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // REQ: OA-FEED-170
+    #[test]
+    fn size_cap_closes_and_syncs_the_active_segment() {
+        let dir = temp_dir("cap");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut rec = recorder(
+            &dir,
+            "cap",
+            Format::Raw,
+            u64::MAX,
+            5,
+            FailAt::None,
+            Arc::clone(&events),
+        );
+        assert!(matches!(
+            rec.write_frame(b"frame", 1_700_000_000, 1_700_000_000),
+            Ok(Outcome::Written)
+        ));
+        assert!(matches!(
+            rec.write_frame(b"next", 1_700_000_001, 1_700_000_001),
+            Ok(Outcome::StoppedNow)
+        ));
+        assert_eq!(*events.lock().unwrap(), vec!["file", "directory"]);
+        assert_eq!((rec.sync_started, rec.sync_completed), (1, 1));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // REQ: OA-FEED-170
+    #[test]
+    fn file_and_directory_sync_failures_are_distinct_from_lost_frames() {
+        for (name, fail_at, expected_events, expected_stage) in [
+            ("file-failure", FailAt::File, vec!["file"], "file"),
+            (
+                "directory-failure",
+                FailAt::Directory,
+                vec!["file", "directory"],
+                "directory",
+            ),
+        ] {
+            let dir = temp_dir(name);
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let mut rec = recorder(
+                &dir,
+                name,
+                Format::Gzip,
+                u64::MAX,
+                u64::MAX,
+                fail_at,
+                Arc::clone(&events),
+            );
+            rec.write_frame(b"frame", 1_700_000_000, 1_700_000_000)
+                .unwrap();
+            let error = rec.finish().unwrap_err().to_string();
+            assert!(error.contains(&format!("{expected_stage} sync failed")));
+            assert_eq!(*events.lock().unwrap(), expected_events);
+            assert_eq!(
+                (rec.sync_started, rec.sync_completed, rec.sync_failures),
+                (1, 0, 1)
+            );
+            assert_eq!(rec.sync_failed_stage, Some(expected_stage));
+            assert_eq!(rec.persistence_unconfirmed_frames, 1);
+            assert_eq!(rec.lost_frames(), 0);
+            assert!(rec
+                .exit_reason()
+                .unwrap()
+                .contains("persistence is unconfirmed"));
+            let line = format_recording(name, &rec);
+            assert!(line.contains("persistence_unconfirmed_frames=1"));
+            assert!(line.contains("lost_frames=0"));
+            let _ = fs::remove_dir_all(dir);
         }
     }
 }
