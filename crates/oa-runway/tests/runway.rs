@@ -587,6 +587,7 @@ fn random_runway(g: &mut Sweep) -> Runway {
     };
     rw.half_len_m = g.scale(1.0e5).max(1.0);
     rw.half_width_m = g.scale(2.0e3).max(1.0);
+    rw.width_m = 2.0 * rw.half_width_m;
     for end in 0..2 {
         let lo = rw.half_len_m * g.between(0.5, 1.5);
         let hi = lo + g.scale(2.0e4).max(1.0);
@@ -595,8 +596,8 @@ fn random_runway(g: &mut Sweep) -> Runway {
         let hi = lo + g.scale(2.0e4).max(1.0);
         rw.departure_along[end] = if end == 0 { [-hi, -lo] } else { [lo, hi] };
     }
-    rw.approach_half_width_m = g.scale(2.0e3).max(1.0);
-    rw.departure_half_width_m = g.scale(2.0e3).max(1.0);
+    rw.approach_half_width_m = rw.half_width_m + APPROACH_SIDE_MARGIN_M;
+    rw.departure_half_width_m = rw.half_width_m + DEPARTURE_SIDE_MARGIN_M;
     rw
 }
 
@@ -611,10 +612,12 @@ fn all_flags(o: &Occupancy) -> [bool; 5] {
 }
 
 /// Every geometry number of a runway, for breaking one.
-fn geometry(rw: &mut Runway) -> [&mut f64; 16] {
+fn geometry(rw: &mut Runway) -> [&mut f64; 18] {
     let [[a00, a01], [a10, a11]] = &mut rw.approach_along;
     let [[d00, d01], [d10, d11]] = &mut rw.departure_along;
     [
+        &mut rw.length_m,
+        &mut rw.width_m,
         &mut rw.center.east_m,
         &mut rw.center.north_m,
         &mut rw.ux,
@@ -1123,7 +1126,9 @@ fn a_runway_with_a_non_finite_number_never_clears_a_target() {
     };
     let base = mdw_runway();
     assert!(!is_occupied(&occupies(&base, far, 0.0)));
-    let breaks: [(&str, Breaker); 9] = [
+    let breaks: [(&str, Breaker); 11] = [
+        ("length", |r| r.length_m = f64::NAN),
+        ("width", |r| r.width_m = f64::NAN),
         ("half_len", |r| r.half_len_m = f64::NAN),
         ("half_width", |r| r.half_width_m = f64::NAN),
         ("ux", |r| r.ux = f64::NAN),
@@ -1143,6 +1148,36 @@ fn a_runway_with_a_non_finite_number_never_clears_a_target() {
             "{name}"
         );
     }
+}
+
+// REQ: OA-RWY-007
+#[test]
+fn a_torn_finite_width_change_is_unknown_while_a_coherent_geometry_change_can_clear() {
+    let base = mdw_runway();
+    let near_edge = at(&base, 0.0, 20.0);
+    let control_far = at(&base, 0.0, 1000.0);
+    assert!(occupies(&base, near_edge, 0.0).on_runway);
+    assert!(!is_occupied(&occupies(&base, control_far, 0.0)));
+
+    // Synthetic complete geometry update: width, half-width and perimeter margins agree, so a
+    // known point 20 m off centre is safely outside this narrower synthetic runway.
+    let mut updated = base;
+    updated.width_m = 15.0;
+    updated.half_width_m = 7.5;
+    updated.approach_half_width_m = 7.5 + APPROACH_SIDE_MARGIN_M;
+    updated.departure_half_width_m = 7.5 + DEPARTURE_SIDE_MARGIN_M;
+    let clear = occupies(&updated, near_edge, 0.0);
+    assert!(!clear.unknown && !is_occupied(&clear));
+
+    // A torn snapshot changes only the half-width used by the predicate. Its published width and
+    // outer-region margins still describe the old runway, so every region remains occupied and
+    // the inconsistency is visible.
+    let mut torn = base;
+    torn.half_width_m = 7.5;
+    let unknown = occupies(&torn, near_edge, 0.0);
+    assert!(unknown.unknown && is_occupied(&unknown));
+    assert_eq!(unknown.approach, [true; 2]);
+    assert_eq!(unknown.departure, [true; 2]);
 }
 
 // REQ: OA-RWY-007

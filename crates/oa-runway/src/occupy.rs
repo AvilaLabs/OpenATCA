@@ -10,11 +10,12 @@
 //! * every region test compares the target's distance from the region with `r`, so a larger radius
 //!   adds occupancy and removes none (tested over random runways, positions and radii, not proved);
 //! * a position or radius that is not finite, a negative radius, a position
-//!   beyond [`COORD_LIMIT_M`], or a runway with a non-finite number, is unknown and occupies every region (tested
-//!   over random runways, not proved): missing data never clears a runway (design rule 4).
+//!   beyond [`COORD_LIMIT_M`], a runway with non-finite occupancy geometry, or an inconsistent
+//!   width tuple is unknown and occupies every region (tested over random runways, not proved):
+//!   missing or torn width data never clears a runway (design rule 4).
 
 use crate::plane::{Local, PLANE_ERROR_BOUND_M};
-use crate::runway::Runway;
+use crate::runway::{Runway, APPROACH_SIDE_MARGIN_M, DEPARTURE_SIDE_MARGIN_M};
 
 /// The largest coordinate, metres, taken as known: a position past it (the earth is 2e7 m round)
 /// is not a position, and is unknown. Our own choice. It keeps every product and sum below in the
@@ -25,6 +26,9 @@ pub const COORD_LIMIT_M: f64 = 1.0e9;
 /// Added to the radius for the rounding of the subtractions in [`in_box`] (numbers within
 /// [`COORD_LIMIT_M`], so a rounding is under 1e-6 m). Our own choice.
 pub const ROUNDING_PAD_M: f64 = 1.0e-6;
+
+/// Tolerance for the same width values carried as a full width and as its half-width plus margin.
+const DIMENSION_TOLERANCE_M: f64 = 1.0e-6;
 
 /// The radius the test uses: the target's 95 % radius, the plane's error bound
 /// ([`PLANE_ERROR_BOUND_M`]: the position the plane gives may be that far from the true one)
@@ -134,7 +138,9 @@ fn in_box(along: f64, across: f64, b: (f64, f64, f64), r: f64) -> bool {
 
 /// True when every number the test reads from the runway is finite.
 fn runway_finite(rw: &Runway) -> bool {
-    rw.center.east_m.is_finite()
+    rw.length_m.is_finite()
+        && rw.width_m.is_finite()
+        && rw.center.east_m.is_finite()
         && rw.center.north_m.is_finite()
         && rw.ux.is_finite()
         && rw.uy.is_finite()
@@ -152,8 +158,29 @@ fn runway_finite(rw: &Runway) -> bool {
         && rw.departure_along[1][1].is_finite()
 }
 
+/// A finite but partially updated width tuple is not a usable runway snapshot. Occupancy uses
+/// half widths directly, while `width_m` is the published width; accepting a mismatch could
+/// shrink the tested perimeter and clear a target that the published runway contains.
+fn dimensions_coherent(rw: &Runway) -> bool {
+    let close = |a: f64, b: f64| (a - b).abs() <= DIMENSION_TOLERANCE_M;
+    rw.length_m > 0.0
+        && rw.width_m > 0.0
+        && rw.half_len_m > 0.0
+        && rw.half_width_m > 0.0
+        && close(rw.width_m, 2.0 * rw.half_width_m)
+        && close(
+            rw.approach_half_width_m,
+            rw.half_width_m + APPROACH_SIDE_MARGIN_M,
+        )
+        && close(
+            rw.departure_half_width_m,
+            rw.half_width_m + DEPARTURE_SIDE_MARGIN_M,
+        )
+}
+
 fn known(rw: &Runway, pos: Local, r95_m: f64) -> bool {
     runway_finite(rw)
+        && dimensions_coherent(rw)
         && (-COORD_LIMIT_M..=COORD_LIMIT_M).contains(&pos.east_m)
         && (-COORD_LIMIT_M..=COORD_LIMIT_M).contains(&pos.north_m)
         && r95_m.is_finite()

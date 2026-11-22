@@ -16,8 +16,9 @@ CIFP and passes the plain values in; this crate reads nothing.
   30 m apart, the runway is refused rather than one source being chosen.
 - `occupy` provides `occupies`. It reports which of five regions a target touches: the rectangle,
   the two approach areas and the two departure areas. The target's position is widened by its
-  95 % radius plus the plane error bound. An unknown position or radius, or a runway with any
-  non-finite number, occupies everything. A NaN anywhere reads as touching, never as clear.
+  95 % radius plus the plane error bound. An unknown position or radius, a runway with any
+  non-finite occupancy geometry, or an internally inconsistent width tuple occupies everything.
+  A NaN or a torn width update reads as touching, never as clear.
 
 The approach and departure dimensions are development values, not FAA values.
 
