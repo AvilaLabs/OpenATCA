@@ -1072,12 +1072,13 @@ fn one_conflict_is_one_alert_with_a_start_a_peak_and_an_end_after_the_hysteresis
     assert_eq!(r.alerts.items[0].ticks_current, 4);
 }
 
-// REQ: OA-CA-012, OA-CA-014
+// REQ: OA-CA-011, OA-CA-012, OA-CA-015
 #[test]
 fn paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery() {
     // Synthetic truth: addresses 1/2 close head-on from 40 km at 400 m/s, so their predicted
-    // loss begins at 87.5 s. Addresses 3/4 are stationary 7 km apart, outside the 5 km minimum.
-    // The latter pair is a healthy control evaluated throughout the simulated ADS-B report gap.
+    // loss begins at 87.5 s. The control pair is within the horizontal minimum and safely
+    // separated by 1,000 ft. It is 250 km north, beyond the look-ahead reach of either
+    // closing aircraft, so every evaluated pair can be accounted for.
     let closing = |t: i64| {
         let d = t as f64 * 400.0;
         [
@@ -1086,8 +1087,8 @@ fn paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery()
         ]
     };
     let control = [
-        trk(3, -3_500.0, 7_000.0, 0.0, 0.0, 10_000.0),
-        trk(4, 3_500.0, 7_000.0, 0.0, 0.0, 10_000.0),
+        trk(3, -2_000.0, 250_000.0, 0.0, 0.0, 10_000.0),
+        trk(4, 2_000.0, 250_000.0, 0.0, 0.0, 11_000.0),
     ];
     let mut r = rig();
 
@@ -1111,7 +1112,7 @@ fn paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery()
         degraded_pair[1].lat_deg = f64::NAN;
         let mut degraded_rows = degraded_pair.to_vec();
         degraded_rows.extend(control);
-        let out = step(&mut r, t * S, &degraded_rows);
+        let out = step(&mut r, t, &degraded_rows);
         assert_eq!((out.input_short, out.stats.rows_bad), (1, 1));
         assert_eq!(out.stats.evaluated, 1, "covered control pair at cycle {t}");
         assert!(matches!(out.report, NetReport::Degraded { .. }));
@@ -1128,7 +1129,7 @@ fn paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery()
     // Recovery restores full pair coverage before hysteresis expires; it continues the same alert.
     rows = closing(4).to_vec();
     rows.extend(control);
-    let recovered = step(&mut r, 4 * S, &rows);
+    let recovered = step(&mut r, 4, &rows);
     assert_eq!(recovered.report, NetReport::Running);
     assert_eq!((recovered.stats.opened, recovered.stats.closed), (0, 0));
     assert_eq!(recovered.stats.evaluated, 2);
@@ -1137,8 +1138,16 @@ fn paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery()
     assert_eq!(ca_open(&r.st)[0].ticks_conflict, 2);
 
     // Declared scoring set: one truth-positive pair and one truth-negative control pair.
-    let misses = usize::from(!ca_open(&r.st).iter().any(|a| (a.addr_a, a.addr_b) == (1, 2)));
-    let nuisance_alerts = usize::from(ca_open(&r.st).iter().any(|a| (a.addr_a, a.addr_b) == (3, 4)));
+    let misses = usize::from(
+        !ca_open(&r.st)
+            .iter()
+            .any(|a| (a.addr_a, a.addr_b) == (1, 2)),
+    );
+    let nuisance_alerts = usize::from(
+        ca_open(&r.st)
+            .iter()
+            .any(|a| (a.addr_a, a.addr_b) == (3, 4)),
+    );
     assert_eq!((misses, nuisance_alerts), (0, 0));
 }
 
