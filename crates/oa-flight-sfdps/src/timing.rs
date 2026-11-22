@@ -52,10 +52,6 @@ impl TimingBins {
         to_ns: i64,
     ) -> Result<Self, TimingBoundsError> {
         let invalid_time = from_ns <= 0
-            || measure_from_ns <= 0
-            || to_ns <= 0
-            || from_ns == i64::MAX
-            || measure_from_ns == i64::MAX
             || to_ns == i64::MAX
             || measure_from_ns < from_ns
             || measure_from_ns > to_ns;
@@ -102,14 +98,14 @@ impl TimingBins {
     }
 
     pub(crate) fn observe(&mut self, bin: usize, recv_ns: i64, elapsed_ns: u128) {
+        let (Some(frames), Some(wall_ns)) = (self.frames.get_mut(bin), self.wall_ns.get_mut(bin))
+        else {
+            return;
+        };
+        *frames = frames.saturating_add(1);
+        *wall_ns = wall_ns.saturating_add(u64::try_from(elapsed_ns).unwrap_or(u64::MAX));
         self.first_received_ns = Some(self.first_received_ns.map_or(recv_ns, |n| n.min(recv_ns)));
         self.last_received_ns = Some(self.last_received_ns.map_or(recv_ns, |n| n.max(recv_ns)));
-        if let Some(frames) = self.frames.get_mut(bin) {
-            *frames = frames.saturating_add(1);
-        }
-        if let Some(wall_ns) = self.wall_ns.get_mut(bin) {
-            *wall_ns = wall_ns.saturating_add(u64::try_from(elapsed_ns).unwrap_or(u64::MAX));
-        }
         self.timed_frames = self.timed_frames.saturating_add(1);
     }
 
@@ -145,6 +141,7 @@ impl TimingBins {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

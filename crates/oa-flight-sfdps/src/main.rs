@@ -14,7 +14,7 @@ use oa_flight_sfdps::{
 
 fn print_timing(t: &ReplayTimingReport) {
     println!(
-        "sfdps_timing scope=message_frame_callback_decode_adapter_table_sweep before_op_hooks_included=true document_sealed_messages_excluded=true read_decompression_merge_and_receive_gates_excluded concurrent_replay_loops_unsynchronized=true measure_from_ns={} measure_to_ns_inclusive={} first_received_ns={:?} last_received_ns={:?} seconds_expected={} seconds_observed={} seconds_empty={} timed_frames={} processing_wall_ms={:.3} p95_observed_second_wall_ms={:.3} max_observed_second_wall_ms={:.3}",
+        "sfdps_timing scope=message_processing source_io_excluded=true sealed_messages_excluded=true measure_from_ns={} measure_to_ns_inclusive={} first_received_ns={:?} last_received_ns={:?} seconds_expected={} seconds_observed={} seconds_empty={} timed_frames={} processing_wall_ms={:.3} p95_observed_second_wall_ms={:.3} max_observed_second_wall_ms={:.3}",
         t.measure_from_ns,
         t.measure_to_ns,
         t.first_received_ns,
