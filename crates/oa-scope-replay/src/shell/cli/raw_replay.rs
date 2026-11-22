@@ -389,18 +389,36 @@ pub(super) fn run_raw_only(
     create_new(&hashes_path)?
         .write_all(hashes.as_bytes())
         .map_err(|e| failed(&format!("write {}", hashes_path.display()), e))?;
+    let loss = write_raw_report(out, mode, &history, &total, &hashes_path, a.allow_loss)
+        .map_err(|error| failed("write raw replay summary", error))?;
+    if loss > 0 && !a.allow_loss {
+        return Err(CliError::Loss(format!(
+            "raw-only run recorded {loss} refused or unavailable work items"
+        )));
+    }
+    Ok(())
+}
+
+fn write_raw_report(
+    out: &mut dyn Write,
+    mode: RawReceiptMode,
+    history: &RawHistory,
+    total: &RawRunStats,
+    hashes_path: &Path,
+    allow_loss: bool,
+) -> std::io::Result<u64> {
     let provenance = match mode {
         RawReceiptMode::Recorded => "caller-declared recorded OAF frame receipt timestamp",
         RawReceiptMode::ArchiveReconstructed => {
             "reconstructed per-frame availability: maximum row observation time"
         }
     };
-    let _ = writeln!(out, "RAW SURVEILLANCE ONLY; independent raw display; no tracker, ownership, extrapolation, or coast");
-    let _ = writeln!(out, "availability {}", provenance);
-    let _ = writeln!(out, "raw      {} source observations retained; {} frames; {} source-frame sealed drops; {} reject frames; {} status frames; {} undecodable payloads; {} frames outside the receipt window; {} decoded observations outside the display window", history.rows.len(), total.frames, history.sealed_frames, history.refused_frames, history.status_frames, history.undecodable, history.outside, history.outside_rows);
-    let _ = writeln!(out, "decode   {} records, {} retained, {} dropped (bad time {}, unknown source {}, bad measurement {}, reserved {}); {} damaged frames", history.decode_records, history.decode_kept, history.decode_dropped, history.decode_bad_time, history.decode_unknown_source, history.decode_bad_measurement, history.decode_reserved, history.damaged_frames);
-    let _ = writeln!(out, "display  totals over {} frames: {} observations considered ({} future at frame time); {} observation visits withheld for later receipt; {} target admissions; {} targets drawn; {} draw losses (including target refusal); {} future-only addresses; {} source-stale address groups excluded; {} source-stale same-time conflicts (included in contradictory total); {} age-stale address groups (age > {} s); {} contradictory same-time address groups; {} refused targets; invalid positions {}; unprojectable {}; off-map {}; {} frames without fresh raw positions", total.frames, total.observations_seen, total.future_observations, total.later_receipts, total.targets_admitted, total.targets_drawn, total.draw_loss, total.future_only_addresses, total.source_stale_addresses, total.source_stale_conflicts, total.stale_addresses, RAW_STALE_CUTOFF_NS / NS_PER_S, total.conflicts, total.refused, total.invalid_positions, total.unprojectable_positions, total.off_map_positions, total.frames_without_fresh_positions);
-    let _ = writeln!(out, "hashes   {}", hashes_path.display());
+    writeln!(out, "RAW SURVEILLANCE ONLY")?;
+    writeln!(out, "availability {}", provenance)?;
+    writeln!(out, "raw      {} source observations retained; {} frames; {} source-frame sealed drops; {} reject frames; {} status frames; {} undecodable payloads; {} frames outside the receipt window; {} decoded observations outside the display window", history.rows.len(), total.frames, history.sealed_frames, history.refused_frames, history.status_frames, history.undecodable, history.outside, history.outside_rows)?;
+    writeln!(out, "decode   {} records, {} retained, {} dropped (bad time {}, unknown source {}, bad measurement {}, reserved {}); {} damaged frames", history.decode_records, history.decode_kept, history.decode_dropped, history.decode_bad_time, history.decode_unknown_source, history.decode_bad_measurement, history.decode_reserved, history.damaged_frames)?;
+    writeln!(out, "display  totals over {} frames: {} observations considered ({} future at frame time); {} observation visits withheld for later receipt; {} target admissions; {} targets drawn; {} draw losses (including target refusal); {} future-only addresses; {} source-stale address groups excluded; {} source-stale same-time conflicts (included in contradictory total); {} age-stale address groups (age > {} s); {} contradictory same-time address groups; {} refused targets; invalid positions {}; unprojectable {}; off-map {}; {} frames without fresh raw positions", total.frames, total.observations_seen, total.future_observations, total.later_receipts, total.targets_admitted, total.targets_drawn, total.draw_loss, total.future_only_addresses, total.source_stale_addresses, total.source_stale_conflicts, total.stale_addresses, RAW_STALE_CUTOFF_NS / NS_PER_S, total.conflicts, total.refused, total.invalid_positions, total.unprojectable_positions, total.off_map_positions, total.frames_without_fresh_positions)?;
+    writeln!(out, "hashes   {}", hashes_path.display())?;
     let loss = history.refused_frames
         + history.undecodable
         + history.decode_dropped
@@ -410,24 +428,20 @@ pub(super) fn run_raw_only(
         + total.invalid_positions
         + total.unprojectable_positions;
     if loss == 0 {
-        let _ = writeln!(out, "loss     none");
-    } else if a.allow_loss {
-        let _ = writeln!(
+        writeln!(out, "loss     none")?;
+    } else if allow_loss {
+        writeln!(
             out,
             "loss     {loss} refused or unavailable raw-only work items; allowed by --allow-loss"
-        );
+        )?;
     } else {
-        let _ = writeln!(
+        writeln!(
             out,
             "loss     {loss} refused or unavailable raw-only work items"
-        );
+        )?;
     }
-    if loss > 0 && !a.allow_loss {
-        return Err(CliError::Loss(format!(
-            "raw-only run recorded {loss} refused or unavailable work items"
-        )));
-    }
-    Ok(())
+    out.flush()?;
+    Ok(loss)
 }
 
 // A7.2: cold run-level raw-path counters.

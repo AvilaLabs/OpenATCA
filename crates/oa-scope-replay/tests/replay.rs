@@ -2027,6 +2027,25 @@ fn raw_only_cli_counts_each_full_target_set_refusal_as_loss_once() {
 
 // REQ: OA-DSP-072
 #[test]
+fn raw_only_cli_reports_summary_writer_failure() {
+    let dir = tmp("raw-replay-report-writer");
+    let (snap, _) = write_inputs(&dir);
+    let now = T0 + 9 * S;
+    let clip = dir.join("complete.oaf");
+    std::fs::write(&clip, raw_message(now, now, 0xA00001, ORD.1)).unwrap();
+    let out = dir.join("raw");
+    let mut empty: [u8; 0] = [];
+    let mut writer = std::io::Cursor::new(empty.as_mut_slice());
+    let result = cli::run(&raw_cli_args(&snap, &clip, &out, "recorded"), &mut writer);
+    let Err(cli::CliError::Failed(reason)) = result else {
+        panic!("the raw run must detect a failed summary write");
+    };
+    assert!(reason.contains("write raw replay summary"), "{reason}");
+    assert_eq!(raw_hashes(&out).len(), 4);
+}
+
+// REQ: OA-DSP-072
+#[test]
 fn raw_only_cli_refuses_an_oversize_clip_before_creating_outputs() {
     let dir = tmp("raw-replay-oversize");
     let (snap, _) = write_inputs(&dir);
