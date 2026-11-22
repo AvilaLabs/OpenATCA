@@ -222,6 +222,19 @@ disagree. Items 1 to 7 are decisions of the coordinator after an independent rev
     transport bookkeeping only; it does not change flight-sector ownership, which belongs to the
     application state machine.
 
+### Local transport-generation ingress seam
+
+`shell::transport_epoch::step_tagged` is an optional local adapter seam. A transport owner tags a
+parsed receive or disconnect with its nonzero connection generation before placing it in a queue;
+at dequeue, the adapter supplies the current generation. A mismatch returns a typed refusal before
+`session::step` runs, so an old queued LAM or disconnect cannot advance the current session. The
+caller must allocate generations from a trusted durable source outside this seam so they do not
+repeat while old queued events can survive, including across process restart. The seam neither
+persists nor authenticates that generation and does not add it to the NAM wire message. It cannot
+distinguish a delayed same-connection reply after message-number wrap. No socket or sector-owner
+integration is provided here; NAM response actions remain transport bookkeeping, while flight
+ownership is handled by the application state machine.
+
 ## Workload and latency (from the ICDs)
 
 Per flight, NAS-IC-21009205 Rev G Part III 6.3 Table 29 (planning estimates; sizes include an

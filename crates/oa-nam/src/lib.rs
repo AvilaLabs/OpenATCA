@@ -12,7 +12,7 @@
 //! that allocates nothing and holds fixed, named capacities (C1, C2), checked under a counting
 //! allocator (C5), and the `Copy` identity types it uses (`core::identity`, re-exported by
 //! [`model`]). The `shell` modules (the codec: [`field`], [`message`], [`model`], [`schema`],
-//! [`frame`], [`lrm`], [`error`], [`workload`]) are an input-format adapter under the shell and
+//! [`frame`], [`lrm`], [`error`], [`transport_epoch`], [`workload`]) are adapters under the shell and
 //! offline rules (D1, C6, as the other decoders of this repository). They are a pure function
 //! of bytes and values, but they allocate per message (`Vec`, `String`), so they are not
 //! real-time core and are not held to C1 or C3. Their structs are cold under A7.2.
@@ -53,7 +53,9 @@ pub mod core;
 pub mod shell;
 
 pub use crate::core::session;
-pub use crate::shell::{error, field, frame, lrm, message, model, schema, workload};
+pub use crate::shell::{
+    error, field, frame, lrm, message, model, schema, transport_epoch, workload,
+};
 
 pub use error::{ErrorKind, NamError, NO_OFFSET};
 pub use field::{MAX_F31_PLAIN, MAX_F31_TEXT, MAX_MESSAGE_LEN, MAX_ROUTE_ELEMENTS};
