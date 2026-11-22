@@ -314,10 +314,15 @@ different-digest probe is refused. The strong config checks at-most-once effect,
 coupling, identity binding, collision refusal, and the fair positive path to an accepted retry.
 `AtomicCommit = FALSE` is a deliberately weak control: the effect and durable decision are separate
 transitions. A crash can occur after the first effect and lost acknowledgement but before the
-decision, so the replacement accepts the retry and produces a second effect. The weak config checks
-that `AtMostOnce` fails; its expected counterexample is first effect, lost ACK, crash before ledger
-commit, restart, then a second effect on the same-key retry. Results are pending the coordinator's
-TLC run.
+decision. The replacement can then accept the retry and produce a second effect.
+
+TLC 2.19 with Java 21, two workers, and a 1 GB heap checked both configurations. The atomic
+configuration passed its invariants and the fair retry property at 13 generated states and
+11 distinct states, with depth 9. Its state graph reached both a delivered retry acknowledgement
+and a refused same-key digest collision. The split configuration violated `AtMostOnce` at
+15 generated states and 14 distinct states. The seven-state counterexample applied the first
+effect, lost the acknowledgement, crashed before recording the durable decision, restarted, and
+applied a second effect for the same key.
 
 Run the strong model from this directory with:
 
