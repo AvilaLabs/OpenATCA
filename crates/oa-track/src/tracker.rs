@@ -2684,6 +2684,7 @@ mod tests {
             let (lat, lon) = unproject(&frame, truth.e, truth.n).expect("synthetic position");
             Measurement {
                 toa_ns: time_s * S,
+                addr: path.addr,
                 lat_e7: (lat * 1.0e7).round() as i32,
                 lon_e7: (lon * 1.0e7).round() as i32,
                 pos_cov_m2: [25.0, 0.0, 25.0],
