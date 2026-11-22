@@ -5955,9 +5955,9 @@ mod tests {
         let no_radar_in_gap = &radar[..2];
         let gap_ns = RESUME_NS - LAST_WARM_NS;
 
-        let mut with_radar = make_fusion(|_| {});
+        let mut with_radar = make_fusion_capacity(64);
         let with_output = run(&mut with_radar, &radar, &adsb);
-        let mut radar_absent = make_fusion(|_| {});
+        let mut radar_absent = make_fusion_capacity(64);
         let absent_output = run(&mut radar_absent, no_radar_in_gap, &adsb);
 
         let config = tracker_config(fusion_tracker(&with_radar));
