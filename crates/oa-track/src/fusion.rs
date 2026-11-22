@@ -1240,7 +1240,6 @@ struct RadarAssoc {
     capped: bool,
     coarse_visits: u64,
     exact_checks: u64,
-    accepted_pairs: u64,
 }
 
 /// The plot the association loop of `radar` starts at in `bucket`, of `n` anonymous plots: a hash
@@ -1529,7 +1528,6 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         capped: false,
         coarse_visits: 0,
         exact_checks: 0,
-        accepted_pairs: 0,
     })
 }
 
@@ -1649,9 +1647,6 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
                 cost,
             });
             ra.infos.push(PairInfo { m, row });
-            if f.cfg.association_diagnostics {
-                ra.accepted_pairs = ra.accepted_pairs.saturating_add(1);
-            }
         }
     }
     f.cand_buf = cand;
@@ -1682,7 +1677,6 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         last_cut_short,
         coarse_visits,
         exact_checks,
-        accepted_pairs,
         ..
     } = ra;
     if let Some(slot) = f.grids.get_mut(radar) {
@@ -1707,17 +1701,14 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
     };
     if f.cfg.association_diagnostics {
         if let Some(d) = f.stats.association_radar.get_mut(radar) {
+            // Every ordinal before next had a complete gate except the last on a cutoff.
+            let completed = next.min(n_anon).saturating_sub(usize::from(last_cut_short));
             d.anonymous_offered = d.anonymous_offered.saturating_add(n_anon as u64);
-            for a in 0..n_anon {
-                if gating_incomplete(a) {
-                    d.incomplete = d.incomplete.saturating_add(1);
-                } else {
-                    d.completed = d.completed.saturating_add(1);
-                }
-            }
+            d.completed = d.completed.saturating_add(completed as u64);
+            d.incomplete = d.incomplete.saturating_add((n_anon - completed) as u64);
             d.coarse_candidates_visited = d.coarse_candidates_visited.saturating_add(coarse_visits);
             d.exact_checks = d.exact_checks.saturating_add(exact_checks);
-            d.accepted_pairs = d.accepted_pairs.saturating_add(accepted_pairs);
+            d.accepted_pairs = d.accepted_pairs.saturating_add(pairs.len() as u64);
             d.capped_batches = d.capped_batches.saturating_add(u64::from(capped));
         }
     }

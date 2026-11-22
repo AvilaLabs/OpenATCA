@@ -1528,6 +1528,14 @@ mod tests {
                 .sum::<u64>(),
             result.fusion.pairs_tested - result.fusion_warm.pairs_tested
         );
+        assert_eq!(
+            result
+                .association_radar
+                .iter()
+                .map(|d| d.accepted_pairs)
+                .sum::<u64>(),
+            result.fusion.pairs_gated - result.fusion_warm.pairs_gated
+        );
         assert_eq!(cap_kv(&result).get("association_diagnostics"), Some("1"));
     }
 
