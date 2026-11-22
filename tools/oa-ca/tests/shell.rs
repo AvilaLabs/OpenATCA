@@ -708,7 +708,9 @@ fn tracker_capacity_refusal_degrades_from_the_observation_cycle_and_is_counted()
     };
     let refused = track_and_alert(&traffic, &one_slot, &none, &set).unwrap();
     assert_eq!(refused.tracker_capacity_refused, 11);
-    assert_eq!(refused.totals.rows_lost_upstream, 11);
+    // The tracker emits ticks strictly before a measurement. The last refusal is at
+    // the end of the recording, so it appears in the final state and run count only.
+    assert_eq!(refused.totals.rows_lost_upstream, 10);
     assert!(refused.net_cycles.contains_key("RUNNING"));
     assert!(refused
         .net_cycles

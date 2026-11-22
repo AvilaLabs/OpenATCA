@@ -873,7 +873,8 @@ fn tracker_capacity_refusal_degrades_only_from_its_observation_and_survives_a_fi
     assert_eq!(refused.totals.rows_lost_upstream, 5);
     assert!(refused.net_cycles.contains_key("RUNNING"));
     assert!(refused.net_cycles.contains_key("DEGRADED: INPUT MISSING"));
-    assert_eq!(refused.final_net, "DEGRADED: INPUT MISSING");
+    // Subsequent cycles see no new loss. The run report still retains the earlier refusals.
+    assert_eq!(refused.final_net, "RUNNING");
     assert!(summary_of(&refused, &set)
         .contains("valid tracker measurements refused for lack of a track slot 5"));
 
