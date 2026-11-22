@@ -397,7 +397,7 @@ fn synthetic_maneuver_grid_scores_sampled_alerts_and_coverage_separately() {
                 && f64::from(case.vertical_separation_ft) < V_LIMIT_FT;
             let declared_truth = case
                 .truth_interval_s
-                .map_or(false, |(entry, exit)| t > entry && t < exit);
+                .is_some_and(|(entry, exit)| t > entry && t < exit);
             assert_eq!(sampled_truth, declared_truth, "{} tick {tick}", case.name);
             let mut rows = [
                 track_xy(
@@ -451,7 +451,7 @@ fn synthetic_maneuver_grid_scores_sampled_alerts_and_coverage_separately() {
                 .iter()
                 .find(|a| a.addr_a == addr_a && a.addr_b == addr_b);
             if let Some(alert) = active {
-                first_alert_s.get_or_insert(t as f64);
+                first_alert_s.get_or_insert(t);
                 if case.degraded_at_s == Some(tick) {
                     degraded_at_alert = alert.flags & AF_ALT_UNKNOWN != 0;
                     assert_eq!(alert.ticks_unevaluated, 0, "{}", case.name);
