@@ -356,8 +356,8 @@ fn witness_mode_refuses_partial_duplicate_and_nonzero_refusal_evidence() {
     }
 }
 
-// REQ: OA-RDF-008, OA-RDF-025
 #[cfg(target_os = "linux")]
+// REQ: OA-RDF-008, OA-RDF-025
 #[test]
 fn witness_mode_reports_a_failed_verdict_write_as_exit_2() {
     let d = dir("witness_fullpipe");
