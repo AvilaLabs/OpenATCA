@@ -46,13 +46,13 @@ use oa_bench::thindex::build_th_index;
 use oa_bench::tracker_input::{legacy_from_track_samples_by_leg, TrackSamples};
 use oa_bench::truth::Truth;
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
+use oa_track::DEFAULT_CONFIG;
 use oa_track::score::{
     interval_stats, score_ranges, scoring_config, split_reports, IntervalStats, RowSet, RowSource,
     DRAIN_ROWS, SCORE_CHUNK_ROWS,
 };
 use oa_track::spill::{spill_append, spill_finish, spill_new};
 use oa_track::types::{output_clear, output_len, output_new, TrackOutput, M_HAS_VEL, O_TICK};
-use oa_track::DEFAULT_CONFIG;
 use oa_track::{tracker_advance, tracker_flush, tracker_new, tracker_update};
 use oa_track::{tracker_log, tracker_stats};
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
@@ -272,6 +272,21 @@ fn age_gap(times: &[i64], t: i64) -> (Option<f64>, Option<f64>) {
         last.map(|l| (t - l) as f64 / 1000.0),
         last.zip(next).map(|(l, n)| (n - l) as f64 / 1000.0),
     )
+}
+
+/// Estimate the signed time offset represented by a reported heading during a reference turn.
+/// Positive means the reported heading trails the reference; negative means it leads. This is a
+/// diagnostic proxy, not an estimate of the tracker's internal state or proof of causality.
+fn heading_lag_s(reference_deg: f64, reported_deg: f64, reference_rate_dps: f64) -> Option<f64> {
+    if !reference_deg.is_finite()
+        || !reported_deg.is_finite()
+        || !reference_rate_dps.is_finite()
+        || reference_rate_dps.abs() < TURN_DPS
+    {
+        return None;
+    }
+    let signed_delta = (reference_deg - reported_deg + 180.0).rem_euclid(360.0) - 180.0;
+    Some(signed_delta / reference_rate_dps)
 }
 
 /// One sample's reference heading rate and turn phase, and its tracker row.
@@ -559,9 +574,10 @@ fn run(
         if w.abs() < TURN_DPS {
             continue;
         }
-        let d = ((ht - h + 180.0).rem_euclid(360.0) - 180.0) / w;
-        if let Some(b) = lag.get_mut(bin_of(&RATE_EDGES, w.abs())) {
-            b.push(d);
+        if let Some(seconds) = heading_lag_s(ht, h, w) {
+            if let Some(b) = lag.get_mut(bin_of(&RATE_EDGES, w.abs())) {
+                b.push(seconds);
+            }
         }
     }
 
@@ -752,7 +768,7 @@ fn run(
     }
     let _ = writeln!(
         o,
-        "\nLag of the reported velocity's track behind the reference's, seconds (reference track minus reported, over the reference rate; every {LAG_EVERY}th report of the aircraft above)"
+        "\nReported-velocity heading lag proxy, seconds (wrapped reference-minus-reported heading divided by reference turn rate; positive trails, negative leads; every {LAG_EVERY}th report of the aircraft above; descriptive, not causal)"
     );
     for (l, v) in by_rate.labels.iter().zip(&lag) {
         let mut s = v.clone();
@@ -813,6 +829,17 @@ mod tests {
         assert_eq!(age_gap(&t, 6500), (Some(2.5), Some(5.0)));
         assert_eq!(age_gap(&t, 500), (None, None));
         assert_eq!(age_gap(&t, 9500), (Some(0.5), None));
+    }
+
+    // REQ: OA-TRK-402
+    #[test]
+    fn heading_lag_proxy_handles_wrap_sign_and_non_turning_inputs() {
+        assert_eq!(heading_lag_s(3.0, 0.0, 1.5), Some(2.0));
+        assert_eq!(heading_lag_s(0.0, 3.0, 1.5), Some(-2.0));
+        assert_eq!(heading_lag_s(1.0, 359.0, 1.0), Some(2.0));
+        assert_eq!(heading_lag_s(0.0, 1.0, 0.0), None);
+        assert_eq!(heading_lag_s(0.0, 1.0, TURN_DPS - f64::EPSILON), None);
+        assert_eq!(heading_lag_s(f64::NAN, 1.0, 1.0), None);
     }
 
     // REQ: OA-TRK-402
