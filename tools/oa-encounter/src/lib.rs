@@ -11,5 +11,6 @@
 pub mod args;
 pub mod guard;
 pub mod join;
+pub mod qualification;
 pub mod report;
 pub mod run;

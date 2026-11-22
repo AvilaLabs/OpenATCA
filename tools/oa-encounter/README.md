@@ -85,6 +85,12 @@ nuisance and lead-time denominators. Both check input degradation while preservi
 state. They do not consume this tool's recorded-traffic output, estimate operational rates or
 establish readiness; M5's recorded-traffic evaluation remains a separate build step.
 
+`oa_encounter_run::qualification` is a bounded pure matcher for callers that already have
+independently labelled cases and warning intervals. It matches by track or canonical pair, counts
+one hit per label, reports exact lead time, and keeps degraded/unavailable labels in explicit
+denominators with their reasons. It neither creates truth labels nor adapts CA/MSAW output; the
+synthetic matcher fixtures test only the scorer contract.
+
 ## Output
 
 `encounters.csv` has one row per encounter, sorted by start time, with the two addresses (8 hex
