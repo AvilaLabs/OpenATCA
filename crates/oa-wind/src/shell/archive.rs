@@ -181,7 +181,7 @@ pub fn select_cycle_as_of(
                         .get(*a)
                         .and_then(|fa| fb.valid_s.checked_sub(fa.valid_s))
                 })
-                .map_or(true, |gap| gap > max_gap_s),
+                .is_none_or(|gap| gap > max_gap_s),
             _ => false,
         }) {
             saw_large_gap = true;
