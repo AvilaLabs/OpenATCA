@@ -145,13 +145,16 @@ fn is_called(code: &str, name: &str, bare: bool) -> bool {
     })
 }
 
+fn rust_code(text: &str) -> String {
+    lex(text).iter().map(|l| format!("{}\n", l.code)).collect()
+}
+
 /// Whether the file calls a guard entry point (comments, strings and unused imports do not
 /// count): `oa_sealed::open(..)` and the other functions, `Sealed::production(..)`,
 /// `Sealed::production_embedded(..)`, `Sealed::with_..(..)`, a guard method (`.check(`,
 /// `.refuse(`), or a function imported from `oa_sealed` called by its own name.
 fn calls_guard(text: &str) -> bool {
-    let lines = lex(text);
-    let code: String = lines.iter().map(|l| format!("{}\n", l.code)).collect();
+    let code = rust_code(text);
     if GUARD_FNS
         .iter()
         .any(|f| is_called(&code, &format!("oa_sealed::{f}"), false))
@@ -178,9 +181,34 @@ fn calls_guard(text: &str) -> bool {
     })
 }
 
+/// The replay example delegates its only recording input to the guarded ADS-B clip reader.
+/// Check this specific chain so a removed guard in the reader fails even when the example uses
+/// the same library API.
+fn replay_example_uses_guard(text: &str) -> bool {
+    let example = rust_code(text);
+    let replay =
+        rust_code(&fs::read_to_string(repo().join("crates/openatca-core/src/lib.rs")).unwrap());
+    let clips =
+        rust_code(&fs::read_to_string(repo().join("crates/oa-truth/src/shell/clip.rs")).unwrap());
+    let mut clip_functions = clips.split("\npub fn ");
+    let counted = clip_functions
+        .find(|body| body.starts_with("read_clip_counted("))
+        .unwrap_or_default();
+    let tallied = clip_functions
+        .find(|body| body.starts_with("read_clip_tallied("))
+        .unwrap_or_default();
+    is_called(&example, "SurveillanceReplay::open", false)
+        && is_called(&replay, "read_clip_counted", true)
+        && is_called(counted, "read_clip_tallied", true)
+        && is_called(tallied, "oa_sealed::open", false)
+}
+
 fn uses_guard(t: &Target, all: &[Target]) -> bool {
     if !t.is_bin {
-        return calls_guard(&fs::read_to_string(&t.entry).unwrap());
+        let text = fs::read_to_string(&t.entry).unwrap();
+        return calls_guard(&text)
+            || (t.entry == repo().join("crates/openatca-core/examples/replay.rs")
+                && replay_example_uses_guard(&text));
     }
     // A bin: its entry file, and the crate's other source files that are not the entry of a
     // target (those are other programs of the crate).
