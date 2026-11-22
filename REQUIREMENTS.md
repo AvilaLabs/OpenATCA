@@ -888,15 +888,16 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FEED-151** Every latency bin edge is exact: the first value of each bin, one above it and
   one below it (the previous bin) land where documented, negatives land in bin 0 and anything from
   600000 ms in the overflow bin.
-- **OA-FEED-152** A frame repeating the last `seq` is a duplicate (not a regression, also for the
-  first frame) and leaves the expectation unchanged; the expected `seq` is never a gap; one ahead
+- **OA-FEED-152** A frame repeating the last `seq` is a duplicate (including when the expectation
+  has saturated at `u64::MAX`) and leaves the expectation unchanged; the expected `seq` is never a gap; one ahead
   is one gap of one missing frame; one below the last is a regression unless it fills the
   most recent open gap (OA-FEED-172).
 - **OA-FEED-153** Latency is the receive time in whole milliseconds minus the JMS time: exact
   values land in the maximum and the histogram, equal times are zero (not skew), a stamp ahead by
   one millisecond is skew.
-- **OA-FEED-154** The latency quantile is `None` without samples and with a zero denominator
-  (either alone, no division by zero), otherwise the upper edge of the bin holding it.
+- **OA-FEED-154** The latency quantile is `None` without samples, with a zero denominator, for a
+  fraction above one, or in the overflow bin. For other fractions it returns the upper edge of
+  the bin holding the rank, without overflowing for any histogram counts or fraction inputs.
 - **OA-FEED-155** The summary prints `state=disconnected` after a disconnect STATUS, and
   `lat_p50_ms`, `lat_p95_ms` and `lat_max_ms` all as `-` while there are no latency samples
   (none yet, no JMS stamp, or only clock skew).

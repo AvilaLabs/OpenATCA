@@ -239,8 +239,8 @@ fn observe_seq(h: &mut FeedHealth, seq: u64) {
     if h.frames == 0 {
         // First frame: nothing below it has been seen, so the late range is empty.
         h.gap_lo = seq.saturating_add(1);
-    } else if seq == h.seq_next {
-        // Exactly the expected one.
+    } else if seq == h.seq_next && seq != h.seq_last {
+        // Exactly the expected one. At u64::MAX the saturated expectation is the last value.
     } else if seq > h.seq_next {
         h.gaps = h.gaps.saturating_add(1);
         h.missing = h.missing.saturating_add(seq - h.seq_next);
@@ -373,16 +373,19 @@ pub fn rates_milli(h: &FeedHealth, now_ns: i64) -> (u64, u64) {
 }
 
 /// Upper edge in ms (exclusive) of the bin holding quantile `num/den` of the latency samples;
-/// `None` if there are no samples or the quantile falls in the overflow bin.
+/// `None` without samples, for a fraction outside [0, 1], or in the overflow bin.
 pub fn latency_quantile_ms(h: &FeedHealth, num: u64, den: u64) -> Option<i64> {
-    let total: u64 = h.lat_hist.iter().sum();
-    if total == 0 || den == 0 {
+    let total: u128 = h.lat_hist.iter().map(|&count| u128::from(count)).sum();
+    if total == 0 || den == 0 || num > den {
         return None;
     }
-    let target = (total * num).div_ceil(den).max(1);
-    let mut cum = 0u64;
+    let (num, den) = (u128::from(num), u128::from(den));
+    // Compute ceil(total * num / den) without multiplying the whole histogram sum.
+    // The first term is at most total and the second product multiplies two u64-sized values.
+    let target = ((total / den) * num + ((total % den) * num).div_ceil(den)).max(1);
+    let mut cum = 0u128;
     for (i, c) in h.lat_hist.iter().enumerate() {
-        cum += c;
+        cum += u128::from(*c);
         if cum >= target {
             return lat_bin_upper_ms(i);
         }
@@ -468,6 +471,10 @@ mod proofs {
             assert_eq!(h.duplicates, duplicates + 1);
             assert_eq!((h.seq_next, h.missing, h.gaps), (next, missing, gaps));
             assert_eq!(h.regressions, regressions);
+        }
+        if frames != 0 && seq == next && seq == last {
+            assert_eq!(h.duplicates, duplicates + 1);
+            assert_eq!((h.seq_next, h.missing, h.gaps), (next, missing, gaps));
         }
         assert!(h.gap_len == 0 || h.gap_lo <= h.gap_start);
         assert!(h.gap_lo <= h.seq_next);

@@ -2134,6 +2134,17 @@ fn a_repeat_of_the_last_seq_is_a_duplicate_and_the_expected_one_is_not_a_gap() {
     // One below the last outside any open gap is a regression.
     observe_frame(&mut h, &fr(Kind::Message, 0, 1, t, 0, b"x"), t);
     assert_eq!((h.duplicates, h.regressions), (1, 1));
+
+    // When the expectation saturates, the terminal value is still a duplicate on repeat.
+    let mut h = FeedHealth::new();
+    for seq in [u64::MAX - 1, u64::MAX, u64::MAX] {
+        observe_frame(&mut h, &fr(Kind::Message, 0, seq, t, 0, b"x"), t);
+    }
+    assert_eq!((h.seq_last, h.seq_next), (u64::MAX, u64::MAX));
+    assert_eq!(
+        (h.gaps, h.missing, h.duplicates, h.regressions),
+        (0, 0, 1, 0)
+    );
 }
 
 // REQ: OA-FEED-153
@@ -2182,6 +2193,14 @@ fn latency_quantile_needs_samples_and_a_denominator() {
     // Samples and a denominator: the bin's upper edge.
     assert_eq!(latency_quantile_ms(&h, 1, 2), Some(300));
     assert_eq!(latency_quantile_ms(&h, 19, 20), Some(300));
+    assert_eq!(latency_quantile_ms(&h, 21, 20), None);
+
+    // The sum can exceed u64 and a valid fraction can have large numerator and denominator.
+    let mut h = FeedHealth::new();
+    h.lat_hist[0] = u64::MAX;
+    h.lat_hist[1] = u64::MAX;
+    assert_eq!(latency_quantile_ms(&h, 1, 2), Some(10));
+    assert_eq!(latency_quantile_ms(&h, u64::MAX - 1, u64::MAX), Some(20));
 }
 
 // REQ: OA-FEED-155
