@@ -258,3 +258,13 @@ anonymous tracks that ended before the snapshot. It currently cannot be combined
 Add `--initiation-diagnostics` to see how each radar used the shared initiation budget during
 measurement. Each radar reports the work available at the start of its batches, charged work,
 requested and denied retirement reservations, exact pair tests, capped batches, and refused plots.
+
+Run this radar-only cold start on both revisions with identical traffic settings. The three radars
+cover the same stress area. The score measures identities at 75 seconds of simulated traffic.
+
+```sh
+cargo +1.89.0 run --release --locked -p oa-perf -- one \
+  --n 8192 --layout stress --radars e,t,t --adsb-frac 0 --seed 20261123 \
+  --warmup 60 --duration 15 --no-early-stop --max-tracks 16384 --max-wall 120 \
+  --truth-score --initiation-diagnostics --out /tmp/oa-radar-cold-start
+```
