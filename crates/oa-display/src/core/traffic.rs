@@ -101,7 +101,10 @@ const LON_E7_MAX: i32 = 1_800_000_000;
 // Geometry, in pixels.
 const SQUARE_HALF: i32 = 4;
 const DIAMOND_HALF: i32 = 6;
-const REACQ_RADIUS: i32 = 9;
+/// Maximum radius in pixels of a centered target marker (the reacquisition ring).
+/// This excludes uncertainty circles, leaders and data blocks, which are separate overlays.
+pub const MAX_TARGET_SYMBOL_RADIUS_PX: i32 = 9;
+const REACQ_RADIUS: i32 = MAX_TARGET_SYMBOL_RADIUS_PX;
 const TRAIL_HALF: i32 = 1;
 const BLOCK_DX: i32 = 14;
 const BLOCK_DY: i32 = -30;

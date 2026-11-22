@@ -29,7 +29,7 @@ use oa_display::core::scene::{
 use oa_display::core::text::{text_clipped, text_new, text_push_dec, text_push_str, text_str};
 use oa_display::core::traffic::{
     build_traffic, caps_add, targets_clear, targets_malformed, targets_new, targets_refused,
-    traffic_caps, TargetSet, TrafficStats, TrafficStyle, LAYER_BLOCK,
+    traffic_caps, TargetSet, TrafficStats, TrafficStyle, LAYER_BLOCK, MAX_TARGET_SYMBOL_RADIUS_PX,
 };
 use oa_safety::inhibit::InhibitTable;
 use oa_safety::net::StateTable;
@@ -55,7 +55,7 @@ pub enum ReplayError {
     Config(RowsError),
     /// The raw fallback input was not a bounded, ordered set of columns.
     RawInput(RawInputError),
-    /// The mandatory raw-only banner cannot fit the configured viewport.
+    /// The mandatory raw-only banner cannot fit the viewport clear of map target symbols.
     RawBannerDoesNotFit {
         width: u32,
         height: u32,
@@ -71,7 +71,7 @@ impl fmt::Display for ReplayError {
             ReplayError::RawInput(e) => write!(f, "raw surveillance input: {e}"),
             ReplayError::RawBannerDoesNotFit { width, height } => write!(
                 f,
-                "raw surveillance banner does not fit {width}x{height} viewport"
+                "raw surveillance banner cannot fit safely in {width}x{height} viewport"
             ),
         }
     }
@@ -245,7 +245,12 @@ pub fn replay_build_raw(
             / i64::from(CAP_HEIGHT);
         let half_span = banner_width.saturating_add(1) / 2 + i64::from(RAW_BANNER_PADDING_PX);
         let banner_bottom = RAW_BANNER_TOP_PX + i32::from(RAW_BANNER_SIZE) + RAW_BANNER_PADDING_PX;
-        if half_span * 2 > i64::from(width) || i64::from(banner_bottom) > i64::from(height) {
+        let marker_clearance_bottom =
+            i64::from(banner_bottom).saturating_add(i64::from(MAX_TARGET_SYMBOL_RADIUS_PX));
+        if half_span * 2 > i64::from(width)
+            || i64::from(banner_bottom) > i64::from(height)
+            || marker_clearance_bottom >= i64::from(r.view.proj.top_inset)
+        {
             return Err(ReplayError::RawBannerDoesNotFit { width, height });
         }
         let raw = raw_targets_at(observations, as_of_ns, &r.view.proj, &mut r.set)?;
