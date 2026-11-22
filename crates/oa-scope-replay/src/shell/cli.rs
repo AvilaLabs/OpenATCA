@@ -1303,21 +1303,25 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     }
     let a = parse_args(args)?;
     check_out_dir(&a.out_dir, a.overwrite)?;
-    // The guard first: the file is opened through it, and its size is read from the opened file.
-    let file = oa_sealed::open(&a.snapshot)
+    let (file, size) = oa_sealed::open_regular(&a.snapshot)
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
-    let meta = file
-        .metadata()
-        .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
-    if meta.len() > oa_airspace::snapshot::MAX_SNAPSHOT_BYTES as u64 {
-        return Err(CliError::Failed(format!(
+    let max_snapshot = oa_airspace::snapshot::MAX_SNAPSHOT_BYTES;
+    let too_large = || {
+        CliError::Failed(format!(
             "{} is larger than the snapshot limit",
             a.snapshot.display()
-        )));
+        ))
+    };
+    if size > max_snapshot as u64 {
+        return Err(too_large());
     }
     let mut bytes = Vec::new();
-    std::io::Read::read_to_end(&mut &file, &mut bytes)
+    file.take(max_snapshot as u64 + 1)
+        .read_to_end(&mut bytes)
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
+    if bytes.len() > max_snapshot {
+        return Err(too_large());
+    }
     let model = oa_airspace::snapshot::decode(&bytes).map_err(|e| failed("snapshot", e))?;
 
     if let Some(mode) = a.raw_receipt {

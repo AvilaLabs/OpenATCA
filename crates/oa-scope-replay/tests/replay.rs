@@ -1880,25 +1880,27 @@ fn raw_only_cli_refuses_an_oversize_clip_before_creating_outputs() {
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-fn raw_only_cli_refuses_a_fifo_without_a_writer() {
+fn raw_only_cli_refuses_a_fifo_as_either_input_without_a_writer() {
     let dir = tmp("raw-replay-fifo");
-    let (snap, _) = write_inputs(&dir);
+    let (snap, oaf) = write_inputs(&dir);
     let clip = dir.join("pipe.oaf");
     assert!(std::process::Command::new("mkfifo")
         .arg(&clip)
         .status()
         .unwrap()
         .success());
-    let output = dir.join("raw");
-    let run = std::process::Command::new("timeout")
-        .args(["2", env!("CARGO_BIN_EXE_oa-scope-replay")])
-        .args(raw_cli_args(&snap, &clip, &output, "recorded"))
-        .output()
-        .unwrap();
-    let error = String::from_utf8_lossy(&run.stderr);
-    assert_eq!(run.status.code(), Some(1), "{error}");
-    assert!(error.contains("not a regular file"), "{error}");
-    assert!(!output.exists());
+    for (snapshot, source) in [(&snap, &clip), (&clip, &oaf)] {
+        let output = dir.join("raw");
+        let run = std::process::Command::new("timeout")
+            .args(["2", env!("CARGO_BIN_EXE_oa-scope-replay")])
+            .args(raw_cli_args(snapshot, source, &output, "recorded"))
+            .output()
+            .unwrap();
+        let error = String::from_utf8_lossy(&run.stderr);
+        assert_eq!(run.status.code(), Some(1), "{error}");
+        assert!(error.contains("not a regular file"), "{error}");
+        assert!(!output.exists());
+    }
 }
 
 fn run_text(a: &[String]) -> (Result<(), cli::CliError>, String) {
