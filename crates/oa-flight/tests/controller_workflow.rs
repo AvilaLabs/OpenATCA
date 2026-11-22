@@ -7,6 +7,7 @@
 )]
 
 use oa_flight::*;
+use std::io::{Read, Write};
 
 const ZAU: [u8; 4] = *b"ZAU\0";
 
@@ -237,4 +238,92 @@ fn accepted_controller_state_replays_after_table_replacement_then_takes_control_
         replacement.stats.refused[usize::from(OP_HO_TAKE) * R_COUNT + usize::from(R_NO_HANDOFF)],
         1
     );
+}
+
+#[test]
+fn controller_takeover_worker_process() {
+    if std::env::var_os("OA_CONTROLLER_TAKEOVER_WORKER").as_deref()
+        != Some(std::ffi::OsStr::new("1"))
+    {
+        return;
+    }
+
+    let key = key_gufi(901);
+    let mut table = table();
+    let mut plan = op(OP_SET_PLAN, key, 1_000, 1);
+    plan.state = ST_ACTIVE;
+    plan.plan_id = code("PLAN901");
+    let mut owner = op(OP_OWNER, key, 2_000, 2);
+    owner.unit_a = code("ZAU12");
+    let mut assigned = op(OP_ASSIGN, key, 2_500, 3);
+    assigned.alt = Alt {
+        form: ALT_SIMPLE,
+        a_ft: 36_000,
+        b_ft: 0,
+    };
+    let mut interim = op(OP_INTERIM, key, 2_750, 4);
+    interim.alt = Alt {
+        form: ALT_SIMPLE,
+        a_ft: 24_000,
+        b_ft: 0,
+    };
+    for operation in [
+        plan,
+        owner,
+        assigned,
+        interim,
+        handoff(OP_HO_INITIATE, key, 3_000, 5),
+        handoff(OP_HO_ACCEPT, key, 4_000, 6),
+    ] {
+        assert_eq!(flights_apply(&mut table, &operation), Outcome::Applied);
+    }
+    flights_check(&table).unwrap();
+
+    let take = handoff(OP_HO_TAKE, key, 5_000, 7);
+    let mut input = std::io::stdin().lock();
+    let mut output = std::io::stdout().lock();
+    for (expected, phase) in [(b'P', "P"), (b'T', "T"), (b'R', "R"), (b'Q', "Q")] {
+        let mut command = [0_u8; 1];
+        input.read_exact(&mut command).unwrap();
+        if command[0] == b'Q' {
+            return;
+        }
+        assert_eq!(command[0], expected, "unexpected takeover worker command");
+
+        match phase {
+            "P" => {}
+            "T" => assert_eq!(flights_apply(&mut table, &take), Outcome::Applied),
+            "R" => assert_eq!(
+                flights_apply(&mut table, &take),
+                Outcome::Refused(R_NO_HANDOFF)
+            ),
+            _ => unreachable!(),
+        }
+        flights_check(&table).unwrap();
+        let flight = flight_get(&table, &key).unwrap();
+        let accepted_by = if flight.ho_accepted_by.iter().all(|byte| *byte == 0) {
+            "-"
+        } else {
+            let end = flight
+                .ho_accepted_by
+                .iter()
+                .position(|byte| *byte == 0)
+                .unwrap_or(flight.ho_accepted_by.len());
+            std::str::from_utf8(&flight.ho_accepted_by[..end]).unwrap()
+        };
+        writeln!(
+            output,
+            "MACHINE_LOSS_CONTROL {phase} {} {accepted_by} {} {} {} {:016x}",
+            std::str::from_utf8(
+                &flight.owner[..flight.owner.iter().position(|byte| *byte == 0).unwrap_or(8)]
+            )
+            .unwrap(),
+            flight.assigned.a_ft,
+            flight.interim.a_ft,
+            table.stats.handoffs_completed,
+            flights_digest(&table)
+        )
+        .unwrap();
+        output.flush().unwrap();
+    }
 }
