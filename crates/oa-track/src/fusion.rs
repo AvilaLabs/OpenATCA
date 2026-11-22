@@ -2248,14 +2248,12 @@ fn initiate(
     let (Some(&g), Some(&s)) = (f.geoms.get(radar), f.sites.get(radar)) else {
         return;
     };
-    let before = f.cfg.init_diagnostics.then(|| {
-        (
-            f.stats.init_work,
-            f.stats.init_tests,
-            f.stats.init_capped,
-            f.stats.init_plots_refused,
-        )
-    });
+    let before = f.cfg.init_diagnostics.then_some((
+        f.stats.init_work,
+        f.stats.init_tests,
+        f.stats.init_capped,
+        f.stats.init_plots_refused,
+    ));
     // Each plot can add at most one candidate. Hold the cost of reading and compacting that
     // maximum before any search can exhaust the remaining credit. Return unused credit to
     // the bucket so the next radar pays only for work actually charged.
