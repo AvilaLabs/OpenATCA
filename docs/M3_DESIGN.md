@@ -130,6 +130,10 @@ preserves unvisited candidates and explicitly refuses unprocessed plots; it does
 retry. One bounded refusal-accounting pass reports loss even with no allowance left. This is a
 bound on initiation, not a complete work or allocation proof for the whole tracker.
 
+Each radar reserves the candidate-list retirement pass before it searches. A candidate with
+enough distinct scans can reach confirmation even when the search uses its remaining allowance.
+Unused retirement credit returns to the bucket for later radars.
+
 **Initiation, coasting, drop.** Tentative to confirmed by M-of-N: 2 of 3 for ADS-B with a
 plausible address and kinematics, 3 of 4 for radar only. Coast after missed expected updates,
 flagged; drop after a time set from the recorded data per airspace (en route, terminal). Every

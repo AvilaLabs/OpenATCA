@@ -4021,6 +4021,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   every candidate the all-candidates test could pass; a candidate that finds the wide list full is not
   tested in that bucket and is counted in `init_wide_full`; `init_tests` counts the exact tests and
   `init_visits` the candidates the grid returned.
+- **OA-TRK-403** Radar initiation reserves enough shared bucket work to read and compact the
+  largest candidate list a radar's plots could leave. A candidate that reaches confirmation can
+  retire into the tracker when search uses all its remaining allowance. Other radars can use
+  any credit left after actual retirement work is charged.
 - **OA-TRK-302** A track's expected update interval is the shortest scan period among the radars that
   updated it within their last three periods (as of its newest update), and it is flagged coasting when
   its newest update is older than three of those intervals; a track no radar updated that recently keeps

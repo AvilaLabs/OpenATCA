@@ -3148,7 +3148,9 @@ mod tests {
     #[test]
     fn initiation_address_lookup_is_charged_before_candidate_visit() {
         let mut f = make_fusion(|_| {});
-        f.init_work_max = 4;
+        // Four search units reach the address lookup. The remaining four units reserve room
+        // to retire the existing candidate and the most that this plot could add.
+        f.init_work_max = 8;
         let prior = Cand {
             radar: 0,
             addr: 0xA00001,
@@ -3163,7 +3165,8 @@ mod tests {
         let _ = run(&mut f, &plots, &[]);
         assert_eq!(f.cands.len(), 1);
         assert_eq!(f.cands.first().map(|c| (c.addr, c.n)), Some((0xA00001, 1)));
-        assert_eq!(fusion_stats(&f).init_work, 4);
+        // The refused lookup spends no credit. Retirement reads and keeps one candidate.
+        assert_eq!(fusion_stats(&f).init_work, 6);
         assert_eq!(fusion_stats(&f).init_plots_refused, 1);
     }
 
@@ -3200,8 +3203,9 @@ mod tests {
         // + 1 plot visit + 2 fallback writes = 23. The two grid keys share a cell and are
         // ascending: heap build costs 4 units (loop, sift, comparison, swap), extraction 2.
         // The first visit/test and second visit cost 3 more; the second exact test cannot
-        // fit and the first pair must be rolled back, at a total of 26.
-        f.init_work_max = 26;
+        // fit and the first pair must be rolled back, at a search total of 26. Hold a
+        // further six units for retiring two existing candidates and one potential new one.
+        f.init_work_max = 32;
         f.brute_coarse = true;
         let mut plot = mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0);
         plot.alt_ft = NONE_ALT;
@@ -3234,6 +3238,7 @@ mod tests {
         let _ = run(&mut f, &[plot], &[]);
         let st = fusion_stats(&f);
         assert_eq!(st.init_tests, 1, "{st:?}");
+        assert_eq!(st.init_work, 30, "{st:?}");
         assert_eq!(st.cand_joined, 0, "{st:?}");
         assert_eq!(st.init_plots_refused, 1, "{st:?}");
         assert_eq!(st.assoc_refused, 0, "{st:?}");
