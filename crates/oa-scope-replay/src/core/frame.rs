@@ -11,14 +11,17 @@ use crate::core::rows::{
 use oa_airspace::core::model::Model;
 use oa_display::core::font::{text_width_units, CAP_HEIGHT};
 use oa_display::core::list::{
-    list_clear, list_new, push_text, DisplayError, DisplayList, ListCaps, ALIGN_CENTRE, ALIGN_RIGHT,
+    list_clear, list_new, push_rect, push_text, DisplayError, DisplayList, ListCaps, ALIGN_CENTRE,
+    ALIGN_RIGHT,
 };
 use oa_display::core::ownership::{
     build_ownership_status, ownership_caps, ownership_status_fits, OwnershipStatus,
 };
 use oa_display::core::palette;
 use oa_display::core::raster::{frame_len, rasterize, FrameSpec, RenderError};
-use oa_display::core::safety::{build_safety, safety_caps, FeedStatus, SafetyScene};
+use oa_display::core::safety::{
+    build_safety, safety_caps, FeedStatus, SafetyScene, LAYER_BANNER, LAYER_BANNER_BG,
+};
 use oa_display::core::scene::{
     build_scene, scene_caps, scene_index, scratch_for, view_new, SceneIndex, SceneStats, Scratch,
     View,
@@ -40,6 +43,7 @@ const STAMP_BYTES: usize = 96;
 const RAW_BANNER: &str = "RAW SURVEILLANCE ONLY";
 const RAW_BANNER_SIZE: u8 = 16;
 const RAW_BANNER_TOP_PX: i32 = 10;
+const RAW_BANNER_PADDING_PX: i32 = 4;
 
 /// Why a frame could not be made.
 // A7.2: cold struct, size guard waived (errors are rare).
@@ -174,7 +178,7 @@ pub fn replay_new(model: Model, cfg: &ReplayConfig) -> Result<Replay, ReplayErro
     };
     let stamp = ListCaps {
         lines: 0,
-        rects: 0,
+        rects: 1,
         circles: 0,
         polylines: 0,
         poly_vertices: 0,
@@ -239,8 +243,9 @@ pub fn replay_build_raw(
             .saturating_mul(i64::from(RAW_BANNER_SIZE))
             .saturating_add(i64::from(CAP_HEIGHT) - 1)
             / i64::from(CAP_HEIGHT);
-        let banner_height = i64::from(RAW_BANNER_TOP_PX) + i64::from(RAW_BANNER_SIZE);
-        if banner_width > i64::from(width) || banner_height > i64::from(height) {
+        let half_span = banner_width.saturating_add(1) / 2 + i64::from(RAW_BANNER_PADDING_PX);
+        let banner_bottom = RAW_BANNER_TOP_PX + i32::from(RAW_BANNER_SIZE) + RAW_BANNER_PADDING_PX;
+        if half_span * 2 > i64::from(width) || i64::from(banner_bottom) > i64::from(height) {
             return Err(ReplayError::RawBannerDoesNotFit { width, height });
         }
         let raw = raw_targets_at(observations, as_of_ns, &r.view.proj, &mut r.set)?;
@@ -269,18 +274,32 @@ pub fn replay_build_raw(
             text_str(&status),
         )?;
 
-        let banner_x = i32::try_from(width / 2)
-            .unwrap_or(i32::MAX)
-            .saturating_mul(16);
+        let banner_x = i32::try_from(width / 2).unwrap_or(i32::MAX);
+        let half_span = i32::try_from(half_span).unwrap_or(i32::MAX);
+        // The legend is opaque and sits above traffic. Use the safety overlay layers for the
+        // raw banner so a successfully drawn scope always identifies its source.
+        push_rect(
+            &mut r.list,
+            (
+                banner_x.saturating_sub(half_span).saturating_mul(16),
+                (RAW_BANNER_TOP_PX - RAW_BANNER_PADDING_PX) * 16,
+            ),
+            (
+                banner_x.saturating_add(half_span).saturating_mul(16),
+                banner_bottom * 16,
+            ),
+            palette::BACKGROUND,
+            LAYER_BANNER_BG,
+        )?;
         let mut banner = text_new();
         text_push_str(&mut banner, RAW_BANNER);
         push_text(
             &mut r.list,
-            (banner_x, RAW_BANNER_TOP_PX.saturating_mul(16)),
+            (banner_x.saturating_mul(16), RAW_BANNER_TOP_PX * 16),
             RAW_BANNER_SIZE,
             ALIGN_CENTRE,
             palette::ALERT,
-            LAYER_BLOCK,
+            LAYER_BANNER,
             text_str(&banner),
         )?;
         Ok((
