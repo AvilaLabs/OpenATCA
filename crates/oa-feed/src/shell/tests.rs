@@ -1495,8 +1495,7 @@ fn compressed_recording_names_and_content() {
     assert_eq!((s.members, s.truncated), (1, None));
     assert_eq!(rec.total_bytes(), bytes.len() as u64);
     assert_eq!(rec.files_opened(), 1);
-    // A second recorder in the same second gets the next number, and name order is creation
-    // order (OA-FEED-019); raw files keep `.oaf`.
+    // Sequential recorders share the naming watermark across formats (OA-FEED-019).
     let mut again = Recorder::open(&dir, "scds-x", u64::MAX, u64::MAX, Format::Gzip).unwrap();
     again
         .write_frame(&frames[0].1, 1_700_000_000, 1_700_000_000)
@@ -1509,13 +1508,13 @@ fn compressed_recording_names_and_content() {
     assert_eq!(
         files_in(&dir),
         vec![
-            "scds-x-20231114T221320Z-0001.oaf".to_string(),
             "scds-x-20231114T221320Z-0001.oaf.gz".to_string(),
             "scds-x-20231114T221320Z-0002.oaf.gz".to_string(),
+            "scds-x-20231114T221320Z-0003.oaf".to_string(),
         ]
     );
     assert_eq!(
-        std::fs::read(dir.join("scds-x-20231114T221320Z-0001.oaf")).unwrap(),
+        std::fs::read(dir.join("scds-x-20231114T221320Z-0003.oaf")).unwrap(),
         frames[0].1
     );
     std::fs::remove_dir_all(&dir).unwrap();
