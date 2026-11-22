@@ -199,8 +199,15 @@ non-vacuous; it is not a model of an implementation option. Run it with:
 java -cp /path/to/tla2tools.jar tlc2.TLC -config RecoveryProtocol_WeakFence.cfg RecoveryProtocol.tla
 ```
 
-These files were added as a model specification and bounded configuration. TLC has not been run
-for this model. The bounds do not establish unbounded protocol correctness, cryptographic
-security, power-loss behavior, real storage durability, control transfer, network timing, or
-operational suitability. The model is only a small check of the stated abstract acceptance and
-restart rules.
+TLC 2.19 with Java 21, two workers and a 1 GB heap checked the two configurations.
+
+| Configuration | Result | States generated / distinct | Time |
+|---|---|---|---|
+| `RecoveryProtocol.cfg` | All invariants and `NoRegression` hold, depth 10 | 3,024,309 / 574,600 | 36 s |
+| `RecoveryProtocol_WeakFence.cfg` | `NoUnverifiedServing` fails in a three-state trace | 603 / 591 at failure | <1 s |
+
+The weak trace offers an unverified checkpoint and admits it at the next receive step. In the
+strong model, an external authority advance revokes serving in the same abstract transition, and
+acceptance stores the durable state atomically with publication. The check is bounded to the states
+and transitions above. Dissemination of authority changes, real storage durability, cryptographic
+verification, and operational availability require separate evidence.
