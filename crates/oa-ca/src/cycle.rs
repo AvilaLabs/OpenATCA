@@ -61,7 +61,7 @@ fn add(t: &mut CycleStats, s: &CycleStats) {
     t.alerts_dropped += s.alerts_dropped;
     t.net_refused += s.net_refused;
     t.rate_unknown_pairs += s.rate_unknown_pairs;
-    t.rows_lost_upstream += s.rows_lost_upstream;
+    t.rows_lost_upstream = t.rows_lost_upstream.saturating_add(s.rows_lost_upstream);
     t.finish_dropped += s.finish_dropped;
 }
 
@@ -435,14 +435,19 @@ fn sat32(x: u64) -> u32 {
 
 /// The work a cycle left undone and the input it left out or altered, as counts: `(work, input)`.
 fn shortfalls(s: &CycleStats) -> (u64, u64) {
-    let work = s.not_evaluated
-        + s.tracks_unscanned
-        + s.rows_over_capacity
-        + s.open_dropped
-        + s.alerts_dropped
-        + s.alt_lost_dropped;
-    let input =
-        s.rows_bad + s.rows_duplicate + s.rows_high_lat + s.r95_clamped + s.rows_lost_upstream;
+    let work = s
+        .not_evaluated
+        .saturating_add(s.tracks_unscanned)
+        .saturating_add(s.rows_over_capacity)
+        .saturating_add(s.open_dropped)
+        .saturating_add(s.alerts_dropped)
+        .saturating_add(s.alt_lost_dropped);
+    let input = s
+        .rows_bad
+        .saturating_add(s.rows_duplicate)
+        .saturating_add(s.rows_high_lat)
+        .saturating_add(s.r95_clamped)
+        .saturating_add(s.rows_lost_upstream);
     (work, input)
 }
 
@@ -450,7 +455,10 @@ fn shortfalls(s: &CycleStats) -> (u64, u64) {
 fn radius_capping_only(s: &CycleStats, above_cap: u64) -> bool {
     above_cap > 0
         && s.r95_clamped == above_cap
-        && s.rows_bad + s.rows_duplicate + s.rows_high_lat + s.rows_lost_upstream == 0
+        && s.rows_bad == 0
+        && s.rows_duplicate == 0
+        && s.rows_high_lat == 0
+        && s.rows_lost_upstream == 0
 }
 
 /// The net's report for a cycle (M5 rules 1 and 5): running when everything was evaluated;
@@ -471,7 +479,7 @@ fn net_report_with_radius_cap(s: &CycleStats, above_cap: u64) -> NetReport {
         NetReport::Degraded {
             reason: Reason::BudgetExceeded,
             area: Area::Whole,
-            count: sat32(work + input),
+            count: sat32(work.saturating_add(input)),
         }
     } else if input > 0 {
         NetReport::Degraded {

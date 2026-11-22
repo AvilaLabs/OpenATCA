@@ -344,6 +344,27 @@ fn radius_capping_alone_is_reported_without_suppressing_healthy_pair_evaluation(
     ));
 }
 
+#[test]
+fn upstream_loss_counts_saturate_without_hiding_missing_input() {
+    let mut r = rig();
+    let mut capped = trk(1, 0.0, 0.0, 0.0, 0.0, 20_000.0);
+    capped.r95_m = 21_000.0;
+    for (time, lost) in [(0, u64::MAX), (S, 1)] {
+        ca_note_lost_input(&mut r.st, lost);
+        let out = step(&mut r, time, &[capped]);
+        assert_eq!(out.input_short, lost.saturating_add(1));
+        assert!(matches!(
+            out.report,
+            NetReport::Degraded {
+                reason: Reason::InputMissing,
+                count,
+                ..
+            } if count == u32::try_from(lost.saturating_add(1)).unwrap_or(u32::MAX)
+        ));
+    }
+    assert_eq!(ca_totals(&r.st).rows_lost_upstream, u64::MAX);
+}
+
 // REQ: OA-CA-005
 #[test]
 fn a_coasting_or_uncertain_track_widens_the_vertical_minimum_and_is_flagged() {
