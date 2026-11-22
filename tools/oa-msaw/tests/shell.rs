@@ -748,7 +748,7 @@ fn synthetic_flat_terrain_descent_and_level_control_are_scored_from_runner_outpu
     const LAST_TICK_S: i64 = 149;
 
     let set = settings();
-    let floor_ft = i64::from(set.msaw.gtm_clearance_ft);
+    let floor_ft = i64::from(set.msaw.terrain_clearance_ft);
     assert_eq!(floor_ft, 500);
     let event_start_s = (1800 - floor_ft) / 10;
 
