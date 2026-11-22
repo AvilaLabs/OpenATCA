@@ -84,6 +84,7 @@ fn stats() -> JoinStats {
         refiles: 0,
         refiles_refused: 0,
         positions_bad_time: 0,
+        positions_bad_source_time: 0,
     }
 }
 

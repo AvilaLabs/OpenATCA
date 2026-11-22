@@ -315,6 +315,8 @@ pub struct JoinStats {
     pub refiles: usize,
     pub refiles_refused: u64,
     pub positions_bad_time: u64,
+    /// Positions whose own timestamp was ahead of availability or receipt tolerance.
+    pub positions_bad_source_time: u64,
 }
 
 /// The flight-record configuration of the tool: the national day holds about 45,000 flights, so
@@ -729,6 +731,7 @@ pub fn answer_queries_counted(
         refiles: rep.positions.refiled_len(),
         refiles_refused: rep.positions.refiled_refused,
         positions_bad_time: rep.positions.bad_time,
+        positions_bad_source_time: rep.positions.bad_position_time,
     };
     Ok((answers, diags, stats))
 }
@@ -863,12 +866,13 @@ pub fn join_text(
     );
     let _ = writeln!(
         o,
-        "  positions held at the end {}, positions refused (table full) {}, refile times held {}, refiles refused (table full) {}, positions left out for a stamp too far ahead {}",
+        "  positions held at the end {}, positions refused (table full) {}, refile times held {}, refiles refused (table full) {}, positions left out for a future message timestamp {}, positions left out for a future position timestamp {}",
         stats.positions,
         stats.positions_refused,
         stats.refiles,
         stats.refiles_refused,
-        stats.positions_bad_time
+        stats.positions_bad_time,
+        stats.positions_bad_source_time
     );
     let _ = writeln!(
         o,

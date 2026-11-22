@@ -415,9 +415,15 @@ fn future_position_time_does_not_replace_usable_evidence_before_a_valid_followup
         ),
         (
             3,
-            "2030-01-02T03:05:05.000Z",
-            "2030-01-02T03:06:05.000Z",
-            position("2030-01-02T03:05:50Z", "42.1 -88.1"),
+            "2030-01-02T03:05:20.000Z",
+            "2030-01-02T03:05:20.000Z",
+            position("2030-01-02T03:05:26Z", "42.0 -88.0"),
+        ),
+        (
+            4,
+            "2030-01-02T03:05:21.000Z",
+            "2030-01-02T03:06:30.000Z",
+            position("2030-01-02T03:06:15Z", "42.1 -88.1"),
         ),
     ];
     let mut bytes = Vec::new();
@@ -429,29 +435,34 @@ fn future_position_time_does_not_replace_usable_evidence_before_a_valid_followup
     std::fs::write(dir.join("a.oaf"), bytes).unwrap();
 
     let g = 0x1111_1111_2222_3333_4444_5555_5555_5555u128;
-    let second_receive_ms = parse_iso_ms(b"2030-01-02T03:05:10.000Z").unwrap();
-    let mut old_at_future_position = None;
+    // The third position has lagged publication at 03:06:18. By both of these
+    // later callbacks the preceding rejected position has already been processed.
+    let third_avail = parse_iso_ms(b"2030-01-02T03:06:18Z").unwrap();
+    let fourth_avail = parse_iso_ms(b"2030-01-02T03:06:30Z").unwrap();
+    let mut before_next_position = Vec::new();
     let rep = replay_sfdps(
         recordings_in(&dir).unwrap(),
         &cfg(i64::MIN, i64::MAX),
         &mut |_, positions, avail| {
-            if avail == second_receive_ms {
-                old_at_future_position = positions.get(g).map(|p| (p.ts_ms, p.lat_e7));
+            if avail == third_avail || avail == fourth_avail {
+                before_next_position.push((avail, positions.get(g).map(|p| (p.ts_ms, p.lat_e7))));
             }
         },
     )
     .unwrap();
 
     assert_eq!(rep.positions.bad_time, 0, "the parent timestamps are valid");
-    assert_eq!(rep.positions.bad_position_time, 1);
-    assert_eq!(
-        old_at_future_position,
-        Some((parse_iso_ms(b"2030-01-02T03:04:55Z").unwrap(), 419_000_000))
-    );
+    assert_eq!(rep.positions.bad_position_time, 2);
+    let old = Some((parse_iso_ms(b"2030-01-02T03:04:55Z").unwrap(), 419_000_000));
+    assert!(before_next_position.contains(&(third_avail, old)));
+    assert!(before_next_position.contains(&(fourth_avail, old)));
+    assert!(before_next_position
+        .iter()
+        .all(|&(_, position)| position == old));
     let final_position = rep.positions.get(g).unwrap();
     assert_eq!(
         final_position.ts_ms,
-        parse_iso_ms(b"2030-01-02T03:05:50Z").unwrap()
+        parse_iso_ms(b"2030-01-02T03:06:15Z").unwrap()
     );
     assert_eq!(final_position.lat_e7, 421_000_000);
     let _ = std::fs::remove_dir_all(&dir);
