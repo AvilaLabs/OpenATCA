@@ -1076,9 +1076,9 @@ fn one_conflict_is_one_alert_with_a_start_a_peak_and_an_end_after_the_hysteresis
 #[test]
 fn paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery() {
     // Synthetic truth: addresses 1/2 close head-on from 40 km at 400 m/s, so their predicted
-    // loss begins at 87.5 s. The control pair is within the horizontal minimum and safely
-    // separated by 1,000 ft. It is 250 km north, beyond the look-ahead reach of either
-    // closing aircraft, so every evaluated pair can be accounted for.
+    // loss begins at 87.5 s. The control pair is 250 km north and has enough speed
+    // to reach the minimum from 7 km away within the look-ahead. Its two tracks are
+    // actually flying apart, so the exact evaluation never opens an alert.
     let closing = |t: i64| {
         let d = t as f64 * 400.0;
         [
@@ -1086,14 +1086,17 @@ fn paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery()
             trk(2, 20_000.0 - d / 2.0, 0.0, -200.0, 0.0, 10_000.0),
         ]
     };
-    let control = [
-        trk(3, -2_000.0, 250_000.0, 0.0, 0.0, 10_000.0),
-        trk(4, 2_000.0, 250_000.0, 0.0, 0.0, 11_000.0),
-    ];
+    let control = |t: i64| {
+        let offset = 3_500.0 + t as f64 * 20.0;
+        [
+            trk(3, -offset, 250_000.0, -20.0, 0.0, 10_000.0),
+            trk(4, offset, 250_000.0, 20.0, 0.0, 10_000.0),
+        ]
+    };
     let mut r = rig();
 
     let mut rows = closing(0).to_vec();
-    rows.extend(control);
+    rows.extend(control(0));
     let healthy = step(&mut r, 0, &rows);
     assert_eq!(healthy.report, NetReport::Running);
     assert_eq!((healthy.stats.opened, healthy.stats.closed), (1, 0));
@@ -1103,7 +1106,7 @@ fn paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery()
     assert_eq!((initial.addr_a, initial.addr_b), (1, 2));
     assert!((initial.ttl_first_s - 87.5).abs() < 0.5);
 
-    // One ADS-B surveillance row has an invalid position and is rejected for three cycles. The
+    // One surveillance row has an invalid position and is rejected for three cycles. The
     // input shortfall is explicit, the control pair is still evaluated, and the active alert is
     // held during the short gap.
     let mut held = None;
@@ -1111,7 +1114,7 @@ fn paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery()
         let mut degraded_pair = closing(t);
         degraded_pair[1].lat_deg = f64::NAN;
         let mut degraded_rows = degraded_pair.to_vec();
-        degraded_rows.extend(control);
+        degraded_rows.extend(control(t));
         let out = step(&mut r, t, &degraded_rows);
         assert_eq!((out.input_short, out.stats.rows_bad), (1, 1));
         assert_eq!(out.stats.evaluated, 1, "covered control pair at cycle {t}");
@@ -1128,7 +1131,7 @@ fn paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery()
 
     // Recovery restores full pair coverage before hysteresis expires; it continues the same alert.
     rows = closing(4).to_vec();
-    rows.extend(control);
+    rows.extend(control(4));
     let recovered = step(&mut r, 4, &rows);
     assert_eq!(recovered.report, NetReport::Running);
     assert_eq!((recovered.stats.opened, recovered.stats.closed), (0, 0));
