@@ -278,10 +278,11 @@ order. Equal receipt timestamps are allowed.
 
 Raw replay accepts regular input files and caps reads at 512 MiB, history at 65,536 rows, and
 rendering work at 32 million history visits. The sealed path and time checks apply in both modes.
-Each address can contribute its newest fresh observation as of the rendered frame. The command
-refuses and counts conflicting observations at the same time. A caller using the lower-level
-columns API supplies the receipt check. The offline drill draws observed positions with a finite
-age cutoff and leaves ownership and extrapolation to the processed display.
+Each address can contribute its newest fresh observation as of the rendered frame. A stale flag
+on that observation suppresses the address until fresh evidence arrives. Conflicting observations
+at the same time, including disagreement over that flag, are counted and withheld. A caller using
+the lower-level columns API supplies its own receipt and source-quality checks. The offline
+drill draws observed positions with a finite age cutoff.
 
 ## 9. Time
 
