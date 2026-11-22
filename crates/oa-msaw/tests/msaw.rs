@@ -2334,9 +2334,12 @@ fn resilience_linear_descent_sweep_matches_warning_and_lookahead_edges() {
     let terrain = flat(900, FLOOR_NONE);
 
     // The fixture supplies a constant terrain floor and a constant -600 ft/min descent.
-    // Independent arithmetic gives exact floor-crossing times; these straddle the 20 s
-    // warning boundary and the 60 s prediction horizon by whole five-second sample intervals.
-    for (case, crossing_s) in [15.0_f64, 20.0, 25.0, 75.0].into_iter().enumerate() {
+    // The crossings exercise both sides of the 20 s warning boundary and the 60 s horizon.
+    // At exactly 60 s the track touches the floor; the predicted path never goes below it.
+    for (case, crossing_s) in [15.0_f64, 20.0, 25.0, 55.0, 60.0, 65.0]
+        .into_iter()
+        .enumerate()
+    {
         let mut r = rig(&config);
         let altitude_ft = floor_ft + descent_ft_s * crossing_s;
         let track = tr(
@@ -2349,7 +2352,7 @@ fn resilience_linear_descent_sweep_matches_warning_and_lookahead_edges() {
             -600.0,
         );
         let out = cycle(&mut r, S, &[track], &terrain);
-        let inside_prediction = crossing_s <= config.look_ahead_s;
+        let inside_prediction = crossing_s < config.look_ahead_s;
         assert_eq!(
             out.stats.violations,
             u64::from(inside_prediction),
