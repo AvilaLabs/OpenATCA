@@ -51,6 +51,9 @@ const LAT: i32 = 419_000_000;
 const LON: i32 = -879_000_000;
 const MAX_WORKER_LINE_BYTES: usize = 1_024;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_LAUNCHER_PATH_BYTES: usize = 4_096;
+const MAX_LAUNCHER_ARGS: usize = 16;
+const MAX_LAUNCHER_ARG_BYTES: usize = 1_024;
 const RECOVERY_MAGIC: &[u8; 8] = b"OARCP002";
 const RECOVERY_HEADER_BYTES: usize = 8 + 4 + 32 + 4 + 4 + 8 + 8 + 8;
 const RECOVERY_RECORD_BYTES: usize = 4 + 1;
@@ -1704,7 +1707,7 @@ impl Replica {
         if visible_ca {
             command.env("OA_MACHINE_LOSS_VISIBLE_CA", "1");
         }
-        Self::spawn(command, quarantine)
+        Self::spawn(command, quarantine, Stdio::inherit())
     }
 
     fn start_controller(path: &Path) -> Self {
@@ -1718,14 +1721,70 @@ impl Replica {
                 "--nocapture",
             ])
             .env("OA_CONTROLLER_TAKEOVER_WORKER", "1");
-        Self::spawn(command, None)
+        Self::spawn(command, None, Stdio::inherit())
     }
 
-    fn spawn(mut command: Command, quarantine: Option<QuarantineRecord>) -> Self {
+    fn start_transport(side: &str) -> Self {
+        let launcher_key = format!("OA_MACHINE_LOSS_TRANSPORT_{side}_LAUNCHER");
+        let args_key = format!("OA_MACHINE_LOSS_TRANSPORT_{side}_ARGS");
+        let executable = std::env::var_os(&launcher_key)
+            .unwrap_or_else(|| panic!("set {launcher_key} to an explicit protocol launcher"));
+        let path = PathBuf::from(executable);
+        assert!(
+            path.is_absolute(),
+            "transport launcher path must be absolute"
+        );
+        let path_text = path.as_os_str().to_string_lossy();
+        assert!(
+            path_text.len() <= MAX_LAUNCHER_PATH_BYTES,
+            "transport launcher path exceeds bound"
+        );
+        // The local launcher is a caller-supplied test executable. Refuse sealed artifacts before
+        // invoking it; remote launchers remain responsible for their own authenticated setup.
+        oa_sealed::refuse(&path).expect("transport launcher must not be a sealed input artifact");
+        let args = std::env::var(&args_key).unwrap_or_default();
+        assert!(
+            args.len() <= 8_192,
+            "transport launcher argument list exceeds total bound"
+        );
+        let mut command = Command::new(path);
+        if !args.is_empty() {
+            let parsed: Vec<_> = args.split('\n').collect();
+            assert!(
+                parsed.len() <= MAX_LAUNCHER_ARGS,
+                "too many transport launcher arguments"
+            );
+            for arg in parsed {
+                assert!(
+                    !arg.is_empty(),
+                    "transport launcher arguments cannot be empty lines"
+                );
+                assert!(
+                    arg.len() <= MAX_LAUNCHER_ARG_BYTES,
+                    "transport launcher argument exceeds bound"
+                );
+                assert!(
+                    !arg.contains('\0'),
+                    "transport launcher argument contains NUL"
+                );
+                command.arg(arg);
+            }
+        }
+        // Launcher contract: bridge this process's stdin/stdout to the synthetic worker protocol.
+        // A bridge EOF is a transport disconnect; it does not establish that a remote worker died.
+        // This enables the documented local control: point at this test binary and pass the
+        // machine_loss_worker_process test-harness arguments. A remote bridge may use its own
+        // configured remote command and need not forward this local environment variable.
+        command.env("OA_MACHINE_LOSS_WORKER", "1");
+        // Do not accept unbounded launcher diagnostics on the test's output channel.
+        Self::spawn(command, None, Stdio::null())
+    }
+
+    fn spawn(mut command: Command, quarantine: Option<QuarantineRecord>, stderr: Stdio) -> Self {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(stderr)
             .spawn()
             .unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
@@ -2706,6 +2765,47 @@ fn serving_process_loss_promotes_synchronized_scope_replica() {
     assert_eq!(fields[3], format!("{},{}", A, B));
     assert_eq!(fields[2].len(), 64);
     eprintln!("machine-loss: last_frame_s=10 next_frame_s=40 logical_display_gap_s=30 promotion_observed_ms={promotion_observed_ms} recovery={recovery}");
+}
+
+// Opt-in transport exercise. The caller supplies a test launcher that bridges the bounded
+// MACHINE_LOSS line protocol over stdin/stdout to a worker on another host. No network client,
+// credentials, remote kill, or production endpoint is selected by this test.
+#[test]
+#[ignore = "set OA_MACHINE_LOSS_TRANSPORT_LAUNCHER to an explicit synthetic protocol bridge"]
+fn transport_separated_workers_match_synthetic_scope_reference() {
+    let mut left = Replica::start_transport("LEFT");
+    let mut right = Replica::start_transport("RIGHT");
+    let mut reference = Drill::new();
+    reference.warmup();
+    for &(second, live) in &SYNTHETIC_STREAM {
+        let left_ack = left.step(second, live);
+        let right_ack = right.step(second, live);
+        let expected = local_reference_step(&mut reference, second, live);
+        assert_eq!(
+            left_ack, right_ack,
+            "transport workers diverged at {second}s"
+        );
+        assert_eq!(
+            left_ack, expected,
+            "transport worker differs from local reference at {second}s"
+        );
+    }
+    let left_status = left.shutdown().expect("launcher exits after protocol STOP");
+    let right_status = right
+        .shutdown()
+        .expect("launcher exits after protocol STOP");
+    assert!(
+        left_status.success(),
+        "left launcher exited unsuccessfully: {left_status}"
+    );
+    assert!(
+        right_status.success(),
+        "right launcher exited unsuccessfully: {right_status}"
+    );
+    eprintln!(
+        "transport-drill: workers=2 records={} result=synthetic-output-equivalence launcher_exit=observed remote_process_death=not_claimed",
+        SYNTHETIC_STREAM.len()
+    );
 }
 
 fn controller_ownership(record: &str, phase: &str) -> OwnershipStatus {

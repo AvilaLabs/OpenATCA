@@ -76,3 +76,37 @@ OA_CONTROLLER_TAKEOVER_EXECUTABLE=/absolute/path/to/controller_workflow-binary \
 
 This evidence covers OS process failure on one host with a fixture that owns publication
 authority. The two-host exercise requires a test transport and independent machines.
+
+### Opt-in transport-separated scope workers
+
+`transport_separated_workers_match_synthetic_scope_reference` exercises the scope replay worker
+protocol through two caller-supplied launchers. Each launcher is an explicit absolute executable,
+configured independently as `OA_MACHINE_LOSS_TRANSPORT_LEFT_LAUNCHER` and
+`OA_MACHINE_LOSS_TRANSPORT_RIGHT_LAUNCHER`; optional arguments are supplied one per line in the
+matching `_ARGS` variable (at most 16
+arguments, 1,024 bytes each and 8,192 bytes total). The bridge carries only the existing bounded
+stdin/stdout line protocol. The fixture refuses a sealed launcher path, caps each protocol line
+at 1,024 bytes, caps queued output at eight lines and applies the existing 60-second response and
+exit deadlines. Launcher stderr is discarded to keep child output bounded.
+
+For a local launcher control, build the test harness and use its exact compiler-artifact path:
+
+```sh
+cargo +1.89.0 test --release --locked -p oa-scope-replay --test outage_drill --no-run --message-format=json
+OA_MACHINE_LOSS_TRANSPORT_LEFT_LAUNCHER=/absolute/path/to/outage_drill-binary \
+OA_MACHINE_LOSS_TRANSPORT_LEFT_ARGS=$'--exact\nmachine_loss_worker_process\n--nocapture' \
+OA_MACHINE_LOSS_TRANSPORT_RIGHT_LAUNCHER=/absolute/path/to/outage_drill-binary \
+OA_MACHINE_LOSS_TRANSPORT_RIGHT_ARGS=$'--exact\nmachine_loss_worker_process\n--nocapture' \
+  cargo +1.89.0 test --release --locked -p oa-scope-replay --test outage_drill \
+  transport_separated_workers_match_synthetic_scope_reference -- --ignored --exact --nocapture
+```
+
+This local control proves the launcher contract and exact synthetic output equivalence; it does
+not prove transport separation. For future two-host evidence, configure each launcher to bridge to
+its worker on a different host and run the same exact test and revision from the coordinator.
+Record the source SHA, compiler artifact SHA on each host, launcher configuration, and complete
+test output. A bridge EOF or launcher exit is reported as a transport disconnect or local launcher
+exit; neither establishes death of a remote process. This exercise covers scope replay only. It
+does not exercise `oa-flight` or the combined controller ownership workflow, and the existing
+same-host `serving_process_loss_promotes_synchronized_scope_replica` kill regression remains the
+evidence for actual local process death.
