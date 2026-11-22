@@ -9,7 +9,93 @@ use crate::core::rows::{
 };
 use crate::store::callsigns_build;
 use oa_adsb::Reports;
+use oa_display::safety::{FeedState, FeedStatus};
+use oa_feed::health::{FeedHealth, STATE_CONNECTED, STATE_DISCONNECTED, STATE_UNKNOWN};
 use oa_track::{r95_m_of, TrackOutput, O_COAST, O_HAS_ALT, O_REACQUIRED, O_UNCERTAIN};
+
+/// Caller-supplied feed freshness limits. The slow threshold is inclusive for `Slow`; the lost
+/// threshold is inclusive for `Lost`. No facility-independent defaults are provided (IF-R4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FeedFreshnessLimits {
+    slow_after_ns: i64,
+    lost_after_ns: i64,
+}
+
+/// A freshness limit pair that cannot classify `Slow` before `Lost`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedFreshnessLimitError {
+    SlowMustBePositive,
+    LostMustExceedSlow,
+}
+
+impl FeedFreshnessLimits {
+    /// Builds a validated limit pair in nanoseconds.
+    pub fn new(slow_after_ns: i64, lost_after_ns: i64) -> Result<Self, FeedFreshnessLimitError> {
+        if slow_after_ns <= 0 {
+            return Err(FeedFreshnessLimitError::SlowMustBePositive);
+        }
+        if lost_after_ns <= slow_after_ns {
+            return Err(FeedFreshnessLimitError::LostMustExceedSlow);
+        }
+        Ok(Self {
+            slow_after_ns,
+            lost_after_ns,
+        })
+    }
+}
+
+/// Converts one health snapshot to the display's plain feed status. `now_ns` must be in the same
+/// clock domain as the receive timestamps supplied to `oa_feed::observe_frame`; a future frame or
+/// message timestamp is surfaced as `ClockMismatch`, never treated as fresh. A MESSAGE means a framed
+/// source message arrived, not that its payload decoded into an accepted track update.
+pub fn feed_status_from_health(
+    name: [u8; 8],
+    health: &FeedHealth,
+    now_ns: i64,
+    limits: FeedFreshnessLimits,
+) -> FeedStatus {
+    let state = if !matches!(
+        health.state,
+        STATE_UNKNOWN | STATE_CONNECTED | STATE_DISCONNECTED
+    ) || u128::from(health.messages) + u128::from(health.rejects)
+        > u128::from(health.frames)
+        || (health.state != STATE_UNKNOWN && health.frames == 0)
+        || (health.messages == 0) != health.last_message_recv_ns.is_none()
+    {
+        FeedState::InvalidHealth
+    } else if health.frames > 0 && health.last_recv_ns > now_ns {
+        FeedState::ClockMismatch
+    } else if let Some(last_message_ns) = health.last_message_recv_ns {
+        if last_message_ns > now_ns {
+            FeedState::ClockMismatch
+        } else if health.state == STATE_DISCONNECTED {
+            FeedState::Disconnected
+        } else {
+            let age_ns = i128::from(now_ns) - i128::from(last_message_ns);
+            let age_ms = u32::try_from(age_ns / 1_000_000).ok();
+            if age_ns >= i128::from(limits.lost_after_ns) {
+                age_ms.map_or(FeedState::LostAgeOverflow, |age_ms| FeedState::Lost {
+                    age_ms,
+                })
+            } else if age_ns >= i128::from(limits.slow_after_ns) {
+                age_ms.map_or(FeedState::SlowAgeOverflow, |age_ms| FeedState::Slow {
+                    age_ms,
+                })
+            } else {
+                FeedState::Live
+            }
+        }
+    } else if health.state == STATE_DISCONNECTED {
+        FeedState::Disconnected
+    } else if health.rejects > 0 {
+        FeedState::RejectedInput {
+            count: health.rejects,
+        }
+    } else {
+        FeedState::NoMessageSeen
+    };
+    FeedStatus { name, state }
+}
 
 /// The two columns that are computed, not viewed: reused from drain to drain. Plain data.
 // A7.2: cold struct, size guard waived (one per run).

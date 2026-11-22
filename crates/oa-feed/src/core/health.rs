@@ -26,6 +26,8 @@
 //!   histogram. Bins resolve 10 ms up to 100 ms, 100 ms up to 1 s, 1 s up to 60 s, 10 s up to
 //!   600 s, then overflow. The summary prints p50 and p95 as the bin's upper edge in ms, never above the
 //!   exact maximum, which is also printed; anything in the overflow bin prints as `>=600000`.
+//! * Frame activity (`last_recv_ns`) and surveillance-message freshness (`last_message_recv_ns`)
+//!   are separate: STATUS heartbeats and REJECT frames do not refresh the last MESSAGE time.
 
 use crate::core::frame::{Frame, FrameError, Kind, FLAG_REDELIVERED};
 
@@ -98,6 +100,9 @@ pub struct FeedHealth {
     pub first_recv_ns: i64,
     /// Receive time of the most recent frame (ns).
     pub last_recv_ns: i64,
+    /// Receive time of the most recent MESSAGE frame (ns), or `None` if no MESSAGE has been seen.
+    /// STATUS and REJECT frames do not advance this value.
+    pub last_message_recv_ns: Option<i64>,
     /// Largest latency sample (ms); -1 until there is one.
     pub lat_max_ms: i64,
     /// Frames of every kind accepted.
@@ -160,9 +165,9 @@ pub struct FeedHealth {
     /// Per-second ring for the rates.
     pub ring: [Slot; RING_SLOTS],
 }
-// Budget: 24 u64/i64 fields (192) + 2 u32 (8) + state and reserved (8) + 24 * 8 + 133 * 8 + 61 * 16
-// = 2440. One per feed, updated per frame; the rings dominate and have no padding.
-const _: () = assert!(core::mem::size_of::<FeedHealth>() == 2440);
+// Budget: 24 u64/i64 fields (192) + one Option<i64> (16) + 2 u32 (8) + state and reserved (8)
+// + 24 * 8 + 133 * 8 + 61 * 16 = 2456. One per feed, updated per frame; the rings dominate.
+const _: () = assert!(core::mem::size_of::<FeedHealth>() == 2456);
 
 impl FeedHealth {
     /// An empty health record.
@@ -170,6 +175,7 @@ impl FeedHealth {
         FeedHealth {
             first_recv_ns: 0,
             last_recv_ns: 0,
+            last_message_recv_ns: None,
             lat_max_ms: -1,
             frames: 0,
             messages: 0,
@@ -229,7 +235,10 @@ pub fn observe_frame(h: &mut FeedHealth, f: &Frame<'_>, now_ns: i64) {
     h.frames += 1;
     h.last_recv_ns = now_ns;
     match f.kind {
-        Kind::Message => observe_message(h, f, now_ns),
+        Kind::Message => {
+            h.last_message_recv_ns = Some(now_ns);
+            observe_message(h, f, now_ns)
+        }
         Kind::Reject => h.rejects += 1,
         Kind::Status => observe_status(h, f.payload),
     }

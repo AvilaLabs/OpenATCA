@@ -30,7 +30,10 @@
 //! * One line per net that is not plainly running: name, state, reason, area, count, age of the
 //!   state, and the number of inhibitions in force. A net whose suppressions were lost to a full
 //!   log reads degraded (`SUPPRESSION LOG FULL`).
-//! * One line per feed that is not live: `FEED <name> SLOW <age>` or `FEED <name> LOST <age>`.
+//! * One line per feed that is not live: `SLOW`/`LOST` with message age, `NO MESSAGE SEEN`,
+//!   `REJECTED <count>` when only source frames were rejected, `CLOCK MISMATCH`, `DISCONNECTED`,
+//!   or a visible `>49D` lower bound if the age field is too small. A STATUS heartbeat does not
+//!   count as a surveillance MESSAGE.
 //! * `INHIBITION AREAS NOT DRAWN: N` when an area has a vertex that does not project.
 //!
 //! If the lines do not fit the frame, the last visible line reads `+N MORE STATES NOT SHOWN`.
@@ -123,6 +126,22 @@ pub enum FeedState {
     Lost {
         age_ms: u32,
     },
+    /// No framed MESSAGE is present in this health snapshot; status heartbeats do not imply data.
+    NoMessageSeen,
+    /// Source frames were rejected, with no MESSAGE accepted by the frame reader.
+    RejectedInput {
+        count: u64,
+    },
+    /// The latest MESSAGE timestamp is later than the caller's comparison time.
+    ClockMismatch,
+    /// A slow-feed age exceeds the legacy millisecond display field; the banner says `>49D`.
+    SlowAgeOverflow,
+    /// A lost-feed age exceeds the legacy millisecond display field; the banner says `>49D`.
+    LostAgeOverflow,
+    /// The bridge reports a disconnected or reconnecting transport.
+    Disconnected,
+    /// The supplied counters and last-MESSAGE evidence disagree.
+    InvalidHealth,
 }
 
 /// One feed: its name (ASCII, zero padded) and state.
@@ -313,13 +332,28 @@ pub fn feed_line(b: &mut TextBuf, f: &FeedStatus) {
     text_clear(b);
     let (word, age_ms) = match f.state {
         FeedState::Live => return,
-        FeedState::Slow { age_ms } => (" SLOW ", age_ms),
-        FeedState::Lost { age_ms } => (" LOST ", age_ms),
+        FeedState::Slow { age_ms } => (" SLOW ", Some(age_ms)),
+        FeedState::Lost { age_ms } => (" LOST ", Some(age_ms)),
+        FeedState::NoMessageSeen => (" NO MESSAGE SEEN", None),
+        FeedState::RejectedInput { count } => {
+            text_push_str(b, "FEED ");
+            text_push_str(b, text_of(&f.name));
+            text_push_str(b, " REJECTED ");
+            push_capped(b, count, SHOW_MAX);
+            return;
+        }
+        FeedState::ClockMismatch => (" CLOCK MISMATCH", None),
+        FeedState::SlowAgeOverflow => (" SLOW >49D", None),
+        FeedState::LostAgeOverflow => (" LOST >49D", None),
+        FeedState::Disconnected => (" DISCONNECTED", None),
+        FeedState::InvalidHealth => (" HEALTH INCONSISTENT", None),
     };
     text_push_str(b, "FEED ");
     text_push_str(b, text_of(&f.name));
     text_push_str(b, word);
-    push_tenths(b, i64::from(age_ms) * 1_000_000);
+    if let Some(age_ms) = age_ms {
+        push_tenths(b, i64::from(age_ms) * 1_000_000);
+    }
 }
 
 /// The banner line of a frozen picture.
