@@ -292,6 +292,7 @@ fn checked_directory_anchor(dir: &Path) -> io::Result<(PathBuf, File)> {
     oa_sealed::refuse_io_embedded(dir)?;
     let canonical = fs::canonicalize(dir)?;
     oa_sealed::refuse_io_embedded(&canonical)?;
+    // seal-allow: probes identity metadata for the checked directory before opening its descriptor
     let expected = fs::metadata(&canonical)?;
     // seal-allow: opens the caller-checked existing recording directory; it reads no contents
     let directory = File::open(&canonical)?;
@@ -311,6 +312,7 @@ fn checked_directory_anchor(dir: &Path) -> io::Result<(PathBuf, File)> {
     oa_sealed::Sealed::production_embedded().verify_open(&canonical, &directory)?;
     let anchor = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
     oa_sealed::refuse_io_embedded(&anchor)?;
+    // seal-allow: probes the type of the checked /proc/self/fd directory alias
     if !fs::metadata(&anchor)?.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
