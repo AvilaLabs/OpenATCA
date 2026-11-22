@@ -1682,7 +1682,7 @@ fn raw_message_rows(frame_time_ns: i64, rows: &[(i64, u32, i32)]) -> Vec<u8> {
         reports_push(&mut reports, &row);
     }
     let mut payload = Vec::new();
-    encode_payload(&mut payload, &reports, 0, 1).unwrap();
+    encode_payload(&mut payload, &reports, 0, rows.len()).unwrap();
     let mut frame = vec![0u8; payload.len() + 256];
     let n = oa_feed::encode_frame(
         &mut frame,
