@@ -117,8 +117,8 @@ const D_REFUSED: u8 = 3;
 /// A Mode S plot not applied: outside the wide gate of its address's track, or a second plot of
 /// that track in the bucket. Kept out of initiation like a refused plot.
 const D_MISMATCH: u8 = 4;
-/// An anonymous plot the bucket's work limit left ungated: it is neither a hit nor evidence that
-/// no track holds it, so initiation leaves it alone.
+/// An unmatched anonymous plot whose gates were incomplete at a work or pair limit.
+/// Initiation leaves it alone because the missing gates might have found a match.
 const D_DEFERRED: u8 = 5;
 
 /// Why the fusion layer refused its configuration.
@@ -305,8 +305,8 @@ pub struct FusionStats {
     /// Live tracks predicted for association, summed over the radar-buckets (the size of the
     /// per-bucket track pass).
     pub tracks_at_sum: u64,
-    /// Anonymous plots of an association that were never gated because the bucket's work limit
-    /// or the pair limit was reached first.
+    /// Anonymous plots deferred because a work or pair limit left their gating incomplete and
+    /// the solver had no match for them.
     pub anon_plots_ungated: u64,
     /// Initiation passes cut short by a limit, counted at most once per radar-bucket.
     pub init_capped: u64,
@@ -1185,11 +1185,13 @@ struct RadarAssoc {
     dh_max: f64,
     pairs: Vec<Pair>,
     infos: Vec<PairInfo>,
-    /// Where the loop over the anonymous plots starts (see [`loop_start`]), the number gated so
-    /// far, counted from there, and how many pairs the plots before the wrap had made.
+    /// Where the loop over the anonymous plots starts (see [`loop_start`]), the number started
+    /// so far, counted from there, and how many pairs the plots before the wrap had made.
     start: usize,
     next: usize,
     wrap_pairs: Option<usize>,
+    /// The last plot started reached a limit before finishing its gates.
+    last_cut_short: bool,
     /// Work spent (coarse candidates visited and exact gates tested) by this radar's plots.
     work: usize,
     capped: bool,
@@ -1476,6 +1478,7 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         start: loop_start(f.done_bucket, radar, anon_len),
         next: 0,
         wrap_pairs: None,
+        last_cut_short: false,
         work: 0,
         capped: false,
     })
@@ -1618,6 +1621,7 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         next,
         start,
         wrap_pairs,
+        last_cut_short,
         ..
     } = ra;
     if let Some(slot) = f.grids.get_mut(radar) {
@@ -1625,7 +1629,6 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
     }
     if capped {
         f.stats.bucket_work_capped += 1;
-        f.stats.anon_plots_ungated += anon.len().saturating_sub(next) as u64;
     }
     // The plots were gated from `start` round the end and on from the first: put the pairs back in
     // plot order, which is the order a loop from the first plot makes them in.
@@ -1634,9 +1637,13 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         pairs.rotate_left(w.min(np));
         infos.rotate_left(w.min(ni));
     }
-    // The plots the loop never reached: after `next` of them from `start`, round the ring.
     let n_anon = anon.len();
-    let ungated = |a: usize| capped && (a + n_anon - start) % n_anon.max(1) >= next;
+    // A plot that was never reached, or whose gates were cut short, cannot supply evidence
+    // for starting an anonymous track just because the solver found it no match.
+    let gating_incomplete = |a: usize| {
+        let ordinal = (a + n_anon - start) % n_anon.max(1);
+        ordinal >= next || (last_cut_short && ordinal + 1 == next)
+    };
     let solved = if f.cfg.assoc == ASSOC_GNN {
         gnn(
             &mut f.assoc,
@@ -1664,10 +1671,11 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
             .copied()
             .unwrap_or(NO_TRACK);
         if t == NO_TRACK {
-            if ungated(a) {
+            if gating_incomplete(a) {
                 if let Some(d) = dec.get_mut(j) {
                     d.kind = D_DEFERRED;
                 }
+                f.stats.anon_plots_ungated = f.stats.anon_plots_ungated.saturating_add(1);
             } else {
                 f.stats.unassigned += 1;
             }
@@ -1770,6 +1778,7 @@ fn associate_bucket(f: &mut Fusion) {
         }
         let a = (ra.start + k) % n.max(1);
         total += assoc_plot(f, ra, a, budget - total);
+        ra.last_cut_short = ra.capped;
     }
     for ra in &mut ras {
         if let Some(ra) = ra.take() {
@@ -5428,6 +5437,38 @@ mod tests {
         assert_eq!(st.cand_started, 0, "{st:?}");
         assert_eq!(deferred(&f).len() as u64, st.anon_plots_ungated, "{st:?}");
         assert_eq!(st.unassigned, 0, "{st:?}");
+    }
+
+    // REQ: OA-TRK-299
+    #[test]
+    fn a_plot_cut_short_by_the_work_limit_cannot_start_an_anonymous_track() {
+        let (mut limited, at) = capped_fusion();
+        limited.bucket_tests_max = 1;
+        let plots = plots_on(&SITE, &at, 1, 0.0, 3);
+        let mut out = output_new(1 << 18);
+        fusion_plots(&mut limited, 0, &plots);
+        fusion_advance(&mut limited, 7 * NS_PER_S, &mut out);
+        let stats = fusion_stats(&limited);
+        assert_eq!(stats.bucket_work_capped, 1, "{stats:?}");
+        assert_eq!(stats.coarse_visits, 1, "{stats:?}");
+        assert_eq!(stats.pairs_tested, 0, "{stats:?}");
+        assert_eq!(stats.anon_plots_ungated, 1, "{stats:?}");
+        assert_eq!(deferred(&limited), [0]);
+        assert_eq!(stats.unassigned, 0, "{stats:?}");
+        assert_eq!(stats.cand_started + stats.cand_joined, 0, "{stats:?}");
+
+        let (mut control, _) = capped_fusion();
+        control.bucket_tests_max = MAX_BUCKET_TESTS;
+        fusion_plots(&mut control, 0, &plots);
+        fusion_advance(&mut control, 7 * NS_PER_S, &mut out);
+        let stats = fusion_stats(&control);
+        assert_eq!(stats.bucket_work_capped, 0, "{stats:?}");
+        assert_eq!(stats.applied_assoc, 1, "{stats:?}");
+        assert_eq!(
+            stats.anon_plots_ungated + stats.cand_started,
+            0,
+            "{stats:?}"
+        );
     }
 
     // REQ: OA-TRK-299

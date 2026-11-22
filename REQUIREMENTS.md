@@ -3983,8 +3983,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   right after `split_reports`; a violation is a hard error of the run. The scorer builds the legacy table by
   truth leg (the chunk ranges are by address, so all legs of an address are in one chunk).
 - **OA-TRK-297** The fusion layer records where a bucket's work goes and what its work limit leaves out: the
-  tracks predicted for association, the coarse window width, the anonymous plots never gated because the
-  limit was reached, the initiation tests and candidates alive at most, and (apart from the counters, in
+  tracks predicted for association, the coarse window width, the anonymous plots deferred when gating
+  reached a limit, the initiation tests and candidates alive at most, and (apart from the counters, in
   `FusionTimers`) the wall time of each stage. None of it is read back by the layer.
 - **OA-TRK-307** Proved (Kani, `fixed_map_agrees_with_a_reference_model_2_slots`): `FixedMap` agrees with a
   reference list through any sequence of insert, get, remove and retain: no key is lost or duplicated, `len`
@@ -3998,10 +3998,10 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   buckets processed. They are counters only (the layer reads no clock, RULESET B2); none is read back.
 - **OA-TRK-298** WITHDRAWN: proximity-based candidate merging and cancellation conflicts with E7.
   Replaced by OA-TRK-323 and OA-TRK-324; anonymous hypotheses stay separate and visibly unidentified.
-- **OA-TRK-299** A plot the bucket's work limit left ungated is deferred: it is not unassigned, so it starts
-  no candidate and joins none, and `anon_plots_ungated` counts it. The association loop starts at a plot that
-  depends deterministically on the bucket and the radar, so the plots left out are not always the same
-  sector of the scan; when nothing is cut the result does not depend on where the loop started.
+- **OA-TRK-299** A plot whose gates never ran, or were cut short without finding a match, is deferred
+  and counted by `anon_plots_ungated`. It can neither start nor join an anonymous candidate. The
+  association loop starts at a plot that depends deterministically on the bucket and radar, spreading
+  deferred work around the scan. When gating completes, the result is independent of that starting point.
 - **OA-TRK-300** The coarse window of an association is per track: a track whose window (the coarse
   margin plus eight standard deviations) is above the standard search radius is on a wide list of fixed
   capacity that every plot also tests, and the grid is searched at the standard radius, so one uncertain
