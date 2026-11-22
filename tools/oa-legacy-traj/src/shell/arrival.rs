@@ -722,10 +722,7 @@ fn note_assignment_pair(
     assigned: Option<ArrivalScore>,
 ) {
     totals.assigned_altitude_pair_eligible += 1;
-    for i in 0..3 {
-        let Some(pair) = totals.assigned_altitude_pairs.get_mut(i) else {
-            continue;
-        };
+    for (i, pair) in totals.assigned_altitude_pairs.iter_mut().enumerate() {
         let before = assignment_free.and_then(|score| score.forecast.get(i)?.vertical_error_ft);
         let after = assigned.and_then(|score| score.forecast.get(i)?.vertical_error_ft);
         if before.is_none() {
@@ -1068,7 +1065,7 @@ pub(crate) fn report(
     .map_err(|e| e.to_string())?;
     writeln!(
         text,
-        "Assigned-altitude paired vertical diagnostic: admitted simple assignments only; denominator is {} issues. Each horizon compares only issues with vertical scores on both forecasts; missing score counts are shown by side.",
+        "Paired vertical scoring uses {} issues with an admitted simple assignment. Each horizon pairs issues with vertical scores from both forecasts and counts missing scores for each forecast.",
         totals.assigned_altitude_pair_eligible
     )
     .map_err(|e| e.to_string())?;
@@ -1089,7 +1086,7 @@ pub(crate) fn report(
         );
         writeln!(
             text,
-            "{mins} min paired ({paired} matched): {free}; {assigned}; improved {}; worsened {}; tied {}; missing assignment-free score {}; missing assigned score {}",
+            "{mins} min paired ({paired} matched)\n  {free}\n  {assigned}\n  improved {}, worsened {}, tied {}, missing assignment-free score {}, missing assigned score {}",
             pair.improved,
             pair.worsened,
             pair.tied,
