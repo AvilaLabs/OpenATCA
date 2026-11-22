@@ -1833,6 +1833,39 @@ fn raw_only_archive_uses_the_latest_time_in_the_batch_and_recorded_counts_future
 
 // REQ: OA-DSP-072
 #[test]
+fn raw_only_recorded_receipt_clock_regression_refuses_the_picture() {
+    let dir = tmp("raw-replay-clock-regression");
+    let (snap, _) = write_inputs(&dir);
+    let start = T0 + 9 * S;
+    let clip = dir.join("clock-regression.oaf");
+    let frames = [
+        raw_message(start, start, 0xA00001, ORD.1),
+        raw_message(start + S, start + S, 0xA00002, ORD.1),
+        raw_message(start + S / 2, start + S / 2, 0xA00003, ORD.1),
+    ];
+    std::fs::write(&clip, frames.concat()).unwrap();
+    let recorded = dir.join("recorded");
+    let (result, _) = run_text(&raw_cli_args(&snap, &clip, &recorded, "recorded"));
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("1 recorded receipt clock regressions"),
+        "{error}"
+    );
+    assert!(!recorded.exists());
+
+    let archive = dir.join("archive");
+    let (result, said) = run_text(&raw_cli_args(
+        &snap,
+        &clip,
+        &archive,
+        "archive-reconstructed",
+    ));
+    assert!(result.is_ok(), "{said}");
+    assert_eq!(raw_hashes(&archive).len(), 4);
+}
+
+// REQ: OA-DSP-072
+#[test]
 fn raw_only_cli_returns_loss_for_a_contradictory_latest_observation() {
     let dir = tmp("raw-replay-conflict");
     let (snap, _) = write_inputs(&dir);

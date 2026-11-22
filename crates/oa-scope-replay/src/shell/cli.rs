@@ -818,11 +818,20 @@ fn raw_history(
     // One extra byte distinguishes an exact-limit file from one that grew past the bound.
     let mut input = file.take(MAX_RAW_CLIP_BYTES + 1);
     let mut scratch = Reports::default();
+    let mut latest_receipt = None;
+    let mut receipt_regressions = 0u64;
     let damaged = oa_feed::read_frames(&mut input, &mut |frame| {
         if oa_sealed::in_sealed_window(frame.recv_unix_ns) {
             history.sealed_frames = history.sealed_frames.saturating_add(1);
             oa_sealed::note_window_drops(1);
             return;
+        }
+        if mode == RawReceiptMode::Recorded {
+            if latest_receipt.is_some_and(|latest| frame.recv_unix_ns < latest) {
+                receipt_regressions = receipt_regressions.saturating_add(1);
+                return;
+            }
+            latest_receipt = Some(frame.recv_unix_ns);
         }
         let message = frame.kind == oa_feed::Kind::Message;
         let frame_outside = if message {
@@ -911,6 +920,11 @@ fn raw_history(
         return Err(CliError::Failed(format!(
             "{} exceeded the raw-only input limit of {MAX_RAW_CLIP_BYTES} bytes while reading",
             path.display()
+        )));
+    }
+    if receipt_regressions > 0 {
+        return Err(CliError::Failed(format!(
+            "raw clip has {receipt_regressions} recorded receipt clock regressions"
         )));
     }
     if capacity_refused > 0 {

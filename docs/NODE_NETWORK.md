@@ -273,7 +273,8 @@ The offline `oa-scope-replay --raw-only` command requires a receipt basis. With
 `--raw-receipt archive-reconstructed`, it uses the latest decoded observation time in the
 archive frame as the availability proxy for the whole batch. The report names the basis and
 counts observations still waiting for receipt separately from future-dated observations that
-have already arrived.
+have already arrived. Recorded mode refuses a clip whose receipt clock regresses in stream
+order. Equal receipt timestamps are allowed.
 
 Raw replay accepts regular input files and caps reads at 512 MiB, history at 65,536 rows, and
 rendering work at 32 million history visits. The sealed path and time checks apply in both modes.
