@@ -9,8 +9,9 @@ every one of them reports to and what every display reads from.
 
 There are four nets: conflict alert, MSAW, area proximity warning and approach path monitoring
 (`NetId`, `NETS`). Each reports its state every cycle with `state_report`: running, degraded with a
-reason, the area affected and a count (pairs or tracks not evaluated, say), or unavailable with a
-reason.
+reason, the area affected and a count of affected items (work left unevaluated or input items
+missing, rejected, or altered), or unavailable with a reason. A conflict-alert cycle whose only
+shortfall is a horizontal uncertainty radius held to its cap reports `UNCERTAINTY CAPPED`.
 
 The table, not the net, decides what is shown (`net_status`, `net_statuses`):
 

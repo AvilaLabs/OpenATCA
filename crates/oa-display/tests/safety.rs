@@ -198,6 +198,44 @@ fn every_net_state_that_is_not_running_is_a_banner_line_in_the_alert_colour() {
     assert!(empty(&draw(&scene(&st3, &inh3, &feeds3)).0));
 }
 
+// REQ: OA-DSP-061
+#[test]
+fn capped_uncertainty_is_a_distinct_degraded_banner_from_unavailable() {
+    let (mut states, inh, feeds) = well();
+    state_report(
+        &mut states,
+        NetId::ConflictAlert,
+        NetReport::Degraded {
+            reason: Reason::RadiusCapped,
+            area: Area::Whole,
+            count: 2,
+        },
+        NOW,
+        NOW,
+    )
+    .unwrap();
+    state_report(
+        &mut states,
+        NetId::Msaw,
+        NetReport::Unavailable {
+            reason: Reason::InputMissing,
+        },
+        NOW,
+        NOW,
+    )
+    .unwrap();
+
+    let (list, stats) = draw(&scene(&states, &inh, &feeds));
+    assert_eq!(stats.nets_shown, 2);
+    assert_eq!(
+        texts(&list),
+        [
+            "CONFLICT ALERT DEGRADED: UNCERTAINTY CAPPED, WHOLE, COUNT 2, AGE 0S",
+            "MSAW UNAVAILABLE: INPUT MISSING, AGE 0S",
+        ]
+    );
+}
+
 // REQ: OA-DSP-062
 #[test]
 fn an_inhibition_is_drawn_as_a_labelled_outline_and_the_net_reads_inhibited() {

@@ -84,11 +84,14 @@ fn row_ok(c: &CaConfig, o: &CaTrack) -> bool {
 
 /// Copies the usable rows into `st.obs` in address order. A row with an address another row of the
 /// cycle also has is left out with its twins: which of them is right is not known. A row's 95 %
-/// radius that is not finite, is negative or is above the cap is held to the cap and counted.
-fn load(st: &mut CaState, rows: &[CaTrack], stats: &mut CycleStats) {
+/// radius that is not finite, is negative or is above the cap is held to the cap and counted. The
+/// return value counts only finite radii above the cap, so the report can distinguish them from an
+/// unusable radius without adding a field to the public cycle statistics.
+fn load(st: &mut CaState, rows: &[CaTrack], stats: &mut CycleStats) -> u64 {
     st.scratch.clear();
     st.obs.clear();
     let cap = st.cfg.r95_cap_m;
+    let mut above_cap = 0;
     for o in rows {
         if !row_ok(&st.cfg, o) {
             stats.rows_bad += 1;
@@ -98,6 +101,9 @@ fn load(st: &mut CaState, rows: &[CaTrack], stats: &mut CycleStats) {
             let mut o = *o;
             let r = f64::from(o.r95_m);
             if !(r.is_finite() && (0.0..=cap).contains(&r)) {
+                if r.is_finite() && r > cap {
+                    above_cap += 1;
+                }
                 o.r95_m = cap as f32;
                 stats.r95_clamped += 1;
             }
@@ -123,6 +129,7 @@ fn load(st: &mut CaState, rows: &[CaTrack], stats: &mut CycleStats) {
         a = b;
     }
     stats.tracks = st.obs.len() as u64;
+    above_cap
 }
 
 /// True if a row with this address is in the cycle's loaded rows (they are in address order).
@@ -439,11 +446,26 @@ fn shortfalls(s: &CycleStats) -> (u64, u64) {
     (work, input)
 }
 
+/// True when finite radii above the cap are the only input shortfall for this cycle.
+fn radius_capping_only(s: &CycleStats, above_cap: u64) -> bool {
+    above_cap > 0
+        && s.r95_clamped == above_cap
+        && s.rows_bad + s.rows_duplicate + s.rows_high_lat + s.rows_lost_upstream == 0
+}
+
 /// The net's report for a cycle (M5 rules 1 and 5): running when everything was evaluated;
 /// degraded otherwise. The count is every shortfall of the cycle, work and input together (the
 /// state table holds one reason, so it is the work's when there is any work left undone, else the
-/// input's; [`CycleOut`] carries the two counts apart).
+/// input's; [`CycleOut`] carries the two counts apart). Aggregate statistics alone cannot separate
+/// finite over-cap radii from unusable radii, so this helper uses the generic input reason for
+/// either; [`ca_cycle`] retains that distinction for its own report.
 pub fn net_report_of(s: &CycleStats) -> NetReport {
+    net_report_with_radius_cap(s, 0)
+}
+
+/// The cycle also knows how many of its held radii were finite and exceeded the configured cap;
+/// that detail is kept out of the public aggregate statistics, so only `ca_cycle` passes it here.
+fn net_report_with_radius_cap(s: &CycleStats, above_cap: u64) -> NetReport {
     let (work, input) = shortfalls(s);
     if work > 0 {
         NetReport::Degraded {
@@ -453,7 +475,11 @@ pub fn net_report_of(s: &CycleStats) -> NetReport {
         }
     } else if input > 0 {
         NetReport::Degraded {
-            reason: Reason::InputMissing,
+            reason: if radius_capping_only(s, above_cap) {
+                Reason::RadiusCapped
+            } else {
+                Reason::InputMissing
+            },
             area: Area::Whole,
             count: sat32(input),
         }
@@ -510,7 +536,7 @@ pub fn ca_cycle(
     st.last_ns = t_ns;
     stats.cycles = 1;
     stats.rows_lost_upstream = core::mem::take(&mut st.lost_input);
-    load(st, rows, &mut stats);
+    let above_cap = load(st, rows, &mut stats);
     grid_build(st);
     // Rows above the latitude the cell search is shown for are used and counted.
     stats.rows_high_lat = st
@@ -587,7 +613,7 @@ pub fn ca_cycle(
             true
         }
     });
-    let report = net_report_of(&stats);
+    let report = net_report_with_radius_cap(&stats, above_cap);
     let (work_short, input_short) = shortfalls(&stats);
     publish(net, report, t_ns, &mut stats);
     add(&mut st.totals, &stats);

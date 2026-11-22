@@ -71,6 +71,9 @@ pub enum Reason {
     /// Suppressions on the net were lost because the suppressed-alert log was full: what an
     /// inhibition hid is no longer fully recorded. Set by the table, not by a net.
     SuppressionLogFull = 10,
+    /// A track's horizontal uncertainty radius was invalid or exceeded the configured cap and was
+    /// held to that cap.
+    RadiusCapped = 11,
 }
 
 /// The text of a reason: at most 20 characters, so that the longest banner line fits its buffer.
@@ -86,6 +89,7 @@ pub fn reason_text(r: Reason) -> &'static str {
         Reason::NeverReported => "NEVER REPORTED",
         Reason::TimeInconsistent => "STATE DATED AHEAD",
         Reason::SuppressionLogFull => "SUPPRESSION LOG FULL",
+        Reason::RadiusCapped => "UNCERTAINTY CAPPED",
     }
 }
 
@@ -101,8 +105,8 @@ pub enum Area {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetReport {
     Running,
-    /// Running with reduced coverage: why, where, and how many items (pairs, tracks) were not
-    /// evaluated.
+    /// Running with a shortfall: reason, area, and count of affected items. The count may be work
+    /// left unevaluated or input items that were missing, rejected, or altered.
     Degraded {
         reason: Reason,
         area: Area,

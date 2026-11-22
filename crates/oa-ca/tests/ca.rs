@@ -246,7 +246,102 @@ fn a_poor_track_widens_the_horizontal_minimum_by_its_95_percent_radius() {
     let mut r = rig();
     let out = step(&mut r, 0, &[a, b]);
     assert_eq!(out.stats.r95_clamped, 1);
+    assert!(matches!(
+        out.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            count: 1,
+            ..
+        }
+    ));
     assert_eq!(ca_open_len(&r.st), 1);
+}
+
+// REQ: OA-CA-004
+#[test]
+fn radius_capping_alone_is_reported_without_suppressing_healthy_pair_evaluation() {
+    // Two independent head-on pairs: one healthy pair and one with a radius above the configured
+    // cap. The rows remain usable, the healthy pair is still evaluated, and only the cap is
+    // counted as the input shortfall.
+    let mut rows = [
+        trk(1, -20_000.0, 0.0, 200.0, 0.0, 10_000.0),
+        trk(2, 20_000.0, 0.0, -200.0, 0.0, 10_000.0),
+        trk(3, 80_000.0, 0.0, 200.0, 0.0, 10_000.0),
+        trk(4, 120_000.0, 0.0, -200.0, 0.0, 10_000.0),
+    ];
+    rows[2].r95_m = 30_000.0;
+
+    let mut r = rig();
+    let out = step(&mut r, 0, &rows);
+    assert_eq!(out.stats.r95_clamped, 1);
+    assert_eq!((out.work_short, out.input_short), (0, 1));
+    assert_eq!(out.stats.not_evaluated, 0);
+    assert!(matches!(
+        out.report,
+        NetReport::Degraded {
+            reason: Reason::RadiusCapped,
+            area: oa_safety::net::Area::Whole,
+            count: 1,
+        }
+    ));
+    let healthy = ca_open(&r.st)
+        .iter()
+        .find(|a| a.addr_a == 1 && a.addr_b == 2)
+        .expect("healthy pair remains evaluated");
+    let capped = ca_open(&r.st)
+        .iter()
+        .find(|a| a.addr_a == 3 && a.addr_b == 4)
+        .expect("capped pair remains evaluated");
+    assert_eq!(healthy.h_eff_m, 5_000.0);
+    assert_eq!(
+        capped.h_eff_m, 25_000.0,
+        "the configured 20 km cap is applied"
+    );
+
+    // A cap combined with actual upstream loss keeps the generic missing-input reason.
+    let mut mixed = rig();
+    ca_note_lost_input(&mut mixed.st, 1);
+    let out = step(&mut mixed, 0, &rows);
+    assert_eq!(out.input_short, 2);
+    assert!(matches!(
+        out.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            count: 2,
+            ..
+        }
+    ));
+
+    // A finite over-cap radius mixed with an unusable one is also generic input missing.
+    let mut cap_and_invalid = rows;
+    cap_and_invalid[0].r95_m = f32::NAN;
+    let mut mixed = rig();
+    let out = step(&mut mixed, 0, &cap_and_invalid);
+    assert_eq!(out.stats.r95_clamped, 2);
+    assert_eq!(out.input_short, 2);
+    assert!(matches!(
+        out.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            count: 2,
+            ..
+        }
+    ));
+
+    // Work shortfalls retain their higher-priority reason when radius capping is also present.
+    let report = net_report_of(&CycleStats {
+        r95_clamped: 1,
+        not_evaluated: 2,
+        ..CycleStats::default()
+    });
+    assert!(matches!(
+        report,
+        NetReport::Degraded {
+            reason: Reason::BudgetExceeded,
+            count: 3,
+            ..
+        }
+    ));
 }
 
 // REQ: OA-CA-005
