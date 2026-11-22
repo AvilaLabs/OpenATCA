@@ -2794,8 +2794,8 @@ fn start_candidate(f: &mut Fusion, radar: usize, addr: u32, m: Measurement, labe
 /// Anonymous candidates keep separate local keys: proximity and Mode A do not establish identity.
 /// Returns the key and the time of the decision when a track was made.
 fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Option<(u32, i64)> {
-    let key = if c.addr != NO_ADDR {
-        c.addr
+    let (key, serial) = if c.addr != NO_ADDR {
+        (c.addr, None)
     } else {
         let Some((serial, key)) = f
             .next_serial
@@ -2806,11 +2806,9 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
             f.stats.track_refused += 1;
             return None;
         };
-        f.next_serial = serial;
-        key
+        (key, Some(serial))
     };
     let n = usize::from(c.n);
-    f.stats.cand_confirmed += 1;
     let before = tracker_stats(&f.tracker).capacity_refused;
     // The plots are replayed into a scratch table and only rows at or after the confirming
     // plot go to the real output: nothing, not even a retroactive tick, precedes the decision.
@@ -2822,6 +2820,21 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
         };
         m.addr = key;
         tracker_update(&mut f.tracker, &m, &mut f.scratch);
+    }
+    let capacity_refused = tracker_stats(&f.tracker).capacity_refused > before;
+    if !tracker_has_key(&f.tracker, key) {
+        if capacity_refused {
+            f.stats.track_refused += 1;
+        }
+        output_clear(&mut f.scratch);
+        return None;
+    }
+    if let Some(serial) = serial {
+        f.next_serial = serial;
+    }
+    f.stats.cand_confirmed += 1;
+    for i in 0..n {
+        let Some(m) = c.meas.get(i) else { continue };
         let label = c.label.get(i).copied().unwrap_or(NO_ADDR);
         log_assign(f, m.toa_ns, key, label, radar as u8, HOW_INIT);
         note_plot_scan(f, key, radar, m.toa_ns);
@@ -2832,7 +2845,7 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
         c.meas.get(n.saturating_sub(1)).map_or(0, |m| m.toa_ns),
     );
     copy_rows_from(&f.scratch, decision_ns, out);
-    if tracker_stats(&f.tracker).capacity_refused > before {
+    if capacity_refused {
         f.stats.track_refused += 1;
     }
     let first = c.meas.first().map_or(0, |m| m.toa_ns);
@@ -3259,6 +3272,38 @@ mod tests {
         assert_eq!(f.stats.cand_confirmed, confirmed);
         assert_eq!(f.stats.track_refused, 1);
         assert!(!out.addr.contains(&NO_ADDR));
+    }
+
+    // REQ: OA-TRK-084
+    #[test]
+    fn a_radar_candidate_refused_at_track_capacity_emits_no_phantom_track_record() {
+        let mut f = make_fusion_capacity(1);
+        let mut out = output_new(64);
+        tracker_update(&mut f.tracker, &adsb_fix(0xA00001, 0), &mut f.scratch);
+        output_clear(&mut f.scratch);
+        assert!(tracker_has_key(&f.tracker, 0xA00001));
+
+        let mut c = Cand {
+            radar: 0,
+            addr: NO_ADDR,
+            n: 3,
+            first_scan: 0,
+            last_scan: 2,
+            meas: [adsb_fix(7, 0); 4],
+            label: [0xA00002; 4],
+        };
+        for (i, m) in c.meas.iter_mut().take(3).enumerate() {
+            m.toa_ns = i as i64 * NS_PER_S;
+        }
+
+        assert_eq!(confirm(&mut f, 0, &c, &mut out), None);
+        assert_eq!(fusion_radar_tracks(&f).len(), 0);
+        assert_eq!(fusion_stats(&f).cand_confirmed, 0);
+        assert_eq!(fusion_stats(&f).track_refused, 1);
+        assert!(fusion_assign_log(&f).key.is_empty());
+        assert!(out.addr.is_empty());
+        assert_eq!(f.next_serial, 0);
+        assert_eq!(tracker_live(&f.tracker).len(), 1);
     }
 
     fn easting(lines: &[Line]) -> Vec<Line> {
