@@ -1378,6 +1378,9 @@ fn restart_after_wall_clock_step_back_keeps_file_replay_order_across_utc_day() {
         );
         recorder.finish().unwrap();
     }
+    // A directory with a recording-shaped name cannot set the segment watermark.
+    let lookalike = dir.join("clock-20231116T001320Z-9999.oaf");
+    std::fs::create_dir(&lookalike).unwrap();
     {
         let mut recorder = Recorder::open(&dir, "clock", 1, u64::MAX, Format::Raw).unwrap();
         assert_eq!(
@@ -1388,6 +1391,7 @@ fn restart_after_wall_clock_step_back_keeps_file_replay_order_across_utc_day() {
         );
         recorder.finish().unwrap();
     }
+    std::fs::remove_dir(lookalike).unwrap();
 
     let names = files_in(&dir);
     assert_eq!(

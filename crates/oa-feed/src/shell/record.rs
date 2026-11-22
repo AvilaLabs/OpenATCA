@@ -565,13 +565,19 @@ fn existing_recording_state(
         }
         entries += 1;
         let entry = entry?;
-        if is_recording(&entry.path()) {
-            total = total.saturating_add(entry.metadata()?.len());
-            if let Some(candidate) = recording_name_watermark(&entry.path(), feed) {
-                if last_file_name.as_ref().is_none_or(|last| &candidate > last) {
-                    last_file_name = Some(candidate);
-                }
-            }
+        let path = entry.path();
+        if !is_recording(&path) {
+            continue;
+        }
+        let metadata = entry.metadata()?;
+        total = total.saturating_add(metadata.len());
+        if !metadata.is_file() {
+            continue;
+        }
+        if let Some(candidate) = recording_name_watermark(&path, feed)
+            .filter(|candidate| last_file_name.as_ref().is_none_or(|last| candidate > last))
+        {
+            last_file_name = Some(candidate);
         }
     }
     Ok(ExistingRecordingState {
