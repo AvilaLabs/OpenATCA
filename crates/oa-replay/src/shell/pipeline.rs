@@ -513,8 +513,8 @@ pub fn replay_hash(p: &Pipeline) -> Digest {
 /// made a time-domain decision, the tag `OADM1` and the decision counts, the decision log and
 /// each feed's reference) and the cadence state (the next checkpoint time and
 /// the next sweep time of the flight, ADS-B and TFMS tables), integers as eight little-endian
-/// bytes and flags as one byte. Two pipelines with equal digests behave alike on any further
-/// input; equal [`replay_hash`] alone does not say so, as a held candidate step changes what the
+/// bytes and flags as one byte. Two pipelines with equal digests under the same settings behave
+/// alike on further input. A held candidate step changes what the
 /// next frames do without changing a table. The digest also covers the basis of each NOTAM
 /// tombstone's time ([`fns_tomb_basis_into`]).
 pub fn replay_state_digest(p: &Pipeline) -> Digest {

@@ -440,14 +440,14 @@ fn settings_precondition_binds_effective_config_but_not_read_chunk_size() {
     let (frames, input, state) = fingerprint_witness(&err, &out);
     let frames = frames.to_string();
 
-    // The old witness still matches if only checkpoint cadence changes for this one-frame clip.
+    // The old witness still matches if only the active-flight age setting changes on this one-frame clip.
     let (code, changed_out, changed_err) = run_bin(&[
         "--verify-end",
         &frames,
         &input,
         &state,
-        "--checkpoint-secs",
-        "17",
+        "--active-age-secs",
+        "3600",
         "--sfdps",
         clip.to_str().unwrap(),
     ]);
@@ -463,8 +463,8 @@ fn settings_precondition_binds_effective_config_but_not_read_chunk_size() {
         &state,
         "--verify-settings",
         &settings,
-        "--checkpoint-secs",
-        "17",
+        "--active-age-secs",
+        "3600",
         "--sfdps",
         missing.to_str().unwrap(),
     ]);
