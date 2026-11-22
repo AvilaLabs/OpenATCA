@@ -1985,6 +1985,10 @@ fn raw_only_cli_returns_loss_for_a_contradictory_latest_observation() {
         "{said}"
     );
     assert!(said.contains("0 targets drawn"), "{said}");
+    assert!(
+        said.contains("4 frames without fresh raw positions"),
+        "{said}"
+    );
     assert_eq!(raw_hashes(&out).len(), 4);
 }
 
@@ -2010,6 +2014,10 @@ fn raw_only_cli_counts_each_full_target_set_refusal_as_loss_once() {
     assert!(matches!(result, Err(cli::CliError::Loss(_))), "{said}");
     assert!(said.contains("4 targets drawn"), "{said}");
     assert!(said.contains("4 refused targets"), "{said}");
+    assert!(
+        said.contains("0 frames without fresh raw positions"),
+        "{said}"
+    );
     assert!(
         said.contains("loss     4 refused or unavailable raw-only work items"),
         "{said}"

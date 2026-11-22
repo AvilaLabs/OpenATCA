@@ -1045,6 +1045,7 @@ mod closed_segment_sync_tests {
     };
     use std::fs;
     use std::io::{self, Write};
+    use std::os::unix::process::ExitStatusExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1305,6 +1306,8 @@ mod closed_segment_sync_tests {
         frame
     }
 
+    const FILE_SYNC_RETURNED: &[u8] = b"file sync returned; directory sync not entered";
+
     fn pause_after_file_sync(dir: &Path) {
         use std::fs::OpenOptions;
 
@@ -1315,13 +1318,13 @@ mod closed_segment_sync_tests {
             Ok(Box::new(super::SyncingFile(file)) as Box<dyn SyncingWriter>)
         });
         let directory: DirectorySyncer = Box::new(move || {
-            fs::write(
-                &checkpoint,
-                b"file sync returned; directory sync not entered",
-            )?;
-            loop {
-                thread::sleep(Duration::from_secs(1));
-            }
+            fs::write(&checkpoint, FILE_SYNC_RETURNED)?;
+            // Allow time for the parent to kill us. If it disappears, the child still exits.
+            thread::sleep(Duration::from_secs(15));
+            Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "parent did not interrupt the directory-sync boundary",
+            ))
         });
         let mut recorder = Recorder::open_sync_closed_segments_with_hooks(
             dir,
@@ -1366,7 +1369,7 @@ mod closed_segment_sync_tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut checkpoint_seen = false;
         while Instant::now() < deadline {
-            if checkpoint.exists() {
+            if fs::read(&checkpoint).is_ok_and(|bytes| bytes == FILE_SYNC_RETURNED) {
                 checkpoint_seen = true;
                 break;
             }
@@ -1377,18 +1380,16 @@ mod closed_segment_sync_tests {
         }
         let _ = child.kill();
         let status = child.wait().unwrap();
-        assert!(
-            !status.success(),
-            "child must be killed in the sync boundary"
+        assert_eq!(
+            status.signal(),
+            Some(9),
+            "child must be killed at the boundary"
         );
         assert!(
             checkpoint_seen,
             "child did not reach the post-file-sync hook"
         );
-        assert_eq!(
-            fs::read(&checkpoint).unwrap(),
-            b"file sync returned; directory sync not entered"
-        );
+        assert_eq!(fs::read(&checkpoint).unwrap(), FILE_SYNC_RETURNED);
         assert!(
             !completed.exists(),
             "directory sync must not report completion after process kill"
@@ -1399,6 +1400,7 @@ mod closed_segment_sync_tests {
             .map(|entry| entry.unwrap().path())
             .find(|path| path.extension().is_some_and(|ext| ext == "oaf"))
             .unwrap();
+        assert_eq!(fs::read(&first).unwrap(), one_raw_frame());
         let report = crate::replay::replay_sources(vec![fs::File::open(&first).unwrap()]).unwrap();
         assert_eq!(report.health.frames, 1);
         assert!(report.errors.is_empty());
@@ -1438,9 +1440,11 @@ mod closed_segment_sync_tests {
             .filter(|name| name.ends_with(".oaf"))
             .collect();
         names.sort();
-        assert_eq!(names.len(), 2);
-        assert!(names[0].ends_with("-0001.oaf"), "{names:?}");
-        assert!(names[1].ends_with("-0002.oaf"), "{names:?}");
+        let [first, second] = names.as_slice() else {
+            panic!("expected the previous and restarted segments, got {names:?}");
+        };
+        assert!(first.ends_with("-0001.oaf"), "{names:?}");
+        assert!(second.ends_with("-0002.oaf"), "{names:?}");
         let _ = fs::remove_dir_all(dir);
     }
 }
