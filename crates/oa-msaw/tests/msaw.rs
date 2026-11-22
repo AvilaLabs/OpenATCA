@@ -2376,7 +2376,7 @@ fn resilience_linear_descent_sweep_matches_warning_and_lookahead_edges() {
                 "t={crossing_s}"
             );
             assert!(
-                (alert.ttv_min_s - crossing_s).abs() < 0.01,
+                (f64::from(alert.ttv_min_s) - crossing_s).abs() < 0.01,
                 "t={crossing_s}: {}",
                 alert.ttv_min_s
             );
