@@ -785,9 +785,49 @@ impl Sealed {
         Ok(file)
     }
 
+    /// Opens a regular input file and returns the size of the verified descriptor. On supported
+    /// Linux targets, opening a FIFO is nonblocking so it can be refused before a read.
+    pub fn open_regular(&self, path: &Path) -> io::Result<(File, u64)> {
+        self.check(path).map_err(|r| io::Error::other(r.why))?;
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
+        let file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            // asm-generic/fcntl.h defines O_NONBLOCK this way on x86-64 and AArch64.
+            const O_NONBLOCK: i32 = 0o4000;
+            // seal-allow: guard checks the path above and verifies the nonblocking descriptor below
+            fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(O_NONBLOCK)
+                .open(path)?
+        };
+        #[cfg(not(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )))]
+        let file = {
+            // seal-allow: precheck the type of the already guarded path before a platform open
+            if !fs::metadata(path)?.is_file() {
+                return Err(io::Error::other("input is not a regular file"));
+            }
+            self.open(path)?
+        };
+        let meta = self.verify_open_metadata(path, &file)?;
+        if !meta.is_file() {
+            return Err(io::Error::other("input is not a regular file"));
+        }
+        Ok((file, meta.len()))
+    }
+
     /// Asks the kernel for the real path of an open file and refuses a sealed one. A platform
     /// without `/proc/self/fd` skips this (the check before the open stands).
     pub fn verify_open(&self, path: &Path, file: &File) -> io::Result<()> {
+        self.verify_open_metadata(path, file).map(|_| ())
+    }
+
+    fn verify_open_metadata(&self, path: &Path, file: &File) -> io::Result<fs::Metadata> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
         // A regular file with more than one name is refused: a hard link under a neutral name
@@ -810,7 +850,7 @@ impl Sealed {
             self.check_resolved(path, &real, false)
                 .map_err(|r| io::Error::other(r.why))?;
         }
-        Ok(())
+        Ok(m)
     }
 }
 
@@ -837,6 +877,11 @@ pub fn refuse_io(path: &Path) -> io::Result<()> {
 /// opened file.
 pub fn open(path: &Path) -> io::Result<File> {
     Sealed::production().open(path)
+}
+
+/// Production opener for a bounded regular-file input. Returns the descriptor and its size.
+pub fn open_regular(path: &Path) -> io::Result<(File, u64)> {
+    Sealed::production().open_regular(path)
 }
 
 /// Production read of a whole file through the guard's opener (`fs::read`, guarded).

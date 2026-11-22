@@ -62,7 +62,9 @@ use oa_adsb::{decode_payload_lenient, reports_clear, reports_len, Reports};
 use oa_display::cli::{parse_centre, parse_size};
 use oa_display::project::{MAX_RANGE_NM, MIN_RANGE_NM};
 use oa_display::raster::frame_digest;
-use oa_display::traffic::{TrafficStyle, DEFAULT_STYLE, MAX_LEADER_MIN, MAX_TARGETS, MAX_TRAIL};
+use oa_display::traffic::{
+    traffic_loss, TrafficStyle, DEFAULT_STYLE, MAX_LEADER_MIN, MAX_TARGETS, MAX_TRAIL,
+};
 use oa_sha256::to_hex;
 use oa_track::adsb::{adsb_measurements, AdsbConfig, AdsbStats};
 use oa_track::score::{interval_stats, scoring_config};
@@ -71,7 +73,7 @@ use oa_track::{
     tracker_update, DEFAULT_CONFIG, REFUSE_KINDS, REFUSE_NAMES,
 };
 use std::fmt;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -177,9 +179,7 @@ pub struct ReplayArgs {
     pub overwrite: bool,
     /// Exit zero although work was lost (the report still says so).
     pub allow_loss: bool,
-    /// Explicit independent raw display path; does not construct or consult the tracker.
-    pub raw_only: bool,
-    /// Receipt timestamp provenance declared by the caller for raw-only mode.
+    /// Opt-in independent raw display with caller-declared receipt timestamp provenance.
     pub raw_receipt: Option<RawReceiptMode>,
 }
 
@@ -499,7 +499,6 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
         hashes_only,
         overwrite,
         allow_loss,
-        raw_only,
         raw_receipt,
     })
 }
@@ -740,23 +739,51 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
-// A7.2: cold per-run source history, bounded by MAX_RAW_OBSERVATIONS.
+/// One row of cold raw history, reduced to fields used by the raw display.
+struct ReceivedObservation {
+    received_ns: i64,
+    time_ns: i64,
+    addr: u32,
+    lat: i32,
+    lon: i32,
+    alt: i32,
+    speed: u16,
+    track: u16,
+}
+
+impl ReceivedObservation {
+    fn new(row: oa_adsb::Row, received_ns: i64) -> Self {
+        let alt = if row.flags & oa_adsb::F_GROUND != 0 {
+            oa_display::traffic::NO_ALT
+        } else if row.flags & oa_adsb::F_ALT_GEOM != 0 {
+            row.geom_alt_ft
+        } else {
+            row.baro_alt_ft
+        };
+        Self {
+            received_ns,
+            time_ns: row.time_ns,
+            addr: row.icao,
+            lat: row.lat_e7,
+            lon: row.lon_e7,
+            alt,
+            speed: row.gs_dkt,
+            track: row.track_ddeg,
+        }
+    }
+}
+
+// A7.2: cold per-run source history and counts, bounded by MAX_RAW_OBSERVATIONS.
 #[derive(Default)]
 struct RawHistory {
-    time: Vec<i64>,
-    received: Vec<i64>,
-    addr: Vec<u32>,
-    lat: Vec<i32>,
-    lon: Vec<i32>,
-    alt: Vec<i32>,
-    speed: Vec<u16>,
-    track: Vec<u16>,
+    rows: Vec<ReceivedObservation>,
     sealed_frames: u64,
     refused_frames: u64,
     undecodable: u64,
     status_frames: u64,
     outside: u64,
     damaged_frames: u64,
+    outside_rows: u64,
     decode_records: u64,
     decode_kept: u64,
     decode_dropped: u64,
@@ -764,29 +791,6 @@ struct RawHistory {
     decode_unknown_source: u64,
     decode_bad_measurement: u64,
     decode_reserved: u64,
-}
-
-impl RawHistory {
-    fn push(&mut self, row: oa_adsb::Row, received_ns: i64) {
-        self.time.push(row.time_ns);
-        self.received.push(received_ns);
-        self.addr.push(row.icao);
-        self.lat.push(row.lat_e7);
-        self.lon.push(row.lon_e7);
-        self.alt.push(if row.flags & oa_adsb::F_GROUND != 0 {
-            oa_display::traffic::NO_ALT
-        } else if row.flags & oa_adsb::F_ALT_GEOM != 0 {
-            row.geom_alt_ft
-        } else {
-            row.baro_alt_ft
-        });
-        self.speed.push(row.gs_dkt);
-        self.track.push(row.track_ddeg);
-    }
-
-    fn len(&self) -> usize {
-        self.time.len()
-    }
 }
 
 /// Reads a bounded raw history while retaining each frame's availability time. Archive-reconstructed
@@ -803,26 +807,30 @@ fn raw_history(
         .ok_or_else(|| CliError::Failed("raw history start is outside clock range".into()))?;
     let mut history = RawHistory::default();
     let mut capacity_refused = 0u64;
-    let mut file =
-        oa_sealed::open(path).map_err(|e| failed(&format!("read {}", path.display()), e))?;
-    let bytes = file
-        .metadata()
-        .map_err(|e| failed(&format!("stat {}", path.display()), e))?
-        .len();
-    if bytes > MAX_RAW_CLIP_BYTES {
+    let (file, size) = oa_sealed::open_regular(path)
+        .map_err(|e| failed(&format!("read {}", path.display()), e))?;
+    if size > MAX_RAW_CLIP_BYTES {
         return Err(CliError::Failed(format!(
             "{} exceeds the raw-only input limit of {MAX_RAW_CLIP_BYTES} bytes",
             path.display()
         )));
     }
+    // One extra byte distinguishes an exact-limit file from one that grew past the bound.
+    let mut input = file.take(MAX_RAW_CLIP_BYTES + 1);
     let mut scratch = Reports::default();
-    let damaged = oa_feed::read_frames(&mut file, &mut |frame| {
+    let damaged = oa_feed::read_frames(&mut input, &mut |frame| {
         if oa_sealed::in_sealed_window(frame.recv_unix_ns) {
             history.sealed_frames = history.sealed_frames.saturating_add(1);
             oa_sealed::note_window_drops(1);
             return;
         }
-        if frame.recv_unix_ns > end_ns {
+        let message = frame.kind == oa_feed::Kind::Message;
+        let frame_outside = if message {
+            mode == RawReceiptMode::Recorded && frame.recv_unix_ns > end_ns
+        } else {
+            !(earliest..=end_ns).contains(&frame.recv_unix_ns)
+        };
+        if frame_outside {
             history.outside = history.outside.saturating_add(1);
             return;
         }
@@ -845,6 +853,22 @@ fn raw_history(
                 return;
             }
         };
+        // Match the tracker loader's frame-level row seal: a sealed row drops the whole payload.
+        if (0..reports_len(&scratch)).any(|i| {
+            oa_adsb::reports_row(&scratch, i)
+                .is_some_and(|row| oa_sealed::in_sealed_window(row.time_ns))
+        }) {
+            history.sealed_frames = history.sealed_frames.saturating_add(1);
+            oa_sealed::note_window_drops(reports_len(&scratch).max(1) as u64);
+            return;
+        }
+        history.decode_records += decoded.records as u64;
+        history.decode_kept += decoded.kept as u64;
+        history.decode_dropped += decoded.dropped as u64;
+        history.decode_bad_time += decoded.bad_time as u64;
+        history.decode_unknown_source += decoded.unknown_source as u64;
+        history.decode_bad_measurement += decoded.bad_measurement as u64;
+        history.decode_reserved += decoded.reserved_set as u64;
         let mut received_ns = frame.recv_unix_ns;
         if mode == RawReceiptMode::ArchiveReconstructed {
             let mut latest = None;
@@ -858,51 +882,58 @@ fn raw_history(
             };
             received_ns = proxy;
         }
-        // Match the tracker loader's frame-level row seal: a sealed row drops the whole payload.
-        if (0..reports_len(&scratch)).any(|i| {
-            oa_adsb::reports_row(&scratch, i)
-                .is_some_and(|row| oa_sealed::in_sealed_window(row.time_ns))
-        }) {
-            history.sealed_frames = history.sealed_frames.saturating_add(1);
-            oa_sealed::note_window_drops(reports_len(&scratch).max(1) as u64);
+        if received_ns > end_ns {
+            history.outside = history.outside.saturating_add(1);
+            history.outside_rows += reports_len(&scratch) as u64;
             return;
         }
         let eligible = (0..reports_len(&scratch))
             .filter_map(|i| oa_adsb::reports_row(&scratch, i))
-            .filter(|row| (earliest..=end_ns).contains(&row.time_ns) && received_ns <= end_ns)
+            .filter(|row| (earliest..=end_ns).contains(&row.time_ns))
             .count();
-        if history.len().saturating_add(eligible) > MAX_RAW_OBSERVATIONS {
+        history.outside_rows += reports_len(&scratch).saturating_sub(eligible) as u64;
+        if history.rows.len().saturating_add(eligible) > MAX_RAW_OBSERVATIONS {
             capacity_refused = capacity_refused.saturating_add(1);
             return;
         }
         for i in 0..reports_len(&scratch) {
             if let Some(row) = oa_adsb::reports_row(&scratch, i) {
-                if (earliest..=end_ns).contains(&row.time_ns) && received_ns <= end_ns {
-                    history.push(row, received_ns);
+                if (earliest..=end_ns).contains(&row.time_ns) {
+                    history
+                        .rows
+                        .push(ReceivedObservation::new(row, received_ns));
                 }
             }
         }
-        history.decode_records += decoded.records as u64;
-        history.decode_kept += decoded.kept as u64;
-        history.decode_dropped += decoded.dropped as u64;
-        history.decode_bad_time += decoded.bad_time as u64;
-        history.decode_unknown_source += decoded.unknown_source as u64;
-        history.decode_bad_measurement += decoded.bad_measurement as u64;
-        history.decode_reserved += decoded.reserved_set as u64;
     })
     .map_err(|e| failed(&format!("read {}", path.display()), e))?;
+    if input.limit() == 0 {
+        return Err(CliError::Failed(format!(
+            "{} exceeded the raw-only input limit of {MAX_RAW_CLIP_BYTES} bytes while reading",
+            path.display()
+        )));
+    }
     if capacity_refused > 0 {
         return Err(CliError::Failed(format!(
             "raw history refused {capacity_refused} frame(s) at the {MAX_RAW_OBSERVATIONS}-observation limit; narrow the window"
         )));
     }
     history.damaged_frames = damaged;
-    if history.len() == 0 {
+    if history.rows.is_empty() {
         return Err(CliError::Failed(format!(
-            "{} has no eligible raw observations",
-            path.display()
+            "{} has no eligible raw observations ({} outside the display window, {} sealed frames, {} reject frames, {} undecodable payloads, {} invalid observations, {} damaged frames)",
+            path.display(),
+            history.outside_rows,
+            history.sealed_frames,
+            history.refused_frames,
+            history.undecodable,
+            history.decode_dropped,
+            history.damaged_frames
         )));
     }
+    history
+        .rows
+        .sort_unstable_by_key(|row| (row.addr, row.time_ns));
     Ok(history)
 }
 
@@ -916,7 +947,6 @@ struct RawFrameColumns {
     alt: Vec<i32>,
     speed: Vec<u16>,
     track: Vec<u16>,
-    order: Vec<usize>,
 }
 
 impl RawFrameColumns {
@@ -929,10 +959,9 @@ impl RawFrameColumns {
             alt: Vec::with_capacity(n),
             speed: Vec::with_capacity(n),
             track: Vec::with_capacity(n),
-            order: Vec::with_capacity(n),
         }
     }
-    fn fill(&mut self, history: &RawHistory, as_of_ns: i64) {
+    fn fill(&mut self, history: &RawHistory, as_of_ns: i64) -> u64 {
         self.time.clear();
         self.addr.clear();
         self.lat.clear();
@@ -940,23 +969,21 @@ impl RawFrameColumns {
         self.alt.clear();
         self.speed.clear();
         self.track.clear();
-        self.order.clear();
-        for i in 0..history.len() {
-            if history.received[i] <= as_of_ns && history.time[i] <= as_of_ns {
-                self.order.push(i);
+        let mut later_receipts = 0;
+        for row in &history.rows {
+            if row.received_ns > as_of_ns {
+                later_receipts += 1;
+                continue;
             }
+            self.time.push(row.time_ns);
+            self.addr.push(row.addr);
+            self.lat.push(row.lat);
+            self.lon.push(row.lon);
+            self.alt.push(row.alt);
+            self.speed.push(row.speed);
+            self.track.push(row.track);
         }
-        self.order
-            .sort_unstable_by_key(|&i| (history.addr[i], history.time[i]));
-        for &i in &self.order {
-            self.time.push(history.time[i]);
-            self.addr.push(history.addr[i]);
-            self.lat.push(history.lat[i]);
-            self.lon.push(history.lon[i]);
-            self.alt.push(history.alt[i]);
-            self.speed.push(history.speed[i]);
-            self.track.push(history.track[i]);
-        }
+        later_receipts
     }
     fn columns(&self) -> RawObservationColumns<'_> {
         RawObservationColumns {
@@ -1131,14 +1158,14 @@ fn show_counts(names: &[&str], counts: &[u64]) -> String {
     }
 }
 
-/// `oa-scope-replay`: the whole run; the summary goes to `out`.
+/// Renders the bounded surveillance history and writes aggregate receipt and loss counts.
 fn run_raw_only(
     a: &ReplayArgs,
+    mode: RawReceiptMode,
     model: oa_airspace::model::Model,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
-    let mode = a.raw_receipt.expect("parse_args requires raw receipt mode");
-    let span = i64::try_from(a.frames)
+    let span = i64::try_from(a.frames.saturating_sub(1))
         .ok()
         .and_then(|n| n.checked_mul(a.step_ns))
         .ok_or_else(|| CliError::Failed("raw run span is outside clock range".into()))?;
@@ -1147,7 +1174,7 @@ fn run_raw_only(
         .checked_add(span)
         .ok_or_else(|| CliError::Failed("raw run end is outside clock range".into()))?;
     let history = raw_history(&a.adsb, a.start_ns, end_ns, mode)?;
-    if history.len().saturating_mul(a.frames as usize) > MAX_RAW_FRAME_VISITS {
+    if history.rows.len().saturating_mul(a.frames as usize) > MAX_RAW_FRAME_VISITS {
         return Err(CliError::Failed(format!(
             "raw history × frames exceeds {MAX_RAW_FRAME_VISITS} report visits; narrow the window or reduce frames"
         )));
@@ -1168,7 +1195,7 @@ fn run_raw_only(
     if a.overwrite {
         remove_ours(&a.out_dir)?;
     }
-    let mut columns = RawFrameColumns::with_capacity(history.len());
+    let mut columns = RawFrameColumns::with_capacity(history.rows.len());
     let mut hashes = String::new();
     let mut total = RawRunStats::default();
     for i in 0..a.frames {
@@ -1177,9 +1204,9 @@ fn run_raw_only(
             .and_then(|k| k.checked_mul(a.step_ns))
             .and_then(|d| a.start_ns.checked_add(d))
             .ok_or_else(|| CliError::Failed("raw frame time is outside clock range".into()))?;
-        columns.fill(&history, t_ns);
+        total.later_receipts += columns.fill(&history, t_ns);
         let stamp = stamp_of(t_ns);
-        let (_info, stats) = replay_build_raw(&mut replay, &columns.columns(), t_ns, &stamp)?;
+        let (info, stats) = replay_build_raw(&mut replay, &columns.columns(), t_ns, &stamp)?;
         replay_raster(&mut replay)?;
         let digest = frame_digest(&replay.spec, &replay.buf).map_err(|e| failed("hash", e))?;
         hashes.push_str(&format!("{i:04} {} {}\n", unix_text(t_ns), to_hex(&digest)));
@@ -1194,6 +1221,8 @@ fn run_raw_only(
         total.frames += 1;
         total.observations_seen += stats.observations_in;
         total.targets_admitted += stats.targets_admitted;
+        total.targets_drawn += u64::from(info.traffic.drawn);
+        total.draw_loss += traffic_loss(&info.traffic) + u64::from(info.stamp_clipped);
         total.future_observations += stats.future_observations;
         total.future_only_addresses += stats.future_only_addresses;
         total.stale_addresses += stats.stale_addresses;
@@ -1215,15 +1244,16 @@ fn run_raw_only(
     };
     let _ = writeln!(out, "RAW SURVEILLANCE ONLY; independent raw display; no tracker, ownership, extrapolation, or coast");
     let _ = writeln!(out, "availability {}", provenance);
-    let _ = writeln!(out, "raw      {} source observations retained; {} frames; {} source-frame sealed drops; {} reject frames; {} status frames; {} undecodable payloads; {} out-of-as-of frames", history.len(), total.frames, history.sealed_frames, history.refused_frames, history.status_frames, history.undecodable, history.outside);
+    let _ = writeln!(out, "raw      {} source observations retained; {} frames; {} source-frame sealed drops; {} reject frames; {} status frames; {} undecodable payloads; {} frames outside the receipt window; {} decoded observations outside the display window", history.rows.len(), total.frames, history.sealed_frames, history.refused_frames, history.status_frames, history.undecodable, history.outside, history.outside_rows);
     let _ = writeln!(out, "decode   {} records, {} retained, {} dropped (bad time {}, unknown source {}, bad measurement {}, reserved {}); {} damaged frames", history.decode_records, history.decode_kept, history.decode_dropped, history.decode_bad_time, history.decode_unknown_source, history.decode_bad_measurement, history.decode_reserved, history.damaged_frames);
-    let _ = writeln!(out, "display  totals over {} frames: {} observations considered ({} future at frame time); {} target admissions; {} future-only addresses; {} stale addresses (age > {} s); {} contradictory same-time addresses; {} refused targets; invalid positions {}; unprojectable {}; off-map {}", total.frames, total.observations_seen, total.future_observations, total.targets_admitted, total.future_only_addresses, total.stale_addresses, RAW_STALE_CUTOFF_NS / NS_PER_S, total.conflicts, total.refused, total.invalid_positions, total.unprojectable_positions, total.off_map_positions);
+    let _ = writeln!(out, "display  totals over {} frames: {} observations considered ({} future at frame time); {} observation visits withheld for later receipt; {} target admissions; {} targets drawn; {} draw losses (including target refusal); {} future-only addresses; {} stale addresses (age > {} s); {} contradictory same-time addresses; {} refused targets; invalid positions {}; unprojectable {}; off-map {}", total.frames, total.observations_seen, total.future_observations, total.later_receipts, total.targets_admitted, total.targets_drawn, total.draw_loss, total.future_only_addresses, total.stale_addresses, RAW_STALE_CUTOFF_NS / NS_PER_S, total.conflicts, total.refused, total.invalid_positions, total.unprojectable_positions, total.off_map_positions);
     let _ = writeln!(out, "hashes   {}", hashes_path.display());
     let loss = history.refused_frames
         + history.undecodable
         + history.decode_dropped
         + history.damaged_frames
-        + total.refused
+        + total.draw_loss
+        + total.conflicts
         + total.invalid_positions
         + total.unprojectable_positions;
     if loss == 0 {
@@ -1252,7 +1282,10 @@ fn run_raw_only(
 struct RawRunStats {
     frames: u64,
     observations_seen: u64,
+    later_receipts: u64,
     targets_admitted: u64,
+    targets_drawn: u64,
+    draw_loss: u64,
     future_observations: u64,
     future_only_addresses: u64,
     stale_addresses: u64,
@@ -1287,8 +1320,8 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
     let model = oa_airspace::snapshot::decode(&bytes).map_err(|e| failed("snapshot", e))?;
 
-    if a.raw_only {
-        return run_raw_only(&a, model, out);
+    if let Some(mode) = a.raw_receipt {
+        return run_raw_only(&a, mode, model, out);
     }
 
     // parse_args checked that these fit; they are checked again here, not trusted.

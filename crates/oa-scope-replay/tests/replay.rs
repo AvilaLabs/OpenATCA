@@ -1668,13 +1668,19 @@ fn frame_bytes(kind: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 fn raw_message(frame_time_ns: i64, row_time_ns: i64, addr: u32, lon_e7: i32) -> Vec<u8> {
+    raw_message_rows(frame_time_ns, &[(row_time_ns, addr, lon_e7)])
+}
+
+fn raw_message_rows(frame_time_ns: i64, rows: &[(i64, u32, i32)]) -> Vec<u8> {
     let mut reports = Reports::default();
-    let mut row: Row = ROW_EMPTY;
-    row.time_ns = row_time_ns;
-    row.icao = addr;
-    row.lat_e7 = ORD.0;
-    row.lon_e7 = lon_e7;
-    reports_push(&mut reports, &row);
+    for &(time_ns, icao, lon_e7) in rows {
+        let mut row: Row = ROW_EMPTY;
+        row.time_ns = time_ns;
+        row.icao = icao;
+        row.lat_e7 = ORD.0;
+        row.lon_e7 = lon_e7;
+        reports_push(&mut reports, &row);
+    }
     let mut payload = Vec::new();
     encode_payload(&mut payload, &reports, 0, 1).unwrap();
     let mut frame = vec![0u8; payload.len() + 256];
@@ -1692,6 +1698,32 @@ fn raw_message(frame_time_ns: i64, row_time_ns: i64, addr: u32, lon_e7: i32) -> 
     frame
 }
 
+fn raw_cli_args(
+    snapshot: &std::path::Path,
+    source: &std::path::Path,
+    out: &std::path::Path,
+    provenance: &str,
+) -> Vec<String> {
+    let mut args_out = cli_args(snapshot, source, out, &[]);
+    let start = args_out.iter().position(|v| v == "--start").unwrap();
+    args_out[start + 1] = "1794772809".into();
+    let duration = args_out.iter().position(|v| v == "--duration-s").unwrap();
+    args_out[duration + 1] = "2".into();
+    let step = args_out.iter().position(|v| v == "--step-s").unwrap();
+    args_out[step + 1] = "0.5".into();
+    args_out.extend(args(&["--raw-only", "--raw-receipt", provenance]));
+    args_out
+}
+
+fn raw_hashes(out: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(out.join("hashes.txt"))
+        .unwrap()
+        .lines()
+        .map(|line| line.split(' ').nth(2).unwrap().to_owned())
+        .collect()
+}
+
+// REQ: OA-DSP-072
 #[test]
 fn raw_only_cli_applies_observation_and_declared_receipt_cutoffs() {
     let dir = tmp("replay-raw-receipt");
@@ -1703,37 +1735,28 @@ fn raw_only_cli_applies_observation_and_declared_receipt_cutoffs() {
     bytes.extend_from_slice(&raw_message(b_received, b_time, 0xA00001, ORD.1 + 300_000));
     let clip = dir.join("late.oaf");
     std::fs::write(&clip, bytes).unwrap();
-    let raw_args = |source: &std::path::Path, out: &std::path::Path, provenance: &str| {
-        let mut a = cli_args(&snap, source, out, &[]);
-        let start = a.iter().position(|v| v == "--start").unwrap();
-        a[start + 1] = "1794772809".into();
-        let duration = a.iter().position(|v| v == "--duration-s").unwrap();
-        a[duration + 1] = "2".into();
-        let step = a.iter().position(|v| v == "--step-s").unwrap();
-        a[step + 1] = "0.5".into();
-        a.extend(args(&["--raw-only", "--raw-receipt", provenance]));
-        a
-    };
     let base_clip = dir.join("base.oaf");
     std::fs::write(&base_clip, raw_message(a_time, a_time, 0xA00001, ORD.1)).unwrap();
-    let (base, said) = run_text(&raw_args(&base_clip, &dir.join("base"), "recorded"));
+    let (base, said) = run_text(&raw_cli_args(
+        &snap,
+        &base_clip,
+        &dir.join("base"),
+        "recorded",
+    ));
     assert!(base.is_ok(), "{said}");
-    let (recorded, said) = run_text(&raw_args(&clip, &dir.join("recorded"), "recorded"));
+    let (recorded, said) = run_text(&raw_cli_args(
+        &snap,
+        &clip,
+        &dir.join("recorded"),
+        "recorded",
+    ));
     assert!(recorded.is_ok(), "{said}");
     assert!(
         said.contains("caller-declared recorded OAF frame receipt timestamp"),
         "{said}"
     );
-    let recorded_hashes: Vec<String> = std::fs::read_to_string(dir.join("recorded/hashes.txt"))
-        .unwrap()
-        .lines()
-        .map(|line| line.split(' ').nth(2).unwrap().to_owned())
-        .collect();
-    let base_hashes: Vec<String> = std::fs::read_to_string(dir.join("base/hashes.txt"))
-        .unwrap()
-        .lines()
-        .map(|line| line.split(' ').nth(2).unwrap().to_owned())
-        .collect();
+    let recorded_hashes = raw_hashes(&dir.join("recorded"));
+    let base_hashes = raw_hashes(&dir.join("base"));
     assert_eq!(recorded_hashes[0], base_hashes[0]);
     assert_eq!(recorded_hashes[1], base_hashes[1]);
     assert_eq!(
@@ -1745,24 +1768,137 @@ fn raw_only_cli_applies_observation_and_declared_receipt_cutoffs() {
         "inclusive receipt cutoff admits B exactly at t=10.5"
     );
 
-    let (archive, said) = run_text(&raw_args(
+    let (archive, said) = run_text(&raw_cli_args(
+        &snap,
         &clip,
         &dir.join("archive"),
         "archive-reconstructed",
     ));
     assert!(archive.is_ok(), "{said}");
     assert!(said.contains("maximum row observation time"), "{said}");
-    let archive_hashes: Vec<String> = std::fs::read_to_string(dir.join("archive/hashes.txt"))
-        .unwrap()
-        .lines()
-        .map(|line| line.split(' ').nth(2).unwrap().to_owned())
-        .collect();
+    let archive_hashes = raw_hashes(&dir.join("archive"));
     assert_eq!(archive_hashes[0], base_hashes[0]);
     assert_ne!(
         archive_hashes[1], base_hashes[1],
         "declared archive proxy admits B exactly at the observation boundary t=9.5"
     );
     assert!(said.contains("RAW SURVEILLANCE ONLY"), "{said}");
+}
+
+// REQ: OA-DSP-072
+#[test]
+fn raw_only_archive_uses_the_latest_time_in_the_batch_and_recorded_counts_future_rows() {
+    let dir = tmp("raw-replay-batch");
+    let (snap, _) = write_inputs(&dir);
+    let start = T0 + 9 * S;
+    let base_frame = raw_message(start, start, 0xA00001, ORD.1);
+    let batch = raw_message_rows(
+        start + S / 4,
+        &[
+            (start + S / 2, 0xA00002, ORD.1 + 300_000),
+            (start + S, 0xA00003, ORD.1 - 300_000),
+        ],
+    );
+    let base_clip = dir.join("base.oaf");
+    let clip = dir.join("batch.oaf");
+    std::fs::write(&base_clip, &base_frame).unwrap();
+    std::fs::write(&clip, [base_frame, batch].concat()).unwrap();
+    let base_out = dir.join("base");
+    let recorded_out = dir.join("recorded");
+    let archive_out = dir.join("archive");
+    let (result, said) = run_text(&raw_cli_args(&snap, &base_clip, &base_out, "recorded"));
+    assert!(result.is_ok(), "{said}");
+    let (result, said) = run_text(&raw_cli_args(&snap, &clip, &recorded_out, "recorded"));
+    assert!(result.is_ok(), "{said}");
+    assert!(said.contains("1 future at frame time"), "{said}");
+    let (result, said) = run_text(&raw_cli_args(
+        &snap,
+        &clip,
+        &archive_out,
+        "archive-reconstructed",
+    ));
+    assert!(result.is_ok(), "{said}");
+    assert!(said.contains("0 future at frame time"), "{said}");
+    let base = raw_hashes(&base_out);
+    let recorded = raw_hashes(&recorded_out);
+    let archive = raw_hashes(&archive_out);
+    assert_eq!(
+        base[1], archive[1],
+        "batch still unavailable in archive mode"
+    );
+    assert_ne!(base[1], recorded[1], "first row present in recorded mode");
+    assert_ne!(base[2], archive[2], "batch now available in archive mode");
+    assert_eq!(recorded[2..], archive[2..]);
+}
+
+// REQ: OA-DSP-072
+#[test]
+fn raw_only_cli_returns_loss_for_a_contradictory_latest_observation() {
+    let dir = tmp("raw-replay-conflict");
+    let (snap, _) = write_inputs(&dir);
+    let now = T0 + 9 * S;
+    let clip = dir.join("conflict.oaf");
+    std::fs::write(
+        &clip,
+        raw_message_rows(
+            now,
+            &[(now, 0xA00001, ORD.1), (now, 0xA00001, ORD.1 + 300_000)],
+        ),
+    )
+    .unwrap();
+    let out = dir.join("conflict");
+    let (result, said) = run_text(&raw_cli_args(&snap, &clip, &out, "recorded"));
+    assert!(matches!(result, Err(cli::CliError::Loss(_))), "{said}");
+    assert!(
+        said.contains("4 contradictory same-time addresses"),
+        "{said}"
+    );
+    assert!(said.contains("0 targets drawn"), "{said}");
+    assert_eq!(raw_hashes(&out).len(), 4);
+}
+
+// REQ: OA-DSP-072
+#[test]
+fn raw_only_cli_refuses_an_oversize_clip_before_creating_outputs() {
+    let dir = tmp("raw-replay-oversize");
+    let (snap, _) = write_inputs(&dir);
+    let clip = dir.join("oversize.oaf");
+    std::fs::File::create(&clip)
+        .unwrap()
+        .set_len(cli::MAX_RAW_CLIP_BYTES + 1)
+        .unwrap();
+    let output = dir.join("raw");
+    let (result, _) = run_text(&raw_cli_args(&snap, &clip, &output, "recorded"));
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("raw-only input limit"), "{error}");
+    assert!(!output.exists());
+}
+
+// REQ: OA-DSP-072
+#[test]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn raw_only_cli_refuses_a_fifo_without_a_writer() {
+    let dir = tmp("raw-replay-fifo");
+    let (snap, _) = write_inputs(&dir);
+    let clip = dir.join("pipe.oaf");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&clip)
+        .status()
+        .unwrap()
+        .success());
+    let output = dir.join("raw");
+    let run = std::process::Command::new("timeout")
+        .args(["2", env!("CARGO_BIN_EXE_oa-scope-replay")])
+        .args(raw_cli_args(&snap, &clip, &output, "recorded"))
+        .output()
+        .unwrap();
+    let error = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(run.status.code(), Some(1), "{error}");
+    assert!(error.contains("not a regular file"), "{error}");
+    assert!(!output.exists());
 }
 
 fn run_text(a: &[String]) -> (Result<(), cli::CliError>, String) {

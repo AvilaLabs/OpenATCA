@@ -120,8 +120,9 @@ fn targets() -> Vec<Target> {
 /// The entry points of the guard that open, check or walk paths: a free function of `oa_sealed`
 /// (or one imported from it), or the `Sealed` guard type's constructors and its checking methods.
 /// A `DropReport`, a window test or a drop line does not count: those never look at a path.
-const GUARD_FNS: [&str; 8] = [
+const GUARD_FNS: [&str; 9] = [
     "open",
+    "open_regular",
     "read",
     "read_to_string",
     "refuse",
@@ -284,7 +285,7 @@ const ALLOW: &str = "seal-allow:";
 
 /// The allow comments in the sources the rule covers, pinned exactly: adding one is a decision
 /// made here, not slack in a budget.
-const ALLOW_COUNT: usize = 145;
+const ALLOW_COUNT: usize = 147;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.
