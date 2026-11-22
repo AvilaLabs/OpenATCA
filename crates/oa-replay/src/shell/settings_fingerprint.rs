@@ -77,3 +77,58 @@ pub fn settings_fingerprint(cfg: &PipelineConfig, inputs: &[Input]) -> Option<Di
     }
     Some(hash.finalize())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{settings_fingerprint, FeedKind, Input, PipelineConfig};
+    use std::path::PathBuf;
+
+    #[test]
+    fn ordered_logical_streams_are_bound_independently_of_paths_and_rotation() {
+        let config = PipelineConfig::default();
+        let input = |feed, name, dir| Input {
+            feed,
+            path: PathBuf::from(name),
+            dir,
+        };
+        let expected = settings_fingerprint(
+            &config,
+            &[
+                input(FeedKind::Sfdps, "original.oaf", false),
+                input(FeedKind::Adsb, "raw", true),
+            ],
+        );
+        assert!(expected.is_some());
+        assert_eq!(
+            expected,
+            settings_fingerprint(
+                &config,
+                &[
+                    input(FeedKind::Sfdps, "rotated", true),
+                    input(FeedKind::Adsb, "concatenated.oaf", false),
+                ],
+            )
+        );
+        assert_ne!(
+            expected,
+            settings_fingerprint(
+                &config,
+                &[
+                    input(FeedKind::Adsb, "raw", true),
+                    input(FeedKind::Sfdps, "original.oaf", false),
+                ],
+            )
+        );
+        assert_ne!(
+            expected,
+            settings_fingerprint(
+                &config,
+                &[
+                    input(FeedKind::Sfdps, "original.oaf", false),
+                    input(FeedKind::Adsb, "raw", true),
+                    input(FeedKind::Adsb, "another-stream", true),
+                ],
+            )
+        );
+    }
+}
