@@ -5,6 +5,16 @@ Rules 1 and 2 of `docs/M5_DESIGN.md`. A core crate (`no_std`, no `unsafe`), clas
 `RULESET.md`. The nets themselves live elsewhere (`oa-ca` for conflict alert); this crate is what
 every one of them reports to and what every display reads from.
 
+## Independent monitor slice
+
+`monitor::check_pairs` is a bounded offline core checker for positively and independently paired raw
+observations and track claims (NODE_NETWORK §§7 and 11). The caller supplies age, timestamp-skew,
+rate and tolerance bounds, and marks whether both positions are in one supported local east/north
+frame. The checker compares supplied identity keys but does not establish their provenance, match
+tracks, implement geodesy, select operational thresholds, or run in a live path. Missing, stale,
+invalid, future, identity-mismatched and unsupported evidence is never called healthy; mutation
+results apply only to supplied pairs and their declared bounds.
+
 ## Net state (`net`)
 
 There are four nets: conflict alert, MSAW, area proximity warning and approach path monitoring

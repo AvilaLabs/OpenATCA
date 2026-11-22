@@ -9,6 +9,8 @@
 //!   later than the configured maximum, a reason and an author; it is logged, it expires, and
 //!   every alert it suppresses is recorded (rule 2).
 //! * [`geom`]: the fixed-size polygon an inhibition covers.
+//! * [`monitor`]: a bounded offline checker for independently paired observations and track
+//!   claims (no live wiring or matching).
 //!
 //! No function allocates: every table is a fixed array whose capacity is a named constant with
 //! its reasoning beside it (C1, C2), and no function panics on any input. Times are signed
@@ -20,4 +22,5 @@ compile_error!("the core crates support 64-bit targets only, so that usize is 64
 
 pub mod geom;
 pub mod inhibit;
+pub mod monitor;
 pub mod net;
