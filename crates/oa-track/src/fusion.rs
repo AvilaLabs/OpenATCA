@@ -3256,8 +3256,8 @@ mod tests {
     #[test]
     fn initiation_retires_complete_evidence_after_search_budget_exhaustion() {
         let mut f = make_fusion(|c| c.tracker.max_tracks = 32);
-        // Classification takes one unit; pruning cannot fit in the remaining budget. The
-        // outer reservation must leave enough work to confirm the already-complete candidate.
+        // With four units reserved, classification uses the only search unit. The held credit
+        // has to cover confirmation even though pruning cannot fit in the search budget.
         f.init_work_max = 5;
         let plot = mode_s_plot_at(NO_ADDR, 0, 0);
         let sample = plot_convert(
@@ -3286,8 +3286,9 @@ mod tests {
 
         let _ = run(&mut f, &[mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0)], &[]);
         let st = fusion_stats(&f);
-        assert!(st.init_capped > 0, "{st:?}");
-        assert!(st.init_plots_refused > 0, "{st:?}");
+        assert_eq!(st.init_capped, 1, "{st:?}");
+        assert_eq!(st.init_plots_refused, 1, "{st:?}");
+        assert_eq!(st.init_work, 3, "{st:?}");
         assert_eq!(st.cand_confirmed, 1, "{st:?}");
         assert!(f.cands.is_empty(), "{st:?}");
         let records = fusion_radar_tracks(&f);
