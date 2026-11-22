@@ -12,8 +12,8 @@ use oa_track::fusion::{
     fusion_radar_tracks, fusion_stats, fusion_tracker_config,
 };
 use oa_track::fusion_score::identify_tracks;
-use oa_track::radar::{polar_of, radar_geom, RadarPlot, RadarSite, NONE_CODE};
-use oa_track::{output_new, DEFAULT_CONFIG, NO_ADDR};
+use oa_track::radar::{NONE_CODE, RadarPlot, RadarSite, polar_of, radar_geom};
+use oa_track::{DEFAULT_CONFIG, NO_ADDR, output_new};
 
 const SITE: RadarSite = RadarSite {
     lat_deg: 41.976_940_27,
@@ -104,6 +104,33 @@ fn check_hypotheses(lines: &[Line], expected_hypotheses: usize) {
         score.duplicates as usize,
         expected_hypotheses - expected.len()
     );
+    // Duplicate source-local keys are a scorer count, not evidence that plots changed identity.
+    assert_eq!(score.swaps, 0);
+    assert_eq!(score.wrong_plots, 0);
+    assert_eq!(score.false_tracks, 0);
+}
+
+fn check_single_radar(lines: &[Line]) {
+    let site = SITE;
+    let mut cfg = fusion_config(fusion_tracker_config(&DEFAULT_CONFIG, &[site]));
+    cfg.log_assign = true;
+    let mut fusion = fusion_new(&cfg, &[site]).unwrap();
+    let p = plots(&site, lines);
+    fusion_plots(&mut fusion, 0, &p);
+    let end = 24 * site.period_ns;
+    let mut output = output_new(1 << 16);
+    fusion_advance(&mut fusion, end, &mut output);
+    fusion_finish(&mut fusion, end + site.period_ns, &mut output);
+
+    let keys: Vec<_> = fusion_radar_tracks(&fusion)
+        .iter()
+        .map(|track| track.key)
+        .collect();
+    let score = identify_tracks(fusion_assign_log(&fusion), &keys);
+    assert_eq!(keys.len(), lines.len());
+    assert_eq!(score.duplicates, 0);
+    assert_eq!(score.swaps, 0);
+    assert_eq!(score.wrong_plots, 0);
     assert_eq!(score.false_tracks, 0);
 }
 
@@ -118,6 +145,9 @@ fn one_anonymous_aircraft_confirmed_independently_by_two_radars_reproduces_dupli
         label: 0xA00001,
     }];
     // Each radar's candidate confirms independently; current contract keeps both anonymous keys.
+    // The paired one-radar control has one key and no duplicate; these two keys add a scorer
+    // duplicate while keeping swaps and wrong plots at zero, isolating the E7 source-local case.
+    check_single_radar(&aircraft);
     check_hypotheses(&aircraft, 2);
 }
 
