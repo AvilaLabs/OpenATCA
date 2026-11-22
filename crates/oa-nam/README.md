@@ -294,6 +294,10 @@ most 8 actions. A full table refuses a new message and numbers nothing.
 * `tests/roundtrip.rs`: byte-exact round trip on seeds and 60,000 mutations, arbitrary bytes.
 * `tests/session.rs`: every transition of Figure 3-3, timeouts, numbering and wrap, bookkeeping,
   bounds, the LRM table and the workload figures, wrong-unit refusal, unmatched LRMs.
+* `tests/peer_fixture.rs`: one deterministic offline peer run through encode/parse/framing and
+  `step`, with ten deliberately unanswered FPLs, bounded timeout batches, transport loss and
+  reactivation, a late response, and duplicate/reordered inbound sequence evidence. Its timer
+  values and messages are fixture inputs, not latency or throughput measurements.
 * `tests/review.rs`: the fixes from the independent review: CHG optionality, Field 10, profiles,
   LRM code mapping.
 * Fuzz target `nam` (`fuzz/`, docs/FUZZING.md), seeded with the examples.
