@@ -1959,6 +1959,18 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
                     scan.sealed_window_dropped
                 ),
             ));
+            let refused = &scan.document_refusals;
+            header.push((
+                "assigned-altitude document refusals".to_string(),
+                format!(
+                    "{} oversized message files, {} XML limits, {} other XML parse failures, {} unsupported FIXM roots, {} other FIXM refusals",
+                    refused.oversized_msg_file,
+                    refused.xml_limit,
+                    refused.xml_parse,
+                    refused.unsupported_fixm_root,
+                    refused.other_fixm,
+                ),
+            ));
             header.push((
                 "assigned-altitude records for issue GUFIs".to_string(),
                 format!(

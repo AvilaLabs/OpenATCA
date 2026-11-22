@@ -30,7 +30,7 @@ use oa_sha256::{sha256, sha256_reader, to_hex, Digest, Sha256};
 use crate::assignment::{assignment_query, AssignmentIssue, AssignmentQuery};
 use crate::ingest::{
     ingest_assignment_query, ingest_sfdps, ingest_tbfm, ingest_tfms, new_reader,
-    AssignmentDecodeCounts, Reader,
+    AssignmentDecodeCounts, AssignmentDocumentRefusals, Reader,
 };
 use crate::legacy::{new_legacy, Legacy, Limits, NO_TIME};
 use crate::report::InputHash;
@@ -334,6 +334,7 @@ pub struct AssignmentScan {
     pub query: AssignmentQuery,
     pub frame_errors: u64,
     pub documents_refused: u64,
+    pub document_refusals: AssignmentDocumentRefusals,
     pub messages_rejected: u64,
     pub messages_undecoded: u64,
     pub sealed_window_dropped: u64,
@@ -398,7 +399,8 @@ pub fn scan_sfdps_assignments(
                             NO_TIME,
                         );
                     } else {
-                        counts.documents_refused = counts.documents_refused.saturating_add(1);
+                        let count = &mut counts.document_refusals.oversized_msg_file;
+                        *count = count.saturating_add(1);
                     }
                 }
             }
@@ -417,7 +419,8 @@ pub fn scan_sfdps_assignments(
     Ok(AssignmentScan {
         query,
         frame_errors,
-        documents_refused: counts.documents_refused,
+        documents_refused: counts.document_refusals.total(),
+        document_refusals: counts.document_refusals,
         messages_rejected: counts.messages_rejected,
         messages_undecoded: counts.messages_undecoded,
         sealed_window_dropped: *sealed,

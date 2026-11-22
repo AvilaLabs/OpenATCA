@@ -95,10 +95,30 @@ fn assignment_event(
     })
 }
 
+/// Document refusals during the bounded assignment query, without document contents.
+#[derive(Default)]
+pub struct AssignmentDocumentRefusals {
+    pub oversized_msg_file: u64,
+    pub xml_limit: u64,
+    pub xml_parse: u64,
+    pub unsupported_fixm_root: u64,
+    pub other_fixm: u64,
+}
+
+impl AssignmentDocumentRefusals {
+    pub(crate) fn total(&self) -> u64 {
+        self.oversized_msg_file
+            .saturating_add(self.xml_limit)
+            .saturating_add(self.xml_parse)
+            .saturating_add(self.unsupported_fixm_root)
+            .saturating_add(self.other_fixm)
+    }
+}
+
 // A7.2: one aggregate for the offline assignment pass.
 #[derive(Default)]
 pub(crate) struct AssignmentDecodeCounts {
-    pub documents_refused: u64,
+    pub document_refusals: AssignmentDocumentRefusals,
     pub messages_rejected: u64,
     pub messages_undecoded: u64,
     pub sealed: u64,
@@ -113,13 +133,29 @@ pub(crate) fn ingest_assignment_query(
     received_ms: i64,
 ) {
     clear_events(&mut reader.events);
-    let Ok(doc) = reader.parser.parse(bytes) else {
-        counts.documents_refused = counts.documents_refused.saturating_add(1);
-        return;
+    let doc = match reader.parser.parse(bytes) {
+        Ok(doc) => doc,
+        Err(e) => {
+            let count = if matches!(e, oa_xml::XmlError::Limit { .. }) {
+                &mut counts.document_refusals.xml_limit
+            } else {
+                &mut counts.document_refusals.xml_parse
+            };
+            *count = count.saturating_add(1);
+            return;
+        }
     };
-    let Ok(summary) = reader.fixm.decode_prefix(&doc, bytes, &mut reader.events) else {
-        counts.documents_refused = counts.documents_refused.saturating_add(1);
-        return;
+    let summary = match reader.fixm.decode_prefix(&doc, bytes, &mut reader.events) {
+        Ok(summary) => summary,
+        Err(e) => {
+            let count = if e == oa_fixm::FixmError::UnsupportedRoot {
+                &mut counts.document_refusals.unsupported_fixm_root
+            } else {
+                &mut counts.document_refusals.other_fixm
+            };
+            *count = count.saturating_add(1);
+            return;
+        }
     };
     if summary.sealed_window_dropped > 0 {
         let dropped = u64::from(summary.sealed_window_dropped);
