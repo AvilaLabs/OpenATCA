@@ -2737,13 +2737,13 @@ fn mark_init_capped(f: &mut Fusion, radar: usize) {
     }
 }
 
-/// Appends the rows of `src` at or after `from_ns` to `dst`.
-fn copy_rows_from(src: &TrackOutput, from_ns: i64, dst: &mut TrackOutput) {
+/// Appends the rows of `src` at or after `from_ns` to `dst`, optionally excluding one key.
+fn copy_rows_from(src: &TrackOutput, from_ns: i64, except_key: Option<u32>, dst: &mut TrackOutput) {
     for i in 0..src.t_ns.len() {
         let (Some(&t), Some(&addr)) = (src.t_ns.get(i), src.addr.get(i)) else {
             continue;
         };
-        if t < from_ns {
+        if t < from_ns || except_key == Some(addr) {
             continue;
         }
         let g = |v: &[f32]| v.get(i).copied().unwrap_or(0.0);
@@ -2826,7 +2826,7 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
         if capacity_refused {
             f.stats.track_refused += 1;
         }
-        output_clear(&mut f.scratch);
+        copy_rows_from(&f.scratch, decision_ns, Some(key), out);
         return None;
     }
     if let Some(serial) = serial {
@@ -2844,7 +2844,7 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
         key,
         c.meas.get(n.saturating_sub(1)).map_or(0, |m| m.toa_ns),
     );
-    copy_rows_from(&f.scratch, decision_ns, out);
+    copy_rows_from(&f.scratch, decision_ns, None, out);
     if capacity_refused {
         f.stats.track_refused += 1;
     }
@@ -3280,8 +3280,14 @@ mod tests {
         let mut f = make_fusion_capacity(1);
         let mut out = output_new(64);
         tracker_update(&mut f.tracker, &adsb_fix(0xA00001, 0), &mut f.scratch);
+        tracker_update(
+            &mut f.tracker,
+            &adsb_fix(0xA00001, NS_PER_S),
+            &mut f.scratch,
+        );
         output_clear(&mut f.scratch);
         assert!(tracker_has_key(&f.tracker, 0xA00001));
+        assert!(tracker_is_confirmed(&f.tracker, 0xA00001));
 
         let mut c = Cand {
             radar: 0,
@@ -3292,16 +3298,23 @@ mod tests {
             meas: [adsb_fix(7, 0); 4],
             label: [0xA00002; 4],
         };
-        for (i, m) in c.meas.iter_mut().take(3).enumerate() {
-            m.toa_ns = i as i64 * NS_PER_S;
-        }
+        c.meas[0].toa_ns = 4 * NS_PER_S;
+        c.meas[1].toa_ns = 7 * NS_PER_S;
+        // An out-of-order deciding report makes replay emit eligible ticks while keeping the
+        // decision boundary inside the tracker's supported re-filter window.
+        c.meas[2].toa_ns = 5 * NS_PER_S;
 
         assert_eq!(confirm(&mut f, 0, &c, &mut out), None);
         assert_eq!(fusion_radar_tracks(&f).len(), 0);
         assert_eq!(fusion_stats(&f).cand_confirmed, 0);
         assert_eq!(fusion_stats(&f).track_refused, 1);
         assert!(fusion_assign_log(&f).key.is_empty());
-        assert!(out.addr.is_empty());
+        assert!(out
+            .addr
+            .iter()
+            .zip(&out.t_ns)
+            .all(|(&addr, &t)| addr == 0xA00001 && t >= 5 * NS_PER_S));
+        assert!(out.t_ns.iter().any(|&t| t == 5 * NS_PER_S));
         assert_eq!(f.next_serial, 0);
         assert_eq!(tracker_live(&f.tracker).len(), 1);
     }
