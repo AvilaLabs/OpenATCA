@@ -77,16 +77,27 @@ fn two_sector_offer_accept_timeout_and_stale_duplicate_delivery() {
     assert_eq!(transferred.owner, code("ZMP34"));
     assert_eq!(transferred.ho_state, HO_NONE);
 
-    // A delivery older than the accepted event is refused and cannot roll the record back.
+    // A late acceptance after completion has no pending handoff to accept.
     let stale_accept = handoff(OP_HO_ACCEPT, accepted_key, 3_500, 40);
     assert_eq!(
         flights_apply(&mut table, &stale_accept),
-        Outcome::Refused(R_STALE)
+        Outcome::Refused(R_NO_HANDOFF)
     );
     assert_eq!(
         flight_get(&table, &accepted_key).unwrap().owner,
         code("ZMP34")
     );
+
+    // An old, otherwise valid offer reaches the stamp gate while no handoff is pending and is
+    // refused as stale. It cannot reopen the completed transfer.
+    let stale_offer = handoff(OP_HO_INITIATE, accepted_key, 4_500, 41);
+    assert_eq!(
+        flights_apply(&mut table, &stale_offer),
+        Outcome::Refused(R_STALE)
+    );
+    let still_transferred = flight_get(&table, &accepted_key).unwrap();
+    assert_eq!(still_transferred.owner, code("ZMP34"));
+    assert_eq!(still_transferred.ho_state, HO_NONE);
 
     // The timeout is represented by the existing explicit failure transition. It clears the
     // pending offer while retaining the prior owner; a later accept is refused as no handoff.
@@ -109,11 +120,11 @@ fn two_sector_offer_accept_timeout_and_stale_duplicate_delivery() {
     assert_eq!(table.stats.handoffs_completed, 1);
     assert_eq!(table.stats.handoffs_failed, 1);
     assert_eq!(
-        table.stats.refused[usize::from(OP_HO_ACCEPT) * R_COUNT + usize::from(R_STALE)],
+        table.stats.refused[usize::from(OP_HO_INITIATE) * R_COUNT + usize::from(R_STALE)],
         1
     );
     assert_eq!(
         table.stats.refused[usize::from(OP_HO_ACCEPT) * R_COUNT + usize::from(R_NO_HANDOFF)],
-        1
+        2
     );
 }

@@ -591,6 +591,9 @@ fn enter_inactive(s: &mut Session, a: &mut Actions) {
     s.irs_deadline = None;
     s.trs_deadline = None;
     s.asm = None;
+    // The next ACTIVE exchange is a new numbering context; sequence evidence from the prior
+    // connection must not label its first message as a duplicate or gap.
+    s.rx_last_number = None;
     abandon_pending(s, a);
 }
 

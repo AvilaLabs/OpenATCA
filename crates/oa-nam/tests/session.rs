@@ -364,6 +364,35 @@ fn active_connection_lost_goes_inactive() {
     assert_eq!(a, [Action::AbandonPending { count: 1 }]);
 }
 
+// REQ: OA-NAM-026
+#[test]
+fn reconnect_starts_a_fresh_inbound_sequence_and_abandons_old_requests() {
+    let c = cfg();
+    let (mut s, _) = run(&c, active(&c), Event::Received(rx(Kind::Fpl, 88, None)), 10);
+    assert_eq!(s.rx_last_number, Some(88));
+    let (next, _) = run(&c, s, Event::SendAtm(Kind::Cpl), 11);
+    s = next;
+
+    let (s, a) = run(&c, s, Event::ConnectionLost, 12);
+    assert_eq!(s.state, State::Inactive);
+    assert_eq!(s.rx_last_number, None);
+    assert!(s.pending().is_empty());
+    assert_eq!(a, [Action::AbandonPending { count: 1 }]);
+
+    let (s, a) = run(&c, s, Event::Activate, 20);
+    assert_eq!(a, [Action::SendIrq { number: 2 }]);
+    let (s, _) = run(&c, s, Event::Received(rx(Kind::Irs, 90, Some(2))), 21);
+    let (s, a) = run(&c, s, Event::Received(rx(Kind::Fpl, 88, None)), 22);
+    assert_eq!(s.rx_last_number, Some(88));
+    assert!(matches!(
+        a.as_slice(),
+        [Action::Deliver {
+            seq: Seq::First,
+            ..
+        }]
+    ));
+}
+
 // REQ: OA-NAM-013
 #[test]
 fn deactivating_trs_goes_inactive() {

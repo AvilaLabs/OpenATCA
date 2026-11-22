@@ -193,7 +193,9 @@ disagree. Items 1 to 7 are decisions of the coordinator after an independent rev
     `Profile::EramAttachment2` increments (`Config::for_profile`); an IRS to any of the last eight
     IRQs is accepted either way.
 14. **Connection loss** is not in Figure 3-3. `Event::ConnectionLost` goes to INACTIVE; the shell
-    raises Activate when the connection returns (NAS-IR-82422100 3.2.2.6-c).
+    raises Activate when the connection returns (NAS-IR-82422100 3.2.2.6-c). Pending responses are
+    abandoned and counted, and the inbound sequence baseline resets so the first message on the
+    reconnected session is not compared with a message from the lost connection.
 15. **Response matching.** A LAM answers anything but RTI and POI; an RLA answers an RTI; a PLA
     answers a POI; an LRM answers anything. RTU expects no response (Table B-1).
 16. **Sequence numbers** of received messages are tracked only for messages the session

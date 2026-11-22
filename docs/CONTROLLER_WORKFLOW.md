@@ -14,7 +14,8 @@ Run evidence for the fixture is asserted in
 | Offer to `ZMP34` | Owner stays `ZAU12`; offered | Owner stays `ZAU12`; offered |
 | Receiving sector accepts | Owner stays `ZAU12`; accepted by `ZMP34` | — |
 | Duplicate acceptance | Unchanged; one accepted event | — |
-| Stale acceptance delivery | Refused as stale; owner remains `ZMP34` after transfer | — |
+| Late acceptance after completion | Refused because no handoff is pending; owner remains `ZMP34` | — |
+| Old but valid offer delivery | Refused as stale; completed transfer stays closed | — |
 | Receiving sector takes control | Owner becomes `ZMP34`; handoff clears | — |
 | Offer timeout (`HO_FAIL`) | — | Owner stays `ZAU12`; handoff clears |
 | Acceptance after timeout | — | Refused because no handoff is pending |
