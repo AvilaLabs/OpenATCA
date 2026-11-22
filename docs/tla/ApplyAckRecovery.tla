@@ -298,7 +298,6 @@ Spec ==
     /\ WF_vars(SendRetry)
     /\ WF_vars(RetryApply)
     /\ WF_vars(WeakCommitDecision)
-    /\ WF_vars(RejectDigestCollision)
     /\ WF_vars(DeliverRetryAck)
 
 AtMostOnce == effectCount <= 1
