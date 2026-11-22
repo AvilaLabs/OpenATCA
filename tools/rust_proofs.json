@@ -1,6 +1,6 @@
 {
   "registry_version": 1,
-  "expected_proof_count": 111,
+  "expected_proof_count": 112,
   "proofs": [
     {
       "id": "output-append",
@@ -565,6 +565,28 @@
       "tier": "push",
       "ci_seconds": 4,
       "ci_seconds_source": "ci"
+    },
+    {
+      "id": "replay-clock-vote",
+      "requirement": "OA-RPL-188: a clock step requires consecutive candidates, with the configured vote and tie rule for a backward step.",
+      "package": "oa-replay",
+      "harness": "core::clock::proofs::clock_step_needs_three_candidates_and_the_vote",
+      "enabled": true,
+      "experimental": false,
+      "required_covers": [
+        "confirmed forward step",
+        "backward step with sufficient votes",
+        "backward step held after losing the vote"
+      ],
+      "stubbing": false,
+      "stub_summaries": [],
+      "cfgs": [],
+      "harness_timeout_seconds": 300,
+      "external_timeout_seconds": 420,
+      "memory_mib": 5632,
+      "tier": "push",
+      "ci_seconds": 43,
+      "ci_seconds_source": "local"
     },
     {
       "id": "safety-future-report-recovery",

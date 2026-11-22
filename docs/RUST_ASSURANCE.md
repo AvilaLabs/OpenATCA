@@ -19,9 +19,9 @@ This record separates requirement validity, bounded proof, runtime testing, allo
 
 ## Current verification results
 
-Kani 0.68.0 has 111 registered proofs, including 102 enabled proofs and nine disabled experiments.
+Kani 0.68.0 has 112 registered proofs, including 103 enabled proofs and nine disabled experiments.
 - The earlier complete CI run at `a006cea` passed 81 proofs. Fourteen parser and decoder proofs were registered on 2026-11-20 after local passes.
-- Each entry records a time in `ci_seconds` and identifies its source as CI or local. The enabled registry contains 32 nightly proofs over 120 s and 70 push proofs.
+- Each entry records a time in `ci_seconds` and identifies its source as CI or local. The enabled registry contains 32 nightly proofs over 120 s and 71 push proofs.
 - A push or pull request runs the push-tier proofs of the packages it changes, and of every package that depends on them, in four balanced shards. A change to the registry, the runner, the workflow, the toolchain, the lock file or a few listed paths runs the whole push tier. The full registry runs nightly and on manual dispatch.
 - The 19 large-move and snapshot proofs of RT-239 (listed in [Verification](VERIFICATION.md)) were each run locally on 2026-11-20 and are recorded in the status file under `rt239_large_move_snapshot_runs`: eighteen at `5e2d601`, and `large-move-decision-rejected` at `007a8a4`, which changed only that harness.
 - The [machine-readable record](../validation/rust-proof-status.json) keeps the earlier local results in distinct frozen source groups, without the records of retired proofs. It is a cumulative local record, not one fresh-checkout run.
@@ -32,6 +32,13 @@ across valid signed clocks and configuration values. It checks counted refusal, 
 recovery on a valid report, and separately checks the saturated horizon. At `781c779` Kani passed
 all assertions and five required covers in 8.74 s including build and verification. The result JSON
 SHA-256 is `67e48de4ff1f787e12f1c2f725893ecf16f7c627d846766888b00966a205b389`.
+
+The OA-RPL-188 clock harness checks one observation across its admitted clock states, including
+consecutive candidates, the backward vote and its tie rule. Kani passed all assertions and the
+three forward, backward and outvoted covers in 42.43 s including build and verification. The
+`clock.rs` source and result JSON SHA-256 digests are
+`d62a100c8b27ba5b0a4f3ceb64cde244bbb9778358b37992c7c4fb6a79e7194d` and
+`c66accd5d3ed985d188a2d703ee07249ebb9f0ee54806541c1e8003353cfa276`.
 
 Five added in-order caller proofs independently vary and dirty the selected current-filter, anchor-filter, ring, metadata or statistics projection before modeled refusal. Production capture and restore calls remain in the path. These establish each selected projection through the actual caller; their differing other prestate fields do not establish an arbitrary simultaneous-state theorem.
 

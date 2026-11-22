@@ -78,13 +78,13 @@ class SuiteConfigurationTests(unittest.TestCase):
         registry, errors = load_registry(REGISTRY_PATH)
         self.assertEqual(errors, [])
         self.assertIsNotNone(registry)
-        self.assertEqual(registry["expected_proof_count"], 111)
-        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 111)
+        self.assertEqual(registry["expected_proof_count"], 112)
+        self.assertEqual(len({p["id"] for p in registry["proofs"]}), 112)
         self.assertEqual(
             sum(p["enabled"] for p in registry["proofs"]),
             sum(not p["experimental"] for p in registry["proofs"]),
         )
-        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 102)
+        self.assertEqual(sum(p["enabled"] for p in registry["proofs"]), 103)
         experimental = {p["id"] for p in registry["proofs"] if p["experimental"]}
         self.assertEqual(experimental, {
             "tracker-numerical-refusal-rollback",
@@ -228,8 +228,9 @@ class SuiteConfigurationTests(unittest.TestCase):
         self.assertEqual(tiers["asterix-fspec-cat021"], "nightly")
         self.assertEqual(tiers["output-append"], "push")
         local = {p["id"] for p in registry["proofs"] if p["ci_seconds_source"] == "local"}
-        self.assertIn("safety-future-report-recovery", local)
-        local.remove("safety-future-report-recovery")
+        for added in ("safety-future-report-recovery", "replay-clock-vote"):
+            self.assertIn(added, local)
+            local.remove(added)
         self.assertEqual(len(local), 20)
         self.assertTrue(all(i.startswith(("asterix-", "adsb-", "msaw-")) for i in local))
 
