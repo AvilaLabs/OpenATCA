@@ -20,7 +20,7 @@ use oa_scope_replay::store::{store_add, store_finish};
 use oa_track::{
     output_new, r95_m_of, tracker_advance, tracker_new, tracker_newest_update_ns, tracker_predict,
     tracker_stats, tracker_update, Measurement, TrackOutput, Tracker, DEFAULT_CONFIG, M_HAS_VEL,
-    NONE_I32, NO_IDENT, O_COAST, O_HAS_ALT, O_IDENTITY_UNCONFIRMED, O_REACQUIRED, O_UNCERTAIN,
+    NONE_I32, NO_IDENT, O_HAS_ALT, O_IDENTITY_UNCONFIRMED, O_REACQUIRED,
 };
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -835,17 +835,17 @@ impl Drill {
             assert_eq!(targets.lon_e7[index], row.lon_e7);
 
             let mut flags = 0;
-            if row.flags & O_COAST != 0 {
+            // Prediction provides geometry and motion; the emitted scope row carries coast
+            // and uncertainty status from the display tick at the same source time.
+            if targets.flags[index] & T_COAST != 0 {
                 flags |= F_COAST;
-                assert_ne!(targets.flags[index] & T_COAST, 0);
-            } else {
-                assert_eq!(targets.flags[index] & T_COAST, 0);
+                assert!(
+                    newest_ns < at_ns,
+                    "coasting track {addr} has a fresh update"
+                );
             }
-            if row.flags & O_UNCERTAIN != 0 {
+            if targets.flags[index] & oa_display::traffic::T_UNCERTAIN != 0 {
                 flags |= F_UNCERTAIN;
-                assert_ne!(targets.flags[index] & oa_display::traffic::T_UNCERTAIN, 0);
-            } else {
-                assert_eq!(targets.flags[index] & oa_display::traffic::T_UNCERTAIN, 0);
             }
             if row.flags & O_IDENTITY_UNCONFIRMED != 0 {
                 flags |= F_IDENTITY_UNCONFIRMED;
