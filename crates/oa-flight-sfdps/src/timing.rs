@@ -21,8 +21,8 @@ pub struct ReplayTimingReport {
     pub expected_seconds: usize,
     pub observed_seconds: usize,
     pub empty_seconds: usize,
-    /// SFDPS frames entering the processing callback, including refused messages and non-message
-    /// frame kinds. Read/decompression failures and receive-time-gated frames are not timed frames.
+    /// SFDPS MESSAGE frames entering processing, including parse and decoder refusals.
+    /// Document-sealed removals, other frame kinds, read errors, and gated frames are excluded.
     pub timed_frames: u64,
     pub first_received_ns: Option<i64>,
     pub last_received_ns: Option<i64>,

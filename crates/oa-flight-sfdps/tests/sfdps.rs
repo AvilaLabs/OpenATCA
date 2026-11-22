@@ -146,8 +146,21 @@ fn temp_dir(tag: &str) -> PathBuf {
 }
 
 fn frame(seq: u64, recv_ms: i64, xml: &str) -> Vec<u8> {
-    let mut buf = vec![0u8; xml.len() + 64];
-    let n = encode_frame(&mut buf, 1, 0, seq, recv_ms * 1_000_000, 0, xml.as_bytes()).unwrap();
+    frame_kind(oa_feed::Kind::Message as u8, seq, recv_ms, xml)
+}
+
+fn frame_kind(kind: u8, seq: u64, recv_ms: i64, payload: &str) -> Vec<u8> {
+    let mut buf = vec![0u8; payload.len() + 64];
+    let n = encode_frame(
+        &mut buf,
+        kind,
+        0,
+        seq,
+        recv_ms * 1_000_000,
+        0,
+        payload.as_bytes(),
+    )
+    .unwrap();
     buf.truncate(n);
     buf
 }
@@ -472,14 +485,20 @@ fn the_replay_decoder_drops_the_sealed_window() {
 }
 
 #[test]
-fn opt_in_timing_counts_a_decoder_refusal_in_its_receive_second() {
+fn opt_in_timing_counts_messages_but_leaves_a_status_only_second_empty() {
     let dir = temp_dir("timing-refused");
     let recv_ns = 1_000_000_000;
-    std::fs::write(dir.join("a.oaf"), frame(1, 1_000, "<MessageCollection/>")).unwrap();
+    let end_ns = 3_000_000_000;
+    let frames = [
+        frame(1, 1_000, "<MessageCollection/>"),
+        frame_kind(oa_feed::Kind::Status as u8, 2, 2_000, "state=connected\n"),
+        frame(3, 3_000, "<MessageCollection/>"),
+    ];
+    std::fs::write(dir.join("a.oaf"), frames.concat()).unwrap();
     let mut sealed = 0;
     let (rep, timing) = replay_sfdps_timed_counted(
         recordings_in(&dir).unwrap(),
-        &cfg(recv_ns, recv_ns),
+        &cfg(recv_ns, end_ns),
         &mut |_, _, _| {},
         &mut sealed,
         recv_ns,
@@ -487,16 +506,16 @@ fn opt_in_timing_counts_a_decoder_refusal_in_its_receive_second() {
     .unwrap();
 
     assert_eq!(rep.docs_unparsed, 0);
-    assert_eq!(rep.docs_refused, 1);
-    assert_eq!(rep.refused_by[0], 1);
-    assert_eq!(rep.frames, 1);
+    assert_eq!(rep.docs_refused, 2);
+    assert_eq!(rep.refused_by[0], 2);
+    assert_eq!(rep.frames, 2);
     assert_eq!(timing.measure_from_ns, recv_ns);
-    assert_eq!(timing.measure_to_ns, recv_ns);
-    assert_eq!(timing.expected_seconds, 1);
-    assert_eq!(timing.observed_seconds, 1);
-    assert_eq!(timing.empty_seconds, 0);
-    assert_eq!(timing.timed_frames, 1);
+    assert_eq!(timing.measure_to_ns, end_ns);
+    assert_eq!(timing.expected_seconds, 3);
+    assert_eq!(timing.observed_seconds, 2);
+    assert_eq!(timing.empty_seconds, 1);
+    assert_eq!(timing.timed_frames, 2);
     assert_eq!(timing.first_received_ns, Some(recv_ns));
-    assert_eq!(timing.last_received_ns, Some(recv_ns));
+    assert_eq!(timing.last_received_ns, Some(end_ns));
     assert_eq!(sealed, 0);
 }

@@ -263,12 +263,14 @@ pub fn replay_sfdps_counted(
     replay_sfdps_counted_inner(paths, cfg, before_op, sealed, None).map(|(report, _)| report)
 }
 
-/// Replays as [`replay_sfdps_counted`] and adds bounded per-received-second timing for frames
-/// with receive times in `[measure_from_ns, cfg.to_ns]`. The receive-time gate and end boundary
-/// retain the existing inclusive `to_ns` behavior. Timing excludes file reads, decompression,
-/// merge work, and frames skipped before `cfg.from_ns`; it includes the frame callback's decode,
-/// adapter, flight-table, and sweep work, including refusals. This shell diagnostic uses
-/// `Instant`; concurrent replay loops are independent and are not synchronized by simulated time.
+/// Replays as [`replay_sfdps_counted`] and adds bounded per-received-second timing for
+/// SFDPS MESSAGE frames with receive times in [measure_from_ns, cfg.to_ns]. The existing
+/// inclusive `to_ns` gate is retained. Document-sealed removals are excluded from timing bins
+/// and observed receive extrema, but their existing sealed counters remain visible. Timing
+/// excludes file reads, decompression, merge work, and frames skipped before `cfg.from_ns`; it
+/// includes decode, adapter, flight-table, sweep, and any caller `before_op` hook work, including
+/// refusals. This shell diagnostic uses `Instant`; independent replay loops are not synchronized
+/// by simulated time.
 pub fn replay_sfdps_timed_counted(
     paths: Vec<PathBuf>,
     cfg: &ReplayConfig,
@@ -346,33 +348,20 @@ fn replay_sfdps_counted_inner(
     let spec = spec_from_paths(FeedKind::Sfdps, paths);
     let mut ended = false;
     let (report, res) = merge_counted(vec![spec], 1 << 16, &mut |m| {
-        if m.feed != FeedKind::Sfdps {
+        if m.feed != FeedKind::Sfdps || m.kind != Kind::Message {
             return Ok(());
         }
-        if m.kind != Kind::Message {
-            if timing.is_none() {
-                return Ok(());
-            }
-            if m.recv_ns < cfg.from_ns || m.recv_ns > cfg.to_ns {
-                return Ok(());
-            }
-        } else {
-            if m.recv_ns < cfg.from_ns {
-                rep.frames_skipped_before += 1;
-                return Ok(());
-            }
-            if m.recv_ns > cfg.to_ns {
-                rep.frames_after_end += 1;
-                ended = true;
-                return Err(io::Error::other(WINDOW_END));
-            }
+        if m.recv_ns < cfg.from_ns {
+            rep.frames_skipped_before += 1;
+            return Ok(());
+        }
+        if m.recv_ns > cfg.to_ns {
+            rep.frames_after_end += 1;
+            ended = true;
+            return Err(io::Error::other(WINDOW_END));
         }
         let timing_bin = timing.as_ref().and_then(|t| t.bin(m.recv_ns));
         let timing_started = timing_bin.map(|_| Instant::now());
-        if m.kind != Kind::Message {
-            finish_timing(&mut timing, timing_bin, m.recv_ns, timing_started);
-            return Ok(());
-        }
         let seen_ms = m.recv_ns.div_euclid(1_000_000);
         let doc = match parser.parse(m.payload) {
             Ok(d) => d,
@@ -391,7 +380,6 @@ fn replay_sfdps_counted_inner(
                 // window: the frame is in no count here but the drop (OA-SEAL-014).
                 *sealed += u64::from(s.sealed_window_dropped);
                 oa_sealed::note_window_drops(u64::from(s.sealed_window_dropped));
-                finish_timing(&mut timing, timing_bin, m.recv_ns, timing_started);
                 return Ok(());
             }
         }
