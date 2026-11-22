@@ -27,7 +27,7 @@ use oa_encounter_run::qualification::{
     score, AlertEpisode, Case, CaseResult, Evaluation, Outcome, Subject,
 };
 use oa_encounter_run::run::GroundTable;
-use oa_safety::net::{NetState, Reason};
+use oa_safety::net::{NetReport, NetState, Reason};
 use oa_track::{Measurement, TrackerConfig, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT};
 
 const DEV_CFG: &str = include_str!("../testdata/dev.cfg");
