@@ -47,3 +47,32 @@ line that does not fit is omitted and reported as `FrameInfo::ownership_clipped`
 or a display-list failure is returned as a replay error. The display and replay crates do not
 depend on `oa-flight`, so the caller remains responsible for mapping a flight record and refusal
 evidence to this presentation value.
+
+
+## Process takeover with the scope
+
+The combined offline drill runs the tracker and scope in two separate processes and runs a
+flight table beside each. A third flight table and an uninterrupted scope provide the
+reference. The fixture's flight record carries the full address of a displayed target. The
+controller witness supplies the owner, the accepted handoff, and both altitude clearances.
+The test uses the owner and accepting unit from that witness in the scope's ownership line.
+
+At the last synchronized record, the test kills both serving processes. The standby then
+renders the accepted handoff and applies the take-control input. It refuses the repeated take.
+The fixture sink refuses old-generation output and already accepted sequence numbers. The
+drill checks the resulting frames against uninterrupted playback, reports the source-time
+gap, and measures the local wall time until the first verified frame.
+
+Build the controller fixture from the same revision and use its exact executable path from
+the build's compiler-artifact output.
+
+\`\`\`sh
+cargo +1.89.0 test --release --locked -p oa-flight --test controller_workflow --no-run --message-format=json
+OA_CONTROLLER_TAKEOVER_EXECUTABLE=/absolute/path/to/controller_workflow-binary \
+  cargo +1.89.0 test --release --locked -p oa-scope-replay --test outage_drill \
+  controller_handoff_and_scope_continue_after_serving_processes_are_killed \
+  -- --ignored --exact --nocapture
+\`\`\`
+
+This evidence covers OS process failure on one host with a fixture that owns publication
+authority. The two-host exercise requires a test transport and independent machines.

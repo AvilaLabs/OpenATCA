@@ -267,11 +267,19 @@ fn controller_takeover_worker_process() {
         a_ft: 24_000,
         b_ft: 0,
     };
+    let mut address = op(OP_ADDRESS, key, 2_800, 8);
+    address.address = 0xA00001;
+    let mut identity = op(OP_IDENTITY, key, 2_900, 9);
+    identity.callsign = code("SYN901");
+    identity.dep = code("KORD");
+    identity.arr = code("KMSP");
     for operation in [
         plan,
         owner,
         assigned,
         interim,
+        address,
+        identity,
         handoff(OP_HO_INITIATE, key, 3_000, 5),
         handoff(OP_HO_ACCEPT, key, 4_000, 6),
     ] {
@@ -313,7 +321,7 @@ fn controller_takeover_worker_process() {
         };
         writeln!(
             output,
-            "MACHINE_LOSS_CONTROL {phase} {} {accepted_by} {} {} {} {:016x}",
+            "MACHINE_LOSS_CONTROL {phase} {} {accepted_by} {} {} {} {:016x} {} {}",
             std::str::from_utf8(
                 &flight.owner[..flight.owner.iter().position(|byte| *byte == 0).unwrap_or(8)]
             )
@@ -321,7 +329,11 @@ fn controller_takeover_worker_process() {
             flight.assigned.a_ft,
             flight.interim.a_ft,
             table.stats.handoffs_completed,
-            flights_digest(&table)
+            flights_digest(&table),
+            flight.address,
+            std::str::from_utf8(&flight.callsign)
+                .unwrap()
+                .trim_end_matches('\0')
         )
         .unwrap();
         output.flush().unwrap();
