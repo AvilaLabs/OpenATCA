@@ -44,10 +44,12 @@ pub enum CausalRefusal {
     TooManyFiles,
     InvalidMetadata,
     NoCycleBeforeCutoff,
+    ReceiptBeforeIssue,
     ReceiptUnknown,
     ReceiptAfterCutoff,
     ConflictingCycle,
     NoValidBracket,
+    ValidGapTooLarge,
 }
 
 /// One verified reference-time cycle selected using separately supplied receipt evidence.
@@ -56,24 +58,27 @@ pub struct CycleSelection {
     pub issue_s: i64,
     pub first_valid_s: i64,
     pub last_valid_s: i64,
-    /// Indices into the `HourFile` slice supplied to [`select_cycle_as_of`].
-    pub file_indices: Vec<usize>,
+    /// Owned metadata rows selected from one issue cycle.
+    pub files: Vec<HourFile>,
 }
 
 /// Selects the latest verified forecast cycle available by `cutoff_s` that brackets the complete
 /// requested valid-time interval. `receipt_s[i]` is separate evidence supplied by the caller for
 /// `files[i]`; `None` is unknown receipt time, never inferred from a file path, reference time or
 /// file metadata. This selector does not load grid data. Existing [`archive_sample`] remains a
-/// valid-time archive query and does not apply this causal rule. Apply the returned indices to
-/// the `HourFile` slice before calling [`archive_files`]; then load/query that cycle normally.
-/// Every returned hour must have its own receipt evidence, including any hour between the two
-/// brackets. No maximum valid-time gap is imposed by this metadata selector.
+/// valid-time archive query and does not apply this causal rule. The returned rows are metadata;
+/// before loading, the caller must bind each supplied receipt to the identical immutable file
+/// bytes. The archive rechecks issue and lead metadata, but does not hash file contents.
+/// Every returned hour must have receipt evidence, including hours between the two brackets.
+/// The caller supplies a positive maximum gap for interpolation; exact-time requests can select
+/// one exact hour and therefore do not require an adjacent hour.
 pub fn select_cycle_as_of(
     files: &[HourFile],
     receipt_s: &[Option<i64>],
     cutoff_s: i64,
     valid_from_s: i64,
     valid_to_s: i64,
+    max_gap_s: i64,
 ) -> Result<CycleSelection, CausalRefusal> {
     if files.len() > MAX_ARCHIVE_FILES {
         return Err(CausalRefusal::TooManyFiles);
@@ -82,6 +87,7 @@ pub fn select_cycle_as_of(
         || cutoff_s <= 0
         || valid_from_s <= 0
         || valid_to_s < valid_from_s
+        || max_gap_s <= 0
     {
         return Err(CausalRefusal::InvalidMetadata);
     }
@@ -95,6 +101,13 @@ pub fn select_cycle_as_of(
         {
             return Err(CausalRefusal::InvalidMetadata);
         }
+        if receipt_s
+            .get(i)
+            .and_then(|r| *r)
+            .is_some_and(|received| received < file.issue_s)
+        {
+            return Err(CausalRefusal::ReceiptBeforeIssue);
+        }
         if file.issue_s <= cutoff_s {
             cycles.entry(file.issue_s).or_default().push(i);
         }
@@ -106,7 +119,7 @@ pub fn select_cycle_as_of(
     let mut saw_unknown_receipt = false;
     let mut saw_late_receipt = false;
     let mut saw_conflict = false;
-    let mut saw_no_bracket = false;
+    let mut saw_large_gap = false;
     for (issue_s, mut indices) in cycles.into_iter().rev() {
         indices.sort_unstable_by_key(|&i| files.get(i).map_or(i64::MAX, |f| f.valid_s));
         if indices.windows(2).any(|w| {
@@ -115,18 +128,28 @@ pub fn select_cycle_as_of(
             saw_conflict = true;
             continue;
         }
-        let lower_all = indices
+        let lower = indices
             .iter()
             .copied()
             .filter(|&i| files.get(i).is_some_and(|f| f.valid_s <= valid_from_s))
             .max_by_key(|&i| files.get(i).map_or(i64::MIN, |f| f.valid_s));
-        let upper_all = indices
-            .iter()
-            .copied()
-            .filter(|&i| files.get(i).is_some_and(|f| f.valid_s >= valid_to_s))
-            .min_by_key(|&i| files.get(i).map_or(i64::MAX, |f| f.valid_s));
-        let (Some(lower_all), Some(upper_all)) = (lower_all, upper_all) else {
-            saw_no_bracket = true;
+        let upper = if valid_from_s == valid_to_s
+            && indices
+                .iter()
+                .any(|&i| files.get(i).is_some_and(|f| f.valid_s == valid_from_s))
+        {
+            indices
+                .iter()
+                .copied()
+                .find(|&i| files.get(i).is_some_and(|f| f.valid_s == valid_from_s))
+        } else {
+            indices
+                .iter()
+                .copied()
+                .filter(|&i| files.get(i).is_some_and(|f| f.valid_s >= valid_to_s))
+                .min_by_key(|&i| files.get(i).map_or(i64::MAX, |f| f.valid_s))
+        };
+        let (Some(lower), Some(upper)) = (lower, upper) else {
             continue;
         };
         let eligible = |i: usize| {
@@ -134,26 +157,6 @@ pub fn select_cycle_as_of(
                 .get(i)
                 .and_then(|r| *r)
                 .is_some_and(|received| received <= cutoff_s)
-        };
-        let lower = indices
-            .iter()
-            .copied()
-            .filter(|&i| eligible(i) && files.get(i).is_some_and(|f| f.valid_s <= valid_from_s))
-            .max_by_key(|&i| files.get(i).map_or(i64::MIN, |f| f.valid_s));
-        let upper = indices
-            .iter()
-            .copied()
-            .filter(|&i| eligible(i) && files.get(i).is_some_and(|f| f.valid_s >= valid_to_s))
-            .min_by_key(|&i| files.get(i).map_or(i64::MAX, |f| f.valid_s));
-        let (Some(lower), Some(upper)) = (lower, upper) else {
-            for i in [lower_all, upper_all] {
-                match receipt_s.get(i).copied().flatten() {
-                    None => saw_unknown_receipt = true,
-                    Some(received) if received > cutoff_s => saw_late_receipt = true,
-                    Some(_) => {}
-                }
-            }
-            continue;
         };
         let lower_pos = indices.iter().position(|&i| i == lower).unwrap_or(0);
         let upper_pos = indices
@@ -170,13 +173,31 @@ pub fn select_cycle_as_of(
             continue;
         }
         let selected = selected.to_vec();
+        if selected.windows(2).any(|pair| match pair {
+            [a, b] => files
+                .get(*b)
+                .and_then(|fb| {
+                    files
+                        .get(*a)
+                        .and_then(|fa| fb.valid_s.checked_sub(fa.valid_s))
+                })
+                .map_or(true, |gap| gap > max_gap_s),
+            _ => false,
+        }) {
+            saw_large_gap = true;
+            continue;
+        }
+        let selected_files = selected
+            .iter()
+            .filter_map(|&i| files.get(i).cloned())
+            .collect::<Vec<_>>();
         let first_valid_s = files.get(lower).map_or(valid_from_s, |file| file.valid_s);
         let last_valid_s = files.get(upper).map_or(valid_to_s, |file| file.valid_s);
         return Ok(CycleSelection {
             issue_s,
             first_valid_s,
             last_valid_s,
-            file_indices: selected,
+            files: selected_files,
         });
     }
     if saw_late_receipt {
@@ -185,8 +206,8 @@ pub fn select_cycle_as_of(
         Err(CausalRefusal::ReceiptUnknown)
     } else if saw_conflict {
         Err(CausalRefusal::ConflictingCycle)
-    } else if saw_no_bracket {
-        Err(CausalRefusal::NoValidBracket)
+    } else if saw_large_gap {
+        Err(CausalRefusal::ValidGapTooLarge)
     } else {
         Err(CausalRefusal::NoValidBracket)
     }

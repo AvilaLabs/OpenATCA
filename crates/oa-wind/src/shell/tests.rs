@@ -651,13 +651,13 @@ fn causal_selector_pins_latest_received_cycle_and_never_mixes_hours() {
         Some(1_155),
         Some(1_300), // Later valid hour, but not received by the cutoff.
     ];
-    let selection = select_cycle_as_of(&files, &receipts, 1_200, 1_075, 1_150).unwrap();
+    let selection = select_cycle_as_of(&files, &receipts, 1_200, 1_075, 1_150, 100).unwrap();
     assert_eq!(selection.issue_s, 1_050);
     assert_eq!(
         (selection.first_valid_s, selection.last_valid_s),
         (1_050, 1_150)
     );
-    assert_eq!(selection.file_indices, [3, 4]);
+    assert_eq!(selection.files, files[3..5]);
 }
 
 #[test]
@@ -674,6 +674,7 @@ fn causal_selector_names_unknown_late_conflicting_and_missing_brackets() {
             1_200,
             1_050,
             1_150,
+            100,
         ),
         Err(CausalRefusal::ReceiptUnknown)
     );
@@ -686,6 +687,7 @@ fn causal_selector_names_unknown_late_conflicting_and_missing_brackets() {
             1_300,
             1_050,
             1_150,
+            100,
         ),
         Err(CausalRefusal::ReceiptUnknown)
     );
@@ -696,6 +698,7 @@ fn causal_selector_names_unknown_late_conflicting_and_missing_brackets() {
             1_200,
             1_050,
             1_150,
+            100,
         ),
         Err(CausalRefusal::ReceiptAfterCutoff)
     );
@@ -707,11 +710,19 @@ fn causal_selector_names_unknown_late_conflicting_and_missing_brackets() {
             1_300,
             1_050,
             1_150,
+            100,
         ),
         Err(CausalRefusal::ConflictingCycle)
     );
     assert_eq!(
-        select_cycle_as_of(&base[..2], &[Some(1_001), Some(1_101)], 1_200, 1_050, 1_150,),
+        select_cycle_as_of(
+            &base[..2],
+            &[Some(1_001), Some(1_101)],
+            1_200,
+            1_050,
+            1_150,
+            100,
+        ),
         Err(CausalRefusal::NoValidBracket)
     );
 }
@@ -720,7 +731,7 @@ fn causal_selector_names_unknown_late_conflicting_and_missing_brackets() {
 fn causal_selector_validates_metadata_receipt_shape_and_issue_cutoff() {
     let file = manifest_hour("future", 2_000, 0);
     assert_eq!(
-        select_cycle_as_of(&[file], &[Some(1_900)], 1_900, 2_000, 2_000),
+        select_cycle_as_of(&[file], &[Some(2_001)], 1_900, 2_000, 2_000, 100),
         Err(CausalRefusal::NoCycleBeforeCutoff)
     );
     let bad = HourFile {
@@ -728,13 +739,82 @@ fn causal_selector_validates_metadata_receipt_shape_and_issue_cutoff() {
         ..manifest_hour("bad", 1_000, 100)
     };
     assert_eq!(
-        select_cycle_as_of(&[bad], &[Some(1_100)], 1_200, 1_100, 1_100),
+        select_cycle_as_of(&[bad], &[Some(1_100)], 1_200, 1_100, 1_100, 100),
         Err(CausalRefusal::InvalidMetadata)
     );
     assert_eq!(
-        select_cycle_as_of(&[manifest_hour("ok", 1_000, 0)], &[], 1_200, 1_000, 1_000,),
+        select_cycle_as_of(
+            &[manifest_hour("ok", 1_000, 0)],
+            &[],
+            1_200,
+            1_000,
+            1_000,
+            100,
+        ),
         Err(CausalRefusal::InvalidMetadata)
     );
+    assert_eq!(
+        select_cycle_as_of(
+            &[manifest_hour("receipt-before-issue", 1_000, 100)],
+            &[Some(999)],
+            1_200,
+            1_050,
+            1_050,
+            100,
+        ),
+        Err(CausalRefusal::ReceiptBeforeIssue)
+    );
+    assert_eq!(
+        select_cycle_as_of(
+            &[manifest_hour("ok", 1_000, 0)],
+            &[Some(1_001)],
+            1_200,
+            1_000,
+            1_000,
+            0,
+        ),
+        Err(CausalRefusal::InvalidMetadata)
+    );
+}
+
+#[test]
+fn causal_selector_enforces_gap_and_preserves_exact_hour_semantics() {
+    let older = [
+        manifest_hour("old0", 1_000, 0),
+        manifest_hour("old1", 1_000, 100),
+        manifest_hour("old2", 1_000, 200),
+    ];
+    let newer = [
+        manifest_hour("new0", 1_050, 0),
+        manifest_hour("new1", 1_050, 250),
+    ];
+    let files = older
+        .iter()
+        .chain(newer.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    let receipts = [1_001, 1_101, 1_201, 1_051, 1_301]
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    let selected = select_cycle_as_of(&files, &receipts, 1_500, 1_075, 1_150, 100).unwrap();
+    assert_eq!(selected.issue_s, 1_000);
+    assert_eq!(selected.files, older[1..3]);
+
+    assert_eq!(
+        select_cycle_as_of(
+            &newer,
+            &[Some(1_051), Some(1_301)],
+            1_500,
+            1_075,
+            1_150,
+            100
+        ),
+        Err(CausalRefusal::ValidGapTooLarge)
+    );
+    let exact = [manifest_hour("exact", 1_000, 50)];
+    let selection = select_cycle_as_of(&exact, &[Some(1_051)], 1_200, 1_050, 1_050, 1).unwrap();
+    assert_eq!(selection.files, exact);
 }
 
 // REQ: OA-WIND-012
