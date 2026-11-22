@@ -5,6 +5,7 @@
 //!           | --tfms-dir | --fns-dir | --adsb-dir <dir>)... [--checkpoint-secs <n>] [--max-age-secs <n>]
 //!           [--active-age-secs <n>] [--proposed-age-secs <n>] [--terminal-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] [--chunk-bytes <n>] [--progress-minutes <n>]
 //!           [--quiet] [--input-fingerprint]
+//!           [--verify-prefix <frames> <input-sha256> <state-sha256>]
 //! ```
 //!
 //! Each file is `.oaf` or `.oaf.gz` (told apart by its first bytes) and is given a feed kind by
@@ -16,6 +17,7 @@ use std::path::PathBuf;
 
 use crate::pipeline::{FeedKind, PipelineConfig};
 use crate::table::NS_PER_S;
+use oa_sha256::Digest;
 
 /// Default read size for recordings.
 pub const DEFAULT_CHUNK: usize = 64 * 1024;
@@ -48,6 +50,19 @@ pub struct Command {
     pub quiet: bool,
     /// Print the bounded ordered-input digest diagnostic to stderr.
     pub input_fingerprint: bool,
+    /// Expected ordered-input and replay-state digest at a prefix boundary.
+    pub verify_prefix: Option<PrefixWitness>,
+}
+
+/// Explicit prefix witness used only by the offline CLI verification mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrefixWitness {
+    /// Number of admitted pipeline frames at which the witness applies.
+    pub frames: u64,
+    /// Ordered-input digest from a complete prefix-only fingerprint run.
+    pub input_digest: Digest,
+    /// Full replay-state digest from that same prefix-only run.
+    pub state_digest: Digest,
 }
 
 /// The usage text.
@@ -55,7 +70,22 @@ pub const USAGE: &str = "usage: oa-replay (--sfdps|--tbfm|--tfms|--fns|--adsb <f
 --sfdps-dir|--tbfm-dir|--tfms-dir|--fns-dir|--adsb-dir <dir>)... \
 [--checkpoint-secs <n>] [--max-age-secs <n>] [--active-age-secs <n>] [--proposed-age-secs <n>] \
 [--terminal-age-secs <n>] [--sweep-secs <n>] [--capacity <n>] \
-[--chunk-bytes <n>] [--progress-minutes <n>] [--quiet] [--input-fingerprint]";
+[--chunk-bytes <n>] [--progress-minutes <n>] [--quiet] [--input-fingerprint] \\
+[--verify-prefix <frames> <input-sha256> <state-sha256>]";
+
+fn digest(flag: &str, v: Option<&String>) -> Result<Digest, String> {
+    let value = v.ok_or_else(|| format!("missing value for {flag}"))?;
+    if value.len() != 64 || !value.is_ascii() {
+        return Err(format!("{flag} needs 64 hexadecimal digits"));
+    }
+    let mut result = [0u8; 32];
+    for (i, byte) in result.iter_mut().enumerate() {
+        let start = i * 2;
+        *byte = u8::from_str_radix(&value[start..start + 2], 16)
+            .map_err(|_| format!("{flag} needs 64 hexadecimal digits"))?;
+    }
+    Ok(result)
+}
 
 fn number(flag: &str, v: Option<&String>) -> Result<u64, String> {
     let v = v.ok_or_else(|| format!("missing value for {flag}"))?;
@@ -73,6 +103,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
     let mut chunk = DEFAULT_CHUNK;
     let mut quiet = false;
     let mut input_fingerprint = false;
+    let mut verify_prefix = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -135,6 +166,16 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
             }
             "--quiet" => quiet = true,
             "--input-fingerprint" => input_fingerprint = true,
+            "--verify-prefix" => {
+                let frames = number(a, it.next())?;
+                let input_digest = digest("--verify-prefix input digest", it.next())?;
+                let state_digest = digest("--verify-prefix state digest", it.next())?;
+                verify_prefix = Some(PrefixWitness {
+                    frames,
+                    input_digest,
+                    state_digest,
+                });
+            }
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -148,6 +189,7 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         chunk,
         quiet,
         input_fingerprint,
+        verify_prefix,
     })
 }
 

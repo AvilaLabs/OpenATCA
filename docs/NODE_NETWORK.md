@@ -154,6 +154,15 @@ replay settings and stream grouping. A frame dropped by a document guard may sti
 replay clock using its accepted receive time, so a partial digest cannot explain every state
 difference. Peer authentication and complete delivery require separate evidence.
 
+The opt-in offline `oa-replay --verify-prefix <frames> <input-sha256> <state-sha256>` gate accepts
+only when both digests match at the exact admitted-frame boundary. Supply the frame count and
+digests from an independently retained, complete `--input-fingerprint` run over the prefix, using
+the same exact commit/build, replay settings, feed assignments, and stream grouping. This mode
+does not restore state or authenticate the witness; it replays from the beginning, suppresses
+checkpoint output, and emits the final summary only if the prefix matches and the observed full
+run is complete. It does not establish peer identity, authority, or equivalence under other
+settings.
+
 The input hash determines how a disagreement between peer checkpoints is classified.
 
 - **Different inputs:** a data-path fault (loss, delay beyond the window, a feed problem). The

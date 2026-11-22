@@ -74,11 +74,32 @@ fn command_line_gives_each_file_its_feed_kind_and_validates_numbers() {
     assert_eq!(c.cfg.table.capacity, 32_768);
     assert_eq!((c.chunk, c.quiet), (DEFAULT_CHUNK, false));
     assert!(!c.input_fingerprint);
+    assert!(c.verify_prefix.is_none());
     assert!(
         parse_args(&args(&["--sfdps", "x", "--input-fingerprint"]))
             .unwrap()
             .input_fingerprint
     );
+    assert!(parse_args(&args(&[
+        "--sfdps",
+        "x",
+        "--verify-prefix",
+        "2",
+        &"ab".repeat(32),
+        &"cd".repeat(32),
+    ]))
+    .unwrap()
+    .verify_prefix
+    .is_some());
+    assert!(parse_args(&args(&[
+        "--sfdps",
+        "x",
+        "--verify-prefix",
+        "0",
+        &"ab".repeat(32),
+        &"cd".repeat(32),
+    ]))
+    .is_err());
     let c = parse_args(&args(&[
         "--tbfm",
         "x",
@@ -151,6 +172,101 @@ fn stable(out: &str) -> String {
         .filter(|l| !l.starts_with("timing"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn fingerprint_witness(err: &str, out: &str) -> (u64, String, String) {
+    let line = err
+        .lines()
+        .find(|line| line.starts_with("input_fingerprint "))
+        .unwrap();
+    let field = |name: &str| {
+        line.split_whitespace()
+            .find_map(|part| part.strip_prefix(&format!("{name}=")))
+            .unwrap()
+            .to_string()
+    };
+    let frames = field("pipeline_frames").parse().unwrap();
+    let input = field("sha256");
+    let state = out
+        .lines()
+        .find_map(|line| line.strip_prefix("final state_digest="))
+        .unwrap()
+        .to_string();
+    (frames, input, state)
+}
+
+#[test]
+fn verify_prefix_gates_stdout_on_both_digests_and_complete_suffix() {
+    let dir = scratch("verify-prefix");
+    let prefix = dir.join("prefix.oaf");
+    let full = dir.join("full.oaf");
+    let t0 = DAY * 1_000_000;
+    let first = frame(3, 0, t0, sf_doc(&[sf(71, 0).status("ACTIVE")]).as_bytes());
+    let second = frame(
+        3,
+        1,
+        t0 + NS,
+        sf_doc(&[sf(71, 1_000).status("ACTIVE")]).as_bytes(),
+    );
+    std::fs::write(&prefix, &first).unwrap();
+    let (code, prefix_out, prefix_err) =
+        run_bin(&["--input-fingerprint", "--sfdps", prefix.to_str().unwrap()]);
+    assert_eq!(code, 0, "{prefix_err}");
+    let (frames, input, state) = fingerprint_witness(&prefix_err, &prefix_out);
+    assert_eq!(frames, 1);
+    std::fs::write(&full, [first.as_slice(), second.as_slice()].concat()).unwrap();
+    let verify = |count: u64, input: &str, state: &str, path: &std::path::Path| {
+        run_bin(&[
+            "--verify-prefix",
+            &count.to_string(),
+            input,
+            state,
+            "--sfdps",
+            path.to_str().unwrap(),
+        ])
+    };
+    let (code, out, err) = verify(frames, &input, &state, &full);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.contains("final state_digest="));
+    assert!(!out.contains("checkpoint "));
+
+    let wrong_input = format!(
+        "{}{}",
+        if input.starts_with('0') { "1" } else { "0" },
+        &input[1..]
+    );
+    let (code, out, err) = verify(frames, &wrong_input, &state, &full);
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
+    assert!(err.contains("ordered-input digest mismatch"), "{err}");
+
+    let wrong_state = format!(
+        "{}{}",
+        if state.starts_with('0') { "1" } else { "0" },
+        &state[1..]
+    );
+    let (code, out, err) = verify(frames, &input, &wrong_state, &full);
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
+    assert!(err.contains("replay-state digest mismatch"), "{err}");
+
+    let (code, out, err) = verify(frames + 2, &input, &state, &full);
+    assert_eq!(code, 1);
+    assert!(out.is_empty());
+    assert!(
+        err.contains("boundary") && err.contains("not reached"),
+        "{err}"
+    );
+
+    let damaged = dir.join("damaged.oaf");
+    let mut bytes = [first.as_slice(), second.as_slice()].concat();
+    bytes.extend_from_slice(b"OAF1\0\0\0\0");
+    std::fs::write(&damaged, bytes).unwrap();
+    let (code, out, err) = verify(frames, &input, &state, &damaged);
+    assert_ne!(code, 0);
+    assert!(out.is_empty());
+    assert!(err.contains("prefix verification refused"), "{err}");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 // REQ: OA-SEAL-014
