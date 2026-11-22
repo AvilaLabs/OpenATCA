@@ -845,6 +845,64 @@ fn synthetic_flat_terrain_descent_and_level_control_are_scored_from_runner_outpu
     assert_eq!(results[1].outcome, Outcome::Quiet);
 }
 
+#[test]
+fn tracker_capacity_refusal_degrades_only_from_its_observation_and_survives_a_final_gap() {
+    let set = settings();
+    let mut traffic = approach(0x801, true);
+    traffic.truncate(21);
+    for t in 10..=14 {
+        traffic.push(meas(
+            t,
+            0x802,
+            13.41 + 0.0009 * (t - 10) as f64,
+            144.81,
+            100.0,
+            2000 - 12 * (t - 10) as i32,
+            -700,
+        ));
+    }
+    traffic.sort_by_key(|m| m.toa_ns);
+    let none = GroundTable::new();
+    let one_slot = oa_track::TrackerConfig {
+        max_tracks: 1,
+        ..DEFAULT_CONFIG
+    };
+    let refused =
+        track_and_alert(&traffic, &one_slot, &none, &set, ridge_floors(), None, 0).unwrap();
+    assert_eq!(refused.tracker_capacity_refused, 5);
+    assert_eq!(refused.totals.rows_lost_upstream, 5);
+    assert!(refused.net_cycles.contains_key("RUNNING"));
+    assert!(refused.net_cycles.contains_key("DEGRADED: INPUT MISSING"));
+    assert_eq!(refused.final_net, "DEGRADED: INPUT MISSING");
+    assert!(summary_of(&refused, &set)
+        .contains("valid tracker measurements refused for lack of a track slot 5"));
+
+    // A roomier tracker admits B and publishes its rows without an upstream-loss indication.
+    let two_slots = oa_track::TrackerConfig {
+        max_tracks: 2,
+        ..DEFAULT_CONFIG
+    };
+    let recovered =
+        track_and_alert(&traffic, &two_slots, &none, &set, ridge_floors(), None, 0).unwrap();
+    assert_eq!(recovered.tracker_capacity_refused, 0);
+    assert_eq!(recovered.totals.rows_lost_upstream, 0);
+    assert!(recovered.totals.rows > refused.totals.rows);
+    assert_eq!(recovered.final_net, "RUNNING");
+
+    // A refusal after the last tick still appears in the run report and final state.
+    let mut final_gap = approach(0x801, true);
+    final_gap.truncate(11);
+    let mut b = meas(10, 0x802, 13.41, 144.81, 100.0, 2000, -700);
+    b.toa_ns += S / 2;
+    final_gap.push(b);
+    final_gap.sort_by_key(|m| m.toa_ns);
+    let final_loss =
+        track_and_alert(&final_gap, &one_slot, &none, &set, ridge_floors(), None, 0).unwrap();
+    assert_eq!(final_loss.tracker_capacity_refused, 1);
+    assert_eq!(final_loss.totals.rows_lost_upstream, 0);
+    assert_eq!(final_loss.final_net, "DEGRADED: INPUT MISSING");
+}
+
 // REQ: OA-MSAW-038
 #[test]
 fn guam_synthetic_with_an_inhibition_has_no_alert_and_the_inhibition_is_in_the_output() {
@@ -970,6 +1028,7 @@ fn summary_of(r: &Record, set: &Settings) -> String {
         alert_overflow: r.alert_overflow,
         skip_overflow: r.skip_overflow,
         tracker_overflow: r.tracker_overflow,
+        tracker_capacity_refused: r.tracker_capacity_refused,
         measurements: 0,
         tick_rows: r.tick_rows,
         rows_skipped: r.rows_skipped,

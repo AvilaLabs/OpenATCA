@@ -307,7 +307,7 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
     let mut cycles = BTreeMap::new();
     cycles.insert("RUNNING".to_string(), 3598u64);
     cycles.insert("DEGRADED: BUDGET EXCEEDED".to_string(), 2u64);
-    let input = |l: &[Alert], t: CycleStats, log_overflow: u64| {
+    let input = |l: &[Alert], t: CycleStats, log_overflow: u64, capacity_refused: u64| {
         summary_text(&SummaryInput {
             cfg: &s.ca,
             alerts: l,
@@ -317,6 +317,7 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
             log_overflow,
             event_overflow: 0,
             tracker_overflow: 0,
+            tracker_capacity_refused: capacity_refused,
             measurements: 10,
             tick_rows: 20,
             rows_skipped: 0,
@@ -335,8 +336,8 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
         cycles: 3600,
         ..CycleStats::default()
     };
-    let t = input(&list, ok, 0);
-    assert_eq!(t, input(&rev, ok, 0));
+    let t = input(&list, ok, 0, 0);
+    assert_eq!(t, input(&rev, ok, 0, 0));
     for hidden in [
         "ABCDEF", "123456", "AAAA", "BBBB", "CCCC", "DDDD", "EEEE", "FFFF",
     ] {
@@ -428,12 +429,17 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
             },
         ),
     ] {
-        let t = input(&[], tot, 0);
+        let t = input(&[], tot, 0, 0);
         assert!(t.contains("net state: DEGRADED"), "{what}");
         assert!(t.contains(what), "{what}");
     }
-    let t = input(&[], ok, 2);
+    let t = input(&[], ok, 2, 0);
     assert!(t.contains("net state: DEGRADED") && t.contains("alerts lost to a full log: 2"));
+    let capacity_loss = input(&[], ok, 0, 2);
+    assert!(capacity_loss.contains("net state: DEGRADED"));
+    assert!(
+        capacity_loss.contains("valid tracker measurements refused for lack of a track slot: 2")
+    );
     // Names.
     assert_eq!(flags_text(AF_COAST | AF_RADAR_ONLY), "coast|radar_only");
     assert_eq!(flags_text(0), "");
@@ -640,6 +646,43 @@ fn synthetic_tracker_crossing_and_vertical_control_are_scored_against_declared_w
     let lead_ns = results[0].lead_ns.expect("scored warning lead time");
     assert!(lead_ns >= 20 * S, "lead {lead_ns} ns");
     assert_eq!(results[1].outcome, Outcome::Quiet);
+}
+
+#[test]
+fn tracker_capacity_refusal_degrades_from_the_observation_cycle_and_is_counted() {
+    let set = parse_config(DEV_CFG).unwrap();
+    let none = GroundTable::new();
+    let mut traffic = Vec::new();
+    for t in 0..=20 {
+        traffic.push(meas(t, 0x100001, 70.0 * t as f64, 0.0, 70.0, 20_000));
+        if t >= 10 {
+            traffic.push(meas(t, 0x100002, 60_000.0, 150_000.0, 0.0, 20_000));
+        }
+    }
+    let one_slot = TrackerConfig {
+        max_tracks: 1,
+        ..DEFAULT_CONFIG
+    };
+    let refused = track_and_alert(&traffic, &one_slot, &none, &set).unwrap();
+    assert_eq!(refused.tracker_capacity_refused, 11);
+    assert_eq!(refused.totals.rows_lost_upstream, 11);
+    assert!(refused.net_cycles.contains_key("RUNNING"));
+    assert!(refused
+        .net_cycles
+        .keys()
+        .any(|state| state == "DEGRADED: INPUT MISSING"));
+    assert_eq!(refused.final_net, "DEGRADED: INPUT MISSING");
+
+    // With room for both identities, B is admitted and contributes rows without a refusal.
+    let two_slots = TrackerConfig {
+        max_tracks: 2,
+        ..DEFAULT_CONFIG
+    };
+    let recovered = track_and_alert(&traffic, &two_slots, &none, &set).unwrap();
+    assert_eq!(recovered.tracker_capacity_refused, 0);
+    assert_eq!(recovered.totals.rows_lost_upstream, 0);
+    assert!(recovered.totals.tracks > refused.totals.tracks);
+    assert_eq!(recovered.final_net, "RUNNING");
 }
 
 // REQ: OA-CA-010

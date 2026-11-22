@@ -181,6 +181,8 @@ pub struct SummaryInput<'a> {
     pub log_overflow: u64,
     pub event_overflow: u64,
     pub tracker_overflow: u64,
+    /// Valid tracker measurements refused because no track slot was available.
+    pub tracker_capacity_refused: u64,
     pub measurements: u64,
     pub tick_rows: u64,
     /// Rows of the tracker's output left out for a missing column.
@@ -221,6 +223,7 @@ pub fn degraded(i: &SummaryInput) -> bool {
         + i.log_overflow
         + i.event_overflow
         + i.tracker_overflow
+        + i.tracker_capacity_refused
         > 0
 }
 
@@ -394,6 +397,10 @@ pub fn summary_text(i: &SummaryInput) -> String {
         ("altitude-loss events lost to a full log", i.event_overflow),
         ("net state reports refused by the table", t.net_refused),
         ("tracker output rows lost", i.tracker_overflow),
+        (
+            "valid tracker measurements refused for lack of a track slot",
+            i.tracker_capacity_refused,
+        ),
         (
             "tracker output rows left out: a column missing",
             i.rows_skipped,

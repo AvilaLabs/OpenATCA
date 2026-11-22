@@ -20,15 +20,17 @@ use oa_safety::inhibit::{
     events_take, inhibit_create, inhibit_expire, inhibits_new, suppressed_clear, suppressed_log,
     suppressed_overflow, Event, EventKind, InhibitRequest, InhibitTable,
 };
-use oa_safety::net::{net_status, state_table_new, NetId, StateTable};
+use oa_safety::net::{
+    net_status, state_report, state_table_new, Area, NetId, NetReport, Reason, StateTable,
+};
 use oa_sealed::Sealed;
 use oa_sha256::{sha256, to_hex};
 use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
 use oa_track::score::{interval_stats, scoring_config, split_reports, IntervalStats};
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
-    tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG, O_COAST, O_HAS_ALT,
-    O_IDENTITY_UNCONFIRMED, O_TICK, O_UNCERTAIN,
+    tracker_stats, tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG,
+    O_COAST, O_HAS_ALT, O_IDENTITY_UNCONFIRMED, O_TICK, O_UNCERTAIN,
 };
 
 use crate::args::Args;
@@ -104,6 +106,8 @@ pub struct Record {
     pub alert_overflow: u64,
     pub skip_overflow: u64,
     pub tracker_overflow: u64,
+    /// Valid measurements refused because the track table had no free slot.
+    pub tracker_capacity_refused: u64,
     pub tick_rows: u64,
     /// Rows of the tracker's output left out for a missing column.
     pub rows_skipped: u64,
@@ -180,6 +184,9 @@ struct Feed<'a> {
     tick_rows: u64,
     rows_skipped: u64,
     last_overflow: u64,
+    tracker_capacity_refused: u64,
+    capacity_refused_seen: u64,
+    capacity_refused_by_time: BTreeMap<i64, u64>,
     /// The number of tracks the core evaluates in a cycle (its budget).
     st_track_budget: usize,
     /// The times of the latest barometric altitudes of each aircraft (a few, oldest first), for the
@@ -219,6 +226,17 @@ fn flush(f: &mut Feed) {
     if f.error.is_some() {
         f.batch.clear();
         return;
+    }
+    let ready: Vec<(i64, u64)> = f
+        .capacity_refused_by_time
+        .range(..=t)
+        .map(|(&at, &count)| (at, count))
+        .collect();
+    for (at, count) in ready {
+        f.capacity_refused_by_time.remove(&at);
+        // A refused observation at `at` cannot affect earlier tick cycles. Charge it to
+        // the first cycle at or after the observation via the existing upstream-loss path.
+        msaw_note_lost_input(&mut f.st, count);
     }
     inhibit_expire(&mut f.inh, t);
     // Over the budget the tracks are ranked by height above the highest terrain of their own cell,
@@ -582,6 +600,9 @@ pub fn track_and_alert(
         tick_rows: 0,
         rows_skipped: 0,
         last_overflow: 0,
+        tracker_capacity_refused: 0,
+        capacity_refused_seen: 0,
+        capacity_refused_by_time: BTreeMap::new(),
         st_track_budget: set.msaw.track_budget,
         alt_times: std::collections::HashMap::new(),
         t0_ns,
@@ -627,6 +648,14 @@ pub fn track_and_alert(
             f.alt_times.entry(m.addr).or_default().push(m.toa_ns);
         }
         tracker_update(&mut t, m, &mut out);
+        let refused = tracker_stats(&t).capacity_refused;
+        let newly_refused = refused.saturating_sub(f.capacity_refused_seen);
+        if newly_refused > 0 {
+            f.capacity_refused_seen = refused;
+            f.tracker_capacity_refused = f.tracker_capacity_refused.saturating_add(newly_refused);
+            let count = f.capacity_refused_by_time.entry(m.toa_ns).or_default();
+            *count = count.saturating_add(newly_refused);
+        }
         if output_len(&out) > drain {
             consume(&mut f, &out);
             output_clear(&mut out);
@@ -644,7 +673,29 @@ pub fn track_and_alert(
     }
     msaw_finish(&mut f.st, &mut f.alerts);
     f.all.extend_from_slice(&f.alerts.items);
-    let final_net = state_text(&net_status(&f.net, &f.inh, NetId::Msaw, f.last_t).state);
+    let mut final_t = f.last_t;
+    if let Some((&last_fault_ns, _)) = f.capacity_refused_by_time.last_key_value() {
+        // No tracker tick followed the final refusal. Report the run-level shortfall at its
+        // observation time so the final status does not remain RUNNING.
+        final_t = final_t.max(last_fault_ns);
+        let pending = f
+            .capacity_refused_by_time
+            .values()
+            .copied()
+            .fold(0u64, u64::saturating_add);
+        let _ = state_report(
+            &mut f.net,
+            NetId::Msaw,
+            NetReport::Degraded {
+                reason: Reason::InputMissing,
+                area: Area::Whole,
+                count: u32::try_from(pending).unwrap_or(u32::MAX),
+            },
+            last_fault_ns,
+            last_fault_ns,
+        );
+    }
+    let final_net = state_text(&net_status(&f.net, &f.inh, NetId::Msaw, final_t).state);
     let diag0 = cpu_seconds();
     let mut setter_m = BTreeMap::new();
     for a in &f.all {
@@ -669,6 +720,7 @@ pub fn track_and_alert(
         alert_overflow: f.alerts.overflow,
         skip_overflow: f.skips.overflow,
         tracker_overflow: out.overflow,
+        tracker_capacity_refused: f.tracker_capacity_refused,
         tick_rows: f.tick_rows,
         rows_skipped: f.rows_skipped,
         alt_age_unknown: f.alt_age_unknown,
@@ -1342,6 +1394,7 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         alert_overflow: rec.alert_overflow,
         skip_overflow: rec.skip_overflow,
         tracker_overflow: rec.tracker_overflow,
+        tracker_capacity_refused: rec.tracker_capacity_refused,
         measurements: meas.len() as u64,
         tick_rows: rec.tick_rows,
         rows_skipped: rec.rows_skipped,

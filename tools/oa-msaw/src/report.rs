@@ -459,6 +459,8 @@ pub struct SummaryInput<'a> {
     pub alert_overflow: u64,
     pub skip_overflow: u64,
     pub tracker_overflow: u64,
+    /// Valid tracker measurements refused because no track slot was available.
+    pub tracker_capacity_refused: u64,
     pub measurements: u64,
     pub tick_rows: u64,
     /// Rows of the tracker's output left out for a missing column.
@@ -774,6 +776,11 @@ pub fn summary_text(i: &SummaryInput) -> String {
         o,
         "measurements {}, tracker rows (ticks) {}, tracker rows lost {}, columns missing {}",
         i.measurements, i.tick_rows, i.tracker_overflow, i.rows_skipped
+    );
+    let _ = writeln!(
+        o,
+        "valid tracker measurements refused for lack of a track slot {}",
+        i.tracker_capacity_refused
     );
     let _ = writeln!(o, "cycles {} (out of order {})", t.cycles, t.out_of_order);
     let _ = writeln!(o, "track rows {}", t.rows);
