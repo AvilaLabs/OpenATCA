@@ -4,7 +4,7 @@
 use oa_airspace::model::{empty_model, Meta};
 use oa_ca::{
     alert_log_new, ca_cycle, ca_new, ca_open, event_log_new, Area, CaConfig, CaTrack, Volume,
-    AIRBORNE, MAX_VOLUMES,
+    AF_COAST, AIRBORNE, F_COAST, F_IDENTITY_UNCONFIRMED, F_UNCERTAIN, MAX_VOLUMES,
 };
 use oa_display::raster::frame_digest;
 use oa_display::safety::{FeedState, FeedStatus};
@@ -18,9 +18,9 @@ use oa_scope_replay::frame::{
 use oa_scope_replay::rows::{Callsigns, RowStore, DEFAULT_CONVERT};
 use oa_scope_replay::store::{store_add, store_finish};
 use oa_track::{
-    output_new, tracker_advance, tracker_new, tracker_newest_update_ns, tracker_stats,
-    tracker_update, Measurement, TrackOutput, Tracker, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32,
-    NO_IDENT, O_REACQUIRED,
+    output_new, r95_m_of, tracker_advance, tracker_new, tracker_newest_update_ns, tracker_predict,
+    tracker_stats, tracker_update, Measurement, TrackOutput, Tracker, DEFAULT_CONFIG, M_HAS_VEL,
+    NONE_I32, NO_IDENT, O_COAST, O_HAS_ALT, O_IDENTITY_UNCONFIRMED, O_REACQUIRED, O_UNCERTAIN,
 };
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -65,6 +65,8 @@ const SYNTHETIC_STREAM: [(i32, bool); 15] = [
     (42, true),
     (43, true),
 ];
+const VISIBLE_CA_STREAM: [(i32, bool); 5] =
+    [(0, true), (1, true), (2, true), (20, false), (21, true)];
 
 struct TempCheckpointFiles {
     dir: PathBuf,
@@ -208,6 +210,31 @@ fn ca_active(drill: &Drill) -> String {
     let active = ca_open(&drill.ca)
         .iter()
         .map(|alert| format!("{}:{}:{}", alert.addr_a, alert.addr_b, alert.start_ns))
+        .collect::<Vec<_>>()
+        .join(",");
+    if active.is_empty() {
+        "-".to_owned()
+    } else {
+        active
+    }
+}
+
+fn ca_active_detail(drill: &Drill) -> String {
+    let active = ca_open(&drill.ca)
+        .iter()
+        .map(|alert| {
+            format!(
+                "{}:{}:{}:{}:{}:{}:{}:{}",
+                alert.addr_a,
+                alert.addr_b,
+                alert.start_ns,
+                alert.end_ns,
+                alert.ticks_conflict,
+                alert.ticks_current,
+                alert.ticks_unevaluated,
+                alert.flags
+            )
+        })
         .collect::<Vec<_>>()
         .join(",");
     if active.is_empty() {
@@ -585,6 +612,16 @@ fn validate_worker_ack(line: &str, expected_second: i32) {
     );
 }
 
+fn assert_ca_ack_state(line: &str, second: i32, transition: &str, active: &str) {
+    let fields: Vec<_> = line.split_whitespace().collect();
+    assert_eq!(fields[1].parse::<i32>().ok(), Some(second));
+    assert_eq!(fields[6], transition, "CA transition at {second}s: {line}");
+    assert!(
+        fields[7].starts_with(active),
+        "active CA identity at {second}s: {line}"
+    );
+}
+
 struct Drill {
     tracker: Tracker,
     out: TrackOutput,
@@ -745,6 +782,13 @@ impl Drill {
         }
     }
 
+    fn warmup_visible_ca(&mut self) {
+        for second in [-3, -2, -1] {
+            self.offer_with_vrate(A, 1, second, 0);
+            self.offer_with_vrate(B, 2, second, 0);
+        }
+    }
+
     fn process(&mut self, second: i32, live: bool) -> String {
         let ca_transitions = self.conflict_step(second);
         if live {
@@ -778,7 +822,160 @@ impl Drill {
         format!("MACHINE_LOSS_ACK {second} {digest} {ids} {warning_count} {conflict_count} {ca_transitions} {active}")
     }
 
+    fn visible_ca_rows(&self, at_ns: i64) -> Vec<CaTrack> {
+        let targets = targets_columns(&self.scope.set);
+        let mut rows = Vec::with_capacity(targets.addr.len());
+        for (index, &addr) in targets.addr.iter().enumerate() {
+            let (row, confirmed, newest_ns) = tracker_predict(&self.tracker, addr, at_ns)
+                .expect("every displayed identity has a predicted tracker row");
+            assert!(confirmed, "scope target {addr} is not a confirmed track");
+            assert_eq!(row.addr, addr);
+            assert!(newest_ns <= at_ns, "track {addr} comes from the future");
+            assert_eq!(targets.lat_e7[index], row.lat_e7);
+            assert_eq!(targets.lon_e7[index], row.lon_e7);
+
+            let mut flags = 0;
+            if row.flags & O_COAST != 0 {
+                flags |= F_COAST;
+                assert_ne!(targets.flags[index] & T_COAST, 0);
+            } else {
+                assert_eq!(targets.flags[index] & T_COAST, 0);
+            }
+            if row.flags & O_UNCERTAIN != 0 {
+                flags |= F_UNCERTAIN;
+                assert_ne!(targets.flags[index] & oa_display::traffic::T_UNCERTAIN, 0);
+            } else {
+                assert_eq!(targets.flags[index] & oa_display::traffic::T_UNCERTAIN, 0);
+            }
+            if row.flags & O_IDENTITY_UNCONFIRMED != 0 {
+                flags |= F_IDENTITY_UNCONFIRMED;
+            }
+            let altitude = if row.flags & O_HAS_ALT != 0 {
+                assert_ne!(targets.alt_ft[index], oa_display::traffic::NO_ALT);
+                assert!(row.alt_ft.is_finite() && row.vrate_fpm.is_finite());
+                row.alt_ft
+            } else {
+                assert_eq!(targets.alt_ft[index], oa_display::traffic::NO_ALT);
+                f32::NAN
+            };
+            let r95_m = r95_m_of(row.pos_cov_m2);
+            assert!(r95_m.is_finite() && r95_m >= 0.0);
+            assert!(row.vel_east_mps.is_finite() && row.vel_north_mps.is_finite());
+            rows.push(CaTrack {
+                lat_deg: f64::from(row.lat_e7) / 10_000_000.0,
+                lon_deg: f64::from(row.lon_e7) / 10_000_000.0,
+                addr,
+                vel_east_mps: row.vel_east_mps,
+                vel_north_mps: row.vel_north_mps,
+                r95_m: r95_m as f32,
+                alt_ft: altitude,
+                vrate_fpm: if row.flags & O_HAS_ALT != 0 {
+                    row.vrate_fpm
+                } else {
+                    f32::NAN
+                },
+                flags,
+                ground: AIRBORNE,
+            });
+        }
+        assert_eq!(rows.len(), targets.addr.len());
+        assert_eq!(
+            rows.len(),
+            2,
+            "fixture CA pair must use both visible tracks"
+        );
+        rows
+    }
+
+    fn process_visible_ca(&mut self, second: i32, live: bool) -> String {
+        if live {
+            self.offer_with_vrate(A, 1, second, 0);
+            self.offer_with_vrate(B, 2, second, 0);
+            self.feeds[0].state = FeedState::Live;
+            self.feeds[1].state = FeedState::Live;
+        } else {
+            let elapsed_s = second.saturating_sub(2).max(0);
+            let elapsed_ms = u32::try_from(elapsed_s)
+                .unwrap_or(u32::MAX)
+                .saturating_mul(1_000);
+            self.feeds[0].state = FeedState::Lost { age_ms: elapsed_ms };
+            self.feeds[1].state = FeedState::Lost { age_ms: elapsed_ms };
+        }
+        let at_ns = EPOCH + i64::from(second) * S;
+        self.frame_inner(i64::from(second), None);
+        assert_eq!(
+            self.out.overflow, 0,
+            "tracker output overflowed at {second}s"
+        );
+        let rows = self.visible_ca_rows(at_ns);
+        if !live {
+            assert!(rows.iter().all(|row| row.flags & F_COAST != 0));
+        }
+        let alert_count = self.ca_alerts.items.len();
+        let out = ca_cycle(
+            &mut self.ca,
+            at_ns,
+            &rows,
+            &mut self.ca_alerts,
+            &mut self.ca_events,
+            &mut self.states,
+        );
+        assert_eq!(out.work_short, 0, "CA work budget exhausted at {second}s");
+        assert_eq!(out.input_short, 0, "CA input was lost at {second}s");
+        assert_eq!(
+            self.ca_alerts.overflow, 0,
+            "CA alert log overflowed at {second}s"
+        );
+        if !live {
+            let alerts = ca_open(&self.ca);
+            assert_eq!(alerts.len(), 1, "source-silent CA alert ended at {second}s");
+            assert_eq!((alerts[0].addr_a, alerts[0].addr_b), (A, B));
+            assert_ne!(alerts[0].flags & AF_COAST, 0);
+        }
+        let mut transitions = Vec::new();
+        if out.stats.opened > 0 {
+            transitions.extend(
+                ca_open(&self.ca)
+                    .iter()
+                    .filter(|alert| alert.start_ns == at_ns)
+                    .map(|alert| {
+                        format!("OPEN:{}:{}:{}", alert.addr_a, alert.addr_b, alert.start_ns)
+                    }),
+            );
+        }
+        for alert in self.ca_alerts.items.iter().skip(alert_count) {
+            transitions.push(format!(
+                "CLOSE:{}:{}:{}",
+                alert.addr_a, alert.addr_b, alert.start_ns
+            ));
+        }
+        let ca_transitions = if transitions.is_empty() {
+            "-".to_owned()
+        } else {
+            transitions.join(",")
+        };
+        let digest = oa_sha256::to_hex(&frame_digest(&self.scope.spec, &self.scope.buf).unwrap());
+        let ids = targets_columns(&self.scope.set)
+            .addr
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let warnings = warning_count(&self.scope);
+        let conflict_count = targets_columns(&self.scope.set)
+            .flags
+            .iter()
+            .filter(|&&flags| flags & oa_display::traffic::T_CS_CONFLICT != 0)
+            .count();
+        let active = ca_active_detail(self);
+        format!("MACHINE_LOSS_ACK {second} {digest} {ids} {warnings} {conflict_count} {ca_transitions} {active}")
+    }
+
     fn offer(&mut self, addr: u32, sensor: u16, second: i32) {
+        self.offer_with_vrate(addr, sensor, second, NONE_I32);
+    }
+
+    fn offer_with_vrate(&mut self, addr: u32, sensor: u16, second: i32, vrate_fpm: i32) {
         tracker_update(
             &mut self.tracker,
             &Measurement {
@@ -790,7 +987,7 @@ impl Drill {
                 lat_e7: LAT + i32::from(sensor) * 80_000,
                 lon_e7: LON + second * 10_000,
                 alt_ft: 12_000,
-                vrate_fpm: NONE_I32,
+                vrate_fpm,
                 addr,
                 alt_quant_ft: 25,
                 sensor,
@@ -865,7 +1062,17 @@ fn machine_loss_worker_process() {
     let mut input = BufReader::new(stdin.lock());
     let mut line_bytes = Vec::with_capacity(MAX_WORKER_LINE_BYTES);
     let mut drill = Drill::new();
-    drill.warmup();
+    let visible_ca = std::env::var_os("OA_MACHINE_LOSS_VISIBLE_CA").is_some();
+    if visible_ca {
+        drill.warmup_visible_ca();
+    } else {
+        drill.warmup();
+    }
+    let stream = if visible_ca {
+        &VISIBLE_CA_STREAM[..]
+    } else {
+        &SYNTHETIC_STREAM[..]
+    };
     let mut step_no = 0usize;
     let mut publisher_fence = advance_generation(
         INITIAL_FENCE,
@@ -888,7 +1095,7 @@ fn machine_loss_worker_process() {
         };
         let retained_fence = checkpoint.fence;
         for (index, &(second, live)) in checkpoint.steps.iter().enumerate() {
-            if SYNTHETIC_STREAM.get(step_no) != Some(&(second, live)) {
+            if stream.get(step_no) != Some(&(second, live)) {
                 println!("MACHINE_LOSS_ERROR checkpoint_prefix_mismatch");
                 let _ = std::io::stdout().flush();
                 return;
@@ -910,7 +1117,12 @@ fn machine_loss_worker_process() {
                 }
             };
             step_no += 1;
-            println!("{}", drill.process(second, live));
+            let ack = if visible_ca {
+                drill.process_visible_ca(second, live)
+            } else {
+                drill.process(second, live)
+            };
+            println!("{ack}");
             let _ = std::io::stdout().flush();
         }
         if publisher_fence != retained_fence {
@@ -936,7 +1148,7 @@ fn machine_loss_worker_process() {
             break;
         };
         let (second, live) = match command {
-            WorkerCommand::Stop if step_no == SYNTHETIC_STREAM.len() => break,
+            WorkerCommand::Stop if step_no == stream.len() => break,
             WorkerCommand::Stop => {
                 println!("MACHINE_LOSS_ERROR premature_stop");
                 let _ = std::io::stdout().flush();
@@ -944,7 +1156,7 @@ fn machine_loss_worker_process() {
             }
             WorkerCommand::Step { second, feed_live } => (second, feed_live),
         };
-        if SYNTHETIC_STREAM.get(step_no) != Some(&(second, live)) {
+        if stream.get(step_no) != Some(&(second, live)) {
             println!("MACHINE_LOSS_ERROR stream_order_or_record_mismatch");
             let _ = std::io::stdout().flush();
             break;
@@ -966,7 +1178,11 @@ fn machine_loss_worker_process() {
             }
         };
         step_no = step_no.saturating_add(1);
-        let ack = drill.process(second, live);
+        let ack = if visible_ca {
+            drill.process_visible_ca(second, live)
+        } else {
+            drill.process(second, live)
+        };
         println!("{ack}");
         let _ = std::io::stdout().flush();
     }
@@ -985,16 +1201,28 @@ impl Replica {
     }
 
     fn start_with_checkpoint(checkpoint: Option<&std::path::Path>) -> Self {
+        Self::start_mode(checkpoint, false)
+    }
+
+    fn start_visible_ca(checkpoint: Option<&std::path::Path>) -> Self {
+        Self::start_mode(checkpoint, true)
+    }
+
+    fn start_mode(checkpoint: Option<&std::path::Path>, visible_ca: bool) -> Self {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args(["--exact", "machine_loss_worker_process", "--nocapture"])
             .env("OA_MACHINE_LOSS_WORKER", "1")
             .env_remove("OA_MACHINE_LOSS_CHECKPOINT")
+            .env_remove("OA_MACHINE_LOSS_VISIBLE_CA")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         if let Some(path) = checkpoint {
             command.env("OA_MACHINE_LOSS_CHECKPOINT", path);
+        }
+        if visible_ca {
+            command.env("OA_MACHINE_LOSS_VISIBLE_CA", "1");
         }
         let mut child = command.spawn().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
@@ -1128,6 +1356,66 @@ fn durable_prefix_recovers_in_fresh_process_and_refuses_damage() {
             local_reference_step(&mut reference, second, live),
             "recovered continuation diverged at {second}s"
         );
+    }
+    let status = recovered.shutdown().unwrap();
+    assert!(status.success());
+}
+
+// REQ: OA-CA-003, OA-CA-009, OA-TRK-343
+#[test]
+fn visible_tracker_ca_alert_survives_silent_durable_replacement() {
+    let prefix = &VISIBLE_CA_STREAM[..RECOVERY_MAX_RECORDS];
+    let checkpoint = encode_recovery_checkpoint(prefix, INITIAL_FENCE, RECOVERY_GENERATION);
+    let files = TempCheckpointFiles::new();
+    let path = files.write("visible-ca-prefix.oarc", &checkpoint);
+    let active = format!("{}:{}:{}:", A, B, EPOCH);
+    let opened = format!("OPEN:{}:{}:{}", A, B, EPOCH);
+
+    let mut serving = Replica::start_visible_ca(None);
+    let mut reference = Drill::new();
+    reference.warmup_visible_ca();
+    let mut prefix_ack = Vec::with_capacity(prefix.len());
+    for (index, &(second, live)) in prefix.iter().enumerate() {
+        let ack = serving.step(second, live);
+        let expected = reference.process_visible_ca(second, live);
+        assert_eq!(ack, expected, "serving output diverged at {second}s");
+        assert_ca_ack_state(
+            &ack,
+            second,
+            if index == 0 { &opened } else { "-" },
+            &active,
+        );
+        prefix_ack.push(ack);
+    }
+
+    serving.child.kill().unwrap();
+    let killed_status = wait_bounded(&mut serving.child).unwrap();
+    assert!(!killed_status.success());
+    drop(serving);
+
+    let mut recovered = Replica::start_visible_ca(Some(&path));
+    for (index, &(second, _)) in prefix.iter().enumerate() {
+        let ack = recovered.recovered_prefix_line(second);
+        assert_eq!(
+            ack, prefix_ack[index],
+            "recovered prefix diverged at {second}s"
+        );
+        assert_ca_ack_state(
+            &ack,
+            second,
+            if index == 0 { &opened } else { "-" },
+            &active,
+        );
+    }
+    for &(second, live) in VISIBLE_CA_STREAM.iter().skip(prefix.len()) {
+        let ack = recovered.step(second, live);
+        let expected = reference.process_visible_ca(second, live);
+        assert_eq!(ack, expected, "silent recovery diverged at {second}s");
+        assert_ca_ack_state(&ack, second, "-", &active);
+        if !live {
+            let fields: Vec<_> = ack.split_whitespace().collect();
+            assert!(fields[4].parse::<usize>().is_ok_and(|count| count > 0));
+        }
     }
     let status = recovered.shutdown().unwrap();
     assert!(status.success());

@@ -4,6 +4,8 @@ Run with:
 
 ```sh
 cargo test -p oa-scope-replay --test outage_drill serving_process_loss_promotes_synchronized_scope_replica -- --nocapture
+cargo test -p oa-scope-replay --test outage_drill durable_prefix_recovers_in_fresh_process_and_refuses_damage -- --nocapture
+cargo test -p oa-scope-replay --test outage_drill visible_tracker_ca_alert_survives_silent_durable_replacement -- --nocapture
 ```
 
 The test launches two child copies of its own Rust integration-test executable. Each child
@@ -50,3 +52,13 @@ the reader uses `oa_sealed::open`. Wrong-digest and internally truncated prefixe
 the fresh worker and reported with a reason. Source timestamps are synthetic; the test does not
 measure wall-clock recovery time or claim power-loss durability, production checkpoint
 compatibility, a production publisher-generation schema, or operational failover.
+
+The separate `visible_tracker_ca_alert_survives_silent_durable_replacement` fixture obtains its
+CA rows from the identities actually present in the scope target set, then retrieves those
+confirmed tracks with `tracker_predict`; coordinates, velocity, covariance, altitude, vertical
+rate and coast flags come from those rows. The two distinct synthetic addresses have finite
+velocity, altitude and zero vertical rate, and their latitude inputs differ by 0.008 degrees
+(about 0.9 km); the fixture CA horizontal/vertical thresholds are 1,300 m and 300 ft. It requires
+that alert to open before process loss, remain active across an 18-second source-silent frame, and
+match after a fresh process replays the durable prefix and resumes. This is a synthetic geometry
+check, not a claim about operational traffic or controller display of CA alerts.
