@@ -2325,6 +2325,64 @@ fn resilience_approach_warns_when_the_crossing_enters_the_terminal_horizon() {
     assert!((alert.ttv_min_s - 14.5).abs() < 0.01);
 }
 
+// REQ: OA-MSAW-010
+#[test]
+fn resilience_linear_descent_sweep_matches_warning_and_lookahead_edges() {
+    let config = cfg();
+    let floor_ft = 1400.0;
+    let descent_ft_s = 10.0;
+    let terrain = flat(900, FLOOR_NONE);
+
+    // The fixture supplies a constant terrain floor and a constant -600 ft/min descent.
+    // Independent arithmetic gives exact floor-crossing times; these straddle the 20 s
+    // warning boundary and the 60 s prediction horizon by whole five-second sample intervals.
+    for (case, crossing_s) in [15.0_f64, 20.0, 25.0, 75.0].into_iter().enumerate() {
+        let mut r = rig(&config);
+        let altitude_ft = floor_ft + descent_ft_s * crossing_s;
+        let track = tr(
+            u32::try_from(case + 1).unwrap(),
+            40.0,
+            -88.0,
+            0.0,
+            0.0,
+            altitude_ft as f32,
+            -600.0,
+        );
+        let out = cycle(&mut r, S, &[track], &terrain);
+        let inside_prediction = crossing_s <= config.look_ahead_s;
+        assert_eq!(
+            out.stats.violations,
+            u64::from(inside_prediction),
+            "t={crossing_s}"
+        );
+
+        if inside_prediction {
+            let alert = &msaw_open(&r.st)[0];
+            let expected_warning = crossing_s <= config.warning_s;
+            assert_eq!(
+                alert.peak,
+                if expected_warning {
+                    Grade::Warning
+                } else {
+                    Grade::Caution
+                }
+            );
+            assert_eq!(
+                alert.warning_ns.is_some(),
+                expected_warning,
+                "t={crossing_s}"
+            );
+            assert!(
+                (alert.ttv_min_s - crossing_s).abs() < 0.01,
+                "t={crossing_s}: {}",
+                alert.ttv_min_s
+            );
+        } else {
+            assert!(msaw_open(&r.st).is_empty(), "t={crossing_s}");
+        }
+    }
+}
+
 // REQ: OA-MSAW-010, OA-MSAW-015, OA-MSAW-070
 #[test]
 fn resilience_go_around_warns_before_reaching_high_ground_past_the_runway() {
