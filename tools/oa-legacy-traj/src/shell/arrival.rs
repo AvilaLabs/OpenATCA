@@ -1398,10 +1398,12 @@ pub(crate) fn report(
         }
     }
     writeln!(text, "route messages excluded: outside selected fix or repeated fix {}; ambiguous same-time routes {}; missing, old, on-ground or conflicting ADS-B state {}; source-flag stale ADS-B state {}; outside issue distance {}; unresolved forward route {}", plan.no_meter, plan.ambiguous_routes, plan.no_track, plan.stale_source_track, plan.outside_issue_window, plan.unusable_route).map_err(|e| e.to_string())?;
-    for (((mins, h), v), coverage) in [5, 10, 20]
+    let scalar_errors = totals.horizontal.iter_mut().zip(&mut totals.vertical);
+    let directional_errors = totals.along_track.iter_mut().zip(&mut totals.cross_track);
+    for (((mins, (h, v)), (along, cross)), coverage) in [5, 10, 20]
         .into_iter()
-        .zip(&mut totals.horizontal)
-        .zip(&mut totals.vertical)
+        .zip(scalar_errors)
+        .zip(directional_errors)
         .zip(&totals.coverage)
     {
         writeln!(
@@ -1430,22 +1432,17 @@ pub(crate) fn report(
             }
         )
         .map_err(|e| e.to_string())?;
-        let index = match mins {
-            5 => 0,
-            10 => 1,
-            _ => 2,
-        };
         writeln!(
             text,
             "{}\n{}",
             summarize_direction(
                 &format!("{mins} min along-track error (m; +ahead)"),
-                &mut totals.along_track[index],
+                along,
                 totals.issued
             ),
             summarize_direction(
                 &format!("{mins} min cross-track error (m; +right)"),
-                &mut totals.cross_track[index],
+                cross,
                 totals.issued
             )
         )
