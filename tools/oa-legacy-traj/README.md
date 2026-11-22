@@ -52,7 +52,8 @@ excluded.
 The legacy route table omits published procedure altitude windows. Synthetic checks exercise waypoint crossing
 feasibility; this is not a fitted vertical solver. Coverage at each horizon is divided by every issued
 forecast; missing predicted positions and missing truth interpolation are counted separately.
-Forecast eligibility is determined before future truth is read.
+After flow selection, issue eligibility uses cutoff-time route and track observations.
+Scoring queries future truth only after freezing the issue cohort.
 
 The pure core also exposes an opt-in wind route forecast that requires explicit true airspeed and
 one typed, cutoff-safe wind vector for every leg. It cancels crosswind in the wind triangle and
