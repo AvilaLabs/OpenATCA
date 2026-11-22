@@ -6,6 +6,7 @@ Run with:
 cargo test -p oa-scope-replay --test outage_drill serving_process_loss_promotes_synchronized_scope_replica -- --nocapture
 cargo test -p oa-scope-replay --test outage_drill durable_prefix_recovers_in_fresh_process_and_refuses_damage -- --nocapture
 cargo test -p oa-scope-replay --test outage_drill visible_tracker_ca_alert_survives_silent_durable_replacement -- --nocapture
+cargo test -p oa-scope-replay --test outage_drill crash_after_apply_before_ack_replays_from_verified_prefix -- --nocapture
 cargo test -p oa-scope-replay --test outage_drill poison_input_is_quarantined_before_replacement_application -- --nocapture
 ```
 
@@ -53,6 +54,17 @@ the reader uses `oa_sealed::open`. Wrong-digest and internally truncated prefixe
 the fresh worker and reported with a reason. Source timestamps are synthetic; the test does not
 measure wall-clock recovery time or claim power-loss durability, production checkpoint
 compatibility, a production publisher-generation schema, or operational failover.
+
+The `crash_after_apply_before_ack_replays_from_verified_prefix` fixture restores a three-step
+synthetic prefix into a fresh child, processes the next tracker-to-scope/raster/CA step, and exits
+before returning its success acknowledgement. A distinct bounded marker records that the injected
+point was reached and includes the computed raster and CA identity; it is not an acknowledgement.
+A second fresh child restores the same retained prefix, replays that step, and continues. Its
+ordered outputs are compared with an uninterrupted in-process reference. In this fixture all
+effects are process-local; no external publication or durable post-apply effect can escape. This
+shows deterministic reconstruction from the last fixture checkpoint, not production exactly-once
+processing or a rule for resolving an externally visible but unacknowledged effect. That ambiguous
+case remains open. The fixture uses synthetic source times and makes no wall-clock recovery claim.
 
 The separate `visible_tracker_ca_alert_survives_silent_durable_replacement` fixture obtains its
 CA rows from the identities actually present in the scope target set, then retrieves those

@@ -271,6 +271,7 @@ enum WorkerCommand {
         second: i32,
         feed_live: bool,
         fail_before_apply: bool,
+        crash_after_apply: bool,
     },
     QuarantineSkip {
         key: InputKey,
@@ -308,7 +309,7 @@ fn parse_worker_command(line: &str) -> Option<WorkerCommand> {
             };
             WorkerCommand::Step { second, feed_live }
         }
-        "INPUT" | "FAIL_BEFORE_APPLY" | "QUARANTINE" => {
+        "INPUT" | "FAIL_BEFORE_APPLY" | "CRASH_AFTER_APPLY" | "QUARANTINE" => {
             let key = InputKey {
                 publisher_id: fields.next()?.parse().ok()?,
                 source_id: fields.next()?.parse().ok()?,
@@ -329,6 +330,7 @@ fn parse_worker_command(line: &str) -> Option<WorkerCommand> {
                     second,
                     feed_live,
                     fail_before_apply: command == "FAIL_BEFORE_APPLY",
+                    crash_after_apply: command == "CRASH_AFTER_APPLY",
                 }
             }
         }
@@ -1432,6 +1434,7 @@ fn machine_loss_worker_process() {
                 second,
                 feed_live,
                 fail_before_apply,
+                crash_after_apply,
             } => {
                 let identity = QuarantineRecord {
                     key,
@@ -1481,6 +1484,22 @@ fn machine_loss_worker_process() {
                 } else {
                     drill.process(second, feed_live)
                 };
+                if crash_after_apply {
+                    let fields: Vec<_> = ack.split_whitespace().collect();
+                    println!(
+                        "MACHINE_LOSS_APPLIED_NO_ACK {} {} {} {} {} {} {} {}",
+                        key.publisher_id,
+                        key.source_id,
+                        key.generation,
+                        key.sequence,
+                        oa_sha256::to_hex(&identity.payload_digest),
+                        fields[2],
+                        fields[6],
+                        fields[7]
+                    );
+                    let _ = std::io::stdout().flush();
+                    std::process::exit(87);
+                }
                 println!(
                     "MACHINE_LOSS_INPUT_ACK {} {} {} {} {} {ack}",
                     key.publisher_id,
@@ -1677,6 +1696,10 @@ impl Replica {
         self.input_command("FAIL_BEFORE_APPLY", identity.key, second, live)
     }
 
+    fn crash_after_apply(&mut self, identity: QuarantineRecord, second: i32, live: bool) -> String {
+        self.input_command("CRASH_AFTER_APPLY", identity.key, second, live)
+    }
+
     fn shutdown(&mut self) -> io::Result<ExitStatus> {
         writeln!(self.input, "STOP")?;
         self.input.flush()?;
@@ -1807,6 +1830,77 @@ fn visible_tracker_ca_alert_survives_silent_durable_replacement() {
     }
     let status = recovered.shutdown().unwrap();
     assert!(status.success());
+}
+
+// REQ: OA-CA-003, OA-CA-009, OA-TRK-343
+#[test]
+fn crash_after_apply_before_ack_replays_from_verified_prefix() {
+    let prefix = &VISIBLE_CA_STREAM[..RECOVERY_MAX_RECORDS];
+    let checkpoint = encode_recovery_checkpoint(prefix, INITIAL_FENCE, RECOVERY_GENERATION);
+    let files = TempCheckpointFiles::new();
+    let path = files.write("apply-before-ack-prefix.oarc", &checkpoint);
+
+    let mut reference = Drill::new();
+    reference.warmup_visible_ca();
+    let expected_prefix: Vec<_> = prefix
+        .iter()
+        .map(|&(second, live)| reference.process_visible_ca(second, live))
+        .collect();
+
+    // This child restores the last verified checkpoint, applies the next source record through
+    // tracker, scope, raster digest and CA, then exits before its success acknowledgement.
+    let mut crashed = Replica::start_visible_ca(Some(&path));
+    for (&(second, _), expected) in prefix.iter().zip(&expected_prefix) {
+        assert_eq!(crashed.recovered_prefix_line(second), *expected);
+    }
+    let (second, live) = VISIBLE_CA_STREAM[prefix.len()];
+    let expected_applied = reference.process_visible_ca(second, live);
+    let active = format!("{}:{}:{}:", A, B, EPOCH);
+    assert_ca_ack_state(&expected_applied, second, "-", &active);
+    let identity = input_identity(prefix.len() as u64 + 1, second, live);
+    let fields: Vec<_> = expected_applied.split_whitespace().collect();
+    let marker = crashed.crash_after_apply(identity, second, live);
+    assert_eq!(
+        marker,
+        format!(
+            "MACHINE_LOSS_APPLIED_NO_ACK {} {} {} {} {} {} {} {}",
+            identity.key.publisher_id,
+            identity.key.source_id,
+            identity.key.generation,
+            identity.key.sequence,
+            oa_sha256::to_hex(&identity.payload_digest),
+            fields[2],
+            fields[6],
+            fields[7]
+        )
+    );
+    let status =
+        wait_bounded(&mut crashed.child).expect("injected post-apply crash exits promptly");
+    assert_eq!(
+        status.code(),
+        Some(87),
+        "post-apply crash injection was not exercised"
+    );
+    drop(crashed);
+
+    // The replacement receives only the retained prefix, so it reconstructs the applied-but-
+    // unacknowledged step once in its new process. Compare every output with uninterrupted state.
+    let mut replacement = Replica::start_visible_ca(Some(&path));
+    for (&(prefix_second, _), expected) in prefix.iter().zip(&expected_prefix) {
+        assert_eq!(replacement.recovered_prefix_line(prefix_second), *expected);
+    }
+    let replayed = replacement.step(second, live);
+    assert_eq!(
+        replayed, expected_applied,
+        "replacement diverged on replayed step"
+    );
+    assert_ca_ack_state(&replayed, second, "-", &active);
+    for &(suffix_second, suffix_live) in VISIBLE_CA_STREAM.iter().skip(prefix.len() + 1) {
+        let ack = replacement.step(suffix_second, suffix_live);
+        let expected = reference.process_visible_ca(suffix_second, suffix_live);
+        assert_eq!(ack, expected, "replacement diverged at {suffix_second}s");
+    }
+    assert!(replacement.shutdown().unwrap().success());
 }
 
 // Exercises the pre-application failure described by IF-R2 and IF-R3 in docs/INTERFACES.md.
@@ -2003,6 +2097,7 @@ fn worker_protocol_is_typed_and_caps_output_lines() {
             second: 12,
             feed_live: true,
             fail_before_apply: false,
+            crash_after_apply: false,
         })
     );
     assert_eq!(
@@ -2012,6 +2107,17 @@ fn worker_protocol_is_typed_and_caps_output_lines() {
             second: 12,
             feed_live: true,
             fail_before_apply: true,
+            crash_after_apply: false,
+        })
+    );
+    assert_eq!(
+        parse_worker_command("CRASH_AFTER_APPLY 1 2 3 4 12 LOST"),
+        Some(WorkerCommand::Input {
+            key,
+            second: 12,
+            feed_live: false,
+            fail_before_apply: false,
+            crash_after_apply: true,
         })
     );
     assert_eq!(
