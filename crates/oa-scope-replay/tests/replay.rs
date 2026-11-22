@@ -562,7 +562,7 @@ fn raw_fallback_is_as_of_finite_and_visibly_bypasses_tracker_rows() {
     assert_eq!(raw.future_observations, 3);
     assert_eq!(raw.future_only_addresses, 1);
     assert_eq!(raw.stale_addresses, 1);
-    assert_eq!(raw.shown, 1);
+    assert_eq!(raw.targets_admitted, 1);
     assert_eq!(raw.refused_capacity, 1);
     assert_eq!((info.traffic.drawn, info.refused), (1, 1));
     let shown = targets_columns(&replay.set);
@@ -592,6 +592,80 @@ fn raw_fallback_is_as_of_finite_and_visibly_bypasses_tracker_rows() {
         replay.buf.chunks_exact(4).any(|pixel| pixel == alert_pixel),
         "the raw-only banner is rasterized in the alert color"
     );
+
+    let bad_times = [T0, T0 + S];
+    let bad_addresses = [12, 11];
+    let bad_positions = [ORD.0; 2];
+    let bad_longitudes = [ORD.1; 2];
+    let bad_altitudes = [24_000; 2];
+    let bad_speeds = [NO_U16; 2];
+    let bad_tracks = [NO_U16; 2];
+    let invalid = RawObservationColumns {
+        t_ns: &bad_times,
+        addr: &bad_addresses,
+        lat_e7: &bad_positions,
+        lon_e7: &bad_longitudes,
+        alt_ft: &bad_altitudes,
+        gs_dkt: &bad_speeds,
+        track_ddeg: &bad_tracks,
+    };
+    assert!(replay_build_raw(&mut replay, &invalid, as_of, "BAD").is_err());
+    assert!(replay_raster(&mut replay).is_err());
+
+    replay_build_raw(&mut replay, &observations, as_of, "RAW TEST").unwrap();
+    replay_raster(&mut replay).unwrap();
+    replay.cfg.width = 20;
+    assert!(replay_build_raw(&mut replay, &observations, as_of, "NARROW").is_err());
+    assert!(replay_raster(&mut replay).is_err());
+    replay.cfg.width = 800;
+    replay.cfg.height = 20;
+    assert!(replay_build_raw(&mut replay, &observations, as_of, "SMALL").is_err());
+    assert!(replay_raster(&mut replay).is_err());
+}
+
+#[test]
+fn raw_fallback_refuses_conflicting_latest_timestamp_and_collapses_duplicates() {
+    let times = [T0, T0 + S, T0 + S];
+    let addresses = [7, 7, 7];
+    let latitudes = [ORD.0, ORD.0 + 1, ORD.0 + 2];
+    let longitudes = [ORD.1, ORD.1, ORD.1];
+    let altitudes = [24_000; 3];
+    let speeds = [NO_U16; 3];
+    let tracks = [NO_U16; 3];
+    let conflicting = RawObservationColumns {
+        t_ns: &times,
+        addr: &addresses,
+        lat_e7: &latitudes,
+        lon_e7: &longitudes,
+        alt_ft: &altitudes,
+        gs_dkt: &speeds,
+        track_ddeg: &tracks,
+    };
+    let mut replay = replay_new(model(), &frame_cfg()).unwrap();
+    let (_, first) = replay_build_raw(&mut replay, &conflicting, T0 + S, "RAW").unwrap();
+    assert_eq!(first.conflicting_timestamps, 1);
+    assert_eq!(first.targets_admitted, 0);
+    assert!(targets_columns(&replay.set).addr.is_empty());
+
+    let reversed_latitudes = [ORD.0, ORD.0 + 2, ORD.0 + 1];
+    let reversed = RawObservationColumns {
+        lat_e7: &reversed_latitudes,
+        ..conflicting
+    };
+    let (_, reverse) = replay_build_raw(&mut replay, &reversed, T0 + S, "RAW").unwrap();
+    assert_eq!(reverse.conflicting_timestamps, first.conflicting_timestamps);
+    assert_eq!(reverse.targets_admitted, first.targets_admitted);
+    assert!(targets_columns(&replay.set).addr.is_empty());
+
+    let duplicate_latitudes = [ORD.0, ORD.0 + 1, ORD.0 + 1];
+    let duplicate = RawObservationColumns {
+        lat_e7: &duplicate_latitudes,
+        ..conflicting
+    };
+    let (_, exact) = replay_build_raw(&mut replay, &duplicate, T0 + S, "RAW").unwrap();
+    assert_eq!(exact.conflicting_timestamps, 0);
+    assert_eq!(exact.targets_admitted, 1);
+    assert_eq!(targets_columns(&replay.set).lat_e7, &[ORD.0 + 1]);
 }
 
 // REQ: OA-DSP-044

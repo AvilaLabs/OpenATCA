@@ -1,7 +1,9 @@
 //! Independent raw-surveillance display reduction (core, B1): the caller supplies bounded,
-//! address/time-sorted ADS-B observations as plain columns. This path does not accept tracker rows,
-//! infer ownership, extrapolate, or coast. Only the newest observation at or before the display
-//! time is eligible; age at the inclusive finite cutoff is shown, and anything older is dropped.
+//! address/time-sorted ADS-B observations as plain columns. The caller must include only
+//! observations available by the as-of time: these columns encode observation time, not receipt
+//! time. This path does not accept tracker rows, infer ownership, extrapolate, or coast. Only the
+//! newest observation at or before the display time is eligible; age at the inclusive finite
+//! cutoff is shown, and anything older is dropped.
 
 use oa_display::core::traffic::{
     position_valid, targets_clear, targets_malformed, targets_push, targets_refused, Target,
@@ -17,6 +19,7 @@ pub const RAW_STALE_CUTOFF_NS: i64 = 3 * 1_000_000_000;
 #[derive(Clone, Copy, Debug)]
 pub struct RawObservationColumns<'a> {
     /// Observation time in Unix nanoseconds (not receipt time).
+    /// Caller must filter by actual availability/receipt time before passing this slice.
     pub t_ns: &'a [i64],
     pub addr: &'a [u32],
     pub lat_e7: &'a [i32],
@@ -38,7 +41,10 @@ pub struct RawStats {
     pub future_only_addresses: u64,
     pub stale_addresses: u64,
     pub invalid_positions: u64,
-    pub shown: u64,
+    /// Distinct targets admitted to the display set (projection may still omit them).
+    pub targets_admitted: u64,
+    /// Address groups whose newest as-of timestamp has contradictory payloads.
+    pub conflicting_timestamps: u64,
     pub refused_capacity: u64,
     pub refused_malformed: u64,
 }
@@ -118,9 +124,10 @@ fn validate_raw(columns: &RawObservationColumns<'_>) -> Result<usize, RawInputEr
     Ok(n)
 }
 
-/// Fills set with latest-at-as-of raw observations in address order. For equal observation
-/// timestamps, the last input row wins. set is cleared only after the whole input is validated.
-/// No extrapolation, synthetic coast, callsign, or ownership is added.
+/// Fills set with latest-at-as-of raw observations in address order. Exact duplicate rows at an
+/// equal newest timestamp collapse; conflicting payloads at that timestamp refuse the address,
+/// without falling back to older data. No extrapolation, synthetic coast, callsign, or ownership
+/// is added.
 pub fn raw_targets_at(
     columns: &RawObservationColumns<'_>,
     as_of_ns: i64,
@@ -146,7 +153,7 @@ pub fn raw_targets_at(
             end = end.saturating_add(1);
         }
 
-        let mut newest_at_or_before = None;
+        let mut newest_time = None;
         for index in start..end {
             let Some(&t_ns) = columns.t_ns.get(index) else {
                 return Err(RawInputError::ColumnLength {
@@ -156,15 +163,56 @@ pub fn raw_targets_at(
                 });
             };
             if t_ns <= as_of_ns {
-                newest_at_or_before = Some(index);
+                newest_time = Some(t_ns);
             } else {
                 stats.future_observations = stats.future_observations.saturating_add(1);
             }
         }
-        let Some(index) = newest_at_or_before else {
+        let Some(newest_time) = newest_time else {
             stats.future_only_addresses = stats.future_only_addresses.saturating_add(1);
             start = end;
             continue;
+        };
+        let mut newest_payload = None;
+        let mut conflict = false;
+        for index in start..end {
+            if columns.t_ns.get(index).copied() != Some(newest_time) {
+                continue;
+            }
+            let payload = columns
+                .lat_e7
+                .get(index)
+                .zip(columns.lon_e7.get(index))
+                .zip(columns.alt_ft.get(index))
+                .zip(columns.gs_dkt.get(index))
+                .zip(columns.track_ddeg.get(index))
+                .map(|(((((lat, lon), alt), gs), track))| (*lat, *lon, *alt, *gs, *track));
+            let Some(payload) = payload else {
+                return Err(RawInputError::ColumnLength {
+                    column: "observation",
+                    got: index,
+                    want: n,
+                });
+            };
+            if newest_payload.is_some_and(|previous| previous != payload) {
+                conflict = true;
+                break;
+            }
+            newest_payload = Some(payload);
+        }
+        if conflict {
+            stats.conflicting_timestamps = stats.conflicting_timestamps.saturating_add(1);
+            start = end;
+            continue;
+        }
+        let Some(index) =
+            (start..end).find(|&index| columns.t_ns.get(index).copied() == Some(newest_time))
+        else {
+            return Err(RawInputError::ColumnLength {
+                column: "observation",
+                got: start,
+                want: n,
+            });
         };
         let Some((&t_ns, &lat_e7, &lon_e7, &alt_ft, &gs_dkt, &track_ddeg)) = columns
             .t_ns
@@ -210,7 +258,7 @@ pub fn raw_targets_at(
             trail_len: 0,
         };
         if targets_push(set, &target).is_ok() {
-            stats.shown = stats.shown.saturating_add(1);
+            stats.targets_admitted = stats.targets_admitted.saturating_add(1);
         }
         start = end;
     }

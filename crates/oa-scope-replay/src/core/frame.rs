@@ -9,8 +9,9 @@ use crate::core::rows::{
     convert_check, targets_at, Callsigns, ConvertConfig, ConvertStats, RowStore, RowsError,
 };
 use oa_airspace::core::model::Model;
+use oa_display::core::font::{text_width_units, CAP_HEIGHT};
 use oa_display::core::list::{
-    list_new, push_text, DisplayError, DisplayList, ListCaps, ALIGN_CENTRE, ALIGN_RIGHT,
+    list_clear, list_new, push_text, DisplayError, DisplayList, ListCaps, ALIGN_CENTRE, ALIGN_RIGHT,
 };
 use oa_display::core::ownership::{
     build_ownership_status, ownership_caps, ownership_status_fits, OwnershipStatus,
@@ -50,6 +51,11 @@ pub enum ReplayError {
     Config(RowsError),
     /// The raw fallback input was not a bounded, ordered set of columns.
     RawInput(RawInputError),
+    /// The mandatory raw-only banner cannot fit the configured viewport.
+    RawBannerDoesNotFit {
+        width: u32,
+        height: u32,
+    },
 }
 
 impl fmt::Display for ReplayError {
@@ -59,6 +65,10 @@ impl fmt::Display for ReplayError {
             ReplayError::Render(e) => write!(f, "render: {e}"),
             ReplayError::Config(e) => write!(f, "configuration: {e}"),
             ReplayError::RawInput(e) => write!(f, "raw surveillance input: {e}"),
+            ReplayError::RawBannerDoesNotFit { width, height } => write!(
+                f,
+                "raw surveillance banner does not fit {width}x{height} viewport"
+            ),
         }
     }
 }
@@ -210,68 +220,90 @@ pub fn replay_build(
 }
 
 /// Builds a frame directly from caller-owned raw observation columns, without using tracker
-/// output. The as-of time is explicit; only observations at or before it and no older than the
+/// output. The caller must supply only observations available by as-of time: the columns encode
+/// observation time, not receipt time. Only observations at or before as-of and no older than the
 /// finite cutoff in the raw reducer can appear. No ownership, callsign, coast, trail, or
 /// extrapolated position is inferred. The banner makes this step down visible to the controller.
-/// The caller's columns and reader state are independent of tracker output.
+/// On any error, the previous list is cleared and rasterization is refused.
 pub fn replay_build_raw(
     r: &mut Replay,
     observations: &RawObservationColumns<'_>,
     as_of_ns: i64,
     stamp: &str,
 ) -> Result<(FrameInfo, RawStats), ReplayError> {
-    let raw = raw_targets_at(observations, as_of_ns, &mut r.set)?;
-    let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
-    let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
+    list_clear(&mut r.list);
+    targets_clear(&mut r.set);
+    let result = (|| {
+        let banner_width = i64::from(text_width_units(RAW_BANNER.chars().count()))
+            .saturating_mul(i64::from(RAW_BANNER_SIZE))
+            .saturating_add(i64::from(CAP_HEIGHT) - 1)
+            / i64::from(CAP_HEIGHT);
+        let banner_height = i64::from(RAW_BANNER_TOP_PX) + i64::from(RAW_BANNER_SIZE);
+        if banner_width > i64::from(r.cfg.width) || banner_height > i64::from(r.cfg.height) {
+            return Err(ReplayError::RawBannerDoesNotFit {
+                width: r.cfg.width,
+                height: r.cfg.height,
+            });
+        }
+        let raw = raw_targets_at(observations, as_of_ns, &mut r.set)?;
+        let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
+        let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
 
-    let mut status = text_new();
-    text_push_str(&mut status, stamp);
-    text_push_str(&mut status, "  TARGETS ");
-    text_push_dec(&mut status, u64::from(traffic.drawn), 0);
-    let y = i32::try_from(r.cfg.height)
-        .unwrap_or(i32::MAX)
-        .saturating_sub(STAMP_FROM_BOTTOM_PX)
-        .saturating_mul(16);
-    let x = i32::try_from(r.cfg.width)
-        .unwrap_or(i32::MAX)
-        .saturating_sub(STAMP_RIGHT_PX)
-        .saturating_mul(16);
-    push_text(
-        &mut r.list,
-        (x, y),
-        STAMP_SIZE,
-        ALIGN_RIGHT,
-        palette::TEXT,
-        LAYER_BLOCK,
-        text_str(&status),
-    )?;
+        let mut status = text_new();
+        text_push_str(&mut status, stamp);
+        text_push_str(&mut status, "  TARGETS ");
+        text_push_dec(&mut status, u64::from(traffic.drawn), 0);
+        let y = i32::try_from(r.cfg.height)
+            .unwrap_or(i32::MAX)
+            .saturating_sub(STAMP_FROM_BOTTOM_PX)
+            .saturating_mul(16);
+        let x = i32::try_from(r.cfg.width)
+            .unwrap_or(i32::MAX)
+            .saturating_sub(STAMP_RIGHT_PX)
+            .saturating_mul(16);
+        push_text(
+            &mut r.list,
+            (x, y),
+            STAMP_SIZE,
+            ALIGN_RIGHT,
+            palette::TEXT,
+            LAYER_BLOCK,
+            text_str(&status),
+        )?;
 
-    let banner_x = i32::try_from(r.cfg.width / 2)
-        .unwrap_or(i32::MAX)
-        .saturating_mul(16);
-    let mut banner = text_new();
-    text_push_str(&mut banner, RAW_BANNER);
-    push_text(
-        &mut r.list,
-        (banner_x, RAW_BANNER_TOP_PX.saturating_mul(16)),
-        RAW_BANNER_SIZE,
-        ALIGN_CENTRE,
-        palette::ALERT,
-        LAYER_BLOCK,
-        text_str(&banner),
-    )?;
-    Ok((
-        FrameInfo {
-            scene,
-            traffic,
-            convert: ConvertStats::default(),
-            refused: targets_refused(&r.set),
-            malformed: targets_malformed(&r.set),
-            stamp_clipped: text_clipped(&status) || text_clipped(&banner),
-            ownership_clipped: false,
-        },
-        raw,
-    ))
+        let banner_x = i32::try_from(r.cfg.width / 2)
+            .unwrap_or(i32::MAX)
+            .saturating_mul(16);
+        let mut banner = text_new();
+        text_push_str(&mut banner, RAW_BANNER);
+        push_text(
+            &mut r.list,
+            (banner_x, RAW_BANNER_TOP_PX.saturating_mul(16)),
+            RAW_BANNER_SIZE,
+            ALIGN_CENTRE,
+            palette::ALERT,
+            LAYER_BLOCK,
+            text_str(&banner),
+        )?;
+        Ok((
+            FrameInfo {
+                scene,
+                traffic,
+                convert: ConvertStats::default(),
+                refused: targets_refused(&r.set),
+                malformed: targets_malformed(&r.set),
+                stamp_clipped: text_clipped(&status) || text_clipped(&banner),
+                ownership_clipped: false,
+            },
+            raw,
+        ))
+    })();
+    if result.is_err() {
+        list_clear(&mut r.list);
+        r.list.faulted = true;
+        targets_clear(&mut r.set);
+    }
+    result
 }
 
 /// Builds the scope frame with independent feed, track-freshness and safety-net telemetry.

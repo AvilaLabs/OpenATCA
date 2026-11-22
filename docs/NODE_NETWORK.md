@@ -268,6 +268,13 @@ Two further rules:
 
 Every step down is logged and counted.
 
+The scope replay crate currently has a callable raw-display prototype for offline and synthetic
+use. It is not wired to live intake, automatic step-down, or operational logging. A caller must
+provide an independent decoded observation path, filter observations by actual availability at
+the as-of time (the prototype columns carry observation time only), and record the returned
+fallback and refusal counters. It draws only the newest eligible position within its fixed finite
+age limit and refuses conflicting equal-time payloads; it does not infer ownership or coast.
+
 ## 9. Time
 
 Comparison windows need clocks that agree. Each node takes authenticated network time (NTS,
