@@ -66,13 +66,13 @@ gap, and measures the local wall time until the first verified frame.
 Build the controller fixture from the same revision and use its exact executable path from
 the build's compiler-artifact output.
 
-\`\`\`sh
+```sh
 cargo +1.89.0 test --release --locked -p oa-flight --test controller_workflow --no-run --message-format=json
 OA_CONTROLLER_TAKEOVER_EXECUTABLE=/absolute/path/to/controller_workflow-binary \
   cargo +1.89.0 test --release --locked -p oa-scope-replay --test outage_drill \
   controller_handoff_and_scope_continue_after_serving_processes_are_killed \
   -- --ignored --exact --nocapture
-\`\`\`
+```
 
 This evidence covers OS process failure on one host with a fixture that owns publication
 authority. The two-host exercise requires a test transport and independent machines.

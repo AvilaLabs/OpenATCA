@@ -2730,6 +2730,7 @@ fn controller_ownership(record: &str, phase: &str) -> OwnershipStatus {
 #[test]
 #[ignore = "set OA_CONTROLLER_TAKEOVER_EXECUTABLE to the oa-flight test binary from this build"]
 fn controller_handoff_and_scope_continue_after_serving_processes_are_killed() {
+    const PREFIX_LEN: usize = 11;
     let executable = PathBuf::from(std::env::var_os("OA_CONTROLLER_TAKEOVER_EXECUTABLE").unwrap());
     let mut serving = Replica::start();
     let mut standby = Replica::start();
@@ -2746,7 +2747,7 @@ fn controller_handoff_and_scope_continue_after_serving_processes_are_killed() {
     let pending_ownership = controller_ownership(&pending, "P");
 
     let mut fence = INITIAL_FENCE;
-    for (step, &(second, live)) in SYNTHETIC_STREAM.iter().enumerate().take(11) {
+    for (step, &(second, live)) in SYNTHETIC_STREAM.iter().enumerate().take(PREFIX_LEN) {
         let primary = serving.owned_step(second, live, &pending);
         assert_eq!(primary, standby.owned_step(second, live, &backup_pending));
         assert_eq!(
@@ -2771,7 +2772,8 @@ fn controller_handoff_and_scope_continue_after_serving_processes_are_killed() {
         RECOVERY_GENERATION,
     )
     .unwrap();
-    let delayed = publication_for_step(old_fence, 11, SYNTHETIC_STREAM[11].0).unwrap();
+    let delayed =
+        publication_for_step(old_fence, PREFIX_LEN, SYNTHETIC_STREAM[PREFIX_LEN].0).unwrap();
     assert_eq!(
         accept_publication(fence, delayed),
         Err(FenceRefusal::Generation)
@@ -2780,7 +2782,7 @@ fn controller_handoff_and_scope_continue_after_serving_processes_are_killed() {
     let mut witness = backup_pending;
     let mut ownership = pending_ownership;
     let mut first_frame_ms = None;
-    for (step, &(second, live)) in SYNTHETIC_STREAM.iter().enumerate().skip(11) {
+    for (step, &(second, live)) in SYNTHETIC_STREAM.iter().enumerate().skip(PREFIX_LEN) {
         if second == 41 {
             witness = standby_control.controller_step(b'T');
             assert_eq!(witness, reference_control.controller_step(b'T'));
