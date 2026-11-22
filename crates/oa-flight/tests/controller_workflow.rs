@@ -128,3 +128,98 @@ fn two_sector_offer_accept_timeout_and_stale_duplicate_delivery() {
         2
     );
 }
+
+// REQ: OA-FLT-002, OA-FLT-010, OA-FLT-011
+#[test]
+fn accepted_controller_state_replays_after_table_replacement_then_takes_control_once() {
+    let key = key_gufi(901);
+
+    // Retain the exact controller-operation prefix that produced the accepted handoff.
+    let mut plan = op(OP_SET_PLAN, key, 1_000, 1);
+    plan.state = ST_ACTIVE;
+    let mut owner = op(OP_OWNER, key, 2_000, 2);
+    owner.unit_a = code("ZAU12");
+    let mut assigned = op(OP_ASSIGN, key, 2_500, 3);
+    assigned.alt = Alt {
+        form: ALT_SIMPLE,
+        a_ft: 36_000,
+        b_ft: 0,
+    };
+    let mut interim = op(OP_INTERIM, key, 2_750, 4);
+    interim.alt = Alt {
+        form: ALT_SIMPLE,
+        a_ft: 24_000,
+        b_ft: 0,
+    };
+    let prefix = [
+        plan,
+        owner,
+        assigned,
+        interim,
+        handoff(OP_HO_INITIATE, key, 3_000, 5),
+        handoff(OP_HO_ACCEPT, key, 4_000, 6),
+    ];
+
+    let mut uninterrupted = table();
+    for operation in &prefix {
+        assert_eq!(flights_apply(&mut uninterrupted, operation), Outcome::Applied);
+    }
+    flights_check(&uninterrupted).unwrap();
+
+    // A replacement starts from an empty table and consumes the retained prefix in order.
+    let mut replacement = table();
+    for operation in &prefix {
+        assert_eq!(flights_apply(&mut replacement, operation), Outcome::Applied);
+    }
+    flights_check(&replacement).unwrap();
+    assert_eq!(flights_digest(&replacement), flights_digest(&uninterrupted));
+
+    let accepted = flight_get(&replacement, &key).unwrap();
+    assert_eq!(view_of(&accepted, &ZAU).unwrap().state, ST_ACTIVE);
+    assert_eq!(accepted.assigned, assigned.alt);
+    assert_eq!(accepted.interim, interim.alt);
+    assert_eq!(accepted.owner, code("ZAU12"));
+    assert_eq!(accepted.ho_state, HO_ACCEPTED);
+    assert_eq!(accepted.ho_from, code("ZAU12"));
+    assert_eq!(accepted.ho_to, code("ZMP34"));
+    assert_eq!(accepted.ho_accepted_by, code("ZMP34"));
+
+    // Both histories continue with the same controller input after replacement.
+    let take = handoff(OP_HO_TAKE, key, 5_000, 7);
+    assert_eq!(
+        flights_apply(&mut uninterrupted, &take),
+        Outcome::Applied
+    );
+    assert_eq!(flights_apply(&mut replacement, &take), Outcome::Applied);
+    flights_check(&uninterrupted).unwrap();
+    flights_check(&replacement).unwrap();
+    assert_eq!(flights_digest(&replacement), flights_digest(&uninterrupted));
+    let transferred = flight_get(&replacement, &key).unwrap();
+    assert_eq!(transferred.assigned, assigned.alt);
+    assert_eq!(transferred.interim, interim.alt);
+    assert_eq!(transferred.owner, code("ZMP34"));
+    assert_eq!(transferred.ho_state, HO_NONE);
+    assert_eq!(replacement.stats.handoffs_completed, 1);
+
+    // A repeated take is refused after the pending handoff has cleared; it cannot transfer twice.
+    assert_eq!(
+        flights_apply(&mut uninterrupted, &take),
+        Outcome::Refused(R_NO_HANDOFF)
+    );
+    assert_eq!(
+        flights_apply(&mut replacement, &take),
+        Outcome::Refused(R_NO_HANDOFF)
+    );
+    flights_check(&uninterrupted).unwrap();
+    flights_check(&replacement).unwrap();
+    assert_eq!(flights_digest(&replacement), flights_digest(&uninterrupted));
+    let still_transferred = flight_get(&replacement, &key).unwrap();
+    assert_eq!(still_transferred.owner, code("ZMP34"));
+    assert_eq!(still_transferred.ho_state, HO_NONE);
+    assert_eq!(replacement.stats.handoffs_completed, 1);
+    assert_eq!(
+        replacement.stats.refused[usize::from(OP_HO_TAKE) * R_COUNT
+            + usize::from(R_NO_HANDOFF)],
+        1
+    );
+}
