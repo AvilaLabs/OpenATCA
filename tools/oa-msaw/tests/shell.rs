@@ -753,9 +753,12 @@ fn synthetic_flat_terrain_descent_and_level_control_are_scored_from_runner_outpu
     let event_start_s = (1800 - floor_ft) / 10;
 
     // Truth is from the generated measurements and flat synthetic terrain: the hazard is
-    // 1,800 - 10t ft over the configured flat-terrain floor, so its strict below-floor interval starts just after
-    // t=130 s. The control stays at 4,000 ft. These declarations precede runner output.
+    // 1,800 - 10t ft over the configured flat-terrain floor. Continuous crossing is at 130 s.
+    // At equality the aircraft is still clear. The first strictly below-floor sample on the
+    // one-second evaluation grid is at 131 s. The control stays at 4,000 ft.
     let event_start_ns = event_start_s * S;
+    let first_below_floor_tick_ns = event_start_ns + S;
+    let warning_horizon_ns = (set.msaw.warning_s * S as f64).round() as i64;
     let mut rows = Vec::new();
     for t in 0..=LAST_TICK_S {
         let t_f = t as f64;
@@ -805,7 +808,7 @@ fn synthetic_flat_terrain_descent_and_level_control_are_scored_from_runner_outpu
             violation: Some((event_start_ns, LAST_TICK_S * S)),
             alert_desired: true,
             warning_from_ns: 0,
-            warning_deadline_ns: event_start_ns - (set.msaw.warning_s * S as f64).round() as i64,
+            warning_deadline_ns: first_below_floor_tick_ns - warning_horizon_ns,
             evaluation: Evaluation::Available,
         },
         Case {
@@ -838,7 +841,7 @@ fn synthetic_flat_terrain_descent_and_level_control_are_scored_from_runner_outpu
         ),
         (1, 0, 1)
     );
-    assert_eq!(results[0].lead_ns, Some(20 * S));
+    assert_eq!(results[0].lead_ns, Some(warning_horizon_ns - S));
     assert_eq!(results[1].outcome, Outcome::Quiet);
 }
 
