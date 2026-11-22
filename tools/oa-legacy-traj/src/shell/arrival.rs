@@ -579,8 +579,21 @@ struct Totals {
     vertical: [Vec<f64>; 3],
     coverage: [HorizonCoverage; 3],
     assigned_altitude_states: BTreeMap<String, usize>,
+    assigned_altitude_pairs: [PairedVertical; 3],
+    assigned_altitude_pair_eligible: usize,
     eta: [Vec<f64>; 3],
     paired_oa_eta: [Vec<f64>; 2],
+}
+
+#[derive(Default)]
+struct PairedVertical {
+    assignment_free_abs_error_ft: Vec<f64>,
+    assigned_abs_error_ft: Vec<f64>,
+    improved: usize,
+    worsened: usize,
+    tied: usize,
+    missing_assignment_free: usize,
+    missing_assigned: usize,
 }
 
 #[derive(Default)]
@@ -700,6 +713,38 @@ fn note(t: &mut Totals, s: ArrivalScore) {
         .zip([s.eram_eta_error_s, s.tb_fm_eta_error_s])
     {
         paired.extend(s.oa_eta_error_s.zip(legacy).map(|(oa, _)| oa.abs()));
+    }
+}
+
+fn note_assignment_pair(
+    totals: &mut Totals,
+    assignment_free: Option<ArrivalScore>,
+    assigned: Option<ArrivalScore>,
+) {
+    totals.assigned_altitude_pair_eligible += 1;
+    for i in 0..3 {
+        let Some(pair) = totals.assigned_altitude_pairs.get_mut(i) else {
+            continue;
+        };
+        let before = assignment_free.and_then(|score| score.forecast.get(i)?.vertical_error_ft);
+        let after = assigned.and_then(|score| score.forecast.get(i)?.vertical_error_ft);
+        if before.is_none() {
+            pair.missing_assignment_free += 1;
+        }
+        if after.is_none() {
+            pair.missing_assigned += 1;
+        }
+        if let (Some(before), Some(after)) = (before, after) {
+            pair.assignment_free_abs_error_ft.push(before);
+            pair.assigned_abs_error_ft.push(after);
+            if after < before {
+                pair.improved += 1;
+            } else if after > before {
+                pair.worsened += 1;
+            } else {
+                pair.tied += 1;
+            }
+        }
     }
 }
 
@@ -930,31 +975,13 @@ pub(crate) fn report(
             .assigned_altitude_states
             .entry(assigned_altitude_label(&evidence))
             .or_default() += 1;
+        let pair_eligible = matches!(&evidence, AssignmentEvidence::Available { .. });
+        let assignment_free_forecast = pair_eligible
+            .then(|| forecast(&planned.issue).ok())
+            .flatten();
         let mut issue = planned.issue.clone();
         apply_assignment(&mut issue, &evidence);
         let at = issue.issued_ms;
-        let predicted = match forecast(&issue) {
-            Ok(predicted) => predicted,
-            Err(refusal) => {
-                assigned_forecast_refused += 1;
-                *totals
-                    .forecast_refused
-                    .entry(format!("{refusal:?}"))
-                    .or_default() += 1;
-                for coverage in &mut totals.coverage {
-                    coverage.no_prediction += 1;
-                }
-                continue;
-            }
-        };
-        for (coverage, point) in totals.coverage.iter_mut().zip(&predicted.positions) {
-            if point.vertical_status != VerticalStatus::Available {
-                *coverage
-                    .vertical_unavailable
-                    .entry(format!("{:?}", point.vertical_status))
-                    .or_default() += 1;
-            }
-        }
         let eram = legacy
             .route_points
             .est_ms
@@ -971,21 +998,55 @@ pub(crate) fn report(
             .get(planned.route_row.0 as usize)
             .and_then(|p| tbfm.get(&norm_id(p)))
             .and_then(|entries| estimate_at(entries, at));
-        match score(
-            &predicted,
-            &truth_path(built, planned.addr, at),
-            Some(plan.meter),
-            eram,
-            tb,
-            2.0 * 1852.0,
-        ) {
-            Ok(s) => note(&mut totals, s),
+        let predicted = match forecast(&issue) {
+            Ok(predicted) => predicted,
             Err(refusal) => {
+                assigned_forecast_refused += 1;
                 *totals
-                    .score_refused
+                    .forecast_refused
                     .entry(format!("{refusal:?}"))
-                    .or_default() += 1
+                    .or_default() += 1;
+                for coverage in &mut totals.coverage {
+                    coverage.no_prediction += 1;
+                }
+                if pair_eligible {
+                    let truth = truth_path(built, planned.addr, at);
+                    let assignment_free_score = assignment_free_forecast.as_ref().and_then(|f| {
+                        score(f, &truth, Some(plan.meter), eram, tb, 2.0 * 1852.0).ok()
+                    });
+                    note_assignment_pair(&mut totals, assignment_free_score, None);
+                }
+                continue;
             }
+        };
+        for (coverage, point) in totals.coverage.iter_mut().zip(&predicted.positions) {
+            if point.vertical_status != VerticalStatus::Available {
+                *coverage
+                    .vertical_unavailable
+                    .entry(format!("{:?}", point.vertical_status))
+                    .or_default() += 1;
+            }
+        }
+        let truth = truth_path(built, planned.addr, at);
+        let assigned_score =
+            match score(&predicted, &truth, Some(plan.meter), eram, tb, 2.0 * 1852.0) {
+                Ok(s) => {
+                    note(&mut totals, s);
+                    Some(s)
+                }
+                Err(refusal) => {
+                    *totals
+                        .score_refused
+                        .entry(format!("{refusal:?}"))
+                        .or_default() += 1;
+                    None
+                }
+            };
+        if pair_eligible {
+            let assignment_free_score = assignment_free_forecast
+                .as_ref()
+                .and_then(|f| score(f, &truth, Some(plan.meter), eram, tb, 2.0 * 1852.0).ok());
+            note_assignment_pair(&mut totals, assignment_free_score, assigned_score);
         }
     }
     let mut text = format!(
@@ -1005,6 +1066,38 @@ pub(crate) fn report(
         totals.assigned_altitude_states
     )
     .map_err(|e| e.to_string())?;
+    writeln!(
+        text,
+        "Assigned-altitude paired vertical diagnostic: admitted simple assignments only; denominator is {} issues. Each horizon compares only issues with vertical scores on both forecasts; missing score counts are shown by side.",
+        totals.assigned_altitude_pair_eligible
+    )
+    .map_err(|e| e.to_string())?;
+    for (mins, pair) in [5, 10, 20]
+        .into_iter()
+        .zip(&mut totals.assigned_altitude_pairs)
+    {
+        let paired = pair.assignment_free_abs_error_ft.len();
+        let free = summarize(
+            "assignment-free absolute vertical error (ft)",
+            &mut pair.assignment_free_abs_error_ft,
+            totals.assigned_altitude_pair_eligible,
+        );
+        let assigned = summarize(
+            "assigned absolute vertical error (ft)",
+            &mut pair.assigned_abs_error_ft,
+            totals.assigned_altitude_pair_eligible,
+        );
+        writeln!(
+            text,
+            "{mins} min paired ({paired} matched): {free}; {assigned}; improved {}; worsened {}; tied {}; missing assignment-free score {}; missing assigned score {}",
+            pair.improved,
+            pair.worsened,
+            pair.tied,
+            pair.missing_assignment_free,
+            pair.missing_assigned
+        )
+        .map_err(|e| e.to_string())?;
+    }
     writeln!(
         text,
         "Assignment query: {}",
@@ -1098,6 +1191,44 @@ pub(crate) fn report(
 #[cfg(test)]
 mod assignment_plan_tests {
     use super::*;
+
+    fn vertical_score(errors: [Option<f64>; 3]) -> ArrivalScore {
+        let mut score = ArrivalScore::default();
+        for (horizon, error) in score.forecast.iter_mut().zip(errors) {
+            horizon.vertical_error_ft = error;
+        }
+        score
+    }
+
+    #[test]
+    fn paired_vertical_diagnostic_counts_direction_ties_and_one_sided_missing() {
+        let mut totals = Totals::default();
+        note_assignment_pair(
+            &mut totals,
+            Some(vertical_score([Some(100.0), Some(100.0), Some(100.0)])),
+            Some(vertical_score([Some(90.0), Some(110.0), Some(100.0)])),
+        );
+        note_assignment_pair(
+            &mut totals,
+            None,
+            Some(vertical_score([Some(10.0), None, Some(20.0)])),
+        );
+
+        assert_eq!(totals.assigned_altitude_pair_eligible, 2);
+        let [five, ten, twenty] = &totals.assigned_altitude_pairs;
+        assert_eq!((five.improved, five.worsened, five.tied), (1, 0, 0));
+        assert_eq!(
+            (five.missing_assignment_free, five.missing_assigned),
+            (1, 0)
+        );
+        assert_eq!((ten.improved, ten.worsened, ten.tied), (0, 1, 0));
+        assert_eq!((ten.missing_assignment_free, ten.missing_assigned), (1, 1));
+        assert_eq!((twenty.improved, twenty.worsened, twenty.tied), (0, 0, 1));
+        assert_eq!(
+            (twenty.missing_assignment_free, twenty.missing_assigned),
+            (1, 0)
+        );
+    }
 
     #[test]
     fn frozen_plan_exports_one_typed_gufi_and_cutoff_per_issue() {
