@@ -19,6 +19,9 @@
 use std::collections::HashMap;
 
 use oa_fixm::{code_str, has_field, Field};
+pub use oa_fixm::{
+    ALT_FORM_AT_FIX, ALT_FORM_BLOCK, ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS,
+};
 
 /// "No index" for flights and addresses (RULESET A4).
 pub const NONE: u32 = u32::MAX;
@@ -44,6 +47,10 @@ pub const MAX_HANDOFFS: usize = 1 << 22;
 pub const MAX_ROUTES: usize = 1 << 21;
 /// Most route points over all routes (about 5 per route in the sample; 16 million).
 pub const MAX_ROUTE_POINTS: usize = 1 << 24;
+/// Most assigned-altitude updates retained for as-of SFDPS snapshots.
+pub const MAX_ASSIGNED_ALTITUDE_UPDATES: usize = 1 << 22;
+/// Most assigned-altitude updates per flight; excess rows are counted and not stored.
+pub const MAX_ASSIGNED_ALTITUDE_UPDATES_PER_FLIGHT: u16 = 256;
 /// Most TBFM estimate and schedule entries.
 pub const MAX_TBFM: usize = 1 << 23;
 /// Most TFMS estimate entries.
@@ -62,6 +69,7 @@ pub struct Limits {
     pub tbfm: usize,
     pub tfms: usize,
     pub beacons: usize,
+    pub assigned_altitude_updates: usize,
 }
 
 impl Default for Limits {
@@ -75,6 +83,7 @@ impl Default for Limits {
             tbfm: MAX_TBFM,
             tfms: MAX_TFMS,
             beacons: MAX_BEACON_ROWS,
+            assigned_altitude_updates: MAX_ASSIGNED_ALTITUDE_UPDATES,
         }
     }
 }
@@ -139,6 +148,18 @@ pub struct Flights {
     pub plan_id: Vec<[u8; 12]>,
     pub dep: Vec<[u8; 12]>,
     pub arr: Vec<[u8; 12]>,
+}
+
+/// Typed SFDPS assigned-altitude updates with their message and receive times.
+/// `form` uses oa-fixm ALT_FORM_* codes; `value_ft` is meaningful only for SIMPLE.
+// A3: one Vec per column.
+#[derive(Clone, Debug, Default)]
+pub struct AssignedAltitudeTable {
+    pub flight: Vec<u32>,
+    pub ts_ms: Vec<i64>,
+    pub recv_ms: Vec<i64>,
+    pub form: Vec<u8>,
+    pub value_ft: Vec<i32>,
 }
 
 /// ERAM track samples (`TH` messages with a position).
@@ -282,6 +303,8 @@ pub struct Counts {
     pub overflow_th: u64,
     pub overflow_handoffs: u64,
     pub overflow_routes: u64,
+    pub overflow_assigned_altitude_updates: u64,
+    pub assigned_altitude_unknown_availability: u64,
     pub overflow_tbfm: u64,
     pub overflow_tfms: u64,
     /// TFMS actual-arrival rows that did not fit; not shown in the report (a diagnostic table).
@@ -320,6 +343,7 @@ pub struct Legacy {
     pub handoffs: HandoffTable,
     pub routes: RouteTable,
     pub route_points: RoutePoints,
+    pub assigned_altitudes: AssignedAltitudeTable,
     pub tbfm: TbfmTable,
     pub tfms: TfmsTable,
     /// TFMS arrival times of type `ACTUAL`, one row each (kind [`tfms_kind::ETA`]). Kept apart
@@ -328,6 +352,15 @@ pub struct Legacy {
     pub counts: Counts,
     pub limits: Limits,
     by_gufi: HashMap<u128, u32>,
+    assigned_altitudes_by_flight: HashMap<u32, u16>,
+    assigned_altitude_overflow_flights: HashMap<u32, i64>,
+}
+
+/// Whether assigned-altitude history for a flight is incomplete because a storage bound was hit.
+pub fn assigned_altitude_history_overflowed(leg: &Legacy, flight: u32, cutoff_ms: i64) -> bool {
+    leg.assigned_altitude_overflow_flights
+        .get(&flight)
+        .is_some_and(|&available_ms| available_ms > 0 && available_ms <= cutoff_ms)
 }
 
 /// An empty set of tables.
@@ -369,6 +402,51 @@ pub fn set_addr_hint(leg: &mut Legacy, f: u32, addr: u32) {
     if let Some(a) = leg.flights.addr_hint.get_mut(f as usize) {
         *a = addr;
     }
+}
+
+/// Appends a typed assigned-altitude event, enforcing total and per-flight budgets.
+pub fn push_assigned_altitude(
+    leg: &mut Legacy,
+    flight: u32,
+    ts_ms: i64,
+    recv_ms: i64,
+    form: u8,
+    value_ft: i32,
+) {
+    if ts_ms <= 0 || recv_ms <= 0 || ts_ms > recv_ms {
+        leg.counts.assigned_altitude_unknown_availability = leg
+            .counts
+            .assigned_altitude_unknown_availability
+            .saturating_add(1);
+        return;
+    }
+    if leg.assigned_altitudes.flight.len() >= leg.limits.assigned_altitude_updates
+        || leg
+            .assigned_altitudes_by_flight
+            .get(&flight)
+            .copied()
+            .unwrap_or(0)
+            >= MAX_ASSIGNED_ALTITUDE_UPDATES_PER_FLIGHT
+    {
+        leg.counts.overflow_assigned_altitude_updates = leg
+            .counts
+            .overflow_assigned_altitude_updates
+            .saturating_add(1);
+        let first_overflow = leg
+            .assigned_altitude_overflow_flights
+            .entry(flight)
+            .or_insert(recv_ms);
+        *first_overflow = (*first_overflow).min(recv_ms);
+        return;
+    }
+    let table = &mut leg.assigned_altitudes;
+    table.flight.push(flight);
+    table.ts_ms.push(ts_ms);
+    table.recv_ms.push(recv_ms);
+    table.form.push(form);
+    table.value_ft.push(value_ft);
+    let n = leg.assigned_altitudes_by_flight.entry(flight).or_insert(0);
+    *n = (*n).saturating_add(1);
 }
 
 /// Appends an ERAM track sample, or counts the overflow.

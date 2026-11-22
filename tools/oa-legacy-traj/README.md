@@ -39,11 +39,13 @@ ERAM and TBFM when comparable estimates exist. `auto` selects a resolvable fix b
 distinct ORD flight plans with a TBFM estimate, before scoring. OpenATCA uses the received route's
 geometry and observed motion. Its ETA does not depend on the legacy time predictions. The ADS-B
 archive records observation time and has no comparable receive clock. This baseline has no winds or
-aircraft performance model. The pure core accepts provenance-stamped route altitude windows and
-an assigned-altitude provenance; synthetic coverage checks exercise them as waypoint-crossing
-feasibility checks. This is not a fitted vertical solver. The current legacy input
-tables carry neither clearance altitude nor published procedure constraints, so the ORD shell leaves
-those fields absent and reports that data gap. Coverage at each horizon is divided by every issued
+aircraft performance model. The SFDPS input retains typed assigned-altitude changes with their
+receive time. Only a valid `simple` form supplies a scalar; a later valid VFR, block, or at-fix form
+supersedes the prior scalar and is reported as unsupported. A same-stamp conflict or incomplete
+history refuses the scalar. The issue snapshot carries its source and availability time, and excludes
+updates received after the route cutoff. Published procedure altitude windows are not in the legacy
+route table, so route constraints remain absent. Synthetic checks exercise waypoint crossing
+feasibility; this is not a fitted vertical solver. Coverage at each horizon is divided by every issued
 forecast; missing predicted positions and missing truth interpolation are counted separately.
 Forecast eligibility is determined before future truth is read.
 

@@ -416,11 +416,12 @@ pub fn extraction_counts(l: &crate::legacy::Legacy) -> Vec<(String, u64)> {
             plan.overflow,
         ),
         (
-            "rows dropped at capacity (flights, TH, handoffs, routes, TBFM, TFMS)".into(),
+            "rows dropped at capacity (flights, TH, handoffs, routes, assigned altitude, TBFM, TFMS)".into(),
             c.overflow_flights
                 + c.overflow_th
                 + c.overflow_handoffs
                 + c.overflow_routes
+                + c.overflow_assigned_altitude_updates
                 + c.overflow_tbfm
                 + c.overflow_tfms,
         ),

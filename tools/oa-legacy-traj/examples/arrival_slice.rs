@@ -66,6 +66,7 @@ fn main() -> Result<(), String> {
             vertical_rate_fpm: Some(-900.0),
         },
         assigned_altitude_ft: Some(5_000.0),
+        assigned_altitude_available_ms: Some(1_000_000),
         assigned_altitude_provenance: Some(ConstraintProvenance::Synthetic),
         route: vec![jot, fix, ord],
         meter_fix: Some(fix),

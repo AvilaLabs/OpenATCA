@@ -102,7 +102,9 @@ pub struct IssueSnapshot {
     pub issued_ms: i64,
     pub track: TrackState,
     pub assigned_altitude_ft: Option<f64>,
-    /// Source of assigned altitude; absent when its provenance is unknown.
+    /// Receive/availability time of the assigned altitude; absent with the value.
+    pub assigned_altitude_available_ms: Option<i64>,
+    /// Source of assigned altitude; absent with the value.
     pub assigned_altitude_provenance: Option<ConstraintProvenance>,
     /// Ordered converted route points; the first point is the next fix after the track state.
     pub route: Vec<RouteFix>,
@@ -147,6 +149,8 @@ pub struct MeterEta {
 pub struct Forecast {
     pub issued_ms: i64,
     pub cutoff_ms: i64,
+    pub assigned_altitude_available_ms: Option<i64>,
+    pub assigned_altitude_provenance: Option<ConstraintProvenance>,
     /// The unique meter fix selected from this issue snapshot, if one was resolved.
     pub meter_fix: Option<RouteFix>,
     pub positions: [ForecastPoint; 3],
@@ -195,6 +199,19 @@ pub fn forecast(snapshot: &IssueSnapshot) -> Result<Forecast, ForecastRefusal> {
     let speed = t.speed_mps.ok_or(ForecastRefusal::MissingSpeed)?;
     if speed <= 1.0 || speed > MAX_GROUND_SPEED_MPS {
         return Err(ForecastRefusal::InvalidSpeed);
+    }
+    if match (
+        snapshot.assigned_altitude_ft,
+        snapshot.assigned_altitude_available_ms,
+        snapshot.assigned_altitude_provenance,
+    ) {
+        (None, None, None) => false,
+        (Some(_), Some(available_ms), Some(_)) => {
+            available_ms <= 0 || available_ms > snapshot.cutoff_ms
+        }
+        _ => true,
+    } {
+        return Err(ForecastRefusal::InvalidTrackValue);
     }
     if t.altitude_ft
         .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
@@ -295,6 +312,8 @@ pub fn forecast(snapshot: &IssueSnapshot) -> Result<Forecast, ForecastRefusal> {
     Ok(Forecast {
         issued_ms: snapshot.issued_ms,
         cutoff_ms: snapshot.cutoff_ms,
+        assigned_altitude_available_ms: snapshot.assigned_altitude_available_ms,
+        assigned_altitude_provenance: snapshot.assigned_altitude_provenance,
         meter_fix: snapshot.meter_fix,
         positions: points,
         meter_eta,
@@ -697,6 +716,7 @@ mod tests {
                 vertical_rate_fpm: None,
             },
             assigned_altitude_ft: None,
+            assigned_altitude_available_ms: None,
             assigned_altitude_provenance: None,
             route: vec![fix],
             meter_fix: Some(fix),
@@ -918,6 +938,8 @@ mod tests {
         aged.track.altitude_ft = Some(12_000.0);
         aged.track.vertical_rate_fpm = Some(-600.0);
         aged.assigned_altitude_ft = Some(5_000.0);
+        aged.assigned_altitude_available_ms = Some(aged.cutoff_ms);
+        aged.assigned_altitude_provenance = Some(ConstraintProvenance::Synthetic);
         let aged_forecast = forecast(&aged).map_err(|error| format!("aged forecast: {error:?}"))?;
         assert_eq!(aged_forecast.positions[0].altitude_ft, Some(8_950.0));
 
@@ -1126,6 +1148,7 @@ mod tests {
         conflict.track.speed_mps = Some(180.0);
         conflict.track.vertical_rate_fpm = Some(-600.0);
         conflict.assigned_altitude_ft = Some(9_000.0);
+        conflict.assigned_altitude_available_ms = Some(conflict.cutoff_ms);
         conflict.assigned_altitude_provenance = Some(ConstraintProvenance::SfdpsAssignedAltitude);
         conflict
             .route

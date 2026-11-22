@@ -191,6 +191,7 @@ fn rows_past_a_capacity_are_dropped_and_counted() {
         routes: 0,
         route_points: 2,
         beacons: 1,
+        assigned_altitude_updates: 2,
         tbfm: 2,
         tfms: 1,
     };
