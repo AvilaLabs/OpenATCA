@@ -2830,7 +2830,8 @@ fn controller_handoff_and_scope_continue_after_serving_processes_are_killed() {
     }
     assert_eq!(fence.last_sequence, SYNTHETIC_STREAM.len() as u64);
     eprintln!(
-        "controller-takeover: last_source_s=10 first_promoted_source_s=40          source_gap_s=30 first_verified_frame_local_ms={} completed_handoffs=1",
+        "controller-takeover: last_source_s=10 first_promoted_source_s=40 \
+         source_gap_s=30 first_verified_frame_local_ms={} completed_handoffs=1",
         first_frame_ms.unwrap()
     );
 }
