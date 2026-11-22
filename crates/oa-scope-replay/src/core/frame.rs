@@ -43,9 +43,12 @@ const STAMP_RIGHT_PX: i32 = 8;
 const STAMP_FROM_BOTTOM_PX: i32 = 22;
 const STAMP_BYTES: usize = 96;
 const RAW_BANNER: &str = "RAW SURVEILLANCE ONLY";
+const RAW_NO_POSITION_NOTICE: &str = "NO FRESH RAW POSITIONS";
 const RAW_BANNER_SIZE: u8 = 16;
 const RAW_BANNER_NARROW_SIZE: u8 = STAMP_SIZE;
+const RAW_NOTICE_SIZE: u8 = STAMP_SIZE;
 const RAW_BANNER_TOP_PX: i32 = 10;
+const RAW_NOTICE_GAP_PX: i32 = 1;
 const RAW_BANNER_PADDING_PX: i32 = 4;
 
 /// Why a frame could not be made.
@@ -185,8 +188,8 @@ pub fn replay_new(model: Model, cfg: &ReplayConfig) -> Result<Replay, ReplayErro
         circles: 0,
         polylines: 0,
         poly_vertices: 0,
-        texts: 2,
-        text_bytes: STAMP_BYTES + RAW_BANNER.len(),
+        texts: 3,
+        text_bytes: STAMP_BYTES + RAW_BANNER.len() + RAW_NO_POSITION_NOTICE.len(),
     };
     let caps = caps_add(
         &caps_add(
@@ -230,7 +233,8 @@ pub fn replay_build(
 /// output. The caller must supply only observations available by as-of time: the columns encode
 /// observation time, not receipt time. Only observations at or before as-of and no older than the
 /// finite cutoff in the raw reducer can appear. No ownership, callsign, coast, trail, or
-/// extrapolated position is inferred. The banner makes this step down visible to the controller.
+/// extrapolated position is inferred. The banner makes this step down visible to the controller;
+/// if no unique fresh valid raw position exists, it also says so, even when the map is empty.
 /// On any error, the previous list is cleared and rasterization is refused.
 pub fn replay_build_raw(
     r: &mut Replay,
@@ -269,12 +273,12 @@ pub(crate) fn replay_build_raw_with_source_stale(
                 half_span_at_size(RAW_BANNER_NARROW_SIZE),
             )
         };
-        let banner_bottom = RAW_BANNER_TOP_PX + i32::from(banner_size) + RAW_BANNER_PADDING_PX;
-        let marker_clearance_bottom =
-            i64::from(banner_bottom).saturating_add(i64::from(MAX_TARGET_SYMBOL_RADIUS_PX));
+        let one_line_bottom = RAW_BANNER_TOP_PX + i32::from(banner_size) + RAW_BANNER_PADDING_PX;
+        let one_line_marker_clearance =
+            i64::from(one_line_bottom).saturating_add(i64::from(MAX_TARGET_SYMBOL_RADIUS_PX));
         if half_span * 2 > i64::from(width)
-            || i64::from(banner_bottom) > i64::from(height)
-            || marker_clearance_bottom >= i64::from(r.view.proj.top_inset)
+            || i64::from(one_line_bottom) > i64::from(height)
+            || one_line_marker_clearance >= i64::from(r.view.proj.top_inset)
         {
             return Err(ReplayError::RawBannerDoesNotFit { width, height });
         }
@@ -285,6 +289,33 @@ pub(crate) fn replay_build_raw_with_source_stale(
             &r.view.proj,
             &mut r.set,
         )?;
+        let no_fresh_positions = raw.fresh_valid_positions == 0;
+        let (banner_bottom, banner_half_span) = if no_fresh_positions {
+            let notice_units = i64::from(text_width_units(RAW_NO_POSITION_NOTICE.chars().count()));
+            let notice_span = notice_units
+                .saturating_mul(i64::from(RAW_NOTICE_SIZE))
+                .saturating_add(i64::from(CAP_HEIGHT) - 1)
+                / i64::from(CAP_HEIGHT);
+            let notice_half_span = (notice_span.saturating_add(1) / 2)
+                .saturating_add(i64::from(RAW_BANNER_PADDING_PX));
+            let half_span = half_span.max(notice_half_span);
+            let notice_bottom = RAW_BANNER_TOP_PX
+                + i32::from(banner_size)
+                + RAW_NOTICE_GAP_PX
+                + i32::from(RAW_NOTICE_SIZE)
+                + RAW_BANNER_PADDING_PX;
+            let marker_clearance_bottom =
+                i64::from(notice_bottom).saturating_add(i64::from(MAX_TARGET_SYMBOL_RADIUS_PX));
+            if half_span.saturating_mul(2) > i64::from(width)
+                || i64::from(notice_bottom) > i64::from(height)
+                || marker_clearance_bottom >= i64::from(r.view.proj.top_inset)
+            {
+                return Err(ReplayError::RawBannerDoesNotFit { width, height });
+            }
+            (notice_bottom, half_span)
+        } else {
+            (one_line_bottom, half_span)
+        };
         let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
         let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
 
@@ -311,17 +342,17 @@ pub(crate) fn replay_build_raw_with_source_stale(
         )?;
 
         let banner_x = i32::try_from(width / 2).unwrap_or(i32::MAX);
-        let half_span = i32::try_from(half_span).unwrap_or(i32::MAX);
+        let banner_half_span = i32::try_from(banner_half_span).unwrap_or(i32::MAX);
         // The legend is opaque and sits above traffic. Use the safety overlay layers for the
         // raw banner so a successfully drawn scope always identifies its source.
         push_rect(
             &mut r.list,
             (
-                banner_x.saturating_sub(half_span).saturating_mul(16),
+                banner_x.saturating_sub(banner_half_span).saturating_mul(16),
                 (RAW_BANNER_TOP_PX - RAW_BANNER_PADDING_PX) * 16,
             ),
             (
-                banner_x.saturating_add(half_span).saturating_mul(16),
+                banner_x.saturating_add(banner_half_span).saturating_mul(16),
                 banner_bottom * 16,
             ),
             palette::BACKGROUND,
@@ -338,6 +369,23 @@ pub(crate) fn replay_build_raw_with_source_stale(
             LAYER_BANNER,
             text_str(&banner),
         )?;
+        if no_fresh_positions {
+            let notice_y = RAW_BANNER_TOP_PX + i32::from(banner_size) + RAW_NOTICE_GAP_PX;
+            let mut notice = text_new();
+            text_push_str(&mut notice, RAW_NO_POSITION_NOTICE);
+            if text_clipped(&notice) {
+                return Err(ReplayError::RawBannerDoesNotFit { width, height });
+            }
+            push_text(
+                &mut r.list,
+                (banner_x.saturating_mul(16), notice_y * 16),
+                RAW_NOTICE_SIZE,
+                ALIGN_CENTRE,
+                palette::ALERT,
+                LAYER_BANNER,
+                text_str(&notice),
+            )?;
+        }
         Ok((
             FrameInfo {
                 scene,

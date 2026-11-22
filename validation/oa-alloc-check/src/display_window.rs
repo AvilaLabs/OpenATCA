@@ -639,6 +639,20 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         gs_dkt: &raw_speeds,
         track_ddeg: &raw_tracks,
     };
+    let no_raw_times: [i64; 0] = [];
+    let no_raw_addresses: [u32; 0] = [];
+    let no_raw_positions: [i32; 0] = [];
+    let no_raw_altitudes: [i32; 0] = [];
+    let no_raw_motion: [u16; 0] = [];
+    let raw_empty = RawObservationColumns {
+        t_ns: &no_raw_times,
+        addr: &no_raw_addresses,
+        lat_e7: &no_raw_positions,
+        lon_e7: &no_raw_positions,
+        alt_ft: &no_raw_altitudes,
+        gs_dkt: &no_raw_motion,
+        track_ddeg: &no_raw_motion,
+    };
     let raw_many_times = [raw_as_of; 10];
     let raw_many_addresses = [
         0xA3_0000, 0xA3_0001, 0xA3_0002, 0xA3_0003, 0xA3_0004, 0xA3_0005, 0xA3_0006, 0xA3_0007,
@@ -675,7 +689,8 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         track_ddeg: &invalid_tracks,
     };
     let mut raw_ok = true;
-    let (mut raw_drawn, mut raw_capacity_refused, mut raw_invalid_refused) = (0u64, 0u64, 0u64);
+    let (mut raw_drawn, mut raw_capacity_refused, mut raw_invalid_refused, mut raw_notice_drawn) =
+        (0u64, 0u64, 0u64, 0u64);
     let raw_alert = PALETTE
         .get(usize::from(ALERT))
         .ok_or("raw alert color unavailable")?
@@ -698,6 +713,31 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
                     && info.traffic.drawn == 1
                 {
                     raw_drawn += 1;
+                } else {
+                    raw_ok = false;
+                }
+            }
+            Err(_) => raw_ok = false,
+        }
+        match replay_build_raw(&mut replay, &raw_empty, raw_as_of, "RAW EMPTY") {
+            Ok((_, evidence)) => {
+                let notice = list_has_text(&replay.list, "NO FRESH RAW POSITIONS");
+                let raster = replay_raster(&mut replay).is_ok();
+                let second_line_pixel = replay
+                    .buf
+                    .chunks_exact(replay.spec.stride as usize)
+                    .skip(27)
+                    .take(12)
+                    .flat_map(|line| line.chunks_exact(4))
+                    .any(|pixel| pixel == raw_alert);
+                let digest = frame_digest(&replay.spec, &replay.buf).is_ok();
+                if notice
+                    && raster
+                    && second_line_pixel
+                    && digest
+                    && evidence.fresh_valid_positions == 0
+                {
+                    raw_notice_drawn += 1;
                 } else {
                     raw_ok = false;
                 }
@@ -732,7 +772,7 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         }
     })?;
     add_counts(&mut counts, c);
-    if !raw_ok {
+    if !raw_ok || raw_notice_drawn == 0 {
         return Err("a measured raw surveillance display branch failed its witness");
     }
 

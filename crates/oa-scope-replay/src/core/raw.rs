@@ -47,6 +47,10 @@ pub struct RawStats {
     /// Newest same-time groups with both fresh and source-stale rows; withheld as conflicts.
     pub source_stale_conflicts: u64,
     pub stale_addresses: u64,
+    /// Unique latest groups passing as-of, supplied source and age freshness checks with valid
+    /// coordinates, before map exclusion or target capacity. Off-map and unprojectable positions
+    /// count; groups refused as invalid, stale or conflicting do not.
+    pub fresh_valid_positions: u64,
     pub invalid_positions: u64,
     pub unprojectable_positions: u64,
     pub off_map_positions: u64,
@@ -277,10 +281,15 @@ pub(crate) fn raw_targets_at_with_source_stale(
         match map_position(proj, lat_e7, lon_e7) {
             MapPos::Invalid => stats.invalid_positions = stats.invalid_positions.saturating_add(1),
             MapPos::Unprojectable => {
+                stats.fresh_valid_positions = stats.fresh_valid_positions.saturating_add(1);
                 stats.unprojectable_positions = stats.unprojectable_positions.saturating_add(1);
             }
-            MapPos::Off => stats.off_map_positions = stats.off_map_positions.saturating_add(1),
+            MapPos::Off => {
+                stats.fresh_valid_positions = stats.fresh_valid_positions.saturating_add(1);
+                stats.off_map_positions = stats.off_map_positions.saturating_add(1);
+            }
             MapPos::On(_) => {
+                stats.fresh_valid_positions = stats.fresh_valid_positions.saturating_add(1);
                 let target = Target {
                     lat_e7,
                     lon_e7,

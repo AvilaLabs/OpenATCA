@@ -23,6 +23,10 @@ const BANNER_SIZE_PX: i32 = 16;
 const BANNER_PADDING_PX: i32 = 4;
 
 fn replay(width: u32, height: u32) -> Replay {
+    replay_with_capacity(width, height, 4)
+}
+
+fn replay_with_capacity(width: u32, height: u32, max_targets: usize) -> Replay {
     let model = empty_model(Meta {
         nasr_effective: 0,
         cifp_cycle: 0,
@@ -39,7 +43,7 @@ fn replay(width: u32, height: u32) -> Replay {
             range_nm: RANGE_NM,
             width,
             height,
-            max_targets: 4,
+            max_targets,
             style: DEFAULT_STYLE,
             convert: DEFAULT_CONVERT,
         },
@@ -65,6 +69,38 @@ fn build_raw(replay: &mut Replay, lat_e7: i32, lon_e7: i32) -> Result<RawStats, 
         track_ddeg: &tracks,
     };
     replay_build_raw(replay, &observations, NOW, "RAW GEOMETRY").map(|(_, stats)| stats)
+}
+
+fn build_columns(
+    replay: &mut Replay,
+    times: &[i64],
+    addresses: &[u32],
+    latitudes: &[i32],
+    longitudes: &[i32],
+) -> (RawStats, Vec<u8>) {
+    let altitudes = vec![12_000; times.len()];
+    let speeds = vec![oa_display::traffic::NO_U16; times.len()];
+    let tracks = vec![oa_display::traffic::NO_U16; times.len()];
+    let observations = RawObservationColumns {
+        t_ns: times,
+        addr: addresses,
+        lat_e7: latitudes,
+        lon_e7: longitudes,
+        alt_ft: &altitudes,
+        gs_dkt: &speeds,
+        track_ddeg: &tracks,
+    };
+    let (_, stats) = replay_build_raw(replay, &observations, NOW, "RAW EVIDENCE").unwrap();
+    replay_raster(replay).unwrap();
+    (stats, replay.buf.clone())
+}
+
+fn has_text(replay: &Replay, wanted: &str) -> bool {
+    (0..replay.list.texts.x.len()).any(|i| {
+        let start = replay.list.texts.start[i] as usize;
+        let len = replay.list.texts.len[i] as usize;
+        &replay.list.text[start..start + len] == wanted
+    })
 }
 
 // REQ: OA-DSP-071, OA-DSP-072
@@ -130,4 +166,70 @@ fn raw_banner_is_visible_on_a_320_pixel_scope() {
         .take(12)
         .flat_map(|line| line.chunks_exact(4))
         .any(|pixel| pixel == ink));
+}
+
+// REQ: OA-DSP-071, OA-DSP-072
+#[test]
+fn raw_banner_distinguishes_no_fresh_position_from_valid_off_map_evidence() {
+    let mut empty = replay(320, 240);
+    let (empty_stats, empty_pixels) = build_columns(&mut empty, &[], &[], &[], &[]);
+    assert_eq!(empty_stats.fresh_valid_positions, 0);
+    assert!(has_text(&empty, "NO FRESH RAW POSITIONS"));
+
+    let mut stale = replay(320, 240);
+    let stale_times = [NOW - oa_scope_replay::raw::RAW_STALE_CUTOFF_NS - 1];
+    let addresses = [0xA00001];
+    let latitudes = [ORD.0];
+    let longitudes = [ORD.1];
+    let (stale_stats, stale_pixels) = build_columns(
+        &mut stale,
+        &stale_times,
+        &addresses,
+        &latitudes,
+        &longitudes,
+    );
+    assert_eq!(stale_stats.stale_addresses, 1);
+    assert_eq!(stale_stats.fresh_valid_positions, 0);
+    assert!(has_text(&stale, "NO FRESH RAW POSITIONS"));
+    assert_eq!(
+        empty_pixels, stale_pixels,
+        "empty and stale both show the notice"
+    );
+
+    // Valid but outside the projection still proves that fresh raw position evidence exists.
+    let mut off_map = replay(320, 240);
+    let fresh_times = [NOW];
+    let off_map_lon = [ORD.1 + 10_000_000];
+    let (off_map_stats, off_map_pixels) = build_columns(
+        &mut off_map,
+        &fresh_times,
+        &addresses,
+        &latitudes,
+        &off_map_lon,
+    );
+    assert_eq!(off_map_stats.off_map_positions, 1);
+    assert_eq!(off_map_stats.fresh_valid_positions, 1);
+    assert!(!has_text(&off_map, "NO FRESH RAW POSITIONS"));
+    assert_ne!(
+        empty_pixels, off_map_pixels,
+        "the second line changes the raster"
+    );
+
+    // Fresh in-map evidence remains countable even when target-slot capacity refuses admission.
+    let mut limited = replay_with_capacity(320, 240, 1);
+    let two_times = [NOW, NOW];
+    let two_addresses = [0xA00001, 0xA00002];
+    let two_lats = [ORD.0, ORD.0 + 100];
+    let two_lons = [ORD.1, ORD.1 + 100];
+    let (limited_stats, _) = build_columns(
+        &mut limited,
+        &two_times,
+        &two_addresses,
+        &two_lats,
+        &two_lons,
+    );
+    assert_eq!(limited_stats.fresh_valid_positions, 2);
+    assert_eq!(limited_stats.targets_admitted, 1);
+    assert_eq!(limited_stats.refused_capacity, 1);
+    assert!(!has_text(&limited, "NO FRESH RAW POSITIONS"));
 }

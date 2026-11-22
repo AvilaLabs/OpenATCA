@@ -289,7 +289,10 @@ Each address can contribute its newest fresh observation as of the rendered fram
 on that observation suppresses the address until fresh evidence arrives. Conflicting observations
 at the same time, including disagreement over that flag, are counted and withheld. A caller using
 the lower-level columns API supplies its own receipt and source-quality checks. The offline
-drill draws observed positions with a finite age cutoff.
+drill draws observed positions with a finite age cutoff. Its raw-only picture says
+`NO FRESH RAW POSITIONS` when that frame has no unique latest source-fresh, age-fresh valid
+position; a valid off-map position and a valid position rejected only by target capacity still
+count as evidence. This picture cue is not a feed-outage classification.
 
 ## 9. Time
 
