@@ -12,6 +12,7 @@ use oa_ca::{
     AF_COAST, AIRBORNE, F_COAST, F_IDENTITY_UNCONFIRMED, F_UNCERTAIN, MAX_VOLUMES,
 };
 use oa_display::core::palette;
+use oa_display::ownership::{OwnershipPhase, OwnershipStatus};
 use oa_display::raster::frame_digest;
 use oa_display::safety::{FeedState, FeedStatus};
 use oa_display::traffic::{targets_columns, DEFAULT_STYLE, T_COAST};
@@ -24,7 +25,7 @@ use oa_safety::monitor::{
 use oa_safety::net::{state_report, state_table_new, NetId, NetReport, StateTable, NETS};
 use oa_scope_replay::adapt::{row_columns, ColumnBuf};
 use oa_scope_replay::frame::{
-    replay_build_raw, replay_build_with_safety, replay_new, replay_raster, Replay, ReplayConfig,
+    replay_build_raw, replay_build_with_overlays, replay_new, replay_raster, Replay, ReplayConfig,
     ReplaySafety,
 };
 use oa_scope_replay::raw::RawObservationColumns;
@@ -281,6 +282,7 @@ enum WorkerCommand {
     Step {
         second: i32,
         feed_live: bool,
+        ownership: Option<OwnershipStatus>,
     },
     Input {
         key: InputKey,
@@ -308,6 +310,34 @@ struct QuarantineRecord {
     payload_digest: [u8; 32],
 }
 
+fn ownership_input(owner: &str, accepted: &str) -> Option<OwnershipStatus> {
+    fn unit(text: &str) -> Option<[u8; 8]> {
+        let bytes = text.as_bytes();
+        if bytes.is_empty()
+            || !bytes
+                .iter()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+        {
+            return None;
+        }
+        let mut unit = [0; 8];
+        unit.get_mut(..bytes.len())?.copy_from_slice(bytes);
+        Some(unit)
+    }
+    let phase = if accepted == "-" {
+        OwnershipPhase::Current
+    } else {
+        OwnershipPhase::Accepted {
+            by: unit(accepted)?,
+        }
+    };
+    Some(OwnershipStatus {
+        callsign: *b"SYN901\0\0",
+        current_owner: unit(owner)?,
+        phase,
+    })
+}
+
 fn parse_worker_command(line: &str) -> Option<WorkerCommand> {
     let mut fields = line.split_whitespace();
     let command = fields.next()?;
@@ -315,14 +345,23 @@ fn parse_worker_command(line: &str) -> Option<WorkerCommand> {
         return fields.next().is_none().then_some(WorkerCommand::Stop);
     }
     let parsed = match command {
-        "STEP" => {
+        "STEP" | "STEP_OWNED" => {
             let second = fields.next()?.parse().ok()?;
             let feed_live = match fields.next()? {
                 "LIVE" => true,
                 "LOST" => false,
                 _ => return None,
             };
-            WorkerCommand::Step { second, feed_live }
+            let ownership = if command == "STEP_OWNED" {
+                Some(ownership_input(fields.next()?, fields.next()?)?)
+            } else {
+                None
+            };
+            WorkerCommand::Step {
+                second,
+                feed_live,
+                ownership,
+            }
         }
         "INPUT"
         | "FAIL_BEFORE_APPLY"
@@ -1016,6 +1055,15 @@ impl Drill {
     }
 
     fn process(&mut self, second: i32, live: bool) -> String {
+        self.process_with_ownership(second, live, None)
+    }
+
+    fn process_with_ownership(
+        &mut self,
+        second: i32,
+        live: bool,
+        ownership: Option<&OwnershipStatus>,
+    ) -> String {
         let ca_transitions = self.conflict_step(second);
         if live {
             self.offer(A, 1, second);
@@ -1030,7 +1078,7 @@ impl Drill {
             self.feeds[0].state = FeedState::Lost { age_ms: elapsed_ms };
             self.feeds[1].state = FeedState::Lost { age_ms: elapsed_ms };
         }
-        self.frame_inner(i64::from(second), None);
+        self.frame_with_ownership(i64::from(second), None, ownership);
         let digest = oa_sha256::to_hex(&frame_digest(&self.scope.spec, &self.scope.buf).unwrap());
         let ids = targets_columns(&self.scope.set)
             .addr
@@ -1231,6 +1279,15 @@ impl Drill {
     }
 
     fn frame_inner(&mut self, second: i64, expected_warnings: Option<&[&str]>) {
+        self.frame_with_ownership(second, expected_warnings, None);
+    }
+
+    fn frame_with_ownership(
+        &mut self,
+        second: i64,
+        expected_warnings: Option<&[&str]>,
+        ownership: Option<&OwnershipStatus>,
+    ) {
         let at = EPOCH + second * S;
         tracker_advance(&mut self.tracker, at, &mut self.out);
         let mut store = RowStore::default();
@@ -1243,21 +1300,23 @@ impl Drill {
         assert_eq!(stats.kept, stats.rows_in);
         assert_eq!(store_finish(&mut store), 0);
         let newest = tracker_newest_update_ns(&self.tracker);
-        replay_build_with_safety(
+        let info = replay_build_with_overlays(
             &mut self.scope,
             &store,
             &Callsigns::default(),
             at,
             "OUTAGE DRILL",
-            &ReplaySafety {
+            Some(&ReplaySafety {
                 states: &self.states,
                 inhibits: &self.inhibits,
                 feeds: &self.feeds,
                 newest_track_ns: (newest != i64::MIN).then_some(newest),
                 frozen_limit_ns: 5 * S,
-            },
+            }),
+            ownership,
         )
         .unwrap();
+        assert!(!info.ownership_clipped);
         replay_raster(&mut self.scope).unwrap();
         let list = &self.scope.list;
         let warnings: Vec<_> = list
@@ -1420,8 +1479,14 @@ fn machine_loss_worker_process() {
                 );
                 let _ = std::io::stdout().flush();
             }
-            WorkerCommand::Step { second, feed_live } => {
-                if stream.get(step_no) != Some(&(second, feed_live)) {
+            WorkerCommand::Step {
+                second,
+                feed_live,
+                ownership,
+            } => {
+                if (visible_ca && ownership.is_some())
+                    || stream.get(step_no) != Some(&(second, feed_live))
+                {
                     println!("MACHINE_LOSS_ERROR stream_order_or_record_mismatch");
                     let _ = std::io::stdout().flush();
                     break;
@@ -1447,7 +1512,7 @@ fn machine_loss_worker_process() {
                 let ack = if visible_ca {
                     drill.process_visible_ca(second, feed_live)
                 } else {
-                    drill.process(second, feed_live)
+                    drill.process_with_ownership(second, feed_live, ownership.as_ref())
                 };
                 println!("{ack}");
                 let _ = std::io::stdout().flush();
@@ -1629,10 +1694,7 @@ impl Replica {
             .env("OA_MACHINE_LOSS_WORKER", "1")
             .env_remove("OA_MACHINE_LOSS_CHECKPOINT")
             .env_remove("OA_MACHINE_LOSS_CHECKPOINT_OUTPUT")
-            .env_remove("OA_MACHINE_LOSS_VISIBLE_CA")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .env_remove("OA_MACHINE_LOSS_VISIBLE_CA");
         if let Some(path) = checkpoint {
             command.env("OA_MACHINE_LOSS_CHECKPOINT", path);
         }
@@ -1642,7 +1704,30 @@ impl Replica {
         if visible_ca {
             command.env("OA_MACHINE_LOSS_VISIBLE_CA", "1");
         }
-        let mut child = command.spawn().unwrap();
+        Self::spawn(command, quarantine)
+    }
+
+    fn start_controller(path: &Path) -> Self {
+        // The manual drill passes the controller fixture built at the same commit.
+        oa_sealed::refuse(path).unwrap();
+        let mut command = Command::new(path);
+        command
+            .args([
+                "--exact",
+                "controller_takeover_worker_process",
+                "--nocapture",
+            ])
+            .env("OA_CONTROLLER_TAKEOVER_WORKER", "1");
+        Self::spawn(command, None)
+    }
+
+    fn spawn(mut command: Command, quarantine: Option<QuarantineRecord>) -> Self {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         let (sender, output) = mpsc::sync_channel(8);
         let reader = thread::spawn(move || read_worker_output(stdout, sender));
@@ -1703,6 +1788,27 @@ impl Replica {
             !line.starts_with("MACHINE_LOSS_ERROR "),
             "worker rejected command at {second}s: {line}"
         );
+        validate_worker_ack(&line, second);
+        line
+    }
+
+    fn controller_step(&mut self, phase: u8) -> String {
+        self.input.write_all(&[phase]).unwrap();
+        self.input.flush().unwrap();
+        self.receive_record("controller takeover")
+    }
+
+    fn owned_step(&mut self, second: i32, live: bool, control: &str) -> String {
+        let fields: Vec<_> = control.split_whitespace().collect();
+        let (owner, accepted_by) = (fields[2], fields[3]);
+        writeln!(
+            self.input,
+            "STEP_OWNED {second} {} {owner} {accepted_by}",
+            if live { "LIVE" } else { "LOST" }
+        )
+        .unwrap();
+        self.input.flush().unwrap();
+        let line = self.receive_record("scope with controller takeover state");
         validate_worker_ack(&line, second);
         line
     }
@@ -1780,6 +1886,10 @@ impl Replica {
     fn shutdown(&mut self) -> io::Result<ExitStatus> {
         writeln!(self.input, "STOP")?;
         self.input.flush()?;
+        self.finish()
+    }
+
+    fn finish(&mut self) -> io::Result<ExitStatus> {
         let status = wait_bounded(&mut self.child)?;
         drop(self.output.take());
         if let Some(reader) = self.reader.take() {
@@ -2282,10 +2392,24 @@ fn worker_protocol_is_typed_and_caps_output_lines() {
         parse_worker_command("STEP 12 LIVE"),
         Some(WorkerCommand::Step {
             second: 12,
-            feed_live: true
+            feed_live: true,
+            ownership: None,
         })
     );
     assert_eq!(parse_worker_command("STEP 12 LIVE extra"), None);
+    assert_eq!(
+        parse_worker_command("STEP_OWNED 12 LIVE ZAU12 ZMP34"),
+        Some(WorkerCommand::Step {
+            second: 12,
+            feed_live: true,
+            ownership: ownership_input("ZAU12", "ZMP34"),
+        }),
+    );
+    assert_eq!(parse_worker_command("STEP_OWNED 12 LIVE ZAU12 zmp34"), None);
+    assert_eq!(
+        parse_worker_command("STEP_OWNED 12 LIVE ZAU12 ZMP34 extra"),
+        None
+    );
     let key = InputKey {
         publisher_id: 1,
         source_id: 2,
@@ -2582,6 +2706,131 @@ fn serving_process_loss_promotes_synchronized_scope_replica() {
     assert_eq!(fields[3], format!("{},{}", A, B));
     assert_eq!(fields[2].len(), 64);
     eprintln!("machine-loss: last_frame_s=10 next_frame_s=40 logical_display_gap_s=30 promotion_observed_ms={promotion_observed_ms} recovery={recovery}");
+}
+
+fn controller_ownership(record: &str, phase: &str) -> OwnershipStatus {
+    let fields: Vec<_> = record.split_whitespace().collect();
+    let ["MACHINE_LOSS_CONTROL", got_phase, owner, accepted_by, "36000", "24000", completed, digest, address, "SYN901"] =
+        fields.as_slice()
+    else {
+        panic!("invalid controller witness {record}");
+    };
+    assert_eq!(*got_phase, phase);
+    assert_eq!(address.parse::<u32>().unwrap(), A);
+    assert_eq!(digest.len(), 16);
+    assert!(u64::from_str_radix(digest, 16).is_ok());
+    match phase {
+        "P" => assert_eq!((*owner, *accepted_by, *completed), ("ZAU12", "ZMP34", "0")),
+        "T" | "R" => assert_eq!((*owner, *accepted_by, *completed), ("ZMP34", "-", "1")),
+        _ => panic!("unexpected witness phase {phase}"),
+    }
+    ownership_input(owner, accepted_by).unwrap()
+}
+
+#[test]
+#[ignore = "set OA_CONTROLLER_TAKEOVER_EXECUTABLE to the oa-flight test binary from this build"]
+fn controller_handoff_and_scope_continue_after_serving_processes_are_killed() {
+    let executable = PathBuf::from(std::env::var_os("OA_CONTROLLER_TAKEOVER_EXECUTABLE").unwrap());
+    let mut serving = Replica::start();
+    let mut standby = Replica::start();
+    let mut serving_control = Replica::start_controller(&executable);
+    let mut standby_control = Replica::start_controller(&executable);
+    let mut reference_control = Replica::start_controller(&executable);
+    let mut reference_scope = Drill::new();
+    reference_scope.warmup();
+
+    let pending = serving_control.controller_step(b'P');
+    let backup_pending = standby_control.controller_step(b'P');
+    assert_eq!(pending, backup_pending);
+    assert_eq!(pending, reference_control.controller_step(b'P'));
+    let pending_ownership = controller_ownership(&pending, "P");
+
+    let mut fence = INITIAL_FENCE;
+    for (step, &(second, live)) in SYNTHETIC_STREAM.iter().enumerate().take(11) {
+        let primary = serving.owned_step(second, live, &pending);
+        assert_eq!(primary, standby.owned_step(second, live, &backup_pending));
+        assert_eq!(
+            primary,
+            reference_scope.process_with_ownership(second, live, Some(&pending_ownership)),
+        );
+        let publication = publication_for_step(fence, step, second).unwrap();
+        fence = accept_publication(fence, publication).unwrap();
+    }
+
+    let promotion_started = Instant::now();
+    serving.child.kill().unwrap();
+    serving_control.child.kill().unwrap();
+    assert!(!serving.finish().unwrap().success());
+    assert!(!serving_control.finish().unwrap().success());
+
+    let old_fence = fence;
+    fence = advance_generation(
+        fence,
+        RECOVERY_PUBLISHER,
+        RECOVERY_SOURCE,
+        RECOVERY_GENERATION,
+    )
+    .unwrap();
+    let delayed = publication_for_step(old_fence, 11, SYNTHETIC_STREAM[11].0).unwrap();
+    assert_eq!(
+        accept_publication(fence, delayed),
+        Err(FenceRefusal::Generation)
+    );
+
+    let mut witness = backup_pending;
+    let mut ownership = pending_ownership;
+    let mut first_frame_ms = None;
+    for (step, &(second, live)) in SYNTHETIC_STREAM.iter().enumerate().skip(11) {
+        if second == 41 {
+            witness = standby_control.controller_step(b'T');
+            assert_eq!(witness, reference_control.controller_step(b'T'));
+            ownership = controller_ownership(&witness, "T");
+        }
+        if second == 42 {
+            witness = standby_control.controller_step(b'R');
+            assert_eq!(witness, reference_control.controller_step(b'R'));
+            ownership = controller_ownership(&witness, "R");
+        }
+
+        let candidate = standby.owned_step(second, live, &witness);
+        assert_eq!(
+            candidate,
+            reference_scope.process_with_ownership(second, live, Some(&ownership)),
+        );
+        let publication = publication_for_step(fence, step, second).unwrap();
+        fence = accept_publication(fence, publication).unwrap();
+        assert_eq!(
+            accept_publication(fence, publication),
+            Err(FenceRefusal::SequenceReplay),
+        );
+        if second == 40 {
+            first_frame_ms = Some(promotion_started.elapsed().as_millis());
+            assert!(reference_scope
+                .scope
+                .list
+                .text
+                .contains("FLIGHT SYN901 OWNER ZAU12 | ACCEPTED BY ZMP34"));
+        }
+        if second >= 41 {
+            assert!(reference_scope
+                .scope
+                .list
+                .text
+                .contains("FLIGHT SYN901 OWNER ZMP34 | CURRENT"));
+        }
+    }
+
+    assert!(standby.shutdown().unwrap().success());
+    for control in [&mut standby_control, &mut reference_control] {
+        control.input.write_all(b"Q").unwrap();
+        control.input.flush().unwrap();
+        assert!(control.finish().unwrap().success());
+    }
+    assert_eq!(fence.last_sequence, SYNTHETIC_STREAM.len() as u64);
+    eprintln!(
+        "controller-takeover: last_source_s=10 first_promoted_source_s=40          source_gap_s=30 first_verified_frame_local_ms={} completed_handoffs=1",
+        first_frame_ms.unwrap()
+    );
 }
 
 // REQ: OA-DSP-043, OA-DSP-061, OA-DSP-063, OA-DSP-064, OA-TRK-343
