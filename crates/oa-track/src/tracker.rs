@@ -2322,7 +2322,7 @@ mod tests {
     )]
 
     use super::*;
-    use crate::types::{output_new, DEFAULT_CONFIG, O_HAS_ALT};
+    use crate::types::{output_new, DEFAULT_CONFIG, M_ALT_GEOMETRIC, O_HAS_ALT};
 
     const S: i64 = NS_PER_S;
     const ADDR: u32 = 0xABC123;
@@ -2420,6 +2420,55 @@ mod tests {
         let (row, _, _) = tracker_predict(&t, ADDR, 29 * S).unwrap();
         assert!(row.flags & O_HAS_ALT != 0);
         assert!((row.vrate_fpm + 15_000.0).abs() < 2_000.0);
+    }
+
+    // REQ: OA-TRK-355
+    #[test]
+    fn contradictory_rate_then_missing_altitude_and_coast_preserve_reacquired_fast_vertical_motion()
+    {
+        for direction in [-1, 1] {
+            let c = cfg(1, 0);
+            let mut t = tracker_new(&c).unwrap();
+            let mut out = output_new(c.out_capacity);
+            // Flat barometric altitude contradicts the reported descent rate.
+            for k in 0..8 {
+                tracker_update(&mut t, &baro(k * S, 10_000, -15_000), &mut out);
+            }
+            let (level, _, _) = tracker_predict(&t, ADDR, 8 * S).unwrap();
+            assert!(level.flags & O_HAS_ALT != 0);
+            assert!((level.alt_ft - 10_000.0).abs() < 100.0);
+            assert!(level.vrate_fpm.abs() < 1_000.0);
+
+            // Geometric-only reports do not supply barometric evidence; the track then coasts.
+            for k in 8..10 {
+                let mut m = at(k * S, 0, 100.0);
+                m.alt_ft = 10_000 + 5_000 * k as i32;
+                m.alt_quant_ft = 25;
+                m.flags |= M_ALT_GEOMETRIC;
+                tracker_update(&mut t, &m, &mut out);
+            }
+            assert!(tracker_set_expected_interval(&mut t, ADDR, S));
+            tracker_advance(&mut t, 20 * S, &mut out);
+            assert!(out.flags.iter().any(|flags| flags & O_COAST != 0));
+
+            // After the old raw-altitude anchor expires, consistent reports establish a real
+            // rapid descent or climb despite the earlier contradictory rate.
+            for k in 0..=8 {
+                tracker_update(
+                    &mut t,
+                    &baro(
+                        28 * S + k * S,
+                        10_000 + direction * 250 * k as i32,
+                        direction * 15_000,
+                    ),
+                    &mut out,
+                );
+            }
+            let (row, _, _) = tracker_predict(&t, ADDR, 37 * S).unwrap();
+            assert!(row.flags & O_HAS_ALT != 0);
+            assert!((row.alt_ft - (10_000.0 + direction as f32 * 2_250.0)).abs() < 250.0);
+            assert!((row.vrate_fpm - direction as f32 * 15_000.0).abs() < 2_000.0);
+        }
     }
 
     // REQ: OA-TRK-355
