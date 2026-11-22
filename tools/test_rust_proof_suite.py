@@ -228,6 +228,8 @@ class SuiteConfigurationTests(unittest.TestCase):
         self.assertEqual(tiers["asterix-fspec-cat021"], "nightly")
         self.assertEqual(tiers["output-append"], "push")
         local = {p["id"] for p in registry["proofs"] if p["ci_seconds_source"] == "local"}
+        self.assertIn("safety-future-report-recovery", local)
+        local.remove("safety-future-report-recovery")
         self.assertEqual(len(local), 20)
         self.assertTrue(all(i.startswith(("asterix-", "adsb-", "msaw-")) for i in local))
 
