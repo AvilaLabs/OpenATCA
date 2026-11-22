@@ -5,8 +5,9 @@
 //! newest observation at or before the display time is eligible; age at the inclusive finite
 //! cutoff is shown, and anything older is dropped.
 
+use oa_display::core::project::Projection;
 use oa_display::core::traffic::{
-    position_valid, targets_clear, targets_malformed, targets_push, targets_refused, Target,
+    map_position, targets_clear, targets_malformed, targets_push, targets_refused, MapPos, Target,
     TargetSet, MAX_TRAIL, NO_REACQ, T_UNCERTAIN,
 };
 use std::fmt;
@@ -41,6 +42,8 @@ pub struct RawStats {
     pub future_only_addresses: u64,
     pub stale_addresses: u64,
     pub invalid_positions: u64,
+    pub unprojectable_positions: u64,
+    pub off_map_positions: u64,
     /// Distinct targets admitted to the display set (projection may still omit them).
     pub targets_admitted: u64,
     /// Address groups whose newest as-of timestamp has contradictory payloads.
@@ -126,11 +129,13 @@ fn validate_raw(columns: &RawObservationColumns<'_>) -> Result<usize, RawInputEr
 
 /// Fills set with latest-at-as-of raw observations in address order. Exact duplicate rows at an
 /// equal newest timestamp collapse; conflicting payloads at that timestamp refuse the address,
-/// without falling back to older data. No extrapolation, synthetic coast, callsign, or ownership
-/// is added.
+/// without falling back to older data. Observations outside the map do not consume target slots.
+/// Targets carry reported positions and kinematics. The reducer supplies no predicted positions
+/// or ownership metadata.
 pub fn raw_targets_at(
     columns: &RawObservationColumns<'_>,
     as_of_ns: i64,
+    proj: &Projection,
     set: &mut TargetSet,
 ) -> Result<RawStats, RawInputError> {
     let n = validate_raw(columns)?;
@@ -220,27 +225,31 @@ pub fn raw_targets_at(
             start = end;
             continue;
         }
-        if !position_valid(lat_e7, lon_e7) {
-            stats.invalid_positions = stats.invalid_positions.saturating_add(1);
-            start = end;
-            continue;
-        }
-        let target = Target {
-            lat_e7,
-            lon_e7,
-            alt_ft,
-            addr,
-            r95_m: f32::NAN,
-            trail: [(0, 0); MAX_TRAIL],
-            callsign: [0; 8],
-            track_ddeg,
-            gs_dkt,
-            reacq_age_s: NO_REACQ,
-            flags: T_UNCERTAIN,
-            trail_len: 0,
-        };
-        if targets_push(set, &target).is_ok() {
-            stats.targets_admitted = stats.targets_admitted.saturating_add(1);
+        match map_position(proj, lat_e7, lon_e7) {
+            MapPos::Invalid => stats.invalid_positions = stats.invalid_positions.saturating_add(1),
+            MapPos::Unprojectable => {
+                stats.unprojectable_positions = stats.unprojectable_positions.saturating_add(1);
+            }
+            MapPos::Off => stats.off_map_positions = stats.off_map_positions.saturating_add(1),
+            MapPos::On(_) => {
+                let target = Target {
+                    lat_e7,
+                    lon_e7,
+                    alt_ft,
+                    addr,
+                    r95_m: f32::NAN,
+                    trail: [(0, 0); MAX_TRAIL],
+                    callsign: [0; 8],
+                    track_ddeg,
+                    gs_dkt,
+                    reacq_age_s: NO_REACQ,
+                    flags: T_UNCERTAIN,
+                    trail_len: 0,
+                };
+                if targets_push(set, &target).is_ok() {
+                    stats.targets_admitted = stats.targets_admitted.saturating_add(1);
+                }
+            }
         }
         start = end;
     }

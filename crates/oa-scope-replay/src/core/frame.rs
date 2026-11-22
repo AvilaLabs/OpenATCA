@@ -243,7 +243,7 @@ pub fn replay_build_raw(
         if banner_width > i64::from(width) || banner_height > i64::from(height) {
             return Err(ReplayError::RawBannerDoesNotFit { width, height });
         }
-        let raw = raw_targets_at(observations, as_of_ns, &mut r.set)?;
+        let raw = raw_targets_at(observations, as_of_ns, &r.view.proj, &mut r.set)?;
         let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
         let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;
 

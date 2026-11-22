@@ -519,9 +519,11 @@ fn replayed_frames_are_the_same_in_every_run_and_do_not_depend_on_earlier_frames
 
 const GOLDEN: &str = "3d27683429165aaedf3ff3e8341b2ed667adcbf711d356c223222a222efd2980";
 
+// REQ: OA-DSP-072
 #[test]
 fn raw_fallback_is_as_of_finite_and_visibly_bypasses_tracker_rows() {
     let times = [
+        T0 + 5 * S,
         T0,
         T0 + 2 * S,
         T0 + 6 * S,
@@ -530,12 +532,31 @@ fn raw_fallback_is_as_of_finite_and_visibly_bypasses_tracker_rows() {
         T0 + 6 * S,
         T0 + 5 * S,
     ];
-    let addresses = [11, 11, 11, 22, 22, 33, 44];
-    let latitudes = [ORD.0, ORD.0 + 500, ORD.0 + 900, ORD.0, ORD.0, ORD.0, ORD.0];
-    let longitudes = [ORD.1, ORD.1 + 700, ORD.1 + 900, ORD.1, ORD.1, ORD.1, ORD.1];
-    let altitudes = [24_000; 7];
-    let speeds = [NO_U16; 7];
-    let tracks = [NO_U16; 7];
+    let addresses = [1, 11, 11, 11, 22, 22, 33, 44];
+    // Address 1 arrives first but its observed position is south of the map.
+    let latitudes = [
+        ORD.0 - 40_000_000,
+        ORD.0,
+        ORD.0 + 500,
+        ORD.0 + 900,
+        ORD.0,
+        ORD.0,
+        ORD.0,
+        ORD.0,
+    ];
+    let longitudes = [
+        ORD.1,
+        ORD.1,
+        ORD.1 + 700,
+        ORD.1 + 900,
+        ORD.1,
+        ORD.1,
+        ORD.1,
+        ORD.1,
+    ];
+    let altitudes = [24_000; 8];
+    let speeds = [NO_U16; 8];
+    let tracks = [NO_U16; 8];
     let observations = RawObservationColumns {
         t_ns: &times,
         addr: &addresses,
@@ -558,10 +579,11 @@ fn raw_fallback_is_as_of_finite_and_visibly_bypasses_tracker_rows() {
         3 * S,
         "the raw-only freshness limit is finite and fixed"
     );
-    assert_eq!(raw.observations_in, 7);
+    assert_eq!(raw.observations_in, 8);
     assert_eq!(raw.future_observations, 3);
     assert_eq!(raw.future_only_addresses, 1);
     assert_eq!(raw.stale_addresses, 1);
+    assert_eq!(raw.off_map_positions, 1);
     assert_eq!(raw.targets_admitted, 1);
     assert_eq!(raw.refused_capacity, 1);
     assert_eq!((info.traffic.drawn, info.refused), (1, 1));
@@ -635,6 +657,7 @@ fn raw_fallback_is_as_of_finite_and_visibly_bypasses_tracker_rows() {
     }
 }
 
+// REQ: OA-DSP-072
 #[test]
 fn raw_fallback_refuses_conflicting_latest_timestamp_and_collapses_duplicates() {
     let times = [T0, T0 + S, T0 + S];
