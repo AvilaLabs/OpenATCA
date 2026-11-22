@@ -44,6 +44,7 @@ const STAMP_FROM_BOTTOM_PX: i32 = 22;
 const STAMP_BYTES: usize = 96;
 const RAW_BANNER: &str = "RAW SURVEILLANCE ONLY";
 const RAW_BANNER_SIZE: u8 = 16;
+const RAW_BANNER_NARROW_SIZE: u8 = STAMP_SIZE;
 const RAW_BANNER_TOP_PX: i32 = 10;
 const RAW_BANNER_PADDING_PX: i32 = 4;
 
@@ -252,12 +253,23 @@ pub(crate) fn replay_build_raw_with_source_stale(
     targets_clear(&mut r.set);
     let result = (|| {
         let (width, height) = (r.spec.width, r.spec.height);
-        let banner_width = i64::from(text_width_units(RAW_BANNER.chars().count()))
-            .saturating_mul(i64::from(RAW_BANNER_SIZE))
-            .saturating_add(i64::from(CAP_HEIGHT) - 1)
-            / i64::from(CAP_HEIGHT);
-        let half_span = banner_width.saturating_add(1) / 2 + i64::from(RAW_BANNER_PADDING_PX);
-        let banner_bottom = RAW_BANNER_TOP_PX + i32::from(RAW_BANNER_SIZE) + RAW_BANNER_PADDING_PX;
+        let half_span_at_size = |size: u8| {
+            let banner_width = i64::from(text_width_units(RAW_BANNER.chars().count()))
+                .saturating_mul(i64::from(size))
+                .saturating_add(i64::from(CAP_HEIGHT) - 1)
+                / i64::from(CAP_HEIGHT);
+            banner_width.saturating_add(1) / 2 + i64::from(RAW_BANNER_PADDING_PX)
+        };
+        let full_span = half_span_at_size(RAW_BANNER_SIZE);
+        let (banner_size, half_span) = if full_span * 2 <= i64::from(width) {
+            (RAW_BANNER_SIZE, full_span)
+        } else {
+            (
+                RAW_BANNER_NARROW_SIZE,
+                half_span_at_size(RAW_BANNER_NARROW_SIZE),
+            )
+        };
+        let banner_bottom = RAW_BANNER_TOP_PX + i32::from(banner_size) + RAW_BANNER_PADDING_PX;
         let marker_clearance_bottom =
             i64::from(banner_bottom).saturating_add(i64::from(MAX_TARGET_SYMBOL_RADIUS_PX));
         if half_span * 2 > i64::from(width)
@@ -320,7 +332,7 @@ pub(crate) fn replay_build_raw_with_source_stale(
         push_text(
             &mut r.list,
             (banner_x.saturating_mul(16), RAW_BANNER_TOP_PX * 16),
-            RAW_BANNER_SIZE,
+            banner_size,
             ALIGN_CENTRE,
             palette::ALERT,
             LAYER_BANNER,

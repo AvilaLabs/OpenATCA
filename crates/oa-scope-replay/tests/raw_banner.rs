@@ -2,11 +2,14 @@
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
 
 use oa_airspace::model::{empty_model, Meta};
+use oa_display::core::palette;
 use oa_display::project::{project, unproject};
 use oa_display::scene::LEGEND_STRIP_PX;
 use oa_display::traffic::DEFAULT_STYLE;
 use oa_display::traffic::{map_position, MapPos, MAX_TARGET_SYMBOL_RADIUS_PX};
-use oa_scope_replay::frame::{replay_build_raw, replay_new, Replay, ReplayConfig, ReplayError};
+use oa_scope_replay::frame::{
+    replay_build_raw, replay_new, replay_raster, Replay, ReplayConfig, ReplayError,
+};
 use oa_scope_replay::raw::{RawObservationColumns, RawStats};
 use oa_scope_replay::rows::DEFAULT_CONVERT;
 
@@ -19,7 +22,7 @@ const BANNER_TOP_PX: i32 = 10;
 const BANNER_SIZE_PX: i32 = 16;
 const BANNER_PADDING_PX: i32 = 4;
 
-fn replay() -> oa_scope_replay::frame::Replay {
+fn replay(width: u32, height: u32) -> Replay {
     let model = empty_model(Meta {
         nasr_effective: 0,
         cifp_cycle: 0,
@@ -34,8 +37,8 @@ fn replay() -> oa_scope_replay::frame::Replay {
             centre_lat_e7: ORD.0,
             centre_lon_e7: ORD.1,
             range_nm: RANGE_NM,
-            width: WIDTH,
-            height: HEIGHT,
+            width,
+            height,
             max_targets: 4,
             style: DEFAULT_STYLE,
             convert: DEFAULT_CONVERT,
@@ -67,7 +70,7 @@ fn build_raw(replay: &mut Replay, lat_e7: i32, lon_e7: i32) -> Result<RawStats, 
 // REQ: OA-DSP-071, OA-DSP-072
 #[test]
 fn raw_banner_is_outside_admitted_symbol_extent_and_bad_layout_refuses() {
-    let mut replay = replay();
+    let mut replay = replay(WIDTH, HEIGHT);
     let proj = replay.view.proj;
     let banner_bottom_px = BANNER_TOP_PX + BANNER_SIZE_PX + BANNER_PADDING_PX;
 
@@ -106,4 +109,25 @@ fn raw_banner_is_outside_admitted_symbol_extent_and_bad_layout_refuses() {
         build_raw(&mut replay, lat_e7, lon_e7),
         Err(ReplayError::RawBannerDoesNotFit { .. })
     ));
+}
+
+// REQ: OA-DSP-072
+#[test]
+fn raw_banner_is_visible_on_a_320_pixel_scope() {
+    let mut narrow = replay(320, 240);
+    assert_eq!(
+        build_raw(&mut narrow, ORD.0, ORD.1)
+            .unwrap()
+            .targets_admitted,
+        1
+    );
+    replay_raster(&mut narrow).unwrap();
+    let ink = palette::PALETTE[usize::from(palette::ALERT)].to_le_bytes();
+    assert!(narrow
+        .buf
+        .chunks_exact(narrow.spec.stride as usize)
+        .skip(10)
+        .take(12)
+        .flat_map(|line| line.chunks_exact(4))
+        .any(|pixel| pixel == ink));
 }
