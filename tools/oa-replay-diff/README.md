@@ -24,6 +24,36 @@ oa-replay-diff digest-a.txt digest-b.txt [--rows-a rows-a.bin --rows-b rows-b.bi
 Prints the report, then `[summary]` and `key=value` lines (also written to `--summary`).
 Exit status: 0 identical (with `--expect`: every difference declared), 1 different, 2 error.
 
+## Comparing replay witnesses
+
+To compare two complete local `oa-replay --input-fingerprint` runs, copy exactly these three
+lines from each run into a small text file, preserving their order:
+
+```text
+settings_fingerprint version=1 sha256=<64 hex digits> note=settings_and_ordered_feed_stream_kinds_only
+input_fingerprint version=1 status=complete pipeline_frames=<count> pipeline_payload_bytes=<count> sha256=<64 hex digits> source_rejected=0 source_sealed_drops=0 semantic_sealed_drops=0 semantic_errors=0 bridge_reject_frames=0 note=diagnostic_only_not_completeness_or_cross_clock_equivalence
+final state_digest=<64 hex digits>
+```
+
+Then run:
+
+```text
+oa-replay-diff --compare-witness-files witness-a.txt witness-b.txt
+```
+
+The mode reads at most 4 KiB from each regular file through the sealed-path guard. It accepts only
+the three version-1 lines above, complete status, valid counts and digests, and zero refusal or
+sealed-drop counters. It prints `MATCH`, `SETTINGS MISMATCH`, `INPUT MISMATCH`, or `STATE MISMATCH`;
+exit status is 0 for `MATCH`, 1 for a mismatch, and 2 for malformed or incomparable evidence.
+Settings are compared first, then admitted frame count and ordered-input digest, then final state
+digest. No witness contents or input payloads are printed.
+
+This verdict compares only the supplied local evidence. Interpret it only when the two witnesses
+come from complete runs with the same build, replay configuration, feed and stream grouping, and
+the same fingerprint/state-digest versions. A match does not establish source completeness beyond
+the reported counters, equivalence between independently clocked feeds, authority, or correctness
+of data omitted before the pipeline.
+
 Differences are classed by field:
 
 | class | fields |

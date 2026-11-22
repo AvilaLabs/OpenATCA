@@ -277,3 +277,103 @@ fn a_rows_file_with_a_row_in_the_sealed_window_is_refused_with_a_count_and_no_di
     assert!(err.contains("1 rows are in the sealed window"), "{err}");
     assert!(err.contains("sealed-window rows dropped: 1"), "{err}");
 }
+
+fn replay_witness(settings: u8, input: u8, state: u8, frames: u64) -> String {
+    format!(
+        "settings_fingerprint version=1 sha256={} note=settings_and_ordered_feed_stream_kinds_only\ninput_fingerprint version=1 status=complete pipeline_frames={frames} pipeline_payload_bytes=240 sha256={} source_rejected=0 source_sealed_drops=0 semantic_sealed_drops=0 semantic_errors=0 bridge_reject_frames=0 note=diagnostic_only_not_completeness_or_cross_clock_equivalence\nfinal state_digest={}\n",
+        oa_track::canon::hex32(&[settings; 32]),
+        oa_track::canon::hex32(&[input; 32]),
+        oa_track::canon::hex32(&[state; 32]),
+    )
+}
+
+fn compare_witness_texts(a_text: &str, b_text: &str, label: &str) -> std::process::Output {
+    let d = dir(label);
+    let (a, b) = (d.join("a.witness"), d.join("b.witness"));
+    fs::write(&a, a_text).unwrap();
+    fs::write(&b, b_text).unwrap();
+    bin()
+        .args(["--compare-witness-files"])
+        .arg(a)
+        .arg(b)
+        .output()
+        .unwrap()
+}
+
+// REQ: OA-RDF-024
+#[test]
+fn witness_mode_compares_settings_then_input_then_state() {
+    let base = replay_witness(1, 2, 3, 5);
+    let cases = [
+        (base.clone(), base.clone(), 0, "MATCH"),
+        (
+            base.clone(),
+            replay_witness(4, 2, 3, 5),
+            1,
+            "SETTINGS MISMATCH",
+        ),
+        (
+            base.clone(),
+            replay_witness(1, 4, 3, 5),
+            1,
+            "INPUT MISMATCH",
+        ),
+        (
+            base.clone(),
+            replay_witness(1, 2, 4, 5),
+            1,
+            "STATE MISMATCH",
+        ),
+        (
+            base.clone(),
+            replay_witness(1, 2, 3, 6),
+            1,
+            "INPUT MISMATCH",
+        ),
+    ];
+    for (index, (a, b, code, expected)) in cases.into_iter().enumerate() {
+        let out = compare_witness_texts(&a, &b, &format!("witness_compare_{index}"));
+        assert_eq!(out.status.code(), Some(code), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expected);
+    }
+}
+
+// REQ: OA-RDF-024
+#[test]
+fn witness_mode_refuses_partial_duplicate_and_nonzero_refusal_evidence() {
+    let valid = replay_witness(1, 2, 3, 5);
+    let partial = valid.replace("status=complete", "status=incomplete");
+    let duplicate = format!("{valid}{}", valid.lines().next().unwrap());
+    let nonzero = valid.replace("source_rejected=0", "source_rejected=1");
+    for (index, invalid) in [partial, duplicate, nonzero].into_iter().enumerate() {
+        let out = compare_witness_texts(&invalid, &valid, &format!("witness_invalid_{index}"));
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(out.stdout.is_empty(), "{out:?}");
+    }
+}
+
+// REQ: OA-SEAL-005, OA-RDF-024
+#[test]
+fn witness_mode_checks_sealed_paths_and_enforces_its_read_cap() {
+    let d = dir("witness_limits");
+    let valid = d.join("valid.witness");
+    fs::write(&valid, replay_witness(1, 2, 3, 5)).unwrap();
+    let fake = "/nonexistent-fake/scds/rec-20261119/day2/witness.txt";
+    let out = bin()
+        .args(["--compare-witness-files", fake, valid.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("OA-SEAL-001"));
+    let oversized = d.join("oversized.witness");
+    let file = File::create(&oversized).unwrap();
+    file.set_len(oa_replay_diff::MAX_WITNESS_BYTES + 1).unwrap();
+    let out = bin()
+        .args(["--compare-witness-files"])
+        .arg(&oversized)
+        .arg(&valid)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("limit"));
+}

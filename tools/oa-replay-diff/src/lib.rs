@@ -11,4 +11,7 @@ pub mod diff;
 pub mod files;
 
 pub use diff::*;
-pub use files::{load_digest_text, load_expect_text, open_rows, write_out, RowsReader};
+pub use files::{
+    load_digest_text, load_expect_text, load_witness_text, open_rows, write_out, RowsReader,
+    MAX_WITNESS_BYTES,
+};

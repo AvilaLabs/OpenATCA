@@ -17,12 +17,13 @@ use std::process::ExitCode;
 
 use oa_replay_diff::{
     compare_digests, compare_rows, digest_rows, digest_seconds_in_window, load_digest_text,
-    load_expect_text, nothing_to_compare, open_rows, parse_digest, parse_expect, render_report,
-    render_summary, row_in_window, verdict, write_out, Comparison, Group,
+    load_expect_text, load_witness_text, nothing_to_compare, open_rows, parse_digest, parse_expect,
+    render_report, render_summary, row_in_window, verdict, write_out, Comparison, Group,
 };
 use oa_sealed::DropWindow;
+use oa_track::canon::from_hex32;
 
-const USAGE: &str = "usage: oa-replay-diff <digest-a> <digest-b> [--rows-a <file> --rows-b <file>] [--expect <file>] [--summary <file>] [--max-detail <n>]";
+const USAGE: &str = "usage: oa-replay-diff <digest-a> <digest-b> [--rows-a <file> --rows-b <file>] [--expect <file>] [--summary <file>] [--max-detail <n>]\n       oa-replay-diff --compare-witness-files <witness-a> <witness-b>";
 
 fn main() -> ExitCode {
     // Printed (on standard error) on every exit: the count of what was refused for its time.
@@ -46,10 +47,17 @@ fn once(slot: &mut Option<PathBuf>, name: &str, v: String) -> Result<(), String>
 }
 
 fn run(drops: &mut oa_sealed::DropReport) -> Result<u8, String> {
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv
+        .first()
+        .is_some_and(|arg| arg == "--compare-witness-files")
+    {
+        return run_witness_comparison(&argv[1..]);
+    }
     let (mut pos, mut rows_a, mut rows_b) = (Vec::new(), None, None);
     let (mut expect, mut summary, mut max_detail) = (None, None, 50usize);
     let mut seen_max_detail = false;
-    let mut args = std::env::args().skip(1);
+    let mut args = argv.into_iter();
     while let Some(a) = args.next() {
         if !a.starts_with("--") {
             pos.push(PathBuf::from(a));
@@ -158,4 +166,113 @@ fn run(drops: &mut oa_sealed::DropReport) -> Result<u8, String> {
         &format!("{text}\n[summary]\n{sum}"),
     )?;
     Ok(verdict(&c, allowed.as_ref()))
+}
+
+#[derive(Clone, Copy)]
+struct ReplayWitness {
+    settings: [u8; 32],
+    frames: u64,
+    input: [u8; 32],
+    state: [u8; 32],
+}
+
+fn witness_digest(field: &str, token: Option<&str>) -> Result<[u8; 32], String> {
+    let value = token
+        .and_then(|part| part.strip_prefix(&format!("{field}=")))
+        .ok_or_else(|| format!("malformed witness {field}"))?;
+    from_hex32(value).ok_or_else(|| format!("malformed witness {field}"))
+}
+
+fn witness_count(field: &str, token: Option<&str>) -> Result<u64, String> {
+    token
+        .and_then(|part| part.strip_prefix(&format!("{field}=")))
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| format!("malformed witness {field}"))
+}
+
+fn parse_witness(text: &str) -> Result<ReplayWitness, String> {
+    let mut lines = text.lines();
+    let settings: Vec<_> = lines
+        .next()
+        .ok_or_else(|| "missing settings witness line".to_string())?
+        .split_whitespace()
+        .collect();
+    if settings.len() != 4
+        || settings[0] != "settings_fingerprint"
+        || settings[1] != "version=1"
+        || settings[3] != "note=settings_and_ordered_feed_stream_kinds_only"
+    {
+        return Err("malformed settings witness line".to_string());
+    }
+    let settings_digest = witness_digest("sha256", settings.get(2).copied())?;
+
+    let input: Vec<_> = lines
+        .next()
+        .ok_or_else(|| "missing input witness line".to_string())?
+        .split_whitespace()
+        .collect();
+    if input.len() != 12
+        || input[0] != "input_fingerprint"
+        || input[1] != "version=1"
+        || input[2] != "status=complete"
+        || input[11] != "note=diagnostic_only_not_completeness_or_cross_clock_equivalence"
+    {
+        return Err("incomplete or malformed input witness line".to_string());
+    }
+    let frames = witness_count("pipeline_frames", input.get(3).copied())?;
+    let _payload_bytes = witness_count("pipeline_payload_bytes", input.get(4).copied())?;
+    let input_digest = witness_digest("sha256", input.get(5).copied())?;
+    for (field, index) in [
+        ("source_rejected", 6),
+        ("source_sealed_drops", 7),
+        ("semantic_sealed_drops", 8),
+        ("semantic_errors", 9),
+        ("bridge_reject_frames", 10),
+    ] {
+        if witness_count(field, input.get(index).copied())? != 0 {
+            return Err(format!("witness has nonzero {field}"));
+        }
+    }
+
+    let state: Vec<_> = lines
+        .next()
+        .ok_or_else(|| "missing final state witness line".to_string())?
+        .split_whitespace()
+        .collect();
+    if state.len() != 2 || state[0] != "final" {
+        return Err("malformed final state witness line".to_string());
+    }
+    let state_digest = witness_digest("state_digest", state.get(1).copied())?;
+    if lines.next().is_some() {
+        return Err("extra witness lines".to_string());
+    }
+    Ok(ReplayWitness {
+        settings: settings_digest,
+        frames,
+        input: input_digest,
+        state: state_digest,
+    })
+}
+
+fn run_witness_comparison(args: &[String]) -> Result<u8, String> {
+    let [a, b] = args else {
+        return Err(format!("two witness files are required\n{USAGE}"));
+    };
+    let (a, b) = (PathBuf::from(a), PathBuf::from(b));
+    // Check both paths before either file is opened. The read helper repeats the guard at open.
+    oa_sealed::refuse(&a)?;
+    oa_sealed::refuse(&b)?;
+    let left = parse_witness(&load_witness_text(&a)?)?;
+    let right = parse_witness(&load_witness_text(&b)?)?;
+    let (result, code) = if left.settings != right.settings {
+        ("SETTINGS MISMATCH", 1)
+    } else if left.frames != right.frames || left.input != right.input {
+        ("INPUT MISMATCH", 1)
+    } else if left.state != right.state {
+        ("STATE MISMATCH", 1)
+    } else {
+        ("MATCH", 0)
+    };
+    println!("{result}");
+    Ok(code)
 }

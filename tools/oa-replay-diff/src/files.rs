@@ -17,6 +17,9 @@ use crate::diff::{
     grouper_finish, grouper_push, Group, Grouper, MAX_DIGEST_BYTES, MAX_EXPECT_BYTES,
 };
 
+/// Maximum size of the metadata-only replay witness specimen.
+pub const MAX_WITNESS_BYTES: u64 = 4096;
+
 /// Reads a text file of at most `max` bytes; the size is checked before the read and again on
 /// the bytes read (a file that grows between the two).
 fn read_limited(p: &Path, max: u64) -> Result<String, String> {
@@ -45,6 +48,11 @@ pub fn load_digest_text(p: &Path) -> Result<String, String> {
 /// The text of an expect file, within [`MAX_EXPECT_BYTES`].
 pub fn load_expect_text(p: &Path) -> Result<String, String> {
     read_limited(p, MAX_EXPECT_BYTES)
+}
+
+/// Reads a metadata-only replay witness specimen through the sealed path guard.
+pub fn load_witness_text(p: &Path) -> Result<String, String> {
+    read_limited(p, MAX_WITNESS_BYTES)
 }
 
 /// Writes `text` and flushes; a failure (a closed pipe, a full disk) is an error, not a panic.
