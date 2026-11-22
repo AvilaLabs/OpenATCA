@@ -544,10 +544,6 @@ struct Totals {
     crossing: usize,
     forecast_refused: BTreeMap<String, usize>,
     score_refused: BTreeMap<String, usize>,
-    ambiguous_routes: usize,
-    no_track: usize,
-    outside_issue_window: usize,
-    unusable_route: usize,
     horizontal: [Vec<f64>; 3],
     vertical: [Vec<f64>; 3],
     coverage: [HorizonCoverage; 3],
@@ -877,9 +873,11 @@ pub(crate) fn report(
             "arrival experiment input exceeds the report, route, or estimate budget".into(),
         );
     }
-    let mut totals = Totals::default();
-    totals.forecast_refused = plan.baseline_forecast_refused.clone();
-    totals.issued = plan.issues.len();
+    let mut totals = Totals {
+        forecast_refused: plan.baseline_forecast_refused.clone(),
+        issued: plan.issues.len(),
+        ..Totals::default()
+    };
     let tbfm = tbfm_index(legacy, plan.meter)?;
     let mut assigned_forecast_refused = 0usize;
     for planned in &plan.issues {
