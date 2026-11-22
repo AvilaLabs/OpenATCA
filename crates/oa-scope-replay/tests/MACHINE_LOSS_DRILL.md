@@ -33,3 +33,13 @@ targets; the tracker/display path remains active on its own synthetic identities
 `oa-ca` dependency is approved under F1. No callsign conflict or terrain warning source is present,
 so those warning types are not exercised.
 No live or sealed input is opened.
+
+The companion test `durable_prefix_recovers_in_fresh_process_and_refuses_damage` adds a bounded,
+test-only recovery checkpoint: up to three synthetic source steps in the existing OAF1 frame
+format, wrapped in a versioned header and SHA-256 digest. A fresh child process validates the
+digest, frame CRCs, record count, order and source timestamps before replaying the prefix through
+the same tracker, scope, display and CA path. Its output and alert identities are compared with an
+uninterrupted in-process reference at each source second, then the child continues the suffix.
+Wrong-digest and internally truncated prefixes are explicitly refused. Source timestamps are
+synthetic; the test does not measure wall-clock recovery time or claim production checkpoint
+compatibility, persistence guarantees, or operational failover.

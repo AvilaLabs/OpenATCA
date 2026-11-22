@@ -22,7 +22,7 @@ use oa_track::{
     tracker_update, Measurement, TrackOutput, Tracker, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32,
     NO_IDENT, O_REACQUIRED,
 };
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
@@ -36,6 +36,12 @@ const LAT: i32 = 419_000_000;
 const LON: i32 = -879_000_000;
 const MAX_WORKER_LINE_BYTES: usize = 1_024;
 const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
+const RECOVERY_MAGIC: &[u8; 8] = b"OARCP001";
+const RECOVERY_HEADER_BYTES: usize = 8 + 4 + 32;
+// C2/C7: three five-byte payloads, each with one OAF1 header and CRC, plus 44 envelope bytes;
+// 4 KiB is a fixed file-read ceiling with ample format headroom, never input-controlled.
+const RECOVERY_MAX_BYTES: usize = 4_096;
+const RECOVERY_MAX_RECORDS: usize = 3;
 const SYNTHETIC_STREAM: [(i32, bool); 15] = [
     (0, true),
     (1, true),
@@ -102,6 +108,106 @@ fn parse_worker_command(line: &str) -> Option<WorkerCommand> {
         }),
         _ => None,
     }
+}
+
+// This test-only envelope stores real OAF1 frames. Its digest covers the complete frame prefix;
+// the inner feed framing then independently checks each frame's CRC and exact source timestamp.
+fn encode_recovery_checkpoint(steps: &[(i32, bool)]) -> Vec<u8> {
+    assert!(!steps.is_empty() && steps.len() <= RECOVERY_MAX_RECORDS);
+    let mut frames = Vec::new();
+    let mut frame = vec![0u8; oa_feed::HEADER_LEN + 5 + oa_feed::TRAILER_LEN];
+    for (seq, &(second, live)) in steps.iter().enumerate() {
+        let mut payload = second.to_le_bytes().to_vec();
+        payload.push(u8::from(live));
+        let len = oa_feed::encode_frame(
+            &mut frame,
+            1,
+            0,
+            seq as u64,
+            EPOCH + i64::from(second) * S,
+            0,
+            &payload,
+        )
+        .expect("bounded fixture frame fits");
+        frames.extend_from_slice(&frame[..len]);
+    }
+    let mut checkpoint = Vec::with_capacity(RECOVERY_HEADER_BYTES + frames.len());
+    checkpoint.extend_from_slice(RECOVERY_MAGIC);
+    checkpoint.extend_from_slice(&(steps.len() as u32).to_le_bytes());
+    checkpoint.extend_from_slice(&oa_sha256::sha256(&frames));
+    checkpoint.extend_from_slice(&frames);
+    assert!(checkpoint.len() <= RECOVERY_MAX_BYTES);
+    checkpoint
+}
+
+fn decode_recovery_checkpoint(bytes: &[u8]) -> Result<Vec<(i32, bool)>, &'static str> {
+    if bytes.len() > RECOVERY_MAX_BYTES || bytes.len() < RECOVERY_HEADER_BYTES {
+        return Err("checkpoint_size_or_header");
+    }
+    if bytes.get(..8) != Some(RECOVERY_MAGIC.as_slice()) {
+        return Err("checkpoint_magic");
+    }
+    let count_bytes: [u8; 4] = bytes
+        .get(8..12)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or("checkpoint_header")?;
+    let count = u32::from_le_bytes(count_bytes) as usize;
+    if count == 0 || count > RECOVERY_MAX_RECORDS {
+        return Err("checkpoint_record_bound");
+    }
+    let expected: [u8; 32] = bytes
+        .get(12..44)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or("checkpoint_header")?;
+    let frames = bytes
+        .get(RECOVERY_HEADER_BYTES..)
+        .ok_or("checkpoint_header")?;
+    if oa_sha256::sha256(frames) != expected {
+        return Err("checkpoint_digest");
+    }
+    let frame_bytes = oa_feed::HEADER_LEN + 5 + oa_feed::TRAILER_LEN;
+    if frames.len() != count.saturating_mul(frame_bytes) {
+        return Err("checkpoint_frame_bytes");
+    }
+    let mut input = vec![0u8; oa_feed::MAX_FRAME_LEN];
+    let mut reader = oa_feed::FrameReader::new(&mut input).map_err(|_| "reader_capacity")?;
+    if reader.push(frames) != frames.len() {
+        return Err("checkpoint_frame_bound");
+    }
+    let mut steps = Vec::with_capacity(count);
+    loop {
+        let next = reader.next();
+        let Some(frame) = next else { break };
+        let frame = frame.map_err(|_| "checkpoint_frame_invalid")?;
+        if frame.kind != oa_feed::Kind::Message || frame.flags != 0 || frame.payload.len() != 5 {
+            return Err("checkpoint_record_shape");
+        }
+        let seq = steps.len() as u64;
+        let expected_payload: [u8; 4] = frame.payload[..4]
+            .try_into()
+            .map_err(|_| "checkpoint_record_shape")?;
+        let second = i32::from_le_bytes(expected_payload);
+        let live = match frame.payload[4] {
+            0 => false,
+            1 => true,
+            _ => return Err("checkpoint_record_shape"),
+        };
+        let expected_source_ns = i64::from(second)
+            .checked_mul(S)
+            .and_then(|offset| EPOCH.checked_add(offset))
+            .ok_or("checkpoint_source_time_overflow")?;
+        if frame.seq != seq || frame.recv_unix_ns != expected_source_ns {
+            return Err("checkpoint_sequence_or_time");
+        }
+        steps.push((second, live));
+        if steps.len() > count {
+            return Err("checkpoint_record_count");
+        }
+    }
+    if reader.finish().is_some() || steps.len() != count {
+        return Err("checkpoint_truncated_or_count");
+    }
+    Ok(steps)
 }
 
 fn validate_worker_ack(line: &str, expected_second: i32) {
@@ -422,6 +528,33 @@ fn machine_loss_worker_process() {
     let mut drill = Drill::new();
     drill.warmup();
     let mut step_no = 0usize;
+    if let Some(path) = std::env::var_os("OA_MACHINE_LOSS_CHECKPOINT") {
+        let loaded = std::fs::File::open(path).ok().and_then(|file| {
+            let mut bytes = Vec::with_capacity(RECOVERY_MAX_BYTES);
+            Read::take(file, RECOVERY_MAX_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            Some(bytes)
+        });
+        let Some(steps) = loaded
+            .as_deref()
+            .and_then(|data| decode_recovery_checkpoint(data).ok())
+        else {
+            println!("MACHINE_LOSS_ERROR checkpoint_refused");
+            let _ = std::io::stdout().flush();
+            return;
+        };
+        for &(second, live) in &steps {
+            if SYNTHETIC_STREAM.get(step_no) != Some(&(second, live)) {
+                println!("MACHINE_LOSS_ERROR checkpoint_prefix_mismatch");
+                let _ = std::io::stdout().flush();
+                return;
+            }
+            step_no += 1;
+            println!("{}", drill.process(second, live));
+            let _ = std::io::stdout().flush();
+        }
+    }
     loop {
         let line = match read_bounded_line(&mut input, &mut line_bytes) {
             Ok(Some(line)) => line,
@@ -467,14 +600,21 @@ struct Replica {
 
 impl Replica {
     fn start() -> Self {
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        Self::start_with_checkpoint(None)
+    }
+
+    fn start_with_checkpoint(checkpoint: Option<&std::path::Path>) -> Self {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .args(["--exact", "machine_loss_worker_process", "--nocapture"])
             .env("OA_MACHINE_LOSS_WORKER", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        if let Some(path) = checkpoint {
+            command.env("OA_MACHINE_LOSS_CHECKPOINT", path);
+        }
+        let mut child = command.spawn().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         let (sender, output) = mpsc::sync_channel(8);
         let reader = thread::spawn(move || read_worker_output(stdout, sender));
@@ -484,6 +624,17 @@ impl Replica {
             reader: Some(reader),
             child,
         }
+    }
+
+    fn recovered_prefix_line(&self, second: i32) -> String {
+        let deadline = Instant::now() + WORKER_TIMEOUT;
+        let output = self.output.as_ref().expect("worker output receiver exists");
+        let line = output
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("checkpoint recovery response timed out")
+            .expect("checkpoint recovery output is readable");
+        validate_worker_ack(&line, second);
+        line.trim_end_matches(['\r', '\n']).to_owned()
     }
 
     fn step(&mut self, second: i32, live: bool) -> String {
@@ -531,6 +682,70 @@ impl Replica {
         }
         Ok(status)
     }
+}
+
+#[test]
+fn durable_prefix_recovers_in_fresh_process_and_refuses_damage() {
+    let prefix = &SYNTHETIC_STREAM[..RECOVERY_MAX_RECORDS];
+    let checkpoint = encode_recovery_checkpoint(prefix);
+    let mut wrong_checkpoint = checkpoint.clone();
+    wrong_checkpoint[12] ^= 1;
+    assert_eq!(
+        decode_recovery_checkpoint(&wrong_checkpoint),
+        Err("checkpoint_digest")
+    );
+    let mut truncated = checkpoint.clone();
+    truncated.pop();
+    let truncated_digest = oa_sha256::sha256(&truncated[RECOVERY_HEADER_BYTES..]);
+    truncated[12..44].copy_from_slice(&truncated_digest);
+    assert_eq!(
+        decode_recovery_checkpoint(&truncated),
+        Err("checkpoint_frame_bytes")
+    );
+
+    // The prefix carries synthetic Unix source times. No wall clock value is fed to the core;
+    // this drill makes no failover-latency claim (the companion drill measures that separately).
+    let dir = std::env::temp_dir().join(format!("oa-recovery-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("synthetic-prefix.oarc");
+    std::fs::write(&path, &checkpoint).unwrap();
+
+    let mut serving = Replica::start();
+    let mut reference = Drill::new();
+    reference.warmup();
+    for &(second, live) in prefix {
+        assert_eq!(
+            serving.step(second, live),
+            local_reference_step(&mut reference, second, live)
+        );
+    }
+    let killed_status = {
+        serving.child.kill().unwrap();
+        wait_bounded(&mut serving.child).unwrap()
+    };
+    assert!(!killed_status.success());
+    drop(serving);
+
+    let mut recovered = Replica::start_with_checkpoint(Some(&path));
+    for &(second, live) in prefix {
+        let recovered_line = recovered.recovered_prefix_line(second);
+        let expected = local_reference_step(&mut reference, second, live);
+        assert_eq!(
+            recovered_line, expected,
+            "durable replay diverged at {second}s"
+        );
+    }
+    for &(second, live) in SYNTHETIC_STREAM.iter().skip(prefix.len()) {
+        assert_eq!(
+            recovered.step(second, live),
+            local_reference_step(&mut reference, second, live),
+            "recovered continuation diverged at {second}s"
+        );
+    }
+    let status = recovered.shutdown().unwrap();
+    assert!(status.success());
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_dir(dir).unwrap();
 }
 
 impl Drop for Replica {
