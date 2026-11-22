@@ -839,6 +839,30 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             Err(reason) => (None, Some(reason)),
         }
     };
+    let mut init_radar = [RadarInitStats::default(); MAX_RADARS];
+    if cfg.init_diagnostics && measure_done > 0 {
+        for ((delta, now), before) in init_radar
+            .iter_mut()
+            .zip(fusion_stats(&f).init_radar)
+            .zip(warm.0.init_radar)
+        {
+            *delta = RadarInitStats {
+                batches: now.batches.saturating_sub(before.batches),
+                plots: now.plots.saturating_sub(before.plots),
+                opening_work: now.opening_work.saturating_sub(before.opening_work),
+                retirement_requested: now
+                    .retirement_requested
+                    .saturating_sub(before.retirement_requested),
+                retirement_denied: now
+                    .retirement_denied
+                    .saturating_sub(before.retirement_denied),
+                work: now.work.saturating_sub(before.work),
+                pair_tests: now.pair_tests.saturating_sub(before.pair_tests),
+                capped_batches: now.capped_batches.saturating_sub(before.capped_batches),
+                refused_plots: now.refused_plots.saturating_sub(before.refused_plots),
+            };
+        }
+    }
     Ok(CapResult {
         n,
         layout: cfg.traffic.layout,
@@ -873,19 +897,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         delay_adsb_ms: h_da.summary(),
         delay_plot_ms: h_dp.summary(),
         fusion: *fusion_stats(&f),
-        init_radar: std::array::from_fn(|i| {
-            let now = fusion_stats(&f).init_radar[i];
-            let before = warm.0.init_radar[i];
-            RadarInitStats {
-                batches: now.batches.saturating_sub(before.batches),
-                plots: now.plots.saturating_sub(before.plots),
-                reserved: now.reserved.saturating_sub(before.reserved),
-                work: now.work.saturating_sub(before.work),
-                pair_tests: now.pair_tests.saturating_sub(before.pair_tests),
-                capped_batches: now.capped_batches.saturating_sub(before.capped_batches),
-                refused_plots: now.refused_plots.saturating_sub(before.refused_plots),
-            }
-        }),
+        init_radar,
         tracker: *fusion_tracker_stats(&f),
         out_overflow: out.overflow,
         fusion_warm: warm.0,
@@ -954,7 +966,12 @@ pub fn cap_kv(r: &CapResult) -> Kv {
             let prefix = format!("init.radar{radar}.");
             kv.put(&format!("{prefix}batches"), d.batches);
             kv.put(&format!("{prefix}plots"), d.plots);
-            kv.put(&format!("{prefix}reserved"), d.reserved);
+            kv.put(&format!("{prefix}opening_work"), d.opening_work);
+            kv.put(
+                &format!("{prefix}retirement_requested"),
+                d.retirement_requested,
+            );
+            kv.put(&format!("{prefix}retirement_denied"), d.retirement_denied);
             kv.put(&format!("{prefix}work"), d.work);
             kv.put(&format!("{prefix}pair_tests"), d.pair_tests);
             kv.put(&format!("{prefix}capped_batches"), d.capped_batches);
@@ -1274,14 +1291,15 @@ pub fn cap_text(r: &CapResult) -> String {
         },
     ));
     if r.init_diagnostics {
-        s.push_str("  per-radar initiation (measured window; work is charged units, reservation is potential retirement work):\n");
+        s.push_str("  per-radar initiation during measurement (work in charged units):\n");
         for (radar, d) in r.init_radar.iter().enumerate() {
             if d.batches == 0 {
                 continue;
             }
             s.push_str(&format!(
-                "    radar {radar}: {} batches, {} plots, {} work reserved, {} work consumed, {} pair tests, {} capped batches, {} refused plots\n",
-                d.batches, d.plots, d.reserved, d.work, d.pair_tests, d.capped_batches, d.refused_plots
+                "    radar {radar}: {} batches, {} plots, {} work available at batch start, {} consumed, {} retirement work requested, {} reservations denied, {} pair tests, {} capped batches, {} refused plots\n",
+                d.batches, d.plots, d.opening_work, d.work, d.retirement_requested,
+                d.retirement_denied, d.pair_tests, d.capped_batches, d.refused_plots
             ));
         }
     }
@@ -1410,6 +1428,39 @@ mod tests {
             truth_score: false,
             init_diagnostics: false,
         }
+    }
+
+    #[test]
+    fn initiation_diagnostics_attribute_measured_work_to_each_radar() {
+        let mut cfg = small(48, 24, 15);
+        cfg.traffic.adsb_frac = 0.0;
+        let default = run_capacity(&cfg).unwrap();
+        assert!(!default.init_diagnostics);
+        assert_eq!(cap_kv(&default).get("init_diagnostics"), None);
+
+        cfg.init_diagnostics = true;
+        let result = run_capacity(&cfg).unwrap();
+        assert_eq!(result.tracks_confirmed, default.tracks_confirmed);
+        assert!(result.init_radar.iter().take(3).all(|radar| {
+            radar.batches > 0 && radar.work <= radar.opening_work && radar.retirement_denied == 0
+        }));
+        assert_eq!(
+            result
+                .init_radar
+                .iter()
+                .map(|radar| radar.work)
+                .sum::<u64>(),
+            result.fusion.init_work - result.fusion_warm.init_work
+        );
+        assert_eq!(
+            result
+                .init_radar
+                .iter()
+                .map(|radar| radar.pair_tests)
+                .sum::<u64>(),
+            result.fusion.init_tests - result.fusion_warm.init_tests
+        );
+        assert_eq!(cap_kv(&result).get("init_diagnostics"), Some("1"));
     }
 
     #[test]

@@ -360,9 +360,13 @@ pub struct FusionStats {
 pub struct RadarInitStats {
     pub batches: u64,
     pub plots: u64,
-    /// Reservation made for candidate retirement before searching (two units per possible item).
-    pub reserved: u64,
-    /// Budget units actually charged by this radar, including reservation.
+    /// Sum of shared budget available when this radar started each batch.
+    pub opening_work: u64,
+    /// Work set aside for retirement, requested before searching each batch.
+    pub retirement_requested: u64,
+    /// Batches that could not reserve enough budget for candidate retirement.
+    pub retirement_denied: u64,
+    /// Budget units actually charged by this radar, including work spent on retirement.
     pub work: u64,
     pub pair_tests: u64,
     pub capped_batches: u64,
@@ -2244,13 +2248,14 @@ fn initiate(
     let (Some(&g), Some(&s)) = (f.geoms.get(radar), f.sites.get(radar)) else {
         return;
     };
-    let diagnostics = f.cfg.init_diagnostics;
-    let before_work = diagnostics.then_some(f.stats.init_work).unwrap_or(0);
-    let before_tests = diagnostics.then_some(f.stats.init_tests).unwrap_or(0);
-    let before_capped = diagnostics.then_some(f.stats.init_capped).unwrap_or(0);
-    let before_refused = diagnostics
-        .then_some(f.stats.init_plots_refused)
-        .unwrap_or(0);
+    let before = f.cfg.init_diagnostics.then(|| {
+        (
+            f.stats.init_work,
+            f.stats.init_tests,
+            f.stats.init_capped,
+            f.stats.init_plots_refused,
+        )
+    });
     // Each plot can add at most one candidate. Hold the cost of reading and compacting that
     // maximum before any search can exhaust the remaining credit. Return unused credit to
     // the bucket so the next radar pays only for work actually charged.
@@ -2260,64 +2265,38 @@ fn initiate(
         .saturating_add(plots.len())
         .min(MAX_CANDIDATES)
         .saturating_mul(2);
-    if diagnostics {
-        if let Some(d) = f.stats.init_radar.get_mut(radar) {
-            d.batches = d.batches.saturating_add(1);
-            d.plots = d.plots.saturating_add(plots.len() as u64);
-            d.reserved = d.reserved.saturating_add(retire_work as u64);
-        }
-    }
-    let Some(search_budget) = f.init_work_left.checked_sub(retire_work) else {
+    let opening_work = f.init_work_left;
+    let search_budget = opening_work.checked_sub(retire_work);
+    if let Some(search_budget) = search_budget {
+        f.init_work_left = search_budget;
+        initiate_candidates(f, radar, &g, &s, plots, dec);
+        f.init_work_left += retire_work;
+        retire_candidates(f, radar, plots, out);
+    } else {
         refuse_initiation_batch(f, radar, dec);
-        if diagnostics {
-            record_radar_init_delta(
-                f,
-                radar,
-                before_work,
-                before_tests,
-                before_capped,
-                before_refused,
-            );
-        }
-        return;
-    };
-    f.init_work_left = search_budget;
-    initiate_candidates(f, radar, &g, &s, plots, dec);
-    f.init_work_left += retire_work;
-    retire_candidates(f, radar, plots, out);
-    if diagnostics {
-        record_radar_init_delta(
-            f,
-            radar,
-            before_work,
-            before_tests,
-            before_capped,
-            before_refused,
-        );
     }
-}
-
-fn record_radar_init_delta(
-    f: &mut Fusion,
-    radar: usize,
-    before_work: u64,
-    before_tests: u64,
-    before_capped: u64,
-    before_refused: u64,
-) {
-    if let Some(d) = f.stats.init_radar.get_mut(radar) {
+    if let (Some((work, tests, capped, refused)), Some(d)) =
+        (before, f.stats.init_radar.get_mut(radar))
+    {
+        d.batches = d.batches.saturating_add(1);
+        d.plots = d.plots.saturating_add(plots.len() as u64);
+        d.opening_work = d.opening_work.saturating_add(opening_work as u64);
+        d.retirement_requested = d.retirement_requested.saturating_add(retire_work as u64);
+        d.retirement_denied = d
+            .retirement_denied
+            .saturating_add(u64::from(search_budget.is_none()));
         d.work = d
             .work
-            .saturating_add(f.stats.init_work.saturating_sub(before_work));
+            .saturating_add(f.stats.init_work.saturating_sub(work));
         d.pair_tests = d
             .pair_tests
-            .saturating_add(f.stats.init_tests.saturating_sub(before_tests));
+            .saturating_add(f.stats.init_tests.saturating_sub(tests));
         d.capped_batches = d
             .capped_batches
-            .saturating_add(f.stats.init_capped.saturating_sub(before_capped));
+            .saturating_add(f.stats.init_capped.saturating_sub(capped));
         d.refused_plots = d
             .refused_plots
-            .saturating_add(f.stats.init_plots_refused.saturating_sub(before_refused));
+            .saturating_add(f.stats.init_plots_refused.saturating_sub(refused));
     }
 }
 
