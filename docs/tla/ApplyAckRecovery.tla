@@ -188,7 +188,6 @@ StrongAcceptRetry ==
     /\ requestDigest = GoodDigest
     /\ ledgerKey = SenderKey
     /\ ledgerDigest = GoodDigest
-    /\ collisionRefused
     /\ ~senderAck
     /\ requestPending' = FALSE
     /\ retryAccepted' = TRUE
@@ -256,11 +255,11 @@ WeakCommitDecision ==
                    senderAck, retryAccepted, collisionKey, collisionDigest,
                    collisionRefused>>
 
+(* The collision probe is independent of accepting and acknowledging a valid retry. *)
 RejectDigestCollision ==
     /\ AtomicCommit
     /\ workerUp
     /\ currentWorker = "worker-2"
-    /\ requestPending
     /\ attempt = 1
     /\ requestKey = SenderKey
     /\ ledgerKey = SenderKey
