@@ -20,10 +20,10 @@ NoRelease == "none"
 Releases == {PriorRelease, CandidateRelease, NoRelease}
 
 VARIABLES release, healthy, serving, comparisons, qualified,
-          evidenceValid, quarantined, unavailable, priorUntouched
+          evidenceValid, quarantined, unavailable
 
 vars == <<release, healthy, serving, comparisons, qualified,
-          evidenceValid, quarantined, unavailable, priorUntouched>>
+          evidenceValid, quarantined, unavailable>>
 
 Init ==
     /\ release = [r \in Replicas |-> IF r = "Primary" THEN PriorRelease ELSE NoRelease]
@@ -34,7 +34,6 @@ Init ==
     /\ evidenceValid = FALSE
     /\ quarantined = FALSE
     /\ unavailable = FALSE
-    /\ priorUntouched = TRUE
 
 InstallCandidate ==
     /\ release["Shadow"] = NoRelease
@@ -46,7 +45,7 @@ InstallCandidate ==
     /\ qualified' = FALSE
     /\ evidenceValid' = TRUE
     /\ quarantined' = FALSE
-    /\ UNCHANGED <<healthy, serving, unavailable, priorUntouched>>
+    /\ UNCHANGED <<healthy, serving, unavailable>>
 
 (* One bounded abstract concordant comparison against the trusted primary. *)
 GoodComparison ==
@@ -58,7 +57,7 @@ GoodComparison ==
     /\ comparisons < MaxComparisons
     /\ comparisons' = comparisons + 1
     /\ UNCHANGED <<release, healthy, serving, qualified, evidenceValid,
-                   quarantined, unavailable, priorUntouched>>
+                   quarantined, unavailable>>
 
 Qualify ==
     /\ release["Shadow"] = CandidateRelease
@@ -69,7 +68,7 @@ Qualify ==
     /\ ~qualified
     /\ qualified' = TRUE
     /\ UNCHANGED <<release, healthy, serving, comparisons, evidenceValid,
-                   quarantined, unavailable, priorUntouched>>
+                   quarantined, unavailable>>
 
 Promote ==
     /\ release["Shadow"] = CandidateRelease
@@ -80,7 +79,7 @@ Promote ==
     /\ serving' = [serving EXCEPT !["Primary"] = FALSE, !["Shadow"] = TRUE]
     /\ unavailable' = FALSE
     /\ UNCHANGED <<release, healthy, comparisons, qualified, evidenceValid,
-                   quarantined, priorUntouched>>
+                   quarantined>>
 
 (* A candidate failure or disagreement is contained on Shadow. *)
 CandidateFailure ==
@@ -93,7 +92,7 @@ CandidateFailure ==
     /\ evidenceValid' = FALSE
     /\ quarantined' = TRUE
     /\ unavailable' = ~healthy["Primary"]
-    /\ UNCHANGED <<release, comparisons, priorUntouched>>
+    /\ UNCHANGED <<release, comparisons>>
 
 EvidenceDisagreement ==
     /\ release["Shadow"] = CandidateRelease
@@ -104,7 +103,7 @@ EvidenceDisagreement ==
                                   !["Primary"] = healthy["Primary"]]
     /\ quarantined' = TRUE
     /\ unavailable' = ~healthy["Primary"]
-    /\ UNCHANGED <<release, healthy, comparisons, priorUntouched>>
+    /\ UNCHANGED <<release, healthy, comparisons>>
 
 PrimaryFailure ==
     /\ healthy["Primary"]
@@ -112,7 +111,7 @@ PrimaryFailure ==
     /\ serving' = [serving EXCEPT !["Primary"] = FALSE]
     /\ unavailable' = ~serving["Shadow"]
     /\ UNCHANGED <<release, comparisons, qualified, evidenceValid,
-                   quarantined, priorUntouched>>
+                   quarantined>>
 
 Next ==
     \/ InstallCandidate
@@ -134,14 +133,11 @@ TypeOK ==
     /\ evidenceValid \in BOOLEAN
     /\ quarantined \in BOOLEAN
     /\ unavailable \in BOOLEAN
-    /\ priorUntouched \in BOOLEAN
 
-PriorReleaseUntouched ==
-    /\ priorUntouched
-    /\ release["Primary"] = PriorRelease
+PriorReleaseUntouched == release["Primary"] = PriorRelease
 
-FallbackPresentWhenHealthy ==
-    healthy["Primary"] => release["Primary"] = PriorRelease /\ priorUntouched
+QuarantineFallsBackWhenPriorHealthy ==
+    quarantined /\ healthy["Primary"] => serving["Primary"] /\ ~unavailable
 
 NoUnqualifiedCandidateServing ==
     serving["Shadow"] =>

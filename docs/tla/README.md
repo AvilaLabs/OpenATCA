@@ -226,7 +226,8 @@ release resumes only if it is healthy.
 
 The finite bound is one rollout, two replicas, one prior release, one candidate and two required
 comparison steps. `StagedRollout.cfg` checks type, untouched fallback, qualification-before-serving,
-single-serving, healthy-serving and explicit-unavailability invariants. Its action graph contains
+quarantine fallback, single-serving, healthy-serving and explicit-unavailability invariants.
+Both configurations allow terminal faults as stuttering states. Its action graph contains
 the positive path `InstallCandidate`, two `GoodComparison` actions, `Qualify`, then `Promote`, as
 well as both orderings of primary failure and qualification and candidate/evidence failure before
 or after promotion. No fairness or measured-liveness claim is made.
