@@ -666,6 +666,8 @@ impl Replica {
             .stderr(Stdio::null());
         if let Some(path) = checkpoint {
             command.env("OA_MACHINE_LOSS_CHECKPOINT", path);
+        } else {
+            command.env_remove("OA_MACHINE_LOSS_CHECKPOINT");
         }
         let mut child = command.spawn().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());

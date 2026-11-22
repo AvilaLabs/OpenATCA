@@ -61,6 +61,10 @@ pub struct RouteFix {
 }
 // A7.2: cold struct, size guard waived; one forecast input value.
 
+fn fix_identity(fix: RouteFix) -> ([u8; 8], Place) {
+    (fix.name, fix.place)
+}
+
 /// Origin is carried with the value so predictions retain constraint provenance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConstraintProvenance {
@@ -386,14 +390,14 @@ pub fn score(
             .is_some_and(|fix| !valid_place(fix.place))
         || forecast
             .meter_eta
-            .is_some_and(|eta| Some(eta.fix) != forecast.meter_fix)
+            .is_some_and(|eta| Some(fix_identity(eta.fix)) != forecast.meter_fix.map(fix_identity))
     {
         return Err(ScoreRefusal::InvalidForecast);
     }
     if meter_fix.is_some_and(|fix| !valid_place(fix.place)) {
         return Err(ScoreRefusal::InvalidMeterFix);
     }
-    if forecast.meter_fix != meter_fix {
+    if forecast.meter_fix.map(fix_identity) != meter_fix.map(fix_identity) {
         return Err(ScoreRefusal::MeterFixMismatch);
     }
     let truth = prepare_truth(truth)?;
@@ -650,7 +654,7 @@ fn route_distance_to(start: Place, route: &[RouteFix], fix: RouteFix) -> Option<
     for p in route {
         sum += great_circle_m(here, p.place);
         here = p.place;
-        if p.name == fix.name && p.place == fix.place {
+        if fix_identity(*p) == fix_identity(fix) {
             found = true;
             break;
         }
@@ -982,6 +986,24 @@ mod tests {
             Err(ScoreRefusal::MeterFixMismatch)
         );
         assert_eq!(forecast.meter_fix, Some(fix));
+        let same_fix_with_constraint = RouteFix {
+            altitude_constraint: Some(AltitudeConstraint {
+                minimum_ft: Some(9_000.0),
+                maximum_ft: None,
+                available_ms: snapshot.cutoff_ms,
+                provenance: ConstraintProvenance::PublishedProcedure,
+            }),
+            ..fix
+        };
+        assert!(score(
+            &forecast,
+            &[],
+            Some(same_fix_with_constraint),
+            None,
+            None,
+            1_000.0,
+        )
+        .is_ok());
         Ok(())
     }
 
