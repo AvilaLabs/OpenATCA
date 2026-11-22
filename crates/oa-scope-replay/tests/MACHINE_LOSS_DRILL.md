@@ -6,6 +6,7 @@ Run with:
 cargo test -p oa-scope-replay --test outage_drill serving_process_loss_promotes_synchronized_scope_replica -- --nocapture
 cargo test -p oa-scope-replay --test outage_drill durable_prefix_recovers_in_fresh_process_and_refuses_damage -- --nocapture
 cargo test -p oa-scope-replay --test outage_drill visible_tracker_ca_alert_survives_silent_durable_replacement -- --nocapture
+cargo test -p oa-scope-replay --test outage_drill poison_input_is_quarantined_before_replacement_application -- --nocapture
 ```
 
 The test launches two child copies of its own Rust integration-test executable. Each child
@@ -62,3 +63,14 @@ velocity, altitude and zero vertical rate, and their latitude inputs differ by 0
 that alert to open before process loss, remain active across an 18-second source-silent frame, and
 match after a fresh process replays the durable prefix and resumes. This is a synthetic geometry
 check, not a claim about operational traffic or controller display of CA alerts.
+
+The `poison_input_is_quarantined_before_replacement_application` fixture injects an explicit
+failure before applying one normal synthetic measurement. Its quarantine record binds the fixture
+publisher/source, generation, sequence and SHA-256 payload digest; the record is synced before the
+replacement starts. The replacement-side input gate rebuilds the accepted prefix and rejects
+changed bytes under the same identity. For the exact retry, it sends only a sequence-skip control;
+the poison payload never reaches the replacement worker. The worker then continues with the next
+source sequence. Later warning and CA output is compared with an independent reference
+that also omits the quarantined measurement. This tests failure-before-application only; it does
+not resolve ambiguous crash-after-application, provide power-loss durability, or implement a
+production supervisor, source identity, publisher authority or quarantine format.

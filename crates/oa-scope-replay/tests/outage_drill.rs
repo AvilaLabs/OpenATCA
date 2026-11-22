@@ -45,6 +45,9 @@ const WORKER_TIMEOUT: Duration = Duration::from_secs(60);
 const RECOVERY_MAGIC: &[u8; 8] = b"OARCP002";
 const RECOVERY_HEADER_BYTES: usize = 8 + 4 + 32 + 4 + 4 + 8 + 8 + 8;
 const RECOVERY_RECORD_BYTES: usize = 4 + 1;
+const QUARANTINE_MAGIC: &[u8; 8] = b"OAPQ0001";
+const QUARANTINE_BODY_BYTES: usize = 8 + 4 + 4 + 8 + 8 + 32;
+const QUARANTINE_RECORD_BYTES: usize = QUARANTINE_BODY_BYTES + 32;
 const RECOVERY_INITIAL_GENERATION: u64 = 6;
 const RECOVERY_GENERATION: u64 = 7;
 const RECOVERY_PUBLISHER: u32 = 0x4F415031;
@@ -251,24 +254,79 @@ fn ca_active_detail(drill: &Drill) -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkerCommand {
-    Step { second: i32, feed_live: bool },
+    Step {
+        second: i32,
+        feed_live: bool,
+    },
+    Input {
+        key: InputKey,
+        second: i32,
+        feed_live: bool,
+        fail_before_apply: bool,
+    },
+    QuarantineSkip {
+        key: InputKey,
+    },
     Stop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InputKey {
+    publisher_id: u32,
+    source_id: u32,
+    generation: u64,
+    sequence: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QuarantineRecord {
+    key: InputKey,
+    payload_digest: [u8; 32],
 }
 
 fn parse_worker_command(line: &str) -> Option<WorkerCommand> {
     let mut fields = line.split_whitespace();
-    match (fields.next()?, fields.next(), fields.next(), fields.next()) {
-        ("STOP", None, None, None) => Some(WorkerCommand::Stop),
-        ("STEP", Some(second), Some("LIVE"), None) => Some(WorkerCommand::Step {
-            second: second.parse().ok()?,
-            feed_live: true,
-        }),
-        ("STEP", Some(second), Some("LOST"), None) => Some(WorkerCommand::Step {
-            second: second.parse().ok()?,
-            feed_live: false,
-        }),
-        _ => None,
+    let command = fields.next()?;
+    if command == "STOP" {
+        return fields.next().is_none().then_some(WorkerCommand::Stop);
     }
+    let parsed = match command {
+        "STEP" => {
+            let second = fields.next()?.parse().ok()?;
+            let feed_live = match fields.next()? {
+                "LIVE" => true,
+                "LOST" => false,
+                _ => return None,
+            };
+            WorkerCommand::Step { second, feed_live }
+        }
+        "INPUT" | "FAIL_BEFORE_APPLY" | "QUARANTINE" => {
+            let key = InputKey {
+                publisher_id: fields.next()?.parse().ok()?,
+                source_id: fields.next()?.parse().ok()?,
+                generation: fields.next()?.parse().ok()?,
+                sequence: fields.next()?.parse().ok()?,
+            };
+            if command == "QUARANTINE" {
+                WorkerCommand::QuarantineSkip { key }
+            } else {
+                let second = fields.next()?.parse().ok()?;
+                let feed_live = match fields.next()? {
+                    "LIVE" => true,
+                    "LOST" => false,
+                    _ => return None,
+                };
+                WorkerCommand::Input {
+                    key,
+                    second,
+                    feed_live,
+                    fail_before_apply: command == "FAIL_BEFORE_APPLY",
+                }
+            }
+        }
+        _ => return None,
+    };
+    fields.next().is_none().then_some(parsed)
 }
 
 fn source_time_ns(second: i32) -> Option<i64> {
@@ -299,6 +357,119 @@ fn refusal_name(refusal: FenceRefusal) -> &'static str {
         FenceRefusal::WatermarkRegression => "watermark_regression",
         FenceRefusal::GenerationNotHigher => "generation_not_higher",
     }
+}
+
+fn synthetic_payload(second: i32, live: bool) -> [u8; RECOVERY_RECORD_BYTES] {
+    let mut payload = [0u8; RECOVERY_RECORD_BYTES];
+    payload[..4].copy_from_slice(&second.to_le_bytes());
+    payload[4] = u8::from(live);
+    payload
+}
+
+fn input_identity(sequence: u64, second: i32, live: bool) -> QuarantineRecord {
+    QuarantineRecord {
+        key: InputKey {
+            publisher_id: RECOVERY_PUBLISHER,
+            source_id: RECOVERY_SOURCE,
+            generation: RECOVERY_GENERATION,
+            sequence,
+        },
+        payload_digest: oa_sha256::sha256(&synthetic_payload(second, live)),
+    }
+}
+
+// Test-only quarantine envelope. Its checksum detects fixture corruption; it is not a signature
+// or authority proof. The source/generation/sequence is the key; the digest binds its payload.
+fn encode_quarantine(record: QuarantineRecord) -> [u8; QUARANTINE_RECORD_BYTES] {
+    let mut bytes = [0u8; QUARANTINE_RECORD_BYTES];
+    bytes[..8].copy_from_slice(QUARANTINE_MAGIC);
+    bytes[8..12].copy_from_slice(&record.key.publisher_id.to_le_bytes());
+    bytes[12..16].copy_from_slice(&record.key.source_id.to_le_bytes());
+    bytes[16..24].copy_from_slice(&record.key.generation.to_le_bytes());
+    bytes[24..32].copy_from_slice(&record.key.sequence.to_le_bytes());
+    bytes[32..64].copy_from_slice(&record.payload_digest);
+    let checksum = oa_sha256::sha256(&bytes[..QUARANTINE_BODY_BYTES]);
+    bytes[64..].copy_from_slice(&checksum);
+    bytes
+}
+
+fn decode_quarantine(bytes: &[u8]) -> Result<QuarantineRecord, &'static str> {
+    if bytes.len() != QUARANTINE_RECORD_BYTES || bytes.get(..8) != Some(QUARANTINE_MAGIC.as_slice())
+    {
+        return Err("quarantine_record_shape");
+    }
+    let expected = oa_sha256::sha256(
+        bytes
+            .get(..QUARANTINE_BODY_BYTES)
+            .ok_or("quarantine_record_shape")?,
+    );
+    if bytes.get(QUARANTINE_BODY_BYTES..) != Some(expected.as_slice()) {
+        return Err("quarantine_record_digest");
+    }
+    let u32_at = |start| -> Result<u32, &'static str> {
+        Ok(u32::from_le_bytes(
+            bytes
+                .get(start..start + 4)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or("quarantine_record_shape")?,
+        ))
+    };
+    let u64_at = |start| -> Result<u64, &'static str> {
+        Ok(u64::from_le_bytes(
+            bytes
+                .get(start..start + 8)
+                .and_then(|slice| slice.try_into().ok())
+                .ok_or("quarantine_record_shape")?,
+        ))
+    };
+    let payload_digest = bytes
+        .get(32..64)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or("quarantine_record_shape")?;
+    Ok(QuarantineRecord {
+        key: InputKey {
+            publisher_id: u32_at(8)?,
+            source_id: u32_at(12)?,
+            generation: u64_at(16)?,
+            sequence: u64_at(24)?,
+        },
+        payload_digest,
+    })
+}
+
+fn read_quarantine(path: &Path) -> Result<QuarantineRecord, &'static str> {
+    let file = oa_sealed::open(path).map_err(|_| "quarantine_open")?;
+    let mut bytes = Vec::with_capacity(QUARANTINE_RECORD_BYTES + 1);
+    Read::take(file, QUARANTINE_RECORD_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "quarantine_read")?;
+    if bytes.len() > QUARANTINE_RECORD_BYTES {
+        return Err("quarantine_record_shape");
+    }
+    decode_quarantine(&bytes)
+}
+
+fn validate_quarantine_for_stream(
+    record: QuarantineRecord,
+    stream: &[(i32, bool)],
+) -> Result<(), &'static str> {
+    if record.key.publisher_id != RECOVERY_PUBLISHER
+        || record.key.source_id != RECOVERY_SOURCE
+        || record.key.generation != RECOVERY_GENERATION
+    {
+        return Err("quarantine_identity");
+    }
+    let index = record
+        .key
+        .sequence
+        .checked_sub(1)
+        .and_then(|sequence| usize::try_from(sequence).ok())
+        .ok_or("quarantine_sequence")?;
+    let &(second, live) = stream.get(index).ok_or("quarantine_sequence")?;
+    if record.payload_digest != oa_sha256::sha256(&synthetic_payload(second, live)) {
+        return Err("quarantine_payload_mismatch");
+    }
+    Ok(())
 }
 
 // This test-only envelope stores real OAF1 frames. Its digest covers the complete frame prefix;
@@ -615,6 +786,23 @@ fn validate_worker_ack(line: &str, expected_second: i32) {
         !fields[6].is_empty() && !fields[7].is_empty(),
         "empty CA event state: {line}"
     );
+}
+
+fn validate_input_ack(line: &str, identity: QuarantineRecord, second: i32) -> String {
+    let fields: Vec<_> = line.split_whitespace().collect();
+    assert_eq!(fields.len(), 14, "malformed identity-bound ack: {line}");
+    assert_eq!(fields[0], "MACHINE_LOSS_INPUT_ACK", "{line}");
+    assert_eq!(
+        fields[1].parse::<u32>().ok(),
+        Some(identity.key.publisher_id)
+    );
+    assert_eq!(fields[2].parse::<u32>().ok(), Some(identity.key.source_id));
+    assert_eq!(fields[3].parse::<u64>().ok(), Some(identity.key.generation));
+    assert_eq!(fields[4].parse::<u64>().ok(), Some(identity.key.sequence));
+    assert_eq!(fields[5], oa_sha256::to_hex(&identity.payload_digest));
+    let ack = fields[6..].join(" ");
+    validate_worker_ack(&ack, second);
+    ack
 }
 
 fn assert_ca_ack_state(line: &str, second: i32, transition: &str, active: &str) {
@@ -1152,44 +1340,150 @@ fn machine_loss_worker_process() {
             let _ = std::io::stdout().flush();
             break;
         };
-        let (second, live) = match command {
+        match command {
             WorkerCommand::Stop if step_no == stream.len() => break,
             WorkerCommand::Stop => {
                 println!("MACHINE_LOSS_ERROR premature_stop");
                 let _ = std::io::stdout().flush();
                 break;
             }
-            WorkerCommand::Step { second, feed_live } => (second, feed_live),
-        };
-        if stream.get(step_no) != Some(&(second, live)) {
-            println!("MACHINE_LOSS_ERROR stream_order_or_record_mismatch");
-            let _ = std::io::stdout().flush();
-            break;
-        }
-        let Some(publication) = publication_for_step(publisher_fence, step_no, second) else {
-            println!("MACHINE_LOSS_ERROR source_time_overflow");
-            let _ = std::io::stdout().flush();
-            break;
-        };
-        publisher_fence = match accept_publication(publisher_fence, publication) {
-            Ok(next) => next,
-            Err(refusal) => {
+            WorkerCommand::QuarantineSkip { key } => {
+                let Some(&(second, live)) = stream.get(step_no) else {
+                    println!("MACHINE_LOSS_ERROR quarantine_skip_without_record");
+                    let _ = std::io::stdout().flush();
+                    break;
+                };
+                let Some(expected) = publication_for_step(publisher_fence, step_no, second) else {
+                    println!("MACHINE_LOSS_ERROR source_time_overflow");
+                    let _ = std::io::stdout().flush();
+                    break;
+                };
+                if key.publisher_id != expected.publisher_id
+                    || key.source_id != expected.source_id
+                    || key.generation != expected.generation
+                    || key.sequence != expected.sequence
+                {
+                    println!("MACHINE_LOSS_ERROR quarantine_identity_or_order_mismatch");
+                    let _ = std::io::stdout().flush();
+                    break;
+                }
+                publisher_fence = match accept_publication(publisher_fence, expected) {
+                    Ok(next) => next,
+                    Err(refusal) => {
+                        println!(
+                            "MACHINE_LOSS_ERROR publication_refused_{}",
+                            refusal_name(refusal)
+                        );
+                        let _ = std::io::stdout().flush();
+                        break;
+                    }
+                };
+                step_no = step_no.saturating_add(1);
+                let digest =
+                    oa_sha256::to_hex(&oa_sha256::sha256(&synthetic_payload(second, live)));
                 println!(
-                    "MACHINE_LOSS_ERROR publication_refused_{}",
-                    refusal_name(refusal)
+                    "MACHINE_LOSS_QUARANTINED {} {} {} {} {}",
+                    key.publisher_id, key.source_id, key.generation, key.sequence, digest
                 );
                 let _ = std::io::stdout().flush();
-                break;
             }
-        };
-        step_no = step_no.saturating_add(1);
-        let ack = if visible_ca {
-            drill.process_visible_ca(second, live)
-        } else {
-            drill.process(second, live)
-        };
-        println!("{ack}");
-        let _ = std::io::stdout().flush();
+            WorkerCommand::Step { second, feed_live } => {
+                if stream.get(step_no) != Some(&(second, feed_live)) {
+                    println!("MACHINE_LOSS_ERROR stream_order_or_record_mismatch");
+                    let _ = std::io::stdout().flush();
+                    break;
+                }
+                let Some(publication) = publication_for_step(publisher_fence, step_no, second)
+                else {
+                    println!("MACHINE_LOSS_ERROR source_time_overflow");
+                    let _ = std::io::stdout().flush();
+                    break;
+                };
+                publisher_fence = match accept_publication(publisher_fence, publication) {
+                    Ok(next) => next,
+                    Err(refusal) => {
+                        println!(
+                            "MACHINE_LOSS_ERROR publication_refused_{}",
+                            refusal_name(refusal)
+                        );
+                        let _ = std::io::stdout().flush();
+                        break;
+                    }
+                };
+                step_no = step_no.saturating_add(1);
+                let ack = if visible_ca {
+                    drill.process_visible_ca(second, feed_live)
+                } else {
+                    drill.process(second, feed_live)
+                };
+                println!("{ack}");
+                let _ = std::io::stdout().flush();
+            }
+            WorkerCommand::Input {
+                key,
+                second,
+                feed_live,
+                fail_before_apply,
+            } => {
+                let identity = QuarantineRecord {
+                    key,
+                    payload_digest: oa_sha256::sha256(&synthetic_payload(second, feed_live)),
+                };
+                let Some(expected) = publication_for_step(publisher_fence, step_no, second) else {
+                    println!("MACHINE_LOSS_ERROR source_time_overflow");
+                    let _ = std::io::stdout().flush();
+                    break;
+                };
+                if key.publisher_id != expected.publisher_id
+                    || key.source_id != expected.source_id
+                    || key.generation != expected.generation
+                    || key.sequence != expected.sequence
+                    || stream.get(step_no) != Some(&(second, feed_live))
+                {
+                    println!("MACHINE_LOSS_ERROR input_identity_or_order_mismatch");
+                    let _ = std::io::stdout().flush();
+                    break;
+                }
+                if fail_before_apply {
+                    println!(
+                        "MACHINE_LOSS_FAIL_BEFORE_APPLY {} {} {} {} {}",
+                        key.publisher_id,
+                        key.source_id,
+                        key.generation,
+                        key.sequence,
+                        oa_sha256::to_hex(&identity.payload_digest)
+                    );
+                    let _ = std::io::stdout().flush();
+                    std::process::exit(86);
+                }
+                publisher_fence = match accept_publication(publisher_fence, expected) {
+                    Ok(next) => next,
+                    Err(refusal) => {
+                        println!(
+                            "MACHINE_LOSS_ERROR publication_refused_{}",
+                            refusal_name(refusal)
+                        );
+                        let _ = std::io::stdout().flush();
+                        break;
+                    }
+                };
+                step_no = step_no.saturating_add(1);
+                let ack = if visible_ca {
+                    drill.process_visible_ca(second, feed_live)
+                } else {
+                    drill.process(second, feed_live)
+                };
+                println!(
+                    "MACHINE_LOSS_INPUT_ACK {} {} {} {} {} {ack}",
+                    key.publisher_id,
+                    key.source_id,
+                    key.generation,
+                    key.sequence,
+                    oa_sha256::to_hex(&identity.payload_digest)
+                );
+                let _ = std::io::stdout().flush();
+            }
+        }
     }
 }
 
@@ -1198,6 +1492,7 @@ struct Replica {
     input: ChildStdin,
     output: Option<Receiver<io::Result<String>>>,
     reader: Option<JoinHandle<()>>,
+    quarantine: Option<QuarantineRecord>,
 }
 
 impl Replica {
@@ -1213,7 +1508,30 @@ impl Replica {
         Self::start_mode(checkpoint, true)
     }
 
+    fn start_visible_ca_with_quarantine(path: &std::path::Path) -> Self {
+        Self::start_mode_with_quarantine(None, true, Some(path))
+    }
+
     fn start_mode(checkpoint: Option<&std::path::Path>, visible_ca: bool) -> Self {
+        Self::start_mode_with_quarantine(checkpoint, visible_ca, None)
+    }
+
+    fn start_mode_with_quarantine(
+        checkpoint: Option<&std::path::Path>,
+        visible_ca: bool,
+        quarantine: Option<&std::path::Path>,
+    ) -> Self {
+        let quarantine = quarantine.map(|path| {
+            let record = read_quarantine(path).expect("replacement reads durable fixture marker");
+            let stream = if visible_ca {
+                &VISIBLE_CA_STREAM[..]
+            } else {
+                &SYNTHETIC_STREAM[..]
+            };
+            validate_quarantine_for_stream(record, stream)
+                .expect("fixture marker names a record in its selected synthetic stream");
+            record
+        });
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args(["--exact", "machine_loss_worker_process", "--nocapture"])
@@ -1237,6 +1555,7 @@ impl Replica {
             input: child.stdin.take().unwrap(),
             output: Some(output),
             reader: Some(reader),
+            quarantine,
             child,
         }
     }
@@ -1254,7 +1573,7 @@ impl Replica {
                 .recv_timeout(remaining)
                 .unwrap_or_else(|error| panic!("worker response timeout/EOF at {context}: {error}"))
                 .unwrap_or_else(|error| panic!("invalid worker output at {context}: {error}"));
-            if line.starts_with("MACHINE_LOSS_ACK ") || line.starts_with("MACHINE_LOSS_ERROR ") {
+            if line.starts_with("MACHINE_LOSS_") {
                 return line.trim_end_matches(['\r', '\n']).to_owned();
             }
         }
@@ -1291,6 +1610,63 @@ impl Replica {
         );
         validate_worker_ack(&line, second);
         line
+    }
+
+    fn input_command(&mut self, verb: &str, key: InputKey, second: i32, live: bool) -> String {
+        writeln!(
+            self.input,
+            "{verb} {} {} {} {} {second} {}",
+            key.publisher_id,
+            key.source_id,
+            key.generation,
+            key.sequence,
+            if live { "LIVE" } else { "LOST" },
+        )
+        .unwrap();
+        self.input.flush().unwrap();
+        self.receive_record("identity-bound input")
+    }
+
+    fn input(&mut self, identity: QuarantineRecord, second: i32, live: bool) -> String {
+        let actual_digest = oa_sha256::sha256(&synthetic_payload(second, live));
+        if identity.payload_digest != actual_digest {
+            return format!(
+                "MACHINE_LOSS_ERROR input_payload_binding_mismatch {} {} {} {}",
+                identity.key.publisher_id,
+                identity.key.source_id,
+                identity.key.generation,
+                identity.key.sequence
+            );
+        }
+        if let Some(record) = self.quarantine.filter(|record| record.key == identity.key) {
+            if record.payload_digest != identity.payload_digest {
+                return format!(
+                    "MACHINE_LOSS_ERROR quarantine_identity_conflict {} {} {} {} {}",
+                    identity.key.publisher_id,
+                    identity.key.source_id,
+                    identity.key.generation,
+                    identity.key.sequence,
+                    oa_sha256::to_hex(&identity.payload_digest)
+                );
+            }
+            return self.quarantine_skip(identity.key);
+        }
+        self.input_command("INPUT", identity.key, second, live)
+    }
+
+    fn quarantine_skip(&mut self, key: InputKey) -> String {
+        writeln!(
+            self.input,
+            "QUARANTINE {} {} {} {}",
+            key.publisher_id, key.source_id, key.generation, key.sequence
+        )
+        .unwrap();
+        self.input.flush().unwrap();
+        self.receive_record("quarantine skip")
+    }
+
+    fn fail_before_apply(&mut self, identity: QuarantineRecord, second: i32, live: bool) -> String {
+        self.input_command("FAIL_BEFORE_APPLY", identity.key, second, live)
     }
 
     fn shutdown(&mut self) -> io::Result<ExitStatus> {
@@ -1425,6 +1801,125 @@ fn visible_tracker_ca_alert_survives_silent_durable_replacement() {
     assert!(status.success());
 }
 
+// REQ: IF-R2, IF-R3, OA-CA-003, OA-CA-009, OA-TRK-343
+#[test]
+fn poison_input_is_quarantined_before_replacement_application() {
+    // This is a normal, well-formed synthetic tracker measurement. The explicit test command
+    // fails the serving worker before application; the replacement receives only a quarantine
+    // decision for that identity and then processes the following useful source records.
+    let prefix = &VISIBLE_CA_STREAM[..2];
+    let active = format!("{}:{}:{}:", A, B, EPOCH);
+    let opened = format!("OPEN:{}:{}:{}", A, B, EPOCH);
+    let mut serving = Replica::start_visible_ca(None);
+    let mut reference = Drill::new();
+    reference.warmup_visible_ca();
+    let mut prefix_acks = Vec::with_capacity(prefix.len());
+    for (index, &(second, live)) in prefix.iter().enumerate() {
+        let identity = input_identity(index as u64 + 1, second, live);
+        let line = serving.input(identity, second, live);
+        let ack = validate_input_ack(&line, identity, second);
+        let expected = reference.process_visible_ca(second, live);
+        assert_eq!(ack, expected, "serving prefix diverged at {second}s");
+        assert_ca_ack_state(
+            &ack,
+            second,
+            if index == 0 { &opened } else { "-" },
+            &active,
+        );
+        prefix_acks.push((identity, second, live, ack));
+    }
+
+    let poison = input_identity(3, 2, true);
+    let poison_digest = oa_sha256::to_hex(&poison.payload_digest);
+    let stalled = serving.fail_before_apply(poison, 2, true);
+    assert_eq!(
+        stalled,
+        format!(
+            "MACHINE_LOSS_FAIL_BEFORE_APPLY {} {} {} {} {}",
+            poison.key.publisher_id,
+            poison.key.source_id,
+            poison.key.generation,
+            poison.key.sequence,
+            poison_digest
+        )
+    );
+    let status = wait_bounded(&mut serving.child).expect("injected worker failure exits promptly");
+    assert_eq!(
+        status.code(),
+        Some(86),
+        "failure injection was not exercised"
+    );
+    drop(serving);
+
+    let encoded_marker = encode_quarantine(poison);
+    assert_eq!(decode_quarantine(&encoded_marker), Ok(poison));
+    let files = TempCheckpointFiles::new();
+    let marker_path = files.write("synthetic-poison-quarantine.oaq", &encoded_marker);
+    let mut replacement = Replica::start_visible_ca_with_quarantine(&marker_path);
+
+    // Rebuild the accepted prefix in a fresh child and compare it with saved primary output.
+    for (identity, second, live, expected) in prefix_acks {
+        let line = replacement.input(identity, second, live);
+        assert_eq!(validate_input_ack(&line, identity, second), expected);
+    }
+
+    // A reused sequence with different ordinary synthetic content conflicts with the stored
+    // payload binding at the input gate; it cannot evade quarantine under the same source key.
+    let conflict = replacement.input(input_identity(3, 3, true), 3, true);
+    assert_eq!(
+        conflict,
+        format!(
+            "MACHINE_LOSS_ERROR quarantine_identity_conflict {} {} {} {} {}",
+            poison.key.publisher_id,
+            poison.key.source_id,
+            poison.key.generation,
+            poison.key.sequence,
+            oa_sha256::to_hex(&oa_sha256::sha256(&synthetic_payload(3, true)))
+        )
+    );
+
+    // The replacement's input gate sends only a skip control to its worker; the payload itself
+    // never crosses the child boundary or reaches Drill processing.
+    let quarantined = replacement.input(poison, 2, true);
+    assert_eq!(
+        quarantined,
+        format!(
+            "MACHINE_LOSS_QUARANTINED {} {} {} {} {}",
+            poison.key.publisher_id,
+            poison.key.source_id,
+            poison.key.generation,
+            poison.key.sequence,
+            poison_digest
+        )
+    );
+    assert_eq!(
+        usize::from(quarantined.starts_with("MACHINE_LOSS_QUARANTINED ")),
+        1
+    );
+
+    // The lost measurement is omitted from the reference too; later source silence still opens
+    // the feed warning, and confirmed tracker-derived CA identities remain useful and comparable.
+    for (index, &(second, live)) in VISIBLE_CA_STREAM.iter().enumerate().skip(prefix.len() + 1) {
+        let identity = input_identity(index as u64 + 1, second, live);
+        let line = replacement.input(identity, second, live);
+        let ack = validate_input_ack(&line, identity, second);
+        let expected = reference.process_visible_ca(second, live);
+        assert_eq!(ack, expected, "replacement diverged at {second}s");
+        assert_ca_ack_state(&ack, second, "-", &active);
+        if !live {
+            assert!(
+                ack.split_whitespace()
+                    .nth(4)
+                    .and_then(|count| count.parse::<usize>().ok())
+                    .is_some_and(|count| count > 0),
+                "feed-loss warning missing after quarantined input: {ack}"
+            );
+        }
+    }
+    let status = replacement.shutdown().unwrap();
+    assert!(status.success());
+}
+
 impl Drop for Replica {
     fn drop(&mut self) {
         drop(self.output.take());
@@ -1486,6 +1981,35 @@ fn worker_protocol_is_typed_and_caps_output_lines() {
         })
     );
     assert_eq!(parse_worker_command("STEP 12 LIVE extra"), None);
+    let key = InputKey {
+        publisher_id: 1,
+        source_id: 2,
+        generation: 3,
+        sequence: 4,
+    };
+    assert_eq!(
+        parse_worker_command("INPUT 1 2 3 4 12 LIVE"),
+        Some(WorkerCommand::Input {
+            key,
+            second: 12,
+            feed_live: true,
+            fail_before_apply: false,
+        })
+    );
+    assert_eq!(
+        parse_worker_command("FAIL_BEFORE_APPLY 1 2 3 4 12 LIVE"),
+        Some(WorkerCommand::Input {
+            key,
+            second: 12,
+            feed_live: true,
+            fail_before_apply: true,
+        })
+    );
+    assert_eq!(
+        parse_worker_command("QUARANTINE 1 2 3 4"),
+        Some(WorkerCommand::QuarantineSkip { key })
+    );
+    assert_eq!(parse_worker_command("INPUT 1 2 3 4 12 LIVE extra"), None);
     let mut input = io::Cursor::new(vec![b'x'; MAX_WORKER_LINE_BYTES + 1]);
     let mut line = Vec::with_capacity(MAX_WORKER_LINE_BYTES);
     assert_eq!(
