@@ -3,7 +3,9 @@
 //! a value so naming is testable. Frame stamps never drive flushing or naming.
 //!
 //! Files are named `<feed>-<UTC start>-<NNNN>.oaf.gz` or `.oaf` (UTC as `YYYYMMDDTHHMMSSZ`;
-//! `NNNN` counts from 0001 within one second, so name order is creation order). Frames are never split across files. The total size of every `.oaf`
+//! `NNNN` counts from 0001 within one naming second). If the wall clock steps back during one
+//! recording, rotation keeps the last naming second until it catches up, so name order still
+//! follows creation order. Frames are never split across files. The total size of every `.oaf`
 //! and `.oaf.gz` file in the directory is capped; at the cap recording stops, once, with a
 //! warning, and nothing is deleted (a recording is evidence, A8).
 //!
@@ -85,6 +87,8 @@ pub struct Recorder {
     scratch: Vec<u8>,
     stopped: bool,
     files_opened: u32,
+    last_file_name: Option<(i64, u32)>,
+    rotations_after_clock_step_back: u64,
     implausible_stamps: u64,
     opener: Opener,
     /// The first error that failed the recording; once set, nothing more is written.
@@ -175,6 +179,8 @@ impl Recorder {
             scratch: Vec::new(),
             stopped: false,
             files_opened: 0,
+            last_file_name: None,
+            rotations_after_clock_step_back: 0,
             implausible_stamps: 0,
             opener,
             failed: None,
@@ -406,17 +412,26 @@ impl Recorder {
     }
 
     fn create(&mut self, now_unix_secs: i64) -> io::Result<Current> {
-        let stamp = utc_stamp(now_unix_secs).ok_or_else(|| {
+        let invalid_time = || {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "local clock is outside the years 1 to 9999; no file name can be made",
             )
-        })?;
+        };
+        if !(UTC_MIN_SECS..=UTC_MAX_SECS).contains(&now_unix_secs) {
+            return Err(invalid_time());
+        }
+        let (stamp_secs, mut n) = match self.last_file_name {
+            Some((last_secs, last_number)) if last_secs >= now_unix_secs => {
+                (last_secs, last_number + 1)
+            }
+            _ => (now_unix_secs, 1),
+        };
+        let stamp = utc_stamp(stamp_secs).ok_or_else(invalid_time)?;
         let ext = match self.format {
             Format::Gzip => "oaf.gz",
             Format::Raw => "oaf",
         };
-        let mut n = 1u32;
         loop {
             // Always numbered and zero-padded, so name order is creation order: a second file
             // in the same second must not sort before the first (a replay glob would then play
@@ -431,6 +446,11 @@ impl Recorder {
             match (self.opener)(&self.dir.join(name)) {
                 Ok(file) => {
                     self.files_opened += 1;
+                    self.last_file_name = Some((stamp_secs, n));
+                    if stamp_secs > now_unix_secs {
+                        self.rotations_after_clock_step_back =
+                            self.rotations_after_clock_step_back.saturating_add(1);
+                    }
                     return Ok(Current {
                         file,
                         disk: 0,
@@ -524,6 +544,12 @@ pub fn format_recording(feed: &str, r: &Recorder) -> String {
         r.files_opened(),
         r.total_bytes()
     );
+    if r.rotations_after_clock_step_back != 0 {
+        out.push_str(&format!(
+            " rotations_after_clock_step_back={}",
+            r.rotations_after_clock_step_back
+        ));
+    }
     if let Some(e) = r.failure() {
         out.push_str(&format!(
             " FAILED lost_frames={} first_error=\"{e}\"",

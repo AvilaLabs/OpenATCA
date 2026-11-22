@@ -1307,6 +1307,44 @@ fn files_in(dir: &std::path::Path) -> Vec<String> {
     v
 }
 
+// REQ: OA-FEED-019
+#[test]
+fn rotation_after_wall_clock_step_back_keeps_file_replay_order() {
+    let dir = tmpdir("rotate-clock-step");
+    let start = 1_700_000_000;
+    let mut recorder = Recorder::open(&dir, "clock", 1, u64::MAX, Format::Raw).unwrap();
+    let frames = timed_frames(4, start, 1_000);
+    for ((frame_secs, bytes), local_secs) in
+        frames.iter().zip([start, start - 2, start - 2, start + 1])
+    {
+        assert_eq!(
+            recorder
+                .write_frame(bytes, *frame_secs, local_secs)
+                .unwrap(),
+            Outcome::Written
+        );
+    }
+    recorder.finish().unwrap();
+    let names = files_in(&dir);
+    assert_eq!(
+        names,
+        [
+            "clock-20231114T221320Z-0001.oaf",
+            "clock-20231114T221320Z-0002.oaf",
+            "clock-20231114T221320Z-0003.oaf",
+            "clock-20231114T221321Z-0001.oaf",
+        ]
+    );
+    let paths = names.iter().map(|name| dir.join(name)).collect::<Vec<_>>();
+    let replay = replay_files(&paths).unwrap();
+    assert_eq!(replay.health.messages, 4);
+    assert_eq!(replay.health.gaps, 0);
+    assert_eq!(replay.health.regressions, 0);
+    assert_eq!(replay.health.seq_last, 3);
+    assert!(format_recording("clock", &recorder).contains("rotations_after_clock_step_back=2"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 // REQ: OA-FEED-026
 #[test]
 fn compressed_recording_names_and_content() {
