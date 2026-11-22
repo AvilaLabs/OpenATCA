@@ -234,16 +234,14 @@ pub fn replay_build_raw(
     list_clear(&mut r.list);
     targets_clear(&mut r.set);
     let result = (|| {
+        let (width, height) = (r.spec.width, r.spec.height);
         let banner_width = i64::from(text_width_units(RAW_BANNER.chars().count()))
             .saturating_mul(i64::from(RAW_BANNER_SIZE))
             .saturating_add(i64::from(CAP_HEIGHT) - 1)
             / i64::from(CAP_HEIGHT);
         let banner_height = i64::from(RAW_BANNER_TOP_PX) + i64::from(RAW_BANNER_SIZE);
-        if banner_width > i64::from(r.cfg.width) || banner_height > i64::from(r.cfg.height) {
-            return Err(ReplayError::RawBannerDoesNotFit {
-                width: r.cfg.width,
-                height: r.cfg.height,
-            });
+        if banner_width > i64::from(width) || banner_height > i64::from(height) {
+            return Err(ReplayError::RawBannerDoesNotFit { width, height });
         }
         let raw = raw_targets_at(observations, as_of_ns, &mut r.set)?;
         let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
@@ -271,7 +269,7 @@ pub fn replay_build_raw(
             text_str(&status),
         )?;
 
-        let banner_x = i32::try_from(r.cfg.width / 2)
+        let banner_x = i32::try_from(width / 2)
             .unwrap_or(i32::MAX)
             .saturating_mul(16);
         let mut banner = text_new();

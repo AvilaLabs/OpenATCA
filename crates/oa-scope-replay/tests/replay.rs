@@ -20,7 +20,7 @@ use oa_scope_replay::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use oa_scope_replay::cli;
 use oa_scope_replay::frame::{
     replay_build, replay_build_raw, replay_build_with_safety, replay_new, replay_raster,
-    ReplayConfig, ReplaySafety,
+    ReplayConfig, ReplayError, ReplaySafety,
 };
 use oa_scope_replay::raw::{RawObservationColumns, RAW_STALE_CUTOFF_NS};
 use oa_scope_replay::rows::*;
@@ -589,7 +589,13 @@ fn raw_fallback_is_as_of_finite_and_visibly_bypasses_tracker_rows() {
     assert!(texts.contains(&"RAW SURVEILLANCE ONLY"));
     let alert_pixel = palette::PALETTE[usize::from(palette::ALERT)].to_le_bytes();
     assert!(
-        replay.buf.chunks_exact(4).any(|pixel| pixel == alert_pixel),
+        replay
+            .buf
+            .chunks_exact(replay.spec.stride as usize)
+            .skip(10)
+            .take(16)
+            .flat_map(|line| line.chunks_exact(4))
+            .any(|pixel| pixel == alert_pixel),
         "the raw-only banner is rasterized in the alert color"
     );
 
@@ -614,13 +620,19 @@ fn raw_fallback_is_as_of_finite_and_visibly_bypasses_tracker_rows() {
 
     replay_build_raw(&mut replay, &observations, as_of, "RAW TEST").unwrap();
     replay_raster(&mut replay).unwrap();
-    replay.cfg.width = 20;
-    assert!(replay_build_raw(&mut replay, &observations, as_of, "NARROW").is_err());
-    assert!(replay_raster(&mut replay).is_err());
-    replay.cfg.width = 800;
-    replay.cfg.height = 20;
-    assert!(replay_build_raw(&mut replay, &observations, as_of, "SMALL").is_err());
-    assert!(replay_raster(&mut replay).is_err());
+    let full_spec = replay.spec;
+    for (width, height) in [(20, full_spec.height), (full_spec.width, 20)] {
+        replay.spec.width = width;
+        replay.spec.height = height;
+        assert!(matches!(
+            replay_build_raw(&mut replay, &observations, as_of, "SMALL"),
+            Err(ReplayError::RawBannerDoesNotFit { .. })
+        ));
+        replay.spec = full_spec;
+        assert!(replay_raster(&mut replay).is_err());
+        replay_build_raw(&mut replay, &observations, as_of, "RAW TEST").unwrap();
+        replay_raster(&mut replay).unwrap();
+    }
 }
 
 #[test]

@@ -205,33 +205,15 @@ pub fn raw_targets_at(
             start = end;
             continue;
         }
-        let Some(index) =
-            (start..end).find(|&index| columns.t_ns.get(index).copied() == Some(newest_time))
-        else {
+        let Some((lat_e7, lon_e7, alt_ft, gs_dkt, track_ddeg)) = newest_payload else {
             return Err(RawInputError::ColumnLength {
                 column: "observation",
                 got: start,
                 want: n,
             });
         };
-        let Some((&t_ns, &lat_e7, &lon_e7, &alt_ft, &gs_dkt, &track_ddeg)) = columns
-            .t_ns
-            .get(index)
-            .zip(columns.lat_e7.get(index))
-            .zip(columns.lon_e7.get(index))
-            .zip(columns.alt_ft.get(index))
-            .zip(columns.gs_dkt.get(index))
-            .zip(columns.track_ddeg.get(index))
-            .map(|(((((t, lat), lon), alt), gs), track)| (t, lat, lon, alt, gs, track))
-        else {
-            return Err(RawInputError::ColumnLength {
-                column: "observation",
-                got: index,
-                want: n,
-            });
-        };
         if as_of_ns
-            .checked_sub(t_ns)
+            .checked_sub(newest_time)
             .is_none_or(|age| age > RAW_STALE_CUTOFF_NS)
         {
             stats.stale_addresses = stats.stale_addresses.saturating_add(1);
