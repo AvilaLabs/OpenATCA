@@ -350,3 +350,97 @@ pub fn net_status(st: &StateTable, inh: &InhibitTable, net: NetId, now_ns: TimeN
 pub fn net_statuses(st: &StateTable, inh: &InhibitTable, now_ns: TimeNs) -> [NetStatus; NET_COUNT] {
     NETS.map(|n| net_status(st, inh, n, now_ns))
 }
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+    use crate::inhibit::inhibits_new;
+
+    // REQ: OA-SAF-016
+    #[kani::proof]
+    fn future_timestamp_refusal_is_unavailable_until_valid_recovery() {
+        let stale_limit_ns: i64 = kani::any();
+        let future_horizon_ns: i64 = kani::any();
+        let now_ns: i64 = kani::any();
+        kani::assume(stale_limit_ns > 0);
+        kani::assume(future_horizon_ns >= 0);
+
+        let last_acceptable_ns = now_ns.saturating_add(future_horizon_ns);
+        let mut states = state_table_new(stale_limit_ns, future_horizon_ns).unwrap();
+        let inhibits = inhibits_new();
+        let before = net_status(&states, &inhibits, NetId::Msaw, now_ns);
+        assert_eq!(
+            before.state,
+            NetState::Unavailable {
+                reason: Reason::NeverReported
+            }
+        );
+
+        if last_acceptable_ns < i64::MAX {
+            let future_ns = last_acceptable_ns + 1;
+            kani::cover!(
+                last_acceptable_ns < i64::MAX,
+                "representable future timestamp refused"
+            );
+            kani::cover!(future_ns == i64::MAX, "last representable future refused");
+            assert_eq!(
+                state_report(
+                    &mut states,
+                    NetId::Msaw,
+                    NetReport::Running,
+                    future_ns,
+                    now_ns
+                ),
+                Err(StateError::TimeAhead)
+            );
+            assert_eq!(state_future_rejected(&states), 1);
+            assert_eq!(state_rejected(&states), 1);
+            kani::cover!(
+                state_future_rejected(&states) == 1,
+                "future refusal counted"
+            );
+            assert_eq!(
+                net_status(&states, &inhibits, NetId::Msaw, now_ns).state,
+                NetState::Unavailable {
+                    reason: Reason::TimeInconsistent
+                }
+            );
+
+            assert_eq!(
+                state_report(&mut states, NetId::Msaw, NetReport::Running, now_ns, now_ns),
+                Ok(())
+            );
+            let recovered = net_status(&states, &inhibits, NetId::Msaw, now_ns);
+            assert_eq!(recovered.state, NetState::Running);
+            assert_eq!(recovered.age_ns, Some(0));
+            assert_eq!(state_future_rejected(&states), 1);
+            assert_eq!(state_rejected(&states), 1);
+            kani::cover!(
+                recovered.state == NetState::Running,
+                "valid report restores running state"
+            );
+        } else {
+            // A saturated cutoff admits every representable timestamp, including i64::MAX.
+            assert_eq!(last_acceptable_ns, i64::MAX);
+            kani::cover!(
+                last_acceptable_ns == i64::MAX,
+                "saturated horizon admits maximum timestamp"
+            );
+            assert_eq!(
+                state_report(
+                    &mut states,
+                    NetId::Msaw,
+                    NetReport::Running,
+                    i64::MAX,
+                    now_ns
+                ),
+                Ok(())
+            );
+            let accepted = net_status(&states, &inhibits, NetId::Msaw, i64::MAX);
+            assert_eq!(accepted.state, NetState::Running);
+            assert_eq!(accepted.age_ns, Some(0));
+            assert_eq!(state_future_rejected(&states), 0);
+            assert_eq!(state_rejected(&states), 0);
+        }
+    }
+}
