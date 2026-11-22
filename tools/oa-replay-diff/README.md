@@ -41,18 +41,16 @@ Then run:
 oa-replay-diff --compare-witness-files witness-a.txt witness-b.txt
 ```
 
-The mode reads at most 4 KiB from each regular file through the sealed-path guard. It accepts only
-the three version-1 lines above, complete status, a positive admitted-frame count, valid counts and
-digests, and zero refusal or sealed-drop counters. It prints `MATCH`, `SETTINGS MISMATCH`, `INPUT MISMATCH`, or `STATE MISMATCH`;
-exit status is 0 for `MATCH`, 1 for a mismatch, and 2 for malformed or incomparable evidence.
-Settings are compared first, then admitted frame count and ordered-input digest, then final state
-digest. No witness contents or input payloads are printed.
+The mode accepts up to 4 KiB per regular file through the sealed-path guard. Each file must
+contain exactly the three version-1 lines above with complete status, a positive admitted-frame
+count, valid digests, and zero refusal or sealed-drop counters. It prints `MATCH`,
+`SETTINGS MISMATCH`, `INPUT MISMATCH`, or `STATE MISMATCH`. Exit status is 0 for a match,
+1 for a mismatch, and 2 for malformed or incomparable evidence. The verdict checks settings
+first, then admitted frame count and ordered-input digest, then final state digest.
 
-This verdict compares only the supplied local evidence. Interpret it only when the two witnesses
-come from complete runs with the same build, replay configuration, feed and stream grouping, and
-the same fingerprint/state-digest versions. A match does not establish source completeness beyond
-the reported counters, equivalence between independently clocked feeds, authority, or correctness
-of data omitted before the pipeline.
+Use witnesses from the same build with compatible fingerprint versions. The verdict describes
+the supplied replay evidence. Source completeness, clock equivalence, and witness provenance
+require separate checks.
 
 Differences are classed by field:
 

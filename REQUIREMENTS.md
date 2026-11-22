@@ -5347,6 +5347,10 @@ scope.
   `--digest`) or an unknown header is exit 2. It runs both `oa-track-run` calls in the same
   `env -i` environment as the builds, and records the diff tool's build commit and whether that
   tree was clean in the report and in `summary.txt`.
+- **OA-RDF-025** Replay witness comparison accepts two guarded regular files containing only
+  the versioned settings, complete ordered-input, and final-state lines. Each file is limited
+  to 4 KiB. Positive frame counts and zero refusal counters are required. The verdict checks
+  settings first, then admitted frame count and ordered-input digest, then final-state digest.
 - **OA-TRK-377** A P-002 hold-out run (neither `--development` nor `--allow-dirty`) needs
   `--frozen-commit <40 hex>` and is refused (exit 2) unless the commit embedded in the binary at
   build time (`OA_BUILD_COMMIT`, with `OA_BUILD_DIRTY=0`, set by `tools/p002_build.sh`) equals it,

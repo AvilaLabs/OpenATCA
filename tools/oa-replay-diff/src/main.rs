@@ -53,7 +53,7 @@ fn run(drops: &mut oa_sealed::DropReport) -> Result<u8, String> {
         .is_some_and(|arg| arg == "--compare-witness-files")
     {
         let _mode = args.next();
-        let witness_args: Vec<_> = args.collect();
+        let witness_args: Vec<_> = args.take(3).collect();
         return run_witness_comparison(&witness_args);
     }
     let (mut pos, mut rows_a, mut rows_b) = (Vec::new(), None, None);

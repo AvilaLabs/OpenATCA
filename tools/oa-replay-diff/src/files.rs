@@ -27,11 +27,16 @@ fn read_limited(p: &Path, max: u64) -> Result<String, String> {
     // The guard first: the path is checked before anything, metadata included, reads it.
     let f = oa_sealed::open(p).map_err(|e| format!("{name}: {e}"))?;
     let len = f.metadata().map_err(|e| format!("{name}: {e}"))?.len();
+    read_limited_file(p, f, len, max)
+}
+
+fn read_limited_file(p: &Path, file: File, len: u64, max: u64) -> Result<String, String> {
+    let name = p.display();
     if len > max {
         return Err(format!("{name}: {len} bytes, more than the limit of {max}"));
     }
     let mut s = String::new();
-    f.take(max.saturating_add(1))
+    file.take(max.saturating_add(1))
         .read_to_string(&mut s)
         .map_err(|e| format!("{name}: {e}"))?;
     if u64::try_from(s.len()).unwrap_or(u64::MAX) > max {
@@ -52,7 +57,9 @@ pub fn load_expect_text(p: &Path) -> Result<String, String> {
 
 /// Reads a metadata-only replay witness specimen through the sealed path guard.
 pub fn load_witness_text(p: &Path) -> Result<String, String> {
-    read_limited(p, MAX_WITNESS_BYTES)
+    let (file, len) =
+        oa_sealed::open_regular(p).map_err(|error| format!("{}: {error}", p.display()))?;
+    read_limited_file(p, file, len, MAX_WITNESS_BYTES)
 }
 
 /// Writes `text` and flushes; a failure (a closed pipe, a full disk) is an error, not a panic.

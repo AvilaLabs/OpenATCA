@@ -300,7 +300,7 @@ fn compare_witness_texts(a_text: &str, b_text: &str, label: &str) -> std::proces
         .unwrap()
 }
 
-// REQ: OA-RDF-024
+// REQ: OA-RDF-025
 #[test]
 fn witness_mode_compares_settings_then_input_then_state() {
     let base = replay_witness(1, 2, 3, 5);
@@ -338,7 +338,7 @@ fn witness_mode_compares_settings_then_input_then_state() {
     }
 }
 
-// REQ: OA-RDF-024
+// REQ: OA-RDF-025
 #[test]
 fn witness_mode_refuses_partial_duplicate_and_nonzero_refusal_evidence() {
     let valid = replay_witness(1, 2, 3, 5);
@@ -356,7 +356,8 @@ fn witness_mode_refuses_partial_duplicate_and_nonzero_refusal_evidence() {
     }
 }
 
-// REQ: OA-RDF-008, OA-RDF-024
+// REQ: OA-RDF-008, OA-RDF-025
+#[cfg(target_os = "linux")]
 #[test]
 fn witness_mode_reports_a_failed_verdict_write_as_exit_2() {
     let d = dir("witness_fullpipe");
@@ -376,7 +377,7 @@ fn witness_mode_reports_a_failed_verdict_write_as_exit_2() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("cannot write"));
 }
 
-// REQ: OA-SEAL-005, OA-RDF-024
+// REQ: OA-SEAL-005, OA-RDF-025
 #[test]
 fn witness_mode_checks_sealed_paths_and_enforces_its_read_cap() {
     let d = dir("witness_limits");
@@ -400,4 +401,15 @@ fn witness_mode_checks_sealed_paths_and_enforces_its_read_cap() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("limit"));
+
+    #[cfg(target_os = "linux")]
+    {
+        let out = bin()
+            .args(["--compare-witness-files", "/dev/null"])
+            .arg(&valid)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("not a regular file"));
+    }
 }
