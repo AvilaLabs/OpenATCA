@@ -114,9 +114,9 @@ fn a_file_that_cannot_be_opened_partway_through_the_list_keeps_the_count_of_the_
 
 // REQ: OA-FLT-029, OA-FLT-040
 #[test]
-fn normal_replay_cli_reports_held_position_and_future_time_rejection() {
+fn normal_replay_cli_reports_held_position_and_future_message_time_rejection() {
     const GOOD: &str = r#"<?xml version="1.0" encoding="UTF-8"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><flightStatus fdpsFlightStatus="ACTIVE"/><enRoute><position positionTime="2030-01-02T03:04:00Z"><position><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>41.9 -87.9</pos></location></position></position></enRoute></flight></message></ns5:MessageCollection>"#;
-    const FUTURE: &str = r#"<?xml version="1.0" encoding="UTF-8"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:05.000Z"><gufi codeSpace="urn:uuid">22222222-2222-3333-4444-555555555555</gufi><flightStatus fdpsFlightStatus="ACTIVE"/><enRoute><position positionTime="2030-01-02T03:04:20Z"><position><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>42.0 -88.0</pos></location></position></position></enRoute></flight></message></ns5:MessageCollection>"#;
+    const FUTURE: &str = r#"<?xml version="1.0" encoding="UTF-8"?><ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZXX" source="TH" system="SLC" timestamp="2030-01-02T03:04:20.000Z"><gufi codeSpace="urn:uuid">22222222-2222-3333-4444-555555555555</gufi><flightStatus fdpsFlightStatus="ACTIVE"/><enRoute><position positionTime="2030-01-02T03:04:00Z"><position><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>42.0 -88.0</pos></location></position></position></enRoute></flight></message></ns5:MessageCollection>"#;
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("flight-position-evidence");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -145,7 +145,7 @@ fn normal_replay_cli_reports_held_position_and_future_time_rejection() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "{stderr}");
     assert!(
-        stdout.contains("position_evidence held=1 updates=1 capacity_refusals=0 out_of_order_ignored=0 future_time_ignored=1 refiled_held=0 refile_capacity_refusals=0"),
+        stdout.contains("position_evidence held=1 updates=1 capacity_refusals=0 out_of_order_ignored=0 future_message_time_ignored=1 refiled_held=0 refile_capacity_refusals=0"),
         "{stdout}"
     );
     let _ = std::fs::remove_dir_all(&dir);
