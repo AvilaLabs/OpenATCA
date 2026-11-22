@@ -3252,6 +3252,50 @@ mod tests {
         assert_eq!(f.cands.len(), 2, "{st:?}");
     }
 
+    // REQ: OA-TRK-403
+    #[test]
+    fn initiation_retires_complete_evidence_after_search_budget_exhaustion() {
+        let mut f = make_fusion(|c| c.tracker.max_tracks = 32);
+        // Classification takes one unit; pruning cannot fit in the remaining budget. The
+        // outer reservation must leave enough work to confirm the already-complete candidate.
+        f.init_work_max = 5;
+        let plot = mode_s_plot_at(NO_ADDR, 0, 0);
+        let sample = plot_convert(
+            f.geoms.first().unwrap(),
+            f.sites.first().unwrap(),
+            &plot,
+            &NO_BIAS,
+            Some((20_000.0 * FT_M, 15.0)),
+            NO_ADDR,
+        )
+        .unwrap()
+        .m;
+        let mut meas = [sample; 4];
+        for (scan, measurement) in meas.iter_mut().take(3).enumerate() {
+            measurement.toa_ns = scan as i64 * SITE.period_ns;
+        }
+        f.cands.push(Cand {
+            radar: 0,
+            addr: NO_ADDR,
+            n: 3,
+            first_scan: 0,
+            last_scan: 2,
+            meas,
+            label: [7; 4],
+        });
+
+        let _ = run(&mut f, &[mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0)], &[]);
+        let st = fusion_stats(&f);
+        assert!(st.init_capped > 0, "{st:?}");
+        assert!(st.init_plots_refused > 0, "{st:?}");
+        assert_eq!(st.cand_confirmed, 1, "{st:?}");
+        assert!(f.cands.is_empty(), "{st:?}");
+        let records = fusion_radar_tracks(&f);
+        assert_eq!(records.len(), 1, "{st:?}");
+        assert!(tracker_has_key(&f.tracker, records[0].key));
+        assert_eq!(records[0].key, KEY_RADAR_BASE + 1);
+    }
+
     // REQ: OA-TRK-325
     #[test]
     fn initiation_exhaustion_at_each_stage_keeps_every_scratch_buffer() {
