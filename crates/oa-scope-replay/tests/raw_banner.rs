@@ -199,7 +199,7 @@ fn raw_banner_distinguishes_no_fresh_position_from_valid_off_map_evidence() {
     // Valid but outside the projection still proves that fresh raw position evidence exists.
     let mut off_map = replay(320, 240);
     let fresh_times = [NOW];
-    let off_map_lon = [ORD.1 + 10_000_000];
+    let off_map_lon = [ORD.1 + 30_000_000];
     let (off_map_stats, off_map_pixels) = build_columns(
         &mut off_map,
         &fresh_times,
