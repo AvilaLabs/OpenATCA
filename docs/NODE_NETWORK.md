@@ -160,6 +160,9 @@ ordered logical feed stream kinds and count. Supplying `--verify-settings <setti
 either witness mode checks this precondition before opening a recording. A mismatch withholds
 the summary. The same logical streams keep their settings digest when paths, read chunk size
 or output controls change. Verify build identity and witness provenance separately.
+The offline `oa-replay-diff --compare-witness-files` command compares the three metadata
+lines of two complete witnesses. It checks settings and ordered input before comparing the
+final state. The inputs are described in [the comparison tool README](../tools/oa-replay-diff/README.md).
 
 The opt-in offline `oa-replay --verify-prefix <frames> <input-sha256> <state-sha256>` gate accepts
 only when both digests match at the exact admitted-frame boundary. Supply the frame count and
