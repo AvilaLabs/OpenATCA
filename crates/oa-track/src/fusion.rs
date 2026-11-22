@@ -2882,7 +2882,7 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
 mod tests {
     use super::*;
     use crate::radar::NONE_CODE;
-    use crate::tracker::{tracker_live, tracker_predict};
+    use crate::tracker::{tracker_config, tracker_live, tracker_log, tracker_predict};
     use crate::types::{output_len, DEFAULT_CONFIG, O_RADAR_DISAGREES, O_TICK};
     use oa_sensorsim::prng::Rng;
     use std::collections::{BTreeMap, BTreeSet};
@@ -5932,6 +5932,99 @@ mod tests {
             ),
             None => panic!("the en-route track never coasted"),
         }
+    }
+
+    // REQ: OA-TRK-050, OA-TRK-302, OA-TRK-344
+    #[test]
+    fn an_adsb_gap_keeps_the_mode_s_track_live_and_reacquires_when_both_sources_are_absent() {
+        const ADDR: u32 = 0xA00001;
+        const LAST_WARM_NS: i64 = 20 * NS_PER_S;
+        const RESUME_NS: i64 = 46 * NS_PER_S;
+
+        // ADS-B warms and resumes on the same timeline in both runs. The 26-second gap is over
+        // the reacquisition and coast thresholds but below fusion's drop time.
+        let adsb: Vec<Measurement> = (0..=20)
+            .map(|s| adsb_fix(ADDR, s * NS_PER_S))
+            .chain([adsb_fix(ADDR, RESUME_NS)])
+            .collect();
+        // Seven Mode S scans at the site's measured 4.8-second cadence; the first two precede
+        // the ADS-B gap and the remaining five fall inside it.
+        let radar: Vec<RadarPlot> = (3..=9)
+            .map(|scan| mode_s_plot_at(ADDR, scan * SITE.period_ns, 0))
+            .collect();
+        let no_radar_in_gap = &radar[..2];
+        let gap_ns = RESUME_NS - LAST_WARM_NS;
+
+        let mut with_radar = make_fusion(|_| {});
+        let with_output = run(&mut with_radar, &radar, &adsb);
+        let mut radar_absent = make_fusion(|_| {});
+        let absent_output = run(&mut radar_absent, no_radar_in_gap, &adsb);
+
+        let config = tracker_config(fusion_tracker(&with_radar));
+        assert!(gap_ns > config.reacquire_gap_ns);
+        assert!(gap_ns < config.drop_after_ns);
+        assert!(gap_ns > config.coast_after_intervals * SITE.period_ns);
+        assert_eq!(fusion_stats(&with_radar).adsb_in, adsb.len() as u64);
+        assert_eq!(fusion_stats(&radar_absent).adsb_in, adsb.len() as u64);
+
+        // All seven Mode S scans update the ADS-B-confirmed address key by hard address match;
+        // none starts a radar-only shadow track or a second identity.
+        assert_eq!(fusion_stats(&with_radar).applied_hard, radar.len() as u64);
+        assert_eq!(fusion_stats(&with_radar).cand_started, 0);
+        assert_eq!(fusion_stats(&with_radar).cand_confirmed, 0);
+        assert!(fusion_radar_tracks(&with_radar).is_empty());
+        let with_log = tracker_log(fusion_tracker(&with_radar));
+        assert_eq!(with_log.addr, vec![ADDR]);
+        assert_ne!(with_log.confirmed_ns[0], i64::MIN);
+        assert_eq!(with_log.last_ns, vec![RESUME_NS]);
+        let absent_log = tracker_log(fusion_tracker(&radar_absent));
+        assert_eq!(absent_log.addr, vec![ADDR]);
+        assert_ne!(absent_log.confirmed_ns[0], i64::MIN);
+        assert_eq!(absent_log.last_ns, vec![RESUME_NS]);
+
+        let assignments = fusion_assign_log(&with_radar);
+        let representative_gap_scan = 7 * SITE.period_ns;
+        assert_eq!(assignments.t_ns.len(), radar.len());
+        assert!(assignments.key.iter().all(|&key| key == ADDR));
+        assert!(assignments.how.iter().all(|&how| how == HOW_HARD));
+        assert!((0..assignments.t_ns.len()).any(|i| {
+            assignments.t_ns[i] == representative_gap_scan
+                && assignments.key[i] == ADDR
+                && assignments.label[i] == ADDR
+                && assignments.how[i] == HOW_HARD
+        }));
+
+        let coast_in_gap = |out: &TrackOutput| {
+            (0..out.t_ns.len()).any(|i| {
+                out.addr[i] == ADDR
+                    && out.t_ns[i] > LAST_WARM_NS
+                    && out.t_ns[i] < RESUME_NS
+                    && out.flags[i] & crate::types::O_COAST != 0
+            })
+        };
+        assert!(
+            !coast_in_gap(&with_output),
+            "Mode S updates should keep the shared address track fresh"
+        );
+        assert!(
+            coast_in_gap(&absent_output),
+            "with both sources absent, the existing track should visibly coast"
+        );
+
+        assert!(fusion_radar_tracks(&radar_absent).is_empty());
+
+        // Resume is the only event at 46 s in either run, so the newest applied update proves
+        // ADS-B returned to the same track. The control marks its long-gap update reacquired.
+        let has_reacquired_update = |out: &TrackOutput| {
+            (0..out.t_ns.len()).any(|i| {
+                out.addr[i] == ADDR
+                    && out.t_ns[i] == RESUME_NS
+                    && out.flags[i] & O_TICK == 0
+                    && out.flags[i] & crate::types::O_REACQUIRED != 0
+            })
+        };
+        assert!(!has_reacquired_update(&with_output));
+        assert!(has_reacquired_update(&absent_output));
     }
 
     // REQ: OA-TRK-303
