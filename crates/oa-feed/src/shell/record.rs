@@ -1344,9 +1344,9 @@ mod closed_segment_sync_tests {
         fs::write(completed, b"directory sync returned").unwrap();
     }
 
-    // REQ: OA-FEED-170
     // Process-restart fixture only: visible files and successful sync calls do not certify
     // power-loss durability.
+    // REQ: OA-FEED-170
     #[test]
     fn process_restart_after_file_sync_replays_segment_and_respects_name_and_cap() {
         const CHILD_ENV: &str = "OA_FEED_TEST_SYNC_RESTART_DIR";
