@@ -90,8 +90,8 @@ use crate::registration::{
 use crate::tracker::{
     check_advance_time, tracker_advance, tracker_buffers, tracker_flush, tracker_has_key,
     tracker_is_confirmed, tracker_live_iter, tracker_new, tracker_note_radar_disagreement,
-    tracker_predict_checked, tracker_predict_if_altitude, tracker_set_expected_interval,
-    tracker_stats, tracker_update, Tracker,
+    tracker_predict_association_checked, tracker_predict_checked, tracker_predict_if_altitude,
+    tracker_set_expected_interval, tracker_stats, tracker_update, Tracker,
 };
 use crate::types::{
     output_clear, output_new, output_push, Measurement, OutRow, PredictError, TrackError,
@@ -1651,7 +1651,7 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
             break;
         }
         let forecast = if p.alt_ft == NONE_ALT {
-            tracker_predict_checked(&f.tracker, t.key, p.time_ns)
+            tracker_predict_association_checked(&f.tracker, t.key, p.time_ns)
                 .map(|(row, _, last)| Some((row, last)))
         } else {
             // Each coarse visit also covers this fixed-size vertical check. Its inputs use the
