@@ -107,6 +107,7 @@ LoseAck ==
 
 RepeatAck ==
     /\ requestDelivered
+    /\ online
     /\ durableMinGen = 2
     /\ ~ackPending
     /\ ~ackReceived
