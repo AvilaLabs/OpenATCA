@@ -2221,6 +2221,26 @@ fn initiate(
     dec: &[Decision],
     out: &mut TrackOutput,
 ) {
+    // Each plot can add at most one candidate. Hold the cost of reading and compacting that
+    // maximum before any search can exhaust the remaining credit. Return unused credit to
+    // the bucket so the next radar pays only for work actually charged.
+    let retire_work = f
+        .cands
+        .len()
+        .saturating_add(plots.len())
+        .min(MAX_CANDIDATES)
+        .saturating_mul(2);
+    let Some(search_budget) = f.init_work_left.checked_sub(retire_work) else {
+        refuse_initiation_batch(f, radar, dec);
+        return;
+    };
+    f.init_work_left = search_budget;
+    initiate_candidates(f, radar, plots, dec);
+    f.init_work_left += retire_work;
+    retire_candidates(f, radar, plots, out);
+}
+
+fn initiate_candidates(f: &mut Fusion, radar: usize, plots: &[RadarPlot], dec: &[Decision]) {
     let (Some(&g), Some(&s)) = (f.geoms.get(radar), f.sites.get(radar)) else {
         return;
     };
@@ -2239,12 +2259,7 @@ fn initiate(
     // Reserve the full-input classification pass before inspecting plots. If it cannot fit,
     // the refusal-accounting pass is separate, fixed at one pass over this input batch.
     if !charge_init_work(f, plots.len()) {
-        f.stats.init_refusal_pass_visits = f
-            .stats
-            .init_refusal_pass_visits
-            .saturating_add(dec.len() as u64);
-        f.stats.init_plots_refused += dec.iter().filter(|d| d.kind == D_UNASSIGNED).count() as u64;
-        mark_init_capped(f, radar);
+        refuse_initiation_batch(f, radar, dec);
         f.init_free = free;
         f.init_anon = anon;
         f.cand_ix = cand_ix;
@@ -2690,7 +2705,9 @@ fn initiate(
     f.init_free = free;
     f.init_anon = anon;
     f.cand_ix = cand_ix;
-    // Confirm and expire.
+}
+
+fn retire_candidates(f: &mut Fusion, radar: usize, plots: &[RadarPlot], out: &mut TrackOutput) {
     let now_scan = plots
         .first()
         .map_or(Some(0), |p| scan_of(f, radar, p.time_ns));
@@ -2724,6 +2741,19 @@ fn initiate(
         }
     }
     f.cands.truncate(kept);
+}
+
+/// Accounts for one refused radar input batch before classifying any of its plots.
+fn refuse_initiation_batch(f: &mut Fusion, radar: usize, dec: &[Decision]) {
+    f.stats.init_refusal_pass_visits = f
+        .stats
+        .init_refusal_pass_visits
+        .saturating_add(dec.len() as u64);
+    f.stats.init_plots_refused = f
+        .stats
+        .init_plots_refused
+        .saturating_add(dec.iter().filter(|d| d.kind == D_UNASSIGNED).count() as u64);
+    mark_init_capped(f, radar);
 }
 
 /// Reserves initiation work before a bounded pass. Counters describe actual reserved work.
