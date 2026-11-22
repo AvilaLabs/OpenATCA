@@ -8,20 +8,17 @@
 
 use oa_adsb::{reports_push, Reports, ROW_EMPTY};
 use oa_airspace::model::{empty_model, Meta, Model};
-use oa_display::list::list_new;
-use oa_display::ownership::{
-    build_ownership_status, ownership_caps, OwnershipPhase, OwnershipStatus, LAYER_OWNERSHIP,
-    OWNERSHIP_ID_BYTES,
-};
+use oa_display::ownership::{OwnershipPhase, OwnershipStatus, LAYER_OWNERSHIP, OWNERSHIP_ID_BYTES};
 use oa_display::palette;
 use oa_display::raster::{frame_digest, FrameSpec};
 use oa_display::safety::{FeedState, FeedStatus};
-use oa_display::traffic::{caps_add, DEFAULT_STYLE};
+use oa_display::traffic::DEFAULT_STYLE;
 use oa_safety::inhibit::inhibits_new;
 use oa_safety::net::{state_report, state_table_new, Area, NetId, NetReport, Reason, NETS};
 use oa_scope_replay::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use oa_scope_replay::frame::{
-    replay_build_with_safety, replay_new, replay_raster, ReplayConfig, ReplaySafety,
+    replay_build_with_overlays, replay_build_with_safety, replay_new, replay_raster, ReplayConfig,
+    ReplaySafety,
 };
 use oa_scope_replay::rows::{Callsigns, RowStore, DEFAULT_CONVERT};
 use oa_scope_replay::store::{store_add, store_finish};
@@ -215,11 +212,6 @@ fn ownership_after_timeout_stays_actionable_beside_frozen_and_degraded_warnings(
     )
     .unwrap();
 
-    // The existing replay builder owns all scene, traffic, safety, and stamp capacities. Add the
-    // standalone ownership row to those preallocated caps, without changing replay or manifests.
-    let caps = caps_add(&replay.list.caps, &ownership_caps()).unwrap();
-    replay.list = list_new(caps).unwrap();
-
     let (states, inhibits, feeds) = safety_inputs();
     let safety = ReplaySafety {
         states: &states,
@@ -229,7 +221,7 @@ fn ownership_after_timeout_stays_actionable_beside_frozen_and_degraded_warnings(
         frozen_limit_ns: S,
     };
     let store = store_of(&output());
-    let info = replay_build_with_safety(
+    let baseline = replay_build_with_safety(
         &mut replay,
         &store,
         &callsigns(),
@@ -238,8 +230,29 @@ fn ownership_after_timeout_stays_actionable_beside_frozen_and_degraded_warnings(
         &safety,
     )
     .unwrap();
-    assert_eq!(info.traffic.drawn, 1);
-    assert_eq!(info.stamp_clipped, false);
+    assert_eq!(baseline.traffic.drawn, 1);
+    assert!(!baseline.stamp_clipped);
+    assert!(!baseline.ownership_clipped);
+    replay_raster(&mut replay).unwrap();
+    let baseline_digest = frame_digest(&replay.spec, &replay.buf).unwrap();
+
+    let absent = replay_build_with_overlays(
+        &mut replay,
+        &store,
+        &callsigns(),
+        T0 + 2 * S,
+        "T+2S",
+        Some(&safety),
+        None,
+    )
+    .unwrap();
+    assert!(!absent.ownership_clipped);
+    replay_raster(&mut replay).unwrap();
+    assert_eq!(
+        frame_digest(&replay.spec, &replay.buf).unwrap(),
+        baseline_digest,
+        "omitting ownership preserves the existing safety-frame pixels"
+    );
 
     // A handoff timeout leaves ZAU12 as owner. This input is the current flight state after the
     // explicit timeout event; no NAM transport acknowledgment participates in this mapping.
@@ -248,7 +261,17 @@ fn ownership_after_timeout_stays_actionable_beside_frozen_and_degraded_warnings(
         current_owner: id("ZAU12"),
         phase: OwnershipPhase::Current,
     };
-    build_ownership_status(&mut replay.list, &replay.view.proj, &owner).unwrap();
+    let info = replay_build_with_overlays(
+        &mut replay,
+        &store,
+        &callsigns(),
+        T0 + 2 * S,
+        "T+2S",
+        Some(&safety),
+        Some(&owner),
+    )
+    .unwrap();
+    assert!(!info.ownership_clipped);
     replay_raster(&mut replay).unwrap();
 
     let labels = texts(&replay);
@@ -306,4 +329,43 @@ fn ownership_after_timeout_stays_actionable_beside_frozen_and_degraded_warnings(
     let digest = frame_digest(&replay.spec, &replay.buf).unwrap();
     replay_raster(&mut replay).unwrap();
     assert_eq!(frame_digest(&replay.spec, &replay.buf).unwrap(), digest);
+}
+
+#[test]
+fn narrow_ownership_status_is_reported_as_clipped_without_a_partial_line() {
+    let width = 250;
+    let mut replay = replay_new(
+        model(),
+        &ReplayConfig {
+            centre_lat_e7: 419_786_000,
+            centre_lon_e7: -879_048_000,
+            range_nm: 30.0,
+            width,
+            height: HEIGHT,
+            max_targets: 4,
+            style: DEFAULT_STYLE,
+            convert: DEFAULT_CONVERT,
+        },
+    )
+    .unwrap();
+    let owner = OwnershipStatus {
+        callsign: id("DAL56"),
+        current_owner: id("ZAU12"),
+        phase: OwnershipPhase::StaleOffer { to: id("ZMP34") },
+    };
+    let info = replay_build_with_overlays(
+        &mut replay,
+        &RowStore::default(),
+        &Callsigns::default(),
+        T0,
+        "T",
+        None,
+        Some(&owner),
+    )
+    .unwrap();
+    assert!(info.ownership_clipped);
+    assert!(texts(&replay)
+        .iter()
+        .all(|text| !text.starts_with("FLIGHT DAL56 OWNER")));
+    assert!(!replay.list.faulted);
 }

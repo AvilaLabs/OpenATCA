@@ -60,6 +60,50 @@ pub const fn ownership_caps() -> ListCaps {
     }
 }
 
+/// Reports whether a valid ownership line fits the supplied projection. `false` means the
+/// frame is too short or too narrow; malformed status data remains an explicit error.
+pub fn ownership_status_fits(
+    proj: &Projection,
+    status: &OwnershipStatus,
+) -> Result<bool, DisplayError> {
+    let phase_id = match status.phase {
+        OwnershipPhase::Current => None,
+        OwnershipPhase::Offered { to } | OwnershipPhase::StaleOffer { to } => Some(to),
+        OwnershipPhase::Accepted { by } => Some(by),
+    };
+    if !valid_identifier(&status.callsign)
+        || !valid_identifier(&status.current_owner)
+        || phase_id.is_some_and(|id| !valid_identifier(&id))
+    {
+        return Err(DisplayError::BadView(
+            "ownership identifiers must be uppercase ASCII",
+        ));
+    }
+    if i64::from(proj.height) - i64::from(STATUS_TEXT_FROM_BOTTOM_PX)
+        < i64::from(proj.top_inset) + 8
+    {
+        return Ok(false);
+    }
+
+    let mut text = text_new();
+    status_text(status, &mut text);
+    let content = text_str(&text);
+    if text_clipped(&text) || content.len() > OWNERSHIP_TEXT_BYTES {
+        return Err(DisplayError::BadView(
+            "ownership status exceeds its text budget",
+        ));
+    }
+    let text_width16 = text_width_units(content.len())
+        .saturating_mul(i32::from(STATUS_SIZE))
+        .saturating_mul(16)
+        / CAP_HEIGHT;
+    let right16 = i32::try_from(proj.width)
+        .unwrap_or(i32::MAX)
+        .saturating_mul(16)
+        .saturating_sub(RIGHT_PAD_PX * 16);
+    Ok(right16.saturating_sub(text_width16) >= 0)
+}
+
 fn valid_identifier(id: &[u8; OWNERSHIP_ID_BYTES]) -> bool {
     let mut ended = false;
     let mut present = false;

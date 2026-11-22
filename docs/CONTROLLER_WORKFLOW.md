@@ -30,10 +30,12 @@ flight operation model and does not claim wire compatibility or compare against 
 legacy emulator. NAM parsing/session envelopes remain available in `oa-nam`, but introducing a
 new protocol adapter or dependency is outside this fixture.
 
-`oa_display::ownership` exposes a separate pure rendering seam for one selected flight: the caller
+`oa_display::ownership` exposes a pure typed rendering seam for one selected flight: the caller
 supplies the current owner plus `Current`, `Offered`, `Accepted`, or `StaleOffer`. An accepted status
 still displays the existing owner alongside the accepting sector. A NAM logical response cannot be
-passed as an ownership input. The caller adds `ownership_caps()` to its display-list capacities; a
-narrow frame is refused instead of clipping the state. The display crate does not depend on
-`oa-flight`, so a replay adapter remains responsible for mapping the flight record and refusal
+passed as an ownership input. The public replay builders reserve one bounded ownership text slot
+up front and accept an optional status value; omitting it preserves existing frame pixels. A valid
+line that does not fit is omitted and reported as `FrameInfo::ownership_clipped`; malformed input
+or a display-list failure is returned as a replay error. The display and replay crates do not
+depend on `oa-flight`, so the caller remains responsible for mapping a flight record and refusal
 evidence to this presentation value.

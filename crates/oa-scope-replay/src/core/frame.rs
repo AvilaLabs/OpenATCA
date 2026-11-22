@@ -11,6 +11,9 @@ use oa_airspace::core::model::Model;
 use oa_display::core::list::{
     list_new, push_text, DisplayError, DisplayList, ListCaps, ALIGN_RIGHT,
 };
+use oa_display::core::ownership::{
+    build_ownership_status, ownership_caps, ownership_status_fits, OwnershipStatus,
+};
 use oa_display::core::palette;
 use oa_display::core::raster::{frame_len, rasterize, FrameSpec, RenderError};
 use oa_display::core::safety::{build_safety, safety_caps, FeedStatus, SafetyScene};
@@ -120,6 +123,8 @@ pub struct FrameInfo {
     pub malformed: u32,
     /// The frame's own stamp text did not fit its buffer (LOSS: the stamp on the frame is short).
     pub stamp_clipped: bool,
+    /// A supplied ownership line was valid but did not fit this projection, so it was omitted.
+    pub ownership_clipped: bool,
 }
 
 /// Allocates every table for the model and the configuration.
@@ -156,7 +161,10 @@ pub fn replay_new(model: Model, cfg: &ReplayConfig) -> Result<Replay, ReplayErro
     let caps = caps_add(
         &caps_add(
             &scene_caps(&model)?,
-            &caps_add(&traffic_caps(cfg.max_targets, &cfg.style)?, &safety_caps())?,
+            &caps_add(
+                &traffic_caps(cfg.max_targets, &cfg.style)?,
+                &caps_add(&safety_caps(), &ownership_caps())?,
+            )?,
         )?,
         &stamp,
     )?;
@@ -185,7 +193,7 @@ pub fn replay_build(
     t_ns: i64,
     stamp: &str,
 ) -> Result<FrameInfo, ReplayError> {
-    replay_build_inner(r, store, calls, t_ns, stamp, None)
+    replay_build_with_overlays(r, store, calls, t_ns, stamp, None, None)
 }
 
 /// Builds the scope frame with independent feed, track-freshness and safety-net telemetry.
@@ -197,9 +205,24 @@ pub fn replay_build_with_safety(
     calls: &Callsigns,
     t_ns: i64,
     stamp: &str,
-    safety: &ReplaySafety<'_>,
+    safety: Option<&ReplaySafety<'_>>,
 ) -> Result<FrameInfo, ReplayError> {
-    replay_build_inner(r, store, calls, t_ns, stamp, Some(safety))
+    replay_build_with_overlays(r, store, calls, t_ns, stamp, Some(safety), None)
+}
+
+/// Builds a scope frame with optional safety telemetry and caller-supplied ownership evidence.
+/// Ownership is presentation input only; this function does not infer it from NAM acknowledgments.
+/// A valid line that cannot fit is omitted and reported by `FrameInfo`.
+pub fn replay_build_with_overlays(
+    r: &mut Replay,
+    store: &RowStore,
+    calls: &Callsigns,
+    t_ns: i64,
+    stamp: &str,
+    safety: &ReplaySafety<'_>,
+    ownership: Option<&OwnershipStatus>,
+) -> Result<FrameInfo, ReplayError> {
+    replay_build_inner(r, store, calls, t_ns, stamp, safety, ownership)
 }
 
 fn replay_build_inner(
@@ -209,6 +232,7 @@ fn replay_build_inner(
     t_ns: i64,
     stamp: &str,
     safety: Option<&ReplaySafety<'_>>,
+    ownership: Option<&OwnershipStatus>,
 ) -> Result<FrameInfo, ReplayError> {
     targets_clear(&mut r.set);
     let convert = targets_at(store, calls, t_ns, &r.cfg.convert, &r.view.proj, &mut r.set);
@@ -226,6 +250,16 @@ fn replay_build_inner(
         };
         build_safety(&mut r.list, &r.view.proj, &scene)?;
     }
+    let ownership_clipped = if let Some(status) = ownership {
+        if ownership_status_fits(&r.view.proj, status)? {
+            build_ownership_status(&mut r.list, &r.view.proj, status)?;
+            false
+        } else {
+            true
+        }
+    } else {
+        false
+    };
     let mut tb = text_new();
     text_push_str(&mut tb, stamp);
     text_push_str(&mut tb, "  TARGETS ");
@@ -254,6 +288,7 @@ fn replay_build_inner(
         refused: targets_refused(&r.set),
         malformed: targets_malformed(&r.set),
         stamp_clipped: text_clipped(&tb),
+        ownership_clipped,
     })
 }
 
