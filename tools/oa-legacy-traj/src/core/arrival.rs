@@ -203,161 +203,8 @@ pub struct Forecast {
 /// Invalid, future, stale and degenerate input returns a named refusal rather than a partial
 /// forecast.
 pub fn forecast(snapshot: &IssueSnapshot) -> Result<Forecast, ForecastRefusal> {
-    let t = snapshot.track;
-    if snapshot.issued_ms <= 0 || snapshot.cutoff_ms <= 0 {
-        return Err(ForecastRefusal::NonpositiveIssueTime);
-    }
-    if snapshot.issued_ms < snapshot.cutoff_ms {
-        return Err(ForecastRefusal::IssueBeforeCutoff);
-    }
-    if t.time_ms > snapshot.cutoff_ms {
-        return Err(ForecastRefusal::TrackAfterCutoff);
-    }
-    if snapshot
-        .issued_ms
-        .checked_sub(t.time_ms)
-        .is_none_or(|age| age > MAX_TRACK_AGE_MS)
-    {
-        return Err(ForecastRefusal::TrackTooStale);
-    }
-    if !valid_place(t.place) {
-        return Err(ForecastRefusal::InvalidTrackPlace);
-    }
-    if [
-        t.altitude_ft,
-        t.speed_mps,
-        t.vertical_rate_fpm,
-        snapshot.assigned_altitude_ft,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|v| !v.is_finite())
-    {
-        return Err(ForecastRefusal::InvalidTrackValue);
-    }
-    let speed = t.speed_mps.ok_or(ForecastRefusal::MissingSpeed)?;
-    if speed <= 1.0 || speed > MAX_GROUND_SPEED_MPS {
-        return Err(ForecastRefusal::InvalidSpeed);
-    }
-    if match (
-        snapshot.assigned_altitude_ft,
-        snapshot.assigned_altitude_available_ms,
-        snapshot.assigned_altitude_provenance,
-    ) {
-        (None, None, None) => false,
-        (Some(_), Some(available_ms), Some(_)) => {
-            available_ms <= 0 || available_ms > snapshot.cutoff_ms
-        }
-        _ => true,
-    } {
-        return Err(ForecastRefusal::InvalidTrackValue);
-    }
-    if t.altitude_ft
-        .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
-        || snapshot
-            .assigned_altitude_ft
-            .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
-        || t.vertical_rate_fpm
-            .is_some_and(|v| v.abs() > MAX_VERTICAL_RATE_FPM)
-    {
-        return Err(ForecastRefusal::InvalidTrackValue);
-    }
-    if snapshot.route.len() > MAX_ROUTE_FIXES {
-        return Err(ForecastRefusal::TooManyRouteFixes);
-    }
-    if snapshot.route.is_empty() {
-        return Err(ForecastRefusal::EmptyRoute);
-    }
-    if snapshot.route.iter().any(|p| !valid_place(p.place)) {
-        return Err(ForecastRefusal::InvalidRoutePlace);
-    }
-    if snapshot
-        .route
-        .iter()
-        .filter_map(|p| p.altitude_constraint)
-        .any(|c| {
-            c.minimum_ft.is_some_and(|v| !v.is_finite())
-                || c.maximum_ft.is_some_and(|v| !v.is_finite())
-                || c.available_ms <= 0
-                || c.available_ms > snapshot.cutoff_ms
-                || c.minimum_ft
-                    .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
-                || c.maximum_ft
-                    .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
-                || matches!((c.minimum_ft, c.maximum_ft), (Some(lo), Some(hi)) if lo > hi)
-        })
-    {
-        return Err(ForecastRefusal::InvalidTrackValue);
-    }
-    if snapshot.meter_fix.is_some_and(|p| !valid_place(p.place)) {
-        return Err(ForecastRefusal::InvalidMeterFix);
-    }
-    let mut points = [ForecastPoint {
-        time_ms: 0,
-        place: None,
-        altitude_ft: None,
-        vertical_status: VerticalStatus::MissingAltitude,
-    }; 3];
-    for (i, seconds) in HORIZON_S.iter().copied().enumerate() {
-        let delta_ms = seconds
-            .checked_mul(1000)
-            .ok_or(ForecastRefusal::EtaOverflow)?;
-        let time_ms = snapshot
-            .issued_ms
-            .checked_add(delta_ms)
-            .ok_or(ForecastRefusal::EtaOverflow)?;
-        let elapsed_ms = time_ms
-            .checked_sub(t.time_ms)
-            .ok_or(ForecastRefusal::EtaOverflow)?;
-        if let Some(point) = points.get_mut(i) {
-            let vertical = vertical_at(
-                t,
-                snapshot.assigned_altitude_ft,
-                snapshot.assigned_altitude_provenance,
-                &snapshot.route,
-                speed,
-                elapsed_ms as f64 / 1000.0,
-            );
-            *point = ForecastPoint {
-                time_ms,
-                place: route_position(t.place, speed, &snapshot.route, elapsed_ms as f64 / 1000.0),
-                altitude_ft: vertical.altitude_ft,
-                vertical_status: vertical.status,
-            };
-        }
-    }
-    let meter_eta = if let Some(fix) = snapshot.meter_fix {
-        route_distance_to(t.place, &snapshot.route, fix)
-            .map(|distance| {
-                let delta_ms_f = (distance / speed) * 1000.0;
-                if !delta_ms_f.is_finite() || delta_ms_f < 0.0 || delta_ms_f >= i64::MAX as f64 {
-                    return Err(ForecastRefusal::EtaOverflow);
-                }
-                let delta_ms = oa_ieee::round(delta_ms_f) as i64;
-                let time_ms = t
-                    .time_ms
-                    .checked_add(delta_ms)
-                    .ok_or(ForecastRefusal::EtaOverflow)?;
-                if time_ms <= snapshot.issued_ms {
-                    return Ok(None);
-                }
-                Ok(Some(MeterEta { fix, time_ms }))
-            })
-            .transpose()?
-            .flatten()
-    } else {
-        None
-    };
-    Ok(Forecast {
-        issued_ms: snapshot.issued_ms,
-        cutoff_ms: snapshot.cutoff_ms,
-        assigned_altitude_available_ms: snapshot.assigned_altitude_available_ms,
-        assigned_altitude_provenance: snapshot.assigned_altitude_provenance,
-        wind_profile: None,
-        meter_fix: snapshot.meter_fix,
-        positions: points,
-        meter_eta,
-    })
+    let speed = validate_snapshot(snapshot, true)?.ok_or(ForecastRefusal::MissingSpeed)?;
+    forecast_from_motion(snapshot, MotionModel::Constant(speed), None)
 }
 
 /// Opt-in route experiment using explicit true airspeed and one cutoff-safe wind vector per leg.
@@ -367,90 +214,8 @@ pub fn forecast_with_wind(
     snapshot: &IssueSnapshot,
     profile: &WindProfile,
 ) -> Result<Forecast, ForecastRefusal> {
+    validate_snapshot(snapshot, false)?;
     let t = snapshot.track;
-    if snapshot.issued_ms <= 0 || snapshot.cutoff_ms <= 0 {
-        return Err(ForecastRefusal::NonpositiveIssueTime);
-    }
-    if snapshot.issued_ms < snapshot.cutoff_ms {
-        return Err(ForecastRefusal::IssueBeforeCutoff);
-    }
-    if t.time_ms > snapshot.cutoff_ms {
-        return Err(ForecastRefusal::TrackAfterCutoff);
-    }
-    if snapshot
-        .issued_ms
-        .checked_sub(t.time_ms)
-        .is_none_or(|age| age > MAX_TRACK_AGE_MS)
-    {
-        return Err(ForecastRefusal::TrackTooStale);
-    }
-    if !valid_place(t.place) {
-        return Err(ForecastRefusal::InvalidTrackPlace);
-    }
-    if [
-        t.altitude_ft,
-        t.vertical_rate_fpm,
-        snapshot.assigned_altitude_ft,
-    ]
-    .into_iter()
-    .flatten()
-    .any(|v| !v.is_finite())
-    {
-        return Err(ForecastRefusal::InvalidTrackValue);
-    }
-    if match (
-        snapshot.assigned_altitude_ft,
-        snapshot.assigned_altitude_available_ms,
-        snapshot.assigned_altitude_provenance,
-    ) {
-        (None, None, None) => false,
-        (Some(_), Some(available_ms), Some(_)) => {
-            available_ms <= 0 || available_ms > snapshot.cutoff_ms
-        }
-        _ => true,
-    } {
-        return Err(ForecastRefusal::InvalidTrackValue);
-    }
-    if t.altitude_ft
-        .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
-        || snapshot
-            .assigned_altitude_ft
-            .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
-        || t.vertical_rate_fpm
-            .is_some_and(|v| v.abs() > MAX_VERTICAL_RATE_FPM)
-    {
-        return Err(ForecastRefusal::InvalidTrackValue);
-    }
-    if snapshot.route.len() > MAX_ROUTE_FIXES {
-        return Err(ForecastRefusal::TooManyRouteFixes);
-    }
-    if snapshot.route.is_empty() {
-        return Err(ForecastRefusal::EmptyRoute);
-    }
-    if snapshot.route.iter().any(|p| !valid_place(p.place)) {
-        return Err(ForecastRefusal::InvalidRoutePlace);
-    }
-    if snapshot
-        .route
-        .iter()
-        .filter_map(|p| p.altitude_constraint)
-        .any(|c| {
-            c.minimum_ft.is_some_and(|v| !v.is_finite())
-                || c.maximum_ft.is_some_and(|v| !v.is_finite())
-                || c.available_ms <= 0
-                || c.available_ms > snapshot.cutoff_ms
-                || c.minimum_ft
-                    .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
-                || c.maximum_ft
-                    .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
-                || matches!((c.minimum_ft, c.maximum_ft), (Some(lo), Some(hi)) if lo > hi)
-        })
-    {
-        return Err(ForecastRefusal::InvalidTrackValue);
-    }
-    if snapshot.meter_fix.is_some_and(|p| !valid_place(p.place)) {
-        return Err(ForecastRefusal::InvalidMeterFix);
-    }
     if profile.legs.len() != snapshot.route.len() {
         return Err(ForecastRefusal::MissingWindInput);
     }
@@ -489,6 +254,129 @@ pub fn forecast_with_wind(
         )?);
         start = fix.place;
     }
+    forecast_from_motion(snapshot, MotionModel::PerLeg(&ground_speeds), Some(profile))
+}
+
+#[derive(Clone, Copy)]
+enum MotionModel<'a> {
+    Constant(f64),
+    PerLeg(&'a [f64]),
+}
+
+fn validate_snapshot(
+    snapshot: &IssueSnapshot,
+    require_ground_speed: bool,
+) -> Result<Option<f64>, ForecastRefusal> {
+    let track = snapshot.track;
+    if snapshot.issued_ms <= 0 || snapshot.cutoff_ms <= 0 {
+        return Err(ForecastRefusal::NonpositiveIssueTime);
+    }
+    if snapshot.issued_ms < snapshot.cutoff_ms {
+        return Err(ForecastRefusal::IssueBeforeCutoff);
+    }
+    if track.time_ms > snapshot.cutoff_ms {
+        return Err(ForecastRefusal::TrackAfterCutoff);
+    }
+    if snapshot
+        .issued_ms
+        .checked_sub(track.time_ms)
+        .is_none_or(|age| age > MAX_TRACK_AGE_MS)
+    {
+        return Err(ForecastRefusal::TrackTooStale);
+    }
+    if !valid_place(track.place) {
+        return Err(ForecastRefusal::InvalidTrackPlace);
+    }
+    let speed_input = if require_ground_speed {
+        track.speed_mps
+    } else {
+        None
+    };
+    if [
+        track.altitude_ft,
+        speed_input,
+        track.vertical_rate_fpm,
+        snapshot.assigned_altitude_ft,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|v| !v.is_finite())
+    {
+        return Err(ForecastRefusal::InvalidTrackValue);
+    }
+    let speed = if require_ground_speed {
+        let speed = track.speed_mps.ok_or(ForecastRefusal::MissingSpeed)?;
+        if speed <= 1.0 || speed > MAX_GROUND_SPEED_MPS {
+            return Err(ForecastRefusal::InvalidSpeed);
+        }
+        Some(speed)
+    } else {
+        None
+    };
+    if match (
+        snapshot.assigned_altitude_ft,
+        snapshot.assigned_altitude_available_ms,
+        snapshot.assigned_altitude_provenance,
+    ) {
+        (None, None, None) => false,
+        (Some(_), Some(available_ms), Some(_)) => {
+            available_ms <= 0 || available_ms > snapshot.cutoff_ms
+        }
+        _ => true,
+    } {
+        return Err(ForecastRefusal::InvalidTrackValue);
+    }
+    if track
+        .altitude_ft
+        .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
+        || snapshot
+            .assigned_altitude_ft
+            .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
+        || track
+            .vertical_rate_fpm
+            .is_some_and(|v| v.abs() > MAX_VERTICAL_RATE_FPM)
+    {
+        return Err(ForecastRefusal::InvalidTrackValue);
+    }
+    if snapshot.route.len() > MAX_ROUTE_FIXES {
+        return Err(ForecastRefusal::TooManyRouteFixes);
+    }
+    if snapshot.route.is_empty() {
+        return Err(ForecastRefusal::EmptyRoute);
+    }
+    if snapshot.route.iter().any(|p| !valid_place(p.place)) {
+        return Err(ForecastRefusal::InvalidRoutePlace);
+    }
+    if snapshot
+        .route
+        .iter()
+        .filter_map(|p| p.altitude_constraint)
+        .any(|c| {
+            c.minimum_ft.is_some_and(|v| !v.is_finite())
+                || c.maximum_ft.is_some_and(|v| !v.is_finite())
+                || c.available_ms <= 0
+                || c.available_ms > snapshot.cutoff_ms
+                || c.minimum_ft
+                    .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
+                || c.maximum_ft
+                    .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
+                || matches!((c.minimum_ft, c.maximum_ft), (Some(lo), Some(hi)) if lo > hi)
+        })
+    {
+        return Err(ForecastRefusal::InvalidTrackValue);
+    }
+    if snapshot.meter_fix.is_some_and(|p| !valid_place(p.place)) {
+        return Err(ForecastRefusal::InvalidMeterFix);
+    }
+    Ok(speed)
+}
+
+fn forecast_from_motion(
+    snapshot: &IssueSnapshot,
+    motion: MotionModel<'_>,
+    wind_profile: Option<&WindProfile>,
+) -> Result<Forecast, ForecastRefusal> {
+    let track = snapshot.track;
     let mut points = [ForecastPoint {
         time_ms: 0,
         place: None,
@@ -504,34 +392,59 @@ pub fn forecast_with_wind(
             .checked_add(delta_ms)
             .ok_or(ForecastRefusal::EtaOverflow)?;
         let elapsed_ms = time_ms
-            .checked_sub(t.time_ms)
+            .checked_sub(track.time_ms)
             .ok_or(ForecastRefusal::EtaOverflow)?;
         if let Some(point) = points.get_mut(i) {
             let elapsed_s = elapsed_ms as f64 / 1000.0;
-            let vertical = vertical_at_wind(
-                t,
-                snapshot.assigned_altitude_ft,
-                snapshot.assigned_altitude_provenance,
-                &snapshot.route,
-                &ground_speeds,
-                elapsed_s,
-            );
+            let vertical = match motion {
+                MotionModel::Constant(speed) => vertical_at(
+                    track,
+                    snapshot.assigned_altitude_ft,
+                    snapshot.assigned_altitude_provenance,
+                    &snapshot.route,
+                    speed,
+                    elapsed_s,
+                ),
+                MotionModel::PerLeg(speeds) => vertical_at_wind(
+                    track,
+                    snapshot.assigned_altitude_ft,
+                    snapshot.assigned_altitude_provenance,
+                    &snapshot.route,
+                    speeds,
+                    elapsed_s,
+                ),
+            };
+            let place = match motion {
+                MotionModel::Constant(speed) => {
+                    route_position(track.place, speed, &snapshot.route, elapsed_s)
+                }
+                MotionModel::PerLeg(speeds) => {
+                    route_position_by_leg(track.place, &snapshot.route, speeds, elapsed_s)
+                }
+            };
             *point = ForecastPoint {
                 time_ms,
-                place: route_position_by_leg(t.place, &snapshot.route, &ground_speeds, elapsed_s),
+                place,
                 altitude_ft: vertical.altitude_ft,
                 vertical_status: vertical.status,
             };
         }
     }
     let meter_eta = if let Some(fix) = snapshot.meter_fix {
-        route_time_to_fix(t.place, &snapshot.route, &ground_speeds, fix)
-            .map(|seconds| {
-                let delta_ms_f = seconds * 1000.0;
+        let eta_ms = match motion {
+            MotionModel::Constant(speed) => route_distance_to(track.place, &snapshot.route, fix)
+                .map(|distance| (distance / speed) * 1000.0),
+            MotionModel::PerLeg(speeds) => {
+                route_time_to_fix(track.place, &snapshot.route, speeds, fix)
+                    .map(|seconds| seconds * 1000.0)
+            }
+        };
+        eta_ms
+            .map(|delta_ms_f| {
                 if !delta_ms_f.is_finite() || delta_ms_f < 0.0 || delta_ms_f >= i64::MAX as f64 {
                     return Err(ForecastRefusal::EtaOverflow);
                 }
-                let time_ms = t
+                let time_ms = track
                     .time_ms
                     .checked_add(oa_ieee::round(delta_ms_f) as i64)
                     .ok_or(ForecastRefusal::EtaOverflow)?;
@@ -550,7 +463,7 @@ pub fn forecast_with_wind(
         cutoff_ms: snapshot.cutoff_ms,
         assigned_altitude_available_ms: snapshot.assigned_altitude_available_ms,
         assigned_altitude_provenance: snapshot.assigned_altitude_provenance,
-        wind_profile: Some(profile.clone()),
+        wind_profile: wind_profile.cloned(),
         meter_fix: snapshot.meter_fix,
         positions: points,
         meter_eta,
@@ -817,66 +730,52 @@ struct VerticalForecast {
 }
 // A7.2: one-shot forecast helper, size guard waived.
 
-fn vertical_at(
-    track: TrackState,
-    assigned: Option<f64>,
-    assigned_provenance: Option<ConstraintProvenance>,
-    route: &[RouteFix],
-    speed: f64,
-    seconds: f64,
-) -> VerticalForecast {
-    let Some(current) = track.altitude_ft.filter(|v| v.is_finite()) else {
-        return VerticalForecast {
-            altitude_ft: None,
-            status: VerticalStatus::MissingAltitude,
-        };
-    };
-    let Some(rate) = track.vertical_rate_fpm.filter(|v| v.is_finite()) else {
-        return VerticalForecast {
-            altitude_ft: None,
-            status: VerticalStatus::MissingVerticalRate,
-        };
-    };
-    let altitude_at_seconds = |elapsed: f64| {
-        let raw = current + rate * elapsed / 60.0;
-        assigned.filter(|v| v.is_finite()).map_or(raw, |target| {
-            if rate > 0.0 && target >= current {
-                oa_math::min_f64(raw, target)
-            } else if rate < 0.0 && target <= current {
-                oa_math::max_f64(raw, target)
-            } else {
-                raw
-            }
-        })
-    };
-    let mut distance = 0.0;
-    let mut here = track.place;
-    let traveled = speed * seconds;
-    for fix in route {
-        distance += great_circle_m(here, fix.place);
-        if distance > traveled {
-            break;
-        }
-        if let Some(constraint) = fix.altitude_constraint {
-            let crossing_seconds = distance / speed;
-            let altitude = altitude_at_seconds(crossing_seconds);
-            let within_window = altitude >= constraint.minimum_ft.unwrap_or(MIN_ALTITUDE_FT)
-                && altitude <= constraint.maximum_ft.unwrap_or(MAX_ALTITUDE_FT);
-            if !within_window {
-                return VerticalForecast {
-                    altitude_ft: None,
-                    status: VerticalStatus::ConstraintConflict {
-                        constraint: constraint.provenance,
-                        assigned_altitude: assigned
-                            .filter(|_| assigned_provenance.is_some())
-                            .and(assigned_provenance),
-                    },
-                };
-            }
-        }
-        here = fix.place;
+fn missing_vertical_status(track: TrackState) -> Option<VerticalStatus> {
+    if track.altitude_ft.filter(|v| v.is_finite()).is_none() {
+        Some(VerticalStatus::MissingAltitude)
+    } else if track.vertical_rate_fpm.filter(|v| v.is_finite()).is_none() {
+        Some(VerticalStatus::MissingVerticalRate)
+    } else {
+        None
     }
-    let altitude = altitude_at_seconds(seconds);
+}
+
+fn altitude_at_seconds(track: TrackState, assigned: Option<f64>, seconds: f64) -> Option<f64> {
+    let current = track.altitude_ft.filter(|v| v.is_finite())?;
+    let rate = track.vertical_rate_fpm.filter(|v| v.is_finite())?;
+    let raw = current + rate * seconds / 60.0;
+    Some(assigned.filter(|v| v.is_finite()).map_or(raw, |target| {
+        if rate > 0.0 && target >= current {
+            oa_math::min_f64(raw, target)
+        } else if rate < 0.0 && target <= current {
+            oa_math::max_f64(raw, target)
+        } else {
+            raw
+        }
+    }))
+}
+
+fn constraint_conflict(
+    constraint: AltitudeConstraint,
+    altitude: f64,
+    assigned_provenance: Option<ConstraintProvenance>,
+) -> Option<VerticalStatus> {
+    let inside = altitude >= constraint.minimum_ft.unwrap_or(MIN_ALTITUDE_FT)
+        && altitude <= constraint.maximum_ft.unwrap_or(MAX_ALTITUDE_FT);
+    (!inside).then_some(VerticalStatus::ConstraintConflict {
+        constraint: constraint.provenance,
+        assigned_altitude: assigned_provenance,
+    })
+}
+
+fn finish_vertical(track: TrackState, assigned: Option<f64>, seconds: f64) -> VerticalForecast {
+    if let Some(status) = missing_vertical_status(track) {
+        return VerticalForecast {
+            altitude_ft: None,
+            status,
+        };
+    }
+    let altitude = altitude_at_seconds(track, assigned, seconds).unwrap_or(f64::NAN);
     if !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&altitude) {
         VerticalForecast {
             altitude_ft: None,
@@ -888,6 +787,44 @@ fn vertical_at(
             status: VerticalStatus::Available,
         }
     }
+}
+
+fn vertical_at(
+    track: TrackState,
+    assigned: Option<f64>,
+    assigned_provenance: Option<ConstraintProvenance>,
+    route: &[RouteFix],
+    speed: f64,
+    seconds: f64,
+) -> VerticalForecast {
+    if let Some(status) = missing_vertical_status(track) {
+        return VerticalForecast {
+            altitude_ft: None,
+            status,
+        };
+    }
+    let assigned_provenance = assigned_provenance.filter(|_| assigned.is_some());
+    let mut distance = 0.0;
+    let mut here = track.place;
+    let traveled = speed * seconds;
+    for fix in route {
+        distance += great_circle_m(here, fix.place);
+        if distance > traveled {
+            break;
+        }
+        if let Some(constraint) = fix.altitude_constraint {
+            let altitude =
+                altitude_at_seconds(track, assigned, distance / speed).unwrap_or(f64::NAN);
+            if let Some(status) = constraint_conflict(constraint, altitude, assigned_provenance) {
+                return VerticalForecast {
+                    altitude_ft: None,
+                    status,
+                };
+            }
+        }
+        here = fix.place;
+    }
+    finish_vertical(track, assigned, seconds)
 }
 
 fn wind_triangle_ground_speed(
@@ -938,30 +875,13 @@ fn vertical_at_wind(
     speeds: &[f64],
     seconds: f64,
 ) -> VerticalForecast {
-    let Some(current) = track.altitude_ft.filter(|v| v.is_finite()) else {
+    if let Some(status) = missing_vertical_status(track) {
         return VerticalForecast {
             altitude_ft: None,
-            status: VerticalStatus::MissingAltitude,
+            status,
         };
-    };
-    let Some(rate) = track.vertical_rate_fpm.filter(|v| v.is_finite()) else {
-        return VerticalForecast {
-            altitude_ft: None,
-            status: VerticalStatus::MissingVerticalRate,
-        };
-    };
-    let altitude_at_seconds = |elapsed: f64| {
-        let raw = current + rate * elapsed / 60.0;
-        assigned.filter(|v| v.is_finite()).map_or(raw, |target| {
-            if rate > 0.0 && target >= current {
-                oa_math::min_f64(raw, target)
-            } else if rate < 0.0 && target <= current {
-                oa_math::max_f64(raw, target)
-            } else {
-                raw
-            }
-        })
-    };
+    }
+    let assigned_provenance = assigned_provenance.filter(|_| assigned.is_some());
     let mut here = track.place;
     let mut crossing_seconds = 0.0;
     for (fix, speed) in route.iter().zip(speeds) {
@@ -971,35 +891,18 @@ fn vertical_at_wind(
             break;
         }
         if let Some(constraint) = fix.altitude_constraint {
-            let altitude = altitude_at_seconds(crossing_seconds);
-            let within_window = altitude >= constraint.minimum_ft.unwrap_or(MIN_ALTITUDE_FT)
-                && altitude <= constraint.maximum_ft.unwrap_or(MAX_ALTITUDE_FT);
-            if !within_window {
+            let altitude =
+                altitude_at_seconds(track, assigned, crossing_seconds).unwrap_or(f64::NAN);
+            if let Some(status) = constraint_conflict(constraint, altitude, assigned_provenance) {
                 return VerticalForecast {
                     altitude_ft: None,
-                    status: VerticalStatus::ConstraintConflict {
-                        constraint: constraint.provenance,
-                        assigned_altitude: assigned
-                            .filter(|_| assigned_provenance.is_some())
-                            .and(assigned_provenance),
-                    },
+                    status,
                 };
             }
         }
         here = fix.place;
     }
-    let altitude = altitude_at_seconds(seconds);
-    if !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&altitude) {
-        VerticalForecast {
-            altitude_ft: None,
-            status: VerticalStatus::OutsideModelRange,
-        }
-    } else {
-        VerticalForecast {
-            altitude_ft: Some(altitude),
-            status: VerticalStatus::Available,
-        }
-    }
+    finish_vertical(track, assigned, seconds)
 }
 
 fn route_position_by_leg(
@@ -1178,6 +1081,23 @@ mod tests {
         assert_eq!(
             calm.wind_profile.as_ref().unwrap().legs[0].provenance,
             WindProvenance::Synthetic
+        );
+        let mut aged = snapshot.clone();
+        aged.track.time_ms -= 5_000;
+        aged.track.altitude_ft = Some(12_000.0);
+        aged.track.vertical_rate_fpm = Some(-600.0);
+        let aged_baseline = forecast(&aged)?;
+        let aged_wind = forecast_with_wind(&aged, &wind_profile(&aged, 0.0, 0.0))?;
+        assert_eq!(aged_wind.meter_eta, aged_baseline.meter_eta);
+        assert_eq!(
+            aged_wind.positions[0].altitude_ft,
+            aged_baseline.positions[0].altitude_ft
+        );
+        assert!(
+            great_circle_m(
+                aged_wind.positions[0].place.unwrap(),
+                aged_baseline.positions[0].place.unwrap()
+            ) < 0.01
         );
         let mut no_ground_speed = snapshot.clone();
         no_ground_speed.track.speed_mps = None;
