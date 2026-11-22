@@ -1738,6 +1738,72 @@ fn a_visual_base_leg_in_an_airport_area_alerts_only_for_a_tower_and_the_floor_is
     assert_eq!(msaw_open(&r.st)[0].worst_floor_ft, 800);
 }
 
+// REQ: OA-MSAW-004, OA-MSAW-011, OA-MSAW-039
+#[test]
+fn resilience_terrain_gap_during_active_warning_recovers_with_clean_control() {
+    let mut config = cfg();
+    config.wide_degrade_share = 0.4;
+    let mut r = rig(&config);
+    let hazard = tr(21, 40.0, -88.0, 0.0, 0.0, 1550.0, -600.0);
+    let control = tr(22, 40.2, -88.0, 0.0, 0.0, 2600.0, 0.0);
+    let full = flat(900, FLOOR_NONE);
+
+    let opened = cycle(&mut r, S, &[hazard, control], &full);
+    assert_eq!(opened.stats.violations, 1);
+    let warning_ns = msaw_open(&r.st)
+        .iter()
+        .find(|alert| alert.addr == 21)
+        .and_then(|alert| alert.warning_ns)
+        .expect("synthetic terrain hazard enters warning");
+    assert!(!msaw_open(&r.st).iter().any(|alert| alert.addr == 22));
+
+    // The terrain tile covering the hazard is temporarily unavailable. Its paired control keeps
+    // full coverage, and the already published warning remains open while the net degrades.
+    let temporary_terrain_gap = |lat: i32, lon: i32| {
+        let sample = full(lat, lon);
+        if (399_000_000..401_000_000).contains(&lat) {
+            FloorSample {
+                terrain_ft: FLOOR_NONE,
+                ..sample
+            }
+        } else {
+            sample
+        }
+    };
+    let degraded = cycle(&mut r, 2 * S, &[hazard, control], &temporary_terrain_gap);
+    assert_eq!(degraded.stats.no_coverage, 1);
+    assert!(matches!(
+        degraded.report,
+        NetReport::Degraded {
+            reason: Reason::InputMissing,
+            count: 1,
+            ..
+        }
+    ));
+    assert_eq!(
+        msaw_open(&r.st)
+            .iter()
+            .find(|alert| alert.addr == 21)
+            .and_then(|alert| alert.warning_ns),
+        Some(warning_ns),
+        "terrain loss must not clear the active warning"
+    );
+
+    let recovered = cycle(&mut r, 3 * S, &[hazard, control], &full);
+    assert_eq!(recovered.report, NetReport::Running);
+    assert_eq!(recovered.stats.violations, 1);
+    assert_eq!(recovered.stats.opened, 0);
+    assert!(!msaw_open(&r.st).iter().any(|alert| alert.addr == 22));
+    assert_eq!(
+        msaw_open(&r.st)
+            .iter()
+            .find(|alert| alert.addr == 21)
+            .and_then(|alert| alert.warning_ns),
+        Some(warning_ns),
+        "restored terrain must resume evaluation without replacing the warning"
+    );
+}
+
 // REQ: OA-MSAW-064
 #[test]
 fn an_airport_area_keeps_the_general_look_ahead_and_only_a_capture_box_shortens_it() {
