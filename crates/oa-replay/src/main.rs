@@ -28,13 +28,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let mut input_fingerprint = InputFingerprint::default();
+    let mut input_fingerprint = cmd.input_fingerprint.then(InputFingerprint::default);
     // Every input path is checked, as given and resolved, before anything is opened.
     for i in &cmd.inputs {
         if let Err(e) = oa_sealed::refuse(&i.path) {
             eprintln!("oa-replay: {e}");
-            if cmd.input_fingerprint {
-                print_fingerprint(&input_fingerprint, "incomplete", Some(1), 0, 0, None);
+            if let Some(fingerprint) = &input_fingerprint {
+                print_fingerprint(fingerprint, "incomplete", Some(1), 0, 0, None);
             }
             return ExitCode::from(2);
         }
@@ -48,8 +48,8 @@ fn main() -> ExitCode {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("oa-replay: {e}");
-                    if cmd.input_fingerprint {
-                        print_fingerprint(&input_fingerprint, "incomplete", None, 0, 0, None);
+                    if let Some(fingerprint) = &input_fingerprint {
+                        print_fingerprint(fingerprint, "incomplete", None, 0, 0, None);
                     }
                     return ExitCode::from(1);
                 }
@@ -71,7 +71,6 @@ fn main() -> ExitCode {
     let mut first_ns = i64::MIN;
     let mut next_progress = i64::MIN;
     let quiet = cmd.quiet;
-    let print_input_fingerprint = cmd.input_fingerprint;
     let progress_ns = cmd.progress_ns;
     let mut write_err: Option<std::io::Error> = None;
     let mut hook = |p: &mut Pipeline| -> std::io::Result<()> {
@@ -99,14 +98,14 @@ fn main() -> ExitCode {
         Ok(())
     };
     let mut sealed_frames = 0u64;
-    let ran = if print_input_fingerprint {
+    let ran = if let Some(fingerprint) = &mut input_fingerprint {
         run_streams_observed(
             &mut p,
             specs,
             cmd.chunk,
             &mut hook,
             &mut sealed_frames,
-            &mut |frame| input_fingerprint.observe(frame),
+            &mut |frame| fingerprint.observe(frame),
         )
     } else {
         run_streams_counted(&mut p, specs, cmd.chunk, &mut hook, &mut sealed_frames)
@@ -118,9 +117,9 @@ fn main() -> ExitCode {
     let report = match ran {
         Ok(r) => r,
         Err(e) => {
-            if print_input_fingerprint {
+            if let Some(fingerprint) = &input_fingerprint {
                 print_fingerprint(
-                    &input_fingerprint,
+                    fingerprint,
                     "incomplete",
                     None,
                     sealed_frames,
@@ -150,16 +149,21 @@ fn main() -> ExitCode {
     ) {
         return fail_write(&e);
     }
-    if print_input_fingerprint {
-        let source_rejected = oa_replay::errors_total(&report.errors);
+    if let Some(fingerprint) = &input_fingerprint {
+        let source_rejected = errors_total(&report.errors);
         let semantic_errors = errors_total(&p.errors).saturating_sub(source_rejected);
-        let status = if source_rejected > 0 || p.sealed_window_dropped > 0 || semantic_errors > 0 {
+        let status = if source_rejected > 0
+            || report.sealed_window_dropped > 0
+            || p.sealed_window_dropped > 0
+            || semantic_errors > 0
+            || p.rows_refused_full.iter().any(|&n| n != 0)
+        {
             "partial"
         } else {
             "complete"
         };
         print_fingerprint(
-            &input_fingerprint,
+            fingerprint,
             status,
             Some(source_rejected),
             report.sealed_window_dropped,
@@ -179,8 +183,13 @@ fn print_fingerprint(
     semantic_sealed: u64,
     semantic_errors: Option<u64>,
 ) {
-    let digest = fingerprint
-        .finalize()
+    let digest = fingerprint.finalize();
+    let status = if digest.is_some() {
+        status
+    } else {
+        "unavailable"
+    };
+    let digest = digest
         .map(|d| oa_sha256::to_hex(&d))
         .unwrap_or_else(|| "unavailable".to_string());
     let source_rejected = source_rejected

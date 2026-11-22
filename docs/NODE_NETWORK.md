@@ -144,17 +144,15 @@ membership this needs no outside witness network.
 
 ## 6. Comparing, isolating and rebuilding
 
-A checkpoint that differs from its peers is classified by its input hash first:
-
 For offline replay triage, `oa-replay --input-fingerprint` can emit a bounded ordered-input
-digest alongside the existing state digest. It hashes validated frame metadata and payload bytes
-only after the frame and document sealed-window gates accept them. Its diagnostic separately
-counts source framing/gzip refusals, pipeline semantic errors, and both sealed-drop gates; an
-incomplete or refused replay is marked partial (or incomplete when reading stops). The recorded
-receive and optional monotonic timestamps are source fields, not measured wall time. This is a
-local comparison aid: it does not
-prove complete delivery, establish equivalence between independently clocked feeds, or provide
-the peer-authenticated input commitment described here.
+digest alongside the existing state digest. It hashes validated metadata, replay stream identity,
+and payload bytes after the frame and document sealed-window checks. It counts source framing
+and gzip refusals, pipeline errors, and sealed drops separately. The result is partial if the
+replay encounters a refusal or a drop, and incomplete if it stops on an error. The recorded
+receive and monotonic timestamps are input fields. Compare local runs with the same replay
+settings and stream grouping. Peer authentication and complete delivery require separate evidence.
+
+The input hash determines how a disagreement between peer checkpoints is classified.
 
 - **Different inputs:** a data-path fault (loss, delay beyond the window, a feed problem). The
   node fetches what it missed and replays from the last agreed checkpoint.

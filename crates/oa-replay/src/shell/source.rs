@@ -570,7 +570,7 @@ pub fn run_streams_counted(
     after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
     sealed_frames: &mut u64,
 ) -> io::Result<MergeReport> {
-    run_streams_observed(p, specs, chunk, after_frame, sealed_frames, &mut |_| {})
+    run_streams_inner(p, specs, chunk, after_frame, sealed_frames, None)
 }
 
 /// [`run_streams_counted`] with an observer for frames passed through the pipeline. A message whose
@@ -584,6 +584,24 @@ pub fn run_streams_observed(
     sealed_frames: &mut u64,
     on_pipeline_frame: &mut dyn FnMut(&Merged<'_>),
 ) -> io::Result<MergeReport> {
+    run_streams_inner(
+        p,
+        specs,
+        chunk,
+        after_frame,
+        sealed_frames,
+        Some(on_pipeline_frame),
+    )
+}
+
+fn run_streams_inner(
+    p: &mut Pipeline,
+    specs: Vec<StreamSpec>,
+    chunk: usize,
+    after_frame: &mut dyn FnMut(&mut Pipeline) -> io::Result<()>,
+    sealed_frames: &mut u64,
+    mut on_pipeline_frame: Option<&mut dyn FnMut(&Merged<'_>)>,
+) -> io::Result<MergeReport> {
     // The bytes of the frames whose document the decoder dropped whole (OA-SEAL-014): not in
     // the byte count, like the frames dropped by receive time.
     let mut dropped_bytes = 0u64;
@@ -591,8 +609,8 @@ pub fn run_streams_observed(
         process_frame_mono(p, m.feed, m.kind, m.recv_ns, m.stream, m.mono_ns, m.payload);
         if p.last_doc_dropped {
             dropped_bytes += m.frame_len;
-        } else {
-            on_pipeline_frame(m);
+        } else if let Some(observe) = on_pipeline_frame.as_mut() {
+            observe(m);
         }
         after_frame(p)
     });

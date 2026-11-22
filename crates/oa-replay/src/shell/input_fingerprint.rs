@@ -36,24 +36,34 @@ impl InputFingerprint {
         let Some(hash) = self.hash.as_mut() else {
             return;
         };
-        let mut header = [0u8; 36];
-        header[..4].copy_from_slice(FRAME);
-        header[4] = frame.feed as u8;
-        header[5] = frame.kind as u8;
-        header[6] = frame.flags;
-        header[7] = u8::from(frame.mono_ns.is_some());
-        header[8..16].copy_from_slice(&frame.recv_ns.to_le_bytes());
-        header[16..24].copy_from_slice(&frame.mono_ns.unwrap_or(0).to_le_bytes());
-        header[24..32].copy_from_slice(&frame.seq.to_le_bytes());
-        header[32..36].copy_from_slice(&(frame.payload.len() as u32).to_le_bytes());
-        if hash.update(&header).is_err() || hash.update(frame.payload).is_err() {
+        let Ok(payload_len) = u32::try_from(frame.payload.len()) else {
             self.hash = None;
             return;
+        };
+        let tags = [
+            frame.feed as u8,
+            frame.kind as u8,
+            frame.flags,
+            u8::from(frame.mono_ns.is_some()),
+        ];
+        let parts: [&[u8]; 8] = [
+            FRAME,
+            &tags,
+            &frame.recv_ns.to_le_bytes(),
+            &frame.mono_ns.unwrap_or(0).to_le_bytes(),
+            &frame.seq.to_le_bytes(),
+            &frame.stream.to_le_bytes(),
+            &payload_len.to_le_bytes(),
+            frame.payload,
+        ];
+        for part in parts {
+            if hash.update(part).is_err() {
+                self.hash = None;
+                return;
+            }
         }
         self.frames = self.frames.saturating_add(1);
-        self.payload_bytes = self
-            .payload_bytes
-            .saturating_add(frame.payload.len() as u64);
+        self.payload_bytes = self.payload_bytes.saturating_add(u64::from(payload_len));
     }
 
     /// Number of frames included in the digest.
@@ -110,5 +120,13 @@ mod tests {
         d.observe(&frame(b"ab", 1, None, 2));
         d.observe(&frame(b"c", 3, Some(0), 4));
         assert_ne!(c.finalize(), d.finalize());
+
+        let mut e = InputFingerprint::default();
+        e.observe(&frame(b"ab", 1, None, 2));
+        e.observe(&Merged {
+            stream: 1,
+            ..frame(b"c", 3, Some(0), 4)
+        });
+        assert_ne!(d.finalize(), e.finalize());
     }
 }
