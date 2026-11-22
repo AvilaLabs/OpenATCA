@@ -125,6 +125,45 @@ fn stdin_mode_records_verbatim_and_replay_agrees() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn stdin_can_sync_rotated_files_in_the_checked_directory() {
+    let dir = std::env::temp_dir().join(format!("oa-feed-it-sync-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let data = frames();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_oa-feed"))
+        .args(["--stdin", "--feed", "it-sync", "--record-raw"])
+        .arg(&dir)
+        .args(["--sync-closed-segments", "--rotate-bytes", "1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&data).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("sync_closed_segments_started=20 completed=20 failed=0"),
+        "{stdout} {stderr}"
+    );
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 20);
+    let mut recorded = Vec::new();
+    for file in files {
+        recorded.extend(std::fs::read(file).unwrap());
+    }
+    assert_eq!(without_mono(&recorded), data);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 // REQ: OA-FEED-178
 #[test]
 fn duration_arguments_at_the_limit_run_and_above_it_are_refused_without_a_panic() {

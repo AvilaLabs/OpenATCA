@@ -270,21 +270,14 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
     });
 
     let mut recorder = match &cfg.record {
-        Some(dir) => Some(
-            if cfg.sync_closed_segments {
-                Recorder::open_sync_closed_segments(
-                    dir,
-                    &cfg.feed,
-                    cfg.rotate_bytes,
-                    cfg.max_bytes,
-                    if cfg.record_raw {
-                        Format::Raw
-                    } else {
-                        Format::Gzip
-                    },
-                )
+        Some(dir) => {
+            let open = if cfg.sync_closed_segments {
+                Recorder::open_sync_closed_segments
             } else {
-                Recorder::open(
+                Recorder::open
+            };
+            Some(
+                open(
                     dir,
                     &cfg.feed,
                     cfg.rotate_bytes,
@@ -295,9 +288,9 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
                         Format::Gzip
                     },
                 )
-            }
-            .map_err(|e| format!("cannot open recording directory: {e}"))?,
-        ),
+                .map_err(|e| format!("cannot open recording directory: {e}"))?,
+            )
+        }
         None => None,
     };
     let mut storage = vec![0u8; 2 * MAX_FRAME_LEN];
