@@ -52,7 +52,7 @@ pub struct CapCfg {
 }
 
 /// Truth-derived identity summary for final confirmed tracks. A7.2: cold report data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TruthSnapshotScore {
     /// Confirmed track keys live at the final run time.
     pub snapshot_tracks: usize,
@@ -69,6 +69,8 @@ pub struct TruthSnapshotScore {
     pub swaps: u64,
     /// Assignment evidence spans warm-up and measured traffic, but is restricted to snapshot keys.
     pub assignment_rows: usize,
+    /// First once-per-second confirmed appearance of each matched final key, from run start.
+    pub first_confirmed_s: Option<Dist>,
 }
 
 /// What a capacity run measured.
@@ -536,6 +538,7 @@ fn offered_plots(coverage: &mut OfferedCoverage, radar_plots: &[Vec<oa_track::ra
 fn truth_snapshot_score(
     fusion: &oa_track::fusion::Fusion,
     offered: &OfferedCoverage,
+    first_confirmed: &HashMap<u32, i64>,
 ) -> Result<TruthSnapshotScore, &'static str> {
     if fusion_stats(fusion).assign_log_overflow > 0 {
         return Err("assignment log overflowed; identity score unavailable");
@@ -571,22 +574,28 @@ fn truth_snapshot_score(
                 .then_some(addr)
         })
         .collect();
-    let matched_truth: BTreeSet<u32> = identified
+    // The adjudicator returns one primary key per truth aircraft.
+    let matched_keys: Vec<u32> = identified
         .truth_of
-        .values()
-        .filter(|&&addr| offered_truth.contains(&addr))
-        .copied()
+        .iter()
+        .filter_map(|(&key, addr)| offered_truth.contains(addr).then_some(key))
         .collect();
+    let first_confirmed_s = matched_keys
+        .iter()
+        .map(|key| first_confirmed.get(key).map(|&second| second as f64))
+        .collect::<Option<Vec<_>>>()
+        .map(|seconds| dist_of(&seconds));
     Ok(TruthSnapshotScore {
         snapshot_tracks: keys.len(),
         offered_aircraft: offered_truth.len(),
-        matched_aircraft: matched_truth.len(),
-        missing_aircraft: offered_truth.len().saturating_sub(matched_truth.len()),
+        matched_aircraft: matched_keys.len(),
+        missing_aircraft: offered_truth.len().saturating_sub(matched_keys.len()),
         duplicate_tracks: identified.duplicates,
         false_tracks: identified.false_tracks,
         false_applied: identified.false_applied,
         swaps: identified.swaps,
         assignment_rows: assign.t_ns.len(),
+        first_confirmed_s,
     })
 }
 
@@ -645,6 +654,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
 
     let (mut adsb, mut plots) = (Vec::<Measurement>::new(), Vec::new());
     let (mut before, mut after) = (HashMap::new(), HashMap::new());
+    let mut first_confirmed = HashMap::new();
     let mut h_tick = Hist::new(1.0, 100_000);
     let mut h_tick_a = Hist::new(1.0, 100_000);
     let mut h_tick_r = Hist::new(1.0, 100_000);
@@ -698,6 +708,16 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         fusion_advance(&mut f, until, &mut out);
         let ms = t0.elapsed().as_secs_f64() * 1.0e3;
         wall_total += ms * 1.0e-3;
+        if cfg.truth_score {
+            // Match the assignment log's existing evidence bound. If a final key is absent
+            // after reaching the bound, the report marks the timing distribution unavailable.
+            for (key, _) in tracker_live_iter(fusion_tracker(&f)) {
+                if first_confirmed.len() == ASSIGN_LOG_MAX {
+                    break;
+                }
+                first_confirmed.entry(key).or_insert(k + 1);
+            }
+        }
         let n_plots: usize = plots.iter().map(Vec::len).sum();
         if measured {
             wall_measured += ms * 1.0e-3;
@@ -808,7 +828,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             Some("run did not complete the full measured interval"),
         )
     } else {
-        match truth_snapshot_score(&f, &offered) {
+        match truth_snapshot_score(&f, &offered, &first_confirmed) {
             Ok(score) => (Some(score), None),
             Err(reason) => (None, Some(reason)),
         }
@@ -941,6 +961,12 @@ pub fn cap_kv(r: &CapResult) -> Kv {
             "truth_score.assignment_rows_run_cumulative",
             score.assignment_rows,
         );
+        if let Some(timing) = score.first_confirmed_s {
+            kv.put("truth_score.first_confirmed.status", "available");
+            kv.put_dist("truth_score.first_confirmed", "s", &timing);
+        } else {
+            kv.put("truth_score.first_confirmed.status", "unavailable");
+        }
     } else if let Some(reason) = r.truth_score_unavailable {
         kv.put("truth_score.status", "unavailable");
         kv.put("truth_score.reason", reason);
@@ -1185,6 +1211,14 @@ pub fn cap_text(r: &CapResult) -> String {
             score.swaps,
             score.assignment_rows
         ));
+        match score.first_confirmed_s {
+            Some(timing) if timing.n > 0 => s.push_str(&format!(
+                "  first confirmed appearance of matched final tracks: n={} p50={:.0} s p90={:.0} s max={:.0} s from run start\n",
+                timing.n, timing.p50, timing.p90, timing.max
+            )),
+            Some(_) => s.push_str("  first confirmed appearance: no matched final tracks\n"),
+            None => s.push_str("  first confirmed appearance: key history unavailable\n"),
+        }
     } else if let Some(reason) = r.truth_score_unavailable {
         s.push_str(&format!(
             "  truth-derived final snapshot: unavailable ({reason})\n"
@@ -1382,6 +1416,15 @@ mod tests {
         assert_eq!(
             score.matched_aircraft + score.missing_aircraft,
             score.offered_aircraft
+        );
+        let timing = score.first_confirmed_s.expect("complete first sightings");
+        assert!(timing.n > 0);
+        assert_eq!(timing.n, score.matched_aircraft);
+        assert!(timing.min >= 1.0);
+        assert!(timing.max <= (cfg.warmup_s + cfg.measure_s) as f64);
+        assert_eq!(
+            cap_kv(&result).get("truth_score.first_confirmed.status"),
+            Some("available")
         );
         assert_eq!(result.fusion.assign_log_overflow, 0);
         assert!(cap_text(&result).contains("truth-derived final snapshot"));

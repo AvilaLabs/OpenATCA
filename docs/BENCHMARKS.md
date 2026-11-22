@@ -247,6 +247,8 @@ scores identity only for confirmed tracks live at the final run time. It reuses 
 assignment-label majority rule, with cumulative assignment evidence from warm-up and measurement
 filtered to those final keys. The denominator is distinct known truth aircraft offered during
 measurement; duplicate, false-track, false-assignment and swap counts are reported separately.
+The first confirmed appearance distribution samples the tracker once per simulated second from
+run start and covers the primary keys matched at the final snapshot.
 The log is opt-in because it adds memory and timing overhead. Truncated runs, unknown offered
 labels, incomplete assignment columns or log overflow produce an explicit unavailable result.
 This is a final-snapshot identity diagnostic, not a trajectory-accuracy score; it cannot report
