@@ -995,8 +995,6 @@ impl Replica {
             .stderr(Stdio::null());
         if let Some(path) = checkpoint {
             command.env("OA_MACHINE_LOSS_CHECKPOINT", path);
-        } else {
-            command.env_remove("OA_MACHINE_LOSS_CHECKPOINT");
         }
         let mut child = command.spawn().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
@@ -1010,25 +1008,35 @@ impl Replica {
         }
     }
 
-    fn recovered_prefix_line(&self, second: i32) -> String {
+    fn receive_record(&self, context: &str) -> String {
         let deadline = Instant::now() + WORKER_TIMEOUT;
         let output = self.output.as_ref().expect("worker output receiver exists");
-        let line = output
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .expect("checkpoint recovery response timed out")
-            .expect("checkpoint recovery output is readable");
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "worker response timed out at {context}"
+            );
+            let line = output
+                .recv_timeout(remaining)
+                .unwrap_or_else(|error| panic!("worker response timeout/EOF at {context}: {error}"))
+                .unwrap_or_else(|error| panic!("invalid worker output at {context}: {error}"));
+            if line.starts_with("MACHINE_LOSS_ACK ") || line.starts_with("MACHINE_LOSS_ERROR ") {
+                return line.trim_end_matches(['\r', '\n']).to_owned();
+            }
+        }
+    }
+
+    fn recovered_prefix_line(&self, second: i32) -> String {
+        let line = self.receive_record("checkpoint recovery");
         validate_worker_ack(&line, second);
-        line.trim_end_matches(['\r', '\n']).to_owned()
+        line
     }
 
     fn assert_checkpoint_refused(&mut self, reason: &str) {
-        let output = self.output.as_ref().expect("worker output receiver exists");
-        let line = output
-            .recv_timeout(WORKER_TIMEOUT)
-            .expect("checkpoint refusal response timed out")
-            .expect("checkpoint refusal output is readable");
+        let line = self.receive_record("checkpoint refusal");
         assert_eq!(
-            line.trim_end_matches(['\r', '\n']),
+            line,
             format!("MACHINE_LOSS_ERROR checkpoint_refused {reason}")
         );
         let status = wait_bounded(&mut self.child).expect("refusing worker exits promptly");
@@ -1043,29 +1051,13 @@ impl Replica {
         )
         .unwrap();
         self.input.flush().unwrap();
-        let deadline = Instant::now() + WORKER_TIMEOUT;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            assert!(
-                !remaining.is_zero(),
-                "worker response timed out at {second}s"
-            );
-            let output = match self.output.as_ref() {
-                Some(output) => output,
-                None => panic!("worker output receiver was already closed"),
-            };
-            let line = output
-                .recv_timeout(remaining)
-                .unwrap_or_else(|error| panic!("worker response timeout/EOF at {second}s: {error}"))
-                .unwrap_or_else(|error| panic!("invalid worker output at {second}s: {error}"));
-            if line.starts_with("MACHINE_LOSS_ERROR ") {
-                panic!("worker rejected command at {second}s: {line}");
-            }
-            if line.starts_with("MACHINE_LOSS_ACK ") {
-                validate_worker_ack(&line, second);
-                return line.trim_end_matches(['\r', '\n']).to_owned();
-            }
-        }
+        let line = self.receive_record(&format!("{second}s"));
+        assert!(
+            !line.starts_with("MACHINE_LOSS_ERROR "),
+            "worker rejected command at {second}s: {line}"
+        );
+        validate_worker_ack(&line, second);
+        line
     }
 
     fn shutdown(&mut self) -> io::Result<ExitStatus> {

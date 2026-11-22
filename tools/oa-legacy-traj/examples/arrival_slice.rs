@@ -3,7 +3,8 @@
 //! No recordings, feeds, network, or private data are read.
 
 use oa_legacy_traj::core::arrival::{
-    forecast, score, IssueSnapshot, LegacyEta, RouteFix, TrackState, TruthPoint,
+    forecast, score, ConstraintProvenance, IssueSnapshot, LegacyEta, RouteFix, TrackState,
+    TruthPoint,
 };
 use oa_legacy_traj::core::types::Place;
 
@@ -65,7 +66,7 @@ fn main() -> Result<(), String> {
             vertical_rate_fpm: Some(-900.0),
         },
         assigned_altitude_ft: Some(5_000.0),
-        assigned_altitude_provenance: Some(crate::core::arrival::ConstraintProvenance::Synthetic),
+        assigned_altitude_provenance: Some(ConstraintProvenance::Synthetic),
         route: vec![jot, fix, ord],
         meter_fix: Some(fix),
     };

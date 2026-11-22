@@ -179,9 +179,7 @@ fn stalled_peer_times_out_in_bounded_batches_then_reconnects() {
     };
     let sent = wire_fpl(c.local, c.peer, old_number);
     assert_eq!(sent.id.number, old_number);
-    s = next;
-
-    let (next, actions) = step(&c, s, Event::ConnectionLost, 301);
+    let (next, actions) = step(&c, next, Event::ConnectionLost, 301);
     assert_eq!(next.state, State::Inactive);
     assert_eq!(actions.as_slice(), [Action::AbandonPending { count: 1 }]);
     assert!(next.pending().is_empty());
