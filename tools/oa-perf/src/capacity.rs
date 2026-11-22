@@ -294,6 +294,7 @@ pub const FUSION_NOT_LOSS: &[&str] = &[
     "init_tests",
     "init_work",
     "init_refusal_pass_visits",
+    "init_radar", // Diagnostic breakdown of existing counters.
     "cands_live_max",
     "assoc_runs",
     "coarse_width_sum_m",
