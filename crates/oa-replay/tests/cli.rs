@@ -310,6 +310,10 @@ fn verify_prefix_gates_stdout_on_both_digests_and_complete_suffix() {
     assert!(out.is_empty());
     assert!(err.contains("prefix verification refused"), "{err}");
     assert!(err.contains("sealed-window rows dropped: 1"), "{err}");
+    assert!(
+        err.contains("verification_blockers source_rejected=0 source_sealed_drops=1 "),
+        "{err}"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -551,6 +555,15 @@ fn bridge_rejects_make_witness_verification_partial_without_rejecting_status_fra
         assert_eq!(code, 1, "{err}");
         assert!(out.is_empty(), "{out}");
         assert!(err.contains("replay is partial or incomplete"), "{err}");
+        assert!(
+            err.lines().any(|line| line
+                == concat!(
+                    "verification_blockers source_rejected=0 source_sealed_drops=0 ",
+                    "semantic_sealed_drops=0 semantic_errors=0 bridge_reject_frames=1 ",
+                    "adsb_future_refused=0 rows_out_of_order=0 rows_refused_full=0"
+                )),
+            "{err}"
+        );
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }

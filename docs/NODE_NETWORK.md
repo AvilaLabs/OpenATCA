@@ -178,6 +178,8 @@ boundary. Supply the count and both digests from an independently retained, comp
 of the intended recording under the same settings. A cleanly omitted or appended segment
 changes the observed count or input digest and withholds the summary. This flag can run on
 its own or with `--verify-prefix` to check both a recovery boundary and the expected tail.
+If final verification refuses a partial replay, standard error reports aggregate
+`verification_blockers` counters for the applicable input and state checks.
 
 The input hash determines how a disagreement between peer checkpoints is classified.
 

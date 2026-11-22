@@ -218,9 +218,9 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
     if verify_mode {
-        let Some((observed_frames, observed_input)) = input_fingerprint
+        let Some((fingerprint, observed_input)) = input_fingerprint
             .as_ref()
-            .and_then(|fingerprint| Some((fingerprint.frames(), fingerprint.finalize()?)))
+            .and_then(|fingerprint| Some((fingerprint, fingerprint.finalize()?)))
         else {
             eprintln!(
                 "oa-replay: {verification} verification refused: full ordered-input digest unavailable"
@@ -231,9 +231,35 @@ fn main() -> ExitCode {
             eprintln!(
                 "oa-replay: {verification} verification refused: replay is partial or incomplete"
             );
+            if let Some((source_rejected, semantic_errors, _)) = fingerprint_quality {
+                let out_of_order = p
+                    .rows_out_of_order
+                    .iter()
+                    .copied()
+                    .fold(0, u64::saturating_add);
+                let refused_full = p
+                    .rows_refused_full
+                    .iter()
+                    .copied()
+                    .fold(0, u64::saturating_add);
+                eprintln!(
+                    "verification_blockers source_rejected={} source_sealed_drops={} \
+                     semantic_sealed_drops={} semantic_errors={} bridge_reject_frames={} \
+                     adsb_future_refused={} rows_out_of_order={} rows_refused_full={}",
+                    source_rejected,
+                    report.sealed_window_dropped,
+                    p.sealed_window_dropped,
+                    semantic_errors,
+                    fingerprint.bridge_reject_frames(),
+                    p.adsb.stats.future_refused,
+                    out_of_order,
+                    refused_full,
+                );
+            }
             return ExitCode::from(1);
         }
         if let Some(witness) = verify_end {
+            let observed_frames = fingerprint.frames();
             if observed_frames != witness.frames {
                 eprintln!(
                     "oa-replay: terminal verification refused: expected {} admitted frames, observed {observed_frames}",
