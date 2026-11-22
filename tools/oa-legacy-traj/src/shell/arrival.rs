@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use oa_adsb::{
-    Reports, F_ALT_GEOM, F_GROUND, F_RATE_GEOM, F_STALE, NONE_I32, NONE_U16, NONE_U8,
+    Reports, F_ALT_GEOM, F_GROUND, F_RATE_GEOM, F_STALE, NONE_I32, NONE_U16, NONE_U8, SOURCE_NAMES,
     SOURCE_UNKNOWN,
 };
 use oa_bench::adsb_truth::{query, BuiltTruth};
@@ -45,7 +45,8 @@ const MAX_ISSUES: usize = MAX_ASSIGNMENT_ISSUES;
 const MAX_TRACK_AGE_MS: i64 = 30_000;
 const MAX_RATE_DIAGNOSTIC_ROWS: usize = 128;
 const MAX_RATE_DIAGNOSTIC_GAP_NS: i64 = 10_000_000_000;
-const RATE_DIAGNOSTIC_TOLERANCE_FT: f64 = 50.0;
+const RATE_DIAGNOSTIC_TOLERANCE_FT: i128 = 50;
+const NS_PER_MINUTE: i128 = 60_000_000_000;
 const TRUTH_STEP_MS: i64 = 5_000;
 const TRUTH_STEPS: i64 = 720;
 const MIN_FROM_FIX_M: f64 = 40.0 * 1852.0;
@@ -621,9 +622,12 @@ fn raw_rate_status(
             if flags & (F_STALE | F_ALT_GEOM | F_GROUND) != 0 || alt == NONE_I32 {
                 saw_incompatible_baro = true;
             } else {
-                let rate_delta_ft = f64::from(selected_rate) * (gap_ns as f64 / 60_000_000_000.0);
-                let observed_delta_ft = f64::from(selected_alt) - f64::from(alt);
-                return if (rate_delta_ft - observed_delta_ft).abs() <= RATE_DIAGNOSTIC_TOLERANCE_FT
+                // Compare displacement with the common time scale factored out. The product
+                // of an i32 rate and the bounded gap, or an i32 altitude difference and one
+                // minute in nanoseconds, fits exactly in i128.
+                let implied = i128::from(selected_rate) * i128::from(gap_ns);
+                let observed = (i128::from(selected_alt) - i128::from(alt)) * NS_PER_MINUTE;
+                return if (implied - observed).abs() <= RATE_DIAGNOSTIC_TOLERANCE_FT * NS_PER_MINUTE
                 {
                     RawRateStatus::Agrees
                 } else {
@@ -650,8 +654,10 @@ fn raw_rate_status(
 }
 
 fn is_adsb_source(source: u8) -> bool {
-    // Known ADS-B source classes accepted by oa-truth; the diagnostic still refuses unknowns.
-    matches!(source, 0 | 1 | 8)
+    matches!(
+        SOURCE_NAMES.get(usize::from(source)).copied(),
+        Some("adsb_icao" | "adsb_icao_nt" | "adsb_other")
+    )
 }
 
 fn distance(a: Place, b: Place) -> f64 {
@@ -1287,7 +1293,7 @@ pub(crate) fn report(
     writeln!(text, "Selected flow: {}. AUTO ranks resolvable TBFM fixes by distinct ORD flight plans before scoring. The experiment takes the first eligible route and track snapshot per flight, 40 to 200 NM from the fix, using the most recent unique ADS-B report within 30 s. It freezes each issue GUFI and cutoff after an assignment-free forecast succeeds, before the SFDPS assignment query. Forecast uses received ERAM route geometry and ADS-B observation time. Legacy ETA values do not enter the model.", plan.requested).map_err(|e| e.to_string())?;
     writeln!(text, "Procedure input: the legacy route tables contain no published procedure altitude windows; route constraint checks are unavailable for this run.").map_err(|e| e.to_string())?;
     if let Some(diagnostic) = &plan.raw_rate_diagnostic {
-        writeln!(text, "Raw vertical-rate diagnostic: aggregate over {} frozen issues; compares the selected raw rate with a unique preceding same-source barometric altitude within 10 s, scanning at most {MAX_RATE_DIAGNOSTIC_ROWS} rows per issue. Agreement uses an illustrative 50 ft tolerance (about two 25 ft altitude quanta). This is a raw-pair proxy, not the tracker decision or receipt-time evidence.", plan.issues.len()).map_err(|e| e.to_string())?;
+        writeln!(text, "Raw vertical-rate diagnostic over {} frozen issues. A raw-pair proxy compares the selected rate with a unique preceding barometric altitude from the same ADS-B source class within 10 s. It scans at most {MAX_RATE_DIAGNOSTIC_ROWS} rows per issue. The illustrative 50 ft tolerance allows two nominal 25 ft steps. This proxy uses observation timestamps and raw altitudes. The tracker uses its own accepted history.", plan.issues.len()).map_err(|e| e.to_string())?;
         writeln!(text, "raw-rate outcomes: missing rate {}; geometric rate {}; missing barometric altitude {}; selected source unknown {}; selected source non-ADS-B {}; no comparable prior {}; prior source unknown {}; prior source non-ADS-B {}; prior source mismatch {}; prior barometric altitude missing, geometric, or stale {}; prior timestamp conflict {}; preceding-row scan limit {}; agrees {}; contradicts {}", diagnostic.missing_rate, diagnostic.geometric_rate, diagnostic.missing_baro_altitude, diagnostic.unknown_selected_source, diagnostic.non_adsb_selected_source, diagnostic.no_comparable_prior, diagnostic.prior_source_unknown, diagnostic.prior_source_non_adsb, diagnostic.prior_source_mismatch, diagnostic.prior_not_baro_or_stale, diagnostic.prior_timestamp_conflict, diagnostic.scan_limit, diagnostic.agrees, diagnostic.contradicts).map_err(|e| e.to_string())?;
     }
     writeln!(
@@ -1592,6 +1598,7 @@ mod raw_rate_diagnostic_tests {
         (0..count).map(|i| ReportIx(i as u32)).collect()
     }
 
+    // REQ: OA-LTJ-056
     #[test]
     fn raw_pair_proxy_distinguishes_contradiction_and_agreement() {
         let base = 1_000_000;
@@ -1616,6 +1623,19 @@ mod raw_rate_diagnostic_tests {
             raw_rate_status(&matching, &rows(2), 1),
             RawRateStatus::Agrees
         );
+
+        for (altitude, expected) in [
+            (10_450, RawRateStatus::Agrees),
+            (10_449, RawRateStatus::Contradicts),
+        ] {
+            let near_boundary = reports(
+                &[base - 5_000, base],
+                &[10_000, altitude],
+                &[NONE_I32, 6_000],
+                &[0, 0],
+            );
+            assert_eq!(raw_rate_status(&near_boundary, &rows(2), 1), expected);
+        }
     }
 
     #[test]

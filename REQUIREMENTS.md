@@ -6666,6 +6666,10 @@ configuration with no default; the crate's tests use synthetic values.
   available updates. Malformed assignments, valid non-simple replacements, conflicts at the same source stamp,
   uncertain availability that could change the selection, and incomplete bounded history
   withhold the scalar with a named reason. The report counts assignment states per issued forecast.
+- **OA-LTJ-056** The opt-in arrival raw-rate diagnostic counts evidence over the frozen issue
+  cohort using unique, compatible preceding barometric observations of the same ADS-B source
+  class. It considers up to 128 prior rows and uses observations within 10 seconds to compare
+  displacement against its illustrative 50-foot tolerance. It uses existing issues and forecasts.
 - **OA-LTJ-057** Arrival prediction and truth interpolation follow the shorter longitude
   displacement across the antimeridian. Closest-approach segments also follow the shorter
   displacement across the planar chart boundary opposite the scoring point.
