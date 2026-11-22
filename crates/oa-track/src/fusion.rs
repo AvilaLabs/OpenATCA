@@ -3284,7 +3284,9 @@ mod tests {
             label: [7; 4],
         });
 
-        let _ = run(&mut f, &[mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0)], &[]);
+        let mut out = output_new(32);
+        fusion_plots(&mut f, 0, &[mode_s_plot_at(NO_ADDR, 10 * NS_PER_S, 0)]);
+        fusion_advance(&mut f, 11 * NS_PER_S, &mut out);
         let st = fusion_stats(&f);
         assert_eq!(st.init_capped, 1, "{st:?}");
         assert_eq!(st.init_plots_refused, 1, "{st:?}");
@@ -3295,6 +3297,7 @@ mod tests {
         assert_eq!(records.len(), 1, "{st:?}");
         assert!(tracker_has_key(&f.tracker, records[0].key));
         assert_eq!(records[0].key, KEY_RADAR_BASE + 1);
+        assert!(out.addr.contains(&records[0].key));
     }
 
     // REQ: OA-TRK-325
