@@ -150,6 +150,16 @@ Duplicate(s, fresh) ==
                    activeVerified, durableGen, durableWM, durableVerified,
                    everGen, everWM>>
 
+(* A consumed slot carries no state. Forget its metadata regardless of the verdict. *)
+ClearSlot(s) ==
+    /\ used' = [used EXCEPT ![s] = FALSE]
+    /\ msgFrom' = [msgFrom EXCEPT ![s] = "A"]
+    /\ msgTo' = [msgTo EXCEPT ![s] = "A"]
+    /\ msgGen' = [msgGen EXCEPT ![s] = NoValue]
+    /\ msgWM' = [msgWM EXCEPT ![s] = NoValue]
+    /\ msgBinds' = [msgBinds EXCEPT ![s] = FALSE]
+    /\ msgAuthenticated' = [msgAuthenticated EXCEPT ![s] = FALSE]
+
 Accept(n, s) ==
     /\ n \in Nodes
     /\ s \in Slots
@@ -163,9 +173,8 @@ Accept(n, s) ==
     /\ durableVerified' = [durableVerified EXCEPT ![n] = CheckpointVerified(s)]
     /\ everGen' = [everGen EXCEPT ![n] = msgGen[s]]
     /\ everWM' = [everWM EXCEPT ![n] = msgWM[s]]
-    /\ used' = [used EXCEPT ![s] = FALSE]
-    /\ UNCHANGED <<authorityGen, online, msgFrom, msgTo, msgGen, msgWM,
-                   msgBinds, msgAuthenticated>>
+    /\ ClearSlot(s)
+    /\ UNCHANGED <<authorityGen, online>>
 
 Reject(n, s) ==
     /\ n \in Nodes
@@ -174,11 +183,10 @@ Reject(n, s) ==
     /\ msgTo[s] = n
     /\ online[n]
     /\ ~CanAccept(n, s)
-    /\ used' = [used EXCEPT ![s] = FALSE]
+    /\ ClearSlot(s)
     /\ UNCHANGED <<authorityGen, online, serving, activeGen, activeWM,
                    activeVerified, durableGen, durableWM, durableVerified,
-                   everGen, everWM, msgFrom, msgTo, msgGen, msgWM,
-                   msgBinds, msgAuthenticated>>
+                   everGen, everWM>>
 
 Receive(s) ==
     /\ s \in Slots
@@ -276,7 +284,9 @@ DurableAtHighWater ==
     \A n \in Nodes : durableGen[n] = everGen[n] /\ durableWM[n] = everWM[n]
 
 (* Action-level safety: the persistent high-water marks never decrease. *)
-NoRegression ==
-    [] (\A n \in Nodes : everGen'[n] >= everGen[n] /\ everWM'[n] >= everWM[n])
+Nondecreasing ==
+    \A n \in Nodes : everGen'[n] >= everGen[n] /\ everWM'[n] >= everWM[n]
+
+NoRegression == [][Nondecreasing]_<<everGen, everWM>>
 
 =============================================================================
