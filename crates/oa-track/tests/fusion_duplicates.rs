@@ -9,7 +9,7 @@
 use oa_geo::aeqd::{frame_new, unproject};
 use oa_track::fusion::{
     fusion_advance, fusion_config, fusion_finish, fusion_new, fusion_plots, fusion_radar_tracks,
-    fusion_stats,
+    fusion_stats, fusion_tracker_config,
 };
 use oa_track::radar::{polar_of, radar_geom, RadarPlot, RadarSite, NONE_CODE};
 use oa_track::{output_new, DEFAULT_CONFIG, NO_ADDR};
@@ -74,7 +74,7 @@ fn plots(site: &RadarSite, lines: &[Line]) -> Vec<RadarPlot> {
 
 fn run(lines: &[Line]) -> (usize, u64, u64) {
     let sites = sites();
-    let cfg = fusion_config(DEFAULT_CONFIG);
+    let cfg = fusion_config(fusion_tracker_config(&DEFAULT_CONFIG, &sites));
     let mut fusion = fusion_new(&cfg, &sites).unwrap();
     for (i, site) in sites.iter().enumerate() {
         let p = plots(site, lines);
