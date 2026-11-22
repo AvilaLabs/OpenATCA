@@ -19,7 +19,8 @@ use oa_track::score::{
 };
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
-    tracker_update, TrackOutput, DEFAULT_CONFIG, O_COAST, O_HAS_ALT, O_TICK, RADAR_KEY_BASE,
+    tracker_stats, tracker_update, TrackOutput, TrackerStats, DEFAULT_CONFIG, NONE_I32, NO_IDENT,
+    O_COAST, O_HAS_ALT, O_TICK, RADAR_KEY_BASE,
 };
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
 
@@ -32,7 +33,29 @@ use crate::screen::{
     build_samples, by_address, quantile, render_screen, screen_fleet, RawReport, SampleRow, Tally,
     TruthPoint, TURN_SPAN_MS,
 };
-use crate::window::{extent, overlap, restrict_eram, restrict_oa, utc_text};
+use crate::window::{coverage, extent, overlap, restrict_eram, restrict_oa, utc_text};
+
+fn tracker_completeness_error(stats: &TrackerStats, output_overflow: u64) -> Option<String> {
+    match (stats.capacity_refused, output_overflow) {
+        (0, 0) => None,
+        (refused, 0) => Some(format!(
+            "the tracker refused {refused} measurements for lack of track slots; the comparison is incomplete"
+        )),
+        (0, lost) => Some(format!(
+            "the tracker lost {lost} output rows to a full table; the run is not complete"
+        )),
+        (refused, lost) => Some(format!(
+            "the tracker refused {refused} measurements for lack of track slots and lost {lost} output rows to a full table; the comparison is incomplete"
+        )),
+    }
+}
+
+fn extent_text(extent: Option<(i64, i64)>) -> String {
+    extent.map_or_else(
+        || "none".to_string(),
+        |(start, end)| format!("{} to {}", utc_text(start), utc_text(end)),
+    )
+}
 
 /// Whether a position (1e-7 degree) is inside the clip box both systems are restricted to.
 pub fn in_box(lat_e7: i32, lon_e7: i32) -> bool {
@@ -298,11 +321,8 @@ fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     tracker_advance(&mut tracker, end, &mut scratch);
     tracker_flush(&mut tracker, end, &mut scratch);
     collect_ticks(&scratch, &mut rows);
-    if scratch.overflow > 0 {
-        return Err(format!(
-            "the tracker lost {} output rows to a full table; the run is not complete",
-            scratch.overflow
-        ));
+    if let Some(error) = tracker_completeness_error(tracker_stats(&tracker), scratch.overflow) {
+        return Err(error);
     }
     drop((tracker, meas));
     eprintln!("tracker done");
@@ -343,6 +363,24 @@ fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         .zip(oa_extent)
         .and_then(|(a, b)| overlap(a, b))
         .ok_or("the two recordings do not overlap in time")?;
+    let (eram_original, eram_before, eram_after) = coverage(
+        eram.iter().flat_map(|f| f.samples.iter().map(|s| s.t_ms)),
+        lo,
+        hi,
+    );
+    let (oa_original, oa_before, oa_after) = coverage(
+        oa.values().flat_map(|a| a.samples.iter().map(|s| s.t_ms)),
+        lo,
+        hi,
+    );
+    header.push(format!(
+        "original in-box sample extents (UTC): ERAM {}; OpenATCA {}",
+        extent_text(eram_original),
+        extent_text(oa_original)
+    ));
+    header.push(format!(
+        "rows excluded outside common window: ERAM before {eram_before}, after {eram_after}; OpenATCA before {oa_before}, after {oa_after}"
+    ));
     header.push(format!(
         "comparison window (overlap of the two in-box recorded extents, both cut to it): {} to {} UTC",
         utc_text(lo),
@@ -532,6 +570,21 @@ fn run_screen_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
         .zip(adsb_extent)
         .and_then(|(a, b)| overlap(a, b))
         .ok_or("the two recordings do not overlap in time")?;
+    let (eram_original, eram_before, eram_after) = coverage(
+        eram.iter().flat_map(|f| f.samples.iter().map(|s| s.t_ms)),
+        lo,
+        hi,
+    );
+    let (adsb_original, adsb_before, adsb_after) =
+        coverage(raw.values().flat_map(|v| v.iter().map(|r| r.t_ms)), lo, hi);
+    header.push(format!(
+        "original input extents (UTC): ERAM in-box {}; addressed ADS-B reports {}",
+        extent_text(eram_original),
+        extent_text(adsb_original)
+    ));
+    header.push(format!(
+        "outside common extent (not discarded from truth build): ERAM reports excluded before {eram_before}, after {eram_after}; eligible addressed ADS-B reports before {adsb_before}, after {adsb_after}"
+    ));
     header.push(format!(
         "comparison window (overlap of ERAM's in-box extent and the ADS-B reports of its addressed flights): {} to {} UTC",
         utc_text(lo),
@@ -569,4 +622,60 @@ fn run_screen_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
             .map_err(|e| format!("{}: {e}", args.out.join(name).display()))?;
     }
     Ok(rendered.summary)
+}
+
+#[cfg(test)]
+mod completeness_tests {
+    use super::*;
+
+    // REQ: OA-SHD-018
+    #[test]
+    fn valid_measurement_refused_at_track_capacity_blocks_the_comparison() {
+        let mut cfg = DEFAULT_CONFIG;
+        cfg.max_tracks = 1;
+        cfg.init_m = 1;
+        cfg.init_n = 1;
+        let mut tracker = tracker_new(&cfg).unwrap();
+        let mut output = output_new(cfg.out_capacity);
+        let measurement = |toa_ns, addr| oa_track::Measurement {
+            toa_ns,
+            pos_cov_m2: [100.0, 0.0, 100.0],
+            vel_cov_m2s2: [0.0; 3],
+            vel_east_mps: 0.0,
+            vel_north_mps: 0.0,
+            lat_e7: 420_000_000,
+            lon_e7: -880_000_000,
+            alt_ft: NONE_I32,
+            vrate_fpm: NONE_I32,
+            addr,
+            alt_quant_ft: 0,
+            sensor: 0,
+            ident: NO_IDENT,
+            flags: 0,
+            category: 0,
+            vel_lag_s: 0.0,
+        };
+        tracker_update(&mut tracker, &measurement(1_000_000_000, 1), &mut output);
+        tracker_update(&mut tracker, &measurement(2_000_000_000, 2), &mut output);
+
+        let stats = tracker_stats(&tracker);
+        assert_eq!(stats.capacity_refused, 1);
+        assert!(tracker_completeness_error(stats, output.overflow)
+            .unwrap()
+            .contains("refused 1 measurements"));
+        assert_eq!(
+            tracker_completeness_error(&TrackerStats::default(), 0),
+            None
+        );
+        assert!(tracker_completeness_error(&TrackerStats::default(), 1)
+            .unwrap()
+            .contains("lost 1 output rows"));
+        let both = TrackerStats {
+            capacity_refused: 1,
+            ..TrackerStats::default()
+        };
+        let combined = tracker_completeness_error(&both, 1).unwrap();
+        assert!(combined.contains("refused 1 measurements"));
+        assert!(combined.contains("lost 1 output rows"));
+    }
 }

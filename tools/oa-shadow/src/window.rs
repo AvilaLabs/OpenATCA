@@ -19,6 +19,25 @@ pub fn extent(times: impl Iterator<Item = i64>) -> Option<(i64, i64)> {
     })
 }
 
+/// The original extent and sample counts outside a closed comparison window.
+pub fn coverage(
+    times: impl Iterator<Item = i64>,
+    lo: i64,
+    hi: i64,
+) -> (Option<(i64, i64)>, u64, u64) {
+    let mut extent = None;
+    let (mut before, mut after) = (0u64, 0u64);
+    for t in times {
+        extent = Some(extent.map_or((t, t), |(a, b): (i64, i64)| (a.min(t), b.max(t))));
+        if t < lo {
+            before = before.saturating_add(1);
+        } else if t > hi {
+            after = after.saturating_add(1);
+        }
+    }
+    (extent, before, after)
+}
+
 /// Keeps the ERAM samples inside `[lo, hi]` and drops the flights left with none.
 pub fn restrict_eram(flights: &mut Vec<EramFlight>, lo: i64, hi: i64) {
     for f in flights.iter_mut() {

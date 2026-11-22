@@ -337,11 +337,19 @@ fn both_systems_are_restricted_to_the_clip_box_and_ident_points_carry_values_for
 // REQ: OA-SHD-018
 #[test]
 fn both_sides_are_cut_to_the_overlap_of_the_two_recordings() {
-    use oa_shadow::window::{overlap, restrict_eram, restrict_oa, utc_text};
+    use oa_shadow::window::{coverage, overlap, restrict_eram, restrict_oa, utc_text};
     assert_eq!(overlap((0, 10), (5, 20)), Some((5, 10)));
     assert_eq!(overlap((0, 10), (10, 20)), Some((10, 10)));
     assert_eq!(overlap((0, 10), (11, 20)), None);
     assert_eq!(overlap((5, 6), (0, 100)), Some((5, 6)));
+    assert_eq!(
+        coverage([0, 5, 10, 15].into_iter(), 5, 10),
+        (Some((0, 15)), 1, 1)
+    );
+    assert_eq!(
+        coverage([3, 7, 12].into_iter(), 5, 10),
+        (Some((3, 12)), 1, 1)
+    );
     let mut eram = vec![
         flight(
             Some(1),
