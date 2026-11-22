@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use oa_feed::Kind;
 use oa_fixm::{Decoder, FIELD_COUNT};
@@ -20,6 +21,7 @@ use oa_replay::{
 use oa_xml::Parser;
 
 use crate::adapter::{row_ops, AdapterStats};
+use crate::timing::{ReplayTimingReport, TimingBins};
 
 /// Lag histogram bounds: one-second buckets from `LAG_MIN_S` up to (excluding) `LAG_MAX_S`.
 pub const LAG_MIN_S: i64 = -10;
@@ -258,6 +260,51 @@ pub fn replay_sfdps_counted(
     before_op: &mut dyn FnMut(&FlightTable, &Positions, i64),
     sealed: &mut u64,
 ) -> io::Result<ReplayReport> {
+    replay_sfdps_counted_inner(paths, cfg, before_op, sealed, None).map(|(report, _)| report)
+}
+
+/// Replays as [`replay_sfdps_counted`] and adds bounded per-received-second timing for frames
+/// with receive times in `[measure_from_ns, cfg.to_ns]`. The receive-time gate and end boundary
+/// retain the existing inclusive `to_ns` behavior. Timing excludes file reads, decompression,
+/// merge work, and frames skipped before `cfg.from_ns`; it includes the frame callback's decode,
+/// adapter, flight-table, and sweep work, including refusals. This shell diagnostic uses
+/// `Instant`; concurrent replay loops are independent and are not synchronized by simulated time.
+pub fn replay_sfdps_timed_counted(
+    paths: Vec<PathBuf>,
+    cfg: &ReplayConfig,
+    before_op: &mut dyn FnMut(&FlightTable, &Positions, i64),
+    sealed: &mut u64,
+    measure_from_ns: i64,
+) -> io::Result<(ReplayReport, ReplayTimingReport)> {
+    let timing = TimingBins::new(cfg.from_ns, measure_from_ns, cfg.to_ns).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid timing bounds: {e:?}"),
+        )
+    })?;
+    let (report, timing) = replay_sfdps_counted_inner(paths, cfg, before_op, sealed, Some(timing))?;
+    let timing = timing.ok_or_else(|| io::Error::other("timing report was not produced"))?;
+    Ok((report, timing))
+}
+
+fn finish_timing(
+    timing: &mut Option<TimingBins>,
+    bin: Option<usize>,
+    recv_ns: i64,
+    started: Option<Instant>,
+) {
+    if let (Some(timing), Some(bin), Some(started)) = (timing.as_mut(), bin, started) {
+        timing.observe(bin, recv_ns, started.elapsed().as_nanos());
+    }
+}
+
+fn replay_sfdps_counted_inner(
+    paths: Vec<PathBuf>,
+    cfg: &ReplayConfig,
+    before_op: &mut dyn FnMut(&FlightTable, &Positions, i64),
+    sealed: &mut u64,
+    mut timing: Option<TimingBins>,
+) -> io::Result<(ReplayReport, Option<ReplayTimingReport>)> {
     let mut table = flights_new(&cfg.flight).map_err(|e| io::Error::other(format!("{e:?}")))?;
     let mut parser =
         Parser::new(doc_xml_limits()).map_err(|e| io::Error::other(format!("{e:?}")))?;
@@ -299,17 +346,32 @@ pub fn replay_sfdps_counted(
     let spec = spec_from_paths(FeedKind::Sfdps, paths);
     let mut ended = false;
     let (report, res) = merge_counted(vec![spec], 1 << 16, &mut |m| {
-        if m.feed != FeedKind::Sfdps || m.kind != Kind::Message {
+        if m.feed != FeedKind::Sfdps {
             return Ok(());
         }
-        if m.recv_ns < cfg.from_ns {
-            rep.frames_skipped_before += 1;
-            return Ok(());
+        if m.kind != Kind::Message {
+            if timing.is_none() {
+                return Ok(());
+            }
+            if m.recv_ns < cfg.from_ns || m.recv_ns > cfg.to_ns {
+                return Ok(());
+            }
+        } else {
+            if m.recv_ns < cfg.from_ns {
+                rep.frames_skipped_before += 1;
+                return Ok(());
+            }
+            if m.recv_ns > cfg.to_ns {
+                rep.frames_after_end += 1;
+                ended = true;
+                return Err(io::Error::other(WINDOW_END));
+            }
         }
-        if m.recv_ns > cfg.to_ns {
-            rep.frames_after_end += 1;
-            ended = true;
-            return Err(io::Error::other(WINDOW_END));
+        let timing_bin = timing.as_ref().and_then(|t| t.bin(m.recv_ns));
+        let timing_started = timing_bin.map(|_| Instant::now());
+        if m.kind != Kind::Message {
+            finish_timing(&mut timing, timing_bin, m.recv_ns, timing_started);
+            return Ok(());
         }
         let seen_ms = m.recv_ns.div_euclid(1_000_000);
         let doc = match parser.parse(m.payload) {
@@ -317,6 +379,7 @@ pub fn replay_sfdps_counted(
             Err(_) => {
                 note_frame(&mut rep, m.recv_ns);
                 rep.docs_unparsed += 1;
+                finish_timing(&mut timing, timing_bin, m.recv_ns, timing_started);
                 return Ok(());
             }
         };
@@ -328,6 +391,7 @@ pub fn replay_sfdps_counted(
                 // window: the frame is in no count here but the drop (OA-SEAL-014).
                 *sealed += u64::from(s.sealed_window_dropped);
                 oa_sealed::note_window_drops(u64::from(s.sealed_window_dropped));
+                finish_timing(&mut timing, timing_bin, m.recv_ns, timing_started);
                 return Ok(());
             }
         }
@@ -344,6 +408,7 @@ pub fn replay_sfdps_counted(
             if let Some(c) = rep.refused_by.get_mut(k) {
                 *c += 1;
             }
+            finish_timing(&mut timing, timing_bin, m.recv_ns, timing_started);
             return Ok(());
         }
         for row in 0..events.len {
@@ -383,6 +448,7 @@ pub fn replay_sfdps_counted(
             }
             next_sweep = table.clock_ms.saturating_add(cfg.sweep_every_ms);
         }
+        finish_timing(&mut timing, timing_bin, m.recv_ns, timing_started);
         Ok(())
     });
     // The merge's own count of frames dropped by receive time is added on every way out, a stop at
@@ -412,7 +478,8 @@ pub fn replay_sfdps_counted(
     rep.fixm = decoder.stats().clone();
     rep.positions = positions;
     rep.table = table;
-    Ok(rep)
+    let timing = timing.map(|bins| bins.report());
+    Ok((rep, timing))
 }
 
 /// When the position of a row becomes available.

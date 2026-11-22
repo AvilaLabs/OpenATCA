@@ -17,7 +17,8 @@ use oa_flight::{
     OP_REQUEST, OP_SET_PLAN,
 };
 use oa_flight_sfdps::{
-    lag_quantile_s, recordings_in, replay_sfdps, row_ops, AdapterStats, ReplayConfig,
+    lag_quantile_s, recordings_in, replay_sfdps, replay_sfdps_timed_counted, row_ops, AdapterStats,
+    ReplayConfig,
 };
 use oa_xml::{Limits as XmlLimits, Parser};
 
@@ -468,4 +469,34 @@ fn the_replay_decoder_drops_the_sealed_window() {
     assert_eq!(w, oa_sealed::DropWindow::sealed());
     assert_eq!(w.span(), oa_sealed::sealed_window_ms());
     assert!(w.span().is_some());
+}
+
+#[test]
+fn opt_in_timing_counts_a_decoder_refusal_in_its_receive_second() {
+    let dir = temp_dir("timing-refused");
+    let recv_ns = 1_000_000_000;
+    std::fs::write(dir.join("a.oaf"), frame(1, 1_000, "<MessageCollection/>")).unwrap();
+    let mut sealed = 0;
+    let (rep, timing) = replay_sfdps_timed_counted(
+        recordings_in(&dir).unwrap(),
+        &cfg(recv_ns, recv_ns),
+        &mut |_, _, _| {},
+        &mut sealed,
+        recv_ns,
+    )
+    .unwrap();
+
+    assert_eq!(rep.docs_unparsed, 0);
+    assert_eq!(rep.docs_refused, 1);
+    assert_eq!(rep.refused_by[0], 1);
+    assert_eq!(rep.frames, 1);
+    assert_eq!(timing.measure_from_ns, recv_ns);
+    assert_eq!(timing.measure_to_ns, recv_ns);
+    assert_eq!(timing.expected_seconds, 1);
+    assert_eq!(timing.observed_seconds, 1);
+    assert_eq!(timing.empty_seconds, 0);
+    assert_eq!(timing.timed_frames, 1);
+    assert_eq!(timing.first_received_ns, Some(recv_ns));
+    assert_eq!(timing.last_received_ns, Some(recv_ns));
+    assert_eq!(sealed, 0);
 }

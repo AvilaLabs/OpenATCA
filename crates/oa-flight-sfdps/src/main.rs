@@ -1,42 +1,66 @@
 #![forbid(unsafe_code)]
-//! `oa-flight <recording-dir> [--from <unix ns>] [--to <unix ns>]`: replays SFDPS recordings into
-//! the flight record and prints counts: decoded forms, lag, refusals, conflicts, removals.
+//! `oa-flight <recording-dir> [--from <unix ns>] [--to <unix ns>]
+//! [--measure-from <unix ns>]`: replays SFDPS recordings into the flight record. The optional
+//! timing window reports bounded per-received-second frame-processing work.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use oa_flight::{FlightConfig, R_COUNT};
-use oa_flight_sfdps::{lag_quantile_s, recordings_in, replay_sfdps_counted, ReplayConfig};
+use oa_flight_sfdps::{
+    lag_quantile_s, recordings_in, replay_sfdps_counted, replay_sfdps_timed_counted, ReplayConfig,
+    ReplayTimingReport,
+};
+
+fn print_timing(t: &ReplayTimingReport) {
+    println!(
+        "sfdps_timing scope=frame_callback_decode_adapter_table_sweep read_decompression_merge_and_receive_gates_excluded concurrent_replay_loops_unsynchronized=true measure_from_ns={} measure_to_ns_inclusive={} first_received_ns={:?} last_received_ns={:?} seconds_expected={} seconds_observed={} seconds_empty={} timed_frames={} processing_wall_ms={:.3} p95_observed_second_wall_ms={:.3} max_observed_second_wall_ms={:.3}",
+        t.measure_from_ns,
+        t.measure_to_ns,
+        t.first_received_ns,
+        t.last_received_ns,
+        t.expected_seconds,
+        t.observed_seconds,
+        t.empty_seconds,
+        t.timed_frames,
+        t.processing_wall_ns as f64 / 1_000_000.0,
+        t.p95_observed_second_ns as f64 / 1_000_000.0,
+        t.max_observed_second_ns as f64 / 1_000_000.0,
+    );
+}
 
 fn main() -> ExitCode {
     // Printed when `main` returns: on every exit, an error or a refusal included. Frames by
     // receive time and messages by their own time.
     let mut drops = oa_sealed::DropReport::new();
     let mut dir: Option<PathBuf> = None;
-    let (mut from, mut to) = (i64::MIN, i64::MAX);
+    let (mut from, mut to, mut measure_from) = (i64::MIN, i64::MAX, None);
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--from" | "--to" => {
+            "--from" | "--to" | "--measure-from" => {
                 let Some(v) = args.next().and_then(|v| v.parse::<i64>().ok()) else {
                     eprintln!("{a} needs a number");
                     return ExitCode::from(2);
                 };
-                if a == "--from" {
-                    from = v;
-                } else {
-                    to = v;
+                match a.as_str() {
+                    "--from" => from = v,
+                    "--to" => to = v,
+                    "--measure-from" => measure_from = Some(v),
+                    _ => unreachable!(),
                 }
             }
             _ if dir.is_none() => dir = Some(PathBuf::from(a)),
             _ => {
-                eprintln!("usage: oa-flight <recording-dir> [--from <ns>] [--to <ns>]");
+                eprintln!("usage: oa-flight <recording-dir> [--from <ns>] [--to <ns>] [--measure-from <ns>]");
                 return ExitCode::from(2);
             }
         }
     }
     let Some(dir) = dir else {
-        eprintln!("usage: oa-flight <recording-dir> [--from <ns>] [--to <ns>]");
+        eprintln!(
+            "usage: oa-flight <recording-dir> [--from <ns>] [--to <ns>] [--measure-from <ns>]"
+        );
         return ExitCode::from(2);
     };
     // The sealed hold-out guard sees the directory first; every file is opened through it too.
@@ -67,9 +91,16 @@ fn main() -> ExitCode {
         silence_ms: 6 * 3_600_000,
     };
     let mut sealed = 0u64;
-    let replayed = replay_sfdps_counted(paths, &cfg, &mut |_, _, _| {}, &mut sealed);
+    let replayed = match measure_from {
+        Some(start) => {
+            replay_sfdps_timed_counted(paths, &cfg, &mut |_, _, _| {}, &mut sealed, start)
+                .map(|(report, timing)| (report, Some(timing)))
+        }
+        None => replay_sfdps_counted(paths, &cfg, &mut |_, _, _| {}, &mut sealed)
+            .map(|report| (report, None)),
+    };
     drops.add(sealed);
-    let rep = match replayed {
+    let (rep, timing) = match replayed {
         Ok(r) => r,
         Err(e) => {
             eprintln!("{e}");
@@ -80,6 +111,9 @@ fn main() -> ExitCode {
         "frames {} skipped_before {} after_end {}",
         rep.frames, rep.frames_skipped_before, rep.frames_after_end
     );
+    if let Some(timing) = timing {
+        print_timing(&timing);
+    }
     println!(
         "docs_unparsed {} docs_refused {}",
         rep.docs_unparsed, rep.docs_refused
