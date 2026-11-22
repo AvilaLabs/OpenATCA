@@ -371,7 +371,11 @@ fn synthetic_maneuver_grid_scores_sampled_alerts_and_coverage_separately() {
         let closest_n = case.rel_start_m.1 + case.rel_velocity_mps.1 * closest_s;
         let closest_distance = closest_e.hypot(closest_n);
         if wants_alert {
-            assert!(case.vertical_separation_ft < V_LIMIT_FT, "{}", case.name);
+            assert!(
+                f64::from(case.vertical_separation_ft) < V_LIMIT_FT,
+                "{}",
+                case.name
+            );
         } else {
             assert!(
                 closest_distance >= H_LIMIT_M + 1_500.0
