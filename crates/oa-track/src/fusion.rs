@@ -2874,7 +2874,7 @@ mod tests {
     use super::*;
     use crate::radar::NONE_CODE;
     use crate::tracker::{tracker_live, tracker_predict};
-    use crate::types::{output_len, DEFAULT_CONFIG, O_RADAR_DISAGREES};
+    use crate::types::{output_len, DEFAULT_CONFIG, O_RADAR_DISAGREES, O_TICK};
     use oa_sensorsim::prng::Rng;
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -3317,6 +3317,82 @@ mod tests {
         assert!(out.t_ns.iter().any(|&t| t == 5 * NS_PER_S));
         assert_eq!(f.next_serial, 0);
         assert_eq!(tracker_live(&f.tracker).len(), 1);
+    }
+
+    // REQ: OA-TRK-084
+    #[test]
+    fn radar_initiation_recovers_after_capacity_refusal_without_identity_collision() {
+        fn send_three_scans(
+            fusion: &mut Fusion,
+            out: &mut TrackOutput,
+            lines: &[Line],
+            start_ns: i64,
+            bucket_ns: i64,
+        ) {
+            let mut plots = plots_of(lines, 3, 41, false);
+            for plot in &mut plots {
+                plot.time_ns += start_ns;
+                fusion_plots(fusion, 0, &[*plot]);
+                fusion_advance(fusion, plot.time_ns + bucket_ns, out);
+            }
+        }
+
+        let mut f = make_fusion_capacity(1);
+        let mut out = output_new(1 << 16);
+        for t in [0, NS_PER_S] {
+            fusion_adsb(&mut f, &adsb_fix(0xA00001, t));
+        }
+        fusion_advance(&mut f, 2 * NS_PER_S, &mut out);
+        assert!(tracker_is_confirmed(&f.tracker, 0xA00001));
+
+        let lines = easting(&[Line {
+            x0: 100_000.0,
+            y0: 100_000.0,
+            vx: -100.0,
+            vy: 50.0,
+            alt_ft: 30_000,
+            label: 0xA00002,
+        }]);
+        let bucket_ns = f.cfg.bucket_ns;
+        send_three_scans(&mut f, &mut out, &lines, 2 * NS_PER_S, bucket_ns);
+        assert_eq!(fusion_stats(&f).track_refused, 1);
+        assert_eq!(fusion_stats(&f).cand_confirmed, 0);
+        assert!(fusion_radar_tracks(&f).is_empty());
+        assert!(fusion_assign_log(&f).how.iter().all(|&how| how != HOW_INIT));
+        assert!(tracker_has_key(&f.tracker, 0xA00001));
+        assert!(out
+            .addr
+            .iter()
+            .zip(&out.flags)
+            .any(|(&addr, &flags)| addr == 0xA00001 && flags & O_TICK != 0));
+        assert!(!out.addr.iter().any(|&addr| addr >= KEY_RADAR_BASE));
+
+        let drop_ns = crate::tracker::tracker_config(fusion_tracker(&f)).drop_after_ns;
+        let recovered_at = 2 * NS_PER_S + drop_ns + 3 * NS_PER_S;
+        fusion_advance(&mut f, recovered_at, &mut out);
+        assert!(!tracker_has_key(&f.tracker, 0xA00001));
+        assert!(out
+            .addr
+            .iter()
+            .zip(&out.flags)
+            .any(|(&addr, &flags)| addr == 0xA00001 && flags & O_TICK != 0));
+
+        send_three_scans(&mut f, &mut out, &lines, recovered_at + NS_PER_S, bucket_ns);
+        assert_eq!(fusion_stats(&f).track_refused, 1);
+        assert_eq!(fusion_stats(&f).cand_confirmed, 1);
+        assert_eq!(fusion_radar_tracks(&f).len(), 1);
+        let record = fusion_radar_tracks(&f).first().unwrap();
+        assert_eq!(record.key, KEY_RADAR_BASE + 1);
+        assert!(tracker_has_key(&f.tracker, record.key));
+        let init_logs: Vec<u32> = fusion_assign_log(&f)
+            .how
+            .iter()
+            .zip(&fusion_assign_log(&f).key)
+            .filter_map(|(&how, &key)| (how == HOW_INIT).then_some(key))
+            .collect();
+        assert_eq!(init_logs, [record.key; 3]);
+        assert!(out.addr.iter().any(|&addr| addr == record.key));
+        assert!(!out.addr.iter().any(|&addr| addr == KEY_RADAR_BASE));
     }
 
     fn easting(lines: &[Line]) -> Vec<Line> {
