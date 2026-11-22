@@ -211,7 +211,6 @@ pub(crate) fn raw_targets_at_with_source_stale(
         let mut newest_payload = None;
         let mut conflict = false;
         let mut source_stale_conflict = false;
-        let mut first_source_stale = None;
         for index in start..end {
             if columns.t_ns.get(index).copied() != Some(newest_time) {
                 continue;
@@ -220,11 +219,6 @@ pub(crate) fn raw_targets_at_with_source_stale(
                 .and_then(|stale| stale.get(index))
                 .copied()
                 .unwrap_or(false);
-            if first_source_stale.is_some_and(|seen| seen != row_source_stale) {
-                source_stale_conflict = true;
-            } else if first_source_stale.is_none() {
-                first_source_stale = Some(row_source_stale);
-            }
             let payload = columns
                 .lat_e7
                 .get(index)
@@ -242,10 +236,12 @@ pub(crate) fn raw_targets_at_with_source_stale(
                     want: n,
                 });
             };
-            if newest_payload.is_some_and(|previous| previous != payload) {
-                conflict = true;
-            } else if newest_payload.is_none() {
-                newest_payload = Some(payload);
+            match newest_payload {
+                Some(previous @ (_, _, _, _, _, was_stale)) => {
+                    conflict |= previous != payload;
+                    source_stale_conflict |= was_stale != row_source_stale;
+                }
+                None => newest_payload = Some(payload),
             }
         }
         if conflict {
