@@ -170,7 +170,8 @@ pub struct Session {
 }
 // Budget: dominated by the 128 x 16 byte pending table (2048); the rest is the state, counters,
 // timers and the 8-entry IRQ history. Copied in and out of every step.
-const _: () = assert!(core::mem::size_of::<Session>() == 2216);
+// A7.1: grew 2216 -> 2224 bytes for a distinct counter covering wrapped-number refusals.
+const _: () = assert!(core::mem::size_of::<Session>() == 2224);
 
 /// A new session: INACTIVE, the first message number 000.
 pub const fn new_session() -> Session {
@@ -205,7 +206,7 @@ impl Session {
 /// Number of [`Discard`] reasons (the length of the per-reason counters).
 pub const DISCARD_REASONS: usize = 8;
 /// Number of [`Refusal`] reasons.
-pub const REFUSAL_REASONS: usize = 5;
+pub const REFUSAL_REASONS: usize = 6;
 
 /// Messages discarded for `reason` since the session was created (saturating, E6).
 pub fn discard_count(s: &Session, reason: Discard) -> u32 {
@@ -243,6 +244,7 @@ const fn refusal_index(r: Refusal) -> usize {
         Refusal::NotAnAtmMessage => 2,
         Refusal::NotAResponse => 3,
         Refusal::PendingFull => 4,
+        Refusal::MessageNumberInUse => 5,
     }
 }
 
@@ -317,6 +319,9 @@ pub enum Refusal {
     NotAResponse,
     /// [`MAX_PENDING`] messages are unanswered; nothing was numbered.
     PendingFull,
+    /// The next sequential message number is still used by an unanswered message; nothing was
+    /// numbered or sent. The application may retry after that response arrives or times out.
+    MessageNumberInUse,
 }
 
 /// What the shell must do. Plain data (A1). Numbers are the Field 03(b) message numbers to
@@ -907,6 +912,16 @@ pub fn step(cfg: &Config, s: Session, ev: Event, now: Millis) -> (Session, Actio
             {
                 a.push(Action::Refuse {
                     reason: Refusal::PendingFull,
+                });
+            } else if expects_response_in(cfg.profile, kind)
+                && s.pending()
+                    .iter()
+                    .any(|p| p.number == s.next_number % NUMBER_MODULUS)
+            {
+                // A response identifies its request by the 000..999 number. Do not reuse a
+                // still-pending number at wrap: that would make two requests indistinguishable.
+                a.push(Action::Refuse {
+                    reason: Refusal::MessageNumberInUse,
                 });
             } else {
                 let number = take_number(&mut s);

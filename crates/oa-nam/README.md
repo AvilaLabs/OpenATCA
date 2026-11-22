@@ -213,6 +213,12 @@ disagree. Items 1 to 7 are decisions of the coordinator after an independent rev
 22. **RTU rate discrepancy between the two ICDs.** See the workload table.
 23. **RTA 31(c)** presence (always when accepting, never when retracting) cannot be told from the
     message alone, so only its form is checked; presence is the shell's.
+24. **Outstanding message numbers are unique.** The 000–999 sequence wraps, but a new ATM message
+    that expects a response is refused with `Refusal::MessageNumberInUse` if its next number is
+    still pending. The caller can retry after the response or timeout; the refused request consumes
+    no number. This keeps transport response matching unambiguous. A LAM/other logical response is
+    transport bookkeeping only; it does not change flight-sector ownership, which belongs to the
+    application state machine.
 
 ## Workload and latency (from the ICDs)
 

@@ -483,6 +483,48 @@ fn message_numbers_run_000_to_999_and_wrap() {
 
 // REQ: OA-NAM-014
 #[test]
+fn wrapped_number_still_pending_is_refused_without_advancing_sequence() {
+    let c = cfg();
+    let mut s = active(&c);
+    let (next, a) = run(&c, s, Event::SendAtm(Kind::Cpl), 10);
+    s = next;
+    assert_eq!(
+        a,
+        [Action::SendAtm {
+            kind: Kind::Cpl,
+            number: 1
+        }]
+    );
+
+    // Keep number 1 pending while the other 999 values make a full sequence turn.
+    for i in 0..999 {
+        let (next, a) = run(&c, s, Event::SendAtm(Kind::Rtu), 11 + i);
+        assert_eq!(
+            a,
+            [Action::SendAtm {
+                kind: Kind::Rtu,
+                number: ((i + 2) % 1000) as u16
+            }]
+        );
+        s = next;
+    }
+    assert_eq!(s.next_number, 1);
+    assert_eq!(s.pending().len(), 1);
+
+    let (s, a) = run(&c, s, Event::SendAtm(Kind::Cpl), 2_000);
+    assert_eq!(
+        a,
+        [Action::Refuse {
+            reason: Refusal::MessageNumberInUse
+        }]
+    );
+    assert_eq!(s.next_number, 1, "refused work consumes no message number");
+    assert_eq!(s.pending().len(), 1);
+    assert_eq!(refusal_count(&s, Refusal::MessageNumberInUse), 1);
+}
+
+// REQ: OA-NAM-014
+#[test]
 fn inbound_sequence_is_classified() {
     let c = cfg();
     let mut s = active(&c);

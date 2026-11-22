@@ -21,7 +21,10 @@ Run evidence for the fixture is asserted in
 
 The test also audits the table invariants and exact completion, timeout-failure, and refusal
 counters. Sector ownership remains a single value on each flight throughout the scenario. The
-legacy comparison is a declared interface boundary only: the scenario exercises the internal
+NAM session's LAM/RLA/PLA responses acknowledge messages at the transport coordination layer;
+they do not transfer a flight. In this workflow only the explicit `OP_HO_TAKE` flight operation
+changes sector ownership. The legacy comparison is a declared interface boundary only: the
+scenario exercises the internal
 flight operation model and does not claim wire compatibility or compare against an authenticated
 legacy emulator. NAM parsing/session envelopes remain available in `oa-nam`, but introducing a
 new protocol adapter or dependency is outside this fixture.
