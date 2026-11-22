@@ -127,6 +127,102 @@ fn alerted(rows: &[CaTrack]) -> bool {
     ca_open_len(&state) > 0
 }
 
+// REQ: OA-CA-004
+#[test]
+fn finite_over_cap_radius_can_qualify_uncapped_but_is_absent_from_capped_candidates() {
+    // Declare both geometries before asking CA for output. The equal-altitude stationary pair is
+    // inside the horizontal limit if its supplied 25 km radii are retained. The spatial grid uses
+    // radii held to the configured 20 km cap. A conservative 1.10 bracket exceeds the current
+    // grid's 1.02 cheap margin, so this fixture remains separated from the capped candidate reach.
+    let cfg = config();
+    let uncapped_radius_m = 25_000.0;
+    let expected_distance_m = 50_000.0;
+    let uncapped_conflict_limit_m = cfg.default_volume.h_m + 2.0 * uncapped_radius_m;
+    let capped_search_upper_m = (cfg.default_volume.h_m + 2.0 * cfg.r95_cap_m) * 1.10;
+    let mut rows = [
+        track_xy(501, -expected_distance_m / 2.0, 0.0, 0.0, 0.0, 10_000.0),
+        track_xy(502, expected_distance_m / 2.0, 0.0, 0.0, 0.0, 10_000.0),
+    ];
+    rows[0].r95_m = uncapped_radius_m;
+    rows[1].r95_m = uncapped_radius_m;
+    let ellipsoid = oa_geo::wgs84();
+    let distance_m = ellipsoid
+        .inverse(
+            oa_geo::LatLon::new(rows[0].lat_deg, rows[0].lon_deg).unwrap(),
+            oa_geo::LatLon::new(rows[1].lat_deg, rows[1].lon_deg).unwrap(),
+        )
+        .unwrap()
+        .distance_m;
+    assert!((distance_m - expected_distance_m).abs() < 0.1);
+    assert!(
+        distance_m > capped_search_upper_m,
+        "{distance_m} > {capped_search_upper_m}"
+    );
+    assert!(
+        distance_m < uncapped_conflict_limit_m,
+        "{distance_m} < {uncapped_conflict_limit_m}"
+    );
+
+    let mut clipped = rig();
+    let out = ca_cycle(
+        &mut clipped.0,
+        0,
+        &rows,
+        &mut clipped.1,
+        &mut clipped.2,
+        &mut clipped.3,
+    );
+    assert_eq!(out.stats.r95_clamped, 2);
+    assert_eq!(out.stats.tracks, 2);
+    assert_eq!(out.stats.candidates, 0);
+    assert_eq!(out.stats.evaluated, 0);
+    assert_eq!(out.stats.not_evaluated, 0);
+    assert_eq!(out.stats.tracks_unscanned, 0);
+    assert_eq!((out.work_short, out.input_short), (0, 2));
+    assert!(matches!(
+        out.report,
+        NetReport::Degraded {
+            reason: Reason::RadiusCapped,
+            count: 2,
+            ..
+        }
+    ));
+    assert_eq!(ca_open_len(&clipped.0), 0);
+
+    // In-cap, closer head-on control: its 40 km geodesic start and 400 m/s closure enter the
+    // synthetic 5 km horizontal limit at 87.5 s. It remains fully evaluated with no cap reason.
+    let control_rows = [
+        track_xy(601, -20_000.0, 0.0, 200.0, 0.0, 10_000.0),
+        track_xy(602, 20_000.0, 0.0, -200.0, 0.0, 10_000.0),
+    ];
+    let control_distance = ellipsoid
+        .inverse(
+            oa_geo::LatLon::new(control_rows[0].lat_deg, control_rows[0].lon_deg).unwrap(),
+            oa_geo::LatLon::new(control_rows[1].lat_deg, control_rows[1].lon_deg).unwrap(),
+        )
+        .unwrap()
+        .distance_m;
+    assert!((control_distance - 40_000.0).abs() < 0.1);
+    let mut control = rig();
+    let out = ca_cycle(
+        &mut control.0,
+        0,
+        &control_rows,
+        &mut control.1,
+        &mut control.2,
+        &mut control.3,
+    );
+    assert_eq!(out.stats.r95_clamped, 0);
+    assert_eq!(out.stats.candidates, 1);
+    assert_eq!(out.stats.evaluated, 1);
+    assert_eq!((out.work_short, out.input_short), (0, 0));
+    assert_eq!(out.report, NetReport::Running);
+    let warning = ca_open(&control.0)
+        .first()
+        .expect("healthy in-cap control is alerted");
+    assert!((f64::from(warning.ttl_first_s) - 87.5).abs() < 0.5);
+}
+
 // REQ: OA-CA-002, OA-CA-003, OA-CA-012
 #[test]
 fn synthetic_truth_qualification_counts_misses_nuisance_and_lead_time() {

@@ -21,8 +21,9 @@ in the crate; the tests use made-up values.
 ## How a cycle works
 
 1. **Candidates.** A grid of horizontal cells finds every pair that could come within the
-   largest minimum in the look-ahead, given each track's speed and 95 % radius. The test is a
-   superset: it may pass pairs that cannot conflict, never miss one that can.
+   largest minimum in the look-ahead, given each track's speed and 95 % radius up to
+   `r95_cap_m`. The pair test may pass pairs that cannot conflict. Its search is bounded by those
+   held radii, not by any larger original radius.
 2. **Exact test.** Each candidate is predicted in a straight line. The horizontal loss interval
    is the solution of a quadratic, the vertical one of a linear inequality, both with strict
    edges and exact handling of zero relative speed (`solve`). A pair is in conflict when the
@@ -48,6 +49,10 @@ gap.
 
 ## Stated limits
 
+- A radius above `r95_cap_m` (or one that is unusable) is held to the cap and degrades the cycle.
+  Candidate completeness is relative to that held radius: a pair whose original uncapped
+  uncertainty would extend beyond the cap-defined search may not become a candidate. The degraded
+  state exposes this input limitation; it does not establish coverage of such omitted pairs.
 - Prediction is a straight line from the cycle's position and velocity. A turning aircraft is not
   yet predicted; that is build order step 6.
 - The grid tests a pair by a local flat approximation (east-west scale at the first track's
