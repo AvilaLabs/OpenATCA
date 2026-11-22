@@ -56,6 +56,41 @@ the fresh worker and reported with a reason. Source timestamps are synthetic; th
 measure wall-clock recovery time or claim power-loss durability, production checkpoint
 compatibility, a production publisher-generation schema, or operational failover.
 
+The opt-in `partitioned_handoff_promotes_standby_and_fences_reconnected_primary` test composes
+that bounded checkpoint and fence with the two transport launchers and the `oa-flight` controller
+worker. Both controller copies first reach the accepted-handoff state while the old generation
+serves three synthetic frames. The primary then stays alive without receiving records while the
+standby replays the synced prefix at the next generation. The standby takes control and publishes
+each remaining synthetic frame; after the first promoted frame, the old primary reconnects, makes
+the same local handoff transition and emits the same source records. The sink accepts exactly one
+publication per source sequence and rejects every old-generation publication. All accepted scope
+output is compared with a local uninterrupted reference, and each accepted ownership witness names
+`ZMP34` as the sole current owner.
+
+Run this local, offline control with launchers pointing at the same test executable. The checkpoint
+path is passed through the standby launcher, so both it and the worker must run on this host. The
+60-second response and exit deadlines, 1 KiB protocol-line cap, three-record checkpoint, fixed
+15-record stream and generated temporary checkpoint bound all waits and data.
+
+```sh
+cargo +1.89.0 test --release --locked -p oa-flight --test controller_workflow --no-run --message-format=json
+cargo +1.89.0 test --release --locked -p oa-scope-replay --test outage_drill --no-run --message-format=json
+OA_CONTROLLER_TAKEOVER_EXECUTABLE=/absolute/path/to/controller_workflow-binary \
+OA_MACHINE_LOSS_TRANSPORT_LEFT_LAUNCHER=/absolute/path/to/outage_drill-binary \
+OA_MACHINE_LOSS_TRANSPORT_LEFT_ARGS=$'--exact\nmachine_loss_worker_process\n--nocapture' \
+OA_MACHINE_LOSS_TRANSPORT_RIGHT_LAUNCHER=/absolute/path/to/outage_drill-binary \
+OA_MACHINE_LOSS_TRANSPORT_RIGHT_ARGS=$'--exact\nmachine_loss_worker_process\n--nocapture' \
+  cargo +1.89.0 test --release --locked -p oa-scope-replay --test outage_drill \
+  partitioned_handoff_promotes_standby_and_fences_reconnected_primary -- --ignored --exact --nocapture
+```
+
+This is a same-host synthetic transport-partition model: the primary's command stream is withheld
+while the standby starts from the checkpoint. It does not cut an OS/network link, prove remote
+checkpoint delivery, establish production publisher authority or leases, or test external side
+effects. The flight owner and publication fence are independent test fixtures; together they verify
+the stated transition and stale-generation rejection without claiming an operational controller
+failover implementation.
+
 The `crash_after_apply_before_ack_replays_from_verified_prefix` fixture restores a three-step
 synthetic prefix into a fresh child, processes the next tracker-to-scope/raster/CA step, and exits
 before returning its success acknowledgement. A distinct bounded marker records that the injected

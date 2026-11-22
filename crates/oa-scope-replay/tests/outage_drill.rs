@@ -1726,6 +1726,10 @@ impl Replica {
     }
 
     fn start_transport(side: &str) -> Self {
+        Self::start_transport_with_checkpoint(side, None)
+    }
+
+    fn start_transport_with_checkpoint(side: &str, checkpoint: Option<&Path>) -> Self {
         let launcher_key = format!("OA_MACHINE_LOSS_TRANSPORT_{side}_LAUNCHER");
         let args_key = format!("OA_MACHINE_LOSS_TRANSPORT_{side}_ARGS");
         let executable = std::env::var_os(&launcher_key)
@@ -1778,6 +1782,9 @@ impl Replica {
         // machine_loss_worker_process test-harness arguments. A remote bridge may use its own
         // configured remote command and need not forward this local environment variable.
         command.env("OA_MACHINE_LOSS_WORKER", "1");
+        if let Some(path) = checkpoint {
+            command.env("OA_MACHINE_LOSS_CHECKPOINT", path);
+        }
         // Do not accept unbounded launcher diagnostics on the test's output channel.
         Self::spawn(command, None, Stdio::null())
     }
@@ -2807,6 +2814,176 @@ fn transport_separated_workers_match_synthetic_scope_reference() {
     eprintln!(
         "transport-drill: workers=2 records={} result=synthetic-output-equivalence launcher_exit=observed",
         SYNTHETIC_STREAM.len()
+    );
+}
+
+// REQ: OA-FLT-010, OA-FLT-011, OA-FLT-015
+#[test]
+#[ignore = "configure both OA_MACHINE_LOSS_TRANSPORT launchers and OA_CONTROLLER_TAKEOVER_EXECUTABLE"]
+fn partitioned_handoff_promotes_standby_and_fences_reconnected_primary() {
+    const PREFIX_LEN: usize = RECOVERY_MAX_RECORDS;
+    let executable = PathBuf::from(std::env::var_os("OA_CONTROLLER_TAKEOVER_EXECUTABLE").unwrap());
+    let promoted_generation = RECOVERY_GENERATION + 1;
+    let files = TempCheckpointFiles::new();
+    let checkpoint_bytes = encode_recovery_checkpoint(
+        &SYNTHETIC_STREAM[..PREFIX_LEN],
+        INITIAL_FENCE,
+        promoted_generation,
+    );
+    let checkpoint_path = files.write("partition-prefix.oarc", &checkpoint_bytes);
+    let retained = decode_recovery_checkpoint(&checkpoint_bytes, INITIAL_FENCE).unwrap();
+
+    let mut primary = Replica::start_transport("LEFT");
+    let mut primary_control = Replica::start_controller(&executable);
+    let mut standby_control = Replica::start_controller(&executable);
+    let mut reference_control = Replica::start_controller(&executable);
+    let mut reference_scope = Drill::new();
+    reference_scope.warmup();
+
+    // The active offer and acceptance are synchronized before the synthetic link partition.
+    let pending = primary_control.controller_step(b'P');
+    assert_eq!(pending, standby_control.controller_step(b'P'));
+    assert_eq!(pending, reference_control.controller_step(b'P'));
+    let pending_ownership = controller_ownership(&pending, "P");
+    let mut fence = INITIAL_FENCE;
+    let mut prefix_acks = Vec::with_capacity(PREFIX_LEN);
+    for (step, &(second, live)) in SYNTHETIC_STREAM.iter().enumerate().take(PREFIX_LEN) {
+        let ack = primary.owned_step(second, live, &pending);
+        assert_eq!(
+            ack,
+            local_reference_step(&mut reference_scope, second, live)
+        );
+        let publication = publication_for_step(fence, step, second).unwrap();
+        fence = accept_publication(fence, publication).unwrap();
+        prefix_acks.push(ack);
+    }
+
+    // The primary stays alive but receives no records while the standby replays the synced
+    // prefix at a higher generation. This models a partition at the worker transport boundary.
+    let mut standby = Replica::start_transport_with_checkpoint("RIGHT", Some(&checkpoint_path));
+    for (index, &(second, _)) in SYNTHETIC_STREAM.iter().enumerate().take(PREFIX_LEN) {
+        assert_eq!(standby.recovered_prefix_line(second), prefix_acks[index]);
+    }
+    assert_eq!(retained.fence.generation, promoted_generation);
+    assert_eq!(retained.fence.last_sequence, PREFIX_LEN as u64);
+    fence = advance_generation(
+        fence,
+        RECOVERY_PUBLISHER,
+        RECOVERY_SOURCE,
+        promoted_generation,
+    )
+    .unwrap();
+    assert_eq!(fence, retained.fence);
+
+    let mut standby_witness = pending.clone();
+    let mut primary_witness = pending;
+    let mut accepted_publications = 0usize;
+    let mut stale_publications_refused = 0usize;
+    let mut accepted_owners = Vec::with_capacity(SYNTHETIC_STREAM.len() - PREFIX_LEN);
+    let mut primary_reconnected = false;
+
+    for (step, &(second, live)) in SYNTHETIC_STREAM.iter().enumerate().skip(PREFIX_LEN) {
+        if step == PREFIX_LEN {
+            standby_witness = standby_control.controller_step(b'T');
+            assert_eq!(standby_witness, reference_control.controller_step(b'T'));
+            let owner = controller_ownership(&standby_witness, "T");
+            let standby_ack = standby.owned_step(second, live, &standby_witness);
+            assert_eq!(
+                standby_ack,
+                local_reference_step(&mut reference_scope, second, live)
+            );
+            let publication = publication_for_step(fence, step, second).unwrap();
+            fence = accept_publication(fence, publication).unwrap();
+            accepted_publications += 1;
+            accepted_owners.push(owner);
+
+            // Reconnect the old primary after promotion. It completes its local copy of the
+            // already accepted handoff and emits the same source step, but its generation is stale.
+            primary_witness = primary_control.controller_step(b'T');
+            assert_eq!(primary_witness, standby_witness);
+            assert_eq!(
+                primary.owned_step(second, live, &primary_witness),
+                standby_ack
+            );
+            primary_reconnected = true;
+            let stale = Publication {
+                generation: RECOVERY_GENERATION,
+                sequence: step as u64 + 1,
+                source_time_ns: source_time_ns(second).unwrap(),
+                ..publication
+            };
+            assert_eq!(
+                accept_publication(fence, stale),
+                Err(FenceRefusal::Generation)
+            );
+            stale_publications_refused += 1;
+            continue;
+        }
+
+        if step == PREFIX_LEN + 1 {
+            standby_witness = standby_control.controller_step(b'R');
+            assert_eq!(standby_witness, reference_control.controller_step(b'R'));
+            primary_witness = primary_control.controller_step(b'R');
+            assert_eq!(primary_witness, standby_witness);
+            assert_eq!(
+                controller_ownership(&standby_witness, "R"),
+                accepted_owners[0]
+            );
+        }
+
+        let standby_ack = standby.owned_step(second, live, &standby_witness);
+        assert_eq!(
+            standby_ack,
+            local_reference_step(&mut reference_scope, second, live)
+        );
+        let publication = publication_for_step(fence, step, second).unwrap();
+        fence = accept_publication(fence, publication).unwrap();
+        accepted_publications += 1;
+        accepted_owners.push(controller_ownership(
+            &standby_witness,
+            if step == PREFIX_LEN + 1 { "R" } else { "T" },
+        ));
+
+        let primary_ack = primary.owned_step(second, live, &primary_witness);
+        assert_eq!(primary_ack, standby_ack);
+        let stale = Publication {
+            generation: RECOVERY_GENERATION,
+            sequence: step as u64 + 1,
+            source_time_ns: source_time_ns(second).unwrap(),
+            ..publication
+        };
+        assert_eq!(
+            accept_publication(fence, stale),
+            Err(FenceRefusal::Generation)
+        );
+        stale_publications_refused += 1;
+    }
+
+    assert!(primary_reconnected);
+    assert_eq!(accepted_publications, SYNTHETIC_STREAM.len() - PREFIX_LEN);
+    assert_eq!(stale_publications_refused, accepted_publications);
+    assert!(accepted_owners
+        .iter()
+        .all(|owner| *owner == accepted_owners[0]));
+    assert_eq!(fence.generation, promoted_generation);
+    assert_eq!(fence.last_sequence, SYNTHETIC_STREAM.len() as u64);
+    for replica in [&mut primary, &mut standby] {
+        assert!(replica.shutdown().unwrap().success());
+    }
+    for control in [
+        &mut primary_control,
+        &mut standby_control,
+        &mut reference_control,
+    ] {
+        control.input.write_all(b"Q").unwrap();
+        control.input.flush().unwrap();
+        assert!(control.finish().unwrap().success());
+    }
+    eprintln!(
+        "partition-handoff: prefix_records={PREFIX_LEN} generation={} promoted_records={} stale_publications_refused={} accepted_owner=ZMP34 active_handoff_partitioned=true old_primary_reconnected=true",
+        fence.generation,
+        accepted_publications,
+        stale_publications_refused
     );
 }
 
