@@ -167,8 +167,8 @@ A publication carries a peer identity, generation, replay watermark, and abstrac
 metadata. The `CheckpointVerified` predicate stands for the combined result of peer identity,
 authentication, and binding the checkpoint's generation and watermark to the publication. It is
 not a signature, parser, hash, Merkle, or on-disk format model. The network can hold a bounded
-message, delay its delivery,
-duplicate it into another slot, or deliver it after an authority change or receiver restart.
+message, delay delivery, duplicate it into another slot, or deliver it after an authority change
+or receiver restart.
 `NetworkOffer` injects valid and invalid offers so the model can check refusal behavior. A crash
 clears runtime serving state but preserves durable and high-water values; restart serves only a
 verified durable checkpoint for the currently authorized generation.
@@ -193,7 +193,11 @@ java -cp /path/to/tla2tools.jar tlc2.TLC -config RecoveryProtocol.cfg RecoveryPr
 `RecoveryProtocol_WeakFence.cfg` sets `RequireVerified = FALSE`. It is an intentionally weakened
 control: the `NoUnverifiedServing` invariant should find a counterexample when an invalid network
 offer is accepted. This control is included to check that the verification invariant is
-non-vacuous; it is not a model of an implementation option.
+non-vacuous; it is not a model of an implementation option. Run it with:
+
+```sh
+java -cp /path/to/tla2tools.jar tlc2.TLC -config RecoveryProtocol_WeakFence.cfg RecoveryProtocol.tla
+```
 
 These files were added as a model specification and bounded configuration. TLC has not been run
 for this model. The bounds do not establish unbounded protocol correctness, cryptographic
