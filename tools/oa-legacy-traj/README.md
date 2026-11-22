@@ -41,9 +41,11 @@ geometry and observed motion. Its ETA does not depend on the legacy time predict
 archive records observation time and has no comparable receive clock. This baseline has no winds or
 aircraft performance model. The SFDPS input retains typed assigned-altitude changes with their
 receive time. Only a valid `simple` form supplies a scalar; a later valid VFR, block, or at-fix form
-supersedes the prior scalar and is reported as unsupported. A same-stamp conflict or incomplete
-history refuses the scalar. The issue snapshot carries its source and availability time, and excludes
-updates received after the route cutoff. Published procedure altitude windows are not in the legacy
+supersedes the prior scalar and is reported as unsupported. A same-stamp conflict, bounded-history
+overflow, or later event with unknown receive time that could change the selected value refuses the
+scalar. That uncertainty is cutoff-gated by source time when known; an event with no usable source
+time remains conservative at every cutoff. The issue snapshot carries its source and availability
+time, and excludes updates received after the route cutoff. Published procedure altitude windows are not in the legacy
 route table, so route constraints remain absent. Synthetic checks exercise waypoint crossing
 feasibility; this is not a fitted vertical solver. Coverage at each horizon is divided by every issued
 forecast; missing predicted positions and missing truth interpolation are counted separately.

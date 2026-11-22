@@ -162,6 +162,17 @@ pub struct AssignedAltitudeTable {
     pub value_ft: Vec<i32>,
 }
 
+/// Assignment events whose receive time is absent or contradicts their source time.
+/// A positive `source_ms` is the earliest cutoff at which the event can affect selection;
+/// zero means its timing is wholly unknown.
+#[derive(Clone, Debug, Default)]
+pub struct UnknownAssignedAltitudeTable {
+    pub flight: Vec<u32>,
+    pub source_ms: Vec<i64>,
+    pub form: Vec<u8>,
+    pub value_ft: Vec<i32>,
+}
+
 /// ERAM track samples (`TH` messages with a position).
 // A3: one Vec per column.
 #[derive(Clone, Debug, Default)]
@@ -344,6 +355,7 @@ pub struct Legacy {
     pub routes: RouteTable,
     pub route_points: RoutePoints,
     pub assigned_altitudes: AssignedAltitudeTable,
+    pub unknown_assigned_altitudes: UnknownAssignedAltitudeTable,
     pub tbfm: TbfmTable,
     pub tfms: TfmsTable,
     /// TFMS arrival times of type `ACTUAL`, one row each (kind [`tfms_kind::ETA`]). Kept apart
@@ -418,9 +430,38 @@ pub fn push_assigned_altitude(
             .counts
             .assigned_altitude_unknown_availability
             .saturating_add(1);
+        if leg.assigned_altitudes.flight.len() + leg.unknown_assigned_altitudes.flight.len()
+            >= leg.limits.assigned_altitude_updates
+            || leg
+                .assigned_altitudes_by_flight
+                .get(&flight)
+                .copied()
+                .unwrap_or(0)
+                >= MAX_ASSIGNED_ALTITUDE_UPDATES_PER_FLIGHT
+        {
+            leg.counts.overflow_assigned_altitude_updates = leg
+                .counts
+                .overflow_assigned_altitude_updates
+                .saturating_add(1);
+            let earliest_possible = ts_ms.max(1);
+            let entry = leg
+                .assigned_altitude_overflow_flights
+                .entry(flight)
+                .or_insert(earliest_possible);
+            *entry = (*entry).min(earliest_possible);
+            return;
+        }
+        let table = &mut leg.unknown_assigned_altitudes;
+        table.flight.push(flight);
+        table.source_ms.push(ts_ms.max(0));
+        table.form.push(form);
+        table.value_ft.push(value_ft);
+        let n = leg.assigned_altitudes_by_flight.entry(flight).or_insert(0);
+        *n = (*n).saturating_add(1);
         return;
     }
-    if leg.assigned_altitudes.flight.len() >= leg.limits.assigned_altitude_updates
+    if leg.assigned_altitudes.flight.len() + leg.unknown_assigned_altitudes.flight.len()
+        >= leg.limits.assigned_altitude_updates
         || leg
             .assigned_altitudes_by_flight
             .get(&flight)

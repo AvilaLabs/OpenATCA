@@ -59,6 +59,7 @@ enum AssignedAltitudeInput {
     UnsupportedForm { form: u8, available_ms: i64 },
     SameTimeConflict { available_ms: i64 },
     InvalidSimpleValue { available_ms: i64 },
+    UnknownAvailability { source_ms: i64 },
     HistoryOverflow,
 }
 
@@ -82,14 +83,23 @@ fn assigned_altitude_label(input: AssignedAltitudeInput) -> String {
         AssignedAltitudeInput::InvalidSimpleValue { .. } => {
             "invalid SFDPS simple assigned-altitude value".into()
         }
+        AssignedAltitudeInput::UnknownAvailability { .. } => {
+            "SFDPS assignment could affect snapshot but receive time is unknown".into()
+        }
         AssignedAltitudeInput::HistoryOverflow => "SFDPS assigned-altitude history overflow".into(),
     }
+}
+
+#[derive(Default)]
+struct AssignedAltitudeIndices {
+    known: BTreeMap<u32, Vec<usize>>,
+    unknown: BTreeMap<u32, Vec<usize>>,
 }
 
 fn assigned_altitude_index(
     legacy: &Legacy,
     selected_flights: &BTreeSet<u32>,
-) -> Result<BTreeMap<u32, Vec<usize>>, String> {
+) -> Result<AssignedAltitudeIndices, String> {
     let table = &legacy.assigned_altitudes;
     if table.ts_ms.len() != table.flight.len()
         || table.recv_ms.len() != table.flight.len()
@@ -98,14 +108,31 @@ fn assigned_altitude_index(
     {
         return Err("inconsistent assigned-altitude columns".into());
     }
-    let mut index = BTreeMap::<u32, Vec<usize>>::new();
+    let unknown = &legacy.unknown_assigned_altitudes;
+    if unknown.source_ms.len() != unknown.flight.len()
+        || unknown.form.len() != unknown.flight.len()
+        || unknown.value_ft.len() != unknown.flight.len()
+    {
+        return Err("inconsistent unknown assigned-altitude columns".into());
+    }
+    let mut index = AssignedAltitudeIndices::default();
     for (i, &flight) in table.flight.iter().enumerate() {
         if !selected_flights.contains(&flight) {
             continue;
         }
-        let rows = index.entry(flight).or_default();
+        let rows = index.known.entry(flight).or_default();
         if rows.len() == usize::from(oa_bench::legacy::MAX_ASSIGNED_ALTITUDE_UPDATES_PER_FLIGHT) {
             return Err("assigned-altitude history exceeds its per-flight bound".into());
+        }
+        rows.push(i);
+    }
+    for (i, &flight) in unknown.flight.iter().enumerate() {
+        if !selected_flights.contains(&flight) {
+            continue;
+        }
+        let rows = index.unknown.entry(flight).or_default();
+        if rows.len() == usize::from(oa_bench::legacy::MAX_ASSIGNED_ALTITUDE_UPDATES_PER_FLIGHT) {
+            return Err("unknown assigned-altitude history exceeds its per-flight bound".into());
         }
         rows.push(i);
     }
@@ -116,6 +143,7 @@ fn assigned_altitude_at(
     legacy: &Legacy,
     flight: u32,
     rows: Option<&[usize]>,
+    unknown_rows: Option<&[usize]>,
     cutoff_ms: i64,
 ) -> AssignedAltitudeInput {
     if assigned_altitude_history_overflowed(legacy, flight, cutoff_ms) {
@@ -157,9 +185,20 @@ fn assigned_altitude_at(
             _ => {}
         }
     }
-    let Some((_, available_ms, form, value_ft)) = latest else {
+    let Some((source_ms, available_ms, form, value_ft)) = latest else {
+        if unknown_assignment_could_change(legacy, unknown_rows, cutoff_ms, None).is_some() {
+            return AssignedAltitudeInput::UnknownAvailability { source_ms: 0 };
+        }
         return AssignedAltitudeInput::Missing;
     };
+    if let Some(source_ms) = unknown_assignment_could_change(
+        legacy,
+        unknown_rows,
+        cutoff_ms,
+        Some((source_ms, form, value_ft)),
+    ) {
+        return AssignedAltitudeInput::UnknownAvailability { source_ms };
+    }
     if conflicting {
         return AssignedAltitudeInput::SameTimeConflict { available_ms };
     }
@@ -173,6 +212,36 @@ fn assigned_altitude_at(
         value_ft,
         available_ms,
     }
+}
+
+fn unknown_assignment_could_change(
+    legacy: &Legacy,
+    rows: Option<&[usize]>,
+    cutoff_ms: i64,
+    selected: Option<(i64, u8, i32)>,
+) -> Option<i64> {
+    let table = &legacy.unknown_assigned_altitudes;
+    let mut earliest = None;
+    for &i in rows.unwrap_or(&[]) {
+        let source_ms = table.source_ms[i];
+        if source_ms > 0 && source_ms > cutoff_ms {
+            continue;
+        }
+        if let Some((selected_source, selected_form, selected_value)) = selected {
+            if source_ms > 0 && selected_source > source_ms {
+                continue;
+            }
+            if source_ms > 0
+                && selected_source == source_ms
+                && selected_form == table.form[i]
+                && selected_value == table.value_ft[i]
+            {
+                continue;
+            }
+        }
+        earliest = Some(earliest.map_or(source_ms, |previous: i64| previous.min(source_ms)));
+    }
+    earliest
 }
 
 fn route_range(legacy: &Legacy, ix: RouteIx) -> Option<std::ops::Range<usize>> {
@@ -643,7 +712,8 @@ pub(crate) fn report(
                 let assigned = assigned_altitude_at(
                     legacy,
                     flight,
-                    assigned_index.get(&flight).map(Vec::as_slice),
+                    assigned_index.known.get(&flight).map(Vec::as_slice),
+                    assigned_index.unknown.get(&flight).map(Vec::as_slice),
                     at,
                 );
                 let (
@@ -754,7 +824,7 @@ pub(crate) fn report(
         totals.issued, totals.assigned_altitude_states
     )
     .map_err(|e| e.to_string())?;
-    writeln!(text, "Assigned-altitude updates omitted for missing or future timestamps: {}; updates refused by bounded storage: {}", legacy.counts.assigned_altitude_unknown_availability, legacy.counts.overflow_assigned_altitude_updates).map_err(|e| e.to_string())?;
+    writeln!(text, "Assigned-altitude updates with missing or contradictory receipt time (retained as bounded uncertainty evidence): {}; updates refused by bounded storage: {}", legacy.counts.assigned_altitude_unknown_availability, legacy.counts.overflow_assigned_altitude_updates).map_err(|e| e.to_string())?;
     let forecast_refused: usize = totals.forecast_refused.values().sum();
     let score_refused: usize = totals.score_refused.values().sum();
     writeln!(text, "offered flights with known address: {}; route messages without address: {no_addr}; issued: {}; scored: {}; without eligible state or route: {}; forecast refused: {forecast_refused}; score refused: {score_refused}; observed passages: {}", flights.len(), totals.issued, totals.issued.saturating_sub(score_refused), flights.len().saturating_sub(totals.issued + forecast_refused), totals.crossing).map_err(|e| e.to_string())?;
@@ -891,8 +961,10 @@ mod assigned_altitude_tests {
         );
         let index = assigned_altitude_index(&legacy, &BTreeSet::from([0]))
             .expect("bounded synthetic index");
-        let rows = index.get(&0).map(Vec::as_slice);
-        let selected = assigned_altitude_at(&legacy, 0, rows, BASE_RECEIVED_MS + 1_000);
+        let rows = index.known.get(&0).map(Vec::as_slice);
+        let unknown_rows = index.unknown.get(&0).map(Vec::as_slice);
+        let selected =
+            assigned_altitude_at(&legacy, 0, rows, unknown_rows, BASE_RECEIVED_MS + 1_000);
         assert_eq!(
             selected,
             AssignedAltitudeInput::Available {
@@ -943,21 +1015,21 @@ mod assigned_altitude_tests {
             Some(crate::core::arrival::ConstraintProvenance::SfdpsAssignedAltitude,)
         );
         assert_eq!(
-            assigned_altitude_at(&legacy, 0, rows, BASE_RECEIVED_MS + 3_000),
+            assigned_altitude_at(&legacy, 0, rows, unknown_rows, BASE_RECEIVED_MS + 3_000),
             AssignedAltitudeInput::UnsupportedForm {
                 form: ALT_FORM_VFR,
                 available_ms: BASE_RECEIVED_MS + 2_000,
             }
         );
         assert_eq!(
-            assigned_altitude_at(&legacy, 0, rows, BASE_RECEIVED_MS + 1_000),
+            assigned_altitude_at(&legacy, 0, rows, unknown_rows, BASE_RECEIVED_MS + 1_000),
             AssignedAltitudeInput::Available {
                 value_ft: 12_000,
                 available_ms: BASE_RECEIVED_MS,
             }
         );
         assert_eq!(
-            assigned_altitude_at(&legacy, 0, rows, BASE_RECEIVED_MS + 5_000),
+            assigned_altitude_at(&legacy, 0, rows, unknown_rows, BASE_RECEIVED_MS + 5_000),
             AssignedAltitudeInput::Available {
                 value_ft: 14_000,
                 available_ms: BASE_RECEIVED_MS + 4_000,
@@ -995,14 +1067,14 @@ mod assigned_altitude_tests {
             BASE_RECEIVED_MS + 256,
         ));
         assert_eq!(
-            assigned_altitude_at(&legacy, 0, None, BASE_RECEIVED_MS + 255),
+            assigned_altitude_at(&legacy, 0, None, None, BASE_RECEIVED_MS + 255),
             AssignedAltitudeInput::Available {
                 value_ft: 12_000,
                 available_ms: BASE_RECEIVED_MS,
             }
         );
         assert_eq!(
-            assigned_altitude_at(&legacy, 0, None, BASE_RECEIVED_MS + 300),
+            assigned_altitude_at(&legacy, 0, None, None, BASE_RECEIVED_MS + 300),
             AssignedAltitudeInput::HistoryOverflow
         );
     }
@@ -1031,7 +1103,8 @@ mod assigned_altitude_tests {
             assigned_altitude_at(
                 &legacy,
                 0,
-                index.get(&0).map(Vec::as_slice),
+                index.known.get(&0).map(Vec::as_slice),
+                index.unknown.get(&0).map(Vec::as_slice),
                 BASE_RECEIVED_MS
             ),
             AssignedAltitudeInput::SameTimeConflict {
@@ -1049,10 +1122,76 @@ mod assigned_altitude_tests {
             "<assignedAltitude><simple uom=\"FEET\">18000</simple></assignedAltitude>",
         );
         assert_eq!(unknown.assigned_altitudes.flight.len(), 0);
+        assert_eq!(unknown.unknown_assigned_altitudes.flight.len(), 1);
         assert_eq!(unknown.counts.assigned_altitude_unknown_availability, 1);
         assert_eq!(
-            assigned_altitude_at(&unknown, 0, None, BASE_RECEIVED_MS),
-            AssignedAltitudeInput::Missing
+            assigned_altitude_at(&unknown, 0, None, None, BASE_RECEIVED_MS),
+            AssignedAltitudeInput::UnknownAvailability {
+                source_ms: BASE_RECEIVED_MS - 60_000,
+            }
+        );
+    }
+
+    #[test]
+    fn later_unknown_receipt_blocks_only_after_its_source_time_and_newer_definitive_event_supersedes(
+    ) {
+        let mut legacy = new_legacy();
+        let mut reader = new_reader().expect("synthetic decoder setup");
+        let source_base = BASE_RECEIVED_MS - 60_000;
+        ingest(
+            &mut legacy,
+            &mut reader,
+            "2026-11-14T13:50:49.564Z",
+            source_base,
+            "<assignedAltitude><simple uom=\"FEET\">12000</simple></assignedAltitude>",
+        );
+        ingest(
+            &mut legacy,
+            &mut reader,
+            "2026-11-14T13:50:50.564Z",
+            NO_TIME,
+            "<assignedAltitude><simple uom=\"FEET\">18000</simple></assignedAltitude>",
+        );
+        let index = assigned_altitude_index(&legacy, &BTreeSet::from([0]))
+            .expect("bounded synthetic index");
+        let known = index.known.get(&0).map(Vec::as_slice);
+        let unknown = index.unknown.get(&0).map(Vec::as_slice);
+        assert_eq!(
+            assigned_altitude_at(&legacy, 0, known, unknown, source_base + 500),
+            AssignedAltitudeInput::Available {
+                value_ft: 12_000,
+                available_ms: source_base,
+            }
+        );
+        assert_eq!(
+            assigned_altitude_at(&legacy, 0, known, unknown, source_base + 1_000),
+            AssignedAltitudeInput::UnknownAvailability {
+                source_ms: source_base + 1_000,
+            }
+        );
+
+        push_assigned_altitude(
+            &mut legacy,
+            0,
+            source_base + 2_000,
+            source_base + 3_000,
+            ALT_FORM_SIMPLE,
+            20_000,
+        );
+        let index = assigned_altitude_index(&legacy, &BTreeSet::from([0]))
+            .expect("bounded synthetic index after definitive replacement");
+        assert_eq!(
+            assigned_altitude_at(
+                &legacy,
+                0,
+                index.known.get(&0).map(Vec::as_slice),
+                index.unknown.get(&0).map(Vec::as_slice),
+                source_base + 3_000,
+            ),
+            AssignedAltitudeInput::Available {
+                value_ft: 20_000,
+                available_ms: source_base + 3_000,
+            }
         );
     }
 }
