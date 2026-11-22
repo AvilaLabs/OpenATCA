@@ -39,14 +39,16 @@ ERAM and TBFM when comparable estimates exist. `auto` selects a resolvable fix b
 distinct ORD flight plans with a TBFM estimate, before scoring. OpenATCA uses the received route's
 geometry and observed motion. Its ETA does not depend on the legacy time predictions. The ADS-B
 archive records observation time and has no comparable receive clock. This baseline has no winds or
-aircraft performance model. The arrival experiment opts in to a bounded SFDPS assignment history
-that retains typed assigned-altitude changes with their receive time. Only a valid `simple` form
-supplies a scalar; a later valid VFR, block, or at-fix form
-supersedes the prior scalar and is reported as unsupported. A malformed assignment, same-stamp
-conflict, bounded-history overflow, or later event with unknown receive time that could change the
-selected value refuses the scalar. That uncertainty is cutoff-gated by source time when known.
-An event with no usable source time remains conservative at every cutoff. The issue snapshot
-carries its source and availability time and excludes updates received after the route cutoff.
+aircraft performance model. The experiment freezes one issue cutoff per eligible flight before
+rereading SFDPS for those flights' typed assigned-altitude evidence. The guarded second pass verifies
+the same input manifest and keeps bounded state for each selected flight. It reports scan and decode
+refusals, which limit the evidence to admitted records. A valid `simple` form supplies a scalar.
+A later VFR, block or at-fix form supersedes the scalar and is reported as unsupported. Malformed
+assignments, same-stamp conflicts and unknown receipt times that could change the selected value
+leave the scalar unavailable. When the source time is known, it bounds whether an uncertain record
+could have been available by cutoff. An unusable source time remains uncertain at every cutoff.
+The issue snapshot carries the assignment's provenance and receipt time. Receipts after cutoff are
+excluded.
 The legacy route table omits published procedure altitude windows. Synthetic checks exercise waypoint crossing
 feasibility; this is not a fitted vertical solver. Coverage at each horizon is divided by every issued
 forecast; missing predicted positions and missing truth interpolation are counted separately.

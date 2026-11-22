@@ -8,13 +8,17 @@ use oa_adsb::{Reports, F_GROUND, F_RATE_GEOM, NONE_I32, NONE_U16};
 use oa_bench::adsb_truth::{query, BuiltTruth};
 use oa_bench::assignment::{
     assignment_at_issue, AssignmentEvidence, AssignmentIssue, AssignmentQuery,
+    MAX_ASSIGNMENT_ISSUES,
 };
 use oa_bench::geo::{dist_m, enu, heading_deg, wrap180};
 #[cfg(test)]
-use oa_bench::legacy::{assigned_altitude_history_overflowed, MAX_ASSIGNED_ALTITUDE_UPDATES};
 use oa_bench::legacy::{
-    name, norm_id, tbfm_kind, Legacy, ALT_FORM_AT_FIX, ALT_FORM_BLOCK, ALT_FORM_INVALID,
-    ALT_FORM_SIMPLE, ALT_FORM_VFR, ALT_FORM_VFR_PLUS, NONE, NO_ALT, NO_COORD, NO_TIME,
+    assigned_altitude_history_overflowed, ALT_FORM_INVALID, ALT_FORM_SIMPLE,
+    MAX_ASSIGNED_ALTITUDE_UPDATES, NO_ALT,
+};
+use oa_bench::legacy::{
+    name, norm_id, tbfm_kind, Legacy, ALT_FORM_AT_FIX, ALT_FORM_BLOCK, ALT_FORM_VFR,
+    ALT_FORM_VFR_PLUS, NONE, NO_COORD, NO_TIME,
 };
 use oa_bench::stats::nearest_rank;
 
@@ -34,7 +38,7 @@ const MAX_CAPTURED_TBFM: usize = 5_000_000;
 const MAX_CAPTURED_ASSIGNED_ALTITUDES: usize = MAX_ASSIGNED_ALTITUDE_UPDATES;
 const MAX_METER_PLAN_PAIRS: usize = 500_000;
 const MAX_ESTIMATES_FOR_FIX: usize = 500_000;
-const MAX_ISSUES: usize = 12_000;
+const MAX_ISSUES: usize = MAX_ASSIGNMENT_ISSUES;
 const MAX_TRACK_AGE_MS: i64 = 30_000;
 const TRUTH_STEP_MS: i64 = 5_000;
 const TRUTH_STEPS: i64 = 720;
@@ -873,9 +877,6 @@ pub(crate) fn report(
             "arrival experiment input exceeds the report, route, or estimate budget".into(),
         );
     }
-    if !plan.issues.is_empty() && assignments.is_none() {
-        return Err("arrival assignment query is required for the frozen issue plan".into());
-    }
     let mut totals = Totals::default();
     totals.forecast_refused = plan.baseline_forecast_refused.clone();
     totals.issued = plan.issues.len();
@@ -884,7 +885,7 @@ pub(crate) fn report(
     for planned in &plan.issues {
         let evidence = assignments
             .and_then(|query| assignment_at_issue(query, planned.gufi))
-            .unwrap_or(AssignmentEvidence::Missing);
+            .ok_or("arrival assignment query does not cover its frozen issue plan")?;
         *totals
             .assigned_altitude_states
             .entry(assigned_altitude_label(&evidence))
@@ -955,7 +956,7 @@ pub(crate) fn report(
         writeln!(text, "{label}: {value}").map_err(|e| e.to_string())?;
     }
     writeln!(text, "sealed-window rows dropped: {sealed}").map_err(|e| e.to_string())?;
-    writeln!(text, "Selected flow: {}. AUTO ranks resolvable TBFM fixes by distinct ORD flight plans before scoring. One earliest baseline-eligible issue per flight, 40 to 200 NM from the fix, using the most recent unique ADS-B report within 30 s. Issue GUFI and cutoff are frozen after route, track and assignment-free forecast eligibility, before the SFDPS assignment query. Forecast uses received ERAM route geometry and ADS-B observation time. Legacy ETA values do not enter the model.", plan.requested).map_err(|e| e.to_string())?;
+    writeln!(text, "Selected flow: {}. AUTO ranks resolvable TBFM fixes by distinct ORD flight plans before scoring. The experiment takes the first eligible route and track snapshot per flight, 40 to 200 NM from the fix, using the most recent unique ADS-B report within 30 s. It freezes each issue GUFI and cutoff after an assignment-free forecast succeeds, before the SFDPS assignment query. Forecast uses received ERAM route geometry and ADS-B observation time. Legacy ETA values do not enter the model.", plan.requested).map_err(|e| e.to_string())?;
     writeln!(text, "Procedure input: the legacy route tables contain no published procedure altitude windows; route constraint checks are unavailable for this run.").map_err(|e| e.to_string())?;
     writeln!(
         text,
