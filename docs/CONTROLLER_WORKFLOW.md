@@ -30,17 +30,13 @@ flight operation model and does not claim wire compatibility or compare against 
 legacy emulator. NAM parsing/session envelopes remain available in `oa-nam`, but introducing a
 new protocol adapter or dependency is outside this fixture.
 
-`accepted_controller_state_replays_after_table_replacement_then_takes_control_once` adds a small
-offline replacement drill using the same `oa-flight` APIs. It retains the synthetic operation
-prefix for Flight 901: active plan, assigned altitude 36,000 ft, interim altitude 24,000 ft, owner
-`ZAU12`, and an offer accepted by `ZMP34`. Replaying that prefix into a fresh `FlightTable` must
-produce the same `flights_digest` and exact current fields as the uninterrupted table. Both then
-consume the same `OP_HO_TAKE`; ownership transfers to `ZMP34` once, and a repeated take is refused
-as `R_NO_HANDOFF` without another completion.
-
-This checks deterministic reconstruction from a retained synthetic `Op` prefix and continuation
-through the existing table API. It does not test a disk log, transport, authentication, process
-supervision, or a combined scope-replay takeover.
+The [replacement drill](../crates/oa-flight/tests/controller_workflow.rs) retains the synthetic
+operation prefix for Flight 901, including its active plan, assigned altitude of 36,000 ft, interim
+altitude of 24,000 ft, owner `ZAU12`, and handoff accepted by `ZMP34`. A fresh `FlightTable` replays
+that prefix and matches the uninterrupted table's digest and current fields. Both tables refuse a
+delayed interim-altitude change, transfer ownership to `ZMP34` on `OP_HO_TAKE`, and refuse a
+repeated take without another completion. The fixture exercises deterministic reconstruction and
+continuation through the flight table API with a retained synthetic operation sequence.
 
 `oa_display::ownership` exposes a pure typed rendering seam for one selected flight: the caller
 supplies the current owner plus `Current`, `Offered`, `Accepted`, or `StaleOffer`. An accepted status

@@ -137,6 +137,7 @@ fn accepted_controller_state_replays_after_table_replacement_then_takes_control_
     // Retain the exact controller-operation prefix that produced the accepted handoff.
     let mut plan = op(OP_SET_PLAN, key, 1_000, 1);
     plan.state = ST_ACTIVE;
+    plan.plan_id = code("PLAN901");
     let mut owner = op(OP_OWNER, key, 2_000, 2);
     owner.unit_a = code("ZAU12");
     let mut assigned = op(OP_ASSIGN, key, 2_500, 3);
@@ -162,7 +163,10 @@ fn accepted_controller_state_replays_after_table_replacement_then_takes_control_
 
     let mut uninterrupted = table();
     for operation in &prefix {
-        assert_eq!(flights_apply(&mut uninterrupted, operation), Outcome::Applied);
+        assert_eq!(
+            flights_apply(&mut uninterrupted, operation),
+            Outcome::Applied
+        );
     }
     flights_check(&uninterrupted).unwrap();
 
@@ -175,7 +179,9 @@ fn accepted_controller_state_replays_after_table_replacement_then_takes_control_
     assert_eq!(flights_digest(&replacement), flights_digest(&uninterrupted));
 
     let accepted = flight_get(&replacement, &key).unwrap();
-    assert_eq!(view_of(&accepted, &ZAU).unwrap().state, ST_ACTIVE);
+    let active_plan = view_of(&accepted, &ZAU).unwrap();
+    assert_eq!(active_plan.state, ST_ACTIVE);
+    assert_eq!(active_plan.plan_id, plan.plan_id);
     assert_eq!(accepted.assigned, assigned.alt);
     assert_eq!(accepted.interim, interim.alt);
     assert_eq!(accepted.owner, code("ZAU12"));
@@ -184,12 +190,22 @@ fn accepted_controller_state_replays_after_table_replacement_then_takes_control_
     assert_eq!(accepted.ho_to, code("ZMP34"));
     assert_eq!(accepted.ho_accepted_by, code("ZMP34"));
 
+    // Both histories receive a delayed interim altitude before the new owner takes control.
+    let mut stale = op(OP_INTERIM, key, 2_625, 7);
+    stale.recv_ms = 65_500;
+    stale.alt = Alt {
+        form: ALT_SIMPLE,
+        a_ft: 22_000,
+        b_ft: 0,
+    };
+    for table in [&mut uninterrupted, &mut replacement] {
+        assert_eq!(flights_apply(table, &stale), Outcome::Refused(R_STALE));
+        assert_eq!(flight_get(table, &key).unwrap().interim, interim.alt);
+    }
+
     // Both histories continue with the same controller input after replacement.
-    let take = handoff(OP_HO_TAKE, key, 5_000, 7);
-    assert_eq!(
-        flights_apply(&mut uninterrupted, &take),
-        Outcome::Applied
-    );
+    let take = handoff(OP_HO_TAKE, key, 5_000, 8);
+    assert_eq!(flights_apply(&mut uninterrupted, &take), Outcome::Applied);
     assert_eq!(flights_apply(&mut replacement, &take), Outcome::Applied);
     flights_check(&uninterrupted).unwrap();
     flights_check(&replacement).unwrap();
@@ -218,8 +234,7 @@ fn accepted_controller_state_replays_after_table_replacement_then_takes_control_
     assert_eq!(still_transferred.ho_state, HO_NONE);
     assert_eq!(replacement.stats.handoffs_completed, 1);
     assert_eq!(
-        replacement.stats.refused[usize::from(OP_HO_TAKE) * R_COUNT
-            + usize::from(R_NO_HANDOFF)],
+        replacement.stats.refused[usize::from(OP_HO_TAKE) * R_COUNT + usize::from(R_NO_HANDOFF)],
         1
     );
 }
