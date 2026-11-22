@@ -4,17 +4,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
-use oa_adsb::{F_GROUND, F_RATE_GEOM, NONE_I32, NONE_U16, Reports};
-use oa_bench::adsb_truth::{BuiltTruth, query};
+use oa_adsb::{Reports, F_GROUND, F_RATE_GEOM, NONE_I32, NONE_U16};
+use oa_bench::adsb_truth::{query, BuiltTruth};
 use oa_bench::geo::{dist_m, enu, heading_deg, wrap180};
-use oa_bench::legacy::{Legacy, NO_COORD, NO_TIME, NONE, name, norm_id, tbfm_kind};
+use oa_bench::legacy::{name, norm_id, tbfm_kind, Legacy, NONE, NO_COORD, NO_TIME};
 use oa_bench::stats::nearest_rank;
 
 use crate::core::arrival::{
-    ArrivalScore, IssueSnapshot, LegacyEta, RouteFix, TrackState, TruthPoint, forecast, score,
+    forecast, score, ArrivalScore, IssueSnapshot, LegacyEta, RouteFix, TrackState, TruthPoint,
+    VerticalStatus,
 };
 use crate::core::types::Place;
-use crate::shell::places::{PlaceTable, place_of_e7, point_places};
+use crate::shell::places::{place_of_e7, point_places, PlaceTable};
 
 // C7: headroom over the two regional ADS-B days and the one day of route/TBFM recording in the
 // development baseline. Check the volume before indexing and check keyed limits before inserting.
@@ -340,6 +341,7 @@ struct Totals {
     vertical: [Vec<f64>; 3],
     no_prediction: [usize; 3],
     no_truth: [usize; 3],
+    vertical_unavailable: [BTreeMap<String, usize>; 3],
     eta: [Vec<f64>; 3],
     paired_oa_eta: [Vec<f64>; 2],
 }
@@ -533,6 +535,15 @@ pub(crate) fn report(
             }
         };
         totals.issued += 1;
+        for (i, point) in predicted.positions.iter().enumerate() {
+            if point.vertical_status != VerticalStatus::Available {
+                if let Some(counts) = totals.vertical_unavailable.get_mut(i) {
+                    *counts
+                        .entry(format!("{:?}", point.vertical_status))
+                        .or_default() += 1;
+                }
+            }
+        }
         let eram = legacy
             .route_points
             .est_ms
@@ -575,6 +586,7 @@ pub(crate) fn report(
     }
     writeln!(text, "sealed-window rows dropped: {sealed}").map_err(|e| e.to_string())?;
     writeln!(text, "Selected flow: {requested}. AUTO ranks resolvable TBFM fixes by distinct ORD flight plans before scoring. One earliest eligible issue per flight, 40 to 200 NM from the fix, using the most recent unique ADS-B report within 30 s. Forecast uses received ERAM route geometry and ADS-B observation time. Legacy ETA values do not enter the model.").map_err(|e| e.to_string())?;
+    writeln!(text, "Clearance/procedure input: the legacy route tables contain no assigned altitude or published procedure windows; vertical constraint checks are unavailable for this run.").map_err(|e| e.to_string())?;
     let forecast_refused: usize = totals.forecast_refused.values().sum();
     let score_refused: usize = totals.score_refused.values().sum();
     writeln!(text, "offered flights with known address: {}; route messages without address: {no_addr}; issued: {}; scored: {}; without eligible state or route: {}; forecast refused: {forecast_refused}; score refused: {score_refused}; observed passages: {}", flights.len(), totals.issued, totals.issued.saturating_sub(score_refused), flights.len().saturating_sub(totals.issued + forecast_refused), totals.crossing).map_err(|e| e.to_string())?;
@@ -605,6 +617,23 @@ pub(crate) fn report(
             _ => 2,
         };
         writeln!(text, "{mins} min coverage: denominator is all {} issued forecasts; missing predicted position {}; no usable truth interpolation {}; forecast selection does not depend on future truth", totals.issued, totals.no_prediction[index], totals.no_truth[index]).map_err(|e| e.to_string())?;
+        let reasons = totals.vertical_unavailable[index]
+            .iter()
+            .map(|(reason, count)| format!("{reason}={count}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            text,
+            "{mins} min vertical unavailable: {}/{} issued; {}",
+            totals.vertical_unavailable[index].values().sum::<usize>(),
+            totals.issued,
+            if reasons.is_empty() {
+                "none"
+            } else {
+                reasons.as_str()
+            }
+        )
+        .map_err(|e| e.to_string())?;
     }
     for (label, values) in ["OpenATCA", "ERAM", "TBFM"]
         .into_iter()

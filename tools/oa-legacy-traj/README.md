@@ -40,7 +40,8 @@ distinct ORD flight plans with a TBFM estimate, before scoring. OpenATCA uses th
 geometry and observed motion. Its ETA does not depend on the legacy time predictions. The ADS-B
 archive records observation time and has no comparable receive clock. This baseline has no winds or
 aircraft performance model. The pure core accepts provenance-stamped route altitude windows and
-an assigned-altitude provenance; synthetic coverage checks exercise them. The current legacy input
+an assigned-altitude provenance; synthetic coverage checks exercise them as waypoint-crossing
+feasibility checks. This is not a fitted vertical solver. The current legacy input
 tables carry neither clearance altitude nor published procedure constraints, so the ORD shell leaves
 those fields absent and reports that data gap. Coverage at each horizon is divided by every issued
 forecast; missing predicted positions and missing truth interpolation are counted separately.

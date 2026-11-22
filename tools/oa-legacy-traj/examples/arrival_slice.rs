@@ -3,7 +3,7 @@
 //! No recordings, feeds, network, or private data are read.
 
 use oa_legacy_traj::core::arrival::{
-    IssueSnapshot, LegacyEta, RouteFix, TrackState, TruthPoint, forecast, score,
+    forecast, score, IssueSnapshot, LegacyEta, RouteFix, TrackState, TruthPoint,
 };
 use oa_legacy_traj::core::types::Place;
 

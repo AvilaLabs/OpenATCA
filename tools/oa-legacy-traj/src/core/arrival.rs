@@ -113,8 +113,22 @@ pub struct ForecastPoint {
     pub time_ms: i64,
     pub place: Option<Place>,
     pub altitude_ft: Option<f64>,
+    pub vertical_status: VerticalStatus,
 }
 // A7.2: cold struct, size guard waived; one-shot forecast result.
+
+/// Why vertical output is present or unavailable at a forecast horizon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerticalStatus {
+    Available,
+    MissingAltitude,
+    MissingVerticalRate,
+    OutsideModelRange,
+    ConstraintConflict {
+        constraint: ConstraintProvenance,
+        assigned_altitude: Option<ConstraintProvenance>,
+    },
+}
 
 /// Predicted metering-fix arrival; absent if the fix, speed, or usable route is missing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -204,6 +218,7 @@ pub fn forecast(snapshot: &IssueSnapshot) -> Result<Forecast, ForecastRefusal> {
         .any(|c| {
             c.minimum_ft.is_some_and(|v| !v.is_finite())
                 || c.maximum_ft.is_some_and(|v| !v.is_finite())
+                || c.available_ms <= 0
                 || c.available_ms > snapshot.cutoff_ms
                 || c.minimum_ft
                     .is_some_and(|v| !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v))
@@ -221,6 +236,7 @@ pub fn forecast(snapshot: &IssueSnapshot) -> Result<Forecast, ForecastRefusal> {
         time_ms: 0,
         place: None,
         altitude_ft: None,
+        vertical_status: VerticalStatus::MissingAltitude,
     }; 3];
     for (i, seconds) in HORIZON_S.iter().copied().enumerate() {
         let delta_ms = seconds
@@ -234,15 +250,19 @@ pub fn forecast(snapshot: &IssueSnapshot) -> Result<Forecast, ForecastRefusal> {
             .checked_sub(t.time_ms)
             .ok_or(ForecastRefusal::EtaOverflow)?;
         if let Some(point) = points.get_mut(i) {
+            let vertical = vertical_at(
+                t,
+                snapshot.assigned_altitude_ft,
+                snapshot.assigned_altitude_provenance,
+                &snapshot.route,
+                speed,
+                elapsed_ms as f64 / 1000.0,
+            );
             *point = ForecastPoint {
                 time_ms,
                 place: route_position(t.place, speed, &snapshot.route, elapsed_ms as f64 / 1000.0),
-                altitude_ft: altitude_at(
-                    t,
-                    snapshot.assigned_altitude_ft,
-                    reached_constraint(t.place, speed, &snapshot.route, elapsed_ms as f64 / 1000.0),
-                    elapsed_ms as f64 / 1000.0,
-                ),
+                altitude_ft: vertical.altitude_ft,
+                vertical_status: vertical.status,
             };
         }
     }
@@ -356,6 +376,7 @@ pub fn score(
                 || p.altitude_ft.is_some_and(|v| {
                     !v.is_finite() || !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&v)
                 })
+                || p.altitude_ft.is_some() != (p.vertical_status == VerticalStatus::Available)
         })
         || forecast
             .meter_eta
@@ -520,55 +541,84 @@ fn actual_passage(
         .map(|p| p.t_ms)
 }
 
-fn altitude_at(
+#[derive(Clone, Copy)]
+struct VerticalForecast {
+    altitude_ft: Option<f64>,
+    status: VerticalStatus,
+}
+// A7.2: one-shot forecast helper, size guard waived.
+
+fn vertical_at(
     track: TrackState,
     assigned: Option<f64>,
-    route_constraint: Option<AltitudeConstraint>,
-    seconds: f64,
-) -> Option<f64> {
-    let current = track.altitude_ft.filter(|v| v.is_finite())?;
-    let rate = track.vertical_rate_fpm.filter(|v| v.is_finite())?;
-    let raw = current + rate * seconds / 60.0;
-    let value = assigned.filter(|v| v.is_finite()).map_or(raw, |target| {
-        if rate > 0.0 && target >= current {
-            oa_math::min_f64(raw, target)
-        } else if rate < 0.0 && target <= current {
-            oa_math::max_f64(raw, target)
-        } else {
-            raw
-        }
-    });
-    let constrained = route_constraint.map_or(value, |c| {
-        let floor = c.minimum_ft.unwrap_or(MIN_ALTITUDE_FT);
-        let ceiling = c.maximum_ft.unwrap_or(MAX_ALTITUDE_FT);
-        oa_math::max_f64(floor, oa_math::min_f64(value, ceiling))
-    });
-    (MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT)
-        .contains(&constrained)
-        .then_some(constrained)
-}
-
-fn reached_constraint(
-    start: Place,
-    speed: f64,
+    assigned_provenance: Option<ConstraintProvenance>,
     route: &[RouteFix],
+    speed: f64,
     seconds: f64,
-) -> Option<AltitudeConstraint> {
+) -> VerticalForecast {
+    let Some(current) = track.altitude_ft.filter(|v| v.is_finite()) else {
+        return VerticalForecast {
+            altitude_ft: None,
+            status: VerticalStatus::MissingAltitude,
+        };
+    };
+    let Some(rate) = track.vertical_rate_fpm.filter(|v| v.is_finite()) else {
+        return VerticalForecast {
+            altitude_ft: None,
+            status: VerticalStatus::MissingVerticalRate,
+        };
+    };
+    let altitude_at_seconds = |elapsed: f64| {
+        let raw = current + rate * elapsed / 60.0;
+        assigned.filter(|v| v.is_finite()).map_or(raw, |target| {
+            if rate > 0.0 && target >= current {
+                oa_math::min_f64(raw, target)
+            } else if rate < 0.0 && target <= current {
+                oa_math::max_f64(raw, target)
+            } else {
+                raw
+            }
+        })
+    };
     let mut distance = 0.0;
-    let mut here = start;
+    let mut here = track.place;
     let traveled = speed * seconds;
-    let mut active = None;
     for fix in route {
         distance += great_circle_m(here, fix.place);
         if distance > traveled {
             break;
         }
         if let Some(constraint) = fix.altitude_constraint {
-            active = Some(constraint);
+            let crossing_seconds = distance / speed;
+            let altitude = altitude_at_seconds(crossing_seconds);
+            let within_window = altitude >= constraint.minimum_ft.unwrap_or(MIN_ALTITUDE_FT)
+                && altitude <= constraint.maximum_ft.unwrap_or(MAX_ALTITUDE_FT);
+            if !within_window {
+                return VerticalForecast {
+                    altitude_ft: None,
+                    status: VerticalStatus::ConstraintConflict {
+                        constraint: constraint.provenance,
+                        assigned_altitude: assigned
+                            .filter(|_| assigned_provenance.is_some())
+                            .and(assigned_provenance),
+                    },
+                };
+            }
         }
         here = fix.place;
     }
-    active
+    let altitude = altitude_at_seconds(seconds);
+    if !(MIN_ALTITUDE_FT..=MAX_ALTITUDE_FT).contains(&altitude) {
+        VerticalForecast {
+            altitude_ft: None,
+            status: VerticalStatus::OutsideModelRange,
+        }
+    } else {
+        VerticalForecast {
+            altitude_ft: Some(altitude),
+            status: VerticalStatus::Available,
+        }
+    }
 }
 
 fn route_position(start: Place, speed: f64, route: &[RouteFix], seconds: f64) -> Option<Place> {
@@ -899,8 +949,8 @@ mod tests {
 
     // REQ: OA-LTJ-054
     #[test]
-    fn elapsed_meter_crossing_before_issue_has_no_eta_and_score_rejects_other_fix()
-    -> Result<(), ForecastRefusal> {
+    fn elapsed_meter_crossing_before_issue_has_no_eta_and_score_rejects_other_fix(
+    ) -> Result<(), ForecastRefusal> {
         let (mut snapshot, fix) = fixture();
         snapshot.track.time_ms = snapshot.issued_ms - MAX_TRACK_AGE_MS;
         snapshot.track.speed_mps = Some(180.0);
@@ -937,11 +987,44 @@ mod tests {
 
     // REQ: OA-LTJ-054
     #[test]
-    fn issue_available_route_altitude_constraint_is_applied_with_provenance()
-    -> Result<(), ForecastRefusal> {
+    fn compatible_waypoint_window_checks_crossing_without_changing_the_profile(
+    ) -> Result<(), ForecastRefusal> {
         let (mut snapshot, _) = fixture();
         snapshot.track.altitude_ft = Some(10_000.0);
         snapshot.track.speed_mps = Some(300.0);
+        snapshot.track.vertical_rate_fpm = Some(-600.0);
+        snapshot.route[0].altitude_constraint = Some(AltitudeConstraint {
+            minimum_ft: Some(7_000.0),
+            maximum_ft: Some(8_500.0),
+            available_ms: snapshot.cutoff_ms,
+            provenance: ConstraintProvenance::PublishedProcedure,
+        });
+        let predicted = forecast(&snapshot)?;
+        assert_eq!(predicted.positions[0].altitude_ft, Some(7_000.0));
+        assert_eq!(
+            predicted.positions[0].vertical_status,
+            VerticalStatus::Available
+        );
+        assert_eq!(
+            snapshot.route[0].altitude_constraint.unwrap().provenance,
+            ConstraintProvenance::PublishedProcedure
+        );
+
+        snapshot.route[0]
+            .altitude_constraint
+            .as_mut()
+            .unwrap()
+            .available_ms += 1;
+        assert_eq!(forecast(&snapshot), Err(ForecastRefusal::InvalidTrackValue));
+        Ok(())
+    }
+
+    // REQ: OA-LTJ-054
+    #[test]
+    fn infeasible_waypoint_window_marks_vertical_only_unavailable() -> Result<(), ForecastRefusal> {
+        let (mut snapshot, _) = fixture();
+        snapshot.track.altitude_ft = Some(10_000.0);
+        snapshot.track.speed_mps = Some(180.0);
         snapshot.track.vertical_rate_fpm = Some(-600.0);
         snapshot.route[0].altitude_constraint = Some(AltitudeConstraint {
             minimum_ft: Some(9_000.0),
@@ -949,18 +1032,106 @@ mod tests {
             available_ms: snapshot.cutoff_ms,
             provenance: ConstraintProvenance::Synthetic,
         });
+        snapshot.route.push(RouteFix {
+            name: *b"AFTER   ",
+            place: Place {
+                lat_deg: 41.7,
+                lon_deg: -86.8,
+            },
+            altitude_constraint: None,
+        });
         let predicted = forecast(&snapshot)?;
+        assert!(predicted.positions[0].place.is_some());
+        assert_eq!(predicted.positions[0].altitude_ft, Some(7_000.0));
         assert_eq!(
-            snapshot.route[0].altitude_constraint.unwrap().provenance,
-            ConstraintProvenance::Synthetic
+            predicted.positions[0].vertical_status,
+            VerticalStatus::Available
         );
+        assert!(predicted.positions[1].place.is_some());
+        assert_eq!(predicted.positions[1].altitude_ft, None);
+        assert_eq!(
+            predicted.positions[1].vertical_status,
+            VerticalStatus::ConstraintConflict {
+                constraint: ConstraintProvenance::Synthetic,
+                assigned_altitude: None,
+            }
+        );
+        let actual = TruthPoint {
+            time_ms: predicted.positions[1].time_ms,
+            place: predicted.positions[1].place.unwrap(),
+            altitude_ft: None,
+            gap_before: false,
+        };
+        let scored = score(
+            &predicted,
+            &[actual],
+            predicted.meter_fix,
+            None,
+            None,
+            2_000.0,
+        )
+        .expect("horizontal scoring remains available");
+        assert!(scored.forecast[1].horizontal_error_m.is_some());
+        assert_eq!(scored.forecast[1].vertical_error_ft, None);
+        Ok(())
+    }
+
+    // REQ: OA-LTJ-054
+    #[test]
+    fn missing_vertical_rate_and_assigned_clearance_conflict_are_explicit(
+    ) -> Result<(), ForecastRefusal> {
+        let (mut missing_rate, _) = fixture();
+        let missing_altitude = forecast(&missing_rate)?;
+        assert_eq!(missing_altitude.positions[0].altitude_ft, None);
+        assert_eq!(
+            missing_altitude.positions[0].vertical_status,
+            VerticalStatus::MissingAltitude
+        );
+        missing_rate.track.altitude_ft = Some(10_000.0);
+        let missing = forecast(&missing_rate)?;
+        assert!(missing.positions[0].place.is_some());
+        assert_eq!(missing.positions[0].altitude_ft, None);
+        assert_eq!(
+            missing.positions[0].vertical_status,
+            VerticalStatus::MissingVerticalRate
+        );
+
+        let (mut conflict, _) = fixture();
+        conflict.track.altitude_ft = Some(10_000.0);
+        conflict.track.speed_mps = Some(180.0);
+        conflict.track.vertical_rate_fpm = Some(-600.0);
+        conflict.assigned_altitude_ft = Some(9_000.0);
+        conflict.assigned_altitude_provenance = Some(ConstraintProvenance::SfdpsAssignedAltitude);
+        conflict.route[0].altitude_constraint = Some(AltitudeConstraint {
+            minimum_ft: Some(9_500.0),
+            maximum_ft: Some(11_000.0),
+            available_ms: conflict.cutoff_ms,
+            provenance: ConstraintProvenance::PublishedProcedure,
+        });
+        conflict.route.push(RouteFix {
+            name: *b"AFTER   ",
+            place: Place {
+                lat_deg: 41.7,
+                lon_deg: -86.8,
+            },
+            altitude_constraint: None,
+        });
+        let predicted = forecast(&conflict)?;
+        assert!(predicted.positions[0].place.is_some());
         assert_eq!(predicted.positions[0].altitude_ft, Some(9_000.0));
-        snapshot.route[0]
-            .altitude_constraint
-            .as_mut()
-            .unwrap()
-            .available_ms += 1;
-        assert_eq!(forecast(&snapshot), Err(ForecastRefusal::InvalidTrackValue));
+        assert_eq!(
+            predicted.positions[0].vertical_status,
+            VerticalStatus::Available
+        );
+        assert!(predicted.positions[1].place.is_some());
+        assert_eq!(predicted.positions[1].altitude_ft, None);
+        assert_eq!(
+            predicted.positions[1].vertical_status,
+            VerticalStatus::ConstraintConflict {
+                constraint: ConstraintProvenance::PublishedProcedure,
+                assigned_altitude: Some(ConstraintProvenance::SfdpsAssignedAltitude),
+            }
+        );
         Ok(())
     }
 
@@ -975,6 +1146,10 @@ mod tests {
         let forecast = forecast(&snapshot)?;
         assert!(forecast.positions[0].place.is_some());
         assert_eq!(forecast.positions[0].altitude_ft, None);
+        assert_eq!(
+            forecast.positions[0].vertical_status,
+            VerticalStatus::OutsideModelRange
+        );
         Ok(())
     }
 }
