@@ -57,10 +57,34 @@ pub const PATH_EXACT: u8 = 2;
 pub const PATH_GREEDY: u8 = 3;
 /// Plain nearest-neighbour baseline; no component solve was run.
 pub const PATH_NEAREST: u8 = 4;
+/// No selected assignment has regret evidence (including an unassigned plot).
+pub const REGRET_NONE: u8 = 0;
+/// Exact edge-exclusion regret from the padded Hungarian objective.
+pub const REGRET_EXACT: u8 = 1;
+/// Analytic edge-exclusion regret for a one-pair component.
+pub const REGRET_SINGLE: u8 = 2;
+/// Regret is unavailable because the bounded greedy solver was used.
+pub const REGRET_GREEDY: u8 = 3;
+/// Regret is unavailable because the per-solve work allowance was exhausted.
+pub const REGRET_BUDGET: u8 = 4;
+/// Regret is unavailable because inputs are outside its certified numeric domain.
+pub const REGRET_UNSUPPORTED: u8 = 5;
+/// Regret is unavailable because the floating-point optimality checks failed.
+pub const REGRET_NUMERICAL: u8 = 6;
+/// Regret is unavailable because the nearest-neighbour solver was used.
+pub const REGRET_NOT_GNN: u8 = 7;
 /// Limit: the largest component (tracks plus plots) solved exactly; 160 gives a padded matrix of
 /// 160 rows and columns, about 4e6 operations worst case. Larger components are assigned
 /// greedily and counted.
 pub const MAX_COMPONENT: usize = 160;
+/// Maximum charged regret work per forensic solve. The allowance covers one maximum exact
+/// component's `n^3 + 3n^2 + 5n` regret bound plus one full `MAX_SCRATCH_PAIRS` validation pass.
+/// Components are precharged by that formula plus their input pair count, so repeated small
+/// components remain bounded by this aggregate allowance too.
+pub const MAX_REGRET_WORK: usize = MAX_COMPONENT * MAX_COMPONENT * MAX_COMPONENT
+    + 3 * MAX_COMPONENT * MAX_COMPONENT
+    + 5 * MAX_COMPONENT
+    + MAX_SCRATCH_PAIRS;
 /// Limit: tracks or plots a scratch is built for; a larger request is built at this size (a solve
 /// asking for more is refused as too large).
 pub const MAX_SCRATCH_ITEMS: usize = 1 << 22;
@@ -68,6 +92,9 @@ pub const MAX_SCRATCH_ITEMS: usize = 1 << 22;
 pub const MAX_SCRATCH_PAIRS: usize = 1 << 22;
 /// Cost standing for "forbidden" inside the padded matrix; every real cost is far below it.
 const FORBIDDEN: f64 = 1.0e12;
+/// A conservative forensic-only ceiling: even a full padded objective at this gate is below
+/// one quarter of the forbidden sentinel, leaving headroom for the row tie surcharge.
+const MAX_REGRET_GATE: f64 = FORBIDDEN / (4.0 * MAX_COMPONENT as f64);
 
 /// One gated candidate pair. Plain data (A1); hot (A7): built per plot per scan.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,6 +129,8 @@ pub enum GnnError {
     BadGate,
     /// More tracks, plots or pairs than the scratch was built for.
     TooLarge,
+    /// Forensic regret was requested from scratch that was not created for forensics.
+    ForensicsDisabled,
 }
 
 impl std::fmt::Display for GnnError {
@@ -109,6 +138,9 @@ impl std::fmt::Display for GnnError {
         match self {
             GnnError::BadGate => write!(f, "association gate is not a finite positive number"),
             GnnError::TooLarge => write!(f, "association input exceeds the scratch capacity"),
+            GnnError::ForensicsDisabled => {
+                write!(f, "association regret requires forensic scratch")
+            }
         }
     }
 }
@@ -150,6 +182,14 @@ pub struct AssocScratch {
     component_size: Vec<u32>,
     /// [`PATH_SINGLE`], [`PATH_EXACT`], [`PATH_GREEDY`] or [`PATH_NONE`].
     component_path: Vec<u8>,
+    /// Edge-exclusion objective increase for each selected plot; consult `regret_status` first.
+    regret: Vec<f64>,
+    /// One of the `REGRET_*` states for each selected plot.
+    regret_status: Vec<u8>,
+    /// Worst-case work units precharged for the most recent forensic solve.
+    regret_work: usize,
+    /// Fixed `MAX_COMPONENT` square scratch used only by forensic solves.
+    regret_dist: Vec<f64>,
     own: Vec<f64>,
     other: Vec<f64>,
     parent: Vec<u32>,
@@ -216,6 +256,22 @@ fn assoc_scratch_new_inner(
         } else {
             Vec::new()
         },
+        regret: if collect_metadata {
+            vec![0.0; max_plots]
+        } else {
+            Vec::new()
+        },
+        regret_status: if collect_metadata {
+            vec![REGRET_NONE; max_plots]
+        } else {
+            Vec::new()
+        },
+        regret_work: 0,
+        regret_dist: if collect_metadata {
+            vec![f64::INFINITY; MAX_COMPONENT * MAX_COMPONENT]
+        } else {
+            Vec::new()
+        },
         own: vec![0.0; max_plots],
         other: vec![0.0; max_plots],
         parent: vec![0; max_tracks + max_plots],
@@ -258,6 +314,9 @@ pub fn assoc_scratch_buffers(sc: &AssocScratch) -> Vec<(usize, usize)> {
         of(&sc.alternate_pair),
         of(&sc.component_size),
         of(&sc.component_path),
+        of(&sc.regret),
+        of(&sc.regret_status),
+        of(&sc.regret_dist),
         of(&sc.own),
         of(&sc.other),
         of(&sc.parent),
@@ -311,6 +370,21 @@ pub fn assoc_component_path(sc: &AssocScratch) -> &[u8] {
     sc.component_path.get(..sc.n_plots).unwrap_or(&[])
 }
 
+/// Per-plot edge-exclusion objective increase. Read only entries whose status is exact or single.
+pub fn assoc_regret(sc: &AssocScratch) -> &[f64] {
+    sc.regret.get(..sc.n_plots).unwrap_or(&[])
+}
+
+/// Per-plot regret availability; unavailable values are never represented as a numeric sentinel.
+pub fn assoc_regret_status(sc: &AssocScratch) -> &[u8] {
+    sc.regret_status.get(..sc.n_plots).unwrap_or(&[])
+}
+
+/// Worst-case work units precharged during the most recent forensic GNN solve.
+pub fn assoc_regret_work(sc: &AssocScratch) -> usize {
+    sc.regret_work
+}
+
 /// Writes to the opt-in, fixed-size metadata columns in the most recent solve.
 pub fn assoc_metadata_writes(sc: &AssocScratch) -> u64 {
     sc.metadata_writes
@@ -325,11 +399,13 @@ fn reset_result(sc: &mut AssocScratch, n_plots: usize) {
     if sc.collect_metadata {
         sc.metadata_writes = sc
             .metadata_writes
-            .saturating_add((sc.n_plots as u64).saturating_mul(3));
+            .saturating_add((sc.n_plots as u64).saturating_mul(5));
         for j in 0..sc.n_plots {
             sc.alternate_pair[j] = NONE;
             sc.component_size[j] = 0;
             sc.component_path[j] = PATH_NONE;
+            sc.regret[j] = 0.0;
+            sc.regret_status[j] = REGRET_NONE;
         }
     }
 }
@@ -454,10 +530,41 @@ pub fn gnn(
     pairs: &[Pair],
     gate: f64,
 ) -> Result<GnnStats, GnnError> {
+    gnn_inner(sc, n_tracks, n_plots, pairs, gate, false, 0)
+}
+
+/// Global nearest-neighbour association with opt-in, label-free edge-exclusion regret metadata.
+/// The scratch must have been created by [`assoc_scratch_new_forensics`]. Assignments are
+/// computed by the same solver and with the same costs as [`gnn`].
+pub fn gnn_forensics(
+    sc: &mut AssocScratch,
+    n_tracks: usize,
+    n_plots: usize,
+    pairs: &[Pair],
+    gate: f64,
+) -> Result<GnnStats, GnnError> {
+    if !sc.collect_metadata {
+        sc.regret_work = 0;
+        reset_result(sc, n_plots);
+        return Err(GnnError::ForensicsDisabled);
+    }
+    gnn_inner(sc, n_tracks, n_plots, pairs, gate, true, MAX_REGRET_WORK)
+}
+
+fn gnn_inner(
+    sc: &mut AssocScratch,
+    n_tracks: usize,
+    n_plots: usize,
+    pairs: &[Pair],
+    gate: f64,
+    compute_regret: bool,
+    regret_budget: usize,
+) -> Result<GnnStats, GnnError> {
     let collect_metadata = sc.collect_metadata;
     if collect_metadata {
         sc.metadata_writes = 0;
     }
+    sc.regret_work = 0;
     reset_result(sc, n_plots);
     if !(gate.is_finite() && gate > 0.0) {
         return Err(GnnError::BadGate);
@@ -495,6 +602,7 @@ pub fn gnn(
     }
     by_root.sort_unstable();
     let mut at = 0usize;
+    let mut regret_budget_left = regret_budget;
     while at < by_root.len() {
         let root = by_root[at].0;
         let end = by_root[at..]
@@ -508,7 +616,8 @@ pub fn gnn(
             &by_root[at..end],
             gate,
             &mut stats,
-            collect_metadata,
+            compute_regret,
+            &mut regret_budget_left,
         );
         at = end;
     }
@@ -523,8 +632,10 @@ fn solve_component(
     group: &[(u32, u32)],
     gate: f64,
     stats: &mut GnnStats,
-    collect_metadata: bool,
+    compute_regret: bool,
+    regret_budget_left: &mut usize,
 ) {
+    let collect_metadata = sc.collect_metadata;
     let pr = |e: &(u32, u32)| pairs[e.1 as usize];
     // Local indexes of the component's tracks and plots, ascending.
     sc.comp_tracks.clear();
@@ -574,6 +685,22 @@ fn solve_component(
             let p = pr(e);
             if p.cost < gate {
                 sc.plot_track[p.plot as usize] = p.track;
+                if compute_regret {
+                    let plot = p.plot as usize;
+                    let budget_ok = precharge_regret_work(1, regret_budget_left);
+                    if budget_ok {
+                        sc.regret_work = sc.regret_work.saturating_add(1);
+                    }
+                    if !budget_ok {
+                        sc.regret_status[plot] = REGRET_BUDGET;
+                    } else if regret_component_supported(group, pairs, gate) {
+                        sc.regret[plot] = gate - p.cost;
+                        sc.regret_status[plot] = REGRET_SINGLE;
+                    } else {
+                        sc.regret_status[plot] = REGRET_UNSUPPORTED;
+                    }
+                    sc.metadata_writes = sc.metadata_writes.saturating_add(2);
+                }
             }
         }
         return;
@@ -597,6 +724,10 @@ fn solve_component(
             if p.cost < gate && !sc.track_used[ti] && sc.plot_track[p.plot as usize] == NONE {
                 sc.track_used[ti] = true;
                 sc.plot_track[p.plot as usize] = p.track;
+                if compute_regret {
+                    sc.regret_status[p.plot as usize] = REGRET_GREEDY;
+                    sc.metadata_writes = sc.metadata_writes.saturating_add(1);
+                }
             }
         }
         return;
@@ -639,12 +770,207 @@ fn solve_component(
         }
     }
     hungarian(&mut sc.hung, n);
+    let regret_state = if compute_regret {
+        if let Some(required) = regret_work_bound(n, group.len()) {
+            if !precharge_regret_work(required, regret_budget_left) {
+                REGRET_BUDGET
+            } else {
+                sc.regret_work = sc.regret_work.saturating_add(required);
+                if !regret_component_supported(group, pairs, gate) {
+                    REGRET_UNSUPPORTED
+                } else {
+                    match exact_component_regret(sc, n, t, q) {
+                        Ok(()) => REGRET_EXACT,
+                        Err(()) => REGRET_NUMERICAL,
+                    }
+                }
+            }
+        } else {
+            REGRET_UNSUPPORTED
+        }
+    } else {
+        REGRET_NONE
+    };
     for i in 0..t {
         let j = sc.hung.row_to_col[i];
         if j < q && sc.hung.cost[i * n + j] < FORBIDDEN * 0.5 {
-            sc.plot_track[sc.comp_plots[j] as usize] = sc.comp_tracks[i];
+            let plot = sc.comp_plots[j] as usize;
+            sc.plot_track[plot] = sc.comp_tracks[i];
+            if compute_regret {
+                if regret_state == REGRET_EXACT {
+                    sc.regret_status[plot] = REGRET_EXACT;
+                } else {
+                    sc.regret_status[plot] = regret_state;
+                }
+                sc.metadata_writes = sc.metadata_writes.saturating_add(1);
+            }
         }
     }
+}
+
+fn regret_work_bound(n: usize, pair_count: usize) -> Option<usize> {
+    let n2 = n.checked_mul(n)?;
+    let n3 = n2.checked_mul(n)?;
+    n3.checked_add(n2.checked_mul(3)?)?
+        .checked_add(n.checked_mul(5)?)?
+        .checked_add(pair_count)
+}
+
+fn precharge_regret_work(required: usize, budget_left: &mut usize) -> bool {
+    if required > *budget_left {
+        return false;
+    }
+    *budget_left -= required;
+    true
+}
+
+/// The diagnostic currently certifies only the bounded, nonnegative costs emitted by fusion.
+/// The public GNN solver still accepts other finite inputs and continues to assign them normally.
+fn regret_component_supported(group: &[(u32, u32)], pairs: &[Pair], gate: f64) -> bool {
+    gate.is_finite()
+        && gate > 0.0
+        && gate <= MAX_REGRET_GATE
+        && group.iter().all(|&(_, pair_ix)| {
+            pairs
+                .get(pair_ix as usize)
+                .is_some_and(|pair| pair.cost.is_finite() && pair.cost >= 0.0 && pair.cost < gate)
+        })
+}
+
+/// Computes selected real-edge exclusion deltas against the exact padded matrix held by the
+/// Hungarian solver, including its tie surcharge. `own` stages outputs so a numerical refusal
+/// never publishes only some rows from one component.
+fn exact_component_regret(
+    sc: &mut AssocScratch,
+    n: usize,
+    n_tracks: usize,
+    n_plots: usize,
+) -> Result<(), ()> {
+    let cells = n.checked_mul(n).ok_or(())?;
+    if n == 0 || n > MAX_COMPONENT || cells > sc.regret_dist.len() {
+        return Err(());
+    }
+    let used = sc.hung.used.get_mut(..n).ok_or(())?;
+    used.fill(false);
+    let matching = sc.hung.row_to_col.get(..n).ok_or(())?;
+    for &column in matching.iter() {
+        if column >= n || used[column] {
+            return Err(());
+        }
+        used[column] = true;
+    }
+    let matrix = &sc.hung.cost;
+    let distance = sc.regret_dist.get_mut(..cells).ok_or(())?;
+    distance.fill(f64::INFINITY);
+
+    for row in 0..n {
+        let own = matrix[row * n + matching[row]];
+        if !own.is_finite() || own >= FORBIDDEN * 0.5 {
+            return Err(());
+        }
+        distance[row * n + row] = 0.0;
+        for target in 0..n {
+            if target == row {
+                continue;
+            }
+            let cost = matrix[row * n + matching[target]];
+            if cost < FORBIDDEN * 0.5 {
+                if !cost.is_finite() {
+                    return Err(());
+                }
+                let delta = cost - own;
+                if !delta.is_finite() {
+                    return Err(());
+                }
+                distance[row * n + target] = delta;
+            }
+        }
+    }
+
+    for mid in 0..n {
+        for from in 0..n {
+            let left = distance[from * n + mid];
+            if !left.is_finite() {
+                continue;
+            }
+            for to in 0..n {
+                let right = distance[mid * n + to];
+                if !right.is_finite() {
+                    continue;
+                }
+                let through = left + right;
+                if !through.is_finite() {
+                    return Err(());
+                }
+                if through < distance[from * n + to] {
+                    distance[from * n + to] = through;
+                }
+            }
+        }
+    }
+    for row in 0..n {
+        if distance[row * n + row] < 0.0 {
+            return Err(());
+        }
+    }
+
+    for row in 0..n_tracks {
+        let selected_column = matching[row];
+        if selected_column >= n_plots {
+            continue;
+        }
+        let own = matrix[row * n + selected_column];
+        let mut best = f64::INFINITY;
+        for next in 0..n {
+            if next == row {
+                continue;
+            }
+            let next_column = matching[next];
+            let edge_cost = matrix[row * n + next_column];
+            if edge_cost >= FORBIDDEN * 0.5 {
+                continue;
+            }
+            if !edge_cost.is_finite() {
+                return Err(());
+            }
+            let return_path = distance[next * n + row];
+            if !return_path.is_finite() {
+                continue;
+            }
+            let cycle = (edge_cost - own) + return_path;
+            if !cycle.is_finite() || cycle < 0.0 {
+                return Err(());
+            }
+            if cycle < best {
+                best = cycle;
+            }
+        }
+        if !best.is_finite() {
+            return Err(());
+        }
+        let plot = sc.comp_plots[selected_column] as usize;
+        let Some(slot) = sc.own.get_mut(plot) else {
+            return Err(());
+        };
+        *slot = best;
+    }
+
+    for row in 0..n_tracks {
+        let selected_column = matching[row];
+        if selected_column >= n_plots {
+            continue;
+        }
+        let plot = sc.comp_plots[selected_column] as usize;
+        let Some(value) = sc.own.get(plot).copied() else {
+            return Err(());
+        };
+        let Some(slot) = sc.regret.get_mut(plot) else {
+            return Err(());
+        };
+        *slot = value;
+        sc.metadata_writes = sc.metadata_writes.saturating_add(1);
+    }
+    Ok(())
 }
 
 /// Plain nearest neighbour, the baseline: each plot takes its cheapest gated track (the lowest
@@ -654,6 +980,7 @@ pub fn nearest(sc: &mut AssocScratch, n_plots: usize, pairs: &[Pair]) -> Result<
     if sc.collect_metadata {
         sc.metadata_writes = 0;
     }
+    sc.regret_work = 0;
     reset_result(sc, n_plots);
     if n_plots > sc.max_plots {
         sc.n_plots = 0;
@@ -677,6 +1004,10 @@ pub fn nearest(sc: &mut AssocScratch, n_plots: usize, pairs: &[Pair]) -> Result<
         if better {
             sc.own[j] = p.cost;
             sc.plot_track[j] = p.track;
+            if sc.collect_metadata {
+                sc.regret_status[j] = REGRET_NOT_GNN;
+                sc.metadata_writes = sc.metadata_writes.saturating_add(1);
+            }
         }
     }
     Ok(())
@@ -826,6 +1157,85 @@ mod tests {
             n_tracks,
             gate,
         )
+    }
+
+    /// Exhaustive objective over the same real-edge tie surcharge used by the padded solver.
+    fn brute_perturbed_excluding(
+        pairs: &[Pair],
+        track_ids: &[u32],
+        plot_ids: &[u32],
+        gate: f64,
+        excluded: Option<(u32, u32)>,
+    ) -> f64 {
+        #[allow(clippy::too_many_arguments)]
+        fn visit(
+            plot: usize,
+            pairs: &[Pair],
+            used: &mut [bool],
+            assigned: usize,
+            sum: f64,
+            track_ids: &[u32],
+            plot_ids: &[u32],
+            gate: f64,
+            excluded: Option<(u32, u32)>,
+            best: &mut f64,
+        ) {
+            if plot == plot_ids.len() {
+                let unmatched = (track_ids.len() - assigned) + (plot_ids.len() - assigned);
+                *best = best.min(sum + 0.5 * gate * unmatched as f64);
+                return;
+            }
+            visit(
+                plot + 1,
+                pairs,
+                used,
+                assigned,
+                sum,
+                track_ids,
+                plot_ids,
+                gate,
+                excluded,
+                best,
+            );
+            for pair in pairs.iter().filter(|pair| {
+                pair.plot == plot_ids[plot] && excluded != Some((pair.track, pair.plot))
+            }) {
+                let Ok(track) = track_ids.binary_search(&pair.track) else {
+                    continue;
+                };
+                if used[track] {
+                    continue;
+                }
+                used[track] = true;
+                visit(
+                    plot + 1,
+                    pairs,
+                    used,
+                    assigned + 1,
+                    sum + pair.cost + gate * TIE_BREAK * track as f64,
+                    track_ids,
+                    plot_ids,
+                    gate,
+                    excluded,
+                    best,
+                );
+                used[track] = false;
+            }
+        }
+        let mut best = f64::INFINITY;
+        visit(
+            0,
+            pairs,
+            &mut vec![false; track_ids.len()],
+            0,
+            0.0,
+            track_ids,
+            plot_ids,
+            gate,
+            excluded,
+            &mut best,
+        );
+        best
     }
 
     // REQ: OA-TRK-151
@@ -1245,7 +1655,16 @@ mod tests {
             reset_result(&mut sc, n);
             let group: Vec<(u32, u32)> = (0..pairs.len() as u32).map(|k| (0, k)).collect();
             let mut st = GnnStats::default();
-            solve_component(&mut sc, &pairs, &group, 1.0e9, &mut st, false);
+            let mut regret_budget_left = MAX_REGRET_WORK;
+            solve_component(
+                &mut sc,
+                &pairs,
+                &group,
+                1.0e9,
+                &mut st,
+                false,
+                &mut regret_budget_left,
+            );
             assert_eq!(st.greedy_components, 1);
             assoc_plot_track(&sc).to_vec()
         };
@@ -1402,5 +1821,415 @@ mod tests {
         assert_eq!(sc.alternate_pair.capacity(), 0);
         assert_eq!(sc.component_size.capacity(), 0);
         assert_eq!(sc.component_path.capacity(), 0);
+        assert_eq!(sc.regret.capacity(), 0);
+        assert_eq!(sc.regret_status.capacity(), 0);
+        assert_eq!(sc.regret_dist.capacity(), 0);
+    }
+
+    #[test]
+    fn forensic_regret_matches_exhaustive_perturbed_objective_including_raw_worse_choice() {
+        let gate = 10.0;
+        let track_ids = [2, 7];
+        let plot_ids = [0];
+        let pairs = [
+            Pair {
+                track: 2,
+                plot: 0,
+                cost: 1.0 + 0.5e-9,
+            },
+            Pair {
+                track: 7,
+                plot: 0,
+                cost: 1.0,
+            },
+        ];
+        let mut sc = assoc_scratch_new_forensics(8, 1, pairs.len());
+        gnn_forensics(&mut sc, 8, 1, &pairs, gate).unwrap();
+        let assigned = assoc_plot_track(&sc)[0];
+        assert_eq!(
+            assigned, 2,
+            "local row surcharge intentionally picks raw-worse edge"
+        );
+        assert_eq!(assoc_regret_status(&sc), &[REGRET_EXACT]);
+        let best = brute_perturbed_excluding(&pairs, &track_ids, &plot_ids, gate, None);
+        let alternative =
+            brute_perturbed_excluding(&pairs, &track_ids, &plot_ids, gate, Some((assigned, 0)));
+        let expected = alternative - best;
+        assert!((assoc_regret(&sc)[0] - expected).abs() < 1.0e-12);
+        assert!(expected > 0.0 && expected < 1.0e-9);
+    }
+
+    #[test]
+    fn forensic_regret_includes_unmatched_alternatives_and_duplicate_minimum() {
+        let gate = 10.0;
+        let pairs = [
+            Pair {
+                track: 0,
+                plot: 0,
+                cost: 1.0,
+            },
+            Pair {
+                track: 0,
+                plot: 0,
+                cost: 3.0,
+            },
+            Pair {
+                track: 1,
+                plot: 1,
+                cost: 2.0,
+            },
+        ];
+        let mut sc = assoc_scratch_new_forensics(2, 2, pairs.len());
+        gnn_forensics(&mut sc, 2, 2, &pairs, gate).unwrap();
+        assert_eq!(assoc_plot_track(&sc), &[0, 1]);
+        for plot in 0..2 {
+            let track = assoc_plot_track(&sc)[plot];
+            let component_pairs: Vec<Pair> = pairs
+                .iter()
+                .copied()
+                .filter(|pair| pair.track == track && pair.plot == plot as u32)
+                .collect();
+            let track_ids = [track];
+            let plot_ids = [plot as u32];
+            let expected =
+                brute_perturbed_excluding(
+                    &component_pairs,
+                    &track_ids,
+                    &plot_ids,
+                    gate,
+                    Some((track, plot as u32)),
+                ) - brute_perturbed_excluding(&component_pairs, &track_ids, &plot_ids, gate, None);
+            assert_eq!(
+                assoc_regret_status(&sc)[plot],
+                if plot == 0 {
+                    REGRET_EXACT
+                } else {
+                    REGRET_SINGLE
+                }
+            );
+            assert!((assoc_regret(&sc)[plot] - expected).abs() < 1.0e-12);
+        }
+        assert!(assoc_regret(&sc)[0] > 0.0);
+    }
+
+    #[test]
+    fn seeded_small_graphs_match_the_perturbed_exhaustive_oracle() {
+        let mut seed = 0x7ac3_61d9_0b25_ef47u64;
+        for case in 0..48 {
+            let n_tracks = 1 + (next(&mut seed) * 3.0) as usize;
+            let n_plots = 1 + (next(&mut seed) * 3.0) as usize;
+            let mut pairs = Vec::new();
+            for track in 0..n_tracks {
+                for plot in 0..n_plots {
+                    let cost = 0.25 * f64::from(1 + (next(&mut seed) * 20.0) as u32);
+                    pairs.push(Pair {
+                        track: track as u32,
+                        plot: plot as u32,
+                        cost,
+                    });
+                    if next(&mut seed) < 0.2 {
+                        pairs.push(Pair {
+                            track: track as u32,
+                            plot: plot as u32,
+                            cost: cost + 0.25,
+                        });
+                    }
+                }
+            }
+            let track_ids: Vec<u32> = (0..n_tracks as u32).collect();
+            let plot_ids: Vec<u32> = (0..n_plots as u32).collect();
+            let mut sc = assoc_scratch_new_forensics(n_tracks, n_plots, pairs.len());
+            gnn_forensics(&mut sc, n_tracks, n_plots, &pairs, 10.0).unwrap();
+            for (plot, &track) in assoc_plot_track(&sc).iter().enumerate() {
+                if track == NONE {
+                    continue;
+                }
+                let best = brute_perturbed_excluding(&pairs, &track_ids, &plot_ids, 10.0, None);
+                let alternative = brute_perturbed_excluding(
+                    &pairs,
+                    &track_ids,
+                    &plot_ids,
+                    10.0,
+                    Some((track, plot as u32)),
+                );
+                assert!(
+                    matches!(assoc_regret_status(&sc)[plot], REGRET_EXACT | REGRET_SINGLE),
+                    "case {case}, plot {plot}: status {}",
+                    assoc_regret_status(&sc)[plot]
+                );
+                let expected = alternative - best;
+                assert!(
+                    (assoc_regret(&sc)[plot] - expected).abs() < 1.0e-9,
+                    "case {case}, plot {plot}: got {}, oracle {expected}",
+                    assoc_regret(&sc)[plot]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn singleton_and_exact_work_boundary_are_explicit() {
+        let pair = Pair {
+            track: 0,
+            plot: 0,
+            cost: 1.25,
+        };
+        let mut one = assoc_scratch_new_forensics(1, 1, 1);
+        gnn_forensics(&mut one, 1, 1, &[pair], 10.0).unwrap();
+        assert_eq!(assoc_regret_status(&one), &[REGRET_SINGLE]);
+        assert_eq!(assoc_regret(&one), &[8.75]);
+
+        assert_eq!(
+            MAX_REGRET_WORK,
+            MAX_COMPONENT * MAX_COMPONENT * MAX_COMPONENT
+                + 3 * MAX_COMPONENT * MAX_COMPONENT
+                + 5 * MAX_COMPONENT
+                + MAX_SCRATCH_PAIRS
+        );
+        let required = regret_work_bound(MAX_COMPONENT, 6_400).unwrap();
+        assert!(required <= MAX_REGRET_WORK);
+        let mut exactly = required;
+        assert!(precharge_regret_work(required, &mut exactly));
+        assert_eq!(exactly, 0);
+        let mut one_short = required - 1;
+        assert!(!precharge_regret_work(required, &mut one_short));
+        assert_eq!(one_short, required - 1);
+        let n = MAX_COMPONENT / 2;
+        let dense: Vec<Pair> = (0..n)
+            .flat_map(|track| {
+                (0..n).map(move |plot| Pair {
+                    track: track as u32,
+                    plot: plot as u32,
+                    cost: 1.0,
+                })
+            })
+            .collect();
+        let mut exact = assoc_scratch_new_forensics(n, n, dense.len());
+        gnn_forensics(&mut exact, n, n, &dense, 10.0).unwrap();
+        assert!(assoc_regret_status(&exact)
+            .iter()
+            .all(|&status| status == REGRET_EXACT));
+        assert_eq!(assoc_regret_work(&exact), required);
+    }
+
+    #[test]
+    fn aggregate_regret_budget_marks_whole_later_component_unavailable() {
+        let side = 65;
+        let components = 4;
+        let pairs: Vec<Pair> = (0..components * side)
+            .flat_map(|track| {
+                let component = track / side;
+                let first_plot = component * side;
+                (first_plot..first_plot + side).map(move |plot| Pair {
+                    track: track as u32,
+                    plot: plot as u32,
+                    cost: 1.0,
+                })
+            })
+            .collect();
+        let item_count = components * side;
+        let mut sc = assoc_scratch_new_forensics(item_count, item_count, pairs.len());
+        let mut plain = assoc_scratch_new(item_count, item_count, pairs.len());
+        gnn(&mut plain, item_count, item_count, &pairs, 10.0).unwrap();
+        gnn_forensics(&mut sc, item_count, item_count, &pairs, 10.0).unwrap();
+        assert_eq!(assoc_plot_track(&plain), assoc_plot_track(&sc));
+        assert!(assoc_regret_status(&sc)[..3 * side]
+            .iter()
+            .all(|&status| status == REGRET_EXACT));
+        assert!(assoc_regret_status(&sc)[3 * side..]
+            .iter()
+            .all(|&status| status == REGRET_BUDGET));
+        assert!(assoc_regret_work(&sc) <= MAX_REGRET_WORK);
+    }
+
+    #[test]
+    fn one_unit_short_budget_refuses_the_whole_component_without_partial_regret() {
+        let pairs = [
+            Pair {
+                track: 0,
+                plot: 0,
+                cost: 1.0,
+            },
+            Pair {
+                track: 0,
+                plot: 1,
+                cost: 3.0,
+            },
+            Pair {
+                track: 1,
+                plot: 0,
+                cost: 2.0,
+            },
+            Pair {
+                track: 1,
+                plot: 1,
+                cost: 1.0,
+            },
+        ];
+        let required = regret_work_bound(4, pairs.len()).unwrap();
+        let mut plain = assoc_scratch_new(2, 2, pairs.len());
+        let mut one_short = assoc_scratch_new_forensics(2, 2, pairs.len());
+        gnn(&mut plain, 2, 2, &pairs, 10.0).unwrap();
+        gnn_inner(&mut one_short, 2, 2, &pairs, 10.0, true, required - 1).unwrap();
+        assert_eq!(assoc_plot_track(&plain), assoc_plot_track(&one_short));
+        assert!(assoc_regret_status(&one_short)
+            .iter()
+            .all(|&status| status == REGRET_BUDGET));
+        assert_eq!(assoc_regret(&one_short), &[0.0, 0.0]);
+        assert_eq!(assoc_regret_work(&one_short), 0);
+
+        let mut exact = assoc_scratch_new_forensics(2, 2, pairs.len());
+        gnn_inner(&mut exact, 2, 2, &pairs, 10.0, true, required).unwrap();
+        assert!(assoc_regret_status(&exact)
+            .iter()
+            .all(|&status| status == REGRET_EXACT));
+        assert_eq!(assoc_regret_work(&exact), required);
+    }
+
+    #[test]
+    fn forensic_solver_matches_plain_decisions_and_keeps_scratch_fixed() {
+        let pairs = [
+            Pair {
+                track: 0,
+                plot: 0,
+                cost: 1.0,
+            },
+            Pair {
+                track: 0,
+                plot: 1,
+                cost: 4.0,
+            },
+            Pair {
+                track: 1,
+                plot: 0,
+                cost: 3.0,
+            },
+            Pair {
+                track: 1,
+                plot: 1,
+                cost: 2.0,
+            },
+        ];
+        let mut plain = assoc_scratch_new(2, 2, pairs.len());
+        let mut forensic = assoc_scratch_new_forensics(2, 2, pairs.len());
+        let buffers = assoc_scratch_buffers(&forensic);
+        gnn(&mut plain, 2, 2, &pairs, 10.0).unwrap();
+        gnn_forensics(&mut forensic, 2, 2, &pairs, 10.0).unwrap();
+        assert_eq!(assoc_plot_track(&plain), assoc_plot_track(&forensic));
+        assert_eq!(assoc_scratch_buffers(&forensic), buffers);
+
+        let mut no_metadata = assoc_scratch_new(2, 2, pairs.len());
+        assert_eq!(
+            gnn_forensics(&mut no_metadata, 2, 2, &pairs, 10.0),
+            Err(GnnError::ForensicsDisabled)
+        );
+        assert_eq!(assoc_plot_track(&no_metadata), &[NONE, NONE]);
+    }
+
+    #[test]
+    fn unsupported_inputs_keep_assignments_and_never_claim_regret() {
+        let cases = [
+            (
+                Pair {
+                    track: 0,
+                    plot: 0,
+                    cost: -1.0,
+                },
+                10.0,
+            ),
+            (
+                Pair {
+                    track: 0,
+                    plot: 0,
+                    cost: 10.0,
+                },
+                10.0,
+            ),
+            (
+                Pair {
+                    track: 0,
+                    plot: 0,
+                    cost: 1.0,
+                },
+                2.0e12,
+            ),
+            (
+                Pair {
+                    track: 0,
+                    plot: 0,
+                    cost: 1.0,
+                },
+                f64::MAX,
+            ),
+        ];
+        for (pair, gate) in cases {
+            let mut plain = assoc_scratch_new(1, 1, 1);
+            let mut forensic = assoc_scratch_new_forensics(1, 1, 1);
+            gnn(&mut plain, 1, 1, &[pair], gate).unwrap();
+            gnn_forensics(&mut forensic, 1, 1, &[pair], gate).unwrap();
+            assert_eq!(assoc_plot_track(&plain), assoc_plot_track(&forensic));
+            if assoc_plot_track(&forensic)[0] != NONE {
+                assert_eq!(assoc_regret_status(&forensic), &[REGRET_UNSUPPORTED]);
+            } else {
+                assert_eq!(assoc_regret_status(&forensic), &[REGRET_NONE]);
+            }
+        }
+    }
+
+    #[test]
+    fn exact_limit_has_regret_and_greedy_limit_reports_unavailable() {
+        let exact_tracks = MAX_COMPONENT / 2;
+        let exact_pairs: Vec<Pair> = (0..exact_tracks)
+            .flat_map(|track| {
+                (0..exact_tracks).map(move |plot| Pair {
+                    track: track as u32,
+                    plot: plot as u32,
+                    cost: 1.0,
+                })
+            })
+            .collect();
+        let mut exact = assoc_scratch_new_forensics(exact_tracks, exact_tracks, exact_pairs.len());
+        gnn_forensics(&mut exact, exact_tracks, exact_tracks, &exact_pairs, 10.0).unwrap();
+        assert!(assoc_component_size(&exact)
+            .iter()
+            .all(|&size| size as usize == MAX_COMPONENT));
+        assert!(assoc_regret_status(&exact)
+            .iter()
+            .all(|&status| status == REGRET_EXACT));
+
+        let greedy_tracks = exact_tracks;
+        let greedy_plots = exact_tracks + 1;
+        let greedy_pairs: Vec<Pair> = (0..greedy_tracks)
+            .flat_map(|track| {
+                (0..greedy_plots).map(move |plot| Pair {
+                    track: track as u32,
+                    plot: plot as u32,
+                    cost: 1.0,
+                })
+            })
+            .collect();
+        let mut greedy =
+            assoc_scratch_new_forensics(greedy_tracks, greedy_plots, greedy_pairs.len());
+        gnn_forensics(
+            &mut greedy,
+            greedy_tracks,
+            greedy_plots,
+            &greedy_pairs,
+            10.0,
+        )
+        .unwrap();
+        assert!(assoc_component_size(&greedy)
+            .iter()
+            .all(|&size| size as usize == MAX_COMPONENT + 1));
+        assert!(assoc_regret_status(&greedy)
+            .iter()
+            .zip(assoc_plot_track(&greedy))
+            .all(|(&status, &track)| {
+                if track == NONE {
+                    status == REGRET_NONE
+                } else {
+                    status == REGRET_GREEDY
+                }
+            }));
     }
 }
