@@ -211,9 +211,6 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     if o.truth_score && o.cmd != "one" {
         return Err("--truth-score is available with `one` only".to_string());
     }
-    if o.truth_score && o.adsb_dropout_s.is_some() {
-        return Err("--truth-score cannot yet be combined with --adsb-dropout".to_string());
-    }
     if o.radar_no_altitude && o.cmd != "one" {
         return Err("--radar-no-altitude is available with `one` only".to_string());
     }
@@ -684,7 +681,9 @@ mod tests {
         assert!(parse_args(&a("one --n")).is_err());
         assert!(parse_args(&a("one --truth-score")).unwrap().truth_score);
         assert!(parse_args(&a("sweep --truth-score")).is_err());
-        assert!(parse_args(&a("one --truth-score --adsb-dropout 5")).is_err());
+        let joint = parse_args(&a("one --truth-score --adsb-dropout 5")).unwrap();
+        assert!(joint.truth_score);
+        assert_eq!(joint.adsb_dropout_s, Some(5));
         assert!(
             parse_args(&a("one --radar-no-altitude"))
                 .unwrap()

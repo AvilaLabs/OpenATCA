@@ -14,7 +14,7 @@ use std::time::Instant;
 use oa_track::fusion::{
     fusion_adsb, fusion_advance, fusion_assign_log, fusion_bookkeeping_len, fusion_buffers,
     fusion_config, fusion_new, fusion_plots, fusion_stats, fusion_take_radar_tracks,
-    fusion_tracker, fusion_tracker_config, fusion_tracker_stats, FusionStats,
+    fusion_tracker, fusion_tracker_config, fusion_tracker_stats, AssignLog, FusionStats,
     RadarAssociationStats, RadarInitStats,
 };
 use oa_track::fusion_params::{ASSIGN_LOG_MAX, KEY_RADAR_BASE, MAX_RADARS};
@@ -72,8 +72,17 @@ pub struct TruthSnapshotScore {
     /// Duplicate final tracks for a truth identity, per fusion_score::identify.
     pub duplicate_tracks: u64,
     pub false_tracks: u64,
+    /// True aircraft plots applied to a track identified as another aircraft.
+    pub wrong_plots: u64,
+    /// Synthetic false plots applied to a real-aircraft track.
     pub false_applied: u64,
     pub swaps: u64,
+    /// Wrong-aircraft plot applications whose plot time is in the measured window.
+    pub measured_wrong_plots: u64,
+    /// Identity changes whose plot time is in the measured window.
+    pub measured_swaps: u64,
+    /// Assignment evidence rows whose plot time is in the measured window.
+    pub measured_assignment_rows: usize,
     /// Assignment evidence spans warm-up and measured traffic, but is restricted to snapshot keys.
     pub assignment_rows: usize,
     /// First once-per-second confirmed appearance of each matched final key, from run start.
@@ -559,6 +568,7 @@ fn truth_snapshot_score(
     fusion: &oa_track::fusion::Fusion,
     offered: &OfferedCoverage,
     first_confirmed: &HashMap<u32, i64>,
+    measured_from_ns: i64,
 ) -> Result<TruthSnapshotScore, &'static str> {
     if fusion_stats(fusion).assign_log_overflow > 0 {
         return Err("assignment log overflowed; identity score unavailable");
@@ -582,6 +592,30 @@ fn truth_snapshot_score(
         .map(|(key, _)| key)
         .collect();
     let identified = identify_tracks(assign, &keys);
+    // A separate measured-window view isolates failures after the degradation begins. This is
+    // cold scoring work: labels remain write-only evidence and never enter a fusion decision.
+    let mut measured_assign = AssignLog::default();
+    for i in 0..assign.t_ns.len() {
+        let Some((&t_ns, &key, &label, &radar, &how)) = assign
+            .t_ns
+            .get(i)
+            .zip(assign.key.get(i))
+            .zip(assign.label.get(i))
+            .zip(assign.radar.get(i))
+            .zip(assign.how.get(i))
+            .map(|((((t_ns, key), label), radar), how)| (t_ns, key, label, radar, how))
+        else {
+            return Err("assignment log columns are incomplete");
+        };
+        if t_ns >= measured_from_ns {
+            measured_assign.t_ns.push(t_ns);
+            measured_assign.key.push(key);
+            measured_assign.label.push(label);
+            measured_assign.radar.push(radar);
+            measured_assign.how.push(how);
+        }
+    }
+    let measured_identified = identify_tracks(&measured_assign, &keys);
     let offered_truth: BTreeSet<u32> = offered
         .by_addr
         .iter()
@@ -612,8 +646,12 @@ fn truth_snapshot_score(
         missing_aircraft: offered_truth.len().saturating_sub(matched_keys.len()),
         duplicate_tracks: identified.duplicates,
         false_tracks: identified.false_tracks,
+        wrong_plots: identified.wrong_plots,
         false_applied: identified.false_applied,
         swaps: identified.swaps,
+        measured_wrong_plots: measured_identified.wrong_plots,
+        measured_swaps: measured_identified.swaps,
+        measured_assignment_rows: measured_assign.t_ns.len(),
         assignment_rows: assign.t_ns.len(),
         first_confirmed_s,
     })
@@ -621,9 +659,6 @@ fn truth_snapshot_score(
 
 /// Runs the traffic through the layer and measures it.
 pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
-    if cfg.truth_score && cfg.adsb_dropout_s.is_some() {
-        return Err("truth-score and dropout cannot be combined".to_string());
-    }
     if cfg.warmup_s < 0 {
         return Err("capacity warm-up cannot be negative".to_string());
     }
@@ -859,7 +894,8 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             Some("run did not complete the full measured interval"),
         )
     } else {
-        match truth_snapshot_score(&f, &offered, &first_confirmed) {
+        let measured_from_ns = EPOCH_NS.saturating_add(cfg.warmup_s.saturating_mul(NS_PER_S));
+        match truth_snapshot_score(&f, &offered, &first_confirmed, measured_from_ns) {
             Ok(score) => (Some(score), None),
             Err(reason) => (None, Some(reason)),
         }
@@ -1083,8 +1119,18 @@ pub fn cap_kv(r: &CapResult) -> Kv {
         kv.put("truth_score.missing_aircraft", score.missing_aircraft);
         kv.put("truth_score.duplicate_tracks", score.duplicate_tracks);
         kv.put("truth_score.false_tracks", score.false_tracks);
+        kv.put("truth_score.wrong_plots", score.wrong_plots);
         kv.put("truth_score.false_applied", score.false_applied);
         kv.put("truth_score.swaps", score.swaps);
+        kv.put(
+            "truth_score.measured_wrong_plots",
+            score.measured_wrong_plots,
+        );
+        kv.put("truth_score.measured_swaps", score.measured_swaps);
+        kv.put(
+            "truth_score.assignment_rows_measured",
+            score.measured_assignment_rows,
+        );
         kv.put(
             "truth_score.assignment_rows_run_cumulative",
             score.assignment_rows,
@@ -1333,7 +1379,7 @@ pub fn cap_text(r: &CapResult) -> String {
     }
     if let Some(score) = r.truth_score {
         s.push_str(&format!(
-            "  truth-derived final snapshot at t={} s: {} confirmed keys, {} / {} distinct known measured-window truth aircraft matched, {} missing; {} duplicate tracks, {} false tracks, {} false assignments, {} swaps. Identity uses cumulative assignments since run start, filtered to final snapshot keys ({} logged rows total). Timings include assignment logging.\n",
+            "  truth-derived final snapshot at t={} s: {} confirmed keys, {} / {} distinct known measured-window truth aircraft matched, {} missing; {} duplicate tracks, {} false tracks, {} wrong-aircraft plots, {} synthetic false plots applied, {} swaps. Identity uses cumulative assignments since run start, filtered to final snapshot keys ({} logged rows total). Timings include assignment logging.\n",
             r.warmup_s.saturating_add(r.measure_s_done),
             score.snapshot_tracks,
             score.matched_aircraft,
@@ -1341,9 +1387,14 @@ pub fn cap_text(r: &CapResult) -> String {
             score.missing_aircraft,
             score.duplicate_tracks,
             score.false_tracks,
+            score.wrong_plots,
             score.false_applied,
             score.swaps,
             score.assignment_rows
+        ));
+        s.push_str(&format!(
+            "  measured-window identity evidence: {} wrong-aircraft plots and {} swaps in {} assignment rows.\n",
+            score.measured_wrong_plots, score.measured_swaps, score.measured_assignment_rows
         ));
         match score.first_confirmed_s {
             Some(timing) if timing.n > 0 => s.push_str(&format!(
@@ -1704,6 +1755,32 @@ mod tests {
         assert_eq!(result.fusion.assign_log_overflow, 0);
         assert!(cap_text(&result).contains("truth-derived final snapshot"));
         assert!(cap_kv(&result).get("truth_score.status").is_some());
+        assert!(cap_kv(&result)
+            .get("truth_score.measured_wrong_plots")
+            .is_some());
+    }
+
+    #[test]
+    fn truth_score_remains_available_during_a_bounded_adsb_dropout() {
+        let mut cfg = small(80, 10, 5);
+        cfg.truth_score = true;
+        cfg.adsb_dropout_s = Some(3);
+        cfg.radar_no_altitude = true;
+        let result = run_capacity(&cfg).unwrap();
+        let score = result.truth_score.expect("complete assignment evidence");
+        assert_eq!(result.truth_score_unavailable, None);
+        assert_eq!(result.adsb_dropout_s, Some(3));
+        assert!(result.adsb_dropout_reports > 0);
+        assert!(result.radar_altitudes_removed > 0);
+        assert_eq!(
+            score.matched_aircraft + score.missing_aircraft,
+            score.offered_aircraft
+        );
+        let kv = cap_kv(&result);
+        assert_eq!(kv.get("truth_score.status"), Some("available"));
+        assert!(kv.get("truth_score.wrong_plots").is_some());
+        assert!(kv.get("truth_score.measured_wrong_plots").is_some());
+        assert!(score.measured_assignment_rows > 0);
     }
 
     // REQ: OA-PRF-012
