@@ -30,6 +30,7 @@ pub mod assoc;
 pub mod canon;
 pub mod canon_spill;
 pub mod coarse;
+mod coarse_polar;
 mod confirm;
 mod filter;
 pub mod fixed_map;

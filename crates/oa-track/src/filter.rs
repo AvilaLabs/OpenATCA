@@ -20,17 +20,19 @@
 //! whether or not the update carries an altitude.
 
 use oa_adsb::{jump_verdict, JumpPair, JumpVerdict, CAP_ORDINARY_KT, NONE_U16};
+#[cfg(test)]
+use oa_geo::aeqd::unproject;
 use oa_geo::aeqd::{
     frame_at_fix, frame_from_trig, frame_new, frame_trig, mat2_apply, mat2_congruence, project,
-    try_frame_change, try_frame_from_true, try_frame_to_true, unproject, unproject_fix, Frame,
+    try_frame_change, try_frame_from_true, unproject_fix, unproject_with_frame_to_true, Frame,
     Mat2,
 };
 
 use crate::confirm::move_is_large;
 use crate::gate_trace::{gate_trace_push, GateTraceRow};
 use crate::hfilter::{
-    dwell_decay, h_change_frame, h_combine, h_gate_d2, h_init, h_pos_nis, h_predict, h_update,
-    h_vel_gate_d2, HFilter, VelMeas,
+    dwell_decay, h_change_frame, h_combine, h_gate_d2, h_init, h_pos_moments, h_pos_nis, h_predict,
+    h_predict_pos_moments, h_update, h_vel_gate_d2, HFilter, VelMeas,
 };
 use crate::params::{
     ALT_BASE_SIGMA_FT, ALT_GATE_SIGMAS, GATE_CHI2, NS_PER_S, PLAUSIBLE_SLACK_M, RESYNC_AFTER,
@@ -628,13 +630,13 @@ pub(crate) fn filter_output_checked(f: &Filter, t_ns: i64) -> Result<OutRow, Pre
     let xg = |i: usize| x.get(i).copied().unwrap_or(0.0);
     let pg = |i: usize, j: usize| p.get(i).and_then(|r| r.get(j)).copied().unwrap_or(0.0);
     // A state past the chart has no position.
-    let (la, lo) = unproject(&frame, xg(0), xg(1)).ok_or(PredictError::Unrepresentable)?;
+    let ((la, lo), jt) =
+        unproject_with_frame_to_true(&frame, xg(0), xg(1)).ok_or(PredictError::Unrepresentable)?;
     let (lat_e7, lon_e7) = (
         to_e7(la).ok_or(PredictError::Unrepresentable)?,
         to_e7(lo).ok_or(PredictError::Unrepresentable)?,
     );
     // The state is in the plane of the frame; the output is in east and north at the point.
-    let jt = try_frame_to_true(&frame, xg(0), xg(1)).ok_or(PredictError::Unrepresentable)?;
     let (ve, vn) = mat2_apply(&jt, (xg(2), xg(3)));
     let pc = mat2_congruence(&jt, &[pg(0, 0), pg(0, 1), pg(1, 1)]);
     let vc = mat2_congruence(&jt, &[pg(2, 2), pg(2, 3), pg(3, 3)]);
@@ -663,6 +665,54 @@ pub(crate) fn filter_output_checked(f: &Filter, t_ns: i64) -> Result<OutRow, Pre
         },
         mu_h: [h.mu[0] as f32, h.mu[1] as f32],
         mu_v: [vf.mu[0] as f32, vf.mu[1] as f32],
+        flags: if has_alt { O_HAS_ALT } else { 0 },
+    })
+}
+
+/// Forecast fields used by radar association. Position, position covariance, altitude and
+/// altitude variance are bit-identical to [`filter_output_checked`]; velocity output, turn rate
+/// and model-probability presentation fields are deliberately not computed because association
+/// never reads them.
+pub(crate) fn filter_association_output_checked(
+    f: &Filter,
+    t_ns: i64,
+) -> Result<OutRow, PredictError> {
+    let dt = filter_forecast_seconds(f, t_ns)?;
+    let frame = filter_frame(f);
+    let (position, vf) = if dt > 0.0 {
+        let u = dwell_decay(dt);
+        (
+            h_predict_pos_moments(&f.h, dt, u, f.h_mode).ok_or(PredictError::Numerical)?,
+            v_predict(&f.v, dt, u),
+        )
+    } else {
+        (h_pos_moments(&f.h), f.v)
+    };
+    let ([east, north], position_covariance) = position;
+    let ((la, lo), jt) =
+        unproject_with_frame_to_true(&frame, east, north).ok_or(PredictError::Unrepresentable)?;
+    let (lat_e7, lon_e7) = (
+        to_e7(la).ok_or(PredictError::Unrepresentable)?,
+        to_e7(lo).ok_or(PredictError::Unrepresentable)?,
+    );
+    let pc = mat2_congruence(&jt, &position_covariance);
+    let (xv, pv) = v_combine(&vf);
+    let has_alt = f.has_alt != 0;
+    Ok(OutRow {
+        t_ns,
+        addr: 0,
+        lat_e7,
+        lon_e7,
+        vel_east_mps: 0.0,
+        vel_north_mps: 0.0,
+        pos_cov_m2: [pc[0] as f32, pc[1] as f32, pc[2] as f32],
+        vel_cov_m2s2: [0.0; 3],
+        turn_rate_rps: 0.0,
+        alt_ft: if has_alt { xv[0] as f32 } else { f32::NAN },
+        alt_var_ft2: if has_alt { pv[0] as f32 } else { f32::NAN },
+        vrate_fpm: 0.0,
+        mu_h: [0.0; 2],
+        mu_v: [0.0; 2],
         flags: if has_alt { O_HAS_ALT } else { 0 },
     })
 }
@@ -702,7 +752,6 @@ pub(crate) fn filter_altitude_forecast(
 )]
 mod tests {
     use super::*;
-    use crate::hfilter::h_pos_moments;
     use crate::types::NO_ADDR;
     use oa_geo::aeqd::Frame;
 
@@ -823,6 +872,40 @@ mod tests {
         ));
         assert!(filter_output(&f, i64::MAX).is_none());
         assert_eq!(f, before);
+    }
+
+    #[test]
+    fn association_forecast_matches_every_gate_input_of_the_full_row() {
+        let moving = moving_track(42.0, 0.05, 2.0, [100.0, 2.0, 144.0], [4.0, 0.5, 9.0]);
+        let mut altitude_measurement = meas(42.0, -88.0, 0, [81.0, -1.0, 121.0]);
+        altitude_measurement.alt_ft = 20_000;
+        altitude_measurement.alt_quant_ft = 25;
+        let altitude = filter_init(&altitude_measurement, 0);
+        for filter in [moving, altitude] {
+            for at_ns in [
+                filter.t_ns,
+                filter.t_ns + NS_PER_S,
+                filter.t_ns + 6 * NS_PER_S,
+            ] {
+                let full = filter_output_checked(&filter, at_ns).unwrap();
+                let association = filter_association_output_checked(&filter, at_ns).unwrap();
+                assert_eq!(association.t_ns, full.t_ns);
+                assert_eq!(
+                    (association.lat_e7, association.lon_e7),
+                    (full.lat_e7, full.lon_e7)
+                );
+                assert_eq!(
+                    association.pos_cov_m2.map(f32::to_bits),
+                    full.pos_cov_m2.map(f32::to_bits)
+                );
+                assert_eq!(association.alt_ft.to_bits(), full.alt_ft.to_bits());
+                assert_eq!(
+                    association.alt_var_ft2.to_bits(),
+                    full.alt_var_ft2.to_bits()
+                );
+                assert_eq!(association.flags & O_HAS_ALT, full.flags & O_HAS_ALT);
+            }
+        }
     }
 
     /// A track at `(lat, 0)` with the true velocity that takes it to `(lat, lon_t)` in `dt` s

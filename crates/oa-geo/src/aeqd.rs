@@ -167,6 +167,47 @@ pub fn unproject(f: &Frame, x: f64, y: f64) -> Option<(f64, f64)> {
     unproject_fix(f, x, y).map(|p| (p.lat_deg, p.lon_deg))
 }
 
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+struct Radial {
+    rho: f64,
+    c: f64,
+    sc: f64,
+    cc: f64,
+    sa: f64,
+    ca: f64,
+    k: f64,
+}
+const _: () = assert!(core::mem::size_of::<Radial>() == 56);
+
+fn radial(f: &Frame, x: f64, y: f64) -> Option<Radial> {
+    let half = f.r * core::f64::consts::PI * (1.0 + 1e-12);
+    if !(x.abs() <= half && y.abs() <= half) {
+        return None;
+    }
+    let rho = oa_ieee::sqrt(x * x + y * y);
+    let c = rho / f.r;
+    if rho > half || !c.is_finite() || c >= core::f64::consts::PI - ANTIPODE_MARGIN_RAD {
+        return None;
+    }
+    let (sa, ca) = if rho < 1e-9 {
+        (0.0, 1.0)
+    } else {
+        (x / rho, y / rho)
+    };
+    let (sc, cc) = sin_cos_near_zero(c);
+    let k = if c < 1e-8 { 1.0 } else { sc / c };
+    Some(Radial {
+        rho,
+        c,
+        sc,
+        cc,
+        sa,
+        ca,
+        k,
+    })
+}
+
 /// [`unproject`] keeping what the computation knew about the point's latitude and longitude, for
 /// [`frame_at_fix`].
 ///
@@ -176,16 +217,12 @@ pub fn unproject(f: &Frame, x: f64, y: f64) -> Option<(f64, f64)> {
 /// length of `(X, Y)`); the point's `sin` and `cos` come out of the same quantities. Elsewhere
 /// the library `asin` and `atan2` are used. The results agree to rounding.
 pub fn unproject_fix(f: &Frame, x: f64, y: f64) -> Option<Fix> {
-    // Each component is bounded before squaring, so the sum cannot overflow; `sqrt` is exactly
-    // rounded on every platform, unlike a library `hypot`.
-    let half = f.r * core::f64::consts::PI * (1.0 + 1e-12);
-    if !(x.abs() <= half && y.abs() <= half) {
-        return None;
-    }
-    let rho = oa_ieee::sqrt(x * x + y * y);
-    if rho > half || rho / f.r >= core::f64::consts::PI - ANTIPODE_MARGIN_RAD {
-        return None;
-    }
+    let radial = radial(f, x, y)?;
+    unproject_fix_radial(f, x, y, radial)
+}
+
+fn unproject_fix_radial(f: &Frame, x: f64, y: f64, radial: Radial) -> Option<Fix> {
+    let Radial { rho, c, sc, cc, .. } = radial;
     if rho < 1e-9 {
         return Some(Fix {
             lat_deg: f.lat0.to_degrees(),
@@ -194,8 +231,6 @@ pub fn unproject_fix(f: &Frame, x: f64, y: f64) -> Option<Fix> {
             lat_trig: Some((f.sin0, f.cos0)),
         });
     }
-    let c = rho / f.r;
-    let (sc, cc) = sin_cos_near_zero(c);
     let sl = oa_math::clamp_f64(cc * f.sin0 + y * sc * f.cos0 / rho, -1.0, 1.0);
     let (xs, ys) = (x * sc, rho * f.cos0 * cc - y * f.sin0 * sc);
     if c <= SIN_COS_LIMIT && f.sin0.abs() <= 0.9 {
@@ -315,25 +350,13 @@ fn axes_rotation(from: &Frame, to: &Frame) -> [V3; 3] {
 /// scaled by `sin c / c` (`c` the angle from the origin), so the displacements are exact.
 /// `None` outside the chart's domain ([`ANTIPODE_MARGIN_RAD`]), where the scale is not exact.
 fn local(f: &Frame, x: f64, y: f64) -> Option<(V3, [V3; 2], f64)> {
-    // The plane position is bounded in every use (a chart point, a filter state); `hypot` only
-    // guards a component whose square could overflow.
-    let rho = if x.abs() < 1e150 && y.abs() < 1e150 {
-        oa_ieee::sqrt(x * x + y * y)
-    } else {
-        oa_math::hypot(x, y)
-    };
-    let c = rho / f.r;
-    if !c.is_finite() || c >= core::f64::consts::PI - ANTIPODE_MARGIN_RAD {
-        return None;
-    }
-    let (sa, ca) = if rho < 1e-9 {
-        (0.0, 1.0)
-    } else {
-        (x / rho, y / rho)
-    };
-    let (sc, cc) = sin_cos_near_zero(c);
-    // Exact: the factor vanishes only at the origin's antipode, which the domain excludes.
-    let k = if c < 1e-8 { 1.0 } else { sc / c };
+    Some(local_radial(f, radial(f, x, y)?))
+}
+
+fn local_radial(f: &Frame, radial: Radial) -> (V3, [V3; 2], f64) {
+    let Radial {
+        sc, cc, sa, ca, k, ..
+    } = radial;
     let u = [cc * sa, cc * ca, -sc];
     let t = [ca, -sa, 0.0];
     let col = |p: f64, q: f64| {
@@ -343,7 +366,7 @@ fn local(f: &Frame, x: f64, y: f64) -> Option<(V3, [V3; 2], f64)> {
             (p * u[2] + q * k * t[2]) / f.r,
         ]
     };
-    Some(([sc * sa, sc * ca, cc], [col(sa, ca), col(ca, -sa)], k))
+    ([sc * sa, sc * ca, cc], [col(sa, ca), col(ca, -sa)], k)
 }
 
 /// The point's unit east and north vectors and the WGS-84 radii `(N, M)` there, in the frame's
@@ -377,9 +400,26 @@ fn enu(f: &Frame, p: &V3) -> (V3, V3, f64, f64) {
 /// `None` outside the chart's domain ([`ANTIPODE_MARGIN_RAD`]); never a regularised value.
 pub fn try_frame_to_true(f: &Frame, x: f64, y: f64) -> Option<Mat2> {
     let (p, cols, _) = local(f, x, y)?;
-    let (east, north, n, m) = enu(f, &p);
+    Some(frame_to_true_from_local(f, &p, &cols))
+}
+
+fn frame_to_true_from_local(f: &Frame, p: &V3, cols: &[V3; 2]) -> Mat2 {
+    let (east, north, n, m) = enu(f, p);
     let row = |v: &V3, radius: f64| [radius * dot(v, &cols[0]), radius * dot(v, &cols[1])];
-    Some([row(&east, n), row(&north, m)])
+    [row(&east, n), row(&north, m)]
+}
+
+/// [`unproject`] and [`try_frame_to_true`] from one shared radial calculation. The returned
+/// position and differential are bit-identical to the separate calls; callers that need both
+/// avoid repeating the chart-domain check, square root and angular trigonometry.
+pub fn unproject_with_frame_to_true(f: &Frame, x: f64, y: f64) -> Option<((f64, f64), Mat2)> {
+    let radial = radial(f, x, y)?;
+    let fix = unproject_fix_radial(f, x, y, radial)?;
+    let (p, cols, _) = local_radial(f, radial);
+    Some((
+        (fix.lat_deg, fix.lon_deg),
+        frame_to_true_from_local(f, &p, &cols),
+    ))
 }
 
 /// [`try_frame_to_true`] where the caller has a matrix to fill: every entry NaN outside the
@@ -529,6 +569,36 @@ mod tests {
             let (x, y) = project(&f, la, lo);
             let (la2, lo2) = unproject(&f, x, y).unwrap();
             assert!((la - la2).abs() < 1e-9 && (lo - lo2).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn combined_unprojection_and_differential_are_bit_identical_to_separate_calls() {
+        for origin in [(41.9, -88.3), (89.9999, 20.0), (-89.9999, 170.0)] {
+            let f = frame_new(origin.0, origin.1);
+            for (x, y) in [
+                (0.0, 0.0),
+                (1.0e-10, -1.0e-10),
+                (125_000.0, -87_000.0),
+                (-900_000.0, 1_300_000.0),
+            ] {
+                let position = unproject(&f, x, y).unwrap();
+                let differential = try_frame_to_true(&f, x, y).unwrap();
+                let (combined_position, combined_differential) =
+                    unproject_with_frame_to_true(&f, x, y).unwrap();
+                assert_eq!(
+                    [combined_position.0.to_bits(), combined_position.1.to_bits()],
+                    [position.0.to_bits(), position.1.to_bits()]
+                );
+                assert_eq!(
+                    combined_differential.map(|row| row.map(f64::to_bits)),
+                    differential.map(|row| row.map(f64::to_bits))
+                );
+            }
+            for (x, y) in [(f64::NAN, 0.0), (f64::INFINITY, 0.0), (1.0e200, 1.0e200)] {
+                assert!(unproject_with_frame_to_true(&f, x, y).is_none());
+                assert!(unproject(&f, x, y).is_none() || try_frame_to_true(&f, x, y).is_none());
+            }
         }
     }
 

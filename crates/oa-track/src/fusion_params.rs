@@ -33,9 +33,10 @@ pub const GATE_TOTAL_CHI2: f64 = 21.11;
 /// Covers the motion within a bucket at 360 m/s with room; it only saves work, the exact gate
 /// decides.
 pub const COARSE_M: f64 = 3_000.0;
-/// The standard coarse search radius, metres: the grid is searched this far from a plot, which
-/// covers every track whose own window ([`COARSE_M`] plus eight standard deviations) is no wider,
-/// that is, a standard deviation up to 187 m. A track with a wider window is on the wide list.
+/// The standard coarse search radius, metres: the polar posting index is queried at this width.
+/// It covers every track whose own window ([`COARSE_M`] plus eight standard deviations) is no wider,
+/// that is, a standard deviation up to 187 m. A track with a wider window is on the wide list and
+/// is included in each anonymous plot's candidate set.
 pub const COARSE_STD_M: f64 = 4_500.0;
 /// Limit: tracks on the wide list of one association, 4,096 (the tracks with a standard deviation
 /// above 187 m: starved tracks and the coarse ones; the limit is far above what the stress
@@ -174,10 +175,15 @@ pub const KEY_RADAR_BASE: u32 = crate::types::RADAR_KEY_BASE;
 pub const MAX_BUCKET_PLOTS: usize = 16_384;
 /// Limit: gated candidate pairs of one association; pairs beyond are counted and not formed.
 pub const MAX_BUCKET_PAIRS: usize = 1 << 18;
-/// Limit: work in the associations of one bucket, all radars together, 1 Mi: a (plot, track) pair
-/// given the exact gate costs one unit (about two microseconds) and so does a candidate the coarse
-/// window is applied to (much less), so this is about the longest a bucket can take.
+/// Limit: charged association work in one bucket, all radars together, 1 Mi: each candidate visit
+/// and each exact pair costs one unit. This is a work budget, not a measured time or latency bound.
 pub const MAX_BUCKET_TESTS: usize = 1 << 20;
+/// Limit: polar posting construction and query work of one bucket, all radars together, 16 Mi.
+/// The per-radar wide-track classification pass and posting-build pass each charge input-track
+/// visits; posting ordering charges its in-place heapsort operations. Queries charge prefix
+/// probes, inspected postings, and candidate ordering. Exhaustion makes that radar's anonymous
+/// graph incomplete, so OA-TRK-299 defers it whole.
+pub const MAX_BUCKET_POLAR_WORK: usize = 1 << 24;
 /// Limit: ordering candidates of plots whose coarse lists exceed their remaining visit share.
 /// At most one plot per radar per bucket uses this allowance. For n supported tracks, reserve
 /// 2n for distance calculation and retained keys, 3n for the outer heap loops, and at most

@@ -304,6 +304,11 @@ pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
         ("bucket_work_capped", s.bucket_work_capped),
         ("assoc_refused", s.assoc_refused),
         ("coarse_visits", s.coarse_visits),
+        ("polar_index_work", s.polar_index_work),
+        ("polar_index_build_work", s.polar_index_build_work),
+        ("polar_index_query_work", s.polar_index_query_work),
+        ("polar_index_queries", s.polar_index_queries),
+        ("polar_index_track_visits", s.polar_index_track_visits),
         ("pairs_tested", s.pairs_tested),
         ("pairs_rejected_by_altitude", s.pairs_rejected_by_altitude),
         ("pairs_gated", s.pairs_gated),
@@ -358,6 +363,11 @@ pub const FUSION_NOT_LOSS: &[&str] = &[
     "hard_extra",
     "held_forced",
     "coarse_visits",
+    "polar_index_work",
+    "polar_index_build_work",
+    "polar_index_query_work",
+    "polar_index_queries",
+    "polar_index_track_visits",
     "pairs_tested",
     "pairs_rejected_by_altitude",
     "pairs_gated",
@@ -1526,6 +1536,38 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     for (name, v) in fusion_counters(&measured_fusion) {
         kv.put(&format!("fusion.{name}"), v);
     }
+    for (name, final_value, warm_value) in [
+        (
+            "polar_index_work",
+            r.fusion.polar_index_work,
+            r.fusion_warm.polar_index_work,
+        ),
+        (
+            "polar_index_build_work",
+            r.fusion.polar_index_build_work,
+            r.fusion_warm.polar_index_build_work,
+        ),
+        (
+            "polar_index_query_work",
+            r.fusion.polar_index_query_work,
+            r.fusion_warm.polar_index_query_work,
+        ),
+        (
+            "polar_index_queries",
+            r.fusion.polar_index_queries,
+            r.fusion_warm.polar_index_queries,
+        ),
+        (
+            "polar_index_track_visits",
+            r.fusion.polar_index_track_visits,
+            r.fusion_warm.polar_index_track_visits,
+        ),
+    ] {
+        kv.put(
+            &format!("fusion_measured.{name}"),
+            final_value.saturating_sub(warm_value),
+        );
+    }
     for (name, v) in tracker_counters(&r.tracker) {
         kv.put(&format!("tracker.{name}"), v);
     }
@@ -1680,6 +1722,24 @@ pub fn cap_text(r: &CapResult) -> String {
         "  (warm-up seconds, for comparison)",
         "ms",
         &r.warmup_advance_ms,
+    ));
+    s.push_str(&format!(
+        "  measured polar-index work: {} total = {} build + {} query; {} queries; {} build track visits\n",
+        r.fusion
+            .polar_index_work
+            .saturating_sub(r.fusion_warm.polar_index_work),
+        r.fusion
+            .polar_index_build_work
+            .saturating_sub(r.fusion_warm.polar_index_build_work),
+        r.fusion
+            .polar_index_query_work
+            .saturating_sub(r.fusion_warm.polar_index_query_work),
+        r.fusion
+            .polar_index_queries
+            .saturating_sub(r.fusion_warm.polar_index_queries),
+        r.fusion
+            .polar_index_track_visits
+            .saturating_sub(r.fusion_warm.polar_index_track_visits),
     ));
     s.push_str(&dist_line(
         "input-to-effect delay, ADS-B",

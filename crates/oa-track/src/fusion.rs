@@ -11,9 +11,9 @@
 //! 1. **Association, per radar, from the state at the start of the bucket.** A plot with a Mode S
 //!    address goes to the track with that key (a hard constraint; the filter's own jump gate
 //!    still counts a contradiction). Any other plot is converted (`radar.rs`) with the radar's
-//!    current registration correction, gated against the live tracks by a coarse window (applied
-//!    to the tracks in the cells of a latitude and longitude grid the plot can reach, `coarse.rs`,
-//!    which finds exactly what testing every track finds; the radars' plots are gated in turn,
+//!    current registration correction, gated against the live tracks by a coarse window (narrowed
+//!    by the bounded radar-polar posting index in `coarse_polar.rs`, then checked by the exact
+//!    predicate; the radars' plots are gated in turn,
 //!    the radar that has spent least work first, against one work limit per bucket) and then by
 //!    the exact Mahalanobis distance (horizontal against the track's predicted position and
 //!    covariance, vertical against its altitude), and the gated pairs are assigned by global
@@ -62,10 +62,13 @@ use crate::assoc::{
     NONE as NO_TRACK, PATH_NONE, REGRET_EXACT, REGRET_NONE, REGRET_OUT_OF_SCOPE, REGRET_SINGLE,
 };
 use crate::coarse::{
-    coarse_buffer, coarse_build, coarse_distance, coarse_new, coarse_passes, coarse_query,
-    point_grid_buffer, point_grid_build_budgeted, point_grid_new, point_grid_query_budgeted,
-    point_grid_radix_buffer, sort_unique_indices_budgeted, sort_values_budgeted, CoarseIndex,
-    PointGrid, PointGridBuildResult, PointGridQueryResult, SortUniqueResult,
+    coarse_distance, coarse_passes, point_grid_buffer, point_grid_build_budgeted, point_grid_new,
+    point_grid_query_budgeted, point_grid_radix_buffer, sort_unique_indices_budgeted,
+    sort_values_budgeted, PointGrid, PointGridBuildResult, PointGridQueryResult, SortUniqueResult,
+};
+use crate::coarse_polar::{
+    polar_buffers, polar_build, polar_new, polar_query, PolarBuildResult, PolarIndex,
+    PolarQueryResult, PolarQuerySpec,
 };
 use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
@@ -74,27 +77,31 @@ use crate::fusion_params::{
     CAND_ORDER_WORDS, CAND_SLACK_M, COARSE_M, COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S,
     GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2,
     HOLD_MAX_RUN, INIT_CELL_M, INIT_STD_M, INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS,
-    MAX_ASSOC_ORDER_WORK, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS,
-    MAX_CANDIDATES, MAX_INIT_WORK, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS, MAX_TRACK_RECS,
-    RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX,
-    REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES, REG_MIN_NACP,
-    REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
-    RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
+    MAX_ASSOC_ORDER_WORK, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS,
+    MAX_BUCKET_POLAR_WORK, MAX_BUCKET_TESTS, MAX_CANDIDATES, MAX_INIT_WORK, MAX_PENDING,
+    MAX_RADARS, MAX_SOLVE_TRACKS, MAX_TRACK_RECS, RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N,
+    RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M,
+    REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS,
+    REG_REF_SLOTS, REG_REF_SLOTS_MAX, RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
 use crate::radar::{
-    plot_check, plot_convert, polar_of, radar_geom, site_check, Bias, Converted, RadarError,
-    RadarGeom, RadarPlot, RadarSite, FT_M, NONE_ALT, NONE_CODE, NO_BIAS,
+    plot_check, plot_convert, plot_convert_prepared, plot_prepare, polar_of, radar_geom,
+    site_check, Bias, Converted, RadarError, RadarGeom, RadarPlot, RadarSite, FT_M, NONE_ALT,
+    NONE_CODE, NO_BIAS,
 };
 use crate::registration::{
     reg_bias, reg_new_with, reg_offer, reg_predict, reg_residual, reg_sample, RegSample, RegState,
     Residual,
 };
+#[cfg(test)]
+use crate::tracker::tracker_predict_if_altitude;
 use crate::tracker::{
     check_advance_time, tracker_advance, tracker_buffers, tracker_flush, tracker_has_key,
     tracker_is_confirmed, tracker_live_iter, tracker_new, tracker_note_radar_disagreement,
-    tracker_predict_checked, tracker_predict_if_altitude, tracker_set_expected_interval,
-    tracker_stats, tracker_update, Tracker,
+    tracker_predict_checked, tracker_predict_for_association,
+    tracker_predict_for_association_if_altitude, tracker_set_expected_interval, tracker_stats,
+    tracker_update, Tracker,
 };
 use crate::types::{
     output_clear, output_new, output_push, Measurement, OutRow, PredictError, TrackError,
@@ -277,15 +284,25 @@ pub struct FusionStats {
     pub held_forced: u64,
     /// Plots beyond [`MAX_BUCKET_PLOTS`] of one radar in one bucket: dropped.
     pub bucket_plot_overflow: u64,
-    /// Associations cut short at [`MAX_BUCKET_TESTS`] units of work (coarse candidates and exact
-    /// tests, shared by the radars of a bucket) or [`MAX_BUCKET_PAIRS`] pairs.
+    /// Associations cut short at [`MAX_BUCKET_TESTS`] candidate/gate units, the shared
+    /// [`MAX_BUCKET_POLAR_WORK`] index units, or [`MAX_BUCKET_PAIRS`] pairs.
     pub bucket_work_capped: u64,
     /// Assignments the solver refused (an invalid gate or too large an input): every plot of
     /// that solve is then unassigned.
     pub assoc_refused: u64,
-    /// Candidates the coarse window was applied to, taken from the grid cells a plot reaches
-    /// (charged to the bucket's work limit like the exact tests).
+    /// Candidates the coarse window was applied to (charged to [`MAX_BUCKET_TESTS`]).
     pub coarse_visits: u64,
+    /// Polar index build and query work, charged to the one shared [`MAX_BUCKET_POLAR_WORK`]
+    /// allowance per bucket.
+    pub polar_index_work: u64,
+    /// Polar index construction work; denominator is `polar_index_track_visits`.
+    pub polar_index_build_work: u64,
+    /// Polar index lookup work; denominator is `polar_index_queries`.
+    pub polar_index_query_work: u64,
+    /// Polar index lookups attempted for anonymous plots.
+    pub polar_index_queries: u64,
+    /// Track slots visited during wide classification and posting builds, including skipped slots.
+    pub polar_index_track_visits: u64,
     /// Pairs tested by the exact gate, and those inside it.
     pub pairs_tested: u64,
     /// Pairs that the exact vertical gate could reject before predicting horizontal motion.
@@ -728,15 +745,17 @@ pub struct Fusion {
     /// as above).
     pairs_bufs: Vec<Vec<Pair>>,
     infos_bufs: Vec<Vec<PairInfo>>,
-    /// Per radar, the grid of the live tracks, and the candidates of one plot: all allocated at
-    /// start for the tracker's capacity.
-    grids: Vec<CoarseIndex>,
+    /// Per radar, the polar index of standard-window tracks, and one plot's candidates, allocated
+    /// at start for the tracker's capacity.
+    grids: Vec<PolarIndex>,
     cand_buf: Vec<u32>,
     /// Scratch for one packed distance and track index per configured association slot.
     cand_rank_buf: Vec<u128>,
     /// Work (coarse candidates and exact gates) one bucket's associations may spend in all (a
     /// field so a test can lower it).
     bucket_tests_max: usize,
+    /// Polar build/query allowance shared by a bucket's radars (a field so a test can lower it).
+    polar_work_max: usize,
     /// Initiation allowance shared across the radars of the current bucket.
     init_work_left: usize,
     init_capped_mask: u16,
@@ -744,7 +763,7 @@ pub struct Fusion {
     init_work_max: usize,
     /// Tracks on one association's wide list at most (a field so a test can lower it).
     wide_max: usize,
-    /// Test only: test every track against the coarse window, as before the grid.
+    /// Test only: test every track against the coarse window, bypassing polar narrowing.
     #[cfg(test)]
     brute_coarse: bool,
     /// Per address: what registration needs of its ADS-B. Holds only keys the tracker holds (cut
@@ -848,11 +867,12 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
             .collect(),
         grids: sites
             .iter()
-            .map(|_| coarse_new(cfg.tracker.max_tracks))
+            .map(|_| polar_new(cfg.tracker.max_tracks))
             .collect(),
         cand_buf: Vec::with_capacity(cfg.tracker.max_tracks),
         cand_rank_buf: Vec::with_capacity(cfg.tracker.max_tracks),
         bucket_tests_max: MAX_BUCKET_TESTS,
+        polar_work_max: MAX_BUCKET_POLAR_WORK,
         init_work_left: MAX_INIT_WORK,
         init_capped_mask: 0,
         #[cfg(test)]
@@ -907,8 +927,8 @@ pub fn fusion_registration(f: &Fusion, radar: usize) -> Option<(&RegState, &[Reg
 /// allocator needs `unsafe`, which A0 forbids here).
 pub fn fusion_assoc_buffers(f: &Fusion) -> Vec<(usize, usize)> {
     let mut v = assoc_scratch_buffers(&f.assoc);
-    // The grid of each radar and the candidates of a plot.
-    v.extend(f.grids.iter().map(coarse_buffer));
+    // The polar index of each radar and the candidates of a plot.
+    v.extend(f.grids.iter().flat_map(polar_buffers));
     v.push((f.cand_buf.as_ptr() as usize, f.cand_buf.capacity()));
     v.push((
         f.cand_rank_buf.as_ptr() as usize,
@@ -1233,11 +1253,7 @@ fn cov_f64(c: [f32; 3]) -> [f64; 3] {
     [f64::from(c[0]), f64::from(c[1]), f64::from(c[2])]
 }
 
-/// Squared Mahalanobis distance of a converted position from a track row, horizontally.
-fn d2_horizontal(row: &OutRow, z_lat: f64, z_lon: f64, z_cov: [f64; 3]) -> f64 {
-    let frame = frame_new(f64::from(row.lat_e7) / 1.0e7, f64::from(row.lon_e7) / 1.0e7);
-    let (x, y) = project(&frame, z_lat, z_lon);
-    let p = cov_f64(row.pos_cov_m2);
+fn d2_horizontal_offset(x: f64, y: f64, p: [f64; 3], z_cov: [f64; 3]) -> f64 {
     let s = [p[0] + z_cov[0], p[1] + z_cov[1], p[2] + z_cov[2]];
     let det = s[0] * s[2] - s[1] * s[1];
     if !(det.is_finite() && det > 0.0) {
@@ -1306,10 +1322,6 @@ fn d2_vertical_values(
 #[derive(Debug, Clone, Copy)]
 struct TrackAt {
     key: u32,
-    lat: f64,
-    lon: f64,
-    /// Height above the radar, metres.
-    dh: f64,
     rho: f64,
     az: f64,
     ground: f64,
@@ -1346,9 +1358,6 @@ fn tracks_at(f: &Fusion, radar: usize, at_ns: i64, v: &mut Vec<TrackAt>) -> (u64
         let c = cov_f64(row.pos_cov_m2);
         let at = TrackAt {
             key,
-            lat,
-            lon,
-            dh,
             rho,
             az,
             ground,
@@ -1420,16 +1429,18 @@ fn pair_cost(
         f64::from(conv.m.lon_e7) / 1.0e7,
     );
     let zc = cov_f64(conv.m.pos_cov_m2);
-    let dh = d2_horizontal(row, plat, plon, zc);
+    let frame = frame_new(f64::from(row.lat_e7) / 1.0e7, f64::from(row.lon_e7) / 1.0e7);
+    let (x, y) = project(&frame, plat, plon);
+    let p = cov_f64(row.pos_cov_m2);
+    let dh = d2_horizontal_offset(x, y, p, zc);
     // The gate allows for a manoeuvre the filter has not caught up with; the cost does not, so a
     // pair that passes only by that allowance costs just under the gate and is assigned only
     // where no better pair competes for either side.
-    let dh_gate = d2_horizontal(
-        row,
-        plat,
-        plon,
-        [zc[0] + man * man, zc[1], zc[2] + man * man],
-    );
+    let dh_gate = if man == 0.0 {
+        dh
+    } else {
+        d2_horizontal_offset(x, y, p, [zc[0] + man * man, zc[1], zc[2] + man * man])
+    };
     let since = plot.time_ns.saturating_sub(last_ns);
     let dv = d2_vertical(row, plot, quant_ft, since, 0.0);
     let dv_gate = d2_vertical(row, plot, quant_ft, since, GATE_VRATE_SIGMA_FPM);
@@ -1458,11 +1469,14 @@ struct RadarAssoc {
     /// Indices of the anonymous plots, to map back from the solver's compact plot numbers.
     anon: Vec<usize>,
     conv_own: Vec<Option<Converted>>,
-    grid: CoarseIndex,
-    /// The tracks with a coarse window above the standard one, ascending, and the tallest of
-    /// the others above or below the radar.
+    grid: PolarIndex,
+    polar_index_work: usize,
+    polar_index_build_work: usize,
+    polar_index_query_work: usize,
+    polar_index_queries: u64,
+    polar_index_track_visits: u64,
+    /// Tracks with a coarse window above the standard one, in ascending track order.
     wide: Vec<u32>,
-    dh_max: f64,
     pairs: Vec<Pair>,
     infos: Vec<PairInfo>,
     /// Where the loop over the anonymous plots starts (see [`loop_start`]), the number started
@@ -1496,9 +1510,21 @@ fn loop_start(bucket: i64, radar: usize, n: usize) -> usize {
     (z % n as u64) as usize
 }
 
+fn charge_polar_work(remaining: &mut usize, spent: &mut usize) -> bool {
+    let Some(next_spent) = spent.checked_add(1) else {
+        return false;
+    };
+    if *remaining == 0 {
+        return false;
+    }
+    *remaining -= 1;
+    *spent = next_spent;
+    true
+}
+
 /// The first part of one radar's association of a bucket (see the module documentation, step 1):
-/// the hard-constraint plots are decided and the tracks, the conversions and the grid made.
-fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
+/// the hard-constraint plots are decided and the tracks, conversions and polar index made.
+fn assoc_prepare(f: &mut Fusion, radar: usize, polar_remaining: &mut usize) -> Option<RadarAssoc> {
     let (Some(&g), Some(&s)) = (f.geoms.get(radar), f.sites.get(radar)) else {
         return None;
     };
@@ -1876,67 +1902,69 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
                 .and_then(|p| plot_convert(&g, &s, p, &bias, None, NO_ADDR).ok()),
         );
     }
-    // Each track has its own coarse window, [`COARSE_M`] plus eight standard deviations. The tracks
-    // whose window is above the standard search radius ([`COARSE_STD_M`]) are on the wide list,
-    // which every plot tests; the rest are in the grid, searched at the standard radius.
-    //
-    // Superset: the old search was the grid at the widest window of any live track, `W`, which
-    // returns every track that passes its own window at a plot (own window <= W, and the grid's
-    // proof covers any window up to the width it is searched at). Now a track with its own window
-    // <= COARSE_STD_M is in the grid, and the search width COARSE_STD_M is at least that window,
-    // so the same proof returns it whenever it passes its window; a track with a wider window (or
-    // a window that is not a number, which passes whatever its place) is on the wide list, tested
-    // for every plot. The union of the two lists, in track order, holds every track that passes
-    // its own window, which is every track the old search could test. A track refused for want of
-    // room on the wide list is left out of the association (`wide_full`).
+    // Every track with window `COARSE_M + 8*sigma` above the standard radius is on the fixed wide
+    // list. Other tracks receive one polar posting (regular width/range key or ALWAYS). A query
+    // widens each width band's radial cells outward, then applies the exact `coarse_passes`
+    // predicate while visiting postings. Thus the regular index plus the wide list is the same
+    // eligible set as testing every track. A track refused
+    // for want of wide-list room is left out and counted in `wide_full`.
     wide.clear();
     let mut candidate_set_complete = true;
+    let mut polar_work = 0usize;
+    let mut polar_track_visits = 0usize;
+    let mut width = 0.0f64;
     for (i, t) in tracks.iter().enumerate() {
+        if !charge_polar_work(polar_remaining, &mut polar_work) {
+            candidate_set_complete = false;
+            break;
+        }
+        polar_track_visits = polar_track_visits.saturating_add(1);
         if skip.get(i).copied().unwrap_or(true) {
             continue;
         }
-        if COARSE_M + 8.0 * t.sigma <= COARSE_STD_M {
-            continue;
-        }
-        if wide.len() < f.wide_max && push_within(&mut wide, i as u32) {
-            f.stats.wide_tracks_sum += 1;
-        } else {
-            f.stats.wide_full += 1;
-            candidate_set_complete = false;
-            if let Some(k) = skip.get_mut(i) {
-                *k = true;
+        let track_width = COARSE_M + 8.0 * t.sigma;
+        if !matches!(
+            track_width.partial_cmp(&COARSE_STD_M),
+            Some(core::cmp::Ordering::Less | core::cmp::Ordering::Equal)
+        ) {
+            if wide.len() < f.wide_max && push_within(&mut wide, i as u32) {
+                f.stats.wide_tracks_sum += 1;
+            } else {
+                f.stats.wide_full += 1;
+                candidate_set_complete = false;
+                if let Some(k) = skip.get_mut(i) {
+                    *k = true;
+                }
             }
         }
+        if !skip.get(i).copied().unwrap_or(true) {
+            width = width.max(track_width);
+        }
     }
-    let on_wide = |i: usize| wide.binary_search(&(i as u32)).is_ok();
+    // Both lists are ascending. The cursor makes membership linear over the whole build instead
+    // of doing an uncharged logarithmic search for every track; the build's one charged visit per
+    // track covers this amortized-constant check.
+    let mut wide_at = 0usize;
+    let mut on_wide = |i: usize| {
+        let index = u32::try_from(i).unwrap_or(u32::MAX);
+        while wide.get(wide_at).is_some_and(|&entry| entry < index) {
+            wide_at = wide_at.saturating_add(1);
+        }
+        wide.get(wide_at).copied() == Some(index)
+    };
     let mut grid = std::mem::take(f.grids.get_mut(radar)?);
-    coarse_build(
+    let built = polar_build(
         &mut grid,
-        (s.lat_deg, s.lon_deg),
         tracks.len(),
-        |i| {
-            tracks
-                .get(i)
-                .filter(|t| t.rho.is_finite() && t.az.is_finite() && t.ground.is_finite())
-                .map(|t| (t.lat, t.lon))
-        },
+        |i| tracks.get(i).map(|t| (t.rho, t.az, t.ground, t.sigma)),
         |i| skip.get(i).copied().unwrap_or(false) || on_wide(i),
+        polar_remaining,
+        &mut polar_work,
     );
-    let live = |i: usize| !skip.get(i).copied().unwrap_or(false);
-    // The tallest of the tracks in the grid above or below the radar.
-    let dh_max = tracks
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| live(*i) && !on_wide(*i))
-        .map(|(_, t)| t.dh.abs())
-        .fold(0.0, f64::max);
-    // The widest window of any live track (recorded, not searched at).
-    let width = tracks
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| live(*i))
-        .map(|(_, t)| COARSE_M + 8.0 * t.sigma)
-        .fold(0.0, f64::max);
+    polar_track_visits = polar_track_visits.saturating_add(match built {
+        PolarBuildResult::Complete { track_visits, .. }
+        | PolarBuildResult::Capped { track_visits, .. } => track_visits,
+    });
     f.stats.assoc_runs += 1;
     // A window width that is not a finite non-negative number (a huge covariance) is recorded as
     // the largest count, and the sum saturates: the statistic never panics the fusion.
@@ -1969,8 +1997,12 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         anon,
         conv_own,
         grid,
+        polar_index_work: polar_work,
+        polar_index_build_work: polar_work,
+        polar_index_query_work: 0,
+        polar_index_queries: 0,
+        polar_index_track_visits: u64::try_from(polar_track_visits).unwrap_or(u64::MAX),
         wide,
-        dh_max,
         pairs,
         infos,
         start: loop_start(f.done_bucket, radar, anon_len),
@@ -1978,10 +2010,11 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         wrap_pairs: None,
         last_cut_short: false,
         work: 0,
-        capped: false,
+        capped: matches!(built, PolarBuildResult::Capped { .. }),
         coarse_visits: 0,
         exact_checks: 0,
-        candidate_set_complete,
+        candidate_set_complete: candidate_set_complete
+            && matches!(built, PolarBuildResult::Complete { .. }),
     })
 }
 
@@ -2016,12 +2049,24 @@ fn merge_assoc_candidates(candidates: &mut Vec<u32>, wide: &[u32]) -> Option<()>
 
 /// Gates the anonymous plot's coarse and exact pairs within the shared visit budget.
 /// A capped plot ranks candidates once under a separate, bounded per-radar allowance.
-fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> usize {
+fn assoc_plot(
+    f: &mut Fusion,
+    ra: &mut RadarAssoc,
+    a: usize,
+    budget: usize,
+    polar_remaining: &mut usize,
+) -> usize {
     let Some(&j) = ra.anon.get(a) else { return 0 };
     let Some(p) = ra.plots.get(j) else { return 0 };
     let (g, s, bias) = (ra.g, ra.s, ra.bias);
     let prho = p.range_m - bias.range_m;
     let paz = (p.az_deg - bias.az_deg).rem_euclid(360.0);
+    let converted_once = ra.conv_own.get(a).copied().flatten();
+    let prepared = if converted_once.is_none() {
+        plot_prepare(&s, p, &bias).ok()
+    } else {
+        None
+    };
     let mut cand = std::mem::take(&mut f.cand_buf);
     #[cfg(test)]
     let brute = f.brute_coarse;
@@ -2031,7 +2076,34 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
         cand.clear();
         cand.extend(0..ra.tracks.len() as u32);
     } else {
-        coarse_query(&ra.grid, &mut cand, prho, paz, ra.dh_max, COARSE_STD_M);
+        ra.polar_index_queries = ra.polar_index_queries.saturating_add(1);
+        let tracks = &ra.tracks;
+        let query_work_before = ra.polar_index_query_work;
+        let result = polar_query(
+            &mut ra.grid,
+            &mut cand,
+            PolarQuerySpec {
+                plot: (prho, paz),
+                search_width: COARSE_STD_M,
+                exact_window: COARSE_M,
+            },
+            |i| {
+                tracks
+                    .get(i as usize)
+                    .map(|t| (t.rho, t.az, t.ground, t.sigma))
+            },
+            polar_remaining,
+            &mut ra.polar_index_query_work,
+        );
+        ra.polar_index_work = ra
+            .polar_index_work
+            .saturating_add(ra.polar_index_query_work.saturating_sub(query_work_before));
+        if !matches!(result, PolarQueryResult::Complete { .. }) {
+            f.cand_buf = cand;
+            ra.capped = true;
+            ra.candidate_set_complete = false;
+            return 0;
+        }
         if merge_assoc_candidates(&mut cand, &ra.wide).is_none() {
             f.stats.scratch_full += 1;
             f.cand_buf = cand;
@@ -2077,22 +2149,26 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
             break;
         }
         let forecast = if p.alt_ft == NONE_ALT {
-            tracker_predict_checked(&f.tracker, t.key, p.time_ns)
-                .map(|(row, _, last)| Some((row, last)))
+            tracker_predict_for_association(&f.tracker, t.key, p.time_ns).map(Some)
         } else {
             // Each coarse visit also covers this fixed-size vertical check. Its inputs use the
             // exact forecast's output precision. The full gate still computes the pair cost.
-            tracker_predict_if_altitude(&f.tracker, t.key, p.time_ns, |altitude, variance, last| {
-                let cost = d2_vertical_values(
-                    altitude,
-                    variance,
-                    f64::from(p.alt_ft),
-                    s.alt_quantum_ft,
-                    p.time_ns.saturating_sub(last),
-                    GATE_VRATE_SIGMA_FPM,
-                );
-                cost.partial_cmp(&GATE_V_CHI2) != Some(core::cmp::Ordering::Greater)
-            })
+            tracker_predict_for_association_if_altitude(
+                &f.tracker,
+                t.key,
+                p.time_ns,
+                |altitude, variance, last| {
+                    let cost = d2_vertical_values(
+                        altitude,
+                        variance,
+                        f64::from(p.alt_ft),
+                        s.alt_quantum_ft,
+                        p.time_ns.saturating_sub(last),
+                        GATE_VRATE_SIGMA_FPM,
+                    );
+                    cost.partial_cmp(&GATE_V_CHI2) != Some(core::cmp::Ordering::Greater)
+                },
+            )
         };
         let (row, last_ns) = match forecast {
             Ok(Some(pair)) => pair,
@@ -2106,11 +2182,13 @@ fn assoc_plot(f: &mut Fusion, ra: &mut RadarAssoc, a: usize, budget: usize) -> u
                 continue;
             }
         };
-        let conv = match ra.conv_own.get(a).copied().flatten() {
+        let conv = match converted_once {
             Some(c) => c,
-            None => match plot_convert(&g, &s, p, &bias, track_height(&row), t.key) {
-                Ok(c) => c,
-                Err(_) => {
+            None => match prepared.as_ref().and_then(|terms| {
+                plot_convert_prepared(&g, &s, p, terms, track_height(&row), t.key).ok()
+            }) {
+                Some(c) => c,
+                None => {
                     f.stats.no_height_pairs += 1;
                     continue;
                 }
@@ -2221,6 +2299,11 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         last_cut_short,
         coarse_visits,
         exact_checks,
+        polar_index_work,
+        polar_index_build_work,
+        polar_index_query_work,
+        polar_index_queries,
+        polar_index_track_visits,
         candidate_set_complete,
         ..
     } = ra;
@@ -2230,6 +2313,26 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
     if capped {
         f.stats.bucket_work_capped += 1;
     }
+    f.stats.polar_index_work = f
+        .stats
+        .polar_index_work
+        .saturating_add(polar_index_work as u64);
+    f.stats.polar_index_build_work = f
+        .stats
+        .polar_index_build_work
+        .saturating_add(polar_index_build_work as u64);
+    f.stats.polar_index_query_work = f
+        .stats
+        .polar_index_query_work
+        .saturating_add(polar_index_query_work as u64);
+    f.stats.polar_index_queries = f
+        .stats
+        .polar_index_queries
+        .saturating_add(polar_index_queries);
+    f.stats.polar_index_track_visits = f
+        .stats
+        .polar_index_track_visits
+        .saturating_add(polar_index_track_visits);
     // The plots were gated from `start` round the end and on from the first: put the pairs back in
     // plot order, which is the order a loop from the first plot makes them in.
     if let Some(w) = wrap_pairs {
@@ -2594,9 +2697,10 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
 fn associate_bucket(f: &mut Fusion) {
     // At most `MAX_RADARS` radars (checked by `fusion_new`).
     let mut ras: [Option<RadarAssoc>; MAX_RADARS] = std::array::from_fn(|_| None);
+    let mut polar_remaining = f.polar_work_max;
     for (r, slot) in ras.iter_mut().enumerate() {
         if f.rscratch.get(r).is_some_and(|rs| !rs.plots.is_empty()) {
-            *slot = assoc_prepare(f, r);
+            *slot = assoc_prepare(f, r, &mut polar_remaining);
         }
     }
     let budget = f.bucket_tests_max;
@@ -2608,11 +2712,11 @@ fn associate_bucket(f: &mut Fusion) {
             .filter_map(|(i, r)| {
                 r.as_ref()
                     .filter(|ra| !ra.capped && ra.next < ra.anon.len())
-                    .map(|ra| (ra.work, i))
+                    .map(|ra| (ra.work.saturating_add(ra.polar_index_work), i))
             })
             .min();
         let Some((_, i)) = pick else { break };
-        if total >= budget {
+        if total >= budget || polar_remaining == 0 {
             // Out of work for the bucket: the plots still waiting are not gated.
             for ra in ras.iter_mut().flatten() {
                 ra.capped |= ra.next < ra.anon.len();
@@ -2631,7 +2735,7 @@ fn associate_bucket(f: &mut Fusion) {
             ra.wrap_pairs = Some(ra.pairs.len());
         }
         let a = (ra.start + k) % n.max(1);
-        total += assoc_plot(f, ra, a, budget - total);
+        total += assoc_plot(f, ra, a, budget - total, &mut polar_remaining);
         ra.last_cut_short = ra.capped;
     }
     for ra in &mut ras {
@@ -5447,6 +5551,11 @@ mod tests {
         crate::types::output_hash_into(&mut h, out);
         let mut st = *fusion_stats(f);
         st.coarse_visits = 0;
+        st.polar_index_work = 0;
+        st.polar_index_build_work = 0;
+        st.polar_index_query_work = 0;
+        st.polar_index_queries = 0;
+        st.polar_index_track_visits = 0;
         st.init_tests = 0;
         st.init_visits = 0;
         // Search implementations spend different work while making the same decisions.
@@ -6702,6 +6811,39 @@ mod tests {
         assert_eq!(st.assoc_incomplete_deferred, 100, "{st:?}");
         assert_eq!(st.applied_assoc, 0, "{st:?}");
         assert_eq!(st.unassigned, 0, "{st:?}");
+    }
+
+    // REQ: OA-TRK-299, OA-TRK-300
+    #[test]
+    fn polar_work_exhaustion_discards_partial_index_and_defers_the_whole_graph() {
+        let mut f = make_fusion_sites(&[SITE], 400);
+        f.polar_work_max = 1;
+        let buffers_before = fusion_assoc_buffers(&f);
+        let mut out = output_new(1 << 18);
+        let at = feed_tracks(&mut f, &SITE, 200, 20_000.0, 7, 0x100000);
+        fusion_advance(&mut f, 4 * NS_PER_S, &mut out);
+        let plots = plots_on(&SITE, &at, 100, 0.0, 3);
+        fusion_plots(&mut f, 0, &plots);
+        fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
+
+        let st = *fusion_stats(&f);
+        assert_eq!(st.bucket_work_capped, 1, "{st:?}");
+        assert_eq!(st.polar_index_work, 1, "{st:?}");
+        assert_eq!(st.polar_index_build_work, 1, "{st:?}");
+        assert_eq!(st.polar_index_query_work, 0, "{st:?}");
+        assert_eq!(st.polar_index_queries, 0, "{st:?}");
+        assert_eq!(st.polar_index_track_visits, 1, "{st:?}");
+        assert_eq!(st.coarse_visits, 0, "{st:?}");
+        assert_eq!(st.pairs_tested, 0, "{st:?}");
+        assert_eq!(st.assoc_incomplete_batches, 1, "{st:?}");
+        assert_eq!(st.assoc_incomplete_deferred, plots.len() as u64, "{st:?}");
+        assert_eq!(st.applied_assoc, 0, "{st:?}");
+        assert_eq!(st.cand_started + st.cand_joined, 0, "{st:?}");
+        assert!(f.rscratch[0]
+            .dec
+            .iter()
+            .all(|decision| decision.kind == D_DEFERRED));
+        assert_eq!(fusion_assoc_buffers(&f), buffers_before);
     }
 
     // REQ: OA-TRK-299

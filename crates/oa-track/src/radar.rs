@@ -342,11 +342,23 @@ pub fn polar_to_geodetic(
     if !(rho_m.is_finite() && az_deg.is_finite() && h_m.is_finite()) || rho_m < 1.0 {
         return Err(RadarError::BadPlot("range, azimuth or height"));
     }
+    let az_trig = oa_math::sin_cos(az_deg.to_radians());
+    polar_to_geodetic_prepared(g, rho_m, h_m, az_trig)
+}
+
+fn polar_to_geodetic_prepared(
+    g: &RadarGeom,
+    rho_m: f64,
+    h_m: f64,
+    (st, ct): (f64, f64),
+) -> Result<Geo, RadarError> {
+    if !(rho_m.is_finite() && h_m.is_finite() && st.is_finite() && ct.is_finite()) || rho_m < 1.0 {
+        return Err(RadarError::BadPlot("range, azimuth or height"));
+    }
     let (r, a) = (g.r_mean_m, g.r_mean_m + g.height_m);
     let b = r + h_m;
     let sin_e_raw = (b * b - a * a - rho_m * rho_m) / (2.0 * a * rho_m);
     let mut e = oa_math::asin(sin_e_raw.clamp(-1.0, 1.0));
-    let (st, ct) = oa_math::sin_cos(az_deg.to_radians());
     let at = |e: f64| -> (f64, f64, f64) {
         let (se, ce) = oa_math::sin_cos(e);
         let mut p = g.origin;
@@ -516,6 +528,41 @@ pub struct Converted {
     pub geo: Geo,
 }
 
+/// Plot terms independent of the candidate track height. Preparing once avoids repeating
+/// validation, azimuth trigonometry and sensor-variance arithmetic for every anonymous pair.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub(crate) struct PreparedPlot {
+    rho_m: f64,
+    az_deg: f64,
+    az_trig: (f64, f64),
+    var_rho_m2: f64,
+    var_az_rad2: f64,
+}
+const _: () = assert!(core::mem::size_of::<PreparedPlot>() == 48);
+
+pub(crate) fn plot_prepare(
+    s: &RadarSite,
+    p: &RadarPlot,
+    bias: &Bias,
+) -> Result<PreparedPlot, RadarError> {
+    plot_check(p)?;
+    let rho_m = p.range_m - bias.range_m;
+    let az_deg = (p.az_deg - bias.az_deg).rem_euclid(360.0);
+    let var_rho_m2 = s.sigma_range_m * s.sigma_range_m
+        + s.range_quantum_m * s.range_quantum_m / 12.0
+        + bias.var_range_m2;
+    let sa = s.sigma_az_deg.to_radians();
+    let var_az_rad2 = sa * sa + bias.var_az_deg2 * oa_math::powi(core::f64::consts::PI / 180.0, 2);
+    Ok(PreparedPlot {
+        rho_m,
+        az_deg,
+        az_trig: oa_math::sin_cos(az_deg.to_radians()),
+        var_rho_m2,
+        var_az_rad2,
+    })
+}
+
 /// The plot as a [`Measurement`] at its own time, after subtracting `bias` and adding its
 /// variance. The height is the plot's Mode C altitude when it has one, else `height_m` (a
 /// track's altitude, with `height_sigma_m` its standard deviation), else the plot is refused
@@ -529,7 +576,18 @@ pub fn plot_convert(
     height_m: Option<(f64, f64)>,
     key: u32,
 ) -> Result<Converted, RadarError> {
-    plot_check(p)?;
+    let prepared = plot_prepare(s, p, bias)?;
+    plot_convert_prepared(g, s, p, &prepared, height_m, key)
+}
+
+pub(crate) fn plot_convert_prepared(
+    g: &RadarGeom,
+    s: &RadarSite,
+    p: &RadarPlot,
+    prepared: &PreparedPlot,
+    height_m: Option<(f64, f64)>,
+    key: u32,
+) -> Result<Converted, RadarError> {
     let (h, sigma_h) = if p.alt_ft != NONE_ALT {
         (
             f64::from(p.alt_ft) * FT_M,
@@ -538,23 +596,16 @@ pub fn plot_convert(
     } else {
         height_m.ok_or(RadarError::NoHeight)?
     };
-    let rho = p.range_m - bias.range_m;
-    let az = (p.az_deg - bias.az_deg).rem_euclid(360.0);
-    let geo = polar_to_geodetic(g, rho, az, h)?;
-    let var_rho = s.sigma_range_m * s.sigma_range_m
-        + s.range_quantum_m * s.range_quantum_m / 12.0
-        + bias.var_range_m2;
-    let sa = s.sigma_az_deg.to_radians();
-    let var_az = sa * sa + bias.var_az_deg2 * oa_math::powi(core::f64::consts::PI / 180.0, 2);
+    let geo = polar_to_geodetic_prepared(g, prepared.rho_m, h, prepared.az_trig)?;
     let mut cov = polar_cov_local(
         g,
-        rho,
-        az,
+        prepared.rho_m,
+        prepared.az_deg,
         geo.elev_rad,
         geo.lat_deg,
         geo.lon_deg,
-        var_rho,
-        var_az,
+        prepared.var_rho_m2,
+        prepared.var_az_rad2,
         sigma_h * sigma_h,
     );
     let trace = cov[0] + cov[2];
@@ -1041,6 +1092,43 @@ mod tests {
         assert_eq!(c.m.lon_e7, c2.m.lon_e7);
         // The supplied height's uncertainty is in the covariance: larger than with Mode C.
         assert!(c2.m.pos_cov_m2[0] + c2.m.pos_cov_m2[2] > c.m.pos_cov_m2[0] + c.m.pos_cov_m2[2]);
+    }
+
+    // REQ: OA-TRK-032, OA-TRK-306
+    #[test]
+    fn prepared_plot_conversion_is_exact_for_each_candidate_height() {
+        let g = radar_geom(&SITE);
+        let bias = Bias {
+            range_m: 37.0,
+            az_deg: -0.07,
+            var_range_m2: 19.0 * 19.0,
+            var_az_deg2: 0.013 * 0.013,
+        };
+        let mut p = RadarPlot {
+            time_ns: 1_500_000_000,
+            range_m: 93_000.0,
+            az_deg: 359.95,
+            alt_ft: NONE_ALT,
+            addr: NO_ADDR,
+            label: NO_ADDR,
+            mode_a: 0o4321,
+        };
+        let prepared = plot_prepare(&SITE, &p, &bias).unwrap();
+        for (height, key) in [((1_200.0, 17.0), 41), ((11_300.0, 260.0), 42)] {
+            assert_eq!(
+                plot_convert(&g, &SITE, &p, &bias, Some(height), key),
+                plot_convert_prepared(&g, &SITE, &p, &prepared, Some(height), key)
+            );
+        }
+
+        // Mode C makes the conversion candidate-independent, including when a supplied
+        // candidate height would otherwise be very different.
+        p.alt_ft = 27_000;
+        let prepared = plot_prepare(&SITE, &p, &bias).unwrap();
+        assert_eq!(
+            plot_convert(&g, &SITE, &p, &bias, Some((500.0, 1.0)), 43),
+            plot_convert_prepared(&g, &SITE, &p, &prepared, Some((15_000.0, 900.0)), 43,)
+        );
     }
 
     // REQ: OA-TRK-033

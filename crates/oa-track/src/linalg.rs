@@ -45,26 +45,6 @@ pub(crate) fn transpose(a: &M5) -> M5 {
     o
 }
 
-pub(crate) fn add(a: &M5, b: &M5) -> M5 {
-    let mut o = ZERO;
-    for i in 0..N {
-        for j in 0..N {
-            o[i][j] = a[i][j] + b[i][j];
-        }
-    }
-    o
-}
-
-pub(crate) fn scale(a: &M5, s: f64) -> M5 {
-    let mut o = *a;
-    for r in o.iter_mut() {
-        for v in r.iter_mut() {
-            *v *= s;
-        }
-    }
-    o
-}
-
 pub(crate) fn matvec(a: &M5, v: &V5) -> V5 {
     let mut o = [0.0; N];
     for i in 0..N {
@@ -85,17 +65,6 @@ pub(crate) fn symmetrise(a: &M5) -> M5 {
             let m = (a[i][j] + a[j][i]) / 2.0;
             o[i][j] = m;
             o[j][i] = m;
-        }
-    }
-    o
-}
-
-/// `v v'`.
-pub(crate) fn outer(v: &V5) -> M5 {
-    let mut o = ZERO;
-    for i in 0..N {
-        for j in 0..N {
-            o[i][j] = v[i] * v[j];
         }
     }
     o

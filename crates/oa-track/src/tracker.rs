@@ -60,8 +60,9 @@ use oa_adsb::{
 
 use crate::confirm::{confirm_window_ns, move_is_large, resolve_decide, Resolve, Seen, NO_VOTE_NS};
 use crate::filter::{
-    filter_altitude_forecast, filter_apply, filter_init, filter_miss_m, filter_output,
-    filter_output_checked, filter_replay, filter_row_distance_m, Applied, Filter,
+    filter_altitude_forecast, filter_apply, filter_association_output_checked, filter_init,
+    filter_miss_m, filter_output, filter_output_checked, filter_replay, filter_row_distance_m,
+    Applied, Filter,
 };
 use crate::hfilter::{h_combine, HFilter};
 use crate::params::{CHI2_2_95, FAIL_CLOSED_R95_M, NS_PER_S, PLAUSIBLE_SLACK_M, RING_DEPTH};
@@ -2265,8 +2266,54 @@ pub fn tracker_predict_checked(
     tracker_forecast(t, key, at_ns).map(|(row, confirmed, last, _)| (row, confirmed, last))
 }
 
+/// Forecasts only the row fields radar association reads. This avoids presentation-only velocity
+/// covariance and move-display work while preserving the exact position and altitude gate inputs.
+pub(crate) fn tracker_predict_for_association(
+    t: &Tracker,
+    key: u32,
+    at_ns: i64,
+) -> Result<(OutRow, i64), PredictError> {
+    let slot = lookup(t, key).ok_or(PredictError::NoTrack)?;
+    if col(&t.state, slot, FREE) == FREE {
+        return Err(PredictError::NoTrack);
+    }
+    let f = col(&t.cur, slot, blank_filter());
+    let mut row = filter_association_output_checked(&f, at_ns.max(f.t_ns))?;
+    row.addr = key;
+    if key >= RADAR_KEY_BASE {
+        row.flags |= O_IDENTITY_UNCONFIRMED;
+    }
+    Ok((row, col(&t.last_ns, slot, 0)))
+}
+
+/// Runs the association-only forecast only when precise vertical evidence may pass `accept`.
+pub(crate) fn tracker_predict_for_association_if_altitude(
+    t: &Tracker,
+    key: u32,
+    at_ns: i64,
+    accept: impl FnOnce(f32, f32, i64) -> bool,
+) -> Result<Option<(OutRow, i64)>, PredictError> {
+    let slot = lookup(t, key).ok_or(PredictError::NoTrack)?;
+    if col(&t.state, slot, FREE) == FREE {
+        return Err(PredictError::NoTrack);
+    }
+    let f = col(&t.cur, slot, blank_filter());
+    if let Some((altitude, variance)) = filter_altitude_forecast(&f, at_ns.max(f.t_ns))? {
+        if !accept(altitude, variance, col(&t.last_ns, slot, 0)) {
+            return Ok(None);
+        }
+    }
+    let mut row = filter_association_output_checked(&f, at_ns.max(f.t_ns))?;
+    row.addr = key;
+    if key >= RADAR_KEY_BASE {
+        row.flags |= O_IDENTITY_UNCONFIRMED;
+    }
+    Ok(Some((row, col(&t.last_ns, slot, 0))))
+}
+
 /// Runs the full forecast only when the precise vertical forecast may pass the caller's gate.
 /// A missing altitude preserves the usual forecast path.
+#[cfg(test)]
 pub(crate) fn tracker_predict_if_altitude(
     t: &Tracker,
     key: u32,

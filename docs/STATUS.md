@@ -51,6 +51,12 @@ depend on the machine's maths library. No other operating system or architecture
 
 ## Performance numbers
 
+The [2026-11-23 radar investigation](RADAR_CAPACITY_2026-11-23.md) closes the coverage lane with
+62,002/62,002 anonymous gate traversals complete in one 8,192-aircraft stress case, versus
+16,089/62,002 on `ce7d4b1`. It remains a failed capacity case: 8/15 measured seconds exceed 1 s,
+the peak is 1.545 s, and missing-height losses remain nonzero. The linked report retains the
+full counters and timing sequence, including identity errors and the limits of this evidence.
+
 The capacity figures come from `tools/oa-perf`: synthetic traffic, a laptop (Intel i3-N305), no
 flight-plan processing. A run passes only if every measured second finishes within real time and no
 work is lost (no refused plot, capped batch, overflow or refusal of any kind). They show where the

@@ -3989,10 +3989,18 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-296** The `oa-track` run checks the split of the clip with `oa_bench::split_check::check_split`
   right after `split_reports`; a violation is a hard error of the run. The scorer builds the legacy table by
   truth leg (the chunk ranges are by address, so all legs of an address are in one chunk).
-- **OA-TRK-297** The fusion layer records where a bucket's work goes and what its work limit leaves out: the
-  tracks predicted for association, the coarse window width, the anonymous plots deferred when gating
-  reached a limit, the initiation tests and candidates alive at most, and (apart from the counters, in
-  `FusionTimers`) the wall time of each stage. None of it is read back by the layer.
+- **OA-TRK-297** The fusion layer records where a bucket's work goes and what its work limits leave out:
+  tracks predicted for association, coarse-window width, wide-list tracks and overflow, emitted coarse
+  candidates and visits, exact gate work, polar build/query work and attempted query count, anonymous
+  plots deferred when association work is incomplete, initiation tests and work, the separate bounded
+  initiation-refusal pass visits, and candidates alive at most. Polar work shares
+  `MAX_BUCKET_POLAR_WORK` across all radars in a bucket. `polar_index_query_work` per
+  `polar_index_queries` is charged work per attempted lookup (including a capped lookup);
+  `polar_index_build_work` per `polar_index_track_visits` is charged work per slot visit across the
+  wide-track classification and posting-build passes, including sorting work in the numerator. These
+  are work counters, not elapsed-time or latency measurements. Candidate visits and exact gates share
+  `MAX_BUCKET_TESTS`; neither budget promises an equal per-radar share. Counters are diagnostics and
+  are not read back by the layer.
 - **OA-TRK-307** Proved (Kani, `fixed_map_agrees_with_a_reference_model_2_slots`): `FixedMap` agrees with a
   reference list through any sequence of insert, get, remove and retain: no key is lost or duplicated, `len`
   is the number of held keys, an insert is refused exactly when the key is new and the table is full, and
@@ -4015,12 +4023,20 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   the scan. When gating completes, the result is independent of that starting point. A solver refusal on
   a complete graph likewise defers every anonymous plot and counts it in `assoc_refused_deferred`.
 - **OA-TRK-300** The coarse window of an association is per track: a track whose window (the coarse
-  margin plus eight standard deviations) is above the standard search radius is on a wide list of fixed
-  capacity that every plot also tests, and the grid is searched at the standard radius, so one uncertain
-  track does not widen the search of every plot. The tracks tested for a plot are every track the single
-  widest window would have tested that could pass its own window. A track that finds the wide list full is
-  left out of that association and counted in `wide_full`; because that track could pair with any
-  anonymous plot, the radar-bucket's anonymous graph is incomplete and OA-TRK-299 defers it whole.
+  margin plus eight standard deviations) is above the standard search radius is on a fixed-capacity wide
+  list included for each anonymous plot; the bounded polar index is queried at the standard radius, so one
+  uncertain track does not widen every query. Width-band upper bounds and outward-padded radial cells
+  select postings, and the exact `coarse_passes` predicate filters them. The ascending index results
+  merged with the ascending wide list are a superset of every eligible track that could pass its own
+  window, as if every eligible track had been tested. This universal superset property is an implementation
+  requirement; finite regression cases do not prove it for all inputs. A track left out for want of
+  wide-list room is counted in `wide_full`; because it could pair with any anonymous plot, the graph is
+  incomplete and OA-TRK-299 defers it whole. An index build or query that reaches `MAX_BUCKET_POLAR_WORK`
+  clears partial results, marks the graph incomplete, and also defers it whole. If a candidate list exceeds
+  its remaining gate-visit share, all candidate distances are ranked by a packed nonnegative distance-bits
+  and track-index key under the separate bounded ordering allowance; only the nearest candidates are
+  gated, in distance then track-number order (OA-TRK-222). These budgets bound charged work; this
+  requirement makes no latency or strict real-time qualification claim.
 - **OA-TRK-301** Initiation tests an anonymous plot against the anonymous candidates near it, found in a
   grid of the candidates by predicted position (cells and a wide list of fixed capacity for the candidates
   whose reach exceeds the standard one), and converts the plot once. The candidates tested for a plot are
@@ -4043,11 +4059,17 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   Replaced by OA-TRK-323; the plot remains available to its own candidate.
 - **OA-TRK-305** WITHDRAWN: exactly one track per anonymous aircraft assumed proximity established
   identity. OA-TRK-323 retains source hypotheses; tracking quality reports their duplicates explicitly.
-- **OA-TRK-306** The grid of the coarse window has cells about 5.6 km on a side everywhere on earth (bands of
-  0.05 degrees of latitude, each cut into as many cells of longitude as keep it that wide at its
-  edge nearest a pole), and the window's rectangle is cut into pieces of at most 20 km, each with a box of
-  its own, so a plot visits few tracks. The candidates hold every track the window passes at the poles, on
-  the seam and at the equator.
+- **OA-TRK-306** The production association index is a fixed-capacity polar posting array: one posting per
+  standard-width track, keyed by an upper-bounded 512 m window band and a 500 m slant-range cell, with
+  unsupported or singular track terms in an ALWAYS class. A query seeks only the radial cells widened by
+  a full cell at both ends, then applies `coarse_passes` (including its wrapped azimuth/cross-range test)
+  to each visited posting. It returns ascending track indexes; the polar query uses budgeted heapsort or
+  a stable two-pass radix ordering according to the candidate count. For every plot in the supported
+  range/azimuth domain, the output is a superset of the tracks `coarse_passes` accepts, including
+  width/range boundaries, wrapped azimuths, nadir and non-finite terms. This universal property is an
+  implementation requirement, not a claim established by a finite test set. The fixed build/query work
+  cap and incomplete-graph fallback are OA-TRK-300; this association index does not use geographic
+  projection, latitude bands, or longitude seam cells.
 - **OA-TRK-311** A radar-only track keeps its aircraft through the onset of a climb: a level aircraft that
   starts to climb between two scans does not start a second track (the altitude gate of the association is
   widened by a standard deviation of `GATE_VRATE_SIGMA_FPM` of climb rate over the time since the update, at
@@ -4287,12 +4309,14 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   counted; the position, the filter and the assignment are not changed. An ADS-B track 5 km from where two
   radars see its Mode S plots carries the flag, an honest one does not, and the flag clears after three
   scans without a contradiction.
-- **OA-TRK-177** The coarse window of a plot is applied only to the tracks in the latitude and longitude
-  grid cells it can reach, in ascending track order, and finds exactly the associations that testing every
-  track finds (across the +-180 degree seam and at the poles); 10,000 plots over 20,000 tracks associate
-  in seconds in a debug build; candidates visited are charged to the bucket's work limit and counted; when
-  the limit is reached the radars of a bucket have each had an equal share, so one radar's flood does not
-  leave another radar's plots ungated.
+- **OA-TRK-177** Association uses the polar posting index and per-track wide list specified in
+  OA-TRK-300 and OA-TRK-306. Each returned candidate is checked with `coarse_passes` before exact gating.
+  Candidate visits and exact gates are charged to the bucket-shared `MAX_BUCKET_TESTS`; polar index
+  construction and queries are charged to the bucket-shared `MAX_BUCKET_POLAR_WORK`. No equal per-radar
+  work share is promised. A cap that leaves an anonymous candidate graph incomplete is counted and defers
+  that radar-bucket's anonymous plots as specified by OA-TRK-299. Universal candidate-superset correctness
+  is required by OA-TRK-300/306; finite tests and observed run times are evidence for selected cases, not
+  proof of that invariant or a strict real-time latency qualification.
 - **OA-TRK-190** The step limit is a configuration value (`clock_step_limit_ns`, default the
   out-of-order window); a configuration with a limit below the window or not below the drop age is
   refused.
@@ -4369,11 +4393,12 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-212** The simulated ADS-B noise of a sample depends only on the seed, the address and the
   sample's time, so the two legs of one aircraft do not repeat each other's draws and a simulation of a
   subrange reproduces exactly the samples of the full run that it covers.
-- **OA-TRK-220** A pole inside the coarse search rectangle (judged in the rectangle's plane, with a margin)
-  makes the grid take every longitude up to that pole, so a track beyond a pole that the window passes is
-  a candidate at any index size, including where the sampled points are all far from the pole.
-- **OA-TRK-221** At 80 N with the plot 1,100 km north, tracks in rings of 3 and 10 km round the pole are
-  all candidates the window test can pass, at index sizes either side of the scan fallback.
+- **OA-TRK-220** The polar coarse index works in the radar's slant-range and wrapped-azimuth terms, so
+  geographic poles and the antimeridian do not create coordinate cells or discontinuities. A track
+  with singular or unsupported polar terms is in the always-included posting.
+- **OA-TRK-221** At nadir and near nadir, including ground range below 1 m, every track the exact
+  coarse predicate accepts is retained by a completed polar query. If its work cap prevents completion,
+  the query clears partial output and the incomplete anonymous graph is deferred under OA-TRK-299.
 - **OA-TRK-222** When the visit budget is shorter than the candidates, the nearest by coarse distance
   (then lowest track number) are tested, not the lowest numbered; the plot is marked capped and the
   incomplete radar-bucket is deferred under OA-TRK-299 rather than applied from a partial graph.
@@ -4419,11 +4444,13 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   point: a track started from a plot returns its covariance and velocity at the start, at 45 and 89.9999
   degrees and in the south, to 1e-4.
 - **OA-TRK-264** No order or selection in the tracker reads the sign or payload of a NaN: the greedy order of
-  a component larger than `MAX_COMPONENT` and the order in which a plot keeps coarse candidates (by
-  `coarse_distance`, then track number) use `oa_math::cmp_canon_f64`, so the same inputs with a positive, a
-  negative and a payload NaN choose the same tracks. Real-data digests are unchanged where no NaN reaches a
-  migrated sort; a sort that does see NaN now places every NaN last (the canonical order) instead of by sign (the gate of OA-TRC-260 keeps the raw `total_cmp`,
-  `is_sign_negative`, `copysign` and `signum` out of every non-test source of the workspace).
+  a component larger than `MAX_COMPONENT` uses `oa_math::cmp_canon_f64`, so positive, negative and payload
+  NaN costs have one canonical order. When a plot has more coarse candidates than its visit allowance,
+  `coarse_distance` maps NaN geometry to zero; the bounded ranking packs the nonnegative distance bits in
+  the high portion and the track index in the low portion, then orders the integer keys. Thus all NaN
+  geometries produce the same selection and ties use track number. Real-data digests are unchanged where
+  no NaN reaches a migrated sort; a sort that does see NaN uses the canonical ordering rather than the NaN
+  sign (OA-TRC-260 keeps raw float-order and sign methods out of non-test workspace sources).
 
 ## Speed and capacity harness (oa-perf)
 
