@@ -4005,16 +4005,22 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   buckets processed. They are counters only (the layer reads no clock, RULESET B2); none is read back.
 - **OA-TRK-298** WITHDRAWN: proximity-based candidate merging and cancellation conflicts with E7.
   Replaced by OA-TRK-323 and OA-TRK-324; anonymous hypotheses stay separate and visibly unidentified.
-- **OA-TRK-299** A plot whose gates never ran, or were cut short without finding a match, is deferred
-  and counted by `anon_plots_ungated`. It can neither start nor join an anonymous candidate. The
-  association loop starts at a plot that depends deterministically on the bucket and radar, spreading
-  deferred work around the scan. When gating completes, the result is independent of that starting point.
+- **OA-TRK-299** If a work or pair limit leaves any anonymous gate unfinished in one radar-bucket,
+  every anonymous assignment from that radar-bucket is invalid: an omitted edge can connect apparent
+  components or change a winner. Every anonymous plot is deferred from both update and initiation and
+  the plots whose own gating was unfinished are counted by `anon_plots_ungated`, all plots deferred
+  because the graph is incomplete are counted by `assoc_incomplete_deferred`, and the batch is counted
+  by `assoc_incomplete_batches`. Hard-address assignments remain independent. The association loop starts
+  at a plot that depends deterministically on the bucket and radar, spreading completed gate work around
+  the scan. When gating completes, the result is independent of that starting point. A solver refusal on
+  a complete graph likewise defers every anonymous plot and counts it in `assoc_refused_deferred`.
 - **OA-TRK-300** The coarse window of an association is per track: a track whose window (the coarse
   margin plus eight standard deviations) is above the standard search radius is on a wide list of fixed
   capacity that every plot also tests, and the grid is searched at the standard radius, so one uncertain
   track does not widen the search of every plot. The tracks tested for a plot are every track the single
   widest window would have tested that could pass its own window. A track that finds the wide list full is
-  left out of that association and counted in `wide_full`.
+  left out of that association and counted in `wide_full`; because that track could pair with any
+  anonymous plot, the radar-bucket's anonymous graph is incomplete and OA-TRK-299 defers it whole.
 - **OA-TRK-301** Initiation tests an anonymous plot against the anonymous candidates near it, found in a
   grid of the candidates by predicted position (cells and a wide list of fixed capacity for the candidates
   whose reach exceeds the standard one), and converts the plot once. The candidates tested for a plot are
@@ -4369,7 +4375,8 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-TRK-221** At 80 N with the plot 1,100 km north, tracks in rings of 3 and 10 km round the pole are
   all candidates the window test can pass, at index sizes either side of the scan fallback.
 - **OA-TRK-222** When the visit budget is shorter than the candidates, the nearest by coarse distance
-  (then lowest track number) are kept, not the lowest numbered; the plot is still marked capped.
+  (then lowest track number) are tested, not the lowest numbered; the plot is marked capped and the
+  incomplete radar-bucket is deferred under OA-TRK-299 rather than applied from a partial graph.
 - **OA-TRK-250** A fusion configuration whose radars share a sensor id is refused, because the tracker
   identifies a report by time and sensor id and would drop the second radar's report as a duplicate. The
   study radars carry distinct ids (terminal 1, en route 2); with distinct ids every report of both radars

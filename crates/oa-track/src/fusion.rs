@@ -332,9 +332,17 @@ pub struct FusionStats {
     /// Live tracks predicted for association, summed over the radar-buckets (the size of the
     /// per-bucket track pass).
     pub tracks_at_sum: u64,
-    /// Anonymous plots deferred because a work or pair limit left their gating incomplete and
-    /// the solver had no match for them.
+    /// Anonymous plots whose own gating was left incomplete by a work or pair limit. Any such
+    /// plot makes the radar-bucket's whole anonymous candidate graph incomplete; the total
+    /// deferred from that graph is [`FusionStats::assoc_incomplete_deferred`].
     pub anon_plots_ungated: u64,
+    /// Radar-buckets and anonymous plots deferred because a work, pair, or wide-list limit left
+    /// the candidate graph incomplete. `association_radar.anonymous_offered` is the plot
+    /// denominator.
+    pub assoc_incomplete_batches: u64,
+    pub assoc_incomplete_deferred: u64,
+    /// Anonymous plots deferred because the assignment solver refused a complete graph.
+    pub assoc_refused_deferred: u64,
     /// Initiation passes cut short by a limit, counted at most once per radar-bucket.
     pub init_capped: u64,
     /// Plot-candidate pairs tested by initiation.
@@ -1469,6 +1477,9 @@ struct RadarAssoc {
     capped: bool,
     coarse_visits: u64,
     exact_checks: u64,
+    /// Every live, eligible track was represented in the candidate search. False when the
+    /// fixed-capacity wide list left out a track that could pair with any anonymous plot.
+    candidate_set_complete: bool,
 }
 
 /// The plot the association loop of `radar` starts at in `bucket`, of `n` anonymous plots: a hash
@@ -1879,6 +1890,7 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
     // its own window, which is every track the old search could test. A track refused for want of
     // room on the wide list is left out of the association (`wide_full`).
     wide.clear();
+    let mut candidate_set_complete = true;
     for (i, t) in tracks.iter().enumerate() {
         if skip.get(i).copied().unwrap_or(true) {
             continue;
@@ -1890,6 +1902,7 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
             f.stats.wide_tracks_sum += 1;
         } else {
             f.stats.wide_full += 1;
+            candidate_set_complete = false;
             if let Some(k) = skip.get_mut(i) {
                 *k = true;
             }
@@ -1968,6 +1981,7 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         capped: false,
         coarse_visits: 0,
         exact_checks: 0,
+        candidate_set_complete,
     })
 }
 
@@ -2207,6 +2221,7 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         last_cut_short,
         coarse_visits,
         exact_checks,
+        candidate_set_complete,
         ..
     } = ra;
     if let Some(slot) = f.grids.get_mut(radar) {
@@ -2223,6 +2238,7 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         infos.rotate_left(w.min(ni));
     }
     let n_anon = anon.len();
+    let completed_gates = next.min(n_anon).saturating_sub(usize::from(last_cut_short));
     // A plot that was never reached, or whose gates were cut short, cannot supply evidence
     // for starting an anonymous track just because the solver found it no match.
     let gating_incomplete = |a: usize| {
@@ -2232,17 +2248,32 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
     if f.cfg.association_diagnostics {
         if let Some(d) = f.stats.association_radar.get_mut(radar) {
             // Every ordinal before next had a complete gate except the last on a cutoff.
-            let completed = next.min(n_anon).saturating_sub(usize::from(last_cut_short));
             d.anonymous_offered = d.anonymous_offered.saturating_add(n_anon as u64);
-            d.completed = d.completed.saturating_add(completed as u64);
-            d.incomplete = d.incomplete.saturating_add((n_anon - completed) as u64);
+            d.completed = d.completed.saturating_add(completed_gates as u64);
+            d.incomplete = d
+                .incomplete
+                .saturating_add((n_anon - completed_gates) as u64);
             d.coarse_candidates_visited = d.coarse_candidates_visited.saturating_add(coarse_visits);
             d.exact_checks = d.exact_checks.saturating_add(exact_checks);
             d.accepted_pairs = d.accepted_pairs.saturating_add(pairs.len() as u64);
             d.capped_batches = d.capped_batches.saturating_add(u64::from(capped));
         }
     }
-    let solved = if f.cfg.assoc == ASSOC_GNN {
+    // An omitted gate can connect two apparent components or change which track wins a plot.
+    // Applying any anonymous result from such a partial graph would turn missing work into a
+    // positive identity decision (RULESET E6/E7). Hard-address decisions were made separately
+    // and remain valid. Reset the association output, then defer every anonymous plot from both
+    // update and initiation.
+    let graph_incomplete = capped || !candidate_set_complete;
+    let solved = if graph_incomplete {
+        if f.cfg.association_forensics {
+            gnn_forensics(&mut f.assoc, 0, anon.len(), &[], GATE_TOTAL_CHI2)
+                .map(|st| add_gnn(&mut f.stats.gnn, &st))
+        } else {
+            gnn(&mut f.assoc, 0, anon.len(), &[], GATE_TOTAL_CHI2)
+                .map(|st| add_gnn(&mut f.stats.gnn, &st))
+        }
+    } else if f.cfg.assoc == ASSOC_GNN {
         let result = if f.cfg.association_forensics {
             gnn_forensics(
                 &mut f.assoc,
@@ -2290,7 +2321,7 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
             .saturating_add(u64::try_from(unavailable).unwrap_or(u64::MAX));
     }
     let hold = f.cfg.hold_ambiguous;
-    if hold || f.cfg.association_forensics {
+    if !graph_incomplete && !solve_refused && (hold || f.cfg.association_forensics) {
         if f.cfg.association_forensics {
             f.stats.forensics_pair_visits = f
                 .stats
@@ -2304,13 +2335,68 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         ambiguous_pairs(&mut f.assoc, &pairs, AMBIGUITY_MARGIN);
     }
     assigned_pairs(&mut f.assoc, &pairs);
+    if graph_incomplete {
+        f.stats.assoc_incomplete_batches = f.stats.assoc_incomplete_batches.saturating_add(1);
+        f.stats.assoc_incomplete_deferred = f
+            .stats
+            .assoc_incomplete_deferred
+            .saturating_add(n_anon as u64);
+        if capped {
+            f.stats.anon_plots_ungated = f
+                .stats
+                .anon_plots_ungated
+                .saturating_add((n_anon - completed_gates) as u64);
+        }
+    } else if solve_refused {
+        f.stats.assoc_refused_deferred =
+            f.stats.assoc_refused_deferred.saturating_add(n_anon as u64);
+    }
     for (a, &j) in anon.iter().enumerate() {
         let Some(p) = plots.get(j) else { continue };
         let t = assoc_plot_track(&f.assoc)
             .get(a)
             .copied()
             .unwrap_or(NO_TRACK);
-        let incomplete = gating_incomplete(a);
+        let incomplete = graph_incomplete || gating_incomplete(a);
+        if graph_incomplete || solve_refused {
+            if let Some(d) = dec.get_mut(j) {
+                d.kind = D_DEFERRED;
+            }
+            log_forensic_if_enabled!(
+                f,
+                ForensicRow {
+                    t_ns: p.time_ns,
+                    ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
+                    range_m: p.range_m,
+                    az_deg: p.az_deg,
+                    alt_ft: p.alt_ft,
+                    plot_addr: p.addr,
+                    label: p.label,
+                    mode_a: p.mode_a,
+                    radar: r8,
+                    action: if solve_refused {
+                        FORENSIC_REFUSED
+                    } else {
+                        FORENSIC_DEFERRED
+                    },
+                    selected_key: FORENSIC_NONE,
+                    selected_cost: FORENSIC_NO_COST,
+                    alternate_key: FORENSIC_NONE,
+                    alternate_cost: FORENSIC_NO_COST,
+                    ambiguous: false,
+                    hold_run: 0,
+                    held: false,
+                    forced: false,
+                    component_size: 0,
+                    solver_path: PATH_NONE,
+                    exclusion_regret: 0.0,
+                    regret_status: REGRET_NONE,
+                    incomplete,
+                    capped,
+                },
+            );
+            continue;
+        }
         if t == NO_TRACK {
             if incomplete {
                 if let Some(d) = dec.get_mut(j) {
@@ -5444,7 +5530,7 @@ mod tests {
 
     // REQ: OA-TRK-222
     #[test]
-    fn a_short_budget_keeps_the_nearest_candidates_not_the_lowest_numbered() {
+    fn a_short_budget_tests_the_nearest_candidates_then_defers_the_partial_graph() {
         // 5,000 tracks inside one grid cell (42.0 to 42.25 N, 88.0 to 87.75 W, 20 to 40 km from
         // the radar), the plot's own track numbered last; the plot may spend 100 (75 visits, then
         // the exact gates).
@@ -5472,15 +5558,21 @@ mod tests {
         assert_eq!(st.bucket_work_capped, 1, "{st:?}");
         assert_eq!(st.coarse_visits, 75, "{st:?}");
         assert_eq!(fusion_assoc_buffers(&f), buffers_before);
-        let log = fusion_assign_log(&f);
-        let i = log.label.iter().position(|&l| l == 0);
-        assert!(i.is_some(), "the plot was not associated: {st:?}");
-        assert_eq!(
-            log.key.get(i.unwrap_or(0)).copied(),
-            Some(0x100000 + 4_999),
-            "{:?}",
-            log.how
+        let own_track = f.rscratch[0]
+            .tracks
+            .iter()
+            .position(|track| track.key == 0x100000 + 4_999)
+            .unwrap();
+        assert!(
+            f.pairs_bufs[0]
+                .iter()
+                .any(|pair| pair.track as usize == own_track),
+            "the nearest own track was not tested: {st:?}"
         );
+        assert_eq!(f.rscratch[0].dec[0].kind, D_DEFERRED, "{st:?}");
+        assert_eq!(st.applied_assoc, 0, "{st:?}");
+        assert_eq!(st.assoc_incomplete_batches, 1, "{st:?}");
+        assert_eq!(st.assoc_incomplete_deferred, 1, "{st:?}");
     }
 
     // REQ: OA-TRK-297
@@ -5504,6 +5596,9 @@ mod tests {
             st.anon_plots_ungated > 0 && st.anon_plots_ungated < 100,
             "{st:?}"
         );
+        assert_eq!(st.assoc_incomplete_batches, 1, "{st:?}");
+        assert_eq!(st.assoc_incomplete_deferred, 100, "{st:?}");
+        assert_eq!(st.applied_assoc, 0, "{st:?}");
         assert_eq!(st.tracks_at_sum, 200, "{st:?}");
         assert!(st.coarse_width_max_m >= COARSE_M as u64, "{st:?}");
         assert_eq!(st.coarse_width_sum_m, st.coarse_width_max_m, "{st:?}");
@@ -6598,7 +6693,14 @@ mod tests {
         assert!(st.anon_plots_ungated > 0, "{st:?}");
         // Every one of those plots lies on a track: none is evidence of a new aircraft.
         assert_eq!(st.cand_started, 0, "{st:?}");
-        assert_eq!(deferred(&f).len() as u64, st.anon_plots_ungated, "{st:?}");
+        assert!(st.anon_plots_ungated > 0, "{st:?}");
+        assert_eq!(
+            deferred(&f).len() as u64,
+            st.assoc_incomplete_deferred,
+            "{st:?}"
+        );
+        assert_eq!(st.assoc_incomplete_deferred, 100, "{st:?}");
+        assert_eq!(st.applied_assoc, 0, "{st:?}");
         assert_eq!(st.unassigned, 0, "{st:?}");
     }
 
@@ -6636,13 +6738,23 @@ mod tests {
 
     // REQ: OA-TRK-299
     #[test]
-    fn the_ungated_tail_is_not_the_same_plots_in_the_next_bucket() {
+    fn the_completed_gates_rotate_even_though_each_partial_graph_is_deferred_whole() {
         let (mut f, at) = capped_fusion();
         let mut out = output_new(1 << 18);
         let plots = plots_on(&SITE, &at, 100, 0.0, 3);
         fusion_plots(&mut f, 0, &plots);
         fusion_advance(&mut f, 7 * NS_PER_S, &mut out);
-        let first = deferred(&f);
+        let gated = |f: &Fusion| {
+            let mut plots: Vec<usize> = f.pairs_bufs[0]
+                .iter()
+                .filter_map(|pair| f.rscratch[0].anon.get(pair.plot as usize).copied())
+                .collect();
+            plots.sort_unstable();
+            plots.dedup();
+            plots
+        };
+        let first = gated(&f);
+        assert_eq!(deferred(&f).len(), plots.len());
         let later: Vec<RadarPlot> = plots
             .iter()
             .map(|p| RadarPlot {
@@ -6652,16 +6764,10 @@ mod tests {
             .collect();
         fusion_plots(&mut f, 0, &later);
         fusion_advance(&mut f, 9 * NS_PER_S, &mut out);
-        let second = deferred(&f);
+        let second = gated(&f);
+        assert_eq!(deferred(&f).len(), plots.len());
         assert!(!first.is_empty() && !second.is_empty());
         assert_ne!(first, second);
-        // The plots that were gated are other plots too.
-        let gated = |d: &Vec<usize>| {
-            (0..plots.len())
-                .filter(|j| !d.contains(j))
-                .collect::<Vec<_>>()
-        };
-        assert_ne!(gated(&first), gated(&second));
     }
 
     // REQ: OA-TRK-299
@@ -7002,6 +7108,13 @@ mod tests {
         // Eight uncertain tracks, room for three.
         assert_eq!(st.wide_tracks_sum, 3, "{st:?}");
         assert_eq!(st.wide_full, 5, "{st:?}");
+        assert_eq!(st.assoc_incomplete_batches, 1, "{st:?}");
+        assert_eq!(st.assoc_incomplete_deferred, at.len() as u64, "{st:?}");
+        assert_eq!(st.applied_assoc, 0, "{st:?}");
+        assert!(f.rscratch[0]
+            .dec
+            .iter()
+            .all(|decision| decision.kind == D_DEFERRED));
         assert_eq!(st.scratch_full, 0, "{st:?}");
     }
 
