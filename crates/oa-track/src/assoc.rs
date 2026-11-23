@@ -977,6 +977,92 @@ mod tests {
         assigned_pairs(&mut sc, &pairs);
         assert_eq!(assoc_pair_of(&sc), &[0, 2, NONE]);
     }
+
+    // REQ: OA-TRK-036
+    #[test]
+    fn local_ambiguity_is_not_global_assignment_regret() {
+        let regret_without = |pairs: &[Pair], selected: Pair, best: f64, gate: f64| {
+            let remaining: Vec<_> = pairs
+                .iter()
+                .copied()
+                .filter(|p| {
+                    !(p.track == selected.track
+                        && p.plot == selected.plot
+                        && p.cost == selected.cost)
+                })
+                .collect();
+            brute(&remaining, 2, 2, gate) - best
+        };
+
+        // The two complete matchings cost 11 and 11.1. Excluding either selected edge changes
+        // both plot identities for only 0.1 more total cost, but the local rule marks only plot
+        // 1: plot 0's other edge is nine cost units above its selected edge.
+        let under = [
+            Pair {
+                track: 0,
+                plot: 0,
+                cost: 1.0,
+            },
+            Pair {
+                track: 0,
+                plot: 1,
+                cost: 1.1,
+            },
+            Pair {
+                track: 1,
+                plot: 0,
+                cost: 10.0,
+            },
+            Pair {
+                track: 1,
+                plot: 1,
+                cost: 10.0,
+            },
+        ];
+        let mut sc = assoc_scratch_new(2, 2, under.len());
+        gnn(&mut sc, 2, 2, &under, 16.0).unwrap();
+        assert_eq!(assoc_plot_track(&sc), &[0, 1]);
+        ambiguous_pairs(&mut sc, &under, 4.0);
+        assert_eq!(assoc_ambiguous(&sc), &[false, true]);
+        let best = objective(&under, 2, assoc_plot_track(&sc), 16.0);
+        let regret = regret_without(&under, under[0], best, 16.0);
+        assert!((regret - 0.1).abs() < 1.0e-9, "regret {regret}");
+
+        // Here plot 0 has a close local competitor (1.0 versus 1.5), but using it forces the
+        // other plot onto the 9.9 edge. The whole alternate matching costs 10.4 more. A local
+        // ambiguity flag therefore also cannot be read as low whole-matching regret.
+        let over = [
+            Pair {
+                track: 0,
+                plot: 0,
+                cost: 1.0,
+            },
+            Pair {
+                track: 0,
+                plot: 1,
+                cost: 9.9,
+            },
+            Pair {
+                track: 1,
+                plot: 0,
+                cost: 1.5,
+            },
+            Pair {
+                track: 1,
+                plot: 1,
+                cost: 0.0,
+            },
+        ];
+        let mut sc = assoc_scratch_new(2, 2, over.len());
+        gnn(&mut sc, 2, 2, &over, 16.0).unwrap();
+        assert_eq!(assoc_plot_track(&sc), &[0, 1]);
+        ambiguous_pairs(&mut sc, &over, 4.0);
+        assert_eq!(assoc_ambiguous(&sc), &[true, false]);
+        let best = objective(&over, 2, assoc_plot_track(&sc), 16.0);
+        let regret = regret_without(&over, over[0], best, 16.0);
+        assert!((regret - 10.4).abs() < 1.0e-9, "regret {regret}");
+    }
+
     // REQ: OA-TRK-264
     #[test]
     fn the_greedy_order_of_a_large_component_does_not_depend_on_the_sign_of_a_nan_cost() {
