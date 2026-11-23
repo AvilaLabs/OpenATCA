@@ -116,6 +116,8 @@ pub struct ForensicWrongRow {
     pub forced: bool,
     pub component_size: u32,
     pub solver_path: u8,
+    pub exclusion_regret: f64,
+    pub regret_status: u8,
     pub incomplete: bool,
     pub capped: bool,
 }
@@ -288,6 +290,11 @@ pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
         ("forensics_pair_visits", s.forensics_pair_visits),
         ("forensics_plot_visits", s.forensics_plot_visits),
         ("forensics_metadata_writes", s.forensics_metadata_writes),
+        ("forensics_regret_work", s.forensics_regret_work),
+        (
+            "forensics_regret_unavailable",
+            s.forensics_regret_unavailable,
+        ),
         ("hard_mismatch", s.hard_mismatch),
         ("radar_disagree", s.radar_disagree),
         ("hard_extra", s.hard_extra),
@@ -341,6 +348,8 @@ pub const FUSION_NOT_LOSS: &[&str] = &[
     "forensics_pair_visits",
     "forensics_plot_visits",
     "forensics_metadata_writes",
+    "forensics_regret_work",
+    "forensics_regret_unavailable",
     "hard_mismatch",
     "radar_disagree",
     "hard_extra",
@@ -739,6 +748,8 @@ fn assignment_forensics_rows(
         || evidence.forced.len() != n
         || evidence.component_size.len() != n
         || evidence.solver_path.len() != n
+        || evidence.exclusion_regret.len() != n
+        || evidence.regret_status.len() != n
         || evidence.incomplete.len() != n
         || evidence.capped.len() != n
     {
@@ -854,6 +865,8 @@ fn assignment_forensics_rows(
             Some(&forced),
             Some(&component_size),
             Some(&solver_path),
+            Some(&exclusion_regret),
+            Some(&regret_status),
             Some(&incomplete),
             Some(&capped),
         ) = (
@@ -871,6 +884,8 @@ fn assignment_forensics_rows(
             evidence.forced.get(i),
             evidence.component_size.get(i),
             evidence.solver_path.get(i),
+            evidence.exclusion_regret.get(i),
+            evidence.regret_status.get(i),
             evidence.incomplete.get(i),
             evidence.capped.get(i),
         )
@@ -903,6 +918,8 @@ fn assignment_forensics_rows(
             forced,
             component_size,
             solver_path,
+            exclusion_regret,
+            regret_status,
             incomplete,
             capped,
         });
@@ -1485,6 +1502,12 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     measured_fusion.forensics_metadata_writes = measured_fusion
         .forensics_metadata_writes
         .saturating_sub(r.fusion_warm.forensics_metadata_writes);
+    measured_fusion.forensics_regret_work = measured_fusion
+        .forensics_regret_work
+        .saturating_sub(r.fusion_warm.forensics_regret_work);
+    measured_fusion.forensics_regret_unavailable = measured_fusion
+        .forensics_regret_unavailable
+        .saturating_sub(r.fusion_warm.forensics_regret_unavailable);
     for (name, v) in fusion_counters(&measured_fusion) {
         kv.put(&format!("fusion.{name}"), v);
     }
@@ -1545,11 +1568,11 @@ pub fn seconds_csv(r: &CapResult) -> String {
 pub fn assignment_forensics_csv(r: &CapResult) -> Option<String> {
     let rows = r.assignment_forensics_rows.as_ref()?;
     let mut out = String::from(
-        "t_ns,plot_ordinal,radar,plot_addr,truth_label,action,selected_truth,plot_range_m,plot_az_deg,plot_alt_ft,plot_mode_a,selected_key,selected_cost,alternate_key,alternate_truth,alternate_cost,ambiguous,hold_run,forced,component_size,solver_path,incomplete,capped\n",
+        "t_ns,plot_ordinal,radar,plot_addr,truth_label,action,selected_truth,plot_range_m,plot_az_deg,plot_alt_ft,plot_mode_a,selected_key,selected_cost,alternate_key,alternate_truth,alternate_cost,ambiguous,hold_run,forced,component_size,solver_path,exclusion_regret,regret_status,incomplete,capped\n",
     );
     for row in rows {
         out.push_str(&format!(
-            "{},{},{},{},{},{},{},{:.9},{:.9},{},{},{},{:.12},{},{},{:.12},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{:.9},{:.9},{},{},{},{:.12},{},{},{:.12},{},{},{},{},{},{:.12},{},{},{}\n",
             row.t_ns,
             row.plot_ordinal,
             row.radar,
@@ -1571,6 +1594,8 @@ pub fn assignment_forensics_csv(r: &CapResult) -> Option<String> {
             u8::from(row.forced),
             row.component_size,
             row.solver_path,
+            row.exclusion_regret,
+            row.regret_status,
             u8::from(row.incomplete),
             u8::from(row.capped),
         ));
@@ -2163,6 +2188,8 @@ mod tests {
         assert!(
             csv.starts_with("t_ns,plot_ordinal,radar,plot_addr,truth_label,action,selected_truth")
         );
+        assert!(csv.contains(",solver_path,exclusion_regret,regret_status,incomplete,"));
+        assert!(rows.iter().all(|row| row.regret_status != 0));
         assert_eq!(csv.lines().count(), rows.len() + 1);
         let row_count = rows.len().to_string();
         assert_eq!(
@@ -2199,6 +2226,8 @@ mod tests {
             "fusion.forensics_pair_visits",
             "fusion.forensics_plot_visits",
             "fusion.forensics_metadata_writes",
+            "fusion.forensics_regret_work",
+            "fusion.forensics_regret_unavailable",
         ] {
             assert_eq!(kv.get(name), Some("0"), "{name}");
         }

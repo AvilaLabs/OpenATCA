@@ -56,9 +56,10 @@ use oa_geo::aeqd::{frame_new, project, unproject, Frame};
 
 use crate::assoc::{
     ambiguous_pairs, assigned_pairs, assoc_alternate_pair, assoc_ambiguous, assoc_component_path,
-    assoc_component_size, assoc_metadata_writes, assoc_pair_of, assoc_plot_track,
-    assoc_scratch_buffers, assoc_scratch_new, assoc_scratch_new_forensics, gnn, nearest,
-    AssocScratch, GnnStats, Pair, NONE as NO_TRACK, PATH_NONE,
+    assoc_component_size, assoc_metadata_writes, assoc_pair_of, assoc_plot_track, assoc_regret,
+    assoc_regret_status, assoc_regret_work, assoc_scratch_buffers, assoc_scratch_new,
+    assoc_scratch_new_forensics, gnn, gnn_forensics, nearest, AssocScratch, GnnStats, Pair,
+    NONE as NO_TRACK, PATH_NONE, REGRET_EXACT, REGRET_NONE, REGRET_OUT_OF_SCOPE, REGRET_SINGLE,
 };
 use crate::coarse::{
     coarse_buffer, coarse_build, coarse_distance, coarse_new, coarse_passes, coarse_query,
@@ -308,9 +309,12 @@ pub struct FusionStats {
     pub forensics_pair_visits: u64,
     /// Plot visits in the opt-in ambiguity pass and alternate metadata reset, bounded per solve.
     pub forensics_plot_visits: u64,
-    /// Writes to fixed-size opt-in association metadata, at most five per plot per GNN solve
-    /// (four on nearest-neighbour solves).
+    /// Writes to fixed-size opt-in association metadata.
     pub forensics_metadata_writes: u64,
+    /// Worst-case regret work precharged by opt-in radar-GNN solves.
+    pub forensics_regret_work: u64,
+    /// Selected radar association decisions without certified edge-exclusion regret.
+    pub forensics_regret_unavailable: u64,
     /// Sums of the assignment solves (radar association and candidate association).
     pub gnn: GnnStats,
     pub reg_clamped: u64,
@@ -459,6 +463,8 @@ pub struct AssocForensics {
     pub forced: Vec<bool>,
     pub component_size: Vec<u32>,
     pub solver_path: Vec<u8>,
+    pub exclusion_regret: Vec<f64>,
+    pub regret_status: Vec<u8>,
     pub incomplete: Vec<bool>,
     pub capped: Vec<bool>,
 }
@@ -490,6 +496,8 @@ fn forensic_log_new_with_capacity(max_rows: usize) -> AssocForensics {
         forced: Vec::with_capacity(max_rows),
         component_size: Vec::with_capacity(max_rows),
         solver_path: Vec::with_capacity(max_rows),
+        exclusion_regret: Vec::with_capacity(max_rows),
+        regret_status: Vec::with_capacity(max_rows),
         incomplete: Vec::with_capacity(max_rows),
         capped: Vec::with_capacity(max_rows),
     }
@@ -518,6 +526,8 @@ struct ForensicRow {
     forced: bool,
     component_size: u32,
     solver_path: u8,
+    exclusion_regret: f64,
+    regret_status: u8,
     incomplete: bool,
     capped: bool,
 }
@@ -977,6 +987,8 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
         of(&f.forensics.forced),
         of(&f.forensics.component_size),
         of(&f.forensics.solver_path),
+        of(&f.forensics.exclusion_regret),
+        of(&f.forensics.regret_status),
         of(&f.forensics.incomplete),
         of(&f.forensics.capped),
     ]);
@@ -1016,6 +1028,8 @@ pub fn fusion_clear_forensics(f: &mut Fusion) {
     l.forced.clear();
     l.component_size.clear();
     l.solver_path.clear();
+    l.exclusion_regret.clear();
+    l.regret_status.clear();
     l.incomplete.clear();
     l.capped.clear();
 }
@@ -1574,6 +1588,8 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
                     forced: false,
                     component_size: 0,
                     solver_path: PATH_NONE,
+                    exclusion_regret: 0.0,
+                    regret_status: REGRET_NONE,
                     incomplete: false,
                     capped: false,
                 }
@@ -1607,6 +1623,8 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
                         forced: false,
                         component_size: 0,
                         solver_path: PATH_NONE,
+                        exclusion_regret: 0.0,
+                        regret_status: REGRET_NONE,
                         incomplete: false,
                         capped: false,
                     }
@@ -1638,6 +1656,8 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
                         forced: false,
                         component_size: 0,
                         solver_path: PATH_NONE,
+                        exclusion_regret: 0.0,
+                        regret_status: REGRET_NONE,
                         incomplete: false,
                         capped: false,
                     }
@@ -1673,6 +1693,8 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
                     forced: false,
                     component_size: 0,
                     solver_path: PATH_NONE,
+                    exclusion_regret: 0.0,
+                    regret_status: REGRET_NONE,
                     incomplete: false,
                     capped: false,
                 }
@@ -1720,6 +1742,8 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
                     forced: false,
                     component_size: 0,
                     solver_path: PATH_NONE,
+                    exclusion_regret: 0.0,
+                    regret_status: REGRET_NONE,
                     incomplete: false,
                     capped: false,
                 }
@@ -1778,6 +1802,8 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
                         forced: false,
                         component_size: 0,
                         solver_path: PATH_NONE,
+                        exclusion_regret: 0.0,
+                        regret_status: REGRET_NONE,
                         incomplete: false,
                         capped: false,
                     }
@@ -1814,6 +1840,8 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
                     forced: false,
                     component_size: 0,
                     solver_path: PATH_NONE,
+                    exclusion_regret: 0.0,
+                    regret_status: REGRET_OUT_OF_SCOPE,
                     incomplete: false,
                     capped: false,
                 }
@@ -2215,14 +2243,24 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
         }
     }
     let solved = if f.cfg.assoc == ASSOC_GNN {
-        gnn(
-            &mut f.assoc,
-            tracks.len(),
-            anon.len(),
-            &pairs,
-            GATE_TOTAL_CHI2,
-        )
-        .map(|st| add_gnn(&mut f.stats.gnn, &st))
+        let result = if f.cfg.association_forensics {
+            gnn_forensics(
+                &mut f.assoc,
+                tracks.len(),
+                anon.len(),
+                &pairs,
+                GATE_TOTAL_CHI2,
+            )
+        } else {
+            gnn(
+                &mut f.assoc,
+                tracks.len(),
+                anon.len(),
+                &pairs,
+                GATE_TOTAL_CHI2,
+            )
+        };
+        result.map(|st| add_gnn(&mut f.stats.gnn, &st))
     } else {
         nearest(&mut f.assoc, anon.len(), &pairs)
     };
@@ -2235,6 +2273,21 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
             .stats
             .forensics_metadata_writes
             .saturating_add(assoc_metadata_writes(&f.assoc));
+        f.stats.forensics_regret_work = f
+            .stats
+            .forensics_regret_work
+            .saturating_add(u64::try_from(assoc_regret_work(&f.assoc)).unwrap_or(u64::MAX));
+        let unavailable = assoc_plot_track(&f.assoc)
+            .iter()
+            .zip(assoc_regret_status(&f.assoc))
+            .filter(|(track, status)| {
+                **track != NO_TRACK && !matches!(**status, REGRET_EXACT | REGRET_SINGLE)
+            })
+            .count();
+        f.stats.forensics_regret_unavailable = f
+            .stats
+            .forensics_regret_unavailable
+            .saturating_add(u64::try_from(unavailable).unwrap_or(u64::MAX));
     }
     let hold = f.cfg.hold_ambiguous;
     if hold || f.cfg.association_forensics {
@@ -2293,6 +2346,8 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
                         .get(a)
                         .copied()
                         .unwrap_or(PATH_NONE),
+                    exclusion_regret: 0.0,
+                    regret_status: REGRET_NONE,
                     incomplete,
                     capped,
                 },
@@ -2353,6 +2408,11 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
                             .get(a)
                             .copied()
                             .unwrap_or(PATH_NONE),
+                        exclusion_regret: assoc_regret(&f.assoc).get(a).copied().unwrap_or(0.0),
+                        regret_status: assoc_regret_status(&f.assoc)
+                            .get(a)
+                            .copied()
+                            .unwrap_or(REGRET_NONE),
                         incomplete,
                         capped,
                     },
@@ -2398,6 +2458,11 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
                     .get(a)
                     .copied()
                     .unwrap_or(PATH_NONE),
+                exclusion_regret: assoc_regret(&f.assoc).get(a).copied().unwrap_or(0.0),
+                regret_status: assoc_regret_status(&f.assoc)
+                    .get(a)
+                    .copied()
+                    .unwrap_or(REGRET_NONE),
                 incomplete,
                 capped,
             },
@@ -2584,6 +2649,8 @@ fn forensic_log_push(l: &mut AssocForensics, row: ForensicRow) -> bool {
         || l.forced.len() != n
         || l.component_size.len() != n
         || l.solver_path.len() != n
+        || l.exclusion_regret.len() != n
+        || l.regret_status.len() != n
         || l.incomplete.len() != n
         || l.capped.len() != n
         || l.t_ns.capacity() < l.max_rows
@@ -2606,6 +2673,8 @@ fn forensic_log_push(l: &mut AssocForensics, row: ForensicRow) -> bool {
         || l.forced.capacity() < l.max_rows
         || l.component_size.capacity() < l.max_rows
         || l.solver_path.capacity() < l.max_rows
+        || l.exclusion_regret.capacity() < l.max_rows
+        || l.regret_status.capacity() < l.max_rows
         || l.incomplete.capacity() < l.max_rows
         || l.capped.capacity() < l.max_rows
     {
@@ -2631,6 +2700,8 @@ fn forensic_log_push(l: &mut AssocForensics, row: ForensicRow) -> bool {
     l.forced.push(row.forced);
     l.component_size.push(row.component_size);
     l.solver_path.push(row.solver_path);
+    l.exclusion_regret.push(row.exclusion_regret);
+    l.regret_status.push(row.regret_status);
     l.incomplete.push(row.incomplete);
     l.capped.push(row.capped);
     true
@@ -3748,6 +3819,8 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
                 forced: false,
                 component_size: 0,
                 solver_path: PATH_NONE,
+                exclusion_regret: 0.0,
+                regret_status: REGRET_OUT_OF_SCOPE,
                 incomplete: false,
                 capped: false,
             }
@@ -4580,8 +4653,12 @@ mod tests {
         s2.forensics_pair_visits = s1.forensics_pair_visits;
         s2.forensics_plot_visits = s1.forensics_plot_visits;
         s2.forensics_metadata_writes = s1.forensics_metadata_writes;
+        s2.forensics_regret_work = s1.forensics_regret_work;
+        s2.forensics_regret_unavailable = s1.forensics_regret_unavailable;
         s1.forensics_plot_visits = 0;
         s1.forensics_metadata_writes = 0;
+        s1.forensics_regret_work = 0;
+        s1.forensics_regret_unavailable = 0;
         assert_eq!(s1, s2);
         assert!(fusion_forensics(&f2)
             .label
@@ -7482,8 +7559,12 @@ mod tests {
         on_stats.forensics_pair_visits = off_stats.forensics_pair_visits;
         on_stats.forensics_plot_visits = off_stats.forensics_plot_visits;
         on_stats.forensics_metadata_writes = off_stats.forensics_metadata_writes;
+        on_stats.forensics_regret_work = off_stats.forensics_regret_work;
+        on_stats.forensics_regret_unavailable = off_stats.forensics_regret_unavailable;
         off_stats.forensics_plot_visits = 0;
         off_stats.forensics_metadata_writes = 0;
+        off_stats.forensics_regret_work = 0;
+        off_stats.forensics_regret_unavailable = 0;
         assert_eq!(off_stats, on_stats);
         assert_eq!(fusion_buffers(&on), buffers);
         assert_eq!(fusion_stats(&on).forensics_overflow, 0);
@@ -7492,11 +7573,21 @@ mod tests {
         assert_eq!(fusion_forensics(&capped).label.len(), 1);
         assert!(fusion_stats(&on).forensics_pair_visits > 0);
         assert_eq!(fusion_stats(&on).forensics_plot_visits % 3, 0);
+        assert!(fusion_stats(&on).forensics_regret_work > 0);
         let l = fusion_forensics(&on);
         let n = l.t_ns.len();
         assert!(n > 0);
         assert!(l.action.contains(&FORENSIC_INIT));
         assert!(l.action.contains(&FORENSIC_APPLIED));
+        assert!(l
+            .solver_path
+            .iter()
+            .zip(&l.exclusion_regret)
+            .zip(&l.regret_status)
+            .filter(|((path, _), _)| **path != PATH_NONE)
+            .all(|((_, regret), status)| {
+                *regret >= 0.0 && matches!(*status, REGRET_EXACT | REGRET_SINGLE)
+            }));
         assert!([
             l.ordinal.len(),
             l.plot_range_m.len(),
@@ -7517,6 +7608,8 @@ mod tests {
             l.forced.len(),
             l.component_size.len(),
             l.solver_path.len(),
+            l.exclusion_regret.len(),
+            l.regret_status.len(),
             l.incomplete.len(),
             l.capped.len()
         ]
@@ -7552,6 +7645,8 @@ mod tests {
             forced: false,
             component_size: 2,
             solver_path: PATH_SINGLE,
+            exclusion_regret: 4.0,
+            regret_status: REGRET_SINGLE,
             incomplete: false,
             capped: false,
         };
@@ -7583,6 +7678,8 @@ mod tests {
             f.forensics.forced.len(),
             f.forensics.component_size.len(),
             f.forensics.solver_path.len(),
+            f.forensics.exclusion_regret.len(),
+            f.forensics.regret_status.len(),
             f.forensics.incomplete.len(),
             f.forensics.capped.len()
         ]
@@ -7592,6 +7689,8 @@ mod tests {
         f.stats.forensics_pair_visits = 12;
         f.stats.forensics_plot_visits = 9;
         f.stats.forensics_metadata_writes = 7;
+        f.stats.forensics_regret_work = 11;
+        f.stats.forensics_regret_unavailable = 3;
         fusion_clear_forensics(&mut f);
         assert_eq!(fusion_buffers(&f), buffers);
         let cleared = fusion_forensics(&f);
@@ -7616,6 +7715,8 @@ mod tests {
             cleared.forced.len(),
             cleared.component_size.len(),
             cleared.solver_path.len(),
+            cleared.exclusion_regret.len(),
+            cleared.regret_status.len(),
             cleared.incomplete.len(),
             cleared.capped.len()
         ]
@@ -7625,6 +7726,8 @@ mod tests {
         assert_eq!(f.stats.forensics_pair_visits, 12);
         assert_eq!(f.stats.forensics_plot_visits, 9);
         assert_eq!(f.stats.forensics_metadata_writes, 7);
+        assert_eq!(f.stats.forensics_regret_work, 11);
+        assert_eq!(f.stats.forensics_regret_unavailable, 3);
         f.forensics.action.push(FORENSIC_HELD);
         log_forensic(&mut f, row);
         assert_eq!(f.stats.forensics_overflow, 3);
@@ -7662,6 +7765,12 @@ mod tests {
         assert!(actions.contains(&FORENSIC_INIT));
         assert!(actions.contains(&FORENSIC_UNASSIGNED));
         assert!(actions.contains(&FORENSIC_APPLIED));
+        assert!(fusion_forensics(&f)
+            .action
+            .iter()
+            .zip(&fusion_forensics(&f).regret_status)
+            .filter(|(action, _)| matches!(**action, FORENSIC_INIT | FORENSIC_APPLIED))
+            .all(|(_, status)| *status != REGRET_NONE));
     }
 
     #[test]

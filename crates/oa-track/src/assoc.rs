@@ -73,6 +73,8 @@ pub const REGRET_UNSUPPORTED: u8 = 5;
 pub const REGRET_NUMERICAL: u8 = 6;
 /// Regret is unavailable because the nearest-neighbour solver was used.
 pub const REGRET_NOT_GNN: u8 = 7;
+/// A selected decision was outside the measured radar-GNN path.
+pub const REGRET_OUT_OF_SCOPE: u8 = 8;
 /// Limit: the largest component (tracks plus plots) solved exactly; 160 gives a padded matrix of
 /// 160 rows and columns, about 4e6 operations worst case. Larger components are assigned
 /// greedily and counted.
