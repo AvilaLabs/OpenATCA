@@ -1088,7 +1088,26 @@ mod tests {
             let mut candidates = Vec::with_capacity(TRACK_CAP);
             for query in 0..QUERY_CAP {
                 let target = &t[query % (TRACK_CAP - 4)].polar;
-                let plot = if query % 4 == 0 {
+                let plot = if query == 0 {
+                    // Directly exercise the crafted close-range azimuth-seam track.
+                    let crafted = t[TRACK_CAP - 4].polar;
+                    (crafted.0, crafted.1)
+                } else if query == 1 {
+                    // Just inside the crafted track's exact radial coarse-window boundary.
+                    let crafted = t[TRACK_CAP - 3].polar;
+                    let limit = COARSE_M + 8.0 * crafted.3;
+                    (crafted.0 + limit * (1.0 - 1.0e-12), crafted.1)
+                } else if query == 2 {
+                    // Just inside the same track's exact cross-range boundary.
+                    let crafted = t[TRACK_CAP - 3].polar;
+                    let limit = COARSE_M + 8.0 * crafted.3;
+                    let da = (limit * (1.0 - 1.0e-12) / crafted.2).to_degrees();
+                    (crafted.0, (crafted.1 + da).rem_euclid(360.0))
+                } else if query == 3 {
+                    // The crafted high-covariance track is on the always-tested wide list.
+                    let crafted = t[TRACK_CAP - 2].polar;
+                    (crafted.0, crafted.1)
+                } else if query % 4 == 0 {
                     (target.0, target.1)
                 } else if query % 4 == 1 {
                     (1.0 + max_range * rng.unit(), 360.0 * rng.unit())

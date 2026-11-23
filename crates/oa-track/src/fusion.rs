@@ -6104,7 +6104,7 @@ mod tests {
 
     // REQ: OA-TRK-177, OA-TRK-300
     #[test]
-    fn candidate_narrowing_matches_full_work_for_turns_coast_and_extreme_times() {
+    fn candidate_narrowing_matches_full_work_for_turns_coast_and_the_valid_time_limit() {
         // Named caps keep this independent reference bounded: 4 tracks, 16 scans, and a
         // one-million-unit bucket budget, comfortably above the complete work in these worlds.
         const TRACK_CAP: usize = 4;
@@ -6175,6 +6175,9 @@ mod tests {
                         });
                     }
                     plots.sort_by_key(|p| p.time_ns);
+                    assert!(plots.iter().all(|p| {
+                        plot_check(p).is_ok() && scan_at(&[site], 0, p.time_ns).is_some()
+                    }));
                     fusion_plots(&mut f, 0, &plots);
                 }
                 fusion_advance(&mut f, t_ns + site.period_ns / 2, &mut out);
@@ -6193,11 +6196,7 @@ mod tests {
         };
 
         for (world, site) in worlds.into_iter().enumerate() {
-            for base_ns in [
-                0,
-                TIME_LIMIT_NS - 2 * SCAN_CAP as i64 * site.period_ns,
-                -TIME_LIMIT_NS + 2 * SCAN_CAP as i64 * site.period_ns,
-            ] {
+            for base_ns in [0, TIME_LIMIT_NS - 2 * SCAN_CAP as i64 * site.period_ns] {
                 let (grid, st, out, radar_tracks) = run_once(site, false, base_ns);
                 let (reference, reference_st, reference_out, reference_tracks) =
                     run_once(site, true, base_ns);
