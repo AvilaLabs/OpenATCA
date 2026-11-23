@@ -8,6 +8,7 @@
 //!     --out-dir <dir> [--leader-min <n>] [--trail-n <n>] [--trail-step-s <n>] [--reacq-s <n>]
 //!     [--max-targets <n>] [--warmup-s <n>] [--hashes-only] [--overwrite] [--allow-loss]
 //!     [--raw-only --raw-receipt recorded|archive-reconstructed]
+//!     [--raw-witness-out <file>|--verify-raw-witness <file>]
 //! ```
 //!
 //! Frame `i` shows the tracker state at `start + i * step`, for `i` from 0 while the time is
@@ -118,7 +119,8 @@ const USAGE: &str = "usage: oa-scope-replay --snapshot <file> --adsb <clip.oaf> 
 --centre <lat,lon> --range-nm <n> --size <WxH> --start <unix-seconds|YYYY-MM-DDTHH:MM:SSZ> \
 --duration-s <n> --step-s <n> --out-dir <dir> [--leader-min <n>] [--trail-n <n>] \
 [--trail-step-s <n>] [--reacq-s <n>] [--max-targets <n>] [--warmup-s <n>] [--hashes-only] \
-[--overwrite] [--allow-loss] [--raw-only --raw-receipt recorded|archive-reconstructed]";
+[--overwrite] [--allow-loss] [--raw-only --raw-receipt recorded|archive-reconstructed]
+[--raw-witness-out <file>|--verify-raw-witness <file>]";
 
 // A7.2: cold struct, size guard waived (errors are rare).
 #[derive(Debug)]
@@ -177,6 +179,8 @@ pub struct ReplayArgs {
     pub allow_loss: bool,
     /// Opt-in independent raw display with caller-declared receipt timestamp provenance.
     pub raw_receipt: Option<RawReceiptMode>,
+    /// Write or verify a bounded raw replay witness; valid only in raw-only mode.
+    pub raw_witness: Option<RawWitnessAction>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +188,12 @@ pub enum RawReceiptMode {
     Recorded,
     /// OAF archive proxy: use the latest decoded row time in its frame as availability time.
     ArchiveReconstructed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RawWitnessAction {
+    Write(PathBuf),
+    Verify(PathBuf),
 }
 
 fn parse_finite(text: &str) -> Option<f64> {
@@ -346,6 +356,7 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
     let (mut hashes_only, mut overwrite, mut allow_loss, mut raw_only) =
         (false, false, false, false);
     let mut raw_receipt = None;
+    let mut raw_witness = None;
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let mut value = || {
@@ -417,6 +428,16 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
                 };
                 set_once(&mut raw_receipt, flag, mode)?;
             }
+            "--raw-witness-out" => set_once(
+                &mut raw_witness,
+                flag,
+                RawWitnessAction::Write(PathBuf::from(value()?)),
+            )?,
+            "--verify-raw-witness" => set_once(
+                &mut raw_witness,
+                flag,
+                RawWitnessAction::Verify(PathBuf::from(value()?)),
+            )?,
             other => return Err(CliError::Usage(format!("unknown argument {other:?}"))),
         }
     }
@@ -447,6 +468,31 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
         return Err(CliError::Usage(
             "--raw-only requires exactly one --raw-receipt declaration, and --raw-receipt requires --raw-only".into(),
         ));
+    }
+    if raw_witness.is_some() && !raw_only {
+        return Err(CliError::Usage(
+            "raw witness options require --raw-only and --raw-receipt".into(),
+        ));
+    }
+    if matches!(raw_witness.as_ref(), Some(RawWitnessAction::Verify(_))) && overwrite {
+        return Err(CliError::Usage(
+            "--verify-raw-witness is read-only and cannot be combined with --overwrite".into(),
+        ));
+    }
+    if let Some(action) = raw_witness.as_ref() {
+        let witness_path = match action {
+            RawWitnessAction::Write(path) | RawWitnessAction::Verify(path) => path,
+        };
+        let mut partial_name = witness_path
+            .file_name()
+            .ok_or_else(|| CliError::Usage("raw witness path has no file name".into()))?
+            .to_os_string();
+        partial_name.push(".oarw-partial");
+        let partial_path = witness_path.with_file_name(partial_name);
+        for path in [witness_path.as_path(), partial_path.as_path()] {
+            oa_sealed::refuse(path)
+                .map_err(|error| CliError::Failed(format!("raw witness path: {error}")))?;
+        }
     }
     let warmup_ns = warmup.unwrap_or(DEFAULT_WARMUP_NS);
     // Every time the run computes from these is checked here, once, so the run itself only has to
@@ -496,6 +542,7 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
         overwrite,
         allow_loss,
         raw_receipt,
+        raw_witness,
     })
 }
 
@@ -924,7 +971,8 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     let model = oa_airspace::snapshot::decode(&bytes).map_err(|e| failed("snapshot", e))?;
 
     if let Some(mode) = a.raw_receipt {
-        return run_raw_only(&a, mode, model, out);
+        let snapshot_sha256 = oa_sha256::sha256(&bytes);
+        return run_raw_only(&a, mode, model, snapshot_sha256, out);
     }
 
     // parse_args checked that these fit; they are checked again here, not trusted.

@@ -32,8 +32,20 @@ sealed-data guard.
 oa-legacy-traj --sfdps <dir> --tbfm <dir> --adsb <clip.oaf> --nasr <zip> --out <dir> --arrival-meter-fix <NAME|auto>
 ```
 
-This experiment issues one forecast per eligible ORD flight using the route available at receive
-time and the latest eligible ADS-B observation. It writes `arrival-report.txt` with position and
+This experiment issues one forecast per eligible ORD flight using the latest route revision
+received by that issue cutoff and the latest eligible ADS-B observation. Route revisions are
+selected only within one full SFDPS flight GUFI; their plan ID, receive time and GUFI are carried
+beside each forecast and written to `arrival-report.txt`. Future revisions are excluded. Equal-time
+conflicting revisions, missing identity, revision-capacity overflow, and conflicting same-stamp
+ERAM ETA payloads are reported as refusals; exact duplicate revisions are harmless. Malformed or
+over-256-fix rows are counted and skipped as issue candidates, but stay in the revision history so
+they refuse a forecast if available by its cutoff. The cohort still freezes the first eligible issue
+snapshot per flight. At that cutoff, every captured revision for the GUFI participates, including
+one whose arrival is no longer ORD or whose route omits the selected meter fix; a selected revision
+without usable geometry is refused instead of falling back. Each flight history is sorted once;
+cutoff selection binary-searches its eligible prefix and refuses more than 256 revisions before
+resolving geometry. Amendments received after the frozen issue cutoff are excluded, so this
+experiment does not model later in-flight amendments. It writes position and
 altitude coverage and error at 5, 10 and 20 minutes, plus selected-fix ETA errors for OpenATCA,
 ERAM and TBFM when comparable estimates exist. `auto` selects a resolvable fix by the number of
 distinct ORD flight plans with a TBFM estimate, before scoring. OpenATCA uses the received route's

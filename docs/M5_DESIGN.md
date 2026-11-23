@@ -1,8 +1,11 @@
 # M5 — Safety nets: design
 
-Status: approved by Connor 2026-11-19, confirmed 2026-11-20. Built: step 1 (net state, inhibition objects and their
-display indications, `oa-safety` and `oa-display`) and step 2 (the close-encounter record,
-`oa-encounter` and `tools/oa-encounter`). The rest is not built yet.
+Status: approved by Connor 2026-11-19, confirmed 2026-11-20; implementation status reviewed
+2026-11-23. Net state, inhibition/display indications, the encounter record, conflict alert and
+MSAW cores and replay tools are built. Full warning-quality evaluation, operational settings,
+intent integration, APW and approach-path monitoring remain open. See the
+[capability register](CAPABILITIES.md); the build order below specifies the design sequence,
+not a completed M5 qualification.
 
 ## Goal
 

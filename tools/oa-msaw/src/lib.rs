@@ -16,6 +16,7 @@ pub mod coarse;
 pub mod config;
 pub mod diagnose;
 pub mod eligibility;
+pub mod evaluation;
 pub mod floors;
 pub mod guard;
 pub mod qnh;

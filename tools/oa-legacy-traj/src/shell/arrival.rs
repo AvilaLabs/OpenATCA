@@ -25,9 +25,12 @@ use oa_bench::legacy::{
 };
 use oa_bench::stats::nearest_rank;
 
+#[cfg(test)]
+use crate::core::arrival::forecast;
 use crate::core::arrival::{
-    forecast, score, ArrivalScore, IssueSnapshot, LegacyEta, RouteFix, TrackState, TruthPoint,
-    VerticalStatus,
+    forecast_for_route, forecast_latest_route, score, ArrivalScore, ForecastRefusal, IssueSnapshot,
+    LegacyEta, RouteFix, RouteRevision, RouteRevisionCandidate, TrackState, TruthPoint,
+    VerticalStatus, MAX_ROUTE_FIXES, MAX_ROUTE_REVISIONS,
 };
 use crate::core::types::Place;
 use crate::shell::places::{place_of_e7, point_places, PlaceTable};
@@ -117,7 +120,7 @@ impl RawRateDiagnostic {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct RouteIx(u32);
 
 #[derive(Clone, Copy)]
@@ -364,6 +367,12 @@ fn route_rows(legacy: &Legacy) -> impl Iterator<Item = RouteIx> + '_ {
     })
 }
 
+fn sort_route_histories(histories: &mut BTreeMap<u32, Vec<(i64, RouteIx)>>) {
+    for history in histories.values_mut() {
+        history.sort_by_key(|&(received_ms, row)| (received_ms, row.0));
+    }
+}
+
 fn select_meter(requested: &str, legacy: &Legacy, places: &PlaceTable) -> Result<RouteFix, String> {
     let selected = if requested == "AUTO" {
         // Before scoring, count distinct ORD plan/fix pairs present in both captured routes and
@@ -400,11 +409,13 @@ fn select_meter(requested: &str, legacy: &Legacy, places: &PlaceTable) -> Result
             {
                 continue;
             }
-            for fix in route_range(legacy, row)
-                .into_iter()
-                .flatten()
-                .filter_map(|i| legacy.route_points.fix.get(i))
-            {
+            let Some(span) = route_range(legacy, row) else {
+                continue;
+            };
+            if span.len() > MAX_ROUTE_FIXES {
+                continue;
+            }
+            for fix in span.filter_map(|i| legacy.route_points.fix.get(i)) {
                 let key = norm_id::<8>(fix);
                 if candidates.remove(&(plan, key)) {
                     *counts.entry(key).or_insert(0usize) += 1;
@@ -698,6 +709,97 @@ fn route_ahead(
     (meter_ix.checked_sub(next)? < route.len()).then_some(route)
 }
 
+// F4/C6: one offline join boundary; keep its source tables and issue-time evidence explicit.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn cutoff_route_revisions(
+    legacy: &Legacy,
+    places: &PlaceTable,
+    rows: &[(i64, RouteIx)],
+    cutoff_ms: i64,
+    flight: u32,
+    flight_gufi: u128,
+    track: TrackState,
+    course: f64,
+    meter: RouteFix,
+) -> Result<
+    (
+        Vec<RouteRevisionCandidate>,
+        Vec<(RouteRevision, RouteIx, Option<usize>)>,
+    ),
+    ForecastRefusal,
+> {
+    // C7: histories are sorted once with a total 500,000-row cap. Cutoff lookup is logarithmic;
+    // the revision loop is admitted only after the prefix fits the 256-revision cap.
+    let prefix_end = rows.partition_point(|(available_ms, _)| *available_ms <= cutoff_ms);
+    let eligible_rows = rows
+        .get(..prefix_end)
+        .ok_or(ForecastRefusal::InvalidRouteTime)?;
+    if eligible_rows.len() > MAX_ROUTE_REVISIONS {
+        return Err(ForecastRefusal::TooManyRouteRevisions);
+    }
+    let mut candidates: Vec<RouteRevisionCandidate> = Vec::with_capacity(eligible_rows.len());
+    let mut revisions: Vec<(RouteRevision, RouteIx, Option<usize>)> =
+        Vec::with_capacity(eligible_rows.len());
+    for &(available_ms, row) in eligible_rows {
+        if available_ms <= 0 {
+            return Err(ForecastRefusal::InvalidRouteTime);
+        }
+        let i = row.0 as usize;
+        if legacy.routes.flight.get(i).copied() != Some(flight) {
+            continue;
+        }
+        let plan_id = legacy
+            .routes
+            .plan_at_receive
+            .get(i)
+            .map(|plan| norm_id::<12>(plan))
+            .ok_or(ForecastRefusal::InvalidRouteIdentity)?;
+        let span = route_range(legacy, row).ok_or(ForecastRefusal::InvalidRoutePlace)?;
+        if span.len() > MAX_ROUTE_FIXES {
+            return Err(ForecastRefusal::TooManyRouteFixes);
+        }
+        let meter_ix = meter_index(legacy, row, meter);
+        let arrival = legacy
+            .routes
+            .arrival_at_receive
+            .get(i)
+            .map(|id| name(id))
+            .ok_or(ForecastRefusal::InvalidRouteIdentity)?;
+        let route = if matches!(arrival, "ORD" | "KORD") {
+            meter_ix
+                .and_then(|meter_ix| route_ahead(legacy, places, row, meter_ix, track, course))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let selected_eta = meter_ix
+            .and_then(|meter_ix| legacy.route_points.est_ms.get(meter_ix))
+            .copied();
+        for (previous, (previous_revision, _, previous_meter_ix)) in
+            candidates.iter().zip(&revisions)
+        {
+            if previous_revision.available_ms == available_ms
+                && previous_revision.plan_id == plan_id
+                && previous.route == route
+                && (*previous_meter_ix)
+                    .and_then(|meter_ix| legacy.route_points.est_ms.get(meter_ix))
+                    .copied()
+                    != selected_eta
+            {
+                return Err(ForecastRefusal::ConflictingRouteEstimate);
+            }
+        }
+        let revision = RouteRevision {
+            plan_id,
+            flight_gufi,
+            available_ms,
+        };
+        revisions.push((revision, row, meter_ix));
+        candidates.push(RouteRevisionCandidate { revision, route });
+    }
+    Ok((candidates, revisions))
+}
+
 fn tbfm_index(legacy: &Legacy, meter: RouteFix) -> Result<BTreeMap<Plan, Vec<EtaRow>>, String> {
     let mut map = BTreeMap::<Plan, Vec<EtaRow>>::new();
     let mut offered = 0usize;
@@ -827,6 +929,7 @@ struct HorizonCoverage {
 
 struct PlannedIssue {
     issue: IssueSnapshot,
+    route_revision: RouteRevision,
     gufi: u128,
     addr: u32,
     route_row: RouteIx,
@@ -841,6 +944,7 @@ pub(crate) struct ArrivalPlan {
     offered_flights: usize,
     no_addr: usize,
     no_meter: usize,
+    unusable_admission_rows: usize,
     ambiguous_routes: usize,
     no_track: usize,
     stale_source_track: usize,
@@ -1027,10 +1131,34 @@ pub(crate) fn build_plan(
     }
     let meter = select_meter(requested, legacy, places)?;
     let mut flights = BTreeMap::<u32, Vec<(i64, RouteIx, usize)>>::new();
+    let mut all_revisions = BTreeMap::<u32, Vec<(i64, RouteIx)>>::new();
     let mut addresses = BTreeSet::new();
     let mut no_addr = 0usize;
     let mut no_meter = 0usize;
+    let mut unusable_admission_rows = 0usize;
+    for i in 0..legacy.routes.flight.len() {
+        let (Some(&flight), Some(&received_ms)) =
+            (legacy.routes.flight.get(i), legacy.routes.recv_ms.get(i))
+        else {
+            return Err("inconsistent arrival route identity or receive-time columns".into());
+        };
+        all_revisions
+            .entry(flight)
+            .or_default()
+            .push((received_ms, RouteIx(i as u32)));
+    }
+    // C7: sort once across at most MAX_CAPTURED_ROUTES rows. Each issue then uses a logarithmic
+    // cutoff search and examines at most MAX_ROUTE_REVISIONS entries before route geometry work.
+    sort_route_histories(&mut all_revisions);
     for row in route_rows(legacy) {
+        let Some(span) = route_range(legacy, row) else {
+            unusable_admission_rows += 1;
+            continue;
+        };
+        if span.len() > MAX_ROUTE_FIXES {
+            unusable_admission_rows += 1;
+            continue;
+        }
         let Some(meter_ix) = meter_index(legacy, row, meter) else {
             no_meter += 1;
             continue;
@@ -1091,12 +1219,15 @@ pub(crate) fn build_plan(
         )
     };
     let mut issues = Vec::new();
+    // C7: candidate attempts are bounded by the 500,000 captured-route ceiling; each attempted
+    // cutoff examines a binary-searched prefix of at most 256 revisions, so the total candidate
+    // revision examinations are bounded by MAX_CAPTURED_ROUTES * MAX_ROUTE_REVISIONS.
     for routes in flights.values_mut() {
         routes.sort_by_key(|&(recv, row, _)| route_key(recv, row));
         let candidate = routes
             .iter()
             .enumerate()
-            .find_map(|(i, &(at, row, meter_ix))| {
+            .find_map(|(i, &(at, row, _meter_ix))| {
                 let key = route_key(at, row);
                 let duplicates = routes
                     .get(i + 1)
@@ -1128,31 +1259,82 @@ pub(crate) fn build_plan(
                     outside_issue_window += 1;
                     return None;
                 }
-                let Some(route) = route_ahead(legacy, places, row, meter_ix, track, course) else {
+                let flight = *legacy.routes.flight.get(row.0 as usize)?;
+                let gufi = *legacy.flights.gufi.get(flight as usize)?;
+                let revision_history = all_revisions.get(&flight)?;
+                let (revisions, revision_rows) = match cutoff_route_revisions(
+                    legacy,
+                    places,
+                    revision_history,
+                    at,
+                    flight,
+                    gufi,
+                    track,
+                    course,
+                    meter,
+                ) {
+                    Ok(revisions) => revisions,
+                    Err(refusal) => {
+                        unusable_route += 1;
+                        *baseline_forecast_refused
+                            .entry(format!("{refusal:?}"))
+                            .or_default() += 1;
+                        return None;
+                    }
+                };
+                let issue = IssueSnapshot {
+                    cutoff_ms: at,
+                    issued_ms: at,
+                    track,
+                    assigned_altitude_ft: None,
+                    assigned_altitude_available_ms: None,
+                    assigned_altitude_provenance: None,
+                    route: Vec::new(),
+                    meter_fix: Some(meter),
+                };
+                let selected = match forecast_latest_route(&issue, gufi, &revisions) {
+                    Ok(selected) => selected,
+                    Err(refusal) => {
+                        unusable_route += 1;
+                        *baseline_forecast_refused
+                            .entry(format!("{refusal:?}"))
+                            .or_default() += 1;
+                        return None;
+                    }
+                };
+                let selected_row = revision_rows
+                    .iter()
+                    .find(|(revision, _, _)| *revision == selected.revision)?;
+                let selected_route = revisions
+                    .iter()
+                    .find(|candidate| candidate.revision == selected.revision)?
+                    .route
+                    .clone();
+                let Some(selected_meter_ix) = selected_row.2 else {
                     unusable_route += 1;
+                    *baseline_forecast_refused
+                        .entry(format!("{:?}", ForecastRefusal::NoRouteAtCutoff))
+                        .or_default() += 1;
                     return None;
                 };
+                let issue = IssueSnapshot {
+                    route: selected_route,
+                    ..issue
+                };
                 Some((
-                    IssueSnapshot {
-                        cutoff_ms: at,
-                        issued_ms: at,
-                        track,
-                        assigned_altitude_ft: None,
-                        assigned_altitude_available_ms: None,
-                        assigned_altitude_provenance: None,
-                        route,
-                        meter_fix: Some(meter),
-                    },
+                    issue,
                     addr,
-                    row,
-                    meter_ix,
+                    selected_row.1,
+                    selected_meter_ix,
                     report_position,
+                    selected.revision,
                 ))
             });
-        let Some((issue, addr, route_row, meter_ix, report_position)) = candidate else {
+        let Some((issue, addr, route_row, meter_ix, report_position, route_revision)) = candidate
+        else {
             continue;
         };
-        if let Err(refusal) = forecast(&issue) {
+        if let Err(refusal) = forecast_for_route(&issue, route_revision) {
             *baseline_forecast_refused
                 .entry(format!("{refusal:?}"))
                 .or_insert(0) += 1;
@@ -1173,6 +1355,7 @@ pub(crate) fn build_plan(
         }
         issues.push(PlannedIssue {
             issue,
+            route_revision,
             gufi,
             addr,
             route_row,
@@ -1198,6 +1381,7 @@ pub(crate) fn build_plan(
         offered_flights,
         no_addr,
         no_meter,
+        unusable_admission_rows,
         ambiguous_routes,
         no_track,
         stale_source_track,
@@ -1241,7 +1425,11 @@ pub(crate) fn report(
             .or_default() += 1;
         let pair_eligible = matches!(&evidence, AssignmentEvidence::Available { .. });
         let assignment_free_forecast = pair_eligible
-            .then(|| forecast(&planned.issue).ok())
+            .then(|| {
+                forecast_for_route(&planned.issue, planned.route_revision)
+                    .ok()
+                    .map(|output| output.forecast)
+            })
             .flatten();
         let mut issue = planned.issue.clone();
         apply_assignment(&mut issue, &evidence);
@@ -1262,8 +1450,8 @@ pub(crate) fn report(
             .get(planned.route_row.0 as usize)
             .and_then(|p| tbfm.get(&norm_id(p)))
             .and_then(|entries| estimate_at(entries, at));
-        let predicted = match forecast(&issue) {
-            Ok(predicted) => predicted,
+        let predicted = match forecast_for_route(&issue, planned.route_revision) {
+            Ok(predicted) => predicted.forecast,
             Err(refusal) => {
                 assigned_forecast_refused += 1;
                 *totals
@@ -1331,7 +1519,23 @@ pub(crate) fn report(
         writeln!(text, "{label}: {value}").map_err(|e| e.to_string())?;
     }
     writeln!(text, "sealed-window rows dropped: {sealed}").map_err(|e| e.to_string())?;
-    writeln!(text, "Selected flow: {}. AUTO ranks resolvable TBFM fixes by distinct ORD flight plans before scoring. The experiment takes the first eligible route and track snapshot per flight, 40 to 200 NM from the fix, using the most recent unique ADS-B report within 30 s. It freezes each issue GUFI and cutoff after an assignment-free forecast succeeds, before the SFDPS assignment query. Forecast uses received ERAM route geometry and ADS-B observation time. Legacy ETA values do not enter the model.", plan.requested).map_err(|e| e.to_string())?;
+    writeln!(text, "Selected flow: {}. AUTO ranks resolvable TBFM fixes by distinct ORD flight plans before scoring. The experiment takes the first eligible route and track snapshot per flight, 40 to 200 NM from the fix, using the most recent unique ADS-B report within 30 s. For that frozen issue cutoff it considers every captured route revision for the full GUFI, including revisions that no longer qualify for the ORD flow or omit the selected meter fix. It selects the latest received revision; future revisions are excluded, equal-time conflicts are refused, and a selected revision without usable route geometry is refused instead of falling back. The first-eligible issue policy means amendments received after that frozen cutoff are not incorporated. It freezes each issue GUFI, route plan ID, receive time and cutoff after an assignment-free forecast succeeds, before the SFDPS assignment query. Forecast uses received ERAM route geometry and ADS-B observation time. Legacy ETA values do not enter the model.", plan.requested).map_err(|e| e.to_string())?;
+    writeln!(
+        text,
+        "Route revision provenance (one row per issued forecast):"
+    )
+    .map_err(|e| e.to_string())?;
+    for issue in &plan.issues {
+        writeln!(
+            text,
+            "route_revision flight_gufi={:032x} plan_id={:?} received_ms={} cutoff_ms={}",
+            issue.route_revision.flight_gufi,
+            issue.route_revision.plan_id,
+            issue.route_revision.available_ms,
+            issue.issue.cutoff_ms
+        )
+        .map_err(|e| e.to_string())?;
+    }
     writeln!(text, "Procedure input: the legacy route tables contain no published procedure altitude windows; route constraint checks are unavailable for this run.").map_err(|e| e.to_string())?;
     if let Some(diagnostic) = &plan.raw_rate_diagnostic {
         writeln!(text, "Raw vertical-rate diagnostic over {} frozen issues. A raw-pair proxy compares the selected rate with a unique preceding barometric altitude from the same ADS-B source class within 10 s. It scans at most {MAX_RATE_DIAGNOSTIC_ROWS} rows per issue. The illustrative 50 ft tolerance allows two nominal 25 ft steps. This proxy uses observation timestamps and raw altitudes. The tracker uses its own accepted history.", plan.issues.len()).map_err(|e| e.to_string())?;
@@ -1398,6 +1602,12 @@ pub(crate) fn report(
         }
     }
     writeln!(text, "route messages excluded: outside selected fix or repeated fix {}; ambiguous same-time routes {}; missing, old, on-ground or conflicting ADS-B state {}; source-flag stale ADS-B state {}; outside issue distance {}; unresolved forward route {}", plan.no_meter, plan.ambiguous_routes, plan.no_track, plan.stale_source_track, plan.outside_issue_window, plan.unusable_route).map_err(|e| e.to_string())?;
+    writeln!(
+        text,
+        "route rows skipped before admission: malformed or over 256 fixes {}",
+        plan.unusable_admission_rows
+    )
+    .map_err(|e| e.to_string())?;
     let scalar_errors = totals.horizontal.iter_mut().zip(&mut totals.vertical);
     let directional_errors = totals.along_track.iter_mut().zip(&mut totals.cross_track);
     for (((mins, (h, v)), (along, cross)), coverage) in [5, 10, 20]
@@ -1561,6 +1771,7 @@ mod assignment_plan_tests {
             offered_flights: 1,
             no_addr: 0,
             no_meter: 0,
+            unusable_admission_rows: 0,
             ambiguous_routes: 0,
             no_track: 0,
             stale_source_track: 0,
@@ -1584,6 +1795,11 @@ mod assignment_plan_tests {
                     assigned_altitude_provenance: None,
                     route: vec![fix],
                     meter_fix: Some(fix),
+                },
+                route_revision: RouteRevision {
+                    plan_id: [1; 12],
+                    flight_gufi: 0x1111,
+                    available_ms: cutoff_ms,
                 },
                 gufi: 0x1111,
                 addr: 1,
@@ -2106,6 +2322,411 @@ mod assigned_altitude_tests {
                 value_ft: 20_000,
                 available_ms: source_base + 3_000,
             }
+        );
+    }
+}
+
+#[cfg(test)]
+mod route_revision_shell_tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )]
+
+    use super::*;
+
+    fn fix(name: &[u8; 8], lat_e7: i32, lon_e7: i32) -> ([u8; 8], i32, i32) {
+        (norm_id(name), lat_e7, lon_e7)
+    }
+
+    fn add_revision(
+        legacy: &mut Legacy,
+        received_ms: i64,
+        plan_id: [u8; 12],
+        arrival: [u8; 12],
+        points: &[([u8; 8], i32, i32)],
+    ) -> RouteIx {
+        let first = legacy.route_points.fix.len() as u32;
+        for &(name, lat, lon) in points {
+            legacy.route_points.fix.push(name);
+            legacy.route_points.est_ms.push(NO_TIME);
+            legacy.route_points.lat_e7.push(lat);
+            legacy.route_points.lon_e7.push(lon);
+        }
+        let row = legacy.routes.flight.len() as u32;
+        legacy.routes.flight.push(0);
+        legacy.routes.ts_ms.push(received_ms);
+        legacy.routes.recv_ms.push(received_ms);
+        legacy.routes.addr_at_receive.push(1);
+        // Match the decoder's zero-padded identifier contract, not space-padded display text.
+        legacy.routes.plan_at_receive.push(norm_id(&plan_id));
+        legacy.routes.arrival_at_receive.push(norm_id(&arrival));
+        legacy.routes.first.push(first);
+        legacy.routes.len.push(points.len() as u32);
+        RouteIx(row)
+    }
+
+    fn issue(cutoff_ms: i64, meter: RouteFix) -> IssueSnapshot {
+        IssueSnapshot {
+            cutoff_ms,
+            issued_ms: cutoff_ms,
+            track: TrackState {
+                time_ms: cutoff_ms,
+                place: Place {
+                    lat_deg: 41.3,
+                    lon_deg: -88.4,
+                },
+                altitude_ft: None,
+                speed_mps: Some(180.0),
+                vertical_rate_fpm: None,
+            },
+            assigned_altitude_ft: None,
+            assigned_altitude_available_ms: None,
+            assigned_altitude_provenance: None,
+            route: Vec::new(),
+            meter_fix: Some(meter),
+        }
+    }
+
+    fn meter_fix() -> RouteFix {
+        RouteFix {
+            name: norm_id(b"METER"),
+            place: Place {
+                lat_deg: 41.7,
+                lon_deg: -87.9,
+            },
+            altitude_constraint: None,
+        }
+    }
+
+    fn captured_revisions(legacy: &Legacy) -> Vec<(i64, RouteIx)> {
+        (0..legacy.routes.flight.len())
+            .map(|i| (legacy.routes.recv_ms[i], RouteIx(i as u32)))
+            .collect()
+    }
+
+    // REQ: OA-LTJ-204
+    #[test]
+    fn same_cutoff_amendment_without_the_meter_is_refused_not_hidden() {
+        let mut legacy = Legacy::default();
+        let old = add_revision(
+            &mut legacy,
+            800_000,
+            *b"PLAN-A      ",
+            *b"ORD         ",
+            &[fix(b"METER   ", 417_000_000, -879_000_000)],
+        );
+        let amended = add_revision(
+            &mut legacy,
+            900_000,
+            *b"PLAN-B      ",
+            *b"MSP         ",
+            &[fix(b"OTHER   ", 418_000_000, -880_000_000)],
+        );
+        assert_eq!(route_rows(&legacy).collect::<Vec<_>>(), vec![old]);
+        let meter = meter_fix();
+        let (candidates, metadata) = cutoff_route_revisions(
+            &legacy,
+            &PlaceTable::default(),
+            &captured_revisions(&legacy),
+            900_000,
+            0,
+            77,
+            issue(900_000, meter).track,
+            0.0,
+            meter,
+        )
+        .expect("bounded raw revisions");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(metadata[0].1, old);
+        assert_eq!(metadata[1].1, amended);
+        assert!(candidates[1].route.is_empty());
+        assert_eq!(
+            forecast_latest_route(&issue(900_000, meter), 77, &candidates),
+            Err(ForecastRefusal::EmptyRoute)
+        );
+
+        // Removing the meter alone must also refuse; destination still ORD is insufficient.
+        legacy.routes.arrival_at_receive[amended.0 as usize] = norm_id(b"ORD");
+        let (without_meter, _) = cutoff_route_revisions(
+            &legacy,
+            &PlaceTable::default(),
+            &captured_revisions(&legacy),
+            900_000,
+            0,
+            77,
+            issue(900_000, meter).track,
+            0.0,
+            meter,
+        )
+        .expect("bounded ORD revision without the meter");
+        assert_eq!(
+            forecast_latest_route(&issue(900_000, meter), 77, &without_meter),
+            Err(ForecastRefusal::EmptyRoute)
+        );
+    }
+
+    // REQ: OA-LTJ-205
+    #[test]
+    fn future_amendment_is_excluded_and_selected_provenance_matches_route_geometry() {
+        let mut legacy = Legacy::default();
+        add_revision(
+            &mut legacy,
+            900_000,
+            *b"PLAN-A      ",
+            *b"ORD         ",
+            &[fix(b"METER   ", 417_000_000, -879_000_000)],
+        );
+        let waypoint = fix(b"WAYPOINT", 413_000_000, -880_000_000);
+        add_revision(
+            &mut legacy,
+            1_000_001,
+            *b"PLAN-B      ",
+            *b"ORD         ",
+            &[waypoint, fix(b"METER   ", 417_000_000, -879_000_000)],
+        );
+        let meter = meter_fix();
+        let snapshot = issue(900_000, meter);
+        let (candidates, _) = cutoff_route_revisions(
+            &legacy,
+            &PlaceTable::default(),
+            &captured_revisions(&legacy),
+            snapshot.cutoff_ms,
+            0,
+            77,
+            snapshot.track,
+            40.0,
+            meter,
+        )
+        .expect("bounded raw revisions");
+        let selected = forecast_latest_route(&snapshot, 77, &candidates)
+            .expect("future amendment is excluded");
+        assert_eq!(selected.revision.plan_id, norm_id(b"PLAN-A"));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].route, vec![meter]);
+        assert!(selected.forecast.meter_eta.is_some());
+
+        let mut amended_legacy = Legacy::default();
+        add_revision(
+            &mut amended_legacy,
+            800_000,
+            *b"PLAN-A      ",
+            *b"ORD         ",
+            &[fix(b"METER   ", 417_000_000, -879_000_000)],
+        );
+        add_revision(
+            &mut amended_legacy,
+            900_000,
+            *b"PLAN-B      ",
+            *b"ORD         ",
+            &[waypoint, fix(b"METER   ", 417_000_000, -879_000_000)],
+        );
+        let (candidates, _) = cutoff_route_revisions(
+            &amended_legacy,
+            &PlaceTable::default(),
+            &captured_revisions(&amended_legacy),
+            snapshot.cutoff_ms,
+            0,
+            77,
+            snapshot.track,
+            40.0,
+            meter,
+        )
+        .expect("bounded amended revisions");
+        let selected = forecast_latest_route(&snapshot, 77, &candidates)
+            .expect("latest amendment is forecast");
+        assert_eq!(selected.revision.plan_id, norm_id(b"PLAN-B"));
+        assert_eq!(candidates[1].revision, selected.revision);
+        assert_eq!(
+            candidates[1]
+                .route
+                .iter()
+                .map(|fix| fix.name)
+                .collect::<Vec<_>>(),
+            vec![*b"WAYPOINT", norm_id(b"METER")]
+        );
+        assert!(
+            selected.forecast.meter_eta.unwrap().time_ms
+                > forecast_latest_route(&snapshot, 77, &[candidates[0].clone()])
+                    .expect("prior route forecast")
+                    .forecast
+                    .meter_eta
+                    .unwrap()
+                    .time_ms
+        );
+    }
+
+    // REQ: OA-LTJ-206
+    #[test]
+    fn oversized_raw_route_is_refused_before_point_resolution() {
+        let mut legacy = Legacy::default();
+        let row = add_revision(
+            &mut legacy,
+            900_000,
+            *b"PLAN-A      ",
+            *b"ORD         ",
+            &[],
+        );
+        let first = 0u32;
+        legacy.routes.first[row.0 as usize] = first;
+        legacy.routes.len[row.0 as usize] = (MAX_ROUTE_FIXES + 1) as u32;
+        legacy.route_points.fix = vec![*b"METER   "; MAX_ROUTE_FIXES + 1];
+        // Coordinate columns are intentionally absent: the size refusal must happen first.
+        assert_eq!(
+            cutoff_route_revisions(
+                &legacy,
+                &PlaceTable::default(),
+                &captured_revisions(&legacy),
+                900_000,
+                0,
+                77,
+                issue(900_000, meter_fix()).track,
+                0.0,
+                meter_fix(),
+            ),
+            Err(ForecastRefusal::TooManyRouteFixes)
+        );
+    }
+
+    // REQ: OA-LTJ-207
+    #[test]
+    fn future_oversized_revision_does_not_veto_earlier_build_plan_issue() {
+        let mut legacy = Legacy::default();
+        legacy.flights.gufi.push(77);
+        let meter = meter_fix();
+        let earlier = add_revision(
+            &mut legacy,
+            1_000_000,
+            *b"PLAN-A      ",
+            *b"ORD         ",
+            &[fix(b"METER   ", 417_000_000, -879_000_000)],
+        );
+        let oversized = vec![fix(b"OTHER   ", 420_000_000, -880_000_000); MAX_ROUTE_FIXES + 1];
+        add_revision(
+            &mut legacy,
+            1_000_001,
+            *b"PLAN-B      ",
+            *b"ORD         ",
+            &oversized,
+        );
+        let reports = Reports {
+            icao: vec![1],
+            time_ns: vec![1_000_000_000_000],
+            lat_e7: vec![410_000_000],
+            lon_e7: vec![-880_000_000],
+            baro_alt_ft: vec![12_000],
+            gs_dkt: vec![2_500],
+            track_ddeg: vec![900],
+            vrate_fpm: vec![NONE_I32],
+            flags: vec![0],
+            ..Reports::default()
+        };
+        let mut places = PlaceTable::default();
+        places.points.insert("METER".into(), vec![meter.place]);
+
+        let plan = build_plan("METER", &legacy, &places, &reports, false)
+            .expect("future-only oversized amendment cannot veto earlier issue");
+        assert_eq!(plan.issues.len(), 1);
+        assert_eq!(plan.issues[0].route_row, earlier);
+        assert_eq!(plan.issues[0].route_revision.plan_id, norm_id(b"PLAN-A"));
+        assert_eq!(plan.unusable_admission_rows, 1);
+    }
+
+    // REQ: OA-LTJ-208
+    #[test]
+    fn equal_stamp_same_route_with_conflicting_eram_eta_is_refused_in_both_row_orders() {
+        fn run(reverse: bool) -> Result<(), ForecastRefusal> {
+            let mut legacy = Legacy::default();
+            let meter_point = fix(b"METER   ", 417_000_000, -879_000_000);
+            let (first_eta, second_eta) = if reverse {
+                (1_500_000, 1_400_000)
+            } else {
+                (1_400_000, 1_500_000)
+            };
+            add_revision(
+                &mut legacy,
+                900_000,
+                *b"PLAN-A      ",
+                *b"ORD         ",
+                &[meter_point],
+            );
+            legacy.route_points.est_ms[0] = first_eta;
+            add_revision(
+                &mut legacy,
+                900_000,
+                *b"PLAN-A      ",
+                *b"ORD         ",
+                &[meter_point],
+            );
+            legacy.route_points.est_ms[1] = second_eta;
+            let meter = meter_fix();
+            let mut history = captured_revisions(&legacy);
+            history.sort_by_key(|&(available_ms, row)| (available_ms, row.0));
+            cutoff_route_revisions(
+                &legacy,
+                &PlaceTable::default(),
+                &history,
+                900_000,
+                0,
+                77,
+                issue(900_000, meter).track,
+                0.0,
+                meter,
+            )
+            .map(|_| ())
+        }
+
+        assert_eq!(run(false), Err(ForecastRefusal::ConflictingRouteEstimate));
+        assert_eq!(run(true), Err(ForecastRefusal::ConflictingRouteEstimate));
+    }
+
+    // REQ: OA-LTJ-209
+    #[test]
+    fn reversed_history_is_sorted_once_and_overflow_refuses_before_geometry_work() {
+        let mut legacy = Legacy::default();
+        for index in 0..(MAX_ROUTE_REVISIONS + 44) {
+            add_revision(
+                &mut legacy,
+                700_000 + index as i64 * 1_000,
+                *b"PLAN-A      ",
+                *b"ORD         ",
+                &[],
+            );
+        }
+        let mut history = captured_revisions(&legacy);
+        history.reverse();
+        let mut histories = BTreeMap::from([(0u32, history)]);
+        sort_route_histories(&mut histories);
+        let sorted = histories.get(&0).expect("flight history");
+        assert!(sorted.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        let eligible = cutoff_route_revisions(
+            &legacy,
+            &PlaceTable::default(),
+            sorted,
+            701_000,
+            0,
+            77,
+            issue(701_000, meter_fix()).track,
+            0.0,
+            meter_fix(),
+        )
+        .expect("future rows are outside the binary-searched prefix");
+        assert_eq!(eligible.0.len(), 2);
+        assert_eq!(
+            cutoff_route_revisions(
+                &legacy,
+                &PlaceTable::default(),
+                sorted,
+                1_000_000,
+                0,
+                77,
+                issue(1_000_000, meter_fix()).track,
+                0.0,
+                meter_fix(),
+            ),
+            Err(ForecastRefusal::TooManyRouteRevisions)
         );
     }
 }

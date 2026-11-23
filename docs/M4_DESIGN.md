@@ -1,7 +1,11 @@
 # M4 — Flight data processing and trajectory: design
 
-Status: approved by Connor 2026-11-20. The decoders it builds on exist; none of the M4
-functions is built yet.
+Status: approved by Connor 2026-11-20; implementation status reviewed 2026-11-23.
+`oa-flight` and `oa-flight-sfdps` implement the flight-state slice, and `oa-legacy-traj` includes
+an issue-time arrival forecast experiment. These do not close M4. The independent route
+converter, shared operational trajectory and full consumer integration remain open; see the
+[capability register](CAPABILITIES.md) for implemented entry points and limits. The sections
+below specify the target design; their build order is not a completion ledger.
 
 ## Goal
 

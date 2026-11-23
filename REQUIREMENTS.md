@@ -6420,7 +6420,8 @@ configuration with no default; the crate's tests use synthetic values.
   sealed guard or is listed with a reason in `crates/oa-sealed/exempt_targets.txt`; a target with neither, a listed target
   that does not exist, and a listed target that uses the guard all fail the test. In the `src/` and `examples/` of every
   member crate (core crates included), a bare `File::open`, `File::open_buffered`, `File::options`, `OpenOptions`,
-  `fs::read`, `fs::read_to_string`, `fs::read_dir`, `fs::copy`, `fs::hard_link` or `Command::new` fails the test unless
+  `fs::read`, `fs::read_to_string`, `fs::read_dir`, `fs::metadata`, `fs::symlink_metadata`,
+  `fs::copy`, `fs::hard_link` or `Command::new` fails the test unless
   `// seal-allow: <why>` with a reason is on the call's own line (trailing) or is the comment line before the next code
   line it covers. The generic spellings count: `<File>::open`, `<std::fs::File>::open` and a turbofish (`File::<T>::open`); an `include_bytes!` or `include_str!` whose argument is not a plain string literal (`env!`, `concat!`, a macro) is a bare read; and a `pub use` of anything in `std::fs` or `std::process` is one too (it re-exports the functions to the rest of the crate). A manifest that gains `libc`, `memmap`, `memmap2` or `walkdir` needs a `# seal-note: <why>` comment on its line or the line before, or a test fails. A name counts when it is used at all, so a function passed as a value (`.map(fs::read_to_string)`,
   `File::open` as a value) is a use, and so is the `.read_dir()` method. The scan reads each file with a lexer that tells
@@ -6431,7 +6432,7 @@ configuration with no default; the crate's tests use synthetic values.
   is skipped (an inline one with its body, a file module `mod name;` with the file and every module it declares); no file
   is skipped by its name, and any other `#[cfg(test)]` item is scanned. An allow with no bare call on the line it covers is
   stale and fails, and an allow inside a skipped test module is not counted; the number of allows is pinned exactly in the
-  test (`ALLOW_COUNT`, now 99), not a budget. `tests/`, `benches/` and `build.rs` of every crate are scanned the same way
+  test (`ALLOW_COUNT`, now 152), not a budget. `tests/`, `benches/` and `build.rs` of every crate are scanned the same way
   when the file names the real data root (a string that holds `OPENATCA_`, which covers `OPENATCA_RAW`, `OPENATCA_DATA`,
   `OPENATCA_SCDS`, `OPENATCA_ADSB_CLIP`, `OPENATCA_SNAPSHOT`, `OPENATCA_REC`, `OPENATCA_SENSORSIM_CLIP`, `OPENATCA_NASR`,
   `OPENATCA_CIFP` and any other, or `openatca-data`; a comment or an identifier such as a constant does not count), and a
@@ -6737,6 +6738,35 @@ configuration with no default; the crate's tests use synthetic values.
   positive values ahead of and to the right of the truth direction. The components resolve
   the same spherical distance. Truth direction requires gap-free support and speed of at
   least 10 m/s. The report counts unavailable directions by reason.
+- **OA-LTJ-200** At a positive issue cutoff, the route selector forecasts the latest received
+  revision for the specified full flight GUFI, independently of candidate order. A selected
+  amendment changes the supplied route geometry and its resulting meter ETA.
+- **OA-LTJ-201** Other-GUFI and post-cutoff revisions do not participate in route selection.
+  The forecast envelope and shell report retain the selected plan ID, full GUFI, receive time
+  and issue cutoff; future evidence does not alter that issue.
+- **OA-LTJ-202** Available revisions at an equal receive timestamp with differing plan identity
+  or route geometry are refused. Identical duplicates are deterministic in the core selector.
+- **OA-LTJ-203** Missing/blank plan identity, missing flight identity, nonpositive receive or cutoff
+  time, more than 256 selector candidates, or more than 256 fixes in an eligible route is refused
+  before unbounded route processing. Only the bounded selected geometry is copied for prediction.
+- **OA-LTJ-204** The shell considers every captured revision of an admitted flight at its issue
+  cutoff. A latest amendment removing the selected meter or changing the destination out of the
+  admitted ORD flow cannot disappear in favor of an older route; that issue is refused.
+- **OA-LTJ-205** Shell cutoff selection preserves the selected revision's geometry and provenance
+  together and ignores later revisions. The experiment retains its first-eligible issue per flight;
+  it does not update that frozen issue for later in-flight amendments.
+- **OA-LTJ-206** The shell checks raw route spans against the 256-fix limit before route-point
+  resolution or allocation in flow admission and cutoff revision construction.
+- **OA-LTJ-207** Malformed and over-limit route rows are counted and skipped as issue candidates,
+  while retained in the full flight's revision history. A future-only bad revision cannot veto
+  an earlier issue; a bad revision available at an attempted cutoff refuses that issue.
+- **OA-LTJ-208** Same-receive-time, same-plan, identical-geometry revisions carrying conflicting
+  selected-fix ERAM estimate payloads are refused in either input order. No estimate is favored
+  or used to select forecast geometry.
+- **OA-LTJ-209** Per-flight histories are sorted once within the 500,000 captured-route limit.
+  Each issue uses a binary-searched cutoff prefix and refuses more than 256 available revisions
+  before examining geometry. Across candidate attempts, revision examinations are bounded by
+  the captured-row limit times the revision limit; each examined raw span is bounded at 256 fixes.
 
 ## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
 
@@ -6930,6 +6960,30 @@ FAA value.
 - **OA-MSAW-041** The 95 % radius of a covariance is the chi-square radius of its larger eigenvalue, and the
   ground codes of the core are the close-encounter record's.
 
+### Offline encounter evaluation (tools/oa-msaw)
+
+- **OA-MSAW-200** The offline evaluator compares independently supplied same-address hazard windows
+  with a caller-declared complete alert log. Each accepted encounter has exactly one timely, late
+  or missed warning-onset outcome, and these counts sum to the encounter denominator. This is a
+  synthetic development measure, not operational qualification.
+- **OA-MSAW-201** A warning onset inside the window at its deadline is timely; after the deadline
+  through the inclusive end is late. A compressed episode with a first warning before the window
+  and an end inside or after it does not prove continuing warning: the evaluator refuses an
+  ambiguous outcome unless an independent in-window onset already establishes timely credit.
+  Neither the episode end nor a loss observation extends warning evidence.
+- **OA-MSAW-202** Nuisance records are supplied alert records whose inclusive alert interval
+  overlaps no full-address hazard window; the alert record count is reported as their denominator.
+- **OA-MSAW-203** Terminal lost-altitude records and records with a recorded loss observation
+  inside a same-address hazard window are counted separately. A compressed record's `protect_ns`
+  is a point observation; it does not establish an interval or every protection transition.
+- **OA-MSAW-204** An absent evidence source is unavailable, not an empty log. A supplied empty
+  source has zero rows; metrics requiring both sources remain absent unless both are supplied.
+- **OA-MSAW-205** Evaluation refuses malformed intervals and alert transitions, unknown terminal
+  reasons, inconsistent protection timestamps, overlapping same-address truth windows, more than
+  100,000 rows per source, or aggregate pairwise work over 10,000,000 comparisons. Work is checked
+  with overflow-safe arithmetic before pairwise processing, charging all three hazard-alert
+  passes and all unordered hazard-window comparisons. Accepted counts are independent of row order.
+
 ## Runway geometry and occupancy (oa-runway)
 
 - **OA-RWY-001** An airport's local east-north plane is a tangent plane about its reference point with the WGS-84
@@ -7017,6 +7071,25 @@ FAA value.
 - **OA-GAP-017** A regular file in the SFDPS directory that is not `.oaf` or `.oaf.gz` is a read error (exit 2) that names it; the report names the files used.
 - **OA-GAP-018** An `exclude` line parses back to the same nanosecond window under the whole-second ISO grammar of `oa_adsb::cli::parse_iso` plus a nine-digit fraction. The scorer's own parser of these lines is tested on its side, not here.
 - **OA-GAP-019** An existing `--out` is refused (exit 2); the report is written to a new temporary file, synced, then renamed.
+
+## Raw scope replay restart witness (oa-scope-replay)
+
+- **OA-SCP-200** The opt-in raw-only replay CLI writes and verifies a versioned restart witness
+  binding exact adaptation and clip bytes, declared receipt basis, effective render/raw settings,
+  frame count, and ordered frame indexes, nanosecond timestamps and pixel hashes. Verification
+  checks the bounded witness checksum and metadata before creating output, then compares each
+  recomputed frame before publishing it; a mismatch refuses further frames and identifies that
+  earlier matching frames may already exist. A successful restart reproduces the same ordered
+  hashes. The witness is limited to 1,000,000 bytes and 10,000 frames; unknown fields, partial
+  lists and incorrect times are refused. Lossy replay cannot produce or pass a witness even with
+  `--allow-loss`. Output never overwrites an existing witness or partial: a recovery copy is
+  synced under an exclusive partial name before a distinct final file is exclusively created
+  and synced. The complete recovery copy remains after success; publication deletes neither
+  file. Interrupted final publication may leave an incomplete final name, which strict
+  verification refuses; the complete partial can be explicitly selected for verification. No
+  hard-link exception weakens the shared sealed-data guard. SHA-256 is integrity evidence, not
+  authentication. Replay starts from the beginning;
+  this feature neither restores process state nor provides supervision or failover.
 
 ## OpenATCA Core (offline surveillance replay)
 

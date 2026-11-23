@@ -44,6 +44,13 @@ pub enum ForecastRefusal {
     InvalidRoutePlace,
     InvalidMeterFix,
     EtaOverflow,
+    InvalidRouteIdentity,
+    InvalidRouteTime,
+    RouteAfterCutoff,
+    TooManyRouteRevisions,
+    NoRouteAtCutoff,
+    ConflictingRouteRevision,
+    ConflictingRouteEstimate,
 }
 
 /// Why future evidence could not be scored.
@@ -68,8 +75,44 @@ pub struct RouteFix {
 }
 // A7.2: cold struct, size guard waived; one forecast input value.
 
+/// Full identity and receive-time availability of the SFDPS route revision used by a forecast.
+/// `flight_gufi` binds the route to one flight; `plan_id` distinguishes revisions within that
+/// flight. The shell supplies only the revision admitted at the issue cutoff.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteRevision {
+    pub plan_id: [u8; 12],
+    pub flight_gufi: u128,
+    pub available_ms: i64,
+}
+// A7.2: cold struct, size guard waived; one forecast input value.
+
+/// One admitted route revision offered to the cutoff selector.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouteRevisionCandidate {
+    pub revision: RouteRevision,
+    pub route: Vec<RouteFix>,
+}
+// A7.2: cold struct, size guard waived; one forecast input value.
+
+/// C7: the selector examines no more than this many captured revisions per flight/cutoff.
+pub const MAX_ROUTE_REVISIONS: usize = 256;
+
+/// A forecast paired with the exact route revision that produced it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RouteForecast {
+    pub revision: RouteRevision,
+    pub forecast: Forecast,
+}
+// A7.2: cold struct, size guard waived; one-shot forecast result.
+
 fn fix_identity(fix: RouteFix) -> ([u8; 8], Place) {
     (fix.name, fix.place)
+}
+
+fn valid_route_plan_id(plan_id: [u8; 12]) -> bool {
+    plan_id
+        .iter()
+        .any(|&byte| byte != 0 && !byte.is_ascii_whitespace())
 }
 
 /// Origin is carried with the value so predictions retain constraint provenance.
@@ -207,6 +250,95 @@ pub struct Forecast {
 pub fn forecast(snapshot: &IssueSnapshot) -> Result<Forecast, ForecastRefusal> {
     let speed = validate_snapshot(snapshot, true)?.ok_or(ForecastRefusal::MissingSpeed)?;
     forecast_from_motion(snapshot, MotionModel::Constant(speed), None)
+}
+
+/// Forecast a route only when its full SFDPS plan and flight identities are present and its
+/// receive time is no later than the issue cutoff. This wrapper leaves the established motion
+/// model unchanged and returns the route provenance alongside the prediction.
+pub fn forecast_for_route(
+    snapshot: &IssueSnapshot,
+    revision: RouteRevision,
+) -> Result<RouteForecast, ForecastRefusal> {
+    if !valid_route_plan_id(revision.plan_id) || revision.flight_gufi == 0 {
+        return Err(ForecastRefusal::InvalidRouteIdentity);
+    }
+    if revision.available_ms <= 0 {
+        return Err(ForecastRefusal::InvalidRouteTime);
+    }
+    if revision.available_ms > snapshot.cutoff_ms {
+        return Err(ForecastRefusal::RouteAfterCutoff);
+    }
+    let predicted = forecast(snapshot)?;
+    Ok(RouteForecast {
+        revision,
+        forecast: predicted,
+    })
+}
+
+/// Select the latest received route for `flight_gufi` at the snapshot cutoff, then forecast it.
+/// Future revisions and revisions for other GUFIs do not participate. Duplicate identical
+/// records at one receive time are harmless; two distinct revisions at that time are refused.
+pub fn forecast_latest_route(
+    snapshot: &IssueSnapshot,
+    flight_gufi: u128,
+    candidates: &[RouteRevisionCandidate],
+) -> Result<RouteForecast, ForecastRefusal> {
+    if candidates.len() > MAX_ROUTE_REVISIONS {
+        return Err(ForecastRefusal::TooManyRouteRevisions);
+    }
+    if snapshot.cutoff_ms <= 0 || flight_gufi == 0 {
+        return Err(ForecastRefusal::InvalidRouteIdentity);
+    }
+    let mut selected: Option<&RouteRevisionCandidate> = None;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let revision = candidate.revision;
+        if revision.flight_gufi != flight_gufi {
+            continue;
+        }
+        if revision.available_ms > snapshot.cutoff_ms {
+            continue;
+        }
+        if candidate.route.len() > MAX_ROUTE_FIXES {
+            return Err(ForecastRefusal::TooManyRouteFixes);
+        }
+        if !valid_route_plan_id(revision.plan_id) {
+            return Err(ForecastRefusal::InvalidRouteIdentity);
+        }
+        if revision.available_ms <= 0 {
+            return Err(ForecastRefusal::InvalidRouteTime);
+        }
+        for previous in candidates.iter().take(index) {
+            let earlier = previous.revision;
+            if earlier.flight_gufi == flight_gufi
+                && earlier.available_ms == revision.available_ms
+                && earlier.available_ms <= snapshot.cutoff_ms
+                && (earlier.plan_id != revision.plan_id || previous.route != candidate.route)
+            {
+                return Err(ForecastRefusal::ConflictingRouteRevision);
+            }
+        }
+        match selected {
+            None => selected = Some(candidate),
+            Some(previous) if revision.available_ms > previous.revision.available_ms => {
+                selected = Some(candidate);
+            }
+            Some(previous) if revision.available_ms == previous.revision.available_ms => {}
+            _ => {}
+        }
+    }
+    let selected = selected.ok_or(ForecastRefusal::NoRouteAtCutoff)?;
+    // The caller's route is deliberately replaced. Do not clone its unchecked geometry first.
+    let selected_snapshot = IssueSnapshot {
+        cutoff_ms: snapshot.cutoff_ms,
+        issued_ms: snapshot.issued_ms,
+        track: snapshot.track,
+        assigned_altitude_ft: snapshot.assigned_altitude_ft,
+        assigned_altitude_available_ms: snapshot.assigned_altitude_available_ms,
+        assigned_altitude_provenance: snapshot.assigned_altitude_provenance,
+        route: selected.route.clone(),
+        meter_fix: snapshot.meter_fix,
+    };
+    forecast_for_route(&selected_snapshot, selected.revision)
 }
 
 /// Opt-in route experiment using explicit true airspeed and one cutoff-safe wind vector per leg.
@@ -1278,6 +1410,151 @@ mod tests {
             meter_fix: Some(fix),
         };
         (snapshot, fix)
+    }
+
+    fn revision(
+        plan_id: [u8; 12],
+        flight_gufi: u128,
+        available_ms: i64,
+        route: Vec<RouteFix>,
+    ) -> RouteRevisionCandidate {
+        RouteRevisionCandidate {
+            revision: RouteRevision {
+                plan_id,
+                flight_gufi,
+                available_ms,
+            },
+            route,
+        }
+    }
+
+    // REQ: OA-LTJ-200
+    #[test]
+    fn latest_cutoff_route_amendment_changes_eta_and_is_order_independent() {
+        let (snapshot, meter) = fixture();
+        let detour = RouteFix {
+            name: *b"DET     ",
+            place: Place {
+                lat_deg: 41.3,
+                lon_deg: -88.0,
+            },
+            altitude_constraint: None,
+        };
+        let old = revision([1; 12], 77, 900_000, vec![meter]);
+        let amended = revision([2; 12], 77, 950_000, vec![detour, meter]);
+        let selected = forecast_latest_route(&snapshot, 77, &[old.clone(), amended.clone()])
+            .expect("latest route revision is available");
+        let reversed = forecast_latest_route(&snapshot, 77, &[amended.clone(), old.clone()])
+            .expect("input order does not select the route");
+        let original =
+            forecast_latest_route(&snapshot, 77, &[old]).expect("original route is available");
+        assert_eq!(selected, reversed);
+        assert_eq!(selected.revision.plan_id, [2; 12]);
+        let amended_eta_s =
+            (selected.forecast.meter_eta.unwrap().time_ms - snapshot.issued_ms) as f64 / 1000.0;
+        let original_eta_s =
+            (original.forecast.meter_eta.unwrap().time_ms - snapshot.issued_ms) as f64 / 1000.0;
+        assert!((330.0..345.0).contains(&original_eta_s), "{original_eta_s}");
+        assert!((425.0..450.0).contains(&amended_eta_s), "{amended_eta_s}");
+    }
+
+    // REQ: OA-LTJ-201
+    #[test]
+    fn future_revision_does_not_change_cutoff_forecast_and_wrong_flight_is_ignored() {
+        let (snapshot, meter) = fixture();
+        let future = RouteFix {
+            name: *b"FUTURE  ",
+            place: Place {
+                lat_deg: 41.4,
+                lon_deg: -88.2,
+            },
+            altitude_constraint: None,
+        };
+        let available = revision([1; 12], 77, 900_000, vec![meter]);
+        let excluded = revision([9; 12], 77, 1_000_001, vec![future]);
+        let other_flight = revision([8; 12], 88, 999_999, vec![future]);
+        let baseline = forecast_latest_route(&snapshot, 77, core::slice::from_ref(&available))
+            .expect("available route");
+        let with_excluded =
+            forecast_latest_route(&snapshot, 77, &[other_flight, excluded, available])
+                .expect("future and other-flight revisions are excluded");
+        assert_eq!(with_excluded, baseline);
+    }
+
+    // REQ: OA-LTJ-202
+    #[test]
+    fn equal_time_conflicting_revisions_are_refused_and_exact_duplicates_are_stable() {
+        let (snapshot, meter) = fixture();
+        let other = RouteFix {
+            name: *b"OTHER   ",
+            place: Place {
+                lat_deg: 41.6,
+                lon_deg: -88.0,
+            },
+            altitude_constraint: None,
+        };
+        let first = revision([1; 12], 77, 900_000, vec![meter]);
+        let conflict = revision([2; 12], 77, 900_000, vec![other]);
+        assert_eq!(
+            forecast_latest_route(&snapshot, 77, &[first.clone(), conflict]),
+            Err(ForecastRefusal::ConflictingRouteRevision)
+        );
+        assert_eq!(
+            forecast_latest_route(&snapshot, 77, &[first.clone(), first.clone()])
+                .expect("identical duplicate is deterministic")
+                .revision,
+            first.revision
+        );
+    }
+
+    // REQ: OA-LTJ-203
+    #[test]
+    fn route_revision_identity_time_and_capacity_fail_closed() {
+        let (snapshot, meter) = fixture();
+        let missing_plan = revision([0; 12], 77, 900_000, vec![meter]);
+        assert_eq!(
+            forecast_latest_route(&snapshot, 77, &[missing_plan]),
+            Err(ForecastRefusal::InvalidRouteIdentity)
+        );
+        let blank_plan = revision(*b"            ", 77, 900_000, vec![meter]);
+        assert_eq!(
+            forecast_latest_route(&snapshot, 77, &[blank_plan]),
+            Err(ForecastRefusal::InvalidRouteIdentity)
+        );
+        let invalid_time = revision([1; 12], 77, 0, vec![meter]);
+        assert_eq!(
+            forecast_latest_route(&snapshot, 77, &[invalid_time]),
+            Err(ForecastRefusal::InvalidRouteTime)
+        );
+        let mut too_many = Vec::new();
+        for index in 0..=MAX_ROUTE_REVISIONS {
+            too_many.push(revision([1; 12], 77, 900_000 + index as i64, vec![meter]));
+        }
+        assert_eq!(
+            forecast_latest_route(&snapshot, 77, &too_many),
+            Err(ForecastRefusal::TooManyRouteRevisions)
+        );
+        let future_revision = RouteRevision {
+            plan_id: [1; 12],
+            flight_gufi: 77,
+            available_ms: snapshot.cutoff_ms + 1,
+        };
+        assert_eq!(
+            forecast_for_route(&snapshot, future_revision),
+            Err(ForecastRefusal::RouteAfterCutoff)
+        );
+        let mut too_many_fixes = Vec::new();
+        for _ in 0..=MAX_ROUTE_FIXES {
+            too_many_fixes.push(meter);
+        }
+        assert_eq!(
+            forecast_latest_route(
+                &snapshot,
+                77,
+                &[revision([1; 12], 77, 900_000, too_many_fixes,)],
+            ),
+            Err(ForecastRefusal::TooManyRouteFixes)
+        );
     }
 
     // REQ: OA-LTJ-057

@@ -1,9 +1,10 @@
 # Node network design
 
-Status: design, 2026-11-19. Nothing in this document is built yet except what it depends on: the
-deterministic engine and the replay state hash. SCOPE.md design principle 8 states the principle;
-this document is the design behind it. Every part is borrowed from technology that is already in
-production elsewhere, and each section names where it comes from.
+Status: design, 2026-11-19; implementation status reviewed 2026-11-23. Deterministic replay,
+input/state witnesses, raw fallback, an offline monitor and scoped process/transport drills
+exist. A production peer network, supervisor and remotely qualified recovery are not complete.
+The [capability register](CAPABILITIES.md) distinguishes these slices and their limits.
+SCOPE.md design principle 8 states the principle; this document specifies the target design.
 
 ## 1. Why a node network
 

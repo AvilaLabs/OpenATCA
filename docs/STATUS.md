@@ -5,6 +5,10 @@ is meant to go; the design rules are in [RULESET.md](RULESET.md) and the goals i
 [SCOPE.md](../SCOPE.md). When this page and a design document disagree about what is true today,
 this page is the one to believe, and the disagreement is a defect to report.
 
+The [capability and integration register](CAPABILITIES.md) maps implemented entry points to
+their remaining integration and qualification boundaries. Design build orders are not status
+ledgers.
+
 ## What OpenATCA is today
 
 A research prototype. Nothing here is certified, approved or fit for operational use, and nothing
@@ -24,13 +28,19 @@ before.
 | Unit and integration tests | The frozen `e84d933` baseline passed 1,838 release tests; full checks run before promotion | A test checks the cases it was written for; [candidate validation](VALIDATION.md) also checks the evidence and open claims |
 | Real-data suites | FAA NASR and CIFP (2026-10-29 cycle), a one-day Chicago Center ADS-B clip, GeodTest, RAP weather, MVA charts, 3DEP terrain | Skipped when the data is not on the machine; one clip of one day |
 | Requirements traceability | `oa-trace`: every requirement in [REQUIREMENTS.md](../REQUIREMENTS.md) has a test or proof | Shows a test exists, not that it is sufficient |
-| Bounded proofs (Kani) | 40 harnesses, each with its bound; see [VERIFICATION.md](VERIFICATION.md) | True only up to the stated bound; some harnesses did not finish and are listed there |
+| Bounded proofs (Kani) | 112 registered harnesses, 103 enabled and 9 disabled experiments; see [Rust assurance](RUST_ASSURANCE.md) | Results are revision-, assumption- and bound-specific; push-tier selection is not a full-suite run |
 | Model checking (TLA+) | The replay clock; see [tla/README.md](tla/README.md) | Small bounds; the model abstracts the code |
 | Fuzzing | 21 libFuzzer targets over the byte-level decoders; see [FUZZING.md](FUZZING.md) | Most targets have had hours, not weeks |
 | Mutation testing | Saved numerical and truth cases have strengthened independent-answer tests | Unresolved cases are not automatically equivalent or confirmed defects |
 | Allocation instrumentation | Named M3 tracker/fusion routes run under an isolated counting allocator, with positive and injected-allocation controls | Complete C5 coverage remains open; see [candidate validation](VALIDATION.md) |
 | Turn-model moments | Closed-form and independent high-precision references for nonlinear prediction and separate discovery-floor regularization; numerical refusals are counted and history replay is atomic | Gaussian, cubature and regularization approximations remain; synthetic accuracy does not establish recorded-traffic truth |
 | CI | GitHub Actions: format, clippy with Rust 1.89.0 (the declared minimum), release-mode tests, traceability, scoped M3 allocation check, no external crates | x86-64 and aarch64 Linux |
+
+The [full manual Rust assurance run at `4ad16fe`](https://github.com/AvilaLabs/OpenATCA/actions/runs/45231435245)
+passed all four Kani shards and Miri on 2026-11-23. This evidence belongs to that source and the
+registered assumptions and bounds; it does not close the benchmark or operational milestones.
+The [regional replay increment](REGIONAL_INCREMENT_2026-11-23.md) records the next implemented
+flight, recovery and safety-evaluation slices and their limits.
 
 Everything above runs on x86-64 Linux. CI also runs the whole release test suite, golden replay
 digests included, on aarch64 Linux (the `arm` job), so bit-identical replay (RULESET B6) is tested

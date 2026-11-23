@@ -1818,6 +1818,267 @@ fn raw_only_cli_applies_observation_and_declared_receipt_cutoffs() {
     assert!(said.contains("RAW SURVEILLANCE ONLY"), "{said}");
 }
 
+// REQ: OA-SCP-200
+#[test]
+fn raw_replay_witness_verifies_restart_prefix_and_fails_closed_on_damage_or_mismatch() {
+    let dir = tmp("raw-restart-witness");
+    let (snap, _) = write_inputs(&dir);
+    let clip = dir.join("regional.oaf");
+    let first = raw_message(T0 + 9 * S, T0 + 9 * S, 0xA00071, ORD.1);
+    let second = raw_message(T0 + 10 * S, T0 + 10 * S, 0xA00071, ORD.1 + 10_000);
+    std::fs::write(&clip, [first, second].concat()).unwrap();
+
+    let witness = dir.join("restart.oarw");
+    let mut write_args = raw_cli_args(&snap, &clip, &dir.join("first"), "recorded");
+    write_args.extend(args(&["--raw-witness-out", witness.to_str().unwrap()]));
+    let (written, said) = run_text(&write_args);
+    assert!(written.is_ok(), "{said}");
+    let original_hashes = raw_hashes(&dir.join("first"));
+    assert_eq!(
+        std::fs::read(dir.join("restart.oarw.oarw-partial")).unwrap(),
+        std::fs::read(&witness).unwrap()
+    );
+    assert!(
+        said.contains("integrity checksum; not authenticated"),
+        "{said}"
+    );
+
+    let mut verify_args = raw_cli_args(&snap, &clip, &dir.join("restarted"), "recorded");
+    verify_args.extend(args(&["--verify-raw-witness", witness.to_str().unwrap()]));
+    let (verified, said) = run_text(&verify_args);
+    assert!(verified.is_ok(), "{said}");
+    assert!(
+        said.contains("verified exact ordered frame hashes"),
+        "{said}"
+    );
+    assert_eq!(raw_hashes(&dir.join("restarted")), original_hashes);
+
+    // Simulate a crash after the synced recovery copy existed and while the final copy was
+    // incomplete. The final name is refused; the explicitly selected partial verifies normally.
+    let interrupted = dir.join("interrupted.oarw");
+    let partial_name = format!(
+        "{}.oarw-partial",
+        interrupted.file_name().unwrap().to_string_lossy()
+    );
+    let interrupted_partial = interrupted.with_file_name(partial_name);
+    std::fs::write(&interrupted_partial, std::fs::read(&witness).unwrap()).unwrap();
+    std::fs::write(&interrupted, b"OARW001\nsnapshot").unwrap();
+    let mut incomplete_final = raw_cli_args(&snap, &clip, &dir.join("interrupted-out"), "recorded");
+    incomplete_final.extend(args(&[
+        "--verify-raw-witness",
+        interrupted.to_str().unwrap(),
+    ]));
+    let (result, said) = run_text(&incomplete_final);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("checksum"), "{said}");
+    assert!(!dir.join("interrupted-out").exists(), "{said}");
+    let mut recover_partial =
+        raw_cli_args(&snap, &clip, &dir.join("partial-recovered"), "recorded");
+    recover_partial.extend(args(&[
+        "--verify-raw-witness",
+        interrupted_partial.to_str().unwrap(),
+    ]));
+    let (result, said) = run_text(&recover_partial);
+    assert!(result.is_ok(), "{said}");
+    assert_eq!(raw_hashes(&dir.join("partial-recovered")), original_hashes);
+
+    let existing = dir.join("already-there.oarw");
+    std::fs::write(&existing, b"preserve this file").unwrap();
+    let mut no_overwrite = raw_cli_args(&snap, &clip, &dir.join("existing-out"), "recorded");
+    no_overwrite.extend(args(&["--raw-witness-out", existing.to_str().unwrap()]));
+    let (result, said) = run_text(&no_overwrite);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("witness output never overwrites"), "{said}");
+    assert_eq!(std::fs::read(&existing).unwrap(), b"preserve this file");
+    assert!(!dir.join("existing-out").exists(), "{said}");
+
+    let collision_out = dir.join("collision-out");
+    let collision_witness = collision_out.join("hashes.txt");
+    let mut output_collision = raw_cli_args(&snap, &clip, &collision_out, "recorded");
+    output_collision.extend(args(&[
+        "--raw-witness-out",
+        collision_witness.to_str().unwrap(),
+    ]));
+    let (result, said) = run_text(&output_collision);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("collides with generated output"), "{said}");
+    assert!(!collision_out.exists(), "{said}");
+
+    let frame_collision_out = dir.join("frame-collision-out");
+    let frame_collision_witness = frame_collision_out.join("frame-0000.ppm");
+    let mut frame_collision = raw_cli_args(&snap, &clip, &frame_collision_out, "recorded");
+    frame_collision.extend(args(&[
+        "--raw-witness-out",
+        frame_collision_witness.to_str().unwrap(),
+    ]));
+    let (result, said) = run_text(&frame_collision);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("collides with generated output"), "{said}");
+    assert!(!frame_collision_out.exists(), "{said}");
+
+    // A symlink followed by .. resolves through the link's real parent, not its lexical one.
+    // Collision preflight must run before --overwrite can create any ordinary replay output.
+    let real_output = dir.join("symlink-collision-output");
+    std::fs::create_dir_all(real_output.join("inner")).unwrap();
+    let alias = dir.join("symlink-collision-alias");
+    std::os::unix::fs::symlink(real_output.join("inner"), &alias).unwrap();
+    let aliased_witness = alias.join("..").join("hashes.txt");
+    let mut alias_collision = raw_cli_args(&snap, &clip, &real_output, "recorded");
+    alias_collision.extend(args(&[
+        "--overwrite",
+        "--raw-witness-out",
+        aliased_witness.to_str().unwrap(),
+    ]));
+    let (result, said) = run_text(&alias_collision);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("collides with generated output"), "{said}");
+    assert!(!real_output.join("hashes.txt").exists(), "{said}");
+    assert!(real_output.join("inner").is_dir(), "{said}");
+
+    let partial_collision_out = dir.join("partial-collision-out");
+    let partial_collision_witness = dir.join("partial-collision.oarw");
+    let partial_collision = dir.join("partial-collision.oarw.oarw-partial");
+    std::fs::write(&partial_collision, b"keep partial collision").unwrap();
+    let mut partial_collision_args = raw_cli_args(&snap, &clip, &partial_collision_out, "recorded");
+    partial_collision_args.extend(args(&[
+        "--raw-witness-out",
+        partial_collision_witness.to_str().unwrap(),
+    ]));
+    let (result, said) = run_text(&partial_collision_args);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("witness output never overwrites"), "{said}");
+    assert_eq!(
+        std::fs::read(&partial_collision).unwrap(),
+        b"keep partial collision"
+    );
+    assert!(!partial_collision_out.exists(), "{said}");
+
+    let overwrite_dir = dir.join("verify-overwrite");
+    std::fs::create_dir_all(&overwrite_dir).unwrap();
+    let in_overwrite = overwrite_dir.join("hashes.txt");
+    std::fs::copy(&witness, &in_overwrite).unwrap();
+    let mut verify_overwrite = raw_cli_args(&snap, &clip, &overwrite_dir, "recorded");
+    verify_overwrite.extend(args(&[
+        "--verify-raw-witness",
+        in_overwrite.to_str().unwrap(),
+        "--overwrite",
+    ]));
+    let (result, said) = run_text(&verify_overwrite);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("read-only"), "{said}");
+    assert_eq!(
+        std::fs::read(&in_overwrite).unwrap(),
+        std::fs::read(&witness).unwrap()
+    );
+
+    let corrupt = dir.join("corrupt.oarw");
+    let mut damaged = std::fs::read(&witness).unwrap();
+    damaged[10] ^= 1;
+    std::fs::write(&corrupt, damaged).unwrap();
+    let mut bad_args = raw_cli_args(&snap, &clip, &dir.join("corrupt-out"), "recorded");
+    bad_args.extend(args(&["--verify-raw-witness", corrupt.to_str().unwrap()]));
+    let (result, said) = run_text(&bad_args);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("checksum mismatch"), "{said}");
+    assert!(!dir.join("corrupt-out").exists(), "{said}");
+
+    let mut malformed = std::fs::read_to_string(&witness).unwrap();
+    malformed = malformed.replacen("sha256 ", "unknown-field\nsha256 ", 1);
+    let (body, _) = malformed.split_once("sha256 ").unwrap();
+    let checksum = oa_sha256::sha256(body.as_bytes());
+    malformed = format!("{body}sha256 {}\n", oa_sha256::to_hex(&checksum));
+    let malformed_path = dir.join("malformed.oarw");
+    std::fs::write(&malformed_path, malformed).unwrap();
+    let mut malformed_args = raw_cli_args(&snap, &clip, &dir.join("malformed-out"), "recorded");
+    malformed_args.extend(args(&[
+        "--verify-raw-witness",
+        malformed_path.to_str().unwrap(),
+    ]));
+    let (result, said) = run_text(&malformed_args);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("unexpected body fields"), "{said}");
+    assert!(!dir.join("malformed-out").exists(), "{said}");
+
+    let mut different_settings = raw_cli_args(&snap, &clip, &dir.join("settings-out"), "recorded");
+    let centre = different_settings
+        .iter()
+        .position(|arg| arg == "--centre")
+        .unwrap();
+    different_settings[centre + 1] = "41.9786,-87.9047".into();
+    different_settings.extend(args(&["--verify-raw-witness", witness.to_str().unwrap()]));
+    let (result, said) = run_text(&different_settings);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("settings differ"), "{said}");
+    assert!(!dir.join("settings-out").exists(), "{said}");
+
+    let changed_clip = dir.join("changed.oaf");
+    let mut changed_bytes = std::fs::read(&clip).unwrap();
+    changed_bytes.push(0);
+    std::fs::write(&changed_clip, changed_bytes).unwrap();
+    let mut different_source =
+        raw_cli_args(&snap, &changed_clip, &dir.join("source-out"), "recorded");
+    different_source.extend(args(&["--verify-raw-witness", witness.to_str().unwrap()]));
+    let (result, said) = run_text(&different_source);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("source"), "{said}");
+    assert!(!dir.join("source-out").exists(), "{said}");
+
+    let mut different_receipt = raw_cli_args(
+        &snap,
+        &clip,
+        &dir.join("receipt-out"),
+        "archive-reconstructed",
+    );
+    different_receipt.extend(args(&["--verify-raw-witness", witness.to_str().unwrap()]));
+    let (result, said) = run_text(&different_receipt);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("receipt basis"), "{said}");
+    assert!(!dir.join("receipt-out").exists(), "{said}");
+
+    let changed_snapshot = dir.join("changed-snapshot.bin");
+    let mut changed_model = model();
+    changed_model.meta.nasr_sha256 = [9; 32];
+    let snapshot_bytes = oa_airspace::snapshot::encode(&changed_model).unwrap();
+    std::fs::write(&changed_snapshot, snapshot_bytes).unwrap();
+    let mut different_snapshot = raw_cli_args(
+        &changed_snapshot,
+        &clip,
+        &dir.join("snapshot-out"),
+        "recorded",
+    );
+    different_snapshot.extend(args(&["--verify-raw-witness", witness.to_str().unwrap()]));
+    let (result, said) = run_text(&different_snapshot);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("snapshot"), "{said}");
+    assert!(!dir.join("snapshot-out").exists(), "{said}");
+
+    // Change a frame digest and recompute the outer checksum. Metadata and framing remain
+    // structurally valid, so verification must catch the exact ordered replay mismatch.
+    let mut frame_mismatch = std::fs::read_to_string(&witness).unwrap();
+    let first_frame = frame_mismatch
+        .lines()
+        .find(|line| line.starts_with("frame 0 "))
+        .unwrap()
+        .to_owned();
+    let fields: Vec<_> = first_frame.split(' ').collect();
+    let replacement = format!("frame 0 {} {}", fields[2], "0".repeat(64));
+    frame_mismatch = frame_mismatch.replacen(&first_frame, &replacement, 1);
+    let (body, _) = frame_mismatch.split_once("sha256 ").unwrap();
+    let checksum = oa_sha256::sha256(body.as_bytes());
+    frame_mismatch = format!("{body}sha256 {}\n", oa_sha256::to_hex(&checksum));
+    let altered = dir.join("altered-frame.oarw");
+    std::fs::write(&altered, frame_mismatch).unwrap();
+    let mut mismatch_args = raw_cli_args(&snap, &clip, &dir.join("mismatch-out"), "recorded");
+    mismatch_args.extend(args(&["--verify-raw-witness", altered.to_str().unwrap()]));
+    let (result, said) = run_text(&mismatch_args);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("replay prefix differs at frame 0"), "{said}");
+    assert!(
+        said.contains("earlier matching frames may already be published"),
+        "{said}"
+    );
+}
+
 // REQ: OA-DSP-072
 #[test]
 fn raw_only_cli_withholds_source_stale_latest_and_same_time_disagreement_then_recovers() {
@@ -1990,6 +2251,18 @@ fn raw_only_cli_returns_loss_for_a_contradictory_latest_observation() {
         "{said}"
     );
     assert_eq!(raw_hashes(&out).len(), 4);
+
+    let witness = dir.join("lossy.oarw");
+    let mut accepted_loss = raw_cli_args(&snap, &clip, &dir.join("accepted-loss"), "recorded");
+    accepted_loss.extend(args(&["--allow-loss", "--raw-witness-out"]));
+    accepted_loss.push(witness.to_str().unwrap().to_owned());
+    let (result, said) = run_text(&accepted_loss);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("witness"), "{said}");
+    assert!(
+        !witness.exists(),
+        "lossy evidence must not receive a witness"
+    );
 }
 
 // REQ: OA-DSP-072
@@ -2093,7 +2366,13 @@ fn raw_only_cli_refuses_a_fifo_as_either_input_without_a_writer() {
 fn run_text(a: &[String]) -> (Result<(), cli::CliError>, String) {
     let mut said = Vec::new();
     let r = cli::run(a, &mut said);
-    (r, String::from_utf8(said).unwrap())
+    let mut diagnostic = String::from_utf8(said).unwrap();
+    // The executable prints returned errors on stderr. Retain that diagnostic alongside the
+    // summary so negative tests inspect the actual error, not an empty stdout buffer.
+    if let Err(error) = &r {
+        diagnostic.push_str(&format!("\n{error}"));
+    }
+    (r, diagnostic)
 }
 
 // REQ: OA-DSP-051
