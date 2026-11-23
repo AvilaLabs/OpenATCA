@@ -6102,6 +6102,146 @@ mod tests {
         }
     }
 
+    // REQ: OA-TRK-177, OA-TRK-300
+    #[test]
+    fn candidate_narrowing_matches_full_work_for_turns_coast_and_extreme_times() {
+        // Named caps keep this independent reference bounded: 4 tracks, 16 scans, and a
+        // one-million-unit bucket budget, comfortably above the complete work in these worlds.
+        const TRACK_CAP: usize = 4;
+        const SCAN_CAP: usize = 16;
+        const WORK_CAP: usize = 1_000_000;
+        const GAP_START: usize = 7;
+        const GAP_END: usize = 10;
+        use crate::types::TIME_LIMIT_NS;
+
+        let worlds = [
+            SITE,
+            RadarSite {
+                lat_deg: 0.0,
+                lon_deg: 179.999,
+                sensor: 2,
+                ..SITE
+            },
+            RadarSite {
+                lat_deg: 85.0,
+                lon_deg: 20.0,
+                sensor: 3,
+                ..SITE
+            },
+        ];
+        let run_once = |site: RadarSite, brute: bool, base_ns: i64| {
+            let mut f = make_fusion_sites(&[site], 32);
+            f.brute_coarse = brute;
+            f.bucket_tests_max = WORK_CAP;
+            let mut out = output_new(1 << 14);
+            let frame = oa_geo::aeqd::frame_new(site.lat_deg, site.lon_deg);
+            let geom = radar_geom(&site);
+            for scan in 0..SCAN_CAP {
+                let t_ns = base_ns + scan as i64 * site.period_ns;
+                if !(GAP_START..GAP_END).contains(&scan) {
+                    let t_s = scan as f64 * site.period_ns as f64 / 1.0e9;
+                    let mut plots = Vec::with_capacity(TRACK_CAP);
+                    for track in 0..TRACK_CAP {
+                        // Two close parallel paths, one crossing path, and a path that bends
+                        // after scan 6. These stay anonymous so both candidate search and
+                        // assignment ambiguity remain observable.
+                        let (mut x, mut y) = match track {
+                            0 => (20_000.0 - 80.0 * t_s, 25_000.0),
+                            1 => (20_000.0 - 80.0 * t_s, 25_030.0),
+                            2 => (10_000.0 + 80.0 * t_s, 15_000.0 + 80.0 * t_s),
+                            _ => {
+                                let elapsed =
+                                    (scan.saturating_sub(6)) as f64 * site.period_ns as f64 / 1.0e9;
+                                (
+                                    45_000.0 - 90.0 * t_s + 0.5 * elapsed * elapsed,
+                                    8_000.0 + 40.0 * t_s + 0.8 * elapsed * elapsed,
+                                )
+                            }
+                        };
+                        // Keep the curved track's bend gentle and deterministic in local metres.
+                        x = x.clamp(-200_000.0, 200_000.0);
+                        y = y.clamp(-200_000.0, 200_000.0);
+                        let (lat, lon) = oa_geo::aeqd::unproject(&frame, x, y).unwrap();
+                        let (range_m, az_deg) = polar_of(&geom, lat, lon, 20_000.0 * FT_M);
+                        let label = 0xA00001 + track as u32;
+                        plots.push(RadarPlot {
+                            time_ns: t_ns + track as i64 * 10_000,
+                            range_m,
+                            az_deg,
+                            alt_ft: if scan % 5 == 0 { NONE_ALT } else { 20_000 },
+                            addr: NO_ADDR,
+                            label,
+                            mode_a: NONE_CODE,
+                        });
+                    }
+                    plots.sort_by_key(|p| p.time_ns);
+                    fusion_plots(&mut f, 0, &plots);
+                }
+                fusion_advance(&mut f, t_ns + site.period_ns / 2, &mut out);
+            }
+            let end_ns = base_ns + SCAN_CAP as i64 * site.period_ns;
+            fusion_finish(&mut f, end_ns, &mut out);
+            let stats = *fusion_stats(&f);
+            assert_eq!(stats.bucket_work_capped, 0, "{stats:?}");
+            assert_eq!(stats.anon_plots_ungated, 0, "{stats:?}");
+            assert_eq!(stats.cand_merged_on_confirm, 0, "{stats:?}");
+            assert!(
+                stats.held > 0,
+                "the close parallel hypotheses were hidden: {stats:?}"
+            );
+            (outcome(&f, &out), stats, out, fusion_radar_tracks(&f).len())
+        };
+
+        for (world, site) in worlds.into_iter().enumerate() {
+            for base_ns in [
+                0,
+                TIME_LIMIT_NS - 2 * SCAN_CAP as i64 * site.period_ns,
+                -TIME_LIMIT_NS + 2 * SCAN_CAP as i64 * site.period_ns,
+            ] {
+                let (grid, st, out, radar_tracks) = run_once(site, false, base_ns);
+                let (reference, reference_st, reference_out, reference_tracks) =
+                    run_once(site, true, base_ns);
+                assert!(st.pairs_tested > 0, "world {world} base {base_ns}: {st:?}");
+                assert_eq!(grid.0, reference.0, "world {world} base {base_ns}");
+                assert_eq!(grid.1, reference.1, "world {world} base {base_ns}");
+                assert_eq!(grid.2, reference.2, "world {world} base {base_ns}");
+                assert_eq!(
+                    st.pairs_tested, reference_st.pairs_tested,
+                    "world {world} base {base_ns}"
+                );
+                assert_eq!(
+                    st.pairs_gated, reference_st.pairs_gated,
+                    "world {world} base {base_ns}"
+                );
+                assert_eq!(st.anon_plots_ungated, reference_st.anon_plots_ungated);
+                assert_eq!(
+                    radar_tracks, reference_tracks,
+                    "world {world} base {base_ns}"
+                );
+                assert!(
+                    radar_tracks >= 2,
+                    "world {world} base {base_ns}: close hypotheses disappeared"
+                );
+                assert!(
+                    grid.1.t_ns.iter().zip(&grid.1.how).any(|(&t_ns, &how)| {
+                        how == HOW_ASSOC && t_ns >= base_ns + GAP_END as i64 * site.period_ns
+                    }),
+                    "world {world} base {base_ns}: no post-coast association"
+                );
+                assert_eq!(
+                    out.flags
+                        .iter()
+                        .any(|flags| flags & crate::types::O_COAST != 0),
+                    reference_out
+                        .flags
+                        .iter()
+                        .any(|flags| flags & crate::types::O_COAST != 0),
+                    "world {world} base {base_ns}: coast visibility changed"
+                );
+            }
+        }
+    }
+
     // REQ: OA-TRK-300
     #[test]
     fn a_full_wide_list_leaves_the_track_out_and_counts_it() {

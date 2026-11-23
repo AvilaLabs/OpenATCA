@@ -1023,6 +1023,102 @@ mod tests {
         assert!(visited * 4 < total, "{visited} of {total}");
     }
 
+    // REQ: OA-TRK-177, OA-TRK-300
+    #[test]
+    fn candidate_query_has_no_false_negatives_against_independent_exact_reference() {
+        // Deterministic bounds: 192 indexed tracks and 72 queries per world. The expected side
+        // computes the polar window directly and never calls the production gate predicate.
+        const TRACK_CAP: usize = 192;
+        const QUERY_CAP: usize = 72;
+        const SIGMA_HIGH_M: f64 = 30_000.0;
+
+        let reference_passes =
+            |(prho, paz): (f64, f64), (rho, az, ground, sigma): (f64, f64, f64, f64)| {
+                let limit = COARSE_M + 8.0 * sigma;
+                let mut turn = (paz - az + 180.0).rem_euclid(360.0) - 180.0;
+                if turn > 180.0 {
+                    turn -= 360.0;
+                }
+                let radial_error = (prho - rho).abs();
+                let lateral_error = turn.abs() * core::f64::consts::PI / 180.0 * ground;
+                !(radial_error > limit || lateral_error > limit)
+            };
+
+        let mut rng = Rng::from_seed(0xA71C_0A55);
+        for (world, (lat, lon, max_range)) in [
+            (0.0, 179.999, 90_000.0),
+            (89.95, 30.0, 40_000.0),
+            (-89.9, -120.0, 40_000.0),
+            (41.98, -87.91, 90_000.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let s = site(lat, lon);
+            let g = radar_geom(&s);
+            let mut t = tracks(&s, TRACK_CAP - 4, max_range, &mut rng);
+
+            // Crafted exact and near-boundary cases: close to the radar, azimuth seam, parallel
+            // and crossing snapshots, curved-path point, missing position, and high covariance.
+            for (rho, az, height, sigma) in [
+                (0.0, 359.999, 100.0, 0.0),
+                (COARSE_M, 0.001, 1_000.0, 0.0),
+                (max_range * 0.5, 90.0, 6_000.0, 0.01),
+                (max_range * 0.5, 90.0001, 6_000.0, 0.01),
+            ] {
+                let geo = polar_to_geodetic(&g, rho.max(1.0), az, height).unwrap();
+                let (rho, az) = polar_of(&g, geo.lat_deg, geo.lon_deg, height);
+                let ground = (rho * rho - (height - g.height_m).powi(2)).max(1.0).sqrt();
+                t.push(T {
+                    lat: geo.lat_deg,
+                    lon: geo.lon_deg,
+                    polar: (rho, az, ground, sigma),
+                });
+            }
+            if let Some(wide) = t.get_mut(TRACK_CAP - 2) {
+                wide.polar.3 = SIGMA_HIGH_M;
+            }
+            if let Some(unplaced) = t.get_mut(TRACK_CAP - 1) {
+                unplaced.lat = f64::NAN;
+                unplaced.lon = f64::NAN;
+                unplaced.polar = (f64::NAN, 0.0, 1.0, 0.0);
+            }
+
+            let (ix, dh, width) = built(&s, &t);
+            let mut candidates = Vec::with_capacity(TRACK_CAP);
+            for query in 0..QUERY_CAP {
+                let target = &t[query % (TRACK_CAP - 4)].polar;
+                let plot = if query % 4 == 0 {
+                    (target.0, target.1)
+                } else if query % 4 == 1 {
+                    (1.0 + max_range * rng.unit(), 360.0 * rng.unit())
+                } else if query % 4 == 2 {
+                    (
+                        target.0 + COARSE_M,
+                        (target.1 + 180.0 - 1.0e-7).rem_euclid(360.0),
+                    )
+                } else {
+                    (0.0, 0.0)
+                };
+                coarse_query(&ix, &mut candidates, plot.0, plot.1, dh, width);
+                assert!(candidates.windows(2).all(|pair| pair[0] < pair[1]));
+
+                let mut reference = Vec::new();
+                for (index, track) in t.iter().enumerate() {
+                    if reference_passes(plot, track.polar) {
+                        reference.push(index as u32);
+                    }
+                }
+                for index in reference {
+                    assert!(
+                        candidates.binary_search(&index).is_ok(),
+                        "world {world} query {query} omitted reference track {index}: plot {plot:?}"
+                    );
+                }
+            }
+        }
+    }
+
     // REQ: OA-TRK-177
     #[test]
     fn twenty_thousand_plots_over_twenty_thousand_tracks_across_the_conus_take_well_under_a_second()
