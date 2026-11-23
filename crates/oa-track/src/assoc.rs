@@ -47,6 +47,16 @@
 
 /// Absent assignment.
 pub const NONE: u32 = u32::MAX;
+/// Association path was not recorded for this plot.
+pub const PATH_NONE: u8 = 0;
+/// One-pair component (no competition).
+pub const PATH_SINGLE: u8 = 1;
+/// Component solved by the exact Hungarian method.
+pub const PATH_EXACT: u8 = 2;
+/// Component assigned by the bounded greedy fallback.
+pub const PATH_GREEDY: u8 = 3;
+/// Plain nearest-neighbour baseline; no component solve was run.
+pub const PATH_NEAREST: u8 = 4;
 /// Limit: the largest component (tracks plus plots) solved exactly; 160 gives a padded matrix of
 /// 160 rows and columns, about 4e6 operations worst case. Larger components are assigned
 /// greedily and counted.
@@ -125,6 +135,8 @@ pub struct AssocScratch {
     max_tracks: usize,
     max_plots: usize,
     max_pairs: usize,
+    collect_metadata: bool,
+    metadata_writes: u64,
     /// Result: the track of each plot, or [`NONE`]; the first `n_plots` entries are valid.
     plot_track: Vec<u32>,
     n_plots: usize,
@@ -132,6 +144,12 @@ pub struct AssocScratch {
     pair_of: Vec<u32>,
     /// Result of [`ambiguous_pairs`].
     amb: Vec<bool>,
+    /// Index of the least-cost alternate pair for each assigned plot, or [`NONE`].
+    alternate_pair: Vec<u32>,
+    /// Number of tracks plus plots in the plot's connected component, or 0 when unavailable.
+    component_size: Vec<u32>,
+    /// [`PATH_SINGLE`], [`PATH_EXACT`], [`PATH_GREEDY`] or [`PATH_NONE`].
+    component_path: Vec<u8>,
     own: Vec<f64>,
     other: Vec<f64>,
     parent: Vec<u32>,
@@ -149,6 +167,24 @@ pub struct AssocScratch {
 /// A scratch for up to `max_tracks` tracks, `max_plots` plots and `max_pairs` pairs per solve,
 /// each limited to [`MAX_SCRATCH_ITEMS`] (pairs [`MAX_SCRATCH_PAIRS`]).
 pub fn assoc_scratch_new(max_tracks: usize, max_plots: usize, max_pairs: usize) -> AssocScratch {
+    assoc_scratch_new_inner(max_tracks, max_plots, max_pairs, false)
+}
+
+/// A scratch with the bounded per-plot metadata used only by the opt-in forensics sidecar.
+pub fn assoc_scratch_new_forensics(
+    max_tracks: usize,
+    max_plots: usize,
+    max_pairs: usize,
+) -> AssocScratch {
+    assoc_scratch_new_inner(max_tracks, max_plots, max_pairs, true)
+}
+
+fn assoc_scratch_new_inner(
+    max_tracks: usize,
+    max_plots: usize,
+    max_pairs: usize,
+    collect_metadata: bool,
+) -> AssocScratch {
     let (max_tracks, max_plots) = (
         max_tracks.min(MAX_SCRATCH_ITEMS),
         max_plots.min(MAX_SCRATCH_ITEMS),
@@ -159,10 +195,27 @@ pub fn assoc_scratch_new(max_tracks: usize, max_plots: usize, max_pairs: usize) 
         max_tracks,
         max_plots,
         max_pairs,
+        collect_metadata,
+        metadata_writes: 0,
         plot_track: vec![NONE; max_plots],
         n_plots: 0,
         pair_of: vec![NONE; max_plots],
         amb: vec![false; max_plots],
+        alternate_pair: if collect_metadata {
+            vec![NONE; max_plots]
+        } else {
+            Vec::new()
+        },
+        component_size: if collect_metadata {
+            vec![0; max_plots]
+        } else {
+            Vec::new()
+        },
+        component_path: if collect_metadata {
+            vec![PATH_NONE; max_plots]
+        } else {
+            Vec::new()
+        },
         own: vec![0.0; max_plots],
         other: vec![0.0; max_plots],
         parent: vec![0; max_tracks + max_plots],
@@ -202,6 +255,9 @@ pub fn assoc_scratch_buffers(sc: &AssocScratch) -> Vec<(usize, usize)> {
         of(&sc.plot_track),
         of(&sc.pair_of),
         of(&sc.amb),
+        of(&sc.alternate_pair),
+        of(&sc.component_size),
+        of(&sc.component_path),
         of(&sc.own),
         of(&sc.other),
         of(&sc.parent),
@@ -238,11 +294,43 @@ pub fn assoc_ambiguous(sc: &AssocScratch) -> &[bool] {
     sc.amb.get(..sc.n_plots).unwrap_or(&[])
 }
 
+/// After [`ambiguous_pairs`]: the pair index of the least-cost alternate track for each assigned
+/// plot, or [`NONE`] if there is no alternate.
+pub fn assoc_alternate_pair(sc: &AssocScratch) -> &[u32] {
+    sc.alternate_pair.get(..sc.n_plots).unwrap_or(&[])
+}
+
+/// Number of tracks plus plots in each plot's connected component; 0 when no component was
+/// available (for example, after a refused solve or on the nearest-neighbour path).
+pub fn assoc_component_size(sc: &AssocScratch) -> &[u32] {
+    sc.component_size.get(..sc.n_plots).unwrap_or(&[])
+}
+
+/// Solve path for each plot: [`PATH_SINGLE`], [`PATH_EXACT`], [`PATH_GREEDY`], or [`PATH_NONE`].
+pub fn assoc_component_path(sc: &AssocScratch) -> &[u8] {
+    sc.component_path.get(..sc.n_plots).unwrap_or(&[])
+}
+
+/// Writes to the opt-in, fixed-size metadata columns in the most recent solve.
+pub fn assoc_metadata_writes(sc: &AssocScratch) -> u64 {
+    sc.metadata_writes
+}
+
 /// Sets the result for `n_plots` plots to all unassigned (as far as the scratch holds them).
 fn reset_result(sc: &mut AssocScratch, n_plots: usize) {
     sc.n_plots = n_plots.min(sc.max_plots);
     for t in sc.plot_track.iter_mut().take(sc.n_plots) {
         *t = NONE;
+    }
+    if sc.collect_metadata {
+        sc.metadata_writes = sc
+            .metadata_writes
+            .saturating_add((sc.n_plots as u64).saturating_mul(3));
+        for j in 0..sc.n_plots {
+            sc.alternate_pair[j] = NONE;
+            sc.component_size[j] = 0;
+            sc.component_path[j] = PATH_NONE;
+        }
     }
 }
 
@@ -366,6 +454,10 @@ pub fn gnn(
     pairs: &[Pair],
     gate: f64,
 ) -> Result<GnnStats, GnnError> {
+    let collect_metadata = sc.collect_metadata;
+    if collect_metadata {
+        sc.metadata_writes = 0;
+    }
     reset_result(sc, n_plots);
     if !(gate.is_finite() && gate > 0.0) {
         return Err(GnnError::BadGate);
@@ -410,7 +502,14 @@ pub fn gnn(
             .position(|&(r, _)| r != root)
             .map_or(by_root.len(), |d| at + d);
         stats.components += 1;
-        solve_component(sc, pairs, &by_root[at..end], gate, &mut stats);
+        solve_component(
+            sc,
+            pairs,
+            &by_root[at..end],
+            gate,
+            &mut stats,
+            collect_metadata,
+        );
         at = end;
     }
     sc.by_root = by_root;
@@ -424,6 +523,7 @@ fn solve_component(
     group: &[(u32, u32)],
     gate: f64,
     stats: &mut GnnStats,
+    collect_metadata: bool,
 ) {
     let pr = |e: &(u32, u32)| pairs[e.1 as usize];
     // Local indexes of the component's tracks and plots, ascending.
@@ -450,6 +550,23 @@ fn solve_component(
     sc.comp_plots.sort_unstable();
     let (t, q) = (sc.comp_tracks.len(), sc.comp_plots.len());
     stats.largest = stats.largest.max((t + q) as u64);
+    if collect_metadata {
+        let path = if group.len() == 1 {
+            PATH_SINGLE
+        } else if t + q > MAX_COMPONENT {
+            PATH_GREEDY
+        } else {
+            PATH_EXACT
+        };
+        sc.metadata_writes = sc
+            .metadata_writes
+            .saturating_add((q as u64).saturating_mul(2));
+        for &plot in &sc.comp_plots {
+            let j = plot as usize;
+            sc.component_size[j] = (t + q) as u32;
+            sc.component_path[j] = path;
+        }
+    }
     if group.len() == 1 {
         stats.single += 1;
         // A single gated pair is below the gate by construction (the caller's gate).
@@ -534,10 +651,19 @@ fn solve_component(
 /// track index on a tie) and a track may take several plots. The track of each plot or
 /// [`NONE`] is in [`assoc_plot_track`] afterwards.
 pub fn nearest(sc: &mut AssocScratch, n_plots: usize, pairs: &[Pair]) -> Result<(), GnnError> {
+    if sc.collect_metadata {
+        sc.metadata_writes = 0;
+    }
     reset_result(sc, n_plots);
     if n_plots > sc.max_plots {
         sc.n_plots = 0;
         return Err(GnnError::TooLarge);
+    }
+    if sc.collect_metadata {
+        sc.metadata_writes = sc.metadata_writes.saturating_add(n_plots as u64);
+        for path in sc.component_path.iter_mut().take(n_plots) {
+            *path = PATH_NEAREST;
+        }
     }
     for v in sc.own.iter_mut().take(n_plots) {
         *v = f64::INFINITY;
@@ -581,15 +707,46 @@ pub fn ambiguous_pairs(sc: &mut AssocScratch, pairs: &[Pair], margin: f64) {
         sc.other[k] = f64::INFINITY;
         sc.amb[k] = false;
     }
-    for p in pairs {
-        let j = p.plot as usize;
-        if j >= n || sc.plot_track[j] == NONE {
-            continue;
+    if sc.collect_metadata {
+        for k in 0..n {
+            sc.alternate_pair[k] = NONE;
         }
-        if p.track == sc.plot_track[j] {
-            sc.own[j] = sc.own[j].min(p.cost);
-        } else {
-            sc.other[j] = sc.other[j].min(p.cost);
+    }
+    if sc.collect_metadata {
+        for (pair_ix, p) in pairs.iter().enumerate() {
+            let j = p.plot as usize;
+            if j >= n || sc.plot_track[j] == NONE {
+                continue;
+            }
+            if p.track == sc.plot_track[j] {
+                sc.own[j] = sc.own[j].min(p.cost);
+            } else {
+                let prior = sc.other[j];
+                sc.other[j] = sc.other[j].min(p.cost);
+                let current = sc.alternate_pair[j];
+                // Match the existing `f64::min` NaN behavior: NaNs and +infinity do not become
+                // alternate evidence. Equal costs use the lowest track, then first pair.
+                let better = match pairs.get(current as usize) {
+                    Some(prev) => p.cost < prior || (p.cost == prior && p.track < prev.track),
+                    None => p.cost < prior,
+                };
+                if better {
+                    sc.alternate_pair[j] = u32::try_from(pair_ix).unwrap_or(NONE);
+                }
+            }
+        }
+    } else {
+        // Keep the default tracker path identical to the original scoring-only pass.
+        for p in pairs {
+            let j = p.plot as usize;
+            if j >= n || sc.plot_track[j] == NONE {
+                continue;
+            }
+            if p.track == sc.plot_track[j] {
+                sc.own[j] = sc.own[j].min(p.cost);
+            } else {
+                sc.other[j] = sc.other[j].min(p.cost);
+            }
         }
     }
     for j in 0..n {
@@ -1088,7 +1245,7 @@ mod tests {
             reset_result(&mut sc, n);
             let group: Vec<(u32, u32)> = (0..pairs.len() as u32).map(|k| (0, k)).collect();
             let mut st = GnnStats::default();
-            solve_component(&mut sc, &pairs, &group, 1.0e9, &mut st);
+            solve_component(&mut sc, &pairs, &group, 1.0e9, &mut st, false);
             assert_eq!(st.greedy_components, 1);
             assoc_plot_track(&sc).to_vec()
         };
@@ -1102,5 +1259,148 @@ mod tests {
             pos.iter().enumerate().all(|(j, &t)| t as usize == j),
             "{pos:?}"
         );
+    }
+
+    #[test]
+    fn forensics_metadata_preserves_assignments_and_classifies_paths() {
+        let pairs = [
+            Pair {
+                track: 0,
+                plot: 0,
+                cost: 1.0,
+            },
+            Pair {
+                track: 1,
+                plot: 0,
+                cost: 2.0,
+            },
+            Pair {
+                track: 1,
+                plot: 1,
+                cost: 1.0,
+            },
+        ];
+        let mut plain = assoc_scratch_new(2, 2, pairs.len());
+        let mut forensic = assoc_scratch_new_forensics(2, 2, pairs.len());
+        gnn(&mut plain, 2, 2, &pairs, 10.0).unwrap();
+        gnn(&mut forensic, 2, 2, &pairs, 10.0).unwrap();
+        assert_eq!(assoc_plot_track(&plain), assoc_plot_track(&forensic));
+        assert_eq!(assoc_component_path(&forensic), &[PATH_EXACT, PATH_EXACT]);
+        assert_eq!(assoc_component_size(&forensic), &[4, 4]);
+
+        let single = [Pair {
+            track: 0,
+            plot: 0,
+            cost: 1.0,
+        }];
+        gnn(&mut forensic, 1, 1, &single, 10.0).unwrap();
+        assert_eq!(assoc_component_path(&forensic), &[PATH_SINGLE]);
+
+        let n = MAX_COMPONENT / 2 + 1;
+        let dense: Vec<Pair> = (0..n)
+            .flat_map(|track| {
+                (0..n).map(move |plot| Pair {
+                    track: track as u32,
+                    plot: plot as u32,
+                    cost: 1.0,
+                })
+            })
+            .collect();
+        let mut greedy = assoc_scratch_new_forensics(n, n, dense.len());
+        gnn(&mut greedy, n, n, &dense, 10.0).unwrap();
+        assert!(assoc_component_path(&greedy)
+            .iter()
+            .all(|&p| p == PATH_GREEDY));
+        assert!(assoc_component_size(&greedy)
+            .iter()
+            .all(|&size| size == (2 * n) as u32));
+    }
+
+    #[test]
+    fn alternate_evidence_keeps_nan_minimum_semantics_and_stable_ties() {
+        for nan in [
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            f64::from_bits(0xfff8_0000_0000_0001),
+        ] {
+            let pairs = [
+                Pair {
+                    track: 0,
+                    plot: 0,
+                    cost: 1.0,
+                },
+                Pair {
+                    track: 2,
+                    plot: 0,
+                    cost: nan,
+                },
+                Pair {
+                    track: 1,
+                    plot: 0,
+                    cost: 1.1,
+                },
+                Pair {
+                    track: 3,
+                    plot: 0,
+                    cost: 1.1,
+                },
+            ];
+            let mut plain = assoc_scratch_new(4, 1, pairs.len());
+            let mut sc = assoc_scratch_new_forensics(4, 1, pairs.len());
+            gnn(&mut plain, 4, 1, &pairs, 10.0).unwrap();
+            gnn(&mut sc, 4, 1, &pairs, 10.0).unwrap();
+            assert_eq!(assoc_plot_track(&plain), assoc_plot_track(&sc));
+            assigned_pairs(&mut plain, &pairs);
+            assigned_pairs(&mut sc, &pairs);
+            ambiguous_pairs(&mut plain, &pairs, 0.2);
+            ambiguous_pairs(&mut sc, &pairs, 0.2);
+            assert_eq!(assoc_ambiguous(&plain), assoc_ambiguous(&sc));
+            assert_eq!(assoc_ambiguous(&sc), &[true]);
+            let alt = assoc_alternate_pair(&sc)[0] as usize;
+            assert_eq!(pairs[alt].track, 1);
+            assert_eq!(pairs[alt].cost, 1.1);
+        }
+    }
+
+    #[test]
+    fn forensic_nearest_path_is_explicit_and_assignments_match_plain_scratch() {
+        let pairs = [
+            Pair {
+                track: 1,
+                plot: 0,
+                cost: 1.0,
+            },
+            Pair {
+                track: 0,
+                plot: 0,
+                cost: 1.0,
+            },
+            Pair {
+                track: 2,
+                plot: 1,
+                cost: 2.0,
+            },
+        ];
+        let mut plain = assoc_scratch_new(3, 3, pairs.len());
+        let mut forensic = assoc_scratch_new_forensics(3, 3, pairs.len());
+        nearest(&mut plain, 3, &pairs).unwrap();
+        nearest(&mut forensic, 3, &pairs).unwrap();
+        assert_eq!(assoc_plot_track(&plain), assoc_plot_track(&forensic));
+        assert_eq!(assoc_plot_track(&forensic), &[0, 2, NONE]);
+        assert_eq!(
+            assoc_component_path(&forensic),
+            &[PATH_NEAREST, PATH_NEAREST, PATH_NEAREST]
+        );
+        assert_eq!(assoc_component_size(&forensic), &[0, 0, 0]);
+    }
+
+    #[test]
+    fn ordinary_scratch_has_no_metadata_buffers() {
+        let sc = assoc_scratch_new(4, 5, 9);
+        assert!(assoc_alternate_pair(&sc).is_empty());
+        assert!(assoc_component_size(&sc).is_empty());
+        assert!(assoc_component_path(&sc).is_empty());
+        assert_eq!(sc.alternate_pair.capacity(), 0);
+        assert_eq!(sc.component_size.capacity(), 0);
+        assert_eq!(sc.component_path.capacity(), 0);
     }
 }

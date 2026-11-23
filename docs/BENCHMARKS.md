@@ -252,8 +252,41 @@ run start and covers the primary keys matched at the final snapshot.
 The log is opt-in because it adds memory and timing overhead. Truncated runs, unknown offered
 labels, incomplete assignment columns or log overflow produce an explicit unavailable result.
 This is a final-snapshot identity diagnostic, not a trajectory-accuracy score; it cannot report
-anonymous tracks that ended before the snapshot. It currently cannot be combined with
-`--adsb-dropout`.
+anonymous tracks that ended before the snapshot. With `--adsb-dropout`, both the matched
+steady-feed control and outage run receive the same truth scoring and must complete before either
+result is published.
+
+Add `--assignment-forensics` with `--truth-score` to write a bounded, measured-window CSV for
+every wrong applied plot counted by that score. The sidecar is explicit opt-in, preallocates its
+1,048,576-row columns before processing, is cleared at the warm-up boundary without reallocating,
+and does not feed evidence back into association. Export fails closed on a row-cap refusal,
+misaligned column, assignment-log mismatch, incomplete decision source, unavailable truth score,
+or wrong-row count mismatch. When a requested export is unavailable, `oa-perf` removes a prior
+CSV with the same deterministic name so stale evidence cannot appear current.
+
+The CSV action codes are 1 applied, 2 held, 3 unassigned, 4 refused, 5 hard mismatch, 6 deferred,
+and 7 initiation. Solver paths are 0 unavailable/not applicable, 1 single-pair component, 2 exact
+Hungarian, 3 bounded greedy fallback, and 4 nearest-neighbour. `u32::MAX` marks an unavailable key
+or ordinal and `-1` marks unavailable cost or polar evidence. Initiation rows identify the action
+but currently carry unavailable association costs because the candidate that later confirms does
+not retain those per-hit pair costs.
+
+On 22 November 2026, the command below at 2,048 aircraft produced five measured wrong plots in
+the matched steady-feed control and three during the outage. The sidecar reproduced those counts
+exactly. All eight were completed, uncapped, ordinary association decisions from the exact solver
+in components of four to six vertices; none was ambiguous, held, forced, greedy, or initiated.
+Seven named the true aircraft as the cheapest alternate, with a selected-to-alternate cost gap of
+about 4.1 to 4.9 against the current local ambiguity margin of 4.0. This is synthetic,
+loaded-machine diagnostic evidence, not a qualification result and not a basis for tuning the
+margin to truth labels.
+
+```sh
+cargo +1.89.0 run --release --locked -p oa-perf -- one \
+  --n 2048 --layout stress --radars e,t,t --adsb-frac 1 --seed 20261123 \
+  --warmup 60 --duration 15 --no-early-stop --max-tracks 16384 --max-wall 120 \
+  --truth-score --assignment-forensics --association-diagnostics \
+  --radar-no-altitude --adsb-dropout 15 --out /tmp/oa-assignment-forensics
+```
 
 Add `--initiation-diagnostics` to see how each radar used the shared initiation budget during
 measurement. Each radar reports the work available at the start of its batches, charged work,

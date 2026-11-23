@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::capacity::{
-    cap_kv, cap_text, loss_counters, parse_radars, run_capacity, seconds_csv, CapCfg,
+    assignment_forensics_csv, cap_kv, cap_text, loss_counters, parse_radars, run_capacity,
+    seconds_csv, CapCfg,
 };
 use crate::clip::{clip_kv, clip_text, run_clip, ClipCfg};
 use crate::gen::{Layout, TrafficCfg};
@@ -43,6 +44,7 @@ flags (defaults in brackets):
   --adsb-dropout S   opt-in paired run: withhold ADS-B for S measured seconds, then resume
   --radar-no-altitude  remove Mode C altitude from measured-window anonymous radar plots
   --truth-score      opt-in final-snapshot truth identity summary (bounded assignment log)
+  --assignment-forensics  opt-in bounded wrong-assignment rows (requires --truth-score)
   --initiation-diagnostics  opt-in per-radar initiation budget counters
   --association-diagnostics  opt-in per-radar association outcomes and work
   --no-clip --no-overload   leave a part out
@@ -74,6 +76,7 @@ pub struct Opts {
     pub truth_score: bool,
     pub init_diagnostics: bool,
     pub association_diagnostics: bool,
+    pub assignment_forensics: bool,
 }
 
 impl Default for Opts {
@@ -102,6 +105,7 @@ impl Default for Opts {
             truth_score: false,
             init_diagnostics: false,
             association_diagnostics: false,
+            assignment_forensics: false,
         }
     }
 }
@@ -185,6 +189,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             "--truth-score" => o.truth_score = true,
             "--initiation-diagnostics" => o.init_diagnostics = true,
             "--association-diagnostics" => o.association_diagnostics = true,
+            "--assignment-forensics" => o.assignment_forensics = true,
             "--no-clip" => o.no_clip = true,
             "--no-overload" => o.no_overload = true,
             "--no-early-stop" => o.no_early_stop = true,
@@ -210,6 +215,11 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
     }
     if o.truth_score && o.cmd != "one" {
         return Err("--truth-score is available with `one` only".to_string());
+    }
+    if o.assignment_forensics && (!o.truth_score || o.cmd != "one") {
+        return Err(
+            "--assignment-forensics requires --truth-score with the one command".to_string(),
+        );
     }
     if o.radar_no_altitude && o.cmd != "one" {
         return Err("--radar-no-altitude is available with `one` only".to_string());
@@ -240,6 +250,7 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
         truth_score: o.truth_score,
         init_diagnostics: o.init_diagnostics,
         association_diagnostics: o.association_diagnostics,
+        assignment_forensics: o.assignment_forensics,
     })
 }
 
@@ -247,8 +258,37 @@ fn tag(o: &Opts, n: usize) -> String {
     format!("{}_n{n}", o.layout.name())
 }
 
+fn result_tag(o: &Opts, n: usize) -> String {
+    if o.adsb_dropout_s.is_some() {
+        format!("{}_n{n}_dropout", o.layout.name())
+    } else if o.assignment_forensics {
+        format!("{}_n{n}_assignment_forensics", o.layout.name())
+    } else if o.truth_score {
+        format!("{}_n{n}_truthscore", o.layout.name())
+    } else {
+        tag(o, n)
+    }
+}
+
+fn assignment_forensics_path(out: &Path, tag: &str) -> PathBuf {
+    out.join(format!("assignment_forensics_{tag}.csv"))
+}
+
 fn write(path: &Path, text: &str) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Replaces the deterministic sidecar for this run, or removes a prior one when the current
+/// evidence failed closed. A stale success must never look like the result of an unavailable run.
+fn sync_assignment_forensics(path: &Path, csv: Option<&str>) -> Result<(), String> {
+    if let Some(csv) = csv {
+        return write(path, csv);
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", path.display())),
+    }
 }
 
 /// One capacity run in this process; writes `cap_<layout>_n<N>.{txt,kv}` and the per-second CSV.
@@ -305,6 +345,13 @@ fn one(o: &Opts, n: usize) -> Result<(), String> {
             &o.out.join(format!("seconds_{control_tag}.csv")),
             &seconds_csv(&control_result),
         )?;
+        if o.assignment_forensics {
+            let csv = assignment_forensics_csv(&control_result);
+            sync_assignment_forensics(
+                &assignment_forensics_path(&o.out, &control_tag),
+                csv.as_deref(),
+            )?;
+        }
         print!("{control_text}");
     }
     let text = format!(
@@ -317,16 +364,15 @@ fn one(o: &Opts, n: usize) -> Result<(), String> {
         cap_text(&r)
     );
     print!("{text}");
-    let t = if o.adsb_dropout_s.is_some() {
-        format!("{}_n{n}_dropout", o.layout.name())
-    } else if o.truth_score {
-        format!("{}_n{n}_truthscore", o.layout.name())
-    } else {
-        tag(o, n)
-    };
+    let t = result_tag(o, n);
     write(&o.out.join(format!("cap_{t}.txt")), &text)?;
     write(&o.out.join(format!("cap_{t}.kv")), &cap_kv(&r).render())?;
-    write(&o.out.join(format!("seconds_{t}.csv")), &seconds_csv(&r))
+    write(&o.out.join(format!("seconds_{t}.csv")), &seconds_csv(&r))?;
+    if o.assignment_forensics {
+        let csv = assignment_forensics_csv(&r);
+        sync_assignment_forensics(&assignment_forensics_path(&o.out, &t), csv.as_deref())?;
+    }
+    Ok(())
 }
 
 /// Starts this binary as `one` for `n` and returns the result file it wrote.
@@ -355,6 +401,11 @@ fn child(o: &Opts, n: usize) -> Result<Kv, String> {
         })
         .args(if o.association_diagnostics {
             vec!["--association-diagnostics"]
+        } else {
+            vec![]
+        })
+        .args(if o.assignment_forensics {
+            vec!["--assignment-forensics"]
         } else {
             vec![]
         })
@@ -736,5 +787,39 @@ mod tests {
         }
         assert!(parse_args(&a("one --max-wall 0.5 --adsb-frac 0 --warmup 0")).is_ok());
         assert!(parse_args(&a("one --adsb-frac 1")).is_ok());
+    }
+
+    #[test]
+    fn assignment_forensics_is_explicit_and_names_its_sidecar() {
+        assert!(parse_args(&a("one --assignment-forensics")).is_err());
+        let o = parse_args(&a(
+            "one --truth-score --assignment-forensics --layout nas --n 12",
+        ))
+        .unwrap();
+        assert!(o.assignment_forensics);
+        assert!(cap_cfg(&o, 12).unwrap().assignment_forensics);
+        assert_eq!(result_tag(&o, 12), "nas_n12_assignment_forensics");
+        assert_eq!(
+            assignment_forensics_path(Path::new("results"), "nas_n12_control"),
+            PathBuf::from("results/assignment_forensics_nas_n12_control.csv")
+        );
+        assert_eq!(
+            assignment_forensics_path(Path::new("results"), "nas_n12_dropout"),
+            PathBuf::from("results/assignment_forensics_nas_n12_dropout.csv")
+        );
+    }
+
+    #[test]
+    fn unavailable_forensics_invalidates_a_prior_sidecar() {
+        let path = std::env::temp_dir().join(format!(
+            "openatca_forensics_stale_{}_{}.csv",
+            std::process::id(),
+            line!()
+        ));
+        sync_assignment_forensics(&path, Some("header\nrow\n")).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "header\nrow\n");
+        sync_assignment_forensics(&path, None).unwrap();
+        assert!(!path.exists());
+        sync_assignment_forensics(&path, None).unwrap();
     }
 }

@@ -13,11 +13,12 @@ use std::time::Instant;
 
 use oa_track::fusion::{
     fusion_adsb, fusion_advance, fusion_assign_log, fusion_bookkeeping_len, fusion_buffers,
-    fusion_config, fusion_new, fusion_plots, fusion_stats, fusion_take_radar_tracks,
-    fusion_tracker, fusion_tracker_config, fusion_tracker_stats, AssignLog, FusionStats,
-    RadarAssociationStats, RadarInitStats,
+    fusion_clear_forensics, fusion_config, fusion_forensics, fusion_new, fusion_plots,
+    fusion_stats, fusion_take_radar_tracks, fusion_tracker, fusion_tracker_config,
+    fusion_tracker_stats, AssignLog, FusionStats, RadarAssociationStats, RadarInitStats,
+    FORENSIC_APPLIED, FORENSIC_INIT, FORENSIC_NONE, HOW_ASSOC, HOW_HARD, HOW_INIT,
 };
-use oa_track::fusion_params::{ASSIGN_LOG_MAX, KEY_RADAR_BASE, MAX_RADARS};
+use oa_track::fusion_params::{ASSIGN_LOG_MAX, ASSOC_FORENSICS_MAX, KEY_RADAR_BASE, MAX_RADARS};
 use oa_track::fusion_score::{identify_tracks, Kind, EPOCH_NS};
 use oa_track::{
     output_clear, output_new, tracker_bytes, tracker_counts, tracker_live_iter, Measurement,
@@ -56,6 +57,8 @@ pub struct CapCfg {
     pub init_diagnostics: bool,
     /// Show per-radar anonymous association outcomes and work.
     pub association_diagnostics: bool,
+    /// Opt-in bounded wrong-assignment CSV evidence; requires `truth_score`.
+    pub assignment_forensics: bool,
 }
 
 /// Truth-derived identity summary for final confirmed tracks. A7.2: cold report data.
@@ -89,6 +92,34 @@ pub struct TruthSnapshotScore {
     pub first_confirmed_s: Option<Dist>,
 }
 
+/// One measured-window wrong-applied row, post-hoc identified against the final live-key roster.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ForensicWrongRow {
+    pub t_ns: i64,
+    pub plot_ordinal: u32,
+    pub radar: u8,
+    pub plot_addr: u32,
+    pub truth_label: u32,
+    pub action: u8,
+    pub plot_range_m: f64,
+    pub plot_az_deg: f64,
+    pub plot_alt_ft: i32,
+    pub plot_mode_a: u16,
+    pub selected_key: u32,
+    pub selected_truth: u32,
+    pub selected_cost: f64,
+    pub alternate_key: u32,
+    pub alternate_truth: u32,
+    pub alternate_cost: f64,
+    pub ambiguous: bool,
+    pub hold_run: u8,
+    pub forced: bool,
+    pub component_size: u32,
+    pub solver_path: u8,
+    pub incomplete: bool,
+    pub capped: bool,
+}
+
 /// What a capacity run measured.
 #[derive(Debug, Clone)]
 pub struct CapResult {
@@ -96,6 +127,7 @@ pub struct CapResult {
     pub layout: Layout,
     pub init_diagnostics: bool,
     pub association_diagnostics: bool,
+    pub assignment_forensics: bool,
     pub adsb_aircraft: usize,
     pub half_km: f64,
     pub warmup_s: i64,
@@ -138,7 +170,8 @@ pub struct CapResult {
     pub tracker: TrackerStats,
     pub out_overflow: u64,
     /// The same three at the end of the warm-up: the loss counters of the measured window are the
-    /// differences (all zero if the run stopped inside the warm-up).
+    /// differences. If the run stopped inside warm-up, this is the final pre-measurement snapshot,
+    /// so measured deltas remain zero.
     pub fusion_warm: FusionStats,
     pub tracker_warm: TrackerStats,
     pub out_overflow_warm: u64,
@@ -167,6 +200,9 @@ pub struct CapResult {
     pub truth_score: Option<TruthSnapshotScore>,
     /// The truth score was requested but could not be computed honestly.
     pub truth_score_unavailable: Option<&'static str>,
+    /// Rows are present only when requested and the measured-window evidence is complete.
+    pub assignment_forensics_rows: Option<Vec<ForensicWrongRow>>,
+    pub assignment_forensics_unavailable: Option<&'static str>,
     pub radar_track_recs_taken: u64,
     pub bookkeeping: (usize, usize),
     pub buffers_stable: bool,
@@ -248,6 +284,10 @@ pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
         ("held", s.held),
         ("unassigned", s.unassigned),
         ("hard_no_track", s.hard_no_track),
+        ("forensics_overflow", s.forensics_overflow),
+        ("forensics_pair_visits", s.forensics_pair_visits),
+        ("forensics_plot_visits", s.forensics_plot_visits),
+        ("forensics_metadata_writes", s.forensics_metadata_writes),
         ("hard_mismatch", s.hard_mismatch),
         ("radar_disagree", s.radar_disagree),
         ("hard_extra", s.hard_extra),
@@ -297,6 +337,10 @@ pub const FUSION_NOT_LOSS: &[&str] = &[
     "held",
     "unassigned",
     "hard_no_track",
+    "forensics_overflow",
+    "forensics_pair_visits",
+    "forensics_plot_visits",
+    "forensics_metadata_writes",
     "hard_mismatch",
     "radar_disagree",
     "hard_extra",
@@ -657,10 +701,229 @@ fn truth_snapshot_score(
     })
 }
 
+/// Builds only wrong, applied measured-window rows for the final live-key roster. This cold
+/// scoring pass has a fixed input bound (`ASSOC_FORENSICS_MAX`) and fails closed on overflow,
+/// incomplete columns, or disagreement with the existing truth score.
+fn assignment_forensics_rows(
+    fusion: &oa_track::fusion::Fusion,
+    measured_from_ns: i64,
+    expected_wrong: u64,
+    decision_log_complete: bool,
+    measured_forensics_overflow: u64,
+) -> Result<Vec<ForensicWrongRow>, &'static str> {
+    if !decision_log_complete {
+        return Err("fusion scratch or event queue overflow makes decision rows incomplete");
+    }
+    if measured_forensics_overflow > 0 {
+        return Err("forensics sidecar reached its row cap");
+    }
+    let evidence = fusion_forensics(fusion);
+    let n = evidence.t_ns.len();
+    if n > ASSOC_FORENSICS_MAX
+        || evidence.ordinal.len() != n
+        || evidence.plot_range_m.len() != n
+        || evidence.plot_az_deg.len() != n
+        || evidence.plot_alt_ft.len() != n
+        || evidence.plot_addr.len() != n
+        || evidence.label.len() != n
+        || evidence.plot_mode_a.len() != n
+        || evidence.radar.len() != n
+        || evidence.action.len() != n
+        || evidence.selected_key.len() != n
+        || evidence.selected_cost.len() != n
+        || evidence.alternate_key.len() != n
+        || evidence.alternate_cost.len() != n
+        || evidence.ambiguous.len() != n
+        || evidence.hold_run.len() != n
+        || evidence.held.len() != n
+        || evidence.forced.len() != n
+        || evidence.component_size.len() != n
+        || evidence.solver_path.len() != n
+        || evidence.incomplete.len() != n
+        || evidence.capped.len() != n
+    {
+        return Err("forensics sidecar columns are incomplete or exceed their bound");
+    }
+    let assign = fusion_assign_log(fusion);
+    if assign.t_ns.len() > ASSIGN_LOG_MAX
+        || assign.key.len() != assign.t_ns.len()
+        || assign.label.len() != assign.t_ns.len()
+        || assign.radar.len() != assign.t_ns.len()
+        || assign.how.len() != assign.t_ns.len()
+    {
+        return Err("assignment log columns are incomplete");
+    }
+    let keys: Vec<u32> = tracker_live_iter(fusion_tracker(fusion))
+        .map(|(key, _)| key)
+        .collect();
+    let mut measured = AssignLog::default();
+    for i in 0..assign.t_ns.len() {
+        let (Some(&t), Some(&key), Some(&label), Some(&radar), Some(&how)) = (
+            assign.t_ns.get(i),
+            assign.key.get(i),
+            assign.label.get(i),
+            assign.radar.get(i),
+            assign.how.get(i),
+        ) else {
+            return Err("assignment log columns are incomplete");
+        };
+        if t >= measured_from_ns {
+            measured.t_ns.push(t);
+            measured.key.push(key);
+            measured.label.push(label);
+            measured.radar.push(radar);
+            measured.how.push(how);
+        }
+    }
+    let identity = identify_tracks(&measured, &keys);
+    let mut logged = HashMap::<(i64, u32, u32, u8, u8), usize>::new();
+    for i in 0..measured.t_ns.len() {
+        let (Some(&t), Some(&key), Some(&label), Some(&radar), Some(&how)) = (
+            measured.t_ns.get(i),
+            measured.key.get(i),
+            measured.label.get(i),
+            measured.radar.get(i),
+            measured.how.get(i),
+        ) else {
+            return Err("assignment log columns are incomplete");
+        };
+        *logged.entry((t, key, label, radar, how)).or_default() += 1;
+    }
+    let mut wrong = Vec::with_capacity(expected_wrong.min(n as u64) as usize);
+    for i in 0..n {
+        let (Some(&t_ns), Some(&action), Some(&label), Some(&key)) = (
+            evidence.t_ns.get(i),
+            evidence.action.get(i),
+            evidence.label.get(i),
+            evidence.selected_key.get(i),
+        ) else {
+            return Err("forensics sidecar columns are incomplete");
+        };
+        if t_ns < measured_from_ns
+            || !matches!(action, FORENSIC_APPLIED | FORENSIC_INIT)
+            || label == u32::MAX
+        {
+            continue;
+        }
+        let Some(&radar) = evidence.radar.get(i) else {
+            return Err("forensics sidecar columns are incomplete");
+        };
+        let expected_hows: &[u8] = if action == FORENSIC_INIT {
+            &[HOW_INIT]
+        } else {
+            &[HOW_HARD, HOW_ASSOC]
+        };
+        let mut matched = false;
+        for &how in expected_hows {
+            if let Some(left) = logged.get_mut(&(t_ns, key, label, radar, how)) {
+                if *left > 0 {
+                    *left -= 1;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if !matched {
+            continue;
+        }
+        if identity
+            .identity_of
+            .get(&key)
+            .is_none_or(|&truth| truth == label)
+        {
+            continue;
+        }
+        let Some(&selected_truth) = identity.identity_of.get(&key) else {
+            return Err("selected key has no post-hoc truth identity");
+        };
+        if selected_truth == label {
+            return Err("wrong-row identity check disagrees with its filter");
+        }
+        let (
+            Some(&plot_ordinal),
+            Some(&plot_addr),
+            Some(&plot_range_m),
+            Some(&plot_az_deg),
+            Some(&plot_alt_ft),
+            Some(&plot_mode_a),
+            Some(&selected_cost),
+            Some(&alternate_key),
+            Some(&alternate_cost),
+            Some(&ambiguous),
+            Some(&hold_run),
+            Some(&forced),
+            Some(&component_size),
+            Some(&solver_path),
+            Some(&incomplete),
+            Some(&capped),
+        ) = (
+            evidence.ordinal.get(i),
+            evidence.plot_addr.get(i),
+            evidence.plot_range_m.get(i),
+            evidence.plot_az_deg.get(i),
+            evidence.plot_alt_ft.get(i),
+            evidence.plot_mode_a.get(i),
+            evidence.selected_cost.get(i),
+            evidence.alternate_key.get(i),
+            evidence.alternate_cost.get(i),
+            evidence.ambiguous.get(i),
+            evidence.hold_run.get(i),
+            evidence.forced.get(i),
+            evidence.component_size.get(i),
+            evidence.solver_path.get(i),
+            evidence.incomplete.get(i),
+            evidence.capped.get(i),
+        )
+        else {
+            return Err("forensics sidecar columns are incomplete");
+        };
+        wrong.push(ForensicWrongRow {
+            t_ns,
+            plot_ordinal,
+            radar,
+            plot_addr,
+            truth_label: label,
+            action,
+            plot_range_m,
+            plot_az_deg,
+            plot_alt_ft,
+            plot_mode_a,
+            selected_key: key,
+            selected_truth,
+            selected_cost,
+            alternate_key,
+            alternate_truth: identity
+                .identity_of
+                .get(&alternate_key)
+                .copied()
+                .unwrap_or(FORENSIC_NONE),
+            alternate_cost,
+            ambiguous,
+            hold_run,
+            forced,
+            component_size,
+            solver_path,
+            incomplete,
+            capped,
+        });
+    }
+    if wrong.len() as u64 != expected_wrong {
+        return Err("wrong-row export count disagrees with measured truth score");
+    }
+    Ok(wrong)
+}
+
+fn forensics_source_complete(scratch_full: u64) -> bool {
+    scratch_full == 0
+}
+
 /// Runs the traffic through the layer and measures it.
 pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     if cfg.warmup_s < 0 {
         return Err("capacity warm-up cannot be negative".to_string());
+    }
+    if cfg.assignment_forensics && !cfg.truth_score {
+        return Err("assignment forensics requires truth scoring".to_string());
     }
     if cfg.adsb_dropout_s.is_some() && cfg.warmup_s < 1 {
         return Err(
@@ -698,6 +961,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     fcfg.log_assign = cfg.truth_score;
     fcfg.init_diagnostics = cfg.init_diagnostics;
     fcfg.association_diagnostics = cfg.association_diagnostics;
+    fcfg.association_forensics = cfg.assignment_forensics;
     let mut f = fusion_new(&fcfg, &sites).map_err(|e| e.to_string())?;
     // OA-GEN traffic is fixed truth: prebuild the bounded address index and coverage bits before
     // any core timing. Multiple radar labels for one aircraft intentionally count once.
@@ -735,6 +999,9 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         if started.elapsed().as_secs_f64() > cfg.max_wall_s {
             truncated = true;
             break;
+        }
+        if cfg.assignment_forensics && k == cfg.warmup_s {
+            fusion_clear_forensics(&mut f);
         }
         let measured = k >= cfg.warmup_s;
         adsb.clear();
@@ -882,10 +1149,14 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             recs_taken += fusion_take_radar_tracks(&mut f).len() as u64;
         }
     }
+    if seconds_done < cfg.warmup_s {
+        warm = (*fusion_stats(&f), *fusion_tracker_stats(&f), out.overflow);
+    }
     let tracker_table_mb = tracker_bytes(fusion_tracker(&f)) as f64 / (1024.0 * 1024.0);
     let (tent, conf) = tracker_counts(fusion_tracker(&f));
     let md = measure_done.max(1) as f64;
     let advance_ms = dist_of(&adv_ms);
+    let measured_from_ns = EPOCH_NS.saturating_add(cfg.warmup_s.saturating_mul(NS_PER_S));
     let (truth_score, truth_score_unavailable) = if !cfg.truth_score {
         (None, None)
     } else if truncated || stopped_early || measure_done != cfg.measure_s {
@@ -894,11 +1165,36 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             Some("run did not complete the full measured interval"),
         )
     } else {
-        let measured_from_ns = EPOCH_NS.saturating_add(cfg.warmup_s.saturating_mul(NS_PER_S));
         match truth_snapshot_score(&f, &offered, &first_confirmed, measured_from_ns) {
             Ok(score) => (Some(score), None),
             Err(reason) => (None, Some(reason)),
         }
+    };
+    let (assignment_forensics_rows, assignment_forensics_unavailable) = if !cfg.assignment_forensics
+    {
+        (None, None)
+    } else if let Some(score) = truth_score {
+        match assignment_forensics_rows(
+            &f,
+            measured_from_ns,
+            score.measured_wrong_plots,
+            forensics_source_complete(
+                fusion_stats(&f)
+                    .scratch_full
+                    .saturating_sub(warm.0.scratch_full),
+            ),
+            fusion_stats(&f)
+                .forensics_overflow
+                .saturating_sub(warm.0.forensics_overflow),
+        ) {
+            Ok(rows) => (Some(rows), None),
+            Err(reason) => (None, Some(reason)),
+        }
+    } else {
+        (
+            None,
+            Some("truth score unavailable; wrong-row export was not attempted"),
+        )
     };
     let mut init_radar = [RadarInitStats::default(); MAX_RADARS];
     if cfg.init_diagnostics && measure_done > 0 {
@@ -951,6 +1247,7 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         layout: cfg.traffic.layout,
         init_diagnostics: cfg.init_diagnostics,
         association_diagnostics: cfg.association_diagnostics,
+        assignment_forensics: cfg.assignment_forensics,
         adsb_aircraft: traffic.adsb_count(),
         half_km: half_km(&cfg.traffic),
         warmup_s: cfg.warmup_s,
@@ -1002,6 +1299,8 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         continuity_addresses: continuity_cohort.into_iter().collect(),
         truth_score,
         truth_score_unavailable,
+        assignment_forensics_rows,
+        assignment_forensics_unavailable,
         radar_track_recs_taken: recs_taken,
         bookkeeping: fusion_bookkeeping_len(&f),
         buffers_stable: fusion_buffers(&f) == buffers0,
@@ -1145,6 +1444,19 @@ pub fn cap_kv(r: &CapResult) -> Kv {
         kv.put("truth_score.status", "unavailable");
         kv.put("truth_score.reason", reason);
     }
+    if r.assignment_forensics {
+        if let Some(rows) = &r.assignment_forensics_rows {
+            kv.put("assignment_forensics.status", "available");
+            kv.put("assignment_forensics.wrong_rows", rows.len());
+        } else {
+            kv.put("assignment_forensics.status", "unavailable");
+            kv.put(
+                "assignment_forensics.reason",
+                r.assignment_forensics_unavailable
+                    .unwrap_or("unknown reason"),
+            );
+        }
+    }
     kv.put("age_unknown_rows", r.age_unknown);
     kv.put_dist("age_tick_rows", "ms", &r.age_tick_ms);
     kv.put_dist("age_tick_adsb_keys", "ms", &r.age_tick_adsb_ms);
@@ -1160,7 +1472,20 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     {
         kv.put(&format!("loss.{name}"), v.saturating_sub(w));
     }
-    for (name, v) in fusion_counters(&r.fusion) {
+    let mut measured_fusion = r.fusion;
+    measured_fusion.forensics_overflow = measured_fusion
+        .forensics_overflow
+        .saturating_sub(r.fusion_warm.forensics_overflow);
+    measured_fusion.forensics_pair_visits = measured_fusion
+        .forensics_pair_visits
+        .saturating_sub(r.fusion_warm.forensics_pair_visits);
+    measured_fusion.forensics_plot_visits = measured_fusion
+        .forensics_plot_visits
+        .saturating_sub(r.fusion_warm.forensics_plot_visits);
+    measured_fusion.forensics_metadata_writes = measured_fusion
+        .forensics_metadata_writes
+        .saturating_sub(r.fusion_warm.forensics_metadata_writes);
+    for (name, v) in fusion_counters(&measured_fusion) {
         kv.put(&format!("fusion.{name}"), v);
     }
     for (name, v) in tracker_counters(&r.tracker) {
@@ -1214,6 +1539,43 @@ pub fn seconds_csv(r: &CapResult) -> String {
         }
     }
     s
+}
+
+/// CSV for the bounded measured-window wrong-assignment sidecar; absent when export failed closed.
+pub fn assignment_forensics_csv(r: &CapResult) -> Option<String> {
+    let rows = r.assignment_forensics_rows.as_ref()?;
+    let mut out = String::from(
+        "t_ns,plot_ordinal,radar,plot_addr,truth_label,action,selected_truth,plot_range_m,plot_az_deg,plot_alt_ft,plot_mode_a,selected_key,selected_cost,alternate_key,alternate_truth,alternate_cost,ambiguous,hold_run,forced,component_size,solver_path,incomplete,capped\n",
+    );
+    for row in rows {
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{:.9},{:.9},{},{},{},{:.12},{},{},{:.12},{},{},{},{},{},{},{}\n",
+            row.t_ns,
+            row.plot_ordinal,
+            row.radar,
+            row.plot_addr,
+            row.truth_label,
+            row.action,
+            row.selected_truth,
+            row.plot_range_m,
+            row.plot_az_deg,
+            row.plot_alt_ft,
+            row.plot_mode_a,
+            row.selected_key,
+            row.selected_cost,
+            row.alternate_key,
+            row.alternate_truth,
+            row.alternate_cost,
+            u8::from(row.ambiguous),
+            row.hold_run,
+            u8::from(row.forced),
+            row.component_size,
+            row.solver_path,
+            u8::from(row.incomplete),
+            u8::from(row.capped),
+        ));
+    }
+    Some(out)
 }
 
 fn dist_line(name: &str, unit: &str, d: &Dist) -> String {
@@ -1409,6 +1771,29 @@ pub fn cap_text(r: &CapResult) -> String {
             "  truth-derived final snapshot: unavailable ({reason})\n"
         ));
     }
+    if r.assignment_forensics {
+        if let Some(rows) = &r.assignment_forensics_rows {
+            s.push_str(&format!(
+                "  assignment forensics: exported {} measured-window wrong-applied rows; row count matches the measured truth score.\n",
+                rows.len()
+            ));
+        } else {
+            s.push_str(&format!(
+                "  assignment forensics: unavailable ({})\n",
+                r.assignment_forensics_unavailable
+                    .unwrap_or("unknown reason")
+            ));
+        }
+        if r.fusion
+            .forensics_overflow
+            .saturating_sub(r.fusion_warm.forensics_overflow)
+            > 0
+        {
+            s.push_str(
+                "  forensics row-cap overflow is diagnostic evidence loss, not tracker work loss; no partial CSV is written.\n",
+            );
+        }
+    }
     let moved: Vec<String> = r
         .loss()
         .into_iter()
@@ -1574,6 +1959,7 @@ mod tests {
             truth_score: false,
             init_diagnostics: false,
             association_diagnostics: false,
+            assignment_forensics: false,
         }
     }
 
@@ -1758,6 +2144,64 @@ mod tests {
         assert!(cap_kv(&result)
             .get("truth_score.measured_wrong_plots")
             .is_some());
+    }
+
+    #[test]
+    fn assignment_forensics_csv_matches_measured_wrong_plot_total() {
+        let mut cfg = small(24, 4, 12);
+        cfg.truth_score = true;
+        cfg.assignment_forensics = true;
+        let mut result = run_capacity(&cfg).unwrap();
+        let score = result.truth_score.expect("complete measured truth score");
+        let rows = result
+            .assignment_forensics_rows
+            .as_ref()
+            .expect("complete wrong-row export");
+        assert_eq!(rows.len() as u64, score.measured_wrong_plots);
+        assert!(rows.iter().all(|row| row.selected_truth != row.truth_label));
+        let csv = assignment_forensics_csv(&result).expect("forensics CSV");
+        assert!(
+            csv.starts_with("t_ns,plot_ordinal,radar,plot_addr,truth_label,action,selected_truth")
+        );
+        assert_eq!(csv.lines().count(), rows.len() + 1);
+        let row_count = rows.len().to_string();
+        assert_eq!(
+            cap_kv(&result).get("assignment_forensics.wrong_rows"),
+            Some(row_count.as_str())
+        );
+
+        result.assignment_forensics_rows = None;
+        result.assignment_forensics_unavailable = Some("test cap status");
+        assert_eq!(assignment_forensics_csv(&result), None);
+        assert_eq!(
+            cap_kv(&result).get("assignment_forensics.status"),
+            Some("unavailable")
+        );
+        assert!(forensics_source_complete(0));
+        assert!(!forensics_source_complete(1));
+    }
+
+    #[test]
+    fn a_warmup_abort_has_no_measured_forensics_work() {
+        let mut cfg = small(8, 3, 2);
+        cfg.truth_score = true;
+        cfg.assignment_forensics = true;
+        cfg.max_wall_s = f64::MIN_POSITIVE;
+        let result = run_capacity(&cfg).unwrap();
+        assert!(result.truncated);
+        assert_eq!(result.measure_s_done, 0);
+        assert_eq!(result.fusion_warm, result.fusion);
+        assert_eq!(result.tracker_warm, result.tracker);
+        assert_eq!(result.out_overflow_warm, result.out_overflow);
+        let kv = cap_kv(&result);
+        for name in [
+            "fusion.forensics_overflow",
+            "fusion.forensics_pair_visits",
+            "fusion.forensics_plot_visits",
+            "fusion.forensics_metadata_writes",
+        ] {
+            assert_eq!(kv.get(name), Some("0"), "{name}");
+        }
     }
 
     #[test]

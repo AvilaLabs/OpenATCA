@@ -568,6 +568,9 @@ pub fn run_variant(
 pub struct Ident {
     /// Track key to truth address, for the primary track of each aircraft.
     pub truth_of: BTreeMap<u32, u32>,
+    /// Track key to adjudicated truth address, including non-primary duplicate tracks.
+    /// False tracks are excluded. This is scoring-only evidence for per-row attribution.
+    pub identity_of: BTreeMap<u32, u32>,
     /// Tracks that are a second track on an aircraft that has one.
     pub duplicates: u64,
     /// Tracks mostly made of false plots (or with no true plot).
@@ -679,6 +682,7 @@ fn identify_per_key(mut per_key: BTreeMap<u32, Vec<(i64, u32)>>) -> Ident {
             hist.get(&ident).copied().unwrap_or(0),
             key,
         ));
+        id.identity_of.insert(key, ident);
     }
     for (truth, mut v) in claims {
         // The address track first, then the track with the most plots of the aircraft.
@@ -862,6 +866,9 @@ mod identify_tracks_tests {
         assert_eq!(id.tracks, 4);
         assert_eq!(id.truth_of.get(&101), Some(&101));
         assert_eq!(id.truth_of.values().filter(|&&addr| addr == 101).count(), 1);
+        assert_eq!(id.identity_of.get(&radar_a), Some(&101));
+        assert_eq!(id.identity_of.get(&radar_duplicate), Some(&101));
+        assert!(!id.identity_of.contains_key(&radar_false));
         assert_eq!(id.duplicates, 2);
         assert_eq!(id.false_tracks, 1);
         assert_eq!(id.false_applied, 1);

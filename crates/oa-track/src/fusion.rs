@@ -55,9 +55,10 @@
 use oa_geo::aeqd::{frame_new, project, unproject, Frame};
 
 use crate::assoc::{
-    ambiguous_pairs, assigned_pairs, assoc_ambiguous, assoc_pair_of, assoc_plot_track,
-    assoc_scratch_buffers, assoc_scratch_new, gnn, nearest, AssocScratch, GnnStats, Pair,
-    NONE as NO_TRACK,
+    ambiguous_pairs, assigned_pairs, assoc_alternate_pair, assoc_ambiguous, assoc_component_path,
+    assoc_component_size, assoc_metadata_writes, assoc_pair_of, assoc_plot_track,
+    assoc_scratch_buffers, assoc_scratch_new, assoc_scratch_new_forensics, gnn, nearest,
+    AssocScratch, GnnStats, Pair, NONE as NO_TRACK, PATH_NONE,
 };
 use crate::coarse::{
     coarse_buffer, coarse_build, coarse_distance, coarse_new, coarse_passes, coarse_query,
@@ -67,21 +68,22 @@ use crate::coarse::{
 };
 use crate::fixed_map::FixedMap;
 use crate::fusion_params::{
-    AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, BUCKET_EVENTS_MAX, BUCKET_NS, CAND_ALT_SLACK_FT, CAND_IX_MAX,
-    CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS, CAND_ORDER_WORDS, CAND_SLACK_M,
-    COARSE_M, COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S, GATE_MANEUVER_MPS2,
-    GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2, HOLD_MAX_RUN, INIT_CELL_M,
-    INIT_STD_M, INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS, MAX_ASSOC_ORDER_WORK,
-    MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS, MAX_CANDIDATES,
-    MAX_INIT_WORK, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS, MAX_TRACK_RECS, RADAR_DISAGREE_SCANS,
-    RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX, REG_MAX_ADSB_AGE_NS,
-    REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES, REG_MIN_NACP, REG_MIN_RANGE_M, REG_MIN_REFS,
-    REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX, RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
+    AMBIGUITY_MARGIN, ASSIGN_LOG_MAX, ASSOC_FORENSICS_MAX, BUCKET_EVENTS_MAX, BUCKET_NS,
+    CAND_ALT_SLACK_FT, CAND_IX_MAX, CAND_MAX_ACCEL_MPS2, CAND_MAX_SPEED_MPS, CAND_MAX_VRATE_FPS,
+    CAND_ORDER_WORDS, CAND_SLACK_M, COARSE_M, COARSE_STD_M, GATE_H_CHI2, GATE_MANEUVER_MAX_DT_S,
+    GATE_MANEUVER_MPS2, GATE_TOTAL_CHI2, GATE_VRATE_SIGMA_FPM, GATE_V_CHI2, HARD_GATE_CHI2,
+    HOLD_MAX_RUN, INIT_CELL_M, INIT_STD_M, INIT_WIDE_MAX, KEY_RADAR_BASE, KEY_TABLE_SLOTS,
+    MAX_ASSOC_ORDER_WORK, MAX_ASSOC_TRACKS, MAX_BUCKET_PAIRS, MAX_BUCKET_PLOTS, MAX_BUCKET_TESTS,
+    MAX_CANDIDATES, MAX_INIT_WORK, MAX_PENDING, MAX_RADARS, MAX_SOLVE_TRACKS, MAX_TRACK_RECS,
+    RADAR_DISAGREE_SCANS, RADAR_INIT_M, RADAR_INIT_N, RADAR_PLOTS_MAX, READY_MAX, REG_HISTORY_MAX,
+    REG_MAX_ADSB_AGE_NS, REG_MAX_TRACK_SIGMA_M, REG_MIN_ADSB_UPDATES, REG_MIN_NACP,
+    REG_MIN_RANGE_M, REG_MIN_REFS, REG_PUBLISH_NS, REG_REF_SLOTS, REG_REF_SLOTS_MAX,
+    RESCUED_COST_FRACTION, WIDE_TRACKS_MAX,
 };
 use crate::params::{ALT_BASE_SIGMA_FT, NS_PER_S, OOO_WINDOW_NS};
 use crate::radar::{
     plot_check, plot_convert, polar_of, radar_geom, site_check, Bias, Converted, RadarError,
-    RadarGeom, RadarPlot, RadarSite, FT_M, NONE_ALT, NO_BIAS,
+    RadarGeom, RadarPlot, RadarSite, FT_M, NONE_ALT, NONE_CODE, NO_BIAS,
 };
 use crate::registration::{
     reg_bias, reg_new_with, reg_offer, reg_predict, reg_residual, reg_sample, RegSample, RegState,
@@ -169,6 +171,8 @@ pub struct FusionConfig {
     pub init_diagnostics: bool,
     /// Collect fixed-size per-radar association outcomes and work.
     pub association_diagnostics: bool,
+    /// Write the bounded, decision-inert association-forensics sidecar.
+    pub association_forensics: bool,
 }
 
 /// The design's values on a tracker configuration.
@@ -186,6 +190,7 @@ pub fn fusion_config(tracker: TrackerConfig) -> FusionConfig {
         log_assign: false,
         init_diagnostics: false,
         association_diagnostics: false,
+        association_forensics: false,
     }
 }
 
@@ -297,6 +302,15 @@ pub struct FusionStats {
     /// A confirmed candidate refused for track capacity or exhaustion of local keys.
     pub track_refused: u64,
     pub assign_log_overflow: u64,
+    /// Association-forensics rows refused by the sidecar cap or column preflight.
+    pub forensics_overflow: u64,
+    /// Pair visits in the opt-in alternate/ambiguity evidence pass, bounded by `MAX_BUCKET_PAIRS`.
+    pub forensics_pair_visits: u64,
+    /// Plot visits in the opt-in ambiguity pass and alternate metadata reset, bounded per solve.
+    pub forensics_plot_visits: u64,
+    /// Writes to fixed-size opt-in association metadata, at most five per plot per GNN solve
+    /// (four on nearest-neighbour solves).
+    pub forensics_metadata_writes: u64,
     /// Sums of the assignment solves (radar association and candidate association).
     pub gnn: GnnStats,
     pub reg_clamped: u64,
@@ -405,6 +419,115 @@ pub struct AssignLog {
     pub radar: Vec<u8>,
     /// [`HOW_HARD`], [`HOW_ASSOC`] or [`HOW_INIT`].
     pub how: Vec<u8>,
+}
+
+/// Action recorded by [`AssocForensics`]. Plain data (A1).
+pub const FORENSIC_APPLIED: u8 = 1;
+pub const FORENSIC_HELD: u8 = 2;
+pub const FORENSIC_UNASSIGNED: u8 = 3;
+pub const FORENSIC_REFUSED: u8 = 4;
+pub const FORENSIC_MISMATCH: u8 = 5;
+pub const FORENSIC_DEFERRED: u8 = 6;
+pub const FORENSIC_INIT: u8 = 7;
+/// Missing plot ordinal, key, component size, or cost evidence.
+pub const FORENSIC_NONE: u32 = u32::MAX;
+/// Missing cost or polar metadata. Costs and accepted range/azimuth values are nonnegative.
+pub const FORENSIC_NO_COST: f64 = -1.0;
+
+/// Bounded post-hoc evidence for plot decisions. A7.2: cold report data; columns are preallocated
+/// only for opt-in runs. Labels are copied as evidence and never read by tracker logic.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AssocForensics {
+    max_rows: usize,
+    pub t_ns: Vec<i64>,
+    pub ordinal: Vec<u32>,
+    pub plot_range_m: Vec<f64>,
+    pub plot_az_deg: Vec<f64>,
+    pub plot_alt_ft: Vec<i32>,
+    pub plot_addr: Vec<u32>,
+    pub label: Vec<u32>,
+    pub plot_mode_a: Vec<u16>,
+    pub radar: Vec<u8>,
+    pub action: Vec<u8>,
+    pub selected_key: Vec<u32>,
+    pub selected_cost: Vec<f64>,
+    pub alternate_key: Vec<u32>,
+    pub alternate_cost: Vec<f64>,
+    pub ambiguous: Vec<bool>,
+    pub hold_run: Vec<u8>,
+    pub held: Vec<bool>,
+    pub forced: Vec<bool>,
+    pub component_size: Vec<u32>,
+    pub solver_path: Vec<u8>,
+    pub incomplete: Vec<bool>,
+    pub capped: Vec<bool>,
+}
+
+fn forensic_log_new() -> AssocForensics {
+    forensic_log_new_with_capacity(ASSOC_FORENSICS_MAX)
+}
+
+fn forensic_log_new_with_capacity(max_rows: usize) -> AssocForensics {
+    AssocForensics {
+        max_rows,
+        t_ns: Vec::with_capacity(max_rows),
+        ordinal: Vec::with_capacity(max_rows),
+        plot_range_m: Vec::with_capacity(max_rows),
+        plot_az_deg: Vec::with_capacity(max_rows),
+        plot_alt_ft: Vec::with_capacity(max_rows),
+        plot_addr: Vec::with_capacity(max_rows),
+        label: Vec::with_capacity(max_rows),
+        plot_mode_a: Vec::with_capacity(max_rows),
+        radar: Vec::with_capacity(max_rows),
+        action: Vec::with_capacity(max_rows),
+        selected_key: Vec::with_capacity(max_rows),
+        selected_cost: Vec::with_capacity(max_rows),
+        alternate_key: Vec::with_capacity(max_rows),
+        alternate_cost: Vec::with_capacity(max_rows),
+        ambiguous: Vec::with_capacity(max_rows),
+        hold_run: Vec::with_capacity(max_rows),
+        held: Vec::with_capacity(max_rows),
+        forced: Vec::with_capacity(max_rows),
+        component_size: Vec::with_capacity(max_rows),
+        solver_path: Vec::with_capacity(max_rows),
+        incomplete: Vec::with_capacity(max_rows),
+        capped: Vec::with_capacity(max_rows),
+    }
+}
+
+/// One sidecar row before it is appended. A7.2: transient value.
+#[derive(Clone, Copy)]
+struct ForensicRow {
+    t_ns: i64,
+    ordinal: u32,
+    range_m: f64,
+    az_deg: f64,
+    alt_ft: i32,
+    plot_addr: u32,
+    label: u32,
+    mode_a: u16,
+    radar: u8,
+    action: u8,
+    selected_key: u32,
+    selected_cost: f64,
+    alternate_key: u32,
+    alternate_cost: f64,
+    ambiguous: bool,
+    hold_run: u8,
+    held: bool,
+    forced: bool,
+    component_size: u32,
+    solver_path: u8,
+    incomplete: bool,
+    capped: bool,
+}
+
+macro_rules! log_forensic_if_enabled {
+    ($f:expr, $row:expr $(,)?) => {
+        if $f.cfg.association_forensics {
+            log_forensic($f, $row);
+        }
+    };
 }
 
 /// An assignment log with room for [`ASSIGN_LOG_MAX`] rows (scoring runs).
@@ -613,6 +736,7 @@ pub struct Fusion {
     next_serial: u32,
     stats: FusionStats,
     log: AssignLog,
+    forensics: AssocForensics,
     tracks: Vec<RadarTrackRec>,
     /// Records kept at most (a field so a test can lower it).
     track_rec_max: usize,
@@ -689,7 +813,11 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
         hold_run_max: MAX_ASSOC_TRACKS,
         plot_scan: FixedMap::new(KEY_TABLE_SLOTS),
         pend_min_bucket: i64::MAX,
-        assoc: assoc_scratch_new(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS),
+        assoc: if cfg.association_forensics {
+            assoc_scratch_new_forensics(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS)
+        } else {
+            assoc_scratch_new(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS)
+        },
         pairs_buf: Vec::with_capacity(MAX_BUCKET_PAIRS),
         ms_buf: Vec::with_capacity(MAX_BUCKET_PAIRS),
         pairs_bufs: sites
@@ -722,6 +850,11 @@ pub fn fusion_new(cfg: &FusionConfig, sites: &[RadarSite]) -> Result<Fusion, Fus
             assign_log_new()
         } else {
             AssignLog::default()
+        },
+        forensics: if cfg.association_forensics {
+            forensic_log_new()
+        } else {
+            AssocForensics::default()
         },
         tracks: Vec::with_capacity(MAX_TRACK_RECS),
         track_rec_max: MAX_TRACK_RECS,
@@ -824,6 +957,28 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
         of(&f.log.label),
         of(&f.log.radar),
         of(&f.log.how),
+        of(&f.forensics.t_ns),
+        of(&f.forensics.ordinal),
+        of(&f.forensics.plot_range_m),
+        of(&f.forensics.plot_az_deg),
+        of(&f.forensics.plot_alt_ft),
+        of(&f.forensics.plot_addr),
+        of(&f.forensics.label),
+        of(&f.forensics.plot_mode_a),
+        of(&f.forensics.radar),
+        of(&f.forensics.action),
+        of(&f.forensics.selected_key),
+        of(&f.forensics.selected_cost),
+        of(&f.forensics.alternate_key),
+        of(&f.forensics.alternate_cost),
+        of(&f.forensics.ambiguous),
+        of(&f.forensics.hold_run),
+        of(&f.forensics.held),
+        of(&f.forensics.forced),
+        of(&f.forensics.component_size),
+        of(&f.forensics.solver_path),
+        of(&f.forensics.incomplete),
+        of(&f.forensics.capped),
     ]);
     v
 }
@@ -831,6 +986,38 @@ pub fn fusion_buffers(f: &Fusion) -> Vec<(usize, usize)> {
 /// The plot-to-key log (empty unless `log_assign`).
 pub fn fusion_assign_log(f: &Fusion) -> &AssignLog {
     &f.log
+}
+
+/// The association-forensics sidecar (empty unless `association_forensics`).
+pub fn fusion_forensics(f: &Fusion) -> &AssocForensics {
+    &f.forensics
+}
+
+/// Clears the bounded forensics window while retaining every preallocated column buffer.
+pub fn fusion_clear_forensics(f: &mut Fusion) {
+    let l = &mut f.forensics;
+    l.t_ns.clear();
+    l.ordinal.clear();
+    l.plot_range_m.clear();
+    l.plot_az_deg.clear();
+    l.plot_alt_ft.clear();
+    l.plot_addr.clear();
+    l.label.clear();
+    l.plot_mode_a.clear();
+    l.radar.clear();
+    l.action.clear();
+    l.selected_key.clear();
+    l.selected_cost.clear();
+    l.alternate_key.clear();
+    l.alternate_cost.clear();
+    l.ambiguous.clear();
+    l.hold_run.clear();
+    l.held.clear();
+    l.forced.clear();
+    l.component_size.clear();
+    l.solver_path.clear();
+    l.incomplete.clear();
+    l.capped.clear();
 }
 
 /// Every track made by initiation, in creation order.
@@ -1364,16 +1551,97 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         }
         if !tracker_is_confirmed(&f.tracker, p.addr) {
             f.stats.hard_no_track += 1;
+            log_forensic_if_enabled!(
+                f,
+                ForensicRow {
+                    t_ns: p.time_ns,
+                    ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
+                    range_m: p.range_m,
+                    az_deg: p.az_deg,
+                    alt_ft: p.alt_ft,
+                    plot_addr: p.addr,
+                    label: p.label,
+                    mode_a: p.mode_a,
+                    radar: r8,
+                    action: FORENSIC_UNASSIGNED,
+                    selected_key: FORENSIC_NONE,
+                    selected_cost: FORENSIC_NO_COST,
+                    alternate_key: FORENSIC_NONE,
+                    alternate_cost: FORENSIC_NO_COST,
+                    ambiguous: false,
+                    hold_run: 0,
+                    held: false,
+                    forced: false,
+                    component_size: 0,
+                    solver_path: PATH_NONE,
+                    incomplete: false,
+                    capped: false,
+                }
+            );
             continue;
         }
         let (row, last_ns) = match tracker_predict_checked(&f.tracker, p.addr, p.time_ns) {
             Ok((row, true, last_ns)) => (row, last_ns),
             Ok((_, false, _)) | Err(PredictError::NoTrack) => {
                 f.stats.hard_no_track += 1;
+                log_forensic_if_enabled!(
+                    f,
+                    ForensicRow {
+                        t_ns: p.time_ns,
+                        ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
+                        range_m: p.range_m,
+                        az_deg: p.az_deg,
+                        alt_ft: p.alt_ft,
+                        plot_addr: p.addr,
+                        label: p.label,
+                        mode_a: p.mode_a,
+                        radar: r8,
+                        action: FORENSIC_UNASSIGNED,
+                        selected_key: FORENSIC_NONE,
+                        selected_cost: FORENSIC_NO_COST,
+                        alternate_key: FORENSIC_NONE,
+                        alternate_cost: FORENSIC_NO_COST,
+                        ambiguous: false,
+                        hold_run: 0,
+                        held: false,
+                        forced: false,
+                        component_size: 0,
+                        solver_path: PATH_NONE,
+                        incomplete: false,
+                        capped: false,
+                    }
+                );
                 continue;
             }
             Err(PredictError::Numerical | PredictError::Unrepresentable) => {
                 f.stats.prediction_refused += 1;
+                log_forensic_if_enabled!(
+                    f,
+                    ForensicRow {
+                        t_ns: p.time_ns,
+                        ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
+                        range_m: p.range_m,
+                        az_deg: p.az_deg,
+                        alt_ft: p.alt_ft,
+                        plot_addr: p.addr,
+                        label: p.label,
+                        mode_a: p.mode_a,
+                        radar: r8,
+                        action: FORENSIC_REFUSED,
+                        selected_key: FORENSIC_NONE,
+                        selected_cost: FORENSIC_NO_COST,
+                        alternate_key: FORENSIC_NONE,
+                        alternate_cost: FORENSIC_NO_COST,
+                        ambiguous: false,
+                        hold_run: 0,
+                        held: false,
+                        forced: false,
+                        component_size: 0,
+                        solver_path: PATH_NONE,
+                        incomplete: false,
+                        capped: false,
+                    }
+                );
                 continue;
             }
         };
@@ -1382,6 +1650,33 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
             if let Some(d) = dec.get_mut(j) {
                 d.kind = D_REFUSED;
             }
+            log_forensic_if_enabled!(
+                f,
+                ForensicRow {
+                    t_ns: p.time_ns,
+                    ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
+                    range_m: p.range_m,
+                    az_deg: p.az_deg,
+                    alt_ft: p.alt_ft,
+                    plot_addr: p.addr,
+                    label: p.label,
+                    mode_a: p.mode_a,
+                    radar: r8,
+                    action: FORENSIC_REFUSED,
+                    selected_key: FORENSIC_NONE,
+                    selected_cost: FORENSIC_NO_COST,
+                    alternate_key: FORENSIC_NONE,
+                    alternate_cost: FORENSIC_NO_COST,
+                    ambiguous: false,
+                    hold_run: 0,
+                    held: false,
+                    forced: false,
+                    component_size: 0,
+                    solver_path: PATH_NONE,
+                    incomplete: false,
+                    capped: false,
+                }
+            );
             continue;
         };
         let pc = pair_cost(&row, &c, p, s.alt_quantum_ft, last_ns);
@@ -1398,6 +1693,37 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
             if let Some(d) = dec.get_mut(j) {
                 d.kind = D_MISMATCH;
             }
+            log_forensic_if_enabled!(
+                f,
+                ForensicRow {
+                    t_ns: p.time_ns,
+                    ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
+                    range_m: p.range_m,
+                    az_deg: p.az_deg,
+                    alt_ft: p.alt_ft,
+                    plot_addr: p.addr,
+                    label: p.label,
+                    mode_a: p.mode_a,
+                    radar: r8,
+                    action: FORENSIC_MISMATCH,
+                    selected_key: FORENSIC_NONE,
+                    selected_cost: if cost.is_finite() {
+                        cost
+                    } else {
+                        FORENSIC_NO_COST
+                    },
+                    alternate_key: FORENSIC_NONE,
+                    alternate_cost: FORENSIC_NO_COST,
+                    ambiguous: false,
+                    hold_run: 0,
+                    held: false,
+                    forced: false,
+                    component_size: 0,
+                    solver_path: PATH_NONE,
+                    incomplete: false,
+                    capped: false,
+                }
+            );
             continue;
         }
         let resid = (f.cfg.registration && reg_eligible(f, p.addr, &row, p))
@@ -1422,11 +1748,40 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
             .then(a.2.cmp(&b.2))
     });
     // Keys of the tracks that took a hard plot, ascending (the list is sorted by key).
-    for (key, _, j, d) in &hard {
+    for (key, cost, j, d) in &hard {
         if taken.last() == Some(key) {
             f.stats.hard_extra += 1;
             if let Some(slot) = dec.get_mut(*j) {
                 slot.kind = D_MISMATCH;
+            }
+            if let Some(p) = plots.get(*j) {
+                log_forensic_if_enabled!(
+                    f,
+                    ForensicRow {
+                        t_ns: p.time_ns,
+                        ordinal: u32::try_from(*j).unwrap_or(FORENSIC_NONE),
+                        range_m: p.range_m,
+                        az_deg: p.az_deg,
+                        alt_ft: p.alt_ft,
+                        plot_addr: p.addr,
+                        label: p.label,
+                        mode_a: p.mode_a,
+                        radar: r8,
+                        action: FORENSIC_MISMATCH,
+                        selected_key: FORENSIC_NONE,
+                        selected_cost: *cost,
+                        alternate_key: FORENSIC_NONE,
+                        alternate_cost: FORENSIC_NO_COST,
+                        ambiguous: false,
+                        hold_run: 0,
+                        held: false,
+                        forced: false,
+                        component_size: 0,
+                        solver_path: PATH_NONE,
+                        incomplete: false,
+                        capped: false,
+                    }
+                );
             }
             continue;
         }
@@ -1434,6 +1789,35 @@ fn assoc_prepare(f: &mut Fusion, radar: usize) -> Option<RadarAssoc> {
         f.hold_run.remove(&(*key, r8));
         if let Some(slot) = dec.get_mut(*j) {
             *slot = *d;
+        }
+        if let Some(p) = plots.get(*j) {
+            log_forensic_if_enabled!(
+                f,
+                ForensicRow {
+                    t_ns: p.time_ns,
+                    ordinal: u32::try_from(*j).unwrap_or(FORENSIC_NONE),
+                    range_m: p.range_m,
+                    az_deg: p.az_deg,
+                    alt_ft: p.alt_ft,
+                    plot_addr: p.addr,
+                    label: p.label,
+                    mode_a: p.mode_a,
+                    radar: r8,
+                    action: FORENSIC_APPLIED,
+                    selected_key: *key,
+                    selected_cost: *cost,
+                    alternate_key: FORENSIC_NONE,
+                    alternate_cost: FORENSIC_NO_COST,
+                    ambiguous: false,
+                    hold_run: 0,
+                    held: false,
+                    forced: false,
+                    component_size: 0,
+                    solver_path: PATH_NONE,
+                    incomplete: false,
+                    capped: false,
+                }
+            );
         }
         f.stats.applied_hard += 1;
     }
@@ -1842,11 +2226,28 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
     } else {
         nearest(&mut f.assoc, anon.len(), &pairs)
     };
-    if solved.is_err() {
+    let solve_refused = solved.is_err();
+    if solve_refused {
         f.stats.assoc_refused += 1;
     }
+    if f.cfg.association_forensics {
+        f.stats.forensics_metadata_writes = f
+            .stats
+            .forensics_metadata_writes
+            .saturating_add(assoc_metadata_writes(&f.assoc));
+    }
     let hold = f.cfg.hold_ambiguous;
-    if hold {
+    if hold || f.cfg.association_forensics {
+        if f.cfg.association_forensics {
+            f.stats.forensics_pair_visits = f
+                .stats
+                .forensics_pair_visits
+                .saturating_add(pairs.len() as u64);
+            f.stats.forensics_plot_visits = f
+                .stats
+                .forensics_plot_visits
+                .saturating_add((anon.len() as u64).saturating_mul(3));
+        }
         ambiguous_pairs(&mut f.assoc, &pairs, AMBIGUITY_MARGIN);
     }
     assigned_pairs(&mut f.assoc, &pairs);
@@ -1856,8 +2257,9 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
             .get(a)
             .copied()
             .unwrap_or(NO_TRACK);
+        let incomplete = gating_incomplete(a);
         if t == NO_TRACK {
-            if gating_incomplete(a) {
+            if incomplete {
                 if let Some(d) = dec.get_mut(j) {
                     d.kind = D_DEFERRED;
                 }
@@ -1865,6 +2267,36 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
             } else {
                 f.stats.unassigned += 1;
             }
+            log_forensic_if_enabled!(
+                f,
+                ForensicRow {
+                    t_ns: p.time_ns,
+                    ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
+                    range_m: p.range_m,
+                    az_deg: p.az_deg,
+                    alt_ft: p.alt_ft,
+                    plot_addr: p.addr,
+                    label: p.label,
+                    mode_a: p.mode_a,
+                    radar: r8,
+                    action: forensic_unassigned_action(solve_refused, incomplete),
+                    selected_key: FORENSIC_NONE,
+                    selected_cost: FORENSIC_NO_COST,
+                    alternate_key: FORENSIC_NONE,
+                    alternate_cost: FORENSIC_NO_COST,
+                    ambiguous: false,
+                    hold_run: 0,
+                    held: false,
+                    forced: false,
+                    component_size: assoc_component_size(&f.assoc).get(a).copied().unwrap_or(0),
+                    solver_path: assoc_component_path(&f.assoc)
+                        .get(a)
+                        .copied()
+                        .unwrap_or(PATH_NONE),
+                    incomplete,
+                    capped,
+                },
+            );
             continue;
         }
         let k = assoc_pair_of(&f.assoc).get(a).copied().unwrap_or(NO_TRACK);
@@ -1872,19 +2304,104 @@ fn assoc_finish(f: &mut Fusion, ra: RadarAssoc) {
             continue;
         };
         let key = info.m.addr;
-        if hold && assoc_ambiguous(&f.assoc).get(a).copied().unwrap_or(false) {
-            let run = f.hold_run.get(&(key, r8)).map_or(0, |h| h.run);
-            if run < HOLD_MAX_RUN {
-                hold_note(f, key, r8, run + 1);
+        let ambiguous = assoc_ambiguous(&f.assoc).get(a).copied().unwrap_or(false);
+        let hold_run = f.hold_run.get(&(key, r8)).map_or(0, |h| h.run);
+        let mut held = false;
+        let mut forced = false;
+        let mut action = FORENSIC_APPLIED;
+        if hold && ambiguous {
+            if hold_run < HOLD_MAX_RUN {
+                hold_note(f, key, r8, hold_run + 1);
                 f.stats.held += 1;
                 if let Some(d) = dec.get_mut(j) {
                     d.kind = D_HELD;
                 }
+                held = true;
+                action = FORENSIC_HELD;
+                log_forensic_if_enabled!(
+                    f,
+                    ForensicRow {
+                        t_ns: p.time_ns,
+                        ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
+                        range_m: p.range_m,
+                        az_deg: p.az_deg,
+                        alt_ft: p.alt_ft,
+                        plot_addr: p.addr,
+                        label: p.label,
+                        mode_a: p.mode_a,
+                        radar: r8,
+                        action,
+                        selected_key: key,
+                        selected_cost: pairs
+                            .get(k as usize)
+                            .map_or(FORENSIC_NO_COST, |pair| pair.cost),
+                        alternate_key: assoc_alternate_pair(&f.assoc)
+                            .get(a)
+                            .and_then(|ix| pairs.get(*ix as usize))
+                            .and_then(|pair| tracks.get(pair.track as usize))
+                            .map_or(FORENSIC_NONE, |track| track.key),
+                        alternate_cost: assoc_alternate_pair(&f.assoc)
+                            .get(a)
+                            .and_then(|ix| pairs.get(*ix as usize))
+                            .map_or(FORENSIC_NO_COST, |pair| pair.cost),
+                        ambiguous,
+                        hold_run: hold_run.saturating_add(1),
+                        held,
+                        forced,
+                        component_size: assoc_component_size(&f.assoc).get(a).copied().unwrap_or(0),
+                        solver_path: assoc_component_path(&f.assoc)
+                            .get(a)
+                            .copied()
+                            .unwrap_or(PATH_NONE),
+                        incomplete,
+                        capped,
+                    },
+                );
                 continue;
             }
             // The track has been starved of plots by ambiguity: it takes this one.
             f.stats.held_forced += 1;
+            forced = true;
         }
+        log_forensic_if_enabled!(
+            f,
+            ForensicRow {
+                t_ns: p.time_ns,
+                ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
+                range_m: p.range_m,
+                az_deg: p.az_deg,
+                alt_ft: p.alt_ft,
+                plot_addr: p.addr,
+                label: p.label,
+                mode_a: p.mode_a,
+                radar: r8,
+                action,
+                selected_key: key,
+                selected_cost: pairs
+                    .get(k as usize)
+                    .map_or(FORENSIC_NO_COST, |pair| pair.cost),
+                alternate_key: assoc_alternate_pair(&f.assoc)
+                    .get(a)
+                    .and_then(|ix| pairs.get(*ix as usize))
+                    .and_then(|pair| tracks.get(pair.track as usize))
+                    .map_or(FORENSIC_NONE, |track| track.key),
+                alternate_cost: assoc_alternate_pair(&f.assoc)
+                    .get(a)
+                    .and_then(|ix| pairs.get(*ix as usize))
+                    .map_or(FORENSIC_NO_COST, |pair| pair.cost),
+                ambiguous,
+                hold_run,
+                held,
+                forced,
+                component_size: assoc_component_size(&f.assoc).get(a).copied().unwrap_or(0),
+                solver_path: assoc_component_path(&f.assoc)
+                    .get(a)
+                    .copied()
+                    .unwrap_or(PATH_NONE),
+                incomplete,
+                capped,
+            },
+        );
         f.hold_run.remove(&(key, r8));
         let resid = (f.cfg.registration && reg_eligible(f, key, &info.row, p))
             .then(|| residual_for(f, radar, &info.row, p))
@@ -2022,6 +2539,101 @@ fn log_assign(f: &mut Fusion, t_ns: i64, key: u32, label: u32, radar: u8, how: u
     f.log.label.push(label);
     f.log.radar.push(radar);
     f.log.how.push(how);
+}
+
+fn forensic_unassigned_action(solve_refused: bool, incomplete: bool) -> u8 {
+    if solve_refused {
+        FORENSIC_REFUSED
+    } else if incomplete {
+        FORENSIC_DEFERRED
+    } else {
+        FORENSIC_UNASSIGNED
+    }
+}
+
+/// Appends one post-hoc row within the fixed sidecar cap. This path reads no truth label and
+/// does not return a value to the tracker or association solver.
+fn log_forensic(f: &mut Fusion, row: ForensicRow) {
+    if !f.cfg.association_forensics {
+        return;
+    }
+    if !forensic_log_push(&mut f.forensics, row) {
+        f.stats.forensics_overflow = f.stats.forensics_overflow.saturating_add(1);
+    }
+}
+
+fn forensic_log_push(l: &mut AssocForensics, row: ForensicRow) -> bool {
+    let n = l.t_ns.len();
+    if n >= l.max_rows
+        || l.ordinal.len() != n
+        || l.plot_range_m.len() != n
+        || l.plot_az_deg.len() != n
+        || l.plot_alt_ft.len() != n
+        || l.plot_addr.len() != n
+        || l.label.len() != n
+        || l.plot_mode_a.len() != n
+        || l.radar.len() != n
+        || l.action.len() != n
+        || l.selected_key.len() != n
+        || l.selected_cost.len() != n
+        || l.alternate_key.len() != n
+        || l.alternate_cost.len() != n
+        || l.ambiguous.len() != n
+        || l.hold_run.len() != n
+        || l.held.len() != n
+        || l.forced.len() != n
+        || l.component_size.len() != n
+        || l.solver_path.len() != n
+        || l.incomplete.len() != n
+        || l.capped.len() != n
+        || l.t_ns.capacity() < l.max_rows
+        || l.ordinal.capacity() < l.max_rows
+        || l.plot_range_m.capacity() < l.max_rows
+        || l.plot_az_deg.capacity() < l.max_rows
+        || l.plot_alt_ft.capacity() < l.max_rows
+        || l.plot_addr.capacity() < l.max_rows
+        || l.label.capacity() < l.max_rows
+        || l.plot_mode_a.capacity() < l.max_rows
+        || l.radar.capacity() < l.max_rows
+        || l.action.capacity() < l.max_rows
+        || l.selected_key.capacity() < l.max_rows
+        || l.selected_cost.capacity() < l.max_rows
+        || l.alternate_key.capacity() < l.max_rows
+        || l.alternate_cost.capacity() < l.max_rows
+        || l.ambiguous.capacity() < l.max_rows
+        || l.hold_run.capacity() < l.max_rows
+        || l.held.capacity() < l.max_rows
+        || l.forced.capacity() < l.max_rows
+        || l.component_size.capacity() < l.max_rows
+        || l.solver_path.capacity() < l.max_rows
+        || l.incomplete.capacity() < l.max_rows
+        || l.capped.capacity() < l.max_rows
+    {
+        return false;
+    }
+    l.t_ns.push(row.t_ns);
+    l.ordinal.push(row.ordinal);
+    l.plot_range_m.push(row.range_m);
+    l.plot_az_deg.push(row.az_deg);
+    l.plot_alt_ft.push(row.alt_ft);
+    l.plot_addr.push(row.plot_addr);
+    l.label.push(row.label);
+    l.plot_mode_a.push(row.mode_a);
+    l.radar.push(row.radar);
+    l.action.push(row.action);
+    l.selected_key.push(row.selected_key);
+    l.selected_cost.push(row.selected_cost);
+    l.alternate_key.push(row.alternate_key);
+    l.alternate_cost.push(row.alternate_cost);
+    l.ambiguous.push(row.ambiguous);
+    l.hold_run.push(row.hold_run);
+    l.held.push(row.held);
+    l.forced.push(row.forced);
+    l.component_size.push(row.component_size);
+    l.solver_path.push(row.solver_path);
+    l.incomplete.push(row.incomplete);
+    l.capped.push(row.capped);
+    true
 }
 
 /// An ADS-B measurement's bookkeeping, at the time it is applied.
@@ -2905,6 +3517,12 @@ fn initiate_candidates(
         Ok(st) => add_gnn(&mut f.stats.gnn, &st),
         Err(_) => f.stats.assoc_refused += 1,
     }
+    if f.cfg.association_forensics {
+        f.stats.forensics_metadata_writes = f
+            .stats
+            .forensics_metadata_writes
+            .saturating_add(assoc_metadata_writes(&f.assoc));
+    }
     assigned_pairs(&mut f.assoc, &pairs);
     f.pairs_buf = pairs;
     for (a, &j) in anon.iter().enumerate() {
@@ -3107,6 +3725,33 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
     for i in 0..n {
         let Some(m) = c.meas.get(i) else { continue };
         let label = c.label.get(i).copied().unwrap_or(NO_ADDR);
+        log_forensic_if_enabled!(
+            f,
+            ForensicRow {
+                t_ns: m.toa_ns,
+                ordinal: FORENSIC_NONE,
+                range_m: FORENSIC_NO_COST,
+                az_deg: FORENSIC_NO_COST,
+                alt_ft: m.alt_ft,
+                plot_addr: c.addr,
+                label,
+                mode_a: NONE_CODE,
+                radar: radar as u8,
+                action: FORENSIC_INIT,
+                selected_key: key,
+                selected_cost: FORENSIC_NO_COST,
+                alternate_key: FORENSIC_NONE,
+                alternate_cost: FORENSIC_NO_COST,
+                ambiguous: false,
+                hold_run: 0,
+                held: false,
+                forced: false,
+                component_size: 0,
+                solver_path: PATH_NONE,
+                incomplete: false,
+                capped: false,
+            }
+        );
         log_assign(f, m.toa_ns, key, label, radar as u8, HOW_INIT);
         note_plot_scan(f, key, radar, m.toa_ns);
     }
@@ -3143,6 +3788,7 @@ fn confirm(f: &mut Fusion, radar: usize, c: &Cand, out: &mut TrackOutput) -> Opt
 )]
 mod tests {
     use super::*;
+    use crate::assoc::PATH_SINGLE;
     use crate::radar::NONE_CODE;
     use crate::tracker::{tracker_config, tracker_live, tracker_log, tracker_predict};
     use crate::types::{output_len, DEFAULT_CONFIG, O_RADAR_DISAGREES, O_TICK};
@@ -3917,6 +4563,10 @@ mod tests {
             .collect();
         let mut f1 = make_fusion(|_| {});
         let mut f2 = make_fusion(|_| {});
+        f2.cfg.association_forensics = true;
+        f2.forensics = forensic_log_new_with_capacity(256);
+        f2.assoc =
+            assoc_scratch_new_forensics(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS);
         let o1 = run(&mut f1, &plots, &[]);
         let o2 = run(&mut f2, &scrambled, &[]);
         let (mut h1, mut h2) = (oa_sha256::Sha256::new(), oa_sha256::Sha256::new());
@@ -3924,7 +4574,19 @@ mod tests {
         crate::types::output_hash_into(&mut h2, &o2);
         assert_eq!(h1.finalize(), h2.finalize());
         assert_eq!(fusion_assign_log(&f1).key, fusion_assign_log(&f2).key);
-        assert_eq!(fusion_stats(&f1), fusion_stats(&f2));
+        let mut s1 = *fusion_stats(&f1);
+        let mut s2 = *fusion_stats(&f2);
+        s2.forensics_overflow = s1.forensics_overflow;
+        s2.forensics_pair_visits = s1.forensics_pair_visits;
+        s2.forensics_plot_visits = s1.forensics_plot_visits;
+        s2.forensics_metadata_writes = s1.forensics_metadata_writes;
+        s1.forensics_plot_visits = 0;
+        s1.forensics_metadata_writes = 0;
+        assert_eq!(s1, s2);
+        assert!(fusion_forensics(&f2)
+            .label
+            .iter()
+            .all(|&label| label != NO_ADDR));
     }
 
     // REQ: OA-TRK-052
@@ -3954,6 +4616,9 @@ mod tests {
         ]);
         let plots = plots_of(&lines, 40, 21, false);
         let mut f = make_fusion(|_| {});
+        f.cfg.association_forensics = true;
+        f.forensics = forensic_log_new_with_capacity(plots.len().saturating_mul(4));
+        f.assoc = assoc_scratch_new_forensics(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS);
         run(&mut f, &plots, &[]);
         let log = fusion_assign_log(&f);
         // Per radar key, the sequence of labels of applied true plots never changes.
@@ -3969,6 +4634,10 @@ mod tests {
             );
         }
         assert!(fusion_stats(&f).held > 0, "nothing was held");
+        assert!(fusion_forensics(&f).action.contains(&FORENSIC_HELD));
+        if fusion_stats(&f).held_forced > 0 {
+            assert!(fusion_forensics(&f).forced.contains(&true));
+        }
     }
 
     /// Nine aircraft (the first of them radar-only, the others ADS-B equipped) under a radar of
@@ -6752,5 +7421,267 @@ mod tests {
         run(&mut g, &plots, &[]);
         let sg = *fusion_stats(&g);
         assert_eq!((sg.init_wide_full, sg.cand_joined), (0, 5), "{sg:?}");
+    }
+
+    #[test]
+    fn forensics_sidecar_is_bounded_complete_and_decision_inert() {
+        let plots = plots_of(
+            &easting(&[
+                Line {
+                    x0: 30_000.0,
+                    y0: 20_000.0,
+                    vx: -90.0,
+                    vy: 20.0,
+                    alt_ft: 19_000,
+                    label: 0xA00101,
+                },
+                Line {
+                    x0: 80_000.0,
+                    y0: 50_000.0,
+                    vx: -40.0,
+                    vy: -60.0,
+                    alt_ft: 21_000,
+                    label: 0xA00102,
+                },
+            ]),
+            8,
+            17,
+            false,
+        );
+        let mut off = make_fusion(|_| {});
+        let mut on = make_fusion(|_| {});
+        let mut capped = make_fusion(|_| {});
+        on.cfg.association_forensics = true;
+        on.forensics = forensic_log_new_with_capacity(128);
+        on.assoc =
+            assoc_scratch_new_forensics(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS);
+        capped.cfg.association_forensics = true;
+        capped.forensics = forensic_log_new_with_capacity(1);
+        capped.assoc =
+            assoc_scratch_new_forensics(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS);
+        let buffers = fusion_buffers(&on);
+        let out_off = run(&mut off, &plots, &[]);
+        let out_on = run(&mut on, &plots, &[]);
+        let out_capped = run(&mut capped, &plots, &[]);
+        let (mut h_off, mut h_on) = (oa_sha256::Sha256::new(), oa_sha256::Sha256::new());
+        crate::types::output_hash_into(&mut h_off, &out_off);
+        crate::types::output_hash_into(&mut h_on, &out_on);
+        let mut h_capped = oa_sha256::Sha256::new();
+        crate::types::output_hash_into(&mut h_capped, &out_capped);
+        let (hash_off, hash_on, hash_capped) =
+            (h_off.finalize(), h_on.finalize(), h_capped.finalize());
+        assert_eq!(hash_off, hash_on);
+        assert_eq!(hash_off, hash_capped);
+        assert_eq!(fusion_assign_log(&off).key, fusion_assign_log(&on).key);
+        assert_eq!(fusion_assign_log(&off).key, fusion_assign_log(&capped).key);
+        assert_eq!(fusion_assign_log(&off).how, fusion_assign_log(&on).how);
+        assert_eq!(fusion_assign_log(&off).how, fusion_assign_log(&capped).how);
+        let mut off_stats = *fusion_stats(&off);
+        let mut on_stats = *fusion_stats(&on);
+        on_stats.forensics_overflow = off_stats.forensics_overflow;
+        on_stats.forensics_pair_visits = off_stats.forensics_pair_visits;
+        on_stats.forensics_plot_visits = off_stats.forensics_plot_visits;
+        on_stats.forensics_metadata_writes = off_stats.forensics_metadata_writes;
+        off_stats.forensics_plot_visits = 0;
+        off_stats.forensics_metadata_writes = 0;
+        assert_eq!(off_stats, on_stats);
+        assert_eq!(fusion_buffers(&on), buffers);
+        assert_eq!(fusion_stats(&on).forensics_overflow, 0);
+        assert!(fusion_stats(&capped).forensics_overflow > 0);
+        assert_eq!(fusion_forensics(&capped).t_ns.len(), 1);
+        assert_eq!(fusion_forensics(&capped).label.len(), 1);
+        assert!(fusion_stats(&on).forensics_pair_visits > 0);
+        assert_eq!(fusion_stats(&on).forensics_plot_visits % 3, 0);
+        let l = fusion_forensics(&on);
+        let n = l.t_ns.len();
+        assert!(n > 0);
+        assert!(l.action.contains(&FORENSIC_INIT));
+        assert!(l.action.contains(&FORENSIC_APPLIED));
+        assert!([
+            l.ordinal.len(),
+            l.plot_range_m.len(),
+            l.plot_az_deg.len(),
+            l.plot_alt_ft.len(),
+            l.plot_addr.len(),
+            l.label.len(),
+            l.plot_mode_a.len(),
+            l.radar.len(),
+            l.action.len(),
+            l.selected_key.len(),
+            l.selected_cost.len(),
+            l.alternate_key.len(),
+            l.alternate_cost.len(),
+            l.ambiguous.len(),
+            l.hold_run.len(),
+            l.held.len(),
+            l.forced.len(),
+            l.component_size.len(),
+            l.solver_path.len(),
+            l.incomplete.len(),
+            l.capped.len()
+        ]
+        .iter()
+        .all(|&len| len == n));
+        assert_eq!(l, &l.clone());
+    }
+
+    #[test]
+    fn forensics_overflow_counts_refused_rows_and_keeps_columns_aligned() {
+        let mut f = make_fusion(|_| {});
+        f.cfg.association_forensics = true;
+        f.forensics = forensic_log_new_with_capacity(1);
+        let buffers = fusion_buffers(&f);
+        let row = ForensicRow {
+            t_ns: 1,
+            ordinal: 2,
+            range_m: 500.0,
+            az_deg: 10.0,
+            alt_ft: 1_000,
+            plot_addr: NO_ADDR,
+            label: 3,
+            mode_a: NONE_CODE,
+            radar: 0,
+            action: FORENSIC_APPLIED,
+            selected_key: 4,
+            selected_cost: 1.0,
+            alternate_key: FORENSIC_NONE,
+            alternate_cost: FORENSIC_NO_COST,
+            ambiguous: false,
+            hold_run: 0,
+            held: false,
+            forced: false,
+            component_size: 2,
+            solver_path: PATH_SINGLE,
+            incomplete: false,
+            capped: false,
+        };
+        log_forensic(&mut f, row);
+        log_forensic(&mut f, row);
+        log_forensic(&mut f, row);
+        assert_eq!(f.stats.forensics_overflow, 2);
+        assert_eq!(f.forensics.t_ns.len(), 1);
+        assert_eq!(f.forensics.selected_cost.len(), 1);
+        assert_eq!(f.forensics.forced.len(), 1);
+        assert!([
+            f.forensics.t_ns.len(),
+            f.forensics.ordinal.len(),
+            f.forensics.plot_range_m.len(),
+            f.forensics.plot_az_deg.len(),
+            f.forensics.plot_alt_ft.len(),
+            f.forensics.plot_addr.len(),
+            f.forensics.label.len(),
+            f.forensics.plot_mode_a.len(),
+            f.forensics.radar.len(),
+            f.forensics.action.len(),
+            f.forensics.selected_key.len(),
+            f.forensics.selected_cost.len(),
+            f.forensics.alternate_key.len(),
+            f.forensics.alternate_cost.len(),
+            f.forensics.ambiguous.len(),
+            f.forensics.hold_run.len(),
+            f.forensics.held.len(),
+            f.forensics.forced.len(),
+            f.forensics.component_size.len(),
+            f.forensics.solver_path.len(),
+            f.forensics.incomplete.len(),
+            f.forensics.capped.len()
+        ]
+        .iter()
+        .all(|&len| len == 1));
+        assert_eq!(f.forensics, f.forensics.clone());
+        f.stats.forensics_pair_visits = 12;
+        f.stats.forensics_plot_visits = 9;
+        f.stats.forensics_metadata_writes = 7;
+        fusion_clear_forensics(&mut f);
+        assert_eq!(fusion_buffers(&f), buffers);
+        let cleared = fusion_forensics(&f);
+        assert!([
+            cleared.t_ns.len(),
+            cleared.ordinal.len(),
+            cleared.plot_range_m.len(),
+            cleared.plot_az_deg.len(),
+            cleared.plot_alt_ft.len(),
+            cleared.plot_addr.len(),
+            cleared.label.len(),
+            cleared.plot_mode_a.len(),
+            cleared.radar.len(),
+            cleared.action.len(),
+            cleared.selected_key.len(),
+            cleared.selected_cost.len(),
+            cleared.alternate_key.len(),
+            cleared.alternate_cost.len(),
+            cleared.ambiguous.len(),
+            cleared.hold_run.len(),
+            cleared.held.len(),
+            cleared.forced.len(),
+            cleared.component_size.len(),
+            cleared.solver_path.len(),
+            cleared.incomplete.len(),
+            cleared.capped.len()
+        ]
+        .iter()
+        .all(|&len| len == 0));
+        assert_eq!(f.stats.forensics_overflow, 2);
+        assert_eq!(f.stats.forensics_pair_visits, 12);
+        assert_eq!(f.stats.forensics_plot_visits, 9);
+        assert_eq!(f.stats.forensics_metadata_writes, 7);
+        f.forensics.action.push(FORENSIC_HELD);
+        log_forensic(&mut f, row);
+        assert_eq!(f.stats.forensics_overflow, 3);
+        assert!(f.forensics.t_ns.is_empty());
+        assert_eq!(f.forensics.action, &[FORENSIC_HELD]);
+    }
+
+    #[test]
+    fn forensics_records_hard_address_and_initiation_paths() {
+        let lines = easting(&[
+            Line {
+                x0: 30_000.0,
+                y0: 20_000.0,
+                vx: -90.0,
+                vy: 20.0,
+                alt_ft: 19_000,
+                label: 0xA00101,
+            },
+            Line {
+                x0: 80_000.0,
+                y0: 50_000.0,
+                vx: -40.0,
+                vy: -60.0,
+                alt_ft: 21_000,
+                label: 0xA00102,
+            },
+        ]);
+        let plots = plots_of(&lines, 8, 17, true);
+        let mut f = make_fusion(|_| {});
+        f.cfg.association_forensics = true;
+        f.forensics = forensic_log_new_with_capacity(plots.len().saturating_mul(4));
+        f.assoc = assoc_scratch_new_forensics(MAX_SOLVE_TRACKS, MAX_BUCKET_PLOTS, MAX_BUCKET_PAIRS);
+        run(&mut f, &plots, &[]);
+        let actions = &fusion_forensics(&f).action;
+        assert!(actions.contains(&FORENSIC_INIT));
+        assert!(actions.contains(&FORENSIC_UNASSIGNED));
+        assert!(actions.contains(&FORENSIC_APPLIED));
+    }
+
+    #[test]
+    fn refused_gnn_is_distinct_from_deferred_and_unassigned_evidence() {
+        let mut scratch = assoc_scratch_new(0, 0, 0);
+        let pairs = [Pair {
+            track: 0,
+            plot: 0,
+            cost: 1.0,
+        }];
+        let solve_refused = gnn(&mut scratch, 1, 1, &pairs, 10.0).is_err();
+        assert!(solve_refused);
+        assert_eq!(
+            forensic_unassigned_action(solve_refused, false),
+            FORENSIC_REFUSED
+        );
+        assert_eq!(forensic_unassigned_action(false, true), FORENSIC_DEFERRED);
+        assert_eq!(
+            forensic_unassigned_action(false, false),
+            FORENSIC_UNASSIGNED
+        );
     }
 }

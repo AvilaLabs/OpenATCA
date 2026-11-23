@@ -260,6 +260,9 @@ pub const HOLD_MAX_RUN: u8 = 2;
 pub const RADAR_DISAGREE_SCANS: i64 = 3;
 /// Limit: assignment log rows (scoring runs).
 pub const ASSIGN_LOG_MAX: usize = 4 << 20;
+/// Limit: rows in the opt-in association-forensics sidecar. The fixed columns are allocated at
+/// start only when requested; overflow is counted and the tracker continues unchanged.
+pub const ASSOC_FORENSICS_MAX: usize = 1 << 20;
 
 /// Vertical-gate allowance for a change of climb rate since the track's last update, one
 /// standard deviation, feet per minute: the gate variance grows by (this x the time since the
