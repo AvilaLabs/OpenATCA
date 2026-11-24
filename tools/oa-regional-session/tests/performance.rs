@@ -86,6 +86,28 @@ fn parser_preserves_hashed_bytes_and_explicit_zero_rates() {
 
 // REQ: OA-REG-014
 #[test]
+fn parser_preserves_full_non_icao_address_width() {
+    let row = row(
+        "00000000000000000000000000000001",
+        "1ABCDEF",
+        "ZAU1",
+        "PLAN00000001",
+        1_000,
+        1_000,
+        19,
+        5_000,
+        0,
+        0,
+        0,
+        "MEASURED",
+        "VALID",
+    );
+    let parsed = parse_performance_manifest(&bytes_with_rows(&[row])).unwrap();
+    assert_eq!(parsed.envelopes.first().unwrap().key.aircraft_address, 0x1ab_cdef);
+}
+
+// REQ: OA-REG-014
+#[test]
 fn parser_retains_nonsealed_future_rows_without_a_cutoff_policy() {
     // These numeric values are syntactically typed but exceed the vertical core's sanity caps;
     // manifest parsing preserves caller evidence and leaves profile validity to that core.

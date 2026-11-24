@@ -2,7 +2,7 @@
 //! bounded input bytes and hashes them; it does not qualify measured or empirical claims.
 //!
 //! The header is `OA-PERFORMANCE<TAB>1`. Rows have fourteen fields:
-//! `v1`, 32-digit GUFI hex, six-digit address hex, four-byte centre, 12 uppercase plan ID,
+//! `v1`, 32-digit GUFI hex, six- or seven-digit address hex, four-byte centre, 12 uppercase plan ID,
 //! source and availability milliseconds, message ID, maximum age milliseconds, climb and descent
 //! feet/minute bounds, groundspeed millimetres/second bound, source (`MEASURED` or
 //! `EMPIRICAL_MODEL`), and status (`VALID` or `CONTRADICTORY`). No cutoff is applied here.
@@ -199,8 +199,8 @@ fn parse_hex_u128(text: &str, name: &str) -> Result<u128, String> {
 }
 
 fn parse_hex_address(text: &str, row: usize) -> Result<u32, String> {
-    if text.len() != 6 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("performance row {row} address must be six hexadecimal digits"));
+    if !(6..=7).contains(&text.len()) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("performance row {row} address must be six or seven hexadecimal digits"));
     }
     let address = u32::from_str_radix(text, 16)
         .map_err(|_| format!("performance row {row} address is invalid"))?;
