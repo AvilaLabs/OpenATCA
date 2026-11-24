@@ -81,16 +81,16 @@ fn clock_stepback_new_track_does_not_inherit_previous_baro_epoch() {
     regional_step(&mut runtime, &batch(201, &[201], &[None])).unwrap();
     regional_step(&mut runtime, &batch(210, &[210], &[None])).unwrap();
 
-    // Six unique back reports span the 10s out-of-order window. The sixth makes tracker_update
+    // Six ascending late reports span the 10s out-of-order window. The sixth makes tracker_update
     // step its clock back to 191s, retire the old track whose latest state was 210s, and start a
-    // fresh generation for this address from its 181s barometric report. The final 182s row
+    // fresh generation for this address from its 191s barometric report. The final 192s row
     // confirms that new track. Keeping all seven in one receipt avoids regional_advance moving
     // the tracker clock between the back-clock reports.
     let frame = regional_step(
         &mut runtime,
         &batch(
-            213,
-            &[191, 189, 187, 185, 183, 181, 182],
+            223,
+            &[181, 183, 185, 187, 189, 191, 192],
             &[None, None, None, None, None, Some(1_500), None],
         ),
     )
@@ -101,8 +101,8 @@ fn clock_stepback_new_track_does_not_inherit_previous_baro_epoch() {
     assert_eq!(frame.surveillance.tracks[0].address, ADDRESS);
     let msaw = frame.surveillance.msaw.as_ref().expect("MSAW evidence");
     let stats = msaw.stats.expect("MSAW cycle stats");
-    // At the 213s issue cutoff, the new epoch's 181s barometric sample is 32s old, beyond
-    // synthetic stale_hold_s=30. Reusing the prior 200s map value would report age 13s and
+    // At the 223s issue cutoff, the new epoch's 191s barometric sample is 32s old, beyond
+    // synthetic stale_hold_s=30. Reusing the prior 200s map value would report age 23s and
     // incorrectly process this altitude as extrapolatable.
     assert!(stats.alt_stale > 0, "{stats:?}");
     assert_eq!(stats.alt_extrapolated, 0, "{stats:?}");

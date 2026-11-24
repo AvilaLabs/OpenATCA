@@ -37,6 +37,8 @@ pub const MAX_FRAME_GAP_NS: i64 = 60 * SECOND_NS;
 pub const MAX_DRAIN_ROWS: usize = 4096;
 pub const FRAME_WIDTH: u32 = 800;
 pub const FRAME_HEIGHT: u32 = 600;
+/// C7: control redraws over the entire offline session, including ordinary completed frames.
+pub const MAX_PRESENTATION_UPDATES: usize = 8192;
 const MAX_PAIRS: usize = MAX_TRACKS * (MAX_TRACKS - 1) / 2;
 // C2/C7: at most max_open=MAX_PAIRS episodes can close in one cycle, and each retained
 // track can lose altitude once. Both logs are captured in frame evidence and drained every
@@ -98,11 +100,20 @@ pub struct Surveillance {
     frames: usize,
     completed: bool,
     failed: bool,
-    overlay_done: bool,
+    overlay_base: Option<OverlayBase>,
+    presentation_updates: usize,
     msaw: Option<crate::msaw_bridge::RegionalMsaw>,
     baro_seen: BTreeMap<u32, i64>,
 }
 // A7.2: cold subsystem container; core tables allocate once in their constructors.
+
+// A7.2: cold lengths in the current owned display list, never exported across a module.
+#[derive(Clone, Copy)]
+struct OverlayBase {
+    texts: usize,
+    bytes: usize,
+    layers: u16,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurveillanceFrame {
@@ -163,10 +174,10 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
         circles: MAX_TRACKS * oa_display::core::alert_markers::ALERT_CIRCLES_PER_MARKER,
         polylines: 0,
         poly_vertices: 0,
-        texts: 2
+        texts: 4
             + MAX_TRACKS * oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER
             + oa_display::core::alert_markers::ALERT_HEADER_TEXTS,
-        text_bytes: 128
+        text_bytes: 256
             + MAX_TRACKS * oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER
             + oa_display::core::alert_markers::ALERT_HEADER_TEXT_BYTES,
     };
@@ -221,7 +232,8 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
         frames: 0,
         completed: true,
         failed: false,
-        overlay_done: true,
+        overlay_base: None,
+        presentation_updates: 0,
     })
 }
 
@@ -276,7 +288,7 @@ pub fn surveillance_begin(s: &mut Surveillance, time_ns: i64) -> Result<(), Stri
     s.previous_ns = Some(time_ns);
     s.frames += 1; // bounded above before the operation
     s.completed = false;
-    s.overlay_done = false;
+    s.overlay_base = None;
     Ok(())
 }
 
@@ -352,6 +364,20 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
                 &mut s.drain,
             );
             let after = *tracker_stats(&s.tracker);
+            // Clock epochs and filter/slot reconstruction invalidate a cached altitude's
+            // identity. A source timestamp from the previous generation must not make a
+            // restarted filter's older observation appear younger. Re-filtering is handled
+            // conservatively: only this accepted altitude can seed new freshness evidence.
+            if after.time_steps_back > before.time_steps_back {
+                s.baro_seen.clear();
+            } else if after.started > before.started
+                || after.init_implausible > before.init_implausible
+                || after.init_window_expired > before.init_window_expired
+                || after.resyncs > before.resyncs
+                || after.refiltered > before.refiltered
+            {
+                s.baro_seen.remove(&event.identity.aircraft_address);
+            }
             if measurement_rejected(before, after) {
                 s.measurement_rejections = s.measurement_rejections.saturating_add(1);
             } else if after.applied > before.applied
@@ -845,19 +871,63 @@ pub fn surveillance_present_interaction(
     s: &mut Surveillance,
     interaction: &oa_display::interaction::InteractionState,
 ) -> Result<[u8; 32], String> {
-    if s.failed || !s.completed || s.frames == 0 || s.overlay_done {
-        return Err("interaction overlay requires one completed, unpresented frame".into());
+    surveillance_present_controls(s, interaction, "")
+}
+
+/// Replace control primitives while retaining the exact observed/safety/map base. Input editing
+/// cannot accumulate old labels or consume another surveillance epoch (offline shell, C6/C7).
+pub fn surveillance_present_controls(
+    s: &mut Surveillance,
+    interaction: &oa_display::interaction::InteractionState,
+    console: &str,
+) -> Result<[u8; 32], String> {
+    if s.failed || !s.completed || s.frames == 0 {
+        return Err("control overlay requires a completed frame".into());
+    }
+    if console.len() > 128 || !console.bytes().all(|byte| (32..=126).contains(&byte)) {
+        return Err("console text must be at most 128 printable ASCII bytes".into());
+    }
+    if s.presentation_updates >= MAX_PRESENTATION_UPDATES {
+        return Err("regional presentation update budget exhausted".into());
+    }
+    let base = s.overlay_base.unwrap_or(OverlayBase {
+        texts: s.scope.list.texts.x.len(), bytes: s.scope.list.text.len(),
+        layers: s.scope.list.layers_used,
+    });
+    let list = &mut s.scope.list;
+    if [list.texts.x.len(), list.texts.y.len(), list.texts.size.len(), list.texts.align.len(),
+        list.texts.colour.len(), list.texts.layer.len(), list.texts.start.len(), list.texts.len.len()]
+        .iter().any(|len| *len < base.texts)
+        || base.bytes > list.text.len() || !list.text.is_char_boundary(base.bytes) {
+        return Err("control overlay base is inconsistent".into());
     }
     s.failed = true;
+    s.presentation_updates += 1;
+    list.texts.x.truncate(base.texts);
+    list.texts.y.truncate(base.texts);
+    list.texts.size.truncate(base.texts);
+    list.texts.align.truncate(base.texts);
+    list.texts.colour.truncate(base.texts);
+    list.texts.layer.truncate(base.texts);
+    list.texts.start.truncate(base.texts);
+    list.texts.len.truncate(base.texts);
+    list.text.truncate(base.bytes);
+    list.layers_used = base.layers;
+    s.overlay_base = Some(base);
     oa_display::interaction::present_interaction(
         interaction,
         &mut s.scope.list,
         &s.scope.view.proj,
     )
     .map_err(err)?;
+    for (index, line) in console.as_bytes().chunks(64).enumerate() {
+        let text = std::str::from_utf8(line).map_err(|_| "console encoding")?;
+        let y = 84 + i32::try_from(index).map_err(|_| "console row")? * 10;
+        oa_display::list::push_text(&mut s.scope.list, (8 * 16, y * 16), 7,
+            oa_display::list::ALIGN_LEFT, oa_display::palette::TEXT, 13, text).map_err(err)?;
+    }
     replay_raster(&mut s.scope).map_err(err)?;
     let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;
-    s.overlay_done = true;
     s.failed = false;
     Ok(digest)
 }

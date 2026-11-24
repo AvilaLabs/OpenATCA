@@ -14,7 +14,7 @@ fn body(items: &str, total: usize) -> Vec<u8> {
 }
 
 fn ac(hex: &str, seen_pos: &str, extra: &str) -> String {
-    format!(r#"{{"hex":"{hex}","type":"adsb_icao","seen":0.1,"seen_pos":{seen_pos},"lat":41.9,"lon":-87.9,"alt_baro":12000,"alt_geom":12200,"gs":250.5,"track":359.9,"baro_rate":-640,"geom_rate":-700,"nic":8,"nac_p":9,"nac_v":2,"sil":2,"sil_type":"perhour","version":2,"gva":2,"sda":1,"nic_baro":1,"flight":"TEST123 ","squawk":"1200","category":"A3","mlat":[],"tisb":[]}{extra}}"#)
+    format!(r#"{{"hex":"{hex}","type":"adsb_icao","seen":0.1,"seen_pos":{seen_pos},"lat":41.9,"lon":-87.9,"alt_baro":12000,"alt_geom":12200,"gs":250.5,"track":359.9,"baro_rate":-640,"geom_rate":-700,"nic":8,"nac_p":9,"nac_v":2,"sil":2,"sil_type":"perhour","version":2,"gva":2,"sda":1,"nic_baro":1,"flight":"TEST123 ","squawk":"1200","category":"A3","mlat":[],"tisb":[]{extra}}}"#)
 }
 
 #[test]
@@ -71,8 +71,9 @@ fn total_mismatch_duplicate_keys_bad_age_and_sealed_time_are_not_silently_repair
     let sealed_now = 1_795_132_800_000i64;
     let sealed = format!(r#"{{"ac":[],"ctime":{},"msg":"No error","now":{},"ptime":1,"total":0}}"#, sealed_now, sealed_now).into_bytes();
     assert!(matches!(decode_snapshot(&sealed, sealed_now, 15_000, &ZAU_BOX, &mut out), Err(oa_adsb::SnapshotError::SealedTime)));
-    let just_after_window = 1_795_393_930_000i64;
-    let row_sealed = format!(r#"{{"ac":[{}],"ctime":{},"msg":"No error","now":{},"ptime":1,"total":1}}"#, ac("a1b2c3", "20", ""), just_after_window, just_after_window).into_bytes();
+    let end_ns = oa_sealed::sealed_windows().iter().map(|window| window.to_ns).max().unwrap();
+    let just_after_window = end_ns / 1_000_000 + 1_000;
+    let row_sealed = format!(r#"{{"ac":[{}],"ctime":{},"msg":"No error","now":{},"ptime":1,"total":1}}"#, ac("a1b2c3", "2", ""), just_after_window, just_after_window).into_bytes();
     let stats = decode_snapshot(&row_sealed, just_after_window + 1, 15_000, &Filter { from_ns: 0, to_ns: i64::MAX, ..ZAU_BOX }, &mut out).unwrap();
     assert_eq!(stats.sealed_window_dropped, 1);
 }

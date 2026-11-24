@@ -44,15 +44,16 @@ enum CliError {
     Runtime(String),
 }
 
-fn arguments() -> Result<
-    (
-        PathBuf,
-        PathBuf,
-        Option<oa_regional_session::cli::ModelSource>,
-        oa_regional_session::cli::MsawSource,
-    ),
-    CliError,
-> {
+// A7.2: cold command-line configuration, size guard waived.
+struct Arguments {
+    input: PathBuf,
+    output: PathBuf,
+    model: Option<oa_regional_session::cli::ModelSource>,
+    safety: oa_regional_session::cli::MsawSource,
+    performance: Option<PathBuf>,
+}
+
+fn arguments() -> Result<Arguments, CliError> {
     let mut args = env::args_os().skip(1);
     let command = args.next().ok_or(CliError::Usage)?;
     let execute = match command.to_str() {
@@ -64,10 +65,11 @@ fn arguments() -> Result<
     let mut output = None;
     let mut model = None;
     let mut safety = None;
+    let mut performance = None;
     let mut count = 0;
     while let Some(arg) = args.next() {
         count += 1;
-        if count > 4 {
+        if count > 5 {
             return Err(CliError::Usage);
         }
         match arg.to_str() {
@@ -89,6 +91,9 @@ fn arguments() -> Result<
                     args.next().map(PathBuf::from).ok_or(CliError::Usage)?,
                 ));
             }
+            Some("--performance") if execute && performance.is_none() => {
+                performance = Some(args.next().map(PathBuf::from).ok_or(CliError::Usage)?);
+            }
             _ => return Err(CliError::Usage),
         }
     }
@@ -97,12 +102,8 @@ fn arguments() -> Result<
     if execute && model.is_none() {
         return Err(CliError::Usage);
     }
-    Ok((
-        input,
-        output,
-        model,
-        safety.unwrap_or(oa_regional_session::cli::MsawSource::Disabled),
-    ))
+    Ok(Arguments { input, output, model,
+        safety: safety.unwrap_or(oa_regional_session::cli::MsawSource::Disabled), performance })
 }
 
 fn read_input(path: &Path) -> Result<Vec<u8>, CliError> {
@@ -294,17 +295,20 @@ fn write_report(path: &Path, frames: &[FrameEvidence]) -> Result<(), CliError> {
 }
 
 fn run() -> Result<(), CliError> {
-    let (input, output, model, safety) = arguments()?;
+    let Arguments { input, output, model, safety, performance } = arguments()?;
     oa_sealed::refuse_io(&input).map_err(CliError::Io)?;
     oa_sealed::refuse_io(&output).map_err(CliError::Io)?;
     if let Some(oa_regional_session::cli::ModelSource::Snapshot(path)) = &model {
+        oa_sealed::refuse_io(path).map_err(CliError::Io)?;
+    }
+    if let Some(path) = &performance {
         oa_sealed::refuse_io(path).map_err(CliError::Io)?;
     }
     let bytes = read_input(&input)?;
     let frames = parse_input(&bytes)?;
     match model {
         Some(source) => {
-            oa_regional_session::cli::run_session_with_safety(&bytes, &output, &source, &safety)
+            oa_regional_session::cli::run_session_with_options(&bytes, &output, &source, &safety, performance.as_deref())
                 .map_err(CliError::Runtime)
         }
         None => write_report(&output, &frames),
@@ -314,7 +318,7 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),

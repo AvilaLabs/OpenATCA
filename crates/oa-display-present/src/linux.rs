@@ -57,6 +57,7 @@ const SIG_BLOCK: c_int = 0;
 const SIG_SETMASK: c_int = 2;
 const SIGUSR1: c_int = 10;
 const SIGUSR2: c_int = 12;
+#[cfg(test)]
 const SI_USER: i32 = 0;
 const SI_KERNEL: i32 = 0x80;
 const SFD_NONBLOCK: c_int = 0x800;
@@ -744,7 +745,7 @@ impl KmsDisplay {
             let drop_master = ioctl_call_unit(self.drm.as_raw_fd(), DROP_MASTER);
             let release = ioctl_value(self.tty.as_raw_fd(), VT_RELDISP, VT_RELEASE_OK);
             if release.is_ok() { self.state = kms_transition(self.state, KmsTransition::ReleaseAcknowledged).map_err(|_| KmsError::InvalidLifecycle)?; }
-            if let Err(d) = drop_master { return Err(d); }
+            drop_master?;
             if let Err(r) = release { return Err(KmsError::ReleaseFailed(system_code(r))); }
             return Err(e);
         }
@@ -769,7 +770,7 @@ impl KmsDisplay {
         let drop_master = ioctl_call_unit(self.drm.as_raw_fd(), DROP_MASTER);
         let release = ioctl_value(self.tty.as_raw_fd(), VT_RELDISP, VT_RELEASE_OK);
         if release.is_ok() { self.state = kms_transition(self.state, KmsTransition::ReleaseAcknowledged).map_err(|_| KmsError::InvalidLifecycle)?; }
-        if let Err(e) = drop_master { return Err(e); }
+        drop_master?;
         if let Err(e) = release { return Err(KmsError::ReleaseFailed(system_code(e))); }
         Err(KmsError::Faulted)
     }

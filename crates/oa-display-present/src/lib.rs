@@ -225,7 +225,10 @@ mod tests {
     #[test] fn decodes_native_evdev_record_and_sync() {
         let mut b = [0u8; 24]; b[8..16].copy_from_slice(&1i64.to_ne_bytes()); b[16..18].copy_from_slice(&1u16.to_ne_bytes()); b[18..20].copy_from_slice(&30u16.to_ne_bytes()); b[20..24].copy_from_slice(&1i32.to_ne_bytes());
         assert_eq!(decode_evdev_event(&b).unwrap().unwrap().value, 1);
-        b[16..18].copy_from_slice(&0u16.to_ne_bytes()); assert_eq!(decode_evdev_event(&b), Ok(None));
+        b[16..18].copy_from_slice(&0u16.to_ne_bytes());
+        assert!(decode_evdev_event(&b).unwrap().is_some(), "other EV_SYN codes remain visible");
+        b[18..20].copy_from_slice(&SYN_REPORT.to_ne_bytes());
+        assert_eq!(decode_evdev_event(&b), Ok(None));
     }
     #[test] fn fixed_input_batch_starts_with_zero_reserved_bytes() {
         assert_eq!(input_batch_new().reserved, [0; 2]);

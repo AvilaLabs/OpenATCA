@@ -41,6 +41,9 @@ oa-sealed = { path = "../../crates/oa-sealed" }
 oa-msaw = { path = "../../crates/oa-msaw" }
 # Bounded terrain/obstacle/received-weather loading and datum correction, reused without a new parser.
 oa-msaw-run = { path = "../oa-msaw" }
+# F1: approved ninth internal runtime link (2026-11-24); the isolated A0 Linux
+# presentation shell owns direct KMS/VT and evdev access for operated recorded replay.
+oa-display-present = { path = "../../crates/oa-display-present" }
 # F1 approval: Connor approved these existing workspace recording/decoder links on 2026-11-24.
 # OAF bounded frame parsing and gzip inflation; import site: recordings_reader.rs.
 oa-feed = { path = "../../crates/oa-feed" }

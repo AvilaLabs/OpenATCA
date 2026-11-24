@@ -563,15 +563,17 @@ pub fn read_tile(path: &Path) -> Result<Grid, String> {
 }
 
 /// Reads one terrain source under explicit file, decode and combined working-memory caps.
-const MAX_COARSE_BLOCKS_PER_TILE: usize = 9;
-const COARSE_BLOCK_BYTES: usize = 500 * 500 * 2;
-
 fn read_tile_bounded(
     path: &Path,
     limits: TerrainServiceLimits,
     retained_bytes: usize,
 ) -> Result<Option<(Grid, [u8; 32])>, String> {
-    let future_retained_bytes = MAX_COARSE_BLOCKS_PER_TILE.saturating_mul(COARSE_BLOCK_BYTES);
+    // Reserve every remaining cache byte before parsing. The actual accepted geographic
+    // extent is checked after decoding, before any coarse-grid insertion; filenames alone
+    // cannot establish a trusted grid footprint for the transient-memory calculation.
+    let Some(future_retained_bytes) = limits.max_resident_bytes.checked_sub(retained_bytes) else {
+        return Ok(None);
+    };
     let fixed_bytes = retained_bytes
         .checked_add(future_retained_bytes)
         .and_then(|n| n.checked_add(limits.max_grid_bytes))
@@ -614,9 +616,7 @@ fn read_tile_bounded(
 }
 
 fn retained_budget_fits(limits: TerrainServiceLimits, retained_bytes: usize) -> bool {
-    retained_bytes
-        .checked_add(MAX_COARSE_BLOCKS_PER_TILE.saturating_mul(COARSE_BLOCK_BYTES))
-        .is_some_and(|bytes| bytes <= limits.max_resident_bytes)
+    retained_bytes < limits.max_resident_bytes
 }
 
 impl Floors {

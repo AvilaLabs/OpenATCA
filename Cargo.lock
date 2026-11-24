@@ -145,6 +145,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-display-present"
+version = "0.0.1"
+
+[[package]]
 name = "oa-dof"
 version = "0.0.1"
 dependencies = [
@@ -365,6 +369,7 @@ dependencies = [
  "oa-airspace",
  "oa-ca",
  "oa-display",
+ "oa-display-present",
  "oa-feed",
  "oa-fixm",
  "oa-flight",

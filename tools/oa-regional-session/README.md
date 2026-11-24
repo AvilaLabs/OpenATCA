@@ -133,6 +133,22 @@ Only supported geometry is admitted. Both altitude and speed restrictions surviv
 IAS is never treated as groundspeed. The baseline still lacks wind, aircraft performance,
 forward uncertainty and altitude-crossing feasibility; these remain explicit output limitations.
 
+`--performance MANIFEST` opts into sequential vertical reachability alongside the unchanged
+horizontal baseline. The bounded `OA-PERFORMANCE<TAB>1` manifest contains at most 32 explicit
+performance envelopes, each bound to full GUFI, aircraft address (including the non-ICAO bit),
+reporting centre and plan ID. `examples/synthetic-performance.tsv` is a public synthetic model,
+not measured aircraft capability. Its fourteen tab-separated fields are `v1`, GUFI hex, address
+hex, centre, plan ID, source ms, availability ms, message ID, maximum age ms, climb ft/min,
+descent ft/min, groundspeed mm/s, `MEASURED`/`EMPIRICAL_MODEL`, and `VALID`/`CONTRADICTORY`.
+Zero rates are explicit level-flight bounds. Missing, stale, future or duplicate eligible evidence
+has a visible refusal; no aircraft performance is inferred from its name or type. Source bytes
+are retained and hashed in the completed run.
+
+These outputs are reachable altitude intervals at each route prefix under the supplied bounds
+and constant observed groundspeed. They are not a predicted altitude, a whole-route viable
+envelope, an uncertainty estimate or an acceleration/wind model. Assigned altitude is a level-off
+target with no invented fix deadline. Only explicit route restrictions impose fix constraints.
+
 `COMMAND` carries plan ID, expected target generation, displayed frame sequence, local actor ID,
 and a typed operation/value. Development actor IDs 1 and 2 map to `SECTOR1` and `SECTOR2`.
 Operations are `ASSIGNED`, `UNASSIGNED`, `INTERIM`, `CLEAR_INTERIM`, `HO_OFFER`, `HO_ACCEPT`,

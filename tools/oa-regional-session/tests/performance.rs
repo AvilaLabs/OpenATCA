@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 const HEADER: &str = "OA-PERFORMANCE\t1";
 
+// Fixture-only factory retains the protocol's thirteen independent payload fields.
+#[allow(clippy::too_many_arguments)]
 fn row(
     gufi: &str,
     address: &str,

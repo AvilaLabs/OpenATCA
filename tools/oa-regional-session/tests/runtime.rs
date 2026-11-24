@@ -172,6 +172,38 @@ fn confirmation_batch() -> ReceiptBatch {
     }
 }
 
+// REQ: OA-REG-015
+#[test]
+fn selection_and_console_replace_only_controls_and_keep_the_observation_epoch() {
+    use oa_regional_session::runtime::{regional_console_overlay, regional_pixels, regional_select};
+    let mut engine = runtime();
+    let frame = confirmed(&mut engine);
+    let view = frame.controller_views.iter().find(|view| view.address == 0xabc101).unwrap();
+    let selected = regional_select(&mut engine, view.address, view.generation, Some(view.identity)).unwrap();
+    for _ in 0..100 {
+        let edited = regional_console_overlay(&mut engine, "INPUT ASSIGNED 12000").unwrap();
+        assert_ne!(edited, selected);
+        assert_eq!(regional_console_overlay(&mut engine, "").unwrap(), selected);
+    }
+    let before = regional_pixels(&engine).unwrap().to_vec();
+    assert!(regional_console_overlay(&mut engine, "bad\ninput").is_err());
+    assert_eq!(regional_pixels(&engine).unwrap(), before);
+    let next = regional_step(&mut engine, &ReceiptBatch {
+        receipt_ns: 3 * SECOND, source_clock_regressions: 0, events: Vec::new(),
+    }).unwrap();
+    assert_eq!(next.controller_selected_address, Some(view.address));
+    assert_eq!(next.controller_selection, Some(view.identity));
+    assert_eq!(next.surveillance.time_ns, 3 * SECOND);
+    assert_eq!(next.surveillance.ca_stats.tracks, 2);
+    assert!(regional_select(&mut engine, view.address, view.generation + 1, Some(view.identity)).is_err());
+    assert!(regional_pixels(&engine).is_ok(), "ordinary selection refusal remains visible");
+    let next = regional_step(&mut engine, &ReceiptBatch {
+        receipt_ns: 4 * SECOND, source_clock_regressions: 0, events: Vec::new(),
+    }).unwrap();
+    assert_eq!(next.controller_selected_address, None);
+    assert_eq!(next.controller_selection, None);
+}
+
 // REQ: OA-REG-004
 #[test]
 fn actual_tracker_flight_route_ca_and_scope_share_one_cutoff() {

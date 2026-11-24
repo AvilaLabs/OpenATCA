@@ -76,7 +76,10 @@ pub const MAX_PIXELS: u64 = 1 << 26;
 /// Limit: largest uncompressed strip or tile, 64 MiB.
 pub const MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
 /// Conservative temporary storage for decoding one bounded segment plus TIFF tag arrays.
-pub const MAX_READ_SCRATCH_BYTES: usize = (3 * MAX_SEGMENT_BYTES as usize) + (32 * 1024 * 1024);
+pub const MAX_READ_SCRATCH_BYTES: usize = 224 * 1024 * 1024;
+// This budget includes three 64 MiB segment buffers and 32 MiB of tag scratch.
+// Raising the segment ceiling requires an explicit review of this peak bound.
+const _: () = assert!(MAX_SEGMENT_BYTES == 64 * 1024 * 1024);
 /// Limit: most `GeoKeyDirectory` keys.
 pub const MAX_GEO_KEYS: usize = 1024;
 /// Limit: longest ASCII tag value (`GDAL_NODATA`, `GeoAsciiParams`), 64 KiB.

@@ -6880,6 +6880,7 @@ This is a bounded normalized-input composition, not facility, deadline or operat
 - **OA-REG-012** MSAW provider failure publishes unavailable without evaluating partial floor samples, preserves alert evidence and permits tracking, observed conflict alerts and scope presentation to continue. Synthetic floor/weather requires an explicit option; supplied sources retain hashes and receipt evidence.
 - **OA-REG-013** Bounded recorded ADS-B and SFDPS imports preserve exact native receipt provenance, admit events no earlier than the next whole-second cutoff, retain source timestamps and count unsupported, malformed, sealed and capacity-refused work. Closed imports use guarded new outputs and a completion marker written last.
 - **OA-REG-014** Vertical profile integration is opt-in and uses only explicit eligible performance evidence for the exact full flight key. Missing, duplicate or foreign evidence has a visible per-flight refusal and cannot change horizontal forecasts or observed safety nets.
+- **OA-REG-015** Operated replay selection checks the exact displayed address, generation and full identity; refusal clears selection and remains visible. Bounded console redraws replace only control primitives, preserve the observation epoch and safety presentation, and retain selection/input evidence.
 
 ## Current alert presentation (oa-display)
 

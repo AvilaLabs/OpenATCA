@@ -176,7 +176,7 @@ fn validate_tree(doc: &Doc<'_>, n: NodeIx, depth: u8, budget: &mut usize) -> Res
     match doc.kind(n) {
         Some(Kind::Object) => {
             unique_object(doc, n)?;
-            for (k, v) in doc.members(n) {
+            for (_, v) in doc.members(n) {
                 *budget = budget.checked_sub(1).ok_or(SnapshotError::StructureLimit)?;
                 validate_tree(doc, v, depth + 1, budget)?;
             }

@@ -204,7 +204,7 @@ fn parse_hex_address(text: &str, row: usize) -> Result<u32, String> {
     }
     let address = u32::from_str_radix(text, 16)
         .map_err(|_| format!("performance row {row} address is invalid"))?;
-    if address == 0 || address > MAX_AIRCRAFT_ADDRESS {
+    if oa_adsb::is_reserved_address(address) || address > MAX_AIRCRAFT_ADDRESS {
         return Err(format!("performance row {row} address is outside the aircraft range"));
     }
     Ok(address)

@@ -462,13 +462,13 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
         &batches,
         &[],
     );
-    for index in 0..prefix {
+    for (index, expected_output) in expected.iter().enumerate().take(prefix) {
         let out = next_output(&mut serving, authority.generation, index);
         assert_eq!(
             out,
             Output {
                 generation: authority.generation,
-                ..expected[index].clone()
+                ..expected_output.clone()
             }
         );
         authority
@@ -564,13 +564,13 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
         &batches,
         &expected,
     );
-    for index in prefix + 1..batches.len() {
+    for (index, expected_output) in expected.iter().enumerate().take(batches.len()).skip(prefix + 1) {
         let out = next_output(&mut replacement, authority.generation, index);
         assert_eq!(
             out,
             Output {
                 generation: authority.generation,
-                ..expected[index].clone()
+                ..expected_output.clone()
             }
         );
         authority

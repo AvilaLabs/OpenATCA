@@ -27,6 +27,7 @@ pub struct RegionalRuntime {
     views: Vec<oa_display::interaction::TargetView>,
     observed: Vec<crate::surveillance::ObservedTrack>,
     next_generation: u32,
+    console_text: String,
 }
 
 // A3/C6: at most 32 cold offline evidence rows/frame; snapshots are copied, never aliased. Optional
@@ -53,6 +54,10 @@ pub struct RegionalFrame {
     pub controller_views: Vec<oa_display::interaction::TargetView>,
     pub controller_dispatches: Vec<commands::Dispatch>,
     pub controller_outcome: oa_display::interaction::CommandOutcome,
+    pub controller_selection_kind: oa_display::interaction::SelectionKind,
+    pub controller_selected_address: Option<u32>,
+    pub controller_selection: Option<oa_display::interaction::FlightIdentity>,
+    pub console_text: String,
 }
 // A7.2: cold shell evidence, bounded by runtime capacities.
 
@@ -108,6 +113,7 @@ pub fn regional_new(
         views: Vec::with_capacity(MAX_DRIVER_FLIGHTS),
         observed: Vec::with_capacity(MAX_DRIVER_FLIGHTS),
         next_generation: 0,
+        console_text: String::with_capacity(128),
     })
 }
 
@@ -169,9 +175,10 @@ fn execute(
     // Flight ownership presentation currently requires an explicitly selected flight. Per-flight
     // snapshots below preserve every owner; no arbitrary 'first' flight is promoted to selection.
     let mut surveillance = surveillance::surveillance_finish(&mut runtime.surveillance, None)?;
-    surveillance.frame_sha256 = surveillance::surveillance_present_interaction(
+    surveillance.frame_sha256 = surveillance::surveillance_present_controls(
         &mut runtime.surveillance,
         &runtime.interaction,
+        &runtime.console_text,
     )?;
     runtime.frame_sequence = runtime
         .frame_sequence
@@ -291,6 +298,10 @@ fn execute(
         controller_views: runtime.views.clone(),
         controller_dispatches,
         controller_outcome: oa_display::interaction::command_outcome(&runtime.interaction),
+        controller_selection_kind: oa_display::interaction::selection_kind(&runtime.interaction),
+        controller_selected_address: oa_display::interaction::selected_address(&runtime.interaction),
+        controller_selection: oa_display::interaction::selected_identity(&runtime.interaction),
+        console_text: runtime.console_text.clone(),
     })
 }
 
@@ -345,6 +356,72 @@ pub fn regional_pixels(runtime: &RegionalRuntime) -> Result<&[u8], String> {
         return Err("no publishable frame after session failure".into());
     }
     surveillance::surveillance_pixels(&runtime.surveillance)
+}
+
+/// Explicit current-view selection. Ordinary refusal clears selection and is rendered; it
+/// cannot manufacture a full flight binding, advance source time or transfer authority.
+pub fn regional_select(
+    runtime: &mut RegionalRuntime,
+    address: u32,
+    generation: u32,
+    identity: Option<oa_display::interaction::FlightIdentity>,
+) -> Result<[u8; 32], String> {
+    if runtime.failed || runtime.frame_sequence == 0 {
+        return Err("selection requires a completed regional frame".into());
+    }
+    let sequence = u32::try_from(runtime.frame_sequence).map_err(|_| "view sequence exhausted")?;
+    let outcome = oa_display::interaction::select_target(
+        &mut runtime.interaction, &runtime.views, sequence, address, generation, identity,
+    );
+    if !matches!(outcome, oa_display::interaction::InteractionResult::Applied) {
+        oa_display::interaction::clear_selection(&mut runtime.interaction);
+    }
+    let digest = match surveillance::surveillance_present_controls(
+        &mut runtime.surveillance, &runtime.interaction, &runtime.console_text,
+    ) {
+        Ok(digest) => digest,
+        Err(reason) => { runtime.failed = true; return Err(reason); }
+    };
+    match outcome {
+        oa_display::interaction::InteractionResult::Applied => Ok(digest),
+        other => Err(format!("selection: {other:?}")),
+    }
+}
+
+/// Bounded input/status text for operated replay. Rendering replaces prior control primitives,
+/// keeps the observed frame unchanged, and records this text in the next frame's evidence.
+pub fn regional_console_overlay(
+    runtime: &mut RegionalRuntime,
+    text: &str,
+) -> Result<[u8; 32], String> {
+    if runtime.failed || runtime.frame_sequence == 0 {
+        return Err("console presentation requires a completed regional frame".into());
+    }
+    if text.len() > 128 || !text.bytes().all(|byte| (32..=126).contains(&byte)) {
+        return Err("console text must be at most 128 printable ASCII bytes".into());
+    }
+    runtime.console_text.clear();
+    runtime.console_text.push_str(text);
+    match surveillance::surveillance_present_controls(
+        &mut runtime.surveillance, &runtime.interaction, &runtime.console_text,
+    ) {
+        Ok(digest) => Ok(digest),
+        Err(reason) => { runtime.failed = true; Err(reason) }
+    }
+}
+
+/// Clear only operator selection; captured authority requests retain their own full identity.
+pub fn regional_clear_selection(runtime: &mut RegionalRuntime) -> Result<[u8; 32], String> {
+    if runtime.failed || runtime.frame_sequence == 0 {
+        return Err("selection clearing requires a completed regional frame".into());
+    }
+    oa_display::interaction::clear_selection(&mut runtime.interaction);
+    match surveillance::surveillance_present_controls(
+        &mut runtime.surveillance, &runtime.interaction, &runtime.console_text,
+    ) {
+        Ok(digest) => Ok(digest),
+        Err(reason) => { runtime.failed = true; Err(reason) }
+    }
 }
 
 pub fn regional_enable_msaw(

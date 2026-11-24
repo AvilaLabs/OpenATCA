@@ -12,15 +12,15 @@ const MAX_LINE: usize = 1024;
 // This is a fixture-settings subset, not a fingerprint of every downstream subsystem setting.
 const SETTINGS: &str = "OA-REGIONAL-RECOVERY-SETTINGS\t1\ncentre\tZAU1\ncentre_lat_e7\t410000000\ncentre_lon_e7\t-870000000\nrange_nm\t180.0\ntracks\t32\nframes\t512\n";
 
-fn setup() -> Result<
-    (
+// A7.2: cold process fixture initialization result.
+type WorkerSetup = (
         oa_regional_session::runtime::RegionalRuntime,
         Vec<oa_regional_session::ReceiptBatch>,
         [u8; 32],
         [u8; 32],
-    ),
-    String,
-> {
+    );
+
+fn setup() -> Result<WorkerSetup, String> {
     let snapshot = oa_airspace::core::snapshot::encode(&synthetic_model()?)
         .map_err(|e| format!("snapshot encode: {e:?}"))?;
     let snapshot_hash = oa_sha256::sha256(&snapshot);
@@ -145,7 +145,7 @@ fn main() {
         let _ = writeln!(
             io::stdout().lock(),
             "ERROR {}",
-            error.replace('\n', " ").replace('\r', " ")
+            error.replace(['\n', '\r'], " ")
         );
         std::process::exit(2);
     }
