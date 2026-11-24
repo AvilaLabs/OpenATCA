@@ -10,11 +10,16 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import sealed_guard  # noqa: E402
 
 
 MAX_STDDS_FILES = 32
@@ -24,6 +29,7 @@ MAX_ADSB_BYTES = 128 * 1024 * 1024
 MAX_ROWS = 100_000
 MAX_REPORT_BYTES = 256 * 1024 * 1024
 MAX_ANALYSIS_WORK = 80_000_000
+MAX_INVENTORY_BYTES = 1024 * 1024
 OUTPUTS = ["stdds_ref.txt", "stdds_ref.csv", "stdds_ref.json", "stdds_ref.complete"]
 HEX = re.compile(r"^[0-9a-f]{64}$")
 
@@ -62,7 +68,27 @@ def _input(item: Any, kind: str, index: int) -> dict[str, str]:
     return {"path": path, "sha256": digest, "source_id": source_id}
 
 
-def build_plan(spec: dict[str, Any]) -> dict[str, Any]:
+def _private_path(path: str) -> bool:
+    return "openatca-private" in Path(path).parts
+
+
+def _check_path(guard: sealed_guard.Guard, path: str, label: str) -> None:
+    try:
+        guard.check(path)
+    except sealed_guard.SealedError as exc:
+        raise PlanError(f"{label} is refused by the sealed-data guard: {exc}") from None
+
+
+def _check_interval(guard: sealed_guard.Guard, from_ms: int, to_ms: int) -> None:
+    if guard.broken or not guard.windows:
+        raise PlanError("compiled sealed time windows are unavailable; cannot certify the cohort interval")
+    start_ns, end_ns = from_ms * 1_000_000, to_ms * 1_000_000
+    if any(start_ns < window_to and end_ns > window_from for _, window_from, window_to in guard.windows):
+        raise PlanError("cohort interval intersects a compiled sealed time window")
+
+
+def build_plan(spec: dict[str, Any], guard: sealed_guard.Guard | None = None) -> dict[str, Any]:
+    guard = guard or sealed_guard.production()
     if spec.get("schema") != "oa-stdds-ref-plan-input-v1":
         raise PlanError("schema must be oa-stdds-ref-plan-input-v1")
     cohort = spec.get("cohort_id")
@@ -78,6 +104,7 @@ def build_plan(spec: dict[str, Any]) -> dict[str, Any]:
         raise PlanError("interval_utc.start must precede interval_utc.end")
     from_ms = _unix_ms(start, "interval_utc.start")
     to_ms = _unix_ms(end, "interval_utc.end")
+    _check_interval(guard, from_ms, to_ms)
     inventory = spec.get("inputs")
     if not isinstance(inventory, dict) or not isinstance(inventory.get("stdds"), list):
         raise PlanError("inputs.stdds must be an array")
@@ -85,13 +112,20 @@ def build_plan(spec: dict[str, Any]) -> dict[str, Any]:
         raise PlanError(f"STDDS input count must be 1..{MAX_STDDS_FILES}")
     stdds = [_input(x, "inputs.stdds", i) for i, x in enumerate(inventory["stdds"])]
     adsb = _input(inventory.get("adsb"), "inputs.adsb", 0)
+    for i, item in enumerate(stdds):
+        _check_path(guard, item["path"], f"inputs.stdds[{i}].path")
+    _check_path(guard, adsb["path"], "inputs.adsb.path")
     executable = spec.get("executable")
     if not isinstance(executable, dict):
         raise PlanError("executable metadata is required")
     binary = _input(executable, "executable", 0)
+    _check_path(guard, binary["path"], "executable.path")
     output = spec.get("output_directory")
     if not isinstance(output, str) or not output.strip():
         raise PlanError("output_directory is required")
+    if not _private_path(output):
+        raise PlanError("output_directory must be below an openatca-private directory")
+    _check_path(guard, output, "output_directory")
     source = spec.get("source")
     if not isinstance(source, dict) or not isinstance(source.get("commit"), str) or not HEX.fullmatch(source.get("tree_sha256", "")):
         raise PlanError("source.commit and source.tree_sha256 are required")
@@ -116,21 +150,86 @@ def build_plan(spec: dict[str, Any]) -> dict[str, Any]:
     return plan
 
 
-def main(argv: list[str] | None = None) -> int:
+def _load_inventory(path: Path, guard: sealed_guard.Guard) -> dict[str, Any]:
+    if not _private_path(str(path)):
+        raise PlanError("inventory must be below an openatca-private directory")
+    try:
+        with guard.open(path, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise PlanError("inventory must be a guarded regular file")
+            if before.st_size > MAX_INVENTORY_BYTES:
+                raise PlanError(f"inventory exceeds {MAX_INVENTORY_BYTES} bytes")
+            raw = stream.read(MAX_INVENTORY_BYTES + 1)
+            after = os.fstat(stream.fileno())
+            if len(raw) > MAX_INVENTORY_BYTES or len(raw) != before.st_size:
+                raise PlanError(f"inventory exceeds {MAX_INVENTORY_BYTES} bytes or changed while read")
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+            ):
+                raise PlanError("inventory changed while read")
+    except sealed_guard.SealedError as exc:
+        raise PlanError(f"inventory is refused by the sealed-data guard: {exc}") from None
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise PlanError(f"inventory is not bounded UTF-8 JSON: {exc}") from None
+    if not isinstance(value, dict):
+        raise PlanError("inventory must be a JSON object")
+    return value
+
+
+def _write_plan_new(path: Path, data: bytes, guard: sealed_guard.Guard) -> None:
+    if not _private_path(str(path)):
+        raise PlanError("plan output must be below an openatca-private directory")
+    _check_path(guard, str(path.parent), "plan output parent")
+    parent = os.stat(path.parent)
+    if not stat.S_ISDIR(parent.st_mode):
+        raise PlanError("plan output parent must already be a directory")
+    _check_path(guard, str(path), "plan output")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        guard.verify_fd(fd, path)
+        try:
+            real = os.readlink(f"/proc/self/fd/{fd}")
+        except OSError:
+            real = str(path)
+        if not _private_path(real):
+            raise PlanError("created plan file is outside openatca-private")
+        with os.fdopen(fd, "wb", closefd=True) as stream:
+            fd = -1
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except BaseException:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            _check_path(guard, str(path), "partial plan output")
+            path.unlink(missing_ok=True)
+        except (OSError, PlanError):
+            pass
+        raise
+
+
+def main(argv: list[str] | None = None, guard: sealed_guard.Guard | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--inventory", type=Path, required=True, help="metadata-only JSON inventory")
     parser.add_argument("--out", type=Path, required=True, help="new private plan JSON path")
     args = parser.parse_args(argv)
+    guard = guard or sealed_guard.production()
     try:
-        spec = json.loads(args.inventory.read_text(encoding="utf-8"))
-        if not isinstance(spec, dict):
-            raise PlanError("inventory must be a JSON object")
-        result = build_plan(spec)
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        with args.out.open("x", encoding="utf-8", newline="\n") as stream:
-            json.dump(result, stream, indent=2, sort_keys=True, allow_nan=False)
-            stream.write("\n")
-    except (OSError, UnicodeError, json.JSONDecodeError, PlanError) as exc:
+        spec = _load_inventory(args.inventory, guard)
+        result = build_plan(spec, guard)
+        data = (json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
+        _write_plan_new(args.out, data, guard)
+    except (OSError, PlanError, ValueError, sealed_guard.SealedError) as exc:
         print(f"oa-stdds-ref plan: {exc}", file=sys.stderr)
         return 2
     print(f"plan SHA-256: {result['plan_sha256']}")

@@ -100,11 +100,16 @@ sealed-data guard before access.
 ## Pre-run plan
 
 `plan_run.py` turns a metadata-only inventory into a private, hashed run plan before inputs are
-opened. The JSON inventory records a cohort ID, explicit UTC interval, source commit/tree hash,
-the executable path and digest, and each input path, digest, and saved provenance record ID. The
-helper does not stat, enumerate, open, or hash any FAA input path. Its output freezes the current
-raw and fitted modes, fit policy, tool limits, output filenames, and exact current command line.
-Keep both inventory and plan private.
+opened. The inventory is read through `sealed_guard` as a single-link regular file, capped at 1 MiB;
+the new plan file is created exclusively and verified through its open descriptor. Both must be
+below an `openatca-private` directory, whose parent must already exist. The JSON inventory records
+a cohort ID, explicit UTC interval, source commit/tree hash, the executable path and digest, and
+each input path, digest, and saved provenance record ID. The helper does not stat, enumerate, open,
+or hash any FAA input path. It rejects any metadata path the compiled sealed-data guard refuses,
+and the planned half-open cohort is checked against the entire padded compiled sealed-window set
+before the input metadata is interpreted. Its output freezes the current raw and fitted modes, fit
+policy, tool limits, output filenames, and exact current command line. Keep both inventory and
+plan private.
 
 The interval is enforced as a half-open UTC `mrtTime` selection on STDDS rows before calibration.
 The cohort ID and both signed Unix-millisecond bounds are required; unbounded scoring is refused. The `from` bound
