@@ -43,6 +43,12 @@ normalized input; 768 bytes per row; 256 bytes per filed route/cursor text; 64 M
 Capacity and work exhaustion refuse explicitly. Offline shell allocation is permitted; this
 composition makes no real-time allocation or deadline qualification claim.
 
+Each frame retains completed CA alert episodes and altitude-loss events as well as currently
+open alerts. The core logs are drained only after that evidence is copied. Their payload budget
+is one cycle: 496 completed episodes (47,616 bytes) and 32 altitude losses (1,024 bytes), rather
+than a completed-alert allocation multiplied by the 512-frame session limit. Log-overflow
+counters remain in the cycle statistics; end-of-input open episodes remain explicitly open.
+
 The scope is 800×600, centred on 41°N, 87°W at 180 NM. The centre view is `ZAU1`. Normalized
 positions here mean airborne traffic; ground/surface classification is not inferred. The CA
 settings (1,300 m horizontal, 300 ft vertical, 120 s lookahead) are synthetic development values,

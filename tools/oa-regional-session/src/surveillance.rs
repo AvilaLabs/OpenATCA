@@ -4,8 +4,9 @@
 use crate::input::{EventKind, NormalizedEvent, SourceKind};
 use oa_airspace::core::model::Model;
 use oa_ca::{
-    alert_log_new, ca_cycle, ca_new, ca_open, event_log_new, Area, CaConfig, CaTrack, Volume,
-    AIRBORNE, F_COAST, F_IDENTITY_UNCONFIRMED, F_UNCERTAIN, MAX_VOLUMES,
+    alert_log_clear, alert_log_new, ca_cycle, ca_new, ca_open, event_log_clear, event_log_new,
+    Area, CaConfig, CaTrack, Volume, AIRBORNE, F_COAST, F_IDENTITY_UNCONFIRMED, F_UNCERTAIN,
+    MAX_VOLUMES,
 };
 use oa_display::core::ownership::OwnershipStatus;
 use oa_display::core::raster::frame_digest;
@@ -37,6 +38,11 @@ pub const MAX_DRAIN_ROWS: usize = 4096;
 pub const FRAME_WIDTH: u32 = 800;
 pub const FRAME_HEIGHT: u32 = 600;
 const MAX_PAIRS: usize = MAX_TRACKS * (MAX_TRACKS - 1) / 2;
+// C2/C7: at most max_open=MAX_PAIRS episodes can close in one cycle, and each retained
+// track can lose altitude once. Both logs are captured in frame evidence and drained every
+// cycle; storage therefore depends on simultaneous traffic, never the session's frame count.
+const MAX_CLOSED_ALERTS_PER_CYCLE: usize = MAX_PAIRS;
+const MAX_ALTITUDE_LOSSES_PER_CYCLE: usize = MAX_TRACKS;
 const FEED_NAMES: [[u8; 8]; 5] = [
     *b"TRACK\0\0\0",
     *b"FLIGHT\0\0",
@@ -100,6 +106,8 @@ pub struct SurveillanceFrame {
     pub flags: Vec<u8>,
     pub frame_sha256: [u8; 32],
     pub ca_open: Vec<oa_ca::Alert>,
+    pub ca_closed: Vec<oa_ca::Alert>,
+    pub ca_altitude_lost: Vec<oa_ca::AltLost>,
     pub ca_stats: oa_ca::CycleStats,
     pub ca_work_short: u64,
     pub ca_input_short: u64,
@@ -186,8 +194,8 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
         drain: output_new(MAX_DRAIN_ROWS),
         scope,
         ca,
-        alerts: alert_log_new(MAX_PAIRS * MAX_FRAMES).map_err(err)?,
-        events: event_log_new(MAX_DRAIN_ROWS).map_err(err)?,
+        alerts: alert_log_new(MAX_CLOSED_ALERTS_PER_CYCLE).map_err(err)?,
+        events: event_log_new(MAX_ALTITUDE_LOSSES_PER_CYCLE).map_err(err)?,
         states: state_table_new(10 * SECOND_NS, 0).map_err(err)?,
         inhibits: Box::new(inhibits_new()),
         seen: [None; 5],
@@ -420,6 +428,14 @@ fn fixed_i32(value: f64) -> Result<i32, String> {
     Ok(rounded as i32)
 }
 
+fn capture_ca_logs(s: &mut Surveillance) -> (Vec<oa_ca::Alert>, Vec<oa_ca::AltLost>) {
+    let closed = s.alerts.items.clone();
+    let altitude_lost = s.events.items.clone();
+    alert_log_clear(&mut s.alerts);
+    event_log_clear(&mut s.events);
+    (closed, altitude_lost)
+}
+
 pub fn surveillance_finish(
     s: &mut Surveillance,
     ownership: Option<&OwnershipStatus>,
@@ -533,6 +549,7 @@ pub fn surveillance_finish(
         &mut s.events,
         &mut s.states,
     );
+    let (ca_closed, ca_altitude_lost) = capture_ca_logs(s);
     let mut store = RowStore::default();
     let stats = store_add(
         &mut store,
@@ -652,6 +669,8 @@ pub fn surveillance_finish(
         flags,
         frame_sha256: digest,
         ca_open: ca_open(&s.ca).to_vec(),
+        ca_closed,
+        ca_altitude_lost,
         ca_stats: ca.stats,
         ca_work_short: ca.work_short,
         ca_input_short: ca.input_short,
@@ -834,5 +853,78 @@ mod tests {
         assert!(!replace_latest_row(&mut latest, 0x123456, 3).expect("first address"));
         assert!(replace_latest_row(&mut latest, 0x123456, 7).expect("replacement"));
         assert_eq!(latest.get(&0x123456), Some(&7));
+    }
+
+    // REQ: OA-REG-004
+    #[test]
+    fn finished_ca_episodes_and_altitude_loss_are_captured_once_per_cycle() {
+        let mut s = new_surveillance();
+        let track = |addr, alt_ft| CaTrack {
+            lat_deg: 41.0,
+            lon_deg: -87.0,
+            addr,
+            vel_east_mps: 0.0,
+            vel_north_mps: 0.0,
+            r95_m: 0.0,
+            alt_ft,
+            vrate_fpm: 0.0,
+            flags: 0,
+            ground: AIRBORNE,
+        };
+        let rows = [track(0x123456, 10_000.0), track(0x123457, 10_000.0)];
+        ca_cycle(
+            &mut s.ca,
+            SECOND_NS,
+            &rows,
+            &mut s.alerts,
+            &mut s.events,
+            &mut s.states,
+        );
+        assert_eq!(
+            ca_open(&s.ca).len(),
+            1,
+            "coincident level aircraft conflict"
+        );
+        assert_eq!(capture_ca_logs(&mut s), (vec![], vec![]));
+        let rows = [track(0x123456, f32::NAN), track(0x123457, 10_000.0)];
+        let cycle = ca_cycle(
+            &mut s.ca,
+            2 * SECOND_NS,
+            &rows,
+            &mut s.alerts,
+            &mut s.events,
+            &mut s.states,
+        );
+        assert_eq!(cycle.stats.alt_lost, 1);
+        let (closed, lost) = capture_ca_logs(&mut s);
+        assert!(closed.is_empty());
+        assert_eq!(lost.len(), 1);
+        assert_eq!(lost[0].addr, 0x123456);
+        assert_eq!(lost[0].t_ns, 2 * SECOND_NS);
+        let cycle = ca_cycle(
+            &mut s.ca,
+            5 * SECOND_NS,
+            &[],
+            &mut s.alerts,
+            &mut s.events,
+            &mut s.states,
+        );
+        assert_eq!(cycle.stats.closed, 1);
+        let (closed, lost) = capture_ca_logs(&mut s);
+        assert_eq!(closed.len(), 1);
+        assert_eq!((closed[0].addr_a, closed[0].addr_b), (0x123456, 0x123457));
+        assert_eq!(closed[0].start_ns, SECOND_NS);
+        assert!(lost.is_empty());
+        ca_cycle(
+            &mut s.ca,
+            6 * SECOND_NS,
+            &[],
+            &mut s.alerts,
+            &mut s.events,
+            &mut s.states,
+        );
+        assert_eq!(capture_ca_logs(&mut s), (vec![], vec![]));
+        assert_eq!(s.alerts.capacity, MAX_PAIRS);
+        assert_eq!(s.events.capacity, MAX_TRACKS);
     }
 }
