@@ -8,7 +8,10 @@ decodes Linux 64-bit evdev records into fixed-capacity plain input records.
 in text mode, and in automatic VT-switch mode before opening DRM. It discovers read-only
 topology, acquires DRM master, then recaptures the CRTC and connector routing under master.
 After preparation it changes the VT to `VT_PROCESS` with reserved SIGUSR1/SIGUSR2 signals,
-blocked and consumed through signalfd; it installs no global signal handler. The API requires a
+blocked and consumed through signalfd; it installs no global signal handler. Only kernel-origin
+VT signals (`si_code == SI_KERNEL`) are accepted as handshakes; externally-sent SIGUSR1/SIGUSR2
+returns `UnexpectedSignal` without changing display state. The kernel sends VT process-control
+signals through privileged `kill_pid(..., 1)`, which yields `SI_KERNEL`. The API requires a
 dedicated single-threaded owner process, and checks that contract at open and on each operation.
 `start()` is the explicit modeset point. It allocates two bounded, linear dumb XRGB8888 buffers,
 modesets the blank front buffer, then `present()` validates and copies every visible source row
@@ -25,6 +28,9 @@ supervisor must detect the failed presenter and start its fallback. `close()` re
 VT mode and signal mask before buffer cleanup when the lifecycle is healthy. Multiple routed
 connectors on the selected CRTC, unsupported dimensions, inactive VT, and unsupported topology
 fail closed. No desktop, window system, or toolkit backend is used.
+If setup cannot restore `VT_AUTO` after installing `VT_PROCESS`, `open_kms` returns
+`OwnerMustTerminate` while retaining blocked signal ownership; the owner process must exit before
+the supervisor retries.
 
 This is an unqualified implementation: no DRM/VT ioctl or device was exercised here. Kernel
 rejection of a restore or page-flip completion is reported as loss of display availability; the
@@ -43,7 +49,8 @@ action state on `SyncLost` and allow actions only after `Resynchronized`, with p
 until a fresh position is established. `input_event_is_action_press` accepts EV_KEY value 1 and
 excludes repeat value 2, so repeated keys cannot create another command edge.
 Disconnects, partial records, and malformed timestamps are explicit errors. `InputBatch` has
-128 struct-of-arrays records and counts refused pushes.
+128 struct-of-arrays records and counts refused pushes. Public fixed records include explicit
+zero-valued reserved bytes so their C layouts have no implicit padding.
 
 ## ABI provenance
 
@@ -67,6 +74,11 @@ describes event reads. The VT modes and ioctl values follow the upstream
 [`include/uapi/linux/vt.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/vt.h);
 the release/acknowledge handling is implemented in
 [`drivers/tty/vt/vt_ioctl.c`](https://github.com/torvalds/linux/blob/master/drivers/tty/vt/vt_ioctl.c).
+That source passes `1` to `kill_pid` for release/acquire notifications; the kernel's
+[`include/linux/sched/signal.h`](https://github.com/torvalds/linux/blob/master/include/linux/sched/signal.h)
+defines `SEND_SIG_PRIV`, and the
+[`include/uapi/asm-generic/siginfo.h`](https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/siginfo.h)
+defines `SI_KERNEL` for privileged kernel-generated signals.
 The DRM ioctl structures and commands follow upstream
 [`include/uapi/drm/drm_mode.h`](https://github.com/torvalds/linux/blob/master/include/uapi/drm/drm_mode.h)
 and the installed headers listed above.

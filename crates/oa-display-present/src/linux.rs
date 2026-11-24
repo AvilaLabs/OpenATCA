@@ -57,6 +57,8 @@ const SIG_BLOCK: c_int = 0;
 const SIG_SETMASK: c_int = 2;
 const SIGUSR1: c_int = 10;
 const SIGUSR2: c_int = 12;
+const SI_USER: i32 = 0;
+const SI_KERNEL: i32 = 0x80;
 const SFD_NONBLOCK: c_int = 0x800;
 const SFD_CLOEXEC: c_int = O_CLOEXEC;
 const CONNECTED: u32 = 1;
@@ -146,7 +148,7 @@ const _: () = assert!(size_of::<AbsInfo>() == 24);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum KmsError {
     Present(PresentError), InvalidDevicePath, InactiveVt, VtNotText, DrmMasterUnavailable,
     NoConnectedMode, UnsupportedTopology, UnsupportedDimensions, Timeout, MalformedEvent,
-    DedicatedOwnerProcessRequired, SignalControl(i32), InvalidLifecycle,
+    DedicatedOwnerProcessRequired, SignalControl(i32), UnexpectedSignal(i32), OwnerMustTerminate, InvalidLifecycle,
     RestoreFailed, ReleaseFailed(i32), Faulted, System(i32), CleanupFailed { operation: i32, rollback: i32 },
 }
 
@@ -227,7 +229,7 @@ impl EvdevInput {
         Ok(input_record(InputRecordKind::Resynchronized, InputEvent::default(), snapshot))
     }
 }
-fn input_record(kind: InputRecordKind, event: InputEvent, snapshot: InputSnapshot) -> InputRecord { InputRecord { kind, event, snapshot } }
+fn input_record(kind: InputRecordKind, event: InputEvent, snapshot: InputSnapshot) -> InputRecord { InputRecord { kind, reserved: [0; 7], event, snapshot } }
 fn query_input_snapshot(fd: c_int, discarded: u32) -> Result<InputSnapshot, InputDeviceError> {
     let mut snapshot = InputSnapshot { discarded_records: discarded, relative_motion_lost: 1, ..Default::default() };
     // SAFETY: EVIOCGKEY writes exactly this initialized 96-byte key bitmap.
@@ -288,8 +290,17 @@ impl Buffer {
         }
         let map_ptr = match NonNull::new(raw.cast::<u8>()) {
             Some(p) => p,
-            None => { let mut destroy = DestroyDumb { handle: create.handle }; let _ = call(fd, DESTROY_DUMB, &mut destroy); return Err(KmsError::System(12)); }
+            None => {
+                // SAFETY: mmap succeeded at address zero; remove this exact mapping before
+                // destroying its DRM handle even though Rust cannot represent it as NonNull.
+                let _ = unsafe { munmap(raw, size) };
+                let mut destroy = DestroyDumb { handle: create.handle }; let _ = call(fd, DESTROY_DUMB, &mut destroy);
+                return Err(KmsError::System(12));
+            }
         };
+        // SAFETY: `size` is the bounded successful mapping extent owned by map_ptr.
+        // Zeroing ensures the first scanout is deterministic instead of relying on driver state.
+        unsafe { core::ptr::write_bytes(map_ptr.as_ptr(), 0, size); }
         let mut fb = FbCmd { width, height, pitch: create.pitch, bpp: 32, depth: 24, handle: create.handle, ..Default::default() };
         if let Err(e) = call(fd, ADDFB, &mut fb) {
             // SAFETY: map_ptr/size are exactly the successful mmap region above.
@@ -414,9 +425,15 @@ fn prepare(drm: File, tty: File, active_vt: u16, old_kd_mode: c_int, old_vt_mode
     let setup_still_active = matches!(active_after_setup, Ok(vt) if vt == active_vt);
     if !setup_still_active {
         let mut restore_mode = old_vt_mode; let restore = call(tty.as_raw_fd(), VT_SETMODE, &mut restore_mode);
-        drop(signals); let mask = restore_signal_mask(&old_signal_mask);
         let _ = destroy_buffer(fd, b0); let _ = destroy_buffer(fd, b1);
-        if let Err(e) = restore { return Err(e); } if let Err(e) = mask { return Err(e); }
+        if restore.is_err() {
+            // VT_PROCESS still names this process. Preserve its signal fd and blocked mask;
+            // terminating this owner lets the kernel reset VT control safely.
+            core::mem::forget(signals);
+            return Err(KmsError::OwnerMustTerminate);
+        }
+        drop(signals);
+        restore_signal_mask(&old_signal_mask)?;
         return match active_after_setup { Err(e) => Err(e), Ok(_) => Err(KmsError::InactiveVt) };
     }
     Ok(KmsDisplay { drm, tty, active_vt, old_kd_mode, old_crtc, old_connectors, old_connector_count, crtc_id, mode, connector, width, height, buffers: [Some(b0),Some(b1)], front: 0,
@@ -558,16 +575,34 @@ impl KmsDisplay {
     pub fn dimensions(&self) -> (u32, u32) { (self.width, self.height) }
     pub fn lifecycle(&self) -> KmsLifecycle { self.state }
     pub fn must_terminate_owner(&self) -> bool { matches!(self.state, KmsLifecycle::Faulted | KmsLifecycle::FaultedReleaseAckPending) }
-    /// Enter graphics mode and set the selected CRTC to a known blank front buffer.
+    /// Enter graphics mode and set the selected CRTC to the zeroed front buffer.
     pub fn start(&mut self) -> Result<(), KmsError> {
         self.ensure_owner()?;
         self.service_vt(0)?;
         if self.state != KmsLifecycle::Prepared { return Err(KmsError::InvalidLifecycle); }
         self.ensure_active()?;
-        self.set_kd_mode(KD_GRAPHICS)?;
-        self.service_vt(0)?;
+        if let Err(e) = self.set_kd_mode(KD_GRAPHICS) {
+            if let Err(rollback) = self.set_kd_mode(self.old_kd_mode) {
+                self.state = KmsLifecycle::Faulted;
+                return Err(KmsError::CleanupFailed { operation: system_code(e), rollback: system_code(rollback) });
+            }
+            return Err(e);
+        }
+        if let Err(e) = self.service_vt(0) {
+            if let Err(rollback) = self.set_kd_mode(self.old_kd_mode) {
+                self.state = KmsLifecycle::Faulted;
+                return Err(KmsError::CleanupFailed { operation: system_code(e), rollback: system_code(rollback) });
+            }
+            return Err(e);
+        }
         if self.state != KmsLifecycle::Prepared { return Err(KmsError::InactiveVt); }
-        let front = self.buffers.first().and_then(Option::as_ref).ok_or(KmsError::UnsupportedTopology)?;
+        let front = match self.buffers.first().and_then(Option::as_ref) {
+            Some(front) => front,
+            None => {
+                if self.set_kd_mode(self.old_kd_mode).is_err() { self.state = KmsLifecycle::Faulted; }
+                return Err(KmsError::UnsupportedTopology);
+            }
+        };
         let mut crtc = Crtc { connectors_ptr: (&self.connector as *const u32) as u64, connector_count: 1,
             crtc_id: self.crtc_id, fb_id: front.fb, mode_valid: 1, mode: self.mode, ..Default::default() };
         if let Err(e) = call(self.drm.as_raw_fd(), SETCRTC, &mut crtc) {
@@ -638,13 +673,21 @@ impl KmsDisplay {
     fn wait_pending_flip(&mut self, timeout_ms: u32) -> Result<(), KmsError> {
         let deadline = Instant::now() + Duration::from_millis(u64::from(timeout_ms));
         let mut interruptions = 0u8;
+        let mut zero_timeout_probed = false;
         while self.flip_pending {
+            let now = Instant::now();
+            let expired = now >= deadline;
+            if expired && (timeout_ms != 0 || zero_timeout_probed) {
+                if self.release_requested { return self.fault_release_pending_flip(); }
+                return Err(KmsError::Timeout);
+            }
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let millis = remaining.as_millis().min(i32::MAX as u128) as c_int;
+            let millis = if expired { 0 } else { remaining.as_millis().min(i32::MAX as u128) as c_int };
             let signal_fd = self.signals.as_ref().ok_or(KmsError::SignalControl(-1))?.as_raw_fd();
             let mut fds = [PollFd { fd: self.drm.as_raw_fd(), events: POLLIN, revents: 0 }, PollFd { fd: signal_fd, events: POLLIN, revents: 0 }];
             // SAFETY: fds is a two-element initialized poll array valid for the duration of poll.
             let count = unsafe { poll(fds.as_mut_ptr(), fds.len(), millis) };
+            if timeout_ms == 0 { zero_timeout_probed = true; }
             if count == 0 {
                 if self.release_requested { return self.fault_release_pending_flip(); }
                 return Err(KmsError::Timeout);
@@ -695,8 +738,9 @@ impl KmsDisplay {
     }
     fn complete_release(&mut self) -> Result<(), KmsError> {
         let restore = self.restore_crtc();
-        let text = if restore.is_ok() { self.set_kd_mode(KD_TEXT) } else { Err(KmsError::RestoreFailed) };
-        if let Err(e) = restore.or(text) {
+        let text = self.set_kd_mode(KD_TEXT);
+        if restore.is_err() || text.is_err() {
+            let e = restore.err().or_else(|| text.err()).unwrap_or(KmsError::RestoreFailed);
             self.state = kms_transition(self.state, KmsTransition::RestoreFailed).map_err(|_| KmsError::InvalidLifecycle)?;
             let drop_master = ioctl_call_unit(self.drm.as_raw_fd(), DROP_MASTER);
             let release = ioctl_value(self.tty.as_raw_fd(), VT_RELDISP, VT_RELEASE_OK);
@@ -790,8 +834,7 @@ impl KmsDisplay {
             return Err(KmsError::SignalControl(e.raw_os_error().unwrap_or(-1)));
         }
         if n as usize != SIGNAL_INFO_BYTES { return Err(KmsError::SignalControl(-1)); }
-        let signo = u32::from_ne_bytes(info.get(0..4).ok_or(KmsError::SignalControl(-1))?.try_into().map_err(|_| KmsError::SignalControl(-1))?);
-        Ok(i32::try_from(signo).ok())
+        decode_vt_signal_info(&info).map(Some)
     }
     fn set_kd_mode(&self, mode: c_int) -> Result<(), KmsError> {
         // SAFETY: KDSETMODE is an argument-by-value ioctl (`KD_TEXT` or `KD_GRAPHICS`).
@@ -840,6 +883,15 @@ impl KmsDisplay {
         if let Err(e) = restore_signal_mask(&self.old_signal_mask) { self.state = KmsLifecycle::Faulted; return Err(e); }
         self.state = final_state;
         Ok(())
+    }
+}
+fn decode_vt_signal_info(info: &[u8]) -> Result<c_int, KmsError> {
+    let signo = u32::from_ne_bytes(info.get(0..4).ok_or(KmsError::SignalControl(-1))?.try_into().map_err(|_| KmsError::SignalControl(-1))?);
+    let code = i32::from_ne_bytes(info.get(8..12).ok_or(KmsError::SignalControl(-1))?.try_into().map_err(|_| KmsError::SignalControl(-1))?);
+    match i32::try_from(signo).ok() {
+        Some(SIGUSR1 | SIGUSR2) if code == SI_KERNEL => i32::try_from(signo).map_err(|_| KmsError::UnexpectedSignal(-1)),
+        Some(other) => Err(KmsError::UnexpectedSignal(other)),
+        None => Err(KmsError::UnexpectedSignal(-1)),
     }
 }
 impl KmsDisplay {
@@ -920,5 +972,18 @@ fn tty_number(s: &str) -> Option<u16> { let n = s.strip_prefix("/dev/tty")?; let
     #[test] fn explicit_device_paths_only() {
         assert!(valid_card_path("/dev/dri/card0")); assert!(!valid_card_path("/dev/dri/renderD128"));
         assert!(valid_tty_path("/dev/tty7")); assert!(!valid_tty_path("/dev/tty17")); assert!(!valid_tty_path("/dev/ttyS0"));
+    }
+    #[test] fn only_kernel_generated_vt_signals_drive_lifecycle() {
+        let mut info = [0u8; SIGNAL_INFO_BYTES];
+        info[0..4].copy_from_slice(&(SIGUSR1 as u32).to_ne_bytes());
+        info[8..12].copy_from_slice(&SI_KERNEL.to_ne_bytes());
+        assert_eq!(decode_vt_signal_info(&info), Ok(SIGUSR1));
+        info[8..12].copy_from_slice(&SI_USER.to_ne_bytes());
+        assert_eq!(decode_vt_signal_info(&info), Err(KmsError::UnexpectedSignal(SIGUSR1)));
+    }
+    #[test] fn plain_input_records_have_explicit_zero_padding() {
+        let record = input_record(InputRecordKind::SyncReport, InputEvent::default(), InputSnapshot::default());
+        assert_eq!(record.reserved, [0; 7]);
+        assert_eq!(record.snapshot.reserved, [0; 3]);
     }
 }

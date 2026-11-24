@@ -136,13 +136,14 @@ pub struct InputSnapshot {
     pub absolute_axis_values: [i32; 64],
     pub discarded_records: u32,
     pub relative_motion_lost: u8,
+    pub reserved: [u8; 3],
 }
 const _: () = assert!(core::mem::size_of::<InputSnapshot>() == 368);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
-pub struct InputRecord { pub kind: InputRecordKind, pub event: InputEvent, pub snapshot: InputSnapshot }
-// Budget: event plus fixed key snapshot and C alignment padding.
+pub struct InputRecord { pub kind: InputRecordKind, pub reserved: [u8; 7], pub event: InputEvent, pub snapshot: InputSnapshot }
+// Budget: explicitly zeroed tag padding plus event and fixed key snapshot.
 const _: () = assert!(core::mem::size_of::<InputRecord>() == 400);
 
 /// Only a non-repeat EV_KEY press is an action edge. Value 2 is kernel key repeat.
@@ -174,15 +175,16 @@ pub struct InputBatch {
     pub codes: [u16; INPUT_BATCH_CAPACITY],
     pub values: [i32; INPUT_BATCH_CAPACITY],
     pub len: u16,
+    pub reserved: [u8; 2],
     pub refused: u32,
 }
-// Budget: 128 * 24-byte events plus counters and C alignment padding.
+// Budget: 128 * 24-byte events plus counters and explicit zero padding.
 const _: () = assert!(core::mem::size_of::<InputBatch>() == 3080);
 
 pub const fn input_batch_new() -> InputBatch {
     InputBatch { seconds: [0; INPUT_BATCH_CAPACITY], microseconds: [0; INPUT_BATCH_CAPACITY],
         kinds: [0; INPUT_BATCH_CAPACITY], codes: [0; INPUT_BATCH_CAPACITY],
-        values: [0; INPUT_BATCH_CAPACITY], len: 0, refused: 0 }
+        values: [0; INPUT_BATCH_CAPACITY], len: 0, reserved: [0; 2], refused: 0 }
 }
 
 /// Append a record to the fixed struct-of-arrays batch; a full batch is counted and refused.
@@ -209,6 +211,10 @@ mod tests {
         let mut b = [0u8; 24]; b[8..16].copy_from_slice(&1i64.to_ne_bytes()); b[16..18].copy_from_slice(&1u16.to_ne_bytes()); b[18..20].copy_from_slice(&30u16.to_ne_bytes()); b[20..24].copy_from_slice(&1i32.to_ne_bytes());
         assert_eq!(decode_evdev_event(&b).unwrap().unwrap().value, 1);
         b[16..18].copy_from_slice(&0u16.to_ne_bytes()); assert_eq!(decode_evdev_event(&b), Ok(None));
+    }
+    #[test] fn fixed_input_batch_starts_with_zero_reserved_bytes() {
+        assert_eq!(input_batch_new().reserved, [0; 2]);
+        assert_eq!(InputSnapshot::default().reserved, [0; 3]);
     }
     #[test] fn kms_lifecycle_requires_completed_flip_before_normal_release() {
         let state = kms_transition(KmsLifecycle::Prepared, KmsTransition::Start).unwrap();
