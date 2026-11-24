@@ -87,6 +87,8 @@ fn input<'a>(points: &'a [RoutePoint]) -> TrajectoryIssueInput<'a> {
 
 fn performance() -> PerformanceEnvelope {
     PerformanceEnvelope {
+        key: key(),
+        reserved_key_align: [0; 4],
         source_ms: 1_000,
         available_ms: 1_100,
         message_id: 12,
@@ -205,7 +207,8 @@ fn sequential_descent_clearance_leveloff_and_separate_speed_channel() {
 
     request.clearance.min_altitude_ft = NO_ALTITUDE_FT;
     request.clearance.max_altitude_ft = NO_ALTITUDE_FT;
-    request.clearance.form = ClearanceForm::Unsupported;
+    request.clearance.altitude_at_fix_ft = NO_ALTITUDE_FT;
+    request.clearance.form = ClearanceForm::Absent;
     request.clearance.source_ms = 0;
     request.clearance.available_ms = 0;
     request.clearance.message_id = 0;
@@ -242,6 +245,224 @@ fn sequential_descent_clearance_leveloff_and_separate_speed_channel() {
         issue_vertical_profile(&input(&over_cap), performance()).refusal,
         Refusal::InfeasibleSpeedWindow
     );
+}
+
+// REQ: OA-REG-010
+#[test]
+fn performance_evidence_is_flight_bound_and_zero_rate_is_a_valid_level_bound() {
+    let points = [route_point(0, 1_000, ident())];
+    let request = input_without_clearance(&points);
+    let mut evidence = performance();
+    evidence.max_climb_fpm = 0;
+    evidence.max_descent_fpm = 0;
+    let level = issue_vertical_profile(&request, evidence);
+    assert_eq!(level.availability, Availability::Available);
+    assert_eq!(level.points[0].reachable_min_ft, 10_000);
+    assert_eq!(level.points[0].reachable_max_ft, 10_000);
+    assert_eq!(level.performance, evidence);
+
+    evidence.key.gufi[0] ^= 1;
+    let mismatched = issue_vertical_profile(&request, evidence);
+    assert_eq!(mismatched.refusal, Refusal::PerformanceIdentityMismatch);
+    assert_eq!(mismatched.performance, evidence);
+
+    let mut missing_message = performance();
+    missing_message.message_id = 0;
+    assert_eq!(issue_vertical_profile(&request, missing_message).refusal, Refusal::InvalidPerformance);
+    let mut excessive_rate = performance();
+    excessive_rate.max_climb_fpm = 60_001;
+    assert_eq!(issue_vertical_profile(&request, excessive_rate).refusal, Refusal::InvalidPerformance);
+    let mut bad_key_padding = performance();
+    bad_key_padding.reserved_key_align[0] = 1;
+    assert_eq!(issue_vertical_profile(&request, bad_key_padding).refusal, Refusal::InvalidReservedFields);
+}
+
+// REQ: OA-REG-010
+#[test]
+fn current_unsupported_and_future_clearances_never_produce_a_feasible_profile() {
+    let mut point = route_point(0, 1_000, ident());
+    point.altitude_constraint_kind = AltitudeConstraintKind::None;
+    let points = [point];
+    let mut request = input(&points);
+    request.clearance.form = ClearanceForm::AltitudeAtFix;
+    request.clearance.min_altitude_ft = NO_ALTITUDE_FT;
+    request.clearance.max_altitude_ft = NO_ALTITUDE_FT;
+    request.clearance.altitude_at_fix_ft = 20_000;
+    request.clearance.message_id = 14;
+    let unsupported = issue_vertical_profile(&request, performance());
+    assert_eq!(unsupported.availability, Availability::Unavailable);
+    assert_eq!(unsupported.refusal, Refusal::UnsupportedClearanceForm);
+    assert_eq!(unsupported.clearance_assumption, ClearanceAssumption::Unsupported);
+    for form in [ClearanceForm::Block, ClearanceForm::Vfr, ClearanceForm::Unsupported] {
+        request.clearance.form = form;
+        request.clearance.altitude_at_fix_ft = NO_ALTITUDE_FT;
+        let output = issue_vertical_profile(&request, performance());
+        assert_eq!(output.refusal, Refusal::UnsupportedClearanceForm);
+        assert_eq!(output.availability, Availability::Unavailable);
+    }
+
+    request.clearance.form = ClearanceForm::Exact;
+    request.clearance.altitude_at_fix_ft = NO_ALTITUDE_FT;
+    request.clearance.min_altitude_ft = 12_000;
+    request.clearance.max_altitude_ft = 12_000;
+    request.clearance.source_ms = request.cutoff_ms + 1;
+    request.clearance.available_ms = request.cutoff_ms + 2;
+    let future = issue_vertical_profile(&request, performance());
+    assert_eq!(future.availability, Availability::Unavailable);
+    assert_eq!(future.refusal, Refusal::ClearanceUnavailableAtCutoff);
+    assert_eq!(future.clearance_assumption, ClearanceAssumption::Unavailable);
+
+    request.clearance.source_ms = 1_000;
+    request.clearance.available_ms = 1_100;
+    request.clearance.min_altitude_ft = NO_ALTITUDE_FT;
+    request.clearance.max_altitude_ft = NO_ALTITUDE_FT;
+    assert_eq!(issue_vertical_profile(&request, performance()).refusal, Refusal::InfeasibleAltitudeWindow);
+
+    request.clearance = Clearance {
+        source_ms: 0,
+        available_ms: 0,
+        message_id: 0,
+        min_altitude_ft: NO_ALTITUDE_FT,
+        max_altitude_ft: NO_ALTITUDE_FT,
+        altitude_at_fix_ft: 0,
+        form: ClearanceForm::Absent,
+        reserved: [0; 3],
+    };
+    let malformed_absent = issue_vertical_profile(&request, performance());
+    assert_eq!(malformed_absent.refusal, Refusal::ClearanceUnavailableAtCutoff);
+}
+
+// REQ: OA-REG-010
+#[test]
+fn assigned_exact_target_is_a_leveloff_target_and_route_constraints_remain_sequential() {
+    let near = [route_point(0, 1_000, ident())];
+    let mut request = input(&near);
+    request.clearance.min_altitude_ft = 18_000;
+    request.clearance.max_altitude_ft = 18_000;
+    request.clearance.form = ClearanceForm::Exact;
+    let target = issue_vertical_profile(&request, performance());
+    assert_eq!(target.availability, Availability::Available);
+    assert!(target.points[0].reachable_min_ft < 18_000);
+    assert!(target.points[0].reachable_max_ft < 18_000);
+
+    let mut below = route_point(0, 1_000, ident());
+    below.altitude_constraint_kind = AltitudeConstraintKind::Maximum;
+    below.max_altitude_ft = 9_000;
+    let below_points = [below];
+    let mut below_request = input(&below_points);
+    below_request.clearance.min_altitude_ft = 18_000;
+    below_request.clearance.max_altitude_ft = 18_000;
+    let below_result = issue_vertical_profile(&below_request, performance());
+    assert_eq!(below_result.refusal, Refusal::InfeasibleVerticalProfile);
+
+    let mut at_target = route_point(0, 10_000_000, ident());
+    at_target.altitude_constraint_kind = AltitudeConstraintKind::AtAltitude;
+    at_target.min_altitude_ft = 18_000;
+    let mut later_fix = ident();
+    later_fix.ident.bytes[0] = b'D';
+    let later = route_point(0, 10_000_100, later_fix);
+    let points = [at_target, later];
+    let mut request = input(&points);
+    request.clearance.min_altitude_ft = 18_000;
+    request.clearance.max_altitude_ft = 18_000;
+    let result = issue_vertical_profile(&request, performance());
+    assert_eq!(result.availability, Availability::Available);
+    assert_eq!(result.points[0].reachable_min_ft, 18_000);
+    assert_eq!(result.points[1].reachable_min_ft, 18_000);
+    assert_eq!(result.points[1].reachable_max_ft, 18_000);
+
+    let mut contradictory_point = later;
+    contradictory_point.altitude_constraint_kind = AltitudeConstraintKind::AtAltitude;
+    contradictory_point.min_altitude_ft = 10_000;
+    let contradictory = [at_target, contradictory_point];
+    let mut contradiction = input(&contradictory);
+    contradiction.clearance.min_altitude_ft = 18_000;
+    contradiction.clearance.max_altitude_ft = 18_000;
+    let result = issue_vertical_profile(&contradiction, performance());
+    assert_eq!(result.refusal, Refusal::InfeasibleVerticalProfile);
+    assert_eq!(result.examined_points, 2);
+    assert_eq!(result.points[0].availability, Availability::Available);
+    assert_eq!(result.points[1].availability, Availability::Unavailable);
+}
+
+// REQ: OA-REG-010
+#[test]
+fn window_clearance_allows_entry_without_a_deadline_and_holds_inside_bounds() {
+    let mut too_soon = route_point(0, 1_000, ident());
+    too_soon.altitude_constraint_kind = AltitudeConstraintKind::AtAltitude;
+    too_soon.min_altitude_ft = 15_000;
+    let too_soon_points = [too_soon];
+    let mut early = input(&too_soon_points);
+    early.clearance.form = ClearanceForm::Window;
+    early.clearance.min_altitude_ft = 12_000;
+    early.clearance.max_altitude_ft = 16_000;
+    let early_result = issue_vertical_profile(&early, performance());
+    assert_eq!(early_result.refusal, Refusal::InfeasibleVerticalProfile);
+
+    let mut first_distant = route_point(0, 10_000_000, ident());
+    first_distant.altitude_constraint_kind = AltitudeConstraintKind::None;
+    let mut reached_fix = ident();
+    reached_fix.ident.bytes[0] = b'D';
+    let mut reached = route_point(0, 10_000_000, reached_fix);
+    reached.altitude_constraint_kind = AltitudeConstraintKind::AtAltitude;
+    reached.min_altitude_ft = 15_000;
+    let mut final_fix = ident();
+    final_fix.ident.bytes[0] = b'E';
+    let final_point = route_point(0, 10_000_100, final_fix);
+    let points = [first_distant, reached, final_point];
+    let mut request = input(&points);
+    request.clearance.form = ClearanceForm::Window;
+    request.clearance.min_altitude_ft = 12_000;
+    request.clearance.max_altitude_ft = 16_000;
+    let result = issue_vertical_profile(&request, performance());
+    assert_eq!(result.availability, Availability::Available);
+    assert!(result.points[0].reachable_min_ft < 12_000);
+    assert_eq!(result.points[1].reachable_min_ft, 15_000);
+    assert_eq!(result.points[2].reachable_min_ft, 15_000);
+    assert_eq!(result.points[2].reachable_max_ft, 15_000);
+}
+
+// REQ: OA-REG-010
+#[test]
+fn microfoot_propagation_handles_zero_tiny_legs_and_reports_checked_overflow() {
+    let mut second_fix = ident();
+    second_fix.ident.bytes[0] = b'D';
+    let points = [
+        route_point(0, 0, ident()),
+        route_point(0, 0, second_fix),
+        route_point(0, 1, {
+            let mut fix = ident();
+            fix.ident.bytes[0] = b'E';
+            fix
+        }),
+    ];
+    let request = input_without_clearance(&points);
+    let result = issue_vertical_profile(&request, performance());
+    assert_eq!(result.availability, Availability::Available);
+    assert_eq!(result.points[0].crossing_ms, request.track.state_ms);
+    assert_eq!(result.points[1].crossing_ms, request.track.state_ms);
+    assert!(result.points[2].crossing_ms >= request.track.state_ms);
+
+    let long_points = [route_point(0, 900_000_000, ident())];
+    let long_request = input_without_clearance(&long_points);
+    let mut slow = performance();
+    slow.max_groundspeed_mmps = 1;
+    slow.max_climb_fpm = 60_000;
+    let mut slow_request = long_request;
+    slow_request.track.groundspeed_mmps = 1;
+    assert_eq!(issue_vertical_profile(&slow_request, slow).refusal, Refusal::AltitudeOverflow);
+
+    let time_points = [route_point(0, 1_000_000, ident())];
+    let mut time_overflow = input_without_clearance(&time_points);
+    time_overflow.track.state_ms = i64::MAX;
+    time_overflow.track.available_ms = i64::MAX;
+    time_overflow.track.newest_source_ms = i64::MAX;
+    time_overflow.cutoff_ms = i64::MAX;
+    let mut fresh = performance();
+    fresh.source_ms = i64::MAX - 10;
+    fresh.available_ms = i64::MAX - 5;
+    fresh.max_age_ms = 20;
+    assert_eq!(issue_vertical_profile(&time_overflow, fresh).refusal, Refusal::TimeOverflow);
 }
 
 #[test]

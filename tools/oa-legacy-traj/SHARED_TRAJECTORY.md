@@ -104,24 +104,46 @@ qualification and makes no operational-safety or legacy-superiority claim.
 
 `issue_vertical_profile` is an explicit API selection; ordinary `issue_trajectory` behavior and
 its fixed output layout do not change. It accepts the same route, flight key, active cursor, track,
-clearance and cutoff plus a `PerformanceEnvelope`. The envelope states whether evidence is measured
-or empirical-model based, its source and availability times, message identifier, maximum age, and
-positive maximum climb, descent and groundspeed values. Missing, contradictory, stale or future
-performance evidence is refused. The caller supplies performance; this API does not infer aircraft
-type, fall back to an aircraft class or synthesize a default rate.
+clearance and cutoff plus a `PerformanceEnvelope`. The envelope carries the complete flight key,
+positive source message identifier, measured or empirical-model source, source and availability
+times, maximum age, and maximum climb, descent and groundspeed bounds. Its key must match the
+flight key being evaluated. Missing, contradictory, mismatched, stale, future or malformed
+performance evidence is refused. Zero climb or descent is a valid level-only bound; zero is not an
+absence marker. Bounds above 60,000 ft/min or 1,000,000 mm/s are refused. The caller supplies the
+evidence and these broad sanity bounds; the core does not infer aircraft type, choose an aircraft
+class, synthesize a performance rate, or predict an aircraft-specific motion model.
 
-For each active suffix point, crossing time is distance from the prior point divided by measured
-track groundspeed. The route suffix starts at the track position and exact unique cursor identity.
-At successive crossings, the reachable altitude interval expands from the previous feasible
-interval by the declared climb and descent bounds for elapsed time, then intersects the point's
-altitude restriction and any eligible supported exact/window clearance. Sequential set propagation
-means each reported interval has at least one path through all earlier restrictions. Exact altitude
-restrictions and exact clearance bounds hold the interval at that altitude at later crossings while
-the same constraint remains active, representing a feasible level-off. This does not claim a fitted
-vertical profile, rate-of-climb acceleration or a particular chosen path inside a feasible interval.
-It starts from reported altitude and does not model the track's instantaneous vertical rate or
-vertical-rate acceleration.
-Crossing times use constant observed groundspeed and do not include wind.
+Only a canonical absent clearance (absent form, zero evidence stamps and message ID, all altitude
+fields set to the absent sentinel, and zero reserved bytes) is treated as omitted. A present
+clearance must have valid, cutoff-eligible evidence. Only exact and window forms are supported;
+altitude-at-fix, block, VFR, and other forms return an explicit refusal. The result records whether
+clearance was absent, exact, or a window and copies the full performance envelope, including its
+flight key, source identifier, and timestamps. It does not hide missing clearance as an empty
+interval.
+
+The active route suffix starts at the track position and exact unique cursor identity. Each leg's
+crossing duration is its great-circle distance divided by measured groundspeed. Climb and descent
+allowances are independently floored per leg in microfeet; they are not derived by subtracting
+rounded cumulative crossing times. Crossing timestamps are the checked ceiling of cumulative travel
+time. Internal interval propagation uses checked integer microfeet, and reported whole-foot bounds
+round the reachable lower endpoint upward and upper endpoint downward.
+
+At successive crossings, the reachable interval propagates from the preceding interval using the
+declared rate bounds, then intersects route-point restrictions. With no clearance, climb and descent
+are both permitted within their bounds. An exact clearance is a level-off target rather than a
+requirement to be attained at the first fix: an interval below the target may wait or climb toward
+it; one above may wait or descend toward it. A window behaves similarly at each finite boundary,
+allowing entry without inventing an arrival deadline and preventing motion farther away outside the
+window. Once a route-point restriction intersects the interval, only that feasible prefix is
+reported if a later crossing is infeasible. Top-level success means a legal prefix exists under the
+declared constant-rate bounds; it is not a selected trajectory or a claim that every preceding
+altitude remains viable for every later fix.
+
+The model uses constant observed groundspeed, no wind, and rate bounds without acceleration. It
+starts from reported altitude and does not model the track's instantaneous vertical rate, vertical
+rate acceleration, temperature, turns, or forward uncertainty. The performance bounds are caller
+evidence with coarse sanity caps, not a validated aircraft-specific model. This is bounded
+prefix-reachability evidence only, with no physical or operational qualification claim.
 
 Altitude and speed restrictions remain separate channels. The output retains measured groundspeed
 per crossing. Explicit groundspeed restrictions are checked against that observed speed; a minimum
@@ -131,20 +153,20 @@ Indicated-airspeed and unknown-reference restrictions are never converted to gro
 maximum groundspeed is a bound, not a command, and does not produce an accelerated speed prediction.
 
 Work is checked before processing: `MAX_VERTICAL_WORK = 27,647` units at the 256-point route limit,
-including admission through the fixed-motion core and sequential crossing checks.
-The output contains exactly 256 fixed-size point slots and reports the processed suffix length and
-first infeasible route index. Unsupported route geometry, vectors gaps, unsupported altitude
-forms, malformed restrictions, crossing-time overflow and unreachable intervals are explicit
-refusals. Wind and forward uncertainty remain unmodelled and are not implied by this feasibility
-result. This API is not operationally qualified.
+including admission through the fixed-motion core and sequential crossing checks. The fixed output
+contains 256 point slots, the supplied performance envelope, a clearance-assumption tag, the actual
+visited prefix length, and the first infeasible route index. Unsupported route geometry, vectors
+gaps, unsupported clearance/altitude forms, malformed restrictions, crossing-time overflow and
+unreachable intervals are explicit refusals. The result does not imply unmodelled wind or forward
+uncertainty, and is not operationally qualified.
 
 ### Requirements suggestions (not yet normative)
 
 - A future performance source should identify fitted/model version and aircraft applicability,
   evidence population and validity interval; this API accepts caller-supplied bounds and does not
   qualify them.
-- A speed-profile mode needs explicit speed-command intent and a validated acceleration model before
-  it can claim route speed-transition feasibility.
+- A speed-profile mode needs explicit speed-command intent before it can claim route speed-transition
+  feasibility.
 - M4's target model still needs wind, temperature, uncertainty, turn geometry and empirical
   evaluation against legacy baselines; this feasibility API closes none of those requirements.
 
