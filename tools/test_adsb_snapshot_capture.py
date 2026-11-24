@@ -5,6 +5,7 @@ from argparse import Namespace
 from pathlib import Path
 import tempfile
 import unittest
+import warnings
 from unittest.mock import patch
 
 
@@ -110,6 +111,60 @@ class CaptureTests(unittest.TestCase):
             code, stdout, stderr = capture.bounded_process(command, b"", 5, 4096, 4096, (binary.fileno(),))
         self.assertEqual(code, 0, stderr.decode("utf-8", "replace"))
         self.assertEqual(stdout, b"descriptor-ok\n")
+
+    def test_process_pipes_close_without_resource_warnings(self):
+        real_popen = capture.subprocess.Popen
+        children = []
+
+        def track_child(*command, **options):
+            child = real_popen(*command, **options)
+            children.append(child)
+            return child
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ResourceWarning)
+            with patch.object(capture.subprocess, "Popen", side_effect=track_child):
+                code, stdout, _ = capture.bounded_process(
+                    [capture.sys.executable, "-c", "print('closed')"], b"", 5, 4096, 4096)
+        self.assertEqual(code, 0)
+        self.assertEqual(stdout, b"closed\n")
+        self.assertEqual(len(children), 1)
+        self.assertTrue(children[0].stdin.closed)
+        self.assertTrue(children[0].stdout.closed)
+        self.assertTrue(children[0].stderr.closed)
+
+    def test_timeout_kills_and_reaps_child_and_closes_pipes(self):
+        real_popen = capture.subprocess.Popen
+        children = []
+
+        def track_child(*command, **options):
+            child = real_popen(*command, **options)
+            children.append(child)
+            return child
+
+        with patch.object(capture.subprocess, "Popen", side_effect=track_child):
+            started = capture.time.monotonic()
+            with self.assertRaises(capture.subprocess.TimeoutExpired):
+                capture.bounded_process(
+                    [capture.sys.executable, "-c", "import time; time.sleep(10)"],
+                    b"x" * (1024 * 1024), 0.5, 4096, 4096)
+            elapsed = capture.time.monotonic() - started
+        self.assertEqual(len(children), 1)
+        self.assertLess(elapsed, 3.0)
+        child = children[0]
+        self.assertIsNotNone(child.poll())
+        self.assertTrue(child.stdin.closed)
+        self.assertTrue(child.stdout.closed)
+        self.assertTrue(child.stderr.closed)
+
+    def test_timeout_kills_descendant_holding_capture_pipes(self):
+        child = "import time; time.sleep(10)"
+        parent = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',sys.argv[1]]); print('parent-exit',flush=True)"
+        started = capture.time.monotonic()
+        with self.assertRaises(capture.subprocess.TimeoutExpired):
+            capture.bounded_process(
+                [capture.sys.executable, "-c", parent, child], b"", 0.5, 4096, 4096)
+        self.assertLess(capture.time.monotonic() - started, 3.0)
 
     def test_open_binary_digest_detects_in_place_change(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -18,7 +18,8 @@ from pathlib import Path
 import subprocess
 import stat
 import sys
-import threading
+import selectors
+import signal
 import time
 from datetime import datetime, timezone
 import re
@@ -280,46 +281,92 @@ def check_snapshot_times(body: bytes, receipt_ms: int, guard: sealed_guard.Guard
 def bounded_process(command: list[str], body: bytes, timeout_s: int, stdout_limit: int, stderr_limit: int,
                     pass_fds: tuple[int, ...] = ()) -> tuple[int, bytes, bytes]:
     proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            close_fds=True, pass_fds=pass_fds)
-    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+                            close_fds=True, pass_fds=pass_fds, start_new_session=True)
+    stdin, stdout, stderr = proc.stdin, proc.stdout, proc.stderr
+    if stdin is None or stdout is None or stderr is None:
+        proc.kill()
+        proc.wait()
+        raise RuntimeError("decoder subprocess pipes were not created")
+    selector = selectors.DefaultSelector()
     outputs = [bytearray(), bytearray()]
     limits = [stdout_limit, stderr_limit]
-    overflow = threading.Event()
+    streams = {stdout: 0, stderr: 1}
+    pending = memoryview(body)
+    deadline = time.monotonic() + timeout_s
 
-    def drain(stream, slot: int) -> None:
-        while True:
-            chunk = stream.read(8192)
-            if not chunk:
-                return
-            remaining = limits[slot] - len(outputs[slot])
-            if len(chunk) > remaining:
-                if remaining > 0:
-                    outputs[slot].extend(chunk[:remaining])
-                overflow.set()
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
-            elif not overflow.is_set():
-                outputs[slot].extend(chunk)
+    def kill_group() -> None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
-    readers = [threading.Thread(target=drain, args=(proc.stdout, 0), daemon=True),
-               threading.Thread(target=drain, args=(proc.stderr, 1), daemon=True)]
-    for thread in readers:
-        thread.start()
     try:
-        proc.stdin.write(body)
-        proc.stdin.close()
-        code = proc.wait(timeout=timeout_s)
+        for stream in (stdin, stdout, stderr):
+            os.set_blocking(stream.fileno(), False)
+        selector.register(stdout, selectors.EVENT_READ, "stdout")
+        selector.register(stderr, selectors.EVENT_READ, "stderr")
+        if pending:
+            selector.register(stdin, selectors.EVENT_WRITE, "stdin")
+        else:
+            stdin.close()
+        while True:
+            if proc.poll() is not None and not selector.get_map():
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(command, timeout_s)
+            events = selector.select(remaining)
+            for key, _ in events:
+                stream = key.fileobj
+                if key.data == "stdin":
+                    try:
+                        sent = os.write(stream.fileno(), pending[:65_536])
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        selector.unregister(stream)
+                        stream.close()
+                        continue
+                    if sent <= 0:
+                        raise BrokenPipeError("decoder closed its input")
+                    pending = pending[sent:]
+                    if not pending:
+                        selector.unregister(stream)
+                        stream.close()
+                    continue
+                try:
+                    chunk = os.read(stream.fileno(), 8192)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                slot = streams[stream]
+                remaining_capacity = limits[slot] - len(outputs[slot])
+                if len(chunk) > remaining_capacity:
+                    if remaining_capacity > 0:
+                        outputs[slot].extend(chunk[:remaining_capacity])
+                    raise RuntimeError("snapshot decoder exceeded stdout/stderr cap")
+                outputs[slot].extend(chunk)
+        code = proc.wait()
     except BaseException:
-        proc.kill()
+        kill_group()
         proc.wait()
         raise
     finally:
-        for thread in readers:
-            thread.join()
-    if overflow.is_set():
-        raise RuntimeError("snapshot decoder exceeded stdout/stderr cap")
+        if proc.poll() is None:
+            kill_group()
+            proc.wait()
+        selector.close()
+        for stream in (stdin, stdout, stderr):
+            if not stream.closed:
+                stream.close()
     return code, bytes(outputs[0]), bytes(outputs[1])
 
 
