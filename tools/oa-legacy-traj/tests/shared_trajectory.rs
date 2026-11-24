@@ -226,8 +226,10 @@ fn sequential_descent_clearance_leveloff_and_separate_speed_channel() {
     level_request.clearance.max_altitude_ft = 10_500;
     let level = issue_vertical_profile(&level_request, performance());
     assert_eq!(level.availability, Availability::Available);
-    assert_eq!(level.points[0].reachable_min_ft, 10_500);
-    assert_eq!(level.points[1].reachable_min_ft, 10_500);
+    // A clearance is a level-off target; it does not force attainment at the first fix.
+    assert_eq!(level.points[0].reachable_min_ft, 10_000);
+    assert_eq!(level.points[0].reachable_max_ft, 10_500);
+    assert_eq!(level.points[1].reachable_min_ft, 10_000);
     assert_eq!(level.points[1].reachable_max_ft, 10_500);
 
     let mut bad_speed = point;
