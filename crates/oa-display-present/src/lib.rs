@@ -1,13 +1,17 @@
 //! Direct Linux presentation boundary. All device access is shell code; the contract and
 //! event decoder are pure. No desktop, window system, or toolkit is involved.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("oa-display-present supports only the Linux 64-bit UAPI");
+#[cfg(not(target_os = "linux"))]
+compile_error!("oa-display-present targets Linux only");
+#[cfg(target_endian = "big")]
+compile_error!("oa-display-present requires little-endian XRGB8888 pixels");
 
-mod os;
+mod linux;
 
-pub use os::{open_kms, KmsDisplay};
+pub use linux::{open_evdev, open_kms, EvdevInput, InputDeviceError, KmsDisplay, KmsError};
 
 /// Maximum dimensions accepted from a mode or caller configuration.
 pub const MAX_WIDTH: u32 = 4096;
@@ -62,6 +66,7 @@ pub fn validate_frame(frame: PixelFrame<'_>) -> Result<FrameLayout, PresentError
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct InputEvent {
     pub seconds: i64,
     pub microseconds: i64,
@@ -69,35 +74,55 @@ pub struct InputEvent {
     pub code: u16,
     pub value: i32,
 }
+// Budget: fixed 64-bit evdev record copied by each shell read.
+const _: () = assert!(core::mem::size_of::<InputEvent>() == 24);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InputError { Truncated, InvalidTimestamp, UnsupportedEvent }
+pub enum InputError { Truncated, InvalidTimestamp }
 
 /// Decode the Linux 64-bit `struct input_event` wire layout (24 bytes).
-/// SYN_REPORT is represented by `Ok(None)`; other event types are preserved verbatim.
+/// SYN_REPORT (`EV_SYN`/`SYN_REPORT`) is represented by `Ok(None)`; all other types are preserved.
 pub fn decode_evdev_event(bytes: &[u8]) -> Result<Option<InputEvent>, InputError> {
     if bytes.len() != 24 { return Err(InputError::Truncated); }
-    let i64_at = |o| i64::from_ne_bytes([bytes[o],bytes[o+1],bytes[o+2],bytes[o+3],bytes[o+4],bytes[o+5],bytes[o+6],bytes[o+7]]);
-    let u16_at = |o| u16::from_ne_bytes([bytes[o], bytes[o+1]]);
-    let i32_at = |o| i32::from_ne_bytes([bytes[o],bytes[o+1],bytes[o+2],bytes[o+3]]);
-    let seconds = i64_at(0); let microseconds = i64_at(8);
+    let seconds = i64::from_ne_bytes(bytes.get(0..8).ok_or(InputError::Truncated)?.try_into().map_err(|_| InputError::Truncated)?);
+    let microseconds = i64::from_ne_bytes(bytes.get(8..16).ok_or(InputError::Truncated)?.try_into().map_err(|_| InputError::Truncated)?);
     if seconds < 0 || !(0..1_000_000).contains(&microseconds) { return Err(InputError::InvalidTimestamp); }
-    let kind = u16_at(16);
-    if kind == 0 { return Ok(None); }
-    if !matches!(kind, 1 | 2 | 3 | 4 | 5 | 17 | 18 | 20) { return Err(InputError::UnsupportedEvent); }
-    Ok(Some(InputEvent { seconds, microseconds, kind, code: u16_at(18), value: i32_at(20) }))
+    let kind = u16::from_ne_bytes(bytes.get(16..18).ok_or(InputError::Truncated)?.try_into().map_err(|_| InputError::Truncated)?);
+    let code = u16::from_ne_bytes(bytes.get(18..20).ok_or(InputError::Truncated)?.try_into().map_err(|_| InputError::Truncated)?);
+    let value = i32::from_ne_bytes(bytes.get(20..24).ok_or(InputError::Truncated)?.try_into().map_err(|_| InputError::Truncated)?);
+    if kind == 0 && code == 0 { return Ok(None); }
+    Ok(Some(InputEvent { seconds, microseconds, kind, code, value }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InputBatch { pub events: [InputEvent; INPUT_BATCH_CAPACITY], pub len: u16, pub refused: u32 }
+#[repr(C)]
+pub struct InputBatch {
+    pub seconds: [i64; INPUT_BATCH_CAPACITY],
+    pub microseconds: [i64; INPUT_BATCH_CAPACITY],
+    pub kinds: [u16; INPUT_BATCH_CAPACITY],
+    pub codes: [u16; INPUT_BATCH_CAPACITY],
+    pub values: [i32; INPUT_BATCH_CAPACITY],
+    pub len: u16,
+    pub refused: u32,
+}
+// Budget: 128 * 24-byte events plus counters and C alignment padding.
+const _: () = assert!(core::mem::size_of::<InputBatch>() == 3080);
 
-impl InputBatch {
-    pub const fn new() -> Self { Self { events: [InputEvent { seconds: 0, microseconds: 0, kind: 0, code: 0, value: 0 }; INPUT_BATCH_CAPACITY], len: 0, refused: 0 } }
-    pub fn push(&mut self, event: InputEvent) -> bool {
-        let i = usize::from(self.len);
-        if i >= INPUT_BATCH_CAPACITY { self.refused = self.refused.saturating_add(1); return false; }
-        self.events[i] = event; self.len += 1; true
-    }
+pub const fn input_batch_new() -> InputBatch {
+    InputBatch { seconds: [0; INPUT_BATCH_CAPACITY], microseconds: [0; INPUT_BATCH_CAPACITY],
+        kinds: [0; INPUT_BATCH_CAPACITY], codes: [0; INPUT_BATCH_CAPACITY],
+        values: [0; INPUT_BATCH_CAPACITY], len: 0, refused: 0 }
+}
+
+/// Append a record to the fixed struct-of-arrays batch; a full batch is counted and refused.
+pub fn input_batch_push(batch: &mut InputBatch, event: InputEvent) -> bool {
+    let i = usize::from(batch.len);
+    if i >= INPUT_BATCH_CAPACITY { batch.refused = batch.refused.saturating_add(1); return false; }
+    let (Some(seconds), Some(microseconds), Some(kinds), Some(codes), Some(values)) =
+        (batch.seconds.get_mut(i), batch.microseconds.get_mut(i), batch.kinds.get_mut(i), batch.codes.get_mut(i), batch.values.get_mut(i))
+    else { batch.refused = batch.refused.saturating_add(1); return false; };
+    *seconds = event.seconds; *microseconds = event.microseconds; *kinds = event.kind; *codes = event.code; *values = event.value;
+    batch.len += 1; true
 }
 
 #[cfg(test)]
