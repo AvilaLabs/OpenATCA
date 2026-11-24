@@ -135,7 +135,7 @@ fn published_time_selection_is_half_open_and_excluded_rows_do_not_enter_fit_or_d
     };
     recs.push(untimed);
     let interval = TimeInterval::new(T0 + 20_000, T0 + 40_000).unwrap();
-    let counts = select_published_time(&mut recs, Some(interval));
+    let counts = select_published_time(&mut recs, Some(interval)).unwrap();
     assert_eq!(counts.records_after_sealed_filter, 82);
     assert_eq!(counts.selected_records, 10);
     assert_eq!(counts.excluded_outside_interval, 71);
