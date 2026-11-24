@@ -10,6 +10,7 @@ pub enum RecordingCliError {
     Adapt(AdapterError),
 }
 
+// A7.2: cold shell output for one offline recording conversion.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordingCliOutput {
     pub normalized_tsv: String,

@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+default-run = "oa-regional-session"
+autobins = false
 
 [lints]
 workspace = true
@@ -60,3 +62,7 @@ path = "src/main.rs"
 [[bin]]
 name = "regional-recovery-worker"
 path = "src/bin/regional-recovery-worker.rs"
+
+[[bin]]
+name = "regional-recording-import"
+path = "src/bin/regional-recording-import.rs"

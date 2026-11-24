@@ -20,13 +20,12 @@ pub enum RecordingSource {
     Adsb,
 }
 
-impl RecordingSource {
-    pub const fn rank(self) -> u8 {
-        // The normalized protocol requires surveillance before flight events at one receipt.
-        match self { Self::Adsb => 0, Self::Sfdps => 1 }
-    }
+pub const fn recording_source_rank(source: RecordingSource) -> u8 {
+    // The normalized protocol requires surveillance before flight events at one receipt.
+    match source { RecordingSource::Adsb => 0, RecordingSource::Sfdps => 1 }
 }
 
+// A7.2: cold shell input descriptor; one row per bounded source stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordingInput {
     pub source: RecordingSource,
@@ -34,6 +33,7 @@ pub struct RecordingInput {
 }
 
 /// A bounded copied frame, independent of the reader's reused byte buffer.
+// A7.2: cold shell record retained only within the offline 100k-frame bound.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedFrame {
     pub source: RecordingSource,
@@ -49,6 +49,7 @@ pub struct RecordedFrame {
     pub payload: Vec<u8>,
 }
 
+// A7.2: cold shell per-source counters.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StreamCounts {
     pub files_seen: u64,
@@ -72,6 +73,7 @@ pub struct StreamCounts {
     pub gzip_damaged: u64,
 }
 
+// A7.2: cold shell aggregate counters for one offline adaptation.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecordingCounts {
     pub sfdps: StreamCounts,
@@ -85,6 +87,7 @@ pub struct RecordingCounts {
     pub work_compacted_bytes: u64,
 }
 
+// A7.2: cold shell output retained within the offline frame and byte limits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordingFrames {
     /// Sorted by receipt, source priority, source sequence, caller stream order, and byte offset.
@@ -94,6 +97,7 @@ pub struct RecordingFrames {
     pub streams: Vec<RecordingStreamProvenance>,
 }
 
+// A7.2: cold shell content hash and byte counts for one input stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordingStreamProvenance {
     pub source: RecordingSource,
@@ -315,7 +319,8 @@ pub fn read_oaf_inputs(inputs: &[RecordingInput]) -> Result<RecordingFrames, Rec
         if physical.len() > remaining_bytes { return Err(RecordingReadError::InputTooLarge); }
         if physical.len() != file_bytes { return Err(RecordingReadError::Read(io::Error::new(io::ErrorKind::UnexpectedEof, "recording changed while reading"))); }
         let compressed = physical.starts_with(&[0x1f, 0x8b]) || path.extension().is_some_and(|ext| ext == "gz");
-        let remaining_decoded = MAX_RECORDING_INPUT_BYTES.checked_sub(result.counts.total_decoded_bytes).ok_or(RecordingReadError::InputTooLarge)?;
+        let already_decoded = usize::try_from(result.counts.total_decoded_bytes).map_err(|_| RecordingReadError::InputTooLarge)?;
+        let remaining_decoded = MAX_RECORDING_INPUT_BYTES.checked_sub(already_decoded).ok_or(RecordingReadError::InputTooLarge)?;
         let expanded;
         let bytes = if compressed {
             let (decoded, gzip_summary, damaged) = inflate_gzip(&physical, remaining_decoded)?;
@@ -351,10 +356,11 @@ pub fn read_oaf_inputs(inputs: &[RecordingInput]) -> Result<RecordingFrames, Rec
             gzip: compressed,
         });
         result.counts.total_bytes = result.counts.total_bytes.checked_add(size).ok_or(RecordingReadError::InputTooLarge)?;
-        result.counts.total_decoded_bytes = result.counts.total_decoded_bytes.checked_add(bytes.len()).ok_or(RecordingReadError::InputTooLarge)?;
+        let decoded_bytes = u64::try_from(bytes.len()).map_err(|_| RecordingReadError::InputTooLarge)?;
+        result.counts.total_decoded_bytes = result.counts.total_decoded_bytes.checked_add(decoded_bytes).ok_or(RecordingReadError::InputTooLarge)?;
         result.counts.total_frames = result.counts.total_frames.checked_add(stream_counts.frames_seen).ok_or(RecordingReadError::FrameCountOverflow)?;
         let target = counts_mut(&mut result.counts, input.source);
-        *target = target.saturating_add(stream_counts);
+        *target = add_stream_counts(*target, stream_counts);
         result.counts.work_scan_positions = result.counts.work_scan_positions.saturating_add(work.scan_positions);
         result.counts.work_crc_bytes = result.counts.work_crc_bytes.saturating_add(work.crc_bytes);
         result.counts.work_copied_bytes = result.counts.work_copied_bytes.saturating_add(work.copied_bytes);
@@ -368,26 +374,24 @@ pub fn read_oaf_inputs(inputs: &[RecordingInput]) -> Result<RecordingFrames, Rec
 
 /// Canonical receipt merge. Source rank matches the normalized same-receipt category order.
 pub fn sort_recording_frames(frames: &mut [RecordedFrame]) {
-    frames.sort_unstable_by_key(|f| (f.receipt_ns, f.source.rank(), f.sequence, f.stream_index, f.byte_offset));
+    frames.sort_unstable_by_key(|f| (f.receipt_ns, recording_source_rank(f.source), f.sequence, f.stream_index, f.byte_offset));
 }
 
-impl StreamCounts {
-    fn saturating_add(self, rhs: Self) -> Self {
-        Self {
-            files_seen: self.files_seen.saturating_add(rhs.files_seen), files_refused: self.files_refused.saturating_add(rhs.files_refused),
-            input_bytes: self.input_bytes.saturating_add(rhs.input_bytes), frames_seen: self.frames_seen.saturating_add(rhs.frames_seen),
-            message_frames: self.message_frames.saturating_add(rhs.message_frames), status_frames: self.status_frames.saturating_add(rhs.status_frames),
-            reject_frames: self.reject_frames.saturating_add(rhs.reject_frames), invalid_frames: self.invalid_frames.saturating_add(rhs.invalid_frames),
-            truncated_frames: self.truncated_frames.saturating_add(rhs.truncated_frames), skipped_bytes: self.skipped_bytes.saturating_add(rhs.skipped_bytes),
-            invalid_receipt: self.invalid_receipt.saturating_add(rhs.invalid_receipt), receipt_regressions: self.receipt_regressions.saturating_add(rhs.receipt_regressions),
-            sequence_regressions: self.sequence_regressions.saturating_add(rhs.sequence_regressions),
-            sealed_receipt: self.sealed_receipt.saturating_add(rhs.sealed_receipt), over_capacity_frames: self.over_capacity_frames.saturating_add(rhs.over_capacity_frames),
-            compressed_inputs_refused: self.compressed_inputs_refused.saturating_add(rhs.compressed_inputs_refused),
-            gzip_bytes_out: self.gzip_bytes_out.saturating_add(rhs.gzip_bytes_out),
-            gzip_truncated: self.gzip_truncated.saturating_add(rhs.gzip_truncated),
-            gzip_damaged: self.gzip_damaged.saturating_add(rhs.gzip_damaged),
+fn add_stream_counts(lhs: StreamCounts, rhs: StreamCounts) -> StreamCounts {
+        StreamCounts {
+            files_seen: lhs.files_seen.saturating_add(rhs.files_seen), files_refused: lhs.files_refused.saturating_add(rhs.files_refused),
+            input_bytes: lhs.input_bytes.saturating_add(rhs.input_bytes), frames_seen: lhs.frames_seen.saturating_add(rhs.frames_seen),
+            message_frames: lhs.message_frames.saturating_add(rhs.message_frames), status_frames: lhs.status_frames.saturating_add(rhs.status_frames),
+            reject_frames: lhs.reject_frames.saturating_add(rhs.reject_frames), invalid_frames: lhs.invalid_frames.saturating_add(rhs.invalid_frames),
+            truncated_frames: lhs.truncated_frames.saturating_add(rhs.truncated_frames), skipped_bytes: lhs.skipped_bytes.saturating_add(rhs.skipped_bytes),
+            invalid_receipt: lhs.invalid_receipt.saturating_add(rhs.invalid_receipt), receipt_regressions: lhs.receipt_regressions.saturating_add(rhs.receipt_regressions),
+            sequence_regressions: lhs.sequence_regressions.saturating_add(rhs.sequence_regressions),
+            sealed_receipt: lhs.sealed_receipt.saturating_add(rhs.sealed_receipt), over_capacity_frames: lhs.over_capacity_frames.saturating_add(rhs.over_capacity_frames),
+            compressed_inputs_refused: lhs.compressed_inputs_refused.saturating_add(rhs.compressed_inputs_refused),
+            gzip_bytes_out: lhs.gzip_bytes_out.saturating_add(rhs.gzip_bytes_out),
+            gzip_truncated: lhs.gzip_truncated.saturating_add(rhs.gzip_truncated),
+            gzip_damaged: lhs.gzip_damaged.saturating_add(rhs.gzip_damaged),
         }
-    }
 }
 
 #[cfg(test)]

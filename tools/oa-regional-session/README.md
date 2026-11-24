@@ -12,7 +12,17 @@ oa-regional-session run --input FILE --snapshot ADAPTATION --out NEW_DIR
 oa-regional-session run --input examples/synthetic-msaw.tsv --synthetic-model --synthetic-msaw --out NEW_DIR
 oa-regional-session run --input FILE --snapshot ADAPTATION --msaw-inputs MSAW_MANIFEST --out NEW_DIR
 oa-regional-session stage --input FILE --out NEW_DIR
+regional-recording-import --sfdps FILE --adsb FILE --centre ZAU1 --out NEW_DIR
 ```
+
+`regional-recording-import` reads up to eight explicitly typed OAF files, including bounded gzip
+inputs, and writes `normalized.tsv`, `provenance.tsv`, `counts.tsv`, `manifest.tsv`, and
+`COMPLETE` last. The normalized file is directly admissible to `stage`; provenance binds each
+event to its source stream hash, OAF frame and exact subsecond receipt while the normalized issue
+cutoff is conservatively ceiled to a positive whole second. Inputs are capped at 16 MiB compressed
+and 16 MiB expanded total, 100,000 OAF frames, and 4 MiB per frame. Normalized output is capped at
+the session's 16 MiB input limit. This development adapter does not cover the much larger known
+STDDS captures or establish operational capacity.
 
 The first command exercises two-report tracker confirmation, two aircraft, route forecasts,
 controller handoff offer/accept/take, unauthorized and authorized altitude requests, feed loss,
