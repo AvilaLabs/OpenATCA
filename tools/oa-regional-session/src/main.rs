@@ -102,8 +102,13 @@ fn arguments() -> Result<Arguments, CliError> {
     if execute && model.is_none() {
         return Err(CliError::Usage);
     }
-    Ok(Arguments { input, output, model,
-        safety: safety.unwrap_or(oa_regional_session::cli::MsawSource::Disabled), performance })
+    Ok(Arguments {
+        input,
+        output,
+        model,
+        safety: safety.unwrap_or(oa_regional_session::cli::MsawSource::Disabled),
+        performance,
+    })
 }
 
 fn read_input(path: &Path) -> Result<Vec<u8>, CliError> {
@@ -295,7 +300,13 @@ fn write_report(path: &Path, frames: &[FrameEvidence]) -> Result<(), CliError> {
 }
 
 fn run() -> Result<(), CliError> {
-    let Arguments { input, output, model, safety, performance } = arguments()?;
+    let Arguments {
+        input,
+        output,
+        model,
+        safety,
+        performance,
+    } = arguments()?;
     oa_sealed::refuse_io(&input).map_err(CliError::Io)?;
     oa_sealed::refuse_io(&output).map_err(CliError::Io)?;
     if let Some(oa_regional_session::cli::ModelSource::Snapshot(path)) = &model {
@@ -307,10 +318,14 @@ fn run() -> Result<(), CliError> {
     let bytes = read_input(&input)?;
     let frames = parse_input(&bytes)?;
     match model {
-        Some(source) => {
-            oa_regional_session::cli::run_session_with_options(&bytes, &output, &source, &safety, performance.as_deref())
-                .map_err(CliError::Runtime)
-        }
+        Some(source) => oa_regional_session::cli::run_session_with_options(
+            &bytes,
+            &output,
+            &source,
+            &safety,
+            performance.as_deref(),
+        )
+        .map_err(CliError::Runtime),
         None => write_report(&output, &frames),
     }
 }

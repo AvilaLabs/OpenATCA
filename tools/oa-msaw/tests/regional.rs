@@ -96,13 +96,11 @@ fn terrain_cell_budget_refuses_before_tile_access_and_missing_source_stays_missi
         max_terrain_file_bytes: 16,
         ..RegionalDataLimits::default()
     };
-    let mut fresh = load_regional_data(
-        &paths,
-        limits,
-        WeatherAdmission { cutoff_ms: 0 },
-    )
-    .unwrap();
-    assert_eq!(fresh.floors.floor_at(&local).unwrap().terrain_ft, oa_msaw::FLOOR_NONE);
+    let mut fresh = load_regional_data(&paths, limits, WeatherAdmission { cutoff_ms: 0 }).unwrap();
+    assert_eq!(
+        fresh.floors.floor_at(&local).unwrap().terrain_ft,
+        oa_msaw::FLOOR_NONE
+    );
     assert_eq!(fresh.floors.stats.terrain_budget_refused, 1);
     assert_eq!(fresh.floors.stats.tiles_loaded, 0);
 }

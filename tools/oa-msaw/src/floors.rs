@@ -578,8 +578,8 @@ fn read_tile_bounded(
         .checked_add(future_retained_bytes)
         .and_then(|n| n.checked_add(limits.max_grid_bytes))
         .and_then(|n| n.checked_add(oa_tiff::MAX_READ_SCRATCH_BYTES));
-    let Some(input_budget) = fixed_bytes
-        .and_then(|fixed| limits.max_working_bytes.checked_sub(fixed))
+    let Some(input_budget) =
+        fixed_bytes.and_then(|fixed| limits.max_working_bytes.checked_sub(fixed))
     else {
         return Ok(None);
     };
@@ -592,7 +592,9 @@ fn read_tile_bounded(
     let mut bytes = Vec::new();
     let mut limited = std::io::Read::take(
         file,
-        u64::try_from(input_limit).unwrap_or(u64::MAX).saturating_add(1),
+        u64::try_from(input_limit)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
     );
     std::io::Read::read_to_end(&mut limited, &mut bytes)
         .map_err(|e| format!("{}: {e}", path.display()))?;
@@ -881,9 +883,10 @@ impl Floors {
                     self.stats.tiles_absent += 1;
                     return Ok(());
                 }
-                if self.terrain_limits.is_some_and(|limits| {
-                    !retained_budget_fits(limits, self.coarse.bytes())
-                }) {
+                if self
+                    .terrain_limits
+                    .is_some_and(|limits| !retained_budget_fits(limits, self.coarse.bytes()))
+                {
                     self.refused.insert(cell);
                     self.stats.tiles_refused += 1;
                     self.stats.terrain_budget_refused += 1;

@@ -32,11 +32,11 @@ pub const NO_POSITION_E7: i32 = i32::MIN;
 const ALERT_LAYER: u8 = 13;
 const ALERT_TEXT_SIZE: u8 = 10;
 const ALERT_HEADER_X_PX: i32 = 8;
-const ALERT_HEADER_Y_PX: i32 = 72;
+const ALERT_HEADER_Y_PX: i32 = 112;
 const ALERT_OUTER_RADIUS_PX: i32 = 16;
 const ALERT_INNER_RADIUS_PX: i32 = 12;
 const MIN_ALERT_VIEW_WIDTH: u32 = 500;
-const MIN_ALERT_TOP_INSET: u32 = 104;
+const MIN_ALERT_TOP_INSET: u32 = 128;
 
 const fn px(value: i32) -> i32 {
     value * 16
@@ -104,10 +104,13 @@ fn ensure_room(
 fn inside_frame(p: &Projection, (x, y): (i32, i32)) -> bool {
     let x = i64::from(x);
     let y = i64::from(y);
-    x >= 0
-        && x < i64::from(p.width) * 16
-        && y >= i64::from(p.top_inset) * 16
-        && y < i64::from(p.height) * 16
+    // A partially clipped marker is counted as off-map rather than presenting an incomplete
+    // state symbol. Reserve the whole outer-ring radius even for a caution marker.
+    let margin = i64::from(ALERT_OUTER_RADIUS_PX) * 16;
+    x >= margin
+        && x + margin < i64::from(p.width) * 16
+        && y >= i64::from(p.top_inset) * 16 + margin
+        && y + margin < i64::from(p.height) * 16
 }
 
 fn increment(counter: &mut u16) {
@@ -131,7 +134,8 @@ fn header(stats: MarkerStats) -> crate::core::text::TextBuf {
 
 /// Append current alert markers and their bounded count header to an existing display list.
 ///
-/// The view must provide a 104 px legend strip and at least 500 px of width. Exact header width
+/// The view must provide a 128 px top strip and at least 500 px of width. The header occupies
+/// rows 112..124 below the standard 104 px legend. Exact header width
 /// and all worst-case list capacity requirements are checked before writing anything.
 pub fn append_alert_markers(
     list: &mut DisplayList,
@@ -143,7 +147,7 @@ pub fn append_alert_markers(
         || projection.height <= projection.top_inset
     {
         return Err(bad_alert(
-            "MSAW markers require width 500 and a 104 px top strip",
+            "MSAW markers require width 500 and a 128 px top strip",
         ));
     }
     if list.faulted {
@@ -329,7 +333,7 @@ pub fn append_alert_markers(
         ALERT_TEXT_SIZE,
         ALIGN_LEFT,
         palette::ALERT,
-        ALERT_LAYER,
+        15,
         header_str,
     )?;
     Ok(stats)

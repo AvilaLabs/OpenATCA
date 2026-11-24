@@ -823,7 +823,10 @@ fn caller_grid_and_working_limits_refuse_before_output_allocation() {
     limits.max_grid_bytes = 100;
     assert!(matches!(
         read_geotiff_bounded(&bytes, limits),
-        Err(TiffError::ReadBudgetExceeded { what: "decoded grid bytes", .. })
+        Err(TiffError::ReadBudgetExceeded {
+            what: "decoded grid bytes",
+            ..
+        })
     ));
 
     let mut limits = base;
@@ -832,7 +835,10 @@ fn caller_grid_and_working_limits_refuse_before_output_allocation() {
     limits.future_retained_bytes = 2;
     assert!(matches!(
         read_geotiff_bounded(&bytes, limits),
-        Err(TiffError::ReadBudgetExceeded { what: "terrain retained bytes", .. })
+        Err(TiffError::ReadBudgetExceeded {
+            what: "terrain retained bytes",
+            ..
+        })
     ));
 
     let mut limits = base;
@@ -840,7 +846,10 @@ fn caller_grid_and_working_limits_refuse_before_output_allocation() {
     limits.retained_bytes = 1;
     assert!(matches!(
         read_geotiff_bounded(&bytes, limits),
-        Err(TiffError::ReadBudgetExceeded { what: "terrain working bytes", .. })
+        Err(TiffError::ReadBudgetExceeded {
+            what: "terrain working bytes",
+            ..
+        })
     ));
 }
 

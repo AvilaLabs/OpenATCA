@@ -38,12 +38,8 @@ const T0: i64 = 1_794_772_800 * S;
 fn replay_inset_constructor_preserves_default_and_builds_clipped_map_frame() {
     let cfg = frame_cfg();
     let default = replay_new(model(), &cfg).unwrap();
-    let explicit_default = replay_new_with_top_inset(
-        model(),
-        &cfg,
-        oa_display::scene::LEGEND_STRIP_PX,
-    )
-    .unwrap();
+    let explicit_default =
+        replay_new_with_top_inset(model(), &cfg, oa_display::scene::LEGEND_STRIP_PX).unwrap();
     assert_eq!(default.view, explicit_default.view);
 
     let mut inset = replay_new_with_top_inset(model(), &cfg, 160).unwrap();
@@ -59,14 +55,21 @@ fn replay_inset_constructor_preserves_default_and_builds_clipped_map_frame() {
     .unwrap();
     assert!(!info.stamp_clipped);
     let map_top = 160 * 16;
-    let map_primitives = inset.list.lines.layer.iter()
+    let map_primitives = inset
+        .list
+        .lines
+        .layer
+        .iter()
         .chain(&inset.list.rects.layer)
         .chain(&inset.list.circles.layer)
         .chain(&inset.list.polylines.layer)
         .chain(&inset.list.texts.layer)
         .filter(|&&layer| layer <= 6)
         .count();
-    assert!(map_primitives > 0, "synthetic model produced no map geometry");
+    assert!(
+        map_primitives > 0,
+        "synthetic model produced no map geometry"
+    );
     for ((&layer, &y0), &y1) in inset
         .list
         .lines
@@ -76,7 +79,10 @@ fn replay_inset_constructor_preserves_default_and_builds_clipped_map_frame() {
         .zip(&inset.list.lines.y1)
     {
         if layer <= 6 {
-            assert!(y0 >= map_top && y1 >= map_top, "line crossed reserved header");
+            assert!(
+                y0 >= map_top && y1 >= map_top,
+                "line crossed reserved header"
+            );
         }
     }
     for ((&layer, &y0), &y1) in inset
@@ -88,19 +94,17 @@ fn replay_inset_constructor_preserves_default_and_builds_clipped_map_frame() {
         .zip(&inset.list.rects.y1)
     {
         if layer <= 6 {
-            assert!(y0 >= map_top && y1 >= map_top, "rectangle crossed reserved header");
+            assert!(
+                y0 >= map_top && y1 >= map_top,
+                "rectangle crossed reserved header"
+            );
         }
     }
-    for ((&layer, &y), &radius) in inset
-        .list
-        .circles
-        .layer
-        .iter()
-        .zip(&inset.list.circles.y)
-        .zip(&inset.list.circles.r)
-    {
+    for (&layer, &y) in inset.list.circles.layer.iter().zip(&inset.list.circles.y) {
         if layer <= 6 {
-            assert!(y.saturating_sub(radius) >= map_top, "circle crossed reserved header");
+            // Range circles deliberately extend beyond the viewport; the opaque reserved
+            // backdrop clips their visible pixels rather than changing their geometry.
+            assert!(y >= map_top, "circle centre crossed reserved header");
         }
     }
     for ((&layer, &start), &len) in inset
@@ -115,7 +119,13 @@ fn replay_inset_constructor_preserves_default_and_builds_clipped_map_frame() {
             let start = usize::try_from(start).unwrap();
             let end = start.checked_add(usize::try_from(len).unwrap()).unwrap();
             assert!(
-                inset.list.poly_y.get(start..end).unwrap().iter().all(|&y| y >= map_top),
+                inset
+                    .list
+                    .poly_y
+                    .get(start..end)
+                    .unwrap()
+                    .iter()
+                    .all(|&y| y >= map_top),
                 "polyline crossed reserved header"
             );
         }
@@ -127,18 +137,30 @@ fn replay_inset_constructor_preserves_default_and_builds_clipped_map_frame() {
     }
     replay_raster(&mut inset).unwrap();
     assert_eq!(inset.buf.len(), oa_display::raster::frame_len(&inset.spec));
+    let background = oa_display::palette::bytes_of(oa_display::palette::BACKGROUND).unwrap();
+    for row in 104usize..160 {
+        let start = row * inset.spec.stride as usize;
+        let end = start + inset.spec.width as usize * 4;
+        assert!(
+            inset.buf[start..end]
+                .chunks_exact(4)
+                .all(|pixel| pixel == background),
+            "map pixels crossed the reserved header at row {row}"
+        );
+    }
 
     assert!(matches!(
         replay_new_with_top_inset(model(), &cfg, oa_display::scene::LEGEND_STRIP_PX - 1),
-        Err(ReplayError::Display(oa_display::list::DisplayError::BadView(_)))
+        Err(ReplayError::Display(
+            oa_display::list::DisplayError::BadView(_)
+        ))
     ));
-    let too_tall = ReplayConfig {
-        height: 480,
-        ..cfg
-    };
+    let too_tall = ReplayConfig { height: 480, ..cfg };
     assert!(matches!(
         replay_new_with_top_inset(model(), &too_tall, 465),
-        Err(ReplayError::Display(oa_display::list::DisplayError::BadView(_)))
+        Err(ReplayError::Display(
+            oa_display::list::DisplayError::BadView(_)
+        ))
     ));
 }
 

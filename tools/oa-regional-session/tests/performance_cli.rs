@@ -68,8 +68,8 @@ fn opt_in_keeps_horizontal_frame_and_publishes_performance_evidence() {
     let retained = fs::read(performance_output.join("performance-inputs.tsv"))
         .expect("read retained source evidence");
     assert_eq!(retained, performance_bytes);
-    let manifest = fs::read_to_string(performance_output.join("manifest.tsv"))
-        .expect("read output manifest");
+    let manifest =
+        fs::read_to_string(performance_output.join("manifest.tsv")).expect("read output manifest");
     let digest = oa_sha256::to_hex(&oa_sha256::sha256(performance_bytes));
     assert!(manifest.contains(&format!("performance_sha256\t{digest}\n")));
 

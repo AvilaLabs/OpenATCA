@@ -165,11 +165,16 @@ pub struct RegionalData {
 
 fn checked_limits(l: RegionalDataLimits) -> Result<(), String> {
     let d = RegionalDataLimits::default();
-    if l.max_config_bytes == 0 || l.max_config_bytes > d.max_config_bytes
-        || l.max_terrain_tiles == 0 || l.max_terrain_tiles > d.max_terrain_tiles
-        || l.max_terrain_file_bytes == 0 || l.max_terrain_file_bytes > d.max_terrain_file_bytes
-        || l.max_terrain_grid_bytes == 0 || l.max_terrain_grid_bytes > d.max_terrain_grid_bytes
-        || l.max_terrain_working_bytes == 0 || l.max_terrain_working_bytes > d.max_terrain_working_bytes
+    if l.max_config_bytes == 0
+        || l.max_config_bytes > d.max_config_bytes
+        || l.max_terrain_tiles == 0
+        || l.max_terrain_tiles > d.max_terrain_tiles
+        || l.max_terrain_file_bytes == 0
+        || l.max_terrain_file_bytes > d.max_terrain_file_bytes
+        || l.max_terrain_grid_bytes == 0
+        || l.max_terrain_grid_bytes > d.max_terrain_grid_bytes
+        || l.max_terrain_working_bytes == 0
+        || l.max_terrain_working_bytes > d.max_terrain_working_bytes
         || l.max_terrain_resident_bytes == 0
         || l.max_terrain_resident_bytes > d.max_terrain_resident_bytes
         || l.max_terrain_query_cells == 0
@@ -472,7 +477,12 @@ pub fn load_regional_data(
     }
     if let Some(dir) = &paths.terrain_dir {
         crate::guard::refuse_sealed(Sealed::production(), dir)?;
-        if !dir.is_dir() { return Err(format!("{}: terrain path is not a directory", dir.display())); }
+        if !dir.is_dir() {
+            return Err(format!(
+                "{}: terrain path is not a directory",
+                dir.display()
+            ));
+        }
     }
 
     let config_bytes = read_bounded(&paths.config, limits.max_config_bytes)?;

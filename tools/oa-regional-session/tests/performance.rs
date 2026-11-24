@@ -1,5 +1,10 @@
 //! Bounded performance-manifest grammar, causal timestamp ordering and guarded file reads.
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 
 use oa_legacy_traj::core::trajectory::{PerformanceSource, PerformanceStatus};
 use oa_regional_session::performance::{
@@ -105,7 +110,10 @@ fn parser_preserves_full_non_icao_address_width() {
         "VALID",
     );
     let parsed = parse_performance_manifest(&bytes_with_rows(&[row])).unwrap();
-    assert_eq!(parsed.envelopes.first().unwrap().key.aircraft_address, 0x1ab_cdef);
+    assert_eq!(
+        parsed.envelopes.first().unwrap().key.aircraft_address,
+        0x1ab_cdef
+    );
 }
 
 // REQ: OA-REG-014
@@ -205,21 +213,162 @@ fn timestamps_are_checked_before_identity_or_capability_payload() {
 #[test]
 fn malformed_fields_and_bounded_syntax_refuse_the_whole_manifest() {
     for malformed in [
-        row("0", "ABC101", "ZAU1", "PLAN00000001", 1_000, 1_100, 19, 5_000, 1, 1, 1, "MEASURED", "VALID"),
-        row("00000000000000000000000000000000", "ABC101", "ZAU1", "PLAN00000001", 1_000, 1_100, 19, 5_000, 1, 1, 1, "MEASURED", "VALID"),
-        row("00000000000000000000000000000001", "000000", "ZAU1", "PLAN00000001", 1_000, 1_100, 19, 5_000, 1, 1, 1, "MEASURED", "VALID"),
-        row("00000000000000000000000000000001", "FFFFFF", "ZAU1", "PLAN00000001", 1_000, 1_100, 19, 5_000, 1, 1, 1, "MEASURED", "VALID"),
-        row("00000000000000000000000000000001", "ABC101", "!AU1", "PLAN00000001", 1_000, 1_100, 19, 5_000, 1, 1, 1, "MEASURED", "VALID"),
-        row("00000000000000000000000000000001", "ABC101", "ZAU1", "plan00000001", 1_000, 1_100, 19, 5_000, 1, 1, 1, "MEASURED", "VALID"),
-        row("00000000000000000000000000000001", "ABC101", "ZAU1", "PLAN00000001", 1_000, 1_100, 0, 5_000, 1, 1, 1, "MEASURED", "VALID"),
-        row("00000000000000000000000000000001", "ABC101", "ZAU1", "PLAN00000001", 1_000, 1_100, 19, -1, 1, 1, 1, "MEASURED", "VALID"),
-        row("00000000000000000000000000000001", "ABC101", "ZAU1", "PLAN00000001", 1_000, 1_100, 19, 5_000, 1, 1, 1, "measured", "VALID"),
-        row("00000000000000000000000000000001", "ABC101", "ZAU1", "PLAN00000001", 1_000, 1_100, 19, 5_000, 1, 1, 1, "MEASURED", "valid"),
+        row(
+            "0",
+            "ABC101",
+            "ZAU1",
+            "PLAN00000001",
+            1_000,
+            1_100,
+            19,
+            5_000,
+            1,
+            1,
+            1,
+            "MEASURED",
+            "VALID",
+        ),
+        row(
+            "00000000000000000000000000000000",
+            "ABC101",
+            "ZAU1",
+            "PLAN00000001",
+            1_000,
+            1_100,
+            19,
+            5_000,
+            1,
+            1,
+            1,
+            "MEASURED",
+            "VALID",
+        ),
+        row(
+            "00000000000000000000000000000001",
+            "000000",
+            "ZAU1",
+            "PLAN00000001",
+            1_000,
+            1_100,
+            19,
+            5_000,
+            1,
+            1,
+            1,
+            "MEASURED",
+            "VALID",
+        ),
+        row(
+            "00000000000000000000000000000001",
+            "FFFFFF",
+            "ZAU1",
+            "PLAN00000001",
+            1_000,
+            1_100,
+            19,
+            5_000,
+            1,
+            1,
+            1,
+            "MEASURED",
+            "VALID",
+        ),
+        row(
+            "00000000000000000000000000000001",
+            "ABC101",
+            "!AU1",
+            "PLAN00000001",
+            1_000,
+            1_100,
+            19,
+            5_000,
+            1,
+            1,
+            1,
+            "MEASURED",
+            "VALID",
+        ),
+        row(
+            "00000000000000000000000000000001",
+            "ABC101",
+            "ZAU1",
+            "plan00000001",
+            1_000,
+            1_100,
+            19,
+            5_000,
+            1,
+            1,
+            1,
+            "MEASURED",
+            "VALID",
+        ),
+        row(
+            "00000000000000000000000000000001",
+            "ABC101",
+            "ZAU1",
+            "PLAN00000001",
+            1_000,
+            1_100,
+            0,
+            5_000,
+            1,
+            1,
+            1,
+            "MEASURED",
+            "VALID",
+        ),
+        row(
+            "00000000000000000000000000000001",
+            "ABC101",
+            "ZAU1",
+            "PLAN00000001",
+            1_000,
+            1_100,
+            19,
+            -1,
+            1,
+            1,
+            1,
+            "MEASURED",
+            "VALID",
+        ),
+        row(
+            "00000000000000000000000000000001",
+            "ABC101",
+            "ZAU1",
+            "PLAN00000001",
+            1_000,
+            1_100,
+            19,
+            5_000,
+            1,
+            1,
+            1,
+            "measured",
+            "VALID",
+        ),
+        row(
+            "00000000000000000000000000000001",
+            "ABC101",
+            "ZAU1",
+            "PLAN00000001",
+            1_000,
+            1_100,
+            19,
+            5_000,
+            1,
+            1,
+            1,
+            "MEASURED",
+            "valid",
+        ),
     ] {
         assert!(parse_performance_manifest(&bytes_with_rows(&[malformed])).is_err());
     }
 
-    let overflowing_speed = valid_row().replace("\t0\tMEASURED\tVALID", "\t4294967296\tMEASURED\tVALID");
+    let overflowing_speed =
+        valid_row().replace("\t0\tMEASURED\tVALID", "\t4294967296\tMEASURED\tVALID");
     assert!(parse_performance_manifest(&bytes_with_rows(&[overflowing_speed])).is_err());
 
     let later_bad_row = vec![valid_row(), "v1\tbad".to_owned()];

@@ -139,7 +139,10 @@ pub fn run_session_with_safety(
 }
 
 pub fn run_session_with_options(
-    bytes: &[u8], output: &Path, source: &ModelSource, safety: &MsawSource,
+    bytes: &[u8],
+    output: &Path,
+    source: &ModelSource,
+    safety: &MsawSource,
     performance: Option<&Path>,
 ) -> Result<(), String> {
     if bytes.len() > 16 * 1024 * 1024 {
@@ -192,7 +195,9 @@ pub fn run_session_with_options(
         return Err("session contains no events".into());
     }
     let first = batches.first().ok_or("session has no cutoff")?.receipt_ns;
-    let performance_data = performance.map(crate::performance::load_performance).transpose()?;
+    let performance_data = performance
+        .map(crate::performance::load_performance)
+        .transpose()?;
     let mut safety_data = None;
     let safety_manifest_sha = match safety {
         MsawSource::Disabled => None,
@@ -238,7 +243,10 @@ pub fn run_session_with_options(
         ));
     }
     if let Some(data) = &performance_data {
-        settings.push_str(&format!("vertical_profile\tEXPLICIT_PERFORMANCE\nperformance_sha256\t{}\n", oa_sha256::to_hex(&data.sha256)));
+        settings.push_str(&format!(
+            "vertical_profile\tEXPLICIT_PERFORMANCE\nperformance_sha256\t{}\n",
+            oa_sha256::to_hex(&data.sha256)
+        ));
     } else {
         settings.push_str("vertical_profile\tDISABLED\n");
     }
@@ -253,11 +261,18 @@ pub fn run_session_with_options(
     }
     if let Some(data) = &performance_data {
         write_new(&output.join("performance-inputs.tsv"), &data.bytes)?;
-        manifest.push_str(&format!("performance_sha256\t{}\n", oa_sha256::to_hex(&data.sha256)));
+        manifest.push_str(&format!(
+            "performance_sha256\t{}\n",
+            oa_sha256::to_hex(&data.sha256)
+        ));
     }
     for batch in &batches {
         let frame = match &performance_data {
-            Some(data) => crate::runtime::regional_step_with_performance(&mut runtime, batch, &data.envelopes)?,
+            Some(data) => crate::runtime::regional_step_with_performance(
+                &mut runtime,
+                batch,
+                &data.envelopes,
+            )?,
             None => regional_step(&mut runtime, batch)?,
         };
         let evidence = format!("OA_REGIONAL_FRAME\t1\n{frame:#?}\n");

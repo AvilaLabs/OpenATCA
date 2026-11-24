@@ -16,7 +16,8 @@ use oa_safety::inhibit::{inhibits_new, InhibitTable};
 use oa_safety::net::{state_table_new, StateTable};
 use oa_scope_replay::adapt::{row_columns, ColumnBuf};
 use oa_scope_replay::frame::{
-    replay_build_with_overlays, replay_new, replay_raster, Replay, ReplayConfig, ReplaySafety,
+    replay_build_with_overlays, replay_new_with_top_inset, replay_raster, Replay, ReplayConfig,
+    ReplaySafety,
 };
 use oa_scope_replay::rows::{Callsigns, RowStore, DEFAULT_CONVERT};
 use oa_scope_replay::store::{store_add, store_finish};
@@ -154,7 +155,7 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
         ..DEFAULT_CONFIG
     })
     .map_err(err)?;
-    let mut scope = replay_new(
+    let mut scope = replay_new_with_top_inset(
         model,
         &ReplayConfig {
             centre_lat_e7: cfg.centre_lat_e7,
@@ -166,11 +167,12 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
             style: DEFAULT_STYLE,
             convert: DEFAULT_CONVERT,
         },
+        160,
     )
     .map_err(err)?;
     let interaction_caps = oa_display::list::ListCaps {
-        lines: 0,
-        rects: 0,
+        lines: 1,
+        rects: 1,
         circles: MAX_TRACKS * oa_display::core::alert_markers::ALERT_CIRCLES_PER_MARKER,
         polylines: 0,
         poly_vertices: 0,
@@ -770,6 +772,30 @@ pub fn surveillance_finish(
             return Err("scope/CA position mismatch".into());
         }
     }
+    // Reserve rows 104..160 for alerts and console text. Layer 14 masks map primitives that
+    // extend beyond their clipped centre, while the standard legend remains in rows 0..104.
+    oa_display::list::push_rect(
+        &mut s.scope.list,
+        (0, 104 * 16),
+        (
+            i32::try_from(FRAME_WIDTH).map_err(|_| "panel width")? * 16,
+            160 * 16,
+        ),
+        oa_display::palette::BACKGROUND,
+        14,
+    )
+    .map_err(err)?;
+    oa_display::list::push_line(
+        &mut s.scope.list,
+        (0, 159 * 16),
+        (
+            i32::try_from(FRAME_WIDTH).map_err(|_| "panel width")? * 16,
+            159 * 16,
+        ),
+        oa_display::palette::DIM_TEXT,
+        15,
+    )
+    .map_err(err)?;
     let msaw_markers = if let Some(frame) = msaw.as_ref() {
         use oa_display::core::alert_markers::{
             append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
@@ -891,14 +917,26 @@ pub fn surveillance_present_controls(
         return Err("regional presentation update budget exhausted".into());
     }
     let base = s.overlay_base.unwrap_or(OverlayBase {
-        texts: s.scope.list.texts.x.len(), bytes: s.scope.list.text.len(),
+        texts: s.scope.list.texts.x.len(),
+        bytes: s.scope.list.text.len(),
         layers: s.scope.list.layers_used,
     });
     let list = &mut s.scope.list;
-    if [list.texts.x.len(), list.texts.y.len(), list.texts.size.len(), list.texts.align.len(),
-        list.texts.colour.len(), list.texts.layer.len(), list.texts.start.len(), list.texts.len.len()]
-        .iter().any(|len| *len < base.texts)
-        || base.bytes > list.text.len() || !list.text.is_char_boundary(base.bytes) {
+    if [
+        list.texts.x.len(),
+        list.texts.y.len(),
+        list.texts.size.len(),
+        list.texts.align.len(),
+        list.texts.colour.len(),
+        list.texts.layer.len(),
+        list.texts.start.len(),
+        list.texts.len.len(),
+    ]
+    .iter()
+    .any(|len| *len < base.texts)
+        || base.bytes > list.text.len()
+        || !list.text.is_char_boundary(base.bytes)
+    {
         return Err("control overlay base is inconsistent".into());
     }
     s.failed = true;
@@ -922,9 +960,17 @@ pub fn surveillance_present_controls(
     .map_err(err)?;
     for (index, line) in console.as_bytes().chunks(64).enumerate() {
         let text = std::str::from_utf8(line).map_err(|_| "console encoding")?;
-        let y = 84 + i32::try_from(index).map_err(|_| "console row")? * 10;
-        oa_display::list::push_text(&mut s.scope.list, (8 * 16, y * 16), 7,
-            oa_display::list::ALIGN_LEFT, oa_display::palette::TEXT, 13, text).map_err(err)?;
+        let y = 132 + i32::try_from(index).map_err(|_| "console row")? * 12;
+        oa_display::list::push_text(
+            &mut s.scope.list,
+            (8 * 16, y * 16),
+            7,
+            oa_display::list::ALIGN_LEFT,
+            oa_display::palette::TEXT,
+            15,
+            text,
+        )
+        .map_err(err)?;
     }
     replay_raster(&mut s.scope).map_err(err)?;
     let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;

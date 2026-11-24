@@ -54,6 +54,9 @@ be present and well formed on position rows. A direct ADS-B type paired with non
 MLAT/TIS-B-derived fields is counted as a source conflict and excluded from reports, so it
 cannot be treated as independent ADS-B truth.
 
+The official OpenAPI schema checked on 2026-11-24 explicitly includes `mlat` and `tisb` in
+`V2Response_AcItem.required`; this requirement is for that V2 endpoint, not every readsb JSON feed.
+
 The capture wrapper has fixed ceilings: 300 seconds, polling no faster than every 5 seconds, 60
 responses, 1 MiB per response, 64 MiB cumulative response bytes, 256 MiB OAF bytes, 15-second
 maximum request timeout, and 30 seconds maximum position age. It makes one current METAR request

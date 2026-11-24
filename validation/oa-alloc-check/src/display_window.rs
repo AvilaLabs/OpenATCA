@@ -10,12 +10,14 @@ use oa_airspace::model::{
     stratum, time_code, AirwayLegIx, Meta, Model, PointIx, PosE7, RouteIx, SegIx, Span, StrIx,
     StrTable, VertexIx, ALT_NONE, ELEV_NONE,
 };
+use oa_display::core::alert_markers::{
+    append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
+};
 use oa_display::interaction::{
     complete_oldest, enqueue_intent, interaction_new, next_intent, preflight_oldest,
     present_interaction, select_target, CommandOutcome, FlightIdentity, Intent, InteractionResult,
     TargetView,
 };
-use oa_display::core::alert_markers::{append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7};
 use oa_display::list::{list_clear, list_new, DisplayList, ListCaps};
 use oa_display::palette::{ALERT, PALETTE};
 use oa_display::project::projection_new;
@@ -930,16 +932,35 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
     // REQ: OA-DSP-077
     // Current alert presentation, off-map/unlocated accounting and atomic capacity/identity
     // refusals all execute inside the allocator window; only startup creates these buffers.
+    let msaw_projection =
+        projection_new(ORD.0, ORD.1, 60.0, 640, 400, 160).map_err(|_| "MSAW projection")?;
     let mut msaw_list = list_new(ListCaps {
-        lines: 0, rects: 0, circles: 10, polylines: 0, poly_vertices: 0,
-        texts: 6, text_bytes: 69,
-    }).map_err(|_| "MSAW list")?;
+        lines: 0,
+        rects: 0,
+        circles: 10,
+        polylines: 0,
+        poly_vertices: 0,
+        texts: 6,
+        text_bytes: 69,
+    })
+    .map_err(|_| "MSAW list")?;
     let mut msaw_short = list_new(ListCaps {
-        lines: 0, rects: 0, circles: 0, polylines: 0, poly_vertices: 0,
-        texts: 6, text_bytes: 69,
-    }).map_err(|_| "MSAW short list")?;
+        lines: 0,
+        rects: 0,
+        circles: 0,
+        polylines: 0,
+        poly_vertices: 0,
+        texts: 6,
+        text_bytes: 69,
+    })
+    .map_err(|_| "MSAW short list")?;
     let marker = |address, state, lat_e7, lon_e7, position_known| AlertMarker {
-        address, state, lat_e7, lon_e7, position_known, reserved: [0; 2],
+        address,
+        state,
+        lat_e7,
+        lon_e7,
+        position_known,
+        reserved: [0; 2],
     };
     let first_marker = marker(1, MarkerState::Caution, ORD.0, ORD.1, 1);
     let msaw_markers = [
@@ -947,27 +968,55 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         marker(2, MarkerState::Warning, ORD.0, ORD.1, 1),
         marker(3, MarkerState::ProtectionLost, ORD.0, ORD.1, 1),
         marker(4, MarkerState::Warning, UNPLACED.0, UNPLACED.1, 1),
-        marker(5, MarkerState::ProtectionLost, NO_POSITION_E7, NO_POSITION_E7, 0),
+        marker(
+            5,
+            MarkerState::ProtectionLost,
+            NO_POSITION_E7,
+            NO_POSITION_E7,
+            0,
+        ),
     ];
     let mut msaw_presented = 0;
     let mut msaw_refused = 0;
     let mut msaw_rasterized = 0;
     let c = measure(inject, FRAMES, |_| {
         list_clear(&mut msaw_list);
-        let stats = append_alert_markers(&mut msaw_list, &interaction_projection, &msaw_markers);
-        msaw_presented += u64::from(stats.is_ok_and(|s| s.examined == 5 && s.drawn == 3
-            && s.off_map == 1 && s.unlocated == 1 && s.caution == 1
-            && s.warning == 2 && s.protection_lost == 2));
-        msaw_rasterized += u64::from(rasterize(&msaw_list, &interaction_spec, &mut interaction_pixels).is_ok()
-            && frame_digest(&interaction_spec, &interaction_pixels).is_ok());
+        let stats = append_alert_markers(&mut msaw_list, &msaw_projection, &msaw_markers);
+        msaw_presented += u64::from(stats.is_ok_and(|s| {
+            s.examined == 5
+                && s.drawn == 3
+                && s.off_map == 1
+                && s.unlocated == 1
+                && s.caution == 1
+                && s.warning == 2
+                && s.protection_lost == 2
+        }));
+        msaw_rasterized += u64::from(
+            rasterize(&msaw_list, &interaction_spec, &mut interaction_pixels).is_ok()
+                && frame_digest(&interaction_spec, &interaction_pixels).is_ok(),
+        );
         list_clear(&mut msaw_short);
-        msaw_refused += u64::from(append_alert_markers(&mut msaw_short, &interaction_projection, &[first_marker]).is_err()
-            && msaw_short.circles.x.is_empty() && msaw_short.texts.x.is_empty());
-        msaw_refused += u64::from(append_alert_markers(&mut msaw_short, &interaction_projection, &[first_marker, first_marker]).is_err()
-            && msaw_short.circles.x.is_empty() && msaw_short.texts.x.is_empty());
+        msaw_refused += u64::from(
+            append_alert_markers(&mut msaw_short, &msaw_projection, &[first_marker]).is_err()
+                && msaw_short.circles.x.is_empty()
+                && msaw_short.texts.x.is_empty(),
+        );
+        msaw_refused += u64::from(
+            append_alert_markers(
+                &mut msaw_short,
+                &msaw_projection,
+                &[first_marker, first_marker],
+            )
+            .is_err()
+                && msaw_short.circles.x.is_empty()
+                && msaw_short.texts.x.is_empty(),
+        );
     })?;
     add_counts(&mut counts, c);
-    if msaw_presented != FRAMES as u64 || msaw_refused != 2 * FRAMES as u64 || msaw_rasterized != FRAMES as u64 {
+    if msaw_presented != FRAMES as u64
+        || msaw_refused != 2 * FRAMES as u64
+        || msaw_rasterized != FRAMES as u64
+    {
         return Err("measured MSAW presentation, refusal or raster witness failed");
     }
 

@@ -216,14 +216,12 @@ fn execute(
                 row.refusal = "flight plan is not active/departed".into();
             } else {
                 let selected_performance = match (performance, performance_cutoff_ms) {
-                    (Some(rows), Some(cutoff_ms)) => match performance_for_key(
-                        rows,
-                        route::flight_key(view),
-                        cutoff_ms,
-                    ) {
-                        Ok(value) => (value, None),
-                        Err(reason) => (None, Some(reason)),
-                    },
+                    (Some(rows), Some(cutoff_ms)) => {
+                        match performance_for_key(rows, route::flight_key(view), cutoff_ms) {
+                            Ok(value) => (value, None),
+                            Err(reason) => (None, Some(reason)),
+                        }
+                    }
                     _ => (None, None),
                 };
                 if let Some(reason) = selected_performance.1 {
@@ -299,7 +297,9 @@ fn execute(
         controller_dispatches,
         controller_outcome: oa_display::interaction::command_outcome(&runtime.interaction),
         controller_selection_kind: oa_display::interaction::selection_kind(&runtime.interaction),
-        controller_selected_address: oa_display::interaction::selected_address(&runtime.interaction),
+        controller_selected_address: oa_display::interaction::selected_address(
+            &runtime.interaction,
+        ),
         controller_selection: oa_display::interaction::selected_identity(&runtime.interaction),
         console_text: runtime.console_text.clone(),
     })
@@ -371,16 +371,26 @@ pub fn regional_select(
     }
     let sequence = u32::try_from(runtime.frame_sequence).map_err(|_| "view sequence exhausted")?;
     let outcome = oa_display::interaction::select_target(
-        &mut runtime.interaction, &runtime.views, sequence, address, generation, identity,
+        &mut runtime.interaction,
+        &runtime.views,
+        sequence,
+        address,
+        generation,
+        identity,
     );
     if !matches!(outcome, oa_display::interaction::InteractionResult::Applied) {
         oa_display::interaction::clear_selection(&mut runtime.interaction);
     }
     let digest = match surveillance::surveillance_present_controls(
-        &mut runtime.surveillance, &runtime.interaction, &runtime.console_text,
+        &mut runtime.surveillance,
+        &runtime.interaction,
+        &runtime.console_text,
     ) {
         Ok(digest) => digest,
-        Err(reason) => { runtime.failed = true; return Err(reason); }
+        Err(reason) => {
+            runtime.failed = true;
+            return Err(reason);
+        }
     };
     match outcome {
         oa_display::interaction::InteractionResult::Applied => Ok(digest),
@@ -403,10 +413,15 @@ pub fn regional_console_overlay(
     runtime.console_text.clear();
     runtime.console_text.push_str(text);
     match surveillance::surveillance_present_controls(
-        &mut runtime.surveillance, &runtime.interaction, &runtime.console_text,
+        &mut runtime.surveillance,
+        &runtime.interaction,
+        &runtime.console_text,
     ) {
         Ok(digest) => Ok(digest),
-        Err(reason) => { runtime.failed = true; Err(reason) }
+        Err(reason) => {
+            runtime.failed = true;
+            Err(reason)
+        }
     }
 }
 
@@ -417,10 +432,15 @@ pub fn regional_clear_selection(runtime: &mut RegionalRuntime) -> Result<[u8; 32
     }
     oa_display::interaction::clear_selection(&mut runtime.interaction);
     match surveillance::surveillance_present_controls(
-        &mut runtime.surveillance, &runtime.interaction, &runtime.console_text,
+        &mut runtime.surveillance,
+        &runtime.interaction,
+        &runtime.console_text,
     ) {
         Ok(digest) => Ok(digest),
-        Err(reason) => { runtime.failed = true; Err(reason) }
+        Err(reason) => {
+            runtime.failed = true;
+            Err(reason)
+        }
     }
 }
 

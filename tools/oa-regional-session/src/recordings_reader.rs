@@ -22,7 +22,10 @@ pub enum RecordingSource {
 
 pub const fn recording_source_rank(source: RecordingSource) -> u8 {
     // The normalized protocol requires surveillance before flight events at one receipt.
-    match source { RecordingSource::Adsb => 0, RecordingSource::Sfdps => 1 }
+    match source {
+        RecordingSource::Adsb => 0,
+        RecordingSource::Sfdps => 1,
+    }
 }
 
 // A7.2: cold shell input descriptor; one row per bounded source stream.
@@ -121,11 +124,16 @@ pub enum RecordingReadError {
 }
 
 impl From<io::Error> for RecordingReadError {
-    fn from(value: io::Error) -> Self { Self::Read(value) }
+    fn from(value: io::Error) -> Self {
+        Self::Read(value)
+    }
 }
 
 fn counts_mut(counts: &mut RecordingCounts, source: RecordingSource) -> &mut StreamCounts {
-    match source { RecordingSource::Sfdps => &mut counts.sfdps, RecordingSource::Adsb => &mut counts.adsb }
+    match source {
+        RecordingSource::Sfdps => &mut counts.sfdps,
+        RecordingSource::Adsb => &mut counts.adsb,
+    }
 }
 
 fn note_frame_error(counts: &mut StreamCounts, error: FrameError) {
@@ -135,23 +143,50 @@ fn note_frame_error(counts: &mut StreamCounts, error: FrameError) {
     }
 }
 
-fn inflate_gzip(bytes: &[u8], max_output: usize) -> Result<(Vec<u8>, oa_zip::GzipSummary, bool), RecordingReadError> {
-    let limits = oa_zip::InflateLimits { max_output: max_output as u64, max_ratio: 200, ratio_exempt_bytes: 1024 * 1024 };
+fn inflate_gzip(
+    bytes: &[u8],
+    max_output: usize,
+) -> Result<(Vec<u8>, oa_zip::GzipSummary, bool), RecordingReadError> {
+    let limits = oa_zip::InflateLimits {
+        max_output: max_output as u64,
+        max_ratio: 200,
+        ratio_exempt_bytes: 1024 * 1024,
+    };
     let mut gzip = oa_zip::GzipReader::new(limits);
     let mut output = Vec::new();
-    output.try_reserve_exact(bytes.len().min(max_output)).map_err(|_| RecordingReadError::InflateAllocation)?;
+    output
+        .try_reserve_exact(bytes.len().min(max_output))
+        .map_err(|_| RecordingReadError::InflateAllocation)?;
     let mut output_limit = false;
     let mut allocation_failed = false;
     let result = gzip.push(bytes, &mut |chunk: &[u8]| -> Result<(), ()> {
-        let Some(next) = output.len().checked_add(chunk.len()) else { output_limit = true; return Err(()); };
-        if next > max_output { output_limit = true; return Err(()); }
-        if output.try_reserve(chunk.len()).is_err() { allocation_failed = true; return Err(()); }
+        let Some(next) = output.len().checked_add(chunk.len()) else {
+            output_limit = true;
+            return Err(());
+        };
+        if next > max_output {
+            output_limit = true;
+            return Err(());
+        }
+        if output.try_reserve(chunk.len()).is_err() {
+            allocation_failed = true;
+            return Err(());
+        }
         output.extend_from_slice(chunk);
         Ok(())
     });
-    if output_limit { return Err(RecordingReadError::InflateLimit); }
-    if allocation_failed { return Err(RecordingReadError::InflateAllocation); }
-    if matches!(&result, Err(oa_zip::GzipError::Data(oa_zip::InflateError::OutputLimit { .. } | oa_zip::InflateError::RatioLimit { .. }))) {
+    if output_limit {
+        return Err(RecordingReadError::InflateLimit);
+    }
+    if allocation_failed {
+        return Err(RecordingReadError::InflateAllocation);
+    }
+    if matches!(
+        &result,
+        Err(oa_zip::GzipError::Data(
+            oa_zip::InflateError::OutputLimit { .. } | oa_zip::InflateError::RatioLimit { .. }
+        ))
+    ) {
         return Err(RecordingReadError::InflateLimit);
     }
     let summary = gzip.finish();
@@ -168,16 +203,27 @@ fn capture_frame(
     counts: &mut StreamCounts,
 ) -> Result<(), RecordingReadError> {
     counts.skipped_bytes = counts.skipped_bytes.saturating_add(frame.skipped_before);
-    if !validate_frame_order(frame, last_receipt, last_sequence, counts) { return Ok(()); }
+    if !validate_frame_order(frame, last_receipt, last_sequence, counts) {
+        return Ok(());
+    }
     match frame.kind {
-        Kind::Reject => { counts.reject_frames = counts.reject_frames.saturating_add(1); return Ok(()); }
-        Kind::Status => { counts.status_frames = counts.status_frames.saturating_add(1); return Ok(()); }
+        Kind::Reject => {
+            counts.reject_frames = counts.reject_frames.saturating_add(1);
+            return Ok(());
+        }
+        Kind::Status => {
+            counts.status_frames = counts.status_frames.saturating_add(1);
+            return Ok(());
+        }
         Kind::Message => counts.message_frames = counts.message_frames.saturating_add(1),
     }
     let mut payload = Vec::new();
-    payload.try_reserve_exact(frame.payload.len()).map_err(|_| RecordingReadError::FrameBufferAllocation)?;
+    payload
+        .try_reserve_exact(frame.payload.len())
+        .map_err(|_| RecordingReadError::FrameBufferAllocation)?;
     payload.extend_from_slice(frame.payload);
-    out.try_reserve(1).map_err(|_| RecordingReadError::FrameBufferAllocation)?;
+    out.try_reserve(1)
+        .map_err(|_| RecordingReadError::FrameBufferAllocation)?;
     out.push(RecordedFrame {
         source,
         stream_index,
@@ -246,28 +292,60 @@ pub fn scan_oaf_bytes(
     bytes: &[u8],
     remaining_frame_capacity: usize,
 ) -> Result<(Vec<RecordedFrame>, StreamCounts, oa_feed::FrameWorkStats), RecordingReadError> {
-    let mut counts = StreamCounts { input_bytes: u64::try_from(bytes.len()).map_err(|_| RecordingReadError::InputTooLarge)?, ..StreamCounts::default() };
+    let mut counts = StreamCounts {
+        input_bytes: u64::try_from(bytes.len()).map_err(|_| RecordingReadError::InputTooLarge)?,
+        ..StreamCounts::default()
+    };
     let mut out = Vec::new();
-    out.try_reserve_exact(remaining_frame_capacity.min(1024)).map_err(|_| RecordingReadError::FrameBufferAllocation)?;
+    out.try_reserve_exact(remaining_frame_capacity.min(1024))
+        .map_err(|_| RecordingReadError::FrameBufferAllocation)?;
     let mut scratch = Vec::new();
-    scratch.try_reserve_exact(MAX_FRAME_LEN).map_err(|_| RecordingReadError::FrameBufferAllocation)?;
+    scratch
+        .try_reserve_exact(MAX_FRAME_LEN)
+        .map_err(|_| RecordingReadError::FrameBufferAllocation)?;
     scratch.resize(MAX_FRAME_LEN, 0);
-    let mut reader = FrameReader::new(&mut scratch).map_err(|_| RecordingReadError::InputTooLarge)?;
+    let mut reader =
+        FrameReader::new(&mut scratch).map_err(|_| RecordingReadError::InputTooLarge)?;
     let mut input_pos = 0usize;
     let mut last_receipt = None;
     let mut last_sequence = None;
     while input_pos < bytes.len() {
         let budget = FrameWorkBudget::for_capacity(MAX_FRAME_LEN);
-        let pushed = reader.push_with_budget(bytes.get(input_pos..).ok_or(RecordingReadError::InputTooLarge)?, budget).map_err(RecordingReadError::FrameWork)?;
-        input_pos = input_pos.checked_add(pushed).ok_or(RecordingReadError::InputTooLarge)?;
+        let pushed = reader
+            .push_with_budget(
+                bytes
+                    .get(input_pos..)
+                    .ok_or(RecordingReadError::InputTooLarge)?,
+                budget,
+            )
+            .map_err(RecordingReadError::FrameWork)?;
+        input_pos = input_pos
+            .checked_add(pushed)
+            .ok_or(RecordingReadError::InputTooLarge)?;
         loop {
-            match reader.next_with_budget(FrameWorkBudget::for_capacity(MAX_FRAME_LEN)).map_err(RecordingReadError::FrameWork)? {
+            match reader
+                .next_with_budget(FrameWorkBudget::for_capacity(MAX_FRAME_LEN))
+                .map_err(RecordingReadError::FrameWork)?
+            {
                 Some(Ok(frame)) => {
                     if counts.frames_seen as usize >= remaining_frame_capacity {
-                        count_over_capacity_frame(frame, &mut last_receipt, &mut last_sequence, &mut counts);
+                        count_over_capacity_frame(
+                            frame,
+                            &mut last_receipt,
+                            &mut last_sequence,
+                            &mut counts,
+                        );
                     } else {
                         counts.frames_seen = counts.frames_seen.saturating_add(1);
-                        capture_frame(frame, source, stream_index, &mut last_receipt, &mut last_sequence, &mut out, &mut counts)?;
+                        capture_frame(
+                            frame,
+                            source,
+                            stream_index,
+                            &mut last_receipt,
+                            &mut last_sequence,
+                            &mut out,
+                            &mut counts,
+                        )?;
                     }
                 }
                 Some(Err(error)) => note_frame_error(&mut counts, error),
@@ -278,17 +356,32 @@ pub fn scan_oaf_bytes(
             return Err(RecordingReadError::InputTooLarge);
         }
     }
-    while let Some(next) = reader.next_with_budget(FrameWorkBudget::for_capacity(MAX_FRAME_LEN)).map_err(RecordingReadError::FrameWork)? {
+    while let Some(next) = reader
+        .next_with_budget(FrameWorkBudget::for_capacity(MAX_FRAME_LEN))
+        .map_err(RecordingReadError::FrameWork)?
+    {
         match next {
             Ok(frame) if (counts.frames_seen as usize) < remaining_frame_capacity => {
                 counts.frames_seen = counts.frames_seen.saturating_add(1);
-                capture_frame(frame, source, stream_index, &mut last_receipt, &mut last_sequence, &mut out, &mut counts)?;
+                capture_frame(
+                    frame,
+                    source,
+                    stream_index,
+                    &mut last_receipt,
+                    &mut last_sequence,
+                    &mut out,
+                    &mut counts,
+                )?;
             }
-            Ok(frame) => count_over_capacity_frame(frame, &mut last_receipt, &mut last_sequence, &mut counts),
+            Ok(frame) => {
+                count_over_capacity_frame(frame, &mut last_receipt, &mut last_sequence, &mut counts)
+            }
             Err(error) => note_frame_error(&mut counts, error),
         }
     }
-    if let Some(error) = reader.finish() { note_frame_error(&mut counts, error); }
+    if let Some(error) = reader.finish() {
+        note_frame_error(&mut counts, error);
+    }
     counts.skipped_bytes = reader.skipped_total();
     let work = reader.work_stats();
     Ok((out, counts, work))
@@ -299,28 +392,56 @@ pub fn scan_oaf_bytes(
 /// each OAF payload's 4 MiB ceiling, and FIXM/XML element caps. The receipt merge sorts at most
 /// 100k frames (O(n log n)); no input-dependent loop exceeds those caps.
 pub fn read_oaf_inputs(inputs: &[RecordingInput]) -> Result<RecordingFrames, RecordingReadError> {
-    if inputs.len() > MAX_RECORDING_STREAMS { return Err(RecordingReadError::TooManyStreams); }
-    let mut result = RecordingFrames { frames: Vec::new(), counts: RecordingCounts::default(), streams: Vec::new() };
+    if inputs.len() > MAX_RECORDING_STREAMS {
+        return Err(RecordingReadError::TooManyStreams);
+    }
+    let mut result = RecordingFrames {
+        frames: Vec::new(),
+        counts: RecordingCounts::default(),
+        streams: Vec::new(),
+    };
     for (i, input) in inputs.iter().enumerate() {
-        let already_read = usize::try_from(result.counts.total_bytes).map_err(|_| RecordingReadError::InputTooLarge)?;
+        let already_read = usize::try_from(result.counts.total_bytes)
+            .map_err(|_| RecordingReadError::InputTooLarge)?;
         let counts = counts_mut(&mut result.counts, input.source);
         counts.files_seen = counts.files_seen.saturating_add(1);
         let path = &input.path;
-        let (file, size) = oa_sealed::open_regular(path.as_path()).map_err(RecordingReadError::Read)?;
-        let remaining_bytes = MAX_RECORDING_INPUT_BYTES.checked_sub(already_read).ok_or(RecordingReadError::InputTooLarge)?;
+        let (file, size) =
+            oa_sealed::open_regular(path.as_path()).map_err(RecordingReadError::Read)?;
+        let remaining_bytes = MAX_RECORDING_INPUT_BYTES
+            .checked_sub(already_read)
+            .ok_or(RecordingReadError::InputTooLarge)?;
         let file_bytes = usize::try_from(size).map_err(|_| RecordingReadError::InputTooLarge)?;
         if file_bytes > remaining_bytes {
             counts.files_refused = counts.files_refused.saturating_add(1);
             return Err(RecordingReadError::InputTooLarge);
         }
         let mut physical = Vec::new();
-        physical.try_reserve_exact(file_bytes).map_err(|_| RecordingReadError::FrameBufferAllocation)?;
-        file.take(u64::try_from(remaining_bytes).map_err(|_| RecordingReadError::InputTooLarge)?.saturating_add(1)).read_to_end(&mut physical)?;
-        if physical.len() > remaining_bytes { return Err(RecordingReadError::InputTooLarge); }
-        if physical.len() != file_bytes { return Err(RecordingReadError::Read(io::Error::new(io::ErrorKind::UnexpectedEof, "recording changed while reading"))); }
-        let compressed = physical.starts_with(&[0x1f, 0x8b]) || path.extension().is_some_and(|ext| ext == "gz");
-        let already_decoded = usize::try_from(result.counts.total_decoded_bytes).map_err(|_| RecordingReadError::InputTooLarge)?;
-        let remaining_decoded = MAX_RECORDING_INPUT_BYTES.checked_sub(already_decoded).ok_or(RecordingReadError::InputTooLarge)?;
+        physical
+            .try_reserve_exact(file_bytes)
+            .map_err(|_| RecordingReadError::FrameBufferAllocation)?;
+        file.take(
+            u64::try_from(remaining_bytes)
+                .map_err(|_| RecordingReadError::InputTooLarge)?
+                .saturating_add(1),
+        )
+        .read_to_end(&mut physical)?;
+        if physical.len() > remaining_bytes {
+            return Err(RecordingReadError::InputTooLarge);
+        }
+        if physical.len() != file_bytes {
+            return Err(RecordingReadError::Read(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "recording changed while reading",
+            )));
+        }
+        let compressed =
+            physical.starts_with(&[0x1f, 0x8b]) || path.extension().is_some_and(|ext| ext == "gz");
+        let already_decoded = usize::try_from(result.counts.total_decoded_bytes)
+            .map_err(|_| RecordingReadError::InputTooLarge)?;
+        let remaining_decoded = MAX_RECORDING_INPUT_BYTES
+            .checked_sub(already_decoded)
+            .ok_or(RecordingReadError::InputTooLarge)?;
         let expanded;
         let bytes = if compressed {
             let (decoded, gzip_summary, damaged) = inflate_gzip(&physical, remaining_decoded)?;
@@ -328,44 +449,90 @@ pub fn read_oaf_inputs(inputs: &[RecordingInput]) -> Result<RecordingFrames, Rec
                 counts_mut(&mut result.counts, input.source).gzip_damaged += 1;
             }
             let stream_counts = counts_mut(&mut result.counts, input.source);
-            stream_counts.gzip_bytes_out = stream_counts.gzip_bytes_out.saturating_add(gzip_summary.bytes_out);
-            if gzip_summary.truncated.is_some() { stream_counts.gzip_truncated = stream_counts.gzip_truncated.saturating_add(1); }
+            stream_counts.gzip_bytes_out = stream_counts
+                .gzip_bytes_out
+                .saturating_add(gzip_summary.bytes_out);
+            if gzip_summary.truncated.is_some() {
+                stream_counts.gzip_truncated = stream_counts.gzip_truncated.saturating_add(1);
+            }
             if damaged || gzip_summary.truncated.is_some() {
                 // Gzip delivers bytes before it verifies the trailer. Do not admit even a
                 // seemingly complete OAF prefix from an unverified member as source evidence.
-                stream_counts.compressed_inputs_refused = stream_counts.compressed_inputs_refused.saturating_add(1);
+                stream_counts.compressed_inputs_refused =
+                    stream_counts.compressed_inputs_refused.saturating_add(1);
                 expanded = Vec::new();
             } else {
                 expanded = decoded;
             }
-            if expanded.len() > remaining_decoded { return Err(RecordingReadError::InflateLimit); }
+            if expanded.len() > remaining_decoded {
+                return Err(RecordingReadError::InflateLimit);
+            }
             expanded.as_slice()
-        } else { physical.as_slice() };
-        if bytes.len() > remaining_decoded { return Err(RecordingReadError::InputTooLarge); }
-        let seen_frames = usize::try_from(result.counts.total_frames).map_err(|_| RecordingReadError::FrameCountOverflow)?;
+        } else {
+            physical.as_slice()
+        };
+        if bytes.len() > remaining_decoded {
+            return Err(RecordingReadError::InputTooLarge);
+        }
+        let seen_frames = usize::try_from(result.counts.total_frames)
+            .map_err(|_| RecordingReadError::FrameCountOverflow)?;
         let remaining_frames = MAX_RECORDING_FRAMES.saturating_sub(seen_frames);
-        let (mut frames, mut stream_counts, work) = scan_oaf_bytes(input.source, u8::try_from(i).map_err(|_| RecordingReadError::TooManyStreams)?, bytes, remaining_frames)?;
+        let (mut frames, mut stream_counts, work) = scan_oaf_bytes(
+            input.source,
+            u8::try_from(i).map_err(|_| RecordingReadError::TooManyStreams)?,
+            bytes,
+            remaining_frames,
+        )?;
         stream_counts.input_bytes = size;
-        result.streams.try_reserve(1).map_err(|_| RecordingReadError::FrameBufferAllocation)?;
+        result
+            .streams
+            .try_reserve(1)
+            .map_err(|_| RecordingReadError::FrameBufferAllocation)?;
         result.streams.push(RecordingStreamProvenance {
             source: input.source,
             stream_index: u8::try_from(i).map_err(|_| RecordingReadError::TooManyStreams)?,
             sha256: oa_sha256::sha256(&physical),
             compressed_bytes: size,
-            decoded_bytes: u64::try_from(bytes.len()).map_err(|_| RecordingReadError::InputTooLarge)?,
+            decoded_bytes: u64::try_from(bytes.len())
+                .map_err(|_| RecordingReadError::InputTooLarge)?,
             gzip: compressed,
         });
-        result.counts.total_bytes = result.counts.total_bytes.checked_add(size).ok_or(RecordingReadError::InputTooLarge)?;
-        let decoded_bytes = u64::try_from(bytes.len()).map_err(|_| RecordingReadError::InputTooLarge)?;
-        result.counts.total_decoded_bytes = result.counts.total_decoded_bytes.checked_add(decoded_bytes).ok_or(RecordingReadError::InputTooLarge)?;
-        result.counts.total_frames = result.counts.total_frames.checked_add(stream_counts.frames_seen).ok_or(RecordingReadError::FrameCountOverflow)?;
+        result.counts.total_bytes = result
+            .counts
+            .total_bytes
+            .checked_add(size)
+            .ok_or(RecordingReadError::InputTooLarge)?;
+        let decoded_bytes =
+            u64::try_from(bytes.len()).map_err(|_| RecordingReadError::InputTooLarge)?;
+        result.counts.total_decoded_bytes = result
+            .counts
+            .total_decoded_bytes
+            .checked_add(decoded_bytes)
+            .ok_or(RecordingReadError::InputTooLarge)?;
+        result.counts.total_frames = result
+            .counts
+            .total_frames
+            .checked_add(stream_counts.frames_seen)
+            .ok_or(RecordingReadError::FrameCountOverflow)?;
         let target = counts_mut(&mut result.counts, input.source);
         *target = add_stream_counts(*target, stream_counts);
-        result.counts.work_scan_positions = result.counts.work_scan_positions.saturating_add(work.scan_positions);
+        result.counts.work_scan_positions = result
+            .counts
+            .work_scan_positions
+            .saturating_add(work.scan_positions);
         result.counts.work_crc_bytes = result.counts.work_crc_bytes.saturating_add(work.crc_bytes);
-        result.counts.work_copied_bytes = result.counts.work_copied_bytes.saturating_add(work.copied_bytes);
-        result.counts.work_compacted_bytes = result.counts.work_compacted_bytes.saturating_add(work.compacted_bytes);
-        result.frames.try_reserve(frames.len()).map_err(|_| RecordingReadError::FrameBufferAllocation)?;
+        result.counts.work_copied_bytes = result
+            .counts
+            .work_copied_bytes
+            .saturating_add(work.copied_bytes);
+        result.counts.work_compacted_bytes = result
+            .counts
+            .work_compacted_bytes
+            .saturating_add(work.compacted_bytes);
+        result
+            .frames
+            .try_reserve(frames.len())
+            .map_err(|_| RecordingReadError::FrameBufferAllocation)?;
         result.frames.append(&mut frames);
     }
     sort_recording_frames(&mut result.frames);
@@ -374,34 +541,63 @@ pub fn read_oaf_inputs(inputs: &[RecordingInput]) -> Result<RecordingFrames, Rec
 
 /// Canonical receipt merge. Source rank matches the normalized same-receipt category order.
 pub fn sort_recording_frames(frames: &mut [RecordedFrame]) {
-    frames.sort_unstable_by_key(|f| (f.receipt_ns, recording_source_rank(f.source), f.sequence, f.stream_index, f.byte_offset));
+    frames.sort_unstable_by_key(|f| {
+        (
+            f.receipt_ns,
+            recording_source_rank(f.source),
+            f.sequence,
+            f.stream_index,
+            f.byte_offset,
+        )
+    });
 }
 
 fn add_stream_counts(lhs: StreamCounts, rhs: StreamCounts) -> StreamCounts {
-        StreamCounts {
-            files_seen: lhs.files_seen.saturating_add(rhs.files_seen), files_refused: lhs.files_refused.saturating_add(rhs.files_refused),
-            input_bytes: lhs.input_bytes.saturating_add(rhs.input_bytes), frames_seen: lhs.frames_seen.saturating_add(rhs.frames_seen),
-            message_frames: lhs.message_frames.saturating_add(rhs.message_frames), status_frames: lhs.status_frames.saturating_add(rhs.status_frames),
-            reject_frames: lhs.reject_frames.saturating_add(rhs.reject_frames), invalid_frames: lhs.invalid_frames.saturating_add(rhs.invalid_frames),
-            truncated_frames: lhs.truncated_frames.saturating_add(rhs.truncated_frames), skipped_bytes: lhs.skipped_bytes.saturating_add(rhs.skipped_bytes),
-            invalid_receipt: lhs.invalid_receipt.saturating_add(rhs.invalid_receipt), receipt_regressions: lhs.receipt_regressions.saturating_add(rhs.receipt_regressions),
-            sequence_regressions: lhs.sequence_regressions.saturating_add(rhs.sequence_regressions),
-            sealed_receipt: lhs.sealed_receipt.saturating_add(rhs.sealed_receipt), over_capacity_frames: lhs.over_capacity_frames.saturating_add(rhs.over_capacity_frames),
-            compressed_inputs_refused: lhs.compressed_inputs_refused.saturating_add(rhs.compressed_inputs_refused),
-            gzip_bytes_out: lhs.gzip_bytes_out.saturating_add(rhs.gzip_bytes_out),
-            gzip_truncated: lhs.gzip_truncated.saturating_add(rhs.gzip_truncated),
-            gzip_damaged: lhs.gzip_damaged.saturating_add(rhs.gzip_damaged),
-        }
+    StreamCounts {
+        files_seen: lhs.files_seen.saturating_add(rhs.files_seen),
+        files_refused: lhs.files_refused.saturating_add(rhs.files_refused),
+        input_bytes: lhs.input_bytes.saturating_add(rhs.input_bytes),
+        frames_seen: lhs.frames_seen.saturating_add(rhs.frames_seen),
+        message_frames: lhs.message_frames.saturating_add(rhs.message_frames),
+        status_frames: lhs.status_frames.saturating_add(rhs.status_frames),
+        reject_frames: lhs.reject_frames.saturating_add(rhs.reject_frames),
+        invalid_frames: lhs.invalid_frames.saturating_add(rhs.invalid_frames),
+        truncated_frames: lhs.truncated_frames.saturating_add(rhs.truncated_frames),
+        skipped_bytes: lhs.skipped_bytes.saturating_add(rhs.skipped_bytes),
+        invalid_receipt: lhs.invalid_receipt.saturating_add(rhs.invalid_receipt),
+        receipt_regressions: lhs
+            .receipt_regressions
+            .saturating_add(rhs.receipt_regressions),
+        sequence_regressions: lhs
+            .sequence_regressions
+            .saturating_add(rhs.sequence_regressions),
+        sealed_receipt: lhs.sealed_receipt.saturating_add(rhs.sealed_receipt),
+        over_capacity_frames: lhs
+            .over_capacity_frames
+            .saturating_add(rhs.over_capacity_frames),
+        compressed_inputs_refused: lhs
+            .compressed_inputs_refused
+            .saturating_add(rhs.compressed_inputs_refused),
+        gzip_bytes_out: lhs.gzip_bytes_out.saturating_add(rhs.gzip_bytes_out),
+        gzip_truncated: lhs.gzip_truncated.saturating_add(rhs.gzip_truncated),
+        gzip_damaged: lhs.gzip_damaged.saturating_add(rhs.gzip_damaged),
+    }
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use super::*;
 
     fn frame(seq: u64, receipt: i64, kind: Kind) -> Vec<u8> {
         let mut out = vec![0u8; oa_feed::HEADER_LEN + 6 + oa_feed::TRAILER_LEN];
-        let len = oa_feed::encode_frame(&mut out, kind as u8, 0, seq, receipt, 0, b"sample").unwrap();
+        let len =
+            oa_feed::encode_frame(&mut out, kind as u8, 0, seq, receipt, 0, b"sample").unwrap();
         out.truncate(len);
         out
     }
@@ -413,7 +609,14 @@ mod tests {
         bytes.extend(frame(3, 99, Kind::Message));
         let (frames, counts, _) = scan_oaf_bytes(RecordingSource::Adsb, 0, &bytes, 10).unwrap();
         assert_eq!(frames.len(), 1);
-        assert_eq!((frames[0].sequence, frames[0].receipt_ns, frames[0].payload.as_slice()), (1, 100, b"sample".as_slice()));
+        assert_eq!(
+            (
+                frames[0].sequence,
+                frames[0].receipt_ns,
+                frames[0].payload.as_slice()
+            ),
+            (1, 100, b"sample".as_slice())
+        );
         assert_eq!(counts.frames_seen, 3);
         assert_eq!(counts.status_frames, 1);
         assert_eq!(counts.receipt_regressions, 1);
@@ -433,8 +636,17 @@ mod tests {
     #[test]
     fn merge_order_is_receipt_then_protocol_source_then_complete_source_tie_break() {
         let make = |source, receipt_ns, sequence, stream_index, byte_offset| RecordedFrame {
-            source, stream_index, receipt_ns, sequence, jms_timestamp_ms: 0, mono_ns: None,
-            oaf_flags: 0, byte_offset, skipped_before: 0, kind: Kind::Message, payload: vec![],
+            source,
+            stream_index,
+            receipt_ns,
+            sequence,
+            jms_timestamp_ms: 0,
+            mono_ns: None,
+            oaf_flags: 0,
+            byte_offset,
+            skipped_before: 0,
+            kind: Kind::Message,
+            payload: vec![],
         };
         let mut frames = vec![
             make(RecordingSource::Sfdps, 20, 1, 0, 36),
@@ -443,12 +655,24 @@ mod tests {
             make(RecordingSource::Sfdps, 10, 99, 0, 100),
         ];
         sort_recording_frames(&mut frames);
-        assert_eq!(frames.iter().map(|f| (f.receipt_ns, f.source, f.sequence, f.stream_index, f.byte_offset)).collect::<Vec<_>>(), vec![
-            (10, RecordingSource::Sfdps, 99, 0, 100),
-            (20, RecordingSource::Adsb, 1, 0, 36),
-            (20, RecordingSource::Adsb, 2, 1, 70),
-            (20, RecordingSource::Sfdps, 1, 0, 36),
-        ]);
+        assert_eq!(
+            frames
+                .iter()
+                .map(|f| (
+                    f.receipt_ns,
+                    f.source,
+                    f.sequence,
+                    f.stream_index,
+                    f.byte_offset
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (10, RecordingSource::Sfdps, 99, 0, 100),
+                (20, RecordingSource::Adsb, 1, 0, 36),
+                (20, RecordingSource::Adsb, 2, 1, 70),
+                (20, RecordingSource::Sfdps, 1, 0, 36),
+            ]
+        );
     }
 
     #[test]
@@ -466,6 +690,9 @@ mod tests {
         assert_eq!(summary.members, 1);
         assert_eq!(summary.truncated, None);
         assert!(!damaged);
-        assert!(matches!(inflate_gzip(&gzip, payload.len() - 1), Err(RecordingReadError::InflateLimit)));
+        assert!(matches!(
+            inflate_gzip(&gzip, payload.len() - 1),
+            Err(RecordingReadError::InflateLimit)
+        ));
     }
 }

@@ -81,6 +81,21 @@ fn draw(sc: &SafetyScene<'_>) -> (DisplayList, SafetyStats) {
     (l, stats)
 }
 
+// REQ: OA-DSP-078
+#[test]
+fn safety_banner_respects_additional_reserved_operator_header() {
+    let (states, inhibits, mut feeds) = well();
+    feeds[0].state = FeedState::Lost { age_ms: 60_000 };
+    let sc = scene(&states, &inhibits, &feeds);
+    let projection = projection_new(ORD.0, ORD.1, 20.0, 800, 600, 160).unwrap();
+    let mut list = list_new(safety_caps()).unwrap();
+    let stats = build_safety(&mut list, &projection, &sc).unwrap();
+    assert!(stats.banner_lines > 0);
+    assert!(!list.rects.y0.is_empty());
+    assert!(list.rects.y0.iter().all(|&y| y >= 160 * 16));
+    assert!(list.texts.y.iter().all(|&y| y >= 168 * 16));
+}
+
 fn texts(l: &DisplayList) -> Vec<String> {
     (0..l.texts.x.len())
         .map(|i| {

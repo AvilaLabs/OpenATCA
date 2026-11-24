@@ -65,7 +65,7 @@ fn texts(list: &DisplayList) -> Vec<String> {
 // REQ: OA-DSP-077
 #[test]
 fn caution_warning_and_protection_lost_have_distinct_alert_primitives_and_header() {
-    let p = projection(800, 104);
+    let p = projection(800, 160);
     let markers = [
         marker(1, MarkerState::Caution, CENTRE.0, CENTRE.1),
         marker(2, MarkerState::Warning, CENTRE.0, CENTRE.1),
@@ -98,9 +98,9 @@ fn caution_warning_and_protection_lost_have_distinct_alert_primitives_and_header
         Some("MSAW WARNING 1 CAUTION 1 LOST 1 OFF 0 UNLOCATED 0")
     );
     assert_eq!(list.texts.x.get(3).copied(), Some(8 * 16));
-    assert_eq!(list.texts.y.get(3).copied(), Some(72 * 16));
+    assert_eq!(list.texts.y.get(3).copied(), Some(112 * 16));
     assert_eq!(list.texts.size.get(3), Some(&10));
-    assert_eq!(list.texts.layer.get(3), Some(&13));
+    assert_eq!(list.texts.layer.get(3), Some(&15));
     let point = project(&p, CENTRE.0, CENTRE.1).unwrap();
     assert_eq!(list.texts.x.first().copied(), Some(point.0));
     assert_eq!(list.texts.y.first().copied(), Some(point.1 - 80));
@@ -109,7 +109,7 @@ fn caution_warning_and_protection_lost_have_distinct_alert_primitives_and_header
 // REQ: OA-DSP-077
 #[test]
 fn off_map_and_unlocated_alerts_are_counted_without_drawing_guessed_points() {
-    let p = projection(800, 104);
+    let p = projection(800, 160);
     let markers = [
         marker(10, MarkerState::Caution, CENTRE.0, CENTRE.1),
         marker(20, MarkerState::Warning, CENTRE.0, -870_000_000),
@@ -138,7 +138,7 @@ fn off_map_and_unlocated_alerts_are_counted_without_drawing_guessed_points() {
 // REQ: OA-DSP-077
 #[test]
 fn invalid_records_and_short_lists_refuse_without_mutating_the_list() {
-    let p = projection(800, 104);
+    let p = projection(800, 160);
     let valid = marker(10, MarkerState::Caution, CENTRE.0, CENTRE.1);
     let mut list = list_for(2);
 
@@ -254,7 +254,7 @@ fn view_and_header_width_are_checked_before_writing() {
     let mut list = list_for(markers.len());
     let before = list.clone();
     assert!(matches!(
-        append_alert_markers(&mut list, &projection(480, 104), &markers),
+        append_alert_markers(&mut list, &projection(480, 160), &markers),
         Err(DisplayError::BadView(_))
     ));
     assert_eq!(list, before);
@@ -267,5 +267,5 @@ fn view_and_header_width_are_checked_before_writing() {
 
     // The documented minimum width fits this header. Refusing it would turn the
     // stated minimum into a misleading contract.
-    assert!(append_alert_markers(&mut list, &projection(500, 104), &markers).is_ok());
+    assert!(append_alert_markers(&mut list, &projection(500, 160), &markers).is_ok());
 }

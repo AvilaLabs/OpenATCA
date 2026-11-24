@@ -342,7 +342,9 @@ const ALLOW: &str = "seal-allow:";
 /// made here, not slack in a budget.
 // Sixteen reviewed output/control-path operations added for regional evidence and atomic
 // replay/comparator publication: guarded create-new writes, metadata, inventories and links.
-const ALLOW_COUNT: usize = 168;
+// Nine reviewed additions: snapshot stdin, four fixed Linux device/process sites, two
+// synthetic recovery-worker control/output sites, and two create-new operated output sites.
+const ALLOW_COUNT: usize = 177;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.

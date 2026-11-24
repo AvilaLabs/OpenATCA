@@ -444,18 +444,25 @@ fn collect_nets(b: &mut Banner, tb: &mut TextBuf, s: &SafetyScene<'_>, st: &mut 
 
 /// Rows of banner text that fit the frame between the legend strip and the bottom notices.
 fn rows_that_fit(proj: &Projection) -> usize {
-    let free = i64::from(proj.height) - i64::from(LEGEND_STRIP_PX) - 8 - i64::from(BOTTOM_RESERVE);
+    let free = i64::from(proj.height)
+        - i64::from(proj.top_inset.max(LEGEND_STRIP_PX))
+        - 8
+        - i64::from(BOTTOM_RESERVE);
     usize::try_from((free / i64::from(BANNER_PITCH)).max(1)).unwrap_or(1)
 }
 
 /// The box of `n` lines whose widest has `widest_units` grid units, 1/16 pixel: left, top, right,
 /// bottom.
-fn box_of(n: usize, widest_units: i32) -> (i32, i32, i32, i32) {
+fn banner_top16(proj: &Projection) -> i32 {
+    i32::try_from((i64::from(proj.top_inset.max(LEGEND_STRIP_PX)) + 8) * 16).unwrap_or(i32::MAX)
+}
+
+fn box_of(proj: &Projection, n: usize, widest_units: i32) -> (i32, i32, i32, i32) {
     let w = i32::try_from(i64::from(widest_units) * i64::from(BANNER_SIZE) / i64::from(CAP_HEIGHT))
         .unwrap_or(i32::MAX);
     let rows = i32::try_from(n).unwrap_or(i32::MAX);
     let x0 = px(BANNER_X - BANNER_PAD);
-    let y0 = px(LEGEND_STRIP_PX as i32 + 8 - BANNER_PAD);
+    let y0 = banner_top16(proj).saturating_sub(px(BANNER_PAD));
     (
         x0,
         y0,
@@ -516,7 +523,7 @@ fn banner_draw(
     let under = targets_under(
         targets,
         proj,
-        box_of(b.n + 1, widest(b).max(text_width_units(30))),
+        box_of(proj, b.n + 1, widest(b).max(text_width_units(30))),
     );
     if under > 0 && b.n < fit {
         text_clear(tb);
@@ -524,9 +531,9 @@ fn banner_draw(
         push_capped(tb, u64::from(under), SHOW_MAX);
         banner_add(b, tb, st);
     }
-    st.targets_under_banner = targets_under(targets, proj, box_of(b.n, widest(b)));
+    st.targets_under_banner = targets_under(targets, proj, box_of(proj, b.n, widest(b)));
     st.banner_lines = u32::try_from(b.n).unwrap_or(u32::MAX);
-    let (x0, y0, x1, y1) = box_of(b.n, widest(b));
+    let (x0, y0, x1, y1) = box_of(proj, b.n, widest(b));
     push_rect(l, (x0, y0), (x1, y1), palette::BACKGROUND, LAYER_BANNER_BG)?;
     for (p, q) in [
         ((x0, y0), (x1, y0)),
@@ -536,7 +543,7 @@ fn banner_draw(
     ] {
         push_line(l, p, q, palette::ALERT, LAYER_BANNER)?;
     }
-    let mut y = px(LEGEND_STRIP_PX as i32 + 8);
+    let mut y = banner_top16(proj);
     for t in b.lines.iter().take(b.n) {
         push_text(
             l,

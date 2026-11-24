@@ -68,10 +68,12 @@ pub fn parse_performance_manifest(bytes: &[u8]) -> Result<PerformanceInputs, Str
     if !text.is_ascii() {
         return Err("performance manifest must be ASCII".into());
     }
-    let mut lines = text.split_inclusive('\n').map(|chunk| match chunk.strip_suffix('\n') {
-        Some(line) => strip_cr(line),
-        None => chunk,
-    });
+    let mut lines = text
+        .split_inclusive('\n')
+        .map(|chunk| match chunk.strip_suffix('\n') {
+            Some(line) => strip_cr(line),
+            None => chunk,
+        });
     let header = lines.next().ok_or("performance manifest is empty")?;
     if header != "OA-PERFORMANCE\t1" {
         return Err("expected OA-PERFORMANCE version 1 header".into());
@@ -81,7 +83,10 @@ pub fn parse_performance_manifest(bytes: &[u8]) -> Result<PerformanceInputs, Str
     for (zero_index, raw_line) in lines.enumerate() {
         let line = raw_line;
         if line.len() > MAX_PERFORMANCE_ROW_BYTES {
-            return Err(format!("performance row {} exceeds 1024 bytes", zero_index + 1));
+            return Err(format!(
+                "performance row {} exceeds 1024 bytes",
+                zero_index + 1
+            ));
         }
         if line.is_empty() {
             return Err(format!("performance row {} is empty", zero_index + 1));
@@ -105,7 +110,10 @@ pub fn parse_performance_manifest(bytes: &[u8]) -> Result<PerformanceInputs, Str
 
         let gufi = parse_hex_u128(field(&fields, 1)?, "GUFI")?;
         if gufi == 0 {
-            return Err(format!("performance row {} has a zero GUFI", zero_index + 1));
+            return Err(format!(
+                "performance row {} has a zero GUFI",
+                zero_index + 1
+            ));
         }
         let address = parse_hex_address(field(&fields, 2)?, zero_index + 1)?;
         let centre = parse_centre(field(&fields, 3)?, zero_index + 1)?;
@@ -119,11 +127,17 @@ pub fn parse_performance_manifest(bytes: &[u8]) -> Result<PerformanceInputs, Str
 
         let message_id = parse_u64(field(&fields, 7)?, "message_id")?;
         if message_id == 0 {
-            return Err(format!("performance row {} has a zero message_id", zero_index + 1));
+            return Err(format!(
+                "performance row {} has a zero message_id",
+                zero_index + 1
+            ));
         }
         let max_age_ms = parse_i64(field(&fields, 8)?, "max_age_ms")?;
         if max_age_ms < 0 {
-            return Err(format!("performance row {} has negative max_age_ms", zero_index + 1));
+            return Err(format!(
+                "performance row {} has negative max_age_ms",
+                zero_index + 1
+            ));
         }
         let max_climb_fpm = parse_u32(field(&fields, 9)?, "max_climb_fpm")?;
         let max_descent_fpm = parse_u32(field(&fields, 10)?, "max_descent_fpm")?;
@@ -131,12 +145,22 @@ pub fn parse_performance_manifest(bytes: &[u8]) -> Result<PerformanceInputs, Str
         let source = match field(&fields, 12)? {
             "MEASURED" => PerformanceSource::Measured,
             "EMPIRICAL_MODEL" => PerformanceSource::EmpiricalModel,
-            _ => return Err(format!("performance row {} has unknown source", zero_index + 1)),
+            _ => {
+                return Err(format!(
+                    "performance row {} has unknown source",
+                    zero_index + 1
+                ))
+            }
         };
         let status = match field(&fields, 13)? {
             "VALID" => PerformanceStatus::Valid,
             "CONTRADICTORY" => PerformanceStatus::Contradictory,
-            _ => return Err(format!("performance row {} has unknown status", zero_index + 1)),
+            _ => {
+                return Err(format!(
+                    "performance row {} has unknown status",
+                    zero_index + 1
+                ))
+            }
         };
         envelopes.push(PerformanceEnvelope {
             key,
@@ -200,19 +224,25 @@ fn parse_hex_u128(text: &str, name: &str) -> Result<u128, String> {
 
 fn parse_hex_address(text: &str, row: usize) -> Result<u32, String> {
     if !(6..=7).contains(&text.len()) || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("performance row {row} address must be six or seven hexadecimal digits"));
+        return Err(format!(
+            "performance row {row} address must be six or seven hexadecimal digits"
+        ));
     }
     let address = u32::from_str_radix(text, 16)
         .map_err(|_| format!("performance row {row} address is invalid"))?;
     if oa_adsb::is_reserved_address(address) || address > MAX_AIRCRAFT_ADDRESS {
-        return Err(format!("performance row {row} address is outside the aircraft range"));
+        return Err(format!(
+            "performance row {row} address is outside the aircraft range"
+        ));
     }
     Ok(address)
 }
 
 fn parse_centre(text: &str, row: usize) -> Result<[u8; 4], String> {
     if text.len() != 4 || !text.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
-        return Err(format!("performance row {row} centre must be four ASCII alphanumerics"));
+        return Err(format!(
+            "performance row {row} centre must be four ASCII alphanumerics"
+        ));
     }
     let mut centre = [0; 4];
     for (slot, byte) in centre.iter_mut().zip(text.bytes()) {
@@ -227,7 +257,9 @@ fn parse_plan_id(text: &str, row: usize) -> Result<[u8; 12], String> {
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     {
-        return Err(format!("performance row {row} plan_id must be 12 uppercase alphanumerics"));
+        return Err(format!(
+            "performance row {row} plan_id must be 12 uppercase alphanumerics"
+        ));
     }
     let mut plan_id = [0; 12];
     for (slot, byte) in plan_id.iter_mut().zip(text.bytes()) {
@@ -238,7 +270,9 @@ fn parse_plan_id(text: &str, row: usize) -> Result<[u8; 12], String> {
 
 fn validate_times(source_ms: i64, available_ms: i64, row: usize) -> Result<(), String> {
     if source_ms < 0 || available_ms < 0 || source_ms > available_ms {
-        return Err(format!("performance row {row} has invalid source/availability ordering"));
+        return Err(format!(
+            "performance row {row} has invalid source/availability ordering"
+        ));
     }
     let source_ns = source_ms
         .checked_mul(MS_TO_NS)

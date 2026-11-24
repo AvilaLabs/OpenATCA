@@ -93,7 +93,9 @@ bound by the closed run manifest; frame evidence records the exact terrain tiles
 The current MSAW alert markers use the matching current tracker position and retain latched
 episode severity. A lost-altitude alert or failed provider is labelled protection lost; no
 current position means an unlocated count, never a marker at the alert's historical origin.
-Warning, caution, lost, off-map and unlocated counts remain in the scope legend. A terrain
+Warning, caution, lost, off-map and unlocated counts remain in a reserved panel beneath the
+standard legend. The regional map begins at row 160; rows 104..160 contain alert counts and
+console text. Alerts whose full marker would cross the map edge count as off-map. A terrain
 reader failure isolates MSAW and leaves tracking, observed conflict alerting and scope running;
 resuming MSAW requires fresh prefix reconstruction. This display has no aural alert or alert
 acknowledgement workflow yet.
@@ -187,7 +189,11 @@ selection, and queued commands. All input is suppressed while KMS is inactive; r
 device queue and records held keys as state only, never as commands.
 
 The device mode requires an 800×600-or-larger KMS mode and displays the fixed view at native pixel
-size with black letterbox borders. It uses one owner thread and finite VT/input waits. Output
+size with black letterbox borders. It uses one owner thread and finite VT/input waits. Every
+session is capped at 100,000 input-loop polls, 4,096 actions, and 30 minutes; irrelevant device
+traffic and key repeats cannot refresh the inactivity timer. The dedicated process exits on
+every error, including failed CRTC/VT restoration; embedding this loop in a continuing process
+does not satisfy its ownership contract. Output
 contains per-frame debug evidence and PPM images, the action/resequence journal, settings and
 manifest hashes, and a `COMPLETE` marker written last. Any unresolved input loss, queued action,
 device error, or incomplete session prevents that marker. Logical frame state and pixels are

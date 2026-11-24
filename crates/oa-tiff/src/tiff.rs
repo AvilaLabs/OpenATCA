@@ -559,11 +559,12 @@ fn read_geotiff_inner(data: &[u8], limits: Option<ReadLimits>) -> Result<Grid, T
         .checked_mul(u64::try_from(std::mem::size_of::<f32>()).unwrap_or(u64::MAX))
         .ok_or(TiffError::BadValue("decoded grid byte count overflow"))?;
     if let Some(limits) = limits {
-        let grid_bytes = usize::try_from(grid_bytes_u64).map_err(|_| TiffError::ReadBudgetExceeded {
-            what: "decoded grid bytes",
-            value: grid_bytes_u64,
-            limit: limits.max_grid_bytes as u64,
-        })?;
+        let grid_bytes =
+            usize::try_from(grid_bytes_u64).map_err(|_| TiffError::ReadBudgetExceeded {
+                what: "decoded grid bytes",
+                value: grid_bytes_u64,
+                limit: limits.max_grid_bytes as u64,
+            })?;
         if grid_bytes > limits.max_grid_bytes {
             return Err(TiffError::ReadBudgetExceeded {
                 what: "decoded grid bytes",
@@ -571,7 +572,8 @@ fn read_geotiff_inner(data: &[u8], limits: Option<ReadLimits>) -> Result<Grid, T
                 limit: limits.max_grid_bytes as u64,
             });
         }
-        let retained = limits.retained_bytes
+        let retained = limits
+            .retained_bytes
             .checked_add(limits.future_retained_bytes)
             .ok_or(TiffError::BadValue("retained byte count overflow"))?;
         if retained > limits.max_retained_bytes {
@@ -581,7 +583,8 @@ fn read_geotiff_inner(data: &[u8], limits: Option<ReadLimits>) -> Result<Grid, T
                 limit: limits.max_retained_bytes as u64,
             });
         }
-        let working = data.len()
+        let working = data
+            .len()
             .checked_add(grid_bytes)
             .and_then(|n| n.checked_add(retained))
             .and_then(|n| n.checked_add(MAX_READ_TEMP_BYTES))

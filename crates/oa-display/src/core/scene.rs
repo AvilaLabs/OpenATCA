@@ -1748,12 +1748,13 @@ fn legend(
     let pitch = 18 * 16;
     let mut y = 8 * 16;
     let strip16 = i32::try_from(LEGEND_STRIP_PX * 16).unwrap_or(i32::MAX);
+    let reserved16 = i32::try_from(i64::from(p.top_inset) * 16).unwrap_or(i32::MAX);
     let width16 = i32::try_from(i64::from(p.width) * 16).unwrap_or(i32::MAX);
     // An opaque backdrop the full width of the strip, and a rule under it.
     push_rect(
         l,
         (0, 0),
-        (width16, strip16),
+        (width16, reserved16),
         palette::BACKGROUND,
         LAYER_LEGEND_BG,
     )?;

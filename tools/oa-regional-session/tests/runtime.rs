@@ -1,14 +1,14 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 
+use oa_legacy_traj::core::trajectory::{
+    FlightKey, PerformanceEnvelope, PerformanceSource, PerformanceStatus,
+};
 use oa_regional_session::cli::synthetic_model;
 use oa_regional_session::runtime::{
     regional_new, regional_step, regional_step_with_performance, MAX_PERFORMANCE_ENVELOPES,
 };
 use oa_regional_session::surveillance::SurveillanceConfig;
 use oa_regional_session::{parse_event_line, ReceiptBatch};
-use oa_legacy_traj::core::trajectory::{
-    FlightKey, PerformanceEnvelope, PerformanceSource, PerformanceStatus,
-};
 
 const SECOND: i64 = 1_000_000_000;
 const ROUTE: &str = "FIX:FIXA:K1:1:- DCT:FIXB:K1:1:-";
@@ -175,11 +175,23 @@ fn confirmation_batch() -> ReceiptBatch {
 // REQ: OA-REG-015
 #[test]
 fn selection_and_console_replace_only_controls_and_keep_the_observation_epoch() {
-    use oa_regional_session::runtime::{regional_console_overlay, regional_pixels, regional_select};
+    use oa_regional_session::runtime::{
+        regional_console_overlay, regional_pixels, regional_select,
+    };
     let mut engine = runtime();
     let frame = confirmed(&mut engine);
-    let view = frame.controller_views.iter().find(|view| view.address == 0xabc101).unwrap();
-    let selected = regional_select(&mut engine, view.address, view.generation, Some(view.identity)).unwrap();
+    let view = frame
+        .controller_views
+        .iter()
+        .find(|view| view.address == 0xabc101)
+        .unwrap();
+    let selected = regional_select(
+        &mut engine,
+        view.address,
+        view.generation,
+        Some(view.identity),
+    )
+    .unwrap();
     for _ in 0..100 {
         let edited = regional_console_overlay(&mut engine, "INPUT ASSIGNED 12000").unwrap();
         assert_ne!(edited, selected);
@@ -188,18 +200,39 @@ fn selection_and_console_replace_only_controls_and_keep_the_observation_epoch() 
     let before = regional_pixels(&engine).unwrap().to_vec();
     assert!(regional_console_overlay(&mut engine, "bad\ninput").is_err());
     assert_eq!(regional_pixels(&engine).unwrap(), before);
-    let next = regional_step(&mut engine, &ReceiptBatch {
-        receipt_ns: 3 * SECOND, source_clock_regressions: 0, events: Vec::new(),
-    }).unwrap();
+    let next = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 3 * SECOND,
+            source_clock_regressions: 0,
+            events: Vec::new(),
+        },
+    )
+    .unwrap();
     assert_eq!(next.controller_selected_address, Some(view.address));
     assert_eq!(next.controller_selection, Some(view.identity));
     assert_eq!(next.surveillance.time_ns, 3 * SECOND);
     assert_eq!(next.surveillance.ca_stats.tracks, 2);
-    assert!(regional_select(&mut engine, view.address, view.generation + 1, Some(view.identity)).is_err());
-    assert!(regional_pixels(&engine).is_ok(), "ordinary selection refusal remains visible");
-    let next = regional_step(&mut engine, &ReceiptBatch {
-        receipt_ns: 4 * SECOND, source_clock_regressions: 0, events: Vec::new(),
-    }).unwrap();
+    assert!(regional_select(
+        &mut engine,
+        view.address,
+        view.generation + 1,
+        Some(view.identity)
+    )
+    .is_err());
+    assert!(
+        regional_pixels(&engine).is_ok(),
+        "ordinary selection refusal remains visible"
+    );
+    let next = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 4 * SECOND,
+            source_clock_regressions: 0,
+            events: Vec::new(),
+        },
+    )
+    .unwrap();
     assert_eq!(next.controller_selected_address, None);
     assert_eq!(next.controller_selection, None);
 }
@@ -369,25 +402,47 @@ fn opt_in_uses_full_key_performance_and_preserves_horizontal_only_results() {
 
     let envelope = performance_for(first_flight_key());
     let opt_in = confirmed_with_performance(&[envelope]);
-    let baseline_first = baseline.flights.iter().find(|f| f.address == 0xabc101).unwrap();
-    let opt_in_first = opt_in.flights.iter().find(|f| f.address == 0xabc101).unwrap();
+    let baseline_first = baseline
+        .flights
+        .iter()
+        .find(|f| f.address == 0xabc101)
+        .unwrap();
+    let opt_in_first = opt_in
+        .flights
+        .iter()
+        .find(|f| f.address == 0xabc101)
+        .unwrap();
     assert_eq!(baseline_first.trajectory, opt_in_first.trajectory);
     let profile = opt_in_first.vertical_profile.unwrap();
     assert_eq!(profile.performance, envelope);
     assert_eq!(profile.key, envelope.key);
-    assert_eq!(profile.availability, oa_legacy_traj::core::trajectory::Availability::Available);
-    assert_eq!(profile.points[0].availability, oa_legacy_traj::core::trajectory::Availability::Available);
+    assert_eq!(
+        profile.availability,
+        oa_legacy_traj::core::trajectory::Availability::Available
+    );
+    assert_eq!(
+        profile.points[0].availability,
+        oa_legacy_traj::core::trajectory::Availability::Available
+    );
     assert_eq!(profile.points[0].reachable_min_ft, 10_000);
     assert!(profile.points[0].reachable_max_ft >= 10_000);
     assert!(opt_in_first.vertical_refusal.is_empty());
 
-    let other_flight = opt_in.flights.iter().find(|f| f.address == 0xabc102).unwrap();
+    let other_flight = opt_in
+        .flights
+        .iter()
+        .find(|f| f.address == 0xabc102)
+        .unwrap();
     assert!(other_flight.vertical_profile.is_none());
     assert!(other_flight.vertical_refusal.contains("full flight key"));
 
     let disabled = confirmed_with_performance(&[]);
     for expected in &baseline.flights {
-        let actual = disabled.flights.iter().find(|f| f.address == expected.address).unwrap();
+        let actual = disabled
+            .flights
+            .iter()
+            .find(|f| f.address == expected.address)
+            .unwrap();
         assert_eq!(expected.trajectory, actual.trajectory);
         assert!(actual.vertical_profile.is_none());
     }
@@ -399,14 +454,22 @@ fn only_one_eligible_exact_full_key_envelope_is_selected() {
     let mut mismatched_key = first_flight_key();
     mismatched_key.plan_id[0] ^= 1;
     let mismatch_frame = confirmed_with_performance(&[performance_for(mismatched_key)]);
-    let mismatch = mismatch_frame.flights.iter().find(|f| f.address == 0xabc101).unwrap();
+    let mismatch = mismatch_frame
+        .flights
+        .iter()
+        .find(|f| f.address == 0xabc101)
+        .unwrap();
     assert!(mismatch.trajectory.is_some());
     assert!(mismatch.vertical_profile.is_none());
     assert!(mismatch.vertical_refusal.contains("full flight key"));
 
     let envelope = performance_for(first_flight_key());
     let duplicate_frame = confirmed_with_performance(&[envelope, envelope]);
-    let duplicate = duplicate_frame.flights.iter().find(|f| f.address == 0xabc101).unwrap();
+    let duplicate = duplicate_frame
+        .flights
+        .iter()
+        .find(|f| f.address == 0xabc101)
+        .unwrap();
     assert!(duplicate.trajectory.is_some());
     assert!(duplicate.vertical_profile.is_none());
     assert!(duplicate.vertical_refusal.contains("duplicate eligible"));

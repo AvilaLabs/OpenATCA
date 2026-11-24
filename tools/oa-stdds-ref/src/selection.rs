@@ -54,8 +54,12 @@ pub struct SelectionCounts {
 pub fn select_published_time(
     recs: &mut Vec<Rec>,
     interval: Option<TimeInterval>,
-) -> SelectionCounts {
-    let records_after_sealed_filter = u64::try_from(recs.len()).unwrap_or(u64::MAX);
+) -> Result<SelectionCounts, String> {
+    if recs.len() > crate::load::MAX_STDDS_RECORDS {
+        return Err("cohort selection exceeds the STDDS record budget".into());
+    }
+    let records_after_sealed_filter =
+        u64::try_from(recs.len()).map_err(|_| "cohort selection record count overflow")?;
     let mut counts = SelectionCounts {
         records_after_sealed_filter,
         ..SelectionCounts::default()
@@ -74,7 +78,7 @@ pub fn select_published_time(
             true
         }
     });
-    counts
+    Ok(counts)
 }
 
 #[cfg(test)]
@@ -99,6 +103,7 @@ mod tests {
         }
     }
 
+    // REQ: OA-SRF-021
     #[test]
     fn interval_is_half_open_and_supports_negative_unix_times() {
         let range = TimeInterval::new(-10, 20).unwrap();
@@ -114,6 +119,7 @@ mod tests {
         assert!(!overlaps(sealed, 30, 40));
     }
 
+    // REQ: OA-SRF-021
     #[test]
     fn selection_preserves_cohort_and_accounts_for_every_parsed_row() {
         let mut rows = vec![
@@ -123,7 +129,8 @@ mod tests {
             rec(Some(20)),
             rec(None),
         ];
-        let counts = select_published_time(&mut rows, Some(TimeInterval::new(10, 20).unwrap()));
+        let counts =
+            select_published_time(&mut rows, Some(TimeInterval::new(10, 20).unwrap())).unwrap();
         assert_eq!(counts.records_after_sealed_filter, 5);
         assert_eq!(counts.selected_records, 2);
         assert_eq!(counts.excluded_outside_interval, 2);
@@ -138,13 +145,22 @@ mod tests {
         );
     }
 
+    // REQ: OA-SRF-021
     #[test]
     fn no_interval_keeps_all_timed_rows_and_counts_missing_time() {
         let mut rows = vec![rec(Some(-1)), rec(Some(0)), rec(None)];
-        let counts = select_published_time(&mut rows, None);
+        let counts = select_published_time(&mut rows, None).unwrap();
         assert_eq!(counts.records_after_sealed_filter, 3);
         assert_eq!(counts.selected_records, 2);
         assert_eq!(counts.excluded_outside_interval, 0);
         assert_eq!(counts.excluded_untimed, 1);
+    }
+
+    // REQ: OA-SRF-021
+    #[test]
+    fn oversized_selection_is_refused_before_any_rows_are_removed() {
+        let mut rows = vec![rec(None); crate::load::MAX_STDDS_RECORDS + 1];
+        assert!(select_published_time(&mut rows, None).is_err());
+        assert_eq!(rows.len(), crate::load::MAX_STDDS_RECORDS + 1);
     }
 }

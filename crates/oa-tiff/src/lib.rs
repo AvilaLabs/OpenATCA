@@ -201,7 +201,10 @@ impl fmt::Display for TiffError {
                 write!(f, "{what} is {value}, over the {limit} limit")
             }
             TiffError::ReadBudgetExceeded { what, value, limit } => {
-                write!(f, "{what} is {value}, over the caller's {limit} read budget")
+                write!(
+                    f,
+                    "{what} is {value}, over the caller's {limit} read budget"
+                )
             }
             TiffError::Unsupported { what, value } => write!(f, "unsupported {what}: {value}"),
             TiffError::BadValue(w) => write!(f, "bad value: {w}"),

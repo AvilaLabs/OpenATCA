@@ -42,7 +42,9 @@ The `oa-scope-replay` frame builder draws map, traffic and frame labels. For eac
 scene to `build_safety` when they need feed and net warnings alongside traffic.
 
 `alert_markers::append_alert_markers` presents a bounded set of current MSAW states from their
-current observed positions. It counts off-map and unlocated alerts in the header, draws visible
+current observed positions. It requires at least 128 reserved top rows; the count header is
+below the standard legend. Alerts whose complete 16 pixel ring would cross a viewport edge
+are included in the off-map count. It counts off-map and unlocated alerts in the header, draws visible
 caution, warning and protection-lost states with distinct circle patterns and letters, and refuses
 malformed records or insufficient reserved list capacity before writing primitives. This presents
 supplied alert state; it does not compute MSAW alerts or provide full alert decluttering.

@@ -2448,6 +2448,8 @@ frame of their feed has been fed (as the ADS-B table is).
   decoder refuses the payload.
 - **OA-ADSB-172** The trace decoder refuses and counts (`REJ_TIME`) a row whose absolute time (base plus offset) is
   outside `TIME_MIN_NS..TIME_MAX_NS`, so every row it produces is one the payload reader accepts.
+- **OA-ADSB-174** Bounded public V2 snapshots retain full source identity and available quality fields, estimate source time only from envelope time minus explicit position age, count every exclusion, and never fall back to a historical position. Required source arrays follow the V2Response_AcItem schema; contradictory source flags cannot be admitted as direct ADS-B.
+- **OA-ADSB-175** Snapshot decoding refuses oversized structures, row arrays, inconsistent counts, duplicate keys and invalid or sealed envelope timestamps before admitting rows; sealed row timestamps are separately dropped and counted.
 - **OA-ADSB-100** (proof) The record decoder, for every `ADS2` record (80 octets) and every `ADS1` record
   (64 octets), never panics or overflows; a record it keeps has a position inside +-90 and +-180 degrees,
   a source type that is absent, known or `unknown`, and anomaly bits among the three that exist.
@@ -6694,6 +6696,7 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-SRF-020** Summary, CSV and JSON are published without replacing existing outputs; a final
   content/provenance marker binds all three. Cooperating same-host writers hold one publisher lock.
   This does not establish distributed fencing or automatic recovery of a partial report set.
+- **OA-SRF-021** Published-time cohort selection uses explicit half-open bounds before offset fitting, retains the complete ADS-B boundary context, and counts selected, untimed and outside rows against the post-seal denominator. Oversized retained sets are refused before selection mutates any row.
 
 ## M4 legacy trajectory measurement (tools/oa-legacy-traj)
 
@@ -6881,10 +6884,12 @@ This is a bounded normalized-input composition, not facility, deadline or operat
 - **OA-REG-013** Bounded recorded ADS-B and SFDPS imports preserve exact native receipt provenance, admit events no earlier than the next whole-second cutoff, retain source timestamps and count unsupported, malformed, sealed and capacity-refused work. Closed imports use guarded new outputs and a completion marker written last.
 - **OA-REG-014** Vertical profile integration is opt-in and uses only explicit eligible performance evidence for the exact full flight key. Missing, duplicate or foreign evidence has a visible per-flight refusal and cannot change horizontal forecasts or observed safety nets.
 - **OA-REG-015** Operated replay selection checks the exact displayed address, generation and full identity; refusal clears selection and remains visible. Bounded console redraws replace only control primitives, preserve the observation epoch and safety presentation, and retain selection/input evidence.
+- **OA-REG-016** The operated recorded-session console caps action parsing, inserts explicitly bound local commands in source order with sequence audit, refuses stale or ambiguous targets, and closes a manifest only after frame and journal files are durably written. Script-mode CLI tests verify accepted commands, visible refusals and every listed output hash; native input is accepted only on the active VT and idle polling is not input loss.
 
 ## Current alert presentation (oa-display)
 
 - **OA-DSP-077** Bounded MSAW markers distinguish caution, warning and protection loss by shape and label, use the matching aircraft's current supplied position, and count off-map and unlocated alerts. Complete validation and list-budget checks precede mutation; a count header retains every alert category.
+- **OA-DSP-078** Explicit scene and replay top insets preserve the default 104 pixel view, validate additional reserved header space before allocation, and clip map primitives to the resulting map viewport.
 
 ## Controller interaction (oa-display)
 

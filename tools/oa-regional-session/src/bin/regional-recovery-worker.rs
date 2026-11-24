@@ -14,11 +14,11 @@ const SETTINGS: &str = "OA-REGIONAL-RECOVERY-SETTINGS\t1\ncentre\tZAU1\ncentre_l
 
 // A7.2: cold process fixture initialization result.
 type WorkerSetup = (
-        oa_regional_session::runtime::RegionalRuntime,
-        Vec<oa_regional_session::ReceiptBatch>,
-        [u8; 32],
-        [u8; 32],
-    );
+    oa_regional_session::runtime::RegionalRuntime,
+    Vec<oa_regional_session::ReceiptBatch>,
+    [u8; 32],
+    [u8; 32],
+);
 
 fn setup() -> Result<WorkerSetup, String> {
     let snapshot = oa_airspace::core::snapshot::encode(&synthetic_model()?)
@@ -167,9 +167,9 @@ fn run() -> Result<(), String> {
     let mut processed = 0usize;
     let mut replayed = false;
     let mut stdout = io::BufWriter::new(io::stdout().lock());
-    let stdin = io::stdin();
     // seal-allow: stdin carries only this bounded local test-control protocol; synthetic fixture
     // rows and adaptation are embedded below, and no FAA or external input can be read here.
+    let stdin = io::stdin();
     let mut reader = BufReader::new(stdin.lock());
     while let Some(line) = read_line(&mut reader).map_err(|e| e.to_string())? {
         let fields: Vec<&str> = line.split('\t').collect();

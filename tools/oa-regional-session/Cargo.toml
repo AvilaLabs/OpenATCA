@@ -69,3 +69,7 @@ path = "src/bin/regional-recovery-worker.rs"
 [[bin]]
 name = "regional-recording-import"
 path = "src/bin/regional-recording-import.rs"
+
+[[bin]]
+name = "oa-regional-console"
+path = "src/bin/regional-console.rs"

@@ -311,7 +311,7 @@ fn run(
             info.gzip_truncated
         ));
     }
-    let selection = select_published_time(&mut recs, interval);
+    let selection = select_published_time(&mut recs, interval)?;
     header.push(format!("cohort id: {cohort_id}"));
     match interval {
         Some(range) => header.push(format!(

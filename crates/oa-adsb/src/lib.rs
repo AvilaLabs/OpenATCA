@@ -129,9 +129,9 @@ mod archive;
 mod category;
 pub mod cli;
 mod frames;
+mod snapshot;
 mod speed;
 mod summary;
-mod snapshot;
 mod trace;
 
 pub use archive::{scan_archive, scan_archive_counted, ScanEnd, ScanError, ScanResult};
@@ -142,16 +142,16 @@ pub use frames::{
     MAX_FRAME_MS, MAX_ROWS_PER_FRAME, MIN_FRAME_MS, PAYLOAD_HEADER_LEN, PAYLOAD_MAGIC,
     PREVIOUS_PAYLOAD_MAGIC, RECORD_LEN, TIME_MAX_NS, TIME_MIN_NS,
 };
+pub use snapshot::{
+    decode_snapshot, SnapshotError, SnapshotStats, MAX_POSITION_AGE_MS, MAX_SNAPSHOT_BYTES,
+    MAX_SNAPSHOT_NODES, MAX_SNAPSHOT_ROWS,
+};
 pub use speed::{
     category_ceiling_kt, category_hard_cap_kt, is_jump, is_reserved_address, jump_verdict,
     JumpPair, JumpVerdict, CAP_HIGH_KT, CAP_ORDINARY_KT, CAP_SPACE_KT, CONSISTENCY_ACCEL_KT_S,
     CONSISTENCY_BASE_KT, CONSISTENCY_FACTOR, SPEED_ENVELOPE_KT, SPEED_ENVELOPE_MPS,
 };
 pub use summary::{summarize, Summary, MIN_JUMP_NM};
-pub use snapshot::{
-    decode_snapshot, SnapshotError, SnapshotStats, MAX_POSITION_AGE_MS, MAX_SNAPSHOT_BYTES,
-    MAX_SNAPSHOT_NODES, MAX_SNAPSHOT_ROWS,
-};
 pub use trace::{decode_trace, TraceError};
 
 /// Limit: rows in one trace. A busy day's longest real trace is tens of thousands of rows; at
