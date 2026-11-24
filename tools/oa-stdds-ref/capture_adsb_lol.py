@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import http.client
 import hashlib
 import json
 import math
@@ -20,12 +21,13 @@ import stat
 import sys
 import selectors
 import signal
+import struct
 import time
 from datetime import datetime, timezone
 import re
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.parse import parse_qs, quote, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -44,6 +46,11 @@ UA = "OpenATCA-development-capture/1.0 (private research; contact Connor Avila)"
 FIXED_QUERY = (42.5, -88.5, 250)
 MAX_DECODER_STDOUT = 16 * 1024 * 1024
 MAX_DECODER_STDERR = 64 * 1024
+MAX_FETCH_HEADERS = 32
+MAX_FETCH_HEADER_BYTES = 32 * 1024
+MAX_FETCH_WORKER_STDOUT = MAX_BODY_BYTES + MAX_FETCH_HEADER_BYTES + 16
+FETCH_MAGIC = b"OAHTTP1\0"
+FETCH_WORKER_SWITCH = "--internal-fetch-worker"
 
 
 def utc_ms() -> int:
@@ -280,6 +287,7 @@ def check_snapshot_times(body: bytes, receipt_ms: int, guard: sealed_guard.Guard
 
 def bounded_process(command: list[str], body: bytes, timeout_s: int, stdout_limit: int, stderr_limit: int,
                     pass_fds: tuple[int, ...] = ()) -> tuple[int, bytes, bytes]:
+    deadline = time.monotonic() + timeout_s
     proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             close_fds=True, pass_fds=pass_fds, start_new_session=True)
     stdin, stdout, stderr = proc.stdin, proc.stdout, proc.stderr
@@ -292,7 +300,7 @@ def bounded_process(command: list[str], body: bytes, timeout_s: int, stdout_limi
     limits = [stdout_limit, stderr_limit]
     streams = {stdout: 0, stderr: 1}
     pending = memoryview(body)
-    deadline = time.monotonic() + timeout_s
+    cleanup_started = False
 
     def kill_group() -> None:
         try:
@@ -305,6 +313,20 @@ def bounded_process(command: list[str], body: bytes, timeout_s: int, stdout_limi
             except OSError:
                 pass
 
+    def stop_and_reap() -> None:
+        nonlocal cleanup_started
+        cleanup_started = True
+        kill_group()
+        try:
+            proc.wait(timeout=1.0)
+            return
+        except subprocess.TimeoutExpired:
+            kill_group()
+        try:
+            proc.wait(timeout=1.0)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("decoder/fetch worker did not exit within 2 s after process-group SIGKILL; the OS may be holding it in an uninterruptible state") from exc
+
     try:
         for stream in (stdin, stdout, stderr):
             os.set_blocking(stream.fileno(), False)
@@ -315,9 +337,11 @@ def bounded_process(command: list[str], body: bytes, timeout_s: int, stdout_limi
         else:
             stdin.close()
         while True:
-            if proc.poll() is not None and not selector.get_map():
-                break
             remaining = deadline - time.monotonic()
+            if proc.poll() is not None and not selector.get_map():
+                if remaining < 0:
+                    raise subprocess.TimeoutExpired(command, timeout_s)
+                break
             if remaining <= 0:
                 raise subprocess.TimeoutExpired(command, timeout_s)
             events = selector.select(remaining)
@@ -356,17 +380,17 @@ def bounded_process(command: list[str], body: bytes, timeout_s: int, stdout_limi
                 outputs[slot].extend(chunk)
         code = proc.wait()
     except BaseException:
-        kill_group()
-        proc.wait()
+        stop_and_reap()
         raise
     finally:
-        if proc.poll() is None:
-            kill_group()
-            proc.wait()
-        selector.close()
-        for stream in (stdin, stdout, stderr):
-            if not stream.closed:
-                stream.close()
+        try:
+            if proc.poll() is None and not cleanup_started:
+                stop_and_reap()
+        finally:
+            selector.close()
+            for stream in (stdin, stdout, stderr):
+                if not stream.closed:
+                    stream.close()
     return code, bytes(outputs[0]), bytes(outputs[1])
 
 
@@ -379,24 +403,144 @@ def metar_url(stations: str) -> str:
     return "https://aviationweather.gov/api/data/metar?ids=" + quote(stations, safe=",") + "&format=json"
 
 
-def fetch_once(url: str, timeout_s: int, *, allow_204: bool = False) -> tuple[bytes, dict[str, str], int, int, int]:
+def _validate_fetch_url(url: str) -> None:
+    if not isinstance(url, str) or len(url) > 2048:
+        raise ValueError("fetch URL must be at most 2048 characters")
+    parsed = urlsplit(url)
+    if parsed.scheme != "https" or parsed.username is not None or parsed.password is not None or parsed.fragment:
+        raise ValueError("fetch URL must be HTTPS without credentials or a fragment")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("fetch URL has an invalid port") from exc
+    if port not in (None, 443):
+        raise ValueError("fetch URL must use the standard HTTPS port")
+    if parsed.hostname == "api.adsb.lol":
+        if parsed.query or re.fullmatch(r"/v2/lat/-?[0-9]+\.[0-9]{5}/lon/-?[0-9]+\.[0-9]{5}/dist/[0-9]{1,3}", parsed.path) is None:
+            raise ValueError("adsb.lol fetch URL is outside the bounded regional V2 endpoint")
+        return
+    if parsed.hostname == "aviationweather.gov" and parsed.path == "/api/data/metar":
+        pairs = parse_qs(parsed.query, strict_parsing=True)
+        stations = pairs.get("ids", [""])
+        if set(pairs) != {"ids", "format"} or pairs.get("format") != ["json"] or len(stations) != 1:
+            raise ValueError("METAR fetch URL must contain ids and format=json only")
+        ids = stations[0].split(",")
+        if not 1 <= len(ids) <= 32 or any(re.fullmatch(r"[A-Z]{4}", station) is None for station in ids):
+            raise ValueError("METAR fetch URL must list 1 to 32 uppercase four-letter stations")
+        return
+    raise ValueError("fetch URL host is not an approved public endpoint")
+
+
+def fetch_worker_command(url: str, timeout_s: int, allow_204: bool) -> list[str]:
+    _validate_fetch_url(url)
+    if not 1 <= timeout_s <= 15:
+        raise ValueError("fetch timeout must be 1 to 15 seconds")
+    return [sys.executable, str(Path(__file__).resolve()), FETCH_WORKER_SWITCH, url, str(timeout_s), "1" if allow_204 else "0"]
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, _request, _fp, _code, _message, _headers, _newurl):
+        return None
+
+
+def _urlopen_no_redirect(request: Request, timeout_s: int):
+    return build_opener(_NoRedirect).open(request, timeout=timeout_s)
+
+
+def _fetch_response(url: str, timeout_s: int, *, allow_204: bool = False) -> tuple[bytes, dict[str, str], int, int, int]:
+    # This runs only in a killable worker process. urllib's socket timeout is an inactivity
+    # timeout; the parent enforces the total DNS/connect/header/body deadline.
+    http.client._MAXHEADERS = MAX_FETCH_HEADERS
+    http.client._MAXLINE = 8192
     request = Request(url, headers={"Accept": "application/json", "User-Agent": UA})
     try:
-        with urlopen(request, timeout=timeout_s) as response:
+        with _urlopen_no_redirect(request, timeout_s) as response:
             if response.status != 200 and not (allow_204 and response.status == 204):
-                raise RuntimeError(f"adsb.lol HTTP status {response.status}")
+                raise RuntimeError(f"HTTP status {response.status}")
             body = response.read(MAX_BODY_BYTES + 1)
+            all_headers = list(response.headers.raw_items())
+            if len(all_headers) > MAX_FETCH_HEADERS:
+                raise RuntimeError("response has too many HTTP headers")
+            encoded_headers = [(str(key), str(value)) for key, value in all_headers]
+            if sum(len(k.encode("utf-8")) + len(v.encode("utf-8")) + 4 for k, v in encoded_headers) > MAX_FETCH_HEADER_BYTES:
+                raise RuntimeError("response HTTP headers exceed the 32 KiB limit")
             headers = {key: response.headers.get(key, "") for key in ("Date", "ETag", "Last-Modified", "Content-Type")}
             status = response.status
     except HTTPError as e:
-        raise RuntimeError(f"HTTP status {e.code}; Retry-After={e.headers.get('Retry-After', '')}") from e
+        retry_after = e.headers.get("Retry-After", "")[:128]
+        raise RuntimeError(f"HTTP status {e.code}; Retry-After={retry_after}") from e
     except URLError as e:
-        raise RuntimeError(f"adsb.lol request failed: {e.reason}") from e
+        raise RuntimeError(f"public data request failed: {type(e.reason).__name__}") from e
     received_mono = time.monotonic_ns()
     received_ms = utc_ms()
     if len(body) > MAX_BODY_BYTES:
         raise RuntimeError(f"response exceeds {MAX_BODY_BYTES} bytes")
     return body, headers, status, received_ms, received_mono
+
+
+def _fetch_worker_main(argv: list[str]) -> int:
+    if len(argv) != 4:
+        print("fetch worker: invalid argument count", file=sys.stderr)
+        return 2
+    _, url, timeout_text, allow_text = argv
+    try:
+        timeout_s = int(timeout_text)
+        if allow_text not in ("0", "1"):
+            raise ValueError("invalid allow-204 flag")
+        if not 1 <= timeout_s <= 15:
+            raise ValueError("worker timeout must be 1 to 15 seconds")
+        _validate_fetch_url(url)
+        body, headers, status, received_ms, received_mono = _fetch_response(
+            url, timeout_s, allow_204=(allow_text == "1"))
+        meta = json.dumps({"headers": headers, "status": status, "received_ms": received_ms,
+                           "received_mono_ns": received_mono}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        if len(meta) > MAX_FETCH_HEADER_BYTES:
+            raise RuntimeError("response metadata exceeds the 32 KiB limit")
+        packet = FETCH_MAGIC + struct.pack("<II", len(meta), len(body)) + meta + body
+        sys.stdout.buffer.write(packet)
+        sys.stdout.buffer.flush()
+        return 0
+    except (OSError, ValueError, RuntimeError, HTTPError, URLError) as exc:
+        message = str(exc).replace("\n", " ")[:512]
+        print(f"fetch worker: {message}", file=sys.stderr)
+        return 2
+
+
+def run_fetch_worker(command: list[str], timeout_s: int) -> tuple[bytes, dict[str, str], int, int, int]:
+    code, packet, stderr = bounded_process(command, b"", timeout_s, MAX_FETCH_WORKER_STDOUT, MAX_DECODER_STDERR)
+    if code != 0:
+        detail = stderr.decode("utf-8", "replace")[-512:]
+        raise RuntimeError(f"public data request failed: {detail or f'worker exit {code}'}")
+    if len(packet) < len(FETCH_MAGIC) + 8 or not packet.startswith(FETCH_MAGIC):
+        raise RuntimeError("fetch worker returned a malformed packet")
+    meta_len, body_len = struct.unpack_from("<II", packet, len(FETCH_MAGIC))
+    start = len(FETCH_MAGIC) + 8
+    if meta_len > MAX_FETCH_HEADER_BYTES or body_len > MAX_BODY_BYTES or len(packet) != start + meta_len + body_len:
+        raise RuntimeError("fetch worker packet exceeds its declared limits")
+    try:
+        metadata = json.loads(packet[start:start + meta_len].decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise RuntimeError("fetch worker returned invalid response metadata") from exc
+    if not isinstance(metadata, dict):
+        raise RuntimeError("fetch worker response metadata is not an object")
+    headers, status = metadata.get("headers"), metadata.get("status")
+    received_ms, received_mono = metadata.get("received_ms"), metadata.get("received_mono_ns")
+    if (not isinstance(headers, dict) or len(headers) > MAX_FETCH_HEADERS
+            or any(not isinstance(k, str) or not isinstance(v, str) for k, v in headers.items())
+            or isinstance(status, bool) or not isinstance(status, int)
+            or isinstance(received_ms, bool) or not isinstance(received_ms, int)
+            or not 100 <= status <= 599
+            or not 946_684_800_000 <= received_ms < 4_102_444_800_000
+            or isinstance(received_mono, bool) or not isinstance(received_mono, int)
+            or not 0 <= received_mono < 2**64):
+        raise RuntimeError("fetch worker response metadata has invalid fields")
+    body = packet[start + meta_len:]
+    return body, headers, status, received_ms, received_mono
+
+
+def fetch_once(url: str, timeout_s: int, *, allow_204: bool = False) -> tuple[bytes, dict[str, str], int, int, int]:
+    command = fetch_worker_command(url, timeout_s, allow_204)
+    return run_fetch_worker(command, timeout_s)
 
 
 def parse_args() -> argparse.Namespace:
@@ -684,4 +828,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == FETCH_WORKER_SWITCH:
+        raise SystemExit(_fetch_worker_main(sys.argv[1:]))
     raise SystemExit(main())

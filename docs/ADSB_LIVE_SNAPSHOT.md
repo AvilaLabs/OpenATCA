@@ -58,8 +58,13 @@ The official OpenAPI schema checked on 2026-11-24 explicitly includes `mlat` and
 `V2Response_AcItem.required`; this requirement is for that V2 endpoint, not every readsb JSON feed.
 
 The capture wrapper has fixed ceilings: 300 seconds, polling no faster than every 5 seconds, 60
-responses, 1 MiB per response, 64 MiB cumulative response bytes, 256 MiB OAF bytes, 15-second
-maximum request timeout, and 30 seconds maximum position age. It makes one current METAR request
+responses, 1 MiB per response, 64 MiB cumulative response bytes, 256 MiB OAF bytes, a 15-second
+total request deadline that includes DNS/connect/headers/body, bounded response headers, and 30
+seconds maximum position age. Each HTTPS request runs in a separate process group so a stalled
+name lookup or trickle response can be killed at the total deadline; urllib's socket inactivity
+timeout is an additional per-operation bound. Process cleanup waits are capped at two seconds
+after SIGKILL; an uninterruptible OS process is reported as a cleanup failure and never yields
+COMPLETE. It makes one current METAR request
 to the official Aviation Weather Center API and retains its response and HTTP receipt metadata.
 It allows at most 32 METAR station identifiers. Its adsb.lol query is fixed to the documented
 ZAU coverage circle (42.5 N, 88.5 W, 250 nm), and the decoder applies the fixed 38.5–46.5 N,

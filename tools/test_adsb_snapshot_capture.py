@@ -57,6 +57,12 @@ class CaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "fixed ZAU"):
             capture.checked_options(args(lat=40.0))
 
+    def test_fetch_worker_accepts_only_fixed_https_source_families(self):
+        with self.assertRaisesRegex(ValueError, "approved public endpoint"):
+            capture.fetch_worker_command("https://synthetic.invalid/data", 5, False)
+        with self.assertRaisesRegex(ValueError, "credentials"):
+            capture.fetch_worker_command("https://user:pass@api.adsb.lol/v2/lat/42.50000/lon/-88.50000/dist/250", 5, False)
+
     def test_numeric_options_reject_bool_and_float_values(self):
         for override in ({"duration_s": True}, {"poll_s": 5.0}, {"timeout_s": False},
                          {"max_age_ms": 1.5}, {"radius_nm": 250.0}):
@@ -187,10 +193,14 @@ class CaptureTests(unittest.TestCase):
             with self.subTest(override=override), self.assertRaisesRegex(ValueError, expected):
                 capture.checked_options(args(**override))
 
-    def test_fetch_receipt_is_sampled_after_body_and_headers_are_saved(self):
+    def test_worker_fetch_receipt_is_sampled_after_body_and_headers_are_saved(self):
+        class FakeHeaders(dict):
+            def raw_items(self):
+                return self.items()
+
         class FakeResponse:
             status = 200
-            headers = {"Date": "Tue, 24 Nov 2026 22:00:00 GMT", "ETag": '"synthetic"', "Content-Type": "application/json"}
+            headers = FakeHeaders({"Date": "Tue, 24 Nov 2026 22:00:00 GMT", "ETag": '"synthetic"', "Content-Type": "application/json"})
 
             def __enter__(self):
                 return self
@@ -203,19 +213,24 @@ class CaptureTests(unittest.TestCase):
                     raise AssertionError("unexpected read cap")
                 return b'{"ac":[],"ctime":1795557600000,"msg":"No error","now":1795557600000,"ptime":1,"total":0}'
 
-        with patch.object(capture, "urlopen", lambda _request, timeout: FakeResponse()), \
+        with patch.object(capture, "_urlopen_no_redirect", lambda _request, timeout: FakeResponse()), \
              patch.object(capture.time, "monotonic_ns", return_value=90), \
              patch.object(capture, "utc_ms", return_value=1_795_557_600_100):
-            body, headers, status, received_ms, mono = capture.fetch_once("https://synthetic.invalid", 5)
+            body, headers, status, received_ms, mono = capture._fetch_response(
+                "https://api.adsb.lol/v2/lat/42.50000/lon/-88.50000/dist/250", 5)
         self.assertTrue(body.startswith(b'{"ac"'))
         self.assertEqual(headers["ETag"], '"synthetic"')
         self.assertEqual(status, 200)
         self.assertEqual((received_ms, mono), (1_795_557_600_100, 90))
 
-    def test_oversized_response_is_refused_without_network(self):
+    def test_worker_oversized_response_is_refused_without_network(self):
+        class FakeHeaders(dict):
+            def raw_items(self):
+                return self.items()
+
         class FakeResponse:
             status = 200
-            headers = {}
+            headers = FakeHeaders()
 
             def __enter__(self):
                 return self
@@ -226,9 +241,70 @@ class CaptureTests(unittest.TestCase):
             def read(self, _cap):
                 return b"x" * (capture.MAX_BODY_BYTES + 1)
 
-        with patch.object(capture, "urlopen", lambda _request, timeout: FakeResponse()):
+        with patch.object(capture, "_urlopen_no_redirect", lambda _request, timeout: FakeResponse()):
             with self.assertRaisesRegex(RuntimeError, "exceeds"):
-                capture.fetch_once("https://synthetic.invalid", 5)
+                capture._fetch_response("https://api.adsb.lol/v2/lat/42.50000/lon/-88.50000/dist/250", 5)
+
+    def test_worker_rejects_excessive_response_header_count(self):
+        class FakeHeaders(dict):
+            def raw_items(self):
+                return self.items()
+
+        class FakeResponse:
+            status = 200
+            headers = FakeHeaders({f"X-H{i}": "v" for i in range(capture.MAX_FETCH_HEADERS + 1)})
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _cap):
+                return b"{}"
+
+        with patch.object(capture, "_urlopen_no_redirect", lambda _request, timeout: FakeResponse()):
+            with self.assertRaisesRegex(RuntimeError, "too many HTTP headers"):
+                capture._fetch_response("https://api.adsb.lol/v2/lat/42.50000/lon/-88.50000/dist/250", 5)
+
+    def test_worker_packet_is_length_checked_and_preserves_receipt_metadata(self):
+        body = b'{"synthetic":true}'
+        metadata = capture.json.dumps({"headers": {"ETag": "synthetic"}, "status": 200,
+                                       "received_ms": 1_795_557_600_100,
+                                       "received_mono_ns": 90}, separators=(",", ":")).encode()
+        packet = capture.FETCH_MAGIC + capture.struct.pack("<II", len(metadata), len(body)) + metadata + body
+        worker = "import sys; sys.stdout.buffer.write(" + repr(packet) + ")"
+        result = capture.run_fetch_worker([capture.sys.executable, "-c", worker], 5)
+        self.assertEqual(result, (body, {"ETag": "synthetic"}, 200, 1_795_557_600_100, 90))
+
+    def test_fetch_total_deadline_covers_a_stalled_response_body_and_reaps_worker(self):
+        real_popen = capture.subprocess.Popen
+        children = []
+
+        def track_child(*command, **options):
+            child = real_popen(*command, **options)
+            children.append(child)
+            return child
+
+        stalled_worker = (
+            "import time\n"
+            "class FakeResponse:\n"
+            " def read(self, _limit): time.sleep(10)\n"
+            "FakeResponse().read(1048577)\n"
+        )
+        url = "https://api.adsb.lol/v2/lat/42.50000/lon/-88.50000/dist/250"
+        with patch.object(capture, "fetch_worker_command", return_value=[capture.sys.executable, "-c", stalled_worker]), \
+             patch.object(capture.subprocess, "Popen", side_effect=track_child):
+            started = capture.time.monotonic()
+            with self.assertRaises(capture.subprocess.TimeoutExpired):
+                capture.fetch_once(url, 0.5)
+            elapsed = capture.time.monotonic() - started
+        self.assertLess(elapsed, 3.0)
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].poll())
+        self.assertTrue(children[0].stdin.closed)
+        self.assertTrue(children[0].stdout.closed)
+        self.assertTrue(children[0].stderr.closed)
 
 
 if __name__ == "__main__":
