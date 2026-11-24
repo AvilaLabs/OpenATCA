@@ -296,6 +296,9 @@ fn fixture_console_journals_fresh_authorized_and_stale_requests() {
     assert!(fs::read_to_string(output.join("frame-0003.txt"))
         .unwrap()
         .contains("Accepted"));
+    assert!(fs::read_to_string(output.join("frame-0003.txt"))
+        .unwrap()
+        .contains("COMMANDS ACCEPTED 1 REFUSED 0; SELECT AGAIN"));
     verify_closed_bundle(&output);
     fs::remove_dir_all(&output).unwrap();
     fs::remove_file(script).unwrap();

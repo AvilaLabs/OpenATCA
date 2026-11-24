@@ -682,14 +682,38 @@ impl SessionRunner {
         let mut frame = regional_step(&mut self.runtime, &batch)?;
         self.next_batch += 1;
         self.selected = None; // Every command requires selection against the newest view sequence.
-        let selection_note = "SELECT then issue command";
+        if frame.controller_dispatches.len() > crate::MAX_EVENTS_PER_RECEIPT {
+            return Err("command outcome presentation exceeds receipt work budget".into());
+        }
+        let selection_note = if frame.controller_dispatches.is_empty() {
+            "SELECT then issue command".to_owned()
+        } else {
+            let accepted = frame
+                .controller_dispatches
+                .iter()
+                .filter(|dispatch| {
+                    dispatch.refusal.is_empty()
+                        && dispatch.outcome.as_ref().is_some_and(|outcome| {
+                            outcome.adapter_refusal.is_none()
+                                && matches!(
+                                    outcome.operation,
+                                    Some(
+                                        oa_flight::Outcome::Applied | oa_flight::Outcome::Unchanged
+                                    )
+                                )
+                        })
+                })
+                .count();
+            let refused = frame.controller_dispatches.len() - accepted;
+            format!("COMMANDS ACCEPTED {accepted} REFUSED {refused}; SELECT AGAIN")
+        };
         self.clear_runtime_selection(&format!("FRAME:{}", frame.sequence))?;
         self.reserve_presentation_update()?;
-        let digest = crate::runtime::regional_console_overlay(&mut self.runtime, selection_note)?;
+        let digest = crate::runtime::regional_console_overlay(&mut self.runtime, &selection_note)?;
         frame.controller_selection_kind = oa_display::interaction::SelectionKind::None;
         frame.controller_selected_address = None;
         frame.controller_selection = None;
-        frame.console_text = selection_note.to_owned();
+        frame.console_text = selection_note;
         frame.surveillance.frame_sha256 = digest;
         operator_journal_push(
             &mut self.journal,
