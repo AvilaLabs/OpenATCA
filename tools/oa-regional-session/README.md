@@ -160,3 +160,33 @@ requests are recorded as refusals. This local actor registry is not network auth
 The controller interaction core is independent of the flight table. Its queue acceptance is
 request acceptance, not authority transfer. A valid handoff acceptance still leaves the original
 owner in place until a valid take. A level observation never teleports to a requested altitude.
+
+## Operated recorded-session console
+
+`oa-regional-console` is an explicit single-thread operator for normalized recorded replay. It
+does not open display or input devices in script mode and it does not label recorded cutoffs as
+live time. The model and input must be selected explicitly; output must be a new directory.
+
+```text
+oa-regional-console --input FILE --synthetic-model --out NEW_DIR --script ACTIONS
+oa-regional-console --input FILE --snapshot FILE --out NEW_DIR \
+  --drm /dev/dri/card0 --tty /dev/tty1 --connector ID --input-device /dev/input/event0
+```
+
+The bounded ASCII action grammar is `NEXT`, `SELECT ADDRESS`, `ACTOR 1|2`, `ASSIGNED ft`,
+`UNASSIGNED`, `INTERIM ft`, `CLEAR_INTERIM`, `HO_OFFER unit`, `HO_ACCEPT unit`, `HO_TAKE unit`,
+`HO_CANCEL unit`, and `QUIT`. `SELECT` requires one unique, currently displayed, positively bound
+full identity. Every command captures that view's generation, frame sequence, identity, plan, and
+explicit actor; selection is cleared after advancing a receipt, so stale commands are refused.
+Queued local events are inserted after upstream flight updates and before route updates. Their
+category sequence numbers are assigned monotonically, with original row ordinal, sequence,
+category, and receipt cutoff retained in the operator journal. A full batch refuses queued actions
+visibly. Evdev loss clears pending input and commands; action input remains blocked until a kernel
+resynchronization record arrives.
+
+The device mode requires an 800×600-or-larger KMS mode and displays the fixed view at native pixel
+size with black letterbox borders. It uses one owner thread and finite VT/input waits. Output
+contains per-frame debug evidence and PPM images, the action/resequence journal, settings and
+manifest hashes, and a `COMPLETE` marker written last. Any unresolved input loss, queued action,
+device error, or incomplete session prevents that marker. This is operated replay evidence, not a
+live surveillance console or an operationally qualified display.
