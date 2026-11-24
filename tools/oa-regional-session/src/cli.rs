@@ -20,6 +20,12 @@ pub enum ModelSource {
     Synthetic,
 }
 
+pub enum MsawSource {
+    Disabled,
+    Synthetic,
+    Manifest(PathBuf),
+}
+
 pub fn read_guarded(path: &Path, max: usize) -> Result<Vec<u8>, String> {
     let (file, len) = oa_sealed::open_regular(path).map_err(|e| format!("guarded input: {e}"))?;
     let cap = u64::try_from(max).map_err(|_| "byte limit width")?;
@@ -103,7 +109,7 @@ pub fn synthetic_model() -> Result<Model, String> {
     Ok(model)
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     oa_sealed::refuse(path)?;
     // seal-allow: create-new evidence output after path refusal; write only, never reads an input
     let mut file = OpenOptions::new()
@@ -120,6 +126,15 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn run_session(bytes: &[u8], output: &Path, source: &ModelSource) -> Result<(), String> {
+    run_session_with_safety(bytes, output, source, &MsawSource::Disabled)
+}
+
+pub fn run_session_with_safety(
+    bytes: &[u8],
+    output: &Path,
+    source: &ModelSource,
+    safety: &MsawSource,
+) -> Result<(), String> {
     if bytes.len() > 16 * 1024 * 1024 {
         return Err("normalized input exceeds byte limit".into());
     }
@@ -169,12 +184,60 @@ pub fn run_session(bytes: &[u8], output: &Path, source: &ModelSource) -> Result<
     if batches.is_empty() {
         return Err("session contains no events".into());
     }
+    let first = batches.first().ok_or("session has no cutoff")?.receipt_ns;
+    let mut safety_data = None;
+    let safety_manifest_sha = match safety {
+        MsawSource::Disabled => None,
+        MsawSource::Synthetic => {
+            if !matches!(source, ModelSource::Synthetic) {
+                return Err(
+                    "synthetic MSAW requires the explicit synthetic adaptation model".into(),
+                );
+            }
+            crate::runtime::regional_enable_synthetic_msaw(&mut runtime)?;
+            None
+        }
+        MsawSource::Manifest(path) => {
+            let (data, manifest_sha) =
+                crate::msaw_bridge::load_msaw_manifest(path, first / 1_000_000)?;
+            let evidence = format!(
+                "OA_REGIONAL_MSAW_DATA\t1\nprovenance\n{:#?}\nsettings\n{:#?}\nlimits\n{:#?}\n",
+                data.provenance,
+                data.settings,
+                oa_msaw_run::regional::RegionalDataLimits::default()
+            );
+            if evidence.len() > 2 * 1024 * 1024 {
+                return Err("MSAW startup evidence exceeds 2 MiB".into());
+            }
+            safety_data = Some(evidence);
+            crate::runtime::regional_enable_msaw(&mut runtime, data)?;
+            Some(manifest_sha)
+        }
+    };
     // Runtime failures precede final output publication. Temporary evidence is identifiable by
     // the absence of COMPLETE and is never accepted as a closed result.
     fs::create_dir(output).map_err(|e| format!("create new output: {e}"))?;
-    let settings = format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address synthetic-airborne positions; no raw FAA adapters\nmodel\t{}\n", match source { ModelSource::Synthetic => "SYNTHETIC", ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT" });
+    let mut settings = format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", match source { ModelSource::Synthetic => "SYNTHETIC", ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT" });
+    settings.push_str(match safety {
+        MsawSource::Disabled => "msaw\tUNAVAILABLE_NOT_CONFIGURED\n",
+        MsawSource::Synthetic => "msaw\tPUBLIC_SYNTHETIC_FLOOR_WEATHER\n",
+        MsawSource::Manifest(_) => "msaw\tSUPPLIED_DATA_MANIFEST\n",
+    });
+    if let Some(sha) = safety_manifest_sha {
+        settings.push_str(&format!(
+            "msaw_input_manifest_sha256\t{}\n",
+            oa_sha256::to_hex(&sha)
+        ));
+    }
     write_new(&output.join("settings.tsv"), settings.as_bytes())?;
     let mut manifest = format!("OA_REGIONAL_MANIFEST\t1\ninput_sha256\t{}\nsnapshot_sha256\t{}\nexecutable_sha256\t{}\nsettings_sha256\t{}\n", oa_sha256::to_hex(&oa_sha256::sha256(bytes)), oa_sha256::to_hex(&snapshot_sha), oa_sha256::to_hex(&executable_sha), oa_sha256::to_hex(&oa_sha256::sha256(settings.as_bytes())));
+    if let Some(data) = safety_data {
+        write_new(&output.join("msaw-data.txt"), data.as_bytes())?;
+        manifest.push_str(&format!(
+            "msaw_data_sha256\t{}\n",
+            oa_sha256::to_hex(&oa_sha256::sha256(data.as_bytes()))
+        ));
+    }
     for batch in &batches {
         let frame = regional_step(&mut runtime, batch)?;
         let evidence = format!("OA_REGIONAL_FRAME\t1\n{frame:#?}\n");

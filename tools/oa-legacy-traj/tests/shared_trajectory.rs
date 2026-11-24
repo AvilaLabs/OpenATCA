@@ -214,7 +214,10 @@ fn sequential_descent_clearance_leveloff_and_separate_speed_channel() {
     request.clearance.message_id = 0;
     let feasible = issue_vertical_profile(&request, performance());
     assert_eq!(feasible.availability, Availability::Available);
-    assert_eq!(feasible.points[0].speed_mmps, request.track.groundspeed_mmps);
+    assert_eq!(
+        feasible.points[0].speed_mmps,
+        request.track.groundspeed_mmps
+    );
 
     let first = route_point(0, 1_000_000, ident());
     let mut second_fix = ident();
@@ -270,13 +273,22 @@ fn performance_evidence_is_flight_bound_and_zero_rate_is_a_valid_level_bound() {
 
     let mut missing_message = performance();
     missing_message.message_id = 0;
-    assert_eq!(issue_vertical_profile(&request, missing_message).refusal, Refusal::InvalidPerformance);
+    assert_eq!(
+        issue_vertical_profile(&request, missing_message).refusal,
+        Refusal::InvalidPerformance
+    );
     let mut excessive_rate = performance();
     excessive_rate.max_climb_fpm = 60_001;
-    assert_eq!(issue_vertical_profile(&request, excessive_rate).refusal, Refusal::InvalidPerformance);
+    assert_eq!(
+        issue_vertical_profile(&request, excessive_rate).refusal,
+        Refusal::InvalidPerformance
+    );
     let mut bad_key_padding = performance();
     bad_key_padding.reserved_key_align[0] = 1;
-    assert_eq!(issue_vertical_profile(&request, bad_key_padding).refusal, Refusal::InvalidReservedFields);
+    assert_eq!(
+        issue_vertical_profile(&request, bad_key_padding).refusal,
+        Refusal::InvalidReservedFields
+    );
 
     let mut future_evidence = performance();
     future_evidence.source_ms = request.cutoff_ms + 1;
@@ -289,8 +301,14 @@ fn performance_evidence_is_flight_bound_and_zero_rate_is_a_valid_level_bound() {
     changed_future_evidence.reserved[0] = 9;
     let changed_future_output = issue_vertical_profile(&request, changed_future_evidence);
     assert_eq!(future_output, changed_future_output);
-    assert_eq!(future_output.refusal, Refusal::PerformanceUnavailableAtCutoff);
-    assert_eq!(future_output.performance.source, PerformanceSource::Unavailable);
+    assert_eq!(
+        future_output.refusal,
+        Refusal::PerformanceUnavailableAtCutoff
+    );
+    assert_eq!(
+        future_output.performance.source,
+        PerformanceSource::Unavailable
+    );
 }
 
 // REQ: OA-TRAJ-025
@@ -308,8 +326,15 @@ fn current_unsupported_and_future_clearances_never_produce_a_feasible_profile() 
     let unsupported = issue_vertical_profile(&request, performance());
     assert_eq!(unsupported.availability, Availability::Unavailable);
     assert_eq!(unsupported.refusal, Refusal::UnsupportedClearanceForm);
-    assert_eq!(unsupported.clearance_assumption, ClearanceAssumption::Unsupported);
-    for form in [ClearanceForm::Block, ClearanceForm::Vfr, ClearanceForm::Unsupported] {
+    assert_eq!(
+        unsupported.clearance_assumption,
+        ClearanceAssumption::Unsupported
+    );
+    for form in [
+        ClearanceForm::Block,
+        ClearanceForm::Vfr,
+        ClearanceForm::Unsupported,
+    ] {
         request.clearance.form = form;
         request.clearance.altitude_at_fix_ft = NO_ALTITUDE_FT;
         let output = issue_vertical_profile(&request, performance());
@@ -326,13 +351,19 @@ fn current_unsupported_and_future_clearances_never_produce_a_feasible_profile() 
     let future = issue_vertical_profile(&request, performance());
     assert_eq!(future.availability, Availability::Unavailable);
     assert_eq!(future.refusal, Refusal::ClearanceUnavailableAtCutoff);
-    assert_eq!(future.clearance_assumption, ClearanceAssumption::Unavailable);
+    assert_eq!(
+        future.clearance_assumption,
+        ClearanceAssumption::Unavailable
+    );
 
     request.clearance.source_ms = 1_000;
     request.clearance.available_ms = 1_100;
     request.clearance.min_altitude_ft = NO_ALTITUDE_FT;
     request.clearance.max_altitude_ft = NO_ALTITUDE_FT;
-    assert_eq!(issue_vertical_profile(&request, performance()).refusal, Refusal::InfeasibleAltitudeWindow);
+    assert_eq!(
+        issue_vertical_profile(&request, performance()).refusal,
+        Refusal::InfeasibleAltitudeWindow
+    );
 
     request.clearance = Clearance {
         source_ms: 0,
@@ -345,7 +376,10 @@ fn current_unsupported_and_future_clearances_never_produce_a_feasible_profile() 
         reserved: [0; 3],
     };
     let malformed_absent = issue_vertical_profile(&request, performance());
-    assert_eq!(malformed_absent.refusal, Refusal::ClearanceUnavailableAtCutoff);
+    assert_eq!(
+        malformed_absent.refusal,
+        Refusal::ClearanceUnavailableAtCutoff
+    );
 }
 
 // REQ: OA-TRAJ-026
@@ -473,7 +507,10 @@ fn microfoot_propagation_handles_zero_tiny_legs_and_reports_checked_overflow() {
     slow.max_climb_fpm = 60_000;
     let mut slow_request = long_request;
     slow_request.track.groundspeed_mmps = 1;
-    assert_eq!(issue_vertical_profile(&slow_request, slow).refusal, Refusal::AltitudeOverflow);
+    assert_eq!(
+        issue_vertical_profile(&slow_request, slow).refusal,
+        Refusal::AltitudeOverflow
+    );
 
     let time_points = [route_point(0, 1_000_000, ident())];
     let mut time_overflow = input_without_clearance(&time_points);
@@ -485,7 +522,10 @@ fn microfoot_propagation_handles_zero_tiny_legs_and_reports_checked_overflow() {
     fresh.source_ms = i64::MAX - 10;
     fresh.available_ms = i64::MAX - 5;
     fresh.max_age_ms = 20;
-    assert_eq!(issue_vertical_profile(&time_overflow, fresh).refusal, Refusal::TimeOverflow);
+    assert_eq!(
+        issue_vertical_profile(&time_overflow, fresh).refusal,
+        Refusal::TimeOverflow
+    );
 }
 
 #[test]

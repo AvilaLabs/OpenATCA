@@ -220,3 +220,23 @@ pub fn regional_pixels(runtime: &RegionalRuntime) -> Result<&[u8], String> {
     }
     surveillance::surveillance_pixels(&runtime.surveillance)
 }
+
+pub fn regional_enable_msaw(
+    runtime: &mut RegionalRuntime,
+    data: oa_msaw_run::regional::RegionalData,
+) -> Result<(), String> {
+    let service = crate::msaw_bridge::regional_msaw_new(data, surveillance::MAX_TRACKS)?;
+    regional_attach_msaw(runtime, service)
+}
+
+pub fn regional_enable_synthetic_msaw(runtime: &mut RegionalRuntime) -> Result<(), String> {
+    let service = crate::msaw_bridge::regional_msaw_synthetic(surveillance::MAX_TRACKS)?;
+    regional_attach_msaw(runtime, service)
+}
+
+pub fn regional_attach_msaw(
+    runtime: &mut RegionalRuntime,
+    service: crate::msaw_bridge::RegionalMsaw,
+) -> Result<(), String> {
+    surveillance::surveillance_enable_msaw(&mut runtime.surveillance, service)
+}

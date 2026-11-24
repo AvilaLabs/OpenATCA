@@ -63,7 +63,7 @@ fn texts(list: &DisplayList) -> Vec<String> {
         .collect()
 }
 
-// REQ: OA-DSP077
+// REQ: OA-DSP-077
 #[test]
 fn caution_warning_and_protection_lost_have_distinct_alert_primitives_and_header() {
     let p = projection(800, 104);
@@ -83,14 +83,21 @@ fn caution_warning_and_protection_lost_have_distinct_alert_primitives_and_header
     assert_eq!(stats.off_map, 0);
     assert_eq!(stats.unlocated, 0);
     assert_eq!(list.circles.r.as_slice(), &[192, 256, 192, 256, 192]);
-    assert!(list.circles.colour.iter().all(|colour| *colour == palette::ALERT));
+    assert!(list
+        .circles
+        .colour
+        .iter()
+        .all(|colour| *colour == palette::ALERT));
     assert!(list.circles.layer.iter().all(|layer| *layer == 13));
 
     let labels = texts(&list);
     assert_eq!(labels.first().map(String::as_str), Some("C"));
     assert_eq!(labels.get(1).map(String::as_str), Some("W"));
     assert_eq!(labels.get(2).map(String::as_str), Some("L"));
-    assert_eq!(labels.get(3).map(String::as_str), Some("MSAW WARNING 1 CAUTION 1 LOST 1 OFF 0 UNLOCATED 0"));
+    assert_eq!(
+        labels.get(3).map(String::as_str),
+        Some("MSAW WARNING 1 CAUTION 1 LOST 1 OFF 0 UNLOCATED 0")
+    );
     assert_eq!(list.texts.x.get(3).copied(), Some(8 * 16));
     assert_eq!(list.texts.y.get(3).copied(), Some(72 * 16));
     assert_eq!(list.texts.size.get(3), Some(&10));
@@ -100,7 +107,7 @@ fn caution_warning_and_protection_lost_have_distinct_alert_primitives_and_header
     assert_eq!(list.texts.y.first().copied(), Some(point.1 - 80));
 }
 
-// REQ: OA-DSP077
+// REQ: OA-DSP-077
 #[test]
 fn off_map_and_unlocated_alerts_are_counted_without_drawing_guessed_points() {
     let p = projection(800, 104);
@@ -129,7 +136,7 @@ fn off_map_and_unlocated_alerts_are_counted_without_drawing_guessed_points() {
     );
 }
 
-// REQ: OA-DSP077
+// REQ: OA-DSP-077
 #[test]
 fn invalid_records_and_short_lists_refuse_without_mutating_the_list() {
     let p = projection(800, 104);
@@ -186,7 +193,10 @@ fn invalid_records_and_short_lists_refuse_without_mutating_the_list() {
     let before = short.clone();
     assert!(matches!(
         append_alert_markers(&mut short, &p, &[valid]),
-        Err(DisplayError::Full { table: "circles", .. })
+        Err(DisplayError::Full {
+            table: "circles",
+            ..
+        })
     ));
     assert_eq!(short, before);
 
@@ -220,7 +230,10 @@ fn invalid_records_and_short_lists_refuse_without_mutating_the_list() {
     let before = short_bytes.clone();
     assert!(matches!(
         append_alert_markers(&mut short_bytes, &p, &[valid]),
-        Err(DisplayError::Full { table: "text bytes", .. })
+        Err(DisplayError::Full {
+            table: "text bytes",
+            ..
+        })
     ));
     assert_eq!(short_bytes, before);
 
@@ -235,7 +248,7 @@ fn invalid_records_and_short_lists_refuse_without_mutating_the_list() {
     assert_eq!(list, before);
 }
 
-// REQ: OA-DSP077
+// REQ: OA-DSP-077
 #[test]
 fn view_and_header_width_are_checked_before_writing() {
     let markers = [marker(1, MarkerState::Caution, CENTRE.0, CENTRE.1)];

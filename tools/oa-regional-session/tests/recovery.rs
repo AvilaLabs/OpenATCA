@@ -1,5 +1,10 @@
 //! OS-process recovery drill over the integrated regional runtime and a synthetic admitted log.
-#![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 
 use oa_regional_session::cli::synthetic_model;
 use oa_regional_session::{flush_receipt_group, parse_event_line, push_event, session_cursor_new};
@@ -49,22 +54,38 @@ fn read_bounded_line(reader: &mut BufReader<ChildStdout>) -> io::Result<Option<V
     loop {
         let available = reader.fill_buf()?;
         if available.is_empty() {
-            return if bytes.is_empty() { Ok(None) } else {
-                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "unterminated worker output"))
+            return if bytes.is_empty() {
+                Ok(None)
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unterminated worker output",
+                ))
             };
         }
-        let take = available.iter().position(|byte| *byte == b'\n')
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
             .map_or(available.len(), |index| index + 1);
         if bytes.len().saturating_add(take) > MAX_PROTOCOL_LINE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "worker output line exceeded bound"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "worker output line exceeded bound",
+            ));
         }
         let complete = available.get(take - 1) == Some(&b'\n');
         let Some(chunk) = available.get(..take) else {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "worker output slice out of bounds"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "worker output slice out of bounds",
+            ));
         };
         bytes.extend_from_slice(chunk);
         reader.consume(take);
-        if complete { bytes.pop(); return Ok(Some(bytes)); }
+        if complete {
+            bytes.pop();
+            return Ok(Some(bytes));
+        }
     }
 }
 
@@ -86,8 +107,11 @@ impl Worker {
                 match read_bounded_line(&mut reader) {
                     Ok(None) => break,
                     Ok(Some(bytes)) => {
-                        let line = String::from_utf8(bytes).map_err(|_| "non-UTF8 worker line".to_owned());
-                        if sender.send(line).is_err() { break; }
+                        let line =
+                            String::from_utf8(bytes).map_err(|_| "non-UTF8 worker line".to_owned());
+                        if sender.send(line).is_err() {
+                            break;
+                        }
                     }
                     Err(error) => {
                         let _ = sender.send(Err(error.to_string()));
@@ -96,7 +120,11 @@ impl Worker {
                 }
             }
         });
-        Self { child, input, lines }
+        Self {
+            child,
+            input,
+            lines,
+        }
     }
 
     fn send(&mut self, line: &str) {
@@ -111,7 +139,9 @@ impl Worker {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 panic!("worker response exceeded {WORKER_RESPONSE_DEADLINE:?}")
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("worker stdout closed before response"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("worker stdout closed before response")
+            }
         }
     }
 
@@ -146,19 +176,31 @@ impl Worker {
 
     fn terminate(mut self) {
         let _ = self.child.kill();
-        let status = self.wait_bounded().expect("fault-injected worker exits within bounded cleanup deadline");
-        assert!(!status.success(), "fault-injected worker unexpectedly succeeded");
+        let status = self
+            .wait_bounded()
+            .expect("fault-injected worker exits within bounded cleanup deadline");
+        assert!(
+            !status.success(),
+            "fault-injected worker unexpectedly succeeded"
+        );
     }
 
     fn exit(mut self) {
         self.send("EXIT");
-        let status = self.wait_bounded().expect("worker exits within named deadline");
+        let status = self
+            .wait_bounded()
+            .expect("worker exits within named deadline");
         assert!(status.success(), "worker exit failed: {status}");
     }
 
     fn expect_failure(mut self) {
-        let status = self.wait_bounded().expect("failed worker exits within named deadline");
-        assert!(!status.success(), "invalid worker protocol unexpectedly succeeded");
+        let status = self
+            .wait_bounded()
+            .expect("failed worker exits within named deadline");
+        assert!(
+            !status.success(),
+            "invalid worker protocol unexpectedly succeeded"
+        );
     }
 }
 
@@ -168,7 +210,9 @@ impl Drop for Worker {
             let _ = self.child.kill();
             let start = Instant::now();
             while start.elapsed() < WORKER_CLEANUP_DEADLINE {
-                if matches!(self.child.try_wait(), Ok(Some(_))) { break; }
+                if matches!(self.child.try_wait(), Ok(Some(_))) {
+                    break;
+                }
                 thread::sleep(WORKER_POLL_INTERVAL);
             }
         }
@@ -184,10 +228,18 @@ struct Authority {
 
 impl Authority {
     fn accept(&mut self, output: Output) -> Result<(), &'static str> {
-        if output.generation != self.generation { return Err("generation"); }
-        if output.sequence <= self.last_sequence { return Err("sequence replay"); }
-        if output.sequence != self.last_sequence + 1 { return Err("sequence gap"); }
-        if output.receipt_ns < self.watermark_ns { return Err("watermark regression"); }
+        if output.generation != self.generation {
+            return Err("generation");
+        }
+        if output.sequence <= self.last_sequence {
+            return Err("sequence replay");
+        }
+        if output.sequence != self.last_sequence + 1 {
+            return Err("sequence gap");
+        }
+        if output.receipt_ns < self.watermark_ns {
+            return Err("watermark regression");
+        }
         self.last_sequence = output.sequence;
         self.watermark_ns = output.receipt_ns;
         self.accepted.push(output);
@@ -200,14 +252,21 @@ impl Authority {
 }
 
 fn fixture_identity() -> (String, String) {
-    let snapshot = oa_airspace::core::snapshot::encode(&synthetic_model().expect("synthetic model"))
-        .expect("encode synthetic adaptation");
-    (oa_sha256::to_hex(&oa_sha256::sha256(SETTINGS.as_bytes())),
-     oa_sha256::to_hex(&oa_sha256::sha256(&snapshot)))
+    let snapshot =
+        oa_airspace::core::snapshot::encode(&synthetic_model().expect("synthetic model"))
+            .expect("encode synthetic adaptation");
+    (
+        oa_sha256::to_hex(&oa_sha256::sha256(SETTINGS.as_bytes())),
+        oa_sha256::to_hex(&oa_sha256::sha256(&snapshot)),
+    )
 }
 
 fn admitted_prefix_hash(count: usize, batches: &[oa_regional_session::ReceiptBatch]) -> String {
-    let cutoff = if count == 0 { None } else { Some(batches[count - 1].receipt_ns) };
+    let cutoff = if count == 0 {
+        None
+    } else {
+        Some(batches[count - 1].receipt_ns)
+    };
     let mut bytes = Vec::with_capacity(FIXTURE.len());
     for (index, line) in FIXTURE.lines().enumerate() {
         if index == 0 {
@@ -241,11 +300,24 @@ fn batches() -> Vec<oa_regional_session::ReceiptBatch> {
     result
 }
 
-fn replay(worker: &mut Worker, generation: u64, count: usize, identity: &(String, String), batches: &[oa_regional_session::ReceiptBatch], expected: &[Output]) {
+fn replay(
+    worker: &mut Worker,
+    generation: u64,
+    count: usize,
+    identity: &(String, String),
+    batches: &[oa_regional_session::ReceiptBatch],
+    expected: &[Output],
+) {
     let prefix_hash = admitted_prefix_hash(count, batches);
-    worker.send(&format!("REPLAY\t{generation}\t{count}\t{prefix_hash}\t{}\t{}", identity.0, identity.1));
+    worker.send(&format!(
+        "REPLAY\t{generation}\t{count}\t{prefix_hash}\t{}\t{}",
+        identity.0, identity.1
+    ));
     if count == 0 {
-        assert_eq!(worker.receive(), format!("REPLAYED\t{generation}\t0\t0\t-\t-\t-"));
+        assert_eq!(
+            worker.receive(),
+            format!("REPLAYED\t{generation}\t0\t0\t-\t-\t-")
+        );
         return;
     }
     for (index, known) in expected.iter().take(count).enumerate() {
@@ -285,7 +357,11 @@ fn parse_output(line: &str) -> Output {
 }
 
 fn parse_source_lag(field: &str) -> Option<i64> {
-    if field == "-" { None } else { Some(field.parse().expect("integer source-lag field")) }
+    if field == "-" {
+        None
+    } else {
+        Some(field.parse().expect("integer source-lag field"))
+    }
 }
 
 fn next_output(worker: &mut Worker, generation: u64, index: usize) -> Output {
@@ -303,7 +379,10 @@ fn acknowledge(worker: &mut Worker, generation: u64, sequence: u64) {
 fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     let batches = batches();
     let identity = fixture_identity();
-    assert!(batches.len() >= 6, "fixture covers multiple continuation frames");
+    assert!(
+        batches.len() >= 6,
+        "fixture covers multiple continuation frames"
+    );
 
     // Uninterrupted child is the bit-exact continuation reference; the assertions below also
     // check known fixture-level subsystem state so this is not only a comparison to itself.
@@ -313,20 +392,56 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     for index in 0..batches.len() {
         let out = next_output(&mut reference, 1, index);
         assert_eq!(out.sequence as usize, index + 1);
-        assert_eq!(out.receipt_ns, batches.get(index).expect("reference batch").receipt_ns);
+        assert_eq!(
+            out.receipt_ns,
+            batches.get(index).expect("reference batch").receipt_ns
+        );
         acknowledge(&mut reference, 1, out.sequence);
         expected.push(out);
     }
     reference.exit();
-    assert_eq!(expected[0].tracks, 0, "first surveillance reports cannot confirm targets");
-    assert_eq!(expected[1].tracks, 2, "two synthetic targets confirm after repeat reports");
-    assert!(expected.iter().any(|out| out.flights == 2), "flight table state appears in composed frames");
-    assert!(expected.iter().any(|out| out.trajectory_rows > 0), "route conversion contributes trajectory rows");
-    assert!(expected.iter().any(|out| out.open_alerts > 0), "observed traffic produces a CA alert in the fixture");
-    assert!(expected.iter().filter_map(|out| out.source_lag_ns).any(|age| age > 0), "feed outage exposes stale measurement age");
-    assert_eq!((expected[2].handoff_state, expected[2].owner.as_str()), (1, "SECTOR1"), "offer preserves current ownership");
-    assert_eq!((expected[3].handoff_state, expected[3].owner.as_str()), (2, "SECTOR1"), "acceptance does not transfer ownership");
-    assert_eq!((expected[4].handoff_state, expected[4].owner.as_str()), (0, "SECTOR2"), "take transfers ownership once");
+    assert_eq!(
+        expected[0].tracks, 0,
+        "first surveillance reports cannot confirm targets"
+    );
+    assert_eq!(
+        expected[1].tracks, 2,
+        "two synthetic targets confirm after repeat reports"
+    );
+    assert!(
+        expected.iter().any(|out| out.flights == 2),
+        "flight table state appears in composed frames"
+    );
+    assert!(
+        expected.iter().any(|out| out.trajectory_rows > 0),
+        "route conversion contributes trajectory rows"
+    );
+    assert!(
+        expected.iter().any(|out| out.open_alerts > 0),
+        "observed traffic produces a CA alert in the fixture"
+    );
+    assert!(
+        expected
+            .iter()
+            .filter_map(|out| out.source_lag_ns)
+            .any(|age| age > 0),
+        "feed outage exposes stale measurement age"
+    );
+    assert_eq!(
+        (expected[2].handoff_state, expected[2].owner.as_str()),
+        (1, "SECTOR1"),
+        "offer preserves current ownership"
+    );
+    assert_eq!(
+        (expected[3].handoff_state, expected[3].owner.as_str()),
+        (2, "SECTOR1"),
+        "acceptance does not transfer ownership"
+    );
+    assert_eq!(
+        (expected[4].handoff_state, expected[4].owner.as_str()),
+        (0, "SECTOR2"),
+        "take transfers ownership once"
+    );
     assert_eq!(expected[2].command_dispatches, 1);
     assert_eq!(expected[3].command_dispatches, 1);
     assert_eq!(expected[4].command_dispatches, 1);
@@ -339,11 +454,26 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     };
     let prefix = 3;
     let mut serving = Worker::start(authority.generation);
-    replay(&mut serving, authority.generation, 0, &identity, &batches, &[]);
+    replay(
+        &mut serving,
+        authority.generation,
+        0,
+        &identity,
+        &batches,
+        &[],
+    );
     for index in 0..prefix {
         let out = next_output(&mut serving, authority.generation, index);
-        assert_eq!(out, Output { generation: authority.generation, ..expected[index].clone() });
-        authority.accept(out.clone()).expect("serving generation publishes retained prefix");
+        assert_eq!(
+            out,
+            Output {
+                generation: authority.generation,
+                ..expected[index].clone()
+            }
+        );
+        authority
+            .accept(out.clone())
+            .expect("serving generation publishes retained prefix");
         acknowledge(&mut serving, authority.generation, out.sequence);
     }
 
@@ -353,40 +483,99 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     serving.terminate();
     authority.promote();
     let mut replacement = Worker::start(authority.generation);
-    replay(&mut replacement, authority.generation, prefix, &identity, &batches, &expected);
+    replay(
+        &mut replacement,
+        authority.generation,
+        prefix,
+        &identity,
+        &batches,
+        &expected,
+    );
 
     // The process applies an actual regional frame and dies before publishing an output record.
     replacement.send(&format!("APPLY_ONLY\t{}\t{prefix}", authority.generation));
-    assert_eq!(replacement.receive(), format!("APPLIED\t{}\t{}\t{}", authority.generation, prefix + 1, prefix + 1));
+    assert_eq!(
+        replacement.receive(),
+        format!(
+            "APPLIED\t{}\t{}\t{}",
+            authority.generation,
+            prefix + 1,
+            prefix + 1
+        )
+    );
     replacement.terminate();
     authority.promote();
 
     // The next generation reconstructs only the authority's committed input prefix. The
     // unpublished application is deterministically recomputed at the same sequence.
     let mut replacement = Worker::start(authority.generation);
-    replay(&mut replacement, authority.generation, prefix, &identity, &batches, &expected);
+    replay(
+        &mut replacement,
+        authority.generation,
+        prefix,
+        &identity,
+        &batches,
+        &expected,
+    );
     let output = next_output(&mut replacement, authority.generation, prefix);
     let expected_unpublished = expected.get(prefix).expect("expected continuation frame");
     assert_eq!(output.frame_hash, expected_unpublished.frame_hash);
     assert_eq!(output.pixels_hash, expected_unpublished.pixels_hash);
-    assert_eq!(output, Output { generation: authority.generation, ..expected_unpublished.clone() });
-    authority.accept(output.clone()).expect("independent output authority accepts current generation");
+    assert_eq!(
+        output,
+        Output {
+            generation: authority.generation,
+            ..expected_unpublished.clone()
+        }
+    );
+    authority
+        .accept(output.clone())
+        .expect("independent output authority accepts current generation");
     let availability_gap_ms = start.elapsed().as_millis();
     // Kill after output is accepted but before the worker receives its output acknowledgment.
     replacement.terminate();
     authority.promote();
 
-    let stale = Output { generation: authority.generation - 1, ..output.clone() };
-    assert_eq!(authority.accept(stale), Err("generation"), "old-generation output is fenced");
-    let duplicate = Output { generation: authority.generation, ..output };
-    assert_eq!(authority.accept(duplicate), Err("sequence replay"), "duplicate accepted output is refused");
+    let stale = Output {
+        generation: authority.generation - 1,
+        ..output.clone()
+    };
+    assert_eq!(
+        authority.accept(stale),
+        Err("generation"),
+        "old-generation output is fenced"
+    );
+    let duplicate = Output {
+        generation: authority.generation,
+        ..output
+    };
+    assert_eq!(
+        authority.accept(duplicate),
+        Err("sequence replay"),
+        "duplicate accepted output is refused"
+    );
 
     let mut replacement = Worker::start(authority.generation);
-    replay(&mut replacement, authority.generation, prefix + 1, &identity, &batches, &expected);
+    replay(
+        &mut replacement,
+        authority.generation,
+        prefix + 1,
+        &identity,
+        &batches,
+        &expected,
+    );
     for index in prefix + 1..batches.len() {
         let out = next_output(&mut replacement, authority.generation, index);
-        assert_eq!(out, Output { generation: authority.generation, ..expected[index].clone() });
-        authority.accept(out.clone()).expect("current-generation output accepted once");
+        assert_eq!(
+            out,
+            Output {
+                generation: authority.generation,
+                ..expected[index].clone()
+            }
+        );
+        authority
+            .accept(out.clone())
+            .expect("current-generation output accepted once");
         acknowledge(&mut replacement, authority.generation, out.sequence);
     }
     replacement.exit();
@@ -401,25 +590,47 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
 fn recovery_protocol_refuses_changed_prefix_and_bounds_bad_or_stalled_workers() {
     let identity = fixture_identity();
     let mut changed = Worker::start(20);
-    changed.send(&format!("REPLAY\t20\t0\t{}\t{}\t{}", "00".repeat(32), identity.0, identity.1));
-    assert!(changed.receive().starts_with("ERROR replay prefix digest mismatch"));
+    changed.send(&format!(
+        "REPLAY\t20\t0\t{}\t{}\t{}",
+        "00".repeat(32),
+        identity.0,
+        identity.1
+    ));
+    assert!(changed
+        .receive()
+        .starts_with("ERROR replay prefix digest mismatch"));
     changed.expect_failure();
 
     let mut malformed = Worker::start(21);
     replay(&mut malformed, 21, 0, &identity, &[], &[]);
     malformed.send("NOT_A_PROTOCOL_RECORD");
-    assert!(malformed.receive().starts_with("ERROR malformed or out-of-order protocol record"));
+    assert!(malformed
+        .receive()
+        .starts_with("ERROR malformed or out-of-order protocol record"));
     malformed.expect_failure();
 
     let mut stalled = Worker::start(22);
     replay(&mut stalled, 22, 0, &identity, &[], &[]);
     stalled.send("STALL");
-    assert!(stalled.lines.recv_timeout(WORKER_RESPONSE_DEADLINE).is_err(), "stalled worker must hit response deadline");
+    assert!(
+        stalled
+            .lines
+            .recv_timeout(WORKER_RESPONSE_DEADLINE)
+            .is_err(),
+        "stalled worker must hit response deadline"
+    );
     stalled.terminate();
 
     let mut missing = Worker::start(23);
-    missing.send(&format!("REPLAY\t23\t999\t{}\t{}\t{}", "00".repeat(32), identity.0, identity.1));
-    assert!(missing.receive().starts_with("ERROR replay count exceeds admitted prefix"));
+    missing.send(&format!(
+        "REPLAY\t23\t999\t{}\t{}\t{}",
+        "00".repeat(32),
+        identity.0,
+        identity.1
+    ));
+    assert!(missing
+        .receive()
+        .starts_with("ERROR replay count exceeds admitted prefix"));
     missing.expect_failure();
 }
 

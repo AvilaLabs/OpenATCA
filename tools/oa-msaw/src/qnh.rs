@@ -235,7 +235,8 @@ impl Qnh {
         max_age_s: i64,
     ) -> Result<Qnh, String> {
         let cutoff_s = cutoff_ms.div_euclid(1000);
-        let mut grouped: BTreeMap<u32, (f64, f64, f64, BTreeMap<i64, (f64, f64)>)> = BTreeMap::new();
+        let mut grouped: BTreeMap<u32, (f64, f64, f64, BTreeMap<i64, (f64, f64)>)> =
+            BTreeMap::new();
         let mut retained_rows = 0u64;
         for (name, bytes, received_at_ms) in files {
             if *received_at_ms > cutoff_ms {
@@ -267,21 +268,34 @@ impl Qnh {
                     (
                         f64::from(la) / 1e5,
                         f64::from(lo) / 1e5,
-                        if elev == NONE_I16 { f64::NAN } else { f64::from(elev) / FT_M },
+                        if elev == NONE_I16 {
+                            f64::NAN
+                        } else {
+                            f64::from(elev) / FT_M
+                        },
                         BTreeMap::new(),
                     )
                 });
                 if entry.0 != f64::from(la) / 1e5 || entry.1 != f64::from(lo) / 1e5 {
-                    return Err(format!("{name}: METAR station identity has conflicting coordinates"));
+                    return Err(format!(
+                        "{name}: METAR station identity has conflicting coordinates"
+                    ));
                 }
                 if entry.2.is_nan() && elev != NONE_I16 {
                     entry.2 = f64::from(elev) / FT_M;
                 }
-                let temp_c = if temp == NONE_I16 { f64::NAN } else { f64::from(temp) / 10.0 };
+                let temp_c = if temp == NONE_I16 {
+                    f64::NAN
+                } else {
+                    f64::from(temp) / 10.0
+                };
                 if let Some(existing) = entry.3.get(&obs) {
-                    let same_temp = existing.1 == temp_c || (existing.1.is_nan() && temp_c.is_nan());
+                    let same_temp =
+                        existing.1 == temp_c || (existing.1.is_nan() && temp_c.is_nan());
                     if existing.0 != hpa || !same_temp {
-                        return Err(format!("{name}: conflicting METAR values at the same station time"));
+                        return Err(format!(
+                            "{name}: conflicting METAR values at the same station time"
+                        ));
                     }
                 } else {
                     entry.3.insert(obs, (hpa, temp_c));
@@ -295,7 +309,13 @@ impl Qnh {
                 .into_iter()
                 .map(|(time, (hpa, temp))| ((time, hpa), temp))
                 .unzip();
-            stations.push(Station { lat, lon, obs, elev_ft, temp_c });
+            stations.push(Station {
+                lat,
+                lon,
+                obs,
+                elev_ft,
+                temp_c,
+            });
         }
         let mut q = Qnh::empty(radius_nm, max_age_s);
         q.stats.files = files.len() as u64;

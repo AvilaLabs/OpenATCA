@@ -43,6 +43,9 @@ const MAX_PAIRS: usize = MAX_TRACKS * (MAX_TRACKS - 1) / 2;
 // cycle; storage therefore depends on simultaneous traffic, never the session's frame count.
 const MAX_CLOSED_ALERTS_PER_CYCLE: usize = MAX_PAIRS;
 const MAX_ALTITUDE_LOSSES_PER_CYCLE: usize = MAX_TRACKS;
+// C2/C6: at most one new address per admitted event, bounded across the offline session.
+// Keeping the latest accepted barometric source time also preserves tentative-track evidence.
+const MAX_BARO_EVIDENCE: usize = crate::session::MAX_SESSION_EVENTS;
 const FEED_NAMES: [[u8; 8]; 5] = [
     *b"TRACK\0\0\0",
     *b"FLIGHT\0\0",
@@ -96,6 +99,8 @@ pub struct Surveillance {
     completed: bool,
     failed: bool,
     overlay_done: bool,
+    msaw: Option<crate::msaw_bridge::RegionalMsaw>,
+    baro_seen: BTreeMap<u32, i64>,
 }
 // A7.2: cold subsystem container; core tables allocate once in their constructors.
 
@@ -108,6 +113,9 @@ pub struct SurveillanceFrame {
     pub ca_open: Vec<oa_ca::Alert>,
     pub ca_closed: Vec<oa_ca::Alert>,
     pub ca_altitude_lost: Vec<oa_ca::AltLost>,
+    pub msaw: Option<crate::msaw_bridge::RegionalMsawFrame>,
+    pub msaw_markers: Option<oa_display::core::alert_markers::MarkerStats>,
+    pub msaw_altitude_source_unknown: u32,
     pub ca_stats: oa_ca::CycleStats,
     pub ca_work_short: u64,
     pub ca_input_short: u64,
@@ -152,11 +160,15 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
     let interaction_caps = oa_display::list::ListCaps {
         lines: 0,
         rects: 0,
-        circles: 0,
+        circles: MAX_TRACKS * oa_display::core::alert_markers::ALERT_CIRCLES_PER_MARKER,
         polylines: 0,
         poly_vertices: 0,
-        texts: 2,
-        text_bytes: 128,
+        texts: 2
+            + MAX_TRACKS * oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER
+            + oa_display::core::alert_markers::ALERT_HEADER_TEXTS,
+        text_bytes: 128
+            + MAX_TRACKS * oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER
+            + oa_display::core::alert_markers::ALERT_HEADER_TEXT_BYTES,
     };
     let caps = oa_display::traffic::caps_add(&scope.list.caps, &interaction_caps).map_err(err)?;
     scope.list = oa_display::list::list_new(caps).map_err(err)?;
@@ -201,6 +213,8 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
         seen: [None; 5],
         down: [false; 5],
         track_down: false,
+        msaw: None,
+        baro_seen: BTreeMap::new(),
         track_measurement_seen_ns: None,
         measurement_rejections: 0,
         previous_ns: None,
@@ -209,6 +223,19 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
         failed: false,
         overlay_done: true,
     })
+}
+
+pub fn surveillance_enable_msaw(
+    s: &mut Surveillance,
+    service: crate::msaw_bridge::RegionalMsaw,
+) -> Result<(), String> {
+    if s.frames != 0 || s.previous_ns.is_some() || s.msaw.is_some() {
+        return Err("MSAW must be configured exactly once before the first frame".into());
+    }
+    let (stale_ns, future_ns) = crate::msaw_bridge::regional_msaw_net_policy(&service);
+    s.states = state_table_new(stale_ns, future_ns).map_err(err)?;
+    s.msaw = Some(service);
+    Ok(())
 }
 
 pub fn source_index(source: SourceKind) -> usize {
@@ -338,6 +365,17 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
                     s.track_measurement_seen_ns = Some(accepted);
                 }
                 s.track_down = false;
+                if altitude_ft.is_some() && after.alt_rejected == before.alt_rejected {
+                    let address = event.identity.aircraft_address;
+                    if !s.baro_seen.contains_key(&address) && s.baro_seen.len() >= MAX_BARO_EVIDENCE
+                    {
+                        return Err("accepted barometric evidence capacity exhausted".into());
+                    }
+                    let known = s.baro_seen.entry(address).or_insert(event.source_ns);
+                    if event.source_ns > *known {
+                        *known = event.source_ns;
+                    }
+                }
             }
         }
         EventKind::Operator(_) => {}
@@ -473,6 +511,8 @@ pub fn surveillance_finish(
     let mut ca_rows = Vec::with_capacity(MAX_TRACKS);
     let mut tracks = Vec::with_capacity(MAX_TRACKS);
     let mut flags = Vec::with_capacity(MAX_TRACKS);
+    let mut msaw_rows = Vec::with_capacity(MAX_TRACKS);
+    let mut msaw_altitude_source_unknown = 0u32;
     for (&address, &index) in &last {
         let row = output_row(&s.drain, index)?;
         let source_ns = *newest
@@ -539,8 +579,79 @@ pub fn surveillance_finish(
             flags: ca_flags,
             ground: AIRBORNE,
         });
+        if s.msaw.is_some() {
+            let mut msaw_flags = 0;
+            if row.flags & O_COAST != 0 {
+                msaw_flags |= oa_msaw::F_COAST;
+            }
+            if row.flags & O_UNCERTAIN != 0 {
+                msaw_flags |= oa_msaw::F_UNCERTAIN;
+            }
+            if row.flags & O_IDENTITY_UNCONFIRMED != 0 {
+                msaw_flags |= oa_msaw::F_IDENTITY_UNCONFIRMED;
+            }
+            let source = s.baro_seen.get(&address).copied();
+            let age_s = match source {
+                Some(at) if at <= time_ns => {
+                    let age = time_ns
+                        .checked_sub(at)
+                        .ok_or("barometric source age overflow")?;
+                    let exact = age as f64 / 1e9;
+                    let rounded = exact as f32;
+                    // Round measurement age upward, never making an old altitude younger.
+                    if f64::from(rounded) < exact {
+                        f32::from_bits(
+                            rounded
+                                .to_bits()
+                                .checked_add(1)
+                                .ok_or("altitude age rounding overflow")?,
+                        )
+                    } else {
+                        rounded
+                    }
+                }
+                Some(_) => return Err("barometric evidence is after the state cutoff".into()),
+                None => {
+                    msaw_altitude_source_unknown = msaw_altitude_source_unknown.saturating_add(1);
+                    f32::NAN
+                }
+            };
+            msaw_rows.push(oa_msaw::MsawTrack {
+                lat_deg: f64::from(row.lat_e7) / 1e7,
+                lon_deg: f64::from(row.lon_e7) / 1e7,
+                addr: address,
+                vel_east_mps: row.vel_east_mps,
+                vel_north_mps: row.vel_north_mps,
+                r95_m: radius as f32,
+                alt_ft: if row.flags & O_HAS_ALT != 0 && source.is_some() {
+                    row.alt_ft
+                } else {
+                    f32::NAN
+                },
+                vrate_fpm: if row.flags & O_HAS_ALT != 0 {
+                    row.vrate_fpm
+                } else {
+                    f32::NAN
+                },
+                flags: msaw_flags,
+                ground: oa_msaw::AIRBORNE,
+                alt_age_s: age_s,
+                alt_change_10s_ft: f32::NAN,
+                ground_ft: f32::NAN,
+            });
+        }
         append(&mut snapshot, row)?;
     }
+    let msaw = match s.msaw.as_mut() {
+        Some(service) => Some(crate::msaw_bridge::regional_msaw_cycle(
+            service,
+            time_ns,
+            &msaw_rows,
+            &mut s.states,
+            &mut s.inhibits,
+        )?),
+        None => None,
+    };
     let ca = ca_cycle(
         &mut s.ca,
         time_ns,
@@ -633,6 +744,38 @@ pub fn surveillance_finish(
             return Err("scope/CA position mismatch".into());
         }
     }
+    let msaw_markers = if let Some(frame) = msaw.as_ref() {
+        use oa_display::core::alert_markers::{
+            append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
+        };
+        if frame.open.len() > MAX_TRACKS {
+            return Err("MSAW alert marker capacity exceeded".into());
+        }
+        let mut markers = Vec::with_capacity(MAX_TRACKS);
+        for alert in &frame.open {
+            let position = tracks.iter().find(|track| track.address == alert.addr);
+            let state = if frame.stats.is_none() || alert.end_reason != oa_msaw::END_CLEAR {
+                MarkerState::ProtectionLost
+            } else {
+                match alert.peak {
+                    oa_msaw::Grade::Caution => MarkerState::Caution,
+                    oa_msaw::Grade::Warning => MarkerState::Warning,
+                }
+            };
+            markers.push(AlertMarker {
+                address: alert.addr,
+                lat_e7: position.map_or(NO_POSITION_E7, |track| track.lat_e7),
+                lon_e7: position.map_or(NO_POSITION_E7, |track| track.lon_e7),
+                state,
+                position_known: u8::from(position.is_some()),
+                reserved: [0; 2],
+            });
+        }
+        markers.sort_by_key(|marker| marker.address);
+        Some(append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers).map_err(err)?)
+    } else {
+        None
+    };
     replay_raster(&mut s.scope).map_err(err)?;
     let mut warnings = Vec::new();
     if s.scope.list.texts.start.len() > 100_000 {
@@ -671,6 +814,9 @@ pub fn surveillance_finish(
         ca_open: ca_open(&s.ca).to_vec(),
         ca_closed,
         ca_altitude_lost,
+        msaw,
+        msaw_markers,
+        msaw_altitude_source_unknown,
         ca_stats: ca.stats,
         ca_work_short: ca.work_short,
         ca_input_short: ca.input_short,

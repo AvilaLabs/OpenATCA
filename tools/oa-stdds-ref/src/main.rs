@@ -122,9 +122,9 @@ fn selected_source_fingerprint(g: &Sealed) -> Result<(String, String), String> {
 fn valid_cohort_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':')
-        })
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
 }
 
 fn main() -> ExitCode {
@@ -150,7 +150,9 @@ fn main() -> ExitCode {
                 from_ms = match args.next().and_then(|v| v.parse::<i64>().ok()) {
                     Some(v) => Some(v),
                     None => {
-                        eprintln!("oa-stdds-ref: --from-ms requires a signed Unix millisecond integer");
+                        eprintln!(
+                            "oa-stdds-ref: --from-ms requires a signed Unix millisecond integer"
+                        );
                         return ExitCode::from(2);
                     }
                 }
@@ -163,7 +165,9 @@ fn main() -> ExitCode {
                 to_ms = match args.next().and_then(|v| v.parse::<i64>().ok()) {
                     Some(v) => Some(v),
                     None => {
-                        eprintln!("oa-stdds-ref: --to-ms requires a signed Unix millisecond integer");
+                        eprintln!(
+                            "oa-stdds-ref: --to-ms requires a signed Unix millisecond integer"
+                        );
                         return ExitCode::from(2);
                     }
                 }

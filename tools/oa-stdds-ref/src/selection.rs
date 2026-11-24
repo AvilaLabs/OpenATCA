@@ -51,7 +51,10 @@ pub struct SelectionCounts {
 
 /// Retains timed rows in the interval; with no interval, retains every timed row.
 /// This must run before any fit calculation so out-of-cohort rows cannot influence calibration.
-pub fn select_published_time(recs: &mut Vec<Rec>, interval: Option<TimeInterval>) -> SelectionCounts {
+pub fn select_published_time(
+    recs: &mut Vec<Rec>,
+    interval: Option<TimeInterval>,
+) -> SelectionCounts {
     let records_after_sealed_filter = u64::try_from(recs.len()).unwrap_or(u64::MAX);
     let mut counts = SelectionCounts {
         records_after_sealed_filter,
@@ -113,7 +116,13 @@ mod tests {
 
     #[test]
     fn selection_preserves_cohort_and_accounts_for_every_parsed_row() {
-        let mut rows = vec![rec(Some(9)), rec(Some(10)), rec(Some(19)), rec(Some(20)), rec(None)];
+        let mut rows = vec![
+            rec(Some(9)),
+            rec(Some(10)),
+            rec(Some(19)),
+            rec(Some(20)),
+            rec(None),
+        ];
         let counts = select_published_time(&mut rows, Some(TimeInterval::new(10, 20).unwrap()));
         assert_eq!(counts.records_after_sealed_filter, 5);
         assert_eq!(counts.selected_records, 2);
@@ -123,7 +132,10 @@ mod tests {
             counts.selected_records + counts.excluded_outside_interval + counts.excluded_untimed,
             counts.records_after_sealed_filter
         );
-        assert_eq!(rows.iter().map(|r| r.t_ms.unwrap()).collect::<Vec<_>>(), [10, 19]);
+        assert_eq!(
+            rows.iter().map(|r| r.t_ms.unwrap()).collect::<Vec<_>>(),
+            [10, 19]
+        );
     }
 
     #[test]

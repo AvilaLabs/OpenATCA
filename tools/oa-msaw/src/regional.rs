@@ -158,31 +158,42 @@ pub struct RegionalData {
 
 fn checked_limits(l: RegionalDataLimits) -> Result<(), String> {
     let d = RegionalDataLimits::default();
-    if l.max_config_bytes == 0 || l.max_config_bytes > d.max_config_bytes
-        || l.max_terrain_tiles == 0 || l.max_terrain_tiles > d.max_terrain_tiles
-        || l.max_terrain_file_bytes == 0 || l.max_terrain_file_bytes > d.max_terrain_file_bytes
+    if l.max_config_bytes == 0
+        || l.max_config_bytes > d.max_config_bytes
+        || l.max_terrain_tiles == 0
+        || l.max_terrain_tiles > d.max_terrain_tiles
+        || l.max_terrain_file_bytes == 0
+        || l.max_terrain_file_bytes > d.max_terrain_file_bytes
         || l.max_terrain_resident_bytes == 0
         || l.max_terrain_resident_bytes > d.max_terrain_resident_bytes
-        || l.max_terrain_query_cells == 0 || l.max_terrain_query_cells > d.max_terrain_query_cells
+        || l.max_terrain_query_cells == 0
+        || l.max_terrain_query_cells > d.max_terrain_query_cells
         || l.max_dof_files > d.max_dof_files
         || l.max_dof_compressed_file_bytes == 0
         || l.max_dof_compressed_file_bytes > d.max_dof_compressed_file_bytes
         || l.max_dof_compressed_total_bytes == 0
         || l.max_dof_compressed_total_bytes > d.max_dof_compressed_total_bytes
-        || l.max_dof_data_bytes == 0 || l.max_dof_data_bytes > d.max_dof_data_bytes
+        || l.max_dof_data_bytes == 0
+        || l.max_dof_data_bytes > d.max_dof_data_bytes
         || l.max_dof_total_data_bytes == 0
         || l.max_dof_total_data_bytes > d.max_dof_total_data_bytes
-        || l.max_dof_records == 0 || l.max_dof_records > d.max_dof_records
+        || l.max_dof_records == 0
+        || l.max_dof_records > d.max_dof_records
         || l.max_dof_coverage_cells == 0
         || l.max_dof_coverage_cells > d.max_dof_coverage_cells
         || l.max_metar_files > d.max_metar_files
-        || l.max_metar_file_bytes == 0 || l.max_metar_file_bytes > d.max_metar_file_bytes
-        || l.max_metar_total_bytes == 0 || l.max_metar_total_bytes > d.max_metar_total_bytes
-        || l.max_gtm_polygon_bytes == 0 || l.max_gtm_polygon_bytes > d.max_gtm_polygon_bytes
+        || l.max_metar_file_bytes == 0
+        || l.max_metar_file_bytes > d.max_metar_file_bytes
+        || l.max_metar_total_bytes == 0
+        || l.max_metar_total_bytes > d.max_metar_total_bytes
+        || l.max_gtm_polygon_bytes == 0
+        || l.max_gtm_polygon_bytes > d.max_gtm_polygon_bytes
         || l.max_gtm_polygon_vertices == 0
         || l.max_gtm_polygon_vertices > d.max_gtm_polygon_vertices
     {
-        return Err("regional data limits must be positive and within implementation ceilings".into());
+        return Err(
+            "regional data limits must be positive and within implementation ceilings".into(),
+        );
     }
     Ok(())
 }
@@ -230,8 +241,16 @@ fn manifest_hash(
     bytes.extend_from_slice(&cutoff_ms.to_le_bytes());
     bytes.push(u8::from(terrain_dir_present));
     bytes.push(0); // Chart model is not loaded by this data-service increment.
-    bytes.extend_from_slice(&u64::try_from(dof_file_count).unwrap_or(u64::MAX).to_le_bytes());
-    bytes.extend_from_slice(&u64::try_from(metar_file_count).unwrap_or(u64::MAX).to_le_bytes());
+    bytes.extend_from_slice(
+        &u64::try_from(dof_file_count)
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    bytes.extend_from_slice(
+        &u64::try_from(metar_file_count)
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     for source in sources {
         bytes.push(source.kind as u8);
         bytes.extend_from_slice(&source.bytes.to_le_bytes());
@@ -268,25 +287,45 @@ fn manifest_hash(
 
 fn parse_dof_data(path: &Path, data: &[u8], limits: RegionalDataLimits) -> Result<Dof, String> {
     if u64::try_from(data.len()).unwrap_or(u64::MAX) > limits.max_dof_data_bytes {
-        return Err(format!("{}: DOF data exceeds the byte limit", path.display()));
+        return Err(format!(
+            "{}: DOF data exceeds the byte limit",
+            path.display()
+        ));
     }
     let lines = line_count(data);
-    if lines > limits.max_dof_records.saturating_add(oa_dof::HEADER_LINES as usize) {
-        return Err(format!("{}: DOF line count exceeds the record limit", path.display()));
+    if lines
+        > limits
+            .max_dof_records
+            .saturating_add(oa_dof::HEADER_LINES as usize)
+    {
+        return Err(format!(
+            "{}: DOF line count exceeds the record limit",
+            path.display()
+        ));
     }
     let dof = parse_dof(data).map_err(|e| format!("{}: {e}", path.display()))?;
     if dof.lat_e7.is_empty() {
-        return Err(format!("{}: no obstacle in the file (an empty file is not coverage)", path.display()));
+        return Err(format!(
+            "{}: no obstacle in the file (an empty file is not coverage)",
+            path.display()
+        ));
     }
     if dof.lat_e7.len() > limits.max_dof_records {
-        return Err(format!("{}: DOF accepted record count exceeds the limit", path.display()));
+        return Err(format!(
+            "{}: DOF accepted record count exceeds the limit",
+            path.display()
+        ));
     }
     Ok(dof)
 }
 
 fn line_count(bytes: &[u8]) -> usize {
     let endings = bytes.iter().filter(|&&b| b == b'\n').count();
-    endings.saturating_add(if bytes.last().is_some_and(|b| *b != b'\n') { 1 } else { 0 })
+    endings.saturating_add(if bytes.last().is_some_and(|b| *b != b'\n') {
+        1
+    } else {
+        0
+    })
 }
 
 fn extract_dof_bounded(
@@ -294,7 +333,9 @@ fn extract_dof_bounded(
     source: Vec<u8>,
     limits: RegionalDataLimits,
 ) -> Result<(Vec<u8>, RegionalSourceEvidence), String> {
-    let zip = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+    let zip = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zip"));
     let source_evidence = evidence(RegionalSourceKind::Dof, path, &source, 0);
     if zip {
         let zip_limits = ZipLimits {
@@ -307,12 +348,19 @@ fn extract_dof_bounded(
         };
         let archive = Archive::parse_with_limits(&source, zip_limits)
             .map_err(|e| format!("{}: {e}", path.display()))?;
-        let entry = archive.entries().iter().find(|e| e.name() == "DOF.DAT")
+        let entry = archive
+            .entries()
+            .iter()
+            .find(|e| e.name() == "DOF.DAT")
             .ok_or_else(|| format!("{}: zip has no DOF.DAT", path.display()))?;
         if entry.uncompressed_size() > limits.max_dof_data_bytes {
-            return Err(format!("{}: DOF.DAT exceeds the decompressed byte limit", path.display()));
+            return Err(format!(
+                "{}: DOF.DAT exceeds the decompressed byte limit",
+                path.display()
+            ));
         }
-        let data = archive.extract_entry(entry)
+        let data = archive
+            .extract_entry(entry)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         Ok((data, source_evidence))
     } else {
@@ -323,14 +371,22 @@ fn extract_dof_bounded(
 fn coverage_cell_estimate(d: &Dof) -> u64 {
     let cell = |x: i32| ((f64::from(x) / 1e7 / 0.5).floor()) as i64;
     let bounds = |values: &[i32]| {
-        values.iter().copied().min().zip(values.iter().copied().max())
+        values
+            .iter()
+            .copied()
+            .min()
+            .zip(values.iter().copied().max())
     };
     let (Some((south, north)), Some((west, east))) = (bounds(&d.lat_e7), bounds(&d.lon_e7)) else {
         return 0;
     };
     let rows = cell(north) - cell(south) + 1;
     let cols = cell(east) - cell(west) + 1;
-    if rows <= 0 || cols <= 0 { u64::MAX } else { (rows as u64).saturating_mul(cols as u64) }
+    if rows <= 0 || cols <= 0 {
+        u64::MAX
+    } else {
+        (rows as u64).saturating_mul(cols as u64)
+    }
 }
 
 fn load_areas(
@@ -357,16 +413,23 @@ fn load_areas(
                 let mut vertices = Vec::new();
                 for line in text.lines() {
                     let line = line.split('#').next().unwrap_or("").trim();
-                    if line.is_empty() { continue; }
+                    if line.is_empty() {
+                        continue;
+                    }
                     if total_vertices.saturating_add(vertices.len())
                         >= limits.max_gtm_polygon_vertices
                     {
                         return Err(format!("{name}: polygon vertex limit exceeded"));
                     }
-                    let (lat, lon): (f64, f64) = line.split_once(',')
-                        .and_then(|(lat, lon)| Some((lat.trim().parse().ok()?, lon.trim().parse().ok()?)))
+                    let (lat, lon): (f64, f64) = line
+                        .split_once(',')
+                        .and_then(|(lat, lon)| {
+                            Some((lat.trim().parse().ok()?, lon.trim().parse().ok()?))
+                        })
                         .ok_or_else(|| format!("{name}: `{line}` is not lat,lon"))?;
-                    if !lat.is_finite() || !lon.is_finite() || !(-90.0..=90.0).contains(&lat)
+                    if !lat.is_finite()
+                        || !lon.is_finite()
+                        || !(-90.0..=90.0).contains(&lat)
                         || !(-180.0..=180.0).contains(&lon)
                     {
                         return Err(format!("{name}: `{line}` is outside coordinate bounds"));
@@ -401,18 +464,28 @@ pub fn load_regional_data(
     }
     if let Some(dir) = &paths.terrain_dir {
         crate::guard::refuse_sealed(&Sealed::production(), dir)?;
-        if !dir.is_dir() { return Err(format!("{}: terrain path is not a directory", dir.display())); }
+        if !dir.is_dir() {
+            return Err(format!(
+                "{}: terrain path is not a directory",
+                dir.display()
+            ));
+        }
     }
 
     let config_bytes = read_bounded(&paths.config, limits.max_config_bytes)?;
     let config_text = String::from_utf8(config_bytes.clone())
         .map_err(|_| format!("{}: not UTF-8 text", paths.config.display()))?;
-    let settings = parse_config(&config_text)
-        .map_err(|e| format!("{}: {e}", paths.config.display()))?;
+    let settings =
+        parse_config(&config_text).map_err(|e| format!("{}: {e}", paths.config.display()))?;
     if !settings.cifp_airports.is_empty() || settings.cifp_area_margin_nm.is_some() {
         return Err("bounded regional data service does not load CIFP; configuration requests CIFP corridors".into());
     }
-    let mut sources = vec![evidence(RegionalSourceKind::Config, &paths.config, &config_bytes, 0)];
+    let mut sources = vec![evidence(
+        RegionalSourceKind::Config,
+        &paths.config,
+        &config_bytes,
+        0,
+    )];
     let areas = load_areas(&settings, limits, &mut sources)?;
 
     let mut obstacles: Option<ObstacleIndex> = None;
@@ -434,7 +507,8 @@ pub fn load_regional_data(
     let mut dof_line_upper_bound = 0usize;
     for (path, source_bytes) in dof_inputs {
         let (data, source_evidence) = extract_dof_bounded(&path, source_bytes, limits)?;
-        dof_total_data = dof_total_data.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+        dof_total_data =
+            dof_total_data.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
         if dof_total_data > limits.max_dof_total_data_bytes {
             return Err("combined DOF decompressed byte limit exceeded".into());
         }
@@ -472,10 +546,14 @@ pub fn load_regional_data(
     let mut metar_data = Vec::with_capacity(paths.metar_files.len());
     for source in &paths.metar_files {
         if source.received_at_ms > weather.cutoff_ms {
-            return Err(format!("{}: METAR file received after issue cutoff", source.path.display()));
+            return Err(format!(
+                "{}: METAR file received after issue cutoff",
+                source.path.display()
+            ));
         }
         let bytes = read_bounded(&source.path, limits.max_metar_file_bytes)?;
-        metar_bytes_total = metar_bytes_total.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        metar_bytes_total =
+            metar_bytes_total.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         if metar_bytes_total > limits.max_metar_total_bytes {
             return Err("combined METAR byte limit exceeded".into());
         }
@@ -485,7 +563,11 @@ pub fn load_regional_data(
             &bytes,
             source.received_at_ms,
         ));
-        metar_data.push((source.path.to_string_lossy().into_owned(), bytes, source.received_at_ms));
+        metar_data.push((
+            source.path.to_string_lossy().into_owned(),
+            bytes,
+            source.received_at_ms,
+        ));
     }
     let metar_refs: Vec<(&str, &[u8], i64)> = metar_data
         .iter()
@@ -529,7 +611,12 @@ pub fn load_regional_data(
         metar_rows: qnh.stats.rows,
         metar_stations: qnh.stats.stations,
     };
-    Ok(RegionalData { settings, floors, qnh, provenance })
+    Ok(RegionalData {
+        settings,
+        floors,
+        qnh,
+        provenance,
+    })
 }
 
 pub fn source_digest_hex(source: &RegionalSourceEvidence) -> String {

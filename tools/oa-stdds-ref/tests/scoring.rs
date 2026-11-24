@@ -13,7 +13,9 @@ use oa_stdds_ref::engine::{
 };
 use oa_stdds_ref::load::{load_reader, rec_of};
 use oa_stdds_ref::model::{classify_record, Class, Fix, Miss, Rec, Reference, Unpaired};
-use oa_stdds_ref::report::{altitude_suspect, build_report, build_report_with_selection, check_report_bound, speed_suspect};
+use oa_stdds_ref::report::{
+    altitude_suspect, build_report, build_report_with_selection, check_report_bound, speed_suspect,
+};
 use oa_stdds_ref::selection::{select_published_time, TimeInterval};
 use oa_stdds_ref::sources::{interpolate, Row, TrackerSource};
 use oa_xml::{Limits as XmlLimits, Parser};
@@ -127,7 +129,10 @@ fn track(late_ms: i64, class: Class) -> Vec<Rec> {
 fn published_time_selection_is_half_open_and_excluded_rows_do_not_enter_fit_or_denominator() {
     let l = line();
     let mut recs = track(0, Class::AdsbAbsent);
-    let untimed = Rec { t_ms: None, ..recs[0] };
+    let untimed = Rec {
+        t_ms: None,
+        ..recs[0]
+    };
     recs.push(untimed);
     let interval = TimeInterval::new(T0 + 20_000, T0 + 40_000).unwrap();
     let counts = select_published_time(&mut recs, Some(interval));
@@ -142,8 +147,16 @@ fn published_time_selection_is_half_open_and_excluded_rows_do_not_enter_fit_or_d
     assert_eq!(analysis.rows.len(), 10);
     let fit = analysis.fits.first().unwrap().result.unwrap();
     assert_eq!(fit.samples, 10);
-    let report = build_report_with_selection(&[], &analysis, "synthetic-test-cohort", Some(interval), counts);
-    assert!(report.json.contains("\"cohort_id\":\"synthetic-test-cohort\""));
+    let report = build_report_with_selection(
+        &[],
+        &analysis,
+        "synthetic-test-cohort",
+        Some(interval),
+        counts,
+    );
+    assert!(report
+        .json
+        .contains("\"cohort_id\":\"synthetic-test-cohort\""));
     assert!(report.json.contains("\"records_after_sealed_filter\":82"));
     assert!(report.json.contains("\"selected_records\":10"));
     assert!(report.json.contains("\"excluded_outside_interval\":71"));

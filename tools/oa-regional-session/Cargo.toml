@@ -35,6 +35,11 @@ oa-ieee = { path = "../../crates/oa-ieee" }
 oa-sha256 = { path = "../../crates/oa-sha256" }
 # Check every input/output path and every source/receipt timestamp before admission.
 oa-sealed = { path = "../../crates/oa-sealed" }
+# F1: Connor explicitly approved these runtime links on 2026-11-24 (nine-link question).
+# Execute the existing terrain-warning core on the same regional observation epoch.
+oa-msaw = { path = "../../crates/oa-msaw" }
+# Bounded terrain/obstacle/received-weather loading and datum correction, reused without a new parser.
+oa-msaw-run = { path = "../oa-msaw" }
 
 [package.metadata.openatca]
 class = "shell"

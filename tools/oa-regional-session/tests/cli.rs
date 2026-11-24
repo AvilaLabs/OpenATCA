@@ -110,6 +110,76 @@ fn timed_guard_precedes_payload_interpretation_and_output_creation() {
     fs::remove_dir_all(root).expect("cleanup");
 }
 
+// REQ: OA-REG-011, OA-REG-012, OA-REG-008
+#[test]
+fn explicit_synthetic_msaw_evaluates_warning_and_closes_evidence() {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "oa-regional-msaw-cli-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).expect("isolated directory");
+    let input = root.join("synthetic-msaw.tsv");
+    fs::write(&input, include_str!("../examples/synthetic-msaw.tsv"))
+        .expect("public synthetic input");
+    let executable = root.join("oa-regional-session");
+    fs::copy(env!("CARGO_BIN_EXE_oa-regional-session"), &executable).expect("standalone binary");
+    let output = root.join("out");
+    let result = Command::new(&executable)
+        .args(["run", "--synthetic-model", "--synthetic-msaw", "--input"])
+        .arg(&input)
+        .arg("--out")
+        .arg(&output)
+        .output()
+        .expect("CLI");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let second =
+        fs::read_to_string(output.join("frame-0002.txt")).expect("confirmed caution evidence");
+    assert!(second.contains("peak: Caution"));
+    let last = fs::read_to_string(output.join("frame-0004.txt")).expect("warning evidence");
+    assert!(last.contains("peak: Warning"));
+    assert!(last.contains("synthetic: true"));
+    let settings = fs::read_to_string(output.join("settings.tsv")).expect("settings");
+    assert!(settings.contains("msaw\tPUBLIC_SYNTHETIC_FLOOR_WEATHER"));
+    let manifest = fs::read(output.join("manifest.tsv")).expect("manifest");
+    let complete = fs::read_to_string(output.join("COMPLETE")).expect("completion");
+    assert_eq!(
+        complete.trim(),
+        oa_sha256::to_hex(&oa_sha256::sha256(&manifest))
+    );
+
+    // Weather admission must fail before creating output. Actual receipt cannot be
+    // guessed from observation time, including when the supplied files do not exist.
+    let inputs = root.join("msaw-inputs.tsv");
+    fs::write(
+        &inputs,
+        "OA-MSAW-INPUTS\t1\nCONFIG\tmissing-config.json\nMETAR\t2000\tmissing-weather.json\n",
+    )
+    .expect("future weather manifest");
+    let refused = root.join("refused");
+    let result = Command::new(&executable)
+        .args(["run", "--synthetic-model", "--msaw-inputs"])
+        .arg(&inputs)
+        .arg("--input")
+        .arg(&input)
+        .arg("--out")
+        .arg(&refused)
+        .output()
+        .expect("refused CLI");
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr)
+        .contains("METAR receipt is after first regional cutoff"));
+    assert!(!refused.exists());
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
 // REQ: OA-REG-004, OA-REG-005, OA-REG-008
 #[test]
 fn full_synthetic_session_has_closed_identical_evidence_and_valid_images() {

@@ -9,7 +9,9 @@
 //! header text and 64 header bytes.
 
 use crate::core::font::{text_width_units, CAP_HEIGHT};
-use crate::core::list::{push_circle, push_text, DisplayError, DisplayList, ALIGN_CENTRE, ALIGN_LEFT};
+use crate::core::list::{
+    push_circle, push_text, DisplayError, DisplayList, ALIGN_CENTRE, ALIGN_LEFT,
+};
 use crate::core::palette;
 use crate::core::project::{project, Projection};
 use crate::core::text::{text_new, text_push_dec, text_push_str, text_str};
@@ -140,7 +142,9 @@ pub fn append_alert_markers(
         || projection.top_inset < MIN_ALERT_TOP_INSET
         || projection.height <= projection.top_inset
     {
-        return Err(bad_alert("MSAW markers require width 500 and a 104 px top strip"));
+        return Err(bad_alert(
+            "MSAW markers require width 500 and a 104 px top strip",
+        ));
     }
     if list.faulted {
         return Err(bad_alert("MSAW markers cannot append to a faulted list"));
@@ -172,7 +176,9 @@ pub fn append_alert_markers(
     let mut previous_address = 0u32;
     for (index, marker) in markers.iter().enumerate() {
         if marker.address == 0 || marker.address <= previous_address {
-            return Err(bad_alert("MSAW addresses must be positive, unique and increasing"));
+            return Err(bad_alert(
+                "MSAW addresses must be positive, unique and increasing",
+            ));
         }
         previous_address = marker.address;
         if marker.reserved != [0; 2] {
@@ -194,11 +200,15 @@ pub fn append_alert_markers(
                 if !(-900_000_000..=900_000_000).contains(&marker.lat_e7)
                     || !(-1_800_000_000..=1_800_000_000).contains(&marker.lon_e7)
                 {
-                    return Err(bad_alert("known MSAW position is outside coordinate bounds"));
+                    return Err(bad_alert(
+                        "known MSAW position is outside coordinate bounds",
+                    ));
                 }
                 match project(projection, marker.lat_e7, marker.lon_e7) {
                     Some(point) if inside_frame(projection, point) => {
-                        projected[index] = Some(point);
+                        *projected
+                            .get_mut(index)
+                            .ok_or_else(|| bad_alert("MSAW projection index"))? = Some(point);
                         increment(&mut stats.drawn);
                     }
                     _ => increment(&mut stats.off_map),
@@ -226,14 +236,15 @@ pub fn append_alert_markers(
         return Err(bad_alert("MSAW count header does not fit the view width"));
     }
 
-    let needed_circles = markers
-        .len()
-        .checked_mul(ALERT_CIRCLES_PER_MARKER)
-        .ok_or(DisplayError::TooLarge {
-            what: "MSAW circle reservation",
-            requested: u128::MAX,
-            limit: list.caps.circles,
-        })?;
+    let needed_circles =
+        markers
+            .len()
+            .checked_mul(ALERT_CIRCLES_PER_MARKER)
+            .ok_or(DisplayError::TooLarge {
+                what: "MSAW circle reservation",
+                requested: u128::MAX,
+                limit: list.caps.circles,
+            })?;
     let needed_texts = markers
         .len()
         .checked_mul(ALERT_TEXTS_PER_MARKER)
@@ -252,9 +263,19 @@ pub fn append_alert_markers(
             requested: u128::MAX,
             limit: list.caps.text_bytes,
         })?;
-    ensure_room("circles", list.circles.x.len(), needed_circles, list.caps.circles)?;
+    ensure_room(
+        "circles",
+        list.circles.x.len(),
+        needed_circles,
+        list.caps.circles,
+    )?;
     ensure_room("texts", list.texts.x.len(), needed_texts, list.caps.texts)?;
-    ensure_room("text bytes", list.text.len(), needed_text_bytes, list.caps.text_bytes)?;
+    ensure_room(
+        "text bytes",
+        list.text.len(),
+        needed_text_bytes,
+        list.caps.text_bytes,
+    )?;
 
     for (index, marker) in markers.iter().enumerate() {
         let Some(point) = projected.get(index).copied().flatten() else {
@@ -262,11 +283,29 @@ pub fn append_alert_markers(
         };
         match marker.state {
             MarkerState::Caution => {
-                push_circle(list, point, px(ALERT_INNER_RADIUS_PX), palette::ALERT, ALERT_LAYER)?;
+                push_circle(
+                    list,
+                    point,
+                    px(ALERT_INNER_RADIUS_PX),
+                    palette::ALERT,
+                    ALERT_LAYER,
+                )?;
             }
             MarkerState::Warning | MarkerState::ProtectionLost => {
-                push_circle(list, point, px(ALERT_OUTER_RADIUS_PX), palette::ALERT, ALERT_LAYER)?;
-                push_circle(list, point, px(ALERT_INNER_RADIUS_PX), palette::ALERT, ALERT_LAYER)?;
+                push_circle(
+                    list,
+                    point,
+                    px(ALERT_OUTER_RADIUS_PX),
+                    palette::ALERT,
+                    ALERT_LAYER,
+                )?;
+                push_circle(
+                    list,
+                    point,
+                    px(ALERT_INNER_RADIUS_PX),
+                    palette::ALERT,
+                    ALERT_LAYER,
+                )?;
             }
         }
         let label = match marker.state {

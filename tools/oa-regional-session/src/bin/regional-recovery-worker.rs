@@ -12,7 +12,15 @@ const MAX_LINE: usize = 1024;
 // This is a fixture-settings subset, not a fingerprint of every downstream subsystem setting.
 const SETTINGS: &str = "OA-REGIONAL-RECOVERY-SETTINGS\t1\ncentre\tZAU1\ncentre_lat_e7\t410000000\ncentre_lon_e7\t-870000000\nrange_nm\t180.0\ntracks\t32\nframes\t512\n";
 
-fn setup() -> Result<(oa_regional_session::runtime::RegionalRuntime, Vec<oa_regional_session::ReceiptBatch>, [u8; 32], [u8; 32]), String> {
+fn setup() -> Result<
+    (
+        oa_regional_session::runtime::RegionalRuntime,
+        Vec<oa_regional_session::ReceiptBatch>,
+        [u8; 32],
+        [u8; 32],
+    ),
+    String,
+> {
     let snapshot = oa_airspace::core::snapshot::encode(&synthetic_model()?)
         .map_err(|e| format!("snapshot encode: {e:?}"))?;
     let snapshot_hash = oa_sha256::sha256(&snapshot);
@@ -32,25 +40,42 @@ fn setup() -> Result<(oa_regional_session::runtime::RegionalRuntime, Vec<oa_regi
     }
     for row in rows.filter(|row| !row.is_empty()) {
         let event = parse_event_line(row).map_err(|e| format!("fixture parse: {e:?}"))?;
-        if let Some(batch) = push_event(&mut cursor, event)
-            .map_err(|e| format!("fixture admission: {e:?}"))?
+        if let Some(batch) =
+            push_event(&mut cursor, event).map_err(|e| format!("fixture admission: {e:?}"))?
         {
             batches.push(batch);
         }
     }
-    if let Some(batch) = flush_receipt_group(&mut cursor)
-        .map_err(|e| format!("fixture close: {e:?}"))?
+    if let Some(batch) =
+        flush_receipt_group(&mut cursor).map_err(|e| format!("fixture close: {e:?}"))?
     {
         batches.push(batch);
     }
     if batches.is_empty() || batches.len() > 512 {
         return Err("fixture frame count outside bounded envelope".into());
     }
-    Ok((runtime, batches, oa_sha256::sha256(SETTINGS.as_bytes()), snapshot_hash))
+    Ok((
+        runtime,
+        batches,
+        oa_sha256::sha256(SETTINGS.as_bytes()),
+        snapshot_hash,
+    ))
 }
 
-fn admitted_prefix_bytes(count: usize, batches: &[oa_regional_session::ReceiptBatch]) -> Result<Vec<u8>, String> {
-    let cutoff = if count == 0 { None } else { Some(batches.get(count - 1).ok_or("replay count exceeds admitted prefix")?.receipt_ns) };
+fn admitted_prefix_bytes(
+    count: usize,
+    batches: &[oa_regional_session::ReceiptBatch],
+) -> Result<Vec<u8>, String> {
+    let cutoff = if count == 0 {
+        None
+    } else {
+        Some(
+            batches
+                .get(count - 1)
+                .ok_or("replay count exceeds admitted prefix")?
+                .receipt_ns,
+        )
+    };
     let mut bytes = Vec::with_capacity(FIXTURE.len());
     for (index, line) in FIXTURE.lines().enumerate() {
         if index == 0 {
@@ -58,8 +83,12 @@ fn admitted_prefix_bytes(count: usize, batches: &[oa_regional_session::ReceiptBa
             bytes.push(b'\n');
             continue;
         }
-        let receipt = line.split('\t').nth(1).ok_or("malformed embedded fixture row")?
-            .parse::<i64>().map_err(|_| "invalid embedded receipt time")?;
+        let receipt = line
+            .split('\t')
+            .nth(1)
+            .ok_or("malformed embedded fixture row")?
+            .parse::<i64>()
+            .map_err(|_| "invalid embedded receipt time")?;
         if cutoff.is_some_and(|value| receipt <= value) {
             bytes.extend_from_slice(line.as_bytes());
             bytes.push(b'\n');
@@ -76,16 +105,27 @@ fn read_line<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
             return if bytes.is_empty() {
                 Ok(None)
             } else {
-                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "unterminated protocol line"))
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unterminated protocol line",
+                ))
             };
         }
-        let take = available.iter().position(|byte| *byte == b'\n')
+        let take = available
+            .iter()
+            .position(|byte| *byte == b'\n')
             .map_or(available.len(), |index| index + 1);
         if bytes.len().saturating_add(take) > MAX_LINE {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "protocol line over bound"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "protocol line over bound",
+            ));
         }
         let Some(chunk) = available.get(..take) else {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "protocol line slice out of bounds"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "protocol line slice out of bounds",
+            ));
         };
         let complete = chunk.last() == Some(&b'\n');
         bytes.extend_from_slice(chunk);
@@ -102,7 +142,11 @@ fn read_line<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
 
 fn main() {
     if let Err(error) = run() {
-        let _ = writeln!(io::stdout().lock(), "ERROR {}", error.replace('\n', " ").replace('\r', " "));
+        let _ = writeln!(
+            io::stdout().lock(),
+            "ERROR {}",
+            error.replace('\n', " ").replace('\r', " ")
+        );
         std::process::exit(2);
     }
 }
@@ -113,7 +157,9 @@ fn run() -> Result<(), String> {
         return Err("expected one positive generation argument".into());
     }
     let generation_arg = args.get(1).ok_or("missing generation")?;
-    let generation = generation_arg.parse::<u64>().map_err(|_| "invalid generation")?;
+    let generation = generation_arg
+        .parse::<u64>()
+        .map_err(|_| "invalid generation")?;
     if generation == 0 {
         return Err("generation must be positive".into());
     }
@@ -129,7 +175,10 @@ fn run() -> Result<(), String> {
         let fields: Vec<&str> = line.split('\t').collect();
         match fields.as_slice() {
             ["REPLAY", gen, count, prefix_hash, settings, snapshot] if !replayed => {
-                if gen.parse::<u64>().ok() != Some(generation) || settings != oa_sha256::to_hex(&settings_hash) || snapshot != oa_sha256::to_hex(&snapshot_hash) {
+                if gen.parse::<u64>().ok() != Some(generation)
+                    || *settings != oa_sha256::to_hex(&settings_hash)
+                    || *snapshot != oa_sha256::to_hex(&snapshot_hash)
+                {
                     return Err("replay settings, adaptation, or generation mismatch".into());
                 }
                 let count = count.parse::<usize>().map_err(|_| "invalid replay count")?;
@@ -137,7 +186,7 @@ fn run() -> Result<(), String> {
                     return Err("replay count exceeds admitted prefix".into());
                 }
                 let prefix_bytes = admitted_prefix_bytes(count, &batches)?;
-                if prefix_hash != oa_sha256::to_hex(&oa_sha256::sha256(&prefix_bytes)) {
+                if *prefix_hash != oa_sha256::to_hex(&oa_sha256::sha256(&prefix_bytes)) {
                     return Err("replay prefix digest mismatch".into());
                 }
                 for batch in batches.iter().take(count) {
@@ -146,12 +195,22 @@ fn run() -> Result<(), String> {
                     let pixels = regional_pixels(&runtime)?;
                     let pixels_hash = oa_sha256::sha256(pixels);
                     let state_hash = oa_sha256::sha256(format!("{frame:?}").as_bytes());
-                    writeln!(stdout, "REPLAYED\t{generation}\t{}\t{}\t{}\t{}\t{}", processed, frame.sequence, oa_sha256::to_hex(&frame.surveillance.frame_sha256), oa_sha256::to_hex(&pixels_hash), oa_sha256::to_hex(&state_hash)).map_err(|e| e.to_string())?;
+                    writeln!(
+                        stdout,
+                        "REPLAYED\t{generation}\t{}\t{}\t{}\t{}\t{}",
+                        processed,
+                        frame.sequence,
+                        oa_sha256::to_hex(&frame.surveillance.frame_sha256),
+                        oa_sha256::to_hex(&pixels_hash),
+                        oa_sha256::to_hex(&state_hash)
+                    )
+                    .map_err(|e| e.to_string())?;
                     stdout.flush().map_err(|e| e.to_string())?;
                 }
                 replayed = true;
                 if count == 0 {
-                    writeln!(stdout, "REPLAYED\t{generation}\t0\t0\t-\t-\t-").map_err(|e| e.to_string())?;
+                    writeln!(stdout, "REPLAYED\t{generation}\t0\t0\t-\t-\t-")
+                        .map_err(|e| e.to_string())?;
                     stdout.flush().map_err(|e| e.to_string())?;
                 }
             }
@@ -163,16 +222,25 @@ fn run() -> Result<(), String> {
                 if index != processed || index >= batches.len() {
                     return Err("step is not the next retained input".into());
                 }
-                let batch = batches.get(index).ok_or("step index outside retained fixture")?;
+                let batch = batches
+                    .get(index)
+                    .ok_or("step index outside retained fixture")?;
                 let frame = regional_step(&mut runtime, batch)?;
                 processed += 1;
                 let pixels = regional_pixels(&runtime)?;
                 let pixel_hash = oa_sha256::sha256(pixels);
                 let state_hash = oa_sha256::sha256(format!("{frame:?}").as_bytes());
-                let trajectory_rows = frame.flights.iter().filter(|flight| flight.trajectory.is_some()).count();
+                let trajectory_rows = frame
+                    .flights
+                    .iter()
+                    .filter(|flight| flight.trajectory.is_some())
+                    .count();
                 let source_lag_ns = match frame.surveillance.track_measurement_seen_ns {
                     Some(seen) => {
-                        let age = frame.surveillance.time_ns.checked_sub(seen)
+                        let age = frame
+                            .surveillance
+                            .time_ns
+                            .checked_sub(seen)
                             .ok_or("track measurement age overflow")?;
                         if age < 0 {
                             return Err("track measurement is newer than frame time".into());
@@ -181,13 +249,37 @@ fn run() -> Result<(), String> {
                     }
                     None => None,
                 };
-                let selected = frame.flights.iter().find(|flight| flight.address == 0xABC101).and_then(|flight| flight.view);
+                let selected = frame
+                    .flights
+                    .iter()
+                    .find(|flight| flight.address == 0xABC101)
+                    .and_then(|flight| flight.view);
                 let handoff_state = selected.map_or(u8::MAX, |view| view.handoff_state);
-                let owner = selected.map_or("-", |view| {
-                    std::str::from_utf8(&view.owner_unit).unwrap_or("?").trim_end_matches('\0')
+                let owner = selected.as_ref().map_or("-", |view| {
+                    std::str::from_utf8(&view.owner_unit)
+                        .unwrap_or("?")
+                        .trim_end_matches('\0')
                 });
-                let source_lag = source_lag_ns.map_or_else(|| "-".to_owned(), |value| value.to_string());
-                writeln!(stdout, "OUTPUT\t{generation}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", frame.sequence, frame.input.receipt_ns, oa_sha256::to_hex(&frame.surveillance.frame_sha256), oa_sha256::to_hex(&pixel_hash), oa_sha256::to_hex(&state_hash), frame.surveillance.tracks.len(), frame.flight_report.flights, trajectory_rows, frame.surveillance.ca_open.len(), source_lag, frame.controller_dispatches.len(), handoff_state, owner).map_err(|e| e.to_string())?;
+                let source_lag =
+                    source_lag_ns.map_or_else(|| "-".to_owned(), |value| value.to_string());
+                writeln!(
+                    stdout,
+                    "OUTPUT\t{generation}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+                    frame.sequence,
+                    frame.input.receipt_ns,
+                    oa_sha256::to_hex(&frame.surveillance.frame_sha256),
+                    oa_sha256::to_hex(&pixel_hash),
+                    oa_sha256::to_hex(&state_hash),
+                    frame.surveillance.tracks.len(),
+                    frame.flight_report.flights,
+                    trajectory_rows,
+                    frame.surveillance.ca_open.len(),
+                    source_lag,
+                    frame.controller_dispatches.len(),
+                    handoff_state,
+                    owner
+                )
+                .map_err(|e| e.to_string())?;
                 stdout.flush().map_err(|e| e.to_string())?;
             }
             ["APPLY_ONLY", gen, index] if replayed => {
@@ -198,10 +290,17 @@ fn run() -> Result<(), String> {
                 if index != processed || index >= batches.len() {
                     return Err("step is not the next retained input".into());
                 }
-                let batch = batches.get(index).ok_or("step index outside retained fixture")?;
+                let batch = batches
+                    .get(index)
+                    .ok_or("step index outside retained fixture")?;
                 let frame = regional_step(&mut runtime, batch)?;
                 processed += 1;
-                writeln!(stdout, "APPLIED\t{generation}\t{}\t{}", processed, frame.sequence).map_err(|e| e.to_string())?;
+                writeln!(
+                    stdout,
+                    "APPLIED\t{generation}\t{}\t{}",
+                    processed, frame.sequence
+                )
+                .map_err(|e| e.to_string())?;
                 stdout.flush().map_err(|e| e.to_string())?;
             }
             ["STALL"] if replayed => {
@@ -210,7 +309,9 @@ fn run() -> Result<(), String> {
                 let _ = read_line(&mut reader).map_err(|e| e.to_string())?;
             }
             ["ACK", gen, sequence] if replayed => {
-                if gen.parse::<u64>().ok() != Some(generation) || sequence.parse::<usize>().ok() != Some(processed) {
+                if gen.parse::<u64>().ok() != Some(generation)
+                    || sequence.parse::<usize>().ok() != Some(processed)
+                {
                     return Err("acknowledgment fence mismatch".into());
                 }
                 writeln!(stdout, "ACKED\t{generation}\t{processed}").map_err(|e| e.to_string())?;

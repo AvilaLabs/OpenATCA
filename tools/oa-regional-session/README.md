@@ -9,6 +9,8 @@ windowed controller workstation are separate integration work.
 ```text
 oa-regional-session run --input examples/synthetic-session.tsv --synthetic-model --out NEW_DIR
 oa-regional-session run --input FILE --snapshot ADAPTATION --out NEW_DIR
+oa-regional-session run --input examples/synthetic-msaw.tsv --synthetic-model --synthetic-msaw --out NEW_DIR
+oa-regional-session run --input FILE --snapshot ADAPTATION --msaw-inputs MSAW_MANIFEST --out NEW_DIR
 oa-regional-session stage --input FILE --out NEW_DIR
 ```
 
@@ -55,6 +57,36 @@ settings (1,300 m horizontal, 300 ft vertical, 120 s lookahead) are synthetic de
 not operational FAA separation minima. Other safety nets display unavailable state until they
 have actual evaluated inputs. Transport receipt and accepted observation freshness are separate
 evidence; a live transport cannot make an old or rejected measurement current.
+
+MSAW is evaluated only when explicitly configured. `--synthetic-msaw` uses a public flat
+500-ft terrain model, 500-ft clearance and synthetic weather in the 40–42°N, 88–86°W test box;
+it requires `--synthetic-model`. The synthetic descending-aircraft example exercises caution
+and warning with the actual core. It does not qualify operational terrain coverage or tuning.
+`--msaw-inputs` reads a bounded UTF-8 manifest beside its referenced files:
+
+```text
+OA-MSAW-INPUTS<TAB>1
+CONFIG<TAB>path/to/config.json
+TERRAIN<TAB>path/to/terrain-directory
+DOF<TAB>path/to/obstacles.zip
+METAR<TAB>actual_file_receipt_unix_ms<TAB>path/to/metar.json
+```
+
+CONFIG is required; TERRAIN is optional and unique; at most 32 DOF and 32 METAR files are
+accepted. Each weather file must have actually arrived by the first session cutoff; report
+observation times also pass causal admission. Missing terrain, obstacles, weather and chart
+coverage remain explicit. Automatic CIFP corridor loading and controller-authorized MSAW
+inhibition/service requests are not yet bridged and configured requests are refused.
+`msaw-data.txt` records supplied settings, source hashes, receipt stamps and loader limits,
+bound by the closed run manifest; frame evidence records the exact terrain tiles used.
+
+The current MSAW alert markers use the matching current tracker position and retain latched
+episode severity. A lost-altitude alert or failed provider is labelled protection lost; no
+current position means an unlocated count, never a marker at the alert's historical origin.
+Warning, caution, lost, off-map and unlocated counts remain in the scope legend. A terrain
+reader failure isolates MSAW and leaves tracking, observed conflict alerting and scope running;
+resuming MSAW requires fresh prefix reconstruction. This display has no aural alert or alert
+acknowledgement workflow yet.
 
 ## Protocol and identity
 

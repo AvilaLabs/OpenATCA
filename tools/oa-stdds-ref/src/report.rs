@@ -463,7 +463,11 @@ fn json_string(s: &str) -> String {
     out
 }
 
-fn selection_json(cohort_id: &str, interval: Option<TimeInterval>, counts: SelectionCounts) -> String {
+fn selection_json(
+    cohort_id: &str,
+    interval: Option<TimeInterval>,
+    counts: SelectionCounts,
+) -> String {
     match interval {
         Some(range) => format!(
             "{{\"cohort_id\":{},\"policy\":\"mrtTime in half-open [from_ms,to_ms), before offset fitting\",\"from_ms\":{},\"to_ms\":{},\"records_after_sealed_filter\":{},\"selected_records\":{},\"excluded_outside_interval\":{},\"excluded_untimed\":{}}}",
@@ -478,8 +482,13 @@ fn selection_json(cohort_id: &str, interval: Option<TimeInterval>, counts: Selec
     }
 }
 
-fn json_of(a: &Analysis, header: &[String], selection: Option<(&str, Option<TimeInterval>, SelectionCounts)>) -> String {
-    let selection = selection.map(|(cohort_id, interval, counts)| selection_json(cohort_id, interval, counts));
+fn json_of(
+    a: &Analysis,
+    header: &[String],
+    selection: Option<(&str, Option<TimeInterval>, SelectionCounts)>,
+) -> String {
+    let selection =
+        selection.map(|(cohort_id, interval, counts)| selection_json(cohort_id, interval, counts));
     let mut out = String::from("{\n  \"schema\": \"oa-stdds-ref-v1\",\n  \"time_basis\": \"mrtTime Unix milliseconds UTC\",\n  \"units\": {\"position_error\": \"m\", \"altitude_error\": \"ft (feed unit assumed)\", \"velocity_error\": \"m/s (feed unit assumed)\", \"time\": \"ms\"},\n  \"calibration\": \"in-sample: offset fit uses the same records later scored in fitted mode; fitted metrics are calibrated agreement, not prospective accuracy\",\n  \"cohort\": \"all three error sets share each mode's paired records; zero/missing address and duplicate key timestamps are excluded\",\n");
     if let Some(selection) = selection {
         let _ = writeln!(out, "  \"selection\": {selection},");

@@ -11,10 +11,7 @@ use oa_msaw_run::regional::{
 const DEV_CFG: &str = include_str!("../testdata/dev.cfg");
 
 fn scratch(name: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "oa-msaw-regional-{name}-{}",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("oa-msaw-regional-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&path);
     std::fs::create_dir_all(&path).unwrap();
     path
@@ -66,7 +63,7 @@ fn terrain_cell_budget_refuses_before_tile_access_and_missing_source_stays_missi
     let terrain = root.join("tiles");
     std::fs::create_dir_all(&terrain).unwrap();
     paths.terrain_dir = Some(terrain);
-    let mut data = load_regional_data(
+    let data = load_regional_data(
         &paths,
         RegionalDataLimits::default(),
         WeatherAdmission { cutoff_ms: 0 },
@@ -99,12 +96,7 @@ fn terrain_cell_budget_refuses_before_tile_access_and_missing_source_stays_missi
         max_terrain_file_bytes: 16,
         ..RegionalDataLimits::default()
     };
-    let mut fresh = load_regional_data(
-        &paths,
-        limits,
-        WeatherAdmission { cutoff_ms: 0 },
-    )
-    .unwrap();
+    let mut fresh = load_regional_data(&paths, limits, WeatherAdmission { cutoff_ms: 0 }).unwrap();
     let error = fresh.floors.floor_at(&local).unwrap_err();
     assert!(error.contains("exceeds 16 bytes"));
 }

@@ -848,8 +848,8 @@ impl Floors {
                         (grid, Some(hash))
                     }
                     None => {
-                        let bytes = oa_tiff::read_file(&p)
-                            .map_err(|e| format!("{}: {e}", p.display()))?;
+                        let bytes =
+                            oa_tiff::read_file(&p).map_err(|e| format!("{}: {e}", p.display()))?;
                         let grid = oa_tiff::read_geotiff(&bytes)
                             .map_err(|e| format!("{}: {e}", p.display()))?;
                         (grid, None)

@@ -6859,6 +6859,8 @@ These requirements describe the bounded, pure issue-time component in `core::tra
 - **OA-TRAJ-022** Indicated-airspeed and unknown-reference limits are retained and reported unsupported; they never compare to, replace or flag observed groundspeed.
 - **OA-TRAJ-023** Route evidence after cutoff is gated before constraint or coordinate validation; changing future payload cannot affect issue output.
 - **OA-TRAJ-024** Malformed altitude or speed windows are refused even when the other independent channel is valid.
+- **OA-TRAJ-025** Opt-in vertical reachability uses explicit full-flight-bound performance evidence and sequential rate-limited intervals. Assigned altitude is a level-off target without a fabricated fix deadline; unsupported or missing evidence cannot report a feasible profile.
+- **OA-TRAJ-026** Performance and clearance evidence after cutoff is gated before payload inspection. Eligible evidence has checked timestamps, limits, reserved bytes and fixed-point propagation; zero climb/descent capacity is a valid physical bound.
 
 ## Regional offline integration (tools/oa-regional-session)
 
@@ -6873,6 +6875,15 @@ This is a bounded normalized-input composition, not facility, deadline or operat
 - **OA-REG-007** Feed loss remains visible while coasting traffic retains identity. Transport receipt and accepted measurement freshness are distinct evidence.
 - **OA-REG-008** Input/output paths and source/receipt timestamps obey the sealed-data guard. A new closed run records input, adaptation, executable, settings and per-frame evidence hashes; incomplete runs have no valid completion marker.
 - **OA-REG-009** Local controller requests preserve receipt/source sequence order with authoritative flight updates. The bridge checks full displayed and current identity, generation, command/track freshness and actor authority; every queued request is completed explicitly, and invariant failure poisons the session.
+- **OA-REG-010** Default process recovery drills kill synthetic workers before apply, after apply and around authority acceptance, reconstruct identical admitted prefixes, fence stale/duplicate generations and bound stalled-worker cleanup. This is same-host recomputation, not an external exactly-once guarantee.
+- **OA-REG-011** The composed MSAW core receives the current tracker epoch and the age of its last accepted barometric observation. Missing or stale altitude and missing coverage remain explicit; horizontal receipts cannot refresh altitude evidence.
+- **OA-REG-012** MSAW provider failure publishes unavailable without evaluating partial floor samples, preserves alert evidence and permits tracking, observed conflict alerts and scope presentation to continue. Synthetic floor/weather requires an explicit option; supplied sources retain hashes and receipt evidence.
+- **OA-REG-013** Bounded recorded ADS-B and SFDPS imports preserve exact native receipt provenance, admit events no earlier than the next whole-second cutoff, retain source timestamps and count unsupported, malformed, sealed and capacity-refused work. Closed imports use guarded new outputs and a completion marker written last.
+- **OA-REG-014** Vertical profile integration is opt-in and uses only explicit eligible performance evidence for the exact full flight key. Missing, duplicate or foreign evidence has a visible per-flight refusal and cannot change horizontal forecasts or observed safety nets.
+
+## Current alert presentation (oa-display)
+
+- **OA-DSP-077** Bounded MSAW markers distinguish caution, warning and protection loss by shape and label, use the matching aircraft's current supplied position, and count off-map and unlocated alerts. Complete validation and list-budget checks precede mutation; a count header retains every alert category.
 
 ## Controller interaction (oa-display)
 

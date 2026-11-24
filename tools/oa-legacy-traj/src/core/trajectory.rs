@@ -1667,12 +1667,16 @@ fn lower_microfeet_to_feet(value: i64) -> Option<i32> {
     } else {
         floor.checked_add(1)?
     };
-    i32::try_from(ceil).ok().filter(|feet| *feet != NO_ALTITUDE_FT)
+    i32::try_from(ceil)
+        .ok()
+        .filter(|feet| *feet != NO_ALTITUDE_FT)
 }
 
 fn upper_microfeet_to_feet(value: i64) -> Option<i32> {
     let floor = i64::div_euclid(value, MICROFEET_PER_FOOT);
-    i32::try_from(floor).ok().filter(|feet| *feet != NO_ALTITUDE_FT)
+    i32::try_from(floor)
+        .ok()
+        .filter(|feet| *feet != NO_ALTITUDE_FT)
 }
 
 fn altitude_allowance_microfeet(duration_ms: f64, rate_fpm: u32) -> Option<i64> {
@@ -1772,10 +1776,20 @@ pub fn issue_vertical_profile(
         return vertical_output(input, performance, assumption, Refusal::VerticalWorkLimit);
     }
     if performance.key != input.key {
-        return vertical_output(input, performance, assumption, Refusal::PerformanceIdentityMismatch);
+        return vertical_output(
+            input,
+            performance,
+            assumption,
+            Refusal::PerformanceIdentityMismatch,
+        );
     }
     if performance.source == PerformanceSource::Unavailable || performance.max_age_ms < 0 {
-        return vertical_output(input, performance, assumption, Refusal::PerformanceUnavailable);
+        return vertical_output(
+            input,
+            performance,
+            assumption,
+            Refusal::PerformanceUnavailable,
+        );
     }
     if performance.message_id == 0
         || performance.max_climb_fpm > MAX_PROFILE_RATE_FPM
@@ -1785,10 +1799,16 @@ pub fn issue_vertical_profile(
     {
         return vertical_output(input, performance, assumption, Refusal::InvalidPerformance);
     }
-    if !reserved_zero(&performance.reserved) || performance.reserved_key_align != [0; 4]
+    if !reserved_zero(&performance.reserved)
+        || performance.reserved_key_align != [0; 4]
         || performance.reserved_speed_cap != 0
     {
-        return vertical_output(input, performance, assumption, Refusal::InvalidReservedFields);
+        return vertical_output(
+            input,
+            performance,
+            assumption,
+            Refusal::InvalidReservedFields,
+        );
     }
     if performance.source_ms > performance.available_ms {
         return vertical_output(input, performance, assumption, Refusal::InvalidPerformance);
@@ -1803,17 +1823,32 @@ pub fn issue_vertical_profile(
     let clearance = input.clearance;
     let clearance_absent = assumption == ClearanceAssumption::Absent;
     if clearance.form == ClearanceForm::Absent && !clearance_absent {
-        return vertical_output(input, performance, ClearanceAssumption::Unavailable, Refusal::ClearanceUnavailableAtCutoff);
+        return vertical_output(
+            input,
+            performance,
+            ClearanceAssumption::Unavailable,
+            Refusal::ClearanceUnavailableAtCutoff,
+        );
     }
     if clearance.form != ClearanceForm::Absent {
         if clearance.source_ms > clearance.available_ms
             || clearance.available_ms > input.cutoff_ms
             || clearance.message_id == 0
         {
-            return vertical_output(input, performance, ClearanceAssumption::Unavailable, Refusal::ClearanceUnavailableAtCutoff);
+            return vertical_output(
+                input,
+                performance,
+                ClearanceAssumption::Unavailable,
+                Refusal::ClearanceUnavailableAtCutoff,
+            );
         }
         if !reserved_zero(&clearance.reserved) {
-            return vertical_output(input, performance, assumption, Refusal::InvalidReservedFields);
+            return vertical_output(
+                input,
+                performance,
+                assumption,
+                Refusal::InvalidReservedFields,
+            );
         }
         match clearance.form {
             ClearanceForm::Exact => {
@@ -1821,7 +1856,12 @@ pub fn issue_vertical_profile(
                     || clearance.min_altitude_ft != clearance.max_altitude_ft
                     || clearance.altitude_at_fix_ft != NO_ALTITUDE_FT
                 {
-                    return vertical_output(input, performance, assumption, Refusal::InfeasibleAltitudeWindow);
+                    return vertical_output(
+                        input,
+                        performance,
+                        assumption,
+                        Refusal::InfeasibleAltitudeWindow,
+                    );
                 }
             }
             ClearanceForm::Window => {
@@ -1832,10 +1872,22 @@ pub fn issue_vertical_profile(
                         && clearance.max_altitude_ft != NO_ALTITUDE_FT
                         && clearance.min_altitude_ft > clearance.max_altitude_ft)
                 {
-                    return vertical_output(input, performance, assumption, Refusal::InfeasibleAltitudeWindow);
+                    return vertical_output(
+                        input,
+                        performance,
+                        assumption,
+                        Refusal::InfeasibleAltitudeWindow,
+                    );
                 }
             }
-            _ => return vertical_output(input, performance, ClearanceAssumption::Unsupported, Refusal::UnsupportedClearanceForm),
+            _ => {
+                return vertical_output(
+                    input,
+                    performance,
+                    ClearanceAssumption::Unsupported,
+                    Refusal::UnsupportedClearanceForm,
+                )
+            }
         }
     }
 
@@ -1886,7 +1938,11 @@ pub fn issue_vertical_profile(
             input,
             performance,
             assumption,
-            if match_count == 0 { Refusal::ActiveLegUnknown } else { Refusal::AmbiguousActiveLeg },
+            if match_count == 0 {
+                Refusal::ActiveLegUnknown
+            } else {
+                Refusal::AmbiguousActiveLeg
+            },
         );
     }
     let Some(first) = start_index else {
@@ -1937,7 +1993,8 @@ pub fn issue_vertical_profile(
                 return output;
             }
         };
-        if point.geometry == PathGeometry::Unsupported || point.geometry == PathGeometry::VectorsGap {
+        if point.geometry == PathGeometry::Unsupported || point.geometry == PathGeometry::VectorsGap
+        {
             output.refusal = Refusal::UnsupportedGeometry;
             output.first_infeasible_route_index = route_ix;
             return output;
@@ -1969,12 +2026,16 @@ pub fn issue_vertical_profile(
             output.first_infeasible_route_index = route_ix;
             return output;
         };
-        let Some(climb_delta) = altitude_allowance_microfeet(leg_duration_ms, performance.max_climb_fpm) else {
+        let Some(climb_delta) =
+            altitude_allowance_microfeet(leg_duration_ms, performance.max_climb_fpm)
+        else {
             output.refusal = Refusal::AltitudeOverflow;
             output.first_infeasible_route_index = route_ix;
             return output;
         };
-        let Some(descent_delta) = altitude_allowance_microfeet(leg_duration_ms, performance.max_descent_fpm) else {
+        let Some(descent_delta) =
+            altitude_allowance_microfeet(leg_duration_ms, performance.max_descent_fpm)
+        else {
             output.refusal = Refusal::AltitudeOverflow;
             output.first_infeasible_route_index = route_ix;
             return output;
@@ -1996,24 +2057,40 @@ pub fn issue_vertical_profile(
             }
         };
         low = if let Some(bound) = clearance_low {
-            if low < bound { low } else { next_low.max(bound) }
-        } else { next_low };
+            if low < bound {
+                low
+            } else {
+                next_low.max(bound)
+            }
+        } else {
+            next_low
+        };
         high = if let Some(bound) = clearance_high {
-            if high > bound { high } else { next_high.min(bound) }
-        } else { next_high };
+            if high > bound {
+                high
+            } else {
+                next_high.min(bound)
+            }
+        } else {
+            next_high
+        };
 
         let mut route_low = None;
         let mut route_high = None;
         match point.altitude_constraint_kind {
             AltitudeConstraintKind::None => {
-                if point.min_altitude_ft != NO_ALTITUDE_FT || point.max_altitude_ft != NO_ALTITUDE_FT {
+                if point.min_altitude_ft != NO_ALTITUDE_FT
+                    || point.max_altitude_ft != NO_ALTITUDE_FT
+                {
                     output.refusal = Refusal::InfeasibleAltitudeWindow;
                     output.first_infeasible_route_index = route_ix;
                     return output;
                 }
             }
             AltitudeConstraintKind::Minimum => {
-                if point.min_altitude_ft == NO_ALTITUDE_FT || point.max_altitude_ft != NO_ALTITUDE_FT {
+                if point.min_altitude_ft == NO_ALTITUDE_FT
+                    || point.max_altitude_ft != NO_ALTITUDE_FT
+                {
                     output.refusal = Refusal::InfeasibleAltitudeWindow;
                     output.first_infeasible_route_index = route_ix;
                     return output;
@@ -2026,7 +2103,9 @@ pub fn issue_vertical_profile(
                 route_low = Some(bound);
             }
             AltitudeConstraintKind::Maximum => {
-                if point.max_altitude_ft == NO_ALTITUDE_FT || point.min_altitude_ft != NO_ALTITUDE_FT {
+                if point.max_altitude_ft == NO_ALTITUDE_FT
+                    || point.min_altitude_ft != NO_ALTITUDE_FT
+                {
                     output.refusal = Refusal::InfeasibleAltitudeWindow;
                     output.first_infeasible_route_index = route_ix;
                     return output;
@@ -2059,7 +2138,8 @@ pub fn issue_vertical_profile(
                 route_high = Some(maximum);
             }
             AltitudeConstraintKind::AtAltitude
-                if point.min_altitude_ft != NO_ALTITUDE_FT && point.max_altitude_ft == NO_ALTITUDE_FT =>
+                if point.min_altitude_ft != NO_ALTITUDE_FT
+                    && point.max_altitude_ft == NO_ALTITUDE_FT =>
             {
                 let Some(target) = foot_to_microfeet(point.min_altitude_ft) else {
                     output.refusal = Refusal::AltitudeOverflow;
@@ -2112,27 +2192,41 @@ pub fn issue_vertical_profile(
         if point.speed_constraint_kind != SpeedConstraintKind::None {
             let speed_ok = point.speed_reference == SpeedReference::GroundSpeed
                 && match point.speed_constraint_kind {
-                    SpeedConstraintKind::Minimum => point.min_speed_mmps != NO_SPEED_MMPS
-                        && input.track.groundspeed_mmps >= point.min_speed_mmps,
-                    SpeedConstraintKind::Maximum => point.max_speed_mmps != NO_SPEED_MMPS
-                        && input.track.groundspeed_mmps <= point.max_speed_mmps,
-                    SpeedConstraintKind::Window => point.min_speed_mmps != NO_SPEED_MMPS
-                        && point.max_speed_mmps != NO_SPEED_MMPS
-                        && input.track.groundspeed_mmps >= point.min_speed_mmps
-                        && input.track.groundspeed_mmps <= point.max_speed_mmps,
+                    SpeedConstraintKind::Minimum => {
+                        point.min_speed_mmps != NO_SPEED_MMPS
+                            && input.track.groundspeed_mmps >= point.min_speed_mmps
+                    }
+                    SpeedConstraintKind::Maximum => {
+                        point.max_speed_mmps != NO_SPEED_MMPS
+                            && input.track.groundspeed_mmps <= point.max_speed_mmps
+                    }
+                    SpeedConstraintKind::Window => {
+                        point.min_speed_mmps != NO_SPEED_MMPS
+                            && point.max_speed_mmps != NO_SPEED_MMPS
+                            && input.track.groundspeed_mmps >= point.min_speed_mmps
+                            && input.track.groundspeed_mmps <= point.max_speed_mmps
+                    }
                     _ => false,
                 };
             if !speed_ok {
                 let minimum_exceeds_cap = point.speed_reference == SpeedReference::GroundSpeed
                     && point.min_speed_mmps != NO_SPEED_MMPS
                     && point.min_speed_mmps > performance.max_groundspeed_mmps;
-                output.refusal = if minimum_exceeds_cap { Refusal::InfeasibleSpeedWindow } else { Refusal::UnsupportedConstraint };
+                output.refusal = if minimum_exceeds_cap {
+                    Refusal::InfeasibleSpeedWindow
+                } else {
+                    Refusal::UnsupportedConstraint
+                };
                 output.first_infeasible_route_index = route_ix;
                 return output;
             }
         }
-        if let Some(bound) = route_low { low = low.max(bound); }
-        if let Some(bound) = route_high { high = high.min(bound); }
+        if let Some(bound) = route_low {
+            low = low.max(bound);
+        }
+        if let Some(bound) = route_high {
+            high = high.min(bound);
+        }
         if low > high {
             output.refusal = Refusal::InfeasibleVerticalProfile;
             output.first_infeasible_route_index = route_ix;
@@ -2145,10 +2239,9 @@ pub fn issue_vertical_profile(
             output.first_infeasible_route_index = route_ix;
             return output;
         }
-        let (Some(reachable_min_ft), Some(reachable_max_ft)) = (
-            lower_microfeet_to_feet(low),
-            upper_microfeet_to_feet(high),
-        ) else {
+        let (Some(reachable_min_ft), Some(reachable_max_ft)) =
+            (lower_microfeet_to_feet(low), upper_microfeet_to_feet(high))
+        else {
             output.refusal = Refusal::AltitudeOverflow;
             output.first_infeasible_route_index = route_ix;
             return output;

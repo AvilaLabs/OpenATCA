@@ -367,6 +367,8 @@ dependencies = [
  "oa-flight",
  "oa-ieee",
  "oa-legacy-traj",
+ "oa-msaw",
+ "oa-msaw-run",
  "oa-safety",
  "oa-scope-replay",
  "oa-sealed",
