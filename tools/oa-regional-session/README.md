@@ -183,7 +183,8 @@ explicit actor; selection is cleared after advancing a receipt, so stale command
 Queued local events are inserted after upstream flight updates and before route updates. Their
 category sequence numbers are assigned monotonically, with original row ordinal, sequence,
 category, and receipt cutoff retained in the operator journal. A full batch refuses queued actions
-visibly. Evdev loss clears pending input and commands; action input remains blocked until bounded
+visibly. The command-result line counts all commands in the current receipt, including recorded
+upstream commands; the frame evidence identifies each request and its result. Evdev loss clears pending input and commands; action input remains blocked until bounded
 queued-record draining and a fresh key-state snapshot succeed. VT release clears line, actor,
 selection, and queued commands. All input is suppressed while KMS is inactive; reacquire drains the
 device queue and records held keys as state only, never as commands.

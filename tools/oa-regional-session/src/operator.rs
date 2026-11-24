@@ -659,10 +659,12 @@ impl SessionRunner {
             self.refusal(ordinal, "no recorded receipt group remains")?;
             return Ok(());
         };
+        let mut batch_full_refused = 0usize;
         let queued = if recorded.events.len().saturating_add(self.queue.len())
             > crate::MAX_EVENTS_PER_RECEIPT
         {
             let refused_commands = core::mem::take(&mut self.queue);
+            batch_full_refused = refused_commands.len();
             for command in &refused_commands {
                 self.refusal(
                     command.ordinal,
@@ -685,7 +687,7 @@ impl SessionRunner {
         if frame.controller_dispatches.len() > crate::MAX_EVENTS_PER_RECEIPT {
             return Err("command outcome presentation exceeds receipt work budget".into());
         }
-        let selection_note = if frame.controller_dispatches.is_empty() {
+        let selection_note = if frame.controller_dispatches.is_empty() && batch_full_refused == 0 {
             "SELECT then issue command".to_owned()
         } else {
             let accepted = frame
@@ -704,7 +706,9 @@ impl SessionRunner {
                         })
                 })
                 .count();
-            let refused = frame.controller_dispatches.len() - accepted;
+            let refused = (frame.controller_dispatches.len() - accepted)
+                .checked_add(batch_full_refused)
+                .ok_or("command refusal count overflow")?;
             format!("COMMANDS ACCEPTED {accepted} REFUSED {refused}; SELECT AGAIN")
         };
         self.clear_runtime_selection(&format!("FRAME:{}", frame.sequence))?;

@@ -202,6 +202,11 @@ fn explicit_selection_refuses_ambiguous_or_unbound_address() {
         ..view
     };
     assert!(oa_regional_session::operator::selected_target(&[raw], view.address, 3).is_err());
+    assert!(
+        oa_regional_session::operator::selected_target(&vec![view; 33], view.address, 3)
+            .unwrap_err()
+            .contains("work budget")
+    );
 }
 
 // REQ: OA-REG-016
@@ -298,9 +303,67 @@ fn fixture_console_journals_fresh_authorized_and_stale_requests() {
         .contains("Accepted"));
     assert!(fs::read_to_string(output.join("frame-0003.txt"))
         .unwrap()
-        .contains("COMMANDS ACCEPTED 1 REFUSED 0; SELECT AGAIN"));
+        .contains("COMMANDS ACCEPTED 2 REFUSED 0; SELECT AGAIN"));
     verify_closed_bundle(&output);
     fs::remove_dir_all(&output).unwrap();
     fs::remove_file(script).unwrap();
     fs::remove_file(executable).unwrap();
+}
+
+// REQ: OA-REG-016
+#[test]
+fn full_recorded_batch_keeps_local_command_refusal_visible() {
+    let source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/synthetic-session.tsv"),
+    )
+    .unwrap();
+    let input = temp_path("full-input");
+    let script = temp_path("full-script");
+    let output = temp_path("full-out");
+    let executable = temp_path("full-bin");
+    let mut recording = source
+        .lines()
+        .take_while(|line| !line.starts_with("v1\t3000000000\t"))
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    for sequence in 1..=MAX_EVENTS_PER_RECEIPT {
+        recording.push_str(&format!("v1\t3000000000\t3000000000\t{sequence}\tADAPTATION\t00000000000000000000000000000001\tABC101\tZAU1\tFEED\tUP\t0\n"));
+    }
+    fs::write(&input, recording).unwrap();
+    fs::write(
+        &script,
+        b"NEXT\nNEXT\nSELECT ABC101\nACTOR 1\nASSIGNED 15000\nNEXT\nQUIT\n",
+    )
+    .unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_oa-regional-console"), &executable).unwrap();
+    let result = Command::new(&executable)
+        .args([
+            "--input",
+            input.to_str().unwrap(),
+            "--synthetic-model",
+            "--script",
+            script.to_str().unwrap(),
+            "--out",
+            output.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let frame = fs::read_to_string(output.join("frame-0003.txt")).unwrap();
+    assert!(
+        frame.contains("COMMANDS ACCEPTED 0 REFUSED 1; SELECT AGAIN"),
+        "{frame}"
+    );
+    assert!(fs::read_to_string(output.join("operator.tsv"))
+        .unwrap()
+        .contains("receipt batch full"));
+    verify_closed_bundle(&output);
+    fs::remove_dir_all(output).unwrap();
+    for path in [input, script, executable] {
+        fs::remove_file(path).unwrap();
+    }
 }
