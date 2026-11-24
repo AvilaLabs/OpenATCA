@@ -11,12 +11,14 @@ reach the screen, so everything here is testable bit for bit, and every frame ca
 
 Core versus shell (RULESET B1):
 
-The modules live in `src/core/` and `src/shell/` and are re-exported at the crate root, so
-`oa_display::traffic` is `oa_display::core::traffic`. Every public function of a module has its
-module's class.
+The modules live in `src/core/` and `src/shell/`; existing public modules are re-exported at the
+crate root, so `oa_display::traffic` is `oa_display::core::traffic`. The MSAW presenter is
+available at `oa_display::core::alert_markers`. Every public function of a module has its module's
+class.
 
 | module    | class | role                                                               |
 |-----------|-------|--------------------------------------------------------------------|
+| `alert_markers` | core | current MSAW alert markers and count header                       |
 | `list`    | core  | the fixed-capacity struct-of-arrays display list and its pushes     |
 | `palette` | core  | the fixed colour palette and its colour indices                    |
 | `project` | core  | WGS-84 to screen: oblique stereographic projection and its inverse  |
@@ -38,6 +40,12 @@ The `oa-scope-replay` frame builder draws map, traffic and frame labels. For eac
 `targets_at` selects the newest row at or before frame time. The target stays visible through
 `stale_ns` and returns after expiry when a newer row arrives. Callers supply a separate safety
 scene to `build_safety` when they need feed and net warnings alongside traffic.
+
+`alert_markers::append_alert_markers` presents a bounded set of current MSAW states from their
+current observed positions. It counts off-map and unlocated alerts in the header, draws visible
+caution, warning and protection-lost states with distinct circle patterns and letters, and refuses
+malformed records or insufficient reserved list capacity before writing primitives. This presents
+supplied alert state; it does not compute MSAW alerts or provide full alert decluttering.
 
 ## `oa-scope`
 

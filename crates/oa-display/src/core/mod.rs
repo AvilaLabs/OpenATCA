@@ -3,6 +3,7 @@
 //! built (C1). Every module states its class in its own header; the modules are re-exported at
 //! the crate root, so `oa_display::traffic` is `oa_display::core::traffic`.
 
+pub mod alert_markers;
 pub mod font;
 pub mod interaction;
 pub mod list;
