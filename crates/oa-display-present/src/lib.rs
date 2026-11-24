@@ -23,6 +23,7 @@ pub const EV_KEY: u16 = 1;
 pub const SYN_REPORT: u16 = 0;
 pub const SYN_DROPPED: u16 = 3;
 
+// A7.2: cold frame view, size guard waived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PixelFrame<'a> {
     pub pixels: &'a [u8],
@@ -31,6 +32,7 @@ pub struct PixelFrame<'a> {
     pub stride: u32,
 }
 
+// A7.2: cold validated frame metadata, size guard waived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameLayout {
     pub width: u32,
@@ -128,7 +130,7 @@ const _: () = assert!(core::mem::size_of::<InputEvent>() == 24);
 #[repr(u8)]
 pub enum InputRecordKind { Event, SyncReport, SyncLost, Discarded, Resynchronized }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct InputSnapshot {
     pub key_bits: [u8; 96],
@@ -139,6 +141,18 @@ pub struct InputSnapshot {
     pub reserved: [u8; 3],
 }
 const _: () = assert!(core::mem::size_of::<InputSnapshot>() == 368);
+
+/// Construct the fixed resynchronization snapshot with all state and reserved bytes clear.
+pub const fn input_snapshot_new() -> InputSnapshot {
+    InputSnapshot {
+        key_bits: [0; 96],
+        absolute_axis_bits: [0; 8],
+        absolute_axis_values: [0; 64],
+        discarded_records: 0,
+        relative_motion_lost: 0,
+        reserved: [0; 3],
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
@@ -199,6 +213,7 @@ pub fn input_batch_push(batch: &mut InputBatch, event: InputEvent) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     #[test] fn checks_frame_products_before_use() {
@@ -214,7 +229,7 @@ mod tests {
     }
     #[test] fn fixed_input_batch_starts_with_zero_reserved_bytes() {
         assert_eq!(input_batch_new().reserved, [0; 2]);
-        assert_eq!(InputSnapshot::default().reserved, [0; 3]);
+        assert_eq!(input_snapshot_new().reserved, [0; 3]);
     }
     #[test] fn kms_lifecycle_requires_completed_flip_before_normal_release() {
         let state = kms_transition(KmsLifecycle::Prepared, KmsTransition::Start).unwrap();

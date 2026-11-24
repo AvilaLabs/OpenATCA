@@ -1,10 +1,10 @@
 [package]
 name = "oa-display-present"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
-rust-version = "1.75"
-authors = ["Connor Avila <Connoravila@gmail.com>"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
 description = "Direct Linux display and input presentation adapter for OpenATCA"
 
 [package.metadata.openatca]
@@ -12,3 +12,12 @@ class = "shell"
 
 [lib]
 path = "src/lib.rs"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"

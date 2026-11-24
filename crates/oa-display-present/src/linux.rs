@@ -102,8 +102,7 @@ const SIGNAL_INFO_BYTES: usize = 128;
 #[repr(C)] #[derive(Default)] struct VtState { active: u16, signal: u16, state: u16 }
 #[repr(C)] #[derive(Clone, Copy, Default)] struct VtMode { mode: u8, waitv: u8, relsig: i16, acqsig: i16, frsig: i16 }
 #[repr(C)] #[derive(Default)] struct PollFd { fd: c_int, events: i16, revents: i16 }
-#[repr(C)] #[derive(Clone, Copy)] struct SigSet { words: [u64; 16] }
-impl Default for SigSet { fn default() -> Self { Self { words: [0; 16] } } }
+#[repr(C)] #[derive(Clone, Copy, Default)] struct SigSet { words: [u64; 16] }
 
 const _: () = assert!(size_of::<ModeInfo>() == 68);
 const _: () = assert!(size_of::<CardResources>() == 64);
@@ -161,7 +160,7 @@ pub fn open_evdev(path: &str) -> Result<EvdevInput, InputDeviceError> {
     let number = path.strip_prefix("/dev/input/event").ok_or(InputDeviceError::InvalidPath)?;
     if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) { return Err(InputDeviceError::InvalidPath); }
     let file = OpenOptions::new().read(true).custom_flags(O_NONBLOCK | O_CLOEXEC)
-        .open(path).map_err(|e| InputDeviceError::System(e.raw_os_error().unwrap_or(-1)))?;
+        .open(path).map_err(|e| InputDeviceError::System(e.raw_os_error().unwrap_or(-1)))?; // seal-allow: open only the caller-selected validated evdev device node
     let mut version = 0i32;
     // SAFETY: EVIOCGVERSION writes one initialized 32-bit version value to this live pointer.
     let rc = unsafe { ioctl(file.as_raw_fd(), EVIOCGVERSION, &mut version as *mut i32) };
@@ -212,15 +211,15 @@ impl EvdevInput {
         match decoded.map_err(InputDeviceError::Decode)? {
             Some(event) if event.kind == EV_SYN && event.code == SYN_DROPPED => {
                 self.desynchronized = true; self.resync_pending = false; self.discarded = 0;
-                Ok(input_record(InputRecordKind::SyncLost, InputEvent::default(), InputSnapshot::default()))
+                Ok(input_record(InputRecordKind::SyncLost, InputEvent::default(), crate::input_snapshot_new()))
             }
             Some(_) if self.desynchronized => {
                 self.discarded = self.discarded.saturating_add(1);
-                Ok(input_record(InputRecordKind::Discarded, InputEvent::default(), InputSnapshot { discarded_records: self.discarded, ..Default::default() }))
+                Ok(input_record(InputRecordKind::Discarded, InputEvent::default(), InputSnapshot { discarded_records: self.discarded, ..crate::input_snapshot_new() }))
             }
-            Some(event) => Ok(input_record(InputRecordKind::Event, event, InputSnapshot::default())),
+            Some(event) => Ok(input_record(InputRecordKind::Event, event, crate::input_snapshot_new())),
             None if self.desynchronized => { self.resync_pending = true; self.resync() }
-            None => Ok(input_record(InputRecordKind::SyncReport, InputEvent::default(), InputSnapshot::default())),
+            None => Ok(input_record(InputRecordKind::SyncReport, InputEvent::default(), crate::input_snapshot_new())),
         }
     }
     fn resync(&mut self) -> Result<InputRecord, InputDeviceError> {
@@ -231,7 +230,7 @@ impl EvdevInput {
 }
 fn input_record(kind: InputRecordKind, event: InputEvent, snapshot: InputSnapshot) -> InputRecord { InputRecord { kind, reserved: [0; 7], event, snapshot } }
 fn query_input_snapshot(fd: c_int, discarded: u32) -> Result<InputSnapshot, InputDeviceError> {
-    let mut snapshot = InputSnapshot { discarded_records: discarded, relative_motion_lost: 1, ..Default::default() };
+    let mut snapshot = InputSnapshot { discarded_records: discarded, relative_motion_lost: 1, ..crate::input_snapshot_new() };
     // SAFETY: EVIOCGKEY writes exactly this initialized 96-byte key bitmap.
     let rc = unsafe { ioctl(fd, EVIOCGKEY, snapshot.key_bits.as_mut_ptr()) };
     if rc < 0 { return Err(InputDeviceError::System(std::io::Error::last_os_error().raw_os_error().unwrap_or(-1))); }
@@ -341,7 +340,7 @@ pub struct KmsDisplay {
 pub fn open_kms(drm_path: &str, tty_path: &str, connector_id: u32) -> Result<KmsDisplay, KmsError> {
     if !valid_card_path(drm_path) || !valid_tty_path(tty_path) { return Err(KmsError::InvalidDevicePath); }
     if !is_dedicated_owner_process() { return Err(KmsError::DedicatedOwnerProcessRequired); }
-    let tty = OpenOptions::new().read(true).write(true).custom_flags(O_CLOEXEC | O_NOCTTY).open(tty_path).map_err(sys_error)?;
+    let tty = OpenOptions::new().read(true).write(true).custom_flags(O_CLOEXEC | O_NOCTTY).open(tty_path).map_err(sys_error)?; // seal-allow: open only the validated active Linux VT device
     let mut vt = VtState::default();
     call(tty.as_raw_fd(), VT_GETSTATE, &mut vt)?;
     let expected = tty_number(tty_path).ok_or(KmsError::InvalidDevicePath)?;
@@ -353,7 +352,7 @@ pub fn open_kms(drm_path: &str, tty_path: &str, connector_id: u32) -> Result<Kms
     call(tty.as_raw_fd(), VT_GETMODE, &mut vt_mode)?;
     if vt_mode.mode != VT_AUTO { return Err(KmsError::VtNotText); }
 
-    let drm = OpenOptions::new().read(true).write(true).custom_flags(O_CLOEXEC).open(drm_path).map_err(sys_error)?;
+    let drm = OpenOptions::new().read(true).write(true).custom_flags(O_CLOEXEC).open(drm_path).map_err(sys_error)?; // seal-allow: open only the caller-selected validated DRM card device
     prepare(drm, tty, vt.active, kd, vt_mode, connector_id)
 }
 
@@ -494,7 +493,7 @@ fn is_dedicated_owner_process() -> bool {
     // lets signalfd own SIGUSR1/SIGUSR2 without installing a global handler or sharing masks.
     // SAFETY: getpid takes no arguments and has no pointer invariants.
     if current_tid() != unsafe { getpid() } { return false; }
-    std::fs::read_dir("/proc/self/task").ok().is_some_and(|tasks| tasks.count() == 1)
+    std::fs::read_dir("/proc/self/task").ok().is_some_and(|tasks| tasks.count() == 1) // seal-allow: inspect the fixed process task directory to enforce single-threaded VT signal ownership
 }
 fn install_vt_process(tty_fd: c_int) -> Result<(File, SigSet), KmsError> {
     let mut mask = SigSet::default();
@@ -960,7 +959,9 @@ fn valid_card_path(s: &str) -> bool { s.strip_prefix("/dev/dri/card").is_some_an
 fn valid_tty_path(s: &str) -> bool { tty_number(s).is_some() }
 fn tty_number(s: &str) -> Option<u16> { let n = s.strip_prefix("/dev/tty")?; let x = n.parse::<u16>().ok()?; (x > 0 && x < 16).then_some(x) }
 
-#[cfg(test)] mod tests {
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
     use super::*;
     #[test] fn uapi_layouts_match_linux_64_bit_abi() {
         assert_eq!(size_of::<ModeInfo>(), 68); assert_eq!(size_of::<CardResources>(), 64);
@@ -982,7 +983,7 @@ fn tty_number(s: &str) -> Option<u16> { let n = s.strip_prefix("/dev/tty")?; let
         assert_eq!(decode_vt_signal_info(&info), Err(KmsError::UnexpectedSignal(SIGUSR1)));
     }
     #[test] fn plain_input_records_have_explicit_zero_padding() {
-        let record = input_record(InputRecordKind::SyncReport, InputEvent::default(), InputSnapshot::default());
+        let record = input_record(InputRecordKind::SyncReport, InputEvent::default(), crate::input_snapshot_new());
         assert_eq!(record.reserved, [0; 7]);
         assert_eq!(record.snapshot.reserved, [0; 3]);
     }

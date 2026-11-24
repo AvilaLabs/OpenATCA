@@ -25,6 +25,7 @@ members = [
     "crates/oa-notam",
     "crates/oa-tfms",
     "crates/oa-display",
+    "crates/oa-display-present",
     "crates/oa-scope-replay",
     "crates/oa-tiff",
     "crates/oa-dof",

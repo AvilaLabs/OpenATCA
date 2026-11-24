@@ -238,6 +238,17 @@ members = ["crates/oa-track"]
 exclude = ["fuzz", "validation/oa-alloc-check"]
 [workspace.lints.rust]
 unsafe_code = "forbid"
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.89"
+authors = ["OpenATCA"]
 ''')
     write(root / "crates/oa-track/Cargo.toml", '''
 [package]
@@ -278,6 +289,37 @@ fn main() {}
 static A: System = System;
 unsafe impl GlobalAlloc for A {}
 ''')
+
+
+def add_presentation_exception(root, *, relative="crates/oa-display-present",
+                               name="oa-display-present", class_name="shell"):
+    manifest = root / "Cargo.toml"
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+        'members = ["crates/oa-track"]',
+        f'members = ["crates/oa-track", "{relative}"]'), encoding="utf-8")
+    crate = root / relative
+    write(crate / "Cargo.toml", f'''
+[package]
+name = "{name}"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+[package.metadata.openatca]
+class = "{class_name}"
+[lib]
+path = "src/lib.rs"
+[lints.rust]
+unsafe_code = "deny"
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+''')
+    write(crate / "src/lib.rs", "#![deny(unsafe_code)]\nmod linux;\n")
+    write(crate / "src/linux.rs", "#![allow(unsafe_code)]\nfn os_shell() {}\n")
 
 
 class AllocatorResultTests(unittest.TestCase):
@@ -365,6 +407,61 @@ class AllocatorLayoutTests(unittest.TestCase):
             root = Path(temp)
             layout_tree(root)
             self.assertEqual(gate.allocation_layout_errors(root), [])
+
+    def test_exact_presentation_exception_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            add_presentation_exception(root)
+            self.assertEqual(gate.allocation_layout_errors(root), [])
+
+    def test_presentation_exception_rejects_sibling_path_name_and_class_spoofs(self):
+        cases = (
+            {"relative": "crates/oa-display-present-copy", "name": "oa-display-present"},
+            {"relative": "crates/oa-display-present", "name": "oa-display-present-copy"},
+            {"relative": "crates/oa-display-present", "name": "oa-display-present", "class_name": "core"},
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                layout_tree(root)
+                add_presentation_exception(root, **case)
+                self.assertTrue(gate.allocation_layout_errors(root))
+
+    def test_presentation_exception_rejects_unsafe_escape_sources_and_include(self):
+        mutations = (
+            lambda crate: (crate / "src/lib.rs").write_text(
+                (crate / "src/lib.rs").read_text(encoding="utf-8") + "unsafe fn escaped() {}\n", encoding="utf-8"),
+            lambda crate: write(crate / "src/extra.rs", "unsafe fn escaped() {}\n"),
+            lambda crate: (crate / "src/lib.rs").write_text(
+                (crate / "src/lib.rs").read_text(encoding="utf-8") + 'include!("../../outside.rs");\n', encoding="utf-8"),
+        )
+        for mutate in mutations:
+            with self.subTest(mutate=mutate), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                layout_tree(root)
+                add_presentation_exception(root)
+                mutate(root / "crates/oa-display-present")
+                self.assertTrue(gate.allocation_layout_errors(root))
+
+    def test_presentation_exception_rejects_softened_runtime_lint(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            add_presentation_exception(root)
+            manifest = root / "crates/oa-display-present/Cargo.toml"
+            manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+                'indexing_slicing = "deny"', 'indexing_slicing = "allow"'), encoding="utf-8")
+            self.assertTrue(any("four strict workspace Clippy" in error
+                                for error in gate.allocation_layout_errors(root)))
+
+    def test_product_source_cannot_name_global_allocator(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            add_presentation_exception(root)
+            write(root / "crates/oa-track/src/allocator.rs", "struct GlobalAllocMarker;\n")
+            self.assertTrue(any("GlobalAlloc" in error for error in gate.allocation_layout_errors(root)))
 
     # REQ: OA-TRK-337
     def test_route_ledger_requires_source_symbols_and_exact_runtime_route_set(self):

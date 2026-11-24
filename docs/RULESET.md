@@ -21,19 +21,31 @@ the rule unless an exception is recorded at the site as a comment naming the rul
 
 ## A0. Unsafe code
 
-- **A0 [MUST]** `#![forbid(unsafe_code)]` in every crate except the single display-presentation
-  crate, which needs raw OS calls for KMS/DRM (ioctl, mmap). There, every `unsafe` block is as
-  small as possible, carries a `// SAFETY:` comment stating the invariant it relies on, and is
-  reviewed line by line. The standalone `validation/oa-alloc-check` C5 harness is the only other
+- **A0 [MUST]** `#![forbid(unsafe_code)]` in every crate except the exact product package
+  `crates/oa-display-present` (`oa-display-present`), the direct Linux KMS/DRM presentation shell.
+  This one package is the sole product exception. No product source may name `GlobalAlloc`.
+  Its manifest is classified `shell`, inherits the workspace package metadata, and is the one
+  strict-lint-inheritance exception: it must set `[lints.rust] unsafe_code = "deny"` (not `forbid`,
+  so the private OS module can locally override it) and explicitly deny all four workspace runtime
+  Clippy lints (`unwrap_used`, `expect_used`, `panic`, `indexing_slicing`). Every other product
+  package still inherits workspace lints and the workspace still forbids `unsafe_code`.
+  The presentation crate root uses `#![deny(unsafe_code)]`; the sole private OS module
+  `src/linux.rs` has exactly one `#![allow(unsafe_code)]`. All raw system calls and unsafe code
+  must stay in that file, every `unsafe` block is as small as possible, carries a `// SAFETY:`
+  comment stating its invariant, and is reviewed line by line. No other source file in that crate
+  may use `unsafe`, `extern`, link/name/export attributes, `include!` or `#[path]`; its source
+  inventory is exactly `src/lib.rs` and `src/linux.rs`.
+  The standalone `validation/oa-alloc-check` C5 harness is the only other
   exception: its single allocator module may implement `GlobalAlloc` to count allocations in the
   real-time tracker/fusion tests. It is excluded from the product workspace, has no product use,
   and must not be linked into a product target. Every unsafe operation is confined to that
   module, carries a `// SAFETY:` comment, and is reviewed line by line. No other crate may gain an
-  exception without amending this rule. The gate checks it (amended 2026-11-19): every core and
-  split crate declares `[lints] workspace = true` (the workspace forbids `unsafe_code`) and has
-  `#![forbid(unsafe_code)]` as an inner attribute at the top of `src/lib.rs`, `oa-ieee` included, and
-  core code contains none of the tokens `unsafe`, `extern`, `#[link`, `no_mangle`, `export_name`,
-  `link_section`.
+  exception without amending this rule. The gate checks it (amended 2026-11-19 and 2026-11-24):
+  every other product crate, including all core and split crates, declares `[lints] workspace = true`
+  (the workspace forbids `unsafe_code`) and has `#![forbid(unsafe_code)]` as an inner attribute at
+  the top of `src/lib.rs`, `oa-ieee` included; core code contains none of the tokens `unsafe`,
+  `extern`, `#[link`, `no_mangle`, `export_name`, `link_section`; and no product source may name
+  `GlobalAlloc`. The allocator C5 harness remains the only non-product exception.
 
 ## A. Data layout
 

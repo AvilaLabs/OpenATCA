@@ -1,7 +1,7 @@
 # oa-display-present
 
-Linux-only direct display/input foundation. This crate has no dependencies and is deliberately
-not yet in the product workspace. Its pure surface validates bounded XRGB8888 frame extents and
+Linux-only direct display/input shell in the product workspace. This crate has no dependencies.
+Its pure surface validates bounded XRGB8888 frame extents and
 decodes Linux 64-bit evdev records into fixed-capacity plain input records.
 
 `open_kms("/dev/dri/cardN", "/dev/ttyN", connector_id)` verifies the selected VT is active,

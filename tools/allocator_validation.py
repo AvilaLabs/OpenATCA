@@ -11,6 +11,9 @@ import tomllib
 
 
 HARNESS = Path("validation/oa-alloc-check")
+PRESENTATION = Path("crates/oa-display-present")
+PRESENTATION_SOURCES = {"src/lib.rs", "src/linux.rs"}
+STRICT_RUNTIME_CLIPPY_LINTS = ("unwrap_used", "expect_used", "panic", "indexing_slicing")
 # Pinned to oa-airspace::core::route::MAX_ROUTE_WORK: full identity scans across the
 # 11,640-point regional model need 744,960 visits for 64 endpoints, plus expansion.
 ROUTE_CONVERSION_WORK_LIMIT = 1_048_576
@@ -328,6 +331,123 @@ def _member_manifests(root: Path, workspace: dict) -> tuple[list[Path], list[str
     return sorted(members), errors
 
 
+def _presentation_exception_errors(root: Path, members: list[Path]) -> list[str]:
+    """Check the one exact product package allowed to isolate Linux OS unsafe code."""
+    errors: list[str] = _product_global_allocator_errors(members)
+    declared_dir = root / PRESENTATION
+    expected_dir = declared_dir.resolve()
+    declared_manifest = declared_dir / "Cargo.toml"
+    expected_manifest = declared_manifest.resolve()
+    if (declared_dir.is_symlink() or expected_dir != declared_dir
+            or not _inside(expected_dir, root) or declared_manifest.is_symlink()):
+        errors.append("oa-display-present package path may not use symlinks")
+        return errors
+    named_members: list[Path] = []
+    for manifest in members:
+        data, problem = _read_toml(manifest)
+        if problem:
+            continue
+        package = data.get("package", {})
+        if isinstance(package, dict) and package.get("name") == "oa-display-present":
+            named_members.append(manifest)
+    if not expected_manifest.exists():
+        if named_members:
+            errors.append("oa-display-present may exist only at crates/oa-display-present/Cargo.toml")
+        return errors
+    if expected_manifest not in members:
+        errors.append("crates/oa-display-present must be an explicit product workspace member")
+    if any(manifest != expected_manifest for manifest in named_members):
+        errors.append("oa-display-present may exist only at crates/oa-display-present/Cargo.toml")
+    data, problem = _read_toml(expected_manifest)
+    if problem:
+        return errors + [problem]
+    package = data.get("package", {})
+    if not isinstance(package, dict) or package.get("name") != "oa-display-present":
+        errors.append("the exact presentation package path must declare name = oa-display-present")
+        package = {}
+    for key in ("version", "edition", "license", "rust-version", "authors"):
+        package_value = package.get(key)
+        if not isinstance(package_value, dict) or package_value.get("workspace") is not True:
+            errors.append(f"oa-display-present package.{key} must inherit workspace.package")
+    metadata = package.get("metadata", {}) if isinstance(package, dict) else {}
+    openatca = metadata.get("openatca", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(openatca, dict) or openatca.get("class") != "shell":
+        errors.append("oa-display-present must have package.metadata.openatca.class = shell")
+    lint_tables = data.get("lints", {})
+    if not isinstance(lint_tables, dict):
+        lint_tables = {}
+    if lint_tables.get("workspace") is True:
+        errors.append("oa-display-present must not inherit workspace lints (forbid blocks its one private OS module)")
+    rust_lints = lint_tables.get("rust", {})
+    if not isinstance(rust_lints, dict) or rust_lints.get("unsafe_code") != "deny":
+        errors.append("oa-display-present must explicitly deny the unsafe_code Rust lint")
+    clippy_lints = lint_tables.get("clippy", {})
+    if (not isinstance(clippy_lints, dict)
+            or set(clippy_lints) != set(STRICT_RUNTIME_CLIPPY_LINTS)
+            or any(clippy_lints.get(name) != "deny" for name in STRICT_RUNTIME_CLIPPY_LINTS)):
+        errors.append("oa-display-present must explicitly deny the four strict workspace Clippy lints")
+    if any(data.get(section) for section in ("dependencies", "dev-dependencies", "build-dependencies", "target")):
+        errors.append("oa-display-present must remain a zero-dependency package")
+
+    source_paths = sorted(expected_dir.rglob("*.rs"))
+    source_names: set[str] = set()
+    source_text: dict[str, str] = {}
+    for source in source_paths:
+        relative = source.relative_to(expected_dir).as_posix()
+        if source.is_symlink() or not _inside(source.resolve(), expected_dir):
+            errors.append(f"oa-display-present Rust source escapes its package: {relative}")
+            continue
+        source_names.add(relative)
+        try:
+            source_text[relative] = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            errors.append(f"cannot read oa-display-present Rust source {relative}: {exc}")
+    if source_names != PRESENTATION_SOURCES:
+        errors.append("oa-display-present Rust source inventory must be exactly src/lib.rs and src/linux.rs")
+    lib_tokens = _rust_tokens(source_text.get("src/lib.rs", ""))
+    linux_tokens = _rust_tokens(source_text.get("src/linux.rs", ""))
+    if len(re.findall(r"#!\s*\[\s*deny\s*\(\s*unsafe_code\s*\)\s*\]", lib_tokens)) != 1:
+        errors.append("oa-display-present src/lib.rs must declare exactly one #![deny(unsafe_code)]")
+    if len(re.findall(r"\bmod\s+linux\s*;", lib_tokens)) != 1 or re.search(r"\bpub\s+mod\s+linux\b", lib_tokens):
+        errors.append("oa-display-present must expose linux.rs only as a private module")
+    outside_os_forbidden = re.compile(
+        r"\b(?:unsafe|extern|no_mangle|export_name|link_section)\b|"
+        r"\ballow\s*\([^]]*\bunsafe_code\b|#\s*\[\s*link\b|#\s*\[\s*path\b|"
+        r"\bpath\s*=|\binclude(?:_str|_bytes)?\s*!"
+    )
+    if outside_os_forbidden.search(lib_tokens):
+        errors.append("oa-display-present src/lib.rs may not contain OS escape tokens or attributes")
+    if len(re.findall(r"#!\s*\[\s*allow\s*\(\s*unsafe_code\s*\)\s*\]", linux_tokens)) != 1:
+        errors.append("oa-display-present src/linux.rs must contain exactly one module-level unsafe allowance")
+    all_allow_attrs = re.findall(r"\ballow\s*\([^]]*\bunsafe_code\b[^]]*\)", linux_tokens)
+    if len(all_allow_attrs) != 1:
+        errors.append("oa-display-present src/linux.rs may contain no nested unsafe_code allowances")
+    if re.search(r"#\s*\[\s*link\b|#\s*\[\s*path\b|\bpath\s*=|"
+                 r"\b(?:no_mangle|export_name|link_section)\b|\binclude(?:_str|_bytes)?\s*!", linux_tokens):
+        errors.append("oa-display-present may not use source inclusion or path attributes")
+
+    return errors
+
+
+def _product_global_allocator_errors(members: list[Path]) -> list[str]:
+    """The allocator harness is excluded; product source may never name GlobalAlloc."""
+    errors: list[str] = []
+    for manifest in members:
+        package_dir = manifest.parent
+        for source in package_dir.rglob("*.rs"):
+            if source.is_symlink() or not _inside(source.resolve(), package_dir.resolve()):
+                errors.append(f"product Rust source escapes its package: {source}")
+                continue
+            try:
+                tokens = _rust_tokens(source.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError) as exc:
+                errors.append(f"cannot scan product Rust source {source}: {exc}")
+                continue
+            if re.search(r"\bGlobalAlloc\b", tokens):
+                errors.append(f"product source may not implement or name GlobalAlloc: {source}")
+    return errors
+
+
 def _all_deps(manifest: dict):
     """Yield dependency declarations, including target-specific tables."""
     for section in ("dependencies", "dev-dependencies", "build-dependencies"):
@@ -511,9 +631,15 @@ def allocation_layout_errors(repo: Path) -> list[str]:
         root_rust_lints = {}
     if root_rust_lints.get("unsafe_code") != "forbid":
         errors.append("root workspace rust unsafe_code lint must remain forbid")
+    root_clippy_lints = root_lints.get("clippy", {})
+    if (not isinstance(root_clippy_lints, dict)
+            or any(root_clippy_lints.get(name) != "deny" for name in STRICT_RUNTIME_CLIPPY_LINTS)):
+        errors.append("root workspace must keep all four strict runtime Clippy lints denied")
 
     members, member_errors = _member_manifests(root, workspace.get("workspace", {}))
     errors.extend(member_errors)
+    errors.extend(_presentation_exception_errors(root, members))
+    presentation_manifest = (root / PRESENTATION / "Cargo.toml").resolve()
     for member in members:
         if not _inside(member, root):
             errors.append(f"workspace member manifest escapes repository: {member}")
@@ -521,7 +647,7 @@ def allocation_layout_errors(repo: Path) -> list[str]:
         member_data, member_problem = _read_toml(member)
         if member_problem:
             errors.append(member_problem)
-        elif member_data.get("lints", {}).get("workspace") is not True:
+        elif member != presentation_manifest and member_data.get("lints", {}).get("workspace") is not True:
             errors.append(f"product workspace member must inherit workspace lints: {member}")
     harness_dir = (root / HARNESS).resolve()
     if not _inside(harness_dir, root):
