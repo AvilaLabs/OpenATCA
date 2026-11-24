@@ -97,6 +97,21 @@ openable as a guarded single-link file; copy an installed binary to a standalone
 system hard-links it into multiple locations. Every input and output path is checked by the shared
 sealed-data guard before access.
 
+## Pre-run plan
+
+`plan_run.py` turns a metadata-only inventory into a private, hashed run plan before inputs are
+opened. The JSON inventory records a cohort ID, explicit UTC interval, source commit/tree hash,
+the executable path and digest, and each input path, digest, and saved provenance record ID. The
+helper does not stat, enumerate, open, or hash any FAA input path. Its output freezes the current
+raw and fitted modes, fit policy, tool limits, output filenames, and exact current command line.
+Keep both inventory and plan private.
+
+The interval is an eligibility declaration for selecting the input files; the current comparator
+still scores every admitted record and does not clip to that interval. The plan states this
+limitation explicitly. Do not execute it as an interval-bounded comparison unless the selected
+files themselves are already bounded to that window. The fitted mode remains an in-sample
+agreement result. Example and tests use synthetic paths and digests only.
+
 ## Recording status and limits
 
 The STDDS subscription was approved 19 November 2026. A real 20 November preliminary census has
