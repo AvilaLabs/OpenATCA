@@ -119,7 +119,8 @@ clearance must have valid, cutoff-eligible evidence. Only exact and window forms
 altitude-at-fix, block, VFR, and other forms return an explicit refusal. The result records whether
 clearance was absent, exact, or a window and copies the full performance envelope, including its
 flight key, source identifier, and timestamps. It does not hide missing clearance as an empty
-interval.
+interval. A window may omit one side; that side is treated as unbounded only within the supported
+altitude domain, excluding the `NO_ALTITUDE_FT` sentinel.
 
 The active route suffix starts at the track position and exact unique cursor identity. Each leg's
 crossing duration is its great-circle distance divided by measured groundspeed. Climb and descent

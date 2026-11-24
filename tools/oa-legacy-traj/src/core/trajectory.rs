@@ -359,10 +359,12 @@ pub struct VerticalProfileOutput {
     pub examined_points: u16,
     pub first_infeasible_route_index: u16,
     pub reserved: [u8; 4],
+    pub reserved_points_align: [u8; 4],
     pub points: [VerticalPointOutput; MAX_ROUTE_POINTS],
 }
-// A7: 36 key + 4 alignment + 8 time + 96 performance + 12 explicit status/count bytes + 8,192 point bytes.
-const _: () = assert!(core::mem::size_of::<VerticalProfileOutput>() == 8_348);
+// A7: 36 key + 4 alignment + 8 time + 96 performance + 12 status/count bytes + 4 point alignment
+// + 8,192 point bytes = 8,352; all padding is named and initialized.
+const _: () = assert!(core::mem::size_of::<VerticalProfileOutput>() == 8_352);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -1585,6 +1587,8 @@ pub fn select_revision_evidence(
 
 const MICROFEET_PER_FOOT: i64 = 1_000_000;
 const MICROFEET_PER_FOOT_F64: f64 = 1_000_000.0;
+const MIN_PROFILE_ALTITUDE_MICROFEET: i64 = (i32::MIN as i64 + 1) * MICROFEET_PER_FOOT;
+const MAX_PROFILE_ALTITUDE_MICROFEET: i64 = i32::MAX as i64 * MICROFEET_PER_FOOT;
 const MAX_PROFILE_RATE_FPM: u32 = 60_000;
 const MAX_PROFILE_GROUNDSPEED_MMPS: u32 = 1_000_000;
 const I64_UPPER_EXCLUSIVE_F64: f64 = 9_223_372_036_854_775_808.0;
@@ -1647,6 +1651,7 @@ fn vertical_output(
         examined_points: 0,
         first_infeasible_route_index: u16::MAX,
         reserved: [0; 4],
+        reserved_points_align: [0; 4],
         points: [empty_vertical_point(u16::MAX); MAX_ROUTE_POINTS],
     }
 }
@@ -1656,8 +1661,8 @@ fn foot_to_microfeet(feet: i32) -> Option<i64> {
 }
 
 fn lower_microfeet_to_feet(value: i64) -> Option<i32> {
-    let floor = value.div_euclid(MICROFEET_PER_FOOT);
-    let ceil = if value.rem_euclid(MICROFEET_PER_FOOT) == 0 {
+    let floor = i64::div_euclid(value, MICROFEET_PER_FOOT);
+    let ceil = if i64::rem_euclid(value, MICROFEET_PER_FOOT) == 0 {
         floor
     } else {
         floor.checked_add(1)?
@@ -1666,7 +1671,7 @@ fn lower_microfeet_to_feet(value: i64) -> Option<i32> {
 }
 
 fn upper_microfeet_to_feet(value: i64) -> Option<i32> {
-    let floor = value.div_euclid(MICROFEET_PER_FOOT);
+    let floor = i64::div_euclid(value, MICROFEET_PER_FOOT);
     i32::try_from(floor).ok().filter(|feet| *feet != NO_ALTITUDE_FT)
 }
 
@@ -1712,18 +1717,36 @@ fn altitude_band(clearance: Clearance) -> Option<(Option<i64>, Option<i64>)> {
     if clearance.form == ClearanceForm::Window {
         return Some((
             if clearance.min_altitude_ft == NO_ALTITUDE_FT {
-                None
+                Some(MIN_PROFILE_ALTITUDE_MICROFEET)
             } else {
                 Some(foot_to_microfeet(clearance.min_altitude_ft)?)
             },
             if clearance.max_altitude_ft == NO_ALTITUDE_FT {
-                None
+                Some(MAX_PROFILE_ALTITUDE_MICROFEET)
             } else {
                 Some(foot_to_microfeet(clearance.max_altitude_ft)?)
             },
         ));
     }
     Some((None, None))
+}
+
+fn unavailable_performance(key: FlightKey) -> PerformanceEnvelope {
+    PerformanceEnvelope {
+        key,
+        reserved_key_align: [0; 4],
+        source_ms: 0,
+        available_ms: 0,
+        message_id: 0,
+        max_age_ms: 0,
+        max_climb_fpm: 0,
+        max_descent_fpm: 0,
+        max_groundspeed_mmps: 0,
+        reserved_speed_cap: 0,
+        source: PerformanceSource::Unavailable,
+        status: PerformanceStatus::Valid,
+        reserved: [0; 6],
+    }
 }
 
 /// Opt-in, sequential reachability under bounded vertical rates and constant observed groundspeed.
@@ -1733,6 +1756,14 @@ pub fn issue_vertical_profile(
     performance: PerformanceEnvelope,
 ) -> VerticalProfileOutput {
     let assumption = clearance_assumption(input);
+    if performance.available_ms > input.cutoff_ms || performance.source_ms > input.cutoff_ms {
+        return vertical_output(
+            input,
+            unavailable_performance(input.key),
+            assumption,
+            Refusal::PerformanceUnavailableAtCutoff,
+        );
+    }
     if input.points.len() > MAX_ROUTE_POINTS {
         return vertical_output(input, performance, assumption, Refusal::RouteTooLong);
     }
@@ -1761,9 +1792,6 @@ pub fn issue_vertical_profile(
     }
     if performance.source_ms > performance.available_ms {
         return vertical_output(input, performance, assumption, Refusal::InvalidPerformance);
-    }
-    if performance.available_ms > input.cutoff_ms || performance.source_ms > input.cutoff_ms {
-        return vertical_output(input, performance, assumption, Refusal::PerformanceUnavailableAtCutoff);
     }
     let age = match input.cutoff_ms.checked_sub(performance.source_ms) {
         Some(value) => value,

@@ -247,7 +247,7 @@ fn sequential_descent_clearance_leveloff_and_separate_speed_channel() {
     );
 }
 
-// REQ: OA-REG-010
+// REQ: OA-TRAJ-025
 #[test]
 fn performance_evidence_is_flight_bound_and_zero_rate_is_a_valid_level_bound() {
     let points = [route_point(0, 1_000, ident())];
@@ -275,9 +275,23 @@ fn performance_evidence_is_flight_bound_and_zero_rate_is_a_valid_level_bound() {
     let mut bad_key_padding = performance();
     bad_key_padding.reserved_key_align[0] = 1;
     assert_eq!(issue_vertical_profile(&request, bad_key_padding).refusal, Refusal::InvalidReservedFields);
+
+    let mut future_evidence = performance();
+    future_evidence.source_ms = request.cutoff_ms + 1;
+    future_evidence.available_ms = request.cutoff_ms + 2;
+    let future_output = issue_vertical_profile(&request, future_evidence);
+    let mut changed_future_evidence = future_evidence;
+    changed_future_evidence.max_climb_fpm = u32::MAX;
+    changed_future_evidence.max_groundspeed_mmps = u32::MAX;
+    changed_future_evidence.status = PerformanceStatus::Contradictory;
+    changed_future_evidence.reserved[0] = 9;
+    let changed_future_output = issue_vertical_profile(&request, changed_future_evidence);
+    assert_eq!(future_output, changed_future_output);
+    assert_eq!(future_output.refusal, Refusal::PerformanceUnavailableAtCutoff);
+    assert_eq!(future_output.performance.source, PerformanceSource::Unavailable);
 }
 
-// REQ: OA-REG-010
+// REQ: OA-TRAJ-025
 #[test]
 fn current_unsupported_and_future_clearances_never_produce_a_feasible_profile() {
     let mut point = route_point(0, 1_000, ident());
@@ -332,7 +346,7 @@ fn current_unsupported_and_future_clearances_never_produce_a_feasible_profile() 
     assert_eq!(malformed_absent.refusal, Refusal::ClearanceUnavailableAtCutoff);
 }
 
-// REQ: OA-REG-010
+// REQ: OA-TRAJ-026
 #[test]
 fn assigned_exact_target_is_a_leveloff_target_and_route_constraints_remain_sequential() {
     let near = [route_point(0, 1_000, ident())];
@@ -385,7 +399,7 @@ fn assigned_exact_target_is_a_leveloff_target_and_route_constraints_remain_seque
     assert_eq!(result.points[1].availability, Availability::Unavailable);
 }
 
-// REQ: OA-REG-010
+// REQ: OA-TRAJ-026
 #[test]
 fn window_clearance_allows_entry_without_a_deadline_and_holds_inside_bounds() {
     let mut too_soon = route_point(0, 1_000, ident());
@@ -420,9 +434,16 @@ fn window_clearance_allows_entry_without_a_deadline_and_holds_inside_bounds() {
     assert_eq!(result.points[1].reachable_min_ft, 15_000);
     assert_eq!(result.points[2].reachable_min_ft, 15_000);
     assert_eq!(result.points[2].reachable_max_ft, 15_000);
+
+    request.clearance.min_altitude_ft = 9_000;
+    request.clearance.max_altitude_ft = NO_ALTITUDE_FT;
+    let open_upper = issue_vertical_profile(&request, performance());
+    assert_eq!(open_upper.availability, Availability::Available);
+    assert!(open_upper.points[0].reachable_min_ft >= 9_000);
+    assert_ne!(open_upper.points[0].reachable_max_ft, NO_ALTITUDE_FT);
 }
 
-// REQ: OA-REG-010
+// REQ: OA-TRAJ-026
 #[test]
 fn microfoot_propagation_handles_zero_tiny_legs_and_reports_checked_overflow() {
     let mut second_fix = ident();
