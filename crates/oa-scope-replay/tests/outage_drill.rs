@@ -9,7 +9,7 @@
 use oa_airspace::model::{empty_model, Meta};
 use oa_ca::{
     alert_log_new, ca_cycle, ca_new, ca_open, event_log_new, Area, CaConfig, CaTrack, Volume,
-    AF_COAST, AIRBORNE, F_COAST, F_IDENTITY_UNCONFIRMED, F_UNCERTAIN, MAX_VOLUMES,
+    AF_COAST, AIRBORNE, F_COAST, F_IDENTITY_UNCONFIRMED, MAX_VOLUMES,
 };
 use oa_display::core::palette;
 use oa_display::ownership::{OwnershipPhase, OwnershipStatus};
@@ -22,7 +22,9 @@ use oa_safety::monitor::{
     check_pairs, MonitorFinding, MonitorLimits, MonitorPair, MonitorStatus, COMMON_LOCAL_FRAME,
     HAS_CLAIM, HAS_REFERENCE, VIOLATION_ALTITUDE,
 };
-use oa_safety::net::{state_report, state_table_new, NetId, NetReport, StateTable, NETS};
+use oa_safety::net::{
+    net_status, state_report, state_table_new, NetId, NetReport, NetState, StateTable, NETS,
+};
 use oa_scope_replay::adapt::{row_columns, ColumnBuf};
 use oa_scope_replay::frame::{
     replay_build_raw, replay_build_with_overlays, replay_new, replay_raster, Replay, ReplayConfig,
@@ -34,7 +36,8 @@ use oa_scope_replay::store::{store_add, store_finish};
 use oa_track::{
     output_new, r95_m_of, tracker_advance, tracker_new, tracker_newest_update_ns, tracker_predict,
     tracker_stats, tracker_update, Measurement, TrackOutput, Tracker, DEFAULT_CONFIG, M_HAS_VEL,
-    NONE_I32, NO_IDENT, O_HAS_ALT, O_IDENTITY_UNCONFIRMED, O_REACQUIRED,
+    NONE_I32, NO_IDENT, O_COAST, O_HAS_ALT, O_IDENTITY_UNCONFIRMED, O_REACQUIRED, O_TICK,
+    O_UNCERTAIN,
 };
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -955,7 +958,10 @@ fn exercise_fixture_fence(fence: PublisherFence) {
 
 fn validate_worker_ack(line: &str, expected_second: i32) {
     let fields: Vec<_> = line.split_whitespace().collect();
-    assert_eq!(fields.len(), 8, "malformed worker ack: {line}");
+    assert!(
+        fields.len() == 8 || fields.len() == 10,
+        "malformed worker ack: {line}"
+    );
     assert_eq!(
         fields[0], "MACHINE_LOSS_ACK",
         "malformed worker ack: {line}"
@@ -987,11 +993,27 @@ fn validate_worker_ack(line: &str, expected_second: i32) {
         !fields[6].is_empty() && !fields[7].is_empty(),
         "empty CA event state: {line}"
     );
+    if fields.len() == 10 {
+        let expected_ns = EPOCH + i64::from(expected_second) * S;
+        assert_eq!(
+            fields[8].parse::<i64>().ok(),
+            Some(expected_ns),
+            "CA time mismatch: {line}"
+        );
+        assert_eq!(
+            fields[9].parse::<i64>().ok(),
+            Some(expected_ns),
+            "frame time mismatch: {line}"
+        );
+    }
 }
 
 fn validate_input_ack(line: &str, identity: QuarantineRecord, second: i32) -> String {
     let fields: Vec<_> = line.split_whitespace().collect();
-    assert_eq!(fields.len(), 14, "malformed identity-bound ack: {line}");
+    assert!(
+        fields.len() == 14 || fields.len() == 16,
+        "malformed identity-bound ack: {line}"
+    );
     assert_eq!(fields[0], "MACHINE_LOSS_INPUT_ACK", "{line}");
     assert_eq!(
         fields[1].parse::<u32>().ok(),
@@ -1007,7 +1029,13 @@ fn validate_input_ack(line: &str, identity: QuarantineRecord, second: i32) -> St
 }
 
 fn assert_ca_ack_state(line: &str, second: i32, transition: &str, active: &str) {
+    validate_worker_ack(line, second);
     let fields: Vec<_> = line.split_whitespace().collect();
+    assert_eq!(
+        fields.len(),
+        10,
+        "missing same-time frame and CA witnesses: {line}"
+    );
     assert_eq!(fields[1].parse::<i32>().ok(), Some(second));
     assert_eq!(fields[6], transition, "CA transition at {second}s: {line}");
     assert!(
@@ -1225,40 +1253,78 @@ impl Drill {
         format!("MACHINE_LOSS_ACK {second} {digest} {ids} {warning_count} {conflict_count} {ca_transitions} {active}")
     }
 
-    fn visible_ca_rows(&self, at_ns: i64) -> Vec<CaTrack> {
-        let targets = targets_columns(&self.scope.set);
-        let mut rows = Vec::with_capacity(targets.addr.len());
-        for (index, &addr) in targets.addr.iter().enumerate() {
+    fn visible_ca_rows(&self, at_ns: i64, expected_fresh: bool) -> Vec<CaTrack> {
+        // This is the complete physical identity set for this bounded fixture. Do not derive
+        // CA input from the previous frame: a missing current prediction must fail explicitly.
+        let expected_addrs = [A, B];
+        let mut rows = Vec::with_capacity(expected_addrs.len());
+        for &addr in &expected_addrs {
             let (row, confirmed, newest_ns) = tracker_predict(&self.tracker, addr, at_ns)
-                .expect("every displayed identity has a predicted tracker row");
+                .expect("every expected visible identity has a same-time predicted tracker row");
             assert!(confirmed, "scope target {addr} is not a confirmed track");
             assert_eq!(row.addr, addr);
             assert!(newest_ns <= at_ns, "track {addr} comes from the future");
-            assert_eq!(targets.lat_e7[index], row.lat_e7);
-            assert_eq!(targets.lon_e7[index], row.lon_e7);
+            if expected_fresh {
+                assert_eq!(newest_ns, at_ns, "fresh source time for {addr}");
+                assert_eq!(row.t_ns, at_ns, "fresh prediction time for {addr}");
+            } else {
+                assert!(
+                    newest_ns < at_ns,
+                    "coasted prediction for {addr} is not stale"
+                );
+            }
+
+            // Forecasts contain predicted geometry, but coast/uncertainty are display-status
+            // decisions made by the emitted tracker tick. Carry those exact emitted flags.
+            let status_index = self
+                .out
+                .addr
+                .iter()
+                .enumerate()
+                .filter(|(index, emitted_addr)| {
+                    **emitted_addr == addr && self.out.t_ns.get(*index) == Some(&at_ns)
+                })
+                .map(|(index, _)| index)
+                .next_back()
+                .expect("each expected identity has an emitted tracker status at frame time");
+            let emitted_flags = *self
+                .out
+                .flags
+                .get(status_index)
+                .expect("emitted tracker status has flags");
 
             let mut flags = 0;
-            // Prediction provides geometry and motion; the emitted scope row carries coast
-            // and uncertainty status from the display tick at the same source time.
-            if targets.flags[index] & T_COAST != 0 {
+            // Preserve the tracker output's classification for CA and compare it with the
+            // display's independently adapted flags after the frame is built.
+            if emitted_flags & O_COAST != 0 {
                 flags |= F_COAST;
                 assert!(
                     newest_ns < at_ns,
                     "coasting track {addr} has a fresh update"
                 );
+                assert_ne!(
+                    emitted_flags & O_TICK,
+                    0,
+                    "coast status for {addr} is not a tick"
+                );
             }
-            if targets.flags[index] & oa_display::traffic::T_UNCERTAIN != 0 {
-                flags |= F_UNCERTAIN;
+            if emitted_flags & O_UNCERTAIN != 0 {
+                flags |= oa_ca::F_UNCERTAIN;
+            }
+            if newest_ns == at_ns {
+                assert_eq!(
+                    emitted_flags & O_COAST,
+                    0,
+                    "fresh track {addr} is marked coasting"
+                );
             }
             if row.flags & O_IDENTITY_UNCONFIRMED != 0 {
                 flags |= F_IDENTITY_UNCONFIRMED;
             }
             let altitude = if row.flags & O_HAS_ALT != 0 {
-                assert_ne!(targets.alt_ft[index], oa_display::traffic::NO_ALT);
                 assert!(row.alt_ft.is_finite() && row.vrate_fpm.is_finite());
                 row.alt_ft
             } else {
-                assert_eq!(targets.alt_ft[index], oa_display::traffic::NO_ALT);
                 f32::NAN
             };
             let r95_m = r95_m_of(&row.pos_cov_m2);
@@ -1281,12 +1347,8 @@ impl Drill {
                 ground: AIRBORNE,
             });
         }
-        assert_eq!(rows.len(), targets.addr.len());
-        assert_eq!(
-            rows.len(),
-            2,
-            "fixture CA pair must use both visible tracks"
-        );
+        let row_addrs: Vec<_> = rows.iter().map(|row| row.addr).collect();
+        assert_eq!(row_addrs.as_slice(), &expected_addrs);
         rows
     }
 
@@ -1305,13 +1367,17 @@ impl Drill {
             self.feeds[1].state = FeedState::Lost { age_ms: elapsed_ms };
         }
         let at_ns = EPOCH + i64::from(second) * S;
-        self.frame_inner(i64::from(second), None);
+        // Advance once, then let prediction, CA, safety state, display list and raster all
+        // consume this source-time snapshot in that order.
+        tracker_advance(&mut self.tracker, at_ns, &mut self.out);
         assert_eq!(
             self.out.overflow, 0,
             "tracker output overflowed at {second}s"
         );
-        let rows = self.visible_ca_rows(at_ns);
+        let rows = self.visible_ca_rows(at_ns, live);
         if !live {
+            let row_addrs: Vec<_> = rows.iter().map(|row| row.addr).collect();
+            assert_eq!(row_addrs.as_slice(), &[A, B]);
             assert!(rows.iter().all(|row| row.flags & F_COAST != 0));
         }
         let alert_count = self.ca_alerts.items.len();
@@ -1328,6 +1394,26 @@ impl Drill {
         assert_eq!(
             self.ca_alerts.overflow, 0,
             "CA alert log overflowed at {second}s"
+        );
+        assert_eq!(out.stats.rows_bad, 0, "invalid CA rows at {second}s");
+        assert_eq!(
+            out.stats.rows_duplicate, 0,
+            "duplicate CA rows at {second}s"
+        );
+        assert_eq!(
+            out.stats.rows_over_capacity, 0,
+            "CA capacity loss at {second}s"
+        );
+        assert_eq!(
+            out.stats.rows_lost_upstream, 0,
+            "upstream CA row loss at {second}s"
+        );
+        let ca_status = net_status(&self.states, &self.inhibits, NetId::ConflictAlert, at_ns);
+        assert_eq!(ca_status.state, NetState::Running, "CA status at {second}s");
+        assert_eq!(
+            ca_status.age_ns,
+            Some(0),
+            "CA report is not current at {second}s"
         );
         if !live {
             let alerts = ca_open(&self.ca);
@@ -1357,21 +1443,98 @@ impl Drill {
         } else {
             transitions.join(",")
         };
+        // The current CA cycle has now published its net state. Build the safety/display frame
+        // only after that publication so both witnesses refer to the same source timestamp.
+        self.render_scope_after_advance(i64::from(second), None, None);
+        let displayed = targets_columns(&self.scope.set);
+        assert_eq!(displayed.addr, &[A, B], "display identity set at {second}s");
+        for (index, row) in rows.iter().enumerate() {
+            assert_eq!(displayed.addr[index], row.addr);
+            if row.alt_ft.is_finite() {
+                assert_ne!(displayed.alt_ft[index], oa_display::traffic::NO_ALT);
+                assert!(
+                    (displayed.alt_ft[index] as f32 - row.alt_ft).abs() <= 0.5,
+                    "scope/CA altitude disagrees for {} at {second}s",
+                    row.addr
+                );
+            } else {
+                assert_eq!(displayed.alt_ft[index], oa_display::traffic::NO_ALT);
+            }
+            assert_eq!(
+                displayed.lat_e7[index],
+                (row.lat_deg * 10_000_000.0).round() as i32
+            );
+            assert_eq!(
+                displayed.lon_e7[index],
+                (row.lon_deg * 10_000_000.0).round() as i32
+            );
+            assert_eq!(
+                displayed.flags[index] & T_COAST != 0,
+                row.flags & F_COAST != 0,
+                "scope/CA coast status for {} at {second}s",
+                row.addr
+            );
+            assert_eq!(
+                displayed.flags[index] & oa_display::traffic::T_UNCERTAIN != 0,
+                row.flags & oa_ca::F_UNCERTAIN != 0,
+                "scope/CA uncertainty status for {} at {second}s",
+                row.addr
+            );
+        }
+        let shown_warnings: Vec<_> = self
+            .scope
+            .list
+            .texts
+            .start
+            .iter()
+            .zip(&self.scope.list.texts.len)
+            .map(|(&start, &len)| {
+                &self.scope.list.text[start as usize..start as usize + len as usize]
+            })
+            .filter(|line| line.starts_with("FEED ") || line.starts_with("PICTURE "))
+            .collect();
+        if live {
+            assert!(
+                !shown_warnings
+                    .iter()
+                    .any(|line| line.starts_with("FEED ") || line.starts_with("PICTURE ")),
+                "fresh source frame still reports outage at {second}s: {shown_warnings:?}"
+            );
+        } else {
+            let age_s = second.saturating_sub(2);
+            let age = format!("{:.1}S", f64::from(age_s));
+            assert!(
+                shown_warnings.contains(&format!("FEED ADSB LOST {age}").as_str()),
+                "missing ADS-B loss warning at {second}s: {shown_warnings:?}"
+            );
+            assert!(
+                shown_warnings.contains(&format!("FEED RADAR LOST {age}").as_str()),
+                "missing radar loss warning at {second}s: {shown_warnings:?}"
+            );
+            // A quarantined input may leave the last admitted position older than the last
+            // source heartbeat. Picture age and feed-loss age must not be conflated.
+            let picture_age_ns = at_ns - tracker_newest_update_ns(&self.tracker);
+            let picture_age = format!("{:.1}S", picture_age_ns as f64 / S as f64);
+            assert!(
+                shown_warnings.contains(&format!("PICTURE FROZEN {picture_age}").as_str()),
+                "missing frozen-picture warning at {second}s: {shown_warnings:?}"
+            );
+        }
         let digest = oa_sha256::to_hex(&frame_digest(&self.scope.spec, &self.scope.buf).unwrap());
-        let ids = targets_columns(&self.scope.set)
+        let ids = displayed
             .addr
             .iter()
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(",");
         let warnings = warning_count(&self.scope);
-        let conflict_count = targets_columns(&self.scope.set)
+        let conflict_count = displayed
             .flags
             .iter()
             .filter(|&&flags| flags & oa_display::traffic::T_CS_CONFLICT != 0)
             .count();
         let active = ca_active_detail(self);
-        format!("MACHINE_LOSS_ACK {second} {digest} {ids} {warnings} {conflict_count} {ca_transitions} {active}")
+        format!("MACHINE_LOSS_ACK {second} {digest} {ids} {warnings} {conflict_count} {ca_transitions} {active} {at_ns} {at_ns}")
     }
 
     fn offer(&mut self, addr: u32, sensor: u16, second: i32) {
@@ -1419,6 +1582,16 @@ impl Drill {
     ) {
         let at = EPOCH + second * S;
         tracker_advance(&mut self.tracker, at, &mut self.out);
+        self.render_scope_after_advance(second, expected_warnings, ownership);
+    }
+
+    fn render_scope_after_advance(
+        &mut self,
+        second: i64,
+        expected_warnings: Option<&[&str]>,
+        ownership: Option<&OwnershipStatus>,
+    ) {
+        let at = EPOCH + second * S;
         let mut store = RowStore::default();
         let stats = store_add(
             &mut store,
@@ -1731,7 +1904,7 @@ fn machine_loss_worker_process() {
                 if fault == InputFault::CrashAfterApply {
                     let fields: Vec<_> = ack.split_whitespace().collect();
                     println!(
-                        "MACHINE_LOSS_APPLIED_NO_ACK {} {} {} {} {} {} {} {}",
+                        "MACHINE_LOSS_APPLIED_NO_ACK {} {} {} {} {} {} {} {} {} {}",
                         key.publisher_id,
                         key.source_id,
                         key.generation,
@@ -1739,7 +1912,9 @@ fn machine_loss_worker_process() {
                         oa_sha256::to_hex(&identity.payload_digest),
                         fields[2],
                         fields[6],
-                        fields[7]
+                        fields[7],
+                        fields[8],
+                        fields[9]
                     );
                     let _ = std::io::stdout().flush();
                     std::process::exit(87);
@@ -1756,7 +1931,7 @@ fn machine_loss_worker_process() {
                     write_checkpoint_create_new(&output, &checkpoint);
                     let fields: Vec<_> = ack.split_whitespace().collect();
                     println!(
-                        "MACHINE_LOSS_CHECKPOINTED_NO_ACK {} {} {} {} {} {} {} {} {}",
+                        "MACHINE_LOSS_CHECKPOINTED_NO_ACK {} {} {} {} {} {} {} {} {} {} {}",
                         key.publisher_id,
                         key.source_id,
                         key.generation,
@@ -1765,7 +1940,9 @@ fn machine_loss_worker_process() {
                         oa_sha256::to_hex(&oa_sha256::sha256(&checkpoint)),
                         fields[2],
                         fields[6],
-                        fields[7]
+                        fields[7],
+                        fields[8],
+                        fields[9]
                     );
                     let _ = std::io::stdout().flush();
                     std::process::exit(88);
@@ -2271,7 +2448,7 @@ fn crash_after_apply_before_ack_replays_from_verified_prefix() {
     assert_eq!(
         marker,
         format!(
-            "MACHINE_LOSS_APPLIED_NO_ACK {} {} {} {} {} {} {} {}",
+            "MACHINE_LOSS_APPLIED_NO_ACK {} {} {} {} {} {} {} {} {} {}",
             identity.key.publisher_id,
             identity.key.source_id,
             identity.key.generation,
@@ -2279,7 +2456,9 @@ fn crash_after_apply_before_ack_replays_from_verified_prefix() {
             oa_sha256::to_hex(&identity.payload_digest),
             fields[2],
             fields[6],
-            fields[7]
+            fields[7],
+            fields[8],
+            fields[9]
         )
     );
     let status =
@@ -2365,7 +2544,7 @@ fn checkpointed_apply_before_ack_recovers_and_continues() {
     assert_eq!(
         marker,
         format!(
-            "MACHINE_LOSS_CHECKPOINTED_NO_ACK {} {} {} {} {} {} {} {} {}",
+            "MACHINE_LOSS_CHECKPOINTED_NO_ACK {} {} {} {} {} {} {} {} {} {} {}",
             identity.key.publisher_id,
             identity.key.source_id,
             identity.key.generation,
@@ -2374,7 +2553,9 @@ fn checkpointed_apply_before_ack_recovers_and_continues() {
             oa_sha256::to_hex(&oa_sha256::sha256(&expected_checkpoint)),
             fields[2],
             fields[6],
-            fields[7]
+            fields[7],
+            fields[8],
+            fields[9]
         )
     );
     let status =

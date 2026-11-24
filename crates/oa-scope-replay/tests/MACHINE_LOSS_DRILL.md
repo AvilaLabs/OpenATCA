@@ -122,9 +122,14 @@ ordering at the file-sync and acknowledgement boundary. Directory-entry durabili
 recovery, external effects, and operational supervisor policy require separate evidence.
 
 The separate `visible_tracker_ca_alert_survives_silent_durable_replacement` fixture obtains its
-CA rows from the identities actually present in the scope target set, then retrieves those
+CA rows from the complete expected physical identity set, then retrieves those
 confirmed tracks with `tracker_predict`; coordinates, velocity, covariance, altitude, vertical
-rate and coast flags come from those rows. The two distinct synthetic addresses have finite
+rate come from those predictions. Coast and uncertainty come from the actual emitted tracker
+row at that same timestamp. The fixture advances once, runs CA, checks its fresh net state,
+then builds and rasterizes the frame. Displayed identity, position, altitude and status must
+agree with CA input. The extended acknowledgement carries CA and frame input timestamps;
+the frame timestamp echoes the render argument rather than an independently returned clock.
+The two distinct synthetic addresses have finite
 velocity, altitude and zero vertical rate, and their latitude inputs differ by 0.008 degrees
 (about 0.9 km); the fixture CA horizontal/vertical thresholds are 1,300 m and 300 ft. It requires
 that alert to open before process loss, remain active across an 18-second source-silent frame, and

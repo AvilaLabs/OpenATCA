@@ -28,6 +28,14 @@ recover from a serving-process failure. Its audit trail must identify exact inpu
 binary, settings, receipt-time basis and every omission. The current independent tools and
 fixtures are ingredients; a single integrated regional runner is not yet delivered.
 
+The source-ordered route API `forecast_latest_source_route` now supplies a bounded integration
+building block: availability gates the evidence, source time orders amendments within one full
+GUFI and reporting centre, and successes and refusals retain complete candidate counts. It does
+not change the frozen study selector. The visible-CA recovery fixture also checks current CA
+state before rasterizing, with matching tracker/display identities, altitude and coast/uncertainty
+status. These remain component and same-host fixture evidence; the proposed composition is in
+[the regional session plan](REGIONAL_SESSION_PLAN.md).
+
 The next development increments are bounded:
 
 1. Select the route revision actually available at an issue cutoff, reject conflicting revisions,

@@ -30,7 +30,7 @@ before.
 | Requirements traceability | `oa-trace`: every requirement in [REQUIREMENTS.md](../REQUIREMENTS.md) has a test or proof | Shows a test exists, not that it is sufficient |
 | Bounded proofs (Kani) | 112 registered harnesses, 103 enabled and 9 disabled experiments; see [Rust assurance](RUST_ASSURANCE.md) | Results are revision-, assumption- and bound-specific; push-tier selection is not a full-suite run |
 | Model checking (TLA+) | The replay clock; see [tla/README.md](tla/README.md) | Small bounds; the model abstracts the code |
-| Fuzzing | 21 libFuzzer targets over the byte-level decoders; see [FUZZING.md](FUZZING.md) | Most targets have had hours, not weeks |
+| Fuzzing | 23 libFuzzer targets over the byte-level decoders; see [FUZZING.md](FUZZING.md) | Most targets have had hours, not weeks |
 | Mutation testing | Saved numerical and truth cases have strengthened independent-answer tests | Unresolved cases are not automatically equivalent or confirmed defects |
 | Allocation instrumentation | Named M3 tracker/fusion routes run under an isolated counting allocator, with positive and injected-allocation controls | Complete C5 coverage remains open; see [candidate validation](VALIDATION.md) |
 | Turn-model moments | Closed-form and independent high-precision references for nonlinear prediction and separate discovery-floor regularization; numerical refusals are counted and history replay is atomic | Gaussian, cubature and regularization approximations remain; synthetic accuracy does not establish recorded-traffic truth |

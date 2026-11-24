@@ -6768,6 +6768,33 @@ configuration with no default; the crate's tests use synthetic values.
   before examining geometry. Across candidate attempts, revision examinations are bounded by
   the captured-row limit times the revision limit; each examined raw span is bounded at 256 fixes.
 
+- **OA-LTJ-210** Operational source-ordered route selection is bounded to 256 revisions and
+  256 route fixes per cutoff, is independent of candidate input order, and never lets a
+  later-received older source event roll back a newer source event already available.
+- **OA-LTJ-211** Within the 256-candidate budget, revisions received after the issue cutoff
+  cannot affect selection or cause refusal for malformed revision payload or geometry.
+  When a newer source revision is not yet
+  received, the latest older source revision available at the cutoff remains selected.
+- **OA-LTJ-212** Contradictory eligible route payloads for the same full GUFI, reporting centre
+  and source timestamp are explicitly refused independent of input order. Distinct reporting
+  centres are independent.
+- **OA-LTJ-213** Equivalent same-source route payload duplicates are harmless. Provenance is
+  chosen deterministically by earliest receive availability, then message identity, retaining
+  full GUFI, centre, plan ID, source time, receive availability and message identity.
+- **OA-LTJ-214** The latest eligible source revision is never silently replaced by an older
+  revision when its route is empty, invalid or over the route-fix bound. Identity, centre,
+  source/availability timing, revision-capacity and route-capacity failures are explicit.
+- **OA-LTJ-215** Every source-ordered route selection, successful or refused, retains its offered
+  denominator. Other-flight, other-centre, future, eligible and unexamined counts partition all
+  input candidates; selected, older-source, restated and withheld counts partition eligible
+  candidates. Above the global cap no candidate is examined. A refused issue withholds every
+  eligible candidate and returns its named reason with the counts.
+- **OA-LTJ-216** Operational route payload equality compares canonical floating-point bits,
+  including altitude windows. Signed-zero differences cannot choose a payload by input order:
+  they are explicit contradictory evidence. Equivalent invalid NaN payloads compare alike
+  after canonicalization and remain subject to forecast validation, rather than producing a
+  false same-source conflict solely because NaN is unequal to itself.
+
 ## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
 
 Build order step 7 of docs/M5_DESIGN.md. `oa-msaw` is a core crate; the shell lookups of terrain,

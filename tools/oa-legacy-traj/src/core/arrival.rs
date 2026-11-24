@@ -50,6 +50,10 @@ pub enum ForecastRefusal {
     TooManyRouteRevisions,
     NoRouteAtCutoff,
     ConflictingRouteRevision,
+    TooManyOperationalRouteRevisions,
+    InvalidOperationalRouteIdentity,
+    InvalidOperationalRouteTime,
+    ConflictingOperationalRouteRevision,
     ConflictingRouteEstimate,
 }
 
@@ -104,6 +108,68 @@ pub struct RouteForecast {
     pub forecast: Forecast,
 }
 // A7.2: cold struct, size guard waived; one-shot forecast result.
+
+/// Source-ordered operational route identity. Unlike [`RouteRevision`], this retains the
+/// reporting centre and the source event order used by `oa-flight`'s stamped-field gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OperationalRouteRevision {
+    pub flight_gufi: u128,
+    /// Four ASCII bytes, zero padded; a centre is never inferred from another identifier.
+    pub centre: [u8; 4],
+    pub plan_id: [u8; 12],
+    /// Source event time (ERAM), Unix ms.
+    pub source_ms: i64,
+    /// Receive availability time, Unix ms.
+    pub available_ms: i64,
+    /// Opaque input message identity, as assigned by the replay driver.
+    pub msg: u64,
+}
+// A7.2: cold struct, size guard waived; one route revision value.
+
+/// One expanded route paired with its full operational revision identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OperationalRouteCandidate {
+    pub revision: OperationalRouteRevision,
+    pub route: Vec<RouteFix>,
+}
+// A7.2: cold struct, size guard waived; one route candidate.
+
+/// One cutoff-safe trajectory and the exact source-ordered route revision that produced it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OperationalTrajectoryView {
+    pub revision: OperationalRouteRevision,
+    pub forecast: Forecast,
+    pub selection: OperationalRouteCounts,
+}
+// A7.2: cold struct, size guard waived; one-shot forecast result.
+
+/// Admission partition: offered = unexamined + other_flight + other_centre + future + eligible.
+/// Eligible disposition: eligible = selected + older_source + restated + withheld.
+/// Identity filtering precedes centre filtering, which precedes the availability cutoff.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OperationalRouteCounts {
+    pub offered: usize,
+    /// Above the global budget, no candidate is examined.
+    pub unexamined: usize,
+    pub other_flight: usize,
+    pub other_centre: usize,
+    pub future: usize,
+    pub eligible: usize,
+    pub selected: usize,
+    pub older_source: usize,
+    pub restated: usize,
+    /// On any refusal every eligible candidate is withheld; no forecast is returned.
+    pub withheld: usize,
+}
+// A7.2: cold struct, size guard waived; one accounting value per selection, never stored hot.
+
+/// A refused issue retains its input denominator and every admission/disposition count.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OperationalRouteRefusal {
+    pub reason: ForecastRefusal,
+    pub selection: OperationalRouteCounts,
+}
+// A7.2: cold struct, size guard waived; one refused selection result.
 
 fn fix_identity(fix: RouteFix) -> ([u8; 8], Place) {
     (fix.name, fix.place)
@@ -339,6 +405,267 @@ pub fn forecast_latest_route(
         meter_fix: snapshot.meter_fix,
     };
     forecast_for_route(&selected_snapshot, selected.revision)
+}
+
+fn valid_zero_padded_ascii<const N: usize>(value: [u8; N]) -> bool {
+    let mut saw_byte = false;
+    let mut padding = false;
+    for byte in value {
+        if byte == 0 {
+            padding = true;
+        } else if padding || !byte.is_ascii_graphic() {
+            return false;
+        } else {
+            saw_byte = true;
+        }
+    }
+    saw_byte
+}
+
+fn valid_operational_centre(centre: [u8; 4]) -> bool {
+    valid_zero_padded_ascii(centre)
+}
+
+fn valid_operational_plan_id(plan_id: [u8; 12]) -> bool {
+    valid_zero_padded_ascii(plan_id)
+}
+
+fn same_route_float(a: f64, b: f64) -> bool {
+    oa_math::canon_nan(a).to_bits() == oa_math::canon_nan(b).to_bits()
+}
+
+fn same_route_optional_float(a: Option<f64>, b: Option<f64>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => same_route_float(a, b),
+        _ => false,
+    }
+}
+
+fn same_route_constraint(a: Option<AltitudeConstraint>, b: Option<AltitudeConstraint>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.available_ms == b.available_ms
+                && a.provenance == b.provenance
+                && same_route_optional_float(a.minimum_ft, b.minimum_ft)
+                && same_route_optional_float(a.maximum_ft, b.maximum_ft)
+        }
+        _ => false,
+    }
+}
+
+/// Payload equality is bitwise after NaN canonicalization, so signed-zero differences cannot
+/// choose a different payload by input order. Equal invalid NaNs remain duplicate evidence and
+/// are refused by forecast validation rather than misreported as contradictory revisions.
+fn same_operational_route(a: &[RouteFix], b: &[RouteFix]) -> bool {
+    // C7: the caller has checked all eligible route lengths before comparing any pair.
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).all(|(a, b)| {
+        a.name == b.name
+            && same_route_float(a.place.lat_deg, b.place.lat_deg)
+            && same_route_float(a.place.lon_deg, b.place.lon_deg)
+            && same_route_constraint(a.altitude_constraint, b.altitude_constraint)
+    })
+}
+
+/// Select and forecast the latest source-ordered route for one full GUFI and reporting centre at
+/// the issue cutoff. Availability gates what the caller could know; source time orders the state
+/// once it is available. A later receipt carrying an older source event cannot roll the route
+/// back. Revisions from different centres are independent plan views and are never compared.
+///
+/// Revisions at one source time with different plan identity or geometry are refused, regardless
+/// of input order. Equivalent same-source payloads are duplicate/restated evidence; their
+/// provenance is chosen deterministically by earliest availability, then message identity. A
+/// future-received row is ignored before its other fields are examined. The latest eligible
+/// source event is forecast as-is: invalid or empty selected geometry is refused, without falling
+/// back to an older route.
+///
+/// C7: at most [`MAX_ROUTE_REVISIONS`] candidates are examined, and each matching cutoff-eligible
+/// route is checked to contain no more than [`MAX_ROUTE_FIXES`] points before comparison. The
+/// pairwise same-source conflict scan is therefore bounded by 256 × 256 revision pairs, with at
+/// most 256 route points compared per pair.
+pub fn forecast_latest_source_route(
+    snapshot: &IssueSnapshot,
+    flight_gufi: u128,
+    centre: [u8; 4],
+    candidates: &[OperationalRouteCandidate],
+) -> Result<OperationalTrajectoryView, OperationalRouteRefusal> {
+    let mut selection = OperationalRouteCounts {
+        offered: candidates.len(),
+        ..OperationalRouteCounts::default()
+    };
+    if candidates.len() > MAX_ROUTE_REVISIONS {
+        selection.unexamined = candidates.len();
+        return Err(OperationalRouteRefusal {
+            reason: ForecastRefusal::TooManyOperationalRouteRevisions,
+            selection,
+        });
+    }
+    // C7/E8: this prechecked scan has at most 256 iterations. Every counter starts at zero and
+    // each candidate increments exactly one partition cell, so no counter can exceed 256.
+    for candidate in candidates {
+        let revision = candidate.revision;
+        if revision.flight_gufi != flight_gufi {
+            selection.other_flight += 1;
+        } else if revision.centre != centre {
+            selection.other_centre += 1;
+        } else if revision.available_ms > snapshot.cutoff_ms {
+            selection.future += 1;
+        } else {
+            selection.eligible += 1;
+        }
+    }
+    match operational_forecast(snapshot, flight_gufi, centre, candidates) {
+        Ok((revision, forecast)) => {
+            // A successful selection has exactly one selected candidate. Equal-source eligible
+            // payloads are proven equivalent by operational_forecast before this bounded scan.
+            for candidate in candidates {
+                let input = candidate.revision;
+                if input.flight_gufi == flight_gufi
+                    && input.centre == centre
+                    && input.available_ms <= snapshot.cutoff_ms
+                {
+                    if input.source_ms < revision.source_ms {
+                        selection.older_source += 1;
+                    } else if selection.selected == 0 {
+                        selection.selected = 1;
+                    } else {
+                        selection.restated += 1;
+                    }
+                }
+            }
+            Ok(OperationalTrajectoryView {
+                revision,
+                forecast,
+                selection,
+            })
+        }
+        Err(reason) => {
+            selection.withheld = selection.eligible;
+            Err(OperationalRouteRefusal { reason, selection })
+        }
+    }
+}
+
+fn operational_forecast(
+    snapshot: &IssueSnapshot,
+    flight_gufi: u128,
+    centre: [u8; 4],
+    candidates: &[OperationalRouteCandidate],
+) -> Result<(OperationalRouteRevision, Forecast), ForecastRefusal> {
+    if candidates.len() > MAX_ROUTE_REVISIONS {
+        return Err(ForecastRefusal::TooManyOperationalRouteRevisions);
+    }
+    if flight_gufi == 0 || !valid_operational_centre(centre) {
+        return Err(ForecastRefusal::InvalidOperationalRouteIdentity);
+    }
+    if snapshot.cutoff_ms <= 0 {
+        return Err(ForecastRefusal::InvalidOperationalRouteTime);
+    }
+
+    // Validate the whole eligible set before comparing it. This gives malformed candidate sets a
+    // deterministic refusal independent of their input ordering.
+    let mut invalid_identity = false;
+    let mut invalid_time = false;
+    let mut too_many_fixes = false;
+    for candidate in candidates {
+        let revision = candidate.revision;
+        if revision.flight_gufi != flight_gufi || revision.centre != centre {
+            continue;
+        }
+        // Availability is the knowledge boundary. Nothing in a not-yet-received revision can
+        // alter this issue, including malformed provenance or geometry.
+        if revision.available_ms > snapshot.cutoff_ms {
+            continue;
+        }
+        if !valid_operational_plan_id(revision.plan_id)
+            || !valid_operational_centre(revision.centre)
+        {
+            invalid_identity = true;
+        }
+        if revision.source_ms <= 0
+            || revision.available_ms <= 0
+            || revision.source_ms > revision.available_ms
+        {
+            invalid_time = true;
+        }
+        if candidate.route.len() > MAX_ROUTE_FIXES {
+            too_many_fixes = true;
+        }
+    }
+    if invalid_identity {
+        return Err(ForecastRefusal::InvalidOperationalRouteIdentity);
+    }
+    if invalid_time {
+        return Err(ForecastRefusal::InvalidOperationalRouteTime);
+    }
+    if too_many_fixes {
+        return Err(ForecastRefusal::TooManyRouteFixes);
+    }
+
+    for (index, candidate) in candidates.iter().enumerate() {
+        let revision = candidate.revision;
+        if revision.flight_gufi != flight_gufi
+            || revision.centre != centre
+            || revision.available_ms > snapshot.cutoff_ms
+        {
+            continue;
+        }
+        for previous in candidates.iter().take(index) {
+            let earlier = previous.revision;
+            if earlier.flight_gufi == flight_gufi
+                && earlier.centre == centre
+                && earlier.available_ms <= snapshot.cutoff_ms
+                && earlier.source_ms == revision.source_ms
+                && (earlier.plan_id != revision.plan_id
+                    || !same_operational_route(&previous.route, &candidate.route))
+            {
+                return Err(ForecastRefusal::ConflictingOperationalRouteRevision);
+            }
+        }
+    }
+
+    let mut selected: Option<&OperationalRouteCandidate> = None;
+    for candidate in candidates {
+        let revision = candidate.revision;
+        if revision.flight_gufi != flight_gufi
+            || revision.centre != centre
+            || revision.available_ms > snapshot.cutoff_ms
+        {
+            continue;
+        }
+        match selected {
+            None => selected = Some(candidate),
+            Some(previous) if revision.source_ms > previous.revision.source_ms => {
+                selected = Some(candidate);
+            }
+            Some(previous) if revision.source_ms == previous.revision.source_ms => {
+                let previous_key = (previous.revision.available_ms, previous.revision.msg);
+                let candidate_key = (revision.available_ms, revision.msg);
+                if candidate_key < previous_key {
+                    selected = Some(candidate);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let selected = selected.ok_or(ForecastRefusal::NoRouteAtCutoff)?;
+    let selected_snapshot = IssueSnapshot {
+        cutoff_ms: snapshot.cutoff_ms,
+        issued_ms: snapshot.issued_ms,
+        track: snapshot.track,
+        assigned_altitude_ft: snapshot.assigned_altitude_ft,
+        assigned_altitude_available_ms: snapshot.assigned_altitude_available_ms,
+        assigned_altitude_provenance: snapshot.assigned_altitude_provenance,
+        route: selected.route.clone(),
+        meter_fix: snapshot.meter_fix,
+    };
+    let forecast = forecast(&selected_snapshot)?;
+    Ok((selected.revision, forecast))
 }
 
 /// Opt-in route experiment using explicit true airspeed and one cutoff-safe wind vector per leg.
@@ -1262,6 +1589,18 @@ fn interpolate_place(a: Place, b: Place, f: f64) -> Place {
 mod tests {
     use super::*;
 
+    // Selection semantics below compare the stable refusal reason. The separate accounting
+    // fixture calls the public API directly and checks both complete denominator partitions.
+    fn forecast_latest_source_route(
+        snapshot: &IssueSnapshot,
+        flight_gufi: u128,
+        centre: [u8; 4],
+        candidates: &[OperationalRouteCandidate],
+    ) -> Result<OperationalTrajectoryView, ForecastRefusal> {
+        super::forecast_latest_source_route(snapshot, flight_gufi, centre, candidates)
+            .map_err(|refusal| refusal.reason)
+    }
+
     // REQ: OA-LTJ-058
     #[test]
     fn directional_projection_has_cardinal_signs_and_preserves_scalar_error() {
@@ -1426,6 +1765,524 @@ mod tests {
             },
             route,
         }
+    }
+
+    fn operational_revision(
+        flight_gufi: u128,
+        centre: [u8; 4],
+        plan_id: [u8; 12],
+        source_ms: i64,
+        available_ms: i64,
+        msg: u64,
+        route: Vec<RouteFix>,
+    ) -> OperationalRouteCandidate {
+        OperationalRouteCandidate {
+            revision: OperationalRouteRevision {
+                flight_gufi,
+                centre,
+                plan_id,
+                source_ms,
+                available_ms,
+                msg,
+            },
+            route,
+        }
+    }
+
+    // REQ: OA-LTJ-210
+    #[test]
+    fn operational_selector_uses_source_order_after_cutoff_availability() {
+        let (snapshot, meter) = fixture();
+        let detour = RouteFix {
+            name: *b"DET     ",
+            place: Place {
+                lat_deg: 41.3,
+                lon_deg: -88.0,
+            },
+            altitude_constraint: None,
+        };
+        let latest_source = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-B\0\0\0\0\0\0",
+            950_000,
+            970_000,
+            20,
+            vec![detour, meter],
+        );
+        // This older source event arrives later. It must not roll the plan back.
+        let stale_late = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-A\0\0\0\0\0\0",
+            900_000,
+            990_000,
+            30,
+            vec![meter],
+        );
+        let selected = forecast_latest_source_route(
+            &snapshot,
+            77,
+            *b"ZAU\0",
+            &[latest_source.clone(), stale_late.clone()],
+        )
+        .expect("newer source event is available at cutoff");
+        let reversed = forecast_latest_source_route(
+            &snapshot,
+            77,
+            *b"ZAU\0",
+            &[stale_late, latest_source.clone()],
+        )
+        .expect("input order cannot roll back the source state");
+        assert_eq!(selected, reversed);
+        assert_eq!(selected.revision, latest_source.revision);
+        assert_eq!(selected.revision.source_ms, 950_000);
+        assert_eq!(selected.revision.available_ms, 970_000);
+        let eta_s =
+            (selected.forecast.meter_eta.unwrap().time_ms - snapshot.issued_ms) as f64 / 1000.0;
+        assert!((425.0..450.0).contains(&eta_s), "{eta_s}");
+    }
+
+    // REQ: OA-LTJ-211
+    #[test]
+    fn operational_selector_excludes_future_receipt_and_keeps_cutoff_state() {
+        let (snapshot, meter) = fixture();
+        let future = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-F\0\0\0\0\0\0",
+            995_000,
+            snapshot.cutoff_ms + 1,
+            99,
+            vec![],
+        );
+        let available = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-A\0\0\0\0\0\0",
+            900_000,
+            900_001,
+            10,
+            vec![meter],
+        );
+        let expected = forecast_latest_source_route(
+            &snapshot,
+            77,
+            *b"ZAU\0",
+            core::slice::from_ref(&available),
+        )
+        .expect("older route was available at cutoff");
+        let actual = forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &[future, available])
+            .expect("future malformed geometry is outside the cutoff");
+        assert_eq!(actual.revision, expected.revision);
+        assert_eq!(actual.forecast, expected.forecast);
+        assert_eq!(actual.selection.future, 1);
+        assert_eq!(actual.selection.eligible, 1);
+    }
+
+    // REQ: OA-LTJ-212
+    #[test]
+    fn operational_selector_refuses_same_source_conflicts_in_any_input_order() {
+        let (snapshot, meter) = fixture();
+        let other = RouteFix {
+            name: *b"OTHER   ",
+            place: Place {
+                lat_deg: 41.6,
+                lon_deg: -88.0,
+            },
+            altitude_constraint: None,
+        };
+        let first = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-A\0\0\0\0\0\0",
+            900_000,
+            920_000,
+            10,
+            vec![meter],
+        );
+        let conflict = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-B\0\0\0\0\0\0",
+            900_000,
+            930_000,
+            11,
+            vec![other],
+        );
+        assert_eq!(
+            forecast_latest_source_route(
+                &snapshot,
+                77,
+                *b"ZAU\0",
+                &[first.clone(), conflict.clone()],
+            ),
+            Err(ForecastRefusal::ConflictingOperationalRouteRevision)
+        );
+        assert_eq!(
+            forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &[conflict, first]),
+            Err(ForecastRefusal::ConflictingOperationalRouteRevision)
+        );
+        let same_plan_conflict = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-A\0\0\0\0\0\0",
+            900_000,
+            930_000,
+            12,
+            vec![other],
+        );
+        assert_eq!(
+            forecast_latest_source_route(
+                &snapshot,
+                77,
+                *b"ZAU\0",
+                &[
+                    operational_revision(
+                        77,
+                        *b"ZAU\0",
+                        *b"PLAN-A\0\0\0\0\0\0",
+                        900_000,
+                        920_000,
+                        10,
+                        vec![meter],
+                    ),
+                    same_plan_conflict,
+                ],
+            ),
+            Err(ForecastRefusal::ConflictingOperationalRouteRevision)
+        );
+    }
+
+    // REQ: OA-LTJ-213
+    #[test]
+    fn operational_selector_deduplicates_equivalent_events_and_is_centre_scoped() {
+        let (snapshot, meter) = fixture();
+        let earlier_receive = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-A\0\0\0\0\0\0",
+            900_000,
+            910_000,
+            20,
+            vec![meter],
+        );
+        let repeated = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-A\0\0\0\0\0\0",
+            900_000,
+            920_000,
+            10,
+            vec![meter],
+        );
+        let other_centre = operational_revision(
+            77,
+            *b"ZNY\0",
+            *b"PLAN-B\0\0\0\0\0\0",
+            900_000,
+            910_000,
+            1,
+            vec![],
+        );
+        let other_gufi = operational_revision(
+            (1_u128 << 100) | 77,
+            *b"ZAU\0",
+            *b"PLAN-B\0\0\0\0\0\0",
+            950_000,
+            960_000,
+            2,
+            vec![],
+        );
+        let selected = forecast_latest_source_route(
+            &snapshot,
+            77,
+            *b"ZAU\0",
+            &[
+                repeated,
+                other_centre.clone(),
+                other_gufi.clone(),
+                earlier_receive.clone(),
+            ],
+        )
+        .expect("other centre is independent and equivalent reports are duplicates");
+        let reversed = forecast_latest_source_route(
+            &snapshot,
+            77,
+            *b"ZAU\0",
+            &[
+                earlier_receive.clone(),
+                other_centre,
+                other_gufi,
+                operational_revision(
+                    77,
+                    *b"ZAU\0",
+                    *b"PLAN-A\0\0\0\0\0\0",
+                    900_000,
+                    920_000,
+                    10,
+                    vec![meter],
+                ),
+            ],
+        )
+        .expect("input order does not choose duplicate provenance");
+        assert_eq!(selected, reversed);
+        assert_eq!(selected.revision, earlier_receive.revision);
+        assert_eq!(selected.revision.centre, *b"ZAU\0");
+        assert_eq!(
+            forecast_latest_source_route(&snapshot, 77, *b"ZNY\0", &[earlier_receive]),
+            Err(ForecastRefusal::NoRouteAtCutoff)
+        );
+    }
+
+    // REQ: OA-LTJ-214
+    #[test]
+    fn operational_selector_does_not_fall_back_from_latest_bad_route_and_checks_bounds() {
+        let (snapshot, meter) = fixture();
+        let good = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-A\0\0\0\0\0\0",
+            900_000,
+            910_000,
+            1,
+            vec![meter],
+        );
+        let latest_empty = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-B\0\0\0\0\0\0",
+            950_000,
+            960_000,
+            2,
+            vec![],
+        );
+        assert_eq!(
+            forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &[good.clone(), latest_empty],),
+            Err(ForecastRefusal::EmptyRoute)
+        );
+
+        let too_many = vec![good.clone(); MAX_ROUTE_REVISIONS + 1];
+        let at_capacity = vec![good.clone(); MAX_ROUTE_REVISIONS];
+        assert!(forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &at_capacity).is_ok());
+        assert_eq!(
+            forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &too_many),
+            Err(ForecastRefusal::TooManyOperationalRouteRevisions)
+        );
+        let too_many_fixes = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-C\0\0\0\0\0\0",
+            970_000,
+            980_000,
+            3,
+            vec![meter; MAX_ROUTE_FIXES + 1],
+        );
+        assert_eq!(
+            forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &[too_many_fixes]),
+            Err(ForecastRefusal::TooManyRouteFixes)
+        );
+
+        let invalid_geometry = RouteFix {
+            name: *b"BAD     ",
+            place: Place {
+                lat_deg: 91.0,
+                lon_deg: 0.0,
+            },
+            altitude_constraint: None,
+        };
+        let invalid_selected = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-C\0\0\0\0\0\0",
+            990_000,
+            995_000,
+            4,
+            vec![invalid_geometry],
+        );
+        assert_eq!(
+            forecast_latest_source_route(
+                &snapshot,
+                77,
+                *b"ZAU\0",
+                &[good.clone(), invalid_selected]
+            ),
+            Err(ForecastRefusal::InvalidRoutePlace)
+        );
+
+        for plan_id in [[0; 12], *b"PLAN\0A\0\0\0\0\0\0", [1; 12]] {
+            let invalid =
+                operational_revision(77, *b"ZAU\0", plan_id, 900_000, 910_000, 5, vec![meter]);
+            assert_eq!(
+                forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &[invalid]),
+                Err(ForecastRefusal::InvalidOperationalRouteIdentity)
+            );
+        }
+        for (source_ms, available_ms) in [(0, 910_000), (920_000, 910_000), (900_000, 0)] {
+            let invalid = operational_revision(
+                77,
+                *b"ZAU\0",
+                *b"PLAN-A\0\0\0\0\0\0",
+                source_ms,
+                available_ms,
+                6,
+                vec![meter],
+            );
+            assert_eq!(
+                forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &[invalid]),
+                Err(ForecastRefusal::InvalidOperationalRouteTime)
+            );
+        }
+        let mut no_cutoff = snapshot.clone();
+        no_cutoff.cutoff_ms = 0;
+        assert_eq!(
+            forecast_latest_source_route(&no_cutoff, 77, *b"ZAU\0", core::slice::from_ref(&good)),
+            Err(ForecastRefusal::InvalidOperationalRouteTime)
+        );
+        for centre in [[0; 4], *b"ZA\0U", [1; 4]] {
+            assert_eq!(
+                forecast_latest_source_route(&snapshot, 77, centre, core::slice::from_ref(&good)),
+                Err(ForecastRefusal::InvalidOperationalRouteIdentity)
+            );
+        }
+    }
+
+    // REQ: OA-LTJ-216
+    #[test]
+    fn operational_payload_equality_preserves_signed_zero_and_canonicalizes_invalid_nans() {
+        let (snapshot, mut fix) = fixture();
+        fix.place.lat_deg = 0.0;
+        let positive = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-A\0\0\0\0\0\0",
+            900_000,
+            910_000,
+            1,
+            vec![fix],
+        );
+        let mut negative = positive.clone();
+        negative.route.first_mut().unwrap().place.lat_deg = -0.0;
+        for inputs in [
+            [positive.clone(), negative.clone()],
+            [negative, positive.clone()],
+        ] {
+            assert_eq!(
+                forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &inputs),
+                Err(ForecastRefusal::ConflictingOperationalRouteRevision),
+            );
+        }
+        let mut nan_a = positive.clone();
+        nan_a.route.first_mut().unwrap().place.lat_deg = f64::NAN;
+        let mut nan_b = nan_a.clone();
+        nan_b.route.first_mut().unwrap().place.lat_deg = f64::from_bits(0xfff8_0000_0000_0123);
+        for inputs in [[nan_a.clone(), nan_b.clone()], [nan_b, nan_a]] {
+            assert_eq!(
+                forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &inputs),
+                Err(ForecastRefusal::InvalidRoutePlace),
+            );
+        }
+        let mut constraint_a = positive.clone();
+        constraint_a.route.first_mut().unwrap().altitude_constraint = Some(AltitudeConstraint {
+            minimum_ft: Some(0.0),
+            maximum_ft: None,
+            available_ms: 910_000,
+            provenance: ConstraintProvenance::Synthetic,
+        });
+        let mut constraint_b = constraint_a.clone();
+        constraint_b
+            .route
+            .first_mut()
+            .unwrap()
+            .altitude_constraint
+            .as_mut()
+            .unwrap()
+            .minimum_ft = Some(-0.0);
+        for inputs in [
+            [constraint_a.clone(), constraint_b.clone()],
+            [constraint_b, constraint_a],
+        ] {
+            assert_eq!(
+                forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &inputs),
+                Err(ForecastRefusal::ConflictingOperationalRouteRevision),
+            );
+        }
+    }
+
+    // REQ: OA-LTJ-215
+    #[test]
+    fn operational_selection_accounts_every_candidate_on_success_and_refusal() {
+        let (snapshot, meter) = fixture();
+        let candidate = operational_revision(
+            77,
+            *b"ZAU\0",
+            *b"PLAN-A\0\0\0\0\0\0",
+            900_000,
+            910_000,
+            1,
+            vec![meter],
+        );
+        let mut older = candidate.clone();
+        older.revision.source_ms -= 1;
+        let mut future = candidate.clone();
+        future.revision.available_ms = snapshot.cutoff_ms + 1;
+        let mut foreign = candidate.clone();
+        foreign.revision.flight_gufi |= 1_u128 << 100;
+        let mut other_centre = candidate.clone();
+        other_centre.revision.centre = *b"ZNY\0";
+        let mut inputs = vec![
+            candidate.clone(),
+            candidate.clone(),
+            older,
+            future,
+            foreign,
+            other_centre,
+        ];
+        let result = super::forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &inputs)
+            .expect("all six candidates have an explicit disposition");
+        assert_eq!(
+            result.selection,
+            OperationalRouteCounts {
+                offered: 6,
+                unexamined: 0,
+                other_flight: 1,
+                other_centre: 1,
+                future: 1,
+                eligible: 3,
+                selected: 1,
+                older_source: 1,
+                restated: 1,
+                withheld: 0,
+            }
+        );
+        inputs.get_mut(1).unwrap().revision.plan_id = *b"PLAN-B\0\0\0\0\0\0";
+        let refusal = super::forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &inputs)
+            .expect_err("contradiction withholds every eligible candidate");
+        assert_eq!(
+            refusal.reason,
+            ForecastRefusal::ConflictingOperationalRouteRevision
+        );
+        assert_eq!(
+            refusal.selection,
+            OperationalRouteCounts {
+                selected: 0,
+                older_source: 0,
+                restated: 0,
+                withheld: 3,
+                ..result.selection
+            }
+        );
+        let over = vec![candidate; MAX_ROUTE_REVISIONS + 1];
+        let refused = super::forecast_latest_source_route(&snapshot, 77, *b"ZAU\0", &over)
+            .expect_err("above the cap no candidate is scanned");
+        assert_eq!(
+            refused.selection,
+            OperationalRouteCounts {
+                offered: 257,
+                unexamined: 257,
+                ..OperationalRouteCounts::default()
+            }
+        );
     }
 
     // REQ: OA-LTJ-200

@@ -28,6 +28,23 @@ sealed-data guard.
 
 ### ORD arrival forecast experiment
 
+The core also exposes `forecast_latest_source_route` for a receiving application that needs
+source-ordered amendments. It takes `OperationalRouteCandidate` values carrying full GUFI,
+explicit reporting centre, plan identifier, source timestamp, receive availability and message
+identity. Within the 256-candidate limit, it first excludes future receipts, then selects the
+newest source event for that flight and centre. A delayed older event cannot roll the route
+back. Contradictory same-source-time payloads refuse the issue; equivalent duplicates retain
+deterministic provenance. Invalid selected geometry never falls back to an older route.
+Payload comparison uses canonical floating-point bits: signed-zero differences under the same
+source stamp are explicit contradictions; duplicate invalid NaNs still fail geometry validation.
+Successful values carry `selection` counts; `OperationalRouteRefusal` carries the same input
+denominator and disposition counts alongside `reason`. Callers can account for every candidate
+even when the forecast is withheld or the global budget prevents any candidate scan.
+
+This API does not reconstruct historical flight state, convert filed routes or change the
+experiment below. Its caller must supply the flight/track snapshot actually available at that
+cutoff. It is an integration building block, not a shared operational trajectory service.
+
 ```
 oa-legacy-traj --sfdps <dir> --tbfm <dir> --adsb <clip.oaf> --nasr <zip> --out <dir> --arrival-meter-fix <NAME|auto>
 ```
