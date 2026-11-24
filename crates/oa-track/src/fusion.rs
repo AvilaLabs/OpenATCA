@@ -243,6 +243,30 @@ pub fn fusion_tracker_config(base: &TrackerConfig, sites: &[RadarSite]) -> Track
     }
 }
 
+/// Bounded reason counts for radar conversion refusals at one fusion stage.
+/// A7: five fixed counters updated in bounded association loops; saturation is explicit.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[repr(C)]
+pub struct RadarConversionRefusals {
+    pub bad_site: u64,
+    pub bad_plot: u64,
+    pub no_height: u64,
+    pub no_convergence: u64,
+    pub unreachable: u64,
+}
+const _: () = assert!(core::mem::size_of::<RadarConversionRefusals>() == 40);
+
+fn count_conversion_refusal(counts: &mut RadarConversionRefusals, error: RadarError) {
+    let count = match error {
+        RadarError::BadSite(_) => &mut counts.bad_site,
+        RadarError::BadPlot(_) => &mut counts.bad_plot,
+        RadarError::NoHeight => &mut counts.no_height,
+        RadarError::NoConvergence => &mut counts.no_convergence,
+        RadarError::Unreachable => &mut counts.unreachable,
+    };
+    *count = count.saturating_add(1);
+}
+
 /// What the layer did. Plain record (A1); A7.2: cold struct.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct FusionStats {
@@ -308,13 +332,25 @@ pub struct FusionStats {
     /// Pairs that the exact vertical gate could reject before predicting horizontal motion.
     pub pairs_rejected_by_altitude: u64,
     pub pairs_gated: u64,
-    /// Pairs skipped for want of a height (no Mode C and no track altitude).
+    /// Legacy aggregate: exact candidate pairs where preparation or the height-specific
+    /// conversion step failed. It can include errors other than missing height. The name is
+    /// retained for output compatibility; reason-specific counts are in
+    /// `pair_conversion_refusals`.
     pub no_height_pairs: u64,
+    /// Reason breakdown for conversion attempts at each fusion stage. These are diagnostic
+    /// subsets of existing refusal totals, not additional refused work.
+    pub hard_conversion_refusals: RadarConversionRefusals,
+    pub pair_conversion_refusals: RadarConversionRefusals,
+    pub candidate_pair_conversion_refusals: RadarConversionRefusals,
+    pub addressed_init_conversion_refusals: RadarConversionRefusals,
+    pub anonymous_init_conversion_refusals: RadarConversionRefusals,
     pub cand_started: u64,
     pub cand_joined: u64,
     pub cand_confirmed: u64,
     pub cand_expired: u64,
-    /// Unassigned plots that could not start a candidate (no altitude).
+    /// Legacy aggregate: unassigned plots whose candidate conversion returned any `RadarError`.
+    /// The name is retained for output compatibility; reason-specific counts are in the two
+    /// initiation conversion breakdowns.
     pub cand_no_height: u64,
     pub cand_capacity: u64,
     /// A confirmed candidate refused for track capacity or exhaustion of local keys.
@@ -1702,41 +1738,45 @@ fn assoc_prepare(f: &mut Fusion, radar: usize, polar_remaining: &mut usize) -> O
                 continue;
             }
         };
-        let Ok(c) = plot_convert(&g, &s, p, &bias, track_height(&row), p.addr) else {
-            f.stats.plots_refused += 1;
-            if let Some(d) = dec.get_mut(j) {
-                d.kind = D_REFUSED;
-            }
-            log_forensic_if_enabled!(
-                f,
-                ForensicRow {
-                    t_ns: p.time_ns,
-                    ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
-                    range_m: p.range_m,
-                    az_deg: p.az_deg,
-                    alt_ft: p.alt_ft,
-                    plot_addr: p.addr,
-                    label: p.label,
-                    mode_a: p.mode_a,
-                    radar: r8,
-                    action: FORENSIC_REFUSED,
-                    selected_key: FORENSIC_NONE,
-                    selected_cost: FORENSIC_NO_COST,
-                    alternate_key: FORENSIC_NONE,
-                    alternate_cost: FORENSIC_NO_COST,
-                    ambiguous: false,
-                    hold_run: 0,
-                    held: false,
-                    forced: false,
-                    component_size: 0,
-                    solver_path: PATH_NONE,
-                    exclusion_regret: 0.0,
-                    regret_status: REGRET_NONE,
-                    incomplete: false,
-                    capped: false,
+        let c = match plot_convert(&g, &s, p, &bias, track_height(&row), p.addr) {
+            Ok(c) => c,
+            Err(error) => {
+                count_conversion_refusal(&mut f.stats.hard_conversion_refusals, error);
+                f.stats.plots_refused += 1;
+                if let Some(d) = dec.get_mut(j) {
+                    d.kind = D_REFUSED;
                 }
-            );
-            continue;
+                log_forensic_if_enabled!(
+                    f,
+                    ForensicRow {
+                        t_ns: p.time_ns,
+                        ordinal: u32::try_from(j).unwrap_or(FORENSIC_NONE),
+                        range_m: p.range_m,
+                        az_deg: p.az_deg,
+                        alt_ft: p.alt_ft,
+                        plot_addr: p.addr,
+                        label: p.label,
+                        mode_a: p.mode_a,
+                        radar: r8,
+                        action: FORENSIC_REFUSED,
+                        selected_key: FORENSIC_NONE,
+                        selected_cost: FORENSIC_NO_COST,
+                        alternate_key: FORENSIC_NONE,
+                        alternate_cost: FORENSIC_NO_COST,
+                        ambiguous: false,
+                        hold_run: 0,
+                        held: false,
+                        forced: false,
+                        component_size: 0,
+                        solver_path: PATH_NONE,
+                        exclusion_regret: 0.0,
+                        regret_status: REGRET_NONE,
+                        incomplete: false,
+                        capped: false,
+                    }
+                );
+                continue;
+            }
         };
         let pc = pair_cost(&row, &c, p, s.alt_quantum_ft, last_ns);
         let cost = pc.dh_gate + pc.dv_gate;
@@ -2063,7 +2103,7 @@ fn assoc_plot(
     let paz = (p.az_deg - bias.az_deg).rem_euclid(360.0);
     let converted_once = ra.conv_own.get(a).copied().flatten();
     let prepared = if converted_once.is_none() {
-        plot_prepare(&s, p, &bias).ok()
+        Some(plot_prepare(&s, p, &bias))
     } else {
         None
     };
@@ -2182,17 +2222,27 @@ fn assoc_plot(
                 continue;
             }
         };
-        let conv = match converted_once {
-            Some(c) => c,
-            None => match prepared.as_ref().and_then(|terms| {
-                plot_convert_prepared(&g, &s, p, terms, track_height(&row), t.key).ok()
-            }) {
-                Some(c) => c,
-                None => {
-                    f.stats.no_height_pairs += 1;
-                    continue;
+        let conversion = match converted_once {
+            Some(c) => Ok(c),
+            None => match prepared.as_ref() {
+                Some(Ok(terms)) => {
+                    plot_convert_prepared(&g, &s, p, terms, track_height(&row), t.key)
                 }
+                Some(Err(error)) => Err(*error),
+                None => continue,
             },
+        };
+        let conv = match conversion {
+            Ok(c) => c,
+            Err(error) => {
+                count_conversion_refusal(&mut f.stats.pair_conversion_refusals, error);
+                // Preserve the historical aggregate's value and output contract.
+                // The previous Option chain counted preparation failures as well as prepared
+                // conversion failures. Preserve that aggregate exactly; classify the reason
+                // independently so diagnostics do not redefine the qualification denominator.
+                f.stats.no_height_pairs += 1;
+                continue;
+            }
         };
         spent += 1;
         f.stats.pairs_tested += 1;
@@ -3414,9 +3464,16 @@ fn initiate_candidates(
     for &j in &free {
         let Some(p) = plots.get(j) else { continue };
         if f.cfg.use_address && p.addr != NO_ADDR {
-            let Ok(c) = plot_convert(g, s, p, &bias, None, p.addr) else {
-                f.stats.cand_no_height += 1;
-                continue;
+            let c = match plot_convert(g, s, p, &bias, None, p.addr) {
+                Ok(c) => c,
+                Err(error) => {
+                    count_conversion_refusal(
+                        &mut f.stats.addressed_init_conversion_refusals,
+                        error,
+                    );
+                    f.stats.cand_no_height += 1;
+                    continue;
+                }
             };
             // Plot times were checked against the epoch when offered.
             let Some(scan) = scan_of(f, radar, p.time_ns) else {
@@ -3604,7 +3661,10 @@ fn initiate_candidates(
                 (Some(c.m), Some((q, 1.03 * noise)))
             }
             // The conversion fails for every candidate alike.
-            Some(Err(_)) => continue,
+            Some(Err(error)) => {
+                count_conversion_refusal(&mut f.stats.candidate_pair_conversion_refusals, *error);
+                continue;
+            }
             None => (None, None),
         };
         let pair_start = pairs.len();
@@ -3744,8 +3804,15 @@ fn initiate_candidates(
                         .map(|m| m.alt_ft)
                         .filter(|&a| a != NONE_I32);
                     let h = last_alt.map(|a| (f64::from(a) * FT_M, 15.0));
-                    let Ok(conv) = plot_convert(g, s, p, &bias, h, NO_ADDR) else {
-                        continue;
+                    let conv = match plot_convert(g, s, p, &bias, h, NO_ADDR) {
+                        Ok(conv) => conv,
+                        Err(error) => {
+                            count_conversion_refusal(
+                                &mut f.stats.candidate_pair_conversion_refusals,
+                                error,
+                            );
+                            continue;
+                        }
                     };
                     conv.m
                 }
@@ -3809,7 +3876,10 @@ fn initiate_candidates(
         // Starts a candidate if it has an altitude to convert at.
         match plot_convert(g, s, p, &bias, None, NO_ADDR) {
             Ok(c) => start_candidate(f, radar, NO_ADDR, c.m, p.label, scan),
-            Err(_) => f.stats.cand_no_height += 1,
+            Err(error) => {
+                count_conversion_refusal(&mut f.stats.anonymous_init_conversion_refusals, error);
+                f.stats.cand_no_height += 1;
+            }
         }
     }
     f.ms_buf = ms;
@@ -4083,6 +4153,40 @@ mod tests {
 
     fn plots_of(lines: &[Line], scans: i64, seed: u64, mode_s: bool) -> Vec<RadarPlot> {
         plots_of_site(&SITE, lines, scans, seed, mode_s)
+    }
+
+    // REQ: OA-PRF-014
+    #[test]
+    fn conversion_refusal_reasons_distinguish_missing_height_from_bad_geometry() {
+        let geom = radar_geom(&SITE);
+        let mut plot = RadarPlot {
+            time_ns: 1_000_000_000,
+            range_m: 60_000.0,
+            az_deg: 100.0,
+            alt_ft: NONE_ALT,
+            addr: NO_ADDR,
+            label: NO_ADDR,
+            mode_a: NONE_CODE,
+        };
+        let missing_height = plot_convert(&geom, &SITE, &plot, &NO_BIAS, None, NO_ADDR)
+            .expect_err("height is intentionally absent");
+        plot.range_m = -1.0;
+        let bad_plot = plot_convert(&geom, &SITE, &plot, &NO_BIAS, None, NO_ADDR)
+            .expect_err("negative range is invalid plot geometry");
+        plot.range_m = 1_000.0;
+        plot.alt_ft = 50_000;
+        let unreachable = plot_convert(&geom, &SITE, &plot, &NO_BIAS, None, NO_ADDR)
+            .expect_err("altitude is above what this range can reach");
+
+        let mut reasons = RadarConversionRefusals::default();
+        count_conversion_refusal(&mut reasons, missing_height);
+        count_conversion_refusal(&mut reasons, bad_plot);
+        count_conversion_refusal(&mut reasons, unreachable);
+        assert_eq!(reasons.no_height, 1);
+        assert_eq!(reasons.bad_plot, 1);
+        assert_eq!(reasons.unreachable, 1);
+        assert_eq!(reasons.bad_site, 0);
+        assert_eq!(reasons.no_convergence, 0);
     }
 
     /// The same, seen from `site` (the lines are in the plane of `SITE`).

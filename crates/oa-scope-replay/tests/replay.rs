@@ -22,6 +22,7 @@ use oa_scope_replay::frame::{
     replay_build, replay_build_raw, replay_build_with_safety, replay_new, replay_raster,
     ReplayConfig, ReplayError, ReplaySafety,
 };
+use oa_scope_replay::publication::Publisher;
 use oa_scope_replay::raw::{RawObservationColumns, RAW_STALE_CUTOFF_NS};
 use oa_scope_replay::rows::*;
 use oa_scope_replay::store::*;
@@ -1756,6 +1757,68 @@ fn raw_hashes(out: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+// REQ: OA-DSP-076
+#[test]
+fn overwrite_is_locked_before_deletion_and_input_output_aliases_are_refused() {
+    let dir = tmp("raw-overwrite-lock-and-collision");
+    let (snap, clip) = write_inputs(&dir);
+    let out = dir.join("output");
+    std::fs::create_dir(&out).unwrap();
+    let mut active = Publisher::open(&out, 4, false).unwrap();
+    active.publish_frame(0, b"active-complete-frame").unwrap();
+    let original_frame = std::fs::read(out.join("frame-0000.ppm")).unwrap();
+
+    let mut overwrite = raw_cli_args(&snap, &clip, &out, "recorded");
+    overwrite.extend(args(&["--overwrite"]));
+    let (result, said) = run_text(&overwrite);
+    assert!(result.is_err(), "{said}");
+    assert!(
+        said.contains("another publisher owns this output directory"),
+        "{said}"
+    );
+    assert_eq!(
+        std::fs::read(out.join("frame-0000.ppm")).unwrap(),
+        original_frame
+    );
+
+    drop(active);
+    let alias_out = dir.join("input-alias-output");
+    std::fs::create_dir(&alias_out).unwrap();
+    let aliased_clip = alias_out.join("hashes.txt");
+    std::fs::copy(&clip, &aliased_clip).unwrap();
+    let original_clip = std::fs::read(&aliased_clip).unwrap();
+    let mut collision = raw_cli_args(&snap, &aliased_clip, &alias_out, "recorded");
+    collision.extend(args(&["--overwrite"]));
+    let (result, said) = run_text(&collision);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("collides with generated output"), "{said}");
+    assert_eq!(std::fs::read(&aliased_clip).unwrap(), original_clip);
+    assert!(!alias_out.join("frame-0000.ppm").exists(), "{said}");
+}
+
+// REQ: OA-DSP-076
+#[test]
+fn oversized_overwrite_directory_is_refused_before_any_owned_file_is_removed() {
+    let dir = tmp("raw-overwrite-bounded-preflight");
+    let (snap, clip) = write_inputs(&dir);
+    let out = dir.join("output");
+    std::fs::create_dir(&out).unwrap();
+    let owned = out.join("frame-0000.ppm");
+    std::fs::write(&owned, b"keep this prior output").unwrap();
+    for index in 0..10_010 {
+        std::fs::File::create(out.join(format!("unrelated-{index:05}"))).unwrap();
+    }
+    let mut overwrite = raw_cli_args(&snap, &clip, &out, "recorded");
+    overwrite.extend(args(&["--overwrite"]));
+    let (result, said) = run_text(&overwrite);
+    assert!(result.is_err(), "{said}");
+    assert!(
+        said.contains("output directory exceeds its bounded entry limit"),
+        "{said}"
+    );
+    assert_eq!(std::fs::read(&owned).unwrap(), b"keep this prior output");
+}
+
 // REQ: OA-DSP-072
 #[test]
 fn raw_only_cli_applies_observation_and_declared_receipt_cutoffs() {
@@ -1818,7 +1881,7 @@ fn raw_only_cli_applies_observation_and_declared_receipt_cutoffs() {
     assert!(said.contains("RAW SURVEILLANCE ONLY"), "{said}");
 }
 
-// REQ: OA-SCP-200
+// REQ: OA-SCP-200, OA-DSP-074
 #[test]
 fn raw_replay_witness_verifies_restart_prefix_and_fails_closed_on_damage_or_mismatch() {
     let dir = tmp("raw-restart-witness");
@@ -1841,6 +1904,48 @@ fn raw_replay_witness_verifies_restart_prefix_and_fails_closed_on_damage_or_mism
     assert!(
         said.contains("integrity checksum; not authenticated"),
         "{said}"
+    );
+
+    // A closed witness from the full run permits publication recovery after only a completed
+    // prefix was left behind. The input and every output byte are recomputed from frame zero.
+    let resumed_dir = dir.join("resumed-prefix");
+    std::fs::create_dir(&resumed_dir).unwrap();
+    std::fs::copy(
+        dir.join("first/frame-0000.ppm"),
+        resumed_dir.join("frame-0000.ppm"),
+    )
+    .unwrap();
+    let mut resume_args = raw_cli_args(&snap, &clip, &resumed_dir, "recorded");
+    resume_args.extend(args(&[
+        "--verify-raw-witness",
+        witness.to_str().unwrap(),
+        "--resume-raw-publication",
+    ]));
+    let (resumed, said) = run_text(&resume_args);
+    assert!(resumed.is_ok(), "{said}");
+    assert_eq!(raw_hashes(&resumed_dir), original_hashes);
+    for index in 0..original_hashes.len() {
+        assert_eq!(
+            std::fs::read(resumed_dir.join(format!("frame-{index:04}.ppm"))).unwrap(),
+            std::fs::read(dir.join(format!("first/frame-{index:04}.ppm"))).unwrap()
+        );
+    }
+
+    let truncated_dir = dir.join("truncated-prefix");
+    std::fs::create_dir(&truncated_dir).unwrap();
+    std::fs::write(truncated_dir.join("frame-0000.ppm"), b"partial PPM").unwrap();
+    let mut truncated_args = raw_cli_args(&snap, &clip, &truncated_dir, "recorded");
+    truncated_args.extend(args(&[
+        "--verify-raw-witness",
+        witness.to_str().unwrap(),
+        "--resume-raw-publication",
+    ]));
+    let (truncated, said) = run_text(&truncated_args);
+    assert!(truncated.is_err(), "{said}");
+    assert!(said.contains("wrong size"), "{said}");
+    assert_eq!(
+        std::fs::read(truncated_dir.join("frame-0000.ppm")).unwrap(),
+        b"partial PPM"
     );
 
     let mut verify_args = raw_cli_args(&snap, &clip, &dir.join("restarted"), "recorded");
@@ -2010,6 +2115,22 @@ fn raw_replay_witness_verifies_restart_prefix_and_fails_closed_on_damage_or_mism
     assert!(result.is_err(), "{said}");
     assert!(said.contains("settings differ"), "{said}");
     assert!(!dir.join("settings-out").exists(), "{said}");
+
+    let mut changed_settings_with_prefix = raw_cli_args(&snap, &clip, &resumed_dir, "recorded");
+    let centre = changed_settings_with_prefix
+        .iter()
+        .position(|arg| arg == "--centre")
+        .unwrap();
+    changed_settings_with_prefix[centre + 1] = "41.9786,-87.9047".into();
+    changed_settings_with_prefix.extend(args(&[
+        "--verify-raw-witness",
+        witness.to_str().unwrap(),
+        "--resume-raw-publication",
+    ]));
+    let (result, said) = run_text(&changed_settings_with_prefix);
+    assert!(result.is_err(), "{said}");
+    assert!(said.contains("settings differ"), "{said}");
+    assert_eq!(raw_hashes(&resumed_dir), original_hashes);
 
     let changed_clip = dir.join("changed.oaf");
     let mut changed_bytes = std::fs::read(&clip).unwrap();

@@ -28,4 +28,4 @@ pub mod core;
 pub mod shell;
 
 pub use crate::core::{frame, raw, rows};
-pub use crate::shell::{adapt, cli, store};
+pub use crate::shell::{adapt, cli, publication, store};

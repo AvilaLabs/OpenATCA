@@ -4,6 +4,7 @@
 //! the crate root, so `oa_display::traffic` is `oa_display::core::traffic`.
 
 pub mod font;
+pub mod interaction;
 pub mod list;
 pub mod ownership;
 pub mod palette;

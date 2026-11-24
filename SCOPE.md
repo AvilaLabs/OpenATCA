@@ -365,7 +365,7 @@ decoded by our own code.
 | TBFM schedules and estimates | M2 baseline, M4 | SWIM TBFM | **Have**, recording |
 | TFMS flight data, traffic management programmes | M2 baseline, M4 | SWIM TFMS | **Have**, recording |
 | NOTAMs | M4, M5 (temporary restrictions) | SWIM FNS | **Have**, recording |
-| Terminal surveillance and flight data | M3 terminal | SWIM STDDS | Account not approved |
+| Terminal surveillance and flight data | M3 terminal | SWIM STDDS | Subscription approved 2026-11-19; preliminary 2026-11-20 census has 4.5 million updates across 142 facilities (UK-009). Comparator evidence is unfinished. `adsb=false` does not establish radar-only or independent positioning. |
 | ADS-B history (truth, tracker input) | M2, M3 | adsb.lol history, ODbL | Format sample (2026-11-13, first part) **have**; the recorded days publish about 03:30Z the next day |
 | ADS-B live, independent of the FAA | M3, M7 | Own receiver (about $40) | Purchase needs Connor |
 | ADS-B history, research grade | M3 | OpenSky, research licence, non-redistributable | Application pending |
@@ -453,7 +453,7 @@ To close:
 - ADS-B history for the same 24 hours and region (adsb.lol) decoded into the same replay.
 - Weather for the same day captured (HRRR winds, aviationweather.gov products) before it ages
   out.
-- STDDS added when the account is approved (does not block closing).
+- STDDS added after the subscription was approved (does not block closing); preliminary census recorded, comparator evidence unfinished.
 
 Exit: one command replays the day with all sources merged; two runs give the same hash; feed
 health shows no unexplained gaps.

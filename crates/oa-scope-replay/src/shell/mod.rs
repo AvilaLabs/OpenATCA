@@ -4,4 +4,5 @@
 
 pub mod adapt;
 pub mod cli;
+pub mod publication;
 pub mod store;

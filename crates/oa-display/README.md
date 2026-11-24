@@ -26,6 +26,7 @@ module's class.
 | `traffic` | core  | live targets to display list: symbols, leader, trail, data block    |
 | `safety`  | core  | net-state banner, inhibition areas, feed states, picture frozen     |
 | `text`    | core  | fixed-size stack text buffer: the data block text, no allocation    |
+| `interaction` | core | operator target selection, bounded typed-intent queue and status text |
 | `ppm`     | shell | binary PPM (P6) writer                                             |
 | `cli`     | shell | the `oa-scope` command line, file reads and writes                 |
 
@@ -143,6 +144,38 @@ Peak memory of a run, from the named capacities: the row store is at most 2^24 r
 practice); one tracker output table, the display tables and the frame buffer (`width * height * 4`,
 8 MiB at 1920x1080) are small beside them. Together at most about 1.1 GiB, reached only by a
 window larger than any clip this tool is sized for; a typical hour is a few hundred MiB.
+
+## Controller interaction
+
+`interaction` is the pure controller-facing foundation. The regional runner supplies a bounded
+current view (at most 4,096 rows per operation), a nonzero view sequence, and a full flight key:
+the 16 GUFI network bytes, aircraft address, four centre bytes and 12 plan-ID bytes. A target can
+be selected as a raw track for display, or bound only when exactly one current row claims the
+address and its full identity matches. Raw-track selections cannot queue control. Duplicate
+addresses, ambiguous identity claims, stale generations, backwards view/input sequences, malformed
+reserved bytes, missing tracks and queue overflow return named refusals and remain visible in the
+status overlay.
+
+The fixed queue holds 32 typed requests: assigned/interim altitude set or clear, and handoff
+offer/accept/take/cancel using stable unit IDs. Each row captures the full identity, target
+generation, source view sequence, operator input sequence and issue-time timestamp. Input sequence
+numbers advance only when a request is queued; a refusal does not consume its number, allowing a
+caller to retry after refreshing a stale view or freeing queue capacity. Accepted issue timestamps
+must be nondecreasing. The timestamp is supplied by the regional runner and is audit evidence, not
+authority for applying a command. A later address reuse cannot change that captured key. The bridge
+reads the head, explicitly preflights it against a current view, and must complete that exact input
+sequence with an accepted, refused or stale outcome; a mismatched completion leaves the head in
+place. The display crate does not mutate flight state and has no `oa-flight` dependency. The
+approved regional bridge remains responsible for applying the intent through `oa-flight` and
+checking authoritative state.
+
+`present_interaction` takes the active `Projection`, places its text below that projection's
+reserved top inset, and checks that the complete text fits the viewport and remaining display-list
+text capacity before appending either line. It tries top-right, bottom-right, bottom-left, then
+top-left positions, keeping 42 pixels clear above bottom notices and avoiding higher-priority filled
+rectangles with a bounded scan. A narrow or short viewport, covered positions, or inconsistent
+display-list storage return an explicit error without changing the list. The interaction overlay
+uses layer 13, above the legend and traffic, below the safety banner.
 
 ## Display list
 

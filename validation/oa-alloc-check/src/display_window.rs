@@ -10,10 +10,15 @@ use oa_airspace::model::{
     stratum, time_code, AirwayLegIx, Meta, Model, PointIx, PosE7, RouteIx, SegIx, Span, StrIx,
     StrTable, VertexIx, ALT_NONE, ELEV_NONE,
 };
-use oa_display::list::{list_clear, list_new, DisplayList};
+use oa_display::interaction::{
+    complete_oldest, enqueue_intent, interaction_new, next_intent, preflight_oldest,
+    present_interaction, select_target, CommandOutcome, FlightIdentity, Intent, InteractionResult,
+    TargetView,
+};
+use oa_display::list::{list_clear, list_new, DisplayList, ListCaps};
 use oa_display::palette::{ALERT, PALETTE};
 use oa_display::project::projection_new;
-use oa_display::raster::frame_digest;
+use oa_display::raster::{frame_digest, frame_len, rasterize, FrameSpec};
 use oa_display::safety::{FeedState, FeedStatus};
 use oa_display::scene::{build_scene, scene_caps, scene_index, scratch_for, view_new};
 use oa_display::traffic::{
@@ -74,6 +79,13 @@ pub(super) struct DisplayEvidence {
     pub raw_drawn: u64,
     pub raw_capacity_refused: u64,
     pub raw_invalid_refused: u64,
+    pub interaction_selected: u64,
+    pub interaction_refused: u64,
+    pub interaction_queued: u64,
+    pub interaction_preflighted: u64,
+    pub interaction_completed: u64,
+    pub interaction_presented: u64,
+    pub interaction_rasterized: u64,
     pub injected: bool,
 }
 
@@ -793,6 +805,124 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         return Err("a measured cloned-scratch scene failed");
     }
 
+    // Interaction state, its view, display list and frame are all prebuilt before the C5 window.
+    // The measured route retries one stale-view refusal, queues the same input sequence against
+    // the fresh view, preflights the captured full identity, appends the overlay and rasterizes it.
+    const INTERACTION_FRAMES: i64 = 20;
+    let interaction_projection =
+        projection_new(ORD.0, ORD.1, 60.0, 640, 400, 104).map_err(|_| "interaction projection")?;
+    let interaction_spec = FrameSpec {
+        width: 640,
+        height: 400,
+        stride: 640 * 4,
+    };
+    let mut interaction_pixels = vec![0; frame_len(&interaction_spec)];
+    let mut interaction_list = list_new(ListCaps {
+        lines: 0,
+        rects: 0,
+        circles: 0,
+        polylines: 0,
+        poly_vertices: 0,
+        texts: 2,
+        text_bytes: 64,
+    })
+    .map_err(|_| "interaction list")?;
+    let interaction_identity = FlightIdentity {
+        gufi: [7; 16],
+        aircraft_address: 0xA10101,
+        centre: *b"ZAU ",
+        plan_id: *b"PLAN00000001",
+    };
+    let interaction_views = [TargetView {
+        address: interaction_identity.aircraft_address,
+        generation: 3,
+        identity_claims: 1,
+        identity_present: 1,
+        reserved: 0,
+        identity: interaction_identity,
+    }];
+    let mut interaction_state = interaction_new();
+    let mut interaction_selected = 0u64;
+    let mut interaction_refused = 0u64;
+    let mut interaction_queued = 0u64;
+    let mut interaction_preflighted = 0u64;
+    let mut interaction_completed = 0u64;
+    let mut interaction_presented = 0u64;
+    let mut interaction_rasterized = 0u64;
+    let mut interaction_ok = true;
+    let c = measure(inject, INTERACTION_FRAMES, |k| {
+        list_clear(&mut interaction_list);
+        let sequence = u32::try_from(k).map_or(u32::MAX, |n| n.saturating_add(1));
+        let view_sequence = sequence.saturating_mul(2).saturating_sub(1);
+        interaction_selected += u64::from(
+            select_target(
+                &mut interaction_state,
+                &interaction_views,
+                view_sequence,
+                interaction_identity.aircraft_address,
+                3,
+                Some(interaction_identity),
+            ) == InteractionResult::Applied,
+        );
+        interaction_refused += u64::from(
+            enqueue_intent(
+                &mut interaction_state,
+                &interaction_views,
+                view_sequence.saturating_sub(1),
+                sequence,
+                u64::from(sequence).saturating_add(100),
+                Intent::SetAssignedAltitude(12_000),
+            ) == InteractionResult::Refused(oa_display::interaction::Refusal::StaleView),
+        );
+        let queued = enqueue_intent(
+            &mut interaction_state,
+            &interaction_views,
+            view_sequence,
+            sequence,
+            u64::from(sequence).saturating_add(100),
+            Intent::SetAssignedAltitude(12_000),
+        );
+        interaction_queued += u64::from(queued == InteractionResult::Applied);
+        let head_matches = next_intent(&interaction_state).is_some_and(|command| {
+            command.identity == interaction_identity && command.input_sequence == sequence
+        });
+        let preflighted =
+            preflight_oldest(&mut interaction_state, &interaction_views, view_sequence);
+        interaction_preflighted +=
+            u64::from(head_matches && preflighted == InteractionResult::Applied);
+        interaction_ok &= present_interaction(
+            &interaction_state,
+            &mut interaction_list,
+            &interaction_projection,
+        )
+        .is_ok();
+        interaction_presented += u64::from(interaction_list.texts.x.len() == 2);
+        interaction_ok &= rasterize(
+            &interaction_list,
+            &interaction_spec,
+            &mut interaction_pixels,
+        )
+        .is_ok();
+        interaction_rasterized +=
+            u64::from(frame_digest(&interaction_spec, &interaction_pixels).is_ok());
+        interaction_completed += u64::from(
+            complete_oldest(&mut interaction_state, sequence, CommandOutcome::Accepted)
+                == InteractionResult::Applied,
+        );
+    })?;
+    add_counts(&mut counts, c);
+    if !interaction_ok
+        || interaction_selected != INTERACTION_FRAMES as u64
+        || interaction_refused != INTERACTION_FRAMES as u64
+        || interaction_queued != INTERACTION_FRAMES as u64
+        || interaction_preflighted != INTERACTION_FRAMES as u64
+        || interaction_completed != INTERACTION_FRAMES as u64
+        || interaction_presented != INTERACTION_FRAMES as u64
+        || interaction_rasterized != INTERACTION_FRAMES as u64
+    {
+        return Err("measured interaction selection, retry, queue, presentation, or draw failed");
+    }
+
     Ok(DisplayEvidence {
         counts,
         convert_added: u64::from(convert.added),
@@ -817,6 +947,13 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         raw_drawn,
         raw_capacity_refused,
         raw_invalid_refused,
+        interaction_selected,
+        interaction_refused,
+        interaction_queued,
+        interaction_preflighted,
+        interaction_completed,
+        interaction_presented,
+        interaction_rasterized,
         injected: true,
     })
 }

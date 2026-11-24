@@ -1,0 +1,430 @@
+#![forbid(unsafe_code)]
+//! CLI shell for normalized regional-session input staging and composed offline execution.
+
+use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+
+use oa_regional_session::{
+    flush_receipt_group, parse_event_line, push_event, session_cursor_new, session_total_events,
+    summarize_input_batch, FrameEvidence, InputError, MAX_EVENT_LINE_BYTES, MAX_SESSION_EVENTS,
+};
+
+const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowAccounting {
+    admitted: u64,
+    refused: u64,
+    unexamined: u64,
+    denominator: u64,
+}
+
+#[derive(Debug)]
+enum CliError {
+    Usage,
+    Io(io::Error),
+    InputTooLarge,
+    InvalidUtf8,
+    BadHeader,
+    MissingHeader,
+    BadLine {
+        line: usize,
+        error: InputError,
+        accounting: RowAccounting,
+    },
+    Ordering {
+        line: usize,
+        message: &'static str,
+        accounting: RowAccounting,
+    },
+    OutputExists,
+    TooManyEvents,
+    Runtime(String),
+}
+
+fn arguments() -> Result<
+    (
+        PathBuf,
+        PathBuf,
+        Option<oa_regional_session::cli::ModelSource>,
+    ),
+    CliError,
+> {
+    let mut args = env::args_os().skip(1);
+    let command = args.next().ok_or(CliError::Usage)?;
+    let execute = match command.to_str() {
+        Some("run") => true,
+        Some("stage") => false,
+        _ => return Err(CliError::Usage),
+    };
+    let mut input = None;
+    let mut output = None;
+    let mut model = None;
+    let mut count = 0;
+    while let Some(arg) = args.next() {
+        count += 1;
+        if count > 3 {
+            return Err(CliError::Usage);
+        }
+        match arg.to_str() {
+            Some("--input") if input.is_none() => input = args.next().map(PathBuf::from),
+            Some("--out") if output.is_none() => output = args.next().map(PathBuf::from),
+            Some("--snapshot") if execute && model.is_none() => {
+                model = Some(oa_regional_session::cli::ModelSource::Snapshot(
+                    args.next().map(PathBuf::from).ok_or(CliError::Usage)?,
+                ))
+            }
+            Some("--synthetic-model") if execute && model.is_none() => {
+                model = Some(oa_regional_session::cli::ModelSource::Synthetic)
+            }
+            _ => return Err(CliError::Usage),
+        }
+    }
+    let input = input.ok_or(CliError::Usage)?;
+    let output = output.ok_or(CliError::Usage)?;
+    if execute && model.is_none() {
+        return Err(CliError::Usage);
+    }
+    Ok((input, output, model))
+}
+
+fn read_input(path: &Path) -> Result<Vec<u8>, CliError> {
+    let (file, len) = oa_sealed::open_regular(path).map_err(CliError::Io)?;
+    if len > MAX_INPUT_BYTES {
+        return Err(CliError::InputTooLarge);
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_INPUT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(CliError::Io)?;
+    let byte_count = u64::try_from(bytes.len()).map_err(|_| CliError::InputTooLarge)?;
+    if byte_count > MAX_INPUT_BYTES {
+        return Err(CliError::InputTooLarge);
+    }
+    Ok(bytes)
+}
+
+fn count_nonempty_rows<'a>(lines: impl Iterator<Item = &'a str>) -> Result<u64, CliError> {
+    let mut count = 0u64;
+    for line in lines {
+        if !line.is_empty() {
+            count = count.checked_add(1).ok_or(CliError::TooManyEvents)?;
+        }
+    }
+    Ok(count)
+}
+
+fn row_accounting(admitted: u64, unexamined: u64) -> Result<RowAccounting, CliError> {
+    let denominator = admitted
+        .checked_add(1)
+        .and_then(|count| count.checked_add(unexamined))
+        .ok_or(CliError::TooManyEvents)?;
+    Ok(RowAccounting {
+        admitted,
+        refused: 1,
+        unexamined,
+        denominator,
+    })
+}
+
+fn row_failure_accounting<'a>(
+    cursor: &oa_regional_session::SessionCursor,
+    remaining_lines: impl Iterator<Item = &'a str>,
+) -> Result<RowAccounting, CliError> {
+    row_accounting(
+        session_total_events(cursor),
+        count_nonempty_rows(remaining_lines)?,
+    )
+}
+
+fn parse_input(bytes: &[u8]) -> Result<Vec<FrameEvidence>, CliError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| CliError::InvalidUtf8)?;
+    let mut lines = text.split('\n');
+    match lines.next() {
+        Some("OA-RS\t1") => {}
+        Some(_) => return Err(CliError::BadHeader),
+        None => return Err(CliError::MissingHeader),
+    }
+    let mut cursor = session_cursor_new();
+    let mut evidence = Vec::new();
+    let mut line_number = 1usize;
+    while let Some(raw) = lines.next() {
+        line_number = line_number.checked_add(1).ok_or(CliError::TooManyEvents)?;
+        if raw.is_empty() {
+            continue;
+        }
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if line.len() > MAX_EVENT_LINE_BYTES {
+            let accounting = row_failure_accounting(&cursor, lines)?;
+            return Err(CliError::BadLine {
+                line: line_number,
+                error: InputError::RowTooLong,
+                accounting,
+            });
+        }
+        if cursor_total(&cursor) >= MAX_SESSION_EVENTS as u64 {
+            let accounting = row_failure_accounting(&cursor, lines)?;
+            return Err(CliError::Ordering {
+                line: line_number,
+                message: "session event capacity reached",
+                accounting,
+            });
+        }
+        let event = match parse_event_line(line) {
+            Ok(event) => event,
+            Err(error) => {
+                let accounting = row_failure_accounting(&cursor, lines)?;
+                return Err(CliError::BadLine {
+                    line: line_number,
+                    error,
+                    accounting,
+                });
+            }
+        };
+        let completed = match push_event(&mut cursor, event) {
+            Ok(completed) => completed,
+            Err(error) => {
+                let message = match error {
+                    oa_regional_session::SessionError::CursorClosed => "session cursor is closed",
+                    oa_regional_session::SessionError::InvalidTime => {
+                        "event time is negative or source time is after receipt time"
+                    }
+                    oa_regional_session::SessionError::SealedTimestamp => {
+                        "sealed source or receipt timestamp refused"
+                    }
+                    oa_regional_session::SessionError::ReceiptRegression => {
+                        "receipt time moved backward"
+                    }
+                    oa_regional_session::SessionError::EqualTimeOrderRegression => {
+                        "equal-time source order moved backward"
+                    }
+                    oa_regional_session::SessionError::SequenceRegression => {
+                        "source sequence is not increasing"
+                    }
+                    oa_regional_session::SessionError::ReceiptGroupFull => {
+                        "receipt group capacity reached"
+                    }
+                    oa_regional_session::SessionError::EventCountOverflow => {
+                        "event counter overflow"
+                    }
+                    oa_regional_session::SessionError::SessionFull => {
+                        "session event capacity reached"
+                    }
+                    oa_regional_session::SessionError::NoPendingGroup => {
+                        "receipt group state invalid"
+                    }
+                };
+                let accounting = row_failure_accounting(&cursor, lines)?;
+                return Err(CliError::Ordering {
+                    line: line_number,
+                    message,
+                    accounting,
+                });
+            }
+        };
+        if let Some(batch) = completed {
+            evidence.push(summarize_input_batch(&batch).map_err(|_| CliError::TooManyEvents)?);
+        }
+    }
+    if let Some(batch) = flush_receipt_group(&mut cursor).map_err(|_| CliError::TooManyEvents)? {
+        evidence.push(summarize_input_batch(&batch).map_err(|_| CliError::TooManyEvents)?);
+    }
+    Ok(evidence)
+}
+
+fn cursor_total(cursor: &oa_regional_session::SessionCursor) -> u64 {
+    session_total_events(cursor)
+}
+
+fn write_report(path: &Path, frames: &[FrameEvidence]) -> Result<(), CliError> {
+    oa_sealed::refuse_io(path).map_err(CliError::Io)?;
+    if path.exists() {
+        return Err(CliError::OutputExists);
+    }
+    fs::create_dir(path).map_err(CliError::Io)?;
+    let report_path = path.join("session-report.tsv");
+    oa_sealed::refuse_io(&report_path).map_err(CliError::Io)?;
+    // seal-allow: create-new staging report output after its path passed the sealed guard
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&report_path)
+        .map_err(CliError::Io)?;
+    oa_sealed::Sealed::production()
+        .verify_open(&report_path, &file)
+        .map_err(CliError::Io)?;
+    writeln!(file, "status\tSTAGED_INPUT_ONLY").map_err(CliError::Io)?;
+    writeln!(file, "frame_count\t{}", frames.len()).map_err(CliError::Io)?;
+    writeln!(
+        file,
+        "input_events\t{}",
+        frames
+            .iter()
+            .map(|f| u64::from(f.input_events))
+            .sum::<u64>()
+    )
+    .map_err(CliError::Io)?;
+    writeln!(file, "subsystem_execution\tNOT_IMPLEMENTED").map_err(CliError::Io)?;
+    writeln!(file, "receipt_ns\tinput_events\tsurveillance\tflight\troute\tweather\tadaptation\tsource_clock_regressions").map_err(CliError::Io)?;
+    for frame in frames {
+        write!(file, "{}\t{}", frame.receipt_ns, frame.input_events).map_err(CliError::Io)?;
+        for count in frame.source_events {
+            write!(file, "\t{count}").map_err(CliError::Io)?;
+        }
+        writeln!(file, "\t{}", frame.source_clock_regressions).map_err(CliError::Io)?;
+    }
+    Ok(())
+}
+
+fn run() -> Result<(), CliError> {
+    let (input, output, model) = arguments()?;
+    oa_sealed::refuse_io(&input).map_err(CliError::Io)?;
+    oa_sealed::refuse_io(&output).map_err(CliError::Io)?;
+    if let Some(oa_regional_session::cli::ModelSource::Snapshot(path)) = &model {
+        oa_sealed::refuse_io(path).map_err(CliError::Io)?;
+    }
+    let bytes = read_input(&input)?;
+    let frames = parse_input(&bytes)?;
+    match model {
+        Some(source) => oa_regional_session::cli::run_session(&bytes, &output, &source)
+            .map_err(CliError::Runtime),
+        None => write_report(&output, &frames),
+    }
+}
+
+fn main() {
+    if let Err(error) = run() {
+        let message = match error {
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model); stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Io(error) => format!("I/O error: {error}"),
+            CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
+            CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),
+            CliError::BadHeader => "expected header OA-RS<TAB>1".to_owned(),
+            CliError::MissingHeader => "input header is missing".to_owned(),
+            CliError::BadLine { line, error, accounting } => format!(
+                "invalid protocol row at line {line}: {error:?}; normalized_event_rows admitted={} refused={} unexamined={} denominator={}",
+                accounting.admitted, accounting.refused, accounting.unexamined, accounting.denominator,
+            ),
+            CliError::Ordering { line, message, accounting } => format!(
+                "{message} at line {line}; normalized_event_rows admitted={} refused={} unexamined={} denominator={}",
+                accounting.admitted, accounting.refused, accounting.unexamined, accounting.denominator,
+            ),
+            CliError::OutputExists => "output directory must not already exist".to_owned(),
+            CliError::TooManyEvents => "session exceeds a bounded event or counter limit".to_owned(),
+            CliError::Runtime(message) => message,
+        };
+        eprintln!("oa-regional-session: {message}");
+        std::process::exit(2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::{parse_input, CliError, FrameEvidence, InputError, RowAccounting};
+
+    const ROW: &str = "v1\t1000\t900\t{sequence}\tADAPTATION\t00000000000000000000000000000385\tABC123\tZAU1\tFEED\tUP\t1";
+
+    fn bad_line_accounting(
+        result: Result<Vec<FrameEvidence>, CliError>,
+        expected: InputError,
+    ) -> RowAccounting {
+        match result {
+            Err(CliError::BadLine {
+                error, accounting, ..
+            }) => {
+                assert_eq!(error, expected);
+                accounting
+            }
+            _ => RowAccounting {
+                admitted: u64::MAX,
+                refused: 0,
+                unexamined: 0,
+                denominator: 0,
+            },
+        }
+    }
+
+    fn ordering_accounting(
+        result: Result<Vec<FrameEvidence>, CliError>,
+        expected: &'static str,
+    ) -> RowAccounting {
+        match result {
+            Err(CliError::Ordering {
+                message,
+                accounting,
+                ..
+            }) => {
+                assert_eq!(message, expected);
+                accounting
+            }
+            _ => RowAccounting {
+                admitted: u64::MAX,
+                refused: 0,
+                unexamined: 0,
+                denominator: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn malformed_row_counts_the_refusal_and_unexamined_suffix() {
+        let first = ROW.replace("{sequence}", "1");
+        let last = ROW.replace("{sequence}", "2");
+        let input = format!("OA-RS\t1\n{first}\nbad\n{last}\n");
+        assert_eq!(
+            bad_line_accounting(parse_input(input.as_bytes()), InputError::BadFieldCount),
+            RowAccounting {
+                admitted: 1,
+                refused: 1,
+                unexamined: 1,
+                denominator: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn misordered_row_counts_the_refusal_and_unexamined_suffix() {
+        let first = ROW.replace("1000", "2000").replace("{sequence}", "1");
+        let backwards = ROW.replace("{sequence}", "2");
+        let later = ROW.replace("1000", "3000").replace("{sequence}", "3");
+        let input = format!("OA-RS\t1\n{first}\n{backwards}\n{later}\n");
+        assert_eq!(
+            ordering_accounting(parse_input(input.as_bytes()), "receipt time moved backward"),
+            RowAccounting {
+                admitted: 1,
+                refused: 1,
+                unexamined: 1,
+                denominator: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn receipt_group_limit_counts_the_refusal_and_unexamined_suffix() {
+        let mut input = String::from("OA-RS\t1\n");
+        for sequence in 1..=256 {
+            input.push_str(&ROW.replace("{sequence}", &sequence.to_string()));
+            input.push('\n');
+        }
+        input.push_str(&ROW.replace("{sequence}", "257"));
+        input.push('\n');
+        input.push_str(&ROW.replace("{sequence}", "258"));
+        input.push('\n');
+        assert_eq!(
+            ordering_accounting(
+                parse_input(input.as_bytes()),
+                "receipt group capacity reached"
+            ),
+            RowAccounting {
+                admitted: 256,
+                refused: 1,
+                unexamined: 1,
+                denominator: 258,
+            }
+        );
+    }
+}

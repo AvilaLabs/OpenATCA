@@ -48,6 +48,18 @@ struct Target {
     is_bin: bool,
 }
 
+/// Cargo discovers Rust source files and directory main.rs files as implicit targets;
+/// data files beside those examples are not executable entry points.
+fn implicit_source_path(path: &Path, directory: bool) -> Option<PathBuf> {
+    if directory {
+        Some(path.join("main.rs"))
+    } else if path.extension().is_some_and(|extension| extension == "rs") {
+        Some(path.to_path_buf())
+    } else {
+        None
+    }
+}
+
 fn targets() -> Vec<Target> {
     let mut out = Vec::new();
     for dir in members() {
@@ -97,16 +109,14 @@ fn targets() -> Vec<Target> {
                 continue;
             };
             for e in rd.map(|e| e.unwrap().path()) {
-                let (name, entry) = if e.is_dir() {
-                    (
-                        e.file_name().unwrap().to_string_lossy().into_owned(),
-                        e.join("main.rs"),
-                    )
+                let directory = e.is_dir();
+                let Some(entry) = implicit_source_path(&e, directory) else {
+                    continue;
+                };
+                let name = if directory {
+                    e.file_name().unwrap().to_string_lossy().into_owned()
                 } else {
-                    (
-                        e.file_stem().unwrap().to_string_lossy().into_owned(),
-                        e.clone(),
-                    )
+                    e.file_stem().unwrap().to_string_lossy().into_owned()
                 };
                 if entry.exists() && !declared.contains(&entry) {
                     add(format!("{kind}:{name}"), entry, is_bin);
@@ -248,6 +258,23 @@ fn exempt() -> BTreeMap<String, String> {
 
 // REQ: OA-SEAL-006
 #[test]
+fn implicit_target_discovery_keeps_rust_entries_and_excludes_neighboring_data() {
+    assert_eq!(
+        implicit_source_path(Path::new("examples/run.rs"), false),
+        Some(PathBuf::from("examples/run.rs"))
+    );
+    assert_eq!(
+        implicit_source_path(Path::new("examples/fixture.tsv"), false),
+        None
+    );
+    assert_eq!(
+        implicit_source_path(Path::new("examples/nested"), true),
+        Some(PathBuf::from("examples/nested/main.rs"))
+    );
+}
+
+// REQ: OA-SEAL-006
+#[test]
 fn every_bin_and_example_target_uses_the_guard_or_is_exempt_with_a_reason() {
     let all = targets();
     assert!(all.len() > 20, "found only {} targets", all.len());
@@ -313,8 +340,9 @@ const ALLOW: &str = "seal-allow:";
 
 /// The allow comments in the sources the rule covers, pinned exactly: adding one is a decision
 /// made here, not slack in a budget.
-// One additional guarded output-existence probe for the raw replay witness and recovery copy.
-const ALLOW_COUNT: usize = 152;
+// Sixteen reviewed output/control-path operations added for regional evidence and atomic
+// replay/comparator publication: guarded create-new writes, metadata, inventories and links.
+const ALLOW_COUNT: usize = 168;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.

@@ -94,10 +94,11 @@ fn route_point(lat_e7: i32, lon_e7: i32, fix: FixIdentity) -> RoutePoint {
         min_speed_mmps: NO_SPEED_MMPS,
         max_speed_mmps: NO_SPEED_MMPS,
         fix,
-        constraint_kind: ConstraintKind::None,
+        altitude_constraint_kind: AltitudeConstraintKind::None,
+        speed_constraint_kind: SpeedConstraintKind::None,
         geometry: PathGeometry::GreatCircleLeg,
         speed_reference: SpeedReference::GroundSpeed,
-        reserved: [0; 2],
+        reserved: [0; 1],
     }
 }
 
@@ -105,7 +106,7 @@ fn route_point(lat_e7: i32, lon_e7: i32, fix: FixIdentity) -> RoutePoint {
 #[test]
 fn unavailable_clearance_payload_cannot_withhold_horizontal_forecasts() {
     let mut points = [route_point(0, 100_000_000, ident())];
-    points[0].constraint_kind = ConstraintKind::MinimumAltitude;
+    points[0].altitude_constraint_kind = AltitudeConstraintKind::Minimum;
     points[0].min_altitude_ft = 8_000;
     let mut request = input(&points);
     request.clearance.source_ms = request.cutoff_ms + 1;
@@ -218,11 +219,11 @@ fn clearance_capture_never_teleports_level_or_away_moving_traffic() {
 #[test]
 fn unsupported_constraint_beyond_all_horizons_is_still_declared_for_the_route() {
     let mut points = [route_point(0, 100_000_000, ident())];
-    points[0].constraint_kind = ConstraintKind::MinimumAltitude;
+    points[0].altitude_constraint_kind = AltitudeConstraintKind::Minimum;
     points[0].min_altitude_ft = 5_000;
     let result = issue_trajectory(&input(&points));
     assert_ne!(result.model_flags & MODEL_ROUTE_CONSTRAINT_UNSUPPORTED, 0);
-    points[0].constraint_kind = ConstraintKind::SpeedWindow;
+    points[0].speed_constraint_kind = SpeedConstraintKind::Window;
     points[0].speed_reference = SpeedReference::Unknown;
     points[0].min_speed_mmps = NO_SPEED_MMPS;
     points[0].max_speed_mmps = 120_000;
@@ -254,7 +255,7 @@ fn constant_groundspeed_horizons_and_exact_fix_eta_are_deterministic() {
 #[test]
 fn altitude_capture_and_infeasible_route_window_are_explicit() {
     let mut points = [route_point(0, 100_000_000, ident())];
-    points[0].constraint_kind = ConstraintKind::AltitudeWindow;
+    points[0].altitude_constraint_kind = AltitudeConstraintKind::Window;
     points[0].min_altitude_ft = 12_000;
     points[0].max_altitude_ft = 10_000;
     let result = issue_trajectory(&input(&points));
@@ -262,7 +263,7 @@ fn altitude_capture_and_infeasible_route_window_are_explicit() {
         result.horizons[0].refusal,
         Refusal::InfeasibleAltitudeWindow
     );
-    points[0].constraint_kind = ConstraintKind::None;
+    points[0].altitude_constraint_kind = AltitudeConstraintKind::None;
     let mut climb = input(&points);
     climb.track.vertical_rate_fpm = 1_200;
     let captured = issue_trajectory(&climb);
@@ -274,7 +275,7 @@ fn altitude_capture_and_infeasible_route_window_are_explicit() {
 #[test]
 fn published_speed_window_is_reported_without_coercing_groundspeed() {
     let mut points = [route_point(0, 100_000_000, ident())];
-    points[0].constraint_kind = ConstraintKind::SpeedWindow;
+    points[0].speed_constraint_kind = SpeedConstraintKind::Window;
     points[0].min_speed_mmps = 110_000;
     points[0].max_speed_mmps = 120_000;
     let result = issue_trajectory(&input(&points));
@@ -286,6 +287,100 @@ fn published_speed_window_is_reported_without_coercing_groundspeed() {
     assert_eq!(airspeed.horizons[0].available, Availability::Degraded);
     assert_eq!(airspeed.horizons[0].refusal, Refusal::UnsupportedConstraint);
     assert_eq!(airspeed.horizons[0].groundspeed_mmps, 100_000);
+}
+
+// REQ: OA-TRAJ-021
+#[test]
+fn altitude_and_speed_constraints_are_retained_and_evaluated_independently() {
+    let mut points = [route_point(0, 100_000_000, ident())];
+    points[0].altitude_constraint_kind = AltitudeConstraintKind::Minimum;
+    points[0].min_altitude_ft = 8_000;
+    points[0].speed_constraint_kind = SpeedConstraintKind::Minimum;
+    points[0].min_speed_mmps = 90_000;
+    let result = issue_trajectory(&input(&points));
+
+    assert_ne!(result.model_flags & MODEL_ROUTE_CONSTRAINT_UNSUPPORTED, 0);
+    assert_eq!(result.horizons[0].available, Availability::Degraded);
+    assert_eq!(result.horizons[0].refusal, Refusal::UnsupportedConstraint);
+    assert_ne!(result.horizons[0].flags & OUTPUT_CONSTRAINT_CHECKED, 0);
+    assert_eq!(
+        result.horizons[0].flags & OUTPUT_SPEED_CONSTRAINT_VIOLATED,
+        0
+    );
+    assert_eq!(result.horizons[0].groundspeed_mmps, 100_000);
+    assert_eq!(result.horizons[0].altitude_ft, NO_ALTITUDE_FT);
+}
+
+// REQ: OA-TRAJ-022
+#[test]
+fn indicated_airspeed_constraint_is_never_compared_with_groundspeed() {
+    let mut points = [route_point(0, 100_000_000, ident())];
+    points[0].speed_constraint_kind = SpeedConstraintKind::Window;
+    points[0].speed_reference = SpeedReference::IndicatedAirspeed;
+    points[0].min_speed_mmps = 110_000;
+    points[0].max_speed_mmps = 120_000;
+    let result = issue_trajectory(&input(&points));
+
+    assert_eq!(result.horizons[0].refusal, Refusal::UnsupportedConstraint);
+    assert_eq!(result.horizons[0].groundspeed_mmps, 100_000);
+    assert_eq!(
+        result.horizons[0].flags & OUTPUT_SPEED_CONSTRAINT_VIOLATED,
+        0
+    );
+    assert_eq!(result.horizons[0].flags & OUTPUT_CONSTRAINT_CHECKED, 0);
+}
+
+// REQ: OA-TRAJ-023
+#[test]
+fn future_route_payload_is_isolated_before_constraint_validation() {
+    let valid_points = [route_point(0, 100_000_000, ident())];
+    let mut baseline_request = input(&valid_points);
+    baseline_request.route.available_ms = baseline_request.cutoff_ms + 1;
+    let baseline = issue_trajectory(&baseline_request);
+
+    let mut malformed_points = [route_point(0, 100_000_000, ident())];
+    malformed_points[0].lat_e7 = i32::MIN;
+    malformed_points[0].altitude_constraint_kind = AltitudeConstraintKind::Window;
+    malformed_points[0].min_altitude_ft = 15_000;
+    malformed_points[0].max_altitude_ft = 5_000;
+    malformed_points[0].speed_constraint_kind = SpeedConstraintKind::Window;
+    malformed_points[0].min_speed_mmps = 130_000;
+    malformed_points[0].max_speed_mmps = 90_000;
+    let mut future_request = input(&malformed_points);
+    future_request.route.available_ms = future_request.cutoff_ms + 1;
+    let future_payload = issue_trajectory(&future_request);
+
+    assert_eq!(future_payload, baseline);
+    assert_eq!(
+        future_payload.horizons[0].refusal,
+        Refusal::RouteUnavailableAtCutoff
+    );
+}
+
+// REQ: OA-TRAJ-024
+#[test]
+fn malformed_constraint_in_either_channel_is_refused_even_with_other_channel_present() {
+    let mut altitude_bad = [route_point(0, 100_000_000, ident())];
+    altitude_bad[0].altitude_constraint_kind = AltitudeConstraintKind::Window;
+    altitude_bad[0].min_altitude_ft = 15_000;
+    altitude_bad[0].max_altitude_ft = 5_000;
+    altitude_bad[0].speed_constraint_kind = SpeedConstraintKind::Minimum;
+    altitude_bad[0].min_speed_mmps = 90_000;
+    assert_eq!(
+        issue_trajectory(&input(&altitude_bad)).horizons[0].refusal,
+        Refusal::InfeasibleAltitudeWindow
+    );
+
+    let mut speed_bad = [route_point(0, 100_000_000, ident())];
+    speed_bad[0].altitude_constraint_kind = AltitudeConstraintKind::Minimum;
+    speed_bad[0].min_altitude_ft = 8_000;
+    speed_bad[0].speed_constraint_kind = SpeedConstraintKind::Window;
+    speed_bad[0].min_speed_mmps = 130_000;
+    speed_bad[0].max_speed_mmps = 90_000;
+    assert_eq!(
+        issue_trajectory(&input(&speed_bad)).horizons[0].refusal,
+        Refusal::InfeasibleSpeedWindow
+    );
 }
 
 // REQ: OA-TRAJ-004

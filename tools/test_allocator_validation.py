@@ -31,6 +31,7 @@ def result(injected=False):
             "nam_session_activate_traffic_retry_full_deactivate",
             "display_rows_traffic_frame_refusal",
             "display_raw_fallback_draw_capacity_invalid_refusal",
+            "display_controller_interaction_queue",
             "safety_state_inhibit_display",
             "airspace_route_direct_airway_procedure_atomic_refusal",
         ],
@@ -79,6 +80,13 @@ def result(injected=False):
             'display_raw_frame_draw',
             'display_raw_capacity_refusal',
             'display_raw_invalid_refusal',
+            'display_interaction_selection',
+            'display_interaction_retry_refusal',
+            'display_interaction_enqueue',
+            'display_interaction_preflight',
+            'display_interaction_completion',
+            'display_interaction_presentation',
+            'display_interaction_rasterization',
             'nam_session_activation',
             'nam_session_traffic',
             'nam_session_resend',
@@ -193,6 +201,9 @@ def result(injected=False):
             "convert_trail_dropped": 63, "convert_time_overflow": 2718,
             "draw_trail_dropped": 20, "stamp_clipped": 5, "digests": 20,
             "raw_drawn": 20, "raw_capacity_refused": 40, "raw_invalid_refused": 20,
+            "interaction_selected": 20, "interaction_refused": 20, "interaction_queued": 20,
+            "interaction_preflighted": 20, "interaction_completed": 20,
+            "interaction_presented": 20, "interaction_rasterized": 20,
         },
         "safety": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
@@ -353,6 +364,7 @@ class AllocatorLayoutTests(unittest.TestCase):
 
     # REQ: OA-TRK-337
     def test_route_ledger_requires_source_symbols_and_exact_runtime_route_set(self):
+        self.assertEqual(set(gate.ROUTE_SYMBOLS), set(gate.ROUTE_LEDGER))
         value = result()
         value["route_ids"] = value["route_ids"][:-1]
         self.assertTrue(any("route_ids" in error for error in
@@ -500,6 +512,10 @@ probe = { path = "../../validation/oa-alloc-check" }
         value = result()
         value["display_frame"]["alloc"] = 1
         self.assertTrue(gate.evaluate_allocator_result(json.dumps(value)))
+        value = result()
+        value["display_frame"]["interaction_presented"] = 0
+        self.assertTrue(any("display_frame.interaction_presented" in error
+                            for error in gate.evaluate_allocator_result(json.dumps(value))))
 
     def test_repository_allocator_layout_is_valid(self):
         self.assertEqual(gate.allocation_layout_errors(Path(__file__).resolve().parents[1]), [])

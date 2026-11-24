@@ -6,7 +6,7 @@
 //! direction of the ADS-B truth velocity in all three, so the sets are comparable; cross is
 //! positive to the right of the direction of travel.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::model::{Class, Fix, Rec, Reference, Unpaired, MIN_SPEED_MPS};
 
@@ -18,6 +18,9 @@ pub const OFFSET_STEP_MS: i64 = 100;
 pub const FIT_MAX_SAMPLES: usize = 128;
 /// Fewest samples a track needs to be fitted.
 pub const FIT_MIN_SAMPLES: usize = 8;
+/// A changed TAIS key after a silence this long starts a new calibration segment. TAIS carries
+/// no generation identifier, so this is a reported segmentation policy, not proof of flight identity.
+pub const TRACK_REUSE_GAP_MS: i64 = 60_000;
 
 /// Names of the three error sets, in the order of [`Sample::errs`].
 pub const SET_NAMES: [&str; 3] = [
@@ -120,6 +123,9 @@ pub fn evaluate(
     truth: &dyn Reference,
 ) -> Result<Sample, Unpaired> {
     let addr = rec.addr.ok_or(Unpaired::NoAddress)?;
+    if addr == 0 {
+        return Err(Unpaired::ZeroAddress);
+    }
     let std = stdds_fix(rec).ok_or(Unpaired::NoTimeOrPosition)?;
     let trk = tracker.at(addr, t_ms).map_err(Unpaired::NoTracker)?;
     let tru = truth.at(addr, t_ms).map_err(Unpaired::NoTruth)?;
@@ -141,8 +147,19 @@ pub fn evaluate(
     }
 }
 
-/// A STDDS track: one address under one producing facility and track number.
+/// An observed TAIS key: positive Mode S address under one producing facility and track number.
+/// This is not a guaranteed flight generation; [`TRACK_REUSE_GAP_MS`] segments long silences.
 pub type TrackKey = (u32, [u8; 8], Option<u32>);
+
+fn timed_fit_key(rec: &Rec) -> Option<(TrackKey, i64)> {
+    if !rec.src_present || rec.pos.is_none() {
+        return None;
+    }
+    Some((
+        (rec.addr.filter(|a| *a != 0)?, rec.src, Some(rec.track_num?)),
+        rec.t_ms?,
+    ))
+}
 
 /// Why a track has no fitted offset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,7 +192,85 @@ pub struct Fitted {
 pub struct TrackFit {
     pub class: Class,
     pub key: TrackKey,
+    /// Zero-based fit segment after reuse gaps and unambiguous class changes.
+    pub segment: u32,
     pub result: Result<Fitted, FitMiss>,
+}
+
+/// Conservative fit-sample and report-scan estimate, evaluated before reference construction.
+/// Duplicate key/timestamp rows are excluded just as in [`analyse`]; each unambiguous class/reuse
+/// segment contributes at most `min(segment rows, FIT_MAX_SAMPLES)` fit samples.
+pub fn estimate_analysis_work(recs: &[Rec]) -> Result<usize, String> {
+    let mut histories: BTreeMap<(u32, [u8; 8], u32), Vec<&Rec>> = BTreeMap::new();
+    for rec in recs {
+        if rec.pos.is_none() {
+            continue;
+        }
+        if let (Some(addr), Some(track_num), Some(_)) = (
+            rec.addr.filter(|addr| *addr != 0),
+            rec.track_num.filter(|_| rec.src_present),
+            rec.t_ms,
+        ) {
+            histories
+                .entry((addr, rec.src, track_num))
+                .or_default()
+                .push(rec);
+        }
+    }
+    let mut fit_samples = 0usize;
+    for history in histories.values_mut() {
+        history.sort_by_key(|rec| (rec.t_ms, rec.file, rec.index));
+        let mut segment_rows: BTreeMap<(u32, Class), usize> = BTreeMap::new();
+        let mut previous_time = None;
+        let mut previous_class = None;
+        let mut segment = 0u32;
+        let mut begin = 0usize;
+        while begin < history.len() {
+            let Some(time) = history.get(begin).and_then(|rec| rec.t_ms) else {
+                begin += 1;
+                continue;
+            };
+            let mut end = begin + 1;
+            while history.get(end).is_some_and(|rec| rec.t_ms == Some(time)) {
+                end += 1;
+            }
+            // Same-key duplicate timestamps are ambiguous; don't let file order choose churn.
+            if end - begin == 1 {
+                let Some(rec) = history.get(begin).copied() else {
+                    break;
+                };
+                if previous_time
+                    .is_some_and(|prev: i64| time.saturating_sub(prev) > TRACK_REUSE_GAP_MS)
+                {
+                    segment = segment.saturating_add(1);
+                }
+                if previous_class.is_some_and(|class| class != rec.class) {
+                    segment = segment.saturating_add(1);
+                }
+                previous_time = Some(time);
+                previous_class = Some(rec.class);
+                if rec.pos.is_some() {
+                    *segment_rows.entry((segment, rec.class)).or_default() += 1;
+                }
+            }
+            begin = end;
+        }
+        for rows in segment_rows.values() {
+            fit_samples = fit_samples
+                .checked_add((*rows).min(FIT_MAX_SAMPLES))
+                .ok_or_else(|| "fit work estimate overflow".to_string())?;
+        }
+    }
+    let offset_width = usize::try_from(2 * (OFFSET_MAX_MS / OFFSET_STEP_MS) + 1)
+        .map_err(|_| "offset width exceeds this platform".to_string())?;
+    fit_samples
+        .checked_mul(offset_width)
+        .and_then(|fit| {
+            recs.len()
+                .checked_mul(480)
+                .and_then(|report| fit.checked_add(report))
+        })
+        .ok_or_else(|| "analysis work estimate overflow".to_string())
 }
 
 /// The stamp offset of one track, minimising the sum of squared along-track errors of the STDDS
@@ -261,6 +356,8 @@ pub struct Row {
     pub plain: Result<Sample, Unpaired>,
     /// The record's track offset, when fitted.
     pub offset_ms: Option<i64>,
+    /// Segment index for its address/source/track key, when available.
+    pub segment: Option<u32>,
     /// Read at the stamp minus the track's fitted offset.
     pub fitted: Result<Sample, Unpaired>,
 }
@@ -271,65 +368,159 @@ pub struct Row {
 pub struct Analysis {
     pub rows: Vec<Row>,
     pub fits: Vec<TrackFit>,
+    /// Rows excluded because a positive key occurs more than once at the same timestamp.
+    pub ambiguous_timestamp_rows: u64,
+    /// Descending timestamps in file/record arrival order, counted per key.
+    pub nonmonotonic_arrivals: u64,
+    /// Adjacent sorted updates whose flag-derived class changes within a key.
+    pub class_churn_transitions: u64,
+    /// Boundaries created by [`TRACK_REUSE_GAP_MS`].
+    pub reuse_segments: u64,
 }
 
 /// Scores every record: at its own stamp, and at the stamp corrected by its track's fitted
 /// offset. Rows are in the order of `recs`; fits are in track-key order.
 pub fn analyse(recs: &[Rec], tracker: &dyn Reference, truth: &dyn Reference) -> Analysis {
-    // A track is one address, facility and track number within one class: a coasting stretch of a
-    // track is fitted on its own and never pooled with the rest.
-    let mut tracks: BTreeMap<(Class, TrackKey), Vec<&Rec>> = BTreeMap::new();
+    // TAIS has no generation identifier. Positive address, facility and track number form the
+    // observed key; long silences split calibration segments. Class switches also split fits.
+    // Duplicate key/timestamp rows are ambiguous and excluded rather than settled by file order.
+    let mut histories: BTreeMap<TrackKey, Vec<&Rec>> = BTreeMap::new();
     for r in recs {
-        if let (Some(a), Some(_), Some(_)) = (r.addr, r.t_ms, r.pos) {
-            tracks
-                .entry((r.class, (a, r.src, r.track_num)))
-                .or_default()
-                .push(r);
+        if let Some((key, _)) = timed_fit_key(r) {
+            histories.entry(key).or_default().push(r);
         }
     }
-    let mut fits = Vec::with_capacity(tracks.len());
-    let mut offsets: BTreeMap<(Class, TrackKey), i64> = BTreeMap::new();
-    for ((class, key), v) in &mut tracks {
-        v.sort_by_key(|r| (r.t_ms, r.file, r.index));
-        let class = *class;
-        let result = fit_offset(v, truth);
-        if let Ok(f) = result {
-            offsets.insert((class, *key), f.offset_ms);
+    let mut fits = Vec::new();
+    let mut offsets: BTreeMap<(Class, TrackKey, u32), i64> = BTreeMap::new();
+    let mut segments: BTreeMap<(TrackKey, i64), u32> = BTreeMap::new();
+    let mut ambiguous = BTreeSet::new();
+    let mut ambiguous_timestamp_rows = 0u64;
+    let mut nonmonotonic_arrivals = 0u64;
+    let mut class_churn_transitions = 0u64;
+    let mut reuse_segments = 0u64;
+    for (key, history) in &mut histories {
+        history.sort_by_key(|r| (r.t_ms, r.file, r.index));
+        let mut by_time: BTreeMap<i64, Vec<&Rec>> = BTreeMap::new();
+        for r in history.iter() {
+            if let Some(t) = r.t_ms {
+                by_time.entry(t).or_default().push(r);
+            }
         }
-        fits.push(TrackFit {
-            class,
-            key: *key,
-            result,
-        });
+        for (time, rows) in by_time.iter().filter(|(_, rows)| rows.len() > 1) {
+            ambiguous.insert((*key, *time));
+            ambiguous_timestamp_rows = ambiguous_timestamp_rows
+                .saturating_add(u64::try_from(rows.len()).unwrap_or(u64::MAX));
+        }
+        let mut arrival: Vec<_> = history
+            .iter()
+            .copied()
+            .filter(|r| r.t_ms.is_some_and(|t| !ambiguous.contains(&(*key, t))))
+            .collect();
+        arrival.sort_by_key(|r| (r.file, r.index));
+        let mut prev_t: Option<i64> = None;
+        let mut prev_file: Option<u32> = None;
+        for r in arrival {
+            if prev_file.is_some_and(|f| f != r.file) {
+                prev_t = None;
+            }
+            if r.t_ms.is_some_and(|t| prev_t.is_some_and(|p| t < p)) {
+                nonmonotonic_arrivals = nonmonotonic_arrivals.saturating_add(1);
+            }
+            prev_t = r.t_ms;
+            prev_file = Some(r.file);
+        }
+        let mut segment = 0u32;
+        let mut previous_time = None;
+        let mut previous_class = None;
+        let mut per_segment: BTreeMap<(Class, u32), Vec<&Rec>> = BTreeMap::new();
+        for r in history.iter().copied() {
+            let Some(t) = r.t_ms else { continue };
+            if ambiguous.contains(&(*key, t)) {
+                continue;
+            }
+            if previous_time.is_some_and(|p: i64| t.saturating_sub(p) > TRACK_REUSE_GAP_MS) {
+                segment = segment.saturating_add(1);
+                reuse_segments = reuse_segments.saturating_add(1);
+            }
+            if previous_class.is_some_and(|c| c != r.class) {
+                class_churn_transitions = class_churn_transitions.saturating_add(1);
+                segment = segment.saturating_add(1);
+            }
+            previous_time = Some(t);
+            previous_class = Some(r.class);
+            segments.insert((*key, t), segment);
+            if r.pos.is_some() {
+                per_segment.entry((r.class, segment)).or_default().push(r);
+            }
+        }
+        for ((class, segment), mut rows) in per_segment {
+            rows.sort_by_key(|r| (r.t_ms, r.file, r.index));
+            let result = fit_offset(&rows, truth);
+            if let Ok(f) = result {
+                offsets.insert((class, *key, segment), f.offset_ms);
+            }
+            fits.push(TrackFit {
+                class,
+                key: *key,
+                segment,
+                result,
+            });
+        }
     }
     let rows = recs
         .iter()
         .map(|rec| {
-            let offset_ms = rec
-                .addr
-                .and_then(|a| offsets.get(&(rec.class, (a, rec.src, rec.track_num))))
-                .copied();
-            let (plain, fitted) = match (rec.addr, rec.t_ms, rec.pos) {
-                (None, _, _) => (Err(Unpaired::NoAddress), Err(Unpaired::NoAddress)),
-                (_, None, _) | (_, _, None) => (
-                    Err(Unpaired::NoTimeOrPosition),
-                    Err(Unpaired::NoTimeOrPosition),
-                ),
-                (Some(_), Some(t), Some(_)) => (
-                    evaluate(rec, t, tracker, truth),
-                    match offset_ms {
-                        Some(o) => evaluate(rec, t - o, tracker, truth),
-                        None => Err(Unpaired::NotFitted),
-                    },
-                ),
+            let segment = timed_fit_key(rec).and_then(|key| segments.get(&key).copied());
+            let offset_ms = rec.addr.filter(|a| *a != 0).and_then(|a| {
+                segment.and_then(|seg| {
+                    offsets
+                        .get(&(rec.class, (a, rec.src, rec.track_num), seg))
+                        .copied()
+                })
+            });
+            let (plain, fitted) = if timed_fit_key(rec).is_some_and(|key| ambiguous.contains(&key))
+            {
+                (
+                    Err(Unpaired::AmbiguousTimestamp),
+                    Err(Unpaired::AmbiguousTimestamp),
+                )
+            } else {
+                match (rec.addr, rec.t_ms, rec.pos) {
+                    (None, _, _) => (Err(Unpaired::NoAddress), Err(Unpaired::NoAddress)),
+                    (Some(0), _, _) => (Err(Unpaired::ZeroAddress), Err(Unpaired::ZeroAddress)),
+                    (_, None, _) | (_, _, None) => (
+                        Err(Unpaired::NoTimeOrPosition),
+                        Err(Unpaired::NoTimeOrPosition),
+                    ),
+                    (Some(_), Some(t), Some(_)) => {
+                        let plain = evaluate(rec, t, tracker, truth);
+                        let fitted = if !rec.src_present || rec.track_num.is_none() {
+                            Err(Unpaired::MissingFitKey)
+                        } else {
+                            match offset_ms {
+                                Some(o) => evaluate(rec, t - o, tracker, truth),
+                                None => Err(Unpaired::NotFitted),
+                            }
+                        };
+                        (plain, fitted)
+                    }
+                }
             };
             Row {
                 rec: *rec,
                 plain,
                 offset_ms,
+                segment,
                 fitted,
             }
         })
         .collect();
-    Analysis { rows, fits }
+    Analysis {
+        ambiguous_timestamp_rows,
+        rows,
+        fits,
+        nonmonotonic_arrivals,
+        class_churn_transitions,
+        reuse_segments,
+    }
 }

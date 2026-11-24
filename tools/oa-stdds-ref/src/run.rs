@@ -3,6 +3,7 @@
 //! builds the truth.
 
 use std::collections::BTreeSet;
+use std::io::{self, Read};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -20,6 +21,41 @@ use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
 
 use crate::guard::open_guarded;
 use crate::sources::{Row, TrackerSource};
+
+/// ADS-B clip source cap. Combined with the 384 MiB STDDS source cap, total source input is at
+/// most 512 MiB for one comparator invocation.
+pub const MAX_ADSB_CLIP_BYTES: u64 = 128 * 1024 * 1024;
+/// Maximum decoded ADS-B rows retained by the comparison.
+pub const MAX_ADSB_ROWS: usize = 100_000;
+
+struct LimitedReader<R> {
+    inner: R,
+    remaining: u64,
+}
+
+impl<R: Read> Read for LimitedReader<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            let mut probe = [0u8; 1];
+            return match self.inner.read(&mut probe)? {
+                0 => Ok(0),
+                _ => Err(io::Error::other(
+                    "ADS-B clip grew beyond its byte limit while reading",
+                )),
+            };
+        }
+        let cap = usize::try_from(self.remaining.min(out.len() as u64))
+            .map_err(|_| io::Error::other("ADS-B read size exceeds this platform"))?;
+        let n = self.inner.read(out.get_mut(..cap).ok_or_else(|| {
+            io::Error::other("ADS-B input reader buffer is shorter than its declared limit")
+        })?)?;
+        self.remaining = self.remaining.saturating_sub(n as u64);
+        Ok(n)
+    }
+}
 
 /// The two references of one clip, and the header lines that describe how they were made.
 // A7.2: cold struct, size guard waived
@@ -42,9 +78,26 @@ pub fn build_refs(
 ) -> Result<Refs, String> {
     let guard = g.clone();
     let opener: Opener = Rc::new(move |p: &Path| {
-        open_guarded(&guard, p).map(|f| Box::new(f) as Box<dyn std::io::Read>)
+        let f = open_guarded(&guard, p)?;
+        let size = f.metadata()?.len();
+        if size > MAX_ADSB_CLIP_BYTES {
+            return Err(io::Error::other(format!(
+                "{} exceeds the {}-byte ADS-B clip limit",
+                p.display(),
+                MAX_ADSB_CLIP_BYTES
+            )));
+        }
+        Ok(Box::new(LimitedReader {
+            inner: f,
+            remaining: MAX_ADSB_CLIP_BYTES,
+        }) as Box<dyn std::io::Read>)
     });
     let loaded = load_adsb_with(clip, &opener).map_err(|e| e.to_string())?;
+    if oa_adsb::reports_len(&loaded.reports) > MAX_ADSB_ROWS {
+        return Err(format!(
+            "ADS-B clip exceeds the {MAX_ADSB_ROWS}-row retained-data limit"
+        ));
+    }
     let clip_digest = loaded.hash.sha256.clone();
     // The clip's rows left out for their time in a sealed window (OA-SEAL-014), given to the
     // caller before anything that can fail.
@@ -110,6 +163,8 @@ pub fn build_refs(
     let tracker = TrackerSource::from_rows(rows);
 
     let truth = adsb_truth::build(&set_b, &TRUTH_DEFAULT).map_err(|e| format!("truth: {e}"))?;
+    let settings = format!("tracker={cfg:?}; truth={TRUTH_DEFAULT:?}; interval-stats={iv:?}");
+    let settings_hash = oa_sha256::to_hex(&oa_sha256::sha256(settings.as_bytes()));
     let header = vec![
         format!("ADS-B clip: {} (digest {clip_digest})", clip.display()),
         format!("split: {SPLIT_TEXT}"),
@@ -124,6 +179,8 @@ pub fn build_refs(
             "tracker rows kept (one-second output of the addresses in the STDDS files): {}",
             tracker.len()
         ),
+        format!("effective tracker/truth settings: {settings}"),
+        format!("effective settings SHA-256: {settings_hash}"),
     ];
     Ok(Refs {
         tracker,

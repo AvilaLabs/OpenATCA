@@ -6,6 +6,7 @@ use super::{
     RawWitnessAction, ReplayArgs,
 };
 use crate::frame::{replay_build_raw_with_source_stale, replay_new, replay_raster, ReplayConfig};
+use crate::publication::{publish_hashes_only_locked, OutputLock, Publisher, MAX_FRAME_BYTES};
 use crate::raw::{RawObservationColumns, MAX_RAW_OBSERVATIONS, RAW_STALE_CUTOFF_NS};
 use crate::rows::NS_PER_S;
 use oa_adsb::{decode_payload_lenient, reports_clear, reports_len, Reports};
@@ -278,6 +279,18 @@ fn witness_bytes(
     Ok(body)
 }
 
+fn hashes_from_witness(witness: &RawWitness) -> String {
+    let mut hashes = String::new();
+    for (index, (time_ns, digest)) in witness.frames.iter().enumerate() {
+        hashes.push_str(&format!(
+            "{index:04} {} {}\n",
+            unix_text(*time_ns),
+            to_hex(digest)
+        ));
+    }
+    hashes
+}
+
 fn check_witness_output(path: &Path) -> Result<(), CliError> {
     oa_sealed::refuse(path).map_err(CliError::Failed)?;
     let partial = partial_witness_path(path)?;
@@ -359,35 +372,70 @@ fn canonical_candidate(path: &Path) -> Result<PathBuf, CliError> {
     }
 }
 
-fn check_witness_output_collisions(a: &ReplayArgs) -> Result<(), CliError> {
-    let Some(action) = &a.raw_witness else {
-        return Ok(());
-    };
-    let witness_path = match action {
-        RawWitnessAction::Write(path) | RawWitnessAction::Verify(path) => path,
-    };
-    let partial_path = partial_witness_path(witness_path)?;
-    let protected = [witness_path.as_path(), partial_path.as_path()]
+pub(super) fn check_output_collisions(a: &ReplayArgs) -> Result<(), CliError> {
+    let mut protected_paths = vec![a.snapshot.as_path(), a.adsb.as_path()];
+    let mut extra_paths = Vec::new();
+    if let Some(action) = &a.raw_witness {
+        let witness_path = match action {
+            RawWitnessAction::Write(path) | RawWitnessAction::Verify(path) => path,
+        };
+        extra_paths.push(witness_path.clone());
+        extra_paths.push(partial_witness_path(witness_path)?);
+    }
+    oa_sealed::refuse(&a.out_dir).map_err(CliError::Failed)?;
+    for path in protected_paths
+        .iter()
+        .copied()
+        .chain(extra_paths.iter().map(PathBuf::as_path))
+    {
+        oa_sealed::refuse(path).map_err(CliError::Failed)?;
+    }
+    protected_paths.extend(extra_paths.iter().map(PathBuf::as_path));
+    let protected = protected_paths
         .into_iter()
         .map(|path| Ok((absolute_lexical(path)?, canonical_candidate(path)?)))
         .collect::<Result<Vec<_>, CliError>>()?;
     let output_dir_lexical = absolute_lexical(&a.out_dir)?;
-    let output_names = std::iter::once("hashes.txt".to_owned())
-        .chain((0..a.frames).map(|i| format!("frame-{i:04}.ppm")));
-    for name in output_names {
-        let generated = a.out_dir.join(&name);
-        let generated_lexical = output_dir_lexical.join(&name);
-        let generated_canonical = canonical_candidate(&generated)?;
-        if protected.iter().any(|(lexical, canonical)| {
-            lexical == &generated_lexical || canonical == &generated_canonical
-        }) {
-            return Err(witness_error(format!(
-                "witness path or partial sibling collides with generated output {}",
-                generated.display()
+    let output_dir_canonical = canonical_candidate(&a.out_dir)?;
+    for (lexical, canonical) in protected {
+        let lexical_collision = lexical.parent() == Some(output_dir_lexical.as_path())
+            && lexical.file_name().is_some_and(is_generated_output_name);
+        let canonical_collision = canonical.parent() == Some(output_dir_canonical.as_path())
+            && canonical.file_name().is_some_and(is_generated_output_name);
+        if lexical_collision || canonical_collision {
+            return Err(CliError::Failed(format!(
+                "input, witness, or partial sibling collides with generated output {}",
+                canonical.display()
             )));
         }
     }
     Ok(())
+}
+
+fn is_generated_output_name(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    if matches!(
+        name,
+        "hashes.txt"
+            | ".oa-scope-replay.publisher.lock"
+            | ".oa-scope-replay.stage-hashes.txt"
+            | ".oa-scope-replay.stage-hashes-only.txt"
+    ) {
+        return true;
+    }
+    let frame = name
+        .strip_prefix("frame-")
+        .and_then(|s| s.strip_suffix(".ppm"));
+    let stage = name
+        .strip_prefix(".oa-scope-replay.stage-frame-")
+        .and_then(|s| s.strip_suffix(".ppm"));
+    [frame, stage].into_iter().flatten().any(|digits| {
+        digits.len() == 4
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && digits.parse::<u16>().is_ok_and(|index| index < 10_000)
+    })
 }
 
 fn partial_witness_path(path: &Path) -> Result<std::path::PathBuf, CliError> {
@@ -769,7 +817,7 @@ pub(super) fn run_raw_only(
     snapshot_sha256: [u8; 32],
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
-    check_witness_output_collisions(a)?;
+    check_output_collisions(a)?;
     let span = i64::try_from(a.frames.saturating_sub(1))
         .ok()
         .and_then(|n| n.checked_mul(a.step_ns))
@@ -822,11 +870,43 @@ pub(super) fn run_raw_only(
         convert: a.convert,
     };
     let mut replay = replay_new(model, &cfg)?;
-    std::fs::create_dir_all(&a.out_dir)
-        .map_err(|e| failed(&format!("create {}", a.out_dir.display()), e))?;
-    if a.overwrite {
-        remove_ours(&a.out_dir)?;
+    let acquired = if a.overwrite {
+        OutputLock::acquire_for_overwrite(&a.out_dir, a.frames)
+    } else {
+        OutputLock::acquire(&a.out_dir, a.frames)
     }
+    .map_err(|e| failed("lock raw replay output directory", e))?;
+    let mut output_lock = Some(acquired);
+    if a.overwrite {
+        let lock = output_lock
+            .as_ref()
+            .ok_or_else(|| CliError::Failed("raw output lock was lost".into()))?;
+        remove_ours(&a.out_dir, lock)?;
+    }
+    let mut publisher = if a.hashes_only {
+        None
+    } else {
+        let lock = output_lock
+            .take()
+            .ok_or_else(|| CliError::Failed("raw output lock was lost".into()))?;
+        Some(
+            Publisher::open_locked_allow_unrelated(
+                &a.out_dir,
+                a.frames,
+                a.resume_raw_publication,
+                lock,
+                a.overwrite,
+            )
+            .map_err(|e| failed("open raw replay publisher", e))?,
+        )
+    };
+    if let (Some(publisher), Some(witness)) = (publisher.as_ref(), verify_witness.as_ref()) {
+        let expected_hashes = hashes_from_witness(witness);
+        publisher
+            .verify_manifest(expected_hashes.as_bytes())
+            .map_err(|e| failed("verify existing hashes manifest", e))?;
+    }
+    let existing_prefix = publisher.as_ref().map_or(0, Publisher::existing_prefix);
     let mut columns = RawFrameColumns::with_capacity(history.rows.len());
     let mut hashes = String::new();
     let mut frame_hashes = Vec::with_capacity(a.frames as usize);
@@ -858,12 +938,33 @@ pub(super) fn run_raw_only(
         hashes.push_str(&format!("{i:04} {} {}\n", unix_text(t_ns), to_hex(&digest)));
         frame_hashes.push((t_ns, digest));
         if !a.hashes_only {
-            let path = a.out_dir.join(format!("frame-{i:04}.ppm"));
-            let file = create_new(&path)?;
-            let mut writer = std::io::BufWriter::new(file);
-            oa_display::ppm::write_ppm(&mut writer, &replay.spec, &replay.buf)
-                .and_then(|()| writer.flush())
-                .map_err(|e| failed(&format!("write {}", path.display()), e))?;
+            let pixels = u64::from(replay.spec.width)
+                .checked_mul(u64::from(replay.spec.height))
+                .ok_or_else(|| CliError::Failed("PPM pixel count overflows".into()))?;
+            let ppm_limit = pixels
+                .checked_mul(3)
+                .and_then(|bytes| bytes.checked_add(64))
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .filter(|&bytes| bytes <= MAX_FRAME_BYTES)
+                .ok_or_else(|| {
+                    CliError::Failed("PPM frame exceeds the bounded publication size".into())
+                })?;
+            let mut ppm = Vec::with_capacity(ppm_limit);
+            oa_display::ppm::write_ppm(&mut ppm, &replay.spec, &replay.buf)
+                .map_err(|e| failed("encode raw replay frame", e))?;
+            let publisher = publisher
+                .as_mut()
+                .ok_or_else(|| CliError::Failed("raw frame publisher is not active".into()))?;
+            if i < existing_prefix {
+                publisher
+                    .verify_existing_frame(i, &ppm)
+                    .map_err(|e| failed(&format!("verify published frame {i}"), e))?;
+            } else {
+                // Each generated frame is checked against its witnessed digest before publication.
+                publisher
+                    .publish_frame(i, &ppm)
+                    .map_err(|e| failed(&format!("publish frame {i}"), e))?;
+            }
         }
         total.frames += 1;
         total.frames_without_fresh_positions += u64::from(stats.fresh_valid_positions == 0);
@@ -884,9 +985,17 @@ pub(super) fn run_raw_only(
         total.off_map_positions += stats.off_map_positions;
     }
     let hashes_path = a.out_dir.join("hashes.txt");
-    create_new(&hashes_path)?
-        .write_all(hashes.as_bytes())
-        .map_err(|e| failed(&format!("write {}", hashes_path.display()), e))?;
+    if let Some(publisher) = publisher.as_mut() {
+        publisher
+            .finish(hashes.as_bytes())
+            .map_err(|e| failed("publish hashes manifest", e))?;
+    } else {
+        let lock = output_lock
+            .as_mut()
+            .ok_or_else(|| CliError::Failed("raw output lock was lost".into()))?;
+        publish_hashes_only_locked(lock, hashes.as_bytes())
+            .map_err(|e| failed(&format!("publish {}", hashes_path.display()), e))?;
+    }
     let loss = write_raw_report(out, mode, &history, &total, &hashes_path, a.allow_loss)
         .map_err(|error| failed("write raw replay summary", error))?;
     if loss > 0 && a.raw_witness.is_some() {

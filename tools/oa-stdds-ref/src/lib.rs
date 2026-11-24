@@ -20,6 +20,7 @@ pub mod engine;
 pub mod guard;
 pub mod load;
 pub mod model;
+pub mod publish;
 pub mod report;
 pub mod run;
 pub mod sources;

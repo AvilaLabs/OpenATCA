@@ -49,13 +49,18 @@ reported as such; the component does not coerce them into a scalar altitude.
 complete `FixIdentity`: length-tagged `ident[12]`, `region[4]`, length-tagged `scope[12]`, and
 class. Empty scope is a valid explicit identity. Coordinates are signed degrees × 1e7; altitude
 constraints are feet; speed bounds and measured groundspeed are millimetres per second.
-Constraint kind, path geometry and speed reference are typed. Speed reference distinguishes
+Altitude and speed each have an independent typed constraint channel, so one fix can carry both.
+Altitude kinds distinguish no restriction, minimum, maximum, window, at-altitude and unsupported;
+speed kinds distinguish no restriction, minimum, maximum, window and unsupported. Bounds and the
+`NO_ALTITUDE_FT`/`NO_SPEED_MMPS` unavailable sentinels remain explicit. Speed reference distinguishes
 groundspeed, indicated airspeed and unknown. Only an explicitly groundspeed-referenced constraint
-can be compared with observed groundspeed. Unsupported route constraints are declared and
-degraded or refused, never silently reinterpreted.
+can be compared with observed groundspeed. Indicated-airspeed restrictions and unsupported route
+forms are retained and declared as unsupported, never dropped or reinterpreted. Published route
+altitude restrictions (including procedure altitude restrictions) remain unsupported by this
+baseline because it has no altitude-crossing feasibility solver.
 
 The route slice may contain at most 256 points. The named checked forecast-work budget is
-`MAX_FORECAST_WORK = 23,216` units at that maximum route size. The active cursor is required:
+`MAX_FORECAST_WORK = 24,063` units at that maximum route size. The active cursor is required:
 the core resolves its exact full fix identity uniquely in the filed route, then forecasts only
 the suffix beginning there. It does not infer progress from proximity, route order, or the ETA
 target. Missing and ambiguous cursor matches, a future cursor, or a cursor bound to another key

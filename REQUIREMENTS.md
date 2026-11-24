@@ -4515,6 +4515,11 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   second and exact number removed. The radar schedule, plot count and truth labels remain unchanged,
   so a control and degraded run with the same seed exercise identical aircraft and plot times.
 
+- **OA-PRF-014** Radar conversion refusals retain fixed-size reason counters for every conversion
+  stage, distinguishing missing height, invalid plot, unreachable altitude and numerical geometry
+  failures. These diagnostic subsets preserve existing aggregate loss totals and do not double-count
+  loss or change qualification acceptance thresholds.
+
 - **OA-TRK-337** The standalone allocation checker ties every declared measured tracker/fusion
   route to its production source symbol and requires a positive route-specific runtime evidence
   field. Tracker fixtures include the default 4,096-track capacity followed by refusal and recovery,
@@ -5753,6 +5758,14 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   interval counters report omitted work in radar association or initiation. The indication is
   independent of source freshness and does not total unlike or overlapping work counters. A
   decrease in a relevant counter is displayed as inconsistent health.
+- **OA-DSP-074** Raw publication recovery verifies exact input, adaptation, receipt/settings and
+  ordered-frame witness provenance before admitting an existing completed output prefix.
+- **OA-DSP-075** Restart publication verifies completed prefix bytes without replacement and
+  publishes only the ordered missing suffix and closed manifest. Partial staging and publication
+  interruption must not silently replace completed files or accept damaged output.
+- **OA-DSP-076** All cooperating publishers, including overwrite writers, hold one same-host
+  exclusive lock through validation, removal and final publication. This is not distributed fencing
+  or restoration of tracker/process state.
 - **OA-SHD-030** `oa-shadow screen` compares ADS-B with ERAM's reports of address-paired aircraft: ADS-B is
   evaluated at each ERAM report time by oa-truth's smoother (default settings) and the offset ADS-B minus ERAM is
   resolved along and across the ADS-B velocity direction. The along offset is `c - L x speed`: L is the apparent
@@ -6672,6 +6685,15 @@ configuration with no default; the crate's tests use synthetic values.
   truth altitude and the median ratio of STDDS speed to truth speed on the paired samples, with "units
   suspect" when the altitude medians (floored at 100 ft) differ by more than a factor of 10 or the speed
   ratio is outside 0.8 to 1.25.
+- **OA-SRF-018** Offset calibration requires a positive address and complete source-facility/track
+  key. Ambiguous duplicate timestamps are excluded without choosing class order; every unambiguous
+  class transition and declared reuse gap starts a separate fit segment, including A-to-B-to-A.
+- **OA-SRF-019** Comparison input, retained records, fit work and output bytes have checked limits.
+  Reports distinguish each mode's cohort from the same-record raw/fitted intersection and publish
+  per-metric denominators. In-sample calibration and unverified units remain explicit limitations.
+- **OA-SRF-020** Summary, CSV and JSON are published without replacing existing outputs; a final
+  content/provenance marker binds all three. Cooperating same-host writers hold one publisher lock.
+  This does not establish distributed fencing or automatic recovery of a partial report set.
 
 ## M4 legacy trajectory measurement (tools/oa-legacy-traj)
 
@@ -6832,6 +6854,48 @@ These requirements describe the bounded, pure issue-time component in `core::tra
 - **OA-TRAJ-018** Repeated exact ETA-target identities are refused as ambiguous, and a vector gap crossed by a horizon remains visible as degraded output with a gap flag; an ETA across a gap is refused.
 - **OA-TRAJ-019** Required alignment bytes are explicit, zero-filled record fields; nonzero bytes in eligible inputs are refused, while future evidence remains gated before reserved-byte validation.
 - **OA-TRAJ-020** An indeterminate antipodal great-circle interpolation is refused as unsupported geometry, with unavailable coordinates; it is not reported as an exhausted route.
+
+- **OA-TRAJ-021** Route points retain independent altitude and speed constraint channels, including simultaneous restrictions; a supported groundspeed check still runs while altitude is degraded as unsupported.
+- **OA-TRAJ-022** Indicated-airspeed and unknown-reference limits are retained and reported unsupported; they never compare to, replace or flag observed groundspeed.
+- **OA-TRAJ-023** Route evidence after cutoff is gated before constraint or coordinate validation; changing future payload cannot affect issue output.
+- **OA-TRAJ-024** Malformed altitude or speed windows are refused even when the other independent channel is valid.
+
+## Regional offline integration (tools/oa-regional-session)
+
+This is a bounded normalized-input composition, not facility, deadline or operational qualification.
+
+- **OA-REG-001** Authoritative normalized flight updates execute actual flight operations; offer and acceptance preserve current ownership, and only a valid take transfers it. Clearances and stale refusals retain source evidence.
+- **OA-REG-002** Track/flight joins use positive full aircraft addresses and retain all claimants; ambiguous joins and future snapshots cannot select a flight for prediction.
+- **OA-REG-003** Surveillance and route events cannot manufacture flight identity bindings. Flight source/availability timestamps require exact millisecond precision rather than silent truncation.
+- **OA-REG-004** All collection capacities and overflow counters remain visible. Each completed frame uses the same emitted observed state epoch for actual conflict alerting and scope, with flight and route evidence frozen at its receipt cutoff.
+- **OA-REG-005** Bounded filed route text retains its exact bytes and provenance. Reconstructing the admitted prefix gives identical subsystem evidence; later amendments cannot change earlier frames.
+- **OA-REG-006** Normalized event kinds must match their source categories. A newer route/plan mismatch blocks fallback; an execution failure poisons the session until fresh prefix reconstruction.
+- **OA-REG-007** Feed loss remains visible while coasting traffic retains identity. Transport receipt and accepted measurement freshness are distinct evidence.
+- **OA-REG-008** Input/output paths and source/receipt timestamps obey the sealed-data guard. A new closed run records input, adaptation, executable, settings and per-frame evidence hashes; incomplete runs have no valid completion marker.
+- **OA-REG-009** Local controller requests preserve receipt/source sequence order with authoritative flight updates. The bridge checks full displayed and current identity, generation, command/track freshness and actor authority; every queued request is completed explicitly, and invariant failure poisons the session.
+
+## Controller interaction (oa-display)
+
+- **OA-UI-001** Selection, intent queue, completion and presentation are pure functions over caller-supplied plain values.
+- **OA-UI-002** Bound flight identity includes all GUFI network-order bytes, aircraft address, reporting centre and plan ID, compared in full.
+- **OA-UI-003** Target-view operations refuse more than 4,096 rows before scanning.
+- **OA-UI-004** Selection distinguishes absent, raw-track-only and full-flight-bound states.
+- **OA-UI-005** Address selection requires exactly one current target row and the expected generation.
+- **OA-UI-006** A raw-track-only selection is displayable but cannot enqueue a control intent.
+- **OA-UI-007** Binding refuses absent, ambiguous or mismatched full identity claims.
+- **OA-UI-008** Missing tracks, duplicate addresses, malformed reserved fields and stale views/generations have named refusals.
+- **OA-UI-009** Clearing selection never erases or retargets pending intents.
+- **OA-UI-010** Assigned and interim altitude set/clear requests are typed intents, separate from authoritative flight mutation.
+- **OA-UI-011** Handoff offer, accept, take and cancel intents name stable unit identifiers.
+- **OA-UI-012** The fixed 32-row SoA queue reports capacity without allocation, panic or silent drop.
+- **OA-UI-013** Each intent retains full identity, generation, view/input sequences, supplied issue timestamp and original typed request.
+- **OA-UI-014** Accepted input sequences increase strictly; retries and backwards sequences have explicit outcomes.
+- **OA-UI-015** Dispatch preflight rechecks current address uniqueness, generation and full identity against a non-backwards view sequence.
+- **OA-UI-016** Completion names the exact pending head sequence; a mismatch cannot remove it.
+- **OA-UI-017** Address reuse, disappearance and selection changes never rebind a queued intent.
+- **OA-UI-018** Selection/queue refusals and completion outcomes remain explicit and presentable.
+- **OA-UI-019** Interaction status uses the existing display list with bounded text and explicit viewport/capacity refusal.
+- **OA-UI-020** Display interaction does not mutate or depend on the flight subsystem; the regional bridge remains responsible for authoritative identity and authority validation.
 
 ## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
 

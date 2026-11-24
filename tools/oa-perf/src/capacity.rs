@@ -313,6 +313,106 @@ pub fn fusion_counters(s: &FusionStats) -> Vec<(&'static str, u64)> {
         ("pairs_rejected_by_altitude", s.pairs_rejected_by_altitude),
         ("pairs_gated", s.pairs_gated),
         ("no_height_pairs", s.no_height_pairs),
+        (
+            "conversion.hard.bad_site",
+            s.hard_conversion_refusals.bad_site,
+        ),
+        (
+            "conversion.hard.bad_plot",
+            s.hard_conversion_refusals.bad_plot,
+        ),
+        (
+            "conversion.hard.no_height",
+            s.hard_conversion_refusals.no_height,
+        ),
+        (
+            "conversion.hard.no_convergence",
+            s.hard_conversion_refusals.no_convergence,
+        ),
+        (
+            "conversion.hard.unreachable",
+            s.hard_conversion_refusals.unreachable,
+        ),
+        (
+            "conversion.pair.bad_site",
+            s.pair_conversion_refusals.bad_site,
+        ),
+        (
+            "conversion.pair.bad_plot",
+            s.pair_conversion_refusals.bad_plot,
+        ),
+        (
+            "conversion.pair.no_height",
+            s.pair_conversion_refusals.no_height,
+        ),
+        (
+            "conversion.pair.no_convergence",
+            s.pair_conversion_refusals.no_convergence,
+        ),
+        (
+            "conversion.pair.unreachable",
+            s.pair_conversion_refusals.unreachable,
+        ),
+        (
+            "conversion.candidate_pair.bad_site",
+            s.candidate_pair_conversion_refusals.bad_site,
+        ),
+        (
+            "conversion.candidate_pair.bad_plot",
+            s.candidate_pair_conversion_refusals.bad_plot,
+        ),
+        (
+            "conversion.candidate_pair.no_height",
+            s.candidate_pair_conversion_refusals.no_height,
+        ),
+        (
+            "conversion.candidate_pair.no_convergence",
+            s.candidate_pair_conversion_refusals.no_convergence,
+        ),
+        (
+            "conversion.candidate_pair.unreachable",
+            s.candidate_pair_conversion_refusals.unreachable,
+        ),
+        (
+            "conversion.addressed_init.bad_site",
+            s.addressed_init_conversion_refusals.bad_site,
+        ),
+        (
+            "conversion.addressed_init.bad_plot",
+            s.addressed_init_conversion_refusals.bad_plot,
+        ),
+        (
+            "conversion.addressed_init.no_height",
+            s.addressed_init_conversion_refusals.no_height,
+        ),
+        (
+            "conversion.addressed_init.no_convergence",
+            s.addressed_init_conversion_refusals.no_convergence,
+        ),
+        (
+            "conversion.addressed_init.unreachable",
+            s.addressed_init_conversion_refusals.unreachable,
+        ),
+        (
+            "conversion.anonymous_init.bad_site",
+            s.anonymous_init_conversion_refusals.bad_site,
+        ),
+        (
+            "conversion.anonymous_init.bad_plot",
+            s.anonymous_init_conversion_refusals.bad_plot,
+        ),
+        (
+            "conversion.anonymous_init.no_height",
+            s.anonymous_init_conversion_refusals.no_height,
+        ),
+        (
+            "conversion.anonymous_init.no_convergence",
+            s.anonymous_init_conversion_refusals.no_convergence,
+        ),
+        (
+            "conversion.anonymous_init.unreachable",
+            s.anonymous_init_conversion_refusals.unreachable,
+        ),
         ("cand_started", s.cand_started),
         ("cand_joined", s.cand_joined),
         ("cand_confirmed", s.cand_confirmed),
@@ -371,6 +471,38 @@ pub const FUSION_NOT_LOSS: &[&str] = &[
     "pairs_tested",
     "pairs_rejected_by_altitude",
     "pairs_gated",
+    // The stats structs and emitted leaf counters are diagnostic breakdowns, not additional
+    // lost work. Keep both names classified: the audit enumerates top-level stats fields.
+    "hard_conversion_refusals",
+    "pair_conversion_refusals",
+    "candidate_pair_conversion_refusals",
+    "addressed_init_conversion_refusals",
+    "anonymous_init_conversion_refusals",
+    "conversion.hard.bad_site",
+    "conversion.hard.bad_plot",
+    "conversion.hard.no_height",
+    "conversion.hard.no_convergence",
+    "conversion.hard.unreachable",
+    "conversion.pair.bad_site",
+    "conversion.pair.bad_plot",
+    "conversion.pair.no_height",
+    "conversion.pair.no_convergence",
+    "conversion.pair.unreachable",
+    "conversion.candidate_pair.bad_site",
+    "conversion.candidate_pair.bad_plot",
+    "conversion.candidate_pair.no_height",
+    "conversion.candidate_pair.no_convergence",
+    "conversion.candidate_pair.unreachable",
+    "conversion.addressed_init.bad_site",
+    "conversion.addressed_init.bad_plot",
+    "conversion.addressed_init.no_height",
+    "conversion.addressed_init.no_convergence",
+    "conversion.addressed_init.unreachable",
+    "conversion.anonymous_init.bad_site",
+    "conversion.anonymous_init.bad_plot",
+    "conversion.anonymous_init.no_height",
+    "conversion.anonymous_init.no_convergence",
+    "conversion.anonymous_init.unreachable",
     "cand_started",
     "cand_joined",
     "cand_confirmed",
@@ -1933,6 +2065,38 @@ pub fn cap_text(r: &CapResult) -> String {
             ));
         }
     }
+    for (stage, counts) in [
+        ("hard", r.fusion.hard_conversion_refusals),
+        ("association", r.fusion.pair_conversion_refusals),
+        (
+            "candidate association",
+            r.fusion.candidate_pair_conversion_refusals,
+        ),
+        (
+            "addressed initiation",
+            r.fusion.addressed_init_conversion_refusals,
+        ),
+        (
+            "anonymous initiation",
+            r.fusion.anonymous_init_conversion_refusals,
+        ),
+    ] {
+        if counts.bad_site > 0
+            || counts.bad_plot > 0
+            || counts.no_height > 0
+            || counts.no_convergence > 0
+            || counts.unreachable > 0
+        {
+            s.push_str(&format!(
+                "  radar conversion refusals at {stage}: bad site {}, bad plot {}, missing height {}, no convergence {}, unreachable altitude {}\n",
+                counts.bad_site,
+                counts.bad_plot,
+                counts.no_height,
+                counts.no_convergence,
+                counts.unreachable,
+            ));
+        }
+    }
     s.push_str(&format!(
         "  buffers unchanged across the run: {}; radar-only track records handed on: {}\n",
         r.buffers_stable, r.radar_track_recs_taken
@@ -1969,6 +2133,31 @@ pub fn parse_radars(s: &str) -> Result<Vec<Kind>, String> {
 )]
 mod tests {
     use super::*;
+
+    // REQ: OA-PRF-014
+    #[test]
+    fn conversion_reason_diagnostics_are_emitted_without_changing_loss_counters() {
+        let fusion = FusionStats {
+            no_height_pairs: 3,
+            pair_conversion_refusals: oa_track::fusion::RadarConversionRefusals {
+                no_height: 2,
+                unreachable: 1,
+                ..Default::default()
+            },
+            anonymous_init_conversion_refusals: oa_track::fusion::RadarConversionRefusals {
+                bad_plot: 4,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let counters = fusion_counters(&fusion);
+        assert!(counters.contains(&("conversion.pair.no_height", 2)));
+        assert!(counters.contains(&("conversion.pair.unreachable", 1)));
+        assert!(counters.contains(&("conversion.anonymous_init.bad_plot", 4)));
+        assert!(loss_counters(&fusion, &TrackerStats::default(), 0)
+            .iter()
+            .all(|(name, _)| !name.contains("conversion.")));
+    }
 
     /// Sets the counter `name` (as `loss_counters` names it) to 1 in the result's totals.
     fn set_loss(r: &mut CapResult, name: &str) {

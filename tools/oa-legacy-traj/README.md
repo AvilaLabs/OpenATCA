@@ -45,6 +45,12 @@ This API does not reconstruct historical flight state, convert filed routes or c
 experiment below. Its caller must supply the flight/track snapshot actually available at that
 cutoff. It is an integration building block, not a shared operational trajectory service.
 
+The pure shared trajectory baseline accepts separate altitude and speed restriction channels on
+each route point, preserving simultaneous published restrictions. It checks only groundspeed-
+qualified speed limits against observed groundspeed. Indicated-airspeed and route-altitude
+restrictions remain explicit as unsupported because the baseline has no wind correction or
+altitude-crossing feasibility solver. See `SHARED_TRAJECTORY.md` for the input contract and limits.
+
 ```
 oa-legacy-traj --sfdps <dir> --tbfm <dir> --adsb <clip.oaf> --nasr <zip> --out <dir> --arrival-meter-fix <NAME|auto>
 ```

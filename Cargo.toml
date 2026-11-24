@@ -49,6 +49,7 @@ members = [
     "crates/oa-runway",
     "crates/oa-sealed",
     "tools/oa-build-info",
+    "tools/oa-regional-session",
     "tools/oa-encounter",
     "tools/oa-legacy-traj",
     "tools/oa-msaw",

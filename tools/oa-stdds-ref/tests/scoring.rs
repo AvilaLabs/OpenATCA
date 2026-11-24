@@ -8,10 +8,12 @@
 )]
 
 use oa_stdds::{new_stats, parse_message, Limits, Message};
-use oa_stdds_ref::engine::{analyse, evaluate, fit_offset, pair_err, FitMiss, FIT_MIN_SAMPLES};
+use oa_stdds_ref::engine::{
+    analyse, estimate_analysis_work, evaluate, fit_offset, pair_err, FitMiss, FIT_MIN_SAMPLES,
+};
 use oa_stdds_ref::load::{load_reader, rec_of};
 use oa_stdds_ref::model::{classify_record, Class, Fix, Miss, Rec, Reference, Unpaired};
-use oa_stdds_ref::report::{altitude_suspect, build_report, speed_suspect};
+use oa_stdds_ref::report::{altitude_suspect, build_report, check_report_bound, speed_suspect};
 use oa_stdds_ref::sources::{interpolate, Row, TrackerSource};
 use oa_xml::{Limits as XmlLimits, Parser};
 
@@ -98,6 +100,7 @@ fn rec(gen: &Line, addr: Option<u32>, stamp: i64, index: u32, class: Class) -> R
         class,
         addr,
         src: *b"ZZA\0\0\0\0\0",
+        src_present: true,
         track_num: Some(1234),
         t_ms: Some(stamp),
         pos: Some((f.lat, f.lon)),
@@ -189,7 +192,7 @@ fn a_record_without_an_address_is_counted_and_not_paired() {
     assert_eq!(last.plain, Err(Unpaired::NoAddress));
     assert_eq!(last.fitted, Err(Unpaired::NoAddress));
     let r = build_report(&[], &a);
-    assert!(r.summary.contains("without address 1 "), "{}", r.summary);
+    assert!(r.summary.contains("without address 1,"), "{}", r.summary);
     assert!(r.summary.contains("unpaired, no Mode S address: 1"));
     // An address no reference holds is a counted reason of its own.
     let stranger = Rec {
@@ -804,7 +807,7 @@ fn the_summary_carries_the_digests_and_both_outputs_are_deterministic() {
     assert!(!r1.csv.contains("digest") && !r1.csv.contains("abc"));
     let last = r1.summary.lines().last().unwrap();
     let hex = last
-        .strip_prefix("digest (summary above and the csv): ")
+        .strip_prefix("digest (summary above, csv and json): ")
         .unwrap();
     assert_eq!(hex.len(), 64);
     assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -1009,15 +1012,27 @@ fn unit_checks_flag_altitude_and_speed_scales() {
 // REQ: OA-SRF-003
 #[test]
 fn a_pseudo_frozen_or_coasting_class_is_reported_on_its_own() {
-    let l = line();
-    let mut recs = track(0, Class::AdsbTrue);
-    recs.extend(track(0, Class::PseudoFrozenCoast).into_iter().map(|mut r| {
-        r.index += 100;
-        r
-    }));
-    let a = analyse(&recs, &tracker_of(&l), &l);
+    let mut long = line();
+    long.t1 = T0 + 400_000;
+    let mut recs = Vec::new();
+    for (class, start, index_base) in [
+        (Class::AdsbTrue, 20_000i64, 0u32),
+        (Class::PseudoFrozenCoast, 182_000, 100),
+    ] {
+        recs.extend((0..81u32).map(|i| {
+            rec(
+                &long,
+                Some(ADDR),
+                T0 + start + i64::from(i) * 2_000,
+                index_base + i,
+                class,
+            )
+        }));
+    }
+    let a = analyse(&recs, &tracker_of(&long), &long);
     // Same address, facility and track number, but a separate track (and fit) per class.
     assert_eq!(a.fits.len(), 2);
+    assert!(a.class_churn_transitions > 0);
     let r = build_report(&[], &a);
     assert_eq!(r.summary.matches("== independence class:").count(), 2);
     assert!(r
@@ -1025,6 +1040,169 @@ fn a_pseudo_frozen_or_coasting_class_is_reported_on_its_own() {
         .contains("== independence class: pseudo, frozen or coasting =="));
     assert!(r.summary.contains("== independence class: adsb=true =="));
     assert!(r.csv.lines().any(|x| x.contains(",pseudo-frozen-coast,")));
+}
+
+// REQ: OA-SRF-018
+#[test]
+fn class_churn_a_to_b_to_a_creates_three_disjoint_fit_segments() {
+    let mut long = line();
+    long.t1 = T0 + 600_000;
+    let mut recs = Vec::new();
+    for (phase, class, start) in [
+        (0u32, Class::AdsbTrue, 20_000i64),
+        (1, Class::AdsbFalse, 182_000),
+        (2, Class::AdsbTrue, 344_000),
+    ] {
+        for i in 0..81u32 {
+            recs.push(rec(
+                &long,
+                Some(ADDR),
+                T0 + start + i64::from(i) * 2_000,
+                phase * 100 + i,
+                class,
+            ));
+        }
+    }
+    let analysis = analyse(&recs, &tracker_of(&long), &long);
+    assert_eq!(analysis.reuse_segments, 0);
+    assert_eq!(analysis.class_churn_transitions, 2);
+    assert_eq!(analysis.fits.len(), 3);
+    assert_eq!(estimate_analysis_work(&recs).unwrap(), 243 * 781);
+    assert_eq!(
+        analysis
+            .fits
+            .iter()
+            .map(|fit| fit.segment)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [0, 1, 2].into_iter().collect()
+    );
+}
+
+// REQ: OA-SRF-018
+#[test]
+fn incomplete_fit_keys_refuse_calibration_but_address_pairing_remains_and_facilities_split() {
+    let l = line();
+    let complete = track(0, Class::AdsbAbsent);
+    let mut missing_source = complete[0];
+    missing_source.src_present = false;
+    missing_source.t_ms = Some(T0 + 100_000);
+    let mut missing_track = complete[0];
+    missing_track.track_num = None;
+    missing_track.t_ms = Some(T0 + 101_000);
+    let incomplete = analyse(&[missing_source, missing_track], &tracker_of(&l), &l);
+    assert!(incomplete.fits.is_empty());
+    assert!(incomplete.rows.iter().all(|row| row.plain.is_ok()));
+    assert!(incomplete
+        .rows
+        .iter()
+        .all(|row| row.fitted == Err(Unpaired::MissingFitKey)));
+
+    let mut other_facility: Vec<_> = complete
+        .iter()
+        .copied()
+        .map(|mut row| {
+            row.src = *b"ZZB\0\0\0\0\0";
+            row
+        })
+        .collect();
+    let mut first_facility: Vec<_> = complete
+        .iter()
+        .copied()
+        .map(|mut row| {
+            row.index += 100;
+            row
+        })
+        .collect();
+    first_facility.append(&mut other_facility);
+    let qualified = analyse(&first_facility, &tracker_of(&l), &l);
+    assert_eq!(qualified.fits.len(), 2);
+}
+
+#[test]
+fn zero_addresses_and_duplicate_key_timestamps_are_excluded_and_counted() {
+    let l = line();
+    let base = track(0, Class::AdsbAbsent);
+    let zero = Rec {
+        addr: Some(0),
+        ..base[0]
+    };
+    let duplicate = Rec {
+        index: 1000,
+        ..base[0]
+    };
+    let recs = [zero, base[0], duplicate];
+    let a = analyse(&recs, &tracker_of(&l), &l);
+    assert_eq!(a.rows[0].plain, Err(Unpaired::ZeroAddress));
+    assert_eq!(a.rows[1].plain, Err(Unpaired::AmbiguousTimestamp));
+    assert_eq!(a.rows[2].fitted, Err(Unpaired::AmbiguousTimestamp));
+    assert_eq!(a.ambiguous_timestamp_rows, 2);
+    let report = build_report(&[], &a);
+    assert!(report.summary.contains("zero address 1"));
+    assert!(report.json.contains("ambiguous duplicate timestamp"));
+}
+
+#[test]
+fn reuse_gap_boundary_and_nonmonotonic_file_order_are_explicit() {
+    let l = line();
+    let a = track(0, Class::AdsbAbsent)[0];
+    let mut b = a;
+    b.index = 1;
+    b.t_ms = Some(T0 + 60_000);
+    let mut c = a;
+    c.index = 0;
+    c.t_ms = Some(T0 + 120_001);
+    let a = Rec { index: 2, ..a };
+    let analysis = analyse(&[c, b, a], &tracker_of(&l), &l);
+    assert_eq!(analysis.rows[0].segment, Some(1));
+    assert_eq!(analysis.rows[1].segment, Some(0));
+    assert_eq!(analysis.rows[2].segment, Some(0));
+    assert_eq!(analysis.reuse_segments, 1);
+    assert_eq!(analysis.nonmonotonic_arrivals, 2);
+}
+
+#[test]
+fn machine_output_marks_common_cohorts_and_in_sample_fit() {
+    let l = line();
+    let a = analyse(&track(2_300, Class::AdsbAbsent), &tracker_of(&l), &l);
+    let report = build_report(&["input SHA-256: synthetic".to_string()], &a);
+    assert!(report
+        .csv
+        .starts_with("file,record,class,status_plain,raw_common_cohort"));
+    assert!(report.csv.contains(",true,"));
+    assert!(report.json.contains("\"raw_common_cohort\""));
+    assert!(report.json.contains("in-sample"));
+    assert!(report.json.contains("mrtTime Unix milliseconds UTC"));
+}
+
+// REQ: OA-SRF-019
+#[test]
+fn report_states_mode_and_intersection_denominators_and_refuses_size_overflow() {
+    let l = line();
+    let mut records = track(2_300, Class::AdsbAbsent);
+    // Missing velocity removes this record from only the velocity metric denominators.
+    records[10].vel = None;
+    // Raw timestamp is covered; the fitted stamp is 700 ms before truth coverage.
+    let mut early = rec(&l, Some(ADDR), T0 + 1_600, 81, Class::AdsbAbsent);
+    // Independent continuation of the known 200 m/s line to 0.7 s before reference coverage.
+    early.pos =
+        Some(oa_geo::aeqd::unproject(&oa_geo::aeqd::frame_new(LAT, LON), -140.0, 0.0).unwrap());
+    early.vel = None;
+    records.push(early);
+    let analysis = analyse(&records, &tracker_of(&l), &l);
+    let report = build_report(&[], &analysis);
+    assert!(report
+        .summary
+        .contains("Raw-mode and fitted-mode cohorts can differ"));
+    assert!(report
+        .summary
+        .contains("same-record raw/fitted intersection: 81 records"));
+    assert!(report
+        .json
+        .contains("\"raw_fitted_intersection_records\": 81"));
+    assert!(report.json.contains("\"velocity (m/s)\":{\"unit\":\"m/s\""));
+    assert!(report.json.contains("\"same_record_intersection_raw\""));
+    assert!(report.json.contains("\"n\":80"));
+    assert!(check_report_bound(usize::MAX, 0).is_err());
 }
 
 // REQ: OA-SRF-016

@@ -1,0 +1,44 @@
+[package]
+name = "oa-regional-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+# F1: Connor explicitly approved these thirteen existing workspace runtime links on
+# 2026-11-24 after confirming that they introduce no external packages. Only links used by
+# this increment are retained; direct oa-geo/oa-math links are unnecessary at this boundary.
+[dependencies]
+# Authoritative flight operations, stamped clearances and ownership transitions.
+oa-flight = { path = "../../crates/oa-flight" }
+# Actual observed traffic and deterministic issue-time tracker output.
+oa-track = { path = "../../crates/oa-track" }
+# Shared deterministic route trajectory calculation; existing study remains independent.
+oa-legacy-traj = { path = "../oa-legacy-traj" }
+# Actual short-term alerts remain based on observed traffic, independent of route intent.
+oa-ca = { path = "../../crates/oa-ca" }
+# Net availability, input degradation and inhibition state.
+oa-safety = { path = "../../crates/oa-safety" }
+# Plain scope inputs, ownership display and raster fingerprints.
+oa-display = { path = "../../crates/oa-display" }
+# Existing tracker-to-scope construction and deterministic rendering.
+oa-scope-replay = { path = "../../crates/oa-scope-replay" }
+# Adaptation snapshot and independent route conversion against its own NASR/CIFP model.
+oa-airspace = { path = "../../crates/oa-airspace" }
+# Exactly specified rounding before checked fixed-point conversions.
+oa-ieee = { path = "../../crates/oa-ieee" }
+# Bind inputs, adaptation, source, executable and output evidence to exact bytes.
+oa-sha256 = { path = "../../crates/oa-sha256" }
+# Check every input/output path and every source/receipt timestamp before admission.
+oa-sealed = { path = "../../crates/oa-sealed" }
+
+[package.metadata.openatca]
+class = "shell"
+
+[[bin]]
+name = "oa-regional-session"
+path = "src/main.rs"

@@ -12,6 +12,6 @@ pub mod shell;
 
 pub use crate::core::raster::MAX_DISPLAY_PIXELS;
 pub use crate::core::{
-    font, list, ownership, palette, project, raster, safety, scene, text, traffic,
+    font, interaction, list, ownership, palette, project, raster, safety, scene, text, traffic,
 };
 pub use crate::shell::{cli, ppm, probe};

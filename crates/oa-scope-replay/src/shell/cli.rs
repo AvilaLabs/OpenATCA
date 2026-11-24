@@ -8,7 +8,7 @@
 //!     --out-dir <dir> [--leader-min <n>] [--trail-n <n>] [--trail-step-s <n>] [--reacq-s <n>]
 //!     [--max-targets <n>] [--warmup-s <n>] [--hashes-only] [--overwrite] [--allow-loss]
 //!     [--raw-only --raw-receipt recorded|archive-reconstructed]
-//!     [--raw-witness-out <file>|--verify-raw-witness <file>]
+//!     [--raw-witness-out <file>|--verify-raw-witness <file>] [--resume-raw-publication]
 //! ```
 //!
 //! Frame `i` shows the tracker state at `start + i * step`, for `i` from 0 while the time is
@@ -46,10 +46,13 @@
 //! `--step-s` steps is a usage error.
 //!
 //! `--out-dir` must be empty or new unless `--overwrite` is given, which deletes only the files
-//! this tool writes there: `frame-NNNN.ppm` and `hashes.txt`.
+//! this tool writes there: `frame-NNNN.ppm` and `hashes.txt`. Raw-only publication can instead
+//! resume an exact completed PPM prefix with `--resume-raw-publication` and a verified prior
+//! witness; it recomputes from the beginning and stores no process or tracker checkpoint.
 
 use crate::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use crate::frame::{replay_build, replay_new, replay_raster, ReplayConfig, ReplayError};
+use crate::publication::{OutputLock, MAX_DIRECTORY_ENTRIES, MAX_FRAME_BYTES};
 use crate::rows::{
     convert_check, store_addresses, store_loss, store_rows, store_stats_add, CallsignStats,
     Callsigns, ConvertConfig, RowStore, StoreStats, DEFAULT_CONVERT, MAX_CALLSIGN_REPORTS,
@@ -120,7 +123,7 @@ const USAGE: &str = "usage: oa-scope-replay --snapshot <file> --adsb <clip.oaf> 
 --duration-s <n> --step-s <n> --out-dir <dir> [--leader-min <n>] [--trail-n <n>] \
 [--trail-step-s <n>] [--reacq-s <n>] [--max-targets <n>] [--warmup-s <n>] [--hashes-only] \
 [--overwrite] [--allow-loss] [--raw-only --raw-receipt recorded|archive-reconstructed]
-[--raw-witness-out <file>|--verify-raw-witness <file>]";
+[--raw-witness-out <file>|--verify-raw-witness <file>] [--resume-raw-publication]";
 
 // A7.2: cold struct, size guard waived (errors are rare).
 #[derive(Debug)]
@@ -181,6 +184,8 @@ pub struct ReplayArgs {
     pub raw_receipt: Option<RawReceiptMode>,
     /// Write or verify a bounded raw replay witness; valid only in raw-only mode.
     pub raw_witness: Option<RawWitnessAction>,
+    /// Resume publishing a recomputed raw-only output prefix verified against a witness.
+    pub resume_raw_publication: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -353,8 +358,8 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
     let (mut start, mut duration, mut step, mut out_dir) = (None, None, None, None);
     let (mut leader, mut trail_n, mut trail_step, mut reacq) = (None, None, None, None);
     let (mut max_targets, mut warmup) = (None, None);
-    let (mut hashes_only, mut overwrite, mut allow_loss, mut raw_only) =
-        (false, false, false, false);
+    let (mut hashes_only, mut overwrite, mut allow_loss, mut raw_only, mut resume_raw_publication) =
+        (false, false, false, false, false);
     let mut raw_receipt = None;
     let mut raw_witness = None;
     let mut it = args.iter();
@@ -416,6 +421,7 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
             "--overwrite" => overwrite = true,
             "--allow-loss" => allow_loss = true,
             "--raw-only" => raw_only = true,
+            "--resume-raw-publication" => resume_raw_publication = true,
             "--raw-receipt" => {
                 let mode = match value()?.as_str() {
                     "recorded" => RawReceiptMode::Recorded,
@@ -472,6 +478,16 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
     if raw_witness.is_some() && !raw_only {
         return Err(CliError::Usage(
             "raw witness options require --raw-only and --raw-receipt".into(),
+        ));
+    }
+    if resume_raw_publication
+        && (!raw_only
+            || !matches!(raw_witness.as_ref(), Some(RawWitnessAction::Verify(_)))
+            || overwrite
+            || hashes_only)
+    {
+        return Err(CliError::Usage(
+            "--resume-raw-publication requires raw-only mode, --verify-raw-witness, PPM output, and no --overwrite".into(),
         ));
     }
     if matches!(raw_witness.as_ref(), Some(RawWitnessAction::Verify(_))) && overwrite {
@@ -543,6 +559,7 @@ pub fn parse_args(args: &[String]) -> Result<ReplayArgs, CliError> {
         allow_loss,
         raw_receipt,
         raw_witness,
+        resume_raw_publication,
     })
 }
 
@@ -805,7 +822,7 @@ fn create_new(path: &Path) -> Result<std::fs::File, CliError> {
 
 /// Refuses an output directory that holds anything, unless `overwrite`. A directory that does not
 /// exist is fine.
-fn check_out_dir(dir: &Path, overwrite: bool) -> Result<(), CliError> {
+fn check_out_dir(dir: &Path, overwrite: bool, resume: bool) -> Result<(), CliError> {
     oa_sealed::refuse(dir).map_err(CliError::Failed)?;
     // seal-allow: the output directory is refused by the guard above; only its emptiness is read
     let mut entries = match std::fs::read_dir(dir) {
@@ -815,11 +832,19 @@ fn check_out_dir(dir: &Path, overwrite: bool) -> Result<(), CliError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(failed(&format!("read {}", dir.display()), e)),
     };
-    if !overwrite && entries.next().is_some() {
-        return Err(CliError::Failed(format!(
-            "{} is not empty; give --overwrite to delete the frame-NNNN.ppm and hashes.txt files of an earlier run, or choose another directory",
-            dir.display()
-        )));
+    if !overwrite && !resume {
+        if let Some(entry) = entries.next() {
+            let entry = entry.map_err(|e| failed(&format!("read {}", dir.display()), e))?;
+            let is_idle_lock = entry.file_name() == ".oa-scope-replay.publisher.lock"
+                && entry.file_type().is_ok_and(|kind| kind.is_file())
+                && entries.next().is_none();
+            if !is_idle_lock {
+                return Err(CliError::Failed(format!(
+                    "{} is not empty; give --overwrite to delete the frame-NNNN.ppm and hashes.txt files of an earlier run, or choose another directory",
+                    dir.display()
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -827,28 +852,74 @@ fn check_out_dir(dir: &Path, overwrite: bool) -> Result<(), CliError> {
 /// Deletes the files of an earlier run (see [`is_ours`]) from `dir`, and nothing else. A name
 /// like an output that is not a plain file (a symlink, a directory) is an error: it is never
 /// followed and never deleted.
-fn remove_ours(dir: &Path) -> Result<u64, CliError> {
+fn remove_ours(dir: &Path, lock: &OutputLock) -> Result<u64, CliError> {
+    if !lock.protects(dir) {
+        return Err(CliError::Failed(
+            "overwrite requires the active output-directory lock".into(),
+        ));
+    }
     let mut removed = 0u64;
     let entries =
         // seal-allow: the output directory (checked when it was chosen); only names of the tool's own files are read
         std::fs::read_dir(dir).map_err(|e| failed(&format!("read {}", dir.display()), e))?;
+    let mut seen = 0u64;
+    let mut owned: Vec<(PathBuf, u64, u64)> = Vec::new();
     for entry in entries {
+        seen = seen
+            .checked_add(1)
+            .ok_or_else(|| CliError::Failed("output directory entry count overflow".into()))?;
+        if seen > MAX_DIRECTORY_ENTRIES {
+            return Err(CliError::Failed(
+                "output directory exceeds its bounded entry limit; no files were removed".into(),
+            ));
+        }
         let entry = entry.map_err(|e| failed(&format!("read {}", dir.display()), e))?;
         let name = entry.file_name();
         if !name.to_str().is_some_and(is_ours) {
             continue;
         }
-        let kind = entry
-            .file_type()
-            .map_err(|e| failed(&format!("stat {}", entry.path().display()), e))?;
-        if !kind.is_file() {
+        let path = entry.path();
+        oa_sealed::refuse(&path).map_err(CliError::Failed)?;
+        // seal-allow: metadata only for a guarded owned output name during locked overwrite preflight
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|e| failed(&format!("stat {}", path.display()), e))?;
+        if !metadata.file_type().is_file() {
             return Err(CliError::Failed(format!(
                 "{} is not a plain file (a link or a directory); remove it and run again",
-                entry.path().display()
+                path.display()
             )));
         }
-        std::fs::remove_file(entry.path())
-            .map_err(|e| failed(&format!("remove {}", entry.path().display()), e))?;
+        use std::os::unix::fs::MetadataExt;
+        owned.push((path, metadata.dev(), metadata.ino()));
+    }
+    // Recover exact interrupted stages only after the bounded inventory and all initial checks.
+    // A linked stage/final pair is reconciled by inode metadata before any guarded content read.
+    lock.recover_stages()
+        .map_err(|e| failed("recover output staging files", e))?;
+    // Recheck every candidate before the first deletion. Require one link so a hardlink outside
+    // this directory is never silently removed as part of overwrite.
+    for (path, dev, ino) in &owned {
+        oa_sealed::refuse(path).map_err(CliError::Failed)?;
+        // seal-allow: recheck guarded output inode and link count before any overwrite deletion
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|e| failed(&format!("stat {}", path.display()), e))?;
+        use std::os::unix::fs::MetadataExt;
+        if !metadata.file_type().is_file()
+            || metadata.dev() != *dev
+            || metadata.ino() != *ino
+            || metadata.nlink() != 1
+        {
+            return Err(CliError::Failed(format!(
+                "{} changed after overwrite preflight; no replacement was removed",
+                path.display()
+            )));
+        }
+    }
+    // All candidate identities have passed before the first deletion.
+    for (path, _, _) in owned {
+        oa_sealed::refuse(&path).map_err(CliError::Failed)?;
+        std::fs::remove_file(&path)
+            .map_err(|e| failed(&format!("remove {}", path.display()), e))?;
         removed += 1;
     }
     Ok(removed)
@@ -948,7 +1019,8 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         return Ok(());
     }
     let a = parse_args(args)?;
-    check_out_dir(&a.out_dir, a.overwrite)?;
+    raw_replay::check_output_collisions(&a)?;
+    check_out_dir(&a.out_dir, a.overwrite, a.resume_raw_publication)?;
     let (file, size) = oa_sealed::open_regular(&a.snapshot)
         .map_err(|e| failed(&format!("read {}", a.snapshot.display()), e))?;
     let max_snapshot = oa_airspace::snapshot::MAX_SNAPSHOT_BYTES;
@@ -1016,10 +1088,14 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         convert: a.convert,
     };
     let mut r = replay_new(model, &cfg)?;
-    std::fs::create_dir_all(&a.out_dir)
-        .map_err(|e| failed(&format!("create {}", a.out_dir.display()), e))?;
+    let mut output_lock = if a.overwrite {
+        OutputLock::acquire_for_overwrite(&a.out_dir, a.frames)
+    } else {
+        OutputLock::acquire(&a.out_dir, a.frames)
+    }
+    .map_err(|e| failed("lock output directory", e))?;
     if a.overwrite {
-        remove_ours(&a.out_dir)?;
+        remove_ours(&a.out_dir, &output_lock)?;
     }
     let mut hashes = String::new();
     let (mut build_ms, mut raster_ms, mut hash_ms, mut write_ms) = (0.0, 0.0, 0.0, 0.0);
@@ -1040,12 +1116,23 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         let digest = frame_digest(&r.spec, &r.buf).map_err(|e| failed("hash", e))?;
         let t4 = Instant::now();
         if !a.hashes_only {
-            let path = a.out_dir.join(format!("frame-{i:04}.ppm"));
-            let file = create_new(&path)?;
-            let mut w = std::io::BufWriter::new(file);
-            oa_display::ppm::write_ppm(&mut w, &r.spec, &r.buf)
-                .and_then(|()| w.flush())
-                .map_err(|e| failed(&format!("write {}", path.display()), e))?;
+            let pixels = u64::from(r.spec.width)
+                .checked_mul(u64::from(r.spec.height))
+                .ok_or_else(|| CliError::Failed("PPM pixel count overflows".into()))?;
+            let ppm_limit = pixels
+                .checked_mul(3)
+                .and_then(|bytes| bytes.checked_add(64))
+                .and_then(|bytes| usize::try_from(bytes).ok())
+                .filter(|&bytes| bytes <= MAX_FRAME_BYTES)
+                .ok_or_else(|| {
+                    CliError::Failed("PPM frame exceeds the bounded publication size".into())
+                })?;
+            let mut ppm = Vec::with_capacity(ppm_limit);
+            oa_display::ppm::write_ppm(&mut ppm, &r.spec, &r.buf)
+                .map_err(|e| failed("encode PPM frame", e))?;
+            output_lock
+                .publish_frame(i, &ppm)
+                .map_err(|e| failed(&format!("publish frame {i}"), e))?;
         }
         let t5 = Instant::now();
         hashes.push_str(&format!("{i:04} {} {}\n", unix_text(t_ns), to_hex(&digest)));
@@ -1063,9 +1150,12 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         );
     }
     let hashes_path = a.out_dir.join("hashes.txt");
-    create_new(&hashes_path)?
-        .write_all(hashes.as_bytes())
-        .map_err(|e| failed(&format!("write {}", hashes_path.display()), e))?;
+    if a.hashes_only {
+        output_lock.finish_hashes_only(hashes.as_bytes())
+    } else {
+        output_lock.finish_frames(hashes.as_bytes())
+    }
+    .map_err(|e| failed(&format!("publish {}", hashes_path.display()), e))?;
 
     let n = a.frames as f64;
     let dc = &tr.decode;

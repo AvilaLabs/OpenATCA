@@ -94,6 +94,8 @@ pub struct Rec {
     pub addr: Option<u32>,
     /// The producing TRACON, zero padded; all zero when the message has none.
     pub src: [u8; 8],
+    /// Whether the message actually supplied its producing TRACON.
+    pub src_present: bool,
     pub track_num: Option<u32>,
     /// `mrtTime`, Unix ms.
     pub t_ms: Option<i64>,
@@ -151,7 +153,13 @@ pub trait Reference {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Unpaired {
     NoAddress,
+    /// A present address field containing the reserved all-zero value.
+    ZeroAddress,
     NoTimeOrPosition,
+    /// More than one record uses this positive address/source/track key at this timestamp.
+    AmbiguousTimestamp,
+    /// The row can pair by address but has no complete per-track fit identity.
+    MissingFitKey,
     NoTracker(Miss),
     NoTruth(Miss),
     NotFinite,
@@ -163,7 +171,10 @@ impl fmt::Display for Unpaired {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Unpaired::NoAddress => f.write_str("no Mode S address"),
+            Unpaired::ZeroAddress => f.write_str("zero Mode S address"),
             Unpaired::NoTimeOrPosition => f.write_str("no time or position"),
+            Unpaired::AmbiguousTimestamp => f.write_str("ambiguous duplicate timestamp"),
+            Unpaired::MissingFitKey => f.write_str("missing facility or track number for fit"),
             Unpaired::NoTracker(m) => write!(f, "no tracker fix: {}", m.name()),
             Unpaired::NoTruth(m) => write!(f, "no ADS-B truth: {}", m.name()),
             Unpaired::NotFinite => f.write_str("non-finite error"),

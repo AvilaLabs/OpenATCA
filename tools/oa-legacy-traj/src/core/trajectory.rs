@@ -25,7 +25,9 @@ pub const FIX_IDENTITY_BYTE_WORK: usize = 12 + 4 + 12;
 pub const FLIGHT_KEY_IDENTITY_BYTE_WORK: usize = 16 + 4 + 4 + 12;
 pub const ROUTE_BINDING_HASH_BYTE_WORK: usize = 32;
 pub const OWNER_UNIT_ID_BYTE_WORK: usize = 8;
-pub const ROUTE_POINT_RESERVED_BYTE_WORK: usize = 2;
+pub const ROUTE_POINT_RESERVED_BYTE_WORK: usize = 1;
+/// Independent altitude and speed channel tags validated once per route point.
+pub const ROUTE_CONSTRAINT_CHANNEL_WORK: usize = 2;
 pub const ROUTE_PROVENANCE_RESERVED_BYTE_WORK: usize = 4;
 pub const CURSOR_RESERVED_BYTE_WORK: usize = 5;
 pub const OWNER_RESERVED_BYTE_WORK: usize = 7;
@@ -34,8 +36,11 @@ pub const REVISION_RESERVED_BYTE_WORK: usize = 4;
 /// Checked before scanning: cursor search, suffix validation, route walks, ETA search, bounded
 /// identity/reserved-byte checks, plus one cursor and flight-key check.
 pub const MAX_FORECAST_WORK: usize = MAX_ROUTE_POINTS
-    * (HORIZON_COUNT + 3 + 3 * FIX_IDENTITY_BYTE_WORK)
-    + MAX_ROUTE_POINTS * ROUTE_POINT_RESERVED_BYTE_WORK
+    * (HORIZON_COUNT
+        + 3
+        + 3 * FIX_IDENTITY_BYTE_WORK
+        + ROUTE_POINT_RESERVED_BYTE_WORK
+        + ROUTE_CONSTRAINT_CHANNEL_WORK)
     + ROUTE_PROVENANCE_RESERVED_BYTE_WORK
     + CURSOR_RESERVED_BYTE_WORK
     + OWNER_RESERVED_BYTE_WORK
@@ -112,21 +117,29 @@ pub enum SpeedReference {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-pub enum ConstraintKind {
+pub enum AltitudeConstraintKind {
     None = 0,
-    MinimumAltitude = 1,
-    MaximumAltitude = 2,
-    AltitudeWindow = 3,
+    Minimum = 1,
+    Maximum = 2,
+    Window = 3,
     AtAltitude = 4,
-    MinimumSpeed = 5,
-    MaximumSpeed = 6,
-    SpeedWindow = 7,
+    Unsupported = 255,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SpeedConstraintKind {
+    None = 0,
+    Minimum = 1,
+    Maximum = 2,
+    Window = 3,
     Unsupported = 255,
 }
 
 /// One normalized route point. Coordinates are degrees × 1e7; constraints use feet and mm/s.
-/// `constraint_kind` describes which populated bounds have published meaning. Unknown forms
-/// degrade vertical output explicitly rather than being silently ignored.
+/// The two constraint channels describe the populated bounds independently, so a fix can carry
+/// altitude and speed restrictions together. Unsupported forms remain explicit and degrade the
+/// relevant output instead of being silently ignored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct RoutePoint {
@@ -137,13 +150,14 @@ pub struct RoutePoint {
     pub min_speed_mmps: u32,
     pub max_speed_mmps: u32,
     pub fix: FixIdentity,
-    pub constraint_kind: ConstraintKind,
+    pub altitude_constraint_kind: AltitudeConstraintKind,
+    pub speed_constraint_kind: SpeedConstraintKind,
     pub geometry: PathGeometry,
     pub speed_reference: SpeedReference,
     /// A7: explicit zero bytes complete the 60-byte aligned record.
-    pub reserved: [u8; 2],
+    pub reserved: [u8; 1],
 }
-// A7: 24 numeric + 31 identity + 3 enum + 2 explicit alignment bytes = 60; A3: the bounded
+// A7: 24 numeric + 31 identity + 4 enum + 1 explicit alignment byte = 60; A3: the bounded
 // per-flight snapshot is capped at 256 records (15,360 bytes), with longer routes refused.
 const _: () = assert!(core::mem::size_of::<RoutePoint>() == 60);
 
@@ -602,7 +616,11 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
         .points
         .len()
         .saturating_mul(
-            HORIZON_COUNT + 3 + 3 * FIX_IDENTITY_BYTE_WORK + ROUTE_POINT_RESERVED_BYTE_WORK,
+            HORIZON_COUNT
+                + 3
+                + 3 * FIX_IDENTITY_BYTE_WORK
+                + ROUTE_POINT_RESERVED_BYTE_WORK
+                + ROUTE_CONSTRAINT_CHANNEL_WORK,
         )
         .saturating_add(
             2 * FIX_IDENTITY_BYTE_WORK
@@ -766,7 +784,7 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
                 active_index,
             );
         }
-        if p.constraint_kind == ConstraintKind::AltitudeWindow
+        if p.altitude_constraint_kind == AltitudeConstraintKind::Window
             && p.min_altitude_ft > p.max_altitude_ft
         {
             return output_route_refusal(
@@ -777,16 +795,30 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
             );
         }
         if matches!(
-            p.constraint_kind,
-            ConstraintKind::Unsupported
-                | ConstraintKind::AtAltitude
-                | ConstraintKind::MinimumAltitude
-                | ConstraintKind::MaximumAltitude
-                | ConstraintKind::AltitudeWindow
+            p.altitude_constraint_kind,
+            AltitudeConstraintKind::Unsupported
+                | AltitudeConstraintKind::AtAltitude
+                | AltitudeConstraintKind::Minimum
+                | AltitudeConstraintKind::Maximum
+                | AltitudeConstraintKind::Window
         ) {
             unsupported_route_constraint = true;
         }
-        if p.constraint_kind == ConstraintKind::AltitudeWindow
+        if (p.altitude_constraint_kind == AltitudeConstraintKind::Minimum
+            && p.min_altitude_ft == NO_ALTITUDE_FT)
+            || (p.altitude_constraint_kind == AltitudeConstraintKind::Maximum
+                && p.max_altitude_ft == NO_ALTITUDE_FT)
+            || (p.altitude_constraint_kind == AltitudeConstraintKind::Window
+                && (p.min_altitude_ft == NO_ALTITUDE_FT || p.max_altitude_ft == NO_ALTITUDE_FT))
+        {
+            return output_route_refusal(
+                input,
+                Refusal::InfeasibleAltitudeWindow,
+                validated_route_points,
+                active_index,
+            );
+        }
+        if p.altitude_constraint_kind == AltitudeConstraintKind::Window
             && clearance_evidence_valid
             && clearance_supported
         {
@@ -809,7 +841,7 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
                 );
             }
         }
-        if p.constraint_kind == ConstraintKind::MinimumAltitude
+        if p.altitude_constraint_kind == AltitudeConstraintKind::Minimum
             && clearance_evidence_valid
             && clearance_supported
             && input.clearance.max_altitude_ft != NO_ALTITUDE_FT
@@ -822,7 +854,7 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
                 active_index,
             );
         }
-        if p.constraint_kind == ConstraintKind::MaximumAltitude
+        if p.altitude_constraint_kind == AltitudeConstraintKind::Maximum
             && clearance_evidence_valid
             && clearance_supported
             && input.clearance.min_altitude_ft != NO_ALTITUDE_FT
@@ -835,7 +867,7 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
                 active_index,
             );
         }
-        if p.constraint_kind == ConstraintKind::SpeedWindow
+        if p.speed_constraint_kind == SpeedConstraintKind::Window
             && p.min_speed_mmps != NO_SPEED_MMPS
             && p.max_speed_mmps != NO_SPEED_MMPS
             && p.min_speed_mmps > p.max_speed_mmps
@@ -847,15 +879,21 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
                 active_index,
             );
         }
-        let has_speed_constraint = p.constraint_kind == ConstraintKind::MinimumSpeed
-            || p.constraint_kind == ConstraintKind::MaximumSpeed
-            || p.constraint_kind == ConstraintKind::SpeedWindow;
-        let missing_speed_bound = (p.constraint_kind == ConstraintKind::MinimumSpeed
+        let has_speed_constraint = matches!(
+            p.speed_constraint_kind,
+            SpeedConstraintKind::Minimum
+                | SpeedConstraintKind::Maximum
+                | SpeedConstraintKind::Window
+        );
+        let missing_speed_bound = (p.speed_constraint_kind == SpeedConstraintKind::Minimum
             && p.min_speed_mmps == NO_SPEED_MMPS)
-            || (p.constraint_kind == ConstraintKind::MaximumSpeed
+            || (p.speed_constraint_kind == SpeedConstraintKind::Maximum
                 && p.max_speed_mmps == NO_SPEED_MMPS)
-            || (p.constraint_kind == ConstraintKind::SpeedWindow
+            || (p.speed_constraint_kind == SpeedConstraintKind::Window
                 && (p.min_speed_mmps == NO_SPEED_MMPS || p.max_speed_mmps == NO_SPEED_MMPS));
+        if p.speed_constraint_kind == SpeedConstraintKind::Unsupported {
+            unsupported_route_constraint = true;
+        }
         if has_speed_constraint
             && (p.speed_reference != SpeedReference::GroundSpeed || missing_speed_bound)
         {
@@ -962,40 +1000,43 @@ pub fn issue_trajectory(input: &TrajectoryIssueInput<'_>) -> TrajectoryIssueOutp
                     }
                 }
                 degraded = degraded || vectors_gap;
-                if point.constraint_kind == ConstraintKind::Unsupported {
+                if point.altitude_constraint_kind == AltitudeConstraintKind::Unsupported
+                    || point.speed_constraint_kind == SpeedConstraintKind::Unsupported
+                {
                     degraded = true;
                     vertical_refusal = Refusal::UnsupportedConstraint;
                 }
-                let has_speed_constraint = point.constraint_kind == ConstraintKind::MinimumSpeed
-                    || point.constraint_kind == ConstraintKind::MaximumSpeed
-                    || point.constraint_kind == ConstraintKind::SpeedWindow;
-                let missing_speed_bound = (point.constraint_kind == ConstraintKind::MinimumSpeed
+                let has_speed_constraint = matches!(
+                    point.speed_constraint_kind,
+                    SpeedConstraintKind::Minimum
+                        | SpeedConstraintKind::Maximum
+                        | SpeedConstraintKind::Window
+                );
+                let missing_speed_bound = (point.speed_constraint_kind
+                    == SpeedConstraintKind::Minimum
                     && point.min_speed_mmps == NO_SPEED_MMPS)
-                    || (point.constraint_kind == ConstraintKind::MaximumSpeed
+                    || (point.speed_constraint_kind == SpeedConstraintKind::Maximum
                         && point.max_speed_mmps == NO_SPEED_MMPS)
-                    || (point.constraint_kind == ConstraintKind::SpeedWindow
+                    || (point.speed_constraint_kind == SpeedConstraintKind::Window
                         && (point.min_speed_mmps == NO_SPEED_MMPS
                             || point.max_speed_mmps == NO_SPEED_MMPS));
-                let speed_constraint_supported =
-                    point.speed_reference == SpeedReference::GroundSpeed && !missing_speed_bound;
+                let speed_constraint_supported = has_speed_constraint
+                    && point.speed_reference == SpeedReference::GroundSpeed
+                    && !missing_speed_bound;
                 speed_constraint_checked = has_speed_constraint && speed_constraint_supported;
                 let speed_violation = speed_constraint_supported
-                    && ((point.constraint_kind == ConstraintKind::MinimumSpeed
+                    && ((point.speed_constraint_kind == SpeedConstraintKind::Minimum
                         && input.track.groundspeed_mmps < point.min_speed_mmps)
-                        || (point.constraint_kind == ConstraintKind::MaximumSpeed
+                        || (point.speed_constraint_kind == SpeedConstraintKind::Maximum
                             && input.track.groundspeed_mmps > point.max_speed_mmps)
-                        || (point.constraint_kind == ConstraintKind::SpeedWindow
+                        || (point.speed_constraint_kind == SpeedConstraintKind::Window
                             && (input.track.groundspeed_mmps < point.min_speed_mmps
                                 || input.track.groundspeed_mmps > point.max_speed_mmps)));
                 if has_speed_constraint && !speed_constraint_supported {
                     degraded = true;
                     vertical_refusal = Refusal::UnsupportedConstraint;
                 }
-                if point.constraint_kind == ConstraintKind::MinimumAltitude
-                    || point.constraint_kind == ConstraintKind::MaximumAltitude
-                    || point.constraint_kind == ConstraintKind::AltitudeWindow
-                    || point.constraint_kind == ConstraintKind::AtAltitude
-                {
+                if point.altitude_constraint_kind != AltitudeConstraintKind::None {
                     degraded = true;
                     vertical_refusal = Refusal::UnsupportedConstraint;
                 }
