@@ -51,7 +51,6 @@ const KD_TEXT: c_int = 0;
 const KD_GRAPHICS: c_int = 1;
 const VT_AUTO: u8 = 0;
 const VT_PROCESS: u8 = 1;
-const VT_ACKACQ: c_ulong = 2;
 const VT_RELEASE_OK: c_ulong = 1;
 const SIG_BLOCK: c_int = 0;
 const SIG_SETMASK: c_int = 2;
@@ -72,6 +71,7 @@ const MAX_MODES: usize = 64;
 const WAIT_MS: c_int = 1000;
 const MAX_INPUT_WAIT_MS: u32 = 1000;
 const MAX_INTERRUPTS: u8 = 8;
+const MAX_RESYNC_RECORDS: u32 = 1024;
 const SIGNAL_INFO_BYTES: usize = 128;
 
 #[repr(C)] #[derive(Clone, Copy, Default, PartialEq, Eq)] struct ModeInfo {
@@ -153,10 +153,10 @@ const _: () = assert!(size_of::<AbsInfo>() == 24);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InputDeviceError { InvalidPath, Disconnected, TruncatedRecord, WaitLimit, Timeout, Decode(InputError), System(i32) }
+pub enum InputDeviceError { InvalidPath, Disconnected, TruncatedRecord, WaitLimit, RecordLimit, Timeout, Decode(InputError), System(i32) }
 
 /// Bounded Linux evdev reader for one explicitly selected `/dev/input/eventN` node.
-pub struct EvdevInput { file: File, record: [u8; 24], filled: usize, desynchronized: bool, resync_pending: bool, discarded: u32 }
+pub struct EvdevInput { file: File, record: [u8; 24], filled: usize, desynchronized: bool, discarded: u32 }
 pub fn open_evdev(path: &str) -> Result<EvdevInput, InputDeviceError> {
     let number = path.strip_prefix("/dev/input/event").ok_or(InputDeviceError::InvalidPath)?;
     if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) { return Err(InputDeviceError::InvalidPath); }
@@ -166,14 +166,13 @@ pub fn open_evdev(path: &str) -> Result<EvdevInput, InputDeviceError> {
     // SAFETY: EVIOCGVERSION writes one initialized 32-bit version value to this live pointer.
     let rc = unsafe { ioctl(file.as_raw_fd(), EVIOCGVERSION, &mut version as *mut i32) };
     if rc < 0 { return Err(InputDeviceError::System(std::io::Error::last_os_error().raw_os_error().unwrap_or(-1))); }
-    Ok(EvdevInput { file, record: [0; 24], filled: 0, desynchronized: false, resync_pending: false, discarded: 0 })
+    Ok(EvdevInput { file, record: [0; 24], filled: 0, desynchronized: false, discarded: 0 })
 }
 impl EvdevInput {
     /// Read one complete input record within `timeout_ms` (capped at one second).
-    /// SYN_DROPPED invalidates actions through the next SYN_REPORT, where key state is queried.
+    /// SYN_DROPPED invalidates actions until `resynchronize` drains queued input and snapshots state.
     pub fn read_record(&mut self, timeout_ms: u32) -> Result<InputRecord, InputDeviceError> {
         if timeout_ms > MAX_INPUT_WAIT_MS { return Err(InputDeviceError::WaitLimit); }
-        if self.resync_pending { return self.resync(); }
         let timeout = Duration::from_millis(u64::from(timeout_ms));
         let deadline = Instant::now() + timeout;
         let mut interruptions = 0u8;
@@ -211,7 +210,7 @@ impl EvdevInput {
         self.filled = 0;
         match decoded.map_err(InputDeviceError::Decode)? {
             Some(event) if event.kind == EV_SYN && event.code == SYN_DROPPED => {
-                self.desynchronized = true; self.resync_pending = false; self.discarded = 0;
+                self.desynchronized = true; self.discarded = 0;
                 Ok(input_record(InputRecordKind::SyncLost, InputEvent::default(), crate::input_snapshot_new()))
             }
             Some(_) if self.desynchronized => {
@@ -219,14 +218,54 @@ impl EvdevInput {
                 Ok(input_record(InputRecordKind::Discarded, InputEvent::default(), InputSnapshot { discarded_records: self.discarded, ..crate::input_snapshot_new() }))
             }
             Some(event) => Ok(input_record(InputRecordKind::Event, event, crate::input_snapshot_new())),
-            None if self.desynchronized => { self.resync_pending = true; self.resync() }
+            None if self.desynchronized => {
+                self.discarded = self.discarded.saturating_add(1);
+                Ok(input_record(InputRecordKind::Discarded, InputEvent::default(), InputSnapshot { discarded_records: self.discarded, ..crate::input_snapshot_new() }))
+            }
             None => Ok(input_record(InputRecordKind::SyncReport, InputEvent::default(), crate::input_snapshot_new())),
         }
     }
-    fn resync(&mut self) -> Result<InputRecord, InputDeviceError> {
-        let snapshot = query_input_snapshot(self.file.as_raw_fd(), self.discarded)?;
-        self.desynchronized = false; self.resync_pending = false;
-        Ok(input_record(InputRecordKind::Resynchronized, InputEvent::default(), snapshot))
+
+    /// Drain queued records before querying current key and absolute-axis state.
+    /// Actions remain invalid on every refusal or error; held keys are reported as state only.
+    /// A zero timeout means nonblocking bounded drain; positive values cap total elapsed time.
+    pub fn resynchronize(&mut self, max_records: u32, timeout_ms: u32) -> Result<InputSnapshot, InputDeviceError> {
+        self.desynchronized = true;
+        if max_records == 0 || max_records > MAX_RESYNC_RECORDS { return Err(InputDeviceError::RecordLimit); }
+        if timeout_ms > MAX_INPUT_WAIT_MS { return Err(InputDeviceError::WaitLimit); }
+        if self.filled != 0 { self.filled = 0; return Err(InputDeviceError::TruncatedRecord); }
+
+        let timeout = Duration::from_millis(u64::from(timeout_ms));
+        let started = Instant::now();
+        let mut records = 0u32;
+        let mut interruptions = 0u8;
+        let mut wire = [0u8; 24];
+        loop {
+            if timeout_ms != 0 && started.elapsed() > timeout { return Err(InputDeviceError::Timeout); }
+            if records == max_records { return Err(InputDeviceError::RecordLimit); }
+            match self.file.read(&mut wire) {
+                Ok(0) => return Err(InputDeviceError::Disconnected),
+                Ok(n) if n != wire.len() => return Err(InputDeviceError::TruncatedRecord),
+                Ok(_) => {
+                    interruptions = 0;
+                    records += 1;
+                    self.discarded = self.discarded.saturating_add(1);
+                    decode_evdev_event(&wire).map_err(InputDeviceError::Decode)?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if timeout_ms != 0 && started.elapsed() > timeout { return Err(InputDeviceError::Timeout); }
+                    let snapshot = query_input_snapshot(self.file.as_raw_fd(), self.discarded)?;
+                    if timeout_ms != 0 && started.elapsed() > timeout { return Err(InputDeviceError::Timeout); }
+                    self.desynchronized = false;
+                    return Ok(snapshot);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    interruptions = interruptions.saturating_add(1);
+                    if interruptions > MAX_INTERRUPTS { return Err(InputDeviceError::System(error.raw_os_error().unwrap_or(-1))); }
+                }
+                Err(error) => return Err(InputDeviceError::System(error.raw_os_error().unwrap_or(-1))),
+            }
+        }
     }
 }
 fn input_record(kind: InputRecordKind, event: InputEvent, snapshot: InputSnapshot) -> InputRecord { InputRecord { kind, reserved: [0; 7], event, snapshot } }
@@ -777,7 +816,9 @@ impl KmsDisplay {
     fn begin_acquire(&mut self) -> Result<(), KmsError> {
         self.state = kms_transition(self.state, KmsTransition::AcquireSignal).map_err(|_| KmsError::InvalidLifecycle)?;
         if query_active_vt(self.tty.as_raw_fd()) != Ok(self.active_vt) { self.state = KmsLifecycle::Faulted; return Err(KmsError::InactiveVt); }
-        if let Err(e) = ioctl_value(self.tty.as_raw_fd(), VT_RELDISP, VT_ACKACQ) { self.state = KmsLifecycle::Faulted; return Err(KmsError::ReleaseFailed(system_code(e))); }
+        // The kernel delivers SIGUSR2 only after this VT is active; VT_RELDISP(2) is
+        // meaningful only for acknowledging a still-pending acquire notification. This
+        // process is already active, so avoid a redundant ACK that can race another release.
         if let Err(e) = ioctl_call_unit(self.drm.as_raw_fd(), SET_MASTER) { self.state = KmsLifecycle::Faulted; return Err(e); }
         let baseline = capture_baseline(self.drm.as_raw_fd(), self.connector, self.crtc_id, self.mode);
         let (old_crtc, old_connectors, old_connector_count) = match baseline {

@@ -17,7 +17,7 @@ dedicated single-threaded owner process, and checks that contract at open and on
 modesets the blank front buffer, then `present()` validates and copies every visible source row
 to the back buffer, submits a legacy vblank page flip, and waits up to one second for
 `DRM_EVENT_FLIP_COMPLETE`. `service_vt(timeout_ms)` handles VT release/acquire handshakes; release
-restores the baseline before `VT_RELDISP(1)`, while acquire acknowledges, reacquires DRM master,
+restores the baseline before `VT_RELDISP(1)`, while acquire reacquires DRM master,
 revalidates topology, recaptures the baseline, then re-enters graphics mode.
 
 If a pending flip does not complete by the release deadline, the adapter stops writes, drops DRM
@@ -42,11 +42,15 @@ whole `stride * height` extent before use. Pixel order is XRGB8888 bytes in memo
 little-endian Linux). `decode_evdev_event` expects exactly the 64-bit Linux UAPI `input_event`
 layout (native-endian seconds/useconds, type, code, value). `open_evdev("/dev/input/eventN")`
 reads one record at a time with a caller-supplied timeout capped at one second. `SYN_DROPPED`
-emits `SyncLost`; subsequent records are marked `Discarded` until `SYN_REPORT`, where EVIOCGKEY
-and EVIOCGABS return fixed key and absolute-axis state in `Resynchronized`. The snapshot marks
-relative motion as lost because relative position cannot be queried. The consumer must invalidate
-action state on `SyncLost` and allow actions only after `Resynchronized`, with pointer actions held
-until a fresh position is established. `input_event_is_action_press` accepts EV_KEY value 1 and
+emits `SyncLost`; records remain marked `Discarded` until the caller invokes
+`resynchronize(max_records, timeout_ms)`. That method drains every currently queued record through
+`EAGAIN`, then EVIOCGKEY and EVIOCGABS return fixed key and absolute-axis state. It refuses invalid
+record caps, cap exhaustion before another probe, elapsed deadlines (positive timeout; zero is a
+nonblocking bounded drain), partial records, disconnects, and malformed timestamps while keeping
+actions invalid. The snapshot marks relative motion as lost because relative position
+cannot be queried. Call resynchronization on initial VT entry and after reacquire; held keys in its
+snapshot are state only and never command edges. Allow actions only after success, with pointer
+actions held until a fresh position is established. `input_event_is_action_press` accepts EV_KEY value 1 and
 excludes repeat value 2, so repeated keys cannot create another command edge.
 Disconnects, partial records, and malformed timestamps are explicit errors. `InputBatch` has
 128 struct-of-arrays records and counts refused pushes. Public fixed records include explicit
@@ -73,8 +77,9 @@ buffers, legacy modesetting and page-flip synchronization; [DRM UAPI documentati
 describes event reads. The VT modes and ioctl values follow the upstream
 [`include/uapi/linux/vt.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/vt.h);
 the release/acknowledge handling is implemented in
-[`drivers/tty/vt/vt_ioctl.c`](https://github.com/torvalds/linux/blob/master/drivers/tty/vt/vt_ioctl.c).
+[`drivers/tty/vt/vt_ioctl.c`](https://github.com/torvalds/linux/blob/v6.12/drivers/tty/vt/vt_ioctl.c).
 That source passes `1` to `kill_pid` for release/acquire notifications; the kernel's
+SIGUSR2 arrives after this VT is active, so no redundant `VT_RELDISP(2)` acquire ACK is sent.
 [`include/linux/sched/signal.h`](https://github.com/torvalds/linux/blob/master/include/linux/sched/signal.h)
 defines `SEND_SIG_PRIV`, and the
 [`include/uapi/asm-generic/siginfo.h`](https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/siginfo.h)
