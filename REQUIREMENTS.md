@@ -387,6 +387,18 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-ASP-078** The calendar helper refuses impossible dates: year 1 to 9999, month 1 to 12, a day that exists
   in the month; `airac_cycle` returns `None` for them.
 
+### Route conversion (oa-airspace)
+
+- **OA-RTE-001** A route fix is resolved by its complete stable identity, and a direct connector exists only when an explicit direct step is supplied; otherwise a fix remains an isolated anchor.
+- **OA-RTE-002** Duplicate exact fix identities are reported as ambiguous and refuse the route; lookup order never hides a duplicate.
+- **OA-RTE-003** Airway expansion follows only a contiguous supported forward sequence from the exact entry to exit, retains MEA data, and refuses a gap or unsupported reverse constraints.
+- **OA-RTE-004** Supported CIFP IF/TF/DF procedure transitions preserve exact point and transition identity and their published altitude, speed and turn constraints; unsupported path terminators are refused.
+- **OA-RTE-005** Malformed model columns, exhausted work limits and invalid route-step counts are refused atomically with no partial converted route and with bounded refusal accounting.
+- **OA-RTE-010** The normalized route instruction parser preserves full fix identity and refuses labels or numeric fields that exceed their declared bounds rather than truncating them.
+- **OA-RTE-011** Parser refusals account for admitted, refused and unexamined instruction suffixes; an overlong input whose instruction count is unknown is reported as such, and step limits are explicit.
+- **OA-RTE-012** The route command converts a supplied model snapshot and binds the report to the exact snapshot and instruction bytes with their SHA-256 hashes.
+- **OA-RTE-013** The route command refuses a sealed snapshot path before conversion output is written.
+
 
 ### Traceability (oa-trace)
 
@@ -6246,6 +6258,7 @@ configuration with no default; the crate's tests use synthetic values.
   a parent-message stamp too far ahead of receipt or a position stamp later than its availability time; the two timestamp
   rejection counts are separate. A rejected position does not replace the last usable position.
 - **OA-FLT-041** A flight's own position counts only when stamped at or before the question and no more than 120 s before it.
+- **OA-FLT-042** Clearing an assigned altitude is represented as the explicit nil form with zero bounds and its own source stamp; it is not converted to VFR or an unstated altitude.
 - **OA-FLT-021** The encounter tool takes a window of reports, the SFDPS recordings and the lag floor (58 s unless given), and
   refuses a window that is open at one end or runs backwards.
 
@@ -6794,6 +6807,31 @@ configuration with no default; the crate's tests use synthetic values.
   they are explicit contradictory evidence. Equivalent invalid NaN payloads compare alike
   after canonicalization and remain subject to forecast validation, rather than producing a
   false same-source conflict solely because NaN is unequal to itself.
+
+## M4 shared trajectory baseline (tools/oa-legacy-traj)
+
+These requirements describe the bounded, pure issue-time component in `core::trajectory`; they do not qualify it as an operational trajectory service.
+
+- **OA-TRAJ-001** With a valid track and route, the baseline deterministically returns fixed 5-, 10- and 20-minute constant-groundspeed horizon positions and an ETA for the requested exact route fix.
+- **OA-TRAJ-002** A supported clearance can capture the forecast at its altitude only when the observed vertical motion approaches or crosses that boundary; inverted altitude windows are refused as infeasible.
+- **OA-TRAJ-003** Published speed windows are checked against observed groundspeed only when the source is explicitly groundspeed-qualified; indicated-airspeed or unknown-reference constraints degrade as unsupported and never rewrite observed groundspeed.
+- **OA-TRAJ-004** Route, track and clearance evidence is checked against the supplied issue cutoff; track state time and newest measurement time are distinct, freshness uses checked age arithmetic, and missing groundspeed or stale/future evidence has an explicit result.
+- **OA-TRAJ-005** ETA matching uses the complete fix identity including region and scope, and the predictor refuses to extrapolate beyond the filed route end.
+- **OA-TRAJ-006** Forecasting starts at the uniquely resolved exact active cursor bound to the flight key and route payload hash; filed points before it are excluded from forecast geometry and counted.
+- **OA-TRAJ-007** A route longer than the fixed point capacity is refused before scanning and reports every supplied point as unexamined.
+- **OA-TRAJ-008** Missing, ambiguous, future-available or incorrectly bound active cursors are explicitly refused; no proximity-based active-leg inference is used.
+- **OA-TRAJ-009** Horizon and ETA timestamp overflow is detected and reported rather than wrapping.
+- **OA-TRAJ-010** Route revision evidence available by the cutoff is validated as a whole; a malformed eligible amendment withholds selection rather than falling back to an older valid route, while future-available evidence is gated before payload validation.
+- **OA-TRAJ-011** Revision evidence over the fixed candidate capacity is refused before scanning and counts all candidates as unexamined.
+- **OA-TRAJ-012** Foreign route evidence is counted in disjoint GUFI, aircraft-address and reporting-centre categories.
+- **OA-TRAJ-013** Revision selection orders evidence by source time across plan IDs, preserves the selected full key and provenance, chooses exact duplicates deterministically, and refuses same-source conflicting revisions.
+- **OA-TRAJ-014** An absent scope is a valid explicit fix identity, while a surveillance aircraft address that differs from the flight key is refused.
+- **OA-TRAJ-015** Clearance capture does not teleport a level aircraft or reverse vertical motion that is moving away from the cleared boundary; malformed scalar clearance evidence is refused or degraded explicitly.
+- **OA-TRAJ-016** Unsupported route altitude constraints are declared even when outside the displayed horizons, and unsupported speed references are not reported as groundspeed violations.
+- **OA-TRAJ-017** Clearance values whose evidence is unavailable at the issue cutoff cannot affect route-clearance feasibility checks or suppress horizontal forecasts; their altitude outputs remain unavailable and degraded.
+- **OA-TRAJ-018** Repeated exact ETA-target identities are refused as ambiguous, and a vector gap crossed by a horizon remains visible as degraded output with a gap flag; an ETA across a gap is refused.
+- **OA-TRAJ-019** Required alignment bytes are explicit, zero-filled record fields; nonzero bytes in eligible inputs are refused, while future evidence remains gated before reserved-byte validation.
+- **OA-TRAJ-020** An indeterminate antipodal great-circle interpolation is refused as unsupported geometry, with unavailable coordinates; it is not reported as an exhausted route.
 
 ## M5 — Minimum safe altitude warning (oa-msaw, tools/oa-msaw)
 

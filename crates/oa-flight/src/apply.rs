@@ -439,6 +439,7 @@ fn alt_op(t: &mut FlightTable, slot: u32, op: &Op, avail: i64, field: usize) -> 
     let allowed: &[u8] = match field {
         F_ASSIGNED => &[
             ALT_SIMPLE,
+            ALT_NIL,
             ALT_VFR_ON_TOP_PLUS,
             ALT_VFR,
             ALT_BLOCK,

@@ -1,11 +1,14 @@
 # M4 — Flight data processing and trajectory: design
 
-Status: approved by Connor 2026-11-20; implementation status reviewed 2026-11-23.
-`oa-flight` and `oa-flight-sfdps` implement the flight-state slice, and `oa-legacy-traj` includes
-an issue-time arrival forecast experiment. These do not close M4. The independent route
-converter, shared operational trajectory and full consumer integration remain open; see the
-[capability register](CAPABILITIES.md) for implemented entry points and limits. The sections
-below specify the target design; their build order is not a completion ledger.
+Status: approved by Connor 2026-11-20; implementation status reviewed 2026-11-24.
+`oa-flight` and `oa-flight-sfdps` implement the flight-state slice. `oa-airspace` now has a
+bounded converter for caller-normalized route instructions, and `oa-legacy-traj` has both the
+earlier arrival experiment and a fixed-capacity shared issue-time trajectory baseline. These
+components do not close M4: the normalized converter is not a general route parser, the baseline
+is not aircraft-performance/wind/uncertainty qualified, and neither is composed into the
+operational consumers. Full consumer integration remains open; see the
+[capability register](CAPABILITIES.md) for exact boundaries. The sections below specify the
+target design; their build order is not a completion ledger.
 
 ## Goal
 
@@ -115,9 +118,12 @@ and replaying the same operations gives the same plan bit for bit (RULESET B6).
 
 ## 3. Route conversion
 
-A route string (fixes, airways, SIDs, STARs, latitude-longitude points, speed and altitude changes)
-becomes an ordered list of points against the airspace model. There is no route conversion code
-yet; the model has every ingredient.
+A route description (fixes, airways, SIDs, STARs, latitude-longitude points, speed and altitude
+changes) is intended to become an ordered list of points against the airspace model. The current
+`oa-airspace::core::route::convert_route` implements a narrower, bounded component: callers
+provide normalized identity-qualified steps, and the converter emits supported fixed-capacity
+geometry and constraints. Its command grammar is not a general filed-route parser, it does not
+infer the active leg, and broader ERAM comparison remains open.
 
 - **Duplicate names (LS-007).** A name that matches more than one fix is resolved by the route
   around it (the previous and next points), and only when one candidate is clearly consistent. An
@@ -210,8 +216,11 @@ question is tens of metres at most (RT-288 simulation).
    into level-offs and climbs that do not stop.
 2. **Legacy measurement** (section 9), on the recorded day.
 3. **The plan model and its properties** (section 2), with the U-2 and duplicate-waypoint replays.
-4. **Route conversion**, compared with ERAM's on every flight that carries a converted route.
-5. **The trajectory predictor**, scored by look-ahead against the legacy figures from step 2.
+4. **Route conversion comparison**, extending the implemented normalized converter to the
+   broader route inputs and comparing it with ERAM on every flight that carries a converted route.
+5. **The qualified trajectory predictor**, extending the implemented fixed-groundspeed baseline
+   with the target route, performance, wind and uncertainty model, then scoring it against the
+   legacy figures from step 2.
 6. **Conformance monitoring.**
 7. **Ownership and handoffs**, with the derived sector boundaries.
 8. **The conflict probe and meter-fix times.**

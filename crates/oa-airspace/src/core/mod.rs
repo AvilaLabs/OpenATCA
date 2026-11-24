@@ -8,5 +8,6 @@ pub mod diff;
 pub mod geom;
 pub mod model;
 pub mod report;
+pub mod route;
 pub mod snapshot;
 pub mod source;

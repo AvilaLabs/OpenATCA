@@ -32,6 +32,7 @@ def result(injected=False):
             "display_rows_traffic_frame_refusal",
             "display_raw_fallback_draw_capacity_invalid_refusal",
             "safety_state_inhibit_display",
+            "airspace_route_direct_airway_procedure_atomic_refusal",
         ],
         "route_ids": [
             'safety_banner_clamp', 'safety_banner_draw', 'safety_build_error',
@@ -111,6 +112,10 @@ def result(injected=False):
             'tracker_output_reuse',
             'tracker_prediction',
             'tracker_update',
+            'route_direct_fix_identity',
+            'route_airway_expansion',
+            'route_procedure_transition',
+            'route_atomic_refusal',
         ],
         "controls": {"alloc": 2, "zeroed": 1, "realloc": 1, "overflow": False},
         "tracker": {
@@ -197,6 +202,12 @@ def result(injected=False):
             "inhibitions_drawn": 20, "inhibitions_unplaced": 20, "state_backdated": 1,
             "state_future_refused": 1, "banner_hidden": 140, "error_builds": 20,
         },
+        "route_conversion": {
+            "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,
+            "iterations": 10, "direct_points": 2, "airway_points": 2, "procedure_points": 2,
+            "connected_links": 4, "refusals": 1, "atomic_empty": True, "recoveries": 1,
+            "work_used": 100, "work_limit": 1_048_576, "injected": True,
+        },
     }
 
 
@@ -255,6 +266,17 @@ unsafe impl GlobalAlloc for A {}
 
 
 class AllocatorResultTests(unittest.TestCase):
+    # REQ: OA-RTE-005
+    def test_route_budget_rejects_stale_limit_and_excess_work(self):
+        value = result()
+        value["route_conversion"]["work_limit"] = 16_384
+        self.assertTrue(any("route_conversion.work_limit" in error for error in
+                            gate.evaluate_allocator_result(json.dumps(value))))
+        value = result()
+        value["route_conversion"]["work_used"] = 1_048_577
+        self.assertTrue(any("route_conversion.work_used exceeds work_limit" in error for error in
+                            gate.evaluate_allocator_result(json.dumps(value))))
+
     # REQ: OA-TRK-337
     def test_exercised_and_injected_results_pass(self):
         self.assertEqual(gate.evaluate_allocator_result(json.dumps(result())), [])

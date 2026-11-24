@@ -9,6 +9,7 @@
 //! |--------------|-------|-------------------------------------------------------------------|
 //! | `model`      | core  | tables, index types, codes, validation, lookups                    |
 //! | `geom`       | core  | fixed-point conversion, selection area, geodesic tests             |
+//! | `route`      | core  | bounded, atomic NASR/CIFP route expansion                          |
 //! | `airac`      | core  | a date to its 28-day AIRAC cycle                                   |
 //! | `snapshot`   | core  | model to bytes and back, bounded reader                            |
 //! | `report`     | core  | the build report text and boundary-geometry unknowns               |
@@ -27,5 +28,5 @@ compile_error!("this crate supports 64-bit targets only");
 pub mod core;
 pub mod shell;
 
-pub use crate::core::{airac, build_info, diff, geom, model, report, snapshot, source};
+pub use crate::core::{airac, build_info, diff, geom, model, report, route, snapshot, source};
 pub use crate::shell::{build, cli, load, sources};

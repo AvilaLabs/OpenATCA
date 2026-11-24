@@ -46,7 +46,8 @@ impl std::error::Error for CliError {}
 pub const USAGE: &str = "usage:
   oa-adapt build --nasr <zip> --cifp <zip> --artcc <ID> [--buffer-nm <NM>]
                  [--expect-sha256 <file>=<hex>]... [--allow-cycle-mismatch] --out <snapshot>
-  oa-adapt diff <snapshot-a> <snapshot-b>";
+  oa-adapt diff <snapshot-a> <snapshot-b>
+  oa-adapt route --snapshot <snapshot> --steps <identity-qualified instructions>";
 
 fn failed(step: &str, e: impl fmt::Display) -> CliError {
     CliError::Failed(format!("{step}: {e}"))
@@ -248,6 +249,7 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     match args.split_first() {
         Some((cmd, rest)) if cmd == "build" => run_build(rest, out),
         Some((cmd, rest)) if cmd == "diff" => run_diff(rest, out),
+        Some((cmd, rest)) if cmd == "route" => crate::shell::route_cli::run_route(rest, out),
         Some((cmd, _)) if cmd == "--help" || cmd == "-h" => {
             let _ = writeln!(out, "{USAGE}");
             Ok(())

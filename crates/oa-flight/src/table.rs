@@ -669,7 +669,13 @@ fn alt_allowed(field: usize, form: u8) -> bool {
     match field {
         crate::types::F_ASSIGNED => matches!(
             form,
-            ALT_NONE | ALT_SIMPLE | ALT_VFR_ON_TOP_PLUS | ALT_VFR | ALT_BLOCK | ALT_AT_FIX
+            ALT_NONE
+                | ALT_SIMPLE
+                | ALT_VFR_ON_TOP_PLUS
+                | ALT_VFR
+                | ALT_BLOCK
+                | ALT_AT_FIX
+                | ALT_NIL
         ),
         crate::types::F_INTERIM => matches!(form, ALT_NONE | ALT_SIMPLE | ALT_NIL),
         _ => matches!(form, ALT_NONE | ALT_SIMPLE | ALT_VFR_ON_TOP_PLUS | ALT_VFR),

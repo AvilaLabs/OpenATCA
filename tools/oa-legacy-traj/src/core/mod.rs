@@ -7,4 +7,5 @@ pub mod cross;
 pub mod join;
 pub mod places;
 pub mod report;
+pub mod trajectory;
 pub mod types;

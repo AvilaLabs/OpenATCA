@@ -196,6 +196,37 @@ fn the_three_altitudes_are_separate_fields_with_their_own_forms() {
     assert_eq!(flight_get(&t, &k).unwrap().assigned_fix, [0; 12]);
 }
 
+// REQ: OA-FLT-042
+#[test]
+fn an_explicit_assigned_altitude_clear_is_nil_not_vfr_or_unstated() {
+    let mut t = table();
+    let k = gk(1);
+    live(&mut t, k);
+    assert_eq!(apply(&mut t, &assign(k, 2_000, 36_000)), Outcome::Applied);
+
+    let mut clear = op(OP_ASSIGN, k, ZAU, 3_000);
+    clear.alt = Alt {
+        form: ALT_NIL,
+        a_ft: 0,
+        b_ft: 0,
+    };
+    assert_eq!(apply(&mut t, &clear), Outcome::Applied);
+    let cleared = flight_get(&t, &k).unwrap();
+    assert_eq!(cleared.assigned.form, ALT_NIL);
+    assert_eq!(cleared.assigned.a_ft, 0);
+    assert_eq!(cleared.assigned.b_ft, 0);
+    assert_eq!(cleared.stamps[F_ASSIGNED].ts_ms, 3_000);
+
+    clear.ts_ms = 4_000;
+    clear.seen_ms = 65_000;
+    assert_eq!(apply(&mut t, &clear), Outcome::Unchanged);
+    assert_eq!(flight_get(&t, &k).unwrap().stamps[F_ASSIGNED].ts_ms, 3_000);
+
+    let mut requested_nil = op(OP_REQUEST, k, ZAU, 5_000);
+    requested_nil.alt = clear.alt;
+    assert_eq!(apply(&mut t, &requested_nil), Outcome::Refused(R_BAD_VALUE));
+}
+
 // REQ: OA-FLT-002
 #[test]
 fn an_altitude_the_field_cannot_hold_is_refused_and_changes_nothing() {
@@ -251,7 +282,7 @@ fn an_altitude_the_field_cannot_hold_is_refused_and_changes_nothing() {
             OP_ASSIGN,
             Alt {
                 form: ALT_NIL,
-                a_ft: 0,
+                a_ft: 1,
                 b_ft: 0,
             },
             [0; 12],

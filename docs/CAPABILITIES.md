@@ -1,7 +1,7 @@
 # Capability and integration register
 
-Reviewed against baseline source `4ad16fe` and the regional increments described below,
-2026-11-23. This register separates implemented code, its
+Reviewed against the current component source and the regional increments described below,
+2026-11-24. This register separates implemented code, its
 integration boundary, and the evidence still needed. A component or scripted fixture does not
 close a milestone in [SCOPE.md](../SCOPE.md). OpenATCA remains a research prototype.
 
@@ -11,8 +11,10 @@ close a milestone in [SCOPE.md](../SCOPE.md). OpenATCA remains a research protot
 | Ingest and deterministic replay | `oa-feed`, `oa-replay`, ordered input fingerprints and state witnesses | Live ingestion and file replay exist. Authenticated peer distribution and autonomous facility operation are not established by those tools. |
 | Surveillance | `oa-track`, `oa-perf`, recorded comparison tooling | Recorded and synthetic paths exist. [Radar qualification](RADAR_CAPACITY_2026-11-23.md) still fails strict latency and zero-loss criteria; gate coverage is not identity accuracy. |
 | Flight state and handoffs | `oa-flight`, `oa-flight-sfdps`; [controller workflow](CONTROLLER_WORKFLOW.md) | Plan lifecycle, altitude forms, ownership and handoff operations exist. The composed workflow is scripted; a live coordination service and controller command path are not complete. |
+| Normalized route conversion | `oa-airspace::core::route::convert_route`, `oa-adapt route`; [converter contract](../crates/oa-airspace/README.md) | Bounded caller-normalized fix/direct/airway/procedure steps resolve full identities and retain supported geometry and constraints. This is not a general filed-route parser, does not infer active progress, and has not been scored against ERAM's expanded routes. |
 | Arrival trajectory experiment | `oa-legacy-traj::core::arrival`, `--arrival-meter-fix`; [method and limits](../tools/oa-legacy-traj/README.md) | Issue-time route/track/assignment evidence produces 5/10/20-minute forecasts and meter ETA, with cutoff revision selection and retained provenance. The experiment freezes its first eligible issue per flight. This uses supplied expanded routes, not an independent NASR/CIFP route converter. Explicit wind prediction exists in the core; a weather/airspeed source is not wired into the scored shell baseline. |
-| Shared operational trajectory | M4 design | The arrival experiment is not yet the single authoritative trajectory consumed by conformance, coordination, conflict probe and safety nets. Aircraft performance and uncertainty qualification remain open. |
+| Shared issue-time trajectory baseline | `oa-legacy-traj::core::trajectory`; [API and limits](../tools/oa-legacy-traj/SHARED_TRAJECTORY.md) | A separate fixed-capacity component selects bounded revision evidence and emits 5/10/20-minute constant-groundspeed/vertical-rate horizons plus exact-fix ETA from a full route key and explicit active cursor. It reports omitted wind, aircraft performance and forward uncertainty; altitude-crossing feasibility is not implemented. It is not composed into the earlier arrival experiment or consumed by conformance, coordination, conflict probe, MSAW or safety nets. |
+| Shared operational trajectory | M4 design | No single authoritative trajectory is yet shared by conformance, coordination, conflict probe and safety nets. The current fixed-motion baseline is not operationally qualified; aircraft performance, wind, forward uncertainty, route/flight-state composition and consumer integration remain open. No combined regional session runner is claimed to work. |
 | Conflict alert | `oa-ca`, `oa-ca-run` | Bounded geometric alerting, net status and replay tools exist. Development settings and finite tests do not qualify facility warning/miss/nuisance rates. |
 | Minimum safe altitude warning | `oa-msaw`, `oa-msaw-run`; [offline encounter evaluator](../tools/oa-msaw/EVALUATION.md) | Terrain/obstacle/procedure-aware replay exists, including flight-data eligibility. The evaluator measures warning onsets against independent synthetic windows and refuses ambiguous compressed records. Complete cycle-level availability evidence and facility qualification remain necessary. |
 | Other safety nets | `oa-safety` state/inhibition infrastructure; `oa-runway` geometry/occupancy | APW and approach-path monitoring are not complete nets. Runway occupancy does not implement a complete surface tracker or runway alerting service. |
@@ -28,18 +30,22 @@ recover from a serving-process failure. Its audit trail must identify exact inpu
 binary, settings, receipt-time basis and every omission. The current independent tools and
 fixtures are ingredients; a single integrated regional runner is not yet delivered.
 
-The source-ordered route API `forecast_latest_source_route` now supplies a bounded integration
-building block: availability gates the evidence, source time orders amendments within one full
-GUFI and reporting centre, and successes and refusals retain complete candidate counts. It does
-not change the frozen study selector. The visible-CA recovery fixture also checks current CA
+The source-ordered route API `forecast_latest_source_route` supplies a bounded building block:
+availability gates the evidence, source time orders amendments within one full GUFI and reporting
+centre, and successes and refusals retain complete candidate counts. The independent normalized
+route converter and shared issue-time trajectory baseline are also available as components, but
+the combined shell adapter and its full cutoff/key/cursor binding have not been delivered. The
+new evidence selector does not change the frozen study selector. The visible-CA recovery fixture
+also checks current CA
 state before rasterizing, with matching tracker/display identities, altitude and coast/uncertainty
 status. These remain component and same-host fixture evidence; the proposed composition is in
 [the regional session plan](REGIONAL_SESSION_PLAN.md).
 
 The next development increments are bounded:
 
-1. Select the route revision actually available at an issue cutoff, reject conflicting revisions,
-   and feed the existing arrival predictor with retained provenance.
+1. Compose the normalized converter and source-ordered revision evidence with a frozen flight
+   view, explicit active cursor and the selected trajectory consumer. Check plan identity and
+   route payload binding without changing the frozen arrival-study selector.
 2. Persist and verify raw-replay evidence across a restart, binding inputs, adaptation, receipt
    semantics and effective rendering settings. This is a recovery building block, not failover.
 3. Evaluate MSAW warning onsets against explicit hazard windows, with timely/late/missed outcomes,

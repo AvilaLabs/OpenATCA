@@ -62,7 +62,8 @@ pub const ALT_BLOCK: u8 = 4;
 /// An altitude at a fix: `a_ft` before the fix, `b_ft` after it, the fix named beside it. The
 /// reading of before and after is the feed's `pre` and `post`, unconfirmed.
 pub const ALT_AT_FIX: u8 = 5;
-/// Explicitly none: the source said the field is cleared (an interim altitude given up).
+/// Explicitly none: the source said this clearance field is cleared; this is distinct from a field
+/// the source has never stated (`ALT_NONE`).
 pub const ALT_NIL: u8 = 6;
 
 /// An altitude, in feet.

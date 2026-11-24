@@ -11,13 +11,16 @@ import tomllib
 
 
 HARNESS = Path("validation/oa-alloc-check")
+# Pinned to oa-airspace::core::route::MAX_ROUTE_WORK: full identity scans across the
+# 11,640-point regional model need 744,960 visits for 64 endpoints, plus expansion.
+ROUTE_CONVERSION_WORK_LIMIT = 1_048_576
 HARNESS_DEPS = {
     "oa-track": "../../crates/oa-track", "oa-nam": "../../crates/oa-nam",
     "oa-display": "../../crates/oa-display", "oa-scope-replay": "../../crates/oa-scope-replay",
     "oa-airspace": "../../crates/oa-airspace", "oa-geo": "../../crates/oa-geo",
     "oa-safety": "../../crates/oa-safety",
 }
-HELPER_MODULES = ("pending_windows.rs", "nam_window.rs", "display_window.rs", "safety_window.rs")
+HELPER_MODULES = ("pending_windows.rs", "nam_window.rs", "display_window.rs", "safety_window.rs", "route_window.rs")
 FIXTURE_IDS = {
     "tracker_update_ooo_refusal_capacity_advance_flush",
     "tracker_default_4096_capacity_recovery",
@@ -32,6 +35,7 @@ FIXTURE_IDS = {
     "display_rows_traffic_frame_refusal",
     "display_raw_fallback_draw_capacity_invalid_refusal",
     "safety_state_inhibit_display",
+    "airspace_route_direct_airway_procedure_atomic_refusal",
 }
 TRACKER_FIELDS = {
     "applied": 4, "refiltered": 1, "refused": 1, "capacity_refused": 1,
@@ -137,6 +141,10 @@ ROUTE_LEDGER = {
     "safety_state_future_refusal": ("crates/oa-safety/src/net.rs", "safety.state_future_refused"),
     "safety_banner_clamp": ("crates/oa-display/src/core/safety.rs", "safety.banner_hidden"),
     "safety_build_error": ("crates/oa-display/src/core/safety.rs", "safety.error_builds"),
+    "route_direct_fix_identity": ("crates/oa-airspace/src/core/route.rs", "route_conversion.direct_points"),
+    "route_airway_expansion": ("crates/oa-airspace/src/core/route.rs", "route_conversion.airway_points"),
+    "route_procedure_transition": ("crates/oa-airspace/src/core/route.rs", "route_conversion.procedure_points"),
+    "route_atomic_refusal": ("crates/oa-airspace/src/core/route.rs", "route_conversion.refusals"),
 }
 
 ROUTE_SYMBOLS = {
@@ -214,7 +222,11 @@ ROUTE_SYMBOLS = {
     "safety_state_backdated": "state_report",
     "safety_state_future_refusal": "state_report",
     "safety_banner_clamp": "build_safety",
-    "safety_build_error": "build_safety"
+    "safety_build_error": "build_safety",
+    "route_direct_fix_identity": "convert_route",
+    "route_airway_expansion": "convert_route",
+    "route_procedure_transition": "convert_route",
+    "route_atomic_refusal": "convert_route",
 }
 
 
@@ -625,7 +637,7 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
     required_keys = {"status", "injection_requested", "fixture_ids", "route_ids", "controls",
                      "tracker", "default_capacity", "output_log", "clock_gate",
                      "bucket_capacity", "adsb_pending", "plot_pending", "fusion", "nam_session",
-                     "display_frame", "safety"}
+                     "display_frame", "safety", "route_conversion"}
     if set(result) != required_keys:
         errors.append("result must contain exactly the required allocator evidence fields")
     expected_status = "FAIL_M3_ALLOCATION" if expect_injected else "PASS_M3_EXERCISED"
@@ -713,6 +725,9 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
             errors.append(f"fusion.{name} is below required exercised coverage")
 
     extra_fields = {
+        "route_conversion": {"iterations": 10, "direct_points": 2, "airway_points": 2,
+                             "procedure_points": 2, "connected_links": 4, "refusals": 1,
+                             "recoveries": 1, "work_used": 1, "work_limit": ROUTE_CONVERSION_WORK_LIMIT},
         "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1, "recovered": 1,
                              "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
         "output_log": {"output_overflow": 1, "output_rows_after_reuse": 1,
@@ -763,6 +778,8 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
             required |= {"final_inactive"}
         if group == "output_log":
             required |= {"output_aligned", "output_preserved_addr", "output_payload_unchanged", "log_aligned"}
+        if group == "route_conversion":
+            required |= {"atomic_empty", "injected"}
         if not _object(evidence) or set(evidence) != required:
             errors.append(f"{group} must contain exactly its declared route evidence and allocator counters")
             evidence = {}
@@ -783,6 +800,10 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
             elif value < minimum:
                 errors.append(f"{group}.{name} is below required exercised coverage")
     exact_fields = {
+        "route_conversion": {"iterations": 10, "direct_points": 2, "airway_points": 2,
+                             "procedure_points": 2, "connected_links": 4, "refusals": 1,
+                             "atomic_empty": True, "recoveries": 1, "work_limit": ROUTE_CONVERSION_WORK_LIMIT,
+                             "injected": True},
         "default_capacity": {"occupied": 4096, "confirmed": 4096, "refused": 1,
                              "history_refiltered": 1, "history_replayed": 1, "late_ring": 1},
         "output_log": {"log_overflow": 1, "log_rows": 1},
@@ -820,6 +841,11 @@ def evaluate_allocator_result(text: str, expect_injected: bool = False) -> list[
         for name, expected in fields.items():
             if not _object(evidence) or evidence.get(name) != expected:
                 errors.append(f"{group}.{name} must equal {expected}")
+    route_conversion = result.get("route_conversion")
+    if _object(route_conversion):
+        used, limit = route_conversion.get("work_used"), route_conversion.get("work_limit")
+        if _nonnegative_int(used) and _nonnegative_int(limit) and used > limit:
+            errors.append("route_conversion.work_used exceeds work_limit")
     nam_session = result.get("nam_session")
     if not _object(nam_session) or nam_session.get("final_inactive") is not True:
         errors.append("nam_session.final_inactive must be true")
