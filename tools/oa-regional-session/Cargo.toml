@@ -9,9 +9,8 @@ authors.workspace = true
 [lints]
 workspace = true
 
-# F1: Connor explicitly approved these thirteen existing workspace runtime links on
-# 2026-11-24 after confirming that they introduce no external packages. Only links used by
-# this increment are retained; direct oa-geo/oa-math links are unnecessary at this boundary.
+# F1: Connor explicitly approved the existing workspace runtime links below on 2026-11-24;
+# they add no external packages. Each import site states the reason for its direct link.
 [dependencies]
 # Authoritative flight operations, stamped clearances and ownership transitions.
 oa-flight = { path = "../../crates/oa-flight" }
@@ -40,6 +39,16 @@ oa-sealed = { path = "../../crates/oa-sealed" }
 oa-msaw = { path = "../../crates/oa-msaw" }
 # Bounded terrain/obstacle/received-weather loading and datum correction, reused without a new parser.
 oa-msaw-run = { path = "../oa-msaw" }
+# F1 approval: Connor approved these existing workspace recording/decoder links on 2026-11-24.
+# OAF bounded frame parsing and gzip inflation; import site: recordings_reader.rs.
+oa-feed = { path = "../../crates/oa-feed" }
+oa-zip = { path = "../../crates/oa-zip" }
+# ADS-B binary payload and FIXM XML source decoder; import sites: recordings.rs.
+oa-adsb = { path = "../../crates/oa-adsb" }
+oa-fixm = { path = "../../crates/oa-fixm" }
+oa-xml = { path = "../../crates/oa-xml" }
+# Source-faithful SFDPS event→operation adapter; import site: recordings.rs.
+oa-flight-sfdps = { path = "../../crates/oa-flight-sfdps" }
 
 [package.metadata.openatca]
 class = "shell"

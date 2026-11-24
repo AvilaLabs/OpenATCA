@@ -2,6 +2,17 @@
 //! Shell adapter (RULESET B1, B3, B7); callers own file decoding and receipt metadata.
 
 use crate::input::{EventKind, Identity, NormalizedEvent, SourceKind};
+use crate::recordings_reader::{RecordedFrame, RecordingCounts, RecordingSource};
+
+use oa_adsb::{decode_payload_lenient, reports_len, reports_push, reports_row, Reports, F_GROUND, NONE_I32};
+use oa_fixm::{new_events, Decoder, Field, Limits as FixmLimits};
+use oa_flight::{
+    Alt, OP_ADDRESS, OP_ASSIGN, OP_COUNT, OP_HO_ACCEPT, OP_HO_FAIL, OP_HO_INITIATE,
+    OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM, OP_OWNER,
+    OP_REQUEST, OP_SET_PLAN, ALT_NIL, ALT_SIMPLE,
+};
+use oa_flight_sfdps::{row_ops, AdapterStats as SfdpsAdapterStats, MAX_OPS_PER_MESSAGE};
+use oa_xml::{Limits as XmlLimits, Parser};
 
 /// Stable source-order key supplied by the recording reader. It is preserved verbatim.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +68,11 @@ pub enum AdapterError {
     CountOverflow,
     UnsupportedEvent,
     InvalidCentre,
+    InvalidField,
+    RowTooLong,
+    FramesNotMerged,
+    WorkBudget,
+    AllocationRefused,
 }
 
 /// Development sizing for the next adapter increment. The work cap is checked against decoded
@@ -76,6 +92,11 @@ pub const DEVELOPMENT_RECORDING_BUDGET: RecordingBudget = RecordingBudget {
     max_work_items: 100_000,
 };
 
+/// Source decoder work caps for the 16 MiB OAF envelope. The ADS-B wire's shortest legacy row is
+/// 64 bytes; FIXM rows are capped at the same 100k event budget as normalized output.
+pub const MAX_ADSB_ROWS_PER_ADAPTATION: usize = 262_144;
+pub const MAX_SFDPS_ROWS_PER_ADAPTATION: usize = 100_000;
+
 /// Worst-case retained normalized event storage for this profile, excluding allocator overhead.
 /// This arithmetic is deliberately based on the actual inline event size, including route payload
 /// space, rather than assuming every future input is a small position row.
@@ -83,6 +104,511 @@ pub fn event_storage_budget(budget: RecordingBudget) -> Result<usize, AdapterErr
     core::mem::size_of::<NormalizedEvent>()
         .checked_mul(budget.max_rows)
         .ok_or(AdapterError::CountOverflow)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecordedAdapterCounts {
+    pub frames_adsb: u64,
+    pub frames_sfdps: u64,
+    pub nonmessage_frames_refused: u64,
+    pub invalid_frame_metadata: u64,
+    pub adsb_payload_refused: u64,
+    pub adsb_rows_in: u64,
+    pub adsb_rows_over_capacity: u64,
+    pub adsb_rows_dropped: u64,
+    pub adsb_ground_excluded: u64,
+    pub adsb_unknown_ground_refused: u64,
+    /// Decoded source flag byte frequencies, including excluded ground/unknown rows.
+    pub adsb_native_flag_values: [u64; 256],
+    /// Decoded source selector frequencies, including absent/unknown selectors.
+    pub adsb_native_source_values: [u64; 256],
+    pub adsb_source_time_regressions: u64,
+    pub adsb_rows_order_refused: u64,
+    pub adsb_velocity_unavailable: u64,
+    /// Thirteen oa-truth quality refusal reasons, in the decoder's stable reason order.
+    pub adsb_quality_removed: [u64; 13],
+    pub adsb_unknown_gufi_positions: u64,
+    pub sfdps_payload_refused: u64,
+    pub sfdps_rows_decoded: u64,
+    pub sfdps_rows_not_decoded_capacity: u64,
+    pub sfdps_frames_over_capacity: u64,
+    pub sfdps_rows_refused: u64,
+    pub sfdps_rows_no_operations: u64,
+    pub sfdps_no_status: u64,
+    pub sfdps_operations_unusable: u64,
+    pub sfdps_owner_unknown: u64,
+    pub sfdps_handoff_incomplete: u64,
+    pub sfdps_handoff_unknown_unit: u64,
+    pub sfdps_handoff_receiving_only: u64,
+    pub sfdps_departure_not_active: u64,
+    pub sfdps_not_decoded: u64,
+    pub sfdps_sealed_messages: u64,
+    pub sfdps_positions_unmapped: u64,
+    pub sfdps_field_errors: u64,
+    pub sfdps_rejected_messages: u64,
+    pub sfdps_unknown_elements: u64,
+    pub sfdps_unknown_attributes: u64,
+    pub sfdps_unknown_overflow: u64,
+    pub unsupported_operations: [u64; OP_COUNT],
+    pub invalid_operation_time: u64,
+    pub source_after_receipt: u64,
+    pub invalid_operation_identity: u64,
+    pub invalid_operation_centre: u64,
+    pub invalid_operation_address: u64,
+    pub unbound_flight_updates: u64,
+    pub invalid_position_rows: u64,
+    pub output_capacity_refusals: u64,
+    pub unprocessed_frames: u64,
+    pub events_emitted: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedAdaptation {
+    pub events: Vec<NormalizedEvent>,
+    /// One-to-one audit trail for every normalized event, preserving the actual OAF source stream,
+    /// frame sequence, frame byte offset, and within-frame emitted-item ordinal.
+    pub provenance: Vec<EventProvenance>,
+    pub counts: RecordedAdapterCounts,
+    pub recording: RecordingCounts,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EventProvenance {
+    pub source: RecordingSource,
+    pub stream_index: u8,
+    pub frame_sequence: u64,
+    pub jms_timestamp_ms: i64,
+    pub mono_ns: Option<u64>,
+    pub oaf_flags: u8,
+    pub frame_byte_offset: u64,
+    pub skipped_before: u64,
+    pub emitted_item_ordinal: u32,
+    /// Raw flags and selector from the decoded source row, retained without interpretation loss.
+    pub native_flags: u32,
+    pub native_source: [u8; 2],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AdsGroundClass { Ground, Airborne, Unknown }
+
+/// readsb carries explicit ground state as `F_GROUND`; a numeric barometric altitude is the
+/// available positive evidence of airborne status. Missing altitude without a ground bit stays
+/// unknown and is refused by the AIRBORNE-only regional session.
+fn adsb_ground_class(flags: u8, baro_alt_ft: i32) -> AdsGroundClass {
+    if flags & F_GROUND != 0 { AdsGroundClass::Ground }
+    else if baro_alt_ft != NONE_I32 { AdsGroundClass::Airborne }
+    else { AdsGroundClass::Unknown }
+}
+
+/// Parses the OAF message payloads already sorted by receipt. ADS-B quality removals and every
+/// unrepresentable SFDPS operation are counted explicitly; no event fields are guessed.
+pub fn adapt_recorded_frames(
+    frames: &[RecordedFrame],
+    recording_counts: RecordingCounts,
+    max_events: usize,
+    adsb_centre: [u8; 4],
+) -> Result<RecordedAdaptation, AdapterError> {
+    if max_events == 0 { return Err(AdapterError::ZeroCapacity); }
+    if max_events > DEVELOPMENT_RECORDING_BUDGET.max_rows || frames.len() > crate::recordings_reader::MAX_RECORDING_FRAMES {
+        return Err(AdapterError::WorkBudget);
+    }
+    if !adsb_centre.iter().all(u8::is_ascii_graphic) { return Err(AdapterError::InvalidCentre); }
+    let declared_decoded = usize::try_from(recording_counts.total_decoded_bytes).map_err(|_| AdapterError::WorkBudget)?;
+    if declared_decoded > DEVELOPMENT_RECORDING_BUDGET.max_input_bytes {
+        return Err(AdapterError::WorkBudget);
+    }
+    let mut frame_payload_bytes = 0usize;
+    for frame in frames {
+        frame_payload_bytes = frame_payload_bytes.checked_add(frame.payload.len()).ok_or(AdapterError::WorkBudget)?;
+    }
+    if frame_payload_bytes > declared_decoded { return Err(AdapterError::WorkBudget); }
+    for pair in frames.windows(2) {
+        let before = &pair[0];
+        let after = &pair[1];
+        let before_key = (before.receipt_ns, before.source.rank(), before.sequence, before.stream_index, before.byte_offset);
+        let after_key = (after.receipt_ns, after.source.rank(), after.sequence, after.stream_index, after.byte_offset);
+        if after_key < before_key { return Err(AdapterError::FramesNotMerged); }
+    }
+    let mut out = RecordedAdaptation {
+        events: Vec::new(),
+        provenance: Vec::new(),
+        counts: RecordedAdapterCounts::default(),
+        recording: recording_counts,
+    };
+    out.events.try_reserve_exact(max_events.min(4096)).map_err(|_| AdapterError::AllocationRefused)?;
+    out.provenance.try_reserve_exact(max_events.min(4096)).map_err(|_| AdapterError::AllocationRefused)?;
+    let mut parser = Parser::new(XmlLimits {
+        max_input_bytes: oa_feed::MAX_PAYLOAD,
+        max_elements: 262_144,
+        max_attributes: 524_288,
+        max_text_nodes: 262_144,
+        ..XmlLimits::default()
+    }).map_err(|_| AdapterError::UnsupportedEvent)?;
+    let mut fixm_limits = FixmLimits::new(oa_sealed::DropWindow::sealed());
+    fixm_limits.max_elements = 262_144;
+    let mut sfdps_decoder = Decoder::new(fixm_limits);
+    let mut next_surveillance_sequence = 0u64;
+    let mut next_flight_sequence = 0u64;
+    for frame in frames {
+        if frame.kind != oa_feed::Kind::Message {
+            out.counts.nonmessage_frames_refused = out.counts.nonmessage_frames_refused.saturating_add(1);
+            continue;
+        }
+        if frame.receipt_ns < 0 || oa_sealed::in_sealed_window(frame.receipt_ns) || frame.payload.len() > oa_feed::MAX_PAYLOAD {
+            out.counts.invalid_frame_metadata = out.counts.invalid_frame_metadata.saturating_add(1);
+            continue;
+        }
+        if out.events.len() >= max_events {
+            out.counts.unprocessed_frames = out.counts.unprocessed_frames.saturating_add(1);
+            continue;
+        }
+        if measurement.flags & oa_track::M_HAS_VEL == 0 {
+            out.counts.adsb_velocity_unavailable = out.counts.adsb_velocity_unavailable.saturating_add(1);
+            continue;
+        }
+        match frame.source {
+            RecordingSource::Adsb => {
+                out.counts.frames_adsb = out.counts.frames_adsb.saturating_add(1);
+                adapt_adsb_frame(frame, adsb_centre, max_events, &mut next_surveillance_sequence, &mut out)?;
+            }
+            RecordingSource::Sfdps => {
+                out.counts.frames_sfdps = out.counts.frames_sfdps.saturating_add(1);
+                adapt_sfdps_frame(frame, max_events, &mut next_flight_sequence, &mut parser, &mut sfdps_decoder, &mut out)?;
+            }
+        }
+    }
+    out.counts.events_emitted = u64::try_from(out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
+    Ok(out)
+}
+
+fn adapt_adsb_frame(
+    frame: &RecordedFrame,
+    adsb_centre: [u8; 4],
+    max_events: usize,
+    next_sequence: &mut u64,
+    out: &mut RecordedAdaptation,
+) -> Result<(), AdapterError> {
+    let mut reports = Reports::default();
+    let counts = match decode_payload_lenient(&frame.payload, &mut reports) {
+        Ok(counts) => counts,
+        Err(_) => { out.counts.adsb_payload_refused = out.counts.adsb_payload_refused.saturating_add(1); return Ok(()); }
+    };
+    out.counts.adsb_rows_in = out.counts.adsb_rows_in.saturating_add(u64::try_from(counts.records).map_err(|_| AdapterError::CountOverflow)?);
+    out.counts.adsb_rows_dropped = out.counts.adsb_rows_dropped.saturating_add(u64::try_from(counts.dropped).map_err(|_| AdapterError::CountOverflow)?);
+    let previously_admitted = usize::try_from(out.counts.adsb_rows_in).map_err(|_| AdapterError::WorkBudget)?
+        .checked_sub(counts.records).ok_or(AdapterError::CountOverflow)?;
+    if previously_admitted.checked_add(counts.records).map_or(true, |n| n > MAX_ADSB_ROWS_PER_ADAPTATION) {
+        out.counts.adsb_rows_over_capacity = out.counts.adsb_rows_over_capacity.saturating_add(u64::try_from(counts.kept).map_err(|_| AdapterError::CountOverflow)?);
+        return Ok(());
+    }
+    if reports.time_ns.windows(2).any(|pair| pair[1] < pair[0]) {
+        out.counts.adsb_source_time_regressions = out.counts.adsb_source_time_regressions.saturating_add(1);
+        out.counts.adsb_rows_order_refused = out.counts.adsb_rows_order_refused.saturating_add(u64::try_from(counts.kept).map_err(|_| AdapterError::CountOverflow)?);
+        return Ok(());
+    }
+    let airborne_reports = airborne_adsb_reports(&reports, &mut out.counts)?;
+    // Reuse the tracker’s existing quality/velocity conversion so the regional adapter does not
+    // duplicate ADS-B unit math or platform trig. All quality-gated row losses remain reported.
+    let (measurements, stats) = oa_track::adsb::adsb_measurements(&airborne_reports, &oa_track::adsb::DEFAULT_ADSB_CONFIG);
+    for (dst, src) in out.counts.adsb_quality_removed.iter_mut().zip(stats.removed) {
+        *dst = dst.saturating_add(src);
+    }
+    let mut source_row_cursor = 0usize;
+    for (measurement_ordinal, measurement) in measurements.into_iter().enumerate() {
+        if out.events.len() >= max_events {
+            out.counts.output_capacity_refusals = out.counts.output_capacity_refusals.saturating_add(1);
+            continue;
+        }
+        if measurement.flags & oa_track::M_HAS_VEL == 0 {
+            out.counts.adsb_velocity_unavailable = out.counts.adsb_velocity_unavailable.saturating_add(1);
+            continue;
+        }
+        let mut source_row = None;
+        while source_row_cursor < reports_len(&airborne_reports) {
+            let index = source_row_cursor;
+            source_row_cursor += 1;
+            let Some(candidate) = reports_row(&airborne_reports, index) else { continue; };
+            if candidate.icao == measurement.addr && candidate.time_ns == measurement.toa_ns
+                && candidate.lat_e7 == measurement.lat_e7 && candidate.lon_e7 == measurement.lon_e7 {
+                source_row = Some(candidate);
+                break;
+            }
+        }
+        let Some(source_row) = source_row else {
+            out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
+            continue;
+        };
+        let Some(east_mmps) = fixed_mmps(measurement.vel_east_mps) else {
+            out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
+            continue;
+        };
+        let Some(north_mmps) = fixed_mmps(measurement.vel_north_mps) else {
+            out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
+            continue;
+        };
+        let altitude_ft = (measurement.alt_ft != oa_track::NONE_I32).then_some(measurement.alt_ft);
+        let vertical_rate_fpm = (measurement.vrate_fpm != oa_track::NONE_I32).then_some(measurement.vrate_fpm);
+        let position = RecordedPosition {
+            receipt_ns: frame.receipt_ns,
+            source_ns: measurement.toa_ns,
+            sequence: *next_sequence,
+            address: measurement.addr,
+            identity: RecordedIdentity::Unknown,
+            centre: adsb_centre,
+            latitude_e7: measurement.lat_e7,
+            longitude_e7: measurement.lon_e7,
+            altitude_ft,
+            east_mmps,
+            north_mmps,
+            vertical_rate_fpm,
+        };
+        let adapted = adapt_positions(core::slice::from_ref(&position), 1)?;
+        out.counts.adsb_unknown_gufi_positions = out.counts.adsb_unknown_gufi_positions.saturating_add(adapted.counts.unknown_identity);
+        if let Some(event) = adapted.events.into_iter().next() {
+            let next = next_sequence.checked_add(1).ok_or(AdapterError::CountOverflow)?;
+            out.events.try_reserve(1).map_err(|_| AdapterError::AllocationRefused)?;
+            out.provenance.try_reserve(1).map_err(|_| AdapterError::AllocationRefused)?;
+            out.events.push(event);
+            out.provenance.push(EventProvenance {
+                source: frame.source,
+                stream_index: frame.stream_index,
+                frame_sequence: frame.sequence,
+                jms_timestamp_ms: frame.jms_timestamp_ms,
+                mono_ns: frame.mono_ns,
+                oaf_flags: frame.oaf_flags,
+                frame_byte_offset: frame.byte_offset,
+                skipped_before: frame.skipped_before,
+                emitted_item_ordinal: u32::try_from(measurement_ordinal).map_err(|_| AdapterError::CountOverflow)?,
+                native_flags: u32::from(source_row.flags),
+                native_source: [source_row.source, 0],
+            });
+            *next_sequence = next;
+        } else {
+            out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
+        }
+    }
+    Ok(())
+}
+
+fn airborne_adsb_reports(reports: &Reports, counts: &mut RecordedAdapterCounts) -> Result<Reports, AdapterError> {
+    let mut airborne_reports = Reports::default();
+    airborne_reports.icao.try_reserve(reports_len(reports)).map_err(|_| AdapterError::AllocationRefused)?;
+    airborne_reports.time_ns.try_reserve(reports_len(reports)).map_err(|_| AdapterError::AllocationRefused)?;
+    airborne_reports.lat_e7.try_reserve(reports_len(reports)).map_err(|_| AdapterError::AllocationRefused)?;
+    airborne_reports.lon_e7.try_reserve(reports_len(reports)).map_err(|_| AdapterError::AllocationRefused)?;
+    for i in 0..reports_len(reports) {
+        let Some(row) = reports_row(&reports, i) else {
+            counts.invalid_position_rows = counts.invalid_position_rows.saturating_add(1);
+            continue;
+        };
+        if let Some(count) = counts.adsb_native_flag_values.get_mut(usize::from(row.flags)) {
+            *count = count.saturating_add(1);
+        }
+        if let Some(count) = counts.adsb_native_source_values.get_mut(usize::from(row.source)) {
+            *count = count.saturating_add(1);
+        }
+        match adsb_ground_class(row.flags, row.baro_alt_ft) {
+            AdsGroundClass::Ground => counts.adsb_ground_excluded = counts.adsb_ground_excluded.saturating_add(1),
+            AdsGroundClass::Unknown => counts.adsb_unknown_ground_refused = counts.adsb_unknown_ground_refused.saturating_add(1),
+            AdsGroundClass::Airborne => reports_push(&mut airborne_reports, &row),
+        }
+    }
+    Ok(airborne_reports)
+}
+
+fn fixed_mmps(mps: f32) -> Option<i32> {
+    if !mps.is_finite() { return None; }
+    let rounded = oa_ieee::round(f64::from(mps) * 1_000.0);
+    if rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) { return None; }
+    Some(rounded as i32)
+}
+
+fn adapt_sfdps_frame(
+    frame: &RecordedFrame,
+    max_events: usize,
+    next_sequence: &mut u64,
+    parser: &mut Parser,
+    decoder: &mut Decoder,
+    out: &mut RecordedAdaptation,
+) -> Result<(), AdapterError> {
+    let already_decoded = usize::try_from(out.counts.sfdps_rows_decoded).map_err(|_| AdapterError::WorkBudget)?;
+    let remaining_rows = MAX_SFDPS_ROWS_PER_ADAPTATION.saturating_sub(already_decoded);
+    if remaining_rows == 0 {
+        out.counts.sfdps_frames_over_capacity = out.counts.sfdps_frames_over_capacity.saturating_add(1);
+        out.counts.unprocessed_frames = out.counts.unprocessed_frames.saturating_add(1);
+        return Ok(());
+    }
+    let doc = match parser.parse(&frame.payload) {
+        Ok(doc) => doc,
+        Err(_) => { out.counts.sfdps_payload_refused = out.counts.sfdps_payload_refused.saturating_add(1); return Ok(()); }
+    };
+    let mut events = new_events(remaining_rows.min(4096), 1 << 20);
+    let before = decoder.stats();
+    let before_rejected = before.rejected;
+    let before_field_errors = before.field_errors;
+    let (before_unknown_elements, before_unknown_attributes, before_unknown_overflow) =
+        (before.unknown_elements, before.unknown_attributes, before.unknown_overflow);
+    let summary = match decoder.decode_prefix(&doc, &frame.payload, &mut events) {
+        Ok(summary) => summary,
+        Err(_) => {
+        out.counts.sfdps_payload_refused = out.counts.sfdps_payload_refused.saturating_add(1);
+        return Ok(());
+        }
+    };
+    out.counts.sfdps_not_decoded = out.counts.sfdps_not_decoded.saturating_add(u64::from(summary.not_decoded));
+    out.counts.sfdps_rows_not_decoded_capacity = out.counts.sfdps_rows_not_decoded_capacity.saturating_add(u64::from(summary.not_decoded));
+    out.counts.sfdps_sealed_messages = out.counts.sfdps_sealed_messages.saturating_add(u64::from(summary.sealed_window_dropped));
+    let stats = decoder.stats();
+    out.counts.sfdps_rejected_messages = out.counts.sfdps_rejected_messages.saturating_add(stats.rejected.iter().zip(before_rejected).map(|(a, b)| a.saturating_sub(b)).sum::<u64>());
+    out.counts.sfdps_field_errors = out.counts.sfdps_field_errors.saturating_add(stats.field_errors.iter().zip(before_field_errors).map(|(a, b)| a.saturating_sub(b)).sum::<u64>());
+    out.counts.sfdps_unknown_elements = out.counts.sfdps_unknown_elements.saturating_add(stats.unknown_elements.saturating_sub(before_unknown_elements));
+    out.counts.sfdps_unknown_attributes = out.counts.sfdps_unknown_attributes.saturating_add(stats.unknown_attributes.saturating_sub(before_unknown_attributes));
+    out.counts.sfdps_unknown_overflow = out.counts.sfdps_unknown_overflow.saturating_add(stats.unknown_overflow.saturating_sub(before_unknown_overflow));
+    out.counts.sfdps_rows_decoded = out.counts.sfdps_rows_decoded.saturating_add(u64::try_from(events.len).map_err(|_| AdapterError::CountOverflow)?);
+    let seen_ms = frame.receipt_ns / 1_000_000;
+    for row in 0..events.len {
+        let has_position = oa_fixm::has_field(&events, row, Field::Position);
+        if has_position { out.counts.sfdps_positions_unmapped = out.counts.sfdps_positions_unmapped.saturating_add(1); }
+        let mut adapter_stats = SfdpsAdapterStats::default();
+        let mut ops = Vec::new();
+        ops.try_reserve_exact(MAX_OPS_PER_MESSAGE).map_err(|_| AdapterError::AllocationRefused)?;
+        row_ops(&events, row, seen_ms, frame.sequence, &mut adapter_stats, &mut ops);
+        out.counts.sfdps_owner_unknown = out.counts.sfdps_owner_unknown.saturating_add(adapter_stats.owner_unknown);
+        out.counts.sfdps_handoff_incomplete = out.counts.sfdps_handoff_incomplete.saturating_add(adapter_stats.handoff_incomplete);
+        out.counts.sfdps_handoff_unknown_unit = out.counts.sfdps_handoff_unknown_unit.saturating_add(adapter_stats.handoff_unknown_unit);
+        out.counts.sfdps_handoff_receiving_only = out.counts.sfdps_handoff_receiving_only.saturating_add(adapter_stats.handoff_receiving_only);
+        out.counts.sfdps_departure_not_active = out.counts.sfdps_departure_not_active.saturating_add(adapter_stats.departure_not_active);
+        let unusable = adapter_stats.no_status.saturating_add(adapter_stats.owner_unknown)
+            .saturating_add(adapter_stats.handoff_incomplete).saturating_add(adapter_stats.handoff_unknown_unit)
+            .saturating_add(adapter_stats.handoff_receiving_only).saturating_add(adapter_stats.departure_not_active);
+        out.counts.sfdps_operations_unusable = out.counts.sfdps_operations_unusable.saturating_add(unusable);
+        out.counts.sfdps_no_status = out.counts.sfdps_no_status.saturating_add(adapter_stats.no_status);
+        if ops.is_empty() {
+            out.counts.sfdps_rows_no_operations = out.counts.sfdps_rows_no_operations.saturating_add(1);
+            continue;
+        }
+        if out.events.len().checked_add(ops.len()).map_or(true, |wanted| wanted > max_events) {
+            out.counts.output_capacity_refusals = out.counts.output_capacity_refusals.saturating_add(1);
+            out.counts.sfdps_rows_refused = out.counts.sfdps_rows_refused.saturating_add(1);
+            continue;
+        }
+        let mut pending = Vec::new();
+        pending.try_reserve_exact(ops.len()).map_err(|_| AdapterError::AllocationRefused)?;
+        let mut unsupported = false;
+        for (operation_index, op) in ops.iter().enumerate() {
+            match normalized_flight_operation(op.kind, op.alt, op.plan_id, op.state, op.unit_a, op.unit_b, op.address, op.callsign, op.dep, op.arr) {
+                Some((operation, address)) => {
+                    let Some(source_ns) = op.ts_ms.checked_mul(1_000_000) else {
+                        out.counts.invalid_operation_time = out.counts.invalid_operation_time.saturating_add(1);
+                        unsupported = true;
+                        continue;
+                    };
+                    if source_ns < 0 {
+                        out.counts.invalid_operation_time = out.counts.invalid_operation_time.saturating_add(1);
+                        unsupported = true;
+                        continue;
+                    }
+                    if source_ns > frame.receipt_ns {
+                        out.counts.source_after_receipt = out.counts.source_after_receipt.saturating_add(1);
+                        unsupported = true;
+                        continue;
+                    }
+                    if op.key.gufi == 0 {
+                        out.counts.invalid_operation_identity = out.counts.invalid_operation_identity.saturating_add(1);
+                        unsupported = true;
+                        continue;
+                    }
+                    if !op.centre.iter().all(u8::is_ascii_graphic) {
+                        out.counts.invalid_operation_centre = out.counts.invalid_operation_centre.saturating_add(1);
+                        unsupported = true;
+                        continue;
+                    }
+                    if op.kind == OP_ADDRESS && (address == 0 || address > 0x01ff_ffff) {
+                        out.counts.invalid_operation_address = out.counts.invalid_operation_address.saturating_add(1);
+                        unsupported = true;
+                        continue;
+                    }
+                    pending.push((NormalizedEvent {
+                        receipt_ns: frame.receipt_ns,
+                        source_ns,
+                        sequence: 0,
+                        source: SourceKind::Flight,
+                        identity: Identity { flight_gufi: op.key.gufi, aircraft_address: address },
+                        centre: op.centre,
+                        kind: EventKind::Flight(operation),
+                    }, operation_index));
+                }
+                None => {
+                    if let Some(count) = out.counts.unsupported_operations.get_mut(usize::from(op.kind)) { *count = count.saturating_add(1); }
+                    unsupported = true;
+                }
+            }
+        }
+        if unsupported {
+            out.counts.sfdps_rows_refused = out.counts.sfdps_rows_refused.saturating_add(1);
+            continue;
+        }
+        let pending_count = u64::try_from(pending.len()).map_err(|_| AdapterError::CountOverflow)?;
+        let sequence_end = next_sequence.checked_add(pending_count).ok_or(AdapterError::CountOverflow)?;
+        out.events.try_reserve(pending.len()).map_err(|_| AdapterError::AllocationRefused)?;
+        out.provenance.try_reserve(pending.len()).map_err(|_| AdapterError::AllocationRefused)?;
+        for (offset, (mut event, operation_index)) in pending.into_iter().enumerate() {
+            if event.identity.aircraft_address == 0 {
+                out.counts.unbound_flight_updates = out.counts.unbound_flight_updates.saturating_add(1);
+            }
+            event.sequence = next_sequence.checked_add(u64::try_from(offset).map_err(|_| AdapterError::CountOverflow)?)
+                .ok_or(AdapterError::CountOverflow)?;
+            out.events.push(event);
+            out.provenance.push(EventProvenance {
+                source: frame.source,
+                stream_index: frame.stream_index,
+                frame_sequence: frame.sequence,
+                jms_timestamp_ms: frame.jms_timestamp_ms,
+                mono_ns: frame.mono_ns,
+                oaf_flags: frame.oaf_flags,
+                frame_byte_offset: frame.byte_offset,
+                skipped_before: frame.skipped_before,
+                emitted_item_ordinal: u32::try_from(row.saturating_mul(MAX_OPS_PER_MESSAGE).saturating_add(operation_index)).map_err(|_| AdapterError::CountOverflow)?,
+                native_flags: events.flags.get(row).copied().unwrap_or(0),
+                native_source: events.source.get(row).copied().unwrap_or([0; 2]),
+            });
+        }
+        *next_sequence = sequence_end;
+    }
+    Ok(())
+}
+
+fn normalized_flight_operation(
+    kind: u8, alt: Alt, plan_id: [u8; 12], state: u8, unit_a: [u8; 8], unit_b: [u8; 8],
+    address: u32, callsign: [u8; 8], dep: [u8; 12], arr: [u8; 12],
+) -> Option<(crate::input::FlightOperation, u32)> {
+    use crate::input::{FlightOperation, HandoffOperation};
+    let op = match kind {
+        OP_SET_PLAN if plan_id != [0; 12] && valid_padded_ascii(&plan_id) && !plan_id.contains(&0) => FlightOperation::SetPlan { plan_id, status: state },
+        OP_ASSIGN if alt.form == ALT_SIMPLE => FlightOperation::AssignAltitude { altitude_ft: alt.a_ft },
+        OP_ASSIGN if alt.form == ALT_NIL => FlightOperation::ClearAssignedAltitude,
+        OP_INTERIM if alt.form == ALT_SIMPLE => FlightOperation::SetInterimAltitude { altitude_ft: Some(alt.a_ft) },
+        OP_INTERIM if alt.form == ALT_NIL => FlightOperation::SetInterimAltitude { altitude_ft: None },
+        OP_OWNER if valid_padded_ascii(&unit_a) => FlightOperation::SetOwner { unit: unit_a },
+        OP_ADDRESS => FlightOperation::SetAddress,
+        OP_IDENTITY if callsign != [0; 8] && dep != [0; 12] && arr != [0; 12]
+            && valid_padded_ascii(&callsign) && valid_padded_ascii(&dep) && valid_padded_ascii(&arr) =>
+            FlightOperation::SetIdentity { callsign, departure: dep, arrival: arr },
+        OP_HO_ACCEPT if valid_padded_ascii(&unit_b) => FlightOperation::Handoff { operation: HandoffOperation::Accept, unit: unit_b },
+        OP_HO_TAKE if valid_padded_ascii(&unit_b) => FlightOperation::Handoff { operation: HandoffOperation::Take, unit: unit_b },
+        // The normalized model cannot represent the transferring unit, receiving-unit updates,
+        // retractions, requested altitudes, departures, or terminal plan events without loss.
+        OP_HO_INITIATE | OP_HO_UPDATE | OP_HO_RETRACT | OP_HO_FAIL | OP_REQUEST => return None,
+        2..=5 => return None,
+        _ => return None,
+    };
+    Some((op, if kind == OP_ADDRESS { address } else { 0 }))
+}
+
+fn valid_padded_ascii(bytes: &[u8]) -> bool {
+    if !bytes.is_ascii() { return false; }
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    end > 0 && bytes.get(end..).is_some_and(|tail| tail.iter().all(|&b| b == 0))
 }
 
 /// Converts a bounded prefix of decoded ADS-B positions. Oversize input emits no prefix: the
@@ -183,6 +709,103 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
     Ok(out)
 }
 
+/// Serializes the complete subset emitted by the recording adapter as the established OA-RS v1
+/// protocol. A row that cannot be represented within 768 bytes refuses the serialization whole.
+pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, AdapterError> {
+    use core::fmt::Write;
+    use crate::input::{FlightOperation, HandoffOperation, MAX_EVENT_LINE_BYTES};
+    let mut out = String::from("OA-RS\t1\n");
+    for event in events {
+        let (source_name, kind) = match event.source {
+            SourceKind::Surveillance => ("SURVEILLANCE", "POS"),
+            SourceKind::Flight => ("FLIGHT", "FLIGHT"),
+            _ => return Err(AdapterError::UnsupportedEvent),
+        };
+        if !event.centre.iter().all(u8::is_ascii_graphic) || event.identity.aircraft_address > 0x01ff_ffff {
+            return Err(AdapterError::InvalidCentre);
+        }
+        write!(out, "v1\t{}\t{}\t{}\t{}\t{:032X}\t{:06X}\t{}\t{}",
+            event.receipt_ns, event.source_ns, event.sequence, source_name,
+            event.identity.flight_gufi, event.identity.aircraft_address,
+            core::str::from_utf8(&event.centre).map_err(|_| AdapterError::InvalidCentre)?, kind)
+            .map_err(|_| AdapterError::CountOverflow)?;
+        match event.kind {
+            EventKind::Position { latitude_e7, longitude_e7, altitude_ft, east_mmps, north_mmps, vertical_rate_fpm } => {
+                if event.source != SourceKind::Surveillance { return Err(AdapterError::UnsupportedEvent); }
+                write!(out, "\t{}\t{}\t{}\t{}\t{}\t{}", latitude_e7, longitude_e7,
+                    altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string()), east_mmps,
+                    north_mmps, vertical_rate_fpm.map_or_else(|| "-".to_owned(), |v| v.to_string()))
+                    .map_err(|_| AdapterError::CountOverflow)?;
+            }
+            EventKind::Flight(op) if event.source == SourceKind::Flight => {
+                match op {
+                    FlightOperation::SetPlan { plan_id, status } => write!(out, "\tPLAN\t{}\t{}", ascii_field(&plan_id)?, status),
+                    FlightOperation::AssignAltitude { altitude_ft } => write!(out, "\tASSIGNED\t{altitude_ft}"),
+                    FlightOperation::ClearAssignedAltitude => write!(out, "\tUNASSIGNED"),
+                    FlightOperation::SetInterimAltitude { altitude_ft } => write!(out, "\tINTERIM\t{}", altitude_ft.map_or_else(|| "-".to_owned(), |v| v.to_string())),
+                    FlightOperation::SetOwner { unit } => write!(out, "\tOWNER\t{}", ascii_trimmed(&unit)?),
+                    FlightOperation::SetAddress => write!(out, "\tADDRESS"),
+                    FlightOperation::SetIdentity { callsign, departure, arrival } => write!(out, "\tIDENTITY\t{}\t{}\t{}", ascii_trimmed(&callsign)?, ascii_trimmed(&departure)?, ascii_trimmed(&arrival)?),
+                    FlightOperation::Handoff { operation, unit } => {
+                        let name = match operation { HandoffOperation::Offer => "HO_OFFER", HandoffOperation::Accept => "HO_ACCEPT", HandoffOperation::Take => "HO_TAKE", HandoffOperation::Fail => "HO_FAIL" };
+                        write!(out, "\t{name}\t{}", ascii_trimmed(&unit)?)
+                    }
+                }.map_err(|_| AdapterError::CountOverflow)?;
+            }
+            _ => return Err(AdapterError::UnsupportedEvent),
+        }
+        if out.len().saturating_sub(out.rfind('\n').map_or(0, |i| i + 1)) > MAX_EVENT_LINE_BYTES {
+            return Err(AdapterError::RowTooLong);
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Deterministic companion manifest binding each normalized line to its input recording frame.
+pub fn serialize_provenance(
+    events: &[NormalizedEvent],
+    provenance: &[EventProvenance],
+    streams: &[crate::recordings_reader::RecordingStreamProvenance],
+) -> Result<String, AdapterError> {
+    use core::fmt::Write;
+    if events.len() != provenance.len() { return Err(AdapterError::UnsupportedEvent); }
+    let mut out = String::from("OA-RS-PROVENANCE\t1\n");
+    for stream in streams {
+        let feed = match stream.source { RecordingSource::Adsb => "ADSB", RecordingSource::Sfdps => "SFDPS" };
+        let mut digest = [0u8; 64];
+        oa_sha256::to_hex_into(&stream.sha256, &mut digest);
+        let digest = core::str::from_utf8(&digest).map_err(|_| AdapterError::InvalidField)?;
+        writeln!(out, "STREAM\t{}\t{}\t{}\t{}\t{}\t{}", stream.stream_index, feed,
+            digest, stream.compressed_bytes, stream.decoded_bytes, u8::from(stream.gzip))
+            .map_err(|_| AdapterError::CountOverflow)?;
+    }
+    for (index, (event, origin)) in events.iter().zip(provenance).enumerate() {
+        let source = match event.source { SourceKind::Surveillance => "SURVEILLANCE", SourceKind::Flight => "FLIGHT", SourceKind::Route => "ROUTE", SourceKind::Weather => "WEATHER", SourceKind::Adaptation => "ADAPTATION" };
+        let feed = match origin.source { RecordingSource::Adsb => "ADSB", RecordingSource::Sfdps => "SFDPS" };
+        writeln!(out, "EVENT\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:02X}\t{}\t{:08X}\t{:02X}{:02X}", index, source, event.sequence,
+            feed, origin.stream_index, origin.frame_sequence, origin.frame_byte_offset,
+            origin.jms_timestamp_ms, origin.mono_ns.map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            origin.oaf_flags, origin.skipped_before, origin.emitted_item_ordinal, origin.native_flags,
+            origin.native_source[0], origin.native_source[1])
+            .map_err(|_| AdapterError::CountOverflow)?;
+    }
+    Ok(out)
+}
+
+fn ascii_field(bytes: &[u8]) -> Result<String, AdapterError> {
+    if !bytes.is_ascii() || bytes.contains(&0) { return Err(AdapterError::InvalidField); }
+    core::str::from_utf8(bytes).map(str::to_owned).map_err(|_| AdapterError::InvalidField)
+}
+
+fn ascii_trimmed(bytes: &[u8]) -> Result<String, AdapterError> {
+    if !bytes.is_ascii() { return Err(AdapterError::InvalidField); }
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    if bytes.get(end..).is_some_and(|tail| tail.iter().any(|&b| b != 0)) { return Err(AdapterError::InvalidField); }
+    core::str::from_utf8(bytes.get(..end).ok_or(AdapterError::InvalidField)?)
+        .map(str::to_owned).map_err(|_| AdapterError::InvalidField)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +854,70 @@ mod tests {
         assert_eq!(got.counts.invalid_record, 2);
         assert_eq!(event_storage_budget(DEVELOPMENT_RECORDING_BUDGET).unwrap(),
             core::mem::size_of::<NormalizedEvent>() * 100_000);
+    }
+
+    #[test]
+    fn recorded_decoder_refusals_are_counted_by_source_and_no_event_is_fabricated() {
+        let frames = [
+            RecordedFrame {
+                source: RecordingSource::Adsb, stream_index: 0, receipt_ns: 20, sequence: 1,
+                jms_timestamp_ms: 0, mono_ns: None, oaf_flags: 0, byte_offset: 0, skipped_before: 0,
+                kind: oa_feed::Kind::Message, payload: b"bad ADS-B payload".to_vec(),
+            },
+            RecordedFrame {
+                source: RecordingSource::Sfdps, stream_index: 1, receipt_ns: 20, sequence: 1,
+                jms_timestamp_ms: 0, mono_ns: None, oaf_flags: 0, byte_offset: 100, skipped_before: 0,
+                kind: oa_feed::Kind::Message, payload: b"<not-xml".to_vec(),
+            },
+        ];
+        let bytes = frames.iter().map(|frame| frame.payload.len() as u64).sum();
+        let counts = RecordingCounts { total_decoded_bytes: bytes, ..RecordingCounts::default() };
+        let got = adapt_recorded_frames(&frames, counts, 8, *b"ZAU1").unwrap();
+        assert!(got.events.is_empty());
+        assert!(got.provenance.is_empty());
+        assert_eq!(got.counts.adsb_payload_refused, 1);
+        assert_eq!(got.counts.sfdps_payload_refused, 1);
+        assert_eq!(got.counts.events_emitted, 0);
+    }
+
+    #[test]
+    fn only_lossless_sfdps_operations_map_to_normalized_flight_events() {
+        use crate::input::FlightOperation;
+        let set = normalized_flight_operation(OP_ASSIGN, Alt { form: ALT_SIMPLE, a_ft: 12_000, b_ft: 0 }, [0; 12], 0, [0; 8], [0; 8], 0, [0; 8], [0; 12], [0; 12]);
+        assert_eq!(set, Some((FlightOperation::AssignAltitude { altitude_ft: 12_000 }, 0)));
+        let block = normalized_flight_operation(OP_ASSIGN, Alt { form: oa_flight::ALT_BLOCK, a_ft: 10_000, b_ft: 14_000 }, [0; 12], 0, [0; 8], [0; 8], 0, [0; 8], [0; 12], [0; 12]);
+        assert_eq!(block, None);
+        let initiation = normalized_flight_operation(OP_HO_INITIATE, Alt::default(), [0; 12], 0, *b"FROM    ", *b"TO      ", 0, [0; 8], [0; 12], [0; 12]);
+        assert_eq!(initiation, None);
+    }
+
+    #[test]
+    fn serializes_flight_events_and_exact_frame_provenance() {
+        use crate::input::FlightOperation;
+        let event = NormalizedEvent {
+            receipt_ns: 20,
+            source_ns: 10,
+            sequence: 3,
+            source: SourceKind::Flight,
+            identity: Identity { flight_gufi: 0x123, aircraft_address: 0 },
+            centre: *b"ZAU1",
+            kind: EventKind::Flight(FlightOperation::SetOwner { unit: *b"SECTOR1\0" }),
+        };
+        let expected = "OA-RS\t1\nv1\t20\t10\t3\tFLIGHT\t00000000000000000000000000000123\t000000\tZAU1\tFLIGHT\tOWNER\tSECTOR1\n";
+        assert_eq!(serialize_recorded_events(&[event]).unwrap(), expected);
+        let origin = EventProvenance { source: RecordingSource::Sfdps, stream_index: 1, frame_sequence: 42, jms_timestamp_ms: 9, mono_ns: Some(88), oaf_flags: 2, frame_byte_offset: 1234, skipped_before: 5, emitted_item_ordinal: 7, native_flags: 0x12, native_source: *b"TR" };
+        let stream = crate::recordings_reader::RecordingStreamProvenance {
+            source: RecordingSource::Sfdps, stream_index: 1, sha256: [0xAB; 32], compressed_bytes: 80,
+            decoded_bytes: 80, gzip: false,
+        };
+        let manifest = serialize_provenance(&[event], &[origin], &[stream]).unwrap();
+        assert_eq!(manifest, format!("OA-RS-PROVENANCE\t1\nSTREAM\t1\tSFDPS\t{}\t80\t80\t0\nEVENT\t0\tFLIGHT\t3\tSFDPS\t1\t42\t1234\t9\t88\t02\t5\t7\t00000012\t5452\n", "ab".repeat(32)));
+    }
+
+    #[test]
+    fn ground_status_is_never_promoted_to_airborne() {
+        assert_eq!(adsb_ground_class(F_GROUND, 0), AdsGroundClass::Ground);
+        assert_eq!(adsb_ground_class(0, NONE_I32), AdsGroundClass::Unknown);
+        assert_eq!(adsb_ground_class(0, 12_000), AdsGroundClass::Airborne);
     }
 }
