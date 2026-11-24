@@ -20,5 +20,6 @@ pub mod evaluation;
 pub mod floors;
 pub mod guard;
 pub mod qnh;
+pub mod regional;
 pub mod report;
 pub mod run;

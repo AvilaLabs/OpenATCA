@@ -12,6 +12,7 @@
 //! the cell's centre, with observations at or before the start of the bucket and at most the age
 //! old at its end, so that the age of what a track uses is never more than the limit.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -218,6 +219,87 @@ impl Qnh {
         let mut q = Qnh::empty(radius_nm, max_age_s);
         q.stats.files = files;
         q.stats.rows = metar_len(&table) as u64;
+        q.stats.stations = stations.len() as u64;
+        q.stations = stations;
+        Ok(q)
+    }
+
+    /// Builds from an explicit set of caller-admitted METAR bytes. `received_at_ms` is the
+    /// caller's evidence that the whole named source was available by cutoff; observations whose
+    /// report or METAR receipt time is later than its file receipt or `cutoff_ms` is excluded. The regional adapter
+    /// performs byte and file-count checks before calling this decoder.
+    pub(crate) fn from_admitted_bytes(
+        files: &[(&str, &[u8], i64)],
+        cutoff_ms: i64,
+        radius_nm: f64,
+        max_age_s: i64,
+    ) -> Result<Qnh, String> {
+        let cutoff_s = cutoff_ms.div_euclid(1000);
+        let mut grouped: BTreeMap<u32, (f64, f64, f64, BTreeMap<i64, (f64, f64)>)> = BTreeMap::new();
+        let mut retained_rows = 0u64;
+        for (name, bytes, received_at_ms) in files {
+            if *received_at_ms > cutoff_ms {
+                return Err(format!("{name}: METAR source was received after cutoff"));
+            }
+            let mut table = new_metar_table();
+            let mut stats = MetarStats::default();
+            parse_metar(bytes, &mut table, &mut stats).map_err(|e| format!("{name}: {e}"))?;
+            finalize_metar(&mut table);
+            for i in 0..metar_len(&table) {
+                let (Some(&id), Some(&la), Some(&lo), Some(&obs), Some(&receipt)) = (
+                    table.station.get(i),
+                    table.lat_e5.get(i),
+                    table.lon_e5.get(i),
+                    table.obs_s.get(i),
+                    table.receipt_ms.get(i),
+                ) else {
+                    continue;
+                };
+                if obs > cutoff_s || receipt > cutoff_ms || receipt > *received_at_ms {
+                    continue;
+                }
+                let Some(hpa) = metar_altim_hpa(&table, i) else {
+                    continue;
+                };
+                let temp = table.temp_dc.get(i).copied().unwrap_or(NONE_I16);
+                let elev = table.elev_m.get(i).copied().unwrap_or(NONE_I16);
+                let entry = grouped.entry(id).or_insert_with(|| {
+                    (
+                        f64::from(la) / 1e5,
+                        f64::from(lo) / 1e5,
+                        if elev == NONE_I16 { f64::NAN } else { f64::from(elev) / FT_M },
+                        BTreeMap::new(),
+                    )
+                });
+                if entry.0 != f64::from(la) / 1e5 || entry.1 != f64::from(lo) / 1e5 {
+                    return Err(format!("{name}: METAR station identity has conflicting coordinates"));
+                }
+                if entry.2.is_nan() && elev != NONE_I16 {
+                    entry.2 = f64::from(elev) / FT_M;
+                }
+                let temp_c = if temp == NONE_I16 { f64::NAN } else { f64::from(temp) / 10.0 };
+                if let Some(existing) = entry.3.get(&obs) {
+                    let same_temp = existing.1 == temp_c || (existing.1.is_nan() && temp_c.is_nan());
+                    if existing.0 != hpa || !same_temp {
+                        return Err(format!("{name}: conflicting METAR values at the same station time"));
+                    }
+                } else {
+                    entry.3.insert(obs, (hpa, temp_c));
+                    retained_rows += 1;
+                }
+            }
+        }
+        let mut stations = Vec::with_capacity(grouped.len());
+        for (_, (lat, lon, elev_ft, rows)) in grouped {
+            let (obs, temp_c): (Vec<(i64, f64)>, Vec<f64>) = rows
+                .into_iter()
+                .map(|(time, (hpa, temp))| ((time, hpa), temp))
+                .unzip();
+            stations.push(Station { lat, lon, obs, elev_ft, temp_c });
+        }
+        let mut q = Qnh::empty(radius_nm, max_age_s);
+        q.stats.files = files.len() as u64;
+        q.stats.rows = retained_rows;
         q.stats.stations = stations.len() as u64;
         q.stations = stations;
         Ok(q)

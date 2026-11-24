@@ -28,11 +28,13 @@ use oa_msaw::{
 };
 use oa_mva::Model;
 use oa_sealed::Sealed;
+use oa_sha256::sha256;
 use oa_tiff::{Grid, TileSet, METRES_PER_FOOT};
 
 use crate::chart_raster::ChartRaster;
 use crate::coarse::{Coarse, CoarseTerrain, CELLS_PER_DEG};
 use crate::guard::refuse_sealed;
+use crate::guard::{open_guarded, OpenFail};
 
 /// The obstacle index cell, degrees.
 const OBST_CELL_DEG: f64 = 0.1;
@@ -72,6 +74,9 @@ pub struct FloorStats {
     pub chart_absent: u64,
     /// Bytes the reduced terrain grids hold, and the one-degree blocks of the chart raster built.
     pub terrain_grid_bytes: u64,
+    /// Terrain lookups refused by the configured retained-tile, resident-byte or cell-visit caps.
+    pub terrain_budget_refused: u64,
+    pub tiles_refused: u64,
     pub chart_blocks: u64,
 }
 
@@ -497,6 +502,9 @@ pub struct Floors {
     /// The tiles reduced, by the south-west corner of their cell.
     loaded: BTreeSet<(i32, i32)>,
     absent: BTreeSet<(i32, i32)>,
+    refused: BTreeSet<(i32, i32)>,
+    terrain_limits: Option<TerrainServiceLimits>,
+    terrain_hashes: Vec<(String, [u8; 32])>,
     obstacles: Option<ObstacleIndex>,
     chart: Option<ChartRaster>,
     areas: Vec<(Area, i32)>,
@@ -506,6 +514,16 @@ pub struct Floors {
     /// The grid index of those corridors.
     cidx: Option<oa_msaw::CorridorIndex>,
     pub stats: FloorStats,
+}
+
+/// Optional bounds for a reusable terrain service. Unbounded legacy constructors retain their
+/// historical behavior; the regional startup adapter always installs these bounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerrainServiceLimits {
+    pub max_tiles: usize,
+    pub max_file_bytes: u64,
+    pub max_resident_bytes: usize,
+    pub max_query_cells: u64,
 }
 
 /// Whether a circle of `radius_m` at (`lat`, `lon`) can touch the corridor: its centre is within
@@ -541,6 +559,26 @@ pub fn read_tile(path: &Path) -> Result<Grid, String> {
     oa_tiff::read_geotiff(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Reads one terrain source under the regional service's tighter byte cap, before TIFF parsing.
+fn read_tile_bounded(path: &Path, limit: u64) -> Result<(Grid, [u8; 32]), String> {
+    let file = open_guarded(&Sealed::production(), path).map_err(|e| match e {
+        OpenFail::Refused(m) | OpenFail::Io(m) => m,
+    })?;
+    let mut bytes = Vec::new();
+    let mut limited = std::io::Read::take(file, limit.saturating_add(1));
+    std::io::Read::read_to_end(&mut limited, &mut bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+        return Err(format!(
+            "{}: terrain file exceeds {limit} bytes",
+            path.display()
+        ));
+    }
+    let hash = sha256(&bytes);
+    let grid = oa_tiff::read_geotiff(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok((grid, hash))
+}
+
 impl Floors {
     pub fn new(
         tile_dir: Option<PathBuf>,
@@ -553,6 +591,9 @@ impl Floors {
             coarse: CoarseTerrain::default(),
             loaded: BTreeSet::new(),
             absent: BTreeSet::new(),
+            refused: BTreeSet::new(),
+            terrain_limits: None,
+            terrain_hashes: Vec::new(),
             obstacles,
             chart: chart.map(ChartRaster::new),
             areas: Vec::new(),
@@ -561,6 +602,16 @@ impl Floors {
             cidx: None,
             stats: FloorStats::default(),
         }
+    }
+
+    /// Installs explicit startup limits for future lazy terrain reads and per-query work.
+    pub(crate) fn set_terrain_limits(&mut self, limits: TerrainServiceLimits) {
+        self.terrain_limits = Some(limits);
+    }
+
+    /// SHA-256 hashes for the exact terrain bytes actually decoded by this service, in load order.
+    pub fn terrain_hashes(&self) -> &[(String, [u8; 32])] {
+        &self.terrain_hashes
     }
 
     /// Lookups over tiles held in memory (a test hands them over); no file is read.
@@ -771,25 +822,81 @@ impl Floors {
     /// Reduces the tile of a cell into the coarse grid if that is not done; a cell with no file is
     /// noted (once). A tile that is there and cannot be read is an error, never a missing one.
     fn ensure_tile(&mut self, cell: (i32, i32)) -> Result<(), String> {
-        if self.preloaded || self.loaded.contains(&cell) || self.absent.contains(&cell) {
+        if self.preloaded
+            || self.loaded.contains(&cell)
+            || self.absent.contains(&cell)
+            || self.refused.contains(&cell)
+        {
             return Ok(());
         }
         let Some(dir) = self.tile_dir.clone() else {
             return Ok(());
         };
         match tile_name(cell.0, cell.1).map(|n| dir.join(n)) {
-            Some(p) if p.is_file() => {
+            Some(p) => {
+                let sealed = Sealed::production();
+                refuse_sealed(&sealed, &p)?;
+                if !p.is_file() {
+                    self.absent.insert(cell);
+                    self.stats.tiles_absent += 1;
+                    return Ok(());
+                }
                 let t0 = Instant::now();
-                let g = read_tile(&p)?;
+                let (g, hash) = match self.terrain_limits {
+                    Some(limits) => {
+                        let (grid, hash) = read_tile_bounded(&p, limits.max_file_bytes)?;
+                        (grid, Some(hash))
+                    }
+                    None => {
+                        let bytes = oa_tiff::read_file(&p)
+                            .map_err(|e| format!("{}: {e}", p.display()))?;
+                        let grid = oa_tiff::read_geotiff(&bytes)
+                            .map_err(|e| format!("{}: {e}", p.display()))?;
+                        (grid, None)
+                    }
+                };
+                if let Some(limits) = self.terrain_limits {
+                    let span_lat = (f64::from(g.height.saturating_sub(1)) * g.dlat).abs();
+                    let span_lon = (f64::from(g.width.saturating_sub(1)) * g.dlon).abs();
+                    let south = g.lat0 - span_lat;
+                    let west = g.lon0;
+                    let block_rows = ((g.lat0 * 500.0).floor() as i32)
+                        .div_euclid(500)
+                        .abs_diff(((south * 500.0).floor() as i32).div_euclid(500))
+                        as usize
+                        + 1;
+                    let block_cols = ((g.lon0 * 500.0).floor() as i32)
+                        .div_euclid(500)
+                        .abs_diff((((west + span_lon) * 500.0).floor() as i32).div_euclid(500))
+                        as usize
+                        + 1;
+                    let potential_bytes = block_rows
+                        .saturating_mul(block_cols)
+                        .saturating_mul(500 * 500 * 2);
+                    if span_lat > 1.1
+                        || span_lon > 1.1
+                        || self.coarse.bytes().saturating_add(potential_bytes)
+                            > limits.max_resident_bytes
+                    {
+                        self.refused.insert(cell);
+                        self.stats.tiles_refused += 1;
+                        self.stats.terrain_budget_refused += 1;
+                        return Ok(());
+                    }
+                }
                 let t1 = Instant::now();
                 self.coarse.add_grid(&g);
+                if let Some(hash) = hash {
+                    self.terrain_hashes.push((p.display().to_string(), hash));
+                    self.terrain_hashes.sort_by(|a, b| a.0.cmp(&b.0));
+                }
                 self.stats.ns_tile_reduce += t1.elapsed().as_nanos() as u64;
                 self.stats.terrain_grid_bytes = self.coarse.bytes() as u64;
                 self.stats.ns_tile_read += t0.elapsed().as_nanos() as u64;
                 self.loaded.insert(cell);
                 self.stats.tiles_loaded += 1;
             }
-            _ => {
+            None => {
                 self.absent.insert(cell);
                 self.stats.tiles_absent += 1;
             }
@@ -835,8 +942,54 @@ impl Floors {
     fn terrain_query(&mut self, lat: f64, lon: f64, radius_m: f64) -> Result<i32, String> {
         self.stats.terrain_queries += 1;
         let (i0, i1, j0, j1) = CoarseTerrain::cell_box(lat, lon, radius_m);
+        if let Some(limits) = self.terrain_limits {
+            let rows = i64::from(i1) - i64::from(i0) + 1;
+            let cols = i64::from(j1) - i64::from(j0) + 1;
+            let visits = if rows <= 0 || cols <= 0 {
+                u64::MAX
+            } else {
+                (rows as u64).saturating_mul(cols as u64)
+            };
+            if visits > limits.max_query_cells {
+                self.stats.terrain_absent += 1;
+                self.stats.terrain_refused += 1;
+                self.stats.terrain_budget_refused += 1;
+                return Ok(FLOOR_NONE);
+            }
+        }
         let per_deg = CELLS_PER_DEG as i32;
         if !self.preloaded && (i1 - i0 + 1).max(j1 - j0 + 1) < 10 * per_deg {
+            if let Some(limits) = self.terrain_limits {
+                let (la0, la1) = (i0.div_euclid(per_deg), i1.div_euclid(per_deg));
+                let (lo0, lo1) = (j0.div_euclid(per_deg), j1.div_euclid(per_deg));
+                let mut candidates = BTreeSet::new();
+                for la in la0..=la1 {
+                    for lo in lo0..=lo1 {
+                        candidates.insert((la, lo));
+                        if candidates.len() > limits.max_tiles.saturating_add(1) {
+                            break;
+                        }
+                    }
+                    if candidates.len() > limits.max_tiles.saturating_add(1) {
+                        break;
+                    }
+                }
+                let attempts = self.loaded.len() + self.absent.len() + self.refused.len();
+                let new_needed = candidates
+                    .iter()
+                    .filter(|c| {
+                        !self.loaded.contains(c)
+                            && !self.absent.contains(c)
+                            && !self.refused.contains(c)
+                    })
+                    .count();
+                if attempts.saturating_add(new_needed) > limits.max_tiles {
+                    self.stats.terrain_absent += 1;
+                    self.stats.terrain_refused += 1;
+                    self.stats.terrain_budget_refused += 1;
+                    return Ok(FLOOR_NONE);
+                }
+            }
             for la in i0.div_euclid(per_deg)..=i1.div_euclid(per_deg) {
                 for lo in j0.div_euclid(per_deg)..=j1.div_euclid(per_deg) {
                     self.ensure_tile((la, lo))?;
