@@ -9,6 +9,7 @@ use std::io::{self, BufRead, BufReader, Write};
 
 const FIXTURE: &str = include_str!("../../examples/synthetic-session.tsv");
 const MAX_LINE: usize = 1024;
+// This is a fixture-settings subset, not a fingerprint of every downstream subsystem setting.
 const SETTINGS: &str = "OA-REGIONAL-RECOVERY-SETTINGS\t1\ncentre\tZAU1\ncentre_lat_e7\t410000000\ncentre_lon_e7\t-870000000\nrange_nm\t180.0\ntracks\t32\nframes\t512\n";
 
 fn setup() -> Result<(oa_regional_session::runtime::RegionalRuntime, Vec<oa_regional_session::ReceiptBatch>, [u8; 32], [u8; 32]), String> {
@@ -67,7 +68,7 @@ fn admitted_prefix_bytes(count: usize, batches: &[oa_regional_session::ReceiptBa
     Ok(bytes)
 }
 
-fn read_line(reader: &mut BufReader<io::Stdin>) -> io::Result<Option<String>> {
+fn read_line<R: BufRead>(reader: &mut R) -> io::Result<Option<String>> {
     let mut bytes = Vec::with_capacity(MAX_LINE);
     loop {
         let available = reader.fill_buf()?;
@@ -83,8 +84,11 @@ fn read_line(reader: &mut BufReader<io::Stdin>) -> io::Result<Option<String>> {
         if bytes.len().saturating_add(take) > MAX_LINE {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "protocol line over bound"));
         }
-        let complete = available.get(take - 1) == Some(&b'\n');
-        bytes.extend_from_slice(&available[..take]);
+        let Some(chunk) = available.get(..take) else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "protocol line slice out of bounds"));
+        };
+        let complete = chunk.last() == Some(&b'\n');
+        bytes.extend_from_slice(chunk);
         reader.consume(take);
         if complete {
             break;
@@ -108,7 +112,8 @@ fn run() -> Result<(), String> {
     if args.len() != 2 {
         return Err("expected one positive generation argument".into());
     }
-    let generation = args[1].parse::<u64>().map_err(|_| "invalid generation")?;
+    let generation_arg = args.get(1).ok_or("missing generation")?;
+    let generation = generation_arg.parse::<u64>().map_err(|_| "invalid generation")?;
     if generation == 0 {
         return Err("generation must be positive".into());
     }
@@ -117,6 +122,8 @@ fn run() -> Result<(), String> {
     let mut replayed = false;
     let mut stdout = io::BufWriter::new(io::stdout().lock());
     let stdin = io::stdin();
+    // seal-allow: stdin carries only this bounded local test-control protocol; synthetic fixture
+    // rows and adaptation are embedded below, and no FAA or external input can be read here.
     let mut reader = BufReader::new(stdin.lock());
     while let Some(line) = read_line(&mut reader).map_err(|e| e.to_string())? {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -156,21 +163,31 @@ fn run() -> Result<(), String> {
                 if index != processed || index >= batches.len() {
                     return Err("step is not the next retained input".into());
                 }
-                let frame = regional_step(&mut runtime, &batches[index])?;
+                let batch = batches.get(index).ok_or("step index outside retained fixture")?;
+                let frame = regional_step(&mut runtime, batch)?;
                 processed += 1;
                 let pixels = regional_pixels(&runtime)?;
                 let pixel_hash = oa_sha256::sha256(pixels);
                 let state_hash = oa_sha256::sha256(format!("{frame:?}").as_bytes());
                 let trajectory_rows = frame.flights.iter().filter(|flight| flight.trajectory.is_some()).count();
-                let source_lag_ns = frame.surveillance.track_measurement_seen_ns
-                    .map(|seen| frame.surveillance.time_ns.saturating_sub(seen))
-                    .unwrap_or(0);
+                let source_lag_ns = match frame.surveillance.track_measurement_seen_ns {
+                    Some(seen) => {
+                        let age = frame.surveillance.time_ns.checked_sub(seen)
+                            .ok_or("track measurement age overflow")?;
+                        if age < 0 {
+                            return Err("track measurement is newer than frame time".into());
+                        }
+                        Some(age)
+                    }
+                    None => None,
+                };
                 let selected = frame.flights.iter().find(|flight| flight.address == 0xABC101).and_then(|flight| flight.view);
                 let handoff_state = selected.map_or(u8::MAX, |view| view.handoff_state);
                 let owner = selected.map_or("-", |view| {
                     std::str::from_utf8(&view.owner_unit).unwrap_or("?").trim_end_matches('\0')
                 });
-                writeln!(stdout, "OUTPUT\t{generation}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", frame.sequence, frame.input.receipt_ns, oa_sha256::to_hex(&frame.surveillance.frame_sha256), oa_sha256::to_hex(&pixel_hash), oa_sha256::to_hex(&state_hash), frame.surveillance.tracks.len(), frame.flight_report.flights, trajectory_rows, frame.surveillance.ca_open.len(), source_lag_ns, frame.controller_dispatches.len(), handoff_state, owner).map_err(|e| e.to_string())?;
+                let source_lag = source_lag_ns.map_or_else(|| "-".to_owned(), |value| value.to_string());
+                writeln!(stdout, "OUTPUT\t{generation}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}", frame.sequence, frame.input.receipt_ns, oa_sha256::to_hex(&frame.surveillance.frame_sha256), oa_sha256::to_hex(&pixel_hash), oa_sha256::to_hex(&state_hash), frame.surveillance.tracks.len(), frame.flight_report.flights, trajectory_rows, frame.surveillance.ca_open.len(), source_lag, frame.controller_dispatches.len(), handoff_state, owner).map_err(|e| e.to_string())?;
                 stdout.flush().map_err(|e| e.to_string())?;
             }
             ["APPLY_ONLY", gen, index] if replayed => {
@@ -181,7 +198,8 @@ fn run() -> Result<(), String> {
                 if index != processed || index >= batches.len() {
                     return Err("step is not the next retained input".into());
                 }
-                let frame = regional_step(&mut runtime, &batches[index])?;
+                let batch = batches.get(index).ok_or("step index outside retained fixture")?;
+                let frame = regional_step(&mut runtime, batch)?;
                 processed += 1;
                 writeln!(stdout, "APPLIED\t{generation}\t{}\t{}", processed, frame.sequence).map_err(|e| e.to_string())?;
                 stdout.flush().map_err(|e| e.to_string())?;

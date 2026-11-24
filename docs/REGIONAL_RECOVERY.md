@@ -13,7 +13,9 @@ service. Its helper process is `regional-recovery-worker`; that process construc
 `RegionalRuntime` used by the CLI, admits the checked-in normalized synthetic fixture through the
 real session cursor, and invokes `regional_step` for every full `ReceiptBatch`. The adaptation is
 the CLI's deterministic two-fix synthetic model. Each recovery request binds the exact admitted
-prefix bytes, encoded adaptation, and explicit centre/range/capacity settings by hash.
+prefix bytes and encoded adaptation by hash. It also hashes a declared fixture-settings subset
+(centre, surveillance centre coordinates/range, and nominal track/frame limits). That subset is
+not a fingerprint of every current tracker, CA, display, safety, and work-budget setting.
 
 ## What the drill covers
 
@@ -35,8 +37,10 @@ republished. This is a local single-authority fencing example; it makes no quoru
 ownership, or production publication guarantee. Replaying an operator command restores
 deterministic command state, but does not establish exactly-once external side effects.
 
-The protocol accepts only bounded tab-separated records. A worker response has a two-second
-deadline and an output line is capped at 1,024 bytes. The test exercises a changed fixture hash,
+The protocol accepts only bounded tab-separated records. A worker response and normal exit each
+have a two-second deadline; forced cleanup has a separate two-second deadline. An output line is
+capped at 1,024 bytes. Unknown measurement age is encoded as `-` and decoded as `None`, separate
+from a known zero age. The test exercises a changed prefix hash,
 an out-of-range/missing retained prefix, malformed input, a stalled worker, process disconnect
 and reconnect, duplicate output, and an old-generation output. Process recovery is recomputation
 from retained admitted input and deterministic adaptation bytes. It does not serialize or restore

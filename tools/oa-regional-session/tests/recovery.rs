@@ -4,14 +4,19 @@
 use oa_regional_session::cli::synthetic_model;
 use oa_regional_session::{flush_receipt_group, parse_event_line, push_event, session_cursor_new};
 use std::io::{self, BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const FIXTURE: &str = include_str!("../examples/synthetic-session.tsv");
+// Hashes only the synthetic fixture's declared settings subset; no claim of full runtime
+// subsystem-configuration identity is made by this test protocol.
 const SETTINGS: &str = "OA-REGIONAL-RECOVERY-SETTINGS\t1\ncentre\tZAU1\ncentre_lat_e7\t410000000\ncentre_lon_e7\t-870000000\nrange_nm\t180.0\ntracks\t32\nframes\t512\n";
 const WORKER_RESPONSE_DEADLINE: Duration = Duration::from_secs(2);
+const WORKER_EXIT_DEADLINE: Duration = Duration::from_secs(2);
+const WORKER_CLEANUP_DEADLINE: Duration = Duration::from_secs(2);
+const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_PROTOCOL_LINE: usize = 1024;
 const AUTHORITY_GENERATION: u64 = 10;
 
@@ -27,7 +32,7 @@ struct Output {
     flights: usize,
     trajectory_rows: usize,
     open_alerts: usize,
-    source_lag_ns: i64,
+    source_lag_ns: Option<i64>,
     command_dispatches: usize,
     handoff_state: u8,
     owner: String,
@@ -54,7 +59,10 @@ fn read_bounded_line(reader: &mut BufReader<ChildStdout>) -> io::Result<Option<V
             return Err(io::Error::new(io::ErrorKind::InvalidData, "worker output line exceeded bound"));
         }
         let complete = available.get(take - 1) == Some(&b'\n');
-        bytes.extend_from_slice(&available[..take]);
+        let Some(chunk) = available.get(..take) else {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "worker output slice out of bounds"));
+        };
+        bytes.extend_from_slice(chunk);
         reader.consume(take);
         if complete { bytes.pop(); return Ok(Some(bytes)); }
     }
@@ -97,21 +105,73 @@ impl Worker {
     }
 
     fn receive(&self) -> String {
-        self.lines.recv_timeout(WORKER_RESPONSE_DEADLINE)
-            .expect("worker response within bounded deadline")
-            .expect("bounded valid worker line")
+        match self.lines.recv_timeout(WORKER_RESPONSE_DEADLINE) {
+            Ok(Ok(line)) => line,
+            Ok(Err(error)) => panic!("invalid worker output: {error}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("worker response exceeded {WORKER_RESPONSE_DEADLINE:?}")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("worker stdout closed before response"),
+        }
+    }
+
+    fn wait_bounded(&mut self) -> io::Result<ExitStatus> {
+        let start = Instant::now();
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(status);
+            }
+            if start.elapsed() >= WORKER_EXIT_DEADLINE {
+                let _ = self.child.kill();
+                let cleanup = Instant::now();
+                loop {
+                    if let Some(status) = self.child.try_wait()? {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("worker exceeded {WORKER_EXIT_DEADLINE:?}; killed with status {status}"),
+                        ));
+                    }
+                    if cleanup.elapsed() >= WORKER_CLEANUP_DEADLINE {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("worker exceeded exit and {WORKER_CLEANUP_DEADLINE:?} cleanup deadlines"),
+                        ));
+                    }
+                    thread::sleep(WORKER_POLL_INTERVAL);
+                }
+            }
+            thread::sleep(WORKER_POLL_INTERVAL);
+        }
     }
 
     fn terminate(mut self) {
         let _ = self.child.kill();
-        let status = self.child.wait().expect("wait for terminated worker");
+        let status = self.wait_bounded().expect("fault-injected worker exits within bounded cleanup deadline");
         assert!(!status.success(), "fault-injected worker unexpectedly succeeded");
     }
 
     fn exit(mut self) {
         self.send("EXIT");
-        let status = self.child.wait().expect("wait for worker exit");
+        let status = self.wait_bounded().expect("worker exits within named deadline");
         assert!(status.success(), "worker exit failed: {status}");
+    }
+
+    fn expect_failure(mut self) {
+        let status = self.wait_bounded().expect("failed worker exits within named deadline");
+        assert!(!status.success(), "invalid worker protocol unexpectedly succeeded");
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.kill();
+            let start = Instant::now();
+            while start.elapsed() < WORKER_CLEANUP_DEADLINE {
+                if matches!(self.child.try_wait(), Ok(Some(_))) { break; }
+                thread::sleep(WORKER_POLL_INTERVAL);
+            }
+        }
     }
 }
 
@@ -217,11 +277,15 @@ fn parse_output(line: &str) -> Output {
         flights: fields[8].parse().unwrap(),
         trajectory_rows: fields[9].parse().unwrap(),
         open_alerts: fields[10].parse().unwrap(),
-        source_lag_ns: fields[11].parse().unwrap(),
+        source_lag_ns: parse_source_lag(fields.get(11).expect("source-lag protocol field")),
         command_dispatches: fields[12].parse().unwrap(),
         handoff_state: fields[13].parse().unwrap(),
         owner: fields[14].to_owned(),
     }
+}
+
+fn parse_source_lag(field: &str) -> Option<i64> {
+    if field == "-" { None } else { Some(field.parse().expect("integer source-lag field")) }
 }
 
 fn next_output(worker: &mut Worker, generation: u64, index: usize) -> Output {
@@ -235,6 +299,7 @@ fn acknowledge(worker: &mut Worker, generation: u64, sequence: u64) {
 }
 
 #[test]
+// REQ: OA-REG-010
 fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     let batches = batches();
     let identity = fixture_identity();
@@ -248,7 +313,7 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     for index in 0..batches.len() {
         let out = next_output(&mut reference, 1, index);
         assert_eq!(out.sequence as usize, index + 1);
-        assert_eq!(out.receipt_ns, batches[index].receipt_ns);
+        assert_eq!(out.receipt_ns, batches.get(index).expect("reference batch").receipt_ns);
         acknowledge(&mut reference, 1, out.sequence);
         expected.push(out);
     }
@@ -258,7 +323,7 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     assert!(expected.iter().any(|out| out.flights == 2), "flight table state appears in composed frames");
     assert!(expected.iter().any(|out| out.trajectory_rows > 0), "route conversion contributes trajectory rows");
     assert!(expected.iter().any(|out| out.open_alerts > 0), "observed traffic produces a CA alert in the fixture");
-    assert!(expected.iter().any(|out| out.source_lag_ns > 0), "feed outage exposes stale measurement age");
+    assert!(expected.iter().filter_map(|out| out.source_lag_ns).any(|age| age > 0), "feed outage exposes stale measurement age");
     assert_eq!((expected[2].handoff_state, expected[2].owner.as_str()), (1, "SECTOR1"), "offer preserves current ownership");
     assert_eq!((expected[3].handoff_state, expected[3].owner.as_str()), (2, "SECTOR1"), "acceptance does not transfer ownership");
     assert_eq!((expected[4].handoff_state, expected[4].owner.as_str()), (0, "SECTOR2"), "take transfers ownership once");
@@ -301,9 +366,10 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     let mut replacement = Worker::start(authority.generation);
     replay(&mut replacement, authority.generation, prefix, &identity, &batches, &expected);
     let output = next_output(&mut replacement, authority.generation, prefix);
-    assert_eq!(output.frame_hash, expected[prefix].frame_hash);
-    assert_eq!(output.pixels_hash, expected[prefix].pixels_hash);
-    assert_eq!(output, Output { generation: authority.generation, ..expected[prefix].clone() });
+    let expected_unpublished = expected.get(prefix).expect("expected continuation frame");
+    assert_eq!(output.frame_hash, expected_unpublished.frame_hash);
+    assert_eq!(output.pixels_hash, expected_unpublished.pixels_hash);
+    assert_eq!(output, Output { generation: authority.generation, ..expected_unpublished.clone() });
     authority.accept(output.clone()).expect("independent output authority accepts current generation");
     let availability_gap_ms = start.elapsed().as_millis();
     // Kill after output is accepted but before the worker receives its output acknowledgment.
@@ -326,25 +392,24 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     replacement.exit();
     assert_eq!(authority.accepted.len(), batches.len());
 
-    let source_lag_ns = expected.iter().map(|out| out.source_lag_ns).max().unwrap_or(0);
-    eprintln!("regional-recovery: recomputation=true accepted_suffix={} availability_gap_ms={} max_track_measurement_lag_ns={} generation={}", authority.accepted.len(), availability_gap_ms, source_lag_ns, authority.generation);
+    let source_lag_ns = expected.iter().filter_map(|out| out.source_lag_ns).max();
+    eprintln!("regional-recovery: recomputation=true accepted_suffix={} availability_gap_ms={} max_track_measurement_lag_ns={:?} generation={}", authority.accepted.len(), availability_gap_ms, source_lag_ns, authority.generation);
 }
 
 #[test]
+// REQ: OA-REG-010
 fn recovery_protocol_refuses_changed_prefix_and_bounds_bad_or_stalled_workers() {
     let identity = fixture_identity();
     let mut changed = Worker::start(20);
     changed.send(&format!("REPLAY\t20\t0\t{}\t{}\t{}", "00".repeat(32), identity.0, identity.1));
     assert!(changed.receive().starts_with("ERROR replay prefix digest mismatch"));
-    let status = changed.child.wait().expect("changed-prefix worker exit");
-    assert!(!status.success());
+    changed.expect_failure();
 
     let mut malformed = Worker::start(21);
     replay(&mut malformed, 21, 0, &identity, &[], &[]);
     malformed.send("NOT_A_PROTOCOL_RECORD");
     assert!(malformed.receive().starts_with("ERROR malformed or out-of-order protocol record"));
-    let status = malformed.child.wait().expect("malformed worker exit");
-    assert!(!status.success());
+    malformed.expect_failure();
 
     let mut stalled = Worker::start(22);
     replay(&mut stalled, 22, 0, &identity, &[], &[]);
@@ -355,6 +420,12 @@ fn recovery_protocol_refuses_changed_prefix_and_bounds_bad_or_stalled_workers() 
     let mut missing = Worker::start(23);
     missing.send(&format!("REPLAY\t23\t999\t{}\t{}\t{}", "00".repeat(32), identity.0, identity.1));
     assert!(missing.receive().starts_with("ERROR replay count exceeds admitted prefix"));
-    let status = missing.child.wait().expect("missing-prefix worker exit");
-    assert!(!status.success());
+    missing.expect_failure();
+}
+
+#[test]
+// REQ: OA-REG-010
+fn unknown_track_measurement_age_is_not_encoded_as_zero() {
+    assert_eq!(parse_source_lag("-"), None);
+    assert_eq!(parse_source_lag("0"), Some(0));
 }
