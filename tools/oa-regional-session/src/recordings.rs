@@ -75,6 +75,27 @@ pub enum AdapterError {
     AllocationRefused,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CutoffRefusal { Negative, Zero, SealedReceipt, Overflow, SealedCutoff }
+
+const NS_PER_SECOND: i64 = 1_000_000_000;
+
+/// Runtime issue time is the next whole-second cutoff at or after exact source receipt.
+/// Rounding up is conservative: the normalized session never sees a frame before it arrived.
+fn issue_cutoff(receipt_ns: i64) -> Result<i64, CutoffRefusal> {
+    if receipt_ns < 0 { return Err(CutoffRefusal::Negative); }
+    if receipt_ns == 0 { return Err(CutoffRefusal::Zero); }
+    if oa_sealed::in_sealed_window(receipt_ns) { return Err(CutoffRefusal::SealedReceipt); }
+    let seconds = receipt_ns / NS_PER_SECOND;
+    let cutoff = if receipt_ns % NS_PER_SECOND == 0 {
+        receipt_ns
+    } else {
+        seconds.checked_add(1).and_then(|n| n.checked_mul(NS_PER_SECOND)).ok_or(CutoffRefusal::Overflow)?
+    };
+    if oa_sealed::in_sealed_window(cutoff) { return Err(CutoffRefusal::SealedCutoff); }
+    Ok(cutoff)
+}
+
 /// Development sizing for the next adapter increment. The work cap is checked against decoded
 /// rows before conversion; byte capacity is checked by the caller before retaining source rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +133,11 @@ pub struct RecordedAdapterCounts {
     pub frames_sfdps: u64,
     pub nonmessage_frames_refused: u64,
     pub invalid_frame_metadata: u64,
+    pub cutoff_negative_refused: u64,
+    pub cutoff_zero_refused: u64,
+    pub cutoff_sealed_receipt_refused: u64,
+    pub cutoff_overflow_refused: u64,
+    pub cutoff_sealed_issue_refused: u64,
     pub adsb_payload_refused: u64,
     pub adsb_rows_in: u64,
     pub adsb_rows_over_capacity: u64,
@@ -129,6 +155,7 @@ pub struct RecordedAdapterCounts {
     pub adsb_quality_removed: [u64; 13],
     pub adsb_unknown_gufi_positions: u64,
     pub sfdps_payload_refused: u64,
+    pub sfdps_timestamp_precision_refused: u64,
     pub sfdps_rows_decoded: u64,
     pub sfdps_rows_not_decoded_capacity: u64,
     pub sfdps_frames_over_capacity: u64,
@@ -158,6 +185,12 @@ pub struct RecordedAdapterCounts {
     pub unbound_flight_updates: u64,
     pub invalid_position_rows: u64,
     pub output_capacity_refusals: u64,
+    pub receipt_groups_over_capacity: u64,
+    pub receipt_group_events_refused: u64,
+    pub receipt_groups_over_frame_capacity: u64,
+    pub receipt_frame_capacity_events_refused: u64,
+    pub receipt_gap_groups_refused: u64,
+    pub receipt_gap_events_refused: u64,
     pub unprocessed_frames: u64,
     pub events_emitted: u64,
 }
@@ -177,6 +210,8 @@ pub struct EventProvenance {
     pub source: RecordingSource,
     pub stream_index: u8,
     pub frame_sequence: u64,
+    /// Exact OAF receipt before conservative issue-cutoff ceiling.
+    pub input_receipt_ns: i64,
     pub jms_timestamp_ms: i64,
     pub mono_ns: Option<u64>,
     pub oaf_flags: u8,
@@ -200,8 +235,9 @@ fn adsb_ground_class(flags: u8, baro_alt_ft: i32) -> AdsGroundClass {
     else { AdsGroundClass::Unknown }
 }
 
-/// Parses the OAF message payloads already sorted by receipt. ADS-B quality removals and every
-/// unrepresentable SFDPS operation are counted explicitly; no event fields are guessed.
+/// Parses OAF messages, ceilings exact receipts to runtime issue cutoffs, then emits the complete
+/// normalized timeline in cutoff/category/source order. ADS-B quality removals, unsupported source
+/// precision and every unrepresentable operation are counted; no event fields are guessed.
 pub fn adapt_recorded_frames(
     frames: &[RecordedFrame],
     recording_counts: RecordingCounts,
@@ -254,10 +290,18 @@ pub fn adapt_recorded_frames(
             out.counts.nonmessage_frames_refused = out.counts.nonmessage_frames_refused.saturating_add(1);
             continue;
         }
-        if frame.receipt_ns < 0 || oa_sealed::in_sealed_window(frame.receipt_ns) || frame.payload.len() > oa_feed::MAX_PAYLOAD {
+        if frame.payload.len() > oa_feed::MAX_PAYLOAD {
             out.counts.invalid_frame_metadata = out.counts.invalid_frame_metadata.saturating_add(1);
             continue;
         }
+        let issue_receipt_ns = match issue_cutoff(frame.receipt_ns) {
+            Ok(value) => value,
+            Err(CutoffRefusal::Negative) => { out.counts.cutoff_negative_refused = out.counts.cutoff_negative_refused.saturating_add(1); continue; }
+            Err(CutoffRefusal::Zero) => { out.counts.cutoff_zero_refused = out.counts.cutoff_zero_refused.saturating_add(1); continue; }
+            Err(CutoffRefusal::SealedReceipt) => { out.counts.cutoff_sealed_receipt_refused = out.counts.cutoff_sealed_receipt_refused.saturating_add(1); continue; }
+            Err(CutoffRefusal::Overflow) => { out.counts.cutoff_overflow_refused = out.counts.cutoff_overflow_refused.saturating_add(1); continue; }
+            Err(CutoffRefusal::SealedCutoff) => { out.counts.cutoff_sealed_issue_refused = out.counts.cutoff_sealed_issue_refused.saturating_add(1); continue; }
+        };
         if out.events.len() >= max_events {
             out.counts.unprocessed_frames = out.counts.unprocessed_frames.saturating_add(1);
             continue;
@@ -269,20 +313,22 @@ pub fn adapt_recorded_frames(
         match frame.source {
             RecordingSource::Adsb => {
                 out.counts.frames_adsb = out.counts.frames_adsb.saturating_add(1);
-                adapt_adsb_frame(frame, adsb_centre, max_events, &mut next_surveillance_sequence, &mut out)?;
+                adapt_adsb_frame(frame, issue_receipt_ns, adsb_centre, max_events, &mut next_surveillance_sequence, &mut out)?;
             }
             RecordingSource::Sfdps => {
                 out.counts.frames_sfdps = out.counts.frames_sfdps.saturating_add(1);
-                adapt_sfdps_frame(frame, max_events, &mut next_flight_sequence, &mut parser, &mut sfdps_decoder, &mut out)?;
+                adapt_sfdps_frame(frame, issue_receipt_ns, max_events, &mut next_flight_sequence, &mut parser, &mut sfdps_decoder, &mut out)?;
             }
         }
     }
+    sort_and_refuse_oversize_receipt_groups(&mut out, max_events)?;
     out.counts.events_emitted = u64::try_from(out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
     Ok(out)
 }
 
 fn adapt_adsb_frame(
     frame: &RecordedFrame,
+    issue_receipt_ns: i64,
     adsb_centre: [u8; 4],
     max_events: usize,
     next_sequence: &mut u64,
@@ -338,6 +384,11 @@ fn adapt_adsb_frame(
             out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
             continue;
         };
+        if measurement.toa_ns > frame.receipt_ns {
+            out.counts.source_after_receipt = out.counts.source_after_receipt.saturating_add(1);
+            out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
+            continue;
+        }
         let Some(east_mmps) = fixed_mmps(measurement.vel_east_mps) else {
             out.counts.invalid_position_rows = out.counts.invalid_position_rows.saturating_add(1);
             continue;
@@ -349,7 +400,7 @@ fn adapt_adsb_frame(
         let altitude_ft = (measurement.alt_ft != oa_track::NONE_I32).then_some(measurement.alt_ft);
         let vertical_rate_fpm = (measurement.vrate_fpm != oa_track::NONE_I32).then_some(measurement.vrate_fpm);
         let position = RecordedPosition {
-            receipt_ns: frame.receipt_ns,
+            receipt_ns: issue_receipt_ns,
             source_ns: measurement.toa_ns,
             sequence: *next_sequence,
             address: measurement.addr,
@@ -373,6 +424,7 @@ fn adapt_adsb_frame(
                 source: frame.source,
                 stream_index: frame.stream_index,
                 frame_sequence: frame.sequence,
+                input_receipt_ns: frame.receipt_ns,
                 jms_timestamp_ms: frame.jms_timestamp_ms,
                 mono_ns: frame.mono_ns,
                 oaf_flags: frame.oaf_flags,
@@ -416,6 +468,110 @@ fn airborne_adsb_reports(reports: &Reports, counts: &mut RecordedAdapterCounts) 
     Ok(airborne_reports)
 }
 
+/// Refuses any decoded FIXM timestamp whose discarded sub-millisecond digits carry information.
+/// `oa-fixm` intentionally returns Unix milliseconds; this guard prevents its documented
+/// fractional truncation from becoming a silent source-clock repair at this boundary.
+fn has_submillisecond_flight_timestamp(doc: &oa_xml::Doc<'_>, input: &[u8]) -> bool {
+    for (index, &name_span) in doc.attr_name.iter().enumerate() {
+        if doc.attr_prefix.get(index).is_some_and(|prefix| prefix.len != 0) { continue; }
+        if oa_xml::span_bytes(input, name_span).ok() != Some(b"timestamp".as_slice()) { continue; }
+        let Some(&value_span) = doc.attr_value.get(index) else { continue; };
+        let mut value = [0u8; 64];
+        let Ok(len) = oa_xml::decode_into(value_span, input, &mut value, oa_xml::SpanKind::AttrValue) else { continue; };
+        let Some(bytes) = value.get(..len) else { continue; };
+        let Some(dot) = bytes.iter().position(|&byte| byte == b'.') else { continue; };
+        let Some(z) = bytes.iter().position(|&byte| byte == b'Z') else { continue; };
+        if z > dot + 4 && bytes.get(dot + 4..z).is_some_and(|fraction| fraction.iter().any(|&digit| digit != b'0')) {
+            return true;
+        }
+    }
+    false
+}
+
+fn sort_and_refuse_oversize_receipt_groups(out: &mut RecordedAdaptation, max_events: usize) -> Result<(), AdapterError> {
+    use crate::session::MAX_EVENTS_PER_RECEIPT;
+    use crate::surveillance::{MAX_FRAME_GAP_NS, MAX_FRAMES};
+    if out.events.len() != out.provenance.len() { return Err(AdapterError::UnsupportedEvent); }
+    let mut order = Vec::new();
+    order.try_reserve_exact(out.events.len()).map_err(|_| AdapterError::AllocationRefused)?;
+    order.extend(0..out.events.len());
+    let key = |index: usize| {
+        match (out.events.get(index), out.provenance.get(index)) {
+            (Some(event), Some(provenance)) => (event.receipt_ns, event.source,
+                provenance.input_receipt_ns, provenance.frame_sequence, provenance.stream_index,
+                provenance.frame_byte_offset, provenance.emitted_item_ordinal),
+            _ => (i64::MAX, SourceKind::Adaptation, i64::MAX, u64::MAX, u8::MAX, u64::MAX, u32::MAX),
+        }
+    };
+    order.sort_unstable_by(|a, b| key(*a).cmp(&key(*b)));
+    let event_len = out.events.len();
+    for i in 0..event_len {
+        let Some(&mapped) = order.get(i) else { return Err(AdapterError::UnsupportedEvent); };
+        if mapped == i { continue; }
+        let saved_event = *out.events.get(i).ok_or(AdapterError::UnsupportedEvent)?;
+        let saved_provenance = *out.provenance.get(i).ok_or(AdapterError::UnsupportedEvent)?;
+        let mut current = i;
+        loop {
+            let next = *order.get(current).ok_or(AdapterError::UnsupportedEvent)?;
+            if next >= event_len { return Err(AdapterError::UnsupportedEvent); }
+            if next == i {
+                *out.events.get_mut(current).ok_or(AdapterError::UnsupportedEvent)? = saved_event;
+                *out.provenance.get_mut(current).ok_or(AdapterError::UnsupportedEvent)? = saved_provenance;
+                *order.get_mut(current).ok_or(AdapterError::UnsupportedEvent)? = current;
+                break;
+            }
+            let next_event = *out.events.get(next).ok_or(AdapterError::UnsupportedEvent)?;
+            let next_provenance = *out.provenance.get(next).ok_or(AdapterError::UnsupportedEvent)?;
+            *out.events.get_mut(current).ok_or(AdapterError::UnsupportedEvent)? = next_event;
+            *out.provenance.get_mut(current).ok_or(AdapterError::UnsupportedEvent)? = next_provenance;
+            *order.get_mut(current).ok_or(AdapterError::UnsupportedEvent)? = current;
+            current = next;
+        }
+    }
+    let mut start = 0usize;
+    let mut write = 0usize;
+    let mut accepted_groups = 0usize;
+    let mut previous_receipt = None;
+    while start < event_len {
+        let receipt = out.events.get(start).ok_or(AdapterError::UnsupportedEvent)?.receipt_ns;
+        let mut end = start + 1;
+        while end < event_len && out.events.get(end).is_some_and(|event| event.receipt_ns == receipt) { end += 1; }
+        let group_len = end - start;
+        if group_len > MAX_EVENTS_PER_RECEIPT {
+            out.counts.receipt_groups_over_capacity = out.counts.receipt_groups_over_capacity.saturating_add(1);
+            out.counts.receipt_group_events_refused = out.counts.receipt_group_events_refused.saturating_add(u64::try_from(group_len).map_err(|_| AdapterError::CountOverflow)?);
+        } else if accepted_groups >= MAX_FRAMES {
+            out.counts.receipt_groups_over_frame_capacity = out.counts.receipt_groups_over_frame_capacity.saturating_add(1);
+            out.counts.receipt_frame_capacity_events_refused = out.counts.receipt_frame_capacity_events_refused.saturating_add(u64::try_from(group_len).map_err(|_| AdapterError::CountOverflow)?);
+        } else if let Some(previous) = previous_receipt {
+            let gap = receipt.checked_sub(previous).ok_or(AdapterError::CountOverflow)?;
+            if gap <= 0 || gap > MAX_FRAME_GAP_NS {
+                out.counts.receipt_gap_groups_refused = out.counts.receipt_gap_groups_refused.saturating_add(1);
+                out.counts.receipt_gap_events_refused = out.counts.receipt_gap_events_refused.saturating_add(u64::try_from(group_len).map_err(|_| AdapterError::CountOverflow)?);
+            } else {
+                if end > event_len || write > start { return Err(AdapterError::UnsupportedEvent); }
+                out.events.copy_within(start..end, write);
+                out.provenance.copy_within(start..end, write);
+                write = write.checked_add(group_len).ok_or(AdapterError::CountOverflow)?;
+                accepted_groups += 1;
+                previous_receipt = Some(receipt);
+            }
+        } else {
+            if end > event_len || write > start { return Err(AdapterError::UnsupportedEvent); }
+            out.events.copy_within(start..end, write);
+            out.provenance.copy_within(start..end, write);
+            write = write.checked_add(group_len).ok_or(AdapterError::CountOverflow)?;
+            accepted_groups += 1;
+            previous_receipt = Some(receipt);
+        }
+        start = end;
+    }
+    out.events.truncate(write);
+    out.provenance.truncate(write);
+    out.counts.events_emitted = u64::try_from(out.events.len()).map_err(|_| AdapterError::CountOverflow)?;
+    Ok(())
+}
+
 fn fixed_mmps(mps: f32) -> Option<i32> {
     if !mps.is_finite() { return None; }
     let rounded = oa_ieee::round(f64::from(mps) * 1_000.0);
@@ -425,6 +581,7 @@ fn fixed_mmps(mps: f32) -> Option<i32> {
 
 fn adapt_sfdps_frame(
     frame: &RecordedFrame,
+    issue_receipt_ns: i64,
     max_events: usize,
     next_sequence: &mut u64,
     parser: &mut Parser,
@@ -442,6 +599,11 @@ fn adapt_sfdps_frame(
         Ok(doc) => doc,
         Err(_) => { out.counts.sfdps_payload_refused = out.counts.sfdps_payload_refused.saturating_add(1); return Ok(()); }
     };
+    if has_submillisecond_flight_timestamp(&doc, &frame.payload) {
+        out.counts.sfdps_timestamp_precision_refused = out.counts.sfdps_timestamp_precision_refused.saturating_add(1);
+        out.counts.sfdps_rows_refused = out.counts.sfdps_rows_refused.saturating_add(1);
+        return Ok(());
+    }
     let mut events = new_events(remaining_rows.min(4096), 1 << 20);
     let before = decoder.stats();
     let before_rejected = before.rejected;
@@ -465,7 +627,7 @@ fn adapt_sfdps_frame(
     out.counts.sfdps_unknown_attributes = out.counts.sfdps_unknown_attributes.saturating_add(stats.unknown_attributes.saturating_sub(before_unknown_attributes));
     out.counts.sfdps_unknown_overflow = out.counts.sfdps_unknown_overflow.saturating_add(stats.unknown_overflow.saturating_sub(before_unknown_overflow));
     out.counts.sfdps_rows_decoded = out.counts.sfdps_rows_decoded.saturating_add(u64::try_from(events.len).map_err(|_| AdapterError::CountOverflow)?);
-    let seen_ms = frame.receipt_ns / 1_000_000;
+    let seen_ms = issue_receipt_ns / 1_000_000;
     for row in 0..events.len {
         let has_position = oa_fixm::has_field(&events, row, Field::Position);
         if has_position { out.counts.sfdps_positions_unmapped = out.counts.sfdps_positions_unmapped.saturating_add(1); }
@@ -529,7 +691,7 @@ fn adapt_sfdps_frame(
                         continue;
                     }
                     pending.push((NormalizedEvent {
-                        receipt_ns: frame.receipt_ns,
+                        receipt_ns: issue_receipt_ns,
                         source_ns,
                         sequence: 0,
                         source: SourceKind::Flight,
@@ -563,6 +725,7 @@ fn adapt_sfdps_frame(
                 source: frame.source,
                 stream_index: frame.stream_index,
                 frame_sequence: frame.sequence,
+                input_receipt_ns: frame.receipt_ns,
                 jms_timestamp_ms: frame.jms_timestamp_ms,
                 mono_ns: frame.mono_ns,
                 oaf_flags: frame.oaf_flags,
@@ -784,7 +947,7 @@ pub fn serialize_provenance(
         let source = match event.source { SourceKind::Surveillance => "SURVEILLANCE", SourceKind::Flight => "FLIGHT", SourceKind::Route => "ROUTE", SourceKind::Weather => "WEATHER", SourceKind::Adaptation => "ADAPTATION" };
         let feed = match origin.source { RecordingSource::Adsb => "ADSB", RecordingSource::Sfdps => "SFDPS" };
         writeln!(out, "EVENT\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:02X}\t{}\t{:08X}\t{:02X}{:02X}", index, source, event.sequence,
-            feed, origin.stream_index, origin.frame_sequence, origin.frame_byte_offset,
+            feed, origin.stream_index, origin.frame_sequence, origin.input_receipt_ns, origin.frame_byte_offset,
             origin.jms_timestamp_ms, origin.mono_ns.map_or_else(|| "-".to_owned(), |v| v.to_string()),
             origin.oaf_flags, origin.skipped_before, origin.emitted_item_ordinal, origin.native_flags,
             origin.native_source[0], origin.native_source[1])
@@ -905,13 +1068,13 @@ mod tests {
         };
         let expected = "OA-RS\t1\nv1\t20\t10\t3\tFLIGHT\t00000000000000000000000000000123\t000000\tZAU1\tFLIGHT\tOWNER\tSECTOR1\n";
         assert_eq!(serialize_recorded_events(&[event]).unwrap(), expected);
-        let origin = EventProvenance { source: RecordingSource::Sfdps, stream_index: 1, frame_sequence: 42, jms_timestamp_ms: 9, mono_ns: Some(88), oaf_flags: 2, frame_byte_offset: 1234, skipped_before: 5, emitted_item_ordinal: 7, native_flags: 0x12, native_source: *b"TR" };
+        let origin = EventProvenance { source: RecordingSource::Sfdps, stream_index: 1, frame_sequence: 42, input_receipt_ns: 1_234_567_890, jms_timestamp_ms: 9, mono_ns: Some(88), oaf_flags: 2, frame_byte_offset: 1234, skipped_before: 5, emitted_item_ordinal: 7, native_flags: 0x12, native_source: *b"TR" };
         let stream = crate::recordings_reader::RecordingStreamProvenance {
             source: RecordingSource::Sfdps, stream_index: 1, sha256: [0xAB; 32], compressed_bytes: 80,
             decoded_bytes: 80, gzip: false,
         };
         let manifest = serialize_provenance(&[event], &[origin], &[stream]).unwrap();
-        assert_eq!(manifest, format!("OA-RS-PROVENANCE\t1\nSTREAM\t1\tSFDPS\t{}\t80\t80\t0\nEVENT\t0\tFLIGHT\t3\tSFDPS\t1\t42\t1234\t9\t88\t02\t5\t7\t00000012\t5452\n", "ab".repeat(32)));
+        assert_eq!(manifest, format!("OA-RS-PROVENANCE\t1\nSTREAM\t1\tSFDPS\t{}\t80\t80\t0\nEVENT\t0\tFLIGHT\t3\tSFDPS\t1\t42\t1234567890\t1234\t9\t88\t02\t5\t7\t00000012\t5452\n", "ab".repeat(32)));
     }
 
     #[test]
@@ -919,5 +1082,115 @@ mod tests {
         assert_eq!(adsb_ground_class(F_GROUND, 0), AdsGroundClass::Ground);
         assert_eq!(adsb_ground_class(0, NONE_I32), AdsGroundClass::Unknown);
         assert_eq!(adsb_ground_class(0, 12_000), AdsGroundClass::Airborne);
+    }
+
+    fn event(source: SourceKind, sequence: u64) -> NormalizedEvent {
+        let kind = match source {
+            SourceKind::Surveillance => EventKind::Position { latitude_e7: 1, longitude_e7: 2,
+                altitude_ft: Some(10_000), east_mmps: 3, north_mmps: 4, vertical_rate_fpm: None },
+            SourceKind::Flight => EventKind::Flight(crate::input::FlightOperation::SetOwner { unit: *b"SECTOR1\0" }),
+            _ => unreachable!(),
+        };
+        NormalizedEvent { receipt_ns: 2_000_000_000, source_ns: 1_000_000_000, sequence,
+            source, identity: Identity { flight_gufi: 1, aircraft_address: 0x123456 }, centre: *b"ZAU1", kind }
+    }
+
+    fn provenance(source: RecordingSource, receipt_ns: i64, ordinal: u32) -> EventProvenance {
+        EventProvenance { source, stream_index: 0, frame_sequence: ordinal as u64,
+            input_receipt_ns: receipt_ns, jms_timestamp_ms: 0, mono_ns: None, oaf_flags: 0,
+            frame_byte_offset: u64::from(ordinal) * 100, skipped_before: 0,
+            emitted_item_ordinal: ordinal, native_flags: 0, native_source: [0; 2] }
+    }
+
+    #[test]
+    fn receipt_cutoff_ceil_preserves_boundaries_and_refuses_negative_sealed_and_overflow() {
+        assert_eq!(issue_cutoff(1_000_000_000), Ok(1_000_000_000));
+        assert_eq!(issue_cutoff(1_000_000_001), Ok(2_000_000_000));
+        assert_eq!(issue_cutoff(-1), Err(CutoffRefusal::Negative));
+        assert_eq!(issue_cutoff(0), Err(CutoffRefusal::Zero));
+        assert_eq!(issue_cutoff(i64::MAX), Err(CutoffRefusal::Overflow));
+        let window = oa_sealed::Sealed::production().windows().first().expect("production sealed window");
+        assert_eq!(issue_cutoff(window.from_ns), Err(CutoffRefusal::SealedReceipt));
+        assert_eq!(issue_cutoff(window.from_ns - 1), Err(CutoffRefusal::SealedCutoff));
+    }
+
+    #[test]
+    fn adapter_counts_each_cutoff_refusal_reason_from_headers() {
+        let sealed = oa_sealed::Sealed::production().windows().first().expect("production sealed window");
+        let receipts = [-1, 0, sealed.from_ns - 1, sealed.from_ns, i64::MAX];
+        let frames = receipts.iter().enumerate().map(|(index, receipt_ns)| RecordedFrame {
+            source: RecordingSource::Adsb, stream_index: 0, receipt_ns: *receipt_ns,
+            sequence: index as u64, jms_timestamp_ms: 0, mono_ns: None, oaf_flags: 0,
+            byte_offset: index as u64 * 40, skipped_before: 0, kind: oa_feed::Kind::Message,
+            payload: b"bad".to_vec(),
+        }).collect::<Vec<_>>();
+        let counts = RecordingCounts { total_decoded_bytes: 15, ..RecordingCounts::default() };
+        let got = adapt_recorded_frames(&frames, counts, 8, *b"ZAU1").unwrap();
+        assert_eq!(got.counts.cutoff_negative_refused, 1);
+        assert_eq!(got.counts.cutoff_zero_refused, 1);
+        assert_eq!(got.counts.cutoff_sealed_issue_refused, 1);
+        assert_eq!(got.counts.cutoff_sealed_receipt_refused, 1);
+        assert_eq!(got.counts.cutoff_overflow_refused, 1);
+        assert_eq!(got.counts.adsb_payload_refused, 0);
+    }
+
+    #[test]
+    fn coalesced_cutoff_sorts_category_then_original_receipt_with_provenance_attached() {
+        let mut output = RecordedAdaptation { events: vec![event(SourceKind::Flight, 2), event(SourceKind::Flight, 1), event(SourceKind::Surveillance, 0)],
+            provenance: vec![provenance(RecordingSource::Sfdps, 1_900_000_000, 2),
+                provenance(RecordingSource::Sfdps, 1_100_000_000, 1),
+                provenance(RecordingSource::Adsb, 1_999_999_999, 0)],
+            counts: RecordedAdapterCounts::default(), recording: RecordingCounts::default() };
+        sort_and_refuse_oversize_receipt_groups(&mut output, 32).unwrap();
+        assert_eq!(output.events.iter().map(|e| (e.receipt_ns, e.source, e.sequence)).collect::<Vec<_>>(),
+            vec![(2_000_000_000, SourceKind::Surveillance, 0),
+                 (2_000_000_000, SourceKind::Flight, 1), (2_000_000_000, SourceKind::Flight, 2)]);
+        assert_eq!(output.provenance.iter().map(|p| p.input_receipt_ns).collect::<Vec<_>>(),
+            vec![1_999_999_999, 1_100_000_000, 1_900_000_000]);
+    }
+
+    #[test]
+    fn complete_overfull_issue_group_is_refused_and_counted() {
+        let mut output = RecordedAdaptation { events: Vec::new(), provenance: Vec::new(),
+            counts: RecordedAdapterCounts::default(), recording: RecordingCounts::default() };
+        for index in 0..=crate::session::MAX_EVENTS_PER_RECEIPT {
+            output.events.push(event(SourceKind::Surveillance, index as u64));
+            output.provenance.push(provenance(RecordingSource::Adsb, 1_000_000_001, index as u32));
+        }
+        sort_and_refuse_oversize_receipt_groups(&mut output, 1_000).unwrap();
+        assert!(output.events.is_empty());
+        assert_eq!(output.counts.receipt_groups_over_capacity, 1);
+        assert_eq!(output.counts.receipt_group_events_refused, 257);
+        assert_eq!(output.counts.events_emitted, 0);
+    }
+
+    #[test]
+    fn runtime_gap_over_sixty_seconds_refuses_the_later_complete_group() {
+        let mut first = event(SourceKind::Surveillance, 1);
+        first.receipt_ns = 1_000_000_000;
+        let mut later = event(SourceKind::Surveillance, 2);
+        later.receipt_ns = 62_000_000_000;
+        let mut output = RecordedAdaptation { events: vec![later, first],
+            provenance: vec![provenance(RecordingSource::Adsb, 62_000_000_000, 2),
+                provenance(RecordingSource::Adsb, 1_000_000_000, 1)],
+            counts: RecordedAdapterCounts::default(), recording: RecordingCounts::default() };
+        sort_and_refuse_oversize_receipt_groups(&mut output, 8).unwrap();
+        assert_eq!(output.events.iter().map(|e| (e.receipt_ns, e.sequence)).collect::<Vec<_>>(), vec![(1_000_000_000, 1)]);
+        assert_eq!(output.counts.receipt_gap_groups_refused, 1);
+        assert_eq!(output.counts.receipt_gap_events_refused, 1);
+    }
+
+    #[test]
+    fn fixm_timestamp_guard_refuses_only_nonzero_submillisecond_precision() {
+        let mut parser = Parser::new(XmlLimits::default()).unwrap();
+        let finer = b"<x timestamp=\"2020-01-01T00:00:00.1234Z\"/>";
+        let doc = parser.parse(finer).unwrap();
+        assert!(has_submillisecond_flight_timestamp(&doc, finer));
+        let exact = b"<x timestamp=\"2020-01-01T00:00:00.123000Z\"/>";
+        let doc = parser.parse(exact).unwrap();
+        assert!(!has_submillisecond_flight_timestamp(&doc, exact));
+        let entity = b"<x timestamp=\"2020-01-01T00:00:00.123&#52;Z\"/>";
+        let doc = parser.parse(entity).unwrap();
+        assert!(has_submillisecond_flight_timestamp(&doc, entity));
     }
 }
