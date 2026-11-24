@@ -1,0 +1,14 @@
+[package]
+name = "oa-display-present"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+authors = ["Connor Avila <Connoravila@gmail.com>"]
+description = "Direct Linux display and input presentation adapter for OpenATCA"
+
+[package.metadata.openatca]
+class = "shell"
+
+[lib]
+path = "src/lib.rs"
