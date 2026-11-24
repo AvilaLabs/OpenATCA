@@ -924,6 +924,8 @@ fn a_sealed_path_exits_2_naming_it_before_anything_is_opened() {
     let exe = env!("CARGO_BIN_EXE_oa-stdds-ref");
     let run = |clip: &std::path::Path, out: &std::path::Path, file: &std::path::Path| {
         std::process::Command::new(exe)
+            .args(["--cohort-id", "synthetic-sealed-path-test"])
+            .args(["--from-ms", "1000000", "--to-ms", "2000000"])
             .arg("--adsb")
             .arg(clip)
             .arg("--out")
@@ -1262,6 +1264,8 @@ fn an_existing_output_exits_1_and_an_output_link_into_sealed_data_exits_2() {
     let exe = env!("CARGO_BIN_EXE_oa-stdds-ref");
     let run = || {
         std::process::Command::new(exe)
+            .args(["--cohort-id", "synthetic-output-guard-test"])
+            .args(["--from-ms", "1000000", "--to-ms", "2000000"])
             .arg("--adsb")
             .arg(base.join("no-such-clip.oaf"))
             .arg("--out")
