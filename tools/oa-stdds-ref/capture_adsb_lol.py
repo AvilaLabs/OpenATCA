@@ -288,14 +288,14 @@ def check_snapshot_times(body: bytes, receipt_ms: int, guard: sealed_guard.Guard
 def bounded_process(command: list[str], body: bytes, timeout_s: int, stdout_limit: int, stderr_limit: int,
                     pass_fds: tuple[int, ...] = ()) -> tuple[int, bytes, bytes]:
     deadline = time.monotonic() + timeout_s
-    proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            close_fds=True, pass_fds=pass_fds, start_new_session=True)
-    stdin, stdout, stderr = proc.stdin, proc.stdout, proc.stderr
-    if stdin is None or stdout is None or stderr is None:
-        proc.kill()
-        proc.wait()
-        raise RuntimeError("decoder subprocess pipes were not created")
     selector = selectors.DefaultSelector()
+    try:
+        proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                close_fds=True, pass_fds=pass_fds, start_new_session=True)
+    except BaseException:
+        selector.close()
+        raise
+    stdin, stdout, stderr = proc.stdin, proc.stdout, proc.stderr
     outputs = [bytearray(), bytearray()]
     limits = [stdout_limit, stderr_limit]
     streams = {stdout: 0, stderr: 1}
@@ -328,6 +328,8 @@ def bounded_process(command: list[str], body: bytes, timeout_s: int, stdout_limi
             raise RuntimeError("decoder/fetch worker did not exit within 2 s after process-group SIGKILL; the OS may be holding it in an uninterruptible state") from exc
 
     try:
+        if stdin is None or stdout is None or stderr is None:
+            raise RuntimeError("decoder/fetch worker pipes were not created")
         for stream in (stdin, stdout, stderr):
             os.set_blocking(stream.fileno(), False)
         selector.register(stdout, selectors.EVENT_READ, "stdout")
@@ -389,7 +391,7 @@ def bounded_process(command: list[str], body: bytes, timeout_s: int, stdout_limi
         finally:
             selector.close()
             for stream in (stdin, stdout, stderr):
-                if not stream.closed:
+                if stream is not None and not stream.closed:
                     stream.close()
     return code, bytes(outputs[0]), bytes(outputs[1])
 
@@ -416,8 +418,8 @@ def _validate_fetch_url(url: str) -> None:
     if port not in (None, 443):
         raise ValueError("fetch URL must use the standard HTTPS port")
     if parsed.hostname == "api.adsb.lol":
-        if parsed.query or re.fullmatch(r"/v2/lat/-?[0-9]+\.[0-9]{5}/lon/-?[0-9]+\.[0-9]{5}/dist/[0-9]{1,3}", parsed.path) is None:
-            raise ValueError("adsb.lol fetch URL is outside the bounded regional V2 endpoint")
+        if url != request_url(*FIXED_QUERY):
+            raise ValueError("adsb.lol fetch URL must match the fixed ZAU query")
         return
     if parsed.hostname == "aviationweather.gov" and parsed.path == "/api/data/metar":
         pairs = parse_qs(parsed.query, strict_parsing=True)

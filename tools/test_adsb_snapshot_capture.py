@@ -111,6 +111,67 @@ class CaptureTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "stdout/stderr cap"):
             capture.bounded_process(command, b"", 5, 128, 128)
 
+    def test_selector_initialization_failure_does_not_spawn_worker(self):
+        with patch.object(capture.selectors, "DefaultSelector", side_effect=OSError("selector unavailable")), \
+             patch.object(capture.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(OSError, "selector unavailable"):
+                capture.bounded_process(["unused"], b"", 1, 10, 10)
+        popen.assert_not_called()
+
+    def test_worker_initialization_failure_closes_selector(self):
+        class FakeSelector:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        selector = FakeSelector()
+        with patch.object(capture.selectors, "DefaultSelector", return_value=selector), \
+             patch.object(capture.subprocess, "Popen", side_effect=OSError("spawn failed")):
+            with self.assertRaisesRegex(OSError, "spawn failed"):
+                capture.bounded_process(["unused"], b"", 1, 10, 10)
+        self.assertTrue(selector.closed)
+
+    def test_missing_worker_pipe_uses_bounded_reap_and_closes_selector(self):
+        class FakeSelector:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        class FakeProcess:
+            pid = 12345
+            stdin = None
+            stdout = None
+            stderr = None
+            status = None
+
+            def poll(self):
+                return self.status
+
+            def wait(self, *, timeout):
+                self.assert_bounded_timeout(timeout)
+                self.status = -capture.signal.SIGKILL
+                return self.status
+
+            @staticmethod
+            def assert_bounded_timeout(timeout):
+                if timeout != 1.0:
+                    raise AssertionError(f"unexpected wait timeout: {timeout}")
+
+            def kill(self):
+                self.status = -capture.signal.SIGKILL
+
+        selector = FakeSelector()
+        process = FakeProcess()
+        with patch.object(capture.selectors, "DefaultSelector", return_value=selector), \
+             patch.object(capture.subprocess, "Popen", return_value=process), \
+             patch.object(capture.os, "killpg"):
+            with self.assertRaisesRegex(RuntimeError, "pipes were not created"):
+                capture.bounded_process(["unused"], b"", 1, 10, 10)
+        self.assertEqual(process.status, -capture.signal.SIGKILL)
+        self.assertTrue(selector.closed)
+
     def test_execution_uses_the_open_binary_descriptor(self):
         with open(capture.sys.executable, "rb") as binary:
             command = [f"/proc/self/fd/{binary.fileno()}", "-c", "print('descriptor-ok')"]
@@ -305,6 +366,10 @@ class CaptureTests(unittest.TestCase):
         self.assertTrue(children[0].stdin.closed)
         self.assertTrue(children[0].stdout.closed)
         self.assertTrue(children[0].stderr.closed)
+
+    def test_adsb_worker_rejects_nonfixed_query(self):
+        with self.assertRaisesRegex(ValueError, "fixed ZAU query"):
+            capture.fetch_worker_command("https://api.adsb.lol/v2/lat/42.00000/lon/-88.00000/dist/100", 5, False)
 
 
 if __name__ == "__main__":
