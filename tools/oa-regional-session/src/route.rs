@@ -532,15 +532,45 @@ pub fn clearance_evidence(view: &SharedFlightView) -> t::Clearance {
     }
 }
 
-/// Returns either one issue-time result or a precise adapter refusal. The forecast is separate
-/// evidence and is never supplied to short-term observed-traffic conflict alert.
-pub fn route_issue(
+struct PreparedRouteIssue {
+    key: t::FlightKey,
+    route: t::RouteProvenance,
+    cutoff_ms: i64,
+    max_track_age_ms: i64,
+    owner: t::OwnerProvenance,
+    route_cursor: Option<t::ActiveRouteCursor>,
+    track: t::CurrentTrack,
+    clearance: t::Clearance,
+    eta_target: t::EtaTarget,
+    points: Vec<t::RoutePoint>,
+}
+
+impl PreparedRouteIssue {
+    fn input(&self) -> t::TrajectoryIssueInput<'_> {
+        t::TrajectoryIssueInput {
+            key: self.key,
+            route: self.route,
+            cutoff_ms: self.cutoff_ms,
+            max_track_age_ms: self.max_track_age_ms,
+            owner: self.owner,
+            route_cursor: self.route_cursor,
+            track: self.track,
+            clearance: self.clearance,
+            eta_target: self.eta_target,
+            points: &self.points,
+        }
+    }
+}
+
+/// Converts one receipt into the exact issue-time values shared by horizontal and optional
+/// vertical forecasting. Both modes use this selector, cursor, track, clearance and route slice.
+fn prepare_route_issue(
     store: &RouteStore,
     view: &SharedFlightView,
     observed: &ObservedTrack,
     cutoff_ns: i64,
     frame_sequence: u64,
-) -> Result<t::TrajectoryIssueOutput, String> {
+) -> Result<PreparedRouteIssue, String> {
     let cutoff_ms = ms(cutoff_ns)?;
     if !flight_view_in_cutoff(view, cutoff_ms) {
         return Err("flight view has invalid or future-stamped state at cutoff".into());
@@ -701,7 +731,7 @@ pub fn route_issue(
         reserved: [0; 4],
     };
     let target = points.last().ok_or("converted route is empty")?.fix;
-    Ok(t::issue_trajectory(&t::TrajectoryIssueInput {
+    Ok(PreparedRouteIssue {
         key,
         route,
         cutoff_ms,
@@ -714,6 +744,40 @@ pub fn route_issue(
             present: true,
             fix: target,
         },
-        points: &points,
-    }))
+        points,
+    })
+}
+
+/// Returns one issue-time horizontal result using the same prepared input as optional vertical mode.
+pub fn route_issue(
+    store: &RouteStore,
+    view: &SharedFlightView,
+    observed: &ObservedTrack,
+    cutoff_ns: i64,
+    frame_sequence: u64,
+) -> Result<t::TrajectoryIssueOutput, String> {
+    let prepared = prepare_route_issue(store, view, observed, cutoff_ns, frame_sequence)?;
+    Ok(t::issue_trajectory(&prepared.input()))
+}
+
+/// Returns the horizontal baseline and bounded vertical profile from one shared prepared input.
+pub fn route_issue_with_performance(
+    store: &RouteStore,
+    view: &SharedFlightView,
+    observed: &ObservedTrack,
+    cutoff_ns: i64,
+    frame_sequence: u64,
+    performance: t::PerformanceEnvelope,
+) -> Result<(t::TrajectoryIssueOutput, t::VerticalProfileOutput), String> {
+    let prepared = prepare_route_issue(store, view, observed, cutoff_ns, frame_sequence)?;
+    let input = prepared.input();
+    Ok((
+        t::issue_trajectory(&input),
+        t::issue_vertical_profile(&input, performance),
+    ))
+}
+
+/// Converts a receipt nanosecond timestamp through the shared exact-millisecond gate.
+pub(crate) fn receipt_cutoff_ms(cutoff_ns: i64) -> Result<i64, String> {
+    ms(cutoff_ns)
 }

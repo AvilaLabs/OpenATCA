@@ -1,9 +1,14 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 
 use oa_regional_session::cli::synthetic_model;
-use oa_regional_session::runtime::{regional_new, regional_step};
+use oa_regional_session::runtime::{
+    regional_new, regional_step, regional_step_with_performance, MAX_PERFORMANCE_ENVELOPES,
+};
 use oa_regional_session::surveillance::SurveillanceConfig;
 use oa_regional_session::{parse_event_line, ReceiptBatch};
+use oa_legacy_traj::core::trajectory::{
+    FlightKey, PerformanceEnvelope, PerformanceSource, PerformanceStatus,
+};
 
 const SECOND: i64 = 1_000_000_000;
 const ROUTE: &str = "FIX:FIXA:K1:1:- DCT:FIXB:K1:1:-";
@@ -139,7 +144,11 @@ fn confirmed(
         tentative.surveillance.tracks.is_empty(),
         "one report is intentionally tentative"
     );
-    let batch = ReceiptBatch {
+    regional_step(engine, &confirmation_batch()).unwrap()
+}
+
+fn confirmation_batch() -> ReceiptBatch {
+    ReceiptBatch {
         receipt_ns: 2 * SECOND,
         source_clock_regressions: 0,
         events: vec![
@@ -160,8 +169,7 @@ fn confirmed(
                 "POS\t410000000\t-869912000\t10000\t-100000\t0\t0",
             ),
         ],
-    };
-    regional_step(engine, &batch).unwrap()
+    }
 }
 
 // REQ: OA-REG-004
@@ -281,4 +289,127 @@ fn feed_loss_is_visible_without_erasing_or_reidentifying_traffic() {
         "{:?}",
         frame.surveillance.warnings
     );
+}
+
+fn first_flight_key() -> FlightKey {
+    FlightKey {
+        gufi: 1u128.to_be_bytes(),
+        aircraft_address: 0xabc101,
+        centre: *b"ZAU1",
+        plan_id: *b"PLAN00000001",
+    }
+}
+
+fn performance_for(key: FlightKey) -> PerformanceEnvelope {
+    PerformanceEnvelope {
+        key,
+        reserved_key_align: [0; 4],
+        source_ms: 1_000,
+        available_ms: 2_000,
+        message_id: 9001,
+        max_age_ms: 5_000,
+        max_climb_fpm: 600,
+        max_descent_fpm: 600,
+        max_groundspeed_mmps: 1_000_000,
+        reserved_speed_cap: 0,
+        source: PerformanceSource::Measured,
+        status: PerformanceStatus::Valid,
+        reserved: [0; 6],
+    }
+}
+
+fn confirmed_with_performance(
+    performance: &[PerformanceEnvelope],
+) -> oa_regional_session::runtime::RegionalFrame {
+    let mut engine = runtime();
+    regional_step(&mut engine, &start()).unwrap();
+    regional_step_with_performance(&mut engine, &confirmation_batch(), performance).unwrap()
+}
+
+// REQ: OA-REG-014
+#[test]
+fn opt_in_uses_full_key_performance_and_preserves_horizontal_only_results() {
+    let baseline = confirmed(&mut runtime());
+    for flight in &baseline.flights {
+        assert!(flight.vertical_profile.is_none());
+        assert_eq!(flight.vertical_refusal, "vertical profile not requested");
+    }
+
+    let envelope = performance_for(first_flight_key());
+    let opt_in = confirmed_with_performance(&[envelope]);
+    let baseline_first = baseline.flights.iter().find(|f| f.address == 0xabc101).unwrap();
+    let opt_in_first = opt_in.flights.iter().find(|f| f.address == 0xabc101).unwrap();
+    assert_eq!(baseline_first.trajectory, opt_in_first.trajectory);
+    let profile = opt_in_first.vertical_profile.unwrap();
+    assert_eq!(profile.performance, envelope);
+    assert_eq!(profile.key, envelope.key);
+    assert_eq!(profile.availability, oa_legacy_traj::core::trajectory::Availability::Available);
+    assert_eq!(profile.points[0].availability, oa_legacy_traj::core::trajectory::Availability::Available);
+    assert_eq!(profile.points[0].reachable_min_ft, 10_000);
+    assert!(profile.points[0].reachable_max_ft >= 10_000);
+    assert!(opt_in_first.vertical_refusal.is_empty());
+
+    let other_flight = opt_in.flights.iter().find(|f| f.address == 0xabc102).unwrap();
+    assert!(other_flight.vertical_profile.is_none());
+    assert!(other_flight.vertical_refusal.contains("full flight key"));
+
+    let disabled = confirmed_with_performance(&[]);
+    for expected in &baseline.flights {
+        let actual = disabled.flights.iter().find(|f| f.address == expected.address).unwrap();
+        assert_eq!(expected.trajectory, actual.trajectory);
+        assert!(actual.vertical_profile.is_none());
+    }
+}
+
+// REQ: OA-REG-014
+#[test]
+fn only_one_eligible_exact_full_key_envelope_is_selected() {
+    let mut mismatched_key = first_flight_key();
+    mismatched_key.plan_id[0] ^= 1;
+    let mismatch_frame = confirmed_with_performance(&[performance_for(mismatched_key)]);
+    let mismatch = mismatch_frame.flights.iter().find(|f| f.address == 0xabc101).unwrap();
+    assert!(mismatch.trajectory.is_some());
+    assert!(mismatch.vertical_profile.is_none());
+    assert!(mismatch.vertical_refusal.contains("full flight key"));
+
+    let envelope = performance_for(first_flight_key());
+    let duplicate_frame = confirmed_with_performance(&[envelope, envelope]);
+    let duplicate = duplicate_frame.flights.iter().find(|f| f.address == 0xabc101).unwrap();
+    assert!(duplicate.trajectory.is_some());
+    assert!(duplicate.vertical_profile.is_none());
+    assert!(duplicate.vertical_refusal.contains("duplicate eligible"));
+}
+
+// REQ: OA-REG-014
+#[test]
+fn future_performance_payload_does_not_change_the_eligible_profile_or_baseline() {
+    let eligible = performance_for(first_flight_key());
+    let expected = confirmed_with_performance(&[eligible]);
+
+    let mut future = eligible;
+    future.source_ms = 2_001;
+    future.available_ms = 2_002;
+    future.key.plan_id = [b'X'; 12];
+    future.max_climb_fpm = u32::MAX;
+    future.max_descent_fpm = u32::MAX;
+    future.max_groundspeed_mmps = u32::MAX;
+    future.reserved_key_align = [1; 4];
+    future.reserved = [1; 6];
+    future.status = PerformanceStatus::Contradictory;
+    let actual = confirmed_with_performance(&[eligible, future]);
+    assert_eq!(actual, expected);
+}
+
+// REQ: OA-REG-014
+#[test]
+fn over_capacity_performance_slice_refuses_before_runtime_mutation() {
+    let mut engine = runtime();
+    let envelope = performance_for(first_flight_key());
+    let rows = vec![envelope; MAX_PERFORMANCE_ENVELOPES + 1];
+    let error = regional_step_with_performance(&mut engine, &start(), &rows).unwrap_err();
+    assert!(error.contains("performance envelope slice exceeds"));
+
+    let frame = regional_step(&mut engine, &start()).unwrap();
+    assert_eq!(frame.sequence, 1);
+    assert!(frame.flights.is_empty());
 }

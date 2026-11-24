@@ -10,7 +10,9 @@ use crate::route::{self, RouteStore};
 use crate::session::{summarize_input_batch, FrameEvidence, ReceiptBatch, MAX_EVENTS_PER_RECEIPT};
 use crate::surveillance::{self, Surveillance, SurveillanceConfig, SurveillanceFrame};
 use oa_airspace::core::model::Model;
-use oa_legacy_traj::core::trajectory::TrajectoryIssueOutput;
+use oa_legacy_traj::core::trajectory::{
+    PerformanceEnvelope, TrajectoryIssueOutput, VerticalProfileOutput,
+};
 
 // A7.2: cold subsystem composition. All core memory belongs to its originating subsystem.
 pub struct RegionalRuntime {
@@ -27,13 +29,16 @@ pub struct RegionalRuntime {
     next_generation: u32,
 }
 
-// A3/C6: at most 32 cold offline evidence rows/frame; snapshots are copied, never aliased.
+// A3/C6: at most 32 cold offline evidence rows/frame; snapshots are copied, never aliased. Optional
+// vertical outputs are bounded to the same 32 flight views, each containing 256 fixed point slots.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlightEvidence {
     pub address: u32,
     pub claimants: usize,
     pub view: Option<SharedFlightView>,
     pub trajectory: Option<TrajectoryIssueOutput>,
+    pub vertical_profile: Option<VerticalProfileOutput>,
+    pub vertical_refusal: String,
     pub refusal: String,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +55,32 @@ pub struct RegionalFrame {
     pub controller_outcome: oa_display::interaction::CommandOutcome,
 }
 // A7.2: cold shell evidence, bounded by runtime capacities.
+
+/// Maximum caller-supplied performance envelopes in one opt-in receipt (at most 32 rows; matching
+/// work is bounded by 32 flights × 32 envelopes).
+pub const MAX_PERFORMANCE_ENVELOPES: usize = MAX_DRIVER_FLIGHTS;
+
+fn performance_for_key(
+    rows: &[PerformanceEnvelope],
+    key: oa_legacy_traj::core::trajectory::FlightKey,
+    cutoff_ms: i64,
+) -> Result<Option<PerformanceEnvelope>, &'static str> {
+    let mut selected = None;
+    for envelope in rows {
+        // Availability and source time are the outer causal gate. Future payload fields are never
+        // inspected and cannot suppress an eligible exact-key row.
+        if envelope.available_ms > cutoff_ms || envelope.source_ms > cutoff_ms {
+            continue;
+        }
+        if envelope.key == key {
+            if selected.is_some() {
+                return Err("duplicate eligible performance envelopes for full flight key");
+            }
+            selected = Some(*envelope);
+        }
+    }
+    Ok(selected)
+}
 
 pub fn regional_new(
     model: Model,
@@ -80,7 +111,11 @@ pub fn regional_new(
     })
 }
 
-fn execute(runtime: &mut RegionalRuntime, batch: &ReceiptBatch) -> Result<RegionalFrame, String> {
+fn execute(
+    runtime: &mut RegionalRuntime,
+    batch: &ReceiptBatch,
+    performance: Option<&[PerformanceEnvelope]>,
+) -> Result<RegionalFrame, String> {
     if batch.events.len() > MAX_EVENTS_PER_RECEIPT
         || batch
             .events
@@ -90,6 +125,10 @@ fn execute(runtime: &mut RegionalRuntime, batch: &ReceiptBatch) -> Result<Region
         return Err("malformed receipt batch".into());
     }
     let input = summarize_input_batch(batch).map_err(|e| format!("input accounting: {e:?}"))?;
+    let performance_cutoff_ms = match performance {
+        Some(_) => Some(route::receipt_cutoff_ms(batch.receipt_ns)?),
+        None => None,
+    };
     surveillance::surveillance_begin(&mut runtime.surveillance, batch.receipt_ns)?;
     flight::flight_preflight_batch(&mut runtime.flights, &batch.events)
         .map_err(|e| format!("flight adapter preflight: {e:?}"))?;
@@ -153,6 +192,12 @@ fn execute(runtime: &mut RegionalRuntime, batch: &ReceiptBatch) -> Result<Region
             claimants: result.claimants,
             view: None,
             trajectory: None,
+            vertical_profile: None,
+            vertical_refusal: if performance.is_some() {
+                "performance evidence missing for full flight key".into()
+            } else {
+                "vertical profile not requested".into()
+            },
             refusal: String::new(),
         };
         if result.status != FlightViewStatus::Found {
@@ -163,15 +208,68 @@ fn execute(runtime: &mut RegionalRuntime, batch: &ReceiptBatch) -> Result<Region
             {
                 row.refusal = "flight plan is not active/departed".into();
             } else {
-                match route::route_issue(
-                    &runtime.routes,
-                    view,
-                    observed,
-                    batch.receipt_ns,
-                    runtime.frame_sequence,
-                ) {
-                    Ok(trajectory) => row.trajectory = Some(trajectory),
-                    Err(reason) => row.refusal = reason,
+                let selected_performance = match (performance, performance_cutoff_ms) {
+                    (Some(rows), Some(cutoff_ms)) => match performance_for_key(
+                        rows,
+                        route::flight_key(view),
+                        cutoff_ms,
+                    ) {
+                        Ok(value) => (value, None),
+                        Err(reason) => (None, Some(reason)),
+                    },
+                    _ => (None, None),
+                };
+                if let Some(reason) = selected_performance.1 {
+                    row.vertical_refusal = reason.into();
+                    match route::route_issue(
+                        &runtime.routes,
+                        view,
+                        observed,
+                        batch.receipt_ns,
+                        runtime.frame_sequence,
+                    ) {
+                        Ok(trajectory) => row.trajectory = Some(trajectory),
+                        Err(reason) => row.refusal = reason,
+                    }
+                } else if let Some(envelope) = selected_performance.0 {
+                    match route::route_issue_with_performance(
+                        &runtime.routes,
+                        view,
+                        observed,
+                        batch.receipt_ns,
+                        runtime.frame_sequence,
+                        envelope,
+                    ) {
+                        Ok((trajectory, vertical_profile)) => {
+                            row.trajectory = Some(trajectory);
+                            row.vertical_refusal = if vertical_profile.refusal
+                                == oa_legacy_traj::core::trajectory::Refusal::None
+                            {
+                                String::new()
+                            } else {
+                                format!("{:?}", vertical_profile.refusal)
+                            };
+                            row.vertical_profile = Some(vertical_profile);
+                        }
+                        Err(reason) => {
+                            row.vertical_refusal = format!("route input unavailable: {reason}");
+                            row.refusal = reason;
+                        }
+                    }
+                } else {
+                    match route::route_issue(
+                        &runtime.routes,
+                        view,
+                        observed,
+                        batch.receipt_ns,
+                        runtime.frame_sequence,
+                    ) {
+                        Ok(trajectory) => row.trajectory = Some(trajectory),
+                        Err(reason) => {
+                            row.vertical_refusal = format!("route input unavailable: {reason}");
+                            row.refusal = reason;
+                        }
+                    }
                 }
             }
         } else {
@@ -202,10 +300,38 @@ pub fn regional_step(
     runtime: &mut RegionalRuntime,
     batch: &ReceiptBatch,
 ) -> Result<RegionalFrame, String> {
+    regional_step_inner(runtime, batch, None)
+}
+
+/// Opt in to vertical reachability for this receipt using only the caller-supplied, full-key
+/// performance envelopes. No performance defaults are created. Future rows are gated before any
+/// identity or capability fields are inspected.
+pub fn regional_step_with_performance(
+    runtime: &mut RegionalRuntime,
+    batch: &ReceiptBatch,
+    performance: &[PerformanceEnvelope],
+) -> Result<RegionalFrame, String> {
     if runtime.failed {
         return Err("session failed; reconstruct from the admitted input prefix".into());
     }
-    match execute(runtime, batch) {
+    if performance.len() > MAX_PERFORMANCE_ENVELOPES {
+        return Err(format!(
+            "performance envelope slice exceeds {} rows",
+            MAX_PERFORMANCE_ENVELOPES
+        ));
+    }
+    regional_step_inner(runtime, batch, Some(performance))
+}
+
+fn regional_step_inner(
+    runtime: &mut RegionalRuntime,
+    batch: &ReceiptBatch,
+    performance: Option<&[PerformanceEnvelope]>,
+) -> Result<RegionalFrame, String> {
+    if runtime.failed {
+        return Err("session failed; reconstruct from the admitted input prefix".into());
+    }
+    match execute(runtime, batch, performance) {
         Ok(frame) => Ok(frame),
         Err(error) => {
             runtime.failed = true;
