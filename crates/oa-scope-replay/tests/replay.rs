@@ -19,8 +19,8 @@ use oa_display::traffic::{
 use oa_scope_replay::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use oa_scope_replay::cli;
 use oa_scope_replay::frame::{
-    replay_build, replay_build_raw, replay_build_with_safety, replay_new, replay_raster,
-    ReplayConfig, ReplayError, ReplaySafety,
+    replay_build, replay_build_raw, replay_build_with_safety, replay_new,
+    replay_new_with_top_inset, replay_raster, ReplayConfig, ReplayError, ReplaySafety,
 };
 use oa_scope_replay::publication::Publisher;
 use oa_scope_replay::raw::{RawObservationColumns, RAW_STALE_CUTOFF_NS};
@@ -32,6 +32,115 @@ use oa_track::{output_new, TrackOutput, O_COAST, O_HAS_ALT, O_REACQUIRED, O_TICK
 const ORD: (i32, i32) = (419_786_000, -879_048_000);
 const S: i64 = 1_000_000_000;
 const T0: i64 = 1_794_772_800 * S;
+
+// REQ: OA-DSP-078
+#[test]
+fn replay_inset_constructor_preserves_default_and_builds_clipped_map_frame() {
+    let cfg = frame_cfg();
+    let default = replay_new(model(), &cfg).unwrap();
+    let explicit_default = replay_new_with_top_inset(
+        model(),
+        &cfg,
+        oa_display::scene::LEGEND_STRIP_PX,
+    )
+    .unwrap();
+    assert_eq!(default.view, explicit_default.view);
+
+    let mut inset = replay_new_with_top_inset(model(), &cfg, 160).unwrap();
+    assert_eq!(inset.view.proj.top_inset, 160);
+    assert_eq!(inset.view.proj.cy16, 320.0 * 16.0);
+    let info = replay_build(
+        &mut inset,
+        &RowStore::default(),
+        &Callsigns::default(),
+        T0,
+        "INSET TEST",
+    )
+    .unwrap();
+    assert!(!info.stamp_clipped);
+    let map_top = 160 * 16;
+    let map_primitives = inset.list.lines.layer.iter()
+        .chain(&inset.list.rects.layer)
+        .chain(&inset.list.circles.layer)
+        .chain(&inset.list.polylines.layer)
+        .chain(&inset.list.texts.layer)
+        .filter(|&&layer| layer <= 6)
+        .count();
+    assert!(map_primitives > 0, "synthetic model produced no map geometry");
+    for ((&layer, &y0), &y1) in inset
+        .list
+        .lines
+        .layer
+        .iter()
+        .zip(&inset.list.lines.y0)
+        .zip(&inset.list.lines.y1)
+    {
+        if layer <= 6 {
+            assert!(y0 >= map_top && y1 >= map_top, "line crossed reserved header");
+        }
+    }
+    for ((&layer, &y0), &y1) in inset
+        .list
+        .rects
+        .layer
+        .iter()
+        .zip(&inset.list.rects.y0)
+        .zip(&inset.list.rects.y1)
+    {
+        if layer <= 6 {
+            assert!(y0 >= map_top && y1 >= map_top, "rectangle crossed reserved header");
+        }
+    }
+    for ((&layer, &y), &radius) in inset
+        .list
+        .circles
+        .layer
+        .iter()
+        .zip(&inset.list.circles.y)
+        .zip(&inset.list.circles.r)
+    {
+        if layer <= 6 {
+            assert!(y.saturating_sub(radius) >= map_top, "circle crossed reserved header");
+        }
+    }
+    for ((&layer, &start), &len) in inset
+        .list
+        .polylines
+        .layer
+        .iter()
+        .zip(&inset.list.polylines.start)
+        .zip(&inset.list.polylines.len)
+    {
+        if layer <= 6 {
+            let start = usize::try_from(start).unwrap();
+            let end = start.checked_add(usize::try_from(len).unwrap()).unwrap();
+            assert!(
+                inset.list.poly_y.get(start..end).unwrap().iter().all(|&y| y >= map_top),
+                "polyline crossed reserved header"
+            );
+        }
+    }
+    for (&layer, &y) in inset.list.texts.layer.iter().zip(&inset.list.texts.y) {
+        if layer <= 6 {
+            assert!(y >= map_top, "map text crossed reserved header");
+        }
+    }
+    replay_raster(&mut inset).unwrap();
+    assert_eq!(inset.buf.len(), oa_display::raster::frame_len(&inset.spec));
+
+    assert!(matches!(
+        replay_new_with_top_inset(model(), &cfg, oa_display::scene::LEGEND_STRIP_PX - 1),
+        Err(ReplayError::Display(oa_display::list::DisplayError::BadView(_)))
+    ));
+    let too_tall = ReplayConfig {
+        height: 480,
+        ..cfg
+    };
+    assert!(matches!(
+        replay_new_with_top_inset(model(), &too_tall, 465),
+        Err(ReplayError::Display(oa_display::list::DisplayError::BadView(_)))
+    ));
+}
 
 fn model() -> Model {
     empty_model(Meta {

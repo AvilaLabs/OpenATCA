@@ -20,6 +20,29 @@ use oa_sha256::{sha256, to_hex};
 
 const ORD: (i32, i32) = (419_786_000, -879_048_000);
 
+// REQ: OA-DSP-078
+#[test]
+fn inset_view_keeps_default_geometry_and_validates_reserved_header_height() {
+    let default = view_new(ORD.0, ORD.1, 30.0, 800, 600).unwrap();
+    let explicit_default =
+        view_new_with_top_inset(ORD.0, ORD.1, 30.0, 800, 600, LEGEND_STRIP_PX).unwrap();
+    assert_eq!(default, explicit_default);
+
+    let header = view_new_with_top_inset(ORD.0, ORD.1, 30.0, 800, 600, 160).unwrap();
+    assert_eq!(header.proj.top_inset, 160);
+    // The map's centre is recomputed below the application header, not patched after projection.
+    assert_eq!(header.proj.cy16, 380.0 * 16.0);
+    assert!(matches!(
+        view_new_with_top_inset(ORD.0, ORD.1, 30.0, 800, 600, LEGEND_STRIP_PX - 1),
+        Err(DisplayError::BadView(_))
+    ));
+    // The ordinary 16px minimum map height still applies to a valid-sized inset.
+    assert!(matches!(
+        view_new_with_top_inset(ORD.0, ORD.1, 30.0, 800, 600, 585),
+        Err(DisplayError::BadView(_))
+    ));
+}
+
 fn e7(lat: f64, lon: f64) -> (i32, i32) {
     ((lat * 1e7).round() as i32, (lon * 1e7).round() as i32)
 }

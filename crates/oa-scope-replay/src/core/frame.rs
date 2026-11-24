@@ -25,8 +25,8 @@ use oa_display::core::safety::{
     build_safety, safety_caps, FeedStatus, SafetyScene, LAYER_BANNER, LAYER_BANNER_BG,
 };
 use oa_display::core::scene::{
-    build_scene, scene_caps, scene_index, scratch_for, view_new, SceneIndex, SceneStats, Scratch,
-    View,
+    build_scene, scene_caps, scene_index, scratch_for, view_new_with_top_inset, SceneIndex,
+    SceneStats, Scratch, View, LEGEND_STRIP_PX,
 };
 use oa_display::core::text::{text_clipped, text_new, text_push_dec, text_push_str, text_str};
 use oa_display::core::traffic::{
@@ -162,6 +162,17 @@ pub struct FrameInfo {
 
 /// Allocates every table for the model and the configuration.
 pub fn replay_new(model: Model, cfg: &ReplayConfig) -> Result<Replay, ReplayError> {
+    replay_new_with_top_inset(model, cfg, LEGEND_STRIP_PX)
+}
+
+/// Allocates a replay while reserving additional top rows for application-owned furniture.
+/// `top_inset` must be at least [`LEGEND_STRIP_PX`] and leaves the projection to enforce its
+/// minimum map height, dimensions and pixel cap before any replay tables are allocated.
+pub fn replay_new_with_top_inset(
+    model: Model,
+    cfg: &ReplayConfig,
+    top_inset: u32,
+) -> Result<Replay, ReplayError> {
     convert_check(&cfg.convert).map_err(ReplayError::Config)?;
     // The conversion makes `convert.trail_n` history positions and the drawing shows
     // `style.trail_n`; two numbers for one setting would silently draw the smaller.
@@ -170,12 +181,13 @@ pub fn replay_new(model: Model, cfg: &ReplayConfig) -> Result<Replay, ReplayErro
             "the conversion and the style disagree on the trail length",
         )));
     }
-    let view = view_new(
+    let view = view_new_with_top_inset(
         cfg.centre_lat_e7,
         cfg.centre_lon_e7,
         cfg.range_nm,
         cfg.width,
         cfg.height,
+        top_inset,
     )?;
     let spec = FrameSpec {
         width: cfg.width,

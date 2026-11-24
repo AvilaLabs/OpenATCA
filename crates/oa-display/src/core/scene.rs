@@ -246,13 +246,39 @@ pub fn view_new(
     width: u32,
     height: u32,
 ) -> Result<View, DisplayError> {
-    let proj = projection_new(
+    view_new_with_top_inset(
         centre_lat_e7,
         centre_lon_e7,
         range_nm,
         width,
         height,
         LEGEND_STRIP_PX,
+    )
+}
+
+/// A view with every layer on and the default thresholds, reserving `top_inset` screen rows for
+/// application-owned header furniture. The inset must include the standard legend strip; the
+/// remaining map height is checked by [`projection_new`] before any scene scratch is allocated.
+pub fn view_new_with_top_inset(
+    centre_lat_e7: i32,
+    centre_lon_e7: i32,
+    range_nm: f64,
+    width: u32,
+    height: u32,
+    top_inset: u32,
+) -> Result<View, DisplayError> {
+    if top_inset < LEGEND_STRIP_PX {
+        return Err(DisplayError::BadView(
+            "top inset must include the standard legend strip",
+        ));
+    }
+    let proj = projection_new(
+        centre_lat_e7,
+        centre_lon_e7,
+        range_nm,
+        width,
+        height,
+        top_inset,
     )?;
     Ok(View {
         bbox: view_bbox(&proj, MARGIN / 16),
