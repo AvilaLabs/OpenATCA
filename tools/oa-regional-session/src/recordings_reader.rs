@@ -302,11 +302,11 @@ pub fn read_oaf_inputs(inputs: &[RecordingInput]) -> Result<RecordingFrames, Rec
     if inputs.len() > MAX_RECORDING_STREAMS { return Err(RecordingReadError::TooManyStreams); }
     let mut result = RecordingFrames { frames: Vec::new(), counts: RecordingCounts::default(), streams: Vec::new() };
     for (i, input) in inputs.iter().enumerate() {
+        let already_read = usize::try_from(result.counts.total_bytes).map_err(|_| RecordingReadError::InputTooLarge)?;
         let counts = counts_mut(&mut result.counts, input.source);
         counts.files_seen = counts.files_seen.saturating_add(1);
         let path = &input.path;
         let (file, size) = oa_sealed::open_regular(path.as_path()).map_err(RecordingReadError::Read)?;
-        let already_read = usize::try_from(result.counts.total_bytes).map_err(|_| RecordingReadError::InputTooLarge)?;
         let remaining_bytes = MAX_RECORDING_INPUT_BYTES.checked_sub(already_read).ok_or(RecordingReadError::InputTooLarge)?;
         let file_bytes = usize::try_from(size).map_err(|_| RecordingReadError::InputTooLarge)?;
         if file_bytes > remaining_bytes {
