@@ -181,12 +181,16 @@ explicit actor; selection is cleared after advancing a receipt, so stale command
 Queued local events are inserted after upstream flight updates and before route updates. Their
 category sequence numbers are assigned monotonically, with original row ordinal, sequence,
 category, and receipt cutoff retained in the operator journal. A full batch refuses queued actions
-visibly. Evdev loss clears pending input and commands; action input remains blocked until a kernel
-resynchronization record arrives.
+visibly. Evdev loss clears pending input and commands; action input remains blocked until bounded
+queued-record draining and a fresh key-state snapshot succeed. VT release clears line, actor,
+selection, and queued commands. All input is suppressed while KMS is inactive; reacquire drains the
+device queue and records held keys as state only, never as commands.
 
 The device mode requires an 800×600-or-larger KMS mode and displays the fixed view at native pixel
 size with black letterbox borders. It uses one owner thread and finite VT/input waits. Output
 contains per-frame debug evidence and PPM images, the action/resequence journal, settings and
 manifest hashes, and a `COMPLETE` marker written last. Any unresolved input loss, queued action,
-device error, or incomplete session prevents that marker. This is operated replay evidence, not a
-live surveillance console or an operationally qualified display.
+device error, or incomplete session prevents that marker. Logical frame state and pixels are
+deterministic for fixed inputs and executable; actual wall and monotonic receipt timestamps in the
+action journal vary between runs, so complete bundle bytes are not deterministic. This is operated
+replay evidence, not a live surveillance console or an operationally qualified display.

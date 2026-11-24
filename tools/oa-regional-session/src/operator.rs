@@ -86,7 +86,6 @@ pub enum ConsoleMode {
 }
 
 /// A7.2: bounded command-line configuration.
-#[derive(Debug)]
 pub struct ConsoleOptions {
     pub input: PathBuf,
     pub output: PathBuf,
@@ -296,13 +295,13 @@ pub fn prepare_batch(
         let slot = next_sequence.get_mut(ix).ok_or("source category index")?;
         *slot = slot.checked_add(1).ok_or("source sequence overflow")?;
         let assigned = *slot;
-        if let Some(row) = original {
+        if original.is_some() {
             if assigned != original_sequence {
-                journal.push(format!("RESEQUENCE\t{ordinal}\t{}\t{}\t{assigned}\t{}\n",
+                operator_journal_push(journal, format!("RESEQUENCE\t{ordinal}\t{}\t{}\t{assigned}\t{}\n",
                     source_text(event.source), original_sequence, event.receipt_ns))?;
             }
         } else {
-            journal.push(format!("LOCAL\t{ordinal}\tFLIGHT\t0\t{assigned}\t{}\n", event.receipt_ns))?;
+            operator_journal_push(journal, format!("LOCAL\t{ordinal}\tFLIGHT\t0\t{assigned}\t{}\n", event.receipt_ns))?;
         }
         event.sequence = assigned;
         events.push(event);
@@ -312,18 +311,22 @@ pub fn prepare_batch(
 }
 
 /// A7.2: cold operator evidence. The only storage is one capped byte vector.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct OperatorJournal { bytes: Vec<u8> }
 
-impl OperatorJournal {
-    pub fn new() -> Self { Self { bytes: Vec::with_capacity(4096) } }
-    pub fn push(&mut self, row: String) -> Result<(), String> {
-        let next = self.bytes.len().checked_add(row.len()).ok_or("operator journal size overflow")?;
-        if next > MAX_OPERATOR_JOURNAL_BYTES { return Err("operator journal exceeds 16 MiB".into()); }
-        self.bytes.extend_from_slice(row.as_bytes());
-        Ok(())
-    }
-    pub fn bytes(&self) -> &[u8] { &self.bytes }
+pub fn operator_journal_new() -> OperatorJournal {
+    OperatorJournal { bytes: Vec::with_capacity(4096) }
+}
+
+pub fn operator_journal_push(journal: &mut OperatorJournal, row: String) -> Result<(), String> {
+    let next = journal.bytes.len().checked_add(row.len()).ok_or("operator journal size overflow")?;
+    if next > MAX_OPERATOR_JOURNAL_BYTES { return Err("operator journal exceeds 16 MiB".into()); }
+    journal.bytes.extend_from_slice(row.as_bytes());
+    Ok(())
+}
+
+pub fn operator_journal_bytes(journal: &OperatorJournal) -> &[u8] {
+    &journal.bytes
 }
 
 /// Checks address uniqueness and captures the exact positive flight identity at the current view.
@@ -350,11 +353,23 @@ pub fn make_command(selected: SelectedTarget, actor_unit: u32, intent: Intent, o
 #[derive(Clone, Copy)]
 struct ClockStamp { wall_ms: i64, monotonic_ns: u64 }
 
-fn clock_stamp(start: Instant) -> ClockStamp {
-    let wall_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()
-        .as_millis().min(i64::MAX as u128) as i64;
-    let monotonic_ns = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
-    ClockStamp { wall_ms, monotonic_ns }
+fn clock_stamp(start: Instant) -> Result<ClockStamp, String> {
+    let wall_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| format!("wall clock before Unix epoch: {e}"))?
+        .as_millis().try_into().map_err(|_| "wall clock millisecond overflow")?;
+    let monotonic_ns = start.elapsed().as_nanos().try_into().map_err(|_| "monotonic clock nanosecond overflow")?;
+    Ok(ClockStamp { wall_ms, monotonic_ns })
+}
+
+fn input_snapshot_key_sha256(snapshot: &oa_display_present::InputSnapshot) -> [u8; 32] {
+    oa_sha256::sha256(&snapshot.key_bits)
+}
+
+fn device_actions_enabled(lifecycle: oa_display_present::KmsLifecycle) -> bool {
+    lifecycle == oa_display_present::KmsLifecycle::Active
+}
+
+fn is_idle_input_timeout(error: &oa_display_present::InputDeviceError) -> bool {
+    *error == oa_display_present::InputDeviceError::Timeout
 }
 
 struct SessionRunner {
@@ -381,7 +396,7 @@ impl SessionRunner {
         self.next_action = self.next_action.checked_add(1).ok_or("operator action ordinal overflow")?;
         let ordinal = self.next_action;
         let cutoff = self.current_frame.as_ref().map_or(0, |frame| frame.surveillance.time_ns);
-        self.journal.push(format!("ACTION\t{ordinal}\t{}\t{}\t{cutoff}\t{action:?}\n",
+        operator_journal_push(&mut self.journal, format!("ACTION\t{ordinal}\t{}\t{}\t{cutoff}\t{action:?}\n",
             stamp.wall_ms, stamp.monotonic_ns))?;
         if self.current_frame.is_none() && !matches!(action, Action::Next | Action::Quit) {
             self.refusal(ordinal, "advance one recorded receipt before selecting or issuing actions")?;
@@ -392,14 +407,14 @@ impl SessionRunner {
             Action::Select(address) => self.select(address, ordinal)?,
             Action::Actor(unit) => {
                 self.actor = Some(unit);
-                self.journal.push(format!("ACTOR\t{ordinal}\t{unit}\t{}\t{}\n", stamp.wall_ms, stamp.monotonic_ns))?;
+                operator_journal_push(&mut self.journal, format!("ACTOR\t{ordinal}\t{unit}\t{}\t{}\n", stamp.wall_ms, stamp.monotonic_ns))?;
                 self.update_overlay(&format!("ACTOR {unit}"), ordinal, stamp)?;
             }
             Action::Intent(intent) => self.queue_intent(intent, ordinal, stamp)?,
             Action::Quit => {
                 if !self.queue.is_empty() { return Err("QUIT with queued local commands is unresolved".into()); }
                 if self.input_loss_unresolved { return Err("QUIT before evdev resynchronization is incomplete".into()); }
-                self.journal.push(format!("QUIT\t{ordinal}\t{}\t{}\n", stamp.wall_ms, stamp.monotonic_ns))?;
+                operator_journal_push(&mut self.journal, format!("QUIT\t{ordinal}\t{}\t{}\n", stamp.wall_ms, stamp.monotonic_ns))?;
                 return Ok(true);
             }
         }
@@ -412,23 +427,28 @@ impl SessionRunner {
             return Ok(());
         };
         let queued = if recorded.events.len().saturating_add(self.queue.len()) > crate::MAX_EVENTS_PER_RECEIPT {
-            for command in &self.queue {
+            let refused_commands = core::mem::take(&mut self.queue);
+            for command in &refused_commands {
                 self.refusal(command.ordinal, "queued command refused: receipt batch full")?;
             }
-            self.queue.clear();
             Vec::new()
         } else { core::mem::take(&mut self.queue) };
         let batch = prepare_batch(&recorded, &queued, &mut self.next_sequence, &mut self.journal)?;
-        let frame = regional_step(&mut self.runtime, &batch)?;
+        let mut frame = regional_step(&mut self.runtime, &batch)?;
         self.next_batch += 1;
-        self.console_redraws = 0;
         self.selected = None; // Every command requires selection against the newest view sequence.
         let selection_note = "SELECT then issue command";
+        self.clear_runtime_selection(&format!("FRAME:{}", frame.sequence))?;
+        self.reserve_presentation_update()?;
         let digest = crate::runtime::regional_console_overlay(&mut self.runtime, selection_note)?;
-        self.console_redraws = 1;
-        self.journal.push(format!("OVERLAY\tFRAME\t{}\t{}\n", frame.sequence, oa_sha256::to_hex(&digest)))?;
+        frame.controller_selection_kind = oa_display::interaction::SelectionKind::None;
+        frame.controller_selected_address = None;
+        frame.controller_selection = None;
+        frame.console_text = selection_note.to_owned();
+        frame.surveillance.frame_sha256 = digest;
+        operator_journal_push(&mut self.journal, format!("OVERLAY\tFRAME\t{}\t{}\n", frame.sequence, oa_sha256::to_hex(&digest)))?;
         let (report_hash, ppm_hash) = save_frame(&self.output, &frame, &self.runtime)?;
-        self.frame_manifest.push(format!("frame\t{}\t{}\t{:04}.txt\t{}\t{:04}.ppm\t{}\n",
+        self.frame_manifest.push(format!("frame\t{}\t{}\tframe-{:04}.txt\t{}\tframe-{:04}.ppm\t{}\n",
             frame.sequence, frame.surveillance.time_ns, frame.sequence,
             oa_sha256::to_hex(&report_hash), frame.sequence, oa_sha256::to_hex(&ppm_hash)));
         self.current_frame = Some(frame);
@@ -440,15 +460,22 @@ impl SessionRunner {
         let view_sequence = u32::try_from(frame.sequence).map_err(|_| "view sequence overflow")?;
         let selected = match selected_target(&frame.controller_views, address, view_sequence) {
             Ok(selected) => selected,
-            Err(reason) => { self.selected = None; self.refusal(ordinal, &reason)?; return Ok(()); }
+            Err(reason) => {
+                self.selected = None;
+                self.clear_runtime_selection("SELECTION_REFUSAL")?;
+                self.refusal(ordinal, &reason)?;
+                return Ok(());
+            }
         };
+        self.reserve_presentation_update()?;
         match crate::runtime::regional_select(&mut self.runtime, address, selected.view.generation, Some(selected.identity)) {
             Ok(digest) => {
-                self.console_redraws = self.console_redraws.checked_add(1).ok_or("console redraw counter overflow")?;
                 self.selected = Some(selected);
-                self.journal.push(format!("SELECT\t{ordinal}\t{address:08x}\t{}\t{}\t{}\n",
-                    selected.view.generation, selected.view_sequence, oa_sha256::to_hex(&digest)))?;
-                self.update_overlay(&format!("SELECT {address:08X}"), ordinal, clock_stamp(self.wall_start))?;
+        operator_journal_push(&mut self.journal, format!("SELECT\t{ordinal}\t{address:08x}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    selected.view.generation, selected.view_sequence, oa_sha256::to_hex(&selected.identity.gufi),
+                    oa_sha256::to_hex(&selected.identity.centre), oa_sha256::to_hex(&selected.identity.plan_id),
+                    oa_sha256::to_hex(&digest)))?;
+                self.update_overlay(&format!("SELECT {address:08X}"), ordinal, clock_stamp(self.wall_start)?)?;
             }
             Err(reason) => { self.selected = None; self.refusal(ordinal, &reason)?; }
         }
@@ -463,20 +490,26 @@ impl SessionRunner {
             frame.sequence == u64::from(selected.view_sequence)
                 && frame.controller_views.iter().filter(|v| v.address == selected.view.address).count() == 1
                 && frame.controller_views.iter().any(|v| *v == selected.view));
-        if !current_matches { self.selected = None; self.refusal(ordinal, "selected view is stale; SELECT again")?; return Ok(()); }
+        if !current_matches {
+            self.selected = None;
+            self.clear_runtime_selection("STALE_COMMAND_REFUSAL")?;
+            self.refusal(ordinal, "selected view is stale; SELECT again")?;
+            return Ok(());
+        }
         let command = make_command(selected, actor, intent, ordinal)?;
-        self.journal.push(format!("QUEUE\t{ordinal}\t{}\t{}\t{}\t{intent:?}\t{}\t{}\n",
+        operator_journal_push(&mut self.journal, format!("QUEUE\t{ordinal}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{intent:?}\t{}\t{}\n",
             selected.view.address, selected.view.generation, selected.view_sequence,
-            stamp.wall_ms, stamp.monotonic_ns))?;
+            oa_sha256::to_hex(&selected.identity.gufi), oa_sha256::to_hex(&selected.identity.centre),
+            oa_sha256::to_hex(&selected.identity.plan_id), actor, stamp.wall_ms, stamp.monotonic_ns))?;
         self.queue.push(command);
         self.update_overlay(&format!("QUEUED {}", self.queue.len()), ordinal, stamp)?;
         Ok(())
     }
 
     fn refusal(&mut self, ordinal: u64, reason: &str) -> Result<(), String> {
-        self.journal.push(format!("REFUSAL\t{ordinal}\t{}\n", reason.replace('\t', " ").replace('\n', " ")))?;
+        operator_journal_push(&mut self.journal, format!("REFUSAL\t{ordinal}\t{}\n", reason.replace('\t', " ").replace('\n', " ")))?;
         if self.current_frame.is_some() {
-            self.update_overlay(reason, ordinal, clock_stamp(self.wall_start))?;
+            self.update_overlay(reason, ordinal, clock_stamp(self.wall_start)?)?;
         } else {
             writeln!(std::io::stdout(), "REFUSED: {reason}").map_err(|e| e.to_string())?;
         }
@@ -484,13 +517,27 @@ impl SessionRunner {
     }
 
     fn update_overlay(&mut self, text: &str, ordinal: u64, stamp: ClockStamp) -> Result<(), String> {
-        if self.console_redraws >= 4096 { return Err("console redraw budget (4096) exhausted for frame".into()); }
+        self.reserve_presentation_update()?;
         let safe = text.chars().take(128).map(|c| if c.is_ascii_graphic() || c == ' ' { c } else { '?' }).collect::<String>();
         let digest = crate::runtime::regional_console_overlay(&mut self.runtime, &safe)?;
-        self.console_redraws += 1;
-        self.journal.push(format!("CONSOLE\t{ordinal}\t{}\t{}\t{}\t{}\n",
+        operator_journal_push(&mut self.journal, format!("CONSOLE\t{ordinal}\t{}\t{}\t{}\t{}\n",
             stamp.wall_ms, stamp.monotonic_ns, safe, oa_sha256::to_hex(&digest)))?;
         Ok(())
+    }
+
+    fn reserve_presentation_update(&mut self) -> Result<(), String> {
+        if self.console_redraws >= crate::surveillance::MAX_PRESENTATION_UPDATES {
+            return Err("console presentation update budget exhausted".into());
+        }
+        self.console_redraws = self.console_redraws.checked_add(1).ok_or("console redraw counter overflow")?;
+        Ok(())
+    }
+
+    fn clear_runtime_selection(&mut self, reason: &str) -> Result<[u8; 32], String> {
+        self.reserve_presentation_update()?;
+        let digest = crate::runtime::regional_clear_selection(&mut self.runtime)?;
+        operator_journal_push(&mut self.journal, format!("CLEAR_SELECTION\t{reason}\t{}\n", oa_sha256::to_hex(&digest)))?;
+        Ok(digest)
     }
 
     fn input_lost(&mut self, ordinal: u64, kind: &str, stamp: ClockStamp) -> Result<(), String> {
@@ -498,8 +545,9 @@ impl SessionRunner {
         self.queue.clear();
         self.input_loss_unresolved = true;
         self.selected = None;
+        self.actor = None;
         let cutoff = self.current_frame.as_ref().map_or(0, |frame| frame.surveillance.time_ns);
-        self.journal.push(format!("INPUT_LOSS\t{ordinal}\t{kind}\t{discarded}\t{cutoff}\t{}\t{}\n",
+        operator_journal_push(&mut self.journal, format!("INPUT_LOSS\t{ordinal}\t{kind}\t{discarded}\t{cutoff}\t{}\t{}\n",
             stamp.wall_ms, stamp.monotonic_ns))?;
         Ok(())
     }
@@ -508,7 +556,7 @@ impl SessionRunner {
         self.next_action = self.next_action.checked_add(1).ok_or("operator action ordinal overflow")?;
         let ordinal = self.next_action;
         let cutoff = self.current_frame.as_ref().map_or(0, |frame| frame.surveillance.time_ns);
-        self.journal.push(format!("ACTION_REJECTED\t{ordinal}\t{}\t{}\t{cutoff}\t{reason}\n",
+        operator_journal_push(&mut self.journal, format!("ACTION_REJECTED\t{ordinal}\t{}\t{}\t{cutoff}\t{reason}\n",
             stamp.wall_ms, stamp.monotonic_ns))?;
         self.refusal(ordinal, reason)
     }
@@ -528,26 +576,44 @@ fn init_runner(output: &Path, model_source: &crate::cli::ModelSource, batches: V
     let start = Instant::now();
     Ok((SessionRunner { runtime, batches, next_batch: 0, next_sequence: [0; 5], next_action: 0,
         selected: None, actor: None, queue: Vec::with_capacity(MAX_OPERATOR_QUEUE), current_frame: None,
-        journal: OperatorJournal::new(), frame_manifest: Vec::with_capacity(MAX_FRAMES), output: output.to_path_buf(),
+        journal: operator_journal_new(), frame_manifest: Vec::with_capacity(MAX_FRAMES), output: output.to_path_buf(),
         settings_sha256, console_redraws: 0, wall_start: start, input_loss_unresolved: false }, model_sha, executable_sha))
 }
 
 fn close_output(runner: &SessionRunner, input_sha: [u8; 32], model_sha: [u8; 32], executable_sha: [u8; 32], script_sha: [u8; 32]) -> Result<(), String> {
-    write_new(&runner.output.join("operator.tsv"), runner.journal.bytes())?;
-    let mut manifest = format!("OA_OPERATED_MANIFEST\t1\nmode\tRECORDED_REPLAY\ninput_sha256\t{}\nmodel_sha256\t{}\nexecutable_sha256\t{}\nsettings_sha256\t{}\nscript_sha256\t{}\noperator_journal_sha256\t{}\n",
+    write_new(&runner.output.join("operator.tsv"), operator_journal_bytes(&runner.journal))?;
+    let mut manifest = format!("OA_OPERATED_MANIFEST\t1\nmode\tRECORDED_REPLAY\ninput_sha256\t{}\nmodel_sha256\t{}\nexecutable_sha256\t{}\nsettings\tsettings.tsv\t{}\noperator_journal\toperator.tsv\t{}\nscript_sha256\t{}\n",
         oa_sha256::to_hex(&input_sha), oa_sha256::to_hex(&model_sha), oa_sha256::to_hex(&executable_sha),
-        oa_sha256::to_hex(&runner.settings_sha256), oa_sha256::to_hex(&script_sha),
-        oa_sha256::to_hex(&oa_sha256::sha256(runner.journal.bytes())));
+        oa_sha256::to_hex(&runner.settings_sha256),
+        oa_sha256::to_hex(&oa_sha256::sha256(operator_journal_bytes(&runner.journal))),
+        oa_sha256::to_hex(&script_sha));
     for row in &runner.frame_manifest { manifest.push_str(row); }
     write_new(&runner.output.join("manifest.tsv"), manifest.as_bytes())?;
     let directory = oa_sealed::open(&runner.output).map_err(|e| e.to_string())?;
     directory.sync_all().map_err(|e| e.to_string())?;
     let marker = runner.output.join("COMPLETE");
-    write_new(&marker, format!("{}\n", oa_sha256::to_hex(&oa_sha256::sha256(manifest.as_bytes()))).as_bytes())?;
-    directory.sync_all().map_err(|e| e.to_string())
+    let complete = format!("{}\n", oa_sha256::to_hex(&oa_sha256::sha256(manifest.as_bytes())));
+    oa_sealed::refuse(&marker).map_err(|e| e.to_string())?;
+    // seal-allow: create-new completion marker after path refusal; remove only this created file
+    // if verification, write, fsync or parent-directory sync fails.
+    let mut marker_file = OpenOptions::new().create_new(true).write(true).open(&marker)
+        .map_err(|e| format!("create completion marker: {e}"))?;
+    let marker_result = oa_sealed::Sealed::production().verify_open(&marker, &marker_file)
+        .map_err(|e| e.to_string())
+        .and_then(|_| marker_file.write_all(complete.as_bytes()).map_err(|e| e.to_string()))
+        .and_then(|_| marker_file.sync_all().map_err(|e| e.to_string()))
+        .and_then(|_| directory.sync_all().map_err(|e| e.to_string()));
+    drop(marker_file);
+    if let Err(error) = marker_result {
+        let _ = fs::remove_file(&marker);
+        let _ = directory.sync_all();
+        return Err(format!("could not durably close operated session: {error}"));
+    }
+    Ok(())
 }
 
-/// Headless deterministic console runner for a recorded normalized session and action script.
+/// Headless recorded-session runner. Logical frames and pixels are deterministic; receipt-time
+/// action journal clocks intentionally make complete bundle bytes vary by run.
 pub fn run_script_session(input: &Path, output: &Path, model_source: &crate::cli::ModelSource, script: &Path) -> Result<(), String> {
     let input_bytes = crate::cli::read_guarded(input, MAX_RECORDING_BYTES)?;
     let input_sha = oa_sha256::sha256(&input_bytes);
@@ -558,7 +624,7 @@ pub fn run_script_session(input: &Path, output: &Path, model_source: &crate::cli
     let (mut runner, model_sha, executable_sha) = init_runner(output, model_source, batches)?;
     let result = (|| {
         for action in actions {
-            let quit = runner.action(action, clock_stamp(runner.wall_start))?;
+            let quit = runner.action(action, clock_stamp(runner.wall_start)?)?;
             if quit { break; }
         }
         if runner.current_frame.is_none() { return Err("operated session completed no frame".into()); }
@@ -567,7 +633,7 @@ pub fn run_script_session(input: &Path, output: &Path, model_source: &crate::cli
         Ok(())
     })();
     if let Err(error) = result {
-        let _ = write_new(&output.join("operator.tsv"), runner.journal.bytes());
+        let _ = write_new(&output.join("operator.tsv"), operator_journal_bytes(&runner.journal));
         return Err(error);
     }
     close_output(&runner, input_sha, model_sha, executable_sha, script_sha)
@@ -649,6 +715,12 @@ pub fn run_device_session(
     let (mut runner, model_sha, executable_sha) = init_runner(output, model_source, batches)?;
     let mut display = oa_display_present::open_kms(drm, tty, connector).map_err(|e| format!("KMS open: {e:?}"))?;
     let mut evdev = oa_display_present::open_evdev(input_device).map_err(|e| format!("evdev open: {e:?}"))?;
+    let start = Instant::now();
+    let initial_input = evdev.resynchronize(1024, 1000).map_err(|e| format!("initial input resynchronization: {e:?}"))?;
+    let initial_stamp = clock_stamp(start)?;
+    operator_journal_push(&mut runner.journal, format!("INPUT_RESYNC_INITIAL\t{}\t{}\t{}\t{}\n",
+        initial_input.discarded_records, initial_input.relative_motion_lost,
+        oa_sha256::to_hex(&input_snapshot_key_sha256(&initial_input)), initial_stamp.monotonic_ns))?;
     let (width, height) = display.dimensions();
     if width < FRAME_WIDTH || height < FRAME_HEIGHT {
         let _ = display.close();
@@ -663,39 +735,102 @@ pub fn run_device_session(
     let mut pixels = vec![0u8; bytes];
     display.start().map_err(|e| format!("KMS start: {e:?}"))?;
     // Start presents a zeroed frame. The regional view appears only after the first receipt.
-    let start = Instant::now();
     let mut last_input = Instant::now();
     let mut line = String::with_capacity(MAX_ACTION_BYTES);
     let mut shift = false;
     let mut quit = false;
+    let mut was_active = true;
+    let mut inactive_discarded = 0u32;
     let result = (|| {
         while !quit {
             if last_input.elapsed().as_secs() >= idle_limit_seconds { return Err("native console idle limit reached".into()); }
             display.service_vt(25).map_err(|e| format!("VT service: {e:?}"))?;
             if display.must_terminate_owner() { return Err("KMS owner must terminate after a faulted VT transition".into()); }
-            match evdev.read_record(25) {
+            let active = device_actions_enabled(display.lifecycle());
+            if !active {
+                if was_active {
+                    let discarded_commands = runner.queue.len();
+                    let pending_bytes = line.len();
+                    runner.queue.clear();
+                    runner.selected = None;
+                    runner.actor = None;
+                    line.clear();
+                    shift = false;
+                    runner.input_loss_unresolved = true;
+                    let clear_digest = if runner.current_frame.is_some() {
+                        Some(runner.clear_runtime_selection("VT_RELEASE")?)
+                    } else { None };
+                    let stamp = clock_stamp(start)?;
+                    let cutoff = runner.current_frame.as_ref().map_or(0, |frame| frame.surveillance.time_ns);
+                    operator_journal_push(&mut runner.journal, format!("VT_RELEASE\t{discarded_commands}\t{pending_bytes}\t{cutoff}\t{}\t{}\t{}\n",
+                        inactive_discarded, stamp.wall_ms, stamp.monotonic_ns))?;
+                    if let Some(digest) = clear_digest {
+                        operator_journal_push(&mut runner.journal, format!("VT_CLEAR_SELECTION\t{}\n", oa_sha256::to_hex(&digest)))?;
+                    }
+                    was_active = false;
+                }
+                match evdev.read_record(25) {
+                    Ok(_) => inactive_discarded = inactive_discarded.checked_add(1).ok_or("inactive input discard counter overflow")?,
+                    Err(error) if is_idle_input_timeout(&error) => {}
+                    Err(error) => return Err(format!("evdev input while VT inactive: {error:?}")),
+                }
+                continue;
+            }
+            if !was_active {
+                let snapshot = evdev.resynchronize(1024, 1000)
+                    .map_err(|e| format!("VT reacquire input resynchronization: {e:?}"))?;
+                line.clear(); shift = false; runner.input_loss_unresolved = false;
+                let stamp = clock_stamp(start)?;
+                let cutoff = runner.current_frame.as_ref().map_or(0, |frame| frame.surveillance.time_ns);
+                operator_journal_push(&mut runner.journal, format!("VT_REACQUIRE\t{inactive_discarded}\t{}\t{}\t{}\t{}\t{}\n",
+                    snapshot.discarded_records, snapshot.relative_motion_lost,
+                    oa_sha256::to_hex(&input_snapshot_key_sha256(&snapshot)), cutoff, stamp.wall_ms, stamp.monotonic_ns))?;
+                inactive_discarded = 0;
+                was_active = true;
+                runner.update_overlay("VT REACQUIRED; READY", runner.next_action, stamp)?;
+                continue;
+            }
+            let input_poll = evdev.read_record(25);
+            display.service_vt(0).map_err(|e| format!("VT service before input dispatch: {e:?}"))?;
+            if !device_actions_enabled(display.lifecycle()) {
+                if input_poll.is_ok() { inactive_discarded = inactive_discarded.checked_add(1).ok_or("inactive input discard counter overflow")?; }
+                continue;
+            }
+            match input_poll {
+                Err(error) if is_idle_input_timeout(&error) => {}
                 Err(error) => {
-                    runner.input_lost(runner.next_action.saturating_add(1), &format!("{error:?}"), clock_stamp(start))?;
+                    runner.input_lost(runner.next_action.saturating_add(1), &format!("{error:?}"), clock_stamp(start)?)?;
                     return Err(format!("evdev input lost: {error:?}"));
                 }
                 Ok(record) => match record.kind {
                     oa_display_present::InputRecordKind::SyncLost => {
                         line.clear(); shift = false;
-                        runner.input_lost(runner.next_action.saturating_add(1), "SYN_DROPPED", clock_stamp(start))?;
-                        runner.update_overlay("INPUT LOST; RESYNC", runner.next_action, clock_stamp(start))?;
+                        runner.input_lost(runner.next_action.saturating_add(1), "SYN_DROPPED", clock_stamp(start)?)?;
+                        if runner.current_frame.is_some() {
+                            runner.clear_runtime_selection("INPUT_LOSS")?;
+                        }
+                        let snapshot = evdev.resynchronize(1024, 1000)
+                            .map_err(|e| format!("input resynchronization: {e:?}"))?;
+                        runner.input_loss_unresolved = false;
+                        let stamp = clock_stamp(start)?;
+                        let cutoff = runner.current_frame.as_ref().map_or(0, |frame| frame.surveillance.time_ns);
+                        operator_journal_push(&mut runner.journal, format!("INPUT_RESYNC\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                            snapshot.discarded_records, snapshot.relative_motion_lost,
+                            oa_sha256::to_hex(&input_snapshot_key_sha256(&snapshot)), cutoff, stamp.wall_ms, stamp.monotonic_ns))?;
+                        runner.update_overlay("INPUT RESYNCHRONIZED; READY", runner.next_action, stamp)?;
                     }
                     oa_display_present::InputRecordKind::Resynchronized => {
                         shift = false; runner.input_loss_unresolved = false;
-                        let stamp = clock_stamp(start);
+                        let stamp = clock_stamp(start)?;
                         let cutoff = runner.current_frame.as_ref().map_or(0, |frame| frame.surveillance.time_ns);
-                        runner.journal.push(format!("INPUT_RESYNC\t{}\t{}\t{}\t{}\t{}\n", record.snapshot.discarded_records,
+                        operator_journal_push(&mut runner.journal, format!("INPUT_RESYNC\t{}\t{}\t{}\t{}\t{}\n", record.snapshot.discarded_records,
                             record.snapshot.relative_motion_lost, cutoff, stamp.wall_ms, stamp.monotonic_ns))?;
-                        runner.update_overlay("INPUT RESYNCHRONIZED", runner.next_action, clock_stamp(start))?;
+                        runner.update_overlay("INPUT RESYNCHRONIZED", runner.next_action, clock_stamp(start)?)?;
                     }
                     oa_display_present::InputRecordKind::Event => {
                         last_input = Instant::now();
                         if runner.input_loss_unresolved {
-                            runner.journal.push(format!("INPUT_IGNORED\t{}\t{}	{}\n",
+                            operator_journal_push(&mut runner.journal, format!("INPUT_IGNORED\t{}\t{}\t{}\n",
                                 runner.next_action.saturating_add(1), record.event.kind, record.event.code))?;
                             continue;
                         }
@@ -703,19 +838,19 @@ pub fn run_device_session(
                             if record.event.value == 1 { shift = true; } else if record.event.value == 0 { shift = false; }
                         } else if oa_display_present::input_event_is_action_press(record.event) {
                             match record.event.code {
-                                1 => { line.clear(); quit = runner.action(Action::Quit, clock_stamp(start))?; }
-                                28 => { quit = submit_line(&mut runner, &mut line, clock_stamp(start))?; }
+                                1 => { line.clear(); quit = runner.action(Action::Quit, clock_stamp(start)?)?; }
+                                28 => { quit = submit_line(&mut runner, &mut line, clock_stamp(start)?)?; }
                                 14 => { line.pop(); }
                                 _ => if let Some(ch) = key_ascii(record.event, shift) {
                                     if line.len() < MAX_ACTION_BYTES { line.push(ch); }
-                                    else { runner.reject_input("command line exceeds 128 ASCII bytes", clock_stamp(start))?; line.clear(); }
+                                    else { runner.reject_input("command line exceeds 128 ASCII bytes", clock_stamp(start)?)?; line.clear(); }
                                 },
                             }
                         }
-                        if !line.is_empty() { runner.update_overlay(&format!(">{line}"), runner.next_action, clock_stamp(start))?; }
+                        if !line.is_empty() { runner.update_overlay(&format!(">{line}"), runner.next_action, clock_stamp(start)?)?; }
                     }
                     oa_display_present::InputRecordKind::Discarded => {
-                        runner.journal.push(format!("INPUT_DISCARDED\t{}\t{}\n",
+                        operator_journal_push(&mut runner.journal, format!("INPUT_DISCARDED\t{}\t{}\n",
                             runner.next_action.saturating_add(1), record.snapshot.discarded_records))?;
                     }
                     oa_display_present::InputRecordKind::SyncReport => {}
@@ -729,7 +864,7 @@ pub fn run_device_session(
         Ok(())
     })();
     if let Err(error) = result {
-        let _ = write_new(&output.join("operator.tsv"), runner.journal.bytes());
+        let _ = write_new(&output.join("operator.tsv"), operator_journal_bytes(&runner.journal));
         let _ = display.close();
         return Err(error);
     }
@@ -757,15 +892,35 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 fn save_frame(output: &Path, frame: &RegionalFrame, runtime: &RegionalRuntime) -> Result<([u8; 32], [u8; 32]), String> {
-    let report = format!("OA_REGIONAL_OPERATED_FRAME\t1\n{frame:#?}\n");
-    if report.len() > MAX_FRAME_REPORT_BYTES { return Err("frame report exceeds 512 KiB".into()); }
     let pixels = regional_pixels(runtime)?;
     let spec = oa_display::raster::FrameSpec { width: FRAME_WIDTH, height: FRAME_HEIGHT, stride: FRAME_WIDTH * 4 };
     let mut ppm = Vec::new();
     oa_display::ppm::write_ppm(&mut ppm, &spec, pixels).map_err(|e| format!("PPM: {e}"))?;
-    let report_hash = oa_sha256::sha256(report.as_bytes());
     let ppm_hash = oa_sha256::sha256(&ppm);
+    let report = format!("OA_REGIONAL_OPERATED_FRAME\t1\npixels_ppm_sha256\t{}\nrendered_frame_sha256\t{}\n{frame:#?}\n",
+        oa_sha256::to_hex(&ppm_hash), oa_sha256::to_hex(&frame.surveillance.frame_sha256));
+    if report.len() > MAX_FRAME_REPORT_BYTES { return Err("frame report exceeds 512 KiB".into()); }
+    let report_hash = oa_sha256::sha256(report.as_bytes());
     write_new(&output.join(format!("frame-{:04}.txt", frame.sequence)), report.as_bytes())?;
     write_new(&output.join(format!("frame-{:04}.ppm", frame.sequence)), &ppm)?;
     Ok((report_hash, ppm_hash))
+}
+
+#[cfg(test)]
+mod native_state_tests {
+    use super::{device_actions_enabled, is_idle_input_timeout};
+
+    #[test]
+    fn idle_evdev_timeout_is_not_a_failure() {
+        assert!(is_idle_input_timeout(&oa_display_present::InputDeviceError::Timeout));
+        assert!(!is_idle_input_timeout(&oa_display_present::InputDeviceError::Disconnected));
+    }
+
+    #[test]
+    fn only_the_active_vt_accepts_global_input_actions() {
+        assert!(device_actions_enabled(oa_display_present::KmsLifecycle::Active));
+        assert!(!device_actions_enabled(oa_display_present::KmsLifecycle::Suspended));
+        assert!(!device_actions_enabled(oa_display_present::KmsLifecycle::Acquiring));
+        assert!(!device_actions_enabled(oa_display_present::KmsLifecycle::ReleasePending));
+    }
 }
