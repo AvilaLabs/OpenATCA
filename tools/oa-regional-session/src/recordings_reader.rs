@@ -258,7 +258,7 @@ pub fn scan_oaf_bytes(
     let mut last_sequence = None;
     while input_pos < bytes.len() {
         let budget = FrameWorkBudget::for_capacity(MAX_FRAME_LEN);
-        let pushed = reader.push_with_budget(&bytes[input_pos..], budget).map_err(RecordingReadError::FrameWork)?;
+        let pushed = reader.push_with_budget(bytes.get(input_pos..).ok_or(RecordingReadError::InputTooLarge)?, budget).map_err(RecordingReadError::FrameWork)?;
         input_pos = input_pos.checked_add(pushed).ok_or(RecordingReadError::InputTooLarge)?;
         loop {
             match reader.next_with_budget(FrameWorkBudget::for_capacity(MAX_FRAME_LEN)).map_err(RecordingReadError::FrameWork)? {
@@ -395,6 +395,7 @@ fn add_stream_counts(lhs: StreamCounts, rhs: StreamCounts) -> StreamCounts {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
 

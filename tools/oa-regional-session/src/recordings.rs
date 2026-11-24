@@ -291,8 +291,7 @@ pub fn adapt_recorded_frames(
     }
     if frame_payload_bytes > declared_decoded { return Err(AdapterError::WorkBudget); }
     for pair in frames.windows(2) {
-        let before = &pair[0];
-        let after = &pair[1];
+        let [before, after] = pair else { return Err(AdapterError::FramesNotMerged); };
         let before_key = (before.receipt_ns, crate::recordings_reader::recording_source_rank(before.source), before.sequence, before.stream_index, before.byte_offset);
         let after_key = (after.receipt_ns, crate::recordings_reader::recording_source_rank(after.source), after.sequence, after.stream_index, after.byte_offset);
         if after_key < before_key { return Err(AdapterError::FramesNotMerged); }
@@ -371,11 +370,11 @@ fn adapt_adsb_frame(
     out.counts.adsb_rows_dropped = out.counts.adsb_rows_dropped.saturating_add(u64::try_from(counts.dropped).map_err(|_| AdapterError::CountOverflow)?);
     let previously_admitted = usize::try_from(out.counts.adsb_rows_in).map_err(|_| AdapterError::WorkBudget)?
         .checked_sub(counts.records).ok_or(AdapterError::CountOverflow)?;
-    if previously_admitted.checked_add(counts.records).map_or(true, |n| n > MAX_ADSB_ROWS_PER_ADAPTATION) {
+    if previously_admitted.checked_add(counts.records).is_none_or(|n| n > MAX_ADSB_ROWS_PER_ADAPTATION) {
         out.counts.adsb_rows_over_capacity = out.counts.adsb_rows_over_capacity.saturating_add(u64::try_from(counts.kept).map_err(|_| AdapterError::CountOverflow)?);
         return Ok(());
     }
-    if reports.time_ns.windows(2).any(|pair| pair[1] < pair[0]) {
+    if reports.time_ns.windows(2).any(|pair| matches!(pair, [before, after] if after < before)) {
         out.counts.adsb_source_time_regressions = out.counts.adsb_source_time_regressions.saturating_add(1);
         out.counts.adsb_rows_order_refused = out.counts.adsb_rows_order_refused.saturating_add(u64::try_from(counts.kept).map_err(|_| AdapterError::CountOverflow)?);
         return Ok(());
@@ -477,7 +476,7 @@ fn airborne_adsb_reports(reports: &Reports, counts: &mut RecordedAdapterCounts) 
     airborne_reports.lat_e7.try_reserve(reports_len(reports)).map_err(|_| AdapterError::AllocationRefused)?;
     airborne_reports.lon_e7.try_reserve(reports_len(reports)).map_err(|_| AdapterError::AllocationRefused)?;
     for i in 0..reports_len(reports) {
-        let Some(row) = reports_row(&reports, i) else {
+        let Some(row) = reports_row(reports, i) else {
             counts.invalid_position_rows = counts.invalid_position_rows.saturating_add(1);
             continue;
         };
@@ -539,7 +538,7 @@ fn sort_and_refuse_oversize_receipt_groups(out: &mut RecordedAdaptation) -> Resu
             _ => (i64::MAX, SourceKind::Adaptation, i64::MAX, u64::MAX, u8::MAX, u64::MAX, u32::MAX),
         }
     };
-    order.sort_unstable_by(|a, b| key(*a).cmp(&key(*b)));
+    order.sort_unstable_by_key(|index| key(*index));
     let event_len = out.events.len();
     for i in 0..event_len {
         let Some(&mapped) = order.get(i) else { return Err(AdapterError::UnsupportedEvent); };
@@ -685,7 +684,7 @@ fn adapt_sfdps_frame(
             out.counts.sfdps_rows_no_operations = out.counts.sfdps_rows_no_operations.saturating_add(1);
             continue;
         }
-        if out.events.len().checked_add(ops.len()).map_or(true, |wanted| wanted > max_events) {
+        if out.events.len().checked_add(ops.len()).is_none_or(|wanted| wanted > max_events) {
             out.counts.output_capacity_refusals = out.counts.output_capacity_refusals.saturating_add(1);
             out.counts.sfdps_rows_refused = out.counts.sfdps_rows_refused.saturating_add(1);
             continue;
@@ -694,7 +693,11 @@ fn adapt_sfdps_frame(
         pending.try_reserve_exact(ops.len()).map_err(|_| AdapterError::AllocationRefused)?;
         let mut unsupported = false;
         for (operation_index, op) in ops.iter().enumerate() {
-            match normalized_flight_operation(op.kind, op.alt, op.plan_id, op.state, op.unit_a, op.unit_b, op.address, op.callsign, op.dep, op.arr) {
+            match normalized_flight_operation(NormalizedFlightOperationInput {
+                kind: op.kind, alt: op.alt, plan_id: op.plan_id, state: op.state,
+                unit_a: op.unit_a, unit_b: op.unit_b, address: op.address,
+                callsign: op.callsign, dep: op.dep, arr: op.arr,
+            }) {
                 Some((operation, address)) => {
                     let Some(source_ns) = op.ts_ms.checked_mul(1_000_000) else {
                         out.counts.invalid_operation_time = out.counts.invalid_operation_time.saturating_add(1);
@@ -777,11 +780,16 @@ fn adapt_sfdps_frame(
     Ok(())
 }
 
-fn normalized_flight_operation(
+// A7.2: cold normalized operation arguments, mirroring one decoded source operation.
+#[derive(Clone, Copy)]
+struct NormalizedFlightOperationInput {
     kind: u8, alt: Alt, plan_id: [u8; 12], state: u8, unit_a: [u8; 8], unit_b: [u8; 8],
     address: u32, callsign: [u8; 8], dep: [u8; 12], arr: [u8; 12],
-) -> Option<(crate::input::FlightOperation, u32)> {
+}
+
+fn normalized_flight_operation(input: NormalizedFlightOperationInput) -> Option<(crate::input::FlightOperation, u32)> {
     use crate::input::{FlightOperation, HandoffOperation};
+    let NormalizedFlightOperationInput { kind, alt, plan_id, state, unit_a, unit_b, address, callsign, dep, arr } = input;
     let op = match kind {
         OP_SET_PLAN if plan_id != [0; 12] && valid_padded_ascii(&plan_id) && !plan_id.contains(&0) => FlightOperation::SetPlan { plan_id, status: state },
         OP_ASSIGN if alt.form == ALT_SIMPLE => FlightOperation::AssignAltitude { altitude_ft: alt.a_ft },
@@ -1006,6 +1014,7 @@ fn ascii_trimmed(bytes: &[u8]) -> Result<String, AdapterError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -1082,11 +1091,11 @@ mod tests {
     #[test]
     fn only_lossless_sfdps_operations_map_to_normalized_flight_events() {
         use crate::input::FlightOperation;
-        let set = normalized_flight_operation(OP_ASSIGN, Alt { form: ALT_SIMPLE, a_ft: 12_000, b_ft: 0 }, [0; 12], 0, [0; 8], [0; 8], 0, [0; 8], [0; 12], [0; 12]);
+        let set = normalized_flight_operation(NormalizedFlightOperationInput { kind: OP_ASSIGN, alt: Alt { form: ALT_SIMPLE, a_ft: 12_000, b_ft: 0 }, plan_id: [0; 12], state: 0, unit_a: [0; 8], unit_b: [0; 8], address: 0, callsign: [0; 8], dep: [0; 12], arr: [0; 12] });
         assert_eq!(set, Some((FlightOperation::AssignAltitude { altitude_ft: 12_000 }, 0)));
-        let block = normalized_flight_operation(OP_ASSIGN, Alt { form: oa_flight::ALT_BLOCK, a_ft: 10_000, b_ft: 14_000 }, [0; 12], 0, [0; 8], [0; 8], 0, [0; 8], [0; 12], [0; 12]);
+        let block = normalized_flight_operation(NormalizedFlightOperationInput { kind: OP_ASSIGN, alt: Alt { form: oa_flight::ALT_BLOCK, a_ft: 10_000, b_ft: 14_000 }, plan_id: [0; 12], state: 0, unit_a: [0; 8], unit_b: [0; 8], address: 0, callsign: [0; 8], dep: [0; 12], arr: [0; 12] });
         assert_eq!(block, None);
-        let initiation = normalized_flight_operation(OP_HO_INITIATE, Alt::default(), [0; 12], 0, *b"FROM    ", *b"TO      ", 0, [0; 8], [0; 12], [0; 12]);
+        let initiation = normalized_flight_operation(NormalizedFlightOperationInput { kind: OP_HO_INITIATE, alt: Alt::default(), plan_id: [0; 12], state: 0, unit_a: *b"FROM    ", unit_b: *b"TO      ", address: 0, callsign: [0; 8], dep: [0; 12], arr: [0; 12] });
         assert_eq!(initiation, None);
     }
 
