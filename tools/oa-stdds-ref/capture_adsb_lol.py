@@ -441,6 +441,8 @@ def main() -> int:
         if not a.decoder.is_file() or not os.access(a.decoder, os.X_OK):
             raise RuntimeError("decoder is not an executable file")
         decoder_file = guard.open(a.decoder, "rb")
+        decoder_path_record = a.decoder.resolve()
+        guard.check(str(decoder_path_record))
         decoder_stat = os.fstat(decoder_file.fileno())
         if not stat.S_ISREG(decoder_stat.st_mode) or decoder_stat.st_nlink != 1:
             raise RuntimeError("decoder must be a single-link regular file")
@@ -572,7 +574,7 @@ def main() -> int:
             "duration_limit_s": a.duration_s, "poll_interval_s": a.poll_s, "http_timeout_s": a.timeout_s,
             "cohort_interval_utc": {"from_inclusive": a.cohort_from_utc, "to_exclusive": a.cohort_to_utc},
             "cohort_timestamp_policy": "ADS-B estimated report time is server now minus raw seen_pos; exact source response preserves age values; timestamp age/quantization uncertainty remains; not precision truth by default",
-            "decoder_path": str(a.decoder), "decoder_sha256": decoder_hash,
+            "decoder_path": str(decoder_path_record), "decoder_sha256": decoder_hash,
             "capture_tool_path": str(tool_path), "capture_tool_sha256": digest(tool_path, guard),
             "decoder_source": "oa-adsb-snapshot; existing ADS3 payload carried in OAF2 MESSAGE frames with local receipt wall and monotonic times",
             "caps": {"max_responses": MAX_RESPONSES, "max_body_bytes": MAX_BODY_BYTES, "max_total_body_bytes": MAX_TOTAL_BODY_BYTES,
