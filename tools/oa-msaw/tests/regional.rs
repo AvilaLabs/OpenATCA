@@ -63,7 +63,7 @@ fn terrain_cell_budget_refuses_before_tile_access_and_missing_source_stays_missi
     let terrain = root.join("tiles");
     std::fs::create_dir_all(&terrain).unwrap();
     paths.terrain_dir = Some(terrain);
-    let data = load_regional_data(
+    let mut data = load_regional_data(
         &paths,
         RegionalDataLimits::default(),
         WeatherAdmission { cutoff_ms: 0 },
@@ -119,7 +119,7 @@ fn weather_receipt_and_observation_cutoff_are_both_enforced_and_hashed() {
         received_at_ms: 2_000_000_000_000,
     });
     let cutoff_ms = 2_000_000_000_000;
-    let mut data = load_regional_data(
+    let data = load_regional_data(
         &paths,
         RegionalDataLimits::default(),
         WeatherAdmission { cutoff_ms },

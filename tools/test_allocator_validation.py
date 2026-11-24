@@ -87,6 +87,9 @@ def result(injected=False):
             'display_interaction_completion',
             'display_interaction_presentation',
             'display_interaction_rasterization',
+            'display_msaw_markers',
+            'display_msaw_refusal',
+            'display_msaw_rasterization',
             'nam_session_activation',
             'nam_session_traffic',
             'nam_session_resend',
@@ -204,6 +207,7 @@ def result(injected=False):
             "interaction_selected": 20, "interaction_refused": 20, "interaction_queued": 20,
             "interaction_preflighted": 20, "interaction_completed": 20,
             "interaction_presented": 20, "interaction_rasterized": 20,
+            "msaw_presented": 20, "msaw_refused": 40, "msaw_rasterized": 20,
         },
         "safety": {
             "alloc": 1 if injected else 0, "zeroed": 0, "realloc": 0, "overflow": False,

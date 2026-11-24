@@ -1692,22 +1692,22 @@ fn altitude_allowance_microfeet(duration_ms: f64, rate_fpm: u32) -> Option<i64> 
         return None;
     }
     let microfeet = scaled_product / 60_000.0;
-    if !microfeet.is_finite() || microfeet < 0.0 || microfeet >= I64_UPPER_EXCLUSIVE_F64 {
+    if !microfeet.is_finite() || !(0.0..I64_UPPER_EXCLUSIVE_F64).contains(&microfeet) {
         return None;
     }
     let rounded = oa_ieee::floor(microfeet);
-    if !rounded.is_finite() || rounded < 0.0 || rounded >= I64_UPPER_EXCLUSIVE_F64 {
+    if !rounded.is_finite() || !(0.0..I64_UPPER_EXCLUSIVE_F64).contains(&rounded) {
         return None;
     }
     Some(rounded as i64)
 }
 
 fn cumulative_crossing_ms(elapsed_ms: f64) -> Option<i64> {
-    if !elapsed_ms.is_finite() || elapsed_ms < 0.0 || elapsed_ms >= I64_UPPER_EXCLUSIVE_F64 {
+    if !elapsed_ms.is_finite() || !(0.0..I64_UPPER_EXCLUSIVE_F64).contains(&elapsed_ms) {
         return None;
     }
     let rounded = oa_ieee::ceil(elapsed_ms);
-    if !rounded.is_finite() || rounded < 0.0 || rounded >= I64_UPPER_EXCLUSIVE_F64 {
+    if !rounded.is_finite() || !(0.0..I64_UPPER_EXCLUSIVE_F64).contains(&rounded) {
         return None;
     }
     Some(rounded as i64)

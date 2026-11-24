@@ -48,6 +48,7 @@ const COMPRESSION_DEFLATE_ADOBE: u32 = 32946;
 /// input byte slice, decoded elevation grid, already-retained cache, and a conservative estimate
 /// of the cache cells this grid may add. The latter two values are supplied by the caller. The
 /// working total also includes the parser's bounded segment and tag scratch space.
+// A7.2: cold per-read budget record, size guard waived.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadLimits {
     pub max_grid_bytes: usize,

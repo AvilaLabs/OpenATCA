@@ -235,8 +235,9 @@ impl Qnh {
         max_age_s: i64,
     ) -> Result<Qnh, String> {
         let cutoff_s = cutoff_ms.div_euclid(1000);
-        let mut grouped: BTreeMap<u32, (f64, f64, f64, BTreeMap<i64, (f64, f64)>)> =
-            BTreeMap::new();
+        // A7.2: cold startup station grouping, not a real-time record.
+        type AdmittedStation = (f64, f64, f64, BTreeMap<i64, (f64, f64)>);
+        let mut grouped: BTreeMap<u32, AdmittedStation> = BTreeMap::new();
         let mut retained_rows = 0u64;
         for (name, bytes, received_at_ms) in files {
             if *received_at_ms > cutoff_ms {

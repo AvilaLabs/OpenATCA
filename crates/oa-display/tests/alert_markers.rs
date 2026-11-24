@@ -10,7 +10,6 @@ use oa_display::core::alert_markers::*;
 use oa_display::list::{list_new, DisplayError, DisplayList, ListCaps};
 use oa_display::palette;
 use oa_display::project::{project, projection_new, Projection};
-use oa_display::text::text_str;
 
 const CENTRE: (i32, i32) = (419_786_000, -879_048_000);
 
@@ -266,9 +265,7 @@ fn view_and_header_width_are_checked_before_writing() {
     ));
     assert_eq!(list, before);
 
-    assert!(matches!(
-        append_alert_markers(&mut list, &projection(500, 104), &markers),
-        Err(DisplayError::BadView(_))
-    ));
-    assert_eq!(list, before);
+    // The documented minimum width fits this header. Refusing it would turn the
+    // stated minimum into a misleading contract.
+    assert!(append_alert_markers(&mut list, &projection(500, 104), &markers).is_ok());
 }

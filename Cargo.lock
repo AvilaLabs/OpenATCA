@@ -361,10 +361,14 @@ dependencies = [
 name = "oa-regional-session"
 version = "0.0.1"
 dependencies = [
+ "oa-adsb",
  "oa-airspace",
  "oa-ca",
  "oa-display",
+ "oa-feed",
+ "oa-fixm",
  "oa-flight",
+ "oa-flight-sfdps",
  "oa-ieee",
  "oa-legacy-traj",
  "oa-msaw",
@@ -374,6 +378,8 @@ dependencies = [
  "oa-sealed",
  "oa-sha256",
  "oa-track",
+ "oa-xml",
+ "oa-zip",
 ]
 
 [[package]]

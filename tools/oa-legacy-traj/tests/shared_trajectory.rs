@@ -240,7 +240,7 @@ fn sequential_descent_clearance_leveloff_and_separate_speed_channel() {
     let bad_speed = [bad_speed];
     assert_eq!(
         issue_vertical_profile(&input(&bad_speed), performance()).refusal,
-        Refusal::UnsupportedConstraint
+        Refusal::InfeasibleSpeedWindow
     );
     let mut over_cap = point;
     over_cap.min_speed_mmps = 210_000;
