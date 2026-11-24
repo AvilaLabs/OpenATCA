@@ -25,6 +25,7 @@ pub const MAX_POSITION_AGE_MS: u32 = 30_000;
 /// Why a complete snapshot was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SnapshotError {
+    // A7.2: cold error record; size guard waived.
     /// Raw JSON exceeds the input body limit.
     TooLarge(usize),
     /// JSON syntax or parser limits failed.
@@ -32,13 +33,17 @@ pub enum SnapshotError {
     /// A required envelope field is absent, malformed, or inconsistent.
     Envelope(&'static str),
     /// The reported aircraft count exceeds the decoder limit.
-    TooManyRows(usize),
+    TooManyRows(u64),
     /// API source time/cache time is inconsistent with local receipt.
     ReceiptTime,
     /// Caller requested an unsupported source-position-age limit.
     AgeLimit,
     /// A duplicate key would make field interpretation ambiguous.
     DuplicateKey,
+    /// JSON document exceeded the bounded structural walk.
+    StructureLimit,
+    /// One or more snapshot timestamps fall in a compiled sealed interval.
+    SealedTime,
 }
 
 impl fmt::Display for SnapshotError {
@@ -51,6 +56,8 @@ impl fmt::Display for SnapshotError {
             Self::ReceiptTime => f.write_str("snapshot server and local receipt times are inconsistent"),
             Self::AgeLimit => f.write_str("position-age limit must be 1 to 30000 ms"),
             Self::DuplicateKey => f.write_str("snapshot contains a duplicate object key"),
+            Self::StructureLimit => f.write_str("snapshot JSON structure exceeds decoder limits"),
+            Self::SealedTime => f.write_str("snapshot envelope time intersects a sealed interval"),
         }
     }
 }
@@ -60,6 +67,7 @@ impl std::error::Error for SnapshotError {}
 /// Auditable denominators and source identity counts for a single snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotStats {
+    // A7.2: cold report record; size guard waived.
     /// Exact response byte length.
     pub bytes: u64,
     /// API envelope `now`, Unix milliseconds.
@@ -96,6 +104,10 @@ pub struct SnapshotStats {
     pub with_mlat_fields: u64,
     /// Accepted aircraft entries with nonempty `tisb` field lists.
     pub with_tisb_fields: u64,
+    /// Position rows whose direct ADS-B type conflicts with MLAT/TIS-B-derived fields.
+    pub source_conflict: u64,
+    /// Position rows with missing or malformed `mlat`/`tisb` source identity arrays.
+    pub invalid_source_identity: u64,
     /// Optional fields with malformed or out-of-range values.
     pub bad_optional_fields: u64,
     /// Counts for each entry in [`SOURCE_NAMES`].
@@ -147,24 +159,31 @@ fn parse_address(s: &str) -> Option<u32> {
     Some(if non { n | NON_ICAO } else { n })
 }
 
-fn dupes(doc: &Doc<'_>, n: NodeIx, depth: u8) -> bool {
-    if depth > 64 {
-        return true;
+fn unique_object(doc: &Doc<'_>, n: NodeIx) -> Result<(), SnapshotError> {
+    if doc.len(n) > crate::MAX_OBJECT_MEMBERS { return Err(SnapshotError::StructureLimit); }
+    let mut names: Vec<&str> = Vec::with_capacity(doc.len(n));
+    for (k, _) in doc.members(n) {
+        let Some(key) = doc.str(k) else { return Err(SnapshotError::StructureLimit) };
+        if names.contains(&key) { return Err(SnapshotError::DuplicateKey); }
+        names.push(key);
     }
+    Ok(())
+}
+
+fn validate_tree(doc: &Doc<'_>, n: NodeIx, depth: u8, budget: &mut usize) -> Result<(), SnapshotError> {
+    if depth > 64 { return Err(SnapshotError::StructureLimit); }
+    *budget = budget.checked_sub(1).ok_or(SnapshotError::StructureLimit)?;
     match doc.kind(n) {
         Some(Kind::Object) => {
-            let mut names: Vec<&str> = Vec::with_capacity(doc.len(n));
+            unique_object(doc, n)?;
             for (k, v) in doc.members(n) {
-                let Some(key) = doc.str(k) else { return true };
-                if names.contains(&key) || dupes(doc, v, depth + 1) {
-                    return true;
-                }
-                names.push(key);
+                *budget = budget.checked_sub(1).ok_or(SnapshotError::StructureLimit)?;
+                validate_tree(doc, v, depth + 1, budget)?;
             }
-            false
+            Ok(())
         }
-        Some(Kind::Array) => doc.elements(n).any(|v| dupes(doc, v, depth + 1)),
-        _ => false,
+        Some(Kind::Array) => { for v in doc.elements(n) { validate_tree(doc, v, depth + 1, budget)?; } Ok(()) },
+        _ => Ok(()),
     }
 }
 
@@ -190,26 +209,32 @@ pub fn decode_snapshot(
     let doc = oa_json::parse(json, &limits).map_err(SnapshotError::Json)?;
     let root = NodeIx::ROOT;
     if doc.kind(root) != Some(Kind::Object) { return Err(SnapshotError::Envelope("top level is not an object")); }
-    if dupes(&doc, root, 0) { return Err(SnapshotError::DuplicateKey); }
+    unique_object(&doc, root)?;
     let ac = field(&doc, root, "ac").filter(|n| doc.kind(*n) == Some(Kind::Array)).ok_or(SnapshotError::Envelope("missing ac array"))?;
     let now = int(&doc, root, "now").filter(|x| *x >= 946_684_800_000 && *x < 4_102_444_800_000).ok_or(SnapshotError::Envelope("now must be Unix milliseconds within 2000–2100"))?;
     let ctime = int(&doc, root, "ctime").filter(|x| *x >= 946_684_800_000 && *x < 4_102_444_800_000).ok_or(SnapshotError::Envelope("ctime must be Unix milliseconds within 2000–2100"))?;
     if int(&doc, root, "ptime").is_none_or(|x| x < 0) { return Err(SnapshotError::Envelope("ptime must be a nonnegative integer")); }
-    let total = int(&doc, root, "total").filter(|x| *x >= 0).ok_or(SnapshotError::Envelope("total must be a nonnegative integer"))? as usize;
+    let total_raw = int(&doc, root, "total").filter(|x| *x >= 0).ok_or(SnapshotError::Envelope("total must be a nonnegative integer"))? as u64;
     if doc.get(root, "msg").and_then(|n| doc.str(n)) != Some("No error") { return Err(SnapshotError::Envelope("msg is not No error")); }
+    if total_raw > MAX_SNAPSHOT_ROWS as u64 { return Err(SnapshotError::TooManyRows(total_raw)); }
+    let total = usize::try_from(total_raw).map_err(|_| SnapshotError::TooManyRows(total_raw))?;
     if total != doc.len(ac) { return Err(SnapshotError::Envelope("total does not match ac length")); }
-    if total > MAX_SNAPSHOT_ROWS { return Err(SnapshotError::TooManyRows(total)); }
     // The API documents both as Unix ms. Allow limited network/cache delay, never silently clamp.
     if now > receipt_unix_ms.saturating_add(10_000) || receipt_unix_ms.saturating_sub(now) > 60_000
         || ctime > now.saturating_add(10_000) || now.saturating_sub(ctime) > 60_000 {
         return Err(SnapshotError::ReceiptTime);
     }
+    for ms in [receipt_unix_ms, now, ctime] {
+        let ns = ms.checked_mul(1_000_000).ok_or(SnapshotError::ReceiptTime)?;
+        if oa_sealed::in_sealed_window(ns) { return Err(SnapshotError::SealedTime); }
+    }
+    let mut structure_budget = MAX_SNAPSHOT_NODES;
+    validate_tree(&doc, root, 0, &mut structure_budget)?;
     let mut st = SnapshotStats { bytes: json.len() as u64, server_now_ms: now, server_cache_ms: ctime, aircraft_reported: total as u64, min_seen_pos_ms: u32::MAX, ..SnapshotStats::default() };
     let mut appended = Vec::new();
     for acn in doc.elements(ac) {
         st.aircraft_seen += 1;
         if doc.kind(acn) != Some(Kind::Object) { return Err(SnapshotError::Envelope("ac entry is not an object")); }
-        if dupes(&doc, acn, 0) { return Err(SnapshotError::DuplicateKey); }
         if kind(&doc, field(&doc, acn, "lat")).is_none_or(|k| k == Kind::Null)
             || kind(&doc, field(&doc, acn, "lon")).is_none_or(|k| k == Kind::Null) {
             if field(&doc, acn, "lastPosition").is_some_and(|n| doc.kind(n) == Some(Kind::Object)) { st.last_position_only += 1; }
@@ -219,6 +244,7 @@ pub fn decode_snapshot(
         let Some(hex) = str_field(&doc, acn, "hex").and_then(parse_address) else { st.invalid_address += 1; continue; };
         let Some(age) = number(&doc, acn, "seen_pos").filter(|v| v.is_finite() && *v >= 0.0 && *v * 1000.0 <= f64::from(u32::MAX)) else { st.invalid_age += 1; continue; };
         if age * 1000.0 > f64::from(max_age_ms) { st.too_old += 1; continue; }
+        // Rust f64::round is nearest integer, ties away from zero; retain that published rule.
         let age_ms = (age * 1000.0).round() as u32;
         st.min_seen_pos_ms = st.min_seen_pos_ms.min(age_ms);
         st.max_seen_pos_ms = st.max_seen_pos_ms.max(age_ms);
@@ -235,10 +261,15 @@ pub fn decode_snapshot(
         row.icao = hex; row.time_ns = time_ns; row.lat_e7 = lat_e7; row.lon_e7 = lon_e7;
         let source_name = str_field(&doc, acn, "type").ok_or(SnapshotError::Envelope("aircraft type missing or malformed"))?;
         row.source = SOURCE_NAMES.iter().position(|&s| s == source_name).map_or(SOURCE_UNKNOWN, |i| i as u8);
+        let Some(mlat) = field(&doc, acn, "mlat").filter(|&n| string_array(&doc, n)) else { st.invalid_source_identity += 1; continue; };
+        let Some(tisb) = field(&doc, acn, "tisb").filter(|&n| string_array(&doc, n)) else { st.invalid_source_identity += 1; continue; };
+        let has_mlat = doc.len(mlat) > 0;
+        let has_tisb = doc.len(tisb) > 0;
+        if (row.source == 0 || row.source == 1) && (has_mlat || has_tisb) { st.source_conflict += 1; continue; }
         if let Some(n) = st.source_types.get_mut(usize::from(row.source)) { *n += 1; }
         if row.source != 0 && row.source != 1 { st.non_adsb_position += 1; }
-        match field(&doc, acn, "mlat") { Some(n) if doc.kind(n) == Some(Kind::Array) && doc.len(n) > 0 => st.with_mlat_fields += 1, Some(n) if doc.kind(n) != Some(Kind::Array) && doc.kind(n) != Some(Kind::Null) => st.bad_optional_fields += 1, _ => () }
-        match field(&doc, acn, "tisb") { Some(n) if doc.kind(n) == Some(Kind::Array) && doc.len(n) > 0 => st.with_tisb_fields += 1, Some(n) if doc.kind(n) != Some(Kind::Array) && doc.kind(n) != Some(Kind::Null) => st.bad_optional_fields += 1, _ => () }
+        if has_mlat { st.with_mlat_fields += 1; }
+        if has_tisb { st.with_tisb_fields += 1; }
         if let Some(n) = field(&doc, acn, "alt_baro") {
             match doc.kind(n) {
                 Some(Kind::String | Kind::StringPooled) if doc.str(n) == Some("ground") => row.flags |= crate::F_GROUND,
@@ -246,17 +277,17 @@ pub fn decode_snapshot(
                 Some(Kind::Null) => (), _ => st.bad_optional_fields += 1,
             }
         }
-        set_i32(&doc, acn, "alt_geom", -204_800, 204_800, &mut row.geom_alt_ft, &mut st.bad_optional_fields);
+        set_i32(&doc, acn, "alt_geom", (-204_800, 204_800), &mut row.geom_alt_ft, &mut st.bad_optional_fields);
         match field(&doc, acn, "geom_rate") {
             Some(n) if doc.kind(n) == Some(Kind::Number) => {
-                set_i32(&doc, acn, "geom_rate", -262_144, 262_144, &mut row.vrate_fpm, &mut st.bad_optional_fields);
+                set_i32(&doc, acn, "geom_rate", (-262_144, 262_144), &mut row.vrate_fpm, &mut st.bad_optional_fields);
                 if row.vrate_fpm != NONE_I32 { row.flags |= crate::F_RATE_GEOM; }
             }
             Some(n) if doc.kind(n) != Some(Kind::Null) => st.bad_optional_fields += 1,
-            _ => set_i32(&doc, acn, "baro_rate", -262_144, 262_144, &mut row.vrate_fpm, &mut st.bad_optional_fields),
+            _ => set_i32(&doc, acn, "baro_rate", (-262_144, 262_144), &mut row.vrate_fpm, &mut st.bad_optional_fields),
         }
-        set_scaled_u16(&doc, acn, "gs", 0.0, 6000.0, 10.0, &mut row.gs_dkt, &mut st.bad_optional_fields);
-        set_scaled_u16(&doc, acn, "track", 0.0, 360.0, 10.0, &mut row.track_ddeg, &mut st.bad_optional_fields);
+        set_scaled_u16(&doc, acn, "gs", (0.0, 6000.0), 10.0, &mut row.gs_dkt, &mut st.bad_optional_fields);
+        set_scaled_u16(&doc, acn, "track", (0.0, 360.0), 10.0, &mut row.track_ddeg, &mut st.bad_optional_fields);
         row.track_ddeg = if row.track_ddeg == NONE_U16 { NONE_U16 } else { row.track_ddeg % 3600 };
         set_u8(&doc, acn, "nic", 11, &mut row.nic, &mut st.bad_optional_fields);
         set_u8(&doc, acn, "nac_p", 15, &mut row.nac_p, &mut st.bad_optional_fields);
@@ -299,14 +330,18 @@ pub fn decode_snapshot(
     Ok(st)
 }
 
-fn set_i32(doc: &Doc<'_>, obj: NodeIx, key: &str, lo: i64, hi: i64, dst: &mut i32, bad: &mut u64) {
-    match (field(doc,obj,key), int(doc,obj,key)) { (None,_) => (), (Some(n),_) if doc.kind(n)==Some(Kind::Null) => (), (_,Some(v)) if (lo..=hi).contains(&v) => *dst=v as i32, (Some(_),_) => *bad+=1, _ => () }
+fn string_array(doc: &Doc<'_>, n: NodeIx) -> bool {
+    doc.kind(n) == Some(Kind::Array) && doc.elements(n).all(|v| matches!(doc.kind(v), Some(Kind::String | Kind::StringPooled)))
+}
+
+fn set_i32(doc: &Doc<'_>, obj: NodeIx, key: &str, bounds: (i64, i64), dst: &mut i32, bad: &mut u64) {
+    match (field(doc,obj,key), int(doc,obj,key)) { (None,_) => (), (Some(n),_) if doc.kind(n)==Some(Kind::Null) => (), (_,Some(v)) if (bounds.0..=bounds.1).contains(&v) => *dst=v as i32, (Some(_),_) => *bad+=1 }
 }
 fn set_u8(doc: &Doc<'_>, obj: NodeIx, key: &str, hi: i64, dst: &mut u8, bad: &mut u64) {
-    match (field(doc,obj,key),int(doc,obj,key)) { (None,_) => (), (Some(n),_) if doc.kind(n)==Some(Kind::Null) => (), (_,Some(v)) if (0..=hi).contains(&v) => *dst=v as u8, (Some(_),_) => *bad+=1, _ => () }
+    match (field(doc,obj,key),int(doc,obj,key)) { (None,_) => (), (Some(n),_) if doc.kind(n)==Some(Kind::Null) => (), (_,Some(v)) if (0..=hi).contains(&v) => *dst=v as u8, (Some(_),_) => *bad+=1 }
 }
-fn set_scaled_u16(doc: &Doc<'_>, obj: NodeIx, key: &str, lo: f64, hi: f64, scale: f64, dst: &mut u16, bad: &mut u64) {
-    match (field(doc,obj,key),optional_number(doc,obj,key)) { (None,_) => (), (Some(n),_) if doc.kind(n)==Some(Kind::Null) => (), (_,Some(v)) if (lo..=hi).contains(&v) => *dst=(v*scale).round() as u16, (Some(_),_) => *bad+=1, _ => () }
+fn set_scaled_u16(doc: &Doc<'_>, obj: NodeIx, key: &str, bounds: (f64, f64), scale: f64, dst: &mut u16, bad: &mut u64) {
+    match (field(doc,obj,key),optional_number(doc,obj,key)) { (None,_) => (), (Some(n),_) if doc.kind(n)==Some(Kind::Null) => (), (_,Some(v)) if v.is_finite() && (bounds.0..=bounds.1).contains(&v) => *dst=(v*scale).round() as u16, (Some(_),_) => *bad+=1 }
 }
 fn sort_new_rows(out: &mut Reports, count: usize) {
     let start = out.time_ns.len().saturating_sub(count);

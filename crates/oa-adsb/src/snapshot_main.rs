@@ -45,7 +45,7 @@ fn run() -> Result<(), String> {
     let st = decode_snapshot(&body, received_ms, max_age_ms, &ZAU_BOX, &mut reports).map_err(|e| e.to_string())?;
     let n = reports_len(&reports);
     if n == 0 {
-        eprintln!("snapshot: bytes={} reported={} accepted=0 no_position={} last_position_only={} invalid_address={} invalid_age={} too_old={} invalid_position={} outside_box={} reserved={} sealed_window={} non_adsb={} mlat_fields={} tisb_fields={} bad_optional={}", st.bytes, st.aircraft_reported, st.no_position, st.last_position_only, st.invalid_address, st.invalid_age, st.too_old, st.invalid_position, st.outside_box, st.reserved_address, st.sealed_window_dropped, st.non_adsb_position, st.with_mlat_fields, st.with_tisb_fields, st.bad_optional_fields);
+        eprintln!("snapshot: bytes={} reported={} accepted=0 no_position={} last_position_only={} invalid_address={} invalid_age={} too_old={} invalid_position={} outside_box={} reserved={} sealed_window={} non_adsb={} mlat_fields={} tisb_fields={} source_conflict={} invalid_source_identity={} bad_optional={}", st.bytes, st.aircraft_reported, st.no_position, st.last_position_only, st.invalid_address, st.invalid_age, st.too_old, st.invalid_position, st.outside_box, st.reserved_address, st.sealed_window_dropped, st.non_adsb_position, st.with_mlat_fields, st.with_tisb_fields, st.source_conflict, st.invalid_source_identity, st.bad_optional_fields);
         return Ok(());
     }
     if n > MAX_ROWS_PER_FRAME { return Err("snapshot row cap exceeds one ADS3 frame".into()); }
@@ -58,7 +58,7 @@ fn run() -> Result<(), String> {
     let mut frame = vec![0u8; MAX_FRAME_LEN];
     let len = encode_frame_mono(&mut frame, 1, FLAG_BYTES, seq, received_ms.saturating_mul(1_000_000), received_ms, mono_ns, &payload).ok_or("OAF frame overflow")?;
     io::stdout().write_all(frame.get(..len).ok_or("short encoded frame")?).and_then(|()| io::stdout().flush()).map_err(|e| e.to_string())?;
-    eprintln!("snapshot: bytes={} server_now_ms={} server_cache_ms={} reported={} accepted={} no_position={} last_position_only={} invalid_address={} invalid_age={} too_old={} invalid_position={} outside_box={} reserved={} sealed_window={} non_adsb={} mlat_fields={} tisb_fields={} bad_optional={} seen_pos_ms_min={} seen_pos_ms_max={} source_types={:?}", st.bytes, st.server_now_ms, st.server_cache_ms, st.aircraft_reported, st.accepted, st.no_position, st.last_position_only, st.invalid_address, st.invalid_age, st.too_old, st.invalid_position, st.outside_box, st.reserved_address, st.sealed_window_dropped, st.non_adsb_position, st.with_mlat_fields, st.with_tisb_fields, st.bad_optional_fields, st.min_seen_pos_ms, st.max_seen_pos_ms, st.source_types);
+    eprintln!("snapshot: bytes={} server_now_ms={} server_cache_ms={} reported={} accepted={} no_position={} last_position_only={} invalid_address={} invalid_age={} too_old={} invalid_position={} outside_box={} reserved={} sealed_window={} non_adsb={} mlat_fields={} tisb_fields={} source_conflict={} invalid_source_identity={} bad_optional={} seen_pos_ms_min={} seen_pos_ms_max={} source_types={:?}", st.bytes, st.server_now_ms, st.server_cache_ms, st.aircraft_reported, st.accepted, st.no_position, st.last_position_only, st.invalid_address, st.invalid_age, st.too_old, st.invalid_position, st.outside_box, st.reserved_address, st.sealed_window_dropped, st.non_adsb_position, st.with_mlat_fields, st.with_tisb_fields, st.source_conflict, st.invalid_source_identity, st.bad_optional_fields, st.min_seen_pos_ms, st.max_seen_pos_ms, st.source_types);
     Ok(())
 }
 

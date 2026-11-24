@@ -69,8 +69,11 @@ fn total_mismatch_duplicate_keys_bad_age_and_sealed_time_are_not_silently_repair
     let stats = decode_snapshot(&missing_age, NOW_MS, 15_000, &ZAU_BOX, &mut out).unwrap();
     assert_eq!(stats.invalid_age, 1);
     let sealed_now = 1_795_132_800_000i64;
-    let sealed = format!(r#"{{"ac":[{}],"ctime":{},"msg":"No error","now":{},"ptime":1,"total":1}}"#, ac("a1b2c3", "1", ""), sealed_now, sealed_now).into_bytes();
-    let stats = decode_snapshot(&sealed, sealed_now + 1, 15_000, &Filter { from_ns: 0, to_ns: i64::MAX, ..ZAU_BOX }, &mut out).unwrap();
+    let sealed = format!(r#"{{"ac":[],"ctime":{},"msg":"No error","now":{},"ptime":1,"total":0}}"#, sealed_now, sealed_now).into_bytes();
+    assert!(matches!(decode_snapshot(&sealed, sealed_now, 15_000, &ZAU_BOX, &mut out), Err(oa_adsb::SnapshotError::SealedTime)));
+    let just_after_window = 1_795_393_930_000i64;
+    let row_sealed = format!(r#"{{"ac":[{}],"ctime":{},"msg":"No error","now":{},"ptime":1,"total":1}}"#, ac("a1b2c3", "20", ""), just_after_window, just_after_window).into_bytes();
+    let stats = decode_snapshot(&row_sealed, just_after_window + 1, 15_000, &Filter { from_ns: 0, to_ns: i64::MAX, ..ZAU_BOX }, &mut out).unwrap();
     assert_eq!(stats.sealed_window_dropped, 1);
 }
 
@@ -95,6 +98,28 @@ fn age_limit_is_applied_to_raw_value_not_rounded_milliseconds() {
     let stats = decode_snapshot(&body(&item, 1), NOW_MS + 1, 15_000, &ZAU_BOX, &mut out).unwrap();
     assert_eq!(stats.too_old, 1);
     assert_eq!(stats.accepted, 0);
+}
+
+#[test]
+fn source_flags_must_be_present_and_cannot_conflict_with_direct_adsb_type() {
+    let conflict = ac("a1b2c3", "1", "").replace("\"mlat\":[]", "\"mlat\":[\"lat\"]");
+    let missing = r#"{"hex":"a1b2c4","type":"adsb_icao","seen_pos":1,"lat":41.9,"lon":-87.9}"#;
+    let items = format!("{conflict},{missing}");
+    let mut out = Reports::default();
+    let stats = decode_snapshot(&body(&items, 2), NOW_MS + 1, 15_000, &ZAU_BOX, &mut out).unwrap();
+    assert_eq!(stats.aircraft_seen, 2);
+    assert_eq!(stats.source_conflict, 1);
+    assert_eq!(stats.invalid_source_identity, 1);
+    assert_eq!(stats.accepted, 0);
+}
+
+#[test]
+fn object_member_limit_is_enforced_before_row_decoding() {
+    let extra = (0..140).map(|i| format!(r#""extra{i}":0"#)).collect::<Vec<_>>().join(",");
+    let item = ac("a1b2c3", "1", &format!(",{extra}"));
+    let mut out = Reports::default();
+    assert!(matches!(decode_snapshot(&body(&item, 1), NOW_MS + 1, 15_000, &ZAU_BOX, &mut out), Err(oa_adsb::SnapshotError::StructureLimit)));
+    assert!(out.time_ns.is_empty());
 }
 
 #[test]

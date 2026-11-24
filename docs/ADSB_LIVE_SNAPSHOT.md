@@ -46,7 +46,13 @@ never relabeled as ADS-B.
 There are no callsign or proximity joins. Ground state is set only by `alt_baro: "ground"`; a
 missing altitude remains missing. Quality values are retained only when within the crate's known
 field ranges; absent or malformed values are not filled in. The raw response and per-snapshot
-stderr summary preserve the exact source inputs and exclusions.
+stderr summary preserve the exact source inputs and exclusions. Every JSON object is capped at
+128 members and the structural walk is depth/node bounded. The envelope's local receipt, server
+`now`, and `ctime` are checked against sealed windows before the aircraft array is decoded;
+individual estimated position times are also checked. The `mlat` and `tisb` identity arrays must
+be present and well formed on position rows. A direct ADS-B type paired with nonempty
+MLAT/TIS-B-derived fields is counted as a source conflict and excluded from reports, so it
+cannot be treated as independent ADS-B truth.
 
 The capture wrapper has fixed ceilings: 300 seconds, polling no faster than every 5 seconds, 60
 responses, 1 MiB per response, 64 MiB cumulative response bytes, 256 MiB OAF bytes, 15-second
