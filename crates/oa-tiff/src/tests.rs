@@ -808,6 +808,44 @@ fn declared_size_is_checked_against_the_data_before_allocating() {
 
 // REQ: OA-TIFF-030
 #[test]
+fn caller_grid_and_working_limits_refuse_before_output_allocation() {
+    let bytes = build(&Spec::new(20, 20, surface(20, 20)));
+    let base = ReadLimits {
+        max_grid_bytes: 4096,
+        max_working_bytes: usize::MAX,
+        max_retained_bytes: usize::MAX,
+        retained_bytes: 0,
+        future_retained_bytes: 0,
+    };
+    assert!(read_geotiff_bounded(&bytes, base).is_ok());
+
+    let mut limits = base;
+    limits.max_grid_bytes = 100;
+    assert!(matches!(
+        read_geotiff_bounded(&bytes, limits),
+        Err(TiffError::ReadBudgetExceeded { what: "decoded grid bytes", .. })
+    ));
+
+    let mut limits = base;
+    limits.max_retained_bytes = 10;
+    limits.retained_bytes = 9;
+    limits.future_retained_bytes = 2;
+    assert!(matches!(
+        read_geotiff_bounded(&bytes, limits),
+        Err(TiffError::ReadBudgetExceeded { what: "terrain retained bytes", .. })
+    ));
+
+    let mut limits = base;
+    limits.max_working_bytes = bytes.len() + 1600 + 1;
+    limits.retained_bytes = 1;
+    assert!(matches!(
+        read_geotiff_bounded(&bytes, limits),
+        Err(TiffError::ReadBudgetExceeded { what: "terrain working bytes", .. })
+    ));
+}
+
+// REQ: OA-TIFF-030
+#[test]
 fn only_top_left_orientation_is_accepted() {
     let mut s = Spec::new(8, 6, surface(8, 6));
     for o in [None, Some(1)] {

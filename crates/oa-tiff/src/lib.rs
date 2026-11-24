@@ -56,7 +56,7 @@ pub use grid::{
     max_elevation_in_polygon, max_elevation_in_radius, tileset_covers, Elevation, Grid, MaxQuery,
     Peak, QueryError, TileSet,
 };
-pub use tiff::read_geotiff;
+pub use tiff::{read_geotiff, read_geotiff_bounded, ReadLimits};
 
 use std::fmt;
 use std::path::Path;
@@ -75,6 +75,8 @@ pub const MAX_DIMENSION: u32 = 65_536;
 pub const MAX_PIXELS: u64 = 1 << 26;
 /// Limit: largest uncompressed strip or tile, 64 MiB.
 pub const MAX_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+/// Conservative temporary storage for decoding one bounded segment plus TIFF tag arrays.
+pub const MAX_READ_SCRATCH_BYTES: usize = (3 * MAX_SEGMENT_BYTES as usize) + (32 * 1024 * 1024);
 /// Limit: most `GeoKeyDirectory` keys.
 pub const MAX_GEO_KEYS: usize = 1024;
 /// Limit: longest ASCII tag value (`GDAL_NODATA`, `GeoAsciiParams`), 64 KiB.
@@ -143,6 +145,12 @@ pub enum TiffError {
         /// The limit.
         limit: u64,
     },
+    /// A caller's per-read allocation budget was exceeded before the output grid was allocated.
+    ReadBudgetExceeded {
+        what: &'static str,
+        value: u64,
+        limit: u64,
+    },
     /// A valid TIFF feature this reader does not implement.
     Unsupported {
         /// The feature.
@@ -188,6 +196,9 @@ impl fmt::Display for TiffError {
             TiffError::MissingTag(t) => write!(f, "missing required tag {t}"),
             TiffError::TooLarge { what, value, limit } => {
                 write!(f, "{what} is {value}, over the {limit} limit")
+            }
+            TiffError::ReadBudgetExceeded { what, value, limit } => {
+                write!(f, "{what} is {value}, over the caller's {limit} read budget")
             }
             TiffError::Unsupported { what, value } => write!(f, "unsupported {what}: {value}"),
             TiffError::BadValue(w) => write!(f, "bad value: {w}"),

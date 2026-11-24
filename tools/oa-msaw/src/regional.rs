@@ -18,6 +18,9 @@ use crate::qnh::Qnh;
 pub const DEFAULT_MAX_CONFIG_BYTES: u64 = 1 << 20;
 pub const DEFAULT_MAX_TERRAIN_TILES: usize = 64;
 pub const DEFAULT_MAX_TERRAIN_FILE_BYTES: u64 = 128 * 1024 * 1024;
+pub const DEFAULT_MAX_TERRAIN_GRID_BYTES: usize = 128 * 1024 * 1024;
+/// Peak read budget includes source bytes, decoded grid, current/future coarse cache and parser scratch.
+pub const DEFAULT_MAX_TERRAIN_WORKING_BYTES: usize = 640 * 1024 * 1024;
 pub const DEFAULT_MAX_TERRAIN_RESIDENT_BYTES: usize = 128 * 1024 * 1024;
 /// `CoarseTerrain::lookup` refuses above 250,000 cells; the service uses the same hard ceiling.
 pub const DEFAULT_MAX_TERRAIN_QUERY_CELLS: u64 = 250_000;
@@ -31,7 +34,7 @@ pub const DEFAULT_MAX_DOF_COVERAGE_CELLS: u64 = 300_000;
 pub const DEFAULT_MAX_METAR_FILES: usize = 32;
 pub const DEFAULT_MAX_METAR_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub const DEFAULT_MAX_METAR_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
-pub const DEFAULT_MAX_GTM_POLYGON_BYTES: u64 = 1 * 1024 * 1024;
+pub const DEFAULT_MAX_GTM_POLYGON_BYTES: u64 = 1024 * 1024;
 pub const DEFAULT_MAX_GTM_POLYGON_VERTICES: usize = 100_000;
 
 /// A METAR source and the caller's receipt-time evidence. Receipt is per file, not a global
@@ -61,6 +64,8 @@ pub struct RegionalDataLimits {
     pub max_config_bytes: u64,
     pub max_terrain_tiles: usize,
     pub max_terrain_file_bytes: u64,
+    pub max_terrain_grid_bytes: usize,
+    pub max_terrain_working_bytes: usize,
     pub max_terrain_resident_bytes: usize,
     pub max_terrain_query_cells: u64,
     pub max_dof_files: usize,
@@ -83,6 +88,8 @@ impl Default for RegionalDataLimits {
             max_config_bytes: DEFAULT_MAX_CONFIG_BYTES,
             max_terrain_tiles: DEFAULT_MAX_TERRAIN_TILES,
             max_terrain_file_bytes: DEFAULT_MAX_TERRAIN_FILE_BYTES,
+            max_terrain_grid_bytes: DEFAULT_MAX_TERRAIN_GRID_BYTES,
+            max_terrain_working_bytes: DEFAULT_MAX_TERRAIN_WORKING_BYTES,
             max_terrain_resident_bytes: DEFAULT_MAX_TERRAIN_RESIDENT_BYTES,
             max_terrain_query_cells: DEFAULT_MAX_TERRAIN_QUERY_CELLS,
             max_dof_files: DEFAULT_MAX_DOF_FILES,
@@ -158,12 +165,11 @@ pub struct RegionalData {
 
 fn checked_limits(l: RegionalDataLimits) -> Result<(), String> {
     let d = RegionalDataLimits::default();
-    if l.max_config_bytes == 0
-        || l.max_config_bytes > d.max_config_bytes
-        || l.max_terrain_tiles == 0
-        || l.max_terrain_tiles > d.max_terrain_tiles
-        || l.max_terrain_file_bytes == 0
-        || l.max_terrain_file_bytes > d.max_terrain_file_bytes
+    if l.max_config_bytes == 0 || l.max_config_bytes > d.max_config_bytes
+        || l.max_terrain_tiles == 0 || l.max_terrain_tiles > d.max_terrain_tiles
+        || l.max_terrain_file_bytes == 0 || l.max_terrain_file_bytes > d.max_terrain_file_bytes
+        || l.max_terrain_grid_bytes == 0 || l.max_terrain_grid_bytes > d.max_terrain_grid_bytes
+        || l.max_terrain_working_bytes == 0 || l.max_terrain_working_bytes > d.max_terrain_working_bytes
         || l.max_terrain_resident_bytes == 0
         || l.max_terrain_resident_bytes > d.max_terrain_resident_bytes
         || l.max_terrain_query_cells == 0
@@ -199,7 +205,7 @@ fn checked_limits(l: RegionalDataLimits) -> Result<(), String> {
 }
 
 fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
-    let file = open_guarded(&Sealed::production(), path).map_err(|e| match e {
+    let file = open_guarded(Sealed::production(), path).map_err(|e| match e {
         OpenFail::Refused(m) | OpenFail::Io(m) => m,
     })?;
     let mut bytes = Vec::new();
@@ -260,6 +266,8 @@ fn manifest_hash(
     for value in [
         limits.max_config_bytes,
         limits.max_terrain_file_bytes,
+        u64::try_from(limits.max_terrain_grid_bytes).unwrap_or(u64::MAX),
+        u64::try_from(limits.max_terrain_working_bytes).unwrap_or(u64::MAX),
         limits.max_dof_compressed_file_bytes,
         limits.max_dof_compressed_total_bytes,
         limits.max_dof_data_bytes,
@@ -463,13 +471,8 @@ pub fn load_regional_data(
         return Err(format!("more than {} METAR files", limits.max_metar_files));
     }
     if let Some(dir) = &paths.terrain_dir {
-        crate::guard::refuse_sealed(&Sealed::production(), dir)?;
-        if !dir.is_dir() {
-            return Err(format!(
-                "{}: terrain path is not a directory",
-                dir.display()
-            ));
-        }
+        crate::guard::refuse_sealed(Sealed::production(), dir)?;
+        if !dir.is_dir() { return Err(format!("{}: terrain path is not a directory", dir.display())); }
     }
 
     let config_bytes = read_bounded(&paths.config, limits.max_config_bytes)?;
@@ -585,6 +588,8 @@ pub fn load_regional_data(
     floors.set_terrain_limits(TerrainServiceLimits {
         max_tiles: limits.max_terrain_tiles,
         max_file_bytes: limits.max_terrain_file_bytes,
+        max_grid_bytes: limits.max_terrain_grid_bytes,
+        max_working_bytes: limits.max_terrain_working_bytes,
         max_resident_bytes: limits.max_terrain_resident_bytes,
         max_query_cells: limits.max_terrain_query_cells,
     });

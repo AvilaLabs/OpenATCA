@@ -36,11 +36,26 @@ const TAG_NODATA: u16 = 42113;
 /// Most output bytes DEFLATE can produce per input byte (258-byte matches at 2 bits each); LZW
 /// is far below it. A segment that declares more than this is not honest data.
 const MAX_COMPRESSION_RATIO: u64 = 1032;
+// Peak temporary parser storage: a raw segment, its decoded sample vector, and bounded tag arrays.
+const MAX_READ_TEMP_BYTES: usize = crate::MAX_READ_SCRATCH_BYTES;
 
 const COMPRESSION_NONE: u32 = 1;
 const COMPRESSION_LZW: u32 = 5;
 const COMPRESSION_DEFLATE: u32 = 8;
 const COMPRESSION_DEFLATE_ADOBE: u32 = 32946;
+
+/// Caller-supplied decoded-memory bounds for one GeoTIFF read. `max_working_bytes` covers the
+/// input byte slice, decoded elevation grid, already-retained cache, and a conservative estimate
+/// of the cache cells this grid may add. The latter two values are supplied by the caller. The
+/// working total also includes the parser's bounded segment and tag scratch space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadLimits {
+    pub max_grid_bytes: usize,
+    pub max_working_bytes: usize,
+    pub max_retained_bytes: usize,
+    pub retained_bytes: usize,
+    pub future_retained_bytes: usize,
+}
 
 /// One 12-byte IFD entry, still unread.
 #[derive(Clone, Copy)]
@@ -244,6 +259,18 @@ fn bytes_per_sample(f: Format) -> usize {
 
 /// Reads the first image of a classic TIFF / GeoTIFF into an elevation [`Grid`].
 pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
+    read_geotiff_inner(data, None)
+}
+
+/// Reads one GeoTIFF only when its decoded grid and total peak memory fit `limits`.
+/// The limits are checked after bounded TIFF metadata/segment validation and before allocating
+/// the output elevation array. `future_retained_bytes` must conservatively bound the retained
+/// cache growth caused by adding this grid.
+pub fn read_geotiff_bounded(data: &[u8], limits: ReadLimits) -> Result<Grid, TiffError> {
+    read_geotiff_inner(data, Some(limits))
+}
+
+fn read_geotiff_inner(data: &[u8], limits: Option<ReadLimits>) -> Result<Grid, TiffError> {
     if data.len() as u64 > MAX_FILE_BYTES {
         return Err(TiffError::FileTooLarge(data.len() as u64));
     }
@@ -523,6 +550,46 @@ pub fn read_geotiff(data: &[u8]) -> Result<Grid, TiffError> {
             return Err(TiffError::Decompress {
                 segment: idx,
                 reason: "segment byte count cannot hold the declared image",
+            });
+        }
+    }
+
+    let grid_bytes_u64 = pixels
+        .checked_mul(u64::try_from(std::mem::size_of::<f32>()).unwrap_or(u64::MAX))
+        .ok_or(TiffError::BadValue("decoded grid byte count overflow"))?;
+    if let Some(limits) = limits {
+        let grid_bytes = usize::try_from(grid_bytes_u64).map_err(|_| TiffError::ReadBudgetExceeded {
+            what: "decoded grid bytes",
+            value: grid_bytes_u64,
+            limit: limits.max_grid_bytes as u64,
+        })?;
+        if grid_bytes > limits.max_grid_bytes {
+            return Err(TiffError::ReadBudgetExceeded {
+                what: "decoded grid bytes",
+                value: grid_bytes_u64,
+                limit: limits.max_grid_bytes as u64,
+            });
+        }
+        let retained = limits.retained_bytes
+            .checked_add(limits.future_retained_bytes)
+            .ok_or(TiffError::BadValue("retained byte count overflow"))?;
+        if retained > limits.max_retained_bytes {
+            return Err(TiffError::ReadBudgetExceeded {
+                what: "terrain retained bytes",
+                value: u64::try_from(retained).unwrap_or(u64::MAX),
+                limit: limits.max_retained_bytes as u64,
+            });
+        }
+        let working = data.len()
+            .checked_add(grid_bytes)
+            .and_then(|n| n.checked_add(retained))
+            .and_then(|n| n.checked_add(MAX_READ_TEMP_BYTES))
+            .ok_or(TiffError::BadValue("working byte count overflow"))?;
+        if working > limits.max_working_bytes {
+            return Err(TiffError::ReadBudgetExceeded {
+                what: "terrain working bytes",
+                value: u64::try_from(working).unwrap_or(u64::MAX),
+                limit: limits.max_working_bytes as u64,
             });
         }
     }

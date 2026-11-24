@@ -516,12 +516,15 @@ pub struct Floors {
     pub stats: FloorStats,
 }
 
-/// Optional bounds for a reusable terrain service. Unbounded legacy constructors retain their
-/// historical behavior; the regional startup adapter always installs these bounds.
+/// Optional bounds for a reusable terrain service. `max_resident_bytes` caps retained coarse
+/// cache data; `max_working_bytes` caps the simultaneous source, decode, cache and parser memory.
+/// Unbounded legacy constructors retain their historical behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TerrainServiceLimits {
     pub max_tiles: usize,
     pub max_file_bytes: u64,
+    pub max_grid_bytes: usize,
+    pub max_working_bytes: usize,
     pub max_resident_bytes: usize,
     pub max_query_cells: u64,
 }
@@ -559,24 +562,61 @@ pub fn read_tile(path: &Path) -> Result<Grid, String> {
     oa_tiff::read_geotiff(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Reads one terrain source under the regional service's tighter byte cap, before TIFF parsing.
-fn read_tile_bounded(path: &Path, limit: u64) -> Result<(Grid, [u8; 32]), String> {
-    let file = open_guarded(&Sealed::production(), path).map_err(|e| match e {
+/// Reads one terrain source under explicit file, decode and combined working-memory caps.
+const MAX_COARSE_BLOCKS_PER_TILE: usize = 9;
+const COARSE_BLOCK_BYTES: usize = 500 * 500 * 2;
+
+fn read_tile_bounded(
+    path: &Path,
+    limits: TerrainServiceLimits,
+    retained_bytes: usize,
+) -> Result<Option<(Grid, [u8; 32])>, String> {
+    let future_retained_bytes = MAX_COARSE_BLOCKS_PER_TILE.saturating_mul(COARSE_BLOCK_BYTES);
+    let fixed_bytes = retained_bytes
+        .checked_add(future_retained_bytes)
+        .and_then(|n| n.checked_add(limits.max_grid_bytes))
+        .and_then(|n| n.checked_add(oa_tiff::MAX_READ_SCRATCH_BYTES));
+    let Some(input_budget) = fixed_bytes
+        .and_then(|fixed| limits.max_working_bytes.checked_sub(fixed))
+    else {
+        return Ok(None);
+    };
+    let input_limit = usize::try_from(limits.max_file_bytes)
+        .unwrap_or(usize::MAX)
+        .min(input_budget);
+    let file = open_guarded(Sealed::production(), path).map_err(|e| match e {
         OpenFail::Refused(m) | OpenFail::Io(m) => m,
     })?;
     let mut bytes = Vec::new();
-    let mut limited = std::io::Read::take(file, limit.saturating_add(1));
+    let mut limited = std::io::Read::take(
+        file,
+        u64::try_from(input_limit).unwrap_or(u64::MAX).saturating_add(1),
+    );
     std::io::Read::read_to_end(&mut limited, &mut bytes)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
-        return Err(format!(
-            "{}: terrain file exceeds {limit} bytes",
-            path.display()
-        ));
+    if bytes.len() > input_limit {
+        return Ok(None);
     }
+    let read_limits = oa_tiff::ReadLimits {
+        max_grid_bytes: limits.max_grid_bytes,
+        max_working_bytes: limits.max_working_bytes,
+        max_retained_bytes: limits.max_resident_bytes,
+        retained_bytes,
+        future_retained_bytes,
+    };
     let hash = sha256(&bytes);
-    let grid = oa_tiff::read_geotiff(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok((grid, hash))
+    let grid = match oa_tiff::read_geotiff_bounded(&bytes, read_limits) {
+        Ok(grid) => grid,
+        Err(oa_tiff::TiffError::ReadBudgetExceeded { .. }) => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    Ok(Some((grid, hash)))
+}
+
+fn retained_budget_fits(limits: TerrainServiceLimits, retained_bytes: usize) -> bool {
+    retained_bytes
+        .checked_add(MAX_COARSE_BLOCKS_PER_TILE.saturating_mul(COARSE_BLOCK_BYTES))
+        .is_some_and(|bytes| bytes <= limits.max_resident_bytes)
 }
 
 impl Floors {
@@ -835,16 +875,31 @@ impl Floors {
         match tile_name(cell.0, cell.1).map(|n| dir.join(n)) {
             Some(p) => {
                 let sealed = Sealed::production();
-                refuse_sealed(&sealed, &p)?;
+                refuse_sealed(sealed, &p)?;
                 if !p.is_file() {
                     self.absent.insert(cell);
                     self.stats.tiles_absent += 1;
                     return Ok(());
                 }
+                if self.terrain_limits.is_some_and(|limits| {
+                    !retained_budget_fits(limits, self.coarse.bytes())
+                }) {
+                    self.refused.insert(cell);
+                    self.stats.tiles_refused += 1;
+                    self.stats.terrain_budget_refused += 1;
+                    return Ok(());
+                }
                 let t0 = Instant::now();
                 let (g, hash) = match self.terrain_limits {
                     Some(limits) => {
-                        let (grid, hash) = read_tile_bounded(&p, limits.max_file_bytes)?;
+                        let Some((grid, hash)) =
+                            read_tile_bounded(&p, limits, self.coarse.bytes())?
+                        else {
+                            self.refused.insert(cell);
+                            self.stats.tiles_refused += 1;
+                            self.stats.terrain_budget_refused += 1;
+                            return Ok(());
+                        };
                         (grid, Some(hash))
                     }
                     None => {
