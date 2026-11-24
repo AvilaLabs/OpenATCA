@@ -56,8 +56,9 @@ speed kinds distinguish no restriction, minimum, maximum, window and unsupported
 groundspeed, indicated airspeed and unknown. Only an explicitly groundspeed-referenced constraint
 can be compared with observed groundspeed. Indicated-airspeed restrictions and unsupported route
 forms are retained and declared as unsupported, never dropped or reinterpreted. Published route
-altitude restrictions (including procedure altitude restrictions) remain unsupported by this
-baseline because it has no altitude-crossing feasibility solver.
+altitude restrictions (including procedure altitude restrictions) remain unsupported by the
+constant-motion baseline. The explicitly selected `issue_vertical_profile` mode adds a separate,
+evidence-backed altitude-crossing feasibility check; baseline behavior and ABI are unchanged.
 
 The route slice may contain at most 256 points. The named checked forecast-work budget is
 `MAX_FORECAST_WORK = 24,063` units at that maximum route size. The active cursor is required:
@@ -86,9 +87,9 @@ that boundary; the model does not teleport a level aircraft or reverse motion th
 from it. Static inverted altitude windows are refused only when the associated clearance evidence
 is eligible at the cutoff; future or otherwise unavailable clearance payload values cannot affect
 route feasibility or suppress the horizontal forecast. Unavailable clearance leaves altitude
-unavailable and the horizon explicitly degraded. A valid altitude-crossing feasibility solver
-along the route/profile is **not implemented**. Published route altitude constraints are reported
-as unsupported by this baseline rather than treated as a solved vertical profile. Unsupported
+unavailable and the horizon explicitly degraded. Sequential altitude-crossing feasibility is
+available only through the optional API below. Published route altitude constraints remain
+unsupported by this fixed-motion baseline. Unsupported
 geometry, gaps, route end and invalid inputs have named refusal/degraded states. A vector gap
 crossed by a horizon remains flagged and degrades that horizon; ETA across a gap is refused. A
 repeated exact target identity in the active suffix is refused as an ambiguous ETA target rather
@@ -98,6 +99,54 @@ The output flags disclose that wind, aircraft performance and forward uncertaint
 modelled. In particular, constant groundspeed is not a wind-corrected airspeed forecast, and no
 confidence interval or confidence score is invented. This component has no operational-service
 qualification and makes no operational-safety or legacy-superiority claim.
+
+## Optional vertical profile feasibility
+
+`issue_vertical_profile` is an explicit API selection; ordinary `issue_trajectory` behavior and
+its fixed output layout do not change. It accepts the same route, flight key, active cursor, track,
+clearance and cutoff plus a `PerformanceEnvelope`. The envelope states whether evidence is measured
+or empirical-model based, its source and availability times, message identifier, maximum age, and
+positive maximum climb, descent and groundspeed values. Missing, contradictory, stale or future
+performance evidence is refused. The caller supplies performance; this API does not infer aircraft
+type, fall back to an aircraft class or synthesize a default rate.
+
+For each active suffix point, crossing time is distance from the prior point divided by measured
+track groundspeed. The route suffix starts at the track position and exact unique cursor identity.
+At successive crossings, the reachable altitude interval expands from the previous feasible
+interval by the declared climb and descent bounds for elapsed time, then intersects the point's
+altitude restriction and any eligible supported exact/window clearance. Sequential set propagation
+means each reported interval has at least one path through all earlier restrictions. Exact altitude
+restrictions and exact clearance bounds hold the interval at that altitude at later crossings while
+the same constraint remains active, representing a feasible level-off. This does not claim a fitted
+vertical profile, rate-of-climb acceleration or a particular chosen path inside a feasible interval.
+It starts from reported altitude and does not model the track's instantaneous vertical rate or
+vertical-rate acceleration.
+Crossing times use constant observed groundspeed and do not include wind.
+
+Altitude and speed restrictions remain separate channels. The output retains measured groundspeed
+per crossing. Explicit groundspeed restrictions are checked against that observed speed; a minimum
+above the declared maximum groundspeed is infeasible. A mismatch that could be fixed by a future
+speed command is reported unsupported because this API has no explicit speed-command intent.
+Indicated-airspeed and unknown-reference restrictions are never converted to groundspeed. The
+maximum groundspeed is a bound, not a command, and does not produce an accelerated speed prediction.
+
+Work is checked before processing: `MAX_VERTICAL_WORK = 27,647` units at the 256-point route limit,
+including admission through the fixed-motion core and sequential crossing checks.
+The output contains exactly 256 fixed-size point slots and reports the processed suffix length and
+first infeasible route index. Unsupported route geometry, vectors gaps, unsupported altitude
+forms, malformed restrictions, crossing-time overflow and unreachable intervals are explicit
+refusals. Wind and forward uncertainty remain unmodelled and are not implied by this feasibility
+result. This API is not operationally qualified.
+
+### Requirements suggestions (not yet normative)
+
+- A future performance source should identify fitted/model version and aircraft applicability,
+  evidence population and validity interval; this API accepts caller-supplied bounds and does not
+  qualify them.
+- A speed-profile mode needs explicit speed-command intent and a validated acceleration model before
+  it can claim route speed-transition feasibility.
+- M4's target model still needs wind, temperature, uncertainty, turn geometry and empirical
+  evaluation against legacy baselines; this feasibility API closes none of those requirements.
 
 `select_revision_evidence` is separately bounded to 256 candidates with a checked worst-case
 `MAX_EVIDENCE_SCAN_WORK = 1,597,456` units. It considers only evidence

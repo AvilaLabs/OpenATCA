@@ -65,6 +65,7 @@ pub const NO_ALTITUDE_FT: i32 = i32::MIN;
 pub const NO_SPEED_MMPS: u32 = u32::MAX;
 pub const NO_VERTICAL_RATE_FPM: i32 = i32::MIN;
 pub const NO_POSITION_E7: i32 = i32::MIN;
+pub const MAX_VERTICAL_WORK: usize = MAX_FORECAST_WORK + MAX_ROUTE_POINTS * 12 + 512;
 
 /// Full stable flight identity. GUFI and SFDPS plan identity stay lossless across the boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -290,6 +291,74 @@ pub struct TrajectoryIssueInput<'a> {
 }
 // A7.2: cold, borrowed one-shot input value; it is neither stored nor iterated as a collection.
 
+/// Explicit evidence-backed performance limits for the optional vertical feasibility mode.
+/// Rates are feet/minute and speed acceleration bounds are mm/s². This record contains no
+/// aircraft-type lookup or implied default; callers must provide measured/modelled provenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct PerformanceEnvelope {
+    pub source_ms: i64,
+    pub available_ms: i64,
+    pub message_id: u64,
+    pub max_age_ms: i64,
+    pub max_climb_fpm: u32,
+    pub max_descent_fpm: u32,
+    pub max_groundspeed_mmps: u32,
+    pub reserved_speed_cap: u32,
+    pub source: PerformanceSource,
+    pub status: PerformanceStatus,
+    pub reserved: [u8; 6],
+}
+// A7: 32 evidence/time + 16 capability values + 2 tags + 6 explicit padding = 56.
+const _: () = assert!(core::mem::size_of::<PerformanceEnvelope>() == 56);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PerformanceSource {
+    Measured = 0,
+    EmpiricalModel = 1,
+    Unavailable = 255,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PerformanceStatus {
+    Valid = 0,
+    Contradictory = 1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct VerticalPointOutput {
+    pub route_index: u16,
+    pub availability: Availability,
+    pub refusal: Refusal,
+    pub reserved_align: [u8; 4],
+    pub crossing_ms: i64,
+    pub reachable_min_ft: i32,
+    pub reachable_max_ft: i32,
+    pub speed_mmps: u32,
+    pub reserved: [u8; 4],
+}
+const _: () = assert!(core::mem::size_of::<VerticalPointOutput>() == 32);
+
+/// Bounded route crossing feasibility result. Point entries follow the exact filed suffix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct VerticalProfileOutput {
+    pub key: FlightKey,
+    pub reserved_key_align: [u8; 4],
+    pub cutoff_ms: i64,
+    pub availability: Availability,
+    pub refusal: Refusal,
+    pub examined_points: u16,
+    pub first_infeasible_route_index: u16,
+    pub reserved: [u8; 2],
+    pub points: [VerticalPointOutput; MAX_ROUTE_POINTS],
+}
+// A7: 36 key + 4 explicit alignment + 8 time + 8 status/count bytes + 8,192 point bytes.
+const _: () = assert!(core::mem::size_of::<VerticalProfileOutput>() == 8_248);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Refusal {
@@ -325,6 +394,13 @@ pub enum Refusal {
     TrackIdentityMismatch = 29,
     AmbiguousEtaTarget = 30,
     InvalidReservedFields = 31,
+    PerformanceUnavailable = 32,
+    PerformanceStale = 33,
+    InvalidPerformance = 34,
+    InfeasibleVerticalProfile = 35,
+    InfeasibleAcceleration = 36,
+    VerticalWorkLimit = 37,
+    PerformanceUnavailableAtCutoff = 38,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1490,4 +1566,363 @@ pub fn select_revision_evidence(
             reserved: [0; 6],
         },
     }
+}
+
+fn empty_vertical_point(index: u16) -> VerticalPointOutput {
+    VerticalPointOutput {
+        route_index: index,
+        availability: Availability::Unavailable,
+        refusal: Refusal::None,
+        reserved_align: [0; 4],
+        crossing_ms: 0,
+        reachable_min_ft: NO_ALTITUDE_FT,
+        reachable_max_ft: NO_ALTITUDE_FT,
+        speed_mmps: NO_SPEED_MMPS,
+        reserved: [0; 4],
+    }
+}
+
+fn vertical_output(input: &TrajectoryIssueInput<'_>, refusal: Refusal) -> VerticalProfileOutput {
+    VerticalProfileOutput {
+        key: input.key,
+        reserved_key_align: [0; 4],
+        cutoff_ms: input.cutoff_ms,
+        availability: Availability::Unavailable,
+        refusal,
+        examined_points: 0,
+        first_infeasible_route_index: u16::MAX,
+        reserved: [0; 2],
+        points: [empty_vertical_point(u16::MAX); MAX_ROUTE_POINTS],
+    }
+}
+
+/// Opt-in, sequential reachability check over the exact active route suffix. Every point's
+/// interval is propagated from the preceding feasible interval, so one early constraint cannot
+/// be hidden by evaluating each crossing independently. The speed channel remains groundspeed;
+/// this function never turns an IAS restriction into a groundspeed prediction.
+pub fn issue_vertical_profile(
+    input: &TrajectoryIssueInput<'_>,
+    performance: PerformanceEnvelope,
+) -> VerticalProfileOutput {
+    if input.points.len() > MAX_ROUTE_POINTS {
+        return vertical_output(input, Refusal::RouteTooLong);
+    }
+    let work = input.points.len().saturating_mul(12).saturating_add(512);
+    if work > MAX_VERTICAL_WORK {
+        return vertical_output(input, Refusal::VerticalWorkLimit);
+    }
+    if performance.source == PerformanceSource::Unavailable
+        || performance.max_age_ms < 0
+        || performance.max_climb_fpm == 0
+        || performance.max_descent_fpm == 0
+        || performance.max_groundspeed_mmps == 0
+    {
+        return vertical_output(input, Refusal::PerformanceUnavailable);
+    }
+    if performance.status == PerformanceStatus::Contradictory {
+        return vertical_output(input, Refusal::InvalidPerformance);
+    }
+    if performance.source_ms > performance.available_ms {
+        return vertical_output(input, Refusal::InvalidPerformance);
+    }
+    if performance.available_ms > input.cutoff_ms || performance.source_ms > input.cutoff_ms {
+        return vertical_output(input, Refusal::PerformanceUnavailableAtCutoff);
+    }
+    let age = match input.cutoff_ms.checked_sub(performance.source_ms) {
+        Some(value) => value,
+        None => return vertical_output(input, Refusal::TimeOverflow),
+    };
+    if age > performance.max_age_ms {
+        return vertical_output(input, Refusal::PerformanceStale);
+    }
+    if !reserved_zero(&performance.reserved)
+        || performance.reserved_speed_cap != 0
+    {
+        return vertical_output(input, Refusal::InvalidReservedFields);
+    }
+    if performance.max_groundspeed_mmps < input.track.groundspeed_mmps {
+        return vertical_output(input, Refusal::InvalidPerformance);
+    }
+    // Reuse the frozen baseline's exact evidence and cursor validation. A horizon may end before
+    // the route, so only a top-level evidence refusal or incomplete active-suffix scan is fatal.
+    let baseline = issue_trajectory(input);
+    if baseline.examined_route_points == 0 {
+        let refusal = baseline.horizons[0].refusal;
+        return vertical_output(
+            input,
+            if refusal == Refusal::None { Refusal::ActiveLegUnknown } else { refusal },
+        );
+    }
+    let admission_refusal = baseline.horizons[0].refusal;
+    let baseline_degradation = matches!(
+        admission_refusal,
+        Refusal::None
+            | Refusal::RouteHasNoEnd
+            | Refusal::NoAltitude
+            | Refusal::UnsupportedConstraint
+            | Refusal::InfeasibleSpeedWindow
+            | Refusal::ClearanceUnavailableAtCutoff
+            | Refusal::UnsupportedClearanceForm
+            | Refusal::InfeasibleAltitudeWindow
+    );
+    if !baseline_degradation {
+        return vertical_output(input, admission_refusal);
+    }
+    let cursor = match input.route_cursor {
+        Some(value) if value.key == input.key
+            && value.route_payload_sha256 == input.route.payload_sha256
+            && value.source_ms <= value.available_ms
+            && value.available_ms <= input.cutoff_ms => value,
+        _ => return vertical_output(input, Refusal::CursorIdentityMismatch),
+    };
+    let mut start_index = None;
+    let mut match_count = 0usize;
+    for (index, point) in input.points.iter().enumerate() {
+        if same_fix(point.fix, cursor.next_fix) {
+            match_count += 1;
+            start_index = Some(index);
+        }
+    }
+    if match_count != 1 {
+        return vertical_output(
+            input,
+            if match_count == 0 { Refusal::ActiveLegUnknown } else { Refusal::AmbiguousActiveLeg },
+        );
+    }
+    if input.track.altitude_ft == NO_ALTITUDE_FT
+        || input.track.groundspeed_mmps == 0
+        || input.track.groundspeed_mmps == NO_SPEED_MMPS
+    {
+        return vertical_output(input, Refusal::NoAltitude);
+    }
+
+    let clearance_eligible = input.clearance.source_ms <= input.clearance.available_ms
+        && input.clearance.available_ms <= input.cutoff_ms
+        && input.clearance.form != ClearanceForm::Absent;
+    let clearance_supported = clearance_eligible
+        && ((input.clearance.form == ClearanceForm::Exact
+            && input.clearance.min_altitude_ft != NO_ALTITUDE_FT
+            && input.clearance.min_altitude_ft == input.clearance.max_altitude_ft)
+            || input.clearance.form == ClearanceForm::Window);
+    if clearance_eligible && clearance_supported
+        && input.clearance.min_altitude_ft != NO_ALTITUDE_FT
+        && input.clearance.max_altitude_ft != NO_ALTITUDE_FT
+        && input.clearance.min_altitude_ft > input.clearance.max_altitude_ft
+    {
+        return vertical_output(input, Refusal::InfeasibleAltitudeWindow);
+    }
+
+    let first = start_index.unwrap_or(0);
+    let mut output = vertical_output(input, Refusal::None);
+    output.examined_points = (input.points.len() - first) as u16;
+    let mut origin = Place {
+        lat_deg: input.track.lat_e7 as f64 / 10_000_000.0,
+        lon_deg: input.track.lon_e7 as f64 / 10_000_000.0,
+    };
+    let speed_mps = input.track.groundspeed_mmps as f64 / 1000.0;
+    let mut elapsed_ms_f = 0.0f64;
+    let mut prior_elapsed_ms = 0i64;
+    let mut low = input.track.altitude_ft as i64;
+    let mut high = low;
+    for (offset, point) in input.points.iter().skip(first).enumerate() {
+        let route_index = first + offset;
+        let point_place = Place {
+            lat_deg: point.lat_e7 as f64 / 10_000_000.0,
+            lon_deg: point.lon_e7 as f64 / 10_000_000.0,
+        };
+        if point.geometry == PathGeometry::Unsupported || point.geometry == PathGeometry::VectorsGap {
+            output.refusal = Refusal::UnsupportedGeometry;
+            output.first_infeasible_route_index = route_index as u16;
+            return output;
+        }
+        let leg_m = great_circle_m(origin, point_place);
+        elapsed_ms_f += leg_m / speed_mps * 1000.0;
+        if elapsed_ms_f < 0.0 || elapsed_ms_f >= 9_223_372_036_854_775_808.0 {
+            output.refusal = Refusal::TimeOverflow;
+            output.first_infeasible_route_index = route_index as u16;
+            return output;
+        }
+        let elapsed_ms = elapsed_ms_f as i64;
+        let dt_ms = match elapsed_ms.checked_sub(prior_elapsed_ms) {
+            Some(value) if value >= 0 => value,
+            _ => {
+                output.refusal = Refusal::TimeOverflow;
+                output.first_infeasible_route_index = route_index as u16;
+                return output;
+            }
+        };
+        let climb_delta = match (performance.max_climb_fpm as i64).checked_mul(dt_ms) {
+            Some(value) => value / 60_000,
+            None => {
+                output.refusal = Refusal::AltitudeOverflow;
+                output.first_infeasible_route_index = route_index as u16;
+                return output;
+            }
+        };
+        let descent_delta = match (performance.max_descent_fpm as i64).checked_mul(dt_ms) {
+            Some(value) => value / 60_000,
+            None => {
+                output.refusal = Refusal::AltitudeOverflow;
+                output.first_infeasible_route_index = route_index as u16;
+                return output;
+            }
+        };
+        low = match low.checked_sub(descent_delta) {
+            Some(value) => value,
+            None => {
+                output.refusal = Refusal::AltitudeOverflow;
+                output.first_infeasible_route_index = route_index as u16;
+                return output;
+            }
+        };
+        high = match high.checked_add(climb_delta) {
+            Some(value) => value,
+            None => {
+                output.refusal = Refusal::AltitudeOverflow;
+                output.first_infeasible_route_index = route_index as u16;
+                return output;
+            }
+        };
+        let mut constraint_low = i32::MIN as i64;
+        let mut constraint_high = i32::MAX as i64;
+        if point.altitude_constraint_kind == AltitudeConstraintKind::Window
+            && point.min_altitude_ft > point.max_altitude_ft
+        {
+            output.refusal = Refusal::InfeasibleAltitudeWindow;
+            output.first_infeasible_route_index = route_index as u16;
+            return output;
+        }
+        if point.speed_constraint_kind == SpeedConstraintKind::Window
+            && point.min_speed_mmps != NO_SPEED_MMPS
+            && point.max_speed_mmps != NO_SPEED_MMPS
+            && point.min_speed_mmps > point.max_speed_mmps
+        {
+            output.refusal = Refusal::InfeasibleSpeedWindow;
+            output.first_infeasible_route_index = route_index as u16;
+            return output;
+        }
+        match point.altitude_constraint_kind {
+            AltitudeConstraintKind::None => {}
+            AltitudeConstraintKind::Minimum => {
+                if point.min_altitude_ft == NO_ALTITUDE_FT {
+                    output.refusal = Refusal::InfeasibleAltitudeWindow;
+                    output.first_infeasible_route_index = route_index as u16;
+                    return output;
+                }
+                constraint_low = point.min_altitude_ft as i64;
+            }
+            AltitudeConstraintKind::Maximum => {
+                if point.max_altitude_ft == NO_ALTITUDE_FT {
+                    output.refusal = Refusal::InfeasibleAltitudeWindow;
+                    output.first_infeasible_route_index = route_index as u16;
+                    return output;
+                }
+                constraint_high = point.max_altitude_ft as i64;
+            }
+            AltitudeConstraintKind::Window => {
+                if point.min_altitude_ft == NO_ALTITUDE_FT
+                    || point.max_altitude_ft == NO_ALTITUDE_FT
+                {
+                    output.refusal = Refusal::InfeasibleAltitudeWindow;
+                    output.first_infeasible_route_index = route_index as u16;
+                    return output;
+                }
+                constraint_low = point.min_altitude_ft as i64;
+                constraint_high = point.max_altitude_ft as i64;
+            }
+            AltitudeConstraintKind::AtAltitude if point.min_altitude_ft != NO_ALTITUDE_FT => {
+                constraint_low = point.min_altitude_ft as i64;
+                constraint_high = constraint_low;
+            }
+            AltitudeConstraintKind::AtAltitude => {
+                output.refusal = Refusal::InfeasibleAltitudeWindow;
+                output.first_infeasible_route_index = route_index as u16;
+                return output;
+            }
+            _ => {
+                output.refusal = Refusal::UnsupportedConstraint;
+                output.first_infeasible_route_index = route_index as u16;
+                return output;
+            }
+        }
+        if clearance_supported {
+            if input.clearance.min_altitude_ft != NO_ALTITUDE_FT {
+                if input.clearance.min_altitude_ft as i64 > constraint_low {
+                    constraint_low = input.clearance.min_altitude_ft as i64;
+                }
+            }
+            if input.clearance.max_altitude_ft != NO_ALTITUDE_FT {
+                if input.clearance.max_altitude_ft as i64 < constraint_high {
+                    constraint_high = input.clearance.max_altitude_ft as i64;
+                }
+            }
+        }
+        if point.speed_constraint_kind != SpeedConstraintKind::None {
+            let speed_ok = point.speed_reference == SpeedReference::GroundSpeed
+                && match point.speed_constraint_kind {
+                    SpeedConstraintKind::Minimum => point.min_speed_mmps != NO_SPEED_MMPS
+                        && input.track.groundspeed_mmps >= point.min_speed_mmps,
+                    SpeedConstraintKind::Maximum => point.max_speed_mmps != NO_SPEED_MMPS
+                        && input.track.groundspeed_mmps <= point.max_speed_mmps,
+                    SpeedConstraintKind::Window => point.min_speed_mmps != NO_SPEED_MMPS
+                        && point.max_speed_mmps != NO_SPEED_MMPS
+                        && input.track.groundspeed_mmps >= point.min_speed_mmps
+                        && input.track.groundspeed_mmps <= point.max_speed_mmps,
+                    _ => false,
+                };
+            if !speed_ok {
+                let minimum_exceeds_cap = point.speed_reference == SpeedReference::GroundSpeed
+                    && point.min_speed_mmps != NO_SPEED_MMPS
+                    && point.min_speed_mmps > performance.max_groundspeed_mmps;
+                output.refusal = if minimum_exceeds_cap {
+                    Refusal::InfeasibleSpeedWindow
+                } else {
+                    // No supported speed-command intent exists in this API. A mismatch is not
+                    // proof of impossibility when a future speed change could be commanded.
+                    Refusal::UnsupportedConstraint
+                };
+                output.first_infeasible_route_index = route_index as u16;
+                return output;
+            }
+        }
+        if constraint_low > constraint_high {
+            output.refusal = Refusal::InfeasibleAltitudeWindow;
+            output.first_infeasible_route_index = route_index as u16;
+            return output;
+        }
+        if low < constraint_low {
+            low = constraint_low;
+        }
+        if high > constraint_high {
+            high = constraint_high;
+        }
+        if low > high || low <= i32::MIN as i64 || high > i32::MAX as i64 {
+            output.refusal = Refusal::InfeasibleVerticalProfile;
+            output.first_infeasible_route_index = route_index as u16;
+            return output;
+        }
+        let crossing = match input.track.state_ms.checked_add(elapsed_ms) {
+            Some(value) => value,
+            None => {
+                output.refusal = Refusal::TimeOverflow;
+                output.first_infeasible_route_index = route_index as u16;
+                return output;
+            }
+        };
+        output.points[offset] = VerticalPointOutput {
+            route_index: route_index as u16,
+            availability: Availability::Available,
+            refusal: Refusal::None,
+            reserved_align: [0; 4],
+            crossing_ms: crossing,
+            reachable_min_ft: low as i32,
+            reachable_max_ft: high as i32,
+            speed_mmps: input.track.groundspeed_mmps,
+            reserved: [0; 4],
+        };
+        origin = point_place;
+        prior_elapsed_ms = elapsed_ms;
+    }
+    output.availability = Availability::Available;
+    output
 }
