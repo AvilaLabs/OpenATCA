@@ -111,7 +111,7 @@ const EVIOCGVERSION: c_ulong = ((IOC_READ << 30) | (4 << 16) | (b'E' as u32 << 8
 #[derive(Clone, Copy, Debug, PartialEq, Eq)] pub enum KmsError {
     Present(PresentError), InvalidDevicePath, InactiveVt, VtNotText, DrmMasterUnavailable,
     NoConnectedMode, UnsupportedTopology, UnsupportedDimensions, Timeout, MalformedEvent,
-    System(i32), Cleanup(i32),
+    System(i32), CleanupFailed { operation: i32, rollback: i32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -339,7 +339,17 @@ impl KmsDisplay {
         let mut crtc = Crtc { set_connectors_ptr: (&self.connector as *const u32) as u64, connector_count: 1,
             crtc_id: self.crtc_id, fb_id: front.fb, mode_valid: 1, mode: self.mode, ..Default::default() };
         if let Err(e) = call(self.drm.as_raw_fd(), SETCRTC, &mut crtc) {
-            let _ = self.set_kd_mode(self.old_kd_mode); return Err(e);
+            let mut old = self.old_crtc;
+            old.set_connectors_ptr = self.old_connectors.as_ptr() as u64;
+            old.connector_count = self.old_connector_count;
+            let crtc_restore = call(self.drm.as_raw_fd(), SETCRTC, &mut old);
+            let tty_restore = self.set_kd_mode(self.old_kd_mode);
+            // If either rollback operation failed, Drop retries the saved restoration sequence.
+            self.started = crtc_restore.is_err() || tty_restore.is_err();
+            if let Err(rollback) = crtc_restore.or(tty_restore) {
+                return Err(KmsError::CleanupFailed { operation: system_code(e), rollback: system_code(rollback) });
+            }
+            return Err(e);
         }
         self.started = true; self.front = 0; Ok(())
     }
@@ -441,6 +451,7 @@ fn ioctl_arg(fd: c_int, request: c_ulong, value: &mut u32) -> Result<(), KmsErro
     let rc = unsafe { ioctl(fd, request, value as *mut u32) }; if rc < 0 { Err(last_error()) } else { Ok(()) }
 }
 fn last_error() -> KmsError { KmsError::System(std::io::Error::last_os_error().raw_os_error().unwrap_or(-1)) }
+fn system_code(error: KmsError) -> i32 { match error { KmsError::System(code) => code, _ => -1 } }
 fn sys_error(e: std::io::Error) -> KmsError { KmsError::System(e.raw_os_error().unwrap_or(-1)) }
 fn valid_card_path(s: &str) -> bool { s.strip_prefix("/dev/dri/card").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())) }
 fn valid_tty_path(s: &str) -> bool { tty_number(s).is_some() }
