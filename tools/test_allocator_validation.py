@@ -460,7 +460,14 @@ class AllocatorLayoutTests(unittest.TestCase):
             root = Path(temp)
             layout_tree(root)
             add_presentation_exception(root)
-            write(root / "crates/oa-track/src/allocator.rs", "struct GlobalAllocMarker;\n")
+            write(root / "crates/oa-track/src/allocator.rs", "use std::alloc::GlobalAlloc;\n")
+            self.assertTrue(any("GlobalAlloc" in error for error in gate.allocation_layout_errors(root)))
+
+    def test_product_global_allocator_attribute_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            write(root / "crates/oa-track/src/allocator.rs", "#[global_allocator]\nstatic A: System = System;\n")
             self.assertTrue(any("GlobalAlloc" in error for error in gate.allocation_layout_errors(root)))
 
     # REQ: OA-TRK-337

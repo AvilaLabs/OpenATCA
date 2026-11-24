@@ -443,7 +443,9 @@ def _product_global_allocator_errors(members: list[Path]) -> list[str]:
             except (OSError, UnicodeError, ValueError) as exc:
                 errors.append(f"cannot scan product Rust source {source}: {exc}")
                 continue
-            if re.search(r"\bGlobalAlloc\b", tokens):
+            if re.search(r"\bGlobalAlloc\b", tokens) or re.search(
+                r"#\s*\[\s*global_allocator\s*\]", tokens
+            ):
                 errors.append(f"product source may not implement or name GlobalAlloc: {source}")
     return errors
 

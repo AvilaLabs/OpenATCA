@@ -6,7 +6,7 @@
 
 #![allow(unsafe_code)] // RULESET A0: sole OS syscall/mmap module in the display-presentation crate.
 
-use crate::{decode_evdev_event, kms_cleanup_may_destroy, kms_transition, validate_frame, InputError, InputEvent, InputRecord, InputRecordKind, InputSnapshot, KmsLifecycle, KmsTransition, PixelFrame, PresentError, EV_SYN, SYN_DROPPED, SYN_REPORT, MAX_FRAME_BYTES, MAX_HEIGHT, MAX_WIDTH};
+use crate::{decode_evdev_event, kms_cleanup_may_destroy, kms_transition, validate_frame, InputError, InputEvent, InputRecord, InputRecordKind, InputSnapshot, KmsLifecycle, KmsTransition, PixelFrame, PresentError, EV_SYN, SYN_DROPPED, MAX_FRAME_BYTES, MAX_HEIGHT, MAX_WIDTH};
 use core::ffi::{c_int, c_ulong, c_void};
 use core::ptr::NonNull;
 use std::fs::{File, OpenOptions};
@@ -22,7 +22,7 @@ const DRM_IOCTL_BASE: u32 = b'd' as u32;
 const IOC_READ: u32 = 2;
 const IOC_WRITE: u32 = 1;
 const fn ioc_for(dir: u32, kind: u32, nr: u32, size: usize) -> c_ulong {
-    (((dir << 30) | (kind << 8) | nr | ((size as u32) << 16)) as c_ulong)
+    ((dir << 30) | (kind << 8) | nr | ((size as u32) << 16)) as c_ulong
 }
 const fn ioc(dir: u32, nr: u32, size: usize) -> c_ulong { ioc_for(dir, DRM_IOCTL_BASE, nr, size) }
 const fn drm_iowr(nr: u32, size: usize) -> c_ulong { ioc(IOC_READ | IOC_WRITE, nr, size) }
@@ -407,7 +407,7 @@ fn prepare(drm: File, tty: File, active_vt: u16, old_kd_mode: c_int, old_vt_mode
     if current_kd != KD_TEXT || current_vt_mode.mode != VT_AUTO { return Err(KmsError::VtNotText); }
     call_unit(fd, SET_MASTER).map_err(|_| KmsError::DrmMasterUnavailable)?;
     if active_vt != query_active_vt(tty.as_raw_fd())? { return Err(KmsError::InactiveVt); }
-    let (old_crtc, old_connectors, old_connector_count) = capture_baseline(fd, connector, crtc_id)?;
+    let (old_crtc, old_connectors, old_connector_count) = capture_baseline(fd, connector, crtc_id, mode)?;
     let width = u32::from(mode.hdisplay); let height = u32::from(mode.vdisplay);
     let b0 = Buffer::create(fd, width, height)?;
     let b1 = match Buffer::create(fd, width, height) { Ok(b) => b, Err(e) => { let _ = destroy_buffer(fd, b0); return Err(e); } };
@@ -650,8 +650,8 @@ impl KmsDisplay {
         if self.must_terminate_owner() { return Err(KmsError::Faulted); }
         if self.flip_pending { self.wait_pending_flip(timeout_ms)?; return Ok(self.state); }
         match self.read_signal(Some(timeout_ms))? {
-            Some(SIGUSR1) => self.begin_release(),
-            Some(SIGUSR2) => self.begin_acquire(),
+            Some(SIGUSR1) => { self.begin_release()?; }
+            Some(SIGUSR2) => { self.begin_acquire()?; }
             Some(_) => return Err(KmsError::SignalControl(-1)),
             None => {}
         }
@@ -821,7 +821,8 @@ impl KmsDisplay {
             let mut pfd = PollFd { fd, events: POLLIN, revents: 0 };
             // SAFETY: pfd points to one initialized pollfd for the duration of poll.
             let ready = unsafe { poll(&mut pfd, 1, ms as c_int) };
-            if ready == 0 { return Ok(None); } if ready < 0 { return Err(last_error()); }
+            if ready == 0 { return Ok(None); }
+            if ready < 0 { return Err(last_error()); }
             if pfd.revents & POLLIN == 0 { return Err(KmsError::SignalControl(-1)); }
         }
         let mut info = [0u8; SIGNAL_INFO_BYTES];
