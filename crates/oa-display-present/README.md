@@ -4,39 +4,55 @@ Linux-only direct display/input foundation. This crate has no dependencies and i
 not yet in the product workspace. Its pure surface validates bounded XRGB8888 frame extents and
 decodes Linux 64-bit evdev records into fixed-capacity plain input records.
 
-`open_kms("/dev/dri/cardN", "/dev/ttyN")` verifies that the selected VT is active, in text
-mode, and in automatic VT-switch mode before opening the DRM node and acquiring DRM master.
-`start()` is the explicit modeset point. The adapter selects a connected connector, preferred
-mode (or first advertised mode), and compatible encoder/CRTC under fixed resource limits; it
-saves the CRTC and currently routed connectors first. It allocates two bounded, linear dumb
-XRGB8888 buffers, modesets the blank front buffer, then `present()` validates and copies every
-visible source row to the back buffer, submits a legacy vblank page flip, and waits up to one
-second for `DRM_EVENT_FLIP_COMPLETE`. `close()` attempts CRTC/VT restoration before framebuffer
-and dumb-buffer cleanup. `Drop` makes the same best effort. Multiple already-routed connectors
-on the selected CRTC, unexpected active routing, unsupported dimensions, inactive VT, and
-unsupported topology fail closed. There is no desktop, window system, or toolkit backend.
+`open_kms("/dev/dri/cardN", "/dev/ttyN", connector_id)` verifies the selected VT is active,
+in text mode, and in automatic VT-switch mode before opening DRM. It discovers read-only
+topology, acquires DRM master, then recaptures the CRTC and connector routing under master.
+After preparation it changes the VT to `VT_PROCESS` with reserved SIGUSR1/SIGUSR2 signals,
+blocked and consumed through signalfd; it installs no global signal handler. The API requires a
+dedicated single-threaded owner process, and checks that contract at open and on each operation.
+`start()` is the explicit modeset point. It allocates two bounded, linear dumb XRGB8888 buffers,
+modesets the blank front buffer, then `present()` validates and copies every visible source row
+to the back buffer, submits a legacy vblank page flip, and waits up to one second for
+`DRM_EVENT_FLIP_COMPLETE`. `service_vt(timeout_ms)` handles VT release/acquire handshakes; release
+restores the baseline before `VT_RELDISP(1)`, while acquire acknowledges, reacquires DRM master,
+revalidates topology, recaptures the baseline, then re-enters graphics mode.
 
-This is an unqualified implementation: no DRM/VT ioctl or device was exercised here, and the
-restore path cannot guarantee recovery if the kernel/driver refuses restoration or the VT is
-switched away while the adapter is active. The caller must keep the selected VT foreground and
-must treat any returned error as a loss of display availability. Do not claim hardware
-qualification until tested on each target GPU/driver and console setup.
+If a pending flip does not complete by the release deadline, the adapter stops writes, drops DRM
+master, acknowledges VT release, and enters `Faulted` without claiming CRTC restoration or
+destroying buffers. The dedicated owner process must exit on `must_terminate_owner()` so the
+kernel closes the DRM file and its resources. A failed restore follows the same fault path. The
+supervisor must detect the failed presenter and start its fallback. `close()` restores the CRTC,
+VT mode and signal mask before buffer cleanup when the lifecycle is healthy. Multiple routed
+connectors on the selected CRTC, unsupported dimensions, inactive VT, and unsupported topology
+fail closed. No desktop, window system, or toolkit backend is used.
+
+This is an unqualified implementation: no DRM/VT ioctl or device was exercised here. Kernel
+rejection of a restore or page-flip completion is reported as loss of display availability; the
+faulted owner process must exit for kernel file cleanup. Do not claim hardware qualification
+until tested on each target GPU/driver and console setup.
 
 `validate_frame` accepts at most 4096 x 2160, 64 MiB, four-byte aligned rows, and checks the
 whole `stride * height` extent before use. Pixel order is XRGB8888 bytes in memory (B,G,R,X on
 little-endian Linux). `decode_evdev_event` expects exactly the 64-bit Linux UAPI `input_event`
-layout (native-endian seconds/useconds, type, code, value); `SYN_REPORT` is consumed as a batch
-delimiter. Other event types are preserved verbatim. `open_evdev("/dev/input/eventN")` reads
-one record at a time with a caller-supplied timeout capped at one second; disconnects, partial
-records, and malformed timestamps are explicit errors. `InputBatch` has 128 records and counts
-refused pushes.
+layout (native-endian seconds/useconds, type, code, value). `open_evdev("/dev/input/eventN")`
+reads one record at a time with a caller-supplied timeout capped at one second. `SYN_DROPPED`
+emits `SyncLost`; subsequent records are marked `Discarded` until `SYN_REPORT`, where EVIOCGKEY
+and EVIOCGABS return fixed key and absolute-axis state in `Resynchronized`. The snapshot marks
+relative motion as lost because relative position cannot be queried. The consumer must invalidate
+action state on `SyncLost` and allow actions only after `Resynchronized`, with pointer actions held
+until a fresh position is established. `input_event_is_action_press` accepts EV_KEY value 1 and
+excludes repeat value 2, so repeated keys cannot create another command edge.
+Disconnects, partial records, and malformed timestamps are explicit errors. `InputBatch` has
+128 struct-of-arrays records and counts refused pushes.
 
 ## ABI provenance
 
 Layout and constant planning used the locally installed Linux UAPI headers
 `/usr/include/linux/input.h`, `/usr/include/linux/vt.h`, `/usr/include/linux/kd.h`,
 `/usr/include/drm/drm.h`, `/usr/include/drm/drm_mode.h`, and
-`/usr/include/drm/drm_fourcc.h` (kernel DRM UAPI). The evdev decoder follows the 64-bit
+`/usr/include/drm/drm_fourcc.h` (kernel DRM UAPI). Linux UAPI ioctl layouts and constants follow
+these local headers. VT process-control values follow `/usr/include/linux/vt.h`; evdev key-state
+query follows `EVIOCGKEY` in `/usr/include/linux/input.h`. The evdev decoder follows the 64-bit
 `struct input_event`; it is not portable to 32-bit ABI. No DRM ioctl has been exercised here.
 The KMS code uses legacy GETRESOURCES/GETCONNECTOR/GETENCODER/GETCRTC, CREATE_DUMB,
 MAP_DUMB, ADDFB, SETCRTC, PAGE_FLIP, RMFB, and DESTROY_DUMB UAPI calls. Dumb-buffer layout is
@@ -46,7 +62,14 @@ target GPU/driver and console.
 The connected-status value (`1`) follows the kernel's `connector_status_connected` enum in
 [`include/drm/drm_connector.h`](https://github.com/torvalds/linux/blob/master/include/drm/drm_connector.h).
 The kernel's [DRM KMS documentation](https://docs.kernel.org/gpu/drm-kms.html) describes dumb
-buffers, legacy modesetting and page-flip synchronization.
+buffers, legacy modesetting and page-flip synchronization; [DRM UAPI documentation](https://docs.kernel.org/gpu/drm-uapi.html)
+describes event reads. The VT modes and ioctl values follow the upstream
+[`include/uapi/linux/vt.h`](https://github.com/torvalds/linux/blob/master/include/uapi/linux/vt.h);
+the release/acknowledge handling is implemented in
+[`drivers/tty/vt/vt_ioctl.c`](https://github.com/torvalds/linux/blob/master/drivers/tty/vt/vt_ioctl.c).
+The DRM ioctl structures and commands follow upstream
+[`include/uapi/drm/drm_mode.h`](https://github.com/torvalds/linux/blob/master/include/uapi/drm/drm_mode.h)
+and the installed headers listed above.
 
 ## Validation
 

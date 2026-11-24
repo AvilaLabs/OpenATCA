@@ -18,6 +18,10 @@ pub const MAX_WIDTH: u32 = 4096;
 pub const MAX_HEIGHT: u32 = 2160;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 pub const INPUT_BATCH_CAPACITY: usize = 128;
+pub const EV_SYN: u16 = 0;
+pub const EV_KEY: u16 = 1;
+pub const SYN_REPORT: u16 = 0;
+pub const SYN_DROPPED: u16 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PixelFrame<'a> {
@@ -48,6 +52,49 @@ pub enum PresentError {
     System(i32),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum KmsLifecycle { Prepared, Active, FlipPending, ReleasePending, ReleasePendingFlip,
+    ReleaseAckPending, Suspended, Acquiring, FaultedReleaseAckPending, Faulted, Closed }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KmsTransition { Start, FlipSubmitted, FlipCompleted, ReleaseSignal, RestoreSucceeded,
+    RestoreFailed, ReleaseDeadlineExpired, ReleaseAcknowledged, AcquireSignal, AcquireSucceeded,
+    DropMasterFailed, ReleaseAckFailed, CloseRestored, Close }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LifecycleError;
+
+/// Pure owner-process state transition table, also used by the Linux KMS shell.
+pub const fn kms_transition(state: KmsLifecycle, event: KmsTransition) -> Result<KmsLifecycle, LifecycleError> {
+    use KmsLifecycle as S; use KmsTransition as E;
+    match (state, event) {
+        (S::Prepared, E::Start) => Ok(S::Active),
+        (S::Active, E::FlipSubmitted) => Ok(S::FlipPending),
+        (S::FlipPending, E::FlipCompleted) => Ok(S::Active),
+        (S::Prepared, E::ReleaseSignal) => Ok(S::ReleasePending),
+        (S::Active, E::ReleaseSignal) => Ok(S::ReleasePending),
+        (S::FlipPending, E::ReleaseSignal) => Ok(S::ReleasePendingFlip),
+        (S::ReleasePendingFlip, E::FlipCompleted) => Ok(S::ReleasePending),
+        (S::ReleasePendingFlip, E::ReleaseDeadlineExpired) => Ok(S::FaultedReleaseAckPending),
+        (S::ReleasePending, E::RestoreSucceeded) => Ok(S::ReleaseAckPending),
+        (S::ReleasePending, E::RestoreFailed) => Ok(S::FaultedReleaseAckPending),
+        (S::ReleaseAckPending, E::ReleaseAcknowledged) => Ok(S::Suspended),
+        (S::ReleaseAckPending, E::DropMasterFailed) | (S::ReleaseAckPending, E::ReleaseAckFailed) => Ok(S::FaultedReleaseAckPending),
+        (S::FaultedReleaseAckPending, E::ReleaseAcknowledged) => Ok(S::Faulted),
+        (S::Suspended, E::AcquireSignal) => Ok(S::Acquiring),
+        (S::Acquiring, E::AcquireSucceeded) => Ok(S::Active),
+        (S::Active, E::CloseRestored) => Ok(S::Closed),
+        (S::Prepared, E::Close) | (S::Suspended, E::Close) | (S::Faulted, E::Close) => Ok(S::Closed),
+        _ => Err(LifecycleError),
+    }
+}
+/// Whether cleanup may unmap/remove scanout objects without racing a pending flip or active CRTC.
+pub const fn kms_cleanup_may_destroy(state: KmsLifecycle, flip_pending: bool, crtc_restored: bool) -> bool {
+    !flip_pending && crtc_restored && matches!(state, KmsLifecycle::Prepared | KmsLifecycle::Active | KmsLifecycle::Suspended)
+}
+const _: () = assert!(core::mem::size_of::<KmsLifecycle>() == 1);
+
 /// Validate complete XRGB8888 frame bounds before any device or buffer access.
 pub fn validate_frame(frame: PixelFrame<'_>) -> Result<FrameLayout, PresentError> {
     if frame.width == 0 || frame.height == 0 || frame.width > MAX_WIDTH || frame.height > MAX_HEIGHT {
@@ -65,7 +112,7 @@ pub fn validate_frame(frame: PixelFrame<'_>) -> Result<FrameLayout, PresentError
     Ok(FrameLayout { width: frame.width, height: frame.height, stride: frame.stride, bytes })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct InputEvent {
     pub seconds: i64,
@@ -76,6 +123,30 @@ pub struct InputEvent {
 }
 // Budget: fixed 64-bit evdev record copied by each shell read.
 const _: () = assert!(core::mem::size_of::<InputEvent>() == 24);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum InputRecordKind { Event, SyncReport, SyncLost, Discarded, Resynchronized }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct InputSnapshot {
+    pub key_bits: [u8; 96],
+    pub absolute_axis_bits: [u8; 8],
+    pub absolute_axis_values: [i32; 64],
+    pub discarded_records: u32,
+    pub relative_motion_lost: u8,
+}
+const _: () = assert!(core::mem::size_of::<InputSnapshot>() == 368);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct InputRecord { pub kind: InputRecordKind, pub event: InputEvent, pub snapshot: InputSnapshot }
+// Budget: event plus fixed key snapshot and C alignment padding.
+const _: () = assert!(core::mem::size_of::<InputRecord>() == 400);
+
+/// Only a non-repeat EV_KEY press is an action edge. Value 2 is kernel key repeat.
+pub const fn input_event_is_action_press(event: InputEvent) -> bool { event.kind == EV_KEY && event.value == 1 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputError { Truncated, InvalidTimestamp }
@@ -138,5 +209,37 @@ mod tests {
         let mut b = [0u8; 24]; b[8..16].copy_from_slice(&1i64.to_ne_bytes()); b[16..18].copy_from_slice(&1u16.to_ne_bytes()); b[18..20].copy_from_slice(&30u16.to_ne_bytes()); b[20..24].copy_from_slice(&1i32.to_ne_bytes());
         assert_eq!(decode_evdev_event(&b).unwrap().unwrap().value, 1);
         b[16..18].copy_from_slice(&0u16.to_ne_bytes()); assert_eq!(decode_evdev_event(&b), Ok(None));
+    }
+    #[test] fn kms_lifecycle_requires_completed_flip_before_normal_release() {
+        let state = kms_transition(KmsLifecycle::Prepared, KmsTransition::Start).unwrap();
+        let state = kms_transition(state, KmsTransition::FlipSubmitted).unwrap();
+        let state = kms_transition(state, KmsTransition::ReleaseSignal).unwrap();
+        assert_eq!(state, KmsLifecycle::ReleasePendingFlip);
+        let state = kms_transition(state, KmsTransition::FlipCompleted).unwrap();
+        let state = kms_transition(state, KmsTransition::RestoreSucceeded).unwrap();
+        let state = kms_transition(state, KmsTransition::ReleaseAcknowledged).unwrap();
+        assert_eq!(state, KmsLifecycle::Suspended);
+        let state = kms_transition(state, KmsTransition::AcquireSignal).unwrap();
+        assert_eq!(kms_transition(state, KmsTransition::AcquireSucceeded), Ok(KmsLifecycle::Active));
+    }
+    #[test] fn pending_flip_deadline_faults_without_claiming_restore() {
+        let state = kms_transition(KmsLifecycle::Prepared, KmsTransition::Start).unwrap();
+        let state = kms_transition(state, KmsTransition::FlipSubmitted).unwrap();
+        let state = kms_transition(state, KmsTransition::ReleaseSignal).unwrap();
+        assert_eq!(kms_transition(state, KmsTransition::ReleaseDeadlineExpired), Ok(KmsLifecycle::FaultedReleaseAckPending));
+        assert_eq!(kms_transition(KmsLifecycle::Active, KmsTransition::ReleaseAcknowledged), Err(LifecycleError));
+    }
+    #[test] fn cleanup_waits_for_flip_and_successful_crtc_restore() {
+        assert!(!kms_cleanup_may_destroy(KmsLifecycle::Active, true, true));
+        assert!(!kms_cleanup_may_destroy(KmsLifecycle::Active, false, false));
+        assert!(kms_cleanup_may_destroy(KmsLifecycle::Active, false, true));
+        assert!(kms_cleanup_may_destroy(KmsLifecycle::Suspended, false, true));
+        assert!(!kms_cleanup_may_destroy(KmsLifecycle::Faulted, false, true));
+    }
+    #[test] fn key_repeat_is_not_an_action_press() {
+        let base = InputEvent { seconds: 0, microseconds: 0, kind: EV_KEY, code: 30, value: 1 };
+        assert!(input_event_is_action_press(base));
+        assert!(!input_event_is_action_press(InputEvent { value: 2, ..base }));
+        assert!(!input_event_is_action_press(InputEvent { value: 0, ..base }));
     }
 }
