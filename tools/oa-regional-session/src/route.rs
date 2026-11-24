@@ -532,6 +532,7 @@ pub fn clearance_evidence(view: &SharedFlightView) -> t::Clearance {
     }
 }
 
+// A7.2: cold one-receipt adapter value, used only to call both pure issue-time modes on identical inputs.
 struct PreparedRouteIssue {
     key: t::FlightKey,
     route: t::RouteProvenance,
@@ -545,20 +546,18 @@ struct PreparedRouteIssue {
     points: Vec<t::RoutePoint>,
 }
 
-impl PreparedRouteIssue {
-    fn input(&self) -> t::TrajectoryIssueInput<'_> {
-        t::TrajectoryIssueInput {
-            key: self.key,
-            route: self.route,
-            cutoff_ms: self.cutoff_ms,
-            max_track_age_ms: self.max_track_age_ms,
-            owner: self.owner,
-            route_cursor: self.route_cursor,
-            track: self.track,
-            clearance: self.clearance,
-            eta_target: self.eta_target,
-            points: &self.points,
-        }
+fn prepared_input(prepared: &PreparedRouteIssue) -> t::TrajectoryIssueInput<'_> {
+    t::TrajectoryIssueInput {
+        key: prepared.key,
+        route: prepared.route,
+        cutoff_ms: prepared.cutoff_ms,
+        max_track_age_ms: prepared.max_track_age_ms,
+        owner: prepared.owner,
+        route_cursor: prepared.route_cursor,
+        track: prepared.track,
+        clearance: prepared.clearance,
+        eta_target: prepared.eta_target,
+        points: &prepared.points,
     }
 }
 
@@ -757,7 +756,7 @@ pub fn route_issue(
     frame_sequence: u64,
 ) -> Result<t::TrajectoryIssueOutput, String> {
     let prepared = prepare_route_issue(store, view, observed, cutoff_ns, frame_sequence)?;
-    Ok(t::issue_trajectory(&prepared.input()))
+    Ok(t::issue_trajectory(&prepared_input(&prepared)))
 }
 
 /// Returns the horizontal baseline and bounded vertical profile from one shared prepared input.
@@ -770,7 +769,7 @@ pub fn route_issue_with_performance(
     performance: t::PerformanceEnvelope,
 ) -> Result<(t::TrajectoryIssueOutput, t::VerticalProfileOutput), String> {
     let prepared = prepare_route_issue(store, view, observed, cutoff_ns, frame_sequence)?;
-    let input = prepared.input();
+    let input = prepared_input(&prepared);
     Ok((
         t::issue_trajectory(&input),
         t::issue_vertical_profile(&input, performance),

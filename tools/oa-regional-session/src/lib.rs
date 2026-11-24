@@ -7,6 +7,7 @@ pub mod commands;
 pub mod flight;
 pub mod input;
 pub mod msaw_bridge;
+pub mod performance;
 pub mod route;
 pub mod recordings;
 pub mod recordings_reader;
