@@ -4,7 +4,7 @@ Scores the OpenATCA tracker and ADS-B truth against STARS terminal tracks publis
 STDDS (TAIS). It reads an ADS-B clip and one or more STDDS recording files:
 
 ```text
-oa-stdds-ref --adsb <clip.oaf> --out <dir> <stdds.oaf[.gz]>...
+oa-stdds-ref --adsb <clip.oaf> --out <dir> --cohort-id <id> --from-ms <inclusive-unix-ms> --to-ms <exclusive-unix-ms> <stdds.oaf[.gz]>...
 ```
 
 It writes `stdds_ref.txt`, per-record `stdds_ref.csv`, and aggregate `stdds_ref.json`.
@@ -106,11 +106,13 @@ helper does not stat, enumerate, open, or hash any FAA input path. Its output fr
 raw and fitted modes, fit policy, tool limits, output filenames, and exact current command line.
 Keep both inventory and plan private.
 
-The interval is an eligibility declaration for selecting the input files; the current comparator
-still scores every admitted record and does not clip to that interval. The plan states this
-limitation explicitly. Do not execute it as an interval-bounded comparison unless the selected
-files themselves are already bounded to that window. The fitted mode remains an in-sample
-agreement result. Example and tests use synthetic paths and digests only.
+The interval is enforced as a half-open UTC `mrtTime` selection on STDDS rows before calibration.
+The cohort ID and both signed Unix-millisecond bounds are required; unbounded scoring is refused. The `from` bound
+is included and `to` excluded. An interval intersecting the compiled sealed time window is refused
+before any recording is opened. Rows parsed from the STDDS inputs are accounted as selected,
+outside-window, or untimed, in addition to the loader's sealed-window drop counter. The ADS-B clip
+is loaded without that interval cut so it retains truth around the cohort boundaries. The fitted
+mode remains an in-sample agreement result. Example and tests use synthetic paths and digests only.
 
 ## Recording status and limits
 

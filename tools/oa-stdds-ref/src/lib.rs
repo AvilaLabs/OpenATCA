@@ -23,4 +23,5 @@ pub mod model;
 pub mod publish;
 pub mod report;
 pub mod run;
+pub mod selection;
 pub mod sources;

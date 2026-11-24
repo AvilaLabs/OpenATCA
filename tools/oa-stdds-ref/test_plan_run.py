@@ -26,14 +26,18 @@ class PlanTests(unittest.TestCase):
         plan = plan_run.build_plan(fixture())
         self.assertEqual(plan["modes"], ["raw_published_mrtTime", "fitted_in_sample_agreement"])
         self.assertIn("prospective accuracy", plan["fit_policy"]["label"])
-        self.assertEqual(plan["argv"], ["/private/bin/oa-stdds-ref", "--adsb", "/private/example/adsb.oaf", "--out", "/private/output/run-001", "/private/example/stdds.oaf.gz"])
+        self.assertEqual(plan["argv"], ["/private/bin/oa-stdds-ref", "--adsb", "/private/example/adsb.oaf", "--out", "/private/output/run-001", "--cohort-id", "synthetic-development-example", "--from-ms", "1795478400000", "--to-ms", "1795564800000", "/private/example/stdds.oaf.gz"])
         self.assertEqual(plan["limits"]["stdds_files"], 32)
         self.assertEqual(len(plan["plan_sha256"]), 64)
-        self.assertIn("does not clip", plan["interval_utc"]["selection"])
+        self.assertIn("enforced before offset fitting", plan["interval_utc"]["selection"])
 
     def test_invalid_interval_and_hash_are_rejected(self):
         bad = fixture()
         bad["interval_utc"] = {"start": "2026-11-25T00:00:00Z", "end": "2026-11-24T00:00:00Z"}
+        with self.assertRaises(plan_run.PlanError):
+            plan_run.build_plan(bad)
+        bad = fixture()
+        bad["interval_utc"]["start"] = "2026-11-24T00:00:00.0011Z"
         with self.assertRaises(plan_run.PlanError):
             plan_run.build_plan(bad)
         bad = fixture()

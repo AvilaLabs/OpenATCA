@@ -42,6 +42,13 @@ def _utc(value: Any, label: str) -> datetime:
     return parsed
 
 
+def _unix_ms(value: datetime, label: str) -> int:
+    if value.microsecond % 1000:
+        raise PlanError(f"{label} must have millisecond precision")
+    delta = value - datetime(1970, 1, 1, tzinfo=value.tzinfo)
+    return delta.days * 86_400_000 + delta.seconds * 1000 + delta.microseconds // 1000
+
+
 def _input(item: Any, kind: str, index: int) -> dict[str, str]:
     if not isinstance(item, dict):
         raise PlanError(f"{kind}[{index}] must be an object")
@@ -59,14 +66,18 @@ def build_plan(spec: dict[str, Any]) -> dict[str, Any]:
     if spec.get("schema") != "oa-stdds-ref-plan-input-v1":
         raise PlanError("schema must be oa-stdds-ref-plan-input-v1")
     cohort = spec.get("cohort_id")
-    if not isinstance(cohort, str) or not cohort.strip():
-        raise PlanError("cohort_id is required")
+    if not isinstance(cohort, str) or not 1 <= len(cohort) <= 128 or not all(
+        char.isascii() and (char.isalnum() or char in "-_.:") for char in cohort
+    ):
+        raise PlanError("cohort_id must use 1..128 ASCII letters, digits, dot, dash, underscore, or colon")
     interval = spec.get("interval_utc")
     if not isinstance(interval, dict):
         raise PlanError("interval_utc must contain start and end")
     start, end = _utc(interval.get("start"), "interval_utc.start"), _utc(interval.get("end"), "interval_utc.end")
     if start >= end:
         raise PlanError("interval_utc.start must precede interval_utc.end")
+    from_ms = _unix_ms(start, "interval_utc.start")
+    to_ms = _unix_ms(end, "interval_utc.end")
     inventory = spec.get("inputs")
     if not isinstance(inventory, dict) or not isinstance(inventory.get("stdds"), list):
         raise PlanError("inputs.stdds must be an array")
@@ -87,7 +98,7 @@ def build_plan(spec: dict[str, Any]) -> dict[str, Any]:
     plan = {
         "schema": "oa-stdds-ref-run-plan-v1",
         "cohort_id": cohort,
-        "interval_utc": {"start": interval["start"], "end": interval["end"], "selection": "input metadata eligibility only; comparator currently scores every admitted record and does not clip to this interval"},
+        "interval_utc": {"start": interval["start"], "end": interval["end"], "from_ms_inclusive": from_ms, "to_ms_exclusive": to_ms, "selection": "STDDS mrtTime rows in the half-open interval; enforced before offset fitting; ADS-B truth retains full clip context"},
         "modes": ["raw_published_mrtTime", "fitted_in_sample_agreement"],
         "fit_policy": {"offset_search_ms": [-15000, 15000], "step_ms": 100, "minimum_samples": 8, "label": "fitted metrics are in-sample calibrated agreement, not prospective accuracy"},
         "inputs": {"adsb": adsb, "stdds": stdds},
@@ -97,7 +108,7 @@ def build_plan(spec: dict[str, Any]) -> dict[str, Any]:
         "expected_outputs": OUTPUTS,
         "output_manifest": {"required_files": OUTPUTS, "digest_policy": "record SHA-256 for each exact output; accept the bundle only when stdds_ref.complete is present and its embedded digests match the summary, CSV, JSON, and provenance header"},
         "limits": {"stdds_files": MAX_STDDS_FILES, "stdds_stored_bytes": MAX_STDDS_STORED_BYTES, "stdds_decoded_bytes": MAX_STDDS_DECODED_BYTES, "adsb_bytes": MAX_ADSB_BYTES, "retained_rows_each": MAX_ROWS, "report_bytes": MAX_REPORT_BYTES, "analysis_work_units": MAX_ANALYSIS_WORK},
-        "argv": [binary["path"], "--adsb", adsb["path"], "--out", output, *[x["path"] for x in stdds]],
+        "argv": [binary["path"], "--adsb", adsb["path"], "--out", output, "--cohort-id", cohort, "--from-ms", str(from_ms), "--to-ms", str(to_ms), *[x["path"] for x in stdds]],
         "provenance_boundary": "metadata-only plan; the referenced source records and hashes must be independently verified by the operator before execution",
     }
     digest_input = json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")

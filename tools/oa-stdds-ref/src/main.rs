@@ -1,4 +1,4 @@
-//! `oa-stdds-ref --adsb <clip.oaf> --out <dir> <stdds.oaf[.gz]>...`
+//! `oa-stdds-ref --adsb <clip.oaf> --out <dir> --cohort-id ID --from-ms FROM --to-ms TO <stdds.oaf[.gz]>...`
 //!
 //! Creates `stdds_ref.txt` (printed too), `stdds_ref.csv`, `stdds_ref.json`, and a final
 //! `stdds_ref.complete` marker in `--out`; existing output names are refused, never overwritten.
@@ -16,8 +16,9 @@ use oa_stdds_ref::engine::{analyse, estimate_analysis_work};
 use oa_stdds_ref::guard::{is_refusal, open_guarded, refuse_sealed};
 use oa_stdds_ref::load::{load_file_counted_with_budgets, MAX_STDDS_FILES};
 use oa_stdds_ref::publish::publish_report;
-use oa_stdds_ref::report::{build_report, check_report_bound, MAX_REPORT_BYTES};
+use oa_stdds_ref::report::{build_report_with_selection, check_report_bound, MAX_REPORT_BYTES};
 use oa_stdds_ref::run::build_refs;
+use oa_stdds_ref::selection::{overlaps, select_published_time, TimeInterval};
 use oa_stdds_ref::sources::TruthSource;
 
 const TXT: &str = "stdds_ref.txt";
@@ -29,7 +30,7 @@ const MAX_SOURCE_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_SOURCE_BUNDLE_BYTES: u64 = 16 * 1024 * 1024;
 // Each segment contributes min(segment rows, 128) samples, each checked at all 301 offsets.
 const MAX_ANALYSIS_WORK: usize = 80_000_000;
-const SOURCE_FILES: [&str; 14] = [
+const SOURCE_FILES: [&str; 15] = [
     "src/lib.rs",
     "src/main.rs",
     "src/engine.rs",
@@ -39,13 +40,14 @@ const SOURCE_FILES: [&str; 14] = [
     "src/publish.rs",
     "src/report.rs",
     "src/run.rs",
+    "src/selection.rs",
     "src/sources.rs",
     "Cargo.toml",
     "../../Cargo.toml",
     "../../Cargo.lock",
     "../../rust-toolchain.toml",
 ];
-const USAGE: &str = "usage: oa-stdds-ref --adsb <clip.oaf> --out <dir> <stdds.oaf[.gz]>...";
+const USAGE: &str = "usage: oa-stdds-ref --adsb <clip.oaf> --out <dir> --cohort-id <id> --from-ms <inclusive-unix-ms> --to-ms <exclusive-unix-ms> <stdds.oaf[.gz]>...";
 
 fn hash_guarded(g: &Sealed, path: &Path, byte_limit: u64) -> Result<(String, u64), String> {
     let mut file = open_guarded(g, path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -117,14 +119,55 @@ fn selected_source_fingerprint(g: &Sealed) -> Result<(String, String), String> {
     Ok((oa_sha256::to_hex(&hasher.finalize()), selected))
 }
 
+fn valid_cohort_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':')
+        })
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
-    let (mut adsb, mut out) = (None, None);
+    let (mut adsb, mut out, mut cohort_id, mut from_ms, mut to_ms) = (None, None, None, None, None);
     let mut files: Vec<PathBuf> = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--adsb" => adsb = args.next().map(PathBuf::from),
             "--out" => out = args.next().map(PathBuf::from),
+            "--cohort-id" => {
+                if cohort_id.is_some() {
+                    eprintln!("oa-stdds-ref: duplicate --cohort-id");
+                    return ExitCode::from(2);
+                }
+                cohort_id = args.next();
+            }
+            "--from-ms" => {
+                if from_ms.is_some() {
+                    eprintln!("oa-stdds-ref: duplicate --from-ms");
+                    return ExitCode::from(2);
+                }
+                from_ms = match args.next().and_then(|v| v.parse::<i64>().ok()) {
+                    Some(v) => Some(v),
+                    None => {
+                        eprintln!("oa-stdds-ref: --from-ms requires a signed Unix millisecond integer");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            "--to-ms" => {
+                if to_ms.is_some() {
+                    eprintln!("oa-stdds-ref: duplicate --to-ms");
+                    return ExitCode::from(2);
+                }
+                to_ms = match args.next().and_then(|v| v.parse::<i64>().ok()) {
+                    Some(v) => Some(v),
+                    None => {
+                        eprintln!("oa-stdds-ref: --to-ms requires a signed Unix millisecond integer");
+                        return ExitCode::from(2);
+                    }
+                }
+            }
             s if s.starts_with("--") => {
                 eprintln!("oa-stdds-ref: unknown option {s}");
                 return ExitCode::from(2);
@@ -136,9 +179,40 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
     };
+    let Some(cohort_id) = cohort_id.filter(|value| valid_cohort_id(value)) else {
+        eprintln!("oa-stdds-ref: --cohort-id is required and must use 1..128 ASCII letters, digits, dot, dash, underscore, or colon");
+        return ExitCode::from(2);
+    };
     if files.is_empty() {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
+    }
+    let interval = match (from_ms, to_ms) {
+        (Some(from), Some(to)) => match TimeInterval::new(from, to) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("oa-stdds-ref: {e}");
+                return ExitCode::from(2);
+            }
+        },
+        (None, None) => {
+            eprintln!("oa-stdds-ref: bounded published-time cohort required; unbounded scoring is refused");
+            return ExitCode::from(2);
+        }
+        _ => {
+            eprintln!("oa-stdds-ref: --from-ms and --to-ms must be supplied together");
+            return ExitCode::from(2);
+        }
+    };
+    if let Some(range) = interval {
+        let Some((sealed_from, sealed_to)) = oa_sealed::sealed_window_ms() else {
+            eprintln!("oa-stdds-ref: cannot verify requested interval against sealed windows");
+            return ExitCode::from(2);
+        };
+        if overlaps(range, sealed_from, sealed_to) {
+            eprintln!("oa-stdds-ref: requested interval intersects the sealed time window");
+            return ExitCode::from(2);
+        }
     }
     if files.len() > MAX_STDDS_FILES {
         eprintln!("oa-stdds-ref: {USAGE}; at most {MAX_STDDS_FILES} STDDS files are admitted");
@@ -159,7 +233,7 @@ fn main() -> ExitCode {
     }
     // Printed when `main` returns: on every exit after this point, an error included.
     let mut drops = oa_sealed::DropReport::new();
-    match run(g, &adsb, &out, &files, &mut drops) {
+    match run(g, &adsb, &out, &files, &cohort_id, interval, &mut drops) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -177,6 +251,8 @@ fn run(
     adsb: &Path,
     out: &Path,
     files: &[PathBuf],
+    cohort_id: &str,
+    interval: Option<TimeInterval>,
     drops: &mut oa_sealed::DropReport,
 ) -> Result<String, String> {
     // An existing output is refused before any work is done (and again, race-free, at the create).
@@ -231,6 +307,19 @@ fn run(
             info.gzip_truncated
         ));
     }
+    let selection = select_published_time(&mut recs, interval);
+    header.push(format!("cohort id: {cohort_id}"));
+    match interval {
+        Some(range) => header.push(format!(
+            "STDDS cohort selection: mrtTime in half-open [{}, {}) Unix milliseconds UTC; records after sealed-time filter {}, selected {}, excluded outside interval {}, excluded untimed {}; applied before per-key offset fitting",
+            range.from_ms(), range.to_ms(), selection.records_after_sealed_filter, selection.selected_records,
+            selection.excluded_outside_interval, selection.excluded_untimed
+        )),
+        None => header.push(format!(
+            "STDDS cohort selection: all timed mrtTime rows; records after sealed-time filter {}, selected {}, excluded untimed {}; applied before per-key offset fitting",
+            selection.records_after_sealed_filter, selection.selected_records, selection.excluded_untimed
+        )),
+    }
     let exe =
         std::env::current_exe().map_err(|e| format!("cannot identify running binary: {e}"))?;
     let (exe_hash, _) = hash_guarded(g, &exe, MAX_BINARY_BYTES).map_err(|e| {
@@ -274,7 +363,7 @@ fn run(
         truth: &refs.truth.truth,
     };
     let analysis = analyse(&recs, &refs.tracker, &truth);
-    let report = build_report(&header, &analysis);
+    let report = build_report_with_selection(&header, &analysis, cohort_id, interval, selection);
     let report_bytes = report
         .summary
         .len()

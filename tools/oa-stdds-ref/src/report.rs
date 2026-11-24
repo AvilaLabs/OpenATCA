@@ -10,6 +10,7 @@ use crate::engine::{
     Analysis, FitMiss, PairErr, Row, Sample, SET_CODES, SET_NAMES, TRACK_REUSE_GAP_MS,
 };
 use crate::model::{Class, Unpaired, CLASSES, MIN_SPEED_MPS};
+use crate::selection::{SelectionCounts, TimeInterval};
 
 /// The two finished outputs.
 // A7.2: cold struct, size guard waived
@@ -462,8 +463,28 @@ fn json_string(s: &str) -> String {
     out
 }
 
-fn json_of(a: &Analysis, header: &[String]) -> String {
-    let mut out = String::from("{\n  \"schema\": \"oa-stdds-ref-v1\",\n  \"time_basis\": \"mrtTime Unix milliseconds UTC\",\n  \"units\": {\"position_error\": \"m\", \"altitude_error\": \"ft (feed unit assumed)\", \"velocity_error\": \"m/s (feed unit assumed)\", \"time\": \"ms\"},\n  \"calibration\": \"in-sample: offset fit uses the same records later scored in fitted mode; fitted metrics are calibrated agreement, not prospective accuracy\",\n  \"cohort\": \"all three error sets share each mode's paired records; zero/missing address and duplicate key timestamps are excluded\",\n  \"policy\": {\"track_reuse_gap_ms\": ");
+fn selection_json(cohort_id: &str, interval: Option<TimeInterval>, counts: SelectionCounts) -> String {
+    match interval {
+        Some(range) => format!(
+            "{{\"cohort_id\":{},\"policy\":\"mrtTime in half-open [from_ms,to_ms), before offset fitting\",\"from_ms\":{},\"to_ms\":{},\"records_after_sealed_filter\":{},\"selected_records\":{},\"excluded_outside_interval\":{},\"excluded_untimed\":{}}}",
+            json_string(cohort_id), range.from_ms(), range.to_ms(), counts.records_after_sealed_filter, counts.selected_records,
+            counts.excluded_outside_interval, counts.excluded_untimed
+        ),
+        None => format!(
+            "{{\"cohort_id\":{},\"policy\":\"all timed mrtTime rows, before offset fitting\",\"from_ms\":null,\"to_ms\":null,\"records_after_sealed_filter\":{},\"selected_records\":{},\"excluded_outside_interval\":{},\"excluded_untimed\":{}}}",
+            json_string(cohort_id), counts.records_after_sealed_filter, counts.selected_records,
+            counts.excluded_outside_interval, counts.excluded_untimed
+        ),
+    }
+}
+
+fn json_of(a: &Analysis, header: &[String], selection: Option<(&str, Option<TimeInterval>, SelectionCounts)>) -> String {
+    let selection = selection.map(|(cohort_id, interval, counts)| selection_json(cohort_id, interval, counts));
+    let mut out = String::from("{\n  \"schema\": \"oa-stdds-ref-v1\",\n  \"time_basis\": \"mrtTime Unix milliseconds UTC\",\n  \"units\": {\"position_error\": \"m\", \"altitude_error\": \"ft (feed unit assumed)\", \"velocity_error\": \"m/s (feed unit assumed)\", \"time\": \"ms\"},\n  \"calibration\": \"in-sample: offset fit uses the same records later scored in fitted mode; fitted metrics are calibrated agreement, not prospective accuracy\",\n  \"cohort\": \"all three error sets share each mode's paired records; zero/missing address and duplicate key timestamps are excluded\",\n");
+    if let Some(selection) = selection {
+        let _ = writeln!(out, "  \"selection\": {selection},");
+    }
+    out.push_str("  \"policy\": {\"track_reuse_gap_ms\": ");
     let _ = write!(out, "{TRACK_REUSE_GAP_MS}, \"ambiguous_timestamp_rows\": ");
     let _ = write!(out, "{}, \"nonmonotonic_arrivals\": {}, \"class_churn_transitions\": {}, \"reuse_segments\": {} }},\n  \"provenance\": [", a.ambiguous_timestamp_rows, a.nonmonotonic_arrivals, a.class_churn_transitions, a.reuse_segments);
     for (i, h) in header.iter().enumerate() {
@@ -498,6 +519,25 @@ fn json_of(a: &Analysis, header: &[String]) -> String {
 
 /// The report of `a`. `header` lines (inputs and their digests) are printed first, verbatim.
 pub fn build_report(header: &[String], a: &Analysis) -> Report {
+    build_report_inner(header, a, None)
+}
+
+/// Builds a report with explicit pre-fit published-time cohort accounting.
+pub fn build_report_with_selection(
+    header: &[String],
+    a: &Analysis,
+    cohort_id: &str,
+    interval: Option<TimeInterval>,
+    counts: SelectionCounts,
+) -> Report {
+    build_report_inner(header, a, Some((cohort_id, interval, counts)))
+}
+
+fn build_report_inner(
+    header: &[String],
+    a: &Analysis,
+    selection: Option<(&str, Option<TimeInterval>, SelectionCounts)>,
+) -> Report {
     let mut s = String::new();
     s.push_str("OpenATCA tracker and ADS-B truth against STDDS terminal radar tracks (TAIS)\n");
     for h in header {
@@ -527,7 +567,7 @@ pub fn build_report(header: &[String], a: &Analysis) -> Report {
         s.push_str("\nno STDDS records\n");
     }
     let csv = csv_of(a);
-    let json = json_of(a, header);
+    let json = json_of(a, header, selection);
     let mut all = s.clone().into_bytes();
     all.extend_from_slice(b"\n--csv--\n");
     all.extend_from_slice(csv.as_bytes());
