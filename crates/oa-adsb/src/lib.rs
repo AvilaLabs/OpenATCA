@@ -131,6 +131,7 @@ pub mod cli;
 mod frames;
 mod speed;
 mod summary;
+mod snapshot;
 mod trace;
 
 pub use archive::{scan_archive, scan_archive_counted, ScanEnd, ScanError, ScanResult};
@@ -147,6 +148,10 @@ pub use speed::{
     CONSISTENCY_BASE_KT, CONSISTENCY_FACTOR, SPEED_ENVELOPE_KT, SPEED_ENVELOPE_MPS,
 };
 pub use summary::{summarize, Summary, MIN_JUMP_NM};
+pub use snapshot::{
+    decode_snapshot, SnapshotError, SnapshotStats, MAX_POSITION_AGE_MS, MAX_SNAPSHOT_BYTES,
+    MAX_SNAPSHOT_NODES, MAX_SNAPSHOT_ROWS,
+};
 pub use trace::{decode_trace, TraceError};
 
 /// Limit: rows in one trace. A busy day's longest real trace is tens of thousands of rows; at
