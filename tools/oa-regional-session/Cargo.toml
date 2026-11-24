@@ -42,3 +42,7 @@ class = "shell"
 [[bin]]
 name = "oa-regional-session"
 path = "src/main.rs"
+
+[[bin]]
+name = "regional-recovery-worker"
+path = "src/bin/regional-recovery-worker.rs"
