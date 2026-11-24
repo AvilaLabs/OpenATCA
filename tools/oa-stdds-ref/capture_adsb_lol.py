@@ -12,6 +12,7 @@ import argparse
 import calendar
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -391,6 +392,16 @@ def parse_utc(text: str) -> int:
 
 
 def checked_options(a: argparse.Namespace) -> tuple[int, int]:
+    for name in ("duration_s", "poll_s", "timeout_s", "max_age_ms", "radius_nm"):
+        value = getattr(a, name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer")
+    for name in ("lat", "lon"):
+        value = getattr(a, name)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"{name} must be a finite number")
+    if not isinstance(a.metar_stations, str):
+        raise ValueError("METAR stations must be text")
     if not 1 <= a.duration_s <= MAX_DURATION_S:
         raise ValueError(f"duration must be 1 to {MAX_DURATION_S} seconds")
     if not MIN_POLL_S <= a.poll_s <= MAX_POLL_S:
