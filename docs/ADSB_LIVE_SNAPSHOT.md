@@ -58,7 +58,12 @@ The capture wrapper has fixed ceilings: 300 seconds, polling no faster than ever
 responses, 1 MiB per response, 64 MiB cumulative response bytes, 256 MiB OAF bytes, 15-second
 maximum request timeout, and 30 seconds maximum position age. It makes one current METAR request
 to the official Aviation Weather Center API and retains its response and HTTP receipt metadata.
-It does not score data or publish FAA-origin SWIM recordings. Keep all resulting material private.
+It allows at most 32 METAR station identifiers. Its adsb.lol query is fixed to the documented
+ZAU coverage circle (42.5 N, 88.5 W, 250 nm), and the decoder applies the fixed 38.5–46.5 N,
+83.5–93.5 W box; rows outside that box are excluded. Cohort bounds require explicit timestamps
+with exact millisecond precision. Output creation and hashing use the shared sealed-data guard,
+and the decoder executable is hashed and run through the same verified open file. It does not
+score data or publish FAA-origin SWIM recordings. Keep all resulting material private.
 
 The schema and units above follow adsb.lol's official [V2 OpenAPI schema](https://api.adsb.lol/api/openapi.json)
 and [open data API documentation](https://www.adsb.lol/docs/open-data/api). The capture uses the
