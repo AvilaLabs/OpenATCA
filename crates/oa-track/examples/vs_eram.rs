@@ -1369,8 +1369,8 @@ mod turn_window_tests {
         assert!(select_turn_export_limits(false, true).is_err());
     }
 
-    #[test]
     // REQ: OA-TRK-406
+    #[test]
     fn fixed_timing_profile_is_explicit_and_scoped_to_turn_export() {
         assert_eq!(
             select_timing_profile(true, None).unwrap(),
