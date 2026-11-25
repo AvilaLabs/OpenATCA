@@ -7625,3 +7625,34 @@ claims; a match is explicitly unverified.
   and retains returned audit events in bounded storage. Handles identify external records; they do not prove their contents
   or authenticate a principal, and the framework never connects to a live system or selects an
   output.
+
+
+## Migration output selector (H1, H5)
+
+- **OA-MIG-201** `oa-migration-switch` is a zero-dependency, recorded/synthetic-only core. Its swap
+  unit is the exact function/scope/half-open-window tuple plus bound policy/source-epoch digests;
+  it has no network, file, clock, or live-system interface.
+- **OA-MIG-202** The state mirror accepts only bounded, sorted, unique snapshots whose unit, policy,
+  side, source epoch, state version, sequence, time basis, family coverage and health validate.
+  Partial, missing, unsupported, unknown, stale, duplicate, out-of-order, or gapped evidence refuses.
+- **OA-MIG-203** Reconciliation compares sorted full 32-byte business keys and each declared
+  consumer projection for tracks, flight data, handoffs and alerts, including active,
+  acknowledged and suppressed alert state. Each row's field-presence mask must match the
+  schema-bound policy mask and its canonical projection digest must be present. Side-local source
+  identities are retained as provenance and are not cross-side matching keys. This compares only
+  the declared operational projection; it does not claim identical internal filters or algorithms.
+- **OA-MIG-204** A readiness token binds the exact unit/policy, both source epochs, state versions
+  and sequences. Candidate selection also requires a recent accepted M1-style authority receipt
+  bound to the same readiness tuple, policy, evidence handles and allowed role. The selector
+  rejects replayed receipt sequence numbers, stale tokens or stale mirrors; rollback requires a
+  fresh legacy mirror and typed, role-allowed rollback event with an explicit current legacy-health
+  and source-availability observation bound to the mirrored epoch/version/sequence. These supplied
+  observations are not authenticated by the core and do not certify live source health; no caller
+  Boolean or count alone certifies readiness.
+- **OA-MIG-205** The trace records deterministic decision timestamps and selected-output transitions.
+  The endpoint class binds the terminal/en-route update interval and the model records consumer
+  route identity and sequence/timing observations. Promotion reserves the final trace slot for
+  immediate rollback; once the fixed trace is exhausted, further promotion refuses. These are
+  recorded inputs; the core does not route payload bytes or prove a downstream system received
+  them. This does not prove availability, controller authorization, or operational cutover. H5
+  continuity requires separate measured drill evidence from source-backed consumer observations.

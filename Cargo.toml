@@ -59,6 +59,8 @@ members = [
     "crates/oa-sealed",
     "crates/oa-time-window",
     "tools/oa-adapt",
+
+    "crates/oa-migration-switch",
     "tools/oa-build-info",
     "tools/oa-regional-session",
     "tools/oa-encounter",
