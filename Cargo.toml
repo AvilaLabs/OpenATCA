@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 # The fuzz crate is its own workspace (it alone may use libfuzzer-sys); see docs/FUZZING.md.
-exclude = ["fuzz", "validation/oa-alloc-check", "validation/oa-creusot-check", "validation/oa-feed-work-check"]
+exclude = ["fuzz", "validation/oa-alloc-check", "validation/oa-creusot-check", "validation/oa-feed-work-check", "validation/oa-vectors"]
 members = [
     "crates/oa-csv",
     "crates/oa-geo",

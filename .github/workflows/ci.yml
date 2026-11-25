@@ -26,6 +26,14 @@ jobs:
         run: python3 tools/check_allocations.py --target-dir "$RUNNER_TEMP/oa-allocator-target" --out "$RUNNER_TEMP/oa-allocator-evidence"
       - name: Feed reader work check (release)
         run: cargo +1.89.0 run --release --locked --manifest-path validation/oa-feed-work-check/Cargo.toml --target-dir "$RUNNER_TEMP/oa-feed-work-check-target"
+      - name: Format standalone conformance-vector checker
+        run: cargo +1.89.0 fmt --manifest-path validation/oa-vectors/Cargo.toml -- --check
+      - name: Lint standalone conformance-vector checker
+        run: timeout 10m cargo +1.89.0 clippy --offline --manifest-path validation/oa-vectors/Cargo.toml --all-targets --target-dir "$RUNNER_TEMP/oa-vectors-target" --locked -- -D warnings
+      - name: Test conformance-vector checker (offline)
+        run: timeout 10m cargo +1.89.0 test --offline --manifest-path validation/oa-vectors/Cargo.toml --target-dir "$RUNNER_TEMP/oa-vectors-target" --locked
+      - name: Validate checked-in conformance vectors (offline)
+        run: timeout 10m cargo +1.89.0 run --offline --manifest-path validation/oa-vectors/Cargo.toml --target-dir "$RUNNER_TEMP/oa-vectors-target" --locked
       - name: Test
         run: cargo +1.89.0 test --workspace --release --locked
       - name: Diagnostic example regressions
@@ -52,6 +60,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Toolchain
         run: rustup toolchain install 1.89.0 --profile minimal && rustup default 1.89.0
+      - name: Test conformance-vector checker (offline, aarch64)
+        run: timeout 10m cargo +1.89.0 test --offline --manifest-path validation/oa-vectors/Cargo.toml --target-dir "$RUNNER_TEMP/oa-vectors-target" --locked
+      - name: Validate checked-in conformance vectors (offline, aarch64)
+        run: timeout 10m cargo +1.89.0 run --offline --manifest-path validation/oa-vectors/Cargo.toml --target-dir "$RUNNER_TEMP/oa-vectors-target" --locked
       - name: Test (release, aarch64)
         run: cargo +1.89.0 test --workspace --release --locked
   # The dev profile (opt-level 1, debug assertions and overflow checks on). The debug_assert! checks

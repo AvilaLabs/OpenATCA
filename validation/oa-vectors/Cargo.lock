@@ -1,0 +1,43 @@
+# Standalone path-only dependency graph; no external packages.
+version = 4
+
+[[package]]
+name = "oa-asterix"
+version = "0.0.1"
+
+[[package]]
+name = "oa-geo"
+version = "0.0.1"
+dependencies = [
+ "oa-ieee",
+ "oa-math",
+]
+
+[[package]]
+name = "oa-ieee"
+version = "0.0.1"
+
+[[package]]
+name = "oa-json"
+version = "0.0.1"
+
+[[package]]
+name = "oa-math"
+version = "0.0.1"
+dependencies = [
+ "oa-ieee",
+]
+
+[[package]]
+name = "oa-sha256"
+version = "0.0.1"
+
+[[package]]
+name = "oa-vectors"
+version = "0.0.1"
+dependencies = [
+ "oa-asterix",
+ "oa-geo",
+ "oa-json",
+ "oa-sha256",
+]

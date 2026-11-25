@@ -1,0 +1,28 @@
+[package]
+name = "oa-vectors"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+# F1: existing workspace modules under conformance, not new third-party dependencies.
+oa-json = { path = "../../crates/oa-json" }
+oa-geo = { path = "../../crates/oa-geo" }
+oa-sha256 = { path = "../../crates/oa-sha256" }
+# F1: existing pure ASTERIX decoder API for the 0.1 CAT021 conformance adapter.
+oa-asterix = { path = "../../crates/oa-asterix" }
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+
+[profile.release]
+overflow-checks = true
