@@ -55,6 +55,7 @@ members = [
     "crates/oa-msaw",
     "crates/oa-techops",
     "crates/oa-runway",
+    "crates/oa-migration",
     "crates/oa-sealed",
     "crates/oa-time-window",
     "tools/oa-adapt",
