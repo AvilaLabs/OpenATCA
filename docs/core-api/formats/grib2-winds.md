@@ -1,0 +1,11 @@
+# GRIB2 winds public API proposal
+
+**Tier:** Preview for the documented decoder subset; Experimental for general GRIB2 or encoding.
+
+**Proposed public surface:** `decode_message(bytes, limits) -> Result<Message, DecodeError>`, `decode_stream(bytes, limits) -> DecodeReport`, `inspect_stream(bytes, limits) -> InventoryReport`, and `sample_bilinear(field, lat_lon) -> Result<Option<Sample>, SampleError>`. Make report-level stopped framing and skipped unsupported fields impossible to overlook; sampling wind should require paired U/V fields with equal grid, level and time, with explicit grid-relative/earth-relative semantics.
+
+**Source-backed contract:** GRIB Edition 2. Supported grid templates 3.0 (lat/lon) and 3.30 (Lambert conformal); product templates 4.0/4.8; data representations 5.0/5.2/5.3/5.40; bitmap reuse supported. Other packing, including 5.41, is refused/skipped. Named parameters include temperature K, relative humidity, U/V wind m/s, pressure Pa, height geopotential, vertical velocity Pa/s. Levels preserve fixed-surface code/value in the code's unit; isobaric values use Pa. Reference time is Gregorian date/time normalized to Unix seconds; forecast lead retains code-table time unit and value with helper conversion for supported NCEP units. Grid coordinates are degrees; data values are `f32`, missing values are NaN and also counted.
+
+**Bounds/refusals:** 256 MiB/message; 16 Mi grid points per field; 16 fields/message; 64 Mi summed points/message; additional point-work budget of 4 Mi + 64 points per input byte. Unsupported editions, templates, invalid lengths/sections, invalid grids and work-budget exhaustion are typed refusals. Stream decoding records skipped messages/fields and a terminal framing stop with byte offsets. Public API must document that partial decode is not complete success and retain message offsets.
+
+**Gaps/stability:** product and packing coverage is deliberately partial; source has a test encoder only, not a general public encoder. Wind sampling uses interpolation and must state edge/out-of-grid/missing-neighbor behavior. Stable evidence package and cross-platform bit identity for `f32` decode/interpolation are not established. Preview for exact subset only.
