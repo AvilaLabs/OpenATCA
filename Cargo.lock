@@ -212,13 +212,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oa-iwxxm"
-version = "0.0.1"
-dependencies = [
- "oa-xml",
-]
-
-[[package]]
 name = "oa-flight"
 version = "0.0.1"
 
@@ -254,6 +247,13 @@ dependencies = [
 [[package]]
 name = "oa-ieee"
 version = "0.0.1"
+
+[[package]]
+name = "oa-iwxxm"
+version = "0.0.1"
+dependencies = [
+ "oa-xml",
+]
 
 [[package]]
 name = "oa-j2k"
