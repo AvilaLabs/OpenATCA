@@ -793,7 +793,7 @@ fn render_output(
     writeln!(
         output,
         "rows_rejected_shape={}",
-        scan.stats.rejected.get(0).copied().unwrap_or_default()
+        scan.stats.rejected.first().copied().unwrap_or_default()
     )
     .map_err(|e| e.to_string())?;
     writeln!(
