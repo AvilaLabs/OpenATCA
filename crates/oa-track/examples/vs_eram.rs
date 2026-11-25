@@ -2,7 +2,10 @@
 //!
 //! ```text
 //! cargo run --release -p oa-track --example vs_eram -- \
-//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--turn-onset]
+//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir>
+//! cargo run --release -p oa-track --example vs_eram -- \
+//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> \
+//!     --turn-onset --turn-from-ms <utc-ms> --turn-to-ms <utc-ms>
 //! ```
 //!
 //! The ADS-B clip is split into two disjoint halves (`oa_track::score::SPLIT_TEXT`). Set A feeds
@@ -54,6 +57,18 @@ const KT_MPS: f64 = 0.514_444_444_444;
 const TOL_MS: i64 = 500;
 const TURN_EXPORT_ROWS: usize = 250_000;
 
+// A3: one fixed offline export counter record per system, outside tracker state.
+#[repr(C)]
+#[derive(Default)]
+struct TurnExportCounters {
+    no_course: u64,
+    near_zero: u64,
+    no_truth: u64,
+    selected_window: u64,
+    outside_window: u64,
+}
+const _: () = assert!(core::mem::size_of::<TurnExportCounters>() == 40);
+
 fn reference_course_deg(east: f64, north: f64) -> Option<f64> {
     let speed = east.hypot(north);
     (east.is_finite() && north.is_finite() && speed > 0.1)
@@ -70,12 +85,74 @@ fn leg_key(addr: u32, leg: u32) -> String {
     format!("{addr:06x}-{leg}")
 }
 
+fn in_turn_window(t_ms: i64, window: (i64, i64)) -> bool {
+    window.0 <= t_ms && t_ms < window.1
+}
+
+fn checked_turn_window(from_ms: i64, to_ms: i64) -> Result<(i64, i64), String> {
+    if from_ms >= to_ms || from_ms.rem_euclid(1000) != 0 || to_ms.rem_euclid(1000) != 0 {
+        return Err("turn window must be increasing and aligned to whole UTC seconds".into());
+    }
+    let (Some(from_ns), Some(to_ns)) =
+        (from_ms.checked_mul(1_000_000), to_ms.checked_mul(1_000_000))
+    else {
+        return Err("turn window endpoint overflows nanoseconds".into());
+    };
+    if oa_sealed::sealed_windows()
+        .iter()
+        .any(|w| from_ns < w.to_ns && w.from_ns < to_ns)
+    {
+        return Err("turn window intersects a sealed timestamp window".into());
+    }
+    Ok((from_ms, to_ms))
+}
+
+fn selected_truth_grid_bounds(
+    start_ms: i64,
+    end_ms: i64,
+    window: (i64, i64),
+) -> Result<Option<(i64, i64, u64, u64)>, String> {
+    if start_ms > end_ms {
+        return Ok(None);
+    }
+    let first = i128::from(start_ms).div_euclid(1000) * 1000;
+    let last = i128::from(end_ms).div_euclid(1000) * 1000;
+    if first > last {
+        return Ok(None);
+    }
+    let full_count = (last - first).div_euclid(1000) + 1;
+    let selected_first = first.max(i128::from(window.0));
+    let selected_last = last.min(i128::from(window.1) - 1000);
+    let selected_count = if selected_first <= selected_last {
+        (selected_last - selected_first).div_euclid(1000) + 1
+    } else {
+        0
+    };
+    let outside_count = full_count - selected_count;
+    let selected_bounds = if selected_count > 0 {
+        Some((
+            i64::try_from(selected_first)
+                .map_err(|_| "truth grid start outside i64 milliseconds")?,
+            i64::try_from(selected_last).map_err(|_| "truth grid end outside i64 milliseconds")?,
+            u64::try_from(selected_count).map_err(|_| "truth selected row count overflow")?,
+            u64::try_from(outside_count).map_err(|_| "truth outside row count overflow")?,
+        ))
+    } else {
+        Some((
+            0,
+            -1,
+            0,
+            u64::try_from(outside_count).map_err(|_| "truth outside row count overflow")?,
+        ))
+    };
+    Ok(selected_bounds)
+}
+
 fn append_tracker_updates<R: RowSource>(
     out: &mut String,
     count: &mut usize,
-    no_course: &mut u64,
-    near_zero: &mut u64,
-    no_truth: &mut u64,
+    counters: &mut TurnExportCounters,
+    window: (i64, i64),
     run: &R,
     truth: &Truth<'_>,
     system: &str,
@@ -86,27 +163,31 @@ fn append_tracker_updates<R: RowSource>(
             .rows_in(RowSet::Ticks, range.0, range.1)
             .map_err(|e| e.0)?;
         for i in 0..r.addr.len() {
-            let (Some(&addr), Some(&time_ns), Some(&east), Some(&north)) = (
-                r.addr.get(i),
-                r.t_ns.get(i),
-                r.vel_east_mps.get(i),
-                r.vel_north_mps.get(i),
-            ) else {
+            let (Some(&addr), Some(&time_ns)) = (r.addr.get(i), r.t_ns.get(i)) else {
+                continue;
+            };
+            let time_ms = time_ns.div_euclid(1_000_000);
+            if !in_turn_window(time_ms, window) {
+                counters.outside_window = counters.outside_window.saturating_add(1);
+                continue;
+            }
+            counters.selected_window = counters.selected_window.saturating_add(1);
+            let (Some(&east), Some(&north)) = (r.vel_east_mps.get(i), r.vel_north_mps.get(i))
+            else {
                 continue;
             };
             let east = f64::from(east);
             let north = f64::from(north);
             let speed = east.hypot(north);
             if east.is_finite() && north.is_finite() && speed <= 0.1 {
-                *near_zero = near_zero.saturating_add(1);
+                counters.near_zero = counters.near_zero.saturating_add(1);
             }
             let Some(course) = output_course_deg(east, north) else {
-                *no_course = no_course.saturating_add(1);
+                counters.no_course = counters.no_course.saturating_add(1);
                 continue;
             };
-            let time_ms = time_ns.div_euclid(1_000_000);
             let Ok(reference) = (truth.query)(addr, time_ms) else {
-                *no_truth = no_truth.saturating_add(1);
+                counters.no_truth = counters.no_truth.saturating_add(1);
                 continue;
             };
             *count = count.saturating_add(1);
@@ -125,20 +206,38 @@ fn append_tracker_updates<R: RowSource>(
     Ok(())
 }
 
-fn truth_csv(truth: &Truth<'_>) -> Result<String, String> {
+fn truth_csv(truth: &Truth<'_>, window: (i64, i64)) -> Result<(String, u64, u64), String> {
     let mut out = String::from("leg,time_ms,truth_course_deg,truth_speed_kt\n");
-    let mut count = 0usize;
+    let mut selected_rows = 0u64;
+    let mut outside_rows = 0u64;
+    for leg in &truth.legs {
+        let Some((_, _, selected_count, outside_count)) =
+            selected_truth_grid_bounds(leg.start_ms, leg.end_ms, window)?
+        else {
+            continue;
+        };
+        selected_rows = selected_rows
+            .checked_add(selected_count)
+            .ok_or_else(|| "truth selected row count overflow".to_owned())?;
+        outside_rows = outside_rows
+            .checked_add(outside_count)
+            .ok_or_else(|| "truth outside row count overflow".to_owned())?;
+    }
+    if selected_rows > TURN_EXPORT_ROWS as u64 {
+        return Err(format!(
+            "turn-onset truth rows exceed bounded export limit {TURN_EXPORT_ROWS}"
+        ));
+    }
     for (leg_ix, leg) in truth.legs.iter().enumerate() {
-        let mut t = leg.start_ms.div_euclid(1000) * 1000;
-        let end = leg.end_ms.div_euclid(1000) * 1000;
-        while t <= end {
-            count = count.saturating_add(1);
-            if count > TURN_EXPORT_ROWS {
-                return Err(format!(
-                    "turn-onset truth rows exceed bounded export limit {TURN_EXPORT_ROWS}"
-                ));
-            }
-            match (truth.query)(leg.addr, t) {
+        let Some((first, last, _, _)) =
+            selected_truth_grid_bounds(leg.start_ms, leg.end_ms, window)?
+        else {
+            continue;
+        };
+        let mut t = first;
+        while t <= last {
+            let time_ms = t;
+            match (truth.query)(leg.addr, time_ms) {
                 Ok(sample) if sample.leg as usize == leg_ix => {
                     let speed = sample.vel_east_mps.hypot(sample.vel_north_mps) / KT_MPS;
                     if let Some(course) =
@@ -146,34 +245,71 @@ fn truth_csv(truth: &Truth<'_>) -> Result<String, String> {
                     {
                         let _ = writeln!(
                             out,
-                            "{},{t},{course:.9},{speed:.6}",
+                            "{},{time_ms},{course:.9},{speed:.6}",
                             leg_key(leg.addr, leg_ix as u32)
                         );
                     } else {
-                        let _ =
-                            writeln!(out, "{},{t},,{speed:.6}", leg_key(leg.addr, leg_ix as u32));
+                        let _ = writeln!(
+                            out,
+                            "{},{time_ms},,{speed:.6}",
+                            leg_key(leg.addr, leg_ix as u32)
+                        );
                     }
                 }
                 _ => {
-                    let _ = writeln!(out, "{},{t},,", leg_key(leg.addr, leg_ix as u32));
+                    let _ = writeln!(out, "{},{time_ms},,", leg_key(leg.addr, leg_ix as u32));
                 }
             }
-            t = t.saturating_add(1000);
-            if t <= end && t == i64::MAX {
-                return Err("turn-onset truth time overflow".into());
-            }
+            t = t
+                .checked_add(1000)
+                .ok_or_else(|| "truth grid timestamp overflow".to_owned())?;
         }
     }
-    Ok(out)
+    Ok((out, selected_rows, outside_rows))
 }
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let (mut adsb, mut sfdps, mut out) = (None, None, None);
     let mut turn_onset = false;
+    let mut turn_from_ms = None;
+    let mut turn_to_ms = None;
+    let mut turn_from_seen = false;
+    let mut turn_to_seen = false;
     while let Some(a) = args.next() {
         if a == "--turn-onset" {
             turn_onset = true;
+            continue;
+        }
+        if a == "--turn-from-ms" || a == "--turn-to-ms" {
+            let Some(raw) = args.next() else {
+                eprintln!("vs_eram: {a} requires an integer UTC millisecond value");
+                return ExitCode::from(2);
+            };
+            let parsed = match raw.parse::<i64>() {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!(
+                        "vs_eram: {a} must be an in-range signed integer UTC millisecond value"
+                    );
+                    return ExitCode::from(2);
+                }
+            };
+            if a == "--turn-from-ms" {
+                if turn_from_seen {
+                    eprintln!("vs_eram: duplicate --turn-from-ms");
+                    return ExitCode::from(2);
+                }
+                turn_from_seen = true;
+                turn_from_ms = Some(parsed);
+            } else {
+                if turn_to_seen {
+                    eprintln!("vs_eram: duplicate --turn-to-ms");
+                    return ExitCode::from(2);
+                }
+                turn_to_seen = true;
+                turn_to_ms = Some(parsed);
+            }
             continue;
         }
         let v = args.next().map(PathBuf::from);
@@ -188,8 +324,22 @@ fn main() -> ExitCode {
         }
     }
     let (Some(adsb), Some(sfdps), Some(out)) = (adsb, sfdps, out) else {
-        eprintln!("usage: vs_eram --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--turn-onset]");
+        eprintln!("usage: vs_eram --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--turn-onset --turn-from-ms <utc-ms> --turn-to-ms <utc-ms>]");
         return ExitCode::from(2);
+    };
+    let turn_window = match (turn_onset, turn_from_ms, turn_to_ms) {
+        (true, Some(from), Some(to)) => match checked_turn_window(from, to) {
+            Ok(window) => Some(window),
+            Err(e) => {
+                eprintln!("vs_eram: {e}");
+                return ExitCode::from(2);
+            }
+        },
+        (false, None, None) => None,
+        _ => {
+            eprintln!("vs_eram: --turn-onset requires both --turn-from-ms and --turn-to-ms; window flags are invalid without --turn-onset");
+            return ExitCode::from(2);
+        }
     };
     // Every path is checked, as given and resolved, before anything is opened or created.
     for p in [&adsb, &sfdps, &out] {
@@ -198,7 +348,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    match run(&adsb, &sfdps, &out, turn_onset) {
+    match run(&adsb, &sfdps, &out, turn_window) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -337,7 +487,13 @@ fn line(o: &mut String, label: &str, eram: &Stats, ours: &Stats) {
     );
 }
 
-fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, turn_onset: bool) -> Result<String, String> {
+fn run(
+    clip_path: &Path,
+    sfdps: &Path,
+    out_dir: &Path,
+    turn_window: Option<(i64, i64)>,
+) -> Result<String, String> {
+    let turn_onset = turn_window.is_some();
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let mut o = String::new();
     let t_start = Instant::now();
@@ -403,22 +559,17 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, turn_onset: bool) -> Resu
         query: &q,
         legs: &built.legs,
     };
-    let turn_truth = if turn_onset {
-        Some(truth_csv(&truth)?)
+    let (turn_truth, truth_window_rows, truth_outside_rows) = if let Some(window) = turn_window {
+        let (csv, selected, outside) = truth_csv(&truth, window)?;
+        (Some(csv), selected, outside)
     } else {
-        None
+        (None, 0, 0)
     };
     let mut turn_estimates =
         turn_onset.then(|| String::from("leg,state_time_ms,system,course_deg,availability_ms\n"));
     let mut turn_exported = 0usize;
-    let (
-        mut oa_no_course,
-        mut oa_near_zero,
-        mut oa_no_truth,
-        mut cv_no_course,
-        mut cv_near_zero,
-        mut cv_no_truth,
-    ) = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let mut oa_counts = TurnExportCounters::default();
+    let mut cv_counts = TurnExportCounters::default();
     let in_zone = |la: f64, lo: f64| {
         la >= f64::from(ZAU_BOX.lat_min_e7) * 1e-7
             && la <= f64::from(ZAU_BOX.lat_max_e7) * 1e-7
@@ -459,15 +610,15 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, turn_onset: bool) -> Resu
     }
     let (_, ours_pairs) = chunk_finish(acc, &rcfg).map_err(|e| e.0)?;
     if turn_onset {
+        let window = turn_window.ok_or_else(|| "turn-onset window missing".to_owned())?;
         let estimates = turn_estimates
             .as_mut()
             .ok_or_else(|| "turn-onset export buffer missing".to_owned())?;
         append_tracker_updates(
             estimates,
             &mut turn_exported,
-            &mut oa_no_course,
-            &mut oa_near_zero,
-            &mut oa_no_truth,
+            &mut oa_counts,
+            window,
             &run,
             &truth,
             "oa",
@@ -478,9 +629,8 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, turn_onset: bool) -> Resu
         append_tracker_updates(
             estimates,
             &mut turn_exported,
-            &mut cv_no_course,
-            &mut cv_near_zero,
-            &mut cv_no_truth,
+            &mut cv_counts,
+            window,
             cv_rows,
             &truth,
             "cv",
@@ -529,23 +679,31 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, turn_onset: bool) -> Resu
     let mut sfdps_no_truth_rows = 0u64;
     let mut sfdps_no_velocity_rows = 0u64;
     let mut sfdps_near_zero_direction_rows = 0u64;
+    let mut sfdps_window_selected_rows = 0u64;
+    let mut sfdps_window_outside_rows = 0u64;
     let mut sfdps_duplicate_state_rows = 0u64;
     let mut sfdps_conflicting_state_rows = 0u64;
     if turn_onset {
+        let window = turn_window.ok_or_else(|| "turn-onset window missing".to_owned())?;
         for j in 0..leg.th.pos_ms.len() {
             let (Some(&flight), Some(&pos_ms)) = (leg.th.flight.get(j), leg.th.pos_ms.get(j))
             else {
                 continue;
             };
+            if pos_ms == oa_bench::legacy::NO_TIME {
+                sfdps_no_position_time = sfdps_no_position_time.saturating_add(1);
+                continue;
+            }
+            if !in_turn_window(pos_ms, window) {
+                sfdps_window_outside_rows = sfdps_window_outside_rows.saturating_add(1);
+                continue;
+            }
+            sfdps_window_selected_rows = sfdps_window_selected_rows.saturating_add(1);
             let Some(&addr) = assoc.addr.get(flight as usize) else {
                 continue;
             };
             if addr == oa_bench::legacy::NONE {
                 sfdps_unassociated_rows = sfdps_unassociated_rows.saturating_add(1);
-                continue;
-            }
-            if pos_ms == oa_bench::legacy::NO_TIME {
-                sfdps_no_position_time = sfdps_no_position_time.saturating_add(1);
                 continue;
             }
             let (Some(&recv_ms), Some(&vx), Some(&vy)) = (
@@ -806,19 +964,63 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, turn_onset: bool) -> Resu
             "truth_rows={}",
             truth_csv.lines().count().saturating_sub(1)
         );
+        let (window_from_ms, window_to_ms) =
+            turn_window.ok_or_else(|| "turn-onset window missing".to_owned())?;
+        let _ = writeln!(
+            turn_provenance,
+            "turn_window_utc_ms_half_open={window_from_ms},{window_to_ms}"
+        );
+        let _ = writeln!(
+            turn_provenance,
+            "truth_window_selected_rows={truth_window_rows}"
+        );
+        let _ = writeln!(
+            turn_provenance,
+            "truth_window_outside_rows={truth_outside_rows}"
+        );
+        let _ = writeln!(
+            turn_provenance,
+            "oa_window_selected_rows={}",
+            oa_counts.selected_window
+        );
+        let _ = writeln!(
+            turn_provenance,
+            "oa_window_outside_rows={}",
+            oa_counts.outside_window
+        );
+        let _ = writeln!(
+            turn_provenance,
+            "cv_window_selected_rows={}",
+            cv_counts.selected_window
+        );
+        let _ = writeln!(
+            turn_provenance,
+            "cv_window_outside_rows={}",
+            cv_counts.outside_window
+        );
+        let _ = writeln!(
+            turn_provenance,
+            "sfdps_window_selected_rows={sfdps_window_selected_rows}"
+        );
+        let _ = writeln!(
+            turn_provenance,
+            "sfdps_window_outside_rows={sfdps_window_outside_rows}"
+        );
         let _ = writeln!(turn_provenance, "all_estimate_rows={turn_exported}");
-        let _ = writeln!(turn_provenance, "oa_no_course_rows={oa_no_course}");
+        let _ = writeln!(turn_provenance, "oa_no_course_rows={}", oa_counts.no_course);
         let _ = writeln!(
             turn_provenance,
-            "oa_near_zero_direction_rows={oa_near_zero}"
+            "oa_near_zero_direction_rows={}",
+            oa_counts.near_zero
         );
-        let _ = writeln!(turn_provenance, "oa_no_truth_rows={oa_no_truth}");
-        let _ = writeln!(turn_provenance, "cv_no_course_rows={cv_no_course}");
+        let _ = writeln!(turn_provenance, "oa_no_truth_rows={}", oa_counts.no_truth);
+        let _ = writeln!(turn_provenance, "cv_no_course_rows={}", cv_counts.no_course);
         let _ = writeln!(
             turn_provenance,
-            "cv_near_zero_direction_rows={cv_near_zero}"
+            "cv_near_zero_direction_rows={}",
+            cv_counts.near_zero
         );
-        let _ = writeln!(turn_provenance, "cv_no_truth_rows={cv_no_truth}");
+        let _ = writeln!(turn_provenance, "cv_no_truth_rows={}", cv_counts.no_truth);
         let _ = writeln!(
             turn_provenance,
             "sfdps_no_receive_time_rows={sfdps_no_receive_time}"
@@ -889,4 +1091,77 @@ fn run(clip_path: &Path, sfdps: &Path, out_dir: &Path, turn_onset: bool) -> Resu
     fs::write(out_dir.join("compared.csv"), &csv).map_err(|e| e.to_string())?;
     fs::write(out_dir.join("vs_eram.txt"), &o).map_err(|e| e.to_string())?;
     Ok(o)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod turn_window_tests {
+    use super::{checked_turn_window, in_turn_window, selected_truth_grid_bounds};
+
+    // REQ: OA-TRK-404
+    #[test]
+    fn half_open_window_and_checked_whole_seconds() {
+        let window = checked_turn_window(1_000, 3_000).expect("synthetic unsealed interval");
+        assert!(!in_turn_window(999, window));
+        assert!(in_turn_window(1_000, window));
+        assert!(in_turn_window(2_999, window));
+        assert!(!in_turn_window(3_000, window));
+        assert!(checked_turn_window(2_000, 2_000).is_err());
+        assert!(checked_turn_window(1_001, 3_000).is_err());
+        assert!(checked_turn_window(9_223_372_036_854_774_000, 9_223_372_036_854_775_000).is_err());
+    }
+
+    // REQ: OA-TRK-404
+    #[test]
+    fn selected_truth_grid_handles_extremes_and_inverted_legs_without_overflow() {
+        let bounds = selected_truth_grid_bounds(i64::MIN, i64::MAX, (1_000, 3_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!((bounds.0, bounds.1, bounds.2), (1_000, 2_000, 2));
+        assert_eq!(
+            bounds.3,
+            u64::try_from(
+                ((i128::from(i64::MAX).div_euclid(1000) * 1000)
+                    - (i128::from(i64::MIN).div_euclid(1000) * 1000))
+                    .div_euclid(1000)
+                    - 1
+            )
+            .unwrap()
+        );
+        assert_eq!(
+            selected_truth_grid_bounds(4_000, 3_000, (1_000, 3_000)).unwrap(),
+            None
+        );
+        assert_eq!(
+            selected_truth_grid_bounds(1_999, 1_000, (1_000, 3_000)).unwrap(),
+            None
+        );
+        assert_eq!(
+            selected_truth_grid_bounds(1_000, 2_000, (1_000, 3_000)).unwrap(),
+            Some((1_000, 2_000, 2, 0))
+        );
+        assert_eq!(
+            selected_truth_grid_bounds(1_000, 2_000, (3_000, 4_000)).unwrap(),
+            Some((0, -1, 0, 2))
+        );
+    }
+
+    // REQ: OA-TRK-404
+    #[test]
+    fn sealed_middle_interval_is_refused_and_adjacent_boundaries_are_allowed() {
+        let sealed = oa_sealed::sealed_windows()
+            .first()
+            .expect("compiled seal metadata");
+        let middle_ns = (i128::from(sealed.from_ns) + i128::from(sealed.to_ns)) / 2;
+        let middle_from = i64::try_from(middle_ns.div_euclid(1_000_000_000) * 1_000).unwrap();
+        assert!(checked_turn_window(middle_from, middle_from + 1_000).is_err());
+        let before_to =
+            i64::try_from(i128::from(sealed.from_ns).div_euclid(1_000_000_000) * 1_000).unwrap();
+        assert!(checked_turn_window(before_to - 1_000, before_to).is_ok());
+        let after_from = i64::try_from(
+            (i128::from(sealed.to_ns) + 999_999_999).div_euclid(1_000_000_000) * 1_000,
+        )
+        .unwrap();
+        assert!(checked_turn_window(after_from, after_from + 1_000).is_ok());
+    }
 }

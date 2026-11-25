@@ -5484,6 +5484,12 @@ scope.
   - It reports how far the reported velocity's track angle lags behind the reference's.
   - With `--rescore`, `--thin N` keeps every Nth input report per aircraft and `--vel-lag` sets the lag, so both effects can
     be measured on the same day.
+- **OA-TRK-404** The opt-in development turn-onset export requires a checked, increasing,
+  whole-second-aligned half-open UTC-millisecond window, refuses overflow or overlap with sealed
+  timestamps, retains full source history for filter warmup, exports only rows in that window for
+  truth/OA/CV/SFDPS, preflights the selected truth grid against its row cap using overflow-safe
+  arithmetic, and records selected/outside row counts and exact endpoints. Synthetic example tests
+  cover interval boundaries, invalid intervals, sealed-span overlap, and extreme/inverted leg times.
 - **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
   refused in every date syntax. Any input path the shared sealed list refuses (`oa-sealed`, OA-SEAL-001), and every file the run opens
   (each file of the feed directory, the ADS-B clip, each file and the README of a `slice` source), is checked

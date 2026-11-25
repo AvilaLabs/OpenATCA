@@ -101,13 +101,21 @@ alarm/event visit before processing. Gap cleanup builds a retained list in one p
 matching work is offline and uses only the standard library.
 
 The `vs_eram` example emits these files plus `turn-onset-provenance.txt` only when passed
-`--turn-onset`; the ordinary comparison does not run the additional CV baseline or turn exports.
+`--turn-onset --turn-from-ms <utc-ms> --turn-to-ms <utc-ms>`. The required integer millisecond
+endpoints must be increasing, whole-second aligned, and outside every sealed span; the interval is
+half-open `[from,to)`. The ordinary comparison does not run the additional CV baseline or turn
+exports. This bounds turn exports to one predeclared window while the OA, CV and truth estimators
+still process their full source history for warmup. The export contains only selected-window rows;
+the selected truth grid is complete at 1 Hz within each available reference leg. Report boundary
+conditioning: the detector and truth label can arm only from baseline evidence in the selected
+window, so events whose required straight baseline precedes the window are not eligible labels.
 It builds truth from
 split B, exports OA ticks, runs the existing `h_mode=1` straight-only CV filter as a separate
 instance over the same split-A measurements and exports its ticks, then exports all associated
 SFDPS state rows at `pos_ms` with `recv_ms` separately. It records unassociated rows, no-truth,
 no-velocity, near-zero directions, missing/contradictory times, duplicate states and conflicting
 courses in provenance. Ambiguous conflicting course states are omitted from the estimate stream.
+The provenance records both endpoints and selected/outside row counts for truth and each system.
 The adapter is bounded to 250,000 rows per export and the scorer to 32 MiB / 250,000 rows per
 input. A capacity refusal is a hard stop: it must never be represented as a complete day. Freeze a
 predeclared development window that fits all caps or revise caps through review before scoring;
@@ -124,7 +132,7 @@ then run the diagnostic adapter and scorer on development-only inputs and inspec
 
 ```sh
 python3 -m unittest tools/test_turn_onset.py
-cargo run --release -p oa-track --example vs_eram -- --adsb <development-clip.oaf> --sfdps-dir <development-sfdps-dir> --out <turn-onset-output-dir> --turn-onset
+cargo run --release -p oa-track --example vs_eram -- --adsb <development-clip.oaf> --sfdps-dir <development-sfdps-dir> --out <turn-onset-output-dir> --turn-onset --turn-from-ms <utc-ms> --turn-to-ms <utc-ms>
 python3 tools/turn_onset.py --truth <turn-onset-output-dir/turn-onset-truth.csv> --estimates <turn-onset-output-dir/turn-onset-estimates.csv>
 ```
 
