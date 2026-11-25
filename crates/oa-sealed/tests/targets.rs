@@ -348,7 +348,11 @@ const ALLOW: &str = "seal-allow:";
 // metadata of that owned temporary, and no-clobber publication by hard link. Input reads still
 // use the descriptor-verified guard; these allowances do not permit unguarded data reads.
 // G2: three reviewed package metadata/inventory/output sites now carry explicit rationale.
-const ALLOW_COUNT: usize = 183;
+// D1 train review: +5 H2 sites (guarded
+// directory inventory, one empty synthetic CLI invocation, and three guarded output probes/writes);
+// +5 G3 sites (guarded private permission probes, exclusive staging write, no-replace link,
+// and parent-directory fsync). No exemption permits reading an unguarded recording.
+const ALLOW_COUNT: usize = 193;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.
