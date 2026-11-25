@@ -5,6 +5,9 @@
 //! ```text
 //! oa-compass --date <YYYY.MM.DD> --out <dir> [--adsb <clip.oaf>] [--sfdps-dir <dir>] [--split-days]
 //!             [--inputs split|all] [--openatca-rows ticks|updates]
+//! oa-compass radar --cat048 <file.ast> --date <YYYY.MM.DD> --out <new-dir>
+//!                   --site-lat-deg <deg> --site-lon-deg <deg> --site-height-m <ellipsoid-m>
+//!                   --scan-period-ms <ms>
 //!             [--eram-contradicted-address keep|drop]
 //! ```
 //!
@@ -32,6 +35,9 @@ use oa_compass::shell::slice;
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("radar") {
+        return oa_compass::shell::radar::radar_main(argv.get(1..).unwrap_or(&[]));
+    }
     if argv.first().map(String::as_str) == Some("slice") {
         return slice_main(argv.get(1..).unwrap_or(&[]));
     }

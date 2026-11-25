@@ -115,6 +115,7 @@ dependencies = [
  "oa-math",
  "oa-replay",
  "oa-sealed",
+ "oa-sensorsim",
  "oa-track",
  "oa-truth",
 ]

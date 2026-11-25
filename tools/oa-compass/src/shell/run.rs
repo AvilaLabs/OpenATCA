@@ -214,7 +214,7 @@ pub fn run_tracker(
 /// Reads the tracks the tracker has dropped since the last call from its log into `info.ends`.
 /// A dropped track that was never confirmed has no rows and is not an instance. A full log would
 /// lose events, so it fails the run.
-fn note_ends(
+pub(crate) fn note_ends(
     t: &oa_track::Tracker,
     drop_after_ns: i64,
     logged: &mut usize,

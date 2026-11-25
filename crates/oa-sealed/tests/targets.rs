@@ -352,7 +352,8 @@ const ALLOW: &str = "seal-allow:";
 // directory inventory, one empty synthetic CLI invocation, and three guarded output probes/writes);
 // +5 G3 sites (guarded private permission probes, exclusive staging write, no-replace link,
 // and parent-directory fsync). No exemption permits reading an unguarded recording.
-const ALLOW_COUNT: usize = 193;
+// B1: one locally guarded write-only create_new output opener in COMPASS output_fs.
+const ALLOW_COUNT: usize = 194;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.

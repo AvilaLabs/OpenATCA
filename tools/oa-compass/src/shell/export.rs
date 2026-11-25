@@ -22,6 +22,7 @@ use oa_asterix::{decode_block, Block, SourceId};
 use super::encode::{BlockSink, SinkStats};
 use super::error::{io_err, ExportError};
 use super::guard::refuse_sealed_row;
+use super::output_fs::{create_new_private_file, create_private_dir};
 use crate::core::convert::{count_notes, Converted, Refusal, NOTES};
 use crate::core::stats::{summarize, IntervalSummary};
 use crate::core::time::civil_from_days;
@@ -121,6 +122,7 @@ pub struct SystemExport {
     file: &'static str,
     source: SourceId,
     layout: Layout,
+    private_output: bool,
     files: BTreeMap<i64, DayFile>,
     refused: [u64; 2],
     pub counts: Vec<(String, u64)>,
@@ -164,11 +166,32 @@ impl SystemExport {
         source: SourceId,
         layout: Layout,
     ) -> SystemExport {
+        Self::with_privacy(name, file, source, layout, false)
+    }
+
+    /// Creates output files and per-day directories privately for raw-input replay commands.
+    pub fn new_private(
+        name: &'static str,
+        file: &'static str,
+        source: SourceId,
+        layout: Layout,
+    ) -> SystemExport {
+        Self::with_privacy(name, file, source, layout, true)
+    }
+
+    fn with_privacy(
+        name: &'static str,
+        file: &'static str,
+        source: SourceId,
+        layout: Layout,
+        private_output: bool,
+    ) -> SystemExport {
         SystemExport {
             name,
             file,
             source,
             layout,
+            private_output,
             files: BTreeMap::new(),
             refused: [0; 2],
             counts: Vec::new(),
@@ -215,10 +238,18 @@ impl SystemExport {
         }
         if !self.files.contains_key(&c.day) {
             let dir = self.layout.day_dir(c.day);
-            fs::create_dir_all(&dir).map_err(|e| io_err(&dir, &e))?;
+            if self.private_output {
+                create_private_dir(&dir).map_err(|e| io_err(&dir, &e))?;
+            } else {
+                fs::create_dir_all(&dir).map_err(|e| io_err(&dir, &e))?;
+            }
             let path = dir.join(self.file);
             let partial = dir.join(format!("{}.partial", self.file));
-            let f = File::create(&partial).map_err(|e| io_err(&partial, &e))?;
+            let f = if self.private_output {
+                create_new_private_file(&partial).map_err(|e| io_err(&partial, &e))?
+            } else {
+                File::create(&partial).map_err(|e| io_err(&partial, &e))?
+            };
             self.files.insert(
                 c.day,
                 DayFile {

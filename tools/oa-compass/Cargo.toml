@@ -27,6 +27,8 @@ oa-track = { path = "../../crates/oa-track" }
 oa-json = { path = "../../crates/oa-json" }
 # Writes the small ADS-B clip the job tests run on.
 oa-feed = { path = "../../crates/oa-feed" }
+# F1: generated CAT048 sensor plots for the radar-only command integration tests; never a runtime dependency.
+oa-sensorsim = { path = "../../crates/oa-sensorsim" }
 
 [package.metadata.openatca]
 class = "split"

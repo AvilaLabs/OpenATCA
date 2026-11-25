@@ -40,7 +40,7 @@ pub struct SliceArgs {
     pub to: u32,
 }
 
-fn parse_date(s: &str) -> Option<i64> {
+pub(crate) fn parse_date(s: &str) -> Option<i64> {
     let mut it = s.split(['.', '-']);
     let (y, m, d) = (it.next()?, it.next()?, it.next()?);
     if it.next().is_some() {
