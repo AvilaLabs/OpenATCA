@@ -1890,19 +1890,21 @@ mod tests {
 
     // REQ: OA-TRK-402
     #[test]
-    fn only_common_samples_with_finite_errors_are_read_from_the_p002_csv() {
+    fn common_errors_must_be_finite_and_non_common_rows_are_not_scored() {
         let mut csv = String::from(
             "# DEVELOPMENT RUN\naddr,t_ms,phase,band,common,oa_miss,oa_cross_m,oa_track_err_deg,oa_row_dt_ms,eram_miss,eram_cross_m,eram_track_err_deg\n",
         );
         csv.push_str("abc123,1000,climb,below,1,0,-3.5,0.4,20,0,7.0,0.2\n");
         csv.push_str("abc124,1000,climb,below,0,0,1.0,0.1,0,1,,\n");
-        csv.push_str("abc125,2000,climb,below,1,0,2.0,,0,0,5.0,0.3\n");
         let v = parse_samples(&csv).unwrap();
         assert_eq!(v.len(), 1);
         let s = v.first().unwrap();
         assert_eq!((s.addr, s.t_ms), (0xabc123, 1020));
         assert_eq!((s.oa_cross, s.er_cross), (-3.5, 7.0));
         assert_eq!(s.flight, "climb");
+        csv.push_str("abc125,2000,climb,below,1,0,2.0,,0,0,5.0,0.3\n");
+        let error = parse_samples(&csv).err().unwrap();
+        assert!(error.contains("line 5") && error.contains("missing or non-finite common error"));
         assert!(parse_samples("addr,t_ms\n").is_err());
     }
 
