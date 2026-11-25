@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 //! Counts explicit surface flags in a bounded adsb.lol trace archive. Shell-only offline census;
-//! this is not runway occupancy or a runtime safety product.
+//! this is not runway occupancy or a runtime safety product. By default it writes counts only.
+//! The optional private position CSV contains raw transponder addresses and must remain private.
 //!
 //! The input is a private `.complete` manifest with this UTF-8 format:
 //!
@@ -29,7 +30,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 
@@ -46,7 +47,12 @@ const BIN_SECONDS: i64 = 10;
 const DAY_SECONDS: i64 = 86_400;
 const BIN_COUNT: usize = (DAY_SECONDS / BIN_SECONDS) as usize;
 const MAX_REPORT_ROWS: u64 = 10_000_000;
-const MAX_ADDRESS_BINS: usize = 250_000;
+// A7.1: 1M address bins allow roughly 115 IDs sampled in every 10-second bin for a full day;
+// 250k allowed only about 29. The bounded offline BTreeMap and fixed bin arrays remain modest
+// within the 6 GiB coordinator memory envelope, while sparse stationary traces use fewer entries.
+const MAX_ADDRESS_BINS: usize = 1_000_000;
+const MAX_POSITION_CSV_BYTES: u64 = 256 * 1024 * 1024;
+const POSITION_CSV_HEADER: &[u8] = b"addr,t_ns,lat_e7,lon_e7,ground,stale,direct_adsb,source\n";
 
 const S_GROUND: u8 = 1;
 const S_ALTITUDE: u8 = 2;
@@ -487,12 +493,126 @@ fn state_of(row: &Row) -> u8 {
     state
 }
 
+// A7.2: cold struct, size guard waived. This one-run shell subsystem owns the optional CSV's
+// descriptor, bounded writer, cap accounting, hash/close lifecycle and rollback; it is not a plain
+// row record (D5: encapsulate the subsystem, not the record).
+struct PositionCsv {
+    path: PathBuf,
+    writer: Option<BufWriter<File>>,
+    bytes: u64,
+    rows: u64,
+    committed: bool,
+}
+
+impl PositionCsv {
+    fn create(path: &Path) -> Result<Self, String> {
+        oa_sealed::refuse(path)?;
+        let file = create_new(path)?;
+        let mut out = Self {
+            path: path.to_path_buf(),
+            writer: Some(BufWriter::new(file)),
+            bytes: 0,
+            rows: 0,
+            committed: false,
+        };
+        out.write_bytes(POSITION_CSV_HEADER)?;
+        Ok(out)
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let next = checked_csv_size(self.bytes, bytes.len())?;
+        self.writer
+            .as_mut()
+            .ok_or("position CSV writer is closed")?
+            .write_all(bytes)
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        self.bytes = next;
+        Ok(())
+    }
+
+    fn write_row(&mut self, row: &Row) -> Result<(), String> {
+        let line = position_csv_line(row);
+        self.write_bytes(line.as_bytes())?;
+        self.rows = self.rows.checked_add(1).ok_or("CSV row count overflow")?;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<String, String> {
+        let mut writer = self.writer.take().ok_or("position CSV writer is closed")?;
+        writer
+            .flush()
+            .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        drop(writer);
+        let file =
+            oa_sealed::open(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
+        let digest = oa_sha256::sha256_reader(BufReader::new(file))
+            .map_err(|e| format!("{}: {e:?}", self.path.display()))?;
+        Ok(oa_sha256::to_hex(&digest))
+    }
+}
+
+fn checked_csv_size(current: u64, added: usize) -> Result<u64, String> {
+    let next = current
+        .checked_add(u64::try_from(added).map_err(|_| "CSV byte length overflow")?)
+        .ok_or("CSV byte length overflow")?;
+    if next > MAX_POSITION_CSV_BYTES {
+        return Err(format!(
+            "position CSV exceeds {MAX_POSITION_CSV_BYTES} byte limit"
+        ));
+    }
+    Ok(next)
+}
+
+fn position_csv_line(row: &Row) -> String {
+    let ground = u8::from(row.flags & F_GROUND != 0);
+    let stale = u8::from(row.flags & F_STALE != 0);
+    let direct = u8::from(is_direct_adsb(row.source));
+    format!(
+        "{:x},{},{},{},{ground},{stale},{direct},{}\n",
+        row.icao, row.time_ns, row.lat_e7, row.lon_e7, row.source
+    )
+}
+
+fn position_csv_source_index_map() -> String {
+    let mut map = String::new();
+    for (index, name) in SOURCE_NAMES.iter().enumerate() {
+        if index != 0 {
+            map.push(',');
+        }
+        let _ = write!(map, "{index}:{name}");
+    }
+    let _ = write!(map, ",{}:none_no_source_column", oa_adsb::NONE_U8);
+    map
+}
+
+fn parse_position_csv_args(flag: Option<&str>, path: Option<&str>) -> Result<Option<&str>, String> {
+    match (flag, path) {
+        (None, None) => Ok(None),
+        (Some("--position-csv"), Some(path)) if !path.is_empty() => Ok(Some(path)),
+        (Some("--position-csv"), _) => Err("--position-csv requires a private path".into()),
+        (Some(_), _) => {
+            Err("unknown optional argument; expected --position-csv <private-path>".into())
+        }
+        (None, Some(_)) => Err("position CSV path requires --position-csv".into()),
+    }
+}
+
+impl Drop for PositionCsv {
+    fn drop(&mut self) {
+        self.writer.take();
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn add_reports(
     reports: &Reports,
     manifest: &Manifest,
     bins: &mut [Bin],
     address_bins: &mut BTreeMap<(u32, u16), u8>,
     total_rows: &mut u64,
+    position_csv: &mut Option<PositionCsv>,
 ) -> Result<(), String> {
     for index in 0..reports_len(reports) {
         let Some(row) = reports_row(reports, index) else {
@@ -510,6 +630,9 @@ fn add_reports(
             .ok_or("report time precedes the requested day")?;
         if relative_ns < 0 || row.time_ns >= manifest.to_ns {
             return Err("decoder returned a report outside the requested day".into());
+        }
+        if let Some(csv) = position_csv.as_mut() {
+            csv.write_row(&row)?;
         }
         let bin_index = usize::try_from(relative_ns / (BIN_SECONDS * 1_000_000_000))
             .map_err(|_| "bin index conversion failed")?;
@@ -997,6 +1120,69 @@ fn create_new(path: &Path) -> Result<File, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+fn canonical_target(path: &Path) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| format!("{}: output path has no file name", path.display()))?;
+    Ok(parent
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", parent.display()))?
+        .join(name))
+}
+
+fn validate_output_paths(
+    manifest_path: &Path,
+    manifest: &Manifest,
+    output_path: &Path,
+    position_csv_path: Option<&Path>,
+) -> Result<(), String> {
+    let output_target = canonical_target(output_path)?;
+    let count_sidecar = PathBuf::from(format!("{}.source", output_path.display()));
+    let sidecar_target = canonical_target(&count_sidecar)?;
+    let mut input_targets = Vec::with_capacity(manifest.parts.len() + 1);
+    input_targets.push(
+        manifest_path
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", manifest_path.display()))?,
+    );
+    for part in &manifest.parts {
+        input_targets.push(
+            part.path
+                .canonicalize()
+                .map_err(|e| format!("{}: {e}", part.path.display()))?,
+        );
+    }
+    for target in [&output_target, &sidecar_target] {
+        if input_targets.contains(target) {
+            return Err(format!(
+                "{} aliases an input manifest or archive part",
+                target.display()
+            ));
+        }
+    }
+    if output_target == sidecar_target {
+        return Err("count output aliases its source sidecar".into());
+    }
+    if let Some(csv_path) = position_csv_path {
+        let csv_target = canonical_target(csv_path)?;
+        if csv_target == output_target || csv_target == sidecar_target {
+            return Err("position CSV aliases the count output or its source sidecar".into());
+        }
+        if input_targets.contains(&csv_target) {
+            return Err("position CSV aliases the manifest or an archive part".into());
+        }
+        if csv_path.to_str().map_or(true, |s| !valid_manifest_text(s)) {
+            return Err("position CSV path must be UTF-8 without control characters".into());
+        }
+        oa_sealed::refuse(csv_path)?;
+    }
+    Ok(())
+}
+
 fn valid_commit(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -1005,13 +1191,19 @@ fn run(
     manifest_path: &Path,
     output_path: &Path,
     source_commit: &str,
+    position_csv_path: Option<&Path>,
     drops: &mut oa_sealed::DropReport,
 ) -> Result<(), String> {
     if !valid_commit(source_commit) {
         return Err("source commit must be a 40-character hexadecimal hash".into());
     }
     let manifest = read_manifest(manifest_path)?;
+    validate_output_paths(manifest_path, &manifest, output_path, position_csv_path)?;
     let parts = verify_parts(&manifest)?;
+    let mut position_csv = match position_csv_path {
+        Some(path) => Some(PositionCsv::create(path)?),
+        None => None,
+    };
     // A3 exception: these fixed daily output bins are cold shell summaries, each written once.
     let mut bins = vec![Bin::default(); BIN_COUNT];
     // A3 exception: bounded one-shot dedup index, not a hot runtime collection.
@@ -1028,6 +1220,7 @@ fn run(
                 &mut bins,
                 &mut address_bins,
                 &mut total_rows,
+                &mut position_csv,
             )
         },
         &mut sealed_rows,
@@ -1047,6 +1240,10 @@ fn run(
             scan.stats.sealed_window_dropped.max(sealed_rows)
         ));
     }
+    let csv_sha256 = match position_csv.as_mut() {
+        Some(csv) => Some(csv.finish()?),
+        None => None,
+    };
     // A3 exception: one-shot presentation totals indexed by the same fixed daily bin.
     let mut address_counts = vec![AddressBinCounts::default(); BIN_COUNT];
     let totals = summarize_address_bins(&address_bins, &mut address_counts)?;
@@ -1068,8 +1265,21 @@ fn run(
     drop(file);
     let sidecar_path = PathBuf::from(format!("{}.source", output_path.display()));
     let sidecar = format!(
-        "openatca-adsb-surface-counts-source-v1\nsource_commit={source_commit}\noutput_sha256={output_hash}\ncompletion_manifest_sha256={}\nrelease_manifest_sha256={}\nrelease_tag={}\n",
-        manifest.sha256, manifest.release_manifest_sha256, manifest.release_tag
+        "openatca-adsb-surface-counts-source-v1\nsource_commit={source_commit}\noutput_sha256={output_hash}\ncompletion_manifest_sha256={}\nrelease_manifest_sha256={}\nrelease_tag={}\n{}",
+        manifest.sha256,
+        manifest.release_manifest_sha256,
+        manifest.release_tag,
+        match (&position_csv, &csv_sha256) {
+            (Some(csv), Some(hash)) => format!(
+                "position_csv_status={}\nposition_csv_path={}\nposition_csv_rows={}\nposition_csv_sha256={}\nposition_csv_source_index_order=readsb_addrtype_SOURCE_NAMES\nposition_csv_source_index_map={}\n",
+                if scan.stats.traces_refused == 0 { "complete" } else { "partial_refused_trace_files_present" },
+                csv.path.display(),
+                csv.rows,
+                hash,
+                position_csv_source_index_map()
+            ),
+            _ => String::new(),
+        }
     );
     let mut source_file = match create_new(&sidecar_path) {
         Ok(file) => file,
@@ -1087,6 +1297,9 @@ fn run(
         let _ = std::fs::remove_file(output_path);
         return Err(format!("{}: {error}", sidecar_path.display()));
     }
+    if let Some(csv) = position_csv.as_mut() {
+        csv.committed = true;
+    }
     Ok(())
 }
 
@@ -1095,8 +1308,21 @@ fn main() -> ExitCode {
     let manifest = args.next();
     let output = args.next();
     let source_commit = args.next();
-    if manifest.is_none() || output.is_none() || source_commit.is_none() || args.next().is_some() {
-        eprintln!("usage: cargo run --release -p oa-adsb --example surface_counts -- <private.complete> <private-output.txt> <source-commit>");
+    let optional = args.next();
+    let position_csv_path = if optional.as_deref() == Some("--position-csv") {
+        args.next()
+    } else {
+        None
+    };
+    let parsed_position_csv =
+        parse_position_csv_args(optional.as_deref(), position_csv_path.as_deref());
+    if manifest.is_none()
+        || output.is_none()
+        || source_commit.is_none()
+        || parsed_position_csv.is_err()
+        || args.next().is_some()
+    {
+        eprintln!("usage: cargo run --release -p oa-adsb --example surface_counts -- <private.complete> <private-output.txt> <source-commit> [--position-csv <private-path>]");
         return ExitCode::from(2);
     }
     let mut drops = oa_sealed::DropReport::new();
@@ -1104,6 +1330,7 @@ fn main() -> ExitCode {
         Path::new(manifest.as_deref().unwrap_or("")),
         Path::new(output.as_deref().unwrap_or("")),
         source_commit.as_deref().unwrap_or(""),
+        parsed_position_csv.ok().flatten().map(Path::new),
         &mut drops,
     );
     match result {
@@ -1157,5 +1384,73 @@ mod synthetic_tests {
             by_time.get(7).map(|bin| bin.positioned_address_bins),
             Some(2)
         );
+    }
+
+    // REQ: OA-ADSB-177
+    #[test]
+    fn private_position_csv_serializes_normalized_columns_and_flags() {
+        let mut row = oa_adsb::ROW_EMPTY;
+        row.icao = 0xabc123;
+        row.time_ns = 1_234_567_890;
+        row.lat_e7 = 418_786_000;
+        row.lon_e7 = -87_904_000;
+        row.flags = F_GROUND | F_STALE;
+        row.source = SOURCE_NAMES
+            .iter()
+            .position(|name| *name == "adsb_icao")
+            .and_then(|index| u8::try_from(index).ok())
+            .unwrap_or_default();
+        assert_eq!(
+            position_csv_line(&row),
+            "abc123,1234567890,418786000,-87904000,1,1,1,0\n"
+        );
+        assert_eq!(
+            POSITION_CSV_HEADER,
+            b"addr,t_ns,lat_e7,lon_e7,ground,stale,direct_adsb,source\n"
+        );
+        row.source = oa_adsb::NONE_U8;
+        assert_eq!(
+            position_csv_line(&row),
+            "abc123,1234567890,418786000,-87904000,1,1,0,255\n"
+        );
+    }
+
+    // REQ: OA-ADSB-177
+    #[test]
+    fn private_position_csv_cap_is_checked_before_write() {
+        assert_eq!(
+            checked_csv_size(MAX_POSITION_CSV_BYTES - 1, 1),
+            Ok(MAX_POSITION_CSV_BYTES)
+        );
+        assert!(checked_csv_size(MAX_POSITION_CSV_BYTES, 1).is_err());
+        assert!(checked_csv_size(u64::MAX, 1).is_err());
+    }
+
+    // REQ: OA-ADSB-177
+    #[test]
+    fn private_position_csv_source_mapping_is_complete_and_ordered() {
+        let expected = SOURCE_NAMES
+            .iter()
+            .enumerate()
+            .map(|(index, name)| format!("{index}:{name}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            position_csv_source_index_map(),
+            format!("{expected},255:none_no_source_column")
+        );
+    }
+
+    // REQ: OA-ADSB-177
+    #[test]
+    fn optional_position_csv_argument_is_opt_in_and_validated() {
+        assert_eq!(parse_position_csv_args(None, None), Ok(None));
+        assert_eq!(
+            parse_position_csv_args(Some("--position-csv"), Some("private.csv")),
+            Ok(Some("private.csv"))
+        );
+        assert!(parse_position_csv_args(Some("--position-csv"), None).is_err());
+        assert!(parse_position_csv_args(Some("--other"), Some("private.csv")).is_err());
+        assert!(parse_position_csv_args(None, Some("private.csv")).is_err());
     }
 }

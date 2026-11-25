@@ -28,6 +28,12 @@ jobs:
         run: cargo +1.89.0 run --release --locked --manifest-path validation/oa-feed-work-check/Cargo.toml --target-dir "$RUNNER_TEMP/oa-feed-work-check-target"
       - name: Test
         run: cargo +1.89.0 test --workspace --release --locked
+      - name: Diagnostic example regressions
+        run: |
+          cargo +1.89.0 test --release --locked -p oa-track --example turn_diag --example vs_eram
+          cargo +1.89.0 test --release --locked -p oa-adsb --example surface_counts
+      - name: Turn-onset scorer regressions
+        run: python3 tools/test_turn_onset.py
       - name: Requirements traceability
         run: cargo +1.89.0 run --locked -p oa-trace
       - name: No external dependencies
