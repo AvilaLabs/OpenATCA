@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "oa-adapt"
+version = "0.0.1"
+dependencies = [
+ "oa-airspace",
+ "oa-nasr",
+ "oa-sealed",
+ "oa-sha256",
+ "oa-zip",
+]
+
+[[package]]
 name = "oa-adsb"
 version = "0.0.1"
 dependencies = [
@@ -24,7 +35,6 @@ dependencies = [
  "oa-ieee",
  "oa-math",
  "oa-nasr",
- "oa-sealed",
  "oa-sha256",
  "oa-zip",
 ]
@@ -68,6 +78,7 @@ dependencies = [
  "oa-sha256",
  "oa-tbfm",
  "oa-tfms",
+ "oa-time-window",
  "oa-truth",
  "oa-xml",
 ]
@@ -99,6 +110,7 @@ dependencies = [
  "oa-sealed",
  "oa-sha256",
  "oa-track",
+ "oa-track-tools",
 ]
 
 [[package]]
@@ -117,6 +129,7 @@ dependencies = [
  "oa-sealed",
  "oa-sensorsim",
  "oa-track",
+ "oa-track-tools",
  "oa-truth",
 ]
 
@@ -181,6 +194,7 @@ dependencies = [
  "oa-sealed",
  "oa-sha256",
  "oa-track",
+ "oa-track-tools",
  "oa-zip",
 ]
 
@@ -209,6 +223,7 @@ name = "oa-fixm"
 version = "0.0.1"
 dependencies = [
  "oa-sealed",
+ "oa-time-window",
  "oa-xml",
 ]
 
@@ -225,6 +240,7 @@ dependencies = [
  "oa-flight",
  "oa-replay",
  "oa-sealed",
+ "oa-time-window",
  "oa-xml",
 ]
 
@@ -324,6 +340,7 @@ dependencies = [
  "oa-sha256",
  "oa-tiff",
  "oa-track",
+ "oa-track-tools",
  "oa-zip",
 ]
 
@@ -348,7 +365,6 @@ name = "oa-nasr"
 version = "0.0.1"
 dependencies = [
  "oa-csv",
- "oa-sealed",
 ]
 
 [[package]]
@@ -358,6 +374,7 @@ dependencies = [
  "oa-airspace",
  "oa-geo",
  "oa-sealed",
+ "oa-time-window",
  "oa-xml",
 ]
 
@@ -370,6 +387,7 @@ dependencies = [
  "oa-sealed",
  "oa-sensorsim",
  "oa-track",
+ "oa-track-tools",
  "oa-truth",
 ]
 
@@ -412,6 +430,7 @@ dependencies = [
  "oa-sha256",
  "oa-tbfm",
  "oa-tfms",
+ "oa-time-window",
  "oa-xml",
  "oa-zip",
 ]
@@ -421,6 +440,7 @@ name = "oa-replay-diff"
 version = "0.0.1"
 dependencies = [
  "oa-sealed",
+ "oa-time-window",
  "oa-track",
 ]
 
@@ -453,12 +473,16 @@ dependencies = [
  "oa-sealed",
  "oa-sha256",
  "oa-track",
+ "oa-track-tools",
  "oa-truth",
 ]
 
 [[package]]
 name = "oa-sealed"
 version = "0.0.1"
+dependencies = [
+ "oa-time-window",
+]
 
 [[package]]
 name = "oa-sector-reconstruct"
@@ -502,6 +526,7 @@ dependencies = [
  "oa-sealed",
  "oa-sha256",
  "oa-track",
+ "oa-track-tools",
  "oa-truth",
 ]
 
@@ -511,6 +536,7 @@ version = "0.0.1"
 dependencies = [
  "oa-feed",
  "oa-sealed",
+ "oa-time-window",
  "oa-xml",
  "oa-zip",
 ]
@@ -525,6 +551,7 @@ dependencies = [
  "oa-math",
  "oa-sealed",
  "oa-stdds",
+ "oa-time-window",
  "oa-truth",
  "oa-xml",
  "oa-zip",
@@ -541,7 +568,9 @@ dependencies = [
  "oa-sealed",
  "oa-sha256",
  "oa-stdds",
+ "oa-time-window",
  "oa-track",
+ "oa-track-tools",
  "oa-truth",
  "oa-xml",
  "oa-zip",
@@ -557,6 +586,7 @@ version = "0.0.1"
 dependencies = [
  "oa-airspace",
  "oa-sealed",
+ "oa-time-window",
  "oa-xml",
 ]
 
@@ -570,6 +600,7 @@ version = "0.0.1"
 dependencies = [
  "oa-fixm",
  "oa-sealed",
+ "oa-time-window",
  "oa-xml",
 ]
 
@@ -585,11 +616,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "oa-time-window"
+version = "0.0.1"
+
+[[package]]
 name = "oa-trace"
 version = "0.0.1"
 
 [[package]]
 name = "oa-track"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-geo",
+ "oa-math",
+ "oa-sensorsim",
+ "oa-sha256",
+ "oa-truth",
+]
+
+[[package]]
+name = "oa-track-tools"
 version = "0.0.1"
 dependencies = [
  "oa-adsb",
@@ -601,6 +648,7 @@ dependencies = [
  "oa-sealed",
  "oa-sensorsim",
  "oa-sha256",
+ "oa-track",
  "oa-truth",
 ]
 
@@ -615,6 +663,7 @@ dependencies = [
  "oa-math",
  "oa-sealed",
  "oa-sha256",
+ "oa-time-window",
 ]
 
 [[package]]
@@ -638,15 +687,13 @@ dependencies = [
 [[package]]
 name = "oa-zip"
 version = "0.0.1"
-dependencies = [
- "oa-sealed",
-]
 
 [[package]]
 name = "openatca-core"
 version = "0.1.0"
 dependencies = [
  "oa-track",
+ "oa-track-tools",
  "oa-truth",
 ]
 

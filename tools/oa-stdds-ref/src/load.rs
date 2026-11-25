@@ -155,7 +155,7 @@ fn feed(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>, data: &[u8]) {
 /// The decoder limits of every load in this tool: the sealed window as the drop window, so a
 /// record timed in it is dropped before any count (OA-SEAL-014).
 pub fn load_limits() -> Limits {
-    Limits::new(oa_sealed::DropWindow::sealed())
+    Limits::new(oa_sealed::sealed_drop_window())
 }
 
 /// Reads a recording from `src` (raw or gzip, decided by the gzip magic), appending its TAIS

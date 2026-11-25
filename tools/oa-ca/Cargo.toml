@@ -20,6 +20,8 @@ oa-sealed = { path = "../../crates/oa-sealed" }
 oa-safety = { path = "../../crates/oa-safety" }
 oa-sha256 = { path = "../../crates/oa-sha256" }
 oa-track = { path = "../../crates/oa-track" }
+# RULESET F1: private split-report evaluator API is isolated in the tool package.
+oa-track-tools = { path = "../../crates/oa-track-tools" }
 
 [dev-dependencies]
 # Workspace crate, not an outside dependency (RULESET F1): frames the recording of the sealed-window test.

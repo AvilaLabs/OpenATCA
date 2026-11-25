@@ -234,7 +234,8 @@ impl Kv {
     }
 
     pub fn get_f64(&self, k: &str) -> Option<f64> {
-        self.get(k)?.parse().ok()
+        let value: f64 = self.get(k)?.parse().ok()?;
+        (value.is_finite() || value.is_nan()).then_some(value)
     }
 }
 
@@ -322,5 +323,14 @@ mod tests {
         assert_eq!(back.get_f64("a.b"), Some(3.0));
         assert_eq!(back.get("c"), Some("x y"));
         assert_eq!(back.get("none"), None);
+    }
+
+    #[test]
+    fn float_reader_preserves_nan_sentinel_but_rejects_infinity() {
+        let kv = Kv::parse("missing=nan\noverflow=inf\nnegative_overflow=-inf\nfinite=1.25\n");
+        assert!(kv.get_f64("missing").unwrap().is_nan());
+        assert_eq!(kv.get_f64("overflow"), None);
+        assert_eq!(kv.get_f64("negative_overflow"), None);
+        assert_eq!(kv.get_f64("finite"), Some(1.25));
     }
 }

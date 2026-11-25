@@ -210,7 +210,10 @@ fn real_clearance_of_one_chart_against_terrain_and_obstacles() {
         return;
     }
     let m = &l.model;
-    let bytes = oa_zip::read_archive_file(&zip).unwrap();
+    let bytes = oa_sealed::open(&zip)
+        .map_err(oa_zip::ZipError::Io)
+        .and_then(oa_zip::read_archive)
+        .unwrap();
     let dat = oa_zip::Archive::parse(&bytes)
         .unwrap()
         .extract("DOF.DAT")

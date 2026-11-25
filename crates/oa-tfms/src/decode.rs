@@ -54,7 +54,7 @@ use crate::schema::{
     ns_uri, At, El, Nsx, BODIES, EMPTY, FI_MESSAGE, FLIGHT_DATA, FLOW_BODIES, FLTD_MESSAGE,
     MAX_DEPTH, TMI_LIST_BODY, TMI_LIST_TYPE,
 };
-use oa_sealed::DropWindow;
+use oa_time_window::DropWindow;
 use oa_xml::{
     attr_needs_decode, decode_into, decode_text_run, ns_uri_bytes, resolve_elem_ns, span_bytes,
     text_needs_decode, Doc, ElemIx, Limits, Ns, Parser, Span, SpanKind, XmlError,
@@ -142,7 +142,7 @@ pub fn decode_doc_prefix(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocE
 /// messages the document has (all are dropped, at least 1); otherwise 0. A time that cannot be
 /// read is not in the window (the frame's receive time gates it).
 fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
-    if window.span().is_none() {
+    if oa_time_window::span(window).is_none() {
         return 0;
     }
     // Attributes that are an observation or the time of an actual event, on any element.
@@ -170,7 +170,7 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
             a.name == name && value_bytes(doc, attr_val(&a), &mut buf).is_ok_and(|v| v == want)
         })
     };
-    let in_window = |v: &[u8]| parse_time(v).is_ok_and(|t| window.contains(t));
+    let in_window = |v: &[u8]| parse_time(v).is_ok_and(|t| oa_time_window::contains(window, t));
     let (mut messages, mut hit) = (0u32, false);
     for i in 0..doc.elem_name.len() {
         let e = ElemIx(i as u32);

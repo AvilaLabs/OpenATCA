@@ -21,6 +21,8 @@ oa-sealed = { path = "../../crates/oa-sealed" }
 oa-replay = { path = "../../crates/oa-replay" }
 oa-truth = { path = "../../crates/oa-truth" }
 oa-track = { path = "../../crates/oa-track" }
+# RULESET F1: private split-report evaluator API is isolated in the tool package.
+oa-track-tools = { path = "../../crates/oa-track-tools" }
 
 [dev-dependencies]
 # Workspace crate; parses the data-source file in the test (RULESET F1: not an outside dependency).

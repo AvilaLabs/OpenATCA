@@ -10,10 +10,12 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-# Workspace crate, not an outside dependency (RULESET F1): the drop window type the decoder takes, and the guard the tests read through.
-oa-sealed = { path = "../oa-sealed" }
+oa-time-window = { path = "../oa-time-window" }
 oa-xml = { path = "../oa-xml" }
 oa-airspace = { path = "../oa-airspace" }
+
+[dev-dependencies]
+oa-sealed = { path = "../oa-sealed" }
 
 [package.metadata.openatca]
 class = "shell"

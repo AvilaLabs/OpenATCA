@@ -14,7 +14,7 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State {
         parser: oa_xml::Parser::new(oa_xml::Limits::default()).expect("default limits are valid"),
         open: oa_stdds::Limits::new(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
-        sealed: oa_stdds::Limits::new(oa_sealed::DropWindow::sealed()),
+        sealed: oa_stdds::Limits::new(oa_sealed::sealed_drop_window()),
     });
 }
 
@@ -29,20 +29,21 @@ fuzz_target!(|data: &[u8]| {
         let (mut st_open, mut st_sealed) = (oa_stdds::new_stats(), oa_stdds::new_stats());
         let a = oa_stdds::parse_message(parser, data, open, &mut st_open);
         let b = oa_stdds::parse_message(parser, data, sealed, &mut st_sealed);
-        let w = oa_sealed::DropWindow::sealed();
+        let w = oa_sealed::sealed_drop_window();
         // Oracle 1: no record the sealed decoder keeps has an observation time in the window.
         match &b {
             Ok(oa_stdds::Message::Tais(t)) => {
                 for r in &t.records {
                     assert!(
-                        !w.contains(r.mrt_time_ms) && !w.contains(r.rec_safa_receipt_ms),
+                        !oa_time_window::contains(w, r.mrt_time_ms)
+                            && !oa_time_window::contains(w, r.rec_safa_receipt_ms),
                         "kept record in the window"
                     );
                 }
             }
             Ok(oa_stdds::Message::Smes(t)) => {
                 for r in &t.records {
-                    assert!(!w.contains(r.time_ms), "kept report in the window");
+                    assert!(!oa_time_window::contains(w, r.time_ms), "kept report in the window");
                 }
             }
             _ => {}

@@ -24,7 +24,6 @@ dependencies = [
  "oa-ieee",
  "oa-math",
  "oa-nasr",
- "oa-sealed",
  "oa-sha256",
  "oa-zip",
 ]
@@ -153,7 +152,6 @@ name = "oa-nasr"
 version = "0.0.1"
 dependencies = [
  "oa-csv",
- "oa-sealed",
 ]
 
 [[package]]
@@ -281,6 +279,3 @@ version = "0.0.1"
 [[package]]
 name = "oa-zip"
 version = "0.0.1"
-dependencies = [
- "oa-sealed",
-]

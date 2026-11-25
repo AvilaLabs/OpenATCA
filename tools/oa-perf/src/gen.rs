@@ -19,12 +19,12 @@
 use oa_geo::aeqd::{frame_new, try_frame_velocity, unproject, Frame};
 use oa_sensorsim::prng::Rng;
 use oa_sensorsim::profile::MSSR_EUROCONTROL_1997;
-use oa_track::fusion_score::{make_radar, site_def, Kind, EPOCH_NS};
 use oa_track::radar::{
     polar_of, radar_geom, RadarGeom, RadarPlot, RadarSite, FT_M, MIN_PLOT_RANGE_M, NONE_CODE,
     PLOT_NO_ADDR,
 };
 use oa_track::{Measurement, M_HAS_VEL, NO_IDENT};
+use oa_track_tools::fusion_score::{make_radar, site_def, Kind, EPOCH_NS};
 
 /// Centre of the traffic box.
 pub const CENTRE_LAT: f64 = 41.9;

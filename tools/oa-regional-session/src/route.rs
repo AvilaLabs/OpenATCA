@@ -10,7 +10,7 @@ use oa_airspace::core::route::{
     convert_route, empty_converted_route, ConvertedRoute, RouteFailure, RouteReport, RouteSource,
     RouteStep,
 };
-use oa_airspace::shell::route_cli::parse_route_steps;
+use oa_airspace::shell::route_parse::parse_route_steps;
 use oa_legacy_traj::core::trajectory::{
     self as t, AltitudeConstraintKind as A, SpeedConstraintKind as S,
 };

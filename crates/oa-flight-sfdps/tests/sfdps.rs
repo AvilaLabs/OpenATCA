@@ -556,9 +556,9 @@ fn the_position_of_a_flight_the_table_removes_is_forgotten_with_it() {
 #[test]
 fn the_replay_decoder_drops_the_sealed_window() {
     let w = oa_flight_sfdps::decoder_limits().drop_window;
-    assert_eq!(w, oa_sealed::DropWindow::sealed());
-    assert_eq!(w.span(), oa_sealed::sealed_window_ms());
-    assert!(w.span().is_some());
+    assert_eq!(w, oa_sealed::sealed_drop_window());
+    assert_eq!(oa_time_window::span(w), oa_sealed::sealed_window_ms());
+    assert!(oa_time_window::span(w).is_some());
 }
 
 #[test]

@@ -11,13 +11,13 @@ workspace = true
 
 [dependencies]
 oa-xml = { path = "../oa-xml" }
-# Workspace crate, not an outside dependency (RULESET F1): the drop window type the decoder takes.
-oa-sealed = { path = "../oa-sealed" }
+oa-time-window = { path = "../oa-time-window" }
 
 [dev-dependencies]
 # Workspace crates, used by the summary example only to read recordings (not outside code).
 oa-feed = { path = "../oa-feed" }
 oa-zip = { path = "../oa-zip" }
+oa-sealed = { path = "../oa-sealed" }
 
 [package.metadata.openatca]
 class = "shell"

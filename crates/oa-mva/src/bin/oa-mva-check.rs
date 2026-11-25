@@ -277,7 +277,10 @@ fn run_clearance(
     dofzip: &std::path::Path,
     a: &Args,
 ) -> Result<(), String> {
-    let bytes = oa_zip::read_archive_file(dofzip).map_err(|e| e.to_string())?;
+    let bytes = oa_sealed::open(dofzip)
+        .map_err(oa_zip::ZipError::Io)
+        .and_then(oa_zip::read_archive)
+        .map_err(|e| e.to_string())?;
     let arc = oa_zip::Archive::parse(&bytes).map_err(|e| e.to_string())?;
     let dat = arc.extract("DOF.DAT").map_err(|e| e.to_string())?;
     let dof = oa_dof::parse_dof(&dat).map_err(|e| e.to_string())?;

@@ -23,7 +23,7 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State {
         parser: oa_xml::Parser::new(oa_tfms::default_limits()).expect("default limits are valid"),
         open: rows(oa_sealed::DropWindow::empty_for_tests_and_fuzz()),
-        sealed: rows(oa_sealed::DropWindow::sealed()),
+        sealed: rows(oa_sealed::sealed_drop_window()),
     });
 }
 
@@ -53,7 +53,7 @@ fuzz_target!(|data: &[u8]| {
                 )
             };
             // Oracle 1: no row the sealed decoder keeps has an observation time in the window.
-            let w = oa_sealed::DropWindow::sealed();
+            let w = oa_sealed::sealed_drop_window();
             let nf = oa_tfms::flights_len(&sealed.flights);
             for i in 0..nf {
                 let r = oa_tfms::flight_at(&sealed.flights, i).expect("a row below the length");
@@ -71,14 +71,14 @@ fuzz_target!(|data: &[u8]| {
                     r.gate_arr_ms,
                     r.bnd_ms,
                 ] {
-                    assert!(!w.contains(t), "kept flight in the window");
+                    assert!(!oa_time_window::contains(w, t), "kept flight in the window");
                 }
                 // The estimate and coordination times are keys only when they are actual: an eta
                 // or etd of type ACTUAL, a time of departure or arrival that is not an estimate,
                 // and an ACTUAL coordination time. The creation time and the TMI update time are
                 // keys always.
                 use oa_tfms::rows::{flag, ttype};
-                let actual = |ty: u8, t: i64| ty == ttype::ACTUAL && w.contains(t);
+                let actual = |ty: u8, t: i64| ty == ttype::ACTUAL && oa_time_window::contains(w, t);
                 assert!(!actual(r.eta_type, r.eta_ms), "kept actual eta in the window");
                 assert!(!actual(r.etd_type, r.etd_ms), "kept actual etd in the window");
                 assert!(
@@ -87,15 +87,15 @@ fuzz_target!(|data: &[u8]| {
                 );
                 for (est, t) in [(flag::TOD_EST, r.tod_ms), (flag::TOA_EST, r.toa_ms)] {
                     let estimated = oa_tfms::flag_get(r.flags, est) == flag::TRUE;
-                    assert!(estimated || !w.contains(t), "kept actual time of day in window");
+                    assert!(estimated || !oa_time_window::contains(w, t), "kept actual time of day in window");
                 }
-                assert!(!w.contains(r.created_ms), "kept creation time in the window");
-                assert!(!w.contains(r.tmi_ms), "kept TMI update time in the window");
+                assert!(!oa_time_window::contains(w, r.created_ms), "kept creation time in the window");
+                assert!(!oa_time_window::contains(w, r.tmi_ms), "kept TMI update time in the window");
             }
             for i in 0..oa_tfms::flows_len(&sealed.flows) {
                 let r = oa_tfms::flow_at(&sealed.flows, i).expect("a row below the length");
                 assert!(
-                    !w.contains(r.src_ms) && !w.contains(r.event_ms),
+                    !oa_time_window::contains(w, r.src_ms) && !oa_time_window::contains(w, r.event_ms),
                     "kept flow in the window"
                 );
             }

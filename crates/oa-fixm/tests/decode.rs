@@ -1761,7 +1761,7 @@ fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_dro
     );
     assert_eq!(r.dec.stats(), &untouched(all, 1));
     // The production list.
-    let prod = Limits::new(oa_sealed::DropWindow::sealed());
+    let prod = Limits::new(oa_sealed::sealed_drop_window());
     let (r, res) = run_with(&doc(&[at("2026-11-21T00:00:00Z", "")]), 64, 1 << 16, prod);
     res.unwrap();
     assert_eq!(r.sum.sealed_window_dropped, 1);

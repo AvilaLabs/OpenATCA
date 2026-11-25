@@ -1,0 +1,28 @@
+[package]
+name = "oa-adapt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# F1 / CORE_LIBRARY_SPEC §4: existing private command links relocated from oa-airspace
+# under Connor's authorized library/guard separation; no outside packages are introduced.
+# Model construction and byte parsing remain in the shared operational library.
+oa-airspace = { path = "../../crates/oa-airspace" }
+# Private input-path policy stays in this tool process, outside the reusable library.
+oa-sealed = { path = "../../crates/oa-sealed" }
+# Existing command content-identity output, not authentication.
+oa-sha256 = { path = "../../crates/oa-sha256" }
+# Guarded archive-reader boundary and its existing real-data regression checks.
+oa-zip = { path = "../../crates/oa-zip" }
+# Existing private full-NASR regression suite relocated with guarded inputs.
+oa-nasr = { path = "../../crates/oa-nasr" }
+
+[package.metadata.openatca]
+class = "shell"

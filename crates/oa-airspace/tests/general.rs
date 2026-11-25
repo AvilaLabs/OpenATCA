@@ -32,7 +32,7 @@ fn sources() -> Vec<(String, String)> {
 
 // REQ: OA-GEN-001
 #[test]
-fn the_crate_and_its_binary_forbid_unsafe_code() {
+fn the_crate_forbids_unsafe_code() {
     let files = sources();
     assert!(files.len() >= 10);
     let lib = files
@@ -40,11 +40,6 @@ fn the_crate_and_its_binary_forbid_unsafe_code() {
         .find(|(n, _)| n.ends_with("src/lib.rs"))
         .expect("lib.rs");
     assert!(lib.1.starts_with("#![forbid(unsafe_code)]"));
-    let bin = files
-        .iter()
-        .find(|(n, _)| n.ends_with("oa-adapt.rs"))
-        .expect("binary");
-    assert!(bin.1.contains("#![forbid(unsafe_code)]"));
     let keyword = ["un", "safe"].concat();
     for (name, text) in &files {
         for (i, l) in text.lines().enumerate() {

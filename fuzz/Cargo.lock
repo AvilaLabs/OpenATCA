@@ -146,6 +146,7 @@ name = "oa-fixm"
 version = "0.0.1"
 dependencies = [
  "oa-sealed",
+	"oa-time-window",
  "oa-xml",
 ]
 
@@ -169,6 +170,7 @@ dependencies = [
  "oa-nasr",
  "oa-notam",
  "oa-sealed",
+	"oa-time-window",
  "oa-stdds",
  "oa-tar",
  "oa-tbfm",
@@ -244,6 +246,7 @@ dependencies = [
  "oa-airspace",
  "oa-geo",
  "oa-sealed",
+	"oa-time-window",
  "oa-xml",
 ]
 
@@ -260,6 +263,7 @@ name = "oa-stdds"
 version = "0.0.1"
 dependencies = [
  "oa-sealed",
+	"oa-time-window",
  "oa-xml",
 ]
 
@@ -273,6 +277,7 @@ version = "0.0.1"
 dependencies = [
  "oa-airspace",
  "oa-sealed",
+	"oa-time-window",
  "oa-xml",
 ]
 
@@ -282,6 +287,7 @@ version = "0.0.1"
 dependencies = [
  "oa-fixm",
  "oa-sealed",
+	"oa-time-window",
  "oa-xml",
 ]
 
@@ -292,6 +298,10 @@ dependencies = [
  "oa-sealed",
  "oa-zip",
 ]
+
+[[package]]
+name = "oa-time-window"
+version = "0.0.1"
 
 [[package]]
 name = "oa-xml"

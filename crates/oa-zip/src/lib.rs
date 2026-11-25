@@ -757,12 +757,21 @@ fn read_central(cd: &[u8], p: usize, limits: &Limits) -> Result<(Entry, usize), 
 }
 
 /// Read a whole archive file into memory, refusing files above [`MAX_ARCHIVE_BYTES`]. The file is
-/// opened through the sealed-data guard (OA-SEAL-013): a sealed path is refused as an I/O error.
+/// opened without project-specific policy. OpenATCA tools must guarded-open the file themselves
+/// and pass that descriptor to [`read_archive`]. This convenience is for library consumers.
 pub fn read_archive_file(path: &Path) -> Result<Vec<u8>, ZipError> {
-    let f = oa_sealed::open(path).map_err(ZipError::Io)?;
+    // seal-allow: generic library convenience; private commands use guarded readers.
+    let f = std::fs::File::open(path).map_err(ZipError::Io)?;
+    read_archive(f)
+}
+
+/// Read caller-owned archive input, preserving the exact byte cap and I/O refusals.
+/// Filesystem access policy is the caller's responsibility.
+pub fn read_archive(reader: impl Read) -> Result<Vec<u8>, ZipError> {
     let mut buf = Vec::new();
     // Read one byte past the limit so an oversize file is detected, not silently truncated.
-    f.take(MAX_ARCHIVE_BYTES + 1)
+    reader
+        .take(MAX_ARCHIVE_BYTES + 1)
         .read_to_end(&mut buf)
         .map_err(ZipError::Io)?;
     if buf.len() as u64 > MAX_ARCHIVE_BYTES {

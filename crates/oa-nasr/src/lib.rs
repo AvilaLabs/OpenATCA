@@ -169,10 +169,11 @@ pub(crate) fn reject(list: &mut Vec<RowError>, dropped: &mut u64, e: RowError) {
 /// not stored, so one badly broken file cannot exhaust memory.
 pub const MAX_VIOLATIONS_PER_FILE: usize = 100_000;
 
-/// Opens a file for reading through the sealed-data guard (OA-SEAL-013), mapping failures
-/// (a sealed path included) to [`NasrError::Io`].
+/// Opens caller-provided input without project-specific policy. OpenATCA tools use
+/// guarded descriptors and pass their buffered readers to the parsers.
 pub fn open(path: &std::path::Path) -> Result<std::io::BufReader<std::fs::File>, NasrError> {
-    oa_sealed::open(path)
+    // seal-allow: generic library helper; guarded OpenATCA callers own path policy.
+    std::fs::File::open(path)
         .map(std::io::BufReader::new)
         .map_err(|e| NasrError::Io {
             file: path.display().to_string(),

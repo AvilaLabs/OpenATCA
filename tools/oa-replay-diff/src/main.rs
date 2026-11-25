@@ -20,7 +20,6 @@ use oa_replay_diff::{
     load_expect_text, load_witness_text, nothing_to_compare, open_rows, parse_digest, parse_expect,
     render_report, render_summary, row_in_window, verdict, write_out, Comparison, Group,
 };
-use oa_sealed::DropWindow;
 use oa_track::canon::from_hex32;
 
 const USAGE: &str = "usage: oa-replay-diff <digest-a> <digest-b> [--rows-a <file> --rows-b <file>] [--expect <file>] [--summary <file>] [--max-detail <n>]\n       oa-replay-diff --compare-witness-files <witness-a> <witness-b>";
@@ -105,7 +104,7 @@ fn run(drops: &mut oa_sealed::DropReport) -> Result<u8, String> {
     let (la, lb) = (read(pa)?, read(pb)?);
     // An input that holds a second or a row in the sealed window is refused whole: nothing of it
     // is compared or printed, only the count.
-    let window = DropWindow::sealed();
+    let window = oa_sealed::sealed_drop_window();
     let seconds = digest_seconds_in_window(&la, window) + digest_seconds_in_window(&lb, window);
     if seconds > 0 {
         drops.add(seconds);

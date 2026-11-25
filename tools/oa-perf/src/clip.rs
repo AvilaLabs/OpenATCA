@@ -18,13 +18,13 @@ use oa_track::fusion::{
     fusion_adsb, fusion_advance, fusion_config, fusion_finish, fusion_new, fusion_plots,
     fusion_stats, fusion_tracker_config,
 };
-use oa_track::fusion_score::{make_radar, simulate_adsb, simulate_plots, Kind, ADSB_STUDY};
-use oa_track::fusion_world::clip_world_tallied;
 use oa_track::radar::{RadarPlot, RadarSite};
 use oa_track::{
     output_clear, output_new, tracker_new, tracker_update, Measurement, TrackerConfig,
     DEFAULT_CONFIG,
 };
+use oa_track_tools::fusion_score::{make_radar, simulate_adsb, simulate_plots, Kind, ADSB_STUDY};
+use oa_track_tools::fusion_world::clip_world_tallied;
 
 use crate::stats::{dist_of, dist_weighted, Dist, Kv};
 use crate::sys::{loadavg3, status_kb};
@@ -305,7 +305,7 @@ pub fn clip_text(r: &ClipResult) -> String {
 mod tests {
     use super::*;
     use crate::gen::{Layout, Traffic, TrafficCfg};
-    use oa_track::fusion_score::EPOCH_NS;
+    use oa_track_tools::fusion_score::EPOCH_NS;
 
     // REQ: OA-PRF-006
     #[test]

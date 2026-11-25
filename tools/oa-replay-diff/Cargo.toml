@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 # Workspace crate; not an outside dependency (RULESET F1).
 oa-sealed = { path = "../../crates/oa-sealed" }
+oa-time-window = { path = "../../crates/oa-time-window" }
 oa-track = { path = "../../crates/oa-track" }
 
 [[bin]]

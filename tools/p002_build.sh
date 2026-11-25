@@ -17,4 +17,4 @@ commit="$(git rev-parse HEAD)"
 if [ -z "$(git status --porcelain)" ]; then dirty=0; else dirty=1; fi
 echo "p002_build: commit $commit, dirty=$dirty" >&2
 OA_BUILD_COMMIT="$commit" OA_BUILD_DIRTY="$dirty" \
-    exec cargo build --release --locked -p oa-track --example p002 "$@"
+    exec cargo build --release --locked -p oa-track-tools --example p002 "$@"

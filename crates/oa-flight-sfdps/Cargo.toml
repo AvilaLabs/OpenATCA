@@ -18,6 +18,9 @@ oa-replay = { path = "../oa-replay" }
 oa-sealed = { path = "../oa-sealed" }
 oa-xml = { path = "../oa-xml" }
 
+[dev-dependencies]
+oa-time-window = { path = "../oa-time-window" }
+
 [lib]
 name = "oa_flight_sfdps"
 path = "src/lib.rs"

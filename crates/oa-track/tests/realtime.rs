@@ -169,7 +169,12 @@ fn cpu_use_splits_the_readings_and_divides_by_the_span_of_the_traffic() {
 // REQ: OA-TRK-388
 #[test]
 fn the_total_cpu_is_read_before_the_digests_in_the_shell() {
-    let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs")).unwrap();
+    // The CLI shell moved to oa-track-tools; keep this assertion with the shared realtime metrics.
+    let src = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../oa-track-tools/src/main.rs"
+    ))
+    .unwrap();
     let body = &src[src.find("fn run_realtime_inner").unwrap()
         ..src
             .find(

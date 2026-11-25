@@ -1,8 +1,9 @@
-//! Loading the two archives. **Shell** (B1, B3): reads files, hashes, unzips and parses; the
-//! result is plain data ([`Sources`]) for the core. Offline code run once per cycle (C6).
+//! Loading the two caller-supplied archive byte strings. **Shell** (B1, B3): hashes, unzips and
+//! parses; the result is plain data ([`Sources`]) for the core. Filesystem policy stays with the
+//! caller. Offline code run once per cycle (C6).
 //!
-//! The archives are read directly through `oa-zip`; nothing is unpacked to disk. Each archive's
-//! SHA-256 is computed over the file's bytes and compared with the `--expect-sha256` value
+//! The archives are parsed directly through `oa-zip`; nothing is unpacked to disk. Each archive's
+//! SHA-256 is computed over its supplied bytes and compared with the `--expect-sha256` value
 //! before anything is parsed: a mismatch refuses the load ([`LoadError::HashMismatch`]), and so
 //! does an expectation that names no input archive (a typo must not pass silently).
 //!
@@ -120,12 +121,13 @@ pub fn parse_expectation(arg: &str) -> Result<Expectation, LoadError> {
     })
 }
 
-/// Reads both archives from disk and loads them; see [`load_bytes`].
+/// Reads caller-owned archives without project-specific path policy; see [`load_bytes`].
+/// OpenATCA commands use their private guarded loader rather than this generic convenience.
 pub fn load_files(nasr: &Path, cifp: &Path, expect: &[Expectation]) -> Result<Sources, LoadError> {
-    let name_of = |p: &Path| {
-        p.file_name().map_or_else(
-            || p.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
+    let name_of = |path: &Path| {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |name| name.to_string_lossy().into_owned(),
         )
     };
     let nasr_name = name_of(nasr);

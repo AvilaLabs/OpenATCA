@@ -27,12 +27,12 @@ use oa_safety::net::{
 use oa_sealed::Sealed;
 use oa_sha256::{sha256, to_hex};
 use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
-use oa_track::score::{interval_stats, scoring_config, split_reports, IntervalStats};
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
     tracker_stats, tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG,
     O_COAST, O_HAS_ALT, O_IDENTITY_UNCONFIRMED, O_TICK, O_UNCERTAIN,
 };
+use oa_track_tools::score::{interval_stats, scoring_config, split_reports, IntervalStats};
 
 use crate::args::Args;
 use crate::cifp::{
@@ -782,7 +782,8 @@ pub fn landing_of(
             col("worst_floor_ft"),
             col("worst_floor_kind"),
         );
-        let (mut n, mut inside, mut no_setting) = (0usize, 0usize, 0usize);
+        let (mut n, mut inside, mut no_setting, mut invalid_position) =
+            (0usize, 0usize, 0usize, 0usize);
         // The alerts with an obstacle floor whose worst point is in no corridor at all, as
         // `address start floor`, for comparing two runs.
         let mut free: Vec<String> = Vec::new();
@@ -792,8 +793,17 @@ pub fn landing_of(
                 f.get(la).and_then(|x| x.parse::<f64>().ok()),
                 f.get(lo).and_then(|x| x.parse::<f64>().ok()),
             ) else {
+                invalid_position += 1;
                 continue;
             };
+            if !a.is_finite()
+                || !b.is_finite()
+                || !(-90.0..=90.0).contains(&a)
+                || !(-180.0..=180.0).contains(&b)
+            {
+                invalid_position += 1;
+                continue;
+            }
             n += 1;
             let (lat, lon) = ((a * 1e7).round() as i32, (b * 1e7).round() as i32);
             if crate::report::landing_corridor(corridors, lat, lon, cfg).is_some() {
@@ -815,7 +825,7 @@ pub fn landing_of(
             }
         }
         out.push_str(&format!(
-            "alerts in {}: {n}; worst point in a runway strip or the last 1 NM of a capture box: {inside}{}\n",
+            "alerts in {}: {n}; invalid/missing worst positions: {invalid_position}; worst point in a runway strip or the last 1 NM of a capture box: {inside}{}\n",
             path.file_name()
                 .map_or(String::new(), |s| s.to_string_lossy().into_owned()),
             if fl.is_some() {
@@ -949,7 +959,10 @@ fn gtm_areas(g: &Sealed, set: &Settings) -> Result<Vec<(Area, i32)>, String> {
 pub fn read_dof(p: &Path) -> Result<(ObstacleIndex, oa_dof::Dof), String> {
     let is_zip = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
     let bytes = if is_zip {
-        let z = oa_zip::read_archive_file(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let z = oa_sealed::open(p)
+            .map_err(oa_zip::ZipError::Io)
+            .and_then(oa_zip::read_archive)
+            .map_err(|e| format!("{}: {e}", p.display()))?;
         oa_zip::Archive::parse(&z)
             .and_then(|a| a.extract("DOF.DAT"))
             .map_err(|e| format!("{}: {e}", p.display()))?
@@ -981,14 +994,18 @@ fn cpu_seconds() -> Option<f64> {
     let rest = t.rsplit_once(')')?.1;
     let f: Vec<&str> = rest.split_whitespace().collect();
     let (u, s): (f64, f64) = (f.get(11)?.parse().ok()?, f.get(12)?.parse().ok()?);
-    Some((u + s) / 100.0)
+    let ticks = u + s;
+    ticks.is_finite().then_some(ticks / 100.0)
 }
 
 /// The CIFP: `FAACIFP18` itself, or the zip that holds it.
 fn read_cifp(g: &Sealed, p: &Path) -> Result<oa_arinc424::Cifp, String> {
     let is_zip = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip"));
     if is_zip {
-        let z = oa_zip::read_archive_file(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let z = oa_sealed::open(p)
+            .map_err(oa_zip::ZipError::Io)
+            .and_then(oa_zip::read_archive)
+            .map_err(|e| format!("{}: {e}", p.display()))?;
         let bytes = oa_zip::Archive::parse(&z)
             .and_then(|a| a.extract("FAACIFP18"))
             .map_err(|e| format!("{}: {e}", p.display()))?;

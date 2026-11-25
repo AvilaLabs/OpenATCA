@@ -1512,7 +1512,7 @@ fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_dro
     let r = decode_bytes(&mut p, xml.as_bytes(), &mut rows);
     assert_eq!((r, rows_len(&rows)), (Ok(sealed(1)), 0));
     // The production list: the window is dropped, a time outside it is kept.
-    let w = oa_sealed::DropWindow::sealed();
+    let w = oa_sealed::sealed_drop_window();
     let mut rows = new_rows(16, w);
     let inside = env_many(&[(IN, &air)]);
     let r = decode_bytes(&mut p, inside.as_bytes(), &mut rows);

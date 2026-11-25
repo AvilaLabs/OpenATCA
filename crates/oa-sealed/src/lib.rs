@@ -40,6 +40,7 @@
 //!
 //! Requirements: OA-SEAL-001 and the following, in REQUIREMENTS.md.
 
+pub use oa_time_window::DropWindow;
 use std::collections::BTreeSet;
 use std::fmt;
 use std::fs::{self, File};
@@ -696,7 +697,7 @@ impl Sealed {
         let from = self.list.windows.iter().map(|x| x.from_ns).min();
         let to = self.list.windows.iter().map(|x| x.to_ns).max();
         match (self.broken, from, to) {
-            (false, Some(a), Some(b)) => DropWindow::from_ns_span(a, b),
+            (false, Some(a), Some(b)) => oa_time_window::from_ns_span(a, b),
             _ => DropWindow::all_time(),
         }
     }
@@ -707,7 +708,11 @@ impl Sealed {
     pub fn in_window(&self, unix_ns: i64) -> bool {
         self.broken
             || self.list.windows.is_empty()
-            || self.list.windows.iter().any(|w| w.contains(unix_ns))
+            || self
+                .list
+                .windows
+                .iter()
+                .any(|w| unix_ns >= w.from_ns && unix_ns < w.to_ns)
     }
 
     /// Walks `root` for files: a directory or file the guard refuses is skipped and counted,
@@ -1088,76 +1093,20 @@ impl Drop for DropReport {
     }
 }
 
-/// The span of Unix milliseconds a decoder drops rows in, `from` inclusive and `to` exclusive.
-/// A decoder takes it as a required argument, so a caller cannot forget it: the shells pass
-/// [`DropWindow::sealed`], and [`DropWindow::empty_for_tests_and_fuzz`] is the only way to drop nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DropWindow {
-    from_ms: i64,
-    to_ms: i64,
-}
-
-impl DropWindow {
-    /// The span `from_ms` (inclusive) to `to_ms` (exclusive); empty when `from_ms >= to_ms`.
-    pub const fn new(from_ms: i64, to_ms: i64) -> DropWindow {
-        DropWindow { from_ms, to_ms }
-    }
-
-    /// The span of the nanosecond window `from_ns` to `to_ns`, in milliseconds. The start is
-    /// rounded down and the end up, so a window that is not a whole number of milliseconds never
-    /// leaves a gap at either edge: a millisecond that holds any instant of the window is in it.
-    pub const fn from_ns_span(from_ns: i64, to_ns: i64) -> DropWindow {
-        let up = to_ns.div_euclid(1_000_000) + (to_ns.rem_euclid(1_000_000) != 0) as i64;
-        DropWindow::new(from_ns.div_euclid(1_000_000), up)
-    }
-
-    /// A window that holds no time: nothing is dropped. For tests and fuzz targets only; a tool
-    /// passes [`DropWindow::sealed`].
-    pub const fn empty_for_tests_and_fuzz() -> DropWindow {
-        DropWindow {
-            from_ms: 0,
-            to_ms: 0,
-        }
-    }
-
-    /// The sealed window of the compiled-in list ([`sealed_window_ms`]). It fails closed, like
-    /// the path guard: if the list has no window or does not parse, the window covers all time
-    /// and every row is dropped.
-    pub fn sealed() -> DropWindow {
-        Sealed::production().drop_window()
-    }
-
-    /// A window that holds all time (the closed failure of [`DropWindow::sealed`]).
-    pub const fn all_time() -> DropWindow {
-        DropWindow {
-            from_ms: i64::MIN,
-            to_ms: i64::MAX,
-        }
-    }
-
-    /// Whether `t_ms` is in the window.
-    pub const fn contains(&self, t_ms: i64) -> bool {
-        self.from_ms <= t_ms && t_ms < self.to_ms
-    }
-
-    /// The span as `(from, to)`, or `None` when it is empty.
-    pub const fn span(&self) -> Option<(i64, i64)> {
-        if self.from_ms < self.to_ms {
-            Some((self.from_ms, self.to_ms))
-        } else {
-            None
-        }
-    }
+/// The sealed window of the compiled-in list. It fails closed, like the path guard: if the list
+/// has no window or does not parse, the window covers all time and every row is dropped.
+pub fn sealed_drop_window() -> DropWindow {
+    Sealed::production().drop_window()
 }
 
 /// The sealed windows of the list as one span of Unix milliseconds, `from` inclusive and `to`
 /// exclusive (`from` rounded down and `to` up, so a non-aligned window leaves no gap); with
 /// several windows it is the span from the first start to the last end, which also holds the
-/// gaps (the check fails closed). It fails closed like [`DropWindow::sealed`]: a list with no
+/// gaps (the check fails closed). It fails closed like [`sealed_drop_window`]: a list with no
 /// window, or one that does not parse, gives the span of all time. It is the span of
-/// [`DropWindow::sealed`], and always `Some`.
+/// [`sealed_drop_window`], and always `Some`.
 pub fn sealed_window_ms() -> Option<(i64, i64)> {
-    DropWindow::sealed().span()
+    oa_time_window::span(sealed_drop_window())
 }
 
 /// The line for the process-wide count (see [`window_dropped_total`]): a cross-check for tests.
@@ -1197,13 +1146,25 @@ mod tests {
     #[test]
     fn a_window_is_half_open_and_the_sealed_one_is_the_listed_span() {
         let w = DropWindow::new(10, 20);
-        assert!(!w.contains(9) && w.contains(10) && w.contains(19) && !w.contains(20));
-        assert_eq!(w.span(), Some((10, 20)));
+        assert!(
+            !oa_time_window::contains(w, 9)
+                && oa_time_window::contains(w, 10)
+                && oa_time_window::contains(w, 19)
+                && !oa_time_window::contains(w, 20)
+        );
+        assert_eq!(oa_time_window::span(w), Some((10, 20)));
         let e = DropWindow::empty_for_tests_and_fuzz();
-        assert!(!e.contains(0) && !e.contains(i64::MIN) && e.span().is_none());
-        assert_eq!(DropWindow::sealed().span(), sealed_window_ms());
+        assert!(
+            !oa_time_window::contains(e, 0)
+                && !oa_time_window::contains(e, i64::MIN)
+                && oa_time_window::span(e).is_none()
+        );
         assert_eq!(
-            DropWindow::sealed().span(),
+            oa_time_window::span(sealed_drop_window()),
+            sealed_window_ms()
+        );
+        assert_eq!(
+            oa_time_window::span(sealed_drop_window()),
             Some((1_795_131_900_000, 1_795_393_920_000))
         );
     }
@@ -1211,10 +1172,14 @@ mod tests {
     #[test]
     fn the_drop_window_fails_closed_when_the_list_has_no_window_or_does_not_parse() {
         let all = DropWindow::all_time();
-        assert!(all.contains(0) && all.contains(1_795_200_000_000) && all.contains(i64::MIN));
+        assert!(
+            oa_time_window::contains(all, 0)
+                && oa_time_window::contains(all, 1_795_200_000_000)
+                && oa_time_window::contains(all, i64::MIN)
+        );
         // The compiled-in list: its own span.
         assert_eq!(
-            Sealed::with_list(LIST, None).drop_window().span(),
+            oa_time_window::span(Sealed::with_list(LIST, None).drop_window()),
             Some((1_795_131_900_000, 1_795_393_920_000))
         );
         // A list that does not parse, and one with no window line: all time.
@@ -1296,32 +1261,44 @@ mod tests {
         assert!(g.in_window(0) && g.in_window(1_795_200_000_000_000_000));
         // A window from 0.4 ms after 2026-11-20T00:00:00Z to 0.6 ms after 2026-11-23T00:17:00Z
         // (the list has whole seconds, so this is the conversion itself).
-        let w = DropWindow::from_ns_span(1_795_132_800_000_400_000, 1_795_393_020_000_600_000);
+        let w = oa_time_window::from_ns_span(1_795_132_800_000_400_000, 1_795_393_020_000_600_000);
         // The start is rounded down and the end up: the millisecond that holds the first instant
         // and the one that holds the last are both in the span.
-        assert_eq!(w.span(), Some((1_795_132_800_000, 1_795_393_020_001)));
-        assert!(w.contains(1_795_132_800_000) && w.contains(1_795_393_020_000));
-        assert!(!w.contains(1_795_132_799_999) && !w.contains(1_795_393_020_001));
+        assert_eq!(
+            oa_time_window::span(w),
+            Some((1_795_132_800_000, 1_795_393_020_001))
+        );
+        assert!(
+            oa_time_window::contains(w, 1_795_132_800_000)
+                && oa_time_window::contains(w, 1_795_393_020_000)
+        );
+        assert!(
+            !oa_time_window::contains(w, 1_795_132_799_999)
+                && !oa_time_window::contains(w, 1_795_393_020_001)
+        );
         // A window of whole milliseconds is exact, and the compiled-in list agrees.
         assert_eq!(
-            DropWindow::from_ns_span(1_000_000, 3_000_000).span(),
+            oa_time_window::span(oa_time_window::from_ns_span(1_000_000, 3_000_000)),
             Some((1, 3))
         );
-        assert_eq!(DropWindow::sealed().span(), sealed_window_ms());
+        assert_eq!(
+            oa_time_window::span(sealed_drop_window()),
+            sealed_window_ms()
+        );
     }
 
     #[test]
     fn the_sealed_window_is_the_listed_one_widened_by_fifteen_minutes() {
-        let w = DropWindow::sealed();
+        let w = sealed_drop_window();
         // Dropped: a time that rounds to the listed end, one inside the end margin, and the
         // first instant of the start margin.
         for ms in [1_795_393_020_000, 1_795_393_919_000, 1_795_131_900_000] {
-            assert!(w.contains(ms), "{ms}");
+            assert!(oa_time_window::contains(w, ms), "{ms}");
             assert!(in_sealed_window(ms * 1_000_000), "{ms}");
         }
         // Kept: one second before the start margin and the end of the end margin.
         for ms in [1_795_131_899_000, 1_795_393_920_000] {
-            assert!(!w.contains(ms), "{ms}");
+            assert!(!oa_time_window::contains(w, ms), "{ms}");
             assert!(!in_sealed_window(ms * 1_000_000), "{ms}");
         }
         assert_eq!(WINDOW_MARGIN_NS, 15 * 60 * 1_000_000_000);

@@ -1821,7 +1821,7 @@ fn the_summary_example_passes_the_sealed_window_to_the_decoder() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/stdds_summary.rs"),
     )
     .unwrap();
-    assert!(src.contains("Limits::new(oa_sealed::DropWindow::sealed())"));
+    assert!(src.contains("Limits::new(oa_sealed::sealed_drop_window())"));
     assert!(!src.contains("empty_for_tests_and_fuzz"));
 }
 
@@ -1837,13 +1837,13 @@ fn a_window_that_holds_all_time_drops_every_message_and_the_production_list_drop
             0,
         ),
         (
-            Limits::new(oa_sealed::DropWindow::sealed()),
+            Limits::new(oa_sealed::sealed_drop_window()),
             tais_xml(TAIS_IN),
             1,
             0,
         ),
         (
-            Limits::new(oa_sealed::DropWindow::sealed()),
+            Limits::new(oa_sealed::sealed_drop_window()),
             tais_xml(TAIS_OUT),
             0,
             1,
@@ -1914,7 +1914,7 @@ fn observation_times_are_window_keys_in_any_encoding_and_a_foreign_one_is_droppe
 #[test]
 fn the_production_window_has_a_margin_that_covers_the_rounding_of_a_fraction() {
     let mut p = parser();
-    let limits = Limits::new(oa_sealed::DropWindow::sealed());
+    let limits = Limits::new(oa_sealed::sealed_drop_window());
     let at = |t: &str| {
         tais_xml(&format!(
             "<record><track><mrtTime>{t}</mrtTime></track></record>"

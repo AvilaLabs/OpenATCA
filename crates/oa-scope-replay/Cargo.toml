@@ -16,6 +16,8 @@ oa-sealed = { path = "../oa-sealed" }
 oa-display = { path = "../oa-display" }
 oa-safety = { path = "../oa-safety" }
 oa-track = { path = "../oa-track" }
+# RULESET F1: command shell uses the private score interval helper.
+oa-track-tools = { path = "../oa-track-tools" }
 oa-adsb = { path = "../oa-adsb" }
 oa-feed = { path = "../oa-feed" }
 oa-geo = { path = "../oa-geo" }

@@ -11,7 +11,7 @@
 
 use std::process::ExitCode;
 
-use oa_sealed::DropWindow;
+use oa_time_window::DropWindow;
 use oa_truth::clip::{seal_check_clip, MAX_CLIP_BYTES};
 
 fn run(drops: &mut oa_sealed::DropReport) -> Result<ExitCode, String> {
@@ -19,7 +19,7 @@ fn run(drops: &mut oa_sealed::DropReport) -> Result<ExitCode, String> {
     let [path] = args.as_slice() else {
         return Err("usage: oa-clip-sealcheck <clip.oaf>".to_string());
     };
-    let window = DropWindow::sealed();
+    let window = oa_sealed::sealed_drop_window();
     if window == DropWindow::all_time() {
         return Err("the seal list has no usable window (fail-closed): clip refused".to_string());
     }

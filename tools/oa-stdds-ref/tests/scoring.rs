@@ -1325,8 +1325,8 @@ fn a_frame_or_a_record_in_a_sealed_window_is_dropped_and_counted() {
 #[test]
 fn the_loader_drops_the_sealed_window() {
     let w = oa_stdds_ref::load::load_limits().drop_window;
-    assert_eq!(w, oa_sealed::DropWindow::sealed());
-    assert_eq!(w.span(), oa_sealed::sealed_window_ms());
+    assert_eq!(w, oa_sealed::sealed_drop_window());
+    assert_eq!(oa_time_window::span(w), oa_sealed::sealed_window_ms());
 }
 
 // REQ: OA-SEAL-014

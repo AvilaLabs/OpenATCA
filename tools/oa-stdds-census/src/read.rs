@@ -497,7 +497,7 @@ fn read_dir_mode(
 /// The decoder limits of every read in this tool: the sealed window as the drop window, so a
 /// record timed in it is dropped before any count (OA-SEAL-014).
 pub fn read_limits() -> Limits {
-    Limits::new(oa_sealed::DropWindow::sealed())
+    Limits::new(oa_sealed::sealed_drop_window())
 }
 
 /// Reads one in-memory stream (tests).

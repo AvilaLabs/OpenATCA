@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
+[dependencies]
+# Workspace pure interval value; kept separate from this private path and list guard.
+oa-time-window = { path = "../oa-time-window" }
+
 [lints]
 workspace = true
 

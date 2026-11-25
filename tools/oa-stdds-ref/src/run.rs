@@ -12,11 +12,11 @@ use oa_bench::input::{load_adsb_with, Opener};
 use oa_bench::legacy::NO_ALT;
 use oa_sealed::Sealed;
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
-use oa_track::score::{
+use oa_track::DEFAULT_CONFIG;
+use oa_track_tools::score::{
     interval_stats, run_tracker_spilled, score_ranges, scoring_config, split_reports,
     IntervalStats, RowSet, RowSource, SCORE_CHUNK_ROWS, SPLIT_TEXT,
 };
-use oa_track::DEFAULT_CONFIG;
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
 
 use crate::guard::open_guarded;

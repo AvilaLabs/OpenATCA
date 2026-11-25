@@ -191,7 +191,7 @@ impl SealCheck {
 /// `window`, read with no validation of the record: the record length is the header's own, the
 /// count is the bytes that hold whole records. `None` when the records cannot be located (no
 /// ADS1/ADS2/ADS3 header, a record too short to hold a time, or a count the payload cannot hold).
-fn raw_times_in_window(payload: &[u8], window: oa_sealed::DropWindow) -> Option<u64> {
+fn raw_times_in_window(payload: &[u8], window: oa_time_window::DropWindow) -> Option<u64> {
     const HEADER: usize = 16;
     const TIME_AT: usize = 24;
     let magic = payload.get(..4)?;
@@ -210,7 +210,7 @@ fn raw_times_in_window(payload: &[u8], window: oa_sealed::DropWindow) -> Option<
     for i in 0..count {
         let at = HEADER + i * rec + TIME_AT;
         let t = i64::from_le_bytes(payload.get(at..at + 8)?.try_into().ok()?);
-        n += u64::from(window.contains(t.div_euclid(1_000_000)));
+        n += u64::from(oa_time_window::contains(window, t.div_euclid(1_000_000)));
     }
     Some(n)
 }
@@ -222,7 +222,7 @@ fn raw_times_in_window(payload: &[u8], window: oa_sealed::DropWindow) -> Option<
 pub fn seal_check_clip(
     path: &str,
     max_bytes: u64,
-    window: oa_sealed::DropWindow,
+    window: oa_time_window::DropWindow,
 ) -> Result<SealCheck, ClipError> {
     let io = |e: std::io::Error| ClipError::Io(format!("{path}: {e}"));
     let mut f = oa_sealed::open(std::path::Path::new(path)).map_err(io)?;
@@ -237,7 +237,7 @@ pub fn seal_check_clip(
     let mut frame = Reports::default();
     let damaged = read_frames(&mut f, &mut |fr| {
         c.frames += 1;
-        let frame_in = window.contains(fr.recv_unix_ns.div_euclid(1_000_000));
+        let frame_in = oa_time_window::contains(window, fr.recv_unix_ns.div_euclid(1_000_000));
         c.frames_in_window += u64::from(frame_in);
         let mut in_rows = 0u64;
         if fr.kind == Kind::Message {
@@ -250,7 +250,7 @@ pub fn seal_check_clip(
                         .time_ns
                         .iter()
                         .take(n)
-                        .filter(|t| window.contains(t.div_euclid(1_000_000)))
+                        .filter(|t| oa_time_window::contains(window, t.div_euclid(1_000_000)))
                         .count() as u64;
                 }
                 Err(_) => c.unreadable += 1,
@@ -512,7 +512,7 @@ mod tests {
     fn the_seal_check_counts_rows_and_receive_times_in_the_window() {
         // A plausible epoch: the decoder drops rows timed before 1970-ish bounds.
         const B: i64 = 1_700_000_000_000_000_000;
-        let w = oa_sealed::DropWindow::from_ns_span(B + 1_000_000_000_000, B + 2_000_000_000_000);
+        let w = oa_time_window::from_ns_span(B + 1_000_000_000_000, B + 2_000_000_000_000);
         let out = B + 3_000_000_000_000;
         let inn = B + 1_500_000_000_000;
         let one = |frames: &[(i64, &[i64])]| {
@@ -545,7 +545,7 @@ mod tests {
     fn the_seal_check_counts_a_record_the_decoder_drops_by_its_raw_time() {
         use oa_adsb::{encode_payload, reports_push, ROW_EMPTY};
         const B: i64 = 1_700_000_000_000_000_000;
-        let w = oa_sealed::DropWindow::from_ns_span(B + 1_000_000_000_000, B + 2_000_000_000_000);
+        let w = oa_time_window::from_ns_span(B + 1_000_000_000_000, B + 2_000_000_000_000);
         let clip = |lat: i32, t: i64, recv: i64| {
             let mut r = Reports::default();
             let mut row = ROW_EMPTY;
@@ -588,7 +588,7 @@ mod tests {
     // REQ: OA-SEAL-014
     #[test]
     fn the_seal_check_refuses_a_clip_that_does_not_parse_and_one_with_no_frames() {
-        let w = oa_sealed::DropWindow::from_ns_span(1_000_000_000_000, 2_000_000_000_000);
+        let w = oa_time_window::from_ns_span(1_000_000_000_000, 2_000_000_000_000);
         let mut bytes = timed_clip(&[(0, &[0])]);
         bytes.extend_from_slice(b"garbage that is no frame");
         let c = seal_check_clip(&write("damaged.oaf", &bytes), 1 << 20, w).unwrap();
@@ -599,7 +599,7 @@ mod tests {
         let c = seal_check_clip(
             &write("all.oaf", &timed_clip(&[(0, &[0])])),
             1 << 20,
-            oa_sealed::DropWindow::all_time(),
+            oa_time_window::DropWindow::all_time(),
         )
         .unwrap();
         assert!(!c.clean());

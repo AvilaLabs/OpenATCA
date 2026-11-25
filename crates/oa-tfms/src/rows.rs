@@ -13,7 +13,7 @@
 //! expands only to a struct definition and straight-line code (RULESET F3: no hidden control
 //! flow).
 
-use oa_sealed::DropWindow;
+use oa_time_window::DropWindow;
 
 /// Short ASCII names, zero-padded on the right; all zero means absent. Widths come from the
 /// longest value in the 4,237-message survey (docs/TFMS_SURVEY.md) plus headroom; a longer value
@@ -563,7 +563,7 @@ pub const DEFAULT_STRING_BYTES: usize = 256 * 1024;
 
 /// Allocates empty tables with room for `flights` flight rows, `flows` flow rows and
 /// `string_bytes` bytes of text.
-/// A tool passes [`DropWindow::sealed`]; tests and fuzz targets pass
+/// A tool passes `oa_sealed::sealed_drop_window()`; tests and fuzz targets pass
 /// [`DropWindow::empty_for_tests_and_fuzz`].
 pub fn new_rows(flights: usize, flows: usize, string_bytes: usize, window: DropWindow) -> Rows {
     Rows {

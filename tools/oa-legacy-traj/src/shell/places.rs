@@ -105,7 +105,10 @@ pub fn table_from_csv(fix: &[u8], nav: &[u8], apt: &[u8]) -> Result<PlaceTable, 
 
 /// Reads the table from an NASR CSV archive, through the seal guard; also the archive's SHA-256.
 pub fn load_nasr(path: &Path) -> Result<(PlaceTable, String), String> {
-    let bytes = oa_zip::read_archive_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = oa_sealed::open(path)
+        .map_err(oa_zip::ZipError::Io)
+        .and_then(oa_zip::read_archive)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let zip = oa_zip::Archive::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     let get = |n: &str| {
         zip.extract(n)

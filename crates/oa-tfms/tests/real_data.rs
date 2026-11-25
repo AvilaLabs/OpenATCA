@@ -253,7 +253,7 @@ fn real_tfms_flights_link_to_real_sfdps_flights() {
     for bytes in &tfms {
         decode_bytes(&mut parser, bytes, &mut rows).unwrap();
     }
-    let mut dec = Decoder::new(FixmLimits::new(oa_sealed::DropWindow::sealed()));
+    let mut dec = Decoder::new(FixmLimits::new(oa_sealed::sealed_drop_window()));
     let mut ev = new_events(200_000, 16 << 20);
     let mut sparser = Parser::new(oa_xml::Limits::default()).unwrap();
     for bytes in &sfdps {

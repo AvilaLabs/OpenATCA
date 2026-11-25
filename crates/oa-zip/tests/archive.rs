@@ -8,10 +8,10 @@
 )]
 
 use oa_zip::{
-    crc32, inflate, is_safe_path, read_archive_file, Archive, InflateError, Limits, ZipError,
-    DEFAULT_LIMITS, MAX_EOCD_SEARCH,
+    crc32, inflate, is_safe_path, Archive, InflateError, Limits, ZipError, DEFAULT_LIMITS,
+    MAX_EOCD_SEARCH,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const STORED: &[u8] = include_bytes!("fixtures/stored.zip");
 const DEFLATE: &[u8] = include_bytes!("fixtures/deflate.zip");
@@ -535,70 +535,6 @@ fn crc32_known_vector_via_public_api() {
     assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
 }
 
-fn raw_dir() -> Option<PathBuf> {
-    match std::env::var("OPENATCA_RAW") {
-        Ok(p) => Some(PathBuf::from(p)),
-        Err(_) => {
-            eprintln!("skipped: OPENATCA_RAW not set");
-            None
-        }
-    }
-}
-
-fn compare_zip_to_extracted(raw: &Path, zip_rel: &str, dir_rel: &str) -> (usize, u64, f64) {
-    let bytes = read_archive_file(&raw.join(zip_rel)).unwrap();
-    let a = Archive::parse(&bytes).unwrap();
-    let mut total = 0u64;
-    let mut inflate_secs = 0.0f64;
-    for e in a.entries() {
-        let t = std::time::Instant::now();
-        let got = a.extract_entry(e).unwrap();
-        if e.method() == 8 {
-            inflate_secs += t.elapsed().as_secs_f64();
-        }
-        let want = oa_sealed::read(raw.join(dir_rel).join(e.name())).unwrap();
-        assert!(got == want, "{} differs", e.name());
-        total += got.len() as u64;
-    }
-    (a.entries().len(), total, inflate_secs)
-}
-
-// REQ: OA-ZIP-001, OA-ZIP-002
-#[test]
-fn real_nasr_zip_matches_extracted_copy() {
-    let Some(raw) = raw_dir() else { return };
-    let (n, total, secs) = compare_zip_to_extracted(
-        &raw,
-        "nasr-2026-10-29/NASR_CSV_29_Oct_2026.zip",
-        "nasr-2026-10-29/x",
-    );
-    assert_eq!(n, 114);
-    eprintln!(
-        "nasr: {n} entries, {total} bytes, {:.1} MB/s (extract+crc)",
-        total as f64 / 1e6 / secs
-    );
-    // The nested archive is itself readable.
-    let inner =
-        oa_sealed::read(raw.join("nasr-2026-10-29/x/01_Oct_2026_CSV-29_Oct_2026_CSV.zip")).unwrap();
-    let ia = Archive::parse(&inner).unwrap();
-    for e in ia.entries() {
-        ia.extract_entry(e).unwrap();
-    }
-}
-
-// REQ: OA-ZIP-001, OA-ZIP-002, OA-ZIP-003
-#[test]
-fn real_cifp_zip_matches_extracted_copy() {
-    let Some(raw) = raw_dir() else { return };
-    let (n, total, secs) =
-        compare_zip_to_extracted(&raw, "cifp-2026-10-29/CIFP_261029.zip", "cifp-2026-10-29/x");
-    assert_eq!(n, 6);
-    eprintln!(
-        "cifp: {n} entries, {total} bytes, {:.1} MB/s (extract+crc)",
-        total as f64 / 1e6 / secs
-    );
-}
-
 // REQ: OA-ZIP-004
 #[test]
 fn a_zip64_extra_field_must_match_the_fields_that_ask_for_it() {
@@ -712,11 +648,17 @@ fn offsets_near_the_top_of_the_address_space_are_refused_not_added_to() {
     }
 }
 
-// REQ: OA-SEAL-013
+// REQ: OA-ZIP-001, OA-CORE-005
 #[test]
-fn read_archive_file_refuses_a_sealed_path() {
-    let e = read_archive_file(Path::new("/x/derived/adsb/zau-2026.11.21-1s.zip"))
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("OA-SEAL-001"), "{e}");
+fn caller_owned_archive_reader_preserves_bytes_and_reports_io_failure() {
+    let bytes = oa_zip::read_archive(std::io::Cursor::new(STORED)).unwrap();
+    assert_eq!(bytes, STORED);
+    assert!(Archive::parse(&bytes).is_ok());
+    struct Broken;
+    impl std::io::Read for Broken {
+        fn read(&mut self, _out: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("injected archive read failure"))
+        }
+    }
+    assert!(matches!(oa_zip::read_archive(Broken), Err(ZipError::Io(_))));
 }

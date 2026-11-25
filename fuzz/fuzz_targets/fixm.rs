@@ -18,7 +18,7 @@ thread_local! {
         open: oa_fixm::Decoder::new(oa_fixm::Limits::new(
             oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
         )),
-        sealed: oa_fixm::Decoder::new(oa_fixm::Limits::new(oa_sealed::DropWindow::sealed())),
+        sealed: oa_fixm::Decoder::new(oa_fixm::Limits::new(oa_sealed::sealed_drop_window())),
         events: oa_fixm::new_events(256, 256 * 1024),
         sealed_events: oa_fixm::new_events(256, 256 * 1024),
     });
@@ -35,7 +35,7 @@ fuzz_target!(|data: &[u8]| {
             sealed_events,
         } = &mut *s;
         let Ok(doc) = parser.parse(data) else { return };
-        let w = oa_sealed::DropWindow::sealed();
+        let w = oa_sealed::sealed_drop_window();
         for prefix in [false, true] {
             oa_fixm::clear_events(events);
             oa_fixm::clear_events(sealed_events);
@@ -53,9 +53,9 @@ fuzz_target!(|data: &[u8]| {
             // Oracle 1: no event the sealed decoder keeps has an observation time in the window.
             for i in 0..sealed_events.len {
                 assert!(
-                    !w.contains(sealed_events.ts_ms[i])
-                        && !w.contains(sealed_events.pos_time_ms[i])
-                        && !w.contains(sealed_events.dep_actual_ms[i]),
+                    !oa_time_window::contains(w, sealed_events.ts_ms[i])
+                        && !oa_time_window::contains(w, sealed_events.pos_time_ms[i])
+                        && !oa_time_window::contains(w, sealed_events.dep_actual_ms[i]),
                     "kept event in the window"
                 );
             }

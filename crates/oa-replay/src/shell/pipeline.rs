@@ -116,13 +116,13 @@ pub fn doc_xml_limits() -> oa_xml::Limits {
 pub fn doc_fixm_limits() -> Limits {
     Limits {
         max_elements: DOC_MAX_ELEMENTS,
-        ..Limits::new(oa_sealed::DropWindow::sealed())
+        ..Limits::new(oa_sealed::sealed_drop_window())
     }
 }
 
 /// The NOTAM decoder limits of one document: the sealed window as the drop window.
 pub fn doc_notam_limits() -> NotamLimits {
-    NotamLimits::new(oa_sealed::DropWindow::sealed())
+    NotamLimits::new(oa_sealed::sealed_drop_window())
 }
 
 /// The SFDPS event table of one document (see [`doc_xml_limits`]). Documents are decoded with
@@ -134,7 +134,7 @@ pub fn new_doc_events() -> Events {
 /// The TBFM row table of one document.
 pub fn new_doc_tbfm_rows() -> Rows {
     // A flight timed in the sealed window is dropped inside the decoder, before any count.
-    new_rows(DOC_ROW_CAPACITY, oa_sealed::DropWindow::sealed())
+    new_rows(DOC_ROW_CAPACITY, oa_sealed::sealed_drop_window())
 }
 
 /// The TFMS row tables of one document.
@@ -143,7 +143,7 @@ pub fn new_doc_tfms_rows() -> TfmsRows {
         DEFAULT_FLIGHT_CAPACITY,
         DEFAULT_FLOW_CAPACITY,
         DEFAULT_STRING_BYTES,
-        oa_sealed::DropWindow::sealed(),
+        oa_sealed::sealed_drop_window(),
     )
 }
 

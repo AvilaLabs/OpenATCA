@@ -187,9 +187,9 @@ fn an_adsb_frame_with_a_row_in_a_window_is_dropped_whole_and_is_in_no_other_coun
 // REQ: OA-SEAL-014
 #[test]
 fn every_decoder_of_the_pipeline_is_built_with_the_sealed_window_as_its_drop_window() {
-    let sealed = oa_sealed::DropWindow::sealed();
-    assert_eq!(sealed.span(), oa_sealed::sealed_window_ms());
-    assert!(sealed.span().is_some());
+    let sealed = oa_sealed::sealed_drop_window();
+    assert_eq!(oa_time_window::span(sealed), oa_sealed::sealed_window_ms());
+    assert!(oa_time_window::span(sealed).is_some());
     assert_eq!(oa_replay::doc_fixm_limits().drop_window, sealed);
     assert_eq!(oa_replay::doc_notam_limits().drop_window, sealed);
     assert_eq!(oa_replay::new_doc_tbfm_rows().window, sealed);

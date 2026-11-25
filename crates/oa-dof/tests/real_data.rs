@@ -31,7 +31,10 @@ fn zip_path() -> Option<PathBuf> {
 #[test]
 fn real_dof_parses_without_rejections() {
     let Some(p) = zip_path() else { return };
-    let bytes = oa_zip::read_archive_file(&p).unwrap();
+    let bytes = oa_sealed::open(&p)
+        .map_err(oa_zip::ZipError::Io)
+        .and_then(oa_zip::read_archive)
+        .unwrap();
     let a = oa_zip::Archive::parse(&bytes).unwrap();
     let all = parse_dof(&a.extract("DOF.DAT").unwrap()).unwrap();
     eprintln!(

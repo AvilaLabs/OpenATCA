@@ -474,11 +474,11 @@ fn reach(doc: &Doc<'_>, base: ElemIx, path: &[&[u8]], out: &mut Vec<ElemIx>) {
 pub(crate) fn prescan(
     doc: &Doc<'_>,
     tx: &TextIndex,
-    window: oa_sealed::DropWindow,
+    window: oa_time_window::DropWindow,
     record: &[u8],
     time_paths: &[&[&[u8]]],
 ) -> u64 {
-    if window.span().is_none() {
+    if oa_time_window::span(window).is_none() {
         return 0;
     }
     let (mut records, mut hit) = (0u64, false);
@@ -495,7 +495,7 @@ pub(crate) fn prescan(
         for e in &found {
             let mut buf = [0u8; VALUE_BUF];
             if let Ok(t) = leaf_text(doc, tx, *e, &mut buf) {
-                hit |= parse_iso_ms(t).is_some_and(|t| window.contains(t));
+                hit |= parse_iso_ms(t).is_some_and(|t| oa_time_window::contains(window, t));
             }
         }
     }

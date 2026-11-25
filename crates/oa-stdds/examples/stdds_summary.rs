@@ -126,7 +126,7 @@ fn main() -> ExitCode {
     let mut ctx = Ctx {
         parser,
         stats: new_stats(),
-        limits: Limits::new(oa_sealed::DropWindow::sealed()),
+        limits: Limits::new(oa_sealed::sealed_drop_window()),
         frames: 0,
         other_frames: 0,
         bad_frames: 0,

@@ -66,11 +66,11 @@ use oa_display::raster::frame_digest;
 use oa_display::traffic::{TrafficStyle, DEFAULT_STYLE, MAX_LEADER_MIN, MAX_TARGETS, MAX_TRAIL};
 use oa_sha256::to_hex;
 use oa_track::adsb::{adsb_measurements, AdsbConfig, AdsbStats};
-use oa_track::score::{interval_stats, scoring_config};
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_new, tracker_stats,
     tracker_update, DEFAULT_CONFIG, REFUSE_KINDS, REFUSE_NAMES,
 };
+use oa_track_tools::score::{interval_stats, scoring_config};
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

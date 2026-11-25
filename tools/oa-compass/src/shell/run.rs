@@ -5,14 +5,14 @@
 //! samples with the flight's address and callsign) are sorted by position time and written.
 
 use oa_bench::legacy::{Counts, Legacy, NONE, NO_ALT, NO_VEL};
-use oa_track::score::{
-    interval_stats, scoring_config, split_reports_keyed, split_reports_with, IntervalStats,
-    SplitStats, DRAIN_ROWS,
-};
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
     tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG, O_COAST, O_HAS_ALT,
     O_IDENTITY_UNCONFIRMED, O_RADAR_DISAGREES, O_REACQUIRED, O_TICK, O_UNCERTAIN, RADAR_KEY_BASE,
+};
+use oa_track_tools::score::{
+    interval_stats, scoring_config, split_reports_keyed, split_reports_with, IntervalStats,
+    SplitStats, DRAIN_ROWS,
 };
 
 use std::collections::{BTreeMap, HashMap, HashSet};

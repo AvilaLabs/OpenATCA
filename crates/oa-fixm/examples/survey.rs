@@ -50,7 +50,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), String> {
     // Printed when `main` returns, also on a panic: the messages left out for their own time.
     let mut drops = oa_sealed::DropReport::new();
-    let window = oa_sealed::DropWindow::sealed();
+    let window = oa_sealed::sealed_drop_window();
     let dir = std::env::args()
         .nth(1)
         .ok_or_else(|| "usage: survey <dir>".to_string())?;

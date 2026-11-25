@@ -219,6 +219,6 @@ fn a_damaged_gzip_file_exits_3_after_the_report() {
 #[test]
 fn the_census_reader_drops_the_sealed_window() {
     let w = oa_stdds_census::read::read_limits().drop_window;
-    assert_eq!(w, oa_sealed::DropWindow::sealed());
-    assert_eq!(w.span(), oa_sealed::sealed_window_ms());
+    assert_eq!(w, oa_sealed::sealed_drop_window());
+    assert_eq!(oa_time_window::span(w), oa_sealed::sealed_window_ms());
 }

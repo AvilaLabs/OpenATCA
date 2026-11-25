@@ -39,7 +39,7 @@ use crate::rows::{
     Name16, Name20, Name24, Name4, Name8, Row, Rows, BLANK_ROW, NO_TIME,
 };
 use crate::time::parse_iso_ms;
-use oa_sealed::DropWindow;
+use oa_time_window::DropWindow;
 use oa_xml::{
     attr_needs_decode, decode_into, decode_text_run, ns_uri_bytes, resolve_elem_ns, span_bytes,
     text_needs_decode, Doc, ElemIx, Limits, Ns, Parser, Span, SpanKind,
@@ -120,7 +120,7 @@ pub fn decode_doc_prefix(doc: &Doc<'_>, rows: &mut Rows) -> Result<Outcome, DocE
 /// has (all are dropped); otherwise 0. A time that cannot be read is not in the window (the
 /// frame's receive time gates it).
 fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
-    if window.span().is_none() {
+    if oa_time_window::span(window).is_none() {
         return 0;
     }
     let (mut messages, mut hit) = (0u32, false);
@@ -136,7 +136,7 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
             b"ctm" => {
                 let mut buf = [0u8; MAX_VALUE];
                 if let Ok(v) = leaf_text_at(doc, &mut cursor, e, Field::Ctm, &mut buf) {
-                    hit |= parse_time(v).is_ok_and(|t| window.contains(t));
+                    hit |= parse_time(v).is_ok_and(|t| oa_time_window::contains(window, t));
                 }
             }
             _ => {}
@@ -153,7 +153,7 @@ fn prescan(doc: &Doc<'_>, window: DropWindow) -> u32 {
             };
             let mut buf = [0u8; MAX_VALUE];
             if let Ok(v) = attr_val(doc, &a, field, &mut buf) {
-                hit |= parse_time(v).is_ok_and(|t| window.contains(t));
+                hit |= parse_time(v).is_ok_and(|t| oa_time_window::contains(window, t));
             }
         }
     }

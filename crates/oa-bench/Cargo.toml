@@ -25,6 +25,7 @@ oa-airspace = { path = "../oa-airspace" }
 oa-geo = { path = "../oa-geo" }
 oa-math = { path = "../oa-math" }
 oa-sealed = { path = "../oa-sealed" }
+oa-time-window = { path = "../oa-time-window" }
 
 [[bin]]
 name = "oa-bench"

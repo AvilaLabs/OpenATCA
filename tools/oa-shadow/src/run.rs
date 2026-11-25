@@ -14,13 +14,13 @@ use oa_bench::input::{file_opener, load_adsb_counted, load_counted, msg_limit, F
 use oa_bench::legacy::{NONE, NO_ALT};
 use oa_replay::FeedKind;
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
-use oa_track::score::{
-    interval_stats, scoring_config, split_reports, IntervalStats, DRAIN_ROWS, SPLIT_TEXT,
-};
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
     tracker_stats, tracker_update, TrackOutput, TrackerStats, DEFAULT_CONFIG, O_COAST, O_HAS_ALT,
     O_TICK, RADAR_KEY_BASE,
+};
+use oa_track_tools::score::{
+    interval_stats, scoring_config, split_reports, IntervalStats, DRAIN_ROWS, SPLIT_TEXT,
 };
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
 

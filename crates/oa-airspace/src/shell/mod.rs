@@ -1,10 +1,9 @@
-//! Shell (B1, B7): everything that reads files, spawns threads, parses command lines, or uses a
-//! hash map. `build` is shell because its working maps are `HashMap`s (looked up only; every
-//! output list is sorted, so no iteration order reaches the output), `load` and `cli` do I/O.
+//! Shell (B1, B7): code that uses a hash map or coordinates parsing work. `build` is shell
+//! because its working maps are `HashMap`s (looked up only; every output list is sorted, so no
+//! iteration order reaches the output). Callers own file access; private commands live in
+//! `oa-adapt`.
 
 pub mod build;
-pub mod cli;
 pub mod load;
-pub mod manifest;
-pub mod route_cli;
+pub mod route_parse;
 pub mod sources;

@@ -19,11 +19,11 @@ use oa_track::fusion::{
     FORENSIC_APPLIED, FORENSIC_INIT, FORENSIC_NONE, HOW_ASSOC, HOW_HARD, HOW_INIT,
 };
 use oa_track::fusion_params::{ASSIGN_LOG_MAX, ASSOC_FORENSICS_MAX, KEY_RADAR_BASE, MAX_RADARS};
-use oa_track::fusion_score::{identify_tracks, Kind, EPOCH_NS};
 use oa_track::{
     output_clear, output_new, tracker_bytes, tracker_counts, tracker_live_iter, Measurement,
     TrackerConfig, TrackerStats, DEFAULT_CONFIG, O_COAST, O_TICK, REFUSE_NAMES,
 };
+use oa_track_tools::fusion_score::{identify_tracks, Kind, EPOCH_NS};
 
 use crate::gen::{half_km, Layout, Traffic, TrafficCfg};
 use crate::stats::{dist_of, fmt_f, Dist, Hist, Kv};

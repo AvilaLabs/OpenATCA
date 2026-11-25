@@ -46,7 +46,7 @@ impl std::error::Error for ReaderError {}
 
 impl Reader {
     /// The drop window of each decoder of this reader: SFDPS, TBFM, TFMS (OA-SEAL-014).
-    pub fn drop_windows(&self) -> [oa_sealed::DropWindow; 3] {
+    pub fn drop_windows(&self) -> [oa_time_window::DropWindow; 3] {
         [
             self.fixm.limits().drop_window,
             self.tbfm_rows.window,

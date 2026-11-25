@@ -28,6 +28,8 @@ oa-sealed = { path = "../../crates/oa-sealed" }
 oa-sha256 = { path = "../../crates/oa-sha256" }
 oa-tiff = { path = "../../crates/oa-tiff" }
 oa-track = { path = "../../crates/oa-track" }
+# RULESET F1: split-report timing configuration is private benchmark tooling.
+oa-track-tools = { path = "../../crates/oa-track-tools" }
 oa-zip = { path = "../../crates/oa-zip" }
 
 [dev-dependencies]

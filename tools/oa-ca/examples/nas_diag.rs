@@ -41,12 +41,12 @@ use oa_safety::inhibit::inhibits_new;
 use oa_safety::net::{net_status, state_table_new, NetId, NetState};
 use oa_sealed::Sealed;
 use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
-use oa_track::score::{interval_stats, scoring_config, IntervalStats};
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_counts, tracker_flush,
     tracker_new, tracker_stats, tracker_update, TrackOutput, DEFAULT_CONFIG, O_COAST, O_HAS_ALT,
     O_IDENTITY_UNCONFIRMED, O_TICK, O_UNCERTAIN,
 };
+use oa_track_tools::score::{interval_stats, scoring_config, IntervalStats};
 
 const HOUR_S: i64 = 3600;
 const NS: i64 = 1_000_000_000;

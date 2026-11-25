@@ -1,9 +1,8 @@
 #![forbid(unsafe_code)]
-//! oa-track: the surveillance tracker of OpenATCA (`docs/M3_DESIGN.md` section 3), ADS-B only in
-//! this step, with the scoring path of section 2 (split reports). Core (pure, B1): the filters
-//! and the track table are pure functions of the measurements and the times given to them;
-//! [`adsb`] is the adapter from `oa-adsb` reports; [`score`] and the `oa-track-run` binary are
-//! shell (they read a file, read the clock and write files).
+//! oa-track: the reusable surveillance tracker of OpenATCA (`docs/M3_DESIGN.md` section 3).
+//! Core (pure, B1): filters, association, fusion and the track table depend on measurements and
+//! times supplied by the caller; [`adsb`] adapts `oa-adsb` reports. Offline scoring and simulation
+//! commands live in the separate `oa-track-tools` shell package.
 //!
 //! * [`Measurement`] is the interface every sensor plugs into: time of applicability, sensor id,
 //!   position with covariance, optional velocity with covariance, optional barometric or
@@ -17,11 +16,8 @@
 //!
 //! # Honest limits of this step
 //!
-//! The scoring input is ADS-B history, whose cadence is measured for each clip; the split
-//! halves its report groups. No result here is an ESASSP exit result (see `docs/M3_DESIGN.md`);
-//! every scored number is labelled so. GNSS error correlated over
-//! seconds is shared between the two halves of a split. The score measures disagreement with
-//! a correlated reference and does not bound absolute error.
+//! Qualification and comparison claims belong to the private `oa-track-tools` harness; they are
+//! not guarantees of this reusable tracking API.
 
 mod linalg;
 
@@ -36,8 +32,6 @@ mod filter;
 pub mod fixed_map;
 pub mod fusion;
 pub mod fusion_params;
-pub mod fusion_score;
-pub mod fusion_world;
 pub mod gate_trace;
 mod hfilter;
 pub mod latency;
@@ -45,7 +39,6 @@ pub mod params;
 pub mod radar;
 pub mod realtime;
 pub mod registration;
-pub mod score;
 pub mod spill;
 pub mod synth_truth;
 mod time_gate;

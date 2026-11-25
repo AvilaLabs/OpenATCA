@@ -1,7 +1,8 @@
 //! Raw float-from-external-input scan (OA-TRC-103).
 //!
 //! A float read from file bytes, text, arguments or settings is checked finite (and in range where
-//! the field has one) where it is parsed. This scan lists every line of `crates/*/src` that builds
+//! the field has one) where it is parsed. This scan lists every line of `crates/*/src` and
+//! `tools/*/src` that builds
 //! a float from text or bytes by hand, so a new one is reviewed: it goes through the crate's checked
 //! helper, or it is added to [`ALLOW`] with the reason it is safe. Test modules (everything from a
 //! `#[cfg(test)]` line on, and files named `tests.rs` or `*_tests.rs`) are not scanned.
@@ -85,16 +86,21 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The raw reads in `crates/*/src` under `root` that `allow` does not cover, in path then line
+/// The raw reads in `crates/*/src` and `tools/*/src` under `root` that `allow` does not cover, in path then line
 /// order, and the entries of `allow` that matched no line (stale).
 pub fn scan(root: &Path, allow: &[Allow]) -> (Vec<Finding>, Vec<String>) {
     let mut files = Vec::new();
-    let mut crates: Vec<PathBuf> = fs::read_dir(root.join("crates"))
-        .map(|rd| rd.flatten().map(|e| e.path()).collect())
-        .unwrap_or_default();
-    crates.sort();
-    for c in &crates {
-        collect(&c.join("src"), &mut files);
+    let mut packages = Vec::new();
+    for parent in ["crates", "tools"] {
+        packages.extend(
+            fs::read_dir(root.join(parent))
+                .map(|rd| rd.flatten().map(|e| e.path()).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        );
+    }
+    packages.sort();
+    for package in &packages {
+        collect(&package.join("src"), &mut files);
     }
     files.sort();
     let mut used = vec![false; allow.len()];
@@ -158,6 +164,7 @@ mod tests {
         let p = std::env::temp_dir().join(format!("oa-trace-floats-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(p.join("crates/oa-x/src")).unwrap();
+        fs::create_dir_all(p.join("tools/oa-x/src")).unwrap();
         p
     }
 
@@ -213,6 +220,37 @@ mod tests {
         let (found, stale) = scan(&root, &allow);
         let files: Vec<&str> = found.iter().map(|f| f.file.as_str()).collect();
         assert_eq!(files, ["crates/oa-y/src/lib.rs"], "{found:?}");
+        assert!(stale.is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // REQ: OA-TRC-103
+    #[test]
+    fn tool_sources_are_scanned_and_tool_allowlist_paths_are_relative_to_root() {
+        let root = tmp("tools");
+        fs::write(
+            root.join("tools/oa-x/src/main.rs"),
+            "fn a(s: &str) -> f64 { s.parse::<f64>().unwrap_or(0.0) }\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("tools/oa-x/tests")).unwrap();
+        fs::write(
+            root.join("tools/oa-x/tests/ignored.rs"),
+            "fn ignored(s: &str) -> f64 { s.parse::<f64>().unwrap_or(0.0) }\n",
+        )
+        .unwrap();
+        let allow = [Allow {
+            file: "tools/oa-x/src/",
+            needle: "parse::<f64>",
+            reason: "synthetic checked input helper",
+        }];
+        let (found, stale) = scan(&root, &allow);
+        assert!(found.is_empty(), "{found:?}");
+        assert!(stale.is_empty(), "{stale:?}");
+
+        let (found, stale) = scan(&root, &[]);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].file, "tools/oa-x/src/main.rs");
         assert!(stale.is_empty());
         let _ = fs::remove_dir_all(&root);
     }

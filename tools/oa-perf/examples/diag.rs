@@ -22,8 +22,8 @@ use oa_track::fusion::{
     fusion_stats, fusion_tracker, fusion_tracker_config, fusion_tracker_stats,
 };
 use oa_track::fusion_params::KEY_RADAR_BASE;
-use oa_track::fusion_score::EPOCH_NS;
 use oa_track::{output_clear, output_new, tracker_live_iter, tracker_predict, O_COAST, O_TICK};
+use oa_track_tools::fusion_score::EPOCH_NS;
 
 const NS: i64 = 1_000_000_000;
 

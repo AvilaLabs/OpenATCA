@@ -467,8 +467,13 @@ pub fn output_clear(o: &mut TrackOutput) {
     o.flags.clear();
 }
 
-/// Appends a row, or counts the overflow.
-pub(crate) fn output_push(o: &mut TrackOutput, r: &OutRow) {
+/// Append one row to a [`TrackOutput`], or count one overflow when its row capacity is full.
+///
+/// The row count is `t_ns.len()`. On success, every output column receives exactly one value;
+/// when full, no column changes and `overflow` is saturating-incremented. Callers that need the
+/// table's columns allocated once should construct it with [`output_new`]; this function assumes
+/// the column lengths have remained aligned through `output_new`, `output_push` and `output_clear`.
+pub fn output_push(o: &mut TrackOutput, r: &OutRow) {
     if o.t_ns.len() >= o.capacity {
         o.overflow = o.overflow.saturating_add(1);
         return;

@@ -25,6 +25,7 @@ oa-sealed = { path = "../oa-sealed" }
 [dev-dependencies]
 # Workspace crate: compresses test recordings to .oaf.gz.
 oa-deflate = { path = "../oa-deflate" }
+oa-time-window = { path = "../oa-time-window" }
 
 [package.metadata.openatca]
 class = "split"

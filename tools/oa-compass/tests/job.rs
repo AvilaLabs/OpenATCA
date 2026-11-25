@@ -1447,7 +1447,7 @@ fn numbers_with_ends(
 // REQ: OA-CMP-048
 #[test]
 fn a_row_after_the_end_of_a_dropped_track_instance_is_a_new_track_number() {
-    let drop = oa_track::score::SCORE_DROP_AFTER_NS;
+    let drop = oa_track_tools::score::SCORE_DROP_AFTER_NS;
     assert_eq!(drop, 120 * 1_000_000_000);
     // The instance's last update was at 3 s: its rows are on the table through 123 s (age equal to
     // the drop age) and the next instance's rows are later.

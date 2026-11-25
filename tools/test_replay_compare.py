@@ -33,7 +33,7 @@ SCRIPT_FILES = ["replay_compare.sh", "replay_clean_env.sh", "replay_overlay_appl
 SEAL_OK_STUB = "#!/usr/bin/env bash\necho 'clip: 1 frames, 1 rows; in the sealed window: 0'\nexit 0\n"
 
 
-def scratch_repo(base, commits):
+def scratch_repo(base, commits, layout="legacy"):
     """A private repository holding copies of the script and one commit per (name, canon, main).
 
     The tests that name commits use this, never the shared repository: the script adds and prunes
@@ -42,7 +42,11 @@ def scratch_repo(base, commits):
     """
     repo = Path(base) / "r"
     (repo / "tools").mkdir(parents=True)
-    (repo / "crates/oa-track/src").mkdir(parents=True)
+    main_root = "crates/oa-track-tools/src" if layout == "tools" else "crates/oa-track/src"
+    if layout not in {"legacy", "tools"}:
+        raise ValueError(f"unknown replay test layout: {layout}")
+    (repo / main_root).mkdir(parents=True)
+    (repo / "crates/oa-track/src").mkdir(parents=True, exist_ok=True)
     (repo / "crates/oa-sealed").mkdir(parents=True)
     for n in SCRIPT_FILES:
         (repo / "tools" / n).write_text((SCRIPT.parent / n).read_text())
@@ -53,7 +57,7 @@ def scratch_repo(base, commits):
     out = {}
     for name, canon, main in commits:
         (repo / "crates/oa-track/src/canon.rs").write_text(canon)
-        (repo / "crates/oa-track/src/main.rs").write_text(main)
+        (repo / main_root / "main.rs").write_text(main)
         git(repo, "add", "-A")
         git(repo, "commit", "-q", "-m", name)
         out[name] = git(repo, "rev-parse", "HEAD").strip()
@@ -358,7 +362,7 @@ class OverlayApply(unittest.TestCase):
             f'{{ echo "CALL cargo $*"; env | sort | sed "s/^/ENV /"; }} >>{log}\n'
             'pkg=""; while [ $# -gt 0 ]; do [ "$1" = -p ] && pkg="$2"; shift; done\n'
             'mkdir -p "$CARGO_TARGET_DIR/release"\n'
-            f'case "$pkg" in oa-track) printf %s {json_q(run_stub)} >"$CARGO_TARGET_DIR/release/oa-track-run"; chmod +x "$CARGO_TARGET_DIR/release/oa-track-run";;\n'
+            f'case "$pkg" in oa-track-tools) printf %s {json_q(run_stub)} >"$CARGO_TARGET_DIR/release/oa-track-run"; chmod +x "$CARGO_TARGET_DIR/release/oa-track-run";;\n'
             f'oa-replay-diff) printf %s {json_q(diff_stub)} >"$CARGO_TARGET_DIR/release/oa-replay-diff"; chmod +x "$CARGO_TARGET_DIR/release/oa-replay-diff";;\n'
             f'oa-truth) printf %s {json_q(SEAL_OK_STUB)} >"$CARGO_TARGET_DIR/release/oa-clip-sealcheck"; chmod +x "$CARGO_TARGET_DIR/release/oa-clip-sealcheck";; esac\n'
         )
@@ -429,7 +433,7 @@ class OverlayApply(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             'pkg=""; while [ $# -gt 0 ]; do [ "$1" = -p ] && pkg="$2"; shift; done\n'
             'mkdir -p "$CARGO_TARGET_DIR/release"\n'
-            f'[ "$pkg" = oa-track ] && {{ cp {bindir}/run_src "$CARGO_TARGET_DIR/release/oa-track-run"; chmod +x "$CARGO_TARGET_DIR/release/oa-track-run"; }}\n'
+            f'[ "$pkg" = oa-track-tools ] && {{ cp {bindir}/run_src "$CARGO_TARGET_DIR/release/oa-track-run"; chmod +x "$CARGO_TARGET_DIR/release/oa-track-run"; }}\n'
             f'[ "$pkg" = oa-truth ] && {{ printf %s {json_q(SEAL_OK_STUB)} >"$CARGO_TARGET_DIR/release/oa-clip-sealcheck"; chmod +x "$CARGO_TARGET_DIR/release/oa-clip-sealcheck"; }}\n'
             "exit 0\n"
         )
@@ -487,8 +491,8 @@ class OverlayApply(unittest.TestCase):
                 self.assertEqual(sorted(p.name for p in (d / "out").glob("digest-*")), [])
 
 
-    def stubbed(self, d, seal, run_stub, fail_seal_build=False):
-        """A directory `d` with stub cargo and rustc: the oa-truth build makes `seal`, the oa-track
+    def stubbed(self, d, seal, run_stub, fail_seal_build=False, track_package="oa-track-tools"):
+        """A directory `d` with stub cargo and rustc: the oa-truth build makes `seal`, the tracker
         build makes `run_stub`, and the diff build a stub that finds nothing. Returns (env, clip)."""
         bindir = d / "bin"
         bindir.mkdir(parents=True)
@@ -508,7 +512,7 @@ class OverlayApply(unittest.TestCase):
             'pkg=""; while [ $# -gt 0 ]; do [ "$1" = -p ] && pkg="$2"; shift; done\n'
             'mkdir -p "$CARGO_TARGET_DIR/release"\n'
             f'case "$pkg" in oa-truth) {build_seal};;\n'
-            f'oa-track) printf %s {json_q(run_stub)} >"$CARGO_TARGET_DIR/release/oa-track-run"; chmod +x "$CARGO_TARGET_DIR/release/oa-track-run";;\n'
+            f'{track_package}) printf %s {json_q(run_stub)} >"$CARGO_TARGET_DIR/release/oa-track-run"; chmod +x "$CARGO_TARGET_DIR/release/oa-track-run";;\n'
             f'oa-replay-diff) printf %s {json_q(diff_stub)} >"$CARGO_TARGET_DIR/release/oa-replay-diff"; chmod +x "$CARGO_TARGET_DIR/release/oa-replay-diff";; esac\n'
         )
         (bindir / "rustc").write_text("#!/usr/bin/env bash\necho stub\n")
@@ -520,11 +524,37 @@ class OverlayApply(unittest.TestCase):
                    CARGO_TARGET_DIR=str(d / "tgt"))
         return env, clip
 
-    def go(self, d, env, clip):
+    def go(self, d, env, clip, script=SCRIPT):
         return subprocess.run(
-            ["bash", str(SCRIPT), "HEAD", "HEAD", str(clip), str(d / "out"), str(d / "scratch")],
+            ["bash", str(script), "HEAD", "HEAD", str(clip), str(d / "out"), str(d / "scratch")],
             capture_output=True, text=True, env=env, timeout=180,
         )
+
+    # REQ: OA-RDF-016
+    def test_tools_package_layout_reads_new_main_and_builds_the_tools_binary(self):
+        d = self.dir / "tools-layout"
+        repo, _ = scratch_repo(
+            d,
+            [("tools-v2", "// oa-track digest v2: header\n", 'x "--digest" y\n')],
+            layout="tools",
+        )
+        log = d / "cargo.log"
+        run_stub = (
+            "#!/usr/bin/env bash\n"
+            'while [ $# -gt 0 ]; do case "$1" in --digest) echo digest >"$2";; --rows) echo rows >"$2";; esac; shift; done\n'
+        )
+        seal_stub = "#!/usr/bin/env bash\necho 'clip: 1 frames, 1 rows; in the sealed window: 0'\nexit 0\n"
+        env, clip = self.stubbed(d, seal_stub, run_stub, track_package="oa-track-tools")
+        env["CARGO_TARGET_DIR"] = str(d / "target")
+        # Use the script copied into the synthetic repository so its Git probes see the new layout.
+        res = self.go(d, env, clip, script=repo / "tools/replay_compare.sh")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        calls = log.read_text().splitlines()
+        track_builds = [line for line in calls if "-p oa-track-tools" in line and "oa-track-run" in line]
+        self.assertEqual(len(track_builds), 2, calls)
+        report = (d / "out/report.txt").read_text()
+        self.assertIn("digest_format_A=v2", (d / "out/summary.txt").read_text())
+        self.assertIn("overlay for commit A: none", report)
 
     # REQ: OA-SEAL-014
     def test_the_check_and_both_runs_read_one_private_read_only_copy_of_the_clip(self):

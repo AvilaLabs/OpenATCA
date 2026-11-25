@@ -675,7 +675,7 @@ def run_gate(args):
                 raise ValueError("reference-env changed while loading its configuration")
         clip_hash_start = start_inputs["files"].get("--clip", {}).get("sha256")
         build_ok = cargo("build_release", "build", "--locked", "--release", "-p", "oa-bench",
-                         "-p", "oa-track", "-p", "oa-perf")
+                         "-p", "oa-track", "-p", "oa-track-tools", "-p", "oa-perf")
         if build_ok:
             cargo("fmt", "fmt", "--all", "--", "--check")
             cargo("clippy", "clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings")

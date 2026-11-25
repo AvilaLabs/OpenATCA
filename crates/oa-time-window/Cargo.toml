@@ -1,0 +1,13 @@
+[package]
+name = "oa-time-window"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[package.metadata.openatca]
+class = "core"
+
+[lints]
+workspace = true

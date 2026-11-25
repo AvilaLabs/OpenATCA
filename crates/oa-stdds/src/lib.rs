@@ -38,7 +38,7 @@ pub mod status;
 pub mod tais;
 mod walk;
 
-use oa_sealed::DropWindow;
+use oa_time_window::DropWindow;
 use oa_xml::{error_offset, Parser, XmlError};
 use std::fmt;
 
@@ -73,7 +73,8 @@ pub struct Limits {
 }
 
 impl Limits {
-    /// The default bounds, dropping rows timed in `window`. A tool passes [`DropWindow::sealed`];
+    /// The default bounds, dropping rows timed in `window`. A tool passes
+    /// `oa_sealed::sealed_drop_window()`;
     /// tests and fuzz targets pass [`DropWindow::empty_for_tests_and_fuzz`].
     pub const fn new(window: DropWindow) -> Limits {
         Limits {

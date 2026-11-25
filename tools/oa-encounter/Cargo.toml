@@ -21,6 +21,8 @@ oa-nasr = { path = "../../crates/oa-nasr" }
 oa-sealed = { path = "../../crates/oa-sealed" }
 oa-sha256 = { path = "../../crates/oa-sha256" }
 oa-track = { path = "../../crates/oa-track" }
+# RULESET F1: private split-report evaluator API is isolated in the tool package.
+oa-track-tools = { path = "../../crates/oa-track-tools" }
 oa-zip = { path = "../../crates/oa-zip" }
 
 [dev-dependencies]

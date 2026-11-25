@@ -27,7 +27,7 @@ use crate::scalar::{
     parse_lat_lon, parse_limit, parse_uint, parse_uuid, trim, EffEnd,
 };
 use crate::stats::{Stats, UnknownPath, MAX_PATH_TEXT};
-use oa_sealed::DropWindow;
+use oa_time_window::DropWindow;
 use oa_xml::{
     attr_needs_decode, decode_into, ns_uri_bytes, resolve_attr_ns, resolve_elem_ns, span_bytes,
     text_needs_decode, AttrIx, Doc, ElemIx, Ns, Parser, Span, SpanKind, TextIx,
@@ -54,7 +54,8 @@ pub struct Limits {
 
 impl Limits {
     /// The default bounds, dropping NOTAMs timed in `window`. A tool passes
-    /// [`DropWindow::sealed`]; tests and fuzz targets pass [`DropWindow::empty_for_tests_and_fuzz`].
+    /// `oa_sealed::sealed_drop_window()`; tests and fuzz targets pass
+    /// [`DropWindow::empty_for_tests_and_fuzz`].
     pub const fn new(window: DropWindow) -> Limits {
         Limits {
             max_elements: 50_000,
@@ -771,7 +772,7 @@ fn index_texts(dec: &mut Decoder, doc: &Doc<'_>) {
 /// A time that cannot be read is not in the window (the frame's receive time gates it).
 fn prescan(dec: &mut Decoder, doc: &Doc<'_>) -> bool {
     let window = dec.limits.drop_window;
-    if window.span().is_none() {
+    if oa_time_window::span(window).is_none() {
         return false;
     }
     index_texts(dec, doc);
@@ -783,7 +784,7 @@ fn prescan(dec: &mut Decoder, doc: &Doc<'_>) -> bool {
             continue;
         }
         if let Raw::Val(v) = short(doc, &dec.elem_text, i, &mut b1) {
-            if parse_iso_ms(v).is_some_and(|t| window.contains(t)) {
+            if parse_iso_ms(v).is_some_and(|t| oa_time_window::contains(window, t)) {
                 return true;
             }
         }

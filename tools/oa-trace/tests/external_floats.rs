@@ -6,12 +6,127 @@ use std::path::Path;
 
 const ALLOW: &[Allow] = &[
     Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"parse::<f64>\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"parse::<f32>\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"f64::from_str\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"f32::from_str\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"f64::from_bits\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"f32::from_bits\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"f64::from_le_bytes\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"f32::from_le_bytes\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"f64::from_be_bytes\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"f32::from_be_bytes\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"f64::from_ne_bytes\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-trace/src/floatscan.rs",
+        needle: "\"f32::from_ne_bytes\"",
+        reason: "scanner pattern literal describing a raw-read token, not a float conversion",
+    },
+    Allow {
+        file: "tools/oa-regional-session/src/surveillance.rs",
+        needle: "f32::from_bits(",
+        reason: "successor-f32 rounding of a checked nonnegative i64 timestamp delta divided by 1e9; the delta is bounded before this conversion and cannot approach infinity",
+    },
+    Allow {
+        file: "tools/oa-msaw/src/run.rs",
+        needle: "x.parse::<f64>().ok()",
+        reason: "worst-position report coordinates are rejected unless finite and within latitude/longitude bounds before scaling or integer conversion; invalid rows are counted",
+    },
+    Allow {
+        file: "tools/oa-ca/src/config.rs",
+        needle: ".parse()",
+        reason: "configuration numeric values pass through finite(), which rejects NaN and infinities before returning them",
+    },
+    Allow {
+        file: "tools/oa-legacy-traj/src/shell/places.rs",
+        needle: "lat.parse()",
+        reason: "latitude and longitude are range-checked immediately after parsing; NaN and infinities fail the inclusive coordinate bounds",
+    },
+    Allow {
+        file: "tools/oa-legacy-traj/src/shell/places.rs",
+        needle: "lon.parse()",
+        reason: "latitude and longitude are range-checked immediately after parsing; NaN and infinities fail the inclusive coordinate bounds",
+    },
+    Allow {
+        file: "tools/oa-msaw/src/args.rs",
+        needle: ".parse()",
+        reason: "duration values pass through seconds(), which rejects nonfinite and negative values before use",
+    },
+    Allow {
+        file: "tools/oa-msaw/src/config.rs",
+        needle: ".parse()",
+        reason: "configuration numeric values pass through finite(), which rejects NaN and infinities before returning them",
+    },
+    Allow {
+        file: "tools/oa-msaw/src/run.rs",
+        needle: "f.get(11)?.parse().ok()?",
+        reason: "reads the current process's own integer CPU tick fields from /proc/self/stat; the parsed sum is checked finite before conversion to seconds",
+    },
+    Allow {
+        file: "tools/oa-perf/src/stats.rs",
+        needle: "self.get(k)?.parse().ok()",
+        reason: "reads this tool's own generated KV report; `nan` is an intentional missing-value sentinel consumed by fmt_f, not an outside measurement",
+    },
+    Allow {
+        file: "tools/oa-stdds-census/src/main.rs",
+        needle: "v.parse::<f64>().ok()",
+        reason: "the shared option parser rejects nonfinite values; each option then has an explicit domain bound (gate and time-window validation, or 0 < max-gap <= 30)",
+    },
+    Allow {
+        file: "tools/oa-legacy-traj/src/shell/args.rs",
+        needle: "v.parse::<f64>().ok()",
+        reason: "shared CLI number parser rejects nonfinite and nonpositive values; landing-gap and step additionally require whole seconds before integer conversion",
+    },
+    Allow {
         file: "crates/oa-adsb/src/cli.rs",
         needle: "x.trim().parse().ok()",
         reason: "--box: every value is range-checked next (a NaN or infinity is outside, the comparison is false) and a token that fails to parse leaves the count short, which is refused",
     },
     Allow {
-        file: "crates/oa-airspace/src/shell/cli.rs",
+        file: "tools/oa-adapt/src/cli.rs",
         needle: ".parse()",
         reason: "--buffer-nm: the product in metres is checked finite and within 0 to the limit on the next lines",
     },

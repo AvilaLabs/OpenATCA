@@ -283,6 +283,15 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 
 ### Airspace model (oa-airspace)
 
+- **OA-CORE-006** Airspace model construction accepts caller-provided archive bytes and has no
+  project-specific sealed-data dependency. The private `oa-adapt` command owns path policy,
+  guarded-opens the input descriptors it consumes, and leaves model algorithms unchanged.
+- **OA-CORE-007** Decoder time-window values and their half-open interval operations live in the
+  dependency-light `oa-time-window` crate. The five XML codec crates depend on that value crate,
+  not on `oa-sealed`, for their production decoder APIs; guarded callers obtain the active window
+  through `oa_sealed::sealed_drop_window()`. Global pre-scan and row/frame drop behavior stays
+  unchanged.
+
 - **OA-ASP-001** Builds the model for one ARTCC and cycle from NASR and CIFP.
 - **OA-ASP-002** Selects every object inside the ARTCC's HIGH or LOW boundary plus a
   configurable buffer, and every procedure of every airport inside.
@@ -663,6 +672,10 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 
 ### Archives (oa-zip)
 
+- **OA-CORE-005** Reusable ZIP and NASR packages have no project-specific sealed-data dependency.
+  ZIP accepts caller-owned bounded readers; every OpenATCA private archive/data caller retains
+  guarded opens on the descriptor actually consumed. Generic library path conveniences do not
+  apply project policy; private real-data/seal tests live in the guarded caller harness.
 - **OA-ZIP-001** Reads ZIP archives (central directory, local headers, stored and deflate
   entries), rejecting encrypted, multi-disk and ZIP64-beyond-limits archives with a clear error.
 - **OA-ZIP-002** Inflates DEFLATE streams per RFC 1951 (stored, fixed and dynamic Huffman
@@ -5586,6 +5599,12 @@ scope.
 - **OA-TRK-410** B1/H2 private P010 scoring requires the exact registered full-day/split/window/box contract and explicit timing arm; incompatible hold-out, export, damage, address-drop and dirty-tree options are refused. Private per-arm ledgers are new and empty and are never original hold-out ledgers.
 - **OA-TRK-411** B1/H2 P010 eligibility is determined from public set-B truth at UTC minutes, with one unambiguous truth leg, finite position/velocity in the registered box and the P006 pairing direction threshold. Actual-time samples must retain that same leg; addresses, legs, eligible minutes and work have explicit caps and all exclusions are counted.
 - **OA-TRK-412** B1/H2/D1 P010 keeps actual local ERAM times inside its score interval for all systems and time fits, reports availability with its scoped denominator and all input-health counters, and distinguishes measurement completion from qualification. Public reproduction has no FAA input; private per-flight evidence never enters the aggregate allowlist. Wrapper input/source/build/binary/archive identities, fresh outputs and resource caps are enforced, with partial failures preserved.
+- **OA-TRK-413** The reusable `oa-track` package has no direct normal Cargo dependency on the private
+  benchmark harness (`oa-bench`), simulator (`oa-sensorsim`), or sealed path guard (`oa-sealed`).
+  Scoring, fusion-study and simulator-backed command support lives in the separate shell package
+  `oa-track-tools`, which retains the `oa-track-run` and `oa-track-fusion` executable names and all
+  existing examples. Engine consumers retain the public tracker API; shell callers use
+  `oa-track-tools` for scoring helpers and the guarded adapter for filesystem-facing commands.
 
 - **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
   refused in every date syntax. Any input path the shared sealed list refuses (`oa-sealed`, OA-SEAL-001), and every file the run opens

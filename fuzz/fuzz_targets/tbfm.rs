@@ -17,7 +17,7 @@ thread_local! {
             oa_tbfm::DEFAULT_ROW_CAPACITY,
             oa_sealed::DropWindow::empty_for_tests_and_fuzz(),
         ),
-        sealed: oa_tbfm::new_rows(oa_tbfm::DEFAULT_ROW_CAPACITY, oa_sealed::DropWindow::sealed()),
+        sealed: oa_tbfm::new_rows(oa_tbfm::DEFAULT_ROW_CAPACITY, oa_sealed::sealed_drop_window()),
     });
 }
 
@@ -47,15 +47,15 @@ fuzz_target!(|data: &[u8]| {
                 )
             };
             // Oracle 1: no row the sealed decoder keeps has an observation time in the window.
-            let w = oa_sealed::DropWindow::sealed();
+            let w = oa_sealed::sealed_drop_window();
             for i in 0..oa_tbfm::rows_len(sealed) {
                 let r = oa_tbfm::row_at(sealed, i).expect("a row below the length");
-                assert!(!w.contains(r.msg_ms) && !w.contains(r.env_ms), "kept row in the window");
-                assert!(!w.contains(r.ctm_ms), "kept crossing time in the window");
+                assert!(!oa_time_window::contains(w, r.msg_ms) && !oa_time_window::contains(w, r.env_ms), "kept row in the window");
+                assert!(!oa_time_window::contains(w, r.ctm_ms), "kept crossing time in the window");
             }
             // The outcome's envelope time is a key too, whatever the rows are.
             if let Ok(o) = &b {
-                assert!(o.sealed_dropped > 0 || !w.contains(o.env_ms), "kept envelope time");
+                assert!(o.sealed_dropped > 0 || !oa_time_window::contains(w, o.env_ms), "kept envelope time");
             }
             // Oracle 2: a document the sealed decoder did not drop decodes as with no window.
             match &b {

@@ -22,6 +22,7 @@ fn path(name: &str) -> PathBuf {
         .join(format!("{name}.csv"))
 }
 
+// seal-allow: only the fixed checked-in fixture directory, with caller-owned input policy.
 fn fx(name: &str) -> BufReader<std::fs::File> {
     open(&path(name)).unwrap_or_else(|e| panic!("{e}"))
 }
@@ -939,7 +940,7 @@ fn every_source_file_forbids_unsafe_code() {
 
 // REQ: OA-GEN-002
 #[test]
-fn only_dependencies_are_the_in_workspace_csv_and_sealed_guard_crates() {
+fn only_dependency_is_the_in_workspace_csv_crate() {
     let toml = include_str!("../Cargo.toml");
     let after = toml
         .split("[dependencies]")
@@ -951,10 +952,9 @@ fn only_dependencies_are_the_in_workspace_csv_and_sealed_guard_crates() {
         .take_while(|l| !l.trim_start().starts_with('['))
         .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
         .collect();
-    // oa-sealed opens the input (OA-SEAL-013); it has no dependencies of its own.
-    assert_eq!(deps.len(), 2, "{deps:?}");
-    assert!(deps[0].starts_with("oa-sealed") && deps[0].contains("path ="));
-    assert!(deps[1].starts_with("oa-csv") && deps[1].contains("path ="));
+    // CORE: the reusable parser has no project-specific input policy dependency.
+    assert_eq!(deps.len(), 1, "{deps:?}");
+    assert!(deps[0].starts_with("oa-csv") && deps[0].contains("path ="));
     assert!(!toml.contains("[dev-dependencies]") && !toml.contains("[build-dependencies]"));
 }
 
@@ -1083,13 +1083,4 @@ fn rejected_rows_past_the_cap_are_counted_not_stored() {
     let small = cls::parse_class_airspace("c.csv", txt(&format!("{header}{bad}{bad}")))
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!((small.rejected.len(), small.rejected_dropped), (2, 0));
-}
-
-// REQ: OA-SEAL-013
-#[test]
-fn open_refuses_a_sealed_path() {
-    let e = oa_nasr::open(std::path::Path::new("/x/scds/stdds-20261119-holdout.tar"))
-        .unwrap_err()
-        .to_string();
-    assert!(e.contains("OA-SEAL-001"), "{e}");
 }

@@ -1,0 +1,38 @@
+[package]
+name = "oa-track-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# RULESET F1: these are project-owned offline harnesses/simulators, isolated in this shell package.
+oa-bench = { path = "../oa-bench" }
+oa-sensorsim = { path = "../oa-sensorsim" }
+oa-track = { path = "../oa-track" }
+oa-adsb = { path = "../oa-adsb" }
+oa-feed = { path = "../oa-feed" }
+oa-geo = { path = "../oa-geo" }
+oa-math = { path = "../oa-math" }
+oa-replay = { path = "../oa-replay" }
+oa-sealed = { path = "../oa-sealed" }
+oa-sha256 = { path = "../oa-sha256" }
+oa-truth = { path = "../oa-truth" }
+
+[[bin]]
+name = "oa-track-run"
+path = "src/main.rs"
+
+[[bin]]
+name = "oa-track-fusion"
+path = "src/fusion_main.rs"
+
+[package.metadata.openatca]
+class = "shell"
+
+[features]
+gate-trace = ["oa-track/gate-trace"]

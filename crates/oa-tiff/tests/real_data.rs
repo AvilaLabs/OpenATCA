@@ -222,7 +222,10 @@ fn real_tiles_registration_against_neighbours() {
 }
 
 fn outer_zip_entry(zip_path: &std::path::Path, name: &str) -> Vec<u8> {
-    let bytes = oa_zip::read_archive_file(zip_path).unwrap();
+    let bytes = oa_sealed::open(zip_path)
+        .map_err(oa_zip::ZipError::Io)
+        .and_then(oa_zip::read_archive)
+        .unwrap();
     let a = oa_zip::Archive::parse(&bytes).unwrap();
     a.extract(name).unwrap()
 }

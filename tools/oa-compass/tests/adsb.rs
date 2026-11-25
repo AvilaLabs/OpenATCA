@@ -564,7 +564,7 @@ fn all_mode_uses_the_scorers_split_code_with_halving_off_and_counts_what_it_remo
     ] {
         push_row(&mut r, t, 0x100001, |x| x.lat_e7 = lat * 1000);
     }
-    let (all, none, st) = oa_track::score::split_reports_with(&r, false);
+    let (all, none, st) = oa_track_tools::score::split_reports_with(&r, false);
     assert_eq!((reports_len(&all), reports_len(&none)), (5, 0));
     assert_eq!(
         (
@@ -576,7 +576,7 @@ fn all_mode_uses_the_scorers_split_code_with_halving_off_and_counts_what_it_remo
         (7, 2, 1, 2)
     );
     // The halving run removes the same copies and finds the same conflicts.
-    let (a, b, hs) = oa_track::score::split_reports(&r);
+    let (a, b, hs) = oa_track_tools::score::split_reports(&r);
     assert_eq!(reports_len(&a) + reports_len(&b), 5);
     assert_eq!(
         (hs.duplicates_removed, hs.conflict_groups),
@@ -630,7 +630,7 @@ fn the_data_source_file_lists_the_adsb_source_and_the_readme_states_dedup_basis_
         not_offered: 0,
         sealed_window_dropped: 0,
         positions: Vec::new(),
-        split: oa_track::score::SplitStats {
+        split: oa_track_tools::score::SplitStats {
             rows_in: 14,
             aircraft: 1,
             set_a: 10,
@@ -750,7 +750,7 @@ fn a_real_clip_goes_through_the_shared_dedup_into_both_files() {
     );
     // The gate counts are the tracker adapter's own, on the same reports.
     let clip_in = oa_bench::input::load_adsb(&clip).unwrap();
-    let (fed_set, _, _) = oa_track::score::split_reports_with(&clip_in.reports, false);
+    let (fed_set, _, _) = oa_track_tools::score::split_reports_with(&clip_in.reports, false);
     let (_, want) =
         oa_track::adsb::adsb_measurements(&fed_set, &oa_track::adsb::AdsbConfig::default());
     assert_eq!(info.gate, want, "gate counts differ from adsb_measurements");
@@ -1348,10 +1348,10 @@ fn the_file_keeps_reports_that_differ_only_in_nic_baro_sda_or_gva_the_scorers_ke
     });
     push_row(&mut r, 10.0, 0x100001, |x| x.nic_baro = 0);
     // The scorer's split is unchanged: one observation, four copies removed.
-    let (a, _, st) = oa_track::score::split_reports_with(&r, false);
+    let (a, _, st) = oa_track_tools::score::split_reports_with(&r, false);
     assert_eq!((reports_len(&a), st.duplicates_removed), (1, 4));
     // The file's key keeps the four that differ and removes the exact copy.
-    let (kept, _, st) = oa_track::score::split_reports_keyed(&r, false, export_key);
+    let (kept, _, st) = oa_track_tools::score::split_reports_keyed(&r, false, export_key);
     assert_eq!((reports_len(&kept), st.duplicates_removed), (4, 1));
     // They reach adsb.ast: four records.
     let (lay, _out) = layout("keyed", false);

@@ -15,6 +15,9 @@ workspace = true
 # The ADS-B clip reader is shell code in oa-truth; oa-track supplies the normalized adapter and
 # tracker. This crate is a shell-only offline replay façade (RULESET B3, F6).
 [dependencies]
+# Interval-based scoring configuration is offline shell tooling, moved out of the reusable tracker.
+# Keep this façade's existing measured-interval configuration through the shell package API.
+oa-track-tools = { path = "../oa-track-tools" }
 oa-truth = { path = "../oa-truth" }
 oa-track = { path = "../oa-track" }
 

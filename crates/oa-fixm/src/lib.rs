@@ -28,7 +28,7 @@ mod scalar;
 pub use decode::{classify_root, prescan, Decoder, RootClassification};
 pub use scalar::{parse_beacon, parse_hex24, parse_iso_ms, parse_scaled, parse_uuid};
 
-use oa_sealed::DropWindow;
+use oa_time_window::DropWindow;
 use std::fmt;
 
 /// The fields a row can carry, in bit order of [`Events::present`] and [`Events::errors`].
@@ -281,7 +281,8 @@ pub struct Limits {
 
 impl Limits {
     /// The default bounds, dropping messages timed in `window`. A tool passes
-    /// [`DropWindow::sealed`]; tests and fuzz targets pass [`DropWindow::empty_for_tests_and_fuzz`].
+    /// `oa_sealed::sealed_drop_window()`; tests and fuzz targets pass
+    /// [`DropWindow::empty_for_tests_and_fuzz`].
     pub const fn new(window: DropWindow) -> Limits {
         Limits {
             max_elements: 50_000,

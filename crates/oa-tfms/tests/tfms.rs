@@ -2303,7 +2303,7 @@ fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_dro
         }
     );
     // The production list: a message in the window is dropped, one outside it is kept.
-    let w = oa_sealed::DropWindow::sealed();
+    let w = oa_sealed::sealed_drop_window();
     let (r, rows, _) = decode_with_window(&stamped(&doc, "2026-11-21T00:00:00Z"), w);
     assert_eq!((r, rows), (Ok(sealed(1)), 0));
     let (r, rows, s) = decode_with_window(&doc, w);

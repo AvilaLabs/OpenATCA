@@ -1531,7 +1531,7 @@ fn a_window_that_holds_all_time_drops_every_document_and_the_production_list_dro
         }
     );
     // The production list.
-    let w = oa_sealed::DropWindow::sealed();
+    let w = oa_sealed::sealed_drop_window();
     let inside = rep(
         &base,
         issued,

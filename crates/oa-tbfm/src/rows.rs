@@ -11,7 +11,7 @@
 //! is its `NONE` constant and a code column is 0. A speed always carries its unit
 //! ([`spd_unit`]).
 
-use oa_sealed::DropWindow;
+use oa_time_window::DropWindow;
 
 /// A short ASCII name, zero-padded on the right; all zero means absent. Widths come from the
 /// longest value in the 12,760-message survey (docs/TBFM_SURVEY.md) plus headroom; a longer
@@ -274,7 +274,7 @@ pub struct Rows {
 pub const DEFAULT_ROW_CAPACITY: usize = 256;
 
 /// Allocates empty columns able to hold `cap` rows.
-/// A tool passes [`DropWindow::sealed`]; tests and fuzz targets pass
+/// A tool passes `oa_sealed::sealed_drop_window()`; tests and fuzz targets pass
 /// [`DropWindow::empty_for_tests_and_fuzz`].
 pub fn new_rows(cap: usize, window: DropWindow) -> Rows {
     fn v<T>(cap: usize) -> Vec<T> {

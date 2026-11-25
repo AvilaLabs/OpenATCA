@@ -108,7 +108,8 @@ digest_format() {
     local c="$1" canon main_rs has_flag=0
     # Not `git show | grep -q`: grep exits at the first match, git then dies of SIGPIPE, and under
     # pipefail the pipeline fails, which read a commit that has the flag as one without it.
-    main_rs="$(git -C "$repo" show "$c:crates/oa-track/src/main.rs" 2>/dev/null || true)"
+    main_rs="$(git -C "$repo" show "$c:crates/oa-track-tools/src/main.rs" 2>/dev/null ||
+        git -C "$repo" show "$c:crates/oa-track/src/main.rs" 2>/dev/null || true)"
     case "$main_rs" in *'"--digest"'*) has_flag=1 ;; esac
     if canon="$(git -C "$repo" show "$c:crates/oa-track/src/canon.rs" 2>/dev/null)"; then
         [ "$has_flag" = 1 ] || { echo half-way; return; }
@@ -198,9 +199,12 @@ build_and_run() {
     # A commit from before the digest flags existed gets the frozen overlay patch, but only
     # if it has neither the canonical module nor the flags; one with exactly one of them is a
     # half-way commit and is refused.
-    local has_canon=0 has_flag=0
+    local has_canon=0 has_flag=0 main_file="$wt/crates/oa-track/src/main.rs"
     git -C "$repo" cat-file -e "$commit:crates/oa-track/src/canon.rs" 2>/dev/null && has_canon=1
-    grep -q -- '"--digest"' "$wt/crates/oa-track/src/main.rs" && has_flag=1
+    if [ -f "$wt/crates/oa-track-tools/src/main.rs" ]; then
+        main_file="$wt/crates/oa-track-tools/src/main.rs"
+    fi
+    grep -q -- '"--digest"' "$main_file" && has_flag=1
     if [ "$has_canon" = 0 ] && [ "$has_flag" = 0 ]; then
         "$here/replay_overlay_apply.sh" "$wt" "$commit" "$here/replay_compare_overlay.patch" \
             "$outdir/overlay-$label.txt" 2>"$outdir/overlay-$label.err" ||
@@ -209,12 +213,16 @@ build_and_run() {
     elif [ "$has_canon" != "$has_flag" ]; then
         die "$commit has the canonical module or the --digest flag but not both (half-way commit); refusing"
     fi
-    echo "$label: building $commit" >&2
+    local track_package=oa-track
+    if git -C "$wt" cat-file -e HEAD:crates/oa-track-tools/src/main.rs 2>/dev/null; then
+        track_package=oa-track-tools
+    fi
+    echo "$label: building $commit ($track_package)" >&2
     (
         cd "$wt"
         "${guard[@]}" "${clean_env_prefix[@]}" CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS" \
             CARGO_TARGET_DIR="$tgt" cargo "+$toolchain" build --release --locked \
-            --config 'build.rustflags=[]' -p oa-track --bin oa-track-run >"$outdir/build-$label.log" 2>&1
+            --config 'build.rustflags=[]' -p "$track_package" --bin oa-track-run >"$outdir/build-$label.log" 2>&1
     ) || die "build of $commit failed (see $outdir/build-$label.log)"
     echo "$label: running" >&2
     mkdir -p "$scratch/run-$label"

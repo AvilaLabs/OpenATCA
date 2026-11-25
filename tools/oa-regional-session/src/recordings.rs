@@ -411,7 +411,7 @@ pub fn adapt_recorded_frames(
         ..XmlLimits::default()
     })
     .map_err(|_| AdapterError::UnsupportedEvent)?;
-    let mut fixm_limits = FixmLimits::new(oa_sealed::DropWindow::sealed());
+    let mut fixm_limits = FixmLimits::new(oa_sealed::sealed_drop_window());
     fixm_limits.max_elements = 262_144;
     let mut sfdps_decoder = Decoder::new(fixm_limits);
     let mut next_surveillance_sequence = 0u64;

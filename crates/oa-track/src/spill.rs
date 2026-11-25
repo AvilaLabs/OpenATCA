@@ -5,7 +5,7 @@
 //! (little-endian, the bytes [`crate::types::output_hash_into`] hashes, column after column), so
 //! the digest of the run is the same as the digest of the same rows held in memory, computed at
 //! the end by reading the files back in the digest's order. Scoring reads back only the columns
-//! it needs, in blocks, one address range at a time (`crate::score::RowSource`).
+//! it needs, in blocks, one address range at a time (`oa-track-tools::score::RowSource`).
 //!
 //! # What it touches
 //!

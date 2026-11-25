@@ -10,9 +10,13 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-# Workspace crate, not an outside dependency (RULESET F1): the drop window type the decoder takes, and the guard the tests read through.
-oa-sealed = { path = "../oa-sealed" }
+# The pure half-open window value passed to the decoder.
+oa-time-window = { path = "../oa-time-window" }
 oa-xml = { path = "../oa-xml" }
+
+[dev-dependencies]
+# Tests, examples and real-data fixtures exercise the private hold-out guard.
+oa-sealed = { path = "../oa-sealed" }
 
 [package.metadata.openatca]
 class = "shell"

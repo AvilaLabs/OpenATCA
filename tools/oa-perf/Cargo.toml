@@ -16,6 +16,8 @@ oa-math = { path = "../../crates/oa-math" }
 oa-sealed = { path = "../../crates/oa-sealed" }
 oa-sensorsim = { path = "../../crates/oa-sensorsim" }
 oa-track = { path = "../../crates/oa-track" }
+# RULESET F1: synthetic fusion benchmarks live in the private tool package.
+oa-track-tools = { path = "../../crates/oa-track-tools" }
 oa-truth = { path = "../../crates/oa-truth" }
 
 [[bin]]

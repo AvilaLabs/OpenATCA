@@ -10,8 +10,7 @@ authors.workspace = true
 workspace = true
 
 [dependencies]
-# Workspace crate, not an outside dependency (RULESET F1): the sealed hold-out guard every input path is opened through.
-oa-sealed = { path = "../oa-sealed" }
+# Workspace CSV parser; no project-specific input policy in the reusable library.
 oa-csv = { path = "../oa-csv" }
 
 [package.metadata.openatca]

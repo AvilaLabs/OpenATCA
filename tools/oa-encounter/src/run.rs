@@ -13,11 +13,11 @@ use oa_encounter::{
 };
 use oa_sha256::{sha256, to_hex};
 use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig};
-use oa_track::score::{interval_stats, scoring_config, split_reports, IntervalStats};
 use oa_track::{
     output_clear, output_len, output_new, tracker_advance, tracker_flush, tracker_new,
     tracker_update, Measurement, TrackOutput, TrackerConfig, DEFAULT_CONFIG, O_HAS_ALT, O_TICK,
 };
+use oa_track_tools::score::{interval_stats, scoring_config, split_reports, IntervalStats};
 
 use crate::args::Args;
 use crate::join::{answer_queries_counted, join_text, observe, timeline, Query, Sfdps, STABLE_NS};
@@ -222,7 +222,10 @@ pub fn track_and_record(
 
 /// The public airports of an NASR CSV archive (`APT_BASE.csv`: site type airport, public use).
 pub fn load_airports(path: &std::path::Path) -> Result<Vec<Airport>, String> {
-    let bytes = oa_zip::read_archive_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let bytes = oa_sealed::open(path)
+        .map_err(oa_zip::ZipError::Io)
+        .and_then(oa_zip::read_archive)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     let zip = oa_zip::Archive::parse(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     let csv = zip
         .extract("APT_BASE.csv")

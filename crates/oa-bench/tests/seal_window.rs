@@ -95,8 +95,8 @@ fn the_frame_walker_passes_no_frame_with_a_row_in_a_sealed_window() {
 fn the_reader_builds_every_decoder_with_the_sealed_window_as_its_drop_window() {
     let r = oa_bench::ingest::new_reader().unwrap();
     for w in r.drop_windows() {
-        assert_eq!(w, oa_sealed::DropWindow::sealed());
-        assert_eq!(w.span(), oa_sealed::sealed_window_ms());
+        assert_eq!(w, oa_sealed::sealed_drop_window());
+        assert_eq!(oa_time_window::span(w), oa_sealed::sealed_window_ms());
     }
 }
 

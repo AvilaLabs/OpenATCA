@@ -16,7 +16,7 @@ use crate::gen::{Layout, TrafficCfg};
 use crate::stats::{fmt_f, Kv};
 use crate::sys::{cpu_model, loadavg, nproc};
 use oa_track::fusion_params::MAX_ASSOC_TRACKS;
-use oa_track::fusion_score::EPOCH_NS;
+use oa_track_tools::fusion_score::EPOCH_NS;
 
 /// Seconds past the end of the run that the traffic is generated for.
 const HORIZON_PAD_S: i64 = 60;
