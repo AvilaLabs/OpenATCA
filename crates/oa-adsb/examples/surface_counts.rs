@@ -585,7 +585,10 @@ fn position_csv_source_index_map() -> String {
     map
 }
 
-fn parse_position_csv_args(flag: Option<&str>, path: Option<&str>) -> Result<Option<&str>, String> {
+fn parse_position_csv_args<'a>(
+    flag: Option<&str>,
+    path: Option<&'a str>,
+) -> Result<Option<&'a str>, String> {
     match (flag, path) {
         (None, None) => Ok(None),
         (Some("--position-csv"), Some(path)) if !path.is_empty() => Ok(Some(path)),
