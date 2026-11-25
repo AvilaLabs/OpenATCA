@@ -282,7 +282,6 @@ fn read_samples(path: &Path) -> Result<Vec<Sample>, String> {
             path.display()
         ));
     }
-    // seal-allow: reads the p002 output file named on the command line, after the sealed-path check
     let mut text = String::new();
     file.take(MAX_SAMPLES_FILE_BYTES + 1)
         .read_to_string(&mut text)

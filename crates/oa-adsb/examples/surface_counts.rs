@@ -989,6 +989,7 @@ fn render_output(
 
 fn create_new(path: &Path) -> Result<File, String> {
     oa_sealed::refuse(path)?;
+    // seal-allow: write-only count output after the path check; create_new neither reads nor overwrites existing data
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
