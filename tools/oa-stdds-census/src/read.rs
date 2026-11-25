@@ -17,6 +17,10 @@ use std::convert::Infallible;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+/// Distinct minute keys retained for one airport's surface series.
+/// One UTC day needs 1,440 buckets; C7 bounds each insertion search to this fixed limit.
+pub const MAX_SURFACE_MINUTE_KEYS: usize = 1_440;
+
 /// What the read saw, in counts.
 // A7.2: cold struct, size guard waived
 #[derive(Debug)]
@@ -41,6 +45,94 @@ pub struct ReadStats {
     pub stats: Stats,
     /// Message frames dropped because their time is in a sealed window (OA-SEAL-014).
     pub sealed_window_dropped: u64,
+    /// KORD SMES Cat11 position reports, aggregated by Unix minute only. No track values or
+    /// identifiers are retained. The table is bounded to one day's worth of distinct minutes.
+    pub kord_surface: KordSurfaceCounts,
+    /// Message frames returned by the frame reader, whether sealed or parsed.
+    pub message_frames_seen: u64,
+    /// Message frames passed to the XML parser.
+    pub message_frames_parsed: u64,
+    /// Message frames intentionally omitted by receive-time sealed-window filtering.
+    pub message_frames_sealed: u64,
+    /// Non-message frames returned by the frame reader, including sealed ones.
+    pub nonmessage_frames_seen: u64,
+    /// Damaged frame events returned by the frame reader.
+    pub damaged_frame_events: u64,
+    /// An incomplete final frame observed at end-of-stream.
+    pub unfinished_frames: u64,
+}
+
+/// Counts-only KORD surface message summary. The minute table is capped at
+/// [`MAX_SURFACE_MINUTE_KEYS`] entries; reports
+/// for further distinct minutes are counted in `minute_overflow` rather than retained.
+// A7.2: cold struct, size guard waived
+#[derive(Debug, Default)]
+pub struct KordSurfaceCounts {
+    pub reports: u64,
+    pub smes_rows_without_airport_code: u64,
+    pub smes_rows_with_other_airport_code: u64,
+    pub untimed_reports: u64,
+    /// Reports whose distinct minute key was not retained after the table reached capacity.
+    pub minute_overflow: u64,
+    pub by_unix_minute: Vec<(i64, u64)>,
+}
+
+/// Whether nonempty input was fully settled and every potential KORD row can be attributed and
+/// binned. Parser refusals, unknown airport codes, untimed rows, overflow or damaged, sealed,
+/// truncated, stalled or budgeted input make the surface result explicitly incomplete.
+pub fn surface_result_complete(rs: &ReadStats) -> bool {
+    rs.message_frames_parsed
+        .checked_add(rs.message_frames_sealed)
+        .is_some_and(|n| n == rs.message_frames_seen)
+        && !rs.over_budget
+        && rs.stalled_bytes == 0
+        && rs.damaged_frame_events == 0
+        && rs.unfinished_frames == 0
+        && rs.files_gzip_damaged == 0
+        && rs.files_gzip_truncated == 0
+        && rs.sealed_window_dropped == 0
+        && rs.refused.iter().all(|n| *n == 0)
+        && rs.files > 0
+        && rs.message_frames_seen > 0
+        && rs.kord_surface.untimed_reports == 0
+        && rs.kord_surface.minute_overflow == 0
+        && rs.kord_surface.smes_rows_without_airport_code == 0
+}
+
+fn observe_kord_surface(
+    counts: &mut KordSurfaceCounts,
+    airport: Option<[u8; 8]>,
+    time_ms: Option<i64>,
+) {
+    match airport {
+        None => counts.smes_rows_without_airport_code += 1,
+        Some(code) if code != *b"KORD\0\0\0\0" => counts.smes_rows_with_other_airport_code += 1,
+        Some(_) => {
+            counts.reports += 1;
+            let Some(minute) = time_ms.map(|ms| ms.div_euclid(60_000)) else {
+                counts.untimed_reports += 1;
+                return;
+            };
+            if let Some((_, n)) = counts.by_unix_minute.iter_mut().find(|(m, _)| *m == minute) {
+                *n += 1;
+            } else if counts.by_unix_minute.len() < MAX_SURFACE_MINUTE_KEYS {
+                counts.by_unix_minute.push((minute, 1));
+            } else {
+                counts.minute_overflow += 1;
+            }
+        }
+    }
+}
+
+fn observe_surface_message(counts: &mut KordSurfaceCounts, message: &Message) {
+    let Message::Smes(smes) = message else {
+        return;
+    };
+    let airport = smes.airport_present.then_some(smes.airport);
+    for record in &smes.records {
+        let has_time = record.present & oa_stdds::smes::smes_bit(oa_stdds::SmesField::Time) != 0;
+        observe_kord_surface(counts, airport, has_time.then_some(record.time_ms));
+    }
 }
 
 struct Ctx<'a> {
@@ -48,6 +140,7 @@ struct Ctx<'a> {
     limits: Limits,
     census: &'a mut Census,
     rs: ReadStats,
+    surface_only: bool,
     /// Decides the damaged frames of the file being read (see [`oa_sealed::DamagedGate`]).
     gate: oa_sealed::DamagedGate,
 }
@@ -69,6 +162,13 @@ impl ReadStats {
             over_budget: false,
             stats: new_stats(),
             sealed_window_dropped: 0,
+            kord_surface: KordSurfaceCounts::default(),
+            message_frames_seen: 0,
+            message_frames_parsed: 0,
+            message_frames_sealed: 0,
+            nonmessage_frames_seen: 0,
+            damaged_frame_events: 0,
+            unfinished_frames: 0,
         }
     }
 }
@@ -88,11 +188,19 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
         // its own, so the good frames either side of it decide whether it is damage or a drop.
         match &ev {
             Ok(f) => {
+                if f.kind == FrameKind::Message {
+                    ctx.rs.message_frames_seen += 1;
+                } else {
+                    ctx.rs.nonmessage_frames_seen += 1;
+                }
                 let (kept, gone) = ctx.gate.good(f.recv_unix_ns);
                 ctx.rs.bad_frames += kept;
                 ctx.rs.sealed_window_dropped += gone;
             }
-            Err(_) => ctx.gate.damaged(),
+            Err(_) => {
+                ctx.rs.damaged_frame_events += 1;
+                ctx.gate.damaged();
+            }
         }
         match ev {
             // A frame of any kind (Status and Reject included) received in a sealed window is
@@ -100,9 +208,13 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
             Ok(f) if oa_sealed::in_sealed_window(f.recv_unix_ns) => {
                 // A frame whose time is in a sealed window is dropped and counted, never parsed.
                 ctx.rs.sealed_window_dropped += 1;
+                if f.kind == FrameKind::Message {
+                    ctx.rs.message_frames_sealed += 1;
+                }
                 oa_sealed::note_window_drops(1);
             }
             Ok(f) if f.kind == FrameKind::Message => {
+                ctx.rs.message_frames_parsed += 1;
                 let before = ctx.rs.stats.sealed_window_dropped;
                 let parsed =
                     parse_message(&mut ctx.parser, f.payload, &ctx.limits, &mut ctx.rs.stats);
@@ -113,15 +225,25 @@ fn drain(reader: &mut FrameReader<'_>, ctx: &mut Ctx<'_>) {
                     continue;
                 }
                 ctx.rs.frames += 1;
+                if let Ok(message) = &parsed {
+                    observe_surface_message(&mut ctx.rs.kord_surface, message);
+                }
                 match parsed {
                     Ok(Message::Tais(m)) => {
                         ctx.rs.tais_messages += 1;
                         let src = if m.src_present { m.src } else { [0; 8] };
                         for r in &m.records {
                             ctx.rs.tais_records += 1;
-                            ctx.census.observe(src, r);
+                            if !ctx.surface_only {
+                                ctx.census.observe(src, r);
+                            }
                         }
-                        ctx.rs.over_budget |= ctx.census.over_budget();
+                        if !ctx.surface_only {
+                            ctx.rs.over_budget |= ctx.census.over_budget();
+                        }
+                    }
+                    Ok(Message::Smes(_)) => {
+                        ctx.rs.other_messages += 1;
                     }
                     Ok(_) => ctx.rs.other_messages += 1,
                     Err(e) => {
@@ -194,6 +316,7 @@ fn read_stream<R: Read>(mut src: R, ctx: &mut Ctx<'_>) -> std::io::Result<()> {
     }
     drain(&mut reader, ctx);
     if reader.finish().is_some() {
+        ctx.rs.unfinished_frames += 1;
         ctx.gate.damaged();
     }
     ctx.rs.sealed_window_dropped += ctx.gate.finish();
@@ -323,6 +446,23 @@ pub fn read_dir_counted(
     census: &mut Census,
     dropped: &mut u64,
 ) -> Result<ReadStats, ReadError> {
+    read_dir_mode(g, dir, census, dropped, false)
+}
+
+/// Reads a recording for surface counts only. TAIS rows are counted as parsed input but do not
+/// enter the bounded TAIS census, so its independent memory budget cannot truncate this scan.
+pub fn read_dir_surface(g: &Sealed, dir: &Path, dropped: &mut u64) -> Result<ReadStats, ReadError> {
+    let mut census = Census::new();
+    read_dir_mode(g, dir, &mut census, dropped, true)
+}
+
+fn read_dir_mode(
+    g: &Sealed,
+    dir: &Path,
+    census: &mut Census,
+    dropped: &mut u64,
+    surface_only: bool,
+) -> Result<ReadStats, ReadError> {
     let files = recording_files_in(g, dir)?;
     let parser = Parser::new(XmlLimits::default())
         .map_err(|e| ReadError::Failed(format!("xml parser: {e:?}")))?;
@@ -331,6 +471,7 @@ pub fn read_dir_counted(
         limits: read_limits(),
         census,
         rs: ReadStats::new(),
+        surface_only,
         gate: oa_sealed::DamagedGate::new(),
     };
     for f in &files {
@@ -367,11 +508,120 @@ pub fn read_bytes(bytes: &[u8], census: &mut Census) -> Result<ReadStats, String
         limits: read_limits(),
         census,
         rs: ReadStats::new(),
+        surface_only: false,
         gate: oa_sealed::DamagedGate::new(),
     };
     read_stream(bytes, &mut ctx).map_err(|e| format!("cannot read: {e}"))?;
     ctx.rs.sealed_window_dropped += ctx.rs.stats.sealed_window_dropped;
     Ok(ctx.rs)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
+mod surface_tests {
+    use super::*;
+    use oa_stdds::{SmesMessage, SmesRecord, TaisMessage};
+
+    fn record(time_ms: Option<i64>) -> SmesRecord {
+        SmesRecord {
+            present: time_ms.map_or(0, |_| oa_stdds::smes::smes_bit(oa_stdds::SmesField::Time)),
+            errors: 0,
+            invalidated: 0,
+            present_empty: 0,
+            offset: 0,
+            time_ms: time_ms.unwrap_or(0),
+            lat_e7: 0,
+            lon_e7: 0,
+            altitude_ft: 0,
+            heading_cdeg: 0,
+            speed_cmps: 0,
+            vx_cmps: 0,
+            vy_cmps: 0,
+            vvert_ftmin: 0,
+            seq_num: 0,
+            track_num: 0,
+            mode_s_addr: 0,
+            mode3a: 0,
+            aircraft_id: [0; 8],
+            ac_type: [0; 8],
+            runway: [0; 8],
+            tgt_type: [0; 8],
+        }
+    }
+
+    fn smes(airport: Option<[u8; 8]>, records: Vec<SmesRecord>) -> Message {
+        let (airport, airport_present) = airport.map_or(([0; 8], false), |a| (a, true));
+        Message::Smes(SmesMessage {
+            airport,
+            airport_present,
+            records,
+            errors: Vec::new(),
+            errors_dropped: 0,
+            unknown_elements: 0,
+        })
+    }
+
+    // REQ: OA-CEN-024
+    #[test]
+    fn surface_counts_select_kord_smes_and_reconcile_missing_time_and_overflow() {
+        let mut c = KordSurfaceCounts::default();
+        observe_surface_message(
+            &mut c,
+            &Message::Tais(TaisMessage {
+                src: [0; 8],
+                src_present: false,
+                records: Vec::new(),
+                errors: Vec::new(),
+                errors_dropped: 0,
+                unknown_elements: 0,
+            }),
+        );
+        observe_surface_message(
+            &mut c,
+            &smes(
+                Some(*b"KORD\0\0\0\0"),
+                vec![record(Some(60_000)), record(Some(61_000)), record(None)],
+            ),
+        );
+        observe_surface_message(
+            &mut c,
+            &smes(Some(*b"KMDW\0\0\0\0"), vec![record(Some(90_000))]),
+        );
+        observe_surface_message(&mut c, &smes(None, vec![record(Some(90_000))]));
+
+        let mut overflow = KordSurfaceCounts::default();
+        for minute in 0..(MAX_SURFACE_MINUTE_KEYS + 2) {
+            observe_kord_surface(
+                &mut overflow,
+                Some(*b"KORD\0\0\0\0"),
+                Some(i64::try_from(minute).unwrap() * 60_000),
+            );
+        }
+        let binned = overflow.by_unix_minute.iter().map(|(_, n)| *n).sum::<u64>();
+
+        assert_eq!(c.reports, 3);
+        assert_eq!(c.untimed_reports, 1);
+        assert_eq!(c.smes_rows_with_other_airport_code, 1);
+        assert_eq!(c.smes_rows_without_airport_code, 1);
+        assert_eq!(c.by_unix_minute, [(1, 2)]);
+        assert_eq!(
+            overflow.reports,
+            binned + overflow.untimed_reports + overflow.minute_overflow
+        );
+        assert_eq!(overflow.by_unix_minute.len(), MAX_SURFACE_MINUTE_KEYS);
+        assert_eq!(overflow.minute_overflow, 2);
+
+        let mut verdict = ReadStats::new();
+        assert!(!surface_result_complete(&verdict));
+        verdict.files = 1;
+        verdict.message_frames_seen = 1;
+        verdict.message_frames_parsed = 1;
+        assert!(surface_result_complete(&verdict));
+        verdict.kord_surface = c;
+        assert!(!surface_result_complete(&verdict));
+        verdict.kord_surface = overflow;
+        assert!(!surface_result_complete(&verdict));
+    }
 }
 
 #[cfg(test)]

@@ -55,6 +55,45 @@ first). The output is counts and distributions only.
 No position, address, code, callsign or per-aircraft time of a real aircraft is printed; the only
 text taken from the data is the facility source id.
 
+## KORD ASDE-X surface counts
+
+Use the separate `--surface-only` mode for counts-only surface reference from `SMES` / ASDE-X Cat11
+`asdexMsg/positionReport` records whose message-level `airport` is exactly `KORD`. It prints
+their total, rows without a readable `time`, and rows per UTC Unix-minute. At most 1,440 distinct
+minute keys are retained; reports for further distinct minutes increment the named overflow-row
+counter rather than being retained. Parser-kind totals, SMES field errors and airport-code
+counters are explicitly all-facility; they are not a KORD denominator. Whole-message refusals
+cannot reliably be assigned to KORD when airport decoding failed. The report reconciles
+message frames seen with parse attempts and receive-time sealed frames, shows other/damaged/unfinished
+frame counts, whole-message refusals, gzip damage/truncation and the census budget state, and gives
+both input-accounting and COMPLETE/INCOMPLETE verdicts. COMPLETE requires a nonempty read with no
+parser refusal, unknown airport-code rows, untimed KORD rows, unretained minute rows, sealed drops,
+frame/gzip damage, truncation, stalls or budget stop. A failed open/read emits no report and exits
+3; a successfully read but incomplete source emits an INCOMPLETE report and exits 3. This mode
+does not build the TAIS census, so TAIS record or memory caps cannot truncate the surface scan.
+
+For the 24 November baseline and the recovery capture, prepare immutable input snapshots in the
+private tree. The baseline snapshot should contain the closed files for 00:00–07:53Z. The recovery
+snapshot should contain only closed files through a recorded cutoff; exclude the currently open
+recording segment and leave the capture running. Verify snapshot membership and file sizes stay
+fixed during each run. A COMPLETE verdict applies only to the snapshot contents, not to the whole
+live capture or to the gap between windows. Run at the repository root under the workspace memory
+guard; `read_dir_surface` applies `Sealed::production()` to the provided directory and every
+traversed/opened file. Keep resulting reports in the private tree:
+
+```
+env -u RUST_MIN_STACK systemd-run --scope --user -p MemoryMax=6G -p MemorySwapMax=0 --setenv=CARGO_BUILD_JOBS=2 --setenv=MALLOC_ARENA_MAX=1 cargo +1.89.0 run --offline -p oa-stdds-census -- /home/connoravila/Documents/Avila-Labs/openatca-private/agent-plan-20261124/ord-baseline-snapshot --surface-only > /home/connoravila/Documents/Avila-Labs/openatca-private/agent-plan-20261124/ord-stdds-baseline.txt
+env -u RUST_MIN_STACK systemd-run --scope --user -p MemoryMax=6G -p MemorySwapMax=0 --setenv=CARGO_BUILD_JOBS=2 --setenv=MALLOC_ARENA_MAX=1 cargo +1.89.0 run --offline -p oa-stdds-census -- /home/connoravila/Documents/Avila-Labs/openatca-private/agent-plan-20261124/ord-recovery-closed-snapshot --surface-only > /home/connoravila/Documents/Avila-Labs/openatca-private/agent-plan-20261124/ord-stdds-recovery.txt
+```
+
+These counts do not establish when an operational outage started or ended. A capture-directory
+gap or absence of a product is evidence about the recording/product only. The parser types
+`SMES` Cat11 `positionReport` as the ASDE-X surface-track output; TAIS is a separate STARS terminal
+radar product. Cat10 ASDE-X `adsbReport` and `mlatReport` are currently classified only, so the
+tool cannot attribute those report rows to KORD or place them on a time series. The per-kind totals
+therefore cannot substitute for the KORD Cat11 time series or establish that surface radar was
+operationally unavailable.
+
 ## The census
 
 Per update, split by the flag (true, false, absent; absent is never counted as false):

@@ -18,13 +18,15 @@ fn budget() -> u64 {
         .unwrap_or(DEFAULT_BUDGET)
 }
 use oa_stdds_census::guard::{is_refusal, refuse_sealed};
-use oa_stdds_census::read::{read_dir_counted, ReadError};
-use oa_stdds_census::report::render;
+use oa_stdds_census::read::{
+    read_dir_counted, read_dir_surface, surface_result_complete, ReadError,
+};
+use oa_stdds_census::report::{render, render_surface};
 use oa_stdds_census::xcheck::{build, estimate_build_bytes, Params, Window};
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: oa-stdds-census DIR [--from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft N] [--max-gap-s S]]\n  with --adsb the census also compares the updates' positions with ADS-B; the horizontal gate N\n  (default 1 NM) is tried with 0.5 and 2 as well, the vertical gate defaults to 500 ft; --max-gap-s (default 5) is the widest gap between two ADS-B reports that is interpolated;\n  --from/--to restrict both sides to a time of the UTC day, in seconds; the run is refused\n  if its memory estimate is above 4 GB";
+const USAGE: &str = "usage: oa-stdds-census DIR [--surface-only | --from S --to S] [--adsb CLIP.oaf [--gate-nm N] [--gate-ft N] [--max-gap-s S]]\n  --surface-only reads every frame without building the TAIS census and prints KORD SMES Cat11 counts;\n  do not combine it with --from/--to, --adsb, --gate-nm, --gate-ft or --max-gap-s. The report prints\n  accounting and COMPLETE/INCOMPLETE verdicts; an incomplete read exits 3.\n  With --adsb the regular TAIS census also compares update positions with ADS-B. --from/--to\n  restrict its time-of-day window; the memory estimate may refuse runs above 4 GB.";
 
 /// Whether `g` is a whole number of seconds whose milliseconds fit in an `i64`.
 fn whole_seconds(g: f64) -> bool {
@@ -47,6 +49,8 @@ fn main() -> ExitCode {
     let mut params = Params::default();
     let (mut from, mut to) = (None, None);
     let mut gate_given = false;
+    let mut surface_only = false;
+    let mut comparison_option_given = false;
     let mut it = rest.iter();
     while let Some(flag) = it.next() {
         // Only finite numbers are taken (NaN and infinity are a usage error).
@@ -55,14 +59,19 @@ fn main() -> ExitCode {
                 .filter(|x| x.is_finite())
         };
         match flag.as_str() {
+            "--surface-only" => surface_only = true,
             "--adsb" => match it.next() {
-                Some(v) => clip = Some(v),
+                Some(v) => {
+                    clip = Some(v);
+                    comparison_option_given = true;
+                }
                 None => return usage(),
             },
             "--gate-nm" => match num(it.next()) {
                 Some(g) => {
                     params = params.with_primary_gate_nm(g);
                     gate_given = true;
+                    comparison_option_given = true;
                 }
                 None => return usage(),
             },
@@ -70,27 +79,38 @@ fn main() -> ExitCode {
                 Some(g) => {
                     params.v_gate_ft = g;
                     gate_given = true;
+                    comparison_option_given = true;
                 }
                 None => return usage(),
             },
             "--max-gap-s" => match num(it.next()) {
                 Some(g) if g > 0.0 && g <= 30.0 => {
                     params.max_gap_ms = (g * 1000.0).round() as i64;
+                    comparison_option_given = true;
                 }
                 _ => return usage(),
             },
             // A window bound is whole seconds that fit in milliseconds as an i64; a fractional or
             // larger one is a usage error, not truncated or saturated.
             "--from" => match num(it.next()).filter(|g| whole_seconds(*g)) {
-                Some(g) => from = Some(g as i64),
+                Some(g) => {
+                    from = Some(g as i64);
+                    comparison_option_given = true;
+                }
                 None => return usage(),
             },
             "--to" => match num(it.next()).filter(|g| whole_seconds(*g)) {
-                Some(g) => to = Some(g as i64),
+                Some(g) => {
+                    to = Some(g as i64);
+                    comparison_option_given = true;
+                }
                 None => return usage(),
             },
             _ => return usage(),
         }
+    }
+    if surface_only && comparison_option_given {
+        return usage();
     }
     if gate_given && clip.is_none() {
         eprintln!("oa-stdds-census: --gate-nm and --gate-ft need --adsb");
@@ -114,6 +134,31 @@ fn main() -> ExitCode {
         }
     }
     let t0 = std::time::Instant::now();
+    if surface_only {
+        let mut read_dropped = 0u64;
+        let read = read_dir_surface(Sealed::production(), Path::new(dir), &mut read_dropped);
+        drops.add(read_dropped);
+        let rs = match read {
+            Ok(rs) => rs,
+            Err(e @ (ReadError::Refused(_) | ReadError::Layout(_))) => {
+                eprintln!("oa-stdds-census: refused: {e}");
+                return ExitCode::from(2);
+            }
+            Err(e) => {
+                eprintln!(
+                    "oa-stdds-census: {e}; surface count is INCOMPLETE and no report is emitted"
+                );
+                return ExitCode::from(3);
+            }
+        };
+        print!("{}", render_surface(&rs));
+        eprintln!("run time {:.1} s", t0.elapsed().as_secs_f64());
+        return if surface_result_complete(&rs) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(3)
+        };
+    }
     let mut clip_sealed = 0u64;
     let index = match clip {
         Some(c) => {

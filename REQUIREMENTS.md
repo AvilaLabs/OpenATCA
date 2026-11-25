@@ -6428,6 +6428,17 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-CEN-023** An update whose `mrtTime` lies outside the ADS-B clip's time span is counted, per flag, as "outside the
   ADS-B clip", never as no candidate or no ADS-B, and not checked; the run goes on. Exit 2 stays for no overlap at all.
   The spans are printed to the second.
+- **OA-CEN-024** `--surface-only` scans an immutable STDDS input snapshot without accumulating the TAIS census. It
+  counts SMES Cat11 `asdexMsg/positionReport` rows only when the parsed message airport is exactly `KORD`, and
+  reports their parser-UTC Unix-minute counts. Minute storage is bounded by a named 1,440-key one-day capacity;
+  reports whose key cannot be retained, unreadable times, unreadable airport codes, whole-message refusals,
+  damaged/unfinished frames, sealed drops, gzip damage/truncation, reader stalls and budget stops have named
+  counters. Parser-kind and SMES field-error counts are explicitly all-facility. The report reconciles message
+  frames seen with parse attempts and receive-time sealed frames and gives an explicit COMPLETE/INCOMPLETE
+  verdict; COMPLETE requires nonempty input with no omitted, unassignable, untimed or refused input. Only the
+  SMES Cat11 output is airport- and time-attributable; TAIS is a separate STARS product and Cat10 ASDE-X reports
+  remain classification-only. This output is counts-only, guarded by OA-SEAL-001, and makes no inference that
+  product absence or a capture gap establishes operational outage start or resumption.
 
 
 ## Sealed hold-out guard (oa-sealed, tools/sealed_guard.py)

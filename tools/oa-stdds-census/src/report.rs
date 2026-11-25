@@ -10,7 +10,8 @@ use crate::hist::{Hist, COARSE_BINS};
 use crate::read::ReadStats;
 use crate::xcheck::{source_names, Params, OUTCOME_NAMES};
 use crate::xcres::{addr_range, cidx, second_span, XcGroup, GAP_NAMES, MIN_CELL_N, Q_NAMES};
-use oa_stdds::STD_ERROR_NAMES;
+use oa_stdds::SMES_FIELD_NAMES;
+use oa_stdds::{KIND_COUNT, KIND_NAMES, STD_ERROR_NAMES};
 use oa_truth::REMOVE_NAMES;
 use std::fmt::Write;
 
@@ -561,6 +562,52 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
     for (name, c) in STD_ERROR_NAMES.iter().zip(&rs.refused) {
         let _ = writeln!(o, "refused whole, {name}: {c}");
     }
+    let _ = writeln!(o, "== surface reference: SMES / ASDE-X ==");
+    let _ = writeln!(
+        o,
+        "message counts by parser kind (all facilities; not KORD-specific):"
+    );
+    for ix in 0..KIND_COUNT {
+        if let Some(name) = KIND_NAMES.get(ix) {
+            let n = rs.stats.kinds.get(ix).copied().unwrap_or(0);
+            let _ = writeln!(o, "  {name}: {n}");
+        }
+    }
+    let _ = writeln!(o, "SMES field refusal counts (all airports):");
+    for (name, n) in SMES_FIELD_NAMES.iter().zip(&rs.stats.smes_errors) {
+        let _ = writeln!(o, "  {name}: {n}");
+    }
+    let _ = writeln!(
+        o,
+        "KORD SMES Cat11 positionReport rows: {}",
+        rs.kord_surface.reports
+    );
+    let _ = writeln!(
+        o,
+        "  SMES rows without readable airport code (all facilities): {}",
+        rs.kord_surface.smes_rows_without_airport_code
+    );
+    let _ = writeln!(
+        o,
+        "  SMES rows with another airport code (all facilities): {}",
+        rs.kord_surface.smes_rows_with_other_airport_code
+    );
+    let _ = writeln!(
+        o,
+        "  rows without readable time: {}",
+        rs.kord_surface.untimed_reports
+    );
+    let _ = writeln!(
+        o,
+        "  rows with unretained minutes after key cap {}: {}",
+        crate::read::MAX_SURFACE_MINUTE_KEYS,
+        rs.kord_surface.minute_overflow
+    );
+    let mut minutes = rs.kord_surface.by_unix_minute.clone();
+    minutes.sort_unstable_by_key(|(minute, _)| *minute);
+    for (minute, n) in minutes {
+        let _ = writeln!(o, "  unix_minute {minute}: {n}");
+    }
     let flagged = g.ids[0].n + g.ids[1].n;
     for (name, c) in FLAG_NAMES.iter().zip(&g.updates) {
         let _ = writeln!(o, "updates {name}: {c}");
@@ -695,6 +742,94 @@ pub fn render(rs: &ReadStats, r: &Results) -> String {
     }
 
     xc_section(&mut o, r);
+    o
+}
+
+/// Counts-only surface mode report, with an explicit accounting and completeness verdict.
+pub fn render_surface(rs: &ReadStats) -> String {
+    let mut o = String::new();
+    let message_frames_accounted = rs
+        .message_frames_parsed
+        .checked_add(rs.message_frames_sealed);
+    let frame_accounted = message_frames_accounted.is_some_and(|n| n == rs.message_frames_seen);
+    let complete = crate::read::surface_result_complete(rs);
+    let _ = writeln!(o, "STDDS KORD surface count (SMES Cat11, counts only)");
+    let _ = writeln!(o, "files read: {}", rs.files);
+    let _ =
+        writeln!(
+        o,
+        "message frame accounting: seen {}, parsed {}, receive-time sealed {}, accounted {} ({})",
+        rs.message_frames_seen,
+        rs.message_frames_parsed,
+        rs.message_frames_sealed,
+        message_frames_accounted.map_or_else(|| "overflow".to_string(), |n| n.to_string()),
+        if frame_accounted { "reconciles" } else { "DOES NOT RECONCILE" }
+    );
+    let _ = writeln!(o, "other frame events seen: {}", rs.nonmessage_frames_seen);
+    let _ = writeln!(o, "damaged frame events: {}", rs.damaged_frame_events);
+    let _ = writeln!(o, "unfinished trailing frames: {}", rs.unfinished_frames);
+    let _ = writeln!(o, "frame reader stalled bytes: {}", rs.stalled_bytes);
+    let _ = writeln!(o, "census over-budget: {}", rs.over_budget);
+    let _ = writeln!(
+        o,
+        "gzip files: truncated {}, damaged {}",
+        rs.files_gzip_truncated, rs.files_gzip_damaged
+    );
+    let _ = writeln!(
+        o,
+        "sealed-window rows/frames dropped: {}",
+        rs.sealed_window_dropped
+    );
+    for (name, n) in STD_ERROR_NAMES.iter().zip(&rs.refused) {
+        let _ = writeln!(o, "whole-message refusals, {name}: {n}");
+    }
+    let _ = writeln!(
+        o,
+        "parser message counts by kind (all facilities, not KORD-specific):"
+    );
+    for (name, n) in KIND_NAMES.iter().zip(&rs.stats.kinds) {
+        let _ = writeln!(o, "  {name}: {n}");
+    }
+    let _ = writeln!(o, "SMES field refusal counts (all airports):");
+    for (name, n) in SMES_FIELD_NAMES.iter().zip(&rs.stats.smes_errors) {
+        let _ = writeln!(o, "  {name}: {n}");
+    }
+    let _ = writeln!(
+        o,
+        "SMES records without readable airport code (all facilities): {}",
+        rs.kord_surface.smes_rows_without_airport_code
+    );
+    let _ = writeln!(
+        o,
+        "SMES records with other airport codes (all facilities): {}",
+        rs.kord_surface.smes_rows_with_other_airport_code
+    );
+    let _ = writeln!(
+        o,
+        "KORD SMES Cat11 positionReport records: {}",
+        rs.kord_surface.reports
+    );
+    let _ = writeln!(
+        o,
+        "  without readable time: {}",
+        rs.kord_surface.untimed_reports
+    );
+    let _ = writeln!(
+        o,
+        "  rows with unretained minutes after key cap {}: {}",
+        crate::read::MAX_SURFACE_MINUTE_KEYS,
+        rs.kord_surface.minute_overflow
+    );
+    let mut minutes = rs.kord_surface.by_unix_minute.clone();
+    minutes.sort_unstable_by_key(|(minute, _)| *minute);
+    for (minute, n) in minutes {
+        let _ = writeln!(o, "  parser_utc_unix_minute {minute}: {n}");
+    }
+    let _ = writeln!(
+        o,
+        "surface count verdict: {}",
+        if complete { "COMPLETE" } else { "INCOMPLETE" }
+    );
     o
 }
 
