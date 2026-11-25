@@ -7656,3 +7656,25 @@ claims; a match is explicitly unverified.
   recorded inputs; the core does not route payload bytes or prove a downstream system received
   them. This does not prove availability, controller authorization, or operational cutover. H5
   continuity requires separate measured drill evidence from source-backed consumer observations.
+
+## Migration drill harness (M3, H5)
+
+- **OA-MIG-301** The synthetic selector drill calls the production `oa-migration-switch` API for
+  at least 100 independently initialized flip-and-rollback cycles. Each side supplies the declared
+  maximum 64 tracks, flights, handoffs and alerts; reconciliation compares all rows, including
+  active, acknowledged and suppressed alert fields. Every clean cycle records both ordered
+  selector delivery observations and a zero-loss denominator.
+- **OA-MIG-302** A sustained single-selector case retains its full transition ledger across 64
+  flip-and-rollback cycles. The 64th rollback succeeds into the final trace slot, with the exact
+  `Candidate`→`Legacy` record checked. The next promotion reports `TraceFull` while the selected
+  output stays Legacy; the drill reports this per-unit trace-capacity limit instead of resetting
+  the ledger.
+- **OA-MIG-303** Synthetic fault cases record refusal reasons for an epoch change after
+  reconciliation, duplicate/gapped/out-of-order delivery observations, stale legacy health,
+  expiry and incomplete family coverage. A rollback during pending promotion is exercised; any
+  resulting delivery gap is counted as injected loss, not hidden in a clean-cycle denominator.
+- **OA-MIG-304** Decision-path wall samples and selector-API delivery-call samples are separate
+  fields. Modeled delivery delay is not a consumer-wire measurement. Until a normalized,
+  source-backed recorded H2/M4 input adapter exists, the harness labels recorded replay
+  `NOT_BUILT` and qualification `INCOMPLETE`; synthetic output cannot close H5 or authorize
+  readiness.
