@@ -374,8 +374,8 @@ fn acknowledge(worker: &mut Worker, generation: u64, sequence: u64) {
     assert_eq!(worker.receive(), format!("ACKED\t{generation}\t{sequence}"));
 }
 
-#[test]
 // REQ: OA-REG-010
+#[test]
 fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     let batches = batches();
     let identity = fixture_identity();
@@ -590,8 +590,8 @@ fn integrated_runtime_recomputes_retained_prefix_across_process_death() {
     eprintln!("regional-recovery: recomputation=true accepted_suffix={} availability_gap_ms={} max_track_measurement_lag_ns={:?} generation={}", authority.accepted.len(), availability_gap_ms, source_lag_ns, authority.generation);
 }
 
-#[test]
 // REQ: OA-REG-010
+#[test]
 fn recovery_protocol_refuses_changed_prefix_and_bounds_bad_or_stalled_workers() {
     let identity = fixture_identity();
     let mut changed = Worker::start(20);
@@ -639,8 +639,8 @@ fn recovery_protocol_refuses_changed_prefix_and_bounds_bad_or_stalled_workers() 
     missing.expect_failure();
 }
 
-#[test]
 // REQ: OA-REG-010
+#[test]
 fn unknown_track_measurement_age_is_not_encoded_as_zero() {
     assert_eq!(parse_source_lag("-"), None);
     assert_eq!(parse_source_lag("0"), Some(0));

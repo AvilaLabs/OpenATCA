@@ -929,7 +929,7 @@ pub(super) fn display_window(inject: bool) -> Result<DisplayEvidence, &'static s
         return Err("measured interaction selection, retry, queue, presentation, or draw failed");
     }
 
-    // REQ: OA-DSP-077
+    // Allocator witness for OA-DSP-077.
     // Current alert presentation, off-map/unlocated accounting and atomic capacity/identity
     // refusals all execute inside the allocator window; only startup creates these buffers.
     let msaw_projection =

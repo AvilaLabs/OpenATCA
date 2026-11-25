@@ -24,7 +24,7 @@ fn ac(hex: &str, seen_pos: &str, extra: &str) -> String {
     )
 }
 
-// REQ: OA-ADSB-174 OA-ADSB-175
+// REQ: OA-ADSB-174, OA-ADSB-175
 #[test]
 fn maps_snapshot_fields_and_estimated_source_time_without_inventing_age() {
     let json = body(&ac("a1b2c3", "2.5", ""), 1);
@@ -46,7 +46,7 @@ fn maps_snapshot_fields_and_estimated_source_time_without_inventing_age() {
     assert_eq!(SOURCE_NAMES[out.source[0] as usize], "adsb_icao");
 }
 
-// REQ: OA-ADSB-174 OA-ADSB-175
+// REQ: OA-ADSB-174, OA-ADSB-175
 #[test]
 fn seen_pos_boundary_is_inclusive_and_old_rows_remain_in_denominator() {
     let items = format!("{},{}", ac("a1b2c3", "15", ""), ac("a1b2c4", "15.001", ""));
@@ -59,7 +59,7 @@ fn seen_pos_boundary_is_inclusive_and_old_rows_remain_in_denominator() {
     assert_eq!(out.time_ns.len(), 1);
 }
 
-// REQ: OA-ADSB-174 OA-ADSB-175
+// REQ: OA-ADSB-174, OA-ADSB-175
 #[test]
 fn no_position_does_not_fallback_to_lastposition() {
     let item = r#"{"hex":"a1b2c3","type":"adsb_icao","seen":1.0,"seen_pos":90.0,"lat":null,"lon":null,"lastPosition":{"lat":41.9,"lon":-87.9,"nic":8,"rc":75,"seen_pos":90.0},"mlat":[],"tisb":[]}"#;
@@ -70,7 +70,7 @@ fn no_position_does_not_fallback_to_lastposition() {
     assert!(out.time_ns.is_empty());
 }
 
-// REQ: OA-ADSB-174 OA-ADSB-175
+// REQ: OA-ADSB-174, OA-ADSB-175
 #[test]
 fn total_mismatch_duplicate_keys_bad_age_and_sealed_time_are_not_silently_repaired() {
     let mut out = Reports::default();
@@ -127,7 +127,7 @@ fn total_mismatch_duplicate_keys_bad_age_and_sealed_time_are_not_silently_repair
     assert_eq!(stats.sealed_window_dropped, 1);
 }
 
-// REQ: OA-ADSB-174 OA-ADSB-175
+// REQ: OA-ADSB-174, OA-ADSB-175
 #[test]
 fn unknown_position_source_and_ground_state_are_explicitly_counted_and_encoded() {
     let item = r#"{"hex":"~a1b2c3","type":"mode_s","seen":0.1,"seen_pos":0.5,"lat":41.9,"lon":-87.9,"alt_baro":"ground","gs":null,"track":null,"baro_rate":null,"geom_rate":null,"nic":null,"nac_p":null,"nac_v":null,"sil":null,"sil_type":null,"version":null,"gva":null,"sda":null,"nic_baro":null,"mlat":["lat"],"tisb":["lat"]}"#;
@@ -142,7 +142,7 @@ fn unknown_position_source_and_ground_state_are_explicitly_counted_and_encoded()
     assert_eq!(out.source[0], 7); // mode_s is preserved, not relabeled ADS-B.
 }
 
-// REQ: OA-ADSB-174 OA-ADSB-175
+// REQ: OA-ADSB-174, OA-ADSB-175
 #[test]
 fn age_limit_is_applied_to_raw_value_not_rounded_milliseconds() {
     let item = ac("a1b2c3", "15.0004", "");
@@ -152,7 +152,7 @@ fn age_limit_is_applied_to_raw_value_not_rounded_milliseconds() {
     assert_eq!(stats.accepted, 0);
 }
 
-// REQ: OA-ADSB-174 OA-ADSB-175
+// REQ: OA-ADSB-174, OA-ADSB-175
 #[test]
 fn source_flags_must_be_present_and_cannot_conflict_with_direct_adsb_type() {
     let conflict = ac("a1b2c3", "1", "").replace("\"mlat\":[]", "\"mlat\":[\"lat\"]");
@@ -166,7 +166,7 @@ fn source_flags_must_be_present_and_cannot_conflict_with_direct_adsb_type() {
     assert_eq!(stats.accepted, 0);
 }
 
-// REQ: OA-ADSB-174 OA-ADSB-175
+// REQ: OA-ADSB-174, OA-ADSB-175
 #[test]
 fn object_member_limit_is_enforced_before_row_decoding() {
     let extra = (0..140)
@@ -182,7 +182,7 @@ fn object_member_limit_is_enforced_before_row_decoding() {
     assert!(out.time_ns.is_empty());
 }
 
-// REQ: OA-ADSB-174 OA-ADSB-175
+// REQ: OA-ADSB-174, OA-ADSB-175
 #[test]
 fn oversized_aircraft_array_is_refused_before_row_processing() {
     let items = std::iter::repeat_n("{}", oa_adsb::MAX_SNAPSHOT_ROWS + 1)
