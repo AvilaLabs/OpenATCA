@@ -13,8 +13,8 @@ use oa_track::fusion::{
 };
 use oa_track::fusion_params::BUCKET_NS;
 use oa_track::radar::{RadarPlot, RadarSite, NONE_ALT, NONE_CODE, PLOT_NO_ADDR};
-use oa_track_tools::score::DRAIN_ROWS;
 use oa_track::{output_clear, output_len, output_new, tracker_stats, DEFAULT_CONFIG};
+use oa_track_tools::score::DRAIN_ROWS;
 
 use super::args::parse_date;
 use super::error::ExportError;
