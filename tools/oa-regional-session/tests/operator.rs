@@ -269,15 +269,14 @@ fn fixture_console_journals_fresh_authorized_and_stale_requests() {
     let input = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/synthetic-session.tsv");
     let script = temp_path("script");
     let output = temp_path("out");
-    let executable = temp_path("console-bin");
+    // Run Cargo's immutable test binary directly; copying adds an artificial write/exec race.
     let cargo_binary = PathBuf::from(env!("CARGO_BIN_EXE_oa-regional-console"));
-    fs::copy(&cargo_binary, &executable).unwrap();
     fs::write(
         &script,
         b"NEXT\nNEXT\nSELECT ABC101\nACTOR 1\nASSIGNED 15000\nNEXT\nASSIGNED 16000\nQUIT\n",
     )
     .unwrap();
-    let result = Command::new(&executable)
+    let result = Command::new(&cargo_binary)
         .args([
             "--input",
             input.to_str().unwrap(),
@@ -307,7 +306,6 @@ fn fixture_console_journals_fresh_authorized_and_stale_requests() {
     verify_closed_bundle(&output);
     fs::remove_dir_all(&output).unwrap();
     fs::remove_file(script).unwrap();
-    fs::remove_file(executable).unwrap();
 }
 
 // REQ: OA-REG-016
@@ -320,7 +318,8 @@ fn full_recorded_batch_keeps_local_command_refusal_visible() {
     let input = temp_path("full-input");
     let script = temp_path("full-script");
     let output = temp_path("full-out");
-    let executable = temp_path("full-bin");
+    // Run Cargo's immutable test binary directly; copying adds an artificial write/exec race.
+    let cargo_binary = PathBuf::from(env!("CARGO_BIN_EXE_oa-regional-console"));
     let mut recording = source
         .lines()
         .take_while(|line| !line.starts_with("v1\t3000000000\t"))
@@ -335,8 +334,7 @@ fn full_recorded_batch_keeps_local_command_refusal_visible() {
         b"NEXT\nNEXT\nSELECT ABC101\nACTOR 1\nASSIGNED 15000\nNEXT\nQUIT\n",
     )
     .unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_oa-regional-console"), &executable).unwrap();
-    let result = Command::new(&executable)
+    let result = Command::new(&cargo_binary)
         .args([
             "--input",
             input.to_str().unwrap(),
@@ -363,7 +361,7 @@ fn full_recorded_batch_keeps_local_command_refusal_visible() {
         .contains("receipt batch full"));
     verify_closed_bundle(&output);
     fs::remove_dir_all(output).unwrap();
-    for path in [input, script, executable] {
+    for path in [input, script] {
         fs::remove_file(path).unwrap();
     }
 }
