@@ -241,6 +241,11 @@ const ALLOW: &[Allow] = &[
         needle: "v.parse::<f64>().ok()",
         reason: "the guard arm accepts only a finite value of 0 or more",
     },
+    Allow {
+        file: "tools/oa-compass/src/shell/radar.rs",
+        needle: ".parse::<f64>()",
+        reason: "the CLI finite-only parser rejects parse errors and non-finite radar site coordinates/height",
+    },
 ];
 
 // REQ: OA-TRC-103
