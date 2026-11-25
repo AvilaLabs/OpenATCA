@@ -6,6 +6,10 @@
 //! cargo run --release -p oa-track --example vs_eram -- \
 //!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> \
 //!     --turn-onset --turn-from-ms <utc-ms> --turn-to-ms <utc-ms>
+//! cargo run --release -p oa-track --example vs_eram -- \
+//!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> \
+//!     --turn-onset --turn-onset-extended-budget \
+//!     --turn-from-ms <utc-ms> --turn-to-ms <utc-ms>
 //! ```
 //!
 //! The ADS-B clip is split into two disjoint halves (`oa_track::score::SPLIT_TEXT`). Set A feeds
@@ -56,6 +60,126 @@ use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
 const KT_MPS: f64 = 0.514_444_444_444;
 const TOL_MS: i64 = 500;
 const TURN_EXPORT_ROWS: usize = 250_000;
+const TURN_EXPORT_BYTES: usize = 32 * 1024 * 1024;
+const TURN_EXPORT_EXTENDED_ROWS: usize = 1_000_000;
+const TURN_EXPORT_EXTENDED_BYTES: usize = 128 * 1024 * 1024;
+const TURN_EXPORT_MAX_ROW_BYTES: usize = 512;
+
+// A7.2: cold command-level export configuration, copied once per run and never stored per row.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TurnExportLimits {
+    name: &'static str,
+    max_rows: usize,
+    max_bytes: usize,
+}
+
+const STANDARD_TURN_EXPORT: TurnExportLimits = TurnExportLimits {
+    name: "standard",
+    max_rows: TURN_EXPORT_ROWS,
+    max_bytes: TURN_EXPORT_BYTES,
+};
+const EXTENDED_TURN_EXPORT: TurnExportLimits = TurnExportLimits {
+    name: "extended",
+    max_rows: TURN_EXPORT_EXTENDED_ROWS,
+    max_bytes: TURN_EXPORT_EXTENDED_BYTES,
+};
+
+fn select_turn_export_limits(
+    turn_onset: bool,
+    extended: bool,
+) -> Result<Option<TurnExportLimits>, String> {
+    match (turn_onset, extended) {
+        (true, false) => Ok(Some(STANDARD_TURN_EXPORT)),
+        (true, true) => Ok(Some(EXTENDED_TURN_EXPORT)),
+        (false, false) => Ok(None),
+        (false, true) => Err("--turn-onset-extended-budget requires --turn-onset".into()),
+    }
+}
+
+// A1/D5: fixed-layout, cold offline shell formatter adapter; this is not tracker state or a core DTO.
+#[repr(C)]
+struct BoundedCsvRow {
+    bytes: [u8; TURN_EXPORT_MAX_ROW_BYTES],
+    len: u16,
+}
+const _: () = assert!(core::mem::size_of::<BoundedCsvRow>() == 514);
+
+impl std::fmt::Write for BoundedCsvRow {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        let start = usize::from(self.len);
+        let Some(next_len) = start.checked_add(value.len()) else {
+            return Err(std::fmt::Error);
+        };
+        if next_len > TURN_EXPORT_MAX_ROW_BYTES {
+            return Err(std::fmt::Error);
+        }
+        self.bytes
+            .get_mut(start..next_len)
+            .ok_or(std::fmt::Error)?
+            .copy_from_slice(value.as_bytes());
+        self.len = u16::try_from(next_len).map_err(|_| std::fmt::Error)?;
+        Ok(())
+    }
+}
+
+fn append_bounded_csv_row(
+    output: &mut String,
+    limits: TurnExportLimits,
+    format_row: impl FnOnce(&mut BoundedCsvRow) -> std::fmt::Result,
+) -> Result<(), String> {
+    let mut row = BoundedCsvRow {
+        bytes: [0; TURN_EXPORT_MAX_ROW_BYTES],
+        len: 0,
+    };
+    format_row(&mut row).map_err(|_| {
+        format!(
+            "turn-onset formatted row exceeds bounded {}-byte row capacity",
+            TURN_EXPORT_MAX_ROW_BYTES
+        )
+    })?;
+    let bytes = row
+        .bytes
+        .get(..usize::from(row.len))
+        .ok_or_else(|| "turn-onset formatted row length is invalid".to_owned())?;
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "turn-onset formatted row is not valid UTF-8".to_owned())?;
+    let next_len = output
+        .len()
+        .checked_add(text.len())
+        .ok_or_else(|| "turn-onset CSV byte count overflow".to_owned())?;
+    if next_len > limits.max_bytes {
+        return Err(format!(
+            "turn-onset CSV exceeds bounded byte limit {}",
+            limits.max_bytes
+        ));
+    }
+    output.push_str(text);
+    Ok(())
+}
+
+fn increment_export_count(count: &mut usize, limits: TurnExportLimits) -> Result<(), String> {
+    let next = count
+        .checked_add(1)
+        .ok_or_else(|| "turn-onset export row count overflow".to_owned())?;
+    if next > limits.max_rows {
+        return Err(format!(
+            "turn-onset rows exceed bounded export limit {}",
+            limits.max_rows
+        ));
+    }
+    *count = next;
+    Ok(())
+}
+
+fn bounded_csv_header(header: &str, limits: TurnExportLimits) -> Result<String, String> {
+    if header.len() > limits.max_bytes {
+        return Err(format!(
+            "turn-onset CSV header exceeds bounded byte limit {}",
+            limits.max_bytes
+        ));
+    }
+    Ok(String::from(header))
+}
 
 // A3: one fixed offline export counter record per system, outside tracker state.
 #[repr(C)]
@@ -148,10 +272,13 @@ fn selected_truth_grid_bounds(
     Ok(selected_bounds)
 }
 
+// Keep the offline writer's output, counters, capacity, window and row source explicit.
+#[allow(clippy::too_many_arguments)]
 fn append_tracker_updates<R: RowSource>(
     out: &mut String,
     count: &mut usize,
     counters: &mut TurnExportCounters,
+    limits: TurnExportLimits,
     window: (i64, i64),
     run: &R,
     truth: &Truth<'_>,
@@ -190,24 +317,25 @@ fn append_tracker_updates<R: RowSource>(
                 counters.no_truth = counters.no_truth.saturating_add(1);
                 continue;
             };
-            *count = count.saturating_add(1);
-            if *count > TURN_EXPORT_ROWS {
-                return Err(format!(
-                    "turn-onset tracker rows exceed bounded export limit {TURN_EXPORT_ROWS}"
-                ));
-            }
-            let _ = writeln!(
-                out,
-                "{},{time_ms},{system},{course:.9},",
-                leg_key(addr, reference.leg)
-            );
+            increment_export_count(count, limits)?;
+            append_bounded_csv_row(out, limits, |row| {
+                writeln!(
+                    row,
+                    "{},{time_ms},{system},{course:.9},",
+                    leg_key(addr, reference.leg)
+                )
+            })?;
         }
     }
     Ok(())
 }
 
-fn truth_csv(truth: &Truth<'_>, window: (i64, i64)) -> Result<(String, u64, u64), String> {
-    let mut out = String::from("leg,time_ms,truth_course_deg,truth_speed_kt\n");
+fn truth_csv(
+    truth: &Truth<'_>,
+    window: (i64, i64),
+    limits: TurnExportLimits,
+) -> Result<(String, u64, u64), String> {
+    let mut out = bounded_csv_header("leg,time_ms,truth_course_deg,truth_speed_kt\n", limits)?;
     let mut selected_rows = 0u64;
     let mut outside_rows = 0u64;
     for leg in truth.legs {
@@ -223,9 +351,10 @@ fn truth_csv(truth: &Truth<'_>, window: (i64, i64)) -> Result<(String, u64, u64)
             .checked_add(outside_count)
             .ok_or_else(|| "truth outside row count overflow".to_owned())?;
     }
-    if selected_rows > TURN_EXPORT_ROWS as u64 {
+    if selected_rows > limits.max_rows as u64 {
         return Err(format!(
-            "turn-onset truth rows exceed bounded export limit {TURN_EXPORT_ROWS}"
+            "turn-onset truth rows exceed bounded export limit {}",
+            limits.max_rows
         ));
     }
     for (leg_ix, leg) in truth.legs.iter().enumerate() {
@@ -243,21 +372,27 @@ fn truth_csv(truth: &Truth<'_>, window: (i64, i64)) -> Result<(String, u64, u64)
                     if let Some(course) =
                         reference_course_deg(sample.vel_east_mps, sample.vel_north_mps)
                     {
-                        let _ = writeln!(
-                            out,
-                            "{},{time_ms},{course:.9},{speed:.6}",
-                            leg_key(leg.addr, leg_ix as u32)
-                        );
+                        append_bounded_csv_row(&mut out, limits, |row| {
+                            writeln!(
+                                row,
+                                "{},{time_ms},{course:.9},{speed:.6}",
+                                leg_key(leg.addr, leg_ix as u32)
+                            )
+                        })?;
                     } else {
-                        let _ = writeln!(
-                            out,
-                            "{},{time_ms},,{speed:.6}",
-                            leg_key(leg.addr, leg_ix as u32)
-                        );
+                        append_bounded_csv_row(&mut out, limits, |row| {
+                            writeln!(
+                                row,
+                                "{},{time_ms},,{speed:.6}",
+                                leg_key(leg.addr, leg_ix as u32)
+                            )
+                        })?;
                     }
                 }
                 _ => {
-                    let _ = writeln!(out, "{},{time_ms},,", leg_key(leg.addr, leg_ix as u32));
+                    append_bounded_csv_row(&mut out, limits, |row| {
+                        writeln!(row, "{},{time_ms},,", leg_key(leg.addr, leg_ix as u32))
+                    })?;
                 }
             }
             t = t
@@ -272,6 +407,7 @@ fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let (mut adsb, mut sfdps, mut out) = (None, None, None);
     let mut turn_onset = false;
+    let mut turn_onset_extended_budget = false;
     let mut turn_from_ms = None;
     let mut turn_to_ms = None;
     let mut turn_from_seen = false;
@@ -279,6 +415,10 @@ fn main() -> ExitCode {
     while let Some(a) = args.next() {
         if a == "--turn-onset" {
             turn_onset = true;
+            continue;
+        }
+        if a == "--turn-onset-extended-budget" {
+            turn_onset_extended_budget = true;
             continue;
         }
         if a == "--turn-from-ms" || a == "--turn-to-ms" {
@@ -324,7 +464,7 @@ fn main() -> ExitCode {
         }
     }
     let (Some(adsb), Some(sfdps), Some(out)) = (adsb, sfdps, out) else {
-        eprintln!("usage: vs_eram --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--turn-onset --turn-from-ms <utc-ms> --turn-to-ms <utc-ms>]");
+        eprintln!("usage: vs_eram --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--turn-onset [--turn-onset-extended-budget] --turn-from-ms <utc-ms> --turn-to-ms <utc-ms>]");
         return ExitCode::from(2);
     };
     let turn_window = match (turn_onset, turn_from_ms, turn_to_ms) {
@@ -341,6 +481,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let turn_export_limits = match select_turn_export_limits(turn_onset, turn_onset_extended_budget)
+    {
+        Ok(limits) => limits,
+        Err(e) => {
+            eprintln!("vs_eram: {e}");
+            return ExitCode::from(2);
+        }
+    };
     // Every path is checked, as given and resolved, before anything is opened or created.
     for p in [&adsb, &sfdps, &out] {
         if let Err(e) = oa_sealed::refuse(p) {
@@ -348,7 +496,7 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    match run(&adsb, &sfdps, &out, turn_window) {
+    match run(&adsb, &sfdps, &out, turn_window, turn_export_limits) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -492,8 +640,10 @@ fn run(
     sfdps: &Path,
     out_dir: &Path,
     turn_window: Option<(i64, i64)>,
+    turn_export_limits: Option<TurnExportLimits>,
 ) -> Result<String, String> {
     let turn_onset = turn_window.is_some();
+    let export_limits = turn_export_limits;
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let mut o = String::new();
     let t_start = Instant::now();
@@ -560,13 +710,21 @@ fn run(
         legs: &built.legs,
     };
     let (turn_truth, truth_window_rows, truth_outside_rows) = if let Some(window) = turn_window {
-        let (csv, selected, outside) = truth_csv(&truth, window)?;
+        let limits = export_limits.ok_or_else(|| "turn-onset export limits missing".to_owned())?;
+        let (csv, selected, outside) = truth_csv(&truth, window, limits)?;
         (Some(csv), selected, outside)
     } else {
         (None, 0, 0)
     };
-    let mut turn_estimates =
-        turn_onset.then(|| String::from("leg,state_time_ms,system,course_deg,availability_ms\n"));
+    let mut turn_estimates = if turn_onset {
+        let limits = export_limits.ok_or_else(|| "turn-onset export limits missing".to_owned())?;
+        Some(bounded_csv_header(
+            "leg,state_time_ms,system,course_deg,availability_ms\n",
+            limits,
+        )?)
+    } else {
+        None
+    };
     let mut turn_exported = 0usize;
     let mut oa_counts = TurnExportCounters::default();
     let mut cv_counts = TurnExportCounters::default();
@@ -611,6 +769,7 @@ fn run(
     let (_, ours_pairs) = chunk_finish(acc, &rcfg).map_err(|e| e.0)?;
     if turn_onset {
         let window = turn_window.ok_or_else(|| "turn-onset window missing".to_owned())?;
+        let limits = export_limits.ok_or_else(|| "turn-onset export limits missing".to_owned())?;
         let estimates = turn_estimates
             .as_mut()
             .ok_or_else(|| "turn-onset export buffer missing".to_owned())?;
@@ -618,6 +777,7 @@ fn run(
             estimates,
             &mut turn_exported,
             &mut oa_counts,
+            limits,
             window,
             &run,
             &truth,
@@ -630,6 +790,7 @@ fn run(
             estimates,
             &mut turn_exported,
             &mut cv_counts,
+            limits,
             window,
             cv_rows,
             &truth,
@@ -685,6 +846,7 @@ fn run(
     let mut sfdps_conflicting_state_rows = 0u64;
     if turn_onset {
         let window = turn_window.ok_or_else(|| "turn-onset window missing".to_owned())?;
+        let limits = export_limits.ok_or_else(|| "turn-onset export limits missing".to_owned())?;
         for j in 0..leg.th.pos_ms.len() {
             let (Some(&flight), Some(&pos_ms)) = (leg.th.flight.get(j), leg.th.pos_ms.get(j))
             else {
@@ -742,6 +904,12 @@ fn run(
             };
             sfdps_candidate_rows = sfdps_candidate_rows.saturating_add(1);
             let key = (addr, reference.leg, pos_ms);
+            if !sfdps_updates.contains_key(&key) && sfdps_updates.len() >= limits.max_rows {
+                return Err(format!(
+                    "turn-onset SFDPS rows exceed bounded export limit {}",
+                    limits.max_rows
+                ));
+            }
             if let Some(entry) = sfdps_updates.get_mut(&key) {
                 sfdps_duplicate_state_rows = sfdps_duplicate_state_rows.saturating_add(1);
                 if ((entry.1 - course + 180.0).rem_euclid(360.0) - 180.0).abs() > 1e-9 {
@@ -759,32 +927,27 @@ fn run(
             } else {
                 sfdps_updates.insert(key, (availability_ms, course));
             }
-            if sfdps_updates.len() > TURN_EXPORT_ROWS {
-                return Err(format!(
-                    "turn-onset SFDPS rows exceed bounded export limit {TURN_EXPORT_ROWS}"
-                ));
-            }
         }
     }
     let sfdps_deduplicated_updates = sfdps_updates.len();
     if turn_onset {
+        let limits = export_limits.ok_or_else(|| "turn-onset export limits missing".to_owned())?;
         for (&(addr, truth_leg, state_ms), &(availability_ms, course)) in &sfdps_updates {
             if !course.is_finite() {
                 continue;
             }
-            turn_exported = turn_exported.saturating_add(1);
-            if turn_exported > TURN_EXPORT_ROWS {
-                return Err(format!("turn-onset combined estimate rows exceed bounded export limit {TURN_EXPORT_ROWS}"));
-            }
+            increment_export_count(&mut turn_exported, limits)?;
             let availability = availability_ms.map_or_else(String::new, |t| t.to_string());
             let estimates = turn_estimates
                 .as_mut()
                 .ok_or_else(|| "turn-onset export buffer missing".to_owned())?;
-            let _ = writeln!(
-                estimates,
-                "{},{state_ms},sfdps,{course:.9},{availability}",
-                leg_key(addr, truth_leg)
-            );
+            append_bounded_csv_row(estimates, limits, |row| {
+                writeln!(
+                    row,
+                    "{},{state_ms},sfdps,{course:.9},{availability}",
+                    leg_key(addr, truth_leg)
+                )
+            })?;
         }
     }
 
@@ -966,6 +1129,20 @@ fn run(
         );
         let (window_from_ms, window_to_ms) =
             turn_window.ok_or_else(|| "turn-onset window missing".to_owned())?;
+        let limits = export_limits.ok_or_else(|| "turn-onset export limits missing".to_owned())?;
+        let _ = writeln!(turn_provenance, "export_capacity_profile={}", limits.name);
+        let _ = writeln!(
+            turn_provenance,
+            "export_max_rows_per_csv={}",
+            limits.max_rows
+        );
+        let _ = writeln!(
+            turn_provenance,
+            "export_max_bytes_per_csv={}",
+            limits.max_bytes
+        );
+        let _ = writeln!(turn_provenance, "truth_csv_bytes={}", truth_csv.len());
+        let _ = writeln!(turn_provenance, "estimate_csv_bytes={}", estimate_csv.len());
         let _ = writeln!(
             turn_provenance,
             "turn_window_utc_ms_half_open={window_from_ms},{window_to_ms}"
@@ -1096,7 +1273,69 @@ fn run(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod turn_window_tests {
-    use super::{checked_turn_window, in_turn_window, selected_truth_grid_bounds};
+    use super::{
+        append_bounded_csv_row, checked_turn_window, in_turn_window, increment_export_count,
+        select_turn_export_limits, selected_truth_grid_bounds, TurnExportLimits,
+        EXTENDED_TURN_EXPORT, STANDARD_TURN_EXPORT,
+    };
+    use std::fmt::Write as _;
+
+    #[test]
+    fn export_capacity_profiles_are_explicit_and_opt_in() {
+        assert_eq!(
+            select_turn_export_limits(true, false).unwrap(),
+            Some(STANDARD_TURN_EXPORT)
+        );
+        assert_eq!(
+            select_turn_export_limits(true, true).unwrap(),
+            Some(EXTENDED_TURN_EXPORT)
+        );
+        assert_eq!(STANDARD_TURN_EXPORT.max_rows, 250_000);
+        assert_eq!(STANDARD_TURN_EXPORT.max_bytes, 32 * 1024 * 1024);
+        assert_eq!(EXTENDED_TURN_EXPORT.max_rows, 1_000_000);
+        assert_eq!(EXTENDED_TURN_EXPORT.max_bytes, 128 * 1024 * 1024);
+        assert_eq!(select_turn_export_limits(false, false).unwrap(), None);
+        assert!(select_turn_export_limits(false, true).is_err());
+    }
+
+    #[test]
+    fn byte_cap_refuses_before_appending_formatted_row() {
+        let limits = TurnExportLimits {
+            name: "test",
+            max_rows: 3,
+            max_bytes: 4,
+        };
+        let mut output = String::from("abc");
+        let result = append_bounded_csv_row(&mut output, limits, |row| writeln!(row, "x"));
+        assert!(result.is_err());
+        assert_eq!(output, "abc");
+    }
+
+    #[test]
+    fn oversized_formatted_row_refuses_before_appending() {
+        let limits = TurnExportLimits {
+            name: "test",
+            max_rows: 3,
+            max_bytes: 4096,
+        };
+        let mut output = String::from("header\n");
+        let too_long = "x".repeat(TURN_EXPORT_MAX_ROW_BYTES + 1);
+        let result = append_bounded_csv_row(&mut output, limits, |row| write!(row, "{too_long}"));
+        assert!(result.is_err());
+        assert_eq!(output, "header\n");
+    }
+
+    #[test]
+    fn row_cap_refuses_without_incrementing_past_bound() {
+        let limits = TurnExportLimits {
+            name: "test",
+            max_rows: 2,
+            max_bytes: 128,
+        };
+        let mut count = 2;
+        assert!(increment_export_count(&mut count, limits).is_err());
+        assert_eq!(count, 2);
+    }
 
     // REQ: OA-TRK-404
     #[test]

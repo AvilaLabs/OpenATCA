@@ -5492,6 +5492,14 @@ scope.
   truth/OA/CV/SFDPS, preflights the selected truth grid against its row cap using overflow-safe
   arithmetic, and records selected/outside row counts and exact endpoints. Synthetic example tests
   cover interval boundaries, invalid intervals, sealed-span overlap, and extreme/inverted leg times.
+  The standard export/scorer profile permits at most 250,000 data rows and 32 MiB per CSV;
+  a separately opt-in development profile permits at most 1,000,000 rows and 128 MiB. The
+  exporter requires `--turn-onset-extended-budget` with `--turn-onset`; the scorer requires
+  `--extended-budget --protocol v3`. Both profiles refuse excess rows/bytes explicitly. Export
+  row formatting uses at most 512 bytes of scratch and checks accumulated bytes before append;
+  parsing checks the guarded descriptor byte limit, physical record/field/column bounds and sealed
+  timestamps before grouping. Provenance records the selected caps and actual CSV sizes. Capacity
+  refusal is incomplete; the capacity profile does not alter event or matching definitions.
 - **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
   refused in every date syntax. Any input path the shared sealed list refuses (`oa-sealed`, OA-SEAL-001), and every file the run opens
   (each file of the feed directory, the ADS-B clip, each file and the README of a `slice` source), is checked

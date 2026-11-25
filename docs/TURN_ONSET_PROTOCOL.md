@@ -112,10 +112,14 @@ and SFDPS `recv_ms` where valid. Preserve both SFDPS fields and counts in the co
 file. All courses
 are degrees in `[0,360)`. Circular differences use [-180,180), so crossing north (359 to 1 degree)
 is a 2 degree turn. Unique timestamps per leg/system are mandatory. Files are capped at 32 MiB
-and 250,000 rows each; matching is capped at five million precharged work units. Each event prepays the full upper
+and 250,000 rows each by default; matching is capped at five million precharged work units. Each event prepays the full upper
 bound of five scans/removals over its unused alarm list, and gap classification charges each
 alarm/event visit before processing. Gap cleanup builds a retained list in one pass. All parsing and
 matching work is offline and uses only the standard library.
+
+These remain the v2/default limits. The Rust export and scorer each have a separately opt-in
+extended profile only for v3; see `TURN_ONSET_PROTOCOL_V3.md`. This does not change the schema,
+thresholds, or selected time window.
 
 The `vs_eram` example emits these files plus `turn-onset-provenance.txt` only when passed
 `--turn-onset --turn-from-ms <utc-ms> --turn-to-ms <utc-ms>`. The required integer millisecond
@@ -133,8 +137,9 @@ SFDPS state rows at `pos_ms` with `recv_ms` separately. It records unassociated 
 no-velocity, near-zero directions, missing/contradictory times, duplicate states and conflicting
 courses in provenance. Ambiguous conflicting course states are omitted from the estimate stream.
 The provenance records both endpoints and selected/outside row counts for truth and each system.
-The adapter is bounded to 250,000 rows per export and the scorer to 32 MiB / 250,000 rows per
-input. A capacity refusal is a hard stop: it must never be represented as a complete day. Freeze a
+The standard profile bounds the adapter to 250,000 rows / 32 MiB per CSV and the scorer to the same
+per-input limits. A v3-only explicit extension is documented in `TURN_ONSET_PROTOCOL_V3.md`; v2
+remains on standard limits. A capacity refusal is a hard stop: it must never be represented as a complete day. Freeze a
 predeclared development window that fits all caps or revise caps through review before scoring;
 do not silently batch and combine incomplete denominators. Its matcher uses a shared truth
 denominator. The input files and

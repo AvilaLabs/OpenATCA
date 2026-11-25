@@ -8,6 +8,7 @@ distinct observable output rows from a separate CSV; no row is duplicated or hel
 import argparse
 import bisect
 import csv
+import io
 import math
 import statistics
 import sys
@@ -18,6 +19,11 @@ import sealed_guard
 SYSTEMS = ("oa", "cv", "sfdps")
 MAX_BYTES = 32 * 1024 * 1024
 MAX_ROWS = 250_000
+EXTENDED_MAX_BYTES = 128 * 1024 * 1024
+EXTENDED_MAX_ROWS = 1_000_000
+MAX_CSV_LINE_BYTES = 1024
+MAX_CSV_COLUMNS = 16
+MAX_CSV_FIELD_CHARS = 512
 PERSIST_SAMPLES = 3
 TURN_RATE_DEG_S = 0.5
 STRAIGHT_RATE_DEG_S = 0.25
@@ -31,6 +37,57 @@ MAX_MATCH_WORK = 5_000_000
 # A matched event may scan unused alarms for near, candidates, any, min, and removal.
 # Charging five full scans before any of them conservatively bounds every input-sized pass.
 MATCH_SCAN_PASSES = 5
+
+
+def budget_limits(protocol, extended):
+    if extended and protocol != "v3":
+        raise ValueError("--extended-budget requires --protocol v3")
+    if extended:
+        return EXTENDED_MAX_ROWS, EXTENDED_MAX_BYTES
+    return MAX_ROWS, MAX_BYTES
+
+
+class _ByteLimitedRaw(io.RawIOBase):
+    """Cold shell parser adapter limiting reads from the guarded, unbuffered file descriptor."""
+
+    def __init__(self, source, max_bytes):
+        super().__init__()
+        self._source = source
+        self._max_bytes = max_bytes
+        self.bytes_read = 0
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        if not buffer:
+            return 0
+        remaining = self._max_bytes - self.bytes_read
+        block = self._source.read(min(len(buffer), remaining + 1))
+        if len(block) > remaining:
+            raise ValueError(f"input descriptor exceeds {self._max_bytes} byte limit")
+        buffer[:len(block)] = block
+        self.bytes_read += len(block)
+        return len(block)
+
+
+def _iter_bounded_csv_records(stream):
+    """Parse the producer's single-physical-line scalar format with pre-materialization caps."""
+    line_number = 0
+    while True:
+        line = stream.readline(MAX_CSV_LINE_BYTES + 1)
+        if line == "":
+            return
+        line_number += 1
+        if len(line.encode("utf-8")) > MAX_CSV_LINE_BYTES:
+            raise ValueError(f"CSV physical record exceeds {MAX_CSV_LINE_BYTES} UTF-8 bytes")
+        try:
+            cells = next(csv.reader([line], strict=True))
+        except (csv.Error, StopIteration) as exc:
+            raise ValueError(f"CSV line {line_number}: malformed single-line record") from exc
+        if len(cells) > MAX_CSV_COLUMNS:
+            raise ValueError(f"CSV line {line_number}: exceeds {MAX_CSV_COLUMNS} columns")
+        yield line_number, cells
 
 
 def wrap180(angle):
@@ -60,25 +117,47 @@ def course(text):
     return value
 
 
-def iter_csv(path, required, time_columns, optional_time_columns=()):
+def iter_csv(path, required, time_columns, optional_time_columns=(), *,
+             max_bytes=MAX_BYTES, max_rows=MAX_ROWS):
+    if not 0 < max_bytes <= EXTENDED_MAX_BYTES:
+        raise ValueError(f"byte limit must be 1..{EXTENDED_MAX_BYTES}")
+    if not 0 < max_rows <= EXTENDED_MAX_ROWS:
+        raise ValueError(f"row limit must be 1..{EXTENDED_MAX_ROWS}")
     sealed_guard.refuse(path)
-    if path.stat().st_size > MAX_BYTES:
-        raise ValueError(f"{path}: input exceeds {MAX_BYTES} bytes")
-    with sealed_guard.open_read(path, "r", newline="", encoding="utf-8") as stream:
-        reader = csv.DictReader(stream)
-        missing = [name for name in required if name not in (reader.fieldnames or [])]
+    if path.stat().st_size > max_bytes:
+        raise ValueError(f"{path}: input exceeds {max_bytes} bytes")
+    # `buffering=0` prevents the guarded opener from prefetching bytes outside this limiter.
+    with sealed_guard.open_read(path, "rb", buffering=0) as source:
+        bounded = _ByteLimitedRaw(source, max_bytes)
+        binary = io.BufferedReader(bounded)
+        with io.TextIOWrapper(binary, newline="", encoding="utf-8") as stream:
+            yield from _iter_csv_rows(path, stream, required, time_columns,
+                                      optional_time_columns, max_rows)
+
+
+def _iter_csv_rows(path, stream, required, time_columns, optional_time_columns, max_rows):
+    old_field_limit = csv.field_size_limit()
+    csv.field_size_limit(MAX_CSV_FIELD_CHARS)
+    try:
+        records = _iter_bounded_csv_records(stream)
+        header = next(records, None)
+        if header is None:
+            raise ValueError(f"{path}: CSV header is missing")
+        header_line, fieldnames = header
+        missing = [name for name in required if name not in fieldnames]
         if missing:
             raise ValueError(f"{path}: missing columns: {','.join(missing)}")
-        if len(set(reader.fieldnames or [])) != len(reader.fieldnames or []):
+        if len(set(fieldnames)) != len(fieldnames):
             raise ValueError(f"{path}: duplicate column names")
-        for n, row in enumerate(reader, 1):
-            if n > MAX_ROWS:
-                raise ValueError(f"{path}: input exceeds {MAX_ROWS} rows")
-            if None in row or any(value is None for value in row.values()):
-                raise ValueError(f"{path}:{n + 1}: malformed row width")
+        for n, cells in records:
+            if n - header_line > max_rows:
+                raise ValueError(f"{path}: input exceeds {max_rows} rows")
+            if len(cells) != len(fieldnames):
+                raise ValueError(f"{path}:{n}: malformed row width")
+            row = dict(zip(fieldnames, cells))
             # The production guard API accepts UTC nanoseconds; these CSV schemas store UTC
-            # milliseconds. Convert only parseable integer timestamp cells for the guard, leaving
-            # malformed values for this reader's explicit parser to reject below.
+            # milliseconds. Convert only parseable integer timestamp cells for the guard,
+            # leaving malformed values for this reader's explicit parser to reject below.
             guard_row = dict(row)
             for name in (*time_columns, *optional_time_columns):
                 value = row.get(name)
@@ -94,13 +173,16 @@ def iter_csv(path, required, time_columns, optional_time_columns=()):
                 optional=optional_time_columns,
                 keep_malformed=True,
             ):
-                raise ValueError(f"{path}:{n + 1}: timestamp lies in a sealed window")
-            yield n + 1, row
+                raise ValueError(f"{path}:{n}: timestamp lies in a sealed window")
+            yield n, row
+    finally:
+        csv.field_size_limit(old_field_limit)
 
 
-def load_truth(path):
+def load_truth(path, *, max_bytes=MAX_BYTES, max_rows=MAX_ROWS):
     grouped = defaultdict(list)
-    for line, row in iter_csv(path, ("leg", "time_ms", "truth_course_deg", "truth_speed_kt"), ("time_ms",)):
+    for line, row in iter_csv(path, ("leg", "time_ms", "truth_course_deg", "truth_speed_kt"),
+                              ("time_ms",), max_bytes=max_bytes, max_rows=max_rows):
         leg = row["leg"]
         if not leg or len(leg) > 128:
             raise ValueError(f"{path}:{line}: leg must be 1..128 characters")
@@ -122,11 +204,12 @@ def load_truth(path):
     return grouped
 
 
-def load_estimates(path):
+def load_estimates(path, *, max_bytes=MAX_BYTES, max_rows=MAX_ROWS):
     grouped = defaultdict(list)
     for line, row in iter_csv(path,
                               ("leg", "state_time_ms", "system", "course_deg", "availability_ms"),
-                              ("state_time_ms",), ("availability_ms",)):
+                              ("state_time_ms",), ("availability_ms",),
+                              max_bytes=max_bytes, max_rows=max_rows):
         leg, system = row["leg"], row["system"]
         if not leg or len(leg) > 128:
             raise ValueError(f"{path}:{line}: leg must be 1..128 characters")
@@ -522,10 +605,17 @@ def main(argv=None):
     parser.add_argument("--estimates", required=True, type=Path, help="distinct output update CSV")
     parser.add_argument("--protocol", choices=("v2", "v3"), default="v2",
                         help="metric protocol version (default: v2)")
+    parser.add_argument("--extended-budget", action="store_true",
+                        help="use the 1,000,000-row / 128 MiB limits (requires v3)")
     args = parser.parse_args(argv)
     try:
-        truth = load_truth(args.truth)
-        estimates = load_estimates(args.estimates)
+        max_rows, max_bytes = budget_limits(args.protocol, args.extended_budget)
+    except ValueError as exc:
+        print(f"turn_onset: {exc}", file=sys.stderr)
+        return 2
+    try:
+        truth = load_truth(args.truth, max_bytes=max_bytes, max_rows=max_rows)
+        estimates = load_estimates(args.estimates, max_bytes=max_bytes, max_rows=max_rows)
         totals = {n: defaultdict(float) for n in SYSTEMS}
         totals_delays = {n: [] for n in SYSTEMS}
         update_intervals = {n: [] for n in SYSTEMS}
@@ -559,6 +649,7 @@ def main(argv=None):
         else:
             print("protocol=turn-onset-dev-v3-experimental truth=retrospective-smoothed-reference signed_ground_track_rate_only")
             print(f"turn_rate_deg_s={TURN_RATE_DEG_S:g} straight_rate_deg_s={STRAIGHT_RATE_DEG_S:g} straight_s={STRAIGHT_S} persistence_samples={PERSIST_SAMPLES} max_transition_s={MAX_TRANSITION_MS / 1000:g} max_delay_s={MAX_DELAY_S} early_match_s={EARLY_MATCH_S} max_update_gap_s={MAX_UPDATE_GAP_MS / 1000:g}")
+            print(f"v3_capacity_profile={'extended' if args.extended_budget else 'standard'} max_rows_per_csv={max_rows} max_bytes_per_csv={max_bytes} match_work_limit={MAX_MATCH_WORK}")
             print("v3_truth_transition_diagnostics=" + ",".join(
                 f"{key}:{truth_transition_diagnostics[key]}" for key in V3_DIAGNOSTIC_KEYS))
             for name in SYSTEMS:

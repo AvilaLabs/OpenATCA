@@ -104,13 +104,43 @@ unmatched alarms under this proxy definition, not established physical false tur
 errors. Report this asymmetry, reference support gaps, per-system output cadence, and source-time
 clock limitations with every V3 result.
 
-The existing standard-library CSV reader, sealed-window guards, 32 MiB / 250,000-row input caps,
-five-million-work scorer bound, schemas, and matching rules remain unchanged. `--protocol v3`
-adds named per-leg/aggregate state diagnostics for transition candidates started, confirmed,
-cancelled by quiet return, reversal, timeout, invalid truth, or gap, and candidates pending at the
-end of a leg. Cancelled or pending transition candidates are not qualifying truth events and must
-not be counted as detector misses. V2 output schema and default behavior remain unchanged;
-V3 prints its protocol identity and V3-only diagnostic lines before the shared CSV summary.
+Capacity remains explicit and bounded. The standard profile is 250,000 rows and 32 MiB per CSV
+for both the Rust exporter and Python scorer. It remains the default for v2 and v3. The optional
+extended profile is four times those bounds: 1,000,000 rows and 128 MiB per CSV. In the Rust
+example it requires `--turn-onset-extended-budget` together with `--turn-onset`; in the scorer it
+requires `--extended-budget --protocol v3`. The Python scorer refuses extended mode for v2, and
+neither tool accepts limits beyond the extended hard maximum. The Rust exporter checks row count
+and actual accumulated UTF-8 CSV bytes before appending each truth, OA, CV, or SFDPS data row. It
+formats each row through a bounded 512-byte scratch writer, so an oversized formatted row is
+refused before it can grow the export buffer. The Python reader retains the production sealed-path
+and per-row nanosecond checks and additionally counts bytes read from the guarded file descriptor
+through EOF, not only the earlier path-size estimate. Before `csv` constructs a row dictionary,
+the parser caps each physical UTF-8 record at 1,024 bytes, each record at 16 columns, and each field
+at 512 characters. This matches the producer's scalar, single-line CSV schema and refuses
+multiline quoted records; it bounds parser scratch independently of the whole-file cap. The
+five-million-work matching bound,
+schemas, event logic, windows, and matching rules do not change. The Rust provenance records the
+selected profile, row/byte caps, and actual CSV byte lengths.
+
+The Rust exporter and Python scorer run in separate sequential phases; do not add their allocations
+as if simultaneous. For planning only, Python's two tables can contain up to two million materialized
+rows total. At a rough 2 KiB per row this is about 3.82 GiB, plus parser/scoring scratch. The Rust
+phase has up to 256 MiB of logical CSV bytes, a bounded SFDPS dedup map, and its existing clip,
+tracker and SFDPS-loading working sets. These estimates are not measured RSS or formal allocator
+bounds; the existing tracker/loader working sets are not bounded by this export profile. The
+coordinator's 6 GiB / zero-swap guard must cover each actual phase. A guard kill or capacity refusal
+is incomplete and cannot be reported as a complete comparison. Do not claim the total job fits
+under 6 GiB from the export caps alone; record high-water memory for each authorized exporter and
+scorer phase under the guard before declaring the comparison complete. The fourfold profile is not
+unlimited capacity.
+
+`--protocol v3` adds named per-leg/aggregate state diagnostics for transition candidates started,
+confirmed, cancelled by quiet return, reversal, timeout, invalid truth, or gap, and candidates
+pending at the end of a leg. Cancelled or pending transition candidates are not qualifying truth
+events and must not be counted as detector misses. V2 output schema and default behavior remain
+unchanged; V3 prints its protocol identity and V3-only diagnostic lines before the shared CSV
+summary. Its standard capacity profile is also the default; extended limits require the explicit
+V3 flag.
 
 The previously selected two-minute 14Z windows had no shared reference events. The coordinator's
 follow-up development window is ten minutes, `[14:00:00,14:10:00)Z`, on each of the same two

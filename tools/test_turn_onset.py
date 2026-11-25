@@ -3,13 +3,32 @@
 import unittest
 from unittest.mock import patch
 import calendar
+import io
 import tempfile
 import sys
+from contextlib import redirect_stderr
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import turn_onset
 import sealed_guard
+
+
+class CountingRaw:
+    def __init__(self, data):
+        self._stream = io.BytesIO(data)
+        self.bytes_read = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def read(self, size=-1):
+        block = self._stream.read(size)
+        self.bytes_read += len(block)
+        return block
 
 
 def turn_rows(direction=1):
@@ -37,6 +56,95 @@ def v3_ramp_rows(direction=1, initial_course=359.8, end_second=49):
 
 
 class TurnOnsetTests(unittest.TestCase):
+    def test_capacity_profiles_preserve_standard_and_bound_extended(self):
+        self.assertEqual(turn_onset.budget_limits("v2", False),
+                         (250_000, 32 * 1024 * 1024))
+        self.assertEqual(turn_onset.budget_limits("v3", False),
+                         (250_000, 32 * 1024 * 1024))
+        self.assertEqual(turn_onset.budget_limits("v3", True),
+                         (1_000_000, 128 * 1024 * 1024))
+        with self.assertRaisesRegex(ValueError, "requires --protocol v3"):
+            turn_onset.budget_limits("v2", True)
+
+    def test_extended_budget_cli_refuses_before_opening_input(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            status = turn_onset.main([
+                "--truth", "missing-truth.csv", "--estimates", "missing-estimates.csv",
+                "--extended-budget",
+            ])
+        self.assertEqual(status, 2)
+        self.assertIn("requires --protocol v3", stderr.getvalue())
+
+    def test_extended_limits_load_small_synthetic_truth_without_large_allocation(self):
+        development_ms = calendar.timegm((2026, 11, 10, 12, 0, 0)) * 1000
+        rows = "leg,time_ms,truth_course_deg,truth_speed_kt\n" + "".join(
+            f"leg-1,{development_ms + second * 1000},90,120\n" for second in range(3)
+        )
+        estimates = "leg,state_time_ms,system,course_deg,availability_ms\n" + "".join(
+            f"leg-1,{development_ms + second * 1000},sfdps,90,\n" for second in range(3)
+        )
+        max_rows, max_bytes = turn_onset.budget_limits("v3", True)
+        with tempfile.TemporaryDirectory() as tmp:
+            truth_path = Path(tmp) / "small-extended-truth.csv"
+            estimates_path = Path(tmp) / "small-extended-estimates.csv"
+            truth_path.write_text(rows, encoding="utf-8")
+            estimates_path.write_text(estimates, encoding="utf-8")
+            loaded_truth = turn_onset.load_truth(
+                truth_path, max_rows=max_rows, max_bytes=max_bytes)
+            loaded_estimates = turn_onset.load_estimates(
+                estimates_path, max_rows=max_rows, max_bytes=max_bytes)
+        self.assertEqual(len(loaded_truth["leg-1"]), 3)
+        self.assertEqual(len(loaded_estimates[("leg-1", "sfdps")]), 3)
+
+    def test_injected_row_cap_refuses_before_appending_excess_row(self):
+        development_ms = calendar.timegm((2026, 11, 10, 12, 0, 0)) * 1000
+        rows = "leg,time_ms,truth_course_deg,truth_speed_kt\n" + "".join(
+            f"leg-1,{development_ms + second * 1000},90,120\n" for second in range(3)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "row-cap.csv"
+            path.write_text(rows, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exceeds 2 rows"):
+                turn_onset.load_truth(path, max_rows=2, max_bytes=4096)
+
+    def test_python_parser_bounds_csv_columns_physical_records_and_quoted_newlines(self):
+        header = "leg,time_ms,truth_course_deg,truth_speed_kt"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "many-columns.csv"
+            path.write_text(header + "," + ",".join(f"extra{i}" for i in range(13)) + "\n",
+                            encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exceeds 16 columns"):
+                turn_onset.load_truth(path, max_rows=10, max_bytes=4096)
+
+            path.write_text(header + "\n" + "leg-1," + "x" * 1030 + ",120\n",
+                            encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exceeds 1024 UTF-8 bytes"):
+                turn_onset.load_truth(path, max_rows=10, max_bytes=4096)
+
+            path.write_text(header + '\nleg-1,"90\n120",120\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "malformed single-line record"):
+                turn_onset.load_truth(path, max_rows=10, max_bytes=4096)
+
+    def test_guarded_descriptor_reader_probes_at_most_one_byte_past_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "small-stat-but-growing.csv"
+            path.write_bytes(b"x")
+            source = CountingRaw(b"abcdef")
+            with patch.object(sealed_guard, "open_read", return_value=source) as opener:
+                with self.assertRaisesRegex(ValueError, "descriptor exceeds 2 byte limit"):
+                    list(turn_onset.iter_csv(
+                        path, ("a",), (), max_bytes=2, max_rows=1
+                    ))
+            self.assertEqual(opener.call_args.kwargs, {"buffering": 0})
+            self.assertEqual(source.bytes_read, 3)
+
+    def test_caller_cannot_raise_csv_caps_above_extended_hard_maximum(self):
+        with self.assertRaisesRegex(ValueError, "row limit"):
+            turn_onset.load_truth(Path("unused"), max_rows=turn_onset.EXTENDED_MAX_ROWS + 1)
+        with self.assertRaisesRegex(ValueError, "byte limit"):
+            turn_onset.load_truth(Path("unused"), max_bytes=turn_onset.EXTENDED_MAX_BYTES + 1)
+
     def test_v3_gradual_ramp_labels_first_departure_and_alarms_on_third_confirmation(self):
         truth = v3_ramp_rows()
         truth_diag = turn_onset._new_v3_diagnostics()
