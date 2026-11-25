@@ -1276,7 +1276,7 @@ mod turn_window_tests {
     use super::{
         append_bounded_csv_row, checked_turn_window, in_turn_window, increment_export_count,
         select_turn_export_limits, selected_truth_grid_bounds, TurnExportLimits,
-        EXTENDED_TURN_EXPORT, STANDARD_TURN_EXPORT,
+        EXTENDED_TURN_EXPORT, STANDARD_TURN_EXPORT, TURN_EXPORT_MAX_ROW_BYTES,
     };
     use std::fmt::Write as _;
 
