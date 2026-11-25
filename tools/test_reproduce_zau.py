@@ -148,7 +148,10 @@ class ReproduceTests(unittest.TestCase):
         r = sh(REPRO, DAY, self.p.pkg, self.p.out)
         self.assertIn("tar.ab is not in", r.stderr)
         self.assertEqual(r.returncode, 2)
-        self.p.manifest(day="2026-11-19")
+        wrong_day_manifest = self.p.manifest()
+        wrong_day_manifest = wrong_day_manifest.replace("2026-11-15", "2026-11-19")
+        wrong_day_manifest = wrong_day_manifest.replace("v2026.11.15", "v2026.11.19")
+        (self.p.pkg / "MANIFEST").write_text(wrong_day_manifest)
         r = sh(REPRO, DAY, self.p.pkg, self.p.out)
         self.assertIn("the MANIFEST is for 2026-11-19", r.stderr)
         self.assertEqual(r.returncode, 2)
@@ -250,7 +253,7 @@ class ReproduceTests(unittest.TestCase):
         (self.p.pkg / "MANIFEST").write_text(wrong)
         result = sh(REPRO, DAY, self.p.pkg, self.p.out)
         self.assertEqual(result.returncode, 2)
-        self.assertIn("adsb-file URL", result.stderr)
+        self.assertIn("archive part URL does not match its exact release tag and name", result.stderr)
         self.assertFalse(self.p.out.exists())
 
     # REQ: OA-REP-008, OA-REP-009
