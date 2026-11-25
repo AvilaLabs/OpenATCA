@@ -81,6 +81,9 @@ pub struct TrafficCfg {
     pub layout: Layout,
     /// Fraction of aircraft that send ADS-B.
     pub adsb_frac: f64,
+    /// Suppress ADS-B for the complete stress-layout cohort, which is inside radar coverage.
+    /// This mode is deliberately limited to the stress layout and requires at least one radar.
+    pub radar_only: bool,
     /// Radars, in order; offsets from the centre are fixed (see [`RADAR_OFFSETS_KM`]).
     pub radars: Vec<Kind>,
     /// Aircraft that would leave the box within this time fly the other way; any that would still
@@ -259,6 +262,11 @@ impl Traffic {
         if !(0.0..=1.0).contains(&cfg.adsb_frac) {
             return Err("adsb fraction outside 0 to 1".to_string());
         }
+        if cfg.radar_only && (cfg.layout != Layout::Stress || cfg.radars.is_empty()) {
+            return Err(
+                "radar-only mode requires stress layout and at least one radar".to_string(),
+            );
+        }
         if cfg.radars.len() > RADAR_OFFSETS_KM.len() {
             return Err(format!("at most {} radars", RADAR_OFFSETS_KM.len()));
         }
@@ -305,7 +313,8 @@ impl Traffic {
             let alt_ft = 2_000 + 100 * ((rng.unit() * 430.0) as i32);
             let phase_ns =
                 round_ms((rng.unit() * NS_PER_S as f64) as i64).min(NS_PER_S - 1_000_000);
-            let adsb = rng.unit() < cfg.adsb_frac;
+            let adsb_draw = rng.unit();
+            let adsb = !cfg.radar_only && adsb_draw < cfg.adsb_frac;
             ac.push(Aircraft {
                 addr: ADDR_BASE + i as u32,
                 e0,
@@ -355,6 +364,15 @@ impl Traffic {
     /// Aircraft that send ADS-B.
     pub fn adsb_count(&self) -> usize {
         self.ac.iter().filter(|a| a.adsb).count()
+    }
+
+    /// Aircraft intentionally omitted from ADS-B by radar-only stress mode.
+    pub fn radar_only_suppressed_count(&self) -> usize {
+        if self.cfg.radar_only {
+            self.ac.len().saturating_sub(self.adsb_count())
+        } else {
+            0
+        }
     }
 
     /// The ADS-B reports timed in second `k` (from `EPOCH_NS + k` s up to one second later):
@@ -496,6 +514,7 @@ mod tests {
             n,
             layout,
             adsb_frac: 0.5,
+            radar_only: false,
             radars: vec![Kind::EnRoute, Kind::Terminal, Kind::Terminal],
             horizon_s: 120.0,
         }
@@ -514,6 +533,51 @@ mod tests {
             }
         }
         (adsb, plots)
+    }
+
+    #[test]
+    fn radar_only_stress_preserves_same_seed_truth_and_radar_plots() {
+        let baseline_cfg = cfg(20261125, 128, Layout::Stress);
+        let radar_only_cfg = TrafficCfg {
+            radar_only: true,
+            ..baseline_cfg.clone()
+        };
+        let baseline_traffic = Traffic::new(&baseline_cfg).unwrap();
+        let radar_only_traffic = Traffic::new(&radar_only_cfg).unwrap();
+        assert!(baseline_traffic.adsb_count() > 0);
+        assert_eq!(radar_only_traffic.adsb_count(), 0);
+        assert_eq!(
+            radar_only_traffic.radar_only_suppressed_count(),
+            radar_only_cfg.n
+        );
+        for (baseline, radar_only) in baseline_traffic
+            .aircraft()
+            .iter()
+            .zip(radar_only_traffic.aircraft())
+        {
+            assert_eq!(baseline.addr, radar_only.addr);
+            assert_eq!((baseline.e0, baseline.n0), (radar_only.e0, radar_only.n0));
+            assert_eq!((baseline.ve, baseline.vn), (radar_only.ve, radar_only.vn));
+            assert_eq!(baseline.orbit, radar_only.orbit);
+            assert_eq!(baseline.alt_ft, radar_only.alt_ft);
+            assert_eq!(baseline.phase_ns, radar_only.phase_ns);
+        }
+        let baseline = all(&baseline_cfg, 60);
+        let radar_only = all(&radar_only_cfg, 60);
+        assert!(!baseline.0.is_empty());
+        assert!(radar_only.0.is_empty());
+        assert_eq!(baseline.1, radar_only.1);
+    }
+
+    #[test]
+    fn radar_only_mode_rejects_nonstress_or_radarless_inputs() {
+        let mut c = cfg(1, 10, Layout::Nas);
+        c.radar_only = true;
+        assert!(Traffic::new(&c).is_err());
+        let mut c = cfg(1, 10, Layout::Stress);
+        c.radar_only = true;
+        c.radars.clear();
+        assert!(Traffic::new(&c).is_err());
     }
 
     // REQ: OA-PRF-002

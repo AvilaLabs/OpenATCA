@@ -315,6 +315,7 @@ mod tests {
             n: 30,
             layout: Layout::Stress,
             adsb_frac: 0.5,
+            radar_only: false,
             radars: vec![Kind::Terminal],
             horizon_s: 100.0,
         };

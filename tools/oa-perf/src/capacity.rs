@@ -30,6 +30,9 @@ use crate::stats::{dist_of, fmt_f, Dist, Hist, Kv};
 use crate::sys::{loadavg3, status_kb};
 
 const NS_PER_S: i64 = 1_000_000_000;
+/// Opt-in stage samples are at most one day: four f64 values per measured second stay below
+/// 3 MiB, and a longer timer request is refused rather than growing its evidence buffers.
+const MAX_STAGE_TIMING_SECONDS: i64 = 86_400;
 
 /// One capacity run.
 #[derive(Debug, Clone)]
@@ -49,6 +52,8 @@ pub struct CapCfg {
     pub early_stop: bool,
     /// Optional measured-window ADS-B outage, in seconds, beginning at the warm-up boundary.
     pub adsb_dropout_s: Option<i64>,
+    /// Suppress ADS-B for the stress-layout cohort covered by the configured radars.
+    pub radar_only: bool,
     /// Remove Mode C altitude from every measured-window radar plot.
     pub radar_no_altitude: bool,
     /// Opt-in bounded final-snapshot identity summary from plot-assignment evidence.
@@ -59,6 +64,8 @@ pub struct CapCfg {
     pub association_diagnostics: bool,
     /// Opt-in bounded wrong-assignment CSV evidence; requires `truth_score`.
     pub assignment_forensics: bool,
+    /// Opt-in shell timing at existing layer boundaries; never introduces clocks into core.
+    pub stage_timings: bool,
 }
 
 /// Truth-derived identity summary for final confirmed tracks. A7.2: cold report data.
@@ -126,11 +133,21 @@ pub struct ForensicWrongRow {
 #[derive(Debug, Clone)]
 pub struct CapResult {
     pub n: usize,
+    pub fed_seconds: i64,
     pub layout: Layout,
     pub init_diagnostics: bool,
     pub association_diagnostics: bool,
     pub assignment_forensics: bool,
+    /// Available only when shell stage timers were explicitly enabled.
+    pub stage_timing: Option<ShellStageTiming>,
     pub adsb_aircraft: usize,
+    pub radar_only: bool,
+    pub radar_only_suppressed_aircraft: usize,
+    pub radar_observed_aircraft: usize,
+    pub radar_unobserved_aircraft: usize,
+    pub radar_unknown_plot_labels: u64,
+    pub adsb_generated_reports: u64,
+    pub adsb_expected_reports: u64,
     pub half_km: f64,
     pub warmup_s: i64,
     pub measure_s_asked: i64,
@@ -222,8 +239,54 @@ pub struct CapResult {
     pub seconds: Vec<(i64, f64, usize, usize, usize)>,
 }
 
+/// Timings available at the current shell/core boundary. The fusion number is inclusive of all
+/// work inside `fusion_advance`; the output number is shell accounting of returned rows, not core
+/// output generation. No individual fusion/tracker phase is exposed by this API.
+/// A7.2: cold one-run report record; bounded timing samples are held in its separate vector.
+#[derive(Debug, Clone)]
+pub struct ShellStageTiming {
+    pub fusion_advance_ms: Dist,
+    pub output_row_accounting_ms: Dist,
+    /// One measured-second entry aligned with `CapResult::seconds`.
+    pub per_second_ms: Vec<(f64, f64)>,
+}
+
+fn generator_losses(r: &CapResult) -> Vec<(String, u64)> {
+    if !r.radar_only {
+        return Vec::new();
+    }
+    let mut losses = Vec::new();
+    if r.radar_only_suppressed_aircraft != r.n {
+        losses.push((
+            "generator.radar_only_suppression_mismatch".to_string(),
+            r.n.abs_diff(r.radar_only_suppressed_aircraft) as u64,
+        ));
+    }
+    if r.radar_unobserved_aircraft > 0 {
+        losses.push((
+            "generator.radar_only_unobserved_aircraft".to_string(),
+            r.radar_unobserved_aircraft as u64,
+        ));
+    }
+    if r.radar_unknown_plot_labels > 0 {
+        losses.push((
+            "generator.radar_only_unknown_plot_labels".to_string(),
+            r.radar_unknown_plot_labels,
+        ));
+    }
+    if r.adsb_generated_reports != r.adsb_expected_reports {
+        losses.push((
+            "generator.radar_only_adsb_report_mismatch".to_string(),
+            r.adsb_generated_reports
+                .abs_diff(r.adsb_expected_reports)
+                .max(1),
+        ));
+    }
+    losses
+}
+
 impl CapResult {
-    /// The loss-of-work counters that moved during the measured window, by name.
+    /// Measured runtime losses plus whole-run generator-contract failures, by name.
     pub fn loss(&self) -> Vec<(String, u64)> {
         let now = loss_counters(&self.fusion, &self.tracker, self.out_overflow);
         let warm = loss_counters(
@@ -231,14 +294,17 @@ impl CapResult {
             &self.tracker_warm,
             self.out_overflow_warm,
         );
-        now.into_iter()
+        let mut losses: Vec<(String, u64)> = now
+            .into_iter()
             .zip(warm)
             .map(|((name, a), (_, b))| (name, a.saturating_sub(b)))
             .filter(|(_, v)| *v > 0)
-            .collect()
+            .collect();
+        losses.extend(generator_losses(self));
+        losses
     }
 
-    /// The run discarded work in the measured window: some loss counter moved.
+    /// The run discarded measured work or violated the declared generator contract.
     pub fn lost_work(&self) -> bool {
         !self.loss().is_empty()
     }
@@ -253,8 +319,8 @@ impl CapResult {
             && self.advance_ms.max < ADVANCE_BUDGET_MS
     }
 
-    /// A capacity claim: fast enough and no work lost. The knee is the largest `n` where this
-    /// holds.
+    /// A capacity claim: fast enough and no work lost. Radar-only mode also requires complete
+    /// whole-run generator accounting. The knee is the largest `n` where this holds.
     pub fn keeps_up(&self) -> bool {
         self.in_time()
             && !self.lost_work()
@@ -1093,6 +1159,12 @@ fn forensics_source_complete(scratch_full: u64) -> bool {
 
 /// Runs the traffic through the layer and measures it.
 pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
+    if cfg.radar_only != cfg.traffic.radar_only {
+        return Err("radar-only mode must match traffic generator configuration".to_string());
+    }
+    if cfg.radar_only && cfg.adsb_dropout_s.is_some() {
+        return Err("radar-only mode cannot be combined with an ADS-B dropout".to_string());
+    }
     if cfg.warmup_s < 0 {
         return Err("capacity warm-up cannot be negative".to_string());
     }
@@ -1125,6 +1197,16 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             "capacity run exceeds the tracker time limit of {max_s} seconds"
         ));
     }
+    if cfg.stage_timings && cfg.measure_s > MAX_STAGE_TIMING_SECONDS {
+        return Err(format!(
+            "stage-timing evidence is bounded to {MAX_STAGE_TIMING_SECONDS} measured seconds"
+        ));
+    }
+    let stage_capacity = if cfg.stage_timings {
+        usize::try_from(cfg.measure_s).map_err(|_| "stage-timing sample count cannot fit usize")?
+    } else {
+        0
+    };
     let n = cfg.traffic.n;
     let load_start = loadavg3();
     let rss_before_kb = status_kb("VmRSS").unwrap_or(0);
@@ -1140,6 +1222,10 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     // OA-GEN traffic is fixed truth: prebuild the bounded address index and coverage bits before
     // any core timing. Multiple radar labels for one aircraft intentionally count once.
     let mut offered = offered_new(traffic.aircraft());
+    // Complete-run generator accounting is opt-in so default capacity timings and memory stay
+    // unchanged. Capacity is exactly the configured aircraft count (C2/C7).
+    let mut radar_observed = cfg.radar_only.then(|| offered_new(traffic.aircraft()));
+    let mut adsb_generated_reports = 0u64;
     let mut adsb_dropout_reports = 0u64;
     let mut radar_altitudes_removed = 0u64;
     let mut continuity_cohort = BTreeSet::<u32>::new();
@@ -1160,6 +1246,11 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     let mut h_dp = Hist::new(1.0, 1_100);
     let (mut age_unknown, mut recs_taken) = (0u64, 0u64);
     let (mut adv_ms, mut warm_ms) = (Vec::new(), Vec::new());
+    let (mut fusion_advance_samples, mut output_row_accounting_samples) = (
+        Vec::<f64>::with_capacity(stage_capacity),
+        Vec::<f64>::with_capacity(stage_capacity),
+    );
+    let mut per_second_stage_ms = Vec::<(f64, f64)>::with_capacity(stage_capacity);
     let mut seconds = Vec::new();
     let (mut wall_measured, mut wall_total) = (0.0f64, 0.0f64);
     let (mut sum_adsb, mut sum_plots, mut sum_rows) = (0usize, 0usize, 0usize);
@@ -1181,6 +1272,12 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         adsb.clear();
         traffic.adsb_window(k, &mut adsb);
         traffic.plot_windows(k, &mut plots);
+        if cfg.radar_only {
+            adsb_generated_reports = adsb_generated_reports.saturating_add(adsb.len() as u64);
+            if let Some(coverage) = radar_observed.as_mut() {
+                offered_plots(coverage, &plots);
+            }
+        }
         if measured && cfg.radar_no_altitude {
             for plot in plots.iter_mut().flatten() {
                 if plot.alt_ft != oa_track::radar::NONE_ALT {
@@ -1212,7 +1309,14 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         for (r, p) in plots.iter().enumerate() {
             fusion_plots(&mut f, r, p);
         }
-        fusion_advance(&mut f, until, &mut out);
+        let fusion_advance_ms = if cfg.stage_timings {
+            let stage_started = Instant::now();
+            fusion_advance(&mut f, until, &mut out);
+            stage_started.elapsed().as_secs_f64() * 1.0e3
+        } else {
+            fusion_advance(&mut f, until, &mut out);
+            0.0
+        };
         let ms = t0.elapsed().as_secs_f64() * 1.0e3;
         wall_total += ms * 1.0e-3;
         if cfg.truth_score {
@@ -1238,6 +1342,11 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
             for p in plots.iter().flatten() {
                 h_dp.add((until - p.time_ns) as f64 * 1.0e-6);
             }
+            let output_started = if cfg.stage_timings {
+                Some(Instant::now())
+            } else {
+                None
+            };
             let rows = out.t_ns.len();
             for i in 0..rows {
                 let (Some(&key), Some(&t), Some(&fl)) =
@@ -1278,6 +1387,9 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
                     }
                 }
             }
+            let output_row_accounting_ms = output_started
+                .map(|started| started.elapsed().as_secs_f64() * 1.0e3)
+                .unwrap_or(0.0);
             if cfg.adsb_dropout_s.is_some() {
                 continuity_noncoast.push((
                     k,
@@ -1285,6 +1397,11 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
                 ));
             }
             seconds.push((k, ms, adsb.len(), n_plots, rows));
+            if cfg.stage_timings {
+                fusion_advance_samples.push(fusion_advance_ms);
+                output_row_accounting_samples.push(output_row_accounting_ms);
+                per_second_stage_ms.push((fusion_advance_ms, output_row_accounting_ms));
+            }
             sum_adsb += adsb.len();
             sum_plots += n_plots;
             sum_rows += rows;
@@ -1327,9 +1444,39 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
         warm = (*fusion_stats(&f), *fusion_tracker_stats(&f), out.overflow);
     }
     let tracker_table_mb = tracker_bytes(fusion_tracker(&f)) as f64 / (1024.0 * 1024.0);
+    let adsb_expected_reports = if cfg.radar_only {
+        u64::try_from(traffic.adsb_count())
+            .ok()
+            .and_then(|count| {
+                u64::try_from(seconds_done)
+                    .ok()
+                    .and_then(|seconds| count.checked_mul(seconds))
+            })
+            .ok_or("ADS-B generated report expectation overflows")?
+    } else {
+        0
+    };
+    let radar_observed_aircraft = radar_observed
+        .as_ref()
+        .map_or(0, |coverage| coverage.unique);
+    let radar_unknown_plot_labels = radar_observed
+        .as_ref()
+        .map_or(0, |coverage| coverage.unknown);
+    let radar_only_suppressed_aircraft = traffic.radar_only_suppressed_count();
+    let radar_unobserved_aircraft =
+        radar_only_suppressed_aircraft.saturating_sub(radar_observed_aircraft);
     let (tent, conf) = tracker_counts(fusion_tracker(&f));
     let md = measure_done.max(1) as f64;
     let advance_ms = dist_of(&adv_ms);
+    let stage_timing = if cfg.stage_timings {
+        Some(ShellStageTiming {
+            fusion_advance_ms: dist_of(&fusion_advance_samples),
+            output_row_accounting_ms: dist_of(&output_row_accounting_samples),
+            per_second_ms: per_second_stage_ms,
+        })
+    } else {
+        None
+    };
     let measured_from_ns = EPOCH_NS.saturating_add(cfg.warmup_s.saturating_mul(NS_PER_S));
     let (truth_score, truth_score_unavailable) = if !cfg.truth_score {
         (None, None)
@@ -1418,11 +1565,20 @@ pub fn run_capacity(cfg: &CapCfg) -> Result<CapResult, String> {
     }
     Ok(CapResult {
         n,
+        fed_seconds: seconds_done,
         layout: cfg.traffic.layout,
         init_diagnostics: cfg.init_diagnostics,
         association_diagnostics: cfg.association_diagnostics,
         assignment_forensics: cfg.assignment_forensics,
+        stage_timing,
         adsb_aircraft: traffic.adsb_count(),
+        radar_only: cfg.radar_only,
+        radar_only_suppressed_aircraft,
+        radar_observed_aircraft,
+        radar_unobserved_aircraft,
+        radar_unknown_plot_labels,
+        adsb_generated_reports,
+        adsb_expected_reports,
         half_km: half_km(&cfg.traffic),
         warmup_s: cfg.warmup_s,
         measure_s_asked: cfg.measure_s,
@@ -1497,6 +1653,32 @@ pub fn cap_kv(r: &CapResult) -> Kv {
     kv.put("n", r.n);
     kv.put("layout", r.layout.name());
     kv.put("adsb_aircraft", r.adsb_aircraft);
+    if r.radar_only {
+        kv.put("radar_only", 1);
+        kv.put(
+            "radar_only_suppressed_aircraft",
+            r.radar_only_suppressed_aircraft,
+        );
+        kv.put("radar_only_expected_aircraft", r.n);
+        kv.put("radar_only_observed_aircraft", r.radar_observed_aircraft);
+        kv.put(
+            "radar_only_unobserved_aircraft",
+            r.radar_unobserved_aircraft,
+        );
+        kv.put(
+            "radar_only_unknown_plot_labels",
+            r.radar_unknown_plot_labels,
+        );
+        kv.put(
+            "radar_only_adsb_generated_reports",
+            r.adsb_generated_reports,
+        );
+        kv.put("radar_only_adsb_expected_reports", r.adsb_expected_reports);
+        kv.put("radar_only_generator_seconds", r.fed_seconds);
+        for (name, value) in generator_losses(r) {
+            kv.put(&format!("loss.{name}"), value);
+        }
+    }
     kv.put("box_half_km", fmt_f(r.half_km));
     kv.put("warmup_s", r.warmup_s);
     kv.put("measure_s_asked", r.measure_s_asked);
@@ -1618,6 +1800,43 @@ pub fn cap_kv(r: &CapResult) -> Kv {
         kv.put("truth_score.status", "unavailable");
         kv.put("truth_score.reason", reason);
     }
+    if let Some(timing) = &r.stage_timing {
+        kv.put("stage_timing.enabled", 1);
+        kv.put("stage_timing.fusion_advance_scope", "inclusive_core_call");
+        kv.put(
+            "stage_timing.output_row_accounting_scope",
+            "shell_post_core_row_loop",
+        );
+        kv.put("stage_timing.fusion_timer_clock_reads_per_advance", 2);
+        kv.put(
+            "stage_timing.output_timer_clock_reads_per_measured_second",
+            2,
+        );
+        kv.put_dist(
+            "stage_timing.fusion_advance",
+            "ms",
+            &timing.fusion_advance_ms,
+        );
+        kv.put_dist(
+            "stage_timing.shell_output_row_accounting",
+            "ms",
+            &timing.output_row_accounting_ms,
+        );
+        for stage in [
+            "index_build",
+            "index_query",
+            "exact_gating",
+            "assignment",
+            "initiation",
+            "tracker_advance",
+            "core_output_generation",
+        ] {
+            kv.put(
+                &format!("stage_timing.{stage}"),
+                "not_separately_timed_at_current_pure_core_boundary",
+            );
+        }
+    }
     if r.assignment_forensics {
         if let Some(rows) = &r.assignment_forensics_rows {
             kv.put("assignment_forensics.status", "available");
@@ -1726,31 +1945,52 @@ pub fn cap_kv(r: &CapResult) -> Kv {
 
 /// The per-second table of the measured seconds, as CSV.
 pub fn seconds_csv(r: &CapResult) -> String {
+    let stage_suffix = if r.stage_timing.is_some() {
+        ",fusion_advance_wall_ms,shell_output_row_accounting_wall_ms"
+    } else {
+        ""
+    };
     if r.continuity_noncoast.is_empty() {
-        let mut s = String::from("second,wall_ms,adsb_offered,plots_offered,rows_emitted\n");
-        for (k, ms, a, p, rows) in &r.seconds {
-            s.push_str(&format!("{k},{ms:.3},{a},{p},{rows}\n"));
+        let mut s =
+            format!("second,wall_ms,adsb_offered,plots_offered,rows_emitted{stage_suffix}\n");
+        for (i, (k, ms, a, p, rows)) in r.seconds.iter().enumerate() {
+            s.push_str(&format!("{k},{ms:.3},{a},{p},{rows}"));
+            append_stage_csv(&mut s, r.stage_timing.as_ref(), i);
+            s.push('\n');
         }
         return s;
     }
     let mut s = String::from(
-        "second,wall_ms,adsb_offered,plots_offered,rows_emitted,cohort_noncoast,cohort_missing\n",
+        "second,wall_ms,adsb_offered,plots_offered,rows_emitted,cohort_noncoast,cohort_missing",
     );
-    for ((k, ms, a, p, rows), (_, count)) in r.seconds.iter().zip(&r.continuity_noncoast) {
+    s.push_str(stage_suffix);
+    s.push('\n');
+    for (i, ((k, ms, a, p, rows), (_, count))) in
+        r.seconds.iter().zip(&r.continuity_noncoast).enumerate()
+    {
         match count {
             Some(noncoast) if r.continuity_cohort > 0 => s.push_str(&format!(
-                "{k},{ms:.3},{a},{p},{rows},{noncoast},{}\n",
+                "{k},{ms:.3},{a},{p},{rows},{noncoast},{}",
                 r.continuity_cohort.saturating_sub(*noncoast)
             )),
-            Some(_) => s.push_str(&format!(
-                "{k},{ms:.3},{a},{p},{rows},,empty-cutover-cohort\n"
-            )),
+            Some(_) => s.push_str(&format!("{k},{ms:.3},{a},{p},{rows},,empty-cutover-cohort")),
             None => s.push_str(&format!(
-                "{k},{ms:.3},{a},{p},{rows},,uncertain-output-overflow\n"
+                "{k},{ms:.3},{a},{p},{rows},,uncertain-output-overflow"
             )),
         }
+        append_stage_csv(&mut s, r.stage_timing.as_ref(), i);
+        s.push('\n');
     }
     s
+}
+
+fn append_stage_csv(out: &mut String, timing: Option<&ShellStageTiming>, second: usize) {
+    let Some(timing) = timing else { return };
+    if let Some((fusion_ms, output_ms)) = timing.per_second_ms.get(second).copied() {
+        out.push_str(&format!(",{fusion_ms:.3},{output_ms:.3}"));
+    } else {
+        out.push_str(",missing,missing");
+    }
 }
 
 /// CSV for the bounded measured-window wrong-assignment sidecar; absent when export failed closed.
@@ -1849,12 +2089,39 @@ pub fn cap_text(r: &CapResult) -> String {
         verdict,
         r.keeps_up_strict()
     ));
+    if r.radar_only {
+        s.push_str(&format!(
+            "  radar-only generator accounting: ADS-B suppressed for {}/{} aircraft; {} had a generated plot during all {} fed seconds, {} had none; {} unknown labels; ADS-B reports generated/expected {}/{}\n",
+            r.radar_only_suppressed_aircraft,
+            r.n,
+            r.radar_observed_aircraft,
+            r.fed_seconds,
+            r.radar_unobserved_aircraft,
+            r.radar_unknown_plot_labels,
+            r.adsb_generated_reports,
+            r.adsb_expected_reports
+        ));
+    }
     s.push_str(&dist_line("per-advance wall time", "ms", &r.advance_ms));
     s.push_str(&dist_line(
         "  (warm-up seconds, for comparison)",
         "ms",
         &r.warmup_advance_ms,
     ));
+    if let Some(timing) = &r.stage_timing {
+        s.push_str(&dist_line(
+            "shell timer: inclusive fusion_advance call",
+            "ms",
+            &timing.fusion_advance_ms,
+        ));
+        s.push_str(&dist_line(
+            "shell timer: returned-row accounting only",
+            "ms",
+            &timing.output_row_accounting_ms,
+        ));
+        s.push_str("  internal index/gating/assignment/initiation/tracker/output-generation phases are not separately timed at this pure-core boundary.\n");
+        s.push_str("  row-accounting timer measures shell traversal of returned rows; it does not measure core output generation.\n");
+    }
     s.push_str(&format!(
         "  measured polar-index work: {} total = {} build + {} query; {} queries; {} build track visits\n",
         r.fusion
@@ -2238,6 +2505,7 @@ mod tests {
                 n,
                 layout: Layout::Stress,
                 adsb_frac: 0.5,
+                radar_only: false,
                 radars: vec![Kind::EnRoute, Kind::Terminal, Kind::Terminal],
                 horizon_s: (warm + meas) as f64 + 60.0,
             },
@@ -2247,12 +2515,43 @@ mod tests {
             max_wall_s: 120.0,
             early_stop: false,
             adsb_dropout_s: None,
+            radar_only: false,
             radar_no_altitude: false,
             truth_score: false,
             init_diagnostics: false,
             association_diagnostics: false,
             assignment_forensics: false,
+            stage_timings: false,
         }
+    }
+
+    #[test]
+    fn radar_only_run_accounts_for_the_complete_generator_window() {
+        let mut cfg = small(48, 24, 15);
+        cfg.radar_only = true;
+        cfg.traffic.radar_only = true;
+        cfg.truth_score = true;
+        let result = run_capacity(&cfg).unwrap();
+        assert_eq!(result.radar_only_suppressed_aircraft, 48);
+        assert_eq!(result.adsb_aircraft, 0);
+        assert_eq!(result.adsb_generated_reports, 0);
+        assert_eq!(result.adsb_expected_reports, 0);
+        assert_eq!(
+            result.radar_observed_aircraft + result.radar_unobserved_aircraft,
+            48
+        );
+        assert_eq!(result.radar_unknown_plot_labels, 0);
+        let kv = cap_kv(&result);
+        assert_eq!(kv.get("radar_only_generator_seconds"), Some("39"));
+        assert_eq!(kv.get("radar_only_adsb_generated_reports"), Some("0"));
+        assert_eq!(kv.get("radar_only_adsb_expected_reports"), Some("0"));
+        // A generator-accounting defect must remain a named loss even if it occurs in warm-up.
+        let mut invalid = result;
+        invalid.radar_unknown_plot_labels = 1;
+        assert!(invalid.loss().iter().any(|(name, count)| name
+            == "generator.radar_only_unknown_plot_labels"
+            && *count == 1));
+        assert!(!invalid.keeps_up());
     }
 
     #[test]
@@ -2588,6 +2887,7 @@ mod tests {
         assert!(r.tracks_confirmed >= 95, "{}", r.tracks_confirmed);
         // Timing and age figures exist and are ordered.
         assert_eq!(r.advance_ms.n, 20);
+        assert!(r.stage_timing.is_none());
         assert!(r.advance_ms.p50 <= r.advance_ms.p99 && r.advance_ms.p99 <= r.advance_ms.max);
         assert!(r.realtime_ratio > 0.0 && r.keeps_up());
         assert!(r.age_tick_ms.n > 0 && r.age_update_ms.n > 0);
@@ -2625,6 +2925,35 @@ mod tests {
         }
         assert!(cap_text(&r).contains("loaded machine, preliminary"));
         assert_eq!(seconds_csv(&r).lines().count(), 21);
+        assert_eq!(
+            seconds_csv(&r).lines().next(),
+            Some("second,wall_ms,adsb_offered,plots_offered,rows_emitted")
+        );
+    }
+
+    #[test]
+    fn opt_in_shell_stage_timing_reports_only_available_boundaries() {
+        let mut cfg = small(48, 5, 4);
+        cfg.stage_timings = true;
+        let r = run_capacity(&cfg).unwrap();
+        let timing = r.stage_timing.as_ref().expect("opt-in shell timers");
+        assert_eq!(timing.fusion_advance_ms.n, 4);
+        assert_eq!(timing.output_row_accounting_ms.n, 4);
+        assert_eq!(timing.per_second_ms.len(), r.seconds.len());
+        let kv = cap_kv(&r);
+        assert_eq!(kv.get("stage_timing.enabled"), Some("1"));
+        assert_eq!(
+            kv.get("stage_timing.index_build"),
+            Some("not_separately_timed_at_current_pure_core_boundary")
+        );
+        assert!(cap_text(&r).contains("not separately timed at this pure-core boundary"));
+        let csv = seconds_csv(&r);
+        let mut lines = csv.lines();
+        let header = lines.next().expect("CSV header");
+        assert!(header.ends_with("fusion_advance_wall_ms,shell_output_row_accounting_wall_ms"));
+        for line in lines {
+            assert_eq!(line.split(',').count(), 7);
+        }
     }
 
     // REQ: OA-PRF-003

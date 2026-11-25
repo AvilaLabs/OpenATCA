@@ -319,3 +319,25 @@ cargo +1.89.0 run --release --locked -p oa-perf -- one \
   --warmup 60 --duration 15 --no-early-stop --max-tracks 16384 --max-wall 120 \
   --truth-score --initiation-diagnostics --out /tmp/oa-radar-cold-start
 ```
+
+For a named radar-only stress run, `--radar-only` requires `--layout stress` and at least one
+radar. In this layout the full aircraft cohort is inside radar coverage, so ADS-B is suppressed
+for every generated aircraft regardless of `--adsb-frac`. The generator reports the suppressed
+cohort, distinct aircraft with at least one generated radar plot over every fed second, aircraft
+with no generated plot, unknown plot labels, and generated versus expected ADS-B reports over the
+complete run. These are generator accounting checks; zero ADS-B output does not prove radar-only
+identity success, and a run with refused, capped, omitted or unobserved work still fails the
+capacity criterion. This mode leaves radar Mode C altitudes intact unless
+`--radar-no-altitude` is also requested.
+The run is synthetic: it can expose radar-only tracker diagnostics relevant to Claim 3, but it
+does not establish Claim 2, which requires real radar recordings scored against ADS-B. A single
+run also cannot isolate a height effect without a matched control, and it cannot establish
+real-data radar performance.
+
+```sh
+cargo +1.89.0 run --release --locked -p oa-perf -- one \
+  --n 8192 --layout stress --radars e,t,t --seed 20261123 \
+  --warmup 60 --duration 15 --no-early-stop --max-tracks 16384 --max-wall 120 \
+  --truth-score --initiation-diagnostics --association-diagnostics \
+  --radar-only --out /tmp/oa-radar-only-stress
+```

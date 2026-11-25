@@ -63,15 +63,23 @@ Every eligible reference event is a common event for OA, CV and SFDPS. A missing
 reference sample in the ten-second straight interval or through the 30-second delay horizon is a
 reference-gap event, counted once for every system. Do not exclude an event because an estimator
 has no output or misses it. Missing estimator rows/gaps are a per-system availability diagnostic
-and remain `never_detected` if there is no same-direction alarm. `missing_output_events` is a
-subset of the shared denominator and may overlap `never_detected`; the report must state this.
+and remain `never_detected` if there is no same-direction alarm. This diagnostic checks for no
+updates or a state-time gap over 30 seconds; it does not guarantee that three distinct updates are
+present to satisfy detector persistence. `missing_output_events` is a subset of the shared
+denominator and may overlap `never_detected`; the report must state this.
 
 For each event, match the nearest unused same-direction alarm in [-5,+30] seconds. A negative
 delay is an early detection. An opposite-direction alarm in this interval cannot match and is
 counted in `opposite_direction_misses`, a subset of `never_detected`; the opposite alarm remains
-among false turns unless matched to a later eligible opposite-direction event. Alarms within censored reference-gap event windows are counted as
-`gap_associated_alarms` and excluded from false turns because truth cannot classify them. Count
-remaining unmatched alarms as false turns and report false turns per reference flight-hour. Report
+among false turns unless matched to a later eligible opposite-direction event. Alarms within
+censored reference-gap event windows are counted as `gap_associated_alarms` regardless of alarm
+direction and excluded from false turns because truth cannot classify them. Count remaining
+unmatched alarms under the protocol field name `false_turns` and report them per reference
+flight-hour. This is an unmatched-alarm count under the declared proxy definition, not proof of a
+physical false turn or detector error. Truth labels are gated at 30 knots, while the observable-
+output detector has no speed gate because comparable output speed is not part of this frozen input
+schema; consequently low-speed output alarms may contribute to `false_turns`. This truth/detector
+eligibility asymmetry must be disclosed. Report
 the shared event denominator, reference gaps, missing output events, gap-associated alarms,
 matches, never-detected events, opposite-direction misses, early detections, false turns and the
 median/p90 of signed delay among matched events. Keep per-leg counts in coordinator evidence.

@@ -57,6 +57,31 @@ class TurnOnsetTests(unittest.TestCase):
         self.assertEqual(result["missing_output_events"], 1)
         self.assertEqual(result["never_detected"], 1)
 
+    def test_truth_support_uses_the_same_30_knot_gate_as_event_labels(self):
+        below_boundary = turn_rows()
+        below_boundary[20] = (20_000, below_boundary[20][1], 29.9)
+        events = turn_onset.truth_events(below_boundary)
+        self.assertEqual(events, [(11_000, 1)])
+        below_result = turn_onset.score(below_boundary, events, [], [])
+        self.assertEqual(below_result["truth_gaps"], 1)
+
+        at_boundary = turn_rows()
+        at_boundary[20] = (20_000, at_boundary[20][1], 30.0)
+        events = turn_onset.truth_events(at_boundary)
+        self.assertEqual(events, [(11_000, 1)])
+        at_result = turn_onset.score(at_boundary, events, [], [])
+        self.assertEqual(at_result["truth_gaps"], 0)
+
+    def test_gap_window_censors_alarms_regardless_of_direction(self):
+        truth = turn_rows()
+        truth[20] = (20_000, truth[20][1], 29.9)
+        events = turn_onset.truth_events(truth)
+        alarms = [(13_000, 1), (14_000, -1), (42_000, -1)]
+        result = turn_onset.score(truth, events, [], alarms)
+        self.assertEqual(result["truth_gaps"], 1)
+        self.assertEqual(result["gap_associated_alarms"], 2)
+        self.assertEqual(result["false_turns"], 1)
+
     def test_matching_refuses_dense_alarm_work_before_admitting_a_result(self):
         truth = turn_rows()
         alarms = [(13_000 + offset, 1) for offset in range(20)]

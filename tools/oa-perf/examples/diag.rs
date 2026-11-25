@@ -59,6 +59,7 @@ fn main() {
         n,
         layout: Layout::Stress,
         adsb_frac: frac,
+        radar_only: false,
         radars,
         horizon_s: 120.0,
     };

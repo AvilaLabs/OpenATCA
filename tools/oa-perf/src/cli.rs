@@ -36,6 +36,7 @@ flags (defaults in brackets):
                      nas spreads them at the whole-NAS density
   --radars e,t,t     radars: e en-route (12 s), t terminal (4.8 s) [e,t,t]
   --adsb-frac F      fraction of aircraft sending ADS-B [0.5]
+  --radar-only       stress run: suppress ADS-B for the full radar-covered aircraft cohort
   --warmup S --duration S   seconds fed before the statistics, and seconds measured [60, 60]
   --max-wall S       stop a run's feeding after this many wall seconds, positive [540]
   --max-tracks N     tracker capacity [65536]
@@ -47,6 +48,7 @@ flags (defaults in brackets):
   --assignment-forensics  opt-in bounded wrong-assignment rows (requires --truth-score)
   --initiation-diagnostics  opt-in per-radar initiation budget counters
   --association-diagnostics  opt-in per-radar association outcomes and work
+  --stage-timings  opt-in shell-boundary wall timings; fusion internals remain aggregate
   --no-clip --no-overload   leave a part out
   --no-early-stop    feed the whole run even when it is far slower than real time";
 
@@ -62,6 +64,7 @@ pub struct Opts {
     pub layout: Layout,
     pub radars: String,
     pub adsb_frac: f64,
+    pub radar_only: bool,
     pub warmup: i64,
     pub duration: i64,
     pub max_wall: f64,
@@ -77,6 +80,7 @@ pub struct Opts {
     pub init_diagnostics: bool,
     pub association_diagnostics: bool,
     pub assignment_forensics: bool,
+    pub stage_timings: bool,
 }
 
 impl Default for Opts {
@@ -91,6 +95,7 @@ impl Default for Opts {
             layout: Layout::Stress,
             radars: "e,t,t".to_string(),
             adsb_frac: 0.5,
+            radar_only: false,
             warmup: 60,
             duration: 60,
             max_wall: 540.0,
@@ -106,6 +111,7 @@ impl Default for Opts {
             init_diagnostics: false,
             association_diagnostics: false,
             assignment_forensics: false,
+            stage_timings: false,
         }
     }
 }
@@ -178,6 +184,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             }
             "--radars" => o.radars = it.next().ok_or("--radars needs a value")?.clone(),
             "--adsb-frac" => o.adsb_frac = num(a, it.next())?,
+            "--radar-only" => o.radar_only = true,
             "--warmup" => o.warmup = num(a, it.next())?,
             "--duration" => o.duration = num(a, it.next())?,
             "--max-wall" => o.max_wall = num(a, it.next())?,
@@ -190,6 +197,7 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             "--initiation-diagnostics" => o.init_diagnostics = true,
             "--association-diagnostics" => o.association_diagnostics = true,
             "--assignment-forensics" => o.assignment_forensics = true,
+            "--stage-timings" => o.stage_timings = true,
             "--no-clip" => o.no_clip = true,
             "--no-overload" => o.no_overload = true,
             "--no-early-stop" => o.no_early_stop = true,
@@ -221,11 +229,26 @@ pub fn parse_args(args: &[String]) -> Result<Opts, String> {
             "--assignment-forensics requires --truth-score with the one command".to_string(),
         );
     }
+    if o.stage_timings && o.cmd != "one" {
+        return Err("--stage-timings is available with `one` only".to_string());
+    }
     if o.radar_no_altitude && o.cmd != "one" {
         return Err("--radar-no-altitude is available with `one` only".to_string());
     }
+    if o.radar_only && o.cmd != "one" {
+        return Err("--radar-only is available with `one` only".to_string());
+    }
+    if o.radar_only && o.layout != Layout::Stress {
+        return Err("--radar-only requires --layout stress".to_string());
+    }
+    if o.radar_only && o.adsb_dropout_s.is_some() {
+        return Err("--radar-only cannot be combined with --adsb-dropout".to_string());
+    }
     check_times(&o)?;
-    parse_radars(&o.radars)?;
+    let radars = parse_radars(&o.radars)?;
+    if o.radar_only && radars.is_empty() {
+        return Err("--radar-only requires at least one radar".to_string());
+    }
     Ok(o)
 }
 
@@ -237,6 +260,7 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
             n,
             layout: o.layout,
             adsb_frac: o.adsb_frac,
+            radar_only: o.radar_only,
             radars: parse_radars(&o.radars)?,
             horizon_s: o.warmup.saturating_add(o.duration) as f64 + HORIZON_PAD_S as f64,
         },
@@ -246,11 +270,13 @@ pub fn cap_cfg(o: &Opts, n: usize) -> Result<CapCfg, String> {
         max_wall_s: o.max_wall,
         early_stop: !o.no_early_stop,
         adsb_dropout_s: o.adsb_dropout_s,
+        radar_only: o.radar_only,
         radar_no_altitude: o.radar_no_altitude,
         truth_score: o.truth_score,
         init_diagnostics: o.init_diagnostics,
         association_diagnostics: o.association_diagnostics,
         assignment_forensics: o.assignment_forensics,
+        stage_timings: o.stage_timings,
     })
 }
 
@@ -259,7 +285,9 @@ fn tag(o: &Opts, n: usize) -> String {
 }
 
 fn result_tag(o: &Opts, n: usize) -> String {
-    if o.adsb_dropout_s.is_some() {
+    if o.radar_only {
+        format!("{}_n{n}_radar_only", o.layout.name())
+    } else if o.adsb_dropout_s.is_some() {
         format!("{}_n{n}_dropout", o.layout.name())
     } else if o.assignment_forensics {
         format!("{}_n{n}_assignment_forensics", o.layout.name())
@@ -640,8 +668,9 @@ fn clip_part(o: &Opts, kvs: &mut Kv, drops: &mut oa_sealed::DropReport) -> Resul
 }
 
 fn header(o: &Opts) -> String {
+    let mode = if o.radar_only { " radar-only" } else { "" };
     format!(
-        "oa-perf {} | cpu: {} | nproc {} | load before: {}\nlayout {} radars {} adsb-frac {} warm-up {} s, measured {} s per run, seed {}\n",
+        "oa-perf {} | cpu: {} | nproc {} | load before: {}\nlayout {} radars {} adsb-frac {}{} warm-up {} s, measured {} s per run, seed {}\n",
         o.cmd,
         cpu_model(),
         nproc(),
@@ -649,6 +678,7 @@ fn header(o: &Opts) -> String {
         o.layout.name(),
         o.radars,
         o.adsb_frac,
+        mode,
         o.warmup,
         o.duration,
         o.seed
@@ -741,6 +771,15 @@ mod tests {
                 .radar_no_altitude
         );
         assert!(parse_args(&a("sweep --radar-no-altitude")).is_err());
+        assert!(parse_args(&a("one --radar-only")).unwrap().radar_only);
+        assert!(parse_args(&a("sweep --radar-only")).is_err());
+        assert!(parse_args(&a("one --radar-only --layout nas")).is_err());
+        assert!(parse_args(&a("one --radar-only --adsb-dropout 5")).is_err());
+        let radar_only = parse_args(&a("one --radar-only --n 20")).unwrap();
+        assert!(cap_cfg(&radar_only, 20).unwrap().traffic.radar_only);
+        assert_eq!(result_tag(&radar_only, 20), "stress_n20_radar_only");
+        assert!(parse_args(&a("one --stage-timings")).unwrap().stage_timings);
+        assert!(parse_args(&a("sweep --stage-timings")).is_err());
         assert_eq!(cap_cfg(&o, 20).unwrap().traffic.n, 20);
     }
 

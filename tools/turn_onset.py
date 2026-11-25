@@ -37,6 +37,12 @@ def wrap180(angle):
     return (angle + 180.0) % 360.0 - 180.0
 
 
+def valid_truth_sample(course_deg, speed_kt):
+    """Whether a reference row supports truth-rate labels and their horizons."""
+    return (course_deg is not None and speed_kt is not None
+            and speed_kt >= TRUTH_MIN_SPEED_KT)
+
+
 def optional_float(text):
     if text is None or text.strip() == "":
         return None
@@ -157,7 +163,7 @@ def truth_events(rows):
     quiet_start = run_start = None
     run_sign, run_len, active = 0, 0, False
     for t, c, speed in rows:
-        if c is None or speed is None or speed < TRUTH_MIN_SPEED_KT:
+        if not valid_truth_sample(c, speed):
             previous, quiet_start, run_start = None, None, None
             run_sign, run_len, active = 0, 0, False
             continue
@@ -271,13 +277,13 @@ def score(truth_rows, events, updates, alarms):
     work = len(events) * (STRAIGHT_S + MAX_DELAY_S + 1)
     if work > MAX_MATCH_WORK:
         raise ValueError(f"matching exceeded the bounded work limit ({MAX_MATCH_WORK})")
-    valid_truth_times = {t for t, c, speed in truth_rows if c is not None and speed is not None}
+    valid_truth_times = {t for t, c, speed in truth_rows if valid_truth_sample(c, speed)}
     update_times = [t for t, _, _ in updates]
     opposite = 0
     for onset, direction in events:
         if reference_gap(valid_truth_times, onset):
             gaps += 1
-            gap_events.append((onset, direction))
+            gap_events.append(onset)
             continue
         unavailable_now, inspected = missing_event(update_times, onset, MAX_MATCH_WORK - work)
         unavailable += int(unavailable_now)
@@ -308,12 +314,11 @@ def score(truth_rows, events, updates, alarms):
             raise ValueError(f"matching exceeded the bounded work limit ({MAX_MATCH_WORK})")
         work += 1
         associated = False
-        for onset, direction in gap_events:
+        for onset in gap_events:
             if work >= MAX_MATCH_WORK:
                 raise ValueError(f"matching exceeded the bounded work limit ({MAX_MATCH_WORK})")
             work += 1
-            if (alarm[1] == direction
-                    and -EARLY_MATCH_S * 1000 <= alarm[0] - onset <= MAX_DELAY_S * 1000):
+            if -EARLY_MATCH_S * 1000 <= alarm[0] - onset <= MAX_DELAY_S * 1000:
                 associated = True
                 break
         if associated:
