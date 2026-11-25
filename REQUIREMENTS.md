@@ -3825,6 +3825,13 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-AST-113** The functions without an edition are Ed 2.7; records at the limits of I021/131 and I021/073
   round-trip in Ed 2.4.
 
+## Interface versioned conformance inventory
+- **OA-IFACE-001** The machine-readable `validation/interface-conformance-v1.json` pins the public source
+  revisions and implementation profiles tested for ASTERIX CAT021/048/062 and NAM ACC-to-ACC; its
+  synthetic vectors accept the declared examples and refuse the declared edition, framing, repetition,
+  coordinate and NAM-profile defects. The registry records explicit partial coverage and does not claim
+  whole-ICD conformance, operational interoperability or parity with unavailable legacy traffic.
+
 ## M3 — Surveillance tracking (oa-track)
 
 ### ADS-B-only tracker and its scoring (oa-track, oa-bench adapter)

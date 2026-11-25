@@ -1,0 +1,246 @@
+{
+  "schema": "openatca-interface-conformance/1",
+  "snapshot_date": "2026-11-25",
+  "claim_limit": "Partial, source-versioned test coverage only; this registry does not claim whole-ICD conformance, operational interoperability, or parity with unavailable legacy traffic.",
+  "release_watch": {
+    "status": "baseline_only_not_monitored",
+    "h4_note": "This records the checked source versions and implemented profiles. It does not yet monitor future ERAM/STARS sustainment or standards releases. Before a release is connected, refresh the controlling-source version and rerun the affected suite.",
+    "release_baseline_sources": [
+      {
+        "name": "EUROCONTROL ASTERIX categories and statuses",
+        "url": "https://www.eurocontrol.int/publication/list-asterix-categories-and-their-statuses",
+        "checked_on": "2026-11-25",
+        "published_baseline": "2025-10-22"
+      },
+      {
+        "name": "NAS Enterprise Architecture roadmap",
+        "status": "not_in_source_inventory"
+      }
+    ]
+  },
+  "interfaces": [
+    {
+      "interface_id": "EUROCONTROL-ASTERIX-PART1",
+      "protocol": "ASTERIX block framing and common item encoding",
+      "implementation": "crates/oa-asterix",
+      "support_status": "partial-tested",
+      "in_scope": "Three coded categories only; common framing, FSPEC and item walks are tested against synthetic spec-derived bytes.",
+      "source": {
+        "document_id": "EUROCONTROL-SPEC-0149",
+        "title": "EUROCONTROL Specification for Surveillance Data Exchange, ASTERIX Part I",
+        "edition": "3.1",
+        "edition_date": "2021-11-23",
+        "url": "https://www.eurocontrol.int/publication/eurocontrol-specification-surveillance-data-exchange-part-i",
+        "official_pdf_url": "https://www.eurocontrol.int/sites/default/files/2021-11/eurocontrol-specification-asterix-part1-ed-3-1.pdf",
+        "source_artifact_sha256": null,
+        "artifact_note": "The public publication page is the source pin; its PDF is not vendored in this repository."
+      },
+      "tests": {
+        "suite_files": [
+          "crates/oa-asterix/tests/handbuilt.rs",
+          "crates/oa-asterix/tests/refusal.rs",
+          "crates/oa-asterix/tests/roundtrip.rs",
+          "crates/oa-asterix/tests/interface_conformance.rs",
+          "validation/oa-vectors/src/main.rs"
+        ],
+        "coverage": ["block_header_length", "record_fspec_order", "item_framing", "typed_and_raw_roundtrip", "bounded_refusal_locations"]
+      }
+    },
+    {
+      "interface_id": "EUROCONTROL-ASTERIX-CAT021",
+      "protocol": "ASTERIX Category 021 ADS-B Target Reports",
+      "implementation": "crates/oa-asterix",
+      "support_status": "partial-tested",
+      "operational_revision_status": "not_verified",
+      "supported_profiles": [
+        {
+          "edition": "2.7",
+          "edition_date": "2025-07-02",
+          "currency": "latest edition shown on the official publication page checked 2026-11-25",
+          "case_ids": ["asterix.cat021.ed2_7.minimal_typed", "asterix.cat021.ed2_7.refuse_truncated_header"],
+          "test_names": ["interface_conformance::registry_pins_supported_asterix_profiles_and_partial_scope", "interface_conformance::synthetic_cat021_ed27_and_ed24_vectors_accept_and_refuse_at_profile_boundary"]
+        },
+        {
+          "edition": "2.4",
+          "edition_date": "2015-06-15",
+          "currency": "supported historical profile; not the latest edition",
+          "case_ids": ["asterix.cat021.ed2_4.minimal_typed", "asterix.cat021.ed2_4.refuse_mops_version_3"],
+          "test_names": ["cat021_ed24::the_ed24_uap_is_table_2_of_the_specification", "cat021_ed24::a_record_worked_out_from_the_ed24_item_definitions_decodes_and_encodes", "cat021_ed24::ed24_refuses_what_only_ed27_defines_and_ed27_accepts_it"]
+        }
+      ],
+      "source": {
+        "document_id": "EUROCONTROL-SPEC-0149-12",
+        "title": "EUROCONTROL Specification for Surveillance Data Exchange, ASTERIX Part 12 Category 21",
+        "official_publication_page": "https://www.eurocontrol.int/publication/cat021-eurocontrol-specification-surveillance-data-exchange-asterix-part-12-category-21",
+        "edition_2_4_pdf": "https://www.eurocontrol.int/sites/default/files/content/documents/nm/asterix/20150615-asterix-adsbtr-cat021-part12-v2.4.pdf",
+        "edition_2_7_pdf": "https://www.eurocontrol.int/sites/default/files/2025-07/asterix-adsbtr-cat021-part12-v2-7.pdf",
+        "source_artifact_sha256": null,
+        "artifact_note": "The versioned official publication URLs identify the source; the PDFs are not vendored here."
+      },
+      "tested_scope": "CAT021 2.4 and 2.7 UAP/edition boundary, selected hand-derived typed fields, round-trip, and listed refusal cases. This is not every CAT021 item or whole-spec conformance."
+    },
+    {
+      "interface_id": "EUROCONTROL-ASTERIX-CAT048",
+      "protocol": "ASTERIX Category 048 Monoradar Target Reports",
+      "implementation": "crates/oa-asterix",
+      "support_status": "partial-tested",
+      "operational_revision_status": "not_verified",
+      "supported_profiles": [
+        {
+          "edition": "1.32",
+          "edition_date": "2024-07-01",
+          "currency": "latest edition shown on the official publication page checked 2026-11-25",
+          "case_ids": ["asterix.cat048.ed1_32.minimal_typed", "asterix.cat048.ed1_32.refuse_zero_repetition"],
+          "test_names": ["interface_conformance::registry_pins_supported_asterix_profiles_and_partial_scope", "interface_conformance::synthetic_cat048_and_cat062_vectors_accept_and_refuse_declared_domains"]
+        }
+      ],
+      "source": {
+        "document_id": "EUROCONTROL-SPEC-0149-4",
+        "title": "EUROCONTROL Specification for Surveillance Data Exchange, ASTERIX Part 4 Category 48",
+        "edition": "1.32",
+        "edition_date": "2024-07-01",
+        "publication_page_date": "2024-07-02",
+        "url": "https://www.eurocontrol.int/publication/cat048-eurocontrol-specification-surveillance-data-exchange-asterix-part4",
+        "official_pdf_url": "https://www.eurocontrol.int/sites/default/files/2024-07/eurocontrol-cat048-part4-edition-1-32.pdf",
+        "source_artifact_sha256": null,
+        "artifact_note": "The official publication page identifies the edition; its PDF is not vendored here. Appendix A reserved-expansion coding is a separate document and is not claimed by this profile."
+      },
+      "tested_scope": "Selected hand-derived typed item projection, encoding round-trip, and zero-repetition refusal. Other items are preserved as raw where implemented; no whole-spec claim."
+    },
+    {
+      "interface_id": "EUROCONTROL-ASTERIX-CAT062",
+      "protocol": "ASTERIX Category 062 System Track Data",
+      "implementation": "crates/oa-asterix",
+      "support_status": "partial-tested",
+      "operational_revision_status": "not_verified",
+      "supported_profiles": [
+        {
+          "edition": "1.21",
+          "edition_date": "2025-06-05",
+          "currency": "latest edition shown on the official publication page checked 2026-11-25",
+          "case_ids": ["asterix.cat062.ed1_21.minimal_typed", "asterix.cat062.ed1_21.refuse_latitude_over_90"],
+          "test_names": ["interface_conformance::registry_pins_supported_asterix_profiles_and_partial_scope", "interface_conformance::synthetic_cat048_and_cat062_vectors_accept_and_refuse_declared_domains"]
+        }
+      ],
+      "source": {
+        "document_id": "EUROCONTROL-SPEC-0149-9",
+        "title": "EUROCONTROL Specification for Surveillance Data Exchange, ASTERIX Part 9 Category 62",
+        "edition": "1.21",
+        "edition_date": "2025-06-05",
+        "url": "https://www.eurocontrol.int/publication/cat062-eurocontrol-specification-surveillance-data-exchange-asterix-part-9-category-062",
+        "official_pdf_url": "https://www.eurocontrol.int/sites/default/files/2025-06/asterix-cat062-system-track-data-p9-ed1-21.pdf",
+        "source_artifact_sha256": null,
+        "artifact_note": "The official publication page identifies the edition; its PDF is not vendored here. Appendix A reserved-expansion coding is a separate document and is not claimed by this profile."
+      },
+      "tested_scope": "Selected hand-derived typed item projection, round-trip, and coordinate refusal. Other items are preserved as raw where implemented; no whole-spec claim."
+    },
+    {
+      "interface_id": "FAA-NAM-ACC-TO-ACC",
+      "protocol": "North American Common Coordination messages between Area Control Centres, with ERAM/NAM transport/session profile",
+      "implementation": "crates/oa-nam",
+      "support_status": "partial-tested",
+      "operational_revision_status": "unconfirmed",
+      "default_message_profile": "NAS-IC-21009205 Rev G core set",
+      "additional_message_profile": "NAS-IC-21009205 Rev E Part II profile",
+      "transport_session_profile": "NAS-IC-82422100 v4 with NAS-IR-82422100 v1.4 Figure 3-3 implementation",
+      "named_profiles": [
+        {
+          "profile": "Core",
+          "source_revision": "NAS-IC-21009205 Rev G, 2022-12-15",
+          "behavior": "NAM Part II core messages and fields; no ERAM Attachment 2-only fields."
+        },
+        {
+          "profile": "EramAttachment2",
+          "source_revision": "NAS-IC-21009205 Rev G, 2022-12-15",
+          "behavior": "ERAM Attachment 2 variants for selected message fields, LRM mapping, and retry-number rule; this is a profile over the NAM Rev G core, not a separate full ICD revision."
+        },
+        {
+          "profile": "RevE",
+          "source_revision": "NAS-IC-21009205 Rev E, 2016-04-15",
+          "behavior": "Tested Rev E Part II differences. Rev E partner attachments are not implemented."
+        }
+      ],
+      "source_documents": [
+        {
+          "document_id": "NAS-IC-21009205",
+          "title": "NAM Common Coordination Interface Control Document",
+          "revision": "G",
+          "document_date": "2022-12-15",
+          "source_inventory_file": "nam-icd-nas-ic-21009205-revG-2022-12-15.pdf",
+          "source_sha256": "3fbbe3eba9ea9616a39da624e871c23ca79862aca0d640c85ad70f5ee63d0d87"
+        },
+        {
+          "document_id": "NAS-IC-21009205",
+          "title": "NAM Common Coordination Interface Control Document",
+          "revision": "F",
+          "document_date": "2021-07-22",
+          "source_inventory_file": "nam-icd-nas-ic-21009205-revF-2021-07-22.pdf",
+          "source_sha256": "9a3e796063de64dfa251358e011104ddeaed19aee1f7190e01b2e9f819a79214",
+          "support_status": "source-reviewed-not-a-named-runtime-profile"
+        },
+        {
+          "document_id": "NAS-IC-21009205",
+          "title": "NAM Common Coordination Interface Control Document",
+          "revision": "E",
+          "document_date": "2016-04-15",
+          "source_inventory_file": "nam-icd-nas-ic-21009205-revE-2016-04-15.pdf",
+          "source_sha256": "d54e1ab7e15d8320af64fbcecb5bd90294f56f92b7a22857505b4c554ad85126",
+          "support_status": "RevE-profile-tested"
+        },
+        {
+          "document_id": "NAS-IC-82422100",
+          "title": "ERAM / NAM Non-US ACC System Interface Control Document",
+          "revision": "4",
+          "source_inventory_file": "eram-nonusacc-icd-v4.pdf",
+          "source_sha256": "926283b4293a5121e331a64496a14b6f7a5d9e7e103f6e177f9704e29b889bb7",
+          "source_note": "The available copy's session diagram is blank; the implementation uses the cited IRD Figure 3-3 instead."
+        },
+        {
+          "document_id": "NAS-IR-82422100",
+          "title": "ERAM / NAM Non-US ACC Interface Requirements Document",
+          "revision": "1.4",
+          "source_inventory_file": "eram-nonusacc-ird-v1.4.pdf",
+          "source_sha256": "a8df0324e7f111abeb1891711c91ffda6539a6698228b8a1038681c66e344dac"
+        }
+      ],
+      "tested_scope": {
+        "message_examples": "All 37 examples in NAM Rev G Part II sections 3.1.1 through 3.8.2 are represented by tests; one printed POA example is explicitly refused as defective and the corrected form is separately tested.",
+        "message_set": "The 25 Part II Table 2 core messages; other messages and per-partner attachments are refused/not implemented.",
+        "timing_sequence": "Deterministic session tests cover named IRD timers, response deadlines, message-number sequencing and workload arithmetic; test timestamps are synthetic inputs, not legacy observations.",
+        "legacy_comparison": "No comparison to unavailable ERAM/NAM production messages or live traffic is made."
+      },
+      "tests": {
+        "suite_files": [
+          "crates/oa-nam/tests/vectors.rs",
+          "crates/oa-nam/tests/review.rs",
+          "crates/oa-nam/tests/session.rs",
+          "crates/oa-nam/tests/malformed.rs",
+          "crates/oa-nam/tests/transport_epoch.rs",
+          "crates/oa-nam/tests/interface_conformance.rs"
+        ],
+        "representative_test_names": [
+          "vectors::fpl_1_sherbrooke_to_montpelier",
+          "vectors::poa_1_printed_with_a_defect_is_refused_and_the_corrected_form_parses",
+          "review::rev_e_differs_in_asm_poi_poa_and_poj",
+          "session::next_deadline_follows_the_running_timers",
+          "session::workload_table_is_consistent_with_the_icd_arithmetic",
+          "malformed::length_bounds_are_enforced",
+          "interface_conformance::registry_pins_nam_sources_profiles_and_partial_scope",
+          "interface_conformance::public_nam_example_defect_is_refused_and_rev_e_profile_is_explicit"
+        ]
+      }
+    }
+  ],
+  "not_covered_by_this_increment": [
+    {
+      "interfaces": ["ASTERIX CAT008", "ASTERIX CAT010", "ASTERIX CAT023", "ASTERIX CAT033", "ASTERIX CAT034"],
+      "status": "not-supported-by-oa-asterix-profile",
+      "note": "The decoder's supported category list is 021, 048 and 062. Unsupported-category refusal is not category conformance."
+    },
+    {
+      "interfaces": ["CD-2/CD-ASR radar", "SBS", "STARS-ERAM IFDT", "ERAM-ERAM", "FDIO", "NADIN", "WARP", "TDLS", "DCNS", "TFMS", "TBFM", "SWIM"],
+      "status": "not-assessed-by-this-increment",
+      "note": "These remain separate G1 interface work; this table does not imply an ICD is unavailable or a parser absent unless stated in that interface's own inventory."
+    }
+  ]
+}
