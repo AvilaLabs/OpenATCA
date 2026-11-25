@@ -3,7 +3,7 @@
 Reviewed against the current component source and the regional increments described below,
 2026-11-24. This register separates implemented code, its
 integration boundary, and the evidence still needed. A component or scripted fixture does not
-close a milestone in [SCOPE.md](../SCOPE.md). OpenATCA remains a research prototype.
+close a milestone in [SCOPE.md](../SCOPE.md). OpenATCA remains an early-stage operational prototype.
 
 | Capability | Implemented entry point / evidence | Integration and qualification limit |
 |---|---|---|

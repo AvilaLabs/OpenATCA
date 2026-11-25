@@ -11,8 +11,8 @@ ledgers.
 
 ## What OpenATCA is today
 
-A research prototype. Nothing here is certified, approved or fit for operational use, and nothing
-may be connected to anything that affects the national airspace. The tracker, the benchmark
+An early-stage operational prototype. Nothing here is certified, approved or fit for operational
+use, and nothing may be connected to anything that affects the national airspace. The tracker, the benchmark
 harness and the airspace model run on recorded and simulated data. The comparison against ERAM on
 recorded traffic is being built; no result of it is published yet.
 
