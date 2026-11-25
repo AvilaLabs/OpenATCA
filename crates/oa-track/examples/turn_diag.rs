@@ -100,6 +100,17 @@ const MAX_SAMPLE_COLUMNS: usize = 64;
 /// Bounds each line split and field storage before allocating its field vector.
 const MAX_SAMPLE_ROW_BYTES: usize = 4096;
 
+// A3: one offline CSV eligibility counter record, outside tracker state.
+#[derive(Default)]
+#[repr(C)]
+struct SampleCounts {
+    common: u64,
+    non_common: u64,
+    no_cross: u64,
+    no_heading: u64,
+}
+const _: () = assert!(core::mem::size_of::<SampleCounts>() == 32);
+
 /// A per-file byte cap enforced on the same verified descriptor used by the decoder.
 // D5 shell input-adapter subsystem: its state is the live reader and remaining byte budget, not a record.
 struct CappedInput {
@@ -273,7 +284,7 @@ fn main() -> ExitCode {
 
 /// The common samples of a p002 `samples.csv` with finite OpenATCA and ERAM cross-track and
 /// track-angle errors.
-fn read_samples(path: &Path) -> Result<Vec<Sample>, String> {
+fn read_samples(path: &Path) -> Result<(Vec<Sample>, SampleCounts), String> {
     let (file, len) =
         oa_sealed::open_regular(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if len > MAX_SAMPLES_FILE_BYTES {
@@ -296,7 +307,7 @@ fn read_samples(path: &Path) -> Result<Vec<Sample>, String> {
 }
 
 /// [`read_samples`] of the text of the file.
-fn parse_samples(text: &str) -> Result<Vec<Sample>, String> {
+fn parse_samples(text: &str) -> Result<(Vec<Sample>, SampleCounts), String> {
     let mut lines = text
         .lines()
         .enumerate()
@@ -335,6 +346,7 @@ fn parse_samples(text: &str) -> Result<Vec<Sample>, String> {
     );
     let (e_cross, e_hdg) = (col("eram_cross_m")?, col("eram_track_err_deg")?);
     let mut v = Vec::new();
+    let mut counts = SampleCounts::default();
     let mut grid_keys = BTreeSet::new();
     for (line_ix, l) in lines {
         if l.len() > MAX_SAMPLE_ROW_BYTES {
@@ -345,10 +357,15 @@ fn parse_samples(text: &str) -> Result<Vec<Sample>, String> {
         }
         let f: Vec<&str> = l.split(',').collect();
         let g = |i: usize| f.get(i).copied().unwrap_or("");
-        if g(c_common) != "1" {
-            continue;
+        match g(c_common) {
+            "0" => {
+                counts.non_common += 1;
+                continue;
+            }
+            "1" => counts.common += 1,
+            _ => return Err(format!("line {} has an invalid common flag", line_ix + 1)),
         }
-        if v.len() >= MAX_SAMPLES {
+        if counts.common > MAX_SAMPLES as u64 {
             return Err(format!(
                 "line {} exceeds {MAX_SAMPLES} common-row limit",
                 line_ix + 1
@@ -365,13 +382,15 @@ fn parse_samples(text: &str) -> Result<Vec<Sample>, String> {
                 line_ix + 1
             ));
         };
-        let (Some(oa_cross), Some(oa_hdg), Some(er_cross), Some(er_hdg)) =
-            (num(c_cross), num(c_hdg), num(e_cross), num(e_hdg))
-        else {
-            return Err(format!(
-                "line {} has a missing or non-finite common error",
-                line_ix + 1
-            ));
+        let (Some(oa_cross), Some(er_cross)) = (num(c_cross), num(e_cross)) else {
+            counts.no_cross += 1;
+            continue;
+        };
+        // p002's common flag denotes position availability, not finite velocity/heading.
+        // Keep the original joint-error eligibility rule and expose its exclusions.
+        let (Some(oa_hdg), Some(er_hdg)) = (num(c_hdg), num(e_hdg)) else {
+            counts.no_heading += 1;
+            continue;
         };
         if !grid_keys.insert((addr, t)) {
             return Err(format!(
@@ -396,7 +415,7 @@ fn parse_samples(text: &str) -> Result<Vec<Sample>, String> {
             flight: g(c_flight).to_string(),
         });
     }
-    Ok(v)
+    Ok((v, counts))
 }
 
 /// Keeps the tick rows of `o` whose key is wanted.
@@ -624,7 +643,8 @@ fn run(
     vel_lag: Option<f32>,
 ) -> Result<String, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
-    let mut samples = read_samples(samples_path)?;
+    let (mut samples, sample_counts) = read_samples(samples_path)?;
+    let parsed_sample_count = samples.len();
     eprintln!("{} common samples", samples.len());
     let want: BTreeSet<(u32, i64)> = samples.iter().map(|s| (s.addr, s.t_ms)).collect();
 
@@ -1088,6 +1108,16 @@ fn run(
         adsb.display(),
         samples.len(),
         rows.len()
+    );
+    let _ = writeln!(
+        o,
+        "CSV eligibility: common rows {}; non-common rows {}; common rows without finite cross-track error {}; remaining common rows without finite heading error {}; eligible rows before rescore {}; rows lost during rescore {}",
+        sample_counts.common,
+        sample_counts.non_common,
+        sample_counts.no_cross,
+        sample_counts.no_heading,
+        parsed_sample_count,
+        parsed_sample_count.saturating_sub(samples.len())
     );
     let mut gaps: Vec<f64> = times
         .values()
@@ -1890,21 +1920,44 @@ mod tests {
 
     // REQ: OA-TRK-402
     #[test]
-    fn common_errors_must_be_finite_and_non_common_rows_are_not_scored() {
+    fn common_position_rows_without_joint_error_values_are_counted_and_not_scored() {
         let mut csv = String::from(
             "# DEVELOPMENT RUN\naddr,t_ms,phase,band,common,oa_miss,oa_cross_m,oa_track_err_deg,oa_row_dt_ms,eram_miss,eram_cross_m,eram_track_err_deg\n",
         );
         csv.push_str("abc123,1000,climb,below,1,0,-3.5,0.4,20,0,7.0,0.2\n");
         csv.push_str("abc124,1000,climb,below,0,0,1.0,0.1,0,1,,\n");
-        let v = parse_samples(&csv).unwrap();
+        let (v, counts) = parse_samples(&csv).unwrap();
         assert_eq!(v.len(), 1);
+        assert_eq!(
+            (
+                counts.common,
+                counts.non_common,
+                counts.no_cross,
+                counts.no_heading
+            ),
+            (1, 1, 0, 0)
+        );
         let s = v.first().unwrap();
         assert_eq!((s.addr, s.t_ms), (0xabc123, 1020));
         assert_eq!((s.oa_cross, s.er_cross), (-3.5, 7.0));
         assert_eq!(s.flight, "climb");
         csv.push_str("abc125,2000,climb,below,1,0,2.0,,0,0,5.0,0.3\n");
-        let error = parse_samples(&csv).err().unwrap();
-        assert!(error.contains("line 5") && error.contains("missing or non-finite common error"));
+        csv.push_str("abc126,3000,climb,below,1,0,,0.2,0,0,5.0,0.3\n");
+        let (v, counts) = parse_samples(&csv).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(
+            (
+                counts.common,
+                counts.non_common,
+                counts.no_cross,
+                counts.no_heading
+            ),
+            (3, 1, 1, 1)
+        );
+        assert_eq!(
+            counts.common,
+            v.len() as u64 + counts.no_cross + counts.no_heading
+        );
         assert!(parse_samples("addr,t_ms\n").is_err());
     }
 
@@ -2082,7 +2135,7 @@ mod tests {
             "abc123,1000,cruise,below,1,0,1,1,20,0,1,1\n",
             "abc123,1010,cruise,below,1,0,2,2,10,0,2,2\n",
         );
-        let samples = parse_samples(csv).unwrap();
+        let (samples, _) = parse_samples(csv).unwrap();
         assert_eq!(samples.len(), 2);
         assert_eq!((samples[0].t_ms, samples[1].t_ms), (1020, 1020));
     }

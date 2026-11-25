@@ -69,7 +69,24 @@ def iter_csv(path, required, time_columns, optional_time_columns=()):
                 raise ValueError(f"{path}: input exceeds {MAX_ROWS} rows")
             if None in row or any(value is None for value in row.values()):
                 raise ValueError(f"{path}:{n + 1}: malformed row width")
-            if sealed_guard.row_in_window(row, time_columns, optional=optional_time_columns):
+            # The production guard API accepts UTC nanoseconds; these CSV schemas store UTC
+            # milliseconds. Convert only parseable integer timestamp cells for the guard, leaving
+            # malformed values for this reader's explicit parser to reject below.
+            guard_row = dict(row)
+            for name in (*time_columns, *optional_time_columns):
+                value = row.get(name)
+                if value is None or value.strip() == "":
+                    continue
+                try:
+                    guard_row[name] = str(int(value) * 1_000_000)
+                except (ValueError, TypeError):
+                    continue
+            if sealed_guard.row_in_window(
+                guard_row,
+                time_columns,
+                optional=optional_time_columns,
+                keep_malformed=True,
+            ):
                 raise ValueError(f"{path}:{n + 1}: timestamp lies in a sealed window")
             yield n + 1, row
 

@@ -95,6 +95,48 @@ class TurnOnsetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "sealed window"):
                 turn_onset.load_estimates(path)
 
+    def test_production_sealed_guard_uses_half_open_ns_window_for_millisecond_csv(self):
+        _, from_ns, to_ns = sealed_guard.production().windows[0]
+        first_sealed_ms = (from_ns + 999_999) // 1_000_000
+        first_open_ms = to_ns // 1_000_000
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "synthetic.csv"
+            path.write_text("leg,state_time_ms,system,course_deg,availability_ms\n"
+                            f"leg-1,{first_sealed_ms},oa,90,\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "sealed window"):
+                turn_onset.load_estimates(path)
+            path.write_text("leg,state_time_ms,system,course_deg,availability_ms\n"
+                            f"leg-1,{first_open_ms},oa,90,\n", encoding="utf-8")
+            self.assertEqual(turn_onset.load_estimates(path)[("leg-1", "oa")][0][0], first_open_ms)
+
+    def test_invalid_required_and_optional_time_cells_remain_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "synthetic.csv"
+            for bad in ("not-a-time", "1.5", str(2**63)):
+                path.write_text("leg,time_ms,truth_course_deg,truth_speed_kt\n"
+                                f"leg-1,{bad},90,120\n", encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    turn_onset.load_truth(path)
+                path.write_text("leg,state_time_ms,system,course_deg,availability_ms\n"
+                                f"leg-1,1000,sfdps,90,{bad}\n", encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    turn_onset.load_estimates(path)
+
+    def test_production_sealed_guard_checks_availability_at_half_open_boundary(self):
+        development_ms = calendar.timegm((2026, 11, 10, 12, 0, 0)) * 1000
+        _, from_ns, to_ns = sealed_guard.production().windows[0]
+        first_sealed_ms = (from_ns + 999_999) // 1_000_000
+        first_open_ms = to_ns // 1_000_000
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "synthetic.csv"
+            path.write_text("leg,state_time_ms,system,course_deg,availability_ms\n"
+                            f"leg-1,{development_ms},sfdps,90,{first_sealed_ms}\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "sealed window"):
+                turn_onset.load_estimates(path)
+            path.write_text("leg,state_time_ms,system,course_deg,availability_ms\n"
+                            f"leg-1,{development_ms},sfdps,90,{first_open_ms}\n", encoding="utf-8")
+            self.assertEqual(turn_onset.load_estimates(path)[("leg-1", "sfdps")][0][2], first_open_ms)
+
 
 if __name__ == "__main__":
     unittest.main()
