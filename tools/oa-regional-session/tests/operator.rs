@@ -13,6 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 fn temp_path(label: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -21,6 +22,20 @@ fn temp_path(label: &str) -> PathBuf {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ))
+}
+
+fn console_binaries() -> &'static [PathBuf; 2] {
+    static BINARIES: OnceLock<[PathBuf; 2]> = OnceLock::new();
+    BINARIES.get_or_init(|| {
+        // Cargo's artifact has hard-link aliases, which the executable seal guard refuses.
+        // Finish both private copies before either console can inherit another copy's write
+        // descriptor across fork/exec (ETXTBSY). Only fixture setup is shared; tests run in parallel.
+        let binaries = [temp_path("console-bin"), temp_path("full-bin")];
+        for path in &binaries {
+            fs::copy(env!("CARGO_BIN_EXE_oa-regional-console"), path).unwrap();
+        }
+        binaries
+    })
 }
 
 fn verify_closed_bundle(output: &std::path::Path) {
@@ -269,14 +284,13 @@ fn fixture_console_journals_fresh_authorized_and_stale_requests() {
     let input = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/synthetic-session.tsv");
     let script = temp_path("script");
     let output = temp_path("out");
-    // Run Cargo's immutable test binary directly; copying adds an artificial write/exec race.
-    let cargo_binary = PathBuf::from(env!("CARGO_BIN_EXE_oa-regional-console"));
+    let executable = &console_binaries()[0];
     fs::write(
         &script,
         b"NEXT\nNEXT\nSELECT ABC101\nACTOR 1\nASSIGNED 15000\nNEXT\nASSIGNED 16000\nQUIT\n",
     )
     .unwrap();
-    let result = Command::new(&cargo_binary)
+    let result = Command::new(executable)
         .args([
             "--input",
             input.to_str().unwrap(),
@@ -306,6 +320,7 @@ fn fixture_console_journals_fresh_authorized_and_stale_requests() {
     verify_closed_bundle(&output);
     fs::remove_dir_all(&output).unwrap();
     fs::remove_file(script).unwrap();
+    fs::remove_file(executable).unwrap();
 }
 
 // REQ: OA-REG-016
@@ -318,8 +333,7 @@ fn full_recorded_batch_keeps_local_command_refusal_visible() {
     let input = temp_path("full-input");
     let script = temp_path("full-script");
     let output = temp_path("full-out");
-    // Run Cargo's immutable test binary directly; copying adds an artificial write/exec race.
-    let cargo_binary = PathBuf::from(env!("CARGO_BIN_EXE_oa-regional-console"));
+    let executable = &console_binaries()[1];
     let mut recording = source
         .lines()
         .take_while(|line| !line.starts_with("v1\t3000000000\t"))
@@ -334,7 +348,7 @@ fn full_recorded_batch_keeps_local_command_refusal_visible() {
         b"NEXT\nNEXT\nSELECT ABC101\nACTOR 1\nASSIGNED 15000\nNEXT\nQUIT\n",
     )
     .unwrap();
-    let result = Command::new(&cargo_binary)
+    let result = Command::new(executable)
         .args([
             "--input",
             input.to_str().unwrap(),
@@ -364,4 +378,5 @@ fn full_recorded_batch_keeps_local_command_refusal_visible() {
     for path in [input, script] {
         fs::remove_file(path).unwrap();
     }
+    fs::remove_file(executable).unwrap();
 }
