@@ -7325,6 +7325,39 @@ FAA value.
 - **OA-CORE-004** Offline replay takes its tracker cadence settings from the measured report
   intervals when available, using the same configuration logic as scope replay.
 
+## Mode S / 1090ES (initial decoder slice)
+
+- **OA-MODE-001** `oa-modes` accepts exactly one 14-octet long frame and supports only DF17 and
+  DF18; every other input length or downlink format returns a typed refusal.
+- **OA-MODE-002** A DF17/DF18 frame is admitted only when the 24-bit extended-squitter parity
+  check over all 112 bits has zero syndrome. The decoder neither corrects bits nor derives an
+  address from parity.
+- **OA-MODE-003** The returned raw frame is byte-identical to input. The announced address is
+  copied from the AA field; DF17 and DF18 CF=0 classify as ICAO-24, DF18 CF=1 as non-ICAO, CF=2,
+  3, 4 and 5 as TIS-B, and CF=6/7 as unclassified. CF=6's body uses the DF17 message formats and
+  is decoded under OA-MODE-004; its AA field is not promoted to ICAO-24 by this decoder. This is
+  not address registration validation.
+- **OA-MODE-004** For DF17 and DF18 CF=0 or CF=6, type codes 1–4 decode category and eight
+  supported IA-5 subset characters. Eight zero codes mean absent identification; an unsupported
+  character code is a typed error. Unimplemented body formats remain available as raw bytes with
+  their type code. DF18 CF=4 is identified as reserved TIS-B management, but its body remains
+  uninterpreted.
+- **OA-MODE-005** The first slice does not demodulate pulses, decode other DFs, perform error
+  correction, reconstruct CPR position or join messages. No measurement time or position is
+  invented.
+- **OA-MODE-006** This implementation is an experimental partial decoder, not a claim of
+  DO-260B conformance or certification. Synthetic vectors are independent of recorded/SWIM data.
+- **OA-MODE-007** For DF17 and DF18 CF=0 or CF=6 airborne position messages (TC 9–18), an all-zero
+  12-bit altitude subfield is reported as unavailable. With Q=1, the decoder extracts N from the
+  11 altitude bits and reports the encoded value as `25*N - 1000` feet, including the code range
+  endpoints -1000 and 50175 ft. This one-frame API does not establish the altitude's datum/source.
+  Q=0 (100-foot Mode C/Gillham encoding) is retained raw and explicitly marked unsupported; no
+  altitude is fabricated. TC 20–22 and other CF families remain uninterpreted for altitude.
+- **OA-MODE-008** For DF17 and DF18 CF=0 or CF=6 position messages, the decoder returns the raw
+  CPR format flag and 17-bit latitude/longitude fields for surface TC 5–8 and airborne TC 9–18.
+  These are encoded fields, not coordinates. The decoder does not pair even/odd frames, apply a
+  local reference, infer a timestamp, or reconstruct a position.
+
 ## Reproducible ZAU comparison package (p002 `--export-eram`, `--eram-export`, tools/reproduce_zau.sh)
 
 - **OA-REP-001** `p002 --export-eram FILE --sfdps-dir DIR` writes the ERAM data the scorer reads and nothing else:

@@ -16,6 +16,7 @@ members = [
     "crates/oa-json",
     "crates/oa-tar",
     "crates/oa-adsb",
+    "crates/oa-modes",
     "crates/oa-airspace",
     "crates/oa-feed",
     "crates/oa-fixm",
