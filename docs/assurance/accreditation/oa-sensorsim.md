@@ -1,45 +1,55 @@
-# Proposed accreditation record: sensor simulator
+# Sensor simulator capability
 
-**Status: DRAFT / NOT ACCREDITED / NOT APPROVED FOR system verification.** This record does not
-validate the simulator's model against operational sensors.
+**Status:** Proposal, under review.
 
-## Identification and intended use
+## Intended use and boundary
 
-- **Capability:** `oa-sensorsim`, implemented in `crates/oa-sensorsim`.
-- **Proposed use:** deterministic, labeled synthetic radar and ADS-B scenarios for component tests,
-  fault injection, and sensitivity studies.
-- **Not intended to establish:** operational radar detection probability, surveillance accuracy,
-  field coverage, sensor registration, or fidelity outside the selected model.
-- **Configuration:** bind source/build, truth source and coverage, time window, site, scan settings,
-  sensor profile, explicitly chosen error and split parameters, random seed, platform, and all
-  output limits for each use.
+`oa-sensorsim` in `crates/oa-sensorsim` is proposed to generate deterministic, labeled synthetic
+radar and ADS-B scenarios for component tests, fault injection, and sensitivity studies. A result
+supports conclusions about the selected software model and frozen inputs only. It does not establish
+operational radar detection probability, surveillance accuracy, field coverage, sensor registration,
+or fidelity outside the selected model.
 
-## Model and assumptions
+## Configuration and admission record
+
+Freeze the truth source and covered time interval, site and coordinates, scan settings, sensor
+profile, error and split parameters, random seed, platform, output schema, resource limits, and
+expected invariants. Bind these to source revision and clean/dirty state, compiler/toolchain,
+command, exact binary hashes, and generated report identities.
+
+The evidence package must prove build closure using an isolated empty target directory, exact build
+invocation, toolchain, lockfile and resolved dependency manifest, relevant environment, complete
+build log, and produced artifact hashes. A top-level source hash alone does not establish which
+dependencies or cached artifacts produced the executable. Retain all inputs, outputs, refusals,
+resource records, and discrepancies.
+
+## Evidence and decision criteria
+
+Synthetic tests for random generation, geometry, quantization, and repeatability can support
+implementation checks for those properties. They do not validate physical sensor behavior. Before
+credited use, the TEMP must identify the intended model claims, fidelity class, known-answer cases,
+acceptance bounds, uncertainty treatment, and refusal conditions. An independent reviewer checks
+the frozen model/configuration, truth coverage, implementation checks, and comparison to a separately
+controlled reference. The authority records accepted, rejected, or restricted use and the evidence
+supporting that decision.
+
+Refuse admission if the truth coverage, sensor profile, seed, source/build closure, or input/output
+identity is unbound; an acceptance criterion is missing or post hoc; a required comparison is absent;
+or outputs are incomplete. A failed bound or unresolved discrepancy stays visible and cannot be
+reclassified by changing model settings after observing results.
+
+## Limits and open questions
 
 The radar model queries a truth trajectory, solves scan crossing times, and applies configured
 detection, range and azimuth noise, coverage, altitude quantization, false plots, and split plots.
-Pressure altitude is treated as ellipsoid height; a truth record without altitude uses zero height
-for the geometry model. Named profiles contain literature-derived values and assumptions; the code
-requires explicit site biases and split geometry because their values are not established. Some
-model outputs use platform math-library functions, so bit-level repeatability can vary by runtime.
-The table has a finite plot limit, which does not alone establish end-to-end memory or runtime
-bounds.
+Pressure altitude is treated as ellipsoid height; truth without altitude uses zero height for the
+geometry model. Named profiles contain literature-derived values and assumptions; site biases and
+split geometry require explicit values because they are not established by the profile names.
+Some outputs use platform math-library functions, so bit-level repeatability can vary by runtime.
+The plot-table limit alone does not establish end-to-end memory or runtime bounds.
 
-## Evidence and gaps
-
-The source contains synthetic tests for random generation, geometry, quantization, and repeatability.
-They support implementation checks only. No approved execution package or independent comparison
-against measured sensor truth is identified for this record. Unsourced bias and timing distributions,
-clutter, site adaptation, propagation, receiver processing, and correlated errors remain material
-fidelity gaps. A deterministic synthetic result does not demonstrate physical accuracy.
-
-## Required entrance and exit evidence
-
-The approved TEMP must define use-specific fidelity classes and acceptance criteria. Freeze and
-independently review the simulator, truth source, site, profiles, seed, toolchain, and output schema.
-Validation requires representative measured data and documented uncertainty for range, azimuth,
-time, detection, false/split reports, altitude, and coverage. Preserve refusals and all sensitivity
-cases; do not tune parameters to obtain a desired tracker outcome. Until independent model
-validation and formal approval, results must be labeled synthetic and cannot support claims about
-operational radar performance. Model owner, independent reviewer, and approval authority remain
-unassigned.
+Unsourced bias and timing distributions, clutter, site adaptation, propagation, receiver processing,
+and correlated errors remain material validation gaps. Representative measured data and documented
+uncertainty for range, azimuth, time, detection, false/split reports, altitude, and coverage are
+required before making claims about operational radar performance. Model owner, independent
+reviewer, and approval authority must be assigned in the governing plan.

@@ -1,44 +1,53 @@
-# Proposed accreditation record: `oa-perf`
+# Performance harness capability
 
-**Status: DRAFT / NOT ACCREDITED / NOT APPROVED FOR system verification.** This record does not
-qualify national capacity, operational latency, or radar performance.
+**Status:** Proposal, under review.
 
-## Identification and intended use
+## Intended use and boundary
 
-- **Capability:** `oa-perf`, implemented in `tools/oa-perf` and the `oa-track` fusion layer.
-- **Proposed use:** controlled engineering measurements of specified synthetic workloads, bounded
-  clip latency, work counters, memory use, and explicitly instrumented timing boundaries.
-- **Not intended to establish:** whole-system national capacity, a live-facility deadline, radar
-  accuracy, field availability, or production suitability.
-- **Configuration:** bind source/build, compiler, host and OS, seed, workload layout, rates, sensor
-  mix, warm-up, measurement duration, limits, diagnostic settings, and command for every run.
+`oa-perf` in `tools/oa-perf` and the `oa-track` fusion layer is proposed for controlled engineering
+measurements of specified synthetic workloads, bounded clip latency, work counters, memory use,
+and explicitly instrumented timing boundaries. It is not evidence of national capacity, a live
+facility deadline, radar accuracy, field availability, or production suitability.
 
-## Measurement model and limits
+## Configuration and admission record
 
-The synthetic capacity workload simplifies traffic geometry, movement, and sensor schedules. In
-the capacity path, per-second inputs are generated outside the timed region; the measured region
-includes offering the work and the inclusive fusion-advance call, while output draining is timed
-separately. The current implementation exposes only selected shell-boundary timing measurements;
-requested internal fusion-stage timings remain unavailable. Observer-heavy diagnostic runs are not
-equivalent to uninstrumented runs. A short synthetic run on one host cannot establish sustained or
-facility-wide performance.
+Freeze the workload class and generator, seed, traffic layout, rates, sensor mix, warm-up,
+measurement interval, timing boundaries, diagnostic settings, expected work, resource limits, and
+acceptance criteria. Bind the record to source revision and clean/dirty state, exact binary hashes,
+compiler/toolchain, host and OS, environment, command, output schema, and report hashes.
 
-## Evidence and deficiencies
+Prove source-to-binary closure with an isolated empty target directory, exact build invocation,
+toolchain, lockfile and resolved dependency manifest, relevant environment, complete build log,
+and artifact hashes. A source-tree hash does not prove that cached or stale objects were absent.
+Retain raw timing/work outputs, resource records, complete logs, and discrepancies for independent
+review.
 
-The source includes tests for workload generation, bounded counters, and selected timing output.
-No tests were run for this draft. A frozen synthetic radar stress procedure completed, but its
-declared work-completion and matching qualification criteria failed. This remains a negative
-qualification result; fast timing cannot override missing work. The result does not demonstrate
-operational radar detection rates. A separate diagnostic profile was observer-affected and is not
-qualification evidence. Neither finding is a reason to change thresholds after seeing outcomes.
+## Evidence and decision criteria
 
-## Required entrance and exit evidence
+The source includes checks for workload generation, bounded counters, and selected timing output.
+The documented frozen synthetic radar stress procedure completed but failed its declared
+work-completion and matching criteria. That is a negative qualification result and remains open;
+short timing does not compensate for missing work. A separate diagnostic profile was observer-
+affected and is not qualification evidence.
 
-The approved TEMP must define workload classes, workload fidelity, loss policy, duration, memory
-and CPU limits, timing boundaries, and acceptance criteria before testing. Independently review the
-generator and measurement method; freeze source/build, host, seed, workload, diagnostic profile,
-and output validation. Treat the failed stress criterion as unresolved until causes are reviewed
-and a separately approved rerun meets the predeclared gates. Complete or explicitly retain the
-missing stage-timing limitation. Separate representative national workloads, real-data ingestion,
-alerts, recovery, long-duration, and field testing require their own plans and evidence. Capability
-owner, independent measurement reviewer, and approval authority remain unassigned.
+For a future credited use, the approved TEMP must state workload representativeness, loss policy,
+duration, memory and CPU bounds, timing boundaries, and acceptance criteria before execution.
+Independently review the generator and measurement method, then decide against the frozen gates.
+Accept only when the procedure completes all required work and meets all predeclared criteria with
+complete identity-bound evidence. Refuse or retain a negative result for incomplete work, exceeded
+limits, missing instrumentation, observer effects, incomplete logs, or unbound source/build/input.
+Any rerun after a failed criterion needs an approved prospective procedure; do not adjust thresholds
+to fit observed outcomes.
+
+## Limits and open questions
+
+Capacity inputs are generated outside the timed region; the measured region includes offering work
+and the inclusive fusion-advance call, while output draining is measured separately. Current code
+exposes selected shell-boundary timings; requested internal fusion-stage timings remain unavailable.
+Observer-heavy diagnostics are not equivalent to uninstrumented runs. Short synthetic runs on one
+host cannot establish sustained or facility-wide performance.
+
+Representative national workloads, real-data ingestion, alerts, recovery, long-duration behavior,
+and field testing require separate evidence. Resolve or explicitly retain the missing stage-timing
+limitation. Capability owner, independent measurement reviewer, and approval authority must be
+assigned before another qualification run.
