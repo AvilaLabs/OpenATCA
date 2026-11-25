@@ -64,26 +64,28 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-use oa_adsb::{reports_len, NONE_I32, NONE_U16};
+use oa_adsb::{reports_len, NONE_I32, NONE_U16, ZAU_BOX};
 use oa_bench::adsb_truth;
 use oa_bench::assoc::{associate, astatus, TruthIndex};
 use oa_bench::chunked::truth_index;
 use oa_bench::eram_export;
 use oa_bench::geo::KT_MPS;
-use oa_bench::input::{file_opener, load_adsb_counted, load_counted, msg_limit, FeedInput};
+use oa_bench::input::{
+    file_opener, list_inputs, load_adsb_counted, load_counted, msg_limit, FeedInput,
+};
 use oa_bench::legacy::{Legacy, NO_ALT};
 use oa_bench::pair::{build_pairs_with, PairTable};
 use oa_bench::run::RunConfig;
 use oa_bench::stats::{band, phase, Exclusions};
 use oa_bench::thindex::build_th_index;
 use oa_bench::tracker_input::{legacy_from_track_samples_by_leg, TrackSamples};
-use oa_bench::truth::{Truth, TruthLeg};
+use oa_bench::truth::{Truth, TruthLeg, TruthSample};
 use oa_replay::FeedKind;
-use oa_sha256::{sha256, to_hex};
+use oa_sha256::{sha256, to_hex, Sha256};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
     run_tracker_spilled, score_ranges, scoring_timing_config, split_reports, RowSet, RowSource,
-    ScoringTimingProfile, ScoringTimingReport, SCORE_CHUNK_ROWS, SPLIT_TEXT,
+    ScoringTimingProfile, ScoringTimingReport, ScoringTimingSource, SCORE_CHUNK_ROWS, SPLIT_TEXT,
 };
 use oa_track::DEFAULT_CONFIG;
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
@@ -92,6 +94,11 @@ use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
 const TOL_MS: i64 = 500;
 /// Samples below this truth ground speed do not enter a time fit, m/s (`OffsetConfig` default).
 const FIT_MIN_SPEED_MPS: f64 = 50.0;
+// P010 uses the existing P006 pairing direction threshold, not the fit-only cutoff.
+const P010_MIN_DIRECTION_SPEED_MPS: f64 = 10.0;
+// C7: up to eight legs for each of 100,000 addresses over 1,080 score minutes.
+const P010_MAX_ELIGIBILITY_LEG_VISITS: u64 = 864_000_000;
+const P010_MAX_TRUTH_LEGS: usize = 800_000;
 /// Bootstrap resamples and seed (P-002 "Uncertainty").
 const BOOT_N: usize = 1000;
 const BOOT_SEED: u64 = 20_261_119;
@@ -117,6 +124,11 @@ const UNFITTED_TAU_S: f64 = 0.0;
 /// The stamp on every output file of a run marked `--development`.
 const DEV_STAMP: &str = "DEVELOPMENT RUN \u{2014} not a hold-out score";
 const OA_PUBLICATION_GRID_STAMP: &str = "OA_PUBLICATION_GRID=sfdps-v1; OA tick positions rounded to 1 arcsecond then six decimal degrees and velocity components to 1 kt before pairing";
+const P010_WINDOW_PROFILE: &str = "p010-zau-window-v1";
+const P010_BOX_PROFILE: &str = "zau-v1";
+const P010_MAX_ELIGIBLE_ADDRESS_MINUTES: usize = 10_000_000;
+const P010_MAX_ADDRESSES: usize = 100_000;
+const P010_MAX_SFDPS_BYTES: u64 = 64_000_000_000;
 
 const SYS: [&str; 3] = ["OpenATCA", "ERAM", "Passthrough"];
 const OA: usize = 0;
@@ -263,8 +275,9 @@ fn validate_publication_grid_request(
 }
 
 fn combine_has_unsupported_profile(args: &[String]) -> bool {
-    args.iter()
-        .any(|arg| arg == "--timing-profile" || arg == "--oa-publication-grid")
+    args.iter().any(|arg| {
+        arg == "--timing-profile" || arg == "--oa-publication-grid" || arg == "--p010-local-window"
+    })
 }
 
 fn main() -> ExitCode {
@@ -286,6 +299,13 @@ fn main() -> ExitCode {
     let (mut allow_dirty, mut development) = (false, false);
     let mut timing_profile: Option<ScoringTimingProfile> = None;
     let mut oa_publication_grid = false;
+    let mut p010_local_window = false;
+    let (mut warmup_from, mut score_from, mut score_to, mut zau_box_profile): (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = (None, None, None, None);
     let mut frozen: Option<String> = None;
     let mut candidate: Option<String> = None;
     let (mut damage_path, mut ledger): (Option<PathBuf>, Option<PathBuf>) = (None, None);
@@ -313,6 +333,14 @@ fn main() -> ExitCode {
             development = true;
             continue;
         }
+        if a == "--p010-local-window" {
+            if p010_local_window {
+                eprintln!("p002: refused: --p010-local-window may be given only once");
+                return ExitCode::from(2);
+            }
+            p010_local_window = true;
+            continue;
+        }
         if a == "--timing-profile" {
             let Some(value) = args.next() else {
                 eprintln!("p002: --timing-profile needs a profile name");
@@ -323,6 +351,9 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
             match value.as_str() {
+                "legacy-day-intervals" => {
+                    timing_profile = Some(ScoringTimingProfile::LegacyDayIntervals);
+                }
                 "fixed-10-30-120-v1" => {
                     timing_profile = Some(ScoringTimingProfile::Fixed1030120V1);
                 }
@@ -330,6 +361,30 @@ fn main() -> ExitCode {
                     eprintln!("p002: unknown timing profile {value}");
                     return ExitCode::from(2);
                 }
+            }
+            continue;
+        }
+        if [
+            "--warmup-from",
+            "--score-from",
+            "--score-to",
+            "--zau-box-profile",
+        ]
+        .contains(&a.as_str())
+        {
+            let Some(value) = args.next() else {
+                eprintln!("p002: {a} needs a value");
+                return ExitCode::from(2);
+            };
+            let slot = match a.as_str() {
+                "--warmup-from" => &mut warmup_from,
+                "--score-from" => &mut score_from,
+                "--score-to" => &mut score_to,
+                _ => &mut zau_box_profile,
+            };
+            if slot.replace(value).is_some() {
+                eprintln!("p002: refused: {a} may be given only once");
+                return ExitCode::from(2);
             }
             continue;
         }
@@ -368,12 +423,44 @@ fn main() -> ExitCode {
             }
         }
     }
+    let p010 = match parse_p010_window(
+        warmup_from.as_deref(),
+        score_from.as_deref(),
+        score_to.as_deref(),
+        zau_box_profile.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("p002: refused: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if p010_local_window != p010.is_some() {
+        eprintln!("p002: refused: P-010 fields are accepted only with --p010-local-window, which requires all four window/profile fields");
+        return ExitCode::from(2);
+    }
+    if p010_local_window
+        && (!development
+            || allow_dirty
+            || frozen.is_some()
+            || candidate.is_some()
+            || damage_path.is_some()
+            || drop_path.is_some()
+            || !label.is_empty()
+            || !windows.is_empty()
+            || eram_export.is_some()
+            || export_out.is_some()
+            || timing_profile.is_none())
+    {
+        eprintln!("p002: refused: P-010 local window requires --development, one explicit --timing-profile, and --sfdps-dir; it rejects dirty override, frozen/candidate commits, damage/drop-addresses, excluded windows, and ERAM export modes");
+        return ExitCode::from(2);
+    }
     if timing_profile.is_some() && export_out.is_some() {
         eprintln!("p002: refused: --timing-profile cannot be combined with export-only --export-eram mode");
         return ExitCode::from(2);
     }
     if timing_profile.is_some() && (!development || frozen.is_some() || candidate.is_some()) {
-        eprintln!("p002: refused: --timing-profile fixed-10-30-120-v1 requires --development and cannot be combined with frozen/candidate commits");
+        eprintln!("p002: refused: an explicit --timing-profile requires --development and cannot be combined with frozen/candidate commits");
         return ExitCode::from(2);
     }
     if let Err(e) = validate_publication_grid_request(
@@ -407,9 +494,7 @@ fn main() -> ExitCode {
         return export_main(&dir, &file, drop_path.as_deref());
     }
     let (Some(adsb), Some(out)) = (adsb, out) else {
-        eprintln!(
-            "usage: p002 --adsb <clip.oaf> (--sfdps-dir <dir> | --eram-export <file>) --out <dir> [--drop-addresses <file>] [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]... [--damage-report <oa-feed-gaps report>] [--timing-profile fixed-10-30-120-v1] [--oa-publication-grid sfdps-v1] --ledger <file>\n       p002 --combine <dirA> <dirB> <dirC>"
-        );
+        eprintln!("usage: p002 --adsb <clip.oaf> (--sfdps-dir <dir> | --eram-export <file>) --out <dir> [--drop-addresses <file>] [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]... [--damage-report <oa-feed-gaps report>] [--timing-profile legacy-day-intervals|fixed-10-30-120-v1] [--oa-publication-grid sfdps-v1] --ledger <file>\n       p002 --p010-local-window --adsb <full-day clip.oaf> --sfdps-dir <raw dir> --out <private dir> --development --ledger <fresh empty file> --warmup-from <ISO> --score-from <ISO> --score-to <ISO> --zau-box-profile zau-v1 --timing-profile legacy-day-intervals|fixed-10-30-120-v1 [--oa-publication-grid sfdps-v1]\n       p002 --combine <dirA> <dirB> <dirC>");
         return ExitCode::from(2);
     };
     let source = match (sfdps, eram_export) {
@@ -420,6 +505,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if p010_local_window && !matches!(&source, Source::Recording(_)) {
+        eprintln!("p002: refused: P-010 requires raw --sfdps-dir input");
+        return ExitCode::from(2);
+    }
     // Every path is checked, as given and resolved, before anything is opened or created.
     for p in [
         Some(adsb.as_path()),
@@ -436,7 +525,7 @@ fn main() -> ExitCode {
         }
     }
     let git = git_state();
-    if git_is_dirty(&git) && !allow_dirty {
+    if git_is_dirty(&git) && !allow_dirty && !p010_local_window {
         eprintln!(
             "p002: refused: the working tree is not clean ({}); a hold-out score is valid only from a clean checkout at the frozen commit (--allow-dirty runs it, stamped as not valid)",
             git_tree_text(&git)
@@ -517,6 +606,19 @@ fn main() -> ExitCode {
         eprintln!("p002: {e}");
         return ExitCode::from(2);
     }
+    if p010_local_window {
+        match oa_sealed::read(&ledger) {
+            Ok(bytes) if bytes.is_empty() => {}
+            Ok(_) => {
+                eprintln!("p002: refused: P-010 requires a fresh empty per-arm ledger");
+                return ExitCode::from(2);
+            }
+            Err(e) => {
+                eprintln!("p002: refused: P-010 ledger could not be read: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
     // Nothing is written if either output exists (P-006 section 7).
     if let Err(e) = outputs_free(&out) {
         eprintln!("p002: refused: {e}");
@@ -537,6 +639,7 @@ fn main() -> ExitCode {
             drop_list: drop_list.as_ref(),
             timing_profile: timing_profile.unwrap_or(ScoringTimingProfile::LegacyDayIntervals),
             oa_publication_grid,
+            p010,
         },
     ) {
         Ok(text) => {
@@ -2084,6 +2187,244 @@ struct Window {
     to: String,
 }
 
+/// P-010's frozen development-only public comparison window.
+// A7.2: cold struct, size guard waived
+#[derive(Clone, Copy)]
+struct P010Window {
+    warmup_from_ns: i64,
+    score_from_ns: i64,
+    score_to_ns: i64,
+    box_profile: &'static str,
+}
+
+fn parse_p010_window(
+    warmup_from: Option<&str>,
+    score_from: Option<&str>,
+    score_to: Option<&str>,
+    box_profile: Option<&str>,
+) -> Result<Option<P010Window>, String> {
+    let supplied = [warmup_from, score_from, score_to, box_profile]
+        .iter()
+        .filter(|v| v.is_some())
+        .count();
+    if supplied == 0 {
+        return Ok(None);
+    }
+    if supplied != 4 {
+        return Err("P-010 requires --warmup-from, --score-from, --score-to, and --zau-box-profile together".into());
+    }
+    if warmup_from != Some("2026-11-30T05:00:00Z")
+        || score_from != Some("2026-11-30T06:00:00Z")
+        || score_to != Some("2026-12-01T00:00:00Z")
+    {
+        return Err("P-010 timestamp arguments must use the exact canonical UTC strings declared in the protocol".into());
+    }
+    let (warmup_from_ns, score_from_ns, score_to_ns) = (
+        parse_iso_ns(warmup_from.unwrap_or_default())?,
+        parse_iso_ns(score_from.unwrap_or_default())?,
+        parse_iso_ns(score_to.unwrap_or_default())?,
+    );
+    let expected = (
+        parse_iso_ns("2026-11-30T05:00:00Z")?,
+        parse_iso_ns("2026-11-30T06:00:00Z")?,
+        parse_iso_ns("2026-12-01T00:00:00Z")?,
+    );
+    if (warmup_from_ns, score_from_ns, score_to_ns) != expected {
+        return Err("P-010 window must be [2026-11-30T05:00:00Z warm-up, 2026-11-30T06:00:00Z score start, 2026-12-01T00:00:00Z score end)".into());
+    }
+    if box_profile != Some(P010_BOX_PROFILE) {
+        return Err(format!(
+            "P-010 accepts only --zau-box-profile {P010_BOX_PROFILE}"
+        ));
+    }
+    Ok(Some(P010Window {
+        warmup_from_ns,
+        score_from_ns,
+        score_to_ns,
+        box_profile: P010_BOX_PROFILE,
+    }))
+}
+
+fn p010_clip_time_in_day(time_ns: i64) -> bool {
+    let from = days_from_civil(2026, 11, 30) * 86_400 * 1_000_000_000;
+    let to = from + 86_400 * 1_000_000_000;
+    time_ns >= from && time_ns < to
+}
+
+#[derive(Debug, Default)]
+// A7.2: cold struct, size guard waived
+struct P010EligibilityCounts {
+    address_minute_opportunities: u64,
+    no_active_leg_minutes: u64,
+    eligible_address_minutes: u64,
+    ambiguous_candidates: u64,
+    unusable_truth_minutes: u64,
+    no_truth_minutes: u64,
+}
+
+type P010EligibleMinutes = BTreeMap<(u32, i64), u32>;
+
+fn p010_truth_eligible(sample: &TruthSample) -> bool {
+    let speed = oa_math::hypot(sample.vel_east_mps, sample.vel_north_mps);
+    sample.lat.is_finite()
+        && sample.lon.is_finite()
+        && (f64::from(ZAU_BOX.lat_min_e7) / 10_000_000.0
+            ..=f64::from(ZAU_BOX.lat_max_e7) / 10_000_000.0)
+            .contains(&sample.lat)
+        && (f64::from(ZAU_BOX.lon_min_e7) / 10_000_000.0
+            ..=f64::from(ZAU_BOX.lon_max_e7) / 10_000_000.0)
+            .contains(&sample.lon)
+        && sample.vel_east_mps.is_finite()
+        && sample.vel_north_mps.is_finite()
+        && speed.is_finite()
+        && speed >= P010_MIN_DIRECTION_SPEED_MPS
+}
+
+fn p010_public_eligibility(
+    truth: &Truth<'_>,
+    window: P010Window,
+) -> Result<(P010EligibleMinutes, P010EligibilityCounts), String> {
+    if truth.legs.len() > P010_MAX_TRUTH_LEGS {
+        return Err("P010_REFUSED_TRUTH_LEG_CAP".into());
+    }
+    let mut leg_visits = 0u64;
+    let mut by_addr: BTreeMap<u32, Vec<(usize, i64, i64)>> = BTreeMap::new();
+    for (ix, leg) in truth.legs.iter().enumerate() {
+        if !by_addr.contains_key(&leg.addr) && by_addr.len() >= P010_MAX_ADDRESSES {
+            return Err(format!(
+                "P010_REFUSED_ADDRESS_CAP observed_at_least={} cap={P010_MAX_ADDRESSES}",
+                P010_MAX_ADDRESSES + 1
+            ));
+        }
+        by_addr
+            .entry(leg.addr)
+            .or_default()
+            .push((ix, leg.start_ms, leg.end_ms));
+    }
+    let mut eligible = BTreeMap::new();
+    let mut counts = P010EligibilityCounts::default();
+    let start_ms = window.score_from_ns / 1_000_000;
+    let end_ms = window.score_to_ns / 1_000_000;
+    let mut minute_ms = start_ms;
+    while minute_ms < end_ms {
+        for (&addr, legs) in &by_addr {
+            // At most 100,000 addresses x 1,080 minutes: this count cannot overflow.
+            counts.address_minute_opportunities += 1;
+            let mut active_leg = None;
+            let mut active_count = 0usize;
+            for &(ix, from, to) in legs {
+                if leg_visits >= P010_MAX_ELIGIBILITY_LEG_VISITS {
+                    return Err("P010_REFUSED_ELIGIBILITY_WORK_CAP".into());
+                }
+                leg_visits += 1;
+                if from <= minute_ms && minute_ms <= to {
+                    active_count += 1;
+                    active_leg = Some(ix);
+                }
+            }
+            match (active_count, active_leg) {
+                (1, Some(leg_ix)) => match (truth.query)(addr, minute_ms) {
+                    Ok(sample) if sample.leg as usize == leg_ix && p010_truth_eligible(&sample) => {
+                        if eligible.len() >= P010_MAX_ELIGIBLE_ADDRESS_MINUTES {
+                            return Err(format!("P010_REFUSED_ELIGIBLE_ADDRESS_MINUTE_CAP observed_at_least={} cap={P010_MAX_ELIGIBLE_ADDRESS_MINUTES}", P010_MAX_ELIGIBLE_ADDRESS_MINUTES + 1));
+                        }
+                        eligible.insert((addr, minute_ms), sample.leg);
+                        counts.eligible_address_minutes += 1;
+                    }
+                    Ok(_) => counts.unusable_truth_minutes += 1,
+                    Err(_) => counts.no_truth_minutes += 1,
+                },
+                (0, _) => counts.no_active_leg_minutes += 1,
+                _ => counts.ambiguous_candidates += 1,
+            }
+        }
+        minute_ms += 60_000;
+    }
+    // Partition every enumerated address-minute, including those with no active truth leg.
+    if counts.address_minute_opportunities
+        != counts.no_active_leg_minutes
+            + counts.eligible_address_minutes
+            + counts.ambiguous_candidates
+            + counts.unusable_truth_minutes
+            + counts.no_truth_minutes
+    {
+        return Err("P010_REFUSED_ELIGIBILITY_COUNT_MISMATCH".into());
+    }
+    Ok((eligible, counts))
+}
+
+fn p010_keyset_sha256<I>(domain: &[u8], keys: I) -> Result<String, String>
+where
+    I: IntoIterator<Item = (u32, i64, Option<u32>)>,
+{
+    let mut hasher = Sha256::new();
+    hasher
+        .update(domain)
+        .map_err(|e| format!("P-010 cohort hash domain: {e}"))?;
+    for (addr, minute_ms, leg_ix) in keys {
+        let leg_ix = leg_ix
+            .ok_or_else(|| "P-010 available cohort key lacks its eligible truth leg".to_string())?;
+        hasher
+            .update(&addr.to_be_bytes())
+            .map_err(|e| format!("P-010 cohort hash address: {e}"))?;
+        hasher
+            .update(&minute_ms.to_be_bytes())
+            .map_err(|e| format!("P-010 cohort hash minute: {e}"))?;
+        hasher
+            .update(&leg_ix.to_be_bytes())
+            .map_err(|e| format!("P-010 cohort hash truth leg: {e}"))?;
+    }
+    Ok(to_hex(&hasher.finalize()))
+}
+
+fn p010_keeps_time(t_ms: i64, window: P010Window) -> bool {
+    t_ms >= window.score_from_ns.div_euclid(1_000_000)
+        && t_ms < window.score_to_ns.div_euclid(1_000_000)
+}
+
+fn p010_keeps_eligible_time(
+    eligible: &BTreeMap<(u32, i64), u32>,
+    truth: &Truth<'_>,
+    addr: u32,
+    t_ms: i64,
+    window: P010Window,
+) -> bool {
+    p010_keeps_time(t_ms, window)
+        && eligible
+            .get(&(addr, t_ms.div_euclid(60_000) * 60_000))
+            .is_some_and(|&leg| (truth.query)(addr, t_ms).is_ok_and(|sample| sample.leg == leg))
+}
+
+fn filter_times_by_eligible(
+    times: &mut TimesBy,
+    eligible: &BTreeMap<(u32, i64), u32>,
+    truth: &Truth<'_>,
+    window: P010Window,
+) {
+    times.retain(|&addr, values| {
+        values.retain(|&t| p010_keeps_eligible_time(eligible, truth, addr, t, window));
+        !values.is_empty()
+    });
+}
+
+fn p010_preflight_sfdps_bytes(path: &Path) -> Result<u64, String> {
+    let (_, files) = list_inputs(path).map_err(|e| format!("P010 SFDPS input listing: {e}"))?;
+    let mut total = 0u64;
+    for file in files {
+        let (_input, bytes) = oa_sealed::open_regular(&file)
+            .map_err(|e| format!("P010 SFDPS input {} refused: {e}", file.display()))?;
+        total = total
+            .checked_add(bytes)
+            .ok_or("P010 SFDPS byte count overflow")?;
+        if total > P010_MAX_SFDPS_BYTES {
+            return Err(format!(
+                "P010_REFUSED_SFDPS_BYTE_CAP actual={total} cap={P010_MAX_SFDPS_BYTES}"
+            ));
+        }
+    }
+    Ok(total)
+}
+
 /// Days since 1970-01-01 of a proleptic Gregorian date.
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -3419,6 +3760,7 @@ struct Opts<'a> {
     drop_list: Option<&'a BTreeSet<u32>>,
     timing_profile: ScoringTimingProfile,
     oa_publication_grid: bool,
+    p010: Option<P010Window>,
 }
 
 /// Where the ERAM rows come from: the SFDPS recording, or an export of it.
@@ -3441,6 +3783,7 @@ impl Source {
 // A7.2: cold struct, size guard waived
 struct EramLoad {
     legacy: Legacy,
+    source_bytes: u64,
     dir_text: String,
     inputs: Vec<String>,
     manifest: String,
@@ -3672,6 +4015,7 @@ fn run(
         drop_list,
         timing_profile,
         oa_publication_grid,
+        p010,
     } = *opts;
     let partials_left = outputs_free(out_dir)?;
     let windows_all: Vec<Window> = hand_windows
@@ -3692,6 +4036,16 @@ fn run(
     drops.add(clip_sealed);
     let clip = clip.map_err(|e| e.to_string())?;
     let clip_hash = clip.hash.clone();
+    if p010.is_some()
+        && (reports_len(&clip.reports) == 0
+            || clip
+                .reports
+                .time_ns
+                .iter()
+                .any(|&t| !p010_clip_time_in_day(t)))
+    {
+        return Err("P010_REFUSED_PUBLIC_CLIP_OUTSIDE_FULL_UTC_DAY: expected nonempty 2026-11-30 [00:00, 2026-12-01 00:00) report times".into());
+    }
     // P-008 section 5: a clip already scored is refused, whatever the mode.
     if ledger_has(ledger, &clip_hash.sha256)? {
         return Err(format!(
@@ -3722,10 +4076,14 @@ fn run(
     oa_bench::split_check::check_split(&set_a, &set_b)
         .map_err(|v| format!("split refused: {v:?}"))?;
     drop(clip);
-    let (meas, _) = adsb_measurements(&set_a, &AdsbConfig::default());
+    let (mut meas, _) = adsb_measurements(&set_a, &AdsbConfig::default());
     let timing_report: ScoringTimingReport =
         scoring_timing_config(&DEFAULT_CONFIG, &meas, timing_profile);
     let cfg = timing_report.tracker;
+    let n_meas_before_p010_window = meas.len();
+    if let Some(window) = p010 {
+        meas.retain(|m| m.toa_ns >= window.warmup_from_ns && m.toa_ns < window.score_to_ns);
+    }
     let spill = out_dir.join(format!("spill-{}", std::process::id()));
     let t_track = Instant::now();
     let run = run_tracker_spilled(&meas, &cfg, &spill).map_err(|e| e.to_string())?;
@@ -3744,6 +4102,20 @@ fn run(
         query: &q,
         legs: &built.legs,
     };
+    let (p010_eligible, p010_counts) = match p010 {
+        Some(window) => p010_public_eligibility(&truth, window)?,
+        None => (BTreeMap::new(), P010EligibilityCounts::default()),
+    };
+    let p010_truth_cohort_sha256 = if p010.is_some() {
+        p010_keyset_sha256(
+            b"openatca-p010-public-eligible-address-minute-truth-leg-v1\0",
+            p010_eligible
+                .iter()
+                .map(|(&(addr, minute_ms), &leg_ix)| (addr, minute_ms, Some(leg_ix))),
+        )?
+    } else {
+        "not-applicable".to_string()
+    };
     let mut rcfg = RunConfig::default();
     rcfg.pair.max_sigma_m = tcfg.max_sigma95_h_m;
     // frozen p002 protocol: scored without the hint-over-plan rule (OA-BENCH-132 came later)
@@ -3760,6 +4132,15 @@ fn run(
         oa_bench::input::file_opener()(p)
     });
     let mut sfdps_sealed = 0u64;
+    let p010_preflight_bytes = if p010.is_some() {
+        if let Source::Recording(sfdps) = &source {
+            p010_preflight_sfdps_bytes(sfdps)?
+        } else {
+            0
+        }
+    } else {
+        0
+    };
     let mut loaded = match source {
         Source::Recording(sfdps) => {
             let l = load_counted(
@@ -3773,9 +4154,25 @@ fn run(
             );
             drops.add(sfdps_sealed);
             let l = l.map_err(|e| e.to_string())?;
+            if p010.is_some() {
+                let actual_bytes = l
+                    .inputs
+                    .iter()
+                    .fold(0u64, |sum, item| sum.saturating_add(item.bytes));
+                if actual_bytes > P010_MAX_SFDPS_BYTES {
+                    return Err(format!("P010_REFUSED_SFDPS_BYTE_CAP actual={actual_bytes} cap={P010_MAX_SFDPS_BYTES}"));
+                }
+                if actual_bytes != p010_preflight_bytes {
+                    return Err(format!("P010_REFUSED_SFDPS_SOURCE_BYTES_CHANGED preflight={p010_preflight_bytes} loaded={actual_bytes}"));
+                }
+            }
             let meta = describe_recording(sfdps, &l, sfdps_sealed);
             EramLoad {
                 dir_text: meta.source_dir,
+                source_bytes: l
+                    .inputs
+                    .iter()
+                    .fold(0u64, |sum, item| sum.saturating_add(item.bytes)),
                 inputs: meta.source_inputs,
                 manifest: meta.source_sha256,
                 replay_hash: meta.replay_hash,
@@ -3793,6 +4190,7 @@ fn run(
             sfdps_sealed = e.meta.sealed_dropped;
             EramLoad {
                 legacy: eram_export::to_legacy(&e)?,
+                source_bytes: 0,
                 dir_text: e.meta.source_dir,
                 inputs: e.meta.source_inputs,
                 manifest: e.meta.source_sha256,
@@ -3812,6 +4210,7 @@ fn run(
         }
     }
     let sfdps_manifest = loaded.manifest.clone();
+    let sfdps_source_bytes = loaded.source_bytes;
     let sfdps_inputs: Vec<String> = loaded.inputs.clone();
     let sfdps_dir_text = loaded.dir_text.clone();
     let loader = Damage {
@@ -3827,19 +4226,54 @@ fn run(
     drop(loaded);
     let mut er_pts: PerAc = BTreeMap::new();
     let mut er_drop = Dropped::default();
+    let er_keep = |addr: u32, t_ms: i64| {
+        p010.is_none_or(|window| {
+            p010_keeps_eligible_time(&p010_eligible, &truth, addr, t_ms, window)
+        })
+    };
     pair_points(
         &ep.pairs,
         Some(&most_paired_flights(&ep.pairs)),
-        &|_, _| true,
+        &er_keep,
         &mut er_pts,
         &mut er_drop,
     );
     let mut er_old: TimesBy = BTreeMap::new();
     old_rule_times(&ep.pairs, &mut er_old);
+    if let Some(window) = p010 {
+        filter_times_by_eligible(&mut er_old, &p010_eligible, &truth, window);
+    }
     // P-007: the samples inside an excluded window leave the grid for every system alike. The
     // scored legs, the passthrough pairs and the other systems' samples are made from the grid
     // as it was, so no remaining value changes.
     let (scored, er_grid, win_removed, n_win_removed) = plan_grid(&er_pts, &legs, windows);
+    let (
+        p010_eram_available_address_minutes,
+        p010_eram_position_time_rows,
+        p010_eram_cohort_sha256,
+    ) = if p010.is_some() {
+        let mut available = BTreeSet::new();
+        let mut rows = 0u64;
+        for (&addr, pts) in &er_grid {
+            for pt in pts {
+                available.insert((addr, pt.t.div_euclid(60_000) * 60_000));
+                rows += 1;
+            }
+        }
+        let digest = p010_keyset_sha256(
+            b"openatca-p010-eram-available-address-minute-truth-leg-v1\0",
+            available.iter().map(|&(addr, minute_ms)| {
+                (
+                    addr,
+                    minute_ms,
+                    p010_eligible.get(&(addr, minute_ms)).copied(),
+                )
+            }),
+        )?;
+        (available.len() as u64, rows, digest)
+    } else {
+        (0, 0, "not-applicable".to_string())
+    };
     let er_old_win = {
         let t = |m: &TimesBy| -> TimesBy {
             m.iter()
@@ -3913,13 +4347,22 @@ fn run(
             )
         })
         .map_err(|e| format!("track samples: {e:?}"))?;
-        oa_rows += r.addr.len() as u64;
         for (&a, &t) in r.addr.iter().zip(&r.t_ns) {
-            if er_pts.contains_key(&a) {
-                oa_row_times
-                    .entry(a)
-                    .or_default()
-                    .push(t.div_euclid(1_000_000));
+            let t_ms = t.div_euclid(1_000_000);
+            if p010.is_none_or(|window| {
+                p010_keeps_eligible_time(&p010_eligible, &truth, a, t_ms, window)
+            }) {
+                oa_rows += 1;
+            }
+        }
+        for (&a, &t) in r.addr.iter().zip(&r.t_ns) {
+            let t_ms = t.div_euclid(1_000_000);
+            if er_pts.contains_key(&a)
+                && p010.is_none_or(|window| {
+                    p010_keeps_eligible_time(&p010_eligible, &truth, a, t_ms, window)
+                })
+            {
+                oa_row_times.entry(a).or_default().push(t_ms);
             }
         }
         // The tracker's flags by (address, row time in ms), duplicates counted.
@@ -3945,7 +4388,13 @@ fn run(
         let p = pair_legacy(&legacy, &truth, &tix, &rcfg);
         old_rule_times(&p.pairs, &mut oa_old);
         let mut local: PerAc = BTreeMap::new();
-        pair_points(&p.pairs, None, &on_leg, &mut local, &mut oa_drop);
+        let oa_keep = |a: u32, t: i64| {
+            on_leg(a, t)
+                && p010.is_none_or(|window| {
+                    p010_keeps_eligible_time(&p010_eligible, &truth, a, t, window)
+                })
+        };
+        pair_points(&p.pairs, None, &oa_keep, &mut local, &mut oa_drop);
         for (a, v) in &mut local {
             for pt in v {
                 let (u, re) = flag_lookup(&flags, *a, pt.t);
@@ -3968,6 +4417,9 @@ fn run(
             *a += b;
         }
     }
+    if let Some(window) = p010 {
+        filter_times_by_eligible(&mut oa_old, &p010_eligible, &truth, window);
+    }
     for v in oa_row_times.values_mut() {
         v.sort_unstable();
     }
@@ -3982,6 +4434,12 @@ fn run(
             .iter()
             .zip(&set_a.time_ns)
             .enumerate()
+            .filter(|&(_, (&a, &t))| {
+                let t_ms = t.div_euclid(1_000_000);
+                p010.is_none_or(|window| {
+                    p010_keeps_eligible_time(&p010_eligible, &truth, a, t_ms, window)
+                })
+            })
             .map(|(i, (&a, &t))| (a, t, i as u32))
             .collect();
         v.sort_unstable();
@@ -4001,7 +4459,12 @@ fn run(
     let (pp, pt_chosen) = passthrough_pairs(&set_a, &by_addr_time, &er_times, &truth, &tix, &rcfg)?;
     let mut pt_pts: PerAc = BTreeMap::new();
     let mut pt_drop = Dropped::default();
-    pair_points(&pp.pairs, None, &on_leg, &mut pt_pts, &mut pt_drop);
+    let pt_keep = |a: u32, t: i64| {
+        on_leg(a, t)
+            && p010
+                .is_none_or(|window| p010_keeps_eligible_time(&p010_eligible, &truth, a, t, window))
+    };
+    pair_points(&pp.pairs, None, &pt_keep, &mut pt_pts, &mut pt_drop);
     eprintln!("passthrough paired aircraft: {}", pt_pts.len());
     // The replaced rule's passthrough, on the replaced rule's grid (coverage record only).
     let (pp_old, _) = passthrough_pairs(&set_a, &by_addr_time, &er_old, &truth, &tix, &rcfg)?;
@@ -4097,6 +4560,24 @@ fn run(
     if mode.development {
         stamps.push(DEV_STAMP);
     }
+    let p010_arm_stamp = if oa_publication_grid {
+        "P010_ARM=sfdps-v1"
+    } else {
+        "P010_ARM=raw"
+    };
+    if p010.is_some() {
+        stamps.push("P010_MODE=local-window-v1");
+        stamps.push(p010_arm_stamp);
+        stamps.push(match timing_report.profile {
+            ScoringTimingProfile::Fixed1030120V1 => "P010_TIMING_PROFILE=fixed-10-30-120-v1",
+            ScoringTimingProfile::LegacyDayIntervals => "P010_TIMING_PROFILE=legacy-day-intervals",
+        });
+        stamps.push("P010_WINDOW_PROFILE=p010-zau-window-v1");
+        stamps.push("P010_WARMUP_FROM=2026-11-30T05:00:00Z");
+        stamps.push("P010_SCORE_FROM=2026-11-30T06:00:00Z");
+        stamps.push("P010_SCORE_TO=2026-12-01T00:00:00Z");
+        stamps.push("P010_ZAU_BOX_PROFILE=zau-v1");
+    }
     if oa_publication_grid {
         stamps.push(OA_PUBLICATION_GRID_STAMP);
     }
@@ -4142,6 +4623,133 @@ fn run(
         git.head,
         git_tree_text(git)
     );
+    if let Some(window) = p010 {
+        let avail_pct = if p010_counts.eligible_address_minutes == 0 {
+            0.0
+        } else {
+            p010_eram_available_address_minutes as f64 * 100.0
+                / p010_counts.eligible_address_minutes as f64
+        };
+        let timing_name = match timing_report.profile {
+            ScoringTimingProfile::Fixed1030120V1 => "fixed-10-30-120-v1",
+            ScoringTimingProfile::LegacyDayIntervals => "legacy-day-intervals",
+        };
+        let arm = if oa_publication_grid {
+            "sfdps-v1"
+        } else {
+            "raw"
+        };
+        let _ = writeln!(o, "P010_MODE=local-window-v1");
+        let _ = writeln!(o, "P010_STATUS=measurement-complete");
+        let _ = writeln!(
+            o,
+            "P010_QUALIFICATION=not-assessed; frozen-coverage-and-input-health-policy-required"
+        );
+        let _ = writeln!(o, "P010_WINDOW_PROFILE={P010_WINDOW_PROFILE}");
+        let _ = writeln!(o, "P010_ARM={arm}");
+        let _ = writeln!(o, "P010_TIMING_PROFILE={timing_name}");
+        let timing_inputs = if timing_report.profile == ScoringTimingProfile::Fixed1030120V1 {
+            "versioned-constants-no-cadence-statistics"
+        } else {
+            "full-set-A-before-warmup-filter-noncausal-replication-arm"
+        };
+        let _ = writeln!(o, "P010_TIMING_CALIBRATION_INPUTS={timing_inputs}");
+        let _ = writeln!(o, "P010_FULL_CLIP_SPLIT=once-before-set-A-filter");
+        let _ = writeln!(o, "P010_COHORT_IDENTITY_FORMAT=domain-separated-sorted-addr-u32be-minute-i64be-truth-leg-u32be-v1");
+        let _ = writeln!(o, "P010_CLIP_SHA256={}", clip_hash.sha256);
+        let _ = writeln!(o, "P010_SFDPS_AGGREGATE_SHA256={sfdps_manifest}");
+        let _ = writeln!(o, "P010_SFDPS_INPUT_BYTES={sfdps_source_bytes}");
+        let _ = writeln!(o, "P010_SFDPS_PREFLIGHT_INPUT_BYTES={p010_preflight_bytes}");
+        let _ = writeln!(o, "P010_WARMUP_FROM=2026-11-30T05:00:00Z");
+        let _ = writeln!(o, "P010_SCORE_FROM=2026-11-30T06:00:00Z");
+        let _ = writeln!(o, "P010_SCORE_TO=2026-12-01T00:00:00Z");
+        let _ = writeln!(o, "P010_WARMUP_FROM_NS={}", window.warmup_from_ns);
+        let _ = writeln!(o, "P010_SCORE_FROM_NS={}", window.score_from_ns);
+        let _ = writeln!(o, "P010_SCORE_TO_NS={}", window.score_to_ns);
+        let _ = writeln!(o, "P010_SCORE_INTERVAL=half-open");
+        let _ = writeln!(o, "P010_ELIGIBILITY_MINUTE_STEP_MS=60000");
+        let _ = writeln!(o, "P010_ELIGIBILITY_MINUTE_ANCHOR=score-from");
+        let _ = writeln!(o, "P010_ZAU_BOX_PROFILE={}", window.box_profile);
+        let _ = writeln!(o, "P010_ZAU_BOX_LAT_MIN_E7={}", ZAU_BOX.lat_min_e7);
+        let _ = writeln!(o, "P010_ZAU_BOX_LAT_MAX_E7={}", ZAU_BOX.lat_max_e7);
+        let _ = writeln!(o, "P010_ZAU_BOX_LON_MIN_E7={}", ZAU_BOX.lon_min_e7);
+        let _ = writeln!(o, "P010_ZAU_BOX_LON_MAX_E7={}", ZAU_BOX.lon_max_e7);
+        let _ = writeln!(o, "P010_PUBLIC_ELIGIBILITY=one-unambiguous-set-B-truth-leg-per-address-at-whole-UTC-minute; valid-finite-position-and-velocity; speed-at-least-{P010_MIN_DIRECTION_SPEED_MPS}-mps; actual-time-truth-leg-must-match-eligible-minute-leg; fixed-ZAU-box");
+        let _ = writeln!(
+            o,
+            "P010_ADDRESS_MINUTE_OPPORTUNITIES={}",
+            p010_counts.address_minute_opportunities
+        );
+        let _ = writeln!(
+            o,
+            "P010_NO_ACTIVE_LEG_ADDRESS_MINUTES={}",
+            p010_counts.no_active_leg_minutes
+        );
+        let _ = writeln!(
+            o,
+            "P010_PUBLIC_ELIGIBLE_ADDRESS_MINUTES={}",
+            p010_counts.eligible_address_minutes
+        );
+        let _ = writeln!(
+            o,
+            "P010_PUBLIC_ELIGIBLE_COHORT_SHA256={p010_truth_cohort_sha256}"
+        );
+        let _ = writeln!(
+            o,
+            "P010_AMBIGUOUS_ADDRESS_MINUTE_CANDIDATES={}",
+            p010_counts.ambiguous_candidates
+        );
+        let _ = writeln!(
+            o,
+            "P010_UNUSABLE_TRUTH_ADDRESS_MINUTES={}",
+            p010_counts.unusable_truth_minutes
+        );
+        let _ = writeln!(
+            o,
+            "P010_NO_TRUTH_ADDRESS_MINUTES={}",
+            p010_counts.no_truth_minutes
+        );
+        let _ = writeln!(
+            o,
+            "P010_ERAM_FINITE_PAIRED_POSITION_TIME_ROWS={p010_eram_position_time_rows}"
+        );
+        let _ = writeln!(
+            o,
+            "P010_ERAM_AVAILABLE_ADDRESS_MINUTES={p010_eram_available_address_minutes}"
+        );
+        let _ = writeln!(
+            o,
+            "P010_ERAM_AVAILABLE_COHORT_SHA256={p010_eram_cohort_sha256}"
+        );
+        let _ = writeln!(o, "P010_ERAM_AVAILABILITY_SCOPE=post-P006-pairing-and-flight-selection; not-all-local-SFDPS-rows");
+        let _ = writeln!(o, "P010_ADSB_BAD_FRAMES={clip_bad_frames}");
+        let _ = writeln!(o, "P010_ADSB_DROPPED_RECORDS={clip_dropped_records}");
+        let _ = writeln!(o, "P010_ADSB_SEALED_DROPS={clip_sealed}");
+        let _ = writeln!(o, "P010_SFDPS_SEALED_DROPS={sfdps_sealed}");
+        let _ = writeln!(
+            o,
+            "P010_ERAM_AVAILABILITY_DENOMINATOR={}",
+            p010_counts.eligible_address_minutes
+        );
+        let _ = writeln!(o, "P010_ERAM_AVAILABILITY_PERCENT={avail_pct:.6}");
+        let _ = writeln!(
+            o,
+            "P010_TRACKER_MEASUREMENTS_BEFORE_WINDOW_FILTER={n_meas_before_p010_window}"
+        );
+        let _ = writeln!(o, "P010_TRACKER_MEASUREMENTS_AFTER_WARMUP_FILTER={n_meas}");
+        let _ = writeln!(o, "P010_CAP_MAX_ADDRESSES={P010_MAX_ADDRESSES}");
+        let _ = writeln!(
+            o,
+            "P010_CAP_MAX_ELIGIBLE_ADDRESS_MINUTES={P010_MAX_ELIGIBLE_ADDRESS_MINUTES}"
+        );
+        let _ = writeln!(o, "P010_CAP_MAX_SFDPS_INPUT_BYTES={P010_MAX_SFDPS_BYTES}");
+        let _ = writeln!(o, "P010_CAP_STATUS=within-limits");
+        let _ = writeln!(o, "P010_INTERPRETATION=local-P010-comparison-only; not-P006-holdout; no-causal-or-safety-claim");
+        let _ = writeln!(
+            o,
+            "P010_PRIVATE_OUTPUTS=p002.txt,samples.csv; do-not-publish-samples.csv"
+        );
+    }
     let _ = writeln!(
         o,
         "  scored commit U (--frozen-commit): {}; frozen candidate C (--candidate-commit): {}; U differs from C in {SEALED_LIST_PATH} only (checked with git diff --name-only C U, when both are given)",
@@ -4219,6 +4827,43 @@ fn run(
         );
         let _ = writeln!(o, "SCORING_INTERVAL_STATS=not-computed");
         let _ = writeln!(o, "SCORING_TIMING_INPUTS=ADS-B set-A measurements only as tracker inputs; no set-B truth or ERAM/SFDPS cadence used for parameter selection");
+    }
+    if p010.is_some() && timing_report.profile == ScoringTimingProfile::LegacyDayIntervals {
+        let source = match timing_report.source {
+            ScoringTimingSource::MeasuredIntervals => "measured-intervals",
+            ScoringTimingSource::LegacyOneSecondFallback => "legacy-one-second-fallback",
+            ScoringTimingSource::FixedProfileConstants => "versioned-constants",
+        };
+        let _ = writeln!(o, "SCORING_TIMING_PROFILE=legacy-day-intervals");
+        let _ = writeln!(o, "SCORING_TIMING_SOURCE={source}");
+        let _ = writeln!(
+            o,
+            "SCORING_TIMING_INPUTS=full-ADS-B-set-A-before-warmup-filter"
+        );
+        let _ = writeln!(
+            o,
+            "SCORING_EXPECTED_INTERVAL_NS={}",
+            timing_report.expected_interval_ns
+        );
+        let _ = writeln!(
+            o,
+            "SCORING_INIT_INTERVAL_NS={}",
+            timing_report.init_interval_ns
+        );
+        let _ = writeln!(o, "SCORING_DROP_AFTER_NS={}", timing_report.drop_after_ns);
+        let _ = writeln!(
+            o,
+            "SCORING_OUTPUT_CAPACITY={}",
+            timing_report.tracker.out_capacity
+        );
+        if let Some(intervals) = timing_report.intervals {
+            let _ = writeln!(o, "SCORING_INTERVAL_N={}", intervals.n);
+            let _ = writeln!(o, "SCORING_INTERVAL_P50_NS={}", intervals.p50_ns);
+            let _ = writeln!(o, "SCORING_INTERVAL_P90_NS={}", intervals.p90_ns);
+            let _ = writeln!(o, "SCORING_INTERVAL_P99_NS={}", intervals.p99_ns);
+        } else {
+            let _ = writeln!(o, "SCORING_INTERVAL_STATS=empty-one-second-fallback");
+        }
     }
     if oa_publication_grid {
         let _ = writeln!(o, "OA_PUBLICATION_GRID=sfdps-v1");
@@ -4852,6 +5497,263 @@ fn write_share(o: &mut String, c: &[Cnt], draws: &[Vec<u32>], scale: f64) {
 mod tests {
     use super::*;
     use oa_bench::tracker_input::legacy_from_track_samples;
+
+    fn p010_test_window() -> P010Window {
+        parse_p010_window(
+            Some("2026-11-30T05:00:00Z"),
+            Some("2026-11-30T06:00:00Z"),
+            Some("2026-12-01T00:00:00Z"),
+            Some("zau-v1"),
+        )
+        .unwrap()
+        .unwrap()
+    }
+
+    // REQ: OA-TRK-410
+    #[test]
+    fn p010_requires_exact_typed_window_and_explicit_box_profile() {
+        assert!(parse_p010_window(None, None, None, None).unwrap().is_none());
+        assert!(parse_p010_window(
+            Some("2026-11-30T05:00:00.000Z"),
+            Some("2026-11-30T06:00:00Z"),
+            Some("2026-12-01T00:00:00Z"),
+            Some("zau-v1"),
+        )
+        .is_err());
+        assert!(parse_p010_window(
+            Some("2026-11-30T05:00:00Z"),
+            Some("2026-11-30T06:00:00Z"),
+            Some("2026-12-01T00:00:00Z"),
+            Some("other"),
+        )
+        .is_err());
+        let day_start = days_from_civil(2026, 11, 30) * 86_400 * 1_000_000_000;
+        assert!(!p010_clip_time_in_day(day_start - 1));
+        assert!(p010_clip_time_in_day(day_start));
+        assert!(!p010_clip_time_in_day(day_start + 86_400 * 1_000_000_000));
+    }
+
+    // REQ: OA-TRK-411
+    #[test]
+    fn p010_eligibility_requires_a_single_usable_truth_leg_inside_the_box() {
+        let window = p010_test_window();
+        let minute = window.score_from_ns / 1_000_000;
+        let leg = TruthLeg {
+            addr: 0x123456,
+            start_ms: minute,
+            end_ms: minute,
+            callsign: None,
+            start: oa_bench::truth::LegStart::Unknown,
+        };
+        let query = |_: u32, _: i64| {
+            Ok(TruthSample {
+                lat: 41.0,
+                lon: -87.0,
+                baro_alt_ft: Some(20_000),
+                vel_east_mps: 0.0,
+                vel_north_mps: 60.0,
+                vert_rate_fpm: None,
+                sigma95_h_m: 20.0,
+                leg: 0,
+            })
+        };
+        let truth = Truth {
+            query: &query,
+            legs: std::slice::from_ref(&leg),
+        };
+        let (eligible, counts) = p010_public_eligibility(&truth, window).unwrap();
+        assert_eq!(eligible, BTreeMap::from([((leg.addr, minute), 0)]));
+        assert_eq!(counts.eligible_address_minutes, 1);
+        assert_eq!(counts.address_minute_opportunities, 1080);
+        assert_eq!(counts.no_active_leg_minutes, 1079);
+        assert!(p010_keeps_eligible_time(
+            &eligible,
+            &truth,
+            leg.addr,
+            minute + 30_000,
+            window
+        ));
+        assert!(!p010_keeps_eligible_time(
+            &eligible,
+            &truth,
+            leg.addr,
+            minute - 1,
+            window
+        ));
+        assert!(!p010_keeps_eligible_time(
+            &eligible,
+            &truth,
+            leg.addr,
+            window.score_to_ns / 1_000_000,
+            window,
+        ));
+        let ambiguous = [
+            leg,
+            TruthLeg {
+                start_ms: minute,
+                ..leg
+            },
+        ];
+        let truth = Truth {
+            query: &query,
+            legs: &ambiguous,
+        };
+        let (eligible, counts) = p010_public_eligibility(&truth, window).unwrap();
+        assert!(eligible.is_empty());
+        assert_eq!(counts.ambiguous_candidates, 1);
+    }
+
+    // REQ: OA-TRK-411
+    #[test]
+    fn p010_cohort_digest_is_order_independent_and_commits_membership() {
+        let domain = b"openatca-p010-public-eligible-address-minute-truth-leg-v1\0";
+        let forward_rows = BTreeMap::from([
+            ((0x123456, 1_796_018_400), 3),
+            ((0xabcdef, 1_796_018_460), 4),
+        ]);
+        let reverse_rows = BTreeMap::from([
+            ((0xabcdef, 1_796_018_460), 4),
+            ((0x123456, 1_796_018_400), 3),
+        ]);
+        let changed_rows = BTreeMap::from([
+            ((0x123456, 1_796_018_400), 3),
+            ((0xabcdef, 1_796_018_520), 4),
+        ]);
+        let forward = p010_keyset_sha256(
+            domain,
+            forward_rows.iter().map(|(&(a, t), &leg)| (a, t, Some(leg))),
+        )
+        .unwrap();
+        let reverse = p010_keyset_sha256(
+            domain,
+            reverse_rows.iter().map(|(&(a, t), &leg)| (a, t, Some(leg))),
+        )
+        .unwrap();
+        let changed = p010_keyset_sha256(
+            domain,
+            changed_rows.iter().map(|(&(a, t), &leg)| (a, t, Some(leg))),
+        )
+        .unwrap();
+        let other_domain = p010_keyset_sha256(
+            b"openatca-p010-eram-available-address-minute-truth-leg-v1\0",
+            forward_rows.iter().map(|(&(a, t), &leg)| (a, t, Some(leg))),
+        )
+        .unwrap();
+        let changed_leg_rows = BTreeMap::from([
+            ((0x123456, 1_796_018_400), 9),
+            ((0xabcdef, 1_796_018_460), 4),
+        ]);
+        let changed_leg = p010_keyset_sha256(
+            domain,
+            changed_leg_rows
+                .iter()
+                .map(|(&(a, t), &leg)| (a, t, Some(leg))),
+        )
+        .unwrap();
+        assert_eq!(forward, reverse);
+        assert_ne!(forward, changed);
+        assert_ne!(forward, other_domain);
+        assert_ne!(forward, changed_leg);
+    }
+
+    // REQ: OA-TRK-411
+    #[test]
+    fn p010_minute_membership_keeps_the_exact_truth_leg_and_pairing_speed_threshold() {
+        let window = p010_test_window();
+        let minute = window.score_from_ns / 1_000_000;
+        let sample = |leg, speed| TruthSample {
+            lat: 41.0,
+            lon: -87.0,
+            baro_alt_ft: Some(20_000),
+            vel_east_mps: 0.0,
+            vel_north_mps: speed,
+            vert_rate_fpm: None,
+            sigma95_h_m: 20.0,
+            leg,
+        };
+        assert_eq!(
+            P010_MIN_DIRECTION_SPEED_MPS,
+            oa_bench::pair::PairConfig::default().min_speed_mps
+        );
+        assert!(!p010_truth_eligible(&sample(0, 9.99)));
+        assert!(p010_truth_eligible(&sample(0, 10.0)));
+        assert!(p010_truth_eligible(&sample(0, 20.0)));
+        assert!(!p010_truth_eligible(&sample(0, f64::NAN)));
+        let query = |_: u32, t: i64| Ok(sample(if t < minute + 30_000 { 7 } else { 8 }, 20.0));
+        let truth = Truth {
+            query: &query,
+            legs: &[],
+        };
+        let eligible = BTreeMap::from([((0x123456, minute), 7)]);
+        assert!(p010_keeps_eligible_time(
+            &eligible,
+            &truth,
+            0x123456,
+            minute + 29_999,
+            window
+        ));
+        assert!(!p010_keeps_eligible_time(
+            &eligible,
+            &truth,
+            0x123456,
+            minute + 30_000,
+            window
+        ));
+        assert!(!p010_keeps_eligible_time(
+            &eligible, &truth, 0x654321, minute, window
+        ));
+    }
+
+    // REQ: OA-TRK-411, OA-TRK-412
+    #[test]
+    fn p010_rejects_the_address_cap_before_minute_work_and_counts_unusable_truth() {
+        let window = p010_test_window();
+        let legs: Vec<TruthLeg> = (0..=P010_MAX_ADDRESSES)
+            .map(|addr| TruthLeg {
+                addr: addr as u32,
+                start_ms: 0,
+                end_ms: 0,
+                callsign: None,
+                start: oa_bench::truth::LegStart::Unknown,
+            })
+            .collect();
+        let query = |_: u32, _: i64| Err(oa_bench::truth::NoTruth::NoNearbyReport);
+        let truth = Truth {
+            query: &query,
+            legs: &legs,
+        };
+        assert!(p010_public_eligibility(&truth, window)
+            .unwrap_err()
+            .contains("P010_REFUSED_ADDRESS_CAP"));
+
+        let minute = window.score_from_ns / 1_000_000;
+        let leg = TruthLeg {
+            addr: 9,
+            start_ms: minute,
+            end_ms: minute,
+            callsign: None,
+            start: oa_bench::truth::LegStart::Unknown,
+        };
+        let query = |_: u32, _: i64| {
+            Ok(TruthSample {
+                lat: 41.0,
+                lon: -87.0,
+                baro_alt_ft: Some(20_000),
+                vel_east_mps: 0.0,
+                vel_north_mps: 0.0,
+                vert_rate_fpm: None,
+                sigma95_h_m: 20.0,
+                leg: 0,
+            })
+        };
+        let truth = Truth {
+            query: &query,
+            legs: std::slice::from_ref(&leg),
+        };
+        let (eligible, counts) = p010_public_eligibility(&truth, window).unwrap();
+        assert!(eligible.is_empty());
+        assert_eq!(counts.unusable_truth_minutes, 1);
+    }
 
     // REQ: OA-TRK-407
     #[test]

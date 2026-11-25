@@ -6,6 +6,10 @@
 //! oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score]
 //!                [--digest <file>] [--rows <file>]
 //! oa-track-run --adsb <clip.oaf> --out <dir> --realtime [--with-output] [--max-tracks <n>]
+//! oa-track-run --adsb <public-clip.oaf> --out <dir> --public-window --no-score --no-compare
+//!                --timing-profile <fixed-10-30-120-v1|legacy-day-intervals>
+//!                --warmup-from <UTC> --score-from <UTC> --score-to <UTC>
+//!                --digest <file> --rows <file>
 //! ```
 //!
 //! The clip's reports are split into two disjoint halves (`oa_track::score::SPLIT_TEXT`); the
@@ -29,6 +33,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -40,7 +45,7 @@ use oa_bench::report::{code_version, render_csv, render_text, Header};
 use oa_bench::run::find;
 use oa_bench::stats::Stats;
 use oa_track::adsb::{adsb_measurements, check_adsb_config, AdsbConfig, AdsbStats};
-use oa_track::canon_spill::write_canon;
+use oa_track::canon_spill::{write_canon, write_canon_windowed};
 use oa_track::latency::{
     latency_count, latency_new, latency_stats, update_timed, Clock, FrameStamps, LatencyLog,
     LATENCY_CAPACITY, STAGES, STAGE_NAMES,
@@ -51,7 +56,8 @@ use oa_track::realtime::{
 };
 use oa_track::score::{
     initiation_delays, interval_stats, run_tracker_spilled, score_source, scoring_config,
-    split_reports, Esassp, IntervalStats, RowSet, Scored, SplitStats, BASIS_TEXT, CLASS_NAMES,
+    scoring_timing_config, split_reports, Esassp, IntervalStats, RowSet, Scored,
+    ScoringTimingProfile, ScoringTimingReport, SplitStats, BASIS_TEXT, CLASS_NAMES,
     PER_FLIGHT_MIN_N, R4_PER_FLIGHT_M, SPLIT_TEXT,
 };
 use oa_track::spill::{spill_append, spill_finish, spill_new, SpilledRun};
@@ -62,7 +68,143 @@ use oa_track::{
 };
 use oa_truth::{DEFAULT_CONFIG as TRUTH_DEFAULT, REMOVE_NAMES};
 
-const USAGE: &str = "usage: oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score] [--digest <file>] [--rows <file>] | --adsb <clip.oaf> --out <dir> --realtime [--with-output] [--max-tracks <n>]";
+const USAGE: &str = "usage: oa-track-run --adsb <clip.oaf> --out <dir> [--no-compare] [--no-score] [--digest <file>] [--rows <file>] | --adsb <clip.oaf> --out <dir> --realtime [--with-output] [--max-tracks <n>] | --adsb <public-clip.oaf> --out <dir> --public-window --no-score --no-compare --timing-profile <fixed-10-30-120-v1|legacy-day-intervals> --warmup-from <UTC> --score-from <UTC> --score-to <UTC> --digest <file> --rows <file>";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+// A7.2: cold CLI record, size guard waived
+struct PublicWindow {
+    warmup_from_text: String,
+    score_from_text: String,
+    score_to_text: String,
+    warmup_from_ns: i64,
+    score_from_ns: i64,
+    score_to_ns: i64,
+    profile: ScoringTimingProfile,
+}
+
+#[derive(Clone, Copy)]
+// A7.2: cold CLI record, size guard waived
+struct PublicCliArgs<'a> {
+    enabled: bool,
+    no_score: bool,
+    no_compare: bool,
+    realtime: bool,
+    with_output: bool,
+    has_max_tracks: bool,
+    has_canon_outputs: bool,
+    profile: Option<&'a str>,
+    warmup_from: Option<&'a str>,
+    score_from: Option<&'a str>,
+    score_to: Option<&'a str>,
+}
+
+fn parse_public_window(args: PublicCliArgs<'_>) -> Result<Option<PublicWindow>, String> {
+    let PublicCliArgs {
+        enabled,
+        no_score,
+        no_compare,
+        realtime,
+        with_output,
+        has_max_tracks,
+        has_canon_outputs,
+        profile,
+        warmup_from,
+        score_from,
+        score_to,
+    } = args;
+    let any_options =
+        profile.is_some() || warmup_from.is_some() || score_from.is_some() || score_to.is_some();
+    if !enabled && !any_options {
+        return Ok(None);
+    }
+    if !enabled {
+        return Err("timing profile and window bounds require --public-window".to_string());
+    }
+    if !no_score || !no_compare || realtime || with_output || has_max_tracks {
+        return Err("--public-window requires explicit --no-score and --no-compare and forbids realtime/output/max-tracks modes".to_string());
+    }
+    if !has_canon_outputs {
+        return Err("--public-window requires both --digest and --rows".to_string());
+    }
+    let profile = match profile {
+        Some("fixed-10-30-120-v1") => ScoringTimingProfile::Fixed1030120V1,
+        Some("legacy-day-intervals") => ScoringTimingProfile::LegacyDayIntervals,
+        Some(other) => return Err(format!("unsupported public timing profile `{other}`")),
+        None => return Err("--public-window requires an explicit --timing-profile".to_string()),
+    };
+    let warmup_from_text = warmup_from.ok_or("--warmup-from is required")?.to_string();
+    let score_from_text = score_from.ok_or("--score-from is required")?.to_string();
+    let score_to_text = score_to.ok_or("--score-to is required")?.to_string();
+    let to_ns = |text: &str, name: &str| -> Result<i64, String> {
+        if text
+            .as_bytes()
+            .get(17..19)
+            .and_then(|v| std::str::from_utf8(v).ok())
+            .and_then(|v| v.parse::<u8>().ok())
+            .is_none_or(|second| second > 59)
+        {
+            return Err(format!("{name} must not use a leap second"));
+        }
+        let seconds = oa_adsb::cli::parse_iso(text)
+            .ok_or_else(|| format!("{name} must be YYYY-MM-DDTHH:MM:SSZ UTC"))?;
+        seconds
+            .checked_mul(1_000_000_000)
+            .ok_or_else(|| format!("{name} exceeds nanosecond timestamp range"))
+    };
+    let warmup_from_ns = to_ns(&warmup_from_text, "--warmup-from")?;
+    let score_from_ns = to_ns(&score_from_text, "--score-from")?;
+    let score_to_ns = to_ns(&score_to_text, "--score-to")?;
+    if warmup_from_ns > score_from_ns || score_from_ns >= score_to_ns {
+        return Err("bounds must satisfy warmup-from <= score-from < score-to".to_string());
+    }
+    for (name, value) in [
+        ("--warmup-from", warmup_from_ns),
+        ("--score-from", score_from_ns),
+        ("--score-to", score_to_ns),
+    ] {
+        if value.unsigned_abs() > oa_track::TIME_LIMIT_NS as u64 {
+            return Err(format!(
+                "{name} is outside the tracker's supported time range"
+            ));
+        }
+    }
+    Ok(Some(PublicWindow {
+        warmup_from_text,
+        score_from_text,
+        score_to_text,
+        warmup_from_ns,
+        score_from_ns,
+        score_to_ns,
+        profile,
+    }))
+}
+
+fn window_overlaps_sealed(from_ns: i64, to_ns: i64) -> bool {
+    oa_sealed::sealed_windows()
+        .iter()
+        .any(|w| w.from_ns < to_ns && from_ns < w.to_ns)
+}
+
+fn split_full_clip(reports: &Reports) -> Result<(Reports, Reports, SplitStats), String> {
+    let (set_a, set_b, split) = split_reports(reports);
+    oa_bench::split_check::check_split(&set_a, &set_b)
+        .map_err(|v| format!("the split of the full clip is not valid, run refused: {v:?}"))?;
+    Ok((set_a, set_b, split))
+}
+
+fn measurement_in_public_input(time_ns: i64, window: &PublicWindow) -> bool {
+    window.warmup_from_ns <= time_ns && time_ns < window.score_to_ns
+}
+
+fn require_absent(path: &Path) -> Result<(), String> {
+    oa_sealed::refuse(path).map_err(|e| format!("output path refused: {e}"))?;
+    // seal-allow: lstat of an already seal-checked output path, only to reject existing names
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(format!("output path already exists: {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("cannot check output path {}: {e}", path.display())),
+    }
+}
 
 fn main() -> ExitCode {
     let mut adsb: Option<PathBuf> = None;
@@ -72,21 +214,37 @@ fn main() -> ExitCode {
     let mut canon = CanonOut::default();
     let (mut realtime, mut with_output) = (false, false);
     let mut max_tracks: Option<usize> = None;
+    let mut public_window = false;
+    let mut timing_profile: Option<String> = None;
+    let mut warmup_from: Option<String> = None;
+    let mut score_from: Option<String> = None;
+    let mut score_to: Option<String> = None;
+    let (mut no_compare_given, mut no_score_given) = (false, false);
     let mut scored_run_flags: Vec<&str> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--no-compare" => {
                 compare = false;
+                no_compare_given = true;
                 scored_run_flags.push("--no-compare");
             }
             "--no-score" => {
                 score_it = false;
+                no_score_given = true;
                 scored_run_flags.push("--no-score");
             }
             "--realtime" => realtime = true,
             "--with-output" => with_output = true,
-            "--adsb" | "--out" | "--digest" | "--rows" | "--max-tracks" => match args.next() {
+            "--public-window" => {
+                if public_window {
+                    eprintln!("oa-track-run: duplicate --public-window\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+                public_window = true;
+            }
+            "--adsb" | "--out" | "--digest" | "--rows" | "--max-tracks" | "--timing-profile"
+            | "--warmup-from" | "--score-from" | "--score-to" => match args.next() {
                 Some(v) if a == "--adsb" => adsb = Some(PathBuf::from(v)),
                 Some(v) if a == "--digest" => {
                     canon.digest = Some(PathBuf::from(v));
@@ -103,6 +261,30 @@ fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 },
+                Some(v) if a == "--timing-profile" => {
+                    if timing_profile.replace(v).is_some() {
+                        eprintln!("oa-track-run: duplicate --timing-profile\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                }
+                Some(v) if a == "--warmup-from" => {
+                    if warmup_from.replace(v).is_some() {
+                        eprintln!("oa-track-run: duplicate --warmup-from\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                }
+                Some(v) if a == "--score-from" => {
+                    if score_from.replace(v).is_some() {
+                        eprintln!("oa-track-run: duplicate --score-from\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                }
+                Some(v) if a == "--score-to" => {
+                    if score_to.replace(v).is_some() {
+                        eprintln!("oa-track-run: duplicate --score-to\n{USAGE}");
+                        return ExitCode::from(2);
+                    }
+                }
                 Some(v) => out = Some(PathBuf::from(v)),
                 None => {
                     eprintln!("oa-track-run: {a} needs a value\n{USAGE}");
@@ -118,6 +300,34 @@ fn main() -> ExitCode {
     let (Some(adsb), Some(out)) = (adsb, out) else {
         eprintln!("oa-track-run: --adsb and --out are required\n{USAGE}");
         return ExitCode::from(2);
+    };
+    let profile_args_present = timing_profile.is_some()
+        || warmup_from.is_some()
+        || score_from.is_some()
+        || score_to.is_some();
+    let public = if public_window || profile_args_present {
+        match parse_public_window(PublicCliArgs {
+            enabled: public_window,
+            no_score: no_score_given && !score_it,
+            no_compare: no_compare_given && !compare,
+            realtime,
+            with_output,
+            has_max_tracks: max_tracks.is_some(),
+            has_canon_outputs: canon.digest.is_some() && canon.rows.is_some(),
+            profile: timing_profile.as_deref(),
+            warmup_from: warmup_from.as_deref(),
+            score_from: score_from.as_deref(),
+            score_to: score_to.as_deref(),
+        }) {
+            Ok(Some(window)) => Some(window),
+            Ok(None) => None,
+            Err(e) => {
+                eprintln!("oa-track-run: {e}\n{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
     };
     if let Some(why) = check_flags(
         realtime,
@@ -142,6 +352,36 @@ fn main() -> ExitCode {
             eprintln!("oa-track-run: {e}");
             return ExitCode::from(2);
         }
+    }
+    if let Some(window) = public.as_ref() {
+        if window_overlaps_sealed(window.warmup_from_ns, window.score_to_ns) {
+            eprintln!(
+                "oa-track-run: public warmup/score interval intersects a sealed timestamp window"
+            );
+            return ExitCode::from(2);
+        }
+        let (Some(digest), Some(rows)) = (canon.digest.as_ref(), canon.rows.as_ref()) else {
+            eprintln!("oa-track-run: public canonical outputs missing\n{USAGE}");
+            return ExitCode::from(2);
+        };
+        let metadata = out.join("public-window.txt");
+        if digest == rows || digest == &metadata || rows == &metadata {
+            eprintln!("oa-track-run: public canonical output paths must be distinct");
+            return ExitCode::from(2);
+        }
+        for path in [digest, rows, &metadata] {
+            if let Err(e) = require_absent(path) {
+                eprintln!("oa-track-run: {e}");
+                return ExitCode::from(2);
+            }
+        }
+        return match run_public_window(&adsb, &out, &canon, window) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("oa-track-run: {e}");
+                ExitCode::from(1)
+            }
+        };
     }
     let result = if realtime {
         run_realtime(&adsb, &out, with_output, max_tracks)
@@ -1156,6 +1396,275 @@ fn run_realtime_inner(
     failure.map_or(Ok(()), Err)
 }
 
+fn public_window_metadata(
+    window: &PublicWindow,
+    timing: &ScoringTimingReport,
+    source: &PublicRunSummary<'_>,
+    canon: &oa_track::canon_spill::CanonSummary,
+) -> String {
+    let profile = match window.profile {
+        ScoringTimingProfile::Fixed1030120V1 => "fixed-10-30-120-v1",
+        ScoringTimingProfile::LegacyDayIntervals => "legacy-day-intervals",
+    };
+    let timing_source = match timing.source {
+        oa_track::score::ScoringTimingSource::MeasuredIntervals => "measured_intervals",
+        oa_track::score::ScoringTimingSource::LegacyOneSecondFallback => {
+            "legacy_one_second_fallback"
+        }
+        oa_track::score::ScoringTimingSource::FixedProfileConstants => "versioned_constants",
+    };
+    let mut out = String::new();
+    let _ = writeln!(out, "format=oa-track-public-window-v1");
+    let _ = writeln!(out, "profile={profile}");
+    let profile_role = match window.profile {
+        ScoringTimingProfile::Fixed1030120V1 => "fixed_development_profile",
+        ScoringTimingProfile::LegacyDayIntervals => "secondary_noncausal_comparison",
+    };
+    let _ = writeln!(out, "profile_role={profile_role}");
+    let _ = writeln!(out, "tracker_base_config=DEFAULT_CONFIG");
+    let _ = writeln!(
+        out,
+        "tracker_non_timing_parameters=unchanged_from_candidate_build"
+    );
+    let _ = writeln!(out, "timing_source={timing_source}");
+    let causality = match window.profile {
+        ScoringTimingProfile::Fixed1030120V1 => "predeclared_constants_no_interval_calibration",
+        ScoringTimingProfile::LegacyDayIntervals => {
+            "noncausal_full_set_a_interval_calibration_before_warmup_filter"
+        }
+    };
+    let _ = writeln!(out, "timing_causality={causality}");
+    let _ = writeln!(out, "expected_interval_ns={}", timing.expected_interval_ns);
+    let _ = writeln!(out, "init_interval_ns={}", timing.init_interval_ns);
+    let _ = writeln!(out, "drop_after_ns={}", timing.drop_after_ns);
+    match timing.intervals {
+        Some(iv) => {
+            let _ = writeln!(out, "interval_stats_scope=full_set_a_before_warmup_filter");
+            let _ = writeln!(out, "interval_n={}", iv.n);
+            let _ = writeln!(out, "interval_p50_ns={}", iv.p50_ns);
+            let _ = writeln!(out, "interval_p90_ns={}", iv.p90_ns);
+            let _ = writeln!(out, "interval_p99_ns={}", iv.p99_ns);
+        }
+        None => {
+            let _ = writeln!(out, "interval_stats_scope=not_computed");
+            let _ = writeln!(out, "interval_n=not_computed");
+            let _ = writeln!(out, "interval_p50_ns=not_computed");
+            let _ = writeln!(out, "interval_p90_ns=not_computed");
+            let _ = writeln!(out, "interval_p99_ns=not_computed");
+        }
+    }
+    let _ = writeln!(out, "warmup_from_utc={}", window.warmup_from_text);
+    let _ = writeln!(out, "warmup_from_ns={}", window.warmup_from_ns);
+    let _ = writeln!(out, "score_from_utc={}", window.score_from_text);
+    let _ = writeln!(out, "score_from_ns={}", window.score_from_ns);
+    let _ = writeln!(out, "score_to_utc={}", window.score_to_text);
+    let _ = writeln!(out, "score_to_ns={}", window.score_to_ns);
+    let _ = writeln!(out, "window_convention=half_open");
+    let _ = writeln!(out, "input=full_public_clip_loaded_and_split_once");
+    let _ = writeln!(out, "clip_sha256={}", source.clip_hash);
+    let _ = writeln!(out, "clip_reports_decoded={}", source.clip_reports);
+    let _ = writeln!(out, "clip_bad_frames={}", source.clip_bad);
+    let _ = writeln!(out, "split_set_a_reports={}", source.split.set_a);
+    let _ = writeln!(out, "split_set_b_reports={}", source.split.set_b);
+    let _ = writeln!(
+        out,
+        "split_duplicate_reports_removed={}",
+        source.split.duplicates_removed
+    );
+    let _ = writeln!(
+        out,
+        "split_conflict_groups={}",
+        source.split.conflict_groups
+    );
+    let _ = writeln!(out, "split_conflict_rows={}", source.split.conflict_rows);
+    let _ = writeln!(out, "split_rows_invalid={}", source.split.rows_invalid);
+    let _ = writeln!(
+        out,
+        "set_a_reports_adapter_input={}",
+        source.adapter.rows_in
+    );
+    let _ = writeln!(
+        out,
+        "set_a_measurements_adapter_passed_full={}",
+        source.adapter.passed
+    );
+    for (name, count) in REMOVE_NAMES.iter().zip(source.adapter.removed) {
+        let _ = writeln!(out, "adapter_removed_{name}={count}");
+    }
+    let _ = writeln!(
+        out,
+        "adapter_with_velocity={}",
+        source.adapter.with_velocity
+    );
+    let _ = writeln!(
+        out,
+        "adapter_velocity_default_nacv={}",
+        source.adapter.velocity_default_nacv
+    );
+    let _ = writeln!(
+        out,
+        "adapter_velocity_refused={}",
+        source.adapter.velocity_refused
+    );
+    let _ = writeln!(
+        out,
+        "adapter_with_altitude={}",
+        source.adapter.with_altitude
+    );
+    let _ = writeln!(
+        out,
+        "set_a_measurements_before_warmup={}",
+        source.measurement_counts.0
+    );
+    let _ = writeln!(
+        out,
+        "set_a_measurements_warmup_only={}",
+        source.measurement_counts.1
+    );
+    let _ = writeln!(
+        out,
+        "set_a_measurements_in_score_interval={}",
+        source.measurement_counts.2
+    );
+    let _ = writeln!(
+        out,
+        "set_a_measurements_input_interval={}",
+        source.measurement_counts.1 + source.measurement_counts.2
+    );
+    let _ = writeln!(
+        out,
+        "set_a_measurements_after_score_to={}",
+        source.measurement_counts.3
+    );
+    let _ = writeln!(
+        out,
+        "set_a_measurements_fed_to_tracker={}",
+        source.measurement_counts.4
+    );
+    let _ = writeln!(out, "canonical_rows={}", canon.rows);
+    let _ = writeln!(out, "canonical_seconds={}", canon.seconds);
+    let _ = writeln!(out, "canonical_rows_in_order={}", canon.in_order);
+    let _ = writeln!(out, "canonical_interval=[score_from_ns,score_to_ns)");
+    let _ = writeln!(out, "truth_scoring=disabled");
+    let _ = writeln!(out, "wall_times=omitted_from_deterministic_outputs");
+    out
+}
+
+#[derive(Clone, Copy)]
+// A7.2: cold provenance record, size guard waived
+struct PublicRunSummary<'a> {
+    clip_hash: &'a str,
+    clip_reports: usize,
+    clip_bad: u64,
+    split: &'a SplitStats,
+    adapter: &'a AdsbStats,
+    measurement_counts: (usize, usize, usize, usize, usize),
+}
+
+fn run_public_window(
+    clip_path: &Path,
+    out_dir: &Path,
+    canon: &CanonOut,
+    window: &PublicWindow,
+) -> Result<(), String> {
+    let digest_path = canon
+        .digest
+        .as_deref()
+        .ok_or("public mode needs --digest")?;
+    let rows_path = canon.rows.as_deref().ok_or("public mode needs --rows")?;
+    let metadata_path = out_dir.join("public-window.txt");
+    require_absent(digest_path)?;
+    require_absent(rows_path)?;
+    require_absent(&metadata_path)?;
+    let mut drops = oa_sealed::DropReport::new();
+    let mut clip_sealed = 0u64;
+    let clip = load_adsb_counted(clip_path, &file_opener(), &mut clip_sealed)
+        .map_err(|e| e.to_string())?;
+    drops.add(clip_sealed);
+    let (clip_reports, clip_bad, clip_hash) =
+        (reports_len(&clip.reports), clip.bad_frames, clip.hash);
+    let (set_a, set_b, split) = split_full_clip(&clip.reports)?;
+    drop(clip.reports);
+    let adsb_cfg = AdsbConfig::default();
+    check_adsb_config(&adsb_cfg).map_err(|e| format!("adapter configuration: {e}"))?;
+    let (mut full_meas, adapter) = adsb_measurements(&set_a, &adsb_cfg);
+    drop(set_a);
+    drop(set_b);
+    let timing = scoring_timing_config(&DEFAULT_CONFIG, &full_meas, window.profile);
+    let mut before_warmup = 0usize;
+    let mut warmup_only = 0usize;
+    let mut score_input = 0usize;
+    let mut after_score_to = 0usize;
+    for measurement in &full_meas {
+        if measurement.toa_ns < window.warmup_from_ns {
+            before_warmup += 1;
+        } else if measurement.toa_ns >= window.score_to_ns {
+            after_score_to += 1;
+        } else if measurement.toa_ns < window.score_from_ns {
+            warmup_only += 1;
+        } else {
+            score_input += 1;
+        }
+    }
+    full_meas.retain(|m| measurement_in_public_input(m.toa_ns, window));
+    let fed_count = full_meas.len();
+    fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
+    let spill_dir = out_dir.join(format!("spill-public-{}", std::process::id()));
+    let run =
+        run_tracker_spilled(&full_meas, &timing.tracker, &spill_dir).map_err(|e| e.to_string())?;
+    let summary = write_canon_windowed(
+        &run,
+        Some(digest_path),
+        Some(rows_path),
+        window.score_from_ns,
+        window.score_to_ns,
+    )
+    .map_err(|e| format!("public canonical output: {e}"))?;
+    let metadata = public_window_metadata(
+        window,
+        &timing,
+        &PublicRunSummary {
+            clip_hash: &clip_hash.sha256,
+            clip_reports,
+            clip_bad,
+            split: &split,
+            adapter: &adapter,
+            measurement_counts: (
+                before_warmup,
+                warmup_only,
+                score_input,
+                after_score_to,
+                fed_count,
+            ),
+        },
+        &summary,
+    );
+    oa_sealed::refuse(&metadata_path)
+        .map_err(|e| format!("public metadata output refused: {e}"))?;
+    // seal-allow: create_new write to the already seal-checked metadata output; no input read
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&metadata_path)
+        .map_err(|e| format!("{}: {e}", metadata_path.display()))?;
+    file.write_all(metadata.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("{}: {e}", metadata_path.display()))?;
+    drop(file);
+    drop(run);
+    println!(
+        "public window complete: profile={} input_measurements={} canonical_rows={} canonical_seconds={}",
+        match window.profile {
+            ScoringTimingProfile::Fixed1030120V1 => "fixed-10-30-120-v1",
+            ScoringTimingProfile::LegacyDayIntervals => "legacy-day-intervals",
+        },
+        fed_count,
+        summary.rows,
+        summary.seconds
+    );
+    Ok(())
+}
+
 fn run(
     clip_path: &Path,
     out_dir: &Path,
@@ -1367,4 +1876,193 @@ fn run(
     drop(run);
     let _ = fs::remove_dir_all(&spill_root);
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod public_window_tests {
+    use super::*;
+
+    fn valid_cli() -> PublicCliArgs<'static> {
+        PublicCliArgs {
+            enabled: true,
+            no_score: true,
+            no_compare: true,
+            realtime: false,
+            with_output: false,
+            has_max_tracks: false,
+            has_canon_outputs: true,
+            profile: Some("fixed-10-30-120-v1"),
+            warmup_from: Some("2026-11-15T14:00:00Z"),
+            score_from: Some("2026-11-15T14:01:00Z"),
+            score_to: Some("2026-11-15T14:10:00Z"),
+        }
+    }
+
+    // REQ: OA-TRK-408
+    #[test]
+    fn public_profile_requires_explicit_safe_mode_and_bounds() {
+        assert!(parse_public_window(PublicCliArgs {
+            enabled: false,
+            no_score: false,
+            no_compare: false,
+            realtime: false,
+            with_output: false,
+            has_max_tracks: false,
+            has_canon_outputs: false,
+            profile: None,
+            warmup_from: None,
+            score_from: None,
+            score_to: None,
+        })
+        .unwrap()
+        .is_none());
+        let fixed = parse_public_window(valid_cli()).unwrap().unwrap();
+        assert_eq!(fixed.profile, ScoringTimingProfile::Fixed1030120V1);
+        let legacy = parse_public_window(PublicCliArgs {
+            profile: Some("legacy-day-intervals"),
+            ..valid_cli()
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(legacy.profile, ScoringTimingProfile::LegacyDayIntervals);
+        assert!(parse_public_window(PublicCliArgs {
+            profile: None,
+            ..valid_cli()
+        })
+        .is_err());
+        assert!(parse_public_window(PublicCliArgs {
+            no_score: false,
+            ..valid_cli()
+        })
+        .is_err());
+        assert!(parse_public_window(PublicCliArgs {
+            no_compare: false,
+            ..valid_cli()
+        })
+        .is_err());
+        assert!(parse_public_window(PublicCliArgs {
+            realtime: true,
+            ..valid_cli()
+        })
+        .is_err());
+        assert!(parse_public_window(PublicCliArgs {
+            enabled: false,
+            ..valid_cli()
+        })
+        .is_err());
+        assert!(parse_public_window(PublicCliArgs {
+            has_canon_outputs: false,
+            ..valid_cli()
+        })
+        .is_err());
+    }
+
+    // REQ: OA-TRK-408
+    #[test]
+    fn bounds_are_ordered_checked_utc_and_half_open() {
+        let valid = parse_public_window(valid_cli()).unwrap().unwrap();
+        assert!(measurement_in_public_input(valid.warmup_from_ns, &valid));
+        assert!(measurement_in_public_input(valid.score_from_ns, &valid));
+        assert!(!measurement_in_public_input(valid.score_to_ns, &valid));
+        assert!(parse_public_window(PublicCliArgs {
+            warmup_from: Some("2026-11-15T14:02:00Z"),
+            ..valid_cli()
+        })
+        .is_err());
+        assert!(parse_public_window(PublicCliArgs {
+            score_to: Some("2026-11-15T14:01:00Z"),
+            ..valid_cli()
+        })
+        .is_err());
+        assert!(parse_public_window(PublicCliArgs {
+            score_to: Some("2026-11-15T14:10:60Z"),
+            ..valid_cli()
+        })
+        .is_err());
+        assert!(parse_public_window(PublicCliArgs {
+            score_to: Some("9999-12-31T23:59:59Z"),
+            ..valid_cli()
+        })
+        .is_err());
+    }
+
+    // REQ: OA-TRK-408
+    #[test]
+    fn split_is_over_the_full_clip_before_measurement_window_filter() {
+        let mut full = Reports::default();
+        let base_s = 1_700_000_000i64;
+        for offset in 0..4i64 {
+            let mut row = oa_adsb::ROW_EMPTY;
+            row.icao = 0x00ab_cdef;
+            row.time_ns = (base_s + offset) * 1_000_000_000;
+            row.lat_e7 = 420_000_000;
+            row.lon_e7 = -880_000_000;
+            row.gs_dkt = 400;
+            row.track_ddeg = 900;
+            row.nic = 7;
+            row.nac_p = 8;
+            row.nac_v = 2;
+            row.sil = 3;
+            row.version = 2;
+            oa_adsb::reports_push(&mut full, &row);
+        }
+        let (full_a, _full_b, _) = split_full_clip(&full).unwrap();
+        let start = (base_s + 1) * 1_000_000_000;
+        let end = (base_s + 3) * 1_000_000_000;
+        let full_split_times: Vec<i64> = full_a
+            .time_ns
+            .iter()
+            .copied()
+            .filter(|&t| start <= t && t < end)
+            .collect();
+        let (mut full_measurements, _) = adsb_measurements(&full_a, &AdsbConfig::default());
+        let input_window = PublicWindow {
+            warmup_from_text: String::new(),
+            score_from_text: String::new(),
+            score_to_text: String::new(),
+            warmup_from_ns: start,
+            score_from_ns: start,
+            score_to_ns: end,
+            profile: ScoringTimingProfile::Fixed1030120V1,
+        };
+        full_measurements.retain(|m| measurement_in_public_input(m.toa_ns, &input_window));
+        let filtered_measurement_times: Vec<i64> =
+            full_measurements.iter().map(|m| m.toa_ns).collect();
+        let mut clipped = Reports::default();
+        for i in 0..reports_len(&full) {
+            if let Some(row) = oa_adsb::reports_row(&full, i) {
+                if start <= row.time_ns && row.time_ns < end {
+                    oa_adsb::reports_push(&mut clipped, &row);
+                }
+            }
+        }
+        let (cropped_a, _cropped_b, _) = split_full_clip(&clipped).unwrap();
+        assert_eq!(full_split_times, vec![(base_s + 2) * 1_000_000_000]);
+        assert_eq!(filtered_measurement_times, full_split_times);
+        assert_eq!(cropped_a.time_ns, vec![(base_s + 1) * 1_000_000_000]);
+        assert_ne!(full_split_times, cropped_a.time_ns);
+    }
+
+    // REQ: OA-TRK-408
+    #[test]
+    fn request_overlapping_a_sealed_timestamp_span_is_refused() {
+        if let Some(span) = oa_sealed::sealed_windows().first() {
+            assert!(window_overlaps_sealed(span.from_ns, span.to_ns));
+            assert!(!window_overlaps_sealed(
+                span.to_ns,
+                span.to_ns.saturating_add(1)
+            ));
+        }
+        assert!(oa_sealed::refuse(Path::new("/tmp/scds/rec-20261119/day2/clip.oaf")).is_err());
+        assert!(oa_sealed::refuse(Path::new(
+            "/home/connoravila/Documents/Avila-Labs/openatca-data/derived/public/2026.11.20.oaf"
+        ))
+        .is_err());
+    }
 }

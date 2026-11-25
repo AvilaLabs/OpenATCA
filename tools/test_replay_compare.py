@@ -1,5 +1,6 @@
 """The commit-spec and argument checks of replay_compare.sh (no build is started)."""
 
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -291,8 +292,8 @@ class OverlayApply(unittest.TestCase):
 
     # REQ: OA-RDF-015
     def test_the_overlay_carries_the_trees_canonical_code_byte_for_byte(self):
-        # The overlay creates canon.rs and canon_spill.rs; they must be the files of this tree,
-        # which are what writes the digest line, the hash of a second and the chain.
+        # canon.rs and the legacy spill writer are the frozen replay contract. Development-only
+        # windowed output may extend the current shell, but must not enter the historical overlay.
         sections = re.split(r"(?m)^diff --git ", OVERLAY_PATCH.read_text())
         for name in ["canon.rs", "canon_spill.rs"]:
             sec = [x for x in sections if x.startswith(f"a/crates/oa-track/src/{name} ")]
@@ -302,8 +303,39 @@ class OverlayApply(unittest.TestCase):
                 for l in sec[0].splitlines()
                 if l.startswith("+") and not l.startswith("+++")
             ]
-            now = (REPO / "crates/oa-track/src" / name).read_text().splitlines()
-            self.assertEqual(lines, now, f"{name} in the overlay differs from the tree")
+            frozen = "\n".join(lines) + "\n"
+            current = (REPO / "crates/oa-track/src" / name).read_text()
+            if name == "canon.rs":
+                self.assertEqual(frozen, current, f"{name} in the overlay differs from the tree")
+                continue
+
+            # Pin the exact historical spill module and prove that all of its legacy runtime
+            # dependency closure (imports, helpers, and writer) remains identical. Only the
+            # explicitly added development window API and its dependencies may extend it.
+            self.assertEqual(
+                hashlib.sha256(frozen.encode()).hexdigest(),
+                "b206abcd9b41eb55413a84e6327692a9ea08389e9ae7a143646e0a9a8a4e6a1c",
+            )
+            window_start = "/// Writes a strict half-open timestamp slice"
+            self.assertNotIn(window_start, frozen)
+            self.assertIn(window_start, current)
+            current_runtime = current[:current.index(window_start)]
+            import_start = "use crate::canon::{"
+            import_end = "};"
+            frozen_import_at = frozen.index(import_start)
+            current_import_at = current_runtime.index(import_start)
+            frozen_import_end = frozen.index(import_end, frozen_import_at) + len(import_end)
+            current_import_end = current_runtime.index(import_end, current_import_at) + len(import_end)
+            projected = (
+                current_runtime[:current_import_at]
+                + frozen[frozen_import_at:frozen_import_end]
+                + current_runtime[current_import_end:]
+            )
+            self.assertEqual(
+                frozen,
+                projected.rstrip("\n") + "\n",
+                "legacy spill writer/helper contract changed",
+            )
 
     # REQ: OA-RDF-016
     def test_builds_run_locked_in_a_clean_environment_and_the_report_records_it(self):

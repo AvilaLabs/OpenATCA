@@ -5581,6 +5581,12 @@ scope.
   CSV bytes remain unchanged. Synthetic source tests cover signed ties, canonical coordinates,
   poles/dateline, invalid positions, zero/nonfinite velocity, refused modes, and row-count
   accounting.
+- **OA-TRK-408** B1/H2 public-window runner loads and splits the full public clip once, filters existing set-A measurements to its half-open warm-up interval, and emits canonical rows/digests only on the half-open score interval with an explicit timing profile. Fixed constants do not inspect cadence statistics; legacy full-set-A calibration is an explicitly noncausal secondary arm.
+- **OA-TRK-409** B1/H2 public-window input/output paths, strict UTC conversion and nanosecond bounds are checked before use. Canonical output identity excludes wall time; ordinary runner behavior remains unchanged when the mode is absent.
+- **OA-TRK-410** B1/H2 private P010 scoring requires the exact registered full-day/split/window/box contract and explicit timing arm; incompatible hold-out, export, damage, address-drop and dirty-tree options are refused. Private per-arm ledgers are new and empty and are never original hold-out ledgers.
+- **OA-TRK-411** B1/H2 P010 eligibility is determined from public set-B truth at UTC minutes, with one unambiguous truth leg, finite position/velocity in the registered box and the P006 pairing direction threshold. Actual-time samples must retain that same leg; addresses, legs, eligible minutes and work have explicit caps and all exclusions are counted.
+- **OA-TRK-412** B1/H2/D1 P010 keeps actual local ERAM times inside its score interval for all systems and time fits, reports availability with its scoped denominator and all input-health counters, and distinguishes measurement completion from qualification. Public reproduction has no FAA input; private per-flight evidence never enters the aggregate allowlist. Wrapper input/source/build/binary/archive identities, fresh outputs and resource caps are enforced, with partial failures preserved.
+
 - **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
   refused in every date syntax. Any input path the shared sealed list refuses (`oa-sealed`, OA-SEAL-001), and every file the run opens
   (each file of the feed directory, the ADS-B clip, each file and the README of a `slice` source), is checked
