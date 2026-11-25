@@ -1,75 +1,99 @@
-# Voice-system integration design
+# Voice-system integration boundary
 
-**Status: DRAFT — research and boundary design only.** No voice-system interface, adapter, connection, recorder access, operational integration, or qualification is implemented by this document.
+**Status:** Proposal, under review.
 
-## Purpose and acceptance boundary
+## Decision
 
-Controller voice communications are a separate, safety-critical system boundary. A voice switch provides access to air-to-ground (A/G) and ground-to-ground (G/G) communications; it is not an OpenATCA data feed by default. Being installed at a facility that uses a voice switch does not establish system integration.
+OpenATCA will consume voice status through a **read-only, process-isolated adapter**. The adapter owns translation into a versioned normalized contract; OpenATCA consumes that contract over a local Unix-domain socket authenticated with operating-system peer credentials. When the adapter and OpenATCA run on separate hosts, use mutually authenticated TLS 1.3 with service identities. In both deployments, the adapter has no voice-control path or credentials, and the voice system remains independently usable if the adapter or OpenATCA fails.
 
-The relevant operational acceptance criterion requires a deployment that includes legacy surveillance, flight-data processing, and voice communications. This design and the public references cited below do not demonstrate that deployment. A passive display of voice-system availability, if authorized and supported by a current interface, must not be represented as satisfying the criterion by itself.
+The adapter stays outside the reusable flight-data/display core. OpenATCA accepts only the configured adapter identity; network reachability or a valid identity alone does not grant voice-system authority. The adapter may connect only to an endpoint and identity approved for the selected site and release.
 
-## What the public references establish
+This boundary exposes status, not voice control. It does not by itself demonstrate operational voice integration alongside surveillance and flight-data processing.
 
-### Historical VSCS and ACCC interfaces
+## Ownership and direction
 
-FAA Order 6690.4, the 1993 VSCS Project Implementation Plan, describes a historical VSCS end-state. Section 33 says that a VSCS-to-Area Control Computer Complex (ACCC) processor interface could exchange digital data to coordinate ARTCC position-equipment configuration. It identifies NAS-IC-21024201 Part I for that interface and Part II for the common-console interface through the Voice Communication Equipment (VCE). The plan describes the processor interface as a product-improvement requirement intended after initial deployment.
+Use separate authorities for separate facts; do not reconcile mismatches by silently choosing one value.
 
-The same order identifies historical VSCS interfaces to radios, trunks, backup A/G equipment, recording equipment, a coded time source, Network Management and Control Equipment (NMCE), and a maintenance processor. It also names configuration artifacts: VP 26, the site-by-site map-generation report for A/G and G/G assignments and capabilities per operational position; ATR-320, the VSCS site-configuration policy; and VP 41, the VSCS Interface Control Document (ICD). Section 57 says its list of contract deliverables is incomplete and directs readers to the VSCS contract for the full list.
+| Information | Authoritative owner | Proposed flow and use |
+|---|---|---|
+| Voice-system identity, reported service/resource state, and any reported PTT state | The selected voice system, only for fields its approved interface actually defines | Voice system → adapter → clearly source-attributed status view. Absence of a field means unknown; it does not mean idle, healthy, or unkeyed. |
+| Facility, position, sector/side, console, radio-resource and frequency assignments; configuration revision | Facility-approved configuration authority or the voice-system configuration service explicitly named by the controlling ICD | Read-only configuration input to the adapter. Never infer a mapping from a sector name, public frequency list, local UI label, or stale configuration. Configuration changes become effective only with an explicit version/epoch from the authority. |
+| Surveillance tracks, flight plans, controller commands and operational decisions | Their existing approved OpenATCA/source boundaries and, operationally, the controller | No voice adapter writes into these domains. A voice status and a flight/sector view that disagree are shown as a conflict with provenance and time. |
+| Transmit selection, PTT/key/unkey, audio, call routing, mute, reconfiguration and failover | Approved voice equipment and its authorized operators/maintainers | No OpenATCA command path. These actions remain outside this proposal. |
 
-These are documented historical design and document-number facts. They do not prove that a given interface was installed at any particular site, remains present in a current system release, uses the same data semantics, or is available to an external application. They do not authorize OpenATCA to connect. The current site baseline and controlling ICD revisions must be identified by the responsible system and facility authorities.
+Position, sector, controller position, console, and voice position are distinct identifiers unless the approved configuration explicitly maps them. Frequency assignments are configuration facts, not commands. OpenATCA will not infer that a selected resource is able to transmit or that a reported PTT indication proves audio reached a receiver.
 
-### Current program context
+## Process and data contract proposal
 
-The FAA Voice Switch & Recorder (VS&R) public program overview describes legacy analog voice switches and a modernization program for IP-based Voice Communication Systems (VCS). It describes planned dynamic resource reconfiguration and an Air-to-Ground Protocol (APC) that interfaces with legacy analog and IP switches. This is program-level context; it does not define an external API, current site deployment, ERAM/STARS exchange, third-party access, or an OpenATCA interface.
+The adapter is a separate process with a one-way input boundary and a bounded output queue. It does not share mutable voice-system state with the core, expose a reverse command channel, or hold credentials usable for voice control. The adapter-to-OpenATCA envelope is the following OpenATCA-owned normalized contract. It is not the vendor-to-adapter protocol:
 
-FAA controller procedures assign operational radio and interphone duties among team positions and describe constraints associated with VSCS split functionality. Those procedures establish operational responsibilities, not a machine-readable position/sector/frequency schema. Fault-report examples that name sector, side, frequency, or calling/called location are maintenance reporting semantics, not proof that those values are exposed through a digital interface.
+| Envelope field | Meaning |
+|---|---|
+| `contract_version` | Explicit major/minor version. Unknown major versions are rejected. Unknown optional fields in a supported minor version are ignored; required fields and their semantics are fixed by the selected contract version. |
+| `source_id` | Authenticated voice-service identity, checked against the approved allowlist. |
+| `epoch` | Adapter-session generation identifier; a new epoch invalidates sequence continuity from the prior generation. |
+| `sequence` | Monotone per-source, per-epoch sequence number used for duplicate, gap, and replay detection. |
+| `event_time` and `received_time` | Source timestamp and local receipt timestamp retained separately, with explicit time basis/quality from the ICD. |
+| `configuration_version` | Version of the authoritative position/resource mapping used for any assignment. Missing or unknown version prevents assignment joins. |
+| `observations[]` | Bounded, typed, source-reported status values with explicit validity and quality. No inferred values. |
 
-The FAA public order listing identifies JO 6690.3D as an active VSCS maintenance order. That listing is not an ICD and does not supply a current system or site interface definition.
+The adapter emits a heartbeat at 1 Hz on this boundary, including its contract version, adapter epoch, upstream-feed state, and time of last valid source input. OpenATCA marks the feed unavailable after three consecutive missed heartbeats or three seconds without valid source input, clears current voice-status validity, and restores it only after a valid heartbeat and fresh source snapshot in the current epoch. Three seconds tolerates one missed interval for scheduling or delivery jitter while bounding stale-status display. These are OpenATCA design targets; revise them only if measured interface cadence/latency or an approved operating requirement shows they are unsuitable.
 
-## Unknowns that block interface selection
+For the normalized boundary, cap a decoded message at 64 KiB, 128 observations per message, and a 256-message queue per adapter. These caps bound allocation and queue growth. Exceeding a cap rejects the whole message and increments a bounded diagnostic counter; it does not truncate and present a partial message as complete.
 
-Before selecting an integration, the responsible authorities must identify:
+On a single host, authenticate the adapter with OS peer credentials on the Unix-domain socket and authorize its configured service identity. Across hosts, authenticate both service identities with TLS 1.3 mutual authentication and apply the same allowlist authorization. Authentication and authorization are separate; a valid but unapproved identity is rejected. OpenATCA user identity/session is not voice-system authority.
 
-1. The actual voice system, release, and site configuration in scope: VSCS, ETVS, VCS, or another system and facility variant.
-2. The current interface inventory and controlling ICDs for the selected voice and automation systems, including revisions, changes, connected-system list, topology, security boundary, and permitted operating modes.
-3. Whether any read-only status exchange is authorized, and its approved endpoint, transport, identity model, message fields, timing, update rate, authentication, and failure behavior.
-4. The authoritative source for controller position, sector/side, console, radio resource, frequency, assignment, and configuration version. The historical map artifacts show that position-resource configuration is site-specific; they do not define a present external data contract.
-5. What the acceptance authority considers successful voice-system “integration” and the evidence required to claim it in an operational deployment.
+Within an adapter epoch, an identical repeated sequence is a duplicate and is ignored; a reused sequence with different content is a protocol-integrity error and invalidates the affected source state. Older sequences are rejected as replay. A forward sequence gap is recorded and source status becomes incomplete until a fresh source snapshot restores a known baseline. Epoch changes start a new sequence domain; data from a prior epoch cannot overwrite the new one.
 
-Until these questions are resolved, no system protocol or connection is selected. Do not reverse engineer an interface, connect to a voice network, infer an interface from network reachability, or treat an old ICD number as current approval.
+## Mismatch, partition, and loss behavior
 
-## Safety boundary
+| Condition | Adapter behavior | Operator-facing behavior |
+|---|---|---|
+| Authentication, authorization, schema, or version failure | Reject input; retain only bounded reason counters; close/reconnect only under the approved retry policy | Show “voice status unavailable” and the failure category. Never show a green/healthy default. |
+| Duplicate sequence with identical content | Ignore as duplicate | No state change; diagnostic counter only. |
+| Sequence reuse with different content, replay, gap, invalid epoch, or stale source time | Mark that source state unknown/incomplete; do not merge across epochs | Show stale/incomplete state and last accepted source/receive times. Do not imply voice service failure or success. |
+| Position/resource/configuration mismatch or conflicting sources | Preserve both source-attributed observations; refuse the join | Show “mapping conflict” or “mapping unknown”; do not pick the newest or most convenient value silently. |
+| Network partition, process crash, queue full, or adapter restart | Drop no event silently; count bounded losses, terminate/clear uncertain state, reconnect only per the approved policy | Show unavailable/unknown. The approved voice equipment and its normal controls continue independently. |
+| Reported service loss or reported PTT state | Display only if the interface defines the value, scope, time, and quality; distinguish source report from measured end-to-end service | Label the state as reported by the named source. A missing PTT field is “not provided,” not “not keyed.” |
 
-The initial posture is that controllers continue to operate the approved voice system independently. OpenATCA must not select frequencies or radios, key or unkey a transmitter, assert PTT, route or mute calls, assign voice channels to positions, reconfigure voice equipment, or transmit ATC instructions. Controller operational authority and voice-equipment configuration/maintenance authority remain with their designated roles.
+Staleness is measured using source time only when its clock basis and quality are valid; receipt time remains available for diagnosing delivery delay. The three-second target above governs feed availability; if source time quality is invalid, display observations as time-unverified and do not use them as current status. Confirm or revise the target against measured cadence, latency, clock uncertainty, and operational review before implementation. Adapter loss must not interrupt, delay, or alter voice calls.
 
-Do not capture, replay, transcribe, analyze, or associate voice audio with flight records. The FAA identifies the National Voice Recorder as a legally acceptable recorder; it is a separate system boundary and is out of scope.
+No new alarm, sound, or controller-priority alert is proposed. The first UI should be a passive, clearly labeled status panel with source, configuration version, state age/quality, and unavailable/conflict conditions. A status label must not imply control authority, end-to-end audio quality, or controller action. Any future alert would need a separately accepted meaning, priority, threshold, workload assessment, and failure behavior.
 
-If a current, authorized read-only status interface is later established, implement it in a separate shell adapter, not in the reusable core. Keep each observation attributed to its source, source time, receive time, voice-system identity, and configuration version when the ICD defines them. Do not infer PTT, frequency, assignment, or voice health from missing fields or display labels. Do not infer that a selected resource can transmit.
+## Verification strategy
 
-## Position, resource, and time semantics
+Before connecting to any real system, build a deterministic simulator and contract test harness from the approved interface description. Use synthetic identities and states only. The harness should cover:
 
-- **Position and sector:** Sector, controller position, and voice position are not interchangeable identities by implication. Bind mappings to the facility and exact configuration version only when the controlling interface and configuration authority define those keys. Missing, duplicate, stale, or conflicting mappings remain unknown or ambiguous; do not silently relabel them.
-- **Frequency and radio:** Treat frequency and radio selection as configuration and operator action, never as a control request from OpenATCA. Do not derive them from sector labels, public frequency plans, or a stale map.
-- **PTT and audio:** No public source reviewed establishes an OpenATCA-readable PTT/key/unkey event. Keep transmit control and audio out of scope. Any future state indication requires explicit source-of-truth, timing, latency, quality, and failure semantics in the approved ICD.
-- **Time:** The historical VSCS plan identifies a coded time source interface and describes synchronization/timestamping. That does not establish current clock accuracy or cross-system alignment. Preserve source time and receive time separately and use only the time contract approved for the selected interface.
-- **Authority:** A mismatch between voice status and OpenATCA's flight or sector view is a conflict, not a condition to resolve by guesswork. Preserve the values and timestamps from both sources.
+1. Supported and unsupported contract versions, schema bounds, malformed messages, unknown enumerations, and the byte/item/queue caps.
+2. Authentication and authorization separately, including an authenticated but unapproved source.
+3. Duplicate, out-of-order, replayed, conflicting-same-sequence, missing-sequence, epoch-reset, and snapshot-recovery cases.
+4. Stale/future timestamps, invalid clock quality, separate event/receipt time, and configuration-version changes.
+5. Missing, duplicate, and conflicting position/resource mappings; ensure no field or identifier is silently substituted.
+6. Partition, restart, queue exhaustion, malformed input, and adapter shutdown while a separate mock voice service remains callable and unchanged.
+7. UI state for unknown, stale, conflicting, reported loss, and reported PTT; confirm no green default, control action, audio path, or unsupported end-to-end claim.
 
-## Failure isolation
+After contract testing with synthetic data, validate against the approved system simulator or test endpoint for the exact site/release/configuration. Measure timing and loss behavior and demonstrate independent voice operation under adapter failure. Complete facility/system authority review and field acceptance before making an operational integration claim.
 
-If an approved read-only interface is eventually authorized, missing, stale, malformed, or contradictory data must be reported as unknown/unavailable, never as healthy. The adapter must fail independently and must not interrupt voice calls, surveillance processing, flight-data processing, or controller operation. No new controller-facing alert should be introduced until its meaning, priority, stale threshold, and workload impact are accepted by the responsible operational authority.
+## Evidence and decision rationale
 
-The failure model must match the selected current system. Analog VSCS assumptions must not be carried over to a newer IP voice system without evidence from its ICD and acceptance plan. Any active operation—including resource selection, PTT, routing, reconfiguration, or failover—is a separate safety and security case and is not proposed here.
+- FAA Order 6690.4 (1993) §33 describes a historical VSCS-to-ACCC processor interface and identifies NAS-IC-21024201 Parts I and II. It describes historical design intent, not proof of current installation, availability, or authorization.
+- The same order names historical interfaces and configuration artifacts including VP 26, ATR-320, and VP 41; it says its deliverable list is incomplete. These references support the need for a site-specific configuration and current controlling documents, not use of those artifacts as an assumed current contract.
+- The FAA VS&R program overview describes modernization context and planned capabilities. It is not an external API or site deployment specification.
+- FAA controller procedures establish position responsibilities and facility practices, not a machine-readable voice mapping or external data contract.
+- The FAA public order listing identifies current maintenance-order status but is not an interface control document.
 
-## Verification and operational evidence
+The design choice is a read-only, process-isolated adapter with explicit provenance and fail-unknown display behavior. Evidence that would change it includes an approved ICD requiring a different safe boundary or an authority-approved architecture that specifies another process boundary.
 
-Before any integration claim, an approved plan should identify the interface and site baseline, verify read-only behavior and source identity, demonstrate unknown/stale/conflict handling, and show that adapter failure leaves the independent voice service usable. Any operational deployment claim additionally needs facility-approved acceptance records, system safety/security review, operator and maintainer procedures, and field evidence for the designated voice system alongside the surveillance and flight-data integrations.
+## References
 
-No test plan, thresholds, or integration results are claimed here. A successful parser or lab demonstration would not establish current site compatibility or operational acceptance.
-
-## Public references
-
-- FAA, [Voice Switch & Recorder Program](https://www.faa.gov/air_traffic/technology/cinp/vsrprogram) — current program overview and modernization context.
-- FAA, [Order 6690.4, VSCS Project Implementation Plan](https://www.faa.gov/documentLibrary/media/Order/6690.4.pdf), 1993 — historical system interfaces, configuration artifacts, and implementation plan; not a current ICD.
+- FAA, [Voice Switch & Recorder Program](https://www.faa.gov/air_traffic/technology/cinp/vsrprogram) — program-level modernization context.
+- FAA, [Order 6690.4, VSCS Project Implementation Plan](https://www.faa.gov/documentLibrary/media/Order/6690.4.pdf) (1993) — historical interface and configuration references, not a current ICD.
 - FAA, [JO 7110.65, Team Position Responsibilities](https://www.faa.gov/air_traffic/publications/atpubs/ATC_html/chap2_section_10.html) — controller position procedures.
 - FAA, [Facility Administration procedures, Chapter 2](https://www.faa.gov/air_traffic/publications/atpubs/foa_html/chap2_section_2.html) — facility position and equipment status procedures.
-- FAA, [Orders and Notices listing for AJW-154](https://www.faa.gov/regulations_policies/orders_notices/index.cfm/go/document.list/?appliedFacets=%7B%22officenumber%22%3A%22AJW-154%22%7D) — public status listing for current VSCS maintenance orders.
+- FAA, [Orders and Notices listing for AJW-154](https://www.faa.gov/regulations_policies/orders_notices/index.cfm/go/document.list/?appliedFacets=%7B%22officenumber%22%3A%22AJW-154%22%7D) — public order listing, not a system interface definition.
+
+## Limits and open questions
+
+The public references do not identify the current KORD/ARTCC voice system, software release, interface inventory, connected-system topology, site resource configuration, or a third-party read-only status API. They do not establish whether current VSCS, ETVS, or VCS exposes position/resource assignments, PTT, health, or configuration version to OpenATCA. The vendor-to-adapter protocol, endpoint, source identity, field encodings, time semantics, update cadence, and recovery/snapshot behavior therefore remain unknown; no vendor wire format is proposed here.
+
+Next, the responsible engineering authority must provide the controlling ICD and site/release baseline, and identify the authorized test endpoint. The system/security owners must confirm read-only scope, source identity, permitted fields, and mapping authority. Then compare the adapter’s normalized field map, timestamp/epoch translation, queue caps, and heartbeat targets against the ICD and measured normal/peak traffic. Facility operations must define the intended status use and acceptance evidence. If the approved interface cannot support a bounded read-only feed, retain the independent voice boundary without an adapter.
