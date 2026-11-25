@@ -1,0 +1,12 @@
+operation,arg1,arg2,arg3,arg4,status,location,out1,out2,out3,tolerance,case
+inverse,0,0,0,1,0,0,111319.49079327357,90,90,0.000001,equator-one-degree
+inverse,0,0,1,0,0,0,110574.3886,0,0,0.001,meridian-one-degree
+inverse,0,0,0,179.9,0,0,20003008.42150941,,,0.001,near-antipodal-equator
+direct,0,0,90,1000000,0,0,0,8.983152841195214,90,0.0000000001,equator-east
+direct,0,179.5,90,200000,0,0,0,-178.7034,90,0.001,antimeridian-east
+direct,0,0,90,0,0,0,0,0,90,0,zero-distance
+inverse,NaN,0,0,1,2,0,,,,,nan-latitude
+inverse,0,0,0,181,4,3,,,,,longitude-range
+direct,0,181,90,1,4,1,,,,,longitude-range-direct
+direct,0,0,inf,1,2,2,,,,,nonfinite-azimuth
+direct,0,0,90,NaN,2,3,,,,,nonfinite-distance

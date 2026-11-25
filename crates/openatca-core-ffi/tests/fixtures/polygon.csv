@@ -1,0 +1,4 @@
+case,vertices,latitude,longitude,inside
+square-inside,-1|-1;-1|1;1|1;1|-1,0,0,1
+square-outside,-1|-1;-1|1;1|1;1|-1,2,0,0
+antimeridian-inside,10|179;10|-179;-10|-179;-10|179,0,180,1

@@ -43,6 +43,7 @@ members = [
     "crates/oa-sensorsim",
     "crates/oa-track",
     "crates/openatca-core",
+    "crates/openatca-core-ffi",
     "crates/oa-encounter",
     "crates/oa-flight",
     "crates/oa-flight-sfdps",

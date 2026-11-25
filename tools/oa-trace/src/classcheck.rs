@@ -13,6 +13,84 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const FFI_PACKAGE: &str = "openatca-core-ffi";
+const FFI_PACKAGE_DIR: &str = "crates/openatca-core-ffi";
+const FFI_EXPORTS: &[&str] = &[
+    "oa_geo_wgs84_inverse",
+    "oa_geo_wgs84_direct",
+    "oa_core_error_message",
+    "oa_core_abi_version",
+    "oa_math_f64_unary",
+    "oa_math_f64_binary",
+    "oa_math_f64_ternary",
+    "oa_math_f64_powi",
+    "oa_math_f64_sin_cos",
+    "oa_math_f64_compare",
+    "oa_math_f64_is_sign_negative",
+    "oa_math_f32_unary",
+    "oa_math_f32_binary",
+    "oa_math_f32_ternary",
+    "oa_math_f32_compare",
+    "oa_math_f32_is_sign_negative",
+    "oa_sha256_digest",
+    "oa_sha256_hex",
+    "oa_geo_wgs84_rhumb_inverse",
+    "oa_geo_wgs84_rhumb_direct",
+    "oa_geo_wgs84_rhumb_point_at_fraction",
+    "oa_geo_wgs84_geodesic_rhumb_separation",
+    "oa_geo_polygon_new_wgs84",
+    "oa_geo_polygon_contains_wgs84",
+    "oa_geo_polygon_edge_count",
+    "oa_geo_polygon_free",
+];
+const FFI_DEPENDENCIES: &[(&str, &str)] = &[
+    ("oa-geo", "../oa-geo"),
+    ("oa-ieee", "../oa-ieee"),
+    ("oa-math", "../oa-math"),
+    ("oa-sha256", "../oa-sha256"),
+];
+
+/// Reviewed unsafe blocks in the provisional FFI module, grouped by their owning function.
+/// This intentionally pins both the function boundary and the number of unsafe blocks inside it;
+/// every block also needs its local SAFETY rationale below. Change this list only with a reviewed
+/// boundary change and matching negative-fixture coverage.
+pub const FFI_UNSAFE_BLOCKS: &[(&str, usize)] = &[
+    ("write_error", 1),
+    ("oa_geo_wgs84_inverse", 1),
+    ("oa_geo_wgs84_direct", 1),
+    ("oa_math_f64_unary", 1),
+    ("oa_math_f64_binary", 1),
+    ("oa_math_f64_ternary", 1),
+    ("oa_math_f64_powi", 1),
+    ("oa_math_f64_sin_cos", 1),
+    ("oa_math_f64_compare", 1),
+    ("oa_math_f64_is_sign_negative", 1),
+    ("oa_math_f32_unary", 1),
+    ("oa_math_f32_binary", 1),
+    ("oa_math_f32_ternary", 1),
+    ("oa_math_f32_compare", 1),
+    ("oa_math_f32_is_sign_negative", 1),
+    ("oa_sha256_digest", 2),
+    ("oa_sha256_hex", 2),
+    ("oa_geo_wgs84_rhumb_inverse", 1),
+    ("oa_geo_wgs84_rhumb_direct", 1),
+    ("oa_geo_wgs84_rhumb_point_at_fraction", 1),
+    ("oa_geo_wgs84_geodesic_rhumb_separation", 1),
+    ("oa_geo_polygon_new_wgs84", 3),
+    ("oa_geo_polygon_contains_wgs84", 2),
+    ("oa_geo_polygon_edge_count", 2),
+    ("oa_geo_polygon_free", 1),
+    ("oa_core_error_message", 2),
+    ("ffi_l0_matches_the_shared_synthetic_vectors", 3),
+    ("ffi_polygon_matches_the_shared_synthetic_vectors", 4),
+    ("ffi_matches_the_shared_synthetic_geodesy_vectors", 1),
+    ("null_output_is_refused_and_message_copy_is_bounded", 2),
+    (
+        "error_message_capacity_is_all_or_nothing_and_includes_nul",
+        4,
+    ),
+];
+
 mod boundary;
 mod floats;
 mod harden;
@@ -259,6 +337,10 @@ pub struct Manifest {
     pub build_key: bool,
     /// `[lints]` has `workspace = true`.
     pub lints_workspace: bool,
+    /// Individual `[lints.rust] unsafe_code = "deny"` override, used only by the A0 C ABI shell.
+    pub lints_unsafe_deny: bool,
+    /// Explicitly denied `[lints.clippy]` names.
+    pub clippy_denied: BTreeSet<String>,
 }
 
 /// `line` without a trailing `# comment` (a `#` inside quotes is kept).
@@ -422,6 +504,8 @@ pub fn parse_manifest(text: &str) -> Manifest {
         Lib,
         Bin,
         Lints,
+        LintsRust,
+        LintsClippy,
         DepTable(bool),
         DepNamed(String, bool),
     }
@@ -442,6 +526,8 @@ pub fn parse_manifest(text: &str) -> Manifest {
                 ["package", "metadata", "openatca"] => Sec::Meta,
                 ["lib"] => Sec::Lib,
                 ["lints"] => Sec::Lints,
+                ["lints", "rust"] => Sec::LintsRust,
+                ["lints", "clippy"] => Sec::LintsClippy,
                 ["bin"] if array => {
                     m.bin_paths.push(String::new());
                     Sec::Bin
@@ -480,6 +566,12 @@ pub fn parse_manifest(text: &str) -> Manifest {
                 m.class = Some(unquote(value).unwrap_or_else(|| value.to_string()));
             }
             Sec::Lints if key == "workspace" => m.lints_workspace = value == "true",
+            Sec::LintsRust if key == "unsafe_code" => {
+                m.lints_unsafe_deny = unquote(value).as_deref() == Some("deny");
+            }
+            Sec::LintsClippy if unquote(value).as_deref() == Some("deny") => {
+                m.clippy_denied.insert(key.to_string());
+            }
             Sec::Lib if key == "path" => m.lib_path = true,
             Sec::Lib if key == "name" => m.lib_name = unquote(value),
             Sec::Bin if key == "path" => {
@@ -2150,6 +2242,7 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
             check_member(root, m, &view, &mut cbs, &mut rep.failures);
         }
     }
+    check_ffi_a0(root, &members, &mut rep.failures);
     if allow_ok {
         for (k, p) in allow_keys.difference(&cbs.used) {
             rep.failures.push(format!(
@@ -2192,6 +2285,429 @@ pub fn check_with(root: &Path, unsplit_allowed: &[&str]) -> ClassReport {
     rep.failures.sort();
     rep.failures.dedup();
     rep
+}
+
+/// RULESET A0's narrowly scoped provisional FFI exception: one exact shell package and module,
+/// exact `src/` inventory, and a local `// SAFETY:` explanation for each unsafe block.
+fn check_ffi_a0(root: &Path, members: &[Member], fails: &mut Vec<String>) {
+    let package_dir = root.join(FFI_PACKAGE_DIR);
+    let metadata = match fs::symlink_metadata(&package_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            fails.push(format!(
+                "{FFI_PACKAGE_DIR}: A0: cannot inspect binding package: {error}"
+            ));
+            return;
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        fails.push(format!(
+            "{FFI_PACKAGE_DIR}: A0: binding package path must be a real directory"
+        ));
+        return;
+    }
+    let candidates: Vec<&Member> = members
+        .iter()
+        .filter(|member| member.name == FFI_PACKAGE || member.rel_dir == FFI_PACKAGE_DIR)
+        .collect();
+    if candidates.len() != 1 {
+        fails.push(format!(
+            "{FFI_PACKAGE_DIR}: A0: the provisional FFI exception must name exactly one workspace package"
+        ));
+        return;
+    }
+    let Some(member) = candidates.first().copied() else {
+        return;
+    };
+    if member.name != FFI_PACKAGE
+        || member.rel_dir != FFI_PACKAGE_DIR
+        || member.class != Class::Shell
+    {
+        fails.push(format!(
+            "{FFI_PACKAGE_DIR}: A0: the exception is only `openatca-core-ffi` classified as shell at this exact path"
+        ));
+    }
+    if member.man.lints_workspace || !member.man.lints_unsafe_deny {
+        fails.push(format!(
+            "{FFI_PACKAGE_DIR}: A0: the binding package locally sets `[lints.rust] unsafe_code = \"deny\"` and does not inherit workspace `forbid`"
+        ));
+    }
+    let required_clippy: BTreeSet<String> =
+        ["unwrap_used", "expect_used", "panic", "indexing_slicing"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+    if !required_clippy.is_subset(&member.man.clippy_denied) {
+        fails.push(format!(
+            "{FFI_PACKAGE_DIR}: A0: all four workspace runtime Clippy lints remain denied"
+        ));
+    }
+    let dependencies_match = member.man.deps.len() == FFI_DEPENDENCIES.len()
+        && FFI_DEPENDENCIES.iter().all(|(key, path)| {
+            member.man.deps.iter().any(|dependency| {
+                dependency.key == *key
+                    && dependency.path.as_deref() == Some(*path)
+                    && dependency.package.is_none()
+                    && !dependency.workspace
+            })
+        });
+    if !dependencies_match {
+        fails.push(format!(
+            "{FFI_PACKAGE_DIR}: A0/F1: the binding shell depends only on the four named core crates"
+        ));
+    }
+
+    let source_dir = package_dir.join("src");
+    match fs::symlink_metadata(&source_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            fails.push(format!(
+                "{FFI_PACKAGE_DIR}/src: A0: source directory must be a real directory"
+            ));
+            return;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            fails.push(format!(
+                "{FFI_PACKAGE_DIR}/src: A0: cannot inspect source directory: {error}"
+            ));
+            return;
+        }
+    }
+    let entries = match fs::read_dir(&source_dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            fails.push(format!(
+                "{FFI_PACKAGE_DIR}/src: A0: cannot read source inventory: {error}"
+            ));
+            return;
+        }
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                fails.push(format!(
+                    "{FFI_PACKAGE_DIR}/src: A0: cannot read inventory entry: {error}"
+                ));
+                continue;
+            }
+        };
+        let path = entry.path();
+        let entry_type = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) => {
+                fails.push(format!(
+                    "{}: A0: cannot inspect source entry: {error}",
+                    rel(root, &path)
+                ));
+                continue;
+            }
+        };
+        if entry_type.is_symlink() || !entry_type.is_file() {
+            fails.push(format!(
+                "{}: A0: source inventory contains a non-file or symlink",
+                rel(root, &path)
+            ));
+        }
+        names.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    names.sort();
+    if names.len() != 2
+        || names.first().map(String::as_str) != Some("ffi.rs")
+        || names.get(1).map(String::as_str) != Some("lib.rs")
+    {
+        fails.push(format!(
+            "{FFI_PACKAGE_DIR}/src: A0: Rust source inventory is exactly `lib.rs` and `ffi.rs`"
+        ));
+    }
+    for (file, expected_level) in [("lib.rs", "deny"), ("ffi.rs", "allow")] {
+        let path = source_dir.join(file);
+        let source = match fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(error) => {
+                fails.push(format!(
+                    "{}: A0: cannot read binding source: {error}",
+                    rel(root, &path)
+                ));
+                continue;
+            }
+        };
+        let tokenized = tokenize(&mask(&source));
+        let source_injection = tokenized.windows(2).any(|window| {
+            token_pair_is(window, "include", "!") || token_pair_is(window, "macro_rules", "!")
+        }) || tokenized.windows(3).any(|window| {
+            token_triple_is(window, "#", "[", &["path", "macro_use", "macro_export"])
+        }) || tokenized.iter().any(|token| token.s == "path");
+        if source_injection {
+            fails.push(format!(
+                "{}: A0: `include!`, `#[path]`, and source-injecting macros are refused in the two allowed source files",
+                rel(root, &path)
+            ));
+        }
+        let expected_count =
+            lint_attribute_count(&tokenized, expected_level, "unsafe_code", Some(true));
+        let other_level = if expected_level == "allow" {
+            "deny"
+        } else {
+            "allow"
+        };
+        let other_count = lint_attribute_count(&tokenized, other_level, "unsafe_code", None);
+        if expected_count != 1 || other_count != 0 {
+            fails.push(format!(
+                "{}: A0: `{file}` has exactly one inner `#![{expected_level}(unsafe_code)]` and no opposite unsafe lint attribute",
+                rel(root, &path)
+            ));
+        }
+        if file == "lib.rs" {
+            let has_module = tokenized
+                .windows(3)
+                .any(|window| token_triple_is(window, "mod", "ffi", &[";"]));
+            if !has_module {
+                fails.push(format!(
+                    "{}: A0: crate root declares the audited `ffi` module",
+                    rel(root, &path)
+                ));
+            }
+            if tokenized.iter().any(|token| token.s == "unsafe") {
+                fails.push(format!(
+                    "{}: A0: unsafe operations and declarations stay out of the crate root",
+                    rel(root, &path)
+                ));
+            }
+        } else {
+            let raw_lines: Vec<&str> = source.lines().collect();
+            let expected_exports: BTreeSet<String> =
+                FFI_EXPORTS.iter().map(|name| (*name).to_string()).collect();
+            let export_count = tokenized.iter().filter(|token| token.s == "extern").count();
+            let no_mangle_count = tokenized
+                .iter()
+                .filter(|token| token.s == "no_mangle")
+                .count();
+            let mut c_exports = BTreeSet::new();
+            if let Some(kept) = mask_keep_strings(&source) {
+                let c_tokens = tokenize(&kept);
+                for (index, _) in c_tokens
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, token)| token.s == "extern")
+                {
+                    let is_c_function = c_tokens.get(index + 1).map(|next| next.s.as_str())
+                        == Some("\"")
+                        && c_tokens.get(index + 2).map(|next| next.s.as_str()) == Some("C")
+                        && c_tokens.get(index + 3).map(|next| next.s.as_str()) == Some("\"")
+                        && c_tokens.get(index + 4).map(|next| next.s.as_str()) == Some("fn");
+                    let name = c_tokens.get(index + 5).map(|name| name.s.clone());
+                    if is_c_function
+                        && name
+                            .as_deref()
+                            .is_some_and(|name| expected_exports.contains(name))
+                    {
+                        if let Some(name) = name {
+                            c_exports.insert(name);
+                        }
+                    }
+                }
+            }
+            let mut mangled_exports = BTreeSet::new();
+            for (index, _) in tokenized
+                .iter()
+                .enumerate()
+                .filter(|(_, token)| token.s == "no_mangle")
+            {
+                let end = (index + 16).min(tokenized.len());
+                let function = tokenized.get(index + 1..end).and_then(|tokens| {
+                    tokens
+                        .windows(2)
+                        .find(|window| window.first().is_some_and(|token| token.s == "fn"))
+                });
+                if let Some(name) = function.and_then(|function| function.get(1)) {
+                    if expected_exports.contains(&name.s) {
+                        mangled_exports.insert(name.s.clone());
+                    }
+                }
+            }
+            let forbidden_injection = tokenized.windows(2).any(|window| {
+                token_pair_is(window, "include", "!") || token_pair_is(window, "macro_rules", "!")
+            }) || tokenized.windows(3).any(|window| {
+                token_triple_is(window, "#", "[", &["path", "macro_use", "macro_export"])
+            }) || tokenized.iter().any(|token| token.s == "path");
+            if export_count != expected_exports.len()
+                || no_mangle_count != expected_exports.len()
+                || c_exports != expected_exports
+                || mangled_exports != expected_exports
+                || tokenized.iter().any(|token| {
+                    matches!(
+                        token.s.as_str(),
+                        "export_name" | "link_name" | "link_section" | "link"
+                    )
+                })
+                || forbidden_injection
+            {
+                fails.push(format!(
+                    "{}: A0: exports, ABI strings and source injection are restricted to the exact named provisional function inventory",
+                    rel(root, &path)
+                ));
+            }
+            for (index, token) in tokenized
+                .iter()
+                .enumerate()
+                .filter(|(_, token)| token.s == "unsafe")
+            {
+                let next = tokenized.get(index + 1).map(|next| next.s.as_str());
+                let is_export = next == Some("extern")
+                    && tokenized.get(index + 2).map(|next| next.s.as_str()) == Some("fn")
+                    && tokenized.get(index + 3).is_some_and(|name| {
+                        matches!(
+                            name.s.as_str(),
+                            name if FFI_EXPORTS.contains(&name) && name != "oa_core_abi_version"
+                        )
+                    });
+                if is_export {
+                    continue;
+                }
+                if next != Some("{") {
+                    fails.push(format!(
+                        "{}:{}: A0: only the pointer-bearing C exports and their small unsafe blocks are permitted in the audited FFI module",
+                        rel(root, &path), token.line
+                    ));
+                    continue;
+                }
+                if unsafe_block_owner(&tokenized, index).is_none() {
+                    fails.push(format!(
+                        "{}:{}: A0: every unsafe block belongs to a named reviewed function",
+                        rel(root, &path),
+                        token.line
+                    ));
+                }
+                if !has_preceding_safety_comment(&raw_lines, token.line) {
+                    fails.push(format!(
+                        "{}:{}: A0: every unsafe block has an immediately preceding `// SAFETY:` justification",
+                        rel(root, &path), token.line
+                    ));
+                }
+            }
+            let actual_unsafe_blocks = unsafe_block_inventory(&tokenized);
+            let expected_unsafe_blocks: BTreeMap<String, usize> = FFI_UNSAFE_BLOCKS
+                .iter()
+                .map(|(name, count)| ((*name).to_string(), *count))
+                .collect();
+            if actual_unsafe_blocks != expected_unsafe_blocks {
+                fails.push(format!(
+                    "{}: A0: unsafe block inventory by owning function differs from the reviewed list",
+                    rel(root, &path)
+                ));
+            }
+            if tokenized.iter().any(|token| token.s == "GlobalAlloc") {
+                fails.push(format!(
+                    "{}: A0: product source may not name `GlobalAlloc`",
+                    rel(root, &path)
+                ));
+            }
+        }
+    }
+}
+
+fn token_pair_is(tokens: &[Tok], first: &str, second: &str) -> bool {
+    tokens.first().is_some_and(|token| token.s == first)
+        && tokens.get(1).is_some_and(|token| token.s == second)
+}
+
+fn token_triple_is(tokens: &[Tok], first: &str, second: &str, third: &[&str]) -> bool {
+    tokens.first().is_some_and(|token| token.s == first)
+        && tokens.get(1).is_some_and(|token| token.s == second)
+        && tokens
+            .get(2)
+            .is_some_and(|token| third.contains(&token.s.as_str()))
+}
+
+fn has_preceding_safety_comment(lines: &[&str], unsafe_line: usize) -> bool {
+    let Some(mut index) = unsafe_line.checked_sub(2) else {
+        return false;
+    };
+    let mut found_marker = false;
+    loop {
+        let Some(line) = lines.get(index) else {
+            return false;
+        };
+        let comment = line.trim_start();
+        if !comment.starts_with("//") {
+            break;
+        }
+        found_marker |= comment.starts_with("// SAFETY:");
+        if index == 0 {
+            break;
+        }
+        index -= 1;
+    }
+    found_marker
+}
+
+/// Returns the owning function for an `unsafe { ... }` token. FFI source deliberately uses
+/// ordinary function bodies and balanced braces; this small lexical walk does not try to parse
+/// Rust, and fails closed when a block is outside a function.
+fn unsafe_block_owner(tokens: &[Tok], unsafe_index: usize) -> Option<String> {
+    let mut owners: Vec<Option<String>> = Vec::new();
+    let mut pending_function: Option<String> = None;
+    for (index, token) in tokens.iter().enumerate().take(unsafe_index + 2) {
+        if token.s == "fn" {
+            pending_function = tokens.get(index + 1).map(|name| name.s.clone());
+        }
+        match token.s.as_str() {
+            "{" => owners.push(
+                pending_function
+                    .take()
+                    .or_else(|| owners.last().cloned().flatten()),
+            ),
+            "}" => {
+                owners.pop();
+                pending_function = None;
+            }
+            _ => {}
+        }
+    }
+    owners.last().cloned().flatten()
+}
+
+fn unsafe_block_inventory(tokens: &[Tok]) -> BTreeMap<String, usize> {
+    let mut inventory = BTreeMap::new();
+    for (index, _) in tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, token)| token.s == "unsafe")
+    {
+        if tokens.get(index + 1).is_some_and(|next| next.s == "{") {
+            if let Some(owner) = unsafe_block_owner(tokens, index) {
+                *inventory.entry(owner).or_insert(0) += 1;
+            }
+        }
+    }
+    inventory
+}
+
+fn lint_attribute_count(tokens: &[Tok], level: &str, lint: &str, inner: Option<bool>) -> usize {
+    let mut count = 0;
+    for index in 0..tokens.len() {
+        if s(tokens, index) == "#" {
+            let has_inner = s(tokens, index + 1) == "!";
+            let mut start = index + 1;
+            if has_inner {
+                start += 1;
+            }
+            if inner.is_none_or(|required| required == has_inner)
+                && s(tokens, start) == "["
+                && s(tokens, start + 1) == level
+                && s(tokens, start + 2) == "("
+                && s(tokens, start + 3) == lint
+                && s(tokens, start + 4) == ")"
+                && s(tokens, start + 5) == "]"
+            {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 /// The file `crates/oa-math/src/order.rs`, the one place the standard library's sign and order

@@ -10,7 +10,7 @@ use oa_trace::classcheck::{
     check, check_with, ieee_api_problems, lib_rs_problems, mask, parse_manifest, parse_members,
     render_text, scan_source, Class, Ctx, FloatFacts, UNSPLIT_ALLOWED,
 };
-use oa_trace::classcheck::{float_method_advice, FLOAT_METHODS};
+use oa_trace::classcheck::{float_method_advice, FFI_UNSAFE_BLOCKS, FLOAT_METHODS};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -386,6 +386,35 @@ impl Ws {
         ws
     }
 
+    fn ffi(tag: &str, extra_src: &[(&str, &str)]) -> Ws {
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("oa-trace-ffi-{}-{n}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let ws = Ws { root };
+        ws.put(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/openatca-core-ffi\"]\n",
+        );
+        ws.put(ALLOW, "");
+        ws.put(CALLBACKS, "");
+        ws.put(BUDGET, "");
+        ws.put(
+            "crates/openatca-core-ffi/Cargo.toml",
+            "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
+        );
+        ws.put(
+            "crates/openatca-core-ffi/src/lib.rs",
+            "#![deny(unsafe_code)]\nmod ffi;\n",
+        );
+        ws.put("crates/openatca-core-ffi/src/ffi.rs", &ffi_fixture_source());
+        for (path, source) in extra_src {
+            ws.put(&format!("crates/openatca-core-ffi/src/{path}"), source);
+        }
+        ws
+    }
+
     fn put(&self, rel: &str, content: &str) {
         let p = self.root.join(rel);
         fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -395,6 +424,65 @@ impl Ws {
     fn failures(&self) -> Vec<String> {
         check_with(&self.root, &[]).failures
     }
+}
+
+fn ffi_fixture_source() -> String {
+    const EXPORTS: &[&str] = &[
+        "oa_geo_wgs84_inverse",
+        "oa_geo_wgs84_direct",
+        "oa_core_error_message",
+        "oa_core_abi_version",
+        "oa_math_f64_unary",
+        "oa_math_f64_binary",
+        "oa_math_f64_ternary",
+        "oa_math_f64_powi",
+        "oa_math_f64_sin_cos",
+        "oa_math_f64_compare",
+        "oa_math_f64_is_sign_negative",
+        "oa_math_f32_unary",
+        "oa_math_f32_binary",
+        "oa_math_f32_ternary",
+        "oa_math_f32_compare",
+        "oa_math_f32_is_sign_negative",
+        "oa_sha256_digest",
+        "oa_sha256_hex",
+        "oa_geo_wgs84_rhumb_inverse",
+        "oa_geo_wgs84_rhumb_direct",
+        "oa_geo_wgs84_rhumb_point_at_fraction",
+        "oa_geo_wgs84_geodesic_rhumb_separation",
+        "oa_geo_polygon_new_wgs84",
+        "oa_geo_polygon_contains_wgs84",
+        "oa_geo_polygon_edge_count",
+        "oa_geo_polygon_free",
+    ];
+    let mut source = String::from("#![allow(unsafe_code)]\n");
+    for name in EXPORTS {
+        let qualifier = if *name == "oa_core_abi_version" {
+            ""
+        } else {
+            "unsafe "
+        };
+        source.push_str(&format!(
+            "#[no_mangle] pub {qualifier}extern \"C\" fn {name}() {{\n"
+        ));
+        for (_, count) in FFI_UNSAFE_BLOCKS.iter().filter(|(owner, _)| owner == name) {
+            for _ in 0..*count {
+                source.push_str("// SAFETY: fixture rationale.\nunsafe {}\n");
+            }
+        }
+        source.push_str("}\n");
+    }
+    for (owner, count) in FFI_UNSAFE_BLOCKS
+        .iter()
+        .filter(|(owner, _)| !EXPORTS.contains(owner))
+    {
+        source.push_str(&format!("fn {owner}() {{\n"));
+        for _ in 0..*count {
+            source.push_str("// SAFETY: fixture rationale.\nunsafe {}\n");
+        }
+        source.push_str("}\n");
+    }
+    source
 }
 
 impl Drop for Ws {
@@ -1648,6 +1736,230 @@ fn every_core_and_split_crate_takes_the_workspace_lints_and_forbids_unsafe() {
         "#![forbid(unsafe_code)]\n// unsafe extern \"C\"\npub const S: &str = \"unsafe\";\n"
     )
     .is_empty());
+}
+
+// REQ: OA-TRC-262
+#[test]
+fn the_provisional_ffi_unsafe_exception_is_exact_and_auditable() {
+    let ws = Ws::ffi("ffi-ok", &[]);
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+
+    let ws = Ws::ffi("ffi-extra", &[("extra.rs", "pub fn hidden() {}\n")]);
+    assert!(
+        has(&ws.failures(), "source inventory is exactly"),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let ws = Ws::ffi("ffi-safety", &[]);
+    ws.put(
+        "crates/openatca-core-ffi/src/ffi.rs",
+        "#![allow(unsafe_code)]\npub fn boundary() { unsafe { let _ = 1; } }\n",
+    );
+    assert!(
+        has(
+            &ws.failures(),
+            "every unsafe block has an immediately preceding"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let source = ffi_fixture_source().replace(
+        "// SAFETY: fixture rationale.\nunsafe {}",
+        "// SAFETY: fixture rationale spans lines.\n// This continuation is adjacent to the unsafe block.\nunsafe {}",
+    );
+    let ws = Ws::ffi("ffi-multiline-safety", &[]);
+    ws.put("crates/openatca-core-ffi/src/ffi.rs", &source);
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+
+    let source = ffi_fixture_source().replacen(
+        "// SAFETY: fixture rationale.\nunsafe {}",
+        "// SAFETY: separated from the unsafe block.\n\nunsafe {}",
+        1,
+    );
+    let ws = Ws::ffi("ffi-separated-safety", &[]);
+    ws.put("crates/openatca-core-ffi/src/ffi.rs", &source);
+    assert!(
+        has(
+            &ws.failures(),
+            "every unsafe block has an immediately preceding"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let source = ffi_fixture_source().replace(
+        "// SAFETY: fixture rationale.\nunsafe {}",
+        "// SAFETY: fixture rationale spans lines.\n// This continuation is adjacent to the unsafe block.\nunsafe {}",
+    );
+    let ws = Ws::ffi("ffi-multiline-safety", &[]);
+    ws.put("crates/openatca-core-ffi/src/ffi.rs", &source);
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+
+    let source = ffi_fixture_source().replacen(
+        "// SAFETY: fixture rationale.\nunsafe {}",
+        "let _ = 1;\n\n// SAFETY: adjacent comment block after code.\n// The preceding blank line separates older comments.\nunsafe {}",
+        1,
+    );
+    let ws = Ws::ffi("ffi-safety-after-code", &[]);
+    ws.put("crates/openatca-core-ffi/src/ffi.rs", &source);
+    assert!(ws.failures().is_empty(), "{:#?}", ws.failures());
+
+    let source = ffi_fixture_source().replacen(
+        "// SAFETY: fixture rationale.\nunsafe {}",
+        "// SAFETY: separated from the unsafe block.\n\nunsafe {}",
+        1,
+    );
+    let ws = Ws::ffi("ffi-separated-safety", &[]);
+    ws.put("crates/openatca-core-ffi/src/ffi.rs", &source);
+    assert!(
+        has(
+            &ws.failures(),
+            "every unsafe block has an immediately preceding"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let ws = Ws::ffi("ffi-extra-unsafe", &[]);
+    let source = format!(
+        "{}\nfn unreviewed_helper() {{\n// SAFETY: plausible but unreviewed rationale.\nunsafe {{}}\n}}\n",
+        ffi_fixture_source()
+    );
+    ws.put("crates/openatca-core-ffi/src/ffi.rs", &source);
+    assert!(
+        has(&ws.failures(), "unsafe block inventory by owning function"),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let ws = Ws::ffi("ffi-root", &[]);
+    ws.put(
+        "crates/openatca-core-ffi/src/lib.rs",
+        "#![forbid(unsafe_code)]\nmod ffi;\n",
+    );
+    assert!(
+        has(&ws.failures(), "exactly one inner `#![deny(unsafe_code)]`"),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let ws = Ws::ffi("ffi-outer-allow", &[]);
+    ws.put(
+        "crates/openatca-core-ffi/src/ffi.rs",
+        "#[allow(unsafe_code)]\n",
+    );
+    assert!(
+        has(&ws.failures(), "exactly one inner `#![allow(unsafe_code)]`"),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let ws = Ws::ffi("ffi-injection", &[]);
+    ws.put(
+        "crates/openatca-core-ffi/src/ffi.rs",
+        "#![allow(unsafe_code)]\ninclude!(\"outside.rs\");\n",
+    );
+    assert!(
+        has(&ws.failures(), "source injection"),
+        "{:#?}",
+        ws.failures()
+    );
+
+    for (tag, replacement) in [
+        (
+            "ffi-system-abi",
+            "#[no_mangle] pub unsafe extern \"system\" fn oa_geo_wgs84_direct() {}",
+        ),
+        (
+            "ffi-export-name",
+            "#[export_name = \"foreign_name\"] #[no_mangle] pub extern \"C\" fn oa_core_abi_version() {}",
+        ),
+        (
+            "ffi-unknown-export",
+            "#[no_mangle] pub extern \"C\" fn hidden_export() {}",
+        ),
+    ] {
+        let ws = Ws::ffi(tag, &[]);
+        let source = ffi_fixture_source().replace(
+            "#[no_mangle] pub unsafe extern \"C\" fn oa_geo_wgs84_direct() {\n// SAFETY: fixture rationale.\nunsafe {}\n}\n",
+            replacement,
+        );
+        ws.put("crates/openatca-core-ffi/src/ffi.rs", &source);
+        assert!(has(&ws.failures(), "exports, ABI strings"), "{tag}: {:#?}", ws.failures());
+    }
+
+    let ws = Ws::ffi("ffi-extra-dep", &[]);
+    ws.put(
+        "crates/openatca-core-ffi/Cargo.toml",
+        "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\noa-ieee = { path = \"../oa-ieee\" }\noa-math = { path = \"../oa-math\" }\noa-sha256 = { path = \"../oa-sha256\" }\noa-extra = { path = \"../oa-extra\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
+    );
+    assert!(
+        has(&ws.failures(), "depends only on the four named core crates"),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let ws = Ws::ffi("ffi-wrong-class", &[]);
+    ws.put(
+        "crates/openatca-core-ffi/Cargo.toml",
+        "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"core\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\n\n[lints.rust]\nunsafe_code = \"deny\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
+    );
+    assert!(
+        has(&ws.failures(), "classified as shell at this exact path"),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let ws = Ws::ffi("ffi-lint-drift", &[]);
+    ws.put(
+        "crates/openatca-core-ffi/Cargo.toml",
+        "[package]\nname = \"openatca-core-ffi\"\n\n[package.metadata.openatca]\nclass = \"shell\"\n\n[dependencies]\noa-geo = { path = \"../oa-geo\" }\n\n[lints.rust]\nunsafe_code = \"warn\"\n\n[lints.clippy]\nunwrap_used = \"deny\"\nexpect_used = \"deny\"\npanic = \"deny\"\nindexing_slicing = \"deny\"\n",
+    );
+    assert!(
+        has(&ws.failures(), "sets `[lints.rust] unsafe_code = \"deny\"`"),
+        "{:#?}",
+        ws.failures()
+    );
+
+    let ws = Ws::ffi("ffi-wrong-path", &[]);
+    let package = ws.root.join("crates/openatca-core-ffi");
+    let relocated = ws.root.join("crates/ffi-relocated");
+    fs::rename(&package, &relocated).unwrap();
+    fs::create_dir_all(&package).unwrap();
+    ws.put(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/ffi-relocated\"]\n",
+    );
+    assert!(
+        has(&ws.failures(), "classified as shell at this exact path"),
+        "{:#?}",
+        ws.failures()
+    );
+}
+
+#[cfg(unix)]
+// REQ: OA-TRC-262
+#[test]
+fn the_provisional_ffi_source_inventory_rejects_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let ws = Ws::ffi("ffi-source-symlink", &[]);
+    let source_dir = ws.root.join("crates/openatca-core-ffi/src");
+    let ffi = source_dir.join("ffi.rs");
+    fs::remove_file(&ffi).unwrap();
+    let target = source_dir.join("target.rs");
+    fs::write(&target, "#![allow(unsafe_code)]\n").unwrap();
+    symlink(&target, &ffi).unwrap();
+    assert!(
+        has(
+            &ws.failures(),
+            "source inventory contains a non-file or symlink"
+        ),
+        "{:#?}",
+        ws.failures()
+    );
 }
 
 // REQ: OA-TRC-233

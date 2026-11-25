@@ -36,6 +36,55 @@ jobs:
         run: timeout 10m cargo +1.89.0 run --offline --manifest-path validation/oa-vectors/Cargo.toml --target-dir "$RUNNER_TEMP/oa-vectors-target" --locked
       - name: Test
         run: cargo +1.89.0 test --workspace --release --locked
+      - name: Native C and Python FFI vectors (x86_64)
+        run: |
+          set -euo pipefail
+          target_dir="$RUNNER_TEMP/oa-core-ffi-target"
+          artifact_json="$RUNNER_TEMP/oa-core-ffi-artifacts.jsonl"
+          cargo +1.89.0 build -p openatca-core-ffi --locked \
+            --message-format=json-render-diagnostics --target-dir "$target_dir" > "$artifact_json"
+          ffi_lib="$(python3 - "$artifact_json" "$target_dir" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          artifact_json, target_dir = map(Path, sys.argv[1:])
+          target = target_dir.resolve(strict=True)
+          libraries = []
+          with artifact_json.open(encoding="utf-8") as stream:
+              for line in stream:
+                  record = json.loads(line)
+                  target_info = record.get("target", {})
+                  if record.get("reason") == "compiler-artifact" and target_info.get("name") == "openatca_core_ffi":
+                      libraries.extend(Path(name) for name in record.get("filenames", []) if name.endswith(".so"))
+          if len(libraries) != 1:
+              raise SystemExit(f"expected exactly one Cargo-produced shared library, found {len(libraries)}")
+          library = libraries[0]
+          if library.is_symlink():
+              raise SystemExit("Cargo shared library must not be a symlink")
+          library = library.resolve(strict=True)
+          library.relative_to(target)
+          if not library.is_file():
+              raise SystemExit("Cargo shared library is not a regular file")
+          print(library)
+          PY
+          )"
+          library_sha="$(sha256sum "$ffi_lib" | cut -d' ' -f1)"
+          echo "Cargo FFI library: $ffi_lib ($library_sha)"
+          export PYTHONDONTWRITEBYTECODE=1
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/ffi_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-geodesy"
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/ffi_l0_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-l0"
+          "$RUNNER_TEMP/oa-ffi-geodesy" crates/openatca-core-ffi/tests/fixtures/wgs84.csv
+          "$RUNNER_TEMP/oa-ffi-l0" crates/openatca-core-ffi/tests/fixtures/l0.csv \
+            crates/openatca-core-ffi/tests/fixtures/polygon.csv
+          python3 crates/openatca-core-ffi/tests/test_ctypes_vectors.py "$ffi_lib"
+          python3 crates/openatca-core-ffi/tests/test_ctypes_l0.py "$ffi_lib"
+          python3 crates/openatca-core-ffi/tests/test_polygon_thread_safety.py
+          test "$library_sha" = "$(sha256sum "$ffi_lib" | cut -d' ' -f1)"
       - name: Diagnostic example regressions
         run: |
           cargo +1.89.0 test --release --locked -p oa-track --example turn_diag --example vs_eram --example p002
@@ -66,6 +115,55 @@ jobs:
         run: timeout 10m cargo +1.89.0 run --offline --manifest-path validation/oa-vectors/Cargo.toml --target-dir "$RUNNER_TEMP/oa-vectors-target" --locked
       - name: Test (release, aarch64)
         run: cargo +1.89.0 test --workspace --release --locked
+      - name: Native C and Python FFI vectors (aarch64)
+        run: |
+          set -euo pipefail
+          target_dir="$RUNNER_TEMP/oa-core-ffi-target"
+          artifact_json="$RUNNER_TEMP/oa-core-ffi-artifacts.jsonl"
+          cargo +1.89.0 build -p openatca-core-ffi --locked \
+            --message-format=json-render-diagnostics --target-dir "$target_dir" > "$artifact_json"
+          ffi_lib="$(python3 - "$artifact_json" "$target_dir" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          artifact_json, target_dir = map(Path, sys.argv[1:])
+          target = target_dir.resolve(strict=True)
+          libraries = []
+          with artifact_json.open(encoding="utf-8") as stream:
+              for line in stream:
+                  record = json.loads(line)
+                  target_info = record.get("target", {})
+                  if record.get("reason") == "compiler-artifact" and target_info.get("name") == "openatca_core_ffi":
+                      libraries.extend(Path(name) for name in record.get("filenames", []) if name.endswith(".so"))
+          if len(libraries) != 1:
+              raise SystemExit(f"expected exactly one Cargo-produced shared library, found {len(libraries)}")
+          library = libraries[0]
+          if library.is_symlink():
+              raise SystemExit("Cargo shared library must not be a symlink")
+          library = library.resolve(strict=True)
+          library.relative_to(target)
+          if not library.is_file():
+              raise SystemExit("Cargo shared library is not a regular file")
+          print(library)
+          PY
+          )"
+          library_sha="$(sha256sum "$ffi_lib" | cut -d' ' -f1)"
+          echo "Cargo FFI library: $ffi_lib ($library_sha)"
+          export PYTHONDONTWRITEBYTECODE=1
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/ffi_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-geodesy"
+          cc -std=c11 -Wall -Wextra -Werror -I include \
+            crates/openatca-core-ffi/tests/ffi_l0_vectors.c "$ffi_lib" \
+            "-Wl,-rpath,$(dirname "$ffi_lib")" -lm -o "$RUNNER_TEMP/oa-ffi-l0"
+          "$RUNNER_TEMP/oa-ffi-geodesy" crates/openatca-core-ffi/tests/fixtures/wgs84.csv
+          "$RUNNER_TEMP/oa-ffi-l0" crates/openatca-core-ffi/tests/fixtures/l0.csv \
+            crates/openatca-core-ffi/tests/fixtures/polygon.csv
+          python3 crates/openatca-core-ffi/tests/test_ctypes_vectors.py "$ffi_lib"
+          python3 crates/openatca-core-ffi/tests/test_ctypes_l0.py "$ffi_lib"
+          python3 crates/openatca-core-ffi/tests/test_polygon_thread_safety.py
+          test "$library_sha" = "$(sha256sum "$ffi_lib" | cut -d' ' -f1)"
   # The dev profile (opt-level 1, debug assertions and overflow checks on). The debug_assert! checks
   # never run in the release-only test job above.
   debug-assertions:

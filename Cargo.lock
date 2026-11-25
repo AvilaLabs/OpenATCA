@@ -644,3 +644,13 @@ dependencies = [
  "oa-track",
  "oa-truth",
 ]
+
+[[package]]
+name = "openatca-core-ffi"
+version = "0.0.1"
+dependencies = [
+ "oa-geo",
+ "oa-ieee",
+ "oa-math",
+ "oa-sha256",
+]

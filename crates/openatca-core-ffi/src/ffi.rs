@@ -1,0 +1,1573 @@
+//! Raw-pointer adaptation and exported C symbols. Product operations call existing safe `oa-*` APIs.
+#![allow(unsafe_code)] // RULESET A0: the sole unsafe module of openatca-core-ffi.
+
+use oa_geo::{wgs84, GeoError, LatLon, Polygon, RhumbInverse, Separation};
+use oa_sha256::{sha256, to_hex_into, MAX_MESSAGE_BYTES};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+
+pub const ABI_VERSION_PROVISIONAL: u32 = 1;
+
+pub const OA_STATUS_OK: u32 = 0;
+pub const OA_STATUS_INVALID_ARGUMENT: u32 = 1;
+pub const OA_STATUS_NON_FINITE: u32 = 2;
+pub const OA_STATUS_LATITUDE_OUT_OF_RANGE: u32 = 3;
+pub const OA_STATUS_LONGITUDE_OUT_OF_RANGE: u32 = 4;
+pub const OA_STATUS_NO_CONVERGENCE: u32 = 5;
+pub const OA_STATUS_BUFFER_TOO_SMALL: u32 = 6;
+pub const OA_STATUS_INTERNAL_PANIC: u32 = 7;
+pub const OA_STATUS_BAD_PARAMETER: u32 = 8;
+pub const OA_STATUS_LENGTH_TOO_LARGE: u32 = 9;
+pub const OA_STATUS_BAD_OPERATION: u32 = 10;
+pub const OA_STATUS_ALLOCATION_FAILED: u32 = 11;
+
+pub const OA_LOCATION_NONE: u32 = 0;
+pub const OA_LOCATION_ARGUMENT: u32 = 1;
+pub const OA_LOCATION_ELEMENT: u32 = 2;
+
+/// Opaque immutable polygon handle. Its layout is never exposed in the C header.
+pub struct OaPolygon {
+    inner: Polygon,
+}
+
+pub const MATH_U_SIN: u32 = 1;
+pub const MATH_U_COS: u32 = 2;
+pub const MATH_U_TAN: u32 = 3;
+pub const MATH_U_ATAN: u32 = 4;
+pub const MATH_U_ASIN: u32 = 5;
+pub const MATH_U_ACOS: u32 = 6;
+pub const MATH_U_EXP: u32 = 7;
+pub const MATH_U_LN: u32 = 8;
+pub const MATH_U_CBRT: u32 = 9;
+pub const MATH_U_CANON_NAN: u32 = 10;
+pub const MATH_U_SQRT: u32 = 11;
+pub const MATH_U_FLOOR: u32 = 12;
+pub const MATH_U_CEIL: u32 = 13;
+pub const MATH_U_TRUNC: u32 = 14;
+pub const MATH_U_ROUND: u32 = 15;
+pub const MATH_U_SIGNUM_F64: u32 = 16;
+
+pub const MATH_B_ATAN2: u32 = 1;
+pub const MATH_B_POW: u32 = 2;
+pub const MATH_B_HYPOT: u32 = 3;
+pub const MATH_B_REM_EUCLID: u32 = 4;
+pub const MATH_B_MIN_F64: u32 = 5;
+pub const MATH_B_MAX_F64: u32 = 6;
+pub const MATH_B_COPYSIGN_F64: u32 = 7;
+
+pub const MATH_T_CLAMP_F64: u32 = 1;
+
+pub const MATH_F32_U_CANON_NAN: u32 = 1;
+pub const MATH_F32_U_SIGNUM: u32 = 2;
+pub const MATH_F32_B_COPYSIGN: u32 = 1;
+pub const MATH_F32_B_MIN: u32 = 2;
+pub const MATH_F32_B_MAX: u32 = 3;
+pub const MATH_F32_T_CLAMP: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OaErrorInfo {
+    pub code: u32,
+    pub location_kind: u32,
+    pub location: u64,
+}
+// A7.2: cold ABI error record, size asserted to keep the provisional C layout explicit.
+const _: () = assert!(core::mem::size_of::<OaErrorInfo>() == 16);
+const _: () = assert!(core::mem::align_of::<OaErrorInfo>() == 8);
+
+#[derive(Clone, Copy)]
+struct Failure {
+    status: u32,
+    location_kind: u32,
+    location: u64,
+}
+
+impl Failure {
+    const fn argument(status: u32, index: u64) -> Failure {
+        Failure {
+            status,
+            location_kind: OA_LOCATION_ARGUMENT,
+            location: index,
+        }
+    }
+
+    const fn general(status: u32) -> Failure {
+        Failure {
+            status,
+            location_kind: OA_LOCATION_NONE,
+            location: 0,
+        }
+    }
+
+    const fn element(status: u32, index: u64) -> Failure {
+        Failure {
+            status,
+            location_kind: OA_LOCATION_ELEMENT,
+            location: index,
+        }
+    }
+}
+
+fn map_geo(error: GeoError, argument: u64) -> Failure {
+    match error {
+        GeoError::NonFinite(_) => Failure::argument(OA_STATUS_NON_FINITE, argument),
+        GeoError::LatitudeOutOfRange(_) => {
+            Failure::argument(OA_STATUS_LATITUDE_OUT_OF_RANGE, argument)
+        }
+        GeoError::LongitudeOutOfRange(_) => {
+            Failure::argument(OA_STATUS_LONGITUDE_OUT_OF_RANGE, argument)
+        }
+        GeoError::NoConvergence(_) => Failure::general(OA_STATUS_NO_CONVERGENCE),
+        GeoError::BadParameter(_) | GeoError::BadPolygon(_) | GeoError::RhumbPole => {
+            Failure::argument(OA_STATUS_BAD_PARAMETER, argument)
+        }
+        _ => Failure::argument(OA_STATUS_INVALID_ARGUMENT, argument),
+    }
+}
+
+fn map_geo_base(error: GeoError, base: u64) -> Failure {
+    let argument = coordinate_argument(&error, base);
+    map_geo(error, argument)
+}
+
+fn map_geo_motion(error: GeoError, course_arg: u64, distance_arg: u64) -> Failure {
+    let argument = match &error {
+        GeoError::NonFinite("course") | GeoError::NonFinite("azimuth") => course_arg,
+        GeoError::NonFinite("distance") => distance_arg,
+        _ => course_arg,
+    };
+    map_geo(error, argument)
+}
+
+fn map_geo_element(error: GeoError, element: u64) -> Failure {
+    let status = match error {
+        GeoError::NonFinite(_) => OA_STATUS_NON_FINITE,
+        GeoError::LatitudeOutOfRange(_) => OA_STATUS_LATITUDE_OUT_OF_RANGE,
+        GeoError::LongitudeOutOfRange(_) => OA_STATUS_LONGITUDE_OUT_OF_RANGE,
+        GeoError::NoConvergence(_) => OA_STATUS_NO_CONVERGENCE,
+        GeoError::BadParameter(_) | GeoError::BadPolygon(_) | GeoError::RhumbPole => {
+            OA_STATUS_BAD_PARAMETER
+        }
+        _ => OA_STATUS_INVALID_ARGUMENT,
+    };
+    Failure::element(status, element)
+}
+
+fn write_error(pointer: *mut OaErrorInfo, value: OaErrorInfo) {
+    // SAFETY: every caller of this private helper first checks non-null; the public C contract
+    // requires a valid, aligned, writable OaErrorInfo for the duration of the call.
+    unsafe { pointer.write(value) };
+}
+
+fn dispatch<T>(
+    error: *mut OaErrorInfo,
+    operation: impl FnOnce() -> Result<T, Failure>,
+) -> (u32, Option<T>) {
+    if error.is_null() {
+        return (OA_STATUS_INVALID_ARGUMENT, None);
+    }
+    match catch_unwind(AssertUnwindSafe(operation)) {
+        Ok(Ok(value)) => {
+            write_error(
+                error,
+                OaErrorInfo {
+                    code: OA_STATUS_OK,
+                    location_kind: OA_LOCATION_NONE,
+                    location: 0,
+                },
+            );
+            (OA_STATUS_OK, Some(value))
+        }
+        Ok(Err(failure)) => {
+            write_error(
+                error,
+                OaErrorInfo {
+                    code: failure.status,
+                    location_kind: failure.location_kind,
+                    location: failure.location,
+                },
+            );
+            (failure.status, None)
+        }
+        Err(_) => {
+            write_error(
+                error,
+                OaErrorInfo {
+                    code: OA_STATUS_INTERNAL_PANIC,
+                    location_kind: OA_LOCATION_NONE,
+                    location: 0,
+                },
+            );
+            (OA_STATUS_INTERNAL_PANIC, None)
+        }
+    }
+}
+
+/// The caller must supply every output and `error` as valid, aligned, writable, pairwise
+/// non-overlapping memory for this call. Null pointers are rejected where representable; the
+/// library does not and cannot validate arbitrary C addresses.
+///
+/// # Safety
+/// `distance_m`, both azimuth outputs and `error` must each point to valid, aligned, writable
+/// storage for this call, with all four regions pairwise non-overlapping.
+#[no_mangle]
+pub unsafe extern "C" fn oa_geo_wgs84_inverse(
+    lat1_deg: f64,
+    lon1_deg: f64,
+    lat2_deg: f64,
+    lon2_deg: f64,
+    distance_m: *mut f64,
+    azimuth1_deg: *mut f64,
+    azimuth2_deg: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if distance_m.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 4));
+        }
+        if azimuth1_deg.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 5));
+        }
+        if azimuth2_deg.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 6));
+        }
+        let first = LatLon::new(lat1_deg, lon1_deg).map_err(|e| {
+            let argument = coordinate_argument(&e, 0);
+            map_geo(e, argument)
+        })?;
+        let second = LatLon::new(lat2_deg, lon2_deg).map_err(|e| {
+            let argument = coordinate_argument(&e, 2);
+            map_geo(e, argument)
+        })?;
+        let answer = wgs84().inverse(first, second).map_err(|e| map_geo(e, 0))?;
+        Ok((answer.distance_m, answer.azimuth1_deg, answer.azimuth2_deg))
+    });
+    if let Some((distance, azimuth1, azimuth2)) = result {
+        // SAFETY: non-null checks above passed; the C caller's precondition guarantees valid,
+        // aligned, writable, non-overlapping output storage for these three f64 values.
+        unsafe {
+            distance_m.write(distance);
+            azimuth1_deg.write(azimuth1);
+            azimuth2_deg.write(azimuth2);
+        }
+    }
+    status
+}
+
+/// The caller must supply every output and `error` as valid, aligned, writable, pairwise
+/// non-overlapping memory for this call. Null pointers are rejected where representable; the
+/// library does not and cannot validate arbitrary C addresses.
+///
+/// # Safety
+/// `lat2_deg`, `lon2_deg`, `azimuth2_deg` and `error` must each point to valid, aligned, writable
+/// storage for this call, with all four regions pairwise non-overlapping.
+#[no_mangle]
+pub unsafe extern "C" fn oa_geo_wgs84_direct(
+    lat1_deg: f64,
+    lon1_deg: f64,
+    azimuth1_deg: f64,
+    distance_m: f64,
+    lat2_deg: *mut f64,
+    lon2_deg: *mut f64,
+    azimuth2_deg: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if lat2_deg.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 4));
+        }
+        if lon2_deg.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 5));
+        }
+        if azimuth2_deg.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 6));
+        }
+        let start = LatLon::new(lat1_deg, lon1_deg).map_err(|e| {
+            let argument = coordinate_argument(&e, 0);
+            map_geo(e, argument)
+        })?;
+        if !azimuth1_deg.is_finite() {
+            return Err(Failure::argument(OA_STATUS_NON_FINITE, 2));
+        }
+        if !distance_m.is_finite() {
+            return Err(Failure::argument(OA_STATUS_NON_FINITE, 3));
+        }
+        let answer = wgs84()
+            .direct(start, azimuth1_deg, distance_m)
+            .map_err(|e| map_geo(e, 0))?;
+        Ok((
+            answer.position.lat(),
+            answer.position.lon(),
+            answer.azimuth2_deg,
+        ))
+    });
+    if let Some((latitude, longitude, azimuth)) = result {
+        // SAFETY: non-null checks above passed; the C caller's precondition guarantees valid,
+        // aligned, writable, non-overlapping output storage for these three f64 values.
+        unsafe {
+            lat2_deg.write(latitude);
+            lon2_deg.write(longitude);
+            azimuth2_deg.write(azimuth);
+        }
+    }
+    status
+}
+
+/// Stateless scalar operation; domain/special-value behavior is the selected `oa-math` function.
+///
+/// # Safety
+/// `output` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f64_unary(
+    operation: u32,
+    value: f64,
+    output: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 2));
+        }
+        let result = match operation {
+            MATH_U_SIN => oa_math::sin(value),
+            MATH_U_COS => oa_math::cos(value),
+            MATH_U_TAN => oa_math::tan(value),
+            MATH_U_ATAN => oa_math::atan(value),
+            MATH_U_ASIN => oa_math::asin(value),
+            MATH_U_ACOS => oa_math::acos(value),
+            MATH_U_EXP => oa_math::exp(value),
+            MATH_U_LN => oa_math::ln(value),
+            MATH_U_CBRT => oa_math::cbrt(value),
+            MATH_U_CANON_NAN => oa_math::canon_nan(value),
+            MATH_U_SQRT => oa_ieee::sqrt(value),
+            MATH_U_FLOOR => oa_ieee::floor(value),
+            MATH_U_CEIL => oa_ieee::ceil(value),
+            MATH_U_TRUNC => oa_ieee::trunc(value),
+            MATH_U_ROUND => oa_ieee::round(value),
+            MATH_U_SIGNUM_F64 => oa_math::signum_canon_f64(value),
+            _ => return Err(Failure::argument(OA_STATUS_BAD_OPERATION, 0)),
+        };
+        Ok(result)
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `output` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f64_binary(
+    operation: u32,
+    left: f64,
+    right: f64,
+    output: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 3));
+        }
+        let value = match operation {
+            MATH_B_ATAN2 => oa_math::atan2(left, right),
+            MATH_B_POW => oa_math::pow(left, right),
+            MATH_B_HYPOT => oa_math::hypot(left, right),
+            MATH_B_REM_EUCLID => oa_math::rem_euclid(left, right),
+            MATH_B_MIN_F64 => oa_math::min_f64(left, right),
+            MATH_B_MAX_F64 => oa_math::max_f64(left, right),
+            MATH_B_COPYSIGN_F64 => oa_math::copysign_canon_f64(left, right),
+            _ => return Err(Failure::argument(OA_STATUS_BAD_OPERATION, 0)),
+        };
+        Ok(value)
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `output` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f64_ternary(
+    operation: u32,
+    value: f64,
+    lower: f64,
+    upper: f64,
+    output: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 4));
+        }
+        match operation {
+            MATH_T_CLAMP_F64 => Ok(oa_math::clamp_f64(value, lower, upper)),
+            _ => Err(Failure::argument(OA_STATUS_BAD_OPERATION, 0)),
+        }
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `output` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f64_powi(
+    value: f64,
+    exponent: i32,
+    output: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 2));
+        }
+        Ok(oa_math::powi(value, exponent))
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `sine`, `cosine` and `error` must point to valid, aligned, writable pairwise non-overlapping
+/// storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f64_sin_cos(
+    value: f64,
+    sine: *mut f64,
+    cosine: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if sine.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 1));
+        }
+        if cosine.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 2));
+        }
+        Ok(oa_math::sin_cos(value))
+    });
+    if let Some((sine_value, cosine_value)) = result {
+        // SAFETY: pointers are non-null; caller guarantees writable, pairwise non-overlapping outputs.
+        unsafe {
+            sine.write(sine_value);
+            cosine.write(cosine_value);
+        }
+    }
+    status
+}
+
+/// # Safety
+/// `ordering` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f64_compare(
+    left: f64,
+    right: f64,
+    output: *mut i32,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 2));
+        }
+        let order = match oa_math::cmp_canon_f64(left, right) {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Equal => 0,
+            core::cmp::Ordering::Greater => 1,
+        };
+        Ok(order)
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `result` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f64_is_sign_negative(
+    value: f64,
+    output: *mut u32,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 1));
+        }
+        Ok(u32::from(oa_math::is_sign_negative_canon_f64(value)))
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `output` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f32_unary(
+    operation: u32,
+    value: f32,
+    output: *mut f32,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 2));
+        }
+        let result = match operation {
+            MATH_F32_U_CANON_NAN => oa_math::canon_nan_f32(value),
+            MATH_F32_U_SIGNUM => oa_math::signum_canon_f32(value),
+            _ => return Err(Failure::argument(OA_STATUS_BAD_OPERATION, 0)),
+        };
+        Ok(result)
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `output` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f32_binary(
+    operation: u32,
+    left: f32,
+    right: f32,
+    output: *mut f32,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 3));
+        }
+        let result = match operation {
+            MATH_F32_B_COPYSIGN => oa_math::copysign_canon_f32(left, right),
+            MATH_F32_B_MIN => oa_math::min_f32(left, right),
+            MATH_F32_B_MAX => oa_math::max_f32(left, right),
+            _ => return Err(Failure::argument(OA_STATUS_BAD_OPERATION, 0)),
+        };
+        Ok(result)
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `output` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f32_ternary(
+    operation: u32,
+    value: f32,
+    lower: f32,
+    upper: f32,
+    output: *mut f32,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 4));
+        }
+        match operation {
+            MATH_F32_T_CLAMP => Ok(oa_math::clamp_f32(value, lower, upper)),
+            _ => Err(Failure::argument(OA_STATUS_BAD_OPERATION, 0)),
+        }
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `ordering` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f32_compare(
+    left: f32,
+    right: f32,
+    output: *mut i32,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 2));
+        }
+        let order = match oa_math::cmp_canon_f32(left, right) {
+            core::cmp::Ordering::Less => -1,
+            core::cmp::Ordering::Equal => 0,
+            core::cmp::Ordering::Greater => 1,
+        };
+        Ok(order)
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `result` and `error` must point to valid, aligned, writable, non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_math_f32_is_sign_negative(
+    value: f32,
+    output: *mut u32,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 1));
+        }
+        Ok(u32::from(oa_math::is_sign_negative_canon_f32(value)))
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// For nonzero `length`, `input` must identify `length` readable bytes. `digest` and `error` must
+/// be valid, aligned, writable storage, and all input/output/error regions must not overlap.
+#[no_mangle]
+pub unsafe extern "C" fn oa_sha256_digest(
+    input: *const u8,
+    length: u64,
+    digest: *mut u8,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if digest.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 2));
+        }
+        if length > MAX_MESSAGE_BYTES || length > isize::MAX as u64 {
+            return Err(Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1));
+        }
+        let len = usize::try_from(length)
+            .map_err(|_| Failure::argument(OA_STATUS_LENGTH_TOO_LARGE, 1))?;
+        if input.is_null() && len != 0 {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 0));
+        }
+        // SAFETY: null is allowed only for empty input. `from_raw_parts` still requires a non-null
+        // aligned pointer at length zero, so empty input uses a static empty slice.
+        let bytes = if len == 0 {
+            &[]
+        } else {
+            // SAFETY: caller guarantees `length` readable bytes at a non-null pointer.
+            unsafe { core::slice::from_raw_parts(input, len) }
+        };
+        Ok(sha256(bytes))
+    });
+    if let Some(value) = result {
+        // SAFETY: caller guarantees a writable 32-byte digest buffer distinct from input/error.
+        unsafe { core::ptr::copy_nonoverlapping(value.as_ptr(), digest, value.len()) };
+    }
+    status
+}
+
+/// # Safety
+/// `digest` must identify 32 readable bytes; `output` must identify 64 writable bytes; `error`
+/// must be valid, aligned, writable storage. The three regions must not overlap.
+#[no_mangle]
+pub unsafe extern "C" fn oa_sha256_hex(
+    digest: *const u8,
+    output: *mut u8,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if digest.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 0));
+        }
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 1));
+        }
+        // SAFETY: caller guarantees a readable 32-byte digest distinct from output/error.
+        let source: &[u8; 32] = unsafe { &*(digest.cast::<[u8; 32]>()) };
+        let mut hex = [0u8; 64];
+        to_hex_into(source, &mut hex);
+        Ok(hex)
+    });
+    if let Some(value) = result {
+        // SAFETY: caller guarantees 64 writable bytes distinct from digest/error.
+        unsafe { core::ptr::copy_nonoverlapping(value.as_ptr(), output, value.len()) };
+    }
+    status
+}
+
+/// # Safety
+/// `distance_m`, `course_deg` and `error` must point to valid, aligned, writable pairwise
+/// non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_geo_wgs84_rhumb_inverse(
+    lat1_deg: f64,
+    lon1_deg: f64,
+    lat2_deg: f64,
+    lon2_deg: f64,
+    distance_m: *mut f64,
+    course_deg: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if distance_m.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 4));
+        }
+        if course_deg.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 5));
+        }
+        let p1 = LatLon::new(lat1_deg, lon1_deg).map_err(|e| map_geo_base(e, 0))?;
+        let p2 = LatLon::new(lat2_deg, lon2_deg).map_err(|e| map_geo_base(e, 2))?;
+        let answer: RhumbInverse = wgs84().rhumb_inverse(p1, p2).map_err(|e| map_geo(e, 0))?;
+        Ok(answer)
+    });
+    if let Some(answer) = result {
+        // SAFETY: non-null checks passed; caller guarantees valid, distinct outputs.
+        unsafe {
+            distance_m.write(answer.distance_m);
+            course_deg.write(answer.course_deg);
+        }
+    }
+    status
+}
+
+/// # Safety
+/// `lat2_deg`, `lon2_deg` and `error` must point to valid, aligned, writable pairwise
+/// non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_geo_wgs84_rhumb_direct(
+    lat1_deg: f64,
+    lon1_deg: f64,
+    course_deg: f64,
+    distance_m: f64,
+    lat2_deg: *mut f64,
+    lon2_deg: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if lat2_deg.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 4));
+        }
+        if lon2_deg.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 5));
+        }
+        let start = LatLon::new(lat1_deg, lon1_deg).map_err(|e| map_geo_base(e, 0))?;
+        let answer = wgs84()
+            .rhumb_direct(start, course_deg, distance_m)
+            .map_err(|e| map_geo_motion(e, 2, 3))?;
+        Ok((answer.lat(), answer.lon()))
+    });
+    if let Some((lat, lon)) = result {
+        // SAFETY: non-null checks passed; caller guarantees valid, distinct outputs.
+        unsafe {
+            lat2_deg.write(lat);
+            lon2_deg.write(lon);
+        }
+    }
+    status
+}
+
+/// # Safety
+/// `lat_out_deg`, `lon_out_deg` and `error` must point to valid, aligned, writable pairwise
+/// non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_geo_wgs84_rhumb_point_at_fraction(
+    lat1_deg: f64,
+    lon1_deg: f64,
+    lat2_deg: f64,
+    lon2_deg: f64,
+    fraction: f64,
+    lat_out_deg: *mut f64,
+    lon_out_deg: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if lat_out_deg.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 5));
+        }
+        if lon_out_deg.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 6));
+        }
+        let p1 = LatLon::new(lat1_deg, lon1_deg).map_err(|e| map_geo_base(e, 0))?;
+        let p2 = LatLon::new(lat2_deg, lon2_deg).map_err(|e| map_geo_base(e, 2))?;
+        let answer = wgs84()
+            .rhumb_point_at_fraction(p1, p2, fraction)
+            .map_err(|e| map_geo(e, 4))?;
+        Ok((answer.lat(), answer.lon()))
+    });
+    if let Some((lat, lon)) = result {
+        // SAFETY: non-null checks passed; caller guarantees valid, distinct outputs.
+        unsafe {
+            lat_out_deg.write(lat);
+            lon_out_deg.write(lon);
+        }
+    }
+    status
+}
+
+/// # Safety
+/// All four result pointers and `error` must point to valid, aligned, writable pairwise
+/// non-overlapping storage for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_geo_wgs84_geodesic_rhumb_separation(
+    lat1_deg: f64,
+    lon1_deg: f64,
+    lat2_deg: f64,
+    lon2_deg: f64,
+    samples: u32,
+    max_m: *mut f64,
+    at_fraction: *mut f64,
+    geodesic_m: *mut f64,
+    rhumb_m: *mut f64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        let pointers = [max_m, at_fraction, geodesic_m, rhumb_m];
+        for (index, pointer) in pointers.iter().enumerate() {
+            if pointer.is_null() {
+                return Err(Failure::argument(
+                    OA_STATUS_INVALID_ARGUMENT,
+                    5 + index as u64,
+                ));
+            }
+        }
+        let p1 = LatLon::new(lat1_deg, lon1_deg).map_err(|e| map_geo_base(e, 0))?;
+        let p2 = LatLon::new(lat2_deg, lon2_deg).map_err(|e| map_geo_base(e, 2))?;
+        let count =
+            usize::try_from(samples).map_err(|_| Failure::argument(OA_STATUS_BAD_PARAMETER, 4))?;
+        let answer: Separation = wgs84()
+            .geodesic_rhumb_separation(p1, p2, count)
+            .map_err(|e| map_geo(e, 4))?;
+        Ok(answer)
+    });
+    if let Some(answer) = result {
+        // SAFETY: all outputs are non-null; caller guarantees valid pairwise-disjoint writable memory.
+        unsafe {
+            max_m.write(answer.max_m);
+            at_fraction.write(answer.at_fraction);
+            geodesic_m.write(answer.geodesic_m);
+            rhumb_m.write(answer.rhumb_m);
+        }
+    }
+    status
+}
+
+/// # Safety
+/// For nonzero `count`, both coordinate pointers must identify `count` readable, aligned `f64`
+/// values. `output` and `error` must be valid, aligned, writable, and non-overlapping with each
+/// other and with the input arrays. Inputs are borrowed only for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_geo_polygon_new_wgs84(
+    latitudes: *const f64,
+    longitudes: *const f64,
+    count: u64,
+    output: *mut *mut OaPolygon,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 3));
+        }
+        if count > 100_001 {
+            return Err(Failure::argument(OA_STATUS_BAD_PARAMETER, 2));
+        }
+        let len =
+            usize::try_from(count).map_err(|_| Failure::argument(OA_STATUS_BAD_PARAMETER, 2))?;
+        if len != 0 && (latitudes.is_null() || longitudes.is_null()) {
+            return Err(Failure::argument(
+                OA_STATUS_INVALID_ARGUMENT,
+                if latitudes.is_null() { 0 } else { 1 },
+            ));
+        }
+        let lats = if len == 0 {
+            &[]
+        } else {
+            // SAFETY: this nonzero branch has a checked non-null pointer; caller guarantees `count`
+            // readable values in the array.
+            unsafe { core::slice::from_raw_parts(latitudes, len) }
+        };
+        let lons = if len == 0 {
+            &[]
+        } else {
+            // SAFETY: this nonzero branch has a checked non-null pointer; caller guarantees `count`
+            // readable values in the array.
+            unsafe { core::slice::from_raw_parts(longitudes, len) }
+        };
+        let mut vertices = Vec::new();
+        vertices
+            .try_reserve_exact(len)
+            .map_err(|_| Failure::general(OA_STATUS_ALLOCATION_FAILED))?;
+        for (index, (&lat, &lon)) in lats.iter().zip(lons).enumerate() {
+            let element =
+                u64::try_from(index).map_err(|_| Failure::argument(OA_STATUS_BAD_PARAMETER, 2))?;
+            vertices.push(LatLon::new(lat, lon).map_err(|e| map_geo_element(e, element))?);
+        }
+        let polygon = Polygon::new(&wgs84(), &vertices).map_err(|e| map_geo(e, 2))?;
+        Ok(Box::new(OaPolygon { inner: polygon }))
+    });
+    if let Some(polygon) = result {
+        // SAFETY: output is non-null; caller guarantees writable pointer storage distinct from error and input.
+        unsafe { output.write(Box::into_raw(polygon)) };
+    }
+    status
+}
+
+/// # Safety
+/// `polygon` must be a live handle returned by `oa_geo_polygon_new_wgs84` and not concurrently
+/// freed. `inside` and `error` must be valid, aligned, writable and non-overlapping with each
+/// other or the handle for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_geo_polygon_contains_wgs84(
+    polygon: *const OaPolygon,
+    latitude: f64,
+    longitude: f64,
+    inside: *mut u32,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if polygon.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 0));
+        }
+        if inside.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 3));
+        }
+        let point = LatLon::new(latitude, longitude).map_err(|e| map_geo_base(e, 1))?;
+        // SAFETY: pointer is non-null; caller guarantees a live handle returned by polygon_new and not concurrently freed.
+        let value = unsafe { &*polygon }.inner.contains(point);
+        Ok(u32::from(value))
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { inside.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `polygon` must be a live handle returned by `oa_geo_polygon_new_wgs84` and not concurrently
+/// freed. `output` and `error` must be valid, aligned, writable and non-overlapping with each
+/// other or the handle for this call.
+#[no_mangle]
+pub unsafe extern "C" fn oa_geo_polygon_edge_count(
+    polygon: *const OaPolygon,
+    output: *mut u64,
+    error: *mut OaErrorInfo,
+) -> u32 {
+    let (status, result) = dispatch(error, || {
+        if polygon.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 0));
+        }
+        if output.is_null() {
+            return Err(Failure::argument(OA_STATUS_INVALID_ARGUMENT, 1));
+        }
+        // SAFETY: pointer is non-null; caller guarantees a live handle returned by polygon_new and not concurrently freed.
+        let count = unsafe { &*polygon }.inner.len();
+        Ok(count as u64)
+    });
+    if let Some(value) = result {
+        // SAFETY: non-null check passed; caller guarantees valid writable output distinct from error.
+        unsafe { output.write(value) };
+    }
+    status
+}
+
+/// # Safety
+/// `polygon` must be a live handle returned by `oa_geo_polygon_new_wgs84`, with no concurrent
+/// call using it. This function consumes the handle; it must not be used or freed again.
+#[no_mangle]
+pub unsafe extern "C" fn oa_geo_polygon_free(polygon: *mut OaPolygon) {
+    if !polygon.is_null() {
+        // SAFETY: caller must pass a live handle returned by polygon_new exactly once and not use it afterward.
+        unsafe { drop(Box::from_raw(polygon)) };
+    }
+}
+
+fn coordinate_argument(error: &GeoError, base: u64) -> u64 {
+    match error {
+        GeoError::NonFinite("longitude") | GeoError::LongitudeOutOfRange(_) => base + 1,
+        _ => base,
+    }
+}
+
+fn message(code: u32) -> &'static [u8] {
+    match code {
+        OA_STATUS_OK => b"success\0",
+        OA_STATUS_INVALID_ARGUMENT => b"invalid argument\0",
+        OA_STATUS_NON_FINITE => b"argument must be finite\0",
+        OA_STATUS_LATITUDE_OUT_OF_RANGE => b"latitude is outside [-90, 90] degrees\0",
+        OA_STATUS_LONGITUDE_OUT_OF_RANGE => b"longitude is outside [-180, 180] degrees\0",
+        OA_STATUS_NO_CONVERGENCE => b"geodesic computation did not converge\0",
+        OA_STATUS_BUFFER_TOO_SMALL => b"message buffer is too small\0",
+        OA_STATUS_INTERNAL_PANIC => b"internal panic was contained at the C boundary\0",
+        OA_STATUS_BAD_PARAMETER => b"parameter is outside its supported range\0",
+        OA_STATUS_LENGTH_TOO_LARGE => b"input length exceeds the supported limit\0",
+        OA_STATUS_BAD_OPERATION => b"operation code is not supported\0",
+        OA_STATUS_ALLOCATION_FAILED => b"bounded allocation could not be reserved\0",
+        _ => b"unknown status\0",
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn oa_core_abi_version() -> u32 {
+    ABI_VERSION_PROVISIONAL
+}
+
+/// Copies one deterministic NUL-terminated status message. `required` must be valid, aligned,
+/// writable and non-overlapping with `buffer`. A null buffer is allowed only for a zero-capacity
+/// size query. The library cannot validate arbitrary C addresses or the caller's capacity claim.
+///
+/// # Safety
+/// `required` must point to valid, aligned, writable `u64` storage. If `capacity` is nonzero,
+/// `buffer` must point to at least that many writable bytes. `required` and `buffer` must not overlap.
+#[no_mangle]
+pub unsafe extern "C" fn oa_core_error_message(
+    code: u32,
+    buffer: *mut u8,
+    capacity: u64,
+    required: *mut u64,
+) -> u32 {
+    if required.is_null() || (buffer.is_null() && capacity != 0) {
+        return OA_STATUS_INVALID_ARGUMENT;
+    }
+    let text = message(code);
+    let length = text.len() as u64;
+    // SAFETY: required is non-null; its valid, aligned, writable and non-overlapping storage is
+    // an explicit caller precondition for this function.
+    unsafe { required.write(length) };
+    if capacity < length {
+        return OA_STATUS_BUFFER_TOO_SMALL;
+    }
+    // SAFETY: capacity is at least the static message length and buffer is non-null; the caller
+    // guarantees `capacity` writable bytes, alignment is irrelevant for u8, and source/destination
+    // are non-overlapping per the ABI contract.
+    unsafe { core::ptr::copy_nonoverlapping(text.as_ptr(), buffer, text.len()) };
+    OA_STATUS_OK
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )]
+
+    use super::*;
+
+    const VECTORS: &str = include_str!("../tests/fixtures/wgs84.csv");
+    const L0_VECTORS: &str = include_str!("../tests/fixtures/l0.csv");
+    const POLYGON_VECTORS: &str = include_str!("../tests/fixtures/polygon.csv");
+
+    fn number(field: &str) -> Option<f64> {
+        if field.is_empty() {
+            None
+        } else {
+            field.parse::<f64>().ok()
+        }
+    }
+
+    fn vector_numbers(field: &str) -> Vec<f64> {
+        if field.is_empty() {
+            Vec::new()
+        } else {
+            field
+                .split(';')
+                .map(|part| part.parse::<f64>().expect("number"))
+                .collect()
+        }
+    }
+
+    // Exercise the same synthetic L0 vectors as the C and Python runners.
+    // REQ: OA-FFI-002, OA-FFI-003
+    #[test]
+    fn ffi_l0_matches_the_shared_synthetic_vectors() {
+        for (line_number, line) in L0_VECTORS.lines().enumerate().skip(1) {
+            if line.is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split(',').collect();
+            assert_eq!(fields.len(), 7, "L0 vector line {}", line_number + 1);
+            if fields[1] == "sha256" {
+                let input: Vec<u8> = fields[2]
+                    .as_bytes()
+                    .chunks_exact(2)
+                    .map(|pair| {
+                        let text = core::str::from_utf8(pair).expect("hex");
+                        u8::from_str_radix(text, 16).expect("hex byte")
+                    })
+                    .collect();
+                let mut digest = [0_u8; 32];
+                let mut digest_hex = [0_u8; 64];
+                let mut error = OaErrorInfo {
+                    code: 99,
+                    location_kind: 99,
+                    location: 99,
+                };
+                let pointer = if input.is_empty() {
+                    core::ptr::null()
+                } else {
+                    input.as_ptr()
+                };
+                // SAFETY: input bytes and fixed-size digest/error outputs are live, valid and distinct.
+                let digest_status = unsafe {
+                    oa_sha256_digest(pointer, input.len() as u64, digest.as_mut_ptr(), &mut error)
+                };
+                assert_eq!(digest_status, OA_STATUS_OK, "{}", fields[0]);
+                let hex_status =
+                    // SAFETY: digest and output/error arrays are live, valid and non-overlapping.
+                    unsafe { oa_sha256_hex(digest.as_ptr(), digest_hex.as_mut_ptr(), &mut error) };
+                assert_eq!(hex_status, OA_STATUS_OK, "{}", fields[0]);
+                assert_eq!(
+                    core::str::from_utf8(&digest_hex).expect("hex"),
+                    fields[6],
+                    "{}",
+                    fields[0]
+                );
+                assert_eq!(error.code, OA_STATUS_OK, "{}", fields[0]);
+                continue;
+            }
+            let args = vector_numbers(fields[2]);
+            let mut actual = [0.0_f64; 4];
+            let mut expected = vector_numbers(fields[3]);
+            if !fields[4].is_empty() {
+                expected.push(fields[4].parse::<f64>().expect("out2"));
+            }
+            let tolerance = fields[5].parse::<f64>().expect("tolerance");
+            let mut error = OaErrorInfo {
+                code: 99,
+                location_kind: 99,
+                location: 99,
+            };
+            // SAFETY: the synthetic test passes live local output/error storage per each signature.
+            let status = unsafe {
+                match fields[1] {
+                    "math_unary" => {
+                        oa_math_f64_unary(args[0] as u32, args[1], &mut actual[0], &mut error)
+                    }
+                    "math_binary" => oa_math_f64_binary(
+                        args[0] as u32,
+                        args[1],
+                        args[2],
+                        &mut actual[0],
+                        &mut error,
+                    ),
+                    "math_ternary" => oa_math_f64_ternary(
+                        args[0] as u32,
+                        args[1],
+                        args[2],
+                        args[3],
+                        &mut actual[0],
+                        &mut error,
+                    ),
+                    "math_powi" => {
+                        oa_math_f64_powi(args[0], args[1] as i32, &mut actual[0], &mut error)
+                    }
+                    "math_sin_cos" => {
+                        oa_math_f64_sin_cos(args[0], &mut actual[0], &mut actual[1], &mut error)
+                    }
+                    "math_compare" => {
+                        let mut value = 0_i32;
+                        let status = oa_math_f64_compare(args[0], args[1], &mut value, &mut error);
+                        actual[0] = value as f64;
+                        status
+                    }
+                    "math_sign_negative" => {
+                        let mut value = 0_u32;
+                        let status = oa_math_f64_is_sign_negative(args[0], &mut value, &mut error);
+                        actual[0] = value as f64;
+                        status
+                    }
+                    "math_f32_unary" => {
+                        let mut value = 0_f32;
+                        let status = oa_math_f32_unary(
+                            args[0] as u32,
+                            args[1] as f32,
+                            &mut value,
+                            &mut error,
+                        );
+                        actual[0] = value as f64;
+                        status
+                    }
+                    "math_f32_binary" => {
+                        let mut value = 0_f32;
+                        let status = oa_math_f32_binary(
+                            args[0] as u32,
+                            args[1] as f32,
+                            args[2] as f32,
+                            &mut value,
+                            &mut error,
+                        );
+                        actual[0] = value as f64;
+                        status
+                    }
+                    "math_f32_ternary" => {
+                        let mut value = 0_f32;
+                        let status = oa_math_f32_ternary(
+                            args[0] as u32,
+                            args[1] as f32,
+                            args[2] as f32,
+                            args[3] as f32,
+                            &mut value,
+                            &mut error,
+                        );
+                        actual[0] = value as f64;
+                        status
+                    }
+                    "math_f32_compare" => {
+                        let mut value = 0_i32;
+                        let status = oa_math_f32_compare(
+                            args[0] as f32,
+                            args[1] as f32,
+                            &mut value,
+                            &mut error,
+                        );
+                        actual[0] = value as f64;
+                        status
+                    }
+                    "math_f32_sign_negative" => {
+                        let mut value = 0_u32;
+                        let status =
+                            oa_math_f32_is_sign_negative(args[0] as f32, &mut value, &mut error);
+                        actual[0] = value as f64;
+                        status
+                    }
+                    "rhumb_inverse" => oa_geo_wgs84_rhumb_inverse(
+                        args[0],
+                        args[1],
+                        args[2],
+                        args[3],
+                        &mut actual[0],
+                        &mut actual[1],
+                        &mut error,
+                    ),
+                    "rhumb_direct" => oa_geo_wgs84_rhumb_direct(
+                        args[0],
+                        args[1],
+                        args[2],
+                        args[3],
+                        &mut actual[0],
+                        &mut actual[1],
+                        &mut error,
+                    ),
+                    "rhumb_fraction" => oa_geo_wgs84_rhumb_point_at_fraction(
+                        args[0],
+                        args[1],
+                        args[2],
+                        args[3],
+                        args[4],
+                        &mut actual[0],
+                        &mut actual[1],
+                        &mut error,
+                    ),
+                    "separation" => oa_geo_wgs84_geodesic_rhumb_separation(
+                        args[0],
+                        args[1],
+                        args[2],
+                        args[3],
+                        args[4] as u32,
+                        &mut actual[0],
+                        &mut actual[1],
+                        &mut actual[2],
+                        &mut actual[3],
+                        &mut error,
+                    ),
+                    operation => panic!("unknown L0 vector operation {operation}"),
+                }
+            };
+            assert_eq!(status, OA_STATUS_OK, "{}", fields[0]);
+            assert_eq!(error.code, OA_STATUS_OK, "{}", fields[0]);
+            assert_eq!(error.location_kind, OA_LOCATION_NONE, "{}", fields[0]);
+            if fields[0] == "equator-zero-separation" {
+                assert!(actual[1].is_finite() && (0.0..=1.0).contains(&actual[1]));
+                let tied_actual = [actual[0], actual[2], actual[3]];
+                assert_eq!(expected.len(), tied_actual.len(), "{}", fields[0]);
+                for (got, want) in tied_actual.iter().zip(&expected) {
+                    assert!(got.is_finite(), "{}", fields[0]);
+                    assert!(
+                        (got - want).abs() <= tolerance,
+                        "{}: {} vs {}",
+                        fields[0],
+                        got,
+                        want
+                    );
+                }
+            } else {
+                for (index, want) in expected.iter().enumerate() {
+                    assert!(actual[index].is_finite(), "{}", fields[0]);
+                    assert!(
+                        (actual[index] - want).abs() <= tolerance,
+                        "{}: {} vs {}",
+                        fields[0],
+                        actual[index],
+                        want
+                    );
+                }
+            }
+        }
+    }
+
+    // The polygon handle uses the common synthetic C/Python fixtures.
+    // REQ: OA-FFI-003
+    #[test]
+    fn ffi_polygon_matches_the_shared_synthetic_vectors() {
+        for (line_number, line) in POLYGON_VECTORS.lines().enumerate().skip(1) {
+            if line.is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split(',').collect();
+            assert_eq!(fields.len(), 5, "polygon vector line {}", line_number + 1);
+            let points: Vec<(f64, f64)> = fields[1]
+                .split(';')
+                .map(|pair| {
+                    let mut values = pair.split('|');
+                    (
+                        values.next().expect("lat").parse().expect("lat"),
+                        values.next().expect("lon").parse().expect("lon"),
+                    )
+                })
+                .collect();
+            let latitudes: Vec<f64> = points.iter().map(|point| point.0).collect();
+            let longitudes: Vec<f64> = points.iter().map(|point| point.1).collect();
+            let mut polygon = core::ptr::null_mut();
+            let mut error = OaErrorInfo {
+                code: 99,
+                location_kind: 99,
+                location: 99,
+            };
+            // SAFETY: coordinate slices and output/error locals are live, aligned and distinct.
+            let status = unsafe {
+                oa_geo_polygon_new_wgs84(
+                    latitudes.as_ptr(),
+                    longitudes.as_ptr(),
+                    points.len() as u64,
+                    &mut polygon,
+                    &mut error,
+                )
+            };
+            assert_eq!(status, OA_STATUS_OK, "{}", fields[0]);
+            let mut edges = 0_u64;
+            let mut inside = u32::MAX;
+            let status_edges =
+                // SAFETY: polygon is the live constructor result; `edges` and `error` are distinct locals.
+                unsafe { oa_geo_polygon_edge_count(polygon, &mut edges, &mut error) };
+            // SAFETY: polygon is live; `inside` and `error` are distinct locals and remain writable.
+            let status_contains = unsafe {
+                oa_geo_polygon_contains_wgs84(
+                    polygon,
+                    fields[2].parse().expect("lat"),
+                    fields[3].parse().expect("lon"),
+                    &mut inside,
+                    &mut error,
+                )
+            };
+            // SAFETY: this is the live handle returned above, freed once after the two queries.
+            unsafe { oa_geo_polygon_free(polygon) };
+            assert_eq!(status_edges, OA_STATUS_OK, "{}", fields[0]);
+            assert_eq!(status_contains, OA_STATUS_OK, "{}", fields[0]);
+            assert_eq!(edges, points.len() as u64, "{}", fields[0]);
+            assert_eq!(
+                inside,
+                fields[4].parse::<u32>().expect("inside"),
+                "{}",
+                fields[0]
+            );
+        }
+    }
+
+    // REQ: OA-FFI-002
+    #[test]
+    fn ffi_matches_the_shared_synthetic_geodesy_vectors() {
+        assert_eq!(oa_core_abi_version(), ABI_VERSION_PROVISIONAL);
+        for (line_number, line) in VECTORS.lines().enumerate().skip(1) {
+            if line.is_empty() {
+                continue;
+            }
+            let fields: Vec<&str> = line.split(',').collect();
+            assert_eq!(fields.len(), 12, "vector line {}", line_number + 1);
+            let a = fields[1].parse::<f64>().expect("arg1");
+            let b = fields[2].parse::<f64>().expect("arg2");
+            let c = fields[3].parse::<f64>().expect("arg3");
+            let d = fields[4].parse::<f64>().expect("arg4");
+            let expected_status = fields[5].parse::<u32>().expect("status");
+            let expected_location = fields[6].parse::<u64>().expect("location");
+            let (mut out1, mut out2, mut out3) = (1234.0, 1234.0, 1234.0);
+            let mut error = OaErrorInfo {
+                code: 99,
+                location_kind: 99,
+                location: 99,
+            };
+            // SAFETY: the three local outputs and error record are valid, aligned, writable,
+            // distinct objects with lifetimes covering this call; scalar inputs need no pointers.
+            let status = unsafe {
+                if fields[0] == "inverse" {
+                    oa_geo_wgs84_inverse(a, b, c, d, &mut out1, &mut out2, &mut out3, &mut error)
+                } else {
+                    oa_geo_wgs84_direct(a, b, c, d, &mut out1, &mut out2, &mut out3, &mut error)
+                }
+            };
+            assert_eq!(status, expected_status, "vector line {}", line_number + 1);
+            assert_eq!(
+                error.code,
+                expected_status,
+                "vector line {}",
+                line_number + 1
+            );
+            if status == OA_STATUS_OK {
+                assert_eq!(error.location_kind, OA_LOCATION_NONE);
+                let outputs = [out1, out2, out3];
+                let tolerance = fields[10].parse::<f64>().expect("tolerance");
+                for (index, expected) in fields[7..10].iter().enumerate() {
+                    if let Some(want) = number(expected) {
+                        assert!(
+                            (outputs[index] - want).abs() <= tolerance,
+                            "vector {} output {}: got {} expected {} ± {}",
+                            fields[11],
+                            index,
+                            outputs[index],
+                            want,
+                            tolerance
+                        );
+                    } else {
+                        assert!(outputs[index].is_finite(), "vector {}", fields[11]);
+                    }
+                }
+            } else {
+                assert_eq!(error.location_kind, OA_LOCATION_ARGUMENT, "{}", fields[11]);
+                assert_eq!(error.location, expected_location, "{}", fields[11]);
+                assert_eq!((out1, out2, out3), (1234.0, 1234.0, 1234.0));
+            }
+        }
+    }
+
+    // REQ: OA-FFI-001
+    #[test]
+    fn null_output_is_refused_and_message_copy_is_bounded() {
+        let (mut out2, mut out3) = (1234.0, 1234.0);
+        let mut error = OaErrorInfo {
+            code: 99,
+            location_kind: 99,
+            location: 99,
+        };
+        // SAFETY: error and the two non-null outputs are valid distinct local objects; the null
+        // first output is deliberately passed to exercise the documented null refusal path.
+        let status = unsafe {
+            oa_geo_wgs84_inverse(
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                core::ptr::null_mut(),
+                &mut out2,
+                &mut out3,
+                &mut error,
+            )
+        };
+        assert_eq!(status, OA_STATUS_INVALID_ARGUMENT);
+        assert_eq!(error.location_kind, OA_LOCATION_ARGUMENT);
+        assert_eq!(error.location, 4);
+        assert_eq!((out2, out3), (1234.0, 1234.0));
+
+        let mut required = 0_u64;
+        let needed = message(OA_STATUS_INVALID_ARGUMENT).len() as u64;
+        // SAFETY: `required` is a valid writable local; null buffer with capacity zero is the
+        // documented size-query form and does not dereference a buffer pointer.
+        let query = unsafe {
+            oa_core_error_message(
+                OA_STATUS_INVALID_ARGUMENT,
+                core::ptr::null_mut(),
+                0,
+                &mut required,
+            )
+        };
+        assert_eq!(query, OA_STATUS_BUFFER_TOO_SMALL);
+        assert_eq!(required, needed);
+    }
+
+    // Exercise query, refusal and exact-capacity message-copy semantics.
+    // REQ: OA-FFI-001
+    #[test]
+    fn error_message_capacity_is_all_or_nothing_and_includes_nul() {
+        let text = message(OA_STATUS_INVALID_ARGUMENT);
+        let needed = text.len() as u64;
+        assert_eq!(text.last(), Some(&0));
+        let mut buffer = [0xA5_u8; 64];
+        let mut required = u64::MAX;
+
+        // SAFETY: required is a valid aligned writable local; null buffer at zero capacity is the
+        // documented size query and does not dereference a destination buffer.
+        let query = unsafe {
+            oa_core_error_message(
+                OA_STATUS_INVALID_ARGUMENT,
+                core::ptr::null_mut(),
+                0,
+                &mut required,
+            )
+        };
+        assert_eq!(query, OA_STATUS_BUFFER_TOO_SMALL);
+        assert_eq!(required, needed);
+
+        required = u64::MAX;
+        // SAFETY: buffer is valid, aligned and writable; required is a separate valid local.
+        // The null buffer with nonzero capacity is deliberately refused before either write.
+        let null_refusal = unsafe {
+            oa_core_error_message(
+                OA_STATUS_INVALID_ARGUMENT,
+                core::ptr::null_mut(),
+                1,
+                &mut required,
+            )
+        };
+        assert_eq!(null_refusal, OA_STATUS_INVALID_ARGUMENT);
+        assert_eq!(required, u64::MAX);
+        assert_eq!(buffer, [0xA5; 64]);
+
+        required = 0;
+        // SAFETY: buffer and required are valid, aligned, writable and non-overlapping; the
+        // deliberately short capacity is within buffer but shorter than the static message.
+        let short = unsafe {
+            oa_core_error_message(
+                OA_STATUS_INVALID_ARGUMENT,
+                buffer.as_mut_ptr(),
+                needed - 1,
+                &mut required,
+            )
+        };
+        assert_eq!(short, OA_STATUS_BUFFER_TOO_SMALL);
+        assert_eq!(required, needed);
+        assert_eq!(buffer, [0xA5; 64]);
+
+        required = 0;
+        // SAFETY: buffer has more than `needed` writable bytes; only the exact declared capacity
+        // is passed and required is a distinct valid local.
+        let exact = unsafe {
+            oa_core_error_message(
+                OA_STATUS_INVALID_ARGUMENT,
+                buffer.as_mut_ptr(),
+                needed,
+                &mut required,
+            )
+        };
+        assert_eq!(exact, OA_STATUS_OK);
+        assert_eq!(required, needed);
+        assert_eq!(buffer.get(..text.len()), Some(text));
+        assert!(buffer.iter().skip(text.len()).all(|byte| *byte == 0xA5));
+    }
+}

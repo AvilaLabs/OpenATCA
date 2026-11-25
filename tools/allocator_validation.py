@@ -13,6 +13,11 @@ import tomllib
 HARNESS = Path("validation/oa-alloc-check")
 PRESENTATION = Path("crates/oa-display-present")
 PRESENTATION_SOURCES = {"src/lib.rs", "src/linux.rs"}
+CORE_FFI = Path("crates/openatca-core-ffi")
+CORE_FFI_DEPS = {
+    "oa-geo": "../oa-geo", "oa-ieee": "../oa-ieee",
+    "oa-math": "../oa-math", "oa-sha256": "../oa-sha256",
+}
 STRICT_RUNTIME_CLIPPY_LINTS = ("unwrap_used", "expect_used", "panic", "indexing_slicing")
 # Pinned to oa-airspace::core::route::MAX_ROUTE_WORK: full identity scans across the
 # 11,640-point regional model need 744,960 visits for 64 endpoints, plus expansion.
@@ -333,7 +338,7 @@ def _member_manifests(root: Path, workspace: dict) -> tuple[list[Path], list[str
 
 def _presentation_exception_errors(root: Path, members: list[Path]) -> list[str]:
     """Check the one exact product package allowed to isolate Linux OS unsafe code."""
-    errors: list[str] = _product_global_allocator_errors(members)
+    errors: list[str] = []
     declared_dir = root / PRESENTATION
     expected_dir = declared_dir.resolve()
     declared_manifest = declared_dir / "Cargo.toml"
@@ -425,6 +430,83 @@ def _presentation_exception_errors(root: Path, members: list[Path]) -> list[str]
     if re.search(r"#\s*\[\s*link\b|#\s*\[\s*path\b|\bpath\s*=|"
                  r"\b(?:no_mangle|export_name|link_section)\b|\binclude(?:_str|_bytes)?\s*!", linux_tokens):
         errors.append("oa-display-present may not use source inclusion or path attributes")
+
+    return errors
+
+
+def _core_ffi_exception_errors(root: Path, members: list[Path]) -> list[str]:
+    """Check the exact provisional C ABI package boundary required by RULESET A0."""
+    errors: list[str] = []
+    declared_dir = root / CORE_FFI
+    expected_dir = declared_dir.resolve()
+    declared_manifest = declared_dir / "Cargo.toml"
+    expected_manifest = declared_manifest.resolve()
+    if (declared_dir.is_symlink() or expected_dir != declared_dir
+            or not _inside(expected_dir, root) or declared_manifest.is_symlink()):
+        errors.append("openatca-core-ffi package path may not use symlinks")
+        return errors
+
+    named_members: list[Path] = []
+    for manifest in members:
+        data, problem = _read_toml(manifest)
+        if problem:
+            continue
+        package = data.get("package", {})
+        if isinstance(package, dict) and package.get("name") == "openatca-core-ffi":
+            named_members.append(manifest)
+    if not expected_manifest.exists():
+        if named_members:
+            errors.append("openatca-core-ffi may exist only at crates/openatca-core-ffi/Cargo.toml")
+        return errors
+    if expected_manifest not in members:
+        errors.append("crates/openatca-core-ffi must be an explicit product workspace member")
+    if any(manifest != expected_manifest for manifest in named_members):
+        errors.append("openatca-core-ffi may exist only at crates/openatca-core-ffi/Cargo.toml")
+
+    data, problem = _read_toml(expected_manifest)
+    if problem:
+        return errors + [problem]
+    package = data.get("package", {})
+    if not isinstance(package, dict) or package.get("name") != "openatca-core-ffi":
+        errors.append("the exact FFI package path must declare name = openatca-core-ffi")
+        package = {}
+    for key in ("version", "edition", "license", "rust-version", "authors"):
+        package_value = package.get(key)
+        if not isinstance(package_value, dict) or package_value.get("workspace") is not True:
+            errors.append(f"openatca-core-ffi package.{key} must inherit workspace.package")
+    metadata = package.get("metadata", {}) if isinstance(package, dict) else {}
+    openatca = metadata.get("openatca", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(openatca, dict) or openatca.get("class") != "shell":
+        errors.append("openatca-core-ffi must have package.metadata.openatca.class = shell")
+
+    lint_tables = data.get("lints", {})
+    if not isinstance(lint_tables, dict):
+        lint_tables = {}
+    if lint_tables.get("workspace") is True:
+        errors.append("openatca-core-ffi must not inherit workspace lints (A0 requires local unsafe_code deny)")
+    rust_lints = lint_tables.get("rust", {})
+    if not isinstance(rust_lints, dict) or rust_lints != {"unsafe_code": "deny"}:
+        errors.append("openatca-core-ffi must explicitly set only [lints.rust] unsafe_code = deny")
+    clippy_lints = lint_tables.get("clippy", {})
+    if (not isinstance(clippy_lints, dict)
+            or set(clippy_lints) != set(STRICT_RUNTIME_CLIPPY_LINTS)
+            or any(clippy_lints.get(name) != "deny" for name in STRICT_RUNTIME_CLIPPY_LINTS)):
+        errors.append("openatca-core-ffi must explicitly deny the four strict workspace Clippy lints")
+
+    lib = data.get("lib", {})
+    if not isinstance(lib, dict) or lib.get("crate-type") != ["cdylib", "staticlib"]:
+        errors.append("openatca-core-ffi must expose exactly cdylib and staticlib crate types")
+    actual_deps = data.get("dependencies", {})
+    if not isinstance(actual_deps, dict) or set(actual_deps) != set(CORE_FFI_DEPS):
+        errors.append("openatca-core-ffi dependencies must be exactly oa-geo, oa-ieee, oa-math and oa-sha256")
+        actual_deps = actual_deps if isinstance(actual_deps, dict) else {}
+    for name, relative in CORE_FFI_DEPS.items():
+        declaration = actual_deps.get(name)
+        if not isinstance(declaration, dict) or declaration.get("path") != relative:
+            errors.append(f"openatca-core-ffi dependency {name} must use the exact core path {relative}")
+    for section in ("dev-dependencies", "build-dependencies", "target"):
+        if data.get(section):
+            errors.append(f"openatca-core-ffi must not add {section}")
 
     return errors
 
@@ -640,8 +722,11 @@ def allocation_layout_errors(repo: Path) -> list[str]:
 
     members, member_errors = _member_manifests(root, workspace.get("workspace", {}))
     errors.extend(member_errors)
+    errors.extend(_product_global_allocator_errors(members))
     errors.extend(_presentation_exception_errors(root, members))
+    errors.extend(_core_ffi_exception_errors(root, members))
     presentation_manifest = (root / PRESENTATION / "Cargo.toml").resolve()
+    core_ffi_manifest = (root / CORE_FFI / "Cargo.toml").resolve()
     for member in members:
         if not _inside(member, root):
             errors.append(f"workspace member manifest escapes repository: {member}")
@@ -649,7 +734,7 @@ def allocation_layout_errors(repo: Path) -> list[str]:
         member_data, member_problem = _read_toml(member)
         if member_problem:
             errors.append(member_problem)
-        elif member != presentation_manifest and member_data.get("lints", {}).get("workspace") is not True:
+        elif member not in (presentation_manifest, core_ffi_manifest) and member_data.get("lints", {}).get("workspace") is not True:
             errors.append(f"product workspace member must inherit workspace lints: {member}")
     harness_dir = (root / HARNESS).resolve()
     if not _inside(harness_dir, root):

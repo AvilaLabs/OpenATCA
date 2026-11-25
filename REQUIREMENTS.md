@@ -642,6 +642,13 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   passed to `map` or bound by `let`) and `spare_capacity_mut` fail in core code, since the allocator chooses the
   value; a field named `capacity` and `with_capacity` do not, and `try_reserve`-style probes are left alone. The
   allocation probe of the display tests is in a shell module.
+- **OA-TRC-262** The only C ABI unsafe exception is the exact `crates/openatca-core-ffi` package classified `shell`,
+  with local `unsafe_code = "deny"`, explicit runtime Clippy denials, exact core dependencies `oa-geo`,
+  `oa-ieee`, `oa-math`, and `oa-sha256`, an exact named provisional export inventory enforced by `oa-trace`, and
+  exactly `src/lib.rs` plus `src/ffi.rs` in its Rust source inventory. The root denies unsafe; only `ffi.rs` has one
+  module-level unsafe allowance, and each unsafe block has an immediately preceding `// SAFETY:` comment. The
+  checker also pins the reviewed unsafe-block counts by owning function. A
+  different package name/path/class, extra source file, dependency, allowance, or unexplained unsafe block fails.
 
 ### Hashing (oa-sha256)
 
@@ -7383,6 +7390,21 @@ FAA value.
   CPR format flag and 17-bit latitude/longitude fields for surface TC 5–8 and airborne TC 9–18.
   These are encoded fields, not coordinates. The decoder does not pair even/odd frames, apply a
   local reference, infer a timestamp, or reconstruct a position.
+## Provisional OpenATCA Core bindings
+
+- **OA-FFI-001** The experimental C ABI exports the version query, WGS-84 geodesic/rhumb/separation and
+  polygon operations, source-defined scalar math helpers, one-shot SHA-256, and bounded status-message copy over
+  existing safe `oa-*` APIs. Message queries and short buffers report the NUL-inclusive required size and never
+  partially overwrite the destination. Fixed-width status/error shapes, argument
+  locations (including the raw `location` field when `location_kind` is none), and all-or-nothing scalar outputs match the hand-written header; pointer validity, alignment,
+  extent and non-overlap are documented caller preconditions, never arbitrary-address validation claims.
+- **OA-FFI-002** Rust, C and pure-Python `ctypes` source tests consume the same committed synthetic
+  geodesic, rhumb, polygon, scalar-math, and SHA-256 vectors. Importing Python loads no library; native loading
+  requires an explicit absolute path. The ABI remains Preview and unvalidated until independent review and
+  cross-platform gates pass.
+- **OA-FFI-003** The C and Python L0 source runners cover every exported L0 operation family against the
+  shared committed vectors, including polygon handle lifetime operations and bounded one-shot hashing. Source
+  runner presence does not establish that a native build or run succeeded; the coordinator records those gates.
 
 ## Reproducible ZAU comparison package (p002 `--export-eram`, `--eram-export`, tools/reproduce_zau.sh)
 

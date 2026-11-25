@@ -21,11 +21,12 @@ the rule unless an exception is recorded at the site as a comment naming the rul
 
 ## A0. Unsafe code
 
-- **A0 [MUST]** `#![forbid(unsafe_code)]` in every crate except the exact product package
-  `crates/oa-display-present` (`oa-display-present`), the direct Linux KMS/DRM presentation shell.
-  This one package is the sole product exception. No product source may name `GlobalAlloc`.
-  Its manifest is classified `shell`, inherits the workspace package metadata, and is the one
-  strict-lint-inheritance exception: it must set `[lints.rust] unsafe_code = "deny"` (not `forbid`,
+- **A0 [MUST]** `#![forbid(unsafe_code)]` in every crate except the exact product packages
+  `crates/oa-display-present` (`oa-display-present`), the direct Linux KMS/DRM presentation shell,
+  and `crates/openatca-core-ffi` (`openatca-core-ffi`), the isolated provisional C ABI shell.
+  These two packages are the only product exceptions. No product source may name `GlobalAlloc`.
+  The presentation manifest is classified `shell`, inherits the workspace package metadata, and
+  is a strict-lint-inheritance exception: it must set `[lints.rust] unsafe_code = "deny"` (not `forbid`,
   so the private OS module can locally override it) and explicitly deny all four workspace runtime
   Clippy lints (`unwrap_used`, `expect_used`, `panic`, `indexing_slicing`). Every other product
   package still inherits workspace lints and the workspace still forbids `unsafe_code`.
@@ -35,12 +36,26 @@ the rule unless an exception is recorded at the site as a comment naming the rul
   comment stating its invariant, and is reviewed line by line. No other source file in that crate
   may use `unsafe`, `extern`, link/name/export attributes, `include!` or `#[path]`; its source
   inventory is exactly `src/lib.rs` and `src/linux.rs`.
+  The binding package is also classified `shell`, depends only on the exact core crates `oa-geo`,
+  `oa-ieee`, `oa-math` and `oa-sha256`, and sets
+  `[lints.rust] unsafe_code = "deny"` plus explicit denials for the four workspace runtime Clippy
+  lints. Its crate root uses `#![deny(unsafe_code)]`; exactly `src/ffi.rs` has the module-local
+  `#![allow(unsafe_code)]`, and its Rust `src/` inventory is exactly `src/lib.rs` and `src/ffi.rs`.
+  Raw pointers, `extern "C"`, symbol exports and every unsafe operation stay in that module. Each
+  unsafe block is minimal, has a local `// SAFETY:` justification, and receives independent
+  line-by-line review. `oa-trace` pins the reviewed unsafe-block counts by owning function in
+  addition to the named export inventory. Pointer validity, alignment, writable extent and
+  non-overlap are caller preconditions; the ABI does not claim it can validate arbitrary C
+  addresses. The module contains
+  only pointer adaptation and calls to existing safe core APIs; it implements no aviation logic.
   The standalone `validation/oa-alloc-check` C5 harness is the only other
   exception: its single allocator module may implement `GlobalAlloc` to count allocations in the
   real-time tracker/fusion tests. It is excluded from the product workspace, has no product use,
   and must not be linked into a product target. Every unsafe operation is confined to that
   module, carries a `// SAFETY:` comment, and is reviewed line by line. No other crate may gain an
-  exception without amending this rule. The gate checks it (amended 2026-11-19 and 2026-11-24):
+  exception without amending this rule. The gate checks these exceptions mechanically by exact
+  package/path/source inventories, with no glob or derived module accepted. The gate also checks
+  (amended 2026-11-19 and 2026-11-24):
   every other product crate, including all core and split crates, declares `[lints] workspace = true`
   (the workspace forbids `unsafe_code`) and has `#![forbid(unsafe_code)]` as an inner attribute at
   the top of `src/lib.rs`, `oa-ieee` included; core code contains none of the tokens `unsafe`,

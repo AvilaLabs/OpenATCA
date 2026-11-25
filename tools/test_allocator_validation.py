@@ -322,6 +322,49 @@ indexing_slicing = "deny"
     write(crate / "src/linux.rs", "#![allow(unsafe_code)]\nfn os_shell() {}\n")
 
 
+def add_core_ffi_exception(root, *, relative="crates/openatca-core-ffi",
+                           name="openatca-core-ffi", unsafe_lint="deny",
+                           clippy_lint="deny", workspace_lints=False,
+                           class_name="shell"):
+    manifest = root / "Cargo.toml"
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace(
+        'members = ["crates/oa-track"]',
+        f'members = ["crates/oa-track", "{relative}"]'), encoding="utf-8")
+    crate = root / relative
+    write(crate / "Cargo.toml", f'''
+[package]
+name = "{name}"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+[package.metadata.openatca]
+class = "{class_name}"
+[lib]
+crate-type = ["cdylib", "staticlib"]
+[dependencies]
+oa-geo = {{ path = "../oa-geo" }}
+oa-ieee = {{ path = "../oa-ieee" }}
+oa-math = {{ path = "../oa-math" }}
+oa-sha256 = {{ path = "../oa-sha256" }}
+[lints.rust]
+unsafe_code = "{unsafe_lint}"
+[lints.clippy]
+unwrap_used = "{clippy_lint}"
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+''')
+    if workspace_lints:
+        with (crate / "Cargo.toml").open("a", encoding="utf-8") as stream:
+            stream.write("\n[lints]\nworkspace = true\n")
+    write(crate / "src/lib.rs", "#![deny(unsafe_code)]\nmod ffi;\n")
+    write(crate / "src/ffi.rs", "#![allow(unsafe_code)]\nfn boundary() {}\n")
+    for dep in ("oa-geo", "oa-ieee", "oa-math", "oa-sha256"):
+        write(root / "crates" / dep / "Cargo.toml", f'[package]\nname = "{dep}"\nversion = "0.1.0"\n')
+
+
 class AllocatorResultTests(unittest.TestCase):
     # REQ: OA-RTE-005
     def test_route_budget_rejects_stale_limit_and_excess_work(self):
@@ -414,6 +457,39 @@ class AllocatorLayoutTests(unittest.TestCase):
             layout_tree(root)
             add_presentation_exception(root)
             self.assertEqual(gate.allocation_layout_errors(root), [])
+
+    def test_exact_core_ffi_exception_is_accepted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            add_core_ffi_exception(root)
+            self.assertEqual(gate.allocation_layout_errors(root), [])
+
+    def test_core_ffi_exception_rejects_name_path_and_lint_bypasses(self):
+        cases = (
+            {"relative": "crates/openatca-core-ffi-copy"},
+            {"name": "openatca-core-ffi-copy"},
+            {"class_name": "core"},
+            {"unsafe_lint": "allow"},
+            {"clippy_lint": "allow"},
+            {"workspace_lints": True},
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                layout_tree(root)
+                add_core_ffi_exception(root, **case)
+                self.assertTrue(gate.allocation_layout_errors(root))
+
+    def test_core_ffi_exception_rejects_extra_dependency(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            layout_tree(root)
+            add_core_ffi_exception(root)
+            manifest = root / "crates/openatca-core-ffi/Cargo.toml"
+            manifest.write_text(manifest.read_text(encoding="utf-8") +
+                                '\n[dev-dependencies]\nextra = "1"\n', encoding="utf-8")
+            self.assertTrue(gate.allocation_layout_errors(root))
 
     def test_presentation_exception_rejects_sibling_path_name_and_class_spoofs(self):
         cases = (
