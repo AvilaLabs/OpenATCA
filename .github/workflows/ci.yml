@@ -30,10 +30,14 @@ jobs:
         run: cargo +1.89.0 test --workspace --release --locked
       - name: Diagnostic example regressions
         run: |
-          cargo +1.89.0 test --release --locked -p oa-track --example turn_diag --example vs_eram
+          cargo +1.89.0 test --release --locked -p oa-track --example turn_diag --example vs_eram --example p002
           cargo +1.89.0 test --release --locked -p oa-adsb --example surface_counts
       - name: Turn-onset scorer regressions
         run: python3 tools/test_turn_onset.py
+      - name: Reproduction package regressions
+        run: |
+          python3 tools/test_repro_package_io.py
+          python3 tools/test_reproduce_zau.py
       - name: Requirements traceability
         run: cargo +1.89.0 run --locked -p oa-trace
       - name: No external dependencies
