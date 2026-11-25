@@ -1345,9 +1345,10 @@ mod turn_window_tests {
         append_bounded_csv_row, checked_turn_window, fixed_timing_description, in_turn_window,
         increment_export_count, scoring_timing_config, select_timing_profile,
         select_turn_export_limits, selected_truth_grid_bounds, ScoringTimingProfile,
-        ScoringTimingSource, TurnExportLimits, DEFAULT_CONFIG, EXTENDED_TURN_EXPORT,
-        STANDARD_TURN_EXPORT, TURN_EXPORT_MAX_ROW_BYTES,
+        TurnExportLimits, DEFAULT_CONFIG, EXTENDED_TURN_EXPORT, STANDARD_TURN_EXPORT,
+        TURN_EXPORT_MAX_ROW_BYTES,
     };
+    use oa_track::score::ScoringTimingSource;
     use std::fmt::Write as _;
 
     #[test]
