@@ -65,6 +65,7 @@ members = [
     "tools/oa-shadow",
     "tools/oa-stdds-census",
     "tools/oa-trace",
+    "tools/oa-sector-reconstruct",
 ]
 
 [workspace.package]

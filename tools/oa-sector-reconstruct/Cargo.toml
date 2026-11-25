@@ -1,0 +1,23 @@
+[package]
+name = "oa-sector-reconstruct"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# F1 import-site justification: H2 operation-kind/refusal matrices and flight-state count for schema joins.
+oa-flight = { path = "../../crates/oa-flight" }
+# F1 import-site justification: H2 field identifiers validate required centre, owner, position and altitude evidence.
+oa-fixm = { path = "../../crates/oa-fixm" }
+# F1 import-site justification: production sealed-path, guarded-file-open and timestamp-window checks.
+oa-sealed = { path = "../../crates/oa-sealed" }
+# F1 import-site justification: deterministic digests bind trace, model, policy and running executable identities.
+oa-sha256 = { path = "../../crates/oa-sha256" }
+
+[package.metadata.openatca]
+class = "shell"

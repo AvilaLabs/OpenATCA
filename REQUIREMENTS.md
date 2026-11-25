@@ -7417,3 +7417,51 @@ FAA value.
   instructions require a coordinator-verified canonical release inventory and exact part completeness before use;
   the wrapper's manifest cannot prove that an omitted release part does not exist. Raw exports and outputs remain
   private; the procedure is development-only and makes no runtime safety or complete-traffic claim.
+
+## Empirical ZAU sector occupancy (oa-sector-reconstruct; development-only G3 evidence)
+
+- **OA-G3-001** The tool accepts only the complete pinned `H2-OBSERVED-STATE-1` header with
+  `scope=SFDPS-replay-compatibility`, `independent_predictions=not-measured`, and
+  `independent_agreement_denominator=not-observable`, plus the complete H2 CONFIG/BUILD/event/
+  RESULT/COUNTS/INPUT envelope. Unknown records/fields or schema changes refuse before aggregation.
+  It reads no raw SFDPS recordings and never treats a replayed owner, handoff, or flight-data field
+  as an independent controller-action label.
+- **OA-G3-002** Training and check partitions are fixed to 2026-11-15 and 2026-11-19 UTC,
+  respectively. The shared `oa-sealed` path guard runs before each open; the complete bounded
+  trace is pre-scanned for source, position/state, operation, and receive timestamps before
+  aggregation, and every present timestamp must be outside a sealed window and inside the declared
+  UTC partition. ROW source clock fields are required by schema but may explicitly be `none`.
+- **OA-G3-003** A spatial label requires positive same-row identity: the exact zero-padded four-byte
+  ZAU centre encoding, a non-unknown zero-padded controlling-owner unit/sector value, and a full GUFI. Handoff
+  transferring/receiving/accepting units are separately counted observations and never substitute
+  for the controlling-owner field. Unknown identity abstains.
+- **OA-G3-004** The frozen empirical grid uses 0.05-degree global WGS-84 cells, 2,000-ft slabs
+  of reported altitude, and 15-minute bins of position/state time. State time and feed receive time
+  remain distinct and both coverage spans are reported. Missing reported altitude is counted and
+  remains missing; assigned altitude is not a substitute.
+- **OA-G3-005** A cell/altitude/owner label is `supported` only with at least three distinct GUFIs
+  and two distinct state-time bins; competing labels meeting the same minima are `contested` and
+  all other observed labels are `unknown`. The result is empirical occupancy support, not a
+  probability, confidence of official-boundary correctness, official geometry, or autonomous-policy
+  agreement. No hull, interpolation, smoothing, carry-forward, or outside-sector inference is
+  used; no official coverage mask is claimed.
+- **OA-G3-006** Fixed limits bound input bytes, line bytes, total records, row records, unique
+  evidence keys, model bytes, and report bytes. Source receipts use the full
+  `(stream, decoded_offset, recorder_sequence, row)` identity. Exact repeats, conflicting source
+  receipts, conflicting GUFI/state-time owners, unknown identities, missing/invalid fields,
+  missing/out-of-range altitude, sparse support, and unmatched check labels are separate named
+  dispositions. FRAME identity is unique by `(stream, decoded_offset)` and its sequence must join
+  to each ROW/OP source identity. Each OP joins to a ROW, has a unique per-row operation index, and
+  per-row declared operation counts must equal contiguous observed indices. Future source/state
+  clocks relative to receive time are counted; affected ROWs abstain from occupancy without
+  claiming causal synchronization. The row disposition counters conserve every ROW input; any cap
+  or conservation failure is `INCOMPLETE` and creates no report.
+- **OA-G3-007** Training and check are separate artifacts; the check reader cannot modify the
+  model. Artifacts carry input, policy, binary, and training-model SHA-256 values plus frozen
+  schema/partition metadata and an optional embedded source revision, contain only
+  aggregate cell support and handoff counts, and are written exclusively under an explicit
+  canonical private root with mode 0600 and no overwrite. Check requires an identical G3 binary
+  digest and source revision to training. Reproducibility is limited to the exact trace and G3
+  binary; no H2 source reconstruction claim is made. The output reports coverage denominators and
+  sparse abstentions; a zero eligible check denominator is not a pass. Synthetic tests use
+  fabricated source rows only.

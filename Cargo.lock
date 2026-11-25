@@ -460,6 +460,16 @@ name = "oa-sealed"
 version = "0.0.1"
 
 [[package]]
+name = "oa-sector-reconstruct"
+version = "0.0.1"
+dependencies = [
+ "oa-fixm",
+ "oa-flight",
+ "oa-sealed",
+ "oa-sha256",
+]
+
+[[package]]
 name = "oa-sensorsim"
 version = "0.0.1"
 dependencies = [
