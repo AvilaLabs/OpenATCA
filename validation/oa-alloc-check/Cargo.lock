@@ -75,6 +75,7 @@ dependencies = [
  "oa-sha256",
  "oa-tbfm",
  "oa-tfms",
+ "oa-time-window",
  "oa-truth",
  "oa-xml",
 ]
@@ -116,7 +117,7 @@ dependencies = [
 name = "oa-fixm"
 version = "0.0.1"
 dependencies = [
- "oa-sealed",
+ "oa-time-window",
  "oa-xml",
 ]
 
@@ -160,7 +161,7 @@ version = "0.0.1"
 dependencies = [
  "oa-airspace",
  "oa-geo",
- "oa-sealed",
+ "oa-time-window",
  "oa-xml",
 ]
 
@@ -199,11 +200,15 @@ dependencies = [
  "oa-sealed",
  "oa-sha256",
  "oa-track",
+ "oa-track-tools",
 ]
 
 [[package]]
 name = "oa-sealed"
 version = "0.0.1"
+dependencies = [
+ "oa-time-window",
+]
 
 [[package]]
 name = "oa-sensorsim"
@@ -231,7 +236,7 @@ name = "oa-tbfm"
 version = "0.0.1"
 dependencies = [
  "oa-airspace",
- "oa-sealed",
+ "oa-time-window",
  "oa-xml",
 ]
 
@@ -240,12 +245,27 @@ name = "oa-tfms"
 version = "0.0.1"
 dependencies = [
  "oa-fixm",
- "oa-sealed",
+ "oa-time-window",
  "oa-xml",
 ]
 
 [[package]]
+name = "oa-time-window"
+version = "0.0.1"
+
+[[package]]
 name = "oa-track"
+version = "0.0.1"
+dependencies = [
+ "oa-adsb",
+ "oa-geo",
+ "oa-math",
+ "oa-sha256",
+ "oa-truth",
+]
+
+[[package]]
+name = "oa-track-tools"
 version = "0.0.1"
 dependencies = [
  "oa-adsb",
@@ -253,9 +273,11 @@ dependencies = [
  "oa-feed",
  "oa-geo",
  "oa-math",
+ "oa-replay",
  "oa-sealed",
  "oa-sensorsim",
  "oa-sha256",
+ "oa-track",
  "oa-truth",
 ]
 
@@ -270,6 +292,7 @@ dependencies = [
  "oa-math",
  "oa-sealed",
  "oa-sha256",
+ "oa-time-window",
 ]
 
 [[package]]
