@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import atexit
 import calendar
+import errno
 import fnmatch
 import functools
 import hashlib
@@ -385,6 +386,36 @@ class Guard:
             except OSError:
                 pass
             raise
+
+    def open_regular_read(self, path, mode="rb", **kw):
+        """Check, open nonblocking, verify the opened descriptor, then require a regular file.
+
+        This narrow reader is for bounded offline tools that must refuse FIFOs and devices without
+        waiting on them. Generic ``open`` keeps its existing semantics. No bytes are read until
+        both the pathname and the opened descriptor have passed the guard.
+        """
+        if mode not in ("r", "rb"):
+            raise ValueError("the guarded regular-file opener reads only")
+        if not hasattr(os, "O_NONBLOCK"):
+            raise OSError(errno.ENOTSUP, "nonblocking regular-file open is unavailable")
+        self.check(path)
+        flags = os.O_RDONLY | os.O_NONBLOCK
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOCTTY", 0)
+        fd = os.open(path, flags)
+        try:
+            self.verify_fd(fd, path)
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise OSError(errno.EINVAL, f"{path}: guarded input must be a regular file")
+            result = open(fd, mode, closefd=True, **kw)
+            fd = -1
+            return result
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
 
 def start_warning(g: Guard) -> str | None:

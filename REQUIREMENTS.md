@@ -6618,8 +6618,11 @@ configuration with no default; the crate's tests use synthetic values.
   the usual module paths without reading `#[path]`.
 - **OA-SEAL-007** The guard opens a file and then checks the real path of the opened descriptor (`/proc/self/fd`), so a
   link swapped in after the path check is caught and the file closed; the loaders of `oa-bench` and `oa-replay` run the
-  guard before they stat a listed entry, and every guarded opener is this one function. An opened regular file whose link
-  count is above 1, or whose metadata cannot be read, is refused (OA-SEAL-002); a test makes a hard link to a sealed file under a neutral name.
+  guard before they stat a listed entry. `Guard.open` retains its generic read behavior; bounded offline readers that
+  require a regular file use the separate `Guard.open_regular_read`, which opens nonblocking, verifies the same
+  descriptor, requires a regular file, then returns it without reading first. An opened regular file whose link count is
+  above 1, or whose metadata cannot be read, is refused (OA-SEAL-002); tests make a hard link to a sealed file under a
+  neutral name and refuse a FIFO without blocking.
 - **OA-SEAL-008** The list file is printable ASCII and newline only, each line `word`, one space, `value`; both parsers
   refuse anything else, and the same inputs are refused by both.
 - **OA-SEAL-009** Of the four-day recording `scds/rec-20261119`, the sealed list seals the name prefixes `day2*`, `day3*` and
@@ -7678,3 +7681,26 @@ claims; a match is explicitly unverified.
   source-backed recorded H2/M4 input adapter exists, the harness labels recorded replay
   `NOT_BUILT` and qualification `INCOMPLETE`; synthetic output cannot close H5 or authorize
   readiness.
+
+
+## Migration safety evidence package (`tools/migration_evidence.py`; H3)
+
+- **OA-MIG-601** The standard-library-only offline generator accepts a versioned bounded internal
+  manifest for exactly one function, scope, family, half-open window, policy, and pair of source
+  epochs. It opens every input with the production sealed guard, verifies descriptor stability,
+  declared byte lengths and SHA-256 values, rejects duplicate IDs/schema fields, checks absolute
+  timestamps against sealed windows, and reconciles exposure, traffic and per-family shadow
+  denominators. Missing or invalid required artifacts, unknown accounting, empty scope evidence,
+  and capped inputs remain explicit incomplete gaps. Output is deterministic, private (`0700`
+  directory and `0600` file), create-new and no-overwrite; it never connects to an operational
+  system or invents an unavailable ERAM/SFDPS observation.
+- **OA-MIG-602** The generated package carries source hazard IDs and mitigations, shadow rows with
+  every non-equivalent outcome and its review classification/reference, shadow/live exposure,
+  quarantine/rollback events, and reported H5 flip/rollback drill metrics. Review must bind the
+  exact comparison, source identities, policy, function, scope, window, source epochs, reviewer
+  role and evidence hash; unresolved, worse, pending or unverified references block completeness.
+  Fewer than 100 drills reported as recorded-traffic drills with a hash-verified artifact remain
+  explicit; the label and claim that the artifact represents a performed drill are not authenticated
+  by this tool. Unassessed ICD limits, missing/unknown fields, and any unverified source claim also
+  remain explicit. The output is evidence organization for human
+  assessment only: it is never FAA approval, a safety-acceptance decision, or promotion authority.
