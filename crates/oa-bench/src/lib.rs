@@ -33,6 +33,7 @@ pub mod assignment;
 pub mod assoc;
 pub mod chunked;
 pub mod common_time;
+pub mod eram_export;
 pub mod geo;
 pub mod ingest;
 pub mod input;

@@ -21,8 +21,11 @@ flag. The fixed header is:
 addr,t_ns,lat_e7,lon_e7,ground,stale,direct_adsb,source
 ```
 
-Addresses are lowercase hexadecimal; times are Unix nanoseconds; coordinates are signed integer
-degrees times 10^7. The three flags are `0` or `1`; `source` is the numeric `u8` index into readsb
+Addresses are lowercase hexadecimal normalized address words: bit 24 preserves the producer's
+non-ICAO namespace (`NON_ICAO`), so the field can contain seven hex digits. Keep that bit when
+grouping addresses; equal low 24 bits across the two namespaces are distinct identifiers. These
+identifiers do not by themselves establish a unique physical aircraft. Times are Unix nanoseconds;
+coordinates are signed integer degrees times 10^7. The three flags are `0` or `1`; `source` is the numeric `u8` index into readsb
 `addrtype_t` order. When CSV is enabled, the `.source` sidecar records the exact mapping in
 `position_csv_source_index_map`, keyed by `position_csv_source_index_order`.
 The mapping also labels `255` as `none_no_source_column` for legacy traces; those rows have

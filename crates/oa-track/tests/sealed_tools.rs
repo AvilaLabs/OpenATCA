@@ -107,6 +107,105 @@ fn the_examples_that_read_recordings_refuse_a_sealed_path() {
     assert!(!out.exists());
 }
 
+// REQ: OA-REP-004
+#[test]
+fn p002_export_and_export_scoring_refuse_a_sealed_path_and_create_nothing() {
+    let bin = example("p002");
+    let out = out_dir("export");
+    let file = out.join("eram.txt");
+    let fine = "/nonexistent-fake/sfdps";
+    let sealed_out = "/nonexistent-fake/scds/rec-20261119/day3/eram.txt";
+    let runs: [Vec<&std::ffi::OsStr>; 5] = [
+        // The recording to export, the export file, the drop list.
+        vec![
+            "--export-eram".as_ref(),
+            file.as_os_str(),
+            "--sfdps-dir".as_ref(),
+            SFDPS.as_ref(),
+        ],
+        vec![
+            "--export-eram".as_ref(),
+            sealed_out.as_ref(),
+            "--sfdps-dir".as_ref(),
+            fine.as_ref(),
+        ],
+        vec![
+            "--export-eram".as_ref(),
+            file.as_os_str(),
+            "--sfdps-dir".as_ref(),
+            fine.as_ref(),
+            "--drop-addresses".as_ref(),
+            CLIP.as_ref(),
+        ],
+        // Scoring from an export that is a sealed path, and a sealed drop list.
+        vec![
+            "--development".as_ref(),
+            "--adsb".as_ref(),
+            "/nonexistent-fake/x.oaf".as_ref(),
+            "--eram-export".as_ref(),
+            sealed_out.as_ref(),
+            "--out".as_ref(),
+            out.as_os_str(),
+        ],
+        vec![
+            "--development".as_ref(),
+            "--adsb".as_ref(),
+            "/nonexistent-fake/x.oaf".as_ref(),
+            "--eram-export".as_ref(),
+            file.as_os_str(),
+            "--drop-addresses".as_ref(),
+            SFDPS.as_ref(),
+            "--out".as_ref(),
+            out.as_os_str(),
+        ],
+    ];
+    for args in runs {
+        let mut c = Command::new(&bin);
+        c.args(args);
+        refused(c, &out);
+    }
+}
+
+// REQ: OA-REP-005
+#[test]
+fn p002_refuses_two_sources_none_and_an_export_in_a_hold_out_run() {
+    let bin = example("p002");
+    let out = out_dir("export2");
+    for args in [
+        // Both sources, no source, an export for a hold-out run (no --development).
+        vec![
+            "--adsb",
+            "/x.oaf",
+            "--sfdps-dir",
+            "/d",
+            "--eram-export",
+            "/e",
+            "--development",
+        ],
+        vec!["--adsb", "/x.oaf", "--development"],
+        vec!["--adsb", "/x.oaf", "--eram-export", "/e", "--ledger", "/l"],
+        // Export mode takes no scoring options.
+        vec![
+            "--export-eram",
+            "/e",
+            "--sfdps-dir",
+            "/d",
+            "--adsb",
+            "/x.oaf",
+        ],
+        vec!["--export-eram", "/e"],
+    ] {
+        let o = Command::new(&bin)
+            .args(&args)
+            .arg("--out")
+            .arg(&out)
+            .output()
+            .unwrap();
+        assert_eq!(o.status.code(), Some(2), "{args:?}");
+    }
+    assert!(!out.exists());
+}
+
 // REQ: OA-SEAL-005
 #[test]
 fn the_tools_refuse_links_into_sealed_data_and_loaders_refuse_links_inside_a_folder() {

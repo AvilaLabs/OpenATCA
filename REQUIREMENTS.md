@@ -6462,7 +6462,7 @@ configuration with no default; the crate's tests use synthetic values.
 - **OA-SEAL-005** Every tool that reads recordings refuses a sealed input or output path with a nonzero exit, a message that
   names the rule, and nothing written: oa-compass, oa-encounter, oa-shadow, oa-track-run, oa-track-fusion, p002,
   oa-replay-diff, validate_candidate.py, comparison_reference.py, comparison_evaluator.py, run_comparison.py,
-  track_set_score.py, replay_compare.sh and p002_build.sh.
+  track_set_score.py, replay_compare.sh, p002_build.sh, reproduce_zau.sh and zau_manifest.sh.
 - **OA-SEAL-006** Every bin and example target of the workspace, found from the manifests and the source layout, uses the
   sealed guard or is listed with a reason in `crates/oa-sealed/exempt_targets.txt`; a target with neither, a listed target
   that does not exist, and a listed target that uses the guard all fail the test. In the `src/` and `examples/` of every
@@ -7267,3 +7267,36 @@ FAA value.
 - **OA-CORE-004** Offline replay takes its tracker cadence settings from the measured report
   intervals when available, using the same configuration logic as scope replay.
 
+## Reproducible ZAU comparison package (p002 `--export-eram`, `--eram-export`, tools/reproduce_zau.sh)
+
+- **OA-REP-001** `p002 --export-eram FILE --sfdps-dir DIR` writes the ERAM data the scorer reads and nothing else:
+  per flight in order the address, address hint, normalised callsign and sample count, and per sample of a flight
+  with a key its time, position, altitude, velocity and coast flag, as the versioned text format `oa-eram-export 1`;
+  a flight with no key is its sample count only. FILE and its `FILE.sha256` manifest are written together or not at all.
+- **OA-REP-002** The reader refuses a file whose own digest, counts or records are not exactly what the writer writes.
+- **OA-REP-003** A manifest line is `sha256sum` form; a file is checked against exactly one line naming it, and a
+  mismatch, a missing line or a repeated line is refused.
+- **OA-REP-004** An export is never written or read with a sample inside a sealed window, and every path the export
+  and scoring modes take (recording, export, drop list, output) goes through the sealed guard first.
+- **OA-REP-005** `p002 --eram-export FILE` replaces `--sfdps-dir` (exactly one) in a development run only; its output
+  files are byte for byte those of the run on the recording. The run's own timings and memory go to standard error, not
+  into `p002.txt`.
+- **OA-REP-006** `--drop-addresses FILE` (one 24-bit hex address per line) removes every flight whose address or
+  address hint is listed, with its samples, and a run that removes any says how many in its loader notes.
+- **OA-REP-007** The export's summary counts flights by key, samples listed and counted only, coast samples and
+  distinct addresses.
+- **OA-REP-008** `tools/reproduce_zau.sh DAY DATA_DIR OUT_DIR` checks every input against the package manifest,
+  refuses a tree that is not at the manifest's commit, runs the clip tool and the scorer, and prints PASS only when
+  every output hash matches.
+- **OA-REP-009** The development export/package reader refuses manifests above 64 KiB or 512 lines, duplicate scalar
+  or unknown fields, more than 16 archive parts, a part above 8 GiB, more than 64 GiB total archive bytes, and
+  compressed expansion above the smaller of the declared size and 512 MiB. The export is limited to 512 MiB,
+  8,000,000 rows, 100,000 flights and 16 KiB per line; its sidecar is limited to 4 KiB and drop list to 1 MiB.
+  XZ decoding is one stream, with 128 MiB decoder memory, 64 KiB compressed reads and 1 MiB output steps;
+  truncation, trailing bytes or a second stream are refused. Reads and parsing remain bounded even when a manifest advertises a larger value.
+- **OA-REP-010** `--eram-export` is accepted only with explicit `--development` and without `--damage-report`;
+  `--allow-dirty` alone is insufficient. The clip argument manifest accepts only the finite allowlist and cannot
+  inject shell syntax or output-changing options. Package names cannot alias the wrapper's files. The reproduction
+  instructions require a coordinator-verified canonical release inventory and exact part completeness before use;
+  the wrapper's manifest cannot prove that an omitted release part does not exist. Raw exports and outputs remain
+  private; the procedure is development-only and makes no runtime safety or complete-traffic claim.

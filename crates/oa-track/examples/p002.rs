@@ -5,7 +5,17 @@
 //!     --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] \
 //!     [--frozen-commit <sha> --candidate-commit <sha>]
 //! cargo run --release -p oa-track --example p002 -- --combine <dirA> <dirB> <dirC>
+//! cargo run --release -p oa-track --example p002 -- \
+//!     --export-eram <file> --sfdps-dir <dir> [--drop-addresses <file>]
 //! ```
+//!
+//! `--export-eram` reads the SFDPS recording of a day and writes the part of it this scorer reads
+//! (`oa_bench::eram_export`, OA-REP-001 and following) with a `.sha256` manifest beside it; a
+//! development run can then score from that file with `--eram-export <file>` in place of
+//! `--sfdps-dir <dir>`, and its two output files are byte for byte those of the run on the
+//! recording. `--drop-addresses <file>` (one 24-bit address in hex per line) removes every flight
+//! with a listed address or address hint, at export or at scoring; a run that drops any says so in
+//! its loader notes.
 //!
 //! Written from the comparison's scoring protocol P-002 and its amendments P-003 to P-006, fixed by
 //! their hashes before any hold-out data was read; the protocol governs where this code and it
@@ -49,7 +59,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::io::Write as IoWrite;
+use std::io::{Read as IoRead, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
@@ -58,6 +68,7 @@ use oa_adsb::{reports_len, NONE_I32, NONE_U16};
 use oa_bench::adsb_truth;
 use oa_bench::assoc::{associate, astatus, TruthIndex};
 use oa_bench::chunked::truth_index;
+use oa_bench::eram_export;
 use oa_bench::geo::KT_MPS;
 use oa_bench::input::{file_opener, load_adsb_counted, load_counted, msg_limit, FeedInput};
 use oa_bench::legacy::{Legacy, NO_ALT};
@@ -112,6 +123,11 @@ fn main() -> ExitCode {
     }
     let mut args = argv.into_iter();
     let (mut adsb, mut sfdps, mut out, mut label) = (None, None, None, String::new());
+    let (mut eram_export, mut export_out, mut drop_path): (
+        Option<PathBuf>,
+        Option<PathBuf>,
+        Option<PathBuf>,
+    ) = (None, None, None);
     let (mut allow_dirty, mut development) = (false, false);
     let mut frozen: Option<String> = None;
     let mut candidate: Option<String> = None;
@@ -144,6 +160,9 @@ fn main() -> ExitCode {
         match a.as_str() {
             "--adsb" => adsb = v.map(PathBuf::from),
             "--sfdps-dir" => sfdps = v.map(PathBuf::from),
+            "--eram-export" => eram_export = v.map(PathBuf::from),
+            "--export-eram" => export_out = v.map(PathBuf::from),
+            "--drop-addresses" => drop_path = v.map(PathBuf::from),
             "--out" => out = v.map(PathBuf::from),
             "--label" => label = v.unwrap_or_default(),
             "--frozen-commit" => frozen = v,
@@ -156,14 +175,50 @@ fn main() -> ExitCode {
             }
         }
     }
-    let (Some(adsb), Some(sfdps), Some(out)) = (adsb, sfdps, out) else {
+    if let Some(file) = export_out {
+        let stray = adsb.is_some()
+            || out.is_some()
+            || eram_export.is_some()
+            || !label.is_empty()
+            || allow_dirty
+            || development
+            || frozen.is_some()
+            || candidate.is_some()
+            || damage_path.is_some()
+            || ledger.is_some()
+            || !windows.is_empty();
+        let (Some(dir), false) = (sfdps, stray) else {
+            eprintln!(
+                "usage: p002 --export-eram <file> --sfdps-dir <dir> [--drop-addresses <file>]"
+            );
+            return ExitCode::from(2);
+        };
+        return export_main(&dir, &file, drop_path.as_deref());
+    }
+    let (Some(adsb), Some(out)) = (adsb, out) else {
         eprintln!(
-            "usage: p002 --adsb <clip.oaf> --sfdps-dir <dir> --out <dir> [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]... [--damage-report <oa-feed-gaps report>] --ledger <file>\n       p002 --combine <dirA> <dirB> <dirC>"
+            "usage: p002 --adsb <clip.oaf> (--sfdps-dir <dir> | --eram-export <file>) --out <dir> [--drop-addresses <file>] [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]... [--damage-report <oa-feed-gaps report>] --ledger <file>\n       p002 --combine <dirA> <dirB> <dirC>"
         );
         return ExitCode::from(2);
     };
+    let source = match (sfdps, eram_export) {
+        (Some(d), None) => Source::Recording(d),
+        (None, Some(f)) => Source::Export(f),
+        _ => {
+            eprintln!("p002: exactly one of --sfdps-dir and --eram-export is needed");
+            return ExitCode::from(2);
+        }
+    };
     // Every path is checked, as given and resolved, before anything is opened or created.
-    for p in [&adsb, &sfdps, &out] {
+    for p in [
+        Some(adsb.as_path()),
+        Some(out.as_path()),
+        Some(source.path()),
+        drop_path.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         if let Err(e) = oa_sealed::refuse(p) {
             eprintln!("p002: {e}");
             return ExitCode::from(2);
@@ -194,6 +249,22 @@ fn main() -> ExitCode {
         eprintln!("p002: refused: {e}");
         return ExitCode::from(2);
     }
+    // An export has no receive times and is of development days: it cannot be a hold-out run, and
+    // the damage report's check of the recording's span has nothing to read.
+    if matches!(source, Source::Export(_))
+        && (!mode.development || mode.holdout || damage_path.is_some())
+    {
+        eprintln!("p002: refused: --eram-export is for explicit --development runs without --damage-report; a hold-out run reads the recording");
+        return ExitCode::from(2);
+    }
+    let drop_list = match drop_path.as_deref().map(read_drop_list) {
+        None => None,
+        Some(Ok(l)) => Some(l),
+        Some(Err(e)) => {
+            eprintln!("p002: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let commits = Commits { frozen, candidate };
     if let Err(e) = candidate_binding(mode, &commits, Path::new(env!("CARGO_MANIFEST_DIR"))) {
         eprintln!("p002: refused: {e}");
@@ -242,7 +313,7 @@ fn main() -> ExitCode {
     }
     match run(
         &adsb,
-        &sfdps,
+        &source,
         &out,
         &git,
         &Opts {
@@ -252,6 +323,7 @@ fn main() -> ExitCode {
             windows: &windows,
             damage: damage.as_ref(),
             ledger: &ledger,
+            drop_list: drop_list.as_ref(),
         },
     ) {
         Ok(text) => {
@@ -2021,6 +2093,71 @@ fn write_partial(path: &Path, text: &str) -> Result<(), String> {
     f.sync_all().map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Creates an export temporary only after the seal check; `create_new` refuses stale entries and
+/// symlinks atomically. Export temps are never overwritten or followed.
+fn write_new_partial(path: &Path, text: &str) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    oa_sealed::refuse_io(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // seal-allow: guarded create-new write of the export temporary; it reads nothing
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let result = f
+        .write_all(text.as_bytes())
+        .and_then(|()| f.sync_all())
+        .map_err(|e| format!("{}: {e}", path.display()));
+    if result.is_err() {
+        drop(f);
+        // This call created the incomplete file.
+        let _ = fs::remove_file(path);
+    }
+    result
+}
+
+/// Publishes an export and its manifest without replacing either destination. The temporary and
+/// final files share a directory, so hard-link creation is atomic and fails if a destination exists.
+fn publish_export_pair(
+    part_a: &Path,
+    file: &Path,
+    part_b: &Path,
+    side: &Path,
+) -> Result<(), String> {
+    for path in [part_a, part_b] {
+        oa_sealed::refuse_io(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // seal-allow: metadata check of a temp file created by write_new_partial; no contents read
+        let kind = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !kind.file_type().is_file() {
+            return Err(format!(
+                "{}: export temp is not a regular file",
+                path.display()
+            ));
+        }
+    }
+    for path in [file, side] {
+        oa_sealed::refuse_io(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    let link = |part: &Path, dest: &Path| {
+        // seal-allow: publish the guarded temporary file without replacing the guarded destination
+        fs::hard_link(part, dest).map_err(|e| format!("{}: {e}", dest.display()))
+    };
+    link(part_a, file)?;
+    if let Err(e) = link(part_b, side) {
+        let _ = fs::remove_file(file);
+        return Err(e);
+    }
+    for part in [part_a, part_b] {
+        if let Err(e) = fs::remove_file(part) {
+            let _ = fs::remove_file(file);
+            let _ = fs::remove_file(side);
+            return Err(format!("{}: {e}", part.display()));
+        }
+    }
+    Ok(())
+}
+
 /// P-008 and P-006 section 7: both files are written to `.partial` names and flushed, then the
 /// ledger line (a hold-out run's) is appended and flushed, then both are renamed. A run that
 /// stops leaves no result under a final name, and a ledger line is there only when both partials
@@ -3065,11 +3202,247 @@ struct Opts<'a> {
     /// The `oa-feed-gaps` report (its windows are the only ones of a hold-out run).
     damage: Option<&'a DamageReport>,
     ledger: &'a Path,
+    /// The addresses whose flights are left out of the ERAM load (`--drop-addresses`).
+    drop_list: Option<&'a BTreeSet<u32>>,
+}
+
+/// Where the ERAM rows come from: the SFDPS recording, or an export of it.
+enum Source {
+    Recording(PathBuf),
+    Export(PathBuf),
+}
+
+impl Source {
+    fn path(&self) -> &Path {
+        match self {
+            Source::Recording(p) | Source::Export(p) => p,
+        }
+    }
+}
+
+/// What the ERAM load gives the scorer, from either source. `inputs`, `manifest` and `dir_text` are
+/// what the output prints of the recording; an export carries them from the recording it was made
+/// from.
+// A7.2: cold struct, size guard waived
+struct EramLoad {
+    legacy: Legacy,
+    dir_text: String,
+    inputs: Vec<String>,
+    manifest: String,
+    replay_hash: String,
+    notes: Vec<String>,
+    counts: Vec<String>,
+}
+
+/// A drop list read through the guard.
+fn read_drop_list(path: &Path) -> Result<BTreeSet<u32>, String> {
+    const MAX_DROP_LIST_BYTES: u64 = 1024 * 1024;
+    let (mut file, size) =
+        oa_sealed::open_regular(path).map_err(|e| format!("drop list {}: {e}", path.display()))?;
+    if size > MAX_DROP_LIST_BYTES {
+        return Err("drop list exceeds 1 MiB".to_string());
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    std::io::Read::take(&mut file, MAX_DROP_LIST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("drop list {}: {e}", path.display()))?;
+    let text =
+        String::from_utf8(bytes).map_err(|e| format!("drop list {}: {e}", path.display()))?;
+    eram_export::parse_drop_list(&text)
+}
+
+/// The recording's description as the scorer prints it, from a loaded recording.
+fn describe_recording(
+    sfdps: &Path,
+    loaded: &oa_bench::input::Loaded,
+    sealed: u64,
+) -> eram_export::Meta {
+    eram_export::Meta {
+        source_dir: sfdps.display().to_string(),
+        source_inputs: loaded
+            .inputs
+            .iter()
+            .map(|h| {
+                format!(
+                    "{} files={} bytes={} sha256={}",
+                    h.label, h.files, h.bytes, h.sha256
+                )
+            })
+            .collect(),
+        source_sha256: loaded
+            .inputs
+            .iter()
+            .map(|h| h.sha256.clone())
+            .collect::<Vec<_>>()
+            .join(","),
+        replay_hash: loaded.replay_hash.clone(),
+        sealed_dropped: sealed,
+        notes: loaded.notes.clone(),
+        counts: counts_lines(&loaded.legacy.counts),
+    }
+}
+
+/// Reads an export and its required manifest through the guard, and verifies both digests/counts.
+fn read_export(path: &Path) -> Result<(eram_export::Export, String), String> {
+    const MAX_EXPORT_BYTES: u64 = 512 * 1024 * 1024;
+    const MAX_SIDECAR_BYTES: u64 = 4096;
+    let (mut file, size) =
+        oa_sealed::open_regular(path).map_err(|e| format!("export {}: {e}", path.display()))?;
+    if size > MAX_EXPORT_BYTES {
+        return Err("export exceeds 512 MiB".to_string());
+    }
+    let mut bytes = Vec::with_capacity(size as usize);
+    std::io::Read::take(&mut file, MAX_EXPORT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("export {}: {e}", path.display()))?;
+    let mut side = path.as_os_str().to_os_string();
+    side.push(".sha256");
+    let side = PathBuf::from(side);
+    let (mut side_file, side_size) = oa_sealed::open_regular(&side).map_err(|e| {
+        format!(
+            "manifest {}: required sidecar could not be read: {e}",
+            side.display()
+        )
+    })?;
+    if side_size > MAX_SIDECAR_BYTES {
+        return Err("export sidecar exceeds 4 KiB".to_string());
+    }
+    let mut side_bytes = Vec::with_capacity(side_size as usize);
+    std::io::Read::take(&mut side_file, MAX_SIDECAR_BYTES + 1)
+        .read_to_end(&mut side_bytes)
+        .map_err(|e| format!("manifest {}: {e}", side.display()))?;
+    let manifest =
+        String::from_utf8(side_bytes).map_err(|e| format!("manifest {}: {e}", side.display()))?;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("{}: not a file name", path.display()))?;
+    eram_export::check_manifest(&manifest, name, &bytes)?;
+    let sha = eram_export::file_sha256(&bytes);
+    let e = eram_export::parse(&bytes).map_err(|e| format!("export {}: {e}", path.display()))?;
+    Ok((e, sha))
+}
+
+/// `--export-eram <file> --sfdps-dir <dir> [--drop-addresses <file>]`: the export of a recording.
+/// Every path goes through the seal guard before anything is opened or created; the recording is
+/// read by the loader the scorer uses; the file and its manifest are written as partials and
+/// renamed together, only when neither exists.
+fn export_main(sfdps: &Path, file: &Path, drop_path: Option<&Path>) -> ExitCode {
+    for p in [Some(sfdps), Some(file), drop_path].into_iter().flatten() {
+        if let Err(e) = oa_sealed::refuse(p) {
+            eprintln!("p002: {e}");
+            return ExitCode::from(2);
+        }
+    }
+    let mut drops = oa_sealed::DropReport::new();
+    match export_run(sfdps, file, drop_path, &mut drops) {
+        Ok(text) => {
+            print!("{text}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("p002: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn export_run(
+    sfdps: &Path,
+    file: &Path,
+    drop_path: Option<&Path>,
+    drops: &mut oa_sealed::DropReport,
+) -> Result<String, String> {
+    let name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("{}: not a file name", file.display()))?
+        .to_string();
+    let (mut side, mut part_a, mut part_b) = (
+        file.as_os_str().to_os_string(),
+        file.as_os_str().to_os_string(),
+        file.as_os_str().to_os_string(),
+    );
+    side.push(".sha256");
+    part_a.push(PARTIAL);
+    part_b.push(".sha256.partial");
+    let (side, part_a, part_b) = (
+        PathBuf::from(side),
+        PathBuf::from(part_a),
+        PathBuf::from(part_b),
+    );
+    for p in [file, side.as_path(), part_a.as_path(), part_b.as_path()] {
+        oa_sealed::refuse(p).map_err(|e| format!("refused: {e}"))?;
+    }
+    for p in [file, side.as_path(), part_a.as_path(), part_b.as_path()] {
+        if p.exists() || p.is_symlink() {
+            return Err(format!(
+                "refused: {} exists; an export is written only when final and temporary paths are absent",
+                p.display()
+            ));
+        }
+    }
+    let drop_list = drop_path.map(read_drop_list).transpose()?;
+    let open: oa_bench::input::Opener = std::rc::Rc::new(|p: &Path| {
+        oa_sealed::refuse_io(p)?;
+        oa_bench::input::file_opener()(p)
+    });
+    let mut sealed = 0u64;
+    let loaded = load_counted(
+        &[FeedInput {
+            feed: FeedKind::Sfdps,
+            dir: sfdps.to_path_buf(),
+        }],
+        &open,
+        msg_limit(),
+        &mut sealed,
+    );
+    drops.add(sealed);
+    let loaded = loaded.map_err(|e| e.to_string())?;
+    let meta = describe_recording(sfdps, &loaded, sealed);
+    let mut exp = eram_export::from_legacy(&loaded.legacy, meta)?;
+    drop(loaded);
+    let mut report = String::new();
+    if let Some(list) = &drop_list {
+        let st = eram_export::drop_addresses(&mut exp, list);
+        if st.flights > 0 {
+            exp.meta.notes.push(eram_export::drop_note(&st));
+        }
+        let _ = writeln!(report, "dropped by the address list: {st:?}");
+    }
+    let text = eram_export::write(&exp)?;
+    let manifest = eram_export::manifest_line(&name, text.as_bytes())?;
+    write_new_partial(&part_a, &text)?;
+    if let Err(e) = write_new_partial(&part_b, &manifest) {
+        // A failed write takes care of its own partial.
+        let _ = fs::remove_file(&part_a);
+        return Err(e);
+    }
+    if let Err(e) = publish_export_pair(&part_a, file, &part_b, &side) {
+        let _ = fs::remove_file(&part_a);
+        let _ = fs::remove_file(&part_b);
+        return Err(e);
+    }
+    let s = eram_export::summary(&exp);
+    let _ = writeln!(
+        report,
+        "export {} (format {})",
+        file.display(),
+        eram_export::FORMAT_VERSION
+    );
+    let _ = writeln!(
+        report,
+        "  bytes {}, sha256 {}",
+        text.len(),
+        eram_export::file_sha256(text.as_bytes())
+    );
+    let _ = writeln!(report, "  {s:?}");
+    Ok(report)
 }
 
 fn run(
     clip_path: &Path,
-    sfdps: &Path,
+    source: &Source,
     out_dir: &Path,
     git: &GitState,
     opts: &Opts<'_>,
@@ -3081,6 +3454,7 @@ fn run(
         windows: hand_windows,
         damage,
         ledger,
+        drop_list,
     } = *opts;
     let partials_left = outputs_free(out_dir)?;
     let windows_all: Vec<Window> = hand_windows
@@ -3120,6 +3494,9 @@ fn run(
             oa_sealed::refuse_io(p)?;
             oa_bench::input::file_opener()(p)
         });
+        let Source::Recording(sfdps) = source else {
+            return Err("a damage report needs the SFDPS recording, not an export".to_string());
+        };
         let (s_first, s_last) = sfdps_span(sfdps, &guard)?;
         damage_matches_clip(d, first, last, s_first, s_last)?;
     }
@@ -3170,33 +3547,60 @@ fn run(
         oa_bench::input::file_opener()(p)
     });
     let mut sfdps_sealed = 0u64;
-    let loaded = load_counted(
-        &[FeedInput {
-            feed: FeedKind::Sfdps,
-            dir: sfdps.to_path_buf(),
-        }],
-        &open,
-        msg_limit(),
-        &mut sfdps_sealed,
-    );
-    drops.add(sfdps_sealed);
-    let loaded = loaded.map_err(|e| e.to_string())?;
-    let sfdps_manifest = loaded
-        .inputs
-        .iter()
-        .map(|h| h.sha256.clone())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sfdps_inputs: Vec<String> = loaded
-        .inputs
-        .iter()
-        .map(|h| {
-            format!(
-                "{} files={} bytes={} sha256={}",
-                h.label, h.files, h.bytes, h.sha256
-            )
-        })
-        .collect();
+    let mut loaded = match source {
+        Source::Recording(sfdps) => {
+            let l = load_counted(
+                &[FeedInput {
+                    feed: FeedKind::Sfdps,
+                    dir: sfdps.clone(),
+                }],
+                &open,
+                msg_limit(),
+                &mut sfdps_sealed,
+            );
+            drops.add(sfdps_sealed);
+            let l = l.map_err(|e| e.to_string())?;
+            let meta = describe_recording(sfdps, &l, sfdps_sealed);
+            EramLoad {
+                dir_text: meta.source_dir,
+                inputs: meta.source_inputs,
+                manifest: meta.source_sha256,
+                replay_hash: meta.replay_hash,
+                notes: meta.notes,
+                counts: meta.counts,
+                legacy: l.legacy,
+            }
+        }
+        Source::Export(file) => {
+            let (e, sha) = read_export(file)?;
+            eprintln!(
+                "ERAM rows from the export {} (sha256 {sha})",
+                file.display()
+            );
+            sfdps_sealed = e.meta.sealed_dropped;
+            EramLoad {
+                legacy: eram_export::to_legacy(&e)?,
+                dir_text: e.meta.source_dir,
+                inputs: e.meta.source_inputs,
+                manifest: e.meta.source_sha256,
+                replay_hash: e.meta.replay_hash,
+                notes: e.meta.notes,
+                counts: e.meta.counts,
+            }
+        }
+    };
+    if let Some(list) = drop_list {
+        // The flights leave the recording's tables as they leave an export.
+        let mut e = eram_export::from_legacy(&loaded.legacy, eram_export::Meta::default())?;
+        let st = eram_export::drop_addresses(&mut e, list);
+        if st.flights > 0 {
+            loaded.legacy = eram_export::to_legacy(&e)?;
+            loaded.notes.push(eram_export::drop_note(&st));
+        }
+    }
+    let sfdps_manifest = loaded.manifest.clone();
+    let sfdps_inputs: Vec<String> = loaded.inputs.clone();
+    let sfdps_dir_text = loaded.dir_text.clone();
     let loader = Damage {
         clip_bad_frames,
         clip_dropped_records,
@@ -3204,7 +3608,7 @@ fn run(
         sfdps_sealed,
         replay_hash: loaded.replay_hash.clone(),
         notes: loaded.notes.clone(),
-        counts: counts_lines(&loaded.legacy.counts),
+        counts: loaded.counts.clone(),
     };
     let ep = pair_legacy(&loaded.legacy, &truth, &tix, &rcfg);
     drop(loaded);
@@ -3541,7 +3945,7 @@ fn run(
         clip_hash.files,
         clip_hash.bytes
     );
-    let _ = writeln!(o, "  SFDPS dir: {}", sfdps.display());
+    let _ = writeln!(o, "  SFDPS dir: {sfdps_dir_text}");
     for l in &sfdps_inputs {
         let _ = writeln!(o, "    {l}");
     }
@@ -4073,9 +4477,10 @@ fn run(
         Kind::Track,
     );
 
+    // The run's own timings and memory differ on every run, so they are not in the result file
+    // (OA-REP-005: two runs on the same inputs write the same bytes).
     let secs = t_start.elapsed().as_secs_f64();
-    let _ = writeln!(
-        o,
+    eprintln!(
         "RUN: tracker {track_secs:.1} s; total {secs:.1} s; peak resident memory {:.0} MB",
         peak_rss_mb()
     );
@@ -5574,5 +5979,108 @@ mod tests {
         let e = flag_gate(hold, 1, 3, 1).unwrap_err();
         assert!(e.contains("hold-out run refused") && e.contains("1 OpenATCA samples"));
         assert!(flag_gate(dev, 5, 0, 0).is_ok());
+    }
+
+    #[test]
+    fn export_requires_sidecar_and_checks_its_digest() {
+        let dir =
+            std::env::temp_dir().join(format!("p002-export-integrity-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("eram.txt");
+        let export = eram_export::Export {
+            meta: eram_export::Meta {
+                source_dir: "synthetic".into(),
+                source_sha256: "0".repeat(64),
+                replay_hash: "1".repeat(64),
+                ..eram_export::Meta::default()
+            },
+            flights: Vec::new(),
+        };
+        let bytes = eram_export::write(&export).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        assert!(read_export(&path).unwrap_err().contains("required sidecar"));
+
+        let side = dir.join("eram.txt.sha256");
+        fs::write(
+            &side,
+            eram_export::manifest_line("eram.txt", bytes.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        assert!(read_export(&path).is_ok());
+        fs::write(&side, format!("{}  eram.txt\n", "0".repeat(64))).unwrap();
+        assert!(read_export(&path).unwrap_err().contains("does not match"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_writer_refuses_symlinks_and_sealed_targets() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("p002-partial-guard-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("sentinel");
+        fs::write(&target, "keep").unwrap();
+        let ordinary_link = dir.join("ordinary.partial");
+        symlink(&target, &ordinary_link).unwrap();
+        assert!(write_new_partial(&ordinary_link, "changed").is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+
+        let sealed_target = dir.join("scds/rec-20261119/day2/sealed.txt");
+        fs::create_dir_all(sealed_target.parent().unwrap()).unwrap();
+        fs::write(&sealed_target, "sealed fixture").unwrap();
+        let sealed_link = dir.join("sealed.partial");
+        symlink(&sealed_target, &sealed_link).unwrap();
+        let err = write_new_partial(&sealed_link, "changed").unwrap_err();
+        assert!(err.contains("OA-SEAL-001"), "{err}");
+        assert_eq!(
+            fs::read_to_string(&sealed_target).unwrap(),
+            "sealed fixture"
+        );
+
+        let export = dir.join("export.txt");
+        let partial = dir.join("export.txt.partial");
+        symlink(&target, &partial).unwrap();
+        let err = export_run(
+            Path::new("/nonexistent-synthetic-sfdps"),
+            &export,
+            None,
+            &mut oa_sealed::DropReport::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("exists") || err.contains("OA-SEAL-001"),
+            "{err}"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_pair_publication_never_replaces_and_rolls_back_a_half_pair() {
+        let dir = std::env::temp_dir().join(format!("p002-export-publish-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let part_a = dir.join("eram.partial");
+        let part_b = dir.join("eram.sha256.partial");
+        let file = dir.join("eram.txt");
+        let side = dir.join("eram.txt.sha256");
+        fs::write(&part_a, "export").unwrap();
+        fs::write(&part_b, "manifest").unwrap();
+        fs::write(&side, "preexisting").unwrap();
+        assert!(publish_export_pair(&part_a, &file, &part_b, &side).is_err());
+        assert!(
+            !file.exists(),
+            "first half is rolled back if second destination exists"
+        );
+        assert_eq!(fs::read_to_string(&side).unwrap(), "preexisting");
+        fs::remove_file(&side).unwrap();
+        publish_export_pair(&part_a, &file, &part_b, &side).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "export");
+        assert_eq!(fs::read_to_string(&side).unwrap(), "manifest");
+        assert!(!part_a.exists() && !part_b.exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
