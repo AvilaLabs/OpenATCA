@@ -50,6 +50,7 @@ members = [
     "crates/oa-safety",
     "crates/oa-ca",
     "crates/oa-msaw",
+    "crates/oa-techops",
     "crates/oa-runway",
     "crates/oa-sealed",
     "tools/oa-build-info",
