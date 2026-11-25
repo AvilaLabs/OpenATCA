@@ -1035,13 +1035,26 @@ class RunnerCliBindingTests(unittest.TestCase):
         repo = root / "repo"
         repo.mkdir()
         (repo / "Cargo.toml").write_text("[workspace]\nmembers = []\n")
+        lock_original = (
+            'version = 4\n\n'
+            '[[package]]\nname = "oa-iwxxm"\nversion = "0.0.1"\n\n'
+            '[[package]]\nname = "oa-flight"\nversion = "0.0.1"\n\n'
+            '[[package]]\nname = "oa-ieee"\nversion = "0.0.1"\n'
+        )
+        lock_canonical = (
+            'version = 4\n\n'
+            '[[package]]\nname = "oa-flight"\nversion = "0.0.1"\n\n'
+            '[[package]]\nname = "oa-ieee"\nversion = "0.0.1"\n\n'
+            '[[package]]\nname = "oa-iwxxm"\nversion = "0.0.1"\n'
+        )
+        (repo / "Cargo.lock").write_text(lock_original)
         source = repo / "src" / "harness.rs"
         source.parent.mkdir()
         source.write_text("// fake Kani harness source\n")
         subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
         subprocess.run(["git", "config", "user.email", "kani@example.invalid"], cwd=repo, check=True)
         subprocess.run(["git", "config", "user.name", "Kani Fixture"], cwd=repo, check=True)
-        subprocess.run(["git", "add", "Cargo.toml", "src/harness.rs"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "Cargo.toml", "Cargo.lock", "src/harness.rs"], cwd=repo, check=True)
         subprocess.run(["git", "commit", "-qm", "fixture"], cwd=repo, check=True)
 
         def executable(name, body):
@@ -1069,11 +1082,16 @@ class RunnerCliBindingTests(unittest.TestCase):
             "args=sys.argv[1:]\n"
             f"if '--version' in args: print({cargo_output!r}); raise SystemExit(0)\n"
             "destination=pathlib.Path(args[args.index('--export-json')+1])\n"
-            "destination.write_text(pathlib.Path(os.environ['FAKE_KANI_RESULT']).read_text())\n",
+            "destination.write_text(pathlib.Path(os.environ['FAKE_KANI_RESULT']).read_text())\n"
+            "if os.environ.get('FAKE_REORDER_LOCK') == '1':\n"
+            " pathlib.Path('Cargo.lock').write_text(\n"
+            f"  {lock_canonical!r})\n",
         )
         return bin_dir, repo, report_path
 
-    def _invoke_main(self, root, kani_output, cargo_output="cargo 1.89.0 (fake pinned cargo)"):
+    def _invoke_main(
+        self, root, kani_output, cargo_output="cargo 1.89.0 (fake pinned cargo)", reorder_lock=False,
+    ):
         bin_dir, repo, report_path = self._fake_toolchain(root, kani_output, cargo_output)
         out = root / "run-evidence"
         cache = root / "cache"
@@ -1081,6 +1099,7 @@ class RunnerCliBindingTests(unittest.TestCase):
         env = {
             "PATH": str(bin_dir) + os.pathsep + old_path,
             "FAKE_KANI_RESULT": str(report_path),
+            "FAKE_REORDER_LOCK": "1" if reorder_lock else "0",
         }
         stdout, stderr = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, env), redirect_stdout(stdout), redirect_stderr(stderr):
@@ -1118,6 +1137,28 @@ class RunnerCliBindingTests(unittest.TestCase):
             self.assertEqual(check["cargo_version"], run_record["cargo_version"])
             self.assertEqual(check["command"][:2], ["cargo", "+1.89.0"])
             self.assertIn("src/harness.rs", check["harness_source_copies"])
+
+    # REQ: OA-GEN-006
+    def test_kani_lockfile_reordering_fails_the_unchanged_source_gate(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            rc, out, stderr = self._invoke_main(
+                root,
+                "Kani Rust Verifier 0.68.0 (standalone)\nCommit: pinned-test-build\n",
+                reorder_lock=True,
+            )
+            self.assertEqual(rc, 1, stderr)
+            run_record = json.loads((out / "run.json").read_text())
+            self.assertEqual(run_record["status"], "FAIL")
+            check = run_record["checks"][0]
+            self.assertFalse(check["source_unchanged"])
+            self.assertNotEqual(check["source_before"]["Cargo.lock"], check["source_after"]["Cargo.lock"])
+            changed = {
+                path for path, digest in check["source_before"].items()
+                if check["source_after"].get(path) != digest
+            }
+            self.assertEqual(changed, {"Cargo.lock"})
+            self.assertTrue(any("source_unchanged is not true" in error for error in check["evaluation_errors"]))
 
     # REQ: OA-GEN-006
     def test_wrong_cargo_toolchain_is_rejected_before_proof_command(self):
