@@ -18,7 +18,8 @@ day="$1"; commit="$2"; pkg="$3"; export_name="$4"; clip="$5"; clip_args="$6"; ru
 [ "$#" -le 16 ] || { echo "zau_manifest: at most 16 archive parts are accepted" >&2; exit 2; }
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 package_io() { python3 -IB "$here/repro_package_io.py" "$@"; }
-package_io validate-writer-fields "$label" "$clip_args" "$export_name" "$clip" "$@" || exit 2
+args_io() { python3 -IB "$here/repro_zau_args.py" "$@"; }
+package_io validate-writer-fields "$day" "$label" "$clip_args" "$export_name" "$clip" "$@" || exit 2
 python3 -I "$here/sealed_guard.py" "$pkg" "$clip" "$run_out" "$@" || exit 2
 case "${day//-/}" in 20261120 | 20261121 | 20261122) echo "zau_manifest: $day is a sealed hold-out day" >&2; exit 2 ;; esac
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "zau_manifest: COMMIT must be 40 lower-case hex digits" >&2; exit 2; }
@@ -39,12 +40,16 @@ done
 set -o noclobber
 
 # Read and hash every package input/output through a verified descriptor before writing a manifest.
-parts_meta=()
+part_names=() part_sizes=() part_shas=() part_tags=()
 for p in "$@"; do
     result="$(measure "$p")" || exit 2
     read -r n h <<<"$result"
     name="$(basename "$p")"
-    parts_meta+=("$name $n $h")
+    tag="$(args_io release-tag "$name")" || exit 2
+    part_names+=("$name")
+    part_sizes+=("$n")
+    part_shas+=("$h")
+    part_tags+=("$tag")
 done
 clip_info="$(measure "$clip")" || exit 2
 read -r clip_size clip_sha <<<"$clip_info"
@@ -62,11 +67,9 @@ samples_sha="$(sum "$run_out/samples.csv")" || exit 2
     echo "day $day"
     echo "commit $commit"
     echo "label $label"
-    tag="$(basename "$1")"; tag="${tag%.tar.*}"
-    echo "adsb-release https://github.com/adsblol/globe_history_2026/releases/tag/$tag"
-    for entry in "${parts_meta[@]}"; do
-        read -r n bytes digest <<<"$entry"
-        echo "adsb-file $n $bytes $digest https://github.com/adsblol/globe_history_2026/releases/download/$tag/$n"
+    echo "adsb-release https://github.com/adsblol/globe_history_2026/releases/tag/${part_tags[0]}"
+    for i in "${!part_names[@]}"; do
+        echo "adsb-file ${part_names[$i]} ${part_sizes[$i]} ${part_shas[$i]} https://github.com/adsblol/globe_history_2026/releases/download/${part_tags[$i]}/${part_names[$i]}"
     done
     echo "clip-args $clip_args"
     echo "clip $(basename "$clip") $clip_size $clip_sha"

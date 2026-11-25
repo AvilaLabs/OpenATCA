@@ -16,6 +16,7 @@ from pathlib import Path
 # The wrapper invokes Python in isolated mode, which omits the script directory.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import sealed_guard
+from repro_zau_args import download_url, release_tag_for_day, release_url
 
 # Offline reproduction caps, chosen for whole-day packages on a workstation without allowing a
 # manifest or decompressor to turn a review command into an unbounded read/allocation.
@@ -47,6 +48,7 @@ def _validate_manifest_bytes(raw: bytes):
     parts = 0
     total = 0
     part_names = set()
+    part_records = []
     outputs = set()
     named_files = {}
     reserved = {"ledger.txt", "p002.stdout", "p002.err", "clip.out", "clip.err", "build.log", "out", "MANIFEST"}
@@ -87,6 +89,7 @@ def _validate_manifest_bytes(raw: bytes):
             if not re.fullmatch(r"[A-Za-z0-9._+-]+", fields[0]) or fields[0] in {".", ".."}:
                 raise ValueError("archive part name must be a safe basename")
             part_names.add(fields[0])
+            part_records.append((fields[0], fields[3]))
             total += size
             if total > MAX_TOTAL_ARCHIVE_BYTES:
                 raise ValueError("archive parts exceed 64 GiB total")
@@ -147,6 +150,25 @@ def _validate_manifest_bytes(raw: bytes):
                 values[key] = value
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", values.get("day", "")):
         raise ValueError("MANIFEST day must be YYYY-MM-DD")
+    try:
+        from datetime import date
+
+        parsed_day = date.fromisoformat(values["day"])
+    except ValueError as e:
+        raise ValueError("MANIFEST day must be a real calendar date") from e
+    if parsed_day.isoformat() != values["day"]:
+        raise ValueError("MANIFEST day must use canonical YYYY-MM-DD format")
+    if not part_records:
+        raise ValueError("MANIFEST has no ADS-B archive parts")
+    first_tag = release_tag_for_day(part_records[0][0], values["day"])
+    if values.get("adsb-release") != release_url(first_tag):
+        raise ValueError("adsb-release must name the first archive part's exact release URL")
+    if "adsb-url" in values and values["adsb-url"] != release_url(first_tag):
+        raise ValueError("adsb-url must match the first archive part's exact release URL")
+    for name, url in part_records:
+        tag = release_tag_for_day(name, values["day"])
+        if url != download_url(tag, name):
+            raise ValueError(f"archive part URL does not match its exact release tag and name: {name}")
     if not re.fullmatch(r"[0-9a-f]{40}", values.get("commit", "")):
         raise ValueError("MANIFEST commit must be 40 lower-case hexadecimal characters")
     if not values.get("label", "").strip():
@@ -160,7 +182,15 @@ def _validated_manifest(path: str) -> bytes:
     return raw
 
 
-def _validate_writer_fields(label: str, clip_args: str, names: list[str]):
+def _validate_writer_fields(day: str, label: str, clip_args: str, names: list[str]):
+    try:
+        from datetime import date
+
+        parsed_day = date.fromisoformat(day)
+    except ValueError as e:
+        raise ValueError("writer day must be a real YYYY-MM-DD calendar date") from e
+    if parsed_day.isoformat() != day:
+        raise ValueError("writer day must use canonical YYYY-MM-DD format")
     for field, value in (("label", label), ("clip-args", clip_args)):
         try:
             value.encode("ascii")
@@ -189,6 +219,8 @@ def _validate_writer_fields(label: str, clip_args: str, names: list[str]):
         raise ValueError("package basename aliases a wrapper output")
     if len(set(role_names)) != len(role_names):
         raise ValueError("package basenames collide across export, sidecar, compressed export, clip or parts")
+    for name in parts:
+        release_tag_for_day(name, day)
 
 
 def _read(path: str):
@@ -287,8 +319,12 @@ def _unpack(source_path: str, out_path: str, expected_size: int, expected_sha: s
 
 def main(argv: list[str]) -> int:
     try:
-        if len(argv) >= 5 and argv[0] == "validate-writer-fields":
-            _validate_writer_fields(argv[1], argv[2], argv[3:])
+        if len(argv) >= 7 and argv[0] == "validate-writer-fields":
+            day = argv[1]
+            label = argv[2]
+            clip_args = argv[3]
+            names = argv[4:]
+            _validate_writer_fields(day, label, clip_args, names)
             return 0
         if len(argv) == 2 and argv[0] == "validate-manifest":
             _validated_manifest(argv[1])
@@ -347,7 +383,7 @@ def main(argv: list[str]) -> int:
             _unpack(source, output, int(size), digest)
             return 0
         print(
-            "usage: repro_package_io.py validate-writer-fields LABEL CLIP_ARGS EXPORT CLIP PART...; "
+            "usage: repro_package_io.py validate-writer-fields DAY LABEL CLIP_ARGS EXPORT CLIP PART...; "
             "validate-manifest|read-manifest|read|present|measure|masked-hash PATH; "
             "check PATH SIZE SHA256; unpack-xz INPUT OUTPUT SIZE SHA256",
             file=sys.stderr,

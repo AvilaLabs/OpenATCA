@@ -7327,7 +7327,9 @@ FAA value.
   distinct addresses.
 - **OA-REP-008** `tools/reproduce_zau.sh DAY DATA_DIR OUT_DIR` checks every input against the package manifest,
   refuses a tree that is not at the manifest's commit, runs the clip tool and the scorer, and prints PASS only when
-  every output hash matches.
+  every output hash matches. The format-1 manifest contains one release-summary URL for its first ADS-B part and an
+  exact release-download URL bound to each part's validated `v2026.MM.DD-planes-readsb-prod-N.tar.aa` name; all
+  part dates must be real calendar dates equal to the package UTC day, while distinct same-day `prodN` tags are allowed.
 - **OA-REP-009** The development export/package reader refuses manifests above 64 KiB or 512 lines, duplicate scalar
   or unknown fields, more than 16 archive parts, a part above 8 GiB, more than 64 GiB total archive bytes, and
   compressed expansion above the smaller of the declared size and 512 MiB. The export is limited to 512 MiB,

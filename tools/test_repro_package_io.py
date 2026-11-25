@@ -127,7 +127,9 @@ class PackageIoTests(unittest.TestCase):
             "reproduce-zau-manifest 1\n"
             "day 2026-11-15\ncommit " + "0" * 40 + "\nlabel synthetic\n"
             "adsb-release https://github.com/adsblol/globe_history_2026/releases/tag/v2026.11.15-planes-readsb-prod-0\n"
-            f"adsb-file part.tar.aa 1 {sha} https://example.invalid/part.tar.aa\n"
+            f"adsb-file v2026.11.15-planes-readsb-prod-0.tar.aa 1 {sha} "
+            "https://github.com/adsblol/globe_history_2026/releases/download/"
+            "v2026.11.15-planes-readsb-prod-0/v2026.11.15-planes-readsb-prod-0.tar.aa\n"
             "clip-args --frame-ms 1000\nclip clip.oaf 1 " + sha + "\n"
             "eram-export eram.txt 1 " + sha + "\n"
             "output p002.txt " + sha + " " + sha + "\noutput samples.csv " + sha + "\n"
@@ -139,8 +141,12 @@ class PackageIoTests(unittest.TestCase):
             manifest + "label duplicate\n",
             manifest + "unknown value\n",
             manifest.replace("--frame-ms 1000", "--allow-truncated"),
-            manifest.replace("part.tar.aa", ".."),
-            manifest.replace("part.tar.aa", "eram.txt.sha256"),
+            manifest.replace("v2026.11.15-planes-readsb-prod-0.tar.aa", ".."),
+            manifest.replace("v2026.11.15-planes-readsb-prod-0.tar.aa", "eram.txt.sha256"),
+            manifest.replace(
+                "https://github.com/adsblol/globe_history_2026/releases/download/",
+                "https://example.invalid/releases/download/",
+            ),
             manifest.replace("label synthetic", "label bad\x01label"),
             manifest + ("#" + "x" * (64 * 1024) + "\n"),
         ):

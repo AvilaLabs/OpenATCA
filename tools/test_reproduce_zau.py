@@ -178,6 +178,90 @@ class ReproduceTests(unittest.TestCase):
             self.assertEqual(r.returncode, 2, (day, commit))
         self.assertFalse((self.p.pkg / "MANIFEST").exists())
 
+    # REQ: OA-REP-008
+    def test_writer_links_each_part_to_the_release_derived_from_its_own_stem(self):
+        mixed = self.base / "v2026.11.15-planes-readsb-prod-1.tar.aa"
+        mixed.write_bytes(b"cc" * 4)
+        (self.p.pkg / mixed.name).write_bytes(mixed.read_bytes())
+        self.p.parts.append(mixed)
+        manifest = self.p.manifest()
+        self.assertIn(
+            "adsb-file v2026.11.15-planes-readsb-prod-0.tar.aa 10 "
+            + sha(b"aa" * 5)
+            + " https://github.com/adsblol/globe_history_2026/releases/download/"
+            "v2026.11.15-planes-readsb-prod-0/v2026.11.15-planes-readsb-prod-0.tar.aa",
+            manifest,
+        )
+        self.assertIn("adsb-release https://github.com/adsblol/globe_history_2026/releases/tag/v2026.11.15-planes-readsb-prod-0", manifest)
+        self.assertEqual(sum(line.startswith("adsb-release ") for line in manifest.splitlines()), 1)
+        self.assertIn(
+            "adsb-file v2026.11.15-planes-readsb-prod-1.tar.aa 8 "
+            + sha(b"cc" * 4)
+            + " https://github.com/adsblol/globe_history_2026/releases/download/"
+            "v2026.11.15-planes-readsb-prod-1/v2026.11.15-planes-readsb-prod-1.tar.aa",
+            manifest,
+        )
+        self.assertNotIn("adsb-release https://github.com/adsblol/globe_history_2026/releases/tag/v2026.11.15-planes-readsb-prod-1", manifest)
+
+    # REQ: OA-REP-008
+    def test_writer_refuses_part_names_without_a_public_release_stem(self):
+        part = self.base / "archive.bin"
+        part.write_bytes(b"archive")
+        r = sh(
+            WRITER,
+            DAY,
+            FAKE_COMMIT,
+            self.p.pkg,
+            "eram.txt",
+            self.p.clip,
+            "--frame-ms 1000",
+            self.p.run,
+            "label",
+            part,
+        )
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("cannot derive adsb.lol release tag", r.stderr)
+        self.assertFalse((self.p.pkg / "MANIFEST").exists())
+
+    # REQ: OA-REP-008, OA-REP-009
+    def test_writer_refuses_other_days_and_invalid_calendar_dates_in_adsb_part_names(self):
+        for name in (
+            "v2026.11.16-planes-readsb-prod-0.tar.aa",
+            "v2026.02.30-planes-readsb-prod-0.tar.aa",
+            "v2027.11.15-planes-readsb-prod-0.tar.aa",
+            "archive-prod-0.tar.aa",
+        ):
+            part = self.base / name
+            part.write_bytes(b"archive")
+            result = sh(WRITER, DAY, FAKE_COMMIT, self.p.pkg, "eram.txt", self.p.clip,
+                        "--frame-ms 1000", self.p.run, "label", part)
+            self.assertEqual(result.returncode, 2, name)
+            self.assertFalse((self.p.pkg / "MANIFEST").exists())
+            self.assertFalse((self.p.pkg / "MANIFEST.partial").exists())
+
+    # REQ: OA-REP-008, OA-REP-009
+    def test_reader_binds_each_archive_url_to_the_exact_release_and_filename(self):
+        manifest = self.p.manifest()
+        wrong = manifest.replace(
+            "releases/download/v2026.11.15-planes-readsb-prod-0/",
+            "releases/download/v2026.11.15-planes-readsb-prod-1/",
+            1,
+        )
+        (self.p.pkg / "MANIFEST").write_text(wrong)
+        result = sh(REPRO, DAY, self.p.pkg, self.p.out)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("adsb-file URL", result.stderr)
+        self.assertFalse(self.p.out.exists())
+
+    # REQ: OA-REP-008, OA-REP-009
+    def test_reader_refuses_repeated_release_summary_scalar(self):
+        manifest = self.p.manifest()
+        first = next(line for line in manifest.splitlines() if line.startswith("adsb-release "))
+        (self.p.pkg / "MANIFEST").write_text(manifest + first + "\n")
+        result = sh(REPRO, DAY, self.p.pkg, self.p.out)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("repeats scalar field adsb-release", result.stderr)
+
     # REQ: OA-REP-008, OA-SEAL-005
     def test_reproducer_checks_manifest_and_each_concrete_input_path(self):
         sealed = self.sealed_fixture()
