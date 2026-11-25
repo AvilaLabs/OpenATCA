@@ -71,7 +71,8 @@ pub const SPLIT_TEXT: &str = "per aircraft, copies of one observation removed, t
 pub const BASIS_TEXT: &str = "on ADS-B input split into disjoint report groups; not an ESASSP exit result; GNSS error correlated over seconds is shared between the sets; disagreement does not bound absolute error";
 /// A track is dropped after this long without an update in the scoring run, ns: the gap at which
 /// `oa-truth` starts a new leg (`oa_truth::LEG_GAP_MS`), so tracker and truth end an aircraft's
-/// pass at the same silence.
+/// pass at the same silence. This is an existing fixed 120-second engineering value, not a
+/// per-day interval estimate.
 pub const SCORE_DROP_AFTER_NS: i64 = oa_truth::LEG_GAP_MS * 1_000_000;
 /// The scoring run gives the tracker an output table this large (rows) and drains it often, so
 /// no row is lost: 1 Mi rows.
@@ -250,6 +251,307 @@ pub fn scoring_config(base: &TrackerConfig, iv: &IntervalStats) -> TrackerConfig
         drop_after_ns: SCORE_DROP_AFTER_NS,
         out_capacity: SCORE_OUT_CAPACITY,
         ..*base
+    }
+}
+
+/// Versioned fixed timing values for the development-only timing profile.
+pub const SCORING_FIXED_10_30_120_EXPECTED_NS: i64 = 10 * NS_PER_S;
+pub const SCORING_FIXED_10_30_120_INIT_NS: i64 = 30 * NS_PER_S;
+pub const SCORING_FIXED_10_30_120_DROP_NS: i64 = 120 * NS_PER_S;
+
+/// How scoring timing parameters are selected. This is a scoring-shell choice; the tracker core
+/// receives only the resulting [`TrackerConfig`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoringTimingProfile {
+    /// Existing behavior: expected/init intervals use this run's measurements, drop is fixed.
+    LegacyDayIntervals,
+    /// Explicit engineering profile: 10 s expected, 30 s initiation, 120 s drop.
+    Fixed1030120V1,
+}
+
+/// Provenance for the interval inputs used to make a scoring configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScoringTimingSource {
+    /// Percentiles computed from this measurement slice.
+    MeasuredIntervals,
+    /// Existing one-second fallback used when the measured interval distribution is empty.
+    LegacyOneSecondFallback,
+    /// Versioned constants; measurement cadence was not inspected.
+    FixedProfileConstants,
+}
+
+/// Configuration plus machine-readable timing provenance. Cold shell record (A1, A7.2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoringTimingReport {
+    pub tracker: TrackerConfig,
+    pub intervals: Option<IntervalStats>,
+    pub profile: ScoringTimingProfile,
+    pub source: ScoringTimingSource,
+    pub expected_interval_ns: i64,
+    pub init_interval_ns: i64,
+    pub drop_after_ns: i64,
+}
+
+/// Selects the scoring run's timing values and records where they came from.
+///
+/// `Fixed1030120V1` deliberately does not call [`interval_stats`]; its values are independent of
+/// this day's cadence, reference and SFDPS input. The legacy arm exactly preserves
+/// [`scoring_config`] and its one-second empty-distribution fallback.
+pub fn scoring_timing_config(
+    base: &TrackerConfig,
+    meas: &[Measurement],
+    profile: ScoringTimingProfile,
+) -> ScoringTimingReport {
+    let (tracker, intervals, source) = match profile {
+        ScoringTimingProfile::Fixed1030120V1 => (
+            TrackerConfig {
+                expected_interval_ns: SCORING_FIXED_10_30_120_EXPECTED_NS,
+                init_interval_ns: SCORING_FIXED_10_30_120_INIT_NS,
+                drop_after_ns: SCORING_FIXED_10_30_120_DROP_NS,
+                out_capacity: SCORE_OUT_CAPACITY,
+                ..*base
+            },
+            None,
+            ScoringTimingSource::FixedProfileConstants,
+        ),
+        ScoringTimingProfile::LegacyDayIntervals => {
+            let intervals = interval_stats(meas);
+            let effective = intervals.unwrap_or(IntervalStats {
+                n: 0,
+                p50_ns: NS_PER_S,
+                p90_ns: NS_PER_S,
+                p99_ns: NS_PER_S,
+            });
+            let tracker = scoring_config(base, &effective);
+            let source = if intervals.is_some() {
+                ScoringTimingSource::MeasuredIntervals
+            } else {
+                ScoringTimingSource::LegacyOneSecondFallback
+            };
+            (tracker, intervals, source)
+        }
+    };
+    ScoringTimingReport {
+        tracker,
+        intervals,
+        profile,
+        source,
+        expected_interval_ns: tracker.expected_interval_ns,
+        init_interval_ns: tracker.init_interval_ns,
+        drop_after_ns: tracker.drop_after_ns,
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod scoring_timing_profile_tests {
+    use super::*;
+    use crate::types::{NONE_I32, NO_IDENT};
+
+    fn measurement(second: i64) -> Measurement {
+        Measurement {
+            toa_ns: (100 + second) * NS_PER_S,
+            pos_cov_m2: [100.0, 0.0, 100.0],
+            vel_cov_m2s2: [0.0; 3],
+            vel_east_mps: 0.0,
+            vel_north_mps: 0.0,
+            lat_e7: 420_000_000,
+            lon_e7: -880_000_000 + i32::try_from(second).expect("small synthetic position") * 100,
+            alt_ft: NONE_I32,
+            vrate_fpm: NONE_I32,
+            addr: 0x00ab_cdef,
+            alt_quant_ft: 0,
+            sensor: 1,
+            ident: NO_IDENT,
+            flags: 0,
+            category: 0,
+            vel_lag_s: 0.0,
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct PrefixRow {
+        t_ns: i64,
+        addr: u32,
+        lat_e7: i32,
+        lon_e7: i32,
+        vel_east_bits: u32,
+        vel_north_bits: u32,
+        pos_cov_bits: [u32; 3],
+        vel_cov_bits: [u32; 3],
+        turn_rate_bits: u32,
+        alt_bits: u32,
+        alt_var_bits: u32,
+        vrate_bits: u32,
+        mu_h_bits: [u32; 2],
+        mu_v_bits: [u32; 2],
+        flags: u8,
+    }
+
+    fn prefix_rows(run: &TrackRun, cutoff_ns: i64) -> Vec<PrefixRow> {
+        let mut prefix = Vec::new();
+        for (i, &t) in run.out.t_ns.iter().enumerate() {
+            if t > cutoff_ns {
+                continue;
+            }
+            let row = PrefixRow {
+                t_ns: t,
+                addr: *run.out.addr.get(i).expect("address column aligns"),
+                lat_e7: *run.out.lat_e7.get(i).expect("latitude column aligns"),
+                lon_e7: *run.out.lon_e7.get(i).expect("longitude column aligns"),
+                vel_east_bits: run
+                    .out
+                    .vel_east_mps
+                    .get(i)
+                    .expect("east velocity column aligns")
+                    .to_bits(),
+                vel_north_bits: run
+                    .out
+                    .vel_north_mps
+                    .get(i)
+                    .expect("north velocity column aligns")
+                    .to_bits(),
+                pos_cov_bits: run
+                    .out
+                    .pos_cov_m2
+                    .get(i)
+                    .expect("position covariance column aligns")
+                    .map(f32::to_bits),
+                vel_cov_bits: run
+                    .out
+                    .vel_cov_m2s2
+                    .get(i)
+                    .expect("velocity covariance column aligns")
+                    .map(f32::to_bits),
+                turn_rate_bits: run
+                    .out
+                    .turn_rate_rps
+                    .get(i)
+                    .expect("turn-rate column aligns")
+                    .to_bits(),
+                alt_bits: run
+                    .out
+                    .alt_ft
+                    .get(i)
+                    .expect("altitude column aligns")
+                    .to_bits(),
+                alt_var_bits: run
+                    .out
+                    .alt_var_ft2
+                    .get(i)
+                    .expect("altitude variance column aligns")
+                    .to_bits(),
+                vrate_bits: run
+                    .out
+                    .vrate_fpm
+                    .get(i)
+                    .expect("vertical rate column aligns")
+                    .to_bits(),
+                mu_h_bits: run
+                    .out
+                    .mu_h
+                    .get(i)
+                    .expect("horizontal probabilities column aligns")
+                    .map(f32::to_bits),
+                mu_v_bits: run
+                    .out
+                    .mu_v
+                    .get(i)
+                    .expect("vertical probabilities column aligns")
+                    .map(f32::to_bits),
+                flags: *run.out.flags.get(i).expect("flags column aligns"),
+            };
+            prefix.push(row);
+        }
+        prefix
+    }
+
+    // REQ: OA-TRK-405
+    #[test]
+    fn fixed_timing_and_real_tracker_prefix_ignore_future_measurement_cadence() {
+        let dense: Vec<Measurement> = (0..=30).map(measurement).collect();
+        let mut sparse: Vec<Measurement> = (0..=4).map(measurement).collect();
+        sparse.extend((14..=64).step_by(10).map(measurement));
+        let cutoff_ns = 104 * NS_PER_S;
+        assert!(dense.last().is_some_and(|m| m.toa_ns > cutoff_ns));
+        assert!(sparse.last().is_some_and(|m| m.toa_ns > cutoff_ns));
+
+        let dense_fixed = scoring_timing_config(
+            &crate::types::DEFAULT_CONFIG,
+            &dense,
+            ScoringTimingProfile::Fixed1030120V1,
+        );
+        let sparse_fixed = scoring_timing_config(
+            &crate::types::DEFAULT_CONFIG,
+            &sparse,
+            ScoringTimingProfile::Fixed1030120V1,
+        );
+        assert_eq!(dense_fixed, sparse_fixed);
+        assert_eq!(dense_fixed.intervals, None);
+        assert_eq!(
+            dense_fixed.source,
+            ScoringTimingSource::FixedProfileConstants
+        );
+        assert_eq!(dense_fixed.expected_interval_ns, 10 * NS_PER_S);
+        assert_eq!(dense_fixed.init_interval_ns, 30 * NS_PER_S);
+        assert_eq!(dense_fixed.drop_after_ns, 120 * NS_PER_S);
+
+        let dense_legacy = scoring_timing_config(
+            &crate::types::DEFAULT_CONFIG,
+            &dense,
+            ScoringTimingProfile::LegacyDayIntervals,
+        );
+        let sparse_legacy = scoring_timing_config(
+            &crate::types::DEFAULT_CONFIG,
+            &sparse,
+            ScoringTimingProfile::LegacyDayIntervals,
+        );
+        assert_ne!(
+            dense_legacy.tracker.expected_interval_ns,
+            sparse_legacy.tracker.expected_interval_ns
+        );
+        assert_ne!(
+            dense_legacy.tracker.init_interval_ns,
+            sparse_legacy.tracker.init_interval_ns
+        );
+
+        // Both runs have post-cutoff inputs, so no end-of-run flush occurs at or before the
+        // cutoff. Compare actual tracker output, not only profile constants or mirrored math.
+        let dense_run =
+            run_tracker(&dense, &dense_fixed.tracker).expect("dense fixed-profile tracker run");
+        let sparse_run =
+            run_tracker(&sparse, &sparse_fixed.tracker).expect("sparse fixed-profile tracker run");
+        let dense_prefix = prefix_rows(&dense_run, cutoff_ns);
+        let sparse_prefix = prefix_rows(&sparse_run, cutoff_ns);
+        assert!(!dense_prefix.is_empty());
+        assert_eq!(dense_prefix, sparse_prefix);
+    }
+
+    // REQ: OA-TRK-406
+    #[test]
+    fn legacy_empty_interval_fallback_matches_existing_scoring_config() {
+        let expected_fallback = IntervalStats {
+            n: 0,
+            p50_ns: NS_PER_S,
+            p90_ns: NS_PER_S,
+            p99_ns: NS_PER_S,
+        };
+        let report = scoring_timing_config(
+            &crate::types::DEFAULT_CONFIG,
+            &[],
+            ScoringTimingProfile::LegacyDayIntervals,
+        );
+        assert_eq!(
+            report.tracker,
+            scoring_config(&crate::types::DEFAULT_CONFIG, &expected_fallback)
+        );
+        assert_eq!(report.intervals, None);
+        assert_eq!(report.source, ScoringTimingSource::LegacyOneSecondFallback);
     }
 }
 

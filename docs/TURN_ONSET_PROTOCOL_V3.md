@@ -154,6 +154,22 @@ source gaps or detector misses. The first ten seconds likewise cannot label an o
 baseline evidence inside the selected window. These edge conditions do not justify moving the
 window after inspecting outputs.
 
+## Optional scoring timing profile
+
+The `vs_eram` Rust development/export example accepts the opt-in
+`--timing-profile fixed-10-30-120-v1` only with `--turn-onset`; `turn_diag` accepts the same option
+for its development tracker replay, whether or not `--rescore` is set (`--rescore` controls output
+scoring and retention). It assigns expected interval 10 seconds, initiation interval 30 seconds, and
+drop interval 120 seconds to both OpenATCA and its straight-only CV baseline; only `h_mode` differs
+between those tracker configurations. The fixed profile is selected from versioned constants and
+does not inspect the measurement interval distribution. The export provenance and text report
+identify the profile, source, and exact nanosecond values. Without the option, the examples retain
+their existing measurement-derived timing and empty-distribution fallback. This development
+profile does not register a strict metric or alter V3 event definitions, metric definitions,
+windows, thresholds, matching, or scorer defaults. It is not causal calibration: reference
+smoothing and state-time fitting remain retrospective. Report the chosen profile with any
+development result.
+
 ## Evidence boundary
 
 V3 is an explicit, bounded design change motivated by the zero-event v2 development result. The

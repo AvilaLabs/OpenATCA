@@ -5500,6 +5500,20 @@ scope.
   parsing checks the guarded descriptor byte limit, physical record/field/column bounds and sealed
   timestamps before grouping. Provenance records the selected caps and actual CSV sizes. Capacity
   refusal is incomplete; the capacity profile does not alter event or matching definitions.
+- **OA-TRK-405** The opt-in development scoring profile `fixed-10-30-120-v1` sets the expected
+  interval to 10 seconds, initiation interval to 30 seconds and drop age to 120 seconds without
+  inspecting measurement cadence, reference or SFDPS data. It retains the scoring output capacity
+  and other base settings. Changing measurements strictly after a cutoff cannot change this
+  profile's configuration or the real tracker output through that cutoff. A synthetic regression
+  compares complete tracker state rows from two shared-prefix inputs with different later cadences;
+  both inputs extend beyond the cutoff to exclude final-flush artifacts.
+- **OA-TRK-406** Without an explicit timing profile, scoring preserves the existing measured
+  median/p90 intervals and one-second empty-distribution fallback; its 120-second drop age remains
+  fixed. The new profile is development-only: `p002` refuses it without `--development`, with
+  frozen/candidate bindings, combine mode or export-only mode; `vs_eram` requires turn export.
+  Opt-in reports record the profile and actual constants and state that interval statistics were
+  not computed. OA and CV turn replays share these timing settings; the CV model choice remains
+  explicit. Legacy reports acquire no profile lines.
 - **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
   refused in every date syntax. Any input path the shared sealed list refuses (`oa-sealed`, OA-SEAL-001), and every file the run opens
   (each file of the feed directory, the ADS-B clip, each file and the README of a `slice` source), is checked

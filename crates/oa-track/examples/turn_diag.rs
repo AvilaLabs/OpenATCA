@@ -49,7 +49,7 @@ use oa_bench::tracker_input::{legacy_from_track_samples_by_leg, TrackSamples};
 use oa_bench::truth::Truth;
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
-    interval_stats, score_ranges, scoring_config, split_reports, IntervalStats, RowSet, RowSource,
+    score_ranges, scoring_timing_config, split_reports, RowSet, RowSource, ScoringTimingProfile,
     DRAIN_ROWS, SCORE_CHUNK_ROWS,
 };
 use oa_track::spill::{spill_append, spill_finish, spill_new};
@@ -231,9 +231,30 @@ fn main() -> ExitCode {
     let mut rescore = false;
     let mut thin = 1usize;
     let mut vel_lag = None;
+    let mut timing_profile = ScoringTimingProfile::LegacyDayIntervals;
+    let mut timing_profile_seen = false;
     while let Some(a) = args.next() {
         if a == "--rescore" {
             rescore = true;
+            continue;
+        }
+        if a == "--timing-profile" {
+            if timing_profile_seen {
+                eprintln!("turn_diag: duplicate --timing-profile");
+                return ExitCode::from(2);
+            }
+            timing_profile_seen = true;
+            timing_profile = match args.next().as_deref() {
+                Some("fixed-10-30-120-v1") => ScoringTimingProfile::Fixed1030120V1,
+                Some(value) => {
+                    eprintln!("turn_diag: unsupported timing profile {value}");
+                    return ExitCode::from(2);
+                }
+                None => {
+                    eprintln!("turn_diag: --timing-profile requires a value");
+                    return ExitCode::from(2);
+                }
+            };
             continue;
         }
         let v = args.next();
@@ -270,7 +291,15 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    match run(&adsb, &samples, &out, rescore, thin, vel_lag) {
+    match run(
+        &adsb,
+        &samples,
+        &out,
+        rescore,
+        thin,
+        vel_lag,
+        timing_profile,
+    ) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -641,6 +670,7 @@ fn run(
     rescore: bool,
     thin: usize,
     vel_lag: Option<f32>,
+    timing_profile: ScoringTimingProfile,
 ) -> Result<String, String> {
     fs::create_dir_all(out_dir).map_err(|e| format!("{}: {e}", out_dir.display()))?;
     let (mut samples, sample_counts) = read_samples(samples_path)?;
@@ -740,13 +770,8 @@ fn run(
             }
         }
     }
-    let iv = interval_stats(&meas).unwrap_or(IntervalStats {
-        n: 0,
-        p50_ns: 1_000_000_000,
-        p90_ns: 1_000_000_000,
-        p99_ns: 1_000_000_000,
-    });
-    let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
+    let timing = scoring_timing_config(&DEFAULT_CONFIG, &meas, timing_profile);
+    let cfg = timing.tracker;
     let mut t = tracker_new(&cfg).map_err(|e| e.to_string())?;
     let mut scratch = output_new(cfg.out_capacity);
     let mut rows: BTreeMap<(u32, i64), Row> = BTreeMap::new();
@@ -1137,6 +1162,9 @@ fn run(
         gaps.len(),
         gaps.get(gaps.len() / 2).copied().unwrap_or(f64::NAN)
     );
+    if timing.profile == ScoringTimingProfile::Fixed1030120V1 {
+        let _ = writeln!(o, "Scoring timing profile=fixed-10-30-120-v1; source=versioned_constants; expected_interval_ns={}; init_interval_ns={}; drop_after_ns={}; interval_stats=not_computed", timing.expected_interval_ns, timing.init_interval_ns, timing.drop_after_ns);
+    }
     table_write(&all, &mut o);
     for t in [&by_flight_any, &by_flight_near, &by_flight_far] {
         table_write(t, &mut o);

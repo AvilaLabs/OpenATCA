@@ -51,8 +51,8 @@ use oa_bench::truth::{empty_env, Env, Truth};
 use oa_replay::FeedKind;
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
-    interval_stats, run_tracker_spilled, score_ranges, scoring_config, split_reports,
-    IntervalStats, RowSet, RowSource, SCORE_CHUNK_ROWS, SPLIT_TEXT,
+    run_tracker_spilled, score_ranges, scoring_timing_config, split_reports, RowSet, RowSource,
+    ScoringTimingProfile, ScoringTimingReport, SCORE_CHUNK_ROWS, SPLIT_TEXT,
 };
 use oa_track::{TrackerConfig, DEFAULT_CONFIG};
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
@@ -94,6 +94,24 @@ fn select_turn_export_limits(
         (false, false) => Ok(None),
         (false, true) => Err("--turn-onset-extended-budget requires --turn-onset".into()),
     }
+}
+
+fn select_timing_profile(
+    turn_onset: bool,
+    raw: Option<&str>,
+) -> Result<ScoringTimingProfile, String> {
+    match raw {
+        None => Ok(ScoringTimingProfile::LegacyDayIntervals),
+        Some("fixed-10-30-120-v1") if turn_onset => Ok(ScoringTimingProfile::Fixed1030120V1),
+        Some("fixed-10-30-120-v1") => {
+            Err("--timing-profile fixed-10-30-120-v1 requires --turn-onset".into())
+        }
+        Some(value) => Err(format!("unsupported timing profile {value}")),
+    }
+}
+
+fn fixed_timing_description(report: &ScoringTimingReport) -> String {
+    format!("profile=fixed-10-30-120-v1; source=versioned_constants; expected_interval_ns={}; init_interval_ns={}; drop_after_ns={}; interval_stats=not_computed", report.expected_interval_ns, report.init_interval_ns, report.drop_after_ns)
 }
 
 // A1/D5: fixed-layout, cold offline shell formatter adapter; this is not tracker state or a core DTO.
@@ -408,6 +426,7 @@ fn main() -> ExitCode {
     let (mut adsb, mut sfdps, mut out) = (None, None, None);
     let mut turn_onset = false;
     let mut turn_onset_extended_budget = false;
+    let mut timing_profile_raw: Option<String> = None;
     let mut turn_from_ms = None;
     let mut turn_to_ms = None;
     let mut turn_from_seen = false;
@@ -419,6 +438,18 @@ fn main() -> ExitCode {
         }
         if a == "--turn-onset-extended-budget" {
             turn_onset_extended_budget = true;
+            continue;
+        }
+        if a == "--timing-profile" {
+            if timing_profile_raw.is_some() {
+                eprintln!("vs_eram: duplicate --timing-profile");
+                return ExitCode::from(2);
+            }
+            let Some(value) = args.next() else {
+                eprintln!("vs_eram: --timing-profile requires a value");
+                return ExitCode::from(2);
+            };
+            timing_profile_raw = Some(value);
             continue;
         }
         if a == "--turn-from-ms" || a == "--turn-to-ms" {
@@ -489,6 +520,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let timing_profile = match select_timing_profile(turn_onset, timing_profile_raw.as_deref()) {
+        Ok(profile) => profile,
+        Err(e) => {
+            eprintln!("vs_eram: {e}");
+            return ExitCode::from(2);
+        }
+    };
     // Every path is checked, as given and resolved, before anything is opened or created.
     for p in [&adsb, &sfdps, &out] {
         if let Err(e) = oa_sealed::refuse(p) {
@@ -496,7 +534,14 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     }
-    match run(&adsb, &sfdps, &out, turn_window, turn_export_limits) {
+    match run(
+        &adsb,
+        &sfdps,
+        &out,
+        turn_window,
+        turn_export_limits,
+        timing_profile,
+    ) {
         Ok(text) => {
             print!("{text}");
             ExitCode::SUCCESS
@@ -641,6 +686,7 @@ fn run(
     out_dir: &Path,
     turn_window: Option<(i64, i64)>,
     turn_export_limits: Option<TurnExportLimits>,
+    timing_profile: ScoringTimingProfile,
 ) -> Result<String, String> {
     let turn_onset = turn_window.is_some();
     let export_limits = turn_export_limits;
@@ -663,13 +709,8 @@ fn run(
     drop(clip);
     let (meas, _) = adsb_measurements(&set_a, &AdsbConfig::default());
     drop(set_a);
-    let iv = interval_stats(&meas).unwrap_or(IntervalStats {
-        n: 0,
-        p50_ns: 1_000_000_000,
-        p90_ns: 1_000_000_000,
-        p99_ns: 1_000_000_000,
-    });
-    let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
+    let timing = scoring_timing_config(&DEFAULT_CONFIG, &meas, timing_profile);
+    let cfg = timing.tracker;
     let spill = out_dir.join(format!("spill-{}", std::process::id()));
     let t_track = Instant::now();
     let run = run_tracker_spilled(&meas, &cfg, &spill).map_err(|e| e.to_string())?;
@@ -1107,6 +1148,9 @@ fn run(
         o,
         "Inputs differ: ERAM fuses FAA radar and ADS-B; OpenATCA sees only set A of a community ADS-B feed. The reference shares that feed (disjoint reports, correlated GNSS error)."
     );
+    if timing.profile == ScoringTimingProfile::Fixed1030120V1 {
+        let _ = writeln!(o, "Scoring timing: {}", fixed_timing_description(&timing));
+    }
     if turn_onset {
         let mut turn_provenance = String::from(
         "export=turn-onset-input-v1\nmetric_protocol=selected_by_downstream_scorer\ntruth=smoothed-split-B-reference; labels may use future reference only\ncourse=ground_track_from_east_north_velocity\nprimary_time=source/state applicability time, an algorithmic proxy only; not observed detector or wall-clock latency\nOA/CV state_time=tracker tick time on measurement applicability clock; recording has no per-report receive clock and offline ticks are not emission timestamps\nSFDPS state_time=ThTable.pos_ms; availability_time=ThTable.recv_ms where valid; receive cadence reported separately\nNo result compares physical detector latency or claims ERAM internal sensor/update/processing latency\nSFDPS_dedup=per (address, truth leg, pos_ms); omit conflicting course states, retain identical course and earliest valid recv_ms\ncv=separate oa-track TrackerConfig h_mode=1 straight-only CV; no mixing/CT model; CV_ONLY_Q[0]=H_Q_CV=1.0 m^2/s^3\ncv_input=same split-A measurements, measurement timestamps and scoring_config as OA\n",
@@ -1115,6 +1159,30 @@ fn run(
         let config_hash = oa_sha256::to_hex(&oa_sha256::sha256(config_text.as_bytes()));
         let _ = writeln!(turn_provenance, "tracker_config_sha256={config_hash}");
         let _ = writeln!(turn_provenance, "tracker_config_debug={config_text:?}");
+        if timing.profile == ScoringTimingProfile::Fixed1030120V1 {
+            let _ = writeln!(turn_provenance, "scoring_timing_profile=fixed-10-30-120-v1");
+            let _ = writeln!(turn_provenance, "scoring_timing_source=versioned_constants");
+            let _ = writeln!(
+                turn_provenance,
+                "scoring_expected_interval_ns={}",
+                timing.expected_interval_ns
+            );
+            let _ = writeln!(
+                turn_provenance,
+                "scoring_init_interval_ns={}",
+                timing.init_interval_ns
+            );
+            let _ = writeln!(
+                turn_provenance,
+                "scoring_drop_after_ns={}",
+                timing.drop_after_ns
+            );
+            let _ = writeln!(turn_provenance, "scoring_interval_stats=not_computed");
+            let _ = writeln!(
+                turn_provenance,
+                "scoring_metric_protocol=unchanged_v3_definitions_windows_thresholds"
+            );
+        }
         let _ = writeln!(turn_provenance, "adsb_clip_sha256={clip_hash}");
         let truth_csv = turn_truth
             .as_ref()
@@ -1274,9 +1342,11 @@ fn run(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod turn_window_tests {
     use super::{
-        append_bounded_csv_row, checked_turn_window, in_turn_window, increment_export_count,
-        select_turn_export_limits, selected_truth_grid_bounds, TurnExportLimits,
-        EXTENDED_TURN_EXPORT, STANDARD_TURN_EXPORT, TURN_EXPORT_MAX_ROW_BYTES,
+        append_bounded_csv_row, checked_turn_window, fixed_timing_description, in_turn_window,
+        increment_export_count, scoring_timing_config, select_timing_profile,
+        select_turn_export_limits, selected_truth_grid_bounds, ScoringTimingProfile,
+        ScoringTimingSource, TurnExportLimits, DEFAULT_CONFIG, EXTENDED_TURN_EXPORT,
+        STANDARD_TURN_EXPORT, TURN_EXPORT_MAX_ROW_BYTES,
     };
     use std::fmt::Write as _;
 
@@ -1296,6 +1366,40 @@ mod turn_window_tests {
         assert_eq!(EXTENDED_TURN_EXPORT.max_bytes, 128 * 1024 * 1024);
         assert_eq!(select_turn_export_limits(false, false).unwrap(), None);
         assert!(select_turn_export_limits(false, true).is_err());
+    }
+
+    #[test]
+    // REQ: OA-TRK-406
+    fn fixed_timing_profile_is_explicit_and_scoped_to_turn_export() {
+        assert_eq!(
+            select_timing_profile(true, None).unwrap(),
+            ScoringTimingProfile::LegacyDayIntervals
+        );
+        assert_eq!(
+            select_timing_profile(true, Some("fixed-10-30-120-v1")).unwrap(),
+            ScoringTimingProfile::Fixed1030120V1
+        );
+        assert!(select_timing_profile(false, Some("fixed-10-30-120-v1")).is_err());
+        assert!(select_timing_profile(true, Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn fixed_profile_report_proves_constants_and_provenance_without_intervals() {
+        let report =
+            scoring_timing_config(&DEFAULT_CONFIG, &[], ScoringTimingProfile::Fixed1030120V1);
+        assert_eq!(report.intervals, None);
+        assert_eq!(report.source, ScoringTimingSource::FixedProfileConstants);
+        assert_eq!(
+            (
+                report.expected_interval_ns,
+                report.init_interval_ns,
+                report.drop_after_ns
+            ),
+            (10_000_000_000, 30_000_000_000, 120_000_000_000)
+        );
+        let provenance = fixed_timing_description(&report);
+        assert!(provenance.contains("profile=fixed-10-30-120-v1"));
+        assert!(provenance.contains("interval_stats=not_computed"));
     }
 
     #[test]

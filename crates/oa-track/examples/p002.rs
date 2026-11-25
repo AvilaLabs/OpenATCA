@@ -82,8 +82,8 @@ use oa_replay::FeedKind;
 use oa_sha256::{sha256, to_hex};
 use oa_track::adsb::{adsb_measurements, AdsbConfig};
 use oa_track::score::{
-    interval_stats, run_tracker_spilled, score_ranges, scoring_config, split_reports,
-    IntervalStats, RowSet, RowSource, SCORE_CHUNK_ROWS, SPLIT_TEXT,
+    run_tracker_spilled, score_ranges, scoring_timing_config, split_reports, RowSet, RowSource,
+    ScoringTimingProfile, ScoringTimingReport, SCORE_CHUNK_ROWS, SPLIT_TEXT,
 };
 use oa_track::DEFAULT_CONFIG;
 use oa_truth::DEFAULT_CONFIG as TRUTH_DEFAULT;
@@ -119,6 +119,10 @@ const STATS: [&str; 3] = ["median", "p95", "rms"];
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("--combine") {
+        if argv.iter().any(|arg| arg == "--timing-profile") {
+            eprintln!("p002: refused: --timing-profile is not supported by --combine");
+            return ExitCode::from(2);
+        }
         return combine_main(argv.get(1..).unwrap_or(&[]));
     }
     let mut args = argv.into_iter();
@@ -129,6 +133,7 @@ fn main() -> ExitCode {
         Option<PathBuf>,
     ) = (None, None, None);
     let (mut allow_dirty, mut development) = (false, false);
+    let mut timing_profile: Option<ScoringTimingProfile> = None;
     let mut frozen: Option<String> = None;
     let mut candidate: Option<String> = None;
     let (mut damage_path, mut ledger): (Option<PathBuf>, Option<PathBuf>) = (None, None);
@@ -156,6 +161,26 @@ fn main() -> ExitCode {
             development = true;
             continue;
         }
+        if a == "--timing-profile" {
+            let Some(value) = args.next() else {
+                eprintln!("p002: --timing-profile needs a profile name");
+                return ExitCode::from(2);
+            };
+            if timing_profile.is_some() {
+                eprintln!("p002: refused: --timing-profile may be given only once");
+                return ExitCode::from(2);
+            }
+            match value.as_str() {
+                "fixed-10-30-120-v1" => {
+                    timing_profile = Some(ScoringTimingProfile::Fixed1030120V1);
+                }
+                _ => {
+                    eprintln!("p002: unknown timing profile {value}");
+                    return ExitCode::from(2);
+                }
+            }
+            continue;
+        }
         let v = args.next();
         match a.as_str() {
             "--adsb" => adsb = v.map(PathBuf::from),
@@ -174,6 +199,14 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         }
+    }
+    if timing_profile.is_some() && export_out.is_some() {
+        eprintln!("p002: refused: --timing-profile cannot be combined with export-only --export-eram mode");
+        return ExitCode::from(2);
+    }
+    if timing_profile.is_some() && (!development || frozen.is_some() || candidate.is_some()) {
+        eprintln!("p002: refused: --timing-profile fixed-10-30-120-v1 requires --development and cannot be combined with frozen/candidate commits");
+        return ExitCode::from(2);
     }
     if let Some(file) = export_out {
         let stray = adsb.is_some()
@@ -197,7 +230,7 @@ fn main() -> ExitCode {
     }
     let (Some(adsb), Some(out)) = (adsb, out) else {
         eprintln!(
-            "usage: p002 --adsb <clip.oaf> (--sfdps-dir <dir> | --eram-export <file>) --out <dir> [--drop-addresses <file>] [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]... [--damage-report <oa-feed-gaps report>] --ledger <file>\n       p002 --combine <dirA> <dirB> <dirC>"
+            "usage: p002 --adsb <clip.oaf> (--sfdps-dir <dir> | --eram-export <file>) --out <dir> [--drop-addresses <file>] [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]... [--damage-report <oa-feed-gaps report>] [--timing-profile fixed-10-30-120-v1] --ledger <file>\n       p002 --combine <dirA> <dirB> <dirC>"
         );
         return ExitCode::from(2);
     };
@@ -324,6 +357,7 @@ fn main() -> ExitCode {
             damage: damage.as_ref(),
             ledger: &ledger,
             drop_list: drop_list.as_ref(),
+            timing_profile: timing_profile.unwrap_or(ScoringTimingProfile::LegacyDayIntervals),
         },
     ) {
         Ok(text) => {
@@ -3204,6 +3238,7 @@ struct Opts<'a> {
     ledger: &'a Path,
     /// The addresses whose flights are left out of the ERAM load (`--drop-addresses`).
     drop_list: Option<&'a BTreeSet<u32>>,
+    timing_profile: ScoringTimingProfile,
 }
 
 /// Where the ERAM rows come from: the SFDPS recording, or an export of it.
@@ -3455,6 +3490,7 @@ fn run(
         damage,
         ledger,
         drop_list,
+        timing_profile,
     } = *opts;
     let partials_left = outputs_free(out_dir)?;
     let windows_all: Vec<Window> = hand_windows
@@ -3506,13 +3542,9 @@ fn run(
         .map_err(|v| format!("split refused: {v:?}"))?;
     drop(clip);
     let (meas, _) = adsb_measurements(&set_a, &AdsbConfig::default());
-    let iv = interval_stats(&meas).unwrap_or(IntervalStats {
-        n: 0,
-        p50_ns: 1_000_000_000,
-        p90_ns: 1_000_000_000,
-        p99_ns: 1_000_000_000,
-    });
-    let cfg = scoring_config(&DEFAULT_CONFIG, &iv);
+    let timing_report: ScoringTimingReport =
+        scoring_timing_config(&DEFAULT_CONFIG, &meas, timing_profile);
+    let cfg = timing_report.tracker;
     let spill = out_dir.join(format!("spill-{}", std::process::id()));
     let t_track = Instant::now();
     let run = run_tracker_spilled(&meas, &cfg, &spill).map_err(|e| e.to_string())?;
@@ -3955,6 +3987,31 @@ fn run(
         "  set A {} reports ({} after counting), set B {} reports -> reference ({} legs); tracker measurements {n_meas}",
         split.set_a, set_a_reports, split.set_b, built.legs.len()
     );
+    if timing_report.profile == ScoringTimingProfile::Fixed1030120V1 {
+        let _ = writeln!(o, "SCORING_TIMING_PROFILE=fixed-10-30-120-v1");
+        let _ = writeln!(
+            o,
+            "SCORING_TIMING_SOURCE=versioned-constants; no measurement-cadence statistics computed"
+        );
+        let _ = writeln!(
+            o,
+            "SCORING_EXPECTED_INTERVAL_NS={}",
+            timing_report.expected_interval_ns
+        );
+        let _ = writeln!(
+            o,
+            "SCORING_INIT_INTERVAL_NS={}",
+            timing_report.init_interval_ns
+        );
+        let _ = writeln!(o, "SCORING_DROP_AFTER_NS={}", timing_report.drop_after_ns);
+        let _ = writeln!(
+            o,
+            "SCORING_OUTPUT_CAPACITY={}",
+            timing_report.tracker.out_capacity
+        );
+        let _ = writeln!(o, "SCORING_INTERVAL_STATS=not-computed");
+        let _ = writeln!(o, "SCORING_TIMING_INPUTS=ADS-B set-A measurements only as tracker inputs; no set-B truth or ERAM/SFDPS cadence used for parameter selection");
+    }
     let _ = writeln!(
         o,
         "  bootstrap: {BOOT_N} resamples of whole aircraft, splitmix64 seed {BOOT_SEED}, 95% interval = ranks 25 and 975 of the sorted resampled values; every table uses the same resamples"
