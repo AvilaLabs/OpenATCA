@@ -1178,7 +1178,7 @@ fn validate_output_paths(
         if input_targets.contains(&csv_target) {
             return Err("position CSV aliases the manifest or an archive part".into());
         }
-        if csv_path.to_str().map_or(true, |s| !valid_manifest_text(s)) {
+        if csv_path.to_str().is_none_or(|s| !valid_manifest_text(s)) {
             return Err("position CSV path must be UTF-8 without control characters".into());
         }
         oa_sealed::refuse(csv_path)?;
