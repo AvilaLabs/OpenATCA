@@ -205,7 +205,7 @@
       ],
       "tested_scope": {
         "message_examples": "All 37 examples in NAM Rev G Part II sections 3.1.1 through 3.8.2 are represented by tests; one printed POA example is explicitly refused as defective and the corrected form is separately tested.",
-        "message_set": "The 25 Part II Table 2 core messages; other messages and per-partner attachments are refused/not implemented.",
+        "message_set": "The 25 Part II Table 2 core messages; Part II 2.2.6 candidate future message mnemonics are explicit refusal vectors (Mnemonic, LRM code 60). Other messages and per-partner attachments are refused/not implemented.",
         "timing_sequence": "Deterministic session tests cover named IRD timers, response deadlines, message-number sequencing and workload arithmetic; test timestamps are synthetic inputs, not legacy observations.",
         "legacy_comparison": "No comparison to unavailable ERAM/NAM production messages or live traffic is made."
       },
@@ -226,7 +226,8 @@
           "session::workload_table_is_consistent_with_the_icd_arithmetic",
           "malformed::length_bounds_are_enforced",
           "interface_conformance::registry_pins_nam_sources_profiles_and_partial_scope",
-          "interface_conformance::public_nam_example_defect_is_refused_and_rev_e_profile_is_explicit"
+          "interface_conformance::public_nam_example_defect_is_refused_and_rev_e_profile_is_explicit",
+          "interface_conformance::public_future_message_candidates_are_refused_as_undefined_core_mnemonics"
         ]
       }
     }
