@@ -210,7 +210,7 @@ fn truth_csv(truth: &Truth<'_>, window: (i64, i64)) -> Result<(String, u64, u64)
     let mut out = String::from("leg,time_ms,truth_course_deg,truth_speed_kt\n");
     let mut selected_rows = 0u64;
     let mut outside_rows = 0u64;
-    for leg in &truth.legs {
+    for leg in truth.legs {
         let Some((_, _, selected_count, outside_count)) =
             selected_truth_grid_bounds(leg.start_ms, leg.end_ms, window)?
         else {

@@ -82,10 +82,15 @@ const GAP_EDGES: [f64; 4] = [3.0, 6.0, 10.0, 20.0];
 const LAG_EVERY: usize = 4;
 const PHASES: [&str; 5] = ["onset", "steady turn", "rollout", "straight", "no phase"];
 
-/// Bound encoded input bytes before frame decode; this also bounds the loader's input-driven work.
-const MAX_ADSB_FILE_BYTES: u64 = 256 * 1024 * 1024;
-/// Refusal bound for all downstream tracker scans and per-report diagnostic maps.
-const MAX_DIAG_MEASUREMENTS: usize = 1_000_000;
+/// The two development clips are 388,031,016 and 466,613,280 bytes. A 512 MiB ceiling admits
+/// both without an unbounded loader. Valid records use at least 64 encoded bytes, so decoding
+/// this capped stream can retain fewer than 8,388,608 reports before the count check below.
+const MAX_ADSB_FILE_BYTES: u64 = 512 * 1024 * 1024;
+/// The larger development clip contains 5,775,231 reports. Eight million leaves 38% headroom
+/// and bounds downstream scans/maps; retained Sample/Ref/Cand arrays have their separate cap.
+/// Loading/splitting is below roughly 2 GiB of report columns at this bound. Keyed diagnostic
+/// maps, tracker state, truth and tables also remain subject to the coordinator's 6 GiB guard.
+const MAX_DIAG_MEASUREMENTS: usize = 8_000_000;
 /// Byte bound for CSV scanning/allocation before parsing; row/column/field bounds below cap vectors.
 const MAX_SAMPLES_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// Caps parallel sample/ref/candidate arrays and each sample-driven output loop.
