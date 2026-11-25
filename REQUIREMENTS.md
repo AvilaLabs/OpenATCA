@@ -5514,6 +5514,24 @@ scope.
   Opt-in reports record the profile and actual constants and state that interval statistics were
   not computed. OA and CV turn replays share these timing settings; the CV model choice remains
   explicit. Legacy reports acquire no profile lines.
+- **OA-TRK-407** The opt-in `p002 --oa-publication-grid sfdps-v1` mode requires an explicit
+  `--development` run and refuses frozen/candidate, combine, and export-only modes. It quantizes
+  only OpenATCA tick rows after the single tracker replay and before legacy adaptation, pairing,
+  and scoring: latitude/longitude to nearest whole arcsecond with exact integer signed half-away
+  rounding, six-decimal-degree publication rendering, then E7 conversion; east/north velocity components independently to nearest
+  1 kt from raw tracker f32 m/s before the existing deciknot conversion. M5 continues to use the
+  vector component magnitude, not a scalar ground-speed field. Truth, ERAM, passthrough, tracker,
+  timing and row times are unchanged. The ERAM-owned grid construction, pairing and metric
+  algorithms, thresholds and defaults are unchanged; quantization can affect paired values and
+  eligibility. Opt-in output
+  records the profile, units, rounding stage and counted invalid-position/unavailable-velocity
+  rows (nonfinite velocity pairs retain their original components; finite components outside the
+  adapter's representable range refuse the run); the exact-zero count and nonzero-vectors-rounded
+  to zero count are disjoint. `samples.csv` carries a matching comment stamp.
+  Without the option, scorer reports and
+  CSV bytes remain unchanged. Synthetic source tests cover signed ties, canonical coordinates,
+  poles/dateline, invalid positions, zero/nonfinite velocity, refused modes, and row-count
+  accounting.
 - **OA-CMP-047** The sealed hold-out day (2026-11-19, one named constant) is never exported: `--date` of it is
   refused in every date syntax. Any input path the shared sealed list refuses (`oa-sealed`, OA-SEAL-001), and every file the run opens
   (each file of the feed directory, the ADS-B clip, each file and the README of a `slice` source), is checked

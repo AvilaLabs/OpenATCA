@@ -35,3 +35,22 @@ a cutoff and with different later cadences. It checks fixed-profile configuratio
 compares real tracker rows through the cutoff, while confirming that the legacy interval-derived
 configurations diverge. The cutoff is before both runs' final input, so final flush output is not
 mistaken for prefix output. The regression is source-only until run by the designated coordinator.
+
+## Optional publication grid
+
+An explicit development run may also select `--oa-publication-grid sfdps-v1`. After replay,
+the scorer rounds only OpenATCA tick latitude and longitude to the nearest whole arcsecond,
+then renders that grid point to six decimal degrees before the existing E7 representation.
+The extra rendering step matches the inspected SFDPS development messages. It rounds the raw east and
+north velocity components independently to whole knots before the existing deciknot adapter.
+M5 still uses the vector magnitude; this option does not round scalar ground speed.
+
+The option changes the scoring view of the output. It leaves tracker state, timestamps,
+altitude, the reference, ERAM and passthrough inputs unchanged. Pairing and metric algorithms
+remain the same; rounded values can affect eligibility. Invalid positions and unavailable
+velocity pairs are counted, and a finite velocity beyond the adapter's representable range
+refuses the run. Reports and CSV comments identify the selected grid. Strict, combine and
+export-only modes refuse this option, and the default output has no added grid annotation.
+
+The run protocol determines whether this is a predeclared comparison or an exploratory
+sensitivity analysis. Selecting this option does not make a development result a hold-out claim.

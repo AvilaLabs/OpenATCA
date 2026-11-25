@@ -99,6 +99,13 @@ const BOOT_SEED: u64 = 20_261_119;
 const LARGE_M: f64 = 926.0;
 /// The passthrough rule: within this share of OpenATCA's value.
 const FLOOR_SHARE: f64 = 0.10;
+/// Development-only SFDPS-style quantization applied to OpenATCA tracker rows before pairing.
+const OA_PUBLICATION_GRID_PROFILE: &str = "sfdps-v1";
+const E7_PER_DEGREE: i128 = 10_000_000;
+const ARCSECONDS_PER_DEGREE: i128 = 3600;
+const MICRODEGREES_PER_DEGREE: i128 = 1_000_000;
+/// The legacy adapter clamps each velocity component to +/-32,000 deciknots in an i16 field.
+const MAX_PUBLICATION_COMPONENT_KT: f64 = 3200.0;
 
 /// P-003 rounding tolerance: reference times are whole seconds, so along-track error within this
 /// many seconds of travel at the reference ground speed is not charged.
@@ -109,6 +116,7 @@ const DIRTY_STAMP: &str = "DIRTY TREE \u{2014} not valid for hold-out scoring";
 const UNFITTED_TAU_S: f64 = 0.0;
 /// The stamp on every output file of a run marked `--development`.
 const DEV_STAMP: &str = "DEVELOPMENT RUN \u{2014} not a hold-out score";
+const OA_PUBLICATION_GRID_STAMP: &str = "OA_PUBLICATION_GRID=sfdps-v1; OA tick positions rounded to 1 arcsecond then six decimal degrees and velocity components to 1 kt before pairing";
 
 const SYS: [&str; 3] = ["OpenATCA", "ERAM", "Passthrough"];
 const OA: usize = 0;
@@ -116,11 +124,154 @@ const ER: usize = 1;
 const PT: usize = 2;
 const STATS: [&str; 3] = ["median", "p95", "rms"];
 
+// A7.2: cold struct, size guard waived; shell adapter copies one bounded tracker-row range at a time.
+#[derive(Default)]
+struct PublicationGridCounts {
+    invalid_position_rows: u64,
+    unavailable_velocity_rows: u64,
+    zero_velocity_rows: u64,
+    rounded_to_zero_velocity_rows: u64,
+}
+
+// A7.2: cold struct, size guard waived; bounded to one SCORE_CHUNK_ROWS tracker slice.
+struct PublicationGridColumns {
+    lat_e7: Vec<i32>,
+    lon_e7: Vec<i32>,
+    vel_east_mps: Vec<f32>,
+    vel_north_mps: Vec<f32>,
+}
+
+/// Round a signed rational to an integer, with exact half ties away from zero.
+/// Callers pass only bounded products of validated i32 coordinates/arcseconds and positive fixed denominators.
+fn round_ratio_half_away(numerator: i128, denominator: i128) -> i128 {
+    let magnitude = if numerator < 0 { -numerator } else { numerator };
+    let rounded = (magnitude + denominator / 2) / denominator;
+    if numerator < 0 {
+        -rounded
+    } else {
+        rounded
+    }
+}
+
+/// Convert E7 directly to the nearest whole arcsecond and back to canonical E7, avoiding a
+/// floating-point round trip and the incorrect assumption that an arcsecond is 10,000 E7 units.
+fn quantize_publication_coordinate(e7: i32, max_abs_e7: i32) -> Option<i32> {
+    if e7 == NONE_I32 || i64::from(e7).abs() > i64::from(max_abs_e7) {
+        return None;
+    }
+    let arcseconds = round_ratio_half_away(i128::from(e7) * ARCSECONDS_PER_DEGREE, E7_PER_DEGREE);
+    // Development wire census: whole arcseconds are rendered as six decimal degrees before
+    // the FIXM E7 parser sees them. Preserve that additional publication rounding too.
+    let published_e6 =
+        round_ratio_half_away(arcseconds * MICRODEGREES_PER_DEGREE, ARCSECONDS_PER_DEGREE);
+    let canonical_e7 = published_e6 * 10;
+    i32::try_from(canonical_e7).ok()
+}
+
+/// Quantize one east/north component before the legacy adapter converts m/s to deciknots.
+fn quantize_publication_velocity_component(mps: f32) -> Option<f32> {
+    if !mps.is_finite() {
+        return None;
+    }
+    let knots = (f64::from(mps) / KT_MPS).round();
+    if !knots.is_finite() || knots.abs() > MAX_PUBLICATION_COMPONENT_KT {
+        return None;
+    }
+    Some((knots * KT_MPS) as f32)
+}
+
+fn publication_grid_columns(
+    lat_e7: &[i32],
+    lon_e7: &[i32],
+    vel_east_mps: &[f32],
+    vel_north_mps: &[f32],
+    counts: &mut PublicationGridCounts,
+) -> Result<PublicationGridColumns, String> {
+    let n = lat_e7.len();
+    if [lon_e7.len(), vel_east_mps.len(), vel_north_mps.len()]
+        .iter()
+        .any(|&len| len != n)
+    {
+        return Err("publication-grid tracker columns have different lengths".into());
+    }
+    let mut out = PublicationGridColumns {
+        lat_e7: Vec::with_capacity(n),
+        lon_e7: Vec::with_capacity(n),
+        vel_east_mps: Vec::with_capacity(n),
+        vel_north_mps: Vec::with_capacity(n),
+    };
+    for (((&lat, &lon), &east), &north) in lat_e7
+        .iter()
+        .zip(lon_e7)
+        .zip(vel_east_mps)
+        .zip(vel_north_mps)
+    {
+        match (
+            quantize_publication_coordinate(lat, 900_000_000),
+            quantize_publication_coordinate(lon, 1_800_000_000),
+        ) {
+            (Some(quantized_lat), Some(quantized_lon)) => {
+                out.lat_e7.push(quantized_lat);
+                out.lon_e7.push(quantized_lon);
+            }
+            _ => {
+                counts.invalid_position_rows = counts.invalid_position_rows.saturating_add(1);
+                out.lat_e7.push(NONE_I32);
+                out.lon_e7.push(NONE_I32);
+            }
+        }
+        if east == 0.0 && north == 0.0 {
+            counts.zero_velocity_rows = counts.zero_velocity_rows.saturating_add(1);
+        }
+        if !east.is_finite() || !north.is_finite() {
+            counts.unavailable_velocity_rows = counts.unavailable_velocity_rows.saturating_add(1);
+            out.vel_east_mps.push(east);
+            out.vel_north_mps.push(north);
+        } else {
+            let quantized_east = quantize_publication_velocity_component(east)
+                .ok_or("finite east velocity exceeds the publication-grid representable range")?;
+            let quantized_north = quantize_publication_velocity_component(north)
+                .ok_or("finite north velocity exceeds the publication-grid representable range")?;
+            if (east != 0.0 || north != 0.0) && quantized_east == 0.0 && quantized_north == 0.0 {
+                counts.rounded_to_zero_velocity_rows =
+                    counts.rounded_to_zero_velocity_rows.saturating_add(1);
+            }
+            out.vel_east_mps.push(quantized_east);
+            out.vel_north_mps.push(quantized_north);
+        }
+    }
+    Ok(out)
+}
+
+fn validate_publication_grid_request(
+    enabled: bool,
+    development: bool,
+    frozen: bool,
+    candidate: bool,
+    export_only: bool,
+) -> Result<(), &'static str> {
+    if !enabled {
+        return Ok(());
+    }
+    if export_only {
+        return Err("--oa-publication-grid cannot be combined with export-only --export-eram mode");
+    }
+    if !development || frozen || candidate {
+        return Err("--oa-publication-grid sfdps-v1 requires --development and cannot be combined with frozen/candidate commits");
+    }
+    Ok(())
+}
+
+fn combine_has_unsupported_profile(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "--timing-profile" || arg == "--oa-publication-grid")
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("--combine") {
-        if argv.iter().any(|arg| arg == "--timing-profile") {
-            eprintln!("p002: refused: --timing-profile is not supported by --combine");
+        if combine_has_unsupported_profile(&argv) {
+            eprintln!("p002: refused: scoring profiles are not supported by --combine");
             return ExitCode::from(2);
         }
         return combine_main(argv.get(1..).unwrap_or(&[]));
@@ -134,6 +285,7 @@ fn main() -> ExitCode {
     ) = (None, None, None);
     let (mut allow_dirty, mut development) = (false, false);
     let mut timing_profile: Option<ScoringTimingProfile> = None;
+    let mut oa_publication_grid = false;
     let mut frozen: Option<String> = None;
     let mut candidate: Option<String> = None;
     let (mut damage_path, mut ledger): (Option<PathBuf>, Option<PathBuf>) = (None, None);
@@ -181,6 +333,22 @@ fn main() -> ExitCode {
             }
             continue;
         }
+        if a == "--oa-publication-grid" {
+            let Some(value) = args.next() else {
+                eprintln!("p002: --oa-publication-grid needs a profile name");
+                return ExitCode::from(2);
+            };
+            if oa_publication_grid {
+                eprintln!("p002: refused: --oa-publication-grid may be given only once");
+                return ExitCode::from(2);
+            }
+            if value != OA_PUBLICATION_GRID_PROFILE {
+                eprintln!("p002: unknown OA publication grid {value}");
+                return ExitCode::from(2);
+            }
+            oa_publication_grid = true;
+            continue;
+        }
         let v = args.next();
         match a.as_str() {
             "--adsb" => adsb = v.map(PathBuf::from),
@@ -208,6 +376,16 @@ fn main() -> ExitCode {
         eprintln!("p002: refused: --timing-profile fixed-10-30-120-v1 requires --development and cannot be combined with frozen/candidate commits");
         return ExitCode::from(2);
     }
+    if let Err(e) = validate_publication_grid_request(
+        oa_publication_grid,
+        development,
+        frozen.is_some(),
+        candidate.is_some(),
+        export_out.is_some(),
+    ) {
+        eprintln!("p002: refused: {e}");
+        return ExitCode::from(2);
+    }
     if let Some(file) = export_out {
         let stray = adsb.is_some()
             || out.is_some()
@@ -230,7 +408,7 @@ fn main() -> ExitCode {
     }
     let (Some(adsb), Some(out)) = (adsb, out) else {
         eprintln!(
-            "usage: p002 --adsb <clip.oaf> (--sfdps-dir <dir> | --eram-export <file>) --out <dir> [--drop-addresses <file>] [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]... [--damage-report <oa-feed-gaps report>] [--timing-profile fixed-10-30-120-v1] --ledger <file>\n       p002 --combine <dirA> <dirB> <dirC>"
+            "usage: p002 --adsb <clip.oaf> (--sfdps-dir <dir> | --eram-export <file>) --out <dir> [--drop-addresses <file>] [--label <text>] [--allow-dirty] [--development] [--frozen-commit <sha> --candidate-commit <sha>] [--exclude-window <from ISO> <to ISO>]... [--damage-report <oa-feed-gaps report>] [--timing-profile fixed-10-30-120-v1] [--oa-publication-grid sfdps-v1] --ledger <file>\n       p002 --combine <dirA> <dirB> <dirC>"
         );
         return ExitCode::from(2);
     };
@@ -358,6 +536,7 @@ fn main() -> ExitCode {
             ledger: &ledger,
             drop_list: drop_list.as_ref(),
             timing_profile: timing_profile.unwrap_or(ScoringTimingProfile::LegacyDayIntervals),
+            oa_publication_grid,
         },
     ) {
         Ok(text) => {
@@ -3239,6 +3418,7 @@ struct Opts<'a> {
     /// The addresses whose flights are left out of the ERAM load (`--drop-addresses`).
     drop_list: Option<&'a BTreeSet<u32>>,
     timing_profile: ScoringTimingProfile,
+    oa_publication_grid: bool,
 }
 
 /// Where the ERAM rows come from: the SFDPS recording, or an export of it.
@@ -3491,6 +3671,7 @@ fn run(
         ledger,
         drop_list,
         timing_profile,
+        oa_publication_grid,
     } = *opts;
     let partials_left = outputs_free(out_dir)?;
     let windows_all: Vec<Window> = hand_windows
@@ -3689,24 +3870,48 @@ fn run(
     let mut oa_row_times: TimesBy = BTreeMap::new();
     let mut n_reacq_updates = 0u64;
     let (mut flag_dup_rows, mut flag_conflicts) = (0u64, 0u64);
+    let mut publication_grid_counts = PublicationGridCounts::default();
     let counts = run.row_counts(RowSet::Ticks).map_err(|e| e.0)?;
     for range in score_ranges(&counts, SCORE_CHUNK_ROWS) {
         let r = run
             .rows_in(RowSet::Ticks, range.0, range.1)
             .map_err(|e| e.0)?;
-        let legacy = legacy_from_track_samples_by_leg(
-            &TrackSamples {
-                addr: &r.addr,
-                t_ns: &r.t_ns,
-                lat_e7: &r.lat_e7,
-                lon_e7: &r.lon_e7,
-                alt_ft: &r.alt_ft,
-                vel_east_mps: &r.vel_east_mps,
-                vel_north_mps: &r.vel_north_mps,
-                coast: &r.coast,
-            },
-            truth.legs,
-        )
+        let legacy = (if oa_publication_grid {
+            let quantized = publication_grid_columns(
+                &r.lat_e7,
+                &r.lon_e7,
+                &r.vel_east_mps,
+                &r.vel_north_mps,
+                &mut publication_grid_counts,
+            )?;
+            legacy_from_track_samples_by_leg(
+                &TrackSamples {
+                    addr: &r.addr,
+                    t_ns: &r.t_ns,
+                    lat_e7: &quantized.lat_e7,
+                    lon_e7: &quantized.lon_e7,
+                    alt_ft: &r.alt_ft,
+                    vel_east_mps: &quantized.vel_east_mps,
+                    vel_north_mps: &quantized.vel_north_mps,
+                    coast: &r.coast,
+                },
+                truth.legs,
+            )
+        } else {
+            legacy_from_track_samples_by_leg(
+                &TrackSamples {
+                    addr: &r.addr,
+                    t_ns: &r.t_ns,
+                    lat_e7: &r.lat_e7,
+                    lon_e7: &r.lon_e7,
+                    alt_ft: &r.alt_ft,
+                    vel_east_mps: &r.vel_east_mps,
+                    vel_north_mps: &r.vel_north_mps,
+                    coast: &r.coast,
+                },
+                truth.legs,
+            )
+        })
         .map_err(|e| format!("track samples: {e:?}"))?;
         oa_rows += r.addr.len() as u64;
         for (&a, &t) in r.addr.iter().zip(&r.t_ns) {
@@ -3892,6 +4097,9 @@ fn run(
     if mode.development {
         stamps.push(DEV_STAMP);
     }
+    if oa_publication_grid {
+        stamps.push(OA_PUBLICATION_GRID_STAMP);
+    }
     let csv = samples_csv(&rows, &stamps);
     let binary_sha = std::env::current_exe()
         .map_err(|e| e.to_string())
@@ -4011,6 +4219,33 @@ fn run(
         );
         let _ = writeln!(o, "SCORING_INTERVAL_STATS=not-computed");
         let _ = writeln!(o, "SCORING_TIMING_INPUTS=ADS-B set-A measurements only as tracker inputs; no set-B truth or ERAM/SFDPS cadence used for parameter selection");
+    }
+    if oa_publication_grid {
+        let _ = writeln!(o, "OA_PUBLICATION_GRID=sfdps-v1");
+        let _ = writeln!(o, "OA_PUBLICATION_GRID_MODE=explicit development-only OpenATCA tick quantization before legacy adaptation, pairing, and scoring; tracker core and replay unchanged");
+        let _ = writeln!(o, "OA_PUBLICATION_GRID_POSITION=nearest whole arcsecond, then six-decimal-degree publication rendering; exact signed integer rational conversions; ties half away from zero; canonical E7 output");
+        let _ = writeln!(o, "OA_PUBLICATION_GRID_VELOCITY=east and north components independently rounded from raw tracker f32 m/s to nearest 1 kt before legacy 0.1-kt conversion; nonfinite pairs retain input components and are counted; finite components beyond {} kt refuse the run; M5 remains vector magnitude, not scalar ground speed", MAX_PUBLICATION_COMPONENT_KT);
+        let _ = writeln!(
+            o,
+            "OA_PUBLICATION_GRID_INVALID_POSITION_ROWS={}",
+            publication_grid_counts.invalid_position_rows
+        );
+        let _ = writeln!(
+            o,
+            "OA_PUBLICATION_GRID_UNAVAILABLE_VELOCITY_ROWS={}",
+            publication_grid_counts.unavailable_velocity_rows
+        );
+        let _ = writeln!(
+            o,
+            "OA_PUBLICATION_GRID_ZERO_VELOCITY_ROWS={}",
+            publication_grid_counts.zero_velocity_rows
+        );
+        let _ = writeln!(
+            o,
+            "OA_PUBLICATION_GRID_ROUNDED_TO_ZERO_VELOCITY_ROWS={}",
+            publication_grid_counts.rounded_to_zero_velocity_rows
+        );
+        let _ = writeln!(o, "OA_PUBLICATION_GRID_ZERO_COUNTER_SEMANTICS=zero_velocity_rows counts exact input (0,0); rounded_to_zero_velocity_rows counts nonzero input vectors quantized to (0,0)");
     }
     let _ = writeln!(
         o,
@@ -4616,6 +4851,180 @@ fn write_share(o: &mut String, c: &[Cnt], draws: &[Vec<u32>], scale: f64) {
 )]
 mod tests {
     use super::*;
+    use oa_bench::tracker_input::legacy_from_track_samples;
+
+    // REQ: OA-TRK-407
+    #[test]
+    fn publication_grid_coordinates_use_signed_arcsecond_rounding_and_canonical_e7() {
+        assert_eq!(
+            quantize_publication_coordinate(12_500, 900_000_000),
+            Some(13_890)
+        );
+        assert_eq!(
+            quantize_publication_coordinate(-12_500, 900_000_000),
+            Some(-13_890)
+        );
+        assert_eq!(
+            quantize_publication_coordinate(2778, 900_000_000),
+            Some(2780)
+        );
+        assert_eq!(
+            quantize_publication_coordinate(2780, 900_000_000),
+            Some(2780)
+        );
+        assert_eq!(
+            quantize_publication_coordinate(-2778, 900_000_000),
+            Some(-2780)
+        );
+        assert_eq!(
+            quantize_publication_coordinate(900_000_000, 900_000_000),
+            Some(900_000_000)
+        );
+        assert_eq!(
+            quantize_publication_coordinate(-900_000_000, 900_000_000),
+            Some(-900_000_000)
+        );
+        assert_eq!(
+            quantize_publication_coordinate(1_800_000_000, 1_800_000_000),
+            Some(1_800_000_000)
+        );
+        assert_eq!(
+            quantize_publication_coordinate(-1_800_000_000, 1_800_000_000),
+            Some(-1_800_000_000)
+        );
+        assert_eq!(quantize_publication_coordinate(NONE_I32, 900_000_000), None);
+        assert_eq!(
+            quantize_publication_coordinate(900_000_001, 900_000_000),
+            None
+        );
+        assert_eq!(
+            quantize_publication_coordinate(1_800_000_001, 1_800_000_000),
+            None
+        );
+    }
+
+    // REQ: OA-TRK-407
+    #[test]
+    fn publication_grid_rounds_velocity_components_before_deci_knot_conversion() {
+        let half = (0.5 * KT_MPS) as f32;
+        let below = f32::from_bits(half.to_bits() - 1);
+        let above = f32::from_bits(half.to_bits() + 1);
+        assert_eq!(quantize_publication_velocity_component(below), Some(0.0));
+        assert_eq!(
+            quantize_publication_velocity_component(above),
+            Some(KT_MPS as f32)
+        );
+        assert_eq!(quantize_publication_velocity_component(-below), Some(0.0));
+        assert_eq!(
+            quantize_publication_velocity_component(-above),
+            Some((-KT_MPS) as f32)
+        );
+        assert_eq!(quantize_publication_velocity_component(0.0), Some(0.0));
+        assert_eq!(quantize_publication_velocity_component(f32::NAN), None);
+        assert_eq!(quantize_publication_velocity_component(f32::INFINITY), None);
+        assert_eq!(
+            quantize_publication_velocity_component((3300.0 * KT_MPS) as f32),
+            None
+        );
+    }
+
+    // REQ: OA-TRK-407
+    #[test]
+    fn publication_grid_quantizes_non_axis_components_before_adapter_deci_knots() {
+        let raw_east = [(1.49 * KT_MPS) as f32];
+        let raw_north = [(2.51 * KT_MPS) as f32];
+        let mut counts = PublicationGridCounts::default();
+        let q = publication_grid_columns(
+            &[410_000_000],
+            &[-880_000_000],
+            &raw_east,
+            &raw_north,
+            &mut counts,
+        )
+        .unwrap();
+        let addr = [1];
+        let time = [1_000_000_000];
+        let alt = [30_000];
+        let coast = [false];
+        let legacy = legacy_from_track_samples(&TrackSamples {
+            addr: &addr,
+            t_ns: &time,
+            lat_e7: &q.lat_e7,
+            lon_e7: &q.lon_e7,
+            alt_ft: &alt,
+            vel_east_mps: &q.vel_east_mps,
+            vel_north_mps: &q.vel_north_mps,
+            coast: &coast,
+        })
+        .unwrap();
+        assert_eq!(legacy.th.vx_dkt, [10]);
+        assert_eq!(legacy.th.vy_dkt, [30]);
+        assert_eq!(
+            (f64::from(raw_east[0]).hypot(f64::from(raw_north[0])) / KT_MPS).round(),
+            3.0
+        );
+    }
+
+    // REQ: OA-TRK-407
+    #[test]
+    fn publication_grid_counts_refused_rows_and_zero_vectors() {
+        let mut counts = PublicationGridCounts::default();
+        let columns = publication_grid_columns(
+            &[410_000_000, NONE_I32, 410_000_000, 410_000_000],
+            &[-880_000_000, -880_000_000, -880_000_000, -880_000_000],
+            &[0.0, 20.0, f32::NAN, 0.2],
+            &[0.0, 0.0, 30.0, 0.2],
+            &mut counts,
+        )
+        .unwrap();
+        assert_eq!(columns.lat_e7.len(), 4);
+        assert_eq!(columns.lat_e7[1], NONE_I32);
+        assert!(columns.vel_east_mps[2].is_nan());
+        assert_eq!(columns.vel_north_mps[2], 30.0);
+        assert_eq!(counts.invalid_position_rows, 1);
+        assert_eq!(counts.unavailable_velocity_rows, 1);
+        assert_eq!(counts.zero_velocity_rows, 1);
+        assert_eq!(counts.rounded_to_zero_velocity_rows, 1);
+        assert!(publication_grid_columns(
+            &[410_000_000],
+            &[-880_000_000],
+            &[(3300.0 * KT_MPS) as f32],
+            &[(2.0 * KT_MPS) as f32],
+            &mut counts,
+        )
+        .is_err());
+        assert!(publication_grid_columns(&[1], &[], &[1.0], &[1.0], &mut counts).is_err());
+    }
+
+    // REQ: OA-TRK-407
+    #[test]
+    fn publication_grid_refuses_strict_and_non_scoring_modes() {
+        assert!(validate_publication_grid_request(true, false, false, false, false).is_err());
+        assert!(validate_publication_grid_request(true, true, true, false, false).is_err());
+        assert!(validate_publication_grid_request(true, true, false, true, false).is_err());
+        assert!(validate_publication_grid_request(true, true, false, false, true).is_err());
+        assert!(validate_publication_grid_request(false, false, false, false, false).is_ok());
+        assert!(combine_has_unsupported_profile(&[
+            "--combine".into(),
+            "day-a".into(),
+            "--oa-publication-grid".into(),
+            "sfdps-v1".into(),
+        ]));
+        assert!(!combine_has_unsupported_profile(&[
+            "--combine".into(),
+            "day-a".into(),
+        ]));
+    }
+
+    // REQ: OA-TRK-407
+    #[test]
+    fn publication_grid_stamp_is_opt_in_and_default_csv_header_stays_unchanged() {
+        let legacy = samples_csv(&[], &[]);
+        assert!(legacy.starts_with("addr,t_ms,phase,band,common,common_two_way,oa_miss,"));
+        assert!(!legacy.contains("OA_PUBLICATION_GRID"));
+        let exploratory = samples_csv(&[], &[OA_PUBLICATION_GRID_STAMP]);
+        assert!(exploratory.starts_with("# OA_PUBLICATION_GRID=sfdps-v1;"));
+    }
 
     #[test]
     fn splitmix_known_values() {
