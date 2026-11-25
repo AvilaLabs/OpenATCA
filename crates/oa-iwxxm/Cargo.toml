@@ -1,0 +1,17 @@
+[package]
+name = "oa-iwxxm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Workspace XML parser; no external or OpenATCA-private guard dependency.
+oa-xml = { path = "../oa-xml" }
+
+[package.metadata.openatca]
+class = "shell"

@@ -34,6 +34,7 @@ members = [
     "crates/oa-j2k",
     "crates/oa-mva",
     "crates/oa-awc",
+    "crates/oa-iwxxm",
     "crates/oa-truth",
     "crates/oa-bench",
     "crates/oa-wind",

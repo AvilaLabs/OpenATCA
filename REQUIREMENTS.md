@@ -1129,6 +1129,30 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
 - **OA-FIXM-027** The ADS-B (Mode S) address of `aircraftDescription@aircraftAddress` is decoded as exactly six
   hexadecimal digits, not all zero; any other value is a field error.
 
+### IWXXM METAR/SPECI initial subset (oa-iwxxm)
+
+- **OA-IWXXM-001** The bounded shell decoder accepts the explicitly supported IWXXM 2025-2 METAR/SPECI
+  fragment only under exact IWXXM 2025-2, AIXM 5.1.1 and GML 3.2 expanded names, preserving kind,
+  status, permissible usage, station designator, automated-station flag,
+  issue and observation times, exact supported temperature/QNH quantities, and a required but
+  nillable `surfaceWind` property. Within a non-nil wind object, mean speed is required but nillable;
+  mean direction is optional, as are variability and gust, with supported units/operators/nil reasons.
+- **OA-IWXXM-002** An unsupported observation construct is refused visibly; non-CAVOK weather,
+  visibility, cloud, runway range, unsupported wind variability extremes, supplementary hazards,
+  trends and extensions are never silently omitted.
+- **OA-IWXXM-003** Inputs exceeding the document/table/work/scalar bounds are refused, and malformed XML,
+  timestamp, quantity units and decimal forms do not produce a normalized report. Inline property
+  wrappers have exact child cardinality/order; selected element-only parents reject hidden text.
+- **OA-IWXXM-004** Nil values and their reason strings remain distinct from numeric measurements, and a
+  schema-permitted absent observation stays distinct from a nil observation. This subset supports the
+  IWXXM/GML `nilReason` attribute form and refuses `xsi:nil` as unsupported. Temperatures below
+  absolute zero, nonpositive QNH, negative wind speeds/gusts, and directions outside 0..360 degrees
+  are refused. Timestamps use a declared positive-four-digit-year UTC-Z subset, converted to Unix
+  milliseconds without fractional rounding; offsets, year zero, 24:00, leap-second `:60`, and
+  sub-millisecond precision are refused. Only NORMAL, AMENDMENT and CORRECTION statuses are
+  accepted. This limited decoder is not an XSD/Schematron validator and does not claim full edition
+  conformance.
+
 ### TBFM metering publication (oa-tbfm)
 
 Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).
