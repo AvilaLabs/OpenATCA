@@ -1,4 +1,4 @@
-"""Synthetic regression source for the preregistered turn-onset metric; coordinator runs it."""
+"""Synthetic v2 and experimental v3 turn-onset regressions; coordinator runs them."""
 
 import unittest
 from unittest.mock import patch
@@ -25,7 +25,138 @@ def turn_rows(direction=1):
     return rows
 
 
+def v3_ramp_rows(direction=1, initial_course=359.8, end_second=49):
+    rows = [(second * 1000, initial_course, 120.0) for second in range(11)]
+    course = initial_course
+    ramp_rates = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7)
+    for second in range(11, end_second + 1):
+        rate = direction * (ramp_rates[second - 11] if second <= 17 else 0.7)
+        course = (course + rate) % 360.0
+        rows.append((second * 1000, course, 120.0))
+    return rows
+
+
 class TurnOnsetTests(unittest.TestCase):
+    def test_v3_gradual_ramp_labels_first_departure_and_alarms_on_third_confirmation(self):
+        truth = v3_ramp_rows()
+        truth_diag = turn_onset._new_v3_diagnostics()
+        events = turn_onset.truth_events(truth, "v3", truth_diag)
+        estimates = [(t, c) for t, c, _ in truth]
+        detector_diag = turn_onset._new_v3_diagnostics()
+        alarms = turn_onset.detect(estimates, "v3", detector_diag)
+        self.assertEqual(events, [(13_000, 1)])
+        self.assertEqual(alarms, [(17_000, 1)])
+        self.assertEqual(truth_diag["transition_confirmed"], 1)
+        self.assertEqual(detector_diag["transition_confirmed"], 1)
+
+    def test_v2_default_is_unchanged_on_gradual_ramp(self):
+        rows = v3_ramp_rows()
+        updates = [(t, c) for t, c, _ in rows]
+        self.assertEqual(turn_onset.truth_events(rows), turn_onset.truth_events(rows, "v2"))
+        self.assertEqual(turn_onset.truth_events(rows), [])
+        self.assertEqual(turn_onset.detect(updates), turn_onset.detect(updates, "v2"))
+        self.assertEqual(turn_onset.detect(updates), [])
+
+    def test_v3_straight_baseline_boundary_excludes_departure_interval(self):
+        def ramp_after(quiet_seconds):
+            rows = [(second * 1000, 0.0, 120.0) for second in range(quiet_seconds + 1)]
+            course = 0.0
+            for second, rate in enumerate((0.3, 0.5, 0.5, 0.5), quiet_seconds + 1):
+                course = (course + rate) % 360.0
+                rows.append((second * 1000, course, 120.0))
+            return rows
+
+        nine_seconds = ramp_after(9)
+        ten_seconds = ramp_after(10)
+        self.assertEqual(turn_onset.truth_events(nine_seconds, "v3"), [])
+        self.assertEqual(turn_onset.detect([(t, c) for t, c, _ in nine_seconds], "v3"), [])
+        self.assertEqual(turn_onset.truth_events(ten_seconds, "v3"), [(11_000, 1)])
+        self.assertEqual(turn_onset.detect([(t, c) for t, c, _ in ten_seconds], "v3"),
+                         [(14_000, 1)])
+
+    def test_v3_twelve_second_cadence_confirms_three_updates_over_24_seconds(self):
+        updates = [(0, 0.0), (12_000, 0.0), (24_000, 0.0),
+                   (36_000, 6.0), (48_000, 12.0), (60_000, 18.0)]
+        diagnostics = turn_onset._new_v3_diagnostics()
+        self.assertEqual(turn_onset.detect(updates, "v3", diagnostics), [(60_000, 1)])
+        self.assertEqual(diagnostics["transition_started"], 1)
+        self.assertEqual(diagnostics["transition_confirmed"], 1)
+
+    def test_v3_transition_timeout_reverse_quiet_and_invalid_cancel(self):
+        timeout_rates = [0.3] * 32
+        timeout_rows = [(second * 1000, 0.0, 120.0) for second in range(11)]
+        course = 0.0
+        for second, rate in enumerate(timeout_rates, 11):
+            course = (course + rate) % 360.0
+            timeout_rows.append((second * 1000, course, 120.0))
+        diag = turn_onset._new_v3_diagnostics()
+        self.assertEqual(turn_onset.truth_events(timeout_rows, "v3", diag), [])
+        self.assertEqual(diag["transition_cancelled_timeout"], 1)
+
+        reverse_rows = [(second * 1000, 0.0, 120.0) for second in range(11)]
+        course = 0.0
+        for second, rate in enumerate((0.3, 0.4, -0.3, *([0.0] * 12)), 11):
+            course = (course + rate) % 360.0
+            reverse_rows.append((second * 1000, course, 120.0))
+        diag = turn_onset._new_v3_diagnostics()
+        self.assertEqual(turn_onset.truth_events(reverse_rows, "v3", diag), [])
+        self.assertEqual(diag["transition_cancelled_reverse"], 1)
+
+        quiet_rows = [(second * 1000, 0.0, 120.0) for second in range(11)]
+        course = 0.0
+        for second, rate in enumerate((0.3, 0.4, 0.2, *([0.0] * 12)), 11):
+            course = (course + rate) % 360.0
+            quiet_rows.append((second * 1000, course, 120.0))
+        diag = turn_onset._new_v3_diagnostics()
+        self.assertEqual(turn_onset.truth_events(quiet_rows, "v3", diag), [])
+        self.assertEqual(diag["transition_cancelled_quiet"], 1)
+
+        invalid_rows = v3_ramp_rows(end_second=14)
+        invalid_rows[-1] = (invalid_rows[-1][0], invalid_rows[-1][1], 29.9)
+        diag = turn_onset._new_v3_diagnostics()
+        self.assertEqual(turn_onset.truth_events(invalid_rows, "v3", diag), [])
+        self.assertEqual(diag["transition_cancelled_invalid"], 1)
+
+    def test_v3_truth_gap_cancels_unconfirmed_transition(self):
+        rows = v3_ramp_rows(end_second=13)
+        rows.append((15_000, rows[-1][1] + 0.6, 120.0))
+        diag = turn_onset._new_v3_diagnostics()
+        self.assertEqual(turn_onset.truth_events(rows, "v3", diag), [])
+        self.assertEqual(diag["transition_cancelled_gap"], 1)
+
+    def test_v3_irregular_sfdps_updates_use_elapsed_rates_and_transition_time(self):
+        updates = [
+            (0, 359.8), (4_000, 359.8), (10_000, 359.8),
+            (11_000, 359.9), (12_000, 0.1), (14_000, 0.7),
+            (19_000, 2.7), (20_000, 3.2), (22_000, 4.4), (23_000, 5.1),
+        ]
+        diag = turn_onset._new_v3_diagnostics()
+        self.assertEqual(turn_onset.detect(updates, "v3", diag), [(23_000, 1)])
+        self.assertEqual(diag["transition_started"], 1)
+
+    def test_v3_active_latch_rearms_after_ten_seconds_straight(self):
+        rows = [(second * 1000, 359.8, 120.0) for second in range(11)]
+        course = 359.8
+        rates = {11: 0.1, 12: 0.2, 13: 0.3, 14: 0.4,
+                 15: 0.5, 16: 0.6, 17: 0.7, 18: 0.7, 19: 0.7, 20: 0.7}
+        rates.update({second: 0.0 for second in range(21, 31)})
+        rates.update({31: 0.3, 32: 0.4, 33: 0.5, 34: 0.6, 35: 0.7})
+        for second in sorted(rates):
+            course = (course + rates[second]) % 360.0
+            rows.append((second * 1000, course, 120.0))
+        self.assertEqual(turn_onset.truth_events(rows, "v3"),
+                         [(13_000, 1), (31_000, 1)])
+
+    def test_v3_wraps_both_course_directions(self):
+        clockwise = v3_ramp_rows(direction=1, initial_course=359.8)
+        counterclockwise = v3_ramp_rows(direction=-1, initial_course=0.2)
+        self.assertEqual(turn_onset.truth_events(clockwise, "v3"), [(13_000, 1)])
+        self.assertEqual(turn_onset.truth_events(counterclockwise, "v3"), [(13_000, -1)])
+        self.assertEqual(turn_onset.detect([(t, c) for t, c, _ in clockwise], "v3"),
+                         [(17_000, 1)])
+        self.assertEqual(turn_onset.detect([(t, c) for t, c, _ in counterclockwise], "v3"),
+                         [(17_000, -1)])
+
     def test_signed_rate_truth_label_backdates_but_detector_waits_for_three_updates(self):
         truth = turn_rows()
         estimates = [(t, c) for t, c, _ in truth]

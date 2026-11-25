@@ -1,8 +1,17 @@
 # Turn-onset detection delay (development only)
 
-Status: source draft, 2026-11-24. No day has been scored. November 20–22 remain sealed. The
-scorer and optional adapter source are present but await coordinator review and queued validation;
-no metric result is ready to claim.
+Status: source draft, 2026-11-25. The v2 scorer was run on two frozen two-minute 14Z development
+windows; both produced zero shared truth events, so they provide no detection-delay or miss
+comparison. November 20–22 remain sealed. V3 has no result; no performance or accuracy claim is
+ready.
+
+This document freezes the original v2 transition semantics and default. An experimental, separately
+versioned gradual-transition definition is documented in
+[`TURN_ONSET_PROTOCOL_V3.md`](TURN_ONSET_PROTOCOL_V3.md). V3 is opt-in with `--protocol v3`; it
+does not replace or rewrite v2 results. V2's midband reset restricts eligible events to paths that
+enter the 0.5 degrees/second run directly from its qualified straight state. The v3 document
+includes a hand-worked gradual-ramp example and its interpretation. Neither version has a
+performance or accuracy claim.
 
 ## Metric definition
 

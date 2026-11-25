@@ -26,6 +26,7 @@ TRUTH_MIN_SPEED_KT = 30.0
 MAX_DELAY_S = 30
 EARLY_MATCH_S = 5
 MAX_UPDATE_GAP_MS = 30_000
+MAX_TRANSITION_MS = 30_000
 MAX_MATCH_WORK = 5_000_000
 # A matched event may scan unused alarms for near, candidates, any, min, and removal.
 # Charging five full scans before any of them conservatively bounds every input-sized pass.
@@ -157,7 +158,7 @@ def load_estimates(path):
     return grouped
 
 
-def truth_events(rows):
+def _truth_events_v2(rows):
     """Retrospective signed course-rate labels; future rates only confirm truth events."""
     events, previous = [], None
     quiet_start = run_start = None
@@ -203,7 +204,7 @@ def truth_events(rows):
     return events
 
 
-def detect(updates):
+def _detect_v2(updates):
     """Causal detector on distinct updates; a stale held value never adds confirmations."""
     alarms = []
     previous, quiet_start, run_start = None, None, None
@@ -249,6 +250,185 @@ def detect(updates):
             quiet_start = None
             run_start, run_sign, run_len = None, 0, 0
     return alarms
+
+
+V3_DIAGNOSTIC_KEYS = (
+    "transition_started", "transition_confirmed", "transition_cancelled_quiet",
+    "transition_cancelled_reverse", "transition_cancelled_timeout",
+    "transition_cancelled_invalid", "transition_cancelled_gap",
+    "transition_pending_at_end",
+)
+
+
+def _bump(diagnostics, name):
+    if diagnostics is not None:
+        diagnostics[name] = diagnostics.get(name, 0) + 1
+
+
+def _new_v3_diagnostics():
+    return dict.fromkeys(V3_DIAGNOSTIC_KEYS, 0)
+
+
+def _truth_events_v3(rows, diagnostics=None):
+    """Experimental retrospective v3 labels with an explicit armed transition state."""
+    events, previous = [], None
+    quiet_start = None
+    candidate_start = candidate_sign = None
+    run_len, active = 0, False
+    for t, c, speed in rows:
+        if not valid_truth_sample(c, speed):
+            if candidate_start is not None:
+                _bump(diagnostics, "transition_cancelled_invalid")
+            previous, quiet_start, candidate_start, candidate_sign = None, None, None, None
+            run_len, active = 0, False
+            continue
+        if previous is None or t - previous[0] != 1000:
+            if candidate_start is not None:
+                _bump(diagnostics, "transition_cancelled_gap")
+            previous, quiet_start, candidate_start, candidate_sign = (t, c), None, None, None
+            run_len, active = 0, False
+            continue
+        previous_t = previous[0]
+        rate = wrap180(c - previous[1])
+        previous = (t, c)
+        if active:
+            if abs(rate) < STRAIGHT_RATE_DEG_S:
+                quiet_start = previous_t if quiet_start is None else quiet_start
+                if t - quiet_start >= STRAIGHT_S * 1000:
+                    active = False
+            else:
+                quiet_start = None
+            continue
+        if candidate_start is not None:
+            if abs(rate) < STRAIGHT_RATE_DEG_S:
+                _bump(diagnostics, "transition_cancelled_quiet")
+                candidate_start, candidate_sign, run_len = None, None, 0
+                quiet_start = previous_t
+                continue
+            sign = 1 if rate > 0.0 else -1
+            if sign != candidate_sign:
+                _bump(diagnostics, "transition_cancelled_reverse")
+                candidate_start, candidate_sign, run_len, quiet_start = None, None, 0, None
+                continue
+            if t - candidate_start > MAX_TRANSITION_MS:
+                _bump(diagnostics, "transition_cancelled_timeout")
+                candidate_start, candidate_sign, run_len, quiet_start = None, None, 0, None
+                continue
+            if abs(rate) >= TURN_RATE_DEG_S:
+                run_len += 1
+                if run_len == PERSIST_SAMPLES:
+                    events.append((candidate_start, candidate_sign))
+                    _bump(diagnostics, "transition_confirmed")
+                    active, quiet_start = True, None
+                    candidate_start, candidate_sign, run_len = None, None, 0
+            else:
+                run_len = 0
+            continue
+        if abs(rate) < STRAIGHT_RATE_DEG_S:
+            quiet_start = previous_t if quiet_start is None else quiet_start
+            continue
+        # Only intervals observed before this departure can qualify the straight baseline.
+        armed = quiet_start is not None and previous_t - quiet_start >= STRAIGHT_S * 1000
+        if armed and abs(rate) >= STRAIGHT_RATE_DEG_S:
+            candidate_start = t
+            candidate_sign = 1 if rate > 0.0 else -1
+            run_len = int(abs(rate) >= TURN_RATE_DEG_S)
+            quiet_start = None
+            _bump(diagnostics, "transition_started")
+        else:
+            quiet_start = None
+    if candidate_start is not None:
+        _bump(diagnostics, "transition_pending_at_end")
+    return events
+
+
+def _detect_v3(updates, diagnostics=None):
+    """Causal v3 detector; confirmation uses three distinct qualifying updates."""
+    alarms = []
+    previous, quiet_start = None, None
+    candidate_start = candidate_sign = None
+    run_len, active = 0, False
+    for t, c in updates:
+        if previous is None:
+            previous = (t, c)
+            continue
+        dt_ms = t - previous[0]
+        if dt_ms <= 0:
+            continue
+        if dt_ms > MAX_UPDATE_GAP_MS:
+            if candidate_start is not None:
+                _bump(diagnostics, "transition_cancelled_gap")
+            previous, quiet_start, candidate_start, candidate_sign = (t, c), None, None, None
+            run_len, active = 0, False
+            continue
+        previous_t = previous[0]
+        rate = wrap180(c - previous[1]) / (dt_ms / 1000.0)
+        previous = (t, c)
+        if active:
+            if abs(rate) < STRAIGHT_RATE_DEG_S:
+                quiet_start = previous_t if quiet_start is None else quiet_start
+                if t - quiet_start >= STRAIGHT_S * 1000:
+                    active = False
+            else:
+                quiet_start = None
+            continue
+        if candidate_start is not None:
+            if abs(rate) < STRAIGHT_RATE_DEG_S:
+                _bump(diagnostics, "transition_cancelled_quiet")
+                candidate_start, candidate_sign, run_len = None, None, 0
+                quiet_start = previous_t
+                continue
+            sign = 1 if rate > 0.0 else -1
+            if sign != candidate_sign:
+                _bump(diagnostics, "transition_cancelled_reverse")
+                candidate_start, candidate_sign, run_len, quiet_start = None, None, 0, None
+                continue
+            if t - candidate_start > MAX_TRANSITION_MS:
+                _bump(diagnostics, "transition_cancelled_timeout")
+                candidate_start, candidate_sign, run_len, quiet_start = None, None, 0, None
+                continue
+            if abs(rate) >= TURN_RATE_DEG_S:
+                run_len += 1
+                if run_len == PERSIST_SAMPLES:
+                    alarms.append((t, candidate_sign))
+                    _bump(diagnostics, "transition_confirmed")
+                    active, quiet_start = True, None
+                    candidate_start, candidate_sign, run_len = None, None, 0
+            else:
+                run_len = 0
+            continue
+        if abs(rate) < STRAIGHT_RATE_DEG_S:
+            quiet_start = previous_t if quiet_start is None else quiet_start
+            continue
+        # The current rate interval is the departure; it cannot complete the straight baseline.
+        armed = quiet_start is not None and previous_t - quiet_start >= STRAIGHT_S * 1000
+        if armed and abs(rate) >= STRAIGHT_RATE_DEG_S:
+            candidate_start = t
+            candidate_sign = 1 if rate > 0.0 else -1
+            run_len = int(abs(rate) >= TURN_RATE_DEG_S)
+            quiet_start = None
+            _bump(diagnostics, "transition_started")
+        else:
+            quiet_start = None
+    if candidate_start is not None:
+        _bump(diagnostics, "transition_pending_at_end")
+    return alarms
+
+
+def truth_events(rows, protocol="v2", diagnostics=None):
+    if protocol == "v2":
+        return _truth_events_v2(rows)
+    if protocol == "v3":
+        return _truth_events_v3(rows, diagnostics)
+    raise ValueError("protocol must be 'v2' or 'v3'")
+
+
+def detect(updates, protocol="v2", diagnostics=None):
+    if protocol == "v2":
+        return _detect_v2(updates)
+    if protocol == "v3":
+        return _detect_v3(updates, diagnostics)
+    raise ValueError("protocol must be 'v2' or 'v3'")
 
 
 def reference_gap(valid_truth_times, onset):
@@ -340,6 +520,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--truth", required=True, type=Path, help="1 Hz smoothed reference CSV")
     parser.add_argument("--estimates", required=True, type=Path, help="distinct output update CSV")
+    parser.add_argument("--protocol", choices=("v2", "v3"), default="v2",
+                        help="metric protocol version (default: v2)")
     args = parser.parse_args(argv)
     try:
         truth = load_truth(args.truth)
@@ -350,13 +532,18 @@ def main(argv=None):
         availability_intervals = {n: [] for n in SYSTEMS}
         availability_lags = {n: [] for n in SYSTEMS}
         availability_rows = {n: 0 for n in SYSTEMS}
+        truth_transition_diagnostics = _new_v3_diagnostics()
+        detector_transition_diagnostics = {n: _new_v3_diagnostics() for n in SYSTEMS}
         event_count = 0
         for leg, rows in truth.items():
-            events = truth_events(rows)
+            events = truth_events(rows, args.protocol,
+                                  truth_transition_diagnostics if args.protocol == "v3" else None)
             event_count += len(events)
             for name in SYSTEMS:
                 updates = estimates.get((leg, name), [])
-                result = score(rows, events, updates, detect((t, c) for t, c, _ in updates))
+                alarms = detect(((t, c) for t, c, _ in updates), args.protocol,
+                                detector_transition_diagnostics[name] if args.protocol == "v3" else None)
+                result = score(rows, events, updates, alarms)
                 for key in ("truth_events", "matched", "truth_gaps", "missing_output_events", "never_detected", "opposite_direction_misses", "gap_associated_alarms", "early", "false_turns", "update_rows", "flight_hours"):
                     totals[name][key] += result[key]
                 totals_delays[name].extend(result["delays"])
@@ -366,8 +553,18 @@ def main(argv=None):
                 availability_rows[name] += len(received)
                 availability_intervals[name].extend(b - a for a, b in zip(received, received[1:]))
                 availability_lags[name].extend(t - state_t for state_t, _, t in updates if t is not None)
-        print("protocol=turn-onset-dev-v2 truth=retrospective-smoothed-reference signed_ground_track_rate_only")
-        print(f"turn_rate_deg_s={TURN_RATE_DEG_S:g} straight_rate_deg_s={STRAIGHT_RATE_DEG_S:g} straight_s={STRAIGHT_S} persistence_samples={PERSIST_SAMPLES} max_delay_s={MAX_DELAY_S} early_match_s={EARLY_MATCH_S} max_update_gap_s={MAX_UPDATE_GAP_MS / 1000:g}")
+        if args.protocol == "v2":
+            print("protocol=turn-onset-dev-v2 truth=retrospective-smoothed-reference signed_ground_track_rate_only")
+            print(f"turn_rate_deg_s={TURN_RATE_DEG_S:g} straight_rate_deg_s={STRAIGHT_RATE_DEG_S:g} straight_s={STRAIGHT_S} persistence_samples={PERSIST_SAMPLES} max_delay_s={MAX_DELAY_S} early_match_s={EARLY_MATCH_S} max_update_gap_s={MAX_UPDATE_GAP_MS / 1000:g}")
+        else:
+            print("protocol=turn-onset-dev-v3-experimental truth=retrospective-smoothed-reference signed_ground_track_rate_only")
+            print(f"turn_rate_deg_s={TURN_RATE_DEG_S:g} straight_rate_deg_s={STRAIGHT_RATE_DEG_S:g} straight_s={STRAIGHT_S} persistence_samples={PERSIST_SAMPLES} max_transition_s={MAX_TRANSITION_MS / 1000:g} max_delay_s={MAX_DELAY_S} early_match_s={EARLY_MATCH_S} max_update_gap_s={MAX_UPDATE_GAP_MS / 1000:g}")
+            print("v3_truth_transition_diagnostics=" + ",".join(
+                f"{key}:{truth_transition_diagnostics[key]}" for key in V3_DIAGNOSTIC_KEYS))
+            for name in SYSTEMS:
+                diag = detector_transition_diagnostics[name]
+                print(f"v3_{name}_transition_diagnostics=" + ",".join(
+                    f"{key}:{diag[key]}" for key in V3_DIAGNOSTIC_KEYS))
         print("terminal_event_partition=shared_truth_events=truth_reference_gaps+matched+never_detected;opposite_direction_misses_subset_of_never_detected;missing_output_events_may_overlap_never_detected")
         print("system,shared_truth_events,matched,truth_reference_gaps,missing_output_events,never_detected,opposite_direction_misses,gap_associated_alarms,early,false_turns,output_update_rows,state_interval_p50_s,state_interval_p90_s,state_interval_p99_s,state_interval_max_s,availability_rows,availability_interval_p50_s,availability_interval_p90_s,availability_interval_p99_s,availability_interval_max_s,availability_minus_state_p50_s,availability_minus_state_p90_s,availability_minus_state_p99_s,availability_minus_state_max_s,observed_flight_hours,false_turns_per_flight_hour,median_state_delay_s,p90_state_delay_s")
         for name in SYSTEMS:
