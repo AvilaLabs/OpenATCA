@@ -42,19 +42,21 @@ logic.
 Use an ARMv8-A, AArch64 Linux server with ECC memory and hardware watchdog for the first alternate
 evaluation. This gives a different processor architecture from the x86-64 primary evaluation
 target while retaining a hosted Linux environment for a separate display and sensor gateway.
-Select the GNAT Pro for Ada 25 GCC toolchain family on its native Linux ARM64 platform. AdaCore's
-GNAT Pro 25 release notes identify Linux ARM 64-bit native platform support and GNAT Pro for Ada's
-ARM 64-bit cross-Linux support; this establishes a supported toolchain family/platform pairing,
-not a board, distribution, certification, or performance qualification ([GNAT Pro 25 release
-notes](https://docs.adacore.com/live/wave/gnat-release-notes/html/gnat_release_note/release_notes_25.html)).
-Use the SPARK-eligible subset for bounded state and arithmetic where proof obligations are
-well-defined. Constrained types, explicit checks, and proof-capable contracts offer a different
-implementation and assurance path from Rust; a proof establishes only its stated property. Pin
-the exact GNAT Pro maintenance release, board, Linux distribution, runtime profile, compiler
-switches, libraries, and linker before the evaluation build. Change the platform choice if the
-selected board lacks vendor-supported runtime/toolchain coverage, if the safety authority rejects
-the assurance evidence, or if measured worst-case execution misses the target below. Do not port
-the Rust implementation or share generated code as a shortcut.
+Use the free FSF GNAT compiler with the freely available FSF SPARK toolchain, installed and pinned
+through Alire, as the baseline for a reproducible evaluation. AdaCore documents the FSF SPARK
+distribution and its Alire installation path in the SPARK User's Guide §3.4; the selected package,
+compiler release, Alire index/revisions, dependencies, and build environment must still be frozen
+as evaluation inputs ([SPARK User's Guide](https://docs.adacore.com/live/wave/spark2014-docs/html/ug/en/install.html),
+[Alire](https://alire.ada.dev/)). GNAT Pro remains an optional supported toolchain if the owner
+chooses its commercial support or qualification path; it is not required for the baseline. Use the
+SPARK-eligible subset for bounded state and arithmetic where proof obligations are well-defined.
+Constrained types, explicit checks, and proof-capable contracts offer a different implementation
+and assurance path from Rust; a proof establishes only its stated property. Pin the exact GNAT FSF
+and SPARK versions, Alire index and dependency revisions, board, Linux distribution, runtime
+profile, compiler switches, libraries, and linker before the evaluation build. Change the platform
+choice if the selected board lacks a supported runtime/toolchain pairing, if the safety authority
+rejects the assurance evidence, or if measured worst-case execution misses the target below. Do not
+port the Rust implementation or share generated code as a shortcut.
 
 Keep the alternate in its own repository and source history, with a separate build pipeline,
 release process, reviewer set, issue tracking, and requirements-to-test trace. Requirements may
@@ -206,11 +208,12 @@ does not itself authorize a transfer.
 - **Independent surveillance feed.** The sensor fan-out, alternate feed, source timing, and failure
   isolation available at the intended facility are unknown. Next step: document the actual network,
   gateway, time, power, and facility dependency graph before selecting hardware.
-- **Selected evaluation platform.** GNAT Pro 25 supports native Linux ARM64, but the exact board,
-  distribution, runtime profile, maintenance release, compiler options, safety evidence, and
-  execution performance remain open. Next step: pin those items and verify vendor support and
-  procurement availability before producing an evaluation binary; return to x86-64 only if the
-  selected ARM64 pairing is unsupported or misses the frozen deadline.
+- **Selected evaluation platform.** The baseline is FSF GNAT and FSF SPARK via Alire on ARM64 Linux;
+  the exact board, distribution, runtime profile, compiler and SPARK releases, dependency/index
+  revisions, compiler options, safety evidence, and execution performance remain open. GNAT Pro
+  is an optional supported alternative. Next step: freeze and reproduce the selected open toolchain
+  and verify board/runtime support before producing an evaluation binary; return to x86-64 only if
+  the selected ARM64 pairing is unsupported or misses the frozen deadline.
 - **Facility load correspondence.** The 8,192-track/three-radar profile is a concrete initial
   evaluation envelope, not a confirmed site's traffic model. Next step: obtain an approved,
   privacy-safe source-rate and peak/surge profile; increase the envelope if that profile exceeds
