@@ -5,6 +5,8 @@
 //! oa-adapt build --nasr <zip> --cifp <zip> --artcc ZAU [--buffer-nm 50]
 //!                [--expect-sha256 <file>=<hex>]... --out <snapshot>
 //! oa-adapt diff <a> <b>
+//! oa-adapt package --snapshot <snapshot> --out-root <new-directory> --release <id>
+//!                   --facility <ARTCC> --change-ref <approved-record>
 //! ```
 //!
 //! `build` writes `<snapshot>` and `<snapshot>.report.txt`. `diff` prints to standard output.
@@ -21,6 +23,7 @@ use std::path::{Path, PathBuf};
 
 /// Default selection buffer, nautical miles.
 pub const DEFAULT_BUFFER_NM: f64 = 50.0;
+const MAX_PACKAGE_ARGUMENT_BYTES: usize = 4096;
 
 /// Why a command failed; `Display` is the message printed to the user.
 #[derive(Debug)]
@@ -47,7 +50,10 @@ pub const USAGE: &str = "usage:
   oa-adapt build --nasr <zip> --cifp <zip> --artcc <ID> [--buffer-nm <NM>]
                  [--expect-sha256 <file>=<hex>]... [--allow-cycle-mismatch] --out <snapshot>
   oa-adapt diff <snapshot-a> <snapshot-b>
-  oa-adapt route --snapshot <snapshot> --steps <identity-qualified instructions>";
+  oa-adapt package --snapshot <snapshot> --out-root <new-directory> --release <id>
+                   --facility <ARTCC> --change-ref <approved-record>
+  oa-adapt route --snapshot <snapshot> --steps <identity-qualified instructions>
+  oa-adapt route --package-root <directory> --expected-manifest-sha256 <hex> --steps <instructions>";
 
 fn failed(step: &str, e: impl fmt::Display) -> CliError {
     CliError::Failed(format!("{step}: {e}"))
@@ -173,15 +179,37 @@ pub fn report_path(out: &Path) -> PathBuf {
 }
 
 fn read_snapshot(path: &Path) -> Result<Vec<u8>, CliError> {
-    let f = oa_sealed::open(path).map_err(|e| failed(&format!("open {}", path.display()), e))?;
+    let (file, declared_len) = oa_sealed::open_regular(path)
+        .map_err(|e| failed(&format!("open {}", path.display()), e))?;
+    let max = u64::try_from(MAX_SNAPSHOT_BYTES)
+        .map_err(|_| CliError::Failed("snapshot byte limit width".into()))?;
+    if declared_len > max {
+        return Err(CliError::Failed(format!(
+            "{} is larger than the {MAX_SNAPSHOT_BYTES}-byte snapshot limit",
+            path.display()
+        )));
+    }
+    let capacity = usize::try_from(declared_len)
+        .map_err(|_| CliError::Failed("snapshot byte limit width".into()))?;
     let mut buf = Vec::new();
-    // One byte past the limit shows an oversized file without reading all of it.
-    f.take(MAX_SNAPSHOT_BYTES as u64 + 1)
-        .read_to_end(&mut buf)
-        .map_err(|e| failed(&format!("read {}", path.display()), e))?;
+    buf.try_reserve_exact(capacity)
+        .map_err(|_| CliError::Failed("snapshot allocation could not be reserved".into()))?;
+    // `open_regular` refuses FIFOs and other non-files before this bounded read.
+    file.take(
+        max.checked_add(1)
+            .ok_or_else(|| CliError::Failed("snapshot byte limit overflow".into()))?,
+    )
+    .read_to_end(&mut buf)
+    .map_err(|e| failed(&format!("read {}", path.display()), e))?;
     if buf.len() > MAX_SNAPSHOT_BYTES {
         return Err(CliError::Failed(format!(
             "{} is larger than the {MAX_SNAPSHOT_BYTES}-byte snapshot limit",
+            path.display()
+        )));
+    }
+    if u64::try_from(buf.len()).ok() != Some(declared_len) {
+        return Err(CliError::Failed(format!(
+            "{} changed length while being read",
             path.display()
         )));
     }
@@ -244,16 +272,87 @@ pub fn run_diff(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     Ok(())
 }
 
+/// `package`: wrap one validated canonical snapshot in a content-addressed adaptation package.
+pub fn run_package(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
+    if args.len() != 10 {
+        return Err(CliError::Usage("package needs exactly --snapshot FILE --out-root DIR --release ID --facility ARTCC --change-ref REF".into()));
+    }
+    if args
+        .iter()
+        .any(|argument| argument.len() > MAX_PACKAGE_ARGUMENT_BYTES)
+    {
+        return Err(CliError::Usage(
+            "package argument exceeds byte limit".into(),
+        ));
+    }
+    let mut snapshot = None;
+    let mut root = None;
+    let mut release = None;
+    let mut facility = None;
+    let mut change_ref = None;
+    let mut it = args.iter();
+    while let Some(flag) = it.next() {
+        let value = it
+            .next()
+            .ok_or_else(|| CliError::Usage(format!("missing value for {flag}")))?;
+        if value.is_empty() || value.starts_with("--") {
+            return Err(CliError::Usage(format!("{flag} needs a value")));
+        }
+        let slot = match flag.as_str() {
+            "--snapshot" => &mut snapshot,
+            "--out-root" => &mut root,
+            "--release" => &mut release,
+            "--facility" => &mut facility,
+            "--change-ref" => &mut change_ref,
+            _ => {
+                return Err(CliError::Usage(format!(
+                    "unknown package argument {flag:?}"
+                )))
+            }
+        };
+        if slot.replace(value.clone()).is_some() {
+            return Err(CliError::Usage(format!("{flag} given more than once")));
+        }
+    }
+    let snapshot =
+        PathBuf::from(snapshot.ok_or_else(|| CliError::Usage("package needs --snapshot".into()))?);
+    let root =
+        PathBuf::from(root.ok_or_else(|| CliError::Usage("package needs --out-root".into()))?);
+    let release = release.ok_or_else(|| CliError::Usage("package needs --release".into()))?;
+    let facility = facility.ok_or_else(|| CliError::Usage("package needs --facility".into()))?;
+    let change_ref =
+        change_ref.ok_or_else(|| CliError::Usage("package needs --change-ref".into()))?;
+    let bytes = read_snapshot(&snapshot)?;
+    let digest =
+        crate::shell::manifest::write_new_package(&root, &bytes, &release, &facility, &change_ref)
+            .map_err(|e| failed("adaptation package", e))?;
+    writeln!(
+        out,
+        "adaptation_package_status\tcreated_unverified_for_activation"
+    )
+    .map_err(|e| failed("write output", e))?;
+    writeln!(out, "manifest_sha256\t{}", to_hex(&digest)).map_err(|e| failed("write output", e))?;
+    writeln!(
+        out,
+        "integrity_scope\tsha256 consistency only; issuer is not authenticated"
+    )
+    .map_err(|e| failed("write output", e))?;
+    Ok(())
+}
+
 /// Dispatches on the first argument; `args` excludes the program name.
 pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     match args.split_first() {
         Some((cmd, rest)) if cmd == "build" => run_build(rest, out),
         Some((cmd, rest)) if cmd == "diff" => run_diff(rest, out),
+        Some((cmd, rest)) if cmd == "package" => run_package(rest, out),
         Some((cmd, rest)) if cmd == "route" => crate::shell::route_cli::run_route(rest, out),
         Some((cmd, _)) if cmd == "--help" || cmd == "-h" => {
             let _ = writeln!(out, "{USAGE}");
             Ok(())
         }
-        _ => Err(CliError::Usage("expected a command: build or diff".into())),
+        _ => Err(CliError::Usage(
+            "expected a command: build, diff, package, or route".into(),
+        )),
     }
 }

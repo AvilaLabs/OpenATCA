@@ -387,6 +387,24 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 - **OA-ASP-078** The calendar helper refuses impossible dates: year 1 to 9999, month 1 to 12, a day that exists
   in the month; `airac_cycle` returns `None` for them.
 
+## Adaptation package integrity and activation
+
+- **OA-ADAPT-001** An adaptation package manifest is canonical, versioned and bounded. Its exact bytes have a
+  SHA-256 identity that must match a separately supplied expected digest. The manifest identifies release,
+  facility, change record, reader API range and exactly one required airspace snapshot component. Unknown schema
+  versions, incompatible reader ranges, duplicate or missing components, noncanonical encodings, extra files,
+  malformed fields and unsupported paths refuse.
+- **OA-ADAPT-002** Before packaged route conversion admits a model, the loader reads the manifest and required
+  component through guarded descriptors, checks the opened file's bounded inventory identity and declared byte
+  length before allocation/read, hashes and decodes the same snapshot bytes, and matches the decoded facility.
+  Package creation returns its pin only after writes, syncs, and read-back succeed; on error the retained directory
+  is not automatically provisioned. A complete valid byte set after a publisher error could still verify against
+  a separately supplied pin: verification establishes byte consistency, not publication durability. The package
+  is rechecked on every verified route command.
+  Root/file identities and bounded inventory are checked before and after reads, but this is a point-in-time
+  consistency check, not an atomic multi-file filesystem snapshot or lock against hostile replacement/restoration.
+  SHA-256 checks agreement with an independently supplied pin; it does not authenticate an issuer or software.
+
 ### Route conversion (oa-airspace)
 
 - **OA-RTE-001** A route fix is resolved by its complete stable identity, and a direct connector exists only when an explicit direct step is supplied; otherwise a fix remains an isolated anchor.

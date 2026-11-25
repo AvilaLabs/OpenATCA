@@ -347,7 +347,8 @@ const ALLOW: &str = "seal-allow:";
 // Three reproduction-export additions reviewed here: a guarded create-new write-only temporary,
 // metadata of that owned temporary, and no-clobber publication by hard link. Input reads still
 // use the descriptor-verified guard; these allowances do not permit unguarded data reads.
-const ALLOW_COUNT: usize = 180;
+// G2: three reviewed package metadata/inventory/output sites now carry explicit rationale.
+const ALLOW_COUNT: usize = 183;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.

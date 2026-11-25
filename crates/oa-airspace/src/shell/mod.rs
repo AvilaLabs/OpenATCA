@@ -5,5 +5,6 @@
 pub mod build;
 pub mod cli;
 pub mod load;
+pub mod manifest;
 pub mod route_cli;
 pub mod sources;

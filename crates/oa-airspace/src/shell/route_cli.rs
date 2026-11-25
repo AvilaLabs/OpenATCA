@@ -6,6 +6,7 @@ use crate::core::route::{
 };
 use crate::core::snapshot::{decode, MAX_SNAPSHOT_BYTES};
 use crate::shell::cli::CliError;
+use crate::shell::manifest::{PackageIdentity, VerifiedPackage};
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -15,6 +16,38 @@ const MAX_TOKEN_BYTES: usize = 256;
 const MAX_TOKEN_FIELDS: usize = 12;
 const ROUTE_ARGUMENT_COUNT: usize = 4;
 const MAX_ROUTE_ARGUMENT_BYTES: usize = 4096;
+
+// A7.2: cold one-shot route input; no per-cycle or real-time use.
+enum RouteInput {
+    Legacy {
+        model: crate::core::model::Model,
+        digest: oa_sha256::Digest,
+    },
+    Verified(VerifiedPackage),
+}
+
+impl RouteInput {
+    fn model(&self) -> &crate::core::model::Model {
+        match self {
+            Self::Legacy { model, .. } => model,
+            Self::Verified(package) => package.model(),
+        }
+    }
+
+    fn snapshot_digest(&self) -> oa_sha256::Digest {
+        match self {
+            Self::Legacy { digest, .. } => *digest,
+            Self::Verified(package) => package.identity().snapshot_sha256,
+        }
+    }
+
+    fn identity(&self) -> Option<&PackageIdentity> {
+        match self {
+            Self::Legacy { .. } => None,
+            Self::Verified(package) => Some(package.identity()),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParseReason {
@@ -204,9 +237,9 @@ fn row<T: Copy>(values: &[T], index: usize) -> Result<T, CliError> {
 /// `oa-adapt route --snapshot FILE --steps 'FIX:... DCT:... AWY:... PROC:...'`.
 /// Writes the complete report to the supplied output stream, including failed conversion counts.
 pub fn run_route(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
-    if args.len() != ROUTE_ARGUMENT_COUNT {
+    if args.len() != ROUTE_ARGUMENT_COUNT && args.len() != ROUTE_ARGUMENT_COUNT + 2 {
         return Err(CliError::Usage(
-            "route needs exactly --snapshot FILE --steps TEXT".into(),
+            "route needs --snapshot FILE --steps TEXT, or --package-root DIR --expected-manifest-sha256 HEX --steps TEXT".into(),
         ));
     }
     if args
@@ -216,11 +249,15 @@ pub fn run_route(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         return Err(CliError::Usage("route argument exceeds byte limit".into()));
     }
     let mut snapshot = None;
+    let mut package_root = None;
+    let mut expected_pin = None;
     let mut steps = None;
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
         let slot = match flag.as_str() {
             "--snapshot" => &mut snapshot,
+            "--package-root" => &mut package_root,
+            "--expected-manifest-sha256" => &mut expected_pin,
             "--steps" => &mut steps,
             _ => return Err(CliError::Usage(format!("unknown route argument {flag:?}"))),
         };
@@ -232,38 +269,62 @@ pub fn run_route(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
                 .ok_or_else(|| CliError::Usage(format!("missing value for {flag}")))?,
         );
     }
-    let snapshot = snapshot.ok_or_else(|| CliError::Usage("route needs --snapshot".into()))?;
     let steps = steps.ok_or_else(|| CliError::Usage("route needs --steps".into()))?;
     let plan =
         parse_route_steps(steps).map_err(|e| CliError::Usage(format!("route parse {e:?}")))?;
-    let guard = oa_sealed::Sealed::production();
-    let (file, len) = guard
-        .open_regular(Path::new(snapshot))
-        .map_err(|e| CliError::Failed(format!("snapshot: {e}")))?;
-    let max = u64::try_from(MAX_SNAPSHOT_BYTES)
-        .map_err(|_| CliError::Failed("snapshot byte limit width".into()))?;
-    if len > max {
-        return Err(CliError::Failed("snapshot exceeds byte limit".into()));
-    }
-    let mut bytes = Vec::new();
-    file.take(
-        max.checked_add(1)
-            .ok_or_else(|| CliError::Failed("snapshot byte limit overflow".into()))?,
-    )
-    .read_to_end(&mut bytes)
-    .map_err(|e| CliError::Failed(format!("snapshot: {e}")))?;
-    if bytes.len() > MAX_SNAPSHOT_BYTES {
-        return Err(CliError::Failed("snapshot grew beyond byte limit".into()));
-    }
-    let model = decode(&bytes).map_err(|e| CliError::Failed(format!("snapshot: {e}")))?;
+    let input = match (snapshot, package_root, expected_pin) {
+        (Some(path), None, None) => {
+            let guard = oa_sealed::Sealed::production();
+            let (file, len) = guard.open_regular(Path::new(path))
+                .map_err(|e| CliError::Failed(format!("snapshot: {e}")))?;
+            let max = u64::try_from(MAX_SNAPSHOT_BYTES)
+                .map_err(|_| CliError::Failed("snapshot byte limit width".into()))?;
+            if len > max { return Err(CliError::Failed("snapshot exceeds byte limit".into())); }
+            let mut bytes = Vec::new();
+            file.take(max.checked_add(1).ok_or_else(|| CliError::Failed("snapshot byte limit overflow".into()))?)
+                .read_to_end(&mut bytes)
+                .map_err(|e| CliError::Failed(format!("snapshot: {e}")))?;
+            if bytes.len() > MAX_SNAPSHOT_BYTES { return Err(CliError::Failed("snapshot grew beyond byte limit".into())); }
+            let model = decode(&bytes).map_err(|e| CliError::Failed(format!("snapshot: {e}")))?;
+            let digest = oa_sha256::sha256(&bytes);
+            RouteInput::Legacy { model, digest }
+        }
+        (None, Some(root), Some(pin)) => {
+            let pin = crate::shell::manifest::parse_pin(pin)
+                .map_err(|e| CliError::Usage(format!("expected manifest pin: {e}")))?;
+            let verified = crate::shell::manifest::verify_current(Path::new(root), pin)
+                .map_err(|e| CliError::Failed(format!("adaptation refused: {e}")))?;
+            RouteInput::Verified(verified)
+        }
+        _ => return Err(CliError::Usage("route snapshot mode and verified package mode are mutually exclusive; verified mode needs both package root and independent manifest pin".into())),
+    };
     let mut converted = empty_converted_route();
-    let report = convert_route(&model, &plan, &mut converted);
+    let report = convert_route(input.model(), &plan, &mut converted);
     let write_error = |e| CliError::Failed(format!("write route output: {e}"));
     writeln!(out, "OA_ROUTE_CONVERSION\t1").map_err(write_error)?;
+    if let Some(identity) = input.identity() {
+        writeln!(out, "adaptation_status\tverified_for_this_process").map_err(write_error)?;
+        writeln!(
+            out,
+            "manifest_sha256\t{}",
+            oa_sha256::to_hex(&identity.manifest_sha256)
+        )
+        .map_err(write_error)?;
+        writeln!(out, "adaptation_release\t{}", identity.release).map_err(write_error)?;
+        writeln!(out, "adaptation_facility\t{}", identity.facility).map_err(write_error)?;
+        writeln!(out, "change_ref\t{}", identity.change_ref).map_err(write_error)?;
+        writeln!(
+            out,
+            "integrity_scope\tsha256 consistency only; issuer is not authenticated"
+        )
+        .map_err(write_error)?;
+    } else {
+        writeln!(out, "adaptation_status\tunverified_legacy_snapshot").map_err(write_error)?;
+    }
     writeln!(
         out,
         "snapshot_sha256\t{}",
-        oa_sha256::to_hex(&oa_sha256::sha256(&bytes))
+        oa_sha256::to_hex(&input.snapshot_digest())
     )
     .map_err(write_error)?;
     writeln!(

@@ -19,6 +19,7 @@
 //! | `build_info` | core  | what a build learns beside the model, and its thresholds           |
 //! | `build`      | shell | parsed sources to a model; its working maps are `HashMap`s         |
 //! | `load`       | shell | reads the archives, verifies hashes, parses with oa-nasr/oa-arinc424 |
+//! | `manifest`   | shell | canonical adaptation package manifest, guarded verification and activation |
 //! | `cli`        | shell | the `oa-adapt` command line, file reads and writes                 |
 
 // The width of `usize` is fixed by construction: no 32-bit build of the core (B10).

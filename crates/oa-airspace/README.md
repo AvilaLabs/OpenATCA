@@ -32,6 +32,25 @@ The `oa-adapt route` command accepts normalized identity-qualified instructions:
 oa-adapt route --snapshot region.snap --steps 'FIX:ALPHA:K3:1:- DCT:BRAVO:K3:1:-'
 ```
 
+For a pinned adaptation package, first create a new package directory from a validated snapshot:
+
+```text
+oa-adapt package --snapshot region.snap --out-root package-2026-11 --release cycle-2026-11 \
+  --facility ZAU --change-ref CHG-123
+```
+
+The command reports a manifest SHA-256 pin. Provision that value independently, then pass it to
+the verified route path:
+
+```text
+oa-adapt route --package-root package-2026-11 --expected-manifest-sha256 <64-hex-pin> \
+  --steps 'FIX:ALPHA:K3:1:- DCT:BRAVO:K3:1:-'
+```
+
+Verified route mode checks the package on each invocation and decodes the exact bytes it hashes.
+The pin is an integrity comparison; it does not authenticate who issued the package. The legacy
+`--snapshot` route form remains a development path and labels its adaptation status unverified.
+
 `FIX` and `DCT` fields are identifier, region, identity class and scope (`-` means absent).
 `AWY` fields are designator, location, four entry-fix fields, four exit-fix fields and planned
 altitude in feet. `PROC` fields are airport, airport region, procedure kind, procedure identifier,
