@@ -34,8 +34,8 @@ fn synthetic_model() -> Model {
     })
 }
 
-#[test]
 // REQ: OA-ADAPT-001, OA-ADAPT-002
+#[test]
 fn pinned_package_is_checked_before_route_conversion_and_uses_exact_loaded_bytes() {
     let model = synthetic_model();
     let snapshot = encode(&model).expect("fixture snapshot");
@@ -77,8 +77,8 @@ fn pinned_package_is_checked_before_route_conversion_and_uses_exact_loaded_bytes
     let _ = fs::remove_dir_all(root);
 }
 
-#[test]
 // REQ: OA-ADAPT-001, OA-ADAPT-002
+#[test]
 fn incompatible_or_extra_package_paths_refuse_before_route_output() {
     let model = synthetic_model();
     let snapshot = encode(&model).expect("fixture snapshot");
@@ -101,8 +101,8 @@ fn incompatible_or_extra_package_paths_refuse_before_route_output() {
     let _ = fs::remove_dir_all(root);
 }
 
-#[test]
 // REQ: OA-ADAPT-001, OA-ADAPT-002
+#[test]
 fn package_command_reads_back_before_reporting_the_activation_pin() {
     let snapshot = oa_airspace::snapshot::encode(&synthetic_model()).expect("synthetic snapshot");
     let scratch = fresh_root();
@@ -142,8 +142,8 @@ fn package_command_reads_back_before_reporting_the_activation_pin() {
     let _ = fs::remove_dir_all(scratch);
 }
 
-#[test]
 // REQ: OA-ADAPT-001
+#[test]
 fn package_command_refuses_an_oversized_argument_before_cloning_or_io() {
     let args = vec![
         "package".to_owned(),
