@@ -31,6 +31,8 @@
 //! grows by one 80-byte entry per checkpoint interval (about 700 KB for 24 hours at 10 s).
 
 use std::cmp::Reverse;
+use std::cell::Cell;
+use std::rc::Rc;
 use std::collections::BinaryHeap;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -77,6 +79,132 @@ pub fn spec_from_paths(feed: FeedKind, paths: Vec<PathBuf>) -> StreamSpec {
             )
         }),
     }
+}
+
+/// Bytes actually read from one guarded descriptor. A prefix digest includes read-ahead;
+/// `eof` is true only after a verified EOF, never merely because the replay window ended.
+// A7.2: cold provenance record, size guard waived.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputReceipt {
+    pub opened: bool,
+    pub eof: bool,
+    pub bytes: u64,
+    pub sha256: [u8; 32],
+}
+
+/// Ordered pathname-to-receipt mapping. Digests identify content, not authenticated origin.
+// A7.2: cold provenance record, size guard waived.
+#[derive(Clone)]
+pub struct ObservedInput {
+    pub path: PathBuf,
+    /// Full length of the same guarded regular-file descriptor supplied to the merge. For gzip,
+    /// this is the compressed on-disk size. It is reserved before any input bytes are read.
+    pub reserved_bytes: u64,
+    pub receipt: Rc<Cell<InputReceipt>>,
+}
+
+struct HashingInput {
+    file: std::fs::File,
+    hash: oa_sha256::Sha256,
+    receipt: Rc<Cell<InputReceipt>>,
+    expected_bytes: u64,
+    bytes: u64,
+    eof: bool,
+}
+
+impl Read for HashingInput {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() { return Ok(0); }
+        let remaining = self.expected_bytes.checked_sub(self.bytes)
+            .ok_or_else(|| io::Error::other("input receipt already exceeds reserved size"))?;
+        let with_growth_probe = remaining.checked_add(1)
+            .ok_or_else(|| io::Error::other("input growth-probe size overflow"))?;
+        let read_len = match usize::try_from(with_growth_probe) {
+            Ok(read_cap) => buf.len().min(read_cap),
+            // On a narrower platform the cap is larger than any possible caller slice.
+            Err(_) => buf.len(),
+        };
+        let bounded_buf = buf.get_mut(..read_len)
+            .ok_or_else(|| io::Error::other("input bounded read slice invalid"))?;
+        let n = self.file.read(bounded_buf)?;
+        let next = self.bytes.checked_add(u64::try_from(n).map_err(|_| io::Error::other("input read width overflow"))?)
+            .ok_or_else(|| io::Error::other("input receipt byte overflow"))?;
+        self.hash.update(bounded_buf.get(..n).ok_or_else(|| io::Error::other("input read length invalid"))?)
+            .map_err(|_| io::Error::other("input digest length refused"))?;
+        self.bytes = next;
+        if next > self.expected_bytes { return Err(io::Error::other("input grew after guarded open")); }
+        if n == 0 {
+            if next != self.expected_bytes || self.file.metadata()?.len() != self.expected_bytes {
+                return Err(io::Error::other("input size changed while replaying"));
+            }
+            self.eof = true;
+        }
+        Ok(n)
+    }
+}
+
+impl Drop for HashingInput {
+    fn drop(&mut self) {
+        self.receipt.set(InputReceipt { opened: true, eof: self.eof, bytes: self.bytes, sha256: self.hash.clone().finalize() });
+    }
+}
+
+/// H2 provenance from the same descriptors consumed by the merge, including partial reads.
+/// Every descriptor is opened and sized before the merge can read any of them; the caller can
+/// reject the aggregate reservation without processing a prefix. The path inventory is capped at
+/// 128 files. For gzip, the reservation is the compressed on-disk length.
+pub fn spec_from_paths_observed(feed: FeedKind, paths: Vec<PathBuf>) -> io::Result<(StreamSpec, Vec<ObservedInput>, u64)> {
+    if paths.len() > 128 { return Err(io::Error::new(io::ErrorKind::InvalidInput, "observed input file cap")); }
+    let mut observed: Vec<_> = paths.into_iter().map(|path| ObservedInput {
+        path,
+        reserved_bytes: 0,
+        receipt: Rc::new(Cell::new(InputReceipt::default())),
+    }).collect();
+    let mut readers: Vec<io::Result<Box<dyn Read>>> = Vec::with_capacity(observed.len().saturating_add(1));
+    let mut total_reserved = 0u64;
+    let mut open_error = None;
+    for input in &mut observed {
+        let (file, expected_bytes) = match oa_sealed::open_regular(&input.path) {
+            Ok(opened) => opened,
+            Err(error) => {
+                open_error = Some(error);
+                break;
+            }
+        };
+        total_reserved = total_reserved.saturating_add(expected_bytes);
+        input.reserved_bytes = expected_bytes;
+        input.receipt.set(InputReceipt {
+            opened: true,
+            sha256: oa_sha256::sha256(&[]),
+            ..InputReceipt::default()
+        });
+        readers.push(Ok(Box::new(HashingInput {
+            file,
+            hash: oa_sha256::Sha256::new(),
+            receipt: input.receipt.clone(),
+            expected_bytes,
+            bytes: 0,
+            eof: false,
+        }) as Box<dyn Read>));
+    }
+    // An open failure is surfaced before any successfully opened descriptor is read. Their
+    // receipts and reservations remain available for the caller's INCOMPLETE footer.
+    if let Some(error) = open_error { readers.insert(0, Err(error)); }
+    let mut readers = readers.into_iter();
+    let spec = StreamSpec { feed, open: Box::new(move || readers.next()) };
+    Ok((spec, observed, total_reserved))
+}
+
+/// Stable ASCII provenance record; pathname bytes are hex, so controls cannot forge lines.
+pub fn observed_input_line(index: usize, input: &ObservedInput) -> io::Result<String> {
+    let path = input.path.as_os_str().as_encoded_bytes();
+    if path.len() > 4096 { return Err(io::Error::other("observed input pathname exceeds 4096 bytes")); }
+    use std::fmt::Write as _;
+    let mut hex = String::with_capacity(path.len().saturating_mul(2));
+    for byte in path { let _ = write!(hex, "{byte:02x}"); }
+    let receipt = input.receipt.get();
+    let digest = if receipt.opened { oa_sha256::to_hex(&receipt.sha256) } else { "none".into() };
+    Ok(format!("INPUT\tindex={index}\tpath_hex={hex}\topened={}\teof={}\tbytes={}\treserved_bytes={}\tsha256={digest}\n",u8::from(receipt.opened),u8::from(receipt.eof),receipt.bytes,input.reserved_bytes))
 }
 
 /// A stream over in-memory files (tests, emulators).
@@ -140,8 +268,35 @@ struct Head {
     payload: Vec<u8>,
 }
 
+/// Offline whole-merge work allowance. A step renews only the existing finite per-step
+/// frame-reader allowance; decoded bytes include invalid and sealed input before gates.
+// A7.2: cold shell budget, size guard waived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MergeBudget {
+    pub steps_remaining: u64,
+    pub decoded_bytes_remaining: u64,
+    pub refused: bool,
+}
+
+type SharedBudget = Rc<Cell<MergeBudget>>;
+
+fn charge_decoded(budget: &Option<SharedBudget>, bytes: usize) -> io::Result<()> {
+    if let Some(budget) = budget {
+        let mut value = budget.get();
+        let bytes = u64::try_from(bytes).map_err(|_| io::Error::other("decoded byte width overflow"))?;
+        let Some(left) = value.decoded_bytes_remaining.checked_sub(bytes) else {
+            value.refused = true; budget.set(value);
+            return Err(io::Error::other("bounded merge decoded-byte budget exhausted"));
+        };
+        value.decoded_bytes_remaining = left;
+        budget.set(value);
+    }
+    Ok(())
+}
+
 struct Stream<'b> {
     feed: FeedKind,
+    budget: Option<SharedBudget>,
     reader: FrameReader<'b>,
     open: OpenFn,
     cur: Option<Box<dyn Read>>,
@@ -185,6 +340,7 @@ impl<'b> Stream<'b> {
     fn new(spec: StreamSpec, reader: FrameReader<'b>, chunk: usize) -> Self {
         Stream {
             feed: spec.feed,
+            budget: None,
             reader,
             open: spec.open,
             cur: None,
@@ -226,6 +382,15 @@ impl Stream<'_> {
     /// [`advance`](Self::advance), reporting the reader work each bounded step measured.
     fn advance_observed(&mut self, on_step: &mut dyn FnMut(FrameWorkStats)) -> io::Result<bool> {
         loop {
+            if let Some(budget) = &self.budget {
+                let mut remaining = budget.get();
+                let Some(left) = remaining.steps_remaining.checked_sub(1) else {
+                    remaining.refused = true; budget.set(remaining);
+                    return Err(io::Error::other("bounded merge reader-step budget exhausted"));
+                };
+                remaining.steps_remaining = left;
+                budget.set(remaining);
+            }
             let mut work = FrameWorkBudget::for_capacity(MAX_FRAME_LEN);
             let before = self.reader.work_stats();
             let step = self.advance_step(&mut work)?;
@@ -352,22 +517,27 @@ impl Stream<'_> {
         let data = self.inbuf.get(..have).unwrap_or(&[]);
         match &mut self.mode {
             Mode::Raw => {
+                charge_decoded(&self.budget, have)?;
                 self.bytes += have as u64;
                 self.pending.extend_from_slice(data);
             }
             Mode::Gzip(g) => {
                 for piece in data.chunks(GZ_IN) {
+                    let budget = self.budget.clone();
                     let bytes = &mut self.bytes;
                     let pending = &mut self.pending;
                     let res = g.push(
                         piece,
-                        &mut |b: &[u8]| -> Result<(), std::convert::Infallible> {
+                        &mut |b: &[u8]| -> io::Result<()> {
+                            charge_decoded(&budget, b.len())?;
                             *bytes += b.len() as u64;
                             pending.extend_from_slice(b);
                             Ok(())
                         },
                     );
-                    if res.is_err() {
+                    if let Err(oa_zip::GzipError::Sink(error)) = res {
+                        return Err(error);
+                    } else if res.is_err() {
                         count_error(&mut self.errors, ErrKind::GzipDamaged, 1);
                         self.mode = Mode::Dead;
                         break;
@@ -462,6 +632,30 @@ pub fn merge_counted(
     chunk: usize,
     sink: &mut dyn FnMut(&Merged<'_>) -> io::Result<()>,
 ) -> (MergeReport, io::Result<()>) {
+    merge_counted_inner(specs, chunk, sink, None)
+}
+
+/// A whole-merge work/decoded-byte bound, including malformed input that yields no frame.
+/// Remaining allowances and reader diagnostics are retained on every exit.
+pub fn merge_counted_bounded(
+    specs: Vec<StreamSpec>, chunk: usize,
+    sink: &mut dyn FnMut(&Merged<'_>) -> io::Result<()>, budget: &mut MergeBudget,
+) -> (MergeReport, io::Result<()>) {
+    if specs.len() > 128 || budget.refused {
+        return (empty_report(), Err(io::Error::new(io::ErrorKind::InvalidInput, "bounded merge stream cap or exhausted budget")));
+    }
+    let shared = Rc::new(Cell::new(*budget));
+    let result = merge_counted_inner(specs, chunk, sink, Some(shared.clone()));
+    *budget = shared.get();
+    result
+}
+
+fn merge_counted_inner(
+    specs: Vec<StreamSpec>,
+    chunk: usize,
+    sink: &mut dyn FnMut(&Merged<'_>) -> io::Result<()>,
+    budget: Option<SharedBudget>,
+) -> (MergeReport, io::Result<()>) {
     let n = specs.len();
     let mut bufs: Vec<Vec<u8>> = (0..n).map(|_| vec![0u8; MAX_FRAME_LEN]).collect();
     let mut streams: Vec<Stream<'_>> = Vec::with_capacity(n);
@@ -472,7 +666,9 @@ pub fn merge_counted(
                 Err(io::Error::other("reader buffer too small")),
             );
         };
-        streams.push(Stream::new(spec, reader, chunk));
+        let mut stream = Stream::new(spec, reader, chunk);
+        stream.budget = budget.clone();
+        streams.push(stream);
     }
     // Capacity n, never more: one entry per stream that still has a frame.
     let mut heap: BinaryHeap<Reverse<(MergeKey, usize)>> = BinaryHeap::with_capacity(n);
@@ -669,5 +865,186 @@ mod tests {
         assert!(steps >= 5, "{steps}");
         assert!(stream.reader.work_stats().scan_positions >= 5 * quota.scan_positions);
         assert_eq!(stream.reader.work_stats().copied_bytes, total as u64);
+    }
+}
+
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod bounded_merge_tests {
+    use super::*;
+    use std::io::Write;
+    // REQ: OA-FLT-044
+    #[test]
+    fn invalid_bytes_cannot_bypass_whole_reader_work_and_byte_budgets() {
+        let bytes=vec![0x55; 128*1024];
+        let mut budget=MergeBudget {steps_remaining:2,decoded_bytes_remaining:1024*1024,refused:false};
+        let (_,result)=merge_counted_bounded(vec![spec_from_bytes(FeedKind::Sfdps,vec![bytes.clone()])],4096,&mut |_|Ok(()),&mut budget);
+        assert!(result.is_err());assert!(budget.refused);assert_eq!(budget.steps_remaining,0);
+        let mut budget=MergeBudget {steps_remaining:1000,decoded_bytes_remaining:1024,refused:false};
+        let (_,result)=merge_counted_bounded(vec![spec_from_bytes(FeedKind::Sfdps,vec![bytes])],4096,&mut |_|Ok(()),&mut budget);
+        assert!(result.is_err());assert!(budget.refused);
+    }
+
+    // REQ: OA-FLT-043, OA-FLT-044
+    #[test]
+    fn observed_receipt_hashes_the_same_descriptor_through_verified_eof() {
+        let dir = std::env::temp_dir().join(format!(
+            "oa-replay-observed-receipt-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("input.oaf");
+        let payload = b"receipt frame";
+        let mut bytes = vec![0u8; oa_feed::HEADER_LEN + payload.len() + oa_feed::TRAILER_LEN];
+        let used = oa_feed::encode_frame(&mut bytes, 3, 0, 1, 7, 9, payload).unwrap();
+        bytes.truncate(used);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (spec, inputs, reserved) = spec_from_paths_observed(FeedKind::Sfdps, vec![path.clone()]).unwrap();
+        assert_eq!(reserved, bytes.len() as u64);
+        assert_eq!(inputs[0].reserved_bytes, bytes.len() as u64);
+        let mut budget = MergeBudget {
+            steps_remaining: 100,
+            decoded_bytes_remaining: 1024 * 1024,
+            refused: false,
+        };
+        let mut delivered = 0usize;
+        let (report, result) = merge_counted_bounded(
+            vec![spec],
+            MAX_CHUNK,
+            &mut |_| {
+                delivered += 1;
+                Ok(())
+            },
+            &mut budget,
+        );
+        assert!(result.is_ok());
+        assert_eq!(report.files, 1);
+        assert_eq!(delivered, 1);
+        let receipt = inputs[0].receipt.get();
+        assert!(receipt.opened);
+        assert!(receipt.eof);
+        assert_eq!(receipt.bytes, bytes.len() as u64);
+        assert_eq!(receipt.sha256, oa_sha256::sha256(&bytes));
+        let line = observed_input_line(0, &inputs[0]).unwrap();
+        assert!(line.contains("\topened=1\teof=1\t"));
+        assert!(line.contains(format!("\tbytes={}\treserved_bytes={}\t", bytes.len(), bytes.len()).as_str()));
+        let digest = oa_sha256::to_hex(&receipt.sha256);
+        assert!(line.contains(digest.as_str()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // REQ: OA-FLT-044
+    #[test]
+    fn observed_reservation_sums_full_descriptor_lengths_before_any_read() {
+        let dir = std::env::temp_dir().join(format!(
+            "oa-replay-observed-reservation-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("a.oaf");
+        let second = dir.join("b.oaf");
+        let first_bytes = vec![0x11; 17];
+        let second_bytes = vec![0x22; 31];
+        std::fs::write(&first, &first_bytes).unwrap();
+        std::fs::write(&second, &second_bytes).unwrap();
+
+        let (spec, inputs, reserved) = spec_from_paths_observed(
+            FeedKind::Sfdps,
+            vec![first.clone(), second.clone()],
+        )
+        .unwrap();
+        assert_eq!(reserved, 48);
+        assert_eq!(inputs.iter().map(|input| input.reserved_bytes).sum::<u64>(), 48);
+        assert!(inputs.iter().all(|input| input.receipt.get().opened));
+        assert!(inputs.iter().all(|input| input.receipt.get().bytes == 0));
+        drop(spec);
+        assert!(inputs.iter().all(|input| !input.receipt.get().eof));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // REQ: OA-FLT-044
+    #[test]
+    fn a_growing_observed_file_consumes_at_most_one_probe_byte_past_its_reservation() {
+        let dir = std::env::temp_dir().join(format!(
+            "oa-replay-observed-growth-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("growing.oaf");
+        let reserved = b"01234567";
+        std::fs::write(&path, reserved).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let expected_bytes = file.metadata().unwrap().len();
+        let mut grow = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        grow.write_all(b"abcdefgh").unwrap();
+        drop(grow);
+
+        let receipt = Rc::new(Cell::new(InputReceipt {
+            opened: true,
+            sha256: oa_sha256::sha256(&[]),
+            ..InputReceipt::default()
+        }));
+        let mut input = HashingInput {
+            file,
+            hash: oa_sha256::Sha256::new(),
+            receipt: receipt.clone(),
+            expected_bytes,
+            bytes: 0,
+            eof: false,
+        };
+        let mut caller_buffer = vec![0u8; 64 * 1024];
+        let error = input.read(&mut caller_buffer).expect_err("growth probe must refuse the changed file");
+        assert!(error.to_string().contains("input grew after guarded open"));
+        drop(input);
+
+        let observed = receipt.get();
+        assert_eq!(observed.bytes, expected_bytes + 1);
+        assert!(!observed.eof);
+        assert_eq!(observed.sha256, oa_sha256::sha256(b"01234567a"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // REQ: OA-FLT-044
+    #[test]
+    fn bounded_merge_records_a_hashed_prefix_but_never_claims_eof_on_cap() {
+        let dir = std::env::temp_dir().join(format!(
+            "oa-replay-observed-prefix-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("invalid.oaf");
+        let bytes = vec![0x55; 2 * 1024 * 1024];
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (spec, inputs, reserved) = spec_from_paths_observed(FeedKind::Sfdps, vec![path.clone()]).unwrap();
+        assert_eq!(reserved, bytes.len() as u64);
+        assert_eq!(inputs[0].reserved_bytes, bytes.len() as u64);
+        let mut budget = MergeBudget {
+            steps_remaining: 1,
+            decoded_bytes_remaining: 4 * 1024 * 1024,
+            refused: false,
+        };
+        let (_, result) = merge_counted_bounded(vec![spec], MAX_CHUNK, &mut |_| Ok(()), &mut budget);
+        assert!(result.is_err());
+        assert!(budget.refused);
+        let receipt = inputs[0].receipt.get();
+        assert!(receipt.opened);
+        assert!(!receipt.eof);
+        assert!(receipt.bytes > 0);
+        assert!(receipt.bytes < bytes.len() as u64);
+        assert_eq!(
+            receipt.sha256,
+            oa_sha256::sha256(&bytes[..receipt.bytes as usize])
+        );
+        let line = observed_input_line(0, &inputs[0]).unwrap();
+        assert!(line.contains("\teof=0\t"));
+        assert!(line.contains(format!("\tbytes={}\treserved_bytes={}\t", receipt.bytes, bytes.len()).as_str()));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

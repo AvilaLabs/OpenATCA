@@ -44,6 +44,33 @@ fn an_unsealed_missing_directory_is_a_failed_run_not_a_refusal() {
     assert!(err.contains("sealed-window rows dropped: 0"), "{err}");
 }
 
+// REQ: OA-FLT-044
+#[test]
+fn audited_cli_refuses_a_backwards_window_before_creating_its_output() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("audit-backwards-window-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let recordings = root.join("recordings");
+    std::fs::create_dir(&recordings).unwrap();
+    let output = root.join("observed.tsv");
+
+    // seal-allow: runs the built binary on a newly-created empty synthetic directory.
+    let result = Command::new(env!("CARGO_BIN_EXE_oa-flight"))
+        .arg(&recordings)
+        .args(["--from", "20", "--to", "10", "--audit-to"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("from_ns exceeds to_ns"));
+    assert!(
+        !output.exists(),
+        "invalid audit windows must be refused before output creation"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 // REQ: OA-SEAL-014
 #[test]
 fn a_refusal_prints_the_drop_line_and_a_stop_at_to_counts_the_frames_the_merge_dropped() {

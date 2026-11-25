@@ -596,3 +596,377 @@ fn opt_in_timing_counts_messages_but_leaves_a_status_only_second_empty() {
     assert_eq!(timing.last_received_ns, Some(end_ns));
     assert_eq!(sealed, 0);
 }
+
+// REQ: OA-FLT-043, OA-FLT-044
+#[test]
+fn audited_replay_observes_handoff_semantics_without_calling_it_prediction() {
+    use oa_flight::{HO_ACCEPTED, HO_NONE, HO_OFFERED, OP_HO_TAKE};
+    use oa_flight_sfdps::audit::{
+        observation_text, AuditLimits, AuditStats, Observation, ReplayAudit,
+    };
+    let dir = temp_dir("audit-handoff");
+    let base = parse_iso_ms(b"2030-01-02T03:04:00Z").unwrap();
+    let bodies = [
+        r#"<flightStatus fdpsFlightStatus="ACTIVE"/><controllingUnit unitIdentifier="ZXX" sectorIdentifier="12"/><enRoute><position positionTime="2030-01-02T03:03:59Z"><altitude uom="FEET">38000.0</altitude><position><location srsName="urn:ogc:def:crs:EPSG::4326"><pos>41.9 -87.9</pos></location></position></position></enRoute>"#,
+        r#"<enRoute><boundaryCrossings><handoff event="INITIATION"><transferringUnit unitIdentifier="ZXX" sectorIdentifier="12"/><receivingUnit unitIdentifier="ZYY" sectorIdentifier="1E"/></handoff></boundaryCrossings></enRoute>"#,
+        r#"<enRoute><boundaryCrossings><handoff event="ACCEPTANCE"><acceptingUnit unitIdentifier="ZYY" sectorIdentifier="1E"/><receivingUnit unitIdentifier="ZYY" sectorIdentifier="1E"/></handoff></boundaryCrossings></enRoute>"#,
+        r#"<enRoute><boundaryCrossings><handoff event="TAKE_CONTROL"><acceptingUnit unitIdentifier="ZYY" sectorIdentifier="1E"/><receivingUnit unitIdentifier="ZYY" sectorIdentifier="1E"/></handoff></boundaryCrossings></enRoute>"#,
+        r#"<flightStatus fdpsFlightStatus="ACTIVE"/><controllingUnit unitIdentifier="???" sectorIdentifier="12"/><enRoute><boundaryCrossings><handoff><receivingUnit unitIdentifier="ZYY" sectorIdentifier="1E"/></handoff></boundaryCrossings></enRoute>"#,
+        r#"<flightStatus fdpsFlightStatus="PROPOSED"/><departure departurePoint="KAAA"><runwayPositionAndTime><runwayTime><actual time="2030-01-02T03:03:00Z"/></runwayTime></runwayPositionAndTime></departure>"#,
+        r#"<enRoute><boundaryCrossings><handoff event="INITIATION"/></boundaryCrossings></enRoute>"#,
+        r#"<enRoute><boundaryCrossings><handoff event="INITIATION"><transferringUnit unitIdentifier="???" sectorIdentifier="12"/><receivingUnit unitIdentifier="ZYY" sectorIdentifier="1E"/></handoff></boundaryCrossings></enRoute>"#,
+    ];
+    let mut bytes = Vec::new();
+    for (i, body) in bodies.iter().enumerate() {
+        let ts = format!("2030-01-02T03:04:0{i}Z");
+        // Sequence deliberately repeats; decoded offsets, not sequence/time, identify frames.
+        bytes.extend(frame(
+            7,
+            base + 60_000 + i as i64 * 1000,
+            &doc(&msg("OH", &ts, body)),
+        ));
+    }
+    std::fs::write(dir.join("a.oaf"), bytes).unwrap();
+    let run = || {
+        let mut observations = Vec::new();
+        let (rep, stats) = {
+            let mut sink = |record: &Observation| {
+                observations.push(*record);
+                Ok(())
+            };
+            let mut audit = ReplayAudit {
+                limits: AuditLimits {
+                    frames: 8,
+                    rows: 8,
+                    events: 64,
+                },
+                stats: AuditStats::default(),
+                inputs: Vec::new(),
+                sink: &mut sink,
+            };
+            let rep = oa_flight_sfdps::replay_sfdps_audited_counted(
+                recordings_in(&dir).unwrap(),
+                &cfg(i64::MIN, i64::MAX),
+                &mut |_, _, _| {},
+                &mut 0,
+                &mut audit,
+            )
+            .unwrap();
+            (rep, audit.stats)
+        };
+        (rep, stats, observations)
+    };
+    let (rep, stats, records) = run();
+    let (_, again, same_records) = run();
+    assert_eq!(stats, again);
+    assert_eq!(records, same_records);
+    let encoded: Vec<String> = records.iter().map(observation_text).collect();
+    assert_eq!(encoded.len(), records.len());
+    for (record, line) in records.iter().zip(&encoded) {
+        assert!(line.is_ascii());
+        assert!(line.ends_with('\n'));
+        assert!(line.len() <= 8192);
+        match record {
+            Observation::Frame { .. } => assert!(line.starts_with("FRAME\t")),
+            Observation::Row(_) => assert!(line.starts_with("ROW\t")),
+            Observation::Operation(operation) => {
+                assert!(line.starts_with("OP\t"));
+                let clocks = format!(
+                    "source_ms={}\treceived_ms={}",
+                    operation.operation.ts_ms, operation.operation.seen_ms
+                );
+                assert!(line.contains(clocks.as_str()));
+                assert!(line.contains("\toutcome="));
+                assert!(line.contains("\tflight="));
+            }
+        }
+    }
+    assert_eq!(stats.frames_visited, 8);
+    assert_eq!(stats.rows_delivered, 8);
+    assert_eq!(rep.lag.rows, stats.rows_delivered);
+    assert_eq!(stats.rows_missing_key_or_time, 0);
+    assert_eq!(stats.rows_without_operation, 2);
+    let mut applied = [0u64; oa_flight::OP_COUNT];
+    let mut unchanged = [0u64; oa_flight::OP_COUNT];
+    let mut refused = [[0u64; oa_flight::R_COUNT]; oa_flight::OP_COUNT];
+    for record in &records {
+        if let Observation::Operation(operation) = record {
+            let kind = usize::from(operation.operation.kind);
+            match operation.outcome {
+                oa_flight::Outcome::Applied => applied[kind] += 1,
+                oa_flight::Outcome::Unchanged => unchanged[kind] += 1,
+                oa_flight::Outcome::Refused(reason) => refused[kind][usize::from(reason)] += 1,
+            }
+        }
+        if let Observation::Row(row) = record {
+            let observed_ops = records
+                .iter()
+                .filter(|candidate| {
+                    matches!(candidate,
+                    Observation::Operation(operation) if operation.identity == row.identity)
+                })
+                .count();
+            assert_eq!(row.operations, observed_ops);
+        }
+    }
+    assert_eq!(stats.operations_applied, applied);
+    assert_eq!(stats.operations_unchanged, unchanged);
+    assert_eq!(stats.operations_refused, refused);
+    let ordinary = replay_sfdps(
+        recordings_in(&dir).unwrap(),
+        &cfg(i64::MIN, i64::MAX),
+        &mut |_, _, _| {},
+    )
+    .unwrap();
+    assert_eq!(
+        oa_flight::flights_digest(&rep.table),
+        oa_flight::flights_digest(&ordinary.table)
+    );
+    assert_eq!(rep.adapter, ordinary.adapter);
+    assert_eq!(rep.fixm.rows, ordinary.fixm.rows);
+    let first_row = records
+        .iter()
+        .find_map(|record| match record {
+            Observation::Row(row) if row.identity.row == 0 => Some(row),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(first_row.source_time_ms, Some(base));
+    assert_eq!(first_row.received_time_ms, base + 60_000);
+    assert_eq!(first_row.centre.unwrap().get(..3), Some(b"ZXX".as_slice()));
+    assert_eq!(
+        first_row.reported_owner.unwrap().get(..3),
+        Some(b"ZXX".as_slice())
+    );
+    assert_eq!(first_row.position_time_ms, Some(base - 1_000));
+    assert_eq!(first_row.latitude_e7, Some(419_000_000));
+    assert_eq!(first_row.longitude_e7, Some(-879_000_000));
+    assert_eq!(first_row.reported_altitude_ft, Some(38_000));
+    let mut stages = Vec::new();
+    let mut locations = Vec::new();
+    let mut row_flags = Vec::new();
+    for record in records {
+        match record {
+            Observation::Row(row) => {
+                assert_eq!(row.received_time_ms - row.source_time_ms.unwrap(), 60_000);
+                locations.push(row.identity.decoded_offset);
+                row_flags.push((
+                    row.no_status,
+                    row.owner_unknown,
+                    row.handoff_incomplete,
+                    row.handoff_unknown_unit,
+                    row.handoff_receiving_only,
+                    row.departure_not_active,
+                ));
+            }
+            Observation::Operation(op)
+                if matches!(
+                    op.operation.kind,
+                    OP_HO_INITIATE | OP_HO_ACCEPT | OP_HO_TAKE
+                ) =>
+            {
+                assert_eq!(op.outcome, oa_flight::Outcome::Applied);
+                let state = op.state.unwrap();
+                stages.push((op.operation.kind, state.handoff_state, state.owner));
+            }
+            _ => {}
+        }
+    }
+    assert!(locations.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(stages.len(), 3);
+    assert_eq!((stages[0].0, stages[0].1), (OP_HO_INITIATE, HO_OFFERED));
+    assert_eq!((stages[1].0, stages[1].1), (OP_HO_ACCEPT, HO_ACCEPTED));
+    assert_eq!(
+        stages[0].2, stages[1].2,
+        "acceptance alone never transfers ownership"
+    );
+    assert_eq!((stages[2].0, stages[2].1), (OP_HO_TAKE, HO_NONE));
+    assert_ne!(stages[1].2, stages[2].2, "take-control transfers ownership");
+    assert_eq!(rep.adapter.no_status, 5);
+    assert_eq!(rep.adapter.owner_unknown, 1);
+    assert_eq!(rep.adapter.handoff_incomplete, 1);
+    assert_eq!(rep.adapter.handoff_unknown_unit, 1);
+    assert_eq!(rep.adapter.handoff_receiving_only, 1);
+    assert_eq!(rep.adapter.departure_not_active, 1);
+    assert_eq!(row_flags[4], (false, true, false, false, true, false));
+    assert_eq!(row_flags[5], (false, false, false, false, false, true));
+    assert_eq!(row_flags[6], (true, false, true, false, false, false));
+    assert_eq!(row_flags[7], (true, false, false, true, false, false));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// REQ: OA-FLT-044
+#[test]
+fn audited_replay_stops_on_evidence_caps_and_sink_errors_and_keeps_counters() {
+    use oa_flight_sfdps::audit::{AuditLimits, AuditStats, ReplayAudit};
+    let dir = temp_dir("audit-caps");
+    let xml = doc(&msg("TH", "2030-01-02T03:04:05Z", FULL));
+    let received = parse_iso_ms(b"2030-01-02T03:05:05Z").unwrap();
+    std::fs::write(
+        dir.join("a.oaf"),
+        [frame(1, received, &xml), frame(2, received + 1000, &xml)].concat(),
+    )
+    .unwrap();
+
+    let mut sink = |_: &oa_flight_sfdps::audit::Observation| Ok(());
+    let mut audit = ReplayAudit {
+        limits: AuditLimits {
+            frames: 4,
+            rows: 1,
+            events: 64,
+        },
+        stats: AuditStats::default(),
+        inputs: Vec::new(),
+        sink: &mut sink,
+    };
+    assert!(oa_flight_sfdps::replay_sfdps_audited_counted(
+        recordings_in(&dir).unwrap(),
+        &cfg(i64::MIN, i64::MAX),
+        &mut |_, _, _| {},
+        &mut 0,
+        &mut audit
+    )
+    .is_err());
+    assert!(audit.stats.cap_refused);
+    assert_eq!(audit.stats.frames_visited, 2);
+    assert_eq!(audit.stats.rows_delivered, 1);
+
+    let mut sink = |_: &oa_flight_sfdps::audit::Observation| Ok(());
+    let mut audit = ReplayAudit {
+        limits: AuditLimits {
+            frames: 1,
+            rows: 4,
+            events: 64,
+        },
+        stats: AuditStats::default(),
+        inputs: Vec::new(),
+        sink: &mut sink,
+    };
+    assert!(oa_flight_sfdps::replay_sfdps_audited_counted(
+        recordings_in(&dir).unwrap(),
+        &cfg(i64::MIN, i64::MAX),
+        &mut |_, _, _| {},
+        &mut 0,
+        &mut audit
+    )
+    .is_err());
+    assert!(audit.stats.cap_refused);
+    assert_eq!(audit.stats.frames_visited, 1);
+    assert_eq!(audit.stats.rows_delivered, 1);
+
+    let mut sink = |_: &oa_flight_sfdps::audit::Observation| Ok(());
+    let mut audit = ReplayAudit {
+        limits: AuditLimits {
+            frames: 1,
+            rows: 1,
+            events: 1,
+        },
+        stats: AuditStats::default(),
+        inputs: Vec::new(),
+        sink: &mut sink,
+    };
+    assert!(oa_flight_sfdps::replay_sfdps_audited_counted(
+        recordings_in(&dir).unwrap(),
+        &cfg(i64::MIN, i64::MAX),
+        &mut |_, _, _| {},
+        &mut 0,
+        &mut audit
+    )
+    .is_err());
+    assert!(audit.stats.cap_refused);
+    assert_eq!(audit.stats.events_delivered, 1);
+    assert_eq!(audit.stats.rows_delivered, 0);
+    let mut sink = |_: &oa_flight_sfdps::audit::Observation| {
+        Err(std::io::Error::other("injected writer failure"))
+    };
+    let mut audit = ReplayAudit {
+        limits: AuditLimits {
+            frames: 2,
+            rows: 2,
+            events: 32,
+        },
+        stats: AuditStats::default(),
+        inputs: Vec::new(),
+        sink: &mut sink,
+    };
+    assert!(oa_flight_sfdps::replay_sfdps_audited_counted(
+        recordings_in(&dir).unwrap(),
+        &cfg(i64::MIN, i64::MAX),
+        &mut |_, _, _| {},
+        &mut 0,
+        &mut audit
+    )
+    .is_err());
+    assert!(audit.stats.sink_failed);
+    assert_eq!(audit.stats.frames_visited, 1);
+    assert_eq!(audit.stats.events_delivered, 0);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+// REQ: OA-FLT-044
+#[test]
+fn shared_audit_replay_entry_refuses_backwards_window_before_inputs_or_sink() {
+    use oa_flight_sfdps::audit::{AuditLimits, AuditStats, Observation, ReplayAudit};
+    let mut emitted = 0usize;
+    let mut sink = |_: &Observation| {
+        emitted += 1;
+        Ok(())
+    };
+    let mut audit = ReplayAudit {
+        limits: AuditLimits {
+            frames: 1,
+            rows: 1,
+            events: 2,
+        },
+        stats: AuditStats::default(),
+        inputs: Vec::new(),
+        sink: &mut sink,
+    };
+    let result = oa_flight_sfdps::replay_sfdps_audited_counted(
+        Vec::new(),
+        &cfg(20, 10),
+        &mut |_, _, _| {},
+        &mut 0,
+        &mut audit,
+    );
+    assert!(result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.to_string().contains("from_ns exceeds to_ns")));
+    assert_eq!(audit.stats, AuditStats::default());
+    assert!(audit.inputs.is_empty());
+    assert_eq!(emitted, 0);
+}
+
+// REQ: OA-FLT-043, OA-FLT-044
+#[test]
+fn audit_record_encoding_is_explicit_and_preserves_optional_state() {
+    use oa_flight_sfdps::audit::{observation_text, Observation, RowIdentity, RowObservation};
+    let event = Observation::Row(RowObservation {
+        identity: RowIdentity {
+            stream: 1,
+            decoded_offset: 7,
+            recorder_sequence: 3,
+            row: 2,
+        },
+        source_time_ms: None,
+        received_time_ms: 42,
+        gufi: Some(1),
+        present: Some(0),
+        field_errors: None,
+        operations: 0,
+        centre: None,
+        reported_owner: None,
+        position_time_ms: None,
+        latitude_e7: None,
+        longitude_e7: None,
+        reported_altitude_ft: None,
+        no_status: false,
+        owner_unknown: false,
+        handoff_incomplete: false,
+        handoff_unknown_unit: false,
+        handoff_receiving_only: false,
+        departure_not_active: false,
+    });
+    assert_eq!(observation_text(&event),"ROW\tstream=1\toffset=7\tseq=3\trow=2\tsource_ms=none\treceived_ms=42\tgufi=00000000000000000000000000000001\tpresent=0\terrors=none\tops=0\tcentre=none\treported_owner=none\tposition_ms=none\tlat_e7=none\tlon_e7=none\treported_alt_ft=none\tno_status=0\towner_unknown=0\thandoff_incomplete=0\thandoff_unknown_unit=0\thandoff_receiving_only=0\tdeparture_not_active=0\n");
+}
