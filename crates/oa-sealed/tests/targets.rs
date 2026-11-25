@@ -344,7 +344,10 @@ const ALLOW: &str = "seal-allow:";
 // replay/comparator publication: guarded create-new writes, metadata, inventories and links.
 // Nine reviewed additions: snapshot stdin, four fixed Linux device/process sites, two
 // synthetic recovery-worker control/output sites, and two create-new operated output sites.
-const ALLOW_COUNT: usize = 177;
+// Three reproduction-export additions reviewed here: a guarded create-new write-only temporary,
+// metadata of that owned temporary, and no-clobber publication by hard link. Input reads still
+// use the descriptor-verified guard; these allowances do not permit unguarded data reads.
+const ALLOW_COUNT: usize = 180;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.
