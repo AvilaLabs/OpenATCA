@@ -4,8 +4,14 @@ use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// D1/I7: isolate executable installation from every other child launch in this
+// test process. Concurrent copy/spawn lifetimes can leave a copied executable
+// busy; do not retry a failed spawn or weaken the executable provenance guard.
+static CLI_PROCESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn writes_input_only_report_to_a_new_output_directory() {
+    let _serial = CLI_PROCESS_LOCK.lock().expect("CLI fixture process lock");
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock follows the Unix epoch")
@@ -44,6 +50,7 @@ fn writes_input_only_report_to_a_new_output_directory() {
 
 #[test]
 fn reports_failure_counts_and_creates_no_partial_output() {
+    let _serial = CLI_PROCESS_LOCK.lock().expect("CLI fixture process lock");
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock follows the Unix epoch")
@@ -83,6 +90,7 @@ fn reports_failure_counts_and_creates_no_partial_output() {
 // REQ: OA-REG-008, OA-SEAL-014
 #[test]
 fn timed_guard_precedes_payload_interpretation_and_output_creation() {
+    let _serial = CLI_PROCESS_LOCK.lock().expect("CLI fixture process lock");
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
@@ -113,6 +121,7 @@ fn timed_guard_precedes_payload_interpretation_and_output_creation() {
 // REQ: OA-REG-011, OA-REG-012, OA-REG-008
 #[test]
 fn explicit_synthetic_msaw_evaluates_warning_and_closes_evidence() {
+    let _serial = CLI_PROCESS_LOCK.lock().expect("CLI fixture process lock");
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
@@ -183,6 +192,7 @@ fn explicit_synthetic_msaw_evaluates_warning_and_closes_evidence() {
 // REQ: OA-REG-004, OA-REG-005, OA-REG-008
 #[test]
 fn full_synthetic_session_has_closed_identical_evidence_and_valid_images() {
+    let _serial = CLI_PROCESS_LOCK.lock().expect("CLI fixture process lock");
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock")
