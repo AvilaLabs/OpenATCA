@@ -48,6 +48,7 @@ members = [
     "crates/oa-encounter",
     "crates/oa-flight",
     "crates/oa-flight-sfdps",
+    "crates/oa-migration-shadow",
     "crates/oa-safety",
     "crates/oa-ca",
     "crates/oa-msaw",
