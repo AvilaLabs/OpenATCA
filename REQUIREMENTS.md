@@ -7578,3 +7578,25 @@ claims; a match is explicitly unverified.
 
 - **OA-MIG-401** The pure bounded comparator accepts versioned normalized streams for handoffs, point-outs, sector assignments, flight-data amendments and alerts. It binds matching function, scope and half-open UTC window, preserves source-event and observed/receive clocks independently, requires explicit per-family coverage and source epoch hashes, compares stable caller-supplied business keys without replacing side-local source row identities, and uses the frozen `M4-H2-EXACT-1` policy (0 ns time margin and exact numeric values). `FIELD_PROJECTION_VERSION` 1 requires every family-defined operational field ID on each observed pair; explicit absent is distinct from an omitted field, and omitted projection fields are unobservable even when both sides omit them. Missing/invalid/ambiguous key, missing time, invalid or unsupported records, outside-window rows, duplicate keys, out-of-order event times, unknown/absent fields, mismatches, one-sided records and complete-empty families remain explicit and bounded; output capacity and record/field caps are checked before work. A complete-empty family is not evidence of a matched action.
 - **OA-MIG-402** The comparator does not generate an ERAM reference, infer controller intent, or treat SFDPS observed-state replay as independent action ground truth. Missing legacy alert observations are unobservable, never agreement. Exact pairs alone default to equivalent; every mismatch/unobservable result defaults unresolved and blocks. A `better` or `worse` judgment must bind the exact pair/source identities, both source-epoch SHA-256 values, policy, function, scope and window, a recognized reviewer role, and an evidence-artifact SHA-256 reference resolved by the outer evidence-package verifier; such review cannot clear incomplete family coverage or out-of-order streams.
+
+## M7 per-input quarantine (`oa-quarantine`)
+
+- **OA-QUAR-001** Flight-data, surveillance, and adaptation items carry a source-class partition,
+  nonzero source-instance and item identity, and explicit typed refusal-reason bits. Queue identity
+  and caller-supplied claims are not authenticated. Each source class has an independent queue so
+  one full partition cannot consume another class's capacity.
+- **OA-QUAR-002** Each source partition holds at most 128 metadata events. Every reason bit is
+  counted, a queued event remains until explicit acknowledgement, and a full partition returns a
+  visible `ManualHandlingRequired` event while incrementing its queue-full counter. This queue
+  holds no raw source payload; the shell must retain and retrieve the original item by its stable
+  identity. It does not itself guarantee durable operator handling or end-to-end fault isolation.
+- **OA-QUAR-003** The core never mutates accepted flight, surveillance, or adaptation state. A
+  caller may apply an item's state change only after an `Accepted` disposition; a refusal yields
+  queued or direct manual handling. Synthetic LA-2014-shaped altitude-block/route and NATS-2023-
+  shaped duplicate-waypoint cases exercise the boundary, but are not exact reproductions of either
+  historical input or outage.
+- **OA-QUAR-004** Every outcome carries a caller-supplied monotonic clock domain, start/completion
+  timestamps, elapsed-time limit, work count, and work limit. Clock regression, invalid limits,
+  counter overflow, unknown reasons, and invalid identities are explicit errors. Exceeding the
+  declared work or elapsed-time limit adds a named refusal reason and is counted; this pure core
+  does not measure wall time or verify the caller's work accounting.

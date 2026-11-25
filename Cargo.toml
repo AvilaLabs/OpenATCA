@@ -8,6 +8,7 @@ members = [
     "crates/oa-ieee",
     "crates/oa-math",
     "crates/oa-nasr",
+    "crates/oa-quarantine",
     "crates/oa-arinc424",
     "crates/oa-sha256",
     "crates/oa-zip",
