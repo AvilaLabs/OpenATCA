@@ -219,17 +219,21 @@ are taken at ERAM's row times, so ERAM is always scored at the moment of its own
 scored at the same moment, from input that may be up to one archive gap old (8 to 9 s median). ERAM's
 error being flat against the spacing fits that, but does not show ERAM's input rate.
 
-For level samples, dead reckoning has lower p95 cross-track error at several ages between 1 and
-4 seconds and in the over-20-second groups on both days. Beyond 5 seconds it also has lower RMS
-on both days. In the 5-to-8-second group, OpenATCA's p95 is 18.5 m on day 15 and 21.9 m on day 19,
-against ERAM's 19.8 m and 19.2 m.
+For level samples, dead reckoning (DR) has lower p95 cross-track error in most of the 1-to-4-second
+age rows, and in the over-20-second groups on both days (day 15: 89.4 m DR vs 124.9 m OA, n=27;
+day 19: 106.5 m vs 150.5 m, n=57). In the aggregate over-5-second group, DR also has lower RMS
+on both days (25.9 vs 28.4 m and 26.9 vs 28.4 m); this does not hold in the 5-to-8-second
+subgroup, where DR RMS is 12.6 m on both days versus OA's 10.5 m. In that subgroup, OA's p95 is
+18.5 m on day 15 and 21.9 m on day 19, against ERAM's 19.8 m and 19.2 m.
 
-Among level samples more than 5 seconds after a report, OpenATCA's median heading error at
-the last report is about 0.1°. For the subset with more than 50 m of cross-track error, median
-heading error rises to 0.69° and 0.56°, and p95 reaches 1.96° and 3.51°. Heading error and residual
-turn estimates warrant investigation. The groups in these tables use reference turn rate at
-the sample time. Establishing which turns began during the gap requires comparing the reference
-heading over the gap. The observed ERAM publication intervals leave its input rate unknown.
+The tail includes a heading-error problem. Among level samples more than 5 seconds after a report,
+OpenATCA's median heading error at the last report is about 0.1°. For the subset with more than
+50 m of cross-track error (n=66 and 91), median heading error rises to 0.69° and 0.56°, and p95
+reaches 1.96° (n=49) and 3.51° (n=66). Heading error and residual turn estimates warrant
+investigation. The groups in these tables use reference turn rate at the sample time; whether a turn began during the gap was not
+measured, because that requires comparing reference heading over the gap. The observed ERAM
+publication intervals are row spacing, not its surveillance input rate, which the archive does
+not reveal.
 
 | Day | ERAM row spacing (previous grid row of the aircraft) | n | ERAM cross-track median / p95 / RMS m |
 |---|---|---|---|
@@ -246,7 +250,7 @@ heading over the gap. The observed ERAM publication intervals leave its input ra
 
 The development sweep on 15 November compared the current forecast with four turn-rate decay
 settings and three ages at which to switch to a straight-line forecast. The 12-second switch
-advanced to the 19 November tune run. Both runs used the p002 common set for the table below.
+advanced to the single 19 November forward check. Both runs used the p002 common set for the table below.
 
 | Metric | 15 Nov current | 15 Nov 12-second switch | 19 Nov current | 19 Nov 12-second switch |
 |---|---|---|---|---|
