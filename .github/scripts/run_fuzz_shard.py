@@ -111,6 +111,23 @@ def targets_for_shard(targets: list[str], shard: int, shard_count: int = SHARD_C
     return [name for index, name in enumerate(ordered) if index % SHARD_COUNT == shard]
 
 
+def validate_expected_targets(targets: list[str], shard: int, expected_csv: str) -> None:
+    """Require explicit workflow membership to match the real, validated target inventory."""
+    if not 0 <= shard < SHARD_COUNT:
+        raise FuzzShardError("shard index must be one of 0..4 / 5")
+    expected = expected_csv.split(",")
+    if not expected or any(not TARGET_RE.fullmatch(name) for name in expected):
+        raise FuzzShardError("workflow shard target list is empty or contains an invalid name")
+    if len(expected) != len(set(expected)):
+        raise FuzzShardError("workflow shard target list contains duplicates")
+    actual_group = targets_for_shard(targets, shard)
+    if expected != actual_group:
+        raise FuzzShardError(
+            f"workflow shard {shard} differs from computed membership; "
+            f"expected={expected}, actual={actual_group}"
+        )
+
+
 def validate_shard_union(targets: list[str]) -> None:
     """Prove the fixed shard plan covers the validated runtime inventory exactly once."""
     shards = [targets_for_shard(targets, index) for index in range(SHARD_COUNT)]
@@ -200,6 +217,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--targets-file", required=True, type=Path)
     parser.add_argument("--shard", required=True, type=int)
+    parser.add_argument("--expected-targets", required=True)
     parser.add_argument("--repo-root", type=Path, default=Path(__file__).resolve().parents[2])
     args = parser.parse_args(argv)
     try:
@@ -208,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             cargo_bin_inventory(args.repo_root / "fuzz" / "Cargo.toml"),
         )
         validate_shard_union(targets)
+        validate_expected_targets(targets, args.shard, args.expected_targets)
         runner_temp = Path(os.environ["RUNNER_TEMP"])
         return run_shard(targets, args.shard, args.repo_root, runner_temp)
     except (FuzzShardError, KeyError, OSError) as exc:

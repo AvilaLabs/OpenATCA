@@ -36,6 +36,11 @@ class FuzzShardTests(unittest.TestCase):
         self.assertLessEqual(max(map(len, shards)) - min(map(len, shards)), 1)
         self.assertEqual(shards, [shard.targets_for_shard(targets, i) for i in range(5)])
         shard.validate_shard_union(targets)
+        expected = ",".join(shards[0])
+        shard.validate_expected_targets(targets, 0, expected)
+        for invalid in (expected + "," + shards[0][0], ",".join(shards[0][:-1]), ",".join(shards[1])):
+            with self.subTest(expected=invalid), self.assertRaises(shard.FuzzShardError):
+                shard.validate_expected_targets(targets, 0, invalid)
 
     def test_shard_index_and_count_are_fixed(self):
         with self.assertRaises(shard.FuzzShardError):
@@ -137,10 +142,16 @@ class FuzzShardTests(unittest.TestCase):
         end = len(workflow) if boundary is None else start + 1 + boundary.start()
         block = workflow[start:end]
         self.assertIn("fail-fast: false", block)
-        self.assertIn("shard: [0, 1, 2, 3, 4]", block)
+        matrix = re.search(r"(?ms)^        include:\n(?P<rows>.*?)(?=^    steps:)", block)
+        self.assertIsNotNone(matrix)
+        row_pairs = re.findall(r"(?m)^          - shard: (\d+)\n            targets: ([a-z0-9,_-]+)$", matrix.group("rows"))
+        targets = shard.cargo_bin_inventory(REPO / "fuzz" / "Cargo.toml")
+        expected_rows = [(str(i), ",".join(shard.targets_for_shard(targets, i))) for i in range(5)]
+        self.assertEqual(row_pairs, expected_rows)
         self.assertIn("set -euo pipefail", block)
         self.assertIn("fuzz list > \"$RUNNER_TEMP/fuzz-targets.txt\"", block)
         self.assertIn('--shard "${{ matrix.shard }}"', block)
+        self.assertIn('--expected-targets "${{ matrix.targets }}"', block)
         self.assertIn("fuzz-artifacts-shard-${{ matrix.shard }}", block)
         self.assertIn("actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", block)
         self.assertIn("${{ runner.arch }}", block)
@@ -148,17 +159,37 @@ class FuzzShardTests(unittest.TestCase):
         self.assertIn("${{ runner.os }}", block)
         self.assertIn("${{ hashFiles('fuzz/Cargo.lock') }}", block)
         self.assertIn("fuzz-smoke", block)
+        self.assertIn("nightly-2026-08-21-rust-src", block)
         self.assertIn("~/.cargo/registry", block)
         self.assertIn("~/.cargo/git", block)
         self.assertIn("fuzz/target", block)
         self.assertIn("cache_hit=%s", block)
         self.assertIn("target_seconds=60", block)
         self.assertIn("Remove stale cached example executables", block)
+        self.assertNotIn("if: ${{ steps.fuzz-cache.outputs.cache-hit", block)
+        for job_name in ("check", "debug-assertions", "arm"):
+            job_match = re.search(
+                rf"(?ms)^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)",
+                workflow,
+            )
+            self.assertIsNotNone(job_match, job_name)
+            job = job_match.group("body")
+            self.assertIn("actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", job)
+            self.assertIn("${{ runner.os }}", job)
+            self.assertIn("${{ runner.arch }}", job)
+            self.assertIn("${{ github.job }}", job)
+            self.assertIn("hashFiles('Cargo.lock', 'validation/oa-vectors/Cargo.lock')", job)
+            self.assertIn("~/.cargo/registry", job)
+            self.assertIn("~/.cargo/git", job)
+            self.assertIn("target", job)
+            self.assertIn("Remove stale cached example executables", job)
+            self.assertNotIn("if: ${{ steps.rust-cache.outputs.cache-hit", job)
         runner = (REPO / ".github" / "scripts" / "run_fuzz_shard.py").read_text()
         self.assertIn("MAX_TOTAL_TIME_SECONDS = 60", runner)
         self.assertIn("RSS_LIMIT_MB = 2048", runner)
         self.assertIn('-max_total_time={MAX_TOTAL_TIME_SECONDS}', runner)
         self.assertIn('validate_shard_union(targets)', runner)
+        self.assertIn('validate_expected_targets(targets, args.shard, args.expected_targets)', runner)
 
 
 if __name__ == "__main__":
