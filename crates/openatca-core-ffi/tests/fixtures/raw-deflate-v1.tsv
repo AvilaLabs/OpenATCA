@@ -6,3 +6,4 @@ truncated_stored	010300fcff61	8	14	8		-1
 reserved_block	07	8	13	8		-1
 output_limit	010300fcff616263	2	15	8		-1
 capacity_query	010300fcff616263	8	6	0	616263	8
+null_empty_input		8	14	0		-1
