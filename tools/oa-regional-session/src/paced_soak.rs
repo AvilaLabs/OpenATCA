@@ -299,6 +299,7 @@ fn create_output(path: &Path) -> Result<(), String> {
 
 fn create_new_file(path: &Path) -> Result<File, String> {
     oa_sealed::refuse(path).map_err(|error| format!("output file refused: {error}"))?;
+    // seal-allow: write-only create-new output after path refusal; verify the opened descriptor before any write.
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -338,6 +339,8 @@ fn write_progress_row(file: &mut File, committed_len: u64, row: &[u8]) -> Result
 }
 
 fn stop_requested(path: &Path) -> Result<bool, String> {
+    oa_sealed::refuse(path).map_err(|error| format!("stop request path refused: {error}"))?;
+    // seal-allow: metadata-only presence/type probe of the guarded stop marker; contents are opened with open_regular below.
     match fs::symlink_metadata(path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.to_string()),
