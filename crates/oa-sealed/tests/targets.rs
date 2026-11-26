@@ -359,6 +359,7 @@ const ALLOW: &str = "seal-allow:";
 // L3 H2: one additional guarded create-new aggregate output.
 // Two reviewed, descriptor-verified audit-log shell opens: one anchored append destination and
 // one guarded parent-directory descriptor used for anchored creation and sync.
+// H5: bounded stdin protocol and same-executable local worker pipes; no filesystem reads.
 const ALLOW_COUNT: usize = 218;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
