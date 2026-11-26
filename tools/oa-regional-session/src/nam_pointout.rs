@@ -135,6 +135,7 @@ pub enum PointOutError {
     SessionResponse,
     MessageNumberInUse,
     PendingResponse,
+    PendingDecision,
     InvalidTransition,
 }
 
@@ -200,9 +201,15 @@ pub struct NamPointOutRuntime {
     mode: PointOutMode,
     response_profile: Option<PointOutResponseProfile>,
     records: Vec<Record>,
+    /// Outbound POI/POA/POJ IDs stay reserved for this runtime's lifetime. Rev G defines no
+    /// maximum late-response interval, so retirement cannot make a reference safe to recycle.
+    issued_ids: Vec<MsgId>,
     capacity: usize,
 }
 
+/// Create bounded point-out state. `capacity` bounds both live records and outbound point-out
+/// identifiers issued during this runtime; IDs are never recycled because Rev G sets no late
+/// POA/POJ response deadline. Exhaustion refuses new sends instead of guessing that reuse is safe.
 pub fn nam_pointout_runtime_new(capacity: usize, mode: PointOutMode) -> Option<NamPointOutRuntime> {
     if capacity == 0 || capacity > MAX_POINT_OUTS {
         return None;
@@ -211,6 +218,7 @@ pub fn nam_pointout_runtime_new(capacity: usize, mode: PointOutMode) -> Option<N
         mode,
         response_profile: None,
         records: Vec::with_capacity(capacity),
+        issued_ids: Vec::with_capacity(capacity),
         capacity,
     })
 }
@@ -312,7 +320,8 @@ pub fn nam_pointout_tick(
 }
 
 /// Retire a point-out only after an explicit operational lifecycle signal. Pending NAM response
-/// timers block retirement; removing the record releases its wrapped message identifier for reuse.
+/// timers and controller decisions block retirement. Its outbound message ID remains reserved for
+/// this runtime's lifetime because Rev G does not bound late POA/POJ responses.
 pub fn nam_pointout_retire(
     runtime: &mut NamPointOutRuntime,
     point_out_id: MsgId,
@@ -335,6 +344,13 @@ pub fn nam_pointout_retire(
     if view.ack_status == PointOutAckStatus::Awaiting {
         return Err(PointOutError::PendingResponse);
     }
+    if matches!(
+        view.status,
+        PointOutStatus::AwaitingControllerDecision
+            | PointOutStatus::AwaitingRemoteControllerDecision
+    ) {
+        return Err(PointOutError::PendingDecision);
+    }
     if reason == PointOutRetirementReason::ManualCoordinationClosed
         && runtime.mode != PointOutMode::Basic
     {
@@ -356,16 +372,32 @@ fn next_id(
         receiver,
         number: next,
     };
-    if runtime.records.iter().any(|record| {
-        record.view.point_out_id == candidate
-            || record
-                .decision_message
-                .as_ref()
-                .is_some_and(|message| message.header.id == candidate)
-    }) {
+    if runtime.issued_ids.len() >= runtime.capacity {
+        return Err(PointOutError::Capacity);
+    }
+    if runtime.issued_ids.contains(&candidate)
+        || runtime.records.iter().any(|record| {
+            record.view.point_out_id == candidate
+                || record
+                    .decision_message
+                    .as_ref()
+                    .is_some_and(|message| message.header.id == candidate)
+        })
+    {
         return Err(PointOutError::MessageNumberInUse);
     }
     Ok(candidate)
+}
+
+fn retain_issued_id(runtime: &mut NamPointOutRuntime, id: MsgId) -> Result<(), PointOutError> {
+    if runtime.issued_ids.contains(&id) {
+        return Err(PointOutError::MessageNumberInUse);
+    }
+    if runtime.issued_ids.len() >= runtime.capacity {
+        return Err(PointOutError::Capacity);
+    }
+    runtime.issued_ids.push(id);
+    Ok(())
 }
 
 /// Send a caller-prepared POI through the active peer session. Flight identity is an explicit
@@ -447,10 +479,11 @@ pub fn nam_pointout_send_offer(
             _ => None,
         })
         .ok_or(PointOutError::SessionResponse)?;
+    message.header.id.number = number;
+    retain_issued_id(runtime, message.header.id)?;
     if number != candidate.number {
         return Err(PointOutError::SessionResponse);
     }
-    message.header.id.number = number;
     let framed_bytes = frame(&encode(&message).map_err(|_| PointOutError::MissingFields)?)
         .map_err(|_| PointOutError::MissingFields)?;
     let view = PointOutView {
@@ -582,10 +615,12 @@ pub fn nam_pointout_decide(
             _ => None,
         })
         .ok_or(PointOutError::SessionResponse)?;
+    id.number = number;
+    retain_issued_id(runtime, id)?;
     if number != candidate.number {
         return Err(PointOutError::SessionResponse);
     }
-    message.header.id.number = number;
+    message.header.id.number = id.number;
     let framed_bytes = frame(&encode(&message).map_err(|_| PointOutError::MissingFields)?)
         .map_err(|_| PointOutError::MissingFields)?;
     let record = runtime
@@ -1483,6 +1518,16 @@ mod tests {
         .expect("encoded POI is admitted and displayed");
         let view = received.view.expect("point-out view");
         assert_eq!(view.status, PointOutStatus::AwaitingControllerDecision);
+        assert_eq!(
+            nam_pointout_retire(
+                &mut runtime,
+                view.point_out_id,
+                None,
+                PointOutRetirementReason::AirspaceExitedAndConflictsResolved,
+            )
+            .expect_err("an unresolved local controller decision stays live"),
+            PointOutError::PendingDecision,
+        );
         assert_eq!(view.address, None);
         assert_eq!(view.established_mode_a, Some(0o1234));
         assert!(
@@ -1764,6 +1809,16 @@ mod tests {
             accepted.view.expect("view").status,
             PointOutStatus::AwaitingRemoteControllerDecision
         );
+        assert_eq!(
+            nam_pointout_retire(
+                &mut runtime,
+                sent.view.point_out_id,
+                None,
+                PointOutRetirementReason::AirspaceExitedAndConflictsResolved,
+            )
+            .expect_err("an unresolved remote controller decision stays live"),
+            PointOutError::PendingDecision,
+        );
 
         let mut poa = poi(PEER, LOCAL, 9);
         poa.header.kind = Kind::Poa;
@@ -1819,6 +1874,115 @@ mod tests {
             .expect_err("duplicate delivery must not repeat state transition"),
             PointOutError::InvalidTransition,
         );
+    }
+
+    #[test]
+    fn retired_poi_id_is_not_reused_after_actual_number_wrap_and_late_poa_is_rejected() {
+        let mut runtime = enhanced_runtime(PointOutResponseProfile::IcdAnnexBNoResponse);
+        let mut flights = empty_flights();
+        let mut ingress = active_ingress(LOCAL, PEER);
+        let sent = nam_pointout_send_offer(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            poi(LOCAL, PEER, 0),
+            context(1_000_000_000),
+            2,
+            LOCAL.0,
+            &[],
+        )
+        .expect("outgoing POI uses active session");
+        let retired_id = sent.view.point_out_id;
+
+        let mut pla = bare(header(Kind::Pla, PEER, LOCAL, 8, Some(retired_id)));
+        pla.f31 = Some(Field31 {
+            facility: PEER,
+            sector: Some(*b"1A"),
+            text: None,
+        });
+        nam_pointout_receive(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            &framed(&pla),
+            3,
+            LOCAL.0,
+            context(2_000_000_000),
+            &[],
+        )
+        .expect("PLA marks computer receipt only");
+
+        let mut poa = poi(PEER, LOCAL, 9);
+        poa.header.kind = Kind::Poa;
+        poa.header.reference = Some(retired_id);
+        poa.f32 = None;
+        poa.f31 = Some(Field31 {
+            facility: PEER,
+            sector: Some(*b"2A"),
+            text: None,
+        });
+        nam_pointout_receive(
+            &mut runtime,
+            &mut flights,
+            &mut ingress,
+            &framed(&poa),
+            4,
+            LOCAL.0,
+            context(3_000_000_000),
+            &[],
+        )
+        .expect("POA completes the controller decision");
+        nam_pointout_retire(
+            &mut runtime,
+            retired_id,
+            None,
+            PointOutRetirementReason::AirspaceExitedAndConflictsResolved,
+        )
+        .expect("terminal record can be retired");
+
+        while nam_session_ingress_state(&ingress).next_number % session::NUMBER_MODULUS
+            != retired_id.number
+        {
+            nam_session_ingress_local_event(
+                &mut ingress,
+                session::Event::SendAtmWithoutResponse(Kind::Poa),
+                5,
+            )
+            .expect("synthetic no-response ATM send advances the real session counter");
+        }
+        let state_at_wrap = nam_session_ingress_state(&ingress);
+        assert_eq!(
+            nam_pointout_send_offer(
+                &mut runtime,
+                &mut flights,
+                &mut ingress,
+                poi(LOCAL, PEER, 0),
+                context(4_000_000_000),
+                6,
+                LOCAL.0,
+                &[],
+            )
+            .expect_err("retirement never frees an outbound identifier for reuse"),
+            PointOutError::MessageNumberInUse,
+        );
+        assert_eq!(nam_session_ingress_state(&ingress), state_at_wrap);
+        assert_eq!(nam_pointout_views(&runtime).count(), 0);
+
+        assert_eq!(
+            nam_pointout_receive(
+                &mut runtime,
+                &mut flights,
+                &mut ingress,
+                &framed(&poa),
+                7,
+                LOCAL.0,
+                context(5_000_000_000),
+                &[],
+            )
+            .expect_err("late POA cannot bind after its record is retired"),
+            PointOutError::ReferenceMismatch,
+        );
+        assert_eq!(nam_session_ingress_state(&ingress), state_at_wrap);
     }
 
     #[test]
