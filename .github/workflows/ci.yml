@@ -103,7 +103,11 @@ jobs:
           python3 tools/test_repro_package_io.py
           python3 tools/test_reproduce_zau.py
       - name: Requirements and assurance traceability
-        run: cargo +1.89.0 run --locked -p oa-trace
+        run: |
+          cargo +1.89.0 run --locked -p oa-trace
+          python3 tools/test_generate_safety_tables.py
+          python3 tools/generate_safety_tables.py --check
+          python3 tools/generate_safety_tables.py
       - name: No external dependencies
         run: |
           if grep -q 'source = ' Cargo.lock; then echo "external dependency found in Cargo.lock"; exit 1; fi
