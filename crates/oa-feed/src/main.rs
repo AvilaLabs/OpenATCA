@@ -132,6 +132,33 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Command::Replay(files)) => replay(&files),
+        Ok(Command::ListRecordings {
+            dir,
+            feed,
+            from_unix_secs,
+            to_unix_secs,
+        }) => {
+            match oa_feed::record::recordings_overlapping(&dir, &feed, from_unix_secs, to_unix_secs)
+            {
+                Ok(segments) => {
+                    println!("recordings feed={feed} overlapping_range=[{from_unix_secs},{to_unix_secs}) segments={}", segments.len());
+                    for segment in segments {
+                        let end = segment
+                            .end_unix_secs
+                            .map_or_else(|| "unknown".to_owned(), |value| value.to_string());
+                        println!(
+                            "path={:?} start={} end_inclusive={} status={:?}",
+                            segment.path, segment.start_unix_secs, end, segment.status
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("oa-feed: recordings query refused: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Ok(Command::Live(cfg)) => match live(&cfg) {
             Ok(code) => code,
             Err(e) => {
@@ -271,25 +298,39 @@ fn live(cfg: &Live) -> Result<ExitCode, String> {
 
     let mut recorder = match &cfg.record {
         Some(dir) => {
-            let open = if cfg.sync_closed_segments {
-                Recorder::open_sync_closed_segments
+            let format = if cfg.record_raw {
+                Format::Raw
             } else {
-                Recorder::open
+                Format::Gzip
             };
-            Some(
-                open(
+            let recorder = match (cfg.sync_closed_segments, &cfg.retention) {
+                (true, Some(policy)) => Recorder::open_retained_sync_closed_segments(
+                    dir,
+                    &cfg.feed,
+                    cfg.rotate_bytes,
+                    policy.clone(),
+                    format,
+                ),
+                (true, None) => Recorder::open_sync_closed_segments(
                     dir,
                     &cfg.feed,
                     cfg.rotate_bytes,
                     cfg.max_bytes,
-                    if cfg.record_raw {
-                        Format::Raw
-                    } else {
-                        Format::Gzip
-                    },
-                )
-                .map_err(|e| format!("cannot open recording directory: {e}"))?,
-            )
+                    format,
+                ),
+                (false, Some(policy)) => Recorder::open_retained(
+                    dir,
+                    &cfg.feed,
+                    cfg.rotate_bytes,
+                    policy.clone(),
+                    format,
+                ),
+                (false, None) => {
+                    Recorder::open(dir, &cfg.feed, cfg.rotate_bytes, cfg.max_bytes, format)
+                }
+            }
+            .map_err(|e| format!("cannot open recording directory: {e}"))?;
+            Some(recorder)
         }
         None => None,
     };

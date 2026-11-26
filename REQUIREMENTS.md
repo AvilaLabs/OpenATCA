@@ -887,7 +887,9 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   zero-padded counter from 0001 within one naming second. If the local clock steps back while
   recording, each new file keeps the latest naming second and advances its counter so name order
   remains creation order. These rotations are counted. Recording counts existing files toward
-  the total cap, stops once with a warning at the cap and never deletes a file.
+  the total cap and stops once with a warning at the cap. Default recording never deletes files;
+  explicit measured-retention mode may remove only expired segments with its exact ownership marker
+  (OA-FEED-192 to OA-FEED-195).
 - **OA-FEED-020** UTC file names and timestamps are correct calendar times, including leap days
   and times before 1970.
 - **OA-FEED-021** Every frame error carries and prints the byte offset of the problem.
@@ -909,8 +911,8 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   file is finished with its trailer): a file read while recording, or after a crash, holds every
   frame up to the last flush.
 - **OA-FEED-028** Rotation and the total cap count the compressed bytes on disk, including
-  existing `.oaf` and `.oaf.gz` files, rotate on frame boundaries, stop once at the cap and never
-  delete a file.
+  existing `.oaf` and `.oaf.gz` files, rotate on frame boundaries, and stop once at the cap. Default
+  mode never deletes a file; opt-in measured retention follows OA-FEED-192 to OA-FEED-195.
 - **OA-FEED-029** Replay chooses gzip or raw from the file's first bytes, not its name, even when
   the source returns one byte per read.
 - **OA-FEED-030** Replaying a compressed recording gives a health record, summary and byte count
@@ -1049,6 +1051,27 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   with `next`, and reports no work refusal.
 - **OA-FEED-191** The live loop prints a stderr warning (not recorded output) once each time the work-deferral
   count reaches a power of two of 1,024 or more, and not at any other count.
+- **OA-FEED-192** Opt-in measured retention requires at least 45 days, a nonzero operator-supplied measured peak
+  byte rate per hour and a nonempty measurement source path/provenance string supplied with
+  `--peak-rate-source`. Its checked storage cap is derived from the supplied rate and rounded-up retention hours;
+  the CLI records the supplied value but does not itself verify that a measurement file exists or validate its
+  measurement. No default measurement or guessed storage capacity is supplied. Legacy mode
+  retains its existing fixed cap and never deletes recordings.
+- **OA-FEED-193** Retention cleanup runs before the storage-cap decision and removes only canonical expired feed
+  segments with a V2 owner marker bound to the segment device/inode and a matching closed receipt. The path and
+  opened regular-file descriptor identities are checked before deletion; a replacement inode, unmarked file,
+  malformed marker, non-regular file or symlink is preserved. The cleanup is bounded by the recorder's
+  directory-entry limit. These sidecars are not cryptographic authentication: retention assumes the recording
+  directory is not concurrently modified by an untrusted writer, and path-based unlink retains a narrow TOCTOU
+  window against a concurrent same-directory replacement.
+- **OA-FEED-194** The technician `recordings` query accepts a nonempty half-open UTC Unix-second range and lists
+  regular requested-feed segments whose known closed interval overlaps the range, in path order. Open, unowned, or
+  malformed-interval segments with a start before the range end remain visible as candidates with an unknown end;
+  no end is fabricated. The query reports segment intervals, not per-frame coverage; replay remains a separate command.
+- **OA-FEED-195** Measured-retention configuration refuses a window below 45 days, absent/zero measurement, empty
+  source, arithmetic overflow, and conflicting explicit cap; its summary reports the exact configured retention,
+  supplied rate, derived cap and source. On Linux, combining retention with `--sync-closed-segments` preserves
+  file-then-directory sync ordering; a closed receipt is created only after both sync stages succeed.
 - **OA-DEF-001** Compresses to a raw RFC 1951 DEFLATE stream that the oa-zip inflater decodes to
   exactly the input, at levels 1 to 9 (others are clamped), for empty input, one byte, all-same
   bytes, random bytes and data at 32 KiB, 64 KiB and buffer-slide boundaries (each +-1).

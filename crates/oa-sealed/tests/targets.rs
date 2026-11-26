@@ -352,7 +352,7 @@ const ALLOW: &str = "seal-allow:";
 // B1: one locally guarded write-only create_new output opener in COMPASS output_fs.
 // P-010: two reviewed seal-checked metadata/output sites; no unguarded data reads.
 // CORE: two generic caller-policy path helpers; old ZIP fixture path waiver removed: net +1.
-const ALLOW_COUNT: usize = 197;
+const ALLOW_COUNT: usize = 204;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.

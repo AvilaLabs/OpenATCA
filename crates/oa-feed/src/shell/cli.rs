@@ -4,19 +4,25 @@
 //! oa-feed (--env <file> [--jar <jar>] [--java <java>] | --stdin) [--feed <name>]
 //!         [--record <dir> | --record-raw <dir>] [--sync-closed-segments]
 //!         [--max-bytes <n>] [--rotate-bytes <n>]
+//!         [--retain-days <n> --peak-bytes-per-hour <n> --peak-rate-source <measurement-path>]
 //!         [--duration <s>] [--summary-every <s>]
 //! oa-feed replay <file.oaf | file.oaf.gz>...
+//! oa-feed recordings --feed <name> --from <unix-seconds> --to <unix-seconds> <dir>
 //! ```
 //!
 //! `--record` writes gzip-compressed `.oaf.gz` files, `--record-raw` plain `.oaf`. The optional
 //! `--sync-closed-segments` requests synchronous file and directory-entry sync on Linux whenever
 //! a segment closes; it requires an existing recording directory and can delay capture. It does
-//! not certify hardware power-loss behavior. Sizes (`--max-bytes`, `--rotate-bytes`) count the
+//! not certify hardware power-loss behavior. It can be combined with measured retention; a
+//! segment receives a closed-retention receipt only after both sync stages succeed. Sizes
+//! (`--max-bytes`, `--rotate-bytes`) count the
 //! bytes written. Replay tells the formats apart by the file's first bytes, not its name.
 
 use std::path::PathBuf;
 
-use crate::record::check_feed_label;
+use crate::record::{
+    check_feed_label, retention_storage_budget_bytes, RetentionPolicy, MIN_RETENTION_SECS,
+};
 
 /// Default total recording cap: 2 GiB.
 pub const DEFAULT_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -67,6 +73,8 @@ pub struct Live {
     pub duration_secs: Option<u64>,
     /// Seconds between health lines.
     pub summary_secs: u64,
+    /// Optional measured, at-least-45-day retention policy.
+    pub retention: Option<RetentionPolicy>,
 }
 
 /// A parsed command line.
@@ -76,6 +84,13 @@ pub enum Command {
     Live(Live),
     /// Replay recorded files.
     Replay(Vec<PathBuf>),
+    /// List segments whose known or possible interval overlaps a half-open UTC range.
+    ListRecordings {
+        dir: PathBuf,
+        feed: String,
+        from_unix_secs: i64,
+        to_unix_secs: i64,
+    },
     /// Print usage.
     Help,
 }
@@ -84,7 +99,7 @@ pub enum Command {
 pub const USAGE: &str =
     "usage:\n  oa-feed (--env <file> [--jar <jar>] [--java <java>] | --stdin) [--feed <name>] \
 [--record <dir> | --record-raw <dir>] [--sync-closed-segments] [--max-bytes <n>] [--rotate-bytes <n>] [--duration <s>] \
-[--summary-every <s>]\n  oa-feed replay <file.oaf | file.oaf.gz>...";
+[--summary-every <s>] [--retain-days <n> --peak-bytes-per-hour <n> --peak-rate-source <measurement-path>]\n  oa-feed replay <file.oaf | file.oaf.gz>...\n  oa-feed recordings --feed <name> --from <unix-seconds> --to <unix-seconds> <dir>";
 
 /// Parses arguments (without the program name).
 pub fn parse(args: &[String]) -> Result<Command, String> {
@@ -101,12 +116,19 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut rotate_bytes = DEFAULT_ROTATE_BYTES;
     let mut duration_secs = None;
     let mut summary_secs = DEFAULT_SUMMARY_SECS;
+    let mut retain_days = None;
+    let mut peak_bytes_per_hour = None;
+    let mut peak_rate_source = None;
+    let mut max_bytes_set = false;
     if args.first().map(String::as_str) == Some("replay") {
         let files: Vec<PathBuf> = args.iter().skip(1).map(PathBuf::from).collect();
         if files.is_empty() {
             return Err("replay needs at least one file".into());
         }
         return Ok(Command::Replay(files));
+    }
+    if args.first().map(String::as_str) == Some("recordings") {
+        return parse_recordings_query(args);
     }
     while let Some(a) = it.next() {
         let mut value = |name: &str| {
@@ -134,8 +156,21 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 }
                 sync_closed_segments = true;
             }
-            "--max-bytes" => max_bytes = number("--max-bytes", &value("--max-bytes")?)?,
+            "--max-bytes" => {
+                max_bytes = number("--max-bytes", &value("--max-bytes")?)?;
+                max_bytes_set = true;
+            }
             "--rotate-bytes" => rotate_bytes = number("--rotate-bytes", &value("--rotate-bytes")?)?,
+            "--retain-days" => {
+                retain_days = Some(bounded("--retain-days", &value("--retain-days")?, 36_500)?)
+            }
+            "--peak-bytes-per-hour" => {
+                peak_bytes_per_hour = Some(number(
+                    "--peak-bytes-per-hour",
+                    &value("--peak-bytes-per-hour")?,
+                )?)
+            }
+            "--peak-rate-source" => peak_rate_source = Some(value("--peak-rate-source")?),
             "--duration" => {
                 duration_secs = Some(bounded(
                     "--duration",
@@ -178,6 +213,43 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     if sync_closed_segments && record.is_none() {
         return Err("--sync-closed-segments requires --record or --record-raw".into());
     }
+    let retention = match (retain_days, peak_bytes_per_hour, peak_rate_source) {
+        (None, None, None) => None,
+        (Some(days), Some(rate), Some(source)) => {
+            if record.is_none() {
+                return Err("retention options require --record or --record-raw".into());
+            }
+            if max_bytes_set {
+                return Err(
+                    "--max-bytes cannot be combined with measured retention; its budget is derived"
+                        .into(),
+                );
+            }
+            if source.trim().is_empty()
+                || source.len() > 160
+                || !source.bytes().all(|b| (0x20..=0x7e).contains(&b))
+            {
+                return Err("--peak-rate-source must be 1 to 160 printable ASCII bytes".into());
+            }
+            let retention_secs = days
+                .checked_mul(24 * 60 * 60)
+                .ok_or("retention days overflow")?;
+            if retention_secs < MIN_RETENTION_SECS {
+                return Err("--retain-days must be at least 45".into());
+            }
+            let policy = RetentionPolicy {
+                retention_secs,
+                measured_peak_bytes_per_hour: rate,
+                measurement_source: source,
+            };
+            max_bytes = retention_storage_budget_bytes(&policy).map_err(|e| e.to_string())?;
+            Some(policy)
+        }
+        _ => return Err(
+            "--retain-days, --peak-bytes-per-hour and --peak-rate-source must be supplied together"
+                .into(),
+        ),
+    };
     check_feed_label(&feed).map_err(|e| format!("--feed: {e}"))?;
     Ok(Command::Live(Live {
         source,
@@ -189,7 +261,65 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         rotate_bytes,
         duration_secs,
         summary_secs,
+        retention,
     }))
+}
+
+fn parse_recordings_query(args: &[String]) -> Result<Command, String> {
+    let mut feed = None;
+    let mut from = None;
+    let mut to = None;
+    let mut dir = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args.get(i).map(String::as_str) {
+            Some("--feed") if feed.is_none() => {
+                i += 1;
+                feed = Some(args.get(i).ok_or("--feed needs a value")?.clone());
+            }
+            Some("--from") if from.is_none() => {
+                i += 1;
+                from = Some(
+                    args.get(i)
+                        .ok_or("--from needs a value")?
+                        .parse::<i64>()
+                        .map_err(|_| "--from needs Unix seconds")?,
+                );
+            }
+            Some("--to") if to.is_none() => {
+                i += 1;
+                to = Some(
+                    args.get(i)
+                        .ok_or("--to needs a value")?
+                        .parse::<i64>()
+                        .map_err(|_| "--to needs Unix seconds")?,
+                );
+            }
+            Some(value) if !value.starts_with('-') && dir.is_none() => {
+                dir = Some(PathBuf::from(value))
+            }
+            Some(other) => {
+                return Err(format!(
+                    "unexpected or repeated recordings argument {other}"
+                ))
+            }
+            None => return Err("recordings query needs values".into()),
+        }
+        i += 1;
+    }
+    let feed = feed.ok_or("recordings query needs --feed")?;
+    check_feed_label(&feed)?;
+    let from_unix_secs = from.ok_or("recordings query needs --from")?;
+    let to_unix_secs = to.ok_or("recordings query needs --to")?;
+    if from_unix_secs >= to_unix_secs {
+        return Err("recordings range must be nonempty and half-open".into());
+    }
+    Ok(Command::ListRecordings {
+        dir: dir.ok_or("recordings query needs a directory")?,
+        feed,
+        from_unix_secs,
+        to_unix_secs,
+    })
 }
 
 fn number(name: &str, v: &str) -> Result<u64, String> {

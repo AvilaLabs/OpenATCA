@@ -1239,6 +1239,29 @@ fn command_line_parsing() {
     }
     assert!(cli::parse(&a("--stdin --sync-closed-segments")).is_err());
     assert!(matches!(cli::parse(&a("--help")).unwrap(), Command::Help));
+    let retained = cli::parse(&a("--stdin --record /r --retain-days 45 --peak-bytes-per-hour 1024 --peak-rate-source synthetic-measurement-v1")).expect("retention arguments");
+    match retained {
+        Command::Live(l) => {
+            assert_eq!(l.max_bytes, 45 * 24 * 1024);
+            assert_eq!(
+                l.retention.as_ref().map(|p| p.retention_secs),
+                Some(45 * 24 * 60 * 60)
+            );
+            assert_eq!(
+                l.retention.as_ref().map(|p| p.measurement_source.as_str()),
+                Some("synthetic-measurement-v1")
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        cli::parse(&a("recordings --feed t --from 0 --to 1 /records")),
+        Ok(Command::ListRecordings {
+            from_unix_secs: 0,
+            to_unix_secs: 1,
+            ..
+        })
+    ));
     for bad in [
         "",
         "--env",
@@ -1252,9 +1275,20 @@ fn command_line_parsing() {
         "--stdin --record-raw /a --record /b",
         "--stdin --record-raw",
         "--stdin --record /r --sync-closed-segments --sync-closed-segments",
+        "--stdin --record /r --retain-days 44 --peak-bytes-per-hour 1 --peak-rate-source measurement",
+        "--stdin --record /r --retain-days 45 --peak-bytes-per-hour 1",
+        "--stdin --record /r --retain-days 45 --peak-bytes-per-hour 1 --peak-rate-source measurement --max-bytes 100",
+        "recordings --feed t --from 2 --to 1 /records",
+        "recordings --feed t --from 0 --to 1",
     ] {
         assert!(cli::parse(&a(bad)).is_err(), "{bad:?} should be refused");
     }
+
+    let durable_retention = cli::parse(&a("--stdin --record /r --retain-days 45 --peak-bytes-per-hour 1 --peak-rate-source measurement --sync-closed-segments"));
+    assert!(matches!(
+        durable_retention,
+        Ok(Command::Live(ref live)) if live.sync_closed_segments && live.retention.is_some()
+    ));
 }
 
 // REQ: OA-FEED-178
