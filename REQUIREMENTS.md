@@ -1871,6 +1871,16 @@ the FAA event extension).
   a year alone, is still a malformed reference.
 - **OA-NOTAM-025** The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the
   month; hour 24 is refused.
+- **OA-NOTAM-026** The bounded FAA FNS AIXM 5.1 event encoder round-trips retained event fields,
+  ordered feature time slices, supported per-feature designators/airport indicators and associated
+  polygon geometry; it escapes XML text, round-trips a `PERM` effective end with a concrete
+  event-valid end, and emits GML `indeterminatePosition="unknown"` when the retained model has no
+  concrete permanent end. The pinned GML schema defines `unknown`, `after`, `before` and `now` as
+  distinct positions; unsupported non-unknown indeterminate states are refused rather than
+  collapsed. Its default sixteen-feature-per-row reservation is a memory budget, not an AIXM
+  occurrence limit; a caller may provide a larger total feature capacity. A refusal or undersized
+  destination leaves the caller's output bytes unchanged. This is not a general AIXM encoder, a
+  SWIM publisher, or an XSD-conformance claim.
 
 - **OA-RPL-027** A frame whose receive time goes backwards inside one stream is not reordered
   (that would need unbounded lookahead): it is emitted in file order and the pipeline counts a time

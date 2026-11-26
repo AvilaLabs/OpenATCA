@@ -39,14 +39,18 @@ pub const SRS: &str = r#"srsDimension="2" srsName="urn:ogc:def:crs:EPSG::4326""#
 pub const RING: &str = "30.10 -90.10 30.10 -90.20 30.20 -90.20 30.20 -90.10 30.10 -90.10";
 
 pub fn extent(ring: &str) -> String {
-    format!("<aixm:extent><aixm:ElevatedSurface gml:id=\"S\" {SRS}><gml:patches><gml:PolygonPatch><gml:exterior><gml:LinearRing><gml:posList>{ring}</gml:posList></gml:LinearRing></gml:exterior></gml:PolygonPatch></gml:patches></aixm:ElevatedSurface></aixm:extent>")
+    format!(
+        "<aixm:extent><aixm:ElevatedSurface gml:id=\"S\" {SRS}><gml:patches><gml:PolygonPatch><gml:exterior><gml:LinearRing><gml:posList>{ring}</gml:posList></gml:LinearRing></gml:exterior></gml:PolygonPatch></gml:patches></aixm:ElevatedSurface></aixm:extent>"
+    )
 }
 
 pub fn airport() -> String {
     member(
         "AirportHeliport",
         INSTANT,
-        &format!("<aixm:designator>QQA</aixm:designator><aixm:name>TEST FIELD</aixm:name><aixm:locationIndicatorICAO>KQQA</aixm:locationIndicatorICAO><aixm:ARP><aixm:ElevatedPoint gml:id=\"P\" {SRS}><gml:pos>30.2 -90.75</gml:pos></aixm:ElevatedPoint></aixm:ARP>"),
+        &format!(
+            "<aixm:designator>QQA</aixm:designator><aixm:name>TEST FIELD</aixm:name><aixm:locationIndicatorICAO>KQQA</aixm:locationIndicatorICAO><aixm:ARP><aixm:ElevatedPoint gml:id=\"P\" {SRS}><gml:pos>30.2 -90.75</gml:pos></aixm:ElevatedPoint></aixm:ARP>"
+        ),
     )
 }
 pub fn runway() -> String {
@@ -98,7 +102,9 @@ pub fn unit() -> String {
     member(
         "Unit",
         INSTANT,
-        &format!("<aixm:name>TEST ARTCC</aixm:name><aixm:type>ARTCC</aixm:type><aixm:designator>ZQQ</aixm:designator><aixm:position><aixm:ElevatedPoint gml:id=\"P\" {SRS}><gml:pos>30.0 -90.0</gml:pos></aixm:ElevatedPoint></aixm:position>"),
+        &format!(
+            "<aixm:name>TEST ARTCC</aixm:name><aixm:type>ARTCC</aixm:type><aixm:designator>ZQQ</aixm:designator><aixm:position><aixm:ElevatedPoint gml:id=\"P\" {SRS}><gml:pos>30.0 -90.0</gml:pos></aixm:ElevatedPoint></aixm:position>"
+        ),
     )
 }
 pub fn obstacle_area() -> String {
@@ -223,15 +229,35 @@ pub fn check_invariants(n: &Notams) {
     let all = (1u64 << FIELD_COUNT) - 1;
     assert_eq!(n.present.len(), n.len);
     assert_eq!(n.apt_icao.len(), n.len);
+    assert_eq!(n.feature_first.len(), n.len);
+    assert_eq!(n.feature_count.len(), n.len);
     assert_eq!(n.poly_vstart.len(), n.poly_vlen.len());
     assert_eq!(n.poly_vstart.len(), n.poly_kind.len());
+    assert_eq!(n.poly_vstart.len(), n.poly_feature.len());
+    assert_eq!(n.feature_kind.len(), n.feature_time_kind.len());
+    assert_eq!(n.feature_kind.len(), n.feature_interpretation.len());
+    assert_eq!(n.feature_kind.len(), n.feature_meta.len());
+    assert_eq!(n.feature_kind.len(), n.feature_time_meta.len());
+    assert_eq!(n.feature_kind.len(), n.feature_errors.len());
+    assert_eq!(n.feature_kind.len(), n.feature_begin_ms.len());
+    assert_eq!(n.feature_kind.len(), n.feature_end_ms.len());
+    assert_eq!(n.feature_kind.len(), n.feature_sequence_number.len());
+    assert_eq!(n.feature_kind.len(), n.feature_correction_number.len());
+    assert_eq!(n.feature_kind.len(), n.feature_designator.len());
+    assert_eq!(n.feature_kind.len(), n.feature_designator_len.len());
+    assert_eq!(n.feature_kind.len(), n.feature_icao.len());
+    assert_eq!(n.feature_kind.len(), n.feature_icao_len.len());
     assert_eq!(n.vtx_lat.len(), n.vtx_lon.len());
     assert!(n.strings_used <= n.strings.len());
     assert!(n.len <= n.capacity);
     assert!(n.vtx_lat.len() <= n.vtx_capacity);
     assert!(n.poly_vstart.len() <= n.poly_capacity);
+    assert!(n.feature_kind.len() <= n.feature_capacity);
     let max_ms = 253_402_300_799_999i64;
     for i in 0..n.len {
+        let row = row_at(n, i).unwrap();
+        let feature_end = row.feature_first.checked_add(row.feature_count).unwrap();
+        assert!(feature_end as usize <= n.feature_kind.len());
         let p = n.present[i];
         let e = n.errors[i];
         assert_eq!(p & e, 0, "row {i}: a field is both present and an error");
@@ -309,6 +335,7 @@ pub fn check_invariants(n: &Notams) {
                 .iter()
                 .all(|v| (-1_800_000_000..=1_800_000_000).contains(v)));
             assert!((FEAT_AIRPORT..=FEAT_PRIMARY_RADAR).contains(&n.poly_kind[pl]));
+            assert!((row.feature_first..feature_end).contains(&n.poly_feature[pl]));
         }
     }
 }

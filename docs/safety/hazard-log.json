@@ -653,6 +653,7 @@
     "OA-NOTAM-023",
     "OA-NOTAM-024",
     "OA-NOTAM-025",
+    "OA-NOTAM-026",
     "OA-QUAR-001",
     "OA-QUAR-002",
     "OA-QUAR-003",
@@ -8787,6 +8788,7 @@
         "OA-NOTAM-023",
         "OA-NOTAM-024",
         "OA-NOTAM-025",
+        "OA-NOTAM-026",
         "OA-RPL-027",
         "OA-RPL-028",
         "OA-RPL-029",
@@ -8807,6 +8809,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-ADAPT-004"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-NOTAM-026"
         }
       ],
       "verification_refs": [
@@ -9169,6 +9175,41 @@
           "requirement_id": "OA-NOTAM-025",
           "file": "crates/oa-notam/src/scalar.rs",
           "test_name": "impossible_dates_and_years_out_of_range_are_refused"
+        },
+        {
+          "requirement_id": "OA-NOTAM-026",
+          "file": "crates/oa-notam/tests/notam.rs",
+          "test_name": "encoder_roundtrips_retained_scalars_and_escapes_xml_text"
+        },
+        {
+          "requirement_id": "OA-NOTAM-026",
+          "file": "crates/oa-notam/tests/notam.rs",
+          "test_name": "encoder_roundtrips_each_feature_and_keeps_polygon_ownership"
+        },
+        {
+          "requirement_id": "OA-NOTAM-026",
+          "file": "crates/oa-notam/tests/notam.rs",
+          "test_name": "encoder_roundtrips_every_single_feature_fixture"
+        },
+        {
+          "requirement_id": "OA-NOTAM-026",
+          "file": "crates/oa-notam/tests/notam.rs",
+          "test_name": "feature_multiplicity_exceeds_default_reservation_with_explicit_capacity"
+        },
+        {
+          "requirement_id": "OA-NOTAM-026",
+          "file": "crates/oa-notam/tests/notam.rs",
+          "test_name": "feature_capacity_refusal_is_transactional"
+        },
+        {
+          "requirement_id": "OA-NOTAM-026",
+          "file": "crates/oa-notam/tests/notam.rs",
+          "test_name": "encoder_preserves_estimated_end_and_fnse_event_extension_fields"
+        },
+        {
+          "requirement_id": "OA-NOTAM-026",
+          "file": "crates/oa-notam/tests/notam.rs",
+          "test_name": "encoder_roundtrips_permanent_and_explicit_unknown_end_positions"
         },
         {
           "requirement_id": "OA-RPL-027",
@@ -18661,6 +18702,12 @@
       "function": "navigation_and_adaptation_data",
       "hazard_id": "HZ-AIRSPACE-001",
       "rationale": "Engineering safety candidate: this register clause constrains navigation_and_adaptation_data; failure can contribute to the stated hazard. Register clause: The calendar helper refuses years outside 1970 to 9999, months outside 1 to 12 and days that do not exist in the month; hour 24 is refused."
+    },
+    {
+      "id": "OA-NOTAM-026",
+      "function": "navigation_and_adaptation_data",
+      "hazard_id": "HZ-AIRSPACE-001",
+      "rationale": "Engineering safety candidate: a serialized event that changes retained scalar, feature, time-slice, or polygon data, or is partially returned after a lossy refusal, could misstate a navigation constraint to a downstream consumer. The tests cover a bounded FAA FNS AIXM 5.1 subset, explicit capacity behavior, and transactional refusal. This is not a general AIXM encoder, a SWIM publisher, an XSD-conformance claim, or proof of downstream consumer interpretation."
     },
     {
       "id": "OA-RPL-027",

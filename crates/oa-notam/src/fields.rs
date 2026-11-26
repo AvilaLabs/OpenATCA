@@ -29,7 +29,7 @@ pub enum Field {
     Issued,
     /// `validTime/TimePeriod/beginPosition` and `NOTAM/effectiveStart`.
     Start,
-    /// `validTime/TimePeriod/endPosition` and `NOTAM/effectiveEnd`.
+    /// `validTime/TimePeriod/endPosition` and `NOTAM/effectiveEnd`; an unknown end is in flags.
     End,
     /// `NOTAM/schedule`, kept in the string table.
     Schedule,
@@ -193,6 +193,26 @@ pub const ALT_UNLIMITED: i32 = i32::MAX;
 pub const FLAG_PERMANENT: u32 = 1;
 /// The end of the period is an estimate (`effectiveEnd` ends in `EST`).
 pub const FLAG_ESTIMATED: u32 = 2;
+/// The source has no concrete valid-time end. Canonical GML uses
+/// `endPosition indeterminatePosition="unknown"`; this does not mean `after`, `before` or `now`.
+pub const FLAG_END_UNKNOWN: u32 = 4;
+
+/// AIXM time-slice `interpretation` values retained from the source event.
+pub const INTERPRETATION_BASELINE: u8 = 1;
+pub const INTERPRETATION_SNAPSHOT: u8 = 2;
+pub const INTERPRETATION_TEMPDELTA: u8 = 3;
+pub const INTERPRETATION_PERMDELTA: u8 = 4;
+
+/// Event time-slice metadata presence bit: the AIXM `sequenceNumber` element was present.
+pub const SLICE_SEQUENCE_PRESENT: u8 = 1;
+/// Event time-slice metadata presence bit: the AIXM `correctionNumber` element was present.
+pub const SLICE_CORRECTION_PRESENT: u8 = 2;
+/// Event time-slice metadata error bit: the AIXM `interpretation` was malformed or repeated.
+pub const SLICE_INTERPRETATION_ERROR: u8 = 1;
+/// Event time-slice metadata error bit: the AIXM `sequenceNumber` was malformed or repeated.
+pub const SLICE_SEQUENCE_ERROR: u8 = 2;
+/// Event time-slice metadata error bit: the AIXM `correctionNumber` was malformed or repeated.
+pub const SLICE_CORRECTION_ERROR: u8 = 4;
 
 /// Feature kinds (`Notams::feat_kind`, and the bit index in `Notams::feat_mask`); 0 is none.
 pub const FEAT_AIRPORT: u8 = 1;
@@ -274,6 +294,7 @@ pub enum CapacityKind {
     Strings,
     Polygons,
     Vertices,
+    Features,
 }
 
 /// Why a document yielded no row. All or nothing: the caller's tables are as they were.
