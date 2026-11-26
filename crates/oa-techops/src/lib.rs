@@ -381,5 +381,13 @@ pub struct MetricWindowAssessment {
 mod assess;
 pub use assess::{assess_inventory, assess_metric_window};
 
+mod clock;
+pub use clock::{
+    assess_daily_clock, gps_to_utc, parse_ubx_nav_timegps, utc_to_gps, ClockDailyResult,
+    ClockError, ClockProcessorResult, ClockRowState, ClockSample, GpsInstant, ReferenceState,
+    UbxGpsReference, UbxTimeGpsError, UtcInstant, GPS_EPOCH_UNIX_SECONDS, MAX_CLOCK_EXPECTED,
+    MAX_CLOCK_SAMPLES,
+};
+
 #[cfg(test)]
 mod tests;

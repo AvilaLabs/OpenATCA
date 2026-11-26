@@ -7646,6 +7646,16 @@ claims; a match is explicitly unverified.
 - **OA-TECHOPS-005** Inventory, report-row, metric-row and per-window sequence caps are checked
   before scanning or bitmap initialization. Invalid time/window contracts, duplicate expected IDs,
   over-capacity inputs and arithmetic overflow return explicit refusal errors without partial PASS.
+- **OA-TECHOPS-006** UTC/GPS conversion uses the IERS positive-leap history, represents the
+  2016-12-31 leap second distinctly, and refuses invalid leap labels. Daily clock comparison takes
+  processor UTC samples, GPS-derived reference samples, the UTC day and alarm limit as explicit
+  inputs; it reports missing, duplicate, unexpected, unavailable and invalid evidence and never
+  reads a host clock or treats missing reference data as zero offset. Caller-supplied reference age
+  is checked against an explicit freshness bound. `parse_ubx_nav_timegps` accepts one bounded
+  UBX-NAV-TIMEGPS frame, verifies checksum and validity fields, checks the reported leap value
+  against the pinned IERS table, and returns a GPS reference for the same comparison API; it does
+  not authenticate the receiver or prove live source provenance. Conversion refuses beyond the
+  published leap table's confirmed horizon. Results remain unverified claims about supplied sources.
 
 ## H2 normalized migration-shadow event comparison (oa-migration-shadow)
 
