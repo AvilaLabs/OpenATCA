@@ -178,12 +178,8 @@ pub struct Target {
     pub alt_ft: i32,
     /// Aircraft address (bit 24 set for a non-ICAO one); shown as hex without a callsign.
     pub addr: u32,
-    /// Last source-observed Mode 3/A code, or [`NO_IDENT`].
-    pub ident: u16,
     /// Age of `ident` in seconds at this row, or `u32::MAX` if unknown or unrepresentable.
     pub ident_age_s: u32,
-    /// [`IDENT_UNKNOWN`], [`IDENT_OBSERVED`] or [`IDENT_CONFLICT`].
-    pub ident_state: u8,
     /// 95% horizontal position radius, metres; NaN or not positive when unknown.
     pub r95_m: f32,
     /// Positions before the current one, newest first; the first `trail_len` are valid.
@@ -196,9 +192,13 @@ pub struct Target {
     pub gs_dkt: u16,
     /// Seconds since the track was last reacquired, or [`NO_REACQ`].
     pub reacq_age_s: u16,
+    /// Last source-observed Mode 3/A code, or [`NO_IDENT`].
+    pub ident: u16,
     /// [`T_COAST`], [`T_UNCERTAIN`] and [`T_CS_CONFLICT`].
     pub flags: u8,
     pub trail_len: u8,
+    /// [`IDENT_UNKNOWN`], [`IDENT_OBSERVED`] or [`IDENT_CONFLICT`].
+    pub ident_state: u8,
 }
 const _: () = assert!(core::mem::size_of::<Target>() == 172);
 
