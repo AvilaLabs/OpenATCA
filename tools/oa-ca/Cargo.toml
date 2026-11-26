@@ -13,6 +13,9 @@ workspace = true
 # Workspace crates; not outside dependencies (RULESET F1). The ground
 # table of the clip is the close-encounter tool's own, shared so the two tools agree.
 oa-adsb = { path = "../../crates/oa-adsb" }
+# F1 / steer33 L11/A3: runtime shell verifies the issued facility package and loads its exact
+# CA preset before core configuration validation; dependency direction stays tool -> core/tool.
+oa-adapt = { path = "../oa-adapt" }
 oa-bench = { path = "../../crates/oa-bench" }
 oa-ca = { path = "../../crates/oa-ca" }
 oa-encounter-run = { path = "../oa-encounter" }

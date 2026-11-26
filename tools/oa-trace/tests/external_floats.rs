@@ -246,6 +246,11 @@ const ALLOW: &[Allow] = &[
         needle: ".parse::<f64>()",
         reason: "the CLI finite-only parser rejects parse errors and non-finite radar site coordinates/height",
     },
+    Allow {
+        file: "crates/oa-ca/src/preset.rs",
+        needle: "s.parse::<f64>()",
+        reason: "parse_f64 immediately rejects parse errors and non-finite preset minima",
+    },
 ];
 
 // REQ: OA-TRC-103

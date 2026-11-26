@@ -52,12 +52,18 @@ extern crate alloc;
 
 mod cycle;
 mod grid;
+mod preset;
 pub mod solve;
 mod state;
 mod types;
 mod volume;
 
-pub use cycle::{ca_cycle, ca_finish, ca_publish_refused, net_report_of, CycleOut};
+pub use cycle::{
+    ca_cycle, ca_cycle_with_inhibits, ca_finish, ca_publish_refused, net_report_of, CycleOut,
+};
+pub use preset::{
+    ca_preset_apply, ca_preset_facility, ca_preset_parse, CaPreset, CA_PRESET_MAX_BYTES,
+};
 pub use state::{
     alert_log_clear, alert_log_new, ca_check, ca_new, ca_note_lost_input, ca_open, ca_open_len,
     ca_totals, event_log_clear, event_log_new, CaState,
@@ -65,8 +71,8 @@ pub use state::{
 pub use types::{
     Alert, AlertLog, AltLost, Area, CaConfig, CaTrack, CycleStats, EventLog, Volume,
     AF_ALT_UNKNOWN, AF_COAST, AF_IDENTITY_UNCONFIRMED, AF_ONE_GROUND, AF_RADAR_ONLY,
-    AF_RATE_UNKNOWN, AF_UNCERTAIN, AIRBORNE, COAST_V_ALLOWANCE_FT, F_COAST, F_IDENTITY_UNCONFIRMED,
-    F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN, MAX_ABS_ALT_FT, MAX_ABS_VRATE_FPM, MAX_VOLUMES,
-    ON_GROUND,
+    AF_RATE_UNKNOWN, AF_SUPPRESSED, AF_UNCERTAIN, AIRBORNE, COAST_V_ALLOWANCE_FT, F_COAST,
+    F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY, F_UNCERTAIN, GROUND_UNKNOWN, MAX_ABS_ALT_FT,
+    MAX_ABS_VRATE_FPM, MAX_VOLUMES, ON_GROUND,
 };
 pub use volume::{volume_maxima, volume_minima};

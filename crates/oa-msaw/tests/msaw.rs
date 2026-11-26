@@ -476,6 +476,8 @@ fn inhibit_area(end_ns: i64) -> Box<InhibitTable> {
         max_duration_ns: [Some(3600 * S); 4],
         max_start_ahead_ns: Some(3600 * S),
         max_extent_e7: Some(20_000_000),
+        max_alert_suppression_ns: None,
+        allow_military_group_suppression: false,
     };
     let area = [
         (132_000_000, 1_446_000_000),
@@ -544,6 +546,8 @@ fn an_inhibition_of_another_net_or_another_band_hides_nothing() {
         max_duration_ns: [Some(3600 * S); 4],
         max_start_ahead_ns: Some(3600 * S),
         max_extent_e7: Some(20_000_000),
+        max_alert_suppression_ns: None,
+        allow_military_group_suppression: false,
     };
     let area = [
         (132_000_000, 1_446_000_000),

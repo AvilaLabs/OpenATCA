@@ -400,7 +400,8 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
 
 - **OA-ADAPT-001** An adaptation package manifest is canonical, versioned and bounded. Its exact bytes have a
   SHA-256 identity that must match a separately supplied expected digest. The manifest identifies release,
-  facility, change record, reader API range and exactly one required airspace snapshot component. Unknown schema
+  facility, change record, reader API range and the schema's exact required component set. Versions 1 and 2
+  require exactly the airspace snapshot; version 3 requires that snapshot and one CA preset companion. Unknown schema
   versions, incompatible reader ranges, duplicate or missing components, noncanonical encodings, extra files,
   malformed fields and unsupported paths refuse.
 - **OA-ADAPT-002** Before packaged route conversion admits a model, the loader reads the manifest and required
@@ -423,6 +424,12 @@ IDs are never reused. A withdrawn requirement stays in the register marked WITHD
   the issued manifest digest, retaining every expected processor and any mismatch. The current
   `oa-techops::assess_inventory` result remains `ClaimsMatchUnverified` at best; it is integrity/status evidence,
   not an authenticated issuer, deployment attestation, or operational certification.
+- **OA-ADAPT-004** `oa-adapt issue --ca-preset` accepts a bounded versioned CA preset only after the shared
+  `oa-ca` parser validates its exact facility identity, schema, geometry and numeric bounds. It issues manifest
+  schema v3 with strict component identities and byte length/SHA-256 for both the snapshot and preset; v1/v2
+  encodings and package component sets remain unchanged. Issuance returns its digest only after read-back
+  verifies the exact preset body, component set, manifest pin and facility. Digests establish byte integrity,
+  not issuer authentication or operational approval.
 
 ### Route conversion (oa-airspace)
 
@@ -5949,6 +5956,20 @@ allocation after start; times are nanoseconds, positions 1e-7 degree, altitudes 
   and claims against an explicit clock and local-frame motion envelope. It distinguishes a
   contradiction from missing, duplicate, stale, future, or unsupported evidence. A capacity refusal
   leaves the output untouched. The mutation fixture reports detected and in-envelope missed changes.
+- **OA-SAF-021** A pair suppression names two distinct nonzero aircraft addresses, one existing
+  alert's exact start time, a finite start/end window, reason and author. Addresses are canonicalized;
+  only that alert instance is suppressed. Invalid or overlong requests and a full bounded table are
+  refused and counted; expiry is exclusive at the end instant.
+- **OA-SAF-022** Group suppression is available only when the facility's issued adaptation enables
+  it and its purpose is a military special operation. Its bounded member set contains distinct
+  nonzero addresses; an alert is suppressed only when both endpoints belong to that set, so every
+  outsider pair remains active. Other purposes, a disabled facility policy, an invalid set or a full
+  table are refused and counted.
+- **OA-SAF-023** Every actual pair, group or area suppression records a bounded receipt with the
+  canonical aircraft pair, the alert instance start, source and time; that receipt is the
+  acknowledgement of that instance. A full receipt log counts the lost entry while suppression
+  still applies and degrades the net. Acknowledgement does not resolve or close the detected
+  conflict, and cannot carry to a later alert instance.
 - **OA-DSP-067** A newest track update dated after now is never fresh: the banner says `PICTURE TIME
   INCONSISTENT`.
 - **OA-DSP-068** Any loss in the safety record (event log overflow, suppressions lost, expired
@@ -6230,6 +6251,17 @@ configuration with no default; the crate's tests use synthetic values.
     - pairs across ±180 degrees at 60, 75 and 84.9 degrees, found at 0.99 of their reach and not at
       1.05.
   - The cell-search reach is shown numerically and by these tests, not by an analytic proof.
+- **OA-CA-035** The cycle that uses the facility inhibition/control table records area, pair and
+  group suppression receipts for actual conflicts. A suppressed conflict remains in detector state
+  under its original alert start with a current presentation-suppressed flag; when the finite control
+  ends, that same instance is presented again and the flag clears. The report separates detected,
+  suppressed/acknowledged and presented pair cycles; lost receipts and refused lookups are counted
+  and degrade the net.
+- **OA-CA-036** When an adaptation package and independent manifest pin are supplied to `oa-ca`, the shell
+  verifies the package and requires a v3 CA preset component, checks its facility identity with the shared
+  core parser, applies its typed volumes and policy before `ca_check`, and records the loaded manifest digest
+  and adaptation version in run output. Missing, corrupt, wrong-facility or unsupported preset components
+  refuse the run before detector processing.
 
 ## SWIM STDDS terminal data (oa-stdds)
 

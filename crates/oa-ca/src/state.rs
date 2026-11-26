@@ -127,7 +127,7 @@ fn check_area(a: &Area) -> Result<(), &'static str> {
     }
 }
 
-fn check_volume(v: &Volume) -> Result<(), &'static str> {
+pub(crate) fn check_volume(v: &Volume) -> Result<(), &'static str> {
     if !(pos(v.h_m) && v.h_m <= MAX_VOLUME_H_M) {
         return Err("volume h_m");
     }

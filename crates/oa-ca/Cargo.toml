@@ -14,6 +14,8 @@ workspace = true
 oa-geo = { path = "../oa-geo" }
 oa-ieee = { path = "../oa-ieee" }
 oa-math = { path = "../oa-math" }
+# F1: steer33 L11/A3 explicitly authorizes CA integration with the existing InhibitTable and
+# Suppressors owner; bounded alert controls and area/time/band inhibition stay in that core owner.
 oa-safety = { path = "../oa-safety" }
 
 [package.metadata.openatca]

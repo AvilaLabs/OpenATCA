@@ -219,13 +219,17 @@ pub fn report_path(out: &Path) -> PathBuf {
 }
 
 fn read_snapshot(path: &Path) -> Result<Vec<u8>, CliError> {
+    read_bounded_file(path, MAX_SNAPSHOT_BYTES, "snapshot")
+}
+
+fn read_bounded_file(path: &Path, limit: usize, kind: &str) -> Result<Vec<u8>, CliError> {
     let (file, declared_len) = oa_sealed::open_regular(path)
         .map_err(|e| failed(&format!("open {}", path.display()), e))?;
-    let max = u64::try_from(MAX_SNAPSHOT_BYTES)
-        .map_err(|_| CliError::Failed("snapshot byte limit width".into()))?;
+    let max =
+        u64::try_from(limit).map_err(|_| CliError::Failed(format!("{kind} byte limit width")))?;
     if declared_len > max {
         return Err(CliError::Failed(format!(
-            "{} is larger than the {MAX_SNAPSHOT_BYTES}-byte snapshot limit",
+            "{} is larger than the {limit}-byte {kind} limit",
             path.display()
         )));
     }
@@ -241,9 +245,9 @@ fn read_snapshot(path: &Path) -> Result<Vec<u8>, CliError> {
     )
     .read_to_end(&mut buf)
     .map_err(|e| failed(&format!("read {}", path.display()), e))?;
-    if buf.len() > MAX_SNAPSHOT_BYTES {
+    if buf.len() > limit {
         return Err(CliError::Failed(format!(
-            "{} is larger than the {MAX_SNAPSHOT_BYTES}-byte snapshot limit",
+            "{} is larger than the {limit}-byte {kind} limit",
             path.display()
         )));
     }
@@ -382,7 +386,7 @@ pub fn run_package(args: &[String], out: &mut dyn Write) -> Result<(), CliError>
     Ok(())
 }
 
-/// `issue`: create a bounded v2 manifest at the next version after verifying the prior pin.
+/// `issue`: create a bounded v2 or v3 manifest at the next version after verifying the prior pin.
 pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     const FIELDS: [&str; 11] = [
         "--snapshot",
@@ -397,7 +401,7 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         "--approver",
         "--reason",
     ];
-    if args.len() != FIELDS.len() * 2 {
+    if args.len() < FIELDS.len() * 2 || args.len() > (FIELDS.len() + 1) * 2 || args.len() % 2 != 0 {
         return Err(CliError::Usage(
             "issue requires exactly twelve flag/value pairs".into(),
         ));
@@ -416,7 +420,7 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         let value = pair
             .get(1)
             .ok_or_else(|| CliError::Usage("missing issue value".into()))?;
-        if !FIELDS.contains(&flag.as_str()) {
+        if !FIELDS.contains(&flag.as_str()) && flag != "--ca-preset" {
             return Err(CliError::Usage(format!("unknown issue argument {flag:?}")));
         }
         if value.is_empty() || value.starts_with("--") {
@@ -448,20 +452,38 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     let previous_pin = crate::manifest::parse_pin(get("--previous-manifest-sha256")?)
         .map_err(|e| CliError::Usage(e.to_string()))?;
     let snapshot_bytes = read_snapshot(&snapshot_path)?;
-    let (version, digest) = crate::manifest::issue_new_package(
-        &output_root,
-        &snapshot_bytes,
-        get("--release")?,
-        get("--facility")?,
-        get("--change-ref")?,
-        &previous_root,
-        previous_pin,
-        change_class,
-        get("--issuer")?,
-        get("--approver")?,
-        get("--reason")?,
-    )
-    .map_err(|e| failed("adaptation issue", e))?;
+    let issued = if let Some(path) = values.get("--ca-preset") {
+        let preset = read_bounded_file(Path::new(path), oa_ca::CA_PRESET_MAX_BYTES, "CA preset")?;
+        crate::manifest::issue_new_package_with_ca_preset(
+            &output_root,
+            &snapshot_bytes,
+            &preset,
+            get("--release")?,
+            get("--facility")?,
+            get("--change-ref")?,
+            &previous_root,
+            previous_pin,
+            change_class,
+            get("--issuer")?,
+            get("--approver")?,
+            get("--reason")?,
+        )
+    } else {
+        crate::manifest::issue_new_package(
+            &output_root,
+            &snapshot_bytes,
+            get("--release")?,
+            get("--facility")?,
+            get("--change-ref")?,
+            &previous_root,
+            previous_pin,
+            change_class,
+            get("--issuer")?,
+            get("--approver")?,
+            get("--reason")?,
+        )
+    };
+    let (version, digest) = issued.map_err(|e| failed("adaptation issue", e))?;
     writeln!(
         out,
         "adaptation_issue_status\tissued_unverified_for_activation"

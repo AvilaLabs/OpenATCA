@@ -15,6 +15,7 @@
 | OA-ADAPT-001 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: tools/oa-adapt/src/manifest.rs#verifies_independent_pin_and_decodes_the_hashed_component | DRAFT_NOT_ASSESSED |
 | OA-ADAPT-002 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: tools/oa-adapt/src/manifest.rs#verifies_independent_pin_and_decodes_the_hashed_component | DRAFT_NOT_ASSESSED |
 | OA-ADAPT-003 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: crates/oa-techops/src/tests.rs#issued_adaptation_pin_is_checked_for_each_processor_at_startup_and_on_demand; test: tools/oa-adapt/src/manifest.rs#issue_chains_exactly_one_version_and_records_field_change_approval_claims | DRAFT_NOT_ASSESSED |
+| OA-ADAPT-004 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: tools/oa-adapt/src/manifest.rs#v3_issued_facility_preset_roundtrips_exact_body_and_refuses_identity_damage | DRAFT_NOT_ASSESSED |
 | OA-ADSB-001 | surveillance_wire_measurement_decoding | HZ-SURV-INPUT-001 | Test | test: crates/oa-adsb/tests/decode.rs#full_row_with_object_decodes_every_field | DRAFT_NOT_ASSESSED |
 | OA-ADSB-002 | surveillance_wire_measurement_decoding | HZ-SURV-INPUT-001 | Test | test: crates/oa-adsb/tests/decode.rs#every_flag_bit_and_altitude_form | DRAFT_NOT_ASSESSED |
 | OA-ADSB-003 | surveillance_wire_measurement_decoding | HZ-SURV-INPUT-001 | Test | test: crates/oa-adsb/tests/decode.rs#all_fourteen_source_types_and_old_nine_column_rows | DRAFT_NOT_ASSESSED |
@@ -136,6 +137,8 @@
 | OA-CA-032 | conflict_alert | HZ-CA-001 | Test | test: tools/oa-ca/tests/nas_hour.rs#the_census_counts_distinct_airborne_addresses_by_hour_and_minute | DRAFT_NOT_ASSESSED |
 | OA-CA-033 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-ca/src/grid.rs#the_chord_is_never_longer_than_the_arc_at_any_latitude | DRAFT_NOT_ASSESSED |
 | OA-CA-034 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-ca/src/grid.rs#the_chord_is_finite_symmetric_and_not_negative_and_flat_validity_only_narrows | DRAFT_NOT_ASSESSED |
+| OA-CA-035 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-ca/tests/ca.rs#an_area_inhibit_uses_its_altitude_and_half_open_time_window_for_conflict_alert; test: crates/oa-ca/tests/ca.rs#pair_suppression_keeps_the_detected_conflict_and_reveals_the_same_alert_after_expiry | DRAFT_NOT_ASSESSED |
+| OA-CA-036 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-ca/src/preset.rs#runtime_applies_exact_issued_facility_preset_values_before_configuration_check; test: tools/oa-adapt/src/manifest.rs#v3_issued_facility_preset_roundtrips_exact_body_and_refuses_identity_damage; test: tools/oa-ca/src/run.rs#verified_issued_preset_loads_into_runtime_settings_before_ca_cycle | DRAFT_NOT_ASSESSED |
 | OA-CORE-006 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: tools/oa-adapt/tests/cli.rs#build_writes_the_snapshot_and_report_and_a_rebuild_is_byte_identical | DRAFT_NOT_ASSESSED |
 | OA-CORE-007 | navigation_and_adaptation_data | HZ-AIRSPACE-001 | Test | test: crates/oa-time-window/src/lib.rs#half_open_and_empty_windows_keep_their_boundaries | DRAFT_NOT_ASSESSED |
 | OA-CSV-001 | surveillance_and_structured_feed_ingestion | HZ-FEED-001 | Test | test: crates/oa-csv/tests/csv.rs#plain_fields_lf_and_crlf | DRAFT_NOT_ASSESSED |
@@ -678,6 +681,9 @@
 | OA-SAF-018 | safety_net_state_and_display | HZ-NET-STATE-001 | Test | test: crates/oa-safety/tests/safety.rs#a_start_horizon_a_maximum_extent_and_ids_are_required_and_enforced | DRAFT_NOT_ASSESSED |
 | OA-SAF-019 | safety_net_state_and_display | HZ-NET-STATE-001 | Test | test: crates/oa-safety/tests/safety.rs#lost_suppressions_mark_only_their_net_degraded_until_the_log_is_cleared | DRAFT_NOT_ASSESSED |
 | OA-SAF-020 | safety_net_state_and_display | HZ-NET-STATE-001 | Test | test: crates/oa-safety/tests/monitor.rs#synthetic_mutations_separate_detected_missed_and_unavailable_evidence | DRAFT_NOT_ASSESSED |
+| OA-SAF-021 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-safety/tests/safety.rs#pair_suppression_acknowledges_only_the_named_alert_instance | DRAFT_NOT_ASSESSED |
+| OA-SAF-022 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-safety/tests/safety.rs#group_suppression_refuses_disabled_facility_policy_and_nonmilitary_purpose; test: crates/oa-safety/tests/safety.rs#group_suppression_requires_both_aircraft_to_belong_to_the_selected_set | DRAFT_NOT_ASSESSED |
+| OA-SAF-023 | conflict_alert | HZ-CA-001 | Test | test: crates/oa-safety/tests/safety.rs#group_suppression_requires_both_aircraft_to_belong_to_the_selected_set; test: crates/oa-safety/tests/safety.rs#pair_suppression_acknowledges_only_the_named_alert_instance | DRAFT_NOT_ASSESSED |
 | OA-STD-001 | flight_plan_and_coordination_message_ingestion | HZ-FLIGHTDATA-001 | Test | test: crates/oa-stdds/tests/stdds.rs#every_fixture_kind_is_classified_by_root_and_namespace | DRAFT_NOT_ASSESSED |
 | OA-STD-002 | flight_plan_and_coordination_message_ingestion | HZ-FLIGHTDATA-001 | Test | test: crates/oa-stdds/tests/stdds.rs#unknown_kinds_are_counted_with_their_root_and_are_not_errors | DRAFT_NOT_ASSESSED |
 | OA-STD-003 | flight_plan_and_coordination_message_ingestion | HZ-FLIGHTDATA-001 | Test | test: crates/oa-stdds/tests/stdds.rs#a_full_tais_message_parses_every_field_in_its_unit | DRAFT_NOT_ASSESSED |

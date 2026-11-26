@@ -2,6 +2,10 @@
 //! publish the net's state. Core (pure).
 
 use oa_geo::aeqd::{frame_new, project, try_frame_from_true_velocity_at};
+use oa_safety::inhibit::{
+    alert_control_suppress, inhibit_suppress_pair, AlertCandidate, InhibitTable,
+    CONTROL_LOOKUP_WORK_MAX,
+};
 use oa_safety::net::{state_report, Area, NetId, NetReport, Reason, StateTable};
 
 use crate::grid::{exact_radius, grid_build, grid_scan, MAX_LAT_DEG};
@@ -9,8 +13,8 @@ use crate::solve::{predict, Prediction, Vertical};
 use crate::state::{alert_push, AltRec, CaState, Cand};
 use crate::types::{
     Alert, AlertLog, AltLost, CaConfig, CaTrack, CycleStats, EventLog, AF_ALT_UNKNOWN, AF_COAST,
-    AF_IDENTITY_UNCONFIRMED, AF_ONE_GROUND, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_UNCERTAIN,
-    COAST_V_ALLOWANCE_FT, F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY, F_UNCERTAIN,
+    AF_IDENTITY_UNCONFIRMED, AF_ONE_GROUND, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_SUPPRESSED,
+    AF_UNCERTAIN, COAST_V_ALLOWANCE_FT, F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY, F_UNCERTAIN,
     MAX_ABS_ALT_FT, MAX_ABS_VRATE_FPM, ON_GROUND,
 };
 use crate::volume::volume_minima;
@@ -53,6 +57,9 @@ fn add(t: &mut CycleStats, s: &CycleStats) {
     t.beyond_reach += s.beyond_reach;
     t.alt_unknown_pairs += s.alt_unknown_pairs;
     t.in_conflict += s.in_conflict;
+    t.suppressed += s.suppressed;
+    t.suppressions_dropped += s.suppressions_dropped;
+    t.control_lookup_refused += s.control_lookup_refused;
     t.opened += s.opened;
     t.closed += s.closed;
     t.open_dropped += s.open_dropped;
@@ -221,7 +228,14 @@ struct Seen {
 
 /// Exact geometry of one candidate pair, and the alert it opens or extends. False if the pair
 /// could not be evaluated (a projection failed).
-fn evaluate(st: &mut CaState, i: usize, j: usize, t_ns: i64, stats: &mut CycleStats) -> bool {
+fn evaluate(
+    st: &mut CaState,
+    i: usize,
+    j: usize,
+    t_ns: i64,
+    stats: &mut CycleStats,
+    inhibits: &mut Option<&mut InhibitTable>,
+) -> bool {
     let (Some(oi), Some(oj), Some(fi)) = (
         st.obs.get(i).copied(),
         st.obs.get(j).copied(),
@@ -321,6 +335,45 @@ fn evaluate(st: &mut CaState, i: usize, j: usize, t_ns: i64, stats: &mut CycleSt
         flags,
         ground_either: oi.ground == ON_GROUND || oj.ground == ON_GROUND,
     };
+    if let Some(table) = inhibits.as_deref_mut() {
+        let key = pair_key(oi.addr, oj.addr);
+        let existing = st.open.iter().find(|a| pair_key(a.addr_a, a.addr_b) == key);
+        let alert_start_ns = existing.map_or(t_ns, |a| a.start_ns);
+        let overflow_before = oa_safety::inhibit::suppressed_overflow(table);
+        let altitude = alt_known.then_some(oa_ieee::round(mid_alt) as i32);
+        let candidate = AlertCandidate {
+            net: NetId::ConflictAlert,
+            addr_a: oi.addr,
+            addr_b: oj.addr,
+            alert_start_ns,
+            lat_e7,
+            lon_e7,
+            alt_ft: altitude,
+            now_ns: t_ns,
+            control_work_budget: CONTROL_LOOKUP_WORK_MAX,
+        };
+        let area_controls = inhibit_suppress_pair(table, &candidate);
+        let mut controlled = area_controls.count > 0;
+        match alert_control_suppress(table, &candidate) {
+            Ok(controlled_by_pair_or_group) => controlled |= controlled_by_pair_or_group,
+            Err(_) => {
+                stats.control_lookup_refused += 1;
+            }
+        }
+        let overflow_after = oa_safety::inhibit::suppressed_overflow(table);
+        stats.suppressions_dropped = stats
+            .suppressions_dropped
+            .saturating_add(overflow_after.saturating_sub(overflow_before));
+        if controlled {
+            stats.suppressed += 1;
+            // Keep the condition and original alert instance in `st.open`; only current presentation
+            // state changes. When suppression ends this same instance becomes visible again.
+            let mut suppressed_seen = seen;
+            suppressed_seen.flags |= AF_SUPPRESSED;
+            record(st, &oi, &oj, &suppressed_seen, stats);
+            return true;
+        }
+    }
     record(st, &oi, &oj, &seen, stats);
     true
 }
@@ -351,7 +404,7 @@ fn record(st: &mut CaState, oi: &CaTrack, oj: &CaTrack, s: &Seen, stats: &mut Cy
     if s.p.now {
         a.ticks_current = a.ticks_current.saturating_add(1);
     }
-    a.flags |= s.flags;
+    a.flags = (a.flags & !AF_SUPPRESSED) | s.flags;
     let hm = s.p.h_miss_m as f32;
     if hm < a.min_h_miss_m {
         a.min_h_miss_m = hm;
@@ -442,6 +495,9 @@ fn shortfalls(s: &CycleStats) -> (u64, u64) {
         .saturating_add(s.open_dropped)
         .saturating_add(s.alerts_dropped)
         .saturating_add(s.alt_lost_dropped);
+    let work = work
+        .saturating_add(s.suppressions_dropped)
+        .saturating_add(s.control_lookup_refused);
     let input = s
         .rows_bad
         .saturating_add(s.rows_duplicate)
@@ -475,7 +531,16 @@ pub fn net_report_of(s: &CycleStats) -> NetReport {
 /// that detail is kept out of the public aggregate statistics, so only `ca_cycle` passes it here.
 fn net_report_with_radius_cap(s: &CycleStats, above_cap: u64) -> NetReport {
     let (work, input) = shortfalls(s);
-    if work > 0 {
+    if s.suppressions_dropped > 0 {
+        NetReport::Degraded {
+            reason: Reason::SuppressionLogFull,
+            area: Area::Whole,
+            count: sat32(
+                s.suppressions_dropped
+                    .saturating_add(s.control_lookup_refused),
+            ),
+        }
+    } else if work > 0 {
         NetReport::Degraded {
             reason: Reason::BudgetExceeded,
             area: Area::Whole,
@@ -525,6 +590,33 @@ pub fn ca_cycle(
     events: &mut EventLog,
     net: &mut StateTable,
 ) -> CycleOut {
+    ca_cycle_inner(st, t_ns, rows, alerts, events, net, None)
+}
+
+/// Conflict-alert cycle with the facility's existing inhibition/control table. Every hidden alert
+/// is recorded against its identified aircraft pair and alert start; a dropped audit record remains
+/// a counted safety-record shortfall.
+pub fn ca_cycle_with_inhibits(
+    st: &mut CaState,
+    t_ns: i64,
+    rows: &[CaTrack],
+    alerts: &mut AlertLog,
+    events: &mut EventLog,
+    net: &mut StateTable,
+    inhibits: &mut InhibitTable,
+) -> CycleOut {
+    ca_cycle_inner(st, t_ns, rows, alerts, events, net, Some(inhibits))
+}
+
+fn ca_cycle_inner(
+    st: &mut CaState,
+    t_ns: i64,
+    rows: &[CaTrack],
+    alerts: &mut AlertLog,
+    events: &mut EventLog,
+    net: &mut StateTable,
+    mut inhibits: Option<&mut InhibitTable>,
+) -> CycleOut {
     let mut stats = CycleStats::default();
     if st.started && t_ns <= st.last_ns {
         stats.out_of_order = 1;
@@ -566,7 +658,14 @@ pub fn ca_cycle(
         let Some(c) = st.cands.get(k).copied() else {
             break;
         };
-        if evaluate(st, c.i as usize, c.j as usize, t_ns, &mut stats) {
+        if evaluate(
+            st,
+            c.i as usize,
+            c.j as usize,
+            t_ns,
+            &mut stats,
+            &mut inhibits,
+        ) {
             stats.evaluated += 1;
         } else {
             stats.eval_failed += 1;

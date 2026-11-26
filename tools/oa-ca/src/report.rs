@@ -6,14 +6,14 @@ use std::fmt::Write as _;
 
 use oa_ca::{
     Alert, AltLost, CaConfig, CycleStats, AF_ALT_UNKNOWN, AF_COAST, AF_IDENTITY_UNCONFIRMED,
-    AF_ONE_GROUND, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_UNCERTAIN, ON_GROUND,
+    AF_ONE_GROUND, AF_RADAR_ONLY, AF_RATE_UNKNOWN, AF_SUPPRESSED, AF_UNCERTAIN, ON_GROUND,
 };
 use oa_safety::net::{reason_text, NetState};
 
 const NM: f64 = 1852.0;
 
 /// The flag bits of an alert with their names, in the order the summary lists them.
-pub const FLAG_NAMES: [(u16, &str); 7] = [
+pub const FLAG_NAMES: [(u16, &str); 8] = [
     (AF_ALT_UNKNOWN, "alt_unknown"),
     (AF_COAST, "coast"),
     (AF_UNCERTAIN, "uncertain"),
@@ -21,6 +21,7 @@ pub const FLAG_NAMES: [(u16, &str); 7] = [
     (AF_IDENTITY_UNCONFIRMED, "identity_unconfirmed"),
     (AF_ONE_GROUND, "one_ground"),
     (AF_RATE_UNKNOWN, "rate_unknown"),
+    (AF_SUPPRESSED, "suppressed"),
 ];
 
 /// The names of the bits of `f` joined by `|`; empty if none.
@@ -199,6 +200,8 @@ pub struct SummaryInput<'a> {
     pub config_sha256: &'a str,
     pub scope: &'a str,
     pub alerts_sha256: &'a str,
+    pub adaptation_manifest_sha256: Option<&'a str>,
+    pub adaptation_version: Option<u64>,
 }
 
 /// True if a shortfall of the run is non-zero: work left undone, rows left out, a log that lost
@@ -216,6 +219,8 @@ pub fn degraded(i: &SummaryInput) -> bool {
         + t.out_of_order
         + t.alerts_dropped
         + t.alt_lost_dropped
+        + t.suppressions_dropped
+        + t.control_lookup_refused
         + t.net_refused
         + t.rows_lost_upstream
         + t.finish_dropped
@@ -241,12 +246,27 @@ pub fn summary_text(i: &SummaryInput) -> String {
         i.config_name, i.config_sha256
     );
     let _ = writeln!(o, "tracks from: {}", i.scope);
+    if let (Some(pin), Some(version)) = (i.adaptation_manifest_sha256, i.adaptation_version) {
+        let _ = writeln!(
+            o,
+            "adaptation package: version {version} manifest sha256 {pin}"
+        );
+    } else {
+        let _ = writeln!(o, "adaptation package: none");
+    }
     let _ = writeln!(
         o,
         "look-ahead {} s, hysteresis {} s; straight-line prediction; horizontal minimum widened by both 95% radii, vertical by {:.0} ft per coasting or uncertain track",
         cfg.look_ahead_ns as f64 / 1e9,
         cfg.hysteresis_ns as f64 / 1e9,
         oa_ca::COAST_V_ALLOWANCE_FT
+    );
+    let _ = writeln!(
+        o,
+        "pair conflict cycles detected: {}; suppressed and acknowledged: {}; presented: {}",
+        t.in_conflict,
+        t.suppressed,
+        t.in_conflict.saturating_sub(t.suppressed)
     );
     let _ = writeln!(
         o,
@@ -386,6 +406,12 @@ pub fn summary_text(i: &SummaryInput) -> String {
             t.rate_unknown_pairs,
         ),
         ("pair cycles in conflict", t.in_conflict),
+        ("pair cycles suppressed and acknowledged", t.suppressed),
+        ("suppression audit entries dropped", t.suppressions_dropped),
+        (
+            "control lookups refused for work limit",
+            t.control_lookup_refused,
+        ),
         ("alerts opened", t.opened),
         ("alerts closed", t.closed),
         ("alerts not opened (table full)", t.open_dropped),

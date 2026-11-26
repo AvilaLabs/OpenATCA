@@ -38,6 +38,8 @@ fn cfg(hours: i64) -> InhibitConfig {
         max_duration_ns: [Some(hours * H); NET_COUNT],
         max_start_ahead_ns: Some(24 * H),
         max_extent_e7: Some(20_000_000),
+        max_alert_suppression_ns: Some(hours * H),
+        allow_military_group_suppression: true,
     }
 }
 
@@ -51,6 +53,26 @@ fn req<'a>(net: NetId, start: i64, end: i64) -> InhibitRequest<'a> {
         end_ns: end,
         reason: "RANGE 3 TEST FIRING",
         author: "SUP J SMITH",
+    }
+}
+
+fn alert_candidate(
+    addr_a: u32,
+    addr_b: u32,
+    alert_start_ns: i64,
+    now_ns: i64,
+    work: u32,
+) -> AlertCandidate {
+    AlertCandidate {
+        net: NetId::ConflictAlert,
+        addr_a,
+        addr_b,
+        alert_start_ns,
+        lat_e7: INSIDE.0,
+        lon_e7: INSIDE.1,
+        alt_ft: Some(2000),
+        now_ns,
+        control_work_budget: work,
     }
 }
 
@@ -444,10 +466,14 @@ fn every_suppression_is_logged_and_a_full_log_counts_the_overflow() {
         suppressed_log(&inh),
         &[Suppressed {
             time_ns: 5 * S,
+            alert_start_ns: 0,
             inhibition_id: a,
+            addr_a: 0,
+            addr_b: 0,
             lat_e7: INSIDE.0,
             lon_e7: INSIDE.1,
-            net: NetId::Msaw
+            net: NetId::Msaw,
+            source: 0,
         }]
     );
     for k in 1..SUPPRESSED_CAP {
@@ -488,6 +514,147 @@ fn every_suppression_is_logged_and_a_full_log_counts_the_overflow() {
     assert!(suppressed_log(&inh).is_empty());
     assert_eq!(suppressed_overflow(&inh), 3);
     assert_eq!(suppressed_overflow_net(&inh, NetId::Msaw), 0);
+}
+
+// REQ: OA-SAF-021, OA-SAF-023
+#[test]
+fn pair_suppression_acknowledges_only_the_named_alert_instance() {
+    let mut inh = table();
+    let id = pair_suppress_create(
+        &mut inh,
+        &cfg(1),
+        &PairSuppressRequest {
+            addr_a: 22,
+            addr_b: 11,
+            alert_start_ns: 4 * S,
+            start_ns: 5 * S,
+            end_ns: 10 * S,
+            text: AlertControlText {
+                reason: "COORDINATED",
+                author: "SUP A",
+            },
+        },
+        5 * S,
+    )
+    .unwrap();
+    assert!(alert_control_suppress(
+        &mut inh,
+        &alert_candidate(11, 22, 4 * S, 5 * S, CONTROL_LOOKUP_WORK_MAX)
+    )
+    .unwrap());
+    let receipt = suppressed_log(&inh).last().unwrap();
+    assert_eq!(
+        (
+            receipt.inhibition_id,
+            receipt.alert_start_ns,
+            receipt.addr_a,
+            receipt.addr_b,
+            receipt.source
+        ),
+        (id, 4 * S, 11, 22, 1)
+    );
+    assert!(
+        !alert_control_suppress(
+            &mut inh,
+            &alert_candidate(11, 22, 11 * S, 6 * S, CONTROL_LOOKUP_WORK_MAX)
+        )
+        .unwrap(),
+        "a later alert is not acknowledged by the old entry"
+    );
+    assert!(!alert_control_suppress(
+        &mut inh,
+        &alert_candidate(11, 23, 4 * S, 6 * S, CONTROL_LOOKUP_WORK_MAX)
+    )
+    .unwrap());
+    assert_eq!(
+        alert_control_suppress(&mut inh, &alert_candidate(11, 22, 4 * S, 6 * S, 0)),
+        Err(InhibitError::AlertControlWorkLimit)
+    );
+    assert_eq!(alert_control_work_refused(&inh), 1);
+    let bad = PairSuppressRequest {
+        addr_a: 7,
+        addr_b: 7,
+        alert_start_ns: 4 * S,
+        start_ns: 5 * S,
+        end_ns: 10 * S,
+        text: AlertControlText {
+            reason: "COORDINATED",
+            author: "SUP A",
+        },
+    };
+    assert_eq!(
+        pair_suppress_create(&mut inh, &cfg(1), &bad, 5 * S),
+        Err(InhibitError::BadAlertControl)
+    );
+    assert_eq!(alert_control_refused(&inh), 1);
+}
+
+// REQ: OA-SAF-022, OA-SAF-023
+#[test]
+fn group_suppression_requires_both_aircraft_to_belong_to_the_selected_set() {
+    let mut inh = table();
+    group_suppress_create(
+        &mut inh,
+        &cfg(1),
+        &GroupSuppressRequest {
+            members: &[30, 10, 20],
+            start_ns: 5 * S,
+            end_ns: 10 * S,
+            purpose: GroupSuppressPurpose::MilitarySpecialOperation,
+            text: AlertControlText {
+                reason: "MIL SPECIAL OPS",
+                author: "SUP A",
+            },
+        },
+        5 * S,
+    )
+    .unwrap();
+    assert!(alert_control_suppress(
+        &mut inh,
+        &alert_candidate(10, 30, 5 * S, 6 * S, CONTROL_LOOKUP_WORK_MAX)
+    )
+    .unwrap());
+    assert!(!alert_control_suppress(
+        &mut inh,
+        &alert_candidate(10, 40, 5 * S, 6 * S, CONTROL_LOOKUP_WORK_MAX)
+    )
+    .unwrap());
+    assert!(!alert_control_suppress(
+        &mut inh,
+        &alert_candidate(40, 50, 5 * S, 6 * S, CONTROL_LOOKUP_WORK_MAX)
+    )
+    .unwrap());
+    assert_eq!(suppressed_log(&inh).len(), 1);
+    assert_eq!(suppressed_log(&inh)[0].source, 2);
+}
+
+// REQ: OA-SAF-022
+#[test]
+fn group_suppression_refuses_disabled_facility_policy_and_nonmilitary_purpose() {
+    let mut inh = table();
+    let request = GroupSuppressRequest {
+        members: &[10, 20],
+        start_ns: 5 * S,
+        end_ns: 10 * S,
+        purpose: GroupSuppressPurpose::MilitarySpecialOperation,
+        text: AlertControlText {
+            reason: "MIL SPECIAL OPS",
+            author: "SUP A",
+        },
+    };
+    let mut disabled = cfg(1);
+    disabled.allow_military_group_suppression = false;
+    assert_eq!(
+        group_suppress_create(&mut inh, &disabled, &request, 5 * S),
+        Err(InhibitError::BadAlertControl)
+    );
+    let mut wrong = request;
+    wrong.purpose = GroupSuppressPurpose::Other;
+    assert_eq!(
+        group_suppress_create(&mut inh, &cfg(1), &wrong, 5 * S),
+        Err(InhibitError::BadAlertControl)
+    );
+    assert_eq!(alert_control_refused(&inh), 2);
 }
 
 // REQ: OA-SAF-011

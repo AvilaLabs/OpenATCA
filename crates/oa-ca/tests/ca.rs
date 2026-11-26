@@ -12,7 +12,13 @@
 use oa_ca::solve::*;
 use oa_ca::*;
 use oa_geo::aeqd::{frame_new, unproject};
-use oa_safety::net::{net_status, state_table_new, NetId, NetReport, NetState, Reason, StateTable};
+use oa_safety::inhibit::{
+    inhibit_config_none, inhibit_create, inhibits_new, pair_suppress_create, suppressed_log,
+    InhibitConfig, InhibitRequest,
+};
+use oa_safety::net::{
+    net_status, state_table_new, NetId, NetReport, NetState, Reason, StateTable, NET_COUNT,
+};
 
 const S: i64 = 1_000_000_000;
 const BASE: (f64, f64) = (41.5, -88.0);
@@ -581,6 +587,180 @@ fn the_volume_of_a_pair_is_the_one_holding_its_midpoint_and_altitude() {
         volume_minima(&c, 420_000_000, lon, Some(10_000.0)),
         (5000.0, 300.0)
     );
+}
+
+// REQ: OA-CA-008
+#[test]
+fn a_three_nautical_mile_aircraft_alert_volume_overrides_the_five_nautical_mile_default() {
+    let mut c = cfg();
+    c.default_volume = vol(5.0 * 1852.0, 1000.0);
+    c.volumes[0] = Volume {
+        area: Area::Box {
+            lat_min_e7: 415_400_000,
+            lat_max_e7: 415_600_000,
+            lon_min_e7: -880_100_000,
+            lon_max_e7: -879_900_000,
+        },
+        alt_lo_ft: 0,
+        alt_hi_ft: 40_000,
+        h_m: 3.0 * 1852.0,
+        v_ft: 1000.0,
+    };
+    c.n_volumes = 1;
+
+    // The pair is 7,000 m apart at closest approach, between 3 NM and 5 NM. Its midpoint
+    // is 6,000 m north of the base inside the local area; shifting east leaves that volume.
+    let run = |x: f64| {
+        let mut r = rig_with(&c);
+        let p = [
+            trk(1, x - 20_000.0, 2500.0, 200.0, 0.0, 10_000.0),
+            trk(2, x + 20_000.0, 9500.0, -200.0, 0.0, 10_000.0),
+        ];
+        step(&mut r, 0, &p);
+        ca_open_len(&r.st)
+    };
+    assert_eq!(run(0.0), 0, "inside the local area: 7 km exceeds 3 NM");
+    assert_eq!(run(30_000.0), 1, "outside: 7 km is within 5 NM");
+}
+
+// REQ: OA-SAF-009, OA-SAF-023, OA-CA-035
+#[test]
+fn an_area_inhibit_uses_its_altitude_and_half_open_time_window_for_conflict_alert() {
+    let mut st = ca_new(&cfg()).unwrap();
+    let mut alerts = alert_log_new(16).unwrap();
+    let mut events = event_log_new(16).unwrap();
+    let mut net = state_table_new(30 * S, 5 * S).unwrap();
+    let mut inhibits = inhibits_new();
+    let vertices = [
+        (414_000_000, -881_000_000),
+        (417_000_000, -881_000_000),
+        (417_000_000, -879_000_000),
+        (414_000_000, -879_000_000),
+    ];
+    let config = InhibitConfig {
+        max_duration_ns: [Some(20 * S); NET_COUNT],
+        max_start_ahead_ns: Some(0),
+        max_extent_e7: Some(30_000_000),
+        max_alert_suppression_ns: Some(20 * S),
+        allow_military_group_suppression: false,
+    };
+    let request = InhibitRequest {
+        net: NetId::ConflictAlert,
+        vertices: &vertices,
+        alt_low_ft: 9_000,
+        alt_high_ft: 11_000,
+        start_ns: 0,
+        end_ns: 10 * S,
+        reason: "SECTOR COORDINATION",
+        author: "SUP A",
+    };
+    inhibit_create(&mut inhibits, &config, &request, S).unwrap();
+    let rows = [
+        trk(1, -20_000.0, 0.0, 200.0, 0.0, 11_000.0),
+        trk(2, 20_000.0, 0.0, -200.0, 0.0, 11_000.0),
+    ];
+    let first = ca_cycle_with_inhibits(
+        &mut st,
+        S,
+        &rows,
+        &mut alerts,
+        &mut events,
+        &mut net,
+        &mut inhibits,
+    );
+    assert_eq!(first.stats.suppressed, 1);
+    assert_eq!(
+        ca_open_len(&st),
+        1,
+        "suppression preserves the detector's conflict instance"
+    );
+    let instance_start = ca_open(&st)[0].start_ns;
+    assert_eq!(instance_start, S);
+    assert_ne!(ca_open(&st)[0].flags & AF_SUPPRESSED, 0);
+    let receipt = suppressed_log(&inhibits).last().unwrap();
+    assert_eq!(
+        (receipt.addr_a, receipt.addr_b, receipt.alert_start_ns),
+        (1, 2, S)
+    );
+    let at_end = ca_cycle_with_inhibits(
+        &mut st,
+        10 * S,
+        &rows,
+        &mut alerts,
+        &mut events,
+        &mut net,
+        &mut inhibits,
+    );
+    assert_eq!(at_end.stats.suppressed, 0);
+    assert_eq!(
+        ca_open_len(&st),
+        1,
+        "the original alert instance resumes at the end boundary"
+    );
+    assert_eq!(ca_open(&st)[0].start_ns, instance_start);
+    assert_eq!(ca_open(&st)[0].flags & AF_SUPPRESSED, 0);
+}
+
+// REQ: OA-SAF-021, OA-SAF-023, OA-CA-035
+#[test]
+fn pair_suppression_keeps_the_detected_conflict_and_reveals_the_same_alert_after_expiry() {
+    let mut st = ca_new(&cfg()).unwrap();
+    let mut alerts = alert_log_new(16).unwrap();
+    let mut events = event_log_new(16).unwrap();
+    let mut net = state_table_new(30 * S, 5 * S).unwrap();
+    let mut inhibits = inhibits_new();
+    let rows = [
+        trk(1, -20_000.0, 0.0, 200.0, 0.0, 10_000.0),
+        trk(2, 20_000.0, 0.0, -200.0, 0.0, 10_000.0),
+    ];
+    ca_cycle(&mut st, 0, &rows, &mut alerts, &mut events, &mut net);
+    assert_eq!(ca_open_len(&st), 1);
+    let mut control_policy = inhibit_config_none();
+    control_policy.max_alert_suppression_ns = Some(5 * S);
+    pair_suppress_create(
+        &mut inhibits,
+        &control_policy,
+        &oa_safety::inhibit::PairSuppressRequest {
+            addr_a: 1,
+            addr_b: 2,
+            alert_start_ns: 0,
+            start_ns: S,
+            end_ns: 3 * S,
+            text: oa_safety::inhibit::AlertControlText {
+                reason: "COORDINATED",
+                author: "SUP A",
+            },
+        },
+        S,
+    )
+    .unwrap();
+    let hidden = ca_cycle_with_inhibits(
+        &mut st,
+        S,
+        &rows,
+        &mut alerts,
+        &mut events,
+        &mut net,
+        &mut inhibits,
+    );
+    assert_eq!(hidden.stats.suppressed, 1);
+    assert_eq!(ca_open_len(&st), 1);
+    assert_ne!(ca_open(&st)[0].flags & AF_SUPPRESSED, 0);
+    assert_eq!(suppressed_log(&inhibits).last().unwrap().alert_start_ns, 0);
+
+    let visible = ca_cycle_with_inhibits(
+        &mut st,
+        3 * S,
+        &rows,
+        &mut alerts,
+        &mut events,
+        &mut net,
+        &mut inhibits,
+    );
+    assert_eq!(visible.stats.suppressed, 0);
+    assert_eq!(ca_open_len(&st), 1);
+    assert_eq!(ca_open(&st)[0].start_ns, 0);
+    assert_eq!(ca_open(&st)[0].flags & AF_SUPPRESSED, 0);
 }
 
 // REQ: OA-CA-008

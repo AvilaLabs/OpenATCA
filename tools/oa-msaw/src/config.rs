@@ -497,6 +497,8 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
             get("inhibit_max_extent_deg")?,
             180.0,
         )?),
+        max_alert_suppression_ns: None,
+        allow_military_group_suppression: false,
     };
     let no_qnh_allowance_ft = feet("no_qnh_allowance_ft", get("no_qnh_allowance_ft")?)?;
     if no_qnh_allowance_ft < 0 {

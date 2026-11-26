@@ -39,6 +39,9 @@ pub const AF_IDENTITY_UNCONFIRMED: u16 = 16;
 pub const AF_ONE_GROUND: u16 = 32;
 /// [`Alert::flags`]: a vertical rate was unknown on either track (the pair was tested horizontally only).
 pub const AF_RATE_UNKNOWN: u16 = 64;
+/// The current alert instance is intentionally hidden by an explicit suppression or inhibition.
+/// Unlike diagnostic flags, this bit follows the current state and is cleared when suppression ends.
+pub const AF_SUPPRESSED: u16 = 128;
 
 /// The vertical limit is widened by this for each aircraft of a pair whose track is coasting or
 /// uncertain, feet: its altitude is then older or less sure than a reported one (M5 rule 4,
@@ -176,7 +179,7 @@ pub struct Alert {
     pub ticks_conflict: u32,
     pub ticks_current: u32,
     pub ticks_unevaluated: u32,
-    /// [`AF_ALT_UNKNOWN`] and the other `AF_` bits, of any cycle of the alert.
+    /// Diagnostic [`AF_`] bits seen during the alert plus the current [`AF_SUPPRESSED`] state.
     pub flags: u16,
     /// 1 if either aircraft was on the ground at the peak cycle, else 0.
     pub ground_either: u8,
@@ -269,6 +272,12 @@ pub struct CycleStats {
     pub alt_unknown_pairs: u64,
     /// Pair cycles in conflict.
     pub in_conflict: u64,
+    /// Pair cycles hidden by an explicit pair/group control or area inhibition.
+    pub suppressed: u64,
+    /// Suppression audit entries that did not fit; suppression still applied and the net degrades.
+    pub suppressions_dropped: u64,
+    /// Explicit-control lookups refused for an insufficient work budget.
+    pub control_lookup_refused: u64,
     pub opened: u64,
     pub closed: u64,
     /// Alerts not opened because the open table was full.

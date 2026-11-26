@@ -373,6 +373,8 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
             config_sha256: &"2".repeat(64),
             scope: "test",
             alerts_sha256: &"1".repeat(64),
+            adaptation_manifest_sha256: None,
+            adaptation_version: None,
         })
     };
     let ok = CycleStats {

@@ -7,6 +7,7 @@ name = "oa-adapt"
 version = "0.0.1"
 dependencies = [
  "oa-airspace",
+ "oa-ca",
  "oa-nasr",
  "oa-sealed",
  "oa-sha256",
@@ -109,6 +110,7 @@ name = "oa-ca-run"
 version = "0.0.1"
 dependencies = [
  "oa-adsb",
+ "oa-adapt",
  "oa-bench",
  "oa-ca",
  "oa-encounter-run",

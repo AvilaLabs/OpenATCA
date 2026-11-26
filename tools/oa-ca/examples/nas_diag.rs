@@ -29,8 +29,9 @@ use std::time::Instant;
 use oa_adsb::{decode_payload_lenient, reports_len, Reports, F_GROUND, NONE_I32};
 use oa_bench::input::{file_opener, for_each_adsb_frame, load_adsb_counted};
 use oa_ca::{
-    alert_log_clear, alert_log_new, ca_check, ca_cycle, ca_new, ca_totals, event_log_clear,
-    event_log_new, CaTrack, F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY, F_UNCERTAIN,
+    alert_log_clear, alert_log_new, ca_check, ca_cycle_with_inhibits, ca_new, ca_totals,
+    event_log_clear, event_log_new, CaTrack, F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY,
+    F_UNCERTAIN,
 };
 use oa_ca_run::config::parse_config;
 use oa_ca_run::guard::refuse_sealed;
@@ -317,13 +318,14 @@ impl CaSide {
         let diag_now = t >= measured_from_ns;
         let pre = if diag_now { Some(self.pre(t)) } else { None };
         let a = Instant::now();
-        let out = ca_cycle(
+        let out = ca_cycle_with_inhibits(
             &mut self.st,
             t,
             &self.batch,
             &mut self.alerts,
             &mut self.events,
             &mut self.net,
+            &mut self.inh,
         );
         let ns = a.elapsed().as_nanos() as u64;
         self.batch.clear();

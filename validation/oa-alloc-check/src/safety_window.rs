@@ -69,6 +69,8 @@ fn config() -> InhibitConfig {
         max_duration_ns: [Some(3600 * S); NET_COUNT],
         max_start_ahead_ns: Some(3600 * S),
         max_extent_e7: Some(100_000_000),
+        max_alert_suppression_ns: None,
+        allow_military_group_suppression: false,
     }
 }
 

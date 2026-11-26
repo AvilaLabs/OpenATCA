@@ -15,6 +15,9 @@ workspace = true
 # under Connor's authorized library/guard separation; no outside packages are introduced.
 # Model construction and byte parsing remain in the shared operational library.
 oa-airspace = { path = "../../crates/oa-airspace" }
+# F1: steer33 L11/A3 explicitly authorizes issue-time semantic validation of the CA preset with
+# the core parser that runtime CA uses; this is a shell-to-core link, never a reverse dependency.
+oa-ca = { path = "../../crates/oa-ca" }
 # Private input-path policy stays in this tool process, outside the reusable library.
 oa-sealed = { path = "../../crates/oa-sealed" }
 # Existing command content-identity output, not authentication.

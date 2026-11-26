@@ -7,9 +7,10 @@ use std::path::Path;
 
 use oa_bench::input::{file_opener, load_adsb_counted, Opener};
 use oa_ca::{
-    alert_log_clear, alert_log_new, ca_check, ca_cycle, ca_finish, ca_new, ca_note_lost_input,
-    ca_totals, event_log_clear, event_log_new, Alert, AlertLog, AltLost, CaState, CaTrack,
-    CycleStats, EventLog, F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY, F_UNCERTAIN,
+    alert_log_clear, alert_log_new, ca_check, ca_cycle_with_inhibits, ca_finish, ca_new,
+    ca_note_lost_input, ca_totals, event_log_clear, event_log_new, Alert, AlertLog, AltLost,
+    CaState, CaTrack, CycleStats, EventLog, F_COAST, F_IDENTITY_UNCONFIRMED, F_RADAR_ONLY,
+    F_UNCERTAIN,
 };
 use oa_encounter_run::run::{ground_at, ground_table, GroundTable};
 use oa_safety::inhibit::{inhibits_new, InhibitTable};
@@ -27,7 +28,7 @@ use oa_track::{
 use oa_track_tools::score::{interval_stats, scoring_config, split_reports, IntervalStats};
 
 use crate::args::Args;
-use crate::config::{parse_config, Settings};
+use crate::config::Settings;
 use crate::guard::{open_guarded, refuse_sealed, OpenFail};
 use crate::report::{alerts_csv, events_csv, state_text, summary_text, SummaryInput};
 
@@ -108,13 +109,14 @@ fn flush(f: &mut Feed) {
             // Charge it to the first cycle at or after that detection time.
             ca_note_lost_input(&mut f.st, count);
         }
-        let out = ca_cycle(
+        let out = ca_cycle_with_inhibits(
             &mut f.st,
             t,
             &f.batch,
             &mut f.alerts,
             &mut f.events,
             &mut f.net,
+            &mut f.inh,
         );
         f.last_t = t;
         if out.work_short > 0 && out.input_short > 0 {
@@ -319,6 +321,32 @@ pub fn run_counted(args: &Args, sealed: &mut u64) -> Result<String, String> {
     run_counted_with(args, &file_opener(), sealed)
 }
 
+/// Applies an independently pinned issued preset before `ca_check` and detector setup.
+fn load_adaptation_preset(
+    set: &mut Settings,
+    root: &Path,
+    pin: oa_sha256::Digest,
+) -> Result<(), String> {
+    refuse_sealed(Sealed::production(), root)?;
+    let package = oa_adapt::manifest::verify_current(root, pin)
+        .map_err(|e| format!("adaptation package refused: {e}"))?;
+    let body = package
+        .ca_preset_bytes()
+        .ok_or("adaptation package has no v3 CA preset component")?;
+    let facility = package.identity().facility.as_str();
+    let preset =
+        oa_ca::ca_preset_parse(body, facility).map_err(|e| format!("CA preset refused: {e}"))?;
+    if oa_ca::ca_preset_facility(&preset) != facility {
+        return Err("CA preset facility identity mismatch".into());
+    }
+    oa_ca::ca_preset_apply(&mut set.ca, &preset);
+    set.max_alert_suppression_ns = preset.max_alert_suppression_ns;
+    set.allow_military_group_suppression = preset.allow_military_group_suppression;
+    set.adaptation_manifest_sha256 = Some(to_hex(&package.identity().manifest_sha256));
+    set.adaptation_version = package.identity().adaptation_version;
+    Ok(())
+}
+
 /// The names of the output files, the summary last: it is the mark of a complete run.
 const OUTPUTS: [&str; 3] = ["alerts.csv", "altitude_lost.csv", "summary.txt"];
 
@@ -377,7 +405,12 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         .map_err(|e| format!("{}: {e}", args.config.display()))?;
     let cfg_text = String::from_utf8(cfg_bytes.clone())
         .map_err(|_| format!("{}: not UTF-8 text", args.config.display()))?;
-    let set = parse_config(&cfg_text).map_err(|e| format!("{}: {e}", args.config.display()))?;
+    let mut set = crate::config::parse_config_for_preset(&cfg_text)
+        .map_err(|e| format!("{}: {e}", args.config.display()))?;
+    if let (Some(root), Some(pin)) = (&args.adaptation_package, args.adaptation_pin) {
+        load_adaptation_preset(&mut set, root, pin)?;
+    }
+    ca_check(&set.ca).map_err(|e| format!("configuration refused by conflict alert: {e}"))?;
     // The count goes straight into `sealed`, so a clip that fails after rows were dropped still
     // reports them.
     let clip = load_adsb_counted(&args.adsb, open, sealed).map_err(|e| e.to_string())?;
@@ -435,6 +468,8 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         config_sha256: &to_hex(&sha256(&cfg_bytes)),
         scope: &scope,
         alerts_sha256: &csv_sha,
+        adaptation_manifest_sha256: set.adaptation_manifest_sha256.as_deref(),
+        adaptation_version: set.adaptation_version,
     });
     let events = events_csv(&rec.events);
     for (file, text) in OUTPUTS.into_iter().zip([&csv, &events, &summary]) {
@@ -446,4 +481,129 @@ pub fn run_counted_with(args: &Args, open: &Opener, sealed: &mut u64) -> Result<
         .and_then(|d| d.sync_all())
         .map_err(|e| format!("{}: {e}", args.out.display()))?;
     Ok(summary)
+}
+
+#[cfg(test)]
+mod adaptation_preset_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+    use oa_ca::{
+        alert_log_new, ca_check, ca_cycle_with_inhibits, ca_new, ca_open_len, event_log_new,
+        AlertLog, CaTrack, EventLog, AIRBORNE,
+    };
+    use oa_safety::{inhibit::inhibits_new, net::state_table_new};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("oa-ca-a3-{label}-{}-{serial}", std::process::id()))
+    }
+
+    fn open_count(cfg: &oa_ca::CaConfig, midpoint_lat_deg: f64) -> usize {
+        let mut state = ca_new(cfg).expect("synthetic CA state");
+        let mut alerts: AlertLog = alert_log_new(8).expect("synthetic alert log");
+        let mut events: EventLog = event_log_new(8).expect("synthetic event log");
+        let mut net = state_table_new(30_000_000_000, 5_000_000_000).expect("synthetic net table");
+        let mut inhibits = inhibits_new();
+        let half_separation_deg = 0.0315;
+        let rows = [
+            CaTrack {
+                lat_deg: midpoint_lat_deg - half_separation_deg,
+                lon_deg: -88.0,
+                addr: 0x00ab_0101,
+                vel_east_mps: 0.0,
+                vel_north_mps: 0.0,
+                r95_m: 0.0,
+                alt_ft: 10_000.0,
+                vrate_fpm: 0.0,
+                flags: 0,
+                ground: AIRBORNE,
+            },
+            CaTrack {
+                lat_deg: midpoint_lat_deg + half_separation_deg,
+                lon_deg: -88.0,
+                addr: 0x00ab_0102,
+                vel_east_mps: 0.0,
+                vel_north_mps: 0.0,
+                r95_m: 0.0,
+                alt_ft: 10_000.0,
+                vrate_fpm: 0.0,
+                flags: 0,
+                ground: AIRBORNE,
+            },
+        ];
+        ca_cycle_with_inhibits(
+            &mut state,
+            0,
+            &rows,
+            &mut alerts,
+            &mut events,
+            &mut net,
+            &mut inhibits,
+        );
+        ca_open_len(&state)
+    }
+
+    // REQ: OA-CA-036
+    #[test]
+    fn verified_issued_preset_loads_into_runtime_settings_before_ca_cycle() {
+        // Synthetic OAG2 snapshot schema v3: meta 2026-10-29 / CIFP 2611 / 92,600m / ZAU;
+        // provenance hashes are zero and explicitly synthetic; STRS and all 12 data tables empty.
+        // Fixture SHA-256: 4cdabe868c953e70d73e9a9f23af9d5d3b5ebaccaa959ef8a5475d258f13af92cb.
+        let snapshot = include_bytes!("../tests/fixtures/a3-empty-synthetic.oag2");
+        let preset = b"OACA-PRESET-1\nfacility=ZAU\ndefault=box,-900000000,900000000,-1800000000,1800000000,-1000,60000,9260,1000\nmax_alert_suppression_ns=60000000000\nallow_military_group_suppression=true\nvolume=box,414000000,416000000,-881000000,-879000000,0,40000,5556,1000\n";
+        let previous_root = temp_root("previous");
+        let package_root = temp_root("issued");
+        let previous_pin = oa_adapt::manifest::write_new_package(
+            &previous_root,
+            snapshot,
+            "synthetic-base",
+            "ZAU",
+            "A3-FIXTURE",
+        )
+        .expect("synthetic schema snapshot validates as baseline");
+        let (_, pin) = oa_adapt::manifest::issue_new_package_with_ca_preset(
+            &package_root,
+            snapshot,
+            preset,
+            "synthetic-v3",
+            "ZAU",
+            "A3-PRESET",
+            &previous_root,
+            previous_pin,
+            oa_adapt::manifest::ChangeClass::Initial,
+            "issuer-a",
+            "approver-b",
+            "synthetic preset loader regression",
+        )
+        .expect("v3 fixture package issues and readback verifies");
+
+        let cfg_text = include_str!("../testdata/dev.cfg");
+        let mut settings = crate::config::parse_config_for_preset(cfg_text)
+            .expect("development runtime settings parse before preset load");
+        load_adaptation_preset(&mut settings, &package_root, pin)
+            .expect("runtime verifies the package and loads exact preset bytes");
+        ca_check(&settings.ca).expect("preset minima are checked before detector setup");
+        assert_eq!(settings.adaptation_version, Some(1));
+        let expected_pin = oa_sha256::to_hex(&pin);
+        assert_eq!(
+            settings.adaptation_manifest_sha256.as_deref(),
+            Some(expected_pin.as_str())
+        );
+        assert_eq!(settings.ca.n_volumes, 1);
+        assert_eq!(settings.ca.volumes[0].h_m, 5556.0);
+        assert_eq!(settings.max_alert_suppression_ns, Some(60_000_000_000));
+        assert!(settings.allow_military_group_suppression);
+
+        // The same 7km pair is outside the issued 3NM local volume but inside the 5NM default.
+        // At latitude 41.5 the local preset must leave the detector quiet; outside its area the
+        // configured default must produce the alert through the normal cycle API.
+        assert_eq!(open_count(&settings.ca, 41.5), 0);
+        assert_eq!(open_count(&settings.ca, 42.0), 1);
+        let _ = std::fs::remove_dir_all(previous_root);
+        let _ = std::fs::remove_dir_all(package_root);
+    }
 }

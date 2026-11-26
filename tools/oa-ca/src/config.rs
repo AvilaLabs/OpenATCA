@@ -27,7 +27,7 @@ const MAX_TEXT_BYTES: usize = 1 << 20;
 
 /// What the tool needs beyond the core's configuration.
 // A7.2: cold struct, size guard waived
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub ca: CaConfig,
     /// A report of the net state older than this reads as unavailable, ns.
@@ -36,6 +36,10 @@ pub struct Settings {
     pub net_future_horizon_ns: i64,
     pub alert_log_capacity: usize,
     pub event_log_capacity: usize,
+    pub max_alert_suppression_ns: Option<i64>,
+    pub allow_military_group_suppression: bool,
+    pub adaptation_manifest_sha256: Option<String>,
+    pub adaptation_version: Option<u64>,
 }
 
 const KEYS: [&str; 17] = [
@@ -158,6 +162,14 @@ fn volume(v: &str) -> Result<Volume, String> {
 
 /// Parses the configuration text, and checks it with the core's own check.
 pub fn parse_config(text: &str) -> Result<Settings, String> {
+    parse_config_impl(text, true)
+}
+
+pub(crate) fn parse_config_for_preset(text: &str) -> Result<Settings, String> {
+    parse_config_impl(text, false)
+}
+
+fn parse_config_impl(text: &str, check_ca: bool) -> Result<Settings, String> {
     if text.len() > MAX_TEXT_BYTES {
         return Err(format!(
             "the configuration is longer than {MAX_TEXT_BYTES} bytes"
@@ -222,12 +234,19 @@ pub fn parse_config(text: &str) -> Result<Settings, String> {
         volumes: list,
         n_volumes: volumes.len(),
     };
-    oa_ca::ca_check(&ca).map_err(|e| format!("configuration refused by conflict alert: {e}"))?;
+    if check_ca {
+        oa_ca::ca_check(&ca)
+            .map_err(|e| format!("configuration refused by conflict alert: {e}"))?;
+    }
     Ok(Settings {
         ca,
         net_stale_limit_ns: seconds_ns("net_stale_limit_s", get("net_stale_limit_s")?)?,
         net_future_horizon_ns: seconds_ns("net_future_horizon_s", get("net_future_horizon_s")?)?,
         alert_log_capacity: log_capacity("alert_log_capacity", get("alert_log_capacity")?)?,
         event_log_capacity: log_capacity("event_log_capacity", get("event_log_capacity")?)?,
+        max_alert_suppression_ns: None,
+        allow_military_group_suppression: false,
+        adaptation_manifest_sha256: None,
+        adaptation_version: None,
     })
 }

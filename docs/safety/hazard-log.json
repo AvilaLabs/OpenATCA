@@ -1059,7 +1059,13 @@
     "OA-ZIP-010",
     "OA-ZIP-011",
     "OA-ZIP-061",
-    "OA-ZIP-062"
+    "OA-ZIP-062",
+    "OA-ADAPT-004",
+    "OA-CA-035",
+    "OA-CA-036",
+    "OA-SAF-021",
+    "OA-SAF-022",
+    "OA-SAF-023"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -8741,12 +8747,17 @@
         "OA-RTE-004",
         "OA-RTE-005",
         "OA-RTE-010",
-        "OA-RTE-011"
+        "OA-RTE-011",
+        "OA-ADAPT-004"
       ],
       "source_refs": [
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-424-001 through OA-RTE-011 in the owning functional sections"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-ADAPT-004"
         }
       ],
       "verification_refs": [
@@ -9164,6 +9175,11 @@
           "requirement_id": "OA-DEMO-001",
           "file": "crates/oa-demo-scenario/src/shell/resolve.rs",
           "test_name": "approach_final_stops_at_explicit_map_and_requires_the_marker"
+        },
+        {
+          "requirement_id": "OA-ADAPT-004",
+          "file": "tools/oa-adapt/src/manifest.rs",
+          "test_name": "v3_issued_facility_preset_roundtrips_exact_body_and_refuses_identity_damage"
         }
       ],
       "proof_refs": []
@@ -9307,12 +9323,29 @@
         "OA-CA-031",
         "OA-CA-032",
         "OA-CA-033",
-        "OA-CA-034"
+        "OA-CA-034",
+        "OA-CA-036",
+        "OA-SAF-021",
+        "OA-CA-035",
+        "OA-SAF-022",
+        "OA-SAF-023"
       ],
       "source_refs": [
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-CA-001 through OA-CA-034 in the owning functional sections"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-CA-001 through OA-CA-035 and OA-SAF-021 through OA-SAF-023"
+        },
+        {
+          "document": "docs/M5_DESIGN.md",
+          "locator": "Section 1, item 2: inhibition is a bounded, visible, logged object rather than a silent setting"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-CA-036"
         }
       ],
       "verification_refs": [
@@ -9475,6 +9508,56 @@
           "requirement_id": "OA-CA-034",
           "file": "crates/oa-ca/src/grid.rs",
           "test_name": "the_chord_is_finite_symmetric_and_not_negative_and_flat_validity_only_narrows"
+        },
+        {
+          "requirement_id": "OA-SAF-021",
+          "file": "crates/oa-safety/tests/safety.rs",
+          "test_name": "pair_suppression_acknowledges_only_the_named_alert_instance"
+        },
+        {
+          "requirement_id": "OA-SAF-022",
+          "file": "crates/oa-safety/tests/safety.rs",
+          "test_name": "group_suppression_requires_both_aircraft_to_belong_to_the_selected_set"
+        },
+        {
+          "requirement_id": "OA-SAF-022",
+          "file": "crates/oa-safety/tests/safety.rs",
+          "test_name": "group_suppression_refuses_disabled_facility_policy_and_nonmilitary_purpose"
+        },
+        {
+          "requirement_id": "OA-SAF-023",
+          "file": "crates/oa-safety/tests/safety.rs",
+          "test_name": "pair_suppression_acknowledges_only_the_named_alert_instance"
+        },
+        {
+          "requirement_id": "OA-SAF-023",
+          "file": "crates/oa-safety/tests/safety.rs",
+          "test_name": "group_suppression_requires_both_aircraft_to_belong_to_the_selected_set"
+        },
+        {
+          "requirement_id": "OA-CA-035",
+          "file": "crates/oa-ca/tests/ca.rs",
+          "test_name": "an_area_inhibit_uses_its_altitude_and_half_open_time_window_for_conflict_alert"
+        },
+        {
+          "requirement_id": "OA-CA-035",
+          "file": "crates/oa-ca/tests/ca.rs",
+          "test_name": "pair_suppression_keeps_the_detected_conflict_and_reveals_the_same_alert_after_expiry"
+        },
+        {
+          "requirement_id": "OA-CA-036",
+          "file": "tools/oa-adapt/src/manifest.rs",
+          "test_name": "v3_issued_facility_preset_roundtrips_exact_body_and_refuses_identity_damage"
+        },
+        {
+          "requirement_id": "OA-CA-036",
+          "file": "crates/oa-ca/src/preset.rs",
+          "test_name": "runtime_applies_exact_issued_facility_preset_values_before_configuration_check"
+        },
+        {
+          "requirement_id": "OA-CA-036",
+          "file": "tools/oa-ca/src/run.rs",
+          "test_name": "verified_issued_preset_loads_into_runtime_settings_before_ca_cycle"
         }
       ],
       "proof_refs": [
@@ -15403,6 +15486,18 @@
     }
   ],
   "safety_requirement_assessments": [
+    {
+      "id": "OA-CA-036",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: missing, corrupt, unsupported, or wrong-facility preset loading can change conflict-alert behavior. The runtime regression verifies a synthetic issued v3 package, the independent pin, exact typed minima and policy loading before `ca_check`, then shows those minima govern an ordinary CA cycle. The fixture is schema-generated synthetic metadata with empty tables; this does not establish issuer authentication, operational approval, or recorded-rate performance."
+    },
+    {
+      "id": "OA-ADAPT-004",
+      "function": "navigation_and_adaptation_data",
+      "hazard_id": "HZ-AIRSPACE-001",
+      "rationale": "Engineering safety candidate: issuing a CA preset with the wrong facility, malformed geometry or policy, or damaged component identity could feed incorrect warning configuration. The shared parser and exact read-back, component, and facility checks constrain byte and identity errors, but do not authenticate the issuer or establish operational approval. The directly tagged test verifies preset issuance/read-back and identity damage; it does not establish operational validity."
+    },
     {
       "id": "OA-GEN-003",
       "function": "surveillance_and_structured_feed_ingestion",
@@ -21672,6 +21767,30 @@
       "function": "traffic_and_safety_status_display",
       "hazard_id": "HZ-DISPLAY-001",
       "rationale": "Engineering safety candidate: Incorrectly shared position preferences or misleading shared annotations/voice status can produce an incomplete or misunderstood display. This is a prototype display-state contract, not a deployed workstation presentation claim. Register clause: Display range and per-position data-block preferences remain local to each position, while the prototype annotation and voice status use their shared coordination state. Position preference storage is fixed at 32 records. Source test: `position_preferences_are_separate_while_annotations_are_shared`. ## M5 \u2014 Minimum safe altitude warning (oa-msaw, tools/oa-msaw) Build order step 7 of docs/M5_DESIGN.md. `oa-msaw` is a core crate; the shell lookups of terrain, obstacles and charts cross as plain values. Every configured value is a development value, not an FAA value."
+    },
+    {
+      "id": "OA-CA-035",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: an incorrect suppression presentation flag or lost suppression receipt can hide or misrepresent an active conflict warning. The cycle retains detector state and original alert identity, clears presentation suppression when finite control expires, and counts refused lookups/receipt loss. The core does not establish external authority or credential provenance for a caller-provided control. Register clause: The cycle that uses the facility inhibition/control table records area, pair and group suppression receipts for actual conflicts. A suppressed conflict remains in detector state under its original alert start with a current presentation-suppressed flag; when the finite control ends, that same instance is presented again and the flag clears. The report separates detected, suppressed/acknowledged and presented pair cycles; lost receipts and refused lookups are counted and degrade the net."
+    },
+    {
+      "id": "OA-SAF-021",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: a malformed, stale, or overly broad pair suppression could remove a conflict warning from presentation. Exact alert-instance identity, canonical addresses, finite exclusive expiry, and refusal/counting constrain that effect. Reason, author and facility authorization remain caller claims, not authenticated evidence. Register clause: A pair suppression names two distinct nonzero aircraft addresses, one existing alert\u2019s exact start time, a finite start/end window, reason and author. Addresses are canonicalized; only that alert instance is suppressed. Invalid or overlong requests and a full bounded table are refused and counted; expiry is exclusive at the end instant."
+    },
+    {
+      "id": "OA-SAF-022",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: an unauthorized group rule could suppress valid conflict warnings for aircraft outside the intended operation. The feature is limited to a caller-provided enabled facility adaptation and military-special-operation purpose, suppresses only pairs wholly inside the bounded member set, and refuses invalid, disabled, or nonmatching cases. Adaptation issuance, purpose, and caller authority are not independently authenticated here; operator policy and authorization evidence remain open. Register clause: Group suppression is available only when the facility\u2019s issued adaptation enables it and its purpose is a military special operation. Its bounded member set contains distinct nonzero addresses; an alert is suppressed only when both endpoints belong to that set, so every outsider pair remains active. Other purposes, a disabled facility policy, an invalid set or a full table are refused and counted."
+    },
+    {
+      "id": "OA-SAF-023",
+      "function": "conflict_alert",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: missing or misbound acknowledgement for a suppressed alert could leave the controller without an accurate warning state. Receipts are bounded and bind the canonical pair and exact alert start; lost receipt entries are counted and degrade the net, and acknowledgements do not close or transfer to another alert instance. Receipt source/time remain supplied claims. Register clause: Every actual pair, group or area suppression records a bounded receipt with the canonical aircraft pair, the alert instance start, source and time; that receipt is the acknowledgement of that instance. A full receipt log counts the lost entry while suppression still applies and degrades the net. Acknowledgement does not resolve or close the detected conflict, and cannot carry to a later alert instance."
     }
   ],
   "unresolved_requirement_assessments": []
