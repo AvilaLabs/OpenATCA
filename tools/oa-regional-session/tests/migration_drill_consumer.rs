@@ -295,6 +295,28 @@ fn worker_does_not_ack_a_hash_valid_but_semantically_invalid_state_row() {
 
 // REQ: OA-MIG-414
 #[test]
+fn worker_does_not_ack_state_rows_when_commit_digest_is_wrong() {
+    let row = valid_track_state();
+    let correct_digest = state_digest(std::slice::from_ref(&row));
+    let zero_digest = "0".repeat(64);
+    let wrong_digest = if correct_digest == zero_digest {
+        "1".repeat(64)
+    } else {
+        zero_digest
+    };
+    let mut consumer = Consumer::new();
+    consumer.state_begin(0, 1, 1);
+    consumer.state_row(1, &row);
+    let ack = consumer.state_commit(0, 1, 1, &wrong_digest);
+    assert!(
+        ack.is_empty(),
+        "a mismatched commit digest must not be ACKed"
+    );
+    consumer.expect_failed_without_ack();
+}
+
+// REQ: OA-MIG-414
+#[test]
 fn worker_does_not_ack_a_partial_state_generation() {
     let row = valid_track_state();
     let digest = state_digest(std::slice::from_ref(&row));

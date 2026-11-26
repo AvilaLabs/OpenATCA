@@ -44,6 +44,12 @@ use std::time::{Duration, Instant};
 
 pub const CYCLES: usize = 100;
 pub const MAX_CONSUMER_FRAME_BYTES: usize = 2048;
+/// Bounded parent→worker write buffer for selected-state transactions. Sixteen maximum-sized
+/// frames fit without a pipe write; larger snapshots stream through this fixed buffer while the
+/// worker reads each row, then the commit flushes and waits for the single apply ACK.
+const CONSUMER_WRITE_BUFFER_FRAMES: usize = 16;
+const CONSUMER_WRITE_BUFFER_BYTES: usize = MAX_CONSUMER_FRAME_BYTES * CONSUMER_WRITE_BUFFER_FRAMES;
+const _: () = assert!(CONSUMER_WRITE_BUFFER_BYTES <= 64 * 1024);
 /// H5 bounded materialized-vector cap. The full-day M4 source uses the profile cursor and a
 /// streaming reader instead of retaining this many normalized rows.
 pub const MAX_NORMALIZED_EVENTS: usize = 10_000_000;
@@ -1694,6 +1700,35 @@ fn parse_worker_sequence(line: &[u8], expected: u64, expected_hash: &str) -> Res
     Ok(())
 }
 
+fn write_state_row<W: Write>(
+    writer: &mut W,
+    line_buffer: &mut String,
+    sequence: u64,
+    payload: &[u8],
+) -> Result<(), String> {
+    if payload.len() > MAX_CONSUMER_FRAME_BYTES / 2 - 128 {
+        return Err("selected state row cap exceeded".into());
+    }
+    let sha = oa_sha256::to_hex(&oa_sha256::sha256(payload));
+    line_buffer.clear();
+    {
+        use std::fmt::Write as FmtWrite;
+        write!(line_buffer, "H5CONSUMER\t1\tSTATE_ROW\t{sequence}\t{sha}\t")
+            .map_err(|_| "selected state row header formatting failed")?;
+        for byte in payload {
+            write!(line_buffer, "{byte:02x}")
+                .map_err(|_| "selected state row hex formatting failed")?;
+        }
+    }
+    line_buffer.push('\n');
+    if line_buffer.len() > MAX_CONSUMER_FRAME_BYTES {
+        return Err("selected state transport frame cap exceeded".into());
+    }
+    writer
+        .write_all(line_buffer.as_bytes())
+        .map_err(|error| error.to_string())
+}
+
 fn worker_read_frame<R: Read>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
     let mut frame = Vec::with_capacity(128);
     loop {
@@ -2460,6 +2495,9 @@ pub fn consumer_worker() -> Result<(), String> {
             continue;
         }
         if command == "STATE_ROW" {
+            // Rows are validated and accumulated without a response; the transaction has one
+            // apply/ACK boundary at STATE_COMMIT. The writer may stream rows as its bounded pipe
+            // buffer fills, without waiting for per-row progress that this protocol never sends.
             let rest = fields.collect::<Vec<_>>();
             if rest.len() != 3 {
                 return Err("selected state row transport shape is invalid".into());
@@ -2584,6 +2622,7 @@ pub fn consumer_worker() -> Result<(), String> {
 struct Consumer {
     child: Child,
     stdin: Option<BufWriter<ChildStdin>>,
+    state_row_buffer: String,
     replies: Receiver<Result<Vec<u8>, String>>,
     state_started: Option<Instant>,
     state_selected: Option<&'static str>,
@@ -2633,7 +2672,8 @@ impl Consumer {
         });
         Ok(Self {
             child,
-            stdin: Some(BufWriter::new(stdin)),
+            stdin: Some(BufWriter::with_capacity(CONSUMER_WRITE_BUFFER_BYTES, stdin)),
+            state_row_buffer: String::with_capacity(MAX_CONSUMER_FRAME_BYTES),
             replies,
             state_started: None,
             state_selected: None,
@@ -2722,20 +2762,10 @@ impl Consumer {
         if self.state_started.is_none() {
             return Err("selected state row outside a transaction".into());
         }
-        if payload.len() > MAX_CONSUMER_FRAME_BYTES / 2 - 128 {
-            return Err("selected state row cap exceeded".into());
-        }
-        let sha = oa_sha256::to_hex(&oa_sha256::sha256(payload));
-        let hex = hex_encode(payload)?;
-        let line = format!("H5CONSUMER\t1\tSTATE_ROW\t{sequence}\t{sha}\t{hex}\n");
-        if line.len() > MAX_CONSUMER_FRAME_BYTES {
-            return Err("selected state transport frame cap exceeded".into());
-        }
         let writer = self.stdin.as_mut().ok_or("consumer stdin closed")?;
-        writer
-            .write_all(line.as_bytes())
-            .and_then(|_| writer.flush())
-            .map_err(|error| error.to_string())
+        // Do not flush each row. BufWriter streams at its fixed capacity; STATE_COMMIT performs
+        // the transaction flush immediately before waiting for the exact apply ACK.
+        write_state_row(writer, &mut self.state_row_buffer, sequence, payload)
     }
 
     fn commit_state_cycle(
@@ -5821,6 +5851,109 @@ fn row_cycle_in_span(time_ns: i64, start: i64, end: i64) -> Result<usize, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CountedWriter {
+        bytes: Vec<u8>,
+        write_calls: usize,
+        flush_calls: usize,
+        max_chunk: usize,
+    }
+
+    impl Write for CountedWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.write_calls += 1;
+            let count = bytes.len().min(self.max_chunk);
+            self.bytes.extend_from_slice(
+                bytes
+                    .get(..count)
+                    .ok_or_else(|| io::Error::other("counted writer slice invariant"))?,
+            );
+            Ok(count)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flush_calls += 1;
+            Ok(())
+        }
+    }
+
+    fn expected_state_row(sequence: u64, payload: &[u8]) -> Vec<u8> {
+        let mut line = format!(
+            "H5CONSUMER\t1\tSTATE_ROW\t{sequence}\t{}\t",
+            oa_sha256::to_hex(&oa_sha256::sha256(payload))
+        );
+        for byte in payload {
+            use std::fmt::Write as FmtWrite;
+            let _ = write!(line, "{byte:02x}");
+        }
+        line.push('\n');
+        line.into_bytes()
+    }
+
+    // REQ: OA-MIG-414
+    #[test]
+    fn selected_state_rows_batch_exact_protocol_bytes_until_one_frame_flush() -> Result<(), String>
+    {
+        let rows: [&[u8]; 8] = [
+            b"TRACK\talpha",
+            b"FLIGHT\tbeta",
+            b"HANDOFF\tgamma",
+            b"ALERT\tdelta",
+            b"TRACK\tepsilon",
+            b"FLIGHT\tzeta",
+            b"HANDOFF\teta",
+            b"ALERT\ttheta",
+        ];
+        let mut expected = Vec::new();
+        for (index, payload) in rows.iter().enumerate() {
+            expected.extend_from_slice(&expected_state_row(index as u64 + 1, payload));
+        }
+        let counted = CountedWriter {
+            bytes: Vec::new(),
+            write_calls: 0,
+            flush_calls: 0,
+            max_chunk: usize::MAX,
+        };
+        let mut writer = BufWriter::with_capacity(CONSUMER_WRITE_BUFFER_BYTES, counted);
+        let mut row_buffer = String::with_capacity(MAX_CONSUMER_FRAME_BYTES);
+        for (index, payload) in rows.iter().enumerate() {
+            write_state_row(&mut writer, &mut row_buffer, index as u64 + 1, payload)?;
+        }
+        assert_eq!(writer.get_ref().write_calls, 0);
+        assert_eq!(writer.get_ref().flush_calls, 0);
+        writer.flush().map_err(|error| error.to_string())?;
+        assert_eq!(writer.get_ref().write_calls, 1);
+        assert_eq!(writer.get_ref().flush_calls, 1);
+        assert_eq!(writer.get_ref().bytes, expected);
+
+        let partial = CountedWriter {
+            bytes: Vec::new(),
+            write_calls: 0,
+            flush_calls: 0,
+            max_chunk: 7,
+        };
+        let mut writer = BufWriter::with_capacity(CONSUMER_WRITE_BUFFER_BYTES, partial);
+        let mut row_buffer = String::with_capacity(MAX_CONSUMER_FRAME_BYTES);
+        for (index, payload) in rows.iter().enumerate() {
+            write_state_row(&mut writer, &mut row_buffer, index as u64 + 1, payload)?;
+        }
+        writer.flush().map_err(|error| error.to_string())?;
+        assert!(writer.get_ref().write_calls > 1);
+        assert_eq!(writer.get_ref().flush_calls, 1);
+        assert_eq!(writer.get_ref().bytes, expected);
+        Ok(())
+    }
+
+    // REQ: OA-MIG-414
+    #[test]
+    fn selected_state_ack_parser_rejects_wrong_sequence_digest_and_shape() {
+        let hash = "a".repeat(64);
+        let correct = format!("H5CONSUMER\t1\tACK\t7\t{hash}\n");
+        assert!(parse_worker_sequence(correct.as_bytes(), 7, &hash).is_ok());
+        assert!(parse_worker_sequence(correct.as_bytes(), 8, &hash).is_err());
+        assert!(parse_worker_sequence(correct.as_bytes(), 7, &"b".repeat(64)).is_err());
+        assert!(parse_worker_sequence(b"H5CONSUMER\t1\tACK\t7\n", 7, &hash).is_err());
+    }
 
     // REQ: OA-MIG-414
     #[test]
