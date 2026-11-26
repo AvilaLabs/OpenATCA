@@ -524,7 +524,13 @@ fn same_seed_same_bytes_and_streams_are_per_aircraft() {
     let (b, _) = run(&truth, &s, 77);
     assert_eq!(a, b);
     let src = oa_asterix::SourceId { sac: 1, sic: 2 };
-    assert_eq!(to_cat048(&a, src).unwrap(), to_cat048(&b, src).unwrap());
+    let encoded = to_cat048(&a, src).unwrap();
+    assert_eq!(encoded, to_cat048(&b, src).unwrap());
+    let hex = encoded
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    println!("OA-D1-SIM-CAT048-BYTES={} HEX={hex}", encoded.len());
     let (c, _) = run(&truth, &s, 78);
     assert_ne!(a, c);
     // Dropping the other aircraft does not change one aircraft's plots.

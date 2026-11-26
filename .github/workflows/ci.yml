@@ -102,7 +102,7 @@ jobs:
         run: |
           python3 tools/test_repro_package_io.py
           python3 tools/test_reproduce_zau.py
-      - name: Requirements traceability
+      - name: Requirements and assurance traceability
         run: cargo +1.89.0 run --locked -p oa-trace
       - name: No external dependencies
         run: |

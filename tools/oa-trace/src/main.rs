@@ -35,7 +35,16 @@ fn main() -> ExitCode {
     }
     let classes = oa_trace::classcheck::check(&root);
     print!("\n{}", oa_trace::classcheck::render_text(&classes));
-    if rep.ok() && classes.ok() {
+    let accreditation = oa_trace::accreditation::check(&root);
+    println!("\nAccreditation source references:");
+    if accreditation.is_empty() {
+        println!("  OK");
+    } else {
+        for error in &accreditation {
+            println!("  ERROR: {error}");
+        }
+    }
+    if rep.ok() && classes.ok() && accreditation.is_empty() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

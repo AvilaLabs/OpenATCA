@@ -2929,6 +2929,35 @@ mod tests {
             seconds_csv(&r).lines().next(),
             Some("second,wall_ms,adsb_offered,plots_offered,rows_emitted")
         );
+        let counters = [
+            r.measure_s_done as u64,
+            r.offered_aircraft_expected as u64,
+            r.offered_aircraft_unique as u64,
+            r.adsb_expected_reports,
+            r.adsb_generated_reports,
+            r.fusion.adsb_in,
+            r.fusion.plots_in,
+            r.fusion.processed,
+            r.fusion.late,
+            r.fusion.plots_refused,
+            r.tracker.applied,
+            r.out_overflow,
+            r.tracks_confirmed as u64,
+        ];
+        assert_eq!(
+            counters,
+            [20, 100, 100, 0, 0, 1470, 1489, 2959, 0, 0, 2698, 0, 114]
+        );
+        let mut golden = b"OA-PERF-ACCOUNTING-V1\0".to_vec();
+        for value in counters {
+            golden.extend_from_slice(&value.to_le_bytes());
+        }
+        let hex = golden
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        println!("OA-D1-PERF-ACCOUNTING-BYTES={hex}");
+        assert_eq!(golden.len(), 22 + 13 * 8);
     }
 
     #[test]

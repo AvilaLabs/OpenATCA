@@ -7,6 +7,7 @@
 //! above `#[kani::proof]` (with an optional `#[kani::unwind(n)]` on either side of it) and
 //! counts as a proof, reported apart from tests. [`analyze`] joins the two.
 
+pub mod accreditation;
 pub mod classcheck;
 pub mod floatscan;
 

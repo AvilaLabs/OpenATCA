@@ -6922,6 +6922,10 @@ mod tests {
         let day = |r: &[Row], clip: &str| make_day(r, clip, U, true, &[], &[]);
         let d = [day(&win, "c1"), day(&win, "c2"), day(&flat, "c3")];
         let r = combine(files(&d)).unwrap();
+        assert_eq!(
+            to_hex(&sha256(r.as_bytes())),
+            "cd54b9880a95154f58dc5316b377eb06c69659af398b38bda23ef54572afc288"
+        );
         assert_eq!(r.matches("RULE MET").count(), 3, "{r}");
         // C against OpenATCA, or B silent, breaks it.
         let d = [day(&win, "c1"), day(&win, "c2"), day(&lose, "c3")];
