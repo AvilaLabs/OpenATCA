@@ -6,6 +6,7 @@ use crate::flight::{
     self, FlightApplyOutcome, FlightDriver, FlightDriverConfig, FlightDriverReport,
     FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS, MAX_DRIVER_LOG_ENTRIES,
 };
+use crate::metering::{resolve_metering_scan, MeteringScanReport, MeteringScanRow};
 use crate::nam_flight::{self, NamFlightContext, NamFlightResult, NamFlightRuntime};
 use crate::route::{self, RouteStore};
 use crate::session::{summarize_input_batch, FrameEvidence, ReceiptBatch, MAX_EVENTS_PER_RECEIPT};
@@ -19,7 +20,6 @@ use oa_quarantine::{
     InputOutcome, InputSource, QuarantineEvent, QuarantineQueue, ReasonFlags, SourceStats,
     REASON_INPUT_INVALID, REASON_RESOURCE_LIMIT, REASON_SURVEILLANCE_INVALID,
 };
-use crate::metering::{resolve_metering_scan, MeteringScanReport, MeteringScanRow};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
@@ -845,10 +845,8 @@ fn execute(
         None,
         metering_addresses.as_deref(),
     )?;
-    if let (Some(report), Some(convert)) = (
-        metering_report.as_mut(),
-        surveillance.metering_convert,
-    ) {
+    if let (Some(report), Some(convert)) = (metering_report.as_mut(), surveillance.metering_convert)
+    {
         report.target_attached_rows = convert.meter_rows_attached;
         report.target_unmatched_rows = convert.meter_rows_unmatched;
         report.targets_without_meter_row = convert.targets_without_meter_row;

@@ -5,7 +5,9 @@
 //! regional flight key and address, and the live regional flight table confirms that pair at the
 //! requested receipt time. Without that source-qualified binding, the row is counted unbound.
 
-use crate::flight::{flight_view_for_gufi, flight_views_for_address, FlightDriver, FlightViewStatus};
+use crate::flight::{
+    flight_view_for_gufi, flight_views_for_address, FlightDriver, FlightViewStatus,
+};
 use oa_display::core::metering::TargetMetering;
 use oa_scope_replay::rows::AddressMetering;
 use std::fmt;
@@ -129,7 +131,10 @@ impl fmt::Display for MeteringScanError {
                 "metering source row {index} duplicates or precedes the prior (centre, feed GUFI)"
             ),
             Self::InvalidReceiveTime { index } => {
-                write!(f, "metering source row {index} has a nonpositive receive time")
+                write!(
+                    f,
+                    "metering source row {index} has a nonpositive receive time"
+                )
             }
             Self::FutureReceiveTime { index } => write!(
                 f,
@@ -170,7 +175,11 @@ pub fn resolve_metering_scan(
         .try_reserve_exact(rows.len())
         .map_err(|_| MeteringScanError::AddressCapacity)?;
     for (index, row) in rows.iter().enumerate() {
-        let name_len = row.feed_gufi.iter().position(|byte| *byte == 0).unwrap_or(12);
+        let name_len = row
+            .feed_gufi
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(12);
         if name_len != 10
             || row.feed_gufi[name_len..].iter().any(|byte| *byte != 0)
             || !row.feed_gufi[..name_len]
@@ -181,9 +190,9 @@ pub fn resolve_metering_scan(
             return Err(MeteringScanError::MalformedFeedIdentity { index });
         }
         if index > 0 {
-            let prior = rows.get(index - 1).ok_or(
-                MeteringScanError::UnorderedOrDuplicateFeedIdentity { index },
-            )?;
+            let prior = rows
+                .get(index - 1)
+                .ok_or(MeteringScanError::UnorderedOrDuplicateFeedIdentity { index })?;
             if (prior.centre, prior.feed_gufi) >= (row.centre, row.feed_gufi) {
                 return Err(MeteringScanError::UnorderedOrDuplicateFeedIdentity { index });
             }
@@ -194,20 +203,25 @@ pub fn resolve_metering_scan(
         if row.received_time_ns > scan_time_ns {
             return Err(MeteringScanError::FutureReceiveTime { index });
         }
-        if row.source_time_ns.is_some_and(|source_time_ns| source_time_ns > row.received_time_ns) {
+        if row
+            .source_time_ns
+            .is_some_and(|source_time_ns| source_time_ns > row.received_time_ns)
+        {
             report.future_source_time_rows = report.future_source_time_rows.saturating_add(1);
             report.unbound_rows = report.unbound_rows.saturating_add(1);
             continue;
         }
-        if row.source_time_ns.is_some_and(|source_time_ns| source_time_ns < 0) {
+        if row
+            .source_time_ns
+            .is_some_and(|source_time_ns| source_time_ns < 0)
+        {
             report.invalid_source_time_rows = report.invalid_source_time_rows.saturating_add(1);
             report.unbound_rows = report.unbound_rows.saturating_add(1);
             continue;
         }
         if let Some(source_time_ns) = row.source_time_ns {
             let source_age_ns = scan_time_ns.saturating_sub(source_time_ns);
-            let source_age_ms =
-                u64::try_from(source_age_ns.max(0) / 1_000_000).unwrap_or(u64::MAX);
+            let source_age_ms = u64::try_from(source_age_ns.max(0) / 1_000_000).unwrap_or(u64::MAX);
             report.oldest_source_age_ms = Some(
                 report
                     .oldest_source_age_ms
@@ -240,7 +254,8 @@ pub fn resolve_metering_scan(
             }
         };
         let by_key = flight_view_for_gufi(flights, flight_gufi, centre, cutoff_ms);
-        let by_address = flight_views_for_address(flights, address, centre, cutoff_ms, view_scratch);
+        let by_address =
+            flight_views_for_address(flights, address, centre, cutoff_ms, view_scratch);
         let exact = matches!(by_key, Ok(view) if view.gufi == flight_gufi && view.address == address)
             && by_address.status == FlightViewStatus::Found
             && by_address.claimants == 1
@@ -255,7 +270,10 @@ pub fn resolve_metering_scan(
             report.unbound_rows = report.unbound_rows.saturating_add(1);
             continue;
         }
-        resolved.push(AddressMetering { address, values: row.values });
+        resolved.push(AddressMetering {
+            address,
+            values: row.values,
+        });
     }
     resolved.sort_unstable_by_key(|row| row.address);
     if resolved.len() > crate::surveillance::MAX_TRACKS {
@@ -267,9 +285,15 @@ pub fn resolve_metering_scan(
         .map_err(|_| MeteringScanError::AddressCapacity)?;
     let mut index = 0usize;
     while index < resolved.len() {
-        let row = resolved.get(index).copied().ok_or(MeteringScanError::AddressCapacity)?;
+        let row = resolved
+            .get(index)
+            .copied()
+            .ok_or(MeteringScanError::AddressCapacity)?;
         let mut end = index + 1;
-        while resolved.get(end).is_some_and(|other| other.address == row.address) {
+        while resolved
+            .get(end)
+            .is_some_and(|other| other.address == row.address)
+        {
             end += 1;
         }
         if end - index == 1 {
@@ -303,7 +327,14 @@ mod tests {
     }
 
     fn row(key: [u8; 12]) -> MeteringScanRow {
-        MeteringScanRow::unbound(*b"ZAU1", key, [1; 32], Some(900_000_000), 1_000_000_000, TargetMetering::default())
+        MeteringScanRow::unbound(
+            *b"ZAU1",
+            key,
+            [1; 32],
+            Some(900_000_000),
+            1_000_000_000,
+            TargetMetering::default(),
+        )
     }
 
     // REQ: OA-REG-021
@@ -397,4 +428,3 @@ mod tests {
         ));
     }
 }
-

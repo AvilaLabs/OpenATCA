@@ -9,8 +9,8 @@
 
 use oa_adsb::{encode_payload, reports_push, Reports, Row, ROW_EMPTY};
 use oa_airspace::model::{empty_model, Meta, Model};
-use oa_display::core::palette;
 use oa_display::core::metering::{MeterPointTimes, TargetMetering};
+use oa_display::core::palette;
 use oa_display::project::projection_new;
 use oa_display::raster::frame_digest;
 use oa_display::traffic::{
@@ -20,9 +20,9 @@ use oa_display::traffic::{
 use oa_scope_replay::adapt::{callsigns_from_reports, row_columns, ColumnBuf};
 use oa_scope_replay::cli;
 use oa_scope_replay::frame::{
-    replay_build, replay_build_raw, replay_build_with_safety, replay_new,
-    replay_build_with_metering_and_overlays,
-    replay_new_with_top_inset, replay_raster, ReplayConfig, ReplayError, ReplaySafety,
+    replay_build, replay_build_raw, replay_build_with_metering_and_overlays,
+    replay_build_with_safety, replay_new, replay_new_with_top_inset, replay_raster, ReplayConfig,
+    ReplayError, ReplaySafety,
 };
 use oa_scope_replay::publication::Publisher;
 use oa_scope_replay::raw::{RawObservationColumns, RAW_STALE_CUTOFF_NS};

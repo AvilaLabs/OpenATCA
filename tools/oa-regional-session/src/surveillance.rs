@@ -19,8 +19,8 @@ use oa_scope_replay::frame::{
     replay_build_with_overlays, replay_new_with_top_inset, replay_raster, Replay, ReplayConfig,
     ReplaySafety,
 };
-use oa_scope_replay::rows::{Callsigns, RowStore, DEFAULT_CONVERT};
 use oa_scope_replay::rows::AddressMetering;
+use oa_scope_replay::rows::{Callsigns, RowStore, DEFAULT_CONVERT};
 use oa_scope_replay::store::{store_add, store_finish};
 use oa_track::{
     output_clear, output_new, r95_m_of, tracker_advance, tracker_live_iter, tracker_new,
@@ -855,205 +855,206 @@ pub fn surveillance_finish_with_metering(
         &mut s.states,
     );
     let (ca_closed, ca_altitude_lost) = capture_ca_logs(s);
-    let (msaw_markers, digest, displayed, off_map, warnings, metering_convert) = if !s.profile.render_scope {
-        let digest = offline_projection_digest(time_ns, &tracks, ca_open(&s.ca))?;
-        if meter_rows.is_some() {
-            return Err("metering rows require the rendered regional scope path".into());
-        }
-        (None, digest, 0, 0, Vec::new(), None)
-    } else {
-        let mut store = RowStore::default();
-        let stats = store_add(
-            &mut store,
-            &row_columns(&snapshot, &mut ColumnBuf::default()),
-            time_ns,
-        )
-        .map_err(err)?;
-        if stats.kept != stats.rows_in || store_finish(&mut store) != 0 {
-            return Err("scope input snapshot lost rows".into());
-        }
-        let mut feeds = Vec::with_capacity(5);
-        for (i, &name) in FEED_NAMES.iter().enumerate() {
-            let seen = if i == 0 {
-                s.track_measurement_seen_ns
-            } else {
-                required(&s.seen, i)?
-            };
-            let down = if i == 0 {
-                s.track_down
-            } else {
-                required(&s.down, i)?
-            };
-            let state = match seen {
-                None => FeedState::NoMessageSeen,
-                Some(at) => {
-                    let age = time_ns.checked_sub(at).ok_or("feed age overflow")?;
-                    if age < 0 {
-                        return Err("feed age is negative".into());
-                    }
-                    let age_ms = u32::try_from(age / 1_000_000)
-                        .map_err(|_| "feed age exceeds research envelope")?;
-                    if down || age >= 5 * SECOND_NS {
-                        FeedState::Lost { age_ms }
-                    } else if age >= 2 * SECOND_NS {
-                        FeedState::Slow { age_ms }
-                    } else {
-                        FeedState::Live
-                    }
-                }
-            };
-            feeds.push(FeedStatus { name, state });
-        }
-        let newest_track = tracker_newest_update_ns(&s.tracker);
-        let safety = Some(&ReplaySafety {
-            states: &s.states,
-            inhibits: &s.inhibits,
-            feeds: &feeds,
-            newest_track_ns: (newest_track != i64::MIN).then_some(newest_track),
-            frozen_limit_ns: 5 * SECOND_NS,
-        });
-        let info = if let Some(rows) = meter_rows {
-            oa_scope_replay::frame::replay_build_with_metering_and_overlays(
-                &mut s.scope,
-                &store,
-                &Callsigns::default(),
-                time_ns,
-                "REGIONAL RESEARCH",
-                rows,
-                safety,
-                ownership,
-            )
+    let (msaw_markers, digest, displayed, off_map, warnings, metering_convert) =
+        if !s.profile.render_scope {
+            let digest = offline_projection_digest(time_ns, &tracks, ca_open(&s.ca))?;
+            if meter_rows.is_some() {
+                return Err("metering rows require the rendered regional scope path".into());
+            }
+            (None, digest, 0, 0, Vec::new(), None)
         } else {
-            replay_build_with_overlays(
-                &mut s.scope,
-                &store,
-                &Callsigns::default(),
+            let mut store = RowStore::default();
+            let stats = store_add(
+                &mut store,
+                &row_columns(&snapshot, &mut ColumnBuf::default()),
                 time_ns,
-                "REGIONAL RESEARCH",
-                safety,
-                ownership,
             )
-        }
-        .map_err(err)?;
-        if info.refused != 0
-            || info.malformed != 0
-            || info.stamp_clipped
-            || info.ownership_clipped
-            || info.convert.invalid_position != 0
-            || info.convert.unprojectable != 0
-            || info.convert.columns_inconsistent != 0
-        {
-            return Err("scope lost or could not represent current evidence".into());
-        }
-        let displayed = targets_columns(&s.scope.set);
-        // Off-map targets are a named presentation exclusion. Every displayed target must be one of
-        // the exact same issue-time observations offered to CA; no independent fixture traffic.
-        for (i, &address) in displayed.addr.iter().enumerate() {
-            let track = tracks
-                .iter()
-                .find(|t| t.address == address)
-                .ok_or("scope/CA identity mismatch")?;
-            if required(displayed.lat_e7, i)? != track.lat_e7
-                || required(displayed.lon_e7, i)? != track.lon_e7
-            {
-                return Err("scope/CA position mismatch".into());
+            .map_err(err)?;
+            if stats.kept != stats.rows_in || store_finish(&mut store) != 0 {
+                return Err("scope input snapshot lost rows".into());
             }
-        }
-        // Reserve rows 104..160 for alerts and console text. Layer 14 masks map primitives that
-        // extend beyond their clipped centre, while the standard legend remains in rows 0..104.
-        oa_display::list::push_rect(
-            &mut s.scope.list,
-            (0, 104 * 16),
-            (
-                i32::try_from(FRAME_WIDTH).map_err(|_| "panel width")? * 16,
-                160 * 16,
-            ),
-            oa_display::palette::BACKGROUND,
-            14,
-        )
-        .map_err(err)?;
-        oa_display::list::push_line(
-            &mut s.scope.list,
-            (0, 159 * 16),
-            (
-                i32::try_from(FRAME_WIDTH).map_err(|_| "panel width")? * 16,
-                159 * 16,
-            ),
-            oa_display::palette::DIM_TEXT,
-            15,
-        )
-        .map_err(err)?;
-        let msaw_markers = if let Some(frame) = msaw.as_ref() {
-            use oa_display::core::alert_markers::{
-                append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
-            };
-            if frame.open.len() > s.profile.max_tracks {
-                return Err("MSAW alert marker capacity exceeded".into());
-            }
-            let mut markers = Vec::with_capacity(s.profile.max_tracks);
-            for alert in &frame.open {
-                let position = tracks.iter().find(|track| track.address == alert.addr);
-                let state = if frame.stats.is_none() || alert.end_reason != oa_msaw::END_CLEAR {
-                    MarkerState::ProtectionLost
+            let mut feeds = Vec::with_capacity(5);
+            for (i, &name) in FEED_NAMES.iter().enumerate() {
+                let seen = if i == 0 {
+                    s.track_measurement_seen_ns
                 } else {
-                    match alert.peak {
-                        oa_msaw::Grade::Caution => MarkerState::Caution,
-                        oa_msaw::Grade::Warning => MarkerState::Warning,
+                    required(&s.seen, i)?
+                };
+                let down = if i == 0 {
+                    s.track_down
+                } else {
+                    required(&s.down, i)?
+                };
+                let state = match seen {
+                    None => FeedState::NoMessageSeen,
+                    Some(at) => {
+                        let age = time_ns.checked_sub(at).ok_or("feed age overflow")?;
+                        if age < 0 {
+                            return Err("feed age is negative".into());
+                        }
+                        let age_ms = u32::try_from(age / 1_000_000)
+                            .map_err(|_| "feed age exceeds research envelope")?;
+                        if down || age >= 5 * SECOND_NS {
+                            FeedState::Lost { age_ms }
+                        } else if age >= 2 * SECOND_NS {
+                            FeedState::Slow { age_ms }
+                        } else {
+                            FeedState::Live
+                        }
                     }
                 };
-                markers.push(AlertMarker {
-                    address: alert.addr,
-                    lat_e7: position.map_or(NO_POSITION_E7, |track| track.lat_e7),
-                    lon_e7: position.map_or(NO_POSITION_E7, |track| track.lon_e7),
-                    state,
-                    position_known: u8::from(position.is_some()),
-                    reserved: [0; 2],
-                });
+                feeds.push(FeedStatus { name, state });
             }
-            markers.sort_by_key(|marker| marker.address);
-            Some(
-                append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers)
-                    .map_err(err)?,
-            )
-        } else {
-            None
-        };
-        replay_raster(&mut s.scope).map_err(err)?;
-        let mut warnings = Vec::new();
-        if s.scope.list.texts.start.len() > 100_000 {
-            return Err("scope text evidence budget exceeded".into());
-        }
-        for (start, len) in s.scope.list.texts.start.iter().zip(&s.scope.list.texts.len) {
-            let start = usize::try_from(*start).map_err(|_| "text offset")?;
-            let end = start
-                .checked_add(usize::try_from(*len).map_err(|_| "text length")?)
-                .ok_or("text span overflow")?;
-            let text = s
-                .scope
-                .list
-                .text
-                .get(start..end)
-                .ok_or("invalid scope text span")?;
-            if text.starts_with("FEED ")
-                || text.starts_with("PICTURE ")
-                || text.starts_with("MSAW ")
-                || text.starts_with("AREA ")
-                || text.starts_with("APPROACH ")
-                || text.starts_with("CONFLICT ")
+            let newest_track = tracker_newest_update_ns(&s.tracker);
+            let safety = Some(&ReplaySafety {
+                states: &s.states,
+                inhibits: &s.inhibits,
+                feeds: &feeds,
+                newest_track_ns: (newest_track != i64::MIN).then_some(newest_track),
+                frozen_limit_ns: 5 * SECOND_NS,
+            });
+            let info = if let Some(rows) = meter_rows {
+                oa_scope_replay::frame::replay_build_with_metering_and_overlays(
+                    &mut s.scope,
+                    &store,
+                    &Callsigns::default(),
+                    time_ns,
+                    "REGIONAL RESEARCH",
+                    rows,
+                    safety,
+                    ownership,
+                )
+            } else {
+                replay_build_with_overlays(
+                    &mut s.scope,
+                    &store,
+                    &Callsigns::default(),
+                    time_ns,
+                    "REGIONAL RESEARCH",
+                    safety,
+                    ownership,
+                )
+            }
+            .map_err(err)?;
+            if info.refused != 0
+                || info.malformed != 0
+                || info.stamp_clipped
+                || info.ownership_clipped
+                || info.convert.invalid_position != 0
+                || info.convert.unprojectable != 0
+                || info.convert.columns_inconsistent != 0
             {
-                warnings.push(text.to_owned());
+                return Err("scope lost or could not represent current evidence".into());
             }
-        }
-        let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;
-        (
-            msaw_markers,
-            digest,
-            info.convert.added,
-            info.convert.off_map,
-            warnings,
-            meter_rows.map(|_| info.convert),
-        )
-    };
+            let displayed = targets_columns(&s.scope.set);
+            // Off-map targets are a named presentation exclusion. Every displayed target must be one of
+            // the exact same issue-time observations offered to CA; no independent fixture traffic.
+            for (i, &address) in displayed.addr.iter().enumerate() {
+                let track = tracks
+                    .iter()
+                    .find(|t| t.address == address)
+                    .ok_or("scope/CA identity mismatch")?;
+                if required(displayed.lat_e7, i)? != track.lat_e7
+                    || required(displayed.lon_e7, i)? != track.lon_e7
+                {
+                    return Err("scope/CA position mismatch".into());
+                }
+            }
+            // Reserve rows 104..160 for alerts and console text. Layer 14 masks map primitives that
+            // extend beyond their clipped centre, while the standard legend remains in rows 0..104.
+            oa_display::list::push_rect(
+                &mut s.scope.list,
+                (0, 104 * 16),
+                (
+                    i32::try_from(FRAME_WIDTH).map_err(|_| "panel width")? * 16,
+                    160 * 16,
+                ),
+                oa_display::palette::BACKGROUND,
+                14,
+            )
+            .map_err(err)?;
+            oa_display::list::push_line(
+                &mut s.scope.list,
+                (0, 159 * 16),
+                (
+                    i32::try_from(FRAME_WIDTH).map_err(|_| "panel width")? * 16,
+                    159 * 16,
+                ),
+                oa_display::palette::DIM_TEXT,
+                15,
+            )
+            .map_err(err)?;
+            let msaw_markers = if let Some(frame) = msaw.as_ref() {
+                use oa_display::core::alert_markers::{
+                    append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
+                };
+                if frame.open.len() > s.profile.max_tracks {
+                    return Err("MSAW alert marker capacity exceeded".into());
+                }
+                let mut markers = Vec::with_capacity(s.profile.max_tracks);
+                for alert in &frame.open {
+                    let position = tracks.iter().find(|track| track.address == alert.addr);
+                    let state = if frame.stats.is_none() || alert.end_reason != oa_msaw::END_CLEAR {
+                        MarkerState::ProtectionLost
+                    } else {
+                        match alert.peak {
+                            oa_msaw::Grade::Caution => MarkerState::Caution,
+                            oa_msaw::Grade::Warning => MarkerState::Warning,
+                        }
+                    };
+                    markers.push(AlertMarker {
+                        address: alert.addr,
+                        lat_e7: position.map_or(NO_POSITION_E7, |track| track.lat_e7),
+                        lon_e7: position.map_or(NO_POSITION_E7, |track| track.lon_e7),
+                        state,
+                        position_known: u8::from(position.is_some()),
+                        reserved: [0; 2],
+                    });
+                }
+                markers.sort_by_key(|marker| marker.address);
+                Some(
+                    append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers)
+                        .map_err(err)?,
+                )
+            } else {
+                None
+            };
+            replay_raster(&mut s.scope).map_err(err)?;
+            let mut warnings = Vec::new();
+            if s.scope.list.texts.start.len() > 100_000 {
+                return Err("scope text evidence budget exceeded".into());
+            }
+            for (start, len) in s.scope.list.texts.start.iter().zip(&s.scope.list.texts.len) {
+                let start = usize::try_from(*start).map_err(|_| "text offset")?;
+                let end = start
+                    .checked_add(usize::try_from(*len).map_err(|_| "text length")?)
+                    .ok_or("text span overflow")?;
+                let text = s
+                    .scope
+                    .list
+                    .text
+                    .get(start..end)
+                    .ok_or("invalid scope text span")?;
+                if text.starts_with("FEED ")
+                    || text.starts_with("PICTURE ")
+                    || text.starts_with("MSAW ")
+                    || text.starts_with("AREA ")
+                    || text.starts_with("APPROACH ")
+                    || text.starts_with("CONFLICT ")
+                {
+                    warnings.push(text.to_owned());
+                }
+            }
+            let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;
+            (
+                msaw_markers,
+                digest,
+                info.convert.added,
+                info.convert.off_map,
+                warnings,
+                meter_rows.map(|_| info.convert),
+            )
+        };
     let track_transport_seen_ns = s.seen.first().copied().flatten();
     s.completed = true;
     s.failed = false;

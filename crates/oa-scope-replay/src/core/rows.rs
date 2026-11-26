@@ -25,8 +25,8 @@
 //! ([`NO_ALT`], [`NO_U16`], [`NO_REACQ`]) are unreachable from real data. A time difference that
 //! does not fit an `i64` is larger than any window, and is treated as such.
 
-use oa_display::core::project::Projection;
 use oa_display::core::metering::TargetMetering;
+use oa_display::core::project::Projection;
 use oa_display::core::traffic::{
     map_position, position_valid, targets_push, MapPos, Target, TargetSet, MAX_REACQ_AGE_S,
     MAX_TRAIL, NO_ALT, NO_REACQ, NO_U16, T_COAST, T_CS_CONFLICT, T_UNCERTAIN,
@@ -422,10 +422,16 @@ impl fmt::Display for AddressMeteringError {
                 write!(f, "meter input has {requested} rows; maximum is {limit}")
             }
             Self::InvalidAddress { index, address } => {
-                write!(f, "meter input row {index} has invalid aircraft address {address:#x}")
+                write!(
+                    f,
+                    "meter input row {index} has invalid aircraft address {address:#x}"
+                )
             }
             Self::NotStrictlySorted { index } => {
-                write!(f, "meter input address order is duplicate or descending at row {index}")
+                write!(
+                    f,
+                    "meter input address order is duplicate or descending at row {index}"
+                )
             }
         }
     }

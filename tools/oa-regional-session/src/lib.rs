@@ -35,8 +35,7 @@ pub use input::{
 };
 pub use runtime::{
     regional_new_with_profile, regional_profile_limits, regional_step_with_metering,
-    RegionalRunProfile,
-    DEFAULT_REGIONAL_RUN_PROFILE,
+    RegionalRunProfile, DEFAULT_REGIONAL_RUN_PROFILE,
 };
 pub use session::{
     flush_receipt_group, push_event, session_cursor_new, session_cursor_new_with_limit,

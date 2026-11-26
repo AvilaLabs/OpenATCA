@@ -8,8 +8,8 @@ use crate::core::raw::{
     raw_targets_at_with_source_stale, RawInputError, RawObservationColumns, RawStats,
 };
 use crate::core::rows::{
-    convert_check, targets_at, targets_at_with_metering, AddressMetering,
-    AddressMeteringError, Callsigns, ConvertConfig, ConvertStats, RowStore, RowsError,
+    convert_check, targets_at, targets_at_with_metering, AddressMetering, AddressMeteringError,
+    Callsigns, ConvertConfig, ConvertStats, RowStore, RowsError,
 };
 use oa_airspace::core::model::Model;
 use oa_display::core::font::{text_width_units, CAP_HEIGHT};
