@@ -71,7 +71,10 @@ pub struct CanonicalValue {
     pub len: u8,
     pub bytes: [u8; 32],
 }
+// Budget: two compact tagged values may be compared per field; 3 tag/length bytes plus 32 bytes.
+const _: () = assert!(core::mem::size_of::<CanonicalValue>() == 35);
 
+// Budget: processed once per supported source field in a published row comparison.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FieldComparison {
@@ -86,6 +89,7 @@ pub struct FieldComparison {
     pub candidate_source_ns: i64,
     pub candidate_model_available_ns: i64,
 }
+const _: () = assert!(core::mem::size_of::<FieldComparison>() == 112);
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +121,10 @@ pub struct RowComparison {
     pub candidate_not_yet_available: u16,
     pub candidate_not_modeled: u16,
 }
+// Budget: one row comparison contains at most MAX_ROW_FIELDS (11) fixed field records plus
+// source/candidate identity and ten reconciled counters; it is retained only within the bounded
+// H2 offline comparison/report path.
+const _: () = assert!(core::mem::size_of::<RowComparison>() == 1_328);
 
 const EMPTY_FIELD: FieldComparison = FieldComparison {
     field: ComparedField::SectorOwnerUnit,
