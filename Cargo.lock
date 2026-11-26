@@ -110,8 +110,8 @@ dependencies = [
 name = "oa-ca-run"
 version = "0.0.1"
 dependencies = [
- "oa-adsb",
  "oa-adapt",
+ "oa-adsb",
  "oa-bench",
  "oa-ca",
  "oa-encounter-run",
