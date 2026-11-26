@@ -257,13 +257,20 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
     );
     assert!(
         report.replay_output_ack_count > 0,
-        "selected-state ACK count={}, per-cycle row counts={:?}",
+        "selected-state ACK count={}, per-cycle row counts={:?}, display rows={:?}, positions={}, flights={}",
         report.replay_output_ack_count,
         report
             .cycles
             .iter()
             .map(|cycle| cycle.selected_state_applied_family_counts)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
+        report
+            .cycles
+            .iter()
+            .map(|cycle| cycle.selected_display_block_rows)
+            .collect::<Vec<_>>(),
+        report.position_input_count,
+        report.flight_input_count
     );
     assert!(report.cycles.iter().any(|cycle| {
         cycle.selected_display_block_rows.unwrap_or(0) > 0
