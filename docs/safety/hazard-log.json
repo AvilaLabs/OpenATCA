@@ -1103,7 +1103,9 @@
     "OA-L23-002",
     "OA-L23-003",
     "OA-L23-004",
-    "OA-L23-005"
+    "OA-L23-005",
+    "OA-RWY-020",
+    "OA-RWY-021"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -9371,7 +9373,9 @@
         "OA-SAF-021",
         "OA-SAF-022",
         "OA-SAF-023",
-        "OA-L23-002"
+        "OA-L23-002",
+        "OA-RWY-020",
+        "OA-RWY-021"
       ],
       "source_refs": [
         {
@@ -9409,6 +9413,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-L23-002"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-RWY-020 and OA-RWY-021"
         }
       ],
       "verification_refs": [
@@ -9656,6 +9664,51 @@
           "requirement_id": "OA-CA-036",
           "file": "crates/oa-ca/src/preset.rs",
           "test_name": "runtime_applies_exact_issued_facility_preset_values_before_configuration_check"
+        },
+        {
+          "requirement_id": "OA-RWY-020",
+          "file": "crates/oa-runway/src/arv.rs",
+          "test_name": "assigned_runway_match_is_clear_and_keeps_full_identity"
+        },
+        {
+          "requirement_id": "OA-RWY-020",
+          "file": "crates/oa-runway/src/arv.rs",
+          "test_name": "parallel_runway_and_taxiway_mismatches_alert"
+        },
+        {
+          "requirement_id": "OA-RWY-020",
+          "file": "crates/oa-runway/src/arv.rs",
+          "test_name": "only_authenticated_go_around_clears_latched_alert"
+        },
+        {
+          "requirement_id": "OA-RWY-020",
+          "file": "crates/oa-runway/src/arv.rs",
+          "test_name": "threshold_range_and_heading_tolerances_bound_candidate_matches"
+        },
+        {
+          "requirement_id": "OA-RWY-021",
+          "file": "crates/oa-runway/src/arv.rs",
+          "test_name": "assigned_runway_match_is_clear_and_keeps_full_identity"
+        },
+        {
+          "requirement_id": "OA-RWY-021",
+          "file": "crates/oa-runway/src/arv.rs",
+          "test_name": "invalid_late_row_and_duplicate_identity_leave_output_unchanged"
+        },
+        {
+          "requirement_id": "OA-RWY-021",
+          "file": "crates/oa-runway/src/arv.rs",
+          "test_name": "malformed_and_over_capacity_inputs_refuse_before_mutation"
+        },
+        {
+          "requirement_id": "OA-RWY-021",
+          "file": "crates/oa-runway/src/arv.rs",
+          "test_name": "maximum_capacities_fit_checked_work_budget"
+        },
+        {
+          "requirement_id": "OA-RWY-021",
+          "file": "crates/oa-runway/src/arv.rs",
+          "test_name": "candidate_path_ids_must_be_strictly_increasing"
         }
       ],
       "proof_refs": [
@@ -22621,6 +22674,18 @@
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
       "rationale": "Engineering safety candidate: fixed-capacity resource/alarm handling that partially accepts excess entries could make a monitoring record incomplete. The bounded lists refuse before partial status. No display or Remote Maintenance Monitoring integration is implemented; RMM remains UNMET."
+    },
+    {
+      "id": "OA-RWY-020",
+      "function": "runway_assignment_verification",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: an omitted or incorrect parallel-path match may leave a wrong-runway or taxiway alignment undetected in this core result. The helper only compares caller-supplied synthetic or adapted geometry and predicted tracks. It is not connected to an operational controller warning, authenticates no assignment/go-around source, and makes no operational detection or facility-authorization claim."
+    },
+    {
+      "id": "OA-RWY-021",
+      "function": "runway_assignment_verification",
+      "hazard_id": "HZ-CA-001",
+      "rationale": "Engineering safety candidate: incomplete identity, malformed geometry, capacity overflow or partial output could bind an ARV result to the wrong flight or path. The bounded pure core preserves the full supplied identity and refuses before output mutation. The tests establish synthetic API behavior only; caller source binding and operational warning delivery are not implemented."
     }
   ],
   "unresolved_requirement_assessments": []

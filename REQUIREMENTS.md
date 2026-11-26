@@ -7560,6 +7560,22 @@ FAA value.
 - **OA-RWY-019** A track beyond either longitudinal end of the final-monitor segment is not warned for NTZ overlap,
   and a predicted entry that occurs only after passing the threshold end is not cautioned. Tested by
   `warning_is_limited_to_the_final_segment_endpoints` and `predicted_zone_entry_beyond_final_endpoint_is_clear`.
+- **OA-RWY-020** The ARV core evaluates caller-supplied predicted track positions against the assigned runway and
+  candidate runway/taxiway centerlines, using a configured lateral tolerance and heading tolerance within 5 NM of
+  each candidate threshold. A match to the assigned runway is clear; an aligned match to another parallel runway or
+  taxiway is reported distinctly. A latched alert clears only when the caller supplies an authenticated go-around
+  event. The core neither authenticates that event nor claims an operational controller warning. Tested by
+  `assigned_runway_match_is_clear_and_keeps_full_identity`, `parallel_runway_and_taxiway_mismatches_alert`,
+  `only_authenticated_go_around_clears_latched_alert` and
+  `threshold_range_and_heading_tolerances_bound_candidate_matches`.
+- **OA-RWY-021** ARV consumes complete bounded structure-of-arrays inputs for at most 256 unique full flight
+  identities and 512 candidate paths with strictly increasing path IDs. It refuses missing assignments, malformed
+  columns and invalid geometry before output mutation, and preserves all 36 bytes of identity in output. A checked
+  conservative work bound counts flight/path comparisons, identity validation, path ordering and assignment search;
+  calls over 200,000 work units are refused atomically. Tested by `assigned_runway_match_is_clear_and_keeps_full_identity`,
+  `invalid_late_row_and_duplicate_identity_leave_output_unchanged`,
+  `malformed_and_over_capacity_inputs_refuse_before_mutation`,
+  `maximum_capacities_fit_checked_work_budget` and `candidate_path_ids_must_be_strictly_increasing`.
 
 ## Feed damage check (oa-feed-gaps, P-006 section 6 and P-007)
 
