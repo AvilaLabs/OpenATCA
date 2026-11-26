@@ -36,9 +36,37 @@ pub struct RouteRevision {
     pub report: RouteReport,
     pub converted: ConvertedRoute,
 }
+
+/// A rejected filed-route amendment that still fences stale accepted route evidence.
+/// A7.2: cold refusal metadata, distinct from an accepted route payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RouteRefusalFence {
+    pub key: t::FlightKey,
+    /// None means the rejected source timestamp could not safely order this amendment. Until a
+    /// strictly later source-time revision is available, route queries fail closed.
+    pub source_ms: Option<i64>,
+    pub available_ms: i64,
+    pub message_id: u64,
+    pub attempted_text_sha256: [u8; 32],
+    pub reason: u16,
+}
+
+// A7.2: cold per-item stage value; inline fixed-size converted route avoids a new allocation.
+#[allow(clippy::large_enum_variant)]
+pub enum RouteStage {
+    Noop,
+    Revision(RouteRevision),
+    Cursor(t::ActiveRouteCursor, [u8; 32]),
+    Refusal {
+        reason: u16,
+        fence: Option<RouteRefusalFence>,
+    },
+}
 // A7.2: cold shell container, size guard waived.
 pub struct RouteStore {
     pub revisions: Vec<RouteRevision>,
+    /// Failed filed-route amendments retained so a later success cannot rewrite past cutoffs.
+    pub route_refusals: Vec<RouteRefusalFence>,
     pub cursors: Vec<t::ActiveRouteCursor>,
     pub cursor_text_hashes: Vec<[u8; 32]>,
     pub rejected_legacy_routes: u64,
@@ -48,11 +76,366 @@ pub struct RouteStore {
 pub fn route_store_new(snapshot_sha256: [u8; 32]) -> RouteStore {
     RouteStore {
         revisions: Vec::with_capacity(MAX_ROUTE_REVISIONS),
+        route_refusals: Vec::with_capacity(MAX_ROUTE_REVISIONS),
         cursors: Vec::with_capacity(MAX_ROUTE_REVISIONS),
         cursor_text_hashes: Vec::with_capacity(MAX_ROUTE_REVISIONS),
         rejected_legacy_routes: 0,
         snapshot_sha256,
     }
+}
+
+fn valid_refusal_key(key: t::FlightKey) -> bool {
+    key.gufi.iter().any(|&byte| byte != 0)
+        && (1..=0x00ff_ffff).contains(&key.aircraft_address)
+        && key.centre.iter().all(u8::is_ascii_alphanumeric)
+        && key.plan_id.iter().any(|&byte| byte != 0)
+}
+
+fn refusal_fence(
+    event: &NormalizedEvent,
+    plan_id: [u8; 12],
+    available_ms: i64,
+    source_ms: Option<i64>,
+    text: &[u8; MAX_FILED_ROUTE_BYTES],
+    text_len: u16,
+    reason: u16,
+) -> Result<RouteRefusalFence, String> {
+    let key = event_key(event, plan_id);
+    if !valid_refusal_key(key) {
+        return Err("cannot fence failed route amendment without a valid full flight key".into());
+    }
+    let hashed_len = usize::from(text_len).min(text.len());
+    let bytes = text
+        .get(..hashed_len)
+        .ok_or("route refusal digest range invariant")?;
+    Ok(RouteRefusalFence {
+        key,
+        source_ms,
+        available_ms,
+        message_id: event.sequence,
+        attempted_text_sha256: oa_sha256::sha256(bytes),
+        reason,
+    })
+}
+
+fn refuse_filed_route(
+    store: &RouteStore,
+    event: &NormalizedEvent,
+    plan_id: [u8; 12],
+    text: &[u8; MAX_FILED_ROUTE_BYTES],
+    text_len: u16,
+    reason: u16,
+) -> Result<RouteStage, String> {
+    if store.revisions.len() + store.route_refusals.len() >= MAX_ROUTE_REVISIONS {
+        return Err(
+            "route refusal fence capacity exhausted; refusing to expose stale route".into(),
+        );
+    }
+    let available_ms = ms(event.receipt_ns)
+        .map_err(|_| "route refusal has no valid receipt cutoff; session must fail closed")?;
+    let source_ms = if event.source_ns >= 0
+        && event.source_ns % 1_000_000 == 0
+        && event.source_ns <= event.receipt_ns
+        && !oa_sealed::in_sealed_window(event.source_ns)
+    {
+        Some(event.source_ns / 1_000_000)
+    } else {
+        None
+    };
+    let fence = refusal_fence(
+        event,
+        plan_id,
+        available_ms,
+        source_ms,
+        text,
+        text_len,
+        reason,
+    )?;
+    Ok(RouteStage::Refusal {
+        reason,
+        fence: Some(fence),
+    })
+}
+
+pub fn route_refusal_blocks(
+    store: &RouteStore,
+    selected: t::RevisionEvidence,
+    cutoff_ms: i64,
+) -> Result<bool, String> {
+    if store.revisions.len() + store.route_refusals.len() > MAX_ROUTE_REVISIONS
+        || store.route_refusals.len() > MAX_ROUTE_REVISIONS
+    {
+        return Err("route revision/fence budget exceeded".into());
+    }
+    for fence in &store.route_refusals {
+        if !valid_refusal_key(fence.key)
+            || fence.available_ms < 0
+            || fence
+                .source_ms
+                .is_some_and(|source| source < 0 || source > fence.available_ms)
+            || fence.reason == 0
+        {
+            return Err("invalid route refusal fence".into());
+        }
+        if fence.available_ms > cutoff_ms || fence.key != selected.key {
+            continue;
+        }
+        let blocked_through_ms = fence.source_ms.unwrap_or(fence.available_ms);
+        if selected.source_ms <= blocked_through_ms {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Purely validate and stage a route item. A failed filed amendment produces separate refusal
+/// metadata so callers can quarantine it without exposing an older route as current.
+pub fn route_stage_event(
+    store: &RouteStore,
+    model: &Model,
+    event: &NormalizedEvent,
+) -> Result<RouteStage, String> {
+    match event.kind {
+        EventKind::FiledRoute {
+            plan_id,
+            text_len,
+            text,
+            ..
+        } => {
+            if !valid_refusal_key(event_key(event, plan_id)) {
+                return Err("cannot process filed route without a valid full flight key".into());
+            }
+            if event.source != SourceKind::Route {
+                return refuse_filed_route(
+                    store,
+                    event,
+                    plan_id,
+                    &text,
+                    text_len,
+                    oa_quarantine::REASON_INPUT_INVALID,
+                );
+            }
+            let source_ms = match ms(event.source_ns) {
+                Ok(value) => value,
+                Err(_) => {
+                    return refuse_filed_route(
+                        store,
+                        event,
+                        plan_id,
+                        &text,
+                        text_len,
+                        oa_quarantine::REASON_INPUT_INVALID,
+                    )
+                }
+            };
+            let available_ms = ms(event.receipt_ns)?;
+            if source_ms > available_ms || usize::from(text_len) > MAX_FILED_ROUTE_BYTES {
+                return refuse_filed_route(
+                    store,
+                    event,
+                    plan_id,
+                    &text,
+                    text_len,
+                    oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
+                );
+            }
+            if store.revisions.len() + store.route_refusals.len() >= MAX_ROUTE_REVISIONS {
+                return Err("route revision/fence capacity exhausted".into());
+            }
+            let maximum_encoding_size = hash_size(t::MAX_ROUTE_POINTS)?;
+            if maximum_encoding_size > MAX_ROUTE_HASH_BYTES {
+                return Err("route digest bound invariant".into());
+            }
+            let text_view = match bounded_text(&text, text_len) {
+                Ok(value) => value,
+                Err(_) => {
+                    return refuse_filed_route(
+                        store,
+                        event,
+                        plan_id,
+                        &text,
+                        text_len,
+                        oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
+                    )
+                }
+            };
+            let plan = match parse_route_steps(text_view) {
+                Ok(value) => value,
+                Err(_) => {
+                    return refuse_filed_route(
+                        store,
+                        event,
+                        plan_id,
+                        &text,
+                        text_len,
+                        oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
+                    )
+                }
+            };
+            let mut converted = empty_converted_route();
+            let report = convert_route(model, &plan, &mut converted);
+            if report.failure == RouteFailure::MalformedModel {
+                return Err("route model integrity failure".into());
+            }
+            if report.failure != RouteFailure::None {
+                let reason = if report.failure == RouteFailure::Ambiguous {
+                    oa_quarantine::REASON_WAYPOINT_NAME_AMBIGUOUS
+                } else {
+                    oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID
+                };
+                return refuse_filed_route(store, event, plan_id, &text, text_len, reason);
+            }
+            let text_sha256 = oa_sha256::sha256(text_view.as_bytes());
+            let payload_sha256 =
+                canonical_route_digest(store.snapshot_sha256, text_sha256, report, &converted)?;
+            if store.revisions.iter().any(|revision| {
+                revision.evidence.key == event_key(event, plan_id)
+                    && revision.evidence.source_ms == source_ms
+                    && revision.text_sha256 != text_sha256
+            }) {
+                return refuse_filed_route(
+                    store,
+                    event,
+                    plan_id,
+                    &text,
+                    text_len,
+                    oa_quarantine::REASON_IDENTITY_OR_LOCATION_CONFLICT,
+                );
+            }
+            Ok(RouteStage::Revision(RouteRevision {
+                evidence: t::RevisionEvidence {
+                    source_ms,
+                    available_ms,
+                    message_id: event.sequence,
+                    payload_sha256,
+                    key: event_key(event, plan_id),
+                    reserved: [0; 4],
+                },
+                text_sha256,
+                report,
+                converted,
+            }))
+        }
+        EventKind::ActiveCursor {
+            plan_id,
+            route_payload_sha256,
+            fix_len,
+            fix: text,
+        } => {
+            if event.source != SourceKind::Route
+                || event.source_ns > event.receipt_ns
+                || store.cursors.len() >= MAX_ROUTE_REVISIONS
+            {
+                return Ok(RouteStage::Refusal {
+                    reason: oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
+                    fence: None,
+                });
+            }
+            let source_ms = match ms(event.source_ns) {
+                Ok(value) => value,
+                Err(_) => {
+                    return Ok(RouteStage::Refusal {
+                        reason: oa_quarantine::REASON_INPUT_INVALID,
+                        fence: None,
+                    })
+                }
+            };
+            let available_ms = ms(event.receipt_ns)?;
+            let text_view = match bounded_text(&text, fix_len) {
+                Ok(value) if usize::from(fix_len) <= MAX_FILED_ROUTE_BYTES => value,
+                _ => {
+                    return Ok(RouteStage::Refusal {
+                        reason: oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
+                        fence: None,
+                    })
+                }
+            };
+            let plan = match parse_route_steps(text_view) {
+                Ok(value) if value.len == 1 => value,
+                _ => {
+                    return Ok(RouteStage::Refusal {
+                        reason: oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
+                        fence: None,
+                    })
+                }
+            };
+            let next_fix = match plan.steps.first() {
+                Some(RouteStep::Fix(key)) => fix(*key),
+                _ => {
+                    return Ok(RouteStage::Refusal {
+                        reason: oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
+                        fence: None,
+                    })
+                }
+            };
+            Ok(RouteStage::Cursor(
+                t::ActiveRouteCursor {
+                    source_ms,
+                    available_ms,
+                    message_id: event.sequence,
+                    route_payload_sha256: [0; 32],
+                    key: event_key(event, plan_id),
+                    next_fix,
+                    reserved: [0; 5],
+                },
+                route_payload_sha256,
+            ))
+        }
+        _ => Ok(RouteStage::Noop),
+    }
+}
+
+pub fn route_commit_stage(store: &mut RouteStore, stage: RouteStage) {
+    match stage {
+        RouteStage::Noop | RouteStage::Refusal { .. } => {}
+        RouteStage::Revision(revision) => store.revisions.push(revision),
+        RouteStage::Cursor(cursor, text_hash) => {
+            store.cursors.push(cursor);
+            store.cursor_text_hashes.push(text_hash);
+        }
+    }
+}
+
+pub fn route_rejection_fence(
+    store: &RouteStore,
+    event: &NormalizedEvent,
+    stage: &RouteStage,
+    reason: u16,
+) -> Result<Option<RouteRefusalFence>, String> {
+    match stage {
+        RouteStage::Refusal { fence, .. } => Ok(fence.map(|mut fence| {
+            fence.reason |= reason;
+            fence
+        })),
+        RouteStage::Revision(revision) => {
+            let EventKind::FiledRoute { .. } = event.kind else {
+                return Ok(None);
+            };
+            if store.revisions.len() + store.route_refusals.len() >= MAX_ROUTE_REVISIONS {
+                return Err("route refusal fence capacity exhausted".into());
+            }
+            Ok(Some(RouteRefusalFence {
+                key: revision.evidence.key,
+                source_ms: Some(revision.evidence.source_ms),
+                available_ms: revision.evidence.available_ms,
+                message_id: revision.evidence.message_id,
+                attempted_text_sha256: revision.text_sha256,
+                reason,
+            }))
+        }
+        RouteStage::Noop | RouteStage::Cursor(..) => Ok(None),
+    }
+}
+
+pub fn route_commit_refusal(
+    store: &mut RouteStore,
+    fence: RouteRefusalFence,
+) -> Result<(), String> {
+    if store.revisions.len() + store.route_refusals.len() >= MAX_ROUTE_REVISIONS {
+        return Err("route refusal fence capacity exhausted".into());
+    }
+    store.route_refusals.push(fence);
+    Ok(())
 }
 
 pub fn flight_key(view: &SharedFlightView) -> t::FlightKey {
@@ -210,7 +593,7 @@ pub fn route_event(
             if event.source != SourceKind::Route {
                 return Err("filed route has wrong source kind".into());
             }
-            if store.revisions.len() >= MAX_ROUTE_REVISIONS {
+            if store.revisions.len() + store.route_refusals.len() >= MAX_ROUTE_REVISIONS {
                 return Err("route revision capacity exhausted".into());
             }
             let source_ms = ms(event.source_ns)?;
@@ -575,7 +958,7 @@ fn prepare_route_issue(
         return Err("flight view has invalid or future-stamped state at cutoff".into());
     }
     let key = flight_key(view);
-    if store.revisions.len() > MAX_ROUTE_REVISIONS
+    if store.revisions.len() + store.route_refusals.len() > MAX_ROUTE_REVISIONS
         || store.cursors.len() > MAX_ROUTE_REVISIONS
         || store.cursors.len() != store.cursor_text_hashes.len()
     {
@@ -591,6 +974,9 @@ fn prepare_route_issue(
     }
     if selected.selected.key != key {
         return Err("newest route revision does not match frozen flight plan".into());
+    }
+    if route_refusal_blocks(store, selected.selected, cutoff_ms)? {
+        return Err("route refusal fence makes selected revision unavailable".into());
     }
     let revision = store
         .revisions
@@ -779,4 +1165,60 @@ pub fn route_issue_with_performance(
 /// Converts a receipt nanosecond timestamp through the shared exact-millisecond gate.
 pub(crate) fn receipt_cutoff_ms(cutoff_ns: i64) -> Result<i64, String> {
     ms(cutoff_ns)
+}
+
+#[cfg(test)]
+mod refusal_fence_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn key(plan_id: [u8; 12]) -> t::FlightKey {
+        t::FlightKey {
+            gufi: 1u128.to_be_bytes(),
+            aircraft_address: 0x00ab_cdef,
+            centre: *b"ZAU1",
+            plan_id,
+        }
+    }
+
+    fn revision(key: t::FlightKey, source_ms: i64, available_ms: i64) -> t::RevisionEvidence {
+        t::RevisionEvidence {
+            source_ms,
+            available_ms,
+            message_id: 1,
+            payload_sha256: [1; 32],
+            key,
+            reserved: [0; 4],
+        }
+    }
+
+    // REQ: OA-REG-018
+    #[test]
+    fn route_refusal_fence_is_scoped_and_preserved_for_historical_cutoffs() {
+        let plan_a = key(*b"PLAN00000001");
+        let plan_b = key(*b"PLAN00000002");
+        let mut store = route_store_new([0; 32]);
+        store.route_refusals.push(RouteRefusalFence {
+            key: plan_a,
+            source_ms: Some(2_000),
+            available_ms: 2_000,
+            message_id: 2,
+            attempted_text_sha256: [2; 32],
+            reason: oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID,
+        });
+
+        assert!(!route_refusal_blocks(&store, revision(plan_a, 1_000, 1_000), 1_000).unwrap());
+        assert!(route_refusal_blocks(&store, revision(plan_a, 1_000, 2_000), 2_000).unwrap());
+        assert!(route_refusal_blocks(&store, revision(plan_a, 2_000, 2_000), 2_000).unwrap());
+        assert!(!route_refusal_blocks(&store, revision(plan_a, 3_000, 3_000), 3_000).unwrap());
+        // A later success changes only cutoffs where it is available. The retained refusal still
+        // blocks the older revision at the prior cutoff.
+        assert!(route_refusal_blocks(&store, revision(plan_a, 1_000, 1_000), 2_000).unwrap());
+        assert!(!route_refusal_blocks(&store, revision(plan_b, 1_000, 1_000), 2_000).unwrap());
+
+        store.route_refusals.first_mut().unwrap().source_ms = None;
+        assert!(route_refusal_blocks(&store, revision(plan_a, 1_999, 2_000), 2_000).unwrap());
+        assert!(!route_refusal_blocks(&store, revision(plan_a, 2_001, 2_001), 2_001).unwrap());
+    }
 }

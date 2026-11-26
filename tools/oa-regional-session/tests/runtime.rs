@@ -121,7 +121,12 @@ fn start() -> ReceiptBatch {
     }
 }
 fn runtime() -> oa_regional_session::runtime::RegionalRuntime {
-    let model = synthetic_model().unwrap();
+    runtime_with_model(synthetic_model().unwrap())
+}
+
+fn runtime_with_model(
+    model: oa_airspace::core::model::Model,
+) -> oa_regional_session::runtime::RegionalRuntime {
     let bytes = oa_airspace::core::snapshot::encode(&model).unwrap();
     regional_new(
         model,
@@ -134,6 +139,135 @@ fn runtime() -> oa_regional_session::runtime::RegionalRuntime {
         },
     )
     .unwrap()
+}
+
+fn intern(
+    model: &mut oa_airspace::core::model::Model,
+    text: &str,
+) -> oa_airspace::core::model::StrIx {
+    let raw = model.strings.offsets.len().checked_sub(1).unwrap();
+    let index = oa_airspace::core::model::StrIx::new(u32::try_from(raw).unwrap());
+    model.strings.text.push_str(text);
+    model
+        .strings
+        .offsets
+        .push(u32::try_from(model.strings.text.len()).unwrap());
+    index
+}
+
+fn insert_bit(bits: &mut oa_airspace::core::model::BitSet, index: usize, value: bool) {
+    let old_len = usize::try_from(bits.len).unwrap();
+    let old_values: Vec<_> = (0..old_len)
+        .map(|row| {
+            bits.words
+                .get(row / 64)
+                .is_some_and(|word| (word >> (row % 64)) & 1 != 0)
+        })
+        .collect();
+    let mut rebuilt = oa_airspace::core::model::BitSet::default();
+    for row in 0..=old_len {
+        oa_airspace::core::model::bit_push(
+            &mut rebuilt,
+            if row == index {
+                value
+            } else {
+                old_values[if row < index { row } else { row - 1 }]
+            },
+        );
+    }
+    *bits = rebuilt;
+}
+
+fn repeated_name_model() -> oa_airspace::core::model::Model {
+    let mut model = synthetic_model().unwrap();
+    let ident = intern(&mut model, "FIXA");
+    let region = intern(&mut model, "K2");
+    let points = &mut model.points;
+    points
+        .kind
+        .insert(1, oa_airspace::core::model::point_kind::FIX);
+    points.lat.insert(1, 420_000_000);
+    points.lon.insert(1, -860_000_000);
+    points
+        .elev_ft
+        .insert(1, oa_airspace::core::model::ELEV_NONE);
+    points.ident.insert(1, ident);
+    points
+        .alt_ident
+        .insert(1, oa_airspace::core::model::StrIx::NONE);
+    points.region.insert(1, region);
+    points
+        .scope
+        .insert(1, oa_airspace::core::model::StrIx::NONE);
+    points.name.insert(1, oa_airspace::core::model::StrIx::NONE);
+    for (column, value) in [
+        (&mut points.src_nasr, false),
+        (&mut points.src_cifp, false),
+        (&mut points.in_area, true),
+        (&mut points.cls_b, false),
+        (&mut points.cls_c, false),
+        (&mut points.cls_d, false),
+        (&mut points.cls_e, false),
+    ] {
+        insert_bit(column, 1, value);
+    }
+    model
+}
+
+fn ambiguous_airway_model() -> oa_airspace::core::model::Model {
+    use oa_airspace::core::model as m;
+
+    let mut model = synthetic_model().unwrap();
+    let fix_c = intern(&mut model, "FIXC");
+    let fix_d = intern(&mut model, "FIXD");
+    let region = intern(&mut model, "K1");
+    let airway = intern(&mut model, "V1");
+    for (lat, lon, ident) in [
+        (415_000_000, -865_000_000, fix_c),
+        (405_000_000, -855_000_000, fix_d),
+    ] {
+        let points = &mut model.points;
+        points.kind.push(m::point_kind::FIX);
+        points.lat.push(lat);
+        points.lon.push(lon);
+        points.elev_ft.push(m::ELEV_NONE);
+        points.ident.push(ident);
+        points.alt_ident.push(m::StrIx::NONE);
+        points.region.push(region);
+        points.scope.push(m::StrIx::NONE);
+        points.name.push(m::StrIx::NONE);
+        for (column, value) in [
+            (&mut points.src_nasr, false),
+            (&mut points.src_cifp, false),
+            (&mut points.in_area, true),
+            (&mut points.cls_b, false),
+            (&mut points.cls_c, false),
+            (&mut points.cls_d, false),
+            (&mut points.cls_e, false),
+        ] {
+            m::bit_push(column, value);
+        }
+    }
+    model.airways.designator.push(airway);
+    model.airways.location.push(b'C');
+    model.airways.legs.push(m::Span {
+        start: m::AirwayLegIx::new(0),
+        len: 4,
+    });
+    for (from, to) in [(0, 2), (2, 1), (0, 3), (3, 1)] {
+        let legs = &mut model.airway_legs;
+        legs.from.push(m::PointIx::new(from));
+        legs.to.push(m::PointIx::new(to));
+        legs.mea_ft.push(m::ALT_NONE);
+        legs.mea_opp_ft.push(m::ALT_NONE);
+        legs.gps_mea_ft.push(m::ALT_NONE);
+        legs.mea_dir.push(m::compass::NONE);
+        legs.gps_mea_dir.push(m::compass::NONE);
+        m::bit_push(&mut legs.gap, false);
+        m::bit_push(&mut legs.signal_gap, false);
+        m::bit_push(&mut legs.dogleg, false);
+    }
+    model
 }
 
 fn confirmed(
@@ -169,6 +303,17 @@ fn confirmation_batch() -> ReceiptBatch {
                 "POS\t410000000\t-869912000\t10000\t-100000\t0\t0",
             ),
         ],
+    }
+}
+
+fn set_position_altitude(batch: &mut ReceiptBatch, altitude_ft: i32) {
+    for event in &mut batch.events {
+        if let oa_regional_session::EventKind::Position {
+            altitude_ft: field, ..
+        } = &mut event.kind
+        {
+            *field = Some(altitude_ft);
+        }
     }
 }
 
@@ -262,6 +407,247 @@ fn actual_tracker_flight_route_ca_and_scope_share_one_cutoff() {
         !frame.surveillance.ca_open.is_empty(),
         "two closing aircraft are already inside development minima"
     );
+}
+
+// REQ: OA-REG-018
+#[test]
+fn la2014_extreme_altitude_survives_malformed_route_quarantine() {
+    let mut engine = runtime();
+    let mut initial = start();
+    set_position_altitude(&mut initial, 100_000);
+    let tentative = regional_step(&mut engine, &initial).unwrap();
+    assert!(tentative.surveillance.tracks.is_empty());
+
+    let mut confirmation = confirmation_batch();
+    set_position_altitude(&mut confirmation, 100_000);
+    let retained = regional_step(&mut engine, &confirmation).unwrap();
+    assert!(retained.surveillance.displayed > 0);
+    let high_track = retained
+        .surveillance
+        .tracks
+        .iter()
+        .find(|track| track.address == 0xabc101)
+        .unwrap();
+    assert_eq!(high_track.altitude_ft, 100_000);
+
+    let frame = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 3 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![
+                row(
+                    3 * SECOND,
+                    5,
+                    "ROUTE",
+                    1,
+                    0xabc101,
+                    "FILED_ROUTE\tPLAN00000001\tFIXB\tTHIS IS NOT A ROUTE",
+                ),
+                row(
+                    3 * SECOND,
+                    5,
+                    "SURVEILLANCE",
+                    1,
+                    0xabc101,
+                    "POS\t410000000\t-869988000\t100000\t100000\t0\t0",
+                ),
+            ],
+        },
+    )
+    .expect("a known malformed route item must not discard its healthy neighbor");
+
+    assert_eq!(frame.quarantine.records.len(), 1);
+    let refused = &frame.quarantine.records[0];
+    assert_eq!(
+        refused.identity.source,
+        oa_quarantine::InputSource::FlightData
+    );
+    assert_eq!(refused.identity.source_instance, 1);
+    assert_eq!(refused.identity.item_id, 3_u64 << 8);
+    assert_eq!(
+        refused.reasons.0,
+        oa_quarantine::REASON_ALTITUDE_ROUTE_INVALID
+    );
+    assert_eq!(frame.input.input_events, 2);
+    assert_eq!(frame.input.source_events[0], 1);
+    assert_eq!(frame.quarantine.source_stats[0].queued, 1);
+    assert_eq!(frame.quarantine.source_stats[1].accepted, 5);
+    assert_eq!(frame.quarantine.source_stats[1].queued, 0);
+    let later = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 4 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![row(
+                4 * SECOND,
+                6,
+                "ROUTE",
+                1,
+                0xabc101,
+                &format!("FILED_ROUTE\tPLAN00000001\tFIXB\t{ROUTE}"),
+            )],
+        },
+    )
+    .expect("later valid route revision should restore availability for its cutoff");
+    assert_eq!(later.quarantine.records.len(), 0);
+    assert_eq!(later.quarantine.source_stats[0].queued, 1);
+    assert_eq!(later.quarantine.source_stats[0].accepted, 13);
+}
+
+// REQ: OA-REG-018
+#[test]
+fn nats2023_repeated_local_name_resolves_with_full_region_identity_at_runtime() {
+    let mut engine = runtime_with_model(repeated_name_model());
+    confirmed(&mut engine);
+    let frame = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 3 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![
+                row(
+                    3 * SECOND,
+                    5,
+                    "SURVEILLANCE",
+                    1,
+                    0xabc101,
+                    "POS\t410000000\t-869988000\t65000\t100000\t0\t0",
+                ),
+                row(
+                    3 * SECOND,
+                    5,
+                    "ROUTE",
+                    1,
+                    0xabc101,
+                    "FILED_ROUTE\tPLAN00000001\tFIXB\tFIX:FIXA:K2:1:- FIX:FIXB:K1:1:-",
+                ),
+            ],
+        },
+    )
+    .expect("full route identity and high but supported altitude remain admissible");
+
+    assert_eq!(frame.quarantine.records.len(), 0);
+    assert_eq!(frame.input.source_events, [1, 0, 1, 0, 0]);
+    assert_eq!(frame.quarantine.source_stats[0].accepted, 13);
+    assert_eq!(frame.quarantine.source_stats[0].queued, 0);
+    assert_eq!(frame.quarantine.source_stats[1].accepted, 5);
+    assert_eq!(frame.quarantine.source_stats[1].queued, 0);
+}
+
+// REQ: OA-REG-018
+#[test]
+fn ambiguous_route_is_quarantined_and_following_healthy_item_commits() {
+    let mut engine = runtime_with_model(ambiguous_airway_model());
+    confirmed(&mut engine);
+    let frame = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 3 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![
+                row(
+                    3 * SECOND,
+                    5,
+                    "ROUTE",
+                    1,
+                    0xabc101,
+                    "FILED_ROUTE\tPLAN00000001\tFIXB\tAWY:V1:C:FIXA:K1:1:-:FIXB:K1:1:-:12000",
+                ),
+                row(
+                    3 * SECOND,
+                    5,
+                    "SURVEILLANCE",
+                    1,
+                    0xabc101,
+                    "POS\t410000000\t-869988000\t10000\t100000\t0\t0",
+                ),
+            ],
+        },
+    )
+    .expect("ambiguous route is isolated and the next normalized item is handled");
+
+    assert_eq!(frame.quarantine.records.len(), 1);
+    assert_eq!(
+        frame.quarantine.records[0].reasons.0,
+        oa_quarantine::REASON_WAYPOINT_NAME_AMBIGUOUS
+    );
+    assert_eq!(frame.quarantine.records[0].identity.item_id, 3_u64 << 8);
+    assert_eq!(frame.quarantine.source_stats[0].queued, 1);
+    assert_eq!(frame.quarantine.source_stats[1].accepted, 5);
+    assert_eq!(frame.quarantine.source_stats[1].queued, 0);
+
+    let later = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 4 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![row(
+                4 * SECOND,
+                6,
+                "ROUTE",
+                1,
+                0xabc101,
+                &format!("FILED_ROUTE\tPLAN00000001\tFIXB\t{ROUTE}"),
+            )],
+        },
+    )
+    .expect("a later valid amendment remains acceptable after the fenced refusal");
+    assert_eq!(later.quarantine.records.len(), 0);
+    assert_eq!(later.quarantine.source_stats[0].queued, 1);
+    assert_eq!(later.quarantine.source_stats[0].accepted, 13);
+}
+
+// REQ: OA-REG-018
+#[test]
+fn staged_flight_adapter_refusal_does_not_advance_or_block_following_operation() {
+    let mut engine = runtime();
+    confirmed(&mut engine);
+    let frame = regional_step(
+        &mut engine,
+        &ReceiptBatch {
+            receipt_ns: 3 * SECOND,
+            source_clock_regressions: 0,
+            events: vec![
+                row(
+                    3 * SECOND,
+                    9,
+                    "FLIGHT",
+                    1,
+                    0xabc101,
+                    "FLIGHT\tOWNER\tSECTOR2",
+                ),
+                row(
+                    3 * SECOND,
+                    10,
+                    "FLIGHT",
+                    1,
+                    0xabc101,
+                    "FLIGHT\tASSIGNED\t13000",
+                ),
+            ],
+        },
+    )
+    .expect("a staged adapter refusal must permit a following valid operation");
+
+    assert_eq!(frame.quarantine.records.len(), 1);
+    assert_eq!(frame.quarantine.records[0].identity.item_id, 3_u64 << 8);
+    assert_eq!(
+        frame.quarantine.records[0].reasons.0,
+        oa_quarantine::REASON_INPUT_INVALID
+    );
+    assert_eq!(frame.quarantine.source_stats[0].queued, 1);
+    assert_eq!(frame.quarantine.source_stats[0].accepted, 13);
+    assert_eq!(frame.flight_report.adapter.owner_change_requires_take, 1);
+    let flight = frame
+        .flights
+        .iter()
+        .find(|flight| flight.address == 0xabc101)
+        .unwrap();
+    let view = flight.view.unwrap();
+    assert_eq!(view.owner_unit, *b"SECTOR1\0");
+    assert_eq!(view.assigned.form, oa_flight::ALT_SIMPLE);
+    assert_eq!(view.assigned.a_ft, 13_000);
 }
 
 // REQ: OA-REG-005

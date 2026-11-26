@@ -13,6 +13,17 @@ use oa_airspace::core::model::Model;
 use oa_legacy_traj::core::trajectory::{
     PerformanceEnvelope, TrajectoryIssueOutput, VerticalProfileOutput,
 };
+use oa_quarantine::{
+    route_input, source_stats, Disposition, InputIdentity, InputOutcome, InputSource,
+    QuarantineQueue, ReasonFlags, SourceStats, REASON_INPUT_INVALID, REASON_RESOURCE_LIMIT,
+    REASON_SURVEILLANCE_INVALID,
+};
+use std::time::Instant;
+
+const DEFAULT_SESSION_NAMESPACE: u16 = 1;
+const QUARANTINE_CLOCK_DOMAIN_ID: u32 = 1;
+const MAX_RUNTIME_ITEM_WORK: u32 =
+    oa_airspace::core::route::MAX_ROUTE_WORK + crate::input::MAX_FILED_ROUTE_BYTES as u32 + 16;
 
 // A7.2: cold subsystem composition. All core memory belongs to its originating subsystem.
 pub struct RegionalRuntime {
@@ -23,6 +34,8 @@ pub struct RegionalRuntime {
     centre: [u8; 4],
     frame_sequence: u64,
     failed: bool,
+    session_namespace: u16,
+    quarantine_queue: QuarantineQueue,
     interaction: oa_display::interaction::InteractionState,
     views: Vec<oa_display::interaction::TargetView>,
     observed: Vec<crate::surveillance::ObservedTrack>,
@@ -58,12 +71,205 @@ pub struct RegionalFrame {
     pub controller_selected_address: Option<u32>,
     pub controller_selection: Option<oa_display::interaction::FlightIdentity>,
     pub console_text: String,
+    pub quarantine: RuntimeQuarantineReport,
 }
 // A7.2: cold shell evidence, bounded by runtime capacities.
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeQuarantineRecord {
+    pub item_index: u16,
+    pub input_source: InputSource,
+    pub identity: InputIdentity,
+    pub reasons: ReasonFlags,
+    pub manual_handling_required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeQuarantineReport {
+    /// Current receipt batch only; raw event payload remains with the caller's batch.
+    pub records: Vec<RuntimeQuarantineRecord>,
+    /// Queue status is cumulative for this runtime instance.
+    pub source_stats: [SourceStats; oa_quarantine::INPUT_SOURCE_COUNT],
+}
 
 /// Maximum caller-supplied performance envelopes in one opt-in receipt (at most 32 rows; matching
 /// work is bounded by 32 flights × 32 envelopes).
 pub const MAX_PERFORMANCE_ENVELOPES: usize = MAX_DRIVER_FLIGHTS;
+
+fn transaction_item(event: &crate::input::NormalizedEvent) -> bool {
+    match event.kind {
+        crate::input::EventKind::Position { .. }
+        | crate::input::EventKind::Flight(_)
+        | crate::input::EventKind::FiledRoute { .. }
+        | crate::input::EventKind::ActiveCursor { .. } => true,
+        crate::input::EventKind::FeedState { .. } => matches!(
+            event.source,
+            crate::input::SourceKind::Surveillance
+                | crate::input::SourceKind::Flight
+                | crate::input::SourceKind::Route
+        ),
+        crate::input::EventKind::Operator(_) => false,
+        crate::input::EventKind::Route { .. } => false,
+    }
+}
+
+fn quarantine_source(event: &crate::input::NormalizedEvent) -> Result<InputSource, String> {
+    match event.source {
+        crate::input::SourceKind::Surveillance => Ok(InputSource::Surveillance),
+        crate::input::SourceKind::Flight | crate::input::SourceKind::Route => {
+            Ok(InputSource::FlightData)
+        }
+        crate::input::SourceKind::Weather | crate::input::SourceKind::Adaptation => {
+            Err("this runtime transaction slice has no quarantine source mapping".into())
+        }
+    }
+}
+
+fn runtime_item_id(batch_ordinal: u64, item_index: usize) -> Result<u64, String> {
+    let index = u64::try_from(item_index).map_err(|_| "quarantine item index overflow")?;
+    if index >= (1 << 8) || batch_ordinal == 0 || batch_ordinal > (u64::MAX >> 8) {
+        return Err("quarantine batch/item identity overflow".into());
+    }
+    batch_ordinal
+        .checked_shl(8)
+        .and_then(|base| base.checked_add(index))
+        .filter(|value| *value != 0)
+        .ok_or_else(|| "quarantine item identity overflow".into())
+}
+
+fn runtime_item_outcome(
+    runtime: &RegionalRuntime,
+    event: &crate::input::NormalizedEvent,
+    item_index: usize,
+    batch_ordinal: u64,
+    reasons: u16,
+    clock_origin: Instant,
+    item_started: Instant,
+) -> Result<InputOutcome, String> {
+    let input_source = quarantine_source(event)?;
+    let started_at_ns = i64::try_from(
+        item_started
+            .checked_duration_since(clock_origin)
+            .ok_or("runtime quarantine clock regressed")?
+            .as_nanos(),
+    )
+    .map_err(|_| "runtime quarantine start clock overflow")?;
+    let completed_at_ns = i64::try_from(clock_origin.elapsed().as_nanos())
+        .map_err(|_| "runtime quarantine completion clock overflow")?;
+    Ok(InputOutcome {
+        identity: InputIdentity {
+            source: input_source,
+            source_instance: runtime.session_namespace,
+            item_id: runtime_item_id(batch_ordinal, item_index)?,
+        },
+        refusal_reasons: ReasonFlags(reasons),
+        clock_domain_id: QUARANTINE_CLOCK_DOMAIN_ID,
+        started_at_ns,
+        completed_at_ns,
+        // This is offline processing. Duration is observed only; input work is bounded by the
+        // route converter, fixed batch size, and bounded event fields, not interrupted by time.
+        elapsed_limit_ns: u64::MAX,
+        work_units: MAX_RUNTIME_ITEM_WORK,
+        work_limit: MAX_RUNTIME_ITEM_WORK,
+    })
+}
+
+fn quarantine_runtime_item(
+    runtime: &mut RegionalRuntime,
+    event: &crate::input::NormalizedEvent,
+    item_index: usize,
+    batch_ordinal: u64,
+    reasons: u16,
+    clock_origin: Instant,
+    item_started: Instant,
+) -> Result<RuntimeQuarantineRecord, String> {
+    let input_source = quarantine_source(event)?;
+    let outcome = runtime_item_outcome(
+        runtime,
+        event,
+        item_index,
+        batch_ordinal,
+        reasons,
+        clock_origin,
+        item_started,
+    )?;
+    match route_input(&mut runtime.quarantine_queue, outcome)
+        .map_err(|error| format!("quarantine core invariant: {error:?}"))?
+    {
+        Disposition::Queued(item) => Ok(RuntimeQuarantineRecord {
+            item_index: u16::try_from(item_index).map_err(|_| "quarantine item index overflow")?,
+            input_source,
+            identity: item.identity,
+            reasons: item.reasons,
+            manual_handling_required: false,
+        }),
+        Disposition::ManualHandlingRequired(item) => Ok(RuntimeQuarantineRecord {
+            item_index: u16::try_from(item_index).map_err(|_| "quarantine item index overflow")?,
+            input_source,
+            identity: item.identity,
+            reasons: item.reasons,
+            manual_handling_required: true,
+        }),
+        Disposition::Accepted => Err("refused runtime item unexpectedly accepted".into()),
+    }
+}
+
+fn accept_runtime_item(
+    runtime: &mut RegionalRuntime,
+    event: &crate::input::NormalizedEvent,
+    item_index: usize,
+    batch_ordinal: u64,
+    clock_origin: Instant,
+    item_started: Instant,
+) -> Result<(), String> {
+    let outcome = runtime_item_outcome(
+        runtime,
+        event,
+        item_index,
+        batch_ordinal,
+        0,
+        clock_origin,
+        item_started,
+    )?;
+    match route_input(&mut runtime.quarantine_queue, outcome)
+        .map_err(|error| format!("quarantine core invariant: {error:?}"))?
+    {
+        Disposition::Accepted => Ok(()),
+        Disposition::Queued(_) | Disposition::ManualHandlingRequired(_) => {
+            Err("accepted runtime item was unexpectedly refused by quarantine core".into())
+        }
+    }
+}
+
+fn quarantine_stats(
+    queue: &QuarantineQueue,
+) -> Result<[SourceStats; oa_quarantine::INPUT_SOURCE_COUNT], String> {
+    Ok([
+        source_stats(queue, InputSource::FlightData)
+            .map_err(|error| format!("quarantine flight stats: {error:?}"))?,
+        source_stats(queue, InputSource::Surveillance)
+            .map_err(|error| format!("quarantine surveillance stats: {error:?}"))?,
+        source_stats(queue, InputSource::Adaptation)
+            .map_err(|error| format!("quarantine adaptation stats: {error:?}"))?,
+    ])
+}
+
+fn surveillance_refusal_reason(error: surveillance::SurveillanceStageError) -> Option<u16> {
+    match error {
+        surveillance::SurveillanceStageError::FailedSession => None,
+        surveillance::SurveillanceStageError::BarometricEvidenceCapacity => {
+            Some(REASON_RESOURCE_LIMIT)
+        }
+        surveillance::SurveillanceStageError::WrongSourceKind
+        | surveillance::SurveillanceStageError::InvalidPosition => {
+            Some(REASON_SURVEILLANCE_INVALID)
+        }
+        surveillance::SurveillanceStageError::SealedTimestamp
+        | surveillance::SurveillanceStageError::WrongReceiptOrTimestamp => {
+            Some(REASON_INPUT_INVALID)
+        }
+    }
+}
 
 fn performance_for_key(
     rows: &[PerformanceEnvelope],
@@ -93,8 +299,28 @@ pub fn regional_new(
     centre: [u8; 4],
     cfg: SurveillanceConfig,
 ) -> Result<RegionalRuntime, String> {
+    regional_new_with_namespace(
+        model,
+        snapshot_sha256,
+        centre,
+        cfg,
+        DEFAULT_SESSION_NAMESPACE,
+    )
+}
+
+/// Construct a runtime with an explicit nonzero namespace for normalized-item quarantine IDs.
+pub fn regional_new_with_namespace(
+    model: Model,
+    snapshot_sha256: [u8; 32],
+    centre: [u8; 4],
+    cfg: SurveillanceConfig,
+    session_namespace: u16,
+) -> Result<RegionalRuntime, String> {
     if !centre.iter().all(u8::is_ascii_alphanumeric) {
         return Err("centre must be four ASCII alphanumeric bytes".into());
+    }
+    if session_namespace == 0 {
+        return Err("session namespace must be nonzero".into());
     }
     Ok(RegionalRuntime {
         surveillance: surveillance::surveillance_new(model.clone(), cfg)?,
@@ -109,6 +335,8 @@ pub fn regional_new(
         centre,
         frame_sequence: 0,
         failed: false,
+        session_namespace,
+        quarantine_queue: oa_quarantine::queue_new(),
         interaction: oa_display::interaction::interaction_new(),
         views: Vec::with_capacity(MAX_DRIVER_FLIGHTS),
         observed: Vec::with_capacity(MAX_DRIVER_FLIGHTS),
@@ -135,42 +363,144 @@ fn execute(
         Some(_) => Some(route::receipt_cutoff_ms(batch.receipt_ns)?),
         None => None,
     };
+    let next_frame_sequence = runtime
+        .frame_sequence
+        .checked_add(1)
+        .ok_or("frame sequence overflow")?;
+    let batch_ordinal = next_frame_sequence;
+    let processing_started = Instant::now();
+    let mut quarantine_records = Vec::new();
+    quarantine_records
+        .try_reserve_exact(batch.events.len())
+        .map_err(|_| "runtime quarantine output allocation refused")?;
     surveillance::surveillance_begin(&mut runtime.surveillance, batch.receipt_ns)?;
-    flight::flight_preflight_batch(&mut runtime.flights, &batch.events)
-        .map_err(|e| format!("flight adapter preflight: {e:?}"))?;
+    let mut order_cursor = flight::flight_order_cursor(&runtime.flights);
     let mut flight_operations = Vec::with_capacity(batch.events.len());
     let mut controller_dispatches = Vec::with_capacity(batch.events.len());
-    for event in &batch.events {
-        if let crate::input::EventKind::Operator(request) = event.kind {
-            let dispatch = commands::dispatch(
-                &mut runtime.flights,
-                &mut runtime.interaction,
-                &runtime.views,
-                &runtime.observed,
-                u32::try_from(runtime.frame_sequence).map_err(|_| "view sequence exhausted")?,
-                event,
-                request,
-            );
-            if dispatch.terminal_failure {
-                return Err(format!(
-                    "controller bridge invariant failure: {}",
-                    dispatch.refusal
-                ));
+    for (item_index, event) in batch.events.iter().enumerate() {
+        let item_started = Instant::now();
+        let eligible = transaction_item(event);
+        let order_result = flight::flight_stage_order(&runtime.flights, &order_cursor, event);
+        if !eligible {
+            order_result.map_err(|error| format!("flight adapter preflight: {error:?}"))?;
+            if let crate::input::EventKind::Operator(request) = event.kind {
+                let dispatch = commands::dispatch(
+                    &mut runtime.flights,
+                    &mut runtime.interaction,
+                    &runtime.views,
+                    &runtime.observed,
+                    u32::try_from(runtime.frame_sequence).map_err(|_| "view sequence exhausted")?,
+                    event,
+                    request,
+                );
+                if dispatch.terminal_failure {
+                    return Err(format!(
+                        "controller bridge invariant failure: {}",
+                        dispatch.refusal
+                    ));
+                }
+                controller_dispatches.push(dispatch);
+                flight_operations.push(FlightApplyOutcome {
+                    operation: None,
+                    adapter_refusal: None,
+                    ignored_non_flight_event: true,
+                });
+            } else {
+                flight_operations.push(
+                    flight::flight_apply_event(&mut runtime.flights, event)
+                        .map_err(|error| format!("flight adapter: {error:?}"))?,
+                );
             }
-            controller_dispatches.push(dispatch);
-            flight_operations.push(FlightApplyOutcome {
-                operation: None,
-                adapter_refusal: None,
-                ignored_non_flight_event: true,
-            });
-        } else {
-            flight_operations.push(
-                flight::flight_apply_event(&mut runtime.flights, event)
-                    .map_err(|e| format!("flight adapter: {e:?}"))?,
-            );
+            route::route_event(&mut runtime.routes, &runtime.model, event)?;
+            surveillance::surveillance_event(&mut runtime.surveillance, event)?;
+            flight::flight_commit_order(&mut order_cursor, event);
+            continue;
         }
-        route::route_event(&mut runtime.routes, &runtime.model, event)?;
-        surveillance::surveillance_event(&mut runtime.surveillance, event)?;
+
+        let route_stage = route::route_stage_event(&runtime.routes, &runtime.model, event)?;
+        let surveillance_stage =
+            surveillance::surveillance_stage_event(&runtime.surveillance, event);
+        let adapter_refusal = flight::flight_stage_adapter_refusal(&runtime.flights, event);
+        let mut reasons = match order_result {
+            Ok(()) => 0,
+            Err(
+                crate::flight::FlightDriverError::InvalidTimestamp
+                | crate::flight::FlightDriverError::SealedTimestamp
+                | crate::flight::FlightDriverError::NonMillisecondAdapterTimestamp
+                | crate::flight::FlightDriverError::WrongSourceKind
+                | crate::flight::FlightDriverError::InvalidBatchOrder,
+            ) => REASON_INPUT_INVALID,
+            Err(error) => return Err(format!("flight stage invariant: {error:?}")),
+        };
+        if let route::RouteStage::Refusal { reason, .. } = &route_stage {
+            reasons |= *reason;
+        }
+        if adapter_refusal.is_some() {
+            reasons |= REASON_INPUT_INVALID;
+        }
+        match surveillance_stage {
+            Ok(()) => {}
+            Err(error) => match surveillance_refusal_reason(error) {
+                Some(reason) => reasons |= reason,
+                None => return Err(format!("surveillance stage invariant: {}", error.message())),
+            },
+        }
+        let flight_capacity_refusal =
+            flight::flight_table_capacity_refusal(&runtime.flights, event);
+        if flight_capacity_refusal {
+            reasons |= REASON_RESOURCE_LIMIT;
+        }
+
+        if reasons != 0 {
+            let fence =
+                route::route_rejection_fence(&runtime.routes, event, &route_stage, reasons)?;
+            if matches!(event.kind, crate::input::EventKind::FiledRoute { .. }) && fence.is_none() {
+                return Err("refused filed route lacks an availability fence".into());
+            }
+            let record = quarantine_runtime_item(
+                runtime,
+                event,
+                item_index,
+                batch_ordinal,
+                reasons,
+                processing_started,
+                item_started,
+            )?;
+            quarantine_records.push(record);
+            if let Some(fence) = fence {
+                route::route_commit_refusal(&mut runtime.routes, fence)?;
+            }
+            match order_result {
+                Err(error) => flight::flight_record_item_refusal(&mut runtime.flights, error),
+                Ok(()) => match adapter_refusal {
+                    Some(reason) => {
+                        flight::flight_record_adapter_refusal(&mut runtime.flights, reason)
+                    }
+                    None if flight_capacity_refusal => {
+                        flight::flight_record_capacity_refusal(&mut runtime.flights)
+                    }
+                    None => flight::flight_record_external_refusal(&mut runtime.flights),
+                },
+            }
+            continue;
+        }
+
+        accept_runtime_item(
+            runtime,
+            event,
+            item_index,
+            batch_ordinal,
+            processing_started,
+            item_started,
+        )?;
+        flight_operations.push(
+            flight::flight_apply_event(&mut runtime.flights, event)
+                .map_err(|error| format!("accepted flight commit invariant: {error:?}"))?,
+        );
+        route::route_commit_stage(&mut runtime.routes, route_stage);
+        surveillance::surveillance_event(&mut runtime.surveillance, event)
+            .map_err(|error| format!("accepted surveillance commit invariant: {error}"))?;
+        flight::flight_commit_order(&mut order_cursor, event);
     }
     // Flight ownership presentation currently requires an explicitly selected flight. Per-flight
     // snapshots below preserve every owner; no arbitrary 'first' flight is promoted to selection.
@@ -180,10 +510,7 @@ fn execute(
         &runtime.interaction,
         &runtime.console_text,
     )?;
-    runtime.frame_sequence = runtime
-        .frame_sequence
-        .checked_add(1)
-        .ok_or("frame sequence overflow")?;
+    runtime.frame_sequence = next_frame_sequence;
     let mut flights = Vec::with_capacity(MAX_DRIVER_FLIGHTS);
     let mut views = Vec::with_capacity(MAX_DRIVER_FLIGHTS);
     for observed in &surveillance.tracks {
@@ -302,6 +629,10 @@ fn execute(
         ),
         controller_selection: oa_display::interaction::selected_identity(&runtime.interaction),
         console_text: runtime.console_text.clone(),
+        quarantine: RuntimeQuarantineReport {
+            records: quarantine_records,
+            source_stats: quarantine_stats(&runtime.quarantine_queue)?,
+        },
     })
 }
 
@@ -462,4 +793,228 @@ pub fn regional_attach_msaw(
     service: crate::msaw_bridge::RegionalMsaw,
 ) -> Result<(), String> {
     surveillance::surveillance_enable_msaw(&mut runtime.surveillance, service)
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
+
+    use super::*;
+    use crate::cli::synthetic_model;
+    use crate::input::parse_event_line;
+
+    fn intern(model: &mut Model, text: &str) -> oa_airspace::core::model::StrIx {
+        let raw = model.strings.offsets.len().checked_sub(1).unwrap();
+        let index = oa_airspace::core::model::StrIx::new(u32::try_from(raw).unwrap());
+        model.strings.text.push_str(text);
+        model
+            .strings
+            .offsets
+            .push(u32::try_from(model.strings.text.len()).unwrap());
+        index
+    }
+
+    fn insert_bit(bits: &mut oa_airspace::core::model::BitSet, index: usize, value: bool) {
+        let old_len = usize::try_from(bits.len).unwrap();
+        let old_values: Vec<_> = (0..old_len)
+            .map(|row| {
+                bits.words
+                    .get(row / 64)
+                    .is_some_and(|word| (word >> (row % 64)) & 1 != 0)
+            })
+            .collect();
+        let mut rebuilt = oa_airspace::core::model::BitSet::default();
+        for row in 0..=old_len {
+            oa_airspace::core::model::bit_push(
+                &mut rebuilt,
+                if row == index {
+                    value
+                } else {
+                    *old_values
+                        .get(if row < index { row } else { row - 1 })
+                        .unwrap()
+                },
+            );
+        }
+        *bits = rebuilt;
+    }
+
+    fn repeated_name_model() -> Model {
+        let mut model = synthetic_model().unwrap();
+        let ident = intern(&mut model, "FIXA");
+        let region = intern(&mut model, "K2");
+        let points = &mut model.points;
+        points
+            .kind
+            .insert(1, oa_airspace::core::model::point_kind::FIX);
+        points.lat.insert(1, 420_000_000);
+        points.lon.insert(1, -860_000_000);
+        points
+            .elev_ft
+            .insert(1, oa_airspace::core::model::ELEV_NONE);
+        points.ident.insert(1, ident);
+        points
+            .alt_ident
+            .insert(1, oa_airspace::core::model::StrIx::NONE);
+        points.region.insert(1, region);
+        points
+            .scope
+            .insert(1, oa_airspace::core::model::StrIx::NONE);
+        points.name.insert(1, oa_airspace::core::model::StrIx::NONE);
+        for (column, value) in [
+            (&mut points.src_nasr, false),
+            (&mut points.src_cifp, false),
+            (&mut points.in_area, true),
+            (&mut points.cls_b, false),
+            (&mut points.cls_c, false),
+            (&mut points.cls_d, false),
+            (&mut points.cls_e, false),
+        ] {
+            insert_bit(column, 1, value);
+        }
+        model
+    }
+
+    fn runtime() -> RegionalRuntime {
+        runtime_with_model(synthetic_model().unwrap())
+    }
+
+    fn runtime_with_model(model: Model) -> RegionalRuntime {
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        regional_new(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+        )
+        .unwrap()
+    }
+
+    // REQ: OA-REG-018
+    #[test]
+    fn nats2023_runtime_retains_resolved_full_region_coordinate_and_identity() {
+        let mut engine = runtime_with_model(repeated_name_model());
+        let event = parse_event_line(
+            "v1\t1000000000\t1000000000\t1\tROUTE\t00000000000000000000000000000001\tABC101\tZAU1\tFILED_ROUTE\tPLAN00000001\tFIXB\tFIX:FIXA:K2:1:- FIX:FIXB:K1:1:-",
+        )
+        .unwrap();
+        let frame = regional_step(
+            &mut engine,
+            &ReceiptBatch {
+                receipt_ns: 1_000_000_000,
+                source_clock_regressions: 0,
+                events: vec![event],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(frame.quarantine.records.len(), 0);
+        let resolved = engine.routes.revisions.last().unwrap();
+        assert_eq!(resolved.evidence.key.plan_id, *b"PLAN00000001");
+        assert_eq!(resolved.converted.len, 2);
+        assert_eq!(
+            resolved.converted.lat_e7.first().copied(),
+            Some(420_000_000)
+        );
+        assert_eq!(
+            resolved.converted.lon_e7.first().copied(),
+            Some(-860_000_000)
+        );
+        let fix = resolved.converted.ident.first().unwrap();
+        assert_eq!(fix.len, 4);
+        assert_eq!(fix.bytes, *b"FIXA\0\0\0\0\0\0\0\0");
+        let region = resolved.converted.region.first().unwrap();
+        assert_eq!(region.len, 2);
+        assert_eq!(region.bytes, *b"K2\0\0");
+    }
+
+    // REQ: OA-REG-018
+    #[test]
+    fn injected_precommit_failure_leaves_staged_item_state_unchanged() {
+        let mut engine = runtime();
+        let event = parse_event_line(
+            "v1\t1000000000\t1000000000\t1\tFLIGHT\t00000000000000000000000000000001\tABCDEF\tZAU1\tFLIGHT\tASSIGNED\t12000",
+        )
+        .unwrap();
+        surveillance::surveillance_begin(&mut engine.surveillance, 1_000_000_000).unwrap();
+        let mut order = flight::flight_order_cursor(&engine.flights);
+
+        let flights_before = flight::flight_driver_report(&engine.flights);
+        let revisions_before = engine.routes.revisions.len();
+        let fences_before = engine.routes.route_refusals.len();
+        let cursors_before = engine.routes.cursors.len();
+        let quarantine_before = quarantine_stats(&engine.quarantine_queue).unwrap();
+
+        assert!(flight::flight_stage_order(&engine.flights, &order, &event).is_ok());
+        assert!(matches!(
+            route::route_stage_event(&engine.routes, &engine.model, &event).unwrap(),
+            route::RouteStage::Noop
+        ));
+        assert!(surveillance::surveillance_stage_event(&engine.surveillance, &event).is_ok());
+        let injected: Result<(), &str> = Err("injected failure between stage and commit");
+        assert_eq!(injected, Err("injected failure between stage and commit"));
+
+        assert_eq!(
+            flight::flight_driver_report(&engine.flights),
+            flights_before
+        );
+        assert_eq!(engine.routes.revisions.len(), revisions_before);
+        assert_eq!(engine.routes.route_refusals.len(), fences_before);
+        assert_eq!(engine.routes.cursors.len(), cursors_before);
+        assert_eq!(
+            quarantine_stats(&engine.quarantine_queue).unwrap(),
+            quarantine_before
+        );
+        assert_eq!(flight::flight_order_cursor(&engine.flights), order);
+        assert!(
+            !engine.failed,
+            "the isolated test seam precedes runtime commit"
+        );
+        flight::flight_commit_order(&mut order, &event);
+        assert_ne!(order, flight::flight_order_cursor(&engine.flights));
+    }
+
+    // REQ: OA-REG-018
+    #[test]
+    fn required_route_refusal_fence_capacity_failure_poisons_runtime() {
+        let mut engine = runtime();
+        let key = oa_legacy_traj::core::trajectory::FlightKey {
+            gufi: 1_u128.to_be_bytes(),
+            aircraft_address: 0x00ab_cdef,
+            centre: *b"ZAU1",
+            plan_id: *b"PLAN00000001",
+        };
+        engine.routes.route_refusals.resize(
+            route::MAX_ROUTE_REVISIONS,
+            route::RouteRefusalFence {
+                key,
+                source_ms: Some(1),
+                available_ms: 1,
+                message_id: 1,
+                attempted_text_sha256: [0; 32],
+                reason: REASON_INPUT_INVALID,
+            },
+        );
+        let event = parse_event_line(
+            "v1\t2000000000\t2000000000\t1\tROUTE\t00000000000000000000000000000001\tABCDEF\tZAU1\tFILED_ROUTE\tPLAN00000001\tFIXB\tNOT A ROUTE",
+        )
+        .unwrap();
+        let batch = ReceiptBatch {
+            receipt_ns: 2_000_000_000,
+            source_clock_regressions: 0,
+            events: vec![event],
+        };
+
+        assert!(regional_step(&mut engine, &batch)
+            .unwrap_err()
+            .contains("capacity"));
+        assert!(engine.failed);
+        assert!(regional_step(&mut engine, &batch)
+            .unwrap_err()
+            .contains("reconstruct"));
+    }
 }

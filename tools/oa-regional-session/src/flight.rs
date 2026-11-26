@@ -103,6 +103,149 @@ pub struct FlightDriver {
     last_receipt_ns: Option<i64>,
 }
 
+/// Read-only ordering state for a receipt batch. Rejected items do not advance this cursor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlightOrderCursor {
+    prior_receipt_ns: Option<i64>,
+    batch_receipt_ns: Option<i64>,
+    prior_source: Option<SourceKind>,
+    prior_sequence: [Option<u64>; 5],
+}
+
+pub fn flight_order_cursor(driver: &FlightDriver) -> FlightOrderCursor {
+    FlightOrderCursor {
+        prior_receipt_ns: driver.last_receipt_ns,
+        batch_receipt_ns: None,
+        prior_source: None,
+        prior_sequence: [None; 5],
+    }
+}
+
+fn source_order_slot(source: SourceKind) -> usize {
+    match source {
+        SourceKind::Surveillance => 0,
+        SourceKind::Flight => 1,
+        SourceKind::Route => 2,
+        SourceKind::Weather => 3,
+        SourceKind::Adaptation => 4,
+    }
+}
+
+/// Check timestamp, category, and source-order rules without updating driver or cursor state.
+pub fn flight_stage_order(
+    driver: &FlightDriver,
+    cursor: &FlightOrderCursor,
+    event: &NormalizedEvent,
+) -> Result<(), FlightDriverError> {
+    validate_flight_event(event, cursor.prior_receipt_ns.or(driver.last_receipt_ns))?;
+    if cursor
+        .batch_receipt_ns
+        .is_some_and(|receipt| receipt != event.receipt_ns)
+        || cursor
+            .prior_source
+            .is_some_and(|source| event.source < source)
+    {
+        return Err(FlightDriverError::InvalidBatchOrder);
+    }
+    let sequence = cursor
+        .prior_sequence
+        .get(source_order_slot(event.source))
+        .copied()
+        .flatten();
+    if sequence.is_some_and(|prior| event.sequence <= prior) {
+        return Err(FlightDriverError::InvalidBatchOrder);
+    }
+    Ok(())
+}
+
+/// Predicts adapter-level state-dependent refusals without advancing receipt/order state.
+pub fn flight_stage_adapter_refusal(
+    driver: &FlightDriver,
+    event: &NormalizedEvent,
+) -> Option<AdapterRefusal> {
+    let EventKind::Flight(operation) = event.kind else {
+        return None;
+    };
+    let existing = flight_get(&driver.table, &key_gufi(event.identity.flight_gufi));
+    match operation {
+        FlightOperation::SetOwner { unit }
+            if existing.is_some_and(|flight| flight.owner != [0; 8] && flight.owner != unit) =>
+        {
+            Some(AdapterRefusal::OwnerChangeRequiresTake)
+        }
+        FlightOperation::Handoff {
+            operation: HandoffOperation::Offer,
+            ..
+        } if existing.is_some_and(|flight| flight.owner == [0; 8]) => {
+            Some(AdapterRefusal::OfferRequiresCurrentOwner)
+        }
+        FlightOperation::Handoff {
+            operation: HandoffOperation::Accept,
+            unit,
+        } if existing.is_some_and(|flight| flight.ho_state != HO_NONE && flight.ho_to != unit) => {
+            Some(AdapterRefusal::AcceptingUnitIsNotOfferedTarget)
+        }
+        FlightOperation::Handoff {
+            operation: HandoffOperation::Take,
+            unit,
+        } if existing.is_some_and(|flight| flight.ho_state != HO_NONE && flight.ho_to != unit) => {
+            Some(AdapterRefusal::TakingUnitIsNotOfferedTarget)
+        }
+        FlightOperation::Handoff {
+            operation: HandoffOperation::Fail,
+            unit,
+        } if existing
+            .is_some_and(|flight| flight.ho_state != HO_NONE && flight.ho_from != unit) =>
+        {
+            Some(AdapterRefusal::FailingUnitIsNotOfferingOwner)
+        }
+        _ => None,
+    }
+}
+
+/// Records a staged adapter refusal without applying an operation or advancing the receipt clock.
+pub fn flight_record_adapter_refusal(driver: &mut FlightDriver, reason: AdapterRefusal) {
+    driver.stats.events_seen = driver.stats.events_seen.saturating_add(1);
+    driver.stats.flight_events = driver.stats.flight_events.saturating_add(1);
+    let _ = record_adapter_refusal(driver, reason);
+}
+
+/// Advance ordering state only after this item has been accepted and committed.
+pub fn flight_commit_order(cursor: &mut FlightOrderCursor, event: &NormalizedEvent) {
+    cursor.prior_receipt_ns = Some(event.receipt_ns);
+    cursor.batch_receipt_ns = Some(event.receipt_ns);
+    cursor.prior_source = Some(event.source);
+    if let Some(sequence) = cursor
+        .prior_sequence
+        .get_mut(source_order_slot(event.source))
+    {
+        *sequence = Some(event.sequence);
+    }
+}
+
+pub fn flight_record_item_refusal(driver: &mut FlightDriver, error: FlightDriverError) {
+    driver.stats.events_seen = driver.stats.events_seen.saturating_add(1);
+    record_input_refusal(&mut driver.stats, error);
+}
+
+pub fn flight_record_external_refusal(driver: &mut FlightDriver) {
+    driver.stats.events_seen = driver.stats.events_seen.saturating_add(1);
+}
+
+pub fn flight_record_capacity_refusal(driver: &mut FlightDriver) {
+    driver.stats.events_seen = driver.stats.events_seen.saturating_add(1);
+    driver.stats.output_capacity_refusals = driver.stats.output_capacity_refusals.saturating_add(1);
+}
+
+/// Detect the known core table-capacity refusal before the event can advance accepted timestamps.
+pub fn flight_table_capacity_refusal(driver: &FlightDriver, event: &NormalizedEvent) -> bool {
+    let EventKind::Flight(FlightOperation::SetPlan { .. }) = event.kind else {
+        return false;
+    };
+    let key = key_gufi(event.identity.flight_gufi);
+    flight_get(&driver.table, &key).is_none() && flights_len(&driver.table) >= MAX_DRIVER_FLIGHTS
+}
+
 /// Altitude interpretation kept explicit, including forms the shared trajectory adapter cannot
 /// reduce to one numeric effective clearance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

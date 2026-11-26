@@ -106,6 +106,31 @@ pub struct Surveillance {
     msaw: Option<crate::msaw_bridge::RegionalMsaw>,
     baro_seen: BTreeMap<u32, i64>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurveillanceStageError {
+    FailedSession,
+    SealedTimestamp,
+    WrongReceiptOrTimestamp,
+    WrongSourceKind,
+    InvalidPosition,
+    BarometricEvidenceCapacity,
+}
+
+impl SurveillanceStageError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::FailedSession => {
+                "surveillance failed; reconstruct from the admitted input prefix"
+            }
+            Self::SealedTimestamp => "sealed source or receipt timestamp refused",
+            Self::WrongReceiptOrTimestamp => "event does not belong to the current receipt cutoff",
+            Self::WrongSourceKind => "event kind/source category mismatch",
+            Self::InvalidPosition => "position fields are outside the supported input bounds",
+            Self::BarometricEvidenceCapacity => "barometric evidence capacity exhausted",
+        }
+    }
+}
 // A7.2: cold subsystem container; core tables allocate once in their constructors.
 
 // A7.2: cold lengths in the current owned display list, never exported across a module.
@@ -294,13 +319,17 @@ pub fn surveillance_begin(s: &mut Surveillance, time_ns: i64) -> Result<(), Stri
     Ok(())
 }
 
-pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Result<(), String> {
+/// Read-only event checks, including the bounded evidence map, before tracker or health mutation.
+pub fn surveillance_stage_event(
+    s: &Surveillance,
+    event: &NormalizedEvent,
+) -> Result<(), SurveillanceStageError> {
     if s.failed {
-        return Err("surveillance failed; reconstruct from the admitted input prefix".into());
+        return Err(SurveillanceStageError::FailedSession);
     }
     if oa_sealed::in_sealed_window(event.source_ns) || oa_sealed::in_sealed_window(event.receipt_ns)
     {
-        return Err("sealed source or receipt timestamp refused".into());
+        return Err(SurveillanceStageError::SealedTimestamp);
     }
     if s.completed
         || Some(event.receipt_ns) != s.previous_ns
@@ -308,7 +337,7 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
         || event.source_ns < 0
         || event.source_ns > event.receipt_ns
     {
-        return Err("event does not belong to the current receipt cutoff".into());
+        return Err(SurveillanceStageError::WrongReceiptOrTimestamp);
     }
     let source_matches = match event.kind {
         EventKind::Position { .. } => event.source == SourceKind::Surveillance,
@@ -319,8 +348,35 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
         EventKind::FeedState { .. } => true,
     };
     if !source_matches {
-        return Err("event kind/source category mismatch".into());
+        return Err(SurveillanceStageError::WrongSourceKind);
     }
+    if let EventKind::Position {
+        latitude_e7,
+        longitude_e7,
+        altitude_ft,
+        ..
+    } = event.kind
+    {
+        if event.identity.aircraft_address == 0
+            || event.identity.aircraft_address > 0x00ff_ffff
+            || !(-900_000_000..=900_000_000).contains(&latitude_e7)
+            || !(-1_800_000_000..=1_800_000_000).contains(&longitude_e7)
+            || altitude_ft.is_some_and(|alt| !(-2_000..=100_000).contains(&alt))
+        {
+            return Err(SurveillanceStageError::InvalidPosition);
+        }
+        if altitude_ft.is_some()
+            && !s.baro_seen.contains_key(&event.identity.aircraft_address)
+            && s.baro_seen.len() >= MAX_BARO_EVIDENCE
+        {
+            return Err(SurveillanceStageError::BarometricEvidenceCapacity);
+        }
+    }
+    Ok(())
+}
+
+pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Result<(), String> {
+    surveillance_stage_event(s, event).map_err(|error| error.message().to_owned())?;
     let index = source_index(event.source);
     let seen = s.seen.get_mut(index).ok_or("source index")?;
     let down = s.down.get_mut(index).ok_or("source index")?;
@@ -395,10 +451,6 @@ pub fn surveillance_event(s: &mut Surveillance, event: &NormalizedEvent) -> Resu
                 s.track_down = false;
                 if altitude_ft.is_some() && after.alt_rejected == before.alt_rejected {
                     let address = event.identity.aircraft_address;
-                    if !s.baro_seen.contains_key(&address) && s.baro_seen.len() >= MAX_BARO_EVIDENCE
-                    {
-                        return Err("accepted barometric evidence capacity exhausted".into());
-                    }
                     let known = s.baro_seen.entry(address).or_insert(event.source_ns);
                     if event.source_ns > *known {
                         *known = event.source_ns;
@@ -1073,6 +1125,33 @@ mod tests {
         }
     }
 
+    // REQ: OA-REG-018
+    #[test]
+    fn barometric_evidence_capacity_refuses_before_tracker_or_health_mutation() {
+        let mut s = new_surveillance();
+        surveillance_begin(&mut s, SECOND_NS).expect("begin frame before capacity check");
+        for address in 1..=u32::try_from(MAX_BARO_EVIDENCE).unwrap() {
+            s.baro_seen.insert(address, SECOND_NS);
+        }
+        let event = position(SECOND_NS, SECOND_NS, 0x00ab_cdef, 1);
+        let seen_before = s.seen;
+        let down_before = s.down;
+        let tracker_before = *tracker_stats(&s.tracker);
+        let newest_before = tracker_newest_update_ns(&s.tracker);
+        let map_len_before = s.baro_seen.len();
+
+        assert_eq!(
+            surveillance_stage_event(&s, &event),
+            Err(SurveillanceStageError::BarometricEvidenceCapacity)
+        );
+        assert!(surveillance_event(&mut s, &event).is_err());
+        assert_eq!(s.seen, seen_before);
+        assert_eq!(s.down, down_before);
+        assert_eq!(*tracker_stats(&s.tracker), tracker_before);
+        assert_eq!(tracker_newest_update_ns(&s.tracker), newest_before);
+        assert_eq!(s.baro_seen.len(), map_len_before);
+    }
+
     #[test]
     fn wrong_source_and_negative_source_time_do_not_change_feed_health() {
         let mut s = new_surveillance();
@@ -1087,14 +1166,18 @@ mod tests {
     }
 
     #[test]
-    fn transport_receipt_does_not_refresh_rejected_measurement_health() {
+    fn invalid_position_does_not_refresh_feed_or_tracker_health() {
         let mut s = new_surveillance();
         surveillance_begin(&mut s, SECOND_NS).expect("begin first frame");
         let bad_address = position(SECOND_NS, SECOND_NS, u32::MAX, 1);
-        surveillance_event(&mut s, &bad_address).expect("normalized transport event is counted");
-        assert_eq!(s.seen[0], Some(SECOND_NS));
+        assert_eq!(
+            surveillance_stage_event(&s, &bad_address),
+            Err(SurveillanceStageError::InvalidPosition)
+        );
+        assert!(surveillance_event(&mut s, &bad_address).is_err());
+        assert_eq!(s.seen[0], None);
         assert_eq!(s.track_measurement_seen_ns, None);
-        assert_eq!(s.measurement_rejections, 1);
+        assert_eq!(s.measurement_rejections, 0);
     }
 
     #[test]
