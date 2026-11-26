@@ -30,6 +30,12 @@ oa-display = { path = "../../crates/oa-display" }
 oa-scope-replay = { path = "../../crates/oa-scope-replay" }
 # Adaptation snapshot and independent route conversion against its own NASR/CIFP model.
 oa-airspace = { path = "../../crates/oa-airspace" }
+# F1a: the runtime verifies issued runway-aid profiles and resolves them against its exact model.
+oa-adapt = { path = "../oa-adapt" }
+# F1a: terminal aid calculations and profile values are pure bounded core behavior per scan.
+oa-runway = { path = "../../crates/oa-runway" }
+# F1a: deterministic geospatial local-plane math used by the runtime's verified runway resolver.
+oa-math = { path = "../../crates/oa-math" }
 # Exactly specified rounding before checked fixed-point conversions.
 oa-ieee = { path = "../../crates/oa-ieee" }
 # Bind inputs, adaptation, source, executable and output evidence to exact bytes.

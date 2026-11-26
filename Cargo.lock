@@ -508,6 +508,7 @@ dependencies = [
 name = "oa-regional-session"
 version = "0.0.1"
 dependencies = [
+ "oa-adapt",
  "oa-adsb",
  "oa-airspace",
  "oa-audit-core",
@@ -521,6 +522,7 @@ dependencies = [
  "oa-flight-sfdps",
  "oa-ieee",
  "oa-legacy-traj",
+ "oa-math",
  "oa-migration",
  "oa-migration-shadow",
  "oa-migration-switch",
@@ -528,6 +530,7 @@ dependencies = [
  "oa-msaw-run",
  "oa-nam",
  "oa-quarantine",
+ "oa-runway",
  "oa-safety",
  "oa-scope-replay",
  "oa-sealed",
