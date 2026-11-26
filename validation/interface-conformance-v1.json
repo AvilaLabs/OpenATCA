@@ -135,6 +135,89 @@
       "tested_scope": "Selected hand-derived typed item projection, round-trip, and coordinate refusal. Other items are preserved as raw where implemented; no whole-spec claim."
     },
     {
+      "interface_id": "FAA-ERAM-NONUS-ACC-LOWER-LAYER",
+      "protocol": "NAM Direct IP connection/session requirements between ERAM and non-U.S. ACCs",
+      "implementation": "crates/oa-nam",
+      "support_status": "session-requirements-partial; transport-not-implemented",
+      "source_documents": [
+        {
+          "document_id": "NAS-IC-82422100",
+          "title": "ERAM/NAM Non-U.S. ACC System Interface Control Document",
+          "version": "1.0",
+          "document_date": "2019-05-07",
+          "source_inventory_file": "eram-nonusacc-icd-v4.pdf",
+          "source_sha256": "926283b4293a5121e331a64496a14b6f7a5d9e7e103f6e177f9704e29b889bb7",
+          "public_reference": "https://www.icao.int/NACC/Pages/regional-group-AIDC.aspx",
+          "note": "ICD describes direct TCP/IP interface design via NESG/FTI; it does not specify NAM message syntax, which is defined by NAS-IC-21009205."
+        },
+        {
+          "document_id": "NAS-IR-82422100",
+          "title": "ERAM/NAM Non-U.S. ACC Interface Requirements Document",
+          "version": "1.4",
+          "document_date": "2019-05-07",
+          "source_inventory_file": "eram-nonusacc-ird-v1.4.pdf",
+          "source_sha256": "a8df0324e7f111abeb1891711c91ffda6539a6698228b8a1038681c66e344dac",
+          "public_pdf_url": "https://www.icao.int/NACC/Documents/RegionalGroups/ANIWG/AIDC/ERAM-NonUSACC%20IRD-v1.4_4.pdf",
+          "note": "Figure 3-3 supplies the session timer requirements used by the existing NAM session tests."
+        }
+      ],
+      "implemented_profile": {
+        "name": "IRD-Figure-3-3-session-model",
+        "supported": ["synthetic timer/session state transitions already exercised by crates/oa-nam/tests/session.rs"],
+        "unsupported": ["TCP/IP sockets", "NESG/FTI routing and failover", "network or transport packet parsing", "production ERAM/non-U.S. ACC interoperability"],
+        "mandatory_fields_and_extensions": "No lower-layer message or extension encoding is implemented. Do not infer one from the NAM application messages."
+      },
+      "tests": {
+        "suite_files": ["crates/oa-nam/tests/session.rs", "crates/oa-nam/tests/transport_epoch.rs", "crates/oa-nam/tests/interface_conformance.rs"],
+        "coverage": ["synthetic_session_timers", "message_sequence_state", "transport_epoch_invalidations"],
+        "not_covered": ["wire_transport", "live_connection", "failover_path"]
+      }
+    },
+    {
+      "interface_id": "FAA-ASDI-XML-1.8",
+      "protocol": "Aircraft Situation Display to Industry XML feed",
+      "implementation": "crates/oa-xml",
+      "support_status": "documented-profile-only; ASDI-packet-and-schema-codec-not-implemented",
+      "source": {
+        "document_id": "ASDI-FD-001",
+        "title": "Aircraft Situation Display to Industry: Functional Description and Interface Control Document for the XML Version",
+        "edition": "1.8",
+        "edition_date": "2011-04-15",
+        "source_inventory_file": "asdi-xml-icd-v1.8-rev1.pdf",
+        "source_sha256": "3a8213a27253db858b03af7b3fcd306253e294bea181829d0afe5221b56d2f67",
+        "referenced_source": "The document points to the FAA ASDI service site for the XSD set and sample messages; current availability/version of those XSDs was not verified."
+      },
+      "documented_requirements_not_implemented": {
+        "header": "32 bytes: 16-byte timestamp, then network-order 32-bit data type, sequence number, compressed size and decompressed size.",
+        "packet_types": ["1 heartbeat", "2 XML payload"],
+        "sequence": "0..100000 inclusive with restart/reset behavior described in section 5.3.",
+        "payload": "zlib-compressed XML; ASDI preamble and feed-specific messages require the referenced XSD set.",
+        "required_fields_and_extensions": "Per-message required/optional fields and namespace/schema extensions are defined by ASDI.xsd and imported schemas; those schemas and an ASDI-specific decoder are absent from this profile."
+      },
+      "tested_scope": "oa-xml tests cover generic bounded XML 1.0 parsing and security refusals only. They do not validate the ASDI header, zlib framing, heartbeat, XSD, namespace contract, or ASDI message types."
+    },
+    {
+      "interface_id": "FAA-TFMDI-XML-1.7",
+      "protocol": "Traffic Flow Management Data to Industry (TFMDI) XML file set",
+      "implementation": "No TFMDI-specific decoder; crates/oa-tfms targets a separate SWIM TFMData XML profile.",
+      "support_status": "source-pinned; TFMDI-profile-not-implemented",
+      "source": {
+        "document_id": "ETMS-TFMDI-003",
+        "title": "Traffic Flow Management Data to Industry: Interface Control Document",
+        "version": "1.7",
+        "document_date": "2007-05-09",
+        "public_pdf_url": "https://cdm.fly.faa.gov/wp-content/list_yo_files_user_folders/cdm_editor/cdm_data_format_info/TFMDI%20ICD.pdf",
+        "source_inventory_file": "tfm-data-icd-v1.7.pdf",
+        "source_sha256": "5321d99452d9e3578e3ad0ba7979050661761247f7ebbbfb3e12b3a4bd9f6ca8"
+      },
+      "documented_profile": {
+        "format": "Version 1.7 specifies an XML subset for index, public reroute and FEA/FCA files; elements have start/end tags, no attributes, and may appear in any order where allowed by the documented parent relationships.",
+        "implemented": [],
+        "unsupported": ["TFMDI index/file semantics", "reroute/FEA/FCA schema validation", "TFMDI-specific required/optional field enforcement", "compressed file transport"]
+      },
+      "tested_scope": "Generic oa-xml parser tests are not TFMDI conformance tests. oa-tfms tests exercise SWIM TFMData namespaces and message structures, not ETMS-TFMDI-003. No TFMDI profile support is claimed."
+    },
+    {
       "interface_id": "FAA-NAM-ACC-TO-ACC",
       "protocol": "North American Common Coordination messages between Area Control Centres, with ERAM/NAM transport/session profile",
       "implementation": "crates/oa-nam",

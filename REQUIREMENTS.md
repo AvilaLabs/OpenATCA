@@ -3826,11 +3826,16 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   round-trip in Ed 2.4.
 
 ## Interface versioned conformance inventory
-- **OA-IFACE-001** The machine-readable `validation/interface-conformance-v1.json` pins the public source
-  revisions and implementation profiles tested for ASTERIX CAT021/048/062 and NAM ACC-to-ACC; its
-  synthetic vectors accept the declared examples and refuse the declared edition, framing, repetition,
-  coordinate and NAM-profile defects. The registry records explicit partial coverage and does not claim
-  whole-ICD conformance, operational interoperability or parity with unavailable legacy traffic.
+- **OA-IFACE-001** The machine-readable `validation/interface-conformance-v1.json` pins public source
+  versions for NAM/ERAM non-U.S. ACC session requirements, ASDI XML 1.8, TFMDI XML 1.7, and ASTERIX
+  CAT021/048/062. Synthetic ASTERIX and NAM vectors accept selected declared examples and refuse listed
+  edition, framing, repetition, coordinate and profile defects. Generic XML tests establish only
+  well-formed XML parsing and explicit security refusals; ASDI packet/XSD semantics and TFMDI file
+  profiles are not implemented, and the SWIM TFMData decoder is not treated as a TFMDI decoder.
+  Explicit CAT021, CAT048 and CAT062 edition tables mark the tested profiles and partial typed-field
+  coverage. For every interface, the registry distinguishes implemented session or parser scope from
+  unsupported wire fields/extensions; it does not claim whole-ICD conformance, operational
+  interoperability, or parity with unavailable legacy traffic.
 
 ## M3 — Surveillance tracking (oa-track)
 
