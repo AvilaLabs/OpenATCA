@@ -1299,7 +1299,8 @@ const GOLDEN_COUNTERS: &str = "579 472 35 53 4 284 847 14 0 1316";
 // 0x40a4_3b1a_f97a_16bc and
 // "8924b0a9d9aef420b74326d06d45fe3b055b3ea20a74845e0b03bfa4f6d1a6bd".
 const GOLDEN_NIS_BITS: u64 = 0x40a4_3264_bf63_657b;
-const GOLDEN_DIGEST: &str = "5864f9c330900223ad8e431a98d2f5e1ba70f82867c4a64a3005d89d9921488f";
+// OATK2 adds source-observed identity (or explicit unavailable) to the canonical row hash.
+const GOLDEN_DIGEST: &str = "e932a9bef90f22e406bc9c18fb26fd4b5ec21d60566fe2e06371165e1c87f79f";
 
 /// Aircraft that start, stop and start again with long gaps between: one that stops early (and
 /// is dropped), one that flies on, and two that begin after gaps far longer than the drop time.
@@ -1401,7 +1402,8 @@ fn the_newest_update_is_kept_and_is_an_upper_bound_on_the_live_ones() {
 // OA-TRK-329 changes predicted values with the same 1,446 rows, end counts, held reports and
 // applied-after-step counts. Prior digest:
 // "6bf2d72d551760c04e78ed96d9054f6519e8db2ee59fa9b4a1300bbf212578fd".
-const GAPPY_DIGEST: &str = "4a705106b8b2beecf911272b615cf909e7b4c87082b8a2de8b62cf66b3f04b44";
+// OATK2 adds source-observed identity (or explicit unavailable) to the canonical row hash.
+const GAPPY_DIGEST: &str = "c92dd32853d4389acf1d2bab63fc1e85647d39d703bcae1230a7f81cdf93aa34";
 
 // REQ: OA-TRK-041
 #[test]
