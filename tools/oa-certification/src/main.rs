@@ -33,41 +33,20 @@ fn main() -> ExitCode {
                 result.passed().then_some(()).ok_or_else(|| "synthetic PVER checks did not pass".to_owned())
             })
         }
-        [command, path, count, tail, registry_path, registry_pin, principal]
-            if command == "report" =>
-        {
-            let Some(checkpoint) = parse_checkpoint(count, tail) else {
-                eprintln!("invalid record count or tail checkpoint");
+        [command, path, count, tail] if command == "report" => {
+            let count = match count.parse::<u64>() {
+                Ok(value) => value,
+                Err(_) => {
+                    eprintln!("record count must be a nonnegative integer");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(tail) = parse_digest(tail) else {
+                eprintln!("tail must be exactly 64 lowercase hexadecimal characters");
                 return ExitCode::FAILURE;
             };
-            let Some(registry_pin) = parse_digest(registry_pin) else {
-                eprintln!("registry pin must be exactly 64 lowercase hexadecimal characters");
-                return ExitCode::FAILURE;
-            };
-            let Some(principal_id) = principal.parse::<u64>().ok().filter(|value| *value != 0)
-            else {
-                eprintln!("principal must be a nonzero unsigned integer claim");
-                return ExitCode::FAILURE;
-            };
-            let result = (|| -> Result<String, String> {
-                let registry = oa_audit_log::shell::load_principal_registry(
-                    Path::new(registry_path),
-                    registry_pin,
-                )
-                .map_err(|error| format!("principal registry refused: {error:?}"))?;
-                let role = oa_audit_core::authorize_principal(
-                    &registry,
-                    principal_id,
-                    oa_audit_core::Action::Verify,
-                )
-                .map_err(|error| format!("principal registry refused verification: {error:?}"))?;
-                let report = oa_certification::certification_report(Path::new(path), checkpoint)
-                    .map_err(|error| error.to_string())?;
-                Ok(format!(
-                    "verification_principal_claim={principal_id} registry_derived_role={role:?}\n{report}"
-                ))
-            })();
-            result
+            let checkpoint = oa_audit_core::Checkpoint { count, tail };
+            oa_certification::certification_report(std::path::Path::new(path), checkpoint)
                 .map(|report| print!("{report}"))
                 .map_err(|error| error.to_string())
         }
@@ -168,7 +147,7 @@ fn digest_text(value: Option<oa_sha256::Digest>) -> String {
 }
 
 fn usage() {
-    eprintln!("usage: oa-certification pver <full|abbreviated> <g2-package-dir> <manifest-sha256> | report <log> <count> <tail-hex> <local-registry> <registry-sha256> <principal-claim> | certify <log> <count> <tail-hex> <local-registry> <principal-claim> <time-ns-claim> <service> <full|abbreviated> <expected-roster.tsv> <observations.tsv> <exceptions> <artifact-cap>");
+    eprintln!("usage: oa-certification pver <full|abbreviated> <g2-package-dir> <manifest-sha256> | report <log> <count> <tail-hex> | certify <log> <count> <tail-hex> <local-registry> <principal-claim> <time-ns-claim> <service> <full|abbreviated> <expected-roster.tsv> <observations.tsv> <exceptions> <artifact-cap>");
 }
 
 fn parse_checkpoint(count: &str, tail: &str) -> Option<oa_audit_core::Checkpoint> {

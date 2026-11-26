@@ -1,8 +1,7 @@
 //! Durable bounded file operations. One fixed-size record is appended per action.
 use crate::encoding::{chain, checkpoint, decode, encode, MAX_RECORDS, RECORD_BYTES};
 use oa_audit_core::{
-    parse_principal_registry, receipt_claim, validate_event, AuditError, AuditReceipt, Checkpoint,
-    Digest, Event, PrincipalRegistry, Record, RegistryError, MAX_PRINCIPAL_REGISTRY_BYTES,
+    receipt_claim, validate_event, AuditError, AuditReceipt, Checkpoint, Event, Record,
 };
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -21,66 +20,6 @@ pub enum LogError {
 pub enum CommitError<E> {
     Audit(LogError),
     Action(E),
-}
-
-#[derive(Debug)]
-pub enum RegistryLoadError {
-    Io(io::Error),
-    TooLarge,
-    DescriptorChanged,
-    DigestMismatch,
-    InvalidRegistry(RegistryError),
-}
-
-impl std::fmt::Display for RegistryLoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Io(error) => write!(f, "principal registry I/O failed: {error}"),
-            Self::TooLarge => write!(f, "principal registry exceeds its byte limit"),
-            Self::DescriptorChanged => write!(f, "principal registry changed while being read"),
-            Self::DigestMismatch => {
-                write!(f, "principal registry does not match its pinned digest")
-            }
-            Self::InvalidRegistry(error) => write!(f, "principal registry is invalid: {error:?}"),
-        }
-    }
-}
-
-impl std::error::Error for RegistryLoadError {}
-
-/// Load a bounded local principal registry from a production-guarded regular file.
-///
-/// `expected_digest` must come from an independent trusted configuration/pin. It is never read
-/// from the registry bytes themselves. The same opened descriptor is size-checked, read, and
-/// checked again before its exact bytes are hashed and parsed.
-pub fn load_principal_registry(
-    path: &Path,
-    expected_digest: Digest,
-) -> Result<PrincipalRegistry, RegistryLoadError> {
-    let (mut file, _) = oa_sealed::Sealed::production()
-        .open_regular(path)
-        .map_err(RegistryLoadError::Io)?;
-    let before = file.metadata().map_err(RegistryLoadError::Io)?;
-    let len = usize::try_from(before.len()).map_err(|_| RegistryLoadError::TooLarge)?;
-    if len > MAX_PRINCIPAL_REGISTRY_BYTES {
-        return Err(RegistryLoadError::TooLarge);
-    }
-
-    let mut bytes = [0_u8; MAX_PRINCIPAL_REGISTRY_BYTES];
-    let input = bytes.get_mut(..len).ok_or(RegistryLoadError::TooLarge)?;
-    file.read_exact(input).map_err(RegistryLoadError::Io)?;
-    let mut extra = [0_u8; 1];
-    if file.read(&mut extra).map_err(RegistryLoadError::Io)? != 0
-        || file.metadata().map_err(RegistryLoadError::Io)?.len() != before.len()
-    {
-        return Err(RegistryLoadError::DescriptorChanged);
-    }
-    let exact_bytes = bytes.get(..len).ok_or(RegistryLoadError::TooLarge)?;
-    let actual_digest = oa_sha256::core::sha256::sha256(exact_bytes);
-    if actual_digest != expected_digest {
-        return Err(RegistryLoadError::DigestMismatch);
-    }
-    parse_principal_registry(exact_bytes).map_err(RegistryLoadError::InvalidRegistry)
 }
 
 impl From<io::Error> for LogError {
@@ -267,8 +206,7 @@ fn open_log_append_at(path: &Path, parent: &File) -> io::Result<File> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        const O_NOFOLLOW: i32 = 0o400000;
-        options.custom_flags(O_NOFOLLOW);
+        options.custom_flags(linux_o_nofollow_flag()?);
     }
     let file = options.open(&anchored)?;
     guard.verify_open(&anchored, &file)?;
@@ -278,6 +216,71 @@ fn open_log_append_at(path: &Path, parent: &File) -> io::Result<File> {
         ));
     }
     Ok(file)
+}
+
+/// Returns the Linux UAPI `O_NOFOLLOW` value for the target architecture.
+/// The asm-generic value is overridden by several architecture-specific UAPI headers.
+/// Rust reports the x32 ABI with `target_arch = "x86_64"`.
+#[cfg(target_os = "linux")]
+fn linux_o_nofollow_flag() -> io::Result<i32> {
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "m68k",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    ))]
+    {
+        Ok(0o100000)
+    }
+
+    #[cfg(any(
+        target_arch = "csky",
+        target_arch = "hexagon",
+        target_arch = "loongarch64",
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6",
+        target_arch = "riscv32",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "sparc",
+        target_arch = "sparc64",
+        target_arch = "x86",
+        target_arch = "x86_64"
+    ))]
+    {
+        Ok(0o400000)
+    }
+
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "m68k",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "csky",
+        target_arch = "hexagon",
+        target_arch = "loongarch64",
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6",
+        target_arch = "riscv32",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "sparc",
+        target_arch = "sparc64",
+        target_arch = "x86",
+        target_arch = "x86_64"
+    )))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "audit append does not know the target Linux O_NOFOLLOW flag",
+        ))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -334,45 +337,6 @@ mod tests {
 
     fn path(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("oa-audit-{tag}-{}", std::process::id()))
-    }
-
-    // REQ: OA-AUDIT-008
-    #[test]
-    fn principal_registry_loader_checks_external_pin_and_parses_exact_opened_bytes() {
-        let file = path("principals");
-        let _ = std::fs::remove_file(&file);
-        let bytes = b"OACERT-LOCAL-PRINCIPALS-V2\n7\tconfigure\tenabled\n11\toperate\tdisabled\n";
-        std::fs::write(&file, bytes).unwrap();
-        let pin = oa_sha256::core::sha256::sha256(bytes);
-        let registry = load_principal_registry(&file, pin).unwrap();
-        assert_eq!(registry.len(), 2);
-        assert!(matches!(
-            load_principal_registry(&file, [0; 32]),
-            Err(RegistryLoadError::DigestMismatch)
-        ));
-        let _ = std::fs::remove_file(file);
-    }
-
-    // REQ: OA-AUDIT-008
-    #[test]
-    fn principal_registry_loader_refuses_oversize_and_sealed_paths() {
-        let file = path("principals-oversize");
-        let _ = std::fs::remove_file(&file);
-        std::fs::write(&file, vec![b'X'; MAX_PRINCIPAL_REGISTRY_BYTES + 1]).unwrap();
-        assert!(matches!(
-            load_principal_registry(&file, [0; 32]),
-            Err(RegistryLoadError::TooLarge)
-        ));
-
-        let sealed = std::env::temp_dir()
-            .join(format!("oa-audit-sealed-registry-{}", std::process::id()))
-            .join("scds")
-            .join("rec-20261119")
-            .join("day2-synthetic")
-            .join("principals.txt");
-        assert!(load_principal_registry(&sealed, [0; 32]).is_err());
-        assert!(!sealed.exists());
-        let _ = std::fs::remove_file(file);
     }
 
     // REQ: OA-AUDIT-001, OA-AUDIT-003, OA-AUDIT-004

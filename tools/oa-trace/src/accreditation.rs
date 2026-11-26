@@ -6,12 +6,16 @@ use std::path::{Component, Path};
 
 use super::hazard_trace::{parse_document, JsonValue};
 
-const RECORDS: [&str; 4] = [
+const ACCREDITATION_TOOL_COUNT: usize = 4;
+const RECORDS: [&str; ACCREDITATION_TOOL_COUNT] = [
     "docs/assurance/accreditation/oa-perf.md",
     "docs/assurance/accreditation/oa-replay.md",
     "docs/assurance/accreditation/oa-sensorsim.md",
     "docs/assurance/accreditation/p002-scorer.md",
 ];
+const RECORD_DIRECTORY: &str = "docs/assurance/accreditation";
+const RECORD_INDEX: &str = "INDEX.md";
+const MAX_RECORD_DIRECTORY_ENTRIES: usize = 64;
 const CONTROL_MAP: &str = "docs/security/control-map.json";
 const MAX_CONTROL_MAP_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONTROL_ROWS: usize = 1_000;
@@ -20,8 +24,8 @@ const MAX_EVIDENCE_REFS: usize = 32;
 /// Checks that every cited Rust test function in the accreditation records exists as a test.
 /// Citation syntax is `- Test: `relative/path.rs::function_name``.
 pub fn check(root: &Path) -> Vec<String> {
-    let mut errors = Vec::new();
-    for record in RECORDS {
+    let mut errors = check_record_inventory(root, &RECORDS);
+    for &record in &RECORDS {
         let mut record_citations = 0usize;
         let path = root.join(record);
         let text = match fs::read_to_string(&path) {
@@ -111,6 +115,92 @@ pub fn check(root: &Path) -> Vec<String> {
         }
     }
     errors.extend(check_control_map(root));
+    errors
+}
+
+/// Require the compiled four-record inventory to exactly match the checked-in Markdown tool
+/// records. The directory scan is independent of `RECORDS`, so a duplicated or omitted const
+/// entry cannot make a missing tool record pass.
+fn check_record_inventory(root: &Path, records: &[&str]) -> Vec<String> {
+    let mut errors = Vec::new();
+    let directory = root.join(RECORD_DIRECTORY);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            errors.push(format!(
+                "{RECORD_DIRECTORY}: cannot enumerate records: {error}"
+            ));
+            return errors;
+        }
+    };
+    let mut discovered = Vec::with_capacity(ACCREDITATION_TOOL_COUNT);
+    let mut inspected = 0usize;
+    for entry in entries {
+        inspected = inspected.saturating_add(1);
+        if inspected > MAX_RECORD_DIRECTORY_ENTRIES {
+            errors.push(format!(
+                "{RECORD_DIRECTORY}: exceeds {MAX_RECORD_DIRECTORY_ENTRIES} entry limit"
+            ));
+            return errors;
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                errors.push(format!("{RECORD_DIRECTORY}: cannot inspect entry: {error}"));
+                continue;
+            }
+        };
+        let name = match entry.file_name().to_str() {
+            Some(name) => name.to_string(),
+            None => {
+                errors.push(format!("{RECORD_DIRECTORY}: non-UTF-8 entry name"));
+                continue;
+            }
+        };
+        if !name.ends_with(".md") || name == RECORD_INDEX {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(kind) if kind.is_file() => discovered.push(format!("{RECORD_DIRECTORY}/{name}")),
+            Ok(_) => errors.push(format!(
+                "{RECORD_DIRECTORY}/{name}: record must be a regular file"
+            )),
+            Err(error) => errors.push(format!(
+                "{RECORD_DIRECTORY}/{name}: cannot inspect: {error}"
+            )),
+        }
+    }
+    if records.len() > ACCREDITATION_TOOL_COUNT {
+        errors.push("accreditation record inventory exceeds the four-tool limit".into());
+        return errors;
+    }
+    let mut listed = Vec::with_capacity(ACCREDITATION_TOOL_COUNT);
+    listed.extend_from_slice(records);
+    listed.sort_unstable();
+    discovered.sort_unstable();
+    if listed.windows(2).any(|pair| {
+        pair.first()
+            .zip(pair.get(1))
+            .is_some_and(|(first, second)| first == second)
+    }) {
+        errors.push("accreditation record inventory contains a duplicate path".into());
+    }
+    for path in &listed {
+        if !discovered.iter().any(|found| found == path) {
+            errors.push(format!("{path}: listed accreditation record is missing"));
+        }
+    }
+    for path in &discovered {
+        if !listed.iter().any(|listed_path| listed_path == path) {
+            errors.push(format!("{path}: unexpected accreditation tool record"));
+        }
+    }
+    if listed.len() != ACCREDITATION_TOOL_COUNT {
+        errors.push(format!(
+            "accreditation record inventory has {} entries; exactly four tools are required",
+            listed.len()
+        ));
+    }
     errors
 }
 
@@ -589,7 +679,9 @@ mod tests {
         clippy::indexing_slicing
     )]
 
-    use super::{check, contains_ci_step, contains_test, CONTROL_MAP};
+    use super::{
+        check, check_record_inventory, contains_ci_step, contains_test, CONTROL_MAP, RECORDS,
+    };
     use std::fs;
 
     fn scratch() -> std::path::PathBuf {
@@ -697,6 +789,14 @@ mod tests {
     fn checked_in_accreditation_references_resolve() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         assert!(check(&root).is_empty(), "{:?}", check(&root));
+
+        let mut duplicate_tool_mutant = RECORDS;
+        duplicate_tool_mutant[3] = RECORDS[0];
+        let errors = check_record_inventory(&root, &duplicate_tool_mutant);
+        assert!(errors.iter().any(|error| error.contains("duplicate path")));
+        assert!(errors
+            .iter()
+            .any(|error| error.contains("p002-scorer.md: unexpected accreditation tool record")));
     }
 
     // REQ: OA-E1-002

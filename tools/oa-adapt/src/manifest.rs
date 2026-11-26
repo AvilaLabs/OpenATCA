@@ -129,7 +129,7 @@ pub struct PackageIdentity {
     pub ca_preset_sha256: Option<Digest>,
     /// Present only for issued v4 packages; checksum of the exact PVER catalog companion.
     pub pver_catalog_sha256: Option<Digest>,
-    /// Present when the issued manifest includes a validated terminal-aid adaptation component.
+    /// Present when the issued manifest includes a validated terminal-aid component.
     pub runway_aids_sha256: Option<Digest>,
     /// Present when the issued manifest includes the validated surveillance-mode component.
     pub surveillance_mode_sha256: Option<Digest>,
@@ -192,12 +192,10 @@ impl VerifiedPackage {
         self.pver_catalog.as_deref()
     }
 
-    /// Exact versioned runway-aid bytes bound to the issued manifest, if present.
     pub fn runway_aids_bytes(&self) -> Option<&[u8]> {
         self.runway_aids.as_deref()
     }
 
-    /// Exact shared-codec surveillance-mode bytes bound to the issued manifest, if present.
     pub fn surveillance_mode_bytes(&self) -> Option<&[u8]> {
         self.surveillance_mode.as_deref()
     }
@@ -579,7 +577,6 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
             && (manifest.ca_preset.is_none() || manifest.issue.is_none()))
         || (manifest.schema_version != CA_PRESET_MANIFEST_VERSION
             && manifest.schema_version != PVER_CATALOG_MANIFEST_VERSION
-            && manifest.schema_version != RUNWAY_AIDS_MANIFEST_VERSION
             && manifest.ca_preset.is_some())
         || has_pver_catalog != manifest.pver_catalog.is_some()
         || has_runway_aids != manifest.runway_aids.is_some()
@@ -1963,83 +1960,10 @@ mod tests {
     }
 
     #[test]
-    fn v5_runway_aids_extend_pver_manifest_and_bind_profile_bytes() {
-        let (_, snapshot) = sample();
-        let (legacy_root, legacy_pin) = make_package();
-        let pver_root = temp_root("runway-pver-base");
-        let catalog = b"schema,synthetic-pver-v1\nsynthetic-pver-v1,full,T1,410000000,-870000000,1.0,2.0,100.0,1.0\n";
-        let (_, pver_pin) = issue_new_package_with_pver_catalog(
-            &pver_root,
-            &snapshot,
-            catalog,
-            None,
-            "release",
-            "ZAU",
-            "pver",
-            &legacy_root,
-            legacy_pin,
-            ChangeClass::Initial,
-            "issuer-a",
-            "approver-b",
-            "test PVER",
-        )
-        .expect("v4 baseline package verifies");
-        let mut profile =
-            vec![0u8; oa_runway::adaptation::HEADER_BYTES + oa_runway::adaptation::PAIR_BYTES];
-        profile[..8].copy_from_slice(oa_runway::adaptation::MAGIC);
-        profile[8..10].copy_from_slice(&1u16.to_le_bytes());
-        let row = &mut profile[10..];
-        row[..4].copy_from_slice(b"KORD");
-        row[4..8].copy_from_slice(&1u32.to_le_bytes());
-        row[8..11].copy_from_slice(b"27L");
-        row[11..13].copy_from_slice(&150u16.to_le_bytes());
-        row[13..17].copy_from_slice(&2u32.to_le_bytes());
-        row[17..20].copy_from_slice(b"27R");
-        row[20..22].copy_from_slice(&150u16.to_le_bytes());
-        row[22..24].copy_from_slice(&2_000u16.to_le_bytes());
-        row[24..26].copy_from_slice(&3_100u16.to_le_bytes());
-        row[26..30].copy_from_slice(&10_000u32.to_le_bytes());
-        row[30..34].copy_from_slice(&1_200u32.to_le_bytes());
-        row[34..38].copy_from_slice(&10_000u32.to_le_bytes());
-        row[38..42].copy_from_slice(&50_000u32.to_le_bytes());
-        row[42..44].copy_from_slice(&500u16.to_le_bytes());
-        assert!(oa_runway::adaptation::parse(&profile).is_ok());
-        let root = temp_root("runway-aids-v5");
-        let (version, pin) = issue_new_package_with_runway_aids(
-            &root,
-            &snapshot,
-            &profile,
-            "release",
-            "ZAU",
-            "runway-aids",
-            &pver_root,
-            pver_pin,
-            ChangeClass::Routine,
-            "issuer-c",
-            "approver-d",
-            "explicit terminal aid adaptation",
-        )
-        .expect("v5 package verifies by readback");
-        assert_eq!(version, 2);
-        let verified = verify_current(&root, pin).expect("v5 manifest verifies");
-        assert_eq!(verified.pver_catalog_bytes(), Some(catalog.as_slice()));
-        assert_eq!(verified.runway_aids_bytes(), Some(profile.as_slice()));
-        assert_eq!(
-            verified.identity().runway_aids_sha256,
-            Some(sha256(&profile))
-        );
-        let _ = fs::remove_dir_all(legacy_root);
-        let _ = fs::remove_dir_all(pver_root);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn v5_mode_only_component_is_optional_and_bound_without_pver_or_runway() {
         let (_, snapshot) = sample();
         let (previous_root, previous_pin) = make_package();
         let root = temp_root("surveillance-mode-only-v5");
-        // Shared OAMODE01 codec: terminal-fusion mode, radar class 1, no preferred radar,
-        // zero canonical coordinates, and all four booleans false.
         let mode = [
             b'O', b'A', b'M', b'O', b'D', b'E', b'0', b'1', 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0,
@@ -2070,7 +1994,6 @@ mod tests {
             verified.identity().surveillance_mode_sha256,
             Some(sha256(&mode))
         );
-        assert_eq!(verified.identity().runway_aids_sha256, None);
         let mut invalid_mode = mode;
         invalid_mode[8] = 99;
         let invalid_root = temp_root("surveillance-mode-invalid-v5");

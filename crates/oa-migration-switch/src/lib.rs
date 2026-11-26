@@ -4,10 +4,6 @@
 //! Recorded/synthetic model of output selection and state reconciliation.
 //! It does not connect to or certify the health of an operational system.
 
-extern crate alloc;
-
-use alloc::vec::Vec;
-
 // User approved the typed M1-to-M2 authority edge on 2026-11-26 (private F1 decision).
 
 #[cfg(not(target_pointer_width = "64"))]
@@ -23,41 +19,6 @@ pub const MAX_INTERFACED_FACILITIES: usize = 16;
 // C2: this exact product prevents notification-record capacity from trailing trace capacity.
 pub const MAX_COORDINATION_RECORDS: usize = MAX_TRACE * MAX_INTERFACED_FACILITIES;
 pub const MAX_DIFFS: usize = (MAX_TRACKS + MAX_FLIGHTS + MAX_HANDOFFS + MAX_ALERTS) * 2;
-pub const REPLAY_ROWS_PER_FAMILY: usize = 4_096;
-pub const REPLAY_TRACE_RECORDS: usize = 201;
-pub const REPLAY_COORDINATION_RECORDS: usize = 3_200;
-pub const REPLAY_MAX_DIFFS: usize = (REPLAY_ROWS_PER_FAMILY * 4) * 2;
-
-/// Explicit allocation budget for one selector. Construction reserves all storage; no selector
-/// operation grows these buffers. Default capacities preserve the existing small replay profile.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CapacityProfile {
-    pub tracks: usize,
-    pub flights: usize,
-    pub handoffs: usize,
-    pub alerts: usize,
-    pub trace_records: usize,
-    pub coordination_records: usize,
-}
-
-impl CapacityProfile {
-    pub const DEFAULT: Self = Self {
-        tracks: MAX_TRACKS,
-        flights: MAX_FLIGHTS,
-        handoffs: MAX_HANDOFFS,
-        alerts: MAX_ALERTS,
-        trace_records: MAX_TRACE,
-        coordination_records: MAX_COORDINATION_RECORDS,
-    };
-    pub const REPLAY_4096: Self = Self {
-        tracks: REPLAY_ROWS_PER_FAMILY,
-        flights: REPLAY_ROWS_PER_FAMILY,
-        handoffs: REPLAY_ROWS_PER_FAMILY,
-        alerts: REPLAY_ROWS_PER_FAMILY,
-        trace_records: REPLAY_TRACE_RECORDS,
-        coordination_records: REPLAY_COORDINATION_RECORDS,
-    };
-}
 
 // M1's accepted S1->S2 transition requires FacilitySupervisor and IndependentAssessor.
 // M2's role mask encodes the supervisor role as ID 1. These are declared IDs, not
@@ -309,88 +270,6 @@ pub struct Snapshot {
     pub alerts: [Option<AlertState>; MAX_ALERTS],
 }
 
-/// Read-only, contiguous family view used by both the fixed-size compatibility API and bounded
-/// replay profiles. Each family slice must be key-sorted and contain only `Some` entries.
-#[derive(Clone, Copy)]
-pub struct SnapshotView<'a> {
-    pub unit: SwapUnitKey,
-    pub policy: UnitPolicy,
-    pub evidence: EvidenceKind,
-    pub side: Side,
-    pub source_epoch: u64,
-    pub state_version: u64,
-    pub sequence: u64,
-    pub source_time_ns: i64,
-    pub observed_time_ns: i64,
-    pub health: Health,
-    pub track_coverage: FamilyCoverage,
-    pub flight_coverage: FamilyCoverage,
-    pub handoff_coverage: FamilyCoverage,
-    pub alert_coverage: FamilyCoverage,
-    pub tracks: &'a [Option<TrackState>],
-    pub flights: &'a [Option<FlightState>],
-    pub handoffs: &'a [Option<HandoffState>],
-    pub alerts: &'a [Option<AlertState>],
-}
-
-impl Snapshot {
-    pub fn view(&self) -> SnapshotView<'_> {
-        SnapshotView {
-            unit: self.unit,
-            policy: self.policy,
-            evidence: self.evidence,
-            side: self.side,
-            source_epoch: self.source_epoch,
-            state_version: self.state_version,
-            sequence: self.sequence,
-            source_time_ns: self.source_time_ns,
-            observed_time_ns: self.observed_time_ns,
-            health: self.health,
-            track_coverage: self.track_coverage,
-            flight_coverage: self.flight_coverage,
-            handoff_coverage: self.handoff_coverage,
-            alert_coverage: self.alert_coverage,
-            tracks: &self.tracks,
-            flights: &self.flights,
-            handoffs: &self.handoffs,
-            alerts: &self.alerts,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SnapshotHeader {
-    unit: SwapUnitKey,
-    policy: UnitPolicy,
-    evidence: EvidenceKind,
-    side: Side,
-    source_epoch: u64,
-    state_version: u64,
-    sequence: u64,
-    source_time_ns: i64,
-    observed_time_ns: i64,
-    health: Health,
-    track_coverage: FamilyCoverage,
-    flight_coverage: FamilyCoverage,
-    handoff_coverage: FamilyCoverage,
-    alert_coverage: FamilyCoverage,
-}
-
-// C1/C2: all four family arrays are reserved once with the selector's validated profile.
-// Their maximum aggregate row count is 16,384 for REPLAY_4096; no later operation grows them.
-#[derive(Debug, Eq, PartialEq)]
-struct SnapshotStorage {
-    header: Option<SnapshotHeader>,
-    tracks: Vec<Option<TrackState>>,
-    flights: Vec<Option<FlightState>>,
-    handoffs: Vec<Option<HandoffState>>,
-    alerts: Vec<Option<AlertState>>,
-    track_len: usize,
-    flight_len: usize,
-    handoff_len: usize,
-    alert_len: usize,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Refusal {
@@ -455,23 +334,6 @@ pub struct ReconcileReport {
     pub candidate_alerts: u16,
     pub differences: u16,
     pub diffs: [Option<Diff>; MAX_DIFFS],
-    pub as_of_ns: i64,
-    pub ready: bool,
-}
-
-/// Bounded reconcile metadata for caller-owned diff output buffers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(C)]
-pub struct ReconcileSummary {
-    pub compared_tracks: u16,
-    pub compared_flights: u16,
-    pub compared_handoffs: u16,
-    pub compared_alerts: u16,
-    pub candidate_tracks: u16,
-    pub candidate_flights: u16,
-    pub candidate_handoffs: u16,
-    pub candidate_alerts: u16,
-    pub differences: u16,
     pub as_of_ns: i64,
     pub ready: bool,
 }
@@ -592,13 +454,13 @@ const EMPTY_COORDINATION_RECORD: CoordinationRecord = CoordinationRecord {
 };
 
 #[derive(Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct Selector {
     unit: SwapUnitKey,
     policy: UnitPolicy,
     evidence: EvidenceKind,
-    profile: CapacityProfile,
-    legacy: SnapshotStorage,
-    candidate: SnapshotStorage,
+    legacy: Option<Snapshot>,
+    candidate: Option<Snapshot>,
     selected: Output,
     output_sequence: u64,
     delivered_sequence: u64,
@@ -609,11 +471,11 @@ pub struct Selector {
     last_delivery_time_ns: i64,
     pending_delivery: bool,
     trace_len: u16,
-    trace: Vec<Option<TraceRecord>>,
+    trace: [Option<TraceRecord>; MAX_TRACE],
     interfaced_facilities: [u32; MAX_INTERFACED_FACILITIES],
     interfaced_facility_count: u8,
     coordination_len: u16,
-    coordination: Vec<CoordinationRecord>,
+    coordination: [CoordinationRecord; MAX_COORDINATION_RECORDS],
 }
 
 const _: () = assert!(core::mem::size_of::<SwapUnitKey>() == 24);
@@ -634,22 +496,8 @@ const _: () = assert!(core::mem::size_of::<CandidateReadiness>() == 336);
 const _: () = assert!(core::mem::size_of::<TraceRecord>() == 64);
 const _: () = assert!(core::mem::size_of::<CoordinationRecord>() == 48);
 const _: () = assert!(core::mem::size_of::<PromotionIntentRequest>() == 56);
-// A3/A7.2: report fixed admitted byte counts; compile-time checks reject ABI/layout drift.
-const OPTION_TRACK_STATE_BYTES: usize = 160;
-const OPTION_FLIGHT_STATE_BYTES: usize = 176;
-const OPTION_HANDOFF_STATE_BYTES: usize = 152;
-const OPTION_ALERT_STATE_BYTES: usize = 144;
-const OPTION_TRACE_RECORD_BYTES: usize = 64;
-const OPTION_DIFF_BYTES: usize = 64;
-const COORDINATION_RECORD_BYTES: usize = 48;
-const _: () = assert!(core::mem::size_of::<Option<TrackState>>() == OPTION_TRACK_STATE_BYTES);
-const _: () = assert!(core::mem::size_of::<Option<FlightState>>() == OPTION_FLIGHT_STATE_BYTES);
-const _: () = assert!(core::mem::size_of::<Option<HandoffState>>() == OPTION_HANDOFF_STATE_BYTES);
-const _: () = assert!(core::mem::size_of::<Option<AlertState>>() == OPTION_ALERT_STATE_BYTES);
-const _: () = assert!(core::mem::size_of::<Option<TraceRecord>>() == OPTION_TRACE_RECORD_BYTES);
-const _: () = assert!(core::mem::size_of::<Option<Diff>>() == OPTION_DIFF_BYTES);
 // A7.2: selector is a cold control record; row/receipt capacity resides in startup-reserved buffers.
-const _: () = assert!(core::mem::size_of::<Selector>() == 1_440);
+const _: () = assert!(core::mem::size_of::<Selector>() == 188_520);
 
 pub const fn valid_unit(unit: SwapUnitKey) -> bool {
     unit.function_id != 0 && unit.scope_id != 0 && unit.window_start_ns < unit.window_end_ns
@@ -676,56 +524,10 @@ pub fn new_selector(
     start_ns: i64,
     interfaced_facilities: &[u32],
 ) -> Result<Selector, Refusal> {
-    new_selector_with_capacity(
-        unit,
-        policy,
-        evidence,
-        start_ns,
-        interfaced_facilities,
-        CapacityProfile::DEFAULT,
-    )
-}
-
-/// Allocate one bounded selector profile. All vectors are reserved and filled here; later
-/// operations only access existing slots. `REPLAY_4096` reserves 5,343,808 payload bytes
-/// (~5.1 MiB) for both snapshots, 12,864 bytes for the transition trace, and up to 153,600 bytes
-/// (~150 KiB) for 200×16 coordination rows. The budget excludes `Vec` headers and allocator
-/// bookkeeping; row counts and all operations remain bounded by the declared capacities.
-pub fn new_selector_with_capacity(
-    unit: SwapUnitKey,
-    policy: UnitPolicy,
-    evidence: EvidenceKind,
-    start_ns: i64,
-    interfaced_facilities: &[u32],
-    profile: CapacityProfile,
-) -> Result<Selector, Refusal> {
-    new_selector_with_capacity_and_audit_checkpoint(
-        unit,
-        policy,
-        evidence,
-        start_ns,
-        interfaced_facilities,
-        profile,
-        oa_audit_core::genesis(),
-    )
-}
-
-/// Allocate a bounded selector and bind it to the caller's trusted audit-chain checkpoint.
-/// The shell must verify the checkpoint against durable storage before issuing action receipts.
-pub fn new_selector_with_capacity_and_audit_checkpoint(
-    unit: SwapUnitKey,
-    policy: UnitPolicy,
-    evidence: EvidenceKind,
-    start_ns: i64,
-    interfaced_facilities: &[u32],
-    profile: CapacityProfile,
-    checkpoint: oa_audit_core::Checkpoint,
-) -> Result<Selector, Refusal> {
     if !valid_unit(unit)
         || start_ns < unit.window_start_ns
         || !in_window(unit, start_ns)
         || interfaced_facilities.len() > MAX_INTERFACED_FACILITIES
-        || !valid_capacity_profile(profile, interfaced_facilities.len())
         || policy.policy_version == 0
         || policy.policy_digest == [0; 32]
         || policy.source_epoch_digest == [0; 32]
@@ -764,229 +566,32 @@ pub fn new_selector_with_capacity_and_audit_checkpoint(
             .get_mut(index)
             .ok_or(Refusal::InvalidUnit)? = facility_id;
     }
-    let legacy = SnapshotStorage::new(profile)?;
-    let candidate = SnapshotStorage::new(profile)?;
-    let trace = filled_buffer(profile.trace_records, None)?;
-    let coordination = filled_buffer(profile.coordination_records, EMPTY_COORDINATION_RECORD)?;
     Ok(Selector {
         unit,
         policy,
         evidence,
-        profile,
-        legacy,
-        candidate,
+        legacy: None,
+        candidate: None,
         selected: Output::Legacy,
         output_sequence: 0,
         delivered_sequence: 0,
         last_authority_sequence: 0,
-        last_audit_sequence: checkpoint.count,
-        last_audit_digest: checkpoint.tail,
+        last_audit_sequence: 0,
+        last_audit_digest: [0; 32],
         last_output_time_ns: start_ns,
         last_delivery_time_ns: start_ns,
         pending_delivery: false,
         trace_len: 0,
-        trace,
+        trace: [None; MAX_TRACE],
         interfaced_facilities: configured_facilities,
         interfaced_facility_count: u8::try_from(interfaced_facilities.len())
             .map_err(|_| Refusal::InvalidUnit)?,
         coordination_len: 0,
-        coordination,
+        coordination: [EMPTY_COORDINATION_RECORD; MAX_COORDINATION_RECORDS],
     })
 }
 
-fn valid_capacity_profile(profile: CapacityProfile, facility_count: usize) -> bool {
-    profile.tracks > 0
-        && profile.tracks <= REPLAY_ROWS_PER_FAMILY
-        && profile.flights > 0
-        && profile.flights <= REPLAY_ROWS_PER_FAMILY
-        && profile.handoffs > 0
-        && profile.handoffs <= REPLAY_ROWS_PER_FAMILY
-        && profile.alerts > 0
-        && profile.alerts <= REPLAY_ROWS_PER_FAMILY
-        && profile.trace_records >= 2
-        && profile.trace_records <= REPLAY_TRACE_RECORDS
-        && profile.coordination_records <= REPLAY_COORDINATION_RECORDS
-        && profile
-            .trace_records
-            .checked_sub(1)
-            .and_then(|n| n.checked_mul(facility_count))
-            .is_some_and(|required| profile.coordination_records >= required)
-}
-
-/// Startup memory reserved by the selector itself, excluding caller-owned reconcile diff output.
-pub fn capacity_storage_budget_bytes(profile: CapacityProfile) -> Result<usize, Refusal> {
-    if !valid_capacity_profile(profile, 0) {
-        return Err(Refusal::InvalidUnit);
-    }
-    let per_snapshot = profile
-        .tracks
-        .checked_mul(OPTION_TRACK_STATE_BYTES)
-        .and_then(|n| n.checked_add(profile.flights.checked_mul(OPTION_FLIGHT_STATE_BYTES)?))
-        .and_then(|n| n.checked_add(profile.handoffs.checked_mul(OPTION_HANDOFF_STATE_BYTES)?))
-        .and_then(|n| n.checked_add(profile.alerts.checked_mul(OPTION_ALERT_STATE_BYTES)?))
-        .ok_or(Refusal::InvalidUnit)?;
-    per_snapshot
-        .checked_mul(2)
-        .and_then(|n| {
-            n.checked_add(
-                profile
-                    .trace_records
-                    .checked_mul(OPTION_TRACE_RECORD_BYTES)?,
-            )
-        })
-        .and_then(|n| {
-            n.checked_add(
-                profile
-                    .coordination_records
-                    .checked_mul(COORDINATION_RECORD_BYTES)?,
-            )
-        })
-        .ok_or(Refusal::InvalidUnit)
-}
-
-/// Caller-owned diff storage required for the profile's worst-case one-sided differences.
-/// `REPLAY_4096` requires 2,097,152 payload bytes (2 MiB).
-pub fn capacity_diff_budget_bytes(profile: CapacityProfile) -> Result<usize, Refusal> {
-    if !valid_capacity_profile(profile, 0) {
-        return Err(Refusal::InvalidUnit);
-    }
-    let differences = profile
-        .tracks
-        .checked_add(profile.flights)
-        .and_then(|n| n.checked_add(profile.handoffs))
-        .and_then(|n| n.checked_add(profile.alerts))
-        .and_then(|n| n.checked_mul(2))
-        .ok_or(Refusal::InvalidUnit)?;
-    differences
-        .checked_mul(OPTION_DIFF_BYTES)
-        .ok_or(Refusal::InvalidUnit)
-}
-
-fn filled_buffer<T: Copy>(len: usize, value: T) -> Result<Vec<T>, Refusal> {
-    let mut buffer = Vec::new();
-    buffer
-        .try_reserve_exact(len)
-        .map_err(|_| Refusal::StorageAllocationFailed)?;
-    buffer.resize(len, value);
-    Ok(buffer)
-}
-
-impl SnapshotStorage {
-    fn new(profile: CapacityProfile) -> Result<Self, Refusal> {
-        Ok(Self {
-            header: None,
-            tracks: filled_buffer(profile.tracks, None)?,
-            flights: filled_buffer(profile.flights, None)?,
-            handoffs: filled_buffer(profile.handoffs, None)?,
-            alerts: filled_buffer(profile.alerts, None)?,
-            track_len: 0,
-            flight_len: 0,
-            handoff_len: 0,
-            alert_len: 0,
-        })
-    }
-
-    fn view(&self) -> Option<SnapshotView<'_>> {
-        let header = self.header?;
-        Some(SnapshotView {
-            unit: header.unit,
-            policy: header.policy,
-            evidence: header.evidence,
-            side: header.side,
-            source_epoch: header.source_epoch,
-            state_version: header.state_version,
-            sequence: header.sequence,
-            source_time_ns: header.source_time_ns,
-            observed_time_ns: header.observed_time_ns,
-            health: header.health,
-            track_coverage: header.track_coverage,
-            flight_coverage: header.flight_coverage,
-            handoff_coverage: header.handoff_coverage,
-            alert_coverage: header.alert_coverage,
-            tracks: self.tracks.get(..self.track_len)?,
-            flights: self.flights.get(..self.flight_len)?,
-            handoffs: self.handoffs.get(..self.handoff_len)?,
-            alerts: self.alerts.get(..self.alert_len)?,
-        })
-    }
-
-    fn store(&mut self, snapshot: SnapshotView<'_>) -> Result<(), Refusal> {
-        let track_len = array_count(snapshot.tracks)?;
-        let flight_len = array_count(snapshot.flights)?;
-        let handoff_len = array_count(snapshot.handoffs)?;
-        let alert_len = array_count(snapshot.alerts)?;
-        if track_len > self.tracks.len()
-            || flight_len > self.flights.len()
-            || handoff_len > self.handoffs.len()
-            || alert_len > self.alerts.len()
-        {
-            return Err(Refusal::CapacityExceeded);
-        }
-        let source_tracks = snapshot
-            .tracks
-            .get(..track_len)
-            .ok_or(Refusal::BadSnapshot)?;
-        let source_flights = snapshot
-            .flights
-            .get(..flight_len)
-            .ok_or(Refusal::BadSnapshot)?;
-        let source_handoffs = snapshot
-            .handoffs
-            .get(..handoff_len)
-            .ok_or(Refusal::BadSnapshot)?;
-        let source_alerts = snapshot
-            .alerts
-            .get(..alert_len)
-            .ok_or(Refusal::BadSnapshot)?;
-        // Preflight every source and destination range before copying any family. Stale values
-        // beyond a new active length are never exposed by `view()`.
-        self.tracks.get(..track_len).ok_or(Refusal::Incomplete)?;
-        self.flights.get(..flight_len).ok_or(Refusal::Incomplete)?;
-        self.handoffs
-            .get(..handoff_len)
-            .ok_or(Refusal::Incomplete)?;
-        self.alerts.get(..alert_len).ok_or(Refusal::Incomplete)?;
-        self.tracks
-            .get_mut(..track_len)
-            .ok_or(Refusal::Incomplete)?
-            .copy_from_slice(source_tracks);
-        self.flights
-            .get_mut(..flight_len)
-            .ok_or(Refusal::Incomplete)?
-            .copy_from_slice(source_flights);
-        self.handoffs
-            .get_mut(..handoff_len)
-            .ok_or(Refusal::Incomplete)?
-            .copy_from_slice(source_handoffs);
-        self.alerts
-            .get_mut(..alert_len)
-            .ok_or(Refusal::Incomplete)?
-            .copy_from_slice(source_alerts);
-        self.track_len = track_len;
-        self.flight_len = flight_len;
-        self.handoff_len = handoff_len;
-        self.alert_len = alert_len;
-        self.header = Some(SnapshotHeader {
-            unit: snapshot.unit,
-            policy: snapshot.policy,
-            evidence: snapshot.evidence,
-            side: snapshot.side,
-            source_epoch: snapshot.source_epoch,
-            state_version: snapshot.state_version,
-            sequence: snapshot.sequence,
-            source_time_ns: snapshot.source_time_ns,
-            observed_time_ns: snapshot.observed_time_ns,
-            health: snapshot.health,
-            track_coverage: snapshot.track_coverage,
-            flight_coverage: snapshot.flight_coverage,
-            handoff_coverage: snapshot.handoff_coverage,
-            alert_coverage: snapshot.alert_coverage,
-        });
-        Ok(())
-    }
-}
-
-fn array_count<T: Copy>(items: &[Option<T>]) -> Result<usize, Refusal> {
+fn array_count<T: Copy, const N: usize>(items: &[Option<T>; N]) -> Result<usize, Refusal> {
     let mut count = 0usize;
     let mut ended = false;
     for item in items {
@@ -1013,8 +618,8 @@ struct RowFacts {
     projection_digest: [u8; 32],
 }
 
-fn valid_rows<T: Copy>(
-    items: &[Option<T>],
+fn valid_rows<T: Copy, const N: usize>(
+    items: &[Option<T>; N],
     facts: impl Fn(T) -> RowFacts,
     required_mask: u64,
     observed_ns: i64,
@@ -1059,7 +664,7 @@ fn valid_rows<T: Copy>(
 }
 
 fn validate_snapshot(
-    s: SnapshotView<'_>,
+    s: &Snapshot,
     expected_unit: SwapUnitKey,
     policy: UnitPolicy,
     evidence: EvidenceKind,
@@ -1096,7 +701,7 @@ fn validate_snapshot(
         return Err(Refusal::Unhealthy);
     }
     valid_rows(
-        s.tracks,
+        &s.tracks,
         |r| RowFacts {
             key: r.key,
             source_identity: r.source_identity,
@@ -1112,7 +717,7 @@ fn validate_snapshot(
         EntityFamily::Track,
     )?;
     valid_rows(
-        s.flights,
+        &s.flights,
         |r| RowFacts {
             key: r.key,
             source_identity: r.source_identity,
@@ -1128,7 +733,7 @@ fn validate_snapshot(
         EntityFamily::Flight,
     )?;
     valid_rows(
-        s.handoffs,
+        &s.handoffs,
         |r| RowFacts {
             key: r.key,
             source_identity: r.source_identity,
@@ -1144,7 +749,7 @@ fn validate_snapshot(
         EntityFamily::Handoff,
     )?;
     valid_rows(
-        s.alerts,
+        &s.alerts,
         |r| RowFacts {
             key: r.key,
             source_identity: r.source_identity,
@@ -1160,10 +765,10 @@ fn validate_snapshot(
         EntityFamily::Alert,
     )?;
     let coverages = [
-        (s.track_coverage, array_count(s.tracks)?),
-        (s.flight_coverage, array_count(s.flights)?),
-        (s.handoff_coverage, array_count(s.handoffs)?),
-        (s.alert_coverage, array_count(s.alerts)?),
+        (s.track_coverage, array_count(&s.tracks)?),
+        (s.flight_coverage, array_count(&s.flights)?),
+        (s.handoff_coverage, array_count(&s.handoffs)?),
+        (s.alert_coverage, array_count(&s.alerts)?),
     ];
     for (coverage, count) in coverages {
         match (coverage, count) {
@@ -1185,26 +790,8 @@ pub fn ingest(
     now_ns: i64,
     max_age_ns: i64,
 ) -> Result<(), Refusal> {
-    ingest_view(selector, snapshot.view(), now_ns, max_age_ns)
-}
-
-/// Ingests a large or caller-backed normalized snapshot without constructing a multi-megabyte
-/// stack `Snapshot`. The selector copies only validated rows into its preallocated family arrays.
-pub fn ingest_view(
-    selector: &mut Selector,
-    snapshot: SnapshotView<'_>,
-    now_ns: i64,
-    max_age_ns: i64,
-) -> Result<(), Refusal> {
-    if snapshot.tracks.len() > selector.profile.tracks
-        || snapshot.flights.len() > selector.profile.flights
-        || snapshot.handoffs.len() > selector.profile.handoffs
-        || snapshot.alerts.len() > selector.profile.alerts
-    {
-        return Err(Refusal::CapacityExceeded);
-    }
     validate_snapshot(
-        snapshot,
+        &snapshot,
         selector.unit,
         selector.policy,
         selector.evidence,
@@ -1221,11 +808,11 @@ pub fn ingest_view(
     {
         return Err(Refusal::Stale);
     }
-    let storage = match snapshot.side {
+    let slot = match snapshot.side {
         Side::Legacy => &mut selector.legacy,
         Side::Candidate => &mut selector.candidate,
     };
-    if let Some(previous) = storage.view() {
+    if let Some(previous) = slot {
         if snapshot.source_epoch != previous.source_epoch {
             return Err(Refusal::WrongUnit);
         }
@@ -1248,20 +835,18 @@ pub fn ingest_view(
     } else if snapshot.sequence != 1 || snapshot.state_version != 1 {
         return Err(Refusal::SequenceGap);
     }
-    storage.store(snapshot)
+    *slot = Some(snapshot);
+    Ok(())
 }
 
-// The two caller-owned output arguments replace the old embedded fixed-size report array.
-#[allow(clippy::too_many_arguments)]
-fn diff_rows<T: Copy>(
-    a: &[Option<T>],
-    b: &[Option<T>],
+fn diff_rows<T: Copy, const N: usize>(
+    a: &[Option<T>; N],
+    b: &[Option<T>; N],
     kind: DiffKind,
     key: impl Fn(T) -> BusinessKey,
     status: impl Fn(T) -> FieldStatus,
     mask: impl Fn(T, T) -> u32,
-    output: &mut [Option<Diff>],
-    difference_count: &mut u16,
+    report: &mut ReconcileReport,
 ) -> Result<(), Refusal> {
     let mut i = 0usize;
     let mut j = 0usize;
@@ -1276,91 +861,83 @@ fn diff_rows<T: Copy>(
                 if xk == yk {
                     let fields = mask(x, y);
                     if fields != 0 {
-                        push_diff(
-                            output,
-                            difference_count,
-                            Diff {
-                                kind,
-                                key: xk,
-                                legacy_status: status(x),
-                                candidate_status: status(y),
-                                field_mask: fields,
-                            },
-                        )?;
+                        let n = usize::from(report.differences);
+                        *report.diffs.get_mut(n).ok_or(Refusal::DifferenceOverflow)? = Some(Diff {
+                            kind,
+                            key: xk,
+                            legacy_status: status(x),
+                            candidate_status: status(y),
+                            field_mask: fields,
+                        });
+                        report.differences = report
+                            .differences
+                            .checked_add(1)
+                            .ok_or(Refusal::BadSnapshot)?;
                     }
                     i = i.checked_add(1).ok_or(Refusal::BadSnapshot)?;
                     j = j.checked_add(1).ok_or(Refusal::BadSnapshot)?;
                 } else if xk < yk {
-                    push_diff(
-                        output,
-                        difference_count,
-                        Diff {
-                            kind,
-                            key: xk,
-                            legacy_status: status(x),
-                            candidate_status: FieldStatus::Absent,
-                            field_mask: u32::MAX,
-                        },
-                    )?;
+                    let n = usize::from(report.differences);
+                    *report.diffs.get_mut(n).ok_or(Refusal::DifferenceOverflow)? = Some(Diff {
+                        kind,
+                        key: xk,
+                        legacy_status: status(x),
+                        candidate_status: FieldStatus::Absent,
+                        field_mask: u32::MAX,
+                    });
+                    report.differences = report
+                        .differences
+                        .checked_add(1)
+                        .ok_or(Refusal::BadSnapshot)?;
                     i = i.checked_add(1).ok_or(Refusal::BadSnapshot)?;
                 } else {
-                    push_diff(
-                        output,
-                        difference_count,
-                        Diff {
-                            kind,
-                            key: yk,
-                            legacy_status: FieldStatus::Absent,
-                            candidate_status: status(y),
-                            field_mask: u32::MAX,
-                        },
-                    )?;
+                    let n = usize::from(report.differences);
+                    *report.diffs.get_mut(n).ok_or(Refusal::DifferenceOverflow)? = Some(Diff {
+                        kind,
+                        key: yk,
+                        legacy_status: FieldStatus::Absent,
+                        candidate_status: status(y),
+                        field_mask: u32::MAX,
+                    });
+                    report.differences = report
+                        .differences
+                        .checked_add(1)
+                        .ok_or(Refusal::BadSnapshot)?;
                     j = j.checked_add(1).ok_or(Refusal::BadSnapshot)?;
                 }
             }
             (Some(x), None) => {
-                push_diff(
-                    output,
-                    difference_count,
-                    Diff {
-                        kind,
-                        key: key(x),
-                        legacy_status: status(x),
-                        candidate_status: FieldStatus::Absent,
-                        field_mask: u32::MAX,
-                    },
-                )?;
+                let n = usize::from(report.differences);
+                *report.diffs.get_mut(n).ok_or(Refusal::DifferenceOverflow)? = Some(Diff {
+                    kind,
+                    key: key(x),
+                    legacy_status: status(x),
+                    candidate_status: FieldStatus::Absent,
+                    field_mask: u32::MAX,
+                });
+                report.differences = report
+                    .differences
+                    .checked_add(1)
+                    .ok_or(Refusal::BadSnapshot)?;
                 i = i.checked_add(1).ok_or(Refusal::BadSnapshot)?;
             }
             (None, Some(y)) => {
-                push_diff(
-                    output,
-                    difference_count,
-                    Diff {
-                        kind,
-                        key: key(y),
-                        legacy_status: FieldStatus::Absent,
-                        candidate_status: status(y),
-                        field_mask: u32::MAX,
-                    },
-                )?;
+                let n = usize::from(report.differences);
+                *report.diffs.get_mut(n).ok_or(Refusal::DifferenceOverflow)? = Some(Diff {
+                    kind,
+                    key: key(y),
+                    legacy_status: FieldStatus::Absent,
+                    candidate_status: status(y),
+                    field_mask: u32::MAX,
+                });
+                report.differences = report
+                    .differences
+                    .checked_add(1)
+                    .ok_or(Refusal::BadSnapshot)?;
                 j = j.checked_add(1).ok_or(Refusal::BadSnapshot)?;
             }
         }
     }
-}
-
-fn push_diff(
-    output: &mut [Option<Diff>],
-    difference_count: &mut u16,
-    diff: Diff,
-) -> Result<(), Refusal> {
-    let index = usize::from(*difference_count);
-    *output.get_mut(index).ok_or(Refusal::DifferenceOverflow)? = Some(diff);
-    *difference_count = difference_count
-        .checked_add(1)
-        .ok_or(Refusal::DifferenceOverflow)?;
-    Ok(())
 }
 
 const fn mask_bit(value: bool) -> u32 {
@@ -1375,22 +952,9 @@ fn reconcile_inner(
     selector: &Selector,
     now_ns: i64,
     max_age_ns: i64,
-    output: &mut [Option<Diff>],
-) -> Result<(ReconcileSummary, Option<ReconcileToken>), Refusal> {
-    let required_diffs = selector
-        .profile
-        .tracks
-        .checked_add(selector.profile.flights)
-        .and_then(|n| n.checked_add(selector.profile.handoffs))
-        .and_then(|n| n.checked_add(selector.profile.alerts))
-        .and_then(|n| n.checked_mul(2))
-        .ok_or(Refusal::DifferenceOverflow)?;
-    if output.len() < required_diffs {
-        return Err(Refusal::DifferenceOverflow);
-    }
-    output.fill(None);
-    let l = selector.legacy.view().ok_or(Refusal::Incomplete)?;
-    let c = selector.candidate.view().ok_or(Refusal::Incomplete)?;
+) -> Result<(ReconcileReport, Option<ReconcileToken>), Refusal> {
+    let l = selector.legacy.as_ref().ok_or(Refusal::Incomplete)?;
+    let c = selector.candidate.as_ref().ok_or(Refusal::Incomplete)?;
     validate_snapshot(
         l,
         selector.unit,
@@ -1424,28 +988,31 @@ fn reconcile_inner(
     if l.source_epoch == c.source_epoch {
         return Err(Refusal::WrongUnit);
     }
-    let mut report = ReconcileSummary {
-        compared_tracks: u16::try_from(array_count(l.tracks)?).map_err(|_| Refusal::BadSnapshot)?,
-        compared_flights: u16::try_from(array_count(l.flights)?)
+    let mut report = ReconcileReport {
+        compared_tracks: u16::try_from(array_count(&l.tracks)?)
             .map_err(|_| Refusal::BadSnapshot)?,
-        compared_handoffs: u16::try_from(array_count(l.handoffs)?)
+        compared_flights: u16::try_from(array_count(&l.flights)?)
             .map_err(|_| Refusal::BadSnapshot)?,
-        compared_alerts: u16::try_from(array_count(l.alerts)?).map_err(|_| Refusal::BadSnapshot)?,
-        candidate_tracks: u16::try_from(array_count(c.tracks)?)
+        compared_handoffs: u16::try_from(array_count(&l.handoffs)?)
             .map_err(|_| Refusal::BadSnapshot)?,
-        candidate_flights: u16::try_from(array_count(c.flights)?)
+        compared_alerts: u16::try_from(array_count(&l.alerts)?)
             .map_err(|_| Refusal::BadSnapshot)?,
-        candidate_handoffs: u16::try_from(array_count(c.handoffs)?)
+        candidate_tracks: u16::try_from(array_count(&c.tracks)?)
             .map_err(|_| Refusal::BadSnapshot)?,
-        candidate_alerts: u16::try_from(array_count(c.alerts)?)
+        candidate_flights: u16::try_from(array_count(&c.flights)?)
+            .map_err(|_| Refusal::BadSnapshot)?,
+        candidate_handoffs: u16::try_from(array_count(&c.handoffs)?)
+            .map_err(|_| Refusal::BadSnapshot)?,
+        candidate_alerts: u16::try_from(array_count(&c.alerts)?)
             .map_err(|_| Refusal::BadSnapshot)?,
         differences: 0,
+        diffs: [None; MAX_DIFFS],
         as_of_ns: core::cmp::min(l.observed_time_ns, c.observed_time_ns),
         ready: false,
     };
     diff_rows(
-        l.tracks,
-        c.tracks,
+        &l.tracks,
+        &c.tracks,
         DiffKind::Track,
         |r| r.key,
         |r| r.status,
@@ -1462,12 +1029,11 @@ fn reconcile_inner(
                 | (mask_bit(a.field_mask != b.field_mask) << 9)
                 | (mask_bit(a.projection_digest != b.projection_digest) << 10)
         },
-        output,
-        &mut report.differences,
+        &mut report,
     )?;
     diff_rows(
-        l.flights,
-        c.flights,
+        &l.flights,
+        &c.flights,
         DiffKind::Flight,
         |r| r.key,
         |r| r.status,
@@ -1480,12 +1046,11 @@ fn reconcile_inner(
                 | (mask_bit(a.field_mask != b.field_mask) << 5)
                 | (mask_bit(a.projection_digest != b.projection_digest) << 6)
         },
-        output,
-        &mut report.differences,
+        &mut report,
     )?;
     diff_rows(
-        l.handoffs,
-        c.handoffs,
+        &l.handoffs,
+        &c.handoffs,
         DiffKind::Handoff,
         |r| r.key,
         |r| r.status,
@@ -1500,12 +1065,11 @@ fn reconcile_inner(
                 | (mask_bit(a.field_mask != b.field_mask) << 7)
                 | (mask_bit(a.projection_digest != b.projection_digest) << 8)
         },
-        output,
-        &mut report.differences,
+        &mut report,
     )?;
     diff_rows(
-        l.alerts,
-        c.alerts,
+        &l.alerts,
+        &c.alerts,
         DiffKind::Alert,
         |r| r.key,
         |r| r.status,
@@ -1520,8 +1084,7 @@ fn reconcile_inner(
                 | (mask_bit(a.field_mask != b.field_mask) << 7)
                 | (mask_bit(a.projection_digest != b.projection_digest) << 8)
         },
-        output,
-        &mut report.differences,
+        &mut report,
     )?;
     report.ready = report.differences == 0;
     if !report.ready {
@@ -1541,76 +1104,16 @@ fn reconcile_inner(
     Ok((report, Some(token)))
 }
 
-fn to_reconcile_report(
-    summary: ReconcileSummary,
-    diffs: [Option<Diff>; MAX_DIFFS],
-) -> ReconcileReport {
-    ReconcileReport {
-        compared_tracks: summary.compared_tracks,
-        compared_flights: summary.compared_flights,
-        compared_handoffs: summary.compared_handoffs,
-        compared_alerts: summary.compared_alerts,
-        candidate_tracks: summary.candidate_tracks,
-        candidate_flights: summary.candidate_flights,
-        candidate_handoffs: summary.candidate_handoffs,
-        candidate_alerts: summary.candidate_alerts,
-        differences: summary.differences,
-        diffs,
-        as_of_ns: summary.as_of_ns,
-        ready: summary.ready,
-    }
-}
-
 pub fn reconcile(
     selector: &Selector,
     now_ns: i64,
     max_age_ns: i64,
 ) -> Result<ReconcileReport, Refusal> {
-    if selector.profile.tracks != MAX_TRACKS
-        || selector.profile.flights != MAX_FLIGHTS
-        || selector.profile.handoffs != MAX_HANDOFFS
-        || selector.profile.alerts != MAX_ALERTS
-        || selector
-            .profile
-            .tracks
-            .checked_add(selector.profile.flights)
-            .and_then(|n| n.checked_add(selector.profile.handoffs))
-            .and_then(|n| n.checked_add(selector.profile.alerts))
-            .and_then(|n| n.checked_mul(2))
-            != Some(MAX_DIFFS)
-    {
-        return Err(Refusal::DifferenceOverflow);
-    }
-    let mut diffs = [None; MAX_DIFFS];
-    let (summary, _) = reconcile_inner(selector, now_ns, max_age_ns, &mut diffs)?;
-    Ok(to_reconcile_report(summary, diffs))
-}
-
-/// The profile's maximum pairwise diff count, checked against its declared bounds.
-pub fn profile_diff_capacity(profile: CapacityProfile) -> Result<usize, Refusal> {
-    if !valid_capacity_profile(profile, 0) {
-        return Err(Refusal::InvalidUnit);
-    }
-    profile
-        .tracks
-        .checked_add(profile.flights)
-        .and_then(|n| n.checked_add(profile.handoffs))
-        .and_then(|n| n.checked_add(profile.alerts))
-        .and_then(|n| n.checked_mul(2))
-        .ok_or(Refusal::InvalidUnit)
-}
-
-pub fn reconcile_into(
-    selector: &Selector,
-    now_ns: i64,
-    max_age_ns: i64,
-    diffs: &mut [Option<Diff>],
-) -> Result<ReconcileSummary, Refusal> {
-    reconcile_inner(selector, now_ns, max_age_ns, diffs).map(|(summary, _)| summary)
+    reconcile_inner(selector, now_ns, max_age_ns).map(|(report, _)| report)
 }
 
 fn token_matches(selector: &Selector, token: ReconcileToken) -> bool {
-    matches!((selector.legacy.view(), selector.candidate.view()), (Some(l), Some(c)) if token.unit == selector.unit && token.policy == selector.policy && token.legacy_epoch == l.source_epoch && token.candidate_epoch == c.source_epoch && token.legacy_version == l.state_version && token.candidate_version == c.state_version && token.legacy_sequence == l.sequence && token.candidate_sequence == c.sequence)
+    matches!((selector.legacy.as_ref(), selector.candidate.as_ref()), (Some(l), Some(c)) if token.unit == selector.unit && token.policy == selector.policy && token.legacy_epoch == l.source_epoch && token.candidate_epoch == c.source_epoch && token.legacy_version == l.state_version && token.candidate_version == c.state_version && token.legacy_sequence == l.sequence && token.candidate_sequence == c.sequence)
 }
 
 pub fn prepare_candidate(
@@ -1618,27 +1121,9 @@ pub fn prepare_candidate(
     now_ns: i64,
     max_age_ns: i64,
 ) -> Result<(ReconcileReport, CandidateReadiness), Refusal> {
-    if profile_diff_capacity(selector.profile)? != MAX_DIFFS {
-        return Err(Refusal::DifferenceOverflow);
-    }
-    let mut diffs = [None; MAX_DIFFS];
-    let (summary, token) = reconcile_inner(selector, now_ns, max_age_ns, &mut diffs)?;
+    let (report, token) = reconcile_inner(selector, now_ns, max_age_ns)?;
     let token = token.ok_or(Refusal::StateMismatch)?;
-    Ok((
-        to_reconcile_report(summary, diffs),
-        CandidateReadiness { token },
-    ))
-}
-
-pub fn prepare_candidate_into(
-    selector: &Selector,
-    now_ns: i64,
-    max_age_ns: i64,
-    diffs: &mut [Option<Diff>],
-) -> Result<(ReconcileSummary, CandidateReadiness), Refusal> {
-    let (summary, token) = reconcile_inner(selector, now_ns, max_age_ns, diffs)?;
-    let token = token.ok_or(Refusal::StateMismatch)?;
-    Ok((summary, CandidateReadiness { token }))
+    Ok((report, CandidateReadiness { token }))
 }
 
 /// Converts an opaque accepted M1 S1 Advisory → S2 Window transition into a reusable
@@ -1958,7 +1443,7 @@ pub fn select_candidate(
         return Err(Refusal::StateMismatch);
     }
     // Keep one trace slot available for an immediate rollback after promotion.
-    if usize::from(selector.trace_len) >= selector.profile.trace_records - 1 {
+    if usize::from(selector.trace_len) >= MAX_TRACE - 1 {
         return Err(Refusal::TraceFull);
     }
     if max_age_ns != selector.policy.max_snapshot_age_ns {
@@ -2009,7 +1494,7 @@ pub fn select_candidate(
     if token_age < 0 || token_age > max_age_ns {
         return Err(Refusal::Stale);
     }
-    let _ = selector.candidate.view().ok_or(Refusal::Incomplete)?;
+    let _ = selector.candidate.as_ref().ok_or(Refusal::Incomplete)?;
     record_switch(
         selector,
         SwitchRecord {
@@ -2075,8 +1560,8 @@ pub fn rollback(
     {
         return Err(Refusal::ContinuityExceeded);
     }
-    let l = selector.legacy.view().ok_or(Refusal::Incomplete)?;
-    let c = selector.candidate.view().ok_or(Refusal::Incomplete)?;
+    let l = selector.legacy.as_ref().ok_or(Refusal::Incomplete)?;
+    let c = selector.candidate.as_ref().ok_or(Refusal::Incomplete)?;
     if cause.legacy_epoch != l.source_epoch
         || cause.candidate_epoch != c.source_epoch
         || cause.legacy_state_version != l.state_version
@@ -2161,7 +1646,7 @@ fn record_switch(selector: &mut Selector, switch: SwitchRecord) -> Result<(), Re
         return Err(Refusal::Stale);
     }
     let i = usize::from(selector.trace_len);
-    if i >= selector.trace.len() {
+    if i >= MAX_TRACE {
         return Err(Refusal::TraceFull);
     }
     let coordination_start = usize::from(selector.coordination_len);
@@ -2179,7 +1664,7 @@ fn record_switch(selector: &mut Selector, switch: SwitchRecord) -> Result<(), Re
     let required = needed
         .checked_add(reserved)
         .ok_or(Refusal::CoordinationFull)?;
-    if required > selector.coordination.len() {
+    if required > MAX_COORDINATION_RECORDS {
         return Err(Refusal::CoordinationFull);
     }
     // Append one bounded plain record per configured facility before changing the selected side.
@@ -2231,13 +1716,15 @@ fn record_switch(selector: &mut Selector, switch: SwitchRecord) -> Result<(), Re
 pub fn selected(selector: &Selector) -> Output {
     selector.selected
 }
-pub fn trace(selector: &Selector) -> (&[Option<TraceRecord>], u16) {
+pub fn trace(selector: &Selector) -> (&[Option<TraceRecord>; MAX_TRACE], u16) {
     (&selector.trace, selector.trace_len)
 }
 
 /// Returns coordination notices in deterministic append order. These records are emitted as
 /// local evidence only; sending anything to an interfaced facility is outside this core.
-pub fn coordination_records(selector: &Selector) -> (&[CoordinationRecord], u16) {
+pub fn coordination_records(
+    selector: &Selector,
+) -> (&[CoordinationRecord; MAX_COORDINATION_RECORDS], u16) {
     (&selector.coordination, selector.coordination_len)
 }
 
@@ -2974,7 +2461,9 @@ mod tests {
         let (_, ready) = prepare_candidate(&s, 25, 100).unwrap();
         let authorization = promotion(&s, 24);
         let intent = intent(&s, &ready, &authorization, 1, 24);
-        s.candidate.header.as_mut().unwrap().source_epoch = 99;
+        let mut changed = s.candidate.as_ref().unwrap().clone();
+        changed.source_epoch = 99;
+        s.candidate = Some(changed);
         assert_eq!(
             audited_select_candidate(&mut s, &ready, &authorization, &intent, 25, 100),
             Err(Refusal::TokenStale)
@@ -3333,206 +2822,5 @@ mod tests {
             observe_delivery(&mut s, 9, Output::Candidate, 1, 26),
             Err(Refusal::WrongUnit)
         );
-    }
-
-    #[test]
-    fn replay_profile_accepts_max_rows_in_each_family() {
-        let (default_selector, legacy, candidate) = fixture();
-        let mut legacy_rows = Vec::with_capacity(REPLAY_ROWS_PER_FAMILY);
-        let mut candidate_rows = Vec::with_capacity(REPLAY_ROWS_PER_FAMILY);
-        let mut legacy_flights = Vec::with_capacity(REPLAY_ROWS_PER_FAMILY);
-        let mut candidate_flights = Vec::with_capacity(REPLAY_ROWS_PER_FAMILY);
-        let mut legacy_handoffs = Vec::with_capacity(REPLAY_ROWS_PER_FAMILY);
-        let mut candidate_handoffs = Vec::with_capacity(REPLAY_ROWS_PER_FAMILY);
-        let mut legacy_alerts = Vec::with_capacity(REPLAY_ROWS_PER_FAMILY);
-        let mut candidate_alerts = Vec::with_capacity(REPLAY_ROWS_PER_FAMILY);
-        for ordinal in 1..=u64::try_from(REPLAY_ROWS_PER_FAMILY).unwrap() {
-            let mut lrow = legacy.tracks[0].unwrap();
-            lrow.key.ordinal = ordinal;
-            lrow.source_identity.decoded_offset = ordinal;
-            lrow.source_identity.row = u32::try_from(ordinal).unwrap();
-            let mut crow = candidate.tracks[0].unwrap();
-            crow.key.ordinal = ordinal;
-            crow.source_identity.decoded_offset = ordinal;
-            crow.source_identity.row = u32::try_from(ordinal).unwrap();
-            legacy_rows.push(Some(lrow));
-            candidate_rows.push(Some(crow));
-
-            let mut lrow = legacy.flights[0].unwrap();
-            lrow.key.ordinal = ordinal;
-            lrow.source_identity.decoded_offset = ordinal;
-            lrow.source_identity.row = u32::try_from(ordinal).unwrap();
-            let mut crow = candidate.flights[0].unwrap();
-            crow.key.ordinal = ordinal;
-            crow.source_identity.decoded_offset = ordinal;
-            crow.source_identity.row = u32::try_from(ordinal).unwrap();
-            legacy_flights.push(Some(lrow));
-            candidate_flights.push(Some(crow));
-
-            let mut lrow = legacy.handoffs[0].unwrap();
-            lrow.key.ordinal = ordinal;
-            lrow.source_identity.decoded_offset = ordinal;
-            lrow.source_identity.row = u32::try_from(ordinal).unwrap();
-            let mut crow = candidate.handoffs[0].unwrap();
-            crow.key.ordinal = ordinal;
-            crow.source_identity.decoded_offset = ordinal;
-            crow.source_identity.row = u32::try_from(ordinal).unwrap();
-            legacy_handoffs.push(Some(lrow));
-            candidate_handoffs.push(Some(crow));
-
-            let mut lrow = legacy.alerts[0].unwrap();
-            lrow.key.ordinal = ordinal;
-            lrow.source_identity.decoded_offset = ordinal;
-            lrow.source_identity.row = u32::try_from(ordinal).unwrap();
-            let mut crow = candidate.alerts[0].unwrap();
-            crow.key.ordinal = ordinal;
-            crow.source_identity.decoded_offset = ordinal;
-            crow.source_identity.row = u32::try_from(ordinal).unwrap();
-            legacy_alerts.push(Some(lrow));
-            candidate_alerts.push(Some(crow));
-        }
-        let mut legacy_view = legacy.view();
-        legacy_view.tracks = &legacy_rows;
-        legacy_view.flights = &legacy_flights;
-        legacy_view.handoffs = &legacy_handoffs;
-        legacy_view.alerts = &legacy_alerts;
-        let mut candidate_view = candidate.view();
-        candidate_view.tracks = &candidate_rows;
-        candidate_view.flights = &candidate_flights;
-        candidate_view.handoffs = &candidate_handoffs;
-        candidate_view.alerts = &candidate_alerts;
-        let mut default_selector = default_selector;
-        assert_eq!(
-            ingest_view(&mut default_selector, legacy_view, 25, 100),
-            Err(Refusal::CapacityExceeded)
-        );
-
-        let selector = new_selector_with_capacity(
-            legacy.unit,
-            legacy.policy,
-            legacy.evidence,
-            10,
-            &[1001, 1002],
-            CapacityProfile::REPLAY_4096,
-        )
-        .unwrap();
-        let mut selector = selector;
-        ingest_view(&mut selector, legacy_view, 25, 100).unwrap();
-        ingest_view(&mut selector, candidate_view, 25, 100).unwrap();
-        let mut diffs = Vec::with_capacity(REPLAY_MAX_DIFFS);
-        diffs.resize(REPLAY_MAX_DIFFS, None);
-        let summary = reconcile_into(&selector, 25, 100, &mut diffs).unwrap();
-        assert_eq!(summary.compared_tracks, 4_096);
-        assert_eq!(summary.candidate_tracks, 4_096);
-        assert_eq!(summary.compared_flights, 4_096);
-        assert_eq!(summary.candidate_flights, 4_096);
-        assert_eq!(summary.compared_handoffs, 4_096);
-        assert_eq!(summary.candidate_handoffs, 4_096);
-        assert_eq!(summary.compared_alerts, 4_096);
-        assert_eq!(summary.candidate_alerts, 4_096);
-        assert!(summary.ready);
-        assert_eq!(
-            capacity_storage_budget_bytes(CapacityProfile::REPLAY_4096),
-            Ok(5_343_808)
-        );
-        assert_eq!(
-            capacity_diff_budget_bytes(CapacityProfile::REPLAY_4096),
-            Ok(2_097_152)
-        );
-    }
-
-    #[test]
-    fn replay_profile_retains_receipts_for_one_hundred_switch_and_rollback_cycles() {
-        let (_, mut legacy, mut candidate) = fixture();
-        let mut selector = new_selector_with_capacity(
-            legacy.unit,
-            legacy.policy,
-            legacy.evidence,
-            10,
-            &[
-                1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014,
-                1015, 1016,
-            ],
-            CapacityProfile::REPLAY_4096,
-        )
-        .unwrap();
-        let mut diffs = Vec::with_capacity(REPLAY_MAX_DIFFS);
-        diffs.resize(REPLAY_MAX_DIFFS, None);
-        let authorization = promotion(&selector, 24);
-        for cycle in 0..100u64 {
-            let now = 25 + i64::try_from(cycle * 2).unwrap();
-            let next_sequence = cycle + 1;
-            legacy.sequence = next_sequence;
-            candidate.sequence = next_sequence;
-            legacy.state_version = next_sequence;
-            candidate.state_version = next_sequence;
-            legacy.source_time_ns = now;
-            candidate.source_time_ns = now;
-            legacy.observed_time_ns = now;
-            candidate.observed_time_ns = now;
-            ingest_view(&mut selector, legacy.view(), now, 100).unwrap();
-            ingest_view(&mut selector, candidate.view(), now, 100).unwrap();
-            let (_, readiness) = prepare_candidate_into(&selector, now, 100, &mut diffs).unwrap();
-            let intent_sequence = cycle * 2 + 1;
-            let switch_intent = intent(&selector, &readiness, &authorization, intent_sequence, now);
-            audited_select_candidate(
-                &mut selector,
-                &readiness,
-                &authorization,
-                &switch_intent,
-                now,
-                100,
-            )
-            .unwrap();
-            observe_delivery(&mut selector, 1, Output::Candidate, intent_sequence, now).unwrap();
-            let rollback_sequence = intent_sequence + 1;
-            let rollback_at = now + 1;
-            let unit = selector.unit;
-            let policy = selector.policy;
-            audited_rollback(
-                &mut selector,
-                RollbackReceipt {
-                    unit,
-                    kind: RollbackKind::ControllerRequest,
-                    principal_id: [8; 32],
-                    audit_principal_id: 11,
-                    principal_role_id: 1,
-                    policy_version: policy.policy_version,
-                    policy_digest: policy.policy_digest,
-                    source_epoch_digest: policy.source_epoch_digest,
-                    evidence_set_handle: policy.evidence_set_handle,
-                    approval_set_handle: policy.approval_set_handle,
-                    sequence: rollback_sequence,
-                    legacy_epoch: legacy.source_epoch,
-                    candidate_epoch: candidate.source_epoch,
-                    legacy_state_version: legacy.state_version,
-                    candidate_state_version: candidate.state_version,
-                    legacy_sequence: legacy.sequence,
-                    candidate_sequence: candidate.sequence,
-                    legacy_health: Health::Healthy,
-                    legacy_source_available: true,
-                    legacy_health_observed_ns: rollback_at,
-                    event_id: [u8::try_from(cycle + 1).unwrap(); 32],
-                    observed_ns: rollback_at,
-                },
-                rollback_at,
-                100,
-            )
-            .unwrap();
-            observe_delivery(
-                &mut selector,
-                1,
-                Output::Legacy,
-                rollback_sequence,
-                rollback_at,
-            )
-            .unwrap();
-        }
-        let (records, trace_count) = trace(&selector);
-        let (notices, notice_count) = coordination_records(&selector);
-        assert_eq!(trace_count, 200);
-        assert_eq!(notice_count, 3_200);
-        assert_eq!(records.iter().take(200).flatten().count(), 200);
-        assert_eq!(notices.len(), REPLAY_COORDINATION_RECORDS);
     }
 }

@@ -4333,11 +4333,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   flag (at most `0x01ff_ffff`), or the radar's absent-address marker. An address outside that domain is
   refused and counted before it can enter a pending queue or claim a reserved local radar key.
   Local key exhaustion is refused without wrapping, issuing the absent marker or reusing a key.
-- **OA-TRK-327** A standalone, isolated allocation check runs real tracker and fusion entry points
-  after initialization with an observing global allocator. Its three allocation API controls
-  must be observed, every claimed route has explicit exercise evidence, and any observed
-  allocation, counter overflow, failed control or missing route fails the check. Results name
-  the exercised scope and do not imply coverage of every possible input or real-time crate.
+- **OA-TRK-327** A standalone, isolated allocation check runs selected real tracker and fusion, conflict-alert cycle and shared-predictor probe, SUA probe, runway final-monitor and assigned-runway-verification entry points after initialization with an observing global allocator. Its three allocation API controls must be observed; each claimed route and normal, degraded or explicit-overload outcome has exercise evidence; and any observed allocation, counter overflow, failed control or missing route fails the check. Results name the exercised synthetic scope and do not imply coverage of every possible input or real-time crate.
 - **OA-TRK-328** Every fusion-study RMS row reports the sample count for each position, speed
   and heading class. The candidate evaluator refuses missing, empty, malformed or inconsistent
   class counts. Different variants' emitted primary-track cohorts remain explicit; adding counts
@@ -7630,9 +7626,20 @@ FAA value.
   cadence is 1.2 s and default caution horizon is 10 s. These are this monitor's engineering policy. Tested by
   `on_course_clear` and `drift_caution_then_warning`.
 - **OA-RWY-016** Prediction evaluation consumes bounded tracker-prediction columns, validates them as a complete
-  set before output mutation, and identifies alerts by stable runway/end and track identifiers. A 30-degree inward
-  blunder that reaches the NTZ within the prediction horizon is cautioned. Tested by
-  `thirty_degree_blunder_caution_within_prediction`.
+  set before output mutation, and identifies alerts by stable runway/end and track identifiers. At most 256 rows
+  are accepted; course length is 1–40 km, NTZ half-width is positive and at most 3,048 m, local origin/positions
+  stay within the 20 km frame, speed is at most 4,088 kt (the accepted reported-speed envelope), R95 is 0–20 km,
+  and lookahead is at most 60 s. Invalid
+  input, over-cap work or insufficient output capacity is
+  refused atomically, leaving monitor state and output arrays unchanged. A due call performs four bounded linear
+  row passes without allocation; output capacity is checked before the evaluation pass and no row can create more
+  than one alert. Millisecond entry times are range-checked and never saturate. A 30-degree inward blunder that
+  reaches the NTZ within the prediction horizon is cautioned. Tested by
+  `thirty_degree_blunder_caution_within_prediction`,
+  `a_750_mps_predicted_track_remains_inside_the_accepted_speed_domain`,
+  `finite_extreme_pair_and_prediction_values_refuse_without_false_clear_or_mutation`,
+  `excessive_lookahead_cannot_saturate_a_caller_visible_entry_time` and
+  `track_and_output_caps_refuse_atomically`.
 - **OA-RWY-017** A prediction report at least 4.8 s old sets the degraded output flag; the 4.8 s value is a
   development threshold, not a statement of facility adaptation. Tested by `stale_prediction_sets_degraded`.
 - **OA-RWY-018** A parallel-final pair below its configured minimum separation is refused before evaluation.
@@ -7961,7 +7968,6 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
 - **OA-MIG-411** The offline M4/H2 full-day runner uses only a fixed 24-hour evaluation partition and consumes guarded ordered OAF segments without retaining the day's runtime frames. It binds input, executable, airspace, G3 artifact, policy, and run-profile digests; preserves the runtime state continuously; aggregates and drops each output frame; and publishes aggregate counts only. Physical bytes, expanded bytes, decoded frames, normalized events, runtime frames, tracks, flights, per-receipt events, work, and pending-source memory have fixed checked ceilings. Any parser refusal, timestamp gap, out-of-order stream, failed reconciliation, or exhausted capacity prevents a complete result; prefixes are not complete-day evidence. Defaults for existing research/live entrypoints remain unchanged.
 - **OA-MIG-412** `M4-H2-G3-OCCUPANCY-TRANSFER-V2` compares each SFDPS row against the latest already-emitted candidate track state at or before its recorded receive time, no more than one second old. Candidate source and input-availability timestamps must not exceed the query time. Comparison occurs before stepping a later issue tick; future states and future availability are explicit non-comparable dispositions. No prediction or ceil/future tick is used. Every source row retains one explicit G3 disposition and contributes to reconciled denominators. This is a causal as-of occupancy transfer proxy, not physical boundary truth or controller intent.
 - **OA-MIG-413** The full-day shell compares SFDPS row facts with only fields exported in the regional runtime's immutable `SharedFlightView`. Fields absent from that view, including requested altitude and route, are explicitly `CandidateNotModeled`; assigned-at-fix values are not compared when the output view lacks the fix identifier. The view adapter does not read back hidden table state or turn source snapshots into independent events.
-- **OA-MIG-414** The development-only local H5 consumer accepts only parser-validated OA-RS v1 surveillance/flight input rows and typed selected-state rows. Selected-state rows go into bounded per-family tables and require declared family counts within caps, unique family business keys, ordered row sequence, and the next generation; it replaces applied tables and emits an applied-state ACK only after the complete batch digest and all validations succeed. Malformed, semantically invalid, duplicate, partial, wrong-generation, or sealed-timestamp input produces no ACK and does not replace prior state. Input ACKs are hash-bound receipt acknowledgements, not application of input events. This worker is not an external operational endpoint and does not upgrade M2 health, provenance, coverage, or authority.
 - **OA-MIG-415** The bounded OAF segment adapter accepts explicit ordered source segments, applies per-segment and aggregate byte/frame limits, validates each frame before visiting it, and merges accepted frames by recorded receive time with the declared deterministic source/sequence tie-break. It preserves per-source hashes/counts, distinguishes OAF frame-activity coverage from message coverage, reports physical prefix/suffix frames outside the half-open evaluation window without decoding them, and refuses malformed, non-monotone, incomplete, or capacity-exhausted input rather than claiming a complete stream. The normalized visitor is called one event at a time; the day is not materialized. Synthetic coverage includes receipt-order merge, nonmonotone refusal, half-open prefix/suffix skipping and its counters, normalized receive provenance, and recorder-frame activity semantics in `recordings_stream.rs` tests `bounded_segment_merge_streams_messages_in_receipt_order`, `nonmonotone_segment_refuses_before_claiming_full_stream`, `declared_window_counts_and_skips_physical_prefix_and_suffix`, `normalized_stream_carries_sequences_and_exact_receive_provenance`, and `source_coverage_reports_unobserved_prefix_without_erasing_available_rows`.
 - **OA-MIG-416** `M4-H2-AMENDMENT-PROPAGATION-V1` compares source-field transitions across consecutive SFDPS rows for the same explicit GUFI with the actual candidate state observed after each row. It reports nine fixed projections: flight status, flight-plan ID, callsign, departure, arrival, assigned altitude, interim altitude, requested altitude, and route. It reconciles present/absent/malformed/unsupported, identity, clock, and candidate-availability outcomes. This measures same-input propagation only; it does not identify an independent controller amendment decision, infer missing events, or provide an ERAM correctness oracle. Differences remain unresolved without pair-bound review evidence, and absent or unavailable values are never counted as agreement. Synthetic cases are covered by `migration_amendment.rs` tests `source_changes_compare_exact_candidate_before_and_after_values`, `unavailable_identity_and_missing_key_stay_in_explicit_denominators`, `mismatched_candidate_identity_never_becomes_equivalent`, `route_change_is_detected_without_exporting_text_or_claiming_candidate_support`, `source_clock_regression_is_counted_and_never_scored_as_propagated`, `separate_gufi_argument_must_match_decoded_row_identity`, and `source_absent_malformed_and_unsupported_fields_reconcile_separately`.
 
@@ -8146,9 +8152,8 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   with an all-zero previous digest; each following sequence increments by one and binds the prior
   digest. No alternate encoding is accepted.
 - **OA-AUDIT-002** The registry allows `monitor` to verify records, `operate` to release quarantine
-  items and submit vulnerability intake, and `configure` to issue adaptations, certify, flip or
-  roll back migration output, and disposition vulnerability findings. `operate` and `configure`
-  may perform runway assignment actions. Higher roles may perform lower-level actions; a lower role is refused before
+  items, and `configure` to issue adaptations, certify, flip migration output, or roll back
+  migration output. Higher roles may perform lower-level actions; a lower role is refused before
   the action commit. Principal IDs, role claims and timestamps are caller inputs; this registry
   provides no login, credential check, authenticated origin or authority validation.
 - **OA-AUDIT-003** The shell log uses fixed-size records and an OS-held nonblocking exclusive
@@ -8178,23 +8183,3 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   same parent descriptor; its leaf open refuses symlinks with `O_NOFOLLOW`. Append refuses on
   platforms without this directory anchoring. A sealed-path refusal or descriptor-verification
   error fails the audit operation before the associated committed action.
-- **OA-AUDIT-007** The core principal registry accepts the existing bounded
-  `OACERT-LOCAL-PRINCIPALS-V1` two-column grammar and `OACERT-LOCAL-PRINCIPALS-V2` rows with an
-  explicit enabled/disabled status. Both require unique positive canonical decimal IDs and one
-  `monitor`, `operate`, or `configure` role. The fixed table admits at most 128 rows and the parser
-  admits at most 64 KiB; malformed framing, duplicate IDs, unknown roles, invalid status, excess
-  rows, and unknown or disabled principals are explicit refusals. Action authorization first
-  resolves the principal, then applies the existing three-role action matrix. This is local role
-  configuration only; it does not authenticate a login, credential, principal origin, or authority.
-- **OA-AUDIT-008** The shell registry loader opens a regular file through the production sealed
-  path guard, reads from the verified descriptor under the 64 KiB byte cap, rejects size changes,
-  hashes the exact bytes, and compares them with an independently supplied expected SHA-256 pin
-  before parsing. The registry bytes do not supply their own trusted pin. Path, descriptor, pin,
-  framing, and parse refusals return no registry.
-- **OA-AUDIT-009** Vulnerability register intake and disposition commands require a pinned shared
-  `oa-audit-log` action CLI, a caller-supplied checkpoint, and a pinned enabled registry principal.
-  The CLI derives the role from that registry and durably appends a bounded intent binding the
-  action, finding ID, next register revision, and canonical next-register digest before the
-  atomic register replacement. Audit refusal leaves the register unchanged; a later register
-  write failure is reported as uncommitted even though the intent remains in the log. The register
-  actor field records only the registry principal claim; this flow does not authenticate a user.

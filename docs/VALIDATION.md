@@ -76,7 +76,9 @@ zero-allocation normal run and a detected injected allocation. The scoped fixtur
 default 4,096-track tracker capacity, small output/log overflow and reuse, and clock-gate hold,
 forward confirmation and recovery, plus one `MAX_BUCKET_PLOTS` overload with counted loss and
 subsequent existing-track recovery, and full ADS-B and plot pending queues with counted overflow,
-drain and recovery. A source-backed route ledger requires positive runtime evidence and
+drain and recovery. It also runs the real CA cycle and shared-predictor probe, active SUA probe,
+runway final monitor and ARV with synthetic normal, degraded and explicit bounded-input or
+output-capacity cases. A source-backed route ledger requires positive runtime evidence and
 injected-allocation detection in each armed window. The tracker fixture exercises history-ring
 wrap, late replay and late-ring retention refusal. Fusion association-work/pair, candidate, record
 and registration-history boundaries remain outside this scope. See the package's [scope and

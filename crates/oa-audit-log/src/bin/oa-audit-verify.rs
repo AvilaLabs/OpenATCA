@@ -1,6 +1,5 @@
 //! Bounded audit log verifier shell: checks the supplied trusted record count and tail.
-use oa_audit_core::{authorize_principal, Action, Checkpoint};
-use oa_audit_log::shell;
+use oa_audit_log::{shell, Checkpoint};
 use std::path::Path;
 
 fn main() {
@@ -12,16 +11,15 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.len() != 12
+    if args.len() != 6
         || args.iter().any(|argument| argument.len() > 4096)
         || args.first().map(String::as_str) != Some("--log")
         || args.get(2).map(String::as_str) != Some("--count")
         || args.get(4).map(String::as_str) != Some("--tail")
-        || args.get(6).map(String::as_str) != Some("--registry")
-        || args.get(8).map(String::as_str) != Some("--registry-sha256")
-        || args.get(10).map(String::as_str) != Some("--principal")
     {
-        return Err("usage: oa-audit-verify --log <file> --count <n> --tail <64 lowercase hex> --registry <file> --registry-sha256 <64 lowercase hex> --principal <positive-id>".into());
+        return Err(
+            "usage: oa-audit-verify --log <file> --count <n> --tail <64 lowercase hex>".into(),
+        );
     }
     let path = args.get(1).ok_or_else(|| "missing log path".to_owned())?;
     let count = args
@@ -33,24 +31,6 @@ fn run() -> Result<(), String> {
         .get(5)
         .ok_or_else(|| "missing tail digest".to_owned())?;
     let tail = parse_digest(tail_text)?;
-    let registry_path = args
-        .get(7)
-        .ok_or_else(|| "missing registry path".to_owned())?;
-    let registry_pin = parse_digest(
-        args.get(9)
-            .ok_or_else(|| "missing registry pin".to_owned())?,
-    )?;
-    let principal = args
-        .get(11)
-        .ok_or_else(|| "missing principal".to_owned())?
-        .parse::<u64>()
-        .ok()
-        .filter(|id| *id > 0)
-        .ok_or_else(|| "principal must be a positive unsigned ID".to_owned())?;
-    let registry = shell::load_principal_registry(Path::new(registry_path), registry_pin)
-        .map_err(|error| format!("principal registry refused: {error:?}"))?;
-    let role = authorize_principal(&registry, principal, Action::Verify)
-        .map_err(|error| format!("principal registry refused verification: {error:?}"))?;
     let checkpoint = Checkpoint { count, tail };
     let path = Path::new(path);
     oa_sealed::Sealed::production()
@@ -59,10 +39,9 @@ fn run() -> Result<(), String> {
     match shell::verify(path, checkpoint) {
         Ok(actual) => {
             println!(
-                "valid\t{}\t{}\tprincipal_claim={}\tregistry_role={role:?}",
+                "valid\t{}\t{}",
                 actual.count,
-                oa_sha256::to_hex(&actual.tail),
-                principal
+                oa_sha256::to_hex(&actual.tail)
             );
             Ok(())
         }

@@ -1,0 +1,36 @@
+{
+  "build_memory_max_bytes": 6442450944,
+  "build_swap_max_bytes": 0,
+  "cargo_home_empty_before_build": true,
+  "cargo_target_empty_before_build": true,
+  "drill_result_sha256": "c6fe7a950e21a8bd53ac737cbf3e660f9b3df22365fbbf546c8416c1cedd8712",
+  "elapsed_s": 132.9,
+  "export_manifest_sha256": "69f95bc7ba17b227608576bbfe569f212a5067c6ff48a82fbcc2be984c24705c",
+  "finished_utc": "2026-11-26T12:18:35Z",
+  "frame_count": 23,
+  "fresh_clone_build_profile": "dev-default",
+  "fresh_clone_replay_digest_set_sha256": "3466bc1689b94b40e320466d9fb5e7c3a061af2b0d4d3b5969e81699819c4aff",
+  "platform": {
+    "kernel": "7.0.0-43-generic",
+    "machine": "x86_64",
+    "system": "Linux"
+  },
+  "privacy": "Aggregate digests and counts only; no source rows or per-flight identifiers.",
+  "recording_excerpt_seconds": 60,
+  "recording_window_utc": [
+    "2026-11-19T21:00:00Z",
+    "2026-11-19T21:01:00Z"
+  ],
+  "regional_run_profile": "RECORDED_PEAK_RENDERED_V1",
+  "replay_digests_byte_identical": true,
+  "schema": "openatca-portability-drill-v1",
+  "source_build_profile": "release",
+  "source_commit": "4793f3d615aef89f2d7d67e324c2fd83b2719afa",
+  "source_replay_digest_set_sha256": "3466bc1689b94b40e320466d9fb5e7c3a061af2b0d4d3b5969e81699819c4aff",
+  "status": "PASS",
+  "toolchain": {
+    "cargo": "cargo 1.89.0 (c24e10642 2025-06-23)",
+    "rustc": "rustc 1.89.0 (29483883e 2025-08-04)\nbinary: rustc\ncommit-hash: 29483883eed69d5fb4db01964cdf2af4d86e9cb2\ncommit-date: 2025-08-04\nhost: x86_64-unknown-linux-gnu\nrelease: 1.89.0\nLLVM version: 20.1.7",
+    "target": "x86_64-unknown-linux-gnu"
+  }
+}

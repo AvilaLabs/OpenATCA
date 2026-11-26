@@ -530,7 +530,6 @@
     "OA-MIG-411",
     "OA-MIG-412",
     "OA-MIG-413",
-    "OA-MIG-414",
     "OA-MIG-415",
     "OA-MIG-416",
     "OA-MIG-601",
@@ -1131,9 +1130,7 @@
     "OA-ZIP-010",
     "OA-ZIP-011",
     "OA-ZIP-061",
-    "OA-ZIP-062",
-    "OA-AUDIT-007",
-    "OA-AUDIT-008"
+    "OA-ZIP-062"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -5064,7 +5061,7 @@
       "id": "OA-TRK-327",
       "function": "tracker_diagnostics_and_bounded_work_evidence",
       "rationale": "This measures or accounts for storage, work, timing, or diagnostics, rather than which aircraft state is selected or whether an alert is issued.",
-      "register_clause": "A standalone, isolated allocation check runs real tracker and fusion entry points after initialization with an observing global allocator. Its three allocation API controls must be observed, every claimed route has explicit exercise evidence, and any observed allocation, counter overflow, failed control or missing route fails the check. Results name the exercised scope and do not imply coverage of every possible input or real-time crate."
+      "register_clause": "A standalone, isolated allocation check runs selected real tracker and fusion, conflict-alert cycle and shared-predictor probe, SUA probe, runway final-monitor and assigned-runway-verification entry points after initialization with an observing global allocator. Its three allocation API controls must be observed; each claimed route and normal, degraded or explicit-overload outcome has exercise evidence; and any observed allocation, counter overflow, failed control or missing route fails the check. Results name the exercised synthetic scope and do not imply coverage of every possible input or real-time crate."
     },
     {
       "id": "OA-TRK-328",
@@ -9513,6 +9510,10 @@
         {
           "document": "tools/oa-legacy-traj/src/core/trajectory.rs",
           "locator": "shared route walk, bounded profile offsets and sampled trajectory outputs"
+        },
+        {
+          "document": "tools/oa-perf/tests/parallel_final.rs",
+          "locator": "synthetic radar-scan \u2192 tracker-output \u2192 final-monitor integration fixture"
         }
       ],
       "verification_refs": [
@@ -9850,6 +9851,16 @@
           "requirement_id": "OA-ENC-023",
           "file": "tools/oa-regional-session/src/conflict_probe.rs",
           "test_name": "vertical_only_conflict_is_reported_by_shared_predictor_adapter"
+        },
+        {
+          "requirement_id": "OA-RWY-015",
+          "file": "tools/oa-perf/tests/parallel_final.rs",
+          "test_name": "synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning"
+        },
+        {
+          "requirement_id": "OA-RWY-016",
+          "file": "tools/oa-perf/tests/parallel_final.rs",
+          "test_name": "synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning"
         }
       ],
       "proof_refs": [
@@ -10182,28 +10193,17 @@
         "OA-MIG-303",
         "OA-MIG-304",
         "OA-MIG-305",
-        "OA-MIG-414",
         "OA-AUDIT-001",
         "OA-AUDIT-002",
         "OA-AUDIT-003",
         "OA-AUDIT-004",
         "OA-AUDIT-005",
-        "OA-AUDIT-006",
-        "OA-AUDIT-007",
-        "OA-AUDIT-008"
+        "OA-AUDIT-006"
       ],
       "source_refs": [
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-MIG-101 through OA-MIG-305 in the owning functional sections"
-        },
-        {
-          "document": "REQUIREMENTS.md",
-          "locator": "OA-MIG-414"
-        },
-        {
-          "document": "REQUIREMENTS.md",
-          "locator": "OA-MIG-101 through OA-MIG-305 and OA-AUDIT-001 through OA-AUDIT-008 in the owning functional sections"
         }
       ],
       "verification_refs": [
@@ -10298,16 +10298,6 @@
           "test_name": "h1_h5_make_before_break_and_rollback"
         },
         {
-          "requirement_id": "OA-AUDIT-005",
-          "file": "tools/oa-regional-session/tests/h5_recorded_stream.rs",
-          "test_name": "recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_each_update"
-        },
-        {
-          "requirement_id": "OA-AUDIT-007",
-          "file": "tools/oa-regional-session/tests/h5_recorded_stream.rs",
-          "test_name": "recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_each_update"
-        },
-        {
           "requirement_id": "OA-AUDIT-006",
           "file": "crates/oa-audit-log/src/shell/mod.rs",
           "test_name": "protected_aliases_are_refused_before_log_io"
@@ -10356,76 +10346,6 @@
           "requirement_id": "OA-AUDIT-006",
           "file": "tools/oa-regional-session/src/runtime.rs",
           "test_name": "quarantine_maintainer_appends_before_ack_and_refuses_audit_failure"
-        },
-        {
-          "requirement_id": "OA-MIG-414",
-          "file": "tools/oa-regional-session/src/migration_drill.rs",
-          "test_name": "selected_snapshot_rows_apply_to_typed_worker_tables_with_the_same_digest"
-        },
-        {
-          "requirement_id": "OA-MIG-414",
-          "file": "tools/oa-regional-session/src/migration_drill.rs",
-          "test_name": "regional_traffic_display_block_roundtrips_all_typed_fields"
-        },
-        {
-          "requirement_id": "OA-MIG-414",
-          "file": "tools/oa-regional-session/src/surveillance.rs",
-          "test_name": "captured_target_is_the_existing_builder_target_not_a_reformatted_row"
-        },
-        {
-          "requirement_id": "OA-MIG-414",
-          "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
-          "test_name": "worker_applies_exact_selected_state_rows_before_acknowledging_generation"
-        },
-        {
-          "requirement_id": "OA-MIG-414",
-          "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
-          "test_name": "worker_does_not_ack_a_hash_valid_but_semantically_invalid_state_row"
-        },
-        {
-          "requirement_id": "OA-MIG-414",
-          "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
-          "test_name": "worker_does_not_ack_a_partial_state_generation"
-        },
-        {
-          "requirement_id": "OA-MIG-414",
-          "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
-          "test_name": "worker_does_not_apply_duplicate_family_business_keys"
-        },
-        {
-          "requirement_id": "OA-MIG-414",
-          "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
-          "test_name": "worker_refuses_a_hash_valid_normalized_row_with_a_sealed_timestamp"
-        },
-        {
-          "requirement_id": "OA-AUDIT-007",
-          "file": "crates/oa-audit-core/src/principal.rs",
-          "test_name": "local_registry_looks_up_enabled_and_disabled_principals_by_exact_id"
-        },
-        {
-          "requirement_id": "OA-AUDIT-007",
-          "file": "crates/oa-audit-core/src/principal.rs",
-          "test_name": "local_registry_v1_is_compatible_with_existing_i1_configure_claim_rows"
-        },
-        {
-          "requirement_id": "OA-AUDIT-007",
-          "file": "crates/oa-audit-core/src/principal.rs",
-          "test_name": "local_registry_rejects_noncanonical_ids_roles_statuses_and_duplicates"
-        },
-        {
-          "requirement_id": "OA-AUDIT-007",
-          "file": "crates/oa-audit-core/src/principal.rs",
-          "test_name": "local_registry_row_and_byte_limits_refuse_without_truncation"
-        },
-        {
-          "requirement_id": "OA-AUDIT-008",
-          "file": "crates/oa-audit-log/src/shell/mod.rs",
-          "test_name": "principal_registry_loader_checks_external_pin_and_parses_exact_opened_bytes"
-        },
-        {
-          "requirement_id": "OA-AUDIT-008",
-          "file": "crates/oa-audit-log/src/shell/mod.rs",
-          "test_name": "principal_registry_loader_refuses_oversize_and_sealed_paths"
         }
       ],
       "proof_refs": []
@@ -11939,6 +11859,11 @@
           "requirement_id": "OA-QUAR-004",
           "file": "crates/oa-quarantine/src/tests.rs",
           "test_name": "work_and_elapsed_time_overruns_are_named_refusals_and_reason_counts"
+        },
+        {
+          "requirement_id": "OA-QUAR-004",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "quarantine_maintainer_appends_before_ack_and_refuses_audit_failure"
         },
         {
           "requirement_id": "OA-XML-001",
@@ -17332,12 +17257,6 @@
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
       "rationale": "Engineering safety candidate: comparing source facts against hidden or unexported candidate state can falsely imply support for unavailable fields. Restricting comparisons to immutable SharedFlightView fields and marking absent fields CandidateNotModeled limits that evidence risk; it does not make those unmodeled values available."
-    },
-    {
-      "id": "OA-MIG-414",
-      "function": "migration_selector_and_rollback",
-      "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: acknowledging a selected generation before its complete typed state is validated and applied can leave the consumer using stale or partial migration state. The worker requires bounded family counts, unique business keys, ordered rows and the next generation; invalid, partial or duplicate transactions do not replace prior state or emit an applied ACK. This is a local development consumer, not an external operational endpoint, and does not upgrade M2 health, provenance, coverage or authority."
     },
     {
       "id": "OA-MIG-415",
@@ -23283,13 +23202,13 @@
       "id": "OA-RWY-015",
       "function": "conflict_alert",
       "hazard_id": "HZ-CA-001",
-      "rationale": "Engineering safety candidate: a missed caution or warning for a track entering the NTZ, or a misleading rendered state, could delay response. The bounded segment rule limits warning to the interval from outer fix to threshold; prediction timing and the display hook are tested, including invalid packet/capacity refusal. Cadence/lookahead values are engineering policy, not facility adaptation or operational detection evidence."
+      "rationale": "Engineering safety candidate: a missed caution or warning for a track entering the NTZ, or a misleading rendered state, could delay response. The bounded segment rule limits warning to the interval from outer fix to threshold; prediction timing and the display hook are tested, including invalid packet/capacity refusal. Cadence/lookahead values are engineering policy, not facility adaptation or operational detection evidence. A separate synthetic A2 pipeline test generates deterministic radar scans, feeds converted plots through the real tracker, and supplies tracker rows to the monitor to exercise a caution-to-warning progression at the modeled scan cadence. Its detection probability is fixed to 1 for this test and it is not a real-radar performance or operational effectiveness measurement."
     },
     {
       "id": "OA-RWY-016",
       "function": "conflict_alert",
       "hazard_id": "HZ-CA-001",
-      "rationale": "Engineering safety candidate: a blunder trajectory that reaches the NTZ can be missed if bounded prediction columns are incomplete, misidentified, or evaluated after output mutation. The monitor validates the complete bounded prediction set before output and uses stable runway/end and track identity; the test is a synthetic engineering case, not operational effectiveness evidence."
+      "rationale": "Engineering safety candidate: a blunder trajectory that reaches the NTZ can be missed if bounded prediction columns are incomplete, misidentified, or evaluated after output mutation. The monitor validates the complete bounded prediction set before output and uses stable runway/end and track identity; the test is a synthetic engineering case, not operational effectiveness evidence. The synthetic A2 pipeline test supplies actual tracker output to the monitor and observes caution before warning for one fixed path; it does not establish general prediction accuracy, real-sensor performance, or operational effectiveness."
     },
     {
       "id": "OA-RWY-019",
@@ -23409,7 +23328,7 @@
       "id": "OA-AUDIT-005",
       "function": "migration_selector_and_rollback",
       "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: a privileged migration change without its preceding audit intent could leave the selected output changed without a durable record. Direct tests cover the selector receipt gate, adaptation shell pre-commit behavior, and regional-session quarantine append-before-ack path. The regional recorded-drill shell appends a registry-authorized migration intent before its selector flip or rollback, and the quarantine and adaptation CLIs append before their respective commits. Principal and role remain caller claims, not credentials."
+      "rationale": "Engineering safety candidate: a privileged migration change without its preceding audit intent could leave the selected output changed without a durable record. Direct tests cover the selector receipt gate, adaptation shell pre-commit behavior, and regional-session quarantine append-before-ack path. Migration still has no normal shell action caller in this snapshot; the quarantine path covers only an explicit in-process queue-front handoff."
     },
     {
       "id": "OA-AUDIT-006",
@@ -23476,18 +23395,6 @@
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
       "rationale": "Engineering safety candidate: reporting an outcome before durable audit commit, or omitting a failed append, could leave a reviewer with an uncommitted or incomplete certification record. The CLI requires the append receipt after file and directory sync and emits no committed result on failure; this does not authenticate principal or timestamp claims or establish operational certification."
-    },
-    {
-      "id": "OA-AUDIT-007",
-      "function": "migration_selector_and_rollback",
-      "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: a malformed, duplicated, disabled, or insufficient local role entry could reject a valid privileged action or permit an action under an incorrect role claim. Core tests cover the fixed-table parser, exact ID lookup, disabled refusal, and the three-role action matrix, including compatible I1 V1 parsing. This registry validates local configuration only; it does not authenticate a person, credential, origin, or authority, and production callers use the shared pinned loader before privileged actions while treating principal provenance as unauthenticated."
-    },
-    {
-      "id": "OA-AUDIT-008",
-      "function": "migration_selector_and_rollback",
-      "hazard_id": "HZ-CUTOVER-001",
-      "rationale": "Engineering safety candidate: using an unverified or changed local registry could make a privileged action depend on stale or altered role configuration. Shell tests verify a separately supplied digest pin, fixed byte cap, and refusal of a sealed path before reading. This does not authenticate the pin's publisher, registry author, or caller, and the regional-session and oa-adapt CLIs load the pinned registry before deriving an action role; the trusted pin publisher remains external."
     }
   ],
   "unresolved_requirement_assessments": []

@@ -20,6 +20,10 @@ oa-track = { path = "../../crates/oa-track" }
 oa-track-tools = { path = "../../crates/oa-track-tools" }
 oa-truth = { path = "../../crates/oa-truth" }
 
+[dev-dependencies]
+# F1: Connor approved 2026-11-26; A2 feeds real tracker output to the final monitor.
+oa-runway = { path = "../../crates/oa-runway" }
+
 [[bin]]
 name = "oa-perf"
 path = "src/main.rs"

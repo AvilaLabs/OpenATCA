@@ -25,7 +25,10 @@ pub struct RouteEvidence {
     pub recoveries: u64,
     pub work_used: u64,
     pub work_limit: u64,
-    pub injected: bool,
+    /// The requested allocation-injection check completed successfully. This is true
+    /// in normal mode because no injection was requested, and in positive-control
+    /// mode because the injected allocation was observed.
+    pub injection_check_passed: bool,
 }
 
 fn label<const N: usize>(text: &str) -> Result<Label<N>, &'static str> {
@@ -452,6 +455,6 @@ pub fn route_converter_window(inject: bool) -> Result<RouteEvidence, &'static st
         recoveries,
         work_used: u64::from(recovery_report.work_used),
         work_limit: u64::from(recovery_report.work_limit),
-        injected: true,
+        injection_check_passed: injection_observed,
     })
 }
