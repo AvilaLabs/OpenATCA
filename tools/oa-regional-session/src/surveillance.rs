@@ -27,7 +27,7 @@ use oa_track::{
     Tracker, TrackerStats, DEFAULT_CONFIG, M_HAS_VEL, NONE_I32, NO_IDENT, O_COAST, O_HAS_ALT,
     O_IDENTITY_UNCONFIRMED, O_UNCERTAIN,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 pub const SECOND_NS: i64 = 1_000_000_000;
 /// Research envelope: 32 simultaneous aircraft and 512 frames, rather than a facility claim.
@@ -131,10 +131,53 @@ pub struct Surveillance {
     completed: bool,
     failed: bool,
     overlay_base: Option<OverlayBase>,
-    presentation_updates: usize,
+    presentation: PresentationLedger,
     msaw: Option<crate::msaw_bridge::RegionalMsaw>,
     baro_seen: BTreeMap<u32, i64>,
     profile: SurveillanceProfile,
+}
+
+struct PresentationLedger {
+    pending: VecDeque<usize>,
+    total: u64,
+    capacity: usize,
+}
+
+impl PresentationLedger {
+    fn new(capacity: usize) -> Self {
+        Self {
+            pending: VecDeque::with_capacity(capacity),
+            total: 0,
+            capacity,
+        }
+    }
+
+    fn preflight(&self) -> Result<u64, String> {
+        if self.pending.len() >= self.capacity {
+            return Err("regional presentation update budget exhausted".into());
+        }
+        self.total
+            .checked_add(1)
+            .ok_or_else(|| "regional cumulative presentation count overflow".into())
+    }
+
+    fn record(&mut self, frame_sequence: usize, next_total: u64) {
+        self.pending.push_back(frame_sequence);
+        self.total = next_total;
+    }
+
+    fn acknowledge(&mut self, frame_sequence: usize) -> Result<(), String> {
+        match self.pending.front().copied() {
+            Some(pending) if pending == frame_sequence => {
+                self.pending.pop_front();
+                Ok(())
+            }
+            Some(pending) => Err(format!(
+                "presentation acknowledgement out of order: expected frame {pending}"
+            )),
+            None => Err("no pending presentation frame to acknowledge".into()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,7 +372,7 @@ pub fn surveillance_new_with_profile(
         completed: true,
         failed: false,
         overlay_base: None,
-        presentation_updates: 0,
+        presentation: PresentationLedger::new(profile.max_presentation_updates),
     })
 }
 
@@ -1086,9 +1129,7 @@ pub fn surveillance_present_controls(
     if console.len() > 128 || !console.bytes().all(|byte| (32..=126).contains(&byte)) {
         return Err("console text must be at most 128 printable ASCII bytes".into());
     }
-    if s.presentation_updates >= s.profile.max_presentation_updates {
-        return Err("regional presentation update budget exhausted".into());
-    }
+    let next_total = s.presentation.preflight()?;
     let base = s.overlay_base.unwrap_or(OverlayBase {
         texts: s.scope.list.texts.x.len(),
         bytes: s.scope.list.text.len(),
@@ -1113,7 +1154,6 @@ pub fn surveillance_present_controls(
         return Err("control overlay base is inconsistent".into());
     }
     s.failed = true;
-    s.presentation_updates += 1;
     list.texts.x.truncate(base.texts);
     list.texts.y.truncate(base.texts);
     list.texts.size.truncate(base.texts);
@@ -1147,8 +1187,22 @@ pub fn surveillance_present_controls(
     }
     replay_raster(&mut s.scope).map_err(err)?;
     let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;
+    s.presentation.record(s.frames, next_total);
     s.failed = false;
     Ok(digest)
+}
+
+/// Acknowledge the oldest completely consumed rendered control frame. An unacknowledged frame
+/// remains in the bounded pending queue and continues to occupy presentation capacity.
+pub fn surveillance_ack_presentation(
+    s: &mut Surveillance,
+    frame_sequence: usize,
+) -> Result<(), String> {
+    s.presentation.acknowledge(frame_sequence)
+}
+
+pub fn surveillance_presentation_counts(s: &Surveillance) -> (usize, u64) {
+    (s.presentation.pending.len(), s.presentation.total)
 }
 
 #[cfg(test)]
@@ -1156,6 +1210,62 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
     use super::*;
     use oa_airspace::core::model::{self, Model};
+
+    // REQ: OA-REG-021
+    #[test]
+    fn presentation_stream_requires_ordered_ack_and_reuses_only_consumed_capacity() {
+        let mut stream = PresentationLedger::new(2);
+        let first_total = stream.preflight().unwrap();
+        stream.record(1, first_total);
+        let second_total = stream.preflight().unwrap();
+        stream.record(2, second_total);
+        assert_eq!(stream.pending.len(), 2);
+        assert!(
+            stream.preflight().is_err(),
+            "full pending store must block producer"
+        );
+
+        // An attempted consumer failure is represented by withholding ACK; it cannot free space.
+        assert!(
+            stream.acknowledge(2).is_err(),
+            "out-of-order ACK must refuse"
+        );
+        assert_eq!(stream.pending.len(), 2);
+        stream.acknowledge(1).unwrap();
+        assert_eq!(stream.pending.len(), 1);
+        stream.acknowledge(2).unwrap();
+        assert_eq!(stream.pending.len(), 0);
+        assert!(
+            stream.acknowledge(2).is_err(),
+            "repeated drain must be empty"
+        );
+
+        for sequence in 3..=8_195 {
+            let total = stream.preflight().unwrap();
+            stream.record(sequence, total);
+            stream.acknowledge(sequence).unwrap();
+        }
+        assert_eq!(stream.pending.len(), 0);
+        assert_eq!(stream.total, 8_195);
+
+        stream.total = u64::MAX;
+        assert!(
+            stream.preflight().is_err(),
+            "cumulative counter must not wrap"
+        );
+        assert_eq!(stream.pending.len(), 0);
+    }
+
+    // REQ: OA-REG-021
+    #[test]
+    fn failed_render_preflight_does_not_reserve_or_count_a_presentation() {
+        let mut stream = PresentationLedger::new(1);
+        assert_eq!(stream.preflight().unwrap(), 1);
+        // Production records only after rasterization and digest both succeed.
+        assert_eq!(stream.pending.len(), 0);
+        assert_eq!(stream.total, 0);
+        assert_eq!(stream.preflight().unwrap(), 1);
+    }
 
     fn test_model() -> Model {
         let mut model = Model {

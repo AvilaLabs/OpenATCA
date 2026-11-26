@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 //! CLI shell for normalized regional-session input staging and composed offline execution.
 
+mod paced_soak;
+
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
@@ -365,6 +367,13 @@ fn run() -> Result<(), CliError> {
 }
 
 fn main() {
+    if env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("soak")) {
+        if let Err(error) = paced_soak::run(env::args_os().skip(2)) {
+            eprintln!("oa-regional-session soak: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
     if let Err(error) = run() {
         let message = match error {
             CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered]; stage --input FILE --out NEW_DIR".to_owned(),

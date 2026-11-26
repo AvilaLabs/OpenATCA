@@ -703,6 +703,7 @@
     "OA-REG-018",
     "OA-REG-019",
     "OA-REG-020",
+    "OA-REG-021",
     "OA-RPL-027",
     "OA-RPL-028",
     "OA-RPL-029",
@@ -10788,6 +10789,7 @@
         "OA-MIG-602",
         "OA-REG-019",
         "OA-REG-020",
+        "OA-REG-021",
         "OA-ENC-022",
         "OA-L23-003",
         "OA-L23-004",
@@ -10804,7 +10806,7 @@
         },
         {
           "document": "REQUIREMENTS.md",
-          "locator": "OA-MIG-408 through OA-MIG-413 and OA-MIG-415 through OA-MIG-416; OA-REG-019 through OA-REG-020"
+          "locator": "OA-MIG-408 through OA-MIG-413 and OA-MIG-415 through OA-MIG-416; OA-REG-019 through OA-REG-021"
         },
         {
           "document": "REQUIREMENTS.md",
@@ -11083,6 +11085,36 @@
           "requirement_id": "OA-REG-020",
           "file": "tools/test_j2_portability.py",
           "test_name": "test_sidecars_must_match_the_recording_import_manifest"
+        },
+        {
+          "requirement_id": "OA-REG-021",
+          "file": "tools/oa-regional-session/src/paced_soak.rs",
+          "test_name": "d2_paced_soak_profile_fits_duration_under_existing_bounded_caps"
+        },
+        {
+          "requirement_id": "OA-REG-021",
+          "file": "tools/oa-regional-session/src/paced_soak.rs",
+          "test_name": "paced_synthetic_batches_preserve_unique_addresses_and_five_second_source_clock"
+        },
+        {
+          "requirement_id": "OA-REG-021",
+          "file": "tools/oa-regional-session/src/paced_soak.rs",
+          "test_name": "feed_fault_window_is_explicit_and_reacquisition_restores_all_synthetic_tracks"
+        },
+        {
+          "requirement_id": "OA-REG-021",
+          "file": "tools/oa-regional-session/src/runtime.rs",
+          "test_name": "regional_presentation_ack_releases_only_delivered_frame_capacity"
+        },
+        {
+          "requirement_id": "OA-REG-021",
+          "file": "tools/oa-regional-session/src/surveillance.rs",
+          "test_name": "presentation_stream_requires_ordered_ack_and_reuses_only_consumed_capacity"
+        },
+        {
+          "requirement_id": "OA-REG-021",
+          "file": "tools/oa-regional-session/src/surveillance.rs",
+          "test_name": "failed_render_preflight_does_not_reserve_or_count_a_presentation"
         },
         {
           "requirement_id": "OA-ENC-022",
@@ -17308,6 +17340,12 @@
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
       "rationale": "Engineering safety candidate: losing or changing the selected replay profile while exporting, reimporting, or selecting a recording could make a comparison use different settings than its declared evidence. Settings/profile binding and sidecar-to-manifest checks constrain that mismatch; absent metadata retains the historical default. This offline reproducibility path does not authenticate the recording, prove input completeness, or establish operational behavior."
+    },
+    {
+      "id": "OA-REG-021",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: a stability record with skipped frames, an unacknowledged presentation silently discarded, or an interrupted run marked complete could mislead a migration reviewer. The paced mode retains one regional runtime, records actual timing and bounded frame digests, and only releases pending presentation capacity after ordered consumer acknowledgement; all claims are synthetic and qualification remains NONE. This establishes neither facility capacity nor field availability, operational switching, independent-thread validation, or external acceptance."
     },
     {
       "id": "OA-RTE-001",

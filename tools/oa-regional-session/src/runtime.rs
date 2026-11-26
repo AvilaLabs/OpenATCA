@@ -95,6 +95,26 @@ impl RegionalRunProfile {
         profile.surveillance.render_scope = true;
         profile
     }
+
+    /// Bounded 48-hour D2 stability profile: 16 synthetic tracks at 5-second issue cadence,
+    /// full tracker/CA/base-raster/control-overlay work each frame. A streaming consumer must
+    /// acknowledge each presentation before more than the bounded pending capacity accumulates.
+    /// All limits are below existing recorded-profile ceilings; this is not facility capacity.
+    pub const fn paced_d2_soak() -> Self {
+        let mut profile = Self::recorded_peak_rendered();
+        profile.surveillance.max_tracks = 16;
+        profile.surveillance.max_frames = 34_560;
+        profile.surveillance.max_drain_rows = 256;
+        profile.surveillance.max_baro_evidence = 16;
+        profile.surveillance.max_open_alerts = 120;
+        profile.surveillance.max_candidate_pairs = 120;
+        profile.surveillance.max_ca_work_per_frame = 1_000_000;
+        profile.surveillance.max_presentation_updates = surveillance::MAX_PRESENTATION_UPDATES;
+        profile.max_flights = 16;
+        profile.max_flight_log_entries = 256;
+        profile.max_total_events = 552_960;
+        profile
+    }
 }
 
 pub const DEFAULT_REGIONAL_RUN_PROFILE: RegionalRunProfile = RegionalRunProfile {
@@ -861,6 +881,23 @@ pub fn regional_pixels(runtime: &RegionalRuntime) -> Result<&[u8], String> {
     surveillance::surveillance_pixels(&runtime.surveillance)
 }
 
+/// Acknowledge the oldest presentation after its consumer has successfully processed the
+/// matching regional frame. A failed or out-of-order consumer must leave capacity occupied.
+pub fn regional_ack_presentation(
+    runtime: &mut RegionalRuntime,
+    frame_sequence: u64,
+) -> Result<(), String> {
+    if runtime.failed {
+        return Err("cannot acknowledge presentation after session failure".into());
+    }
+    let sequence = usize::try_from(frame_sequence).map_err(|_| "presentation sequence width")?;
+    surveillance::surveillance_ack_presentation(&mut runtime.surveillance, sequence)
+}
+
+pub fn regional_presentation_counts(runtime: &RegionalRuntime) -> (usize, u64) {
+    surveillance::surveillance_presentation_counts(&runtime.surveillance)
+}
+
 /// Explicit current-view selection. Ordinary refusal clears selection and is rendered; it
 /// cannot manufacture a full flight binding, advance source time or transfer authority.
 pub fn regional_select(
@@ -1049,6 +1086,25 @@ mod transaction_tests {
 
     fn runtime() -> RegionalRuntime {
         runtime_with_model(synthetic_model().unwrap())
+    }
+
+    // REQ: OA-REG-021
+    #[test]
+    fn regional_presentation_ack_releases_only_delivered_frame_capacity() {
+        let mut engine = runtime();
+        let batch = ReceiptBatch {
+            receipt_ns: 1_000_000_000,
+            source_clock_regressions: 0,
+            events: Vec::new(),
+        };
+        let frame = regional_step(&mut engine, &batch).unwrap();
+        assert_eq!(regional_presentation_counts(&engine), (1, 1));
+        assert!(regional_ack_presentation(&mut engine, frame.sequence + 1).is_err());
+        assert_eq!(regional_presentation_counts(&engine), (1, 1));
+        regional_ack_presentation(&mut engine, frame.sequence).unwrap();
+        assert_eq!(regional_presentation_counts(&engine), (0, 1));
+        assert!(regional_ack_presentation(&mut engine, frame.sequence).is_err());
+        assert_eq!(regional_presentation_counts(&engine), (0, 1));
     }
 
     fn runtime_with_model(model: Model) -> RegionalRuntime {
