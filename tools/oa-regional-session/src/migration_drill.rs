@@ -5,33 +5,33 @@
 //! without manufacturing missing system state. A successful input ACK is not an M2 flip ACK.
 #![forbid(unsafe_code)]
 
-use crate::ReceiptBatch;
 use crate::input::{EventKind, FlightOperation, SourceKind};
 use crate::recordings_cli::convert_recordings;
 use crate::recordings_reader::{RecordingInput, RecordingSource};
 use crate::recordings_stream::{
-    NormalizedStreamSummary, StreamCounts, StreamInput, source_coverage, stream_normalized_events,
+    source_coverage, stream_normalized_events, NormalizedStreamSummary, StreamCounts, StreamInput,
 };
-use crate::runtime::{RegionalFrame, RegionalRunProfile, regional_new_with_profile, regional_step};
+use crate::runtime::{regional_new_with_profile, regional_step, RegionalFrame, RegionalRunProfile};
 use crate::session::{flush_receipt_group, push_event, session_cursor_new_with_limit};
 use crate::surveillance::SurveillanceConfig;
-use oa_airspace::core::model::{Model, point_kind, str_at};
+use crate::ReceiptBatch;
+use oa_airspace::core::model::{point_kind, str_at, Model};
 use oa_migration::{
-    AuthorityApproval, AuthorityRole, Comparison, DependencyRequirement, EvidenceQuality,
-    MetricCriterion, MetricEvidence, ROLE_ASSESSOR, ROLE_CONTROLLER_ON_POSITION, ROLE_SUPERVISOR,
-    ROLE_TECH_OPS, RollbackRule, RollbackTriggerPolicy, Stage, SwapUnitKey as M1SwapUnitKey,
-    TransitionInput, TransitionPolicy, empty_audit_log, evaluate_transition, new_unit,
+    empty_audit_log, evaluate_transition, new_unit, AuthorityApproval, AuthorityRole, Comparison,
+    DependencyRequirement, EvidenceQuality, MetricCriterion, MetricEvidence, RollbackRule,
+    RollbackTriggerPolicy, Stage, SwapUnitKey as M1SwapUnitKey, TransitionInput, TransitionPolicy,
+    ROLE_ASSESSOR, ROLE_CONTROLLER_ON_POSITION, ROLE_SUPERVISOR, ROLE_TECH_OPS,
 };
 use oa_migration_switch::{
-    AlertState, BusinessKey, CapacityProfile, Diff, EndpointClass, EntityFamily, EvidenceKind,
-    FamilyCoverage, FieldStatus, FlightState, HandoffState, Health, Output, PromotionIntentRequest,
-    REPLAY_ROWS_PER_FAMILY, RollbackKind, RollbackReceipt, Side, SnapshotView, SourceIdentity,
-    SwapUnitKey, TrackState, UnitPolicy, authorize_window, ingest_view, new_promotion_intent,
-    new_selector_with_capacity, observe_delivery, prepare_candidate_into, rollback,
-    select_candidate, selected,
+    authorize_window, ingest_view, new_promotion_intent, new_selector_with_capacity,
+    observe_delivery, prepare_candidate_into, rollback, select_candidate, selected, AlertState,
+    BusinessKey, CapacityProfile, Diff, EndpointClass, EntityFamily, EvidenceKind, FamilyCoverage,
+    FieldStatus, FlightState, HandoffState, Health, Output, PromotionIntentRequest, RollbackKind,
+    RollbackReceipt, Side, SnapshotView, SourceIdentity, SwapUnitKey, TrackState, UnitPolicy,
+    REPLAY_ROWS_PER_FAMILY,
 };
 #[cfg(test)]
-use oa_migration_switch::{MAX_ALERTS, MAX_FLIGHTS, MAX_HANDOFFS, MAX_TRACKS, Snapshot};
+use oa_migration_switch::{Snapshot, MAX_ALERTS, MAX_FLIGHTS, MAX_HANDOFFS, MAX_TRACKS};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -4299,22 +4299,20 @@ mod tests {
                 position(oa_adsb::ZAU_BOX.lat_min_e7, oa_adsb::ZAU_BOX.lon_min_e7),
             ))?);
         }
-        assert!(
-            filter
-                .admit(&spatial_event(
-                    SourceKind::Surveillance,
-                    MAX_ZAU_BOX_ADDRESSES as u32 + 1,
-                    position(oa_adsb::ZAU_BOX.lat_min_e7, oa_adsb::ZAU_BOX.lon_min_e7),
-                ))
-                .is_err()
-        );
+        assert!(filter
+            .admit(&spatial_event(
+                SourceKind::Surveillance,
+                MAX_ZAU_BOX_ADDRESSES as u32 + 1,
+                position(oa_adsb::ZAU_BOX.lat_min_e7, oa_adsb::ZAU_BOX.lon_min_e7),
+            ))
+            .is_err());
         Ok(())
     }
 
     // REQ: OA-MIG-414
     #[test]
-    fn selected_snapshot_rows_apply_to_typed_worker_tables_with_the_same_digest()
-    -> Result<(), String> {
+    fn selected_snapshot_rows_apply_to_typed_worker_tables_with_the_same_digest(
+    ) -> Result<(), String> {
         let track = TrackState {
             key: BusinessKey {
                 entity_key: [0x11; 32],
@@ -4406,8 +4404,8 @@ mod tests {
     }
 
     #[test]
-    fn local_authority_fixture_runs_candidate_select_and_acknowledged_rollback()
-    -> Result<(), String> {
+    fn local_authority_fixture_runs_candidate_select_and_acknowledged_rollback(
+    ) -> Result<(), String> {
         let policy = policy(EndpointClass::Terminal);
         let unit = SwapUnitKey {
             function_id: 1,
@@ -4576,23 +4574,19 @@ mod tests {
             ),
             Ok(Some(CYCLES - 1))
         );
-        assert!(
-            replay_measurement_cycle(
-                measurement_end,
-                capture_start,
-                measurement_start,
-                measurement_end
-            )
-            .is_err()
-        );
-        assert!(
-            replay_measurement_cycle(
-                capture_start - 1,
-                capture_start,
-                measurement_start,
-                measurement_end
-            )
-            .is_err()
-        );
+        assert!(replay_measurement_cycle(
+            measurement_end,
+            capture_start,
+            measurement_start,
+            measurement_end
+        )
+        .is_err());
+        assert!(replay_measurement_cycle(
+            capture_start - 1,
+            capture_start,
+            measurement_start,
+            measurement_end
+        )
+        .is_err());
     }
 }

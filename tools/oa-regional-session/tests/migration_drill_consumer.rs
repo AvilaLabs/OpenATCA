@@ -5,7 +5,7 @@
 mod synthetic;
 
 use oa_migration_switch::{
-    Output, observe_delivery, prepare_candidate, rollback, select_candidate,
+    observe_delivery, prepare_candidate, rollback, select_candidate, Output,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};

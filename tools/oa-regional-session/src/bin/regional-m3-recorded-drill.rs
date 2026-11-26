@@ -4,13 +4,13 @@
 
 use oa_migration_switch::EndpointClass;
 use oa_regional_session::migration_drill::{
+    consumer_worker, run_recorded_stream, RecordedDrillReport, RecordedRunOptions,
     MAX_CONSUMER_FRAME_BYTES, MAX_NORMALIZED_EVENTS, MAX_ZAU_BOX_ADDRESSES,
-    MAX_ZAU_DISTINCT_ADDRESSES, RecordedDrillReport, RecordedRunOptions,
-    ZAU_POSITION_ASSOCIATION_MAX_AGE_NS, consumer_worker, run_recorded_stream,
+    MAX_ZAU_DISTINCT_ADDRESSES, ZAU_POSITION_ASSOCIATION_MAX_AGE_NS,
 };
 use oa_regional_session::recordings_reader::RecordingSource;
 use oa_regional_session::recordings_stream::{
-    MAX_H2_INPUT_FRAMES, MAX_H2_INPUT_STREAMS, MAX_H2_PHYSICAL_INPUT_BYTES, StreamInput,
+    StreamInput, MAX_H2_INPUT_FRAMES, MAX_H2_INPUT_STREAMS, MAX_H2_PHYSICAL_INPUT_BYTES,
 };
 use std::env;
 use std::path::PathBuf;
