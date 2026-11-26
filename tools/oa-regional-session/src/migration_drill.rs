@@ -4155,7 +4155,14 @@ impl LivePairProcessor<'_> {
         let virtual_ns = legacy.observed_time_ns;
         let mut frame_ack_ns = None;
         let mut selected_frame_applied = false;
-        if !state.m2_attempted {
+        let fixture_evidence_start = legacy
+            .unit
+            .window_start_ns
+            .checked_add(2)
+            .ok_or("local fixture M1 evidence timestamp overflow")?;
+        let decision_evidence_ready =
+            !self.local_authority_fixture || virtual_ns > fixture_evidence_start;
+        if !state.m2_attempted && decision_evidence_ready {
             state.m2_attempted = true;
             let decision_started = Instant::now();
             let unit = legacy.unit;
