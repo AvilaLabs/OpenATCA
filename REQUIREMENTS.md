@@ -8177,3 +8177,16 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   same parent descriptor; its leaf open refuses symlinks with `O_NOFOLLOW`. Append refuses on
   platforms without this directory anchoring. A sealed-path refusal or descriptor-verification
   error fails the audit operation before the associated committed action.
+- **OA-AUDIT-007** The core principal registry accepts the existing bounded
+  `OACERT-LOCAL-PRINCIPALS-V1` two-column grammar and `OACERT-LOCAL-PRINCIPALS-V2` rows with an
+  explicit enabled/disabled status. Both require unique positive canonical decimal IDs and one
+  `monitor`, `operate`, or `configure` role. The fixed table admits at most 128 rows and the parser
+  admits at most 64 KiB; malformed framing, duplicate IDs, unknown roles, invalid status, excess
+  rows, and unknown or disabled principals are explicit refusals. Action authorization first
+  resolves the principal, then applies the existing three-role action matrix. This is local role
+  configuration only; it does not authenticate a login, credential, principal origin, or authority.
+- **OA-AUDIT-008** The shell registry loader opens a regular file through the production sealed
+  path guard, reads from the verified descriptor under the 64 KiB byte cap, rejects size changes,
+  hashes the exact bytes, and compares them with an independently supplied expected SHA-256 pin
+  before parsing. The registry bytes do not supply their own trusted pin. Path, descriptor, pin,
+  framing, and parse refusals return no registry.
