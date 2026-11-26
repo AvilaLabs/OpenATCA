@@ -198,13 +198,12 @@ pub fn parse_principal_registry(bytes: &[u8]) -> Result<PrincipalRegistry, Regis
             .iter()
             .position(|entry| entry.principal_id > principal_id)
             .unwrap_or(registry.len());
-        if index < registry.len() {
+        let old_len = registry.len();
+        if index < old_len {
             let destination = index
                 .checked_add(1)
                 .ok_or(RegistryError::TooManyPrincipals)?;
-            registry
-                .entries
-                .copy_within(index..registry.len(), destination);
+            registry.entries.copy_within(index..old_len, destination);
         }
         let slot = registry
             .entries
