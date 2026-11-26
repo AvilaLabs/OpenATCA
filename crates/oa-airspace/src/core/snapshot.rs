@@ -7,8 +7,8 @@
 //! magic "OATCA-ADAPT" (11 bytes), format version u32
 //! nasr_effective u32, cifp_cycle u32, buffer_m u32, artcc (u32 length, bytes),
 //! nasr_sha256 [32], cifp_sha256 [32]
-//! (version 4 and later: cycle_override, u32 length and UTF-8 bytes; version 5 also records
-//! preferred-route availability)
+//! (version 4: cycle_override length and UTF-8 bytes; version 5: option-tagged cycle_override
+//! and preferred-route availability)
 //! then the tables in fixed order, each: 4-byte tag, row count u32, its columns in the order
 //! of the field declarations in `model.rs`; a bitset column is ceil(rows/64) u64 words.
 //! versions 3/4 tables: STRS PNTS VERT BNDS SEGS AWYS AWLG PROC RTES LEGS MORA UNRS DISA;
@@ -221,8 +221,15 @@ pub fn encode(m: &Model) -> Result<Vec<u8>, SnapshotError> {
     out.extend_from_slice(m.meta.artcc.as_bytes());
     out.extend_from_slice(&m.meta.nasr_sha256);
     out.extend_from_slice(&m.meta.cifp_sha256);
+    // Version 5 tags the optional note as length + 1 so `None` and `Some("")` remain distinct.
+    let note_length = match &m.cycle_override {
+        Some(note) => count("cycle note", note.len())?
+            .checked_add(1)
+            .ok_or(SnapshotError::TooLarge("cycle note"))?,
+        None => 0,
+    };
+    put_u32(&mut out, note_length);
     if let Some(note) = &m.cycle_override {
-        put_u32(&mut out, count("cycle note", note.len())?);
         out.extend_from_slice(note.as_bytes());
     }
     out.push(m.preferred_route_state);
@@ -615,7 +622,18 @@ pub fn decode(bytes: &[u8]) -> Result<Model, SnapshotError> {
         nasr_sha256,
         cifp_sha256,
     };
-    let cycle_override = if version >= FORMAT_VERSION_NOTE {
+    let cycle_override = if version >= FORMAT_VERSION {
+        let tagged_length = r.u32("header")? as usize;
+        if tagged_length == 0 {
+            None
+        } else {
+            let n = tagged_length - 1;
+            if n > MAX_CYCLE_OVERRIDE_BYTES {
+                return Err(SnapshotError::BadNote);
+            }
+            Some(String::from_utf8(r.bytes(n, "header")?).map_err(|_| SnapshotError::BadNote)?)
+        }
+    } else if version >= FORMAT_VERSION_NOTE {
         let n = r.u32("header")? as usize;
         if n > MAX_CYCLE_OVERRIDE_BYTES {
             return Err(SnapshotError::BadNote);
