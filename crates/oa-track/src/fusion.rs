@@ -52,6 +52,8 @@
 //! The per-key bookkeeping is two fixed-capacity hash tables (`fixed_map.rs`, [`KEY_TABLE_SLOTS`]
 //! slots each, made at start); the tracker allocates nothing after construction.
 
+use core::ops::{Deref, DerefMut};
+
 use oa_geo::aeqd::{frame_new, project, unproject, Frame};
 
 use crate::assoc::{
@@ -269,6 +271,30 @@ fn count_conversion_refusal(counts: &mut RadarConversionRefusals, error: RadarEr
 }
 
 /// What the layer did. Plain record (A1); A7.2: cold struct.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RadarStatsArray<T, const N: usize>(pub [T; N]);
+
+impl<T: Copy + Default, const N: usize> Default for RadarStatsArray<T, N> {
+    fn default() -> Self {
+        Self([T::default(); N])
+    }
+}
+
+impl<T, const N: usize> Deref for RadarStatsArray<T, N> {
+    type Target = [T; N];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T, const N: usize> DerefMut for RadarStatsArray<T, N> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+/// What the layer did. Plain record (A1); A7.2: cold struct.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct FusionStats {
     pub adsb_in: u64,
@@ -411,10 +437,10 @@ pub struct FusionStats {
     pub init_refusal_pass_visits: u64,
     /// Per-radar initiation budget use. Work includes all charged grid, pair, and cleanup work;
     /// it is not a wall-time measure. The fixed slots follow radar order in the configured sites.
-    pub init_radar: [RadarInitStats; MAX_NETWORK_RADARS],
+    pub init_radar: RadarStatsArray<RadarInitStats, MAX_NETWORK_RADARS>,
     /// Per-radar association totals. Outcomes are gate completion, independent of assignment
     /// verdicts. A7.2: cold diagnostic records in a fixed-size array.
-    pub association_radar: [RadarAssociationStats; MAX_NETWORK_RADARS],
+    pub association_radar: RadarStatsArray<RadarAssociationStats, MAX_NETWORK_RADARS>,
     /// Configured physical sources and eight-source work units in the selected profile.
     pub network_radars: u8,
     pub network_units: u8,
@@ -720,6 +746,7 @@ struct RadarScratch {
 
 /// Large, transient association arrays reused by each eight-source work unit. A7.2: cold
 /// workspace owner; each member has a fixed startup capacity derived from existing limits.
+#[derive(Default)]
 struct RadarWorkspace {
     tracks: Vec<TrackAt>,
     skip: Vec<bool>,
@@ -4762,7 +4789,7 @@ mod tests {
         fusion_advance(&mut f, 11 * NS_PER_S, &mut out);
 
         let stats = fusion_stats(&f);
-        let [first, idle, last, ..] = stats.init_radar;
+        let [first, idle, last, ..] = stats.init_radar.0;
         assert_eq!(first.batches, 1, "{stats:?}");
         assert_eq!(last.batches, 1, "{stats:?}");
         assert_eq!(idle.batches, 0, "{stats:?}");
