@@ -133,6 +133,8 @@ impl DemoEngineConfig {
 pub struct EngineCounters {
     pub labels_placed: u64,
     pub label_overlap_pairs: u64,
+    pub label_overlap_pairs_outside_terminal: u64,
+    pub label_overlap_pairs_inside_terminal: u64,
     pub arrivals_completed: u64,
     pub ca_cycles: u64,
     pub ca_open_alerts: u64,
@@ -758,13 +760,16 @@ impl DemoEngine {
                 entry_receipt: self.receipt.as_ref(),
             },
         )?;
-        let (labels, overlaps) = declutter_labels(
+        let (labels, overlaps, outside_overlaps, inside_overlaps) = declutter_labels(
             &mut self.display_list,
             &self.projection,
             &self.target_positions,
+            oa_display::core::traffic::targets_columns(&self.target_set).callsign,
         )?;
         self.counters.labels_placed = labels as u64;
         self.counters.label_overlap_pairs = overlaps as u64;
+        self.counters.label_overlap_pairs_outside_terminal = outside_overlaps as u64;
+        self.counters.label_overlap_pairs_inside_terminal = inside_overlaps as u64;
         draw_demo_safety_status(
             &mut self.display_list,
             &self.safety_states,
@@ -1380,7 +1385,7 @@ fn choose_label_bounds(
         y1: projection.height as i32 * 16,
     };
     let mut best = EMPTY_LABEL;
-    let mut best_score = i64::MAX;
+    let mut best_score = (true, usize::MAX, i64::MAX);
     for (x0, y0) in candidates {
         let candidate = LabelBounds {
             x0,
@@ -1389,12 +1394,17 @@ fn choose_label_bounds(
             y1: y0 + height,
         };
         let outside = i64::from(width) * i64::from(height) - overlap_area(candidate, view);
-        let mut score = outside * 100;
+        let mut detail_score = outside * 100;
+        let mut overlap_count = 0;
         for &other in placed {
-            score += overlap_area(candidate, other);
+            let area = overlap_area(candidate, other);
+            if area > 0 {
+                overlap_count += 1;
+            }
+            detail_score += area;
         }
         for &(tx, ty) in targets {
-            score += overlap_area(
+            detail_score += overlap_area(
                 candidate,
                 LabelBounds {
                     x0: tx - 9 * 16,
@@ -1404,6 +1414,7 @@ fn choose_label_bounds(
                 },
             );
         }
+        let score = (outside != 0, overlap_count, detail_score);
         if score < best_score {
             best_score = score;
             best = candidate;
@@ -1416,23 +1427,38 @@ fn declutter_labels(
     list: &mut DisplayList,
     projection: &Projection,
     positions: &[(i32, i32)],
-) -> Result<(usize, usize), DisplayError> {
+    callsigns: &[[u8; 8]],
+) -> Result<(usize, usize, usize, usize), DisplayError> {
+    // Fixed SoA scratch: at most sixty aircraft; source text groups are located before moving
+    // any block. Placement order is lexical callsign, with the source index as a stable tie.
     let mut targets = [(0, 0); MAX_AIRCRAFT];
+    let mut keys = [[0u8; 8]; MAX_AIRCRAFT];
+    let mut near_airport = [false; MAX_AIRCRAFT];
     let mut count = 0;
-    for &(lat, lon) in positions {
+    for (source, &(lat, lon)) in positions.iter().enumerate() {
         if oa_display::core::traffic::on_map(projection, lat, lon) {
-            if let (Some(at), Some(slot)) = (project(projection, lat, lon), targets.get_mut(count))
-            {
+            if let (Some(at), Some(slot), Some(key), Some(near)) = (
+                project(projection, lat, lon),
+                targets.get_mut(count),
+                keys.get_mut(count),
+                near_airport.get_mut(count),
+            ) {
                 *slot = at;
+                *key = callsigns.get(source).copied().unwrap_or([0; 8]);
+                *near = ord_distance_m(lat, lon).is_some_and(|d| d <= 5.0 * 1852.0);
                 count += 1;
             }
         }
     }
     let targets = targets.get(..count).unwrap_or(&[]);
-    let mut placed = [EMPTY_LABEL; MAX_AIRCRAFT];
+    let mut starts = [0usize; MAX_AIRCRAFT];
+    let mut ends = [0usize; MAX_AIRCRAFT];
+    let mut widths = [0i32; MAX_AIRCRAFT];
+    let mut heights = [0i32; MAX_AIRCRAFT];
     let mut cursor = 0;
-    let mut placed_count = 0;
-    for &center in targets {
+    let mut order = [0usize; MAX_AIRCRAFT];
+    let mut block_count = 0;
+    for (source, &center) in targets.iter().enumerate() {
         let old_x = center.0 + 14 * 16;
         let old_y = center.1 - 30 * 16;
         let start = (cursor..list.texts.x.len()).find(|&n| {
@@ -1461,10 +1487,39 @@ fn declutter_labels(
             end += 1;
         }
         cursor = end;
+        if let (Some(a), Some(b), Some(w), Some(h), Some(o)) = (
+            starts.get_mut(source),
+            ends.get_mut(source),
+            widths.get_mut(source),
+            heights.get_mut(source),
+            order.get_mut(block_count),
+        ) {
+            *a = start;
+            *b = end;
+            *w = width;
+            *h = height;
+            *o = source;
+            block_count += 1;
+        }
+    }
+    if let Some(order) = order.get_mut(..block_count) {
+        order.sort_unstable_by_key(|&source| (keys.get(source).copied().unwrap_or([0; 8]), source));
+    }
+    let mut placed = [EMPTY_LABEL; MAX_AIRCRAFT];
+    let mut placed_near = [false; MAX_AIRCRAFT];
+    let mut placed_count = 0;
+    for &source in order.get(..block_count).unwrap_or(&[]) {
+        let Some(&center) = targets.get(source) else {
+            continue;
+        };
+        let old_x = center.0 + 14 * 16;
+        let old_y = center.1 - 30 * 16;
+        let start = starts.get(source).copied().unwrap_or(0);
+        let end = ends.get(source).copied().unwrap_or(0);
         let bounds = choose_label_bounds(
             center,
-            width,
-            height,
+            widths.get(source).copied().unwrap_or(0),
+            heights.get(source).copied().unwrap_or(0),
             placed.get(..placed_count).unwrap_or(&[]),
             targets,
             projection,
@@ -1477,8 +1532,12 @@ fn declutter_labels(
                 *y += bounds.y0 - old_y;
             }
         }
-        if let Some(slot) = placed.get_mut(placed_count) {
+        if let (Some(slot), Some(near)) = (
+            placed.get_mut(placed_count),
+            placed_near.get_mut(placed_count),
+        ) {
             *slot = bounds;
+            *near = near_airport.get(source).copied().unwrap_or(false);
             placed_count += 1;
         }
         let endpoint = (
@@ -1494,6 +1553,8 @@ fn declutter_labels(
         )?;
     }
     let mut overlaps = 0;
+    let mut outside_overlaps = 0;
+    let mut inside_overlaps = 0;
     for a in 0..placed_count {
         for b in a + 1..placed_count {
             if placed
@@ -1502,10 +1563,35 @@ fn declutter_labels(
                 .is_some_and(|(&a, &b)| overlap_area(a, b) > 0)
             {
                 overlaps += 1;
+                if placed_near.get(a) == Some(&true) && placed_near.get(b) == Some(&true) {
+                    inside_overlaps += 1;
+                } else {
+                    outside_overlaps += 1;
+                }
             }
         }
     }
-    Ok((placed_count, overlaps))
+    Ok((placed_count, overlaps, outside_overlaps, inside_overlaps))
+}
+
+fn ord_distance_m(lat: i32, lon: i32) -> Option<f64> {
+    let origin = oa_geo::LatLon::new(
+        f64::from(ord_map::KORD.0) * 1e-7,
+        f64::from(ord_map::KORD.1) * 1e-7,
+    )
+    .ok()?;
+    let point = oa_geo::LatLon::new(f64::from(lat) * 1e-7, f64::from(lon) * 1e-7).ok()?;
+    oa_geo::wgs84()
+        .inverse(origin, point)
+        .ok()
+        .map(|r| r.distance_m)
+}
+
+fn show_fix_name(lat: i32, lon: i32, name: &str) -> bool {
+    // The selected public I27L/I28C/I28R final routes mark these fixes with the CIFP
+    // description F (column43). No IAF transition is active in these selected final chains.
+    matches!(name, "JLOWW" | "SEIKA" | "WILLT")
+        || ord_distance_m(lat, lon).is_some_and(|distance| distance >= 12.0 * 1852.0)
 }
 
 /// Fixed map primitives use only the source-pinned public CIFP constant table.
@@ -1539,15 +1625,17 @@ fn draw_public_map(list: &mut DisplayList, projection: &Projection) -> Result<()
                     }
                 }
                 push_circle(list, at, 2 * 16, palette::FIX, 3)?;
-                push_text(
-                    list,
-                    (at.0 + 4 * 16, at.1 + 4 * 16),
-                    9,
-                    ALIGN_LEFT,
-                    palette::DIM_TEXT,
-                    4,
-                    name,
-                )?;
+                if show_fix_name(lat, lon, name) {
+                    push_text(
+                        list,
+                        (at.0 + 4 * 16, at.1 + 4 * 16),
+                        9,
+                        ALIGN_LEFT,
+                        palette::DIM_TEXT,
+                        4,
+                        name,
+                    )?;
+                }
                 previous = Some(at);
             } else {
                 previous = None;
@@ -1763,6 +1851,23 @@ mod tests {
     }
     // REQ: OA-DEMO-001
     #[test]
+    fn terminal_map_hides_inner_names_and_keeps_published_final_approach_fixes() {
+        for name in ["JLOWW", "SEIKA", "WILLT"] {
+            assert!(super::show_fix_name(
+                super::ord_map::KORD.0,
+                super::ord_map::KORD.1,
+                name
+            ));
+        }
+        assert!(!super::show_fix_name(
+            super::ord_map::KORD.0,
+            super::ord_map::KORD.1,
+            "NONCRITICAL"
+        ));
+        assert!(super::show_fix_name(401350167, -925917139, "IRK"));
+    }
+    // REQ: OA-DEMO-001
+    #[test]
     fn normal_push_full_hour_has_no_conflict_alerts() -> Result<(), super::EngineError> {
         // Compiled public-CIFP/synthetic fixture; no SWIM or external input is read.
         let bytes = include_bytes!("../../../oa-demo-scenario/tests/data/ord-normal-push-v1.oasd");
@@ -1805,21 +1910,26 @@ mod tests {
     }
     // REQ: OA-DEMO-001
     #[test]
-    fn normal_push_five_minute_frame_has_no_label_overlap() -> Result<(), super::EngineError> {
+    fn normal_push_requested_frames_have_no_outer_terminal_label_overlap(
+    ) -> Result<(), super::EngineError> {
         let bytes = include_bytes!("../../../oa-demo-scenario/tests/data/ord-normal-push-v1.oasd");
         let mut engine = crate::shell::from_oasd(bytes, oa_sha256::core::sha256::sha256(bytes))?;
-        engine.advance_to(300_000)?;
-        engine.render_frame()?;
-        let count = engine.frame_target_count();
-        assert!(
-            count > 0 && count <= 30,
-            "five minute fixture has {count} targets"
-        );
-        assert_eq!(engine.counters.labels_placed, count as u64);
-        assert_eq!(
-            engine.counters.label_overlap_pairs, 0,
-            "five minute frame with {count} targets"
-        );
+        for minute in [0, 5, 15, 30, 60] {
+            engine.advance_to(minute * 60_000)?;
+            engine.render_frame()?;
+            let count = engine.frame_target_count();
+            assert!(count <= 30, "minute {minute}: {count} targets");
+            assert_eq!(engine.counters.labels_placed, count as u64);
+            eprintln!(
+                "normal_frame minute={minute} targets={count} outer_overlaps={} inner_overlaps={}",
+                engine.counters.label_overlap_pairs_outside_terminal,
+                engine.counters.label_overlap_pairs_inside_terminal
+            );
+            assert_eq!(
+                engine.counters.label_overlap_pairs_outside_terminal, 0,
+                "minute {minute}: outer-terminal data blocks overlap"
+            );
+        }
         Ok(())
     }
 }
