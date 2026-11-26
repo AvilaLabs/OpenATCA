@@ -38,6 +38,9 @@ pub enum Action {
     AdaptationIssue = 4,
     Certification = 5,
     QuarantineRelease = 6,
+    VulnerabilityIntake = 7,
+    VulnerabilityDisposition = 8,
+    RunwayAssignment = 9,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -126,7 +129,10 @@ pub const fn authorize(role: Role, action: Action) -> Result<(), AuditError> {
         | Action::MigrationRollback
         | Action::AdaptationIssue
         | Action::Certification => matches!(role, Role::Configure),
-        Action::QuarantineRelease => matches!(role, Role::Operate | Role::Configure),
+        Action::QuarantineRelease | Action::VulnerabilityIntake | Action::RunwayAssignment => {
+            matches!(role, Role::Operate | Role::Configure)
+        }
+        Action::VulnerabilityDisposition => matches!(role, Role::Configure),
     };
     if allowed {
         Ok(())

@@ -8146,8 +8146,9 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   with an all-zero previous digest; each following sequence increments by one and binds the prior
   digest. No alternate encoding is accepted.
 - **OA-AUDIT-002** The registry allows `monitor` to verify records, `operate` to release quarantine
-  items, and `configure` to issue adaptations, certify, flip migration output, or roll back
-  migration output. Higher roles may perform lower-level actions; a lower role is refused before
+  items and submit vulnerability intake, and `configure` to issue adaptations, certify, flip or
+  roll back migration output, and disposition vulnerability findings. `operate` and `configure`
+  may perform runway assignment actions. Higher roles may perform lower-level actions; a lower role is refused before
   the action commit. Principal IDs, role claims and timestamps are caller inputs; this registry
   provides no login, credential check, authenticated origin or authority validation.
 - **OA-AUDIT-003** The shell log uses fixed-size records and an OS-held nonblocking exclusive
@@ -8190,3 +8191,10 @@ The L13 role registry is not yet landed; roles below are plain caller-supplied c
   hashes the exact bytes, and compares them with an independently supplied expected SHA-256 pin
   before parsing. The registry bytes do not supply their own trusted pin. Path, descriptor, pin,
   framing, and parse refusals return no registry.
+- **OA-AUDIT-009** Vulnerability register intake and disposition commands require a pinned shared
+  `oa-audit-log` action CLI, a caller-supplied checkpoint, and a pinned enabled registry principal.
+  The CLI derives the role from that registry and durably appends a bounded intent binding the
+  action, finding ID, next register revision, and canonical next-register digest before the
+  atomic register replacement. Audit refusal leaves the register unchanged; a later register
+  write failure is reported as uncommitted even though the intent remains in the log. The register
+  actor field records only the registry principal claim; this flow does not authenticate a user.

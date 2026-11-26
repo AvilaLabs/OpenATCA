@@ -31,3 +31,38 @@ fn bounded_event_registry_and_exact_receipt_binding() {
         event(Action::MigrationRollback, Role::Configure)
     ));
 }
+
+// REQ: OA-AUDIT-002, OA-AUDIT-009
+#[test]
+fn vulnerability_and_runway_actions_enforce_registry_role_levels() {
+    assert_eq!(
+        authorize(Role::Monitor, Action::VulnerabilityIntake),
+        Err(AuditError::RoleDenied)
+    );
+    assert_eq!(
+        authorize(Role::Operate, Action::VulnerabilityIntake),
+        Ok(())
+    );
+    assert_eq!(
+        authorize(Role::Configure, Action::VulnerabilityIntake),
+        Ok(())
+    );
+    assert_eq!(
+        authorize(Role::Monitor, Action::VulnerabilityDisposition),
+        Err(AuditError::RoleDenied)
+    );
+    assert_eq!(
+        authorize(Role::Operate, Action::VulnerabilityDisposition),
+        Err(AuditError::RoleDenied)
+    );
+    assert_eq!(
+        authorize(Role::Configure, Action::VulnerabilityDisposition),
+        Ok(())
+    );
+    assert_eq!(
+        authorize(Role::Monitor, Action::RunwayAssignment),
+        Err(AuditError::RoleDenied)
+    );
+    assert_eq!(authorize(Role::Operate, Action::RunwayAssignment), Ok(()));
+    assert_eq!(authorize(Role::Configure, Action::RunwayAssignment), Ok(()));
+}
