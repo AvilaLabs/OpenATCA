@@ -206,8 +206,7 @@ fn open_log_append_at(path: &Path, parent: &File) -> io::Result<File> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        const O_NOFOLLOW: i32 = 0o400000;
-        options.custom_flags(O_NOFOLLOW);
+        options.custom_flags(linux_o_nofollow_flag()?);
     }
     let file = options.open(&anchored)?;
     guard.verify_open(&anchored, &file)?;
@@ -217,6 +216,72 @@ fn open_log_append_at(path: &Path, parent: &File) -> io::Result<File> {
         ));
     }
     Ok(file)
+}
+
+/// Returns the Linux UAPI `O_NOFOLLOW` value for the target architecture.
+/// The asm-generic value is overridden by several architecture-specific UAPI headers.
+#[cfg(target_os = "linux")]
+fn linux_o_nofollow_flag() -> io::Result<i32> {
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "m68k",
+        target_arch = "powerpc",
+        target_arch = "powerpc64"
+    ))]
+    {
+        return Ok(0o100000);
+    }
+
+    #[cfg(any(
+        target_arch = "csky",
+        target_arch = "hexagon",
+        target_arch = "loongarch64",
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6",
+        target_arch = "riscv32",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "sparc",
+        target_arch = "sparc64",
+        target_arch = "x32",
+        target_arch = "x86",
+        target_arch = "x86_64"
+    ))]
+    {
+        return Ok(0o400000);
+    }
+
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        target_arch = "arm",
+        target_arch = "m68k",
+        target_arch = "powerpc",
+        target_arch = "powerpc64",
+        target_arch = "csky",
+        target_arch = "hexagon",
+        target_arch = "loongarch64",
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6",
+        target_arch = "riscv32",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "sparc",
+        target_arch = "sparc64",
+        target_arch = "x32",
+        target_arch = "x86",
+        target_arch = "x86_64"
+    )))]
+    {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "audit append does not know the target Linux O_NOFOLLOW flag",
+        ))
+    }
 }
 
 #[cfg(target_os = "linux")]
