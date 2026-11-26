@@ -324,6 +324,8 @@ fn surveillance_refusal_reason(error: surveillance::SurveillanceStageError) -> O
         surveillance::SurveillanceStageError::BarometricEvidenceCapacity => {
             Some(REASON_RESOURCE_LIMIT)
         }
+        surveillance::SurveillanceStageError::SourceEvidenceCapacity => Some(REASON_RESOURCE_LIMIT),
+        surveillance::SurveillanceStageError::InvalidSourceEvidence => Some(REASON_INPUT_INVALID),
         surveillance::SurveillanceStageError::WrongSourceKind
         | surveillance::SurveillanceStageError::InvalidPosition => {
             Some(REASON_SURVEILLANCE_INVALID)
