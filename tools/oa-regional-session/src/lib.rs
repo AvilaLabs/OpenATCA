@@ -19,6 +19,7 @@ pub mod nam_flight;
 pub mod nam_handoff;
 pub mod operator;
 pub mod performance;
+pub mod processor_inventory;
 pub mod recordings;
 pub mod recordings_cli;
 pub mod recordings_reader;

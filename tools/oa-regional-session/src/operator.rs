@@ -5,7 +5,8 @@ use crate::input::{
     EventKind, Identity, NormalizedEvent, OperatorCommand, SourceKind, MAX_EVENT_LINE_BYTES,
 };
 use crate::runtime::{
-    regional_new, regional_pixels, regional_step, RegionalFrame, RegionalRuntime,
+    regional_adaptation_sha256, regional_new, regional_new_from_issued_package, regional_pixels,
+    regional_step, RegionalFrame, RegionalRuntime,
 };
 use crate::session::{flush_receipt_group, push_event, session_cursor_new, ReceiptBatch};
 use crate::surveillance::{FRAME_HEIGHT, FRAME_WIDTH, MAX_FRAMES};
@@ -25,6 +26,7 @@ pub const MAX_OPERATOR_JOURNAL_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_FRAME_REPORT_BYTES: usize = 512 * 1024;
+const MAX_PROCESSOR_REPORT_BYTES: usize = 1024 * 1024;
 const NATIVE_IDLE_LIMIT_SECONDS: u64 = 300;
 const DEFAULT_IDLE_LIMIT_SECONDS: u64 = 60;
 const MAX_NATIVE_BUFFER_BYTES: usize = 64 * 1024 * 1024;
@@ -112,6 +114,9 @@ pub fn parse_args(args: &[String]) -> Result<ConsoleOptions, String> {
     let mut input = None;
     let mut output = None;
     let mut model: Option<crate::cli::ModelSource> = None;
+    let mut issued_package = None;
+    let mut issued_manifest_pin = None;
+    let mut processor_id = None;
     let mut script = None;
     let mut drm = None;
     let mut tty = None;
@@ -137,6 +142,19 @@ pub fn parse_args(args: &[String]) -> Result<ConsoleOptions, String> {
                 model = Some(crate::cli::ModelSource::Snapshot(PathBuf::from(value(
                     &mut index,
                 )?)))
+            }
+            "--issued-package" if issued_package.is_none() => {
+                issued_package = Some(PathBuf::from(value(&mut index)?))
+            }
+            "--issued-manifest-sha256" if issued_manifest_pin.is_none() => {
+                issued_manifest_pin = Some(value(&mut index)?.to_owned())
+            }
+            "--processor-id" if processor_id.is_none() => {
+                processor_id = Some(
+                    value(&mut index)?
+                        .parse::<u32>()
+                        .map_err(|_| "processor ID must be a positive integer")?,
+                )
             }
             "--script" if script.is_none() => script = Some(PathBuf::from(value(&mut index)?)),
             "--drm" if drm.is_none() => drm = Some(value(&mut index)?.to_owned()),
@@ -170,7 +188,29 @@ pub fn parse_args(args: &[String]) -> Result<ConsoleOptions, String> {
     }
     let input = input.ok_or("--input is required")?;
     let output = output.ok_or("--out is required")?;
-    let model = model.ok_or("choose --synthetic-model or --snapshot FILE")?;
+    let issued_fields_present =
+        issued_package.is_some() || issued_manifest_pin.is_some() || processor_id.is_some();
+    if model.is_some() && issued_fields_present {
+        return Err("choose one model source only".into());
+    }
+    if issued_fields_present {
+        let root = issued_package.ok_or("--issued-package is required")?;
+        let pin = issued_manifest_pin.ok_or("--issued-manifest-sha256 is required")?;
+        let expected_manifest_sha256 = oa_adapt::manifest::parse_pin(&pin)
+            .map_err(|_| "invalid issued manifest SHA-256 pin")?;
+        let processor_id = processor_id.ok_or("--processor-id is required")?;
+        if processor_id == 0 {
+            return Err("processor ID must be positive".into());
+        }
+        model = Some(crate::cli::ModelSource::IssuedPackage {
+            root,
+            expected_manifest_sha256,
+            processor_id,
+        });
+    }
+    let model = model.ok_or(
+        "choose --synthetic-model, --snapshot FILE, or --issued-package with an independent pin",
+    )?;
     let mode = if let Some(script) = script {
         if drm.is_some() || tty.is_some() || connector.is_some() || input_device.is_some() {
             return Err("--script cannot be combined with device options".into());
@@ -574,6 +614,8 @@ fn is_idle_input_timeout(error: &oa_display_present::InputDeviceError) -> bool {
 
 struct SessionRunner {
     runtime: RegionalRuntime,
+    local_activation: Option<oa_adapt::local_inventory::LocalActivation>,
+    processor_report: String,
     batches: Vec<RecordedBatch>,
     next_batch: usize,
     next_sequence: [u64; 5],
@@ -967,16 +1009,105 @@ fn init_runner(
     batches: Vec<RecordedBatch>,
 ) -> Result<(SessionRunner, [u8; 32], [u8; 32]), String> {
     oa_sealed::refuse(output)?;
-    let (model, model_sha, model_label) = load_model(model_source)?;
-    let current = std::env::current_exe().map_err(|e| e.to_string())?;
-    let executable_sha =
-        oa_sha256::sha256(&crate::cli::read_guarded(&current, MAX_EXECUTABLE_BYTES)?);
     let cfg = crate::surveillance::SurveillanceConfig {
         centre_lat_e7: 410_000_000,
         centre_lon_e7: -870_000_000,
         range_nm: 180.0,
     };
-    let runtime = regional_new(model, model_sha, *b"ZAU1", cfg)?;
+    let (runtime, model_sha, model_label, local_activation, mut processor_report) =
+        match model_source {
+            crate::cli::ModelSource::IssuedPackage {
+                root,
+                expected_manifest_sha256,
+                processor_id,
+            } => {
+                let (package, activation) = match oa_adapt::local_inventory::verify_local_startup(
+                    root,
+                    *expected_manifest_sha256,
+                    *processor_id,
+                ) {
+                    Ok(verified) => verified,
+                    Err(_) => {
+                        fs::create_dir(output).map_err(|e| e.to_string())?;
+                        let refusal = crate::processor_inventory::startup_refusal_report(
+                            *processor_id,
+                            *expected_manifest_sha256,
+                            crate::processor_inventory::observed_unix_time_ns(),
+                        );
+                        write_new(&output.join("processor-report.tsv"), refusal.as_bytes())?;
+                        return Err(
+                            "issued adaptation startup verification refused; no model activated"
+                                .into(),
+                        );
+                    }
+                };
+                let runtime = match regional_new_from_issued_package(
+                    package,
+                    *b"ZAU1",
+                    cfg,
+                    crate::runtime::DEFAULT_REGIONAL_RUN_PROFILE,
+                ) {
+                    Ok(runtime) => runtime,
+                    Err(_) => {
+                        fs::create_dir(output).map_err(|e| e.to_string())?;
+                        let refusal = crate::processor_inventory::startup_refusal_report(
+                            *processor_id,
+                            *expected_manifest_sha256,
+                            crate::processor_inventory::observed_unix_time_ns(),
+                        );
+                        write_new(&output.join("processor-report.tsv"), refusal.as_bytes())?;
+                        return Err(
+                            "verified adaptation model did not activate; no runtime started".into(),
+                        );
+                    }
+                };
+                let report = crate::processor_inventory::check_active_runtime_adaptation(
+                    &runtime,
+                    &activation,
+                    crate::processor_inventory::observed_unix_time_ns(),
+                )
+                .map_err(str::to_owned)?;
+                if report.status != oa_adapt::local_inventory::LocalInventoryStatus::Match {
+                    fs::create_dir(output).map_err(|e| e.to_string())?;
+                    let refusal =
+                        oa_adapt::local_inventory::render_processor_report_tsv("STARTUP", &report);
+                    write_new(&output.join("processor-report.tsv"), refusal.as_bytes())?;
+                    return Err("issued adaptation startup disk recheck refused; loaded package retained and run not activated".into());
+                }
+                let processor_report =
+                    oa_adapt::local_inventory::render_processor_report_tsv("STARTUP", &report);
+                let model_sha = regional_adaptation_sha256(&runtime);
+                (
+                    runtime,
+                    model_sha,
+                    "ISSUED_PACKAGE_PIN_VERIFIED",
+                    Some(activation),
+                    processor_report,
+                )
+            }
+            _ => {
+                let (model, model_sha, model_label) = load_model(model_source)?;
+                let runtime = regional_new(model, model_sha, *b"ZAU1", cfg)?;
+                (
+                    runtime,
+                    model_sha,
+                    model_label,
+                    None,
+                    crate::processor_inventory::unpinned_source_report(),
+                )
+            }
+        };
+    let model_sha = regional_adaptation_sha256(&runtime);
+    if let Some(activation) = local_activation.as_ref() {
+        if model_sha != activation.loaded_adaptation_sha256() {
+            return Err(
+                "runtime adaptation fingerprint differs from verified startup model".into(),
+            );
+        }
+    }
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    let executable_sha =
+        oa_sha256::sha256(&crate::cli::read_guarded(&current, MAX_EXECUTABLE_BYTES)?);
     fs::create_dir(output).map_err(|e| format!("create new output: {e}"))?;
     let settings = format!("OA_OPERATED_SETTINGS\t1\nmode\tRECORDED_REPLAY\nclock\trecorded receipt cutoffs; local input wall and monotonic time journaled\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nmodel\t{model_label}\nnormalization\tpositive-address positions and explicit normalized state\n");
     let settings_sha256 = oa_sha256::sha256(settings.as_bytes());
@@ -985,6 +1116,8 @@ fn init_runner(
     Ok((
         SessionRunner {
             runtime,
+            local_activation,
+            processor_report,
             batches,
             next_batch: 0,
             next_sequence: [0; 5],
@@ -1014,13 +1147,18 @@ fn close_output(
     script_sha: [u8; 32],
 ) -> Result<(), String> {
     write_new(
+        &runner.output.join("processor-report.tsv"),
+        runner.processor_report.as_bytes(),
+    )?;
+    write_new(
         &runner.output.join("operator.tsv"),
         operator_journal_bytes(&runner.journal),
     )?;
-    let mut manifest = format!("OA_OPERATED_MANIFEST\t1\nmode\tRECORDED_REPLAY\ninput_sha256\t{}\nmodel_sha256\t{}\nexecutable_sha256\t{}\nsettings\tsettings.tsv\t{}\noperator_journal\toperator.tsv\t{}\nscript_sha256\t{}\n",
+    let mut manifest = format!("OA_OPERATED_MANIFEST\t1\nmode\tRECORDED_REPLAY\ninput_sha256\t{}\nmodel_sha256\t{}\nexecutable_sha256\t{}\nsettings\tsettings.tsv\t{}\noperator_journal\toperator.tsv\t{}\nprocessor_report\tprocessor-report.tsv\t{}\nscript_sha256\t{}\n",
         oa_sha256::to_hex(&input_sha), oa_sha256::to_hex(&model_sha), oa_sha256::to_hex(&executable_sha),
         oa_sha256::to_hex(&runner.settings_sha256),
         oa_sha256::to_hex(&oa_sha256::sha256(operator_journal_bytes(&runner.journal))),
+        oa_sha256::to_hex(&oa_sha256::sha256(runner.processor_report.as_bytes())),
         oa_sha256::to_hex(&script_sha));
     for row in &runner.frame_manifest {
         manifest.push_str(row);
@@ -1056,6 +1194,32 @@ fn close_output(
         let _ = fs::remove_file(&marker);
         let _ = directory.sync_all();
         return Err(format!("could not durably close operated session: {error}"));
+    }
+    Ok(())
+}
+
+/// Performs one explicit package inventory check after operation has stopped advancing frames.
+fn finish_processor_inventory(runner: &mut SessionRunner) -> Result<(), String> {
+    if let Some(activation) = runner.local_activation.as_ref() {
+        let report = crate::processor_inventory::check_active_runtime_adaptation(
+            &runner.runtime,
+            activation,
+            crate::processor_inventory::observed_unix_time_ns(),
+        )
+        .map_err(str::to_owned)?;
+        runner
+            .processor_report
+            .push_str(&oa_adapt::local_inventory::render_processor_report_tsv(
+                "ON_DEMAND",
+                &report,
+            ));
+        write_new(
+            &runner.output.join("processor-report.tsv"),
+            runner.processor_report.as_bytes(),
+        )?;
+        if report.status != oa_adapt::local_inventory::LocalInventoryStatus::Match {
+            return Err("issued adaptation on-demand verification found a mismatch; loaded model was retained and no completion marker was written".into());
+        }
     }
     Ok(())
 }
@@ -1100,6 +1264,7 @@ pub fn run_script_session(
         );
         return Err(error);
     }
+    finish_processor_inventory(&mut runner)?;
     close_output(&runner, input_sha, model_sha, executable_sha, script_sha)
 }
 
@@ -1591,6 +1756,7 @@ pub fn run_device_session(
     }
     close_result
         .map_err(|e| format!("KMS close: {e:?}; dedicated owner process must terminate"))?;
+    finish_processor_inventory(&mut runner)?;
     close_output(
         &runner,
         input_sha,
@@ -1611,6 +1777,11 @@ fn load_model(source: &crate::cli::ModelSource) -> Result<(Model, [u8; 32], &'st
             crate::cli::read_guarded(path, MAX_SNAPSHOT_BYTES)?,
             "SUPPLIED_SNAPSHOT",
         ),
+        crate::cli::ModelSource::IssuedPackage { .. } => {
+            return Err(
+                "issued packages must be verified and activated as one runtime source".into(),
+            )
+        }
     };
     let model =
         oa_airspace::core::snapshot::decode(&bytes).map_err(|e| format!("snapshot: {e:?}"))?;

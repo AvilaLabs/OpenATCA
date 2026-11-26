@@ -66,13 +66,16 @@ fn arguments() -> Result<Arguments, CliError> {
     let mut input = None;
     let mut output = None;
     let mut model = None;
+    let mut issued_package = None;
+    let mut issued_manifest_pin = None;
+    let mut processor_id = None;
     let mut safety = None;
     let mut performance = None;
     let mut profile = None;
     let mut count = 0;
     while let Some(arg) = args.next() {
         count += 1;
-        if count > 6 {
+        if count > 8 {
             return Err(CliError::Usage);
         }
         match arg.to_str() {
@@ -85,6 +88,18 @@ fn arguments() -> Result<Arguments, CliError> {
             }
             Some("--synthetic-model") if execute && model.is_none() => {
                 model = Some(oa_regional_session::cli::ModelSource::Synthetic)
+            }
+            Some("--issued-package") if execute && issued_package.is_none() => {
+                issued_package = args.next().map(PathBuf::from)
+            }
+            Some("--issued-manifest-sha256") if execute && issued_manifest_pin.is_none() => {
+                issued_manifest_pin = args.next().and_then(|value| value.into_string().ok())
+            }
+            Some("--processor-id") if execute && processor_id.is_none() => {
+                processor_id = args
+                    .next()
+                    .and_then(|value| value.into_string().ok())
+                    .and_then(|value| value.parse::<u32>().ok())
             }
             Some("--synthetic-msaw") if execute && safety.is_none() => {
                 safety = Some(oa_regional_session::cli::MsawSource::Synthetic)
@@ -116,6 +131,26 @@ fn arguments() -> Result<Arguments, CliError> {
     }
     let input = input.ok_or(CliError::Usage)?;
     let output = output.ok_or(CliError::Usage)?;
+    let issued_fields_present =
+        issued_package.is_some() || issued_manifest_pin.is_some() || processor_id.is_some();
+    if model.is_some() && issued_fields_present {
+        return Err(CliError::Usage);
+    }
+    if issued_fields_present {
+        let root = issued_package.ok_or(CliError::Usage)?;
+        let pin = issued_manifest_pin.ok_or(CliError::Usage)?;
+        let expected_manifest_sha256 =
+            oa_adapt::manifest::parse_pin(&pin).map_err(|_| CliError::Usage)?;
+        let processor_id = processor_id.ok_or(CliError::Usage)?;
+        if processor_id == 0 {
+            return Err(CliError::Usage);
+        }
+        model = Some(oa_regional_session::cli::ModelSource::IssuedPackage {
+            root,
+            expected_manifest_sha256,
+            processor_id,
+        });
+    }
     if execute && model.is_none() {
         return Err(CliError::Usage);
     }
@@ -339,6 +374,9 @@ fn run() -> Result<(), CliError> {
     if let Some(oa_regional_session::cli::ModelSource::Snapshot(path)) = &model {
         oa_sealed::refuse_io(path).map_err(CliError::Io)?;
     }
+    if let Some(oa_regional_session::cli::ModelSource::IssuedPackage { root, .. }) = &model {
+        oa_sealed::refuse_io(root).map_err(CliError::Io)?;
+    }
     if let Some(path) = &performance {
         oa_sealed::refuse_io(path).map_err(CliError::Io)?;
     }
@@ -367,7 +405,7 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model | --issued-package DIR --issued-manifest-sha256 PIN --processor-id ID) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),
