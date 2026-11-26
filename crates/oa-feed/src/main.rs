@@ -1045,8 +1045,8 @@ mod tests {
 
     use super::{
         cutoff_source, deferral_warning, drain, finalize_reader, judge,
-        should_latch_recording_failure, try_send_from_reader, turn_plan, Msg, SendAttempt,
-        SourceGate, TurnPlan, Verdict, Work,
+        should_latch_recording_failure, try_send_from_reader, turn_plan, DrainOptions, Msg,
+        SendAttempt, SourceGate, TurnPlan, Verdict, Work,
     };
     use oa_feed::record::{format_recording, Format, Recorder};
     use oa_feed::{
