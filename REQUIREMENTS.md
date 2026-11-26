@@ -1248,6 +1248,18 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   URLs, byte lengths, SHA-256 values, and outcomes. This is a partial profile, not general IWXXM
   conformance.
 
+- **OA-IWXXM-006** The encoder emits deterministic, XML-escaped, size-bounded IWXXM 2025-2
+  METAR/SPECI documents from the supported normalized report model. Encoding followed by this
+  decoder preserves every represented value; unsupported report kinds and model states that
+  cannot be represented are refused rather than defaulted or omitted; in particular, trend
+  `FROM` is refused because it is absent from the pinned encoder change-indicator enumeration.
+  Tests check the finite emitted profile against pinned WMO v2025-2, AIXM 5.1.1, and GML 3.2 XSD bytes:
+  expanded namespace URIs, declared elements, emitted child ordering/cardinality, required
+  attributes, generated-ID uniqueness, station/runway designator restrictions, and supported
+  measured-unit checks. Product-level physical-domain bounds are enforced separately from the XSD
+  simple-type checks. This is not a general XSD validator, full imported-type validation, or
+  Schematron validation; see the schema source manifest for the exact schema closure and limits.
+
 ### TBFM metering publication (oa-tbfm)
 
 Built on the survey in `docs/TBFM_SURVEY.md` (12,760 real messages, 20 centres).

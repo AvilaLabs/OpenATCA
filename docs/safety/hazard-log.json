@@ -1107,7 +1107,8 @@
     "OA-RWY-020",
     "OA-RWY-021",
     "OA-ENC-023",
-    "OA-NAM-038"
+    "OA-NAM-038",
+    "OA-IWXXM-006"
   ],
   "non_safety_requirement_assessments": [
     {
@@ -16055,7 +16056,8 @@
         "OA-IWXXM-002",
         "OA-IWXXM-003",
         "OA-IWXXM-004",
-        "OA-IWXXM-005"
+        "OA-IWXXM-005",
+        "OA-IWXXM-006"
       ],
       "source_refs": [
         {
@@ -16065,6 +16067,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-AWC-001 through OA-IWXXM-005 in the owning functional sections"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-IWXXM-006"
         }
       ],
       "verification_refs": [
@@ -16197,6 +16203,41 @@
           "requirement_id": "OA-IWXXM-005",
           "file": "crates/oa-iwxxm/src/tests.rs",
           "test_name": "official_wmo_full_report_set_decodes_or_refuses_by_named_construct"
+        },
+        {
+          "requirement_id": "OA-IWXXM-006",
+          "file": "crates/oa-iwxxm/src/tests.rs",
+          "test_name": "metar_and_speci_round_trip_through_the_bounded_encoder"
+        },
+        {
+          "requirement_id": "OA-IWXXM-006",
+          "file": "crates/oa-iwxxm/src/tests.rs",
+          "test_name": "encoder_escapes_nil_reasons_and_preserves_nil_measurements"
+        },
+        {
+          "requirement_id": "OA-IWXXM-006",
+          "file": "crates/oa-iwxxm/src/tests.rs",
+          "test_name": "encoder_uses_unique_gml_ids_and_refuses_unrepresentable_measures"
+        },
+        {
+          "requirement_id": "OA-IWXXM-006",
+          "file": "crates/oa-iwxxm/src/tests.rs",
+          "test_name": "encoder_refuses_station_designators_outside_pinned_aixm_type"
+        },
+        {
+          "requirement_id": "OA-IWXXM-006",
+          "file": "crates/oa-iwxxm/src/tests.rs",
+          "test_name": "encoder_names_and_supported_sequences_are_pinned_to_wmo_xsd"
+        },
+        {
+          "requirement_id": "OA-IWXXM-006",
+          "file": "crates/oa-iwxxm/src/tests.rs",
+          "test_name": "encoded_iwxxm_elements_have_schema_namespace_and_schema_order"
+        },
+        {
+          "requirement_id": "OA-IWXXM-006",
+          "file": "crates/oa-iwxxm/src/tests.rs",
+          "test_name": "encoded_schema_profile_covers_optional_emission_branches"
         }
       ],
       "proof_refs": []
@@ -22802,6 +22843,12 @@
       "function": "flight_plan_and_coordination_message_ingestion",
       "hazard_id": "HZ-FLIGHTDATA-001",
       "rationale": "Engineering safety candidate: incorrect Field 15 resolution, airway/procedure expansion, or altitude constraint handling could present an incomplete or wrong route. The resolver accepts only exact current-model identities and returns explicit refusals for unsupported or ambiguous cases. This does not claim runtime intake of FPL/CHG/DLA/CNL, authoritative or current navigation data, or operational route approval."
+    },
+    {
+      "id": "OA-IWXXM-006",
+      "function": "weather_and_pressure_altitude_inputs",
+      "hazard_id": "HZ-WEATHER-001",
+      "rationale": "Engineering safety candidate: an encoder that changes or misorders represented observations could produce misleading downstream weather context. The bounded encoder refuses model states it cannot represent, checks a finite emitted structure against pinned WMO/AIXM/GML schema bytes, and round-trips represented values. Product-level measurement domain checks are distinct from XSD facets. This is not full imported-type or Schematron validation, operational weather truth, or evidence of an operational consumer."
     }
   ],
   "unresolved_requirement_assessments": []

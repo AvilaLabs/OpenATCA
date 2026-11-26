@@ -1,7 +1,8 @@
 #![allow(clippy::indexing_slicing, clippy::panic)]
 
 use crate::{
-    decode_report, DecodeFailure, DecodeResult, NilValue, QuantityUnit, ReportKind, ReportStatus,
+    decode_report, encode_report, DecodeFailure, DecodeResult, NilValue, QuantityUnit, ReportKind,
+    ReportStatus,
 };
 
 const METAR: &[u8] = br#"<iwxxm:METAR xmlns:iwxxm="http://icao.int/iwxxm/2025-2"
@@ -41,12 +42,734 @@ const WMO_TAF_NIL_COLLECTION: &[u8] =
     include_bytes!("../testdata/official-wmo-v2025-2/taf-NIL-collect.xml");
 const WMO_TAF_TRANSLATION_FAILED: &[u8] =
     include_bytes!("../testdata/official-wmo-v2025-2/taf-translation-failed.xml");
+const METAR_SPECI_XSD: &str = include_str!("../testdata/schema-2025-2/metarSpeci.xsd");
+const COMMON_XSD: &str = include_str!("../testdata/schema-2025-2/common.xsd");
+const AIXM_XSD: &str = include_str!("../testdata/schema-2025-2/external/AIXM_Features.xsd");
+const AIXM_BASE_XSD: &str =
+    include_str!("../testdata/schema-2025-2/external/AIXM_AbstractGML_ObjectTypes.xsd");
+const AIXM_DATA_TYPES_XSD: &str =
+    include_str!("../testdata/schema-2025-2/external/AIXM_DataTypes.xsd");
+const GML_TEMPORAL_XSD: &str = include_str!("../testdata/schema-2025-2/external/gml/temporal.xsd");
 
 fn decode_supported(input: &[u8], context: &str) -> DecodeResult {
     match decode_report(input) {
         Ok(result) => result,
         Err(error) => panic!("{context}: decode refused: {error:?}"),
     }
+}
+
+fn schema_sequence<'a>(schema: &'a str, type_name: &str) -> Vec<&'a str> {
+    let marker = format!("<complexType name=\"{type_name}\"");
+    let type_start = schema
+        .find(&marker)
+        .unwrap_or_else(|| panic!("schema type missing: {type_name}"));
+    let body_start = schema[type_start..]
+        .find('>')
+        .map(|at| type_start + at + 1)
+        .unwrap_or_else(|| panic!("schema type start is malformed: {type_name}"));
+    let mut cursor = body_start;
+    let mut depth = 1usize;
+    let body_end = loop {
+        let open = schema[cursor..].find("<complexType").map(|at| cursor + at);
+        let close = schema[cursor..]
+            .find("</complexType>")
+            .map(|at| cursor + at);
+        let next = match (open, close) {
+            (Some(open), Some(close)) => open.min(close),
+            (Some(open), None) => open,
+            (None, Some(close)) => close,
+            (None, None) => panic!("schema type is not closed: {type_name}"),
+        };
+        if Some(next) == open {
+            depth += 1;
+            cursor = schema[next..]
+                .find('>')
+                .map(|at| next + at + 1)
+                .unwrap_or_else(|| panic!("nested schema type is malformed: {type_name}"));
+        } else {
+            depth -= 1;
+            if depth == 0 {
+                break next;
+            }
+            cursor = next + "</complexType>".len();
+        }
+    };
+    let body = &schema[body_start..body_end];
+    let sequence_start = body
+        .find("<sequence")
+        .unwrap_or_else(|| panic!("schema sequence missing: {type_name}"));
+    let mut cursor = body[sequence_start..]
+        .find('>')
+        .map(|relative| sequence_start + relative + 1)
+        .unwrap_or_else(|| panic!("schema sequence start is malformed: {type_name}"));
+    let mut depth = 1usize;
+    let mut result = Vec::new();
+    while depth > 0 {
+        let open = body[cursor..].find("<sequence").map(|at| cursor + at);
+        let close = body[cursor..].find("</sequence>").map(|at| cursor + at);
+        let next = match (open, close) {
+            (Some(open), Some(close)) => open.min(close),
+            (Some(open), None) => open,
+            (None, Some(close)) => close,
+            (None, None) => panic!("schema sequence is not closed: {type_name}"),
+        };
+        if depth == 1 {
+            let mut element_cursor = cursor;
+            while let Some(relative) = body[element_cursor..next].find("<element") {
+                let element = element_cursor + relative;
+                let Some(end) = body[element..next].find('>') else {
+                    break;
+                };
+                let tag = &body[element..element + end];
+                if let Some(name) = tag
+                    .split_once("name=\"")
+                    .and_then(|(_, tail)| tail.split_once('"').map(|(name, _)| name))
+                {
+                    result.push(name);
+                }
+                element_cursor = element + end + 1;
+            }
+        }
+        if Some(next) == open {
+            depth += 1;
+            cursor = body[next..]
+                .find('>')
+                .map(|relative| next + relative + 1)
+                .unwrap_or_else(|| panic!("malformed nested schema sequence: {type_name}"));
+        } else {
+            depth -= 1;
+            cursor = next + "</sequence>".len();
+        }
+    }
+    result
+}
+
+fn direct_names<'a>(
+    doc: &oa_xml::Doc<'a>,
+    input: &'a [u8],
+    parent: oa_xml::ElemIx,
+) -> Vec<&'a str> {
+    let mut result = Vec::new();
+    let mut child = doc.elem_first_child[parent.0 as usize];
+    while child != oa_xml::ElemIx::NONE {
+        result.push(
+            core::str::from_utf8(
+                oa_xml::span_bytes(input, doc.elem_name[child.0 as usize])
+                    .unwrap_or_else(|error| panic!("element name span: {error:?}")),
+            )
+            .unwrap_or_else(|error| panic!("ASCII XML name: {error:?}")),
+        );
+        child = doc.elem_next_sibling[child.0 as usize];
+    }
+    result
+}
+
+fn assert_order_subset(actual: &[&str], expected: &[&str], context: &str) {
+    let mut next = 0usize;
+    let mut previous: Option<&str> = None;
+    for name in actual {
+        if previous == Some(name) {
+            // The schema sequence permits repeated occurrences of this element; the separate
+            // profile cardinality assertions enforce the local maximum for emitted lists.
+            continue;
+        }
+        let Some(relative) = expected[next..]
+            .iter()
+            .position(|candidate| candidate == name)
+        else {
+            panic!("{context}: child {name} is out of profile sequence; actual={actual:?}");
+        };
+        next += relative + 1;
+        previous = Some(name);
+    }
+}
+
+fn has_attribute(
+    doc: &oa_xml::Doc<'_>,
+    input: &[u8],
+    element: oa_xml::ElemIx,
+    qname: &str,
+) -> bool {
+    let index = element.0 as usize;
+    let start = doc.elem_first_attr[index].0 as usize;
+    let end = start + doc.elem_attr_count[index] as usize;
+    (start..end).any(|attr| {
+        let prefix = oa_xml::span_bytes(input, doc.attr_prefix[attr]).unwrap_or(b"");
+        let name = oa_xml::span_bytes(input, doc.attr_name[attr]).unwrap_or(b"");
+        let expected = qname.split_once(':');
+        match expected {
+            Some((wanted_prefix, wanted_name)) => {
+                prefix == wanted_prefix.as_bytes() && name == wanted_name.as_bytes()
+            }
+            None => prefix.is_empty() && name == qname.as_bytes(),
+        }
+    })
+}
+
+// REQ: OA-IWXXM-006
+#[test]
+fn metar_and_speci_round_trip_through_the_bounded_encoder() {
+    for (source, label) in [(WMO_METAR, "METAR"), (WMO_SPECI, "SPECI")] {
+        let before = decode_supported(source, label).report;
+        let encoded = encode_report(&before).unwrap_or_else(|error| panic!("{label}: {error:?}"));
+        assert!(encoded.len() <= crate::MAX_DOCUMENT_BYTES);
+        let encoded_again =
+            encode_report(&before).unwrap_or_else(|error| panic!("{label}: {error:?}"));
+        assert_eq!(
+            encoded, encoded_again,
+            "canonical output must be deterministic"
+        );
+        let after = decode_supported(&encoded, "encoded WMO report").report;
+        assert_eq!(
+            after, before,
+            "{label} normalized values must survive encode/decode"
+        );
+    }
+}
+
+// REQ: OA-IWXXM-006
+#[test]
+fn encoder_escapes_nil_reasons_and_preserves_nil_measurements() {
+    let mut before = decode_supported(WMO_METAR, "WMO METAR for escaping").report;
+    let crate::NilValueObservation::Observed(observation) = &mut before.observation else {
+        panic!("observation expected")
+    };
+    observation.runway_visual_ranges[0].runway_designator = Some("12A".to_owned());
+    observation.air_temperature = Some(NilValue::Nil {
+        reason_uri: Some("urn:example:missing?x=1&y=2".to_owned()),
+    });
+    if let Some(crate::WeatherCode::CodeUri(uri)) = observation.present_weather.first_mut() {
+        *uri = "https://example.invalid/weather?x=1&y=\"2\"".to_owned();
+    }
+    let encoded = encode_report(&before)
+        .unwrap_or_else(|error| panic!("normalized report encodes: {error:?}"));
+    let encoded_text = core::str::from_utf8(&encoded)
+        .unwrap_or_else(|error| panic!("encoder emits UTF-8: {error:?}"));
+    assert!(encoded_text.contains("&amp;y=2"));
+    let after = decode_report(&encoded)
+        .unwrap_or_else(|error| {
+            panic!(
+                "encoded escaped URI and nil value refused: {error:?}; output={}",
+                String::from_utf8_lossy(&encoded)
+            )
+        })
+        .report;
+    assert_eq!(after, before);
+}
+
+// REQ: OA-IWXXM-006
+#[test]
+fn encoder_uses_unique_gml_ids_and_refuses_unrepresentable_measures() {
+    assert!(AIXM_DATA_TYPES_XSD.contains("name=\"TextDesignatorBaseType\""));
+    assert!(AIXM_DATA_TYPES_XSD.contains("<maxLength value=\"16\"/>"));
+    assert!(AIXM_DATA_TYPES_XSD.contains("<minLength value=\"1\"/>"));
+    assert!(AIXM_DATA_TYPES_XSD.contains("name=\"Character3Type\""));
+    assert!(AIXM_DATA_TYPES_XSD.contains("value=\"([A-Z]|[0-9]|["));
+    let mut report = decode_supported(WMO_METAR, "WMO METAR for identity checks").report;
+    let crate::NilValueObservation::Observed(observation) = &mut report.observation else {
+        panic!("observation expected")
+    };
+    let rvr = observation.runway_visual_ranges[0].clone();
+    observation.runway_visual_ranges.push(rvr);
+    let encoded =
+        encode_report(&report).unwrap_or_else(|error| panic!("two RVR entries encode: {error:?}"));
+    let text =
+        core::str::from_utf8(&encoded).unwrap_or_else(|error| panic!("UTF-8 XML: {error:?}"));
+    let mut ids = std::collections::BTreeSet::new();
+    for field in text.split("gml:id=\"").skip(1) {
+        let id = field
+            .split('\"')
+            .next()
+            .unwrap_or_else(|| panic!("quoted ID"));
+        assert!(ids.insert(id), "duplicate gml:id {id}");
+    }
+    assert_eq!(decode_supported(&encoded, "two RVR output").report, report);
+
+    let mut invalid = decode_supported(WMO_METAR, "WMO METAR for invalid unit").report;
+    let crate::NilValueObservation::Observed(observation) = &mut invalid.observation else {
+        panic!("observation expected")
+    };
+    let Some(crate::Cloud::Observed { layers, .. }) = observation.cloud.as_mut() else {
+        panic!("fixture cloud layers expected")
+    };
+    layers[0].base = NilValue::Measure {
+        measure: crate::Measure {
+            mantissa: 100,
+            scale: 0,
+            unit: QuantityUnit::Celsius,
+        },
+        operator: None,
+    };
+    assert!(encode_report(&invalid).is_err());
+
+    for designator in ["12\rA", "12\nA", "ab12", "12345678901234567"] {
+        let mut invalid_designator =
+            decode_supported(WMO_METAR, "WMO METAR for runway designator type").report;
+        let crate::NilValueObservation::Observed(observation) = &mut invalid_designator.observation
+        else {
+            panic!("observed runway report expected")
+        };
+        observation.runway_visual_ranges[0].runway_designator = Some(designator.to_owned());
+        assert!(
+            encode_report(&invalid_designator).is_err(),
+            "AIXM TextDesignatorBaseType must refuse {designator:?}"
+        );
+    }
+
+    let mut below_absolute_zero = decode_supported(WMO_METAR, "temperature domain fixture").report;
+    let crate::NilValueObservation::Observed(observation) = &mut below_absolute_zero.observation
+    else {
+        panic!("observed temperature report expected")
+    };
+    observation.air_temperature = Some(NilValue::Measure {
+        measure: crate::Measure {
+            mantissa: -27_316,
+            scale: 2,
+            unit: QuantityUnit::Celsius,
+        },
+        operator: None,
+    });
+    assert!(encode_report(&below_absolute_zero).is_err());
+
+    let mut nonpositive_qnh = decode_supported(WMO_METAR, "pressure domain fixture").report;
+    let crate::NilValueObservation::Observed(observation) = &mut nonpositive_qnh.observation else {
+        panic!("observed pressure report expected")
+    };
+    observation.qnh = Some(NilValue::Measure {
+        measure: crate::Measure {
+            mantissa: 0,
+            scale: 0,
+            unit: QuantityUnit::Hectopascal,
+        },
+        operator: None,
+    });
+    assert!(encode_report(&nonpositive_qnh).is_err());
+
+    let mut out_of_range_direction = decode_supported(WMO_METAR, "direction domain fixture").report;
+    let crate::NilValueObservation::Observed(observation) = &mut out_of_range_direction.observation
+    else {
+        panic!("observed direction report expected")
+    };
+    observation.wind_direction = Some(NilValue::Measure {
+        measure: crate::Measure {
+            mantissa: 361,
+            scale: 0,
+            unit: QuantityUnit::Degree,
+        },
+        operator: None,
+    });
+    assert!(encode_report(&out_of_range_direction).is_err());
+}
+
+// REQ: OA-IWXXM-006
+#[test]
+fn encoder_refuses_station_designators_outside_pinned_aixm_type() {
+    let report = decode_supported(WMO_METAR, "WMO station designator fixture").report;
+    assert!(AIXM_DATA_TYPES_XSD.contains("<maxLength value=\"6\"/>"));
+    assert!(AIXM_DATA_TYPES_XSD.contains("<minLength value=\"3\"/>"));
+    assert!(AIXM_DATA_TYPES_XSD.contains(r#"([A-Z]|\d)*"#));
+    for station in ["abcd", "ABCDEFG", "AB", "ABC_", "ABCD1\n"] {
+        let mut candidate = report.clone();
+        candidate.station = station.to_owned();
+        assert!(
+            encode_report(&candidate).is_err(),
+            "station outside AIXM CodeAirportHeliportDesignatorBaseType must be refused: {station:?}"
+        );
+    }
+}
+
+// REQ: OA-IWXXM-006
+#[test]
+fn encoder_names_and_supported_sequences_are_pinned_to_wmo_xsd() {
+    assert!(METAR_SPECI_XSD.contains("targetNamespace=\"http://icao.int/iwxxm/2025-2\""));
+    assert!(METAR_SPECI_XSD.contains("version=\"3.2.0\""));
+    assert!(COMMON_XSD.contains("targetNamespace=\"http://icao.int/iwxxm/2025-2\""));
+    assert_eq!(
+        schema_sequence(
+            METAR_SPECI_XSD,
+            "MeteorologicalAerodromeObservationReportType"
+        ),
+        [
+            "issueTime",
+            "aerodrome",
+            "observationTime",
+            "observation",
+            "trendForecast"
+        ]
+    );
+    assert_eq!(
+        schema_sequence(METAR_SPECI_XSD, "MeteorologicalAerodromeObservationType"),
+        [
+            "airTemperature",
+            "dewpointTemperature",
+            "qnh",
+            "surfaceWind",
+            "visibility",
+            "rvr",
+            "presentWeather",
+            "cloud",
+            "recentWeather",
+            "windShear",
+            "seaCondition",
+            "extension",
+        ]
+    );
+    assert_eq!(
+        schema_sequence(AIXM_XSD, "AirportHeliportType"),
+        ["timeSlice"]
+    );
+    assert_eq!(
+        schema_sequence(AIXM_XSD, "RunwayDirectionType"),
+        ["timeSlice"]
+    );
+    assert!(GML_TEMPORAL_XSD.contains(r#"<element ref="gml:timePosition"/>"#));
+    for declaration in [
+        "AirportHeliport",
+        "AirportHeliportTimeSlice",
+        "RunwayDirection",
+        "RunwayDirectionTimeSlice",
+    ] {
+        assert!(
+            AIXM_XSD.contains(&format!("name=\"{declaration}\""))
+                || AIXM_BASE_XSD.contains(&format!("name=\"{declaration}\"")),
+            "AIXM declaration missing for {declaration}"
+        );
+    }
+    assert!(GML_TEMPORAL_XSD.contains("name=\"TimeInstant\""));
+    assert!(GML_TEMPORAL_XSD.contains("name=\"TimePeriod\""));
+    assert!(GML_TEMPORAL_XSD.contains("<sequence minOccurs=\"0\">"));
+    assert!(AIXM_BASE_XSD.contains("<element ref=\"gml:identifier\" minOccurs=\"0\"/>"));
+    for name in [
+        "METAR",
+        "SPECI",
+        "MeteorologicalAerodromeObservation",
+        "AerodromeSurfaceWind",
+        "AerodromeHorizontalVisibility",
+        "AerodromeRunwayVisualRange",
+        "AerodromeCloud",
+        "CloudLayer",
+        "AerodromeWindShear",
+        "MeteorologicalAerodromeTrendForecast",
+    ] {
+        let declaration = format!("name=\"{name}\"");
+        assert!(
+            METAR_SPECI_XSD.contains(&declaration) || COMMON_XSD.contains(&declaration),
+            "IWXXM schema declaration missing for {name}"
+        );
+    }
+    assert!(METAR_SPECI_XSD.contains("maxOccurs=\"3\""));
+    assert!(METAR_SPECI_XSD.contains("maxOccurs=\"4\""));
+    for declaration in [
+        "name=\"airTemperature\" type=\"iwxxm:MeasureWithNilReasonType\"",
+        "name=\"dewpointTemperature\" type=\"iwxxm:MeasureWithNilReasonType\"",
+        "name=\"qnh\" type=\"iwxxm:MeasureWithNilReasonType\"",
+        "name=\"meanWindDirection\" type=\"iwxxm:AngleWithNilReasonType\"",
+        "name=\"meanWindSpeed\" type=\"iwxxm:VelocityWithNilReasonType\"",
+        "name=\"windGustSpeed\" type=\"iwxxm:VelocityWithNilReasonType\"",
+        "name=\"meanRVR\" type=\"iwxxm:DistanceWithNilReasonType\"",
+        "name=\"prevailingVisibility\" type=\"gml:LengthType\"",
+    ] {
+        assert!(
+            METAR_SPECI_XSD.contains(declaration),
+            "expected simple-type declaration: {declaration}"
+        );
+    }
+    assert!(COMMON_XSD.contains("name=\"base\" type=\"iwxxm:DistanceWithNilReasonType\""));
+    assert!(AIXM_DATA_TYPES_XSD.contains("name=\"CodeAirportHeliportDesignatorBaseType\""));
+    assert!(AIXM_DATA_TYPES_XSD.contains("name=\"TextDesignatorBaseType\""));
+}
+
+fn check_encoded_schema_profile(source: &crate::Report, label: &str) {
+    let encoded =
+        encode_report(source).unwrap_or_else(|error| panic!("{label} encodes: {error:?}"));
+    let mut parser = oa_xml::Parser::new(oa_xml::Limits::default())
+        .unwrap_or_else(|error| panic!("bounded parser: {error:?}"));
+    let doc = parser.parse(&encoded).unwrap_or_else(|error| {
+        panic!(
+            "encoded XML parses: {error:?}; output={}",
+            String::from_utf8_lossy(&encoded)
+        )
+    });
+    let iwxxm = b"http://icao.int/iwxxm/2025-2";
+    let aixm = b"http://www.aixm.aero/schema/5.1.1";
+    let gml = b"http://www.opengis.net/gml/3.2";
+    for index in 0..doc.elem_name.len() {
+        let element = oa_xml::ElemIx(index as u32);
+        let namespace = match oa_xml::resolve_elem_ns(&doc, element) {
+            oa_xml::Ns::Uri(span) => oa_xml::span_bytes(&encoded, span)
+                .unwrap_or_else(|error| panic!("namespace span: {error:?}")),
+            _ => panic!("every emitted element is namespace-qualified"),
+        };
+        assert!(
+            namespace == iwxxm || namespace == aixm || namespace == gml,
+            "unexpected element namespace: {}",
+            core::str::from_utf8(namespace).unwrap_or("invalid UTF-8")
+        );
+        if namespace == iwxxm {
+            let local = core::str::from_utf8(
+                oa_xml::span_bytes(&encoded, doc.elem_name[index])
+                    .unwrap_or_else(|error| panic!("name span: {error:?}")),
+            )
+            .unwrap_or_else(|error| panic!("ASCII local name: {error:?}"));
+            let declaration = format!("name=\"{local}\"");
+            assert!(
+                METAR_SPECI_XSD.contains(&declaration)
+                    || COMMON_XSD.contains(&declaration)
+                    || matches!(local, "METAR" | "SPECI"),
+                "no declaration for IWXXM element {local}"
+            );
+        } else if namespace == aixm {
+            let local = core::str::from_utf8(
+                oa_xml::span_bytes(&encoded, doc.elem_name[index])
+                    .unwrap_or_else(|error| panic!("AIXM name span: {error:?}")),
+            )
+            .unwrap_or_else(|error| panic!("ASCII AIXM local name: {error:?}"));
+            assert!(
+                AIXM_XSD.contains(&format!("name=\"{local}\""))
+                    || AIXM_BASE_XSD.contains(&format!("name=\"{local}\"")),
+                "no AIXM 5.1.1 declaration for {local}"
+            );
+        } else if namespace == gml {
+            let local = core::str::from_utf8(
+                oa_xml::span_bytes(&encoded, doc.elem_name[index])
+                    .unwrap_or_else(|error| panic!("GML name span: {error:?}")),
+            )
+            .unwrap_or_else(|error| panic!("ASCII GML local name: {error:?}"));
+            assert!(
+                GML_TEMPORAL_XSD.contains(&format!("name=\"{local}\"")),
+                "no GML 3.2 temporal declaration for {local}"
+            );
+        }
+    }
+    let root_children = direct_names(&doc, &encoded, oa_xml::ElemIx(0));
+    assert_eq!(
+        &root_children[..4],
+        ["issueTime", "aerodrome", "observationTime", "observation"]
+    );
+    assert!(root_children[4..]
+        .iter()
+        .all(|name| *name == "trendForecast"));
+    assert!(root_children.len() <= 4 + crate::MAX_TREND_FORECASTS);
+    let mut observation_wrapper = doc.elem_first_child[0];
+    for _ in 0..3 {
+        observation_wrapper = doc.elem_next_sibling[observation_wrapper.0 as usize];
+    }
+    let observation = doc.elem_first_child[observation_wrapper.0 as usize];
+    let observation_children = direct_names(&doc, &encoded, observation);
+    let count = |name: &str| {
+        observation_children
+            .iter()
+            .filter(|child| **child == name)
+            .count()
+    };
+    assert!(count("rvr") <= crate::MAX_RVR_ITEMS);
+    assert!(count("presentWeather") <= crate::MAX_PRESENT_WEATHER);
+    assert!(count("recentWeather") <= crate::MAX_RECENT_WEATHER);
+    assert!(count("cloud") <= 1);
+    let mut emitted = observation_children;
+    emitted.dedup();
+    let schema = schema_sequence(METAR_SPECI_XSD, "MeteorologicalAerodromeObservationType");
+    let supported_schema = schema
+        .into_iter()
+        .take_while(|name| *name != "seaCondition" && *name != "extension")
+        .collect::<Vec<_>>();
+    assert_order_subset(&emitted, &supported_schema, "observation type");
+
+    for (index, span) in doc.elem_name.iter().enumerate() {
+        let local = core::str::from_utf8(
+            oa_xml::span_bytes(&encoded, *span)
+                .unwrap_or_else(|error| panic!("element name span: {error:?}")),
+        )
+        .unwrap_or_else(|error| panic!("ASCII element name: {error:?}"));
+        let expected = match local {
+            "METAR" | "SPECI" => Some((
+                METAR_SPECI_XSD,
+                "MeteorologicalAerodromeObservationReportType",
+            )),
+            "MeteorologicalAerodromeObservation" => {
+                Some((METAR_SPECI_XSD, "MeteorologicalAerodromeObservationType"))
+            }
+            "AerodromeSurfaceWind" => Some((METAR_SPECI_XSD, "AerodromeSurfaceWindType")),
+            "AerodromeHorizontalVisibility" => {
+                Some((METAR_SPECI_XSD, "AerodromeHorizontalVisibilityType"))
+            }
+            "AerodromeRunwayVisualRange" => {
+                Some((METAR_SPECI_XSD, "AerodromeRunwayVisualRangeType"))
+            }
+            "AerodromeCloud" => Some((METAR_SPECI_XSD, "AerodromeCloudType")),
+            "CloudLayer" => Some((COMMON_XSD, "CloudLayerType")),
+            "AerodromeWindShear" => Some((METAR_SPECI_XSD, "AerodromeWindShearType")),
+            "MeteorologicalAerodromeTrendForecast" => {
+                Some((METAR_SPECI_XSD, "MeteorologicalAerodromeTrendForecastType"))
+            }
+            "AirportHeliport" => Some((AIXM_XSD, "AirportHeliportType")),
+            "AirportHeliportTimeSlice" => None,
+            "RunwayDirection" => Some((AIXM_XSD, "RunwayDirectionType")),
+            "RunwayDirectionTimeSlice" => None,
+            "TimeInstant" => None,
+            "TimePeriod" => Some((GML_TEMPORAL_XSD, "TimePeriodType")),
+            _ => None,
+        };
+        if let Some((schema, type_name)) = expected {
+            let actual = direct_names(&doc, &encoded, oa_xml::ElemIx(index as u32));
+            let sequence = schema_sequence(schema, type_name);
+            assert_order_subset(&actual, &sequence, type_name);
+        }
+        let element = oa_xml::ElemIx(index as u32);
+        match local {
+            "METAR" | "SPECI" => {
+                for required in ["gml:id", "reportStatus", "permissibleUsage"] {
+                    assert!(
+                        has_attribute(&doc, &encoded, element, required),
+                        "{local} missing {required}"
+                    );
+                }
+            }
+            "TimeInstant"
+            | "TimePeriod"
+            | "AirportHeliport"
+            | "AirportHeliportTimeSlice"
+            | "RunwayDirection"
+            | "RunwayDirectionTimeSlice"
+            | "MeteorologicalAerodromeObservation"
+            | "AerodromeSurfaceWind"
+            | "MeteorologicalAerodromeTrendForecast" => {
+                assert!(
+                    has_attribute(&doc, &encoded, element, "gml:id"),
+                    "{local} missing gml:id"
+                );
+            }
+            "airTemperature"
+            | "dewpointTemperature"
+            | "qnh"
+            | "meanWindDirection"
+            | "meanWindSpeed"
+            | "windGustSpeed"
+            | "prevailingVisibility"
+            | "minimumVisibility"
+            | "minimumVisibilityDirection"
+            | "meanRVR"
+            | "base"
+            | "verticalVisibility" => {
+                assert!(
+                    has_attribute(&doc, &encoded, element, "uom")
+                        || has_attribute(&doc, &encoded, element, "nilReason"),
+                    "{local} lacks its measured unit or explicit nil reason"
+                );
+            }
+            _ => {}
+        }
+        if matches!(
+            local,
+            "presentWeather" | "recentWeather" | "weather" | "amount" | "cloudType"
+        ) {
+            assert_ne!(
+                has_attribute(&doc, &encoded, element, "xlink:href"),
+                has_attribute(&doc, &encoded, element, "nilReason"),
+                "{local} must have exactly one coded href or nil reason"
+            );
+        }
+        match local {
+            "TimeInstant" => {
+                let actual = direct_names(&doc, &encoded, element);
+                assert_eq!(actual, ["timePosition"]);
+            }
+            "TimePeriod" => {
+                let actual = direct_names(&doc, &encoded, element);
+                assert_eq!(actual, ["beginPosition", "endPosition"]);
+            }
+            "AirportHeliport" | "RunwayDirection" => {
+                let actual = direct_names(&doc, &encoded, element);
+                assert_eq!(actual, ["timeSlice"]);
+            }
+            "AirportHeliportTimeSlice" | "RunwayDirectionTimeSlice" => {
+                let actual = direct_names(&doc, &encoded, oa_xml::ElemIx(index as u32));
+                assert_eq!(actual, ["validTime", "interpretation", "designator"]);
+            }
+            _ => {}
+        }
+    }
+    let encoded_text = core::str::from_utf8(&encoded)
+        .unwrap_or_else(|error| panic!("encoded profile is UTF-8: {error:?}"));
+    assert!(encoded_text.contains(" reportStatus=\""));
+    assert!(encoded_text.contains(" permissibleUsage=\""));
+    assert!(encoded_text.contains(" gml:id=\""));
+    let mut ids = std::collections::BTreeSet::new();
+    for field in encoded_text.split("gml:id=\"").skip(1) {
+        let id = field
+            .split('\"')
+            .next()
+            .unwrap_or_else(|| panic!("quoted ID"));
+        assert!(
+            id.starts_with("uuid."),
+            "generated gml:id is an xs:ID value"
+        );
+        assert!(ids.insert(id), "duplicate generated gml:id {id}");
+    }
+}
+
+// REQ: OA-IWXXM-006
+#[test]
+fn encoded_iwxxm_elements_have_schema_namespace_and_schema_order() {
+    let metar = decode_supported(WMO_METAR, "WMO METAR for schema structure").report;
+    let speci = decode_supported(WMO_SPECI, "WMO SPECI for schema structure").report;
+    check_encoded_schema_profile(&metar, "WMO METAR for schema structure");
+    check_encoded_schema_profile(&speci, "WMO SPECI for schema structure");
+}
+
+// REQ: OA-IWXXM-006
+#[test]
+fn encoded_schema_profile_covers_optional_emission_branches() {
+    let mut report = decode_supported(WMO_METAR, "WMO METAR for optional profile branches").report;
+    let crate::NilValueObservation::Observed(observation) = &mut report.observation else {
+        panic!("observed source report expected")
+    };
+    observation.cloud_and_visibility_ok = false;
+    observation.recent_weather.push(
+        observation
+            .present_weather
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("WMO source report has present weather")),
+    );
+    observation.wind_shear = Some(crate::WindShear {
+        all_runways: false,
+        runway_designators: vec!["09".to_owned()],
+    });
+    report.trends.clear();
+    let observation_time = report.observation_time_ms.unwrap_or(0);
+    report.trends.push(crate::TrendForecast {
+        change: crate::TrendChange::Becoming,
+        time_start_ms: observation_time + 5 * 60 * 1000,
+        time_end_ms: Some(observation_time + 10 * 60 * 1000),
+        time_indicator: None,
+        prevailing_visibility: observation.prevailing_visibility.clone(),
+        prevailing_visibility_operator: None,
+        weather: observation.present_weather.clone(),
+        cloud: observation.cloud.clone(),
+    });
+    check_encoded_schema_profile(&report, "optional IWXXM profile branches");
+    let mut invalid_nil_trend = report.clone();
+    invalid_nil_trend.trends[0].prevailing_visibility = Some(NilValue::Nil {
+        reason_uri: Some("missing".to_owned()),
+    });
+    assert!(encode_report(&invalid_nil_trend).is_err());
+
+    let mut invalid_change_enum = report.clone();
+    let mut invalid_shear_designator = report;
+    let crate::NilValueObservation::Observed(observation) =
+        &mut invalid_shear_designator.observation
+    else {
+        panic!("observed wind-shear report expected")
+    };
+    let Some(shear) = observation.wind_shear.as_mut() else {
+        panic!("wind-shear profile value expected")
+    };
+    shear.runway_designators[0] = "09\n".to_owned();
+    assert!(encode_report(&invalid_shear_designator).is_err());
+
+    invalid_change_enum.trends[0].change = crate::TrendChange::From;
+    assert!(encode_report(&invalid_change_enum).is_err());
 }
 
 fn required_time(text: &[u8]) -> i64 {

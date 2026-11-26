@@ -784,7 +784,7 @@ fn decode_forecast_cloud(
     stats: &mut DecodeStats,
 ) -> Result<crate::Cloud, DecodeError> {
     check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
-    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+    if let Some(reason) = decoded_attr_value(doc, wrapper, input, b"nilReason", stats)? {
         if reason.is_empty()
             || reason.len() > MAX_SCALAR_BYTES
             || first_child(doc, wrapper).is_some()
@@ -888,6 +888,60 @@ fn attr_value<'a>(
                 .map(Some)
                 .map_err(|_| err(DecodeFailure::InvalidValue, *stats));
         }
+    }
+    Ok(None)
+}
+
+fn decoded_attr_value(
+    doc: &oa_xml::Doc<'_>,
+    elem: usize,
+    input: &[u8],
+    want: &[u8],
+    stats: &mut DecodeStats,
+) -> Result<Option<Vec<u8>>, DecodeError> {
+    let first = *doc
+        .elem_first_attr
+        .get(elem)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+    let count = *doc
+        .elem_attr_count
+        .get(elem)
+        .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))? as usize;
+    for i in first.0 as usize..first.0 as usize + count {
+        work(stats)?;
+        let name = span_bytes(
+            input,
+            *doc.attr_name
+                .get(i)
+                .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?,
+        )
+        .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+        if name != want {
+            continue;
+        }
+        if doc.attr_prefix.get(i).is_none_or(|prefix| prefix.len != 0) {
+            return Err(err(DecodeFailure::InvalidValue, *stats));
+        }
+        let span = *doc
+            .attr_value
+            .get(i)
+            .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+        if span.len as usize > MAX_SCALAR_BYTES {
+            return Err(err(DecodeFailure::Limit, *stats));
+        }
+        let raw = span_bytes(input, span).map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+        if !attr_needs_decode(doc, oa_xml::AttrIx(i as u32)) {
+            return Ok(Some(raw.to_vec()));
+        }
+        let mut decoded = [0u8; MAX_SCALAR_BYTES];
+        let len = decode_into(span, input, &mut decoded, oa_xml::SpanKind::AttrValue)
+            .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+        return Ok(Some(
+            decoded
+                .get(..len)
+                .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?
+                .to_vec(),
+        ));
     }
     Ok(None)
 }
@@ -1418,7 +1472,7 @@ fn decode_observation(
     stats: &mut DecodeStats,
 ) -> Result<NilValueObservation, DecodeError> {
     check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
-    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+    if let Some(reason) = decoded_attr_value(doc, wrapper, input, b"nilReason", stats)? {
         if first_child(doc, wrapper).is_some() {
             return Err(err(DecodeFailure::InvalidValue, *stats));
         }
@@ -1633,7 +1687,7 @@ fn decode_visibility(
     stats: &mut DecodeStats,
 ) -> Result<VisibilityFields, DecodeError> {
     check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
-    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+    if let Some(reason) = decoded_attr_value(doc, wrapper, input, b"nilReason", stats)? {
         if first_child(doc, wrapper).is_some()
             || reason.is_empty()
             || reason.len() > MAX_SCALAR_BYTES
@@ -1748,7 +1802,7 @@ fn decode_weather(
     stats: &mut DecodeStats,
 ) -> Result<WeatherCode, DecodeError> {
     check_code_attributes(doc, elem, input, stats)?;
-    if let Some(reason) = attr_value(doc, elem, input, b"nilReason", stats)? {
+    if let Some(reason) = decoded_attr_value(doc, elem, input, b"nilReason", stats)? {
         if reason.is_empty()
             || reason.len() > MAX_SCALAR_BYTES
             || first_child(doc, elem).is_some()
@@ -1813,9 +1867,6 @@ fn check_code_attributes(
             refuse(stats);
             return Err(err(DecodeFailure::UnsupportedConstruct, *stats));
         }
-        if attr_needs_decode(doc, oa_xml::AttrIx(i as u32)) {
-            return Err(err(DecodeFailure::InvalidValue, *stats));
-        }
     }
     Ok(())
 }
@@ -1847,20 +1898,36 @@ fn xlink_href(
         if local == b"href"
             && matches!(resolve_attr_ns(doc, oa_xml::ElemIx(elem as u32), oa_xml::AttrIx(i as u32)), Ns::Uri(s) if oa_xml::ns_uri_bytes(doc, s) == Some(XLINK))
         {
-            if href.is_some() || attr_needs_decode(doc, oa_xml::AttrIx(i as u32)) {
+            if href.is_some() {
                 return Err(err(DecodeFailure::InvalidValue, *stats));
             }
             let span = *doc
                 .attr_value
                 .get(i)
                 .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?;
+            if span.len as usize > MAX_SCALAR_BYTES {
+                return Err(err(DecodeFailure::Limit, *stats));
+            }
             let raw =
                 span_bytes(input, span).map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
-            if raw.is_empty() || raw.len() > MAX_SCALAR_BYTES {
+            let decoded;
+            let value = if attr_needs_decode(doc, oa_xml::AttrIx(i as u32)) {
+                let mut buffer = [0u8; MAX_SCALAR_BYTES];
+                let len = decode_into(span, input, &mut buffer, oa_xml::SpanKind::AttrValue)
+                    .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?;
+                decoded = buffer
+                    .get(..len)
+                    .ok_or_else(|| err(DecodeFailure::InvalidValue, *stats))?
+                    .to_vec();
+                decoded.as_slice()
+            } else {
+                raw
+            };
+            if value.is_empty() {
                 return Err(err(DecodeFailure::Limit, *stats));
             }
             href = Some(
-                String::from_utf8(raw.to_vec())
+                String::from_utf8(value.to_vec())
                     .map_err(|_| err(DecodeFailure::InvalidValue, *stats))?,
             );
         }
@@ -1875,7 +1942,7 @@ fn decode_cloud(
     stats: &mut DecodeStats,
 ) -> Result<crate::Cloud, DecodeError> {
     check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
-    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+    if let Some(reason) = decoded_attr_value(doc, wrapper, input, b"nilReason", stats)? {
         if first_child(doc, wrapper).is_some()
             || reason.is_empty()
             || reason.len() > MAX_SCALAR_BYTES
@@ -1941,13 +2008,18 @@ fn decode_cloud_body(
                             amount = Some(match decode_code_uri(doc, item, input, stats)? {
                                 Some(uri) => crate::CloudAmount::CodeUri(uri),
                                 None => crate::CloudAmount::Nil {
-                                    reason_uri: attr_value(doc, item, input, b"nilReason", stats)?
-                                        .map(|v| {
-                                            String::from_utf8(v.to_vec()).map_err(|_| {
-                                                err(DecodeFailure::InvalidValue, *stats)
-                                            })
-                                        })
-                                        .transpose()?,
+                                    reason_uri: decoded_attr_value(
+                                        doc,
+                                        item,
+                                        input,
+                                        b"nilReason",
+                                        stats,
+                                    )?
+                                    .map(|v| {
+                                        String::from_utf8(v.to_vec())
+                                            .map_err(|_| err(DecodeFailure::InvalidValue, *stats))
+                                    })
+                                    .transpose()?,
                                 },
                             });
                             rank = 1;
@@ -1966,7 +2038,7 @@ fn decode_cloud_body(
                             check_code_attributes(doc, item, input, stats)?;
                             cloud_type_uri = decode_code_uri(doc, item, input, stats)?;
                             cloud_type_nil_reason_uri =
-                                attr_value(doc, item, input, b"nilReason", stats)?
+                                decoded_attr_value(doc, item, input, b"nilReason", stats)?
                                     .map(|value| {
                                         String::from_utf8(value.to_vec())
                                             .map_err(|_| err(DecodeFailure::InvalidValue, *stats))
@@ -2025,7 +2097,7 @@ fn decode_code_uri(
     input: &[u8],
     stats: &mut DecodeStats,
 ) -> Result<Option<String>, DecodeError> {
-    if let Some(reason) = attr_value(doc, elem, input, b"nilReason", stats)? {
+    if let Some(reason) = decoded_attr_value(doc, elem, input, b"nilReason", stats)? {
         if reason.is_empty()
             || reason.len() > MAX_SCALAR_BYTES
             || xlink_href(doc, elem, input, stats)?.is_some()
@@ -2129,7 +2201,7 @@ fn decode_runway(
     stats: &mut DecodeStats,
 ) -> Result<(Option<String>, Option<String>), DecodeError> {
     check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
-    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+    if let Some(reason) = decoded_attr_value(doc, wrapper, input, b"nilReason", stats)? {
         if reason.is_empty()
             || reason.len() > MAX_SCALAR_BYTES
             || first_child(doc, wrapper).is_some()
@@ -2186,7 +2258,7 @@ fn decode_wind_shear(
     stats: &mut DecodeStats,
 ) -> Result<(Option<WindShear>, Option<String>), DecodeError> {
     check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
-    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+    if let Some(reason) = decoded_attr_value(doc, wrapper, input, b"nilReason", stats)? {
         if reason.is_empty()
             || reason.len() > MAX_SCALAR_BYTES
             || first_child(doc, wrapper).is_some()
@@ -2425,7 +2497,7 @@ fn decode_surface_wind(
     stats: &mut DecodeStats,
 ) -> Result<DecodedWind, DecodeError> {
     check_attributes(doc, wrapper, input, &[b"nilReason"], stats)?;
-    if let Some(reason) = attr_value(doc, wrapper, input, b"nilReason", stats)? {
+    if let Some(reason) = decoded_attr_value(doc, wrapper, input, b"nilReason", stats)? {
         if first_child(doc, wrapper).is_some() || reason.is_empty() {
             return Err(err(DecodeFailure::InvalidValue, *stats));
         }
@@ -2610,7 +2682,7 @@ fn measure_value_units(
     stats: &mut DecodeStats,
 ) -> Result<NilValue, DecodeError> {
     check_attributes(doc, elem, input, &[b"nilReason", b"uom"], stats)?;
-    let nil_reason = attr_value(doc, elem, input, b"nilReason", stats)?;
+    let nil_reason = decoded_attr_value(doc, elem, input, b"nilReason", stats)?;
     let unit_text = attr_value(doc, elem, input, b"uom", stats)?;
     if let Some(reason) = nil_reason {
         if reason.is_empty() {

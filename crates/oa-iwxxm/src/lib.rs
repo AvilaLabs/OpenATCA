@@ -17,9 +17,11 @@
 //! observation timestamp.
 
 mod decode;
+mod encode;
 mod model;
 
 pub use decode::{decode_report, DecodeError, DecodeFailure, DecodeResult, DecodeStats};
+pub use encode::{encode_report, EncodeError};
 pub use model::{
     Cloud, CloudAmount, CloudLayer, ForecastChange, ForecastGroup, Measure, NilValue,
     NilValueObservation, Observation, PermissibleUsage, QuantityUnit, RelationalOperator, Report,
