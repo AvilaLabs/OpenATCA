@@ -979,6 +979,27 @@ fn namespaced_and_foreign_elements_are_unknown_not_decoded() {
     assert_eq!(r.dec.stats().unknown_elements, 0);
 }
 
+// REQ: OA-FIXM-028
+#[test]
+fn only_the_declared_core_namespace_is_normalized_for_profile_fields() {
+    let valid = format!(
+        r#"<message xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="ns5:FlightMessageType"><flight source="TH" timestamp="{TS}">{}<ns3:flightStatus fdpsFlightStatus="ACTIVE"/></flight></message>"#,
+        gufi_el(GUFI)
+    );
+    let r = run(&doc(&[valid]));
+    assert!(has_field(&r.ev, 0, Field::Status));
+    assert_eq!(r.ev.status[0], STATUS_ACTIVE);
+    assert_eq!(r.dec.stats().unknown_elements, 0);
+
+    let wrong = format!(
+        r#"<message xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="ns5:FlightMessageType"><flight source="TH" timestamp="{TS}">{}<ns2:flightStatus fdpsFlightStatus="ACTIVE"/></flight></message>"#,
+        gufi_el(GUFI)
+    );
+    let r = run(&doc(&[wrong]));
+    assert!(!has_field(&r.ev, 0, Field::Status));
+    assert_eq!(r.dec.stats().unknown_elements, 1);
+}
+
 // REQ: OA-FIXM-010
 #[test]
 fn documents_that_are_not_sfdps_message_collections_are_refused() {
@@ -1242,6 +1263,22 @@ fn route_attribute_whitespace_is_normalised() {
     assert_eq!(route_text(&r.ev, 0), "AA BB CC");
 }
 
+// REQ: OA-FIXM-028
+#[test]
+fn route_attribute_xml_whitespace_is_preserved_with_character_references() {
+    let xml = doc(&[message(
+        "FH",
+        r#"<agreed><route nasRouteText="AA&#x9;BB&#xA;CC&#xD;DD"/></agreed>"#,
+    )])
+    .replace(GUFI, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    let before = run(&xml);
+    assert_eq!(route_text(&before.ev, 0), "AA\tBB\nCC\rDD");
+    let encoded = oa_fixm::encode(&before.ev).expect("route string is representable");
+    assert!(encoded.contains("AA&#x9;BB&#xA;CC&#xD;DD"));
+    let after = run(&encoded);
+    assert_eq!(route_text(&after.ev, 0), route_text(&before.ev, 0));
+}
+
 fn decode_prefix_run(xml: &str, cap: usize) -> (Summary, usize) {
     let mut parser = Parser::new(XmlLimits::default()).unwrap();
     let d = parser.parse(xml.as_bytes()).expect("fixture parses");
@@ -1374,6 +1411,15 @@ fn assigned_altitude_forms_are_states_not_numbers() {
         (22_000, 7000)
     );
     assert_eq!(code_str(&fix.ev.fixalt_point[0]), "ABCDE");
+    let roundtrip = doc(&[message(
+        "TH",
+        r#"<assignedAltitude><altFixAlt><point xsi:type="ns2:FixPointType" fix="ABCDE"/><post uom="FEET">7000.0</post><pre uom="FEET">22000.0</pre></altFixAlt></assignedAltitude>"#,
+    )])
+    .replace(GUFI, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    let source = run(&roundtrip);
+    let encoded = oa_fixm::encode(&source.ev).expect("alt-fix-alt is representable");
+    assert!(encoded.contains("<point xsi:type=\"fb:FixPointType\""));
+    assert_roundtrip(&roundtrip);
     assert_eq!(fix.sum.unknown_elements, 0);
 }
 
@@ -1536,7 +1582,19 @@ fn handoff_event_and_accepting_unit() {
             0,
             "{name}"
         );
+        let roundtrip =
+            doc(&[message("OH", &body)]).replace(GUFI, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+        let source = run(&roundtrip);
+        let encoded = oa_fixm::encode(&source.ev).expect("handoff units are representable");
+        assert!(encoded.contains("<acceptingUnit xsi:type=\"fb:IdentifiedUnitReferenceType\""));
+        assert_roundtrip(&roundtrip);
     }
+    let transferring_without_event = doc(&[message(
+        "OH",
+        r#"<enRoute><boundaryCrossings><handoff><transferringUnit unitIdentifier="ZXYZ" sectorIdentifier="12"/></handoff></boundaryCrossings></enRoute>"#,
+    )])
+    .replace(GUFI, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    assert_roundtrip(&transferring_without_event);
     // A handoff with no event (the track-message form) has no event and no accepting unit.
     let r = one(
         "TH",
@@ -1556,6 +1614,37 @@ fn handoff_event_and_accepting_unit() {
         has_field(&r.ev, 0, Field::HandoffReceiving),
         "the rest of the row is kept"
     );
+}
+
+// REQ: OA-FIXM-028
+#[test]
+fn accepting_handoff_unit_roundtrips_as_concrete_core_subtype() {
+    let xml = doc(&[message(
+        "OH",
+        r#"<enRoute><boundaryCrossings><handoff event="ACCEPTANCE"><acceptingUnit xsi:type="ns2:IdentifiedUnitReferenceType" unitIdentifier="ZYY" sectorIdentifier="1E"/></handoff></boundaryCrossings></enRoute>"#,
+    )])
+    .replace(GUFI, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    let before = run(&xml);
+    assert!(has_field(&before.ev, 0, Field::HandoffAccepting));
+    assert_eq!(unit_code(&before.ev.acpt[0]), "ZYY");
+    assert_eq!(sector_code(&before.ev.acpt[0]), "1E");
+    let encoded = oa_fixm::encode(&before.ev).expect("accepting unit is representable");
+    assert!(encoded.contains("<acceptingUnit xsi:type=\"fb:IdentifiedUnitReferenceType\""));
+    assert_roundtrip(&xml);
+}
+
+// REQ: OA-FIXM-028
+#[test]
+fn transferring_unit_without_event_roundtrips() {
+    let xml = doc(&[message(
+        "OH",
+        r#"<enRoute><boundaryCrossings><handoff><transferringUnit unitIdentifier="ZXYZ" sectorIdentifier="12"/></handoff></boundaryCrossings></enRoute>"#,
+    )])
+    .replace(GUFI, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    let before = run(&xml);
+    assert!(has_field(&before.ev, 0, Field::HandoffTransferring));
+    assert!(!has_field(&before.ev, 0, Field::HandoffEvent));
+    assert_roundtrip(&xml);
 }
 
 // REQ: OA-FIXM-027
@@ -1837,4 +1926,416 @@ fn the_count_of_a_dropped_document_is_its_messages_and_at_least_one() {
     let (r, res) = run_with(&three, 64, 1 << 16, windowed());
     res.unwrap();
     assert_eq!(r.sum.sealed_window_dropped, 3);
+}
+
+fn assert_roundtrip(xml: &str) {
+    let before = run(xml);
+    assert_eq!(before.sum.field_errors, 0);
+    assert_eq!(before.sum.rejected, 0);
+    let encoded = oa_fixm::encode(&before.ev).expect("eligible subset encodes");
+    let after = run(&encoded);
+    assert_eq!(before.ev.len, after.ev.len);
+    assert_eq!(before.ev.present, after.ev.present);
+    assert_eq!(before.ev.errors, after.ev.errors);
+    assert_eq!(before.ev.flags, after.ev.flags);
+    assert_eq!(before.ev.source, after.ev.source);
+    assert_eq!(before.ev.centre, after.ev.centre);
+    assert_eq!(before.ev.ts_ms, after.ev.ts_ms);
+    assert_eq!(before.ev.gufi, after.ev.gufi);
+    assert_eq!(before.ev.callsign, after.ev.callsign);
+    assert_eq!(before.ev.computer_id, after.ev.computer_id);
+    assert_eq!(before.ev.plan_id, after.ev.plan_id);
+    assert_eq!(before.ev.departure, after.ev.departure);
+    assert_eq!(before.ev.arrival, after.ev.arrival);
+    assert_eq!(before.ev.status, after.ev.status);
+    assert_eq!(before.ev.flight_type, after.ev.flight_type);
+    assert_eq!(before.ev.assigned_ft, after.ev.assigned_ft);
+    assert_eq!(before.ev.reported_ft, after.ev.reported_ft);
+    assert_eq!(before.ev.lat_e7, after.ev.lat_e7);
+    assert_eq!(before.ev.lon_e7, after.ev.lon_e7);
+    assert_eq!(before.ev.pos_time_ms, after.ev.pos_time_ms);
+    assert_eq!(before.ev.gs_dkt, after.ev.gs_dkt);
+    assert_eq!(before.ev.vx_dkt, after.ev.vx_dkt);
+    assert_eq!(before.ev.vy_dkt, after.ev.vy_dkt);
+    assert_eq!(before.ev.aircraft_type, after.ev.aircraft_type);
+    assert_eq!(route_text(&before.ev, 0), route_text(&after.ev, 0));
+    assert_eq!(before.ev.operator, after.ev.operator);
+    assert_eq!(before.ev.beacon, after.ev.beacon);
+    assert_eq!(before.ev.ctrl, after.ev.ctrl);
+    assert_eq!(before.ev.recv, after.ev.recv);
+    assert_eq!(before.ev.xfer, after.ev.xfer);
+    assert_eq!(before.ev.dep_actual_ms, after.ev.dep_actual_ms);
+    assert_eq!(before.ev.arr_est_ms, after.ev.arr_est_ms);
+    assert_eq!(before.ev.msg_seq, after.ev.msg_seq);
+    assert_eq!(before.ev.plan_seq, after.ev.plan_seq);
+    assert_eq!(before.ev.assigned_form, after.ev.assigned_form);
+    assert_eq!(before.ev.requested_form, after.ev.requested_form);
+    assert_eq!(before.ev.requested_ft, after.ev.requested_ft);
+    assert_eq!(before.ev.interim_ft, after.ev.interim_ft);
+    assert_eq!(before.ev.block_above_ft, after.ev.block_above_ft);
+    assert_eq!(before.ev.block_below_ft, after.ev.block_below_ft);
+    assert_eq!(before.ev.fixalt_pre_ft, after.ev.fixalt_pre_ft);
+    assert_eq!(before.ev.fixalt_post_ft, after.ev.fixalt_post_ft);
+    assert_eq!(before.ev.fixalt_point, after.ev.fixalt_point);
+    assert_eq!(before.ev.handoff_event, after.ev.handoff_event);
+    assert_eq!(before.ev.acpt, after.ev.acpt);
+    assert_eq!(before.ev.address, after.ev.address);
+}
+
+// REQ: OA-FIXM-028
+#[test]
+fn supported_track_and_flight_plan_fixtures_roundtrip_without_field_loss() {
+    const VALID_GUFI: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    let track = doc(&[message_with(
+        &format!(
+            r#"centre="ZXX" source="TH" system="SLC" timestamp="{TS}" flightType="SCHEDULED""#
+        ),
+        &format!("{}{TH_BODY}", gufi_el(VALID_GUFI)),
+    )]);
+    assert_roundtrip(&track);
+
+    let flight_plan = doc(&[message(
+        "FH",
+        r#"<agreed><route xsi:type="ns5:NasRouteType" nasRouteText="KAAA.TESTA1.FIXAA..FIXBB..KBBB/1532" initialFlightRules="IFR"/></agreed>
+<aircraftDescription xsi:type="ns5:NasAircraftType" equipmentQualifier="L" aircraftAddress="ABCDEF" registration="N1TST" wakeTurbulence="M"><aircraftType><icaoModelIdentifier>B38M</icaoModelIdentifier></aircraftType></aircraftDescription>
+<arrival xsi:type="ns5:NasArrivalType" arrivalPoint="KBBB"/><departure xsi:type="ns5:NasDepartureType" departurePoint="KAAA"/>
+<enRoute xsi:type="ns5:NasEnRouteType"><beaconCodeAssignment><currentBeaconCode>2604</currentBeaconCode></beaconCodeAssignment></enRoute>
+<flightIdentification xsi:type="ns5:NasFlightIdentificationType" computerId="037" aircraftIdentification="TST1"/>
+<flightStatus xsi:type="ns5:NasFlightStatusType" fdpsFlightStatus="PROPOSED"/>
+<requestedAltitude><simple uom="FEET">35000.0</simple></requestedAltitude>"#,
+    )]);
+    assert_roundtrip(&flight_plan.replace(GUFI, VALID_GUFI));
+}
+
+// REQ: OA-FIXM-028
+#[test]
+fn encoded_profile_matches_pinned_official_nas3_element_namespace_rules() {
+    // Normative source: FIXM US Extension 3.0 Nas.xsd generated schema documentation,
+    // https://fixm.aero/releases/US_Ext-3.0/doc/diagrams/Nas.html
+    // (SHA-256 of the retrieved page: 2486d467a070c7ef3e7789185e7ab5cd2f21d1395e328d2e4bc87e33502fc6e7).
+    // It specifies `element form default: unqualified` and MessageCollectionType's `message+`
+    // model (source lines 300–303 and 4387–4400). FIXM Core 3.0.1 archive bytes are pinned at
+    // https://www.fixm.aero/releases/FIXM-3.0.1/FIXM_Core_v3_0_1_Schemas.zip
+    // SHA-256 fe53afa19ef16f9323c83f74f7626550b66f8bf511b418ba007810da3ca05e48.
+    // This is a finite emitted-profile/namespace check, not full SFDPS profile validation.
+    let body = format!(
+        r#"{TH_BODY}
+<agreed><route xsi:type="ns5:NasRouteType" nasRouteText="KAAA.TEST1.KBBB"/></agreed>
+<aircraftDescription xsi:type="ns5:NasAircraftType" aircraftAddress="ABCDEF"><aircraftType><icaoModelIdentifier>B38M</icaoModelIdentifier></aircraftType></aircraftDescription>
+<interimAltitude uom="FEET">30000</interimAltitude><requestedAltitude><simple uom="FEET">35000</simple></requestedAltitude>"#
+    )
+    .replace(
+        r#"<handoff xsi:type="ns5:NasHandoffType">"#,
+        r#"<handoff xsi:type="ns5:NasHandoffType" event="INITIATION">"#,
+    )
+    .replace(
+        r#"<position xsi:type="ns5:NasAircraftPositionType""#,
+        r#"<position xsi:type="ns5:NasAircraftPositionType" coastIndicator="COASTING""#,
+    );
+    let message = message_with(
+        &format!(r#"centre="ZXX" source="FH" timestamp="{TS}" flightType="SCHEDULED""#),
+        &format!("{}{body}", gufi_el("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")),
+    );
+    let input = doc(&[message]);
+    let decoded = run(&input);
+    let encoded = oa_fixm::encode(&decoded.ev).expect("empty supported flight row encodes");
+    let mut parser = Parser::new(XmlLimits::default()).expect("limits valid");
+    let document = parser.parse(encoded.as_bytes()).expect("encoder emits XML");
+    assert_eq!(
+        classify_root(&document),
+        RootClassification::MessageCollectionNas
+    );
+    let root_name = oa_xml::span_bytes(document.input, document.elem_name[0]).unwrap();
+    assert_eq!(root_name, b"MessageCollection");
+    assert!(matches!(
+        oa_xml::resolve_elem_ns(&document, oa_xml::ElemIx(0)),
+        oa_xml::Ns::Uri(uri)
+            if oa_xml::ns_uri_bytes(&document, uri) == Some(b"http://www.faa.aero/nas/3.0")
+    ));
+    // NAS local declarations are unqualified. Inherited Core declarations are qualified in
+    // their owning Core namespace; NAS extension fields remain unqualified.
+    for elem in 1..document.elem_name.len() {
+        let local = oa_xml::span_bytes(document.input, document.elem_name[elem]).unwrap();
+        let expected = match local {
+            b"agreed"
+            | b"route"
+            | b"aircraftDescription"
+            | b"aircraftType"
+            | b"icaoModelIdentifier"
+            | b"arrival"
+            | b"departure"
+            | b"controllingUnit"
+            | b"enRoute"
+            | b"beaconCodeAssignment"
+            | b"currentBeaconCode"
+            | b"boundaryCrossings"
+            | b"position"
+            | b"actualSpeed"
+            | b"surveillance"
+            | b"altitude"
+            | b"flightIdentification"
+            | b"flightStatus"
+            | b"gufi"
+            | b"operator"
+            | b"operatingOrganization"
+            | b"supplementalData" => Some(b"http://www.fixm.aero/flight/3.0".as_slice()),
+            b"runwayPositionAndTime"
+            | b"runwayTime"
+            | b"actual"
+            | b"estimated"
+            | b"location"
+            | b"nameValue" => Some(b"http://www.fixm.aero/base/3.0".as_slice()),
+            b"organization" | b"pos" => Some(b"http://www.fixm.aero/foundation/3.0".as_slice()),
+            _ => None,
+        };
+        match (
+            expected,
+            oa_xml::resolve_elem_ns(&document, oa_xml::ElemIx(elem as u32)),
+        ) {
+            (None, oa_xml::Ns::None) => {}
+            (Some(uri), oa_xml::Ns::Uri(ns)) => {
+                assert_eq!(oa_xml::ns_uri_bytes(&document, ns), Some(uri));
+            }
+            mismatch => panic!(
+                "unexpected element namespace for {}: {mismatch:?}",
+                std::str::from_utf8(local).unwrap()
+            ),
+        }
+    }
+    let flight = document
+        .elem_name
+        .iter()
+        .enumerate()
+        .find_map(|(index, name)| {
+            let local = oa_xml::span_bytes(document.input, *name).ok()?;
+            let parent = document.elem_parent.get(index)?;
+            (local == b"flight" && parent.0 == 1).then_some(index as u32)
+        })
+        .expect("one flight in message");
+    let direct_child_names = |parent: u32| {
+        document
+            .elem_name
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| {
+                (document.elem_parent.get(index)?.0 == parent)
+                    .then(|| oa_xml::span_bytes(document.input, *name).ok())
+                    .flatten()
+            })
+            .map(|bytes| std::str::from_utf8(bytes).expect("element names are UTF-8"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        direct_child_names(flight),
+        [
+            "agreed",
+            "aircraftDescription",
+            "arrival",
+            "controllingUnit",
+            "departure",
+            "enRoute",
+            "flightIdentification",
+            "flightStatus",
+            "gufi",
+            "operator",
+            "supplementalData",
+            "assignedAltitude",
+            "flightPlan",
+            "interimAltitude",
+            "requestedAltitude",
+        ]
+    );
+    assert!(encoded.contains("codeSpace=\"urn:uuid\""));
+    assert!(encoded.contains("srsName=\"urn:ogc:def:crs:EPSG::4326\""));
+    assert!(encoded.contains("uom=\"FEET\""));
+    assert!(encoded.contains("uom=\"KNOTS\""));
+    for xsi_type in [
+        "nas:FlightMessageType",
+        "nas:NasFlightType",
+        "nas:NasRouteType",
+        "nas:NasAircraftType",
+        "nas:NasArrivalType",
+        "nas:NasDepartureType",
+        "nas:NasEnRouteType",
+        "nas:NasUnitBoundaryType",
+        "nas:NasHandoffType",
+        "nas:NasAircraftPositionType",
+        "nas:NasFlightIdentificationType",
+        "nas:NasFlightStatusType",
+        "nas:NasSupplementalDataType",
+        "fb:LocationPointType",
+    ] {
+        assert!(
+            encoded.contains(&format!("xsi:type=\"{xsi_type}\"")),
+            "{xsi_type}"
+        );
+    }
+    for lexical in [
+        "fdpsFlightStatus=\"ACTIVE\"",
+        "event=\"INITIATION\"",
+        "flightType=\"SCHEDULED\"",
+        "coastIndicator=\"COASTING\"",
+        "name=\"MSG_SEQ_NO\"",
+        "name=\"FLIGHT_PLAN_SEQ_NO\"",
+    ] {
+        assert!(encoded.contains(lexical), "{lexical}");
+    }
+}
+
+// REQ: OA-FIXM-028
+#[test]
+fn parsed_block_altitude_roundtrips_without_field_loss() {
+    let xml = doc(&[message(
+        "FH",
+        r#"<assignedAltitude><block><above uom="FEET">45000.0</above><below uom="FEET">47000.0</below></block></assignedAltitude>"#,
+    )])
+    .replace(GUFI, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    let decoded = run(&xml);
+    let encoded = oa_fixm::encode(&decoded.ev).expect("parsed block form is representable");
+    let after = run(&encoded);
+    assert_eq!(decoded.ev.assigned_form, after.ev.assigned_form);
+    assert_eq!(decoded.ev.block_above_ft, after.ev.block_above_ft);
+    assert_eq!(decoded.ev.block_below_ft, after.ev.block_below_ft);
+    assert_roundtrip(&xml);
+}
+
+// REQ: OA-FIXM-028
+#[test]
+fn encoder_refuses_values_outside_the_documented_emitted_type_facets() {
+    let full = doc(&[message_with(
+        &format!(r#"centre="ZXX" source="TH" timestamp="{TS}" flightType="SCHEDULED""#),
+        &format!(
+            "{}{TH_BODY}",
+            gufi_el("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
+        ),
+    )]);
+    let base = run(&full).ev;
+    let mut invalid = base.clone();
+    invalid.ts_ms[0] = -1;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidTimestamp)
+    );
+
+    let mut invalid = base.clone();
+    invalid.gufi[0] = GUFI_BITS;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidGufi)
+    );
+
+    let mut invalid = base.clone();
+    invalid.status[0] = u8::MAX;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::Status))
+    );
+
+    let mut invalid = base.clone();
+    invalid.flight_type[0] = u8::MAX;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::FlightType))
+    );
+
+    let mut invalid = base.clone();
+    invalid.callsign[0] = *b"ABCDEFGH";
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::Callsign))
+    );
+
+    let mut invalid = base.clone();
+    invalid.assigned_ft[0] = 100_001;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::AssignedForm))
+    );
+
+    let mut invalid = base.clone();
+    invalid.reported_ft[0] = -2_001;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::ReportedAlt))
+    );
+
+    let mut invalid = base.clone();
+    invalid.gs_dkt[0] = 20_001;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::GroundSpeed))
+    );
+
+    let mut invalid = base.clone();
+    invalid.vx_dkt[0] = 20_001;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::Velocity))
+    );
+
+    let mut invalid = base.clone();
+    invalid.lat_e7[0] = 900_000_001;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::Position))
+    );
+
+    let mut invalid = base.clone();
+    invalid.operator[0][0] = 1;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::Operator))
+    );
+
+    let mut invalid = base.clone();
+    invalid.ctrl[0][0] = b'@';
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::ControllingUnit))
+    );
+
+    let with_beacon = doc(&[message(
+        "FH",
+        "<enRoute><beaconCodeAssignment><currentBeaconCode>2604</currentBeaconCode></beaconCodeAssignment></enRoute>",
+    )]).replace(GUFI, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    let mut invalid = run(&with_beacon).ev;
+    invalid.beacon[0] = 8_888;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::Beacon))
+    );
+
+    let with_address = doc(&[message(
+        "FH",
+        r#"<aircraftDescription aircraftAddress="ABCDEF"/>"#,
+    )])
+    .replace(GUFI, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    let mut invalid = run(&with_address).ev;
+    invalid.address[0] = 0;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::AircraftAddress))
+    );
+
+    let handoff = doc(&[message(
+        "FH",
+        r#"<enRoute><boundaryCrossings><handoff event="INITIATION"><receivingUnit unitIdentifier="ZYY"/></handoff></boundaryCrossings></enRoute>"#,
+    )])
+    .replace(GUFI, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+    let mut invalid = run(&handoff).ev;
+    invalid.handoff_event[0] = u8::MAX;
+    assert_eq!(
+        oa_fixm::encode(&invalid),
+        Err(oa_fixm::EncodeError::InvalidValue(Field::HandoffEvent))
+    );
+}
+
+// REQ: OA-FIXM-028
+#[test]
+fn encoder_refuses_empty_message_collection_per_schema_minimum() {
+    let empty = new_events(1, 8);
+    assert_eq!(
+        oa_fixm::encode(&empty),
+        Err(oa_fixm::EncodeError::EmptyCollection)
+    );
 }

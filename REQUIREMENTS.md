@@ -1211,6 +1211,9 @@ under RULESET F6 and is verified by its live run, not by the cargo tests.
   the rest of the row is kept.
 - **OA-FIXM-027** The ADS-B (Mode S) address of `aircraftDescription@aircraftAddress` is decoded as exactly six
   hexadecimal digits, not all zero; any other value is a field error.
+- **OA-FIXM-028** Encoding is lossless for the explicitly supported `oa-fixm` event subset: eligible decoded
+  rows round-trip without changed represented values, while malformed-field rows and forms with no
+  unambiguous encoder representation are refused with a specific error; no partial XML document is returned.
 
 ### IWXXM METAR/SPECI initial subset (oa-iwxxm)
 

@@ -325,6 +325,7 @@
     "OA-FIXM-025",
     "OA-FIXM-026",
     "OA-FIXM-027",
+    "OA-FIXM-028",
     "OA-FLT-001",
     "OA-FLT-002",
     "OA-FLT-003",
@@ -11738,6 +11739,7 @@
         "OA-FIXM-025",
         "OA-FIXM-026",
         "OA-FIXM-027",
+        "OA-FIXM-028",
         "OA-NAM-036",
         "OA-NAM-037",
         "OA-NAM-038",
@@ -11845,6 +11847,10 @@
         {
           "document": "REQUIREMENTS.md",
           "locator": "OA-NAM-038"
+        },
+        {
+          "document": "REQUIREMENTS.md",
+          "locator": "OA-FIXM-028"
         }
       ],
       "verification_refs": [
@@ -12462,6 +12468,31 @@
           "requirement_id": "OA-TFMS-030",
           "file": "crates/oa-tfms/src/time.rs",
           "test_name": "impossible_dates_and_years_out_of_range_are_refused"
+        },
+        {
+          "requirement_id": "OA-FIXM-028",
+          "file": "crates/oa-fixm/tests/decode.rs",
+          "test_name": "parsed_block_altitude_roundtrips_without_field_loss"
+        },
+        {
+          "requirement_id": "OA-FIXM-028",
+          "file": "crates/oa-fixm/tests/decode.rs",
+          "test_name": "route_attribute_xml_whitespace_is_preserved_with_character_references"
+        },
+        {
+          "requirement_id": "OA-FIXM-028",
+          "file": "crates/oa-fixm/tests/decode.rs",
+          "test_name": "encoded_profile_matches_pinned_official_nas3_element_namespace_rules"
+        },
+        {
+          "requirement_id": "OA-FIXM-028",
+          "file": "crates/oa-fixm/tests/decode.rs",
+          "test_name": "accepting_handoff_unit_roundtrips_as_concrete_core_subtype"
+        },
+        {
+          "requirement_id": "OA-FIXM-028",
+          "file": "crates/oa-fixm/tests/decode.rs",
+          "test_name": "transferring_unit_without_event_roundtrips"
         }
       ],
       "proof_refs": []
@@ -17940,6 +17971,12 @@
       "function": "flight_plan_and_coordination_message_ingestion",
       "hazard_id": "HZ-FLIGHTDATA-001",
       "rationale": "Engineering safety candidate: this register clause constrains flight_plan_and_coordination_message_ingestion; failure can contribute to the stated hazard. Register clause: The ADS-B (Mode S) address of `aircraftDescription@aircraftAddress` is decoded as exactly six hexadecimal digits, not all zero; any other value is a field error."
+    },
+    {
+      "id": "OA-FIXM-028",
+      "function": "flight_plan_and_coordination_message_ingestion",
+      "hazard_id": "HZ-FLIGHTDATA-001",
+      "rationale": "Engineering safety candidate: an encoder that changes represented flight or route fields, or emits a partial document after refusing an unsupported model, could create misleading downstream flight-plan state. Tests cover the explicit supported `oa-fixm` event subset and named refusal behavior only. This does not claim general FIXM conformance or FAA NAS wrapper-schema validation."
     },
     {
       "id": "OA-IWXXM-001",
