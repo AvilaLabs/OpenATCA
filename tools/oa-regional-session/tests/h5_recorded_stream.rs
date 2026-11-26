@@ -92,6 +92,7 @@ fn write_synthetic_adsb(path: &Path) {
             nac_v: 2,
             sil: 3,
             version: 2,
+            source: 0,
             ..oa_adsb::ROW_EMPTY
         };
         let mut reports = oa_adsb::Reports::default();
