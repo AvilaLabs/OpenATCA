@@ -674,8 +674,14 @@ fn display_target_rows(
         || columns.reacq_age_s.len() != count
         || columns.r95_m.len() != count
         || columns.trail_len.len() != count
-        || columns.trail_lat_e7.len() != count.checked_mul(MAX_TRAIL).ok_or("display trail size overflow")?
-        || columns.trail_lon_e7.len() != count.checked_mul(MAX_TRAIL).ok_or("display trail size overflow")?
+        || columns.trail_lat_e7.len()
+            != count
+                .checked_mul(MAX_TRAIL)
+                .ok_or("display trail size overflow")?
+        || columns.trail_lon_e7.len()
+            != count
+                .checked_mul(MAX_TRAIL)
+                .ok_or("display trail size overflow")?
     {
         return Err("regional display target columns are incomplete or over capacity".into());
     }
@@ -683,30 +689,77 @@ fn display_target_rows(
     rows.try_reserve_exact(count)
         .map_err(|_| "regional display target snapshot allocation refused")?;
     for index in 0..count {
-        let start = index.checked_mul(MAX_TRAIL).ok_or("display trail offset overflow")?;
-        let end = start.checked_add(MAX_TRAIL).ok_or("display trail end overflow")?;
-        let lat_trail = columns.trail_lat_e7.get(start..end).ok_or("display latitude trail missing")?;
-        let lon_trail = columns.trail_lon_e7.get(start..end).ok_or("display longitude trail missing")?;
+        let start = index
+            .checked_mul(MAX_TRAIL)
+            .ok_or("display trail offset overflow")?;
+        let end = start
+            .checked_add(MAX_TRAIL)
+            .ok_or("display trail end overflow")?;
+        let lat_trail = columns
+            .trail_lat_e7
+            .get(start..end)
+            .ok_or("display latitude trail missing")?;
+        let lon_trail = columns
+            .trail_lon_e7
+            .get(start..end)
+            .ok_or("display longitude trail missing")?;
         let mut trail = [(0, 0); MAX_TRAIL];
         for offset in 0..MAX_TRAIL {
             trail[offset] = (
-                *lat_trail.get(offset).ok_or("display latitude trail row missing")?,
-                *lon_trail.get(offset).ok_or("display longitude trail row missing")?,
+                *lat_trail
+                    .get(offset)
+                    .ok_or("display latitude trail row missing")?,
+                *lon_trail
+                    .get(offset)
+                    .ok_or("display longitude trail row missing")?,
             );
         }
         rows.push(Target {
-            lat_e7: *columns.lat_e7.get(index).ok_or("display latitude row missing")?,
-            lon_e7: *columns.lon_e7.get(index).ok_or("display longitude row missing")?,
-            alt_ft: *columns.alt_ft.get(index).ok_or("display altitude row missing")?,
-            addr: *columns.addr.get(index).ok_or("display address row missing")?,
-            r95_m: *columns.r95_m.get(index).ok_or("display radius row missing")?,
+            lat_e7: *columns
+                .lat_e7
+                .get(index)
+                .ok_or("display latitude row missing")?,
+            lon_e7: *columns
+                .lon_e7
+                .get(index)
+                .ok_or("display longitude row missing")?,
+            alt_ft: *columns
+                .alt_ft
+                .get(index)
+                .ok_or("display altitude row missing")?,
+            addr: *columns
+                .addr
+                .get(index)
+                .ok_or("display address row missing")?,
+            r95_m: *columns
+                .r95_m
+                .get(index)
+                .ok_or("display radius row missing")?,
             trail,
-            callsign: *columns.callsign.get(index).ok_or("display callsign row missing")?,
-            track_ddeg: *columns.track_ddeg.get(index).ok_or("display track row missing")?,
-            gs_dkt: *columns.gs_dkt.get(index).ok_or("display speed row missing")?,
-            reacq_age_s: *columns.reacq_age_s.get(index).ok_or("display reacquisition row missing")?,
-            flags: *columns.flags.get(index).ok_or("display flags row missing")?,
-            trail_len: *columns.trail_len.get(index).ok_or("display trail length missing")?,
+            callsign: *columns
+                .callsign
+                .get(index)
+                .ok_or("display callsign row missing")?,
+            track_ddeg: *columns
+                .track_ddeg
+                .get(index)
+                .ok_or("display track row missing")?,
+            gs_dkt: *columns
+                .gs_dkt
+                .get(index)
+                .ok_or("display speed row missing")?,
+            reacq_age_s: *columns
+                .reacq_age_s
+                .get(index)
+                .ok_or("display reacquisition row missing")?,
+            flags: *columns
+                .flags
+                .get(index)
+                .ok_or("display flags row missing")?,
+            trail_len: *columns
+                .trail_len
+                .get(index)
+                .ok_or("display trail length missing")?,
         });
     }
     Ok(rows)
@@ -718,7 +771,8 @@ mod display_target_capture_tests {
 
     // REQ: OA-MIG-414
     #[test]
-    fn captured_target_is_the_existing_builder_target_not_a_reformatted_row() -> Result<(), String> {
+    fn captured_target_is_the_existing_builder_target_not_a_reformatted_row() -> Result<(), String>
+    {
         use oa_display::core::traffic::{self, Target, MAX_TRAIL};
         let target = Target {
             lat_e7: 385_000_000,

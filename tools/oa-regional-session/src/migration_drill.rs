@@ -1436,8 +1436,8 @@ fn snapshot_output_payloads(
         family_counts[0] = family_counts[0]
             .checked_add(1)
             .ok_or("selected track count overflow")?;
-        let address = u32::try_from(row.key.ordinal)
-            .map_err(|_| "track display join address overflow")?;
+        let address =
+            u32::try_from(row.key.ordinal).map_err(|_| "track display join address overflow")?;
         let display = display_targets
             .binary_search_by_key(&address, |target| target.addr)
             .ok()
@@ -1846,9 +1846,7 @@ fn parse_hex_array<const N: usize>(value: &str) -> Result<[u8; N], String> {
     Ok(out)
 }
 
-fn serialize_display_target(
-    target: Option<&AppliedDisplayTarget>,
-) -> Result<String, String> {
+fn serialize_display_target(target: Option<&AppliedDisplayTarget>) -> Result<String, String> {
     let Some(target) = target else {
         return Ok(String::from("display=NONE"));
     };
@@ -1936,8 +1934,10 @@ fn parse_display_target(value: &str) -> Result<Option<AppliedDisplayTarget>, Str
             .split_once(':')
             .ok_or("regional display trail pair is malformed")?;
         trail[index] = (
-            lat.parse().map_err(|_| "regional display trail latitude is invalid")?,
-            lon.parse().map_err(|_| "regional display trail longitude is invalid")?,
+            lat.parse()
+                .map_err(|_| "regional display trail latitude is invalid")?,
+            lon.parse()
+                .map_err(|_| "regional display trail longitude is invalid")?,
         );
     }
     let display = AppliedDisplayTarget {
@@ -2046,7 +2046,10 @@ fn parse_applied_state_row(
                 .parse()
                 .map_err(|_| "selected track altitude is invalid")?;
             let display = parse_display_target(field_value(
-                fields.get(11).copied().ok_or("display target field missing")?,
+                fields
+                    .get(11)
+                    .copied()
+                    .ok_or("display target field missing")?,
                 "display",
             )?)?;
             if display.as_ref().is_some_and(|target| {
@@ -2055,20 +2058,22 @@ fn parse_applied_state_row(
                     || target.lon_e7 != lon_e7
                     || target.alt_ft != altitude_ft
             }) {
-                return Err("selected display block identity/position differs from track row".into());
+                return Err(
+                    "selected display block identity/position differs from track row".into(),
+                );
             }
             (
                 AppliedStateRow::Track {
-                key: key(4)?,
-                ordinal,
-                status: status(6)?,
-                lat_e7,
-                lon_e7,
-                altitude_ft,
-                display,
-                digest: digest(10, "digest")?,
-            },
-            0,
+                    key: key(4)?,
+                    ordinal,
+                    status: status(6)?,
+                    lat_e7,
+                    lon_e7,
+                    altitude_ft,
+                    display,
+                    digest: digest(10, "digest")?,
+                },
+                0,
             )
         }
         "FLIGHT" if fields.len() == 9 => (
