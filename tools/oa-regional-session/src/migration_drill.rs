@@ -3505,14 +3505,14 @@ fn prepare_local_fixture_candidate(
         at_ns,
         policy.max_snapshot_age_ns,
     )
-        .map_err(|error| format!("local fixture legacy snapshot: {error:?}"))?;
+    .map_err(|error| format!("local fixture legacy snapshot: {error:?}"))?;
     ingest_view(
         &mut selector,
         initial_local_selector_view(candidate),
         at_ns,
         policy.max_snapshot_age_ns,
     )
-        .map_err(|error| format!("local fixture candidate snapshot: {error:?}"))?;
+    .map_err(|error| format!("local fixture candidate snapshot: {error:?}"))?;
     let mut diffs = Vec::new();
     let diff_capacity = CapacityProfile::REPLAY_4096.tracks * 8;
     diffs
