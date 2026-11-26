@@ -1,4 +1,6 @@
+import os
 import re
+import stat
 import sys
 import tempfile
 import unittest
@@ -53,6 +55,78 @@ class FuzzShardTests(unittest.TestCase):
         self.assertEqual(argv[:5], ["cargo", "+nightly-2026-08-21", "fuzz", "run", "alpha"])
         self.assertIn("-rss_limit_mb=2048", argv)
         self.assertIn("-max_total_time=60", argv)
+
+    def test_seed_caps_cover_every_checked_in_seed(self):
+        seeds_root = REPO / "fuzz" / "seeds"
+        target_dirs = []
+        with os.scandir(seeds_root) as scan:
+            for entry in scan:
+                self.assertLess(len(target_dirs), shard.MAX_TARGETS)
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    target_dirs.append(Path(entry.path))
+        target_dirs.sort(key=lambda path: path.name)
+        total_files = 0
+        for seed_dir in target_dirs:
+            entries = []
+            total_bytes = 0
+            with os.scandir(seed_dir) as scan:
+                for entry in scan:
+                    self.assertLess(len(entries), shard.MAX_SEEDS_PER_TARGET, seed_dir.name)
+                    info = entry.stat(follow_symlinks=False)
+                    self.assertTrue(stat.S_ISREG(info.st_mode), entry.name)
+                    self.assertLessEqual(info.st_size, shard.MAX_SEED_FILE_BYTES, entry.name)
+                    total_bytes += info.st_size
+                    entries.append(entry.name)
+            self.assertLessEqual(total_bytes, shard.MAX_SEED_BYTES_PER_TARGET, seed_dir.name)
+            total_files += len(entries)
+        self.assertLessEqual(total_files, shard.MAX_TARGETS * shard.MAX_SEEDS_PER_TARGET)
+
+    def test_bounded_seed_copy_preserves_every_file_byte(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seeds = root / "seeds"
+            corpus = root / "corpus"
+            seeds.mkdir()
+            corpus.mkdir()
+            samples = {"one": b"\x00seed-one", "two": b"seed-two\xff"}
+            for name, payload in samples.items():
+                (seeds / name).write_bytes(payload)
+            self.assertEqual(shard.copy_seeds_bounded(seeds, corpus), len(samples))
+            self.assertEqual({p.name: p.read_bytes() for p in corpus.iterdir()}, samples)
+
+    def test_seed_count_file_and_total_byte_caps_refuse_before_copy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seeds = root / "seeds"
+            corpus = root / "corpus"
+            seeds.mkdir()
+            corpus.mkdir()
+            for index in range(shard.MAX_SEEDS_PER_TARGET + 1):
+                (seeds / f"s{index:03}").write_bytes(b"")
+            with self.assertRaises(shard.FuzzShardError):
+                shard.copy_seeds_bounded(seeds, corpus)
+            self.assertEqual(list(corpus.iterdir()), [])
+
+        for kind in ("single", "aggregate"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                seeds = root / "seeds"
+                corpus = root / "corpus"
+                seeds.mkdir()
+                corpus.mkdir()
+                count = 1 if kind == "single" else shard.MAX_SEED_BYTES_PER_TARGET // shard.MAX_SEED_FILE_BYTES + 1
+                size = shard.MAX_SEED_FILE_BYTES + 1 if kind == "single" else shard.MAX_SEED_FILE_BYTES
+                for index in range(count):
+                    (seeds / f"s{index:03}").write_bytes(b"x" * size)
+                with self.assertRaises(shard.FuzzShardError):
+                    shard.copy_seeds_bounded(seeds, corpus)
+                self.assertEqual(list(corpus.iterdir()), [])
+
+    def test_bounded_input_refuses_nonregular_paths_before_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(shard.FuzzShardError):
+                shard._bounded_bytes(Path(tmp), 1024, "test directory")
 
     def test_ci_uses_checked_enumeration_four_shards_and_unique_artifact_names(self):
         workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
