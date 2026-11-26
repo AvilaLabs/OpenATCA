@@ -1706,7 +1706,11 @@ pub fn validate_model(m: &Model) -> Result<(), ModelError> {
             .sequence
             .get(start..end)
             .ok_or_else(|| bad("preferred_routes", "preferred segment span is out of range"))?;
-        if rows.windows(2).any(|pair| pair[0] >= pair[1]) {
+        if rows.windows(2).any(|pair| {
+            pair.first()
+                .zip(pair.last())
+                .is_some_and(|(first, last)| first >= last)
+        }) {
             return Err(bad(
                 "preferred_route_segments",
                 "segments are not strictly increasing by sequence within a route",
