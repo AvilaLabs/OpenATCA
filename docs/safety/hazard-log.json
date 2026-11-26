@@ -10422,7 +10422,9 @@
         {
           "requirement_id": "OA-MIG-414",
           "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
-          "test_name": "worker_refuses_a_hash_valid_normalized_row_with_a_sealed_timestamp",
+          "test_name": "worker_refuses_a_hash_valid_normalized_row_with_a_sealed_timestamp"
+        },
+        {
           "requirement_id": "OA-AUDIT-007",
           "file": "crates/oa-audit-core/src/principal.rs",
           "test_name": "local_registry_looks_up_enabled_and_disabled_principals_by_exact_id"
