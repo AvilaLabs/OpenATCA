@@ -46,7 +46,8 @@ class VddFixture(unittest.TestCase):
         binary.chmod(0o755)
         self.provenance = self.base / "toolchain-provenance.json"
         self.provenance.write_text(
-            '{"toolchain":{"rustc_fields":{"release":"1.89.0"}},'
+            '{"toolchain":{"rustc_fields":{"release":"1.89.0"},'
+            '"cargo_fields":{"release":"1.89.0"}},'
             '"host":{"kernel":{"machine":"x86_64"},'
             '"os_release":{"pretty_name":"Test Linux"}}}\n', encoding="utf-8"
         )
@@ -133,6 +134,8 @@ class VddFixture(unittest.TestCase):
         self.assertIn("oa-test", text)
         self.assertIn(hashlib.sha256(b"binary fixture").hexdigest(), text)
         self.assertIn("Test Linux", text)
+        self.assertIn("Cargo: `1.89.0`", text)
+        self.assertIn("Python: `", text)
         self.assertIn(hashlib.sha256(self.provenance.read_bytes()).hexdigest(), text)
         self.assertIn(hashlib.sha256((self.base / "sbom.spdx.json").read_bytes()).hexdigest(), text)
 

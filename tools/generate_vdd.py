@@ -380,15 +380,19 @@ def _build_environment(provenance_path: Path | None) -> str:
     try:
         data = json.loads(raw)
         rust = data["toolchain"]["rustc_fields"]
+        cargo = data["toolchain"]["cargo_fields"]
         host = data["host"]
         machine = host["kernel"]["machine"]
         pretty = host["os_release"]["pretty_name"]
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise VddError("toolchain provenance has an unsupported schema") from exc
-    if not isinstance(rust, dict) or not isinstance(machine, str) or not isinstance(pretty, str):
+    if (not isinstance(rust, dict) or not isinstance(cargo, dict)
+            or not isinstance(machine, str) or not isinstance(pretty, str)):
         raise VddError("toolchain provenance fields are malformed")
     return (f"Build host: `{pretty}`, kernel machine `{machine}`.\n"
-            f"Rust compiler: `{rust.get('release', 'unknown')}`; provenance record SHA-256 `{_sha(raw)}`.\n"
+            f"Cargo: `{cargo.get('release', 'unknown')}`; rustc: `{rust.get('release', 'unknown')}`; "
+            f"Python: `{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}`.\n"
+            f"Provenance record SHA-256 `{_sha(raw)}`.\n"
             f"SBOM SHA-256: `{_sha(sbom)}`.\n"
             "The source record identifies host/toolchain inputs and discloses that it is not a witnessed build attestation.\n")
 
