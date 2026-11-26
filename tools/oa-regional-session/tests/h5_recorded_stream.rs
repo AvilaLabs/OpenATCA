@@ -320,6 +320,19 @@ fn known_good_adsb_and_fixm_smoke_reaches_runtime_and_rendered_snapshot() {
     assert_eq!(positions, 12, "accepted normalized ADS-B positions");
     assert!(flights > 0, "no normalized FIXM flight events");
     assert_eq!(summary.normalized_events, normalized);
+    assert_eq!(summary.normalized_surveillance_events, positions);
+    assert_eq!(summary.normalized_flight_events, flights);
+    assert_eq!(summary.normalized_other_events, 0);
+    assert_eq!(summary.adapter_counts.adsb_frames, 1);
+    assert_eq!(summary.adapter_counts.sfdps_frames, 1);
+    assert_eq!(
+        summary.adapter_counts.adsb_rows_in, 12,
+        "all synthetic ADS-B rows reach the adapter counter"
+    );
+    assert!(
+        summary.adapter_counts.sfdps_rows_decoded > 0,
+        "synthetic FIXM source reaches the SFDPS row decoder"
+    );
     assert!(visited_frames > 0, "runtime produced no frames");
     assert!(
         max_tracks > 0,

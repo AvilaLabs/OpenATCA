@@ -117,6 +117,28 @@ fn emit(report: &RecordedDrillReport) {
         .map(|cycle| cycle.display_target_rows)
         .sum::<u64>();
     let paired_runtime_frame_denominator = report.per_update_consumer.updates * 2;
+    let (normalized_surveillance, normalized_flight, normalized_other) =
+        report.normalized_source_counts.map_or(
+            (
+                "UNAVAILABLE".into(),
+                "UNAVAILABLE".into(),
+                "UNAVAILABLE".into(),
+            ),
+            |counts| {
+                (
+                    counts[0].to_string(),
+                    counts[1].to_string(),
+                    counts[2].to_string(),
+                )
+            },
+        );
+    let adapter = &report.adapter_loss_counts;
+    let adsb_quality_removed = adapter
+        .adsb_quality_removed
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
     println!(
         "H5RECORDED\tversion=7\tmode=paired_single_pass_two_independent_same_implementation_runtimes\tprivileged_action_audit=UNAVAILABLE_PUBLISHED_M2_API\tauthority_mode={}\tqualification={}\tcentre={}\tendpoint_class={}\tmeasurement_start_ns={}\tmeasurement_end_ns={}\tcapture_start_ns={}\twarmup_events={}\tupdate_interval_ns={}\tdecision_limit_ns={}\tcycles_defined=100\tm2_ingest_attempts={}\tm2_cycles_refused={}\tflip_rollback_cycles_attempted={}\tflip_rollback_cycles_completed={}\taudit_events_written=0\tmax_retained_snapshot_bytes_per_replica={}\tdrill_runtime_cap_s=300\tphysical_input_byte_cap={}\tinput_frame_cap={}\tinput_stream_cap={}\tnormalized_event_cap={}\tconsumer_event_frame_cap_bytes={}\tsource_files_seen={}\tsource_frames_seen={}\tsource_reject_frames={}\tnormalized_events={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\tactive_ca_alert_frame_rows={}\thandoff_state_frame_rows={}\trenderer_target_frame_rows={}\tpaired_runtime_frame_denominator={}\tquarantine_records={}\tmanual_handling_required={}\tinvalid_source_frames={}\ttruncated_source_frames={}\tskipped_source_bytes={}\tsource_files_refused={}\tsource_error_counter_status=UNAVAILABLE_ON_SUCCESSFUL_STREAM_ABORTED_ON_INVALID_TRUNCATED_RESYNC_OR_REFUSED_INPUT\tinput_delivery=single_stream_callback_to_two_independent_runtimes\tselected_state_apply_ack_rows={}\treplay_projection_equal_cycles={}\tmodel_sha256={}\tmap_centre_lat_e7={}\tmap_centre_lon_e7={}\tmap_range_nm={}\tprofile_max_frames={}\tprofile_max_tracks={}\tprofile_max_flights={}\tprofile_max_total_events={}\tprofile_max_baro_evidence={}\tprofile_max_drain_rows={}\tprofile_max_ca_candidates={}\tprofile_max_open_alerts={}\tprofile_max_ca_work_per_frame={}\tconsumer_output_order=monotonic_generation_checked\tconsumer_scope=local_worker_applies_each_selected_typed_snapshot_and_ACKs_its_exact_digest_no_external_endpoint_or_source_completeness_claim\ttrack_output_integrity=typed_snapshot_digest_ACK\tactive_alert_projection=typed_CA_rows_ACK_ack_suppression_unknown\tdisplay_block_projection=existing_renderer_Target_rows_joined_to_track_state\thandoff_projection=typed_flight_handoff_rows_ACK\tstate_families_available={},{},{},{}",
         report.authority_mode,
@@ -256,6 +278,46 @@ fn emit(report: &RecordedDrillReport) {
         region.expired_address_memberships,
         region.other_rows_seen,
         region.admitted_events
+    );
+    println!(
+        "ADAPTER_LOSSES\tnormalized_surveillance_events={}\tnormalized_flight_events={}\tnormalized_other_events={}\tadsb_frames={}\tadsb_payload_refused={}\tadsb_rows_in={}\tadsb_rows_over_capacity={}\tadsb_rows_dropped={}\tadsb_ground_excluded={}\tadsb_unknown_ground_refused={}\tadsb_quality_removed_oa_truth_REMOVE_NAMES_order={}\tadsb_unknown_gufi_positions={}\tadsb_velocity_unavailable={}\tadsb_invalid_position_rows={}\tadsb_output_capacity_refusals={}\tsfdps_frames={}\tsfdps_payload_refused={}\tsfdps_timestamp_precision_refused={}\tsfdps_rows_decoded={}\tsfdps_rows_not_decoded_capacity={}\tsfdps_rows_refused={}\tsfdps_rows_no_operations={}\tsfdps_no_status={}\tsfdps_operations_unusable={}\tsfdps_unsupported_operations_total={}\tsfdps_field_errors={}\tsfdps_rejected_messages={}\tsfdps_unknown_elements={}\tsfdps_unknown_attributes={}\tsfdps_unbound_flight_updates={}\tsfdps_invalid_operation_time={}\tsfdps_source_after_receipt={}\tsfdps_invalid_operation_identity={}\tsfdps_invalid_operation_centre={}\tsfdps_invalid_operation_address={}\tsfdps_output_capacity_refusals={}\tadapter_events_emitted={}",
+        normalized_surveillance,
+        normalized_flight,
+        normalized_other,
+        adapter.adsb_frames,
+        adapter.adsb_payload_refused,
+        adapter.adsb_rows_in,
+        adapter.adsb_rows_over_capacity,
+        adapter.adsb_rows_dropped,
+        adapter.adsb_ground_excluded,
+        adapter.adsb_unknown_ground_refused,
+        adsb_quality_removed,
+        adapter.adsb_unknown_gufi_positions,
+        adapter.adsb_velocity_unavailable,
+        adapter.adsb_invalid_position_rows,
+        adapter.adsb_output_capacity_refusals,
+        adapter.sfdps_frames,
+        adapter.sfdps_payload_refused,
+        adapter.sfdps_timestamp_precision_refused,
+        adapter.sfdps_rows_decoded,
+        adapter.sfdps_rows_not_decoded_capacity,
+        adapter.sfdps_rows_refused,
+        adapter.sfdps_rows_no_operations,
+        adapter.sfdps_no_status,
+        adapter.sfdps_operations_unusable,
+        adapter.sfdps_unsupported_operations,
+        adapter.sfdps_field_errors,
+        adapter.sfdps_rejected_messages,
+        adapter.sfdps_unknown_elements,
+        adapter.sfdps_unknown_attributes,
+        adapter.sfdps_unbound_flight_updates,
+        adapter.sfdps_invalid_operation_time,
+        adapter.sfdps_source_after_receipt,
+        adapter.sfdps_invalid_operation_identity,
+        adapter.sfdps_invalid_operation_centre,
+        adapter.sfdps_invalid_operation_address,
+        adapter.sfdps_output_capacity_refusals,
+        adapter.adapter_events_emitted,
     );
     for stream in &report.input_streams {
         println!(

@@ -9,7 +9,8 @@ use crate::input::{EventKind, FlightOperation, SourceKind};
 use crate::recordings_cli::convert_recordings;
 use crate::recordings_reader::{RecordingInput, RecordingSource};
 use crate::recordings_stream::{
-    source_coverage, stream_normalized_events, NormalizedStreamSummary, StreamCounts, StreamInput,
+    source_coverage, stream_normalized_events, AdapterLossCounts, NormalizedStreamSummary,
+    StreamCounts, StreamInput,
 };
 use crate::runtime::{regional_new_with_profile, regional_step, RegionalFrame, RegionalRunProfile};
 use crate::session::{flush_receipt_group, push_event, session_cursor_new_with_limit};
@@ -268,6 +269,9 @@ pub struct RecordedDrillReport {
     pub replay_output_ack_count: u64,
     pub input_streams: Vec<StreamReport>,
     pub stream_counts: StreamCounts,
+    pub adapter_loss_counts: AdapterLossCounts,
+    /// Source-kind counts before the H5 geographic admission filter.
+    pub normalized_source_counts: Option<[u64; 3]>,
     pub region_filter: ZauBoxFilterReport,
     pub normalized_event_count: u64,
     pub position_input_count: u64,
@@ -3971,6 +3975,8 @@ pub fn run_recorded(
             .map_err(|_| "replay output ack count overflow")?,
         input_streams,
         stream_counts: StreamCounts::default(),
+        adapter_loss_counts: AdapterLossCounts::default(),
+        normalized_source_counts: None,
         region_filter: ZauBoxFilter::default().finish()?,
         normalized_event_count: u64::try_from(events.len()).map_err(|_| "event count overflow")?,
         position_input_count: positions,
@@ -4903,6 +4909,12 @@ pub fn run_recorded_stream(
         replay_output_ack_count: processor.metrics.output_rows_acked,
         input_streams: streams,
         stream_counts: summary.recording.counts,
+        adapter_loss_counts: summary.adapter_counts,
+        normalized_source_counts: Some([
+            summary.normalized_surveillance_events,
+            summary.normalized_flight_events,
+            summary.normalized_other_events,
+        ]),
         region_filter: region_report,
         normalized_event_count: counts.normalized_events,
         position_input_count: counts.positions,
@@ -5442,6 +5454,12 @@ pub fn run_recorded_stream_cycle_summary(
         replay_output_ack_count: output_ack_count,
         input_streams,
         stream_counts: baseline_summary.recording.counts,
+        adapter_loss_counts: baseline_summary.adapter_counts,
+        normalized_source_counts: Some([
+            baseline_summary.normalized_surveillance_events,
+            baseline_summary.normalized_flight_events,
+            baseline_summary.normalized_other_events,
+        ]),
         region_filter: baseline_region_filter,
         normalized_event_count: baseline_counts.normalized_events,
         position_input_count: baseline_counts.positions,

@@ -164,7 +164,7 @@ pub fn event_storage_budget(budget: RecordingBudget) -> Result<usize, AdapterErr
 }
 
 // A7.2: cold shell counters; not used in core hot-path storage.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecordedAdapterCounts {
     pub frames_adsb: u64,
     pub frames_sfdps: u64,
@@ -233,69 +233,7 @@ pub struct RecordedAdapterCounts {
 }
 
 fn zero_recorded_adapter_counts() -> RecordedAdapterCounts {
-    RecordedAdapterCounts {
-        frames_adsb: 0,
-        frames_sfdps: 0,
-        nonmessage_frames_refused: 0,
-        invalid_frame_metadata: 0,
-        cutoff_negative_refused: 0,
-        cutoff_zero_refused: 0,
-        cutoff_sealed_receipt_refused: 0,
-        cutoff_overflow_refused: 0,
-        cutoff_sealed_issue_refused: 0,
-        adsb_payload_refused: 0,
-        adsb_rows_in: 0,
-        adsb_rows_over_capacity: 0,
-        adsb_rows_dropped: 0,
-        adsb_ground_excluded: 0,
-        adsb_unknown_ground_refused: 0,
-        adsb_native_flag_values: [0; 256],
-        adsb_native_source_values: [0; 256],
-        adsb_source_time_regressions: 0,
-        adsb_rows_order_refused: 0,
-        adsb_velocity_unavailable: 0,
-        adsb_quality_removed: [0; 13],
-        adsb_unknown_gufi_positions: 0,
-        sfdps_payload_refused: 0,
-        sfdps_timestamp_precision_refused: 0,
-        sfdps_rows_decoded: 0,
-        sfdps_rows_not_decoded_capacity: 0,
-        sfdps_frames_over_capacity: 0,
-        sfdps_rows_refused: 0,
-        sfdps_rows_no_operations: 0,
-        sfdps_no_status: 0,
-        sfdps_operations_unusable: 0,
-        sfdps_owner_unknown: 0,
-        sfdps_handoff_incomplete: 0,
-        sfdps_handoff_unknown_unit: 0,
-        sfdps_handoff_receiving_only: 0,
-        sfdps_departure_not_active: 0,
-        sfdps_not_decoded: 0,
-        sfdps_sealed_messages: 0,
-        sfdps_positions_unmapped: 0,
-        sfdps_field_errors: 0,
-        sfdps_rejected_messages: 0,
-        sfdps_unknown_elements: 0,
-        sfdps_unknown_attributes: 0,
-        sfdps_unknown_overflow: 0,
-        unsupported_operations: [0; OP_COUNT],
-        invalid_operation_time: 0,
-        source_after_receipt: 0,
-        invalid_operation_identity: 0,
-        invalid_operation_centre: 0,
-        invalid_operation_address: 0,
-        unbound_flight_updates: 0,
-        invalid_position_rows: 0,
-        output_capacity_refusals: 0,
-        receipt_groups_over_capacity: 0,
-        receipt_group_events_refused: 0,
-        receipt_groups_over_frame_capacity: 0,
-        receipt_frame_capacity_events_refused: 0,
-        receipt_gap_groups_refused: 0,
-        receipt_gap_events_refused: 0,
-        unprocessed_frames: 0,
-        events_emitted: 0,
-    }
+    RecordedAdapterCounts::default()
 }
 
 // A7.2: cold shell output retained within offline input and work bounds.
