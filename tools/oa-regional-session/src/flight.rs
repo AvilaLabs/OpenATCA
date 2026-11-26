@@ -1219,9 +1219,9 @@ mod native_operation_tests {
 
     #[test]
     fn native_altitude_handoff_and_lifecycle_values_reach_core_without_reduction() {
-        let mut driver = driver();
+        let mut active_driver = driver();
         apply(
-            &mut driver,
+            &mut active_driver,
             100,
             1_000,
             1,
@@ -1231,7 +1231,7 @@ mod native_operation_tests {
             },
         );
         apply(
-            &mut driver,
+            &mut active_driver,
             100,
             1_001,
             2,
@@ -1242,14 +1242,14 @@ mod native_operation_tests {
             }),
         );
         apply(
-            &mut driver,
+            &mut active_driver,
             100,
             1_002,
             3,
             FlightOperation::RequestedAltitude(FlightAltitude::VfrOnTopPlus(5_500)),
         );
         apply(
-            &mut driver,
+            &mut active_driver,
             100,
             1_003,
             4,
@@ -1259,7 +1259,7 @@ mod native_operation_tests {
             }),
         );
         apply(
-            &mut driver,
+            &mut active_driver,
             100,
             1_004,
             5,
@@ -1268,7 +1268,7 @@ mod native_operation_tests {
             }),
         );
         apply(
-            &mut driver,
+            &mut active_driver,
             100,
             1_005,
             6,
@@ -1277,7 +1277,7 @@ mod native_operation_tests {
             }),
         );
         apply(
-            &mut driver,
+            &mut active_driver,
             100,
             1_006,
             7,
@@ -1286,20 +1286,21 @@ mod native_operation_tests {
             }),
         );
         apply(
-            &mut driver,
+            &mut active_driver,
             100,
             1_007,
             8,
             FlightOperation::Lifecycle(FlightLifecycle::Depart),
         );
         apply(
-            &mut driver,
+            &mut active_driver,
             100,
             1_008,
             9,
             FlightOperation::Lifecycle(FlightLifecycle::Complete),
         );
-        let record = flight_get(&driver.table, &key_gufi(100)).expect("flight remains inspectable");
+        let record =
+            flight_get(&active_driver.table, &key_gufi(100)).expect("flight remains inspectable");
         assert_eq!(
             record.assigned,
             Alt {
@@ -1320,7 +1321,7 @@ mod native_operation_tests {
         assert_eq!(record.ho_state, HO_NONE);
         assert_eq!(record.owner, *b"NEXT\0\0\0\0");
         assert_eq!(
-            view_for_flight(&record, *b"ZAU1").unwrap().state,
+            view_for_flight(&record, *b"ZAU1").unwrap().plan_state,
             oa_flight::ST_COMPLETED
         );
 
@@ -1344,7 +1345,7 @@ mod native_operation_tests {
         );
         let record = flight_get(&cancelled.table, &key_gufi(200)).unwrap();
         assert_eq!(
-            view_for_flight(&record, *b"ZAU1").unwrap().state,
+            view_for_flight(&record, *b"ZAU1").unwrap().plan_state,
             oa_flight::ST_CANCELLED
         );
 
@@ -1368,7 +1369,7 @@ mod native_operation_tests {
         );
         let record = flight_get(&dropped.table, &key_gufi(300)).unwrap();
         assert_eq!(
-            view_for_flight(&record, *b"ZAU1").unwrap().state,
+            view_for_flight(&record, *b"ZAU1").unwrap().plan_state,
             oa_flight::ST_DROPPED
         );
     }

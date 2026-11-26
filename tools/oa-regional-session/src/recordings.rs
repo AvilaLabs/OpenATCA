@@ -2074,7 +2074,7 @@ struct NormalizedFlightOperationInput {
 fn normalized_flight_operation(
     input: NormalizedFlightOperationInput,
 ) -> Option<(crate::input::FlightOperation, u32)> {
-    use crate::input::{FlightAltitude, FlightHandoff, FlightLifecycle, FlightOperation};
+    use crate::input::{FlightHandoff, FlightLifecycle, FlightOperation};
     let NormalizedFlightOperationInput {
         kind,
         alt,
@@ -2339,9 +2339,7 @@ pub fn serialize_positions(events: &[NormalizedEvent]) -> Result<String, Adapter
 /// Serializes the complete subset emitted by the recording adapter as the established OA-RS v1
 /// protocol. A row that cannot be represented within 768 bytes refuses the serialization whole.
 pub fn serialize_recorded_events(events: &[NormalizedEvent]) -> Result<String, AdapterError> {
-    use crate::input::{
-        FlightHandoff, FlightLifecycle, FlightOperation, HandoffOperation, MAX_EVENT_LINE_BYTES,
-    };
+    use crate::input::MAX_EVENT_LINE_BYTES;
     use core::fmt::Write;
     let version = if events.iter().any(
         |event| matches!(event.kind, EventKind::Flight(op) if flight_operation_requires_v2(op)),
