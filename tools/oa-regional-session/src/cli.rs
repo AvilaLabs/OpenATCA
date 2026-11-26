@@ -31,7 +31,8 @@ pub enum MsawSource {
     Manifest(PathBuf),
 }
 
-/// Explicit caller-supplied inputs for one in-process manual quarantine handoff.
+/// Explicit caller-supplied inputs for one in-process manual quarantine handoff. The pinned
+/// registry is local role configuration, not authenticated identity.
 #[derive(Clone, Debug)]
 pub struct QuarantineReleaseOptions {
     pub source: oa_quarantine::InputSource,
@@ -39,8 +40,8 @@ pub struct QuarantineReleaseOptions {
     pub manual_handoff_ref: String,
     pub audit_log: PathBuf,
     pub audit_checkpoint: oa_audit_core::Checkpoint,
+    pub principal_registry: oa_audit_core::PrincipalRegistry,
     pub principal: u64,
-    pub role: oa_audit_core::Role,
     pub time_ns: u64,
 }
 
@@ -408,8 +409,8 @@ pub fn run_session_with_profile_options_and_quarantine_release(
                 expected_identity: request.identity,
                 audit_log: &request.audit_log,
                 expected_checkpoint: request.audit_checkpoint,
+                principal_registry: &request.principal_registry,
                 principal: request.principal,
-                role: request.role,
                 time_ns: request.time_ns,
                 manual_handoff_ref: &request.manual_handoff_ref,
             },

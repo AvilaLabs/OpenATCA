@@ -438,15 +438,16 @@ pub struct QuarantineMaintenanceReceipt {
 }
 
 /// Audit and acknowledge the selected front item as an explicit manual-responsibility handoff.
-/// The principal, role, timestamp and note are caller claims; this path authenticates no identity
-/// and does not imply that the external manual workflow itself was performed.
+/// The principal, registry, timestamp and note are caller-supplied inputs. The registry role is a
+/// local configuration claim, not authenticated identity, and this path does not imply that the
+/// external manual workflow itself was performed.
 pub struct QuarantineMaintenanceRequest<'a> {
     pub source: InputSource,
     pub expected_identity: InputIdentity,
     pub audit_log: &'a Path,
     pub expected_checkpoint: oa_audit_core::Checkpoint,
+    pub principal_registry: &'a oa_audit_core::PrincipalRegistry,
     pub principal: u64,
-    pub role: oa_audit_core::Role,
     pub time_ns: u64,
     pub manual_handoff_ref: &'a str,
 }
@@ -460,8 +461,8 @@ pub fn regional_acknowledge_quarantine_before_commit(
         expected_identity,
         audit_log,
         expected_checkpoint,
+        principal_registry,
         principal,
-        role,
         time_ns,
         manual_handoff_ref,
     } = request;
@@ -471,6 +472,12 @@ pub fn regional_acknowledge_quarantine_before_commit(
     if principal == 0 || time_ns == 0 {
         return Err("audit principal and timestamp must be positive".into());
     }
+    let role = oa_audit_core::authorize_principal(
+        principal_registry,
+        principal,
+        oa_audit_core::Action::QuarantineRelease,
+    )
+    .map_err(|error| format!("quarantine principal registry refused: {error:?}"))?;
     if manual_handoff_ref.is_empty()
         || manual_handoff_ref.len() > 256
         || !manual_handoff_ref
@@ -1142,6 +1149,10 @@ mod transaction_tests {
         let model = synthetic_model().expect("public synthetic model");
         let snapshot = oa_airspace::core::snapshot::encode(&model).expect("encode model");
         let checkpoint = oa_audit_core::genesis();
+        let registry = oa_audit_core::parse_principal_registry(
+            b"OACERT-LOCAL-PRINCIPALS-V1\n51\toperate\n52\tmonitor\n",
+        )
+        .expect("synthetic principal registry");
         let mut runtime = regional_new_with_profile_and_quarantine_audit_checkpoint(
             model,
             oa_sha256::sha256(&snapshot),
@@ -1199,8 +1210,8 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &protected_alias,
                 expected_checkpoint: checkpoint,
+                principal_registry: &registry,
                 principal: 51,
-                role: oa_audit_core::Role::Operate,
                 time_ns: 100,
                 manual_handoff_ref: "manual-case-77",
             },
@@ -1220,8 +1231,8 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &wrong_role_path,
                 expected_checkpoint: checkpoint,
-                principal: 51,
-                role: oa_audit_core::Role::Monitor,
+                principal_registry: &registry,
+                principal: 52,
                 time_ns: 100,
                 manual_handoff_ref: "manual-case-77",
             },
@@ -1241,8 +1252,8 @@ mod transaction_tests {
                 expected_identity: identity,
                 audit_log: &audit_path,
                 expected_checkpoint: checkpoint,
+                principal_registry: &registry,
                 principal: 51,
-                role: oa_audit_core::Role::Operate,
                 time_ns: 101,
                 manual_handoff_ref: "manual-case-77",
             },
