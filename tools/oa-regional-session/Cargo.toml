@@ -57,8 +57,7 @@ oa-flight-sfdps = { path = "../../crates/oa-flight-sfdps" }
 # F1: Connor approved this caller link on 2026-11-26; recorded source rows are classified before
 # normalized events are committed, with bounded per-source manual-handling accounting.
 oa-quarantine = { path = "../../crates/oa-quarantine" }
-# F1: Connor approved the `oa-regional-session -> oa-nam` session-adapter link on 2026-11-26;
-# framed NAM input is admitted by the existing session state machine before flight projection.
+# F1a: `oa-nam` admits messages; this shell applies them using verified full-key source context.
 oa-nam = { path = "../../crates/oa-nam" }
 # F1: Connor approved this shell-only M4 projection edge on 2026-11-26. The regional shell is the
 # existing boundary that receives flight and alert outputs; import site: migration_shadow.rs.

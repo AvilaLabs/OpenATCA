@@ -5106,7 +5106,7 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
 - **OA-A7-005** The framed peer delivers an EST followed by a CHG in sequence (Rev G Part II
   §§3.1.2–3.1.3). It asserts NAM transport ordering and parsing only; applying the amendment to
   `oa-flight` remains a separate caller integration requirement.
-- **OA-A7-006** The draft regional adapter accepts an RTI only with an explicit existing full
+- **OA-A7-006** The regional adapter accepts an RTI only with an explicit existing full
   `FlightKey`, exact Field 31 facility/sector mapping, and caller-configured endpoint unit IDs;
   it never synthesizes GUFI or joins by callsign. It applies RTI/RLA/RTA/LRM receipts to that
   same full key and refuses a response whose 03(c) reference or peer facilities differ.

@@ -1,10 +1,10 @@
-//! Recorded/synthetic NAM handoff projection into the flight-table adapter (NAS-IC-21009205
+//! Session-admitted NAM handoff bridge into the regional flight-table adapter (NAS-IC-21009205
 //! Rev G Part II §§3.6.1–3.6.4 and B.1.8.1–.3).
 //!
-//! This module is an unapplied F1 integration draft. Its ingress owns framing and feeds parsed
-//! headers to `oa_nam`'s session state machine; only session-admitted application messages become
-//! opaque mapper tokens. Callers supply the explicit flight key and endpoint-unit mapping. It
-//! does not infer flight identity from callsign, facility, or route.
+//! The ingress owns framing and feeds parsed headers to `oa_nam`'s session state machine; only
+//! session-admitted application messages become opaque mapper tokens. Callers supply the explicit
+//! flight key and endpoint-unit mapping. It does not infer flight identity from callsign, facility,
+//! or route.
 //! NAM carries no absolute event timestamp; supplied source/receipt times are external capture
 //! metadata and must be equal when no independent source clock exists. No RTI/RTA decision timeout
 //! is synthesized (Part III §6.1 gives transport/flight-plan response limits, not one).
