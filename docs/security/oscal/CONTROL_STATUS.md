@@ -1,0 +1,30 @@
+# NIST SP 800-53 Rev. 5 HIGH engineering evidence status
+
+Source: `docs/security/oscal/SOURCES.md`; all rows are checked against the pinned resolved OSCAL profile.
+
+These are engineering evidence dispositions, not compliance findings, an ATO, or an FAA authorization.
+`Implemented` requires a direct test or CI reference; `partial` and `inherited` list missing facts.
+
+| Family | Total | Implemented | Partial | Planned | Inherited |
+|---|---:|---:|---:|---:|---:|
+| AC | 46 | 0 | 0 | 46 | 0 |
+| AT | 6 | 0 | 0 | 6 | 0 |
+| AU | 25 | 0 | 0 | 25 | 0 |
+| CA | 14 | 0 | 0 | 14 | 0 |
+| CM | 32 | 0 | 1 | 31 | 0 |
+| CP | 35 | 0 | 0 | 35 | 0 |
+| IA | 26 | 0 | 0 | 26 | 0 |
+| IR | 18 | 0 | 0 | 18 | 0 |
+| MA | 12 | 0 | 0 | 12 | 0 |
+| MP | 10 | 0 | 0 | 10 | 0 |
+| PE | 25 | 0 | 0 | 0 | 25 |
+| PL | 7 | 0 | 0 | 7 | 0 |
+| PS | 10 | 0 | 0 | 10 | 0 |
+| RA | 11 | 0 | 0 | 11 | 0 |
+| SA | 21 | 0 | 1 | 20 | 0 |
+| SC | 30 | 0 | 0 | 30 | 0 |
+| SI | 28 | 0 | 1 | 27 | 0 |
+| SR | 14 | 0 | 0 | 14 | 0 |
+| **Total** | **370** | **0** | **3** | **342** | **25** |
+
+Counts are generated from `docs/security/control-map.json`; they do not measure compliance.

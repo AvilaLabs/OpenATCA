@@ -244,6 +244,9 @@
     "OA-DSP-076",
     "OA-DSP-077",
     "OA-DSP-078",
+    "OA-E1-001",
+    "OA-E1-002",
+    "OA-E1-003",
     "OA-FEED-001",
     "OA-FEED-002",
     "OA-FEED-003",
@@ -10497,6 +10500,9 @@
       "severity_status": "engineering_candidate",
       "severity_rationale": "Incomplete evidence can weaken a staged decision gate; the generator does not grant authority or external approval.",
       "mitigation_requirement_ids": [
+        "OA-E1-001",
+        "OA-E1-002",
+        "OA-E1-003",
         "OA-MIG-401",
         "OA-MIG-402",
         "OA-MIG-403",
@@ -10519,6 +10525,10 @@
       "source_refs": [
         {
           "document": "REQUIREMENTS.md",
+          "locator": "OA-E1-001 through OA-E1-003"
+        },
+        {
+          "document": "REQUIREMENTS.md",
           "locator": "OA-MIG-401 through OA-MIG-602 in the owning functional sections"
         },
         {
@@ -10527,6 +10537,46 @@
         }
       ],
       "verification_refs": [
+        {
+          "requirement_id": "OA-E1-001",
+          "file": "tools/test_generate_oscal_control_map.py",
+          "test_name": "test_checked_in_inventory_matches_the_pinned_source_and_reports"
+        },
+        {
+          "requirement_id": "OA-E1-001",
+          "file": "tools/test_generate_oscal_control_map.py",
+          "test_name": "test_inventory_includes_nested_enhancements_and_parameter_ids"
+        },
+        {
+          "requirement_id": "OA-E1-001",
+          "file": "tools/test_generate_oscal_control_map.py",
+          "test_name": "test_map_rejects_missing_and_duplicate_controls"
+        },
+        {
+          "requirement_id": "OA-E1-002",
+          "file": "tools/oa-trace/src/accreditation.rs",
+          "test_name": "ci_evidence_requires_the_named_job_and_step"
+        },
+        {
+          "requirement_id": "OA-E1-002",
+          "file": "tools/oa-trace/src/accreditation.rs",
+          "test_name": "implemented_control_requires_an_exact_reference"
+        },
+        {
+          "requirement_id": "OA-E1-002",
+          "file": "tools/oa-trace/src/accreditation.rs",
+          "test_name": "implemented_control_test_references_must_resolve"
+        },
+        {
+          "requirement_id": "OA-E1-002",
+          "file": "tools/test_generate_oscal_control_map.py",
+          "test_name": "test_implemented_requires_exact_test_or_ci_reference"
+        },
+        {
+          "requirement_id": "OA-E1-003",
+          "file": "tools/test_generate_oscal_control_map.py",
+          "test_name": "test_counts_are_deterministic_by_family_and_status"
+        },
         {
           "requirement_id": "OA-MIG-401",
           "file": "crates/oa-migration-shadow/tests/compare.rs",
@@ -15893,6 +15943,24 @@
       "function": "navigation_and_adaptation_data",
       "hazard_id": "HZ-AIRSPACE-001",
       "rationale": "Engineering safety candidate: issuing a CA preset with the wrong facility, malformed geometry or policy, or damaged component identity could feed incorrect warning configuration. The shared parser and exact read-back, component, and facility checks constrain byte and identity errors, but do not authenticate the issuer or establish operational approval. The directly tagged test verifies preset issuance/read-back and identity damage; it does not establish operational validity."
+    },
+    {
+      "id": "OA-E1-001",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: an incomplete, duplicated, or unpinned control inventory can make later assurance evidence appear to cover requirements it does not. The generator binds its source identity and checks missing/duplicate/extra IDs and titles against the resolved profile. This inventory is not an independent compliance finding or authorization."
+    },
+    {
+      "id": "OA-E1-002",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: a false `implemented` disposition can overstate assurance coverage if its test or CI evidence reference is absent or invalid, or provider inheritance is treated as verified. Exact source references are checked and missing facts remain explicit; these statuses are engineering evidence handling, not compliance findings, an ATO, or FAA authorization."
+    },
+    {
+      "id": "OA-E1-003",
+      "function": "migration_comparison_and_safety_evidence",
+      "hazard_id": "HZ-EVIDENCE-001",
+      "rationale": "Engineering safety candidate: nondeterministic or incomplete family/status counts can mislead reviewers about evidence coverage. The generator produces deterministic Markdown/CSV summaries and CI checks the generated files against the source inventory; report generation does not establish control effectiveness."
     },
     {
       "id": "OA-GEN-003",

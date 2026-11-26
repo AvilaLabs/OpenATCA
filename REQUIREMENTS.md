@@ -7982,3 +7982,17 @@ claims; a match is explicitly unverified.
   by this tool. Unassessed ICD limits, missing/unknown fields, and any unverified source claim also
   remain explicit. The output is evidence organization for human
   assessment only: it is never FAA approval, a safety-acceptance decision, or promotion authority.
+
+### NIST SP 800-53 Rev. 5 HIGH control evidence map
+
+- **OA-E1-001** `docs/security/control-map.json` contains every control and enhancement selected by
+  the pinned NIST SP 800-53 Rev. 5 HIGH resolved OSCAL profile. The checked-in source URL, release
+  commit, byte length and SHA-256 are recorded in `docs/security/oscal/SOURCES.md`; the inventory
+  generator rejects missing, duplicate, extra, or source-mismatched control IDs and titles.
+- **OA-E1-002** A control may be `implemented` only with an exact existing Rust test or named CI
+  job/step reference, and `oa-trace` verifies those references. `partial`, `planned`, and
+  `inherited` records state missing facts; facility/hosting inheritance remains unverified until
+  the responsible provider and boundary evidence are identified. These engineering dispositions
+  are not compliance findings, an ATO, or FAA authorization.
+- **OA-E1-003** The deterministic generator produces Markdown and CSV counts by control family and
+  evidence status. CI checks the generated files and rejects incomplete or duplicate inventories.

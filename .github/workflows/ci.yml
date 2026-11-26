@@ -115,6 +115,8 @@ jobs:
       - name: Requirements and assurance traceability
         run: |
           cargo +1.89.0 run --locked -p oa-trace
+          python3 tools/test_generate_oscal_control_map.py
+          python3 tools/generate_oscal_control_map.py --check
           python3 tools/test_generate_safety_tables.py
           python3 tools/generate_safety_tables.py
           git diff --exit-code -- docs/safety/generated

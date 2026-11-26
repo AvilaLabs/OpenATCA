@@ -1,0 +1,5882 @@
+{
+  "schema": "openatca.oscal-control-map",
+  "version": 1,
+  "assessment_scope": "Engineering evidence inventory for the NIST SP 800-53 Rev. 5 HIGH resolved baseline. Not a compliance determination or authorization.",
+  "source": {
+    "repo": "usnistgov/oscal-content",
+    "release": "v1.5.0",
+    "commit": "78650f02ad9321bb7b817846f8fbd4f2bcd620de",
+    "path": "nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_HIGH-baseline-resolved-profile_catalog.json",
+    "url": "https://raw.githubusercontent.com/usnistgov/oscal-content/78650f02ad9321bb7b817846f8fbd4f2bcd620de/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_HIGH-baseline-resolved-profile_catalog.json",
+    "sha256": "e2c1a3dbc1d003ce2aea7e70f64527b17fea3a032b972a5fcb8645d1a75f9ed0",
+    "bytes": 4637935,
+    "catalog_version": "5.2.0",
+    "oscal_version": "1.2.2",
+    "profile_title": "Electronic (OSCAL) Version of NIST Special Publication 800-53 Revision 5.1.1 HIGH IMPACT BASELINE"
+  },
+  "status_definitions": {
+    "implemented": "A narrowly stated implementation slice has direct existing test or CI-job evidence. This is not control compliance or authorization.",
+    "partial": "Some directly linked source/test/CI evidence exists, with explicit missing facts listed.",
+    "planned": "No control-specific evidence is mapped; evidence assessment remains planned.",
+    "inherited": "A facility/hosting responsibility is proposed as externally inherited, but provider, scope, and evidence remain unverified."
+  },
+  "counts_are_derived_by": "tools/generate_oscal_control_map.py",
+  "controls": [
+    {
+      "control_id": "AC-1",
+      "oscal_id": "ac-1",
+      "family": "AC",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "ac-1_prm_1",
+        "ac-01_odp.01",
+        "ac-01_odp.02",
+        "ac-01_odp.03",
+        "ac-01_odp.04",
+        "ac-01_odp.05",
+        "ac-01_odp.06",
+        "ac-01_odp.07",
+        "ac-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-2",
+      "oscal_id": "ac-2",
+      "family": "AC",
+      "title": "Account Management",
+      "parameter_ids": [
+        "ac-02_odp.01",
+        "ac-02_odp.02",
+        "ac-02_odp.03",
+        "ac-02_odp.04",
+        "ac-02_odp.05",
+        "ac-02_odp.06",
+        "ac-02_odp.07",
+        "ac-02_odp.08",
+        "ac-02_odp.09",
+        "ac-02_odp.10"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-2(1)",
+      "oscal_id": "ac-2.1",
+      "family": "AC",
+      "title": "Automated System Account Management",
+      "parameter_ids": [
+        "ac-02.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-2(2)",
+      "oscal_id": "ac-2.2",
+      "family": "AC",
+      "title": "Automated Temporary and Emergency Account Management",
+      "parameter_ids": [
+        "ac-02.02_odp.01",
+        "ac-02.02_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-2(3)",
+      "oscal_id": "ac-2.3",
+      "family": "AC",
+      "title": "Disable Accounts",
+      "parameter_ids": [
+        "ac-02.03_odp.01",
+        "ac-02.03_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-2(4)",
+      "oscal_id": "ac-2.4",
+      "family": "AC",
+      "title": "Automated Audit Actions",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-2(5)",
+      "oscal_id": "ac-2.5",
+      "family": "AC",
+      "title": "Inactivity Logout",
+      "parameter_ids": [
+        "ac-02.05_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-2(11)",
+      "oscal_id": "ac-2.11",
+      "family": "AC",
+      "title": "Usage Conditions",
+      "parameter_ids": [
+        "ac-02.11_odp.01",
+        "ac-02.11_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-2(12)",
+      "oscal_id": "ac-2.12",
+      "family": "AC",
+      "title": "Account Monitoring for Atypical Usage",
+      "parameter_ids": [
+        "ac-02.12_odp.01",
+        "ac-02.12_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-2(13)",
+      "oscal_id": "ac-2.13",
+      "family": "AC",
+      "title": "Disable Accounts for High-risk Individuals",
+      "parameter_ids": [
+        "ac-02.13_odp.01",
+        "ac-02.13_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-3",
+      "oscal_id": "ac-3",
+      "family": "AC",
+      "title": "Access Enforcement",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-4",
+      "oscal_id": "ac-4",
+      "family": "AC",
+      "title": "Information Flow Enforcement",
+      "parameter_ids": [
+        "ac-04_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-4(4)",
+      "oscal_id": "ac-4.4",
+      "family": "AC",
+      "title": "Flow Control of Encrypted Information",
+      "parameter_ids": [
+        "ac-04.04_odp.01",
+        "ac-04.04_odp.02",
+        "ac-04.04_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-5",
+      "oscal_id": "ac-5",
+      "family": "AC",
+      "title": "Separation of Duties",
+      "parameter_ids": [
+        "ac-05_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-6",
+      "oscal_id": "ac-6",
+      "family": "AC",
+      "title": "Least Privilege",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-6(1)",
+      "oscal_id": "ac-6.1",
+      "family": "AC",
+      "title": "Authorize Access to Security Functions",
+      "parameter_ids": [
+        "ac-6.1_prm_2",
+        "ac-06.01_odp.01",
+        "ac-06.01_odp.02",
+        "ac-06.01_odp.03",
+        "ac-06.01_odp.04",
+        "ac-06.01_odp.05"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-6(2)",
+      "oscal_id": "ac-6.2",
+      "family": "AC",
+      "title": "Non-privileged Access for Nonsecurity Functions",
+      "parameter_ids": [
+        "ac-06.02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-6(3)",
+      "oscal_id": "ac-6.3",
+      "family": "AC",
+      "title": "Network Access to Privileged Commands",
+      "parameter_ids": [
+        "ac-06.03_odp.01",
+        "ac-06.03_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-6(5)",
+      "oscal_id": "ac-6.5",
+      "family": "AC",
+      "title": "Privileged Accounts",
+      "parameter_ids": [
+        "ac-06.05_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-6(7)",
+      "oscal_id": "ac-6.7",
+      "family": "AC",
+      "title": "Review of User Privileges",
+      "parameter_ids": [
+        "ac-06.07_odp.01",
+        "ac-06.07_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-6(9)",
+      "oscal_id": "ac-6.9",
+      "family": "AC",
+      "title": "Log Use of Privileged Functions",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-6(10)",
+      "oscal_id": "ac-6.10",
+      "family": "AC",
+      "title": "Prohibit Non-privileged Users from Executing Privileged Functions",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-7",
+      "oscal_id": "ac-7",
+      "family": "AC",
+      "title": "Unsuccessful Logon Attempts",
+      "parameter_ids": [
+        "ac-07_odp.01",
+        "ac-07_odp.02",
+        "ac-07_odp.03",
+        "ac-07_odp.04",
+        "ac-07_odp.05",
+        "ac-07_odp.06"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-8",
+      "oscal_id": "ac-8",
+      "family": "AC",
+      "title": "System Use Notification",
+      "parameter_ids": [
+        "ac-08_odp.01",
+        "ac-08_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-10",
+      "oscal_id": "ac-10",
+      "family": "AC",
+      "title": "Concurrent Session Control",
+      "parameter_ids": [
+        "ac-10_odp.01",
+        "ac-10_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-11",
+      "oscal_id": "ac-11",
+      "family": "AC",
+      "title": "Device Lock",
+      "parameter_ids": [
+        "ac-11_odp.01",
+        "ac-11_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-11(1)",
+      "oscal_id": "ac-11.1",
+      "family": "AC",
+      "title": "Pattern-hiding Displays",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-12",
+      "oscal_id": "ac-12",
+      "family": "AC",
+      "title": "Session Termination",
+      "parameter_ids": [
+        "ac-12_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-14",
+      "oscal_id": "ac-14",
+      "family": "AC",
+      "title": "Permitted Actions Without Identification or Authentication",
+      "parameter_ids": [
+        "ac-14_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-17",
+      "oscal_id": "ac-17",
+      "family": "AC",
+      "title": "Remote Access",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-17(1)",
+      "oscal_id": "ac-17.1",
+      "family": "AC",
+      "title": "Monitoring and Control",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-17(2)",
+      "oscal_id": "ac-17.2",
+      "family": "AC",
+      "title": "Protection of Confidentiality and Integrity Using Encryption",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-17(3)",
+      "oscal_id": "ac-17.3",
+      "family": "AC",
+      "title": "Managed Access Control Points",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-17(4)",
+      "oscal_id": "ac-17.4",
+      "family": "AC",
+      "title": "Privileged Commands and Access",
+      "parameter_ids": [
+        "ac-17.4_prm_1",
+        "ac-17.04_odp.01",
+        "ac-17.04_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-18",
+      "oscal_id": "ac-18",
+      "family": "AC",
+      "title": "Wireless Access",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-18(1)",
+      "oscal_id": "ac-18.1",
+      "family": "AC",
+      "title": "Authentication and Encryption",
+      "parameter_ids": [
+        "ac-18.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-18(3)",
+      "oscal_id": "ac-18.3",
+      "family": "AC",
+      "title": "Disable Wireless Networking",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-18(4)",
+      "oscal_id": "ac-18.4",
+      "family": "AC",
+      "title": "Restrict Configurations by Users",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-18(5)",
+      "oscal_id": "ac-18.5",
+      "family": "AC",
+      "title": "Antennas and Transmission Power Levels",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-19",
+      "oscal_id": "ac-19",
+      "family": "AC",
+      "title": "Access Control for Mobile Devices",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-19(5)",
+      "oscal_id": "ac-19.5",
+      "family": "AC",
+      "title": "Full Device or Container-based Encryption",
+      "parameter_ids": [
+        "ac-19.05_odp.01",
+        "ac-19.05_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-20",
+      "oscal_id": "ac-20",
+      "family": "AC",
+      "title": "Use of External Systems",
+      "parameter_ids": [
+        "ac-20_odp.01",
+        "ac-20_odp.02",
+        "ac-20_odp.03",
+        "ac-20_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-20(1)",
+      "oscal_id": "ac-20.1",
+      "family": "AC",
+      "title": "Limits on Authorized Use",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-20(2)",
+      "oscal_id": "ac-20.2",
+      "family": "AC",
+      "title": "Portable Storage Devices \u2014 Restricted Use",
+      "parameter_ids": [
+        "ac-20.02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-21",
+      "oscal_id": "ac-21",
+      "family": "AC",
+      "title": "Information Sharing",
+      "parameter_ids": [
+        "ac-21_odp.01",
+        "ac-21_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AC-22",
+      "oscal_id": "ac-22",
+      "family": "AC",
+      "title": "Publicly Accessible Content",
+      "parameter_ids": [
+        "ac-22_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AT-1",
+      "oscal_id": "at-1",
+      "family": "AT",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "at-1_prm_1",
+        "at-01_odp.01",
+        "at-01_odp.02",
+        "at-01_odp.03",
+        "at-01_odp.04",
+        "at-01_odp.05",
+        "at-01_odp.06",
+        "at-01_odp.07",
+        "at-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AT-2",
+      "oscal_id": "at-2",
+      "family": "AT",
+      "title": "Literacy Training and Awareness",
+      "parameter_ids": [
+        "at-2_prm_1",
+        "at-2_prm_2",
+        "at-02_odp.01",
+        "at-02_odp.02",
+        "at-02_odp.03",
+        "at-02_odp.04",
+        "at-02_odp.05",
+        "at-02_odp.06",
+        "at-02_odp.07"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AT-2(2)",
+      "oscal_id": "at-2.2",
+      "family": "AT",
+      "title": "Insider Threat",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AT-2(3)",
+      "oscal_id": "at-2.3",
+      "family": "AT",
+      "title": "Social Engineering and Mining",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AT-3",
+      "oscal_id": "at-3",
+      "family": "AT",
+      "title": "Role-based Training",
+      "parameter_ids": [
+        "at-3_prm_1",
+        "at-03_odp.01",
+        "at-03_odp.02",
+        "at-03_odp.03",
+        "at-03_odp.04",
+        "at-03_odp.05"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AT-4",
+      "oscal_id": "at-4",
+      "family": "AT",
+      "title": "Training Records",
+      "parameter_ids": [
+        "at-04_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-1",
+      "oscal_id": "au-1",
+      "family": "AU",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "au-1_prm_1",
+        "au-01_odp.01",
+        "au-01_odp.02",
+        "au-01_odp.03",
+        "au-01_odp.04",
+        "au-01_odp.05",
+        "au-01_odp.06",
+        "au-01_odp.07",
+        "au-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-2",
+      "oscal_id": "au-2",
+      "family": "AU",
+      "title": "Event Logging",
+      "parameter_ids": [
+        "au-2_prm_2",
+        "au-02_odp.01",
+        "au-02_odp.02",
+        "au-02_odp.03",
+        "au-02_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-3",
+      "oscal_id": "au-3",
+      "family": "AU",
+      "title": "Content of Audit Records",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-3(1)",
+      "oscal_id": "au-3.1",
+      "family": "AU",
+      "title": "Additional Audit Information",
+      "parameter_ids": [
+        "au-03.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-4",
+      "oscal_id": "au-4",
+      "family": "AU",
+      "title": "Audit Log Storage Capacity",
+      "parameter_ids": [
+        "au-04_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-5",
+      "oscal_id": "au-5",
+      "family": "AU",
+      "title": "Response to Audit Logging Process Failures",
+      "parameter_ids": [
+        "au-05_odp.01",
+        "au-05_odp.02",
+        "au-05_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-5(1)",
+      "oscal_id": "au-5.1",
+      "family": "AU",
+      "title": "Storage Capacity Warning",
+      "parameter_ids": [
+        "au-05.01_odp.01",
+        "au-05.01_odp.02",
+        "au-05.01_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-5(2)",
+      "oscal_id": "au-5.2",
+      "family": "AU",
+      "title": "Real-time Alerts",
+      "parameter_ids": [
+        "au-05.02_odp.01",
+        "au-05.02_odp.02",
+        "au-05.02_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-6",
+      "oscal_id": "au-6",
+      "family": "AU",
+      "title": "Audit Record Review, Analysis, and Reporting",
+      "parameter_ids": [
+        "au-06_odp.01",
+        "au-06_odp.02",
+        "au-06_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-6(1)",
+      "oscal_id": "au-6.1",
+      "family": "AU",
+      "title": "Automated Process Integration",
+      "parameter_ids": [
+        "au-06.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-6(3)",
+      "oscal_id": "au-6.3",
+      "family": "AU",
+      "title": "Correlate Audit Record Repositories",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-6(5)",
+      "oscal_id": "au-6.5",
+      "family": "AU",
+      "title": "Integrated Analysis of Audit Records",
+      "parameter_ids": [
+        "au-06.05_odp.01",
+        "au-06.05_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-6(6)",
+      "oscal_id": "au-6.6",
+      "family": "AU",
+      "title": "Correlation with Physical Monitoring",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-7",
+      "oscal_id": "au-7",
+      "family": "AU",
+      "title": "Audit Record Reduction and Report Generation",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-7(1)",
+      "oscal_id": "au-7.1",
+      "family": "AU",
+      "title": "Automatic Processing",
+      "parameter_ids": [
+        "au-07.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-8",
+      "oscal_id": "au-8",
+      "family": "AU",
+      "title": "Time Stamps",
+      "parameter_ids": [
+        "au-08_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-9",
+      "oscal_id": "au-9",
+      "family": "AU",
+      "title": "Protection of Audit Information",
+      "parameter_ids": [
+        "au-09_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-9(2)",
+      "oscal_id": "au-9.2",
+      "family": "AU",
+      "title": "Store on Separate Physical Systems or Components",
+      "parameter_ids": [
+        "au-09.02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-9(3)",
+      "oscal_id": "au-9.3",
+      "family": "AU",
+      "title": "Cryptographic Protection",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-9(4)",
+      "oscal_id": "au-9.4",
+      "family": "AU",
+      "title": "Access by Subset of Privileged Users",
+      "parameter_ids": [
+        "au-09.04_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-10",
+      "oscal_id": "au-10",
+      "family": "AU",
+      "title": "Non-repudiation",
+      "parameter_ids": [
+        "au-10_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-11",
+      "oscal_id": "au-11",
+      "family": "AU",
+      "title": "Audit Record Retention",
+      "parameter_ids": [
+        "au-11_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-12",
+      "oscal_id": "au-12",
+      "family": "AU",
+      "title": "Audit Record Generation",
+      "parameter_ids": [
+        "au-12_odp.01",
+        "au-12_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-12(1)",
+      "oscal_id": "au-12.1",
+      "family": "AU",
+      "title": "System-wide and Time-correlated Audit Trail",
+      "parameter_ids": [
+        "au-12.01_odp.01",
+        "au-12.01_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "AU-12(3)",
+      "oscal_id": "au-12.3",
+      "family": "AU",
+      "title": "Changes by Authorized Individuals",
+      "parameter_ids": [
+        "au-12.03_odp.01",
+        "au-12.03_odp.02",
+        "au-12.03_odp.03",
+        "au-12.03_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-1",
+      "oscal_id": "ca-1",
+      "family": "CA",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "ca-1_prm_1",
+        "ca-01_odp.01",
+        "ca-01_odp.02",
+        "ca-01_odp.03",
+        "ca-01_odp.04",
+        "ca-01_odp.05",
+        "ca-01_odp.06",
+        "ca-01_odp.07",
+        "ca-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-2",
+      "oscal_id": "ca-2",
+      "family": "CA",
+      "title": "Control Assessments",
+      "parameter_ids": [
+        "ca-02_odp.01",
+        "ca-02_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-2(1)",
+      "oscal_id": "ca-2.1",
+      "family": "CA",
+      "title": "Independent Assessors",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-2(2)",
+      "oscal_id": "ca-2.2",
+      "family": "CA",
+      "title": "Specialized Assessments",
+      "parameter_ids": [
+        "ca-02.02_odp.01",
+        "ca-02.02_odp.02",
+        "ca-02.02_odp.03",
+        "ca-02.02_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-3",
+      "oscal_id": "ca-3",
+      "family": "CA",
+      "title": "Information Exchange",
+      "parameter_ids": [
+        "ca-03_odp.01",
+        "ca-03_odp.02",
+        "ca-03_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-3(6)",
+      "oscal_id": "ca-3.6",
+      "family": "CA",
+      "title": "Transfer Authorizations",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-5",
+      "oscal_id": "ca-5",
+      "family": "CA",
+      "title": "Plan of Action and Milestones",
+      "parameter_ids": [
+        "ca-05_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-6",
+      "oscal_id": "ca-6",
+      "family": "CA",
+      "title": "Authorization",
+      "parameter_ids": [
+        "ca-06_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-7",
+      "oscal_id": "ca-7",
+      "family": "CA",
+      "title": "Continuous Monitoring",
+      "parameter_ids": [
+        "ca-7_prm_4",
+        "ca-7_prm_5",
+        "ca-07_odp.01",
+        "ca-07_odp.02",
+        "ca-07_odp.03",
+        "ca-07_odp.04",
+        "ca-07_odp.05",
+        "ca-07_odp.06",
+        "ca-07_odp.07"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-7(1)",
+      "oscal_id": "ca-7.1",
+      "family": "CA",
+      "title": "Independent Assessment",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-7(4)",
+      "oscal_id": "ca-7.4",
+      "family": "CA",
+      "title": "Risk Monitoring",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-8",
+      "oscal_id": "ca-8",
+      "family": "CA",
+      "title": "Penetration Testing",
+      "parameter_ids": [
+        "ca-08_odp.01",
+        "ca-08_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-8(1)",
+      "oscal_id": "ca-8.1",
+      "family": "CA",
+      "title": "Independent Penetration Testing Agent or Team",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CA-9",
+      "oscal_id": "ca-9",
+      "family": "CA",
+      "title": "Internal System Connections",
+      "parameter_ids": [
+        "ca-09_odp.01",
+        "ca-09_odp.02",
+        "ca-09_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-1",
+      "oscal_id": "cm-1",
+      "family": "CM",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "cm-1_prm_1",
+        "cm-01_odp.01",
+        "cm-01_odp.02",
+        "cm-01_odp.03",
+        "cm-01_odp.04",
+        "cm-01_odp.05",
+        "cm-01_odp.06",
+        "cm-01_odp.07",
+        "cm-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-2",
+      "oscal_id": "cm-2",
+      "family": "CM",
+      "title": "Baseline Configuration",
+      "parameter_ids": [
+        "cm-02_odp.01",
+        "cm-02_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-2(2)",
+      "oscal_id": "cm-2.2",
+      "family": "CM",
+      "title": "Automation Support for Accuracy and Currency",
+      "parameter_ids": [
+        "cm-02.02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-2(3)",
+      "oscal_id": "cm-2.3",
+      "family": "CM",
+      "title": "Retention of Previous Configurations",
+      "parameter_ids": [
+        "cm-02.03_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-2(7)",
+      "oscal_id": "cm-2.7",
+      "family": "CM",
+      "title": "Configure Systems and Components for High-risk Areas",
+      "parameter_ids": [
+        "cm-02.07_odp.01",
+        "cm-02.07_odp.02",
+        "cm-02.07_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-3",
+      "oscal_id": "cm-3",
+      "family": "CM",
+      "title": "Configuration Change Control",
+      "parameter_ids": [
+        "cm-03_odp.01",
+        "cm-03_odp.02",
+        "cm-03_odp.03",
+        "cm-03_odp.04",
+        "cm-03_odp.05"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-3(1)",
+      "oscal_id": "cm-3.1",
+      "family": "CM",
+      "title": "Automated Documentation, Notification, and Prohibition of Changes",
+      "parameter_ids": [
+        "cm-03.01_odp.01",
+        "cm-03.01_odp.02",
+        "cm-03.01_odp.03",
+        "cm-03.01_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-3(2)",
+      "oscal_id": "cm-3.2",
+      "family": "CM",
+      "title": "Testing, Validation, and Documentation of Changes",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-3(4)",
+      "oscal_id": "cm-3.4",
+      "family": "CM",
+      "title": "Security and Privacy Representatives",
+      "parameter_ids": [
+        "cm-3.4_prm_1",
+        "cm-03.04_odp.01",
+        "cm-03.04_odp.02",
+        "cm-03.04_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-3(6)",
+      "oscal_id": "cm-3.6",
+      "family": "CM",
+      "title": "Cryptography Management",
+      "parameter_ids": [
+        "cm-03.06_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-4",
+      "oscal_id": "cm-4",
+      "family": "CM",
+      "title": "Impact Analyses",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-4(1)",
+      "oscal_id": "cm-4.1",
+      "family": "CM",
+      "title": "Separate Test Environments",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-4(2)",
+      "oscal_id": "cm-4.2",
+      "family": "CM",
+      "title": "Verification of Controls",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-5",
+      "oscal_id": "cm-5",
+      "family": "CM",
+      "title": "Access Restrictions for Change",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-5(1)",
+      "oscal_id": "cm-5.1",
+      "family": "CM",
+      "title": "Automated Access Enforcement and Audit Records",
+      "parameter_ids": [
+        "cm-05.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-6",
+      "oscal_id": "cm-6",
+      "family": "CM",
+      "title": "Configuration Settings",
+      "parameter_ids": [
+        "cm-06_odp.01",
+        "cm-06_odp.02",
+        "cm-06_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-6(1)",
+      "oscal_id": "cm-6.1",
+      "family": "CM",
+      "title": "Automated Management, Application, and Verification",
+      "parameter_ids": [
+        "cm-6.1_prm_2",
+        "cm-06.01_odp.01",
+        "cm-06.01_odp.02",
+        "cm-06.01_odp.03",
+        "cm-06.01_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-6(2)",
+      "oscal_id": "cm-6.2",
+      "family": "CM",
+      "title": "Respond to Unauthorized Changes",
+      "parameter_ids": [
+        "cm-06.02_odp.01",
+        "cm-06.02_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-7",
+      "oscal_id": "cm-7",
+      "family": "CM",
+      "title": "Least Functionality",
+      "parameter_ids": [
+        "cm-7_prm_2",
+        "cm-07_odp.01",
+        "cm-07_odp.02",
+        "cm-07_odp.03",
+        "cm-07_odp.04",
+        "cm-07_odp.05",
+        "cm-07_odp.06"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-7(1)",
+      "oscal_id": "cm-7.1",
+      "family": "CM",
+      "title": "Periodic Review",
+      "parameter_ids": [
+        "cm-7.1_prm_2",
+        "cm-07.01_odp.01",
+        "cm-07.01_odp.02",
+        "cm-07.01_odp.03",
+        "cm-07.01_odp.04",
+        "cm-07.01_odp.05",
+        "cm-07.01_odp.06"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-7(2)",
+      "oscal_id": "cm-7.2",
+      "family": "CM",
+      "title": "Prevent Program Execution",
+      "parameter_ids": [
+        "cm-07.02_odp.01",
+        "cm-07.02_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-7(5)",
+      "oscal_id": "cm-7.5",
+      "family": "CM",
+      "title": "Authorized Software \u2014 Allow-by-exception",
+      "parameter_ids": [
+        "cm-07.05_odp.01",
+        "cm-07.05_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-8",
+      "oscal_id": "cm-8",
+      "family": "CM",
+      "title": "System Component Inventory",
+      "parameter_ids": [
+        "cm-08_odp.01",
+        "cm-08_odp.02"
+      ],
+      "status": "partial",
+      "evidence_refs": [
+        {
+          "kind": "ci_job",
+          "path": ".github/workflows/ci.yml",
+          "job": "check",
+          "step": "Generate SPDX SBOM and toolchain provenance"
+        }
+      ],
+      "missing_facts": [
+        "Inventory is generated for the build/source closure; deployed-site hardware, external services, and installed component inventory are not established."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-8(1)",
+      "oscal_id": "cm-8.1",
+      "family": "CM",
+      "title": "Updates During Installation and Removal",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-8(2)",
+      "oscal_id": "cm-8.2",
+      "family": "CM",
+      "title": "Automated Maintenance",
+      "parameter_ids": [
+        "cm-8.2_prm_1",
+        "cm-08.02_odp.01",
+        "cm-08.02_odp.02",
+        "cm-08.02_odp.03",
+        "cm-08.02_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-8(3)",
+      "oscal_id": "cm-8.3",
+      "family": "CM",
+      "title": "Automated Unauthorized Component Detection",
+      "parameter_ids": [
+        "cm-8.3_prm_1",
+        "cm-08.03_odp.01",
+        "cm-08.03_odp.02",
+        "cm-08.03_odp.03",
+        "cm-08.03_odp.04",
+        "cm-08.03_odp.05",
+        "cm-08.03_odp.06"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-8(4)",
+      "oscal_id": "cm-8.4",
+      "family": "CM",
+      "title": "Accountability Information",
+      "parameter_ids": [
+        "cm-08.04_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-9",
+      "oscal_id": "cm-9",
+      "family": "CM",
+      "title": "Configuration Management Plan",
+      "parameter_ids": [
+        "cm-09_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-10",
+      "oscal_id": "cm-10",
+      "family": "CM",
+      "title": "Software Usage Restrictions",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-11",
+      "oscal_id": "cm-11",
+      "family": "CM",
+      "title": "User-installed Software",
+      "parameter_ids": [
+        "cm-11_odp.01",
+        "cm-11_odp.02",
+        "cm-11_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-12",
+      "oscal_id": "cm-12",
+      "family": "CM",
+      "title": "Information Location",
+      "parameter_ids": [
+        "cm-12_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CM-12(1)",
+      "oscal_id": "cm-12.1",
+      "family": "CM",
+      "title": "Automated Tools to Support Information Location",
+      "parameter_ids": [
+        "cm-12.01_odp.01",
+        "cm-12.01_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-1",
+      "oscal_id": "cp-1",
+      "family": "CP",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "cp-1_prm_1",
+        "cp-01_odp.01",
+        "cp-01_odp.02",
+        "cp-01_odp.03",
+        "cp-01_odp.04",
+        "cp-01_odp.05",
+        "cp-01_odp.06",
+        "cp-01_odp.07",
+        "cp-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-2",
+      "oscal_id": "cp-2",
+      "family": "CP",
+      "title": "Contingency Plan",
+      "parameter_ids": [
+        "cp-2_prm_1",
+        "cp-2_prm_2",
+        "cp-2_prm_4",
+        "cp-02_odp.01",
+        "cp-02_odp.02",
+        "cp-02_odp.03",
+        "cp-02_odp.04",
+        "cp-02_odp.05",
+        "cp-02_odp.06",
+        "cp-02_odp.07"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-2(1)",
+      "oscal_id": "cp-2.1",
+      "family": "CP",
+      "title": "Coordinate with Related Plans",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-2(2)",
+      "oscal_id": "cp-2.2",
+      "family": "CP",
+      "title": "Capacity Planning",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-2(3)",
+      "oscal_id": "cp-2.3",
+      "family": "CP",
+      "title": "Resume Mission and Business Functions",
+      "parameter_ids": [
+        "cp-02.03_odp.01",
+        "cp-02.03_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-2(5)",
+      "oscal_id": "cp-2.5",
+      "family": "CP",
+      "title": "Continue Mission and Business Functions",
+      "parameter_ids": [
+        "cp-02.05_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-2(8)",
+      "oscal_id": "cp-2.8",
+      "family": "CP",
+      "title": "Identify Critical Assets",
+      "parameter_ids": [
+        "cp-02.08_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-3",
+      "oscal_id": "cp-3",
+      "family": "CP",
+      "title": "Contingency Training",
+      "parameter_ids": [
+        "cp-03_odp.01",
+        "cp-03_odp.02",
+        "cp-03_odp.03",
+        "cp-03_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-3(1)",
+      "oscal_id": "cp-3.1",
+      "family": "CP",
+      "title": "Simulated Events",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-4",
+      "oscal_id": "cp-4",
+      "family": "CP",
+      "title": "Contingency Plan Testing",
+      "parameter_ids": [
+        "cp-4_prm_2",
+        "cp-04_odp.01",
+        "cp-04_odp.02",
+        "cp-04_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-4(1)",
+      "oscal_id": "cp-4.1",
+      "family": "CP",
+      "title": "Coordinate with Related Plans",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-4(2)",
+      "oscal_id": "cp-4.2",
+      "family": "CP",
+      "title": "Alternate Processing Site",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-6",
+      "oscal_id": "cp-6",
+      "family": "CP",
+      "title": "Alternate Storage Site",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-6(1)",
+      "oscal_id": "cp-6.1",
+      "family": "CP",
+      "title": "Separation from Primary Site",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-6(2)",
+      "oscal_id": "cp-6.2",
+      "family": "CP",
+      "title": "Recovery Time and Recovery Point Objectives",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-6(3)",
+      "oscal_id": "cp-6.3",
+      "family": "CP",
+      "title": "Accessibility",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-7",
+      "oscal_id": "cp-7",
+      "family": "CP",
+      "title": "Alternate Processing Site",
+      "parameter_ids": [
+        "cp-07_odp.01",
+        "cp-07_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-7(1)",
+      "oscal_id": "cp-7.1",
+      "family": "CP",
+      "title": "Separation from Primary Site",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-7(2)",
+      "oscal_id": "cp-7.2",
+      "family": "CP",
+      "title": "Accessibility",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-7(3)",
+      "oscal_id": "cp-7.3",
+      "family": "CP",
+      "title": "Priority of Service",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-7(4)",
+      "oscal_id": "cp-7.4",
+      "family": "CP",
+      "title": "Preparation for Use",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-8",
+      "oscal_id": "cp-8",
+      "family": "CP",
+      "title": "Telecommunications Services",
+      "parameter_ids": [
+        "cp-08_odp.01",
+        "cp-08_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-8(1)",
+      "oscal_id": "cp-8.1",
+      "family": "CP",
+      "title": "Priority of Service Provisions",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-8(2)",
+      "oscal_id": "cp-8.2",
+      "family": "CP",
+      "title": "Single Points of Failure",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-8(3)",
+      "oscal_id": "cp-8.3",
+      "family": "CP",
+      "title": "Separation of Primary and Alternate Providers",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-8(4)",
+      "oscal_id": "cp-8.4",
+      "family": "CP",
+      "title": "Provider Contingency Plan",
+      "parameter_ids": [
+        "cp-8.4_prm_1",
+        "cp-08.04_odp.01",
+        "cp-08.04_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-9",
+      "oscal_id": "cp-9",
+      "family": "CP",
+      "title": "System Backup",
+      "parameter_ids": [
+        "cp-09_odp.01",
+        "cp-09_odp.02",
+        "cp-09_odp.03",
+        "cp-09_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-9(1)",
+      "oscal_id": "cp-9.1",
+      "family": "CP",
+      "title": "Testing for Reliability and Integrity",
+      "parameter_ids": [
+        "cp-9.1_prm_1",
+        "cp-09.01_odp.01",
+        "cp-09.01_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-9(2)",
+      "oscal_id": "cp-9.2",
+      "family": "CP",
+      "title": "Test Restoration Using Sampling",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-9(3)",
+      "oscal_id": "cp-9.3",
+      "family": "CP",
+      "title": "Separate Storage for Critical Information",
+      "parameter_ids": [
+        "cp-09.03_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-9(5)",
+      "oscal_id": "cp-9.5",
+      "family": "CP",
+      "title": "Transfer to Alternate Storage Site",
+      "parameter_ids": [
+        "cp-9.5_prm_1",
+        "cp-09.05_odp.01",
+        "cp-09.05_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-9(8)",
+      "oscal_id": "cp-9.8",
+      "family": "CP",
+      "title": "Cryptographic Protection",
+      "parameter_ids": [
+        "cp-09.08_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-10",
+      "oscal_id": "cp-10",
+      "family": "CP",
+      "title": "System Recovery and Reconstitution",
+      "parameter_ids": [
+        "cp-10_prm_1",
+        "cp-10_odp.01",
+        "cp-10_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-10(2)",
+      "oscal_id": "cp-10.2",
+      "family": "CP",
+      "title": "Transaction Recovery",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "CP-10(4)",
+      "oscal_id": "cp-10.4",
+      "family": "CP",
+      "title": "Restore Within Time Period",
+      "parameter_ids": [
+        "cp-10.04_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-1",
+      "oscal_id": "ia-1",
+      "family": "IA",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "ia-1_prm_1",
+        "ia-01_odp.01",
+        "ia-01_odp.02",
+        "ia-01_odp.03",
+        "ia-01_odp.04",
+        "ia-01_odp.05",
+        "ia-01_odp.06",
+        "ia-01_odp.07",
+        "ia-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-2",
+      "oscal_id": "ia-2",
+      "family": "IA",
+      "title": "Identification and Authentication (Organizational Users)",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-2(1)",
+      "oscal_id": "ia-2.1",
+      "family": "IA",
+      "title": "Multi-factor Authentication to Privileged Accounts",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-2(2)",
+      "oscal_id": "ia-2.2",
+      "family": "IA",
+      "title": "Multi-factor Authentication to Non-privileged Accounts",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-2(5)",
+      "oscal_id": "ia-2.5",
+      "family": "IA",
+      "title": "Individual Authentication with Group Authentication",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-2(8)",
+      "oscal_id": "ia-2.8",
+      "family": "IA",
+      "title": "Access to Accounts \u2014 Replay Resistant",
+      "parameter_ids": [
+        "ia-02.08_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-2(12)",
+      "oscal_id": "ia-2.12",
+      "family": "IA",
+      "title": "Acceptance of PIV Credentials",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-3",
+      "oscal_id": "ia-3",
+      "family": "IA",
+      "title": "Device Identification and Authentication",
+      "parameter_ids": [
+        "ia-03_odp.01",
+        "ia-03_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-4",
+      "oscal_id": "ia-4",
+      "family": "IA",
+      "title": "Identifier Management",
+      "parameter_ids": [
+        "ia-04_odp.01",
+        "ia-04_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-4(4)",
+      "oscal_id": "ia-4.4",
+      "family": "IA",
+      "title": "Identify User Status",
+      "parameter_ids": [
+        "ia-04.04_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-5",
+      "oscal_id": "ia-5",
+      "family": "IA",
+      "title": "Authenticator Management",
+      "parameter_ids": [
+        "ia-05_odp.01",
+        "ia-05_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-5(1)",
+      "oscal_id": "ia-5.1",
+      "family": "IA",
+      "title": "Password-based Authentication",
+      "parameter_ids": [
+        "ia-05.01_odp.01",
+        "ia-05.01_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-5(2)",
+      "oscal_id": "ia-5.2",
+      "family": "IA",
+      "title": "Public Key-based Authentication",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-5(6)",
+      "oscal_id": "ia-5.6",
+      "family": "IA",
+      "title": "Protection of Authenticators",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-6",
+      "oscal_id": "ia-6",
+      "family": "IA",
+      "title": "Authentication Feedback",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-7",
+      "oscal_id": "ia-7",
+      "family": "IA",
+      "title": "Cryptographic Module Authentication",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-8",
+      "oscal_id": "ia-8",
+      "family": "IA",
+      "title": "Identification and Authentication (Non-organizational Users)",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-8(1)",
+      "oscal_id": "ia-8.1",
+      "family": "IA",
+      "title": "Acceptance of PIV Credentials from Other Agencies",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-8(2)",
+      "oscal_id": "ia-8.2",
+      "family": "IA",
+      "title": "Acceptance of External Authenticators",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-8(4)",
+      "oscal_id": "ia-8.4",
+      "family": "IA",
+      "title": "Use of Defined Profiles",
+      "parameter_ids": [
+        "ia-08.04_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-11",
+      "oscal_id": "ia-11",
+      "family": "IA",
+      "title": "Re-authentication",
+      "parameter_ids": [
+        "ia-11_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-12",
+      "oscal_id": "ia-12",
+      "family": "IA",
+      "title": "Identity Proofing",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-12(2)",
+      "oscal_id": "ia-12.2",
+      "family": "IA",
+      "title": "Identity Evidence",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-12(3)",
+      "oscal_id": "ia-12.3",
+      "family": "IA",
+      "title": "Identity Evidence Validation and Verification",
+      "parameter_ids": [
+        "ia-12.03_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-12(4)",
+      "oscal_id": "ia-12.4",
+      "family": "IA",
+      "title": "In-person Validation and Verification",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IA-12(5)",
+      "oscal_id": "ia-12.5",
+      "family": "IA",
+      "title": "Address Confirmation",
+      "parameter_ids": [
+        "ia-12.05_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-1",
+      "oscal_id": "ir-1",
+      "family": "IR",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "ir-1_prm_1",
+        "ir-01_odp.01",
+        "ir-01_odp.02",
+        "ir-01_odp.03",
+        "ir-01_odp.04",
+        "ir-01_odp.05",
+        "ir-01_odp.06",
+        "ir-01_odp.07",
+        "ir-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-2",
+      "oscal_id": "ir-2",
+      "family": "IR",
+      "title": "Incident Response Training",
+      "parameter_ids": [
+        "ir-02_odp.01",
+        "ir-02_odp.02",
+        "ir-02_odp.03",
+        "ir-02_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-2(1)",
+      "oscal_id": "ir-2.1",
+      "family": "IR",
+      "title": "Simulated Events",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-2(2)",
+      "oscal_id": "ir-2.2",
+      "family": "IR",
+      "title": "Automated Training Environments",
+      "parameter_ids": [
+        "ir-02.02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-3",
+      "oscal_id": "ir-3",
+      "family": "IR",
+      "title": "Incident Response Testing",
+      "parameter_ids": [
+        "ir-03_odp.01",
+        "ir-03_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-3(2)",
+      "oscal_id": "ir-3.2",
+      "family": "IR",
+      "title": "Coordination with Related Plans",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-4",
+      "oscal_id": "ir-4",
+      "family": "IR",
+      "title": "Incident Handling",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-4(1)",
+      "oscal_id": "ir-4.1",
+      "family": "IR",
+      "title": "Automated Incident Handling Processes",
+      "parameter_ids": [
+        "ir-04.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-4(4)",
+      "oscal_id": "ir-4.4",
+      "family": "IR",
+      "title": "Information Correlation",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-4(11)",
+      "oscal_id": "ir-4.11",
+      "family": "IR",
+      "title": "Integrated Incident Response Team",
+      "parameter_ids": [
+        "ir-04.11_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-5",
+      "oscal_id": "ir-5",
+      "family": "IR",
+      "title": "Incident Monitoring",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-5(1)",
+      "oscal_id": "ir-5.1",
+      "family": "IR",
+      "title": "Automated Tracking, Data Collection, and Analysis",
+      "parameter_ids": [
+        "ir-5.1_prm_1",
+        "ir-05.01_odp.01",
+        "ir-05.01_odp.02",
+        "ir-05.01_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-6",
+      "oscal_id": "ir-6",
+      "family": "IR",
+      "title": "Incident Reporting",
+      "parameter_ids": [
+        "ir-06_odp.01",
+        "ir-06_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-6(1)",
+      "oscal_id": "ir-6.1",
+      "family": "IR",
+      "title": "Automated Reporting",
+      "parameter_ids": [
+        "ir-06.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-6(3)",
+      "oscal_id": "ir-6.3",
+      "family": "IR",
+      "title": "Supply Chain Coordination",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-7",
+      "oscal_id": "ir-7",
+      "family": "IR",
+      "title": "Incident Response Assistance",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-7(1)",
+      "oscal_id": "ir-7.1",
+      "family": "IR",
+      "title": "Automation Support for Availability of Information and Support",
+      "parameter_ids": [
+        "ir-07.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "IR-8",
+      "oscal_id": "ir-8",
+      "family": "IR",
+      "title": "Incident Response Plan",
+      "parameter_ids": [
+        "ir-8_prm_5",
+        "ir-08_odp.01",
+        "ir-08_odp.02",
+        "ir-08_odp.03",
+        "ir-08_odp.04",
+        "ir-08_odp.05",
+        "ir-08_odp.06",
+        "ir-08_odp.07"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-1",
+      "oscal_id": "ma-1",
+      "family": "MA",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "ma-1_prm_1",
+        "ma-01_odp.01",
+        "ma-01_odp.02",
+        "ma-01_odp.03",
+        "ma-01_odp.04",
+        "ma-01_odp.05",
+        "ma-01_odp.06",
+        "ma-01_odp.07",
+        "ma-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-2",
+      "oscal_id": "ma-2",
+      "family": "MA",
+      "title": "Controlled Maintenance",
+      "parameter_ids": [
+        "ma-02_odp.01",
+        "ma-02_odp.02",
+        "ma-02_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-2(2)",
+      "oscal_id": "ma-2.2",
+      "family": "MA",
+      "title": "Automated Maintenance Activities",
+      "parameter_ids": [
+        "ma-2.2_prm_1",
+        "ma-02.02_odp.01",
+        "ma-02.02_odp.02",
+        "ma-02.02_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-3",
+      "oscal_id": "ma-3",
+      "family": "MA",
+      "title": "Maintenance Tools",
+      "parameter_ids": [
+        "ma-03_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-3(1)",
+      "oscal_id": "ma-3.1",
+      "family": "MA",
+      "title": "Inspect Tools",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-3(2)",
+      "oscal_id": "ma-3.2",
+      "family": "MA",
+      "title": "Inspect Media",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-3(3)",
+      "oscal_id": "ma-3.3",
+      "family": "MA",
+      "title": "Prevent Unauthorized Removal",
+      "parameter_ids": [
+        "ma-03.03_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-4",
+      "oscal_id": "ma-4",
+      "family": "MA",
+      "title": "Nonlocal Maintenance",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-4(3)",
+      "oscal_id": "ma-4.3",
+      "family": "MA",
+      "title": "Comparable Security and Sanitization",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-5",
+      "oscal_id": "ma-5",
+      "family": "MA",
+      "title": "Maintenance Personnel",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-5(1)",
+      "oscal_id": "ma-5.1",
+      "family": "MA",
+      "title": "Individuals Without Appropriate Access",
+      "parameter_ids": [
+        "ma-05.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MA-6",
+      "oscal_id": "ma-6",
+      "family": "MA",
+      "title": "Timely Maintenance",
+      "parameter_ids": [
+        "ma-06_odp.01",
+        "ma-06_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MP-1",
+      "oscal_id": "mp-1",
+      "family": "MP",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "mp-1_prm_1",
+        "mp-01_odp.01",
+        "mp-01_odp.02",
+        "mp-01_odp.03",
+        "mp-01_odp.04",
+        "mp-01_odp.05",
+        "mp-01_odp.06",
+        "mp-01_odp.07",
+        "mp-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MP-2",
+      "oscal_id": "mp-2",
+      "family": "MP",
+      "title": "Media Access",
+      "parameter_ids": [
+        "mp-2_prm_1",
+        "mp-2_prm_2",
+        "mp-02_odp.01",
+        "mp-02_odp.02",
+        "mp-02_odp.03",
+        "mp-02_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MP-3",
+      "oscal_id": "mp-3",
+      "family": "MP",
+      "title": "Media Marking",
+      "parameter_ids": [
+        "mp-03_odp.01",
+        "mp-03_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MP-4",
+      "oscal_id": "mp-4",
+      "family": "MP",
+      "title": "Media Storage",
+      "parameter_ids": [
+        "mp-4_prm_1",
+        "mp-4_prm_2",
+        "mp-04_odp.01",
+        "mp-04_odp.02",
+        "mp-04_odp.03",
+        "mp-04_odp.04",
+        "mp-04_odp.05",
+        "mp-04_odp.06"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MP-5",
+      "oscal_id": "mp-5",
+      "family": "MP",
+      "title": "Media Transport",
+      "parameter_ids": [
+        "mp-5_prm_2",
+        "mp-05_odp.01",
+        "mp-05_odp.02",
+        "mp-05_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MP-6",
+      "oscal_id": "mp-6",
+      "family": "MP",
+      "title": "Media Sanitization",
+      "parameter_ids": [
+        "mp-6_prm_1",
+        "mp-6_prm_2",
+        "mp-06_odp.01",
+        "mp-06_odp.02",
+        "mp-06_odp.03",
+        "mp-06_odp.04",
+        "mp-06_odp.05",
+        "mp-06_odp.06"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MP-6(1)",
+      "oscal_id": "mp-6.1",
+      "family": "MP",
+      "title": "Review, Approve, Track, Document, and Verify",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MP-6(2)",
+      "oscal_id": "mp-6.2",
+      "family": "MP",
+      "title": "Equipment Testing",
+      "parameter_ids": [
+        "mp-6.2_prm_1",
+        "mp-06.02_odp.01",
+        "mp-06.02_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MP-6(3)",
+      "oscal_id": "mp-6.3",
+      "family": "MP",
+      "title": "Nondestructive Techniques",
+      "parameter_ids": [
+        "mp-06.03_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "MP-7",
+      "oscal_id": "mp-7",
+      "family": "MP",
+      "title": "Media Use",
+      "parameter_ids": [
+        "mp-07_odp.01",
+        "mp-07_odp.02",
+        "mp-07_odp.03",
+        "mp-07_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-1",
+      "oscal_id": "pe-1",
+      "family": "PE",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "pe-1_prm_1",
+        "pe-01_odp.01",
+        "pe-01_odp.02",
+        "pe-01_odp.03",
+        "pe-01_odp.04",
+        "pe-01_odp.05",
+        "pe-01_odp.06",
+        "pe-01_odp.07",
+        "pe-01_odp.08"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-2",
+      "oscal_id": "pe-2",
+      "family": "PE",
+      "title": "Physical Access Authorizations",
+      "parameter_ids": [
+        "pe-02_odp"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-3",
+      "oscal_id": "pe-3",
+      "family": "PE",
+      "title": "Physical Access Control",
+      "parameter_ids": [
+        "pe-3_prm_9",
+        "pe-03_odp.01",
+        "pe-03_odp.02",
+        "pe-03_odp.03",
+        "pe-03_odp.04",
+        "pe-03_odp.05",
+        "pe-03_odp.06",
+        "pe-03_odp.07",
+        "pe-03_odp.08",
+        "pe-03_odp.09",
+        "pe-03_odp.10"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-3(1)",
+      "oscal_id": "pe-3.1",
+      "family": "PE",
+      "title": "System Access",
+      "parameter_ids": [
+        "pe-03.01_odp"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-4",
+      "oscal_id": "pe-4",
+      "family": "PE",
+      "title": "Access Control for Transmission",
+      "parameter_ids": [
+        "pe-04_odp.01",
+        "pe-04_odp.02"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-5",
+      "oscal_id": "pe-5",
+      "family": "PE",
+      "title": "Access Control for Output Devices",
+      "parameter_ids": [
+        "pe-05_odp"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-6",
+      "oscal_id": "pe-6",
+      "family": "PE",
+      "title": "Monitoring Physical Access",
+      "parameter_ids": [
+        "pe-06_odp.01",
+        "pe-06_odp.02"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-6(1)",
+      "oscal_id": "pe-6.1",
+      "family": "PE",
+      "title": "Intrusion Alarms and Surveillance Equipment",
+      "parameter_ids": [],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-6(4)",
+      "oscal_id": "pe-6.4",
+      "family": "PE",
+      "title": "Monitoring Physical Access to Systems",
+      "parameter_ids": [
+        "pe-06.04_odp"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-8",
+      "oscal_id": "pe-8",
+      "family": "PE",
+      "title": "Visitor Access Records",
+      "parameter_ids": [
+        "pe-08_odp.01",
+        "pe-08_odp.02",
+        "pe-08_odp.03"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-8(1)",
+      "oscal_id": "pe-8.1",
+      "family": "PE",
+      "title": "Automated Records Maintenance and Review",
+      "parameter_ids": [
+        "pe-8.1_prm_1",
+        "pe-08.01_odp.01",
+        "pe-08.01_odp.02"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-9",
+      "oscal_id": "pe-9",
+      "family": "PE",
+      "title": "Power Equipment and Cabling",
+      "parameter_ids": [],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-10",
+      "oscal_id": "pe-10",
+      "family": "PE",
+      "title": "Emergency Shutoff",
+      "parameter_ids": [
+        "pe-10_odp.01",
+        "pe-10_odp.02"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-11",
+      "oscal_id": "pe-11",
+      "family": "PE",
+      "title": "Emergency Power",
+      "parameter_ids": [
+        "pe-11_odp"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-11(1)",
+      "oscal_id": "pe-11.1",
+      "family": "PE",
+      "title": "Alternate Power Supply \u2014 Minimal Operational Capability",
+      "parameter_ids": [
+        "pe-11.01_odp"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-12",
+      "oscal_id": "pe-12",
+      "family": "PE",
+      "title": "Emergency Lighting",
+      "parameter_ids": [],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-13",
+      "oscal_id": "pe-13",
+      "family": "PE",
+      "title": "Fire Protection",
+      "parameter_ids": [],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-13(1)",
+      "oscal_id": "pe-13.1",
+      "family": "PE",
+      "title": "Detection Systems \u2014 Automatic Activation and Notification",
+      "parameter_ids": [
+        "pe-13.01_odp.01",
+        "pe-13.01_odp.02"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-13(2)",
+      "oscal_id": "pe-13.2",
+      "family": "PE",
+      "title": "Suppression Systems \u2014 Automatic Activation and Notification",
+      "parameter_ids": [
+        "pe-13.02_odp.01",
+        "pe-13.02_odp.02"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-14",
+      "oscal_id": "pe-14",
+      "family": "PE",
+      "title": "Environmental Controls",
+      "parameter_ids": [
+        "pe-14_odp.01",
+        "pe-14_odp.02",
+        "pe-14_odp.03",
+        "pe-14_odp.04"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-15",
+      "oscal_id": "pe-15",
+      "family": "PE",
+      "title": "Water Damage Protection",
+      "parameter_ids": [],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-15(1)",
+      "oscal_id": "pe-15.1",
+      "family": "PE",
+      "title": "Automation Support",
+      "parameter_ids": [
+        "pe-15.01_odp.01",
+        "pe-15.01_odp.02"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-16",
+      "oscal_id": "pe-16",
+      "family": "PE",
+      "title": "Delivery and Removal",
+      "parameter_ids": [
+        "pe-16_prm_1",
+        "pe-16_odp.01",
+        "pe-16_odp.02"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-17",
+      "oscal_id": "pe-17",
+      "family": "PE",
+      "title": "Alternate Work Site",
+      "parameter_ids": [
+        "pe-17_odp.01",
+        "pe-17_odp.02"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PE-18",
+      "oscal_id": "pe-18",
+      "family": "PE",
+      "title": "Location of System Components",
+      "parameter_ids": [
+        "pe-18_odp"
+      ],
+      "status": "inherited",
+      "evidence_refs": [],
+      "missing_facts": [
+        "Facility/hosting inheritance is only a proposed responsibility boundary. Provider, facility, scope, contract, and assessment evidence are not identified; this row is not verified."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PL-1",
+      "oscal_id": "pl-1",
+      "family": "PL",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "pl-1_prm_1",
+        "pl-01_odp.01",
+        "pl-01_odp.02",
+        "pl-01_odp.03",
+        "pl-01_odp.04",
+        "pl-01_odp.05",
+        "pl-01_odp.06",
+        "pl-01_odp.07",
+        "pl-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PL-2",
+      "oscal_id": "pl-2",
+      "family": "PL",
+      "title": "System Security and Privacy Plans",
+      "parameter_ids": [
+        "pl-02_odp.01",
+        "pl-02_odp.02",
+        "pl-02_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PL-4",
+      "oscal_id": "pl-4",
+      "family": "PL",
+      "title": "Rules of Behavior",
+      "parameter_ids": [
+        "pl-04_odp.01",
+        "pl-04_odp.02",
+        "pl-04_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PL-4(1)",
+      "oscal_id": "pl-4.1",
+      "family": "PL",
+      "title": "Social Media and External Site/Application Usage Restrictions",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PL-8",
+      "oscal_id": "pl-8",
+      "family": "PL",
+      "title": "Security and Privacy Architectures",
+      "parameter_ids": [
+        "pl-08_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PL-10",
+      "oscal_id": "pl-10",
+      "family": "PL",
+      "title": "Baseline Selection",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PL-11",
+      "oscal_id": "pl-11",
+      "family": "PL",
+      "title": "Baseline Tailoring",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PS-1",
+      "oscal_id": "ps-1",
+      "family": "PS",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "ps-1_prm_1",
+        "ps-01_odp.01",
+        "ps-01_odp.02",
+        "ps-01_odp.03",
+        "ps-01_odp.04",
+        "ps-01_odp.05",
+        "ps-01_odp.06",
+        "ps-01_odp.07",
+        "ps-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PS-2",
+      "oscal_id": "ps-2",
+      "family": "PS",
+      "title": "Position Risk Designation",
+      "parameter_ids": [
+        "ps-02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PS-3",
+      "oscal_id": "ps-3",
+      "family": "PS",
+      "title": "Personnel Screening",
+      "parameter_ids": [
+        "ps-3_prm_1",
+        "ps-03_odp.01",
+        "ps-03_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PS-4",
+      "oscal_id": "ps-4",
+      "family": "PS",
+      "title": "Personnel Termination",
+      "parameter_ids": [
+        "ps-04_odp.01",
+        "ps-04_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PS-4(2)",
+      "oscal_id": "ps-4.2",
+      "family": "PS",
+      "title": "Automated Actions",
+      "parameter_ids": [
+        "ps-04.02_odp.01",
+        "ps-04.02_odp.02",
+        "ps-04.02_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PS-5",
+      "oscal_id": "ps-5",
+      "family": "PS",
+      "title": "Personnel Transfer",
+      "parameter_ids": [
+        "ps-05_odp.01",
+        "ps-05_odp.02",
+        "ps-05_odp.03",
+        "ps-05_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PS-6",
+      "oscal_id": "ps-6",
+      "family": "PS",
+      "title": "Access Agreements",
+      "parameter_ids": [
+        "ps-06_odp.01",
+        "ps-06_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PS-7",
+      "oscal_id": "ps-7",
+      "family": "PS",
+      "title": "External Personnel Security",
+      "parameter_ids": [
+        "ps-07_odp.01",
+        "ps-07_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PS-8",
+      "oscal_id": "ps-8",
+      "family": "PS",
+      "title": "Personnel Sanctions",
+      "parameter_ids": [
+        "ps-08_odp.01",
+        "ps-08_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "PS-9",
+      "oscal_id": "ps-9",
+      "family": "PS",
+      "title": "Position Descriptions",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-1",
+      "oscal_id": "ra-1",
+      "family": "RA",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "ra-1_prm_1",
+        "ra-01_odp.01",
+        "ra-01_odp.02",
+        "ra-01_odp.03",
+        "ra-01_odp.04",
+        "ra-01_odp.05",
+        "ra-01_odp.06",
+        "ra-01_odp.07",
+        "ra-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-2",
+      "oscal_id": "ra-2",
+      "family": "RA",
+      "title": "Security Categorization",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-3",
+      "oscal_id": "ra-3",
+      "family": "RA",
+      "title": "Risk Assessment",
+      "parameter_ids": [
+        "ra-03_odp.01",
+        "ra-03_odp.02",
+        "ra-03_odp.03",
+        "ra-03_odp.04",
+        "ra-03_odp.05"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-3(1)",
+      "oscal_id": "ra-3.1",
+      "family": "RA",
+      "title": "Supply Chain Risk Assessment",
+      "parameter_ids": [
+        "ra-03.01_odp.01",
+        "ra-03.01_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-5",
+      "oscal_id": "ra-5",
+      "family": "RA",
+      "title": "Vulnerability Monitoring and Scanning",
+      "parameter_ids": [
+        "ra-5_prm_1",
+        "ra-05_odp.01",
+        "ra-05_odp.02",
+        "ra-05_odp.03",
+        "ra-05_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-5(2)",
+      "oscal_id": "ra-5.2",
+      "family": "RA",
+      "title": "Update Vulnerabilities to Be Scanned",
+      "parameter_ids": [
+        "ra-05.02_odp.01",
+        "ra-05.02_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-5(4)",
+      "oscal_id": "ra-5.4",
+      "family": "RA",
+      "title": "Discoverable Information",
+      "parameter_ids": [
+        "ra-05.04_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-5(5)",
+      "oscal_id": "ra-5.5",
+      "family": "RA",
+      "title": "Privileged Access",
+      "parameter_ids": [
+        "ra-05.05_odp.01",
+        "ra-05.05_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-5(11)",
+      "oscal_id": "ra-5.11",
+      "family": "RA",
+      "title": "Public Disclosure Program",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-7",
+      "oscal_id": "ra-7",
+      "family": "RA",
+      "title": "Risk Response",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "RA-9",
+      "oscal_id": "ra-9",
+      "family": "RA",
+      "title": "Criticality Analysis",
+      "parameter_ids": [
+        "ra-09_odp.01",
+        "ra-09_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-1",
+      "oscal_id": "sa-1",
+      "family": "SA",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "sa-1_prm_1",
+        "sa-01_odp.01",
+        "sa-01_odp.02",
+        "sa-01_odp.03",
+        "sa-01_odp.04",
+        "sa-01_odp.05",
+        "sa-01_odp.06",
+        "sa-01_odp.07",
+        "sa-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-2",
+      "oscal_id": "sa-2",
+      "family": "SA",
+      "title": "Allocation of Resources",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-3",
+      "oscal_id": "sa-3",
+      "family": "SA",
+      "title": "System Development Life Cycle",
+      "parameter_ids": [
+        "sa-03_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-4",
+      "oscal_id": "sa-4",
+      "family": "SA",
+      "title": "Acquisition Process",
+      "parameter_ids": [
+        "sa-04_odp.01",
+        "sa-04_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-4(1)",
+      "oscal_id": "sa-4.1",
+      "family": "SA",
+      "title": "Functional Properties of Controls",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-4(2)",
+      "oscal_id": "sa-4.2",
+      "family": "SA",
+      "title": "Design and Implementation Information for Controls",
+      "parameter_ids": [
+        "sa-04.02_odp.01",
+        "sa-04.02_odp.02",
+        "sa-04.02_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-4(5)",
+      "oscal_id": "sa-4.5",
+      "family": "SA",
+      "title": "System, Component, and Service Configurations",
+      "parameter_ids": [
+        "sa-04.05_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-4(9)",
+      "oscal_id": "sa-4.9",
+      "family": "SA",
+      "title": "Functions, Ports, Protocols, and Services in Use",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-4(10)",
+      "oscal_id": "sa-4.10",
+      "family": "SA",
+      "title": "Use of Approved PIV Products",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-5",
+      "oscal_id": "sa-5",
+      "family": "SA",
+      "title": "System Documentation",
+      "parameter_ids": [
+        "sa-05_odp.01",
+        "sa-05_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-8",
+      "oscal_id": "sa-8",
+      "family": "SA",
+      "title": "Security and Privacy Engineering Principles",
+      "parameter_ids": [
+        "sa-8_prm_1",
+        "sa-08_odp.01",
+        "sa-08_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-9",
+      "oscal_id": "sa-9",
+      "family": "SA",
+      "title": "External System Services",
+      "parameter_ids": [
+        "sa-09_odp.01",
+        "sa-09_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-9(2)",
+      "oscal_id": "sa-9.2",
+      "family": "SA",
+      "title": "Identification of Functions, Ports, Protocols, and Services",
+      "parameter_ids": [
+        "sa-09.02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-10",
+      "oscal_id": "sa-10",
+      "family": "SA",
+      "title": "Developer Configuration Management",
+      "parameter_ids": [
+        "sa-10_odp.01",
+        "sa-10_odp.02",
+        "sa-10_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-11",
+      "oscal_id": "sa-11",
+      "family": "SA",
+      "title": "Developer Testing and Evaluation",
+      "parameter_ids": [
+        "sa-11_odp.01",
+        "sa-11_odp.02",
+        "sa-11_odp.03"
+      ],
+      "status": "partial",
+      "evidence_refs": [
+        {
+          "kind": "ci_job",
+          "path": ".github/workflows/ci.yml",
+          "job": "check",
+          "step": "Test"
+        }
+      ],
+      "missing_facts": [
+        "The workflow runs repository tests; a control-specific security testing plan, independent assessment, and deployment assessment evidence are not established."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-15",
+      "oscal_id": "sa-15",
+      "family": "SA",
+      "title": "Development Process, Standards, and Tools",
+      "parameter_ids": [
+        "sa-15_prm_2",
+        "sa-15_odp.01",
+        "sa-15_odp.02",
+        "sa-15_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-15(3)",
+      "oscal_id": "sa-15.3",
+      "family": "SA",
+      "title": "Criticality Analysis",
+      "parameter_ids": [
+        "sa-15.3_prm_2",
+        "sa-15.03_odp.01",
+        "sa-15.03_odp.02",
+        "sa-15.03_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-16",
+      "oscal_id": "sa-16",
+      "family": "SA",
+      "title": "Developer-provided Training",
+      "parameter_ids": [
+        "sa-16_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-17",
+      "oscal_id": "sa-17",
+      "family": "SA",
+      "title": "Developer Security and Privacy Architecture and Design",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-21",
+      "oscal_id": "sa-21",
+      "family": "SA",
+      "title": "Developer Screening",
+      "parameter_ids": [
+        "sa-21_odp.01",
+        "sa-21_odp.02",
+        "sa-21_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SA-22",
+      "oscal_id": "sa-22",
+      "family": "SA",
+      "title": "Unsupported System Components",
+      "parameter_ids": [
+        "sa-22_odp.01",
+        "sa-22_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-1",
+      "oscal_id": "sc-1",
+      "family": "SC",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "sc-1_prm_1",
+        "sc-01_odp.01",
+        "sc-01_odp.02",
+        "sc-01_odp.03",
+        "sc-01_odp.04",
+        "sc-01_odp.05",
+        "sc-01_odp.06",
+        "sc-01_odp.07",
+        "sc-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-2",
+      "oscal_id": "sc-2",
+      "family": "SC",
+      "title": "Separation of System and User Functionality",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-3",
+      "oscal_id": "sc-3",
+      "family": "SC",
+      "title": "Security Function Isolation",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-4",
+      "oscal_id": "sc-4",
+      "family": "SC",
+      "title": "Information in Shared System Resources",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-5",
+      "oscal_id": "sc-5",
+      "family": "SC",
+      "title": "Denial-of-service Protection",
+      "parameter_ids": [
+        "sc-05_odp.01",
+        "sc-05_odp.02",
+        "sc-05_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-7",
+      "oscal_id": "sc-7",
+      "family": "SC",
+      "title": "Boundary Protection",
+      "parameter_ids": [
+        "sc-07_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-7(3)",
+      "oscal_id": "sc-7.3",
+      "family": "SC",
+      "title": "Access Points",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-7(4)",
+      "oscal_id": "sc-7.4",
+      "family": "SC",
+      "title": "External Telecommunications Services",
+      "parameter_ids": [
+        "sc-07.04_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-7(5)",
+      "oscal_id": "sc-7.5",
+      "family": "SC",
+      "title": "Deny by Default \u2014 Allow by Exception",
+      "parameter_ids": [
+        "sc-07.05_odp.01",
+        "sc-07.05_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-7(7)",
+      "oscal_id": "sc-7.7",
+      "family": "SC",
+      "title": "Split Tunneling for Remote Devices",
+      "parameter_ids": [
+        "sc-07.07_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-7(8)",
+      "oscal_id": "sc-7.8",
+      "family": "SC",
+      "title": "Route Traffic to Authenticated Proxy Servers",
+      "parameter_ids": [
+        "sc-07.08_odp.01",
+        "sc-07.08_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-7(18)",
+      "oscal_id": "sc-7.18",
+      "family": "SC",
+      "title": "Fail Secure",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-7(21)",
+      "oscal_id": "sc-7.21",
+      "family": "SC",
+      "title": "Isolation of System Components",
+      "parameter_ids": [
+        "sc-07.21_odp.01",
+        "sc-07.21_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-8",
+      "oscal_id": "sc-8",
+      "family": "SC",
+      "title": "Transmission Confidentiality and Integrity",
+      "parameter_ids": [
+        "sc-08_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-8(1)",
+      "oscal_id": "sc-8.1",
+      "family": "SC",
+      "title": "Cryptographic Protection",
+      "parameter_ids": [
+        "sc-08.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-10",
+      "oscal_id": "sc-10",
+      "family": "SC",
+      "title": "Network Disconnect",
+      "parameter_ids": [
+        "sc-10_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-12",
+      "oscal_id": "sc-12",
+      "family": "SC",
+      "title": "Cryptographic Key Establishment and Management",
+      "parameter_ids": [
+        "sc-12_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-12(1)",
+      "oscal_id": "sc-12.1",
+      "family": "SC",
+      "title": "Availability",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-13",
+      "oscal_id": "sc-13",
+      "family": "SC",
+      "title": "Cryptographic Protection",
+      "parameter_ids": [
+        "sc-13_odp.01",
+        "sc-13_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-15",
+      "oscal_id": "sc-15",
+      "family": "SC",
+      "title": "Collaborative Computing Devices and Applications",
+      "parameter_ids": [
+        "sc-15_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-17",
+      "oscal_id": "sc-17",
+      "family": "SC",
+      "title": "Public Key Infrastructure Certificates",
+      "parameter_ids": [
+        "sc-17_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-18",
+      "oscal_id": "sc-18",
+      "family": "SC",
+      "title": "Mobile Code",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-20",
+      "oscal_id": "sc-20",
+      "family": "SC",
+      "title": "Secure Name/Address Resolution Service (Authoritative Source)",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-21",
+      "oscal_id": "sc-21",
+      "family": "SC",
+      "title": "Secure Name/Address Resolution Service (Recursive or Caching Resolver)",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-22",
+      "oscal_id": "sc-22",
+      "family": "SC",
+      "title": "Architecture and Provisioning for Name/Address Resolution Service",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-23",
+      "oscal_id": "sc-23",
+      "family": "SC",
+      "title": "Session Authenticity",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-24",
+      "oscal_id": "sc-24",
+      "family": "SC",
+      "title": "Fail in Known State",
+      "parameter_ids": [
+        "sc-24_odp.01",
+        "sc-24_odp.02",
+        "sc-24_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-28",
+      "oscal_id": "sc-28",
+      "family": "SC",
+      "title": "Protection of Information at Rest",
+      "parameter_ids": [
+        "sc-28_odp.01",
+        "sc-28_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-28(1)",
+      "oscal_id": "sc-28.1",
+      "family": "SC",
+      "title": "Cryptographic Protection",
+      "parameter_ids": [
+        "sc-28.01_odp.01",
+        "sc-28.01_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SC-39",
+      "oscal_id": "sc-39",
+      "family": "SC",
+      "title": "Process Isolation",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-1",
+      "oscal_id": "si-1",
+      "family": "SI",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "si-1_prm_1",
+        "si-01_odp.01",
+        "si-01_odp.02",
+        "si-01_odp.03",
+        "si-01_odp.04",
+        "si-01_odp.05",
+        "si-01_odp.06",
+        "si-01_odp.07",
+        "si-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-2",
+      "oscal_id": "si-2",
+      "family": "SI",
+      "title": "Flaw Remediation",
+      "parameter_ids": [
+        "si-02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-2(2)",
+      "oscal_id": "si-2.2",
+      "family": "SI",
+      "title": "Automated Flaw Remediation Status",
+      "parameter_ids": [
+        "si-02.02_odp.01",
+        "si-02.02_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-3",
+      "oscal_id": "si-3",
+      "family": "SI",
+      "title": "Malicious Code Protection",
+      "parameter_ids": [
+        "si-03_odp.01",
+        "si-03_odp.02",
+        "si-03_odp.03",
+        "si-03_odp.04",
+        "si-03_odp.05",
+        "si-03_odp.06"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-4",
+      "oscal_id": "si-4",
+      "family": "SI",
+      "title": "System Monitoring",
+      "parameter_ids": [
+        "si-04_odp.01",
+        "si-04_odp.02",
+        "si-04_odp.03",
+        "si-04_odp.04",
+        "si-04_odp.05",
+        "si-04_odp.06"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-4(2)",
+      "oscal_id": "si-4.2",
+      "family": "SI",
+      "title": "Automated Tools and Mechanisms for Real-time Analysis",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-4(4)",
+      "oscal_id": "si-4.4",
+      "family": "SI",
+      "title": "Inbound and Outbound Communications Traffic",
+      "parameter_ids": [
+        "si-4.4_prm_1",
+        "si-4.4_prm_2",
+        "si-04.04_odp.01",
+        "si-04.04_odp.02",
+        "si-04.04_odp.03",
+        "si-04.04_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-4(5)",
+      "oscal_id": "si-4.5",
+      "family": "SI",
+      "title": "System-generated Alerts",
+      "parameter_ids": [
+        "si-04.05_odp.01",
+        "si-04.05_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-4(10)",
+      "oscal_id": "si-4.10",
+      "family": "SI",
+      "title": "Visibility of Encrypted Communications",
+      "parameter_ids": [
+        "si-04.10_odp.01",
+        "si-04.10_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-4(12)",
+      "oscal_id": "si-4.12",
+      "family": "SI",
+      "title": "Automated Organization-generated Alerts",
+      "parameter_ids": [
+        "si-04.12_odp.01",
+        "si-04.12_odp.02",
+        "si-04.12_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-4(14)",
+      "oscal_id": "si-4.14",
+      "family": "SI",
+      "title": "Wireless Intrusion Detection",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-4(20)",
+      "oscal_id": "si-4.20",
+      "family": "SI",
+      "title": "Privileged Users",
+      "parameter_ids": [
+        "si-04.20_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-4(22)",
+      "oscal_id": "si-4.22",
+      "family": "SI",
+      "title": "Unauthorized Network Services",
+      "parameter_ids": [
+        "si-04.22_odp.01",
+        "si-04.22_odp.02",
+        "si-04.22_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-5",
+      "oscal_id": "si-5",
+      "family": "SI",
+      "title": "Security Alerts, Advisories, and Directives",
+      "parameter_ids": [
+        "si-05_odp.01",
+        "si-05_odp.02",
+        "si-05_odp.03",
+        "si-05_odp.04",
+        "si-05_odp.05"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-5(1)",
+      "oscal_id": "si-5.1",
+      "family": "SI",
+      "title": "Automated Alerts and Advisories",
+      "parameter_ids": [
+        "si-05.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-6",
+      "oscal_id": "si-6",
+      "family": "SI",
+      "title": "Security and Privacy Function Verification",
+      "parameter_ids": [
+        "si-6_prm_1",
+        "si-06_odp.01",
+        "si-06_odp.02",
+        "si-06_odp.03",
+        "si-06_odp.04",
+        "si-06_odp.05",
+        "si-06_odp.06",
+        "si-06_odp.07",
+        "si-06_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-7",
+      "oscal_id": "si-7",
+      "family": "SI",
+      "title": "Software, Firmware, and Information Integrity",
+      "parameter_ids": [
+        "si-7_prm_1",
+        "si-7_prm_2",
+        "si-07_odp.01",
+        "si-07_odp.02",
+        "si-07_odp.03",
+        "si-07_odp.04",
+        "si-07_odp.05",
+        "si-07_odp.06"
+      ],
+      "status": "partial",
+      "evidence_refs": [
+        {
+          "kind": "rust_test",
+          "path": "tools/oa-adapt/tests/adaptation_package.rs",
+          "test_name": "pinned_package_is_checked_before_route_conversion_and_uses_exact_loaded_bytes"
+        },
+        {
+          "kind": "rust_test",
+          "path": "tools/oa-adapt/tests/adaptation_package.rs",
+          "test_name": "incompatible_or_extra_package_paths_refuse_before_route_output"
+        }
+      ],
+      "missing_facts": [
+        "These tests cover integrity checking of adaptation package bytes against an independently supplied pin. They do not establish signature authenticity, secure boot, runtime executable verification, or deployed software integrity monitoring."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-7(1)",
+      "oscal_id": "si-7.1",
+      "family": "SI",
+      "title": "Integrity Checks",
+      "parameter_ids": [
+        "si-7.1_prm_1",
+        "si-7.1_prm_2",
+        "si-7.1_prm_3",
+        "si-7.1_prm_4",
+        "si-07.01_odp.01",
+        "si-07.01_odp.02",
+        "si-07.01_odp.03",
+        "si-07.01_odp.04",
+        "si-07.01_odp.05",
+        "si-07.01_odp.06",
+        "si-07.01_odp.07",
+        "si-07.01_odp.08",
+        "si-07.01_odp.09",
+        "si-07.01_odp.10",
+        "si-07.01_odp.11",
+        "si-07.01_odp.12"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-7(2)",
+      "oscal_id": "si-7.2",
+      "family": "SI",
+      "title": "Automated Notifications of Integrity Violations",
+      "parameter_ids": [
+        "si-07.02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-7(5)",
+      "oscal_id": "si-7.5",
+      "family": "SI",
+      "title": "Automated Response to Integrity Violations",
+      "parameter_ids": [
+        "si-07.05_odp.01",
+        "si-07.05_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-7(7)",
+      "oscal_id": "si-7.7",
+      "family": "SI",
+      "title": "Integration of Detection and Response",
+      "parameter_ids": [
+        "si-07.07_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-7(15)",
+      "oscal_id": "si-7.15",
+      "family": "SI",
+      "title": "Code Authentication",
+      "parameter_ids": [
+        "si-07.15_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-8",
+      "oscal_id": "si-8",
+      "family": "SI",
+      "title": "Spam Protection",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-8(2)",
+      "oscal_id": "si-8.2",
+      "family": "SI",
+      "title": "Automatic Updates",
+      "parameter_ids": [
+        "si-08.02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-10",
+      "oscal_id": "si-10",
+      "family": "SI",
+      "title": "Information Input Validation",
+      "parameter_ids": [
+        "si-10_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-11",
+      "oscal_id": "si-11",
+      "family": "SI",
+      "title": "Error Handling",
+      "parameter_ids": [
+        "si-11_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-12",
+      "oscal_id": "si-12",
+      "family": "SI",
+      "title": "Information Management and Retention",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SI-16",
+      "oscal_id": "si-16",
+      "family": "SI",
+      "title": "Memory Protection",
+      "parameter_ids": [
+        "si-16_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-1",
+      "oscal_id": "sr-1",
+      "family": "SR",
+      "title": "Policy and Procedures",
+      "parameter_ids": [
+        "sr-1_prm_1",
+        "sr-01_odp.01",
+        "sr-01_odp.02",
+        "sr-01_odp.03",
+        "sr-01_odp.04",
+        "sr-01_odp.05",
+        "sr-01_odp.06",
+        "sr-01_odp.07",
+        "sr-01_odp.08"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-2",
+      "oscal_id": "sr-2",
+      "family": "SR",
+      "title": "Supply Chain Risk Management Plan",
+      "parameter_ids": [
+        "sr-02_odp.01",
+        "sr-02_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-2(1)",
+      "oscal_id": "sr-2.1",
+      "family": "SR",
+      "title": "Establish SCRM Team",
+      "parameter_ids": [
+        "sr-02.01_odp.01",
+        "sr-02.01_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-3",
+      "oscal_id": "sr-3",
+      "family": "SR",
+      "title": "Supply Chain Controls and Processes",
+      "parameter_ids": [
+        "sr-03_odp.01",
+        "sr-03_odp.02",
+        "sr-03_odp.03",
+        "sr-03_odp.04",
+        "sr-03_odp.05"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-5",
+      "oscal_id": "sr-5",
+      "family": "SR",
+      "title": "Acquisition Strategies, Tools, and Methods",
+      "parameter_ids": [
+        "sr-05_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-6",
+      "oscal_id": "sr-6",
+      "family": "SR",
+      "title": "Supplier Assessments and Reviews",
+      "parameter_ids": [
+        "sr-06_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-8",
+      "oscal_id": "sr-8",
+      "family": "SR",
+      "title": "Notification Agreements",
+      "parameter_ids": [
+        "sr-08_odp.01",
+        "sr-08_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-9",
+      "oscal_id": "sr-9",
+      "family": "SR",
+      "title": "Tamper Resistance and Detection",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-9(1)",
+      "oscal_id": "sr-9.1",
+      "family": "SR",
+      "title": "Multiple Stages of System Development Life Cycle",
+      "parameter_ids": [],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-10",
+      "oscal_id": "sr-10",
+      "family": "SR",
+      "title": "Inspection of Systems or Components",
+      "parameter_ids": [
+        "sr-10_odp.01",
+        "sr-10_odp.02",
+        "sr-10_odp.03",
+        "sr-10_odp.04"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-11",
+      "oscal_id": "sr-11",
+      "family": "SR",
+      "title": "Component Authenticity",
+      "parameter_ids": [
+        "sr-11_odp.01",
+        "sr-11_odp.02",
+        "sr-11_odp.03"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-11(1)",
+      "oscal_id": "sr-11.1",
+      "family": "SR",
+      "title": "Anti-counterfeit Training",
+      "parameter_ids": [
+        "sr-11.01_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-11(2)",
+      "oscal_id": "sr-11.2",
+      "family": "SR",
+      "title": "Configuration Control for Component Service and Repair",
+      "parameter_ids": [
+        "sr-11.02_odp"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    },
+    {
+      "control_id": "SR-12",
+      "oscal_id": "sr-12",
+      "family": "SR",
+      "title": "Component Disposal",
+      "parameter_ids": [
+        "sr-12_odp.01",
+        "sr-12_odp.02"
+      ],
+      "status": "planned",
+      "evidence_refs": [],
+      "missing_facts": [
+        "No control-specific test or CI evidence is mapped yet; this entry remains planned pending control assessment and evidence mapping."
+      ],
+      "implemented_refs": []
+    }
+  ]
+}

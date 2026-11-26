@@ -19,7 +19,7 @@ const MAX_REQUIREMENTS: usize = 10_000;
 const MAX_REFS_PER_HAZARD: usize = 128;
 
 #[derive(Debug)]
-enum JsonValue {
+pub(crate) enum JsonValue {
     Null,
     Bool,
     Number(String),
@@ -266,6 +266,10 @@ impl<'a> JsonParser<'a> {
             self.offset += 1;
         }
     }
+}
+
+pub(crate) fn parse_document(bytes: &[u8]) -> Result<JsonValue, String> {
+    JsonParser::new(bytes).parse()
 }
 
 fn object(value: &JsonValue) -> Option<&BTreeMap<String, JsonValue>> {
