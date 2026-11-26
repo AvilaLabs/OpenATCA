@@ -26,6 +26,9 @@ oa-sha256 = { path = "../../crates/oa-sha256" }
 oa-zip = { path = "../../crates/oa-zip" }
 # Existing private full-NASR regression suite relocated with guarded inputs.
 oa-nasr = { path = "../../crates/oa-nasr" }
+# F1 / Steer34 C: the existing pure bounded comparator owns processor inventory status and
+# missing-sequence accounting; this shell converts local adaptation claims into its plain inputs.
+oa-techops = { path = "../../crates/oa-techops" }
 
 [package.metadata.openatca]
 class = "shell"

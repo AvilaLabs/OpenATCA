@@ -355,7 +355,8 @@ const ALLOW: &str = "seal-allow:";
 // I3: ten reviewed ownership, durability, retention, query and fixture sites, carried from main.
 // F2: five scenario-prep provenance/output sites, one guarded runner output, and one generated
 // seal-checked OASD asset include; none authorizes unguarded external input reads.
-const ALLOW_COUNT: usize = 214;
+// G2 fleet: one guarded report-directory enumeration with each child checked before use.
+const ALLOW_COUNT: usize = 215;
 
 /// Text that names the real data root: a file that holds one must read through `oa_sealed`.
 /// Written in two pieces so this file does not name the root itself.

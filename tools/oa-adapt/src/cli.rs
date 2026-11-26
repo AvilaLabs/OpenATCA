@@ -11,6 +11,10 @@
 //!                 --previous-manifest-sha256 <hex> --release <id> --facility <ARTCC>
 //!                 --change-ref <record> --change-class initial|routine|field-change
 //!                 --issuer <principal-id> --approver <principal-id> --reason <text>
+//! oa-adapt fleet-check --issued-package-root <dir> --expected-manifest-sha256 <hex>
+//!                       --expected <processor-list.tsv> --reports-dir <dir>
+//!                       --previous-epoch <number> --epoch <number> --clock-domain-id <number>
+//!                       --query-time-ns <number> --freshness-limit-ns <number>
 //! ```
 //!
 //! `build` writes `<snapshot>` and `<snapshot>.report.txt`. `diff` prints to standard output.
@@ -92,6 +96,10 @@ pub const USAGE: &str = "usage:
                  --previous-manifest-sha256 <hex> --release <id> --facility <ARTCC>
                  --change-ref <record> --change-class initial|routine|field-change
                  --issuer <principal-id> --approver <principal-id> --reason <text>
+  oa-adapt fleet-check --issued-package-root <dir> --expected-manifest-sha256 <hex>
+                       --expected <processor-list.tsv> --reports-dir <dir>
+                       --previous-epoch <number> --epoch <number> --clock-domain-id <number>
+                       --query-time-ns <number> --freshness-limit-ns <number>
   oa-adapt route --snapshot <snapshot> --steps <identity-qualified instructions>
   oa-adapt route --package-root <directory> --expected-manifest-sha256 <hex> --steps <instructions>";
 
@@ -511,8 +519,11 @@ pub fn run(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
             let _ = writeln!(out, "{USAGE}");
             Ok(())
         }
+        Some((cmd, rest)) if cmd == "fleet-check" => {
+            crate::fleet_cli::run(rest, out).map_err(|error| CliError::Failed(error.to_string()))
+        }
         _ => Err(CliError::Usage(
-            "expected a command: build, diff, package, issue, or route".into(),
+            "expected a command: build, diff, package, issue, fleet-check, or route".into(),
         )),
     }
 }
