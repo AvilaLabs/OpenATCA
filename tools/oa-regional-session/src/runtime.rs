@@ -1148,7 +1148,7 @@ mod transaction_tests {
     }
 
     // REQ: OA-QUAR-004, OA-AUDIT-002, OA-AUDIT-003, OA-AUDIT-005, OA-AUDIT-006
-    // REQ: OA-AUDIT-002, OA-AUDIT-005, OA-AUDIT-007, OA-AUDIT-008
+    // REQ: OA-AUDIT-002, OA-AUDIT-003, OA-AUDIT-005, OA-AUDIT-006, OA-AUDIT-007, OA-AUDIT-008
     #[test]
     fn quarantine_maintainer_appends_before_ack_and_refuses_audit_failure() {
         let model = synthetic_model().expect("public synthetic model");
