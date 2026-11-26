@@ -257,7 +257,7 @@ pub fn resolve_metering_scan(
             report.unbound_rows = report.unbound_rows.saturating_add(1);
             continue;
         }
-        let source_time_ns = match row.source_time_ns {
+        let _source_time_ns = match row.source_time_ns {
             Some(value) => value,
             None => {
                 report.missing_source_time_rows = report.missing_source_time_rows.saturating_add(1);

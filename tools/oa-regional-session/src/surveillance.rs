@@ -1104,8 +1104,8 @@ pub(super) fn rendered_scope_texts(s: &Surveillance) -> Vec<String> {
         .filter_map(|(&start, &len)| {
             let start = usize::try_from(start).ok()?;
             let end = start.checked_add(usize::try_from(len).ok()?)?;
-            let bytes = s.scope.list.text.get(start..end)?;
-            std::str::from_utf8(bytes).ok().map(str::to_owned)
+            let text = s.scope.list.text.get(start..end)?;
+            Some(text.to_owned())
         })
         .collect()
 }
