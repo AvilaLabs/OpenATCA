@@ -108,6 +108,46 @@ fn write_synthetic_adsb(path: &Path) {
     file.sync_all().expect("sync synthetic OAF fixture");
 }
 
+fn write_synthetic_sfdps(path: &Path) {
+    // seal-allow: test writes only a newly-created public synthetic OAF/FIXM fixture under temp_dir.
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .expect("create synthetic SFDPS OAF fixture");
+    let mut sequence = 0u64;
+    let mut receive_ns = H5_CAPTURE_START_NS;
+    while receive_ns < H5_MEASUREMENT_END_NS {
+        sequence += 1;
+        let elapsed_seconds = (receive_ns - H5_CAPTURE_START_NS) / 1_000_000_000;
+        let second_of_day = 20 * 3_600 + 50 * 60 + elapsed_seconds;
+        let hour = (second_of_day / 3_600) % 24;
+        let minute = (second_of_day / 60) % 60;
+        let second = second_of_day % 60;
+        let xml = format!(
+            r#"<ns5:MessageCollection xmlns:ns5="http://www.faa.aero/nas/3.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"><message xsi:type="ns5:FlightMessageType"><flight xsi:type="ns5:NasFlightType" centre="ZAU1" source="TH" system="SLC" timestamp="2026-11-19T{hour:02}:{minute:02}:{second:02}.000Z"><gufi codeSpace="urn:uuid">11111111-2222-3333-4444-555555555555</gufi><controllingUnit unitIdentifier="ZAU1"/><aircraftDescription xsi:type="ns5:NasAircraftType" equipmentQualifier="L" aircraftAddress="ABCDEF" registration="N1TST" wakeTurbulence="M"/></flight></message></ns5:MessageCollection>"#
+        );
+        let frame_receive_ns = receive_ns
+            .checked_add(1)
+            .expect("synthetic receipt-time increment");
+        let mut frame = vec![0; oa_feed::HEADER_LEN + xml.len() + oa_feed::TRAILER_LEN];
+        let bytes = oa_feed::encode_frame(
+            &mut frame,
+            oa_feed::Kind::Message as u8,
+            0,
+            sequence,
+            frame_receive_ns,
+            frame_receive_ns / 1_000_000,
+            xml.as_bytes(),
+        )
+        .expect("encode synthetic SFDPS OAF frame");
+        file.write_all(frame.get(..bytes).expect("encoded frame slice"))
+            .expect("write synthetic SFDPS frame");
+        receive_ns += SYNTHETIC_STEP_NS;
+    }
+    file.sync_all().expect("sync synthetic SFDPS OAF fixture");
+}
+
 #[test]
 fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_each_update() {
     let id = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
@@ -116,12 +156,25 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
         std::process::id(),
         id
     ));
-    let _fixture = FixtureFile(path.clone());
+    let sfdps_path = std::env::temp_dir().join(format!(
+        "oa_h5_recorded_synthetic_sfdps_{}_{}.oaf",
+        std::process::id(),
+        id
+    ));
+    let _adsb_fixture = FixtureFile(path.clone());
+    let _sfdps_fixture = FixtureFile(sfdps_path.clone());
     write_synthetic_adsb(&path);
-    let input = [StreamInput {
-        source: RecordingSource::Adsb,
-        path,
-    }];
+    write_synthetic_sfdps(&sfdps_path);
+    let input = [
+        StreamInput {
+            source: RecordingSource::Adsb,
+            path,
+        },
+        StreamInput {
+            source: RecordingSource::Sfdps,
+            path: sfdps_path,
+        },
+    ];
     let model_bytes = synthetic_model();
     let worker = Path::new(env!("CARGO_BIN_EXE_regional-m3-recorded-drill"));
     let report = run_recorded_stream(
@@ -147,6 +200,8 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
         .iter()
         .all(|cycle| cycle.flip_rollback_attempted && cycle.consumer_frame_updates > 0));
     assert!(report.per_update_consumer.updates > 100);
+    assert!(report.flight_input_count > 0);
+    assert!(report.cycles.iter().any(|cycle| cycle.flight_inputs > 0));
     assert!(report.per_update_consumer.virtual_gap_samples > 0);
     assert_eq!(report.per_update_consumer.virtual_gap_exceeded, 0);
     assert_eq!(
@@ -168,6 +223,13 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
     assert_eq!(report.source_files_refused, None);
     assert_eq!(report.stream_counts.reject_frames, 0);
     assert!(report.warmup_event_count > 0);
+    assert_eq!(report.input_streams.len(), 2);
+    assert!(report.stream_counts.frames >= 2_000);
+    assert_eq!(report.handoff_operation_count, 0);
+    assert_eq!(
+        report.source_state_families_available,
+        [true, true, false, false]
+    );
     assert_eq!(report.window_start_ns, H5_MEASUREMENT_START_NS);
     assert_eq!(report.window_end_ns, H5_MEASUREMENT_END_NS);
     assert_eq!(report.capture_start_ns, H5_CAPTURE_START_NS);

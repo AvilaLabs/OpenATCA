@@ -3981,7 +3981,12 @@ pub fn run_recorded(
         map_centre_lat_e7,
         map_centre_lon_e7,
         map_range_nm,
-        source_state_families_available: [true, true, true, false],
+        source_state_families_available: [
+            counts.positions > 0,
+            counts.flights > 0,
+            counts.handoffs > 0,
+            false,
+        ],
         qualification: "INCOMPLETE_RECORDED_REPLAY_STATE",
         authority_mode: "UNAVAILABLE_NO_LOCAL_FIXTURE",
         m2_attempt_count: m2_cycle_count
@@ -4507,13 +4512,6 @@ pub fn run_recorded_stream(
         worker_executable,
         local_authority_fixture,
     } = options;
-    if local_authority_fixture
-        && inputs
-            .iter()
-            .any(|input| input.source != RecordingSource::Adsb)
-    {
-        return Err("local authority fixture accepts ADS-B-only replay inputs".into());
-    }
     if H5_CAPTURE_START_NS != 1_795_121_400_000_000_000
         || H5_MEASUREMENT_START_NS != 1_795_122_000_000_000_000
         || H5_MEASUREMENT_END_NS != 1_795_125_600_000_000_000
@@ -4915,7 +4913,12 @@ pub fn run_recorded_stream(
         map_centre_lat_e7,
         map_centre_lon_e7,
         map_range_nm,
-        source_state_families_available: [true, true, true, false],
+        source_state_families_available: [
+            counts.positions > 0,
+            counts.flights > 0,
+            counts.handoffs > 0,
+            false,
+        ],
         qualification: if full_local_source
             && m2_refusals == 0
             && flip_completions == CYCLES
