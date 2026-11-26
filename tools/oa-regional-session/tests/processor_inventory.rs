@@ -97,10 +97,14 @@ fn actual_cli_startup_and_runtime_emit_timestamped_processor_report() {
     assert!(report.contains("phase\tOBSERVED\tSTARTUP"));
     assert!(report.contains("phase\tOBSERVED\tON_DEMAND"));
     assert!(report.contains("observed_at_unix_ns\tOBSERVED\t"));
-    assert!(report.contains("loaded_runtime_adaptation_sha256\tOBSERVED\t"));
+    assert!(report.contains("loaded_runtime_model_snapshot_sha256\tOBSERVED\t"));
+    assert!(report.contains("verified_component_coverage\tOBSERVED\tmodel_snapshot_only"));
+    assert!(report.contains("other_loaded_components\tUNAVAILABLE\t"));
+    assert!(report.contains("ca_configuration_state\tUNAVAILABLE\t"));
+    assert!(report.contains("composite_adaptation_status\tUNAVAILABLE\t"));
     assert!(report.contains("disk_adaptation_sha256\tOBSERVED\t"));
     assert!(report.contains("processor_identity\tUNAVAILABLE\t"));
-    assert!(report.contains("status\tOBSERVED\tMatch"));
+    assert!(report.contains("model_snapshot_status\tOBSERVED\tMatch"));
     assert!(output.join("COMPLETE").exists());
 
     let _ = fs::remove_dir_all(package_root);
@@ -127,7 +131,7 @@ fn wrong_independent_pin_refuses_cli_startup_and_writes_fault_report() {
         .contains("no model activated"));
     let report = fs::read_to_string(output.join("processor-report.tsv")).expect("fault report");
     assert!(report.contains("phase\tSTARTUP_REFUSED"));
-    assert!(report.contains("loaded_runtime_adaptation_sha256\tUNAVAILABLE"));
+    assert!(report.contains("loaded_runtime_model_snapshot_sha256\tUNAVAILABLE"));
     assert!(report.contains("status\tFAULT\tSTARTUP_VERIFICATION_REFUSED"));
     assert!(!output.join("COMPLETE").exists());
 

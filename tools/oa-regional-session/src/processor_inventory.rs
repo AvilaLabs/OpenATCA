@@ -44,7 +44,13 @@ pub fn unpinned_source_report() -> String {
     report.push_str("observed_at_unix_ns\tUNAVAILABLE\tno issued-runtime processor observation\n");
     report
         .push_str("issued_manifest_sha256\tUNAVAILABLE\tno independently pinned issue manifest\n");
-    report.push_str("loaded_runtime_adaptation_sha256\tUNAVAILABLE\truntime model is not bound to an issued package\n");
+    report.push_str("verified_component_coverage\tUNAVAILABLE\tno issued package verified\n");
+    report.push_str("loaded_runtime_model_snapshot_sha256\tUNAVAILABLE\truntime model is not bound to an issued package\n");
+    report.push_str("other_loaded_components\tUNAVAILABLE\tno component inventory captured\n");
+    report.push_str("ca_configuration_state\tUNAVAILABLE\truntime CA configuration not observed; empty is not inferred\n");
+    report.push_str(
+        "composite_adaptation_status\tUNAVAILABLE\tno composite runtime fingerprint available\n",
+    );
     report.push_str("disk_adaptation_sha256\tUNAVAILABLE\tno package recheck is available\n");
     report.push_str("status\tUNAVAILABLE\tunverified replay or synthetic source is not a processor inventory match\n");
     report.push_str("provenance\tUNVERIFIED\tno authenticated processor or issuer claim\n");
@@ -76,7 +82,14 @@ pub fn startup_refusal_report(
     report.push_str("issued_manifest_sha256\tOBSERVED\t");
     report.push_str(&oa_sha256::to_hex(&expected_manifest_sha256));
     report.push('\n');
-    report.push_str("loaded_runtime_adaptation_sha256\tUNAVAILABLE\truntime did not activate\n");
+    report.push_str("verified_component_coverage\tUNAVAILABLE\tstartup verification refused\n");
+    report
+        .push_str("loaded_runtime_model_snapshot_sha256\tUNAVAILABLE\truntime did not activate\n");
+    report.push_str("other_loaded_components\tUNAVAILABLE\truntime did not activate\n");
+    report.push_str(
+        "ca_configuration_state\tUNAVAILABLE\truntime did not activate; empty is not inferred\n",
+    );
+    report.push_str("composite_adaptation_status\tUNAVAILABLE\truntime did not activate\n");
     report.push_str("disk_manifest_sha256\tUNAVAILABLE\tissued-package verification refused\n");
     report.push_str("disk_adaptation_sha256\tUNAVAILABLE\tissued-package verification refused\n");
     report.push_str("status\tFAULT\tSTARTUP_VERIFICATION_REFUSED\n");

@@ -170,6 +170,10 @@ pub fn render_processor_report_tsv(phase: &str, report: &LocalInventoryReport) -
     out.push_str(
         "issuer_identity\tUNAVAILABLE\tmanifest principal IDs are not authenticated here\n",
     );
+    out.push_str("verified_component_coverage\tOBSERVED\tmodel_snapshot_only\n");
+    out.push_str("other_loaded_components\tUNAVAILABLE\tCA, PVER, runway and MVA runtime components are not fingerprinted by this producer\n");
+    out.push_str("ca_configuration_state\tUNAVAILABLE\truntime CA configuration not observed; empty is not inferred\n");
+    out.push_str("composite_adaptation_status\tUNAVAILABLE\tmodel snapshot identity does not certify all runtime components\n");
     out.push_str(&format!(
         "issued_manifest_sha256\tOBSERVED\t{}\n",
         oa_sha256::to_hex(&report.issued_manifest_sha256)
@@ -180,7 +184,7 @@ pub fn render_processor_report_tsv(phase: &str, report: &LocalInventoryReport) -
         report.expected_adaptation_sha256,
     );
     out.push_str(&format!(
-        "loaded_runtime_adaptation_sha256\tOBSERVED\t{}\n",
+        "loaded_runtime_model_snapshot_sha256\tOBSERVED\t{}\n",
         oa_sha256::to_hex(&report.loaded_adaptation_sha256)
     ));
     push_optional_digest(
@@ -214,10 +218,13 @@ pub fn render_processor_report_tsv(phase: &str, report: &LocalInventoryReport) -
         report.comparison.loaded_matches_disk,
     );
     out.push_str(&format!(
-        "comparison\tOBSERVED\t{:?}\n",
+        "model_snapshot_comparison\tOBSERVED\t{:?}\n",
         report.comparison.state
     ));
-    out.push_str(&format!("local_status\tOBSERVED\t{:?}\n", report.status));
+    out.push_str(&format!(
+        "model_snapshot_status\tOBSERVED\t{:?}\n",
+        report.status
+    ));
     out.push_str("provenance\tUNVERIFIED\tcontent comparison only; no authenticated processor or issuer claim\n");
     out
 }
