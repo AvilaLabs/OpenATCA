@@ -73,7 +73,7 @@ fn command_binary_forbids_unsafe_code() {
     assert!(main.starts_with("#![forbid(unsafe_code)]"));
 }
 
-// REQ: OA-CERT-001
+// REQ: OA-CERT-001, OA-AUDIT-003, OA-AUDIT-005, OA-AUDIT-008
 #[test]
 fn issue_cli_binds_catalog_companion_and_reads_it_back_from_v4() {
     let scratch = Scratch::new("issue-pver-v4");
@@ -89,6 +89,10 @@ fn issue_cli_binds_catalog_companion_and_reads_it_back_from_v4() {
     std::fs::write(&catalog_path, catalog).expect("synthetic catalog");
     let audit = scratch.path("adaptation.audit");
     let output = scratch.path("issued");
+    let registry = scratch.path("principals.tsv");
+    let registry_bytes = b"OACERT-LOCAL-PRINCIPALS-V1\n11\tconfigure\n";
+    std::fs::write(&registry, registry_bytes).expect("synthetic principal registry");
+    let registry_pin = to_hex(&sha256(registry_bytes));
     let issue_args = args(&[
         "issue",
         "--snapshot",
@@ -125,6 +129,10 @@ fn issue_cli_binds_catalog_companion_and_reads_it_back_from_v4() {
         "configure",
         "--audit-time-ns",
         "1800000000000000000",
+        "--principal-registry",
+        registry.to_str().unwrap(),
+        "--principal-registry-sha256",
+        registry_pin.as_str(),
         "--pver-catalog",
         catalog_path.to_str().unwrap(),
     ]);
