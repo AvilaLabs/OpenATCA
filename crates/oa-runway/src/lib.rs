@@ -17,6 +17,7 @@
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("the core crates support 64-bit targets only, so that usize is 64 bits everywhere");
 
+pub mod adaptation;
 pub mod arv;
 pub mod final_monitor;
 pub mod occupy;

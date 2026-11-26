@@ -11,10 +11,6 @@ publish = false
 workspace = true
 
 [dependencies]
-# F1 / steer41: L13 issue command binds its plain audit event values to the core contract.
-oa-audit-core = { path = "../../crates/oa-audit-core" }
-# L13 privileged adaptation issue writes the audit intent durably before creating package files.
-oa-audit-log = { path = "../../crates/oa-audit-log" }
 # F1 / CORE_LIBRARY_SPEC §4: existing private command links relocated from oa-airspace
 # under Connor's authorized library/guard separation; no outside packages are introduced.
 # Model construction and byte parsing remain in the shared operational library.
@@ -22,6 +18,9 @@ oa-airspace = { path = "../../crates/oa-airspace" }
 # F1: steer33 L11/A3 explicitly authorizes issue-time semantic validation of the CA preset with
 # the core parser that runtime CA uses; this is a shell-to-core link, never a reverse dependency.
 oa-ca = { path = "../../crates/oa-ca" }
+# F1a: verify the emitted runway-aid adaptation against the pure bounded core parser before
+# writing or returning its exact bytes to the runtime.
+oa-runway = { path = "../../crates/oa-runway" }
 # Private input-path policy stays in this tool process, outside the reusable library.
 oa-sealed = { path = "../../crates/oa-sealed" }
 # Existing command content-identity output, not authentication.
