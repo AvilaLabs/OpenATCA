@@ -402,7 +402,7 @@ pub fn run_package(args: &[String], out: &mut dyn Write) -> Result<(), CliError>
     Ok(())
 }
 
-/// `issue`: create a bounded v2, v3, or v4 manifest after verifying the prior pin.
+/// `issue`: create a bounded v2-v5 manifest after verifying the prior pin.
 pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     const FIELDS: [&str; 19] = [
         "--snapshot",
@@ -425,9 +425,9 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         "--principal-registry",
         "--principal-registry-sha256",
     ];
-    if args.len() < FIELDS.len() * 2 || args.len() > (FIELDS.len() + 2) * 2 || args.len() % 2 != 0 {
+    if args.len() < FIELDS.len() * 2 || args.len() > (FIELDS.len() + 3) * 2 || args.len() % 2 != 0 {
         return Err(CliError::Usage(
-            "issue requires nineteen mandatory flag/value pairs and optional --ca-preset/--pver-catalog pairs".into(),
+            "issue requires nineteen mandatory flag/value pairs and optional --ca-preset/--pver-catalog/--runway-aids pairs".into(),
         ));
     }
     if args
@@ -444,7 +444,11 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         let value = pair
             .get(1)
             .ok_or_else(|| CliError::Usage("missing issue value".into()))?;
-        if !FIELDS.contains(&flag.as_str()) && flag != "--ca-preset" && flag != "--pver-catalog" {
+        if !FIELDS.contains(&flag.as_str())
+            && flag != "--ca-preset"
+            && flag != "--pver-catalog"
+            && flag != "--runway-aids"
+        {
             return Err(CliError::Usage(format!("unknown issue argument {flag:?}")));
         }
         if value.is_empty() || value.starts_with("--") {
@@ -496,6 +500,21 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
             )
         })
         .transpose()?;
+    let runway_aids = values
+        .get("--runway-aids")
+        .map(|path| {
+            read_bounded_file(
+                Path::new(path),
+                oa_runway::adaptation::MAX_PROFILE_BYTES,
+                "runway-aid adaptation",
+            )
+        })
+        .transpose()?;
+    if runway_aids.is_some() && pver_catalog.is_some() {
+        return Err(CliError::Usage(
+            "v5 runway-aid issuance carries forward the pinned PVER catalog; do not supply --pver-catalog again".into(),
+        ));
+    }
     let audit_principal = get("--audit-principal")?
         .parse::<u64>()
         .map_err(|_| CliError::Usage("--audit-principal must be a positive numeric ID".into()))?;
@@ -538,14 +557,28 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         .map_err(|e| CliError::Usage(format!("invalid --audit-tail: {e}")))?;
     let (target, target_len) = oa_audit_core::target(facility.as_bytes())
         .map_err(|e| CliError::Usage(format!("invalid audit target: {e:?}")))?;
-    let details = encode_issue_audit_details(&[
-        release,
-        facility,
-        change_ref,
-        get("--change-class")?,
-        approver,
-        reason,
-    ])?;
+    let details = if let Some(profile) = &runway_aids {
+        let profile_digest = to_hex(&oa_sha256::sha256(profile));
+        encode_issue_audit_details(&[
+            release,
+            facility,
+            change_ref,
+            get("--change-class")?,
+            approver,
+            reason,
+            "runway_aids_sha256",
+            &profile_digest,
+        ])?
+    } else {
+        encode_issue_audit_details(&[
+            release,
+            facility,
+            change_ref,
+            get("--change-class")?,
+            approver,
+            reason,
+        ])?
+    };
     let (details, details_len) = oa_audit_core::details(&details)
         .map_err(|e| CliError::Usage(format!("adaptation issue audit details invalid: {e:?}")))?;
     let event = oa_audit_core::Event {
@@ -568,7 +601,22 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         .map_err(|refusal| failed("adaptation audit path", refusal))?;
     let (next_audit, (version, digest)) =
         match oa_audit_log::shell::append_before_commit(&log_path, expected, event, || {
-            if let Some(catalog) = &pver_catalog {
+            if let Some(profile) = &runway_aids {
+                crate::manifest::issue_new_package_with_runway_aids(
+                    &output_root,
+                    &snapshot_bytes,
+                    profile,
+                    release,
+                    facility,
+                    change_ref,
+                    &previous_root,
+                    previous_pin,
+                    change_class,
+                    issuer,
+                    approver,
+                    reason,
+                )
+            } else if let Some(catalog) = &pver_catalog {
                 crate::manifest::issue_new_package_with_pver_catalog(
                     &output_root,
                     &snapshot_bytes,
