@@ -166,7 +166,7 @@ pub fn parse_principal_registry(bytes: &[u8]) -> Result<PrincipalRegistry, Regis
         let mut line = remaining
             .get(..line_len)
             .ok_or(RegistryError::BadHeaderOrFraming)?;
-        if !explicit_status && line.last() == Some(&b'\r') {
+        if !explicit_status && line_terminator.is_some() && line.last() == Some(&b'\r') {
             line = line
                 .get(..line.len().saturating_sub(1))
                 .ok_or(RegistryError::BadHeaderOrFraming)?;
@@ -375,6 +375,19 @@ mod tests {
         assert_eq!(
             authorize_principal(&registry, 12, Action::MigrationFlip),
             Err(PrincipalAuthorizationError::RoleDenied)
+        );
+        assert_eq!(
+            parse_principal_registry(b"OACERT-LOCAL-PRINCIPALS-V1\n11\tconfigure\r"),
+            Err(RegistryError::UnknownRole)
+        );
+        assert_eq!(
+            parse_principal_registry(b"OACERT-LOCAL-PRINCIPALS-V1\n11\tconfigure\r\n")
+                .map(|parsed| parsed.lookup(11)),
+            Ok(Some(PrincipalRecord {
+                principal_id: 11,
+                role: Role::Configure,
+                enabled: true,
+            }))
         );
         Ok(())
     }
