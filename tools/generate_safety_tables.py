@@ -51,7 +51,8 @@ def records(data):
         pha.append({
             "Hazard ID": hazard["id"], "Function": hazard["function"],
             "Cause": hazard["cause"], "Effect": hazard["effect"],
-            "Severity": f"Not yet assessed (log candidate: {hazard['severity_class']})",
+            "Severity class": hazard["severity_class"],
+            "Severity status": hazard["severity_status"],
             "Likelihood": "Not yet assessed",
             "Initial mitigations": "; ".join(mitigations),
             "Assessment status": data["assessment_status"],
@@ -91,13 +92,14 @@ def render_csv(rows):
     return stream.getvalue()
 
 
-def render_markdown(rows):
+def render_markdown(rows, data):
     columns = list(rows[0])
     def cell(value):
         return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", "<br>")
     lines = [
         "<!-- Generated from docs/safety/hazard-log.json and its oa-trace references. -->",
-        "<!-- DRAFT_NOT_ASSESSED; DECLARED_FUNCTION_SCOPE_ONLY; not an accredited SSA. -->",
+        "",
+        f"**Assessment status: {data['assessment_status']} | Coverage status: {data['coverage_status']} | Not an accredited SSA.**",
         "",
         "| " + " | ".join(columns) + " |",
         "| " + " | ".join("---" for _ in columns) + " |",
@@ -112,7 +114,7 @@ def generate(check=False, log_path=LOG, out=OUT):
     out.mkdir(parents=True, exist_ok=True)
     stale = []
     for name, rows in artifacts:
-        for ext, content in (("md", render_markdown(rows)), ("csv", render_csv(rows))):
+        for ext, content in (("md", render_markdown(rows, data)), ("csv", render_csv(rows))):
             path = out / f"{name}.{ext}"
             if check:
                 if not path.is_file() or path.open(encoding="utf-8", newline="").read() != content:

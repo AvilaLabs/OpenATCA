@@ -106,8 +106,8 @@ jobs:
         run: |
           cargo +1.89.0 run --locked -p oa-trace
           python3 tools/test_generate_safety_tables.py
-          python3 tools/generate_safety_tables.py --check
           python3 tools/generate_safety_tables.py
+          git diff --exit-code -- docs/safety/generated
       - name: No external dependencies
         run: |
           if grep -q 'source = ' Cargo.lock; then echo "external dependency found in Cargo.lock"; exit 1; fi

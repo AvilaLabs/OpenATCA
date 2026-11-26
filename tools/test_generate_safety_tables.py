@@ -17,7 +17,8 @@ def fixture():
         "hazards": [{
             "id": "HZ-TEST-001", "function": "func, with | delimiter",
             "cause": "cause,\nwith newline", "effect": "effect | value",
-            "severity_class": "Major", "mitigation_requirement_ids": ["OA-TEST-001"],
+            "severity_class": "Major", "severity_status": "engineering_candidate",
+            "mitigation_requirement_ids": ["OA-TEST-001"],
             "verification_refs": [{"requirement_id": "OA-TEST-001", "file": "tests/a,b.rs",
                                    "test_name": "test | name"}],
             "proof_refs": [],
@@ -43,7 +44,10 @@ class GeneratorTests(unittest.TestCase):
         encoded = gen.render_csv(rows)
         self.assertIn('"cause,\nwith newline"', encoded)
         self.assertIn('"func, with | delimiter"', encoded)
-        self.assertIn("effect \\| value", gen.render_markdown(rows))
+        self.assertIn("effect \\| value", gen.render_markdown(rows, fixture()))
+        self.assertIn("| Severity class | Severity status |", gen.render_markdown(rows, fixture()))
+        self.assertIn("Assessment status: DRAFT_NOT_ASSESSED | Coverage status: DECLARED_FUNCTION_SCOPE_ONLY",
+                      gen.render_markdown(rows, fixture()))
 
     def test_sorted_deterministic_output(self):
         data = fixture()
@@ -51,10 +55,10 @@ class GeneratorTests(unittest.TestCase):
         second.update(id="HZ-TEST-002", function="z", mitigation_requirement_ids=["OA-TEST-001"],
                       verification_refs=[])
         data["hazards"].append(second)
-        outputs_a = [(name, gen.render_csv(rows), gen.render_markdown(rows))
+        outputs_a = [(name, gen.render_csv(rows), gen.render_markdown(rows, data))
                      for name, rows in gen.records(data)]
         data["hazards"].reverse()
-        outputs_b = [(name, gen.render_csv(rows), gen.render_markdown(rows))
+        outputs_b = [(name, gen.render_csv(rows), gen.render_markdown(rows, data))
                      for name, rows in gen.records(data)]
         self.assertEqual(outputs_a, outputs_b)
 

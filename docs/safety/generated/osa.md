@@ -1,5 +1,6 @@
 <!-- Generated from docs/safety/hazard-log.json and its oa-trace references. -->
-<!-- DRAFT_NOT_ASSESSED; DECLARED_FUNCTION_SCOPE_ONLY; not an accredited SSA. -->
+
+**Assessment status: DRAFT_NOT_ASSESSED | Coverage status: DECLARED_FUNCTION_SCOPE_ONLY | Not an accredited SSA.**
 
 | Function | Hazard ID | Hazard |
 | --- | --- | --- |
