@@ -400,7 +400,7 @@ pub fn run_package(args: &[String], out: &mut dyn Write) -> Result<(), CliError>
     Ok(())
 }
 
-/// `issue`: create a bounded v2 or v3 manifest at the next version after verifying the prior pin.
+/// `issue`: create a bounded v2, v3, or v4 manifest after verifying the prior pin.
 pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     const FIELDS: [&str; 17] = [
         "--snapshot",
@@ -421,9 +421,9 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         "--audit-role",
         "--audit-time-ns",
     ];
-    if args.len() < FIELDS.len() * 2 || args.len() > (FIELDS.len() + 1) * 2 || args.len() % 2 != 0 {
+    if args.len() < FIELDS.len() * 2 || args.len() > (FIELDS.len() + 2) * 2 || args.len() % 2 != 0 {
         return Err(CliError::Usage(
-            "issue requires exactly seventeen flag/value pairs".into(),
+            "issue requires seventeen mandatory flag/value pairs and optional --ca-preset/--pver-catalog pairs".into(),
         ));
     }
     if args
@@ -440,7 +440,7 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         let value = pair
             .get(1)
             .ok_or_else(|| CliError::Usage("missing issue value".into()))?;
-        if !FIELDS.contains(&flag.as_str()) && flag != "--ca-preset" {
+        if !FIELDS.contains(&flag.as_str()) && flag != "--ca-preset" && flag != "--pver-catalog" {
             return Err(CliError::Usage(format!("unknown issue argument {flag:?}")));
         }
         if value.is_empty() || value.starts_with("--") {
@@ -481,6 +481,16 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     let ca_preset = values
         .get("--ca-preset")
         .map(|path| read_bounded_file(Path::new(path), oa_ca::CA_PRESET_MAX_BYTES, "CA preset"))
+        .transpose()?;
+    let pver_catalog = values
+        .get("--pver-catalog")
+        .map(|path| {
+            read_bounded_file(
+                Path::new(path),
+                crate::manifest::MAX_PVER_CATALOG_BYTES,
+                "PVER catalog",
+            )
+        })
         .transpose()?;
     let audit_principal = get("--audit-principal")?
         .parse::<u64>()
@@ -535,11 +545,12 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         .map_err(|refusal| failed("adaptation audit path", refusal))?;
     let (next_audit, (version, digest)) =
         match oa_audit_log::shell::append_before_commit(&log_path, expected, event, || {
-            if let Some(preset) = &ca_preset {
-                crate::manifest::issue_new_package_with_ca_preset(
+            if let Some(catalog) = &pver_catalog {
+                crate::manifest::issue_new_package_with_pver_catalog(
                     &output_root,
                     &snapshot_bytes,
-                    preset,
+                    catalog,
+                    ca_preset.as_deref(),
                     release,
                     facility,
                     change_ref,
@@ -550,6 +561,25 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
                     approver,
                     reason,
                 )
+            } else if ca_preset.is_some() {
+                if let Some(preset) = &ca_preset {
+                    crate::manifest::issue_new_package_with_ca_preset(
+                        &output_root,
+                        &snapshot_bytes,
+                        preset,
+                        release,
+                        facility,
+                        change_ref,
+                        &previous_root,
+                        previous_pin,
+                        change_class,
+                        issuer,
+                        approver,
+                        reason,
+                    )
+                } else {
+                    unreachable!("checked option presence")
+                }
             } else {
                 crate::manifest::issue_new_package(
                     &output_root,

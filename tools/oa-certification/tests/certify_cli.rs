@@ -54,7 +54,7 @@ fn certify(
         .arg("certify")
         .arg(inputs.log)
         .arg(checkpoint.0.to_string())
-        .arg(checkpoint.1)
+        .arg(checkpoint.1.clone())
         .arg(inputs.registry)
         .arg("11")
         .arg(time_ns.to_string())
@@ -75,19 +75,75 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
     fs::create_dir(&root).expect("fixture root");
     let package = root.join("adaptation");
     let snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
-    let manifest = oa_adapt::manifest::write_new_package(
-        &package,
+    let previous = root.join("adaptation-previous");
+    let previous_pin = oa_adapt::manifest::write_new_package(
+        &previous,
         snapshot,
         "synthetic-1",
         "ZAU",
         "OA-CERT-CLI-TEST",
     )
     .expect("issue and read back synthetic G2 package");
+    let catalog = include_bytes!("../data/synthetic-pver-v1.csv");
+    let (_, manifest) = oa_adapt::manifest::issue_new_package_with_pver_catalog(
+        &package,
+        snapshot,
+        catalog,
+        None,
+        "synthetic-2",
+        "ZAU",
+        "OA-CERT-CLI-PVER",
+        &previous,
+        previous_pin,
+        oa_adapt::manifest::ChangeClass::Initial,
+        "issuer-a",
+        "approver-b",
+        "issued synthetic PVER target catalog",
+    )
+    .expect("issue and read back manifest-bound v4 PVER catalog");
     let artifact = root.join("oa-certification");
     fs::copy(env!("CARGO_BIN_EXE_oa-certification"), &artifact)
         .expect("copy standalone binary for guarded artifact hashing");
     let software_digest = oa_sha256::sha256(&fs::read(&artifact).expect("read synthetic binary"));
     let adaptation_digest = oa_sha256::sha256(snapshot);
+    let pver = Command::new(&artifact)
+        .arg("pver")
+        .arg("full")
+        .arg(&package)
+        .arg(oa_sha256::to_hex(&manifest))
+        .output()
+        .expect("run bound PVER CLI");
+    assert!(
+        pver.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pver.stderr)
+    );
+    let pver_output = String::from_utf8_lossy(&pver.stdout);
+    assert!(
+        pver_output.contains("catalog_version=synthetic-pver-v1"),
+        "{pver_output}"
+    );
+    assert!(
+        pver_output.contains("catalog_adaptation_version=Some(1)"),
+        "{pver_output}"
+    );
+    let abbreviated = Command::new(&artifact)
+        .arg("pver")
+        .arg("abbreviated")
+        .arg(&package)
+        .arg(oa_sha256::to_hex(&manifest))
+        .output()
+        .expect("run abbreviated PVER CLI");
+    assert!(
+        abbreviated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&abbreviated.stderr)
+    );
+    let abbreviated_output = String::from_utf8_lossy(&abbreviated.stdout);
+    assert!(
+        abbreviated_output.contains("targets=3/3"),
+        "{abbreviated_output}"
+    );
     let registry = root.join("principals.tsv");
     fs::write(&registry, b"OACERT-LOCAL-PRINCIPALS-V1\n11\tconfigure\n")
         .expect("configure claim fixture");
@@ -177,7 +233,7 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
         .arg("report")
         .arg(&log)
         .arg(checkpoint.0.to_string())
-        .arg(checkpoint.1)
+        .arg(checkpoint.1.clone())
         .output()
         .expect("verify and read committed report");
     assert!(
@@ -189,6 +245,10 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
     assert!(report.contains("outcome=certified"));
     assert!(report.contains("outcome=certified_with_exceptions"));
     assert!(report.contains("outcome=not_certified"));
+    assert!(report.contains("catalog_version=synthetic-pver-v1"));
+    assert!(report.contains("catalog_adaptation_version=1"));
+    assert!(report.contains("catalog_version=synthetic-pver-v1"));
+    assert!(report.contains("catalog_adaptation_version=1"));
     assert!(report.contains(&format!(
         "software_observed_sha256={}",
         oa_sha256::to_hex(&software_digest)
@@ -197,5 +257,80 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
         "adaptation_observed_sha256={}",
         oa_sha256::to_hex(&adaptation_digest)
     )));
+    let report_len = fs::metadata(&log).expect("final audit length").len();
+    let unknown_version = String::from_utf8(catalog.to_vec())
+        .expect("catalog UTF-8")
+        .replacen("catalog v1;", "catalog v2;", 1)
+        .into_bytes();
+    let mut arbitrary_schema_row = catalog.to_vec();
+    let insert_at = arbitrary_schema_row
+        .windows(1)
+        .enumerate()
+        .filter_map(|(index, byte)| (byte == b"\n").then_some(index + 1))
+        .nth(1)
+        .expect("two catalog header lines");
+    arbitrary_schema_row.splice(
+        insert_at..insert_at,
+        b"schema,synthetic-pver-v2\n".iter().copied(),
+    );
+    let duplicate_abbreviated = String::from_utf8(catalog.to_vec())
+        .expect("catalog UTF-8")
+        .replace(
+            "synthetic-pver-v1,abbreviated,TGT-05,398000000,-748000000,-55.0,20.0,1500,35",
+            "synthetic-pver-v1,abbreviated,TGT-01,400000000,-750000000,42.0,12.0,1500,35",
+        )
+        .into_bytes();
+    for (label, bad_catalog) in [
+        ("unknown-version", unknown_version),
+        ("arbitrary-schema-row", arbitrary_schema_row),
+        ("duplicate-abbreviated", duplicate_abbreviated),
+    ] {
+        let bad_catalog_path = root.join(format!("{label}.csv"));
+        fs::write(&bad_catalog_path, &bad_catalog).expect("bad catalog bytes");
+        let bad_package = root.join(format!("{label}-package"));
+        let (_, bad_pin) = oa_adapt::manifest::issue_new_package_with_pver_catalog(
+            &bad_package,
+            snapshot,
+            &bad_catalog,
+            None,
+            "synthetic-invalid",
+            "ZAU",
+            label,
+            &previous,
+            previous_pin,
+            oa_adapt::manifest::ChangeClass::Initial,
+            "issuer-a",
+            "approver-b",
+            "negative parser fixture",
+        )
+        .expect("G2 issues exact invalid semantic fixture for loader refusal test");
+        let pver = Command::new(&artifact)
+            .arg("pver")
+            .arg("full")
+            .arg(&bad_package)
+            .arg(oa_sha256::to_hex(&bad_pin))
+            .output()
+            .expect("run PVER refusal CLI");
+        assert!(!pver.status.success(), "{label} must refuse PVER");
+        fs::write(
+            &observations,
+            format!(
+                "OA-CERT-OBSERVATIONS-V1\n7\t{}\t{}\t{}\n",
+                artifact.display(),
+                bad_package.display(),
+                oa_sha256::to_hex(&bad_pin)
+            ),
+        )
+        .expect("bad package observation");
+        let refused = certify(&inputs, checkpoint.clone(), "", 1_800_000_000_000_000_010);
+        assert!(
+            !refused.status.success(),
+            "{label} must refuse certification"
+        );
+        assert_eq!(
+            fs::metadata(&log).expect("audit remains readable").len(),
+            report_len
+        );
+    }
     fs::remove_dir_all(root).expect("fixture cleanup");
 }

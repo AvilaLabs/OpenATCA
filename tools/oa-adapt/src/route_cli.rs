@@ -20,10 +20,10 @@ const MAX_ROUTE_ARGUMENT_BYTES: usize = 4096;
 // A7.2: cold one-shot route input; no per-cycle or real-time use.
 enum RouteInput {
     Legacy {
-        model: oa_airspace::model::Model,
+        model: Box<oa_airspace::model::Model>,
         digest: oa_sha256::Digest,
     },
-    Verified(VerifiedPackage),
+    Verified(Box<VerifiedPackage>),
 }
 
 impl RouteInput {
@@ -118,14 +118,14 @@ pub fn run_route(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
             if bytes.len() > MAX_SNAPSHOT_BYTES { return Err(CliError::Failed("snapshot grew beyond byte limit".into())); }
             let model = decode(&bytes).map_err(|e| CliError::Failed(format!("snapshot: {e}")))?;
             let digest = oa_sha256::sha256(&bytes);
-            RouteInput::Legacy { model, digest }
+            RouteInput::Legacy { model: Box::new(model), digest }
         }
         (None, Some(root), Some(pin)) => {
             let pin = crate::manifest::parse_pin(pin)
                 .map_err(|e| CliError::Usage(format!("expected manifest pin: {e}")))?;
             let verified = crate::manifest::verify_current(Path::new(root), pin)
                 .map_err(|e| CliError::Failed(format!("adaptation refused: {e}")))?;
-            RouteInput::Verified(verified)
+            RouteInput::Verified(Box::new(verified))
         }
         _ => return Err(CliError::Usage("route snapshot mode and verified package mode are mutually exclusive; verified mode needs both package root and independent manifest pin".into())),
     };

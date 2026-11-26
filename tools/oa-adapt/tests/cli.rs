@@ -73,6 +73,78 @@ fn command_binary_forbids_unsafe_code() {
     assert!(main.starts_with("#![forbid(unsafe_code)]"));
 }
 
+// REQ: OA-CERT-001
+#[test]
+fn issue_cli_binds_catalog_companion_and_reads_it_back_from_v4() {
+    let scratch = Scratch::new("issue-pver-v4");
+    let snapshot = include_bytes!("../../oa-ca/tests/fixtures/a3-empty-synthetic.oag2");
+    let snapshot_path = scratch.path("snapshot.oag2");
+    std::fs::write(&snapshot_path, snapshot).expect("synthetic snapshot");
+    let previous_root = scratch.path("previous");
+    let previous_pin =
+        oa_adapt::manifest::write_new_package(&previous_root, snapshot, "before", "ZAU", "initial")
+            .expect("previous package");
+    let catalog_path = scratch.path("pver.csv");
+    let catalog = include_bytes!("../../oa-certification/data/synthetic-pver-v1.csv");
+    std::fs::write(&catalog_path, catalog).expect("synthetic catalog");
+    let audit = scratch.path("adaptation.audit");
+    let output = scratch.path("issued");
+    let issue_args = args(&[
+        "issue",
+        "--snapshot",
+        snapshot_path.to_str().unwrap(),
+        "--out-root",
+        output.to_str().unwrap(),
+        "--previous-package-root",
+        previous_root.to_str().unwrap(),
+        "--previous-manifest-sha256",
+        &to_hex(&previous_pin),
+        "--release",
+        "after",
+        "--facility",
+        "ZAU",
+        "--change-ref",
+        "PVER-ISSUE-1",
+        "--change-class",
+        "initial",
+        "--issuer",
+        "issuer-a",
+        "--approver",
+        "approver-b",
+        "--reason",
+        "issue synthetic PVER catalog",
+        "--audit-log",
+        audit.to_str().unwrap(),
+        "--audit-count",
+        "0",
+        "--audit-tail",
+        &"00".repeat(32),
+        "--audit-principal",
+        "11",
+        "--audit-role",
+        "configure",
+        "--audit-time-ns",
+        "1800000000000000000",
+        "--pver-catalog",
+        catalog_path.to_str().unwrap(),
+    ]);
+    let mut stdout = Vec::new();
+    run(&issue_args, &mut stdout).expect("CLI issues v4 package and appends audit event");
+    let text = String::from_utf8(stdout).expect("CLI output is UTF-8");
+    let pin = text
+        .lines()
+        .find_map(|line| line.strip_prefix("manifest_sha256\t"))
+        .and_then(|text| oa_adapt::manifest::parse_pin(text).ok())
+        .expect("issued manifest pin");
+    let verified = oa_adapt::manifest::verify_current(&output, pin).expect("v4 package verifies");
+    assert_eq!(verified.identity().adaptation_version, Some(1));
+    assert_eq!(verified.pver_catalog_bytes(), Some(catalog.as_slice()));
+    assert_eq!(
+        verified.identity().pver_catalog_sha256,
+        Some(sha256(catalog))
+    );
+}
+
 // REQ: OA-ASP-001
 #[test]
 fn build_arguments_parse_with_the_default_buffer_of_50_nm() {

@@ -20,13 +20,18 @@ const MAGIC: &[u8; 8] = b"OAG2ADPT";
 const LEGACY_MANIFEST_VERSION: u16 = 1;
 const ISSUED_MANIFEST_VERSION: u16 = 2;
 const CA_PRESET_MANIFEST_VERSION: u16 = 3;
+const PVER_CATALOG_MANIFEST_VERSION: u16 = 4;
 const READER_API: u16 = 1;
 const MANIFEST_FILE: &str = "manifest.oag2";
 const SNAPSHOT_FILE: &str = "airspace.snapshot";
 const CA_PRESET_FILE: &str = "ca-preset.oaca";
+const PVER_CATALOG_FILE: &str = "pver-catalog.oapv";
+pub const MAX_PVER_CATALOG_BYTES: usize = 16 * 1024;
 const MAX_MANIFEST_BYTES: usize = 1024;
-const MAX_PACKAGE_BYTES: u64 =
-    MAX_SNAPSHOT_BYTES as u64 + MAX_MANIFEST_BYTES as u64 + oa_ca::CA_PRESET_MAX_BYTES as u64;
+const MAX_PACKAGE_BYTES: u64 = MAX_SNAPSHOT_BYTES as u64
+    + MAX_MANIFEST_BYTES as u64
+    + oa_ca::CA_PRESET_MAX_BYTES as u64
+    + MAX_PVER_CATALOG_BYTES as u64;
 const MAX_RELEASE_BYTES: usize = 64;
 const MAX_FACILITY_BYTES: usize = 64;
 const MAX_CHANGE_REF_BYTES: usize = 128;
@@ -115,6 +120,8 @@ pub struct PackageIdentity {
     pub snapshot_bytes: u64,
     /// Present only for issued v3 packages; checksum of the exact CA preset companion.
     pub ca_preset_sha256: Option<Digest>,
+    /// Present only for issued v4 packages; checksum of the exact PVER catalog companion.
+    pub pver_catalog_sha256: Option<Digest>,
     /// Present for structured issues; the legacy package command has no issued version.
     pub adaptation_version: Option<u64>,
     /// Structured issue metadata; SHA-256 still does not authenticate these claims.
@@ -148,6 +155,7 @@ pub struct VerifiedPackage {
     model: Model,
     identity: PackageIdentity,
     ca_preset: Option<Vec<u8>>,
+    pver_catalog: Option<Vec<u8>>,
 }
 
 impl VerifiedPackage {
@@ -165,10 +173,21 @@ impl VerifiedPackage {
     pub fn ca_preset_bytes(&self) -> Option<&[u8]> {
         self.ca_preset.as_deref()
     }
+
+    /// Exact versioned PVER target catalog bytes from the manifest-bound v4 companion.
+    pub fn pver_catalog_bytes(&self) -> Option<&[u8]> {
+        self.pver_catalog.as_deref()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CaPresetMeta {
+    len: u64,
+    sha256: Digest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PverCatalogMeta {
     len: u64,
     sha256: Digest,
 }
@@ -186,6 +205,7 @@ struct Manifest {
     snapshot_sha256: Digest,
     issue: Option<IssueMetadata>,
     ca_preset: Option<CaPresetMeta>,
+    pver_catalog: Option<PverCatalogMeta>,
 }
 
 fn field<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> Result<&'a [u8], VerifyError> {
@@ -272,6 +292,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
     if version != LEGACY_MANIFEST_VERSION
         && version != ISSUED_MANIFEST_VERSION
         && version != CA_PRESET_MANIFEST_VERSION
+        && version != PVER_CATALOG_MANIFEST_VERSION
     {
         return Err(VerifyError::UnsupportedManifestVersion(version));
     }
@@ -282,12 +303,12 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
     let facility_len = usize::from(*lengths.get(1).ok_or(VerifyError::Truncated)?);
     let change_len = usize::from(*lengths.get(2).ok_or(VerifyError::Truncated)?);
     let component_count = *lengths.get(3).ok_or(VerifyError::Truncated)?;
-    let expected_count = if version == CA_PRESET_MANIFEST_VERSION {
-        2
-    } else {
-        1
+    let count_valid = match version {
+        CA_PRESET_MANIFEST_VERSION => component_count == 2,
+        PVER_CATALOG_MANIFEST_VERSION => component_count == 2 || component_count == 3,
+        _ => component_count == 1,
     };
-    if component_count != expected_count {
+    if !count_valid {
         return Err(VerifyError::WrongComponentCount(component_count));
     }
     let snapshot_len = u64_at(bytes, &mut offset)?;
@@ -326,7 +347,9 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
     } else {
         None
     };
-    let ca_preset = if version == CA_PRESET_MANIFEST_VERSION {
+    let ca_preset = if version == CA_PRESET_MANIFEST_VERSION
+        || (version == PVER_CATALOG_MANIFEST_VERSION && component_count == 3)
+    {
         let len = u64_at(bytes, &mut offset)?;
         let digest = field(bytes, &mut offset, 32)?
             .try_into()
@@ -335,6 +358,21 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
             return Err(VerifyError::Oversize("CA preset"));
         }
         Some(CaPresetMeta {
+            len,
+            sha256: digest,
+        })
+    } else {
+        None
+    };
+    let pver_catalog = if version == PVER_CATALOG_MANIFEST_VERSION {
+        let len = u64_at(bytes, &mut offset)?;
+        let digest = field(bytes, &mut offset, 32)?
+            .try_into()
+            .map_err(|_| VerifyError::Truncated)?;
+        if len == 0 || len > MAX_PVER_CATALOG_BYTES as u64 {
+            return Err(VerifyError::Oversize("PVER catalog"));
+        }
+        Some(PverCatalogMeta {
             len,
             sha256: digest,
         })
@@ -414,6 +452,7 @@ fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
         snapshot_sha256: digest,
         issue,
         ca_preset,
+        pver_catalog,
     };
     if encode_manifest(&manifest)?.as_slice() != bytes {
         return Err(VerifyError::NonCanonical);
@@ -432,14 +471,21 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
     if manifest.schema_version != LEGACY_MANIFEST_VERSION
         && manifest.schema_version != ISSUED_MANIFEST_VERSION
         && manifest.schema_version != CA_PRESET_MANIFEST_VERSION
+        && manifest.schema_version != PVER_CATALOG_MANIFEST_VERSION
     {
         return Err(VerifyError::UnsupportedManifestVersion(
             manifest.schema_version,
         ));
     }
     if (manifest.schema_version == LEGACY_MANIFEST_VERSION) != manifest.issue.is_none()
-        || (manifest.schema_version == CA_PRESET_MANIFEST_VERSION) != manifest.ca_preset.is_some()
-        || (manifest.schema_version == CA_PRESET_MANIFEST_VERSION && manifest.issue.is_none())
+        || (manifest.schema_version == CA_PRESET_MANIFEST_VERSION
+            && (manifest.ca_preset.is_none() || manifest.issue.is_none()))
+        || (manifest.schema_version != CA_PRESET_MANIFEST_VERSION
+            && manifest.schema_version != PVER_CATALOG_MANIFEST_VERSION
+            && manifest.ca_preset.is_some())
+        || (manifest.schema_version == PVER_CATALOG_MANIFEST_VERSION)
+            != manifest.pver_catalog.is_some()
+        || (manifest.schema_version == PVER_CATALOG_MANIFEST_VERSION && manifest.issue.is_none())
     {
         return Err(VerifyError::InvalidField("manifest issue schema"));
     }
@@ -471,6 +517,8 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
     });
     let fixed_bytes = if manifest.schema_version == CA_PRESET_MANIFEST_VERSION {
         ISSUED_HEADER_BYTES + 40
+    } else if manifest.schema_version == PVER_CATALOG_MANIFEST_VERSION {
+        ISSUED_HEADER_BYTES + 40 + if manifest.ca_preset.is_some() { 40 } else { 0 }
     } else if manifest.issue.is_some() {
         ISSUED_HEADER_BYTES
     } else {
@@ -501,11 +549,18 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
         u8::try_from(manifest.change_ref.len())
             .map_err(|_| VerifyError::InvalidField("change reference length"))?,
     );
-    bytes.push(if manifest.schema_version == CA_PRESET_MANIFEST_VERSION {
+    let component_count = if manifest.schema_version == CA_PRESET_MANIFEST_VERSION {
         2
+    } else if manifest.schema_version == PVER_CATALOG_MANIFEST_VERSION {
+        if manifest.ca_preset.is_some() {
+            3
+        } else {
+            2
+        }
     } else {
         1
-    });
+    };
+    bytes.push(component_count);
     bytes.extend_from_slice(&manifest.snapshot_len.to_le_bytes());
     bytes.extend_from_slice(&manifest.snapshot_sha256);
     if let Some(issue) = &manifest.issue {
@@ -532,6 +587,13 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, VerifyError> {
         }
         bytes.extend_from_slice(&preset.len.to_le_bytes());
         bytes.extend_from_slice(&preset.sha256);
+    }
+    if let Some(catalog) = manifest.pver_catalog {
+        if catalog.len == 0 || catalog.len > MAX_PVER_CATALOG_BYTES as u64 {
+            return Err(VerifyError::Oversize("PVER catalog"));
+        }
+        bytes.extend_from_slice(&catalog.len.to_le_bytes());
+        bytes.extend_from_slice(&catalog.sha256);
     }
     bytes.extend_from_slice(manifest.release.as_bytes());
     bytes.extend_from_slice(manifest.facility.as_bytes());
@@ -687,6 +749,7 @@ fn decode_verified(
     manifest_digest: Digest,
     snapshot_bytes: Vec<u8>,
     ca_preset: Option<Vec<u8>>,
+    pver_catalog: Option<Vec<u8>>,
 ) -> Result<VerifiedPackage, VerifyError> {
     let actual_len =
         u64::try_from(snapshot_bytes.len()).map_err(|_| VerifyError::Oversize("snapshot"))?;
@@ -733,6 +796,28 @@ fn decode_verified(
     } else if ca_preset.is_some() {
         return Err(VerifyError::InvalidField("unexpected CA preset component"));
     }
+    if let Some(meta) = manifest.pver_catalog {
+        let bytes = pver_catalog
+            .as_ref()
+            .ok_or(VerifyError::InvalidField("PVER catalog component missing"))?;
+        if bytes.is_empty() || bytes.len() as u64 != meta.len {
+            return Err(VerifyError::ComponentLengthMismatch {
+                expected: meta.len,
+                actual: bytes.len() as u64,
+            });
+        }
+        let actual = sha256(bytes);
+        if actual != meta.sha256 {
+            return Err(VerifyError::ComponentDigestMismatch {
+                expected: oa_sha256::to_hex(&meta.sha256),
+                actual: oa_sha256::to_hex(&actual),
+            });
+        }
+    } else if pver_catalog.is_some() {
+        return Err(VerifyError::InvalidField(
+            "unexpected PVER catalog component",
+        ));
+    }
     Ok(VerifiedPackage {
         model,
         identity: PackageIdentity {
@@ -743,6 +828,7 @@ fn decode_verified(
             change_ref: manifest.change_ref,
             snapshot_bytes: actual_len,
             ca_preset_sha256: manifest.ca_preset.map(|preset| preset.sha256),
+            pver_catalog_sha256: manifest.pver_catalog.map(|catalog| catalog.sha256),
             adaptation_version: manifest
                 .issue
                 .as_ref()
@@ -750,6 +836,7 @@ fn decode_verified(
             issue: manifest.issue.map(Box::new),
         },
         ca_preset,
+        pver_catalog,
     })
 }
 
@@ -791,6 +878,15 @@ pub fn verify_current(
             "component set does not match manifest schema",
         ));
     }
+    let has_pver_catalog = before
+        .entries
+        .iter()
+        .any(|(name, _)| name == PVER_CATALOG_FILE);
+    if has_pver_catalog != manifest.pver_catalog.is_some() {
+        return Err(VerifyError::InvalidField(
+            "component set does not match manifest schema",
+        ));
+    }
     if manifest.snapshot_len > MAX_SNAPSHOT_BYTES as u64 {
         return Err(VerifyError::Oversize("snapshot declared by manifest"));
     }
@@ -819,6 +915,20 @@ pub fn verify_current(
     } else {
         None
     };
+    let pver_catalog_bytes = if let Some(meta) = manifest.pver_catalog {
+        let stamp = inventory_stamp(&before, PVER_CATALOG_FILE)?;
+        Some(read_guarded(
+            &root.join(PVER_CATALOG_FILE),
+            MAX_PVER_CATALOG_BYTES,
+            "PVER catalog",
+            Some(meta.len),
+            stamp,
+            root,
+            (before.device, before.inode),
+        )?)
+    } else {
+        None
+    };
     let after = check_package_entries(root)?;
     if after != before {
         return Err(VerifyError::PackageChanged("bounded package inventory"));
@@ -828,6 +938,7 @@ pub fn verify_current(
         actual_manifest_sha256,
         snapshot_bytes,
         ca_preset_bytes,
+        pver_catalog_bytes,
     )
 }
 
@@ -855,7 +966,11 @@ fn check_package_entries(root: &Path) -> Result<PackageInventory, VerifyError> {
             .file_name()
             .into_string()
             .map_err(|_| VerifyError::InvalidField("package entry name"))?;
-        if name != MANIFEST_FILE && name != SNAPSHOT_FILE && name != CA_PRESET_FILE {
+        if name != MANIFEST_FILE
+            && name != SNAPSHOT_FILE
+            && name != CA_PRESET_FILE
+            && name != PVER_CATALOG_FILE
+        {
             return Err(VerifyError::InvalidField("unreferenced package component"));
         }
         if !entry
@@ -876,7 +991,7 @@ fn check_package_entries(root: &Path) -> Result<PackageInventory, VerifyError> {
             return Err(VerifyError::InvalidField("duplicate package component"));
         }
         names.push((name, entry_stamp));
-        if names.len() > 3 {
+        if names.len() > 4 {
             return Err(VerifyError::InvalidField("unreferenced package component"));
         }
     }
@@ -887,6 +1002,14 @@ fn check_package_entries(root: &Path) -> Result<PackageInventory, VerifyError> {
         .collect::<Vec<_>>();
     if component_names != [SNAPSHOT_FILE, MANIFEST_FILE]
         && component_names != [SNAPSHOT_FILE, CA_PRESET_FILE, MANIFEST_FILE]
+        && component_names != [SNAPSHOT_FILE, MANIFEST_FILE, PVER_CATALOG_FILE]
+        && component_names
+            != [
+                SNAPSHOT_FILE,
+                CA_PRESET_FILE,
+                MANIFEST_FILE,
+                PVER_CATALOG_FILE,
+            ]
     {
         return Err(VerifyError::InvalidField("package component set"));
     }
@@ -942,6 +1065,7 @@ pub fn manifest_for_snapshot(
         snapshot_sha256: sha256(snapshot_bytes),
         issue: None,
         ca_preset: None,
+        pver_catalog: None,
     };
     let bytes = encode_manifest(&manifest)?;
     let digest = sha256(&bytes);
@@ -989,6 +1113,7 @@ fn issued_manifest_for_snapshot(
         snapshot_sha256: sha256(snapshot_bytes),
         issue: Some(issue),
         ca_preset: None,
+        pver_catalog: None,
     };
     let bytes = encode_manifest(&manifest)?;
     let digest = sha256(&bytes);
@@ -1155,6 +1280,7 @@ pub fn issue_new_package_with_ca_preset(
             len: ca_preset.len() as u64,
             sha256: sha256(ca_preset),
         }),
+        pver_catalog: None,
     };
     let manifest_bytes = encode_manifest(&manifest)?;
     let digest = sha256(&manifest_bytes);
@@ -1166,6 +1292,106 @@ pub fn issue_new_package_with_ca_preset(
     verify_current(root, digest).map_err(|e| {
         VerifyError::Output(format!(
             "issued v3 package read-back verification failed; directory retained: {e}"
+        ))
+    })?;
+    Ok((adaptation_version, digest))
+}
+
+/// Issue a v4 package binding a bounded PVER catalog and optional CA preset to the issued snapshot.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_new_package_with_pver_catalog(
+    root: &Path,
+    snapshot_bytes: &[u8],
+    pver_catalog: &[u8],
+    ca_preset: Option<&[u8]>,
+    release: &str,
+    facility: &str,
+    change_ref: &str,
+    previous_root: &Path,
+    previous_manifest_sha256: Digest,
+    change_class: ChangeClass,
+    issuer_principal_id: &str,
+    approver_principal_id: &str,
+    reason: &str,
+) -> Result<(u64, Digest), VerifyError> {
+    if pver_catalog.is_empty() || pver_catalog.len() > MAX_PVER_CATALOG_BYTES {
+        return Err(VerifyError::Oversize("PVER catalog"));
+    }
+    if let Some(bytes) = ca_preset {
+        if bytes.is_empty() || bytes.len() > oa_ca::CA_PRESET_MAX_BYTES {
+            return Err(VerifyError::Oversize("CA preset"));
+        }
+        oa_ca::ca_preset_parse(bytes, facility)
+            .map_err(|_| VerifyError::InvalidField("CA preset schema or facility"))?;
+    }
+    let previous = verify_current(previous_root, previous_manifest_sha256)?;
+    if previous.identity().facility != facility {
+        return Err(VerifyError::InvalidField(
+            "previous package facility differs from issued facility",
+        ));
+    }
+    let adaptation_version = previous
+        .identity()
+        .adaptation_version
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or(VerifyError::InvalidField("adaptation version overflow"))?;
+    if (adaptation_version == 1) != (change_class == ChangeClass::Initial) {
+        return Err(VerifyError::InvalidField(
+            "initial change class/version mismatch",
+        ));
+    }
+    validate_issue_fields(issuer_principal_id, approver_principal_id, reason)?;
+    let model = decode(snapshot_bytes).map_err(|e| VerifyError::SnapshotDecode(e.to_string()))?;
+    if encode(&model).map_err(|e| VerifyError::SnapshotDecode(e.to_string()))? != snapshot_bytes {
+        return Err(VerifyError::NonCanonical);
+    }
+    if facility != model.meta.artcc {
+        return Err(VerifyError::FacilityMismatch {
+            manifest: facility.to_owned(),
+            snapshot: model.meta.artcc,
+        });
+    }
+    let issue = IssueMetadata {
+        adaptation_version,
+        previous_manifest_sha256,
+        change_class,
+        issuer_principal_id: issuer_principal_id.to_owned(),
+        approver_principal_id: approver_principal_id.to_owned(),
+        reason: reason.to_owned(),
+    };
+    let manifest = Manifest {
+        schema_version: PVER_CATALOG_MANIFEST_VERSION,
+        reader_min: READER_API,
+        reader_max: READER_API,
+        release: release.to_owned(),
+        facility: facility.to_owned(),
+        change_ref: change_ref.to_owned(),
+        snapshot_len: snapshot_bytes.len() as u64,
+        snapshot_sha256: sha256(snapshot_bytes),
+        issue: Some(issue),
+        ca_preset: ca_preset.map(|bytes| CaPresetMeta {
+            len: bytes.len() as u64,
+            sha256: sha256(bytes),
+        }),
+        pver_catalog: Some(PverCatalogMeta {
+            len: pver_catalog.len() as u64,
+            sha256: sha256(pver_catalog),
+        }),
+    };
+    let manifest_bytes = encode_manifest(&manifest)?;
+    let digest = sha256(&manifest_bytes);
+    oa_sealed::refuse(root).map_err(VerifyError::Path)?;
+    fs::create_dir(root).map_err(|e| VerifyError::Output(format!("{}: {e}", root.display())))?;
+    write_new_file(&root.join(SNAPSHOT_FILE), snapshot_bytes)?;
+    if let Some(bytes) = ca_preset {
+        write_new_file(&root.join(CA_PRESET_FILE), bytes)?;
+    }
+    write_new_file(&root.join(PVER_CATALOG_FILE), pver_catalog)?;
+    write_new_file(&root.join(MANIFEST_FILE), &manifest_bytes)?;
+    verify_current(root, digest).map_err(|e| {
+        VerifyError::Output(format!(
+            "issued v4 package read-back verification failed; directory retained: {e}"
         ))
     })?;
     Ok((adaptation_version, digest))
@@ -1277,6 +1503,44 @@ mod tests {
         )
         .is_err());
         fs::write(root.join(CA_PRESET_FILE), b"corrupt").expect("corrupt synthetic component");
+        assert!(verify_current(&root, pin).is_err());
+        let _ = fs::remove_dir_all(previous_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    // REQ: OA-CERT-001
+    #[test]
+    fn v4_issued_pver_catalog_is_bound_and_component_damage_is_refused() {
+        let (_, snapshot) = sample();
+        let (previous_root, previous_pin) = make_package();
+        let root = temp_root("pver-catalog-v4");
+        let catalog = b"schema,synthetic-pver-v1\nsynthetic-pver-v1,full,T1,410000000,-870000000,1.0,2.0,100.0,1.0\n";
+        let (version, pin) = issue_new_package_with_pver_catalog(
+            &root,
+            &snapshot,
+            catalog,
+            None,
+            "release",
+            "ZAU",
+            "pver-catalog",
+            &previous_root,
+            previous_pin,
+            ChangeClass::Initial,
+            "issuer-a",
+            "approver-b",
+            "issued synthetic PVER targets",
+        )
+        .expect("v4 catalog package issues and verifies by readback");
+        assert_eq!(version, 1);
+        let verified = verify_current(&root, pin).expect("v4 package verifies");
+        assert_eq!(verified.pver_catalog_bytes(), Some(catalog.as_slice()));
+        assert_eq!(
+            verified.identity().pver_catalog_sha256,
+            Some(sha256(catalog))
+        );
+        assert_eq!(verified.identity().adaptation_version, Some(1));
+        assert!(verified.ca_preset_bytes().is_none());
+        fs::write(root.join(PVER_CATALOG_FILE), b"tampered").expect("tamper synthetic catalog");
         assert!(verify_current(&root, pin).is_err());
         let _ = fs::remove_dir_all(previous_root);
         let _ = fs::remove_dir_all(root);
@@ -1463,7 +1727,7 @@ mod tests {
         let (manifest_bytes, pin) = manifest_for_snapshot(&snapshot, "test-1", "ZAU", "CHG-17")
             .expect("manifest is derived from the supplied snapshot");
         let manifest = parse_manifest(&manifest_bytes).expect("canonical manifest");
-        let verified = decode_verified(manifest, pin, snapshot.clone(), None)
+        let verified = decode_verified(manifest, pin, snapshot.clone(), None, None)
             .expect("verified model is decoded from the exact snapshot bytes");
         assert_eq!(verified.model(), &model);
         assert_ne!(verified.model(), &different_same_facility);
