@@ -616,9 +616,15 @@ mod tests {
                 ground_speed_mps: &speed,
             },
             CrdaGhosts {
-                east_m: &mut ghost_east[..MAX_CRDA_ROWS],
-                north_m: &mut ghost_north[..MAX_CRDA_ROWS],
-                ground_speed_mps: &mut ghost_speed[..MAX_CRDA_ROWS],
+                east_m: ghost_east
+                    .get_mut(..MAX_CRDA_ROWS)
+                    .expect("fixture has one guard row"),
+                north_m: ghost_north
+                    .get_mut(..MAX_CRDA_ROWS)
+                    .expect("fixture has one guard row"),
+                ground_speed_mps: ghost_speed
+                    .get_mut(..MAX_CRDA_ROWS)
+                    .expect("fixture has one guard row"),
             },
         )
         .expect("256-row engineering cap is accepted");
@@ -646,9 +652,9 @@ mod tests {
             ),
             Err(CrdaError::Capacity)
         );
-        assert_eq!(ghost_east[MAX_CRDA_ROWS], 42.0);
-        assert_eq!(ghost_north[MAX_CRDA_ROWS], 43.0);
-        assert_eq!(ghost_speed[MAX_CRDA_ROWS], 44.0);
+        assert_eq!(ghost_east.get(MAX_CRDA_ROWS), Some(&42.0));
+        assert_eq!(ghost_north.get(MAX_CRDA_ROWS), Some(&43.0));
+        assert_eq!(ghost_speed.get(MAX_CRDA_ROWS), Some(&44.0));
     }
 
     fn atpa_case(lead: f64, trail: f64, lead_speed: f64, trail_speed: f64) -> AtpaSeverity {
