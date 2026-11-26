@@ -1,0 +1,581 @@
+{
+  "format_id": "openatca-regional-j2-evidence-v1",
+  "spec_version": 1,
+  "implementations": {
+    "session_writer": "../../../tools/oa-regional-session/src/cli.rs",
+    "recording_import_writer": "../../../tools/oa-regional-session/src/bin/regional-recording-import.rs",
+    "recording_serializers": "../../../tools/oa-regional-session/src/recordings.rs",
+    "portability_writer_and_reader": "../../../tools/j2_portability.py",
+    "operator_frame_writer": "../../../tools/oa-regional-session/src/operator.rs"
+  },
+  "common_tsv": {
+    "encoding": "UTF-8",
+    "line_ending": "LF",
+    "final_newline_required": true,
+    "field_separator": "TAB",
+    "escaping": "For TSV records only, there is no quoting layer and generated fields contain no literal TAB or LF. Rust Debug payloads in frame text are not TSV fields and use Rust Debug string escapes.",
+    "empty_lines": "writers do not emit them; readers that ignore them state so in their own profile",
+    "reference_reader_profile": {
+      "blank_lines": "ignored by the synthetic read_tsv helper; none of the specified writers emits blank records",
+      "strictness": "helper-specific validation can be stricter than a production portability validator; see each reader_scope"
+    }
+  },
+  "regional_settings": {
+    "filename": "settings.tsv",
+    "grammar_ebnf": [
+      "settings = header, LF, setting-row, {setting-row};",
+      "header = \"OA_REGIONAL_SETTINGS\", TAB, \"1\";",
+      "setting-row = key, TAB, value, LF;"
+    ],
+    "default_profile": {
+      "ordered_rows": [
+        "centre=ZAU1",
+        "configuration=SurveillanceConfig Debug",
+        "tracks=32",
+        "frames=512",
+        "frame_gap_max_ns=60000000000",
+        "CA_h_m=1300",
+        "CA_v_ft=300",
+        "CA_lookahead_ns=120000000000",
+        "trajectory_track_age_max_ms=5000",
+        "normalization=positive-address airborne positions",
+        "model=SYNTHETIC|SUPPLIED_SNAPSHOT",
+        "msaw=UNAVAILABLE_NOT_CONFIGURED|PUBLIC_SYNTHETIC_FLOOR_WEATHER|SUPPLIED_DATA_MANIFEST",
+        "optional msaw_input_manifest_sha256",
+        "vertical_profile=EXPLICIT_PERFORMANCE|DISABLED",
+        "optional performance_sha256"
+      ],
+      "configuration_value": {
+        "type": "Rust pretty Debug of oa_regional_session::surveillance::SurveillanceConfig",
+        "field_order": [
+          "centre_lat_e7:i32",
+          "centre_lon_e7:i32",
+          "range_nm:f64"
+        ],
+        "current_emitted_value": "SurveillanceConfig { centre_lat_e7: 410000000, centre_lon_e7: -870000000, range_nm: 180.0 }",
+        "stability": "build-scoped diagnostic value; not an independent configuration wire grammar"
+      }
+    },
+    "recorded_profile": {
+      "ordered_rows": [
+        "centre=ZAU1",
+        "profile=RECORDED_PEAK_RENDERED_V1",
+        "configuration=SurveillanceConfig Debug",
+        "tracks=4096",
+        "flights=4096",
+        "frames=512",
+        "surveillance_max_frames=20000000",
+        "max_total_events=10000000",
+        "max_drain_rows=262144",
+        "max_baro_evidence=1000000",
+        "max_open_alerts=1048576",
+        "max_candidate_pairs=8388608",
+        "max_ca_work_per_frame=8388608",
+        "max_flight_log_entries=1024",
+        "max_presentation_updates=8192",
+        "render_scope=true",
+        "frame_gap_max_ns=60000000000",
+        "CA_h_m=1300",
+        "CA_v_ft=300",
+        "CA_lookahead_ns=120000000000",
+        "trajectory_track_age_max_ms=5000",
+        "normalization=positive-address airborne positions",
+        "model=SYNTHETIC|SUPPLIED_SNAPSHOT",
+        "msaw=UNAVAILABLE_NOT_CONFIGURED|PUBLIC_SYNTHETIC_FLOOR_WEATHER|SUPPLIED_DATA_MANIFEST",
+        "optional msaw_input_manifest_sha256",
+        "vertical_profile=EXPLICIT_PERFORMANCE|DISABLED",
+        "optional performance_sha256"
+      ],
+      "reader_profile_id": "RECORDED_PEAK_RENDERED_V1",
+      "capacity_tuple": {
+        "profile": "RECORDED_PEAK_RENDERED_V1",
+        "tracks": "4096",
+        "flights": "4096",
+        "frames": "512",
+        "surveillance_max_frames": "20000000",
+        "max_total_events": "10000000",
+        "max_drain_rows": "262144",
+        "max_baro_evidence": "1000000",
+        "max_open_alerts": "1048576",
+        "max_candidate_pairs": "8388608",
+        "max_ca_work_per_frame": "8388608",
+        "max_flight_log_entries": "1024",
+        "max_presentation_updates": "8192",
+        "render_scope": "true"
+      },
+      "reader_requires_exact_tuple": true,
+      "reader_implementation": "../../../tools/j2_portability.py::regional_run_profile"
+    },
+    "row_semantics": {
+      "msaw_input_manifest_sha256": "present only when supplied MSAW manifest input is used; lowercase SHA-256 of the input manifest bytes",
+      "performance_sha256": "present only when explicit performance input is used; lowercase SHA-256 of the input bytes",
+      "profile_omission": "historic settings without a profile row are interpreted by the portability reader as DEFAULT_V1",
+      "duplicates": "the portability profile reader rejects duplicate keys"
+    },
+    "limits": {
+      "max_bytes": 65536
+    }
+  },
+  "regional_run": {
+    "files": [
+      "settings.tsv",
+      "manifest.tsv",
+      "frame-NNNN.txt",
+      "frame-NNNN.ppm",
+      "optional msaw-data.txt",
+      "optional performance-inputs.tsv",
+      "COMPLETE"
+    ],
+    "manifest": {
+      "filename": "manifest.tsv",
+      "header": "OA_REGIONAL_MANIFEST\t1",
+      "grammar_ebnf": [
+        "manifest = header, LF, required-digest-rows, optional-digest-rows, frame-row, {frame-row};",
+        "required-digest-rows = input_sha256-row, snapshot_sha256-row, executable_sha256-row, settings_sha256-row;",
+        "optional-digest-rows = [msaw_data_sha256-row], [performance_sha256-row];",
+        "frame-row = \"frame\", TAB, sequence:u64-decimal, TAB, receipt_ns:nonnegative-i64-decimal, TAB, evidence-filename, TAB, evidence-sha256, TAB, ppm-sha256, LF;"
+      ],
+      "required_digest_keys": [
+        "input_sha256",
+        "snapshot_sha256",
+        "executable_sha256",
+        "settings_sha256"
+      ],
+      "optional_digest_keys": [
+        "msaw_data_sha256",
+        "performance_sha256"
+      ],
+      "frame_row_fields": [
+        "tag=frame",
+        "sequence:u64-decimal",
+        "receipt_ns:nonnegative-i64-decimal",
+        "evidence_filename=frame-{sequence:04}.txt",
+        "evidence_sha256",
+        "ppm_sha256"
+      ],
+      "ppm_filename": "frame-{sequence:04}.ppm (derived from sequence; not a separate manifest column)",
+      "digests": "lowercase 64-character hexadecimal SHA-256",
+      "limits": {
+        "portability_reader_manifest_bytes": 67108864,
+        "portability_reader_rows": 100000,
+        "minimum_frames": 1
+      },
+      "producer_order": "four required digest rows, optional MSAW/performance digest rows, then frame rows in receipt order",
+      "reader_scope": "the portability reader validates required digests and frame-row widths/digests; it currently ignores unrecognized non-frame rows and does not enforce sequence uniqueness/order or receipt monotonicity. Its frame-file reader applies a 64 KiB text cap, below the 512 KiB writer cap. It accepts only nonnegative decimal receipt_ns; admitted session input currently produces nonnegative receipt cutoffs."
+    },
+    "complete": {
+      "filename": "COMPLETE",
+      "grammar": "lowercase_hex_sha256(manifest.tsv exact bytes), LF",
+      "authenticates": "content integrity only, not producer identity"
+    },
+    "frame_text": {
+      "filename": "frame-{sequence:04}.txt",
+      "normal_prefix": "OA_REGIONAL_FRAME\t1\n",
+      "normal_record": "normal_prefix followed by Rust pretty Debug value RegionalFrame and LF",
+      "operated_prefix_rows": [
+        "OA_REGIONAL_OPERATED_FRAME\t1",
+        "pixels_ppm_sha256<TAB>lowercase_sha256",
+        "rendered_frame_sha256<TAB>lowercase_sha256"
+      ],
+      "operated_record": "operated_prefix_rows, each LF-terminated, followed by the same Rust pretty Debug value RegionalFrame and LF",
+      "top_level_debug_struct": "RegionalFrame",
+      "producer_rust_toolchain": "1.89.0",
+      "top_level_fields": [
+        {
+          "name": "sequence",
+          "type": "u64"
+        },
+        {
+          "name": "input",
+          "type": "FrameEvidence"
+        },
+        {
+          "name": "surveillance",
+          "type": "SurveillanceFrame"
+        },
+        {
+          "name": "flight_operations",
+          "type": "Vec<FlightApplyOutcome>"
+        },
+        {
+          "name": "flights",
+          "type": "Vec<FlightEvidence>"
+        },
+        {
+          "name": "flight_report",
+          "type": "FlightDriverReport"
+        },
+        {
+          "name": "refused_legacy_route_events",
+          "type": "u64"
+        },
+        {
+          "name": "controller_views",
+          "type": "Vec<TargetView>"
+        },
+        {
+          "name": "controller_dispatches",
+          "type": "Vec<Dispatch>"
+        },
+        {
+          "name": "controller_outcome",
+          "type": "CommandOutcome"
+        },
+        {
+          "name": "controller_selection_kind",
+          "type": "SelectionKind"
+        },
+        {
+          "name": "controller_selected_address",
+          "type": "Option<u32>"
+        },
+        {
+          "name": "controller_selection",
+          "type": "Option<FlightIdentity>"
+        },
+        {
+          "name": "console_text",
+          "type": "String"
+        },
+        {
+          "name": "quarantine",
+          "type": "RuntimeQuarantineReport"
+        }
+      ],
+      "FrameEvidence_fields": [
+        "receipt_ns:i64",
+        "input_events:u16",
+        "source_events:[u16;5]",
+        "source_clock_regressions:u64"
+      ],
+      "SurveillanceFrame_fields": [
+        "time_ns:i64",
+        "raster_rendered:bool",
+        "tracks:Vec<ObservedTrack>",
+        "flags:Vec<u8>",
+        "frame_sha256:[u8;32]",
+        "ca_open:Vec<Alert>",
+        "ca_closed:Vec<Alert>",
+        "ca_altitude_lost:Vec<AltLost>",
+        "msaw:Option<RegionalMsawFrame>",
+        "msaw_markers:Option<MarkerStats>",
+        "msaw_altitude_source_unknown:u32",
+        "ca_stats:CycleStats",
+        "ca_work_short:u64",
+        "ca_input_short:u64",
+        "tracker_stats:TrackerStats",
+        "track_transport_seen_ns:Option<i64>",
+        "track_measurement_seen_ns:Option<i64>",
+        "measurement_rejections:u64",
+        "duplicate_rows_replaced:u32",
+        "displayed:u32",
+        "off_map:u32",
+        "warnings:Vec<String>"
+      ],
+      "other_nested_types": {
+        "FlightEvidence": [
+          "address:u32",
+          "claimants:usize",
+          "view:Option<SharedFlightView>",
+          "trajectory:Option<TrajectoryIssueOutput>",
+          "vertical_profile:Option<VerticalProfileOutput>",
+          "vertical_refusal:String",
+          "refusal:String"
+        ],
+        "RuntimeQuarantineRecord": [
+          "item_index:u16",
+          "input_source:InputSource",
+          "identity:InputIdentity",
+          "reasons:ReasonFlags",
+          "manual_handling_required:bool"
+        ],
+        "RuntimeQuarantineReport": [
+          "records:Vec<RuntimeQuarantineRecord>",
+          "source_stats:[SourceStats;INPUT_SOURCE_COUNT]"
+        ]
+      },
+      "debug_value_grammar": [
+        "value = scalar | rust-string | struct | tuple | sequence | map | enum;",
+        "struct = identifier, \" {\", fields, \"}\";",
+        "fields = field, {\",\", field}, [\",\"];",
+        "field = identifier, \": \", value;",
+        "sequence = \"[\", [value, {\",\", value}], \"]\";",
+        "enum = identifier, [\"(\", value, \")\"] | identifier, \" {\", fields, \"}\";",
+        "rust-string = quote, rust-debug-escaped-characters, quote;"
+      ],
+      "string_escapes": [
+        "\\\\",
+        "\\\"",
+        "\\n",
+        "\\r",
+        "\\t",
+        "\\0",
+        "\\u{HEX}"
+      ],
+      "stability": "diagnostic evidence only. Rust Debug layout and nested fields are scoped to the exact producer executable digest recorded in manifest.tsv and the pinned Rust 1.89.0 toolchain; neither the tag nor this grammar promises a stable general wire API. The regional run manifest omits source_commit; the portability bundle separately records it.",
+      "writer_max_bytes": 524288,
+      "portability_reader_max_bytes": 65536,
+      "reader_scope": "The synthetic inspector accepts the producer-sized 512 KiB bound. The separate portability validator accepts at most 64 KiB for imported baseline frame text."
+    },
+    "ppm": {
+      "format": "Netpbm P6",
+      "header_bytes_ascii": "P6\\n800 600\\n255\\n",
+      "width": 800,
+      "height": 600,
+      "maxval": 255,
+      "payload": "800*600*3 RGB bytes",
+      "total_bytes": 1440015
+    }
+  },
+  "recording_import": {
+    "writer": "../../../tools/oa-regional-session/src/bin/regional-recording-import.rs",
+    "manifest": {
+      "filename": "manifest.tsv",
+      "header": "OA_RECORDING_IMPORT_MANIFEST\t1",
+      "grammar_ebnf": [
+        "manifest = header, LF, metadata-rows, {input-stream-row};",
+        "metadata-row = key, TAB, value, LF;",
+        "input-stream-row = \"input_stream\", TAB, stream-id:u64-decimal, TAB, source, TAB, sha256, TAB, compressed-bytes:u64-decimal, TAB, decoded-bytes:u64-decimal, TAB, gzip:(\"0\"|\"1\"), LF;"
+      ],
+      "metadata_rows_in_writer_order": [
+        "centre",
+        "normalized_bytes",
+        "normalized_sha256",
+        "provenance_bytes",
+        "provenance_sha256",
+        "quarantine_bytes",
+        "quarantine_sha256",
+        "report_bytes",
+        "report_sha256",
+        "executable_sha256",
+        "physical_input_cap_bytes",
+        "expanded_input_cap_bytes",
+        "frame_cap",
+        "stream_cap",
+        "normalized_input_cap_bytes",
+        "normalized_event_cap",
+        "events_per_receipt_cap",
+        "runtime_group_cap",
+        "runtime_gap_cap_ns",
+        "quarantine_record_cap",
+        "quarantine_bytes_cap"
+      ],
+      "metadata_values": {
+        "centre": "four ASCII alphanumeric bytes; typically ZAU1",
+        "byte_counts_and_cap_values": "unsigned decimal ASCII",
+        "sha256_values": "lowercase 64-character hexadecimal"
+      },
+      "input_stream_fields": [
+        "tag=input_stream",
+        "stream_index",
+        "source=ADSB|SFDPS",
+        "source_file_sha256",
+        "compressed_bytes",
+        "decoded_bytes",
+        "gzip=0|1"
+      ],
+      "stream_rules": "one to eight streams; writer preserves stream index order; stream indices are unique decimal strings",
+      "limits": {
+        "manifest_bytes": 1048576,
+        "normalized_bytes": 16777216,
+        "provenance_bytes": 33554432,
+        "quarantine_bytes": 67108864,
+        "report_bytes": 65536,
+        "physical_input_bytes_total": 16777216,
+        "expanded_input_bytes_total": 16777216,
+        "frames": 100000,
+        "streams": 8,
+        "normalized_events": 100000,
+        "events_per_receipt": 256,
+        "quarantine_records": 462144,
+        "oaf_payload_bytes": 4194304
+      },
+      "complete": "COMPLETE contains lowercase SHA-256(manifest.tsv exact bytes) plus LF"
+    },
+    "files": {
+      "normalized.tsv": {
+        "header": "OA-RS\t1",
+        "format_reference": "../../../tools/oa-regional-session/README.md#protocol-and-identity",
+        "max_bytes": 16777216
+      },
+      "provenance.tsv": {
+        "header": "OA-RS-PROVENANCE\t1",
+        "row_kinds": {
+          "STREAM": "STREAM<TAB>stream_index<TAB>ADSB|SFDPS<TAB>source_sha256<TAB>compressed_bytes<TAB>decoded_bytes<TAB>gzip_0_or_1",
+          "EVENT": "EVENT<TAB>event_index<TAB>normalized_source<TAB>sequence<TAB>ADSB|SFDPS<TAB>stream_index<TAB>frame_sequence<TAB>input_receipt_ns<TAB>frame_byte_offset<TAB>jms_timestamp_ms<TAB>mono_ns_or_dash<TAB>oaf_flags_hex2<TAB>skipped_before<TAB>emitted_item_ordinal<TAB>native_flags_hex8<TAB>native_source_hex2_hex2"
+        },
+        "max_bytes": 33554432
+      },
+      "quarantine.tsv": {
+        "header": "OA-REGIONAL-QUARANTINE\t1",
+        "row": "ITEM<TAB>FLIGHT|SURVEILLANCE|ADAPTATION<TAB>stream_index<TAB>frame_sequence<TAB>frame_byte_offset<TAB>source_row_locator<TAB>item_id<TAB>reason_flags<TAB>clock_domain_id<TAB>completed_at_ns<TAB>manual_handling_required_0_or_1",
+        "raw_payload_included": false,
+        "max_bytes": 67108864
+      },
+      "counts.tsv": {
+        "header": "OA_RECORDING_IMPORT_REPORT\t1",
+        "row_kinds": [
+          "caps",
+          "recording_counts",
+          "adapter_counts",
+          "quarantine_stats",
+          "quarantine_records",
+          "manual_handling_required",
+          "queue_full_direct_manual",
+          "quarantine_class",
+          "input_stream"
+        ],
+        "debug_rows": "recording_counts, adapter_counts, quarantine_stats and reasons use Rust Debug formatting scoped to producer executable",
+        "max_bytes": 65536
+      }
+    },
+    "portability_reader_scope": "the reader validates required sidecar lengths/digests, centre, stream row width/source/unique id/hash/decimal fields/gzip flag, and normalized OA-RS header; it does not currently pin all emitted cap rows or reject every unknown row"
+  },
+  "portability_bundle": {
+    "filename": "PORTABILITY.json",
+    "writer": "../../../tools/j2_portability.py::export_bundle",
+    "serialization": "UTF-8 compact JSON with recursively sorted keys and one trailing LF; separators are comma/colon without spaces; JSON standard escaping uses ensure_ascii=true default",
+    "top_level_object": {
+      "schema": {
+        "type": "string",
+        "value": "openatca-j2-regional-portability-v1"
+      },
+      "source_commit": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{40}$"
+      },
+      "recording_index_sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "baseline_manifest_sha256": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "files": {
+        "type": "object",
+        "key": "safe relative POSIX path",
+        "value": {
+          "bytes": "nonnegative integer",
+          "sha256": "lowercase 64-character SHA-256"
+        }
+      }
+    },
+    "emitted_inventory_paths": [
+      "recording/normalized.tsv",
+      "recording/provenance.tsv",
+      "recording/quarantine.tsv",
+      "recording/counts.tsv",
+      "recording/index.tsv",
+      "recording/COMPLETE",
+      "adaptation/airspace.snapshot",
+      "adaptation/manifest.oag2",
+      "replay/settings.tsv",
+      "replay/manifest.tsv",
+      "replay/COMPLETE"
+    ],
+    "inventory_order": "sorted by relative path when serialized",
+    "complete": "COMPLETE contains lowercase SHA-256(PORTABILITY.json exact bytes) plus LF",
+    "limits": {
+      "manifest_bytes": 1048576,
+      "inventory_entries_read": 32,
+      "total_bundle_bytes": 2147483648
+    },
+    "reader_rules": "validates COMPLETE, supported schema, file inventory, safe relative paths, byte lengths and file digests; reader currently permits extra top-level JSON keys",
+    "security": "hashes establish integrity and equality, not signature, issuer identity, or authenticity"
+  },
+  "synthetic_reference_readers": "./reference_readers.py",
+  "synthetic_tests": "./test_format_specs.py",
+  "operated_replay": {
+    "files": [
+      "settings.tsv",
+      "manifest.tsv",
+      "operator.tsv",
+      "frame-NNNN.txt",
+      "frame-NNNN.ppm",
+      "COMPLETE"
+    ],
+    "settings": {
+      "filename": "settings.tsv",
+      "header": "OA_OPERATED_SETTINGS\t1",
+      "ordered_rows": [
+        "mode=RECORDED_REPLAY",
+        "clock=recorded receipt cutoffs; local input wall and monotonic time journaled",
+        "centre=ZAU1",
+        "configuration=SurveillanceConfig Debug",
+        "tracks=32",
+        "frames=512",
+        "model=SYNTHETIC|SUPPLIED_SNAPSHOT",
+        "normalization=positive-address positions and explicit normalized state"
+      ],
+      "configuration_value": {
+        "type": "Rust pretty Debug of SurveillanceConfig",
+        "stability": "build-scoped diagnostic value; exact producer executable digest is recorded in manifest.tsv"
+      }
+    },
+    "manifest": {
+      "filename": "manifest.tsv",
+      "header": "OA_OPERATED_MANIFEST\t1",
+      "grammar_ebnf": [
+        "manifest = header, LF, mode-row, input-digest-row, model-digest-row, executable-digest-row, settings-file-row, operator-journal-file-row, script-digest-row, {frame-row};",
+        "mode-row = \"mode\", TAB, \"RECORDED_REPLAY\", LF;",
+        "digest-row = key, TAB, lowercase-sha256, LF;",
+        "settings-file-row = \"settings\", TAB, \"settings.tsv\", TAB, lowercase-sha256, LF;",
+        "operator-journal-file-row = \"operator_journal\", TAB, \"operator.tsv\", TAB, lowercase-sha256, LF;",
+        "frame-row = \"frame\", TAB, sequence:u64-decimal, TAB, receipt_ns:decimal, TAB, evidence-filename, TAB, evidence-sha256, TAB, ppm-filename, TAB, ppm-sha256, LF;"
+      ],
+      "singleton_rows_in_order": [
+        "mode=RECORDED_REPLAY",
+        "input_sha256",
+        "model_sha256",
+        "executable_sha256",
+        "settings=settings.tsv plus digest",
+        "operator_journal=operator.tsv plus digest",
+        "script_sha256"
+      ],
+      "frame_row_fields": [
+        "tag=frame",
+        "sequence:u64-decimal",
+        "receipt_ns:decimal",
+        "evidence_filename=frame-{sequence:04}.txt",
+        "evidence_sha256",
+        "ppm_filename=frame-{sequence:04}.ppm",
+        "ppm_sha256"
+      ],
+      "complete": "COMPLETE contains lowercase SHA-256(manifest.tsv exact bytes) plus LF",
+      "frame_cap": 512,
+      "reader_scope": "producer binds settings, operator journal, and input/model/executable/script digests. No separate production portability validator for this operated-session manifest was identified. The synthetic reference reader imposes a 64 MiB local parse bound; this is not a producer format limit."
+    },
+    "operator_journal": {
+      "filename": "operator.tsv",
+      "encoding": "UTF-8 LF-terminated records without a header; tab-delimited, no quoting layer",
+      "max_bytes": 16777216,
+      "record_grammar": [
+        "record = RESEQUENCE | LOCAL | ACTION | ACTOR | QUIT | OVERLAY | SELECT | QUEUE | REFUSAL | CONSOLE | CLEAR_SELECTION | INPUT_LOSS | ACTION_REJECTED | INPUT_RESYNC_INITIAL | VT_RELEASE | VT_CLEAR_SELECTION | VT_REACQUIRE | INPUT_RESYNC | INPUT_IGNORED | INPUT_DISCARDED;",
+        "RESEQUENCE = tag, ordinal, source, original-sequence, assigned-sequence, receipt_ns;",
+        "LOCAL = tag, ordinal, \"FLIGHT\", \"0\", assigned-sequence, receipt_ns;",
+        "ACTION = tag, ordinal, wall_ms, monotonic_ns, cutoff_ns, Action-Debug;",
+        "ACTOR = tag, ordinal, unit_id, wall_ms, monotonic_ns;",
+        "QUIT = tag, ordinal, wall_ms, monotonic_ns;",
+        "OVERLAY = tag, \"FRAME\", sequence, lowercase-sha256;",
+        "SELECT = tag, ordinal, address_hex8, generation, view_sequence, gufi_sha256, centre_sha256, plan_id_sha256, overlay_sha256;",
+        "QUEUE = tag, ordinal, address_decimal, generation, view_sequence, gufi_sha256, centre_sha256, plan_id_sha256, actor_id, Intent-Debug, wall_ms, monotonic_ns;",
+        "REFUSAL = tag, ordinal, reason-with-TAB-and-LF-replaced-by-space;",
+        "CONSOLE = tag, ordinal, wall_ms, monotonic_ns, safe-overlay-text, lowercase-sha256;",
+        "CLEAR_SELECTION = tag, reason, lowercase-sha256;",
+        "INPUT_LOSS = tag, ordinal, kind, discarded-command-count, cutoff_ns, wall_ms, monotonic_ns;",
+        "ACTION_REJECTED = tag, ordinal, wall_ms, monotonic_ns, cutoff_ns, reason;",
+        "INPUT_RESYNC_INITIAL = tag, discarded-record-count, relative-motion-lost, input-snapshot-sha256, monotonic_ns;",
+        "VT_RELEASE = tag, discarded-command-count, pending-line-bytes, cutoff_ns, inactive-discard-count, wall_ms, monotonic_ns;",
+        "VT_CLEAR_SELECTION = tag, lowercase-sha256;",
+        "VT_REACQUIRE = tag, inactive-discard-count, discarded-record-count, relative-motion-lost, input-snapshot-sha256, cutoff_ns, wall_ms, monotonic_ns;",
+        "INPUT_RESYNC = tag, discarded-record-count, relative-motion-lost, input-snapshot-sha256, cutoff_ns, wall_ms, monotonic_ns; or tag, discarded-record-count, relative-motion-lost, cutoff_ns, wall_ms, monotonic_ns;",
+        "INPUT_IGNORED = tag, next-action-ordinal, event-kind, event-code;",
+        "INPUT_DISCARDED = tag, next-action-ordinal, discarded-record-count;"
+      ],
+      "value_scope": "Action-Debug and Intent-Debug are Rust Debug diagnostics scoped to the exact producer build; wall_ms is Unix wall-clock milliseconds and monotonic_ns is process-relative monotonic nanoseconds where emitted."
+    },
+    "frame_manifest_row": "frame<TAB>sequence<TAB>receipt_ns<TAB>frame-{sequence:04}.txt<TAB>text-sha256<TAB>frame-{sequence:04}.ppm<TAB>ppm-sha256",
+    "debug_frame_reference": "The operated frame text prefix and RegionalFrame pretty-Debug payload grammar are shared with regional_run.frame_text; the two prefixed digest rows occur only in operated frames."
+  }
+}
