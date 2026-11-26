@@ -425,9 +425,9 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         "--principal-registry",
         "--principal-registry-sha256",
     ];
-    if args.len() < FIELDS.len() * 2 || args.len() > (FIELDS.len() + 3) * 2 || args.len() % 2 != 0 {
+    if args.len() < FIELDS.len() * 2 || args.len() > (FIELDS.len() + 4) * 2 || args.len() % 2 != 0 {
         return Err(CliError::Usage(
-            "issue requires nineteen mandatory flag/value pairs and optional --ca-preset/--pver-catalog/--runway-aids pairs".into(),
+            "issue requires nineteen mandatory flag/value pairs and optional --ca-preset/--pver-catalog/--runway-aids/--surveillance-mode pairs".into(),
         ));
     }
     if args
@@ -448,6 +448,7 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
             && flag != "--ca-preset"
             && flag != "--pver-catalog"
             && flag != "--runway-aids"
+            && flag != "--surveillance-mode"
         {
             return Err(CliError::Usage(format!("unknown issue argument {flag:?}")));
         }
@@ -485,6 +486,10 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
     let reason = get("--reason")?;
     let previous_pin = crate::manifest::parse_pin(get("--previous-manifest-sha256")?)
         .map_err(|e| CliError::Usage(e.to_string()))?;
+    let previous_package = crate::manifest::verify_current(&previous_root, previous_pin)
+        .map_err(|error| failed("previous package", error))?;
+    let previous_has_v5_component = previous_package.runway_aids_bytes().is_some()
+        || previous_package.surveillance_mode_bytes().is_some();
     let snapshot_bytes = read_snapshot(&snapshot_path)?;
     let ca_preset = values
         .get("--ca-preset")
@@ -510,9 +515,29 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
             )
         })
         .transpose()?;
-    if runway_aids.is_some() && pver_catalog.is_some() {
+    let surveillance_mode = values
+        .get("--surveillance-mode")
+        .map(|path| {
+            read_bounded_file(
+                Path::new(path),
+                oa_track::surveillance_mode::MODE_ADAPTATION_BYTES,
+                "surveillance-mode adaptation",
+            )
+        })
+        .transpose()?;
+    if (runway_aids.is_some() || surveillance_mode.is_some()) && pver_catalog.is_some() {
         return Err(CliError::Usage(
-            "v5 runway-aid issuance carries forward the pinned PVER catalog; do not supply --pver-catalog again".into(),
+            "v5 component issuance carries forward the pinned PVER catalog; do not supply --pver-catalog again".into(),
+        ));
+    }
+    if (runway_aids.is_some() || surveillance_mode.is_some()) && ca_preset.is_some() {
+        return Err(CliError::Usage(
+            "v5 component issuance carries forward the pinned CA preset; do not supply --ca-preset again".into(),
+        ));
+    }
+    if previous_has_v5_component && ca_preset.is_some() {
+        return Err(CliError::Usage(
+            "v5 package issuance carries forward its pinned CA preset; a separate CA replacement is not supported".into(),
         ));
     }
     let audit_principal = get("--audit-principal")?
@@ -557,28 +582,24 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         .map_err(|e| CliError::Usage(format!("invalid --audit-tail: {e}")))?;
     let (target, target_len) = oa_audit_core::target(facility.as_bytes())
         .map_err(|e| CliError::Usage(format!("invalid audit target: {e:?}")))?;
-    let details = if let Some(profile) = &runway_aids {
+    let mut audit_fields = vec![
+        release.to_owned(),
+        facility.to_owned(),
+        change_ref.to_owned(),
+        get("--change-class")?.to_owned(),
+        approver.to_owned(),
+        reason.to_owned(),
+    ];
+    if let Some(profile) = &runway_aids {
         let profile_digest = to_hex(&oa_sha256::sha256(profile));
-        encode_issue_audit_details(&[
-            release,
-            facility,
-            change_ref,
-            get("--change-class")?,
-            approver,
-            reason,
-            "runway_aids_sha256",
-            &profile_digest,
-        ])?
-    } else {
-        encode_issue_audit_details(&[
-            release,
-            facility,
-            change_ref,
-            get("--change-class")?,
-            approver,
-            reason,
-        ])?
-    };
+        audit_fields.extend(["runway_aids_sha256".to_owned(), profile_digest]);
+    }
+    if let Some(mode) = &surveillance_mode {
+        let mode_digest = to_hex(&oa_sha256::sha256(mode));
+        audit_fields.extend(["surveillance_mode_sha256".to_owned(), mode_digest]);
+    }
+    let audit_fields: Vec<&str> = audit_fields.iter().map(String::as_str).collect();
+    let details = encode_issue_audit_details(&audit_fields)?;
     let (details, details_len) = oa_audit_core::details(&details)
         .map_err(|e| CliError::Usage(format!("adaptation issue audit details invalid: {e:?}")))?;
     let event = oa_audit_core::Event {
@@ -601,11 +622,13 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
         .map_err(|refusal| failed("adaptation audit path", refusal))?;
     let (next_audit, (version, digest)) =
         match oa_audit_log::shell::append_before_commit(&log_path, expected, event, || {
-            if let Some(profile) = &runway_aids {
-                crate::manifest::issue_new_package_with_runway_aids(
+            if runway_aids.is_some() || surveillance_mode.is_some() {
+                crate::manifest::issue_new_package_with_components(
                     &output_root,
                     &snapshot_bytes,
-                    profile,
+                    None,
+                    runway_aids.as_deref(),
+                    surveillance_mode.as_deref(),
                     release,
                     facility,
                     change_ref,
@@ -622,6 +645,23 @@ pub fn run_issue(args: &[String], out: &mut dyn Write) -> Result<(), CliError> {
                     &snapshot_bytes,
                     catalog,
                     ca_preset.as_deref(),
+                    release,
+                    facility,
+                    change_ref,
+                    &previous_root,
+                    previous_pin,
+                    change_class,
+                    issuer,
+                    approver,
+                    reason,
+                )
+            } else if previous_has_v5_component {
+                crate::manifest::issue_new_package_with_components(
+                    &output_root,
+                    &snapshot_bytes,
+                    None,
+                    None,
+                    None,
                     release,
                     facility,
                     change_ref,

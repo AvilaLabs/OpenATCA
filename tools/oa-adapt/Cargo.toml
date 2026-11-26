@@ -24,6 +24,8 @@ oa-airspace = { path = "../../crates/oa-airspace" }
 oa-ca = { path = "../../crates/oa-ca" }
 # F1a: verify the bounded runway-aid adaptation with its pure core parser before issuance.
 oa-runway = { path = "../../crates/oa-runway" }
+# F1a: bind the exact shared strict surveillance-mode codec to the issued package component.
+oa-track = { path = "../../crates/oa-track" }
 # Private input-path policy stays in this tool process, outside the reusable library.
 oa-sealed = { path = "../../crates/oa-sealed" }
 # Existing command content-identity output, not authentication.
