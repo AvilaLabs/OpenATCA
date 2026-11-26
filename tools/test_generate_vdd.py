@@ -62,7 +62,7 @@ class VddFixture(unittest.TestCase):
         subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-qm",
                         "OA-GEN-001: bounded VDD test /home/example/private/note"], check=True)
-        subprocess.run(["git", "-C", str(self.repo), "tag", "v1.2.4"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "tag", "-a", "-m", "fixture release", "v1.2.4"], check=True)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -86,6 +86,12 @@ class VddFixture(unittest.TestCase):
         self.assertIn("Version: `1.2.4`", text)
         self.assertIn("Release tag: `v1.2.4`", text)
         self.assertIn("Date: `2026-11-26`", text)
+
+    def test_annotated_release_tag_uses_target_commit_date(self):
+        tagged = generate_vdd._git_text(self.repo, "rev-parse", "v1.2.4^{commit}", cap=256)
+        expected = generate_vdd._git_text(self.repo, "show", "-s", "--format=%cs", tagged, cap=256)
+        _, date, _, _ = generate_vdd._tag_info(self.repo, "release", "v1.2.4", None)
+        self.assertEqual(date, expected)
 
     def test_section_2_item_versions(self):
         text = self.render()
@@ -161,6 +167,14 @@ class VddFixture(unittest.TestCase):
         with patch.object(generate_vdd, "MAX_RELEASE_TAGS", 0):
             with self.assertRaisesRegex(generate_vdd.VddError, "tag count"):
                 generate_vdd._previous_tag(self.repo, "candidate", None)
+
+    def test_explicit_previous_tag_must_be_older_and_distinct(self):
+        with self.assertRaisesRegex(generate_vdd.VddError, "differ from the current"):
+            generate_vdd._previous_tag(self.repo, "v1.2.4", "v1.2.4")
+        with self.assertRaisesRegex(generate_vdd.VddError, "lower semantic version"):
+            generate_vdd._previous_tag(self.repo, "v1.2.4", "v2.0.0")
+        with self.assertRaises(generate_vdd.VddError):
+            generate_vdd._previous_tag(self.repo, "v1.2.4", "v1.0.0")
 
     def test_public_status_and_build_caps_refuse(self):
         with patch.object(generate_vdd, "MAX_PUBLIC_LIMIT_ROWS", 0):

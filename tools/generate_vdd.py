@@ -165,7 +165,7 @@ def _tag_info(root: Path, mode: str, tag: str | None, date: str | None) -> tuple
     tagged = _git_text(root, "rev-parse", f"{tag}^{{commit}}", cap=256)
     if tagged != commit:
         raise VddError("release tag must point exactly at HEAD")
-    release_date = date or _git_text(root, "show", "-s", "--format=%cs", tag, cap=256)
+    release_date = date or _git_text(root, "show", "-s", "--format=%cs", tagged, cap=256)
     if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", release_date):
         raise VddError("release date must be YYYY-MM-DD")
     return current_match.group(1), release_date, commit, tag
@@ -175,6 +175,12 @@ def _previous_tag(root: Path, current: str, supplied: str | None) -> str | None:
     if supplied:
         if not VERSION_RE.fullmatch(supplied):
             raise VddError("previous tag must be a vMAJOR.MINOR.PATCH tag")
+        if supplied == current:
+            raise VddError("previous tag must differ from the current release tag")
+        supplied_version = tuple(map(int, VERSION_RE.fullmatch(supplied).group(1).split(".")))
+        current_match = VERSION_RE.fullmatch(current)
+        if current_match and supplied_version >= tuple(map(int, current_match.group(1).split("."))):
+            raise VddError("previous tag must have a lower semantic version than the current tag")
         _git_text(root, "merge-base", "--is-ancestor", supplied, current, cap=256)
         return supplied
     text = _git_text(root, "tag", "--merged", "HEAD", "--list", "v*", "--sort=-version:refname", cap=256 * 1024)
