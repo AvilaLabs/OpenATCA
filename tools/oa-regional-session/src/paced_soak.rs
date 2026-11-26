@@ -1240,13 +1240,14 @@ mod tests {
         assert!(first
             .events
             .windows(2)
-            .all(|pair| pair[0].source_ns <= pair[1].source_ns));
-        assert!(first.events[AIRCRAFT_COUNT..]
+            .all(|pair| matches!(pair, [previous, next] if previous.source_ns <= next.source_ns)));
+        let (initial_reports, confirmations) = first.events.split_at(AIRCRAFT_COUNT);
+        assert!(confirmations
             .iter()
             .all(|event| event.source_ns == first.receipt_ns));
-        assert!(first.events[..AIRCRAFT_COUNT]
+        assert!(initial_reports
             .iter()
-            .zip(&first.events[AIRCRAFT_COUNT..])
+            .zip(confirmations)
             .all(|(initial, confirmation)| {
                 initial.identity.aircraft_address == confirmation.identity.aircraft_address
                     && confirmation.source_ns - initial.source_ns == 1_000_000_000
