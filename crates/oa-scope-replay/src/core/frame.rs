@@ -156,8 +156,9 @@ pub struct ReplaySafety<'a> {
 
 /// Optional per-frame overlays grouped as one borrowed core input.
 ///
-/// This is a cold call record: three optional references occupy 24 bytes on the crate's
-/// supported 64-bit targets. It owns no state and does not change frame allocation behavior.
+/// This is a cold call record: the slice reference plus two optional references occupy 32 bytes
+/// on the crate's supported 64-bit targets. It owns no state and does not change frame allocation
+/// behavior.
 #[derive(Clone, Copy, Default)]
 pub struct FrameOverlays<'r, 'a> {
     pub safety: Option<&'r ReplaySafety<'a>>,
@@ -165,7 +166,7 @@ pub struct FrameOverlays<'r, 'a> {
     pub metering: Option<&'r [AddressMetering]>,
 }
 
-const _: () = assert!(std::mem::size_of::<FrameOverlays<'_, '_>>() == 24);
+const _: () = assert!(std::mem::size_of::<FrameOverlays<'_, '_>>() == 32);
 
 /// What one frame build drew and left out. A7.2: cold struct (one per frame).
 #[derive(Clone, Copy, Debug, PartialEq)]
