@@ -145,6 +145,17 @@ pub struct ReplaySafety<'a> {
     pub frozen_limit_ns: i64,
 }
 
+/// Borrowed optional inputs for one frame build. This groups safety, ownership and exact-address
+/// mode presentation data without changing allocation or frame behavior.
+#[derive(Clone, Copy, Default)]
+pub struct FrameOverlays<'r, 'a> {
+    pub safety: Option<&'r ReplaySafety<'a>>,
+    pub ownership: Option<&'r OwnershipStatus>,
+    pub mode_flags: Option<&'r [(u32, u8)]>,
+}
+
+const _: () = assert!(std::mem::size_of::<FrameOverlays<'_, '_>>() == 24);
+
 /// What one frame build drew and left out. A7.2: cold struct (one per frame).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameInfo {
@@ -431,7 +442,18 @@ pub fn replay_build_with_overlays(
     safety: Option<&ReplaySafety<'_>>,
     ownership: Option<&OwnershipStatus>,
 ) -> Result<FrameInfo, ReplayError> {
-    replay_build_with_mode_overlays(r, store, calls, t_ns, stamp, safety, ownership, &[])
+    replay_build_with_mode_overlays(
+        r,
+        store,
+        calls,
+        t_ns,
+        stamp,
+        FrameOverlays {
+            safety,
+            ownership,
+            mode_flags: None,
+        },
+    )
 }
 
 /// Builds the usual scope frame and applies caller-selected mode flags to matching displayed
@@ -443,13 +465,16 @@ pub fn replay_build_with_mode_overlays(
     calls: &Callsigns,
     t_ns: i64,
     stamp: &str,
-    safety: Option<&ReplaySafety<'_>>,
-    ownership: Option<&OwnershipStatus>,
-    mode_flags: &[(u32, u8)],
+    overlays: FrameOverlays<'_, '_>,
 ) -> Result<FrameInfo, ReplayError> {
+    let FrameOverlays {
+        safety,
+        ownership,
+        mode_flags,
+    } = overlays;
     targets_clear(&mut r.set);
     let convert = targets_at(store, calls, t_ns, &r.cfg.convert, &r.view.proj, &mut r.set);
-    targets_apply_mode_flags(&mut r.set, mode_flags)
+    targets_apply_mode_flags(&mut r.set, mode_flags.unwrap_or(&[]))
         .map_err(|_| ReplayError::Config(RowsError::Config("invalid surveillance mode overlay")))?;
     let scene = build_scene(&mut r.list, &r.model, &r.index, &r.view, &mut r.scratch)?;
     let traffic = build_traffic(&mut r.list, &r.view.proj, &r.ell, &r.set, &r.cfg.style)?;

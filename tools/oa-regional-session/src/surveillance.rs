@@ -1249,15 +1249,17 @@ pub fn surveillance_finish_with_mode(
             &Callsigns::default(),
             time_ns,
             "REGIONAL RESEARCH",
-            Some(&ReplaySafety {
-                states: &s.states,
-                inhibits: &s.inhibits,
-                feeds: &feeds,
-                newest_track_ns: (newest_track != i64::MIN).then_some(newest_track),
-                frozen_limit_ns: 5 * SECOND_NS,
-            }),
-            ownership,
-            &mode_flags,
+            oa_scope_replay::frame::FrameOverlays {
+                safety: Some(&ReplaySafety {
+                    states: &s.states,
+                    inhibits: &s.inhibits,
+                    feeds: &feeds,
+                    newest_track_ns: (newest_track != i64::MIN).then_some(newest_track),
+                    frozen_limit_ns: 5 * SECOND_NS,
+                }),
+                ownership,
+                mode_flags: Some(&mode_flags),
+            },
         )
         .map_err(err)?;
         if info.refused != 0
