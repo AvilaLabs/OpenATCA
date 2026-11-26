@@ -18,12 +18,28 @@ class VddFixture(unittest.TestCase):
         self.base = Path(self.temp.name)
         self.repo = self.base / "repo"
         self.repo.mkdir()
-        self._write("Cargo.toml", '[workspace.package]\nversion = "1.2.3"\n')
+        self._write(
+            "Cargo.toml",
+            '[workspace]\nmembers = [\n    "crates/demo-core",\n    "tools/demo-cli",\n]\n'
+            '[workspace.package]\nversion = "1.2.3"\n',
+        )
+        self._write("crates/demo-core/Cargo.toml", '[package]\nname = "demo-core"\nversion.workspace = true\n')
+        self._write("tools/demo-cli/Cargo.toml", '[package]\nname = "demo-cli"\nversion = "9.8.7"\n')
         self._write("Cargo.lock", "version = 4\n")
         self._write("rust-toolchain.toml", '[toolchain]\nchannel = "1.89.0"\n')
         self._write("python/pyproject.toml", '[project]\nversion = "0.4.2"\n')
-        self._write("tools/oa-adapt/src/manifest.rs", "const LEGACY_MANIFEST_VERSION: u16 = 1;\nconst ISSUED_MANIFEST_VERSION: u16 = 2;\nconst CA_PRESET_MANIFEST_VERSION: u16 = 3;\n")
-        self._write("crates/oa-airspace/src/core/snapshot.rs", "pub const FORMAT_VERSION: u32 = 3;\n")
+        self._write(
+            "tools/oa-adapt/src/manifest.rs",
+            "const LEGACY_MANIFEST_VERSION: u16 = 1;\n"
+            "const ISSUED_MANIFEST_VERSION: u16 = 2;\n"
+            "const CA_PRESET_MANIFEST_VERSION: u16 = 3;\n"
+            "const PVER_CATALOG_MANIFEST_VERSION: u16 = 4;\n"
+            "const PVER_NEXT_MANIFEST_VERSION: u16 = 5;\n",
+        )
+        self._write(
+            "crates/oa-airspace/src/core/snapshot.rs",
+            "pub const FORMAT_VERSION: u32 = 3;\npub const FORMAT_VERSION_NOTE: u32 = 4;\n",
+        )
         self._write("REQUIREMENTS.md", "- **OA-GEN-001** smoke\n")
         self._write("docs/safety/hazard-log.json", '{"schema":"test"}\n')
         self._write("docs/safety/generated/pha.csv", "id\n")
@@ -89,16 +105,53 @@ class VddFixture(unittest.TestCase):
 
     def test_annotated_release_tag_uses_target_commit_date(self):
         tagged = generate_vdd._git_text(self.repo, "rev-parse", "v1.2.4^{commit}", cap=256)
-        expected = generate_vdd._git_text(self.repo, "show", "-s", "--format=%cs", tagged, cap=256)
+        expected = generate_vdd._commit_utc_date(self.repo, tagged)
         _, date, _, _ = generate_vdd._tag_info(self.repo, "release", "v1.2.4", None)
         self.assertEqual(date, expected)
+
+    def test_candidate_date_uses_commit_utc_date_not_runner_date(self):
+        with patch.object(
+            generate_vdd,
+            "_git_text",
+            side_effect=["a" * 40, "2026-11-27T00:30:00+02:00"],
+        ):
+            version, release_date, commit, tag = generate_vdd._tag_info(
+                self.repo, "candidate", None, None
+            )
+        self.assertEqual((version, release_date, commit, tag),
+                         ("unreleased candidate", "2026-11-26", "a" * 40, "none"))
+
+    def test_release_date_rejects_invalid_calendar_day(self):
+        with self.assertRaisesRegex(generate_vdd.VddError, "valid YYYY-MM-DD calendar date"):
+            generate_vdd._tag_info(self.repo, "release", "v1.2.4", "2026-02-30")
 
     def test_section_2_item_versions(self):
         text = self.render()
         self.assertIn("## 2. Configuration items and versions", text)
-        self.assertIn("`1.2.3`", text)
-        self.assertIn("`0.4.2`", text)
-        self.assertIn("`1, 2, 3`", text)
+        self.assertIn("Workspace software items (2 packages)", text)
+        self.assertIn("demo-core — crates/demo-core/Cargo.toml, version 1.2.3", text)
+        self.assertIn("Python package version: 0.4.2", text)
+        self.assertIn("LEGACY_MANIFEST_VERSION=1, ISSUED_MANIFEST_VERSION=2, CA_PRESET_MANIFEST_VERSION=3, PVER_CATALOG_MANIFEST_VERSION=4, PVER_NEXT_MANIFEST_VERSION=5", text)
+
+    def test_section_2_lists_each_package_and_all_format_versions(self):
+        text = self.render()
+        self.assertIn("demo-core — crates/demo-core/Cargo.toml, version 1.2.3", text)
+        self.assertIn("demo-cli — tools/demo-cli/Cargo.toml, version 9.8.7", text)
+        self.assertIn("PVER_CATALOG_MANIFEST_VERSION=4", text)
+        self.assertIn("PVER_NEXT_MANIFEST_VERSION=5", text)
+        self.assertIn("FORMAT_VERSION=3, FORMAT_VERSION_NOTE=4", text)
+        self.assertIn("Facility-issued adaptation identity: unavailable", text)
+
+    def test_workspace_version_inventory_limits_refuse(self):
+        with patch.object(generate_vdd, "MAX_WORKSPACE_PACKAGES", 1):
+            with self.assertRaisesRegex(generate_vdd.VddError, "member list is malformed or exceeds"):
+                generate_vdd._versions(self.repo)
+        with patch.object(generate_vdd, "MAX_PACKAGE_MANIFEST_BYTES", 8):
+            with self.assertRaisesRegex(generate_vdd.VddError, "package manifest exceeds"):
+                generate_vdd._versions(self.repo)
+        with patch.object(generate_vdd, "MAX_TOTAL_PACKAGE_MANIFEST_BYTES", 1):
+            with self.assertRaisesRegex(generate_vdd.VddError, "aggregate byte limit"):
+                generate_vdd._versions(self.repo)
 
     def test_section_3_commit_change_requirements(self):
         text = self.render()

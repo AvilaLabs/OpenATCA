@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date as date_type, datetime, timezone
 import hashlib
 import json
 import os
@@ -33,6 +34,9 @@ MAX_HAZARD_BYTES = 2 * 1024 * 1024  # Matches the safety-table generator's hazar
 MAX_PROVENANCE_BYTES = 32 * 1024 * 1024  # Room for the bounded toolchain component inventory.
 MAX_SBOM_BYTES = 16 * 1024 * 1024  # Matches the supply-chain generator's bounded Cargo.lock input.
 MAX_TEXT_SOURCE_BYTES = 2 * 1024 * 1024  # Public status registers only; each is independently capped.
+MAX_WORKSPACE_PACKAGES = 256  # Bound version inventory rows from Cargo.toml.
+MAX_PACKAGE_MANIFEST_BYTES = 64 * 1024  # Current package manifests are small metadata files.
+MAX_TOTAL_PACKAGE_MANIFEST_BYTES = 8 * 1024 * 1024  # Bound all workspace manifest reads together.
 VERSION_RE = re.compile(r"v([0-9]+\.[0-9]+\.[0-9]+)\Z")
 REQ_RE = re.compile(r"\bOA-[A-Z0-9]+-[0-9]{3}\b")
 LOCAL_PATH_RE = re.compile(r"/(?:home|tmp)/[^\s`]+")
@@ -155,20 +159,37 @@ def _clean_source(root: Path) -> None:
 
 def _tag_info(root: Path, mode: str, tag: str | None, date: str | None) -> tuple[str, str, str, str]:
     commit = _git_text(root, "rev-parse", "HEAD", cap=256)
+    commit_date = _commit_utc_date(root, commit)
     if mode == "candidate":
         if tag or date:
             raise VddError("candidate mode does not accept release tag/date")
-        return "unreleased candidate", "not released", commit, "none"
+        return "unreleased candidate", commit_date, commit, "none"
     current_match = VERSION_RE.fullmatch(tag or "")
     if current_match is None:
         raise VddError("release mode requires a vMAJOR.MINOR.PATCH tag")
     tagged = _git_text(root, "rev-parse", f"{tag}^{{commit}}", cap=256)
     if tagged != commit:
         raise VddError("release tag must point exactly at HEAD")
-    release_date = date or _git_text(root, "show", "-s", "--format=%cs", tagged, cap=256)
-    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", release_date):
-        raise VddError("release date must be YYYY-MM-DD")
+    release_date = date or _commit_utc_date(root, tagged)
+    try:
+        parsed_date = date_type.fromisoformat(release_date)
+    except (TypeError, ValueError) as exc:
+        raise VddError("release date must be a valid YYYY-MM-DD calendar date") from exc
+    if parsed_date.isoformat() != release_date:
+        raise VddError("release date must be a valid YYYY-MM-DD calendar date")
     return current_match.group(1), release_date, commit, tag
+
+
+def _commit_utc_date(root: Path, commit: str) -> str:
+    """Use the commit timestamp's UTC calendar date, never the runner's current date."""
+    raw = _git_text(root, "show", "-s", "--format=%cI", commit, cap=256)
+    try:
+        timestamp = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise VddError("commit timestamp is not a valid ISO-8601 value") from exc
+    if timestamp.tzinfo is None:
+        raise VddError("commit timestamp lacks an explicit timezone")
+    return timestamp.astimezone(timezone.utc).date().isoformat()
 
 
 def _previous_tag(root: Path, current: str, supplied: str | None) -> str | None:
@@ -235,27 +256,134 @@ def _changes(root: Path, baseline: str | None, commit: str) -> str:
     return lines.render()
 
 
+def _toml_section(text: str, name: str) -> str | None:
+    header = re.compile(r"(?m)^\[" + re.escape(name) + r"\]\s*$")
+    match = header.search(text)
+    if match is None:
+        return None
+    next_header = re.compile(r"(?m)^\[([^\]\n]+)\]\s*$").search(text, match.end())
+    return text[match.end() : next_header.start() if next_header else len(text)]
+
+
+def _toml_string(section: str, key: str) -> str | None:
+    match = re.search(r"(?m)^\s*" + re.escape(key) + r"\s*=\s*\"([^\"\n]*)\"\s*(?:#.*)?$", section)
+    return match.group(1) if match else None
+
+
+def _workspace_members(cargo: str) -> list[str]:
+    section = _toml_section(cargo, "workspace")
+    if section is None:
+        raise VddError("Cargo workspace section is missing")
+    match = re.search(r"(?ms)^\s*members\s*=\s*\[(.*?)^\s*\]", section)
+    if match is None:
+        raise VddError("Cargo workspace member list is missing or unsupported")
+    body = match.group(1)
+    members = re.findall(r'"([^\"\n]+)"', body)
+    stripped = re.sub(r'"[^\"\n]+"|[\s,#]', "", body)
+    if stripped or not members or len(members) > MAX_WORKSPACE_PACKAGES:
+        raise VddError("Cargo workspace member list is malformed or exceeds its row limit")
+    if len(set(members)) != len(members):
+        raise VddError("Cargo workspace contains duplicate member paths")
+    for member in members:
+        relative = Path(member)
+        if (not member or len(os.fsencode(member)) > MAX_PATH_BYTES
+                or len(os.fsencode(relative / "Cargo.toml")) > MAX_PATH_BYTES
+                or relative.is_absolute()
+                or relative == Path(".")
+                or any(part in ("", ".", "..") for part in relative.parts)):
+            raise VddError("Cargo workspace member path is invalid")
+    return members
+
+
+def _package_version(manifest: str, workspace_version: str) -> tuple[str, str]:
+    section = _toml_section(manifest, "package")
+    if section is None:
+        raise VddError("workspace member manifest has no [package] section")
+    name = _toml_string(section, "name")
+    if name is None or not name or len(name.encode("utf-8")) > 128:
+        raise VddError("workspace member package name is missing or outside its limit")
+    if re.search(r"(?m)^\s*version\.workspace\s*=\s*true\s*(?:#.*)?$", section):
+        version = workspace_version
+    else:
+        version = _toml_string(section, "version")
+        if version is None and re.search(
+            r"(?m)^\s*version\s*=\s*\{\s*workspace\s*=\s*true\s*\}\s*(?:#.*)?$",
+            section,
+        ):
+            version = workspace_version
+    if not version or len(version.encode("utf-8")) > 64 or "\n" in version:
+        raise VddError("workspace package version is missing or outside its limit")
+    return name, version
+
+
 def _versions(root: Path) -> str:
-    cargo = _read(root / "Cargo.toml", 128 * 1024).decode("utf-8", "strict")
+    cargo_path = root / "Cargo.toml"
+    cargo_raw = _read(cargo_path, 128 * 1024)
+    cargo = cargo_raw.decode("utf-8", "strict")
     pyproject = _read(root / "python/pyproject.toml", 64 * 1024).decode("utf-8", "strict")
     rust = _read(root / "rust-toolchain.toml", 8 * 1024).decode("utf-8", "strict")
-    workspace = re.search(r"(?ms)^\[workspace\.package\]\s*.*?^version\s*=\s*\"([^\"]+)\"", cargo)
-    python = re.search(r"(?ms)^\[project\]\s*.*?^version\s*=\s*\"([^\"]+)\"", pyproject)
-    toolchain = re.search(r"(?m)^channel\s*=\s*\"([^\"]+)\"", rust)
-    if not (workspace and python and toolchain):
+    workspace_section = _toml_section(cargo, "workspace.package")
+    workspace_version = _toml_string(workspace_section or "", "version")
+    python = re.search(r'(?ms)^\[project\]\s*.*?^version\s*=\s*"([^"]+)"', pyproject)
+    toolchain = re.search(r'(?m)^channel\s*=\s*"([^"]+)"', rust)
+    if not (workspace_version and python and toolchain):
         raise VddError("workspace, Python, or Rust toolchain version is missing")
+    members = _workspace_members(cargo)
+    canonical_root = root.resolve(strict=True)
+    manifest_bytes_reserved = len(cargo_raw)
+    manifest_bytes_read = len(cargo_raw)
+    packages = []
+    for member in members:
+        manifest_path = root / member / "Cargo.toml"
+        if manifest_path.is_symlink():
+            raise VddError(f"workspace package manifest is a symlink: {member}")
+        try:
+            resolved_manifest = manifest_path.resolve(strict=True)
+            size = manifest_path.stat().st_size
+        except OSError as exc:
+            raise VddError(f"cannot inspect workspace package manifest: {member}") from exc
+        if canonical_root not in resolved_manifest.parents:
+            raise VddError(f"workspace package manifest escapes the source root: {member}")
+        if size > MAX_PACKAGE_MANIFEST_BYTES:
+            raise VddError(f"workspace package manifest exceeds {MAX_PACKAGE_MANIFEST_BYTES}-byte limit: {member}")
+        manifest_bytes_reserved += size
+        if manifest_bytes_reserved > MAX_TOTAL_PACKAGE_MANIFEST_BYTES:
+            raise VddError("workspace package manifests exceed aggregate byte limit")
+        package_raw = _read(resolved_manifest, MAX_PACKAGE_MANIFEST_BYTES)
+        manifest_bytes_read += len(package_raw)
+        if manifest_bytes_read > MAX_TOTAL_PACKAGE_MANIFEST_BYTES:
+            raise VddError("workspace package manifests exceed aggregate byte limit")
+        name, version = _package_version(package_raw.decode("utf-8", "strict"), workspace_version)
+        packages.append((name, member, version))
+    if len({name for name, _, _ in packages}) != len(packages):
+        raise VddError("workspace package names are not unique")
+    packages.sort(key=lambda package: package[0])
     adaptation = _read(root / "tools/oa-adapt/src/manifest.rs", 256 * 1024).decode("utf-8", "strict")
     snapshot = _read(root / "crates/oa-airspace/src/core/snapshot.rs", 256 * 1024).decode("utf-8", "strict")
-    manifest_versions = sorted(set(re.findall(r"const (?:LEGACY|ISSUED|CA_PRESET)_MANIFEST_VERSION: u16 = ([0-9]+);", adaptation)), key=int)
-    snapshot_version = re.search(r"pub const FORMAT_VERSION: u32 = ([0-9]+);", snapshot)
-    if not manifest_versions or not snapshot_version:
+    manifest_versions = sorted(
+        set(re.findall(
+            r"const ([A-Z][A-Z0-9_]*_MANIFEST_VERSION): u(?:8|16|32|64|128|size) = ([0-9]+);",
+            adaptation,
+        )),
+        key=lambda item: (int(item[1]), item[0]),
+    )
+    snapshot_versions = re.findall(
+        r"pub const (FORMAT_VERSION(?:_NOTE)?): u32 = ([0-9]+);", snapshot
+    )
+    if not manifest_versions or not snapshot_versions:
         raise VddError("adaptation format version source is missing or unrecognized")
-    return (f"- Rust workspace package version: `{workspace.group(1)}`.\n"
-            f"- Python package version: `{python.group(1)}`.\n"
-            f"- Rust toolchain: `{toolchain.group(1)}`.\n"
-            f"- Snapshot format: `{snapshot_version.group(1)}`; adaptation manifest versions: "
-            f"`{', '.join(manifest_versions)}`.\n")
-
+    inventory = BoundedText(MAX_OUTPUT_BYTES - 1024)
+    inventory.append(f"- Workspace software items ({len(packages)} packages):\n")
+    for name, member, version in packages:
+        inventory.append(f"  - {name} — {member}/Cargo.toml, version {version}.\n")
+    snapshot_text = ", ".join(f"{name}={version}" for name, version in snapshot_versions)
+    manifests_text = ", ".join(f"{name}={version}" for name, version in manifest_versions)
+    return (inventory.render()
+            + f"- Python package version: {python.group(1)}.\n"
+            + f"- Rust toolchain: {toolchain.group(1)}.\n"
+            + f"- Snapshot data format versions: {snapshot_text}.\n"
+            + f"- Adaptation manifest data format versions: {manifests_text}.\n"
+            + "- Facility-issued adaptation identity: unavailable; no facility-specific package was supplied.\n")
 
 def _trace_summary(path: Path) -> tuple[str, str, list[str]]:
     raw = _read(path, MAX_TRACE_BYTES)
