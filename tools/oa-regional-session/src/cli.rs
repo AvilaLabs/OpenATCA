@@ -48,6 +48,13 @@ pub struct QuarantineReleaseOptions {
     pub time_ns: u64,
 }
 
+/// Independently pinned, manifest-bound terminal-aid package for one offline runtime.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunwayAidPackageOptions {
+    pub root: PathBuf,
+    pub manifest_sha256: [u8; 32],
+}
+
 /// Persisted CLI profile selection. The absent/default option remains the historical 32-track
 /// rendered run; the recorded profile is an explicit bounded high-volume ADS-B replay variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -229,6 +236,28 @@ pub fn run_session_with_profile_options_and_quarantine_release(
     selected_profile: RegionalCliProfile,
     quarantine_release: Option<&QuarantineReleaseOptions>,
 ) -> Result<(), String> {
+    run_session_with_profile_options_and_authorities(
+        bytes,
+        output,
+        source,
+        safety,
+        performance,
+        selected_profile,
+        quarantine_release,
+        None,
+    )
+}
+
+pub fn run_session_with_profile_options_and_authorities(
+    bytes: &[u8],
+    output: &Path,
+    source: &ModelSource,
+    safety: &MsawSource,
+    performance: Option<&Path>,
+    selected_profile: RegionalCliProfile,
+    quarantine_release: Option<&QuarantineReleaseOptions>,
+    runway_aids: Option<&RunwayAidPackageOptions>,
+) -> Result<(), String> {
     if bytes.len() > 16 * 1024 * 1024 {
         return Err("normalized input exceeds byte limit".into());
     }
@@ -264,6 +293,11 @@ pub fn run_session_with_profile_options_and_quarantine_release(
         }
         None => regional_new_with_profile(model, snapshot_sha, *b"ZAU1", cfg, profile)?,
     };
+    if let Some(options) = runway_aids {
+        let verified = oa_adapt::manifest::verify_current(&options.root, options.manifest_sha256)
+            .map_err(|error| format!("verified runway-aid package refused: {error}"))?;
+        regional_install_verified_runway_aids(&mut runtime, &verified)?;
+    }
     let text = std::str::from_utf8(bytes).map_err(|_| "input not UTF-8")?;
     let mut rows = text.lines();
     let header = rows.next().ok_or("missing OA-RS header")?;

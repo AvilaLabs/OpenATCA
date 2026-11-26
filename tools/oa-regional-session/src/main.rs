@@ -55,6 +55,7 @@ struct Arguments {
     performance: Option<PathBuf>,
     profile: oa_regional_session::cli::RegionalCliProfile,
     quarantine_release: Option<oa_regional_session::cli::QuarantineReleaseOptions>,
+    runway_aids_package: Option<oa_regional_session::cli::RunwayAidPackageOptions>,
 }
 
 fn arguments() -> Result<Arguments, CliError> {
@@ -83,10 +84,12 @@ fn arguments() -> Result<Arguments, CliError> {
     let mut audit_time_ns = None;
     let mut principal_registry_path = None;
     let mut principal_registry_sha256 = None;
+    let mut runway_aid_package_root = None;
+    let mut runway_aid_manifest_sha256 = None;
     let mut count = 0;
     while let Some(arg) = args.next() {
         count += 1;
-        if count > 48 {
+        if count > 56 {
             return Err(CliError::Usage);
         }
         match arg.to_str() {
@@ -123,6 +126,20 @@ fn arguments() -> Result<Arguments, CliError> {
                         }
                         _ => return Err(CliError::Usage),
                     },
+                );
+            }
+            Some("--runway-aid-package-root") if execute && runway_aid_package_root.is_none() => {
+                runway_aid_package_root =
+                    Some(args.next().map(PathBuf::from).ok_or(CliError::Usage)?);
+            }
+            Some("--runway-aid-manifest-sha256")
+                if execute && runway_aid_manifest_sha256.is_none() =>
+            {
+                runway_aid_manifest_sha256 = Some(
+                    args.next()
+                        .and_then(|value| value.into_string().ok())
+                        .and_then(|value| parse_audit_digest(&value).ok())
+                        .ok_or(CliError::Usage)?,
                 );
             }
             Some("--quarantine-release-source") if execute && quarantine_source.is_none() => {
@@ -282,6 +299,16 @@ fn arguments() -> Result<Arguments, CliError> {
     } else {
         None
     };
+    let runway_aids_package = match (runway_aid_package_root, runway_aid_manifest_sha256) {
+        (Some(root), Some(manifest_sha256)) => {
+            Some(oa_regional_session::cli::RunwayAidPackageOptions {
+                root,
+                manifest_sha256,
+            })
+        }
+        (None, None) => None,
+        _ => return Err(CliError::Usage),
+    };
     Ok(Arguments {
         input,
         output,
@@ -290,6 +317,7 @@ fn arguments() -> Result<Arguments, CliError> {
         performance,
         profile: profile.unwrap_or(oa_regional_session::cli::RegionalCliProfile::Default),
         quarantine_release,
+        runway_aids_package,
     })
 }
 
@@ -530,6 +558,7 @@ fn run() -> Result<(), CliError> {
         performance,
         profile,
         quarantine_release,
+        runway_aids_package,
     } = arguments()?;
     oa_sealed::refuse_io(&input).map_err(CliError::Io)?;
     oa_sealed::refuse_io(&output).map_err(CliError::Io)?;
@@ -542,6 +571,9 @@ fn run() -> Result<(), CliError> {
     if let Some(request) = &quarantine_release {
         oa_sealed::refuse_io(&request.audit_log).map_err(CliError::Io)?;
     }
+    if let Some(package) = &runway_aids_package {
+        oa_sealed::refuse_io(&package.root).map_err(CliError::Io)?;
+    }
     let bytes = read_input(&input)?;
     let max_events = match profile {
         oa_regional_session::cli::RegionalCliProfile::Default => MAX_SESSION_EVENTS,
@@ -551,18 +583,17 @@ fn run() -> Result<(), CliError> {
     };
     let frames = parse_input_with_limit(&bytes, max_events)?;
     match model {
-        Some(source) => {
-            oa_regional_session::cli::run_session_with_profile_options_and_quarantine_release(
-                &bytes,
-                &output,
-                &source,
-                &safety,
-                performance.as_deref(),
-                profile,
-                quarantine_release.as_ref(),
-            )
-            .map_err(CliError::Runtime)
-        }
+        Some(source) => oa_regional_session::cli::run_session_with_profile_options_and_authorities(
+            &bytes,
+            &output,
+            &source,
+            &safety,
+            performance.as_deref(),
+            profile,
+            quarantine_release.as_ref(),
+            runway_aids_package.as_ref(),
+        )
+        .map_err(CliError::Runtime),
         None => write_report(&output, &frames),
     }
 }
@@ -570,7 +601,7 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --audit-role monitor|operate|configure --audit-time-ns N --principal-registry FILE --principal-registry-sha256 SHA256]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered] [--runway-aid-package-root DIR --runway-aid-manifest-sha256 SHA256] [--quarantine-release-source flight-data|surveillance --quarantine-release-instance N --quarantine-release-item N --manual-handoff-ref TEXT --audit-log FILE --audit-count N --audit-tail SHA256 --audit-principal N --audit-role monitor|operate|configure --audit-time-ns N --principal-registry FILE --principal-registry-sha256 SHA256]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),
