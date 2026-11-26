@@ -30,7 +30,9 @@
 //! Exceeding one returns an error naming it and the byte offset; nothing is truncated.
 //!
 //! Choices for the JSONTestSuite `i_` (implementation-defined) cases are listed in
-//! `tests/jsontestsuite.rs` next to the table that enforces them. Cold, offline code: A7.2
+//! `tools/oa-compass/tests/json_suite.rs` next to the table that enforces them. The integration
+//! test lives with `oa-compass` because its recorded-corpus inputs must use `oa-sealed`; the
+//! synthetic parser tests remain under this crate. Cold, offline code: A7.2
 //! applies to the document and limit records; the node columns are one row per value.
 
 mod parse;

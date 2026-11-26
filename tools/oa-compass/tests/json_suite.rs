@@ -1,4 +1,7 @@
-//! JSONTestSuite (https://github.com/nst/JSONTestSuite, MIT) `test_parsing` cases. Gated on
+//! JSONTestSuite (https://github.com/nst/JSONTestSuite, MIT) `test_parsing` cases. This is kept
+//! in the `oa-compass` integration suite so its corpus reads use the `oa-sealed` guard; the
+//! `oa-json` package retains its synthetic parser tests and stays free of a private dev-dependency.
+//! Gated on
 //! OPENATCA_DATA: the directory `raw/jsontestsuite/test_parsing` must exist there (see
 //! DATA.md); the test prints a note and skips otherwise.
 //!
