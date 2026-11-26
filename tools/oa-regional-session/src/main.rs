@@ -574,7 +574,7 @@ fn main() {
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),
-            CliError::BadHeader => "expected header OA-RS<TAB>1".to_owned(),
+            CliError::BadHeader => "expected header OA-RS<TAB>1 or OA-RS<TAB>2".to_owned(),
             CliError::MissingHeader => "input header is missing".to_owned(),
             CliError::BadLine { line, error, accounting } => format!(
                 "invalid protocol row at line {line}: {error:?}; normalized_event_rows admitted={} refused={} unexamined={} denominator={}",
