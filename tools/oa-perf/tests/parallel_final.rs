@@ -424,6 +424,7 @@ fn run_blunder_pipeline(sensor_period_ns: i64, monitor_update_ns: u64, minimum_r
     );
 }
 
+// REQ: OA-RWY-015, OA-RWY-016
 #[test]
 fn synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning() {
     run_blunder_pipeline(
