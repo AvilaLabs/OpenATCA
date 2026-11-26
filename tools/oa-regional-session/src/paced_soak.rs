@@ -8,7 +8,7 @@ use oa_regional_session::runtime::{
     regional_ack_presentation, regional_new_with_profile, regional_pixels,
     regional_presentation_counts, regional_step,
 };
-use oa_regional_session::surveillance::SurveillanceConfig;
+use oa_regional_session::surveillance::{ObservedTrack, SurveillanceConfig};
 use oa_regional_session::{cli::synthetic_model, ReceiptBatch};
 use oa_sha256::{to_hex, Sha256};
 use std::env;
@@ -18,7 +18,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const SCHEMA: &str = "openatca-d2-paced-soak/2";
+const SCHEMA: &str = "openatca-d2-paced-soak/3";
 const TICK_NS: i64 = 5_000_000_000;
 const TICK_DURATION: Duration = Duration::from_secs(5);
 const FRAME_COUNT: u64 = 34_560;
@@ -38,7 +38,7 @@ const MAX_UTC_MONOTONIC_DRIFT_NS: u64 = 250_000_000;
 const MAX_PROGRESS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 const PROGRESS_SYNC_FRAMES: u64 = 12;
-const PROFILE_BYTES: &[u8] = b"D2-PACED-SOAK-V2;duration_ns=172800000000000;tick_ns=5000000000;frames=34560;tracks=16;grid_e7=250000;renderer=regional-base-raster-and-control-overlay-every-frame;profile=bounded-recorded-peak-derived;synthetic-model=public-test-fixture;feed-outage-start-tick=12000;feed-outage-ticks=2;schedule-late-max-ns=250000000;actual-gap-min-ns=4750000000;actual-gap-max-ns=5250000000;utc-monotonic-gap-drift-max-ns=250000000;steady-tracks-min=16;warmup-frames=2;feed-recovery-required=true;single-inflight-presentation=true;pending-ledger-cap=8192;presentation-ack=ordered-after-progress-write";
+const PROFILE_BYTES: &[u8] = b"D2-PACED-SOAK-V3;duration_ns=172800000000000;tick_ns=5000000000;frames=34560;tracks=16;grid_e7=250000;renderer=regional-base-raster-and-control-overlay-every-frame;profile=bounded-recorded-peak-derived;synthetic-model=public-test-fixture;feed-outage-start-tick=12000;feed-outage-ticks=2;schedule-late-max-ns=250000000;actual-gap-min-ns=4750000000;actual-gap-max-ns=5250000000;utc-monotonic-gap-drift-max-ns=250000000;steady-tracks-min=16;steady-track-source-time=every-address-current-batch;warmup-frames=2;feed-recovery-required=true;recovery-track-source-time=current-recovery-batch;single-inflight-presentation=true;pending-ledger-cap=8192;presentation-ack=ordered-after-progress-write";
 
 fn clean_reason(reason: &str) -> String {
     reason
@@ -70,6 +70,8 @@ struct Counts {
     max_utc_monotonic_drift_ns: u64,
     timing_violations: u64,
     steady_frames: u64,
+    fresh_steady_frames: u64,
+    stale_steady_frames: u64,
     min_steady_tracks: usize,
     last_lateness_ns: u64,
     last_actual_gap_ns: u64,
@@ -88,6 +90,7 @@ struct Counts {
     feed_fault_start_elapsed_ns: Option<u64>,
     feed_recovered_elapsed_ns: Option<u64>,
     feed_recovery_tracks: Option<usize>,
+    feed_recovery_fresh: Option<bool>,
 }
 
 fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Arguments, String> {
@@ -187,14 +190,49 @@ fn timing_violation(
 fn completion_evidence_valid(counts: &Counts) -> bool {
     counts.frames == FRAME_COUNT
         && counts.steady_frames == EXPECTED_STEADY_FRAMES
+        && counts.fresh_steady_frames == EXPECTED_STEADY_FRAMES
+        && counts.stale_steady_frames == 0
         && counts.min_steady_tracks == AIRCRAFT_COUNT
         && counts.feed_fault_start_utc_ns.is_some()
         && counts.feed_fault_start_elapsed_ns.is_some()
         && counts.feed_recovery_tracks == Some(AIRCRAFT_COUNT)
+        && counts.feed_recovery_fresh == Some(true)
         && counts.feed_recovered_elapsed_ns.is_some()
         && counts.presentation_updates_total == FRAME_COUNT
         && counts.presentation_pending_current == 0
         && counts.timing_violations == 0
+}
+
+fn tracks_refreshed_by_batch(tracks: &[ObservedTrack], batch: &ReceiptBatch) -> bool {
+    if tracks.len() != AIRCRAFT_COUNT {
+        return false;
+    }
+    let mut positions = 0_usize;
+    for event in &batch.events {
+        if matches!(&event.kind, EventKind::Position { .. }) {
+            positions = match positions.checked_add(1) {
+                Some(count) => count,
+                None => return false,
+            };
+            let Some(track) = tracks
+                .iter()
+                .find(|track| track.address == event.identity.aircraft_address)
+            else {
+                return false;
+            };
+            if track.newest_source_ns != event.source_ns {
+                return false;
+            }
+        }
+    }
+    positions == AIRCRAFT_COUNT
+        && tracks.iter().all(|track| {
+            batch.events.iter().any(|event| {
+                event.identity.aircraft_address == track.address
+                    && event.source_ns == track.newest_source_ns
+                    && matches!(&event.kind, EventKind::Position { .. })
+            })
+        })
 }
 
 fn hash_file(path: &Path, cap: u64) -> Result<[u8; 32], String> {
@@ -414,7 +452,7 @@ fn started_json(
     start_utc_ns: u128,
 ) -> String {
     format!(
-        "{{\"schema\":\"{SCHEMA}\",\"status\":\"RUNNING\",\"candidate_commit\":\"{candidate}\",\"executable_sha256\":\"{}\",\"synthetic_adaptation_sha256\":\"{}\",\"configuration_sha256\":\"{}\",\"synthetic_input_profile_sha256\":\"{}\",\"started_utc_unix_ns\":{start_utc_ns},\"planned_duration_ns\":{},\"cadence_ns\":{TICK_NS},\"schedule_lateness_max_ns\":{SCHEDULE_LATE_THRESHOLD_NS},\"actual_frame_gap_min_ns\":{MIN_ACTUAL_FRAME_GAP_NS},\"actual_frame_gap_max_ns\":{MAX_ACTUAL_FRAME_GAP_NS},\"utc_monotonic_gap_drift_max_ns\":{MAX_UTC_MONOTONIC_DRIFT_NS},\"warmup_frames\":{WARMUP_FRAMES},\"min_steady_tracks\":{AIRCRAFT_COUNT},\"steady_frames_expected\":{EXPECTED_STEADY_FRAMES},\"feed_fault_start_tick\":{FEED_FAULT_START_TICK},\"feed_fault_ticks\":{FEED_FAULT_TICKS},\"feed_recovery_tracks_required\":{AIRCRAFT_COUNT},\"streaming_presentation_inflight_limit\":1,\"ledger_hard_cap\":8192,\"frame_count\":{FRAME_COUNT},\"track_count\":{AIRCRAFT_COUNT},\"renderer\":\"regional base raster and control overlay each frame; no live display\",\"recorded_or_live_inputs\":false}}\n",
+        "{{\"schema\":\"{SCHEMA}\",\"status\":\"RUNNING\",\"candidate_commit\":\"{candidate}\",\"executable_sha256\":\"{}\",\"synthetic_adaptation_sha256\":\"{}\",\"configuration_sha256\":\"{}\",\"synthetic_input_profile_sha256\":\"{}\",\"started_utc_unix_ns\":{start_utc_ns},\"planned_duration_ns\":{},\"cadence_ns\":{TICK_NS},\"schedule_lateness_max_ns\":{SCHEDULE_LATE_THRESHOLD_NS},\"actual_frame_gap_min_ns\":{MIN_ACTUAL_FRAME_GAP_NS},\"actual_frame_gap_max_ns\":{MAX_ACTUAL_FRAME_GAP_NS},\"utc_monotonic_gap_drift_max_ns\":{MAX_UTC_MONOTONIC_DRIFT_NS},\"warmup_frames\":{WARMUP_FRAMES},\"min_steady_tracks\":{AIRCRAFT_COUNT},\"steady_frames_expected\":{EXPECTED_STEADY_FRAMES},\"steady_track_freshness_required\":true,\"feed_fault_start_tick\":{FEED_FAULT_START_TICK},\"feed_fault_ticks\":{FEED_FAULT_TICKS},\"feed_recovery_tracks_required\":{AIRCRAFT_COUNT},\"feed_recovery_freshness_required\":true,\"streaming_presentation_inflight_limit\":1,\"ledger_hard_cap\":8192,\"frame_count\":{FRAME_COUNT},\"track_count\":{AIRCRAFT_COUNT},\"renderer\":\"regional base raster and control overlay each frame; no live display\",\"recorded_or_live_inputs\":false}}\n",
         to_hex(executable_sha),
         to_hex(snapshot_sha),
         to_hex(config_sha),
@@ -461,8 +499,11 @@ fn summary_json(summary: SummaryInput<'_>) -> String {
     let feed_recovery_tracks = counts
         .feed_recovery_tracks
         .map_or_else(|| "null".to_string(), |value| value.to_string());
+    let feed_recovery_fresh = counts
+        .feed_recovery_fresh
+        .map_or_else(|| "null".to_string(), |value| value.to_string());
     format!(
-        "{{\"schema\":\"{SCHEMA}\",\"status\":\"COMPLETED_SYNTHETIC_STABILITY_RUN\",\"qualification\":\"NONE\",\"candidate_commit\":\"{candidate}\",\"executable_sha256\":\"{}\",\"synthetic_adaptation_sha256\":\"{}\",\"configuration_sha256\":\"{}\",\"synthetic_input_profile_sha256\":\"{}\",\"started_utc_unix_ns\":{started_utc_ns},\"ended_utc_unix_ns\":{ended_utc_ns},\"monotonic_elapsed_ns\":{elapsed_ns},\"planned_duration_ns\":{},\"frames_expected\":{FRAME_COUNT},\"frames_completed\":{},\"steady_frames_expected\":{EXPECTED_STEADY_FRAMES},\"steady_frames_completed\":{},\"min_steady_tracks\":{},\"tracks_max\":{},\"ca_open_max\":{},\"ca_closed_total\":{},\"measurement_rejections\":{},\"quarantine_records\":{},\"incomplete_ca_frames\":{},\"presentation_updates_total\":{},\"presentation_pending_current\":{},\"presentation_pending_max\":{},\"schedule_late_threshold_ns\":{SCHEDULE_LATE_THRESHOLD_NS},\"actual_frame_gap_min_ns\":{MIN_ACTUAL_FRAME_GAP_NS},\"actual_frame_gap_max_ns\":{MAX_ACTUAL_FRAME_GAP_NS},\"utc_monotonic_gap_drift_max_ns\":{MAX_UTC_MONOTONIC_DRIFT_NS},\"timing_violations\":{},\"late_frames_over_threshold\":{},\"max_schedule_lateness_ns\":{},\"min_actual_frame_gap_ns\":{},\"max_actual_frame_gap_ns\":{},\"max_utc_monotonic_drift_ns\":{},\"max_frame_processing_ns\":{},\"feed_fault_start_utc_ns\":{fault_start_utc},\"feed_fault_start_elapsed_ns\":{fault_start_elapsed},\"feed_recovered_elapsed_ns\":{feed_recovery_elapsed},\"feed_recovery_tracks\":{feed_recovery_tracks},\"progress_log_bytes\":{},\"progress_log_sha256\":\"{}\",\"recorded_or_live_inputs\":false,\"limitations\":[\"synthetic public-model workload\",\"feed-loss/reacquisition only; no process supervisor or restart recovery claim\",\"no independent thread or availability/MTBF claim\",\"no recorded-traffic or field-shadow claim\",\"no operator or live display\"]}}\n",
+        "{{\"schema\":\"{SCHEMA}\",\"status\":\"COMPLETED_SYNTHETIC_STABILITY_RUN\",\"qualification\":\"NONE\",\"candidate_commit\":\"{candidate}\",\"executable_sha256\":\"{}\",\"synthetic_adaptation_sha256\":\"{}\",\"configuration_sha256\":\"{}\",\"synthetic_input_profile_sha256\":\"{}\",\"started_utc_unix_ns\":{started_utc_ns},\"ended_utc_unix_ns\":{ended_utc_ns},\"monotonic_elapsed_ns\":{elapsed_ns},\"planned_duration_ns\":{},\"frames_expected\":{FRAME_COUNT},\"frames_completed\":{},\"steady_frames_expected\":{EXPECTED_STEADY_FRAMES},\"steady_frames_completed\":{},\"fresh_steady_frames_completed\":{},\"stale_steady_frames\":{},\"min_steady_tracks\":{},\"tracks_max\":{},\"ca_open_max\":{},\"ca_closed_total\":{},\"measurement_rejections\":{},\"quarantine_records\":{},\"incomplete_ca_frames\":{},\"presentation_updates_total\":{},\"presentation_pending_current\":{},\"presentation_pending_max\":{},\"schedule_late_threshold_ns\":{SCHEDULE_LATE_THRESHOLD_NS},\"actual_frame_gap_min_ns\":{MIN_ACTUAL_FRAME_GAP_NS},\"actual_frame_gap_max_ns\":{MAX_ACTUAL_FRAME_GAP_NS},\"utc_monotonic_gap_drift_max_ns\":{MAX_UTC_MONOTONIC_DRIFT_NS},\"timing_violations\":{},\"late_frames_over_threshold\":{},\"max_schedule_lateness_ns\":{},\"min_actual_frame_gap_ns\":{},\"max_actual_frame_gap_ns\":{},\"max_utc_monotonic_drift_ns\":{},\"max_frame_processing_ns\":{},\"feed_fault_start_utc_ns\":{fault_start_utc},\"feed_fault_start_elapsed_ns\":{fault_start_elapsed},\"feed_recovered_elapsed_ns\":{feed_recovery_elapsed},\"feed_recovery_tracks\":{feed_recovery_tracks},\"feed_recovery_fresh\":{feed_recovery_fresh},\"progress_log_bytes\":{},\"progress_log_sha256\":\"{}\",\"recorded_or_live_inputs\":false,\"limitations\":[\"synthetic public-model workload\",\"feed-loss/reacquisition only; no process supervisor or restart recovery claim\",\"no independent thread or availability/MTBF claim\",\"no recorded-traffic or field-shadow claim\",\"no operator or live display\"]}}\n",
         to_hex(executable_sha),
         to_hex(snapshot_sha),
         to_hex(config_sha),
@@ -470,6 +511,8 @@ fn summary_json(summary: SummaryInput<'_>) -> String {
         RUN_DURATION.as_nanos(),
         counts.frames,
         counts.steady_frames,
+        counts.fresh_steady_frames,
+        counts.stale_steady_frames,
         counts.min_steady_tracks,
         counts.max_tracks,
         counts.max_open_alerts,
@@ -507,8 +550,11 @@ fn write_interruption(
     let recovery_tracks = counts
         .feed_recovery_tracks
         .map_or_else(|| "null".to_string(), |value| value.to_string());
+    let recovery_fresh = counts
+        .feed_recovery_fresh
+        .map_or_else(|| "null".to_string(), |value| value.to_string());
     let body = format!(
-        "{{\"schema\":\"{SCHEMA}\",\"status\":\"INTERRUPTED_INCOMPLETE\",\"candidate_commit\":\"{candidate}\",\"reason\":\"{}\",\"started_utc_unix_ns\":{start_utc_ns},\"interrupted_utc_unix_ns\":{},\"monotonic_elapsed_ns\":{},\"frames_completed\":{},\"timing_violations\":{},\"last_schedule_lateness_ns\":{},\"last_actual_frame_gap_ns\":{},\"last_utc_monotonic_drift_ns\":{last_clock_drift},\"last_tracks\":{},\"steady_frames_completed\":{},\"min_steady_tracks\":{},\"feed_recovery_tracks\":{recovery_tracks},\"late_frames_over_threshold\":{},\"presentation_pending_current\":{},\"presentation_pending_max\":{},\"presentation_updates_total\":{},\"complete_result_published\":false}}\n",
+        "{{\"schema\":\"{SCHEMA}\",\"status\":\"INTERRUPTED_INCOMPLETE\",\"candidate_commit\":\"{candidate}\",\"reason\":\"{}\",\"started_utc_unix_ns\":{start_utc_ns},\"interrupted_utc_unix_ns\":{},\"monotonic_elapsed_ns\":{},\"frames_completed\":{},\"timing_violations\":{},\"last_schedule_lateness_ns\":{},\"last_actual_frame_gap_ns\":{},\"last_utc_monotonic_drift_ns\":{last_clock_drift},\"last_tracks\":{},\"steady_frames_completed\":{},\"fresh_steady_frames_completed\":{},\"stale_steady_frames\":{},\"min_steady_tracks\":{},\"feed_recovery_tracks\":{recovery_tracks},\"feed_recovery_fresh\":{recovery_fresh},\"late_frames_over_threshold\":{},\"presentation_pending_current\":{},\"presentation_pending_max\":{},\"presentation_updates_total\":{},\"complete_result_published\":false}}\n",
         clean_reason(reason).replace(['\\', '"'], " "),
         unix_ns()?,
         elapsed_ns(started, now)?,
@@ -518,6 +564,8 @@ fn write_interruption(
         counts.last_actual_gap_ns,
         counts.last_tracks,
         counts.steady_frames,
+        counts.fresh_steady_frames,
+        counts.stale_steady_frames,
         counts.min_steady_tracks,
         counts.late_frames,
         counts.presentation_pending_current,
@@ -567,7 +615,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
     )?;
     let progress_path = args.output.join("progress.tsv");
     let mut progress = create_new_file(&progress_path)?;
-    let header = b"tick\tutc_unix_ns\tmonotonic_elapsed_ns\tissue_time_ns\tactual_gap_ns\tutc_gap_ns\tutc_monotonic_drift_ns\tschedule_lateness_ns\tprocessing_ns\tfeed_state\ttracks\tca_open\tca_closed\tmeasurement_rejections\tquarantine_records\tpresentation_pending\tpresentation_total\tpixels_sha256\tframe_sha256\n";
+    let header = b"tick\tutc_unix_ns\tmonotonic_elapsed_ns\tissue_time_ns\tactual_gap_ns\tutc_gap_ns\tutc_monotonic_drift_ns\tschedule_lateness_ns\tprocessing_ns\tfeed_state\ttracks\tfresh_positions_current_batch\tca_open\tca_closed\tmeasurement_rejections\tquarantine_records\tpresentation_pending\tpresentation_total\tpixels_sha256\tframe_sha256\n";
     progress
         .write_all(header)
         .and_then(|()| progress.sync_all())
@@ -749,6 +797,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
         counts.max_processing_ns = counts.max_processing_ns.max(processing_ns);
         let frame_sha = frame.surveillance.frame_sha256;
         let tracks = frame.surveillance.tracks.len();
+        let tracks_fresh = tracks_refreshed_by_batch(&frame.surveillance.tracks, &batch);
         counts.last_tracks = tracks;
         let (presentation_pending, presentation_total) = regional_presentation_counts(&runtime);
         if presentation_pending != 1 || presentation_total != frame.sequence {
@@ -777,6 +826,37 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
         }
         counts.presentation_updates_total = presentation_total;
         let feed_down = (FEED_FAULT_START_TICK..FEED_FAULT_END_TICK).contains(&tick);
+        if tick == FEED_FAULT_END_TICK {
+            counts.feed_recovery_tracks = Some(tracks);
+            counts.feed_recovery_fresh = Some(tracks_fresh);
+            if tracks != AIRCRAFT_COUNT {
+                write_interruption(
+                    &args.output,
+                    &args.candidate_commit,
+                    "runtime_feed_recovery_track_count_incomplete",
+                    start_utc_ns,
+                    started,
+                    &counts,
+                )?;
+                return Err(format!(
+                    "feed recovery had {tracks} tracks; expected {AIRCRAFT_COUNT}"
+                ));
+            }
+            if !tracks_fresh {
+                write_interruption(
+                    &args.output,
+                    &args.candidate_commit,
+                    "runtime_feed_recovery_source_freshness_missing",
+                    start_utc_ns,
+                    started,
+                    &counts,
+                )?;
+                return Err(
+                    "feed recovery retained tracks without current-batch source updates".into(),
+                );
+            }
+            counts.feed_recovered_elapsed_ns = Some(monotonic_sample_ns);
+        }
         if tick >= WARMUP_FRAMES && !feed_down {
             counts.steady_frames = counts
                 .steady_frames
@@ -796,23 +876,28 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
                     "steady frame {tick} had {tracks} tracks; expected {AIRCRAFT_COUNT}"
                 ));
             }
-        }
-        if tick == FEED_FAULT_END_TICK {
-            counts.feed_recovery_tracks = Some(tracks);
-            if tracks != AIRCRAFT_COUNT {
+            if tracks_fresh {
+                counts.fresh_steady_frames = counts
+                    .fresh_steady_frames
+                    .checked_add(1)
+                    .ok_or("fresh steady-frame count overflow")?;
+            } else {
+                counts.stale_steady_frames = counts
+                    .stale_steady_frames
+                    .checked_add(1)
+                    .ok_or("stale steady-frame count overflow")?;
                 write_interruption(
                     &args.output,
                     &args.candidate_commit,
-                    "runtime_feed_recovery_track_count_incomplete",
+                    "steady_track_source_freshness_missing",
                     start_utc_ns,
                     started,
                     &counts,
                 )?;
                 return Err(format!(
-                    "feed recovery had {tracks} tracks; expected {AIRCRAFT_COUNT}"
+                    "steady frame {tick} retained tracks without current-batch source updates"
                 ));
             }
-            counts.feed_recovered_elapsed_ns = Some(monotonic_sample_ns);
         }
         counts.max_tracks = counts.max_tracks.max(tracks);
         counts.max_open_alerts = counts.max_open_alerts.max(frame.surveillance.ca_open.len());
@@ -845,7 +930,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
         let drift_cell =
             utc_mono_drift.map_or_else(|| "null".to_owned(), |drift| drift.to_string());
         let row = format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             tick,
             actual_utc_ns,
             monotonic_sample_ns,
@@ -863,6 +948,7 @@ pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), String> {
                 "UP"
             },
             tracks,
+            tracks_fresh,
             frame.surveillance.ca_open.len(),
             frame.surveillance.ca_closed.len(),
             frame.surveillance.measurement_rejections,
@@ -1049,10 +1135,10 @@ mod tests {
     use super::{
         clock_pair_deltas, completion_evidence_valid, make_batch, make_batch_with_fault,
         regional_ack_presentation, regional_new_with_profile, regional_presentation_counts,
-        regional_step, timing_violation, Counts, AIRCRAFT_COUNT, FEED_FAULT_END_TICK,
-        FEED_FAULT_START_TICK, FEED_FAULT_TICKS, FRAME_COUNT, MAX_ACTUAL_FRAME_GAP_NS,
-        MAX_UTC_MONOTONIC_DRIFT_NS, MIN_ACTUAL_FRAME_GAP_NS, RUN_DURATION,
-        SCHEDULE_LATE_THRESHOLD_NS, TICK_NS,
+        regional_step, timing_violation, tracks_refreshed_by_batch, Counts, AIRCRAFT_COUNT,
+        EXPECTED_STEADY_FRAMES, FEED_FAULT_END_TICK, FEED_FAULT_START_TICK, FEED_FAULT_TICKS,
+        FRAME_COUNT, MAX_ACTUAL_FRAME_GAP_NS, MAX_UTC_MONOTONIC_DRIFT_NS, MIN_ACTUAL_FRAME_GAP_NS,
+        RUN_DURATION, SCHEDULE_LATE_THRESHOLD_NS, TICK_NS,
     };
     use oa_regional_session::input::EventKind;
     use oa_regional_session::runtime::RegionalRunProfile;
@@ -1175,6 +1261,12 @@ mod tests {
         for tick in 0..=5 {
             let batch = make_batch_with_fault(tick, 2).unwrap();
             let frame = regional_step(&mut runtime, &batch).unwrap();
+            if tick >= 4 {
+                assert!(tracks_refreshed_by_batch(
+                    &frame.surveillance.tracks,
+                    &batch
+                ));
+            }
             if tick == 1 {
                 initial_addresses = Some(
                     frame
@@ -1203,6 +1295,53 @@ mod tests {
             regional_ack_presentation(&mut runtime, frame.sequence).unwrap();
         }
         assert_eq!(regional_presentation_counts(&runtime), (0, 6));
+    }
+
+    // REQ: OA-REG-021
+    #[test]
+    fn stale_retained_tracks_do_not_satisfy_freshness_or_completion_gate() {
+        let model = synthetic_model().unwrap();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        let mut runtime = regional_new_with_profile(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            RegionalRunProfile::paced_d2_soak(),
+        )
+        .unwrap();
+        let first_batch = make_batch_with_fault(0, 100).unwrap();
+        let first = regional_step(&mut runtime, &first_batch).unwrap();
+        assert_eq!(first.surveillance.tracks.len(), AIRCRAFT_COUNT);
+        assert!(tracks_refreshed_by_batch(
+            &first.surveillance.tracks,
+            &first_batch
+        ));
+        regional_ack_presentation(&mut runtime, first.sequence).unwrap();
+
+        let stale_batch = super::ReceiptBatch {
+            receipt_ns: first_batch.receipt_ns + TICK_NS,
+            source_clock_regressions: 0,
+            events: Vec::new(),
+        };
+        let stale = regional_step(&mut runtime, &stale_batch).unwrap();
+        assert_eq!(stale.surveillance.tracks.len(), AIRCRAFT_COUNT);
+        assert!(!tracks_refreshed_by_batch(
+            &stale.surveillance.tracks,
+            &stale_batch
+        ));
+        regional_ack_presentation(&mut runtime, stale.sequence).unwrap();
+
+        assert!(!completion_evidence_valid(&Counts {
+            fresh_steady_frames: EXPECTED_STEADY_FRAMES - 1,
+            stale_steady_frames: 1,
+            feed_recovery_fresh: Some(false),
+            ..valid_completion_counts()
+        }));
     }
 
     // REQ: OA-REG-021
@@ -1257,35 +1396,48 @@ mod tests {
     // REQ: OA-REG-021
     #[test]
     fn completion_gate_refuses_missing_recovery_tracks_or_ack_timing_evidence() {
-        let valid = || Counts {
+        assert!(completion_evidence_valid(&valid_completion_counts()));
+        assert!(!completion_evidence_valid(&Counts {
+            feed_recovery_tracks: None,
+            ..valid_completion_counts()
+        }));
+        assert!(!completion_evidence_valid(&Counts {
+            min_steady_tracks: AIRCRAFT_COUNT - 1,
+            ..valid_completion_counts()
+        }));
+        assert!(!completion_evidence_valid(&Counts {
+            presentation_pending_current: 1,
+            ..valid_completion_counts()
+        }));
+        assert!(!completion_evidence_valid(&Counts {
+            timing_violations: 1,
+            ..valid_completion_counts()
+        }));
+        assert!(!completion_evidence_valid(&Counts {
+            stale_steady_frames: 1,
+            ..valid_completion_counts()
+        }));
+        assert!(!completion_evidence_valid(&Counts {
+            feed_recovery_fresh: Some(false),
+            ..valid_completion_counts()
+        }));
+    }
+
+    fn valid_completion_counts() -> Counts {
+        Counts {
             frames: FRAME_COUNT,
             steady_frames: FRAME_COUNT - 2 - FEED_FAULT_TICKS,
+            fresh_steady_frames: EXPECTED_STEADY_FRAMES,
             min_steady_tracks: AIRCRAFT_COUNT,
             feed_fault_start_utc_ns: Some(1),
             feed_fault_start_elapsed_ns: Some(0),
             feed_recovered_elapsed_ns: Some(1),
             feed_recovery_tracks: Some(AIRCRAFT_COUNT),
+            feed_recovery_fresh: Some(true),
             presentation_updates_total: FRAME_COUNT,
             presentation_pending_current: 0,
             timing_violations: 0,
             ..Counts::default()
-        };
-        assert!(completion_evidence_valid(&valid()));
-        assert!(!completion_evidence_valid(&Counts {
-            feed_recovery_tracks: None,
-            ..valid()
-        }));
-        assert!(!completion_evidence_valid(&Counts {
-            min_steady_tracks: AIRCRAFT_COUNT - 1,
-            ..valid()
-        }));
-        assert!(!completion_evidence_valid(&Counts {
-            presentation_pending_current: 1,
-            ..valid()
-        }));
-        assert!(!completion_evidence_valid(&Counts {
-            timing_violations: 1,
-            ..valid()
-        }));
+        }
     }
 }

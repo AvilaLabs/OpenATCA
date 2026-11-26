@@ -11109,6 +11109,11 @@
         {
           "requirement_id": "OA-REG-021",
           "file": "tools/oa-regional-session/src/paced_soak.rs",
+          "test_name": "stale_retained_tracks_do_not_satisfy_freshness_or_completion_gate"
+        },
+        {
+          "requirement_id": "OA-REG-021",
+          "file": "tools/oa-regional-session/src/paced_soak.rs",
           "test_name": "cadence_and_clock_pair_accept_only_predeclared_boundaries"
         },
         {
@@ -17365,7 +17370,7 @@
       "id": "OA-REG-021",
       "function": "migration_comparison_and_safety_evidence",
       "hazard_id": "HZ-EVIDENCE-001",
-      "rationale": "Engineering safety candidate: a stability record with skipped frames, an unacknowledged presentation silently discarded, missing fault recovery, or an interrupted run marked complete could mislead a migration reviewer. The paced mode retains one regional runtime, blocks frame/redraw mutation while its single shared raster has an unacknowledged consumer frame, and requires ordered ACK after the row is written and hashed. Completion gates on all steady frames retaining 16 tracks, the actual runtime restoring 16 at feed recovery, exact frame and ACK counts, fixed pre-run 250 ms lateness/clock-drift and 4.75–5.25 s gap limits, zero timing violations, and 48 monotonic hours. The 8,192 ledger ceiling is separately unit-tested; it is not a claim that multiple raster payloads are retained. All claims remain synthetic and qualification is NONE. This establishes neither facility capacity nor field availability, operational switching, independent-thread validation, or external acceptance."
+      "rationale": "Engineering safety candidate: a stability record with skipped frames, stale retained tracks mistaken for reacquisition, an unacknowledged presentation silently discarded, missing fault recovery, or an interrupted run marked complete could mislead a migration reviewer. The paced mode retains one regional runtime, blocks frame/redraw mutation while its single shared raster has an unacknowledged consumer frame, and requires ordered ACK after the row is written and hashed. Completion gates on all steady frames retaining 16 tracks refreshed by current-batch source timestamps for the expected addresses, and the actual runtime restoring those same fresh tracks at feed recovery, plus exact frame and ACK counts, fixed pre-run 250 ms lateness/clock-drift and 4.75–5.25 s gap limits, zero timing violations, and 48 monotonic hours. The 8,192 ledger ceiling is separately unit-tested; it is not a claim that multiple raster payloads are retained. All claims remain synthetic and qualification is NONE. This establishes neither facility capacity nor field availability, operational switching, independent-thread validation, or external acceptance."
     },
     {
       "id": "OA-RTE-001",
