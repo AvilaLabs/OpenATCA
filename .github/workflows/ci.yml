@@ -107,6 +107,24 @@ jobs:
       - name: No external dependencies
         run: |
           if grep -q 'source = ' Cargo.lock; then echo "external dependency found in Cargo.lock"; exit 1; fi
+      - name: Generate SPDX SBOM and toolchain provenance
+        if: always()
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/supply_chain_evidence.py \
+            --repo "$GITHUB_WORKSPACE" \
+            --out "$RUNNER_TEMP/supply-chain-evidence" \
+            --toolchain 1.89.0
+          cp .github/security/ssdf-evidence-map.json \
+            "$RUNNER_TEMP/supply-chain-evidence/ssdf-evidence-map.json"
+      - name: Attach supply-chain evidence to this CI run
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: openatca-supply-chain-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/supply-chain-evidence/
+          if-no-files-found: warn
+          retention-days: 90
   # REQUIREMENTS.md promises results are the same bits on every IEEE-754 machine (oa-math). The
   # golden-digest tests run here on a second architecture (aarch64) to prove it.
   arm:

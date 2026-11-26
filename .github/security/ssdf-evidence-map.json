@@ -1,0 +1,248 @@
+{
+  "schema": "openatca.ssdf-evidence-map.v1",
+  "assessment_kind": "repository evidence inventory; not an SSDF conformance attestation",
+  "framework": {
+    "name": "NIST Secure Software Development Framework",
+    "publication": "NIST SP 800-218",
+    "version": "1.1",
+    "published": "2022-02-03",
+    "primary_source": "https://doi.org/10.6028/NIST.SP.800-218",
+    "table_source": "https://nvlpubs.nist.gov/nistpubs/SpecialPublications/NIST.SP.800-218.pdf"
+  },
+  "scope": {
+    "repository": "OpenATCA source repository",
+    "evidence_window": "committed source and CI configuration at the source.commit recorded in toolchain-provenance.json",
+    "limits": [
+      "This map identifies repository artifacts that may support selected SSDF tasks. It does not determine whether an organization conforms to SSDF.",
+      "A repository cannot establish organization-wide roles, training, access controls, endpoint hardening, approval authority, incident handling performance, or facility authorization.",
+      "CI artifacts are unsigned GitHub Actions artifacts with configured 90-day retention; this does not establish long-term archival, custody, or an independently witnessed build.",
+      "The generated SPDX inventory describes the root Cargo workspace lockfile. The separate fuzz workspace and its third-party test dependencies are documented in docs/FUZZING.md and are not represented as root-workspace runtime packages.",
+      "Toolchain file hashes and host metadata are observations from the runner after installation. They do not establish vendor signature validation, a trusted builder, or reproducibility against an independent builder."
+    ]
+  },
+  "evidence_artifacts": [
+    {
+      "path": ".github/scripts/supply_chain_evidence.py",
+      "role": "Generates the SPDX-2.3 root-workspace Cargo.lock inventory and openatca.toolchain-provenance.v1 JSON. Requires clean source and checks GitHub event SHA against HEAD when available; evidence output is required to be outside the checkout.",
+      "command": "python3 .github/scripts/supply_chain_evidence.py --repo \"$GITHUB_WORKSPACE\" --out \"$RUNNER_TEMP/supply-chain-evidence\" --toolchain 1.89.0"
+    },
+    {
+      "path": ".github/scripts/test_supply_chain_evidence.py",
+      "role": "Synthetic tests for SPDX graph/workspace reconciliation, zero-third-party policy, installed component file hashes and deterministic component digests, sysroot path refusal, tool binary identity, and output refusal/cleanup behavior.",
+      "command": "python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "role": "Runs the evidence generator in the check job and uploads the generated SBOM, toolchain provenance, and this evidence map.",
+      "ci_job": "check",
+      "artifact_name": "openatca-supply-chain-${{ github.run_id }}-${{ github.run_attempt }}",
+      "artifact_retention_days": 90,
+      "artifact_directory": "$RUNNER_TEMP/supply-chain-evidence/"
+    }
+  ],
+  "practice_evidence": [
+    {
+      "id": "PO.1.1",
+      "evidence_status": "partial",
+      "observed": ["SECURITY.md describes reporting and safety-hazard handling expectations.", "The CI workflow declares concrete format, lint, test, fuzz-smoke, dependency, and evidence-generation checks."],
+      "sources": ["SECURITY.md", ".github/workflows/ci.yml"],
+      "not_established": ["A maintained organization-wide security-requirements policy for development infrastructure and processes, its scheduled review, or approval authority."]
+    },
+    {
+      "id": "PO.2.1",
+      "evidence_status": "not_established_by_repository",
+      "observed": [],
+      "sources": [],
+      "not_established": ["Named accountable security-development roles, periodic role review, or responsibility assignments across an organization."]
+    },
+    {
+      "id": "PO.2.2",
+      "evidence_status": "not_established_by_repository",
+      "observed": [],
+      "sources": [],
+      "not_established": ["Role-based security training and personnel proficiency evidence."]
+    },
+    {
+      "id": "PO.2.3",
+      "evidence_status": "not_established_by_repository",
+      "observed": [],
+      "sources": [],
+      "not_established": ["Upper-management or authorizing-official commitment and release accountability."]
+    },
+    {
+      "id": "PO.3.1",
+      "evidence_status": "partial",
+      "observed": ["The CI file specifies Rust 1.89.0, formatting, Clippy, workspace and standalone tests, fuzz smoke, proof checks, FFI vectors, requirements tracing, and supply-chain evidence generation.", "The generator records rustc/cargo version output, hashes the five invoked Rust tools, and inventories files listed by installed rustup component manifests."],
+      "sources": [".github/workflows/ci.yml", ".github/scripts/supply_chain_evidence.py", ".github/scripts/test_supply_chain_evidence.py"],
+      "commands": ["cargo +1.89.0 fmt --all --check", "cargo +1.89.0 clippy --workspace --all-targets --locked -- -D warnings", "cargo +1.89.0 test --workspace --release --locked", "python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v"],
+      "not_established": ["A formally approved organization toolchain catalog, complete risk-to-tool mapping, immutable action pin policy, or signed toolchain installation verification."]
+    },
+    {
+      "id": "PO.3.2",
+      "evidence_status": "partial",
+      "observed": ["The CI workflow installs a fixed Rust toolchain version and uses locked Cargo operations for its main workspace checks."],
+      "sources": [".github/workflows/ci.yml"],
+      "not_established": ["GitHub-hosted runner hardening, administrative access control, network egress controls, isolation guarantees, or continuous monitoring of the build environment."]
+    },
+    {
+      "id": "PO.3.3",
+      "evidence_status": "partial",
+      "observed": ["The generator emits SPDX SBOM and toolchain/host/source provenance JSON; CI uploads them with this map under a run-specific artifact name."],
+      "sources": [".github/scripts/supply_chain_evidence.py", ".github/workflows/ci.yml"],
+      "artifact": "openatca-supply-chain-${{ github.run_id }}-${{ github.run_attempt }}",
+      "not_established": ["Tamper-evident signing, controlled archival, independent attestation, or organization-defined evidence acceptance criteria."]
+    },
+    {
+      "id": "PO.4.1",
+      "evidence_status": "partial",
+      "observed": ["CI includes formatting/lint/tests, parser fuzz smoke, a root-lock no-external-dependency check, and SBOM/provenance generation."],
+      "sources": [".github/workflows/ci.yml", "docs/FUZZING.md", ".github/scripts/supply_chain_evidence.py"],
+      "not_established": ["Approved organization-defined security acceptance criteria, risk thresholds, exception approvals, and vulnerability triage tracking."]
+    },
+    {
+      "id": "PO.4.2",
+      "evidence_status": "partial",
+      "observed": ["CI collects machine-readable SBOM and provenance outputs and retains the run artifact for 90 days."],
+      "sources": [".github/workflows/ci.yml", ".github/scripts/supply_chain_evidence.py"],
+      "not_established": ["Access-controlled, tamper-resistant evidence retention and review/approval records."]
+    },
+    {
+      "id": "PO.5.1",
+      "evidence_status": "not_established_by_repository",
+      "observed": [],
+      "sources": [".github/workflows/ci.yml"],
+      "not_established": ["Protection and separation controls for development, build, test, and distribution environments; runner hardening; authentication; and network boundaries."]
+    },
+    {
+      "id": "PO.5.2",
+      "evidence_status": "not_established_by_repository",
+      "observed": [],
+      "sources": [],
+      "not_established": ["Developer and builder endpoint hardening, least privilege, MFA, and monitoring."]
+    },
+    {
+      "id": "PS.1.1",
+      "evidence_status": "not_established_by_repository",
+      "observed": ["The repository is the source-controlled home of source and configuration."],
+      "sources": [".github/workflows/ci.yml"],
+      "not_established": ["Repository branch protection, reviewer requirements, least-privilege collaborator access, or audit of source access; these require host-service configuration evidence."]
+    },
+    {
+      "id": "PS.2.1",
+      "evidence_status": "partial",
+      "observed": ["SBOM and provenance files have SHA-256 digests emitted by the generator and are attached to the CI run artifact."],
+      "sources": [".github/scripts/supply_chain_evidence.py", ".github/workflows/ci.yml"],
+      "not_established": ["Published release hashes or signatures for consumers, certificate/key custody, verification instructions, or a protected release distribution channel."]
+    },
+    {
+      "id": "PS.3.1",
+      "evidence_status": "partial",
+      "observed": ["CI attaches evidence as a run-specific artifact with 90-day configured retention."],
+      "sources": [".github/workflows/ci.yml"],
+      "not_established": ["Organization-approved long-term archival, read-only access policy, retention schedule, or release-by-release archive controls."]
+    },
+    {
+      "id": "PS.3.2",
+      "evidence_status": "partial",
+      "observed": ["The SPDX document represents Cargo.lock packages and dependency relationships; provenance binds clean source commit, lock hash, SBOM hash, toolchain files, host OS/kernel, and CI invocation metadata."],
+      "sources": [".github/scripts/supply_chain_evidence.py", ".github/workflows/ci.yml", "Cargo.lock", "Cargo.toml"],
+      "artifact": "openatca-supply-chain-${{ github.run_id }}-${{ github.run_attempt }}",
+      "not_established": ["Signed provenance, independent builder verification, long-term safeguarded sharing, and provenance for release binaries beyond the CI observation recorded here."]
+    },
+    {
+      "id": "PW.4.1",
+      "evidence_status": "partial",
+      "observed": ["The generator enumerates root-workspace Cargo.lock packages and dependencies; the CI no-external-dependencies check rejects any source-backed package in that lockfile.", "The separate fuzz workspace and its third-party crates are documented as test-only in docs/FUZZING.md."],
+      "sources": [".github/scripts/supply_chain_evidence.py", ".github/workflows/ci.yml", "Cargo.lock", "fuzz/Cargo.lock", "fuzz/Cargo.toml", "docs/FUZZING.md"],
+      "commands": ["if grep -q 'source = ' Cargo.lock; then echo 'external dependency found in Cargo.lock'; exit 1; fi"],
+      "not_established": ["A maintained organization-approved component catalog, vulnerability/CVE monitoring for toolchain and fuzz dependencies, or update/exception lifecycle evidence."]
+    },
+    {
+      "id": "PW.4.4",
+      "evidence_status": "partial",
+      "observed": ["CI enforces the root workspace's no-source-backed-dependency rule and emits a lock-derived package inventory."],
+      "sources": [".github/workflows/ci.yml", ".github/scripts/supply_chain_evidence.py", "Cargo.lock"],
+      "not_established": ["Continuous third-party lifecycle/security review, source authenticity validation, or an equivalent check for every separate tool/test workspace and installed host component."]
+    },
+    {
+      "id": "PW.6.1",
+      "evidence_status": "partial",
+      "observed": ["CI selects Rust 1.89.0 and records tool versions and hashes for rustc, cargo, rustdoc, rustfmt, clippy-driver, rustup, and installed rustup component payloads."],
+      "sources": [".github/workflows/ci.yml", ".github/scripts/supply_chain_evidence.py"],
+      "not_established": ["Vendor signature/authenticity verification, approved update/change management, or trusted independent confirmation of installed toolchain files."]
+    },
+    {
+      "id": "PW.6.2",
+      "evidence_status": "partial",
+      "observed": ["CI denies Clippy warnings and uses locked builds/tests; workspace release profile and crate manifests define build settings."],
+      "sources": [".github/workflows/ci.yml", "Cargo.toml", "crates/*/Cargo.toml"],
+      "commands": ["cargo +1.89.0 clippy --workspace --all-targets --locked -- -D warnings", "cargo +1.89.0 test --workspace --release --locked"],
+      "not_established": ["An approved secure compiler/build baseline for each deployment profile and verification that the build environment enforces it."]
+    },
+    {
+      "id": "PW.7.1",
+      "evidence_status": "not_established_by_repository",
+      "observed": ["The project uses CI analysis tools such as Clippy and test/proof checks."],
+      "sources": [".github/workflows/ci.yml"],
+      "not_established": ["Organization criteria defining when independent human code review or security analysis is required; branch-protection/reviewer enforcement."]
+    },
+    {
+      "id": "PW.7.2",
+      "evidence_status": "not_established_by_repository",
+      "observed": [],
+      "sources": [".github/workflows/ci.yml"],
+      "not_established": ["Review findings, triage records, remediation approvals, and protected workflow enforcement."]
+    },
+    {
+      "id": "PW.8.1",
+      "evidence_status": "partial",
+      "observed": ["CI performs unit/integration tests, fuzz smoke, conformance-vector checks, FFI vectors, and proof jobs."],
+      "sources": [".github/workflows/ci.yml", "docs/FUZZING.md", "tools/rust_proof_suite.py"],
+      "not_established": ["A documented organization-approved security testing strategy, coverage rationale, release risk acceptance, or penetration-test program."]
+    },
+    {
+      "id": "PW.8.2",
+      "evidence_status": "partial",
+      "observed": ["CI commands scope and execute automated checks; fuzzing documentation records target entrypoints, seed provenance, limits, and a prior run's results."],
+      "sources": [".github/workflows/ci.yml", "docs/FUZZING.md"],
+      "not_established": ["A current per-release security test report and vulnerability finding/triage records."]
+    },
+    {
+      "id": "RV.1.3",
+      "evidence_status": "partial",
+      "observed": ["SECURITY.md defines a private reporting channel, asks reporters not to publish before a fix, states a seven-day acknowledgement aim, and describes severity/regression-test handling and safety-hazard notification."],
+      "sources": ["SECURITY.md"],
+      "not_established": ["Named response personnel and backup, verified contact coverage, actual response-time history, disclosure coordination agreements, and evidence that the stated process is operationally staffed."]
+    },
+    {
+      "id": "RV.1.1",
+      "evidence_status": "partial",
+      "observed": ["CI includes repeated automated test and fuzz-smoke checks; SECURITY.md invites private vulnerability reports."],
+      "sources": [".github/workflows/ci.yml", "docs/FUZZING.md", "SECURITY.md"],
+      "not_established": ["Scheduled continuous vulnerability scanning of dependencies, toolchain, releases, or deployed systems and a maintained vulnerability inventory."]
+    },
+    {
+      "id": "RV.2.1",
+      "evidence_status": "not_established_by_repository",
+      "observed": [],
+      "sources": ["SECURITY.md"],
+      "not_established": ["Per-finding risk analyses, severity decisions, remediation plans, risk acceptance authority, and tracking-system records."]
+    },
+    {
+      "id": "RV.3.1",
+      "evidence_status": "partial",
+      "observed": ["SECURITY.md says confirmed reports receive a regression test; fuzz corpus seeds are committed and exercised by tests."],
+      "sources": ["SECURITY.md", "docs/FUZZING.md", "fuzz/"],
+      "not_established": ["A maintained vulnerability root-cause register, trend analysis, or organization-level corrective-action process."]
+    }
+  ],
+  "organizational_and_authority_remainders": [
+    "Appoint an accountable software security and supply-chain authority; approve requirements, roles, risk thresholds, exceptions, and release decisions.",
+    "Provide auditable evidence for source repository access controls, required reviews, branch protection, CI identity permissions, runner isolation/hardening, secrets handling, and monitoring.",
+    "Define an evidence retention and distribution policy longer than the current 90-day CI artifact retention, including write protection and access review.",
+    "Establish vendor signature verification, signing-key custody, signed release provenance, and an independently verifiable build/reproducibility process; current CI evidence is explicitly unsigned.",
+    "Include toolchain, operating-system, CI action, and separate test-tool dependencies in a risk-managed component lifecycle with vulnerability monitoring and update records.",
+    "Maintain actual vulnerability intake, triage, root-cause, risk response, disclosure, and remediation records with staffed contacts and measured response history.",
+    "Obtain facility/customer security requirements, authorizations, accreditation, and operational approval from the responsible authority before any deployment; this repository contains no such authority decision."
+  ]
+}
