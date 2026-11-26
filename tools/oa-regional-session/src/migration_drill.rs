@@ -3994,9 +3994,6 @@ pub struct RecordedRunOptions<'a> {
 #[derive(Default)]
 struct LiveCycleState {
     frames: u64,
-    position_inputs: u64,
-    flight_inputs: u64,
-    handoff_inputs: u64,
     m2_attempted: bool,
     m2_refusal: Option<String>,
     m2_validation_ns: Option<u128>,
@@ -4434,11 +4431,16 @@ impl LivePairProcessor<'_> {
     }
 }
 
+struct CapturedReplayFrame {
+    cycle: usize,
+    snapshot: ReplaySnapshot,
+}
+
 fn capture_replay_frame(
     index: usize,
     frame: &RegionalFrame,
     spec: ReplaySpec<'_>,
-) -> Result<(usize, ReplaySnapshot), String> {
+) -> Result<CapturedReplayFrame, String> {
     let unit = cycle_window(index, spec.start, spec.end)?;
     let snapshot = snapshot_from_runtime_frame(
         frame,
@@ -4448,14 +4450,17 @@ fn capture_replay_frame(
         spec.source_epoch,
         spec.local_authority_fixture,
     )?;
-    Ok((index, snapshot))
+    Ok(CapturedReplayFrame {
+        cycle: index,
+        snapshot,
+    })
 }
 
 fn push_replay_frame(
     replay: &mut RegionalReplayAccumulator,
     event: crate::input::NormalizedEvent,
     spec: ReplaySpec<'_>,
-) -> Result<Option<(usize, ReplaySnapshot)>, String> {
+) -> Result<Option<CapturedReplayFrame>, String> {
     let mut captured = None;
     regional_replay_push_observed(replay, event, |index, frame| {
         captured = Some(capture_replay_frame(index, frame, spec)?);
@@ -4467,7 +4472,7 @@ fn push_replay_frame(
 fn finish_replay_frames(
     replay: RegionalReplayAccumulator,
     spec: ReplaySpec<'_>,
-) -> Result<(Vec<ReplicaCycle>, Option<(usize, ReplaySnapshot)>), String> {
+) -> Result<(Vec<ReplicaCycle>, Option<CapturedReplayFrame>), String> {
     let mut captured = None;
     let cycles = regional_replay_finish_observed(replay, |index, frame| {
         captured = Some(capture_replay_frame(index, frame, spec)?);
@@ -4652,10 +4657,10 @@ pub fn run_recorded_stream(
                 _ => (),
             }
             let left = push_replay_frame(&mut legacy_replay, event, legacy_spec)?;
-            let right = push_replay_frame(&mut candidate_replay, event.clone(), candidate_spec)?;
+            let right = push_replay_frame(&mut candidate_replay, event, candidate_spec)?;
             match (left, right) {
-                (Some((left_bin, left)), Some((right_bin, right))) if left_bin == right_bin => {
-                    processor.visit(left_bin, left, right)?;
+                (Some(left), Some(right)) if left.cycle == right.cycle => {
+                    processor.visit(left.cycle, left.snapshot, right.snapshot)?;
                 }
                 (None, None) => (),
                 _ => return Err("independent runtime frame boundaries diverged".into()),
@@ -4670,8 +4675,8 @@ pub fn run_recorded_stream(
     let (candidate_cycles, candidate_final) =
         finish_replay_frames(candidate_replay, candidate_spec)?;
     match (legacy_final, candidate_final) {
-        (Some((left_bin, left)), Some((right_bin, right))) if left_bin == right_bin => {
-            processor.visit(left_bin, left, right)?;
+        (Some(left), Some(right)) if left.cycle == right.cycle => {
+            processor.visit(left.cycle, left.snapshot, right.snapshot)?;
         }
         (None, None) => (),
         _ => return Err("independent runtime final frame boundaries diverged".into()),
@@ -4735,13 +4740,25 @@ pub fn run_recorded_stream(
                 .0
             })
         });
+        let position_inputs = *counts
+            .cycle_positions
+            .get(index)
+            .ok_or("cycle position input count index")?;
+        let flight_inputs = *counts
+            .cycle_flights
+            .get(index)
+            .ok_or("cycle flight input count index")?;
+        let handoff_operations = *counts
+            .cycle_handoffs
+            .get(index)
+            .ok_or("cycle handoff input count index")?;
         cycle_reports.push(CycleAttempt {
             index,
             start_ns: unit.window_start_ns,
             end_ns: unit.window_end_ns,
-            position_inputs: counts.cycle_positions[index],
-            flight_inputs: counts.cycle_flights[index],
-            handoff_operations: counts.cycle_handoffs[index],
+            position_inputs,
+            flight_inputs,
+            handoff_operations,
             consumer_acks: 0,
             consumer_max_ack_ns: None,
             replay_output_max_ack_ns: state.max_apply_ack_ns.unwrap_or(0),
@@ -5462,16 +5479,18 @@ mod tests {
 
     // REQ: OA-MIG-414
     #[test]
-    fn paired_consumer_gap_and_decision_thresholds_are_inclusive_at_the_limit() {
-        assert_eq!(checked_frame_gap(None, 10).expect("first frame"), None);
+    fn paired_consumer_gap_and_decision_thresholds_are_inclusive_at_the_limit(
+    ) -> Result<(), String> {
+        assert_eq!(checked_frame_gap(None, 10)?, None);
         assert_eq!(
-            checked_frame_gap(Some(10), 4_800_000_010).expect("terminal boundary"),
+            checked_frame_gap(Some(10), 4_800_000_010)?,
             Some(4_800_000_000)
         );
         assert!(exceeds_latency_limit(1_000_000_001, 1_000_000_000));
         assert!(!exceeds_latency_limit(1_000_000_000, 1_000_000_000));
         assert!(checked_frame_gap(Some(20), 20).is_err());
         assert!(checked_frame_gap(Some(21), 20).is_err());
+        Ok(())
     }
 
     // REQ: OA-MIG-414
