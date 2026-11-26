@@ -41,6 +41,7 @@ members = [
     "crates/oa-wind",
     "crates/oa-asterix",
     "crates/oa-nam",
+    "crates/oa-asdi",
     "crates/oa-sensorsim",
     "crates/oa-track",
     "crates/oa-track-tools",

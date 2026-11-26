@@ -44,6 +44,10 @@ name = "oa-arinc424"
 version = "0.0.1"
 
 [[package]]
+name = "oa-asdi"
+version = "0.0.1"
+
+[[package]]
 name = "oa-asterix"
 version = "0.0.1"
 dependencies = [

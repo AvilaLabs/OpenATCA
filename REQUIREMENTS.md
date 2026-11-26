@@ -3830,12 +3830,35 @@ radar biases, split geometry and earth-radius factor have no sourced value and a
   versions for NAM/ERAM non-U.S. ACC session requirements, ASDI XML 1.8, TFMDI XML 1.7, and ASTERIX
   CAT021/048/062. Synthetic ASTERIX and NAM vectors accept selected declared examples and refuse listed
   edition, framing, repetition, coordinate and profile defects. Generic XML tests establish only
-  well-formed XML parsing and explicit security refusals; ASDI packet/XSD semantics and TFMDI file
+  well-formed XML parsing and explicit security refusals; ASDI XML payload/XSD semantics and TFMDI file
   profiles are not implemented, and the SWIM TFMData decoder is not treated as a TFMDI decoder.
   Explicit CAT021, CAT048 and CAT062 edition tables mark the tested profiles and partial typed-field
   coverage. For every interface, the registry distinguishes implemented session or parser scope from
   unsupported wire fields/extensions; it does not claim whole-ICD conformance, operational
   interoperability, or parity with unavailable legacy traffic.
+
+## ASDI XML feed header profile (`oa-asdi`)
+- **OA-ASDI-001** `parse_header` accepts only an exact 32-byte ASDI XML ICD v1.8 header. It parses the
+  timestamp's 14 digits, NUL and blank pad, and the four network-order 32-bit fields; malformed
+  timestamp/calendar fields and packet types outside 1 and 2 are refused. The timestamp is exposed as
+  components only, without timezone or epoch interpretation.
+- **OA-ASDI-002** Type 1 is accepted as a header-only heartbeat only when compressed and decompressed
+  sizes are zero, per the public 2010 TFMS-to-ASDI ICD §3.2.1.3.2.2.10. Type 2 is not decoded;
+  `inspect_packet` returns the typed
+  `XmlCompressedNotDecoded` status after validating exact declared packet length.
+- **OA-ASDI-003** Packet length and declared compressed/decompressed sizes are checked against explicit
+  caller-supplied caps before any payload processing. Caller caps cannot exceed the provisional 1 MiB
+  hard ceiling for each payload size, matching the current `oa-xml` input default; this is an
+  implementation bound, not a size promised by the ICD. No allocation occurs; both caps are
+  explicit function inputs.
+- **OA-ASDI-004** Sequence values outside 0 through 100000 are refused. `observe_sequence` treats
+  100000-to-1 as the ordinary wrap and reports other nonzero mismatches as a gap/discontinuity.
+- **OA-ASDI-005** A later sequence zero is reported as `ZeroObserved`; it is not asserted to prove a
+  restart or identify the cause of a discontinuity.
+- **OA-ASDI-006** Synthetic tests establish only the declared header, size and sequence behavior. The
+  profile does not implement sockets, registration, credentials, zlib, XSD validation or ASDI message
+  semantics, and makes no live interoperability claim.
+
 
 ## M3 — Surveillance tracking (oa-track)
 

@@ -20,6 +20,45 @@
   },
   "interfaces": [
     {
+      "interface_id": "FAA-ASDI-XML-HEADER-1.8",
+      "protocol": "ASDI XML feed fixed packet header and sequence profile",
+      "implementation": "crates/oa-asdi",
+      "support_status": "partial-tested-header-only",
+      "supported_profiles": [
+        {
+        "edition": "1.8",
+        "edition_date": "2011-04-15",
+        "implemented": ["exact 32-byte header", "timestamp format/calendar fields", "data types 1 and 2", "sequence range 0..100000", "100000-to-1 sequence wrap", "type-1 zero sizes from the 2010 TFMS-to-ASDI ICD", "caller-bounded packet lengths with provisional 1 MiB hard caps"],
+          "case_ids": ["asdi.v1_8.header.xml-golden", "asdi.v1_8.header.heartbeat-golden", "asdi.v1_8.sequence.wrap-gap-zero"],
+          "not_implemented": ["TCP sockets and vendor registration", "zlib payload validation", "ASDI XSD and message schema", "flight data semantics"]
+        }
+      ],
+      "source": {
+        "source_documents": [
+          {
+            "title": "Aircraft Situation Display To Industry: Functional Description and Interface Control Document for the XML Version",
+            "edition": "1.8",
+            "edition_date": "2011-04-15",
+            "source_inventory_file": "asdi-xml-icd-v1.8-rev1.pdf",
+            "source_artifact_sha256": "3a8213a27253db858b03af7b3fcd306253e294bea181829d0afe5221b56d2f67",
+            "supports": "header length and field layout, timestamp padding, type values, sequence range and wrap"
+          },
+          {
+            "title": "TFMS-to-ASDI Interface Control Document",
+            "document_number": "CSC/TFMM-08/0473",
+            "release": "March 2010 Release 3 Final, Revision 1",
+            "public_pdf_url": "https://cdm.fly.faa.gov/wp-content/list_yo_files_user_folders/cdm_editor/cdm_data_format_info/ASDI%20ICD.pdf",
+            "supports": "type-1 heartbeat uses data type 1 and zero compressed/decompressed sizes (section 3.2.1.3.2.2.10, page 3-11)"
+          }
+        ]
+      },
+      "tested_scope": "Synthetic bytes for documented header size/fields, date-format boundaries, packet-type/sequence domain, heartbeat payload rule, exact packet length and caller size caps. XML packets return XmlCompressedNotDecoded; the tests establish neither zlib validity nor XSD/message conformance.",
+      "tests": {
+        "suite_files": ["crates/oa-asdi/tests/header.rs"],
+        "coverage": ["golden_header", "malformed_and_truncated_header_refusal", "checked_declared_size_boundary", "heartbeat_header_only", "xml_unverified_status", "sequence_wrap_gap_zero_observation"]
+      }
+    },
+    {
       "interface_id": "EUROCONTROL-ASTERIX-PART1",
       "protocol": "ASTERIX block framing and common item encoding",
       "implementation": "crates/oa-asterix",

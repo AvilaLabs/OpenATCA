@@ -42,6 +42,7 @@ an Experimental feature included in a release.
 
 | Module | Draft tier | Source API notes | Principal gap |
 |---|---|---|---|
+| `oa-asdi` | Preview, packet header only | [asdi.md](formats/asdi.md) | zlib payload, ASDI XSD/message semantics and socket/session transport are not implemented. |
 | `oa-asterix` | Preview CAT021/048/062; CAT034 out of scope | [asterix.md](formats/asterix.md) | CAT034 codec absent; CAT021 edition must be explicit; category-specific encoder coverage. |
 | `oa-arinc424` | Preview, FAA CIFP profile | [arinc424.md](formats/arinc424.md) | Unsupported sections skipped; no encoder; identify cycle and complete evidence. |
 | `oa-nasr` | Preview, subscription-specific | [nasr.md](formats/nasr.md) | Carry NASR cycle/schema identity with each dataset; no encoder. |
