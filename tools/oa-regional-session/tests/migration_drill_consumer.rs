@@ -241,8 +241,9 @@ fn worker_refuses_a_hash_valid_normalized_row_with_a_sealed_timestamp() {
 }
 
 fn valid_track_state() -> Vec<u8> {
+    let trail = std::iter::repeat_n("0:0", 16).collect::<Vec<_>>().join(";");
     format!(
-        "H5STATE\t1\tselected=Legacy\tTRACK\tkey={}\tordinal=0\tstatus=2\tlat_e7=385000000\tlon_e7=-935000000\taltitude_ft=1000\tdigest={}",
+        "H5STATE\t1\tselected=Legacy\tTRACK\tkey={}\tordinal=0\tstatus=2\tlat_e7=385000000\tlon_e7=-935000000\taltitude_ft=1000\tdigest={}\tdisplay=385000000,-935000000,1000,0,1120403456,0000000000000000,65535,65535,65535,0,0,{trail}",
         "11".repeat(32),
         "22".repeat(32)
     )
@@ -309,10 +310,7 @@ fn worker_does_not_ack_a_partial_state_generation() {
 #[test]
 fn worker_does_not_apply_duplicate_family_business_keys() {
     let first = valid_track_state();
-    let second = String::from_utf8(valid_track_state())
-        .expect("valid UTF-8 fixture")
-        .replace("lat_e7=385000000", "lat_e7=385000001")
-        .into_bytes();
+    let second = valid_track_state();
     let rows = [first, second];
     let digest = state_digest(&rows);
     let mut consumer = Consumer::new();

@@ -10346,6 +10346,16 @@
         },
         {
           "requirement_id": "OA-MIG-414",
+          "file": "tools/oa-regional-session/src/migration_drill.rs",
+          "test_name": "regional_traffic_display_block_roundtrips_all_typed_fields"
+        },
+        {
+          "requirement_id": "OA-MIG-414",
+          "file": "tools/oa-regional-session/src/surveillance.rs",
+          "test_name": "captured_target_is_the_existing_builder_target_not_a_reformatted_row"
+        },
+        {
+          "requirement_id": "OA-MIG-414",
           "file": "tools/oa-regional-session/tests/migration_drill_consumer.rs",
           "test_name": "worker_applies_exact_selected_state_rows_before_acknowledging_generation"
         },

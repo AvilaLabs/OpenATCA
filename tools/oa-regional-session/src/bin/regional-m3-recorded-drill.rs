@@ -152,11 +152,16 @@ fn emit(report: &RecordedDrillReport) {
     let ca_closed_alert_bytes = (profile.max_open_alerts as u128) * 96;
     let ca_persistent_bytes = ca_candidate_bytes + ca_open_alert_bytes + ca_closed_alert_bytes;
     let ca_frame_alert_copy_bytes = ca_open_alert_bytes + ca_closed_alert_bytes;
+    let display_target_frame_bytes = u128::from(profile.max_tracks as u64) * 164;
     println!(
-        "REPLAY_BOUNDS\tprofile=recorded_peak\tmax_tracks={}\tmax_flights={}\tmax_frames={}\tmax_events={}\tmax_baro_evidence={}\tmax_drain_rows={}\tca_candidates={}\tca_candidate_bytes={}\tca_open_alert_bytes={}\tca_closed_alert_bytes={}\tca_persistent_bytes={}\tca_frame_alert_copy_bytes={}\tca_grid_work_units_per_frame={}\tca_work_unit=band_step_or_cell_probe_or_track_in_cell\tca_eval_budget_per_frame={}\tframe_history_retained=0\tcompleteness_requires_zero_work_short_zero_input_short_zero_tracks_unscanned=1\tmemory_accounting=dominant_CA_tables_only; excludes decoded model, tracker/flight tables, source buffers, BTreeMap allocator overhead, transient frame copies, and process allocator metadata",
+        "REPLAY_BOUNDS\tprofile=recorded_peak_rendered\tmax_tracks={}\tmax_flights={}\tmax_frames={}\tmax_display_builder_updates={}\trender_scope={}\tmax_display_targets_per_frame={}\tmax_display_target_bytes_per_frame={}\tmax_events={}\tmax_baro_evidence={}\tmax_drain_rows={}\tca_candidates={}\tca_candidate_bytes={}\tca_open_alert_bytes={}\tca_closed_alert_bytes={}\tca_persistent_bytes={}\tca_frame_alert_copy_bytes={}\tca_grid_work_units_per_frame={}\tca_work_unit=band_step_or_cell_probe_or_track_in_cell\tca_eval_budget_per_frame={}\tframe_history_retained=0\tdisplay_projection=existing_oa_display_traffic_Target_from_render_builder\tcompleteness_requires_zero_work_short_zero_input_short_zero_tracks_unscanned=1\tmemory_accounting=dominant_CA_tables_and_bounded_display_target_rows; excludes decoded model, tracker/flight tables, source buffers, BTreeMap allocator overhead, transient frame copies, and process allocator metadata",
         report.run_profile.surveillance.max_tracks,
         report.run_profile.max_flights,
         report.run_profile.surveillance.max_frames,
+        report.run_profile.surveillance.max_presentation_updates,
+        u8::from(report.run_profile.surveillance.render_scope),
+        report.run_profile.surveillance.max_tracks,
+        display_target_frame_bytes,
         report.run_profile.max_total_events,
         report.run_profile.surveillance.max_baro_evidence,
         report.run_profile.surveillance.max_drain_rows,
@@ -223,7 +228,7 @@ fn emit(report: &RecordedDrillReport) {
     }
     for cycle in &report.cycles {
         println!(
-            "CYCLE\tindex={}\tstart_ns={}\tend_ns={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\tinput_worker_hash_echo_acks={}\tinput_max_hash_echo_ns={}\tselected_output={}\tselected_output_state_apply_ack_rows={}\tselected_output_apply_batch_ack_ns={}\tdecision_to_selected_output_ack_ns={}\trollback_output_apply_ack_ns={}\tflip_rollback_attempted={}\tselected_state_generation={}\tselected_state_family_counts={:?}\tselected_state_sha256={}\tprojections_equal={}\tbaseline_frames={}\tcandidate_frames={}\tbaseline_tracks={}\tcandidate_tracks={}\tbaseline_flights={}\tcandidate_flights={}\tbaseline_handoffs={}\tcandidate_handoffs={}\tbaseline_alerts={}\tcandidate_alerts={}\tbaseline_export_dropped={:?}\tcandidate_export_dropped={:?}\tbaseline_projection_sha256={}\tcandidate_projection_sha256={}\tm2_ingest_refusal={}\tm2_validation_ns={}\tm1_transition_refusal={}\tm1_validation_ns={}\tflip_rollback_status={}\tunavailable={}",
+            "CYCLE\tindex={}\tstart_ns={}\tend_ns={}\tposition_inputs={}\tflight_inputs={}\thandoff_operations={}\tinput_worker_hash_echo_acks={}\tinput_max_hash_echo_ns={}\tselected_output={}\tselected_output_state_apply_ack_rows={}\tselected_output_apply_batch_ack_ns={}\tdecision_to_selected_output_ack_ns={}\trollback_output_apply_ack_ns={}\tflip_rollback_attempted={}\tselected_state_generation={}\tselected_state_family_counts={:?}\tselected_display_block_rows={}\tselected_state_sha256={}\tprojections_equal={}\tdisplay_targets_equal={}\tbaseline_frames={}\tcandidate_frames={}\tbaseline_tracks={}\tcandidate_tracks={}\tbaseline_display_target_rows={}\tcandidate_display_target_rows={}\tbaseline_flights={}\tcandidate_flights={}\tbaseline_handoffs={}\tcandidate_handoffs={}\tbaseline_alerts={}\tcandidate_alerts={}\tbaseline_export_dropped={:?}\tcandidate_export_dropped={:?}\tbaseline_projection_sha256={}\tcandidate_projection_sha256={}\tm2_ingest_refusal={}\tm2_validation_ns={}\tm1_transition_refusal={}\tm1_validation_ns={}\tflip_rollback_status={}\tunavailable={}",
             cycle.index,
             cycle.start_ns,
             cycle.end_ns,
@@ -251,10 +256,14 @@ fn emit(report: &RecordedDrillReport) {
                 .selected_state_applied_family_counts
                 .map_or_else(|| "UNAVAILABLE".into(), |v| format!("{v:?}")),
             cycle
+                .selected_display_block_rows
+                .map_or_else(|| "UNAVAILABLE".into(), |v| v.to_string()),
+            cycle
                 .selected_state_applied_sha256
                 .as_deref()
                 .unwrap_or("UNAVAILABLE"),
             u8::from(cycle.replay_projection_equal),
+            u8::from(cycle.display_targets_equal),
             report.replica_cycles[0]
                 .get(cycle.index)
                 .map_or(0, |r| r.frames),
@@ -263,6 +272,12 @@ fn emit(report: &RecordedDrillReport) {
                 .map_or(0, |r| r.frames),
             cycle.baseline_track_rows,
             cycle.second_track_rows,
+            report.replica_cycles[0]
+                .get(cycle.index)
+                .map_or(0, |r| r.display_target_rows),
+            report.replica_cycles[1]
+                .get(cycle.index)
+                .map_or(0, |r| r.display_target_rows),
             cycle.baseline_flight_views,
             cycle.second_flight_views,
             cycle.baseline_handoff_views,

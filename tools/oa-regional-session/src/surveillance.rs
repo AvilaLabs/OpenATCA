@@ -178,6 +178,9 @@ pub struct SurveillanceFrame {
     /// state projection bytes, not a raster image.
     pub raster_rendered: bool,
     pub tracks: Vec<ObservedTrack>,
+    /// Exact targets admitted to the existing regional traffic block/raster builder for this
+    /// frame. Empty when the analysis-only profile does not run the display builder.
+    pub display_targets: Vec<oa_display::core::traffic::Target>,
     pub flags: Vec<u8>,
     pub frame_sha256: [u8; 32],
     pub ca_open: Vec<oa_ca::Alert>,
@@ -654,6 +657,91 @@ fn offline_projection_digest(
     Ok(hash.finalize())
 }
 
+fn display_target_rows(
+    columns: oa_display::core::traffic::TargetColumns<'_>,
+    capacity: usize,
+) -> Result<Vec<oa_display::core::traffic::Target>, String> {
+    use oa_display::core::traffic::{Target, MAX_TRAIL};
+    let count = columns.addr.len();
+    if count > capacity
+        || columns.lat_e7.len() != count
+        || columns.lon_e7.len() != count
+        || columns.track_ddeg.len() != count
+        || columns.gs_dkt.len() != count
+        || columns.alt_ft.len() != count
+        || columns.callsign.len() != count
+        || columns.flags.len() != count
+        || columns.reacq_age_s.len() != count
+        || columns.r95_m.len() != count
+        || columns.trail_len.len() != count
+        || columns.trail_lat_e7.len() != count.checked_mul(MAX_TRAIL).ok_or("display trail size overflow")?
+        || columns.trail_lon_e7.len() != count.checked_mul(MAX_TRAIL).ok_or("display trail size overflow")?
+    {
+        return Err("regional display target columns are incomplete or over capacity".into());
+    }
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(count)
+        .map_err(|_| "regional display target snapshot allocation refused")?;
+    for index in 0..count {
+        let start = index.checked_mul(MAX_TRAIL).ok_or("display trail offset overflow")?;
+        let end = start.checked_add(MAX_TRAIL).ok_or("display trail end overflow")?;
+        let lat_trail = columns.trail_lat_e7.get(start..end).ok_or("display latitude trail missing")?;
+        let lon_trail = columns.trail_lon_e7.get(start..end).ok_or("display longitude trail missing")?;
+        let mut trail = [(0, 0); MAX_TRAIL];
+        for offset in 0..MAX_TRAIL {
+            trail[offset] = (
+                *lat_trail.get(offset).ok_or("display latitude trail row missing")?,
+                *lon_trail.get(offset).ok_or("display longitude trail row missing")?,
+            );
+        }
+        rows.push(Target {
+            lat_e7: *columns.lat_e7.get(index).ok_or("display latitude row missing")?,
+            lon_e7: *columns.lon_e7.get(index).ok_or("display longitude row missing")?,
+            alt_ft: *columns.alt_ft.get(index).ok_or("display altitude row missing")?,
+            addr: *columns.addr.get(index).ok_or("display address row missing")?,
+            r95_m: *columns.r95_m.get(index).ok_or("display radius row missing")?,
+            trail,
+            callsign: *columns.callsign.get(index).ok_or("display callsign row missing")?,
+            track_ddeg: *columns.track_ddeg.get(index).ok_or("display track row missing")?,
+            gs_dkt: *columns.gs_dkt.get(index).ok_or("display speed row missing")?,
+            reacq_age_s: *columns.reacq_age_s.get(index).ok_or("display reacquisition row missing")?,
+            flags: *columns.flags.get(index).ok_or("display flags row missing")?,
+            trail_len: *columns.trail_len.get(index).ok_or("display trail length missing")?,
+        });
+    }
+    Ok(rows)
+}
+
+#[cfg(test)]
+mod display_target_capture_tests {
+    use super::display_target_rows;
+
+    // REQ: OA-MIG-414
+    #[test]
+    fn captured_target_is_the_existing_builder_target_not_a_reformatted_row() -> Result<(), String> {
+        use oa_display::core::traffic::{self, Target, MAX_TRAIL};
+        let target = Target {
+            lat_e7: 385_000_000,
+            lon_e7: -935_000_000,
+            alt_ft: 1000,
+            addr: 0xabc123,
+            r95_m: 95.5,
+            trail: [(1, 2); MAX_TRAIL],
+            callsign: *b"TEST123\0",
+            track_ddeg: 900,
+            gs_dkt: 1234,
+            reacq_age_s: 2,
+            flags: 3,
+            trail_len: 1,
+        };
+        let mut set = traffic::targets_new(1).map_err(|_| "target set refused")?;
+        traffic::targets_push(&mut set, &target).map_err(|_| "synthetic target refused")?;
+        let rows = display_target_rows(traffic::targets_columns(&set), 1)?;
+        assert_eq!(rows, [target]);
+        Ok(())
+    }
+}
+
 pub fn surveillance_finish(
     s: &mut Surveillance,
     ownership: Option<&OwnershipStatus>,
@@ -843,6 +931,7 @@ pub fn surveillance_finish(
         &mut s.states,
     );
     let (ca_closed, ca_altitude_lost) = capture_ca_logs(s);
+    let mut display_targets = Vec::new();
     let (msaw_markers, digest, displayed, off_map, warnings) = if !s.profile.render_scope {
         let digest = offline_projection_digest(time_ns, &tracks, ca_open(&s.ca))?;
         (None, digest, 0, 0, Vec::new())
@@ -917,6 +1006,7 @@ pub fn surveillance_finish(
             return Err("scope lost or could not represent current evidence".into());
         }
         let displayed = targets_columns(&s.scope.set);
+        display_targets = display_target_rows(displayed, s.profile.max_tracks)?;
         // Off-map targets are a named presentation exclusion. Every displayed target must be one of
         // the exact same issue-time observations offered to CA; no independent fixture traffic.
         for (i, &address) in displayed.addr.iter().enumerate() {
@@ -1031,6 +1121,7 @@ pub fn surveillance_finish(
         time_ns,
         raster_rendered: s.profile.render_scope,
         tracks,
+        display_targets,
         flags,
         frame_sha256: digest,
         ca_open: ca_open(&s.ca).to_vec(),

@@ -88,6 +88,7 @@ struct ReplaySnapshot {
     flights: Vec<Option<FlightState>>,
     handoffs: Vec<Option<HandoffState>>,
     alerts: Vec<Option<AlertState>>,
+    display_targets: Vec<oa_display::core::traffic::Target>,
 }
 
 impl ReplaySnapshot {
@@ -141,6 +142,13 @@ fn replay_snapshot_bytes(snapshot: &ReplaySnapshot) -> Result<usize, String> {
                 .checked_mul(std::mem::size_of::<Option<AlertState>>())
                 .and_then(|next| bytes.checked_add(next))
         })
+        .and_then(|bytes| {
+            snapshot
+                .display_targets
+                .len()
+                .checked_mul(std::mem::size_of::<oa_display::core::traffic::Target>())
+                .and_then(|next| bytes.checked_add(next))
+        })
         .ok_or_else(|| "M2 replay snapshot byte arithmetic overflow".into())
 }
 
@@ -192,6 +200,8 @@ pub struct CycleAttempt {
     pub replay_output_acks: u64,
     pub selected_state_applied_generation: Option<u64>,
     pub selected_state_applied_family_counts: Option<[u64; 4]>,
+    pub selected_display_block_rows: Option<u64>,
+    pub display_targets_equal: bool,
     pub selected_state_applied_sha256: Option<String>,
     pub decision_to_selected_output_ack_ns: Option<u128>,
     pub rollback_output_apply_ack_ns: Option<u128>,
@@ -524,6 +534,7 @@ pub struct StreamReport {
 pub struct ReplicaCycle {
     pub frames: u64,
     pub track_rows: u64,
+    pub display_target_rows: u64,
     pub flight_views: u64,
     pub handoff_views: u64,
     pub active_ca_alerts: u64,
@@ -540,6 +551,7 @@ pub struct ReplicaCycle {
 struct ReplicaCycleAccumulator {
     frames: u64,
     track_rows: u64,
+    display_target_rows: u64,
     flight_views: u64,
     handoff_views: u64,
     active_ca_alerts: u64,
@@ -558,6 +570,7 @@ impl ReplicaCycleAccumulator {
         Self {
             frames: 0,
             track_rows: 0,
+            display_target_rows: 0,
             flight_views: 0,
             handoff_views: 0,
             active_ca_alerts: 0,
@@ -584,6 +597,13 @@ impl ReplicaCycleAccumulator {
                     .map_err(|_| "track count overflow")?,
             )
             .ok_or("track count overflow")?;
+        self.display_target_rows = self
+            .display_target_rows
+            .checked_add(
+                u64::try_from(frame.surveillance.display_targets.len())
+                    .map_err(|_| "display target count overflow")?,
+            )
+            .ok_or("display target row count overflow")?;
         let flights = frame
             .flights
             .iter()
@@ -758,6 +778,7 @@ impl ReplicaCycleAccumulator {
         ReplicaCycle {
             frames: self.frames,
             track_rows: self.track_rows,
+            display_target_rows: self.display_target_rows,
             flight_views: self.flight_views,
             handoff_views: self.handoff_views,
             active_ca_alerts: self.active_ca_alerts,
@@ -1390,6 +1411,7 @@ fn state_batch_sha256(payloads: &[Vec<u8>]) -> Result<String, String> {
 
 fn snapshot_output_payloads(
     snapshot: SnapshotView<'_>,
+    display_targets: &[oa_display::core::traffic::Target],
     selected_side: Output,
 ) -> Result<SelectedStateBatch, String> {
     let count = snapshot
@@ -1414,14 +1436,28 @@ fn snapshot_output_payloads(
         family_counts[0] = family_counts[0]
             .checked_add(1)
             .ok_or("selected track count overflow")?;
-        payloads.push(
-            format!(
-                "H5STATE\t1\tselected={selected_side}\tTRACK\tkey={}\tordinal={}\tstatus={}\tlat_e7={}\tlon_e7={}\taltitude_ft={}\tdigest={}",
-                hex_encode(&row.key.entity_key)?, row.key.ordinal, row.status as u8,
-                row.lat_e7, row.lon_e7, row.altitude_ft, hex_encode(&row.projection_digest)?,
-            )
-            .into_bytes(),
-        );
+        let address = u32::try_from(row.key.ordinal)
+            .map_err(|_| "track display join address overflow")?;
+        let display = display_targets
+            .binary_search_by_key(&address, |target| target.addr)
+            .ok()
+            .and_then(|index| display_targets.get(index))
+            .copied()
+            .map(AppliedDisplayTarget::from);
+        if display.as_ref().is_some_and(|target| {
+            target.addr != address
+                || target.lat_e7 != row.lat_e7
+                || target.lon_e7 != row.lon_e7
+                || target.alt_ft != row.altitude_ft
+        }) {
+            return Err("display target does not match its selected track row".into());
+        }
+        let display = serialize_display_target(display.as_ref())?;
+        payloads.push(format!(
+            "H5STATE\t1\tselected={selected_side}\tTRACK\tkey={}\tordinal={}\tstatus={}\tlat_e7={}\tlon_e7={}\taltitude_ft={}\tdigest={}\t{}",
+            hex_encode(&row.key.entity_key)?, row.key.ordinal, row.status as u8,
+            row.lat_e7, row.lon_e7, row.altitude_ft, hex_encode(&row.projection_digest)?, display,
+        ).into_bytes());
     }
     for row in snapshot.flights.iter().flatten() {
         family_counts[1] = family_counts[1]
@@ -1571,6 +1607,7 @@ enum AppliedStateRow {
         lat_e7: i32,
         lon_e7: i32,
         altitude_ft: i32,
+        display: Option<AppliedDisplayTarget>,
         digest: [u8; 32],
     },
     Flight {
@@ -1598,6 +1635,41 @@ enum AppliedStateRow {
         suppressed_unknown: bool,
         digest: [u8; 32],
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AppliedDisplayTarget {
+    lat_e7: i32,
+    lon_e7: i32,
+    alt_ft: i32,
+    addr: u32,
+    r95_bits: u32,
+    callsign: [u8; 8],
+    track_ddeg: u16,
+    gs_dkt: u16,
+    reacq_age_s: u16,
+    flags: u8,
+    trail_len: u8,
+    trail: [(i32, i32); oa_display::core::traffic::MAX_TRAIL],
+}
+
+impl From<oa_display::core::traffic::Target> for AppliedDisplayTarget {
+    fn from(target: oa_display::core::traffic::Target) -> Self {
+        Self {
+            lat_e7: target.lat_e7,
+            lon_e7: target.lon_e7,
+            alt_ft: target.alt_ft,
+            addr: target.addr,
+            r95_bits: target.r95_m.to_bits(),
+            callsign: target.callsign,
+            track_ddeg: target.track_ddeg,
+            gs_dkt: target.gs_dkt,
+            reacq_age_s: target.reacq_age_s,
+            flags: target.flags,
+            trail_len: target.trail_len,
+            trail: target.trail,
+        }
+    }
 }
 
 impl AppliedStateRow {
@@ -1774,6 +1846,141 @@ fn parse_hex_array<const N: usize>(value: &str) -> Result<[u8; N], String> {
     Ok(out)
 }
 
+fn serialize_display_target(
+    target: Option<&AppliedDisplayTarget>,
+) -> Result<String, String> {
+    let Some(target) = target else {
+        return Ok(String::from("display=NONE"));
+    };
+    if usize::from(target.trail_len) > oa_display::core::traffic::MAX_TRAIL {
+        return Err("regional display trail length is invalid".into());
+    }
+    let mut trail = String::new();
+    for (index, (lat, lon)) in target.trail.iter().enumerate() {
+        if index != 0 {
+            trail.push(';');
+        }
+        use std::fmt::Write as FmtWrite;
+        write!(&mut trail, "{lat}:{lon}").map_err(|_| "display trail formatting failed")?;
+    }
+    Ok(format!(
+        "display={},{},{},{},{},{},{},{},{},{},{},{}",
+        target.lat_e7,
+        target.lon_e7,
+        target.alt_ft,
+        target.addr,
+        target.r95_bits,
+        hex_encode(&target.callsign)?,
+        target.track_ddeg,
+        target.gs_dkt,
+        target.reacq_age_s,
+        target.flags,
+        target.trail_len,
+        trail
+    ))
+}
+
+fn display_targets_equal(
+    left: &[oa_display::core::traffic::Target],
+    right: &[oa_display::core::traffic::Target],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.lat_e7 == right.lat_e7
+                && left.lon_e7 == right.lon_e7
+                && left.alt_ft == right.alt_ft
+                && left.addr == right.addr
+                && left.r95_m.to_bits() == right.r95_m.to_bits()
+                && left.trail == right.trail
+                && left.callsign == right.callsign
+                && left.track_ddeg == right.track_ddeg
+                && left.gs_dkt == right.gs_dkt
+                && left.reacq_age_s == right.reacq_age_s
+                && left.flags == right.flags
+                && left.trail_len == right.trail_len
+        })
+}
+
+fn parse_display_target(value: &str) -> Result<Option<AppliedDisplayTarget>, String> {
+    if value == "NONE" {
+        return Ok(None);
+    }
+    let fields = value.split(',').collect::<Vec<_>>();
+    if fields.len() != 12 {
+        return Err("regional display target field count is invalid".into());
+    }
+    let number = |index: usize, name: &str| -> Result<u64, String> {
+        fields
+            .get(index)
+            .copied()
+            .ok_or("regional display target field missing")?
+            .parse::<u64>()
+            .map_err(|_| format!("regional display target {name} is invalid"))
+    };
+    let signed = |index: usize, name: &str| -> Result<i32, String> {
+        fields
+            .get(index)
+            .copied()
+            .ok_or("regional display target field missing")?
+            .parse::<i32>()
+            .map_err(|_| format!("regional display target {name} is invalid"))
+    };
+    let trail_text = fields.get(11).copied().ok_or("display trail missing")?;
+    let mut trail = [(0, 0); oa_display::core::traffic::MAX_TRAIL];
+    let trail_rows = trail_text.split(';').collect::<Vec<_>>();
+    if trail_rows.len() != oa_display::core::traffic::MAX_TRAIL {
+        return Err("regional display trail row count is invalid".into());
+    }
+    for (index, row) in trail_rows.iter().enumerate() {
+        let (lat, lon) = row
+            .split_once(':')
+            .ok_or("regional display trail pair is malformed")?;
+        trail[index] = (
+            lat.parse().map_err(|_| "regional display trail latitude is invalid")?,
+            lon.parse().map_err(|_| "regional display trail longitude is invalid")?,
+        );
+    }
+    let display = AppliedDisplayTarget {
+        lat_e7: signed(0, "latitude")?,
+        lon_e7: signed(1, "longitude")?,
+        alt_ft: signed(2, "altitude")?,
+        addr: u32::try_from(number(3, "address")?)
+            .map_err(|_| "regional display address is out of range")?,
+        r95_bits: u32::try_from(number(4, "r95 bits")?)
+            .map_err(|_| "regional display radius bits are out of range")?,
+        callsign: parse_hex_array(fields.get(5).copied().ok_or("display callsign missing")?)?,
+        track_ddeg: u16::try_from(number(6, "track")?)
+            .map_err(|_| "regional display track is out of range")?,
+        gs_dkt: u16::try_from(number(7, "ground speed")?)
+            .map_err(|_| "regional display speed is out of range")?,
+        reacq_age_s: u16::try_from(number(8, "reacquisition age")?)
+            .map_err(|_| "regional display reacquisition age is out of range")?,
+        flags: u8::try_from(number(9, "flags")?)
+            .map_err(|_| "regional display flags are out of range")?,
+        trail_len: u8::try_from(number(10, "trail length")?)
+            .map_err(|_| "regional display trail length is out of range")?,
+        trail,
+    };
+    if usize::from(display.trail_len) > oa_display::core::traffic::MAX_TRAIL {
+        return Err("regional display trail length exceeds the fixed trail capacity".into());
+    }
+    if !oa_display::core::traffic::position_valid(display.lat_e7, display.lon_e7)
+        || display
+            .trail
+            .iter()
+            .take(usize::from(display.trail_len))
+            .any(|point| !oa_display::core::traffic::position_valid(point.0, point.1))
+        || display.flags
+            & !(oa_display::core::traffic::T_COAST
+                | oa_display::core::traffic::T_UNCERTAIN
+                | oa_display::core::traffic::T_CS_CONFLICT)
+            != 0
+    {
+        return Err("regional display target fails the existing builder validity rules".into());
+    }
+    Ok(Some(display))
+}
+
 fn parse_applied_state_row(
     payload: &[u8],
     selected: &'static str,
@@ -1827,24 +2034,43 @@ fn parse_applied_state_row(
         )?)
     };
     let row = match kind {
-        "TRACK" if fields.len() == 11 => (
-            AppliedStateRow::Track {
+        "TRACK" if fields.len() == 12 => {
+            let ordinal = number(5, "ordinal")?;
+            let lat_e7 = field_value(required_field(&fields, 7, "latitude")?, "lat_e7")?
+                .parse()
+                .map_err(|_| "selected track latitude is invalid")?;
+            let lon_e7 = field_value(required_field(&fields, 8, "longitude")?, "lon_e7")?
+                .parse()
+                .map_err(|_| "selected track longitude is invalid")?;
+            let altitude_ft = field_value(required_field(&fields, 9, "altitude")?, "altitude_ft")?
+                .parse()
+                .map_err(|_| "selected track altitude is invalid")?;
+            let display = parse_display_target(field_value(
+                fields.get(11).copied().ok_or("display target field missing")?,
+                "display",
+            )?)?;
+            if display.as_ref().is_some_and(|target| {
+                u64::from(target.addr) != ordinal
+                    || target.lat_e7 != lat_e7
+                    || target.lon_e7 != lon_e7
+                    || target.alt_ft != altitude_ft
+            }) {
+                return Err("selected display block identity/position differs from track row".into());
+            }
+            (
+                AppliedStateRow::Track {
                 key: key(4)?,
-                ordinal: number(5, "ordinal")?,
+                ordinal,
                 status: status(6)?,
-                lat_e7: field_value(required_field(&fields, 7, "latitude")?, "lat_e7")?
-                    .parse()
-                    .map_err(|_| "selected track latitude is invalid")?,
-                lon_e7: field_value(required_field(&fields, 8, "longitude")?, "lon_e7")?
-                    .parse()
-                    .map_err(|_| "selected track longitude is invalid")?,
-                altitude_ft: field_value(required_field(&fields, 9, "altitude")?, "altitude_ft")?
-                    .parse()
-                    .map_err(|_| "selected track altitude is invalid")?,
+                lat_e7,
+                lon_e7,
+                altitude_ft,
+                display,
                 digest: digest(10, "digest")?,
             },
             0,
-        ),
+            )
+        }
         "FLIGHT" if fields.len() == 9 => (
             AppliedStateRow::Flight {
                 key: key(4)?,
@@ -1916,11 +2142,13 @@ fn serialize_applied_state_row(row: &AppliedStateRow, selected: &str) -> Result<
             lat_e7,
             lon_e7,
             altitude_ft,
+            display,
             digest,
         } => format!(
-            "H5STATE\t1\tselected={selected}\tTRACK\tkey={}\tordinal={ordinal}\tstatus={status}\tlat_e7={lat_e7}\tlon_e7={lon_e7}\taltitude_ft={altitude_ft}\tdigest={}",
+            "H5STATE\t1\tselected={selected}\tTRACK\tkey={}\tordinal={ordinal}\tstatus={status}\tlat_e7={lat_e7}\tlon_e7={lon_e7}\taltitude_ft={altitude_ft}\tdigest={}\t{}",
             hex_encode(key)?,
             hex_encode(digest)?,
+            serialize_display_target(display.as_ref())?,
         ),
         AppliedStateRow::Flight {
             key,
@@ -2426,9 +2654,10 @@ impl Consumer {
         worker_cycle: u64,
         generation: u64,
         snapshot: SnapshotView<'_>,
+        display_targets: &[oa_display::core::traffic::Target],
         output: Output,
     ) -> Result<([u64; 4], String, u64, u128), String> {
-        let batch = snapshot_output_payloads(snapshot, output)?;
+        let batch = snapshot_output_payloads(snapshot, display_targets, output)?;
         let side = match output {
             Output::Legacy => "Legacy",
             Output::Candidate => "Candidate",
@@ -2651,6 +2880,17 @@ fn snapshot_from_runtime_frame(
             caps[0], caps[1], caps[2], caps[3]
         ));
     }
+    if frame.surveillance.display_targets.len() > REPLAY_ROWS_PER_FAMILY {
+        return Err("regional display block count exceeds the explicit H5 consumer cap".into());
+    }
+    let mut display_targets = frame.surveillance.display_targets.clone();
+    display_targets.sort_unstable_by_key(|target| target.addr);
+    if display_targets
+        .windows(2)
+        .any(|pair| pair.first().map(|row| row.addr) == pair.get(1).map(|row| row.addr))
+    {
+        return Err("regional display builder produced duplicate address blocks".into());
+    }
     let local_stream = if local_authority_fixture {
         u32::try_from(source_epoch).map_err(|_| "local replay stream identity overflow")?
     } else {
@@ -2867,8 +3107,8 @@ fn snapshot_from_runtime_frame(
         evidence: EvidenceKind::Recorded,
         side,
         source_epoch,
-        state_version: 1,
-        sequence: 1,
+        state_version: frame.sequence,
+        sequence: frame.sequence,
         source_time_ns: frame.surveillance.time_ns,
         observed_time_ns: frame.surveillance.time_ns,
         health: Health::Unknown,
@@ -2880,6 +3120,7 @@ fn snapshot_from_runtime_frame(
         flights,
         handoffs,
         alerts,
+        display_targets,
     };
     let local_replay_healthy = local_authority_fixture
         && caps.iter().all(|count| *count <= REPLAY_ROWS_PER_FAMILY)
@@ -3400,7 +3641,9 @@ pub fn run_recorded(
         .map_err(|error| format!("model snapshot decode: {error:?}"))?;
     let (map_centre_lat_e7, map_centre_lon_e7) = model_centre(&model)?;
     drop(model);
-    let run_profile = RegionalRunProfile::recorded_peak();
+    // H5 records the exact per-frame targets produced by the existing regional display builder.
+    // Its explicit 8,192-presentation cap remains a hard refusal, not a sampling limit.
+    let run_profile = RegionalRunProfile::recorded_peak_rendered();
     let snapshot_policy = policy(endpoint_class);
     let baseline = replay_replica(
         events,
@@ -3555,6 +3798,11 @@ pub fn run_recorded(
             replay_output_acks: 2,
             selected_state_applied_generation: None,
             selected_state_applied_family_counts: None,
+            selected_display_block_rows: None,
+            display_targets_equal: display_targets_equal(
+                &legacy_snapshot.display_targets,
+                &candidate_snapshot.display_targets,
+            ),
             selected_state_applied_sha256: None,
             decision_to_selected_output_ack_ns: None,
             rollback_output_apply_ack_ns: None,
@@ -3725,7 +3973,9 @@ pub fn run_recorded_stream(
         .map_err(|error| format!("model snapshot decode: {error:?}"))?;
     let (map_centre_lat_e7, map_centre_lon_e7) = model_centre(&model)?;
     drop(model);
-    let run_profile = RegionalRunProfile::recorded_peak();
+    // This recorded consumer path must exercise the regional display block builder. Rendering
+    // has a predeclared 8,192-update cap; exceeding it refuses the run rather than thinning rows.
+    let run_profile = RegionalRunProfile::recorded_peak_rendered();
     let snapshot_policy = policy(endpoint_class);
     let mut input_consumer = Consumer::spawn(worker_executable)?;
     let (baseline, baseline_summary, baseline_counts, baseline_region_filter) = stream_replay_pass(
@@ -3833,6 +4083,7 @@ pub fn run_recorded_stream(
         let mut cycle_output_max_ack = 0u128;
         let mut applied_generation = None;
         let mut applied_counts = None;
+        let mut applied_display_blocks = None;
         let mut applied_digest = None;
         if local_authority_fixture {
             let decision_started = Instant::now();
@@ -3856,8 +4107,13 @@ pub fn run_recorded_stream(
                         generation - 1,
                         generation,
                         candidate_snapshot.view(),
+                        &candidate_snapshot.display_targets,
                         Output::Candidate,
                     )?;
+                    applied_display_blocks = Some(
+                        u64::try_from(candidate_snapshot.display_targets.len())
+                            .map_err(|_| "candidate display block count overflow")?,
+                    );
                     worker_generation = generation;
                     let candidate_ack_ns = snapshot_now_ns
                         .checked_add(
@@ -3928,8 +4184,13 @@ pub fn run_recorded_stream(
                         generation - 1,
                         generation,
                         legacy_snapshot.view(),
+                        &legacy_snapshot.display_targets,
                         Output::Legacy,
                     )?;
+                    applied_display_blocks = Some(
+                        u64::try_from(legacy_snapshot.display_targets.len())
+                            .map_err(|_| "rollback display block count overflow")?,
+                    );
                     worker_generation = generation;
                     let rollback_ack_ns = candidate_ack_ns
                         .checked_add(
@@ -3991,8 +4252,13 @@ pub fn run_recorded_stream(
                 worker_generation - 1,
                 worker_generation,
                 selected_snapshot.view(),
+                &selected_snapshot.display_targets,
                 selected_output,
             )?;
+            applied_display_blocks = Some(
+                u64::try_from(selected_snapshot.display_targets.len())
+                    .map_err(|_| "selected display block count overflow")?,
+            );
             cycle_output_acks = applied.2;
             cycle_output_max_ack = applied.3;
             output_ack_count = output_ack_count
@@ -4051,6 +4317,11 @@ pub fn run_recorded_stream(
             replay_output_acks: cycle_output_acks,
             selected_state_applied_generation: applied_generation,
             selected_state_applied_family_counts: applied_counts,
+            selected_display_block_rows: applied_display_blocks,
+            display_targets_equal: display_targets_equal(
+                &legacy_snapshot.display_targets,
+                &candidate_snapshot.display_targets,
+            ),
             selected_state_applied_sha256: applied_digest,
             decision_to_selected_output_ack_ns: decision_to_candidate_ack_ns,
             rollback_output_apply_ack_ns: rollback_output_ack_ns,
@@ -4202,6 +4473,34 @@ fn row_cycle_in_span(time_ns: i64, start: i64, end: i64) -> Result<usize, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // REQ: OA-MIG-414
+    #[test]
+    fn regional_traffic_display_block_roundtrips_all_typed_fields() -> Result<(), String> {
+        let block = AppliedDisplayTarget {
+            lat_e7: 385_000_000,
+            lon_e7: -935_000_000,
+            alt_ft: 1000,
+            addr: 0xabc123,
+            r95_bits: 1120403456,
+            callsign: *b"TEST123\0",
+            track_ddeg: 900,
+            gs_dkt: 1234,
+            reacq_age_s: 2,
+            flags: 3,
+            trail_len: 2,
+            trail: [(1, 2); oa_display::core::traffic::MAX_TRAIL],
+        };
+        let encoded = serialize_display_target(Some(&block))?;
+        let decoded = parse_display_target(
+            encoded
+                .strip_prefix("display=")
+                .ok_or("display target serialization omitted its field name")?,
+        )?;
+        assert_eq!(decoded, Some(block));
+        Ok(())
+    }
+
     fn spatial_event(
         source: SourceKind,
         address: u32,
@@ -4371,7 +4670,7 @@ mod tests {
             handoffs: std::array::from_fn(|_| None),
             alerts: std::array::from_fn(|_| None),
         };
-        let batch = snapshot_output_payloads(snapshot.view(), Output::Legacy)?;
+        let batch = snapshot_output_payloads(snapshot.view(), &[], Output::Legacy)?;
         assert_eq!(batch.family_counts, [1, 0, 0, 0]);
         let row = batch.rows.first().ok_or("selected state row missing")?;
         let mut pending = PendingAppliedState::new(0, 1, "Legacy", [1, 0, 0, 0])?;
