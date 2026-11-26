@@ -15,8 +15,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_PATH = Path("docs/security/oscal/NIST_SP-800-53_rev5_HIGH-baseline-resolved-profile_catalog.json")
 MAP_PATH = Path("docs/security/control-map.json")
-MARKDOWN_PATH = Path("docs/security/oscal/CONTROL_STATUS.md")
-CSV_PATH = Path("docs/security/oscal/control-counts.csv")
+MARKDOWN_PATH = Path("docs/security/generated/control-status.md")
+CSV_PATH = Path("docs/security/generated/control-status.csv")
 SOURCE_SHA256 = "e2c1a3dbc1d003ce2aea7e70f64527b17fea3a032b972a5fcb8645d1a75f9ed0"
 SOURCE_BYTES = 4_637_935
 SOURCE_COMMIT = "78650f02ad9321bb7b817846f8fbd4f2bcd620de"
