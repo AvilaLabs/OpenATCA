@@ -32,8 +32,6 @@ pub enum MsawSource {
     Manifest(PathBuf),
 }
 
-/// Explicit caller-supplied inputs for one in-process manual quarantine handoff.
-#[derive(Clone, Debug)]
 /// Independently pinned verified package supplying explicit runway-aid configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunwayAidPackageOptions {
@@ -41,6 +39,8 @@ pub struct RunwayAidPackageOptions {
     pub manifest_sha256: [u8; 32],
 }
 
+/// Explicit caller-supplied inputs for one in-process manual quarantine handoff.
+#[derive(Clone, Debug)]
 pub struct QuarantineReleaseOptions {
     pub source: oa_quarantine::InputSource,
     pub identity: oa_quarantine::InputIdentity,
