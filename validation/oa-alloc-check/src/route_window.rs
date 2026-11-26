@@ -117,6 +117,7 @@ fn fixture_model() -> Result<Model, &'static str> {
         mora: model::Mora::default(),
         unresolved: model::Unresolved::default(),
         disagreements: model::Disagreements::default(),
+        preferred_routes: model::PreferredRoutes::default(),
         cycle_override: None,
     };
 
