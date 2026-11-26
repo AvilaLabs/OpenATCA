@@ -203,16 +203,15 @@ mod tests {
 
     fn xyz(rgb: [u8; 3], peak_white_cd_m2: f64) -> [f64; 3] {
         let [r, g, b] = rgb.map(|channel| linear(f64::from(channel)));
-        // The published sRGB-to-XYZ matrix is rounded. Normalize each row to the
-        // corresponding D65 reference-white tristimulus value so neutral sRGB
-        // remains neutral instead of inheriting the matrix's coefficient-rounding error.
+        // The published sRGB-to-XYZ matrix is rounded. Its X/Z row sums already equal
+        // the D65 whitepoint values; normalize only Y, whose row sum is 1.0000001.
         let x = 0.412_456_4 * r + 0.357_576_1 * g + 0.180_437_5 * b;
         let y = 0.212_672_9 * r + 0.715_152_2 * g + 0.072_175_0 * b;
         let z = 0.019_333_9 * r + 0.119_192_0 * g + 0.950_304_1 * b;
         [
-            (x * (0.950_47 / (0.412_456_4 + 0.357_576_1 + 0.180_437_5))) * peak_white_cd_m2,
+            x * peak_white_cd_m2,
             (y * (1.0 / (0.212_672_9 + 0.715_152_2 + 0.072_175_0))) * peak_white_cd_m2,
-            (z * (1.088_83 / (0.019_333_9 + 0.119_192_0 + 0.950_304_1))) * peak_white_cd_m2,
+            z * peak_white_cd_m2,
         ]
     }
 
