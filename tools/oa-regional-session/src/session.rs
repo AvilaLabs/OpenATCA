@@ -12,6 +12,9 @@ pub const MAX_EVENTS_PER_RECEIPT: usize = 256;
 
 /// Maximum normalized input events accepted by one invocation.
 pub const MAX_SESSION_EVENTS: usize = 100_000;
+/// Versioned offline full-day cursor bound. Callers must still account for every source row and
+/// stop on this refusal; this is not a parser or archive-size allowance.
+pub const MAX_RECORDED_PROFILE_EVENTS: usize = 10_000_000;
 
 /// Staged, same-receipt event group. A7.2: cold shell struct; not subsystem state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +58,7 @@ pub struct SessionCursor {
     prior_sequence: [Option<u64>; 5],
     source_clock_regressions: u64,
     total_events: u64,
+    max_events: usize,
     closed: bool,
 }
 
@@ -68,8 +72,29 @@ pub fn session_cursor_new() -> SessionCursor {
         prior_sequence: [None; 5],
         source_clock_regressions: 0,
         total_events: 0,
+        max_events: MAX_SESSION_EVENTS,
         closed: false,
     }
+}
+
+/// Constructs a bounded streaming cursor for an explicitly selected offline profile. The pending
+/// receipt group remains capped at `MAX_EVENTS_PER_RECEIPT`; only the total admitted-event budget
+/// changes, up to `MAX_RECORDED_PROFILE_EVENTS`.
+pub fn session_cursor_new_with_limit(max_events: usize) -> Result<SessionCursor, SessionError> {
+    if max_events == 0 || max_events > MAX_RECORDED_PROFILE_EVENTS {
+        return Err(SessionError::SessionFull);
+    }
+    Ok(SessionCursor {
+        pending: Vec::with_capacity(MAX_EVENTS_PER_RECEIPT),
+        receipt_ns: None,
+        prior_receipt_ns: None,
+        prior_source_ns: [None; 5],
+        prior_sequence: [None; 5],
+        source_clock_regressions: 0,
+        total_events: 0,
+        max_events,
+        closed: false,
+    })
 }
 
 /// Returns the number of events admitted to this cursor.
@@ -109,7 +134,7 @@ pub fn push_event(
     {
         return Err(SessionError::ReceiptRegression);
     }
-    if cursor.total_events >= MAX_SESSION_EVENTS as u64 {
+    if cursor.total_events >= cursor.max_events as u64 {
         return Err(SessionError::SessionFull);
     }
 
@@ -237,4 +262,22 @@ pub fn summarize_input_batch(batch: &ReceiptBatch) -> Result<FrameEvidence, Sess
         source_events: counts,
         source_clock_regressions: batch.source_clock_regressions,
     })
+}
+
+#[cfg(test)]
+mod profile_limit_tests {
+    use super::{session_cursor_new_with_limit, SessionError, MAX_RECORDED_PROFILE_EVENTS};
+
+    #[test]
+    fn offline_cursor_accepts_declared_cap_and_refuses_out_of_range_caps() {
+        assert!(session_cursor_new_with_limit(MAX_RECORDED_PROFILE_EVENTS).is_ok());
+        assert!(matches!(
+            session_cursor_new_with_limit(0),
+            Err(SessionError::SessionFull)
+        ));
+        assert!(matches!(
+            session_cursor_new_with_limit(MAX_RECORDED_PROFILE_EVENTS + 1),
+            Err(SessionError::SessionFull)
+        ));
+    }
 }

@@ -1,7 +1,7 @@
 //! Local controller request bridge (shell, B1/B3/C6). UI preflight is followed by a fresh
 //! authoritative flight/address/plan/actor check; transport or UI acceptance is not ownership.
 
-use crate::flight::{self, FlightApplyOutcome, FlightDriver, FlightViewStatus, MAX_DRIVER_FLIGHTS};
+use crate::flight::{self, FlightApplyOutcome, FlightDriver, FlightViewStatus};
 use crate::input::{
     EventKind, FlightOperation, HandoffOperation, NormalizedEvent, OperatorCommand,
 };
@@ -66,8 +66,13 @@ pub fn current_views(
     prior: &[TargetView],
     flights: &[FlightEvidence],
     next_generation: &mut u32,
+    capacity: usize,
 ) -> Result<Vec<TargetView>, String> {
-    if prior.len() > MAX_DRIVER_FLIGHTS || flights.len() > MAX_DRIVER_FLIGHTS {
+    if capacity == 0
+        || capacity > crate::flight::MAX_OFFLINE_DRIVER_FLIGHTS
+        || prior.len() > capacity
+        || flights.len() > capacity
+    {
         return Err("controller view capacity exceeded".into());
     }
     let empty = FlightIdentity {
@@ -76,7 +81,7 @@ pub fn current_views(
         centre: [0; 4],
         plan_id: [0; 12],
     };
-    let mut out = Vec::with_capacity(MAX_DRIVER_FLIGHTS);
+    let mut out = Vec::with_capacity(capacity);
     for flight in flights {
         let bound = flight.view.map(|view| identity(&view));
         let claims = u16::try_from(flight.claimants)
@@ -253,7 +258,7 @@ fn apply(
         Ok(actor) => actor,
         Err(e) => return queued_refusal(interaction, e, false),
     };
-    let mut current = Vec::with_capacity(MAX_DRIVER_FLIGHTS);
+    let mut current = Vec::with_capacity(flight::flight_driver_capacity(driver));
     let result = flight::flight_views_for_address(
         driver,
         key.aircraft_address,
@@ -392,7 +397,8 @@ pub fn dispatch(
         refusal: String::new(),
         terminal_failure: false,
     };
-    if views.len() > MAX_DRIVER_FLIGHTS || observed.len() > MAX_DRIVER_FLIGHTS {
+    let capacity = flight::flight_driver_capacity(driver);
+    if views.len() > capacity || observed.len() > crate::flight::MAX_OFFLINE_DRIVER_FLIGHTS {
         record.refusal = "operator input budget exceeded".into();
         return record;
     }

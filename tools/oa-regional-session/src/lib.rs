@@ -22,8 +22,12 @@ pub use input::{
     parse_event_line, EventKind, FlightOperation, HandoffOperation, Identity, InputError,
     NormalizedEvent, RouteFixInput, SourceKind, MAX_EVENT_LINE_BYTES,
 };
+pub use runtime::{
+    regional_new_with_profile, regional_profile_limits, RegionalRunProfile,
+    DEFAULT_REGIONAL_RUN_PROFILE,
+};
 pub use session::{
-    flush_receipt_group, push_event, session_cursor_new, session_total_events,
-    summarize_input_batch, FrameEvidence, ReceiptBatch, SessionCursor, SessionError,
-    MAX_EVENTS_PER_RECEIPT, MAX_SESSION_EVENTS,
+    flush_receipt_group, push_event, session_cursor_new, session_cursor_new_with_limit,
+    session_total_events, summarize_input_batch, FrameEvidence, ReceiptBatch, SessionCursor,
+    SessionError, MAX_EVENTS_PER_RECEIPT, MAX_RECORDED_PROFILE_EVENTS, MAX_SESSION_EVENTS,
 };

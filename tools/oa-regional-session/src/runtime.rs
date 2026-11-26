@@ -41,10 +41,57 @@ pub struct RegionalRuntime {
     observed: Vec<crate::surveillance::ObservedTrack>,
     next_generation: u32,
     console_text: String,
+    profile: RegionalRunProfile,
 }
 
-// A3/C6: at most 32 cold offline evidence rows/frame; snapshots are copied, never aliased. Optional
-// vertical outputs are bounded to the same 32 flight views, each containing 256 fixed point slots.
+/// Versioned capacities for a single offline replay. Defaults reproduce the historic small
+/// session; `recorded_peak` is an explicitly selected high-volume analysis profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionalRunProfile {
+    pub surveillance: surveillance::SurveillanceProfile,
+    pub max_flights: usize,
+    pub max_flight_log_entries: usize,
+    pub max_total_events: usize,
+}
+
+impl RegionalRunProfile {
+    /// Offline capacity envelope for recorded replay. It supports 20M frame callbacks without
+    /// retaining frames, 10M normalized events in a streaming cursor, 4096 live tracks, and 8192
+    /// flight plans. At full track occupancy, the pair count is 8,386,560; the candidate table
+    /// cap is 8,388,608 × 16 B (~128 MiB). The open-alert state and alert log are each capped at
+    /// 1,048,576 × 96 B (~96 MiB). Those dominant CA tables total about 320 MiB, plus O(track)
+    /// tables, before tracker/model/runtime storage; this leaves substantial headroom inside a
+    /// 6 GiB run cap. Resource caps still cause explicit refusal; this does not promise a workload will fit.
+    pub const fn recorded_peak() -> Self {
+        Self {
+            surveillance: surveillance::SurveillanceProfile {
+                max_tracks: 4096,
+                max_frames: surveillance::MAX_OFFLINE_FRAMES,
+                max_drain_rows: 262_144,
+                max_baro_evidence: surveillance::MAX_OFFLINE_BARO_EVIDENCE,
+                max_open_alerts: 1 << 20,
+                max_candidate_pairs: 8_388_608,
+                max_ca_work_per_frame: 8_388_608,
+                max_presentation_updates: 0,
+                render_scope: false,
+            },
+            max_flights: 8192,
+            max_flight_log_entries: MAX_DRIVER_LOG_ENTRIES,
+            max_total_events: crate::session::MAX_RECORDED_PROFILE_EVENTS,
+        }
+    }
+}
+
+pub const DEFAULT_REGIONAL_RUN_PROFILE: RegionalRunProfile = RegionalRunProfile {
+    surveillance: surveillance::DEFAULT_SURVEILLANCE_PROFILE,
+    max_flights: MAX_DRIVER_FLIGHTS,
+    max_flight_log_entries: MAX_DRIVER_LOG_ENTRIES,
+    max_total_events: crate::session::MAX_SESSION_EVENTS,
+};
+
+// A3/C6: cold offline evidence rows/frame are bounded by the selected flight profile capacity
+// (32 by default, 8192 in recorded_peak); snapshots are copied, never aliased. Optional vertical
+// outputs remain limited by MAX_PERFORMANCE_ENVELOPES and fixed point profile capacity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlightEvidence {
     pub address: u32,
@@ -299,11 +346,12 @@ pub fn regional_new(
     centre: [u8; 4],
     cfg: SurveillanceConfig,
 ) -> Result<RegionalRuntime, String> {
-    regional_new_with_namespace(
+    regional_new_with_profile_and_namespace(
         model,
         snapshot_sha256,
         centre,
         cfg,
+        DEFAULT_REGIONAL_RUN_PROFILE,
         DEFAULT_SESSION_NAMESPACE,
     )
 }
@@ -316,20 +364,78 @@ pub fn regional_new_with_namespace(
     cfg: SurveillanceConfig,
     session_namespace: u16,
 ) -> Result<RegionalRuntime, String> {
+    regional_new_with_profile_and_namespace(
+        model,
+        snapshot_sha256,
+        centre,
+        cfg,
+        DEFAULT_REGIONAL_RUN_PROFILE,
+        session_namespace,
+    )
+}
+
+/// Construct an offline runtime with an explicit fixed-capacity profile.
+pub fn regional_new_with_profile(
+    model: Model,
+    snapshot_sha256: [u8; 32],
+    centre: [u8; 4],
+    cfg: SurveillanceConfig,
+    profile: RegionalRunProfile,
+) -> Result<RegionalRuntime, String> {
+    regional_new_with_profile_and_namespace(
+        model,
+        snapshot_sha256,
+        centre,
+        cfg,
+        profile,
+        DEFAULT_SESSION_NAMESPACE,
+    )
+}
+
+/// Returns the immutable validated capacities selected at construction.
+pub fn regional_profile_limits(runtime: &RegionalRuntime) -> RegionalRunProfile {
+    runtime.profile
+}
+
+fn regional_new_with_profile_and_namespace(
+    model: Model,
+    snapshot_sha256: [u8; 32],
+    centre: [u8; 4],
+    cfg: SurveillanceConfig,
+    profile: RegionalRunProfile,
+    session_namespace: u16,
+) -> Result<RegionalRuntime, String> {
     if !centre.iter().all(u8::is_ascii_alphanumeric) {
         return Err("centre must be four ASCII alphanumeric bytes".into());
     }
     if session_namespace == 0 {
         return Err("session namespace must be nonzero".into());
     }
+    if profile.max_flights == 0
+        || profile.max_flights > crate::flight::MAX_OFFLINE_DRIVER_FLIGHTS
+        || profile.max_flight_log_entries == 0
+        || profile.max_flight_log_entries > MAX_DRIVER_LOG_ENTRIES
+        || profile.max_total_events == 0
+        || profile.max_total_events > crate::session::MAX_RECORDED_PROFILE_EVENTS
+        || (profile.surveillance.render_scope && profile.max_flights > MAX_DRIVER_FLIGHTS)
+    {
+        return Err("regional profile exceeds fixed runtime bounds".into());
+    }
     Ok(RegionalRuntime {
-        surveillance: surveillance::surveillance_new(model.clone(), cfg)?,
+        surveillance: surveillance::surveillance_new_with_profile(
+            model.clone(),
+            cfg,
+            profile.surveillance,
+        )?,
         model,
-        flights: flight::flight_driver_new(FlightDriverConfig {
-            flight_capacity: MAX_DRIVER_FLIGHTS,
-            refusal_log_capacity: MAX_DRIVER_LOG_ENTRIES,
-            conflict_log_capacity: MAX_DRIVER_LOG_ENTRIES,
-        })
+        flights: flight::flight_driver_new_bounded(
+            FlightDriverConfig {
+                flight_capacity: profile.max_flights,
+                refusal_log_capacity: profile.max_flight_log_entries,
+                conflict_log_capacity: profile.max_flight_log_entries,
+            },
+            profile.max_flights,
+        )
         .map_err(|e| format!("flight startup: {e:?}"))?,
         routes: route::route_store_new(snapshot_sha256),
         centre,
@@ -338,10 +444,11 @@ pub fn regional_new_with_namespace(
         session_namespace,
         quarantine_queue: oa_quarantine::queue_new(),
         interaction: oa_display::interaction::interaction_new(),
-        views: Vec::with_capacity(MAX_DRIVER_FLIGHTS),
-        observed: Vec::with_capacity(MAX_DRIVER_FLIGHTS),
+        views: Vec::with_capacity(profile.max_flights),
+        observed: Vec::with_capacity(profile.surveillance.max_tracks),
         next_generation: 0,
         console_text: String::with_capacity(128),
+        profile,
     })
 }
 
@@ -357,6 +464,14 @@ fn execute(
             .any(|e| e.receipt_ns != batch.receipt_ns)
     {
         return Err("malformed receipt batch".into());
+    }
+    if !runtime.profile.surveillance.render_scope
+        && batch
+            .events
+            .iter()
+            .any(|event| matches!(event.kind, crate::input::EventKind::Operator(_)))
+    {
+        return Err("operator requests are unavailable in the analysis-only replay profile".into());
     }
     let input = summarize_input_batch(batch).map_err(|e| format!("input accounting: {e:?}"))?;
     let performance_cutoff_ms = match performance {
@@ -505,14 +620,16 @@ fn execute(
     // Flight ownership presentation currently requires an explicitly selected flight. Per-flight
     // snapshots below preserve every owner; no arbitrary 'first' flight is promoted to selection.
     let mut surveillance = surveillance::surveillance_finish(&mut runtime.surveillance, None)?;
-    surveillance.frame_sha256 = surveillance::surveillance_present_controls(
-        &mut runtime.surveillance,
-        &runtime.interaction,
-        &runtime.console_text,
-    )?;
+    if runtime.profile.surveillance.render_scope {
+        surveillance.frame_sha256 = surveillance::surveillance_present_controls(
+            &mut runtime.surveillance,
+            &runtime.interaction,
+            &runtime.console_text,
+        )?;
+    }
     runtime.frame_sequence = next_frame_sequence;
-    let mut flights = Vec::with_capacity(MAX_DRIVER_FLIGHTS);
-    let mut views = Vec::with_capacity(MAX_DRIVER_FLIGHTS);
+    let mut flights = Vec::with_capacity(runtime.profile.surveillance.max_tracks);
+    let mut views = Vec::with_capacity(runtime.profile.max_flights);
     for observed in &surveillance.tracks {
         let result = flight::flight_views_for_address(
             &mut runtime.flights,
@@ -609,8 +726,12 @@ fn execute(
         }
         flights.push(row);
     }
-    runtime.views =
-        commands::current_views(&runtime.views, &flights, &mut runtime.next_generation)?;
+    runtime.views = commands::current_views(
+        &runtime.views,
+        &flights,
+        &mut runtime.next_generation,
+        runtime.profile.max_flights,
+    )?;
     runtime.observed.clone_from(&surveillance.tracks);
     Ok(RegionalFrame {
         sequence: runtime.frame_sequence,
@@ -1016,5 +1137,26 @@ mod transaction_tests {
         assert!(regional_step(&mut engine, &batch)
             .unwrap_err()
             .contains("reconstruct"));
+    }
+
+    // REQ: OA-REG-004
+    #[test]
+    fn recorded_profile_is_separate_and_stays_within_predeclared_bounds() {
+        let default = DEFAULT_REGIONAL_RUN_PROFILE;
+        assert_eq!(default.surveillance.max_tracks, surveillance::MAX_TRACKS);
+        assert_eq!(default.surveillance.max_frames, surveillance::MAX_FRAMES);
+        assert_eq!(default.max_flights, MAX_DRIVER_FLIGHTS);
+        assert_eq!(default.max_total_events, crate::session::MAX_SESSION_EVENTS);
+
+        let recorded = RegionalRunProfile::recorded_peak();
+        assert_eq!(recorded.surveillance.max_tracks, 4096);
+        assert_eq!(recorded.surveillance.max_frames, 20_000_000);
+        assert_eq!(recorded.surveillance.max_drain_rows, 262_144);
+        assert_eq!(recorded.max_flights, 8192);
+        assert_eq!(recorded.max_total_events, 10_000_000);
+        assert!(!recorded.surveillance.render_scope);
+        let pairs = recorded.surveillance.max_tracks * (recorded.surveillance.max_tracks - 1) / 2;
+        assert!(pairs <= recorded.surveillance.max_candidate_pairs);
+        assert!(recorded.surveillance.max_candidate_pairs <= 1 << 24);
     }
 }

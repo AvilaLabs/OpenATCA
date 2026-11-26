@@ -33,6 +33,10 @@ pub const SECOND_NS: i64 = 1_000_000_000;
 /// Research envelope: 32 simultaneous aircraft and 512 frames, rather than a facility claim.
 pub const MAX_TRACKS: usize = 32;
 pub const MAX_FRAMES: usize = 512;
+/// Hard offline diagnostic limit; unlike the default profile this counter does not retain frames.
+pub const MAX_OFFLINE_FRAMES: usize = 20_000_000;
+pub const MAX_OFFLINE_BARO_EVIDENCE: usize = 1_000_000;
+pub const MAX_OFFLINE_CA_WORK_PER_FRAME: u64 = 8_388_608;
 /// A 60-second gap emits at most 32 * 60 ticks plus 256 group updates, under 4096 rows.
 pub const MAX_FRAME_GAP_NS: i64 = 60 * SECOND_NS;
 pub const MAX_DRAIN_ROWS: usize = 4096;
@@ -45,10 +49,35 @@ const MAX_PAIRS: usize = MAX_TRACKS * (MAX_TRACKS - 1) / 2;
 // track can lose altitude once. Both logs are captured in frame evidence and drained every
 // cycle; storage therefore depends on simultaneous traffic, never the session's frame count.
 const MAX_CLOSED_ALERTS_PER_CYCLE: usize = MAX_PAIRS;
-const MAX_ALTITUDE_LOSSES_PER_CYCLE: usize = MAX_TRACKS;
 // C2/C6: at most one new address per admitted event, bounded across the offline session.
 // Keeping the latest accepted barometric source time also preserves tentative-track evidence.
-const MAX_BARO_EVIDENCE: usize = crate::session::MAX_SESSION_EVENTS;
+
+/// Validated per-run capacities for an offline replay. Existing constructors continue to use
+/// [`DEFAULT_SURVEILLANCE_PROFILE`]; the recorded profile is separately selected and bounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SurveillanceProfile {
+    pub max_tracks: usize,
+    pub max_frames: usize,
+    pub max_drain_rows: usize,
+    pub max_baro_evidence: usize,
+    pub max_open_alerts: usize,
+    pub max_candidate_pairs: usize,
+    pub max_ca_work_per_frame: u64,
+    pub max_presentation_updates: usize,
+    pub render_scope: bool,
+}
+
+pub const DEFAULT_SURVEILLANCE_PROFILE: SurveillanceProfile = SurveillanceProfile {
+    max_tracks: MAX_TRACKS,
+    max_frames: MAX_FRAMES,
+    max_drain_rows: MAX_DRAIN_ROWS,
+    max_baro_evidence: crate::session::MAX_SESSION_EVENTS,
+    max_open_alerts: MAX_CLOSED_ALERTS_PER_CYCLE,
+    max_candidate_pairs: MAX_PAIRS,
+    max_ca_work_per_frame: 1_000_000,
+    max_presentation_updates: MAX_PRESENTATION_UPDATES,
+    render_scope: true,
+};
 const FEED_NAMES: [[u8; 8]; 5] = [
     *b"TRACK\0\0\0",
     *b"FLIGHT\0\0",
@@ -105,6 +134,7 @@ pub struct Surveillance {
     presentation_updates: usize,
     msaw: Option<crate::msaw_bridge::RegionalMsaw>,
     baro_seen: BTreeMap<u32, i64>,
+    profile: SurveillanceProfile,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +174,9 @@ struct OverlayBase {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SurveillanceFrame {
     pub time_ns: i64,
+    /// False in the bounded analysis-only profile; `frame_sha256` then hashes tracker and alert
+    /// state projection bytes, not a raster image.
+    pub raster_rendered: bool,
     pub tracks: Vec<ObservedTrack>,
     pub flags: Vec<u8>,
     pub frame_sha256: [u8; 32],
@@ -172,11 +205,46 @@ fn err(e: impl std::fmt::Debug) -> String {
 }
 
 pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveillance, String> {
+    surveillance_new_with_profile(model, cfg, DEFAULT_SURVEILLANCE_PROFILE)
+}
+
+/// Starts a replay with a fixed-capacity offline profile. Existing constructors keep the
+/// historical small limits; this profile allocates live tables once and retains no frame history.
+pub fn surveillance_new_with_profile(
+    model: Model,
+    cfg: SurveillanceConfig,
+    profile: SurveillanceProfile,
+) -> Result<Surveillance, String> {
+    let maximum_pairs = profile
+        .max_tracks
+        .checked_mul(profile.max_tracks.saturating_sub(1))
+        .and_then(|pairs| pairs.checked_div(2))
+        .ok_or("track pair capacity overflow")?;
+    if profile.max_tracks == 0
+        || profile.max_tracks > 4096
+        || profile.max_frames == 0
+        || profile.max_frames > MAX_OFFLINE_FRAMES
+        || profile.max_drain_rows < profile.max_tracks
+        || profile.max_drain_rows > 262_144
+        || profile.max_baro_evidence == 0
+        || profile.max_baro_evidence > MAX_OFFLINE_BARO_EVIDENCE
+        || profile.max_open_alerts == 0
+        || profile.max_open_alerts > (1 << 20)
+        || profile.max_candidate_pairs == 0
+        || profile.max_candidate_pairs > (1 << 24)
+        || profile.max_candidate_pairs < maximum_pairs
+        || profile.max_ca_work_per_frame == 0
+        || profile.max_ca_work_per_frame > MAX_OFFLINE_CA_WORK_PER_FRAME
+        || profile.max_presentation_updates > MAX_PRESENTATION_UPDATES
+        || (profile.render_scope && profile.max_presentation_updates == 0)
+    {
+        return Err("offline surveillance profile is outside its bounded capacity contract".into());
+    }
     let tracker = tracker_new(&oa_track::TrackerConfig {
-        max_tracks: MAX_TRACKS,
-        out_capacity: MAX_DRAIN_ROWS,
-        log_capacity: MAX_DRAIN_ROWS,
-        confirm_pool: MAX_TRACKS,
+        max_tracks: profile.max_tracks,
+        out_capacity: profile.max_drain_rows,
+        log_capacity: profile.max_drain_rows,
+        confirm_pool: profile.max_tracks,
         ..DEFAULT_CONFIG
     })
     .map_err(err)?;
@@ -188,7 +256,7 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
             range_nm: cfg.range_nm,
             width: FRAME_WIDTH,
             height: FRAME_HEIGHT,
-            max_targets: MAX_TRACKS,
+            max_targets: profile.max_tracks,
             style: DEFAULT_STYLE,
             convert: DEFAULT_CONVERT,
         },
@@ -198,14 +266,14 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
     let interaction_caps = oa_display::list::ListCaps {
         lines: 1,
         rects: 1,
-        circles: MAX_TRACKS * oa_display::core::alert_markers::ALERT_CIRCLES_PER_MARKER,
+        circles: profile.max_tracks * oa_display::core::alert_markers::ALERT_CIRCLES_PER_MARKER,
         polylines: 0,
         poly_vertices: 0,
         texts: 4
-            + MAX_TRACKS * oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER
+            + profile.max_tracks * oa_display::core::alert_markers::ALERT_TEXTS_PER_MARKER
             + oa_display::core::alert_markers::ALERT_HEADER_TEXTS,
         text_bytes: 256
-            + MAX_TRACKS * oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER
+            + profile.max_tracks * oa_display::core::alert_markers::ALERT_TEXT_BYTES_PER_MARKER
             + oa_display::core::alert_markers::ALERT_HEADER_TEXT_BYTES,
     };
     let caps = oa_display::traffic::caps_add(&scope.list.caps, &interaction_caps).map_err(err)?;
@@ -224,13 +292,13 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
         v_ft: 300.0,
     };
     let ca = ca_new(&CaConfig {
-        max_tracks: MAX_TRACKS,
-        max_open: MAX_PAIRS,
-        max_candidates: MAX_PAIRS,
+        max_tracks: profile.max_tracks,
+        max_open: profile.max_open_alerts,
+        max_candidates: profile.max_candidate_pairs,
         look_ahead_ns: 120 * SECOND_NS,
         hysteresis_ns: 3 * SECOND_NS,
-        work_budget: 1_000_000,
-        eval_budget: MAX_PAIRS,
+        work_budget: profile.max_ca_work_per_frame,
+        eval_budget: profile.max_candidate_pairs,
         max_speed_mps: 1000.0,
         r95_cap_m: 20_000.0,
         grid_band_m: 10_000.0,
@@ -241,11 +309,11 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
     .map_err(err)?;
     Ok(Surveillance {
         tracker,
-        drain: output_new(MAX_DRAIN_ROWS),
+        drain: output_new(profile.max_drain_rows),
         scope,
         ca,
-        alerts: alert_log_new(MAX_CLOSED_ALERTS_PER_CYCLE).map_err(err)?,
-        events: event_log_new(MAX_ALTITUDE_LOSSES_PER_CYCLE).map_err(err)?,
+        alerts: alert_log_new(profile.max_open_alerts).map_err(err)?,
+        events: event_log_new(profile.max_tracks).map_err(err)?,
         states: state_table_new(10 * SECOND_NS, 0).map_err(err)?,
         inhibits: Box::new(inhibits_new()),
         seen: [None; 5],
@@ -255,6 +323,7 @@ pub fn surveillance_new(model: Model, cfg: SurveillanceConfig) -> Result<Surveil
         baro_seen: BTreeMap::new(),
         track_measurement_seen_ns: None,
         measurement_rejections: 0,
+        profile,
         previous_ns: None,
         frames: 0,
         completed: true,
@@ -300,7 +369,7 @@ pub fn surveillance_begin(s: &mut Surveillance, time_ns: i64) -> Result<(), Stri
     if oa_sealed::in_sealed_window(time_ns) {
         return Err("sealed frame receipt timestamp refused".into());
     }
-    if s.frames >= MAX_FRAMES {
+    if s.frames >= s.profile.max_frames {
         return Err("regional frame capacity exhausted before application".into());
     }
     if let Some(previous) = s.previous_ns {
@@ -367,7 +436,7 @@ pub fn surveillance_stage_event(
         }
         if altitude_ft.is_some()
             && !s.baro_seen.contains_key(&event.identity.aircraft_address)
-            && s.baro_seen.len() >= MAX_BARO_EVIDENCE
+            && s.baro_seen.len() >= s.profile.max_baro_evidence
         {
             return Err(SurveillanceStageError::BarometricEvidenceCapacity);
         }
@@ -487,9 +556,10 @@ fn replace_latest_row(
     last: &mut BTreeMap<u32, usize>,
     address: u32,
     index: usize,
+    max_tracks: usize,
 ) -> Result<bool, String> {
     let replaced = last.contains_key(&address);
-    if !replaced && last.len() >= MAX_TRACKS {
+    if !replaced && last.len() >= max_tracks {
         return Err("current track capacity exhausted".into());
     }
     last.insert(address, index);
@@ -554,6 +624,36 @@ fn capture_ca_logs(s: &mut Surveillance) -> (Vec<oa_ca::Alert>, Vec<oa_ca::AltLo
     (closed, altitude_lost)
 }
 
+fn offline_projection_digest(
+    time_ns: i64,
+    tracks: &[ObservedTrack],
+    alerts: &[oa_ca::Alert],
+) -> Result<[u8; 32], String> {
+    let mut hash = oa_sha256::Sha256::new();
+    hash.update(&time_ns.to_le_bytes()).map_err(err)?;
+    for track in tracks {
+        hash.update(&track.state_ns.to_le_bytes()).map_err(err)?;
+        hash.update(&track.newest_source_ns.to_le_bytes())
+            .map_err(err)?;
+        hash.update(&track.address.to_le_bytes()).map_err(err)?;
+        hash.update(&track.lat_e7.to_le_bytes()).map_err(err)?;
+        hash.update(&track.lon_e7.to_le_bytes()).map_err(err)?;
+        hash.update(&track.altitude_ft.to_le_bytes()).map_err(err)?;
+        hash.update(&track.vertical_rate_fpm.to_le_bytes())
+            .map_err(err)?;
+        hash.update(&track.east_mmps.to_le_bytes()).map_err(err)?;
+        hash.update(&track.north_mmps.to_le_bytes()).map_err(err)?;
+        hash.update(&track.r95_mm.to_le_bytes()).map_err(err)?;
+    }
+    for alert in alerts {
+        hash.update(&alert.addr_a.to_le_bytes()).map_err(err)?;
+        hash.update(&alert.addr_b.to_le_bytes()).map_err(err)?;
+        hash.update(&alert.start_ns.to_le_bytes()).map_err(err)?;
+        hash.update(&alert.end_ns.to_le_bytes()).map_err(err)?;
+    }
+    Ok(hash.finalize())
+}
+
 pub fn surveillance_finish(
     s: &mut Surveillance,
     ownership: Option<&OwnershipStatus>,
@@ -569,7 +669,7 @@ pub fn surveillance_finish(
     // terminal so callers cannot append events to or retry the partially completed frame.
     s.failed = true;
     tracker_advance(&mut s.tracker, time_ns, &mut s.drain);
-    if s.drain.overflow != 0 || s.drain.t_ns.len() > MAX_DRAIN_ROWS {
+    if s.drain.overflow != 0 || s.drain.t_ns.len() > s.profile.max_drain_rows {
         return Err("tracker output lost work".into());
     }
     let mut last = BTreeMap::new();
@@ -578,20 +678,22 @@ pub fn surveillance_finish(
     for (i, &time) in s.drain.t_ns.iter().enumerate() {
         if time == time_ns {
             let address = required(&s.drain.addr, i)?;
-            if replace_latest_row(&mut last, address, i)? {
+            if replace_latest_row(&mut last, address, i, s.profile.max_tracks)? {
                 duplicate_rows_replaced = duplicate_rows_replaced.saturating_add(1);
             }
         }
     }
-    let newest: BTreeMap<_, _> = tracker_live_iter(&s.tracker).take(MAX_TRACKS + 1).collect();
-    if newest.len() > MAX_TRACKS {
+    let newest: BTreeMap<_, _> = tracker_live_iter(&s.tracker)
+        .take(s.profile.max_tracks + 1)
+        .collect();
+    if newest.len() > s.profile.max_tracks {
         return Err("tracker live identity budget exceeded".into());
     }
-    let mut snapshot = output_new(MAX_TRACKS);
-    let mut ca_rows = Vec::with_capacity(MAX_TRACKS);
-    let mut tracks = Vec::with_capacity(MAX_TRACKS);
-    let mut flags = Vec::with_capacity(MAX_TRACKS);
-    let mut msaw_rows = Vec::with_capacity(MAX_TRACKS);
+    let mut snapshot = output_new(s.profile.max_tracks);
+    let mut ca_rows = Vec::with_capacity(s.profile.max_tracks);
+    let mut tracks = Vec::with_capacity(s.profile.max_tracks);
+    let mut flags = Vec::with_capacity(s.profile.max_tracks);
+    let mut msaw_rows = Vec::with_capacity(s.profile.max_tracks);
     let mut msaw_altitude_source_unknown = 0u32;
     for (&address, &index) in &last {
         let row = output_row(&s.drain, index)?;
@@ -741,177 +843,193 @@ pub fn surveillance_finish(
         &mut s.states,
     );
     let (ca_closed, ca_altitude_lost) = capture_ca_logs(s);
-    let mut store = RowStore::default();
-    let stats = store_add(
-        &mut store,
-        &row_columns(&snapshot, &mut ColumnBuf::default()),
-        time_ns,
-    )
-    .map_err(err)?;
-    if stats.kept != stats.rows_in || store_finish(&mut store) != 0 {
-        return Err("scope input snapshot lost rows".into());
-    }
-    let mut feeds = Vec::with_capacity(5);
-    for (i, &name) in FEED_NAMES.iter().enumerate() {
-        let seen = if i == 0 {
-            s.track_measurement_seen_ns
-        } else {
-            required(&s.seen, i)?
-        };
-        let down = if i == 0 {
-            s.track_down
-        } else {
-            required(&s.down, i)?
-        };
-        let state = match seen {
-            None => FeedState::NoMessageSeen,
-            Some(at) => {
-                let age = time_ns.checked_sub(at).ok_or("feed age overflow")?;
-                if age < 0 {
-                    return Err("feed age is negative".into());
-                }
-                let age_ms = u32::try_from(age / 1_000_000)
-                    .map_err(|_| "feed age exceeds research envelope")?;
-                if down || age >= 5 * SECOND_NS {
-                    FeedState::Lost { age_ms }
-                } else if age >= 2 * SECOND_NS {
-                    FeedState::Slow { age_ms }
-                } else {
-                    FeedState::Live
-                }
-            }
-        };
-        feeds.push(FeedStatus { name, state });
-    }
-    let newest_track = tracker_newest_update_ns(&s.tracker);
-    let info = replay_build_with_overlays(
-        &mut s.scope,
-        &store,
-        &Callsigns::default(),
-        time_ns,
-        "REGIONAL RESEARCH",
-        Some(&ReplaySafety {
-            states: &s.states,
-            inhibits: &s.inhibits,
-            feeds: &feeds,
-            newest_track_ns: (newest_track != i64::MIN).then_some(newest_track),
-            frozen_limit_ns: 5 * SECOND_NS,
-        }),
-        ownership,
-    )
-    .map_err(err)?;
-    if info.refused != 0
-        || info.malformed != 0
-        || info.stamp_clipped
-        || info.ownership_clipped
-        || info.convert.invalid_position != 0
-        || info.convert.unprojectable != 0
-        || info.convert.columns_inconsistent != 0
-    {
-        return Err("scope lost or could not represent current evidence".into());
-    }
-    let displayed = targets_columns(&s.scope.set);
-    // Off-map targets are a named presentation exclusion. Every displayed target must be one of
-    // the exact same issue-time observations offered to CA; no independent fixture traffic.
-    for (i, &address) in displayed.addr.iter().enumerate() {
-        let track = tracks
-            .iter()
-            .find(|t| t.address == address)
-            .ok_or("scope/CA identity mismatch")?;
-        if required(displayed.lat_e7, i)? != track.lat_e7
-            || required(displayed.lon_e7, i)? != track.lon_e7
-        {
-            return Err("scope/CA position mismatch".into());
+    let (msaw_markers, digest, displayed, off_map, warnings) = if !s.profile.render_scope {
+        let digest = offline_projection_digest(time_ns, &tracks, ca_open(&s.ca))?;
+        (None, digest, 0, 0, Vec::new())
+    } else {
+        let mut store = RowStore::default();
+        let stats = store_add(
+            &mut store,
+            &row_columns(&snapshot, &mut ColumnBuf::default()),
+            time_ns,
+        )
+        .map_err(err)?;
+        if stats.kept != stats.rows_in || store_finish(&mut store) != 0 {
+            return Err("scope input snapshot lost rows".into());
         }
-    }
-    // Reserve rows 104..160 for alerts and console text. Layer 14 masks map primitives that
-    // extend beyond their clipped centre, while the standard legend remains in rows 0..104.
-    oa_display::list::push_rect(
-        &mut s.scope.list,
-        (0, 104 * 16),
-        (
-            i32::try_from(FRAME_WIDTH).map_err(|_| "panel width")? * 16,
-            160 * 16,
-        ),
-        oa_display::palette::BACKGROUND,
-        14,
-    )
-    .map_err(err)?;
-    oa_display::list::push_line(
-        &mut s.scope.list,
-        (0, 159 * 16),
-        (
-            i32::try_from(FRAME_WIDTH).map_err(|_| "panel width")? * 16,
-            159 * 16,
-        ),
-        oa_display::palette::DIM_TEXT,
-        15,
-    )
-    .map_err(err)?;
-    let msaw_markers = if let Some(frame) = msaw.as_ref() {
-        use oa_display::core::alert_markers::{
-            append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
-        };
-        if frame.open.len() > MAX_TRACKS {
-            return Err("MSAW alert marker capacity exceeded".into());
-        }
-        let mut markers = Vec::with_capacity(MAX_TRACKS);
-        for alert in &frame.open {
-            let position = tracks.iter().find(|track| track.address == alert.addr);
-            let state = if frame.stats.is_none() || alert.end_reason != oa_msaw::END_CLEAR {
-                MarkerState::ProtectionLost
+        let mut feeds = Vec::with_capacity(5);
+        for (i, &name) in FEED_NAMES.iter().enumerate() {
+            let seen = if i == 0 {
+                s.track_measurement_seen_ns
             } else {
-                match alert.peak {
-                    oa_msaw::Grade::Caution => MarkerState::Caution,
-                    oa_msaw::Grade::Warning => MarkerState::Warning,
+                required(&s.seen, i)?
+            };
+            let down = if i == 0 {
+                s.track_down
+            } else {
+                required(&s.down, i)?
+            };
+            let state = match seen {
+                None => FeedState::NoMessageSeen,
+                Some(at) => {
+                    let age = time_ns.checked_sub(at).ok_or("feed age overflow")?;
+                    if age < 0 {
+                        return Err("feed age is negative".into());
+                    }
+                    let age_ms = u32::try_from(age / 1_000_000)
+                        .map_err(|_| "feed age exceeds research envelope")?;
+                    if down || age >= 5 * SECOND_NS {
+                        FeedState::Lost { age_ms }
+                    } else if age >= 2 * SECOND_NS {
+                        FeedState::Slow { age_ms }
+                    } else {
+                        FeedState::Live
+                    }
                 }
             };
-            markers.push(AlertMarker {
-                address: alert.addr,
-                lat_e7: position.map_or(NO_POSITION_E7, |track| track.lat_e7),
-                lon_e7: position.map_or(NO_POSITION_E7, |track| track.lon_e7),
-                state,
-                position_known: u8::from(position.is_some()),
-                reserved: [0; 2],
-            });
+            feeds.push(FeedStatus { name, state });
         }
-        markers.sort_by_key(|marker| marker.address);
-        Some(append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers).map_err(err)?)
-    } else {
-        None
-    };
-    replay_raster(&mut s.scope).map_err(err)?;
-    let mut warnings = Vec::new();
-    if s.scope.list.texts.start.len() > 100_000 {
-        return Err("scope text evidence budget exceeded".into());
-    }
-    for (start, len) in s.scope.list.texts.start.iter().zip(&s.scope.list.texts.len) {
-        let start = usize::try_from(*start).map_err(|_| "text offset")?;
-        let end = start
-            .checked_add(usize::try_from(*len).map_err(|_| "text length")?)
-            .ok_or("text span overflow")?;
-        let text = s
-            .scope
-            .list
-            .text
-            .get(start..end)
-            .ok_or("invalid scope text span")?;
-        if text.starts_with("FEED ")
-            || text.starts_with("PICTURE ")
-            || text.starts_with("MSAW ")
-            || text.starts_with("AREA ")
-            || text.starts_with("APPROACH ")
-            || text.starts_with("CONFLICT ")
+        let newest_track = tracker_newest_update_ns(&s.tracker);
+        let info = replay_build_with_overlays(
+            &mut s.scope,
+            &store,
+            &Callsigns::default(),
+            time_ns,
+            "REGIONAL RESEARCH",
+            Some(&ReplaySafety {
+                states: &s.states,
+                inhibits: &s.inhibits,
+                feeds: &feeds,
+                newest_track_ns: (newest_track != i64::MIN).then_some(newest_track),
+                frozen_limit_ns: 5 * SECOND_NS,
+            }),
+            ownership,
+        )
+        .map_err(err)?;
+        if info.refused != 0
+            || info.malformed != 0
+            || info.stamp_clipped
+            || info.ownership_clipped
+            || info.convert.invalid_position != 0
+            || info.convert.unprojectable != 0
+            || info.convert.columns_inconsistent != 0
         {
-            warnings.push(text.to_owned());
+            return Err("scope lost or could not represent current evidence".into());
         }
-    }
-    let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;
+        let displayed = targets_columns(&s.scope.set);
+        // Off-map targets are a named presentation exclusion. Every displayed target must be one of
+        // the exact same issue-time observations offered to CA; no independent fixture traffic.
+        for (i, &address) in displayed.addr.iter().enumerate() {
+            let track = tracks
+                .iter()
+                .find(|t| t.address == address)
+                .ok_or("scope/CA identity mismatch")?;
+            if required(displayed.lat_e7, i)? != track.lat_e7
+                || required(displayed.lon_e7, i)? != track.lon_e7
+            {
+                return Err("scope/CA position mismatch".into());
+            }
+        }
+        // Reserve rows 104..160 for alerts and console text. Layer 14 masks map primitives that
+        // extend beyond their clipped centre, while the standard legend remains in rows 0..104.
+        oa_display::list::push_rect(
+            &mut s.scope.list,
+            (0, 104 * 16),
+            (
+                i32::try_from(FRAME_WIDTH).map_err(|_| "panel width")? * 16,
+                160 * 16,
+            ),
+            oa_display::palette::BACKGROUND,
+            14,
+        )
+        .map_err(err)?;
+        oa_display::list::push_line(
+            &mut s.scope.list,
+            (0, 159 * 16),
+            (
+                i32::try_from(FRAME_WIDTH).map_err(|_| "panel width")? * 16,
+                159 * 16,
+            ),
+            oa_display::palette::DIM_TEXT,
+            15,
+        )
+        .map_err(err)?;
+        let msaw_markers = if let Some(frame) = msaw.as_ref() {
+            use oa_display::core::alert_markers::{
+                append_alert_markers, AlertMarker, MarkerState, NO_POSITION_E7,
+            };
+            if frame.open.len() > s.profile.max_tracks {
+                return Err("MSAW alert marker capacity exceeded".into());
+            }
+            let mut markers = Vec::with_capacity(s.profile.max_tracks);
+            for alert in &frame.open {
+                let position = tracks.iter().find(|track| track.address == alert.addr);
+                let state = if frame.stats.is_none() || alert.end_reason != oa_msaw::END_CLEAR {
+                    MarkerState::ProtectionLost
+                } else {
+                    match alert.peak {
+                        oa_msaw::Grade::Caution => MarkerState::Caution,
+                        oa_msaw::Grade::Warning => MarkerState::Warning,
+                    }
+                };
+                markers.push(AlertMarker {
+                    address: alert.addr,
+                    lat_e7: position.map_or(NO_POSITION_E7, |track| track.lat_e7),
+                    lon_e7: position.map_or(NO_POSITION_E7, |track| track.lon_e7),
+                    state,
+                    position_known: u8::from(position.is_some()),
+                    reserved: [0; 2],
+                });
+            }
+            markers.sort_by_key(|marker| marker.address);
+            Some(
+                append_alert_markers(&mut s.scope.list, &s.scope.view.proj, &markers)
+                    .map_err(err)?,
+            )
+        } else {
+            None
+        };
+        replay_raster(&mut s.scope).map_err(err)?;
+        let mut warnings = Vec::new();
+        if s.scope.list.texts.start.len() > 100_000 {
+            return Err("scope text evidence budget exceeded".into());
+        }
+        for (start, len) in s.scope.list.texts.start.iter().zip(&s.scope.list.texts.len) {
+            let start = usize::try_from(*start).map_err(|_| "text offset")?;
+            let end = start
+                .checked_add(usize::try_from(*len).map_err(|_| "text length")?)
+                .ok_or("text span overflow")?;
+            let text = s
+                .scope
+                .list
+                .text
+                .get(start..end)
+                .ok_or("invalid scope text span")?;
+            if text.starts_with("FEED ")
+                || text.starts_with("PICTURE ")
+                || text.starts_with("MSAW ")
+                || text.starts_with("AREA ")
+                || text.starts_with("APPROACH ")
+                || text.starts_with("CONFLICT ")
+            {
+                warnings.push(text.to_owned());
+            }
+        }
+        let digest = frame_digest(&s.scope.spec, &s.scope.buf).map_err(err)?;
+        (
+            msaw_markers,
+            digest,
+            info.convert.added,
+            info.convert.off_map,
+            warnings,
+        )
+    };
     let track_transport_seen_ns = s.seen.first().copied().flatten();
     s.completed = true;
     s.failed = false;
     Ok(SurveillanceFrame {
         time_ns,
+        raster_rendered: s.profile.render_scope,
         tracks,
         flags,
         frame_sha256: digest,
@@ -929,15 +1047,15 @@ pub fn surveillance_finish(
         track_measurement_seen_ns: s.track_measurement_seen_ns,
         measurement_rejections: s.measurement_rejections,
         duplicate_rows_replaced,
-        displayed: info.convert.added,
-        off_map: info.convert.off_map,
+        displayed,
+        off_map,
         warnings,
     })
 }
 
 /// Pixels are borrowed only while the completed immutable frame is being published by the shell.
 pub fn surveillance_pixels(s: &Surveillance) -> Result<&[u8], String> {
-    if s.frames == 0 || s.failed || !s.completed {
+    if !s.profile.render_scope || s.frames == 0 || s.failed || !s.completed {
         return Err("no publishable pixels for an incomplete or failed frame".into());
     }
     Ok(&s.scope.buf)
@@ -959,13 +1077,16 @@ pub fn surveillance_present_controls(
     interaction: &oa_display::interaction::InteractionState,
     console: &str,
 ) -> Result<[u8; 32], String> {
+    if !s.profile.render_scope {
+        return Err("analysis-only profile does not produce a rendered control frame".into());
+    }
     if s.failed || !s.completed || s.frames == 0 {
         return Err("control overlay requires a completed frame".into());
     }
     if console.len() > 128 || !console.bytes().all(|byte| (32..=126).contains(&byte)) {
         return Err("console text must be at most 128 printable ASCII bytes".into());
     }
-    if s.presentation_updates >= MAX_PRESENTATION_UPDATES {
+    if s.presentation_updates >= s.profile.max_presentation_updates {
         return Err("regional presentation update budget exhausted".into());
     }
     let base = s.overlay_base.unwrap_or(OverlayBase {
@@ -1130,7 +1251,7 @@ mod tests {
     fn barometric_evidence_capacity_refuses_before_tracker_or_health_mutation() {
         let mut s = new_surveillance();
         surveillance_begin(&mut s, SECOND_NS).expect("begin frame before capacity check");
-        for address in 1..=u32::try_from(MAX_BARO_EVIDENCE).unwrap() {
+        for address in 1..=u32::try_from(DEFAULT_SURVEILLANCE_PROFILE.max_baro_evidence).unwrap() {
             s.baro_seen.insert(address, SECOND_NS);
         }
         let event = position(SECOND_NS, SECOND_NS, 0x00ab_cdef, 1);
@@ -1195,8 +1316,8 @@ mod tests {
     #[test]
     fn duplicate_same_tick_rows_replace_by_last_index_and_are_countable() {
         let mut latest = BTreeMap::new();
-        assert!(!replace_latest_row(&mut latest, 0x123456, 3).expect("first address"));
-        assert!(replace_latest_row(&mut latest, 0x123456, 7).expect("replacement"));
+        assert!(!replace_latest_row(&mut latest, 0x123456, 3, MAX_TRACKS).expect("first address"));
+        assert!(replace_latest_row(&mut latest, 0x123456, 7, MAX_TRACKS).expect("replacement"));
         assert_eq!(latest.get(&0x123456), Some(&7));
     }
 

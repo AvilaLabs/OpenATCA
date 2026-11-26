@@ -15,6 +15,8 @@ use crate::input::{EventKind, FlightOperation, HandoffOperation, NormalizedEvent
 /// The driver never admits more than this many flights. A regional demonstration is deliberately
 /// small; larger deployment sizing belongs to a separate explicit configuration review.
 pub const MAX_DRIVER_FLIGHTS: usize = 32;
+/// Maximum opt-in offline table capacity; the default driver remains capped at 32.
+pub const MAX_OFFLINE_DRIVER_FLIGHTS: usize = 8192;
 /// Maximum entries in either externally visible flight log.
 pub const MAX_DRIVER_LOG_ENTRIES: usize = 1024;
 
@@ -101,6 +103,7 @@ pub struct FlightDriver {
     table: FlightTable,
     stats: FlightDriverStats,
     last_receipt_ns: Option<i64>,
+    capacity: usize,
 }
 
 /// Read-only ordering state for a receipt batch. Rejected items do not advance this cursor.
@@ -243,7 +246,7 @@ pub fn flight_table_capacity_refusal(driver: &FlightDriver, event: &NormalizedEv
         return false;
     };
     let key = key_gufi(event.identity.flight_gufi);
-    flight_get(&driver.table, &key).is_none() && flights_len(&driver.table) >= MAX_DRIVER_FLIGHTS
+    flight_get(&driver.table, &key).is_none() && flights_len(&driver.table) >= driver.capacity
 }
 
 /// Altitude interpretation kept explicit, including forms the shared trajectory adapter cannot
@@ -331,8 +334,18 @@ pub struct FlightViewResult {
 /// research driver. This does not make an SFDPS freshness claim; source and receipt stamps remain
 /// visible on every copied view.
 pub fn flight_driver_new(config: FlightDriverConfig) -> Result<FlightDriver, FlightDriverError> {
+    flight_driver_new_bounded(config, MAX_DRIVER_FLIGHTS)
+}
+
+/// Constructs a flight driver with a caller-selected validated cap for an offline profile.
+pub fn flight_driver_new_bounded(
+    config: FlightDriverConfig,
+    maximum_flights: usize,
+) -> Result<FlightDriver, FlightDriverError> {
     if config.flight_capacity == 0
-        || config.flight_capacity > MAX_DRIVER_FLIGHTS
+        || maximum_flights == 0
+        || maximum_flights > MAX_OFFLINE_DRIVER_FLIGHTS
+        || config.flight_capacity > maximum_flights
         || config.refusal_log_capacity == 0
         || config.refusal_log_capacity > MAX_DRIVER_LOG_ENTRIES
         || config.conflict_log_capacity == 0
@@ -353,7 +366,12 @@ pub fn flight_driver_new(config: FlightDriverConfig) -> Result<FlightDriver, Fli
         table,
         stats: FlightDriverStats::default(),
         last_receipt_ns: None,
+        capacity: config.flight_capacity,
     })
+}
+
+pub fn flight_driver_capacity(driver: &FlightDriver) -> usize {
+    driver.capacity
 }
 
 /// Returns an immutable snapshot of adapter counters.
@@ -786,14 +804,14 @@ pub fn flight_views_for_address(
     out: &mut Vec<SharedFlightView>,
 ) -> FlightViewResult {
     out.clear();
-    let mut claimed = Vec::with_capacity(MAX_DRIVER_FLIGHTS);
+    let mut claimed = Vec::with_capacity(driver.capacity);
     let claimant_info =
-        flights_claiming_address(&driver.table, address, &mut claimed, MAX_DRIVER_FLIGHTS);
+        flights_claiming_address(&driver.table, address, &mut claimed, driver.capacity);
     if claimant_info.total == 0 {
         driver.stats.unknown_flight_queries = driver.stats.unknown_flight_queries.saturating_add(1);
         return view_result(FlightViewStatus::UnknownFlight, 0, 0);
     }
-    if out.capacity() > MAX_DRIVER_FLIGHTS || out.capacity() < claimed.len() {
+    if out.capacity() > MAX_OFFLINE_DRIVER_FLIGHTS || out.capacity() < claimed.len() {
         driver.stats.output_capacity_refusals =
             driver.stats.output_capacity_refusals.saturating_add(1);
         return view_result(FlightViewStatus::OutputCapacity, claimant_info.total, 0);

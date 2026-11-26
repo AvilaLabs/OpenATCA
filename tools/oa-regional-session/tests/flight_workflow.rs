@@ -2,9 +2,10 @@
 
 use oa_flight::{ALT_NIL, HO_ACCEPTED, HO_NONE, R_NO_HANDOFF, R_STALE, ST_ACTIVE};
 use oa_regional_session::flight::{
-    flight_apply_batch, flight_apply_event, flight_driver_new, flight_driver_report,
-    flight_view_for_gufi, flight_views_for_address, AdapterRefusal, FlightDriverConfig,
-    FlightDriverError, FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS,
+    flight_apply_batch, flight_apply_event, flight_driver_capacity, flight_driver_new,
+    flight_driver_new_bounded, flight_driver_report, flight_view_for_gufi,
+    flight_views_for_address, AdapterRefusal, FlightDriverConfig, FlightDriverError,
+    FlightViewStatus, SharedFlightView, MAX_DRIVER_FLIGHTS, MAX_OFFLINE_DRIVER_FLIGHTS,
 };
 use oa_regional_session::{
     EventKind, FlightOperation, HandoffOperation, Identity, NormalizedEvent, SourceKind,
@@ -496,6 +497,27 @@ fn driver_and_core_capacity_and_log_overflow_counters_are_explicit() {
     assert!(report.refusals_unlisted > 0);
     assert!(report.conflicts_logged <= 1);
     assert!(report.conflicts_unlisted > 0);
+}
+
+// REQ: OA-REG-004
+#[test]
+fn explicit_offline_profile_can_raise_table_cap_without_changing_default() {
+    let config = FlightDriverConfig {
+        flight_capacity: 64,
+        refusal_log_capacity: 1,
+        conflict_log_capacity: 1,
+    };
+    assert!(flight_driver_new(config).is_err());
+    let bounded = flight_driver_new_bounded(config, 64).expect("explicit cap is admitted");
+    assert_eq!(flight_driver_capacity(&bounded), 64);
+    assert!(flight_driver_new_bounded(
+        FlightDriverConfig {
+            flight_capacity: MAX_OFFLINE_DRIVER_FLIGHTS + 1,
+            ..config
+        },
+        MAX_OFFLINE_DRIVER_FLIGHTS + 1,
+    )
+    .is_err());
 }
 
 // REQ: OA-REG-003
