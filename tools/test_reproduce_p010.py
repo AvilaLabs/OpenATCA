@@ -43,7 +43,7 @@ class P010SyntheticGateTests(unittest.TestCase):
         path.write_bytes(data)
         return path
 
-    def cross_capture_summary(self, manifest_sha: str, scale: float = 1.0) -> dict:
+    def cross_capture_summary(self, manifest_sha: str, scale: float = 1.0, binary_digest: str = "e" * 64) -> dict:
         profiles = [
             {"name": "candidate-raw", "tracker_role": "candidate", "timing_profile": "fixed-10-30-120-v1", "publication_grid": None},
             {"name": "replication-raw", "tracker_role": "replication", "timing_profile": "legacy-day-intervals", "publication_grid": None},
@@ -79,7 +79,7 @@ class P010SyntheticGateTests(unittest.TestCase):
                 "driver_sha256": p010._sha(p010._read_guarded(SCRIPT, 2 * 1024 * 1024)), "manifest_sha256": manifest_sha,
                 "candidate_commit": "c" * 40, "replication_commit": p010.REPLICATION_TRACKER_COMMIT,
                 "replication_scorer_commit": "a" * 40, "replication_scorer_patch_sha256": "b" * 64,
-                "build_binary_sha256": {role: "e" * 64 for role in p010.BUILD_ROLES},
+                "build_binary_sha256": {role: binary_digest for role in p010.BUILD_ROLES},
                 "public_archive_inventory_sha256": "7" * 64, "public_clip_sha256": "4" * 64, "public_oa_outputs": [public_output], "compare_profiles": profiles,
                 "health_eligibility": "unknown-not-assessed", "disclosure_eligibility": "unknown-not-assessed",
             },
@@ -227,6 +227,31 @@ class P010SyntheticGateTests(unittest.TestCase):
         self.assertEqual(result["capture_close_match"], "not-assessed-pending-approved-statistic-health-and-disclosure-policy")
         self.assertEqual(result["matched_cohort_checked"], "not-assessed")
         self.assertFalse(result["private_cohort_bindings_disclosed"])
+
+    def test_cross_capture_cli_allows_distinct_valid_local_build_hashes(self) -> None:
+        project_path = self.write_cross_capture(
+            "build-project.json", self.cross_capture_summary("5" * 64, scale=0.0, binary_digest="e" * 64)
+        )
+        outsider_path = self.write_cross_capture(
+            "build-outsider.json", self.cross_capture_summary("6" * 64, scale=0.0, binary_digest="f" * 64)
+        )
+        out = self.root / "different-local-builds"
+        stdout = io.StringIO()
+        with mock.patch.object(p010, "_new_private_dir", side_effect=lambda path: path.mkdir(mode=0o700)):
+            with contextlib.redirect_stdout(stdout):
+                code = p010.main([
+                    "compare-captures", "--project-summary", str(project_path),
+                    "--outsider-summary", str(outsider_path), "--arm", "candidate-raw", "--out", str(out),
+                ])
+        self.assertEqual(code, 0)
+        result = json.loads((out / "cross-capture-summary.json").read_text(encoding="ascii"))
+        self.assertEqual(result["status"], "COMPARISON_COMPLETE")
+
+    def test_cross_capture_reader_still_refuses_bad_local_build_mapping(self) -> None:
+        malformed = self.cross_capture_summary("5" * 64)
+        malformed["bindings"]["build_binary_sha256"].pop(p010.BUILD_ROLES[0])
+        with self.assertRaises(p010.Refused):
+            p010._read_cross_capture_summary(self.write_cross_capture("bad-local-build.json", malformed))
 
     def test_cross_capture_reader_refuses_private_duplicate_and_bad_accounting_fields(self) -> None:
         cases = []

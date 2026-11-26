@@ -1927,7 +1927,9 @@ def _compare_capture_summaries(project: dict[str, Any], outsider: dict[str, Any]
     # Do not treat per-run provenance, equal counts, or participant-held cohort hashes as
     # cross-participant matched-cohort evidence. No approved private attestation is an input here.
     pb, ob = project["bindings"], outsider["bindings"]
-    shared = ("driver_sha256", "candidate_commit", "replication_commit", "replication_scorer_commit", "replication_scorer_patch_sha256", "build_binary_sha256", "public_archive_inventory_sha256", "public_clip_sha256", "public_oa_outputs", "compare_profiles", "health_eligibility", "disclosure_eligibility")
+    # Build hashes remain required per-summary provenance, but independent participants may
+    # produce different executable bytes for the same pinned sources on different platforms.
+    shared = ("driver_sha256", "candidate_commit", "replication_commit", "replication_scorer_commit", "replication_scorer_patch_sha256", "public_archive_inventory_sha256", "public_clip_sha256", "public_oa_outputs", "compare_profiles", "health_eligibility", "disclosure_eligibility")
     mismatched = [key for key in shared if pb[key] != ob[key]]
     if mismatched:
         raise Refused("participant summaries differ in shared source/public-run/window/profile/health bindings: " + ", ".join(mismatched))
