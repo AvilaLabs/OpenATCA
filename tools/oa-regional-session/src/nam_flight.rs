@@ -783,6 +783,17 @@ mod tests {
             m.points.region.push(region_ix);
             m.points.scope.push(StrIx::NONE);
             m.points.name.push(StrIx::NONE);
+            for bits in [
+                &mut m.points.src_nasr,
+                &mut m.points.src_cifp,
+                &mut m.points.in_area,
+                &mut m.points.cls_b,
+                &mut m.points.cls_c,
+                &mut m.points.cls_d,
+                &mut m.points.cls_e,
+            ] {
+                air_model::bit_push(bits, false);
+            }
             assert_eq!(ix, m.points.kind.len() as u32 - 1);
         }
         m
