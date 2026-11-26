@@ -2092,6 +2092,17 @@ mod tests {
         for minute in [0, 5, 15, 30, 60] {
             engine.advance_to(minute * 60_000)?;
             engine.render_frame()?;
+            let targets: Vec<_> = engine
+                .target_positions
+                .iter()
+                .filter_map(|&(lat, lon)| {
+                    if oa_display::core::traffic::on_map(&engine.projection, lat, lon) {
+                        super::project(&engine.projection, lat, lon).map(super::target_bounds)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             let l = &engine.display_list;
             let mut blocks = Vec::new();
             let mut fixes = Vec::new();
@@ -2140,6 +2151,13 @@ mod tests {
                 for &(bn, bb) in fixes.iter().skip(a + 1) {
                     if super::overlap_area(aa, bb) > 0 {
                         collisions.push((an, bn));
+                    }
+                }
+            }
+            for &(name, bounds) in blocks.iter().chain(fixes.iter()) {
+                for &target in &targets {
+                    if super::overlap_area(bounds, target) > 0 {
+                        collisions.push((name, "target symbol"));
                     }
                 }
             }
