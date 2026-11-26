@@ -3475,7 +3475,7 @@ mod tests {
             let (_, readiness) = prepare_candidate_into(&selector, now, 100, &mut diffs).unwrap();
             let intent_sequence = cycle * 2 + 1;
             let switch_intent = intent(&selector, &readiness, &authorization, intent_sequence, now);
-            select_candidate(
+            audited_select_candidate(
                 &mut selector,
                 &readiness,
                 &authorization,
@@ -3489,12 +3489,13 @@ mod tests {
             let rollback_at = now + 1;
             let unit = selector.unit;
             let policy = selector.policy;
-            rollback(
+            audited_rollback(
                 &mut selector,
                 RollbackReceipt {
                     unit,
                     kind: RollbackKind::ControllerRequest,
                     principal_id: [8; 32],
+                    audit_principal_id: 11,
                     principal_role_id: 1,
                     policy_version: policy.policy_version,
                     policy_digest: policy.policy_digest,
