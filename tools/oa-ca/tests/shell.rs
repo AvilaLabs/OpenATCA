@@ -296,7 +296,7 @@ fn alert(a: u32, b: u32, start_s: i64, flags: u16, ground: u8, current: u32) -> 
     }
 }
 
-// REQ: OA-CA-025
+// REQ: OA-CA-015, OA-CA-025
 #[test]
 fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_shortfalls() {
     let s = parse_config(DEV_CFG).unwrap();
@@ -398,6 +398,9 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
     assert!(t.contains("  RUNNING: 3598\n") && t.contains("  DEGRADED: BUDGET EXCEEDED: 2\n"));
     assert!(t.contains("altitude lost (a track that had an altitude and lost it): 2 (on the ground when lost: 1, not: 1)"));
     assert!(t.contains("net state: complete"));
+    assert!(t.contains(
+        "bad-row reason counts below overlap; they are subsets of bad rows and must not be added"
+    ));
     assert!(t.contains("look-ahead 120 s, hysteresis 10 s;"));
     assert!(t.contains("net state after the end of the run (alerts ended last included): RUNNING"));
     assert!(t.contains("pairs tested horizontally only (vertical rate unknown): 0"));
@@ -429,7 +432,11 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
         ),
         (
             "rows with a bad position, speed, altitude or rate: 1",
-            CycleStats { rows_bad: 1, ..ok },
+            CycleStats {
+                rows_bad: 1,
+                rows_bad_speed: 1,
+                ..ok
+            },
         ),
         (
             "rows above 85 degrees of latitude: 1",
@@ -478,6 +485,20 @@ fn the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_sho
         assert!(t.contains("net state: DEGRADED"), "{what}");
         assert!(t.contains(what), "{what}");
     }
+    let bad_rows = input(
+        &[],
+        CycleStats {
+            rows_bad: 1,
+            rows_bad_lat: 1,
+            rows_bad_speed: 1,
+            ..ok
+        },
+        0,
+        0,
+    );
+    assert!(bad_rows.contains("rows with a bad position, speed, altitude or rate: 1"));
+    assert!(bad_rows.contains("bad latitude (overlapping reason subset): 1"));
+    assert!(bad_rows.contains("speed over configured maximum (overlapping reason subset): 1"));
     let t = input(&[], ok, 2, 0);
     assert!(t.contains("net state: DEGRADED") && t.contains("alerts lost to a full log: 2"));
     let capacity_loss = input(&[], ok, 0, 2);

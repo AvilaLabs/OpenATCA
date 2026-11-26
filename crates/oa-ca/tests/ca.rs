@@ -1491,6 +1491,82 @@ fn the_alerts_do_not_depend_on_row_order_and_bad_or_duplicate_rows_are_left_out_
     assert_eq!(out.stats.rows_bad, 2);
 }
 
+// REQ: OA-CA-015
+#[test]
+fn bad_row_reasons_are_counted_independently_and_may_overlap() {
+    let mut p = head_on(10_000.0);
+    p[0].lat_deg = 91.0;
+    let mut r = rig();
+    let out = step(&mut r, 0, &p);
+    assert_eq!(out.stats.rows_bad, 1);
+    assert_eq!(out.stats.rows_bad_lat, 1);
+
+    let mut p = head_on(10_000.0);
+    p[0].lon_deg = 181.0;
+    let mut r = rig();
+    let out = step(&mut r, 0, &p);
+    assert_eq!(out.stats.rows_bad, 1);
+    assert_eq!(out.stats.rows_bad_lon, 1);
+
+    let mut p = head_on(10_000.0);
+    p[0].vel_east_mps = f32::NAN;
+    let mut r = rig();
+    let out = step(&mut r, 0, &p);
+    assert_eq!(out.stats.rows_bad, 1);
+    assert_eq!(out.stats.rows_bad_velocity_component, 1);
+    assert_eq!(out.stats.rows_bad_speed, 0);
+
+    let mut p = head_on(10_000.0);
+    p[0].vel_east_mps = 701.0;
+    let mut r = rig();
+    let out = step(&mut r, 0, &p);
+    assert_eq!(out.stats.rows_bad, 1);
+    assert_eq!(out.stats.rows_bad_speed, 1);
+
+    let mut p = head_on(10_000.0);
+    p[0].alt_ft = 100_001.0;
+    let mut r = rig();
+    let out = step(&mut r, 0, &p);
+    assert_eq!(out.stats.rows_bad, 1);
+    assert_eq!(out.stats.rows_bad_altitude, 1);
+
+    let mut p = head_on(10_000.0);
+    p[0].vrate_fpm = 60_001.0;
+    let mut r = rig();
+    let out = step(&mut r, 0, &p);
+    assert_eq!(out.stats.rows_bad, 1);
+    assert_eq!(out.stats.rows_bad_vrate, 1);
+
+    let mut p = head_on(10_000.0);
+    p[0].lat_deg = f64::NAN;
+    p[0].lon_deg = 181.0;
+    p[0].vel_north_mps = f32::INFINITY;
+    p[0].alt_ft = f32::INFINITY;
+    p[0].vrate_fpm = -60_001.0;
+    let mut r = rig();
+    let out = step(&mut r, 0, &p);
+    assert_eq!(out.stats.rows_bad, 1);
+    assert_eq!(out.stats.rows_bad_lat, 1);
+    assert_eq!(out.stats.rows_bad_lon, 1);
+    assert_eq!(out.stats.rows_bad_velocity_component, 1);
+    assert_eq!(out.stats.rows_bad_speed, 0);
+    assert_eq!(out.stats.rows_bad_altitude, 1);
+    assert_eq!(out.stats.rows_bad_vrate, 1);
+    assert_eq!(ca_totals(&r.st).rows_bad, 1);
+    assert_eq!(ca_totals(&r.st).rows_bad_lat, 1);
+    assert_eq!(ca_totals(&r.st).rows_bad_lon, 1);
+    assert_eq!(ca_totals(&r.st).rows_bad_velocity_component, 1);
+    assert_eq!(ca_totals(&r.st).rows_bad_altitude, 1);
+    assert_eq!(ca_totals(&r.st).rows_bad_vrate, 1);
+    let _ = step(&mut r, 1, &p);
+    assert_eq!(ca_totals(&r.st).rows_bad, 2);
+    assert_eq!(ca_totals(&r.st).rows_bad_lat, 2);
+    assert_eq!(ca_totals(&r.st).rows_bad_lon, 2);
+    assert_eq!(ca_totals(&r.st).rows_bad_velocity_component, 2);
+    assert_eq!(ca_totals(&r.st).rows_bad_altitude, 2);
+    assert_eq!(ca_totals(&r.st).rows_bad_vrate, 2);
+}
+
 // REQ: OA-CA-016
 #[test]
 fn two_aircraft_on_the_ground_are_counted_apart_and_one_on_the_ground_is_flagged() {

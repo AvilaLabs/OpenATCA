@@ -369,6 +369,10 @@ pub fn summary_text(i: &SummaryInput) -> String {
         o,
         "\nshortfalls and counts (every one is a count; none is silent)"
     );
+    let _ = writeln!(
+        o,
+        "bad-row reason counts below overlap; they are subsets of bad rows and must not be added"
+    );
     for (name, n) in [
         ("cycles", t.cycles),
         ("cycles refused (time not after the last)", t.out_of_order),
@@ -378,6 +382,27 @@ pub fn summary_text(i: &SummaryInput) -> String {
         (
             "rows with a bad position, speed, altitude or rate",
             t.rows_bad,
+        ),
+        ("  bad latitude (overlapping reason subset)", t.rows_bad_lat),
+        (
+            "  bad longitude (overlapping reason subset)",
+            t.rows_bad_lon,
+        ),
+        (
+            "  non-finite velocity component (overlapping reason subset)",
+            t.rows_bad_velocity_component,
+        ),
+        (
+            "  speed over configured maximum (overlapping reason subset)",
+            t.rows_bad_speed,
+        ),
+        (
+            "  bad altitude (overlapping reason subset)",
+            t.rows_bad_altitude,
+        ),
+        (
+            "  bad vertical rate (overlapping reason subset)",
+            t.rows_bad_vrate,
         ),
         ("rows sharing an address (all left out)", t.rows_duplicate),
         ("rows over the track capacity", t.rows_over_capacity),

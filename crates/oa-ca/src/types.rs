@@ -224,6 +224,8 @@ pub struct EventLog {
 
 /// What one cycle did, and (as the totals) what a run did. Every shortfall is a count here (M5
 /// rule 5). A7.2: cold struct, size guard waived.
+// A7.1: add six overlapping rejection-reason totals (48 bytes, 272 -> 320) so a bad row remains
+// one rejected row while reports can identify every failed validation predicate without samples.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CycleStats {
     pub cycles: u64,
@@ -233,6 +235,13 @@ pub struct CycleStats {
     /// Rows with a position that is not a coordinate, a velocity, altitude or rate that is not
     /// finite (altitude and rate: NaN is unknown) or beyond the data-sanity bounds.
     pub rows_bad: u64,
+    /// Overlapping subsets of `rows_bad`: rows failing each predicate, not additional row losses.
+    pub rows_bad_lat: u64,
+    pub rows_bad_lon: u64,
+    pub rows_bad_velocity_component: u64,
+    pub rows_bad_speed: u64,
+    pub rows_bad_altitude: u64,
+    pub rows_bad_vrate: u64,
     /// Rows sharing an address with another row of the cycle (all of them are left out).
     pub rows_duplicate: u64,
     /// Rows past the track capacity.
@@ -297,3 +306,5 @@ pub struct CycleStats {
     /// Of `alerts_dropped`: alerts ended by [`crate::ca_finish`], after the last report.
     pub finish_dropped: u64,
 }
+
+const _: () = assert!(core::mem::size_of::<CycleStats>() == 320);

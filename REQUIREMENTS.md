@@ -6168,7 +6168,9 @@ configuration with no default; the crate's tests use synthetic values.
   net state is degraded with their count.
 - **OA-CA-015** The alerts are a deterministic function of the rows: below the track capacity any row order
   gives the same alerts and counts; rows sharing an address are all left out, and rows with a bad position, a
-  speed over the bound, a non-finite value or an altitude or rate out of range are refused, all counted.
+  speed over the bound, a non-finite value or an altitude or rate out of range are refused, all counted. The
+  summary also reports overlapping bad-row reason counts for latitude, longitude, velocity components,
+  speed, altitude and vertical rate; these subsets are not additional rejected rows and must not be summed.
 - **OA-CA-016** A pair with both aircraft on the ground is left out and counted; a pair with one on the
   ground is tested and its alert carries `ONE_GROUND`.
 - **OA-CA-017** A pair with both altitudes known and a vertical rate unknown on either track is tested

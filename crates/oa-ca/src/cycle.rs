@@ -40,6 +40,12 @@ fn add(t: &mut CycleStats, s: &CycleStats) {
     t.out_of_order += s.out_of_order;
     t.tracks += s.tracks;
     t.rows_bad += s.rows_bad;
+    t.rows_bad_lat += s.rows_bad_lat;
+    t.rows_bad_lon += s.rows_bad_lon;
+    t.rows_bad_velocity_component += s.rows_bad_velocity_component;
+    t.rows_bad_speed += s.rows_bad_speed;
+    t.rows_bad_altitude += s.rows_bad_altitude;
+    t.rows_bad_vrate += s.rows_bad_vrate;
     t.rows_duplicate += s.rows_duplicate;
     t.rows_over_capacity += s.rows_over_capacity;
     t.rows_high_lat += s.rows_high_lat;
@@ -89,6 +95,38 @@ fn row_ok(c: &CaConfig, o: &CaTrack) -> bool {
         && vr_ok
 }
 
+/// Count all failed row predicates after the fast-path validator has already rejected this row.
+/// These are overlapping reason counts; `rows_bad` remains the count of rejected rows.
+fn count_bad_row_reasons(c: &CaConfig, o: &CaTrack, stats: &mut CycleStats) {
+    let lat_ok = o.lat_deg.is_finite() && (-90.0..=90.0).contains(&o.lat_deg);
+    let lon_ok = o.lon_deg.is_finite() && (-180.0..=180.0).contains(&o.lon_deg);
+    let (e, n) = (f64::from(o.vel_east_mps), f64::from(o.vel_north_mps));
+    let components_ok = e.is_finite() && n.is_finite();
+    let speed_ok = !components_ok || e * e + n * n <= c.max_speed_mps * c.max_speed_mps;
+    let alt_ok =
+        o.alt_ft.is_nan() || (o.alt_ft.is_finite() && f64::from(o.alt_ft.abs()) <= MAX_ABS_ALT_FT);
+    let vr_ok = o.vrate_fpm.is_nan()
+        || (o.vrate_fpm.is_finite() && f64::from(o.vrate_fpm.abs()) <= MAX_ABS_VRATE_FPM);
+    if !lat_ok {
+        stats.rows_bad_lat += 1;
+    }
+    if !lon_ok {
+        stats.rows_bad_lon += 1;
+    }
+    if !components_ok {
+        stats.rows_bad_velocity_component += 1;
+    }
+    if !speed_ok {
+        stats.rows_bad_speed += 1;
+    }
+    if !alt_ok {
+        stats.rows_bad_altitude += 1;
+    }
+    if !vr_ok {
+        stats.rows_bad_vrate += 1;
+    }
+}
+
 /// Copies the usable rows into `st.obs` in address order. A row with an address another row of the
 /// cycle also has is left out with its twins: which of them is right is not known. A row's 95 %
 /// radius that is not finite, is negative or is above the cap is held to the cap and counted. The
@@ -102,6 +140,7 @@ fn load(st: &mut CaState, rows: &[CaTrack], stats: &mut CycleStats) -> u64 {
     for o in rows {
         if !row_ok(&st.cfg, o) {
             stats.rows_bad += 1;
+            count_bad_row_reasons(&st.cfg, o, stats);
         } else if st.scratch.len() >= st.cfg.max_tracks {
             stats.rows_over_capacity += 1;
         } else {

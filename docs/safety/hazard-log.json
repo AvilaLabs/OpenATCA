@@ -9478,6 +9478,16 @@
           "test_name": "paired_conflict_and_control_timeline_reports_surveillance_loss_and_recovery"
         },
         {
+          "requirement_id": "OA-CA-015",
+          "file": "crates/oa-ca/tests/ca.rs",
+          "test_name": "bad_row_reasons_are_counted_independently_and_may_overlap"
+        },
+        {
+          "requirement_id": "OA-CA-015",
+          "file": "tools/oa-ca/tests/shell.rs",
+          "test_name": "the_files_are_deterministic_and_the_summary_counts_flags_hours_states_and_shortfalls"
+        },
+        {
           "requirement_id": "OA-CA-016",
           "file": "crates/oa-ca/tests/ca.rs",
           "test_name": "two_aircraft_on_the_ground_are_counted_apart_and_one_on_the_ground_is_flagged"
