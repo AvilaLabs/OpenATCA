@@ -47,6 +47,9 @@ pub struct RegionalRuntime {
     console_text: String,
     profile: RegionalRunProfile,
     runway_aids: Vec<RunwayAidRuntime>,
+    runway_assignments: Vec<ActiveRunwayAssignment>,
+    runway_aids_manifest_sha256: Option<[u8; 32]>,
+    runway_aids_profile_sha256: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +57,24 @@ struct RunwayAidRuntime {
     config: oa_runway::adaptation::AidPairConfig,
     geometry: crate::runway_aids::RunwayAidGeometry,
     state: oa_runway::final_monitor::FinalMonitorState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ActiveRunwayAssignment {
+    identity: oa_display::interaction::FlightIdentity,
+    generation: u32,
+    sequence: u32,
+    runway_id: u32,
+    end_name: [u8; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunwayAssignmentValue {
+    pub identity: oa_display::interaction::FlightIdentity,
+    pub generation: u32,
+    pub sequence: u32,
+    pub runway_id: u32,
+    pub end_name: [u8; 3],
 }
 
 const MAX_RUNTIME_RUNWAY_AID_PAIRS: usize = oa_runway::adaptation::MAX_AID_PAIRS;
@@ -148,6 +169,7 @@ pub struct RegionalFrame {
     pub quarantine: RuntimeQuarantineReport,
     /// Typed terminal-aid status. An unconfigured runtime emits one explicit Unavailable packet.
     pub runway_aids: Vec<oa_display::core::runway_aids::RunwayAidPacket>,
+    pub runway_assignments: Vec<oa_display::core::runway_aids::AssignmentPacket>,
 }
 // A7.2: cold shell evidence, bounded by runtime capacities.
 
@@ -656,6 +678,208 @@ pub struct QuarantineMaintenanceReceipt {
     pub audit_checkpoint: oa_audit_core::Checkpoint,
 }
 
+/// One explicit, already-admitted assignment request. The caller supplies the full current flight
+/// key and captured view/command sequence; this operation does not infer an assignment from route,
+/// callsign, or proximity. Principal identity is a registry claim, not credential authentication.
+pub struct RunwayAssignmentRequest<'a> {
+    pub identity: oa_display::interaction::FlightIdentity,
+    pub generation: u32,
+    pub view_sequence: u32,
+    pub service_sequence: u32,
+    pub runway_id: u32,
+    pub end_name: [u8; 3],
+    pub audit_log: &'a Path,
+    pub expected_checkpoint: oa_audit_core::Checkpoint,
+    pub principal_registry: &'a oa_audit_core::PrincipalRegistry,
+    pub principal: u64,
+    pub role: oa_audit_core::Role,
+    pub time_ns: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunwayAssignmentReceipt {
+    pub assignment: RunwayAssignmentValue,
+    pub audit_checkpoint: oa_audit_core::Checkpoint,
+    pub audit_receipt: oa_audit_core::AuditReceipt,
+}
+
+/// Apply an explicit runway assignment after current full-key/view validation and durable audit.
+/// A runway aid profile must be installed first; all refusals leave assignment state unchanged.
+pub fn regional_assign_runway(
+    runtime: &mut RegionalRuntime,
+    request: RunwayAssignmentRequest<'_>,
+) -> Result<RunwayAssignmentReceipt, String> {
+    if runtime.failed || runtime.frame_sequence == 0 || runtime.runway_aids.is_empty() {
+        return Err("runway assignment requires an active configured runtime".into());
+    }
+    let current_sequence = u32::try_from(runtime.frame_sequence)
+        .map_err(|_| "runway assignment view sequence exhausted")?;
+    if request.view_sequence != current_sequence
+        || request.service_sequence == 0
+        || request.generation == 0
+        || request.runway_id == 0
+    {
+        return Err("runway assignment has stale view or invalid sequence/target".into());
+    }
+    let matching_views = runtime
+        .views
+        .iter()
+        .filter(|view| view.address == request.identity.aircraft_address);
+    let mut selected = None;
+    for view in matching_views {
+        if view.identity_claims != 1
+            || view.identity_present != 1
+            || view.reserved != 0
+            || view.generation != request.generation
+            || view.identity != request.identity
+        {
+            return Err("runway assignment full identity is ambiguous or stale".into());
+        }
+        if selected.replace(view).is_some() {
+            return Err("runway assignment address has multiple current views".into());
+        }
+    }
+    if selected.is_none() {
+        return Err("runway assignment target is absent from the current view".into());
+    }
+    let mut matched_airport = None;
+    let mut matches = 0usize;
+    for aid in &runtime.runway_aids {
+        if aid.config.first_runway_id == request.runway_id
+            && aid.config.first_end_name == request.end_name
+        {
+            matched_airport = Some(aid.config.airport);
+            matches += 1;
+        }
+        if aid.config.second_runway_id == request.runway_id
+            && aid.config.second_end_name == request.end_name
+        {
+            matched_airport = Some(aid.config.airport);
+            matches += 1;
+        }
+    }
+    if matches != 1 {
+        return Err("runway assignment target is not unique in the verified profile".into());
+    }
+    let registry_role = oa_audit_core::authorize_principal(
+        request.principal_registry,
+        request.principal,
+        oa_audit_core::Action::RunwayAssignment,
+    )
+    .map_err(|error| format!("runway assignment principal registry refused: {error:?}"))?;
+    if registry_role != request.role {
+        return Err("runway assignment role does not match pinned principal registry".into());
+    }
+    if request.time_ns == 0 {
+        return Err("runway assignment audit timestamp must be positive".into());
+    }
+    let slot_index = runtime.runway_assignments.iter().position(|assignment| {
+        assignment.identity == request.identity && assignment.generation == request.generation
+    });
+    if let Some(index) = slot_index {
+        if runtime
+            .runway_assignments
+            .get(index)
+            .is_none_or(|assignment| request.service_sequence <= assignment.sequence)
+        {
+            return Err("runway assignment sequence is stale or duplicated".into());
+        }
+    }
+    if slot_index.is_none() && runtime.runway_assignments.len() >= runtime.profile.max_flights {
+        return Err("runway assignment active-flight capacity exhausted".into());
+    }
+    let airport = matched_airport.ok_or("runway assignment airport missing")?;
+    let target_text = format!(
+        "RUNWAY\t{}\t{}\t{}",
+        std::str::from_utf8(&airport).unwrap_or("????"),
+        request.runway_id,
+        std::str::from_utf8(&request.end_name).unwrap_or("???")
+    );
+    let (target, target_len) = oa_audit_core::target(target_text.as_bytes())
+        .map_err(|error| format!("runway assignment audit target: {error:?}"))?;
+    let mut detail_text = String::new();
+    detail_text
+        .try_reserve_exact(512)
+        .map_err(|_| "runway assignment audit details allocation refused")?;
+    writeln!(
+        detail_text,
+        "RUNWAY-ASSIGNMENT-V1\nflight_gufi\t{}\naircraft_address\t{:06X}\ncentre\t{}\nplan_id\t{}\ngeneration\t{}\nview_sequence\t{}\nservice_sequence\t{}\nrunway_id\t{}\nend_name\t{}\nmanifest_sha256\t{}\nprofile_sha256\t{}",
+        oa_sha256::to_hex(&request.identity.gufi),
+        request.identity.aircraft_address,
+        std::str::from_utf8(&request.identity.centre).unwrap_or("????"),
+        std::str::from_utf8(&request.identity.plan_id).unwrap_or("????????????"),
+        request.generation,
+        request.view_sequence,
+        request.service_sequence,
+        request.runway_id,
+        std::str::from_utf8(&request.end_name).unwrap_or("???"),
+        runtime.runway_aids_manifest_sha256.map_or_else(|| "unavailable".to_owned(), |digest| oa_sha256::to_hex(&digest)),
+        runtime.runway_aids_profile_sha256.map_or_else(|| "unavailable".to_owned(), |digest| oa_sha256::to_hex(&digest)),
+    )
+    .map_err(|_| "runway assignment audit details formatting failed")?;
+    let (details, details_len) = oa_audit_core::details(detail_text.as_bytes())
+        .map_err(|error| format!("runway assignment audit details: {error:?}"))?;
+    let event = oa_audit_core::Event {
+        principal: request.principal,
+        role: registry_role,
+        action: oa_audit_core::Action::RunwayAssignment,
+        target,
+        target_len,
+        time_ns: request.time_ns,
+        details,
+        details_len,
+    };
+    oa_audit_core::validate_event(&event)
+        .map_err(|error| format!("runway assignment audit event: {error:?}"))?;
+    let (audit_checkpoint, audit_receipt) =
+        oa_audit_log::shell::append_receipt(request.audit_log, request.expected_checkpoint, event)
+            .map_err(|error| format!("runway assignment audit append: {error:?}"))?;
+    let assignment = RunwayAssignmentValue {
+        identity: request.identity,
+        generation: request.generation,
+        sequence: request.service_sequence,
+        runway_id: request.runway_id,
+        end_name: request.end_name,
+    };
+    let stored = ActiveRunwayAssignment {
+        identity: assignment.identity,
+        generation: assignment.generation,
+        sequence: assignment.sequence,
+        runway_id: assignment.runway_id,
+        end_name: assignment.end_name,
+    };
+    if let Some(index) = slot_index {
+        if let Some(slot) = runtime.runway_assignments.get_mut(index) {
+            *slot = stored;
+        }
+    } else {
+        runtime.runway_assignments.push(stored);
+    }
+    Ok(RunwayAssignmentReceipt {
+        assignment,
+        audit_checkpoint,
+        audit_receipt,
+    })
+}
+
+pub fn regional_runway_assignment(
+    runtime: &RegionalRuntime,
+    identity: oa_display::interaction::FlightIdentity,
+    generation: u32,
+) -> Option<RunwayAssignmentValue> {
+    runtime
+        .runway_assignments
+        .iter()
+        .find(|assignment| assignment.identity == identity && assignment.generation == generation)
+        .map(|assignment| RunwayAssignmentValue {
+            identity: assignment.identity,
+            generation: assignment.generation,
+            sequence: assignment.sequence,
+            runway_id: assignment.runway_id,
+            end_name: assignment.end_name,
+        })
+}
+
 /// Audit and acknowledge the selected front item as an explicit manual-responsibility handoff.
 /// The principal, role, timestamp and note are caller claims; this path authenticates no identity
 /// and does not imply that the external manual workflow itself was performed.
@@ -871,6 +1095,9 @@ fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
         console_text: String::with_capacity(128),
         profile,
         runway_aids: Vec::new(),
+        runway_assignments: Vec::with_capacity(profile.max_flights),
+        runway_aids_manifest_sha256: None,
+        runway_aids_profile_sha256: None,
     })
 }
 
@@ -894,8 +1121,8 @@ pub fn regional_install_verified_runway_aids(
     if profile.is_empty() || profile.len() > MAX_RUNTIME_RUNWAY_AID_PAIRS {
         return Err("runway-aid profile exceeds runtime pair capacity".into());
     }
-    runtime
-        .runway_aids
+    let mut configured = Vec::new();
+    configured
         .try_reserve_exact(profile.len())
         .map_err(|_| "runway-aid runtime capacity refused")?;
     for index in 0..profile.len() {
@@ -904,12 +1131,15 @@ pub fn regional_install_verified_runway_aids(
             .ok_or("validated runway-aid pair disappeared")?;
         let geometry = crate::runway_aids::resolve_verified(package, &runtime.model, index)
             .map_err(|error| format!("runway-aid geometry refused: {error:?}"))?;
-        runtime.runway_aids.push(RunwayAidRuntime {
+        configured.push(RunwayAidRuntime {
             config,
             geometry,
             state: oa_runway::final_monitor::FinalMonitorState::new(),
         });
     }
+    runtime.runway_aids = configured;
+    runtime.runway_aids_manifest_sha256 = Some(package.identity().manifest_sha256);
+    runtime.runway_aids_profile_sha256 = package.identity().runway_aids_sha256;
     Ok(())
 }
 
@@ -1200,6 +1430,14 @@ fn execute(
         &mut runtime.next_generation,
         runtime.profile.max_flights,
     )?;
+    runtime.runway_assignments.retain(|assignment| {
+        runtime.views.iter().any(|view| {
+            view.identity_present == 1
+                && view.identity_claims == 1
+                && view.generation == assignment.generation
+                && view.identity == assignment.identity
+        })
+    });
     runtime.observed.clone_from(&surveillance.tracks);
     let runway_aids = runway_aid_packets(
         &mut runtime.runway_aids,
@@ -1229,6 +1467,20 @@ fn execute(
             source_stats: quarantine_stats(&runtime.quarantine_queue)?,
         },
         runway_aids,
+        runway_assignments: runtime
+            .runway_assignments
+            .iter()
+            .map(
+                |assignment| oa_display::core::runway_aids::AssignmentPacket {
+                    identity: assignment.identity,
+                    generation: assignment.generation,
+                    sequence: assignment.sequence,
+                    runway_id: assignment.runway_id,
+                    end_name: assignment.end_name,
+                    reserved: 0,
+                },
+            )
+            .collect(),
     })
 }
 

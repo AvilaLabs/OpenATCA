@@ -39,3 +39,16 @@ pub struct RunwayAidPacket {
     pub unavailable_tracks: u16,
 }
 const _: () = assert!(core::mem::size_of::<RunwayAidPacket>() == 40);
+
+/// One accepted assignment from the runtime's full-key operator boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct AssignmentPacket {
+    pub identity: super::interaction::FlightIdentity,
+    pub generation: u32,
+    pub sequence: u32,
+    pub runway_id: u32,
+    pub end_name: [u8; 3],
+    pub reserved: u8,
+}
+const _: () = assert!(core::mem::size_of::<AssignmentPacket>() == 52);
