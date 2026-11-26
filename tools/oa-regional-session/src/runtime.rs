@@ -437,6 +437,7 @@ pub struct RegionalFrame {
     /// Typed terminal-aid status. An unconfigured runtime emits one explicit Unavailable packet.
     pub runway_aids: Vec<oa_display::core::runway_aids::RunwayAidPacket>,
     pub runway_assignments: Vec<oa_display::core::runway_aids::AssignmentPacket>,
+    pub crda_ghosts: Vec<oa_display::core::runway_aids::CrdaGhostPacket>,
 }
 // A7.2: cold shell evidence, bounded by runtime capacities.
 
@@ -466,10 +467,11 @@ fn runway_aid_packets(
     assignments: &[ActiveRunwayAssignment],
     atpa_scratch: &mut AtpaScratch,
     tracks: &[crate::surveillance::ObservedTrack],
+    crda_ghosts: &mut Vec<oa_display::core::runway_aids::CrdaGhostPacket>,
     scan_time_ns: i64,
     scan_sequence: u64,
 ) -> Vec<oa_display::core::runway_aids::RunwayAidPacket> {
-    use oa_display::core::runway_aids::{Availability, RunwayAidPacket, Severity};
+    use oa_display::core::runway_aids::{Availability, CrdaGhostPacket, RunwayAidPacket, Severity};
     use oa_runway::final_monitor::{
         self, FinalAlertBuffer, FinalSeverity, PredictedTracks, MAX_TRACKS,
     };
@@ -489,6 +491,7 @@ fn runway_aid_packets(
             alert_tracks: 0,
             atpa_warning_pairs: 0,
             atpa_alert_pairs: 0,
+            crda_ghosts: 0,
             unavailable_tracks: 0,
         }];
     }
@@ -505,6 +508,7 @@ fn runway_aid_packets(
         let mut north = [0.0f64; MAX_TRACKS];
         let mut velocity_east = [0.0f64; MAX_TRACKS];
         let mut velocity_north = [0.0f64; MAX_TRACKS];
+        let mut ground_speed = [0.0f64; MAX_TRACKS];
         let mut r95 = [0.0f64; MAX_TRACKS];
         let mut lat = [0i32; MAX_TRACKS];
         let mut lon = [0i32; MAX_TRACKS];
@@ -543,20 +547,35 @@ fn runway_aid_packets(
                     continue;
                 }
                 let Some(point) = point else { continue };
-                let Some((address, e, n, vx, vy, uncertainty, latitude, longitude)) = addresses
-                    .get_mut(included)
-                    .zip(east.get_mut(included))
-                    .zip(north.get_mut(included))
-                    .zip(velocity_east.get_mut(included))
-                    .zip(velocity_north.get_mut(included))
-                    .zip(r95.get_mut(included))
-                    .zip(lat.get_mut(included))
-                    .zip(lon.get_mut(included))
-                    .map(
-                        |(((((((address, e), n), vx), vy), uncertainty), latitude), longitude)| {
-                            (address, e, n, vx, vy, uncertainty, latitude, longitude)
-                        },
-                    )
+                let Some((address, e, n, vx, vy, speed, uncertainty, latitude, longitude)) =
+                    addresses
+                        .get_mut(included)
+                        .zip(east.get_mut(included))
+                        .zip(north.get_mut(included))
+                        .zip(velocity_east.get_mut(included))
+                        .zip(velocity_north.get_mut(included))
+                        .zip(ground_speed.get_mut(included))
+                        .zip(r95.get_mut(included))
+                        .zip(lat.get_mut(included))
+                        .zip(lon.get_mut(included))
+                        .map(
+                            |(
+                                (((((((address, e), n), vx), vy), speed), uncertainty), latitude),
+                                longitude,
+                            )| {
+                                (
+                                    address,
+                                    e,
+                                    n,
+                                    vx,
+                                    vy,
+                                    speed,
+                                    uncertainty,
+                                    latitude,
+                                    longitude,
+                                )
+                            },
+                        )
                 else {
                     invalid = true;
                     break;
@@ -566,6 +585,7 @@ fn runway_aid_packets(
                 *n = point.north_m;
                 *vx = f64::from(track.east_mmps) / 1_000.0;
                 *vy = f64::from(track.north_mmps) / 1_000.0;
+                *speed = oa_math::hypot(*vx, *vy);
                 *uncertainty = f64::from(track.r95_mm) / 1_000.0;
                 *latitude = track.lat_e7;
                 *longitude = track.lon_e7;
@@ -623,6 +643,79 @@ fn runway_aid_packets(
                 }
             }
         }
+        let mut crda_count = 0u16;
+        let crda = if invalid {
+            None
+        } else {
+            let source = oa_runway::terminal_aids::ReferenceLine {
+                origin: aid.geometry.first_threshold,
+                axis_east: aid.geometry.first_inbound_east,
+                axis_north: aid.geometry.first_inbound_north,
+            };
+            let target = oa_runway::terminal_aids::ReferenceLine {
+                origin: aid.geometry.second_threshold,
+                axis_east: aid.geometry.second_inbound_east,
+                axis_north: aid.geometry.second_inbound_north,
+            };
+            let mut ghost_east = [0.0f64; MAX_TRACKS];
+            let mut ghost_north = [0.0f64; MAX_TRACKS];
+            let mut ghost_speed = [0.0f64; MAX_TRACKS];
+            let parents = oa_runway::terminal_aids::CrdaParents {
+                east_m: east.get(..included).unwrap_or(&[]),
+                north_m: north.get(..included).unwrap_or(&[]),
+                ground_speed_mps: ground_speed.get(..included).unwrap_or(&[]),
+            };
+            let result = oa_runway::terminal_aids::project_crda_ghosts(
+                oa_runway::terminal_aids::CrdaTransform {
+                    source,
+                    target,
+                    target_offset_m: aid.geometry.crda_offset_m,
+                },
+                parents,
+                oa_runway::terminal_aids::CrdaGhosts {
+                    east_m: ghost_east.get_mut(..MAX_TRACKS).unwrap_or(&mut []),
+                    north_m: ghost_north.get_mut(..MAX_TRACKS).unwrap_or(&mut []),
+                    ground_speed_mps: ghost_speed.get_mut(..MAX_TRACKS).unwrap_or(&mut []),
+                },
+            );
+            if let Ok(result) = result {
+                crda_count = result.rows;
+                for index in 0..usize::from(result.rows) {
+                    let (
+                        Some(&parent_address),
+                        Some(&ghost_east_m),
+                        Some(&ghost_north_m),
+                        Some(&speed),
+                    ) = (
+                        addresses.get(index),
+                        ghost_east.get(index),
+                        ghost_north.get(index),
+                        ghost_speed.get(index),
+                    )
+                    else {
+                        invalid = true;
+                        break;
+                    };
+                    crda_ghosts.push(CrdaGhostPacket {
+                        scan_sequence,
+                        first_runway_id: aid.config.first_runway_id,
+                        second_runway_id: aid.config.second_runway_id,
+                        parent_address,
+                        origin_lat_e7: aid.geometry.plane_origin_lat_e7,
+                        origin_lon_e7: aid.geometry.plane_origin_lon_e7,
+                        east_m: ghost_east_m,
+                        north_m: ghost_north_m,
+                        ground_speed_mps: speed,
+                    });
+                }
+                Some(result)
+            } else {
+                None
+            }
+        };
+        if crda.is_none() {
+            invalid = true;
+        }
         let atpa = if invalid {
             None
         } else {
@@ -662,6 +755,7 @@ fn runway_aid_packets(
             alert_tracks: 0,
             atpa_warning_pairs: atpa_warnings,
             atpa_alert_pairs: atpa_alerts,
+            crda_ghosts: crda_count,
             unavailable_tracks: omitted,
         });
     }
@@ -677,7 +771,16 @@ mod runway_aid_packet_tests {
     #[test]
     fn unconfigured_runtime_emits_explicit_unavailable_packet() {
         let mut scratch = AtpaScratch::new(1).expect("small bounded ATPA scratch");
-        let packets = runway_aid_packets(&mut [], &[], &mut scratch, &[], 1_000_000_000, 1);
+        let mut ghosts = Vec::new();
+        let packets = runway_aid_packets(
+            &mut [],
+            &[],
+            &mut scratch,
+            &[],
+            &mut ghosts,
+            1_000_000_000,
+            1,
+        );
         assert_eq!(packets.len(), 1);
         let packet = packets.first().expect("one unavailable packet");
         assert_eq!(packet.availability, Availability::Unavailable);
@@ -1726,11 +1829,26 @@ fn execute(
         })
     });
     runtime.observed.clone_from(&surveillance.tracks);
+    let ghost_capacity = runtime
+        .runway_aids
+        .len()
+        .checked_mul(
+            surveillance
+                .tracks
+                .len()
+                .min(oa_runway::terminal_aids::MAX_CRDA_ROWS),
+        )
+        .ok_or("CRDA ghost output capacity overflow")?;
+    let mut crda_ghosts = Vec::new();
+    crda_ghosts
+        .try_reserve_exact(ghost_capacity)
+        .map_err(|_| "CRDA ghost output allocation refused")?;
     let runway_aids = runway_aid_packets(
         &mut runtime.runway_aids,
         &runtime.runway_assignments,
         &mut runtime.atpa_scratch,
         &surveillance.tracks,
+        &mut crda_ghosts,
         surveillance.time_ns,
         runtime.frame_sequence,
     );
@@ -1770,6 +1888,7 @@ fn execute(
                 },
             )
             .collect(),
+        crda_ghosts,
     })
 }
 

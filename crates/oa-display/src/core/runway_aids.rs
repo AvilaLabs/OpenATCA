@@ -37,6 +37,7 @@ pub struct RunwayAidPacket {
     pub alert_tracks: u16,
     pub atpa_warning_pairs: u16,
     pub atpa_alert_pairs: u16,
+    pub crda_ghosts: u16,
     /// Rows excluded due to absent/stale/invalid prediction evidence; never silently treated clear.
     pub unavailable_tracks: u16,
 }
@@ -54,3 +55,19 @@ pub struct AssignmentPacket {
     pub reserved: u8,
 }
 const _: () = assert!(core::mem::size_of::<AssignmentPacket>() == 52);
+
+/// One projected CRDA ghost in the runway pair's local east/north plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub struct CrdaGhostPacket {
+    pub scan_sequence: u64,
+    pub first_runway_id: u32,
+    pub second_runway_id: u32,
+    pub parent_address: u32,
+    pub origin_lat_e7: i32,
+    pub origin_lon_e7: i32,
+    pub east_m: f64,
+    pub north_m: f64,
+    pub ground_speed_mps: f64,
+}
+const _: () = assert!(core::mem::size_of::<CrdaGhostPacket>() == 56);

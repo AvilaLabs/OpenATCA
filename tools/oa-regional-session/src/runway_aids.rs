@@ -14,6 +14,8 @@ const FT_TO_M: f64 = 0.3048;
 pub struct RunwayAidGeometry {
     pub pair: FinalPair,
     pub plane_origin: Geo,
+    pub plane_origin_lat_e7: i32,
+    pub plane_origin_lon_e7: i32,
     pub first_threshold: Local,
     pub first_inbound_east: f64,
     pub first_inbound_north: f64,
@@ -24,7 +26,7 @@ pub struct RunwayAidGeometry {
     pub second_width_m: f64,
     pub crda_offset_m: f64,
 }
-const _: () = assert!(core::mem::size_of::<RunwayAidGeometry>() == 200);
+const _: () = assert!(core::mem::size_of::<RunwayAidGeometry>() == 208);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -264,6 +266,18 @@ pub fn resolve(model: &Model, config: AidPairConfig) -> Result<RunwayAidGeometry
     Ok(RunwayAidGeometry {
         pair,
         plane_origin: plane::plane_origin(&local_plane),
+        plane_origin_lat_e7: model
+            .points
+            .lat
+            .get(airport_row)
+            .copied()
+            .ok_or(GeometryRefusal::MalformedModel)?,
+        plane_origin_lon_e7: model
+            .points
+            .lon
+            .get(airport_row)
+            .copied()
+            .ok_or(GeometryRefusal::MalformedModel)?,
         first_threshold,
         first_inbound_east: first_east,
         first_inbound_north: first_north,
