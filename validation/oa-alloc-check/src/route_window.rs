@@ -114,10 +114,12 @@ fn fixture_model() -> Result<Model, &'static str> {
         procs: model::Procs::default(),
         routes: model::Routes::default(),
         legs: model::Legs::default(),
+        preferred_route_state: model::preferred_route_state::UNAVAILABLE,
+        preferred_routes: model::PreferredRoutes::default(),
+        preferred_route_segments: model::PreferredRouteSegments::default(),
         mora: model::Mora::default(),
         unresolved: model::Unresolved::default(),
         disagreements: model::Disagreements::default(),
-        preferred_routes: model::PreferredRoutes::default(),
         cycle_override: None,
     };
 
