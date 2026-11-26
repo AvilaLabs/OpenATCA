@@ -80,6 +80,19 @@ impl RegionalRunProfile {
             max_total_events: crate::session::MAX_RECORDED_PROFILE_EVENTS,
         }
     }
+
+    /// Bounded raster-producing variant for short, explicit recorded replay bundles such as J2.
+    /// It keeps the recorded surveillance/CA capacities and raises flight/view storage to the
+    /// same finite 4,096-track bound, then enables the existing bounded scope/presentation
+    /// path. This profile is for ADS-B-heavy recorded replay; it is not the analysis-only
+    /// full-day profile and makes no facility-capacity claim.
+    pub const fn recorded_peak_rendered() -> Self {
+        let mut profile = Self::recorded_peak();
+        profile.max_flights = profile.surveillance.max_tracks;
+        profile.surveillance.max_presentation_updates = surveillance::MAX_PRESENTATION_UPDATES;
+        profile.surveillance.render_scope = true;
+        profile
+    }
 }
 
 pub const DEFAULT_REGIONAL_RUN_PROFILE: RegionalRunProfile = RegionalRunProfile {
@@ -417,7 +430,8 @@ fn regional_new_with_profile_and_namespace(
         || profile.max_flight_log_entries > MAX_DRIVER_LOG_ENTRIES
         || profile.max_total_events == 0
         || profile.max_total_events > crate::session::MAX_RECORDED_PROFILE_EVENTS
-        || (profile.surveillance.render_scope && profile.max_flights > MAX_DRIVER_FLIGHTS)
+        || (profile.surveillance.render_scope
+            && profile.max_flights > profile.surveillance.max_tracks)
     {
         return Err("regional profile exceeds fixed runtime bounds".into());
     }
@@ -1158,5 +1172,100 @@ mod transaction_tests {
         let pairs = recorded.surveillance.max_tracks * (recorded.surveillance.max_tracks - 1) / 2;
         assert!(pairs <= recorded.surveillance.max_candidate_pairs);
         assert!(recorded.surveillance.max_candidate_pairs <= 1 << 24);
+
+        let rendered = RegionalRunProfile::recorded_peak_rendered();
+        assert_eq!(
+            rendered.surveillance.max_tracks,
+            recorded.surveillance.max_tracks
+        );
+        assert_eq!(
+            rendered.surveillance.max_open_alerts,
+            recorded.surveillance.max_open_alerts
+        );
+        assert_eq!(
+            rendered.surveillance.max_candidate_pairs,
+            recorded.surveillance.max_candidate_pairs
+        );
+        assert_eq!(
+            rendered.surveillance.max_ca_work_per_frame,
+            recorded.surveillance.max_ca_work_per_frame
+        );
+        assert_eq!(rendered.max_total_events, recorded.max_total_events);
+        assert_eq!(rendered.max_flights, rendered.surveillance.max_tracks);
+        assert!(rendered.surveillance.render_scope);
+        assert_eq!(
+            rendered.surveillance.max_presentation_updates,
+            surveillance::MAX_PRESENTATION_UPDATES
+        );
+    }
+
+    // REQ: OA-REG-019
+    #[test]
+    fn explicit_rendered_recording_profile_processes_more_than_default_track_capacity() {
+        let model = synthetic_model().unwrap();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        let mut engine = regional_new_with_profile(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            RegionalRunProfile::recorded_peak_rendered(),
+        )
+        .unwrap();
+        for second in 1..=3_i64 {
+            let time_ns = second * 1_000_000_000;
+            let longitude_e7 = -870_000_000 + i32::try_from(second - 1).unwrap() * 12_000;
+            let events = (0..33_u32)
+                .map(|index| {
+                    let sequence = (second as u32 - 1) * 33 + index + 1;
+                    let identity = u128::from(index + 1);
+                    let address = 0x00aa_0000 + index;
+                    parse_event_line(&format!(
+                        "v1\t{time_ns}\t{time_ns}\t{sequence}\tSURVEILLANCE\t{identity:032x}\t{address:06x}\tZAU1\tPOS\t410000000\t{longitude_e7}\t10000\t100000\t0\t0"
+                    ))
+                    .unwrap()
+                })
+                .collect();
+            let frame = regional_step(
+                &mut engine,
+                &ReceiptBatch {
+                    receipt_ns: time_ns,
+                    source_clock_regressions: 0,
+                    events,
+                },
+            )
+            .unwrap();
+            if second == 3 {
+                assert_eq!(frame.surveillance.tracks.len(), 33);
+                assert_eq!(regional_pixels(&engine).unwrap().len(), 800 * 600 * 4);
+            }
+        }
+    }
+
+    // REQ: OA-REG-019
+    #[test]
+    fn recorded_render_profile_refuses_candidate_capacity_below_its_track_pair_bound() {
+        let model = synthetic_model().unwrap();
+        let snapshot = oa_airspace::core::snapshot::encode(&model).unwrap();
+        let mut invalid = RegionalRunProfile::recorded_peak_rendered();
+        invalid.surveillance.max_candidate_pairs = 1;
+        let result = regional_new_with_profile(
+            model,
+            oa_sha256::sha256(&snapshot),
+            *b"ZAU1",
+            SurveillanceConfig {
+                centre_lat_e7: 410_000_000,
+                centre_lon_e7: -870_000_000,
+                range_nm: 180.0,
+            },
+            invalid,
+        );
+        assert!(result
+            .err()
+            .is_some_and(|error| error.contains("bounded capacity contract")));
     }
 }

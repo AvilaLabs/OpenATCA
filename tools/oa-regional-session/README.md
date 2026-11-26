@@ -9,6 +9,7 @@ windowed controller workstation are separate integration work.
 ```text
 oa-regional-session run --input examples/synthetic-session.tsv --synthetic-model --out NEW_DIR
 oa-regional-session run --input FILE --snapshot ADAPTATION --out NEW_DIR
+oa-regional-session run --input FILE --snapshot ADAPTATION --profile recorded-peak-rendered --out NEW_DIR
 oa-regional-session run --input examples/synthetic-msaw.tsv --synthetic-model --synthetic-msaw --out NEW_DIR
 oa-regional-session run --input FILE --snapshot ADAPTATION --msaw-inputs MSAW_MANIFEST --out NEW_DIR
 oa-regional-session stage --input FILE --out NEW_DIR
@@ -77,6 +78,16 @@ whole-second positive receipt cutoffs separated by at most 60 seconds; 100,000 i
 normalized input; 768 bytes per row; 256 bytes per filed route/cursor text; 64 MiB adaptation.
 Capacity and work exhaustion refuse explicitly. Offline shell allocation is permitted; this
 composition makes no real-time allocation or deadline qualification claim.
+
+The ordinary `run` profile remains the default. `--profile recorded-peak-rendered` explicitly
+selects the bounded high-volume recorded replay configuration: 4,096 surveillance tracks, finite
+alert/pair/work caps, a 4,096-flight/view table, and rendered output under the existing
+presentation caps. The separately bounded performance-envelope interface remains limited to 32
+rows and does not claim support for performance evidence on every tracked flight.
+The profile is retained in `settings.tsv`, which the run manifest hashes. It is intended for
+short, recorded ADS-B replay and portability evidence; it is not an operational capacity or
+facility-performance claim. J2 cold replay reads this versioned profile from the bound settings
+and invokes the same explicit CLI option. Unknown or altered profile capacity tuples are refused.
 
 Each frame retains completed CA alert episodes and altitude-loss events as well as currently
 open alerts. The core logs are drained only after that evidence is copied. Their payload budget

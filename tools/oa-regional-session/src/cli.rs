@@ -2,9 +2,12 @@
 //! Each successful run is a new directory; COMPLETE is written last. Prefix reconstruction
 //! recomputes state and does not claim a live or distributed process checkpoint.
 
-use crate::runtime::{regional_new, regional_pixels, regional_step};
+use crate::runtime::{
+    regional_new, regional_new_with_profile, regional_pixels, regional_step, RegionalRunProfile,
+    DEFAULT_REGIONAL_RUN_PROFILE,
+};
 use crate::surveillance::{SurveillanceConfig, FRAME_HEIGHT, FRAME_WIDTH, MAX_FRAMES};
-use crate::{flush_receipt_group, parse_event_line, push_event, session_cursor_new};
+use crate::{flush_receipt_group, parse_event_line, push_event, session_cursor_new_with_limit};
 use oa_airspace::core::model::{self, Model};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -24,6 +27,28 @@ pub enum MsawSource {
     Disabled,
     Synthetic,
     Manifest(PathBuf),
+}
+
+/// Persisted CLI profile selection. The absent/default option remains the historical 32-track
+/// rendered run; the recorded profile is an explicit bounded high-volume ADS-B replay variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegionalCliProfile {
+    Default,
+    RecordedPeakRendered,
+}
+
+pub const fn regional_cli_profile_id(profile: RegionalCliProfile) -> &'static str {
+    match profile {
+        RegionalCliProfile::Default => "DEFAULT_V1",
+        RegionalCliProfile::RecordedPeakRendered => "RECORDED_PEAK_RENDERED_V1",
+    }
+}
+
+pub const fn regional_cli_runtime_profile(profile: RegionalCliProfile) -> RegionalRunProfile {
+    match profile {
+        RegionalCliProfile::Default => DEFAULT_REGIONAL_RUN_PROFILE,
+        RegionalCliProfile::RecordedPeakRendered => RegionalRunProfile::recorded_peak_rendered(),
+    }
 }
 
 pub fn read_guarded(path: &Path, max: usize) -> Result<Vec<u8>, String> {
@@ -145,6 +170,24 @@ pub fn run_session_with_options(
     safety: &MsawSource,
     performance: Option<&Path>,
 ) -> Result<(), String> {
+    run_session_with_profile_options(
+        bytes,
+        output,
+        source,
+        safety,
+        performance,
+        RegionalCliProfile::Default,
+    )
+}
+
+pub fn run_session_with_profile_options(
+    bytes: &[u8],
+    output: &Path,
+    source: &ModelSource,
+    safety: &MsawSource,
+    performance: Option<&Path>,
+    selected_profile: RegionalCliProfile,
+) -> Result<(), String> {
     if bytes.len() > 16 * 1024 * 1024 {
         return Err("normalized input exceeds byte limit".into());
     }
@@ -165,12 +208,18 @@ pub fn run_session_with_options(
         centre_lon_e7: -870_000_000,
         range_nm: 180.0,
     };
-    let mut runtime = regional_new(model, snapshot_sha, *b"ZAU1", cfg)?;
+    let profile = regional_cli_runtime_profile(selected_profile);
+    let mut runtime = if selected_profile == RegionalCliProfile::Default {
+        regional_new(model, snapshot_sha, *b"ZAU1", cfg)?
+    } else {
+        regional_new_with_profile(model, snapshot_sha, *b"ZAU1", cfg, profile)?
+    };
     let text = std::str::from_utf8(bytes).map_err(|_| "input not UTF-8")?;
     if text.lines().next() != Some("OA-RS\t1") {
         return Err("expected OA-RS header".into());
     }
-    let mut cursor = session_cursor_new();
+    let mut cursor = session_cursor_new_with_limit(profile.max_total_events)
+        .map_err(|error| format!("session profile event capacity: {error:?}"))?;
     let mut batches = Vec::with_capacity(MAX_FRAMES);
     for row in text.lines().skip(1).filter(|line| !line.is_empty()) {
         let event = parse_event_line(row).map_err(|e| format!("input: {e:?}"))?;
@@ -230,7 +279,11 @@ pub fn run_session_with_options(
     // Runtime failures precede final output publication. Temporary evidence is identifiable by
     // the absence of COMPLETE and is never accepted as a closed result.
     fs::create_dir(output).map_err(|e| format!("create new output: {e}"))?;
-    let mut settings = format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", match source { ModelSource::Synthetic => "SYNTHETIC", ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT" });
+    let mut settings = match selected_profile {
+        // Preserve the prior default settings bytes and behavior exactly.
+        RegionalCliProfile::Default => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nconfiguration\t{cfg:?}\ntracks\t32\nframes\t512\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", match source { ModelSource::Synthetic => "SYNTHETIC", ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT" }),
+        RegionalCliProfile::RecordedPeakRendered => format!("OA_REGIONAL_SETTINGS\t1\ncentre\tZAU1\nprofile\t{}\nconfiguration\t{cfg:?}\ntracks\t{}\nflights\t{}\nframes\t512\nsurveillance_max_frames\t{}\nmax_total_events\t{}\nmax_drain_rows\t{}\nmax_baro_evidence\t{}\nmax_open_alerts\t{}\nmax_candidate_pairs\t{}\nmax_ca_work_per_frame\t{}\nmax_flight_log_entries\t{}\nmax_presentation_updates\t{}\nrender_scope\t{}\nframe_gap_max_ns\t60000000000\nCA_h_m\t1300\nCA_v_ft\t300\nCA_lookahead_ns\t120000000000\ntrajectory_track_age_max_ms\t5000\nnormalization\tpositive-address airborne positions\nmodel\t{}\n", regional_cli_profile_id(selected_profile), profile.surveillance.max_tracks, profile.max_flights, profile.surveillance.max_frames, profile.max_total_events, profile.surveillance.max_drain_rows, profile.surveillance.max_baro_evidence, profile.surveillance.max_open_alerts, profile.surveillance.max_candidate_pairs, profile.surveillance.max_ca_work_per_frame, profile.max_flight_log_entries, profile.surveillance.max_presentation_updates, profile.surveillance.render_scope, match source { ModelSource::Synthetic => "SYNTHETIC", ModelSource::Snapshot(_) => "SUPPLIED_SNAPSHOT" }),
+    };
     settings.push_str(match safety {
         MsawSource::Disabled => "msaw\tUNAVAILABLE_NOT_CONFIGURED\n",
         MsawSource::Synthetic => "msaw\tPUBLIC_SYNTHETIC_FLOOR_WEATHER\n",

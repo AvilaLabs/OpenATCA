@@ -7,8 +7,9 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use oa_regional_session::{
-    flush_receipt_group, parse_event_line, push_event, session_cursor_new, session_total_events,
-    summarize_input_batch, FrameEvidence, InputError, MAX_EVENT_LINE_BYTES, MAX_SESSION_EVENTS,
+    flush_receipt_group, parse_event_line, push_event, session_cursor_new_with_limit,
+    session_total_events, summarize_input_batch, FrameEvidence, InputError, MAX_EVENT_LINE_BYTES,
+    MAX_RECORDED_PROFILE_EVENTS, MAX_SESSION_EVENTS,
 };
 
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
@@ -51,6 +52,7 @@ struct Arguments {
     model: Option<oa_regional_session::cli::ModelSource>,
     safety: oa_regional_session::cli::MsawSource,
     performance: Option<PathBuf>,
+    profile: oa_regional_session::cli::RegionalCliProfile,
 }
 
 fn arguments() -> Result<Arguments, CliError> {
@@ -66,10 +68,11 @@ fn arguments() -> Result<Arguments, CliError> {
     let mut model = None;
     let mut safety = None;
     let mut performance = None;
+    let mut profile = None;
     let mut count = 0;
     while let Some(arg) = args.next() {
         count += 1;
-        if count > 5 {
+        if count > 6 {
             return Err(CliError::Usage);
         }
         match arg.to_str() {
@@ -94,6 +97,20 @@ fn arguments() -> Result<Arguments, CliError> {
             Some("--performance") if execute && performance.is_none() => {
                 performance = Some(args.next().map(PathBuf::from).ok_or(CliError::Usage)?);
             }
+            Some("--profile") if execute && profile.is_none() => {
+                profile = Some(
+                    match args
+                        .next()
+                        .and_then(|value| value.into_string().ok())
+                        .as_deref()
+                    {
+                        Some("recorded-peak-rendered") => {
+                            oa_regional_session::cli::RegionalCliProfile::RecordedPeakRendered
+                        }
+                        _ => return Err(CliError::Usage),
+                    },
+                );
+            }
             _ => return Err(CliError::Usage),
         }
     }
@@ -108,6 +125,7 @@ fn arguments() -> Result<Arguments, CliError> {
         model,
         safety: safety.unwrap_or(oa_regional_session::cli::MsawSource::Disabled),
         performance,
+        profile: profile.unwrap_or(oa_regional_session::cli::RegionalCliProfile::Default),
     })
 }
 
@@ -160,7 +178,12 @@ fn row_failure_accounting<'a>(
     )
 }
 
+#[cfg(test)]
 fn parse_input(bytes: &[u8]) -> Result<Vec<FrameEvidence>, CliError> {
+    parse_input_with_limit(bytes, MAX_SESSION_EVENTS)
+}
+
+fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEvidence>, CliError> {
     let text = std::str::from_utf8(bytes).map_err(|_| CliError::InvalidUtf8)?;
     let mut lines = text.split('\n');
     match lines.next() {
@@ -168,7 +191,8 @@ fn parse_input(bytes: &[u8]) -> Result<Vec<FrameEvidence>, CliError> {
         Some(_) => return Err(CliError::BadHeader),
         None => return Err(CliError::MissingHeader),
     }
-    let mut cursor = session_cursor_new();
+    let mut cursor =
+        session_cursor_new_with_limit(max_events).map_err(|_| CliError::TooManyEvents)?;
     let mut evidence = Vec::new();
     let mut line_number = 1usize;
     while let Some(raw) = lines.next() {
@@ -185,7 +209,9 @@ fn parse_input(bytes: &[u8]) -> Result<Vec<FrameEvidence>, CliError> {
                 accounting,
             });
         }
-        if cursor_total(&cursor) >= MAX_SESSION_EVENTS as u64 {
+        if cursor_total(&cursor)
+            >= u64::try_from(max_events).map_err(|_| CliError::TooManyEvents)?
+        {
             let accounting = row_failure_accounting(&cursor, lines)?;
             return Err(CliError::Ordering {
                 line: line_number,
@@ -306,6 +332,7 @@ fn run() -> Result<(), CliError> {
         model,
         safety,
         performance,
+        profile,
     } = arguments()?;
     oa_sealed::refuse_io(&input).map_err(CliError::Io)?;
     oa_sealed::refuse_io(&output).map_err(CliError::Io)?;
@@ -316,14 +343,21 @@ fn run() -> Result<(), CliError> {
         oa_sealed::refuse_io(path).map_err(CliError::Io)?;
     }
     let bytes = read_input(&input)?;
-    let frames = parse_input(&bytes)?;
+    let max_events = match profile {
+        oa_regional_session::cli::RegionalCliProfile::Default => MAX_SESSION_EVENTS,
+        oa_regional_session::cli::RegionalCliProfile::RecordedPeakRendered => {
+            MAX_RECORDED_PROFILE_EVENTS
+        }
+    };
+    let frames = parse_input_with_limit(&bytes, max_events)?;
     match model {
-        Some(source) => oa_regional_session::cli::run_session_with_options(
+        Some(source) => oa_regional_session::cli::run_session_with_profile_options(
             &bytes,
             &output,
             &source,
             &safety,
             performance.as_deref(),
+            profile,
         )
         .map_err(CliError::Runtime),
         None => write_report(&output, &frames),
@@ -333,7 +367,7 @@ fn run() -> Result<(), CliError> {
 fn main() {
     if let Err(error) = run() {
         let message = match error {
-            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST]; stage --input FILE --out NEW_DIR".to_owned(),
+            CliError::Usage => "usage: oa-regional-session run --input FILE --out NEW_DIR (--snapshot FILE | --synthetic-model) [--msaw-inputs MANIFEST | --synthetic-msaw] [--performance MANIFEST] [--profile recorded-peak-rendered]; stage --input FILE --out NEW_DIR".to_owned(),
             CliError::Io(error) => format!("I/O error: {error}"),
             CliError::InputTooLarge => "input exceeds the 16 MiB limit".to_owned(),
             CliError::InvalidUtf8 => "input is not UTF-8".to_owned(),
@@ -360,7 +394,9 @@ fn main() {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use super::{parse_input, CliError, FrameEvidence, InputError, RowAccounting};
+    use super::{
+        parse_input, parse_input_with_limit, CliError, FrameEvidence, InputError, RowAccounting,
+    };
 
     const ROW: &str = "v1\t1000\t900\t{sequence}\tADAPTATION\t00000000000000000000000000000385\tABC123\tZAU1\tFEED\tUP\t1";
 
@@ -404,6 +440,28 @@ mod tests {
                 denominator: 0,
             },
         }
+    }
+
+    // REQ: OA-REG-019
+    #[test]
+    fn selected_event_limit_controls_parser_capacity_without_changing_the_default() {
+        let first = ROW.replace("{sequence}", "1");
+        let second = ROW.replace("{sequence}", "2");
+        let input = format!("OA-RS\t1\n{first}\n{second}\n");
+        assert!(parse_input_with_limit(input.as_bytes(), 2).is_ok());
+        assert_eq!(
+            ordering_accounting(
+                parse_input_with_limit(input.as_bytes(), 1),
+                "session event capacity reached"
+            ),
+            RowAccounting {
+                admitted: 1,
+                refused: 1,
+                unexamined: 0,
+                denominator: 2,
+            }
+        );
+        assert!(parse_input(input.as_bytes()).is_ok());
     }
 
     #[test]

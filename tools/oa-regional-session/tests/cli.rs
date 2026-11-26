@@ -261,3 +261,66 @@ fn full_synthetic_session_has_closed_identical_evidence_and_valid_images() {
     );
     fs::remove_dir_all(root).expect("cleanup");
 }
+
+// REQ: OA-REG-019, OA-REG-020
+#[test]
+fn explicit_recorded_peak_profile_is_persisted_and_publishes_bound_frames() {
+    let _serial = CLI_PROCESS_LOCK.lock().expect("CLI fixture process lock");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock follows the Unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!(
+        "oa-regional-recorded-profile-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir(&root).expect("create isolated test directory");
+    let input = root.join("synthetic.tsv");
+    fs::write(&input, include_str!("../examples/synthetic-session.tsv"))
+        .expect("public synthetic input");
+    let executable = root.join("oa-regional-session");
+    fs::copy(env!("CARGO_BIN_EXE_oa-regional-session"), &executable)
+        .expect("install standalone test binary");
+    let output = root.join("recorded-profile");
+    let result = Command::new(&executable)
+        .args([
+            "run",
+            "--synthetic-model",
+            "--profile",
+            "recorded-peak-rendered",
+            "--input",
+        ])
+        .arg(&input)
+        .arg("--out")
+        .arg(&output)
+        .output()
+        .expect("run the explicit recorded profile");
+    assert!(
+        result.status.success(),
+        "CLI failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let settings = fs::read_to_string(output.join("settings.tsv")).expect("profile settings");
+    for line in [
+        "profile\tRECORDED_PEAK_RENDERED_V1",
+        "tracks\t4096",
+        "flights\t4096",
+        "max_total_events\t10000000",
+        "max_open_alerts\t1048576",
+        "max_candidate_pairs\t8388608",
+        "render_scope\ttrue",
+    ] {
+        assert!(
+            settings.lines().any(|actual| actual == line),
+            "missing {line}"
+        );
+    }
+    let manifest = fs::read(output.join("manifest.tsv")).expect("manifest");
+    let complete = fs::read_to_string(output.join("COMPLETE")).expect("completion marker");
+    assert_eq!(
+        complete.trim(),
+        oa_sha256::to_hex(&oa_sha256::sha256(&manifest))
+    );
+    assert!(output.join("frame-0002.ppm").is_file());
+    fs::remove_dir_all(root).expect("cleanup");
+}

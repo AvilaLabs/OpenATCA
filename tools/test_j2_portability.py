@@ -36,17 +36,26 @@ class SyntheticPortabilityTests(unittest.TestCase):
         self.adaptation.mkdir()
         self.baseline.mkdir()
         self.input = b"OA-RS\t1\nv1\t1000000000\t1000000000\t1\tSFDPS\t0\t1\tZAU1\tPOS\t419000000\t-879000000\t10000\t0\t0\t0\n"
+        self.provenance = b"OA_PROVENANCE\t1\nsynthetic\n"
+        self.quarantine = b"OA_QUARANTINE\t1\n"
+        self.counts = b"OA_RECORDING_IMPORT_REPORT\t1\n"
         self.index = (
             "OA_RECORDING_IMPORT_MANIFEST\t1\n"
             "centre\tZAU1\n"
             f"normalized_bytes\t{len(self.input)}\n"
             f"normalized_sha256\t{sha(self.input)}\n"
+            f"provenance_bytes\t{len(self.provenance)}\n"
+            f"provenance_sha256\t{sha(self.provenance)}\n"
+            f"quarantine_bytes\t{len(self.quarantine)}\n"
+            f"quarantine_sha256\t{sha(self.quarantine)}\n"
+            f"report_bytes\t{len(self.counts)}\n"
+            f"report_sha256\t{sha(self.counts)}\n"
             "input_stream\t0\tSFDPS\t" + "a" * 64 + "\t1\t1\t0\n"
         ).encode()
         self._write(self.recording / "normalized.tsv", self.input)
-        self._write(self.recording / "provenance.tsv", b"OA_PROVENANCE\t1\nsynthetic\n")
-        self._write(self.recording / "quarantine.tsv", b"OA_QUARANTINE\t1\n")
-        self._write(self.recording / "counts.tsv", b"OA_RECORDING_IMPORT_REPORT\t1\n")
+        self._write(self.recording / "provenance.tsv", self.provenance)
+        self._write(self.recording / "quarantine.tsv", self.quarantine)
+        self._write(self.recording / "counts.tsv", self.counts)
         self._write(self.recording / "manifest.tsv", self.index)
         self._write(self.recording / "COMPLETE", (sha(self.index) + "\n").encode())
 
@@ -106,6 +115,62 @@ class SyntheticPortabilityTests(unittest.TestCase):
         self.assertEqual((target / "adaptation/airspace.snapshot").read_bytes(), self.snapshot)
         self.assertEqual((target / "replay/settings.tsv").read_bytes(), self.settings)
 
+    # REQ: OA-REG-020
+    def test_recorded_profile_is_bound_through_export_reimport_and_replay_selector(self) -> None:
+        self.assertEqual(j2.regional_run_profile(self.settings), ("DEFAULT_V1", None))
+        old_settings_sha = sha(self.settings)
+        lines = [
+            "OA_REGIONAL_SETTINGS\t1",
+            "centre\tZAU1",
+            *[f"{name}\t{value}" for name, value in j2.RECORDED_PROFILE_SETTINGS.items()],
+            "configuration\tSurveillanceConfig",
+            "frame_gap_max_ns\t60000000000",
+            "CA_h_m\t1300",
+            "CA_v_ft\t300",
+            "CA_lookahead_ns\t120000000000",
+            "normalization\tpositive-address airborne positions",
+            "model\tSUPPLIED_SNAPSHOT",
+        ]
+        self.settings = ("\n".join(lines) + "\n").encode()
+        self._write(self.baseline / "settings.tsv", self.settings)
+        self.run_manifest = self.run_manifest.replace(
+            f"settings_sha256\t{old_settings_sha}".encode(),
+            f"settings_sha256\t{sha(self.settings)}".encode(),
+        )
+        self._write(self.baseline / "manifest.tsv", self.run_manifest)
+        self._write(self.baseline / "COMPLETE", (sha(self.run_manifest) + "\n").encode())
+
+        self.assertEqual(
+            j2.regional_run_profile(self.settings),
+            (j2.RECORDED_PROFILE_ID, "recorded-peak-rendered"),
+        )
+        bundle = self._export("recorded-profile-bundle")
+        parsed, _manifest = j2.load_bundle(bundle)
+        files = j2.verify_bundle_files(bundle, parsed)
+        self.assertEqual(files["replay/settings.tsv"], self.settings)
+        target = self.root / "recorded-profile-reimport"
+        j2.reimport_bundle(bundle, target)
+        self.assertEqual((target / "replay/settings.tsv").read_bytes(), self.settings)
+
+    def test_recorded_profile_rejects_unknown_duplicate_and_changed_capacity(self) -> None:
+        with self.assertRaisesRegex(j2.DrillError, "unsupported run profile"):
+            j2.regional_run_profile(b"OA_REGIONAL_SETTINGS\t1\nprofile\tOTHER_V1\n")
+        with self.assertRaisesRegex(j2.DrillError, "duplicate field"):
+            j2.regional_run_profile(
+                b"OA_REGIONAL_SETTINGS\t1\nprofile\tRECORDED_PEAK_RENDERED_V1\n"
+                b"profile\tRECORDED_PEAK_RENDERED_V1\n"
+            )
+        fields = [
+            "OA_REGIONAL_SETTINGS\t1",
+            "centre\tZAU1",
+            *[f"{name}\t{value}" for name, value in j2.RECORDED_PROFILE_SETTINGS.items()],
+        ]
+        settings = "\n".join(fields) + "\n"
+        for name in ("tracks", "flights"):
+            changed = settings.replace(f"{name}\t4096", f"{name}\t32").encode()
+            with self.assertRaisesRegex(j2.DrillError, "capacities do not match"):
+                j2.regional_run_profile(changed)
+
     def test_empty_recording_or_zero_frame_baseline_is_refused(self) -> None:
         empty = b"OA-RS\t1\n"
         self._write(self.recording / "normalized.tsv", empty)
@@ -123,6 +188,12 @@ class SyntheticPortabilityTests(unittest.TestCase):
         self._write(self.baseline / "COMPLETE", (sha(self.run_manifest) + "\n").encode())
         with self.assertRaisesRegex(j2.DrillError, "zero frames"):
             self._export("zero-frames")
+
+    # REQ: OA-REG-020
+    def test_sidecars_must_match_the_recording_import_manifest(self) -> None:
+        self._write(self.recording / "provenance.tsv", self.provenance + b"tampered\n")
+        with self.assertRaisesRegex(j2.DrillError, "provenance sidecar"):
+            self._export()
 
     def test_bad_completion_adaptation_binding_tamper_and_public_output_refuse(self) -> None:
         self._write(self.recording / "COMPLETE", b"0" * 64 + b"\n")

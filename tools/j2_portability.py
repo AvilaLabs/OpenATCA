@@ -35,6 +35,23 @@ CHUNK_BYTES = 64 * 1024
 HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
 RUST_TOOLCHAIN = "1.89.0"
+RECORDED_PROFILE_ID = "RECORDED_PEAK_RENDERED_V1"
+RECORDED_PROFILE_SETTINGS = {
+    "profile": RECORDED_PROFILE_ID,
+    "tracks": "4096",
+    "flights": "4096",
+    "frames": "512",
+    "surveillance_max_frames": "20000000",
+    "max_total_events": "10000000",
+    "max_drain_rows": "262144",
+    "max_baro_evidence": "1000000",
+    "max_open_alerts": "1048576",
+    "max_candidate_pairs": "8388608",
+    "max_ca_work_per_frame": "8388608",
+    "max_flight_log_entries": "1024",
+    "max_presentation_updates": "8192",
+    "render_scope": "true",
+}
 
 SCRIPT = Path(__file__).resolve(strict=True)
 GUARD_SPEC = importlib.util.spec_from_file_location("j2_sealed_guard", SCRIPT.with_name("sealed_guard.py"))
@@ -203,7 +220,12 @@ def validate_recording_import(directory: Path) -> tuple[dict[str, bytes], str]:
         directory, "manifest.tsv", "COMPLETE", MAX_IMPORT_MANIFEST_BYTES
     )
     rows = parse_tsv_fields(manifest, "OA_RECORDING_IMPORT_MANIFEST\t1", 128)
-    fields = unique_fields(rows, {"centre", "normalized_bytes", "normalized_sha256"})
+    fields = unique_fields(rows, {
+        "centre", "normalized_bytes", "normalized_sha256",
+        "provenance_bytes", "provenance_sha256",
+        "quarantine_bytes", "quarantine_sha256",
+        "report_bytes", "report_sha256",
+    })
     if fields["centre"] != "ZAU1":
         raise DrillError("recording import centre must be ZAU1")
     index_rows = [row for row in rows if row and row[0] == "input_stream"]
@@ -219,6 +241,20 @@ def validate_recording_import(directory: Path) -> tuple[dict[str, bytes], str]:
     normalized = read_bounded(directory / "normalized.tsv", MAX_NORMALIZED_BYTES)
     if len(normalized) != int(fields["normalized_bytes"]) or sha256(normalized) != fields["normalized_sha256"]:
         raise DrillError("normalized input does not match its recording-index manifest")
+    sidecars: dict[str, bytes] = {}
+    for filename, label, limit in (
+        ("provenance.tsv", "provenance", MAX_PROVENANCE_BYTES),
+        ("quarantine.tsv", "quarantine", MAX_QUARANTINE_BYTES),
+        ("counts.tsv", "report", MAX_COUNTS_BYTES),
+    ):
+        byte_count = fields[f"{label}_bytes"]
+        digest = fields[f"{label}_sha256"]
+        if not byte_count.isascii() or not byte_count.isdecimal() or not HEX64.fullmatch(digest):
+            raise DrillError(f"{label} metadata has an invalid byte count or digest")
+        payload = read_bounded(directory / filename, limit)
+        if len(payload) != int(byte_count) or sha256(payload) != digest:
+            raise DrillError(f"{label} sidecar does not match its recording-index manifest")
+        sidecars[filename] = payload
     try:
         normalized_text = normalized.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -226,15 +262,11 @@ def validate_recording_import(directory: Path) -> tuple[dict[str, bytes], str]:
     normalized_lines = normalized_text.splitlines()
     if not normalized_lines or normalized_lines[0] != "OA-RS\t1" or len(normalized_lines) < 2:
         raise DrillError("normalized replay input has no event rows")
-    for name, limit in (("provenance.tsv", MAX_PROVENANCE_BYTES),
-                        ("quarantine.tsv", MAX_QUARANTINE_BYTES),
-                        ("counts.tsv", MAX_COUNTS_BYTES)):
-        read_bounded(directory / name, limit)
     return {
         "recording/normalized.tsv": normalized,
-        "recording/provenance.tsv": read_bounded(directory / "provenance.tsv", MAX_PROVENANCE_BYTES),
-        "recording/quarantine.tsv": read_bounded(directory / "quarantine.tsv", MAX_QUARANTINE_BYTES),
-        "recording/counts.tsv": read_bounded(directory / "counts.tsv", MAX_COUNTS_BYTES),
+        "recording/provenance.tsv": sidecars["provenance.tsv"],
+        "recording/quarantine.tsv": sidecars["quarantine.tsv"],
+        "recording/counts.tsv": sidecars["counts.tsv"],
         "recording/index.tsv": manifest,
         "recording/COMPLETE": (manifest_hash + "\n").encode("ascii"),
     }, manifest_hash
@@ -261,6 +293,36 @@ def parse_regional_manifest(manifest: bytes) -> tuple[dict[str, str], list[list[
         if not HEX64.fullmatch(frame[4]) or not HEX64.fullmatch(frame[5]):
             raise DrillError("regional replay frame manifest has an invalid digest")
     return fields, frames
+
+
+def regional_run_profile(settings: bytes) -> tuple[str, str | None]:
+    """Return the validated stored CLI profile and optional CLI selector.
+
+    Historic settings without a profile row replay with unchanged defaults. The recorded profile
+    is accepted only with its exact versioned capacity tuple, so a digest-bound settings file
+    cannot ask a fresh clone to run a different configuration under the same profile label.
+    """
+    try:
+        text = settings.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DrillError("regional settings are not UTF-8") from exc
+    lines = text.splitlines()
+    if not lines or lines[0] != "OA_REGIONAL_SETTINGS\t1":
+        raise DrillError("regional settings have an unsupported header")
+    fields: dict[str, str] = {}
+    for line in lines[1:]:
+        parts = line.split("\t", 1)
+        if len(parts) != 2 or not parts[0] or parts[0] in fields:
+            raise DrillError("regional settings contain a malformed or duplicate field")
+        fields[parts[0]] = parts[1]
+    profile = fields.get("profile")
+    if profile is None:
+        return "DEFAULT_V1", None
+    if profile != RECORDED_PROFILE_ID:
+        raise DrillError("regional settings name an unsupported run profile")
+    if any(fields.get(name) != value for name, value in RECORDED_PROFILE_SETTINGS.items()):
+        raise DrillError("recorded regional profile capacities do not match the selected profile")
+    return RECORDED_PROFILE_ID, "recorded-peak-rendered"
 
 
 def validate_adaptation_package(manifest: bytes, snapshot: bytes) -> None:
@@ -333,6 +395,7 @@ def validate_baseline(directory: Path, input_hash: str, snapshot_hash: str) -> t
         raise DrillError("baseline replay settings digest mismatch")
     if b"centre\tZAU1\n" not in settings:
         raise DrillError("baseline replay configuration is not for ZAU1")
+    regional_run_profile(settings)
     verify_frame_files(directory, frames)
     return {
         "replay/settings.tsv": settings,
@@ -541,6 +604,7 @@ def run_replay(repo: Path, binary: Path, bundle: Path, reimport_dir: Path, outpu
         raise DrillError("fresh clone is not clean at the pinned source commit")
     output = require_private_path(output, new=True)
     settings_expected = files["replay/settings.tsv"]
+    profile_id, profile_cli = regional_run_profile(settings_expected)
     os.mkdir(output, 0o700)
     input_path = reimport_dir / "recording/normalized.tsv"
     snapshot_path = reimport_dir / "adaptation/airspace.snapshot"
@@ -549,7 +613,10 @@ def run_replay(repo: Path, binary: Path, bundle: Path, reimport_dir: Path, outpu
         env = {key: os.environ[key] for key in ("PATH", "HOME", "RUSTUP_HOME", "CARGO_HOME", "TMPDIR") if key in os.environ}
         if runtime_env is not None:
             env.update({key: runtime_env[key] for key in ("CARGO_HOME", "CARGO_TARGET_DIR") if key in runtime_env})
-        result = subprocess.run([str(binary), "run", "--input", str(input_path), "--snapshot", str(snapshot_path), "--out", str(output / "run")],
+        command = [str(binary), "run", "--input", str(input_path), "--snapshot", str(snapshot_path), "--out", str(output / "run")]
+        if profile_cli is not None:
+            command.extend(["--profile", profile_cli])
+        result = subprocess.run(command,
                                 cwd=repo, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, timeout=14_400, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -577,6 +644,7 @@ def run_replay(repo: Path, binary: Path, bundle: Path, reimport_dir: Path, outpu
         raise DrillError("fresh-clone replay adaptation digest differs from the exported snapshot")
     return {
         "status": "MATCH",
+        "regional_run_profile": profile_id,
         "bundle_sha256": sha256(_manifest),
         "recording_index_sha256": parsed["recording_index_sha256"],
         "baseline_manifest_sha256": parsed["baseline_manifest_sha256"],
@@ -716,6 +784,7 @@ def cold_portability_drill(source_repo: Path, bundle: Path, clone_out: Path, car
     report = {
         "schema": "openatca-j2-cold-replay-result-v1",
         "status": replay_result["status"],
+        "regional_run_profile": replay_result["regional_run_profile"],
         "source_commit": source_commit,
         "bundle_sha256": replay_result["bundle_sha256"],
         "recording_index_sha256": replay_result["recording_index_sha256"],

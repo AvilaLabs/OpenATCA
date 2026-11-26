@@ -308,7 +308,8 @@ pub struct SharedFlightView {
     pub handoff_stamp: Stamp,
     pub reserved_tail: [u8; 8],
 }
-// Budget: at most 32 flight snapshots are copied per selected centre per admitted receipt frame.
+// Budget: snapshots copied per admitted receipt frame are bounded by the selected driver's
+// capacity (32 for ordinary sessions; larger only for explicit offline profiles).
 const _: () = assert!(core::mem::size_of::<SharedFlightView>() == 336);
 
 /// Why a view query did not produce a complete, unambiguous set of frozen rows.
