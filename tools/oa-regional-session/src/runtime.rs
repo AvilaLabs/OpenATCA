@@ -46,7 +46,17 @@ pub struct RegionalRuntime {
     next_generation: u32,
     console_text: String,
     profile: RegionalRunProfile,
+    runway_aids: Vec<RunwayAidRuntime>,
 }
+
+#[derive(Clone, Copy)]
+struct RunwayAidRuntime {
+    config: oa_runway::adaptation::AidPairConfig,
+    geometry: crate::runway_aids::RunwayAidGeometry,
+    state: oa_runway::final_monitor::FinalMonitorState,
+}
+
+const MAX_RUNTIME_RUNWAY_AID_PAIRS: usize = oa_runway::adaptation::MAX_AID_PAIRS;
 
 /// Versioned capacities for a single offline replay. Defaults reproduce the historic small
 /// session; `recorded_peak` is an explicitly selected high-volume analysis profile.
@@ -136,6 +146,8 @@ pub struct RegionalFrame {
     pub controller_selection: Option<oa_display::interaction::FlightIdentity>,
     pub console_text: String,
     pub quarantine: RuntimeQuarantineReport,
+    /// Typed terminal-aid status. An unconfigured runtime emits one explicit Unavailable packet.
+    pub runway_aids: Vec<oa_display::core::runway_aids::RunwayAidPacket>,
 }
 // A7.2: cold shell evidence, bounded by runtime capacities.
 
@@ -159,6 +171,213 @@ pub struct RuntimeQuarantineReport {
 /// Maximum caller-supplied performance envelopes in one opt-in receipt (at most 32 rows; matching
 /// work is bounded by 32 flights × 32 envelopes).
 pub const MAX_PERFORMANCE_ENVELOPES: usize = MAX_DRIVER_FLIGHTS;
+
+fn runway_aid_packets(
+    aids: &mut [RunwayAidRuntime],
+    tracks: &[crate::surveillance::ObservedTrack],
+    scan_time_ns: i64,
+    scan_sequence: u64,
+) -> Vec<oa_display::core::runway_aids::RunwayAidPacket> {
+    use oa_display::core::runway_aids::{Availability, RunwayAidPacket, Severity};
+    use oa_runway::final_monitor::{
+        self, FinalAlertBuffer, FinalSeverity, PredictedTracks, MAX_TRACKS,
+    };
+
+    if aids.is_empty() {
+        return vec![RunwayAidPacket {
+            scan_sequence,
+            first_runway_id: 0,
+            first_end_name: [0; 3],
+            second_runway_id: 0,
+            second_end_name: [0; 3],
+            availability: Availability::Unavailable,
+            maximum_severity: Severity::Clear,
+            predicted_tracks: 0,
+            caution_tracks: 0,
+            warning_tracks: 0,
+            alert_tracks: 0,
+            unavailable_tracks: 0,
+        }];
+    }
+    let Ok(now_ns) = u64::try_from(scan_time_ns) else {
+        return Vec::new();
+    };
+    if now_ns == 0 || aids.len() > MAX_RUNTIME_RUNWAY_AID_PAIRS {
+        return Vec::new();
+    }
+    let mut packets = Vec::with_capacity(aids.len());
+    for aid in aids {
+        let mut addresses = [0u32; MAX_TRACKS];
+        let mut east = [0.0f64; MAX_TRACKS];
+        let mut north = [0.0f64; MAX_TRACKS];
+        let mut velocity_east = [0.0f64; MAX_TRACKS];
+        let mut velocity_north = [0.0f64; MAX_TRACKS];
+        let mut r95 = [0.0f64; MAX_TRACKS];
+        let mut lat = [0i32; MAX_TRACKS];
+        let mut lon = [0i32; MAX_TRACKS];
+        let mut included = 0usize;
+        let mut omitted = 0u16;
+        let mut report_ns = now_ns;
+        let local_plane = oa_runway::plane::plane_new(
+            aid.geometry.plane_origin.lat_deg,
+            aid.geometry.plane_origin.lon_deg,
+        );
+        let mut invalid = local_plane.is_none() || tracks.len() > MAX_TRACKS;
+        if tracks.len() > MAX_TRACKS {
+            omitted = u16::try_from(tracks.len().min(usize::from(u16::MAX))).unwrap_or(u16::MAX);
+        }
+        if let Some(local_plane) = local_plane.filter(|_| !invalid) {
+            let mut previous_address = 0u32;
+            for track in tracks {
+                let age = scan_time_ns.checked_sub(track.newest_source_ns);
+                let fresh = age.is_some_and(|delta| (0..4_800_000_000).contains(&delta));
+                let point = oa_runway::plane::to_local(
+                    &local_plane,
+                    oa_runway::plane::Geo {
+                        lat_deg: f64::from(track.lat_e7) / 10_000_000.0,
+                        lon_deg: f64::from(track.lon_e7) / 10_000_000.0,
+                    },
+                );
+                if !fresh
+                    || track.address == 0
+                    || track.address <= previous_address
+                    || point.is_none()
+                {
+                    omitted = omitted.saturating_add(1);
+                    if track.address != 0 && track.address <= previous_address {
+                        invalid = true;
+                    }
+                    continue;
+                }
+                let Some(point) = point else { continue };
+                let Some((address, e, n, vx, vy, uncertainty, latitude, longitude)) = addresses
+                    .get_mut(included)
+                    .zip(east.get_mut(included))
+                    .zip(north.get_mut(included))
+                    .zip(velocity_east.get_mut(included))
+                    .zip(velocity_north.get_mut(included))
+                    .zip(r95.get_mut(included))
+                    .zip(lat.get_mut(included))
+                    .zip(lon.get_mut(included))
+                    .map(
+                        |(((((((address, e), n), vx), vy), uncertainty), latitude), longitude)| {
+                            (address, e, n, vx, vy, uncertainty, latitude, longitude)
+                        },
+                    )
+                else {
+                    invalid = true;
+                    break;
+                };
+                *address = track.address;
+                *e = point.east_m;
+                *n = point.north_m;
+                *vx = f64::from(track.east_mmps) / 1_000.0;
+                *vy = f64::from(track.north_mmps) / 1_000.0;
+                *uncertainty = f64::from(track.r95_mm) / 1_000.0;
+                *latitude = track.lat_e7;
+                *longitude = track.lon_e7;
+                previous_address = track.address;
+                included += 1;
+                if let Ok(source_ns) = u64::try_from(track.newest_source_ns) {
+                    report_ns = report_ns.min(source_ns);
+                }
+            }
+        }
+        let mut output_addresses = [0u32; MAX_TRACKS];
+        let mut output_pairs = [aid.geometry.pair.id; MAX_TRACKS];
+        let mut output_severity = [FinalSeverity::Caution; MAX_TRACKS];
+        let mut output_lat = [0i32; MAX_TRACKS];
+        let mut output_lon = [0i32; MAX_TRACKS];
+        let mut output_entry_ms = [0u32; MAX_TRACKS];
+        let update = if invalid {
+            None
+        } else {
+            final_monitor::update(
+                aid.geometry.pair,
+                &mut aid.state,
+                now_ns,
+                report_ns,
+                PredictedTracks {
+                    addresses: addresses.get(..included).unwrap_or(&[]),
+                    east_m: east.get(..included).unwrap_or(&[]),
+                    north_m: north.get(..included).unwrap_or(&[]),
+                    velocity_east_mps: velocity_east.get(..included).unwrap_or(&[]),
+                    velocity_north_mps: velocity_north.get(..included).unwrap_or(&[]),
+                    r95_m: r95.get(..included).unwrap_or(&[]),
+                    lat_e7: lat.get(..included).unwrap_or(&[]),
+                    lon_e7: lon.get(..included).unwrap_or(&[]),
+                },
+                FinalAlertBuffer {
+                    addresses: output_addresses.get_mut(..MAX_TRACKS).unwrap_or(&mut []),
+                    pair_ids: output_pairs.get_mut(..MAX_TRACKS).unwrap_or(&mut []),
+                    severity: output_severity.get_mut(..MAX_TRACKS).unwrap_or(&mut []),
+                    lat_e7: output_lat.get_mut(..MAX_TRACKS).unwrap_or(&mut []),
+                    lon_e7: output_lon.get_mut(..MAX_TRACKS).unwrap_or(&mut []),
+                    seconds_to_entry_milli: output_entry_ms
+                        .get_mut(..MAX_TRACKS)
+                        .unwrap_or(&mut []),
+                },
+            )
+            .ok()
+        };
+        let mut caution_count = 0u16;
+        let mut warning_count = 0u16;
+        if let Some(result) = update {
+            for severity in output_severity.iter().take(usize::from(result.alerts)) {
+                match severity {
+                    FinalSeverity::Caution => caution_count = caution_count.saturating_add(1),
+                    FinalSeverity::Warning => warning_count = warning_count.saturating_add(1),
+                }
+            }
+        }
+        let degraded = invalid || omitted != 0 || update.is_some_and(|result| result.degraded);
+        packets.push(RunwayAidPacket {
+            scan_sequence,
+            first_runway_id: aid.config.first_runway_id,
+            first_end_name: aid.config.first_end_name,
+            second_runway_id: aid.config.second_runway_id,
+            second_end_name: aid.config.second_end_name,
+            availability: if invalid || update.is_none() {
+                Availability::Unavailable
+            } else if degraded {
+                Availability::Degraded
+            } else {
+                Availability::Available
+            },
+            maximum_severity: if warning_count > 0 {
+                Severity::Warning
+            } else if caution_count > 0 {
+                Severity::Caution
+            } else {
+                Severity::Clear
+            },
+            predicted_tracks: u16::try_from(included).unwrap_or(u16::MAX),
+            caution_tracks: caution_count,
+            warning_tracks: warning_count,
+            alert_tracks: 0,
+            unavailable_tracks: omitted,
+        });
+    }
+    packets
+}
+
+#[cfg(test)]
+mod runway_aid_packet_tests {
+    use super::runway_aid_packets;
+    use oa_display::core::runway_aids::Availability;
+
+    // REQ: OA-RWY-022
+    #[test]
+    fn unconfigured_runtime_emits_explicit_unavailable_packet() {
+        let packets = runway_aid_packets(&mut [], &[], 1_000_000_000, 1);
+        assert_eq!(packets.len(), 1);
+        let packet = packets.first().expect("one unavailable packet");
+        assert_eq!(packet.availability, Availability::Unavailable);
+        assert_eq!(packet.scan_sequence, 1);
+        assert_eq!(packet.first_runway_id, 0);
+        assert_eq!(packet.second_runway_id, 0);
+    }
+}
 
 fn transaction_item(event: &crate::input::NormalizedEvent) -> bool {
     match event.kind {
@@ -651,7 +870,47 @@ fn regional_new_with_profile_and_namespace_and_audit_checkpoint(
         next_generation: 0,
         console_text: String::with_capacity(128),
         profile,
+        runway_aids: Vec::new(),
     })
+}
+
+/// Install runway aids only before the first scan and only from an already verified package
+/// whose exact airspace model equals this runtime model. Resolution is cold and bounded.
+pub fn regional_install_verified_runway_aids(
+    runtime: &mut RegionalRuntime,
+    package: &oa_adapt::manifest::VerifiedPackage,
+) -> Result<(), String> {
+    if runtime.failed || runtime.frame_sequence != 0 || !runtime.runway_aids.is_empty() {
+        return Err("runway aids can only be installed once before the first scan".into());
+    }
+    if package.model() != &runtime.model {
+        return Err("runway-aid package model does not match runtime adaptation".into());
+    }
+    let bytes = package
+        .runway_aids_bytes()
+        .ok_or_else(|| "verified package has no runway-aid profile".to_owned())?;
+    let profile = oa_runway::adaptation::parse(bytes)
+        .map_err(|error| format!("runway-aid profile refused: {error:?}"))?;
+    if profile.is_empty() || profile.len() > MAX_RUNTIME_RUNWAY_AID_PAIRS {
+        return Err("runway-aid profile exceeds runtime pair capacity".into());
+    }
+    runtime
+        .runway_aids
+        .try_reserve_exact(profile.len())
+        .map_err(|_| "runway-aid runtime capacity refused")?;
+    for index in 0..profile.len() {
+        let config = profile
+            .pair(index)
+            .ok_or("validated runway-aid pair disappeared")?;
+        let geometry = crate::runway_aids::resolve_verified(package, &runtime.model, index)
+            .map_err(|error| format!("runway-aid geometry refused: {error:?}"))?;
+        runtime.runway_aids.push(RunwayAidRuntime {
+            config,
+            geometry,
+            state: oa_runway::final_monitor::FinalMonitorState::new(),
+        });
+    }
+    Ok(())
 }
 
 /// Read the final quarantine counters after an optional on-demand release.
@@ -942,6 +1201,12 @@ fn execute(
         runtime.profile.max_flights,
     )?;
     runtime.observed.clone_from(&surveillance.tracks);
+    let runway_aids = runway_aid_packets(
+        &mut runtime.runway_aids,
+        &surveillance.tracks,
+        surveillance.time_ns,
+        runtime.frame_sequence,
+    );
     Ok(RegionalFrame {
         sequence: runtime.frame_sequence,
         input,
@@ -963,6 +1228,7 @@ fn execute(
             records: quarantine_records,
             source_stats: quarantine_stats(&runtime.quarantine_queue)?,
         },
+        runway_aids,
     })
 }
 
