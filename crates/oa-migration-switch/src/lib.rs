@@ -634,6 +634,19 @@ const _: () = assert!(core::mem::size_of::<CandidateReadiness>() == 336);
 const _: () = assert!(core::mem::size_of::<TraceRecord>() == 64);
 const _: () = assert!(core::mem::size_of::<CoordinationRecord>() == 48);
 const _: () = assert!(core::mem::size_of::<PromotionIntentRequest>() == 56);
+// A3/A7.2: report fixed admitted byte counts; compile-time checks reject ABI/layout drift.
+const OPTION_TRACK_STATE_BYTES: usize = 160;
+const OPTION_FLIGHT_STATE_BYTES: usize = 176;
+const OPTION_HANDOFF_STATE_BYTES: usize = 152;
+const OPTION_ALERT_STATE_BYTES: usize = 144;
+const OPTION_TRACE_RECORD_BYTES: usize = 64;
+const OPTION_DIFF_BYTES: usize = 64;
+const _: () = assert!(core::mem::size_of::<Option<TrackState>>() == OPTION_TRACK_STATE_BYTES);
+const _: () = assert!(core::mem::size_of::<Option<FlightState>>() == OPTION_FLIGHT_STATE_BYTES);
+const _: () = assert!(core::mem::size_of::<Option<HandoffState>>() == OPTION_HANDOFF_STATE_BYTES);
+const _: () = assert!(core::mem::size_of::<Option<AlertState>>() == OPTION_ALERT_STATE_BYTES);
+const _: () = assert!(core::mem::size_of::<Option<TraceRecord>>() == OPTION_TRACE_RECORD_BYTES);
+const _: () = assert!(core::mem::size_of::<Option<Diff>>() == OPTION_DIFF_BYTES);
 // A7.2: selector is a cold control record; row/receipt capacity resides in startup-reserved buffers.
 const _: () = assert!(core::mem::size_of::<Selector>() == 1_440);
 
@@ -784,26 +797,26 @@ pub fn capacity_storage_budget_bytes(profile: CapacityProfile) -> Result<usize, 
     }
     let per_snapshot = profile
         .tracks
-        .checked_mul(core::mem::size_of::<Option<TrackState>>())
+        .checked_mul(OPTION_TRACK_STATE_BYTES)
         .and_then(|n| {
             n.checked_add(
                 profile
                     .flights
-                    .checked_mul(core::mem::size_of::<Option<FlightState>>())?,
+                    .checked_mul(OPTION_FLIGHT_STATE_BYTES)?,
             )
         })
         .and_then(|n| {
             n.checked_add(
                 profile
                     .handoffs
-                    .checked_mul(core::mem::size_of::<Option<HandoffState>>())?,
+                    .checked_mul(OPTION_HANDOFF_STATE_BYTES)?,
             )
         })
         .and_then(|n| {
             n.checked_add(
                 profile
                     .alerts
-                    .checked_mul(core::mem::size_of::<Option<AlertState>>())?,
+                    .checked_mul(OPTION_ALERT_STATE_BYTES)?,
             )
         })
         .ok_or(Refusal::InvalidUnit)?;
@@ -813,7 +826,7 @@ pub fn capacity_storage_budget_bytes(profile: CapacityProfile) -> Result<usize, 
             n.checked_add(
                 profile
                     .trace_records
-                    .checked_mul(core::mem::size_of::<Option<TraceRecord>>())?,
+                    .checked_mul(OPTION_TRACE_RECORD_BYTES)?,
             )
         })
         .and_then(|n| {
@@ -840,7 +853,7 @@ pub fn capacity_diff_budget_bytes(profile: CapacityProfile) -> Result<usize, Ref
         .and_then(|n| n.checked_mul(2))
         .ok_or(Refusal::InvalidUnit)?;
     differences
-        .checked_mul(core::mem::size_of::<Option<Diff>>())
+        .checked_mul(OPTION_DIFF_BYTES)
         .ok_or(Refusal::InvalidUnit)
 }
 
@@ -849,9 +862,6 @@ fn filled_buffer<T: Copy>(len: usize, value: T) -> Result<Vec<T>, Refusal> {
     buffer
         .try_reserve_exact(len)
         .map_err(|_| Refusal::StorageAllocationFailed)?;
-    if buffer.capacity() < len {
-        return Err(Refusal::StorageAllocationFailed);
-    }
     buffer.resize(len, value);
     Ok(buffer)
 }
