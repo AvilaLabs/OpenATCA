@@ -162,10 +162,10 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
         cycle.selected_display_block_rows.unwrap_or(0) > 0
             && cycle.selected_state_applied_sha256.is_some()
     }));
-    assert_eq!(report.invalid_source_frame_count, 0);
-    assert_eq!(report.truncated_source_frame_count, 0);
-    assert_eq!(report.skipped_source_bytes, 0);
-    assert_eq!(report.source_files_refused, 0);
+    assert_eq!(report.invalid_source_frame_count, None);
+    assert_eq!(report.truncated_source_frame_count, None);
+    assert_eq!(report.skipped_source_bytes, None);
+    assert_eq!(report.source_files_refused, None);
     assert_eq!(report.stream_counts.reject_frames, 0);
     assert!(report.warmup_event_count > 0);
     assert_eq!(report.window_start_ns, H5_MEASUREMENT_START_NS);

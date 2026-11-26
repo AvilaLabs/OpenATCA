@@ -275,10 +275,12 @@ pub struct RecordedDrillReport {
     pub handoff_operation_count: u64,
     pub quarantine_record_count: u64,
     pub manual_handling_required_count: u64,
-    pub invalid_source_frame_count: u64,
-    pub truncated_source_frame_count: u64,
-    pub skipped_source_bytes: u64,
-    pub source_files_refused: u64,
+    /// The streaming adapter aborts before returning a report on these error classes; `None`
+    /// means no completed-pass counter is exposed, not that the count was measured as zero.
+    pub invalid_source_frame_count: Option<u64>,
+    pub truncated_source_frame_count: Option<u64>,
+    pub skipped_source_bytes: Option<u64>,
+    pub source_files_refused: Option<u64>,
     pub consumer_receipts: Vec<ConsumerReceipt>,
     pub replay_consumer_receipts: Vec<ConsumerReceipt>,
     pub cycles: Vec<CycleAttempt>,
@@ -3954,10 +3956,10 @@ pub fn run_recorded(
         handoff_operation_count: handoffs,
         quarantine_record_count,
         manual_handling_required_count,
-        invalid_source_frame_count,
-        truncated_source_frame_count,
-        skipped_source_bytes,
-        source_files_refused,
+        invalid_source_frame_count: Some(invalid_source_frame_count),
+        truncated_source_frame_count: Some(truncated_source_frame_count),
+        skipped_source_bytes: Some(skipped_source_bytes),
+        source_files_refused: Some(source_files_refused),
         consumer_receipts: receipts,
         replay_consumer_receipts,
         cycles,
@@ -4710,47 +4712,17 @@ pub fn run_recorded_stream(
         (H5_CAPTURE_START_NS, H5_MEASUREMENT_END_NS),
         snapshot_policy.update_interval_ns,
     )?;
+    // The streaming reader returns no summary at all for invalid/truncated/resynchronized/refused
+    // inputs; these conditions therefore abort the run rather than being represented as zero.
+    // Its successful summary exposes reject/status/message frame counts and quarantine rows.
     let full_local_source = local_authority_fixture
         && source_activity.full_window_covered
         && summary.normalized_events > 0
         && summary.recording.counts.frames > 0
         && summary.recording.counts.reject_frames == 0
-        && summary.recording.counts.invalid_frames == 0
-        && summary.recording.counts.truncated_frames == 0
-        && summary.recording.counts.skipped_bytes == 0
-        && summary.recording.counts.files_refused == 0
         && summary.quarantine_rows == 0
         && summary.manual_handling_required == 0
         && summary.unprocessed_frames == 0;
-
-    let invalid_source_frame_count = summary
-        .recording
-        .counts
-        .adsb
-        .invalid_frames
-        .checked_add(summary.recording.counts.sfdps.invalid_frames)
-        .ok_or("invalid source frame count overflow")?;
-    let truncated_source_frame_count = summary
-        .recording
-        .counts
-        .adsb
-        .truncated_frames
-        .checked_add(summary.recording.counts.sfdps.truncated_frames)
-        .ok_or("truncated source frame count overflow")?;
-    let skipped_source_bytes = summary
-        .recording
-        .counts
-        .adsb
-        .skipped_bytes
-        .checked_add(summary.recording.counts.sfdps.skipped_bytes)
-        .ok_or("skipped source byte count overflow")?;
-    let source_files_refused = summary
-        .recording
-        .counts
-        .adsb
-        .files_refused
-        .checked_add(summary.recording.counts.sfdps.files_refused)
-        .ok_or("refused source file count overflow")?;
 
     let mut cycle_reports = Vec::new();
     cycle_reports
@@ -4914,10 +4886,10 @@ pub fn run_recorded_stream(
         handoff_operation_count: counts.handoffs,
         quarantine_record_count: summary.quarantine_rows,
         manual_handling_required_count: summary.manual_handling_required,
-        invalid_source_frame_count,
-        truncated_source_frame_count,
-        skipped_source_bytes,
-        source_files_refused,
+        invalid_source_frame_count: None,
+        truncated_source_frame_count: None,
+        skipped_source_bytes: None,
+        source_files_refused: None,
         consumer_receipts: Vec::new(),
         replay_consumer_receipts: Vec::new(),
         cycles: cycle_reports,
@@ -5448,10 +5420,10 @@ pub fn run_recorded_stream_cycle_summary(
         handoff_operation_count: baseline_counts.handoffs,
         quarantine_record_count: baseline_summary.quarantine_rows,
         manual_handling_required_count: baseline_summary.manual_handling_required,
-        invalid_source_frame_count: 0,
-        truncated_source_frame_count: 0,
-        skipped_source_bytes: 0,
-        source_files_refused: 0,
+        invalid_source_frame_count: None,
+        truncated_source_frame_count: None,
+        skipped_source_bytes: None,
+        source_files_refused: None,
         consumer_receipts: Vec::new(),
         replay_consumer_receipts: Vec::new(),
         cycles,
