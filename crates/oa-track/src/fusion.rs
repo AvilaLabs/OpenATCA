@@ -912,7 +912,11 @@ fn fusion_new_profile(
     if sites.is_empty() || sites.len() > source_limit {
         return Err(FusionError::BadConfig("radar count"));
     }
-    if network_profile && sites.windows(2).any(|w| w[0].sensor >= w[1].sensor) {
+    if network_profile
+        && sites
+            .windows(2)
+            .any(|pair| matches!(pair, [first, second] if first.sensor >= second.sensor))
+    {
         return Err(FusionError::BadConfig(
             "network sites must be ordered by unique physical sensor id",
         ));
@@ -944,21 +948,34 @@ fn fusion_new_profile(
     }
     let tracker = tracker_new(&cfg.tracker).map_err(FusionError::Tracker)?;
     let work_units = sites.len().div_ceil(MAX_RADARS);
+    if work_units == 0 || work_units > MAX_RADAR_NETWORK_UNITS {
+        return Err(FusionError::BadConfig("radar work-unit count"));
+    }
     let reg_history_max = if network_profile {
         NETWORK_REG_HISTORY_MAX
     } else {
         REG_HISTORY_MAX
     };
-    let mut stats = FusionStats::default();
-    stats.network_radars = u8::try_from(sites.len()).unwrap_or(u8::MAX);
-    stats.network_units = u8::try_from(work_units).unwrap_or(u8::MAX);
-    stats.network_bucket_tests_limit = (MAX_BUCKET_TESTS as u64).saturating_mul(work_units as u64);
-    stats.network_polar_work_limit =
-        (MAX_BUCKET_POLAR_WORK as u64).saturating_mul(work_units as u64);
-    stats.network_init_work_limit = (MAX_INIT_WORK as u64).saturating_mul(work_units as u64);
-    stats.network_reg_history_per_source_limit = u32::try_from(reg_history_max).unwrap_or(u32::MAX);
+    let network_radars =
+        u8::try_from(sites.len()).map_err(|_| FusionError::BadConfig("radar count width"))?;
+    let network_units =
+        u8::try_from(work_units).map_err(|_| FusionError::BadConfig("work-unit count width"))?;
+    let network_reg_history_per_source_limit = u32::try_from(reg_history_max)
+        .map_err(|_| FusionError::BadConfig("registration history width"))?;
     let plot_scan_maps = if network_profile { sites.len() } else { 1 };
-    stats.network_plot_scan_slots = (plot_scan_maps as u64).saturating_mul(KEY_TABLE_SLOTS as u64);
+    let network_plot_scan_slots = u64::try_from(plot_scan_maps)
+        .map_err(|_| FusionError::BadConfig("plot-scan map count width"))?
+        .saturating_mul(KEY_TABLE_SLOTS as u64);
+    let stats = FusionStats {
+        network_radars,
+        network_units,
+        network_bucket_tests_limit: (MAX_BUCKET_TESTS as u64).saturating_mul(work_units as u64),
+        network_polar_work_limit: (MAX_BUCKET_POLAR_WORK as u64).saturating_mul(work_units as u64),
+        network_init_work_limit: (MAX_INIT_WORK as u64).saturating_mul(work_units as u64),
+        network_reg_history_per_source_limit,
+        network_plot_scan_slots,
+        ..FusionStats::default()
+    };
     let mut fusion = Fusion {
         cfg: *cfg,
         tracker,
@@ -3042,12 +3059,18 @@ fn associate_bucket(f: &mut Fusion) {
         let mut polar_remaining = f.polar_work_max;
         for radar in unit_start..unit_end {
             let local = radar - unit_start;
-            if f.rscratch
-                .get(radar)
-                .is_some_and(|scratch| !scratch.plots.is_empty())
-            {
-                ras[local] = assoc_prepare(f, radar, &mut polar_remaining);
+            let Some(scratch) = f.rscratch.get(radar) else {
+                f.stats.scratch_full = f.stats.scratch_full.saturating_add(1);
+                continue;
+            };
+            if scratch.plots.is_empty() {
+                continue;
             }
+            let Some(slot) = ras.get_mut(local) else {
+                refuse_association_source(f, radar);
+                continue;
+            };
+            *slot = assoc_prepare(f, radar, &mut polar_remaining);
         }
         let budget = f.bucket_tests_max;
         let mut total = 0usize;
@@ -3089,6 +3112,29 @@ fn associate_bucket(f: &mut Fusion) {
                 assoc_finish(f, ra);
             }
         }
+    }
+}
+
+/// Refuses one source visibly if the fixed eight-slot association unit cannot represent its local
+/// ordinal. This is an internal-capacity failure, not a default source or a partial gate.
+fn refuse_association_source(f: &mut Fusion, radar: usize) {
+    f.stats.scratch_full = f.stats.scratch_full.saturating_add(1);
+    let Some(scratch) = f.rscratch.get_mut(radar) else {
+        return;
+    };
+    let anonymous = scratch
+        .plots
+        .iter()
+        .filter(|plot| plot.addr == NO_ADDR)
+        .count() as u64;
+    for decision in &mut scratch.dec {
+        decision.kind = D_REFUSED;
+    }
+    f.stats.assoc_incomplete_batches = f.stats.assoc_incomplete_batches.saturating_add(1);
+    f.stats.assoc_incomplete_deferred = f.stats.assoc_incomplete_deferred.saturating_add(anonymous);
+    if let Some(source) = f.stats.association_radar.get_mut(radar) {
+        source.anonymous_offered = source.anonymous_offered.saturating_add(anonymous);
+        source.incomplete = source.incomplete.saturating_add(anonymous);
     }
 }
 
@@ -3393,12 +3439,17 @@ fn process_bucket(f: &mut Fusion, adsb: &[Measurement], plots: &[PendPlot], out:
         {
             f.init_work_left = MAX_INIT_WORK;
         }
-        let mut radars_left = f.rscratch[unit_start..unit_end]
+        let Some(unit_scratch) = f.rscratch.get(unit_start..unit_end) else {
+            refuse_initiation_unit(f, unit_start, unit_end);
+            continue;
+        };
+        let mut radars_left = unit_scratch
             .iter()
             .filter(|rs| !rs.plots.is_empty())
             .count();
         for r in unit_start..unit_end {
             let Some(rs) = f.rscratch.get_mut(r).map(std::mem::take) else {
+                f.stats.scratch_full = f.stats.scratch_full.saturating_add(1);
                 continue;
             };
             if !rs.plots.is_empty() {
@@ -4290,6 +4341,29 @@ fn mark_init_capped(f: &mut Fusion, radar: usize) {
     if f.init_capped_mask & bit == 0 {
         f.init_capped_mask |= bit;
         f.stats.init_capped += 1;
+    }
+}
+
+/// Refuses any unassigned plots in a source if the computed unit slice is inconsistent. The
+/// malformed unit is counted as scratch loss and never interpreted as an empty source.
+fn refuse_initiation_unit(f: &mut Fusion, unit_start: usize, unit_end: usize) {
+    f.stats.scratch_full = f.stats.scratch_full.saturating_add(1);
+    for radar in unit_start..unit_end {
+        let Some(scratch) = f.rscratch.get_mut(radar) else {
+            f.stats.scratch_full = f.stats.scratch_full.saturating_add(1);
+            continue;
+        };
+        let visits = scratch.dec.len() as u64;
+        let mut refused = 0u64;
+        for decision in &mut scratch.dec {
+            if decision.kind == D_UNASSIGNED {
+                decision.kind = D_REFUSED;
+                refused = refused.saturating_add(1);
+            }
+        }
+        f.stats.init_refusal_pass_visits = f.stats.init_refusal_pass_visits.saturating_add(visits);
+        f.stats.init_plots_refused = f.stats.init_plots_refused.saturating_add(refused);
+        mark_init_capped(f, radar);
     }
 }
 
