@@ -59,6 +59,35 @@ pub struct RouteFixInput {
 }
 // A7.2: cold struct, size guard waived; route geometry is capped at 16 fixes per event.
 
+/// Raw readsb ADS-B source and report fields retained by OA-RS v2. These source facts are not a
+/// facility reliability assessment, physical receiver/site identity, or ISR determination.
+/// Integer sentinels mean the source decoder did not retain a value. All-zero callsign bytes are
+/// retained as-is; this decoder does not distinguish a missing callsign from an explicitly blank
+/// callsign.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdsbSourceEvidence {
+    pub source_type: u8,
+    /// Raw readsb emitter category; zero is the decoder's absent/default value.
+    pub category: u8,
+    /// Raw readsb ADS-B version value, or `u8::MAX` if not retained.
+    pub version: u8,
+    pub nic: u8,
+    pub nac_p: u8,
+    pub nac_v: u8,
+    pub sil: u8,
+    pub sil_type: u8,
+    pub sda: u8,
+    pub gva: u8,
+    pub nic_baro: u8,
+    /// Raw position flags from the decoded ADS-B row.
+    pub row_flags: u8,
+    /// Raw readsb decimal parse of the four-character octal-digit squawk, or `u16::MAX` if not
+    /// retained. Do not convert to Mode A octal in this protocol layer.
+    pub squawk: u16,
+    /// Raw fixed-width source callsign bytes, preserved without trimming.
+    pub callsign: [u8; 8],
+}
+
 /// Flight operation supplied by the normalized source adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlightOperation {
@@ -150,6 +179,16 @@ pub enum EventKind {
         east_mmps: i32,
         north_mmps: i32,
         vertical_rate_fpm: Option<i32>,
+    },
+    /// OA-RS v2 position with the raw per-report ADS-B evidence preserved.
+    PositionV2 {
+        latitude_e7: i32,
+        longitude_e7: i32,
+        altitude_ft: Option<i32>,
+        east_mmps: i32,
+        north_mmps: i32,
+        vertical_rate_fpm: Option<i32>,
+        evidence: AdsbSourceEvidence,
     },
     Flight(FlightOperation),
     Operator(OperatorCommand),
@@ -312,6 +351,83 @@ fn parse_position(parts: &[&str]) -> Result<EventKind, InputError> {
     })
 }
 
+fn parse_u8_sentinel(text: &str, max: u8) -> Result<u8, InputError> {
+    if text == "-" {
+        return Ok(u8::MAX);
+    }
+    let value = text.parse::<u8>().map_err(|_| InputError::InvalidInteger)?;
+    if value > max {
+        return Err(InputError::InvalidInteger);
+    }
+    Ok(value)
+}
+
+fn parse_position_v2(parts: &[&str]) -> Result<EventKind, InputError> {
+    if parts.len() != 29 {
+        return Err(InputError::BadFieldCount);
+    }
+    let EventKind::Position {
+        latitude_e7,
+        longitude_e7,
+        altitude_ft,
+        east_mmps,
+        north_mmps,
+        vertical_rate_fpm,
+    } = parse_position(parts)?
+    else {
+        return Err(InputError::BadFieldCount);
+    };
+    Ok(EventKind::PositionV2 {
+        latitude_e7,
+        longitude_e7,
+        altitude_ft,
+        east_mmps,
+        north_mmps,
+        vertical_rate_fpm,
+        evidence: AdsbSourceEvidence {
+            source_type: parse_u8_sentinel(part(parts, 15)?, 13)?,
+            category: part(parts, 16)?
+                .parse()
+                .map_err(|_| InputError::InvalidInteger)?,
+            version: parse_u8_sentinel(part(parts, 17)?, 7)?,
+            nic: parse_u8_sentinel(part(parts, 18)?, 11)?,
+            nac_p: parse_u8_sentinel(part(parts, 19)?, 15)?,
+            nac_v: parse_u8_sentinel(part(parts, 20)?, 7)?,
+            sil: parse_u8_sentinel(part(parts, 21)?, 3)?,
+            sil_type: parse_u8_sentinel(part(parts, 22)?, 2)?,
+            sda: parse_u8_sentinel(part(parts, 23)?, 3)?,
+            gva: parse_u8_sentinel(part(parts, 24)?, 3)?,
+            nic_baro: parse_u8_sentinel(part(parts, 25)?, 1)?,
+            row_flags: parse_u8_sentinel(part(parts, 26)?, 31)?,
+            squawk: parse_squawk(part(parts, 27)?)?,
+            callsign: parse_hex_bytes(part(parts, 28)?)?,
+        },
+    })
+}
+
+fn parse_squawk(text: &str) -> Result<u16, InputError> {
+    if text == "-" {
+        return Ok(u16::MAX);
+    }
+    if text.len() != 4 || !text.bytes().all(|byte| (b'0'..=b'7').contains(&byte)) {
+        return Err(InputError::InvalidInteger);
+    }
+    text.parse().map_err(|_| InputError::InvalidInteger)
+}
+
+fn parse_hex_bytes(text: &str) -> Result<[u8; 8], InputError> {
+    if text.len() != 16 || !text.is_ascii() {
+        return Err(InputError::BadFieldCount);
+    }
+    let mut bytes = [0u8; 8];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        let start = index * 2;
+        *byte = u8::from_str_radix(&text[start..start + 2], 16)
+            .map_err(|_| InputError::InvalidInteger)?;
+    }
+    Ok(bytes)
+}
+
 fn parse_flight(parts: &[&str]) -> Result<EventKind, InputError> {
     let op = match part(parts, 9)? {
         "PLAN" if parts.len() == 12 => FlightOperation::SetPlan {
@@ -430,12 +546,14 @@ fn parse_filed_route(parts: &[&str]) -> Result<EventKind, InputError> {
     })
 }
 
-/// Parses one protocol event. The caller checks line length before calling this function.
+/// Parses one versioned protocol event. The caller checks line length before calling this function.
 ///
-/// Position rows have 15 fields; the event type selects the remaining fields:
-/// `v1<TAB>receipt_ns<TAB>source_ns<TAB>sequence<TAB>source<TAB>gufi_hex<TAB>address_hex<TAB>centre<TAB>kind...`.
-/// Position rows append `lat<TAB>lon<TAB>alt-or--<TAB>east-mmps<TAB>north-mmps<TAB>vertical-rate-or--`;
-/// flight and route payloads use the field counts checked below.
+/// Rows use `vN<TAB>receipt_ns<TAB>source_ns<TAB>sequence<TAB>source<TAB>gufi_hex<TAB>address_hex<TAB>centre<TAB>kind...`.
+/// Position rows in v1 have 15 fields; v2 appends raw readsb source, category, version, quality,
+/// flags, squawk and
+/// fixed-width callsign fields. Squawk is its original four decimal digits (each 0–7); callsign
+/// is eight source bytes encoded as sixteen hexadecimal characters.
+/// Flight and route payloads retain their v1 body shape in either event version.
 pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     if line.len() > MAX_EVENT_LINE_BYTES {
         return Err(InputError::RowTooLong);
@@ -444,7 +562,8 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
     if parts.len() < 9 {
         return Err(InputError::BadFieldCount);
     }
-    if part(&parts, 0)? != "v1" {
+    let version = part(&parts, 0)?;
+    if !matches!(version, "v1" | "v2") {
         return Err(InputError::BadVersion);
     }
     let receipt_ns = parse_i64(part(&parts, 1)?)?;
@@ -491,7 +610,8 @@ pub fn parse_event_line(line: &str) -> Result<NormalizedEvent, InputError> {
         return Err(InputError::SourceEventMismatch);
     }
     let kind = match kind_name {
-        "POS" if parts.len() == 15 => parse_position(&parts)?,
+        "POS" if version == "v1" && parts.len() == 15 => parse_position(&parts)?,
+        "POS" if version == "v2" => parse_position_v2(&parts)?,
         "FLIGHT" => parse_flight(&parts)?,
         "COMMAND" if parts.len() == 14 || parts.len() == 15 => {
             use oa_display::interaction::Intent;
