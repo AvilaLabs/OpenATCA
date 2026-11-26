@@ -8,7 +8,8 @@ use crate::flight::{
 };
 use crate::nam_flight::{self, NamFlightContext, NamFlightResult, NamFlightRuntime};
 use crate::nam_pointout::{
-    self, NamPointOutRuntime, PointOutContext, PointOutMode, PointOutResult, PointOutView,
+    self, NamPointOutRuntime, PointOutContext, PointOutDecision, PointOutDecisionResult,
+    PointOutMode, PointOutResult, PointOutTransmitResult, PointOutView,
 };
 use crate::route::{self, RouteStore};
 use crate::session::{summarize_input_batch, FrameEvidence, ReceiptBatch, MAX_EVENTS_PER_RECEIPT};
@@ -472,6 +473,27 @@ pub fn regional_receive_nam_pointout(
     )
 }
 
+/// Send a caller-prepared POI through the regional NAM peer session. The returned framed message
+/// is for the caller's configured transport; this function does not perform network I/O.
+pub fn regional_send_nam_pointout(
+    runtime: &mut RegionalRuntime,
+    ingress: &mut crate::nam_handoff::NamSessionIngress,
+    message: oa_nam::Message,
+    context: PointOutContext,
+    now_ms: u64,
+) -> Result<PointOutTransmitResult, nam_pointout::PointOutError> {
+    nam_pointout::nam_pointout_send_offer(
+        &mut runtime.nam_pointouts,
+        &mut runtime.flights,
+        ingress,
+        message,
+        context,
+        now_ms,
+        runtime.centre,
+        &runtime.observed,
+    )
+}
+
 /// Set the peer adaptation mode before any point-out is admitted. Basic mode retains manual
 /// coordination; Enhanced mode exposes decisions, without assigning a facility behavior policy.
 pub fn regional_set_nam_pointout_mode(
@@ -479,6 +501,28 @@ pub fn regional_set_nam_pointout_mode(
     mode: PointOutMode,
 ) -> Result<(), nam_pointout::PointOutError> {
     nam_pointout::nam_pointout_set_mode(&mut runtime.nam_pointouts, mode)
+}
+
+/// Apply an explicit local Enhanced point-out decision and return the encoded response for the
+/// caller's configured transport. This does not alter flight ownership or treat transport receipt
+/// as controller approval.
+pub fn regional_decide_nam_pointout(
+    runtime: &mut RegionalRuntime,
+    ingress: &mut crate::nam_handoff::NamSessionIngress,
+    point_out_id: oa_nam::MsgId,
+    decision: PointOutDecision,
+    responding_route: oa_nam::Field31,
+    now_ms: u64,
+) -> Result<PointOutDecisionResult, nam_pointout::PointOutError> {
+    nam_pointout::nam_pointout_decide(
+        &mut runtime.nam_pointouts,
+        ingress,
+        point_out_id,
+        decision,
+        responding_route,
+        now_ms,
+        runtime.centre,
+    )
 }
 
 fn regional_new_with_profile_and_namespace(

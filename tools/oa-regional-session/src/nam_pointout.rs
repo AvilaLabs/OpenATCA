@@ -13,7 +13,11 @@ use crate::route;
 use crate::surveillance::ObservedTrack;
 use oa_flight::FlightKey;
 use oa_legacy_traj::core::trajectory::FlightKey as RouteKey;
-use oa_nam::{frame::unframe, parse, session, Field07, Ident, Kind, Message, MsgId};
+use oa_nam::{
+    bare, encode,
+    frame::{frame, unframe},
+    parse, session, Field07, Field31, Header, Ident, Kind, Message, MsgId, Ssr,
+};
 
 pub const MAX_POINT_OUTS: usize = 8192;
 
@@ -25,6 +29,8 @@ pub enum PointOutMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PointOutStatus {
+    /// A locally sent POI is awaiting its logical computer response.
+    AwaitingComputerResponse,
     /// POI is computer-received only; operational coordination remains manual.
     AwaitingManualCoordination,
     /// Enhanced POI is displayed for an explicit controller decision.
@@ -96,6 +102,7 @@ pub enum PointOutError {
     FutureFlight,
     FlightMismatch,
     SessionResponse,
+    InvalidTransition,
 }
 
 #[derive(Clone, Debug)]
@@ -107,7 +114,34 @@ pub struct PointOutResult {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Record(PointOutView);
+pub enum PointOutDecision {
+    Approve { assigned_mode_a: Option<u16> },
+    Deny,
+}
+
+#[derive(Clone, Debug)]
+pub struct PointOutDecisionResult {
+    /// Encoded POA or POJ for the caller's configured peer transport.
+    pub framed_bytes: Vec<u8>,
+    pub message: Message,
+    pub actions: session::Actions,
+    pub view: PointOutView,
+}
+
+#[derive(Clone, Debug)]
+pub struct PointOutTransmitResult {
+    pub framed_bytes: Vec<u8>,
+    pub message: Message,
+    pub actions: session::Actions,
+    pub view: PointOutView,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Record {
+    view: PointOutView,
+    source: Message,
+    outbound: bool,
+}
 
 pub struct NamPointOutRuntime {
     mode: PointOutMode,
@@ -138,7 +172,229 @@ pub fn nam_pointout_set_mode(
 }
 
 pub fn nam_pointout_views(runtime: &NamPointOutRuntime) -> impl Iterator<Item = &PointOutView> {
-    runtime.records.iter().map(|record| &record.0)
+    runtime.records.iter().map(|record| &record.view)
+}
+
+/// Send a caller-prepared POI through the active peer session. Flight identity is an explicit
+/// full-key/address binding; no callsign or beacon-code lookup is performed.
+pub fn nam_pointout_send_offer(
+    runtime: &mut NamPointOutRuntime,
+    flights: &mut FlightDriver,
+    ingress: &mut NamSessionIngress,
+    mut message: Message,
+    context: PointOutContext,
+    now_ms: u64,
+    local_facility: [u8; 4],
+    observed: &[ObservedTrack],
+) -> Result<PointOutTransmitResult, PointOutError> {
+    if message.header.kind != Kind::Poi {
+        return Err(PointOutError::WrongKind);
+    }
+    if message.header.id.sender.0 != local_facility
+        || message.header.id.receiver.0 == local_facility
+        || message
+            .f31
+            .as_ref()
+            .is_some_and(|f31| f31.facility.0 != message.header.id.receiver.0)
+    {
+        return Err(PointOutError::WrongPeer);
+    }
+    if context.source_ns < 0
+        || context.source_ns != context.receipt_ns
+        || context.sequence == 0
+        || context.receipt_ns % 1_000_000 != 0
+    {
+        return Err(PointOutError::InvalidTime);
+    }
+    if runtime.records.len() >= runtime.capacity {
+        return Err(PointOutError::Capacity);
+    }
+    if runtime
+        .records
+        .iter()
+        .any(|record| record.view.point_out_id == message.header.id)
+    {
+        return Err(PointOutError::Duplicate);
+    }
+    let bound = positive_binding(flights, context.binding, context.receipt_ns)?;
+    let established_mode_a = field_code(message.f07.as_ref())?;
+    let address = bound.map(|view| view.address);
+    let observed_track =
+        address.and_then(|address| observed.iter().find(|track| track.address == address));
+    let observed_comparison = compare_observed(established_mode_a, observed_track);
+    // Validate the caller's message before consuming a session message number.
+    message.header.id.number = 0;
+    encode(&message).map_err(|_| PointOutError::MissingFields)?;
+    let actions =
+        nam_session_ingress_local_event(ingress, session::Event::SendAtm(Kind::Poi), now_ms)
+            .map_err(|_| PointOutError::SessionResponse)?;
+    let number = actions
+        .as_slice()
+        .iter()
+        .find_map(|action| match action {
+            session::Action::SendAtm {
+                kind: Kind::Poi,
+                number,
+            } => Some(*number),
+            _ => None,
+        })
+        .ok_or(PointOutError::SessionResponse)?;
+    message.header.id.number = number;
+    let framed_bytes = frame(&encode(&message).map_err(|_| PointOutError::MissingFields)?)
+        .map_err(|_| PointOutError::MissingFields)?;
+    let view = PointOutView {
+        point_out_id: message.header.id,
+        from: message.header.id.sender.0,
+        to: message.header.id.receiver.0,
+        key: context.binding.map(|binding| binding.key),
+        route_key: context.binding.map(|binding| binding.route_key),
+        address,
+        status: PointOutStatus::AwaitingComputerResponse,
+        established_mode_a,
+        assigned_mode_a: None,
+        observed_comparison,
+        assigned_comparison: BeaconComparison::Unknown,
+        source_ns: context.source_ns,
+        receipt_ns: context.receipt_ns,
+    };
+    runtime.records.push(Record {
+        view,
+        source: message.clone(),
+        outbound: true,
+    });
+    Ok(PointOutTransmitResult {
+        framed_bytes,
+        message,
+        actions,
+        view,
+    })
+}
+
+/// Apply a controller decision to one Enhanced inbound POI and return the exact encoded POA/POJ
+/// plus session actions. The caller supplies its configured local Field 31 (facility and sector);
+/// this adapter does not invent a sector. The session action is generated before any external
+/// transport write, and is not itself a network acknowledgement.
+pub fn nam_pointout_decide(
+    runtime: &mut NamPointOutRuntime,
+    ingress: &mut NamSessionIngress,
+    point_out_id: MsgId,
+    decision: PointOutDecision,
+    responding_route: Field31,
+    now_ms: u64,
+    local_facility: [u8; 4],
+) -> Result<PointOutDecisionResult, PointOutError> {
+    if runtime.mode != PointOutMode::Enhanced
+        || responding_route.facility.0 != local_facility
+        || responding_route.sector.is_none()
+    {
+        return Err(PointOutError::UnsupportedEnhancedMessage);
+    }
+    let index = runtime
+        .records
+        .iter()
+        .position(|record| {
+            record.view.point_out_id == point_out_id
+                && record.view.status == PointOutStatus::AwaitingControllerDecision
+        })
+        .ok_or(PointOutError::ReferenceMismatch)?;
+    let record = runtime
+        .records
+        .get(index)
+        .ok_or(PointOutError::ReferenceMismatch)?;
+    let source = &record.source;
+    let id = MsgId {
+        sender: oa_nam::Facility(local_facility),
+        receiver: source.header.id.sender,
+        number: 0,
+    };
+    let (kind, f07, status, assigned_mode_a) = match decision {
+        PointOutDecision::Approve { assigned_mode_a } => {
+            if assigned_mode_a.is_some_and(|code| code > 0o7777) {
+                return Err(PointOutError::InvalidCode);
+            }
+            let acid = source_acid(source.f07.as_ref())?;
+            let ssr = assigned_mode_a.map(mode_a_ssr);
+            (
+                Kind::Poa,
+                Some(Field07 {
+                    ident: Ident::Acid(acid),
+                    ssr,
+                }),
+                PointOutStatus::Approved,
+                assigned_mode_a,
+            )
+        }
+        PointOutDecision::Deny => {
+            let acid = source_acid(source.f07.as_ref())?;
+            (
+                Kind::Poj,
+                Some(Field07 {
+                    ident: Ident::Acid(acid),
+                    ssr: None,
+                }),
+                PointOutStatus::Denied,
+                None,
+            )
+        }
+    };
+    // Validate the copied POI fields and caller route before mutating the session state.
+    let mut message = bare(Header {
+        kind,
+        id,
+        reference: Some(point_out_id),
+    });
+    message.f07 = f07;
+    message.f13 = source.f13;
+    message.f16 = source.f16.clone();
+    message.f31 = Some(responding_route);
+    encode(&message).map_err(|_| PointOutError::MissingFields)?;
+    let actions = nam_session_ingress_local_event(ingress, session::Event::SendAtm(kind), now_ms)
+        .map_err(|_| PointOutError::SessionResponse)?;
+    let number = actions
+        .as_slice()
+        .iter()
+        .find_map(|action| match action {
+            session::Action::SendAtm { kind: sent, number } if *sent == kind => Some(*number),
+            _ => None,
+        })
+        .ok_or(PointOutError::SessionResponse)?;
+    message.header.id.number = number;
+    let framed_bytes = frame(&encode(&message).map_err(|_| PointOutError::MissingFields)?)
+        .map_err(|_| PointOutError::MissingFields)?;
+    let record = runtime
+        .records
+        .get_mut(index)
+        .ok_or(PointOutError::ReferenceMismatch)?;
+    record.view.status = status;
+    record.view.assigned_mode_a = assigned_mode_a;
+    record.view.assigned_comparison =
+        compare_codes(record.view.established_mode_a, assigned_mode_a);
+    Ok(PointOutDecisionResult {
+        framed_bytes,
+        message,
+        actions,
+        view: record.view,
+    })
+}
+
+fn source_acid(field: Option<&Field07>) -> Result<String, PointOutError> {
+    match field.map(|field| &field.ident) {
+        Some(Ident::Acid(acid)) => Ok(acid.clone()),
+        _ => Err(PointOutError::MissingFields),
+    }
+}
+
+fn mode_a_ssr(code: u16) -> Ssr {
+    let mut value = code;
+    let mut digits = [b'0'; 4];
+    for digit in digits.iter_mut().rev() {
+        *digit = b'0' + (value % 8) as u8;
+        value /= 8;
+    }
+    Ssr {
+        mode: b'A',
+        code: digits,
+    }
 }
 
 /// Receive actual encoded POI/PLA/POA/POJ through NAM session admission and update only local
@@ -225,7 +481,7 @@ fn receive_poi(
     if runtime
         .records
         .iter()
-        .any(|record| record.0.point_out_id == message.header.id)
+        .any(|record| record.view.point_out_id == message.header.id)
     {
         return Err(PointOutError::Duplicate);
     }
@@ -266,7 +522,11 @@ fn receive_poi(
         now_ms,
     )
     .map_err(|_| PointOutError::SessionResponse)?;
-    runtime.records.push(Record(view));
+    runtime.records.push(Record {
+        view,
+        source: message.clone(),
+        outbound: false,
+    });
     Ok(PointOutResult {
         ingress: ingress_result.clone(),
         response_actions: Some(response_actions),
@@ -292,13 +552,16 @@ fn receive_decision(
     let index = runtime
         .records
         .iter()
-        .position(|record| record.0.point_out_id == reference)
+        .position(|record| record.view.point_out_id == reference)
         .ok_or(PointOutError::ReferenceMismatch)?;
     let record = runtime
         .records
         .get_mut(index)
         .ok_or(PointOutError::ReferenceMismatch)?;
-    let current = &mut record.0;
+    if !record.outbound {
+        return Err(PointOutError::InvalidTransition);
+    }
+    let current = &mut record.view;
     if message.header.id.sender.0 != current.to
         || message.header.id.receiver.0 != current.from
         || local_facility != current.from
@@ -345,21 +608,33 @@ fn receive_logical_ack(
     let record = runtime
         .records
         .iter()
-        .find(|record| record.0.point_out_id == reference)
+        .find(|record| record.view.point_out_id == reference)
         .ok_or(PointOutError::ReferenceMismatch)?;
-    if message.header.id.sender.0 != record.0.to
-        || message.header.id.receiver.0 != record.0.from
-        || !same_context(&record.0, context)
-        || binding_view.is_some_and(|view| Some(view.address) != record.0.address)
+    if !record.outbound || record.view.status != PointOutStatus::AwaitingComputerResponse {
+        return Err(PointOutError::InvalidTransition);
+    }
+    if message.header.id.sender.0 != record.view.to
+        || message.header.id.receiver.0 != record.view.from
+        || !same_context(&record.view, context)
+        || binding_view.is_some_and(|view| Some(view.address) != record.view.address)
     {
         return Err(PointOutError::WrongPeer);
     }
     // PLA only means the computer accepted the POI. Basic operation still requires manual
     // coordination; it is not an approval state transition.
+    let record = runtime
+        .records
+        .iter_mut()
+        .find(|record| record.view.point_out_id == reference)
+        .ok_or(PointOutError::ReferenceMismatch)?;
+    record.view.status = match runtime.mode {
+        PointOutMode::Basic => PointOutStatus::AwaitingManualCoordination,
+        PointOutMode::Enhanced => PointOutStatus::AwaitingControllerDecision,
+    };
     Ok(PointOutResult {
         ingress: ingress.clone(),
         response_actions: None,
-        view: Some(record.0),
+        view: Some(record.view),
     })
 }
 
