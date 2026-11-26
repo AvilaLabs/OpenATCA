@@ -263,7 +263,7 @@ fn normal_run_uses_the_mode_component_from_the_same_pinned_issued_package() {
         let receipt_ns = sequence * 1_000_000_000;
         let source_ns = receipt_ns - 100_000_000;
         input_bytes.push_str(&format!(
-            "v1\t{source_ns}\t{receipt_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000001\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t0\t0\t0\n"
+            "v1\t{receipt_ns}\t{source_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000001\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t0\t0\t0\n"
         ));
     }
     fs::write(&input, input_bytes).expect("write synthetic normalized reports");
