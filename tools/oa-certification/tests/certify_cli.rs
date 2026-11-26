@@ -68,7 +68,7 @@ fn certify(
         .expect("run certification CLI")
 }
 
-// REQ: OA-CERT-001, OA-CERT-002, OA-CERT-003, OA-CERT-004, OA-CERT-005, OA-CERT-006, OA-CERT-007, OA-CERT-008, OA-CERT-009, OA-CERT-010
+// REQ: OA-CERT-001, OA-CERT-002, OA-CERT-003, OA-CERT-004, OA-CERT-005, OA-CERT-006, OA-CERT-007, OA-CERT-008, OA-CERT-009, OA-CERT-010, OA-AUDIT-007
 #[test]
 fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inputs() {
     let root = fresh_root();
@@ -145,8 +145,9 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
         "{abbreviated_output}"
     );
     let registry = root.join("principals.tsv");
-    fs::write(&registry, b"OACERT-LOCAL-PRINCIPALS-V1\n11\tconfigure\n")
-        .expect("configure claim fixture");
+    let registry_bytes = b"OACERT-LOCAL-PRINCIPALS-V1\n11\tconfigure\n";
+    fs::write(&registry, registry_bytes).expect("configure claim fixture");
+    let registry_pin = oa_sha256::sha256(registry_bytes);
     let expected = root.join("expected.tsv");
     let observations = root.join("observations.tsv");
     fs::write(
@@ -234,6 +235,9 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
         .arg(&log)
         .arg(checkpoint.0.to_string())
         .arg(checkpoint.1.clone())
+        .arg(&registry)
+        .arg(oa_sha256::to_hex(&registry_pin))
+        .arg("11")
         .output()
         .expect("verify and read committed report");
     assert!(
@@ -242,6 +246,7 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
         String::from_utf8_lossy(&report.stderr)
     );
     let report = String::from_utf8_lossy(&report.stdout);
+    assert!(report.contains("verification_principal_claim=11 registry_derived_role=Configure"));
     assert!(report.contains("outcome=certified"));
     assert!(report.contains("outcome=certified_with_exceptions"));
     assert!(report.contains("outcome=not_certified"));
@@ -257,6 +262,29 @@ fn certify_cli_commits_all_three_outcomes_from_real_tracker_and_local_digest_inp
         "adaptation_observed_sha256={}",
         oa_sha256::to_hex(&adaptation_digest)
     )));
+
+    let unknown_principal = Command::new(&artifact)
+        .arg("report")
+        .arg(&log)
+        .arg(checkpoint.0.to_string())
+        .arg(checkpoint.1.clone())
+        .arg(&registry)
+        .arg(oa_sha256::to_hex(&registry_pin))
+        .arg("12")
+        .output()
+        .expect("refuse unregistered report principal");
+    assert!(!unknown_principal.status.success());
+    let mismatched_pin = Command::new(&artifact)
+        .arg("report")
+        .arg(&log)
+        .arg(checkpoint.0.to_string())
+        .arg(checkpoint.1.clone())
+        .arg(&registry)
+        .arg("00".repeat(32))
+        .arg("11")
+        .output()
+        .expect("refuse mismatched report registry pin");
+    assert!(!mismatched_pin.status.success());
     let report_len = fs::metadata(&log).expect("final audit length").len();
     let unknown_version = String::from_utf8(catalog.to_vec())
         .expect("catalog UTF-8")
