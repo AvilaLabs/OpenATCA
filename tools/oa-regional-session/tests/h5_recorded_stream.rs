@@ -75,7 +75,7 @@ fn write_synthetic_adsb(path: &Path) {
         sequence += 1;
         let lon_delta = i64::try_from(sequence - 1)
             .expect("synthetic row index")
-            .checked_mul(22_000)
+            .checked_mul(21_750)
             .expect("synthetic longitude progression");
         let lon_e7 = i32::try_from(i64::from(-934_000_000) + lon_delta)
             .expect("synthetic longitude coordinate");
@@ -186,7 +186,7 @@ fn write_tracker_smoke_inputs(adsb_path: &Path, sfdps_path: &Path) {
         let source_ns = H5_CAPTURE_START_NS
             .checked_add(i64::try_from(sequence).expect("smoke index") * 1_000_000_000)
             .expect("smoke ADS-B time");
-        let lon_e7 = i32::try_from(-883_000_000i64 + i64::try_from(sequence).unwrap() * 22_000)
+        let lon_e7 = i32::try_from(-883_000_000i64 + i64::try_from(sequence).unwrap() * 21_750)
             .expect("smoke longitude");
         let row = oa_adsb::Row {
             time_ns: source_ns,
@@ -373,11 +373,11 @@ fn recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_ea
     )
     .expect("paired synthetic recorded stream completes");
 
-    // `gs_dkt=3,500` is 350 knots and the 22,000 e-7-degree eastward step is about 181 m
+    // `gs_dkt=3,500` is 350 knots and the 21,750 e-7-degree eastward step is about 180 m
     // at this latitude per one-second ADS-B interval.
     let latitude_rad = 41.9_f64.to_radians();
     let measured_step_m =
-        22_000.0 / 10_000_000.0 * std::f64::consts::PI / 180.0 * 6_371_000.0 * latitude_rad.cos();
+        21_750.0 / 10_000_000.0 * std::f64::consts::PI / 180.0 * 6_371_000.0 * latitude_rad.cos();
     let expected_step_m = 350.0 * 1_852.0 / 3_600.0;
     assert!((measured_step_m - expected_step_m).abs() < 1.0);
     let m2_refusals = report
