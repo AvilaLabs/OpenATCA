@@ -896,6 +896,63 @@ mod tests {
                 ])
                 .unwrap(),
             });
+        let mut runtime = regional(service);
+        let first = crate::runtime::regional_step(&mut runtime, &receipt(2, Some(1500)))
+            .unwrap()
+            .surveillance
+            .msaw
+            .unwrap();
+        assert_eq!(first.open.len(), 1);
+        assert_eq!(first.aural.sink, AuralSinkStatus::Unavailable);
+        assert_eq!(first.aural.states.len(), 1);
+        assert_eq!(first.aural.states[0].alert_start_ns, first.open[0].start_ns);
+        assert_eq!(first.aural.states[0].area_id_len, 5);
+        assert_eq!(first.aural.states[0].area_id[..5], *b"TOWER");
+        assert_eq!(first.aural.events.len(), 1);
+        assert_eq!(first.aural.events[0].kind, AuralEventKind::Requested);
+
+        let ongoing = crate::runtime::regional_step(&mut runtime, &receipt(3, Some(1490)))
+            .unwrap()
+            .surveillance
+            .msaw
+            .unwrap();
+        assert_eq!(ongoing.open.len(), 1);
+        assert_eq!(
+            ongoing.aural.events.len(),
+            0,
+            "ordinary scans do not replay request"
+        );
+
+        let later = crate::runtime::regional_step(&mut runtime, &receipt(4, Some(1480)))
+            .unwrap()
+            .surveillance
+            .msaw
+            .unwrap();
+        assert_eq!(later.open.len(), 1);
+        assert_eq!(
+            later.aural.events.len(),
+            0,
+            "ordinary scans do not replay request"
+        );
+    }
+
+    // REQ: OA-MSAW-083
+    #[test]
+    fn aural_acknowledgement_is_exact_and_does_not_clear_visual_alert() {
+        let mut service = regional_msaw_synthetic(32).unwrap();
+        service
+            .settings
+            .aural_areas
+            .push(oa_msaw_run::config::AuralArea {
+                id: "TOWER".into(),
+                polygon: oa_safety::geom::polygon_new(&[
+                    (400_000_000, -880_000_000),
+                    (420_000_000, -880_000_000),
+                    (420_000_000, -860_000_000),
+                    (400_000_000, -860_000_000),
+                ])
+                .unwrap(),
+            });
         let mut states = oa_safety::net::state_table_new(10_000_000_000, 0).unwrap();
         let mut inhibits = oa_safety::inhibit::inhibits_new();
         let first = regional_msaw_cycle(
@@ -906,16 +963,17 @@ mod tests {
             &mut inhibits,
         )
         .unwrap();
-        assert_eq!(first.open.len(), 1);
-        assert_eq!(first.aural.sink, AuralSinkStatus::Unavailable);
-        assert_eq!(first.aural.states.len(), 1);
-        assert_eq!(first.aural.states[0].alert_start_ns, first.open[0].start_ns);
-        assert_eq!(first.aural.states[0].area_id_len, 5);
-        assert_eq!(first.aural.states[0].area_id[..5], *b"TOWER");
-        assert_eq!(first.aural.events.len(), 1);
-        assert_eq!(first.aural.events[0].kind, AuralEventKind::Requested);
-
-        let ongoing = regional_msaw_cycle(
+        let alert_start_ns = first.open[0].start_ns;
+        regional_msaw_acknowledge_aural(&mut service, 0xabc101, alert_start_ns, 2_000_000_000)
+            .unwrap();
+        assert!(regional_msaw_acknowledge_aural(
+            &mut service,
+            0xabc101,
+            alert_start_ns,
+            2_000_000_000,
+        )
+        .is_err());
+        let acknowledged = regional_msaw_cycle(
             &mut service,
             3_000_000_000,
             &[track(1490.0, -600.0)],
@@ -923,40 +981,7 @@ mod tests {
             &mut inhibits,
         )
         .unwrap();
-        assert_eq!(ongoing.open.len(), 1);
-        assert_eq!(
-            ongoing.aural.events.len(),
-            0,
-            "ordinary scans do not replay request"
-        );
-
-        regional_msaw_acknowledge_aural(
-            &mut service,
-            0xabc101,
-            first.open[0].start_ns,
-            3_000_000_000,
-        )
-        .unwrap();
-        assert!(regional_msaw_acknowledge_aural(
-            &mut service,
-            0xabc101,
-            first.open[0].start_ns,
-            3_000_000_000,
-        )
-        .is_err());
-        let acknowledged = regional_msaw_cycle(
-            &mut service,
-            4_000_000_000,
-            &[track(1480.0, -600.0)],
-            &mut states,
-            &mut inhibits,
-        )
-        .unwrap();
-        assert_eq!(
-            acknowledged.open.len(),
-            1,
-            "acknowledgement does not clear visual alert"
-        );
+        assert_eq!(acknowledged.open.len(), 1);
         assert!(acknowledged
             .aural
             .events
