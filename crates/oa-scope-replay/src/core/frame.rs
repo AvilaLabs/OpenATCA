@@ -154,6 +154,19 @@ pub struct ReplaySafety<'a> {
     pub frozen_limit_ns: i64,
 }
 
+/// Optional per-frame overlays grouped as one borrowed core input.
+///
+/// This is a cold call record: three optional references occupy 24 bytes on the crate's
+/// supported 64-bit targets. It owns no state and does not change frame allocation behavior.
+#[derive(Clone, Copy, Default)]
+pub struct FrameOverlays<'r, 'a> {
+    pub safety: Option<&'r ReplaySafety<'a>>,
+    pub ownership: Option<&'r OwnershipStatus>,
+    pub metering: Option<&'r [AddressMetering]>,
+}
+
+const _: () = assert!(std::mem::size_of::<FrameOverlays<'_, '_>>() == 24);
+
 /// What one frame build drew and left out. A7.2: cold struct (one per frame).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameInfo {
@@ -440,7 +453,18 @@ pub fn replay_build_with_overlays(
     safety: Option<&ReplaySafety<'_>>,
     ownership: Option<&OwnershipStatus>,
 ) -> Result<FrameInfo, ReplayError> {
-    replay_build_internal(r, store, calls, t_ns, stamp, safety, ownership, None)
+    replay_build_internal(
+        r,
+        store,
+        calls,
+        t_ns,
+        stamp,
+        FrameOverlays {
+            safety,
+            ownership,
+            metering: None,
+        },
+    )
 }
 
 /// Builds a scope frame with exact-address, per-scan metering values and the optional safety and
@@ -452,20 +476,9 @@ pub fn replay_build_with_metering_and_overlays(
     calls: &Callsigns,
     t_ns: i64,
     stamp: &str,
-    meter_rows: &[AddressMetering],
-    safety: Option<&ReplaySafety<'_>>,
-    ownership: Option<&OwnershipStatus>,
+    overlays: FrameOverlays<'_, '_>,
 ) -> Result<FrameInfo, ReplayError> {
-    replay_build_internal(
-        r,
-        store,
-        calls,
-        t_ns,
-        stamp,
-        safety,
-        ownership,
-        Some(meter_rows),
-    )
+    replay_build_internal(r, store, calls, t_ns, stamp, overlays)
 }
 
 fn replay_build_internal(
@@ -474,10 +487,13 @@ fn replay_build_internal(
     calls: &Callsigns,
     t_ns: i64,
     stamp: &str,
-    safety: Option<&ReplaySafety<'_>>,
-    ownership: Option<&OwnershipStatus>,
-    meter_rows: Option<&[AddressMetering]>,
+    overlays: FrameOverlays<'_, '_>,
 ) -> Result<FrameInfo, ReplayError> {
+    let FrameOverlays {
+        safety,
+        ownership,
+        metering: meter_rows,
+    } = overlays;
     targets_clear(&mut r.set);
     let convert = match meter_rows {
         Some(rows) => targets_at_with_metering(

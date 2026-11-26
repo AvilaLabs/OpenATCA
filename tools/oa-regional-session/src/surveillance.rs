@@ -920,9 +920,11 @@ pub fn surveillance_finish_with_metering(
                     &Callsigns::default(),
                     time_ns,
                     "REGIONAL RESEARCH",
-                    rows,
-                    safety,
-                    ownership,
+                    oa_scope_replay::frame::FrameOverlays {
+                        safety,
+                        ownership,
+                        metering: Some(rows),
+                    },
                 )
             } else {
                 replay_build_with_overlays(
