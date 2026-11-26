@@ -13,7 +13,9 @@ pub mod migration_full_day_runner;
 pub mod migration_g3;
 pub mod migration_shadow;
 pub mod migration_snapshot;
+// Pending F1 integration; must remain excluded from qualified landings until edge approval.
 pub mod msaw_bridge;
+pub mod nam_handoff;
 pub mod operator;
 pub mod performance;
 pub mod recordings;

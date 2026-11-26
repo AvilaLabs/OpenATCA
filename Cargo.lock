@@ -485,6 +485,7 @@ dependencies = [
  "oa-migration-shadow",
  "oa-msaw",
  "oa-msaw-run",
+ "oa-nam",
  "oa-quarantine",
  "oa-safety",
  "oa-scope-replay",

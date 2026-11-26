@@ -28,6 +28,9 @@
     "OA-A7-003",
     "OA-A7-004",
     "OA-A7-005",
+    "OA-A7-006",
+    "OA-A7-007",
+    "OA-A7-008",
     "OA-ADAPT-001",
     "OA-ADAPT-002",
     "OA-ADAPT-003",
@@ -9846,6 +9849,9 @@
         "OA-A7-003",
         "OA-A7-004",
         "OA-A7-005",
+        "OA-A7-006",
+        "OA-A7-007",
+        "OA-A7-008",
         "OA-NAM-001",
         "OA-NAM-002",
         "OA-NAM-003",
@@ -9888,6 +9894,10 @@
         },
         {
           "document": "REQUIREMENTS.md",
+          "locator": "OA-A7-006 through OA-A7-008 in the ACC-to-ACC framed-byte peer fixture section"
+        },
+        {
+          "document": "REQUIREMENTS.md",
           "locator": "OA-NAM-001 through OA-NAM-035 in the owning functional sections"
         }
       ],
@@ -9926,6 +9936,31 @@
           "requirement_id": "OA-A7-005",
           "file": "crates/oa-nam/tests/handoff_peer.rs",
           "test_name": "flight_plan_timeout_and_est_then_chg_are_wire_ordered"
+        },
+        {
+          "requirement_id": "OA-A7-006",
+          "file": "tools/oa-regional-session/tests/nam_handoff_adapter.rs",
+          "test_name": "encoded_nam_rla_and_rta_apply_to_the_exact_full_flight_key"
+        },
+        {
+          "requirement_id": "OA-A7-006",
+          "file": "tools/oa-regional-session/tests/nam_handoff_adapter.rs",
+          "test_name": "changed_target_rti_does_not_silently_recoordinate_an_existing_offer"
+        },
+        {
+          "requirement_id": "OA-A7-007",
+          "file": "tools/oa-regional-session/tests/nam_handoff_adapter.rs",
+          "test_name": "encoded_lrm_fails_and_initiator_rta_retracts_as_distinct_flight_operations"
+        },
+        {
+          "requirement_id": "OA-A7-007",
+          "file": "tools/oa-regional-session/tests/nam_handoff_adapter.rs",
+          "test_name": "encoded_rtu_is_not_forged_into_an_ownership_change"
+        },
+        {
+          "requirement_id": "OA-A7-008",
+          "file": "tools/oa-regional-session/tests/nam_handoff_adapter.rs",
+          "test_name": "encoded_session_sequence_and_response_correlation_gate_flight_mapping"
         },
         {
           "requirement_id": "OA-NAM-001",
@@ -16393,6 +16428,24 @@
       "function": "acc_to_acc_flight_coordination_interface",
       "hazard_id": "HZ-COORDINATION-001",
       "rationale": "Engineering safety candidate: misordering an EST and CHG can leave a flight-plan message sequence ambiguous. The fixture tests framed transport ordering and parsing only; applying the amendment to shared flight state remains a separate caller integration."
+    },
+    {
+      "id": "OA-A7-006",
+      "function": "acc_to_acc_flight_coordination_interface",
+      "hazard_id": "HZ-COORDINATION-001",
+      "rationale": "Engineering safety candidate: associating a framed handoff with the wrong flight or endpoint may misstate coordination state. The synthetic regional adapter requires a caller-supplied full FlightKey, exact facility/sector mapping, and configured endpoint units, then applies operations to that same key. It does not infer identity from callsign or establish operational ownership."
+    },
+    {
+      "id": "OA-A7-007",
+      "function": "acc_to_acc_flight_coordination_interface",
+      "hazard_id": "HZ-COORDINATION-001",
+      "rationale": "Engineering safety candidate: conflating RLA routing, RTA acceptance/retraction, LRM rejection, or RTU with ownership transfer could misrepresent the handoff. Synthetic tests preserve distinct operations; RTU yields no ownership operation and no protocol timeout is inferred. This does not establish operational peer state."
+    },
+    {
+      "id": "OA-A7-008",
+      "function": "acc_to_acc_flight_coordination_interface",
+      "hazard_id": "HZ-COORDINATION-001",
+      "rationale": "Engineering safety candidate: bypassing session admission or hiding sequence/correlation status could expose invalid coordination data. The adapter requires an opaque token from the NAM session, counts delivered sequence gaps while keeping those messages visible, and refuses mapper operations for duplicate, wrong-peer, discarded, unmatched-LRM, or unmatched-response actions. Tests are synthetic; no operational transport, timing, or ownership assurance is claimed."
     },
     {
       "id": "OA-CA-036",

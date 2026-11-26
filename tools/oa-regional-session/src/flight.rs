@@ -6,8 +6,8 @@ use oa_flight::{
     flight_get, flights_apply, flights_claiming_address, flights_len, flights_new, key_gufi,
     op_new, Alt, Flight, FlightConfig, FlightTable, Outcome, Stamp, ALT_NIL, ALT_NONE, ALT_SIMPLE,
     C_COUNT, HO_NONE, MAX_VIEWS, OP_ADDRESS, OP_ASSIGN, OP_COUNT, OP_HO_ACCEPT, OP_HO_FAIL,
-    OP_HO_INITIATE, OP_HO_TAKE, OP_IDENTITY, OP_INTERIM, OP_OWNER, OP_SET_PLAN, R_COUNT, ST_ACTIVE,
-    ST_PROPOSED,
+    OP_HO_INITIATE, OP_HO_RETRACT, OP_HO_TAKE, OP_HO_UPDATE, OP_IDENTITY, OP_INTERIM, OP_OWNER,
+    OP_SET_PLAN, R_COUNT, ST_ACTIVE, ST_PROPOSED,
 };
 
 use crate::input::{EventKind, FlightOperation, HandoffOperation, NormalizedEvent, SourceKind};
@@ -169,12 +169,29 @@ pub fn flight_stage_adapter_refusal(
     let EventKind::Flight(operation) = event.kind else {
         return None;
     };
-    let existing = flight_get(&driver.table, &key_gufi(event.identity.flight_gufi));
+    let key = match operation {
+        FlightOperation::SetPlanByKey { key, .. }
+        | FlightOperation::SetOwnerByKey { key, .. }
+        | FlightOperation::HandoffByKey { key, .. } => key,
+        _ => key_gufi(event.identity.flight_gufi),
+    };
+    let existing = flight_get(&driver.table, &key);
     match operation {
         FlightOperation::SetOwner { unit }
             if existing.is_some_and(|flight| flight.owner != [0; 8] && flight.owner != unit) =>
         {
             Some(AdapterRefusal::OwnerChangeRequiresTake)
+        }
+        FlightOperation::SetOwnerByKey { unit, .. }
+            if existing.is_some_and(|flight| flight.owner != [0; 8] && flight.owner != unit) =>
+        {
+            Some(AdapterRefusal::OwnerChangeRequiresTake)
+        }
+        FlightOperation::Handoff {
+            operation: HandoffOperation::Update,
+            unit,
+        } if existing.is_some_and(|flight| flight.ho_state != HO_NONE && flight.ho_to != unit) => {
+            Some(AdapterRefusal::AcceptingUnitIsNotOfferedTarget)
         }
         FlightOperation::Handoff {
             operation: HandoffOperation::Offer,
@@ -199,6 +216,39 @@ pub fn flight_stage_adapter_refusal(
             unit,
         } if existing
             .is_some_and(|flight| flight.ho_state != HO_NONE && flight.ho_from != unit) =>
+        {
+            Some(AdapterRefusal::FailingUnitIsNotOfferingOwner)
+        }
+        FlightOperation::Handoff {
+            operation: HandoffOperation::Retract,
+            unit,
+        } if existing
+            .is_some_and(|flight| flight.ho_state != HO_NONE && flight.ho_from != unit) =>
+        {
+            Some(AdapterRefusal::FailingUnitIsNotOfferingOwner)
+        }
+        FlightOperation::HandoffByKey {
+            operation: HandoffOperation::Offer,
+            from_unit,
+            ..
+        } if existing.is_none_or(|flight| flight.owner != from_unit || from_unit == [0; 8]) => {
+            Some(AdapterRefusal::OfferRequiresCurrentOwner)
+        }
+        FlightOperation::HandoffByKey {
+            operation: HandoffOperation::Update | HandoffOperation::Accept | HandoffOperation::Take,
+            to_unit,
+            ..
+        } if existing
+            .is_some_and(|flight| flight.ho_state != HO_NONE && flight.ho_to != to_unit) =>
+        {
+            Some(AdapterRefusal::AcceptingUnitIsNotOfferedTarget)
+        }
+        FlightOperation::HandoffByKey {
+            operation: HandoffOperation::Retract | HandoffOperation::Fail,
+            from_unit,
+            ..
+        } if existing
+            .is_some_and(|flight| flight.ho_state != HO_NONE && flight.ho_from != from_unit) =>
         {
             Some(AdapterRefusal::FailingUnitIsNotOfferingOwner)
         }
@@ -242,10 +292,17 @@ pub fn flight_record_capacity_refusal(driver: &mut FlightDriver) {
 
 /// Detect the known core table-capacity refusal before the event can advance accepted timestamps.
 pub fn flight_table_capacity_refusal(driver: &FlightDriver, event: &NormalizedEvent) -> bool {
-    let EventKind::Flight(FlightOperation::SetPlan { .. }) = event.kind else {
+    let EventKind::Flight(operation) = event.kind else {
         return false;
     };
-    let key = key_gufi(event.identity.flight_gufi);
+    let (is_plan, key) = match operation {
+        FlightOperation::SetPlan { .. } => (true, key_gufi(event.identity.flight_gufi)),
+        FlightOperation::SetPlanByKey { key, .. } => (true, key),
+        _ => (false, key_gufi(event.identity.flight_gufi)),
+    };
+    if !is_plan {
+        return false;
+    }
     flight_get(&driver.table, &key).is_none() && flights_len(&driver.table) >= driver.capacity
 }
 
@@ -502,10 +559,34 @@ fn flight_apply_validated_event(
     driver.stats.flight_events = driver.stats.flight_events.saturating_add(1);
     let source_ms = event.source_ns / 1_000_000;
     let receipt_ms = event.receipt_ns / 1_000_000;
-    let key = key_gufi(event.identity.flight_gufi);
+    let key = match operation {
+        FlightOperation::SetPlanByKey { key, .. }
+        | FlightOperation::SetOwnerByKey { key, .. }
+        | FlightOperation::HandoffByKey { key, .. } => key,
+        _ => key_gufi(event.identity.flight_gufi),
+    };
     let existing = flight_get(&driver.table, &key);
     let (kind, state, plan_id, alt, unit_a, unit_b, address, identity) = match operation {
         FlightOperation::SetPlan { plan_id, status } => {
+            let state = match status {
+                1 => ST_PROPOSED,
+                2 => ST_ACTIVE,
+                other => other,
+            };
+            (
+                OP_SET_PLAN,
+                state,
+                plan_id,
+                None,
+                [0; 8],
+                [0; 8],
+                None,
+                None,
+            )
+        }
+        FlightOperation::SetPlanByKey {
+            plan_id, status, ..
+        } => {
             let state = match status {
                 1 => ST_PROPOSED,
                 2 => ST_ACTIVE,
@@ -577,6 +658,12 @@ fn flight_apply_validated_event(
             }
             (OP_OWNER, 0, [0; 12], None, unit, [0; 8], None, None)
         }
+        FlightOperation::SetOwnerByKey { unit, .. } => {
+            if existing.is_some_and(|flight| flight.owner != [0; 8] && flight.owner != unit) {
+                return record_adapter_refusal(driver, AdapterRefusal::OwnerChangeRequiresTake);
+            }
+            (OP_OWNER, 0, [0; 12], None, unit, [0; 8], None, None)
+        }
         FlightOperation::SetAddress => (
             OP_ADDRESS,
             0,
@@ -601,6 +688,10 @@ fn flight_apply_validated_event(
             None,
             Some((callsign, departure, arrival)),
         ),
+        FlightOperation::Handoff {
+            operation: HandoffOperation::Update,
+            unit,
+        } => (OP_HO_UPDATE, 0, [0; 12], None, [0; 8], unit, None, None),
         FlightOperation::Handoff {
             operation: HandoffOperation::Offer,
             unit,
@@ -653,6 +744,53 @@ fn flight_apply_validated_event(
             }
             (OP_HO_FAIL, 0, [0; 12], None, [0; 8], [0; 8], None, None)
         }
+        FlightOperation::Handoff {
+            operation: HandoffOperation::Retract,
+            ..
+        } => (OP_HO_RETRACT, 0, [0; 12], None, [0; 8], [0; 8], None, None),
+        FlightOperation::HandoffByKey {
+            operation,
+            from_unit,
+            to_unit,
+            ..
+        } => match operation {
+            HandoffOperation::Update => {
+                (OP_HO_UPDATE, 0, [0; 12], None, [0; 8], to_unit, None, None)
+            }
+            HandoffOperation::Offer => {
+                if existing.is_none_or(|flight| flight.owner != from_unit || from_unit == [0; 8]) {
+                    return record_adapter_refusal(
+                        driver,
+                        AdapterRefusal::OfferRequiresCurrentOwner,
+                    );
+                }
+                (
+                    OP_HO_INITIATE,
+                    0,
+                    [0; 12],
+                    None,
+                    from_unit,
+                    to_unit,
+                    None,
+                    None,
+                )
+            }
+            HandoffOperation::Accept => {
+                (OP_HO_ACCEPT, 0, [0; 12], None, [0; 8], to_unit, None, None)
+            }
+            HandoffOperation::Take => (OP_HO_TAKE, 0, [0; 12], None, [0; 8], to_unit, None, None),
+            HandoffOperation::Retract => (
+                OP_HO_RETRACT,
+                0,
+                [0; 12],
+                None,
+                from_unit,
+                [0; 8],
+                None,
+                None,
+            ),
+            HandoffOperation::Fail => (OP_HO_FAIL, 0, [0; 12], None, from_unit, [0; 8], None, None),
+        },
     };
     let mut op = op_new(
         kind,
