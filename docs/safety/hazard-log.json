@@ -10298,6 +10298,16 @@
           "test_name": "h1_h5_make_before_break_and_rollback"
         },
         {
+          "requirement_id": "OA-AUDIT-005",
+          "file": "tools/oa-regional-session/tests/h5_recorded_stream.rs",
+          "test_name": "recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_each_update"
+        },
+        {
+          "requirement_id": "OA-AUDIT-007",
+          "file": "tools/oa-regional-session/tests/h5_recorded_stream.rs",
+          "test_name": "recorded_stream_runs_100_paired_m2_flip_rollback_bins_and_consumer_applies_each_update"
+        },
+        {
           "requirement_id": "OA-AUDIT-006",
           "file": "crates/oa-audit-log/src/shell/mod.rs",
           "test_name": "protected_aliases_are_refused_before_log_io"
