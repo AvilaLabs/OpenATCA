@@ -9489,6 +9489,10 @@
         {
           "document": "tools/oa-legacy-traj/src/core/trajectory.rs",
           "locator": "shared route walk, bounded profile offsets and sampled trajectory outputs"
+        },
+        {
+          "document": "tools/oa-perf/tests/parallel_final.rs",
+          "locator": "synthetic radar-scan \u2192 tracker-output \u2192 final-monitor integration fixture"
         }
       ],
       "verification_refs": [
@@ -9826,6 +9830,16 @@
           "requirement_id": "OA-ENC-023",
           "file": "tools/oa-regional-session/src/conflict_probe.rs",
           "test_name": "vertical_only_conflict_is_reported_by_shared_predictor_adapter"
+        },
+        {
+          "requirement_id": "OA-RWY-015",
+          "file": "tools/oa-perf/tests/parallel_final.rs",
+          "test_name": "synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning"
+        },
+        {
+          "requirement_id": "OA-RWY-016",
+          "file": "tools/oa-perf/tests/parallel_final.rs",
+          "test_name": "synthetic_1_2s_reports_track_a_blunder_from_caution_to_warning"
         }
       ],
       "proof_refs": [
@@ -22927,13 +22941,13 @@
       "id": "OA-RWY-015",
       "function": "conflict_alert",
       "hazard_id": "HZ-CA-001",
-      "rationale": "Engineering safety candidate: a missed caution or warning for a track entering the NTZ, or a misleading rendered state, could delay response. The bounded segment rule limits warning to the interval from outer fix to threshold; prediction timing and the display hook are tested, including invalid packet/capacity refusal. Cadence/lookahead values are engineering policy, not facility adaptation or operational detection evidence."
+      "rationale": "Engineering safety candidate: a missed caution or warning for a track entering the NTZ, or a misleading rendered state, could delay response. The bounded segment rule limits warning to the interval from outer fix to threshold; prediction timing and the display hook are tested, including invalid packet/capacity refusal. Cadence/lookahead values are engineering policy, not facility adaptation or operational detection evidence. A separate synthetic A2 pipeline test generates deterministic radar scans, feeds converted plots through the real tracker, and supplies tracker rows to the monitor to exercise a caution-to-warning progression at the modeled scan cadence. Its detection probability is fixed to 1 for this test and it is not a real-radar performance or operational effectiveness measurement."
     },
     {
       "id": "OA-RWY-016",
       "function": "conflict_alert",
       "hazard_id": "HZ-CA-001",
-      "rationale": "Engineering safety candidate: a blunder trajectory that reaches the NTZ can be missed if bounded prediction columns are incomplete, misidentified, or evaluated after output mutation. The monitor validates the complete bounded prediction set before output and uses stable runway/end and track identity; the test is a synthetic engineering case, not operational effectiveness evidence."
+      "rationale": "Engineering safety candidate: a blunder trajectory that reaches the NTZ can be missed if bounded prediction columns are incomplete, misidentified, or evaluated after output mutation. The monitor validates the complete bounded prediction set before output and uses stable runway/end and track identity; the test is a synthetic engineering case, not operational effectiveness evidence. The synthetic A2 pipeline test supplies actual tracker output to the monitor and observes caution before warning for one fixed path; it does not establish general prediction accuracy, real-sensor performance, or operational effectiveness."
     },
     {
       "id": "OA-RWY-019",

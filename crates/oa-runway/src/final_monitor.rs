@@ -13,10 +13,27 @@ pub const DEFAULT_UPDATE_NS: u64 = 1_200_000_000;
 pub const DEFAULT_LOOKAHEAD_NS: u64 = 10_000_000_000;
 pub const DEFAULT_MINIMUM_SEPARATION_FT: f64 = 3_100.0;
 pub const DEGRADED_AFTER_NS: u64 = 4_800_000_000;
+// A7.1: 256 bounds each pass; update performs a sorted-key check, full numeric validation,
+// candidate evaluation and output emission (at most 1,024 row visits). Candidate scratch is 2 KiB
+// at the cap; no row can create more than one alert. Raising the bound requires measured
+// end-to-end monitor capacity evidence.
 pub const MAX_TRACKS: usize = 256;
 pub const DEFAULT_CENTERLINE_EXTENSION_M: f64 = 10_000.0;
+const MAX_LOOKAHEAD_NS: u64 = 60_000_000_000;
+const MAX_UPDATE_NS: u64 = 4_800_000_000;
+// The course length is at most the distance between two endpoints each bounded to a 20 km
+// local frame by finite_point.
+const MAX_COURSE_LENGTH_M: f64 = 40_000.0;
+// Derived from prepare_pair's existing 20,000 ft maximum NTZ width.
+const MAX_NTZ_HALF_WIDTH_M: f64 = 3_048.0;
+// Mirrors the accepted ADS-B reported-speed ceiling (4,088 kt); do not use the lower 360 m/s
+// tracker candidate-pairing gate as a predicted-track limit.
+const MAX_TRACK_SPEED_MPS: f64 = 4_088.0 * 0.514_444_444_444;
+// Prediction positions and the runway origin share the same bounded 20 km local frame.
+const MAX_TRACK_R95_M: f64 = 20_000.0;
 
 /// Cold adaptation values; defaults are a development profile, not universal minima.
+// A7.2: cold struct, size guard waived
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FinalMonitorConfig {
     pub ntz_width_ft: f64,
@@ -44,6 +61,7 @@ pub struct FinalCourseInput {
 }
 
 /// Stable public identifier for one ordered pair; no internal array index crosses the boundary.
+// A7.2: cold struct, size guard waived
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FinalPairId {
     pub first_runway_id: u32,
@@ -53,6 +71,7 @@ pub struct FinalPairId {
 }
 
 /// Prepared geometry for two parallel finals. Cold adaptation record.
+// A7.2: cold struct, size guard waived
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FinalPair {
     pub id: FinalPairId,
@@ -262,6 +281,7 @@ pub fn prepare_pair(
 }
 
 /// Predicted track columns, each with one value per tracker prediction.
+#[repr(C)]
 pub struct PredictedTracks<'a> {
     pub addresses: &'a [u32],
     pub east_m: &'a [f64],
@@ -273,6 +293,8 @@ pub struct PredictedTracks<'a> {
     pub lon_e7: &'a [i32],
 }
 
+const _: () = assert!(core::mem::size_of::<PredictedTracks<'static>>() == 128);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FinalSeverity {
@@ -281,6 +303,7 @@ pub enum FinalSeverity {
 }
 
 /// Caller-owned structure-of-arrays output; capacity is checked before any field is written.
+#[repr(C)]
 pub struct FinalAlertBuffer<'a> {
     pub addresses: &'a mut [u32],
     pub pair_ids: &'a mut [FinalPairId],
@@ -290,6 +313,8 @@ pub struct FinalAlertBuffer<'a> {
     pub seconds_to_entry_milli: &'a mut [u32],
 }
 
+const _: () = assert!(core::mem::size_of::<FinalAlertBuffer<'static>>() == 96);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdateError {
     BadInput,
@@ -298,6 +323,7 @@ pub enum UpdateError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct UpdateResult {
     pub examined: u16,
     pub alerts: u16,
@@ -305,11 +331,16 @@ pub struct UpdateResult {
     pub due: bool,
 }
 
+const _: () = assert!(core::mem::size_of::<UpdateResult>() == 6);
+
 /// Timing state is shell-owned in use; the transition is pure in explicit timestamps.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FinalMonitorState {
     pub last_update_ns: u64,
 }
+
+const _: () = assert!(core::mem::size_of::<FinalMonitorState>() == 8);
 
 impl FinalMonitorState {
     pub const fn new() -> Self {
@@ -336,7 +367,10 @@ fn valid_tracks(t: &PredictedTracks<'_>) -> bool {
 }
 
 /// Evaluate one pair on a due tracker-prediction update. Input addresses must be sorted, unique,
-/// and nonzero. Unknown or malformed predictions refuse the whole call; no partial output.
+/// and nonzero. At most 256 rows are accepted; validation, candidate evaluation and emission are
+/// linear, with no allocation and at most one output row per input. Capacity for all possible rows
+/// is checked before any output write. Unknown, malformed, or numerically unbounded predictions
+/// refuse the whole call; no partial output. A non-due call leaves state and output unchanged.
 pub fn update(
     pair: FinalPair,
     state: &mut FinalMonitorState,
@@ -346,6 +380,9 @@ pub fn update(
     output: FinalAlertBuffer<'_>,
 ) -> Result<UpdateResult, UpdateError> {
     let n = tracks.addresses.len();
+    if n > MAX_TRACKS {
+        return Err(UpdateError::Capacity);
+    }
     if !valid_tracks(&tracks)
         || output.addresses.len() != output.pair_ids.len()
         || output.addresses.len() != output.severity.len()
@@ -355,17 +392,34 @@ pub fn update(
     {
         return Err(UpdateError::BadInput);
     }
-    if !finite_point(pair.origin)
+    if pair.id.first_runway_id == 0
+        || pair.id.second_runway_id == 0
+        || pair.id.first_runway_id == pair.id.second_runway_id
+        || !finite_point(pair.origin)
         || !pair.axis_east.is_finite()
         || !pair.axis_north.is_finite()
         || !pair.normal_east.is_finite()
         || !pair.normal_north.is_finite()
+        || pair.axis_east.abs() > 1.0
+        || pair.axis_north.abs() > 1.0
+        || pair.normal_east.abs() > 1.0
+        || pair.normal_north.abs() > 1.0
         || !pair.course_length_m.is_finite()
-        || pair.course_length_m <= 0.0
+        || !(1.0..=MAX_COURSE_LENGTH_M).contains(&pair.course_length_m)
         || !pair.ntz_half_width_m.is_finite()
-        || pair.ntz_half_width_m <= 0.0
-        || pair.lookahead_ns == 0
-        || pair.update_ns == 0
+        || !(f64::MIN_POSITIVE..=MAX_NTZ_HALF_WIDTH_M).contains(&pair.ntz_half_width_m)
+        || !(1..=MAX_LOOKAHEAD_NS).contains(&pair.lookahead_ns)
+        || !(1..=MAX_UPDATE_NS).contains(&pair.update_ns)
+    {
+        return Err(UpdateError::BadInput);
+    }
+    let axis_norm_sq = pair.axis_east * pair.axis_east + pair.axis_north * pair.axis_north;
+    let normal_norm_sq =
+        pair.normal_east * pair.normal_east + pair.normal_north * pair.normal_north;
+    let axis_normal_dot = pair.axis_east * pair.normal_east + pair.axis_north * pair.normal_north;
+    if (axis_norm_sq - 1.0).abs() > 1.0e-9
+        || (normal_norm_sq - 1.0).abs() > 1.0e-9
+        || axis_normal_dot.abs() > 1.0e-9
     {
         return Err(UpdateError::BadInput);
     }
@@ -382,6 +436,35 @@ pub fn update(
         .is_some_and(|address| *address == 0)
     {
         return Err(UpdateError::BadInput);
+    }
+    for ((((((east, north), vx), vy), r95), lat), lon) in tracks
+        .east_m
+        .iter()
+        .zip(tracks.north_m)
+        .zip(tracks.velocity_east_mps)
+        .zip(tracks.velocity_north_mps)
+        .zip(tracks.r95_m)
+        .zip(tracks.lat_e7)
+        .zip(tracks.lon_e7)
+    {
+        if !east.is_finite()
+            || !north.is_finite()
+            || !vx.is_finite()
+            || !vy.is_finite()
+            || vx.abs() > MAX_TRACK_SPEED_MPS
+            || vy.abs() > MAX_TRACK_SPEED_MPS
+            || !r95.is_finite()
+            || !(0.0..=MAX_TRACK_R95_M).contains(r95)
+            || east.abs() > 20_000.0
+            || north.abs() > 20_000.0
+            || !(-900_000_000..=900_000_000).contains(lat)
+            || !(-1_800_000_000..=1_800_000_000).contains(lon)
+        {
+            return Err(UpdateError::BadInput);
+        }
+        if oa_math::hypot(*vx, *vy) > MAX_TRACK_SPEED_MPS {
+            return Err(UpdateError::BadInput);
+        }
     }
     if now_ns < state.last_update_ns || now_ns < prediction_report_ns {
         return Err(UpdateError::ClockRegression);
@@ -400,41 +483,15 @@ pub fn update(
     if output.addresses.len() < n {
         return Err(UpdateError::Capacity);
     }
-    for ((((((east, north), vx), vy), r95), lat), lon) in tracks
+    let mut candidates = [AlertCandidate::EMPTY; MAX_TRACKS];
+    for (index, ((((&east, &north), &vx), &vy), &r95)) in tracks
         .east_m
         .iter()
         .zip(tracks.north_m)
         .zip(tracks.velocity_east_mps)
         .zip(tracks.velocity_north_mps)
         .zip(tracks.r95_m)
-        .zip(tracks.lat_e7)
-        .zip(tracks.lon_e7)
-    {
-        if !east.is_finite()
-            || !north.is_finite()
-            || !vx.is_finite()
-            || !vy.is_finite()
-            || !r95.is_finite()
-            || *r95 < 0.0
-            || east.abs() > 20_000.0
-            || north.abs() > 20_000.0
-            || !(-900_000_000..=900_000_000).contains(lat)
-            || !(-1_800_000_000..=1_800_000_000).contains(lon)
-        {
-            return Err(UpdateError::BadInput);
-        }
-    }
-    let mut count = 0usize;
-    for (((((((&address, &east), &north), &vx), &vy), &r95), &lat), &lon) in tracks
-        .addresses
-        .iter()
-        .zip(tracks.east_m)
-        .zip(tracks.north_m)
-        .zip(tracks.velocity_east_mps)
-        .zip(tracks.velocity_north_mps)
-        .zip(tracks.r95_m)
-        .zip(tracks.lat_e7)
-        .zip(tracks.lon_e7)
+        .enumerate()
     {
         let dx = east - pair.origin.east_m;
         let dy = north - pair.origin.north_m;
@@ -443,13 +500,15 @@ pub fn update(
         let along_v = vx * pair.axis_east + vy * pair.axis_north;
         let cross_v = vx * pair.normal_east + vy * pair.normal_north;
         let half = pair.ntz_half_width_m + r95 + 1.5;
-        let mut severity = None;
-        let mut t_ms = 0u32;
         let along_low = -pair.course_length_m * 0.5;
         let along_high = pair.course_length_m * 0.5;
         let on_final_segment = along >= along_low && along <= along_high;
-        if on_final_segment && cross.abs() <= half {
-            severity = Some(FinalSeverity::Warning);
+        let candidate = if on_final_segment && cross.abs() <= half {
+            Some(AlertCandidate {
+                present: true,
+                severity: FinalSeverity::Warning,
+                seconds_to_entry_milli: 0,
+            })
         } else if on_final_segment && cross * cross_v < 0.0 {
             let seconds = (cross.abs() - half) / cross_v.abs();
             let t_ns = seconds * 1_000_000_000.0;
@@ -460,37 +519,67 @@ pub fn update(
                 && future_along >= along_low
                 && future_along <= along_high
             {
-                severity = Some(FinalSeverity::Caution);
-                t_ms = (seconds * 1_000.0) as u32;
+                let millis = seconds * 1_000.0;
+                if !millis.is_finite() || !(0.0..=u32::MAX as f64).contains(&millis) {
+                    return Err(UpdateError::BadInput);
+                }
+                let Ok(seconds_to_entry_milli) = u32::try_from(millis as u64) else {
+                    return Err(UpdateError::BadInput);
+                };
+                Some(AlertCandidate {
+                    present: true,
+                    severity: FinalSeverity::Caution,
+                    seconds_to_entry_milli,
+                })
+            } else {
+                None
             }
-        }
-        if let Some(level) = severity {
-            let (
-                Some(out_address),
-                Some(out_pair),
-                Some(out_severity),
-                Some(out_lat),
-                Some(out_lon),
-                Some(out_time),
-            ) = (
-                output.addresses.get_mut(count),
-                output.pair_ids.get_mut(count),
-                output.severity.get_mut(count),
-                output.lat_e7.get_mut(count),
-                output.lon_e7.get_mut(count),
-                output.seconds_to_entry_milli.get_mut(count),
-            )
-            else {
+        } else {
+            None
+        };
+        if let Some(candidate) = candidate {
+            let Some(slot) = candidates.get_mut(index) else {
                 return Err(UpdateError::Capacity);
             };
-            *out_address = address;
-            *out_pair = pair.id;
-            *out_severity = level;
-            *out_lat = lat;
-            *out_lon = lon;
-            *out_time = t_ms;
-            count += 1;
+            *slot = candidate;
         }
+    }
+    let mut count = 0usize;
+    for (index, &address) in tracks.addresses.iter().enumerate() {
+        let Some(candidate) = candidates.get(index).copied() else {
+            return Err(UpdateError::Capacity);
+        };
+        if !candidate.present {
+            continue;
+        }
+        let Some((&lat, &lon)) = tracks.lat_e7.get(index).zip(tracks.lon_e7.get(index)) else {
+            return Err(UpdateError::BadInput);
+        };
+        let (
+            Some(out_address),
+            Some(out_pair),
+            Some(out_severity),
+            Some(out_lat),
+            Some(out_lon),
+            Some(out_time),
+        ) = (
+            output.addresses.get_mut(count),
+            output.pair_ids.get_mut(count),
+            output.severity.get_mut(count),
+            output.lat_e7.get_mut(count),
+            output.lon_e7.get_mut(count),
+            output.seconds_to_entry_milli.get_mut(count),
+        )
+        else {
+            return Err(UpdateError::Capacity);
+        };
+        *out_address = address;
+        *out_pair = pair.id;
+        *out_severity = candidate.severity;
+        *out_lat = lat;
+        *out_lon = lon;
+        *out_time = candidate.seconds_to_entry_milli;
+        count += 1;
     }
     state.last_update_ns = now_ns;
     Ok(UpdateResult {
@@ -499,6 +588,26 @@ pub fn update(
         degraded,
         due: true,
     })
+}
+
+// A7.1: one transient fixed-width result per accepted track; no heap growth.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct AlertCandidate {
+    present: bool,
+    severity: FinalSeverity,
+    seconds_to_entry_milli: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<AlertCandidate>() == 8);
+const _: () = assert!(core::mem::size_of::<[AlertCandidate; MAX_TRACKS]>() == 2_048);
+
+impl AlertCandidate {
+    const EMPTY: Self = Self {
+        present: false,
+        severity: FinalSeverity::Caution,
+        seconds_to_entry_milli: 0,
+    };
 }
 
 #[cfg(test)]
@@ -641,6 +750,64 @@ mod tests {
         )
     }
 
+    fn assert_bad_input_is_atomic(pair: FinalPair, vx: f64, vy: f64, r95: f64, north: f64) {
+        let addresses = [1234];
+        let east_m = [0.0];
+        let north_m = [north];
+        let velocity_east_mps = [vx];
+        let velocity_north_mps = [vy];
+        let r95_m = [r95];
+        let lat_e7 = [100];
+        let lon_e7 = [200];
+        let mut state = FinalMonitorState {
+            last_update_ns: 100,
+        };
+        let mut out_addr = [77];
+        let sentinel_pair = FinalPairId {
+            first_runway_id: 7,
+            first_end_name: *b"07L",
+            second_runway_id: 8,
+            second_end_name: *b"08R",
+        };
+        let mut out_pair = [sentinel_pair];
+        let mut out_severity = [FinalSeverity::Warning];
+        let mut out_lat = [303];
+        let mut out_lon = [404];
+        let mut out_time = [505];
+        let result = update(
+            pair,
+            &mut state,
+            1_200_000_100,
+            1_200_000_100,
+            PredictedTracks {
+                addresses: &addresses,
+                east_m: &east_m,
+                north_m: &north_m,
+                velocity_east_mps: &velocity_east_mps,
+                velocity_north_mps: &velocity_north_mps,
+                r95_m: &r95_m,
+                lat_e7: &lat_e7,
+                lon_e7: &lon_e7,
+            },
+            FinalAlertBuffer {
+                addresses: &mut out_addr,
+                pair_ids: &mut out_pair,
+                severity: &mut out_severity,
+                lat_e7: &mut out_lat,
+                lon_e7: &mut out_lon,
+                seconds_to_entry_milli: &mut out_time,
+            },
+        );
+        assert_eq!(result, Err(UpdateError::BadInput));
+        assert_eq!(state.last_update_ns, 100);
+        assert_eq!(out_addr, [77]);
+        assert_eq!(out_pair, [sentinel_pair]);
+        assert_eq!(out_severity, [FinalSeverity::Warning]);
+        assert_eq!(out_lat, [303]);
+        assert_eq!(out_lon, [404]);
+        assert_eq!(out_time, [505]);
+    }
+
     // REQ: OA-RWY-014
     #[test]
     fn pair_uses_endpoints_and_midway_ntz_default() {
@@ -728,6 +895,15 @@ mod tests {
         assert_eq!(severity, Some(FinalSeverity::Warning));
     }
 
+    // REQ: OA-RWY-015
+    #[test]
+    fn a_750_mps_predicted_track_remains_inside_the_accepted_speed_domain() {
+        let mut state = FinalMonitorState::new();
+        let (result, severity) = evaluate(&mut state, 1_000, 1_000, 0.0, -550.0, 0.0, 750.0);
+        assert_eq!(result.alerts, 1);
+        assert_eq!(severity, Some(FinalSeverity::Caution));
+    }
+
     // REQ: OA-RWY-016
     #[test]
     fn thirty_degree_blunder_caution_within_prediction() {
@@ -791,5 +967,137 @@ mod tests {
         let (result, severity) = evaluate(&mut state, 1_000, 1_000, 4_900.0, -550.0, 100.0, 50.0);
         assert_eq!(result.alerts, 0);
         assert_eq!(severity, None);
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-016
+    #[test]
+    fn finite_extreme_pair_and_prediction_values_refuse_without_false_clear_or_mutation() {
+        let mut invalid = pair();
+        invalid.origin.east_m = f64::MAX;
+        assert_bad_input_is_atomic(invalid, 100.0, 50.0, 0.0, -550.0);
+
+        let mut invalid = pair();
+        invalid.axis_east = f64::MAX;
+        assert_bad_input_is_atomic(invalid, 100.0, 50.0, 0.0, -550.0);
+
+        let mut invalid = pair();
+        invalid.course_length_m = f64::MAX;
+        assert_bad_input_is_atomic(invalid, 100.0, 50.0, 0.0, -550.0);
+
+        let mut invalid = pair();
+        invalid.ntz_half_width_m = f64::MAX;
+        assert_bad_input_is_atomic(invalid, 100.0, 50.0, 0.0, -550.0);
+
+        assert_bad_input_is_atomic(pair(), f64::MAX, 50.0, 0.0, -550.0);
+        assert_bad_input_is_atomic(pair(), 100.0, f64::MAX, 0.0, -550.0);
+        assert_bad_input_is_atomic(pair(), 100.0, 50.0, f64::MAX, -550.0);
+    }
+
+    // REQ: OA-RWY-015, OA-RWY-016
+    #[test]
+    fn excessive_lookahead_cannot_saturate_a_caller_visible_entry_time() {
+        let mut invalid = pair();
+        invalid.lookahead_ns = u64::MAX;
+        // This slow crossing would exceed u32 milliseconds if the caller-controlled lookahead
+        // were accepted. The invalid adaptation must refuse before touching state or output.
+        assert_bad_input_is_atomic(invalid, 0.0, 1.0e-9, 0.0, -20_000.0);
+    }
+
+    // REQ: OA-RWY-015
+    #[test]
+    fn track_and_output_caps_refuse_atomically() {
+        let mut state = FinalMonitorState {
+            last_update_ns: 100,
+        };
+        let addresses = [1, 2];
+        let east_m = [0.0, 0.0];
+        let north_m = [-550.0, -550.0];
+        let velocity_east_mps = [100.0, 100.0];
+        let velocity_north_mps = [50.0, 50.0];
+        let r95_m = [0.0, 0.0];
+        let lat_e7 = [100, 101];
+        let lon_e7 = [200, 201];
+        let mut out_addr = [77];
+        let sentinel_pair = FinalPairId {
+            first_runway_id: 7,
+            first_end_name: *b"07L",
+            second_runway_id: 8,
+            second_end_name: *b"08R",
+        };
+        let mut out_pair = [sentinel_pair];
+        let mut out_severity = [FinalSeverity::Warning];
+        let mut out_lat = [303];
+        let mut out_lon = [404];
+        let mut out_time = [505];
+        let result = update(
+            pair(),
+            &mut state,
+            1_200_000_100,
+            1_200_000_100,
+            PredictedTracks {
+                addresses: &addresses,
+                east_m: &east_m,
+                north_m: &north_m,
+                velocity_east_mps: &velocity_east_mps,
+                velocity_north_mps: &velocity_north_mps,
+                r95_m: &r95_m,
+                lat_e7: &lat_e7,
+                lon_e7: &lon_e7,
+            },
+            FinalAlertBuffer {
+                addresses: &mut out_addr,
+                pair_ids: &mut out_pair,
+                severity: &mut out_severity,
+                lat_e7: &mut out_lat,
+                lon_e7: &mut out_lon,
+                seconds_to_entry_milli: &mut out_time,
+            },
+        );
+        assert_eq!(result, Err(UpdateError::Capacity));
+        assert_eq!(state.last_update_ns, 100);
+        assert_eq!(out_addr, [77]);
+        assert_eq!(out_pair, [sentinel_pair]);
+        assert_eq!(out_severity, [FinalSeverity::Warning]);
+        assert_eq!(out_lat, [303]);
+        assert_eq!(out_lon, [404]);
+        assert_eq!(out_time, [505]);
+
+        let addresses: [u32; MAX_TRACKS + 1] = core::array::from_fn(|index| {
+            u32::try_from(index + 1).expect("address count is bounded by MAX_TRACKS")
+        });
+        let empty: [f64; 0] = [];
+        let empty_i32: [i32; 0] = [];
+        let result = update(
+            pair(),
+            &mut state,
+            2_400_000_100,
+            2_400_000_100,
+            PredictedTracks {
+                addresses: &addresses,
+                east_m: &empty,
+                north_m: &empty,
+                velocity_east_mps: &empty,
+                velocity_north_mps: &empty,
+                r95_m: &empty,
+                lat_e7: &empty_i32,
+                lon_e7: &empty_i32,
+            },
+            FinalAlertBuffer {
+                addresses: &mut out_addr,
+                pair_ids: &mut out_pair,
+                severity: &mut out_severity,
+                lat_e7: &mut out_lat,
+                lon_e7: &mut out_lon,
+                seconds_to_entry_milli: &mut out_time,
+            },
+        );
+        assert_eq!(result, Err(UpdateError::Capacity));
+        assert_eq!(state.last_update_ns, 100);
+        assert_eq!(out_addr, [77]);
+        assert_eq!(out_pair, [sentinel_pair]);
+        assert_eq!(out_severity, [FinalSeverity::Warning]);
+        assert_eq!(out_lat, [303]);
+        assert_eq!(out_lon, [404]);
+        assert_eq!(out_time, [505]);
     }
 }
