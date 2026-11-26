@@ -2418,7 +2418,7 @@ mod transaction_tests {
             let receipt_ns = i64::from(sequence) * surveillance::SECOND_NS;
             let source_ns = receipt_ns - 100_000_000;
             let line = format!(
-                "v1\t{source_ns}\t{receipt_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000001\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t0\t0\t0"
+                "v1\t{receipt_ns}\t{source_ns}\t{sequence}\tSURVEILLANCE\t00000000000000000000000000000001\tABC123\tZAU1\tPOS\t410000000\t-870000000\t35000\t0\t0\t0"
             );
             let event = parse_event_line(&line).expect("bounded synthetic position");
             last = Some(
