@@ -63,7 +63,9 @@ fn v2_preserves_native_adsb_source_quality_without_upgrading_it_to_reliability()
         Err(InputError::InvalidInteger)
     ));
     assert!(matches!(
-        parse_event_line(POSITION).unwrap().kind,
+        parse_event_line(POSITION)
+            .expect("v1 position fixture remains valid")
+            .kind,
         EventKind::Position { .. }
     ));
     let serialized = oa_regional_session::recordings::serialize_recorded_events(&[event])
