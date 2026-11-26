@@ -306,7 +306,7 @@
           "rows": [
             "F2-LABEL-01"
           ],
-          "description": "Rust greedily chooses one of eight label positions in stable target order, minimizing label/label and label/target overlap plus off-scope area. Equal scores retain the default upper-right position. Each label is linked to its target by a leader. Placement is not asserted to match deployed ERAM.",
+          "description": "Engine-owned eight-position leader placement in fixed lexical callsign order; visible candidate with the fewest existing block intersections, then overlap area and target penalties; strict improvement preserves default ties. Outer-terminal overlaps are tested at0/5/15/30/60min; both-aircraft-inside5NM overlaps are reported separately.",
           "sources": []
         },
         {
@@ -830,11 +830,11 @@
           "id": "OA-F2-MAP-FIX-5-IRK",
           "label": "Public CIFP fix IRK",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 401350167, -925917139 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 401350167, -925917139 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -847,11 +847,11 @@
           "id": "OA-F2-MAP-FIX-6-LOAMY",
           "label": "Public CIFP fix LOAMY",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 404245306, -917844000 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 404245306, -917844000 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -864,11 +864,11 @@
           "id": "OA-F2-MAP-FIX-7-KEOKK",
           "label": "Public CIFP fix KEOKK",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 405534028, -914036667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 405534028, -914036667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -881,11 +881,11 @@
           "id": "OA-F2-MAP-FIX-8-DRAMS",
           "label": "Public CIFP fix DRAMS",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 408258972, -905982722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 408258972, -905982722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -898,11 +898,11 @@
           "id": "OA-F2-MAP-FIX-9-RYELY",
           "label": "Public CIFP fix RYELY",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 410333333, -899725000 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 410333333, -899725000 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -915,11 +915,11 @@
           "id": "OA-F2-MAP-FIX-10-BFORD",
           "label": "Public CIFP fix BFORD",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 411600917, -895874111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 411600917, -895874111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -932,11 +932,11 @@
           "id": "OA-F2-MAP-FIX-11-BYLAW",
           "label": "Public CIFP fix BYLAW",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 412863500, -892758444 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 412863500, -892758444 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -949,11 +949,11 @@
           "id": "OA-F2-MAP-FIX-12-BENKY",
           "label": "Public CIFP fix BENKY",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 415118306, -887090167 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 415118306, -887090167 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -966,11 +966,11 @@
           "id": "OA-F2-MAP-FIX-13-NEWRK",
           "label": "Public CIFP fix NEWRK",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 415661250, -885711194 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 415661250, -885711194 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -983,11 +983,11 @@
           "id": "OA-F2-MAP-FIX-14-AHSTN",
           "label": "Public CIFP fix AHSTN",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 417126611, -883573361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 417126611, -883573361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1000,11 +1000,11 @@
           "id": "OA-F2-MAP-FIX-15-PETAH",
           "label": "Public CIFP fix PETAH",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418855167, -881500583 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418855167, -881500583 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1017,11 +1017,11 @@
           "id": "OA-F2-MAP-FIX-16-JORJO",
           "label": "Public CIFP fix JORJO",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418844833, -879885500 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418844833, -879885500 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1034,11 +1034,11 @@
           "id": "OA-F2-MAP-FIX-17-MONKZ",
           "label": "Public CIFP fix MONKZ",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418843306, -878017972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418843306, -878017972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1051,96 +1051,11 @@
           "id": "OA-F2-MAP-FIX-18-TONIE",
           "label": "Public CIFP fix TONIE",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418837139, -874907639 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-19-VOGLR",
-          "label": "Public CIFP fix VOGLR",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419450000, -869186111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Incoming connection is a labelled synthetic DCT, drawn dashed.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-20-NRMAH",
-          "label": "Public CIFP fix NRMAH",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419823833, -873016528 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-21-JOEBO",
-          "label": "Public CIFP fix JOEBO",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419827222, -873718222 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-22-GRABL",
-          "label": "Public CIFP fix GRABL",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419830194, -874419917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-23-RIPPR",
-          "label": "Public CIFP fix RIPPR",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419832722, -875121639 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418837139, -874907639 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1153,11 +1068,11 @@
           "id": "OA-F2-MAP-FIX-24-BASHH",
           "label": "Public CIFP fix BASHH",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419834833, -875823333 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419834833, -875823333 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1170,11 +1085,11 @@
           "id": "OA-F2-MAP-FIX-25-EBENS",
           "label": "Public CIFP fix EBENS",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419836528, -876525056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419836528, -876525056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1187,11 +1102,11 @@
           "id": "OA-F2-MAP-FIX-26-JLOWW",
           "label": "Public CIFP fix JLOWW",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419838528, -877853750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419838528, -877853750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1204,11 +1119,11 @@
           "id": "OA-F2-MAP-FIX-27-RW27L",
           "label": "Public CIFP fix RW27L",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419839000, -878901556 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419839000, -878901556 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1221,11 +1136,11 @@
           "id": "OA-F2-MAP-FIX-30-FWA",
           "label": "Public CIFP fix FWA",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 409790639, -851880583 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 409790639, -851880583 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1238,11 +1153,11 @@
           "id": "OA-F2-MAP-FIX-31-PRONK",
           "label": "Public CIFP fix PRONK",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 411782667, -854773361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 411782667, -854773361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1255,11 +1170,11 @@
           "id": "OA-F2-MAP-FIX-32-DAIFE",
           "label": "Public CIFP fix DAIFE",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 412688889, -858552778 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 412688889, -858552778 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1272,11 +1187,11 @@
           "id": "OA-F2-MAP-FIX-33-WATSN",
           "label": "Public CIFP fix WATSN",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 412834528, -860353361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 412834528, -860353361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1289,11 +1204,11 @@
           "id": "OA-F2-MAP-FIX-34-MKITA",
           "label": "Public CIFP fix MKITA",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 414000000, -866927778 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 414000000, -866927778 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1306,11 +1221,11 @@
           "id": "OA-F2-MAP-FIX-35-ESSPO",
           "label": "Public CIFP fix ESSPO",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 415817361, -872440833 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 415817361, -872440833 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1323,11 +1238,11 @@
           "id": "OA-F2-MAP-FIX-36-LAACY",
           "label": "Public CIFP fix LAACY",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 416997278, -874001028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 416997278, -874001028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1340,11 +1255,11 @@
           "id": "OA-F2-MAP-FIX-37-IZARD",
           "label": "Public CIFP fix IZARD",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 417869611, -874976917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 417869611, -874976917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1357,11 +1272,11 @@
           "id": "OA-F2-MAP-FIX-38-CABIJ",
           "label": "Public CIFP fix CABIJ",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418883417, -876102361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418883417, -876102361 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1374,11 +1289,11 @@
           "id": "OA-F2-MAP-FIX-39-MONKZ",
           "label": "Public CIFP fix MONKZ",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418843306, -878017972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418843306, -878017972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1391,11 +1306,11 @@
           "id": "OA-F2-MAP-FIX-40-JORJO",
           "label": "Public CIFP fix JORJO",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418844833, -879885500 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418844833, -879885500 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1408,96 +1323,11 @@
           "id": "OA-F2-MAP-FIX-41-POSSM",
           "label": "Public CIFP fix POSSM",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418746611, -882751750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-42-VOGLR",
-          "label": "Public CIFP fix VOGLR",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419450000, -869186111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Incoming connection is a labelled synthetic DCT, drawn dashed.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-43-NRMAH",
-          "label": "Public CIFP fix NRMAH",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419823833, -873016528 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-44-JOEBO",
-          "label": "Public CIFP fix JOEBO",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419827222, -873718222 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-45-GRABL",
-          "label": "Public CIFP fix GRABL",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419830194, -874419917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-46-RIPPR",
-          "label": "Public CIFP fix RIPPR",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419832722, -875121639 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418746611, -882751750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1510,11 +1340,11 @@
           "id": "OA-F2-MAP-FIX-47-BASHH",
           "label": "Public CIFP fix BASHH",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419834833, -875823333 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419834833, -875823333 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1527,11 +1357,11 @@
           "id": "OA-F2-MAP-FIX-48-EBENS",
           "label": "Public CIFP fix EBENS",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419836528, -876525056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419836528, -876525056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1544,11 +1374,11 @@
           "id": "OA-F2-MAP-FIX-49-JLOWW",
           "label": "Public CIFP fix JLOWW",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419838528, -877853750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419838528, -877853750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1561,11 +1391,11 @@
           "id": "OA-F2-MAP-FIX-50-RW27L",
           "label": "Public CIFP fix RW27L",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419839000, -878901556 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419839000, -878901556 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1578,11 +1408,11 @@
           "id": "OA-F2-MAP-FIX-53-ZZIPR",
           "label": "Public CIFP fix ZZIPR",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 431858333, -916591667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 431858333, -916591667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1595,11 +1425,11 @@
           "id": "OA-F2-MAP-FIX-54-WELCM",
           "label": "Public CIFP fix WELCM",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 430513000, -912703806 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 430513000, -912703806 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1612,11 +1442,11 @@
           "id": "OA-F2-MAP-FIX-55-TEEOO",
           "label": "Public CIFP fix TEEOO",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 428576722, -907171778 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 428576722, -907171778 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1629,11 +1459,11 @@
           "id": "OA-F2-MAP-FIX-56-MITEE",
           "label": "Public CIFP fix MITEE",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 427015889, -902794417 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 427015889, -902794417 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1646,11 +1476,11 @@
           "id": "OA-F2-MAP-FIX-57-BHAWK",
           "label": "Public CIFP fix BHAWK",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 425184694, -897768917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 425184694, -897768917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1663,11 +1493,11 @@
           "id": "OA-F2-MAP-FIX-58-STNLE",
           "label": "Public CIFP fix STNLE",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 424727889, -894040389 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 424727889, -894040389 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1680,11 +1510,11 @@
           "id": "OA-F2-MAP-FIX-59-CUUPP",
           "label": "Public CIFP fix CUUPP",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 424379056, -891215056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 424379056, -891215056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1697,11 +1527,11 @@
           "id": "OA-F2-MAP-FIX-60-CHMPN",
           "label": "Public CIFP fix CHMPN",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 424298750, -890588028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 424298750, -890588028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1714,11 +1544,11 @@
           "id": "OA-F2-MAP-FIX-61-CLSBY",
           "label": "Public CIFP fix CLSBY",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 424091111, -888937417 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 424091111, -888937417 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1731,11 +1561,11 @@
           "id": "OA-F2-MAP-FIX-62-FYTTE",
           "label": "Public CIFP fix FYTTE",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 423800611, -886677917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 423800611, -886677917 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1748,11 +1578,11 @@
           "id": "OA-F2-MAP-FIX-63-MOTRR",
           "label": "Public CIFP fix MOTRR",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 423584917, -885028750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 423584917, -885028750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1765,11 +1595,11 @@
           "id": "OA-F2-MAP-FIX-64-COGSS",
           "label": "Public CIFP fix COGSS",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 423442722, -883949028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 423442722, -883949028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1782,11 +1612,11 @@
           "id": "OA-F2-MAP-FIX-65-MADII",
           "label": "Public CIFP fix MADII",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 423009639, -883138139 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 423009639, -883138139 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1799,11 +1629,11 @@
           "id": "OA-F2-MAP-FIX-66-SOOLU",
           "label": "Public CIFP fix SOOLU",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 421963750, -881476944 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 421963750, -881476944 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1816,11 +1646,11 @@
           "id": "OA-F2-MAP-FIX-67-JORJO",
           "label": "Public CIFP fix JORJO",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418844833, -879885500 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418844833, -879885500 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1833,11 +1663,11 @@
           "id": "OA-F2-MAP-FIX-68-MONKZ",
           "label": "Public CIFP fix MONKZ",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418843306, -878017972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418843306, -878017972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1850,96 +1680,11 @@
           "id": "OA-F2-MAP-FIX-69-TONIE",
           "label": "Public CIFP fix TONIE",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 418837139, -874907639 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-70-VOGLR",
-          "label": "Public CIFP fix VOGLR",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419450000, -869186111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Incoming connection is a labelled synthetic DCT, drawn dashed.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-71-LNDUH",
-          "label": "Public CIFP fix LNDUH",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419650972, -873016472 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-72-SNTOE",
-          "label": "Public CIFP fix SNTOE",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419653361, -873717806 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-73-KOENN",
-          "label": "Public CIFP fix KOENN",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419655306, -874419167 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-74-MEMAW",
-          "label": "Public CIFP fix MEMAW",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419656833, -875120583 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 418837139, -874907639 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1952,11 +1697,11 @@
           "id": "OA-F2-MAP-FIX-75-RZUKO",
           "label": "Public CIFP fix RZUKO",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419657944, -875822028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419657944, -875822028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1969,11 +1714,11 @@
           "id": "OA-F2-MAP-FIX-76-HAZIL",
           "label": "Public CIFP fix HAZIL",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419658611, -876523528 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419658611, -876523528 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -1986,11 +1731,11 @@
           "id": "OA-F2-MAP-FIX-77-SEIKA",
           "label": "Public CIFP fix SEIKA",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419658722, -877799250 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419658722, -877799250 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2003,11 +1748,11 @@
           "id": "OA-F2-MAP-FIX-78-RW28C",
           "label": "Public CIFP fix RW28C",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419657667, -878918111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419657667, -878918111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2020,11 +1765,11 @@
           "id": "OA-F2-MAP-FIX-81-FNT",
           "label": "Public CIFP fix FNT",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 429667667, -837469889 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 429667667, -837469889 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2037,11 +1782,11 @@
           "id": "OA-F2-MAP-FIX-82-KAYYS",
           "label": "Public CIFP fix KAYYS",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 428844333, -845806667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 428844333, -845806667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2054,11 +1799,11 @@
           "id": "OA-F2-MAP-FIX-83-LTOUR",
           "label": "Public CIFP fix LTOUR",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 428493583, -849183056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 428493583, -849183056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2071,11 +1816,11 @@
           "id": "OA-F2-MAP-FIX-84-VIO",
           "label": "Public CIFP fix VIO",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 427867167, -854970722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 427867167, -854970722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2088,11 +1833,11 @@
           "id": "OA-F2-MAP-FIX-85-DITCA",
           "label": "Public CIFP fix DITCA",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 427461583, -857232972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 427461583, -857232972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2105,11 +1850,11 @@
           "id": "OA-F2-MAP-FIX-86-WLTER",
           "label": "Public CIFP fix WLTER",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 426864972, -860510944 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 426864972, -860510944 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2122,11 +1867,11 @@
           "id": "OA-F2-MAP-FIX-87-RHIVR",
           "label": "Public CIFP fix RHIVR",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 426459556, -862705972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 426459556, -862705972 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2139,11 +1884,11 @@
           "id": "OA-F2-MAP-FIX-88-PAITN",
           "label": "Public CIFP fix PAITN",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 425610306, -867226056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 425610306, -867226056 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2156,11 +1901,11 @@
           "id": "OA-F2-MAP-FIX-89-WYNDE",
           "label": "Public CIFP fix WYNDE",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 424557583, -871101750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 424557583, -871101750 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2173,11 +1918,11 @@
           "id": "OA-F2-MAP-FIX-90-FIYER",
           "label": "Public CIFP fix FIYER",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 423977694, -873211694 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 423977694, -873211694 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2190,11 +1935,11 @@
           "id": "OA-F2-MAP-FIX-91-ERNNY",
           "label": "Public CIFP fix ERNNY",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 423387194, -875341833 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 423387194, -875341833 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2207,11 +1952,11 @@
           "id": "OA-F2-MAP-FIX-92-PAPPI",
           "label": "Public CIFP fix PAPPI",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 422699722, -876072028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 422699722, -876072028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2224,11 +1969,11 @@
           "id": "OA-F2-MAP-FIX-93-TUBEZ",
           "label": "Public CIFP fix TUBEZ",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 421809194, -877008028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 421809194, -877008028 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2241,11 +1986,11 @@
           "id": "OA-F2-MAP-FIX-94-VULCN",
           "label": "Public CIFP fix VULCN",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 420917611, -877941722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 420917611, -877941722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2258,11 +2003,11 @@
           "id": "OA-F2-MAP-FIX-95-KURKK",
           "label": "Public CIFP fix KURKK",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 420918361, -880272000 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 420918361, -880272000 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2275,96 +2020,11 @@
           "id": "OA-F2-MAP-FIX-96-BAMBB",
           "label": "Public CIFP fix BAMBB",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 420909722, -882753722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-97-VOGLR",
-          "label": "Public CIFP fix VOGLR",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419450000, -869186111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Incoming connection is a labelled synthetic DCT, drawn dashed.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-98-MOTTT",
-          "label": "Public CIFP fix MOTTT",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419683528, -873016556 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-99-RICKV",
-          "label": "Public CIFP fix RICKV",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419685944, -873717889 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-100-BLUTO",
-          "label": "Public CIFP fix BLUTO",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419687944, -874419250 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
-          "sources": [
-            {
-              "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
-              "href": "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_products/cifp/",
-              "confidence": "PRIMARY-FAA"
-            }
-          ]
-        },
-        {
-          "id": "OA-F2-MAP-FIX-101-ROCSE",
-          "label": "Public CIFP fix ROCSE",
-          "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
-          "rows": [
-            "F2-MAP-01"
-          ],
-          "description": "Coordinate E7 419689528, -875120667 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 420909722, -882753722 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2377,11 +2037,11 @@
           "id": "OA-F2-MAP-FIX-102-WAVIE",
           "label": "Public CIFP fix WAVIE",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419690667, -875822111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419690667, -875822111 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2394,11 +2054,11 @@
           "id": "OA-F2-MAP-FIX-103-ADAME",
           "label": "Public CIFP fix ADAME",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419691389, -876523611 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419691389, -876523611 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2411,11 +2071,11 @@
           "id": "OA-F2-MAP-FIX-104-WILLT",
           "label": "Public CIFP fix WILLT",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419691583, -877788333 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419691583, -877788333 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
@@ -2428,11 +2088,11 @@
           "id": "OA-F2-MAP-FIX-105-RW28R",
           "label": "Public CIFP fix RW28R",
           "confidence": "PRIMARY-FAA",
-          "availability": "Visible in map range \u00b7 OpenATCA drawing",
+          "availability": "Fix symbol in map range; name outside12NM or selected FAF",
           "rows": [
             "F2-MAP-01"
           ],
-          "description": "Coordinate E7 419690694, -878837278 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs.",
+          "description": "Coordinate E7 419690694, -878837278 from pinned CIFP_261029.zip. Fix name, point and incoming straight fix-to-fix line share this trace. Polyline drawing is a fix-to-fix preview; it does not synthesize curved procedure legs. Inner-airport name labels are suppressed inside12NM except JLOWW, SEIKA and WILLT, the selected finals\u2019 CIFP F fixes; symbols remain.",
           "sources": [
             {
               "label": "FAA CIFP 2026-10-29; archive SHA e3ff2b31a4f6ad3eda1342b83ada1ae399aae7bd8c1e67f3cacd5b288b5e141d",
