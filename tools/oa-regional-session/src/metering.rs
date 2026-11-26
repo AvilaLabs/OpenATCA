@@ -4,6 +4,12 @@
 //! cross-feed identity. A row is attached only when the source adapter supplies an exact full
 //! regional flight key and address, and the live regional flight table confirms that pair at the
 //! requested receipt time. Without that source-qualified binding, the row is counted unbound.
+//!
+//! The checked public TBFM publication is namespace 1.1.0 (`oa_tbfm::NAMESPACE`). Its surveyed
+//! `air/sta` section has no `sta_mfx` element; `sta_sfx` is a separate scheduling-fix value and is
+//! not substituted for it. The feed schema also does not establish a regional-flight join
+//! contract for the caller. Until FAA supplies the STA-at-meter-fix field or an authoritative
+//! join key, source rows remain unbound and the packet is an optional caller input only.
 
 use crate::flight::{
     flight_view_for_gufi, flight_views_for_address, FlightDriver, FlightViewStatus,
