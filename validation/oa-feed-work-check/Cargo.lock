@@ -29,6 +29,13 @@ dependencies = [
 [[package]]
 name = "oa-sealed"
 version = "0.0.1"
+dependencies = [
+ "oa-time-window",
+]
+
+[[package]]
+name = "oa-time-window"
+version = "0.0.1"
 
 [[package]]
 name = "oa-zip"
