@@ -16,6 +16,13 @@ const RECORDS: [&str; ACCREDITATION_TOOL_COUNT] = [
 const RECORD_DIRECTORY: &str = "docs/assurance/accreditation";
 const RECORD_INDEX: &str = "INDEX.md";
 const MAX_RECORD_DIRECTORY_ENTRIES: usize = 64;
+// The largest checked-in record is 5,509 bytes. 16 KiB leaves room for future citations while
+// bounding each of the four fixed records before allocating its text buffer.
+const MAX_RECORD_BYTES: usize = 16 * 1024;
+// The largest file currently cited by these records/control-map entries is 280,584 bytes.
+// 1 MiB gives that source about 3.7x headroom without letting a citation trigger an unbounded
+// repository-file read.
+const MAX_CITED_SOURCE_BYTES: usize = 1024 * 1024;
 const CONTROL_MAP: &str = "docs/security/control-map.json";
 const MAX_CONTROL_MAP_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CONTROL_ROWS: usize = 1_000;
@@ -28,10 +35,12 @@ pub fn check(root: &Path) -> Vec<String> {
     for &record in &RECORDS {
         let mut record_citations = 0usize;
         let path = root.join(record);
-        let text = match fs::read_to_string(&path) {
+        let text = match read_bounded_utf8(&path, MAX_RECORD_BYTES) {
             Ok(text) => text,
             Err(error) => {
-                errors.push(format!("{record}: cannot read record: {error}"));
+                errors.push(format!(
+                    "{record}: cannot read bounded UTF-8 record: {error}"
+                ));
                 continue;
             }
         };
@@ -93,11 +102,11 @@ pub fn check(root: &Path) -> Vec<String> {
                     continue;
                 }
             };
-            let source = match fs::read_to_string(&canonical_source) {
+            let source = match read_bounded_utf8(&canonical_source, MAX_CITED_SOURCE_BYTES) {
                 Ok(source) => source,
                 Err(error) => {
                     errors.push(format!(
-                        "{record}:{}: {file}: cannot read source: {error}",
+                        "{record}:{}: {file}: cannot read bounded UTF-8 source: {error}",
                         line_index + 1
                     ));
                     continue;
@@ -360,8 +369,8 @@ fn check_evidence_ref(root: &Path, canonical_root: &Path, value: &JsonValue) -> 
         Ok(_) => return Err("source path escapes workspace".to_string()),
         Err(error) => return Err(format!("cannot resolve {file}: {error}")),
     };
-    let source = fs::read_to_string(&canonical_source)
-        .map_err(|error| format!("cannot read {file}: {error}"))?;
+    let source = read_bounded_utf8(&canonical_source, MAX_CITED_SOURCE_BYTES)
+        .map_err(|error| format!("cannot read bounded UTF-8 source {file}: {error}"))?;
     match kind {
         "rust_test" => {
             let function = as_string(reference.get("test_name")).unwrap_or("");
@@ -394,6 +403,35 @@ fn check_evidence_ref(root: &Path, canonical_root: &Path, value: &JsonValue) -> 
         }
         _ => Err(format!("unsupported evidence kind {kind:?}")),
     }
+}
+
+/// Read a regular file into a UTF-8 string without allocating beyond the declared byte cap.
+/// Metadata rejects known oversize files early; the bounded read also handles file growth after
+/// that check. UTF-8 validation occurs only after the cap has been enforced.
+fn read_bounded_utf8(path: &Path, max_bytes: usize) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("not a regular file".to_string());
+    }
+    if metadata.len() > max_bytes as u64 {
+        return Err(format!("exceeds {max_bytes} byte limit"));
+    }
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| "byte limit cannot be incremented".to_string())?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(read_limit)
+        .map_err(|error| format!("cannot reserve bounded read buffer: {error}"))?;
+    file.by_ref()
+        .take(read_limit as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() > max_bytes {
+        return Err(format!("exceeds {max_bytes} byte limit"));
+    }
+    String::from_utf8(bytes).map_err(|error| error.to_string())
 }
 
 fn contains_ci_step(source: &str, job: &str, step: &str) -> bool {
@@ -680,7 +718,8 @@ mod tests {
     )]
 
     use super::{
-        check, check_record_inventory, contains_ci_step, contains_test, CONTROL_MAP, RECORDS,
+        check, check_record_inventory, contains_ci_step, contains_test, read_bounded_utf8,
+        CONTROL_MAP, MAX_CITED_SOURCE_BYTES, MAX_RECORD_BYTES, RECORDS,
     };
     use std::fs;
 
@@ -717,6 +756,52 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn oversized_accreditation_record_is_refused_before_unbounded_read() {
+        let root = scratch();
+        records(&root, "tests/example.rs::works");
+        fs::write(root.join(RECORDS[0]), vec![b'x'; MAX_RECORD_BYTES + 1]).unwrap();
+        let errors = check(&root);
+        assert!(errors.iter().any(|error| {
+            error.contains("oa-perf.md: cannot read bounded UTF-8 record")
+                && error.contains("exceeds 16384 byte limit")
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_cited_source_is_refused_before_unbounded_read() {
+        let root = scratch();
+        records(&root, "tests/example.rs::works");
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("tests/example.rs"),
+            vec![b'x'; MAX_CITED_SOURCE_BYTES + 1],
+        )
+        .unwrap();
+        let errors = check(&root);
+        assert!(errors.iter().any(|error| {
+            error.contains("tests/example.rs: cannot read bounded UTF-8 source")
+                && error.contains("exceeds 1048576 byte limit")
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bounded_utf8_reader_accepts_exact_cap_and_refuses_invalid_utf8() {
+        let root = scratch();
+        let exact = root.join("exact.txt");
+        fs::write(&exact, vec![b'a'; 8]).unwrap();
+        assert_eq!(read_bounded_utf8(&exact, 8).as_deref(), Ok("aaaaaaaa"));
+
+        let invalid = root.join("invalid.txt");
+        fs::write(&invalid, [b'a', 0xff]).unwrap();
+        assert!(read_bounded_utf8(&invalid, 8)
+            .unwrap_err()
+            .contains("invalid utf-8"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
