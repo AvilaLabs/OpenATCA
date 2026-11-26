@@ -30,7 +30,8 @@ pub mod session;
 pub mod surveillance;
 
 pub use input::{
-    parse_event_line, EventKind, FlightOperation, HandoffOperation, Identity, InputError,
+    parse_event_line, row_matches_stream_version, stream_row_version, EventKind, FlightAltitude,
+    FlightHandoff, FlightLifecycle, FlightOperation, HandoffOperation, Identity, InputError,
     NormalizedEvent, RouteFixInput, SourceKind, MAX_EVENT_LINE_BYTES,
 };
 pub use runtime::{

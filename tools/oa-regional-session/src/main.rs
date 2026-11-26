@@ -7,9 +7,10 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use oa_regional_session::{
-    flush_receipt_group, parse_event_line, push_event, session_cursor_new_with_limit,
-    session_total_events, summarize_input_batch, FrameEvidence, InputError, MAX_EVENT_LINE_BYTES,
-    MAX_RECORDED_PROFILE_EVENTS, MAX_SESSION_EVENTS,
+    flush_receipt_group, parse_event_line, push_event, row_matches_stream_version,
+    session_cursor_new_with_limit, session_total_events, stream_row_version, summarize_input_batch,
+    FrameEvidence, InputError, MAX_EVENT_LINE_BYTES, MAX_RECORDED_PROFILE_EVENTS,
+    MAX_SESSION_EVENTS,
 };
 
 const MAX_INPUT_BYTES: u64 = 16 * 1024 * 1024;
@@ -376,11 +377,8 @@ fn parse_input(bytes: &[u8]) -> Result<Vec<FrameEvidence>, CliError> {
 fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEvidence>, CliError> {
     let text = std::str::from_utf8(bytes).map_err(|_| CliError::InvalidUtf8)?;
     let mut lines = text.split('\n');
-    match lines.next() {
-        Some("OA-RS\t1") => {}
-        Some(_) => return Err(CliError::BadHeader),
-        None => return Err(CliError::MissingHeader),
-    }
+    let header = lines.next().ok_or(CliError::MissingHeader)?;
+    let row_version = stream_row_version(header).ok_or(CliError::BadHeader)?;
     let mut cursor =
         session_cursor_new_with_limit(max_events).map_err(|_| CliError::TooManyEvents)?;
     let mut evidence = Vec::new();
@@ -396,6 +394,14 @@ fn parse_input_with_limit(bytes: &[u8], max_events: usize) -> Result<Vec<FrameEv
             return Err(CliError::BadLine {
                 line: line_number,
                 error: InputError::RowTooLong,
+                accounting,
+            });
+        }
+        if !row_matches_stream_version(line, row_version) {
+            let accounting = row_failure_accounting(&cursor, lines)?;
+            return Err(CliError::BadLine {
+                line: line_number,
+                error: InputError::BadVersion,
                 accounting,
             });
         }
@@ -659,6 +665,30 @@ mod tests {
             }
         );
         assert!(parse_input(input.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn normalized_stream_header_and_rows_must_share_the_declared_version() {
+        let v1 = ROW.replace("{sequence}", "1");
+        let v2 = v1.replacen("v1\t", "v2\t", 1);
+        assert!(parse_input_with_limit(format!("OA-RS\t1\n{v1}\n").as_bytes(), 2).is_ok());
+        assert!(parse_input_with_limit(format!("OA-RS\t2\n{v2}\n").as_bytes(), 2).is_ok());
+        assert_eq!(
+            bad_line_accounting(
+                parse_input_with_limit(format!("OA-RS\t1\n{v2}\n").as_bytes(), 2),
+                InputError::BadVersion,
+            )
+            .admitted,
+            0
+        );
+        assert_eq!(
+            bad_line_accounting(
+                parse_input_with_limit(format!("OA-RS\t2\n{v1}\n").as_bytes(), 2),
+                InputError::BadVersion,
+            )
+            .admitted,
+            0
+        );
     }
 
     #[test]

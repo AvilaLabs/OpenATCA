@@ -9,7 +9,10 @@ use crate::runtime::{
     DEFAULT_REGIONAL_RUN_PROFILE,
 };
 use crate::surveillance::{SurveillanceConfig, FRAME_HEIGHT, FRAME_WIDTH, MAX_FRAMES};
-use crate::{flush_receipt_group, parse_event_line, push_event, session_cursor_new_with_limit};
+use crate::{
+    flush_receipt_group, parse_event_line, push_event, row_matches_stream_version,
+    session_cursor_new_with_limit, stream_row_version,
+};
 use oa_airspace::core::model::{self, Model};
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -262,13 +265,16 @@ pub fn run_session_with_profile_options_and_quarantine_release(
         None => regional_new_with_profile(model, snapshot_sha, *b"ZAU1", cfg, profile)?,
     };
     let text = std::str::from_utf8(bytes).map_err(|_| "input not UTF-8")?;
-    if text.lines().next() != Some("OA-RS\t1") {
-        return Err("expected OA-RS header".into());
-    }
+    let mut rows = text.lines();
+    let header = rows.next().ok_or("missing OA-RS header")?;
+    let row_version = stream_row_version(header).ok_or("unsupported OA-RS header")?;
     let mut cursor = session_cursor_new_with_limit(profile.max_total_events)
         .map_err(|error| format!("session profile event capacity: {error:?}"))?;
     let mut batches = Vec::with_capacity(MAX_FRAMES);
-    for row in text.lines().skip(1).filter(|line| !line.is_empty()) {
+    for row in rows.filter(|line| !line.is_empty()) {
+        if !row_matches_stream_version(row, row_version) {
+            return Err("OA-RS row version does not match stream header".into());
+        }
         let event = parse_event_line(row).map_err(|e| format!("input: {e:?}"))?;
         if let Some(batch) =
             push_event(&mut cursor, event).map_err(|e| format!("input order: {e:?}"))?
