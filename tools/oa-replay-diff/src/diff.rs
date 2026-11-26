@@ -1331,6 +1331,9 @@ mod tests {
         OutRow {
             t_ns,
             addr,
+            ident: u16::MAX,
+            ident_ns: i64::MIN,
+            ident_conflict: 0,
             lat_e7: 100,
             lon_e7: 200,
             vel_east_mps: 1.0,
