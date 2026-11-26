@@ -3,7 +3,8 @@
 //! recomputes state and does not claim a live or distributed process checkpoint.
 
 use crate::runtime::{
-    regional_acknowledge_quarantine_before_commit, regional_new, regional_new_with_profile,
+    regional_acknowledge_quarantine_before_commit, regional_install_verified_runway_aids,
+    regional_new, regional_new_with_profile,
     regional_new_with_profile_and_quarantine_audit_checkpoint, regional_pixels,
     regional_quarantine_stats, regional_step, QuarantineMaintenanceRequest, RegionalRunProfile,
     DEFAULT_REGIONAL_RUN_PROFILE,
