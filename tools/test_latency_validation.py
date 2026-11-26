@@ -54,14 +54,24 @@ class LatencyValidationTests(unittest.TestCase):
                 validator.validate_report(altered)
 
     def test_p99_claim_must_match_declared_limit(self):
-        altered = copy.deepcopy(self.baseline)
-        altered["metrics"]["scan_input_to_frame_packet"]["p99"] = 100_000_000
-        with self.assertRaises(validator.ValidationError):
-            validator.validate_report(altered)
-        altered = copy.deepcopy(self.baseline)
-        altered["checks"]["display_p99_under_100ms"] = False
-        with self.assertRaises(validator.ValidationError):
-            validator.validate_report(altered)
+        cases = (
+            ("scan_input_to_frame_packet", "display_p99_limit_ms", "display_p99_under_100ms"),
+            ("handoff_initiate_accept_take", "handoff_p99_limit_ms", "handoff_p99_under_10ms"),
+            ("flight_plan_amendment", "amendment_p99_limit_ms", "amendment_p99_under_10ms"),
+        )
+        for metric_name, limit_key, check_key in cases:
+            with self.subTest(metric=metric_name):
+                limit_ns = self.baseline["targets"][limit_key] * 1_000_000
+                below = copy.deepcopy(self.baseline)
+                below["metrics"][metric_name]["p99"] = limit_ns - 1
+                below["metrics"][metric_name]["max"] = limit_ns - 1
+                validator.validate_report(below)
+
+                exact = copy.deepcopy(self.baseline)
+                exact["metrics"][metric_name]["p99"] = limit_ns
+                exact["metrics"][metric_name]["max"] = limit_ns
+                with self.assertRaisesRegex(validator.ValidationError, rf"checks\.{check_key} disagrees"):
+                    validator.validate_report(exact)
 
     def test_nan_zero_samples_and_percentile_order_refuse(self):
         with tempfile.TemporaryDirectory() as directory:
