@@ -4900,7 +4900,7 @@ pub fn run_recorded_stream(
         warmup_event_count: counts.warmup_events,
         input_ack_count: 0,
         warmup_input_ack_count: 0,
-        replay_output_ack_count: processor.metrics.output_rows_acked,
+        replay_output_ack_count: output_ack_count,
         input_streams: streams,
         stream_counts: summary.recording.counts,
         region_filter: region_report,
