@@ -6,9 +6,9 @@ version = 4
 name = "oa-adapt"
 version = "0.0.1"
 dependencies = [
+ "oa-airspace",
  "oa-audit-core",
  "oa-audit-log",
- "oa-airspace",
  "oa-ca",
  "oa-nasr",
  "oa-sealed",
@@ -126,19 +126,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "oa-certification"
-version = "0.0.1"
-dependencies = [
- "oa-adapt",
- "oa-audit-core",
- "oa-audit-log",
- "oa-build-info",
- "oa-sealed",
- "oa-sha256",
- "oa-track",
-]
-
-[[package]]
 name = "oa-ca-run"
 version = "0.0.1"
 dependencies = [
@@ -153,6 +140,19 @@ dependencies = [
  "oa-sha256",
  "oa-track",
  "oa-track-tools",
+]
+
+[[package]]
+name = "oa-certification"
+version = "0.0.1"
+dependencies = [
+ "oa-adapt",
+ "oa-audit-core",
+ "oa-audit-log",
+ "oa-build-info",
+ "oa-sealed",
+ "oa-sha256",
+ "oa-track",
 ]
 
 [[package]]
