@@ -231,7 +231,7 @@ fn linux_o_nofollow_flag() -> io::Result<i32> {
         target_arch = "powerpc64"
     ))]
     {
-        return Ok(0o100000);
+        Ok(0o100000)
     }
 
     #[cfg(any(
@@ -251,7 +251,7 @@ fn linux_o_nofollow_flag() -> io::Result<i32> {
         target_arch = "x86_64"
     ))]
     {
-        return Ok(0o400000);
+        Ok(0o400000)
     }
 
     #[cfg(not(any(
