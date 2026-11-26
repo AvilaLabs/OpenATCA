@@ -1959,7 +1959,12 @@ pub fn regional_step(
     batch: &ReceiptBatch,
 ) -> Result<RegionalFrame, String> {
     let adaptation = runtime.mode_adaptation;
-    regional_step_inner(runtime, batch, None, adaptation.map(|mode| (mode, &[])))
+    regional_step_inner(
+        runtime,
+        batch,
+        None,
+        adaptation.map(|mode| (mode, &[] as &[TargetModeEvidence])),
+    )
 }
 
 /// Apply one explicit facility mode adaptation to this receipt. Per-target source, reliability,
@@ -2004,7 +2009,7 @@ pub fn regional_step_with_performance(
         runtime,
         batch,
         Some(performance),
-        adaptation.map(|mode| (mode, &[])),
+        adaptation.map(|mode| (mode, &[] as &[TargetModeEvidence])),
     )
 }
 

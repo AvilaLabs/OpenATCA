@@ -1620,6 +1620,19 @@ fn load_model(source: &crate::cli::ModelSource) -> Result<(Model, [u8; 32], &'st
             crate::cli::read_guarded(path, MAX_SNAPSHOT_BYTES)?,
             "SUPPLIED_SNAPSHOT",
         ),
+        crate::cli::ModelSource::IssuedPackage {
+            root,
+            manifest_sha256,
+        } => {
+            oa_sealed::refuse_io(root).map_err(|error| format!("issued package path: {error}"))?;
+            let package = oa_adapt::manifest::verify_current(root, *manifest_sha256)
+                .map_err(|error| format!("issued facility package refused: {error}"))?;
+            return Ok((
+                package.model().clone(),
+                package.identity().snapshot_sha256,
+                "ISSUED_FACILITY_PACKAGE",
+            ));
+        }
     };
     let model =
         oa_airspace::core::snapshot::decode(&bytes).map_err(|e| format!("snapshot: {e:?}"))?;

@@ -7,4 +7,3 @@ example:diag synthetic load only; reads /proc/loadavg, no clip
 example:arrival_slice uses fixed synthetic inputs and opens no files
 example:m3_synthetic_drill synthetic-only selector drill; no file inputs or data reads
 example:latency fixed synthetic GUFI operations only; no file or recording input
-bin:oa-trace reads the repository's own sources and requirements, no recording
