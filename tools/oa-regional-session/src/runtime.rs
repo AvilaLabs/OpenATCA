@@ -471,7 +471,7 @@ fn runway_aid_packets(
     aids: &mut [RunwayAidRuntime],
     assignments: &[ActiveRunwayAssignment],
     atpa_scratch: &mut AtpaScratch,
-    surveillance: &surveillance::Surveillance,
+    surveillance: Option<&surveillance::Surveillance>,
     tracks: &[crate::surveillance::ObservedTrack],
     crda_ghosts: &mut Vec<oa_display::core::runway_aids::CrdaGhostPacket>,
     scan_time_ns: i64,
@@ -532,6 +532,10 @@ fn runway_aid_packets(
         if let Some(local_plane) = local_plane.filter(|_| !invalid) {
             let mut previous_address = 0u32;
             for track in tracks {
+                let Some(surveillance) = surveillance else {
+                    invalid = true;
+                    break;
+                };
                 let forecast = surveillance::surveillance_track_forecast(
                     surveillance,
                     track.address,
@@ -742,7 +746,7 @@ fn runway_aid_packets(
             evaluate_assigned_atpa(
                 aid,
                 assignments,
-                surveillance,
+                surveillance?,
                 tracks,
                 scan_time_ns,
                 atpa_scratch,
@@ -803,7 +807,7 @@ mod runway_aid_packet_tests {
             &mut [],
             &[],
             &mut scratch,
-            &runtime().surveillance,
+            None,
             &[],
             &mut ghosts,
             1_000_000_000,
@@ -1864,7 +1868,7 @@ fn execute(
         &mut runtime.runway_aids,
         &runtime.runway_assignments,
         &mut runtime.atpa_scratch,
-        &runtime.surveillance,
+        Some(&runtime.surveillance),
         &surveillance.tracks,
         &mut crda_ghosts,
         surveillance.time_ns,
